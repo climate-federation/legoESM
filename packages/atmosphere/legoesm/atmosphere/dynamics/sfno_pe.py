@@ -6,7 +6,10 @@ equations on the sphere, using the Spherical Fourier Neural Operator
 
 Two modes:
 - **state_update**: SFNO directly predicts the next full state
-- **hybrid_tendencies**: SFNO provides tendencies, integrated with SSP-RK3
+- **hybrid_tendencies**: the SFNO's next-state prediction (a residual
+  net: ``output = input + delta``) is converted to a finite-difference
+  tendency ``(output - input) / dt_sfno`` and integrated with the
+  configured RK scheme (requires ``residual_prediction=True``)
 
 Supports post-hoc conservation corrections for dry air mass and
 moisture, and optional physics coupling.
@@ -71,8 +74,11 @@ class SFNOPrimitiveEquationConfig(NamedTuple):
         to ``False``.
     use_normalization : bool
         Whether to apply Z-score normalization.
-    pressure_levels : tuple
-        Pressure levels [hPa] for the 3D fields.
+
+    Note: channels are packed on the MODEL SIGMA LEVELS directly (see
+    ``legoesm.ml.channel_packing.pack_pe_state``); no sigma→pressure
+    interpolation is performed.  A former ``pressure_levels`` field
+    advertised WeatherBench2 levels that were never used — removed.
     """
     sfno_config: SFNOConfig = SFNOConfig(
         in_channels=54, out_channels=54, embed_dim=256, n_blocks=8
@@ -83,9 +89,6 @@ class SFNOPrimitiveEquationConfig(NamedTuple):
     correct_moisture_budget: bool = False  # not yet wired in _apply_conservation
     clip_q: bool = False  # not yet wired in _apply_conservation
     use_normalization: bool = False
-    pressure_levels: tuple = (
-        1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100, 50
-    )
     time_integrator: str = "ssp_rk3"
 
 
@@ -139,6 +142,26 @@ class SFNOPrimitiveEquationModel:
                 "tendency-output stats (not yet wired)."
             )
 
+        # hybrid_tendencies reads the SFNO as a next-state predictor and
+        # forms the finite-difference tendency (output - input)/dt_sfno
+        # (see ``_sfno_tendency``).  That is only well-defined for a
+        # residual net (``output = input + delta`` by construction).  With
+        # ``residual_prediction=False`` the raw decoder output has no
+        # defined scale/semantics (state vs tendency depends entirely on
+        # the training loss), so refuse loudly rather than integrate
+        # garbage.
+        if (self.config.mode == "hybrid_tendencies"
+                and not self.config.sfno_config.residual_prediction):
+            raise ValueError(
+                "mode='hybrid_tendencies' requires "
+                "sfno_config.residual_prediction=True: the hybrid path "
+                "converts the residual net's next-state prediction to a "
+                "tendency via (output - input)/dt_sfno. With "
+                "residual_prediction=False the raw decoder output has no "
+                "defined scale. Use mode='state_update' for non-residual "
+                "state-predicting networks."
+            )
+
         # Mirror the U-Cast PE bridge guard: these flags are advertised but
         # NOT wired in ``_apply_conservation`` (moisture is a spectral tracer
         # that would need synthesis, clipping/correction and re-analysis, which
@@ -172,6 +195,25 @@ class SFNOPrimitiveEquationModel:
                 key=key,
             )
 
+    def _check_state_update_dt(self, dt: float) -> None:
+        """Refuse a caller ``dt`` that disagrees with ``dt_sfno``.
+
+        In state_update mode the network advances the state by exactly
+        ``config.dt_sfno`` regardless of ``dt``; silently accepting a
+        different ``dt`` desynchronises the caller's clock from the
+        model state (and, in ``step_with_physics``, applies physics over
+        ``dt`` while the dynamics jumped ``dt_sfno``).  ``dt`` is a
+        Python float on every entry path (tests, drivers, rollout
+        closures), so this is a plain Python guard.
+        """
+        if abs(dt - self.config.dt_sfno) > 1e-6 * self.config.dt_sfno:
+            raise ValueError(
+                f"mode='state_update' advances the state by exactly "
+                f"dt_sfno={self.config.dt_sfno} s per call; got dt={dt}. "
+                f"Pass dt=dt_sfno (or set config.dt_sfno to the desired "
+                f"macro step)."
+            )
+
     def step(
         self,
         state: SpectralHydrostaticState,
@@ -184,7 +226,8 @@ class SFNOPrimitiveEquationModel:
         state : SpectralHydrostaticState
             Current state.
         dt : float
-            Time step [s].
+            Time step [s].  In ``state_update`` mode this MUST equal
+            ``config.dt_sfno`` (the network's trained macro step).
 
         Returns
         -------
@@ -192,6 +235,7 @@ class SFNOPrimitiveEquationModel:
             Advanced state.
         """
         if self.config.mode == "state_update":
+            self._check_state_update_dt(dt)
             new_state = self._step_state_update(state)
         elif self.config.mode == "hybrid_tendencies":
             new_state = self._step_hybrid(state, dt)
@@ -246,13 +290,24 @@ class SFNOPrimitiveEquationModel:
                     lambda a, b: a + b, sfno_tend, phys_tend
                 )
             new_state = dispatch_integrator(state, combined_tendency, dt, self.config.time_integrator)
-        else:
+        elif self.config.mode == "state_update":
             # State update mode: SFNO prediction + physics tendencies
+            # (same dt contract as step(); guard AFTER the carry-contract
+            # refusal above so stateful-physics misuse stays the first,
+            # more specific error).
+            self._check_state_update_dt(dt)
             new_state = self._step_state_update(state)
             _phys_result = physics_fn(state, self.grid, self.sigma_coord)
             phys_tend = _phys_result[0] if type(_phys_result) is tuple else _phys_result
             new_state = jax.tree.map(
                 lambda s, t: s + dt * t, new_state, phys_tend
+            )
+        else:
+            # Mirror step(): unknown mode raises, never silently runs
+            # state_update (dispatch hardening).
+            raise ValueError(
+                f"Unknown mode: {self.config.mode!r}. "
+                f"Choose 'state_update' or 'hybrid_tendencies'."
             )
 
         if self.config.correct_mass:
@@ -292,21 +347,27 @@ class SFNOPrimitiveEquationModel:
         self,
         state: SpectralHydrostaticState,
     ) -> SpectralHydrostaticState:
-        """Compute SFNO-predicted tendencies."""
+        """Compute SFNO-derived tendencies.
+
+        The SFNO is a next-state predictor (``residual_prediction=True``
+        enforced in ``__init__``: ``y = x + delta``), NOT a per-second
+        tendency net, so the tendency is the finite difference
+        ``(y - x) / dt_sfno`` in packed-channel space.  Reading ``y``
+        directly as a tendency (the previous behaviour) integrated an
+        O(state)-sized field as a d/dt — wrong by a factor ~dt_sfno.
+        Pure array ops; differentiable through both ``y`` and ``x``.
+
+        Normalization is rejected for this mode in ``__init__``, so
+        ``x`` here is exactly the tensor the network consumed.
+        """
         x = pack_pe_state(state, self.grid, self.sigma_coord)
         x = x.astype(jnp.float32)
 
-        # ``norm_stats`` guaranteed present when use_normalization=True
-        # (validated in __init__); never silently skips.
-        if self.config.use_normalization:
-            x = normalize(x, self.norm_stats)
-
         y = self.sfno(x, self.grid)
 
-        if self.config.use_normalization:
-            y = denormalize(y, self.norm_stats)
+        tend = (y - x) / self.config.dt_sfno
 
-        return unpack_pe_output(y, state, self.grid, mode="tendencies")
+        return unpack_pe_output(tend, state, self.grid, mode="tendencies")
 
     def _apply_conservation(
         self,

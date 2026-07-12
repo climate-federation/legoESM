@@ -704,3 +704,197 @@ class TestCreateModelGridAware:
         except (TypeError, AttributeError, ValueError):
             # Expected: CDGrid model can't handle LatLonGrid.
             pass
+
+
+# =========================================================================
+# 10. time_integrator="auto" default resolves per-dycore
+# =========================================================================
+
+class TestTimeIntegratorAutoDefault:
+    """DycoreConfig defaults to "auto"; every factory branch that forwards
+    an integrator maps "auto" to its dycore's own stable default.
+
+    Pins the fix for the MPAS trap: a direct ``DycoreConfig()`` (i.e. not
+    via the run_amip CLI, whose default was already "auto") used to carry
+    the global "ssp_rk3", which the MPAS PE dycore documents as UNSTABLE
+    with hyperdiffusion at production dt (diverges within ~3 steps at
+    dt=600)."""
+
+    def test_dycore_config_default_is_auto(self):
+        assert DycoreConfig().time_integrator == "auto"
+
+    def test_mpas_default_resolves_to_dycore_default(self):
+        """Factory on MPAS + default DycoreConfig → the MPAS dycore's own
+        default integrator (the scan-folded large-stability SSP-RK54)."""
+        from legoesm.grids.factory import create_grid
+        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+            MPASPrimitiveEquationConfig,
+        )
+        grid = create_grid("mpas", 1, lloyd_iterations=2)
+        config = _make_config(
+            model_type="hydrostatic", discretization="mpas",
+            grid_type="mpas", nlev=2,
+        )
+        assert config.dycore.time_integrator == "auto"
+        model = create_atmosphere_dycore(config, grid, _make_sigma(2))
+        expected = MPASPrimitiveEquationConfig().time_integrator
+        assert expected == "ssp_rk54_scan"  # the documented stable default
+        assert model.config.time_integrator == expected
+
+    def test_cube_pe_default_resolves_to_dycore_default(self):
+        """Cubed-sphere PE maps "auto" to its own default (ssp_rk3) — the
+        pre-flip behaviour for the scientific validation suite."""
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationConfig,
+        )
+        config = _make_config(model_type="hydrostatic")
+        grid = _make_cubed_sphere_grid()
+        model = create_atmosphere_dycore(config, grid, _make_sigma())
+        assert model.config.time_integrator == (
+            CDGridPrimitiveEquationConfig().time_integrator
+        )
+        # "auto" itself must never leak into a model config (it is not a
+        # dispatch_integrator key).
+        assert model.config.time_integrator != "auto"
+
+    def test_explicit_integrator_forwarded_verbatim(self):
+        """An explicit scheme name is forwarded untouched (integrator-
+        sensitivity runs stay possible)."""
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
+            dycore=DycoreConfig(
+                model_type="hydrostatic",
+                discretization="centered",
+                dt=300.0,
+                time_integrator="ssp_rk3_scan",
+            ),
+        )
+        grid = _make_cubed_sphere_grid()
+        model = create_atmosphere_dycore(config, grid, _make_sigma())
+        assert model.config.time_integrator == "ssp_rk3_scan"
+
+
+# =========================================================================
+# 11. fix_mass forwarding on every branch with a fix_mass config field
+# =========================================================================
+
+class TestFixMassForwarding:
+    """DycoreConfig.fix_mass must reach the dycore config on ALL branches
+    that support it.  The cdgrid-CE and spectral-PE branches previously
+    DROPPED it (silently ignoring fix_mass=True); the spectral-NH and
+    MPAS-NH branches forward it (pinned here so they cannot regress)."""
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_cdgrid_compressible_euler_forwards_fix_mass(self, flag):
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
+            dycore=DycoreConfig(
+                model_type="nonhydrostatic", discretization="centered",
+                dt=300.0, fix_mass=flag,
+            ),
+        )
+        grid = _make_cubed_sphere_grid()
+        model = create_atmosphere_dycore(config, grid, _make_sigma())
+        assert model.config.fix_mass is flag
+        assert model.config.anchor_mass_to_initial is flag
+
+    @pytest.mark.parametrize("flag", [True, False])
+    @pytest.mark.skipif(
+        not jax.config.read("jax_enable_x64"),
+        reason="spectral/Gaussian needs JAX_ENABLE_X64=1",
+    )
+    def test_spectral_pe_forwards_fix_mass(self, flag):
+        from legoesm.grids.factory import create_grid
+        grid = create_grid("gaussian", 21)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="gaussian", resolution=21, nlev=5),
+            dycore=DycoreConfig(
+                model_type="hydrostatic", discretization="spectral",
+                dt=300.0, fix_mass=flag,
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, _make_sigma())
+        assert model.config.fix_mass is flag
+        assert model.config.anchor_mass_to_initial is flag
+
+    @pytest.mark.parametrize("flag", [True, False])
+    @pytest.mark.skipif(
+        not jax.config.read("jax_enable_x64"),
+        reason="spectral/Gaussian needs JAX_ENABLE_X64=1",
+    )
+    def test_spectral_nh_forwards_fix_mass(self, flag):
+        from legoesm.grids.factory import create_grid
+        grid = create_grid("gaussian", 21)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="gaussian", resolution=21, nlev=2),
+            dycore=DycoreConfig(
+                model_type="nonhydrostatic", discretization="spectral",
+                dt=300.0, fix_mass=flag,
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, _make_sigma(2))
+        assert model.config.fix_mass is flag
+        assert model.config.anchor_mass_to_initial is flag
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_mpas_nh_forwards_fix_mass(self, flag):
+        from legoesm.grids.factory import create_grid
+        grid = create_grid("mpas", 1, lloyd_iterations=2)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="mpas", resolution=1, nlev=2),
+            dycore=DycoreConfig(
+                model_type="nonhydrostatic", discretization="mpas",
+                dt=300.0, fix_mass=flag,
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, _make_sigma(2))
+        assert model.config.fix_mass is flag
+        assert model.config.anchor_mass_to_initial is flag
+
+
+# =========================================================================
+# 12. Lat-lon SW polar-filter passthrough
+# =========================================================================
+
+class TestLatLonSWPolarFilterForwarding:
+    """use_polar_filter (+ its two parameters) must reach the SW config.
+
+    The dt/CFL relaxation in the factory already assumed the filter was
+    ON (dt lifted to the equatorial CFL) while the SW model silently ran
+    without it — the filter flags were only forwarded on the PE branch."""
+
+    def test_polar_filter_reaches_sw_config(self):
+        from legoesm.grids.latlon import create_latlon_grid
+        grid = create_latlon_grid(16)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
+            dycore=DycoreConfig(
+                model_type="shallow_water", discretization="finite_volume",
+                dt=600.0,
+                use_polar_filter=True,
+                polar_filter_cutoff_deg=65.0,
+                polar_filter_max_wave_speed=250.0,
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, _make_sigma(5))
+        assert model.config.use_polar_filter is True
+        assert model.config.polar_filter_cutoff_deg == 65.0
+        assert model.config.polar_filter_max_wave_speed == 250.0
+        # The masks (cell rows AND v-face rows) must actually be built.
+        assert model._polar_mask is not None
+        assert model._polar_mask_v is not None
+
+    def test_polar_filter_off_by_default_on_sw(self):
+        from legoesm.grids.latlon import create_latlon_grid
+        grid = create_latlon_grid(16)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
+            dycore=DycoreConfig(
+                model_type="shallow_water", discretization="finite_volume",
+                dt=600.0,
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, _make_sigma(5))
+        assert model.config.use_polar_filter is False
+        assert model._polar_mask is None
+        assert model._polar_mask_v is None

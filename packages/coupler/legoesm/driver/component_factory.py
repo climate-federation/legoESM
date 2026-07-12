@@ -346,6 +346,11 @@ def create_atmosphere_dycore(
         cfg = CDGridCompressibleEulerConfig(
             A_h=diff.A_h,
             hyperdiff_coeff=diff.hyperdiff,
+            # Forward the driver-level mass fixer (mirrors the plane / NH
+            # branches).  Previously dropped: DycoreConfig.fix_mass=True was
+            # silently ignored on the cubed-sphere NH path.
+            fix_mass=dc.fix_mass,
+            anchor_mass_to_initial=dc.fix_mass,
         )
         # Non-hydrostatic requires height coordinate and terrain metric.
         # Expect grid to provide these or construct defaults.
@@ -397,6 +402,11 @@ def create_atmosphere_dycore(
             time_integrator="ssp_rk54",
             p_floor=200.0,
             dealiasing_fraction=0.667,
+            # Forward the driver-level mass fixer (mirrors the plane / NH
+            # branches).  Previously dropped: DycoreConfig.fix_mass=True was
+            # silently ignored on the spectral hydrostatic path.
+            fix_mass=dc.fix_mass,
+            anchor_mass_to_initial=dc.fix_mass,
         )
         return SpectralPrimitiveEquationModel(
             grid=grid, sigma_coord=sigma, config=pe_config,
@@ -628,6 +638,13 @@ def create_atmosphere_dycore(
         cfg = CGridLatLonShallowWaterConfig(
             A_h=_A_h,
             fix_mass=_fix_mass,
+            # Stage 3-E: pass polar-filter parameters through (mirrors the
+            # PE branch below).  Previously dropped: the dt/CFL relaxation
+            # above already assumed the filter was ON (dt lifted to the
+            # equatorial CFL) while the model silently ran WITHOUT it.
+            use_polar_filter=dc.use_polar_filter,
+            polar_filter_cutoff_deg=dc.polar_filter_cutoff_deg,
+            polar_filter_max_wave_speed=dc.polar_filter_max_wave_speed,
         )
         model = CGridLatLonShallowWaterModel(grid, cfg, dt=_effective_dt)
         model.effective_dt = _effective_dt

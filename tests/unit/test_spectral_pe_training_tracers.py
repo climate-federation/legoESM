@@ -550,6 +550,65 @@ class TestChannelPackingTracers:
         result = unpack_pe_output(output, spec_state, _GRID, mode="tendencies")
         assert result.tracers is None
 
+    def test_state_update_carries_non_predicted_tracers_through(self):
+        """mode="state_update": the output IS the next state and the
+        network predicts only q_v — non-predicted tracers (q_c, q_r)
+        must be carried through from the INPUT state, not zeroed.
+        Zeroing (the pre-fix behaviour, correct only for tendencies)
+        silently ERASED cloud water on every state-update step."""
+        from legoesm.ml.channel_packing import (
+            pack_pe_state, unpack_pe_output,
+        )
+        from legoesm.training.neural_gcm_spectral import carry_to_spectral_state
+        carry = _make_gaussian_carry(q_v_val=0.005)
+        carry = carry._replace(q_c=jnp.full_like(carry.q_c, 2.5e-4))
+        spec_state = carry_to_spectral_state(carry, _GRID)
+        assert "q_c" in spec_state.tracers  # precondition
+        packed = pack_pe_state(spec_state, _GRID)
+        result = unpack_pe_output(
+            packed, spec_state, _GRID, mode="state_update",
+        )
+        # q_c carried through identically from the input state.
+        assert bool(jnp.array_equal(
+            result.tracers["q_c"].data, spec_state.tracers["q_c"].data,
+        ))
+        assert float(jnp.max(jnp.abs(result.tracers["q_c"].data))) > 0.0
+        # q_v still comes from the network output channel (round-trips).
+        assert bool(jnp.allclose(
+            result.tracers["q_v"].data.astype(jnp.float64),
+            spec_state.tracers["q_v"].data.astype(jnp.float64),
+        ))
+
+    def test_tendencies_mode_zeroes_non_predicted_tracers(self):
+        """mode="tendencies": non-predicted tracers get a ZERO tendency
+        (zero tendency = unchanged after integration — correct), never
+        the input values (which would double them per unit time)."""
+        from legoesm.ml.channel_packing import (
+            pack_pe_state, unpack_pe_output,
+        )
+        from legoesm.training.neural_gcm_spectral import carry_to_spectral_state
+        carry = _make_gaussian_carry(q_v_val=0.005)
+        carry = carry._replace(q_c=jnp.full_like(carry.q_c, 2.5e-4))
+        spec_state = carry_to_spectral_state(carry, _GRID)
+        packed = pack_pe_state(spec_state, _GRID)
+        result = unpack_pe_output(
+            packed, spec_state, _GRID, mode="tendencies",
+        )
+        assert float(jnp.max(jnp.abs(result.tracers["q_c"].data))) == 0.0
+
+    def test_unpack_unknown_mode_raises(self):
+        """Unknown mode must raise, never silently fall through to one of
+        the two behaviours (dispatch hardening)."""
+        from legoesm.ml.channel_packing import (
+            pack_pe_state, unpack_pe_output,
+        )
+        from legoesm.training.neural_gcm_spectral import carry_to_spectral_state
+        carry = _make_gaussian_carry()
+        spec_state = carry_to_spectral_state(carry, _GRID)
+        packed = pack_pe_state(spec_state, _GRID)
+        with pytest.raises(ValueError, match="Unknown unpack mode"):
+            unpack_pe_output(packed, spec_state, _GRID, mode="not_a_mode")
+
     def test_pack_unpack_q_round_trip_is_exact_for_band_limited(self):
         """A wave-3 q_v field round-trips through pack → unpack without
         loss (band-limited grid → tensor → grid is exact)."""

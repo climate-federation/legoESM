@@ -87,10 +87,13 @@ class UCastPrimitiveEquationConfig(NamedTuple):
         Clip negative humidity.  NOT YET WIRED (see above); defaults ``False``.
     use_normalization : bool
         Apply Z-score normalisation around the network.
-    pressure_levels : tuple
-        Pressure levels [hPa] for the 3D fields.
     time_integrator : str
         Integrator name for ``hybrid_tendencies`` mode.
+
+    Note: channels are packed on the MODEL SIGMA LEVELS directly (see
+    ``legoesm.ml.channel_packing.pack_pe_state``); no sigma→pressure
+    interpolation is performed.  A former ``pressure_levels`` field
+    advertised WeatherBench2 levels that were never used — removed.
     """
     ucast_config: UCastConfig = UCastConfig(
         in_channels=54, out_channels=54, model_channels=128,
@@ -102,9 +105,6 @@ class UCastPrimitiveEquationConfig(NamedTuple):
     correct_moisture_budget: bool = False  # not yet wired in _apply_conservation
     clip_q: bool = False  # not yet wired in _apply_conservation
     use_normalization: bool = False
-    pressure_levels: tuple = (
-        1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100, 50
-    )
     time_integrator: str = "ssp_rk3"
 
 
