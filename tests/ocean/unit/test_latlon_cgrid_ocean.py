@@ -591,8 +591,45 @@ class TestSmagCFLCap:
         u = (st.u.data + 3.0 * sign[:, None, None]) * st.u_mask.data[..., None]
         return st._replace(u=st.u.replace(data=u))
 
-    def test_cap_off_by_default(self):
-        assert LatLonCGridOceanConfig.from_flat().lateral_viscosity.smag_cfl_safety == 0.0
+    def test_cap_on_by_default(self):
+        # Issue #939: the Laplacian-Smagorinsky CFL cap is ON by default
+        # (smag_cfl_safety=0.125) so an uncapped A_smag cannot self-CFL-blow a
+        # WOA cold-start.  0.0 opts OUT (uncapped; unsafe with a large C_smag_lap).
+        assert LatLonCGridOceanConfig.from_flat().lateral_viscosity.smag_cfl_safety == 0.125
+
+    def test_default_cap_protects_sharp_jet_over_steps(self, grid, z_coord):
+        """Issue #939 regression: with a large ``C_smag_lap`` and NO explicit
+        ``smag_cfl_safety`` (i.e. the DEFAULT 0.125 cap), a sharp grid-scale jet
+        stays finite over many steps -- the uncapped-Smagorinsky self-CFL blowup
+        (lat-lon 180x360x40 dt=300 WOA cold-start, non-finite by ~step 36) cannot
+        happen.  The explicit opt-out ``smag_cfl_safety=0.0`` is UNSAFE at large
+        ``C_smag_lap`` and DOES blow on the same jet, which is why the cap is the
+        default."""
+        st = self._sharp_jet(grid, z_coord)
+        C = 100.0  # cranked, as the sharp WOA cold-start jets effectively are
+        # DEFAULT config: smag_cfl_safety unset -> the 0.125 cap auto-applies.
+        cfg_default = LatLonCGridOceanConfig.from_flat(C_smag_lap=C)
+        assert cfg_default.lateral_viscosity.smag_cfl_safety == 0.125
+        s = st
+        m_default = LatLonCGridOceanModel(grid, z_coord, cfg_default)
+        for _ in range(10):
+            s = m_default.step(s, 300.0)
+        assert bool(jnp.all(jnp.isfinite(s.u.data)))
+        assert bool(jnp.all(jnp.isfinite(s.v.data)))
+        assert float(jnp.max(jnp.abs(s.u.data))) < 50.0  # bounded near the jet scale
+        # Explicit opt-out (uncapped) self-CFL-blows on the SAME jet.
+        cfg_uncapped = LatLonCGridOceanConfig.from_flat(
+            C_smag_lap=C, smag_cfl_safety=0.0)
+        m_uncapped = LatLonCGridOceanModel(grid, z_coord, cfg_uncapped)
+        s2 = st
+        blew = False
+        for _ in range(10):
+            s2 = m_uncapped.step(s2, 300.0)
+            if not bool(jnp.all(jnp.isfinite(s2.u.data))):
+                blew = True
+                break
+        assert blew, ("uncapped Smagorinsky (smag_cfl_safety=0.0 opt-out) should "
+                      "self-CFL-blow on the sharp jet -- the #939 mechanism")
 
     def test_cap_bounds_and_reduces_smag(self, grid, z_coord):
         dt = 75.0
