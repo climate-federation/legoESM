@@ -184,7 +184,31 @@ class SFNOPrimitiveEquationModel:
                 "NormalizationStats or set use_normalization=False."
             )
 
+        # dt_sfno is the network's trained macro step: state_update jumps
+        # by exactly this, hybrid divides by it — zero/negative is
+        # meaningless in both modes and would divide-by-zero in hybrid.
+        if not self.config.dt_sfno > 0.0:
+            raise ValueError(
+                f"config.dt_sfno must be positive (trained macro step in "
+                f"seconds); got {self.config.dt_sfno!r}."
+            )
+
         if sfno_model is not None:
+            # The config-derived guards above (hybrid residual contract,
+            # normalization) only protect the model if the supplied network
+            # actually matches ``config.sfno_config``.  Validate it so e.g.
+            # a NON-residual network cannot be slipped under a residual
+            # hybrid config — ``(y - x)/dt_sfno`` would then divide raw
+            # decoder output with undefined scale (mirrors the U-Cast
+            # bridge guard).
+            if sfno_model.config != self.config.sfno_config:
+                raise ValueError(
+                    "Supplied sfno_model.config does not match "
+                    "config.sfno_config; the architecture/contract guards "
+                    "(residual_prediction, channels) would not apply to "
+                    f"the actual network.\n  model:  {sfno_model.config}\n"
+                    f"  config: {self.config.sfno_config}"
+                )
             self.sfno = sfno_model
         else:
             if key is None:
@@ -202,14 +226,27 @@ class SFNOPrimitiveEquationModel:
         ``config.dt_sfno`` regardless of ``dt``; silently accepting a
         different ``dt`` desynchronises the caller's clock from the
         model state (and, in ``step_with_physics``, applies physics over
-        ``dt`` while the dynamics jumped ``dt_sfno``).  ``dt`` is a
-        Python float on every entry path (tests, drivers, rollout
-        closures), so this is a plain Python guard.
+        ``dt`` while the dynamics jumped ``dt_sfno``).
+
+        ``dt`` must be a STATIC Python number on this path (it selects a
+        fixed macro step; it is not integrable).  A traced ``dt`` (e.g.
+        ``jax.jit`` over ``step`` with a jnp-scalar dt) is converted to a
+        clear contract error here instead of an opaque
+        ``TracerBoolConversionError`` downstream.
         """
-        if abs(dt - self.config.dt_sfno) > 1e-6 * self.config.dt_sfno:
+        try:
+            dt_val = float(dt)
+        except TypeError as e:
+            raise ValueError(
+                "mode='state_update' requires a STATIC Python-float dt "
+                "(the network advances the fixed macro step dt_sfno; dt "
+                "cannot be traced). Mark dt static under jit, or call "
+                "step() outside jit."
+            ) from e
+        if abs(dt_val - self.config.dt_sfno) > 1e-6 * self.config.dt_sfno:
             raise ValueError(
                 f"mode='state_update' advances the state by exactly "
-                f"dt_sfno={self.config.dt_sfno} s per call; got dt={dt}. "
+                f"dt_sfno={self.config.dt_sfno} s per call; got dt={dt_val}. "
                 f"Pass dt=dt_sfno (or set config.dt_sfno to the desired "
                 f"macro step)."
             )

@@ -851,6 +851,72 @@ class TestFixMassForwarding:
         assert model.config.fix_mass is flag
         assert model.config.anchor_mass_to_initial is flag
 
+    # conservation_fixer=False must OVERRIDE fix_mass=True on every
+    # forwarding branch (the lat-lon contract; codex 2026-07-12 —
+    # unconditional forwarding ignored the master conservation switch).
+    def test_cdgrid_ce_conservation_fixer_false_overrides(self):
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
+            dycore=DycoreConfig(
+                model_type="nonhydrostatic", discretization="centered",
+                dt=300.0, fix_mass=True, conservation_fixer=False,
+            ),
+        )
+        model = create_atmosphere_dycore(
+            config, _make_cubed_sphere_grid(), _make_sigma())
+        assert model.config.fix_mass is False
+        assert model.config.anchor_mass_to_initial is False
+
+    @pytest.mark.skipif(
+        not jax.config.read("jax_enable_x64"),
+        reason="spectral/Gaussian needs JAX_ENABLE_X64=1",
+    )
+    def test_spectral_pe_conservation_fixer_false_overrides(self):
+        from legoesm.grids.factory import create_grid
+        grid = create_grid("gaussian", 21)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="gaussian", resolution=21, nlev=5),
+            dycore=DycoreConfig(
+                model_type="hydrostatic", discretization="spectral",
+                dt=300.0, fix_mass=True, conservation_fixer=False,
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, _make_sigma())
+        assert model.config.fix_mass is False
+        assert model.config.anchor_mass_to_initial is False
+
+    @pytest.mark.skipif(
+        not jax.config.read("jax_enable_x64"),
+        reason="spectral/Gaussian needs JAX_ENABLE_X64=1",
+    )
+    def test_spectral_nh_conservation_fixer_false_overrides(self):
+        from legoesm.grids.factory import create_grid
+        grid = create_grid("gaussian", 21)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="gaussian", resolution=21, nlev=2),
+            dycore=DycoreConfig(
+                model_type="nonhydrostatic", discretization="spectral",
+                dt=300.0, fix_mass=True, conservation_fixer=False,
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, _make_sigma(2))
+        assert model.config.fix_mass is False
+        assert model.config.anchor_mass_to_initial is False
+
+    def test_mpas_nh_conservation_fixer_false_overrides(self):
+        from legoesm.grids.factory import create_grid
+        grid = create_grid("mpas", 1, lloyd_iterations=2)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="mpas", resolution=1, nlev=2),
+            dycore=DycoreConfig(
+                model_type="nonhydrostatic", discretization="mpas",
+                dt=300.0, fix_mass=True, conservation_fixer=False,
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, _make_sigma(2))
+        assert model.config.fix_mass is False
+        assert model.config.anchor_mass_to_initial is False
+
 
 # =========================================================================
 # 12. Lat-lon SW polar-filter passthrough

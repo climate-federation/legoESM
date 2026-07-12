@@ -946,14 +946,25 @@ class SpectralCompressibleEulerModel:
 
     @partial(jax.jit, static_argnums=(0,))
     def _step_on_cpu(self, state: SpectralNHState, dt: float) -> SpectralNHState:
-        """Step without device transfers (for batched CPU integration on Metal)."""
+        """Step without device transfers (for batched CPU integration on Metal).
+
+        Applies the same anchored-mass fixer as :meth:`_step_jit` — the
+        batched path previously skipped it entirely, so long batched-Metal
+        integrations silently ran unanchored (codex 2026-07-12).
+        ``_integrate_on_cpu`` takes the snapshot before the loop.
+        """
         se_config = SplitExplicitConfig(
             n_substeps=self.config.n_acoustic_substeps,
         )
         slow_tendency_fn, acoustic_update_fn = self._build_se_functions()
-        return split_explicit_step(
+        state_new = split_explicit_step(
             state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
         )
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is not None):
+            state_new = self._apply_mass_fixer(state_new)
+        return state_new
 
     def integrate(
         self,
@@ -984,6 +995,15 @@ class SpectralCompressibleEulerModel:
         """Batch integration on CPU: transfer once, not per step."""
         state_cpu = jax.device_put(state, self._cpu_device)
         trajectory_cpu = [state_cpu]
+
+        # Anchored-mass snapshot (mirrors step(); the batched path calls
+        # _step_on_cpu directly, so the snapshot must happen here or the
+        # fixer never engages).  Taken BEFORE tracing so the jitted step
+        # sees a non-None target on its first trace.
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is None):
+            self._target_mass = self.compute_dry_mass(state_cpu)
 
         for i in range(n_steps):
             state_cpu = self._step_on_cpu(state_cpu, dt)

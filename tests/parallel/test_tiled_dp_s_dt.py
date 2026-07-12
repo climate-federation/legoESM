@@ -149,3 +149,22 @@ def test_dp_s_dt_compose_host_body(cdg, hybrid):
     t = _reassemble_cc(_chain, kt)
     np.testing.assert_array_equal(
         t, g, err_msg=f"dp_s_dt host-body != global (hybrid={hybrid})")
+
+
+def test_duogrid_refused():
+    """codex 2026-07-12: the standalone dp_s/dt stage has no duogrid
+    kinked->extended remap and no seam-flux sync — it must refuse a
+    duogrid cdgrid loudly (like the full tiled stage), not silently
+    produce seam-inconsistent fluxes.  The refusal fires before mesh
+    validation, so no device mesh is needed."""
+    from legoesm.parallel.tiled_production_cdgrid import (
+        make_tiled_dp_s_dt_stage_2d,
+    )
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    g = create_cubed_sphere_cdgrid(create_cubed_sphere(N, use_duogrid=True))
+    assert g.base.duogrid is not None
+    with pytest.raises(NotImplementedError, match="non-duogrid"):
+        make_tiled_dp_s_dt_stage_2d(
+            None, g, create_sigma_coordinate(3), n=N, kt=2, nlev=3,
+        )

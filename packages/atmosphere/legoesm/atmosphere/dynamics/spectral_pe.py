@@ -1431,7 +1431,7 @@ class SpectralPrimitiveEquationModel:
             self._si_dt_lf = dt_eff
 
     def _do_step(self, state, dt, tendency_fn,
-                 si_data=None, sponge_factor=None):
+                 si_data=None, sponge_factor=None, target_mass=None):
         """Core step: explicit RK3/RK54 or semi-implicit RK3, then sponge.
 
         ``si_data`` and ``sponge_factor`` are passed as **dynamic args**
@@ -1493,20 +1493,21 @@ class SpectralPrimitiveEquationModel:
         # active or ``state.tracers is None``).
         result = self._apply_tracer_filter(result)
 
-        # Iter-3: anchored-mass fixer.  ``_target_mass`` is None when
-        # disabled (``fix_mass`` off or ``anchor_mass_to_initial`` off)
-        # OR on the very first call (snapshot happens in ``step()``
-        # OUTSIDE this JIT).  When set, it's a fp64 scalar that JIT
-        # captures as a closure constant — same pattern as cubed-sphere
-        # ``self._target_mass`` access in ``_step_fv3``.
+        # Iter-3: anchored-mass fixer.  ``target_mass`` is threaded in as
+        # a TRACED argument (codex 2026-07-12): a closure-captured
+        # ``self._target_mass`` is baked at trace time, so a later
+        # ``set_target_mass()`` / ``reset_target_mass()`` + re-anchor was
+        # silently ignored by the compiled step.  ``None`` (fixer off or
+        # pre-snapshot) keeps the structure stable because ``step()``
+        # snapshots BEFORE the first JIT call whenever anchoring is on.
         if (self.config.fix_mass
                 and self.config.anchor_mass_to_initial
-                and self._target_mass is not None):
-            result = self._apply_mass_fixer(result)
+                and target_mass is not None):
+            result = self._apply_mass_fixer(result, target_mass)
 
         return result
 
-    def _apply_mass_fixer(self, state):
+    def _apply_mass_fixer(self, state, target_mass=None):
         """Rescale ``lnps_hat[0]`` so the global integral matches ``_target_mass``.
 
         With the spectral basis ``(4π)``-normalised on the unit sphere
@@ -1519,13 +1520,15 @@ class SpectralPrimitiveEquationModel:
         ``fix_ps_mass`` additive uniform correction, just expressed in
         log-space because ``lnps`` is the prognostic variable).
         """
+        if target_mass is None:
+            target_mass = self._target_mass
         lnps_grid = sh_synthesis(self.grid, state.lnps_hat.data)
         p_s_grid = jnp.exp(lnps_grid)
         acc = jnp.float64
         mass_now = jnp.sum(
             p_s_grid.astype(acc) * self.grid.grid_area.astype(acc),
         )
-        log_scale = jnp.log(self._target_mass / mass_now)
+        log_scale = jnp.log(target_mass / mass_now)
         # sqrt(4π) is the (0,0) coefficient of a constant=1 field under
         # the (4π)-normalised real-SH convention this module uses.
         sqrt_4pi = jnp.sqrt(jnp.asarray(4.0 * jnp.pi, dtype=acc))
@@ -1595,9 +1598,9 @@ class SpectralPrimitiveEquationModel:
         # cannot silently reseed prognostic physics every step (#405/#413).
         refuse_unthreaded_stateful_physics(
             physics_fn, None, where="Spectral PE step()")
-        # Iter-3: anchor mass on first call (outside JIT so the fp64
-        # scalar becomes a closure constant).  Mirrors
-        # ``primitive_eq_cdgrid.step()`` precompute pattern.
+        # Iter-3: anchor mass on first call (outside JIT; the fp64 scalar
+        # is then THREADED into the jitted step as a traced arg so a
+        # later reset/set_target_mass is honored — codex 2026-07-12).
         if (self.config.fix_mass
                 and self.config.anchor_mass_to_initial
                 and self._target_mass is None):
@@ -1613,9 +1616,9 @@ class SpectralPrimitiveEquationModel:
         self._ensure_tracer_filter(dt)
         if forcing_data is not None:
             return self._step_with_forcing_jit(
-                state, dt, physics_fn, forcing_data,
+                state, dt, physics_fn, forcing_data, self._target_mass,
             )
-        return self._step_jit(state, dt, physics_fn)
+        return self._step_jit(state, dt, physics_fn, self._target_mass)
 
     def _leapfrog_step(self, state, dt, physics_fn=None, forcing_data=None):
         """Leapfrog + SI step with Robert-Asselin filter + implicit diffusion.
@@ -1738,86 +1741,100 @@ class SpectralPrimitiveEquationModel:
             )
         return tendency_fn
 
-    @partial(jax.jit, static_argnums=(0, 3))
+    @partial(jax.jit, static_argnums=(0, 2, 3))
     def _euler_si_jit(self, state, dt, physics_fn=None):
-        """JIT-compiled Euler + SI step (leapfrog startup), optionally with physics."""
+        """JIT-compiled Euler + SI step (leapfrog startup), optionally with physics.
+
+        ``dt`` is STATIC (codex 2026-07-12): the body closure-captures the
+        dt-dependent ``self._si_data`` — with a traced ``dt`` a dt change
+        does not retrace, so the compiled step kept using the STALE SI
+        matrices from the first dt.  A static ``dt`` keys the JIT cache on
+        the value, so ``_ensure_si_data(dt)`` + retrace stay consistent.
+        """
         tendency_fn = self._make_tendency_fn(physics_fn)
         from legoesm.timestepping.semi_implicit import euler_si_step
         return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
 
-    @partial(jax.jit, static_argnums=(0, 3))
+    @partial(jax.jit, static_argnums=(0, 2, 3))
     def _euler_si_with_forcing_jit(self, state, dt, physics_fn, forcing_data):
         """Iter-95: Euler + SI step with TRACED forcing_data threading.
 
-        ``static_argnums=(0, 3)`` matches main's CPU/GPU scaling change
-        (PR #232): only ``self`` and ``physics_fn`` are static; ``dt``
-        and ``forcing_data`` are both traced.  This is required for
-        multi-device sharding compatibility.
+        ``static_argnums=(0, 2, 3)``: ``self``, ``dt`` and ``physics_fn``
+        are static (dt keys the cache — see ``_euler_si_jit``);
+        ``forcing_data`` stays traced so per-step values never retrace.
         """
         tendency_fn = self._make_tendency_fn(physics_fn, forcing_data)
         return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
 
-    @partial(jax.jit, static_argnums=(0, 4))
+    @partial(jax.jit, static_argnums=(0, 3, 4))
     def _leapfrog_si_jit(self, state_n, state_nm1, dt, physics_fn=None):
-        """JIT-compiled leapfrog + SI step, optionally with physics."""
+        """JIT-compiled leapfrog + SI step, optionally with physics.
+
+        ``dt`` static — closure-captures ``self._si_data_lf`` (see
+        ``_euler_si_jit``).
+        """
         tendency_fn = self._make_tendency_fn(physics_fn)
         return leapfrog_si_step(
             state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
         )
 
-    @partial(jax.jit, static_argnums=(0, 4))
+    @partial(jax.jit, static_argnums=(0, 3, 4))
     def _leapfrog_si_with_forcing_jit(
         self, state_n, state_nm1, dt, physics_fn, forcing_data,
     ):
         """Iter-95: leapfrog + SI step with TRACED forcing_data threading.
 
-        ``static_argnums=(0, 4)`` matches main's CPU/GPU scaling
-        pattern: only ``self`` and ``physics_fn`` static; ``dt``
-        and ``forcing_data`` traced.
+        ``self``, ``dt``, ``physics_fn`` static (dt keys the cache — see
+        ``_euler_si_jit``); ``forcing_data`` traced.
         """
         tendency_fn = self._make_tendency_fn(physics_fn, forcing_data)
         return leapfrog_si_step(
             state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
         )
 
-    @partial(jax.jit, static_argnums=(0, 3))
+    @partial(jax.jit, static_argnums=(0, 2, 3))
     def _step_jit(
         self,
         state: SpectralHydrostaticState,
         dt: float,
         physics_fn=None,
+        target_mass=None,
     ) -> SpectralHydrostaticState:
         """JIT-compiled inner step (SI matrices already precomputed), optionally with physics.
 
-        ``dt`` is intentionally a **static** arg.  Iter-211 measured a
-        ~60 % throughput regression on spectral T21 GPU when ``dt`` was
-        made traced (479 → 284 sps with ``--scan-steps=24``): with
-        ``dt`` static the SI matrices, sponge factors and hyperdiff
-        filters constant-fold into the compiled program, but a traced
-        ``dt`` forces a more general program that pays an extra
-        broadcast at every reference.  My iter-5 ``si_data``/
-        ``sponge_factor`` dynamic-arg variant is reverted here in favour
-        of main's measured perf choice; the dt-stale-matrix risk is
-        mitigated by ``_ensure_si_data`` / ``_ensure_sponge_factor``
-        recomputing on every ``step()`` entry — the JIT cache is keyed
-        on ``id(self)`` and the dt value, so a dt change re-traces.
+        ``dt`` is a **static** arg — and, since codex 2026-07-12,
+        ``static_argnums`` actually says so (it previously read
+        ``(0, 3)`` while this docstring claimed dt-static, so a dt
+        change silently reused the STALE SI matrices / sponge / hyperdiff
+        / tracer filters captured at the first trace).  Iter-211 measured
+        a ~60 % throughput regression on spectral T21 GPU when ``dt`` was
+        traced (479 → 284 sps): static ``dt`` lets the dt-dependent
+        filter/matrix closures constant-fold, and the JIT cache keyed on
+        the dt value makes ``_ensure_*`` + retrace consistent.
+
+        ``target_mass`` is TRACED (scalar or None): the anchored-mass
+        target can be reset/re-anchored between calls without a stale
+        closure capture (structure is stable — ``step()`` snapshots
+        before the first JIT call whenever anchoring is on).
         """
         tendency_fn = self._make_tendency_fn(physics_fn)
 
         if self._use_cpu_for_spectral:
             state_cpu = jax.device_put(state, self._cpu_device)
-            result_cpu = self._do_step(state_cpu, dt, tendency_fn)
+            result_cpu = self._do_step(state_cpu, dt, tendency_fn,
+                                       target_mass=target_mass)
             return jax.device_put(result_cpu, self._default_device)
 
-        return self._do_step(state, dt, tendency_fn)
+        return self._do_step(state, dt, tendency_fn, target_mass=target_mass)
 
-    @partial(jax.jit, static_argnums=(0, 3))
+    @partial(jax.jit, static_argnums=(0, 2, 3))
     def _step_with_forcing_jit(
         self,
         state: SpectralHydrostaticState,
         dt: float,
         physics_fn,
         forcing_data,
+        target_mass=None,
     ) -> SpectralHydrostaticState:
         """JIT-compiled step with TRACED ``forcing_data``.
 
@@ -1832,34 +1849,36 @@ class SpectralPrimitiveEquationModel:
         forcing_data)`` — a 4-arg signature.  Existing 3-arg
         physics_fn implementations need to be extended.
 
-        ``static_argnums=(0, 3)`` matches main's CPU/GPU scaling
-        pattern (PR #232): only ``self`` and ``physics_fn`` are
-        static; ``dt`` and ``forcing_data`` are both traced.
+        ``static_argnums=(0, 2, 3)``: ``self``, ``dt``, ``physics_fn``
+        static (dt keys the cache so the dt-dependent filter/matrix
+        closures stay fresh — see ``_step_jit``); ``forcing_data`` and
+        ``target_mass`` traced.
         """
         tendency_fn = self._make_tendency_fn(physics_fn, forcing_data)
 
         if self._use_cpu_for_spectral:
             state_cpu = jax.device_put(state, self._cpu_device)
-            result_cpu = self._do_step(state_cpu, dt, tendency_fn)
+            result_cpu = self._do_step(state_cpu, dt, tendency_fn,
+                                       target_mass=target_mass)
             return jax.device_put(result_cpu, self._default_device)
 
-        return self._do_step(state, dt, tendency_fn)
+        return self._do_step(state, dt, tendency_fn, target_mass=target_mass)
 
-    @partial(jax.jit, static_argnums=(0, 3))
+    @partial(jax.jit, static_argnums=(0, 2, 3))
     def _step_on_cpu(
         self,
         state: SpectralHydrostaticState,
         dt: float,
         physics_fn=None,
+        target_mass=None,
     ) -> SpectralHydrostaticState:
         """Step on CPU without device transfers, optionally with physics.
 
-        Same static-arg pattern as :func:`_step_jit`; reverted from the
-        iter-5 dynamic-arg variant in favour of main's measured perf
-        choice (see ``_step_jit`` docstring for the iter-211 rationale).
+        Same static-arg pattern as :func:`_step_jit` (``dt`` static,
+        ``target_mass`` traced).
         """
         tendency_fn = self._make_tendency_fn(physics_fn)
-        return self._do_step(state, dt, tendency_fn)
+        return self._do_step(state, dt, tendency_fn, target_mass=target_mass)
 
     def integrate(
         self,
@@ -1878,7 +1897,16 @@ class SpectralPrimitiveEquationModel:
         n_steps = int(duration / dt)
         self._ensure_si_data(dt)
         self._ensure_sponge_factor(dt)
+        self._ensure_hyperdiff_filter(dt)
         self._ensure_tracer_filter(dt)
+        # Anchored-mass snapshot: step() does this itself on the direct
+        # path, but the batched-CPU path calls _step_on_cpu directly —
+        # snapshot here so BOTH paths anchor on the true initial state
+        # (codex 2026-07-12: the batched path previously never anchored).
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is None):
+            self._target_mass = self._compute_initial_mass(state)
 
         if self._use_cpu_for_spectral:
             return self._integrate_on_cpu(state, n_steps, dt, save_every, physics_fn)
@@ -1896,10 +1924,20 @@ class SpectralPrimitiveEquationModel:
         trajectory_cpu = [state_cpu]
 
         # Refresh dt-dependent matrices on the host once before stepping.
+        # (integrate() already ensured the hyperdiff/tracer filters and
+        # took the anchored-mass snapshot; direct callers get them here.)
         self._ensure_si_data(dt)
         self._ensure_sponge_factor(dt)
+        self._ensure_hyperdiff_filter(dt)
+        self._ensure_tracer_filter(dt)
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is None):
+            self._target_mass = self._compute_initial_mass(state_cpu)
         for i in range(n_steps):
-            state_cpu = self._step_on_cpu(state_cpu, dt, physics_fn)
+            state_cpu = self._step_on_cpu(
+                state_cpu, dt, physics_fn, self._target_mass,
+            )
             if (i + 1) % save_every == 0:
                 trajectory_cpu.append(state_cpu)
 

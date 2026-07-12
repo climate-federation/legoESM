@@ -343,14 +343,17 @@ def create_atmosphere_dycore(
         from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
             CDGridCompressibleEulerModel, CDGridCompressibleEulerConfig,
         )
+        # Forward the driver-level mass fixer (mirrors the plane / NH
+        # branches).  Previously dropped: DycoreConfig.fix_mass=True was
+        # silently ignored on the cubed-sphere NH path.
+        # conservation_fixer=False overrides fix_mass=True (same contract
+        # as the lat-lon branch below).
+        _nh_fix_mass = dc.fix_mass and dc.conservation_fixer
         cfg = CDGridCompressibleEulerConfig(
             A_h=diff.A_h,
             hyperdiff_coeff=diff.hyperdiff,
-            # Forward the driver-level mass fixer (mirrors the plane / NH
-            # branches).  Previously dropped: DycoreConfig.fix_mass=True was
-            # silently ignored on the cubed-sphere NH path.
-            fix_mass=dc.fix_mass,
-            anchor_mass_to_initial=dc.fix_mass,
+            fix_mass=_nh_fix_mass,
+            anchor_mass_to_initial=_nh_fix_mass,
         )
         # Non-hydrostatic requires height coordinate and terrain metric.
         # Expect grid to provide these or construct defaults.
@@ -405,8 +408,10 @@ def create_atmosphere_dycore(
             # Forward the driver-level mass fixer (mirrors the plane / NH
             # branches).  Previously dropped: DycoreConfig.fix_mass=True was
             # silently ignored on the spectral hydrostatic path.
-            fix_mass=dc.fix_mass,
-            anchor_mass_to_initial=dc.fix_mass,
+            # conservation_fixer=False overrides fix_mass=True (lat-lon
+            # branch contract).
+            fix_mass=dc.fix_mass and dc.conservation_fixer,
+            anchor_mass_to_initial=dc.fix_mass and dc.conservation_fixer,
         )
         return SpectralPrimitiveEquationModel(
             grid=grid, sigma_coord=sigma, config=pe_config,
@@ -432,9 +437,10 @@ def create_atmosphere_dycore(
             if terrain_metric is None:
                 z_s = jnp.zeros_like(grid.lat2d)
                 terrain_metric = compute_terrain_metric(z_s, height_coord)
+        # conservation_fixer=False overrides fix_mass=True (lat-lon contract).
         nh_cfg = SpectralNHConfig(
-            fix_mass=dc.fix_mass,
-            anchor_mass_to_initial=dc.fix_mass,
+            fix_mass=dc.fix_mass and dc.conservation_fixer,
+            anchor_mass_to_initial=dc.fix_mass and dc.conservation_fixer,
         )
         return SpectralCompressibleEulerModel(
             grid, height_coord, terrain_metric, nh_cfg,
@@ -490,12 +496,13 @@ def create_atmosphere_dycore(
             if terrain_metric is None:
                 z_s = jnp.zeros_like(grid.latCell)
                 terrain_metric = compute_terrain_metric(z_s, height_coord)
+        # conservation_fixer=False overrides fix_mass=True (lat-lon contract).
         nh_cfg = MPASCompressibleEulerConfig(
             nu_del2=diff.A_h,
             nu_del4=diff.hyperdiff,
             K_h=diff.A_h,
-            fix_mass=dc.fix_mass,
-            anchor_mass_to_initial=dc.fix_mass,
+            fix_mass=dc.fix_mass and dc.conservation_fixer,
+            anchor_mass_to_initial=dc.fix_mass and dc.conservation_fixer,
         )
         return MPASCompressibleEulerModel(grid, height_coord, terrain_metric, nh_cfg)
 

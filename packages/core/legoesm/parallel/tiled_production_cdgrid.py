@@ -905,6 +905,16 @@ def make_tiled_dp_s_dt_stage_2d(mesh, cdgrid, coord, n: int, kt: int, nlev: int)
         dp_from_hybrid,
     )
     from legoesm.parallel.cubesphere_exchange import make_tiled_pad_body
+    grid = cdgrid.base
+    # Fail-fast BEFORE mesh validation: the refusal must not depend on a
+    # constructible device mesh (codex 2026-07-12).
+    if grid.duogrid is not None:
+        raise NotImplementedError(
+            "make_tiled_dp_s_dt_stage_2d supports the orthogonal-rotation "
+            "(non-duogrid) cube only: the in-stage scalar halo does not "
+            "carry the duogrid kinked->extended remap, and the flux "
+            "divergence here has no seam-flux synchronization (the global "
+            "duogrid path uses cgrid_flux_divergence_sync).")
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
     _check_tiled_mesh(mesh, n, kt)
@@ -915,7 +925,6 @@ def make_tiled_dp_s_dt_stage_2d(mesh, cdgrid, coord, n: int, kt: int, nlev: int)
         raise ValueError(
             f"make_tiled_dp_s_dt_stage_2d: coord.n_levels={coord.n_levels} "
             f"!= nlev={nlev}")
-    grid = cdgrid.base
     nl = n // kt
     _hybrid = isinstance(coord, HybridSigmaPressureCoordinate)
     if not _hybrid:

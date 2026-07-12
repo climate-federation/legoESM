@@ -181,3 +181,80 @@ def test_implicit_hyperdiff_damps_under_ssp(integrator):
         f"implicit hyperdiff inert under {integrator}: "
         f"{amp_diffused:.3e} vs {amp_free:.3e}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 4. JIT-cache freshness: dt change retraces; target-mass reset is honored
+# ---------------------------------------------------------------------------
+
+def _hyperdiff_model_and_state(nu, dt):
+    grid = create_gaussian_grid(21)
+    sigma_coord = create_sigma_coordinate(5)
+    cfg = SpectralPEConfig(
+        hyperdiff_coeff=nu, hyperdiff_order=2, implicit_hyperdiff=True,
+        spectral_filter_strength=0.0, time_integrator="ssp_rk3",
+        fix_mass=False,
+    )
+    model = SpectralPrimitiveEquationModel(
+        grid=grid, sigma_coord=sigma_coord, config=cfg,
+    )
+    state = isothermal_rest_state_spectral(
+        grid, sigma_coord, perturbation_amplitude=0.0,
+    )
+    ls = np.asarray(grid.ls)
+    idx = int(np.argmax(ls == grid.n_max))
+    vor = state.vor_hat.data.at[idx, 2].set(1e-8)
+    return model, state._replace(vor_hat=state.vor_hat.replace(data=vor)), idx
+
+
+def test_dt_change_uses_fresh_filters():
+    """codex 2026-07-12: dt was traced while the dt-dependent hyperdiff/
+    SI/sponge/tracer filters were closure-captured, so a dt change reused
+    the STALE filters of the first trace.  dt is now static: stepping a
+    reused model at a new dt must be bit-identical to a fresh model."""
+    grid = create_gaussian_grid(21)
+    eig = (grid.n_max * (grid.n_max + 1) / grid.radius ** 2) ** 2
+    nu = 2.3 / (300.0 * eig)
+
+    reused, state, idx = _hyperdiff_model_and_state(nu, 300.0)
+    reused.step(state, 300.0)          # bake the dt=300 trace
+    out_reused = reused.step(state, 600.0)
+
+    fresh, state2, _ = _hyperdiff_model_and_state(nu, 600.0)
+    out_fresh = fresh.step(state2, 600.0)
+
+    for f in ("vor_hat", "div_hat", "T_hat", "lnps_hat"):
+        a = getattr(out_reused, f).data
+        b = getattr(out_fresh, f).data
+        assert bool(jnp.array_equal(a, b)), (
+            f"stale dt-cached program: {f} differs after dt 300->600"
+        )
+
+
+def test_set_target_mass_is_honored_by_compiled_step():
+    """codex 2026-07-12: the anchored-mass target was a closure constant
+    of the compiled step, so set_target_mass()/reset after the first
+    trace was silently ignored.  It is now a traced argument."""
+    grid = create_gaussian_grid(21)
+    sigma_coord = create_sigma_coordinate(5)
+    cfg = SpectralPEConfig(
+        hyperdiff_coeff=0.0, fix_mass=True, anchor_mass_to_initial=True,
+        time_integrator="ssp_rk3",
+    )
+    model = SpectralPrimitiveEquationModel(
+        grid=grid, sigma_coord=sigma_coord, config=cfg,
+    )
+    state = isothermal_rest_state_spectral(
+        grid, sigma_coord, perturbation_amplitude=0.0,
+    )
+    out1 = model.step(state, 300.0)          # snapshots + bakes trace
+    m0 = float(model._compute_initial_mass(state))
+    m1 = float(model._compute_initial_mass(out1))
+    assert abs(m1 - m0) / m0 < 1e-12
+
+    model.set_target_mass(jnp.float64(2.0 * m0))
+    out2 = model.step(state, 300.0)          # SAME trace, new target
+    m2 = float(model._compute_initial_mass(out2))
+    assert abs(m2 - 2.0 * m0) / m0 < 1e-9, (
+        f"set_target_mass ignored by compiled step: mass {m2} vs {2*m0}"
+    )

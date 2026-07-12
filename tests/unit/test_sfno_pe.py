@@ -616,3 +616,58 @@ class TestHybridResidualSemantics:
         )
         out = model.step(pe_state, dt=21600.0)
         assert jnp.all(jnp.isfinite(out.T_hat.data))
+
+
+class TestCodexRoundGuards:
+    """codex 2026-07-12 round-2 guards."""
+
+    def test_injected_model_config_mismatch_raises(self, grid_t8, sigma_coord,
+                                                   sfno_config):
+        """A supplied network whose config differs from config.sfno_config
+        must be rejected (a non-residual net under a residual hybrid
+        config would feed raw decoder output into (y-x)/dt_sfno)."""
+        from legoesm.ml.sfno import SFNO
+        net = SFNO(
+            config=sfno_config._replace(residual_prediction=False),
+            grid=grid_t8, key=jax.random.PRNGKey(0),
+        )
+        config = SFNOPrimitiveEquationConfig(
+            sfno_config=sfno_config,  # residual_prediction=True
+            mode="hybrid_tendencies", correct_mass=False,
+        )
+        with pytest.raises(ValueError, match="does not match"):
+            SFNOPrimitiveEquationModel(
+                grid=grid_t8, sigma_coord=sigma_coord, config=config,
+                sfno_model=net,
+            )
+
+    def test_nonpositive_dt_sfno_raises(self, grid_t8, sigma_coord,
+                                        sfno_config):
+        config = SFNOPrimitiveEquationConfig(
+            sfno_config=sfno_config, mode="state_update",
+            correct_mass=False, dt_sfno=0.0,
+        )
+        with pytest.raises(ValueError, match="dt_sfno must be positive"):
+            SFNOPrimitiveEquationModel(
+                grid=grid_t8, sigma_coord=sigma_coord, config=config,
+                key=jax.random.PRNGKey(0),
+            )
+
+    def test_traced_dt_gives_clear_contract_error(self, grid_t8, sigma_coord,
+                                                  pe_state, sfno_config):
+        """A traced dt under jit must raise the contract ValueError, not
+        an opaque TracerBoolConversionError."""
+        config = SFNOPrimitiveEquationConfig(
+            sfno_config=sfno_config, mode="state_update", correct_mass=False,
+        )
+        model = SFNOPrimitiveEquationModel(
+            grid=grid_t8, sigma_coord=sigma_coord, config=config,
+            key=jax.random.PRNGKey(0),
+        )
+
+        @jax.jit
+        def stepper(s, dt):
+            return model.step(s, dt)
+
+        with pytest.raises(ValueError, match="STATIC Python-float dt"):
+            stepper(pe_state, jnp.float64(21600.0))
