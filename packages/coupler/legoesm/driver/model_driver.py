@@ -905,13 +905,28 @@ class ModelDriver:
                     lon_var=cfg.lon_var or "lon",
                     sst_offset=cfg.sst_offset, sic_scale=cfg.sic_scale,
                     sic_path=getattr(cfg, 'sic_path', ''),
+                    # T_ice is the SST freezing floor (applied post-interp); wire
+                    # the run's value so --t-ice-k reaches it (was left default).
+                    T_ice=cfg.T_ice,
                 )
             else:
+                # Forward the run's SST/SIC unit conversions: run_amip defaults
+                # these to the preset's own values (so a bare ``--dataset cobe``
+                # keeps sic_scale=0.01), and an explicit --sic-scale/--sst-offset
+                # overrides them — e.g. ``--sic-scale 0`` for a no-sea-ice run,
+                # which the bare ``_replace(path, T_ice)`` used to silently drop.
                 forcing_config = get_amip_preset(cfg.dataset)._replace(
-                    path=cfg.forcing_path
+                    path=cfg.forcing_path, T_ice=cfg.T_ice,
+                    sst_offset=cfg.sst_offset, sic_scale=cfg.sic_scale,
                 )
 
-            forcing = load_amip_forcing(forcing_config, forcing_grid)
+            # Anchor the SST/SIC time axis to the run's start year so a model
+            # day indexes the file by real calendar date (AMIP-II): a 1979 run
+            # reads the 1979 records of a 1870-2022 input4MIPs file, not 1870.
+            forcing = load_amip_forcing(
+                forcing_config, forcing_grid,
+                start_year=getattr(cfg, "start_year", None),
+            )
             self._forcing = forcing
 
             def get_sst_sic(day):

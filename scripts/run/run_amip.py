@@ -1158,6 +1158,18 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         ),
     )
 
+    # Preset datasets carry their own SST/SIC unit conversions (cobe SIC is
+    # percent -> sic_scale=0.01; hadisst SST is Celsius -> sst_offset=T_freeze).
+    # Fall back to those when the user did not pass --sst-offset/--sic-scale, so a
+    # bare ``--dataset cobe`` keeps correct units; an explicit flag still wins
+    # (model_driver forwards cfg.sst_offset/sic_scale into the preset config).
+    try:
+        from legoesm.forcing.amip import get_amip_preset
+        _preset = get_amip_preset(args.dataset)
+        _sst_default, _sic_default = _preset.sst_offset, _preset.sic_scale
+    except ValueError:
+        _sst_default, _sic_default = 0.0, 1.0
+
     return ExperimentConfig(
         grid=grid_config,
         dycore=dycore_config,
@@ -1172,8 +1184,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         time_var=args.time_var or "",
         lat_var=args.lat_var or "",
         lon_var=args.lon_var or "",
-        sst_offset=args.sst_offset or 0.0,
-        sic_scale=args.sic_scale or 1.0,
+        sst_offset=args.sst_offset if args.sst_offset is not None else _sst_default,
+        # ``is not None`` (not ``or``) so an explicit 0.0 offset / 0.0 scale — a
+        # legitimate no-op-conversion or no-sea-ice sensitivity run — is not
+        # silently replaced by the preset/default fallback.
+        sic_scale=args.sic_scale if args.sic_scale is not None else _sic_default,
         radiation=args.radiation,
         rad_update_steps=args.rad_update_steps,
         unfused_radiation=args.unfused_radiation,
@@ -1344,6 +1359,13 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
         parser.error("--ic-path required when --ic era5")
     if args.ghg_forcing == "external" and not args.ghg_file:
         parser.error("--ghg-file required when --ghg-forcing is external")
+    # Ozone/aerosol "external" with an empty path silently substitutes the
+    # built-in reference climatology (use_reference_if_missing) while the run log
+    # still prints the channel as ACTIVE — require the file, as solar/ghg do.
+    if args.ozone_forcing == "external" and not args.ozone_file:
+        parser.error("--ozone-file required when --ozone-forcing is external")
+    if args.aerosol_forcing == "external" and not args.aerosol_file:
+        parser.error("--aerosol-file required when --aerosol-forcing is external")
     if args.aerosol_ccn:
         if args.aerosol_forcing != "external":
             parser.error("--aerosol-ccn requires --aerosol-forcing external "
