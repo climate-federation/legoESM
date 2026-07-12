@@ -2385,6 +2385,118 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
     return step
 
 
+def warmup_tiled_cube_comms(mesh, kt: int, *, force: bool = False) -> bool:
+    """Deterministically prime EVERY NCCL communicator the closed-loop tiled
+    cube step uses, BEFORE the first real step, so multi-process communicator
+    init cannot deadlock (issue #921).
+
+    The closed-loop blocked step
+    (:func:`make_tiled_fv3_hydrostatic_step_blocked_2d` with ``fix_mass=True``,
+    and the operator-split twin) issues, inside ONE compiled executable, BOTH
+    the halo collective-permutes (``jax.lax.ppermute`` over the
+    ``(face, tile_i, tile_j)`` mesh axes — the tiled halo cliques) AND the
+    mass-fixer GLOBAL reduction (``jax.lax.psum`` over the SAME axes —
+    :func:`_tile_fix_ps_mass_delta` / :func:`_tile_fix_ps_mass_target`).  NCCL
+    communicator init is itself a collective over the clique; under the XLA/GPU
+    defaults (latency-hiding scheduler + async collectives +
+    ``nccl_comm_splitting``) the two clique KINDS can be scheduled for init in a
+    DIFFERENT relative order on different ranks — rank A blocks initialising the
+    reduction clique while rank B blocks initialising a permute clique — a
+    cyclic wait that never converges (observed at np=24 on Derecho: late
+    comm-init NCCL INFO, ZERO ``Init COMPLETE`` for ~85 min, walltime kill).
+    The shipped single-shot lane (halo cliques only) and any single-process
+    CPU-virtual run (no cross-process rendezvous) are immune, which is why the
+    parity gate cannot catch this class of bug.
+
+    This runs, in a FIXED rank-INDEPENDENT order with a cross-process barrier
+    between, ONE tiny standalone zero-array executable per clique KIND:
+
+    1. the halo ``ppermute`` cliques — every table the step's pad body issues
+       (the edge-strip rounds + the guard-sliver rounds + the diagonal-corner
+       rounds), which the shipped single-shot lane PROVES co-init cleanly on
+       their own (89 permutes / 4 comms all reaching ``Init COMPLETE``); then
+    2. the reduction ``psum`` clique.
+
+    Because each executable contains a single clique kind and is driven to
+    completion (``block_until_ready`` + ``sync_global_devices``) before the
+    next, every NCCL communicator is established in isolation and in the same
+    order on every rank.  XLA caches communicators process-globally by clique
+    key (the participating device set / source-target pairs), so the subsequent
+    mixed-clique step reuses the already-initialised comms and has no init left
+    to race.  Same perms + same axes here as the step ⇒ the SAME cliques.
+
+    No-op unless the run is genuinely multi-process (``jax.process_count() > 1``
+    — the route-B one-process-per-GPU lane): single-device / single-process
+    (CPU-virtual smoke, one GPU, or single-process multi-GPU) has no
+    cross-process comm-init rendezvous and is left byte-for-byte unaffected.
+    ``force=True`` runs it anyway (a test hook: exercises the warmup on a
+    single-process CPU-virtual mesh to prove it touches the expected cliques
+    without error — it cannot reproduce the cross-PROCESS NCCL race).
+
+    Returns ``True`` if the warmup executed, ``False`` if it was skipped.
+    """
+    if jax.process_count() <= 1 and not force:
+        return False
+
+    from jax.sharding import NamedSharding
+    from legoesm.parallel.cubesphere_exchange import (
+        _get_tiled_tables, _tiled_diag_perms, _tiled_guard_perms,
+    )
+
+    AXES = ("face", "tile_i", "tile_j")
+    if (int(kt) < 2 or tuple(mesh.devices.shape) != (6, kt, kt)
+            or tuple(getattr(mesh, "axis_names", ())) != AXES):
+        raise ValueError(
+            f"warmup_tiled_cube_comms: mesh must be the tiled cube mesh — "
+            f"axes {tuple(getattr(mesh, 'axis_names', ()))} == {AXES} and "
+            f"devices.shape {tuple(mesh.devices.shape)} == (6, kt, kt)="
+            f"(6, {kt}, {kt}) with kt>=2")
+
+    # Every ppermute the blocked step's halo pad body issues, in the SAME table
+    # order on every rank (the source-target pairs are host-side deterministic
+    # — the cubesphere_exchange table builders): the edge-strip rounds, the
+    # guard-sliver rounds, and the diagonal-corner rounds.  Same perms + same
+    # AXES ⇒ the SAME NCCL cliques the step will reuse.
+    tables = _get_tiled_tables(kt)
+    perms = list(tables.perms)
+    perms += list(_tiled_guard_perms(kt))
+    perms += list(_tiled_diag_perms(kt))
+
+    sh = NamedSharding(mesh, P(*AXES))
+    dummy = jax.device_put(jnp.zeros((6, kt, kt), dtype=jnp.float32), sh)
+
+    @partial(shard_map, mesh=mesh, in_specs=P(*AXES), out_specs=P(*AXES),
+             check_vma=False)
+    def _halo_warm(x):
+        v = x.reshape((1,))
+        acc = v
+        for perm in perms:
+            acc = acc + jax.lax.ppermute(v, AXES, perm)
+        return acc.reshape((1, 1, 1))
+
+    @partial(shard_map, mesh=mesh, in_specs=P(*AXES), out_specs=P(*AXES),
+             check_vma=False)
+    def _reduce_warm(x):
+        v = x.reshape((1,))
+        return (v + jax.lax.psum(v, axis_name=AXES)).reshape((1, 1, 1))
+
+    def _barrier(tag):
+        # A true cross-process rendezvous so no rank races ahead to the next
+        # clique kind while a peer is still initialising the current one
+        # (block_until_ready only proves the LOCAL device's stream drained).
+        if jax.process_count() > 1:
+            from jax.experimental import multihost_utils
+            multihost_utils.sync_global_devices(tag)
+
+    # (1) halo cliques ALONE (the single-shot lane proves they co-init), driven
+    #     to completion, then a global barrier; (2) the reduction clique ALONE.
+    jax.block_until_ready(_halo_warm(dummy))
+    _barrier("tiled_cube_warmup_halo")
+    jax.block_until_ready(_reduce_warm(dummy))
+    _barrier("tiled_cube_warmup_reduce")
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Tiled GLOBAL reduction primitive: area-weighted zero_mean_tendency via psum.
 # The FIRST global reduction in the cube tiled stages (all prior stages are

@@ -6498,6 +6498,15 @@ class ModelDriver:
         current_step = start_step
         status = "COMPLETED"
         seg_idx = -1
+        # #921: prime every NCCL clique this step uses (the halo
+        # collective-permutes + the target-mass / moisture-fixer psums) in a
+        # fixed, rank-independent order before the first real step, so
+        # multi-process (route-B) comm-init cannot deadlock.  No-op
+        # single-process (CPU-virtual / single-GPU) — those lanes are unchanged.
+        from legoesm.parallel.tiled_production_cdgrid import (
+            warmup_tiled_cube_comms,
+        )
+        warmup_tiled_cube_comms(mesh, kt)
         t0 = time.time()
         while current_step < n_steps_total:
             seg_idx += 1
@@ -6731,6 +6740,16 @@ class ModelDriver:
             })
         template = self.state
         blocked = enter(self.state)
+
+        # #921: prime every NCCL clique the blocked step uses (the halo
+        # collective-permutes + the in-stage mass-fixer psum) in a fixed,
+        # rank-independent order before the first real step, so multi-process
+        # (route-B one-process-per-GPU) comm-init cannot deadlock.  No-op
+        # single-process (CPU-virtual / single-GPU) — those lanes are unchanged.
+        from legoesm.parallel.tiled_production_cdgrid import (
+            warmup_tiled_cube_comms,
+        )
+        warmup_tiled_cube_comms(mesh, kt)
 
         t0 = _time.time()
         step_done = 0
