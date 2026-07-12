@@ -208,6 +208,17 @@ def precompute_si_matrices(
     SemiImplicitData
         Precomputed matrices for use in si_correction.
     """
+    # alpha is the theta-method implicitness weight. It MUST lie in (0, 1]:
+    # the forward ``si_correction`` RHS carries a ``((1-alpha)/alpha)`` factor
+    # (division by alpha), and alpha<=0 is not semi-implicit at all (fully
+    # explicit -> no gravity-wave stabilization). Reject it loudly rather than
+    # silently producing a no-op / NaN correction.
+    if not (0.0 < alpha <= 1.0):
+        raise ValueError(
+            f"semi-implicit alpha must be in (0, 1] (0.5=Crank-Nicolson, "
+            f"1.0=fully implicit); got {alpha!r}"
+        )
+
     _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
 
     a = grid.radius
@@ -255,6 +266,7 @@ def si_correction(
     si_data: SemiImplicitData,
     grid: GaussianGrid,
     dt: float,
+    predictor: str = "forward",
 ):
     """Apply semi-implicit correction to divergence, temperature, and lnps.
 
@@ -262,37 +274,72 @@ def si_correction(
     by solving the implicit system, then correct temperature and surface
     pressure to maintain consistency.
 
+    The exact implicit centering depends on how the *explicit predictor*
+    was built, so it MUST match the outer integrator (``predictor``):
+
+    - ``"forward"`` (Euler / SSP-RK3 stage): the predictor is a forward step
+      ``X* = X_old + dt*F(X_old)``, so ``state_old`` is the level the step
+      advances FROM.  The trapezoidal (theta-method) Helmholtz solve is
+
+          (I + M) * D_new = D_explicit - ((1-alpha)/alpha) * M * D_old
+          delta_D         = D_new - D_old
+
+      with ``M = alpha^2*dt^2*eigenvalue[n]*Gamma``.  alpha=0.5 is
+      Crank-Nicolson (neutral, |lambda|=1); alpha>0.5 damps.  (The earlier
+      ``+ M*D_old`` RHS with ``delta_D = D_new - D_explicit`` was a
+      forward-Euler-amplifying increment, unconditionally unstable for the
+      gravity wave -- issue #920.)
+
+    - ``"leapfrog"``: the predictor is the centered ``2*dt`` leapfrog
+      ``X* = X^{n-1} + 2*dt*F(X^n)`` and ``state_old = X^n`` is the CENTER
+      time level, NOT the level the step advances from.  The forward
+      trapezoidal derivation does NOT apply (its ``D_explicit = D_old +
+      dt*F(D_old)`` identity is false here); using it drops leapfrog from
+      2nd- to ~1st-order and makes it weakly amplifying (|lambda|>1).  The
+      correct centered leapfrog-SI keeps the increment form
+
+          (I + M) * D_new = D_explicit + M * D^n
+          delta_D         = D_new - D_explicit
+
+      which is 2nd-order and neutral to O((omega*dt)^4) (verified against the
+      textbook centered SI-leapfrog).  This is the pre-#920 behaviour, now
+      scoped to the leapfrog predictor only.
+
     Parameters
     ----------
     state_explicit : SpectralHydrostaticState
-        State after explicit RK stage.
+        State after the explicit predictor.
     state_old : SpectralHydrostaticState
-        State at the beginning of the RK stage (before tendency).
+        For ``"forward"``: the stage-start state (level advanced FROM).
+        For ``"leapfrog"``: the CENTER time level X^n.
     si_data : SemiImplicitData
         Precomputed matrices.
     grid : GaussianGrid
         Gaussian grid.
     dt : float
-        Time step.
+        Time step (the leapfrog caller passes the full 2*dt step).
+    predictor : str
+        ``"forward"`` (Euler/RK, default) or ``"leapfrog"``.  Selects the
+        implicit centering.  Raises on any other value.
 
     Returns
     -------
     state_corrected : SpectralHydrostaticState
         State with implicit correction applied.
     """
+    if predictor not in ("forward", "leapfrog"):
+        raise ValueError(
+            f"si_correction predictor must be 'forward' or 'leapfrog', "
+            f"got {predictor!r}"
+        )
+
     alpha = si_data.alpha
     T_ref = si_data.T_ref
 
-    # Explicit divergence (what RK produced) and old divergence (start of stage)
+    # Explicit divergence (predictor output) and the reference-level divergence
+    # (forward: stage-start X_old; leapfrog: center X^n).
     div_hat_explicit = state_explicit.div_hat.data  # (n_sh, nlev)
     div_hat_old = state_old.div_hat.data            # (n_sh, nlev)
-
-    # The Hoskins-Simmons SI correction solves:
-    # (I + alpha^2*dt^2*eigenvalue[n]*Gamma) * D_new = D_explicit + alpha^2*dt^2*eigenvalue[n]*Gamma * D_old
-    #
-    # This ensures only the TENDENCY is implicitly modified, not the full state:
-    # D_new = D_old + (I + M)^{-1} * dt * F(X_old)
-    # where M = alpha^2 * dt^2 * eigenvalue * Gamma.
 
     # Map each SH coefficient to its total wavenumber n
     ns = grid.ls  # (n_sh,) -- total wavenumber for each coefficient
@@ -301,20 +348,33 @@ def si_correction(
     # si_matrices: (n_max+1, nlev, nlev), ns: (n_sh,)
     matrices = si_data.si_matrices[ns]  # (n_sh, nlev, nlev)
 
-    # Build RHS: D_explicit + M * D_old
-    # M * D_old = (matrices - I) * D_old
+    # M * D_old = (matrices - I) * D_old  (M = alpha^2*dt^2*eigenvalue*Gamma)
     I_nlev = jnp.eye(matrices.shape[-1], dtype=matrices.dtype)
     M_times_D_old = jnp.einsum('...ij,...j->...i', matrices - I_nlev, div_hat_old)
-    rhs = div_hat_explicit + M_times_D_old
+
+    # Build RHS with the centering that matches the predictor (see docstring).
+    # ``predictor`` is a static Python str (feature gate) -> a plain ``if`` is
+    # correct here; this is not a traced/data-dependent branch.
+    if predictor == "forward":
+        rhs = div_hat_explicit - ((1.0 - alpha) / alpha) * M_times_D_old
+    else:  # "leapfrog": centered 2*dt increment off the explicit predictor
+        rhs = div_hat_explicit + M_times_D_old
 
     # Solve: matrices @ div_corrected = rhs (per coefficient)
     div_hat_corrected = solve(matrices, rhs[..., None]).squeeze(-1)
 
-    # Divergence correction
-    delta_div = div_hat_corrected - div_hat_explicit  # (n_sh, nlev)
+    # Divergence correction. Forward: full implicit increment off the OLD stage
+    # state (D_new - D_old); measuring off D_explicit would double-count the
+    # explicit gravity-wave increment already in D_explicit (issue #920).
+    # Leapfrog: increment off the explicit predictor (D_new - D_explicit), the
+    # centered-leapfrog form that stays 2nd-order and neutral.
+    if predictor == "forward":
+        delta_div = div_hat_corrected - div_hat_old        # (n_sh, nlev)
+    else:  # "leapfrog"
+        delta_div = div_hat_corrected - div_hat_explicit   # (n_sh, nlev)
 
     # Temperature correction:
-    # T_corrected = T_explicit - alpha*dt*T_ref*(D_corrected - D_explicit)
+    # T_corrected = T_explicit - alpha*dt*T_ref*delta_div
     T_hat_corrected = state_explicit.T_hat.data - alpha * dt * T_ref * delta_div
 
     # Surface pressure (lnps) correction:
@@ -468,7 +528,13 @@ def leapfrog_si_step(
     tend = tendency_fn(state_n)
     dt2 = 2.0 * dt
     state_explicit = _pytree_axpy(state_nm1, tend, dt2)
-    return si_correction(state_explicit, state_n, si_data, grid, dt2)
+    # Leapfrog centering: state_n is the CENTER level X^n, not the level the
+    # 2*dt step advances from -- use the leapfrog-scoped SI correction (the
+    # forward/#920 trapezoidal centering would drop leapfrog to ~1st order and
+    # make it weakly unstable).
+    return si_correction(
+        state_explicit, state_n, si_data, grid, dt2, predictor="leapfrog",
+    )
 
 
 def robert_asselin_filter(state_nm1, state_n, state_np1, gamma, alpha=0.53):
