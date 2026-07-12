@@ -47,6 +47,48 @@ def test_main_rejects_bad_timing_window(monkeypatch):
         mod.main()
 
 
+def test_main_rejects_bad_fused_schedule(monkeypatch):
+    # --warmup 0 so the timing-window guard cannot fire first — these
+    # must exercise the fused-schedule guards specifically.
+    for extra, msg in ((["--block-steps", "-1"], "block-steps"),
+                       (["--blocks", "0"], "blocks"),
+                       (["--probe-steps", "-2"], "probe-steps")):
+        monkeypatch.setattr(
+            sys, "argv", ["bench", "--steps", "2", "--warmup", "0"] + extra)
+        with pytest.raises(SystemExit, match=msg):
+            mod.main()
+
+
+def test_main_rejects_per_step_halo_single_rank(monkeypatch):
+    # Dispatch hardening: an explicit per_step request that cannot be
+    # honored (no partition layout single-rank) is a hard error, never a
+    # silent no-op.
+    # --warmup 0 so the timing-window guard cannot fire first — this
+    # must exercise the halo-refresh guard specifically.
+    monkeypatch.setattr(sys, "argv", [
+        "bench", "--steps", "2", "--warmup", "0",
+        "--halo-refresh", "per_step"])
+    with pytest.raises(SystemExit, match="per_step"):
+        mod.main()
+
+
+def test_m1_lane_flags_exist():
+    # Wiring tripwire (OL gate pattern): a rename would only break at
+    # runtime on a cluster.
+    src = _BENCH.read_text()
+    for flag in ("--barotropic-solver", "--halo-refresh", "--block-steps",
+                 "--blocks", "--probe-steps", "--parity-gate",
+                 "--check-conservation"):
+        assert flag in src, flag
+    # Unknown solver literals must be rejected by argparse choices.
+    import argparse  # noqa: F401  (documents the surface under test)
+    assert 'choices=["explicit_substep", "implicit_cn"]' in src
+    # implicit_cn parity at n_ranks>1 is impossible (the serial reference
+    # trips the solver's layout-less multi-rank refusal) — the bench must
+    # refuse the combination loudly, never crash mid-reference.
+    assert "layout-less multi-rank refusal" in src
+
+
 def test_main_rejects_long_parity_window(monkeypatch):
     monkeypatch.setattr(sys, "argv", [
         "bench", "--steps", "30", "--parity-gate"])
@@ -59,6 +101,7 @@ def test_main_single_rank_writes_gated_record(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", [
         "bench", "--subdivision", "2", "--nlev", "3", "--steps", "3",
         "--warmup", "1", "--parity-gate", "--check-conservation",
+        "--block-steps", "2", "--blocks", "1", "--probe-steps", "1",
         "--out", str(out)])
     assert mod.main() == 0
     rec = json.loads(out.read_text().splitlines()[-1])
@@ -74,6 +117,56 @@ def test_main_single_rank_writes_gated_record(tmp_path, monkeypatch):
         assert k in md, k
     assert md["decomposition"] == "none"  # single rank
     assert "_incomplete" not in md
+    # --- M1 lane fields (scaling-M3d increment-1) ---
+    assert rec["barotropic_solver"] == "explicit_substep"
+    assert rec["halo_refresh"] == "none"          # auto @ np=1
+    assert rec["stage_halo_correct"] is True      # no partition @ np=1
+    assert rec["stage_halo_note"] is None
+    # Fused-scan M1 contract: headline + separate dispatch-latency probe.
+    fused = rec["fused"]
+    assert fused["block_steps"] == 2 and fused["n_blocks"] == 1
+    assert fused["fused_step_ms"] > 0
+    assert fused["step_latency_ms"] > 0
+    assert fused["rank_imbalance"] == 1.0         # single process
+    # Wet-cell metrics: internally consistent (land presence at L2
+    # depends on mesh orientation vs land_lat_threshold — not asserted).
+    wet = rec["wet_cell"]
+    total = rec["n_cells"] * 3
+    assert 0 < wet["wet_cell_levels"] <= total
+    assert wet["wet_equals_total"] == (wet["wet_cell_levels"] == total)
+    assert wet["wet_cell_levels_per_device"] == wet["wet_cell_levels"]
+    assert wet["wet_cell_levels_per_device_min"] == wet["wet_cell_levels"]
+    # explicit_substep: no iterative solve, honestly-null residual.
+    assert rec["solver_iters"] is None
+    assert "explicit_substep" in rec["solver_iters_mode"]
+    assert rec["zero_forcing_probe_measured"] is False
+    assert rec["zero_forcing_probe_residual"] is None
+    for k in ("halo_refresh", "barotropic_solver", "block_steps"):
+        assert k in md["extra"], k
+
+
+def test_main_single_rank_implicit_cn_residual_probe(tmp_path, monkeypatch):
+    out = tmp_path / "rec_impl.jsonl"
+    monkeypatch.setattr(sys, "argv", [
+        "bench", "--subdivision", "2", "--nlev", "3", "--steps", "2",
+        "--warmup", "0", "--barotropic-solver", "implicit_cn",
+        "--block-steps", "0", "--probe-steps", "0",
+        "--out", str(out)])
+    assert mod.main() == 0
+    rec = json.loads(out.read_text().splitlines()[-1])
+    assert rec["barotropic_solver"] == "implicit_cn"
+    # --block-steps 0 disables the fused measurement (honest null).
+    assert rec["fused"] is None
+    # Zero-forcing Helmholtz residual probe: measured, finite, converged
+    # to the solver's ballpark on the tiny mesh (health evidence).
+    assert rec["zero_forcing_probe_measured"] is True
+    res = rec["zero_forcing_probe_residual"]
+    assert res is not None and np.isfinite(res)
+    assert res < 1e-3, f"implicit-CN probe residual suspiciously large: {res}"
+    # Single-rank stock CG does not expose an iteration count.
+    assert rec["solver_iters"] is None
+    assert "adaptive_stock_cg" in rec["solver_iters_mode"]
+    assert rec["metadata"]["solver_variant"] == "mpas_ocean_implicit_cn"
 
 
 def test_gather_owned_cells_coverage_check():

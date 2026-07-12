@@ -21,6 +21,19 @@ Anti-fake-scaling guards: multi-rank REQUIRES an armed VoronoiPartitionLayout
 the shared self-describing metadata (transport resolves to mpi4jax via
 n_ranks > process_count) + voronoi partition-quality metrics.
 
+M1 measurement contract (scaling-M3d increment-1): the headline number is a
+fused ``lax.scan`` block (``metadata.timed_scan_blocks``; per-step
+dispatch latency probed SEPARATELY), cross-rank MAX-reduced; rows also carry
+``wet_cell_metrics``, solver-iteration mode + a post-run zero-forcing
+Helmholtz residual probe (implicit_cn only, outside the timed loop), and
+``--halo-refresh`` (default auto => one PACKED full-state halo exchange per
+step at n_ranks > 1 via ``exchange_state_mpas_ocean``).  STAGE CORRECTNESS:
+the ocean step consumes more stencil hops per step than halo_depth between
+refreshes, so multi-rank rows are labeled ``stage_halo_correct=false`` — see
+docs/performance/scaling/mpas_ocean_distributed_stage_audit.md.  The parity
+gate bounds halo-staleness error over a smoke window; it does not certify
+stage correctness.
+
 Run (CPU-MPI):
   mpirun -np 4 python scripts/bench/bench_ocean_mpas_scaling.py \
       --mode strong --subdivision 4 --nlev 10 --steps 12
@@ -43,7 +56,12 @@ import numpy as np
 # Bench dir for the shared metadata module (sibling-script import pattern).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
+from metadata import (  # noqa: E402
+    annotate_incomplete,
+    scaling_metadata,
+    timed_scan_blocks,
+    wet_cell_metrics,
+)
 
 #: Parity tolerances (gathered MPI vs serial, f64/f32) — the re-association
 #: floor of the rank-local step + owned-masked reductions over a SMOKE
@@ -89,7 +107,8 @@ def weak_level_for(cells_per_rank: int, n_ranks: int) -> int:
     return best
 
 
-def build_global_problem(subdivision: int, nlev: int, seed: int = 0):
+def build_global_problem(subdivision: int, nlev: int, seed: int = 0,
+                         barotropic_solver: str = "explicit_substep"):
     """Global mesh + z-coordinate + config + perturbed global IC.
 
     Deterministic and mesh-cache-backed, so every rank derives the
@@ -108,6 +127,11 @@ def build_global_problem(subdivision: int, nlev: int, seed: int = 0):
     config = MPASOceanConfig(
         A_h=1e3, K_h=1e2, A_v=1e-3, K_v=1e-4,
         n_barotropic_substeps=10,
+        # implicit_cn at n_ranks > 1 dispatches to the DISTRIBUTED fixed-M
+        # PCG (halo-composed A_op + owned-masked dots) when the layout is
+        # armed — the OMIP production barotropic path.  The model ctor
+        # validates the literal (raises on unknown).
+        barotropic_solver=barotropic_solver,
         # Production-like conservation fixers: without them the explicit
         # subcycle's raw volume drift (~1e-4 over a smoke window) would
         # trip the gate — and their global reductions are exactly the
@@ -234,6 +258,31 @@ def main() -> int:
     p.add_argument("--partition-method",
                    choices=["auto", "geometric", "metis", "sfc"],
                    default="auto")
+    p.add_argument("--barotropic-solver",
+                   choices=["explicit_substep", "implicit_cn"],
+                   default="explicit_substep",
+                   help="implicit_cn at n_ranks>1 runs the DISTRIBUTED "
+                        "fixed-M PCG (halo-composed A_op, owned-masked "
+                        "dots) and enables the post-run residual probe.")
+    p.add_argument("--halo-refresh", choices=["auto", "per_step", "none"],
+                   default="auto",
+                   help="Packed full-state halo exchange after each step "
+                        "(exchange_state_mpas_ocean). auto => per_step at "
+                        "n_ranks>1, none single-rank.  'none' reproduces "
+                        "the legacy no-refresh rows (halos rot across the "
+                        "window; timing omits exchange cost).  Within-step "
+                        "staleness remains either way — see the stage "
+                        "audit doc.")
+    p.add_argument("--block-steps", type=int, default=8,
+                   help="Steps per fused lax.scan timing block (M1 "
+                        "contract; runs AFTER the gates). 0 disables the "
+                        "fused measurement.")
+    p.add_argument("--blocks", type=int, default=2,
+                   help="Number of fused timing blocks.")
+    p.add_argument("--probe-steps", type=int, default=3,
+                   help="Individually-synced dispatch-latency probe steps "
+                        "(reported separately, never mixed into the fused "
+                        "number).")
     p.add_argument("--parity-gate", action="store_true",
                    help="Gathered-vs-serial gate (smoke windows only; the "
                         "re-association floor grows with steps).")
@@ -249,6 +298,14 @@ def main() -> int:
         raise SystemExit(
             f"--warmup must satisfy 0 <= warmup < steps "
             f"(got warmup={args.warmup}, steps={args.steps})")
+    if args.block_steps < 0:
+        raise SystemExit(
+            f"--block-steps must be >= 0, got {args.block_steps}")
+    if args.blocks < 1:
+        raise SystemExit(f"--blocks must be >= 1, got {args.blocks}")
+    if args.probe_steps < 0:
+        raise SystemExit(
+            f"--probe-steps must be >= 0, got {args.probe_steps}")
 
     if args.device == "gpu":
         # Pin BEFORE the first JAX import (sibling-bench convention: local
@@ -303,10 +360,40 @@ def main() -> int:
             f"--parity-gate is a smoke gate; --steps {args.steps} > "
             f"{PARITY_MAX_STEPS} cap.")
 
+    if args.parity_gate and args.barotropic_solver == "implicit_cn" \
+            and n_ranks > 1:
+        # The parity SERIAL reference steps the GLOBAL mesh before the
+        # partition layout is armed, and implicit_cn refuses a layout-less
+        # multi-rank launch at the solver entry (the stock-CG mass
+        # projection would silently run rank-local).  Refuse the
+        # combination loudly instead of crashing mid-reference; PCG
+        # parity is covered by
+        # tests/ocean/distributed/test_barotropic_pcg_mpas_mpi.py and the
+        # conservation gate remains available.
+        raise SystemExit(
+            "--parity-gate with --barotropic-solver implicit_cn at "
+            "n_ranks > 1 is unsupported: the serial reference cannot be "
+            "computed under the solver's layout-less multi-rank refusal. "
+            "Drop --parity-gate (keep --check-conservation), or gate "
+            "parity on the explicit_substep solver.")
+
+    # Resolve --halo-refresh (dispatch-hardened: an explicit per_step
+    # request that cannot be honored is a hard error, never a silent
+    # no-op; auto degrades to none single-rank where there is no
+    # partition to exchange over).
+    if args.halo_refresh == "auto":
+        halo_refresh = "per_step" if n_ranks > 1 else "none"
+    elif args.halo_refresh == "per_step" and n_ranks == 1:
+        raise SystemExit(
+            "--halo-refresh per_step needs n_ranks > 1 (no partition "
+            "layout exists single-rank); use 'auto' or 'none'.")
+    else:
+        halo_refresh = args.halo_refresh
+
     from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
 
     mesh, z_coord, config, state_global = build_global_problem(
-        subdivision, args.nlev)
+        subdivision, args.nlev, barotropic_solver=args.barotropic_solver)
     is_rank0 = rank == 0
 
     # Serial reference for the parity gate: EVERY rank, BEFORE arming MPI
@@ -350,18 +437,64 @@ def main() -> int:
         state = state_global
 
     _layout = layout if n_ranks > 1 else None
+
+    # ONE production step for both the gated per-step loop and the fused
+    # scan blocks.  At n_ranks > 1 with halo_refresh, a PACKED full-state
+    # exchange (one batched union-neighbor message per neighbor per dtype
+    # group) follows each step so the NEXT step's input halos are fresh
+    # and the timed number pays representative exchange cost.  On owned
+    # cells the exchange is the identity, so the parity gate semantics
+    # are unchanged.  Within-step staleness remains (stage audit doc).
+    if halo_refresh == "per_step":
+        from legoesm.parallel.voronoi_mpi import exchange_state_mpas_ocean
+
+        # jit the COMPOSED step+exchange (one dispatch per step; the
+        # sendrecv wrapper always runs traced, exactly as the atmosphere
+        # step and the distributed PCG use it).  ``_step_impl`` avoids a
+        # nested-JIT boundary inside this wrapper; timed_scan_blocks
+        # re-traces the whole thing into the fused scan — same graph.
+        @jax.jit
+        def advance(st):
+            return exchange_state_mpas_ocean(
+                model._step_impl(st, args.dt), _layout)
+    else:
+        def advance(st):
+            return model.step(st, args.dt)
+
+    # Wet-cell weak metric (M1 audit item 9): MPAS land_mask is a
+    # (nCells,) column mask; a wet column is wet at all nlev levels.
+    # Multi-rank: per-rank OWNED wet columns (halo cells excluded —
+    # owned cells partition the globe, so the allgathered list sums to
+    # the global count exactly).
+    _mask_np = np.asarray(state.land_mask.data)
+    if n_ranks > 1:
+        _own_np = np.asarray(layout.owned_mask_cells, dtype=np.float64)
+        _wet_local = float((_mask_np * _own_np).sum())
+        _wet_per_rank = comm.allgather(_wet_local)
+    else:
+        _wet_per_rank = [float(_mask_np.sum())]
+    wet_rec = wet_cell_metrics(
+        wet_columns=float(sum(_wet_per_rank)),
+        nlev=args.nlev,
+        total_cells=int(mesh.nCells) * args.nlev,
+        n_devices=n_ranks,
+        wet_columns_per_device=_wet_per_rank,
+    )
+
     inv_before = None
     if args.check_conservation:
         inv_before = ocean_invariants(
             state, model.mesh, z_coord, config, layout=_layout, comm=comm)
 
     # Per-step timing with MPI barriers bracketing (route-A convention).
+    # Feeds the gates (exact step count); the M1 fused-scan headline is
+    # measured separately below.
     per_step_ms = []
     for _ in range(args.steps):
         if comm is not None:
             comm.Barrier()
         t0 = time.perf_counter()
-        state = model.step(state, args.dt)
+        state = advance(state)
         jax.block_until_ready(jax.tree.leaves(state))
         if comm is not None:
             comm.Barrier()
@@ -427,6 +560,83 @@ def main() -> int:
                       "reference.", flush=True)
             return 5
 
+    # --- M1 fused-scan measurement (AFTER the gates; timing-only) ----------
+    # The trustworthy production-like number: multi-step lax.scan blocks
+    # with sync only AROUND the block (the per-step host-synced loop above
+    # measures dispatch+sync latency — kept for the gates and legacy
+    # comparability, never as the fused headline).  Route-A: mpi4jax
+    # collectives inside the scan keep ranks in lockstep (the distributed
+    # PCG already runs sendrecv inside fori_loop); block times are
+    # allgathered so the parallel time of block b is the SLOWEST rank in
+    # that block (the same slowest-rank convention as the per-step MAX).
+    fused = None
+    if args.block_steps > 0:
+        state, _t = timed_scan_blocks(
+            advance, state,
+            block_steps=args.block_steps, n_blocks=args.blocks,
+            probe_steps=args.probe_steps,
+            sync_label="ocean_mpas_mpi_bench")
+        if comm is not None and n_ranks > 1:
+            _all = np.asarray(comm.allgather(
+                np.asarray(_t["block_ms"], dtype=np.float64)))
+            _par = np.max(_all, axis=0)
+            _med = np.median(_all, axis=0)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                _imb = np.where(_med > 0.0, _par / _med, np.nan)
+            _t["parallel_block_ms"] = [round(float(b), 2) for b in _par]
+            _t["rank_imbalance_per_block"] = [round(float(r), 4)
+                                              for r in _imb]
+            _t["rank_imbalance"] = (
+                round(float(np.nanmedian(_imb)), 4)
+                if np.isfinite(_imb).any() else float("nan"))
+            _t["fused_step_ms"] = round(
+                float(np.median(_par)) / args.block_steps, 4)
+        fused = _t
+
+    # --- Solver iterations + zero-forcing residual probe (M1) --------------
+    # implicit_cn: distributed (layout armed) runs the fixed-M PCG whose
+    # in-loop residual is not exposed; single-rank runs the stock adaptive
+    # CG (count not exposed; tol/maxiter recorded).  The probe below is ONE
+    # standalone free-surface solve at the FINAL state with zero slow
+    # forcing, OUTSIDE any timed loop, via return_residual=True — the
+    # owned-masked global relative Helmholtz residual of the returned eta.
+    # Solver-HEALTH evidence, not the benchmarked solve's residual
+    # (bench_ocean_latlon_spmd_scaling convention).  Collective at
+    # n_ranks > 1: every rank calls it.
+    zero_forcing_probe_residual = None
+    zero_forcing_probe_measured = False
+    if args.barotropic_solver == "implicit_cn":
+        if n_ranks > 1:
+            solver_iters = int(config.barotropic_implicit_pcg_fixed_iters)
+            solver_iters_mode = (
+                f"distributed_fixed_pcg[{config.barotropic_implicit_pcg_variant}]")
+        else:
+            solver_iters = None
+            solver_iters_mode = (
+                "adaptive_stock_cg(maxiter="
+                f"{int(config.barotropic_implicit_pcg_maxiter)},"
+                f"tol={config.barotropic_implicit_pcg_tol:g}) — iteration "
+                "count not exposed by jax.scipy CG")
+        residual_reason = (
+            "in-loop residual not captured (fixed-iteration PCG exposes "
+            "none in the hot path); zero_forcing_probe_residual is a "
+            "standalone zero-slow-forcing solve at the final state — "
+            "solver-health evidence, not the benchmarked solve's residual")
+        from legoesm.ocean.dynamics.barotropic_implicit_mpas import (
+            barotropic_implicit_mpas,
+        )
+        _probe_out = barotropic_implicit_mpas(
+            state, model.mesh, z_coord, config, args.dt,
+            return_residual=True)
+        zero_forcing_probe_residual = float(
+            jax.block_until_ready(_probe_out[3]))
+        zero_forcing_probe_measured = True
+    else:
+        solver_iters = None
+        solver_iters_mode = "explicit_substep (no iterative solve)"
+        residual_reason = ("explicit_substep barotropic has no iterative "
+                           "solve — no solver residual exists to measure")
+
     steady = per_step_ms[args.warmup:]
     med = float(np.median(steady))
     rec = dict(
@@ -451,6 +661,25 @@ def main() -> int:
         # contain the real JIT compile.
         compile_prewarmed_by_parity_ref=bool(
             args.parity_gate and n_ranks == 1),
+        # --- M1 lane fields (scaling-M3d increment-1) ---
+        barotropic_solver=args.barotropic_solver,
+        halo_refresh=halo_refresh,
+        # Multi-rank MPAS-ocean stepping is NOT stage-correct: within-step
+        # stencil chains exceed halo_depth between refreshes.  Single-rank
+        # rows have no partition, hence trivially true.  Never report a
+        # false row as a stage-correct scaling claim.
+        stage_halo_correct=bool(n_ranks == 1),
+        stage_halo_note=(
+            None if n_ranks == 1 else
+            "per-step packed refresh only; within-step staleness — see "
+            "docs/performance/scaling/mpas_ocean_distributed_stage_audit.md"),
+        fused=fused,
+        wet_cell=wet_rec,
+        solver_iters=solver_iters,
+        solver_iters_mode=solver_iters_mode,
+        zero_forcing_probe_residual=zero_forcing_probe_residual,
+        zero_forcing_probe_measured=zero_forcing_probe_measured,
+        residual_reason=residual_reason,
     )
     rec["metadata"] = annotate_incomplete(scaling_metadata(
         grid="voronoi",
@@ -465,7 +694,7 @@ def main() -> int:
         # mpi4jax halo fabric (codex).
         transport=("mpi4jax" if n_ranks > 1 else None),
         n_gpus=(n_ranks if args.device == "gpu" else 0),
-        solver_variant="mpas_ocean_default",
+        solver_variant=f"mpas_ocean_{args.barotropic_solver}",
         cells_per_rank=int(mesh.nCells) * args.nlev // n_ranks,
         scaling_kind=args.mode,
         partition_metrics=(dict(part_metrics) if part_metrics else None),
@@ -475,6 +704,11 @@ def main() -> int:
             "warmup": args.warmup,
             "parity_gate": bool(args.parity_gate),
             "check_conservation": bool(args.check_conservation),
+            "halo_refresh": halo_refresh,
+            "barotropic_solver": args.barotropic_solver,
+            "block_steps": args.block_steps,
+            "blocks": args.blocks,
+            "probe_steps": args.probe_steps,
         },
     ))
     if is_rank0:
@@ -484,9 +718,15 @@ def main() -> int:
         with open(args.out, "a") as f:
             f.write(json.dumps(rec) + "\n")
         print(json.dumps(rec))
+        _fused_txt = (
+            f" fused_step={fused['fused_step_ms']}ms"
+            f" (latency={fused['step_latency_ms']}ms)"
+            if fused is not None else "")
         print(f"[mpas-ocean np={n_ranks} L{subdivision} "
-              f"nCells={mesh.nCells} nlev={args.nlev}] "
-              f"compile={rec['compile_ms']}ms steady_median={med:.2f}ms/step")
+              f"nCells={mesh.nCells} nlev={args.nlev} "
+              f"solver={args.barotropic_solver} halo={halo_refresh}] "
+              f"compile={rec['compile_ms']}ms "
+              f"steady_median={med:.2f}ms/step{_fused_txt}")
         if rec["metadata"]["virtual_cpu_devices"]:
             print("[virtual-cpu] forced host-platform CPU devices: this row "
                   "is a communication-overhead / correctness proxy, NOT "
