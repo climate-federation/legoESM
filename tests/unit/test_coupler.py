@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+import numpy.testing as npt
 import pytest
 
 from legoesm import constants
@@ -1020,6 +1022,167 @@ def test_full_coupler_step_multilayer_richards():
     # frozen-moisture trick lives only in the offline calibrator, for tractability).
     assert float(jnp.max(jnp.abs(sfc_state.land.theta_soil - theta_init))) > 0.0
     assert float(sfc_state.accumulator.total_dt) == pytest.approx(3 * DT, abs=1e-6)
+
+
+# ==============================================================================
+# Permafrost phi wiring: make_coupler threads the per-cell annual frozen fraction
+# through _step_land_tile -> step_multilayer_land -> step_carbon so a coupled run
+# maintains the seeded permafrost SOC.  (The carbon-step physics itself -- f_perma
+# sign/bounds/conservation -- is covered by tests/land/unit/test_carbon_cycle.py::
+# TestPerennialFrostProtection; these tests cover the COUPLER WIRING.)
+# ==============================================================================
+
+def _make_permafrost_coupler_run(nsteps, *, T_lowest=293.0):
+    """Build a differland multilayer-land coupler over a seeded permafrost-scale
+    SOC state and return ``run(phi) -> per-cell total SOM after nsteps``.
+
+    Deep permafrost-scale SOC (~45 kgC/m2) is seeded FAR above the unprotected
+    equilibrium so decomposition (not input) dominates -> SOC declines under a
+    THAW-season forcing (a cold column's annual turnover is dominated by its brief
+    unfrozen window, exactly what f_perma -- keyed on the ANNUAL frozen fraction,
+    not the instantaneous T -- suppresses)."""
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.soil_grid import SoilGridConfig
+    from legoesm.land.carbon.config import CarbonConfig, som_total
+
+    ncol = 6 * 4 * 4
+    land_cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=6, total_depth=2.0),
+        carbon=CarbonConfig(scheme="differland"))
+    lat = jnp.full(SHAPE, 1.2)  # ~69degN [rad]: a high-latitude permafrost column
+
+    base = init_surface_state(SHAPE, land_config=land_cfg)
+    # Deep Yedoma-scale SOC seeded FAR above equilibrium so decomposition (~ SOM)
+    # dominates the (bounded) litter INPUT -> the pools decline; the protection gap
+    # (som_prot - som_none) cancels the identical input across the two runs anyway.
+    hi = base.carbon._replace(
+        C_som_active=jnp.full((ncol,), 50000.0),
+        C_som_slow=jnp.full((ncol,), 15000.0),
+        C_som_passive=jnp.full((ncol,), 8000.0))
+    sfc0 = base._replace(carbon=hi)
+    som0 = np.asarray(som_total(sfc0.carbon))
+
+    forcing = _make_forcing(T_lowest=T_lowest, precip=5e-5)  # moist thaw season
+    tile_cfg = TileConfig(f_land=jnp.ones(SHAPE), f_lake=jnp.zeros(SHAPE))
+    sst = jnp.full(SHAPE, T_lowest); zu = jnp.zeros(SHAPE)
+    # DAILY step (NOT the module DT=600s): a coupled step needs O(tens of days) to
+    # turn over measurable SOM (tor_som_active ~ 9e-4/day, ~3-yr MRT).  The soil
+    # thermal (backward-Euler) and Richards (Picard) solves are implicit, so a
+    # large dt is numerically stable; the SOM decay uses exact exponential-decay
+    # finite-dt handling (_effective_rate), so it is exact at any dt.
+    dt_run = 86400.0
+
+    def run(phi, *, omit=False):
+        # ``omit`` builds the coupler WITHOUT the phi kwarg (proves the default is
+        # byte-identical to explicitly passing None).
+        if omit:
+            step_fn = make_coupler(CouplerConfig(), land_cfg, SeaIceConfig(),
+                                   LakeConfig(), lat=lat)
+        else:
+            step_fn = make_coupler(CouplerConfig(), land_cfg, SeaIceConfig(),
+                                   LakeConfig(), lat=lat,
+                                   land_soil_frozen_fraction=phi)
+        jstep = jax.jit(
+            lambda s: step_fn(s, forcing, tile_cfg, sst, zu, zu, dt_run)[0])
+        s = sfc0
+        for _ in range(nsteps):
+            s = jstep(s)
+        return np.asarray(som_total(s.carbon))
+
+    return run, som0
+
+
+def test_coupler_permafrost_phi_preserves_seeded_soc():
+    """ACCEPTANCE: a coupled surface integration over a seeded permafrost SOC
+    state PRESERVES the high-latitude SOC when the per-cell annual frozen fraction
+    phi is threaded through make_coupler -> _step_land_tile -> step_multilayer_land
+    -> step_carbon, WHEREAS the same run with soil_frozen_fraction=None decomposes
+    it.  Sign (walked at perennial_frost_protection): higher phi -> smaller f_perma
+    -> less SOM decomposition -> SOC RETAINED (carbon retained inside the existing
+    loss term, not created)."""
+    run, som0 = _make_permafrost_coupler_run(nsteps=60)
+
+    som_none = run(None)                # unprotected -- the pre-fix coupled run
+    som_prot = run(jnp.ones(SHAPE))     # perennial frost (phi=1) -> full protection
+
+    drift_none = (som0 - som_none) / som0     # fractional SOC LOSS over the run
+    drift_prot = (som0 - som_prot) / som0
+
+    # The unprotected run actually decomposed SOC (else the test is vacuous).
+    assert np.all(som_none < som0)
+    assert float(np.mean(drift_none)) > 1e-3
+    # Protection RETAINS carbon: protected SOC strictly higher in EVERY cell (also
+    # proves phi was not silently dropped -- byte-equal would mean broken wiring).
+    # The protection GAP is the un-respired flux, robust to the (identical across
+    # both runs) litter input, which cancels in the difference.
+    assert np.all(som_prot > som_none)
+    assert float(np.mean((som_prot - som_none) / som0)) > 1e-3
+    # Protected drift is strictly LESS than unprotected, in EVERY cell ...
+    assert np.all(drift_prot < drift_none)
+    assert float(np.max(drift_prot)) < float(np.min(drift_none))
+    # ... and substantially so (f_perma(phi=1) = permafrost_protection_min = 0.3
+    # -> ~70% less loss): the protected drift is SMALL relative to unprotected.
+    assert float(np.mean(drift_prot)) < 0.6 * float(np.mean(drift_none))
+    # Absolute smallness bound (the protected permafrost column holds ~all its SOC).
+    assert float(np.max(drift_prot)) < 0.05
+
+
+def test_coupler_phi_none_byte_identical_and_phi_zero_unaffected():
+    """The None path is EXACTLY byte-identical to omitting the kwarg (a static
+    feature gate, not a data-dependent branch), and a phi=0 (temperate/tropical)
+    field leaves the carbon ~unchanged relative to None (f_perma(0) ~ 0.99997 ~ 1),
+    so warm cells are untouched by the permafrost protection."""
+    run, _som0 = _make_permafrost_coupler_run(nsteps=20)
+
+    som_none = run(None)
+    som_omit = run(None, omit=True)     # make_coupler WITHOUT the phi kwarg
+    som_phi0 = run(jnp.zeros(SHAPE))    # explicit phi = 0 everywhere
+
+    # None (feature off) is byte-identical to not wiring the feature at all.
+    npt.assert_array_equal(som_none, som_omit)
+    # phi=0 tracks None to a tiny tolerance: f_perma(0)=0.99997 (not exactly 1), so
+    # NOT literally byte-identical, but temperate/tropical carbon is unaffected.
+    npt.assert_allclose(som_phi0, som_none, rtol=1e-3)
+
+
+def test_coupler_phi_validation_rejects_malformed_field():
+    """make_coupler fail-fasts (setup-time, static) on a malformed permafrost phi:
+    a slab land config, out-of-[0,1], non-finite, or a grid-size mismatch -- so a
+    bad finidat field can never silently alter (or scalar-broadcast into) the
+    protection.  A valid field builds normally."""
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.soil_grid import SoilGridConfig
+    from legoesm.land.carbon.config import CarbonConfig
+
+    land_cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=6, total_depth=2.0),
+        carbon=CarbonConfig(scheme="differland"))
+    lat = jnp.full(SHAPE, 1.0)
+    mk = lambda phi: make_coupler(
+        CouplerConfig(), land_cfg, SeaIceConfig(), LakeConfig(),
+        lat=lat, land_soil_frozen_fraction=phi)
+
+    # slab (non-multilayer) land config -> phi is unsupported (no SOM column).
+    with pytest.raises(ValueError, match="multilayer"):
+        make_coupler(CouplerConfig(), LandConfig(), SeaIceConfig(), LakeConfig(),
+                     lat=lat, land_soil_frozen_fraction=jnp.ones(SHAPE))
+    # phi without lat (the carbon grid) -> cannot validate the grid match.
+    with pytest.raises(ValueError, match="requires lat"):
+        make_coupler(CouplerConfig(), land_cfg, SeaIceConfig(), LakeConfig(),
+                     lat=None, land_soil_frozen_fraction=jnp.ones(SHAPE))
+    # out of [0, 1] (both directions).
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        mk(jnp.full(SHAPE, 1.5))
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        mk(-0.1 * jnp.ones(SHAPE))
+    # non-finite.
+    with pytest.raises(ValueError, match="finite"):
+        mk(jnp.full(SHAPE, jnp.nan))
+    # grid-size mismatch vs lat/forcing.
+    with pytest.raises(ValueError, match="size"):
+        mk(jnp.ones((5,)))
+    # a valid field builds a callable step function.
+    assert callable(mk(jnp.ones(SHAPE)))
 
 
 def test_coupler_multiple_steps():

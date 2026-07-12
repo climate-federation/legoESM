@@ -1022,3 +1022,113 @@ def map_to_grid(cell_archetype_id, cell_archetype_weight, archetype_equilibria):
         gathered = vals[safe]                                   # (ncell, n_pft)
         fields[f] = jnp.asarray((gathered * mask).sum(axis=1))  # (ncell,)
     return archetype_equilibria.__class__(**fields)
+
+
+def map_to_grid_frozen_fraction(table, cell_archetype_id, cell_archetype_weight,
+                                *, config=None):
+    """Cover-weighted per-cell annual frozen fraction ``phi`` in ``[0, 1]``.
+
+    Companion to :func:`map_to_grid`, but for the perennial-frost index ``phi``
+    that seeds the permafrost/anaerobic SOM protection (``f_perma``, see
+    :func:`legoesm.land.carbon.carbon_cycle.perennial_frost_protection`).  A
+    coupled RUN reads this per-cell field from the finidat and threads it into
+    the coupler's ``step_multilayer_land`` call so the running model applies the
+    SAME protection that scaled the seeded equilibrium, preserving the deep
+    permafrost SOC the IC seeds (instead of decomposing it back toward the
+    unprotected equilibrium).
+
+    Per-archetype ``phi`` is recomputed here from the archetype table climate
+    (``mat_k`` / ``t_seasonal_amp_k``) via the SAME climate-only
+    :func:`~legoesm.land.carbon.carbon_cycle.annual_frozen_fraction`.  ``phi``
+    reads only ``config.som_freeze_width_K`` (SOM-parameter- and PFT-independent),
+    so passing the SAME ``CarbonConfig`` the archetypes equilibrated at makes the
+    recomputed ``phi`` BYTE-IDENTICAL to the value :func:`iter_archetype_batches`
+    threaded into each archetype's coupled spin-up.  ``config=None`` (default)
+    uses the production-default ``CarbonConfig``, byte-identical for a default
+    build; a ``--tuned-params`` build that overrides ``som_freeze_width_K`` MUST
+    pass the SAME overridden config here (the caller's equilibration config),
+    else the mapped ``phi`` would drift from the seeded one.
+
+    Reduction (INTENSIVE vs :func:`map_to_grid`'s extensive pools).  Carbon
+    pools are stocks: a half-bare cell holds half the carbon, so ``map_to_grid``
+    sums ``w * eq`` UNnormalised.  ``phi`` is an intensive climate FRACTION -- a
+    half-bare permafrost cell has the SAME frozen climate, not half of it -- so
+    it is a cover-weighted MEAN over the present PFTs (normalised by the
+    vegetated weight), NOT a sum, which would spuriously dilute ``phi`` toward 0
+    in partially-vegetated cells.  Cells with no vegetated cover (all PFTs below
+    ``w_min``) get ``phi = 0`` (temperate default; they carry no seeded SOC to
+    protect, and ``f_perma(0) ~ 1`` leaves any carbon there unchanged).
+
+    Heterogeneous-cell fidelity (a KNOWN Stage-A approximation, NOT exact).  A
+    single per-cell ``phi`` fed to the nonlinear ``f_perma`` cannot in general
+    reproduce a mix of archetypes seeded at DIFFERENT ``phi`` (``f_perma`` of a
+    mean != cover-weighted mean of ``f_perma``), and this is NOT rigorously
+    bounded: :func:`build_archetypes` clusters PER PFT and stores cluster-wide
+    cover-weighted-mean climates, so two PFTs sharing a cell can map to
+    archetypes at materially different ``mat_k``/``amp`` (their cover-weighted
+    mean climate is pulled toward each cluster's dominant-cover cells, see
+    ``test_archetype_climate_mean_is_cover_weighted``).  The cover-weighted
+    ``phi`` mean is a pragmatic single-value choice; it is not claimed to
+    preserve a strongly heterogeneous cell's mixed-pool protection exactly.  It
+    still fixes the FIRST-ORDER drift this wiring targets (``phi`` absent ->
+    f_perma == 1 -> the WHOLE seeded high-latitude SOC decomposes, everywhere).
+    Exact preservation of a heterogeneous mix would need per-PFT/subcolumn
+    ``phi`` + carbon (not the single mixed pool the coupled run carries) or an
+    ``f_perma``-inverse of the SOM-weighted mean protection; computing ``phi``
+    from each cell's own climatology (from ``monthly_t_k``) is the clean
+    single-value alternative that avoids the mean-of-centroids skew.
+
+    Parameters
+    ----------
+    table : ArchetypeTable
+        The archetype table (``mat_k`` / ``t_seasonal_amp_k`` climate) from
+        :func:`build_archetypes`; its rows align with the archetype index space
+        of ``cell_archetype_id``.
+    cell_archetype_id : array (ncell, n_pft) int
+        Archetype index per (cell, PFT); ``-1`` where absent (see
+        :func:`build_archetypes`).
+    cell_archetype_weight : array (ncell, n_pft) float
+        Cover weight per (cell, PFT); 0 where ``cell_archetype_id`` is ``-1``.
+    config : CarbonConfig, optional
+        The ``CarbonConfig`` the archetypes equilibrated at (only
+        ``som_freeze_width_K`` is read).  ``None`` -> the production default.
+
+    Returns
+    -------
+    jnp.ndarray (ncell,)
+        Cover-weighted per-cell ``phi`` in ``[0, 1]``.
+    """
+    # Deferred (function-scope) import: keep Stage-A (`build_archetypes`)
+    # callers numpy-only, mirroring `map_to_grid`.
+    import jax.numpy as jnp
+
+    from legoesm.land.carbon.carbon_cycle import annual_frozen_fraction
+    from legoesm.land.carbon.config import CarbonConfig
+
+    cid = np.asarray(cell_archetype_id)
+    ncell = cid.shape[0]
+    mat = np.asarray(table.mat_k, float)
+    # Degenerate all-bare / empty table: no archetype to gather -> phi = 0
+    # everywhere (guard before the gather, which would index an empty array).
+    if mat.size == 0:
+        return jnp.zeros((ncell,))
+    amp = np.asarray(table.t_seasonal_amp_k, float)
+    cfg = config if config is not None else CarbonConfig(scheme="differland")
+    # Climate-only phi at the equilibration width -- byte-identical to the
+    # per-archetype phi the spin-up applied (annual_frozen_fraction reads only
+    # som_freeze_width_K).
+    phi_arch = np.asarray(
+        annual_frozen_fraction(jnp.asarray(mat), jnp.asarray(amp), cfg),
+        float)                                            # (n_arch,)
+
+    cw = np.asarray(cell_archetype_weight, float)
+    safe = np.where(cid >= 0, cid, 0)                     # gather index (masked below)
+    w = (cid >= 0).astype(float) * cw                     # (ncell, n_pft)
+    gathered = phi_arch[safe]                             # (ncell, n_pft)
+    wsum = w.sum(axis=1)                                  # (ncell,)
+    # Intensive: normalised cover-weighted MEAN (phi is a fraction, not a stock).
+    # 1e-30 is a divide-by-zero safety floor only (the where already zeros the
+    # unvegetated cells); no vegetated cover -> phi = 0.
+    phi_cell = np.where(
+        wsum > 0.0, (gathered * w).sum(axis=1) / np.maximum(wsum, 1e-30), 0.0)
+    return jnp.asarray(phi_cell)

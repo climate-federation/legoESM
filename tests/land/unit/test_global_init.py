@@ -5,6 +5,7 @@ from legoesm.land.carbon.climate_features import (
 from legoesm.land.carbon.config import CarbonState
 from legoesm.land.carbon.global_init import (
     ArchetypeTable, build_archetypes, equilibrate_archetypes, map_to_grid,
+    map_to_grid_frozen_fraction,
 )
 
 def _feats(mat, mapyr, seas, arid, sw):
@@ -147,6 +148,109 @@ def test_absent_pft_contributes_zero_and_pools_nonneg():
 
 
 # ---------------------------------------------------------------------------
+# map_to_grid_frozen_fraction: cover-weighted per-cell permafrost index phi that
+# the coupled run threads into step_multilayer_land to preserve seeded permafrost
+# SOC.  phi is INTENSIVE (cover-weighted MEAN, unlike the extensive pool SUM) and
+# BYTE-IDENTICAL to the per-archetype phi the spin-up applied (IC-consistency).
+# ---------------------------------------------------------------------------
+def _phi_table(mat_k, t_seasonal_amp_k):
+    n = len(mat_k)
+    return ArchetypeTable(
+        pft_id=np.arange(n) % 16 + 1,   # any non-bare ids (phi ignores pft)
+        mat_k=np.asarray(mat_k, float),
+        map_yr=np.full(n, 1000.0),
+        t_seasonal_amp_k=np.asarray(t_seasonal_amp_k, float),
+        aridity=np.full(n, 1.0),
+        sw_mean_w=np.full(n, 200.0),
+        soil_class=np.array(["loam"] * n, dtype=object),
+    )
+
+
+def test_frozen_fraction_byte_identical_to_annual_frozen_fraction():
+    """Per-cell phi (single-PFT cells) is BYTE-IDENTICAL to the climate-only
+    annual_frozen_fraction at the production-default width -- the SAME phi the
+    archetype spin-up applied, so a run protects with the phi that seeded the SOC
+    (exact IC-consistency, option (a))."""
+    from legoesm.land.carbon.carbon_cycle import annual_frozen_fraction
+    from legoesm.land.carbon.config import CarbonConfig
+    mat = np.array([250.0, 285.0, 268.0]); amp = np.array([15.0, 8.0, 20.0])
+    table = _phi_table(mat, amp)
+    cid = np.array([[0, -1], [1, -1], [2, -1]])          # single-PFT cells
+    cw = np.array([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]])
+    phi_cell = np.asarray(map_to_grid_frozen_fraction(table, cid, cw))
+    phi_ref = np.asarray(annual_frozen_fraction(
+        jnp.asarray(mat), jnp.asarray(amp), CarbonConfig(scheme="differland")))
+    npt.assert_array_equal(phi_cell, phi_ref)            # byte-identical
+    assert np.all((phi_cell >= 0.0) & (phi_cell <= 1.0))
+    assert phi_cell[0] > 0.9 and phi_cell[1] < 0.1        # cold~1, warm~0
+
+
+def test_frozen_fraction_is_intensive_mean_not_extensive_sum():
+    """phi is a cover-weighted MEAN (an intensive climate fraction), NOT the
+    extensive pool SUM map_to_grid uses: a half-bare permafrost cell keeps phi~1,
+    not phi/2 (a partially-vegetated cold cell has the SAME frozen climate)."""
+    table = _phi_table([250.0], [15.0])                  # one cold archetype, phi~1
+    phi_half = np.asarray(map_to_grid_frozen_fraction(   # 50% cold PFT + 50% bare
+        table, np.array([[0, -1]]), np.array([[0.5, 0.0]])))
+    phi_full = np.asarray(map_to_grid_frozen_fraction(   # 100% cold PFT
+        table, np.array([[0, -1]]), np.array([[1.0, 0.0]])))
+    npt.assert_allclose(phi_half, phi_full, rtol=1e-9)   # NOT halved
+    assert phi_half[0] > 0.9
+
+
+def test_frozen_fraction_mixed_cell_is_normalised_weighted_mean():
+    """A cell mixing a cold (phi~1) and a warm (phi~0) PFT gets the normalised
+    cover-weighted mean of the two archetype phi values."""
+    table = _phi_table([248.0, 290.0], [12.0, 6.0])      # cold, warm
+    phi_arch = np.asarray(map_to_grid_frozen_fraction(
+        table, np.array([[0, -1], [1, -1]]),
+        np.array([[1.0, 0.0], [1.0, 0.0]])))
+    phi_cell = np.asarray(map_to_grid_frozen_fraction(
+        table, np.array([[0, 1]]), np.array([[0.25, 0.75]])))
+    expect = 0.25 * phi_arch[0] + 0.75 * phi_arch[1]     # weights sum to 1 here
+    npt.assert_allclose(phi_cell, [expect], rtol=1e-9)
+    assert phi_arch[1] < phi_cell[0] < phi_arch[0]       # strictly between
+
+
+def test_frozen_fraction_no_cover_cell_is_zero():
+    """A cell with no vegetated cover -> phi = 0 (no seeded SOC to protect there;
+    f_perma(0)~1 leaves any carbon unchanged)."""
+    table = _phi_table([250.0, 260.0], [15.0, 15.0])
+    phi_cell = np.asarray(map_to_grid_frozen_fraction(
+        table, np.array([[-1, -1]]), np.array([[0.0, 0.0]])))
+    npt.assert_array_equal(phi_cell, [0.0])
+
+
+def test_frozen_fraction_empty_table_is_zeros():
+    """Degenerate all-bare world (EMPTY archetype table) -> phi = 0 everywhere,
+    guarded before the gather (which would index an empty phi_arch)."""
+    empty = ArchetypeTable(
+        pft_id=np.zeros(0, int), mat_k=np.zeros(0), map_yr=np.zeros(0),
+        t_seasonal_amp_k=np.zeros(0), aridity=np.zeros(0), sw_mean_w=np.zeros(0),
+        soil_class=np.zeros(0, dtype=object))
+    phi = np.asarray(map_to_grid_frozen_fraction(
+        empty, np.full((3, 2), -1), np.zeros((3, 2))))
+    npt.assert_array_equal(phi, np.zeros(3))
+
+
+def test_frozen_fraction_honors_config_width():
+    """phi uses the PASSED config's som_freeze_width_K -- so a --tuned-params build
+    that overrides the freeze width stays byte-identical to its own spin-up phi
+    (codex finding: mapping must not silently pin the default width)."""
+    from legoesm.land.carbon.carbon_cycle import annual_frozen_fraction
+    from legoesm.land.carbon.config import CarbonConfig
+    table = _phi_table([270.0], [10.0])            # below-freezing mean
+    cid = np.array([[0, -1]]); cw = np.array([[1.0, 0.0]])
+    wide = CarbonConfig(scheme="differland", som_freeze_width_K=6.0)
+    phi_default = np.asarray(map_to_grid_frozen_fraction(table, cid, cw))
+    phi_wide = np.asarray(map_to_grid_frozen_fraction(table, cid, cw, config=wide))
+    ref_wide = np.asarray(annual_frozen_fraction(
+        jnp.asarray([270.0]), jnp.asarray([10.0]), wide))
+    npt.assert_array_equal(phi_wide, ref_wide)     # honored the passed width
+    assert abs(float(phi_wide[0]) - float(phi_default[0])) > 1e-3  # width matters
+
+
+# ---------------------------------------------------------------------------
 # Per-PFT phenology grouping (Phase B): evergreen vs deciduous leaf habit is a
 # third archetype-group key so tropical/needleleaf-evergreen PFTs equilibrate
 # with continuous phenology.
@@ -250,6 +354,12 @@ def test_driver_dry_run_synthetic_writes_npz(tmp_path):
         assert d["dominant_pft"].shape == (6,)
         assert d["pft_present"].shape == (6, 17)
         assert d["pft_weights"].shape == (6, 17)
+        # Per-cell perennial-frost index phi is persisted for the coupled run to
+        # thread into step_multilayer_land (preserving seeded permafrost SOC).
+        assert d["soil_frozen_fraction"].shape == (6,)
+        assert np.all(np.isfinite(d["soil_frozen_fraction"]))
+        assert np.all((d["soil_frozen_fraction"] >= 0.0)
+                      & (d["soil_frozen_fraction"] <= 1.0))
 
     with np.load(arch_path, allow_pickle=False) as d:
         n_arch = d["pft_id"].shape[0]

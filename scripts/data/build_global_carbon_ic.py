@@ -95,6 +95,7 @@ from legoesm.land.carbon.global_init import (
     dropped_cover_fraction,
     equilibrate_archetypes,
     map_to_grid,
+    map_to_grid_frozen_fraction,
 )
 
 from legoesm import constants
@@ -161,18 +162,21 @@ _CACHE_MIN_COMPILE_SECS_DEFAULT = 1.0   # only cache XLA compiles slower than th
 # upgrade that alters bits on the SAME backend is the user's responsibility (bump
 # the version), mirroring the trainer's documented same-code/backend assumption.
 _EQUILIBRIUM_CACHE_VERSION = "v4"  # v4: + perennial-frost/anaerobic SOM protection (f_perma on the SOM modifier, keyed on the annual frozen fraction) -- coupled-spin-up equilibrium rises for perennially-frozen high-latitude archetypes (permafrost carbon; v3 was the r_maint_* CUE recalibration)
-# FOLLOW-UP (coupled-run maintenance, OUT OF THIS IC-BUILD SCOPE): this map is
-# built WITH the perennial-frost/anaerobic SOM protection (annual_frozen_fraction
-# -> soil_frozen_fraction threaded into the archetype spin-up), and the drift
-# validator applies the SAME protection.  A PRODUCTION coupled run
-# (coupler._step_land_tile -> step_multilayer_land) currently passes
-# soil_frozen_fraction=None (unprotected), so it would slowly decompose the deep
-# permafrost SOC this IC seeds.  To make the running ESM maintain it, wire a
-# per-cell annual frozen fraction (from carbon_cycle.annual_frozen_fraction on the
-# run's climate, or a running annual-min/frozen-fraction accumulator) into the
-# coupler's step_multilayer_land call.  Deferred: it is a cross-package
-# (coupler) production-run change needing a running-model phi source, beyond this
-# IC-build task.
+# COUPLED-RUN MAINTENANCE (now wired): this map is built WITH the perennial-
+# frost/anaerobic SOM protection (annual_frozen_fraction -> soil_frozen_fraction
+# threaded into the archetype spin-up), and the drift validator applies the SAME
+# protection.  So a coupled run does not decompose the seeded permafrost SOC back
+# toward the unprotected equilibrium, the finidat now CARRIES the per-cell
+# perennial-frost index phi (``soil_frozen_fraction``, an intensive cover-weighted
+# MEAN of the byte-identical per-archetype phi -- see map_to_grid_frozen_fraction)
+# and the coupler accepts it: make_coupler(land_soil_frozen_fraction=phi) ->
+# coupler._step_land_tile -> step_multilayer_land(soil_frozen_fraction=phi) ->
+# step_carbon.  A run that loads this finidat's carbon IC passes its stored
+# ``soil_frozen_fraction`` into make_coupler; a run without a permafrost IC omits
+# it (None) and is byte-identical (static feature gate).  REMAINING (separate
+# feature, not this task): a coupled/AMIP driver path that ingests the finidat's
+# per-cell CarbonState into a running model -- today only the offline validators
+# load it; the drivers cold-start carbon via init_carbon_state.
 # The QC bundle equilibrate_archetypes returns, in CANONICAL order.  The result
 # cache requires EXACTLY these members on load (a file missing one is treated as
 # corrupt and recomputed, never served as a partial hit); keep in sync with
@@ -658,8 +662,14 @@ def _write_archetypes_npz(path, table, eq, qc, pft_names, *,
 
 
 def _write_outputs(out_dir, inputs, grid_state, table, eq, qc, w_min, res_deg,
-                   *, n_layers, soil_depth, dt):
-    """Write ``global_carbon_ic.npz`` (finidat) + ``archetypes.npz`` (lookup)."""
+                   *, n_layers, soil_depth, dt, soil_frozen_fraction):
+    """Write ``global_carbon_ic.npz`` (finidat) + ``archetypes.npz`` (lookup).
+
+    ``soil_frozen_fraction`` is the cover-weighted per-cell perennial-frost
+    index ``phi`` (``(ncell,)``, see :func:`map_to_grid_frozen_fraction`),
+    written into the finidat so a coupled run can thread the SAME protection
+    that seeded the SOC into ``step_multilayer_land``.
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     finidat_path = out / "global_carbon_ic.npz"
@@ -680,6 +690,9 @@ def _write_outputs(out_dir, inputs, grid_state, table, eq, qc, w_min, res_deg,
         land_mask=inputs.land_mask,
         dominant_pft=dominant_pft, pft_present=pft_present,
         pft_weights=pft_weights, pft_names=pft_names,
+        # Per-cell perennial-frost index phi -- the coupled-run permafrost SOM
+        # protection source (byte-identical to the phi that seeded the SOC).
+        soil_frozen_fraction=np.asarray(soil_frozen_fraction, float),
         resolution_deg=np.asarray(float(res_deg)),
         n_layers=np.asarray(int(n_layers)),
         soil_depth=np.asarray(float(soil_depth)),
@@ -1041,13 +1054,25 @@ def main(argv=None):
 
     # Stage C: cover-weighted map of archetype equilibria onto the grid.
     grid_state = map_to_grid(cell_id, cell_w, eq)
+    # Stage C': cover-weighted per-cell perennial-frost index phi (the SAME
+    # climate-only phi that scaled each archetype's seeded equilibrium -- an
+    # intensive cover-weighted MEAN, see map_to_grid_frozen_fraction).  Stored in
+    # the finidat so a coupled RUN threads it into step_multilayer_land and
+    # maintains the seeded permafrost SOC (else it decomposes to the unprotected
+    # equilibrium).  This build equilibrates at the PRODUCTION DEFAULT CarbonConfig,
+    # so the default-config phi here is byte-identical to the spin-up's; if a
+    # tuned-parameter equilibration that overrides ``som_freeze_width_K`` is ever
+    # wired into this driver, pass that SAME config via ``config=`` so the mapped
+    # phi stays byte-identical to the tuned spin-up.
+    phi_cell = map_to_grid_frozen_fraction(table, cell_id, cell_w)
 
     _print_qc_summary(table, qc, n_arch)
 
     finidat_path, archetypes_path = _write_outputs(
         args.output, inputs, grid_state, table, eq, qc, args.w_min,
         float(args.resolution_deg),
-        n_layers=args.n_layers, soil_depth=args.soil_depth, dt=args.dt)
+        n_layers=args.n_layers, soil_depth=args.soil_depth, dt=args.dt,
+        soil_frozen_fraction=phi_cell)
     print(f"[global_carbon_ic] wrote {finidat_path}")
     print(f"[global_carbon_ic] wrote {archetypes_path}")
     return finidat_path, archetypes_path
