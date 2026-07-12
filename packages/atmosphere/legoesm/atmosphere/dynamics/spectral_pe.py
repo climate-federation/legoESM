@@ -1957,10 +1957,7 @@ class SpectralPrimitiveEquationModel:
         self._ensure_sponge_factor(dt)
         self._ensure_hyperdiff_filter(dt)
         self._ensure_tracer_filter(dt)
-        if (self.config.fix_mass
-                and self.config.anchor_mass_to_initial
-                and self._target_mass is None):
-            self._target_mass = self._compute_initial_mass(state_cpu)
+        self._maybe_snapshot_target_mass(state_cpu)
         for i in range(n_steps):
             state_cpu = self._step_on_cpu(
                 state_cpu, dt, physics_fn, self._target_mass,
