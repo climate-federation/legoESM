@@ -182,6 +182,7 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.clouds.CloudConfig.conv_cloud_condensate": "cloud_conv_cloud_condensate",
     "atm.clouds.CloudConfig.p_xr": "cloud_p_xr",
     "atm.clouds.CloudConfig.alpha_xr": "cloud_alpha_xr",
+    "atm.clouds.CloudConfig.adiabatic_lwc_rate": "cloud_adiabatic_lwc_rate",
     # convection -> _resolve_convection (physics_pipeline)
     "atm.conv.SBMConfig.tau_c": "sbm_tau_c",
     "atm.conv.SBMConfig.rh_ref": "sbm_RH_ref",

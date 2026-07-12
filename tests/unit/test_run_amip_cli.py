@@ -1968,3 +1968,72 @@ def test_louis_cloudtop_entrainment_efficiency_validate_strict():
                 louis_cloudtop_entrainment_efficiency=bad).validate_strict()
     for ok in (0.0, 0.2, 1.0):
         ExperimentConfig(louis_cloudtop_entrainment_efficiency=ok).validate_strict()
+
+
+def test_diagnostic_condensate_scheme_flows_to_config():
+    """--diagnostic-condensate-scheme + --adiabatic-lwc-rate round-trip into
+    ExperimentConfig (default 'constant' == byte-identical legacy floor)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.cloud_diagnostic_condensate_scheme == "constant"
+    assert cfg_default.cloud_adiabatic_lwc_rate is None
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--clouds", "sundqvist",
+        "--diagnostic-condensate-scheme", "adiabatic",
+        "--adiabatic-lwc-rate", "2.0e-6",
+    ]), parser))
+    assert cfg.cloud_diagnostic_condensate_scheme == "adiabatic"
+    assert cfg.cloud_adiabatic_lwc_rate == 2.0e-6
+
+
+def test_diagnostic_condensate_scheme_threads_into_cloud_config():
+    """The ExperimentConfig fields thread through the shared build_cloud_config
+    into the hot-loop CloudConfig (guards against a dead field)."""
+    from legoesm.atmosphere.physics.clouds.config import build_cloud_config
+    cc = build_cloud_config("sundqvist",
+                            diagnostic_condensate_scheme="adiabatic",
+                            adiabatic_lwc_rate=2.0e-6)
+    assert cc.diagnostic_condensate_scheme == "adiabatic"
+    assert cc.adiabatic_lwc_rate == 2.0e-6
+    # All-None companion call stays byte-identical to the CloudConfig default.
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
+    assert build_cloud_config("sundqvist") == CloudConfig(scheme="sundqvist")
+
+
+def test_diagnostic_condensate_scheme_validate_strict():
+    """validate_strict rejects an unknown diagnostic-condensate scheme, and
+    rejects the adiabatic opt-in on a backend that would silently ignore it."""
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig
+    for ok in ("constant", "adiabatic"):
+        # default dycore is cd-grid (the wired FV radiation path) => OK
+        ExperimentConfig(cloud_scheme="sundqvist",
+                         cloud_diagnostic_condensate_scheme=ok).validate_strict()
+    with pytest.raises(ValueError, match="cloud_diagnostic_condensate_scheme"):
+        ExperimentConfig(
+            cloud_scheme="sundqvist",
+            cloud_diagnostic_condensate_scheme="linear").validate_strict()
+    # adiabatic on a genuinely-bypassing backend (spectral / MPAS build
+    # RadiationConfig directly) is a HARD error — it would silently run the
+    # constant floor there (codex dispatch-hardening).  (validate_strict joins
+    # all errors, so the match just needs our substring.)
+    for bad_disc in ("spectral", "mpas"):
+        with pytest.raises(ValueError, match="cd-grid physics pipeline"):
+            ExperimentConfig(
+                cloud_scheme="sundqvist",
+                cloud_diagnostic_condensate_scheme="adiabatic",
+                dycore=DycoreConfig(discretization=bad_disc)).validate_strict()
+    # A cd-grid ALIAS ('centered' / 'finite_volume') DOES thread the floor via
+    # the FV pipeline, so the guard must NOT false-positive block it (the review
+    # caught this — run_amip defaults --discretization to 'centered').
+    for ok_disc in ("centered", "finite_volume"):
+        try:
+            ExperimentConfig(
+                cloud_scheme="sundqvist",
+                cloud_diagnostic_condensate_scheme="adiabatic",
+                dycore=DycoreConfig(discretization=ok_disc)).validate_strict()
+        except ValueError as exc:  # unrelated dycore validation may still raise
+            assert "cd-grid physics pipeline" not in str(exc), (
+                f"adiabatic must not be guard-blocked on cd-grid alias {ok_disc!r}")

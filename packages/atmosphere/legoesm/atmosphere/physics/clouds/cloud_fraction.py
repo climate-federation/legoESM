@@ -30,6 +30,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import jax.numpy as jnp
+from jax import lax
 
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
 from legoesm.thermo import saturation_mixing_ratio
@@ -292,6 +293,82 @@ def convective_cloud_fraction(
     return cf_col[:, None] * deck
 
 
+# Cloud-fraction above which a layer counts as (fully) part of a cloudy DECK for
+# the geometric-depth integral in ``_adiabatic_incloud_condensate``.  This is a
+# deck-ISOLATION scale, not a tunable closure: it turns cf into a saturating
+# 0/1-ish indicator so ``D`` is the true GEOMETRIC cloudy depth and cloud
+# COVERAGE enters exactly ONCE (via the outer ``cf_strat`` in ``q_total_diag``).
+# Weighting the depth by cf itself would make the grid-mean floor scale as cf^2
+# (double-counting coverage) and detach ``adiabatic_lwc_rate`` from the physical
+# adiabatic gradient.  0.05 => any layer with cf >= 5% contributes its full dz.
+_ADIAB_DECK_CF_FLOOR = 0.05
+
+
+def _adiabatic_incloud_condensate(cf, dp, T, p_full, config):
+    """Capped adiabatic IN-CLOUD liquid-water content [kg/kg] for the stratiform
+    radiative floor of WARM (liquid) clouds.
+
+    Real in-cloud LWC grows ~linearly with height above cloud base (adiabatic
+    ascent), so a THIN low cloud holds far less water than a deep one.  The flat
+    ``q_c_diagnostic`` floor ignores this and over-brightens shallow marine
+    stratocumulus (measured: the floor is the radiative q_c there, ~11x the
+    prognostic).  Returns, for warm cells, ``q_ad = min(adiabatic_lwc_rate * D,
+    q_c_diagnostic)`` where ``D`` is the LAYER-MEAN cloudy geometric depth above
+    cloud base.  This is the IN-CLOUD value; cloud COVERAGE is applied once by
+    the caller (``q_total_diag = cf_strat * q_ad``), so ``adiabatic_lwc_rate`` is
+    the physical adiabatic LWC gradient, not a coverage-entangled effective rate.
+
+    Depth integral (surface-last: index 0 = model top, -1 = surface; height
+    increases toward index 0):
+
+    * a SATURATING indicator ``clip(cf/_ADIAB_DECK_CF_FLOOR, 0, 1)`` (not cf, so
+      coverage is not double-counted) marks cloudy layers;
+    * a RESET cumulative sum over the reversed (surface->up) axis accumulates the
+      cloudy geometric depth but RESTARTS at every clear gap (``cr`` minus the
+      running-max of ``cr`` sampled at clear layers), so a stacked upper deck
+      does NOT inherit a lower deck's depth (codex review: the inherited
+      condensate would be phase-partitioned to ice and perturb IWP/OLR);
+    * the value is taken at the layer MIDPOINT (``- 0.5*dz`` of the current
+      layer): a linear base->top profile has its layer-average at the midpoint,
+      so the layer top would over-count a 1-layer cloud by 2x (codex review).
+
+    A WARM/liquid gate (``T > T_freeze``) restricts the liquid adiabatic gradient
+    to warm boundary-layer cloud; ice / mixed-phase cells keep the calibrated
+    constant floor (do not dim cirrus with a liquid gradient and repartition to
+    ice).  ``q_ad`` is capped at ``q_c_diagnostic`` so it can only DIM, never
+    exceed the validated floor — deep warm clouds are ~unchanged above the cap
+    depth (``q_c_diagnostic/rate`` ~ 667 m); only near-base layers dim.
+
+    Subdifferentiable / transform-compatible (cumsum, clip, cummax, minimum are
+    kinked and JAX supplies subgradients); no Python control flow on traced
+    values.
+    """
+    # Layer geometric thickness dz = dp / (rho g), with rho = p / (R_d T) [m].
+    rho = p_full / (constants.R_d * T)
+    dz = dp / jnp.maximum(rho * constants.g, 1.0e-12)
+    # Saturating cloudy-deck indicator so D is the GEOMETRIC cloudy depth and
+    # coverage (cf) is applied exactly once downstream (not squared).
+    cloud_indicator = jnp.clip(cf / _ADIAB_DECK_CF_FLOOR, 0.0, 1.0)
+    cloudy_dz = cloud_indicator * dz
+    # Reset cumulative sum over the reversed (surface -> up) axis: restart the
+    # depth integral at every clear gap so decks are isolated.  ``cr`` is
+    # non-decreasing (cloudy_dz >= 0), so the most-recent clear-gap depth is the
+    # running MAX of ``cr`` sampled at clear layers.
+    xr = cloudy_dz[..., ::-1]
+    clear = cloud_indicator[..., ::-1] < 0.5
+    _vax = xr.ndim - 1  # vertical axis (last); lax.cummax rejects a negative axis
+    cr = jnp.cumsum(xr, axis=_vax)
+    last_gap = lax.cummax(jnp.where(clear, cr, 0.0), axis=_vax)
+    depth_top = cr - last_gap                       # depth above base at layer TOP
+    depth_mid = jnp.maximum(depth_top - 0.5 * xr, 0.0)  # layer-MEAN (midpoint)
+    depth_from_base = depth_mid[..., ::-1]          # back to surface-last
+    q_ad = jnp.minimum(config.adiabatic_lwc_rate * depth_from_base,
+                       config.q_c_diagnostic)
+    # Warm/liquid gate: ice & mixed-phase cells keep the constant floor.
+    warm = T > constants.T_freeze
+    return jnp.where(warm, q_ad, config.q_c_diagnostic)
+
+
 def compute_cloud_properties(
     T: jnp.ndarray,
     p_full: jnp.ndarray,
@@ -403,8 +480,29 @@ def compute_cloud_properties(
     # (value-identical legacy behaviour — same numbers; the extra max/add ops
     # constant-fold but are not byte-identical HLO).
     _conv_excess = jnp.maximum(cf - cf_strat, 0.0)
+    # In-cloud condensate for the STRATIFORM floor: a flat calibrated value
+    # ("constant", the validated default) or a depth-scaled adiabatic LWC
+    # ("adiabatic") that dims thin low clouds while leaving deep clouds at the
+    # cap (see ``_adiabatic_incloud_condensate`` / CloudConfig docstring).  The
+    # convective EXCESS keeps the thin anvil condensate regardless.
+    if config.diagnostic_condensate_scheme == "constant":
+        q_c_incloud = config.q_c_diagnostic
+    elif config.diagnostic_condensate_scheme == "adiabatic":
+        q_c_incloud = _adiabatic_incloud_condensate(
+            cf_strat, dp, T, p_full, config
+        )
+    else:
+        # Dispatch-hardening: a typo must never silently fall back to the flat
+        # floor and run different cloud physics (validated at fn entry on the
+        # static config value).
+        raise ValueError(
+            f"Unknown diagnostic_condensate_scheme: "
+            f"{config.diagnostic_condensate_scheme!r}; choose 'constant' "
+            f"(flat q_c_diagnostic floor) or 'adiabatic' (depth-scaled "
+            f"adiabatic in-cloud LWC)."
+        )
     q_total_diag = (
-        cf_strat * config.q_c_diagnostic
+        cf_strat * q_c_incloud
         + _conv_excess * config.conv_cloud_condensate
     )
 

@@ -51,6 +51,8 @@ __param_spec__ = {
             "conv_cloud_sigma_top": {"units": "1", "bounds": (0.05, 0.4), "tunable_tier": 0, "transform": "sigmoid", "category": "convective_cloud", "reference": "convective cloud-deck top (sigma); numerics layer-bound", "shape": None},
             "conv_cloud_sigma_base": {"units": "1", "bounds": (0.35, 0.98), "tunable_tier": 0, "transform": "sigmoid", "category": "convective_cloud", "reference": "convective anvil-deck base (sigma); numerics layer-bound", "shape": None},
             "conv_cloud_condensate": {"units": "kg/kg", "bounds": (1.0e-5, 1.0e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "condensate", "reference": "thin anvil-cirrus in-cloud condensate", "shape": None},
+            # --- condensate (adiabatic in-cloud LWC growth rate, opt-in vertical structure) ---
+            "adiabatic_lwc_rate": {"units": "kg/kg/m", "bounds": (5.0e-7, 3.0e-6), "tunable_tier": 2, "transform": "sigmoid", "category": "condensate", "reference": "adiabatic cloud LWC gradient ~1-2 g/kg per km (Brenguier et al. 2000)", "shape": None},
         },
     },
 }
@@ -193,6 +195,29 @@ class CloudConfig(NamedTuple):
     # q_c_diagnostic=1e-3) so the high cloud traps LW without over-reflecting SW
     # (the v3 albedo~42% overshoot; high cold tops keep the LW benefit).
     conv_cloud_condensate: float = 1.5e-4
+    # --- Diagnostic in-cloud condensate vertical structure (opt-in) ---
+    # The stratiform radiative floor ``q_total_diag = cf * q_c_diagnostic`` uses
+    # a CONSTANT in-cloud water (1 g/kg) at every cloudy level.  Measured against
+    # AMIP checkpoints this over-brightens THIN warm marine stratocumulus: the
+    # radiative q_c there is the floor (11.5x the prognostic, dominating 77% of
+    # BL cells), and a shallow Sc's real in-cloud LWC (~0.2-0.5 g/kg) is set by
+    # its DEPTH, not the deep-cloud calibration value.  ``"adiabatic"`` replaces
+    # the constant with a capped adiabatic LWC that grows with cloudy depth above
+    # cloud base (``q_ad = adiabatic_lwc_rate * D``, ``D`` the cloudy GEOMETRIC
+    # depth from cloud base to the level MIDPOINT — reset at clear gaps — capped
+    # at ``q_c_diagnostic``, and only for warm/liquid cells): thin low
+    # clouds dim while a deep cloud is ~unchanged ABOVE the cap depth (~667 m;
+    # its near-base layers still dim, but q_ad can only DIM, never exceed
+    # q_c_diagnostic — preserving the LW_down / anti-too-dark calibration that
+    # raised q_c_diagnostic to 1e-3, and leaving CRM 'resolved' + SBM alone).
+    # Physics of the decoupling: SW cloud albedo is UNSATURATED in optical depth
+    # so it drops with the water path; LW emissivity SATURATES above ~20 g/m^2
+    # LWP so LW_down is ~untouched.  Default ``"constant"`` = byte-identical to
+    # the validated floor.
+    diagnostic_condensate_scheme: str = "constant"
+    adiabatic_lwc_rate: float = 1.5e-6   # in-cloud LWC growth per metre of cloudy
+    # depth [kg/kg/m] ~ 1.5 g/kg per km (adiabatic marine-Sc gradient); only read
+    # when diagnostic_condensate_scheme="adiabatic".
 
 
 def build_cloud_config(
@@ -206,6 +231,8 @@ def build_cloud_config(
     cloud_inhomogeneity_factor: float | None = None,
     p_xr: float | None = None,
     alpha_xr: float | None = None,
+    diagnostic_condensate_scheme: str | None = None,
+    adiabatic_lwc_rate: float | None = None,
 ) -> "CloudConfig":
     """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
     fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
@@ -217,7 +244,7 @@ def build_cloud_config(
     A ``None`` override falls back to the ``CloudConfig`` default (so an
     all-``None`` call is byte-identical to the defaults).
     """
-    overrides: dict[str, float] = {}
+    overrides: dict[str, float | str] = {}
     if rh_crit is not None:
         overrides["rh_crit"] = rh_crit
     if q_c_diagnostic is not None:
@@ -232,6 +259,10 @@ def build_cloud_config(
         overrides["p_xr"] = p_xr
     if alpha_xr is not None:
         overrides["alpha_xr"] = alpha_xr
+    if diagnostic_condensate_scheme is not None:
+        overrides["diagnostic_condensate_scheme"] = diagnostic_condensate_scheme
+    if adiabatic_lwc_rate is not None:
+        overrides["adiabatic_lwc_rate"] = adiabatic_lwc_rate
     return CloudConfig(
         scheme=scheme, convective_cloud=convective_cloud, **overrides
     )

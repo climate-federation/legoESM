@@ -1968,6 +1968,15 @@ class ModelDriver:
                 convective_cloud=False,  # stratiform-only clt (see above)
                 rh_crit=getattr(self.config, "cloud_rh_crit", None),
                 q_c_diagnostic=getattr(self.config, "cloud_q_c_diagnostic", None),
+                # p_xr/alpha_xr set the Xu-Randall cloud FRACTION, so the clt
+                # diagnostic must thread them too or published clt drifts from
+                # the radiation cloud fraction (codex review, pre-existing gap).
+                p_xr=getattr(self.config, "cloud_p_xr", None),
+                alpha_xr=getattr(self.config, "cloud_alpha_xr", None),
+                diagnostic_condensate_scheme=getattr(
+                    self.config, "cloud_diagnostic_condensate_scheme", None),
+                adiabatic_lwc_rate=getattr(
+                    self.config, "cloud_adiabatic_lwc_rate", None),
             )
         self.diagnostics = DiagnosticCollector(
             nlev=self.config.grid.nlev,

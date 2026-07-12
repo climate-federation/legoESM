@@ -587,6 +587,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Xu-Randall condensate sensitivity alpha_xr (None="
                              "default 100; bounds 10..1000). LOWER => cloud "
                              "fraction grows more slowly with condensate.")
+    parser.add_argument("--diagnostic-condensate-scheme",
+                        dest="cloud_diagnostic_condensate_scheme",
+                        choices=["constant", "adiabatic"], default="constant",
+                        help="Vertical structure of the stratiform in-cloud "
+                             "condensate floor. 'constant' (default) = flat "
+                             "q_c_diagnostic at every cloudy level (validated). "
+                             "'adiabatic' = depth-scaled adiabatic LWC that dims "
+                             "THIN warm marine stratocumulus (the source-side "
+                             "marine-BL albedo fix) while deep clouds stay at "
+                             "the cap.")
+    parser.add_argument("--adiabatic-lwc-rate", dest="cloud_adiabatic_lwc_rate",
+                        type=float, default=None,
+                        help="In-cloud LWC growth per metre of cloudy depth "
+                             "[kg/kg/m] for --diagnostic-condensate-scheme="
+                             "adiabatic (None=CloudConfig default 1.5e-6 ~ "
+                             "1.5 g/kg per km; bounds 5e-7..3e-6).")
     parser.add_argument("--convective-cloud", dest="convective_cloud",
                         action=argparse.BooleanOptionalAction, default=False,
                         help="Add the convective (thin-cirrus) cloud-fraction "
@@ -1262,6 +1278,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_inhomogeneity_factor=args.cloud_inhomogeneity_factor,
         cloud_p_xr=args.cloud_p_xr,
         cloud_alpha_xr=args.cloud_alpha_xr,
+        cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
+        cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         convective_cloud=args.convective_cloud,
         fix_moisture=args.fix_moisture,
         energy_consistent_moisture_clip=args.energy_consistent_moisture_clip,

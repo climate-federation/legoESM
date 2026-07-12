@@ -278,6 +278,8 @@ class PhysicsPipeline:
         self._cloud_inhomogeneity_factor = None
         self._cloud_p_xr = None
         self._cloud_alpha_xr = None
+        self._cloud_diagnostic_condensate_scheme = None
+        self._cloud_adiabatic_lwc_rate = None
         # Convection scheme name + grid/vertical-coordinate objects for
         # grid-operator-backed convection inputs (moisture convergence,
         # resolved w, CMT winds).  Set by build_physics_pipeline; with
@@ -1746,6 +1748,10 @@ class PhysicsPipeline:
                     self, "_cloud_inhomogeneity_factor", None),
                 p_xr=getattr(self, "_cloud_p_xr", None),
                 alpha_xr=getattr(self, "_cloud_alpha_xr", None),
+                diagnostic_condensate_scheme=getattr(
+                    self, "_cloud_diagnostic_condensate_scheme", None),
+                adiabatic_lwc_rate=getattr(
+                    self, "_cloud_adiabatic_lwc_rate", None),
             )
             # Column convective precip [kg/m²/s] for the convective cloud cover;
             # flattened to the (ncol,) column layout like the other inputs.
@@ -3117,6 +3123,10 @@ def build_physics_pipeline(grid, sigma, config):
         config, 'cloud_inhomogeneity_factor', None)
     pipeline._cloud_p_xr = getattr(config, 'cloud_p_xr', None)
     pipeline._cloud_alpha_xr = getattr(config, 'cloud_alpha_xr', None)
+    pipeline._cloud_diagnostic_condensate_scheme = getattr(
+        config, 'cloud_diagnostic_condensate_scheme', None)
+    pipeline._cloud_adiabatic_lwc_rate = getattr(
+        config, 'cloud_adiabatic_lwc_rate', None)
     pipeline._conv_scheme = getattr(config, 'convection', 'none')
     pipeline._grid = grid
     pipeline._sigma_coord = sigma

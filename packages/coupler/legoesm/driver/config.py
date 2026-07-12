@@ -428,6 +428,17 @@ class ExperimentConfig(NamedTuple):
     cloud_alpha_xr: float | None = None
     cloud_conv_cloud_max: float | None = None
     cloud_conv_cloud_condensate: float | None = None
+    # Diagnostic in-cloud condensate vertical structure for the stratiform
+    # radiative floor (CloudConfig.diagnostic_condensate_scheme):
+    #   "constant"  — flat q_c_diagnostic at every cloudy level (validated
+    #                 default; byte-identical to the legacy floor).
+    #   "adiabatic" — depth-scaled adiabatic in-cloud LWC (dims THIN warm
+    #                 marine stratocumulus while deep clouds stay at the cap),
+    #                 the source-side marine-BL albedo fix.  cloud_adiabatic_lwc_rate
+    #                 [kg/kg/m] is the LWC growth per metre of cloudy depth
+    #                 (None => CloudConfig default 1.5e-6 ~ 1.5 g/kg per km).
+    cloud_diagnostic_condensate_scheme: str = "constant"
+    cloud_adiabatic_lwc_rate: float | None = None
     microphysics: str = "none"
     # Number of microphysics sub-steps inside one dynamics step.  Morrison's
     # double-moment product terms (q_c·q_r, q_i·q_c) run away at the
@@ -1093,6 +1104,32 @@ class ExperimentConfig(NamedTuple):
                 f"cloud_scheme must be one of {_valid_cloud_schemes}, "
                 f"got {self.cloud_scheme!r}"
             )
+        _valid_diag_condensate = ("constant", "adiabatic")
+        if self.cloud_diagnostic_condensate_scheme not in _valid_diag_condensate:
+            errors.append(
+                f"cloud_diagnostic_condensate_scheme must be one of "
+                f"{_valid_diag_condensate}, "
+                f"got {self.cloud_diagnostic_condensate_scheme!r}"
+            )
+        # The adiabatic in-cloud floor reaches radiation ONLY through the FV
+        # cd-grid physics pipeline (build_physics_pipeline -> build_cloud_config).
+        # The cd-grid family (cdgrid / its aliases 'centered', 'finite_volume')
+        # and latlon_cgrid all go through that pipeline and DO thread it; MPAS and
+        # spectral build RadiationConfig directly and would SILENTLY fall back to
+        # the constant floor.  Reject the opt-in on ONLY the genuinely-bypassing
+        # backends (dispatch-hardening — a silent no-op is a hard error), so a
+        # cd-grid alias is not a false-positive block (codex/review).
+        _NO_CLOUD_THREAD_DISCRETIZATIONS = ("mpas", "spectral")
+        if (self.cloud_diagnostic_condensate_scheme != "constant"
+                and self.dycore.discretization
+                in _NO_CLOUD_THREAD_DISCRETIZATIONS):
+            errors.append(
+                "cloud_diagnostic_condensate_scheme="
+                f"{self.cloud_diagnostic_condensate_scheme!r} is not wired into "
+                f"the {self.dycore.discretization!r} radiation path (only the FV "
+                "cd-grid physics pipeline threads it); it would silently run "
+                "'constant'.  Use a cd-grid discretization or scheme='constant'."
+            )
         if self.microphysics not in VALID_MICROPHYSICS:
             errors.append(
                 f"microphysics must be one of {VALID_MICROPHYSICS}, "
@@ -1279,6 +1316,7 @@ class ExperimentConfig(NamedTuple):
             ("cloud_inhomogeneity_factor", 0.3, 1.0),
             ("cloud_p_xr", 0.05, 1.0),
             ("cloud_alpha_xr", 10.0, 1000.0),
+            ("cloud_adiabatic_lwc_rate", 5.0e-7, 3.0e-6),
         ):
             _v = getattr(self, _f)
             if _v is not None and not (_lo <= _v <= _hi):
