@@ -555,7 +555,11 @@ def test_run_omip_core2_freeze_scheme_wiring():
     import inspect
     from scripts.run import run_omip_core2 as R
 
-    src = inspect.getsource(R.main)
+    # #939 refactored the argparse setup out of main() into _build_arg_parser();
+    # the freeze-scheme wiring (choices + fail-loud guards live in the parser,
+    # the model-config threading lives in main()) now spans BOTH, so the
+    # drift-check inspects both sources.
+    src = inspect.getsource(R.main) + "\n" + inspect.getsource(R._build_arg_parser)
     # Choices come from the single eos source of truth (no copied literal set).
     assert "sorted(VALID_FREEZE_SCHEMES)" in src
     # Fail-loud guards: no consumer / the unwired cube builder.
