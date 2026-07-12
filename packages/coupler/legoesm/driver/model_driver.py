@@ -5369,11 +5369,19 @@ class ModelDriver:
                 # finiteness-only guard; the T_min floor masked its low side).
                 from legoesm.driver.diagnostics import (
                     physical_state_blowup_reason,
+                    t_min_floor_blowup_reason,
                 )
                 _bounds_reason = physical_state_blowup_reason(
                     elapsed_day, T_min, T_max)
-                if (not T_finite) or _bounds_reason is not None:
-                    run_status = (_bounds_reason
+                # LOUD T_min-floor guard (#930): a column pinned at the dycore
+                # floor is a masked runaway.  Label it specifically and PREFER
+                # it over the generic bounds message.  MPAS-only, eager path —
+                # no SegmentCarry / _step_jit signature change.
+                _floor_reason = t_min_floor_blowup_reason(
+                    elapsed_day, T_min, float(self.model.config.T_min))
+                _reason = _floor_reason or _bounds_reason
+                if (not T_finite) or _reason is not None:
+                    run_status = (_reason
                                   or f"BLOWUP at day {elapsed_day:.1f}")
                     logger.error(run_status)
                     self._write_blowup_state(

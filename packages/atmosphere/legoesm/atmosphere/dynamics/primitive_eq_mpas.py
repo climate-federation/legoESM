@@ -60,8 +60,8 @@ from legoesm.grids.vertical import (
     compute_mass_flux_hybrid,
     vertical_advection,
     vertical_advection_hybrid,
-    compute_pressure_velocity,
-    compute_omega_hybrid,
+    vertical_advection_theta,
+    vertical_advection_theta_hybrid,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import (
@@ -371,8 +371,17 @@ def mpas_hydrostatic_tendencies(
         dp_s_dt = -jnp.sum(div_dp_3d, axis=-1) / sigma_coord.B_range
 
         mass_flux, _ = compute_mass_flux_hybrid(div_3d, p_s, sigma_coord)
-        vert_adv_T = vertical_advection_hybrid(T_3d, mass_flux, p_s, sigma_coord)
-        omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt, sigma_coord)
+        # θ-form vertical thermodynamic transport (cancellation-free, #930):
+        #   -F·∂T/∂p + κ·T·F/p  ==  -exner·F·∂θ/∂p   (θ = T·(p₀/p)^κ).
+        # Advecting θ cancels the two large near-equal terms BEFORE
+        # discretization, killing the 2Δz residual the 1/p prefactor
+        # amplified at the stretched top levels.  See the σ branch below.
+        vert_thermo_T = vertical_advection_theta_hybrid(
+            T_3d, mass_flux, p_s, sigma_coord)
+        # Only the surface-pressure-tendency part of ω stays in ``adiabatic``:
+        #   ω = B·dp_s/dt + F  ⇒  ω_ps = B·dp_s/dt.  The F (mass-flux) part
+        # κ·T·F/p is now folded into ``vert_thermo_T`` above — NO double-count.
+        omega_ps = sigma_coord.B_full * dp_s_dt[:, None]
     else:
         sigma_top = sigma_coord.sigma_half[0]
         sigma_range = 1.0 - sigma_top
@@ -388,8 +397,20 @@ def mpas_hydrostatic_tendencies(
         )
         dp_s_dt = -p_s * _D_total_full[..., 0] / sigma_range
 
-        vert_adv_T = vertical_advection(T_3d, sigma_dot, sigma_coord)
-        omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt, sigma_coord)
+        # θ-form vertical thermodynamic transport (cancellation-free, #930):
+        #   -σ̇·∂T/∂σ + κ·T·σ̇/σ  ==  -exner·σ̇·∂θ/∂σ   (θ = T·(p₀/p)^κ).
+        # The split form computes -σ̇·∂T/∂σ (first-diff, ×2 at the 2Δz
+        # Nyquist) and κ·T·σ̇/σ (point value, ×1) separately, leaving a
+        # spurious 2Δz residual that the 1/σ prefactor amplifies at the
+        # stretched top levels.  Advecting θ cancels the two large terms
+        # BEFORE discretization.  σ-convention (index 0 top, σ̇>0 downward)
+        # is inherited verbatim from the reused ``vertical_advection``.
+        vert_thermo_T = vertical_advection_theta(
+            T_3d, sigma_dot, p_s, sigma_coord)
+        # Only the surface-pressure-tendency part of ω stays in ``adiabatic``:
+        #   ω = σ·dp_s/dt + p_s·σ̇  ⇒  ω_ps = σ·dp_s/dt.  The σ̇ part
+        # κ·T·σ̇/σ is now folded into ``vert_thermo_T`` above — NO double-count.
+        omega_ps = sigma_coord.sigma_full * dp_s_dt[:, None]
 
     # Surface pressure hyperdiffusion: -nu * del2(del2(p_s))
     if config.nu_del4_ps > 0:
@@ -406,9 +427,18 @@ def mpas_hydrostatic_tendencies(
     du_dt_3d = du_dt_3d + vert_adv_u
 
     # --- 5. Thermodynamic equation ---
-    # Adiabatic heating: κ·T·ω/p
+    # Adiabatic heating from the surface-pressure tendency ONLY: κ·T·ω_ps/p.
+    # The σ̇/mass-flux part of the adiabatic term (κ·T·σ̇/σ resp. κ·T·F/p)
+    # now lives inside ``vert_thermo_T`` via the θ-form (#930) — using the
+    # full ω here would double-count it.
+    # ``p_floor`` still caps THIS term because it forms an explicit 1/p; the
+    # σ̇-part inside ``vert_thermo_T`` needs no such cap — the θ-form carries
+    # it as exner·∂θ/∂σ (exner = (p/p₀)^κ → 0 at the top), so it is bounded by
+    # construction rather than by a 1/p clip.  (For the standard σ / hybrid
+    # coordinate builders p_full stays well above ``p_floor`` at every full
+    # level, so the two paths' top-level behaviour coincides in practice.)
     p_adiab = jnp.maximum(p_full, config.p_floor)
-    adiabatic = kappa * T_3d * omega / p_adiab
+    adiabatic = kappa * T_3d * omega_ps / p_adiab
 
     # v·∇(ln p_s) at cells: div(u * ln_ps_edge) - ln_ps * div(u).
     # ``div_flux_lnps`` was already computed via the batched divergence
@@ -421,7 +451,7 @@ def mpas_hydrostatic_tendencies(
         v_grad_lnps = v_grad_lnps * (sigma_coord.B_full * p_s[:, None] / p_adiab)
     adiabatic = adiabatic + kappa * T_3d * v_grad_lnps
 
-    dT_dt_3d = horiz_adv_T_3d + vert_adv_T + adiabatic
+    dT_dt_3d = horiz_adv_T_3d + vert_thermo_T + adiabatic
 
     # --- 6. Add physics tendencies ---
     if physics_tendency is not None:
