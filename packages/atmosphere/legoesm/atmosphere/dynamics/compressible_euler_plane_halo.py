@@ -215,8 +215,12 @@ def _compute_smagorinsky_K_m_plane_halo(
     ) / dz_full
     S33_center = dw_dz_center
 
-    du_dz_int = full_level_centred_d_dz(u_int, height_coord)
-    dv_dz_int = full_level_centred_d_dz(v_int, height_coord)
+    # Sign convention (mirrors the serial kernel): z positive UP, level index
+    # TOP→DOWN, so full_level_centred_d_dz returns −∂/∂z_physical. Negate to
+    # the physical sign — S13/S23 mix these with the already-physical ∂w/∂x,
+    # ∂w/∂y, so the sign does not square out of |S|².
+    du_dz_int = -full_level_centred_d_dz(u_int, height_coord)
+    dv_dz_int = -full_level_centred_d_dz(v_int, height_coord)
 
     # ∂w/∂x at x-face (i, j) needs w_full(i-1, j); ∂w/∂y at y-face needs
     # w_full(i, j-1). Reuse the padded w to slice both shifts.
@@ -234,14 +238,14 @@ def _compute_smagorinsky_K_m_plane_halo(
     # — pull from +1-in-x shifted positions.
     w_full_xp1 = w_full_pad[h:-h, h + 1 : (-h + 1) if h > 1 else None, :]
     u_xp1_int = u_xp1                                   # already sliced
-    du_dz_xp1 = full_level_centred_d_dz(u_xp1_int, height_coord)
+    du_dz_xp1 = -full_level_centred_d_dz(u_xp1_int, height_coord)  # +∂u/∂z_phys
     dw_dx_xface_xp1 = (w_full_xp1 - w_full_int) / grid.dx
     S13_xface_xp1 = 0.5 * (du_dz_xp1 + dw_dx_xface_xp1)
     S13_sq_center = 0.5 * (S13_xface ** 2 + S13_xface_xp1 ** 2)
 
     w_full_yp1 = w_full_pad[h + 1 : (-h + 1) if h > 1 else None, h:-h, :]
     v_yp1_int = v_yp1                                   # already sliced
-    dv_dz_yp1 = full_level_centred_d_dz(v_yp1_int, height_coord)
+    dv_dz_yp1 = -full_level_centred_d_dz(v_yp1_int, height_coord)  # +∂v/∂z_phys
     dw_dy_yface_yp1 = (w_full_yp1 - w_full_int) / grid.dy
     S23_yface_yp1 = 0.5 * (dv_dz_yp1 + dw_dy_yface_yp1)
     S23_sq_center = 0.5 * (S23_yface ** 2 + S23_yface_yp1 ** 2)
