@@ -250,11 +250,18 @@ increment-1 wires it natively for the atmosphere step
 * **Corners**: lat-then-lon two-pass exchange composition; the C-grid
   operator chain has no explicit-diagonal stencil (vertex circulations
   combine lat-padded u with lon-padded v), so no corner messages exist.
-* **Topology choice** (`choose_latlon_2d_topology`): minimize per-tile halo
-  perimeter `(w if p_lat>1) + (nl if p_lon>1)` over feasible factorizations;
-  the 1-D band `(N, 1)` is preferred within 1.25× of the optimum — encoding
-  THIS DOC's measurement that single-direction splits win when
-  latency-dominated.  The 1-D band lane stays the default production path.
+* **Topology choice** (`choose_latlon_2d_topology`): minimize the modeled
+  per-tile received VOLUME of one full pad,
+  `(w if p_lat>1) + (nl + n_lon if p_lon>1)` over feasible factorizations —
+  the `n_lon` term is the two pole-fold `all_gather`s every `p_lon > 1` pad
+  executes on EVERY tile (both `jnp.where` fold operands evaluate; codex
+  M3a finding 4: a perimeter-only score mis-ranked lon splits by ignoring
+  them).  Consequence: the band `(N, 1)` wins whenever FEASIBLE under the
+  current fold implementation; the 2-D tiling is selected exactly in the
+  beyond-band regime (`n_lat % N != 0` or `n_lat/N < 2`) it exists for.
+  The 1.25× `band_preference` hysteresis is retained for when the
+  partner-ppermute fold lands and removes the gather term.  The 1-D band
+  lane stays the default production path.
 
 REMAINDER (increment-2+): the ocean 2-D SPMD step; a stateful
 `PhysicsState` carry under 2-D tiles (the `(ncol,)` lat-major flatten is

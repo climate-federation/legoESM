@@ -687,8 +687,10 @@ def choose_latlon_2d_topology(
     band_preference: float = 1.25,
 ) -> tuple[int, int]:
     """Choose the ``(p_lat, p_lon)`` factorization of ``n_devices`` for the
-    2-D lat-lon SPMD tiling — minimizing per-tile halo perimeter, with a
-    documented preference for the 1-D band path at low rank counts.
+    2-D lat-lon SPMD tiling — minimizing the modeled per-tile halo
+    COMMUNICATION VOLUME of the actual pad program (ppermute perimeter PLUS
+    the pole-fold lon-all_gathers every lon split pays), with a documented
+    preference for the 1-D band path.
 
     Feasibility (uniform tiles — one shard_map program):
       * ``p_lat * p_lon == n_devices``;
@@ -697,27 +699,35 @@ def choose_latlon_2d_topology(
         (default 2 — the widest production halo, the PPM ``halo=2``
         exchange, moves edge blocks of that depth in ONE ppermute hop).
 
-    Score = the per-tile halo perimeter per unit halo depth,
-    ``(w if p_lat > 1 else 0) + (nl if p_lon > 1 else 0)`` with
-    ``nl = n_lat/p_lat``, ``w = n_lon/p_lon``: a lat cut moves ``2h*w`` cells
-    per exchange, a lon cut ``2h*nl`` (a dimension that is NOT split — or
-    whose only boundary is the locally-folded pole — moves nothing).  This is
-    exactly the perimeter/area argument of the scaling audit: the 1-D band's
-    score is the CONSTANT ``n_lon`` (independent of the device count — the
-    perimeter cost that caps band scaling), while the balanced 2-D tiling
-    scores ``~2*sqrt(n_lat*n_lon/n_devices)``.
+    Score = the per-tile RECEIVED communication volume of one full halo pad,
+    normalized per unit halo depth (volume / 2h), with ``nl = n_lat/p_lat``,
+    ``w = n_lon/p_lon``:
 
-    Crossover heuristic (``band_preference``): the 1-D band ``(N, 1)`` is
-    returned whenever it is feasible AND its score is within
-    ``band_preference`` (default 1.25x) of the best 2-D score — bands do NO
-    lon collectives at all (no E/W ppermute, no pole-fold all_gather), so in
-    the latency-dominated low-rank regime a modest volume advantage does not
-    pay for 2-3 extra collectives per pad.  With the default 1.25x, a square
-    grid crosses over to 2-D at ``n_devices >= 8`` (band ``n_lon`` vs (2, 4)
-    tiling ``n_lat/2 + n_lon/4 = 0.75*n_lon``); rectangular grids cross
-    earlier when ``n_lat`` is small relative to ``n_lon``.  ``p_lon == 1``
-    also wins all exact ties.  The returned ``(N, 1)`` selects the existing
-    1-D code path (byte-identical, the default production lane).
+      * lat cut (``p_lat > 1``): the N/S ppermute pair moves ``2h*w`` cells
+        -> ``w``;
+      * lon cut (``p_lon > 1``): the E/W ring ppermute pair moves ``~2h*nl``
+        -> ``nl``, PLUS the two pole-fold ``all_gather``s over ``"lon"``
+        (``make_latlon_2d_pad_body._fold_rows``) — each delivers the full
+        ``(h, n_lon)`` pole edge circle to EVERY tile per pad, because both
+        operands of the fold's ``jnp.where`` are evaluated in the uniform
+        program — ``2h*n_lon`` -> ``n_lon`` (codex M3a finding 4: a
+        perimeter-only score ignored this and called the ``(1, N)`` split
+        "E/W-perimeter only", which is false);
+      * an unsplit dimension — or one whose only boundary is the LOCALLY
+        folded pole (``p_lon == 1``) — moves nothing.
+
+    Consequence: under the CURRENT fold implementation any ``p_lon > 1``
+    candidate scores ``>= nl + n_lon > n_lon`` = the band's score, so the
+    1-D band ``(N, 1)`` wins whenever it is FEASIBLE, and the 2-D tiling is
+    selected exactly when the band is not (``n_lat % N != 0`` or
+    ``n_lat/N < min_tile`` — the beyond-band-scaling regime M3a exists for).
+    The documented follow-up (a 180-deg partner-tile ppermute fold for even
+    ``p_lon``) removes the all_gather term; ``band_preference`` (band wins
+    within that factor of the best 2-D score, default 1.25x) is retained so
+    the low-rank latency hysteresis survives that optimisation.
+    ``p_lon == 1`` also wins all exact ties.  The returned ``(N, 1)``
+    selects the existing 1-D code path (byte-identical, the default
+    production lane).
 
     Raises ``ValueError`` when NO factorization is feasible (so a caller can
     never silently run an invalid tiling).
@@ -734,8 +744,13 @@ def choose_latlon_2d_topology(
         nl, w = n_lat // p_lat, n_lon // p_lon
         if (p_lat > 1 and nl < min_tile) or (p_lon > 1 and w < min_tile):
             continue
+        # Received volume per tile per pad, / 2h (see docstring): N/S
+        # ppermute pair (w) + E/W ring pair (nl) + the TWO pole-fold
+        # lon-all_gathers that every p_lon > 1 pad executes on every tile
+        # (2 * h*n_lon -> n_lon) — codex M3a finding 4.
         feasible[(p_lat, p_lon)] = (
-            (w if p_lat > 1 else 0.0) + (nl if p_lon > 1 else 0.0))
+            (w if p_lat > 1 else 0.0)
+            + ((nl + n_lon) if p_lon > 1 else 0.0))
     if not feasible:
         raise ValueError(
             f"choose_latlon_2d_topology: no feasible (p_lat, p_lon) for "
@@ -743,7 +758,8 @@ def choose_latlon_2d_topology(
             f"p_lat*p_lon == n_devices with n_lat % p_lat == 0, "
             f"n_lon % p_lon == 0, and >= {min_tile} cells per split "
             f"dimension per tile).")
-    # Best perimeter; ties broken toward smaller p_lon (fewer collectives).
+    # Best modeled volume; ties broken toward smaller p_lon (fewer
+    # collectives).
     best = min(feasible.items(), key=lambda kv: (kv[1], kv[0][1]))
     band = (n_devices, 1)
     if band in feasible and feasible[band] <= band_preference * best[1]:

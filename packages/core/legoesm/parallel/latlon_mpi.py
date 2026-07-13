@@ -2563,6 +2563,12 @@ def build_padded_grid(grid, layout: LatLonBandLayout, halo: int = 1):
             lon2d=grid.lon2d[layout.lat_start:layout.lat_end, :],
             cos_lat=grid.cos_lat[layout.lat_start:layout.lat_end],
             sin_lat=grid.sin_lat[layout.lat_start:layout.lat_end],
+            # v-face arrays span [lat_start, lat_end+1) — same as
+            # slice_latlon_grid_to_band.  Every n_lat _replace MUST keep
+            # lat_v consistent (n_lat+1): lat_v_interfaces() consumes it
+            # for the PPM meridional flux metric (codex M3a findings 2/6).
+            lat_v=grid.lat_v[layout.lat_start:layout.lat_end + 1],
+            cos_lat_v=grid.cos_lat_v[layout.lat_start:layout.lat_end + 1],
             dy=grid.dy[layout.lat_start:layout.lat_end],
             f=grid.f[layout.lat_start:layout.lat_end, :],
             dx=grid.dx[layout.lat_start:layout.lat_end, :],

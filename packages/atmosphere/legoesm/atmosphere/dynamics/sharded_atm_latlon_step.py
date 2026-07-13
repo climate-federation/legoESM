@@ -920,8 +920,11 @@ def run_atm_latlon_spmd(model, mesh, hs_init, dt, n_steps, *,
 # lat-padded u with lon-padded v).
 #
 # The 1-D band lane above is UNTOUCHED and remains the default production
-# path (choose_latlon_2d_topology returns (N, 1) in the latency-dominated
-# low-rank regime; the (N, 1) 2-D mesh degenerates bit-identically anyway).
+# path (choose_latlon_2d_topology returns (N, 1) whenever the band is
+# FEASIBLE — the 2-D pad's pole-fold lon-all_gathers outweigh its perimeter
+# advantage until the partner-ppermute fold lands; the 2-D lane is for the
+# beyond-band regime n_devices > n_lat/min_tile or indivisible n_lat.  The
+# (N, 1) 2-D mesh degenerates bit-identically anyway).
 
 
 def tile_spec(arr) -> P:
