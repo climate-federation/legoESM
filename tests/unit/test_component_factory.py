@@ -74,13 +74,64 @@ class TestCDGridResolution:
     """Factory resolves the correct CDGrid solver for each model_type."""
 
     def test_shallow_water_creates_sw_model(self):
+        # FV3 single-implementation M2 (2026-07-13): the cube SW factory now
+        # returns the FV3-faithful edge-midpoint core (FV3EdgeShallowWaterModel
+        # + fv3_sw_tendencies), the model the Williamson matrix validates —
+        # NOT the legacy corner-corner CDGridShallowWaterModel (which cannot
+        # stabilize the cube W5/W6 wave class).  See
+        # docs/architecture/fv3_single_implementation_program.md (Phase-1 M2).
         config = _make_config(model_type="shallow_water")
         grid = _make_cubed_sphere_grid()
         sigma = _make_sigma()
         model = create_atmosphere_dycore(config, grid, sigma)
 
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterModel
-        assert isinstance(model, CDGridShallowWaterModel)
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            FV3EdgeShallowWaterModel, CDGridShallowWaterModel)
+        assert isinstance(model, FV3EdgeShallowWaterModel)
+        assert not isinstance(model, CDGridShallowWaterModel)
+        # The validated preset must be wired VERBATIM (codex M2: the class
+        # swap alone is insufficient) — config == williamson_cli_calibration(
+        # grid.n) with only the three driver-exposed overrides applied.
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            williamson_cli_calibration, CDGridShallowWaterConfig)
+        expected = williamson_cli_calibration(grid.n)._replace(
+            use_conservation_fixer=config.dycore.conservation_fixer,
+            fix_mass=config.dycore.fix_mass,
+            time_integrator=(CDGridShallowWaterConfig().time_integrator
+                             if config.dycore.time_integrator == "auto"
+                             else config.dycore.time_integrator),
+        )
+        assert model.config == expected
+        assert model.config.hyperdiff_coeff > 0.0
+        assert model.config.div_damp > 0.0
+        assert model.config.damp_v > 0.0
+
+    def test_shallow_water_rejects_nondefault_diffusion_scale(self):
+        # codex M2: the driver diffusion knobs have no effect on the fixed
+        # cube-SW preset; a non-default scale must fail loudly, not silently
+        # no-op.
+        from legoesm.driver.config import (
+            ExperimentConfig, GridConfig, DycoreConfig)
+        grid = _make_cubed_sphere_grid()
+        sigma = _make_sigma()
+        for knob in ("hyperdiff_scale", "a_h_scale", "div_damp_scale"):
+            config = ExperimentConfig(
+                grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
+                dycore=DycoreConfig(model_type="shallow_water",
+                                    discretization="centered", dt=300.0,
+                                    **{knob: 2.0}),
+                days=1)
+            with pytest.raises(ValueError, match=knob):
+                create_atmosphere_dycore(config, grid, sigma)
+
+    def test_shallow_water_rejects_resolution_mismatch(self):
+        # codex M2: calibration uses grid.n; a grid/config resolution mismatch
+        # must raise rather than build C24 damping on a C48 grid.
+        config = _make_config(model_type="shallow_water", resolution=16)
+        grid = _make_cubed_sphere_grid(resolution=8)  # grid.n=8 != cfg 16
+        sigma = _make_sigma()
+        with pytest.raises(ValueError, match="does not match"):
+            create_atmosphere_dycore(config, grid, sigma)
 
     def test_hydrostatic_creates_pe_model(self):
         config = _make_config(model_type="hydrostatic")
@@ -172,9 +223,26 @@ class TestDiffusiveCFLGuard:
         grid = _make_cubed_sphere_grid()
         diff = compute_diffusion(grid, DycoreConfig(dt=600.0, hyperdiff_scale=1e5))
         with caplog.at_level(logging.WARNING):
-            warn_if_diffusion_unstable("cdgrid_shallow_water", diff, grid, 600.0)
+            # cdgrid_primitive_equations still forwards diff.hyperdiff to the
+            # FV operator, so the guard applies.  (Cube SW was removed from the
+            # explicit set in M2 — it uses a fixed validated preset that owns
+            # its own hyperdiff, so the raw diff.hyperdiff is discarded; see
+            # test_shallow_water_does_not_cry_wolf below.)
+            warn_if_diffusion_unstable("cdgrid_primitive_equations", diff, grid, 600.0)
         assert any("hyperdiff" in r.message and "max stable" in r.message
                    for r in caplog.records)
+
+    def test_shallow_water_does_not_cry_wolf(self, caplog):
+        # M2 (codex): cube SW uses a fixed validated preset that owns its
+        # hyperdiff, so an oversized generic diff.hyperdiff must NOT warn
+        # (the model discards it).
+        import logging
+        from legoesm.driver.component_factory import warn_if_diffusion_unstable
+        grid = _make_cubed_sphere_grid()
+        diff = compute_diffusion(grid, DycoreConfig(dt=600.0, hyperdiff_scale=1e5))
+        with caplog.at_level(logging.WARNING):
+            warn_if_diffusion_unstable("cdgrid_shallow_water", diff, grid, 600.0)
+        assert not any("max stable" in r.message for r in caplog.records)
 
     def test_default_coeffs_do_not_warn(self, caplog):
         import logging
@@ -276,8 +344,10 @@ class TestAtmosphereOnEveryGlobalGrid:
     @pytest.mark.parametrize(
         "grid_type,resolution,model_type,discretization,grid_kwargs,expected_cls,grid_attr",
         [
+            # M2 (2026-07-13): cube SW factory returns the FV3-faithful
+            # edge-midpoint core, not the legacy corner-corner CDGrid model.
             ("cubed_sphere", 8, "shallow_water", "cdgrid", {},
-             "CDGridShallowWaterModel", "grid"),
+             "FV3EdgeShallowWaterModel", "grid"),
             pytest.param(
                 "gaussian", 21, "shallow_water", "spectral", {},
                 "SpectralShallowWaterModel", "grid",
@@ -353,8 +423,33 @@ class TestDriverDelegation:
         driver.sigma = sigma
         driver._create_dycore()
 
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterModel
-        assert isinstance(driver.model, CDGridShallowWaterModel)
+        # M2 (2026-07-13): driver now builds the FV3-faithful edge-midpoint
+        # cube SW core, not the legacy corner-corner CDGrid model.
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            FV3EdgeShallowWaterModel)
+        assert isinstance(driver.model, FV3EdgeShallowWaterModel)
+
+    def test_driver_shallow_water_run_raises_clear_error(self):
+        # codex M2: the factory builds the SW model for component-registry
+        # use, but ModelDriver cannot RUN it — _init_state builds a
+        # hydrostatic PE state, not a SW state.  BOTH public entries (setup,
+        # run) must reject SW loudly BEFORE any dycore/scale-guard, and the
+        # _init_state backstop must too — not crash cryptically at first step.
+        config = _make_config(model_type="shallow_water")
+        from legoesm.driver.model_driver import ModelDriver
+
+        # Public run() rejects at the door, even without setup().
+        driver = ModelDriver(config, output_dir="/tmp/test_driver_sw_run")
+        with pytest.raises(NotImplementedError, match="not runnable via ModelDriver"):
+            driver.run()
+        # Public setup() rejects before any dycore/scale-guard construction.
+        driver2 = ModelDriver(config, output_dir="/tmp/test_driver_sw_setup")
+        with pytest.raises(NotImplementedError, match="not runnable via ModelDriver"):
+            driver2.setup()
+        # _init_state backstop still guards a direct call.
+        driver3 = ModelDriver(config, output_dir="/tmp/test_driver_sw_init")
+        with pytest.raises(NotImplementedError, match="not runnable via ModelDriver"):
+            driver3._init_state()
 
     def test_driver_creates_nonhydrostatic_model(self):
         config = _make_config(model_type="nonhydrostatic")
