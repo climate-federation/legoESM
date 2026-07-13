@@ -107,6 +107,18 @@ def test_biophys_driver_synthetic_smoke(tmp_path):
     assert np.all(np.isfinite(ds["T_sfc"].values))
     assert float(ds["T_sfc"].min()) > 200.0
     assert float(ds["T_sfc"].max()) < 360.0
+    # CF metadata: every variable carries a long_name + units, coords are labelled,
+    # and the file opens (the "days since year_start" units string must NOT be on
+    # the time coord or xarray fails to CF-decode it).
+    assert ds.attrs.get("Conventions") == "CF-1.8"
+    assert ds["T_sfc"].attrs["units"] == "K" and ds["T_sfc"].attrs["long_name"]
+    assert ds["lhflx"].attrs["units"] == "W m-2"
+    assert ds["lat"].attrs["units"] == "degrees_north"
+    assert ds["lon"].attrs["units"] == "degrees_east"
+    assert ds["time"].attrs["units"] == "days"          # plain duration, not CF datetime
+    for v in ds.data_vars:
+        assert ds[v].attrs.get("units") is not None, f"{v} missing units"
+        assert ds[v].attrs.get("long_name"), f"{v} missing long_name"
 
 
 def test_canopy_run_tapes_gpp_and_et(tmp_path):

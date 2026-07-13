@@ -139,7 +139,12 @@ listed there can be overridden.
 ### The tape NetCDFs
 Each `output.tapes` entry produces its own file: `lmip_biophys.<tape_name>.nc`.
 Shipped defaults: `monthly` (time-mean fluxes) + `monthly_state` (instantaneous
-soil snapshot). Layout is `(time, lat, lon)` for latlon grids.
+soil snapshot). Layout is `(time, lat, lon)` for latlon grids. Files are
+**CF-annotated** (`Conventions=CF-1.8`): every variable carries `long_name` +
+`units` (+ a CF `standard_name` where one exists) and `lat`/`lon`/`time` are
+labelled, so `xr.plot`/ncview/panoply read them cleanly. Every file also carries a
+static **`land_fraction`** `(lat, lon)` variable (surfdata land+lake+glacier
+fraction) for area-weighting or masking — there is no hard land cutoff at run time.
 
 **Annual files (multi-year runs).** A run spanning more than one year ALSO writes
 one file per completed year — `lmip_biophys.<tape_name>.<year>.nc` — flushed right

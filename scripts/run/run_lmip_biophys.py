@@ -155,6 +155,73 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
     return ns
 
 
+# CF-style metadata for every output variable (long_name, UDUNITS ``units``, and a
+# CF ``standard_name`` where one exists).  Single source of truth for the tape and
+# revert-map writers; sign / positive direction is stated in the long_name.
+_VAR_META = {
+    "T_sfc":          {"long_name": "surface skin temperature", "units": "K",
+                       "standard_name": "surface_temperature"},
+    "T_soil_top":     {"long_name": "top soil-layer temperature", "units": "K",
+                       "standard_name": "soil_temperature"},
+    "theta_soil_top": {"long_name": "top soil-layer volumetric water content",
+                       "units": "m3 m-3",
+                       "standard_name": "volume_fraction_of_condensed_water_in_soil"},
+    "snow_depth":     {"long_name": "snow water equivalent", "units": "kg m-2",
+                       "standard_name": "surface_snow_amount"},
+    "albedo":         {"long_name": "surface broadband shortwave albedo", "units": "1",
+                       "standard_name": "surface_albedo"},
+    "shflx":          {"long_name": "surface sensible heat flux (positive up, into atmosphere)",
+                       "units": "W m-2", "standard_name": "surface_upward_sensible_heat_flux"},
+    "lhflx":          {"long_name": "surface latent heat flux (positive up, into atmosphere)",
+                       "units": "W m-2", "standard_name": "surface_upward_latent_heat_flux"},
+    "Rnet":           {"long_name": "net radiation into the surface (SW absorbed + net LW)",
+                       "units": "W m-2", "standard_name": "surface_net_downward_radiative_flux"},
+    "runoff":         {"long_name": "total runoff (surface + subsurface freshwater flux)",
+                       "units": "kg m-2 s-1", "standard_name": "runoff_flux"},
+    "precip":         {"long_name": "total precipitation rate", "units": "kg m-2 s-1",
+                       "standard_name": "precipitation_flux"},
+    "LAI":            {"long_name": "leaf area index", "units": "m2 m-2",
+                       "standard_name": "leaf_area_index"},
+    "GPP":            {"long_name": "gross primary production (carbon uptake)",
+                       "units": "gC m-2 day-1",
+                       "standard_name": "gross_primary_productivity_of_biomass_expressed_as_carbon"},
+    "ET":             {"long_name": "evapotranspiration (latent-heat-equivalent, lhflx / L_v)",
+                       "units": "mm day-1", "standard_name": "water_evapotranspiration_flux"},
+    "transp":         {"long_name": "canopy transpiration (LE_canopy / L_v)", "units": "mm day-1",
+                       "standard_name": "transpiration_flux"},
+    "soil_evap":      {"long_name": "soil / ground evaporation (LE_soil / L_v)", "units": "mm day-1",
+                       "standard_name": "water_evaporation_flux_from_soil"},
+    "reverted":       {"long_name": "NaN-revert guard rate (fraction of steps reverted; "
+                                    ">0 = numerically diverging cell)", "units": "1"},
+    "land_fraction":  {"long_name": "surfdata land fraction (land + lake + glacier)", "units": "1",
+                       "standard_name": "land_area_fraction"},
+    "revert_count":   {"long_name": "count of steps the NaN-revert guard fired for this cell",
+                       "units": "1"},
+}
+
+
+def _apply_cf_metadata(ds):
+    """Attach per-variable long_name/units/standard_name + coordinate units +
+    the CF Conventions flag to an output ``xarray.Dataset`` (in place)."""
+    for v in ds.data_vars:
+        ds[v].attrs.update(_VAR_META.get(v, {}))
+    if "lat" in ds.coords or "lat" in ds:
+        ds["lat"].attrs.update({"long_name": "latitude", "units": "degrees_north",
+                                "standard_name": "latitude"})
+    if "lon" in ds.coords or "lon" in ds:
+        ds["lon"].attrs.update({"long_name": "longitude", "units": "degrees_east",
+                                "standard_name": "longitude"})
+    if "time" in ds.coords or "time" in ds:
+        # NB: use a plain UDUNITS duration ("days"), NOT "days since ...year_start",
+        # which xarray would try to CF-decode into a datetime and fail (year_start
+        # is not a real reference date).  The reference is stated in long_name.
+        ds["time"].attrs.update({
+            "long_name": "time (days since Jan 1 of the run's first year, noleap calendar)",
+            "units": "days"})
+    ds.attrs.setdefault("Conventions", "CF-1.8")
+    return ds
+
+
 def _nonfinite_per_col(tree, ncol: int):
     """Per-column bool ``(ncol,)``: True where ANY state leaf is non-finite in
     that column.  Columns are independent in the offline land model, so this
@@ -680,7 +747,7 @@ def run(args) -> int:
                 "time_units": "days since year_start Jan 1 (noleap)",
                 "year_label": label or "all",
             }
-            ds = xr.Dataset(data_vars, coords=coords, attrs=attrs)
+            ds = _apply_cf_metadata(xr.Dataset(data_vars, coords=coords, attrs=attrs))
             suffix = f".{label}" if label else ""
             nc = out_dir / f"lmip_biophys.{tape.name}{suffix}.nc"
             ds.to_netcdf(nc)
@@ -801,9 +868,10 @@ def run(args) -> int:
         else:
             rc_da = xr.DataArray(rc_map, dims=("ncol",), coords={
                 "lat": (("ncol",), lat_deg), "lon": (("ncol",), lon_deg)})
-        xr.Dataset({"revert_count": rc_da},
-                   attrs={"desc": "per-cell count of NaN-revert steps"}).to_netcdf(
-            out_dir / "lmip_biophys.reverts.nc")
+        _apply_cf_metadata(xr.Dataset(
+            {"revert_count": rc_da},
+            attrs={"desc": "per-cell count of NaN-revert-guard steps (0 = fully finite)"}),
+        ).to_netcdf(out_dir / "lmip_biophys.reverts.nc")
         print(f"wrote {out_dir / 'lmip_biophys.reverts.nc'}")
     except Exception as e:  # noqa: BLE001
         print(f"(revert-map write skipped: {e})")
