@@ -118,14 +118,20 @@ class SnowColumnState(NamedTuple):
     density: jnp.ndarray
 
 
-def initial_snow_state(shape, config: SnowColumnConfig = SnowColumnConfig()):
-    """An empty snowpack (all masses zero) of the given leading ``shape``."""
+def initial_snow_state(shape, config: SnowColumnConfig = SnowColumnConfig(),
+                       dtype=None):
+    """An empty snowpack (all masses zero) of the given leading ``shape``.
+
+    ``dtype`` (default: JAX float default) pins the layer arrays so the column
+    does not start float32 under a float64 land state (mirrors the banded-SWE
+    init in ``init_multilayer_land_state``).
+    """
     n = config.n_layers
-    z = jnp.zeros(shape + (n,))
+    z = jnp.zeros(shape + (n,), dtype=dtype)
     return SnowColumnState(
         swe_ice=z, swe_liq=z,
-        T=jnp.full(shape + (n,), _TF),
-        density=jnp.full(shape + (n,), config.rho_snow_fresh),
+        T=jnp.full(shape + (n,), _TF, dtype=dtype),
+        density=jnp.full(shape + (n,), config.rho_snow_fresh, dtype=dtype),
     )
 
 

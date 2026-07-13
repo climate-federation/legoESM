@@ -860,6 +860,11 @@ def _step_multilayer_land_impl(
         # CLM-ML canopy carry is a NamedTuple pytree (not a dtype-castable leaf),
         # so it bypasses ``_match``; ``None`` for the non-canopy schemes.
         canopy_state=canopy_state_new,
+        # Snow-column carry: passed through unchanged here (single-scheme => None).
+        # The multilayer coupling (Phase 2b Stage 3) will replace this with the
+        # stepped column; until then it preserves the pytree structure so a
+        # multilayer state round-trips a lax.scan carry without an in/out mismatch.
+        snow_column=state.snow_column,
     )
 
     # --- Post-step surface state for coupler ---
@@ -1112,6 +1117,17 @@ def init_multilayer_land_state(
     else:
         canopy_state = None
 
+    # Prognostic multi-layer snow column: an empty pack on cold start (all layers
+    # zero SWE, T at freezing, fresh-snow density) when the multilayer scheme is
+    # selected; ``None`` keeps the legacy single cell-mean pytree.  Match the soil
+    # dtype so the column does not start float32 under a float64 state.
+    if config.snow_scheme == "multilayer":
+        from legoesm.land.snow_column import initial_snow_state
+        snow_column = initial_snow_state((ncol,), config.snow_column,
+                                         dtype=T_soil.dtype)
+    else:
+        snow_column = None
+
     return MultiLayerLandState(
         T_soil=T_soil,
         psi_soil=psi_soil,
@@ -1126,6 +1142,7 @@ def init_multilayer_land_state(
         snow_age_bands=snow_age_bands,
         ice_bands=ice_bands,
         canopy_state=canopy_state,
+        snow_column=snow_column,
     )
 
 

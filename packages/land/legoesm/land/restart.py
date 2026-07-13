@@ -42,6 +42,10 @@ _MULTILAYER_FIELDS = (
     "snow_depth", "snow_age",
 )
 
+# Prognostic multi-layer snow-column leaves (SnowColumnState), saved/restored as an
+# additive optional payload under ``snow_col_*`` keys when snow_scheme="multilayer".
+_SNOW_COLUMN_FIELDS = ("swe_ice", "swe_liq", "T", "density")
+
 
 def save_land_restart(
     path,
@@ -93,6 +97,15 @@ def save_land_restart(
     tgc = getattr(state, "TgC", None)
     if tgc is not None:
         payload["TgC"] = np.asarray(tgc)
+    # Multi-layer snow column (snow_scheme="multilayer"): an ADDITIVE optional
+    # payload — a prognostic NamedTuple of 4 (ncol, n_snow_layers) arrays flattened
+    # to ``snow_col_*`` keys.  Mirrors the TgC presence-check convention (no version
+    # bump): a "single"-scheme v1 restart has no such keys and loads with
+    # snow_column=None; a multilayer restart round-trips the equilibrated column.
+    snow_col = getattr(state, "snow_column", None)
+    if snow_col is not None:
+        for field in _SNOW_COLUMN_FIELDS:
+            payload[f"snow_col_{field}"] = np.asarray(getattr(snow_col, field))
 
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -150,6 +163,14 @@ def load_land_restart(
             f"{expected_n_layers}"
         )
 
+    # Reconstruct the multi-layer snow column iff its additive payload is present
+    # (multilayer-scheme restart); a "single"-scheme restart has no snow_col_* keys.
+    snow_column = None
+    if "snow_col_swe_ice" in data.files:
+        from legoesm.land.snow_column import SnowColumnState
+        snow_column = SnowColumnState(
+            **{f: jnp.asarray(data[f"snow_col_{f}"]) for f in _SNOW_COLUMN_FIELDS})
+
     state = MultiLayerLandState(
         T_soil=T,
         psi_soil=jnp.asarray(data["psi_soil"]),
@@ -159,6 +180,7 @@ def load_land_restart(
         snow_depth=jnp.asarray(data["snow_depth"]),
         snow_age=jnp.asarray(data["snow_age"]),
         TgC=jnp.asarray(data["TgC"]) if "TgC" in data.files else None,
+        snow_column=snow_column,
     )
     meta = {
         "restart_version": version,
@@ -198,6 +220,19 @@ def merge_land_restart_into_template(loaded, template):
         fields[name] = arr
     if getattr(loaded, "TgC", None) is not None:
         fields["TgC"] = loaded.TgC
+    # Graft the equilibrated multi-layer snow column onto the template's structure
+    # (both are None for a "single"-scheme run — a harmless no-op).  Shape-check per
+    # leaf so a snow-layer-count skew fails loudly rather than silently reshaping.
+    if getattr(loaded, "snow_column", None) is not None:
+        ref = getattr(template, "snow_column", None)
+        if ref is not None:
+            for leaf in _SNOW_COLUMN_FIELDS:
+                a, r = getattr(loaded.snow_column, leaf), getattr(ref, leaf)
+                if hasattr(a, "shape") and hasattr(r, "shape") and a.shape != r.shape:
+                    raise ValueError(
+                        f"land restart snow_column.{leaf} has shape {tuple(a.shape)}, "
+                        f"expected {tuple(r.shape)} (snow-layer-count skew)")
+        fields["snow_column"] = loaded.snow_column
     return template._replace(**fields)
 
 
