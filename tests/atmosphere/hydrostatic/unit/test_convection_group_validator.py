@@ -447,18 +447,25 @@ def test_tier3_massflux_schemes_total_water_NOT_closed_in_scheme_KNOWN():
 
 @pytest.mark.xfail(
     reason=(
-        "PRE-EXISTING KF column-water closure defect (not a regression from any "
-        "recent branch; kain_fritsch.py untouched). Measured on this column: KF "
-        "net(dq_v+dq_c+dq_r)=+3.16e-4 kg/m^2/s — a spurious water SOURCE, 130x the "
-        "ZM transport residual (2.43e-6) and ~2.7x Bechtold (1.18e-4); dq_r_conv_dt "
-        "is 0 here, so the residual is NOT routed convective rain. The removed-PEFF "
-        "fix (below) closed the old ~2.6e-4 SINK leak but left this ~3.2e-4 SOURCE "
-        "imbalance in the CONDLOAD detrainment<->vapor-consumption mapping. The "
-        "RELATIVE closure gate (test above, net/|int dq_v| < 1e-3) still passes, so "
-        "it is a ~0.1% compensating-subsidence discretization residual — but this "
-        "tier-3 test aspirationally demands KF match ZM's absolute closure, which it "
-        "does not yet. Fixing needs real KF moisture-budget surgery + conservation "
-        "validation + codex; xfail(strict=False) tracks it and will xpass when fixed."
+        "PRE-EXISTING KF-Eta water+energy budget defect (kain_fritsch.py untouched by "
+        "recent branches). ROOT-CAUSED 2026-07-13 on this deep-tropical column: "
+        "net(dq_v+dq_c+dq_r)=+3.16e-4 kg/m^2/s spurious water SOURCE (130x ZM's "
+        "2.43e-6). Mechanism (measured, not the subsidence solve — implicit_flux "
+        "makes it WORSE, +5.17e-4): (1) the entraining plume delivers dq_c_conv_dt≈0 "
+        "to the environment (no detrainable cloud reaches microphysics); (2) CONDLOAD "
+        "generates precip_col=9.48e-4 of fallout and the downdraft re-evaporates "
+        "evap_col=5.17e-4 back into the column as +dq_v_dt, but the CONDENSATION that "
+        "produced that precip is NEVER debited from the column vapor (nor its latent "
+        "warming applied) — so re-evaporated water appears from nowhere; (3) net "
+        "surface rain (precip_col-evap_col=4.31e-4) is emitted as neither dq_r_conv_dt "
+        "nor a column sink. A correct fix is COUPLED: debit -precip_col from dq_v with "
+        "its +L_v/c_p latent warming, emit dq_r_conv_dt for the net rain, and use the "
+        "conservative implicit_flux kernel for the residual -2.01e-4 transport leak — "
+        "all sign-checked and VISUALLY validated vs KF's W2 cube imprint + AMIP day-5 "
+        "+ RCE realism (KF passes these today; a rushed budget rewrite risks "
+        "regressing them). Tracked as a validated-PR-sized effort. The RELATIVE gate "
+        "(test above, net/|int dq_v|<1e-3) still passes. xfail(strict=False) xpasses "
+        "when fixed."
     ),
     strict=False,
 )
