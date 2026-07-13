@@ -61,6 +61,7 @@ __param_spec__ = {
             "epsilon_shallow": "entrainment: IFS shallow base rate scaled in-scheme",
             "lcl_membership_sharpness": "numerics: sigmoid sharpness on the below-LCL level membership [1/level index]",
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
+            "precip_efficiency": "off/on precip-efficiency discontinuity gated by a static Python branch (`if config.precip_efficiency > 0.0` in bechtold.py); not a differentiable trainable leaf (a traced leaf breaks the JIT gate). Retune via config, not sigmoid-trained across the off/on discontinuity.",
             "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
         },
         "params": {
@@ -1372,6 +1373,15 @@ class BechtoldConfig(NamedTuple):
     # [0.5, 1.0] (θ ≥ 0.5 removes the explicit-side amplification).  Unused
     # when subsidence_solve == "advective".
     theta_implicit: float = 1.0
+    # In-updraft convective precipitation efficiency [dimensionless]: the
+    # fraction of detrained plume condensate diverted to RAIN (dq_r_conv_dt,
+    # sediments via microphysics, radiatively invisible) instead of suspended
+    # anvil cloud (dq_c_conv_dt).  Default 0.7 = ON (unlike Tiedtke's 0.0):
+    # without the split, undrained anvil cloud radiatively loads the
+    # polar-night column and runs the equilibrium away (#929).  0.0 restores
+    # the legacy no-split behaviour (dq_r_conv_dt=None) byte-for-byte.  See
+    # bechtold.py in-updraft precipitation block; mirrors TiedtkeConfig.
+    precip_efficiency: float = 0.7
 
 
 class ConvectiveEDMFConfig(NamedTuple):

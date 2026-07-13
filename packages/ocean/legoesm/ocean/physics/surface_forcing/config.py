@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from legoesm import constants
+from legoesm.ocean.eos import FreezingPointConfig
 
 
 __param_spec__ = {
@@ -177,7 +178,11 @@ class FluxFeedbackConfig(NamedTuple):
     ``T_freeze_ocean − T_freeze`` = −1.7999999999999545 °C, equal to Veros's
     literal ``−1.8`` only to ~4.6e-14 (float representation of the
     subtraction). It selects a comparison branch, so the gap is physically
-    inert; documented for bit-level oracle work.
+    inert; documented for bit-level oracle work.  With
+    ``freezing.scheme != "constant"`` (MED-1 follow-up) the mask threshold is
+    instead the LOCAL liquidus ``eos.freezing_point(S_surf, scheme)`` [°C]
+    per cell — fresher water ices at a warmer threshold, saltier colder;
+    ``"constant"`` (default) keeps ``ice_threshold_C`` byte-identical.
 
     Penetrative shortwave (Veros global_flexible / global_1deg ``qsol``):
     with ``penetrative_shortwave=True`` the scheme consumes the optional
@@ -217,6 +222,12 @@ class FluxFeedbackConfig(NamedTuple):
     # channel, never a silent scalar-tau fallback).  OFF by default ⇒
     # bit-identical existing paths.
     salt_restore_piston: bool = False
+    # Seawater freezing-point (liquidus) scheme for the ice-mask threshold
+    # (MED-1 follow-up).  "constant" (default) keeps the fixed
+    # ``ice_threshold_C`` above byte-identical (the Veros comparison); a
+    # liquidus scheme replaces it with the LOCAL per-cell
+    # ``eos.freezing_point(S_surf, scheme)`` [°C].
+    freezing: FreezingPointConfig = FreezingPointConfig()
 
 
 class BulkFormulaConfig(NamedTuple):

@@ -478,8 +478,17 @@ def lu_K(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
         1e-10, 1.0,
     )
     m = 1.0 - 1.0 / config.n_vg
-    inner = 1.0 - (1.0 - Se ** (1.0 / m)) ** m
-    K_cap = config.K_sat * jnp.sqrt(Se) * inner ** 2
+    # where-before-pow guard (identical to van_genuchten_K): at saturation
+    # Se=1 the Mualem base u = 1 - Se^(1/m) = 0, and u**m (m<1) has an infinite
+    # slope, so the outer where(psi>=0, K_sat, K) would give 0*inf = NaN in the
+    # reverse-mode gradient wrt theta_sat/theta_r.  Masking keeps that gradient
+    # finite while the forward stays exact (u=0 -> inner=1 -> K_cap=K_sat).
+    Se_safe = jnp.maximum(Se, 1e-12)
+    u = 1.0 - Se_safe ** (1.0 / m)
+    mask = u > 1e-12
+    u_pow = jnp.where(mask, jnp.where(mask, u, 1.0) ** m, 0.0)
+    inner = 1.0 - u_pow
+    K_cap = config.K_sat * jnp.sqrt(Se_safe) * inner ** 2
     # Film-flow floor: prevents K=0 in the adsorptive regime
     K_film = config.K_sat * 1e-10
     K = jnp.maximum(K_cap, K_film)
@@ -581,10 +590,16 @@ def moisture_capacity(psi: jnp.ndarray, theta: jnp.ndarray,
     elif curve == "lu":
         C = lu_C(psi, config)
     elif curve == "brooks_corey":
-        # Brooks-Corey: use finite difference approximation
+        # Brooks-Corey: finite-difference the RAW retention curve.  Using
+        # theta_from_psi here would double-count the elastic S_s*theta_sat term
+        # (theta_from_psi adds S_s*theta_sat*psi for psi>=0, and the block below
+        # adds S_s*theta_sat again) -> C ~= 2*S_s*theta_sat at saturation,
+        # inconsistent with dtheta/dpsi and the mixed-form Picard mass balance.
+        # Every other scheme (van_genuchten_C, clapp_hornberger_C, pdi_C, lu_C)
+        # differentiates the raw curve, so the S_s term is supplied exactly once.
         eps = 1e-4  # coeff-ok: finite-difference / safety epsilon
-        theta_p = theta_from_psi(psi + eps, config)
-        theta_m = theta_from_psi(psi - eps, config)
+        theta_p = brooks_corey_theta(psi + eps, config)
+        theta_m = brooks_corey_theta(psi - eps, config)
         C = (theta_p - theta_m) / (2.0 * eps)
     else:
         raise ValueError(f"Unknown retention curve: {curve}")

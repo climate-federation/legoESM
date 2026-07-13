@@ -40,8 +40,9 @@ import xarray as xr
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_vapor_pressure_aerk
+from legoesm.thermo import saturation_vapor_pressure_aerk, moist_air_density
 from legoesm.core.coupling_fields import AtmToSurface
+from legoesm.land.forcing.cru_jra import snow_fraction, SNOW_RAIN_RAMP_K
 from legoesm.land.canopy.config import (
     CanopyLandParams,
     PFT_AERO_PARAMS,
@@ -329,11 +330,11 @@ def read_ec_site_driver(
     p_pa = fil["PA"] * _KPA_TO_PA                   # kPa -> Pa
     vpd_pa = fil["VPD"] * _HPA_TO_PA                # hPa -> Pa
     q = _specific_humidity_from_vpd(T_K, vpd_pa, p_pa)
-    T_v = T_K * (1.0 + (1.0 / constants.epsilon - 1.0) * q)   # virtual temperature
-    rho = p_pa / (constants.R_d * T_v)
+    rho = moist_air_density(T_K, p_pa, q)          # shared thermo helper (rho = p/(R_d T_v))
     cos_zen = np.clip(np.cos(np.deg2rad(fil["SZA"])), 0.0, 1.0)   # night SZA>90 -> 0
     precip = fil["P"] / dt_s                       # mm/step (=kg/m2/step) -> kg/m2/s
-    snow_frac = np.clip((constants.T_freeze + 2.0 - T_K) / 4.0, 0.0, 1.0)
+    # Shared CLM snow/rain partition (identical ramp to the gridded CRU-JRA path).
+    snow_frac = snow_fraction(T_K, ramp_k=SNOW_RAIN_RAMP_K)
 
     def col(a):  # (n,) -> (n, 1) jnp
         return jnp.asarray(a, dtype=jnp.float64)[:, None]

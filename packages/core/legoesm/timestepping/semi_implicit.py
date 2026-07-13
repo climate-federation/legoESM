@@ -59,6 +59,11 @@ class SemiImplicitData(NamedTuple):
         Vertical coupling matrix (Hoskins & Simmons 1975).
         Gamma[k, k'] is the contribution of D at level k' to the
         geopotential + R_d*T_ref*lnps tendency at level k.
+    tau : jax.Array, shape (nlev, nlev)
+        Reference thermodynamic coupling matrix: dT'/dt = -tau @ D
+        (linearized adiabatic heating, see compute_tau_matrix).  Used for
+        the temperature correction; consistent with Gamma = R_d*(S @ tau +
+        T_ref*1*b^T).
     eigenvalues : jax.Array, shape (n_max+1,)
         n(n+1)/a^2 for each total wavenumber n.
     si_matrices : jax.Array, shape (n_max+1, nlev, nlev)
@@ -76,6 +81,7 @@ class SemiImplicitData(NamedTuple):
         1 - sigma_top (for lnps correction).
     """
     Gamma: jax.Array
+    tau: jax.Array
     eigenvalues: jax.Array
     si_matrices: jax.Array
     T_ref: float
@@ -85,38 +91,127 @@ class SemiImplicitData(NamedTuple):
     sigma_range: jax.Array
 
 
+def compute_tau_matrix(
+    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
+    T_ref: float,
+) -> jax.Array:
+    """Reference thermodynamic coupling matrix ``tau``: ``dT'/dt = -tau @ D``.
+
+    ``tau`` is the linearization of the dycore's adiabatic heating term
+    ``kappa*T*omega/p`` about the isothermal (``T = T_ref``) resting
+    reference state.  For an isothermal reference the vertical advection of
+    ``T`` vanishes (``dT_ref/dsigma = 0``), so the ENTIRE temperature-from-
+    divergence coupling is the adiabatic term:
+
+        dT'_k/dt = kappa * T_ref * (omega/p)_k,
+        (omega/p)_k = d(ln p_s)/dt + sigma_dot_k / sigma_k,
+
+    where ``d(ln p_s)/dt`` and ``sigma_dot`` are diagnosed from the
+    divergence ``D`` by the SAME shared operators the model integrates with
+    (continuity + :func:`compute_sigma_dot` + :func:`compute_pressure_velocity`).
+    Note the surface pressure ``p_s`` cancels in ``omega/p``, so ``tau`` is
+    independent of the reference pressure.  Because this ``tau`` is the exact
+    linearization of the model's own thermodynamics, the gravity-wave
+    structure matrix ``Gamma = R_d*(S @ tau + T_ref*1*b^T)`` is symmetrizable
+    with REAL, POSITIVE eigenvalues — the vertical normal-mode "equivalent
+    depths" ``H = lambda/g`` (external/Lamb mode ~10 km down to tiny internal
+    modes).
+
+    This replaces the earlier diagonal approximation ``tau = T_ref*I``, which
+    dropped both the factor ``kappa`` and the vertical non-locality of
+    ``omega/p`` and therefore made ``Gamma`` non-normal, with complex
+    eigenvalues at ``nlev >= 4`` (issue #960 — the 2nd contributor to the
+    T85 NaN).
+
+    Parameters
+    ----------
+    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
+        Vertical coordinate.  Hybrid coordinates are linearized at
+        ``p_s = p_ref`` via their sigma-compatibility views (``sigma_full``,
+        ``dsigma``, ``fractional_sigma``).
+    T_ref : float
+        Reference temperature [K].
+
+    Returns
+    -------
+    tau : jax.Array, shape (nlev, nlev)
+    """
+    # Reuse the model's shared vertical operators — never re-derive sigma_dot
+    # or omega here (CLAUDE.md: reuse shared numerics).  Function-scope import
+    # avoids a core->grids top-level cycle.
+    from legoesm.grids.vertical import compute_sigma_dot, compute_pressure_velocity
+
+    kappa = constants.kappa
+    nlev = sigma_coord.n_levels
+    _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+
+    if _hybrid:
+        dsigma = jnp.asarray(sigma_coord.dsigma_eff, dtype=jnp.float64)
+        sigma_range = jnp.asarray(sigma_coord.B_range, dtype=jnp.float64)
+    else:
+        dsigma = jnp.asarray(sigma_coord.dsigma, dtype=jnp.float64)
+        sigma_top = jnp.asarray(sigma_coord.sigma_half[0], dtype=jnp.float64)
+        sigma_range = 1.0 - sigma_top
+
+    sigma_full = jnp.asarray(sigma_coord.sigma_full, dtype=jnp.float64)
+    p_ref = jnp.asarray(constants.p_ref, dtype=jnp.float64)
+    p_full = sigma_full * p_ref  # reference full-level pressure (p_ref cancels)
+
+    def adiabatic_of_D(D: jax.Array) -> jax.Array:
+        # Continuity: d(ln p_s)/dt = -D_total / sigma_range.
+        D_total = jnp.sum(D * dsigma)
+        dlnps_dt = -D_total / sigma_range
+        dp_s_dt = p_ref * dlnps_dt
+        # sigma_dot and omega from the shared discrete operators.
+        sigma_dot = compute_sigma_dot(D, sigma_coord)
+        omega = compute_pressure_velocity(sigma_dot, p_ref, dp_s_dt, sigma_coord)
+        return kappa * T_ref * omega / p_full  # = adiabatic dT'/dt
+
+    # ``adiabatic_of_D`` is EXACTLY linear in D, so its Jacobian is the
+    # operator matrix; dT'/dt = -tau @ D  =>  tau = -d(adiabatic)/dD.
+    dadiab_dD = jax.jacfwd(adiabatic_of_D)(jnp.zeros(nlev, dtype=jnp.float64))
+    return -dadiab_dD
+
+
 def compute_Gamma_matrix(
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     T_ref: float,
+    tau: jax.Array | None = None,
 ) -> jax.Array:
     """Compute the Hoskins-Simmons vertical coupling matrix Gamma.
 
     Gamma encodes the vertical coupling of divergence to pressure
-    gradient through the hydrostatic relation and the equation of state.
+    gradient through the hydrostatic relation and the equation of state,
+    substituting the linearized thermodynamic and continuity equations:
+
+        d^2 D/dt^2 = nabla^2 * Gamma * D,
+        Gamma = R_d * (S @ tau + T_ref * 1 * b^T).
 
     The coupling has two pathways:
 
-    1. **Geopotential (hydrostatic integral)**: D at level k' changes T
-       at k' by -alpha*dt*T_ref*D_{k'} (compression heating). This T
-       change propagates into the geopotential Phi at level k through
-       the Simmons-Burridge hydrostatic integral:
+    1. **Geopotential (hydrostatic integral)**: divergence heats/cools each
+       level adiabatically via ``tau`` (``dT'/dt = -tau @ D``, see
+       :func:`compute_tau_matrix`); the temperature change propagates into
+       the geopotential ``Phi`` at level k through the Simmons-Burridge
+       hydrostatic integral:
 
            Phi_k = phis + sum_{k''>k} R_d*T_{k''}*ln_ratio[k'']
                    + R_d*T_k*alpha_SB[k]
 
-       So dPhi_k/dT_{k'} = R_d*ln_ratio[k'] for k'>k (below level k),
-                          = R_d*alpha_SB[k]   for k'=k (self-coupling),
-                          = 0                  for k'<k (above level k).
+       So ``dPhi_k/dT_{k'} = R_d * S[k, k']`` with
+           S[k, k'] = ln_ratio[k']  for k'>k (below level k),
+                    = alpha_SB[k]    for k'=k (Simmons-Burridge self-coupling),
+                    = 0              for k'<k (above level k).
 
     2. **Surface pressure**: D at all levels changes lnps via the
        continuity equation: d(lnps)/dt = -sum_k D_k*dsigma_k/sigma_range.
-       This enters the PGF as R_d*T_ref*lnps.
+       This enters the PGF as R_d*T_ref*lnps, giving the rank-1 term
+       ``T_ref * 1 * b^T`` with ``b[k'] = dsigma[k']/sigma_range``.
 
-    The combined matrix is:
-
-        Gamma[k,k'] = R_d*T_ref * (S[k,k'] + dsigma[k']/sigma_range)
-
-    where S is an upper-triangular geopotential coupling matrix.
+    Using the CONSISTENT ``tau`` (the linearization of the model's own
+    adiabatic term) — rather than the diagonal ``tau = T_ref*I`` — is what
+    makes Gamma symmetrizable with real, positive eigenvalues at all nlev
+    (issue #960).
 
     For hybrid coordinates, the reference ln_ratio and alpha are
     precomputed at p_s = p_ref (standard linearization). The effective
@@ -128,6 +223,9 @@ def compute_Gamma_matrix(
         Vertical coordinate.
     T_ref : float
         Reference temperature [K].
+    tau : jax.Array, optional
+        Precomputed thermodynamic coupling matrix (shape (nlev, nlev)).
+        If None, computed via :func:`compute_tau_matrix`.
 
     Returns
     -------
@@ -150,6 +248,9 @@ def compute_Gamma_matrix(
         sigma_top = jnp.asarray(sigma_coord.sigma_half[0], dtype=jnp.float64)
         sigma_range = 1.0 - sigma_top
 
+    if tau is None:
+        tau = compute_tau_matrix(sigma_coord, T_ref)
+
     # --- Geopotential coupling matrix S[k, k'] ---
     # S[k, k'] = ln_ratio[k']  if k' > k  (k' is below level k in the
     #                                        hydrostatic integral)
@@ -169,14 +270,17 @@ def compute_Gamma_matrix(
         ),
     )
 
-    # --- Surface pressure coupling ---
+    # --- Surface pressure coupling (rank-1: 1 * b^T) ---
     # Each k' contributes dsigma[k']/sigma_range to all rows k
     lnps_coupling = dsigma[None, :] / sigma_range  # (1, nlev) -> broadcast
 
-    # --- Combined Gamma ---
-    # NOTE: No E-variable diagonal (lnps_ref * I) — the correct PGF form
-    # does not include the R_d*lnps_0*∇²(T') same-level coupling.
-    Gamma = R_d * T_ref * (S + lnps_coupling)
+    # --- Combined Gamma = R_d * (S @ tau + T_ref * 1 * b^T) ---
+    # Geopotential response to the adiabatic heating (S @ tau) plus the
+    # surface-pressure PGF (rank-1).  Consistent ``tau`` => real, positive
+    # eigenvalues (equivalent depths).  NOTE: No E-variable diagonal
+    # (lnps_ref * I) — the correct PGF form does not include the
+    # R_d*lnps_0*∇²(T') same-level coupling.
+    Gamma = R_d * (S @ tau + T_ref * lnps_coupling)
 
     return Gamma
 
@@ -208,14 +312,28 @@ def precompute_si_matrices(
     SemiImplicitData
         Precomputed matrices for use in si_correction.
     """
+    # alpha is the theta-method implicitness weight. It MUST lie in (0, 1]:
+    # the forward ``si_correction`` RHS carries a ``((1-alpha)/alpha)`` factor
+    # (division by alpha), and alpha<=0 is not semi-implicit at all (fully
+    # explicit -> no gravity-wave stabilization). Reject it loudly rather than
+    # silently producing a no-op / NaN correction.
+    if not (0.0 < alpha <= 1.0):
+        raise ValueError(
+            f"semi-implicit alpha must be in (0, 1] (0.5=Crank-Nicolson, "
+            f"1.0=fully implicit); got {alpha!r}"
+        )
+
     _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
 
     a = grid.radius
     n_max = grid.n_max
     nlev = sigma_coord.n_levels
 
-    # Compute vertical coupling matrix
-    Gamma = compute_Gamma_matrix(sigma_coord, T_ref)
+    # Compute vertical coupling matrices.  ``tau`` is the linearized adiabatic
+    # heating (dT'/dt = -tau @ D); ``Gamma`` reuses it so the reference matrix
+    # and the temperature correction stay consistent (issue #960).
+    tau = compute_tau_matrix(sigma_coord, T_ref)
+    Gamma = compute_Gamma_matrix(sigma_coord, T_ref, tau=tau)
 
     # Eigenvalues of -nabla^2: n(n+1)/a^2
     ns = jnp.arange(n_max + 1, dtype=jnp.float64)
@@ -239,6 +357,7 @@ def precompute_si_matrices(
 
     return SemiImplicitData(
         Gamma=Gamma,
+        tau=tau,
         eigenvalues=eigenvalues,
         si_matrices=si_matrices,
         T_ref=T_ref,
@@ -255,6 +374,7 @@ def si_correction(
     si_data: SemiImplicitData,
     grid: GaussianGrid,
     dt: float,
+    predictor: str = "forward",
 ):
     """Apply semi-implicit correction to divergence, temperature, and lnps.
 
@@ -262,37 +382,72 @@ def si_correction(
     by solving the implicit system, then correct temperature and surface
     pressure to maintain consistency.
 
+    The exact implicit centering depends on how the *explicit predictor*
+    was built, so it MUST match the outer integrator (``predictor``):
+
+    - ``"forward"`` (Euler / SSP-RK3 stage): the predictor is a forward step
+      ``X* = X_old + dt*F(X_old)``, so ``state_old`` is the level the step
+      advances FROM.  The trapezoidal (theta-method) Helmholtz solve is
+
+          (I + M) * D_new = D_explicit - ((1-alpha)/alpha) * M * D_old
+          delta_D         = D_new - D_old
+
+      with ``M = alpha^2*dt^2*eigenvalue[n]*Gamma``.  alpha=0.5 is
+      Crank-Nicolson (neutral, |lambda|=1); alpha>0.5 damps.  (The earlier
+      ``+ M*D_old`` RHS with ``delta_D = D_new - D_explicit`` was a
+      forward-Euler-amplifying increment, unconditionally unstable for the
+      gravity wave -- issue #920.)
+
+    - ``"leapfrog"``: the predictor is the centered ``2*dt`` leapfrog
+      ``X* = X^{n-1} + 2*dt*F(X^n)`` and ``state_old = X^n`` is the CENTER
+      time level, NOT the level the step advances from.  The forward
+      trapezoidal derivation does NOT apply (its ``D_explicit = D_old +
+      dt*F(D_old)`` identity is false here); using it drops leapfrog from
+      2nd- to ~1st-order and makes it weakly amplifying (|lambda|>1).  The
+      correct centered leapfrog-SI keeps the increment form
+
+          (I + M) * D_new = D_explicit + M * D^n
+          delta_D         = D_new - D_explicit
+
+      which is 2nd-order and neutral to O((omega*dt)^4) (verified against the
+      textbook centered SI-leapfrog).  This is the pre-#920 behaviour, now
+      scoped to the leapfrog predictor only.
+
     Parameters
     ----------
     state_explicit : SpectralHydrostaticState
-        State after explicit RK stage.
+        State after the explicit predictor.
     state_old : SpectralHydrostaticState
-        State at the beginning of the RK stage (before tendency).
+        For ``"forward"``: the stage-start state (level advanced FROM).
+        For ``"leapfrog"``: the CENTER time level X^n.
     si_data : SemiImplicitData
         Precomputed matrices.
     grid : GaussianGrid
         Gaussian grid.
     dt : float
-        Time step.
+        Time step (the leapfrog caller passes the full 2*dt step).
+    predictor : str
+        ``"forward"`` (Euler/RK, default) or ``"leapfrog"``.  Selects the
+        implicit centering.  Raises on any other value.
 
     Returns
     -------
     state_corrected : SpectralHydrostaticState
         State with implicit correction applied.
     """
-    alpha = si_data.alpha
-    T_ref = si_data.T_ref
+    if predictor not in ("forward", "leapfrog"):
+        raise ValueError(
+            f"si_correction predictor must be 'forward' or 'leapfrog', "
+            f"got {predictor!r}"
+        )
 
-    # Explicit divergence (what RK produced) and old divergence (start of stage)
+    alpha = si_data.alpha
+    tau = si_data.tau  # (nlev, nlev) reference thermodynamic coupling
+
+    # Explicit divergence (predictor output) and the reference-level divergence
+    # (forward: stage-start X_old; leapfrog: center X^n).
     div_hat_explicit = state_explicit.div_hat.data  # (n_sh, nlev)
     div_hat_old = state_old.div_hat.data            # (n_sh, nlev)
-
-    # The Hoskins-Simmons SI correction solves:
-    # (I + alpha^2*dt^2*eigenvalue[n]*Gamma) * D_new = D_explicit + alpha^2*dt^2*eigenvalue[n]*Gamma * D_old
-    #
-    # This ensures only the TENDENCY is implicitly modified, not the full state:
-    # D_new = D_old + (I + M)^{-1} * dt * F(X_old)
-    # where M = alpha^2 * dt^2 * eigenvalue * Gamma.
 
     # Map each SH coefficient to its total wavenumber n
     ns = grid.ls  # (n_sh,) -- total wavenumber for each coefficient
@@ -301,21 +456,39 @@ def si_correction(
     # si_matrices: (n_max+1, nlev, nlev), ns: (n_sh,)
     matrices = si_data.si_matrices[ns]  # (n_sh, nlev, nlev)
 
-    # Build RHS: D_explicit + M * D_old
-    # M * D_old = (matrices - I) * D_old
+    # M * D_old = (matrices - I) * D_old  (M = alpha^2*dt^2*eigenvalue*Gamma)
     I_nlev = jnp.eye(matrices.shape[-1], dtype=matrices.dtype)
     M_times_D_old = jnp.einsum('...ij,...j->...i', matrices - I_nlev, div_hat_old)
-    rhs = div_hat_explicit + M_times_D_old
+
+    # Build RHS with the centering that matches the predictor (see docstring).
+    # ``predictor`` is a static Python str (feature gate) -> a plain ``if`` is
+    # correct here; this is not a traced/data-dependent branch.
+    if predictor == "forward":
+        rhs = div_hat_explicit - ((1.0 - alpha) / alpha) * M_times_D_old
+    else:  # "leapfrog": centered 2*dt increment off the explicit predictor
+        rhs = div_hat_explicit + M_times_D_old
 
     # Solve: matrices @ div_corrected = rhs (per coefficient)
     div_hat_corrected = solve(matrices, rhs[..., None]).squeeze(-1)
 
-    # Divergence correction
-    delta_div = div_hat_corrected - div_hat_explicit  # (n_sh, nlev)
+    # Divergence correction. Forward: full implicit increment off the OLD stage
+    # state (D_new - D_old); measuring off D_explicit would double-count the
+    # explicit gravity-wave increment already in D_explicit (issue #920).
+    # Leapfrog: increment off the explicit predictor (D_new - D_explicit), the
+    # centered-leapfrog form that stays 2nd-order and neutral.
+    if predictor == "forward":
+        delta_div = div_hat_corrected - div_hat_old        # (n_sh, nlev)
+    else:  # "leapfrog"
+        delta_div = div_hat_corrected - div_hat_explicit   # (n_sh, nlev)
 
-    # Temperature correction:
-    # T_corrected = T_explicit - alpha*dt*T_ref*(D_corrected - D_explicit)
-    T_hat_corrected = state_explicit.T_hat.data - alpha * dt * T_ref * delta_div
+    # Temperature correction (consistent with Gamma's linearized adiabatic
+    # coupling): dT'/dt = -tau @ D  =>
+    #   T_corrected = T_explicit - alpha*dt * (tau @ delta_div)
+    # delta_div is (n_sh, nlev); (tau @ delta_div)[n,k] = sum_j tau[k,j]*delta_div[n,j]
+    # = (delta_div @ tau^T)[n,k].  Reduces to the old -alpha*dt*T_ref*delta_div
+    # only when tau = T_ref*I (the previous diagonal approximation, #960).
+    tau_delta_div = delta_div @ tau.T  # (n_sh, nlev)
+    T_hat_corrected = state_explicit.T_hat.data - alpha * dt * tau_delta_div
 
     # Surface pressure (lnps) correction:
     # lnps_corrected = lnps_explicit - alpha*dt * sum_k(delta_D_k * dsigma_k) / sigma_range
@@ -468,7 +641,13 @@ def leapfrog_si_step(
     tend = tendency_fn(state_n)
     dt2 = 2.0 * dt
     state_explicit = _pytree_axpy(state_nm1, tend, dt2)
-    return si_correction(state_explicit, state_n, si_data, grid, dt2)
+    # Leapfrog centering: state_n is the CENTER level X^n, not the level the
+    # 2*dt step advances from -- use the leapfrog-scoped SI correction (the
+    # forward/#920 trapezoidal centering would drop leapfrog to ~1st order and
+    # make it weakly unstable).
+    return si_correction(
+        state_explicit, state_n, si_data, grid, dt2, predictor="leapfrog",
+    )
 
 
 def robert_asselin_filter(state_nm1, state_n, state_np1, gamma, alpha=0.53):

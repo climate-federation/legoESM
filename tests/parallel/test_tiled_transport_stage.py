@@ -236,7 +236,7 @@ def test_u3d_real_ytp_v_corner_cross_tiling():
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
     from legoesm.core.fv3_sw_core import (
-        _pad_halo_uc_vc_new_via_old_delta, _pad_halo_dgrid_for_ppm,
+        _pad_halo_uc_vc_new_via_neighbor_delta, _pad_halo_dgrid_for_ppm,
         bgrid_corner_courant_local,
     )
     from tests.test_cases.cosine_bell import cosine_bell_cubesphere
@@ -252,7 +252,7 @@ def test_u3d_real_ytp_v_corner_cross_tiling():
     rng = np.random.default_rng(31)
     uc = jnp.asarray(rng.standard_normal((6, n + 1, n)))
     vc = jnp.asarray(rng.standard_normal((6, n, n + 1)))
-    uc_pad, vc_pad = _pad_halo_uc_vc_new_via_old_delta(uc, vc, u_d, v_d, cd)
+    uc_pad, vc_pad = _pad_halo_uc_vc_new_via_neighbor_delta(uc, vc, u_d, v_d, cd)
     dt5 = 0.5 * 1800.0
     vb, _ub = bgrid_corner_courant_local(
         uc_pad, vc_pad, cd.cosa_corner, cd.rsin2_corner, dt5)   # (6,n+1,n+1)
@@ -303,7 +303,7 @@ def test_u3d_real_xtp_u_corner_cross_tiling():
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
     from legoesm.core.fv3_sw_core import (
-        _pad_halo_uc_vc_new_via_old_delta, _pad_halo_dgrid_for_ppm,
+        _pad_halo_uc_vc_new_via_neighbor_delta, _pad_halo_dgrid_for_ppm,
         bgrid_corner_courant_local,
     )
     from tests.test_cases.cosine_bell import cosine_bell_cubesphere
@@ -318,7 +318,7 @@ def test_u3d_real_xtp_u_corner_cross_tiling():
     rng = np.random.default_rng(41)
     uc = jnp.asarray(rng.standard_normal((6, n + 1, n)))
     vc = jnp.asarray(rng.standard_normal((6, n, n + 1)))
-    uc_pad, vc_pad = _pad_halo_uc_vc_new_via_old_delta(uc, vc, u_d, v_d, cd)
+    uc_pad, vc_pad = _pad_halo_uc_vc_new_via_neighbor_delta(uc, vc, u_d, v_d, cd)
     dt5 = 0.5 * 1800.0
     _vb, ub = bgrid_corner_courant_local(
         uc_pad, vc_pad, cd.cosa_corner, cd.rsin2_corner, dt5)   # (6,n+1,n+1)
@@ -370,7 +370,7 @@ def test_u3d_real_courant_in_shardmap(sweep):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
     from legoesm.core.fv3_sw_core import (
-        _pad_halo_uc_vc_new_via_old_delta, _pad_halo_dgrid_for_ppm,
+        _pad_halo_uc_vc_new_via_neighbor_delta, _pad_halo_dgrid_for_ppm,
         bgrid_corner_courant_local,
     )
     from tests.test_cases.cosine_bell import cosine_bell_cubesphere
@@ -384,7 +384,7 @@ def test_u3d_real_courant_in_shardmap(sweep):
     rng = np.random.default_rng(53)
     uc = jnp.asarray(rng.standard_normal((6, n + 1, n)))
     vc = jnp.asarray(rng.standard_normal((6, n, n + 1)))
-    uc_pad, vc_pad = _pad_halo_uc_vc_new_via_old_delta(uc, vc, u_d, v_d, cd)
+    uc_pad, vc_pad = _pad_halo_uc_vc_new_via_neighbor_delta(uc, vc, u_d, v_d, cd)
     vb, ub = bgrid_corner_courant_local(
         uc_pad, vc_pad, cd.cosa_corner, cd.rsin2_corner, 0.5 * 1800.0)
     u_d_ihalo, v_d_jhalo = _pad_halo_dgrid_for_ppm(u_d, v_d, cd, halo=h_dg)
@@ -422,3 +422,23 @@ def test_u3d_real_courant_in_shardmap(sweep):
     np.testing.assert_allclose(
         reassembled, global_f, atol=1e-12, rtol=1e-12,
         err_msg=f"U3d real-Courant {sweep}-sweep in shard_map != global")
+
+
+def test_stage_factory_rejects_d_sw3_boundary_fix():
+    """codex 2026-07-11 F3: `make_tiled_transport_sweep_stage_2d` must
+    REFUSE the d_sw3 boundary-fix args (per-tile edge masks not yet
+    ported to the shard-map stage) — a silent no-forward would reproduce
+    the pre-fix numerics under shard_map.  Host-side tiled helpers
+    (`transport_sweep_tile_2d`/`transport_jsweep_tile_2d`) remain the
+    supported route (they take per-tile `boundary_fix_edges`)."""
+    n, kt = 8, 2
+    dummy_dx = jnp.ones((6, n, n))
+    with pytest.raises(NotImplementedError, match="edge masks"):
+        make_tiled_transport_sweep_stage_2d(
+            None, n, kt, apply_d_sw3_boundary_fix=True)
+    with pytest.raises(NotImplementedError, match="edge masks"):
+        make_tiled_transport_sweep_stage_2d(
+            None, n, kt, boundary_fix_dx_field=dummy_dx)
+    with pytest.raises(NotImplementedError, match="edge masks"):
+        make_tiled_transport_sweep_stage_2d(
+            None, n, kt, boundary_fix_edges=(True, False, False, False))

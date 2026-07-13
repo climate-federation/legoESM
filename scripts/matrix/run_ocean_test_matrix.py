@@ -5739,7 +5739,7 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
                 T_ref=run_kw.get("T_ref", 17.5),
                 S_ref=run_kw.get("S_ref", 35.0),
             )
-        config = config._replace(**replace_kwargs)
+        config = config.replace_flat(**replace_kwargs)
         model = LatLonCGridOceanModel(grid, z_coord, config)
     state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
     state = _init_lock_exchange(state, tc.grid_type, grid, z_coord)

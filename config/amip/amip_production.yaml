@@ -71,11 +71,15 @@ orbital_insolation: true    # AMIP-II realistic orbit (Berger 1978): orbital
 # convective_precip_efficiency 0.0.
 cloud_rh_crit: 0.85            # was the calibrated default 0.77 (commit 3f376730e)
 cloud_q_c_diagnostic: 1.0e-4   # was 3.0e-4 ("thinner cloud" -> lower albedo)
-convective_precip_efficiency: 0.5  # detrained-condensate -> convective-rain split
-                            # (raises pr, drains column moisture). REQUIRES the
-                            # split_convective_rain scheme code to be active for
-                            # the chosen convection scheme; a no-op until that
-                            # lands on main (bechtold rain-split is not yet here).
+convective_precip_efficiency: 0.0  # detrained-condensate -> convective-rain split
+                            # (raises pr, drains column moisture). The intended
+                            # 0.5 REQUIRES the bechtold rain-split scheme code,
+                            # which is not on main yet — and run_amip's guard
+                            # hard-errors on >0 with a non-tiedtke scheme, so
+                            # 0.5 made EVERY run of this YAML die at argparse
+                            # (#932). Keep 0.0 until the bechtold rain-split
+                            # lands (tracked with the #929 bechtold campaign),
+                            # then restore 0.5 as #899 intended.
 # convective_cloud (Slingo-1987 cumulus cloud fraction): ON, to MIRROR the
 # canonical tuned-physics base (config/cmip/cmip_tuned_physics.yaml ships
 # convective_cloud: true) so this AMIP runs the SAME tuned slab parameters as the

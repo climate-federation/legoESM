@@ -67,7 +67,10 @@ from legoesm.land.canopy.photosynthesis import (
 )
 from legoesm.land.canopy.sif import SIFConfig
 from legoesm.land.leaf_biophysics import DIFFUSIVITY_RATIO_H2O_CO2
-from legoesm.thermo import saturation_vapor_pressure
+from legoesm.thermo import (
+    saturation_vapor_pressure,
+    vapor_pressure_from_specific_humidity,
+)
 
 # Fixed gas-exchange constants (not tunable).
 _CI_CA_INIT_RATIO = 0.7             # initial intercellular:ambient CO2 guess
@@ -276,7 +279,7 @@ def jarvis_gs(
     # tropical q ≈ 0.02 — small but propagates into VPD-driven
     # stomatal closure.  Audit cycle 2026-05-05 finding #24.
     e_sat = saturation_vapor_pressure(T)
-    e_air = q_air * p_surface / (constants.epsilon + (1.0 - constants.epsilon) * q_air)
+    e_air = vapor_pressure_from_specific_humidity(q_air, p_surface)
     VPD_hPa = jnp.maximum(e_sat - e_air, 0.0) / 100.0
     f_VPD = jnp.clip(1.0 - config.a_vpd * VPD_hPa, config.f_VPD_min, 1.0)
 
@@ -410,7 +413,7 @@ def solve_coupled_farquhar_ci(
     # specific humidity, so use ``e = q · p / (ε + (1 − ε) · q)``;
     # see VPD comment in jarvis_gs above.  Audit finding #24.
     e_sat = saturation_vapor_pressure(T_leaf)
-    e_air = q_air * p_surface / (constants.epsilon + (1.0 - constants.epsilon) * q_air)
+    e_air = vapor_pressure_from_specific_humidity(q_air, p_surface)
     VPD_kPa = jnp.maximum(e_sat - e_air, 0.0) / 1000.0
     RH = jnp.clip(e_air / jnp.maximum(e_sat, 1.0), 0.0, 1.0)
 

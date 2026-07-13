@@ -79,6 +79,17 @@ def constant_vertical_mixing(
     -------
     VerticalMixingOutput
     """
+    # The latitude-dependent background (Gregg 2003 / CVMix) needs the column
+    # latitude + N^2 and is applied ONLY on the implicit vertical-mixing path
+    # (k_profiles.compute_vertical_K_profiles).  Fail loud rather than silently
+    # returning a spatially-constant field the caller did not ask for.
+    if getattr(cfg, "lat_dependent", False):
+        raise ValueError(
+            "ConstantVerticalMixingConfig.lat_dependent=True is only honoured "
+            "on the IMPLICIT vertical-mixing path "
+            "(k_profiles.compute_vertical_K_profiles); the explicit "
+            "constant_vertical_mixing tendency path cannot apply the latitude "
+            "field.  Use implicit vertical mixing, or set lat_dependent=False.")
     nlev = u.shape[-1]
 
     # Velocities with viscosity A_v / tracers with diffusivity K_v.
