@@ -95,22 +95,63 @@ export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_nccl_comm_splitting=false --xl
 # and print date markers so a walltime kill is pinned to a lane at a glance.
 LANE_TIMEOUT="${LANE_TIMEOUT:-1800}"
 
-echo "== single-shot lane START $(date -Is) =="
-timeout "${LANE_TIMEOUT}" \
-mpiexec -n $((6 * KT * KT)) --ppn 4 \
-    sh -c 'export CUDA_VISIBLE_DEVICES=$PALS_LOCAL_RANKID; exec "$@"' -- \
-    "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
-    --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
-    --steps 12 --warmup 2 --multicontroller --out "${OUT}"
-echo "== single-shot lane DONE $(date -Is); closed-loop lane START $(date -Is) =="
+# #921 positional-hypothesis probes (job 6718275: the closed-loop hang tracks
+# the SECOND back-to-back mpiexec — all 24 ranks Init-START one world comm,
+# none COMPLETE — while the FIRST lane completes a fully mixed clique
+# population; so gate each lane, optionally swap order or insert a gap):
+#   RUN_SINGLE_SHOT=0      closed-loop alone in a fresh allocation
+#   LANE_ORDER=loop_first  closed-loop runs FIRST, single-shot second
+#   LANE_GAP_S=120         teardown-vs-bootstrap recycling gap between lanes
+RUN_SINGLE_SHOT="${RUN_SINGLE_SHOT:-1}"
+RUN_CLOSED_LOOP="${RUN_CLOSED_LOOP:-1}"
+LANE_ORDER="${LANE_ORDER:-shot_first}"
+LANE_GAP_S="${LANE_GAP_S:-0}"
+case "$LANE_ORDER" in
+    shot_first|loop_first) ;;
+    *) echo "ERROR: LANE_ORDER='${LANE_ORDER}' (want shot_first|loop_first)" >&2; exit 1 ;;
+esac
+
+single_shot_lane() {
+    echo "== single-shot lane START $(date -Is) =="
+    timeout "${LANE_TIMEOUT}" \
+    mpiexec -n $((6 * KT * KT)) --ppn 4 \
+        sh -c 'export CUDA_VISIBLE_DEVICES=$PALS_LOCAL_RANKID; exec "$@"' -- \
+        "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
+        --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
+        --steps 12 --warmup 2 --multicontroller --out "${OUT}"
+    echo "== single-shot lane DONE $(date -Is) =="
+}
+
 # Closed-loop production lane: the np>6 number that matters (real
 # multi-step integration, state resident tile-sharded across steps).
-timeout "${LANE_TIMEOUT}" \
-mpiexec -n $((6 * KT * KT)) --ppn 4 \
-    sh -c 'export CUDA_VISIBLE_DEVICES=$PALS_LOCAL_RANKID; exec "$@"' -- \
-    "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
-    --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
-    --steps 12 --warmup 2 --multicontroller --closed-loop --out "${OUT}"
-echo "== closed-loop lane DONE $(date -Is) =="
+closed_loop_lane() {
+    echo "== closed-loop lane START $(date -Is) =="
+    timeout "${LANE_TIMEOUT}" \
+    mpiexec -n $((6 * KT * KT)) --ppn 4 \
+        sh -c 'export CUDA_VISIBLE_DEVICES=$PALS_LOCAL_RANKID; exec "$@"' -- \
+        "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
+        --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
+        --steps 12 --warmup 2 --multicontroller --closed-loop --out "${OUT}"
+    echo "== closed-loop lane DONE $(date -Is) =="
+}
+
+inter_lane_gap() {
+    if [ "${RUN_SINGLE_SHOT}" = "1" ] && [ "${RUN_CLOSED_LOOP}" = "1" ] \
+        && [ "${LANE_GAP_S}" -gt 0 ]; then
+        echo "== inter-lane gap ${LANE_GAP_S}s START $(date -Is) =="
+        sleep "${LANE_GAP_S}"
+        echo "== inter-lane gap DONE $(date -Is) =="
+    fi
+}
+
+if [ "${LANE_ORDER}" = "loop_first" ]; then
+    if [ "${RUN_CLOSED_LOOP}" = "1" ]; then closed_loop_lane; fi
+    inter_lane_gap
+    if [ "${RUN_SINGLE_SHOT}" = "1" ]; then single_shot_lane; fi
+else
+    if [ "${RUN_SINGLE_SHOT}" = "1" ]; then single_shot_lane; fi
+    inter_lane_gap
+    if [ "${RUN_CLOSED_LOOP}" = "1" ]; then closed_loop_lane; fi
+fi
 
 echo "done: ${OUT}"
