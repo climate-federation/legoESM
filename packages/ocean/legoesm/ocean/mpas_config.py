@@ -390,6 +390,17 @@ class MPASOceanConfig(NamedTuple):
     # surface cell (Amazon plume fidelity).  Column-integral salt tendency
     # unchanged; 0 = legacy top-cell (bit-exact).
     runoff_depth_spread_m: float = 0.0
+    # NEMO ln_rnf_depth_ini per-cell spread-depth MAP [m] (array shape
+    # (nCells,) on the flattened Voronoi state, or None): depth proportional
+    # to the local climatological runoff maximum so small Arctic/Siberian
+    # rivers stay near-surface (more shelf-surface freshening) while the
+    # Amazon spreads to ~150 m — a FLAT runoff_depth_spread_m dilutes small
+    # river plumes through the whole shelf column and leaves the Siberian/
+    # Beaufort SSS several PSU too salty.  Build with
+    # forcing.runoff_depth.nemo_runoff_depth_map; mutually exclusive with a
+    # nonzero runoff_depth_spread_m (resolve_runoff_spread_arg validates).
+    # Column-integral salt tendency unchanged; None = legacy top-cell.
+    runoff_depth_spread_map: object = None
 
 
 class MPASSimpleOceanConfig(NamedTuple):

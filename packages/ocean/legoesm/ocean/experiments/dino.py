@@ -133,9 +133,31 @@ class DINOConfig:
     T_star_eq: float = 27.0        # equatorial target T [°C]
     T_star_n_mean: float = 5.0     # northern boundary target T (annual mean of B3)
     T_star_s_mean: float = -0.5    # southern boundary target T (annual mean of B4)
+    # Seasonal T* amplitudes (usrdef_sbc.F90 case 4: T*_s = mean_s - amp_s*c2,
+    # T*_n = mean_n + amp_n*c2 with c2 the 21-July-phased cosine).  The
+    # oracle hard-codes 0.5 / 3.0 (asymmetric: mild southern, strong
+    # northern seasonal swing).
+    T_star_seasonal_amp_s: float = 0.5
+    T_star_seasonal_amp_n: float = 3.0
+    # usrdef_sbc taum westerly boost ("Boost in westerlies for TKE"):
+    # taum = |utau| * 1.3 where utau > 0 — TKE surface input only.
+    taum_westerly_boost: float = 1.3
+    # Run the analytic forcing with the oracle's annual cycle (ln_ann_cyc):
+    # T* and Q_sr recomputed per step from the 360-day-year phases.  False
+    # (historical default) keeps the precomputed annual-mean arrays
+    # bit-exact.  Requires the caller to thread t_seconds into
+    # apply_dino_*_surface_forcing (run_dino does).
+    forcing_annual_cycle: bool = False
+    # Route the wind stress THROUGH model.step(surface_forcing=...) (the
+    # dynamics-core external-tau block) instead of the post-step Euler
+    # kick, so the TKE closure receives the surface stress (NEMO's taum
+    # channel, including the usrdef x1.3 westerly boost that feeds TKE
+    # but NOT the momentum).  False (default) keeps the historical
+    # post-step wind application bit-exact.
+    wind_through_step: bool = False
     S_star_eq: float = 37.25       # equatorial target S [g/kg]
-    S_star_n: float = 35.0         # northern boundary target S [g/kg]
-    S_star_s: float = 35.1         # southern boundary target S [g/kg]
+    S_star_n: float = 35.1         # northern boundary target S [g/kg]
+    S_star_s: float = 35.0         # southern boundary target S [g/kg]
     S_star_eq_dip_amp: float = 1.25       # equatorial Gaussian dip amplitude (eq B2)
     S_star_eq_dip_sigma_deg: float = 7.5  # equatorial Gaussian dip width [deg]
 
@@ -231,6 +253,19 @@ class DINOConfig:
     visbeck_kappa_max: float = 2000.0     # κ_GM ceiling [m²/s]
     redi_S_max: float = 0.005             # Redi slope tapering threshold
     gm_redi_slope_scheme: str = "triads"  # Griffies 1998 triads (matches NEMO iso-neutral)
+    # Lateral TRACER mixing direction: "geopotential" (legacy — iso-level
+    # Laplacian K_h = ½·U_T·Δ) or "isoneutral" (NEMO ln_traldf_iso: Redi
+    # iso-neutral Laplacian with kappa = ½·U_d·Δ(φ) row-scaled, slope cap
+    # rn_slpmax via redi_S_max, EIV-independent — use_gm_redi stays the
+    # EIV switch; K_h is zeroed to avoid double-counting; the vertical
+    # diagonal K33 is solved IMPLICITLY = NEMO ln_traldf_msc).
+    lateral_tracer_mixing: str = "geopotential"
+    # Steep-slope handling for the isoneutral operator: "dm95_taper"
+    # (legacy — kappa tapers to 0 at steep slopes) or "nemo_cap" (NEMO
+    # ldfslp: slope capped at redi_S_max, taper 1 — keeps flattening
+    # steep fronts; the oracle semantic).  Only read when
+    # lateral_tracer_mixing="isoneutral".
+    redi_slope_limit: str = "dm95_taper"
 
     # ------------------------------------------------------------------
     # Lateral mixing of momentum (geopotential / iso-level Laplacian;
@@ -308,6 +343,19 @@ class DINOConfig:
     # - Vector-invariant + AL81 EEN PV-flux: legoESM default
     # ------------------------------------------------------------------
     pgf_scheme: str = "adcroft"
+    # Vertical p' quadrature (LatLonCGridOceanConfig.pgf_quadrature):
+    # "cell_integral" (legacy) or "nemo_trapezoid" (dynhpg recurrence —
+    # the DINO oracle; on DINO's stretched levels the two differ).
+    pgf_quadrature: str = "cell_integral"
+    # Vertical coordinate for the lat-lon path: "zstar" (legacy — all 36
+    # levels compressed to the local bowl depth, terrain-following) or
+    # "masked_zco" (NEMO DINO_R1 ln_zco: FLAT geopotential levels with
+    # full-cell bottom masking per zgr_msk_top_bot — wet iff
+    # gdept(k) < H; the column's depth snaps to the interface below the
+    # deepest wet centre).  The oracle runs masked z-levels, so the
+    # r1_exact preset selects "masked_zco".  MPAS keeps its own column
+    # handling and rejects "masked_zco".
+    vertical_coordinate: str = "zstar"
     barotropic_solver: str = "implicit_cn"
     barotropic_implicit_theta_eta: float = 0.55
     # When barotropic_solver="rigid_lid", DINO applies the FULL Veros-faithful
@@ -318,6 +366,14 @@ class DINOConfig:
     # dt_mom = dt / ratio under-relaxes momentum to accelerate the ACC spin-up
     # (Veros dt_mom=4800/dt_tracer=43200 ⇒ 9). Ignored unless rigid_lid.
     rigid_lid_dt_mom_ratio: float = 9.0
+    # Barotropic averaging filter (explicit_substep only): "cosine"
+    # (legacy) | "power_law" | "box" | "nemo_boxcar_centred" (dynspg_ts
+    # ln_bt_fw=F + nn_bt_flt=1 — the DINO namelist selection).
+    barotropic_time_filter: str = "cosine"
+    # ln_bt_auto: compute n_barotropic_substeps from the external-wave
+    # CFL with this Courant ceiling (rn_bt_cmax); <= 0 disables (use
+    # n_barotropic_substeps as-is).
+    barotropic_auto_cmax: float = 0.0
     tracer_advection: str = "tvd"
     # Hollingsworth correction for KE gradient (fixes Hollingsworth-
     # Kallberg instability over stratified bathymetry; legoESM #263).
@@ -381,6 +437,81 @@ class DINOConfig:
             return max(self.A_v_bg, self.tke_momentum_visc_bg)
         return self.A_v_bg
 
+
+def dino_r1_exact_config(**overrides) -> DINOConfig:
+    """DINO_R1 EXACTNESS preset (Level-1 campaign, step 1).
+
+    Flips every DINOConfig selection whose EXACT NEMO block already exists
+    onto the DINO_R1 oracle choice (tests/DINO_R1/EXP00/namelist_cfg — see
+    docs/ocean/fidelity/dino_l1_exactness_audit.md):
+
+    * ``eos="nemo_seos"``            — S-EOS, DINO coefficients (nameos)
+    * ``vmix_scheme="tke"``          — the oracle closure (namzdf); NOTE the
+      known multi-year SW-corner TKE instability (~d226 with the paper
+      backgrounds) is accepted here: exactness first, the harness measures
+      what the oracle-faithful configuration actually does
+    * ``tke_momentum_visc_bg=A_v_bg``— stabilizer floor OFF (oracle
+      avm0 = 1.2e-4 exactly; the 5e-4 floor is a legoESM stabilizer)
+    * ``bottom_drag_scheme="nemo_quadratic"`` — zdfdrg ln_non_lin (#738)
+    * ``use_gm_redi=False``          — ln_ldfeiv = .false. (NO eddy-induced
+      velocity at R1)
+    * ``lateral_tracer_mixing="isoneutral"``, ``redi_S_max=0.01`` —
+      ln_traldf_iso Redi-only Laplacian (kappa = ½·U_d·Δ(φ) row-scaled,
+      K_h zeroed) with the vertical diagonal K33 solved implicitly
+      (= ln_traldf_msc).  Remaining deviation: NEMO CAPS the slope at
+      rn_slpmax + ML ramp; we DM95-taper kappa around S_max
+    * ``A_h_floor=0``, ``A_h_eq_boost=1`` — legoESM stabilizers OFF (the
+      oracle viscosity is exactly ahm = Uv·Δ/2, no floor, no boost)
+    * ``tracer_advection="fct2"`` — NEMO traadv_fct with nn_fct_h =
+      nn_fct_v = 2 (2nd-order centred high flux + Zalesak), the oracle
+      selection
+
+    The preset also enables the oracle's seasonal forcing
+    (``forcing_annual_cycle=True`` — ln_ann_cyc) and routes the wind
+    through model.step (``wind_through_step=True`` — the TKE closure
+    receives NEMO's taum incl. the x1.3 westerly boost).
+
+    Fields that REMAIN approximate after this preset (later ladder steps,
+    tracked in the audit doc):
+    centred split-explicit barotropic (implicit_cn here), iso-neutral+MSC
+    lateral diffusion, and the MLF leapfrog integrator.
+
+    ``**overrides`` are applied on top (dataclasses.replace semantics).
+    """
+    import dataclasses as _dc
+
+    base = DINOConfig(
+        eos="nemo_seos",
+        vmix_scheme="tke",
+        bottom_drag_scheme="nemo_quadratic",
+        use_gm_redi=False,
+        A_h_floor=0.0,
+        A_h_eq_boost=1.0,
+        tracer_advection="fct2",
+        vertical_coordinate="masked_zco",
+        pgf_quadrature="nemo_trapezoid",
+        lateral_tracer_mixing="isoneutral",
+        redi_S_max=0.01,               # rn_slpmax
+        redi_slope_limit="nemo_cap",   # ldfslp cap semantics (not DM95)
+        # Centred split-explicit barotropic (ln_bt_fw=F + flt=1) is
+        # INSEPARABLE from the MLF integrator: the window needs the
+        # before-state (t-dt) start. The forward-frame reduction grows
+        # energy from day ~30 and NaNs by d180 (job 8826132) — and
+        # NEMO's own DINO namelist says the same ("model crashes if
+        # ln_bt_fw=T"). The filter + ln_bt_auto blocks are shipped and
+        # F90-locked; the PRESET keeps implicit_cn until ladder step 4
+        # (MLF) wires the before-state start.
+        forcing_annual_cycle=True,
+        wind_through_step=True,
+    )
+    # Stabilizer floor off: the oracle background viscosity is avm0 exactly.
+    base = _dc.replace(base, tke_momentum_visc_bg=base.A_v_bg)
+    if overrides:
+        base = _dc.replace(base, **overrides)
+    return base
+
+
+# ---------------------------------------------------------------------
 
 # ---------------------------------------------------------------------
 # L2 model recipes (docs/next_implementations "DINO two-level recipe" campaign).
@@ -816,6 +947,63 @@ def dino_Q_sr_annual_mean(lat_deg, cfg: DINOConfig | None = None,
     return jnp.asarray(q.mean(axis=0))
 
 
+def dino_seasonal_cosines(t_seconds, cfg: DINOConfig | None = None):
+    """Seasonal phase cosines (usrdef_sbc.F90 compute_day_of_year).
+
+    360-day year; ``c1`` peaks at 21 June (solar declination phase),
+    ``c2`` at 21 July (T* phase, one month lag)::
+
+        c1 = cos( (t - 21 Jun) / (half year) * pi )
+        c2 = cos( (t - 21 Jul) / (half year) * pi )
+
+    ``t_seconds`` is the model time with NEMO's convention (kt*dt, first
+    step ends at t = dt).  Pure jnp; traced-time safe.
+    """
+    year_h = 360.0 * 24.0
+    zt = jnp.mod(jnp.asarray(t_seconds) / 3600.0, year_h)
+    half = year_h / 2.0
+    c1 = jnp.cos((zt - 171.0 * 24.0) / half * jnp.pi)   # 21 June  (day 171)
+    c2 = jnp.cos((zt - 201.0 * 24.0) / half * jnp.pi)   # 21 July  (day 201)
+    return c1, c2
+
+
+def dino_T_star_seasonal(lat_deg, t_seconds, cfg: DINOConfig | None = None):
+    """Seasonal T*(lat, t) — usrdef_sbc case 4 with ln_ann_cyc.
+
+    Boundary values swing with the 21-July cosine, ASYMMETRICALLY
+    (oracle: south -0.5*c2, north +3.0*c2); the meridional profile is
+    the same Munday cosine as the annual-mean form.
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+    lat = jnp.asarray(lat_deg)
+    _, c2 = dino_seasonal_cosines(t_seconds, cfg)
+    T_s = cfg.T_star_s_mean - cfg.T_star_seasonal_amp_s * c2
+    T_n = cfg.T_star_n_mean + cfg.T_star_seasonal_amp_n * c2
+    T_star_ns = jnp.where(lat <= 0.0, T_s, T_n)
+    profile = jnp.cos(jnp.pi * lat / cfg.L_phi_deg)
+    return T_star_ns + (cfg.T_star_eq - T_star_ns) * profile
+
+
+def dino_Q_sr_seasonal(lat_deg, t_seconds, cfg: DINOConfig | None = None):
+    """Seasonal Q_sr(lat, t) — usrdef_sbc eq B5 with the annual cycle:
+
+        Q_sr = max( Q0 * cos( pi*(lat - 23.5*c1)/180 ), 0 )
+
+    The declination follows the 21-June cosine; the polar-night clip is
+    the max(., 0).  Annual mean of this field == dino_Q_sr_annual_mean
+    (same phase convention; locked by test).
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+    lat = jnp.asarray(lat_deg)
+    c1, _ = dino_seasonal_cosines(t_seconds, cfg)
+    decl = cfg.solar_declination_amp_deg * c1
+    arg = jnp.pi / 180.0 * (lat - decl)
+    return jnp.maximum(cfg.Q_sr_amp * jnp.cos(arg), 0.0)
+
+
+
 # ---------------------------------------------------------------------
 # Phase 2C-extra — Surface tendency functions with Q_sr / non-solar
 # split (paper eqs 7-9). Grid-agnostic: operate on whatever shape the
@@ -1035,6 +1223,95 @@ def create_dino_z_star(cfg: DINOConfig | None = None) -> OceanZStarCoordinate:
     )
 
 
+def dino_masked_zco_coordinate(z_ref, H_bowl):
+    """NEMO ``zgr_msk_top_bot`` masked z-levels for the DINO bowl.
+
+    Reproduces DINO_R1's ``ln_zco`` vertical grid: a cell (i,j,k) is wet
+    iff its reference centre depth is above the bathymetry
+    (``gdept(k) < H``, usrdef_zgr.F90:471-479), and every wet cell is a
+    FULL cell — the column's effective depth snaps to the interface
+    below the deepest wet centre.  Implemented as an
+    ``OceanPartialCellCoordinate`` whose ``H_bathy`` input is that
+    snapped interface depth, so ``h_partial ∈ {0, dz_ref}`` exactly and
+    the Jacobian is 1 at η=0.
+
+    Parameters
+    ----------
+    z_ref : OceanZStarCoordinate
+        The 36-level Lévy reference grid (``create_dino_z_star``).
+    H_bowl : array (n_lat, n_lon)
+        Continuous bowl bathymetry [m, positive down]; <= 0 on land.
+
+    Returns
+    -------
+    (coord, H_snap) : (OceanPartialCellCoordinate, jnp.ndarray)
+        ``H_snap[i,j] = Σ_k h_partial[i,j,k]`` — pass it as the state's
+        ``H_bathy`` so geometry and state agree.
+    """
+    from legoesm.ocean.vertical import create_partial_cell_coordinate
+
+    abs_half = jnp.abs(jnp.asarray(z_ref.z_half_ref))       # (nlev+1,)
+    # gdept(k) = the coordinate's own t-depths — ANALYTIC (mi96 zt=k+0.5)
+    # when the ladder was built with analytic_t_depths=True; NEMO's wet
+    # test uses pdept_1d, and midpoint surrogates put k_bot one level
+    # too shallow wherever H falls between the midpoint and the analytic
+    # centre (up to ~4.6 m apart on the DINO grid — codex r3 HIGH).
+    centers = jnp.abs(jnp.asarray(z_ref.z_full_ref))        # (nlev,)
+    H = jnp.asarray(H_bowl)
+    # NEMO rule: wet iff gdept(k) < H  (strict; usrdef_zgr WHERE clause)
+    n_wet = jnp.sum(centers[None, None, :] < H[..., None], axis=-1)
+    H_snap = jnp.where(n_wet > 0, abs_half[n_wet], 0.0)
+    coord = create_partial_cell_coordinate(z_ref, H_snap)
+    return coord, H_snap
+
+
+def dino_lat_lon_bowl(grid, cfg: DINOConfig | None = None):
+    """Continuous DINO bowl bathymetry H(i,j) [m] on a Mercator grid.
+
+    Single canonical construction (lon wrap to (-180,180] + meshgrid +
+    :func:`dino_bathymetry`) shared by the state builder and the
+    masked-zco coordinate builder.
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+    lat_deg_1d = jnp.degrees(grid.lat)
+    lon_deg_1d = jnp.degrees(grid.lon)
+    lon_deg_1d = (lon_deg_1d + 180.0) % 360.0 - 180.0
+    lon2d, lat2d = jnp.meshgrid(lon_deg_1d, lat_deg_1d, indexing="xy")
+    return dino_bathymetry(lon2d, lat2d, cfg)
+
+
+def dino_lat_lon_vertical(grid, cfg: DINOConfig | None = None):
+    """Vertical coordinate for the lat-lon DINO per
+    ``cfg.vertical_coordinate`` ("zstar" | "masked_zco")."""
+    if cfg is None:
+        cfg = DINOConfig()
+    z_ref = create_dino_z_star(cfg)
+    if cfg.vertical_coordinate == "zstar":
+        return z_ref
+    if cfg.vertical_coordinate == "masked_zco":
+        # NEMO DINO_R1 ladder: jpk = cfg.n_levels counts INTERFACE
+        # indices (level jpk is a permanently-masked dummy), so the wet
+        # cell count is n_levels-1 = 35, and the t-depths are ANALYTIC
+        # (mi96_1d zt = k+0.5) — verified against the reference run's
+        # deptht to 1.5e-4 m (float32 file storage).  The legacy
+        # "zstar" path keeps the historical 36-cell midpoint ladder.
+        z_nemo = create_levy_stretched_z_star(
+            n_levels=cfg.n_levels - 1,
+            H_max=cfg.H_deep,
+            dz_min=cfg.dz_min,
+            k_th=float(cfg.k_th),
+            a_cr=cfg.a_cr,
+            analytic_t_depths=True,
+        )
+        coord, _H_snap = dino_masked_zco_coordinate(
+            z_nemo, dino_lat_lon_bowl(grid, cfg))
+        return coord
+    raise ValueError(
+        f"unknown DINOConfig.vertical_coordinate "
+        f"{cfg.vertical_coordinate!r}; expected 'zstar' or 'masked_zco'")
+
+
 # ---------------------------------------------------------------------
 # Phase 3 — MPAS regional mesh wiring (partial-periodic via land mask)
 #
@@ -1199,13 +1476,9 @@ def dino_lat_lon_initial_state_arrays(
         cfg = DINOConfig()
 
     lat_deg_1d = jnp.degrees(grid.lat)                        # (n_lat,)
-    lon_deg_1d = jnp.degrees(grid.lon)                        # (n_lon,)
-    # Wrap longitudes to (-180, 180] to match DINOConfig
-    lon_deg_1d = (lon_deg_1d + 180.0) % 360.0 - 180.0
-    lon2d, lat2d = jnp.meshgrid(lon_deg_1d, lat_deg_1d, indexing="xy")
 
-    # Bathymetry
-    H_bathy = dino_bathymetry(lon2d, lat2d, cfg)
+    # Bathymetry (shared canonical construction)
+    H_bathy = dino_lat_lon_bowl(grid, cfg)
 
     # ICs: T(lat, z), S(lat, z) — broadcast over longitude
     T_lat_z, S_lat_z = dino_initial_T_S(lat_deg_1d, z_coord.z_full_ref, cfg)
@@ -1254,6 +1527,14 @@ def dino_lat_lon_state(
     T, S, H_bathy, land_mask = dino_lat_lon_initial_state_arrays(
         grid, z_coord, cfg,
     )
+
+    # Masked z-levels (vertical_coordinate="masked_zco"): the state's
+    # H_bathy must be the coordinate's SNAPPED full-cell depth
+    # (Σ h_partial), not the continuous bowl — otherwise the Jacobian
+    # (H_bathy vs Σ h_partial) is inconsistent at η=0.
+    from legoesm.ocean.vertical import OceanPartialCellCoordinate
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        H_bathy = jnp.sum(z_coord.h_partial, axis=-1)
 
     # Build a base rest-state with our overrides, then replace T, S
     state = rest_state_latlon_cgrid_ocean(
@@ -1348,6 +1629,32 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
         "'kpp', 'tke', 'constant', 'richardson' or 'catke'")
 
 
+def _dino_barotropic_substeps(grid, cfg: DINOConfig) -> int:
+    """n_barotropic_substeps, optionally from NEMO ln_bt_auto.
+
+    ``barotropic_auto_cmax > 0``: nn_e = ceil(dt/cmax · max zcu) with
+    ``zcu = sqrt(g·H·(1/e1² + 1/e2²))`` (dynspg_ts.F90:1223-1240),
+    evaluated conservatively with the basin's deepest wet column and
+    the smallest Mercator metrics (poleward rows).  Otherwise the
+    configured ``n_barotropic_substeps`` is returned unchanged.
+    """
+    if cfg.barotropic_auto_cmax <= 0.0:
+        return cfg.n_barotropic_substeps
+    from legoesm import constants
+    from legoesm.ocean.dynamics.barotropic_common import nemo_auto_substeps
+
+    R = float(constants.R_earth)
+    cos_min = float(jnp.min(jnp.cos(jnp.asarray(grid.lat))))
+    e1_min = R * float(grid.dlon) * cos_min          # zonal, smallest row
+    e2_min = R * float(jnp.min(jnp.asarray(grid.dlat))) \
+        if hasattr(grid, "dlat") and jnp.ndim(grid.dlat) > 0 \
+        else R * float(grid.dlat)
+    inv_metric = 1.0 / e1_min ** 2 + 1.0 / e2_min ** 2
+    return nemo_auto_substeps(
+        cfg.dt, cfg.H_deep, inv_metric, float(constants.g),
+        cmax=cfg.barotropic_auto_cmax)
+
+
 def dino_lat_lon_model_config(
     grid,
     cfg: DINOConfig | None = None,
@@ -1392,28 +1699,69 @@ def dino_lat_lon_model_config(
             f"unknown DINOConfig.gm_kappa_scheme {cfg.gm_kappa_scheme!r}; "
             "expected 'visbeck' or 'treguier'")
     from legoesm.ocean.physics.lateral_mixing.config import TreguierConfig
-    gm_redi_cfg = GMRediConfig(
-        # Placeholders; ignored at runtime because an adaptive κ is enabled.
-        # Anchored to visbeck_kappa_min so the static value is non-
-        # degenerate if the adaptive path is ever mis-wired.
-        kappa_GM=cfg.visbeck_kappa_min,
-        kappa_Redi=cfg.visbeck_kappa_min,
-        S_max=cfg.redi_S_max,
-        slope_scheme=cfg.gm_redi_slope_scheme,
-        # Exactly ONE adaptive-κ diagnostic on (the GM/Redi dispatch raises
-        # if both are enabled): "visbeck" (historical) or "treguier" (the
-        # NEMO nn_aei_ijk_t=21 oracle scaling, cap aei0 = rn_Ue·rn_Le).
-        visbeck=VisbeckConfig(
-            enabled=(cfg.gm_kappa_scheme == "visbeck"),
-            alpha=cfg.visbeck_alpha,
-            kappa_min=cfg.visbeck_kappa_min,
-            kappa_max=cfg.visbeck_kappa_max,
-        ),
-        treguier=TreguierConfig(
-            enabled=(cfg.gm_kappa_scheme == "treguier"),
-            aei0=cfg.treguier_aei0,
-        ),
-    ) if cfg.use_gm_redi else None
+    if cfg.lateral_tracer_mixing not in ("geopotential", "isoneutral"):
+        raise ValueError(
+            f"unknown DINOConfig.lateral_tracer_mixing "
+            f"{cfg.lateral_tracer_mixing!r}; expected 'geopotential' or "
+            "'isoneutral'")
+    if cfg.lateral_tracer_mixing == "isoneutral":
+        # NEMO ln_traldf_iso (+ ln_traldf_msc): Redi-ONLY iso-neutral
+        # Laplacian.  kappa_Redi = aht = ½·U_T·Δx(φ) — the equator value
+        # here, row-scaled by cos φ via kappa_redi_lat_scaling (the same
+        # Mercator scaling A_h uses).  EIV stays a SEPARATE switch
+        # (use_gm_redi): at R1 it is off, so kappa_GM=0 and both adaptive
+        # κ diagnostics are disabled.  implicit_K33=True = the MSC
+        # (vertical diagonal of the rotated operator solved backward-
+        # Euler).  slope_density="neutral" builds slopes from locally-
+        # referenced ∂ρ/∂T,∂ρ/∂S like NEMO's neutral slopes.
+        # REMAINING DEVIATION (documented, audit row 8): NEMO caps the
+        # SLOPE at rn_slpmax and ramps it inside the ML; our DM95 tanh
+        # TAPERS kappa to zero around S_max instead.
+        if cfg.use_gm_redi:
+            raise ValueError(
+                "DINOConfig: lateral_tracer_mixing='isoneutral' with "
+                "use_gm_redi=True (EIV) is not wired yet — the R1 oracle "
+                "runs EIV off; add the combined branch when the "
+                "eddy-permitting recipes need it.")
+        # Equator aht = ½·U_T·R·dλ = K_h_base (the SAME coefficient the
+        # legacy iso-level K_h used); per-row cos φ applied by the model
+        # via kappa_redi_lat_scaling.
+        gm_redi_cfg = GMRediConfig(
+            kappa_GM=0.0,
+            kappa_Redi=float(K_h_base),
+            kappa_redi_lat_scaling=True,
+            S_max=cfg.redi_S_max,
+            slope_scheme=cfg.gm_redi_slope_scheme,
+            slope_density="neutral",
+            slope_limit=cfg.redi_slope_limit,
+            implicit_K33=True,
+            visbeck=VisbeckConfig(enabled=False),
+            treguier=TreguierConfig(enabled=False),
+        )
+    else:
+        gm_redi_cfg = GMRediConfig(
+            # Placeholders; ignored at runtime because an adaptive κ is
+            # enabled.  Anchored to visbeck_kappa_min so the static value
+            # is non-degenerate if the adaptive path is ever mis-wired.
+            kappa_GM=cfg.visbeck_kappa_min,
+            kappa_Redi=cfg.visbeck_kappa_min,
+            S_max=cfg.redi_S_max,
+            slope_scheme=cfg.gm_redi_slope_scheme,
+            # Exactly ONE adaptive-κ diagnostic on (the GM/Redi dispatch
+            # raises if both are enabled): "visbeck" (historical) or
+            # "treguier" (the NEMO nn_aei_ijk_t=21 oracle scaling, cap
+            # aei0 = rn_Ue·rn_Le).
+            visbeck=VisbeckConfig(
+                enabled=(cfg.gm_kappa_scheme == "visbeck"),
+                alpha=cfg.visbeck_alpha,
+                kappa_min=cfg.visbeck_kappa_min,
+                kappa_max=cfg.visbeck_kappa_max,
+            ),
+            treguier=TreguierConfig(
+                enabled=(cfg.gm_kappa_scheme == "treguier"),
+                aei0=cfg.treguier_aei0,
+            ),
+        ) if cfg.use_gm_redi else None
 
     physics_cfg = None
     if physics:
@@ -1500,7 +1848,8 @@ def dino_lat_lon_model_config(
         rho_0=cfg.rho_0,
         A_h=A_h_base,
         A_h_lat_scaling=True,         # cos(lat) per-row scaling — Phase 1B
-        K_h=K_h_base,
+        K_h=(0.0 if cfg.lateral_tracer_mixing == "isoneutral"
+             else K_h_base),   # iso-neutral replaces iso-level diffusion
         A_v=cfg.A_v_bg_effective,   # TKE: 4× floor at the SW-corner stabilizer
         K_v=cfg.K_v_bg,
         bottom_drag_r=bottom_drag_r,
@@ -1508,12 +1857,14 @@ def dino_lat_lon_model_config(
         bottom_drag_bbl_thickness=cfg.bottom_drag_bbl_thickness,
         bottom_drag_scheme=cfg.bottom_drag_scheme,
         bottom_drag_cd0=cfg.C_d_bottom,
-        n_barotropic_substeps=cfg.n_barotropic_substeps,
+        n_barotropic_substeps=_dino_barotropic_substeps(grid, cfg),
         barotropic_solver=cfg.barotropic_solver,
         barotropic_implicit_theta_eta=cfg.barotropic_implicit_theta_eta,
+        barotropic_time_filter=cfg.barotropic_time_filter,
         **_scheme,
         tracer_advection=cfg.tracer_advection,
         pgf_scheme=cfg.pgf_scheme,
+        pgf_quadrature=cfg.pgf_quadrature,
         ke_gradient_scheme=cfg.ke_gradient_scheme,  # #263 Hollingsworth fix
         # MOM6-style stability protection (diagnosed 2026-05-14)
         A_h_floor=cfg.A_h_floor,
@@ -1570,6 +1921,29 @@ def dino_mpas_state(
     )
 
 
+_MPAS_TRACER_ADVECTION = ("upwind", "tvd", "superbee")
+
+
+def _mpas_tracer_advection(cfg: "DINOConfig") -> str:
+    """Validate the configured tracer advection for the MPAS DINO path.
+
+    MPASOceanModel only implements upwind / tvd / superbee; the FCT
+    family (ppm_fct, fct2 — e.g. from the latlon-oriented ``r1_exact``
+    preset) would be rejected deep inside model construction.  Raise
+    here with actionable guidance instead (dispatch discipline).
+    """
+    if cfg.tracer_advection not in _MPAS_TRACER_ADVECTION:
+        raise ValueError(
+            f"DINOConfig.tracer_advection={cfg.tracer_advection!r} is not "
+            f"available on the MPAS DINO path (supported: "
+            f"{_MPAS_TRACER_ADVECTION}). The r1_exact preset is lat-lon "
+            "only — override tracer_advection (e.g. "
+            "dino_r1_exact_config(tracer_advection='tvd')) to run its "
+            "other levers on MPAS."
+        )
+    return cfg.tracer_advection
+
+
 def dino_mpas_model_config(
     mesh,
     cfg: DINOConfig | None = None,
@@ -1604,6 +1978,29 @@ def dino_mpas_model_config(
 
     if cfg is None:
         cfg = DINOConfig()
+    _mpas_tracer_advection(cfg)   # fail fast BEFORE any mesh access
+    if cfg.vertical_coordinate != "zstar":
+        raise ValueError(
+            f"DINOConfig.vertical_coordinate={cfg.vertical_coordinate!r} "
+            "is not available on the MPAS DINO path (MPAS keeps its own "
+            "column handling). The r1_exact preset is lat-lon only — "
+            "override vertical_coordinate='zstar' to run on MPAS.")
+    if cfg.lateral_tracer_mixing != "geopotential":
+        raise ValueError(
+            f"DINOConfig.lateral_tracer_mixing="
+            f"{cfg.lateral_tracer_mixing!r} is not available on the MPAS "
+            "DINO path (the Redi-only iso-neutral recipe is wired for the "
+            "lat-lon C-grid). Override lateral_tracer_mixing="
+            "'geopotential' to run on MPAS.")
+    if cfg.barotropic_time_filter != "cosine" or cfg.barotropic_auto_cmax > 0:
+        raise ValueError(
+            "DINOConfig.barotropic_time_filter="
+            f"{cfg.barotropic_time_filter!r} / barotropic_auto_cmax="
+            f"{cfg.barotropic_auto_cmax!r}: the MPAS DINO builder does not "
+            "thread these (it would silently run different barotropic "
+            "numerics — codex r9 P2). The centred split-explicit recipe is "
+            "lat-lon only; override barotropic_time_filter='cosine' and "
+            "barotropic_auto_cmax=0.0 to run on MPAS.")
 
     # Representative cell size from mean cell area (m).
     cell_dx_m = float(jnp.sqrt(jnp.mean(mesh.areaCell)))
@@ -1631,7 +2028,7 @@ def dino_mpas_model_config(
         bottom_drag_cd0=cfg.C_d_bottom,
         n_barotropic_substeps=cfg.n_barotropic_substeps,
         barotropic_solver=cfg.barotropic_solver,
-        tracer_advection=cfg.tracer_advection,
+        tracer_advection=_mpas_tracer_advection(cfg),
         implicit_vertical_mixing=True,
         eos=cfg.eos,                   # "wright" (default) | "nemo_seos" (paper)
     )
@@ -1847,7 +2244,15 @@ def dino_lat_lon_surface_forcing_arrays(grid, cfg: DINOConfig | None = None):
     tau_u_1d = dino_wind_stress(lat_1d, cfg)     # (n_lat,)
 
     shape_2d = (grid.n_lat, grid.n_lon)
+    tau_u_cell_1d = dino_wind_stress(lat_1d, cfg)      # τ at CELL lats
+    # NEMO taum (usrdef_sbc:222-223): |τ|, boosted x1.3 in the westerlies
+    # (utau > 0) — the TKE surface input only, never the momentum stress.
+    taum_1d = jnp.abs(tau_u_cell_1d) * jnp.where(
+        tau_u_cell_1d > 0.0, cfg.taum_westerly_boost, 1.0)
     return {
+        "lat_deg_1d": lat_1d,   # for the seasonal (annual-cycle) recompute
+        "tau_u_cell_2d": jnp.broadcast_to(tau_u_cell_1d[:, None], shape_2d),
+        "taum_2d": jnp.broadcast_to(taum_1d[:, None], shape_2d),
         "T_star_2d": jnp.broadcast_to(T_star_1d[:, None], shape_2d),
         "S_star_2d": jnp.broadcast_to(S_star_1d[:, None], shape_2d),
         "Q_sr_2d":   jnp.broadcast_to(Q_sr_1d[:, None], shape_2d),
@@ -1857,7 +2262,31 @@ def dino_lat_lon_surface_forcing_arrays(grid, cfg: DINOConfig | None = None):
     }
 
 
-def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt):
+def dino_step_surface_forcing(forcing):
+    """OceanSurfaceForcing for model.step() when ``wind_through_step``.
+
+    Carries ONLY the wind: ``tau_x`` (cell-centred zonal stress; the PE
+    external-tau block applies the ocean reaction and the top-layer
+    deposit) and ``taum`` (the NEMO stress-modulus channel with the
+    usrdef x1.3 westerly boost, consumed by the TKE surface input).
+    Heat/salt/SW stay on the analytic post-step applicator.
+    """
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    # SIGN CONVENTION: the PE external-tau block treats (tau_x, tau_y) in
+    # the ATMOSPHERIC convention and applies the OCEAN REACTION -tau (see
+    # compute_omip2_surface_forcing).  DINO's analytic tau is the stress ON
+    # the ocean (+0.2 Pa accelerates the ocean eastward), so negate here;
+    # taum is a modulus (sign-free).
+    return OceanSurfaceForcing(
+        tau_x=-forcing["tau_u_cell_2d"],
+        tau_y=jnp.zeros_like(forcing["tau_u_cell_2d"]),
+        taum=forcing["taum_2d"],
+    )
+
+
+def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
+                                        t_seconds=None):
     """Apply DINO surface forcing on the lat-lon Mercator grid.
 
     Components (paper eqs 7-10):
@@ -1882,13 +2311,31 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt):
     dz_0 = float(z_coord.dz_ref[0])
     cell_mask = state.land_mask.data
 
+    # Oracle annual cycle (ln_ann_cyc): T* and Q_sr are TIME-DEPENDENT —
+    # recompute from the 360-day-year phases at this step's model time.
+    # Fail loud if the caller did not thread t_seconds (a silent fallback
+    # to the annual-mean arrays would fake the seasonal run).
+    T_star_2d = forcing["T_star_2d"]
+    Q_sr_2d = forcing["Q_sr_2d"]
+    if getattr(cfg, "forcing_annual_cycle", False):
+        if t_seconds is None:
+            raise ValueError(
+                "DINOConfig.forcing_annual_cycle=True requires t_seconds "
+                "to be passed to apply_dino_lat_lon_surface_forcing")
+        _lat1 = forcing["lat_deg_1d"]
+        _shape = T_star_2d.shape
+        T_star_2d = jnp.broadcast_to(
+            dino_T_star_seasonal(_lat1, t_seconds, cfg)[:, None], _shape)
+        Q_sr_2d = jnp.broadcast_to(
+            dino_Q_sr_seasonal(_lat1, t_seconds, cfg)[:, None], _shape)
+
     # T/S restoring via the legoESM module with implicit=True. Paper
     # eq 8 split = subtract_qsr=True (Q_sr provided as sw_down).
     tau_T = tau_from_flux_coefficient(cfg.A_theta, cfg.rho_0, cfg.c_p, dz_0)
     tau_S = tau_from_flux_coefficient(cfg.A_S, cfg.rho_0, 1.0, dz_0)
     restoring_cfg = RestoringConfig(
         tau_T=tau_T, tau_S=tau_S,
-        T_star_array=forcing["T_star_2d"],
+        T_star_array=T_star_2d,
         S_star_array=forcing["S_star_2d"],
         subtract_qsr=True,
         implicit=True,
@@ -1896,7 +2343,7 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt):
     rest_out = restoring_surface_forcing(
         state.T.data, state.S.data, _LatLonGridShim(state, cell_mask),
         restoring_cfg,
-        sw_down=forcing["Q_sr_2d"], dt=dt,
+        sw_down=Q_sr_2d, dt=dt,
         rho_0=cfg.rho_0, c_p=cfg.c_p, dz_0=dz_0,
     )
 
@@ -1907,7 +2354,7 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt):
     jacobian = jnp.ones_like(state.eta.data)
     sw_cfg = ShortwavePenetrationConfig(water_type=cfg.jerlov_water_type)
     dT_dt_sw = shortwave_penetration_tendency(
-        sw_down=forcing["Q_sr_2d"],
+        sw_down=Q_sr_2d,
         z_coord_dz_ref=z_coord.dz_ref,
         z_coord_z_half_ref=z_coord.z_half_ref,
         jacobian=jacobian, config=sw_cfg,
@@ -1921,12 +2368,17 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt):
     new_T = state.T.data + dt * (rest_out.dT_dt + dT_dt_sw) * mask3
     new_S = state.S.data + dt * rest_out.dS_dt * mask3
 
-    # u tendency at u-faces (eq 7)
-    u_top = state.u.data[..., 0]
-    du_dt_top = dino_top_layer_u_tendency(forcing["tau_u_face"], dz_0, cfg)
-    u_face_mask = state.u_mask.data
-    new_u_top = u_top + dt * du_dt_top * u_face_mask
-    new_u = state.u.data.at[..., 0].set(new_u_top)
+    # u tendency at u-faces (eq 7) — SKIPPED when the wind goes through
+    # model.step(surface_forcing=...) (wind_through_step: the dynamics-core
+    # external-tau block owns it; applying here too would double the wind).
+    if getattr(cfg, "wind_through_step", False):
+        new_u = state.u.data
+    else:
+        u_top = state.u.data[..., 0]
+        du_dt_top = dino_top_layer_u_tendency(forcing["tau_u_face"], dz_0, cfg)
+        u_face_mask = state.u_mask.data
+        new_u_top = u_top + dt * du_dt_top * u_face_mask
+        new_u = state.u.data.at[..., 0].set(new_u_top)
 
     return state._replace(
         T=Field(data=new_T, name=state.T.name, dims=state.T.dims, units=state.T.units),
@@ -1977,12 +2429,19 @@ def dino_mpas_surface_forcing_arrays(mesh, cfg: DINOConfig | None = None):
     }
 
 
-def apply_dino_mpas_surface_forcing(state, forcing, z_coord, cfg, dt):
+def apply_dino_mpas_surface_forcing(state, forcing, z_coord, cfg, dt,
+                                    t_seconds=None):
     """Apply DINO surface forcing on the MPAS regional mesh.
 
     Same physics as lat-lon (paper eqs 7-10) with edge-projected wind
     and 1D cell-indexed T*, S*, Q_sr.
     """
+    if getattr(cfg, "forcing_annual_cycle", False):
+        raise NotImplementedError(
+            "DINOConfig.forcing_annual_cycle=True is wired on the lat-lon "
+            "DINO path only (seasonal T*/Q_sr recompute); the MPAS apply "
+            "still uses the annual-mean arrays — reject rather than "
+            "silently run the wrong forcing.")
     dz_0 = float(z_coord.dz_ref[0])
     cell_mask = state.land_mask.data                  # (nCells,)
 

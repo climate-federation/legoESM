@@ -966,17 +966,24 @@ def mpas_ocean_baroclinic_tendencies(
                     "normalize_freshwater=False, until owned-mask plumbing lands "
                     "on both paths."
                 )
-        _spread_m = float(getattr(config, "runoff_depth_spread_m", 0.0))
-        if _spread_m > 0.0:
-            # NEMO-style runoff depth spreading (rn_dep_max=150): the runoff
-            # channel dilutes the top `_spread_m` metres; other channels stay
-            # at the top cell; column-integral conservation unchanged.
+        # NEMO-style runoff depth spreading (sbcrnf rn_dep_max): the runoff
+        # channel dilutes the top `_spread_arg` metres — a FLAT scalar
+        # (runoff_depth_spread_m) OR the PER-CELL ln_rnf_depth_ini map
+        # (runoff_depth_spread_map: small Arctic/Siberian rivers stay
+        # near-surface for more shelf freshening).  Other channels stay at
+        # the top cell; column-integral conservation unchanged.  Grid-agnostic
+        # helper: the MPAS state is the flattened (nCells,) / (nCells, nlev)
+        # analogue of the C-grid's per-column arrays.  Static config gate ->
+        # legacy top-cell path stays untraced/bit-exact when neither is set.
+        from legoesm.ocean.freshwater import resolve_runoff_spread_arg
+        _spread_arg = resolve_runoff_spread_arg(config)
+        if _spread_arg is not None:
             from legoesm.ocean.freshwater import (
                 runoff_spread_virtual_salt_tendency_3d,
             )
             dS_fw_3d = runoff_spread_virtual_salt_tendency_3d(
                 freshwater, config.S_ref, h_k, config.rho_0, mask,
-                runoff_spread_m=_spread_m, area=mesh.areaCell,
+                runoff_spread_m=_spread_arg, area=mesh.areaCell,
                 normalize=bool(getattr(config, "normalize_freshwater", False)),
             )
             dS_dt_3d = dS_dt_3d + (dS_fw_3d * mask[:, None]).astype(

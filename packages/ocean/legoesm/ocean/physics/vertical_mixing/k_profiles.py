@@ -400,6 +400,10 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                  if surface_forcing is not None else None)
         tau_y = (getattr(surface_forcing, "tau_y", None)
                  if surface_forcing is not None else None)
+        # NEMO taum channel: stress-modulus override for the TKE surface
+        # input (None -> computed from the components inside tke.py).
+        taum_sf = (getattr(surface_forcing, "taum", None)
+                   if surface_forcing is not None else None)
         # Adiabatic static-stability N² (Veros parcel displacement) needs
         # the cell-centre hydrostatic pressure + the same EOS as the
         # dynamical core. Only computed when the TKE config opts in
@@ -484,6 +488,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     u_data, v_data, T_data, S_data, rho, dz_half,
                     tke_old=_tke_seed,
                     tau_x_surface=tau_x, tau_y_surface=tau_y,
+                taum_surface=taum_sf,
                     cfg=tke_cfg,
                     rho_0=constants_config.rho_0, g=constants_config.g,
                     p_cell=p_cell, dz_ref=z_coord.dz_ref, jacobian=J,
@@ -495,6 +500,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 u_data, v_data, T_data, S_data, rho, dz_half,
                 tke_old=_tke_seed,
                 tau_x_surface=tau_x, tau_y_surface=tau_y,
+                taum_surface=taum_sf,
                 dt=dt_tke, cfg=tke_cfg,
                 rho_0=constants_config.rho_0, g=constants_config.g,
                 n_iterations=1,
@@ -514,6 +520,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             u_data, v_data, T_data, S_data, rho, dz_half,
             tke_old=None,
             tau_x_surface=tau_x, tau_y_surface=tau_y,
+                taum_surface=taum_sf,
             dt=_DIAGNOSTIC_DT, cfg=tke_cfg,
             rho_0=constants_config.rho_0, g=constants_config.g,
             n_iterations=3,

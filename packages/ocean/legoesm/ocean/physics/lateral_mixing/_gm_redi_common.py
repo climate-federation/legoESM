@@ -80,6 +80,14 @@ VALID_ADJOINT_STABILIZATION = frozenset(
 # Default GM/Redi taper transition width (fraction of taper range).
 _DEFAULT_TAPER_WIDTH_FRAC = 0.1
 
+def validate_slope_limit(mode: str) -> None:
+    """Fail-fast membership check for GMRediConfig.slope_limit."""
+    if mode not in ("dm95_taper", "nemo_cap"):
+        raise ValueError(
+            f"Unknown GMRediConfig.slope_limit {mode!r}; expected "
+            "'dm95_taper' or 'nemo_cap'")
+
+
 def validate_adjoint_stabilization(mode: str) -> None:
     """Fail-fast on an unknown ``adjoint_stabilization`` literal.
 

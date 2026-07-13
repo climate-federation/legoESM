@@ -49,6 +49,7 @@ from legoesm.ocean.experiments.dino import (
     create_dino_z_star,
     dino_config_for_recipe,
     dino_lat_lon_grid,
+    dino_lat_lon_vertical,
     dino_lat_lon_model_config,
     dino_lat_lon_state,
     dino_lat_lon_surface_forcing_arrays,
@@ -153,6 +154,19 @@ def _parse_args():
              "'visbeck' (Visbeck 1997, historical default) or 'treguier' "
              "(Treguier 1997 / NEMO nn_aei_ijk_t=21 — the DINO oracle "
              "scaling, cap aei0=rn_Ue*rn_Le=3000 m2/s). Lat-lon only.",
+    )
+    p.add_argument(
+        "--allow-multiyear", action="store_true",
+        help="Opt out of the 1-year local-machine cap on --days (use inside "
+             "SLURM GPU jobs; the multi-year DINO_R1 comparison runs).",
+    )
+    p.add_argument(
+        "--preset", choices=("r1_exact",), default=None,
+        help="Config preset: 'r1_exact' = the DINO_R1 exactness preset "
+             "(dino_r1_exact_config: S-EOS, TKE, nemo_quadratic drag, EIV "
+             "off, stabilizer floors off, ppm_fct — see "
+             "docs/ocean/fidelity/dino_l1_exactness_audit.md).  Individual "
+             "flags still override on top.",
     )
     p.add_argument(
         "--bottom-drag-scheme",
@@ -403,14 +417,23 @@ def main():
             stacklevel=2,
         )
 
-    # Local-machine policy: cap at 1 yr (decision logged in plan)
-    if args.days > 365.0:
+    # Local-machine policy: cap at 1 yr (decision logged in plan).
+    # --allow-multiyear is the explicit opt-out for GPU/SLURM jobs (the
+    # multi-year DINO_R1 comparison runs).
+    if args.days > 365.0 and not args.allow_multiyear:
         raise SystemExit(
             f"--days={args.days} exceeds the 1-year local-machine cap. "
-            "Long spin-ups should run on a GPU machine — see plan."
+            "Long spin-ups should run on a GPU machine (pass "
+            "--allow-multiyear inside a SLURM job) — see plan."
         )
 
-    cfg = DINOConfig()
+    # Base config: the r1_exact preset (NEMO-DINO exact stack) when selected,
+    # else the legoESM defaults.
+    if getattr(args, "preset", None) == "r1_exact":
+        from legoesm.ocean.experiments.dino import dino_r1_exact_config
+        cfg = dino_r1_exact_config()
+    else:
+        cfg = DINOConfig()
     # A named model recipe (pure config overlay) is applied FIRST; the explicit
     # scheme flags below still override it. L2 cards (veros/mitgcm/oceananigans)
     # select lat-lon-C-grid-only blocks (flux-form/WENO momentum, AB2 outer,
@@ -491,9 +514,11 @@ def main():
             f"--vmix kpp on MPAS.")
 
     # Build grid, state, model — branch on grid type
-    z = create_dino_z_star(cfg)
     if grid_kind == "latlon":
         grid = dino_lat_lon_grid(cfg, n_lon=args.n_lon)
+        # zstar OR masked_zco (NEMO ln_zco full-cell masking) per
+        # cfg.vertical_coordinate — the coordinate drives state + model.
+        z = dino_lat_lon_vertical(grid, cfg)
         state = dino_lat_lon_state(grid, z, cfg)
         model_cfg, _ = dino_lat_lon_model_config(
             grid, cfg, physics=not args.physics_off,
@@ -502,8 +527,15 @@ def main():
         forcing = (None if args.no_forcing
                    else dino_lat_lon_surface_forcing_arrays(grid, cfg))
         apply_forcing = apply_dino_lat_lon_surface_forcing
+        from legoesm.ocean.experiments.dino import dino_step_surface_forcing
+        sf_step = (
+            dino_step_surface_forcing(forcing)
+            if forcing is not None
+            and getattr(cfg, "wind_through_step", False)
+            else None)
         grid_desc = f"{grid.n_lat}x{grid.n_lon} lat-lon Mercator"
     else:  # mpas
+        z = create_dino_z_star(cfg)
         grid = create_regional_voronoi_mesh(
             lon_range=(cfg.lon_west_deg, cfg.lon_east_deg),
             lat_range=(-cfg.lat_max_deg, cfg.lat_max_deg),
@@ -518,6 +550,10 @@ def main():
         forcing = (None if args.no_forcing
                    else dino_mpas_surface_forcing_arrays(grid, cfg))
         apply_forcing = apply_dino_mpas_surface_forcing
+        if getattr(cfg, "wind_through_step", False):
+            raise SystemExit(
+                "wind_through_step is wired on the lat-lon DINO path only")
+        sf_step = None
         grid_desc = f"{grid.nCells} cells MPAS regional Voronoi"
 
     # Output directory
@@ -562,9 +598,15 @@ def main():
 
     for k in range(n_steps_total):
         if forcing is not None:
-            state = apply_forcing(state, forcing, z, cfg, dt)
+            # NEMO time convention: step k (0-based) ends at t=(k+1)*dt —
+            # drives the seasonal forcing phases when forcing_annual_cycle.
+            state = apply_forcing(state, forcing, z, cfg, dt,
+                                  t_seconds=(k + 1) * dt)
 
-        state = model.step(state, dt=dt)
+        state = model.step(
+            state, dt=dt,
+            surface_forcing=(sf_step if getattr(cfg, "wind_through_step",
+                                                False) else None))
 
         is_last = (k == n_steps_total - 1)
         if (k + 1) % snapshot_every_steps == 0 or is_last:
