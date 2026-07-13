@@ -6625,8 +6625,13 @@ class ModelDriver:
         """Sub-face-tiled cube SPMD run (``n_devices = 6*kt^2 > 6``).
 
         Integrates via the BLOCKED persistent tiled loop
-        (:func:`legoesm.atmosphere.dynamics.tiled_step_adapter.make_tiled_cc_loop`):
-        state stays TILE-SHARDED across steps (no per-step gather); a
+        (:func:`legoesm.atmosphere.dynamics.tiled_step_adapter.make_tiled_cc_loop`)
+        scanned into per-SEGMENT executables
+        (:func:`legoesm.atmosphere.dynamics.tiled_step_adapter.scan_tiled_cc_steps`,
+        M3b increment 1): state stays TILE-SHARDED across steps AND each
+        segment is ONE ``lax.scan`` dispatch (no per-step host dispatch,
+        no full-face all-gather inside the scan — HLO-gated by
+        ``tests/parallel/test_cube_tile_native_segment.py``); a
         cell-centred ``HydrostaticState`` is gathered once per SEGMENT for
         the coupler callback + a host-side NaN-blowup guard.  A dedicated
         path, NOT the jitted ``compiled_segments`` scan — the exact
@@ -6650,7 +6655,7 @@ class ModelDriver:
         import numpy as _np
 
         from legoesm.atmosphere.dynamics.tiled_step_adapter import (
-            make_tiled_cc_loop,
+            make_tiled_cc_loop, scan_tiled_cc_steps,
         )
 
         cfg = self.config
@@ -6730,7 +6735,21 @@ class ModelDriver:
         enter, tiled_step, tiled_exit = make_tiled_cc_loop(
             self.model, mesh, kt=kt, dt=float(DT),
             column_physics_fn=column_physics_fn)
-        step_jit = jax.jit(tiled_step)   # eager shard_map re-lowers per call
+        # M3b increment 1: each segment is ONE compiled lax.scan of the
+        # blocked step — one host dispatch per SEGMENT instead of per step,
+        # carry persistently tile-sharded, donated between segments.  At
+        # most TWO distinct lengths compile (the regular segment + the
+        # final remainder); the FIRST segment additionally compiles its own
+        # signature (the enter carry is f32-compute until the fixer's f64
+        # p_s promotion — scan_tiled_cc_steps' dtype fixed-point unroll),
+        # exactly as the prior per-step lane compiled two step signatures.
+        _segments: dict[int, object] = {}
+
+        def _scanned(k: int):
+            fn = _segments.get(k)
+            if fn is None:
+                fn = _segments[k] = scan_tiled_cc_steps(tiled_step, k)
+            return fn
         # Moist: the driver keeps tracers in ``self.tracers`` (raw arrays,
         # the tracer-property store) — ``self.state.tracers`` is None after
         # cube setup.  Attach exact {q_v,q_c,q_r} Fields for the loop's
@@ -6769,8 +6788,7 @@ class ModelDriver:
         step_done = 0
         while step_done < n_run:
             seg_n = min(seg_len, n_run - step_done)
-            for _ in range(seg_n):
-                blocked = step_jit(blocked)
+            blocked = _scanned(seg_n)(blocked)
             step_done += seg_n
             # Per-SEGMENT gather: coupler callback + host blowup guard
             # (the in-loop state never gathers).  Callbacks CONSUME the

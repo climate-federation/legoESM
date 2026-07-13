@@ -332,15 +332,31 @@ def _make_band_step_body(model, template, array_field_names, axis,
 
 
 def _dtype_sig(tree) -> tuple:
-    """Trace-time dtype signature of a pytree (leaf dtypes, flattened order)."""
-    return tuple(str(leaf.dtype) for leaf in jax.tree_util.tree_leaves(tree)
-                 if hasattr(leaf, "dtype"))
+    """Trace-time carry signature of a pytree: the pytree STRUCTURE plus
+    every array leaf's ``(shape, dtype, weak_type)``.
+
+    ``lax.scan`` requires carry-in == carry-out in ALL of structure, shape,
+    dtype and weak type — dtype strings alone would mark a step that flips
+    weak typing (or shape) while preserving dtypes as "stable" and then
+    fail inside the scan lowering instead of being absorbed by the unroll
+    (codex M3b review).  Non-array leaves contribute through the treedef.
+    """
+    leaves, treedef = jax.tree_util.tree_flatten(tree)
+    return (str(treedef),
+            tuple((tuple(leaf.shape), str(leaf.dtype),
+                   bool(getattr(leaf, "weak_type", False)))
+                  for leaf in leaves if hasattr(leaf, "dtype")))
 
 
-def _unroll_to_dtype_fixed_point(step1, state, n_left: int):
+def unroll_to_dtype_fixed_point(step1, state, n_left: int):
     """Unroll ``step1`` applications until the state's dtype signature is a
     FIXED POINT of the step (bounded by ``n_left``); returns
     ``(state, n_left_remaining)``.
+
+    PUBLIC (M3b): shared by this module's lat-band segments and the tiled
+    cube segment (``tiled_step_adapter.scan_tiled_cc_steps``) — any
+    ``lax.scan``-of-a-step needs carry-in == carry-out dtypes, and this is
+    the ONE place that trace-time unroll lives (no re-derivation).
 
     Why: ``lax.scan`` needs carry-in == carry-out dtypes.  A mixed-precision
     IC (f32 grid/init-derived leaves beside the step's f64 sources under
@@ -612,7 +628,7 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
 
     Carry dtype: leading steps are UNROLLED outside the ``lax.scan`` until
     the state's dtype signature is a fixed point of the step
-    (:func:`_unroll_to_dtype_fixed_point` — ``jax.eval_shape`` probe, zero
+    (:func:`unroll_to_dtype_fixed_point` — ``jax.eval_shape`` probe, zero
     FLOPs, trace-time constant).  A mixed-precision IC promotes over the
     first stepS (``p_s`` first, ``u/v/T`` next via the promoted ``p_s`` —
     observed jobs 8916406/8916740) exactly as the per-step Python loop
@@ -645,7 +661,7 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
                     s, dt, physics_fn=physics_fn, phys_state=None)
                 return out
             # Unroll to the scan-carry dtype fixed point (helper docstring).
-            out, n_left = _unroll_to_dtype_fixed_point(
+            out, n_left = unroll_to_dtype_fixed_point(
                 _step1, c_state, n_steps)
             if n_left > 0:
                 out, _ = jax.lax.scan(lambda s, _x: (_step1(s), None),
@@ -677,7 +693,7 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
             out, _ps = band_step(s, stacks_local, dt, None)
             return out
         # Unroll to the scan-carry dtype fixed point (helper docstring).
-        out, n_left = _unroll_to_dtype_fixed_point(
+        out, n_left = unroll_to_dtype_fixed_point(
             _step1, state_local, n_steps)
         if n_left > 0:
             out, _ = jax.lax.scan(lambda s, _x: (_step1(s), None),
