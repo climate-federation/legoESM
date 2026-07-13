@@ -56,6 +56,7 @@ __param_spec__ = {
             "depth_split_sharpness": "numerics: sigmoid sharpness on the deep/shallow depth blend",
             "downdraft_RH_min": "trigger: column-mean RH threshold below which the downdraft fires (not sigmoid-tunable, fix via config)",
             "downdraft_rh_sharpness": "numerics: sigmoid sharpness on the downdraft RH trigger [1/RH-fraction]",
+            "downdraft_detrain_scale_m": "numerics: near-surface height scale [m] over which the penetrative-downdraft mass flux tapers to zero (structural deposit depth, not a trained closure)",
             "epsilon_deep": "entrainment: IFS base rate scaled by the height-dependent (1.3-RH) factor in-scheme, not a constant tunable",
             "epsilon_midlevel": "entrainment: IFS mid-level base rate scaled in-scheme",
             "epsilon_shallow": "entrainment: IFS shallow base rate scaled in-scheme",
@@ -80,6 +81,7 @@ __param_spec__ = {
             "delta_shallow": {"units": "1/m", "bounds": (2.475e-05, 0.000225), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Bechtold et al. (2008) IFS Cy49r1", "shape": None},
             "downdraft_alpha": {"units": "1", "bounds": (0.0, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Tiedtke (1989) downdraft", "shape": None},
             "downdraft_evap_efficiency": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Tiedtke (1989) downdraft", "shape": None},
+            "downdraft_entrain_rate": {"units": "1/m", "bounds": (1.0e-4, 2.0e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Tiedtke (1989) penetrative-downdraft entrainment", "shape": None},
             "mc_normalize_scale": {"units": "kg/m^2/s", "bounds": (0.005, 0.2), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "Bechtold et al. (2008) Fig. 2", "shape": None},
             "parcel_dq": {"units": "kg/kg", "bounds": (0.0, 0.003), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Bechtold et al. (2008) scheme default", "shape": None},
             "stochastic_amplitude": {"units": "1", "bounds": (0.0, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Bechtold et al. (2014) AR1 perturbation", "shape": None},
@@ -1338,6 +1340,34 @@ class BechtoldConfig(NamedTuple):
     downdraft_RH_min: float = 0.2
     # See TiedtkeConfig.downdraft_evap_efficiency for definition.
     downdraft_evap_efficiency: float = 0.05
+    # -- Penetrative downdraft thermodynamic transport (opt-in, default OFF) --
+    # The downdraft branch above drives ONLY rain re-evaporation (locally
+    # MOISTENS + cools the sub-cloud layer) and CMT momentum — it has NO
+    # mass-flux transport of air, so it can only WET the marine boundary
+    # layer (strengthening it makes the BL more humid, not less).
+    # ``downdraft_transport`` adds the Tiedtke-1989 penetrative-downdraft
+    # thermodynamic transport: a downdraft initiated at the level of minimum
+    # moist static energy (the level of free sinking) advects low-MSE (dry,
+    # low-q_v) mid-tropospheric air DOWN into the sub-cloud layer, DRYING it.
+    # Physically this is the missing marine-BL ventilation: a drier sub-cloud
+    # layer -> a larger sea-air humidity gradient (stronger surface
+    # evaporation) AND less BL liquid cloud (lower planetary albedo).
+    # Conservative flux form: transports s = c_p T + g z and q_v with the
+    # downdraft mass flux vanishing at BOTH the origin and the surface, so the
+    # column integrals of s and q_v are conserved to machine precision (the
+    # rain re-evaporation phase source above is the separate, already
+    # budget-closed term).  Default False => BYTE-IDENTICAL to the
+    # re-evaporation-only downdraft.
+    downdraft_transport: bool = False
+    # Fractional entrainment rate [1/m] of the descending downdraft plume
+    # (mixes it toward the environment as it sinks; Tiedtke 1989 downdraft
+    # entrainment is O(1e-4 - 1e-3) 1/m).  Larger => the downdraft arrives
+    # less dry => weaker BL drying.
+    downdraft_entrain_rate: float = 5.0e-4
+    # Near-surface height scale [m] over which the downdraft mass flux tapers
+    # to zero as it detrains its air into the sub-cloud layer (the depth of
+    # the drying deposit ~ a marine sub-cloud-layer depth).
+    downdraft_detrain_scale_m: float = 700.0
     enable_cmt: bool = True
     cmt_c_u: float = 0.7
     cmt_c_d: float = 0.7

@@ -2581,6 +2581,19 @@ def _resolve_convection(config):
                 config, 'bechtold_downdraft_evap', 0.05),
             downdraft_alpha=getattr(config, 'bechtold_downdraft_alpha', 0.3),
             downdraft_RH_min=getattr(config, 'bechtold_downdraft_rh_min', 0.2),
+            # Penetrative-downdraft thermodynamic transport (opt-in). UNLIKE
+            # the re-evaporation above (which only moistens the sub-cloud
+            # layer and is gated on LOW sub-cloud RH), the transport is driven
+            # by the convective mass flux (downdraft_alpha·M_b) and advects
+            # low-MSE dry mid-level air DOWN into the humid marine BL, DRYING
+            # it -> stronger surface evaporation + less BL liquid cloud.
+            # Default OFF => byte-identical when unset.
+            downdraft_transport=getattr(
+                config, 'bechtold_downdraft_transport', False),
+            downdraft_entrain_rate=getattr(
+                config, 'bechtold_downdraft_entrain_rate', 5.0e-4),
+            downdraft_detrain_scale_m=getattr(
+                config, 'bechtold_downdraft_detrain_scale_m', 700.0),
         )
     else:
         cc = ConvectionConfig(scheme=scheme)

@@ -659,6 +659,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         dest="bechtold_downdraft_rh_min",
                         help="Bechtold downdraft column-RH suppression threshold "
                              f"[0,1]. Default {_EXPERIMENT_DEFAULTS.bechtold_downdraft_rh_min}.")
+    parser.add_argument("--bechtold-downdraft-transport",
+                        dest="bechtold_downdraft_transport",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_downdraft_transport,
+                        help="Enable the Bechtold PENETRATIVE downdraft: advect "
+                             "low-MSE (dry) mid-level air DOWN into the sub-cloud "
+                             "layer (Tiedtke 1989), DRYING the marine BL => "
+                             "stronger surface evaporation + less BL liquid cloud "
+                             "(lower albedo). UNLIKE --bechtold-downdraft-evap "
+                             "(rain re-evaporation, which MOISTENS), this is the "
+                             "BL-ventilation lever. --no-bechtold-downdraft-transport "
+                             "disables a config-file default. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_downdraft_transport}.")
+    parser.add_argument("--bechtold-downdraft-entrain-rate", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_downdraft_entrain_rate,
+                        dest="bechtold_downdraft_entrain_rate",
+                        help="Penetrative-downdraft fractional entrainment rate "
+                             "[1/m] (mixes it toward the environment as it sinks; "
+                             "larger => arrives less dry => weaker BL drying). "
+                             f"Default {_EXPERIMENT_DEFAULTS.bechtold_downdraft_entrain_rate}.")
+    parser.add_argument("--bechtold-downdraft-detrain-scale", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_downdraft_detrain_scale_m,
+                        dest="bechtold_downdraft_detrain_scale_m",
+                        help="Near-surface height scale [m] over which the "
+                             "penetrative-downdraft mass flux tapers to zero (the "
+                             "drying-deposit depth). Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_downdraft_detrain_scale_m}.")
 
     # Joint ML physics parameterization
     parser.add_argument("--physics-parameterization", type=str, default="none",
@@ -1340,6 +1367,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_downdraft_evap=args.bechtold_downdraft_evap,
         bechtold_downdraft_alpha=args.bechtold_downdraft_alpha,
         bechtold_downdraft_rh_min=args.bechtold_downdraft_rh_min,
+        bechtold_downdraft_transport=args.bechtold_downdraft_transport,
+        bechtold_downdraft_entrain_rate=args.bechtold_downdraft_entrain_rate,
+        bechtold_downdraft_detrain_scale_m=args.bechtold_downdraft_detrain_scale_m,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
         physics_parameterization=args.physics_parameterization,

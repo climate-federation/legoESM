@@ -820,6 +820,15 @@ class ExperimentConfig(NamedTuple):
     bechtold_downdraft_evap: float = 0.05
     bechtold_downdraft_alpha: float = 0.3
     bechtold_downdraft_rh_min: float = 0.2
+    # Penetrative-downdraft thermodynamic transport (marine-BL ventilation).
+    # The re-evaporation downdraft above only MOISTENS the sub-cloud layer;
+    # transport ON advects low-MSE (dry) mid-level air DOWN into the BL,
+    # DRYING it -> stronger surface evaporation + less BL liquid cloud (lower
+    # albedo).  Default OFF => byte-identical to the re-evaporation-only
+    # downdraft.  See BechtoldConfig.downdraft_transport.
+    bechtold_downdraft_transport: bool = False
+    bechtold_downdraft_entrain_rate: float = 5.0e-4
+    bechtold_downdraft_detrain_scale_m: float = 700.0
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -1070,6 +1079,8 @@ class ExperimentConfig(NamedTuple):
             ("bechtold_downdraft_evap", 0.0, 0.5),
             ("bechtold_downdraft_alpha", 0.0, 0.9),
             ("bechtold_downdraft_rh_min", 0.0, 1.0),
+            ("bechtold_downdraft_entrain_rate", 1.0e-4, 2.0e-3),
+            ("bechtold_downdraft_detrain_scale_m", 100.0, 3000.0),
         ):
             _v = getattr(self, _f)
             if not (_lo <= _v <= _hi):
@@ -1763,6 +1774,12 @@ class ExperimentConfig(NamedTuple):
                 amip_cfg, 'bechtold_downdraft_alpha', 0.3),
             bechtold_downdraft_rh_min=getattr(
                 amip_cfg, 'bechtold_downdraft_rh_min', 0.2),
+            bechtold_downdraft_transport=getattr(
+                amip_cfg, 'bechtold_downdraft_transport', False),
+            bechtold_downdraft_entrain_rate=getattr(
+                amip_cfg, 'bechtold_downdraft_entrain_rate', 5.0e-4),
+            bechtold_downdraft_detrain_scale_m=getattr(
+                amip_cfg, 'bechtold_downdraft_detrain_scale_m', 700.0),
             # Convective precip split family — copy through AMIP/checkpoint
             # restore so the physical autoconversion isn't dropped to defaults
             # (codex MED; convective_precip_efficiency was a pre-existing gap).
@@ -1912,6 +1929,9 @@ class ExperimentConfig(NamedTuple):
             bechtold_downdraft_evap=self.bechtold_downdraft_evap,
             bechtold_downdraft_alpha=self.bechtold_downdraft_alpha,
             bechtold_downdraft_rh_min=self.bechtold_downdraft_rh_min,
+            bechtold_downdraft_transport=self.bechtold_downdraft_transport,
+            bechtold_downdraft_entrain_rate=self.bechtold_downdraft_entrain_rate,
+            bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
             sigma_b=self.sigma_b,
             k_BL_max_per_day=self.k_BL_max_per_day,
             k_free_per_day=self.k_free_per_day,

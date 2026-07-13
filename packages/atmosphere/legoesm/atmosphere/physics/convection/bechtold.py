@@ -74,8 +74,9 @@ __physics_contract__ = {
     "summary": (
         "Bechtold/IFS mass-flux convection (Tiedtke 1989 skeleton + Bechtold "
         "2008 PBL/departure-CAPE closure + optional 2014 AR1 stochastic "
-        "perturbation, RH-dependent downdraft, and Gregory-1997 convective "
-        "momentum transport)."
+        "perturbation, RH-dependent downdraft with rain re-evaporation and an "
+        "optional penetrative thermodynamic transport of low-MSE air (column "
+        "s and q_v conserving), and Gregory-1997 convective momentum transport)."
     ),
     "inputs": {
         "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa",
@@ -131,6 +132,164 @@ _BECHTOLD_RH_DETR = 1.6
 # only the numerical spike is removed, real convection untouched.
 _BECHTOLD_DTDT_MAX = 1.0e-3     # K/s (~86 K/day)
 _BECHTOLD_DQVDT_MAX = 1.0e-4    # kg/kg/s (~9 g/kg/day, well above real conv drying)
+
+# --- Penetrative-downdraft transport numerics (Tiedtke 1989) ---------------
+# Softmax "temperature" [J/kg] for the differentiable minimum-MSE (level of
+# free sinking) origin: ~ L_v · 1 g/kg, so layers within ~1 g/kg-equivalent of
+# the MSE minimum share the origin.  Smooths the argmin; not a tuned closure.
+_DD_MSE_SOFT_J_PER_KG = 2500.0
+# Sharpness [1/m] of the "below the origin" gate on the downdraft mass-flux
+# profile (~300 m transition, so the mass flux is negligible ABOVE the level
+# of free sinking — a downdraft must not exist above its own source).
+# Numerics only.
+_DD_ORIGIN_SHARP_PER_M = 3.0e-3
+# Per-column CFL/positivity limiter: the max fraction of a level's vapor the
+# transport may remove in one step (and the |dT/dt| cap, _BECHTOLD_DTDT_MAX,
+# it is scaled to respect).  A UNIFORM per-column scaling preserves the zero
+# column integral => still exactly conservative; it only throttles pathological
+# thin-layer / near-dry columns (aggressive-stack blow-up guard).
+_DD_CFL_FRAC = 0.5
+
+
+def _penetrative_downdraft_transport(
+    T: jax.Array,
+    q_v: jax.Array,
+    z: jax.Array,
+    dp_full: jax.Array,
+    k_lcl_smooth: jax.Array,
+    levels_arr: jax.Array,
+    M_d_mag: jax.Array,
+    entrain_rate: float,
+    detrain_scale_m: float,
+    dt: float,
+) -> tuple[jax.Array, jax.Array]:
+    r"""Tiedtke-1989 penetrative-downdraft thermodynamic transport.
+
+    The bechtold downdraft branch drives only rain re-evaporation (which
+    locally MOISTENS the sub-cloud layer) and CMT momentum — it has no
+    mass-flux transport of air, so it can only wet the marine boundary layer.
+    This adds the missing transport: a downdraft initiated at the level of
+    minimum moist static energy (MSE; the level of free sinking) carries
+    low-MSE — i.e. dry, low-``q_v`` — mid-tropospheric air DOWN into the
+    sub-cloud layer, DRYING it (a larger sea-air humidity gradient => stronger
+    surface evaporation; less BL liquid cloud => lower planetary albedo).
+
+    Conservative environment tendency (Tiedtke 1989, compensated downdraft),
+    evaluated in flux form so the column integrals of the dry static energy
+    ``s = c_p T + g z`` and of ``q_v`` are conserved to machine precision::
+
+        d(psi_bar)/dt = g * d/dp [ M_d * (psi_d - psi_bar) ]
+
+    Sign convention: ``z`` is geometric height [m], POSITIVE UP; the downdraft
+    mass flux ``M_d <= 0`` (downward).  In a humid marine BL fed by a drier
+    free troposphere the deposited air has ``q_d < q_bar``, so the sub-cloud
+    ``dq_v/dt`` is NEGATIVE (drying).  Surface-last level indexing (larger
+    index = lower altitude; index -1 = surface).  The ``M_d -> 0`` boundary
+    conditions at BOTH the origin and the surface are what make the flux-form
+    column integral vanish.
+
+    Returns
+    -------
+    (dT_dd, dq_v_dd) : tuple[jax.Array, jax.Array]
+        Temperature [K/s] and vapor [(kg/kg)/s] tendencies from the downdraft
+        mass-flux transport (add to the environment tendencies).
+    """
+    g = constants.g
+    cpd = constants.c_pd
+    lv = constants.L_v
+
+    s = cpd * T + g * z                          # dry static energy [J/kg]
+    h = s + lv * q_v                             # moist static energy [J/kg]
+
+    # -- Origin = FREE-TROPOSPHERIC level of minimum MSE (level of free sinking)
+    # HARD mask to layers strictly above the LCL: a below-LCL cell gets a
+    # -1e30 logit so softmax gives it EXACTLY zero weight regardless of its MSE
+    # advantage (a soft/multiplicative mask is penetrable — codex).  The soft
+    # argmin over the eligible layers keeps the origin differentiable in the
+    # state.  ``source_valid`` is False only for a degenerate column with no
+    # layer above the LCL (LCL at the model top); it disables the whole
+    # downdraft so ``m_d`` cannot fire on the (then uniform, spurious) origin.
+    above_lcl = levels_arr[None, :] < k_lcl_smooth[:, None]      # hard bool mask
+    neg_h = -(h - jnp.max(h, axis=1, keepdims=True)) / _DD_MSE_SOFT_J_PER_KG
+    masked_neg_h = jnp.where(above_lcl, neg_h, -1.0e30)
+    w_org = jax.nn.softmax(masked_neg_h, axis=1)
+    source_valid = jnp.any(above_lcl, axis=1, keepdims=True).astype(z.dtype)
+    z_org = jnp.sum(w_org * z, axis=1, keepdims=True)     # [ncol, 1]
+    s_org = jnp.sum(w_org * s, axis=1, keepdims=True)
+    q_org = jnp.sum(w_org * q_v, axis=1, keepdims=True)
+
+    # -- Descending plume: entrainment relaxes it toward the environment -----
+    descent = jnp.clip(z_org - z, 0.0, None)             # [ncol, nlev], >=0 m
+    f_env = 1.0 - jnp.exp(-entrain_rate * descent)       # mixing fraction
+    s_d = s_org * (1.0 - f_env) + s * f_env
+    q_d = q_org * (1.0 - f_env) + q_v * f_env
+
+    # -- Downdraft mass flux M_d(k) <= 0, zero AT+ABOVE the origin AND at the
+    # surface.  HARD zero for z >= z_org (a downdraft must not exist above its
+    # own source — codex), rising with depth below it; then tapering to zero
+    # across the sub-cloud layer.  Gated off entirely for a no-source column.
+    # ``descent`` = clip(z_org - z, 0, None) >= 0, so the exp argument is <= 0
+    # => the (where-)UNSELECTED branch above the origin cannot overflow in fp32
+    # (exp(+large) -> inf would poison gradients through z_org — codex).
+    below_origin = jnp.where(
+        z < z_org,
+        1.0 - jnp.exp(-_DD_ORIGIN_SHARP_PER_M * descent),
+        0.0,
+    )
+    z_sfc = z[:, -1:]                                    # surface-last
+    surface_taper = 1.0 - jnp.exp(
+        -jnp.clip(z - z_sfc, 0.0, None) / jnp.maximum(detrain_scale_m, 1.0)
+    )
+    shape = below_origin * surface_taper * source_valid
+    m_d = -M_d_mag[:, None] * shape                      # [ncol, nlev], <=0
+
+    # Interface support: only interfaces with BOTH adjacent cells below the
+    # origin carry flux.  This zeros the origin-STRADDLING interface so NO
+    # tendency leaks to the at/above-origin neighbour (the "no downdraft above
+    # its own source" invariant, made exact at interfaces — cell-centre m_d=0
+    # above the origin is not enough because the 0.5-average g_if straddles it,
+    # codex).  Zeroing an INTERIOR interface preserves the telescoping column
+    # conservation (both g_below and g_above drop the same term).
+    below_mask = z < z_org                               # [ncol, nlev] bool
+    iface_below = (below_mask[:, :-1] & below_mask[:, 1:]).astype(z.dtype)
+
+    # -- Conservative flux form: d(psi)/dt = g d/dp[ M_d (psi_d - psi_bar) ] --
+    def _transport(psi_d: jax.Array, psi_bar: jax.Array) -> jax.Array:
+        excess = m_d * (psi_d - psi_bar)                 # [ncol, nlev]
+        # Interface values (between level k and k+1); the model-top and surface
+        # boundary interfaces carry zero flux (M_d boundary conditions) and the
+        # origin-straddling interior interface is gated to zero, so the column
+        # integral telescopes to zero.
+        g_if = 0.5 * (excess[:, :-1] + excess[:, 1:]) * iface_below
+        zeros = jnp.zeros((excess.shape[0], 1), excess.dtype)
+        g_below = jnp.concatenate([g_if, zeros], axis=1)  # flux at k+1/2
+        g_above = jnp.concatenate([zeros, g_if], axis=1)  # flux at k-1/2
+        return g * (g_below - g_above) / dp_full
+
+    ds_dt = _transport(s_d, s)
+    dq_v_dd = _transport(q_d, q_v)
+    dt_dd = ds_dt / cpd                                  # z fixed => dT=ds/c_p
+
+    # -- CFL / positivity limiter (conservation-preserving) ------------------
+    # Scale the WHOLE-column transport by ONE factor per column so that in one
+    # step no level loses more than ``_DD_CFL_FRAC`` of its vapor and |dT/dt|
+    # stays under the scheme cap.  A uniform per-column scaling keeps the zero
+    # column integral => the transport stays exactly conservative; it only
+    # throttles pathological thin-layer / inversion / near-dry columns (the
+    # aggressive-stack blow-up guard).  ``r`` is smooth (min/abs/clip) => AD-safe.
+    tiny = 1e-30
+    drying = jnp.maximum(-dq_v_dd, 0.0)                  # >0 only where drying
+    # Only DRYING levels constrain the vapor limiter; a non-drying level (incl.
+    # q_v==0 with drying==0) returns a huge value so it never disables a column.
+    r_q = jnp.where(
+        drying > 0.0, _DD_CFL_FRAC * q_v / (drying * dt + tiny), 1.0e30
+    )
+    r_t = _BECHTOLD_DTDT_MAX / (jnp.abs(dt_dd) + tiny)
+    r = jnp.minimum(
+        jnp.min(jnp.minimum(r_q, r_t), axis=1, keepdims=True), 1.0
+    )
+    return dt_dd * r, dq_v_dd * r
+
 
 def bechtold_convection(
     T: jax.Array,
@@ -627,6 +786,28 @@ def bechtold_convection(
         dq_c_conv_dt = jnp.where(
             dq_c_conv_dt > 0.0, dq_c_conv_dt * rain_scale, dq_c_conv_dt,
         )
+
+    # -- Penetrative-downdraft thermodynamic transport (opt-in) --------------
+    # INDEPENDENT of the re-evaporation downdraft above (hence OUTSIDE the
+    # ``enable_downdraft`` block — it is NOT a no-op when that is off): it is
+    # driven by CONVECTIVE activity — its mass flux is a fraction
+    # ``downdraft_alpha`` of the cloud-base updraft mass flux ``M_b`` (Tiedtke
+    # 1989 M_d ∝ M_u at the LFS) — NOT the re-evap ``downdraft_trigger`` (which
+    # fires only where the sub-cloud RH is LOW, i.e. NOT the humid marine BL
+    # this lever targets).  It advects low-MSE (dry) mid-tropospheric air DOWN
+    # into the sub-cloud layer, DRYING it (the ventilation the
+    # re-evaporation-only downdraft lacks).  Conservative (column s and q_v
+    # integrals preserved) + CFL/positivity-limited.
+    if config.downdraft_transport:
+        dT_dt_transport, dq_v_dt_transport = _penetrative_downdraft_transport(
+            T, q_v, z, dp_full, k_lcl_smooth, levels_arr,
+            config.downdraft_alpha * M_b,
+            config.downdraft_entrain_rate,
+            config.downdraft_detrain_scale_m,
+            dt,
+        )
+        dT_dt = dT_dt + dT_dt_transport
+        dq_v_dt = dq_v_dt + dq_v_dt_transport
 
     # -- CMT --------------------------------------------------------------
     if config.enable_cmt:

@@ -1904,6 +1904,52 @@ def test_bechtold_downdraft_validate_bounds():
                      bechtold_downdraft_rh_min=0.6).validate_strict()
 
 
+def test_bechtold_downdraft_transport_round_trips_and_threads():
+    """--bechtold-downdraft-transport/-entrain-rate/-detrain-scale round-trip
+    into ExperimentConfig and thread into the hot-loop BechtoldConfig (the
+    marine-BL ventilation lever); default OFF is byte-identical."""
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-downdraft-transport",
+        "--bechtold-downdraft-entrain-rate", "3e-4",
+        "--bechtold-downdraft-detrain-scale", "500",
+    ]), parser))
+    assert cfg.bechtold_downdraft_transport is True
+    assert cfg.bechtold_downdraft_entrain_rate == 3e-4
+    assert cfg.bechtold_downdraft_detrain_scale_m == 500.0
+    cc = _resolve_convection(cfg)[1]
+    assert cc.downdraft_transport is True
+    assert cc.downdraft_entrain_rate == 3e-4
+    assert cc.downdraft_detrain_scale_m == 500.0
+    # default OFF => byte-identical BechtoldConfig downdraft defaults
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    dcc = _resolve_convection(d)[1]
+    assert dcc.downdraft_transport is False
+    assert (dcc.downdraft_entrain_rate,
+            dcc.downdraft_detrain_scale_m) == (5.0e-4, 700.0)
+    # --no- turns OFF a config-file default
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--no-bechtold-downdraft-transport"]), parser))
+    assert off.bechtold_downdraft_transport is False
+
+
+def test_bechtold_downdraft_transport_validate_bounds():
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match="bechtold_downdraft_entrain_rate"):
+        ExperimentConfig(
+            bechtold_downdraft_entrain_rate=1e-2).validate_strict()   # > 2e-3
+    with pytest.raises(ValueError, match="bechtold_downdraft_detrain_scale_m"):
+        ExperimentConfig(
+            bechtold_downdraft_detrain_scale_m=5000.0).validate_strict()  # > 3000
+    ExperimentConfig(bechtold_downdraft_transport=True,
+                     bechtold_downdraft_entrain_rate=3e-4,
+                     bechtold_downdraft_detrain_scale_m=500.0).validate_strict()
+
+
 def test_cloud_inhomogeneity_factor_round_trips():
     """--cloud-inhomogeneity-factor (Cahalan 1994 plane-parallel correction)
     round-trips into ExperimentConfig; default None => CloudConfig default."""
