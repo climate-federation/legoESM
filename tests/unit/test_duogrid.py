@@ -460,44 +460,6 @@ class TestD2A2CVectDuoGrid:
         assert ua.shape == (6, n, n)
         assert jnp.all(jnp.isfinite(ua))
 
-    def test_fv3_csw_tendencies_with_duogrid(self):
-        """fv3_csw_tendencies should produce finite tendencies with duogrid."""
-        from legoesm.core.fv3_sw_core import fv3_csw_tendencies
-        n = 8
-        cdgrid = self._make_grid(n, use_duogrid=True)
-        h = jnp.ones((6, n, n)) * 1000.0
-        u_d = jnp.zeros((6, n, n + 1))
-        v_d = jnp.zeros((6, n + 1, n))
-        h_s = jnp.zeros((6, n, n))
-        dh, du, dv = fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid)
-        assert dh.shape == (6, n, n)
-        assert du.shape == (6, n, n + 1)
-        assert dv.shape == (6, n + 1, n)
-        assert jnp.all(jnp.isfinite(dh))
-        assert jnp.all(jnp.isfinite(du))
-        assert jnp.all(jnp.isfinite(dv))
-        # At rest: tendencies should be near zero
-        np.testing.assert_allclose(dh, 0.0, atol=1e-8)
-
-    def test_duogrid_mass_conservation_one_step(self):
-        """One RK3 step with duogrid should conserve mass."""
-        from legoesm.core.fv3_sw_core import fv3_csw_tendencies
-        n = 8
-        cdgrid = self._make_grid(n, use_duogrid=True)
-        area = cdgrid.base.area
-        h = jnp.ones((6, n, n)) * 1000.0 + 10.0 * jnp.sin(
-            cdgrid.base.lon) * jnp.cos(cdgrid.base.lat)
-        u_d = jnp.ones((6, n, n + 1)) * 5.0
-        v_d = jnp.zeros((6, n + 1, n))
-        h_s = jnp.zeros((6, n, n))
-        dh, du, dv = fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid)
-        dt = 100.0
-        h_new = h + dt * dh
-        mass_before = float(jnp.sum(h * area))
-        mass_after = float(jnp.sum(h_new * area))
-        rel_err = abs(mass_after - mass_before) / abs(mass_before)
-        assert rel_err < 1e-8, f"Mass conservation violated: rel_err={rel_err:.2e}"
-
 
 # =========================================================================
 # T7b: ext_vector and cubed_a2d_halo

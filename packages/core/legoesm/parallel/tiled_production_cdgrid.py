@@ -2955,10 +2955,9 @@ def make_tiled_fv3_cc2c_stage_2d(mesh, cdgrid, n: int, kt: int):
 #
 # Scope of THIS increment — the BASE momentum path of fv3_sw_tendencies:
 #   div_damp=0, hyperdiff_coeff=0, boundary_fix=False,
-#   fortran_vector_corner_fill=False, all fortran_* corner diagnostics False,
 #   non-duogrid (orthogonal rotation) cube.
-# The optional terms (div damp / hyperdiff / boundary smoothing / Fortran
-# corner specials) are deferred — each rides the same per-op kernels + one more
+# The optional terms (div damp / hyperdiff / boundary smoothing) are deferred
+# — each rides the same per-op kernels + one more
 # in-stage halo and is its own increment.  The mass tendency dh_dt (PPM
 # ``cgrid_mass_flux_divergence``) is the separately-tracked hardest op.
 # ---------------------------------------------------------------------------
