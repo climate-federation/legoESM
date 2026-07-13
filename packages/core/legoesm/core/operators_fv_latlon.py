@@ -197,10 +197,12 @@ def fv_flux_divergence_latlon(q, u, v, grid, limiter=True):
 
     q_face_lat = jnp.where(v_iface >= 0, q_L_lat, q_R_lat)
 
-    # Edge length perpendicular to latitude at interfaces: hx = R * dlon * cos(lat_v)
-    # Use grid-derived midpoints (consistent with divergence_cgrid)
-    lat_v = lat_v_interfaces(grid)
-    hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None]
+    # Edge length perpendicular to latitude at interfaces:
+    # hx = R * dlon * cos(lat_v).  ``grid.cos_lat_v`` is the band-correct
+    # v-face metric (pre-sliced by slice_latlon_grid_to_band under MPI/SPMD;
+    # clamped to 1e-10 only at the true global poles).  Hard-coding ±π/2
+    # endpoints here would collapse interior band-cut faces to ~zero area.
+    hx_iface = R * dlon * grid.cos_lat_v[:, None]
 
     Phi_lat = v_iface * hx_iface * q_face_lat  # (n_lat+1, n_lon)
 
@@ -416,10 +418,9 @@ def cgrid_fv_flux_divergence_latlon(q, u_face, v_face, grid, limiter=True):
     q_L_lat, q_R_lat = _ppm_reconstruct_lat(q_pad, limiter)  # (n_lat+1, n_lon)
     q_face_lat = jnp.where(v_face >= 0, q_L_lat, q_R_lat)
 
-    # Face length at latitude interfaces: R * dlon * cos(lat_v)
-    # Use grid-derived midpoints (consistent with divergence_cgrid)
-    lat_v = lat_v_interfaces(grid)
-    hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None]
+    # Face length at latitude interfaces: R * dlon * cos(lat_v).  Uses the
+    # band-correct pre-sliced ``grid.cos_lat_v`` (see fv_flux_divergence_latlon).
+    hx_iface = R * dlon * grid.cos_lat_v[:, None]
     Phi_lat = v_face * hx_iface * q_face_lat  # (n_lat+1, n_lon)
 
     # --- Net flux divergence ---
@@ -442,8 +443,8 @@ def _cgrid_velocity_divergence(u_face, v_face, grid):
     R = grid.radius
     dlon = grid.dlon
     hy = (grid.dy * 0.5)[:, None]                            # (n_lat, 1)
-    lat_v = lat_v_interfaces(grid)
-    hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None]
+    # Band-correct v-face metric (see fv_flux_divergence_latlon).
+    hx_iface = R * dlon * grid.cos_lat_v[:, None]
 
     net_lon = hy * (u_face[:, 1:] - u_face[:, :-1])
     net_lat = hx_iface[1:, :] * v_face[1:, :] - hx_iface[:-1, :] * v_face[:-1, :]

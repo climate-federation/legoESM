@@ -190,6 +190,20 @@ def make_tiled_cc_step(model, mesh, kt: int, dt: float):
     from legoesm.core.precision import cast_pytree
 
     def step(state):
+        # Dynamics-only single-shot probe: the tiled dry core does not
+        # advance tracers, so re-attaching them unchanged would silently
+        # freeze them while serial advances/floors them
+        # (divergence-by-omission — mirrors make_tiled_cc_loop's dry
+        # refusal).  Tracer presence is pytree STRUCTURE, so this raises
+        # at trace time even under jit.
+        tracers = getattr(state, "tracers", None)
+        if tracers:
+            raise ValueError(
+                "make_tiled_cc_step: state carries tracers but the "
+                "single-shot tiled cc step is dynamics-only — it would "
+                "re-attach them FROZEN (divergence-by-omission). Use "
+                "make_tiled_cc_loop with a column_physics_fn for moist "
+                "runs, or drop the tracers.")
         # Entry: the SAME rotation-aware cc→corner vector interp the serial
         # _step_cell_centre uses (a scalar interp would re-inject the
         # cube-edge vorticity imprint).  Runs in the STORAGE dtype, exactly
@@ -220,7 +234,7 @@ def make_tiled_cc_step(model, mesh, kt: int, dt: float):
             T=state.T.replace(data=T2),
             p_s=state.p_s.replace(data=ps2),
             phis=state.phis,
-            tracers=getattr(state, "tracers", None),
+            tracers=tracers,  # None or empty — guarded above
         )
         # Exit: the serial step's own corner→centre conversion.
         return fv3_to_hydrostatic(fv3_new, cdgrid)

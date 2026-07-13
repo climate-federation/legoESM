@@ -121,6 +121,7 @@ from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
     absolute_vorticity_coriolis,
 )
 from legoesm.core.operators_fv_latlon_3d import (
+    cgrid_fv_flux_divergence_latlon_3d,
     cgrid_fv_scalar_advection_latlon_3d,
 )
 from legoesm.timestepping.split_explicit import SplitExplicitConfig
@@ -227,10 +228,12 @@ def cgrid_latlon_nh_slow_tendencies(
     slow tendency for ``u`` and ``v`` therefore is *full* (advection +
     Coriolis + horizontal Exner gradient + horizontal hyperdiff): no
     pressure-gradient term is shifted into the acoustic loop in this
-    scheme.  For ``theta'`` and ``rho'`` the slow tendency is purely
-    horizontal advection + horizontal hyperdiff -- the vertical
-    advection and continuity contributions are handled inside the
-    acoustic substep loop.
+    scheme.  For ``theta'`` the slow tendency is horizontal advection +
+    horizontal hyperdiff; for ``rho'`` it is the horizontal leg of
+    continuity in conservative flux form on TOTAL density,
+    ``-div_h(rho_total v_h)``, + horizontal hyperdiff on ``rho'`` -- the
+    vertical advection and continuity contributions are handled inside
+    the acoustic substep loop.
 
     Returns
     -------
@@ -301,13 +304,38 @@ def cgrid_latlon_nh_slow_tendencies(
     du_dt = -dKE_dx + pgf_u + cor_u
     dv_dt = -dKE_dy + pgf_v + cor_v
 
-    # --- Horizontal scalar advection (PPM) for theta' + rho' ---
+    # --- Horizontal scalar advection (PPM) for theta' ---
     horiz_adv_theta_p = cgrid_fv_scalar_advection_latlon_3d(
         theta_p, u, v, grid,
     )
-    horiz_adv_rho_p = cgrid_fv_scalar_advection_latlon_3d(
-        rho_p, u, v, grid,
-    )
+    # --- Horizontal continuity for rho': conservative FLUX form ---
+    # Sign convention: tendency = d(rho')/dt, applied as rho' += dt*tend.
+    # Continuity in the terrain-following coordinate is
+    #   d(J rho)/dt = -div_h(J rho v_h) - (vertical flux term),
+    # and the static reference rho_ref(z) gives d(rho')/dt = d(rho)/dt,
+    # so the horizontal leg is
+    #   d(rho')/dt|_h = -(1/J) div_h(J * rho_total * v_h)
+    # on TOTAL density with the metric Jacobian J = (H - z_s)/H inside
+    # the flux -- the same metric treatment as the vertical leg in the
+    # acoustic kernel (flux form on rho_total, divided by J).  For flat
+    # terrain J = 1 exactly and this reduces bit-identically to
+    # -div_h(rho_total v_h).
+    # ``cgrid_fv_flux_divergence_latlon_3d`` returns -div_h(q v) (the
+    # minus sign is inside the operator), so it is added with a + sign.
+    # Budget closure: the J-weighted global integral sum(tend * J * area)
+    # telescopes for ANY J (periodic lon; v = 0 at the polar faces via
+    # _apply_pole_wall above), so dry mass
+    # sum(rho_total * J * dz * area) is conserved.
+    # The v1 code used the ADVECTIVE form on rho' (-v . grad rho'),
+    # which dropped the -rho_total*div_h(v) compression term and leaked
+    # mass under divergent flow.
+    # NOTE: J here closes the MASS budget under a sloped metric; the
+    # rest of the v1 slow dynamics (PGF metric term, surface kinematic
+    # w BC, theta/w advection metrics) remains flat-terrain only.
+    jac_h = terrain_metric.jacobian[..., None]   # (n_lat, n_lon, 1)
+    horiz_cont_rho_p = cgrid_fv_flux_divergence_latlon_3d(
+        jac_h * rho_total, u, v, grid,
+    ) / jac_h
 
     # --- Horizontal advection of w on its native half-level grid ---
     # The PPM helper is shape-generic in the trailing axis, so we can
@@ -353,8 +381,10 @@ def cgrid_latlon_nh_slow_tendencies(
             horiz_adv_theta_p
             + config.hyperdiff_scalar * _laplacian_scalar(theta_p)
         )
-        horiz_adv_rho_p = (
-            horiz_adv_rho_p
+        # Hyperdiffusion stays on the PERTURBATION rho' (smoothing the
+        # deviation field, not the balanced reference profile).
+        horiz_cont_rho_p = (
+            horiz_cont_rho_p
             + config.hyperdiff_scalar * _laplacian_scalar(rho_p)
         )
 
@@ -370,6 +400,7 @@ def cgrid_latlon_nh_slow_tendencies(
     sponge_half = sponge_profile(
         height_coord.z_half, height_coord.H,
         cfg.sponge_width, cfg.sponge_coeff,
+        shape=cfg.sponge_profile_shape,
     )  # (nlev+1,)
     horiz_adv_w = horiz_adv_w - sponge_half * w
 
@@ -388,7 +419,7 @@ def cgrid_latlon_nh_slow_tendencies(
             name="dtheta_prime_dt", dims=dims_c, units="K/s",
         ),
         drho_prime_dt=Field(
-            data=horiz_adv_rho_p,
+            data=horiz_cont_rho_p,
             name="drho_prime_dt", dims=dims_c, units="kg/m^3/s",
         ),
         dphis_dt=Field(
@@ -421,9 +452,14 @@ def cgrid_latlon_nh_step(
 
     Composition:
       1. Compute slow tendencies (advection + Coriolis + PGF + hyperdiff)
-      2. Advance u, v explicitly by dt (slow tendency only -- no acoustic
-         pressure-gradient feedback on horizontal momenta in this split,
-         which matches the Skamarock & Klemp 2008 split-explicit scheme).
+      2. Advance ALL prognostic fields (u, v, w, theta', rho') explicitly
+         by dt * slow tendency.  The shared acoustic substep machinery
+         ignores ``slow_tend`` by contract -- the outer step pre-applies
+         it to every leaf, exactly like
+         ``split_explicit._rk_stage_with_acoustics`` (``_pytree_axpy``)
+         does for the cubed-sphere / MPAS / spectral NH dycores.  u and v
+         then receive no acoustic feedback in this split, which matches
+         the Skamarock & Klemp 2008 split-explicit scheme.
       3. Run ``n_acoustic_substeps`` acoustic substeps on (w, theta', rho')
          using the small acoustic time step.
 
@@ -449,9 +485,23 @@ def cgrid_latlon_nh_step(
         state, grid, height_coord, terrain_metric, config,
     )
 
-    # 2. Update u + v (slow only).  Apply pole wall on v.
+    # 2. Pre-apply the slow tendency to ALL prognostic leaves.
+    #    Sign convention: tendency = d(field)/dt, so field += dt * tend
+    #    (positive tendency increases the field; the w sponge tendency
+    #    -sponge*w therefore damps w).  The shared acoustic substep
+    #    machinery (``acoustic_substeps`` / ``..._semi_implicit``)
+    #    receives ``slow`` but by contract never consumes it ("state
+    #    after slow tendency update"): the outer step must fold the slow
+    #    tendencies into EVERY field first, mirroring
+    #    ``split_explicit._rk_stage_with_acoustics`` (``_pytree_axpy``).
+    #    v1 advanced only u and v here, silently discarding the slow
+    #    w / theta' / rho' tendencies (horizontal advection, hyperdiff,
+    #    and the w sponge never acted on the prognostic state).
     u_new = state.u + dt * slow.du_dt.data
     v_new = _apply_pole_wall(state.v + dt * slow.dv_dt.data)
+    w_slow = state.w + dt * slow.dw_dt.data
+    theta_slow = state.theta_prime + dt * slow.dtheta_prime_dt.data
+    rho_slow = state.rho_prime + dt * slow.drho_prime_dt.data
 
     # 3. Acoustic substeps on (w, theta', rho').  The shared
     #    machinery expects a ``NonHydrostaticState`` with trailing-axis
@@ -461,7 +511,10 @@ def cgrid_latlon_nh_step(
     #    transient ``NonHydrostaticState`` for the substep call and
     #    unwrap back into the C-grid state below.
     state_for_acoustic = _to_shared_state(
-        state._replace(u=u_new, v=v_new),
+        state._replace(
+            u=u_new, v=v_new, w=w_slow,
+            theta_prime=theta_slow, rho_prime=rho_slow,
+        ),
     )
     n_acoustic = cfg.n_acoustic_substeps
     dt_s = dt / n_acoustic

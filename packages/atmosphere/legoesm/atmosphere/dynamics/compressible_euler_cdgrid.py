@@ -789,16 +789,23 @@ def cdgrid_compressible_euler_slow_tendencies(
     n_tracers = tracers.shape[-1] if tracers.ndim > 3 else 0
     n_total = 2 + n_tracers  # theta + rho + tracers
 
+    # Terrain-following z* (J = dz/dz*, horizontally varying): continuity
+    # is conservative in the pseudo-density J·ρ (FV3's delp analogue):
+    # dρ'/dt = -(1/J) ∇·(J ρ v).  Weight the advected scalar so the SAME
+    # PPM flux path discretizes J·ρ at the C-grid faces; the divergence
+    # is divided by the cell J below.  J ≡ 1 (flat) is bit-identical.
+    J_rho_total = J[..., None] * rho_total
+
     if n_tracers > 0:
         combined_stack = jnp.concatenate(
             [
-                jnp.stack([theta_total, rho_total], axis=-1),  # (..., nlev, 2)
+                jnp.stack([theta_total, J_rho_total], axis=-1),  # (..., nlev, 2)
                 tracers,  # (..., nlev, n_tracers)
             ], axis=-1,
         )  # (..., nlev, n_total)
     else:
         combined_stack = jnp.stack(
-            [theta_total, rho_total], axis=-1,
+            [theta_total, J_rho_total], axis=-1,
         )  # (..., nlev, 2)
 
     combined_flat = combined_stack.reshape(
@@ -884,8 +891,11 @@ def cdgrid_compressible_euler_slow_tendencies(
                 _d_con_sum, -_delt_theta_b, _delt_theta_b,
             )
         dtheta_p_dt = dtheta_p_dt + _d_con_sum
-    # Rho uses pure flux form: -∇·(ρv) + 0 (continuity).
-    drho_p_dt = flux_combined[..., 1]
+    # Rho uses pure flux form in z*: dρ'/dt = -(1/J) ∇·(J ρ v)
+    # (continuity; ``cgrid_mass_flux_divergence`` already returns the
+    # NEGATIVE divergence, so net outflow of the J-weighted flux lowers
+    # rho).  The vertical leg carries its 1/J in the acoustic substeps.
+    drho_p_dt = flux_combined[..., 1] / J[..., None]
 
     # Tracer advection (advective form).  Vertical advection still runs
     # per-tracer via ``vmap`` over the trailing axis so JAX produces one

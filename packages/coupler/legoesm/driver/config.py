@@ -177,11 +177,11 @@ class DycoreConfig(NamedTuple):
     # speedup — meaningful for the 100-y AMIP submission where the
     # smoke jobs were paying ~2.5 h of compile per rank-count.
     #
-    # Default ``"ssp_rk3"`` preserves bit-equivalent behaviour for
-    # the existing scientific validation suite.  ``"ssp_rk3_scan"``
-    # is the opt-in for production at scale.
+    # On cube / lat-lon, ``"auto"`` resolves to ``ssp_rk3`` — bit-
+    # equivalent behaviour for the existing scientific validation
+    # suite.  ``"ssp_rk3_scan"`` is the opt-in for production at scale.
     #
-    # ``"auto"`` (the run_amip CLI default since 2026-06-10) selects
+    # ``"auto"`` (the default here AND the run_amip CLI default) selects
     # each dycore's own stable default in ``component_factory``:
     # cube / lat-lon keep ``ssp_rk3``; MPAS gets ``ssp_rk54_scan``
     # (its biharmonic hyperdiffusion eigenvalues at production dt fall
@@ -189,7 +189,14 @@ class DycoreConfig(NamedTuple):
     # blow-up); spectral keeps ``ssp_rk54``.  Any explicit scheme name
     # (including ``ssp_rk3`` on MPAS) is forwarded verbatim, so
     # deliberate integrator-sensitivity runs are still possible.
-    time_integrator: str = "ssp_rk3"
+    # Default flipped ``"ssp_rk3"`` → ``"auto"`` (2026-07-12): a direct
+    # ``DycoreConfig()`` on MPAS previously inherited the documented-
+    # unstable ssp_rk3 (diverges within ~3 steps at dt=600 with
+    # hyperdiff ON) — only the run_amip CLI got the safe per-dycore
+    # resolution.  ``"auto"`` never reaches ``dispatch_integrator``
+    # (every factory branch maps it first; dispatch raises loudly on
+    # unknown names as defense in depth).
+    time_integrator: str = "auto"
     # #771: transport the (attached) moisture tracers horizontally with the
     # mass-conserving flux-form post-RK3 substep instead of the in-RK3 advective
     # -(u·∇q).  Fixes the cube column-water non-conservation / day-150 blow-up.

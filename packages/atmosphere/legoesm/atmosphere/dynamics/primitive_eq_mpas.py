@@ -56,8 +56,8 @@ from legoesm.grids.vertical import (
     dp_from_hybrid,
     compute_geopotential,
     compute_geopotential_hybrid,
-    compute_sigma_dot_and_total,
-    compute_mass_flux_hybrid,
+    compute_sigma_dot_from_cumsum,
+    compute_mass_flux_from_cumsum,
     vertical_advection,
     vertical_advection_hybrid,
     vertical_advection_theta,
@@ -311,15 +311,24 @@ def mpas_hydrostatic_tendencies(
         hybrid_factor_edge = B_full * p_s_edge_scalar[:, None] / jnp.maximum(p_full_edge, 1e-10)
         pg_corr_3d = R_d * T_edge_3d * grad_ln_ps[:, None] * hybrid_factor_edge
     else:
-        # Batch (T_3d, ln_ps) into a single cell_to_edge_avg_3d call.
+        # Batch (T_3d, p_s, ln_ps) into a single cell_to_edge_avg_3d call.
+        # ``p_s`` rides as one extra passive slot so the σ-branch flux-form
+        # continuity below gets the SAME edge-averaged p_s the hybrid branch
+        # uses for its dp_edge — no extra gather.
         nlev_te = T_3d.shape[-1]
         _T_ln_input = jnp.concatenate(
-            [T_3d, ln_ps[:, jnp.newaxis]], axis=-1,
-        )  # (nCells, nlev + 1)
+            [T_3d, p_s[:, jnp.newaxis], ln_ps[:, jnp.newaxis]], axis=-1,
+        )  # (nCells, nlev + 2)
         _T_ln_edge = cell_to_edge_avg_3d(_T_ln_input, mesh)
         T_edge_3d = _T_ln_edge[:, :nlev_te]
+        p_s_edge_scalar = _T_ln_edge[:, -2]  # (nEdges,)
         ln_ps_edge_pre = _T_ln_edge[:, -1]
-        dp_edge_3d = None
+        # σ-coordinate layer thickness at edges: dp_k = p_s·Δσ_k (astype:
+        # keep the state dtype when the σ arrays are f32).
+        dp_edge_3d = (
+            p_s_edge_scalar[:, None]
+            * sigma_coord.dsigma.astype(p_s.dtype)[None, :]
+        )  # (nEdges, nlev)
         pg_corr_3d = R_d * T_edge_3d * grad_ln_ps[:, None]  # (nEdges, nlev)
 
     # PV flux: h_proxy = dp/g (pressure thickness).  For the hybrid
@@ -378,11 +387,11 @@ def mpas_hydrostatic_tendencies(
     # trailing nlev axis is purely passive), so all the divergences
     # the dycore needs at this stage can fold into a single call:
     #
-    #   * div(u)                 — continuity / sigma-dot closure
+    #   * div(u)                 — horizontal-advection / PV bookkeeping
     #   * div(u * T_edge)        — temperature flux divergence
     #   * div(u * ln_ps_edge)    — v·∇(ln p_s) thermodynamic correction
-    #   * div(u * dp_edge)       — hybrid layer-mass continuity
-    #                              (only when ``_hybrid``)
+    #   * div(u * dp_edge)       — flux-form layer-mass continuity
+    #                              (BOTH branches; σ uses dp = p_s_edge·Δσ)
     #   * div(grad_T)            — K_h scalar Laplacian (only when ``K_h > 0``)
     #
     # Pull ``ln_ps_edge`` and (when hybrid) ``u*dp_edge_3d`` and (when
@@ -399,11 +408,11 @@ def mpas_hydrostatic_tendencies(
 
     _div_input_list = [u_3d, flux_T_3d, flux_lnps_3d]
     _idx_u, _idx_uT, _idx_ulnps = 0, 1, 2
-    _idx_udp = -1
     _idx_gradT = -1
-    if _hybrid:
-        _div_input_list.append(u_3d * dp_edge_3d)
-        _idx_udp = len(_div_input_list) - 1
+    # Flux-form layer-mass divergence for BOTH vertical-coordinate branches
+    # (dp_edge_3d is dA+dB·p_s at edges when hybrid, p_s_edge·Δσ when σ).
+    _div_input_list.append(u_3d * dp_edge_3d)
+    _idx_udp = len(_div_input_list) - 1
     if config.K_h > 0:
         _div_input_list.append(grad_T_3d_pre)
         _idx_gradT = len(_div_input_list) - 1
@@ -416,8 +425,7 @@ def mpas_hydrostatic_tendencies(
     div_3d = _div_outputs[..., _idx_u]
     div_uT_3d = _div_outputs[..., _idx_uT]
     div_flux_lnps = _div_outputs[..., _idx_ulnps]
-    if _hybrid:
-        div_dp_3d_pre = _div_outputs[..., _idx_udp]
+    div_dp_3d = _div_outputs[..., _idx_udp]  # flux-form div(u·dp), both branches
     if config.K_h > 0:
         _div_grad_T = _div_outputs[..., _idx_gradT]
     horiz_adv_T_3d = -div_uT_3d + T_3d * div_3d  # (nCells, nlev)
@@ -428,16 +436,24 @@ def mpas_hydrostatic_tendencies(
         horiz_adv_T_3d = horiz_adv_T_3d + config.K_h * _div_grad_T
 
     # --- 4. Surface pressure tendency and vertical velocity ---
+    # Flux-form continuity (both branches): ``div_dp_3d = div(u·dp_edge)``
+    # from the batched divergence block above.  The cumsum is shared between
+    # ``dp_s_dt`` (last entry) and the σ̇ / mass-flux integration (iter-53/54
+    # pattern: one cross-cell-shard reduction per RK stage).  Positive
+    # divergence (mass export) ⇒ dp_s/dt < 0.
+    _cumsum_dp = jnp.cumsum(div_dp_3d, axis=-1)  # (nCells, nlev)
+    _D_total_p = _cumsum_dp[..., -1:]            # (nCells, 1)  [Pa/s]
     if _hybrid:
         # Hybrid closure on MPAS:
         #   B_range * dp_s/dt = -sum_k div(dp_k * v_k)
-        # ``div_dp_3d_pre`` (i.e. ``div(u * dp_edge_3d)``) was already
-        # produced by the batched divergence block above (Loop 155),
-        # so reuse it instead of issuing a standalone divergence call.
-        div_dp_3d = div_dp_3d_pre  # (nCells, nlev)
-        dp_s_dt = -jnp.sum(div_dp_3d, axis=-1) / sigma_coord.B_range
+        dp_s_dt = -_D_total_p[..., 0] / sigma_coord.B_range
 
-        mass_flux, _ = compute_mass_flux_hybrid(div_3d, p_s, sigma_coord)
+        # Flux-form mass flux from the SAME cumsum — consistent with the
+        # flux-form dp_s_dt above.  (compute_mass_flux_hybrid would rebuild
+        # it from the ADVECTIVE div(v)·dp, which differs wherever ∇p_s ≠ 0.)
+        mass_flux = compute_mass_flux_from_cumsum(
+            _cumsum_dp, _D_total_p, sigma_coord,
+        )
         # θ-form vertical thermodynamic transport (cancellation-free, #930):
         #   -F·∂T/∂p + κ·T·F/p  ==  -exner·F·∂θ/∂p   (θ = T·(p₀/p)^κ).
         # Advecting θ cancels the two large near-equal terms BEFORE
@@ -453,16 +469,16 @@ def mpas_hydrostatic_tendencies(
         sigma_top = sigma_coord.sigma_half[0]
         sigma_range = 1.0 - sigma_top
 
-        # Iter-53: share the cumsum between σ̇ and ``D_total`` rather
-        # than running ``jnp.sum(div_3d * dsigma)`` separately and
-        # ``compute_sigma_dot`` doing its own cumsum.  Saves one
-        # cross-cell-shard reduction per RK3 stage on the MPAS
-        # non-hybrid σ-coordinate path (mirrors iter-52's cubed-sphere
-        # FV3 PE refactor).
-        sigma_dot, _D_total_full = compute_sigma_dot_and_total(
-            div_3d, sigma_coord,
+        # σ closure: (1 - σ_top)·dp_s/dt = -Σ_k div(u·p_s_edge·Δσ_k).
+        # ``div_dp`` already carries the p_s factor (flux form) — no extra
+        # p_s multiply, unlike the old advective div(v)·Δσ closure.
+        dp_s_dt = -_D_total_p[..., 0] / sigma_range
+
+        # Flux-form σ̇ from the SAME cumsum (shared closure; mirrors the
+        # lat-lon C-grid reference implementation).
+        sigma_dot = compute_sigma_dot_from_cumsum(
+            _cumsum_dp, _D_total_p, p_s, sigma_coord,
         )
-        dp_s_dt = -p_s * _D_total_full[..., 0] / sigma_range
 
         # θ-form vertical thermodynamic transport (cancellation-free, #930):
         #   -σ̇·∂T/∂σ + κ·T·σ̇/σ  ==  -exner·σ̇·∂θ/∂σ   (θ = T·(p₀/p)^κ).
@@ -766,10 +782,19 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 s, self.mesh, self.sigma_coord, self.config,
                 physics_tendency=None, dt=dt,
             )
+            # Pin every tendency leaf to the state's dtype.  Under an fp32
+            # compute policy with x64 enabled, the f64 mesh-geometry
+            # closure constants promote the tendency products to f64; the
+            # scan-folded integrators (ssp_rk54_scan — the MPAS default via
+            # time_integrator="auto") have a fixed-dtype scan carry and
+            # REFUSE a tendency wider than the state (the unrolled ssp_rk3
+            # used to promote silently instead).  Scan-carry dtype
+            # stability rule: outputs at result dtype of the state.
             _new = MPASHydrostaticState(
-                u=s.u.replace(data=tend.du_dt.data),
-                T=s.T.replace(data=tend.dT_dt.data),
-                p_s=s.p_s.replace(data=tend.dp_s_dt.data),
+                u=s.u.replace(data=tend.du_dt.data.astype(s.u.data.dtype)),
+                T=s.T.replace(data=tend.dT_dt.data.astype(s.T.data.dtype)),
+                p_s=s.p_s.replace(
+                    data=tend.dp_s_dt.data.astype(s.p_s.data.dtype)),
                 phis=s.phis.replace(data=jnp.zeros_like(s.phis.data)),
             )
             # Carry tracer ADVECTION tendencies as a tendency-shaped state so
@@ -777,7 +802,9 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             # tracer keys as the input state ⇒ tree-axpy lines up.
             if s.tracers is not None and tend.tracer_tendencies is not None:
                 _new = _new._replace(tracers={
-                    k: s.tracers[k].replace(data=tend.tracer_tendencies[k].data)
+                    k: s.tracers[k].replace(
+                        data=tend.tracer_tendencies[k].data.astype(
+                            s.tracers[k].data.dtype))
                     for k in s.tracers
                 })
             return _new

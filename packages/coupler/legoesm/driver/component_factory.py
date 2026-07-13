@@ -383,9 +383,17 @@ def create_atmosphere_dycore(
         from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
             CDGridCompressibleEulerModel, CDGridCompressibleEulerConfig,
         )
+        # Forward the driver-level mass fixer (mirrors the plane / NH
+        # branches).  Previously dropped: DycoreConfig.fix_mass=True was
+        # silently ignored on the cubed-sphere NH path.
+        # conservation_fixer=False overrides fix_mass=True (same contract
+        # as the lat-lon branch below).
+        _nh_fix_mass = dc.fix_mass and dc.conservation_fixer
         cfg = CDGridCompressibleEulerConfig(
             A_h=diff.A_h,
             hyperdiff_coeff=diff.hyperdiff,
+            fix_mass=_nh_fix_mass,
+            anchor_mass_to_initial=_nh_fix_mass,
         )
         # Non-hydrostatic requires height coordinate and terrain metric.
         # Expect grid to provide these or construct defaults.
@@ -437,14 +445,46 @@ def create_atmosphere_dycore(
             time_integrator="ssp_rk54",
             p_floor=200.0,
             dealiasing_fraction=0.667,
+            # Forward the driver-level mass fixer (mirrors the plane / NH
+            # branches).  Previously dropped: DycoreConfig.fix_mass=True was
+            # silently ignored on the spectral hydrostatic path.
+            # conservation_fixer=False overrides fix_mass=True (lat-lon
+            # branch contract).
+            fix_mass=dc.fix_mass and dc.conservation_fixer,
+            anchor_mass_to_initial=dc.fix_mass and dc.conservation_fixer,
         )
         return SpectralPrimitiveEquationModel(
             grid=grid, sigma_coord=sigma, config=pe_config,
         )
 
     if solver_name == "spectral_compressible_euler":
-        from legoesm.atmosphere.dynamics.spectral_nh import SpectralCompressibleEulerModel
-        return SpectralCompressibleEulerModel(grid=grid, sigma_coord=sigma)
+        from legoesm.atmosphere.dynamics.spectral_nh import (
+            SpectralCompressibleEulerModel, SpectralNHConfig,
+        )
+        # Non-hydrostatic uses a height (z-star) coordinate, not sigma:
+        # build the flat-topography defaults exactly like the CDGrid-NH
+        # branch above.  z_s must be (n_lat, n_lon) on the Gaussian grid
+        # (grid.lat is 1-D), hence zeros_like(lat2d).
+        height_coord = getattr(grid, "height_coord", None)
+        terrain_metric = getattr(grid, "terrain_metric", None)
+        if height_coord is None or terrain_metric is None:
+            from legoesm.grids.vertical import (
+                create_height_coordinate, compute_terrain_metric,
+            )
+            if height_coord is None:
+                nlev = sigma.sigma_full.shape[0] if hasattr(sigma, "sigma_full") else 40
+                height_coord = create_height_coordinate(nlev, 30_000.0)
+            if terrain_metric is None:
+                z_s = jnp.zeros_like(grid.lat2d)
+                terrain_metric = compute_terrain_metric(z_s, height_coord)
+        # conservation_fixer=False overrides fix_mass=True (lat-lon contract).
+        nh_cfg = SpectralNHConfig(
+            fix_mass=dc.fix_mass and dc.conservation_fixer,
+            anchor_mass_to_initial=dc.fix_mass and dc.conservation_fixer,
+        )
+        return SpectralCompressibleEulerModel(
+            grid, height_coord, terrain_metric, nh_cfg,
+        )
 
     # ----- MPAS icosahedral -----
     if solver_name == "mpas_primitive_equations":
@@ -470,7 +510,10 @@ def create_atmosphere_dycore(
             nu_del4=diff.hyperdiff,
             nu_del4_ps=diff.hyperdiff,
             K_h=diff.A_h,
-            fix_mass=dc.fix_mass,
+            # conservation_fixer=False overrides fix_mass=True (lat-lon
+            # contract; codex 2026-07-12 round 2 — this branch predates
+            # the audit but had the same gap).
+            fix_mass=dc.fix_mass and dc.conservation_fixer,
             time_integrator=_ti,
             # #930 cure: vertical biharmonic damping of the 2Δσ T checkerboard.
             nu_vert4_T=dc.mpas_nu_vert4_T,
@@ -478,8 +521,33 @@ def create_atmosphere_dycore(
         return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma, config=cfg)
 
     if solver_name == "mpas_compressible_euler":
-        from legoesm.atmosphere.dynamics.compressible_euler_mpas import MPASCompressibleEulerModel
-        return MPASCompressibleEulerModel(mesh=grid, sigma_coord=sigma)
+        from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
+            MPASCompressibleEulerModel, MPASCompressibleEulerConfig,
+        )
+        # Non-hydrostatic uses a height (z-star) coordinate, not sigma:
+        # flat-topography defaults as in the CDGrid-NH branch; the MPAS
+        # surface field is 1-D over cells.
+        height_coord = getattr(grid, "height_coord", None)
+        terrain_metric = getattr(grid, "terrain_metric", None)
+        if height_coord is None or terrain_metric is None:
+            from legoesm.grids.vertical import (
+                create_height_coordinate, compute_terrain_metric,
+            )
+            if height_coord is None:
+                nlev = sigma.sigma_full.shape[0] if hasattr(sigma, "sigma_full") else 40
+                height_coord = create_height_coordinate(nlev, 30_000.0)
+            if terrain_metric is None:
+                z_s = jnp.zeros_like(grid.latCell)
+                terrain_metric = compute_terrain_metric(z_s, height_coord)
+        # conservation_fixer=False overrides fix_mass=True (lat-lon contract).
+        nh_cfg = MPASCompressibleEulerConfig(
+            nu_del2=diff.A_h,
+            nu_del4=diff.hyperdiff,
+            K_h=diff.A_h,
+            fix_mass=dc.fix_mass and dc.conservation_fixer,
+            anchor_mass_to_initial=dc.fix_mass and dc.conservation_fixer,
+        )
+        return MPASCompressibleEulerModel(grid, height_coord, terrain_metric, nh_cfg)
 
     # ----- Doubly-periodic plane -----
     if solver_name == "plane_compressible_euler":
@@ -520,8 +588,10 @@ def create_atmosphere_dycore(
             hyperdiff_w_coeff=0.0,
             semi_implicit_acoustic=False,
             use_coriolis=False,
-            fix_mass=dc.fix_mass,
-            anchor_mass_to_initial=dc.fix_mass,
+            # conservation_fixer=False overrides fix_mass=True (lat-lon
+            # contract; codex 2026-07-12 round 2).
+            fix_mass=dc.fix_mass and dc.conservation_fixer,
+            anchor_mass_to_initial=dc.fix_mass and dc.conservation_fixer,
         )
         return PlaneCompressibleEulerModel(grid, height_coord, terrain_metric, cfg)
 
@@ -620,6 +690,13 @@ def create_atmosphere_dycore(
         cfg = CGridLatLonShallowWaterConfig(
             A_h=_A_h,
             fix_mass=_fix_mass,
+            # Stage 3-E: pass polar-filter parameters through (mirrors the
+            # PE branch below).  Previously dropped: the dt/CFL relaxation
+            # above already assumed the filter was ON (dt lifted to the
+            # equatorial CFL) while the model silently ran WITHOUT it.
+            use_polar_filter=dc.use_polar_filter,
+            polar_filter_cutoff_deg=dc.polar_filter_cutoff_deg,
+            polar_filter_max_wave_speed=dc.polar_filter_max_wave_speed,
         )
         model = CGridLatLonShallowWaterModel(grid, cfg, dt=_effective_dt)
         model.effective_dt = _effective_dt

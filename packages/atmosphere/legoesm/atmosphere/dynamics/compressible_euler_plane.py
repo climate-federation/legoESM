@@ -1204,6 +1204,9 @@ def _compute_smagorinsky_K_m_plane(
 
     # --- Vertical gradients (w at half levels, u/v at full levels) ---
     # ∂w/∂z = (w_half[k+1] - w_half[k]) / dz_full[k] at full level (cell centre).
+    # (Level-index difference = −∂w/∂z_physical under top-down storage; S33
+    # enters |S|² only SQUARED, so the sign is inert HERE — do not reuse this
+    # value where a signed ∂w/∂z_physical is required.)
     dz_full = height_coord.dz                          # (nlev,)
     dw_dz_center = (
         w_yxz_half[..., 1:] - w_yxz_half[..., :-1]
@@ -1213,9 +1216,12 @@ def _compute_smagorinsky_K_m_plane(
     # ∂u/∂z at x-face, vertical full-level: needs interior centred
     # difference of u between full levels k+1, k-1 (centred). Edges
     # use one-sided one-level differences.
-    # Build du/dz_full at x-face (same staggering as u).
-    du_dz = full_level_centred_d_dz(u_yxz, height_coord)
-    dv_dz = full_level_centred_d_dz(v_yxz, height_coord)
+    # Sign convention: z is positive UP, level index k runs TOP→DOWN, so
+    # full_level_centred_d_dz returns −∂/∂z_physical. Negate to the physical
+    # sign: S13/S23 MIX these with the already-physical ∂w/∂x, ∂w/∂y, so the
+    # sign does NOT square out — the 2·(∂u/∂z)(∂w/∂x) cross term in S13² flips.
+    du_dz = -full_level_centred_d_dz(u_yxz, height_coord)  # +∂u/∂z_phys, x-face
+    dv_dz = -full_level_centred_d_dz(v_yxz, height_coord)  # +∂v/∂z_phys, y-face
 
     # ∂w/∂x at x-face (cell-centre w_full needed first), ∂w/∂y at y-face.
     # Build w at full level (vertical midpoint of half-level pair) then
@@ -1376,9 +1382,14 @@ def _velocity_gradients_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord):
     dudy = (jnp.roll(uc, -1, axis=0) - jnp.roll(uc, 1, axis=0)) / (2.0 * grid.dy)
     dvdy = (jnp.roll(vc, -1, axis=0) - jnp.roll(vc, 1, axis=0)) / (2.0 * grid.dy)
     dwdy = (jnp.roll(wc, -1, axis=0) - jnp.roll(wc, 1, axis=0)) / (2.0 * grid.dy)
-    dudz = full_level_centred_d_dz(uc, height_coord)
-    dvdz = full_level_centred_d_dz(vc, height_coord)
-    dwdz = full_level_centred_d_dz(wc, height_coord)
+    # z is positive UP, level index k runs TOP→DOWN ⇒ full_level_centred_d_dz
+    # returns −∂/∂z_physical. Negate so this helper honours its contract
+    # (physically-signed a_cd = ∂u_c/∂x_d): the mixed strains S13/S23 and the
+    # Vreman/AMD/Germano gradient PRODUCTS are odd in these entries, so the
+    # sign does not square out downstream.
+    dudz = -full_level_centred_d_dz(uc, height_coord)   # +∂u/∂z_phys
+    dvdz = -full_level_centred_d_dz(vc, height_coord)   # +∂v/∂z_phys
+    dwdz = -full_level_centred_d_dz(wc, height_coord)   # +∂w/∂z_phys
     return uc, vc, wc, dudx, dudy, dudz, dvdx, dvdy, dvdz, dwdx, dwdy, dwdz
 
 
@@ -1568,12 +1579,14 @@ def full_level_centred_d_dz(
     ``z_full`` decreases with level index ``k`` (index 0 = model
     top, index ``nlev-1`` = surface), so the returned value is
     ``+(f[k+1] - f[k-1]) / (z[k-1] - z[k+1])``, i.e. the derivative
-    with respect to LEVEL INDEX. The sign relative to the physical
-    vertical coordinate ``z`` is opposite; this helper is consumed
-    exclusively inside SQUARED strain components ``S_13²``,
-    ``S_23²`` so the sign drops out of ``|S|²``. Do NOT use the raw
-    return value where a signed ``∂f/∂z_physical`` is required
-    without flipping the sign.
+    with respect to LEVEL INDEX = ``−∂f/∂z_physical``. The sign does
+    NOT "drop out when squared" for MIXED strain components —
+    ``S_13² = (0.5(∂u/∂z + ∂w/∂x))²`` carries an odd
+    ``(∂u/∂z)(∂w/∂x)`` cross term — nor in gradient products
+    (Vreman/AMD/Germano ``M_ij``) or in N². EVERY consumer needing a
+    signed ``∂f/∂z_physical`` must negate the raw return value; all
+    current call sites do (leading minus at the N² sites, negation at
+    the strain/gradient sites).
 
     Interior uses the 2-level centred difference; boundaries fall
     back to one-sided one-step differences (top: ``(f[0] - f[1]) /
