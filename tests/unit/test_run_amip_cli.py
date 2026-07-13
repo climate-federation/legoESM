@@ -2041,7 +2041,11 @@ def test_latlon24_production_variant_pins_polar_filter():
     # and lifts hfls 40->70 (#847).  The cube lane keeps bechtold.
     cfg = build_config_from_args(args)
     assert cfg.convection == "sbm" and cfg.gravity_wave_drag == "mcfarlane"
-    assert cfg.convective_precip_efficiency == 0.0  # sbm rejects the bechtold knob
+    # UNSET (#929 None sentinel; an explicit 0.0 now means "force legacy
+    # no-split", not "unset"): the latlon24 YAML clears the inherited bechtold
+    # knob to null, and sbm ignores it (sbm_precip_efficiency is its own knob)
+    # — see the convective_precip_efficiency note in amip_production_latlon24.yaml.
+    assert cfg.convective_precip_efficiency is None
 
 
 def test_explicit_zero_sic_scale_and_sst_offset_preserved():
