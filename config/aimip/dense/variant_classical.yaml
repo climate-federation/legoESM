@@ -1,0 +1,12 @@
+# ACE2-loss classical: the sweep-WINNER scheme combination
+# (combo_conv_edmf: edmf convection + louis + mcfarlane + sundqvist +
+# xu_randall, RRTMGP from the base). Differs from the standard
+# variant_classical (tiedtke + micro=none) by using the winning schemes.
+aimip_variant: "classical"
+aimip_convection: "edmf"
+aimip_turbulence: "louis"
+aimip_gwd: "mcfarlane"
+aimip_microphysics: "sundqvist"
+aimip_cloud: "xu_randall"
+radiation: "gray"          # informational tag; actual radiation = base aimip_radiation (rrtmgp)
+physics_parameterization: "none"
