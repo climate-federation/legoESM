@@ -8,6 +8,16 @@ Convention: newest entries on top. Each entry = what changed, why, how verified.
 
 ---
 
+## 2026-07-13 — Codex round-4 [P1]: thread grid_info through the land rollout (M3)
+
+`step_multilayer_land` / `step_multilayer_land_with_diagnostics` /
+`_step_multilayer_land_impl` gain a `clm_ml_grid_info=None` param, forwarded to
+`compute_clm_ml_canopy_fluxes(grid_info=...)`. A multi-step differentiable
+rollout through the documented `MultiLayerLandConfig` path now works: extract a
+concrete `GridInfo` once from the warm-start state (`extract_clm_ml_grid_info`),
+close over it before the `jax.grad` scan, and pass it via `clm_ml_grid_info=`.
+Non-CLM-ML schemes and forward-only runs ignore it (default `None`).
+
 ## 2026-07-13 — Codex rounds 2–3 fixes
 
 - **Round-2 [P1]** (forward-path API coupling): `grid=`/`vcmaxpft_jax=`/

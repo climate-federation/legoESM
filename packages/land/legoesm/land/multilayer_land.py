@@ -159,6 +159,7 @@ def step_multilayer_land_with_diagnostics(
     carbon_state: CarbonState | None = None,
     doy: float = 0.0,
     land_params=None,
+    clm_ml_grid_info=None,
 ):
     """Like :func:`step_multilayer_land` but also returns the ``SurfaceFluxOutput``.
 
@@ -171,7 +172,8 @@ def step_multilayer_land_with_diagnostics(
     """
     return _step_multilayer_land_impl(
         state, forcing, config, U_min, dt,
-        lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params)
+        lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params,
+        clm_ml_grid_info=clm_ml_grid_info)
 
 
 def root_zone_beta_soil(
@@ -242,6 +244,7 @@ def step_multilayer_land(
     carbon_state: CarbonState | None = None,
     doy: float = 0.0,
     land_params=None,
+    clm_ml_grid_info=None,
 ) -> tuple[MultiLayerLandState, TileResponse, CarbonState | None]:
     """Step the multi-layer land model forward by ``dt`` seconds.
 
@@ -251,10 +254,15 @@ def step_multilayer_land(
     is shared between both branches.  Returns a 3-tuple; use
     :func:`step_multilayer_land_with_diagnostics` to also receive the raw
     ``SurfaceFluxOutput`` for diagnostic inspection.
+
+    ``clm_ml_grid_info`` threads a concrete CLM-ML ``GridInfo`` to the canopy
+    interface for multi-step differentiable rollouts (see
+    :func:`_step_multilayer_land_impl`); ``None`` for forward-only / non-CLM-ML.
     """
     new_state, response, carbon_new, _surface_out = _step_multilayer_land_impl(
         state, forcing, config, U_min, dt,
-        lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params)
+        lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params,
+        clm_ml_grid_info=clm_ml_grid_info)
     return new_state, response, carbon_new
 
 
@@ -268,12 +276,20 @@ def _step_multilayer_land_impl(
     carbon_state: CarbonState | None = None,
     doy: float = 0.0,
     land_params=None,
+    clm_ml_grid_info=None,
 ):
     """Internal 4-tuple (new_state, TileResponse, carbon, SurfaceFluxOutput).
 
     Kept non-public so the two public entry points (``step_multilayer_land``
     and ``step_multilayer_land_with_diagnostics``) can return different
     arities without branching inside the tight-loop code.
+
+    ``clm_ml_grid_info`` (concrete ``GridInfo``) is forwarded to the CLM-ML
+    canopy interface for a MULTI-STEP differentiable rollout — extract it once
+    from a warm-start state with
+    ``legoesm.land.canopy.clm_ml_interface.extract_clm_ml_grid_info`` and close
+    over it before the ``jax.grad`` scan, so the traced carried state is never
+    ``int()``-ed.  Ignored by the non-CLM-ML schemes and by forward-only runs.
     """
     lp = land_params
     T_soil = state.T_soil        # (ncol, n_layers)
@@ -527,6 +543,7 @@ def _step_multilayer_land_impl(
             lat=lat,
             doy=doy,
             lai_override=LAI_override,
+            grid_info=clm_ml_grid_info,
         )
     elif isinstance(config.surface_scheme, SimpleSEBConfig):
         # SimpleSEB: bulk fluxes with skin T = T_soil[:, 0].
