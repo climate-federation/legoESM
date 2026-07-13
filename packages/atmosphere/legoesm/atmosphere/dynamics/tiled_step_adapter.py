@@ -379,7 +379,19 @@ def make_tiled_cc_loop(model, mesh, kt: int, dt: float,
                 "phis": blocked["phis"]}
 
     def exit_(blocked, template_state):
-        """Blocked -> cc HydrostaticState (GLOBAL GATHER — I/O only)."""
+        """Blocked -> cc HydrostaticState (GLOBAL GATHER — I/O only).
+
+        The output is DONATION-INDEPENDENT: every leaf is a fresh buffer,
+        never an alias of the blocked carry.  ``u_d``/``v_d`` (dedup
+        slices) and the ``q_pack`` tracer slices are new by construction;
+        the cc passthrough leaves (``T``, ``p_s``) are explicitly copied —
+        ``fv3_to_hydrostatic`` threads them through unchanged, and a
+        donating segment caller (``scan_tiled_cc_steps`` default)
+        invalidates the carry buffers on its NEXT call, which would
+        otherwise poison a retained ``exit_`` state (e.g. a driver
+        callback holding ``driver.state`` for deferred I/O — codex M3b
+        MAJOR).
+        """
         u_d = dedup_tiled_corners(blocked["u_d"], kt, nl)
         v_d = dedup_tiled_corners(blocked["v_d"], kt, nl)
         tracers = getattr(template_state, "tracers", None)
@@ -392,8 +404,8 @@ def make_tiled_cc_loop(model, mesh, kt: int, dt: float,
         fv3 = FV3HydrostaticState(
             u_d=template_state.u.replace(data=u_d, name="u_d"),
             v_d=template_state.v.replace(data=v_d, name="v_d"),
-            T=template_state.T.replace(data=blocked["T"]),
-            p_s=template_state.p_s.replace(data=blocked["p_s"]),
+            T=template_state.T.replace(data=jnp.copy(blocked["T"])),
+            p_s=template_state.p_s.replace(data=jnp.copy(blocked["p_s"])),
             phis=template_state.phis,
             tracers=tracers,
         )

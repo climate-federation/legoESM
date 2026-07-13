@@ -331,9 +331,20 @@ def _make_band_step_body(model, template, array_field_names, axis,
 
 
 def _dtype_sig(tree) -> tuple:
-    """Trace-time dtype signature of a pytree (leaf dtypes, flattened order)."""
-    return tuple(str(leaf.dtype) for leaf in jax.tree_util.tree_leaves(tree)
-                 if hasattr(leaf, "dtype"))
+    """Trace-time carry signature of a pytree: the pytree STRUCTURE plus
+    every array leaf's ``(shape, dtype, weak_type)``.
+
+    ``lax.scan`` requires carry-in == carry-out in ALL of structure, shape,
+    dtype and weak type — dtype strings alone would mark a step that flips
+    weak typing (or shape) while preserving dtypes as "stable" and then
+    fail inside the scan lowering instead of being absorbed by the unroll
+    (codex M3b review).  Non-array leaves contribute through the treedef.
+    """
+    leaves, treedef = jax.tree_util.tree_flatten(tree)
+    return (str(treedef),
+            tuple((tuple(leaf.shape), str(leaf.dtype),
+                   bool(getattr(leaf, "weak_type", False)))
+                  for leaf in leaves if hasattr(leaf, "dtype")))
 
 
 def unroll_to_dtype_fixed_point(step1, state, n_left: int):

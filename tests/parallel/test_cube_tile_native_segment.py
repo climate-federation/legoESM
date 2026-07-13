@@ -110,6 +110,22 @@ def _assert_scan_parity(got, ref, label):
         assert r < tol, f"{k} rel {r:.3e} >= {tol:g} ({label})"
 
 
+def _worst_corner_abs(blocked_field, global_field):
+    """Worst per-tile ABS diff of a BLOCKED corner field vs global corners
+    (the blocked layout duplicates shared tile faces — compare per tile)."""
+    t = np.asarray(blocked_field)
+    g = np.asarray(global_field)
+    b = NL + 1
+    worst = 0.0
+    for f in range(6):
+        for ti in range(KT):
+            for tj in range(KT):
+                gg = g[f, ti * NL: ti * NL + b, tj * NL: tj * NL + b]
+                tt = t[f, ti * b:(ti + 1) * b, tj * b:(tj + 1) * b]
+                worst = max(worst, float(np.max(np.abs(tt - gg))))
+    return worst
+
+
 # ---------------------------------------------------------------------------
 # Numerics parity
 # ---------------------------------------------------------------------------
@@ -143,7 +159,12 @@ def test_segment_matches_serial_trajectory():
     trajectory from the SAME entry conversion — the shipped adapter-gate
     ABS tolerance class (pre-existing O(1e-6) face-corner wind term;
     measured @3 steps u 1.8e-6 / T 2.9e-8 / p_s 1.2e-5 abs — see
-    test_tiled_blocked_loop.test_adapter_loop_matches_serial_from_same_entry)."""
+    test_tiled_blocked_loop.test_adapter_loop_matches_serial_from_same_entry).
+    The bounds deliberately stay in that ESTABLISHED family rather than
+    hugging the measured values (codex M3b review asked for tighter T/p_s;
+    tightening is a cross-node f32-ISA calibration exercise tracked as a
+    follow-up — the scan-specific regression surface is pinned far tighter
+    by the scan-vs-per-step gates above)."""
     from legoesm.core.operators_cdgrid import center_to_dgrid_vector
 
     mesh = _mesh()
@@ -162,19 +183,12 @@ def test_segment_matches_serial_trajectory():
     def _abs(t, g):
         return float(np.max(np.abs(np.asarray(t) - np.asarray(g))))
 
-    blk_u = np.asarray(blk["u_d"])
-    ref_u = np.asarray(ref.u_d.data)
-    d_u = 0.0
-    b = NL + 1
-    for f in range(6):
-        for ti in range(KT):
-            for tj in range(KT):
-                gg = ref_u[f, ti * NL: ti * NL + b, tj * NL: tj * NL + b]
-                tt = blk_u[f, ti * b:(ti + 1) * b, tj * b:(tj + 1) * b]
-                d_u = max(d_u, float(np.max(np.abs(tt - gg))))
+    d_u = _worst_corner_abs(blk["u_d"], ref.u_d.data)
+    d_v = _worst_corner_abs(blk["v_d"], ref.v_d.data)   # codex: BOTH winds
     d_T = _abs(blk["T"], ref.T.data)
     d_ps = _abs(blk["p_s"], ref.p_s.data)
     assert d_u < 2e-5, f"u_d abs {d_u:.3e}"
+    assert d_v < 2e-5, f"v_d abs {d_v:.3e}"
     assert d_T < 1e-4, f"T abs {d_T:.3e}"
     assert d_ps < 0.06, f"p_s abs {d_ps:.3e}"
 
@@ -225,20 +239,13 @@ def test_segment_matches_face_spmd_step():
         model, mesh, kt=KT, dt=DT, n_steps=N_STEPS)
     blk = segment(enter(hs))
 
-    blk_u = np.asarray(blk["u_d"])
-    ref_u = np.asarray(ref.u_d.data)
-    d_u = 0.0
-    b = NL + 1
-    for f in range(6):
-        for ti in range(KT):
-            for tj in range(KT):
-                gg = ref_u[f, ti * NL: ti * NL + b, tj * NL: tj * NL + b]
-                tt = blk_u[f, ti * b:(ti + 1) * b, tj * b:(tj + 1) * b]
-                d_u = max(d_u, float(np.max(np.abs(tt - gg))))
+    d_u = _worst_corner_abs(blk["u_d"], ref.u_d.data)
+    d_v = _worst_corner_abs(blk["v_d"], ref.v_d.data)   # codex: BOTH winds
     d_T = float(np.max(np.abs(np.asarray(blk["T"]) - np.asarray(ref.T.data))))
     d_ps = float(np.max(np.abs(np.asarray(blk["p_s"])
                                - np.asarray(ref.p_s.data))))
     assert d_u < 2e-5, f"u_d abs {d_u:.3e} (tiled segment vs face-SPMD)"
+    assert d_v < 2e-5, f"v_d abs {d_v:.3e} (tiled segment vs face-SPMD)"
     assert d_T < 1e-4, f"T abs {d_T:.3e} (tiled segment vs face-SPMD)"
     assert d_ps < 0.06, f"p_s abs {d_ps:.3e} (tiled segment vs face-SPMD)"
 
@@ -321,6 +328,14 @@ def test_segment_hlo_no_allgather_collectives_once():
       3 @n=5; both fixed in n, so 4-vs-5 is the invariant comparison — a
       real per-step unroll or per-step re-layout would still scale
       counts with n and trip this.)
+
+    KNOWN LIMIT (codex M3b MINOR): textual counts cannot see a
+    DEVICE-LOCAL copy that sits once in the while body yet executes per
+    iteration (e.g. re-slicing the face-replicated metrics).  Cross-
+    device movement IS fully covered — any per-iteration reshard would
+    emit collectives in the body text (all-gather == 0 module-wide, and
+    permute/reduce counts are pinned); local per-iteration copies are a
+    perf-tuning follow-up, not a layout-correctness hazard.
     """
     hlo4 = _dry_compiled(N_STEPS - 1).as_text()
     hlo5 = _dry_compiled(N_STEPS).as_text()
@@ -343,7 +358,13 @@ def test_segment_hlo_no_allgather_collectives_once():
 def test_segment_memory_constant_in_n_steps():
     """Per-device memory of the segment executable is ~constant in
     ``n_steps`` (the scan carries ONE blocked state; a leak of full-face
-    temporaries out of the scan body would scale with the step count)."""
+    temporaries out of the scan body would scale with the step count).
+
+    n=4 and n=5 compile to the SAME structure (fixed unroll + peel + a
+    while loop — the HLO gate above), so their temp allocations should be
+    near-identical; the tolerance is ONE blocked-carry's bytes (codex:
+    a fixed 1 MiB dwarfed the N=8 state), i.e. leaking even one carry-
+    sized buffer per additional step trips this."""
     try:
         ma4 = _dry_compiled(N_STEPS - 1).memory_analysis()
         ma5 = _dry_compiled(N_STEPS).memory_analysis()
@@ -355,11 +376,16 @@ def test_segment_memory_constant_in_n_steps():
         pytest.skip(f"memory_analysis unavailable on this backend: {e}")
 
     assert o5 == o4, f"output size changed with n_steps: {o4} -> {o5}"
-    # Shared scan body (+ fixed boundary peel) => near-identical temps; a
-    # per-step leak of full-face temporaries would scale ~n_steps (1.25x
-    # here between n=4 and n=5, compounding with n).
-    assert t5 <= 1.2 * t4 + (1 << 20), (
-        f"segment temp memory scales with n_steps: {t4} -> {t5} bytes")
+    # One blocked carry (GLOBAL bytes — an overestimate of any per-device
+    # leak, conservative in the right direction for the bound below).
+    mesh = _mesh()
+    model = _production_model()
+    hs = held_suarez_init(model.grid, model.sigma_coord)
+    enter, _step, _exit = make_tiled_cc_loop(model, mesh, kt=KT, dt=DT)
+    carry_bytes = sum(int(v.nbytes) for v in enter(hs).values())
+    assert t5 - t4 < carry_bytes, (
+        f"segment temp memory scales with n_steps: {t4} -> {t5} bytes "
+        f"(> one blocked carry = {carry_bytes} bytes)")
 
 
 # ---------------------------------------------------------------------------
@@ -440,6 +466,36 @@ def test_production_carry_dtype_unroll_fires():
     got = scan_tiled_cc_steps(step, 3, donate=False)(blk0)
     _assert_scan_parity(got, ref, "production-carry scan vs per-step")
     assert got["p_s"].dtype == jnp.float64
+
+
+def test_exit_state_survives_carry_donation():
+    """The gathered ``exit_`` state must be DONATION-INDEPENDENT: the
+    production lane donates the carry on every segment call, so an
+    ``exit_`` output aliasing carry buffers (T/p_s are passthrough in
+    ``fv3_to_hydrostatic``) would be invalidated one segment later —
+    poisoning any retained ``driver.state`` (deferred/async writer
+    callbacks; codex M3b MAJOR).  Red-green: without the explicit copies
+    in ``exit_``, reading ``out.T`` below raises the deleted/donated-
+    buffer error."""
+    mesh = _mesh()
+    model = _production_model()
+    hs = held_suarez_init(model.grid, model.sigma_coord)
+    enter, segment, exit_ = make_tiled_cc_segment(
+        model, mesh, kt=KT, dt=DT, n_steps=2)   # donate=True default
+    blk1 = segment(enter(hs))
+    out = exit_(blk1, hs)                       # gathered mid-run state
+    blk2 = segment(blk1)                        # donates blk1
+    jax.block_until_ready(blk2["T"])
+    if not blk1["T"].is_deleted():
+        pytest.skip(
+            "buffer donation is a no-op on this backend — the aliasing "
+            "hazard cannot be exercised here (the gate is live where "
+            "donation works, e.g. GPU)")
+    # The retained gathered state must still be fully readable even though
+    # the carry it was gathered from is now donated.
+    assert bool(np.all(np.isfinite(np.asarray(out.T.data))))
+    assert bool(np.all(np.isfinite(np.asarray(out.p_s.data))))
+    assert bool(np.all(np.isfinite(np.asarray(out.u.data))))
 
 
 # ---------------------------------------------------------------------------
