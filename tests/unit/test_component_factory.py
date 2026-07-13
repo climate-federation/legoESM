@@ -432,18 +432,24 @@ class TestDriverDelegation:
     def test_driver_shallow_water_run_raises_clear_error(self):
         # codex M2: the factory builds the SW model for component-registry
         # use, but ModelDriver cannot RUN it — _init_state builds a
-        # hydrostatic PE state, not a SW state.  The run path must fail loudly
-        # with the supported route, not crash cryptically at the first step.
+        # hydrostatic PE state, not a SW state.  BOTH public entries (setup,
+        # run) must reject SW loudly BEFORE any dycore/scale-guard, and the
+        # _init_state backstop must too — not crash cryptically at first step.
         config = _make_config(model_type="shallow_water")
-        grid = _make_cubed_sphere_grid()
-        sigma = _make_sigma()
-
         from legoesm.driver.model_driver import ModelDriver
+
+        # Public run() rejects at the door, even without setup().
         driver = ModelDriver(config, output_dir="/tmp/test_driver_sw_run")
-        driver.grid = grid
-        driver.sigma = sigma
         with pytest.raises(NotImplementedError, match="not runnable via ModelDriver"):
-            driver._init_state()
+            driver.run()
+        # Public setup() rejects before any dycore/scale-guard construction.
+        driver2 = ModelDriver(config, output_dir="/tmp/test_driver_sw_setup")
+        with pytest.raises(NotImplementedError, match="not runnable via ModelDriver"):
+            driver2.setup()
+        # _init_state backstop still guards a direct call.
+        driver3 = ModelDriver(config, output_dir="/tmp/test_driver_sw_init")
+        with pytest.raises(NotImplementedError, match="not runnable via ModelDriver"):
+            driver3._init_state()
 
     def test_driver_creates_nonhydrostatic_model(self):
         config = _make_config(model_type="nonhydrostatic")

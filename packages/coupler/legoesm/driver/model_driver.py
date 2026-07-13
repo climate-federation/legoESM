@@ -506,8 +506,31 @@ class ModelDriver:
             context=context,
         )
 
+    def _reject_shallow_water_unrunnable(self) -> None:
+        """Shallow-water is not a runnable ModelDriver equation set.
+
+        ``_init_state`` builds a hydrostatic primitive-equation state
+        (``held_suarez_init`` / ``isothermal_rest_state_spectral``), never a
+        shallow-water state, so a SW dycore would be handed a PE state and
+        crash cryptically at the first step.  Reject LOUDLY at the public
+        entry points (setup/run) and as an _init_state backstop (codex M2
+        review).  The component factory still builds the correct
+        ``FV3EdgeShallowWaterModel`` for component-registry / build-time use.
+        """
+        if self.config.dycore.model_type == "shallow_water":
+            raise NotImplementedError(
+                "shallow-water is not runnable via ModelDriver: it builds a "
+                "hydrostatic primitive-equation state, not a shallow-water "
+                "state.  Use `legoesm test williamson` or "
+                "`scripts/matrix/run_atmosphere_test_matrix.py --only sw` "
+                "(both construct the SW model + initial state directly).")
+
     def setup(self) -> None:
         """Initialize grid, dycore, physics, forcing, and state."""
+        # SW is not a runnable ModelDriver equation set — reject before any
+        # dycore/state construction so the failure is clear, not a downstream
+        # scale-guard or shape crash (codex M2 review).
+        self._reject_shallow_water_unrunnable()
         # Strict validation — abort early on invalid parameters
         self.config.validate_strict()
 
@@ -1044,20 +1067,10 @@ class ModelDriver:
         from legoesm.diagnostics.column_integrals import column_water_vapor
 
         cfg = self.config
-        # Shallow-water is NOT a runnable ModelDriver equation set: _init_state
-        # builds a hydrostatic primitive-equation state (held_suarez_init /
-        # isothermal_rest_state_spectral), never a shallow-water state.  A SW
-        # dycore would be handed a PE state and crash cryptically at the first
-        # step.  Fail loudly with the supported route (codex M2 review) — the
-        # factory still builds the correct FV3EdgeShallowWaterModel for
-        # component-registry / build-time use.
-        if cfg.dycore.model_type == "shallow_water":
-            raise NotImplementedError(
-                "shallow-water is not runnable via ModelDriver: _init_state "
-                "builds a hydrostatic primitive-equation state, not a "
-                "shallow-water state.  Use "
-                "`scripts/matrix/run_atmosphere_test_matrix.py --only sw` "
-                "(it constructs the SW model + initial state directly).")
+        # Backstop: SW is not a runnable ModelDriver equation set (the public
+        # setup()/run() entries reject it first; this covers a direct
+        # _init_state() call).  See _reject_shallow_water_unrunnable.
+        self._reject_shallow_water_unrunnable()
         N = cfg.grid.resolution
         NLEV = cfg.grid.nlev
 
@@ -4479,6 +4492,9 @@ class ModelDriver:
         str
             Run status ("COMPLETED" or "BLOWUP at day ...").
         """
+        # SW is not runnable via ModelDriver — reject at the public entry even
+        # if a caller reached run() without setup() (codex M2 review).
+        self._reject_shallow_water_unrunnable()
         self._segment_callback = segment_callback
         # Checkpoint hook (a coupled driver passes its own save_checkpoint so
         # the FULL coupled state — not just the atmosphere — is written on a
