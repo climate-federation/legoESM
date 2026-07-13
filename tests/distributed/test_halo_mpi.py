@@ -280,13 +280,16 @@ class TestMPIReductions:
 
 
 class TestPartitionGather:
-    """State partitioning and gathering."""
+    """State partitioning and gathering.
 
-    def test_partition_zeros_non_local(self, topology):
+    Uses the conftest ``cube_face_layout`` fixture: the autouse per-test reset
+    clears the active layout, so it must be re-established at SETUP —
+    a bare ``get_active_layout()`` here always returned None.
+    """
+
+    def test_partition_zeros_non_local(self, topology, cube_face_layout):
         """scatter_to_local extracts only local faces."""
-        from legoesm.parallel.distributed import get_active_layout
-        layout = get_active_layout()
-        n = layout.global_n if layout is not None else 4
+        n = cube_face_layout.global_n
         data = jnp.ones((6, n, n), dtype=jnp.float32)
         result = scatter_to_local(data)
 
@@ -297,11 +300,9 @@ class TestPartitionGather:
         # All local faces should have value 1.0
         assert jnp.allclose(result, 1.0)
 
-    def test_gather_recovers_full(self, topology):
+    def test_gather_recovers_full(self, topology, cube_face_layout):
         """gather_to_global(scatter_to_local(x)) == x on rank 0."""
-        from legoesm.parallel.distributed import get_active_layout
-        layout = get_active_layout()
-        n = layout.global_n if layout is not None else 4
+        n = cube_face_layout.global_n
         data = jnp.ones((6, n, n), dtype=jnp.float32)
         for f in range(6):
             data = data.at[f].set(float(f + 1))
