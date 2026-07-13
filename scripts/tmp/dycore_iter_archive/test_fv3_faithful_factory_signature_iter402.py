@@ -15,11 +15,11 @@ import inspect
 
 import pytest
 
-from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
     CDGridCompressibleEulerConfig,
     make_fv3_faithful_nh_config,
 )
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationConfig,
     make_fv3_faithful_pe_config,
 )

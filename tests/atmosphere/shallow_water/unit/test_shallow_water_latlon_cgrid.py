@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.grids.latlon import create_latlon_grid
-from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
     CGridLatLonShallowWaterModel,
     CGridLatLonShallowWaterConfig,
     CGridLatLonShallowWaterState,

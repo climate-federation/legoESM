@@ -71,10 +71,10 @@ Q_V_SFC = 0.012   # kg/kg (~12 g/kg, tropical SST 300 K)
 
 
 def test_rce_smoke_plane():
-    from legoesm.atmosphere.dynamics.compressible_euler import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
         CompressibleEulerConfig,
     )
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         PlaneCompressibleEulerModel,
         compute_dry_mass_plane,
         make_flat_plane_terrain_metric,
@@ -179,7 +179,7 @@ def test_rce_smoke_plane():
 
 
 def test_rce_smoke_cubed_sphere():
-    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
         CDGridCompressibleEulerConfig,
         CDGridCompressibleEulerModel,
     )
@@ -300,7 +300,7 @@ def test_rce_smoke_mpas():
     ``model_type='mpas_nh'`` factory. Mirror of the cubed-sphere
     smoke — same physics composition (field-wise tendency sum of
     radiation + microphysics)."""
-    from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas import (
         MPASCompressibleEulerConfig, MPASCompressibleEulerModel,
     )
     from legoesm.atmosphere.physics.microphysics.config import (
@@ -420,10 +420,10 @@ def test_rce_cross_grid_buoyancy_sign_consistent():
     results = {}
     # Plane
     from scripts.run.run_rcemip_plane import make_rcemip_physics
-    from legoesm.atmosphere.dynamics.compressible_euler import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
         CompressibleEulerConfig,
     )
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         PlaneCompressibleEulerModel, make_flat_plane_terrain_metric,
         make_rest_state,
     )

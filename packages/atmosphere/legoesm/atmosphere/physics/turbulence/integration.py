@@ -36,7 +36,7 @@ from legoesm.grids.vertical import (
 from legoesm import constants
 
 from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     spectral_pe_to_grid,
 )

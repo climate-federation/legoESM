@@ -47,7 +47,7 @@ from legoesm.grids.vertical import (
     create_height_coordinate,
     compute_terrain_metric,
 )
-from legoesm.atmosphere.dynamics.spectral_nh import (
+from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
     SpectralNHConfig,
     SpectralCompressibleEulerModel,
     nh_rest_state_spectral,

@@ -1085,7 +1085,7 @@ class ModelDriver:
                     phis=self.state.phis.replace(data=self._phis_data),
                 )
         elif cfg.dycore.discretization == "spectral":
-            from legoesm.atmosphere.dynamics.spectral_pe import isothermal_rest_state_spectral
+            from legoesm.atmosphere.dynamics.gcm.spectral_pe import isothermal_rest_state_spectral
             shape_3d = (self.grid.n_lat, self.grid.n_lon, NLEV)
             phis_arg = self._phis_data if jnp.any(self._phis_data != 0) else None
             self.state = isothermal_rest_state_spectral(
@@ -1197,7 +1197,7 @@ class ModelDriver:
                       or cfg.turbulence != "none")
             if _moist:
                 from legoesm.core.field import Field
-                from legoesm.atmosphere.dynamics.spectral_pe import (
+                from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
                     spectral_pe_to_grid,
                 )
                 _f0 = spectral_pe_to_grid(self.state, self.grid, self.sigma)
@@ -1307,7 +1307,7 @@ class ModelDriver:
                             data=jnp.asarray(carry.q_v)),
                     })
                 # Stats from the grid-space reconstruction.
-                from legoesm.atmosphere.dynamics.spectral_pe import (
+                from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
                     spectral_pe_to_grid,
                 )
                 _fg = spectral_pe_to_grid(self.state, self.grid, self.sigma)
@@ -2647,7 +2647,7 @@ class ModelDriver:
                 "anyway."
             )
         import copy as _copy
-        from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+        from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import (
             make_tiled_cc_step,
         )
         _m = _copy.copy(self.model)
@@ -4312,7 +4312,7 @@ class ModelDriver:
                     f"spectral checkpoint not found (or is a directory): "
                     f"{path}"
                 )
-            from legoesm.atmosphere.dynamics.spectral_pe import (
+            from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
                 reconstruct_spectral_state_from_npz,
             )
             # Shared reconstruction (template=self.state ⇒ reuse the configured Field
@@ -5688,7 +5688,7 @@ class ModelDriver:
         back to spectral space via SH analysis.
         """
         import time
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             spectral_pe_to_grid,
             SpectralHydrostaticState,
         )
@@ -6200,7 +6200,7 @@ class ModelDriver:
             try:
                 # Late import to avoid hard dependency at module
                 # import time when spectral support is unavailable.
-                from legoesm.atmosphere.dynamics.spectral_pe import (
+                from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
                     SpectralHydrostaticState, spectral_pe_to_grid,
                 )
                 if isinstance(self.state, SpectralHydrostaticState):
@@ -6376,7 +6376,7 @@ class ModelDriver:
         driver consumes the per-segment state via ``segment_callback``.
         """
         import time
-        from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+        from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
             run_atm_latlon_spmd)
 
         cfg = self.config
@@ -6788,9 +6788,9 @@ class ModelDriver:
         """Sub-face-tiled cube SPMD run (``n_devices = 6*kt^2 > 6``).
 
         Integrates via the BLOCKED persistent tiled loop
-        (:func:`legoesm.atmosphere.dynamics.tiled_step_adapter.make_tiled_cc_loop`)
+        (:func:`legoesm.atmosphere.dynamics.gcm.tiled_step_adapter.make_tiled_cc_loop`)
         scanned into per-SEGMENT executables
-        (:func:`legoesm.atmosphere.dynamics.tiled_step_adapter.scan_tiled_cc_steps`,
+        (:func:`legoesm.atmosphere.dynamics.gcm.tiled_step_adapter.scan_tiled_cc_steps`,
         M3b increment 1): state stays TILE-SHARDED across steps AND each
         segment is ONE ``lax.scan`` dispatch (no per-step host dispatch,
         no full-face all-gather inside the scan — HLO-gated by
@@ -6817,7 +6817,7 @@ class ModelDriver:
         import jax
         import numpy as _np
 
-        from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+        from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import (
             make_tiled_cc_loop, scan_tiled_cc_steps,
         )
 
@@ -7060,7 +7060,7 @@ class ModelDriver:
             make_sharded_operator_split_step,
             shard_operator_split_carry, shard_operator_split_forcing,
         )
-        from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+        from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
             build_band_grids_atm,
         )
         from legoesm.core.conservation import (

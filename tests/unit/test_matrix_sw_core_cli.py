@@ -44,7 +44,7 @@ def test_sw_core_flag_rejects_unknown():
 
 
 def test_fb_m1_preset_config_values():
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import fb_m1_preset_config
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import fb_m1_preset_config
     cfg = fb_m1_preset_config()
     assert cfg.nord == 1
     assert cfg.d4_bg == 0.16
@@ -59,7 +59,7 @@ def test_fb_m1_preset_config_values():
 
 
 def test_fb_cube_sw_model_builder():
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import FV3FBShallowWaterModel
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import FV3FBShallowWaterModel
     M = _load_matrix_module()
     model = M._fb_cube_sw_model(12, 2)
     assert isinstance(model, FV3FBShallowWaterModel)

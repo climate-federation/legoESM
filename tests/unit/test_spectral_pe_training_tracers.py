@@ -36,7 +36,7 @@ from legoesm.grids.gaussian import (
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.ml.sfno import SFNO, SFNOConfig
 from legoesm.ml.channel_packing import PE3DChannelSpec
-from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
 
 jax.config.update("jax_enable_x64", True)
@@ -234,7 +234,7 @@ class TestSpectralRolloutTracers:
             spectral_rollout,
             _compute_tracer_filter,
         )
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             compute_spectral_filter,
         )
 
@@ -822,7 +822,7 @@ class TestNmcMoistureEndToEnd:
             _spectral_to_hydrostatic,
             _hydrostatic_diff,
         )
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPrimitiveEquationModel,
             SpectralPEConfig,
         )

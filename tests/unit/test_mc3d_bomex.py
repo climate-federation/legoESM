@@ -21,7 +21,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     make_flat_plane_terrain_metric,
     make_rest_state,
 )

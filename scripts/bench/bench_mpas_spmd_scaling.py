@@ -97,7 +97,7 @@ def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
     wave) so the sharded step's packed tracer halo exchange + RK tracer
     advection sit on the timed/gated path.
     """
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationConfig,
         MPASPrimitiveEquationModel,
     )
@@ -331,7 +331,7 @@ def main() -> int:
     # build on every process).  model.step's signature is call-compatible.
     serial_final = None
     if args.parity_gate:
-        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel,
         )
         ref_model = (model if dev_config.n_devices <= 1

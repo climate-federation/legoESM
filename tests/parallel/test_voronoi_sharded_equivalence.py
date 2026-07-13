@@ -75,7 +75,7 @@ class TestVoronoiShardedEquivalence:
         """
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
         )
         from legoesm.parallel.voronoi_partition import (

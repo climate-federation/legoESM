@@ -15,7 +15,7 @@ from legoesm.grids.gaussian import (
     spectral_laplacian,
     spectral_hyperdiffusion,
 )
-from legoesm.atmosphere.dynamics.spectral_sw import (
+from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
     SpectralSWConfig,
     SpectralShallowWaterModel,
     spectral_sw_tendencies,
@@ -385,7 +385,7 @@ class TestSpectralSW:
         energy_with_topo = diag['energy']
 
         # Recompute the buggy value (without h·h_s) for comparison.
-        from legoesm.atmosphere.dynamics.spectral_sw import spectral_to_grid
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import spectral_to_grid
         fields = spectral_to_grid(state, grid_t21)
         h, u, v, h_s = fields['h'], fields['u'], fields['v'], fields['h_s']
         w = grid_t21.weights[:, None]

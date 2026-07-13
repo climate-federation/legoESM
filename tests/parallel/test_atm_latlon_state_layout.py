@@ -17,10 +17,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonHydrostaticState,
 )
-from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
     shard_state_atm_latlon, gather_state_atm_latlon)
 
 N_DEV = 4

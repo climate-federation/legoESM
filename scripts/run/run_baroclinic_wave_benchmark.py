@@ -479,7 +479,7 @@ def main():
 
     if USE_SPECTRAL:
         from legoesm.grids.gaussian import create_gaussian_grid
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPrimitiveEquationModel,
             SpectralPEConfig,
             spectral_pe_to_grid,
@@ -509,7 +509,7 @@ def main():
         model = SpectralPrimitiveEquationModel(grid, sigma, config)
 
     elif USE_ICOSAHEDRAL:
-        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel,
             MPASPrimitiveEquationConfig,
         )
@@ -544,7 +544,7 @@ def main():
         )
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
         from legoesm.core.operators_cdgrid import dgrid_vorticity, dgrid_to_center_vector
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel,
             CDGridPrimitiveEquationConfig,
             hydrostatic_to_fv3,

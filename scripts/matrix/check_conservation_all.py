@@ -42,7 +42,7 @@ def _row(name, mass_drift, energy_drift, wall, status, notes=""):
 
 def probe_sw_spectral(n_steps=20, dt=600.0, with_fixers=False):
     from legoesm.grids.gaussian import create_gaussian_grid
-    from legoesm.atmosphere.dynamics.spectral_sw import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
         SpectralShallowWaterModel, SpectralSWConfig,
         williamson_test2_spectral, spectral_to_grid,
     )
@@ -72,7 +72,7 @@ def probe_sw_spectral(n_steps=20, dt=600.0, with_fixers=False):
 
 def probe_sw_latlon(n_steps=20, dt=300.0, with_fixers=False):
     from legoesm.grids.latlon import create_latlon_grid
-    from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
         CGridLatLonShallowWaterModel, CGridLatLonShallowWaterConfig,
         williamson_test2_cgrid,
     )
@@ -106,7 +106,7 @@ def probe_sw_cubed_sphere(n_steps=20, dt=300.0, with_fixers=False):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
     from legoesm.grids.halo import pad_halo_vector
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterModel, CDGridShallowWaterConfig,
         CDGridShallowWaterState,
     )
@@ -158,7 +158,7 @@ def probe_sw_cubed_sphere(n_steps=20, dt=300.0, with_fixers=False):
 
 def probe_sw_mpas(n_steps=20, dt=600.0, with_fixers=False):
     from legoesm.grids.voronoi import create_voronoi_mesh
-    from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
         MPASShallowWaterModel, MPASShallowWaterConfig,
     )
     from legoesm.core.operators_voronoi import kinetic_energy_cell
@@ -197,7 +197,7 @@ def probe_sw_mpas(n_steps=20, dt=600.0, with_fixers=False):
 def probe_pe_spectral(n_steps=20, dt=600.0, with_fixers=False):
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         SpectralPrimitiveEquationModel, SpectralPEConfig,
         isothermal_rest_state_spectral, spectral_pe_to_grid,
     )
@@ -233,7 +233,7 @@ def probe_pe_cubed_sphere(n_steps=20, dt=300.0, with_fixers=False):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
         hydrostatic_to_fv3, fv3_to_hydrostatic,
     )
@@ -281,7 +281,7 @@ def probe_pe_latlon(n_steps=20, dt=30.0, with_fixers=False):
     # at 36×72 with the default polar filter dt=30 s is the stable bound.
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationModel,
         CGridLatLonPrimitiveEquationConfig,
     )
@@ -320,7 +320,7 @@ def probe_pe_latlon(n_steps=20, dt=30.0, with_fixers=False):
 def probe_pe_mpas(n_steps=20, dt=300.0, with_fixers=False):
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
     )
     from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
@@ -358,7 +358,7 @@ def probe_pe_mpas(n_steps=20, dt=300.0, with_fixers=False):
 def probe_nh_cubed_sphere(n_steps=10, dt=10.0, with_fixers=False):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_height_coordinate, compute_terrain_metric
-    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
         CDGridCompressibleEulerModel, CDGridCompressibleEulerConfig,
     )
     from legoesm.core.field import Field

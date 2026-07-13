@@ -60,12 +60,12 @@ import pytest
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonHydrostaticState,
     CGridLatLonPrimitiveEquationConfig,
     CGridLatLonPrimitiveEquationModel,
 )
-from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
     build_tile_grids_atm_2d,
     gather_state_atm_latlon,
     gather_state_atm_latlon_2d,
@@ -245,9 +245,9 @@ def _realistic_amplitude_state(model):
 def _serial_and_tile_tendency(state=None):
     """Serial tendencies and the (2,2)-tile shard_map body's tendencies,
     gathered to global (u as u_left, v as v_lower)."""
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         cgrid_latlon_hydrostatic_tendencies)
-    from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+    from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
         _build_geometry_stacks_2d, atm_grid_array_field_names)
     from legoesm.parallel.latlon_spmd import (
         activate_latlon_spmd_halo, deactivate_latlon_spmd_halo,

@@ -47,8 +47,8 @@ if not _F32:
 import jax.numpy as jnp  # noqa: E402
 
 from legoesm import constants  # noqa: E402
-from legoesm.atmosphere.dynamics import spectral_les_plane as sl  # noqa: E402
-from legoesm.atmosphere.dynamics.spectral_les_moist import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl  # noqa: E402
+from legoesm.atmosphere.dynamics.les.spectral_les_moist import (  # noqa: E402
     LagrangianSDMSegmentDiagnostics,
     conserving_positive,
     make_lagrangian_sdm_step_segment,

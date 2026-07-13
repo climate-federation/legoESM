@@ -143,7 +143,7 @@ def test_guard_detects_a_stale_import():
     in ``column_les``.) A synthetic sentinel name is used for the negative checks so
     a future legitimate re-export cannot cause maintenance churn."""
     column_les = importlib.import_module(
-        "legoesm.atmosphere.dynamics.column_les")
+        "legoesm.atmosphere.dynamics.les.column_les")
     assert _resolves_attr(column_les, "run_forced_les")           # a real attribute
     # rejection on a non-package MODULE (the OSSE class — column_les is a .py module).
     assert not _resolves_attr(column_les, "_no_such_symbol_xyzzy")

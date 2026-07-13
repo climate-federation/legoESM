@@ -41,13 +41,13 @@ import numpy as np
 import pytest
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonHydrostaticState,
     CGridLatLonPrimitiveEquationConfig,
     CGridLatLonPrimitiveEquationModel,
     cgrid_to_hydrostatic,
 )
-from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
     atm_latlon_geometry_bytes,
     gather_state_atm_latlon,
     make_sharded_atm_latlon_segment,

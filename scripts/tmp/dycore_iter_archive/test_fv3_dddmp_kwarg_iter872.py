@@ -52,7 +52,7 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterConfig,
 )
 from legoesm.core.operators_cdgrid import fv3_sw_tendencies
@@ -193,7 +193,7 @@ def test_production_step_forwards_dddmp_prod():
     historic hardcoded value.
     """
     src = legoesm_source_path(
-        "atmosphere/dynamics/shallow_water_fv3_cdgrid.py")
+        "atmosphere/dynamics/gcm/shallow_water_fv3_cdgrid.py")
     tree = ast.parse(src.read_text())
 
     cls = next(
@@ -410,7 +410,7 @@ def test_iter872c_take3_cdgrid_shallow_water_does_not_forward_dddmp():
     0.0 default kwarg added in iter-872c).
     """
     src = legoesm_source_path(
-        "atmosphere/dynamics/shallow_water_fv3_cdgrid.py")
+        "atmosphere/dynamics/gcm/shallow_water_fv3_cdgrid.py")
     tree = ast.parse(src.read_text())
 
     fn = next(
@@ -523,7 +523,7 @@ def test_iter872c_take5_cdgrid_shallow_water_warns_direct_callers():
     warning, leaving a silent-ignore hazard on the functional API.
     """
     import warnings
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig, CDGridShallowWaterState,
         cdgrid_shallow_water_tendencies,
     )
@@ -572,7 +572,7 @@ def test_iter872c_take4_cdgrid_warns_on_non_default_dddmp_prod():
     "high" severity.
     """
     import warnings
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig, CDGridShallowWaterModel,
     )
 
@@ -614,7 +614,7 @@ def test_iter872c_take3_cdgrid_default_no_silent_adaptive_damping():
     shared config, it is not forwarded to this model's tendency
     path, so the default behaviour is unchanged from pre-iter-872.
     """
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig, CDGridShallowWaterModel,
         cdgrid_shallow_water_tendencies, CDGridShallowWaterState,
     )

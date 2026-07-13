@@ -77,7 +77,7 @@ def _make_rrtmgp_physics(model_type: str, dt: float, hs_fn=None):
             rrtmgp_tend = rrtmgp_result[0] if isinstance(rrtmgp_result, tuple) else rrtmgp_result
             phys_state_out = rrtmgp_result[1] if isinstance(rrtmgp_result, tuple) else None
             hs_tend = hs_fn(state, grid, sigma_coord)
-            from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+            from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
             summed = SpectralHydrostaticState(
                 vor_hat=rrtmgp_tend.vor_hat.replace(
                     data=rrtmgp_tend.vor_hat.data + hs_tend.vor_hat.data),
@@ -215,7 +215,7 @@ def run_timeloop(step_fn, state, dt, n_steps, check_fn, scalar_fn,
 def run_cubed_sphere(days, nlev, vertical_coord):
     """Run Held-Suarez + RRTMGP on cubed-sphere C36."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig)
     from legoesm.atmosphere.held_suarez import (
         held_suarez_init, held_suarez_forcing)
@@ -262,7 +262,7 @@ def run_latlon(days, nlev, vertical_coord):
     """Run Held-Suarez + RRTMGP on lat-lon 72x144."""
     import math as _m
     from legoesm.grids.latlon import create_latlon_grid
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig)
     from legoesm.atmosphere.held_suarez import (
         held_suarez_init_latlon, held_suarez_forcing_latlon)
@@ -285,7 +285,7 @@ def run_latlon(days, nlev, vertical_coord):
 
     # Convert to native C-grid state once; step natively to avoid
     # lossy face↔cell re-projection every timestep.
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         hydrostatic_to_cgrid)
     hs_init = held_suarez_init_latlon(grid, sigma)
     state = hydrostatic_to_cgrid(hs_init, grid)
@@ -319,7 +319,7 @@ def run_icosahedral(days, nlev):
     """Run Held-Suarez + RRTMGP on icosahedral ico5."""
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
     from legoesm.atmosphere.held_suarez import (
         held_suarez_init_mpas, held_suarez_forcing_mpas)
@@ -362,7 +362,7 @@ def run_icosahedral(days, nlev):
 def run_spectral(days, nlev, vertical_coord):
     """Run Held-Suarez + RRTMGP on spectral T21."""
     from legoesm.grids.gaussian import create_gaussian_grid, sh_synthesis_3d
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         SpectralPrimitiveEquationModel, SpectralPEConfig,
         isothermal_rest_state_spectral, spectral_pe_to_grid)
     from legoesm.atmosphere.held_suarez import held_suarez_forcing_spectral

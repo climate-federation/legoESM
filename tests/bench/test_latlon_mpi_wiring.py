@@ -62,7 +62,7 @@ def test_latlon_mpi_helpers_exist():
         assert hasattr(latlon_mpi, name), f"latlon_mpi.{name} missing"
 
     cgrid = importlib.import_module(
-        "legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid"
+        "legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid"
     )
     # The IC is a cell-centered HydrostaticState; the harness converts it
     # to the raw-array C-grid state make_latlon_mpi_step needs before scatter.
@@ -92,7 +92,7 @@ def test_baroclinic_ic_converts_and_scatters_to_cgrid():
     No MPI needed: a 1-rank band layout is a pure slice.
     """
     import jax.numpy as jnp
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonHydrostaticState,
         hydrostatic_to_cgrid,
     )

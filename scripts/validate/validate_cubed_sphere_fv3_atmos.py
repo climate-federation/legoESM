@@ -83,7 +83,7 @@ def cube_edge_jump(field, grid):
 
 def _sw_to_cdgrid(state, cdgrid):
     """Convert A-grid ShallowWaterState to CDGridShallowWaterState."""
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterState
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import CDGridShallowWaterState
     from legoesm.grids.halo import pad_halo_vector
     h, u, v, h_s = state.h.data, state.u.data, state.v.data, state.h_s.data
     u_pad, v_pad = pad_halo_vector(
@@ -106,7 +106,7 @@ def run_sw_validation(output_dir):
     """Williamson TC2 + TC5 on native CDGrid shallow water."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterModel, CDGridShallowWaterConfig,
     )
     from tests.test_cases.williamson import williamson_test2, williamson_test5
@@ -176,7 +176,7 @@ def run_hydro_validation(output_dir):
     """Rest-state + Held-Suarez + AMIP dt sweep."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
     )
     from legoesm.atmosphere.held_suarez import held_suarez_forcing, held_suarez_init
@@ -278,7 +278,7 @@ def run_hydro_validation(output_dir):
 def run_nh_validation(output_dir):
     """Short DCMIP TC1 on CDGrid compressible Euler."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
         CDGridCompressibleEulerModel, CDGridCompressibleEulerConfig,
     )
     from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1 import dcmip25_tc1_init

@@ -26,7 +26,7 @@ from legoesm.grids.voronoi import create_voronoi_mesh
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.core.field import Field
 from legoesm.core.state import MPASHydrostaticState
-from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
     MPASPrimitiveEquationModel,
     MPASPrimitiveEquationConfig,
 )

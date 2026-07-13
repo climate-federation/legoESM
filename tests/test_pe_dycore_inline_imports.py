@@ -35,7 +35,7 @@ import pytest
 from tests.legoesm_paths import legoesm_source_path
 
 # Keys below are RELATIVE paths under the ``legoesm`` namespace (e.g.
-# ``atmosphere/dynamics/spectral_pe.py``).  The federation carve moved these
+# ``atmosphere/dynamics/gcm/spectral_pe.py``).  The federation carve moved these
 # subpackages out to ``packages/<member>/legoesm/<subpkg>``, so the concrete
 # on-disk file is resolved at test time via ``legoesm_source_path`` (namespace-
 # aware, spans every ``legoesm.__path__`` root) instead of a hardcoded

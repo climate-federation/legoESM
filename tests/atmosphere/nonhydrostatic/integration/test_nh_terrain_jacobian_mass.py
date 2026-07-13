@@ -53,7 +53,7 @@ def _rel_drift(m0: float, m1: float) -> float:
 
 
 def _mpas_setup(mesh_level: int, terrain: dict):
-    from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas import (
         MPASCompressibleEulerConfig,
         MPASCompressibleEulerModel,
     )
@@ -73,7 +73,7 @@ def _mpas_setup(mesh_level: int, terrain: dict):
 
 
 def _cube_setup(n: int, terrain: dict):
-    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
         CDGridCompressibleEulerConfig,
         CDGridCompressibleEulerModel,
     )

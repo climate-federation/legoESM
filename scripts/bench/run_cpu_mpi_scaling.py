@@ -505,7 +505,7 @@ def _build_cubedsphere(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
 
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
         hydrostatic_to_fv3,
@@ -582,7 +582,7 @@ def _build_cubed_sphere_spmd(resolution, nlev, dt, dtype, physics_level,
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
     from tests.test_cases.baroclinic_wave import baroclinic_wave_init
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
         hydrostatic_to_fv3,
@@ -686,7 +686,7 @@ def _build_cubed_sphere_tiled_loop(resolution, nlev, dt, physics_level,
         expand_corners_to_blocks,
         make_tiled_fv3_hydrostatic_step_blocked_2d,
     )
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationConfig,
         hydrostatic_to_fv3,
         create_cubed_sphere_cdgrid,
@@ -839,7 +839,7 @@ def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     import jax.numpy as jnp
 
     from legoesm.grids.latlon import create_latlon_grid
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationModel,
         CGridLatLonPrimitiveEquationConfig,
         hydrostatic_to_cgrid,
@@ -987,7 +987,7 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     import jax.numpy as jnp
 
     from legoesm.grids.voronoi import create_voronoi_mesh
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel,
         MPASPrimitiveEquationConfig,
     )
@@ -1084,7 +1084,7 @@ def _build_spectral(resolution, nlev, sigma, dt, dtype, physics_level, cast_fn):
     import jax.numpy as jnp
 
     from legoesm.grids.gaussian import create_gaussian_grid
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         SpectralPrimitiveEquationModel,
         SpectralPEConfig,
     )

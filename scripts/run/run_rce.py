@@ -329,7 +329,7 @@ def main():
         from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
         state = held_suarez_init_mpas(grid, sigma, T_init=280.0)
     elif grid_type == "gaussian":
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             isothermal_rest_state_spectral,
         )
         state = isothermal_rest_state_spectral(
@@ -347,7 +347,7 @@ def main():
     # applies the per-level Rayleigh decay; ``is_finite`` powers the
     # blowup detector.
     if grid_type == "gaussian":
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             spectral_pe_to_grid,
         )
         from legoesm.grids.gaussian import sh_analysis_3d

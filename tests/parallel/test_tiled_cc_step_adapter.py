@@ -23,11 +23,11 @@ import pytest
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
 )
 from legoesm.atmosphere.held_suarez import held_suarez_init
-from legoesm.atmosphere.dynamics.tiled_step_adapter import make_tiled_cc_step
+from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import make_tiled_cc_step
 
 N, NLEV, KT = 8, 4, 2
 DT = 60.0
@@ -156,7 +156,7 @@ def test_single_shot_step_refuses_tracers():
 def test_dedup_tiled_corners_synthetic():
     """Block-concatenated tiled corners (with the duplicated shared face)
     reassemble to the exact global corner array."""
-    from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+    from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import (
         dedup_tiled_corners,
     )
     kt, nl = 2, 4

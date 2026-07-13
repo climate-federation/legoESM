@@ -92,7 +92,7 @@ class PlanePencilLayout(NamedTuple):
         Flat ranks of the four periodic neighbours.
     halo : int
         Halo width in cells (default 1). Matches the operator radius
-        in :mod:`legoesm.atmosphere.dynamics.plane_operators`.
+        in :mod:`legoesm.atmosphere.dynamics.les.plane_operators`.
     """
     rank: int
     n_ranks: int
@@ -223,7 +223,7 @@ def exchange_halo_plane_yxz(
     nx_local)`` — matches the
     :class:`legoesm.core.state.PlaneNonHydrostaticState` layout used
     everywhere in the plane dycore. This differs from
-    :func:`legoesm.atmosphere.dynamics.plane_operators.pad_halo_plane_4d`
+    :func:`legoesm.atmosphere.dynamics.les.plane_operators.pad_halo_plane_4d`
     (PR1) which expects ``(batch, nlev, ny, nx)`` with the
     horizontal axes LAST; PR1's helper is the single-rank,
     last-two-axis convention used inside cubed-sphere-shaped

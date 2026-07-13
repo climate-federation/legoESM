@@ -176,7 +176,7 @@ def held_suarez_topo_init_spectral(
     using the same convention as
     :func:`tests.test_cases.baroclinic_wave.baroclinic_wave_init_spectral`.
     """
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
     from legoesm.grids.gaussian import sh_analysis, sh_analysis_3d
 
     n_lat = grid.n_lat

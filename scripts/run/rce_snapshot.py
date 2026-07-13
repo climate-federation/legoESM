@@ -5,7 +5,7 @@ Kept OUT of the faithfulness-critical ``run_rcemip_plane.py`` driver: the driver
 only adds two flags + a few-line loop hook that calls :func:`save_surface_levels`
 (cheap, frequent) and :func:`save_3d` (heavy, only at the requested viz days).
 All physics diagnostics come from the shared
-``legoesm.atmosphere.dynamics.rce_diagnostics`` module.
+``legoesm.atmosphere.dynamics.crm.rce_diagnostics`` module.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from legoesm.atmosphere.dynamics.rce_diagnostics import (
+from legoesm.atmosphere.dynamics.crm.rce_diagnostics import (
     column_water_vapor_plane,
     moist_static_energy_3d_plane,
     precipitation_rate_proxy_plane,

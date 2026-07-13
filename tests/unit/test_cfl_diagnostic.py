@@ -6,14 +6,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from legoesm.atmosphere.dynamics.cfl_diagnostic import (
+from legoesm.atmosphere.dynamics.shared.cfl_diagnostic import (
     acoustic_courant_horizontal,
     assert_courant_below,
     column_sound_speed_upper_bound,
     compute_courant_numbers_plane,
     suggest_stable_dt,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     make_flat_plane_terrain_metric,
     make_rest_state,
 )

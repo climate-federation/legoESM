@@ -1,7 +1,7 @@
 """Direct tests for the package DCMIP-2025 IC primitives module (audit item 9).
 
 The reference-atmosphere profiles, per-case PARAMS, and squall-line sounding
-were moved out of the test tree into ``legoesm.atmosphere.dynamics.dcmip2025_ic``
+were moved out of the test tree into ``legoesm.atmosphere.dynamics.gcm.dcmip2025_ic``
 so the production spectral-NH initializers no longer import ``from tests...``.
 These tests pin the physical properties of the moved primitives and verify the
 test-tree re-exports are the SAME objects (single source of truth, no drift).
@@ -16,7 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics import dcmip2025_ic as ic
+from legoesm.atmosphere.dynamics.gcm import dcmip2025_ic as ic
 
 
 def test_isothermal_theta_increases_upward():

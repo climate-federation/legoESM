@@ -46,8 +46,8 @@ import jax.numpy as jnp  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 from legoesm.thermo import saturation_mixing_ratio  # noqa: E402
-from legoesm.atmosphere.dynamics import spectral_les_plane as sl  # noqa: E402
-from legoesm.atmosphere.dynamics.spectral_les_moist import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl  # noqa: E402
+from legoesm.atmosphere.dynamics.les.spectral_les_moist import (  # noqa: E402
     make_anelastic_reference,
     make_les_microphysics_fn,
 )

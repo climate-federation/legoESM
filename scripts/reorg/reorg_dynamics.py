@@ -100,8 +100,18 @@ BUCKETS: dict[str, str] = {
 
 PKG = "legoesm.atmosphere.dynamics"
 DYN_REL = Path("packages/atmosphere/legoesm/atmosphere/dynamics")
-SKIP_DIRS = {"__pycache__", ".git", ".venv", ".venv-mpi", "build", "dist",
+# NB: skip ALL virtualenvs (.venv*) and .claude agent-worktree copies — the
+# codemod must only touch the live source tree, never installed pkgs or the
+# isolated worktree checkouts under .claude/worktrees/ (each its own git tree).
+SKIP_DIRS = {"__pycache__", ".git", ".claude", "build", "dist",
              "node_modules", ".mypy_cache", ".ruff_cache"}
+
+
+def _skip(p: Path) -> bool:
+    parts = set(p.parts)
+    return bool(SKIP_DIRS & parts) or any(
+        part == ".venv" or part.startswith(".venv-") for part in parts
+    )
 
 # Longest-first so prefixes (tracer_transport) never shadow the longer name
 # (tracer_transport_latlon); \b then rejects a prefix match on the longer one.
@@ -111,6 +121,20 @@ _ESC_PKG = re.escape(PKG)
 RE_DOTTED = re.compile(rf"\b{_ESC_PKG}\.({_ALT})\b")
 # Rule 2: `from <pkg> import <module>` (module-form; verified: no mixed lines).
 RE_FROM = re.compile(rf"\bfrom {_ESC_PKG} import ({_ALT})\b")
+# Rule 3: slash-path string literals to moved source files, anchored on the
+# ``atmosphere/dynamics/<mod>.py`` suffix (any prefix: bare, ``src/legoesm/…``,
+# ``packages/atmosphere/legoesm/…``). Ocean is ``ocean/dynamics/`` so never
+# matches. Used by legoesm_source_path(), AST-guard readers, and baseline
+# dicts. Idempotent: a bucketed path has ``<bucket>/`` after ``dynamics/`` so
+# the module token no longer sits directly before ``.py``.
+RE_PATH = re.compile(rf"atmosphere/dynamics/({_ALT})\.py")
+# Verify-only: multi-line grouped `from <pkg> import ( ... mover ... )`. The
+# auto-rewriter (RE_FROM) is single-line; a parenthesized group mixing movers
+# and non-movers needs a hand edit, so the gate REPORTS it loudly rather than
+# silently leaving a broken top-package attribute import. ponytail: report,
+# not auto-fix — one occurrence repo-wide, a group-splitter isn't worth it.
+RE_GROUP = re.compile(rf"from {_ESC_PKG} import \(([^)]*)\)", re.S)
+_MOVERS = frozenset(BUCKETS)
 
 
 def _rewrite(text: str) -> tuple[str, int]:
@@ -129,8 +153,15 @@ def _rewrite(text: str) -> tuple[str, int]:
         mod = m.group(1)
         return f"from {PKG}.{BUCKETS[mod]} import {mod}"
 
+    def s(m):
+        nonlocal n
+        n += 1
+        mod = m.group(1)
+        return f"atmosphere/dynamics/{BUCKETS[mod]}/{mod}.py"
+
     text = RE_DOTTED.sub(d, text)
     text = RE_FROM.sub(f, text)
+    text = RE_PATH.sub(s, text)
     return text, n
 
 
@@ -138,7 +169,7 @@ def _iter_py(repo: Path, self_path: Path):
     for p in repo.rglob("*.py"):
         if p == self_path:
             continue
-        if SKIP_DIRS & set(p.parts):
+        if _skip(p):
             continue
         yield p
 
@@ -208,6 +239,17 @@ def do_verify(repo: Path) -> int:
         for m in RE_FROM.finditer(text):
             print(f"  STALE from    {p.relative_to(repo)}: {m.group(0)}")
             stale += 1
+        for m in RE_PATH.finditer(text):
+            print(f"  STALE path    {p.relative_to(repo)}: {m.group(0)}")
+            stale += 1
+        for m in RE_GROUP.finditer(text):
+            names = {n.strip().split(" as ")[0].strip()
+                     for n in m.group(1).replace("\n", " ").split(",")}
+            for mod in sorted(names & _MOVERS):
+                print(f"  STALE group   {p.relative_to(repo)}: "
+                      f"from {PKG} import (... {mod} ...) -> hand-fix to "
+                      f".{BUCKETS[mod]} submodule")
+                stale += 1
     print(f"  {stale} straggler(s)")
     return stale
 
@@ -233,6 +275,16 @@ def self_test() -> None:
          f"import {PKG}.gcm._fv3_lin_pgf"),
         (f"import {PKG}.gcm.spectral_pe",                  # idempotent: already bucketed
          f"import {PKG}.gcm.spectral_pe"),
+        ('legoesm_source_path("atmosphere/dynamics/primitive_eq_cdgrid.py")',  # slash path -> bucket
+         'legoesm_source_path("atmosphere/dynamics/gcm/primitive_eq_cdgrid.py")'),
+        ('"packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_plane.py"',  # pkg-prefixed
+         '"packages/atmosphere/legoesm/atmosphere/dynamics/les/compressible_euler_plane.py"'),
+        ("src/legoesm/atmosphere/dynamics/plane_operators.py",  # src-prefixed docstring
+         "src/legoesm/atmosphere/dynamics/les/plane_operators.py"),
+        ("legoesm/ocean/dynamics/spectral_pe.py",          # ocean path: untouched (not atmosphere/)
+         "legoesm/ocean/dynamics/spectral_pe.py"),
+        ("atmosphere/dynamics/gcm/primitive_eq_cdgrid.py",  # idempotent: already bucketed path
+         "atmosphere/dynamics/gcm/primitive_eq_cdgrid.py"),
     ]
     ok = True
     for src, want in cases:

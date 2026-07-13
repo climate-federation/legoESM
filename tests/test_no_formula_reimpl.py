@@ -232,13 +232,13 @@ CANONICAL_FORMULAS = {
         # Per-file count, seeded from the measured baseline (iter 2026-06-09):
         # 33 inline buoyancy/N² re-derivations across 18 modules.
         "budget": {
-            "packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler.py": 5,
-            "packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_mpas.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_plane.py": 2,
+            "packages/atmosphere/legoesm/atmosphere/dynamics/gcm/compressible_euler.py": 5,
+            "packages/atmosphere/legoesm/atmosphere/dynamics/gcm/compressible_euler_mpas.py": 1,
+            "packages/atmosphere/legoesm/atmosphere/dynamics/les/compressible_euler_plane.py": 2,
             # 1 -> 2: main grew a second inline N² site while this branch was
             # in flight (rebase 2026-06-12 baseline re-seed, not branch debt).
-            "packages/atmosphere/legoesm/atmosphere/dynamics/spectral_les_plane.py": 2,
-            "packages/atmosphere/legoesm/atmosphere/dynamics/spectral_nh.py": 2,
+            "packages/atmosphere/legoesm/atmosphere/dynamics/les/spectral_les_plane.py": 2,
+            "packages/atmosphere/legoesm/atmosphere/dynamics/gcm/spectral_nh.py": 2,
             # GWD hines/lindzen/mcfarlane/prognostic_spectral migrated their
             # inline g/θ·∂θ/∂z N² to physics._shared.brunt_vaisala_n_full
             # (ponytail dedup 2026-06-17) → budget ratcheted to 0 (entries removed).
@@ -277,8 +277,8 @@ CANONICAL_FORMULAS = {
         ),
         # 42 inline (p/p0)^κ sites across 29 modules (iter 2026-06-09).
         "budget": {
-            "packages/atmosphere/legoesm/atmosphere/dynamics/_fv3_lin_pgf.py": 2,
-            "packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_plane.py": 1,
+            "packages/atmosphere/legoesm/atmosphere/dynamics/gcm/_fv3_lin_pgf.py": 2,
+            "packages/atmosphere/legoesm/atmosphere/dynamics/les/compressible_euler_plane.py": 1,
             "packages/atmosphere/legoesm/atmosphere/held_suarez.py": 1,
             "packages/atmosphere/legoesm/atmosphere/idealized/rcemip_initial_conditions.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/convection/dca.py": 1,
@@ -294,7 +294,7 @@ CANONICAL_FORMULAS = {
             "packages/atmosphere/legoesm/atmosphere/physics/thermodynamics.py": 3,
             # New on main while this branch was in flight (rebase 2026-06-12
             # baseline seed, not branch debt): 3 inline (p/p0)^κ sites.
-            "packages/atmosphere/legoesm/atmosphere/dynamics/spectral_les_moist.py": 3,
+            "packages/atmosphere/legoesm/atmosphere/dynamics/les/spectral_les_moist.py": 3,
             # Turbulence dedup 2026-07-07: every turbulence-module inline
             # (p/p0)^κ / (p0/p)^κ site (edmf, holtslag_boville, integration,
             # louis, mynn25, pbl_height, smagorinsky, tke, vertical_diffusion,

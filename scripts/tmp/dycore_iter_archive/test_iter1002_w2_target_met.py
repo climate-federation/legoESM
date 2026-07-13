@@ -50,7 +50,7 @@ assert jax.config.read("jax_enable_x64"), (
     "`JAX_ENABLE_X64=1 pytest ...` from the shell."
 )
 
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterConfig,
     FV3EdgeShallowWaterModel,
     FV3EdgeShallowWaterState,
@@ -116,7 +116,7 @@ def test_iter1020_dddmp_silent_noop_warning():
 
     import jax.numpy as jnp_local
 
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig as _Cfg,
         FV3EdgeShallowWaterModel as _Model,
         FV3EdgeShallowWaterState as _State,
@@ -182,7 +182,7 @@ def test_iter1019_hyperdiff_silent_noop_warning():
 
     import jax.numpy as jnp_local
 
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig as _Cfg,
         FV3EdgeShallowWaterModel as _Model,
         FV3EdgeShallowWaterState as _State,
@@ -226,7 +226,7 @@ def test_iter1019_hyperdiff_silent_noop_warning():
 def test_iter1017_preset_warns_on_non_c36():
     """`iter1009_dual_target_config(n != 36)` should emit UserWarning."""
     import warnings
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         iter1009_dual_target_config,
     )
     # C36 must not warn
@@ -254,7 +254,7 @@ def test_iter1017_preset_warns_on_non_c36():
 
 def test_iter1013_preset_helper_matches_explicit_config():
     """`iter1009_dual_target_config(N)` matches the explicit config."""
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         iter1009_dual_target_config,
     )
     N = 36
@@ -291,7 +291,7 @@ def test_iter39_cube_w6_short_run_stable_with_hyperdiff():
     """
     import jax
     import jax.numpy as jnp_local
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         FV3EdgeShallowWaterModel,
         FV3EdgeShallowWaterState,
         iter1009_dual_target_config,
@@ -401,7 +401,7 @@ def test_iter57_cube_w2_matrix_config_5day():
     """
     import jax
     import jax.numpy as jnp_local
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         FV3EdgeShallowWaterModel,
         FV3EdgeShallowWaterState,
         iter1009_dual_target_config,
@@ -513,7 +513,7 @@ def test_iter59_cube_cb_12day_matrix_config():
     """
     import jax
     import jax.numpy as jnp_local
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         FV3EdgeShallowWaterModel,
         iter1009_dual_target_config,
     )
@@ -612,7 +612,7 @@ def test_iter61_latlon_cb_12day_mass_fixer():
     import math
     import jax
     import jax.numpy as jnp_local
-    from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
         CGridLatLonShallowWaterState,
         cell_to_cgrid_winds,
     )
@@ -699,7 +699,7 @@ def test_iter49_cube_w2_matrix_config_short_run():
     """
     import jax
     import jax.numpy as jnp_local
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         FV3EdgeShallowWaterModel,
         FV3EdgeShallowWaterState,
         iter1009_dual_target_config,
@@ -810,7 +810,7 @@ def test_iter48_cube_w5_short_run_stable_with_hyperdiff():
     """
     import jax
     import jax.numpy as jnp_local
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         FV3EdgeShallowWaterModel,
         FV3EdgeShallowWaterState,
         iter1009_dual_target_config,
@@ -898,7 +898,7 @@ def test_iter35_hyperdiff_coeff_kwarg_threads_through():
     test without needing the matrix runner to flag the W2 v_ll
     sentinel regression.
     """
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         iter1009_dual_target_config,
     )
     N = 36

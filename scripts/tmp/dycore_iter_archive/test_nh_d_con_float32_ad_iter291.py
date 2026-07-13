@@ -24,7 +24,7 @@ import pytest
 
 # DO NOT enable x64 — explicit float32 default.
 
-from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
     CDGridCompressibleEulerConfig,
     CDGridCompressibleEulerModel,
 )

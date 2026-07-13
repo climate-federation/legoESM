@@ -22,7 +22,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.grids.cubed_sphere import create_cubed_sphere
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterConfig,
     FV3EdgeShallowWaterModel,
     FV3EdgeShallowWaterState,

@@ -1485,7 +1485,7 @@ def run_benchmark(
 
     if grid_type == "spectral":
         from legoesm.grids.gaussian import create_gaussian_grid
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPrimitiveEquationModel,
             SpectralPEConfig,
         )
@@ -1509,7 +1509,7 @@ def run_benchmark(
         dev_config = create_level_mesh(n_devices=n_gpus)
     elif grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel,
             MPASPrimitiveEquationConfig,
         )
@@ -1577,7 +1577,7 @@ def run_benchmark(
         # grid=latlon/discretization=finite_volume.)
         from legoesm import constants  # lazy: see top-of-file note on JAX init order
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationModel,
             CGridLatLonPrimitiveEquationConfig,
         )
@@ -1643,7 +1643,7 @@ def run_benchmark(
     else:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel,
             CDGridPrimitiveEquationConfig,
             hydrostatic_to_fv3,
@@ -1737,7 +1737,7 @@ def run_benchmark(
         # raw-array C-grid CGridLatLonHydrostaticState.  Convert on the GLOBAL
         # grid first — the cell->face v-wind interpolation needs the full
         # latitude column — then slice to the band.
-        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             hydrostatic_to_cgrid,
         )
         from legoesm.parallel.latlon_mpi import scatter_state_latlon

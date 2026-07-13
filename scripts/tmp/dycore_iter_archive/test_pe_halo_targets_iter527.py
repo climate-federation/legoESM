@@ -28,8 +28,8 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-import legoesm.atmosphere.dynamics.primitive_eq_cdgrid as pe_mod
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+import legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid as pe_mod
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationModel,
     hydrostatic_to_fv3,
     make_legoesm_pe_min_edge_config,

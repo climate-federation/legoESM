@@ -26,7 +26,7 @@ import pytest
 
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.model_driver import ModelDriver
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
 )
 from legoesm.atmosphere.held_suarez import held_suarez_init
@@ -161,7 +161,7 @@ def test_run_tiled_cube_spmd_completes_and_matches_direct_loop():
     # (M3b increment 1: the lane advances each segment via ONE compiled
     # lax.scan, scan_tiled_cc_steps; scan-vs-per-step numerics parity is
     # gated in tests/parallel/test_cube_tile_native_segment.py).
-    from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+    from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import (
         make_tiled_cc_loop, scan_tiled_cc_steps,
     )
     enter, step, exit_ = make_tiled_cc_loop(model, dc.mesh, kt=KT, dt=DT)

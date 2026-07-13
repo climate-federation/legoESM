@@ -46,7 +46,7 @@ _CORES = ("production", "production_duo", "fb")
 
 def _w2_state(grid, cdgrid):
     """Matrix-runner W2 edge-staggered IC (run_atmosphere_test_matrix.py:2603)."""
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import FV3EdgeShallowWaterState
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import FV3EdgeShallowWaterState
 
     from tests.test_cases.williamson import williamson_test2
     sw = williamson_test2(grid)
@@ -61,7 +61,7 @@ def _build(core: str, n: int):
     """Build (model, state) for one bench lane."""
     import warnings
 
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         FV3EdgeShallowWaterModel,
         FV3FBShallowWaterModel,
         cdgrid_hyperdiff_cube,
@@ -126,7 +126,7 @@ def bench_core(core: str, n: int, steps: int, warmup: int) -> dict:
 
 def bench_fb_stages(n: int, steps: int, warmup: int) -> dict[str, float]:
     """Separately-jitted FB phase timings (attribution, not decomposition)."""
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import fb_m1_preset_config
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import fb_m1_preset_config
     from legoesm.core.fv3_sw_core import (
         _EPS,
         _bgrid_ke_transport,

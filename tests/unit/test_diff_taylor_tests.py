@@ -69,7 +69,7 @@ class TestTaylorDynamics:
 
     def test_shallow_water_latlon(self):
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
             CGridLatLonShallowWaterModel,
             CGridLatLonShallowWaterConfig,
             williamson_test2_cgrid,
@@ -106,7 +106,7 @@ class TestTaylorDynamics:
 
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationModel,
             CGridLatLonPrimitiveEquationConfig,
             hydrostatic_to_cgrid,

@@ -1708,7 +1708,7 @@ class TestHeldSuarezInitConsistency:
 
         iter-47 codex HIGH: spectral (Gaussian grid) is added to the
         coverage.  ``isothermal_rest_state_spectral`` lives in
-        ``atmosphere/dynamics/spectral_pe.py`` rather than the
+        ``atmosphere/dynamics/gcm/spectral_pe.py`` rather than the
         ``held_suarez`` module, but its defaults must match the
         other three since the matrix runner's spectral HS branch
         calls it directly.
@@ -1717,7 +1717,7 @@ class TestHeldSuarezInitConsistency:
         # Cube/latlon/MPAS inits all live in the held_suarez module.
         spectral_fn = None
         try:
-            from legoesm.atmosphere.dynamics.spectral_pe import (
+            from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
                 isothermal_rest_state_spectral,
             )
             spectral_fn = isothermal_rest_state_spectral
@@ -1850,7 +1850,7 @@ class TestHeldSuarezInitConsistency:
         """
         import jax.numpy as jnp
         try:
-            from legoesm.atmosphere.dynamics.spectral_pe import (
+            from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
                 isothermal_rest_state_spectral, spectral_pe_to_grid,
             )
             from legoesm.grids.gaussian import create_gaussian_grid
@@ -2767,7 +2767,7 @@ class TestHeldSuarezDissipationImbalance:
         # deviation 0.490 → 5.445 K).  Reverted.  The fix-candidate
         # (a) needs a proper Fortran-reference biharmonic operator
         # (e.g., MOM6 / GFDL FMS) before re-attempt.
-        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationConfig,
         )
         ll_fields = set(CGridLatLonPrimitiveEquationConfig._fields)

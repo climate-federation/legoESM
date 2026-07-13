@@ -1222,7 +1222,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         # so the check must be keyed on the file being scanned.
         files_and_patterns = [
             (
-                "src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py",
+                "src/legoesm/atmosphere/dynamics/gcm/shallow_water_fv3_cdgrid.py",
                 [
                     re.compile(r"\bthis file L\d+", re.IGNORECASE),
                     re.compile(r"shallow_water_fv3_cdgrid\.py:\d+"),
@@ -1397,7 +1397,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         """
         from unittest import mock
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             FV3EdgeShallowWaterModel,
             FV3EdgeShallowWaterState,
             CDGridShallowWaterConfig,
@@ -1620,7 +1620,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         """
         from unittest import mock
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             FV3FBShallowWaterModel,
             FV3EdgeShallowWaterState,
         )
@@ -3968,7 +3968,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         import jax.numpy as jnp
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterConfig,
             FV3EdgeShallowWaterModel,
             FV3EdgeShallowWaterState,
@@ -4053,7 +4053,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         import jax.numpy as jnp
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterConfig,
             FV3EdgeShallowWaterModel,
             FV3EdgeShallowWaterState,
@@ -4198,7 +4198,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         import jax.numpy as jnp
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterConfig,
             FV3EdgeShallowWaterModel,
             FV3EdgeShallowWaterState,
@@ -4207,7 +4207,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
             williamson_test2,
         )
         import legoesm.core.operators_cdgrid as ocd
-        import legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid as sw_mod
+        import legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid as sw_mod
 
         # Monkey-patch fv3_sw_tendencies to set dir_aware=True.  We
         # cannot pass this via config (the config does not expose it);
@@ -4596,7 +4596,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         import jax.numpy as jnp
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterConfig,
             FV3EdgeShallowWaterModel,
             FV3EdgeShallowWaterState,
@@ -4684,7 +4684,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         import jax.numpy as jnp
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterConfig,
             FV3EdgeShallowWaterModel,
             FV3EdgeShallowWaterState,
@@ -4929,7 +4929,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         import jax.numpy as jnp
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterConfig,
             FV3EdgeShallowWaterModel,
             FV3EdgeShallowWaterState,
@@ -5420,7 +5420,7 @@ class TestW2CubeFaceImprintCharacterization(unittest.TestCase):
             create_cubed_sphere_cdgrid,
             cell_centre_angles_from_4edge,
         )
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterConfig,
             FV3EdgeShallowWaterModel,
             FV3EdgeShallowWaterState,
@@ -5528,7 +5528,7 @@ class TestW2CubeFaceImprintCharacterization(unittest.TestCase):
         from legoesm.grids.cubed_sphere_cdgrid import (
             cell_centre_angles_from_4edge,
         )
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterConfig,
             FV3EdgeShallowWaterModel,
             FV3EdgeShallowWaterState,
@@ -5654,7 +5654,7 @@ class TestW2CubeFaceImprintCharacterization(unittest.TestCase):
             create_cubed_sphere_cdgrid,
             cell_centre_angles_from_4edge,
         )
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterConfig,
             FV3EdgeShallowWaterModel,
             FV3EdgeShallowWaterState,
@@ -5774,7 +5774,7 @@ class TestW5PolarFaceMagnitude(unittest.TestCase):
             create_cubed_sphere_cdgrid,
             cell_centre_angles_from_4edge,
         )
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterConfig,
             FV3EdgeShallowWaterModel,
             FV3EdgeShallowWaterState,
@@ -10321,7 +10321,7 @@ class TestW5ProductionGoldFileIter716(unittest.TestCase):
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterConfig, FV3EdgeShallowWaterModel,
             FV3EdgeShallowWaterState)
         from tests.atmosphere.shallow_water.test_cases.williamson import (

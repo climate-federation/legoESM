@@ -11,7 +11,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 from legoesm.grids.gaussian import create_gaussian_grid
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralPrimitiveEquationModel,
     SpectralPEConfig,
     isothermal_rest_state_spectral,

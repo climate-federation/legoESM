@@ -20,7 +20,7 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (  # noqa: E402
     _upwind_advection_x, _upwind_advection_y,
     _van_leer_advection_x, _van_leer_advection_y,
 )
@@ -286,7 +286,7 @@ def test_horizontal_advection_halo_requirement_map_locked():
     (compressible_euler_plane_halo.py validates the layout). Lock
     the active values so a drift in either direction surfaces here.
     """
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         HORIZONTAL_ADVECTION_HALO_REQUIREMENT,
     )
     assert HORIZONTAL_ADVECTION_HALO_REQUIREMENT == {
@@ -306,10 +306,10 @@ def test_van_leer_scheme_dispatch_in_slow_tendency():
     scraping source text, so the table refactor doesn't break the lock
     while a silent fallback would still be caught."""
     import pytest
-    from legoesm.atmosphere.dynamics.compressible_euler import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
         CompressibleEulerConfig,
     )
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         HORIZONTAL_ADVECTION_HALO_REQUIREMENT,
         make_flat_plane_terrain_metric,
         make_rest_state,

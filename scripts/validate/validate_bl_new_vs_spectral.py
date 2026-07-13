@@ -28,8 +28,8 @@ if not _F32:
     jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
-from legoesm.atmosphere.dynamics import pseudo_incompressible_plane as pi  # noqa: E402
-from legoesm.atmosphere.dynamics import spectral_les_plane as sl  # noqa: E402
+from legoesm.atmosphere.dynamics.les import pseudo_incompressible_plane as pi  # noqa: E402
+from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl  # noqa: E402
 
 # --- case definitions (GABLS1 / Wangara, reduced) -------------------------------
 CASES = {

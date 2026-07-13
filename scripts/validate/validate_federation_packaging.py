@@ -303,7 +303,7 @@ def check_sfno_gated_by_ml_extra(wheels: dict[str, Path], tmp: Path) -> None:
     code = (
         "import legoesm.atmosphere\n"                      # base must import fine
         "try:\n"
-        "    import legoesm.atmosphere.dynamics.sfno_sw\n"
+        "    import legoesm.atmosphere.dynamics.neural.sfno_sw\n"
         "    print('UNEXPECTED-OK')\n"
         "except ModuleNotFoundError as e:\n"
         "    assert 'legoesm.ml' in str(e), str(e)\n"

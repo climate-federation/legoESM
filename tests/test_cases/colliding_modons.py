@@ -132,7 +132,7 @@ def colliding_modons_cdgrid(grid, cdgrid):
     ``f0 = fC = 0``); assign it to ``model.cdgrid`` before stepping so the run
     is non-rotating.
     """
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         FV3EdgeShallowWaterState,
     )
 
@@ -214,7 +214,7 @@ def colliding_modons_mpas(mesh) -> MPASShallowWaterState:
 
 def colliding_modons_spectral(grid):
     """Colliding-modons IC in spectral space (Gaussian grid)."""
-    from legoesm.atmosphere.dynamics.spectral_sw import SpectralSWState
+    from legoesm.atmosphere.dynamics.gcm.spectral_sw import SpectralSWState
     from legoesm.grids.gaussian import (
         sh_analysis,
         sh_analysis_dmu,

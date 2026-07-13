@@ -12,7 +12,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.dynamics import plane_fd_advection as adv
+from legoesm.atmosphere.dynamics.les import plane_fd_advection as adv
 
 SCHEMES = ("upwind", "van_leer", "weno5", "weno7", "weno9", "central")
 

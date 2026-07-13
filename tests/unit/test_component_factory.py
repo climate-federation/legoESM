@@ -85,14 +85,14 @@ class TestCDGridResolution:
         sigma = _make_sigma()
         model = create_atmosphere_dycore(config, grid, sigma)
 
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             FV3EdgeShallowWaterModel, CDGridShallowWaterModel)
         assert isinstance(model, FV3EdgeShallowWaterModel)
         assert not isinstance(model, CDGridShallowWaterModel)
         # The validated preset must be wired VERBATIM (codex M2: the class
         # swap alone is insufficient) — config == williamson_cli_calibration(
         # grid.n) with only the three driver-exposed overrides applied.
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             williamson_cli_calibration, CDGridShallowWaterConfig)
         expected = williamson_cli_calibration(grid.n)._replace(
             use_conservation_fixer=config.dycore.conservation_fixer,
@@ -139,7 +139,7 @@ class TestCDGridResolution:
         sigma = _make_sigma()
         model = create_atmosphere_dycore(config, grid, sigma)
 
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import CDGridPrimitiveEquationModel
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import CDGridPrimitiveEquationModel
         assert isinstance(model, CDGridPrimitiveEquationModel)
 
     def test_nonhydrostatic_creates_ce_model(self):
@@ -148,7 +148,7 @@ class TestCDGridResolution:
         sigma = _make_sigma()
         model = create_atmosphere_dycore(config, grid, sigma)
 
-        from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import CDGridCompressibleEulerModel
+        from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import CDGridCompressibleEulerModel
         assert isinstance(model, CDGridCompressibleEulerModel)
 
     def test_cdgrid_alias_resolves_same_as_centered(self):
@@ -421,7 +421,7 @@ class TestDriverDelegation:
         driver.sigma = sigma
         driver._create_dycore()
 
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import CDGridPrimitiveEquationModel
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import CDGridPrimitiveEquationModel
         assert isinstance(driver.model, CDGridPrimitiveEquationModel)
         assert driver._hyperdiff > 0.0
 
@@ -438,7 +438,7 @@ class TestDriverDelegation:
 
         # M2 (2026-07-13): driver now builds the FV3-faithful edge-midpoint
         # cube SW core, not the legacy corner-corner CDGrid model.
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             FV3EdgeShallowWaterModel)
         assert isinstance(driver.model, FV3EdgeShallowWaterModel)
 
@@ -475,7 +475,7 @@ class TestDriverDelegation:
         driver.sigma = sigma
         driver._create_dycore()
 
-        from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import CDGridCompressibleEulerModel
+        from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import CDGridCompressibleEulerModel
         assert isinstance(driver.model, CDGridCompressibleEulerModel)
 
 
@@ -525,7 +525,7 @@ class TestDefaultBehavior:
         sigma = _make_sigma(config.grid.nlev)
         model = create_atmosphere_dycore(config, grid, sigma)
 
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import CDGridPrimitiveEquationModel
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import CDGridPrimitiveEquationModel
         assert isinstance(model, CDGridPrimitiveEquationModel)
 
 
@@ -763,7 +763,7 @@ class TestCreateModelGridAware:
             },
             grid=grid, sigma_coord=sigma,
         )
-        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationModel,
         )
         assert isinstance(model, CGridLatLonPrimitiveEquationModel), (
@@ -777,7 +777,7 @@ class TestCreateModelGridAware:
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.atmosphere.dynamics import create_model
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel,
         )
 
@@ -822,7 +822,7 @@ class TestTimeIntegratorAutoDefault:
         """Factory on MPAS + default DycoreConfig → the MPAS dycore's own
         default integrator (the scan-folded large-stability SSP-RK54)."""
         from legoesm.grids.factory import create_grid
-        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationConfig,
         )
         grid = create_grid("mpas", 1, lloyd_iterations=2)
@@ -839,7 +839,7 @@ class TestTimeIntegratorAutoDefault:
     def test_cube_pe_default_resolves_to_dycore_default(self):
         """Cubed-sphere PE maps "auto" to its own default (ssp_rk3) — the
         pre-flip behaviour for the scientific validation suite."""
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationConfig,
         )
         config = _make_config(model_type="hydrostatic")

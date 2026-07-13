@@ -463,12 +463,12 @@ def grid_winds_from_spectral(state: Any, grid: Any, sigma: Any) -> Any:
     """Synthesize a spectral state to a GRID ``HydrostaticState`` for the compare.
 
     The spectral (Gaussian) dycore's prognostic state is a
-    :class:`~legoesm.atmosphere.dynamics.spectral_pe.SpectralHydrostaticState`
+    :class:`~legoesm.atmosphere.dynamics.gcm.spectral_pe.SpectralHydrostaticState`
     (``vor_hat``/``div_hat``/``T_hat``/``lnps_hat`` — complex SH coefficients), so
     it has no grid ``u``/``v`` for the worst-column ranking / wind RMSE or the LES
     forcing extractor.  This converts it to a grid ``HydrostaticState``
     (``u``/``v``/``T``/``p_s``/``phis``) via the dycore's OWN diagnostic synthesis
-    (:func:`~legoesm.atmosphere.dynamics.spectral_pe.spectral_pe_to_grid` —
+    (:func:`~legoesm.atmosphere.dynamics.gcm.spectral_pe.spectral_pe_to_grid` —
     ``uv_from_vordiv`` + ``sh_synthesis``, frame-consistent geographic east/north
     winds, matching the ERA5 reference on the Gaussian grid).  The spectral analog
     of the MPAS edge→cell reconstruction; like that, the COMPARE side produces grid
@@ -480,13 +480,13 @@ def grid_winds_from_spectral(state: Any, grid: Any, sigma: Any) -> Any:
     :class:`~legoesm.grids.gaussian.GaussianGrid` and ``sigma`` the vertical
     coordinate (both ``driver.grid``/``driver.sigma`` for a spectral run).
     """
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
 
     # isinstance (Codex) — structurally guaranteed, immune to a duck-typed object
     # that accidentally carries a vor_hat attribute.
     if not isinstance(state, SpectralHydrostaticState):
         return state
-    from legoesm.atmosphere.dynamics.spectral_pe import spectral_pe_to_grid
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import spectral_pe_to_grid
     from legoesm.core.field import Field
     from legoesm.core.state import HydrostaticState
 

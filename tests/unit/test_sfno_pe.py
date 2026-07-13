@@ -1,6 +1,6 @@
 """Unit tests for the SFNO primitive-equation dynamical core.
 
-Exercises :class:`~legoesm.atmosphere.dynamics.sfno_pe.SFNOPrimitiveEquationModel`
+Exercises :class:`~legoesm.atmosphere.dynamics.neural.sfno_pe.SFNOPrimitiveEquationModel`
 directly: instantiation with a tiny randomly-initialised SFNO, both
 operating modes (``state_update`` and ``hybrid_tendencies``), the
 post-hoc dry-air-mass conservation correction, physics coupling, and
@@ -26,11 +26,11 @@ import pytest
 
 from legoesm.grids.gaussian import create_gaussian_grid, sh_synthesis
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     isothermal_rest_state_spectral,
 )
-from legoesm.atmosphere.dynamics.sfno_pe import (
+from legoesm.atmosphere.dynamics.neural.sfno_pe import (
     SFNOPrimitiveEquationModel,
     SFNOPrimitiveEquationConfig,
 )

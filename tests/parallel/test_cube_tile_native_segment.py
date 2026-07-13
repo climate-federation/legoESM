@@ -48,10 +48,10 @@ import pytest
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.halo import set_halo_backend
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
 )
-from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import (
     make_tiled_cc_loop, make_tiled_cc_segment, scan_tiled_cc_steps,
 )
 from legoesm.atmosphere.held_suarez import held_suarez_init
@@ -257,7 +257,7 @@ def test_moist_segment_matches_per_step_loop():
     from legoesm.atmosphere.kessler_forcing import (
         make_kessler_column_physics_fn,
     )
-    from legoesm.atmosphere.dynamics.tiled_step_adapter import _TILED_TRACERS
+    from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import _TILED_TRACERS
 
     mesh = _mesh()
     model = _production_model()
@@ -396,7 +396,7 @@ def test_unroll_to_dtype_fixed_point_public():
     """Direct unit for the PROMOTED helper: a mixed-dtype carry unrolls
     exactly until the step's output dtypes are a fixed point; a stable
     carry unrolls nothing."""
-    from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+    from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
         unroll_to_dtype_fixed_point,
     )
 

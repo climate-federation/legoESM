@@ -26,7 +26,7 @@ from legoesm.atmosphere.standard_atmosphere import (
     standard_atmosphere_zonal_wind,
 )
 from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
-from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     cgrid_latlon_hydrostatic_tendencies, hydrostatic_to_cgrid,
     CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
 )

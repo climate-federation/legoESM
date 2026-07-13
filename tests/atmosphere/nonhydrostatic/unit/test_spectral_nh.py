@@ -24,7 +24,7 @@ from legoesm.grids.vertical import (
     create_height_coordinate,
     compute_terrain_metric,
 )
-from legoesm.atmosphere.dynamics.spectral_nh import (
+from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
     SpectralNHState,
     SpectralNHConfig,
     SpectralCompressibleEulerModel,
@@ -32,7 +32,7 @@ from legoesm.atmosphere.dynamics.spectral_nh import (
     _acoustic_substeps_grid,
     nh_rest_state_spectral,
 )
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     compute_exner_perturbation,
 )
 from legoesm.core.field import Field
@@ -493,7 +493,7 @@ def test_batched_cpu_step_honors_threaded_target_mass():
     the first target into the compiled step)."""
     import jax.numpy as jnp
     from legoesm.grids.gaussian import create_gaussian_grid
-    from legoesm.atmosphere.dynamics.spectral_nh import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
         SpectralCompressibleEulerModel, SpectralNHConfig,
         dcmip25_tc1_init_spectral,
     )

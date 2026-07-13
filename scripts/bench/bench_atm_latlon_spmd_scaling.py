@@ -87,10 +87,10 @@ from metadata import (  # noqa: E402
 
 def _build(n_lat, n_lon, nlev):
     from legoesm import constants
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationConfig, CGridLatLonPrimitiveEquationModel)
     from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         hydrostatic_to_cgrid)
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate
@@ -186,7 +186,7 @@ def main() -> int:
         )
         init_multicontroller_distributed(args.coordinator)
 
-    from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+    from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
         atm_latlon_geometry_bytes, make_sharded_atm_latlon_segment,
         make_sharded_atm_latlon_step, shard_state_atm_latlon)
     seg_n = int(args.segment_steps)

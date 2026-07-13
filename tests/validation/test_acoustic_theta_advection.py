@@ -19,11 +19,11 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
     _theta_vert_advection_van_leer_kernel,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     PlaneCompressibleEulerModel,
     vertical_advection_van_leer_plane,
     make_flat_plane_terrain_metric,

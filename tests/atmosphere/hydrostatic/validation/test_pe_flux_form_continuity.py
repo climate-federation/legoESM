@@ -119,7 +119,7 @@ def test_sigma_dot_from_cumsum_uniform_ps_identity():
 # ---------------------------------------------------------------------------
 
 def _cube_model_state(coord_name, use_duogrid):
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
     )
     from legoesm.atmosphere.idealized.held_suarez_topo import (
@@ -259,7 +259,7 @@ def fp64_policy():
 
 def _mpas_model_state(coord_name):
     from legoesm.grids.voronoi import create_voronoi_mesh
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
     )
     from legoesm.atmosphere.idealized.held_suarez_topo import (

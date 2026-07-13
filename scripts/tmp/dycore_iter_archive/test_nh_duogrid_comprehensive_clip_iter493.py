@@ -31,7 +31,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
     CDGridCompressibleEulerModel,
     make_fv3_faithful_nh_config,
 )
@@ -109,7 +109,7 @@ def test_nh_dycore_with_comprehensive_clip(capsys):
         damp_w=0.030, damp_w_d_con=1.0,
     )
     patch_targets = [
-        "legoesm.atmosphere.dynamics.compressible_euler_cdgrid."
+        "legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid."
         "_pad_halo_4d_module",
         "legoesm.core.operators_3d.pad_halo_4d",
         "legoesm.core.operators_cdgrid.pad_halo_4d",

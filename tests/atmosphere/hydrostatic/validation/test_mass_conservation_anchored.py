@@ -43,7 +43,7 @@ def test_mass_conservation_cubed_sphere_pe():
     """Cubed-sphere PE: anchor_mass_to_initial + use_conservation_fixer."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
     )
@@ -75,7 +75,7 @@ def test_mass_conservation_latlon_pe():
     """C-grid lat-lon PE: anchor_mass_to_initial + fp64 budget acc."""
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationModel,
         CGridLatLonPrimitiveEquationConfig,
         hydrostatic_to_cgrid,
@@ -123,7 +123,7 @@ def test_mass_conservation_mpas_pe():
     from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel,
         MPASPrimitiveEquationConfig,
     )
@@ -158,7 +158,7 @@ def test_mass_conservation_spectral_pe():
     """Spectral PE: anchored ``lnps_hat[0]`` rescale."""
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         SpectralPrimitiveEquationModel,
         SpectralPEConfig,
         isothermal_rest_state_spectral,
@@ -199,7 +199,7 @@ def test_long_run_mass_conservation_cubed_sphere_pe():
     """100-step cube PE: anchor must NOT random-walk over long runs."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
     )
@@ -246,7 +246,7 @@ def test_long_run_mass_conservation_spectral_pe():
     """
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         SpectralPrimitiveEquationModel, SpectralPEConfig,
         isothermal_rest_state_spectral, spectral_pe_to_grid,
     )
@@ -288,7 +288,7 @@ def test_long_run_mass_conservation_latlon_pe():
     import math
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationModel,
         CGridLatLonPrimitiveEquationConfig,
         hydrostatic_to_cgrid,
@@ -339,7 +339,7 @@ def test_long_run_mass_conservation_mpas_pe():
     from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
     )
     from legoesm.atmosphere.held_suarez import held_suarez_init_mpas

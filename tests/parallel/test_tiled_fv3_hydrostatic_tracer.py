@@ -30,7 +30,7 @@ from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.halo import set_halo_backend
 from legoesm.core.operators_cdgrid import dgrid_to_center_vector
-from legoesm.atmosphere.dynamics.tracer_transport import advective_tracer_tendency
+from legoesm.atmosphere.dynamics.shared.tracer_transport import advective_tracer_tendency
 from legoesm.parallel.tiled_production_cdgrid import (
     make_tiled_fv3_tracer_advection_stage_2d,
 )

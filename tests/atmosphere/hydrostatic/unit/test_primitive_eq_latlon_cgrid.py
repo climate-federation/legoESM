@@ -6,7 +6,7 @@ import pytest
 
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.grids.vertical import create_sigma_coordinate, make_hybrid_levels
-from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonPrimitiveEquationModel,
     CGridLatLonPrimitiveEquationConfig,
     CGridLatLonHydrostaticState,

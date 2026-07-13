@@ -38,7 +38,7 @@ from legoesm.forcing.amip import (
     load_amip_forcing,
     get_forcing_at_time,
 )
-from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonPrimitiveEquationModel,
     CGridLatLonPrimitiveEquationConfig,
 )

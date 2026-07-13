@@ -25,7 +25,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
     CDGridCompressibleEulerModel,
     make_fv3_faithful_nh_config,
     make_legoesm_nh_min_edge_config,
@@ -103,7 +103,7 @@ def test_combined_flag_drops_and_halo_clip(capsys):
         damp_w=0.030, damp_w_d_con=1.0,
     )
     patch_modules = [
-        "legoesm.atmosphere.dynamics.compressible_euler_cdgrid._pad_halo_4d_module",
+        "legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid._pad_halo_4d_module",
         "legoesm.core.operators_3d.pad_halo_4d",
         "legoesm.core.operators_cdgrid.pad_halo_4d",
         "legoesm.core.operators_fc.pad_halo_4d",

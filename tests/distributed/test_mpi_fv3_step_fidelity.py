@@ -62,7 +62,7 @@ def _build_pe_model_and_state(n: int = 8, nlev: int = 5, **config_overrides):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationConfig,
         CDGridPrimitiveEquationModel,
         hydrostatic_to_fv3,
@@ -258,7 +258,7 @@ class TestFV3PEStepMPIFidelity:
         if size > 6 or 6 % size != 0:
             pytest.skip("Face-only mode only (1/2/3/6 ranks).")
 
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel,
             hydrostatic_to_fv3,
             make_fv3_faithful_pe_config,
