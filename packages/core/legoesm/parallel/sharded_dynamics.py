@@ -2449,6 +2449,12 @@ def make_voronoi_sharded_step(
             return state_new, phys_state_out
         return state_new
 
+    # Effective (post-"auto") strategy, carried on the returned callable
+    # so benches/tests can RECORD what actually ran instead of the
+    # requested flag (codex M3c-2 MINOR; same pattern as kessler's
+    # ``_bound_dt``).  Only multi-device steps carry it — the
+    # single-device early return above hands back ``model.step``.
+    _voronoi_step._halo_strategy_effective = halo_strategy
     return _voronoi_step
 
 

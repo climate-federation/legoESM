@@ -255,11 +255,14 @@ class TestNativeFullProductionParity:
         # (a step that silently dropped tracer advection would keep q_v
         # frozen at the initial field and could still "match" a broken
         # reference).
-        # Threshold ABOVE the tracer comparison atol (1e-9): a frozen
-        # q_v could otherwise hide inside the parity envelope.
-        dq = np.max(np.abs(np.asarray(ref.tracers["q_v"].data)
-                           - np.asarray(state0.tracers["q_v"].data)))
-        assert dq > 1e-8, f"q_v unchanged after 2 steps (max dq={dq:.3e})"
+        # Non-vacuity against the FULL parity envelope (atol + rtol|q|):
+        # a q_v frozen within allclose of its initial field would make
+        # the parity assertion below unable to distinguish transported
+        # from silently-dropped tracers (codex M3c-2 NIT).
+        assert not np.allclose(
+            np.asarray(ref.tracers["q_v"].data),
+            np.asarray(state0.tracers["q_v"].data), **_TOL_Q,
+        ), "q_v unchanged after 2 steps within the parity envelope"
 
         _assert_state_close(
             out, ref, moist=True, label=f"moist kessler [{halo_strategy}]")

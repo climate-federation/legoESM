@@ -140,6 +140,18 @@ forcing values add ZERO traces).
    trajectory; the Kessler advection non-vacuity threshold raised
    above the tracer parity atol.
 
+Round 2 (job 8971595): ALL five round-1 findings verified CLOSED, "no
+new production correctness defect".  Remaining items: (a) MAJOR-scoped
+restatement of remainder #1 below (the operator-split physics closure
+retains the full replicated global mesh — connectivity included — not
+just the 1-D fields it reads; increment 2 moves column physics inside
+shard_map with a narrowed sharded physics-mesh structure); (b) MINOR:
+JSONL rows now record ``halo_strategy_requested`` AND
+``halo_strategy_effective`` (the factory carries the post-"auto"
+resolution on the returned callable, kessler ``_bound_dt`` pattern);
+(c) NIT: the Kessler advection non-vacuity check now asserts
+``not allclose`` against the FULL parity envelope.
+
 Pre-existing (NOT this increment; flagged for a separate fix PR): the
 `test_no_private_cross_imports` ratchet fails on MAIN content —
 `tiled_production_cdgrid.py:2442` imports `_get_tiled_tables` /

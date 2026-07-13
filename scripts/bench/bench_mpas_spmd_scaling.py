@@ -440,7 +440,12 @@ def main() -> int:
         subdivision=args.subdivision, n_devices=nd,
         n_cells=int(mesh.nCells), n_edges=int(mesh.nEdges), nlev=args.nlev,
         partition_method=args.partition_method, physics=args.physics,
-        halo_strategy=args.halo_strategy,
+        # Requested vs EFFECTIVE (post-"auto") strategy — a JSONL row
+        # saying "auto" would not reveal whether ppermute or allgather
+        # was actually measured (codex M3c-2 MINOR).
+        halo_strategy_requested=args.halo_strategy,
+        halo_strategy_effective=getattr(
+            step, "_halo_strategy_effective", "serial"),
         steps=args.steps, dt=dt,
         platform=jax.default_backend(),
         n_processes=jax.process_count(),

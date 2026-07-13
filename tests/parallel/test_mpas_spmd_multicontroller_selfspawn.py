@@ -129,7 +129,9 @@ def test_mpas_spmd_two_process_selfspawn_moist_kessler(tmp_path):
     assert rec["component"] == "mpas_atm"
     assert rec["n_processes"] == N_PROC
     assert rec["physics"] == "kessler"
-    assert rec["halo_strategy"] == "ppermute"
+    # The EFFECTIVE strategy (what actually ran), not the CLI request.
+    assert rec["halo_strategy_requested"] == "ppermute"
+    assert rec["halo_strategy_effective"] == "ppermute"
     # Tracer parity lines printed by the extended gate (q_v/q_c/q_r) and
     # no field mismatched.
     assert "q_v" in outs[0], "tracer parity lines missing from the gate"
