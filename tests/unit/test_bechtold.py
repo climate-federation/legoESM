@@ -193,15 +193,20 @@ def test_bechtold_downdraft_evap_conserves_water_locally():
         f"{res_local:.3e}, max|H|={scale_local:.3e}"
     )
 
-    # (2) Column water conservation
+    # (2) Column water conservation.  The production default splits detrained
+    # condensate into anvil cloud (dq_c_conv_dt) + in-updraft rain
+    # (dq_r_conv_dt) at precip_efficiency (#929); the downdraft evaporation
+    # acts on the PRE-split condensate, so the column budget closes over the
+    # TOTAL convective condensate source dq_c + dq_r.  The rain split is a pure
+    # re-partition of a shared positive quantity and cannot move this balance.
+    dqr_diff = out_on.dq_r_conv_dt - out_off.dq_r_conv_dt
     dp = ph[:, 1:] - ph[:, :-1]
     col_dqv = jnp.sum(dqv_diff * dp, axis=-1) / constants.g
-    col_dqc = jnp.sum(dqc_diff * dp, axis=-1) / constants.g
-    col_dqr = jnp.sum(dqr_diff * dp, axis=-1) / constants.g
-    col_residual = float(jnp.max(jnp.abs(col_dqv + col_dqc + col_dqr)))
+    col_dqc = jnp.sum((dqc_diff + dqr_diff) * dp, axis=-1) / constants.g
+    col_residual = float(jnp.max(jnp.abs(col_dqv + col_dqc)))
     col_scale = float(jnp.max(jnp.abs(col_dqv)) + 1e-15)
     assert col_residual < 1e-10 * max(col_scale, 1.0), (
-        f"Bechtold downdraft column water unclosed: max|∫dq_v + ∫dq_c + ∫dq_r|="
+        f"Bechtold downdraft column water unclosed: max|∫dq_v + ∫(dq_c+dq_r)|="
         f"{col_residual:.3e} kg/m²/s, vapor source={col_scale:.3e}"
     )
 
@@ -624,14 +629,15 @@ def test_bechtold_mse_conservation_within_tolerance():
         moisture_convergence=jnp.zeros_like(T),
     )
     dp = ph[:, 1:] - ph[:, :-1]
+    # The latent-heat sink C is the FULL detrained condensate: the #929 rain
+    # split moves precip_efficiency of it from dq_c_conv_dt into dq_r_conv_dt,
+    # but the latent heat of ALL of it is already booked in dT_dt (H), so the
+    # enthalpy budget must sum dq_c + dq_r (the split re-partitions water
+    # downstream; it does not change the scheme's internal energy balance).
+    dqr = out.dq_r_conv_dt if out.dq_r_conv_dt is not None else 0.0
     H = float(jnp.sum(out.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
     Q = float(jnp.sum(out.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
-    # Total detrained condensate = suspended cloud water + the in-updraft rain
-    # split (default precip_efficiency=0.7 diverts most of it to dq_r_conv_dt).
-    # dT_dt already carries the latent heat of the FULL condensation, so the
-    # MSE budget must count cloud + rain to close.
-    dq_r = out.dq_r_conv_dt if out.dq_r_conv_dt is not None else jnp.zeros_like(out.dq_c_conv_dt)
-    C = float(jnp.sum((out.dq_c_conv_dt + dq_r) * dp / constants.g, axis=1).mean()) * constants.L_v
+    C = float(jnp.sum((out.dq_c_conv_dt + dqr) * dp / constants.g, axis=1).mean()) * constants.L_v
     rel = abs(H + Q + C) / (abs(H) + abs(Q) + abs(C) + 1e-10)
     assert rel < 0.10, (
         f"Bechtold (implicit_flux) MSE residual {H+Q+C:.1f} W/m^2 "
@@ -735,4 +741,88 @@ def test_bechtold_downdraft_sharpness_fields_wired():
     )
     assert float(jnp.max(jnp.abs(out_lcl_flat.dT_dt - out_default.dT_dt))) > 1e-10, (
         "lcl_membership_sharpness is not wired"
+    )
+
+
+# ---------------------------------------------------------------------------
+# In-updraft precipitation split (#929) — divert precip_efficiency of the
+# detrained condensate to RAIN (dq_r_conv_dt) so microphysics can drain the
+# polar-night anvil instead of it radiatively loading the column to runaway.
+# ---------------------------------------------------------------------------
+
+def _run_pe(pe):
+    """Run bechtold on the default moist column at a given precip_efficiency,
+    holding EVERY other config field at its default so PE is the ONLY variable
+    (controlled comparison).  Deterministic: enable_stochastic defaults False,
+    prng_key=None."""
+    T, q, pf, ph, u, v = _column()
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    stoch = jnp.zeros((ncol,))
+    out, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        config=BechtoldConfig(precip_efficiency=pe),
+    )
+    return out
+
+
+def test_bechtold_rain_split_conserves_total_condensate():
+    """Split re-partitions the detrained condensate; column total water is
+    unchanged.  PE=0 returns the legacy suspended-cloud source
+    ``max(dq_c_raw, 0)``; at PE=0.7 the anvil remainder + the rain fraction
+    are EXACT fractions of that legacy source, so together they hold all of it.
+
+    Asserted via the two PIECES separately (each is a bit-exact fraction of the
+    legacy total — same op on the same operand as the scheme), NOT via the
+    ``a*(1-pe)+a*pe`` reconstruction SUM, which rounds to ~1 ULP and would fail
+    an fp32 rtol.  A real water leak from a wrong split fraction would move a
+    piece by O(pe), far outside any rounding."""
+    pe = jnp.clip(jnp.asarray(0.7), 0.0, 1.0)
+    legacy = _run_pe(0.0).dq_c_conv_dt  # == jnp.maximum(dq_c_raw, 0.0)
+    assert float(jnp.max(legacy)) > 0.0, "fixture must fire convection (dq_c>0)"
+    out = _run_pe(0.7)
+    # dq_r is EXACTLY pe*legacy and the anvil remainder EXACTLY (1-pe)*legacy;
+    # their fractions sum to 1, so total condensate is conserved with no water
+    # created or destroyed (precision-independent — holds in fp32 and fp64).
+    assert jnp.array_equal(out.dq_r_conv_dt, legacy * pe), (
+        "rain fraction != PE * legacy condensate (water not conserved)"
+    )
+    assert jnp.array_equal(out.dq_c_conv_dt, legacy * (1.0 - pe)), (
+        "anvil remainder != (1-PE) * legacy condensate (water not conserved)"
+    )
+
+
+def test_bechtold_rain_split_leaves_heat_and_vapor_byte_identical():
+    """dT_dt and dq_v_dt are BYTE-UNTOUCHED by the split — it only moves
+    already-condensed water between two positive sink species and the latent
+    heat is already booked in dT_dt (energy-neutral).  PE=0 vs PE=0.7, every
+    other field held equal, so the split is the only difference."""
+    out0 = _run_pe(0.0)
+    out7 = _run_pe(0.7)
+    assert jnp.array_equal(out0.dT_dt, out7.dT_dt), "dT_dt moved with the split"
+    assert jnp.array_equal(out0.dq_v_dt, out7.dq_v_dt), "dq_v_dt moved with the split"
+
+
+def test_bechtold_rain_split_off_is_legacy_none():
+    """PE=0 (legacy) emits ``dq_r_conv_dt=None`` so downstream consumers that
+    only detrain cloud stay byte-identically unaffected."""
+    assert _run_pe(0.0).dq_r_conv_dt is None
+
+
+def test_bechtold_rain_split_on_partitions_cloud():
+    """PE=0.7: ``dq_r_conv_dt`` is finite and >=0 (a rain SOURCE), and exactly
+    ``(1-PE)`` of the legacy cloud source remains as anvil (bit-exact
+    partition — same op on the same operand as the scheme)."""
+    pe_val = jnp.clip(jnp.asarray(0.7), 0.0, 1.0)
+    legacy = _run_pe(0.0).dq_c_conv_dt
+    out = _run_pe(0.7)
+    assert out.dq_r_conv_dt is not None
+    assert jnp.all(jnp.isfinite(out.dq_r_conv_dt))
+    assert float(jnp.min(out.dq_r_conv_dt)) >= 0.0, "rain source must be >= 0"
+    assert float(jnp.max(out.dq_r_conv_dt)) > 0.0, "fixture must produce rain"
+    assert jnp.array_equal(out.dq_c_conv_dt, legacy * (1.0 - pe_val)), (
+        "anvil remainder != (1-PE) * legacy cloud source"
+    )
+    assert jnp.array_equal(out.dq_r_conv_dt, legacy * pe_val), (
+        "rain fraction != PE * legacy cloud source"
     )

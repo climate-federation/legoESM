@@ -22,6 +22,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
@@ -158,6 +159,27 @@ class TestLatitudeScalingKernel:
         # Gradient wrt latitude finite even at the equator (|f| floor).
         assert bool(jnp.all(jnp.isfinite(jax.grad(loss_lat)(lat))))
 
+    @pytest.mark.parametrize("scale", [1.0, 1.0 - 1e-9, 1.0 + 1e-9])
+    def test_grad_finite_at_N_equals_f_boundary(self, scale):
+        # codex batch2 (MED-2 test gap): differentiate exactly AT (and just
+        # around) the acosh domain edge N == |f| — the argument x = N/|f| = 1
+        # where the raw acosh slope is INFINITE; ``_safe_acosh`` clamps the
+        # argument to ``1 + eps`` so the reverse-mode gradient must be finite.
+        cfg = self.CFG
+        lat = jnp.array([45.0])
+        f_45 = 2.0 * constants.Omega * float(jnp.sin(jnp.deg2rad(45.0)))
+        N2_edge = jnp.full((1, 3), (f_45 ** 2) * scale)
+
+        def loss(N2):
+            return jnp.sum(latitude_background_diffusivity(lat, N2, cfg))
+
+        g = jax.grad(loss)(N2_edge)
+        assert bool(jnp.all(jnp.isfinite(g)))
+        # The value itself stays bounded at the edge too.
+        K = latitude_background_diffusivity(lat, N2_edge, cfg)
+        assert bool(jnp.all(K >= cfg.K_bg_eq - 1e-15))
+        assert bool(jnp.all(K <= cfg.K_bg_pole + 1e-15))
+
 
 # ---------------------------------------------------------------------------
 # Wiring into compute_vertical_K_profiles (implicit path)
@@ -227,6 +249,83 @@ class TestConstantSchemeWiring:
         # A_v = K_v * (A_v_cfg / K_v_cfg) -> constant Prandtl ratio everywhere.
         assert jnp.allclose(A / K, 1e-3 / 1e-4)
 
+    def test_production_floors_suppressed_end_to_end_range(self, grid_z_state):
+        # codex batch2 MED-2 "Final production K range" DEFECT: the PRODUCTION
+        # caller (ocean_model_latlon_cgrid.py) passes the model-level fallback
+        # floors K_v_background = LatLonCGridOceanConfig.K_v (1e-4) and
+        # A_v_background = .A_v (1e-3).  Before the fix they were ADDED on top
+        # of the Gregg field -> final K in [1.1e-4, 2e-4].  lat_dependent=True
+        # must SUPPRESS them (REPLACE semantics): the end-to-end K stays
+        # EXACTLY within [K_bg_eq, K_bg_pole] = [1e-5, 1e-4], and A within the
+        # Prandtl-scaled [1e-4, 1e-3].
+        grid, z, state = grid_z_state
+        cfg = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="constant",
+                constant=ConstantVerticalMixingConfig(
+                    A_v=1e-3, K_v=1e-4, lat_dependent=True,
+                    K_bg_eq=1e-5, K_bg_pole=1e-4),
+            ),
+            **_base())
+        K, A = compute_vertical_K_profiles(
+            state, z, None, cfg,
+            A_v_background=1e-3, K_v_background=1e-4,   # production defaults
+            lat_deg=jnp.degrees(grid.lat))
+        # K: exact dtype-cast bounds (the kernel clamps K itself in-dtype; see
+        # test_lat_dependent_true_varies_with_latitude for the dtype note).
+        assert bool(jnp.all(K >= jnp.asarray(1e-5, K.dtype)))
+        assert bool(jnp.all(K <= jnp.asarray(1e-4, K.dtype)))
+        # A carries ONE extra rounding (A = K * Prandtl, Prandtl = A_v/K_v
+        # computed in K's dtype), so bound it with a 1e-5 relative slack —
+        # still ~4 orders of magnitude tighter than the 1.1e-4/2e-4
+        # double-added-floor defect this test pins.
+        assert bool(jnp.all(A >= jnp.asarray(1e-4 * (1.0 - 1e-5), A.dtype)))
+        assert bool(jnp.all(A <= jnp.asarray(1e-3 * (1.0 + 1e-5), A.dtype)))
+
+    def test_prandtl_ratio_immune_to_mismatched_fallbacks(self, grid_z_state):
+        # codex batch2 MED-2 "A_v Prandtl scaling" DEFECT end-to-end: caller
+        # fallbacks with ratio A_bg/K_bg = 2 (!= configured Prandtl 10) used
+        # to contaminate A/K = (A_bg + 10*K_lat)/(K_bg + K_lat).  The
+        # production defaults share ratio 10, which MASKED the bug — hence the
+        # deliberately mismatched pair here.  With the floors suppressed the
+        # configured ratio holds EXACTLY everywhere.
+        grid, z, state = grid_z_state
+        cfg = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="constant",
+                constant=ConstantVerticalMixingConfig(
+                    A_v=1e-3, K_v=1e-4, lat_dependent=True,
+                    K_bg_eq=1e-5, K_bg_pole=1e-4),
+            ),
+            **_base())
+        K, A = compute_vertical_K_profiles(
+            state, z, None, cfg,
+            A_v_background=2e-4, K_v_background=1e-4,   # ratio 2 != 10
+            lat_deg=jnp.degrees(grid.lat))
+        assert jnp.allclose(A / K, 1e-3 / 1e-4)
+
+    def test_lat_dependent_false_keeps_additive_floors(self, grid_z_state):
+        # Legacy guard: with the flag OFF the caller floors remain ADDITIVE on
+        # top of the constant scheme (pre-feature behaviour) — the suppression
+        # gate must fire ONLY for lat_dependent=True.
+        grid, z, state = grid_z_state
+        cfg = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="constant",
+                constant=ConstantVerticalMixingConfig(
+                    A_v=3e-3, K_v=7e-4, lat_dependent=False),
+            ),
+            **_base())
+        K, A = compute_vertical_K_profiles(
+            state, z, None, cfg,
+            A_v_background=1e-3, K_v_background=1e-4,
+            lat_deg=jnp.degrees(grid.lat))
+        # Same-op-order expected values (full(bg) + full(cfg)) in K's dtype.
+        assert bool(jnp.all(
+            K == jnp.asarray(1e-4, K.dtype) + jnp.asarray(7e-4, K.dtype)))
+        assert bool(jnp.all(
+            A == jnp.asarray(1e-3, A.dtype) + jnp.asarray(3e-3, A.dtype)))
+
     def test_lat_dependent_true_requires_lat_deg(self, grid_z_state):
         _, z, state = grid_z_state
         cfg = OceanPhysicsConfig(
@@ -237,6 +336,117 @@ class TestConstantSchemeWiring:
             **_base())
         with pytest.raises(ValueError, match="lat_deg"):
             compute_vertical_K_profiles(state, z, None, cfg, lat_deg=None)
+
+
+class TestFullModelRouting:
+    """END-TO-END through ``LatLonCGridOceanModel.step`` (codex batch2 r2
+    BLOCKER): the lat-dependent background must actually be reachable in a
+    real implicit model step.
+
+    Pre-fix failure modes pinned here:
+      * the implicit physics composition built the explicit constant vmix fn,
+        whose ``constant_vertical_mixing`` raises unconditionally on
+        ``lat_dependent=True`` -> every production step crashed;
+      * with another scheme surfacing K/A on the tendencies (enhanced-
+        diffusion convection), the dynamics fast path added the model floors
+        and DROPPED the Gregg field entirely.
+    """
+
+    @staticmethod
+    def _build(lat_dependent, *, K0=5e-4, Pr=10.0, convection=False,
+               K_v_floor=1e-4, A_v_floor=1e-3, n_lev=6):
+        import numpy as np
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        from legoesm.ocean.physics.convection.config import (
+            EnhancedDiffusionConfig,
+        )
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+
+        grid = create_latlon_grid(n_lat=12, n_lon=16)
+        z = create_ocean_z_star(n_levels=n_lev, H_max=400.0)
+        state = rest_state_latlon_cgrid_ocean(
+            grid, z, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+            H_max=400.0)
+        # Deterministic small T noise so diffusion has structure to act on.
+        rng = np.random.RandomState(0)
+        T = np.asarray(state.T.data).copy()
+        T += rng.normal(0, 0.05, T.shape).astype(T.dtype)
+        state = state._replace(T=state.T.replace(data=jnp.asarray(T)))
+
+        if lat_dependent:
+            # Degenerate band K_bg_eq == K_bg_pole == K0: the Gregg field is
+            # EXACTLY the constant K0 (clip to [K0, K0]), so a legacy
+            # constant-K0 reference model must reproduce the same step.
+            const = ConstantVerticalMixingConfig(
+                A_v=K0 * Pr, K_v=K0, lat_dependent=True,
+                K_bg_eq=K0, K_bg_pole=K0)
+        else:
+            const = ConstantVerticalMixingConfig(A_v=K0 * Pr, K_v=K0)
+        physics = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="constant", constant=const),
+            convection=OceanConvectionConfig(
+                scheme="enhanced_diffusion" if convection else "none",
+                enhanced_diffusion=EnhancedDiffusionConfig(
+                    K_conv=1.0, K_bg=1e-5, smooth_transition=False),
+            ),
+            lateral_mixing=type(OceanPhysicsConfig().lateral_mixing)(
+                scheme="none"),
+            surface_forcing=type(OceanPhysicsConfig().surface_forcing)(
+                scheme="none"),
+            shortwave_penetration=None,
+        )
+        cfg = LatLonCGridOceanConfig.from_flat(
+            A_h=0.0, B_h=0.0, K_h=0.0, K_bih=0.0,
+            bottom_drag_r=0.0, hyperdiff_coeff=0.0,
+            A_v=A_v_floor, K_v=K_v_floor,
+            n_barotropic_substeps=5,
+            physics=physics,
+            implicit_vertical_mixing=True,
+            barotropic_solver="explicit_substep",
+        )
+        return LatLonCGridOceanModel(grid, z, cfg), state
+
+    def test_step_completes_and_composition_defers_K(self):
+        # Pre-fix: the FIRST model step raised ValueError from
+        # constant_vertical_mixing ("only honoured on the IMPLICIT path")
+        # even though implicit_vertical_mixing=True — the feature was
+        # unreachable end-to-end.  The composition strip must (a) let the
+        # step run and (b) surface NO K/A on the tendencies (K comes from
+        # the compute_vertical_K_profiles fallback instead).
+        model, state = self._build(lat_dependent=True,
+                                   K_v_floor=1e-4, A_v_floor=1e-3)
+        tend = model._physics_fn(state, model.grid, model.z_coord, None)
+        assert tend.K_v is None and tend.A_v is None   # deferred to fallback
+        out = model.step(state, 600.0)
+        assert bool(jnp.all(jnp.isfinite(out.T.data)))
+
+    def test_step_matches_legacy_reference_despite_surfaced_convection_K(self):
+        # The fast-path hazard: enhanced-diffusion convection SURFACES K/A on
+        # the tendencies, which pre-fix routed the implicit solve onto the
+        # fast path — adding the model floors (K_v_floor=1e-4) and dropping
+        # the Gregg background (K0=5e-4) entirely.  With the degenerate band
+        # (K_bg_eq == K_bg_pole == K0) the lat-dependent model must reproduce
+        # a legacy constant-K0 reference (identical total K = K0 + K_conv;
+        # the reference gets zero floors so nothing is double-added there).
+        dt = 1800.0
+        model_lat, state = self._build(lat_dependent=True, convection=True,
+                                       K_v_floor=1e-4, A_v_floor=1e-3)
+        model_ref, _ = self._build(lat_dependent=False, convection=True,
+                                   K_v_floor=0.0, A_v_floor=0.0)
+        out_lat = model_lat.step(state, dt)
+        out_ref = model_ref.step(state, dt)
+        T_lat = jnp.asarray(out_lat.T.data)
+        T_ref = jnp.asarray(out_ref.T.data)
+        assert bool(jnp.all(jnp.isfinite(T_lat)))
+        # Identical mixing totals -> the states agree to rounding.  A fast-
+        # path regression (floor added / Gregg dropped: ΔK ~ 4e-4 m²/s on a
+        # ~0.045 K/m thermocline) shifts T by O(1e-4..1e-3) K in one step —
+        # orders of magnitude above this tolerance.
+        assert bool(jnp.allclose(T_lat, T_ref, rtol=0.0, atol=5e-6)), (
+            f"max |dT| = {float(jnp.max(jnp.abs(T_lat - T_ref)))}")
 
 
 class TestExplicitPathFailsLoud:

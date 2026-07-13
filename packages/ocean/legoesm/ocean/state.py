@@ -980,7 +980,7 @@ class LateralViscosityConfig(NamedTuple):
                                     # viscosity A_smag = (C·dx)²·|D| via the
                                     # energy-stable stress-tensor operator.
                                     # MOM6 OM4 uses 0.15. Additive with A_h.
-    smag_cfl_safety: float = 0.0   # When > 0, cap the Laplacian-Smagorinsky
+    smag_cfl_safety: float = 0.125  # When > 0, cap the Laplacian-Smagorinsky
                                     # coefficient at the per-cell tuned ceiling
                                     # ``smag_cfl_safety * area * cos^2(lat) / dt``
                                     # (see laplacian_smag_cfl_cap; the larger

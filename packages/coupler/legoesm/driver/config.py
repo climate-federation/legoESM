@@ -199,6 +199,16 @@ class DycoreConfig(NamedTuple):
     # face-scatter until the reductions are allreduce-aware).  Appended last to
     # preserve positional ABI.
     moisture_flux_form: bool = False
+    # #930: vertical biharmonic (∂⁴/∂σ⁴) hyperdiffusion coefficient [1/s] for T
+    # on the MPAS hydrostatic dycore — scale-selective damping of the grid-scale
+    # 2Δσ vertical checkerboard that the adiabatic κ·T·ω/p term amplifies (no
+    # other vertical operator in that dycore opposes it) until it rides the
+    # silent T_min=50 K floor (#871/#912/#915).  del4 damps 2Δσ ~47× faster
+    # than an 8Δσ resolved wave, so resolved vertical structure is ~untouched;
+    # explicit-stable to huge dt (16·ν·dt≪1).  Only wired to the MPAS PE dycore
+    # (``component_factory``).  Set 0.0 to reproduce the pre-#930 dycore exactly.
+    # Appended last to preserve positional ABI.
+    mpas_nu_vert4_T: float = 2.0e-6
 
 
 class EvaluationConfig(NamedTuple):
@@ -450,13 +460,17 @@ class ExperimentConfig(NamedTuple):
     # morrison microphysics.  Physics-fidelity correction (no tunable knob).
     subgrid_autoconversion: bool = False
 
-    # Tiedtke convective precipitation efficiency [0,1] (Tiedtke 1989 in-
-    # updraft precipitation).  >0 diverts that fraction of convective
-    # condensate to rain (sediments via microphysics, invisible to radiation)
-    # instead of detraining it all as suspended cloud.  0 = off (legacy).
-    # Observed deep-convective CPE ~0.5-0.9.  Tiedtke-only (guarded in
-    # _resolve_convection).
-    convective_precip_efficiency: float = 0.0
+    # Convective in-updraft precipitation efficiency [0,1] (Tiedtke 1989 in-
+    # updraft precipitation).  A value >0 diverts that fraction of the
+    # convective condensate to rain (sediments via microphysics, invisible to
+    # radiation) instead of detraining it all as suspended cloud.  Observed
+    # deep-convective CPE ~0.5-0.9.  Supported by Tiedtke and Bechtold (threaded
+    # in _resolve_convection).  SENTINEL: ``None`` (default) = use each scheme's
+    # OWN default (Tiedtke 0.0 = legacy no-split; Bechtold 0.7 = ON, the #929
+    # anvil-drain fix); an EXPLICIT value overrides it (0.0 forces the legacy
+    # detrain-all path, dq_r None).  ``None`` distinguishes "unset" from an
+    # explicit 0.0 so Bechtold's ON-by-default is not silently disabled.
+    convective_precip_efficiency: float | None = None
 
     # Tiedtke plume buoyancy-death memory: when True the entraining plume,
     # once it exhausts its cumulative buoyancy budget, stays dead instead of
@@ -809,11 +823,6 @@ class ExperimentConfig(NamedTuple):
     bechtold_m_b_max: float = 0.02
     bechtold_cmt_c_u: float = 0.7
     bechtold_cmt_c_d: float = 0.7
-    # In-updraft rain split (BechtoldConfig.precip_efficiency; default matches
-    # the scheme's 0.7).  0.0 reproduces the legacy detrain-all behaviour —
-    # the #929 polar-night A/B's unstable mode; exposed for the isolation legs
-    # and for reproducing pre-split runs.
-    bechtold_precip_efficiency: float = 0.7
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -1047,11 +1056,6 @@ class ExperimentConfig(NamedTuple):
         if self.bechtold_cmt_c_d < 0:
             errors.append(
                 f"bechtold_cmt_c_d must be >= 0, got {self.bechtold_cmt_c_d}"
-            )
-        if not (0.0 <= self.bechtold_precip_efficiency <= 1.0):
-            errors.append(
-                f"bechtold_precip_efficiency must be in [0, 1], got "
-                f"{self.bechtold_precip_efficiency}"
             )
         if self.physics_parameterization not in ("none", "ml"):
             errors.append(
@@ -1688,8 +1692,6 @@ class ExperimentConfig(NamedTuple):
             bechtold_m_b_max=getattr(amip_cfg, 'bechtold_m_b_max', 0.02),
             bechtold_cmt_c_u=getattr(amip_cfg, 'bechtold_cmt_c_u', 0.7),
             bechtold_cmt_c_d=getattr(amip_cfg, 'bechtold_cmt_c_d', 0.7),
-            bechtold_precip_efficiency=getattr(
-                amip_cfg, 'bechtold_precip_efficiency', 0.7),
             sigma_b=amip_cfg.sigma_b,
             k_BL_max_per_day=amip_cfg.k_BL_max_per_day,
             k_free_per_day=amip_cfg.k_free_per_day,

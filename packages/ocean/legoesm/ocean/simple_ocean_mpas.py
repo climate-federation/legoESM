@@ -12,6 +12,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.ocean.eos import slab_freeze_point_K
 from legoesm.ocean.mpas_config import MPASSimpleOceanConfig
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
@@ -114,12 +115,18 @@ def _slab_step(state, forcing, config, dt):
     dT_dt = (sw_net + lw_net - shflx - lhflx + config.Q_flux) / C_mix
     T_trial = T_sfc + dt * dT_dt
 
-    # Freezing clamp.  The heat the clamp removes to keep SST at T_freeze is
-    # the latent heat of fusion handed to ice formation — diagnose it as
-    # Q_freeze on the new state instead of letting the clamp silently
+    # Freezing clamp.  The heat the clamp removes to keep SST at the freezing
+    # point is the latent heat of fusion handed to ice formation — diagnose it
+    # as Q_freeze on the new state instead of letting the clamp silently
     # destroy energy (mirrors simple_ocean._slab_step; coupler audit F6).
-    T_new = jnp.maximum(T_trial, config.T_freeze)
-    Q_freeze = C_mix * jnp.maximum(config.T_freeze - T_trial, 0.0) / dt
+    # Freeze point: shared single owner ``eos.slab_freeze_point_K``
+    # ("constant" default returns config.T_freeze byte-identical; a liquidus
+    # scheme is evaluated at constants.S_ocean_ref — no prognostic S).  Used
+    # for BOTH the clamp and Q_freeze so the energy booked matches the floor
+    # actually applied.  MED-1 follow-up.
+    T_freeze_eff = slab_freeze_point_K(config.T_freeze, config.freezing.scheme)
+    T_new = jnp.maximum(T_trial, T_freeze_eff)
+    Q_freeze = C_mix * jnp.maximum(T_freeze_eff - T_trial, 0.0) / dt
 
     new_state = MPASSlabOceanState(
         T_sfc=state.T_sfc.replace(data=T_new),
@@ -166,9 +173,11 @@ def _two_layer_step(state, forcing, config, dt):
     T_sfc_trial = T_sfc + dt * dT_sfc_dt
 
     # Freezing clamp on the surface layer — diagnose Q_freeze (see
-    # _slab_step + simple_ocean._two_layer_step; coupler audit F6).
-    T_sfc_new = jnp.maximum(T_sfc_trial, config.T_freeze)
-    Q_freeze = C_mix * jnp.maximum(config.T_freeze - T_sfc_trial, 0.0) / dt
+    # _slab_step + simple_ocean._two_layer_step; coupler audit F6).  Shared
+    # owner eos.slab_freeze_point_K for BOTH the clamp and Q_freeze.
+    T_freeze_eff = slab_freeze_point_K(config.T_freeze, config.freezing.scheme)
+    T_sfc_new = jnp.maximum(T_sfc_trial, T_freeze_eff)
+    Q_freeze = C_mix * jnp.maximum(T_freeze_eff - T_sfc_trial, 0.0) / dt
 
     # Deep layer
     dT_deep_dt = mix_flux / config.h_deep

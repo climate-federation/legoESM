@@ -210,13 +210,63 @@ def gm_resolution_function(
       inf`` so ``f_res -> 0`` (GM off; the resolved eddies do the transport).
 
     ``f_res`` is bounded in ``(0, 1]`` for any finite ``L_d >= 0``, ``dx > 0``,
-    ``gamma > 0``; the denominator ``gamma*Delta`` is floored at ``EPS`` so a
-    degenerate zero-area (land) cell gives ``f_res -> 0`` rather than a NaN.
-    Smooth and differentiable in ``L_d`` and ``dx``.
+    ``gamma > 0`` — EXACTLY, in floating point.  The denominator
+    ``gamma*Delta`` is floored at ``EPS`` so a degenerate zero-area (land)
+    cell gives ``f_res -> 0+`` rather than a NaN, and the formula is
+    evaluated in the overflow-free form ``s = denom/hypot(denom, L_d)``,
+    ``f_res = s*s`` — mathematically identical to ``1/(1+ratio**2)`` but
+    with no intermediate ``ratio**2`` that can overflow (the naive form
+    returned exactly ``0.0`` for ``ratio > sqrt(float_max)``, and its VJP
+    hit ``0*inf = NaN`` once ``ratio`` itself overflowed; codex MED-3 r2).
+    ``s*s`` can still UNDERFLOW to ``0.0`` for astronomically large ratios,
+    so the result is clamped from below at the dtype's smallest positive
+    normal (``finfo.tiny``): the codomain is exactly ``[tiny, 1] ⊂ (0, 1]``
+    for every finite input.
+
+    Differentiability (codex MED-3 r2): smooth in ``L_d`` away from the
+    clamp; PIECEWISE-smooth in ``dx`` and ``gamma`` — the ``EPS`` floor and
+    the tiny-clamp are hard kinks at ``gamma*dx == EPS`` and ``f_res == tiny``
+    (measure-zero thresholds; the same clip/floor convention as the DM95
+    slope bounds and the Treguier ``clip``/``min`` chain).  Gradients are
+    FINITE for every finite input — including ``dx = 0``, ``L_d`` up to
+    ``float_max``, and at every kink (``hypot`` has bounded partials away
+    from the origin, and ``denom >= EPS`` keeps it off the origin) — but not
+    continuous across the thresholds.  NOT globally C^1; do not claim so.
     """
     denom = jnp.maximum(gamma * dx, EPS)
-    ratio = L_d / denom
-    return 1.0 / (1.0 + ratio * ratio)
+    # Overflow-free evaluation of 1/(1 + (L_d/denom)^2); see docstring.
+    s = denom / jnp.hypot(denom, L_d)
+    f_res = jnp.asarray(s * s)
+    # Exact float lower bound (see docstring): s*s can underflow to 0.0;
+    # clamp at the dtype's smallest positive normal so the codomain is
+    # exactly [tiny, 1] ⊂ (0, 1] for every finite input.
+    return jnp.maximum(f_res, jnp.finfo(f_res.dtype).tiny)
+
+
+def gm_resolution_factor(
+    f_coriolis: jnp.ndarray,
+    dx: jnp.ndarray,
+    gamma: float,
+    c_bcl_ms: float,
+) -> jnp.ndarray:
+    """The Hallberg (2013) resolution factor ``f_res`` field itself.
+
+    ``f_res = gm_resolution_function(L_d, dx, gamma)`` with the fixed-``c``
+    deformation radius ``L_d = c_bcl_ms / max(|f|, _RESFN_F_FLOOR_S)`` — the
+    SINGLE definition shared by :func:`gm_resolution_scaled_kappa` (the
+    kappa_GM taper applied inside the GM/Redi tracer tendencies) and the
+    lat-lon model step's EKE-budget coupling (which must scale the GM-derived
+    eddy-energy production by the SAME factor the tracer flux sees; codex
+    MED-3 r2 closure-consistency fix).  Never re-derive this composition.
+
+    Piecewise-smooth in ``f_coriolis``: the equatorial floor
+    ``max(|f|, _RESFN_F_FLOOR_S)`` has kinks at ``|f| = _RESFN_F_FLOOR_S``
+    (the ``|f|=0`` kink of ``abs`` sits inside the floored region and is
+    flattened away); gradients are finite everywhere.
+    """
+    f_abs = jnp.maximum(jnp.abs(f_coriolis), _RESFN_F_FLOOR_S)
+    L_d = c_bcl_ms / f_abs
+    return gm_resolution_function(L_d, dx, gamma)
 
 
 def gm_resolution_scaled_kappa(
@@ -252,14 +302,24 @@ def gm_resolution_scaled_kappa(
     (level) axis (the 3-D prognostic-EKE skew coefficient); ``f_res`` is
     broadcast over that trailing axis.  Returns the same kind (scalar in ->
     field out, since ``f_res`` is a field).
+
+    Differentiability: piecewise-smooth (kinks at the ``|f|`` floor, the
+    ``EPS`` denominator floor and the tiny-clamp — see
+    :func:`gm_resolution_factor` / :func:`gm_resolution_function`); gradients
+    are finite everywhere.
     """
-    f_abs = jnp.maximum(jnp.abs(f_coriolis), _RESFN_F_FLOOR_S)
-    L_d = c_bcl_ms / f_abs
-    f_res = gm_resolution_function(L_d, dx, gamma)
-    if isinstance(kappa_GM, jnp.ndarray) and kappa_GM.ndim > f_res.ndim:
+    f_res = gm_resolution_factor(f_coriolis, dx, gamma, c_bcl_ms)
+    # Rank check via jnp.ndim, NOT ``isinstance(kappa_GM, jnp.ndarray)``:
+    # the isinstance test silently SKIPPED this reshape for NumPy arrays and
+    # for tracer types that don't register as jnp.ndarray, so a 3-D kappa
+    # under jit/grad (or from host code) hit ``(lat,lon,lev) * (lat,lon)``
+    # and failed to broadcast (codex MED-3 r2).  jnp.ndim is rank-static and
+    # works for Python scalars (0), NumPy arrays, JAX arrays and tracers.
+    extra_axes = jnp.ndim(kappa_GM) - jnp.ndim(f_res)
+    if extra_axes > 0:
         # Depth-resolved kappa (..., nlev-1): broadcast f_res over the trailing
-        # (level) axis it lacks.
-        f_res = f_res.reshape(f_res.shape + (1,) * (kappa_GM.ndim - f_res.ndim))
+        # (level) axes it lacks.
+        f_res = f_res.reshape(f_res.shape + (1,) * extra_axes)
     return kappa_GM * f_res
 
 

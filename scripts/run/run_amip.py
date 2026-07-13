@@ -278,6 +278,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hyperdiff-scale", type=float,
                         default=_DYCORE_DEFAULTS.hyperdiff_scale,
                         help="Dycore hyperdiffusion multiplier")
+    parser.add_argument("--mpas-nu-vert4-t", type=float,
+                        default=_DYCORE_DEFAULTS.mpas_nu_vert4_T,
+                        help="MPAS vertical biharmonic hyperdiffusion of T "
+                             "[1/s] — #930 2Δσ vertical-checkerboard cure "
+                             "(0 disables)")
     parser.add_argument("--div-damp-scale", type=float,
                         default=_DYCORE_DEFAULTS.div_damp_scale,
                         help="Dycore divergence-damping multiplier")
@@ -596,16 +601,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[J/kg]; lower it to trigger convection more readily "
                              "at coarse resolution (the AMIP precip-deficit lever). "
                              f"Default {_EXPERIMENT_DEFAULTS.bechtold_cape_threshold}.")
-    parser.add_argument("--bechtold-precip-efficiency", type=float,
-                        default=_EXPERIMENT_DEFAULTS.bechtold_precip_efficiency,
-                        dest="bechtold_precip_efficiency",
-                        help="Bechtold in-updraft rain split "
-                             "(BechtoldConfig.precip_efficiency): fraction of "
-                             "detrained condensate diverted to convective rain. "
-                             "0.0 reproduces the legacy detrain-all mode — the "
-                             "#929 polar-night-unstable behaviour. Distinct from "
-                             "--convective-precip-efficiency (Tiedtke-only). "
-                             f"Default {_EXPERIMENT_DEFAULTS.bechtold_precip_efficiency}.")
 
     # Joint ML physics parameterization
     parser.add_argument("--physics-parameterization", type=str, default="none",
@@ -663,14 +658,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "the non-linear KK2000 rate is not under-fed by "
                              "the grid-mean.  Requires --microphysics morrison.")
     parser.add_argument("--convective-precip-efficiency", type=float,
-                        default=0.0,
-                        help="Tiedtke convective precipitation efficiency "
-                             "[0,1] (1989 in-updraft precipitation). >0 "
+                        default=None,
+                        help="Convective in-updraft precipitation efficiency "
+                             "[0,1] (Tiedtke 1989 in-updraft precipitation). >0 "
                              "diverts that fraction of convective condensate "
                              "to rain (sediments via microphysics, invisible "
                              "to radiation) instead of detraining it all as "
                              "suspended cloud. Observed CPE ~0.5-0.9. Requires "
-                             "--convection tiedtke.")
+                             "--convection tiedtke or bechtold. Unset (default) "
+                             "uses each scheme's own default (Tiedtke 0.0=off, "
+                             "Bechtold 0.7=on, the #929 fix); pass 0.0 to force "
+                             "the legacy no-split path.")
     parser.add_argument("--convective-buoyancy-death-memory",
                         action="store_true",
                         help="Tiedtke plume buoyancy-death memory: once a "
@@ -1138,6 +1136,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         hyperdiff_scale=args.hyperdiff_scale,
         div_damp_scale=args.div_damp_scale,
         moisture_flux_form=args.moisture_flux_form,
+        mpas_nu_vert4_T=args.mpas_nu_vert4_t,
         conservation_fixer=args.conservation_fixer,
         fix_mass=args.fix_mass,
         implicit_grav_wave_use_pcg=args.implicit_grav_wave_use_pcg,
@@ -1179,6 +1178,18 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         ),
     )
 
+    # Preset datasets carry their own SST/SIC unit conversions (cobe SIC is
+    # percent -> sic_scale=0.01; hadisst SST is Celsius -> sst_offset=T_freeze).
+    # Fall back to those when the user did not pass --sst-offset/--sic-scale, so a
+    # bare ``--dataset cobe`` keeps correct units; an explicit flag still wins
+    # (model_driver forwards cfg.sst_offset/sic_scale into the preset config).
+    try:
+        from legoesm.forcing.amip import get_amip_preset
+        _preset = get_amip_preset(args.dataset)
+        _sst_default, _sic_default = _preset.sst_offset, _preset.sic_scale
+    except ValueError:
+        _sst_default, _sic_default = 0.0, 1.0
+
     return ExperimentConfig(
         grid=grid_config,
         dycore=dycore_config,
@@ -1193,8 +1204,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         time_var=args.time_var or "",
         lat_var=args.lat_var or "",
         lon_var=args.lon_var or "",
-        sst_offset=args.sst_offset or 0.0,
-        sic_scale=args.sic_scale or 1.0,
+        sst_offset=args.sst_offset if args.sst_offset is not None else _sst_default,
+        # ``is not None`` (not ``or``) so an explicit 0.0 offset / 0.0 scale — a
+        # legitimate no-op-conversion or no-sea-ice sensitivity run — is not
+        # silently replaced by the preset/default fallback.
+        sic_scale=args.sic_scale if args.sic_scale is not None else _sic_default,
         radiation=args.radiation,
         rad_update_steps=args.rad_update_steps,
         unfused_radiation=args.unfused_radiation,
@@ -1305,7 +1319,6 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sbm_RH_ref=args.sbm_rh_ref,
         sbm_cape_threshold=args.sbm_cape_threshold,
         bechtold_cape_threshold=args.bechtold_cape_threshold,
-        bechtold_precip_efficiency=args.bechtold_precip_efficiency,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
         physics_parameterization=args.physics_parameterization,
@@ -1367,6 +1380,13 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
         parser.error("--ic-path required when --ic era5")
     if args.ghg_forcing == "external" and not args.ghg_file:
         parser.error("--ghg-file required when --ghg-forcing is external")
+    # Ozone/aerosol "external" with an empty path silently substitutes the
+    # built-in reference climatology (use_reference_if_missing) while the run log
+    # still prints the channel as ACTIVE — require the file, as solar/ghg do.
+    if args.ozone_forcing == "external" and not args.ozone_file:
+        parser.error("--ozone-file required when --ozone-forcing is external")
+    if args.aerosol_forcing == "external" and not args.aerosol_file:
+        parser.error("--aerosol-file required when --aerosol-forcing is external")
     if args.aerosol_ccn:
         if args.aerosol_forcing != "external":
             parser.error("--aerosol-ccn requires --aerosol-forcing external "
@@ -1389,10 +1409,13 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
         parser.error("--subgrid-autoconversion requires --microphysics "
                      "morrison (the in-cloud closure lives in the Morrison "
                      "warm-rain path)")
-    if args.convective_precip_efficiency > 0.0 and args.convection != "tiedtke":
+    if (args.convective_precip_efficiency is not None
+            and args.convective_precip_efficiency > 0.0
+            and args.convection not in ("tiedtke", "bechtold")):
         parser.error("--convective-precip-efficiency requires --convection "
-                     "tiedtke (only Tiedtke implements in-updraft "
-                     "precipitation)")
+                     "tiedtke or bechtold (only the mass-flux schemes "
+                     "implement the in-updraft precipitation split; other "
+                     "schemes ignore the knob)")
     if args.convective_buoyancy_death_memory and args.convection != "tiedtke":
         parser.error("--convective-buoyancy-death-memory requires --convection "
                      "tiedtke (plume buoyancy-death memory is a Tiedtke "

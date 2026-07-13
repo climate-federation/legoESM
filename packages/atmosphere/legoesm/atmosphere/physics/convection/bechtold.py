@@ -85,14 +85,20 @@ __physics_contract__ = {
         "cape": "J/kg", "convective_mask": "1 (0-1 convective indicator)",
         "du_dt_conv": "m/s^2 (None unless CMT enabled)",
         "dv_dt_conv": "m/s^2 (None unless CMT enabled)",
+        "dq_r_conv_dt": "kg/kg/s (convective rain source when precip_efficiency>0; else None)",
         "conv_prog_profile_new": "kg/m^2/s (updated mass-flux carry)",
         "conv_stoch_state_new": "1 (updated AR1 noise state)",
     },
     "sign_convention": (
         "Warms and dries the convecting layer via compensating subsidence and "
         "updraft transport (dT_dt, dq_v_dt); the condensed vapor becomes a "
-        "non-negative detrained cloud-water source (dq_c_conv_dt>=0) handed to "
-        "microphysics; the optional downdraft cools and moistens the sub-cloud "
+        "non-negative detrained condensate source split by precip_efficiency "
+        "into anvil cloud-water (dq_c_conv_dt>=0, handed to microphysics — its "
+        "precipitation is DEFERRED to the next step) and in-updraft rain "
+        "(dq_r_conv_dt>=0, None when precip_efficiency=0), a falling species the "
+        "unified pipeline column-integrates into SAME-STEP surface precipitation "
+        "(standalone bridges lacking a precip path route it to the rain tracer or "
+        "fold it back into cloud so no water is lost); the optional downdraft cools and moistens the sub-cloud "
         "layer by rain evaporation; the optional CMT drag opposes the "
         "cloud-relative wind shear; surface at the last vertical index. "
         "Column enthalpy/total-water closure is delegated to the orchestrator "
@@ -627,15 +633,35 @@ def bechtold_convection(
     convective_mask = cape_weight * (deep_weight + shallow_weight + midlevel_weight)
 
     # -- In-updraft precipitation (convective precipitation efficiency) ---
-    # Same gated split as tiedtke.py: without it the plume detrains its FULL
-    # cloud water as suspended grid-scale cloud, which loads the radiation
-    # and which microphysics cannot drain — Bechtold then produces ~zero
-    # convective precip (SCM-RCE a-priori gate: precip 5e-7 mm/day vs 3.2
-    # reference, equilibrium T runs away to 409 K with no precipitating
-    # heat-removal path).  Divert precip_efficiency of the detrained
-    # condensate to RAIN (dq_r_conv_dt — sediments via microphysics,
-    # invisible to radiation), leave (1-PE) as anvil cloud water.
-    # precip_efficiency=0 (default) => no split (legacy, byte-identical).
+    # Mirror tiedtke.py:476-499.  The plume detrains its FULL cloud water as
+    # suspended grid-scale cloud (``dq_c_conv_dt`` — a SOURCE, ``>= 0`` at the
+    # detrainment step above), which loads the RADIATION and which microphysics
+    # cannot drain fast enough (source-buffered).  In the polar-night column
+    # this undrained anvil accumulates and radiatively loads the column ->
+    # runaway (#929).  Divert a fraction ``precip_efficiency`` of that
+    # already-condensed water to RAIN (``dq_r_conv_dt``) — a *precipitating*
+    # species that sediments out via microphysics and is invisible to radiation
+    # (which sees only ``q_c``/``q_i``) — leaving ``(1 - PE)`` as anvil cloud.
+    #
+    # SIGN + CONSERVATION (convention: convective tendencies are SOURCES into
+    # their species, ``state += dt * tend``):
+    #   * ``dq_c_conv_dt >= 0`` (cloud SOURCE) ⇒ ``dq_c_pos >= 0`` ⇒
+    #     ``dq_r_conv_dt = dq_c_pos * pe >= 0`` — a rain SOURCE (integrated
+    #     positive-down as surface precip by physics_pipeline).
+    #   * pure re-partition of the SAME positive condensate (a multiply, no
+    #     denominator): the two pieces ``dq_r_conv_dt = a*pe`` and the anvil
+    #     remainder ``a*(1-pe)`` (a = jnp.maximum(dq_c_conv_dt, 0.0)) each carry
+    #     an EXACT fraction of ``a``; their sum reconstructs ``a`` to machine
+    #     precision (~1 ULP — the ``a*(1-pe)+a*pe`` form rounds, so not literally
+    #     bit-identical) ⇒ column total water unchanged by the split.
+    #   * ``dT_dt`` and ``dq_v_dt`` are BYTE-UNTOUCHED — the latent heat of the
+    #     condensation that made ``dq_c`` is already booked in ``dT_dt``, so the
+    #     split is energy-neutral; it only moves already-condensed water between
+    #     two positive sink species.
+    # The gate is a Python ``if`` on the STATIC config float (feature-gate
+    # exception — NOT ``jnp.where``, does not trace both branches).  ``PE == 0``
+    # ⇒ ``dq_r_conv_dt is None`` and ``dq_c_pos`` is byte-identical to the
+    # legacy ``jnp.maximum(dq_c_conv_dt, 0.0)`` (other consumers unaffected).
     dq_c_pos = jnp.maximum(dq_c_conv_dt, 0.0)
     if config.precip_efficiency > 0.0:
         pe = jnp.clip(config.precip_efficiency, 0.0, 1.0)

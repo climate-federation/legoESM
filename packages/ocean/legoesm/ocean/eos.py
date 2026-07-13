@@ -2050,9 +2050,16 @@ def nemo_eos_fzp(S_psu, depth_m=None):
 #     temperature DIFFERENCE, so its numeric value is the same in K); it is ADDED
 #     to the pure-water freezing point ``T0 = constants.T_freeze`` to return an
 #     ABSOLUTE freezing temperature in KELVIN.  Pure water (S=0, p=0) -> T0 (0 C).
-#   * SIGN: every S- and p-term is NEGATIVE, so T_f DECREASES with both salinity
-#     and depth (more saline / deeper water freezes colder).  Enforced by
-#     tests/ocean/unit/test_freezing_point.py (monotone-in-S + pressure-lowers).
+#   * SIGN: the p-term is negative; the S-terms are MIXED-sign (the S^{3/2}
+#     coefficient +1.710523e-3 is POSITIVE), but the NET slope
+#         dT_f/dS = -0.0575 + 1.5*1.710523e-3*sqrt(S) - 2*2.154996e-4*S
+#     is strictly negative for ALL S >= 0: the two curvature terms together
+#     peak at +3.82e-3 degC/PSU (at S ~ 8.9 PSU), so
+#     dT_f/dS <= -0.0575 + 0.0038 = -0.0537 degC/PSU everywhere (at S=35:
+#     -0.0575 + 0.01518 - 0.01508 = -0.0574).  T_f therefore DECREASES with
+#     both salinity and depth (more saline / deeper water freezes colder).
+#     Enforced by tests/ocean/unit/test_freezing_point.py (monotone-in-S +
+#     pressure-lowers).
 #
 # Distinct from ``nemo_eos_fzp`` above: that is NEMO's TEOS-10 branch
 # (``ln_teos10=.true.``, a polynomial in sqrt(S/S0), returns degC).  The
@@ -2159,3 +2166,27 @@ def freezing_point(S, p=0.0, *, scheme="constant"):
         + _TFRZ_P_DBAR * p_dbar                 # pressure lowering (<= 0)
     )
     return constants.T_freeze + depression_c
+
+
+def slab_freeze_point_K(T_freeze_const, scheme: str = "constant"):
+    """Effective seawater freezing point [K] for slab-ocean freeze clamps.
+
+    The slab / two-layer mixed-layer oceans (``simple_ocean.py`` on the
+    structured grid, ``simple_ocean_mpas.py`` on the Voronoi mesh) carry no
+    prognostic salinity, so a liquidus scheme is evaluated at the fixed
+    reference ocean salinity ``constants.S_ocean_ref`` (an environmental
+    reference, NOT a tunable).  ``"constant"`` (default) returns the caller's
+    ``T_freeze_const`` unchanged -- byte-identical to the historical clamp.
+    A typo'd scheme can never silently fall back to the constant: anything
+    other than ``"constant"`` is dispatched to :func:`freezing_point`, which
+    raises ``ValueError`` on an unknown scheme.
+
+    SINGLE OWNER (MED-1 follow-up): both slab modules call THIS helper for
+    both the ``jnp.maximum`` clamp and the ``Q_freeze`` diagnostic -- do not
+    re-derive the constant-vs-liquidus branch in a consumer.  ``scheme`` is a
+    static config field in every caller, so the Python ``if`` is
+    feature-gating, not a data-dependent traced select.
+    """
+    if scheme == "constant":
+        return T_freeze_const
+    return freezing_point(constants.S_ocean_ref, 0.0, scheme=scheme)

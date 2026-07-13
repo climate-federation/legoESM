@@ -61,7 +61,7 @@ __param_spec__ = {
             "epsilon_shallow": "entrainment: IFS shallow base rate scaled in-scheme",
             "lcl_membership_sharpness": "numerics: sigmoid sharpness on the below-LCL level membership [1/level index]",
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
-            "precip_efficiency": "bulk in-updraft rain fraction (default 0.7, gated `if > 0.0` in bechtold.py; 0 = legacy detrain-all which is unstable); retune via config, not sigmoid-trained across the off/on discontinuity",
+            "precip_efficiency": "off/on precip-efficiency discontinuity gated by a static Python branch (`if config.precip_efficiency > 0.0` in bechtold.py); not a differentiable trainable leaf (a traced leaf breaks the JIT gate). Retune via config, not sigmoid-trained across the off/on discontinuity.",
             "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
         },
         "params": {
@@ -1379,17 +1379,14 @@ class BechtoldConfig(NamedTuple):
     # [0.5, 1.0] (θ ≥ 0.5 removes the explicit-side amplification).  Unused
     # when subsidence_solve == "advective".
     theta_implicit: float = 1.0
-    # In-updraft precipitation split (same convention as
-    # TiedtkeConfig.precip_efficiency): divert this fraction of the detrained
-    # condensate to RAIN (dq_r_conv_dt, sediments via microphysics, invisible
-    # to radiation), leaving (1-PE) as anvil cloud water.  Observed
-    # deep-convective CPE ~0.5-0.9.  Default 0.7 (mid-range) — UNLIKE
-    # TiedtkeConfig this is ON by default: with PE=0 Bechtold produces ~zero
-    # convective precip and is UNUSABLE, not merely biased (SCM-RCE a-priori
-    # gate: equilibrium ran away to 409 K at precip 5e-7 mm/day — no
-    # precipitating heat-removal path; C24 AMIP blew up day 10-15; the June
-    # albedo-0.57/precip-0.8 suspended-condensate bias is the same defect).
-    # Set 0.0 explicitly to reproduce the legacy detrain-all behaviour.
+    # In-updraft convective precipitation efficiency [dimensionless]: the
+    # fraction of detrained plume condensate diverted to RAIN (dq_r_conv_dt,
+    # sediments via microphysics, radiatively invisible) instead of suspended
+    # anvil cloud (dq_c_conv_dt).  Default 0.7 = ON (unlike Tiedtke's 0.0):
+    # without the split, undrained anvil cloud radiatively loads the
+    # polar-night column and runs the equilibrium away (#929).  0.0 restores
+    # the legacy no-split behaviour (dq_r_conv_dt=None) byte-for-byte.  See
+    # bechtold.py in-updraft precipitation block; mirrors TiedtkeConfig.
     precip_efficiency: float = 0.7
 
 

@@ -82,10 +82,14 @@ def build(case, args, dtype):
     cfg = pip.PseudoIncompressibleConfig(
         nx=nx, ny=ny, nz=nz, Lx=args.Lx, Ly=args.Lx, Lz=c["Lz"],
         theta_ref0=c["theta0"], scheme=getattr(args, "scheme", "weno5"),
+        momentum_scheme=getattr(args, "momentum_scheme", None),
         sgs=args.sgs, c_vreman=0.07, c_s=0.16,
         nu_floor=(args.nu_floor if args.nu_floor is not None else c["nu_floor"]),
         hyperdiff_coeff=getattr(args, "hyperdiff", 0.0),
         shapiro_coeff=getattr(args, "shapiro", 0.0),
+        shapiro_order=getattr(args, "shapiro_order", 1),
+        momentum_shapiro_coeff=getattr(args, "momentum_shapiro", 0.0),
+        momentum_shapiro_order=getattr(args, "momentum_shapiro_order", 1),
         f_cor=c["fcor"], ug=c["Ug"], vg=0.0,
         surface=c["surface"], z0=c["z0"], sfc_theta_flux=c["Q0"],
         poisson_maxiter=args.maxiter)
@@ -215,8 +219,14 @@ def main():
     p.add_argument("--sgs", choices=["none", "smagorinsky", "vreman", "lasd"],
                    default="vreman")
     p.add_argument("--scheme", choices=["weno5", "van_leer", "upwind"],
-                   default="weno5", help="scalar/momentum advection (weno5 needs "
+                   default="weno5", help="SCALAR advection (weno5 needs "
                    "f64 at sharp inversions; van_leer is f32-robust)")
+    p.add_argument("--momentum-scheme",
+                   choices=["weno5", "weno7", "weno9", "van_leer", "upwind", "central"],
+                   default=None, help="MOMENTUM advection (default: follow --scheme); "
+                   "weno7/weno9 are "
+                   "sharper (less upwind diffusion) than weno5 and stay stable; "
+                   "'central' is non-dissipative (sharpest) but needs SGS 2Δ control")
     p.add_argument("--nu-floor", type=float, default=None,
                    help="background eddy-viscosity floor [m2/s] (default: per-case)")
     p.add_argument("--hyperdiff", type=float, default=0.0,
@@ -225,6 +235,16 @@ def main():
     p.add_argument("--shapiro", type=float, default=0.0,
                    help="per-step [1,2,1] low-pass strength s in [0,1] on theta+tracers "
                    "— CFL-unlimited de-noiser; unlocks f32 gabls1 (try 0.05-0.2)")
+    p.add_argument("--shapiro-order", type=int, default=1,
+                   help="Shapiro order for the scalar θ de-noiser (flat passband); "
+                   "8-16 lets a stronger --shapiro suppress fine-res 2Δ θ-noise in f32")
+    p.add_argument("--momentum-shapiro", type=float, default=0.0,
+                   help="per-step Shapiro low-pass strength s in [0,1] on VELOCITY — "
+                   "CFL-unlimited 2Δ de-noiser that makes --momentum-scheme central clean "
+                   "(div-free preserved, no re-projection); try 0.2-0.5 with a high order")
+    p.add_argument("--momentum-shapiro-order", type=int, default=8,
+                   help="Shapiro order for the velocity de-noiser (flat passband); "
+                   "8-16 avoids over-damping the resolved eddies (order 1 = [1,2,1])")
     p.add_argument("--ic-amp", type=float, default=0.1,
                    help="IC perturbation amplitude [m/s and K]")
     p.add_argument("--maxiter", type=int, default=200, help="BiCGSTAB max iters")
@@ -251,8 +271,8 @@ def main():
     # f64 runs them finite + turbulent, matching validate_bl_new_vs_spectral.py.
     if args.f32 and (c["cooling_rate"] > 0 or c["Q0"] != 0.0) and args.shapiro == 0.0:
         print(f"  WARNING: case '{args.case}' has active buoyancy forcing; the "
-              f"pseudo core's buoyant path is f32-fragile (NaN-prone). Use f64 "
-              f"(omit --f32), or add --shapiro 0.1 (CFL-unlimited de-noiser).",
+              f"pseudo core's stable-BL 2Δ θ-mode is f32-fragile (NaN-prone). Add "
+              f"--shapiro 0.2-0.3 (CFL-unlimited θ de-noiser), or use f64 (omit --f32).",
               file=sys.stderr)
 
     print(f"[pseudo-LES] case={args.case} grid={args.nx}x{args.ny}x{args.nz} "

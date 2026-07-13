@@ -37,6 +37,55 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.multilayer_soil_depth == 4.5
 
 
+def test_convective_precip_efficiency_cli_wiring_929():
+    """#929: the shared --convective-precip-efficiency knob reaches the config
+    for BOTH Tiedtke and Bechtold; UNSET is the ``None`` sentinel (each scheme
+    keeps its own default) — never a silent 0.0 that would disable Bechtold's
+    ON-by-default rain split."""
+    parser = build_arg_parser()
+
+    # Unset -> None sentinel (NOT 0.0): Bechtold keeps its own 0.7 default.
+    cfg_unset = build_config_from_args(_postprocess_args(
+        parser.parse_args(
+            ["--dataset", "analytical", "--convection", "bechtold"]),
+        parser))
+    assert cfg_unset.convective_precip_efficiency is None
+
+    # Bechtold + explicit PE now ALLOWED (the guard was Tiedtke-only) and
+    # reaches the config.
+    cfg_bech = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--convective-precip-efficiency", "0.7",
+    ]), parser))
+    assert cfg_bech.convective_precip_efficiency == 0.7
+
+    # Explicit 0.0 for Bechtold (legacy no-split) is accepted and threaded.
+    cfg_bech0 = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--convective-precip-efficiency", "0.0",
+    ]), parser))
+    assert cfg_bech0.convective_precip_efficiency == 0.0
+
+    # Tiedtke still reaches the config.
+    cfg_tied = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "tiedtke",
+        "--convective-precip-efficiency", "0.5",
+    ]), parser))
+    assert cfg_tied.convective_precip_efficiency == 0.5
+
+
+def test_convective_precip_efficiency_rejected_for_non_massflux_929():
+    """#929: --convective-precip-efficiency>0 requires a mass-flux scheme
+    (tiedtke or bechtold); other schemes ignore the knob, so the run-guard
+    rejects it rather than silently no-op.  (0.0 / unset are fine everywhere.)"""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--convection", "sbm",
+            "--convective-precip-efficiency", "0.7",
+        ]), parser)
+
+
 def test_no_use_multilayer_land_overrides_yaml_default():
     """--no-use-multilayer-land flips a set_defaults(True) (i.e. a --config YAML
     that enables the multilayer land) back off — needed to run a production
@@ -548,6 +597,7 @@ _AEROSOL_CCN_BASE = [
     "--dataset", "analytical",
     "--aerosol-ccn",
     "--aerosol-forcing", "external",
+    "--aerosol-file", "/tmp/aer.nc",   # external forcing requires a file
     "--microphysics", "morrison",
 ]
 
@@ -832,6 +882,7 @@ def test_issue484_new_amip_flags_flow_to_config():
         "--k-bl-max-per-day", "1.5",
         "--k-free-per-day", "0.2",
         "--aerosol-forcing", "external",
+        "--aerosol-file", "/dummy/aero.nc",   # external forcing requires a file
         "--microphysics", "morrison",
         "--nc-from-aerosol",
     ])
@@ -1475,17 +1526,12 @@ def test_config_yaml_round_trips_authoritative_values():
     args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
     # grid geometry (resolution/nlev/discretization are CLI dests baked into
     # cfg.grid, so assert them at the args level the YAML controls).  The
-    # production YAML is lat-lon n_lat24/L20 with the hydrostatic latlon-cgrid
-    # dycore + top sponge (Pierre's 2026-07-07 directive: latlon/MPAS low-res,
-    # superseding the earlier C12 cubed-sphere target).
-    assert args.resolution == 24
-    assert args.nlev == 20
-    assert args.discretization == "latlon_cgrid"
-    assert args.grid_type == "latlon"
-    assert args.sponge_enabled is True
-    # polar filter is MANDATORY on coarse lat-lon (#869): the 12-day A/B
-    # convicted its absence as the day-1..10 non-finite-winds blowup
-    assert args.use_polar_filter is True
+    # production YAML is the C48/L40 publication lane (#899 restored it from
+    # the C12/L20 land-switch screen; dt=150, fp64 — see the YAML header).
+    assert args.resolution == 48
+    assert args.nlev == 40
+    assert args.discretization == "cdgrid"
+    assert args.grid_type == "cubed_sphere"
     cfg = build_config_from_args(args)
     assert cfg.convection == "bechtold"   # mass-flux, water-conserving (#771)
     assert cfg.gravity_wave_drag == "mcfarlane"
@@ -1502,7 +1548,12 @@ def test_config_yaml_round_trips_authoritative_values():
     assert cfg.convective_cloud is True
     # the run_coupled-mirrored (#647) tuned knobs round-trip from the YAML
     assert cfg.surface_gustiness_zi == 300.0
-    assert cfg.cloud_q_c_diagnostic == pytest.approx(3e-4)
+    # PROVISIONAL cloud tuning (#899): rh_crit 0.85 / q_c 1e-4 (was 0.77/3e-4)
+    assert cfg.cloud_rh_crit == pytest.approx(0.85)
+    assert cfg.cloud_q_c_diagnostic == pytest.approx(1e-4)
+    # 0.0 until the bechtold rain-split lands (#932/#929): 0.5 with a
+    # non-tiedtke scheme trips run_amip's hard guard at argparse.
+    assert cfg.convective_precip_efficiency == 0.0
 
 
 def test_config_yaml_explicit_cli_flag_overrides_file():
@@ -1574,27 +1625,6 @@ def test_params_calibration_reaches_bechtold_tunables(tmp_path):
     assert conv_config.M_b_max == 0.08
     assert conv_config.cmt_c_u == 0.5
     assert conv_config.cmt_c_d == 0.4
-
-
-def test_bechtold_precip_efficiency_flag_flows_to_scheme_config():
-    """--bechtold-precip-efficiency reaches the pipeline-resolved
-    BechtoldConfig (the #929 isolation lever); default 0.7 = scheme default
-    (byte-identical when unset); 0.0 = legacy detrain-all."""
-    from legoesm.driver.physics_pipeline import _resolve_convection
-    parser = build_arg_parser()
-    cfg = build_config_from_args(_postprocess_args(
-        parser.parse_args(_AMIP_DUMMY_PATHS + ["--convection", "bechtold"]),
-        parser))
-    assert cfg.bechtold_precip_efficiency == 0.7
-    _, conv_default = _resolve_convection(cfg)
-    assert conv_default.precip_efficiency == 0.7
-    cfg0 = build_config_from_args(_postprocess_args(
-        parser.parse_args(_AMIP_DUMMY_PATHS + [
-            "--convection", "bechtold",
-            "--bechtold-precip-efficiency", "0.0"]),
-        parser))
-    _, conv_off = _resolve_convection(cfg0)
-    assert conv_off.precip_efficiency == 0.0
 
 
 def test_aimip_louis_preserves_resolved_surface_scheme():
@@ -1920,6 +1950,26 @@ def test_moisture_flux_form_flag_flows_to_dycore_config():
     assert cfg_off.dycore.moisture_flux_form is False
 
 
+def test_mpas_nu_vert4_t_flag_flows_to_dycore_config():
+    """#930: --mpas-nu-vert4-t must reach the DycoreConfig (which the component
+    factory threads into MPASPrimitiveEquationConfig.nu_vert4_T — the vertical
+    2Δσ-checkerboard cure).  Production default is ON (nonzero); 0 disables."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.dycore.mpas_nu_vert4_T > 0.0   # cure on by default
+
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-nu-vert4-t", "0",
+    ]), parser))
+    assert cfg_off.dycore.mpas_nu_vert4_T == 0.0
+
+    cfg_set = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-nu-vert4-t", "5e-6",
+    ]), parser))
+    assert cfg_set.dycore.mpas_nu_vert4_T == pytest.approx(5e-6)
+
+
 def test_multicontroller_coordinator_flags_parse():
     """Route-B flags round-trip through the parser (they are RUN args consumed
     in main() for the jax.distributed bootstrap, not ExperimentConfig fields)."""
@@ -2017,3 +2067,53 @@ def test_latlon24_production_variant_pins_polar_filter():
     cfg = build_config_from_args(args)
     assert cfg.convection == "sbm" and cfg.gravity_wave_drag == "mcfarlane"
     assert cfg.convective_precip_efficiency == 0.0  # sbm rejects the bechtold knob
+
+
+def test_explicit_zero_sic_scale_and_sst_offset_preserved():
+    """An explicit ``--sic-scale 0.0`` / ``--sst-offset 0.0`` must reach the
+    config as 0.0 — the builder uses ``is not None``, not ``or``, so a
+    legitimate no-sea-ice / no-conversion sensitivity value is not silently
+    replaced by the fallback default (1.0 / 0.0)."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--sic-scale", "0.0", "--sst-offset", "0.0",
+    ]), parser))
+    assert cfg.sic_scale == 0.0
+    assert cfg.sst_offset == 0.0
+    # The default path still yields the fallbacks.
+    cfg_def = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_def.sic_scale == 1.0 and cfg_def.sst_offset == 0.0
+
+
+def test_preset_dataset_defaults_and_override():
+    """A preset dataset defaults sic_scale/sst_offset to the preset's own unit
+    conversions (cobe SIC is percent -> 0.01), so a bare ``--dataset cobe`` keeps
+    correct units without needing --sic-scale. An explicit ``--sic-scale 0`` (a
+    no-sea-ice run) still overrides — the value model_driver forwards into the
+    preset config, which used to be dropped by ``_replace(path, T_ice)``."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "cobe", "--forcing-path", "/tmp/cobe.nc",
+    ]), parser))
+    assert cfg.sic_scale == 0.01          # cobe percent -> fraction (preset default)
+    assert cfg.sst_offset == 0.0          # cobe already Kelvin
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "cobe", "--forcing-path", "/tmp/cobe.nc", "--sic-scale", "0",
+    ]), parser))
+    assert cfg0.sic_scale == 0.0          # explicit no-ice override honored
+
+
+def test_external_ozone_aerosol_require_a_file():
+    """``--ozone-forcing external`` / ``--aerosol-forcing external`` without a
+    file must fail loudly rather than silently substitute the built-in reference
+    climatology (parity with the solar/ghg guards)."""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--ozone-forcing", "external",
+        ]), parser)
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--aerosol-forcing", "external",
+        ]), parser)
