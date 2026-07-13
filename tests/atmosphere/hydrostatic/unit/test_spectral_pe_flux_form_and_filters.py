@@ -144,9 +144,12 @@ def test_implicit_hyperdiff_damps_under_ssp(integrator):
     sigma_coord = create_sigma_coordinate(5)
     dt = 300.0
 
-    # nu chosen so one step damps the n=n_max mode by ~e^-2.3 ≈ 0.1.
-    n_max = grid.n_max
-    eig = (n_max * (n_max + 1) / grid.radius ** 2) ** 2
+    # Seed INSIDE the de-aliased band (n_cut = floor(2/3·n_max)): a mode
+    # above the cutoff is now removed by the 2/3 STATE truncation in both
+    # runs, which would make this test vacuous.  nu damps the seeded mode
+    # by ~e^-2.3 ≈ 0.1 per step.
+    n_seed = int(np.floor(0.667 * grid.n_max))
+    eig = (n_seed * (n_seed + 1) / grid.radius ** 2) ** 2
     nu = 2.3 / (dt * eig)
 
     def _run(nu_run):
@@ -165,7 +168,7 @@ def test_implicit_hyperdiff_damps_under_ssp(integrator):
             grid, sigma_coord, perturbation_amplitude=0.0,
         )
         ls = np.asarray(grid.ls)
-        idx = int(np.argmax(ls == n_max))
+        idx = int(np.argmax(ls == n_seed))
         vor = state.vor_hat.data.at[idx, 2].set(1e-8)
         state = state._replace(vor_hat=state.vor_hat.replace(data=vor))
         for _ in range(3):
@@ -202,7 +205,10 @@ def _hyperdiff_model_and_state(nu, dt):
         grid, sigma_coord, perturbation_amplitude=0.0,
     )
     ls = np.asarray(grid.ls)
-    idx = int(np.argmax(ls == grid.n_max))
+    # Inside the 2/3 band — a mode above the cutoff is zeroed by the
+    # state truncation and would make the freshness comparison vacuous.
+    n_seed = int(np.floor(0.667 * grid.n_max))
+    idx = int(np.argmax(ls == n_seed))
     vor = state.vor_hat.data.at[idx, 2].set(1e-8)
     return model, state._replace(vor_hat=state.vor_hat.replace(data=vor)), idx
 
@@ -303,3 +309,41 @@ def test_anchor_snapshot_refuses_tracer_state():
     model.set_target_mass(model._compute_initial_mass(state))
     out = outer(state)
     assert bool(jnp.all(jnp.isfinite(out.lnps_hat.data.real)))
+
+
+def test_upper_third_state_mode_removed_not_frozen():
+    """PE twin of the spectral-SW fix: the 2/3 mask on TENDENCIES holds
+    masked modes constant; pre-existing upper-third STATE power (mountain
+    ICs, restarts) must be truncated by the post-step state mask, not
+    frozen forever."""
+    grid = create_gaussian_grid(21)
+    sigma_coord = create_sigma_coordinate(5)
+    cfg = SpectralPEConfig(
+        hyperdiff_coeff=0.0, spectral_filter_strength=0.0,
+        dealiasing_fraction=0.667, time_integrator="ssp_rk3",
+        fix_mass=False,
+    )
+    model = SpectralPrimitiveEquationModel(
+        grid=grid, sigma_coord=sigma_coord, config=cfg,
+    )
+    state = isothermal_rest_state_spectral(
+        grid, sigma_coord, perturbation_amplitude=0.0,
+    )
+    ls = np.asarray(grid.ls)
+    n_cut = int(np.floor(cfg.dealiasing_fraction * grid.n_max))
+    idx_hi = int(np.argmax(ls == grid.n_max))
+    assert ls[idx_hi] > n_cut
+    amp = 1e-8
+    vor = state.vor_hat.data.at[idx_hi, 2].set(amp)
+    T = state.T_hat.data.at[idx_hi, 2].set(amp)
+    state = state._replace(
+        vor_hat=state.vor_hat.replace(data=vor),
+        T_hat=state.T_hat.replace(data=T),
+    )
+
+    out = model.step(state, 300.0)
+    # Exactly zeroed by the 0/1 mask (pre-fix: frozen at amp).
+    assert float(jnp.abs(out.vor_hat.data[idx_hi, 2])) == 0.0
+    assert float(jnp.abs(out.T_hat.data[idx_hi, 2])) == 0.0
+    # phis (static forcing) untouched by design.
+    assert bool(jnp.array_equal(out.phis_hat.data, state.phis_hat.data))

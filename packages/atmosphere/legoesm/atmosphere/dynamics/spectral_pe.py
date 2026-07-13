@@ -1269,6 +1269,19 @@ class SpectralPrimitiveEquationModel:
                 cutoff_fraction=self.config.spectral_filter_strength,
             )
 
+        # State-truncation mask for the Orszag 2/3 rule (same fix as the
+        # spectral-SW twin, 2026-07-12): the TENDENCIES of vor/div/T/lnps
+        # are masked inside ``spectral_pe_tendencies``, which holds masked
+        # modes CONSTANT — it cannot remove upper-third power already in
+        # the state (mountainous ICs, restarts, user states).  Truncating
+        # the state post-step enforces the band-limit the 2/3 rule
+        # assumes; exact no-op for band-limited states.
+        self._dealias_state = None
+        if self.config.dealiasing_fraction > 0.0:
+            self._dealias_state = dealiasing_mask(
+                self.grid, self.config.dealiasing_fraction,
+            )
+
         if self.config.si_substeps < 1:
             raise ValueError(
                 f"si_substeps must be >= 1, got {self.config.si_substeps!r}",
@@ -1477,6 +1490,10 @@ class SpectralPrimitiveEquationModel:
         if self._spectral_filter is not None:
             result = apply_spectral_filter_to_state(result, self._spectral_filter)
 
+        # 2/3-rule STATE truncation (masked tendencies alone freeze, not
+        # remove, pre-existing upper-third modes — see __init__ note).
+        result = self._apply_state_truncation(result)
+
         # Implicit hyperdiffusion for the non-leapfrog integrators.
         # ``implicit_hyperdiff=True`` disables the explicit tendency term,
         # so without this multiplicative filter the SSP/RK paths ran with
@@ -1506,6 +1523,26 @@ class SpectralPrimitiveEquationModel:
             result = self._apply_mass_fixer(result, target_mass)
 
         return result
+
+    def _apply_state_truncation(self, state):
+        """Truncate the prognostic state to the de-aliased 2/3 band.
+
+        Multiplies vor/div/T (3D) and lnps (2D) by the 0/1 dealiasing
+        mask — the SAME fields whose tendencies are masked in
+        ``spectral_pe_tendencies``.  ``phis_hat`` is static forcing and
+        is never truncated; grid-space tracers are handled by the tracer
+        filter.  No-op when ``dealiasing_fraction == 0``.
+        """
+        if self._dealias_state is None:
+            return state
+        m2 = self._dealias_state
+        m3 = m2[:, None]
+        return state._replace(
+            vor_hat=state.vor_hat.replace(data=state.vor_hat.data * m3),
+            div_hat=state.div_hat.replace(data=state.div_hat.data * m3),
+            T_hat=state.T_hat.replace(data=state.T_hat.data * m3),
+            lnps_hat=state.lnps_hat.replace(data=state.lnps_hat.data * m2),
+        )
 
     def _apply_mass_fixer(self, state, target_mass=None):
         """Rescale ``lnps_hat[0]`` so the global integral matches ``_target_mass``.
@@ -1668,6 +1705,8 @@ class SpectralPrimitiveEquationModel:
                 result = apply_sponge_filter(result, self._sponge_factor, self._sponge_factor_T)
             if self._spectral_filter is not None:
                 result = apply_spectral_filter_to_state(result, self._spectral_filter)
+            # 2/3-rule state truncation (see _apply_state_truncation)
+            result = self._apply_state_truncation(result)
             # Implicit hyperdiffusion (unconditionally stable)
             result = self._apply_implicit_hyperdiff(result)
             # Same combined filter applied to grid-space tracers
@@ -1699,6 +1738,8 @@ class SpectralPrimitiveEquationModel:
                 state_np1 = apply_spectral_filter_to_state(
                     state_np1, self._spectral_filter,
                 )
+            # 2/3-rule state truncation (see _apply_state_truncation)
+            state_np1 = self._apply_state_truncation(state_np1)
             # Implicit hyperdiffusion (unconditionally stable with leapfrog)
             state_np1 = self._apply_implicit_hyperdiff(state_np1)
             # Same combined filter applied to grid-space tracers
