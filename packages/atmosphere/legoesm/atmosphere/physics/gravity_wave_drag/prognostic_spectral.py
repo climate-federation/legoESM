@@ -1,10 +1,34 @@
-"""Prognostic spectral gravity wave drag parameterization.
+"""Prognostic spectral gravity wave drag parameterization (EXPERIMENTAL).
 
 Multi-azimuthal, multi-wavenumber spectral GWD with a prognostic
 wave spectrum. Carries the wave flux array forward in time with a
 relaxation timescale back to the launch source.
 
 Uses jax.lax.scan for the vertical propagation, fully differentiable.
+
+.. warning::
+
+   **Experimental / not validated; opt-in only (the default GWD scheme is
+   ``none``).**  This scheme is *bespoke* — it is NOT a faithful
+   implementation of a published spectral GWD parameterization (e.g.
+   Alexander-Dunkerton 1999 or Scinocca 2003) and carries no
+   ``__physics_contract__`` yet (tracked in ``CONTRACT_TODO``).
+
+   **F-GWD-1 (deposition sign) — FIXED; energetics caveat remains.** The
+   momentum deposition originally omitted the ``sign(c - U_proj)`` factor,
+   so a symmetric launch spectrum produced a force independent of the mean
+   wind.  The deposition now carries ``s0 = sign(c - U_launch)`` fixed at
+   the launch level (see the sign-convention block in
+   ``__physics_contract__``), which relaxes ``U_proj`` toward ``c`` — a
+   true drag whenever the spectrum is slower than the wind.  ``eps_gwd``
+   is the column wave-dissipation (frictional-heating) integral and is
+   ``>= 0`` by construction.  NOTE: with a prognostic two-sided spectrum
+   the mean flow can still legitimately gain kinetic energy from waves
+   faster than the wind, so the mean-flow KE loss
+   ``-sum(rho*(u*du_dt + v*dv_dt)*dz)`` is NOT guaranteed positive and is
+   deliberately NOT what ``eps_gwd`` reports; the saturation energetics
+   still need a proper spectral-GWD review plus a momentum-flux / QBO
+   benchmark (``parameterization_checks.md`` F-GWD-1).
 """
 
 from __future__ import annotations
@@ -270,6 +294,11 @@ def prognostic_spectral_gwd(
         dT_dt = jnp.zeros_like(dT_dt)
 
     # Column dissipation [W/m^2] (>= 0 by construction, see heating above).
+    # Deliberately the WAVE-DISSIPATION integral, not the mean-flow KE loss
+    # -sum(rho*(u*du_dt + v*dv_dt)*dz): with a prognostic two-sided spectrum
+    # waves faster than the wind legitimately accelerate the mean flow toward
+    # c, so the KE-loss form is NOT guaranteed positive — see the module
+    # docstring note (F-GWD-1 history).
     eps_gwd = jnp.sum(rho * heating * dz, axis=1)
 
     # Prognostic spectrum update: relax toward launch source.  Pin the

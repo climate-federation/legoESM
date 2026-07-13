@@ -328,6 +328,37 @@ class DINOConfig:
     # so a field on this config would never be read.
 
     # ------------------------------------------------------------------
+    # Momentum / Coriolis / time-integrator scheme identity (the L2
+    # intercomparison axes — see DINO_RECIPES). Defaults reproduce the legoESM
+    # DINO stack (the NEMO double-gyre approximation: vector-invariant EEN
+    # momentum, Matsuno-split Coriolis, forward-Euler outer integrator, total AB2
+    # scope). The MITgcm / Oceananigans / Veros recipes override these to select
+    # each model's canonical blocks (flux-form / WENO momentum, explicit-AB2
+    # Coriolis, AB2 outer). Consumed by ``dino_lat_lon_model_config`` (lat-lon
+    # C-grid path); the MPAS path keeps its own vector-invariant identity, so the
+    # L2 recipes are lat-lon (matching the paper R1 comparison grid).
+    # ``barotropic_solver="rigid_lid"`` ALWAYS forces the coordinated
+    # Veros-faithful ab2 stack (it is the only barotropic path whose Coriolis is
+    # AB2-consistent — see ``rigid_lid_dt_mom_ratio``), overriding these last.
+    momentum_advection: str = "vector_invariant"  # "flux_form" (MITgcm) | "weno7" (Oceananigans)
+    momentum_flux_scheme: str = "upwind"          # "centered" (MITgcm flux-form advScheme=2)
+    coriolis_scheme: str = "matsuno_split"        # "explicit_ab2" (MITgcm/Oceananigans/Veros)
+    outer_integrator: str = "forward_euler"       # "ab2" (MITgcm/Oceananigans/Veros)
+    ab2_scope: str = "total"                       # "advective" (Veros; forced by rigid_lid)
+    # AB2 time-centering of the barotropic slow forcing F_slow (Oceananigans
+    # Gᵁ convention).  REQUIRED whenever coriolis_scheme="explicit_ab2" pairs
+    # with barotropic_solver="implicit_cn": the CN predictor gates its own FB
+    # Coriolis off (_cori_fac=0) and the outer AB2 deliberately excludes the
+    # barotropic increment from extrapolation, so without this flag the
+    # barotropic-mode Coriolis is integrated FORWARD EULER at weight 1.0 —
+    # unconditionally unstable, |G|=sqrt(1+(f·dt)²) per step (e-fold ≈ 2/(f²·dt):
+    # ~6 d at 15° for dt=2700 s).  Diagnosed as the DINO 'oceananigans'-card
+    # barotropic blowup (dino_l2_bisect o_ctl: basin-scale off-equatorial eta
+    # quadrupole, |eta| 6 m by day 15, growth rate ∝ dt).  The validated-stable
+    # Silvestri §5 jet runs the same Coriolis routing WITH this flag on.
+    barotropic_slow_forcing_ab2: bool = False     # True (Oceananigans card)
+
+    # ------------------------------------------------------------------
     # Diagnostics (paper Figs 5-6: MOC and σ_2 referenced to 2000 m)
     # ------------------------------------------------------------------
     sigma_2_ref_depth: float = 2000.0     # reference depth for σ_2 [m]
@@ -349,6 +380,144 @@ class DINOConfig:
         if self.vmix_scheme == "tke":
             return max(self.A_v_bg, self.tke_momentum_visc_bg)
         return self.A_v_bg
+
+
+# ---------------------------------------------------------------------
+# L2 model recipes (docs/next_implementations "DINO two-level recipe" campaign).
+#
+# A DINO recipe is a PURE CONFIG overlay on ``DINOConfig`` that selects the
+# canonical legoESM blocks reproducing another ocean model's DINO numerics —
+# NEVER a bespoke solver (oracle-recipe doctrine, CLAUDE.md / docs/ocean/
+# fidelity/oracle_recipe_strategy.md). Each dict below is splatted onto a base
+# ``DINOConfig`` via :func:`dino_config_for_recipe`; the model-identity block
+# choices (momentum / Coriolis / integrator / barotropic solver) mirror the
+# verified dycore bundles in ``legoesm.ocean.recipes`` (``mitgcm_v1`` /
+# ``oceananigans_v1`` / ``veros_faithful_v1``) so they cannot drift, while EOS +
+# vertical mixing + tracer advection are set to each model's DINO choice (the
+# thermocline-relevant axes). L1 = the paper/NEMO cards; L2 = the three
+# cross-model cards. All are lat-lon (the paper R1 comparison grid); the MPAS
+# path keeps its own identity.
+#
+# EOS/vmix fidelity notes (mapped, some approximate — see the report):
+#   * MITgcm EOS: ``unesco80`` ≈ MITgcm JMD95Z (Jackett & McDougall 1995) within
+#     ~1e-3 kg/m^3; MITgcm's default MDJWF (McDougall 2003) is NOT bit-exact in
+#     legoESM (a documented gap, not stubbed here).
+#   * Oceananigans EOS: ``veros_gsw`` IS the TEOS-10 48-term polynomial
+#     (SeawaterPolynomials.TEOS10) — exact family match.
+#   * Oceananigans vmix ``catke``: Oceananigans' CATKEVerticalDiffusivity; it is
+#     prognostic (the lat-lon model carries its TKE state like ``tke``). Its 1°
+#     DINO multi-year stability is UNVERIFIED — smoke-gate before a long run;
+#     ``richardson`` (≈ RiBasedVerticalDiffusivity) is the diagnostic fallback.
+#   * Veros vmix ``tke`` is only stable to ~day 226 on our 1° DINO (the SW-corner
+#     mode documented on ``DINOConfig.vmix_scheme``), so the Veros card is a
+#     sub-annual comparison; MITgcm (``kpp``) and the L1 cards run to a year.
+# ---------------------------------------------------------------------
+
+DINO_RECIPES: dict[str, dict] = {
+    # --- L1 — the identity card: legoESM production default (Wright + KPP). ---
+    # Equivalent to a bare DINOConfig(); named for uniform selection.
+    "legoesm_default": {
+        "eos": "wright",
+        "vmix_scheme": "kpp",
+    },
+    # --- L1 — the paper/NEMO-faithful card (Kamm et al. 2025). ---
+    "nemo_paper": {
+        "eos": "nemo_seos",            # Roquet 2015 S-EOS, DINO coefficients (paper)
+        "vmix_scheme": "tke",          # NEMO TKE (Blanke & Delecluse 1993)
+        "tracer_advection": "tvd",     # NEMO FCT/TVD family (R1)
+        "gm_redi_slope_scheme": "triads",   # Griffies iso-neutral triads (NEMO)
+        "ke_gradient_scheme": "hollingsworth",  # NEMO nn_dynkeg=1
+        "barotropic_solver": "implicit_cn",
+    },
+    # --- L2 — Veros (Vallis nonlinear EOS, TKE, superbee, streamfunction/AB2). ---
+    # Dycore identity: recipes.py::veros_faithful_v1 (rigid_lid → the builder
+    # auto-applies ab2 + explicit_ab2 + ab2_scope="advective").
+    "veros": {
+        "eos": "veros_nonlin2",        # Veros eq_of_state_type=3 (Vallis 2008)
+        "vmix_scheme": "tke",          # Veros enable_tke (canonical)
+        "tracer_advection": "superbee",  # Veros Sweby superbee tracer flux
+        "barotropic_solver": "rigid_lid",  # Veros external-mode streamfunction
+        "gm_redi_slope_scheme": "triads",
+        "ke_gradient_scheme": "centered",
+    },
+    # --- L2 — MITgcm (JMD95-family EOS, KPP, DST3 tracer, flux-form centered ---
+    # momentum, explicit-AB2 face-f Coriolis, unsplit implicit free surface, AB2).
+    # Dycore identity: recipes.py::mitgcm_v1.
+    "mitgcm": {
+        "eos": "unesco80",             # ≈ MITgcm JMD95Z (MDJWF not bit-exact)
+        "vmix_scheme": "kpp",          # MITgcm pkg/kpp
+        "tracer_advection": "dst3_multidim",  # MITgcm advScheme=80 (3-DST, multi-dim)
+        "momentum_advection": "flux_form",    # MITgcm mom_fluxform
+        "momentum_flux_scheme": "centered",   # MITgcm advScheme=2 (centered)
+        "coriolis_scheme": "explicit_ab2",    # MITgcm 4-pt face-f Coriolis
+        "outer_integrator": "ab2",            # MITgcm Adams-Bashforth
+        "ab2_scope": "total",                 # MITgcm momDissip_In_AB=.TRUE.
+        "barotropic_solver": "implicit_unsplit",  # implicitFreeSurface (unsplit)
+        "ke_gradient_scheme": "centered",     # dropped under flux_form
+    },
+    # --- L2 — Oceananigans (TEOS-10 EOS, CATKE, WENO tracer + WENOVectorInvariant ---
+    # momentum, implicit free surface, AB2). Dycore identity: recipes.py::
+    # oceananigans_v1. Coriolis explicit_ab2 is [APPROX] for the vertex-f
+    # enstrophy-conserving form (see oceananigans_recipe.py).
+    "oceananigans": {
+        "eos": "veros_gsw",            # TEOS-10 48-term (SeawaterPolynomials.TEOS10)
+        "vmix_scheme": "catke",        # Oceananigans CATKEVerticalDiffusivity
+        "tracer_advection": "weno7",   # Oceananigans WENO(order=7)
+        "momentum_advection": "weno7",  # Oceananigans WENOVectorInvariant (PR #559)
+        "coriolis_scheme": "explicit_ab2",  # [APPROX] face-f ~ vertex-f enstrophy
+        "outer_integrator": "ab2",     # Oceananigans QuasiAdamsBashforth2 (default)
+        "barotropic_solver": "implicit_cn",  # Oceananigans ImplicitFreeSurface
+        # AB2 time-centering of F_slow (Oceananigans Gᵁ): without it the
+        # explicit_ab2 × implicit_cn pairing integrates the barotropic-mode
+        # Coriolis forward-Euler (unconditionally unstable; the diagnosed
+        # DINO-oceananigans barotropic blowup).  Matches the Silvestri §5
+        # jet stack, which validates this Coriolis routing WITH the flag.
+        "barotropic_slow_forcing_ab2": True,
+        "ke_gradient_scheme": "centered",
+    },
+}
+
+# L2 cards select lat-lon-C-grid-only blocks (flux-form / WENO momentum, AB2
+# outer, rigid-lid / unsplit free surface); the L1 cards are grid-portable but
+# the DINO recipe surface is scoped to lat-lon for the intercomparison.
+DINO_L2_RECIPES: frozenset[str] = frozenset({"veros", "mitgcm", "oceananigans"})
+
+
+def dino_config_for_recipe(recipe: str,
+                           base: DINOConfig | None = None) -> DINOConfig:
+    """Return a ``DINOConfig`` overlaid with the named model recipe's blocks.
+
+    ``recipe`` is one of :data:`DINO_RECIPES` (``legoesm_default``,
+    ``nemo_paper``, ``veros``, ``mitgcm``, ``oceananigans``). The recipe is a
+    PURE CONFIG overlay (splatted via ``dataclasses.replace``) selecting shared
+    canonical legoESM blocks — no bespoke solver.
+
+    Parameters
+    ----------
+    recipe : str
+        A key of :data:`DINO_RECIPES`.
+    base : DINOConfig, optional
+        Base config to overlay (default a fresh ``DINOConfig()``); pass one to
+        combine a recipe with non-scheme setup tweaks (``dt``, grid extent).
+
+    Returns
+    -------
+    DINOConfig
+
+    Raises
+    ------
+    ValueError
+        On an unknown recipe name (dispatch hardening — a typo must fail loudly,
+        never silently select a default).
+    """
+    import dataclasses
+    if recipe not in DINO_RECIPES:
+        raise ValueError(
+            f"unknown DINO recipe {recipe!r}; choose from "
+            f"{sorted(DINO_RECIPES)}")
+    if base is None:
+        base = DINOConfig()
+    return dataclasses.replace(base, **DINO_RECIPES[recipe])
 
 
 # ---------------------------------------------------------------------
@@ -1115,7 +1284,8 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
     scheme (``K_conv``) on top, as in the paper.
     """
     from legoesm.ocean.physics.vertical_mixing.config import (
-        KPPConfig, TKEConfig, VerticalMixingConfig,
+        CATKEConfig, KPPConfig, RichardsonVerticalMixingConfig, TKEConfig,
+        VerticalMixingConfig,
     )
     if cfg.vmix_scheme == "tke":
         # prandtl_mode="constant" is REQUIRED for the paper background to take
@@ -1154,9 +1324,28 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
         # the vertical mixing across grids identically (isolating the pure
         # discretization difference from any KPP-implementation difference).
         return VerticalMixingConfig(scheme="constant")
+    if cfg.vmix_scheme == "richardson":
+        # Pacanowski & Philander (1981) Richardson-number mixing — the closure
+        # Oceananigans exposes as RiBasedVerticalDiffusivity. Diagnostic (no
+        # prognostic state). Background floors anchored to the paper A_v_bg/K_v_bg
+        # so the thermocline background matches the other cards.
+        return VerticalMixingConfig(
+            scheme="richardson",
+            richardson=RichardsonVerticalMixingConfig(
+                K_bg=cfg.K_v_bg, A_bg=cfg.A_v_bg_effective,
+            ),
+        )
+    if cfg.vmix_scheme == "catke":
+        # CATKE (Wagner et al. 2025) — Oceananigans' CATKEVerticalDiffusivity,
+        # the canonical Oceananigans-DINO closure. PROGNOSTIC (like tke; the
+        # lat-lon model carries its TKE state). Coefficients are the LES-
+        # calibrated defaults; the model-level A_v/K_v supply the background.
+        # NOTE: CATKE at 1° DINO is UNVERIFIED for multi-year stability — smoke-
+        # gate before a long run; tke/kpp/richardson are fallbacks.
+        return VerticalMixingConfig(scheme="catke", catke=CATKEConfig())
     raise ValueError(
-        f"unknown DINOConfig.vmix_scheme {cfg.vmix_scheme!r}; "
-        "expected 'tke' or 'kpp'")
+        f"unknown DINOConfig.vmix_scheme {cfg.vmix_scheme!r}; expected "
+        "'kpp', 'tke', 'constant', 'richardson' or 'catke'")
 
 
 def dino_lat_lon_model_config(
@@ -1276,10 +1465,36 @@ def dino_lat_lon_model_config(
     # rigid_lid is selected, apply the FULL coordinated stack (veros_acc_recipe.py:
     # ab2 outer + explicit_ab2 Coriolis + ab2_scope="advective" + dt_mom_ratio).
     # Validated: DINO rigid_lid then spins up STABLY (7→31 Sv/180 d, still rising).
-    _rl_stack = (
-        dict(outer_integrator="ab2", coriolis_scheme="explicit_ab2",
-             ab2_scope="advective", dt_mom_ratio=cfg.rigid_lid_dt_mom_ratio)
-        if cfg.barotropic_solver == "rigid_lid" else {})
+    # Momentum / Coriolis / integrator scheme identity — the L2 recipe axes.
+    # Defaults reproduce the legoESM DINO stack (vector-invariant momentum,
+    # Matsuno-split Coriolis, forward-Euler outer, total AB2 scope); the
+    # mitgcm/oceananigans/veros cards override them via DINOConfig (DINO_RECIPES).
+    # rigid_lid ALWAYS forces the coordinated Veros-faithful ab2 stack (the only
+    # barotropic path whose Coriolis is AB2-consistent — see the field note), so
+    # it wins last.
+    _scheme = dict(
+        momentum_advection=cfg.momentum_advection,
+        momentum_flux_scheme=cfg.momentum_flux_scheme,
+        coriolis_scheme=cfg.coriolis_scheme,
+        outer_integrator=cfg.outer_integrator,
+        ab2_scope=cfg.ab2_scope,
+        # Routed into config.barotropic by from_flat.  Required by the
+        # oceananigans card (explicit_ab2 × implicit_cn): keeps the
+        # barotropic-mode Coriolis AB2-extrapolated instead of forward-Euler
+        # (see DINOConfig.barotropic_slow_forcing_ab2).
+        barotropic_slow_forcing_ab2=cfg.barotropic_slow_forcing_ab2,
+    )
+    if cfg.barotropic_solver == "rigid_lid":
+        _scheme.update(
+            outer_integrator="ab2", coriolis_scheme="explicit_ab2",
+            ab2_scope="advective", dt_mom_ratio=cfg.rigid_lid_dt_mom_ratio,
+            # The rigid-lid streamfunction projection removes barotropic
+            # inertial modes entirely (the FE-Coriolis hazard the flag cures
+            # does not exist there), and the flag's validation rejects
+            # ab2_scope="advective" — force it OFF under the coordinated
+            # rigid-lid stack regardless of the recipe card.
+            barotropic_slow_forcing_ab2=False,
+        )
 
     model_cfg = LatLonCGridOceanConfig.from_flat(
         rho_0=cfg.rho_0,
@@ -1296,7 +1511,7 @@ def dino_lat_lon_model_config(
         n_barotropic_substeps=cfg.n_barotropic_substeps,
         barotropic_solver=cfg.barotropic_solver,
         barotropic_implicit_theta_eta=cfg.barotropic_implicit_theta_eta,
-        **_rl_stack,
+        **_scheme,
         tracer_advection=cfg.tracer_advection,
         pgf_scheme=cfg.pgf_scheme,
         ke_gradient_scheme=cfg.ke_gradient_scheme,  # #263 Hollingsworth fix

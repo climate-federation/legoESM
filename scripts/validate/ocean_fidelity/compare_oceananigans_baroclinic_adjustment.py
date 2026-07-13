@@ -138,6 +138,9 @@ def main():
     grid, wall, z, state, model = build_setup()
     state = set_ic(grid, z, state)
     dt = float(os.environ.get("DT", "600.0"))          # 10 min like the oracle wizard start
+    # Seed F_slow prev pair (factory defaults barotropic_slow_forcing_ab2 on
+    # for the explicit_ab2 x implicit_cn x ab2 combo; no-op otherwise).
+    state = model.seed_scan_carry(state, dt)
     nsteps = int(round(stop_days * 86400.0 / dt))
     print(f"[baro-adjust] {NY}x{NX}x{NZ} dt={dt}s stop={stop_days}d ({nsteps} steps); "
           f"IC max|u|={float(jnp.max(jnp.abs(state.u.data))):.4f}", flush=True)

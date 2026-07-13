@@ -148,6 +148,9 @@ def main():
     # dt from the oracle CFL: 0.1 * dx_min / sqrt(g)
     dx_min = float(RADIUS * np.cos(np.radians(80.0)) * np.radians(360.0 / NH))
     dt = 0.1 * dx_min / np.sqrt(G)
+    # Seed F_slow prev pair (factory defaults barotropic_slow_forcing_ab2 on
+    # for the explicit_ab2 x implicit_cn x ab2 combo; no-op otherwise).
+    state = model.seed_scan_carry(state, dt)
     nsteps = int(round(stop / dt))
     spd = max(1, nsteps // int(stop) if stop >= 1 else nsteps)
     print(f"[bickley] {NPHI}x{NH}, weno9, dt={dt:.4f}, stop={stop} ({nsteps} steps); "

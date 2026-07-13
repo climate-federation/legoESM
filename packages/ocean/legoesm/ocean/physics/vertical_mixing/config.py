@@ -9,6 +9,9 @@ from legoesm.ocean.physics.vertical_mixing.tidal import TidalMixingConfig
 from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
     IWMConfig,
 )
+from legoesm.ocean.physics.vertical_mixing.double_diffusion import (
+    DoubleDiffusionConfig,
+)
 
 
 __param_spec__ = {
@@ -658,3 +661,11 @@ class VerticalMixingConfig(NamedTuple):
     # ``iwm.enabled=True`` (the explicit-tendency path cannot honour it),
     # mirroring the tidal guard above.  Default off ⇒ bit-exact legacy.
     iwm: IWMConfig = IWMConfig()
+    # Double-diffusive mixing (NEMO zdfddm; Merryfield 1999) is ADDITIVE like
+    # iwm, but contributes a SEPARATE salt (avs) vs heat (avt) diffusivity, so
+    # it is applied in the implicit vertical-mixing path AFTER the primary
+    # closure and routes the salinity solve through its own diffusivity
+    # (``K_v + (avs - avt)``); momentum (avm) is untouched, matching zdfddm.
+    # Requires ``implicit_vertical_mixing=True`` (the shared-K explicit/pair
+    # path cannot carry avs != avt).  Default off ⇒ bit-exact legacy.
+    ddm: DoubleDiffusionConfig = DoubleDiffusionConfig()

@@ -27,6 +27,8 @@ from legoesm.grids.latlon import create_mercator_grid
 from legoesm.ocean.experiments import dino
 from legoesm.ocean.experiments import AVAILABLE_EXPERIMENTS
 from legoesm.ocean.experiments.dino import (
+    DINO_L2_RECIPES,
+    DINO_RECIPES,
     DINOConfig,
     EXPERIMENT_CONFIG,
     create_dino_z_star,
@@ -36,9 +38,11 @@ from legoesm.ocean.experiments.dino import (
     dino_T_profile_1d,
     dino_T_star_annual_mean,
     dino_bathymetry,
+    dino_config_for_recipe,
     dino_initial_T_S,
     dino_lat_lon_grid,
     dino_lat_lon_initial_state_arrays,
+    dino_lat_lon_model_config,
     dino_top_layer_S_tendency,
     dino_top_layer_T_tendency,
     dino_top_layer_u_tendency,
@@ -137,6 +141,17 @@ class TestDINOConfig:
         vm_c = dino._dino_vertical_mixing_config(
             dataclasses.replace(cfg, vmix_scheme="constant"))
         assert vm_c.scheme == "constant"
+        # richardson (≈ Oceananigans RiBasedVerticalDiffusivity) and catke
+        # (Oceananigans CATKEVerticalDiffusivity) are the L2 Oceananigans-card
+        # closures; both wire with the paper background floors.
+        vm_ri = dino._dino_vertical_mixing_config(
+            dataclasses.replace(cfg, vmix_scheme="richardson"))
+        assert vm_ri.scheme == "richardson"
+        assert vm_ri.richardson.K_bg == pytest.approx(cfg.K_v_bg)
+        assert vm_ri.richardson.A_bg == pytest.approx(cfg.A_v_bg_effective)
+        vm_catke = dino._dino_vertical_mixing_config(
+            dataclasses.replace(cfg, vmix_scheme="catke"))
+        assert vm_catke.scheme == "catke"
         with pytest.raises(ValueError):
             dino._dino_vertical_mixing_config(
                 dataclasses.replace(cfg, vmix_scheme="bogus"))
@@ -152,6 +167,122 @@ class TestDINOConfig:
         assert gs["mpas"] is True
         assert gs["cubed_sphere"] is False
         assert gs["spectral"] is False
+
+
+# ---------------------------------------------------------------------
+# L2 model recipes (DINO two-level intercomparison)
+# ---------------------------------------------------------------------
+
+class TestDINORecipes:
+    """The recipe overlay (``DINO_RECIPES`` + ``dino_config_for_recipe``) selects
+    each model's canonical blocks as a PURE CONFIG on ``DINOConfig``, threads
+    them into the lat-lon model config, and raises on an unknown recipe
+    (dispatch hardening — a typo must never silently pick a default)."""
+
+    def test_unknown_recipe_raises(self):
+        with pytest.raises(ValueError):
+            dino_config_for_recipe("bogus_model")
+
+    def test_catalog_membership(self):
+        assert set(DINO_RECIPES) == {
+            "legoesm_default", "nemo_paper", "veros", "mitgcm", "oceananigans"}
+        assert set(DINO_L2_RECIPES) == {"veros", "mitgcm", "oceananigans"}
+        assert set(DINO_L2_RECIPES) <= set(DINO_RECIPES)
+
+    def test_legoesm_default_is_identity(self):
+        # The identity card = a bare DINOConfig (Wright + KPP), so a no-op run
+        # reproduces the production default exactly.
+        assert dino_config_for_recipe("legoesm_default") == DINOConfig()
+
+    def test_recipe_overlay_selects_documented_blocks(self):
+        # EOS + vertical mixing + tracer advection = the per-model DINO choices.
+        nemo = dino_config_for_recipe("nemo_paper")
+        assert (nemo.eos, nemo.vmix_scheme, nemo.tracer_advection) == (
+            "nemo_seos", "tke", "tvd")
+        veros = dino_config_for_recipe("veros")
+        assert (veros.eos, veros.vmix_scheme, veros.tracer_advection,
+                veros.barotropic_solver) == (
+            "veros_nonlin2", "tke", "superbee", "rigid_lid")
+        mit = dino_config_for_recipe("mitgcm")
+        assert (mit.eos, mit.vmix_scheme, mit.tracer_advection,
+                mit.momentum_advection, mit.outer_integrator,
+                mit.barotropic_solver) == (
+            "unesco80", "kpp", "dst3_multidim", "flux_form", "ab2",
+            "implicit_unsplit")
+        ocn = dino_config_for_recipe("oceananigans")
+        assert (ocn.eos, ocn.vmix_scheme, ocn.tracer_advection,
+                ocn.momentum_advection, ocn.outer_integrator) == (
+            "veros_gsw", "catke", "weno7", "weno7", "ab2")
+
+    def test_base_override_preserved(self):
+        # A recipe overlay keeps the non-scheme setup fields of the base config.
+        import dataclasses
+        base = dataclasses.replace(DINOConfig(), dt=1800.0)
+        cfg = dino_config_for_recipe("mitgcm", base=base)
+        assert cfg.dt == pytest.approx(1800.0)     # setup field preserved
+        assert cfg.eos == "unesco80"               # recipe field applied
+
+    def test_default_model_config_scheme_identity_unchanged(self):
+        # Behavior preservation: a bare DINOConfig still yields the legoESM DINO
+        # dycore identity (the newly threaded fields default to the prior values,
+        # so existing runs are byte-identical).
+        cfg = DINOConfig()
+        grid = dino_lat_lon_grid(cfg, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, cfg, physics=False)
+        assert mc.flat_get("momentum_advection") == "vector_invariant"
+        assert mc.flat_get("coriolis_scheme") == "matsuno_split"
+        assert mc.flat_get("outer_integrator") == "forward_euler"
+
+    def test_mitgcm_threads_into_model_config(self):
+        # The MITgcm card's flux-form / AB2 / unsplit-FS blocks reach the model.
+        cfg = dino_config_for_recipe("mitgcm")
+        grid = dino_lat_lon_grid(cfg, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, cfg, physics=False)
+        assert mc.flat_get("momentum_advection") == "flux_form"
+        assert mc.flat_get("momentum_flux_scheme") == "centered"
+        assert mc.flat_get("coriolis_scheme") == "explicit_ab2"
+        assert mc.flat_get("outer_integrator") == "ab2"
+        assert mc.flat_get("ab2_scope") == "total"
+        assert mc.flat_get("barotropic_solver") == "implicit_unsplit"
+        assert mc.flat_get("eos") == "unesco80"
+
+    def test_veros_rigid_lid_forces_ab2_stack(self):
+        # The Veros card selects rigid_lid; the builder ALWAYS overlays the
+        # coordinated Veros-faithful ab2 stack on that path (ab2 + explicit_ab2 +
+        # advective scope), independent of the DINOConfig integrator defaults.
+        cfg = dino_config_for_recipe("veros")
+        grid = dino_lat_lon_grid(cfg, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, cfg, physics=False)
+        assert mc.flat_get("barotropic_solver") == "rigid_lid"
+        assert mc.flat_get("outer_integrator") == "ab2"
+        assert mc.flat_get("coriolis_scheme") == "explicit_ab2"
+        assert mc.flat_get("ab2_scope") == "advective"
+        assert mc.flat_get("eos") == "veros_nonlin2"
+        # rigid_lid force-disables the F_slow AB2 flag (its validation rejects
+        # ab2_scope="advective"; the streamfunction projection has no barotropic
+        # inertial mode to time-center).
+        assert mc.flat_get("barotropic_slow_forcing_ab2") is False
+
+    def test_oceananigans_card_ab2_centers_barotropic_slow_forcing(self):
+        # Root-cause guard for the DINO 'oceananigans'-card barotropic blowup
+        # (dino_l2_bisect o_ctl: |eta| 6 m by day 15, growth rate ∝ dt, basin-
+        # scale off-equatorial quadrupole).  Under coriolis_scheme="explicit_ab2"
+        # + barotropic_solver="implicit_cn" the CN predictor gates its FB
+        # Coriolis off (_cori_fac=0) and the outer AB2 keeps the barotropic
+        # increment un-extrapolated, so WITHOUT barotropic_slow_forcing_ab2 the
+        # barotropic-mode Coriolis integrates forward-Euler — unconditionally
+        # unstable, |G| = sqrt(1 + (f·dt)²) per step.  The card must carry the
+        # Oceananigans-faithful Gᵁ AB2 time-centering (as the validated-stable
+        # Silvestri §5 jet stack does).
+        cfg = dino_config_for_recipe("oceananigans")
+        assert cfg.barotropic_slow_forcing_ab2 is True
+        grid = dino_lat_lon_grid(cfg, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, cfg, physics=False)
+        assert mc.flat_get("coriolis_scheme") == "explicit_ab2"
+        assert mc.flat_get("barotropic_solver") == "implicit_cn"
+        assert mc.flat_get("outer_integrator") == "ab2"
+        assert mc.flat_get("ab2_scope") == "total"
+        assert mc.flat_get("barotropic_slow_forcing_ab2") is True
 
 
 # ---------------------------------------------------------------------

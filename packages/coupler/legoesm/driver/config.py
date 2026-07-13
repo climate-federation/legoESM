@@ -912,6 +912,15 @@ class ExperimentConfig(NamedTuple):
     # STATELESS physics (Held-Suarez / per-column); a stateful PhysicsState
     # carry is not yet SPMD-routed.  Default off preserves all existing paths.
     enable_latlon_spmd: bool = False
+    # P4 (cube >6 devices): opt-in sub-face-TILED dynamics — the compiled
+    # segment's dynamics core routes through
+    # ``make_tiled_cc_step`` (tiled D-grid SSP-RK3 on a (6,kt,kt) mesh)
+    # when the device layout is sub-face tiled (n_devices = 6*kt^2 > 6).
+    # Dynamics-only swap: physics/fixers/tracers in the segment are
+    # untouched.  The adapter refuses configs outside the tiled base-cut
+    # envelope (non-ssp_rk3 integrator, any extra damping term, duogrid)
+    # LOUDLY.  Default off preserves every existing path.
+    enable_tiled_dycore: bool = False
     # M2b (scaling): run each lat-lon SPMD segment as ONE compiled
     # ``lax.scan`` (``make_sharded_atm_latlon_segment`` — band-sharded
     # geometry, one host dispatch + one in-graph finite-scalar read per
@@ -1010,6 +1019,24 @@ class ExperimentConfig(NamedTuple):
             # to host replicas on every process first.  All flush/save
             # sites are root-gated via ``_mpi_rank = jax.process_index()``.
             pass
+        if self.enable_tiled_dycore:
+            # P4 sub-face-tiled cube dynamics (single-controller multi-device;
+            # (6,kt,kt) mesh).  Cube-only; mpi4jax-distributed runs have no
+            # tiled device mesh (the driver helper also fails loudly there).
+            if g.grid_type != "cubed_sphere":
+                errors.append(
+                    "enable_tiled_dycore=True requires "
+                    f"grid.grid_type='cubed_sphere' (got {g.grid_type!r}): "
+                    "the tiled step is the cube sub-face decomposition"
+                )
+            if self.distributed and self.distributed_mode == "mpi":
+                errors.append(
+                    "enable_tiled_dycore=True is a device-mesh (SPMD) path "
+                    "and cannot run under the mpi4jax replicated-faces mode "
+                    "(distributed_mode='mpi'); use single-process multi-GPU "
+                    "or distributed_mode='spmd'"
+                )
+
         if self.enable_latlon_spmd:
             # Single-process multi-device lat-band path (NOT distributed_mode).
             if g.grid_type != "latlon":

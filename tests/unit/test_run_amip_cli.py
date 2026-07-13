@@ -2048,6 +2048,29 @@ def test_latlon24_production_variant_pins_polar_filter():
     assert cfg.convective_precip_efficiency is None
 
 
+def test_enable_tiled_dycore_flag_flows_to_config():
+    """--enable-tiled-dycore round-trips into ExperimentConfig (P4 cube
+    sub-face tiling) and validate_strict enforces cube-only."""
+    import pytest
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.enable_tiled_dycore is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--enable-tiled-dycore",
+    ]), parser))
+    assert cfg_on.enable_tiled_dycore is True
+    cfg_on.validate_strict()   # default grid = cubed_sphere -> legal
+
+    cfg_bad = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--grid-type", "latlon",
+        "--enable-tiled-dycore",
+    ]), parser))
+    with pytest.raises(ValueError, match="cubed_sphere"):
+        cfg_bad.validate_strict()
+
+
 def test_explicit_zero_sic_scale_and_sst_offset_preserved():
     """An explicit ``--sic-scale 0.0`` / ``--sst-offset 0.0`` must reach the
     config as 0.0 — the builder uses ``is not None``, not ``or``, so a

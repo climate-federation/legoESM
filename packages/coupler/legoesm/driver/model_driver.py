@@ -2573,6 +2573,104 @@ class ModelDriver:
         except Exception as exc:  # pragma: no cover - provenance best-effort
             logger.warning(f"Could not record final state digest: {exc}")
 
+
+    def _maybe_build_tiled_step(self, dt):
+        """Build the sub-face-tiled dynamics step (P4 increment 1b) or None.
+
+        Returns ``make_tiled_cc_step`` over this driver's model + device
+        mesh when ``config.enable_tiled_dycore`` is on and the device
+        layout is sub-face tiled; ``None`` (the default) leaves the
+        compiled segment on ``_dynamics_model.step``.  The model copy
+        mirrors ``build_segment_fn``'s inner dynamics copy under the SAME
+        predicate (outer ``cfg.dycore.fix_mass`` AND model-config
+        ``fix_mass`` -> disable inner fixer + per-stage zero-mean; the
+        segment applies the target-anchored fixer OUTSIDE the dynamics),
+        so the tiled numerics match the untiled inner model exactly; a
+        config whose EFFECTIVE inner model still applies per-stage
+        ``zero_mean_ps_tendency`` is refused (the tiled base cut omits
+        that term).  Flag-on with no tiled layout is a LOUD error, never
+        a silent untiled fallback, and the whole path is gated behind
+        ``LEGOESM_TILED_DYCORE_EXPERIMENTAL=1`` until the outer segment
+        sharding composition is device-validated (increment 1c).
+        """
+        if not getattr(self.config, "enable_tiled_dycore", False):
+            return None
+        dc = self._device_config
+        if (dc is None or getattr(dc, "mesh", None) is None
+                or tuple(getattr(dc, "tiling", (1, 1))) == (1, 1)):
+            raise ValueError(
+                "enable_tiled_dycore=True requires a sub-face-tiled device "
+                "layout (n_devices = 6*kt^2 > 6); got "
+                f"tiling={getattr(dc, 'tiling', None)!r}. Disable the flag "
+                "or launch with a tiled device count."
+            )
+        kt_i, kt_j = dc.tiling
+        if kt_i != kt_j:
+            raise ValueError(
+                f"enable_tiled_dycore: tiling must be square, got {dc.tiling}")
+        import os as _os
+        if _os.environ.get("LEGOESM_TILED_DYCORE_EXPERIMENTAL") != "1":
+            raise NotImplementedError(
+                "enable_tiled_dycore: the OUTER compiled-segment sharding "
+                "composition around the tiled core is not yet device-"
+                "validated (the segment currently runs with "
+                "device_config=None under sub-face tiling — codex round-14 "
+                "HIGH; increment 1c is the real-device full-segment parity "
+                "lane).  Set LEGOESM_TILED_DYCORE_EXPERIMENTAL=1 to run "
+                "anyway."
+            )
+        import copy as _copy
+        from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+            make_tiled_cc_step,
+        )
+        _m = _copy.copy(self.model)
+        _mc = getattr(_m, "config", None)
+        # Mirror build_segment_fn's inner-copy predicate EXACTLY (codex
+        # round-14 Medium): the outer target-anchored fixer path
+        # (cfg.dycore.fix_mass True) disables the inner fixer + per-stage
+        # zero-mean; when the outer fixer is OFF the untiled inner model
+        # KEEPS zero_mean_ps_tendency active — a per-stage global-mean
+        # term the tiled base cut does not implement, so that case is
+        # refused rather than silently dropped.
+        _outer_fix_mass = bool(getattr(self.config.dycore, "fix_mass", False))
+        if (
+            _outer_fix_mass
+            and getattr(_mc, "fix_mass", False)
+            and hasattr(_mc, "_replace")
+        ):
+            _kw = {"fix_mass": False}
+            if hasattr(_mc, "zero_mean_ps_tendency"):
+                _kw["zero_mean_ps_tendency"] = False
+            _m.config = _mc._replace(**_kw)
+            _mc = _m.config
+        # The EFFECTIVE inner model (post-mirror) must not apply the
+        # per-RK-stage zero-mean (gate in primitive_eq_cdgrid:
+        # ``zm and not (ucf and fm)``): the tiled base cut integrates the
+        # RAW dp_s/dt, and silently dropping the term would change the
+        # untiled-vs-tiled numerics.  (The tiled psum primitive
+        # ``make_tiled_zero_mean_tendency_stage_2d`` exists but is not
+        # wired into the step stage — increment 1c+.)
+        _zm_active = (
+            bool(getattr(_mc, "zero_mean_ps_tendency", False))
+            and not (bool(getattr(_mc, "use_conservation_fixer", False))
+                     and bool(getattr(_mc, "fix_mass", False)))
+        )
+        if _zm_active:
+            raise NotImplementedError(
+                "enable_tiled_dycore: this config leaves per-RK-stage "
+                "zero_mean_ps_tendency ACTIVE on the inner model, which "
+                "the tiled base cut does not implement — enable the outer "
+                "mass fixer (conservation_fixer + fix_mass) or set "
+                "zero_mean_ps_tendency=False."
+            )
+        logger.info(
+            "Tiled dycore step ROUTED into the compiled segment "
+            "(P4 increment 1b, experimental): kt=%d, dt=%.1f s, "
+            "mesh axes %s.", int(kt_i), float(dt),
+            getattr(dc.mesh, "axis_names", None),
+        )
+        return make_tiled_cc_step(_m, dc.mesh, kt=int(kt_i), dt=float(dt))
+
     def _bootstrap_runtime(self) -> None:
         """Bootstrap the full runtime: precision, backend, devices, MPI.
 
@@ -2871,11 +2969,13 @@ class ModelDriver:
         Unsupported configurations are not activated.  Non-cubed-sphere
         grids, unsupported device counts, and no-mesh are skipped
         silently (they cannot benefit from the SPMD halo collectives).
-        Sub-face tiling (>6 devices) is skipped with a LOUD warning:
-        the tiled ppermute exchange exists but the tiled dycore STEP is
-        unwired (P4 milestone), so the run stays on the local backend
-        and will not strong-scale past 6 devices — surfaced, not
-        silent, so a tiled production run isn't quietly degraded.
+        Sub-face tiling (>6 devices) never activates THIS backend (the
+        tiled dycore stage carries its own in-stage shard_map halos) but
+        is surfaced loudly either way: an INFO receipt when
+        ``enable_tiled_dycore`` routes dynamics through the tiled stage
+        (P4 increment 1b, experimental), or a WARNING that the run
+        stays on the GSPMD-auto sliced step with local halos and will
+        not strong-scale past 6 devices — never a silent degrade.
 
         For supported configurations, activation must either succeed
         or fail loudly.  Both import failures and activation failures
@@ -2911,14 +3011,41 @@ class ModelDriver:
         if getattr(dc, "tiling", (1, 1)) != (1, 1):
             # Sub-face tiling (>6 devices — the production GPU strong-
             # scaling regime).  The tiled ppermute EXCHANGE layer is
-            # parity-proven (cubesphere_exchange, 24-proc), but it is
-            # NOT yet wired into the production dycore STEP (the
-            # tile-aware operator stage is the P4 milestone; the dycore
-            # still slices full-face arrays).  So activating it here
-            # would be wrong — but SILENTLY keeping the local backend
-            # hides that a tiled run gets degraded (non-SPMD) halos.
-            # Warn loudly instead of returning silently (codex P1,
-            # 2026-06-13).
+            # parity-proven (cubesphere_exchange, 24-proc), but this
+            # SPMD halo backend is NOT the tiled paths' exchange layer
+            # (both tiled lanes carry their own in-stage / mesh-bound
+            # halos) — so it stays off either way.  What changes is the
+            # DYNAMICS routing: with enable_tiled_dycore the compiled
+            # segment runs the tiled D-grid core (P4 increment 1b,
+            # experimental); without it run() dispatches these device
+            # counts to the BLOCKED tiled cube loop
+            # (_run_tiled_cube_spmd).  Inform loudly instead of
+            # returning silently (codex P1, 2026-06-13; message split
+            # when the flag landed).
+            if getattr(self.config, "enable_tiled_dycore", False):
+                # The build-time env gate lives in _maybe_build_tiled_step
+                # (which runs later) — don't log an ACTIVE receipt for a
+                # run that gate will refuse (codex round-16 Low).
+                import os as _os
+                if (_os.environ.get("LEGOESM_TILED_DYCORE_EXPERIMENTAL")
+                        == "1"):
+                    logger.info(
+                        "Sub-face tiling %s (%d devices): tiled dycore "
+                        "step ACTIVE (enable_tiled_dycore, P4 increment "
+                        "1b — experimental); the tiled stage uses its "
+                        "own in-stage halos (the ppermute SPMD backend "
+                        "stays off).",
+                        dc.tiling, dc.n_devices,
+                    )
+                else:
+                    logger.warning(
+                        "Sub-face tiling %s (%d devices): "
+                        "enable_tiled_dycore is set but "
+                        "LEGOESM_TILED_DYCORE_EXPERIMENTAL=1 is not — "
+                        "the segment build will refuse loudly.",
+                        dc.tiling, dc.n_devices,
+                    )
+                return
             logger.info(
                 "SPMD halo backend not armed for sub-face tiling %s "
                 "(%d devices): run() dispatches these device counts to "
@@ -4503,12 +4630,18 @@ class ModelDriver:
                     and self._device_config is not None
                     and self._device_config.mesh is not None
                     and tuple(getattr(self._device_config, "tiling",
-                                      (1, 1))) != (1, 1)):
+                                      (1, 1))) != (1, 1)
+                    and not getattr(self.config, "enable_tiled_dycore",
+                                    False)):
                 # Sub-face-tiled cube SPMD (6*kt^2 > 6 devices): the BLOCKED
                 # persistent tiled loop (same dedicated-lane precedent as the
                 # lat-lon branch above).  Out-of-envelope configs are refused
                 # loudly inside — never a silent fall-through to the
-                # non-tile-aware compiled path.
+                # non-tile-aware compiled path.  With enable_tiled_dycore the
+                # compiled segment IS tile-aware (P4 increment 1b): the run
+                # falls through to the compiled lane below, which routes
+                # dynamics through make_tiled_cc_step
+                # (_maybe_build_tiled_step) instead of this blocked loop.
                 status = self._run_tiled_cube_spmd(start_step, start_day)
             elif compiled:
                 status = self._run_compiled(start_step, start_day)
@@ -7650,6 +7783,7 @@ class ModelDriver:
 
         run_segment = build_segment_fn(
             model=self.model,
+            tiled_step_fn=self._maybe_build_tiled_step(DT),
             step_unified=step_unified,
             step_unified_no_rad=None,
             grid=self.grid,
@@ -7922,6 +8056,7 @@ class ModelDriver:
 
         run_segment = build_segment_fn(
             model=self.model,
+            tiled_step_fn=self._maybe_build_tiled_step(DT),
             step_unified=step_unified,
             step_unified_no_rad=step_unified_no_rad,
             grid=self.grid,
@@ -8475,6 +8610,7 @@ class ModelDriver:
                     )
                     run_segment = build_segment_fn(
                         model=self.model, step_unified=step_unified,
+                        tiled_step_fn=self._maybe_build_tiled_step(DT),
                         step_unified_no_rad=step_unified_no_rad,
                         grid=self.grid, sigma_full=sigma_full, dsigma=dsigma,
                         dt=DT, rad_update_steps=RAD_UPDATE_STEPS,

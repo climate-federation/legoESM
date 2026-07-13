@@ -147,6 +147,36 @@ def test_flag_on_scan_pytree_stable():
     assert bool(jnp.all(jnp.isfinite(s_out.u.data)))
 
 
+def test_seed_scan_carry_seeds_prev_fields():
+    """``seed_scan_carry`` must zero-seed ``F_slow_{u,v}_prev`` when the flag is
+    on (so ANY scan driver — e.g. run_dino with the 'oceananigans' card — gets a
+    stable carry without hand-seeding like the silvestri driver), and must leave
+    them ``None`` when the flag is off (no pytree growth)."""
+    r, m, _ = _setup(True)
+    s = r.initial_state._replace(F_slow_u_prev=None, F_slow_v_prev=None)
+    seeded = m.seed_scan_carry(s, 900.0)
+    assert isinstance(seeded.F_slow_u_prev, Field)
+    assert isinstance(seeded.F_slow_v_prev, Field)
+    # Depth-mean forcing lives on the 2-D face grids: u (n_lat, n_lon+1),
+    # v (n_lat+1, n_lon) — and the cold-start prev is exactly zero.
+    assert seeded.F_slow_u_prev.data.shape == s.u.data.shape[:2]
+    assert seeded.F_slow_v_prev.data.shape == s.v.data.shape[:2]
+    assert float(jnp.max(jnp.abs(seeded.F_slow_u_prev.data))) == 0.0
+    assert float(jnp.max(jnp.abs(seeded.F_slow_v_prev.data))) == 0.0
+    # Idempotent: re-seeding an already-seeded carry keeps the Fields.
+    reseeded = m.seed_scan_carry(seeded, 900.0)
+    assert isinstance(reseeded.F_slow_u_prev, Field)
+    # And the seeded carry actually steps (the unseeded one raises — covered by
+    # test_flag_on_unseeded_prev_raises_clear_error).
+    s1 = m.step(seeded, 900.0)
+    assert bool(jnp.all(jnp.isfinite(s1.u.data)))
+    # Flag off: seeding must NOT grow the pytree.
+    _, m_off, s_off = _setup(False)
+    seeded_off = m_off.seed_scan_carry(s_off, 900.0)
+    assert seeded_off.F_slow_u_prev is None
+    assert seeded_off.F_slow_v_prev is None
+
+
 def test_flag_on_conserves_volume():
     """Adiabatic (no restoring): volume conserved to machine precision."""
     r, m, s = _setup(True)
@@ -165,3 +195,53 @@ def test_flag_on_conserves_volume():
     s = blk(s, 20)
     v1 = vol(s)
     assert abs(v1 - v0) / v0 < 1e-12, f"volume drift {(v1 - v0) / v0:.2e}"
+
+
+def test_seed_scan_carry_partial_pair_seeded():
+    """A PARTIAL prev carry (one Field, one None — e.g. a hand-built restart)
+    must be completed as a pair: the missing component zero-seeded, the present
+    one PRESERVED (codex: a u-only guard skipped this case and the step then
+    raised / flipped None->Field mid-scan)."""
+    r, m, _ = _setup(True)
+    s0 = r.initial_state._replace(F_slow_u_prev=None, F_slow_v_prev=None)
+    full = m.seed_scan_carry(s0, 900.0)
+    marked = Field(data=full.F_slow_u_prev.data + 1.2345e-3,
+                   name="F_slow_u_prev", dims=("lat", "lon_u"), units="m/s^2")
+    partial = s0._replace(F_slow_u_prev=marked, F_slow_v_prev=None)
+    seeded = m.seed_scan_carry(partial, 900.0)
+    assert isinstance(seeded.F_slow_u_prev, Field)
+    assert isinstance(seeded.F_slow_v_prev, Field)
+    # present component preserved bit-for-bit, missing one zero-filled
+    assert float(jnp.max(jnp.abs(seeded.F_slow_u_prev.data - marked.data))) == 0.0
+    assert float(jnp.max(jnp.abs(seeded.F_slow_v_prev.data))) == 0.0
+    # and it steps
+    s1 = m.step(seeded, 900.0)
+    assert bool(jnp.all(jnp.isfinite(s1.u.data)))
+
+
+def test_canonical_factory_defaults_flag_for_fe_coriolis_combo():
+    """The Oceananigans canonical-config factory must default
+    barotropic_slow_forcing_ab2=True for the EFFECTIVE explicit_ab2 x
+    implicit_cn x ab2 combo (the FE-Coriolis hazard), NOT set it when the deck
+    overrides Coriolis to matsuno, and honor an explicit caller override
+    without a duplicate-kwarg TypeError."""
+    from legoesm.ocean.fidelity.oceananigans_recipe import (
+        oceananigans_canonical_ocean_config,
+    )
+    eos = {"rho_ref": 1026.0, "alpha": 2e-4, "beta": 8e-4,
+           "T_ref": 10.0, "S_ref": 35.0}
+    cfg = oceananigans_canonical_ocean_config(eos_linear=eos)
+    assert cfg.flat_get("barotropic_slow_forcing_ab2") is True
+    cfg_m = oceananigans_canonical_ocean_config(
+        eos_linear=eos, coriolis_scheme="matsuno_split")
+    assert not cfg_m.flat_get("barotropic_slow_forcing_ab2")
+    # explicit caller override wins + no duplicate-kwarg crash
+    cfg_off = oceananigans_canonical_ocean_config(
+        eos_linear=eos, barotropic_slow_forcing_ab2=False)
+    assert not cfg_off.flat_get("barotropic_slow_forcing_ab2")
+    # an outer_integrator override via **overrides must be part of the
+    # EFFECTIVE combo (codex): forward_euler outer -> no AB2 default, and no
+    # duplicate-kwarg TypeError for a bundle key arriving via **overrides.
+    cfg_fe = oceananigans_canonical_ocean_config(
+        eos_linear=eos, outer_integrator="forward_euler")
+    assert not cfg_fe.flat_get("barotropic_slow_forcing_ab2")

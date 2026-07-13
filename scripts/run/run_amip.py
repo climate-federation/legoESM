@@ -1051,6 +1051,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
               "single-controller, job 8686550; gate "
               "scripts/validate/validate_driver_cs_spmd_parity.py."))
     parser.add_argument(
+        "--enable-tiled-dycore", action="store_true", default=False,
+        help=("P4 (cube >6 devices): route the compiled segment's dynamics "
+              "through the sub-face-TILED cube step (make_tiled_cc_step, "
+              "(6,kt,kt) device mesh, n_devices=6*kt^2). Dynamics-only swap "
+              "(physics/fixers untouched); refuses configs outside the tiled "
+              "base-cut envelope. Requires --grid-type cubed_sphere."))
+    parser.add_argument(
         "--enable-latlon-spmd", action="store_true", default=False,
         help=("Multi-device lat-BAND SPMD for the lat-lon C-grid dycore (A1). "
               "Requires --grid-type latlon, n_lat %% n_devices == 0. Runs the "
@@ -1325,6 +1332,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         gradient_checkpoint=args.gradient_checkpoint,
         distributed=args.distributed,
         distributed_mode=args.distributed_mode,
+        enable_tiled_dycore=args.enable_tiled_dycore,
         shard_radiation_columns=args.shard_radiation_columns,
         allow_level_fallback=args.allow_level_fallback,
         ensemble_size=args.ensemble_size,

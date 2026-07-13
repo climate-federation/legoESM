@@ -166,6 +166,15 @@ def make_ocean_physics(
             "applied inside compute_vertical_K_profiles and requires "
             "implicit_vertical_mixing=True on the host model config."
         )
+    if (apply_vertical_diffusion
+            and getattr(config.vertical_mixing, "ddm", None) is not None
+            and config.vertical_mixing.ddm.enabled):
+        raise NotImplementedError(
+            "VerticalMixingConfig.ddm.enabled=True is not consumed by the "
+            "EXPLICIT physics composition.  Double-diffusive mixing is applied "
+            "inside compute_vertical_K_profiles (separate salt diffusivity) and "
+            "requires implicit_vertical_mixing=True on the host model config."
+        )
 
     fns = []
 
