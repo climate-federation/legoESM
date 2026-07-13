@@ -1,24 +1,15 @@
 """Multi-layer snowpack column (energy- and mass-conserving).
 
-**NOT YET INTEGRATED** — this module is the validated multi-layer snow *core*
-for replacing the single-layer bulk SWE budget (``snow_budget.update_snow``)
-used by the land models.  It is not yet imported by any production path; wire
-it in by:
-
-1. adding a prognostic :class:`SnowColumnState` (per-layer ``swe_ice``,
-   ``swe_liq``, ``T``, ``density``; shape ``(..., n_snow_layers)``) to
-   :class:`legoesm.land.state.MultiLayerLandState`, with defaults so existing
-   constructors are unaffected;
-2. gating it behind a ``config.snow_scheme == "multilayer"`` branch in
-   ``multilayer_land.step_multilayer_land`` — replacing the single-node
-   ``update_snow`` call, threading the surface energy flux ``Q_top`` into
-   ``step_snow_column`` and the snow<->soil conductive flux ``G_bottom`` into
-   the top soil layer so the coupled surface-energy balance still closes;
-3. routing ``drainage`` (liquid leaving the pack base, at ``T_freeze``) into
-   the soil infiltration / bucket, and exposing the pack-top temperature as the
-   skin temperature for the bulk-flux and albedo blocks;
-4. adding ``--multilayer-snow`` to ``run_lmip`` + a round-trip test, and a
-   snow-column conservation test to the multilayer land suite.
+The CLM-faithful multi-layer snow *core* (Oleson et al. 2013, CLM5 Tech Note §6),
+replacing the single-node bulk SWE budget (``snow_budget.update_snow``) for the
+cold-bias / snow-tower fix.  Selected via ``MultiLayerLandConfig.snow_scheme ==
+"multilayer"`` (default ``"single"`` keeps the bulk budget, bit-for-bit).  Wiring
+plan + coupling design: ``docs/land/phase2b_snow_thermal_plan.md``.  Integration
+stages: (1) DONE — module promoted from ``_future`` + ``snow_scheme`` config gate;
+(2) prognostic :class:`SnowColumnState` on ``MultiLayerLandState``; (3) couple the
+surface flux ``Q_top`` in and the snow<->soil conductive flux ``G_bottom`` to the
+top soil layer, route ``drainage`` to the soil, expose pack-top T as skin T;
+(4) snow albedo + explicit ``h2osno_max`` cap; (5) enable + validate.
 
 Physics (fixed ``n_layers`` equal-SWE-mass layers; the total pack SWE is
 remapped to ``n_layers`` equal-mass layers each step, a conservative 1-D

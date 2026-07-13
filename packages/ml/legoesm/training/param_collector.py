@@ -42,6 +42,7 @@ from legoesm.training.trainable_params import (
 # scheme configs are migrated; the drift test keeps this in sync with the gate.
 SPEC_MODULES: tuple[str, ...] = (
     "legoesm.land.snow_bands",
+    "legoesm.land.snow_column",
     "legoesm.land.soil_thermal",
     "legoesm.ocean.physics.shortwave_penetration",
     "legoesm.ocean.physics.bottom_drag.config",

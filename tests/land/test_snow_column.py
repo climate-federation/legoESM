@@ -1,4 +1,4 @@
-"""Multi-layer snow-column (_future) conservation + physics validation.
+"""Multi-layer snow-column conservation + physics validation.
 
 Covers: the equal-mass remap conservation (water + enthalpy), water-mass
 conservation over a run, the FULL energy budget through liquid heat capacity /
@@ -11,7 +11,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.land._future.snow_column import (
+from legoesm.land.snow_column import (
     SnowColumnConfig,
     SnowColumnState,
     _enthalpy,

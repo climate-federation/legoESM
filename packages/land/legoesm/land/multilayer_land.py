@@ -41,6 +41,11 @@ from legoesm.land.carbon.carbon_cycle import step_carbon
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.snow_budget import update_snow
 from legoesm.land.state import MultiLayerLandState
+
+# Snow thermal scheme dispatch (validated on the static config value at the shared
+# impl entry — see MultiLayerLandConfig.snow_scheme).  Grow this set as schemes are
+# wired; an unknown value must raise, never silently fall through to a default.
+_SUPPORTED_SNOW_SCHEMES = ("single", "multilayer")
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
@@ -277,6 +282,23 @@ def _step_multilayer_land_impl(
     and ``step_multilayer_land_with_diagnostics``) can return different
     arities without branching inside the tight-loop code.
     """
+    # Dispatch hardening: validate the snow scheme on the STATIC config value at fn
+    # entry (never inside the traced body).  Unknown value -> hard error so a typo
+    # cannot silently run the wrong snow physics.
+    if config.snow_scheme not in _SUPPORTED_SNOW_SCHEMES:
+        raise ValueError(
+            f"Unknown snow_scheme {config.snow_scheme!r}; expected one of "
+            f"{_SUPPORTED_SNOW_SCHEMES}.")
+    if config.snow_scheme == "multilayer":
+        # Stage 1: the config value + gate exist, but the prognostic snow-column
+        # coupling (SnowColumnState on the state, canopy<->column<->soil energy
+        # split) lands in Phase 2b Stages 2-3.  Refuse rather than silently run the
+        # single-node budget under a 'multilayer' label.
+        # See docs/land/phase2b_snow_thermal_plan.md.
+        raise NotImplementedError(
+            "snow_scheme='multilayer' is not yet coupled into step_multilayer_land "
+            "(Phase 2b Stage 3, in progress); use snow_scheme='single' until then. "
+            "See docs/land/phase2b_snow_thermal_plan.md.")
     lp = land_params
     T_soil = state.T_soil        # (ncol, n_layers)
     psi = state.psi_soil         # (ncol, n_layers)
