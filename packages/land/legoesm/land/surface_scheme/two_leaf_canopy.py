@@ -451,6 +451,7 @@ def compute_two_leaf_canopy_fluxes(
     An_Sun  = fluxes_per_col["An_Sun"]
     An_Sh   = fluxes_per_col["An_Sh"]
     G       = fluxes_per_col["G"]
+    soil_conductance = fluxes_per_col["soil_conductance"]   # Robin-BC lambda (>=0)
     gs_Sun  = fluxes_per_col["gs_Sun"]
     gs_Sh   = fluxes_per_col["gs_Sh"]
     ustar   = fluxes_per_col["ustar"]
@@ -578,4 +579,7 @@ def compute_two_leaf_canopy_fluxes(
         Rn_ext=Rn_ext_d,
         residual_ext=residual_ext_d,
         stomatal_ratio=jnp.ones_like(T_soil_top),
+        # Robin-BC surface conductance so multilayer_land's final soil-thermal
+        # solve damps the surface-T feedback (Phase 2a; boreal-NaN fix).
+        surface_conductance=soil_conductance,
     )

@@ -74,10 +74,17 @@ diagnostic that tells us how much Phase 2 must do. This unblocks the baseline
 today; the reverted cells are honestly flagged (masked output + the map).
 
 **Phase 2 — Root-cause physics (the real fix).**
-- **2a. Semi-implicit surface BC for the canopy.** Return a linearised
-  `surface_conductance` (∂H/∂T_sfc etc.) from `compute_two_leaf_canopy_fluxes` so
-  the soil-thermal solve gets the Robin-BC damping (mirror
-  `simple_seb.py:221-259`). Primary structural stability fix.
+- **2a. Semi-implicit surface BC for the canopy — DONE (2026-07-13).** The canopy
+  now returns `surface_conductance = λ = −∂G_soil/∂Ts ≥ 0` (analytic ground-LW
+  slope `4·ε_s·σ·Ts³` + ground sensible `ρCp/rah_below` + ground latent via
+  Clausius-Clapeyron), computed in `canopy/solver.py::canopy_forward` and set on
+  `SurfaceFluxOutput.surface_conductance` in `two_leaf_canopy.py`.
+  `multilayer_land.py:796` already forwards it, so the final soil-thermal solve now
+  uses the Robin BC (mirrors `simple_seb.py:221-259`). Because every term is ≥0 it
+  only ADDS to the tridiagonal diagonal — strictly stabilising, never destabilising.
+  Validated: `surface_conductance` finite/positive (~80 W/m²/K, sensible-dominated);
+  canopy suite (14) + albedo (2) + driver (13) + 2 new conductance tests pass; global
+  4° smoke physical (no NaN). Real cold-cell confirmation is the Derecho re-run (Phase 4).
 - **2b. Snow-aware cell-mean canopy G.** Apply snow albedo + insulation (+ `L_s`)
   to the non-banded `G_surface` so a snow-covered cell's soil isn't overcooled to
   220 K. Aligns the canopy's internal energy balance with the already-snow-aware
