@@ -1349,6 +1349,24 @@ def compute_clm_ml_canopy_fluxes(
     # are concrete.  Mirrors make_clm_ml_forward (MLCanopyFluxesMod.py:2098).
     if _diff_mode:
         from multilayer_canopy.MLclm_varctl import GridInfo
+        # Capability guard: the differentiable path is only CORRECT with a
+        # clm-ml-jax build whose ``_CanopyFluxesDiagnostics`` runs in diff mode
+        # (``grid=`` parameter).  Older builds return from ``MLCanopyFluxes``
+        # BEFORE diagnostics in diff mode, leaving the canopy-integrated outputs
+        # (shflx/lhflx/gpp/rnet/…) stale — a silent wrong-answer.  clm-ml-jax is
+        # not on PyPI (local install), so we cannot pin a version; probe the
+        # capability directly and fail LOUDLY instead.
+        import inspect as _inspect
+        from multilayer_canopy import MLCanopyFluxesMod as _mlmod
+        if "grid" not in _inspect.signature(_mlmod._CanopyFluxesDiagnostics).parameters:
+            raise RuntimeError(
+                "CLMMLCanopyConfig.differentiable=True requires a clm-ml-jax build "
+                "whose _CanopyFluxesDiagnostics accepts grid= (runs canopy-flux "
+                "diagnostics on the jax.grad tape). The installed clm-ml-jax returns "
+                "before diagnostics in differentiable mode, which would leave shflx/"
+                "lhflx/gpp/rnet stale. Update clm-ml-jax to a revision including the "
+                "differentiable-diagnostics fix (adds grid= to _CanopyFluxesDiagnostics)."
+            )
         _p = int(filter_exposedvegp[0])
         _ncan_p = int(mlcanopy.ncan_canopy[_p])
         # dpai_profile is (np_, nlev+…); a valid ncan is 1..that width.  An

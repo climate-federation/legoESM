@@ -8,6 +8,19 @@ Convention: newest entries on top. Each entry = what changed, why, how verified.
 
 ---
 
+## 2026-07-13 — Codex review round 1: fix [P1] (silent stale outputs on old clm-ml-jax)
+
+`codex review --base 281f2b0ce` raised one **[P1]**: `differentiable=True`
+depends on the upstream diagnostics fix (`clm-ml-jax` commit `517e044`), but that
+package is not on PyPI (local install), so `clm-ml-jax>=0.1.0` cannot pin it — a
+clean env with an older build would return before `_CanopyFluxesDiagnostics` in
+diff mode and silently yield stale `shflx/lhflx/gpp/rnet`.
+- **Fix:** runtime **capability guard** in the `_diff_mode` branch — probes
+  `inspect.signature(_CanopyFluxesDiagnostics)` for the `grid` parameter and
+  raises a clear, actionable `RuntimeError` if absent (update clm-ml-jax). Turns
+  a silent wrong-answer into a loud failure. Verified the probe returns `True`
+  against the patched build.
+
 ## 2026-07-13 — Durable test + contract flip; ratchet status
 
 - Replaced the strict-xfail `test_grad_lhflx_wrt_T_lowest` with a real
