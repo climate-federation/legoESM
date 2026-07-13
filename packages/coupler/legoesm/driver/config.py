@@ -912,6 +912,16 @@ class ExperimentConfig(NamedTuple):
     # STATELESS physics (Held-Suarez / per-column); a stateful PhysicsState
     # carry is not yet SPMD-routed.  Default off preserves all existing paths.
     enable_latlon_spmd: bool = False
+    # M2b (scaling): run each lat-lon SPMD segment as ONE compiled
+    # ``lax.scan`` (``make_sharded_atm_latlon_segment`` — band-sharded
+    # geometry, one host dispatch + one in-graph finite-scalar read per
+    # segment) instead of the historical per-step Python loop.  Applies to
+    # the STATELESS ``run_atm_latlon_spmd`` lane (dynamics-only /
+    # Held-Suarez); the operator-split unified-physics SPMD lane has no
+    # compiled-scan segments yet and REFUSES this flag loudly (never a
+    # silent no-op).  Requires ``enable_latlon_spmd=True`` (validated).
+    # Default off = byte-identical per-step path.
+    latlon_spmd_compiled_segments: bool = False
 
     # Optional explicit turbulence scheme config (a
     # ``atmosphere.physics.turbulence.config.TurbulenceConfig``) overriding the
@@ -1018,6 +1028,13 @@ class ExperimentConfig(NamedTuple):
             # runtime in ModelDriver._latlon_spmd_mesh against the BUILT
             # LatLonGrid (GridConfig carries only ``resolution``, not the
             # derived n_lat/n_lon), so a wrong device count fails LOUDLY there.
+        if self.latlon_spmd_compiled_segments and not self.enable_latlon_spmd:
+            errors.append(
+                "latlon_spmd_compiled_segments=True requires "
+                "enable_latlon_spmd=True: the compiled-scan segment lane is a "
+                "mode OF the lat-band SPMD run loop (run_atm_latlon_spmd) and "
+                "is a silent no-op on every other path"
+            )
         if self.days <= 0:
             errors.append(f"days must be > 0, got {self.days}")
         if self.seed < 0:

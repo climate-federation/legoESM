@@ -6231,6 +6231,17 @@ class ModelDriver:
         # twin of _run_compiled.  Held-Suarez and dynamics-only fall through to
         # the stateless run_atm_latlon_spmd lane below.
         if self._operator_split_spmd_active():
+            if getattr(cfg, "latlon_spmd_compiled_segments", False):
+                # Never a silent no-op: the operator-split unified-physics
+                # SPMD lane steps per-step (no compiled-scan segments yet),
+                # so a set flag would silently change nothing there.
+                raise NotImplementedError(
+                    "latlon_spmd_compiled_segments=True applies to the "
+                    "STATELESS lat-lon SPMD lane (dynamics-only / "
+                    "Held-Suarez via run_atm_latlon_spmd); the operator-"
+                    "split unified-physics SPMD lane does not run compiled "
+                    "scan segments yet. Unset the flag, or set the "
+                    "parameterizations to 'none' / use held_suarez_forcing.")
             return self._run_operator_split_spmd(start_step, start_day, mesh)
         physics_fn = self._latlon_spmd_physics_fn()      # None / HS / raise
         DT = cfg.dycore.dt
@@ -6277,7 +6288,10 @@ class ModelDriver:
         hs_final, status = run_atm_latlon_spmd(
             self.model, mesh, self.state, DT, n_run,
             segment_steps=seg_len, physics_fn=physics_fn,
-            on_segment=_on_segment)
+            on_segment=_on_segment,
+            # M2b opt-in (--latlon-spmd-compiled-segments): one compiled
+            # lax.scan per segment; default False = per-step path.
+            compiled_segments=cfg.latlon_spmd_compiled_segments)
         self.state = hs_final
         logger.info("lat-lon SPMD run: %s (%.1fs)", status, time.time() - t0)
         return status

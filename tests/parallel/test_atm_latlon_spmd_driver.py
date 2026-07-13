@@ -125,3 +125,71 @@ def test_run_compiled_latlon_spmd_rejects_diag_checkpoint():
     stub = _DriverStub(model, hs0, cfg)
     with pytest.raises(NotImplementedError, match="diagnostics"):
         stub._run_compiled_latlon_spmd()
+
+
+def test_run_compiled_latlon_spmd_operator_split_refuses_compiled_segments():
+    """Dispatch-hardening (M2b CLI): the operator-split unified-physics SPMD
+    lane has no compiled-scan segments — a set ``latlon_spmd_compiled_segments``
+    must raise loudly there, never silently step per-step (the guard sits in
+    ``_run_compiled_latlon_spmd`` BEFORE the operator-split dispatch)."""
+    _require_devices()
+    model, hs0 = _model_and_hs()
+    # held_suarez_forcing=False + one non-'none' scheme => operator-split lane.
+    cfg = _exp_cfg(n_steps=1, held_suarez_forcing=False, turbulence="louis",
+                   latlon_spmd_compiled_segments=True)
+    stub = _DriverStub(model, hs0, cfg)
+    with pytest.raises(NotImplementedError, match="operator-split"):
+        stub._run_compiled_latlon_spmd()
+
+
+def test_run_compiled_latlon_spmd_passes_compiled_segments_flag(monkeypatch):
+    """M2b CLI wiring: ``config.latlon_spmd_compiled_segments=True`` reaches
+    ``run_atm_latlon_spmd`` as ``compiled_segments=True`` (spied kwarg), the
+    run COMPLETEs, and the final state matches a DIRECT
+    ``run_atm_latlon_spmd(compiled_segments=True)`` reference (same-lane
+    comparison, the sibling of test_run_compiled_latlon_spmd_completes_and_
+    matches_reference).  Deliberately NOT compared against the flag-OFF lane
+    here: scan-vs-loop parity is owned by
+    tests/parallel/test_atm_latlon_segment.py at its calibrated near-rest
+    config — on this Held-Suarez JET IC the PPM limiters amplify the
+    compiled scan's last-bit compilation-order roundoff to ~1e-6, which is a
+    property of the lanes, not of the driver wiring under test."""
+    _require_devices()
+    import legoesm.atmosphere.dynamics.sharded_atm_latlon_step as sas
+
+    n_steps = 4
+    # driver run with the flag ON + a spy asserting the kwarg flows through
+    seen = {}
+    real = sas.run_atm_latlon_spmd
+
+    def _spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sas, "run_atm_latlon_spmd", _spy)
+    model_on, hs0 = _model_and_hs()
+    stub_on = _DriverStub(
+        model_on, hs0,
+        _exp_cfg(n_steps=n_steps, latlon_spmd_compiled_segments=True))
+    assert stub_on._run_compiled_latlon_spmd() == "COMPLETED"
+    assert seen.get("compiled_segments") is True
+    assert bool(np.isfinite(np.asarray(stub_on.state.T.data)).all())
+
+    # Reference: the validated runner directly on the SAME lane (fresh model,
+    # cache-independent), same segment cadence as the driver method.
+    ref_model, _ = _model_and_hs()
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:N_DEV]),
+                             axis_names=("lat",))
+    hs_ref, st_ref = run_atm_latlon_spmd(
+        ref_model, mesh, hs0, DT, n_steps,
+        segment_steps=max(1, int(86400.0 / DT)),
+        physics_fn=held_suarez_forcing_latlon,
+        compiled_segments=True)
+    assert st_ref == "COMPLETED"
+    for field in ("u", "v", "T", "p_s"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(stub_on.state, field).data),
+            np.asarray(getattr(hs_ref, field).data),
+            rtol=1e-10, atol=1e-12,
+            err_msg=(f"compiled-segments driver run diverged from the "
+                     f"direct compiled-segments reference in {field}"))
