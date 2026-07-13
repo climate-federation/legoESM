@@ -34,7 +34,7 @@ that qualifier is wrong.
 |------|---------|------------|-------------------------------|----------------|------------------|
 | **lat-lon C-grid** | (a) latitude-band MPI, `bench_ocean_mpi_scaling.py` (parity + conservation gates; `--wet-balance`; distributed fixed-M PCG / single_reduce / preconditioner options) | (a) full-step SPMD `bench_ocean_latlon_spmd_scaling.py` (single-process multi-device AND `--multicontroller` NCCL; parity + conservation gates); jit-once sharded step | 2-GPU full step: strong 0.92 eff at production size, weak 0.97 @ ~590k cells/rank (Ginsburg). CPU-MPI strong np16→32 eff 0.55 (implicit-CN reduction wall; split-explicit + local clamp opt-in 1.15–1.65× at ≥2 nodes) | implicit-CN allreduce wall at high ranks; land-cell load imbalance | Derecho/Levante A100 ladders (jobs exist, unrun); wide-halo split-explicit A/B at ≥16 ranks; wet-cell-balanced partitions at scale |
 | **tripole / eORCA** | (c) operator-level fold-aware band-MPI halo machinery validated (`tests/distributed/test_latlon_mpi_tripole.py`); full-model MPI step NOT validated — `bench_ocean_mpi_scaling.py --tripole` refuses loudly | (d→c) `make_sharded_ocean_step` raises `NotImplementedError` on a fold grid; single-GPU throughput measured only (b: 313 Mc/s fp32, `SCALING_SUMMARY.md`) | none | SPMD/full-model fold wiring | wire + parity-gate a full `LatLonCGridOceanModel.step` tripole MPI case, then the SPMD fold |
-| **MPAS / Voronoi** | (c) `voronoi_mpi` step exists; MPI conservation tested; NO scaling bench lane drives it | (b) single-GPU throughput only (333 Mc/s fp32 impl_cn) | none | missing bench lane, not missing capability | add an MPAS-ocean scaling lane on the existing `make_voronoi_mpi_step` |
+| **MPAS / Voronoi** | (c) bench lane EXISTS (`bench_ocean_mpas_scaling.py`: multi-rank `MPASOceanModel.step` on `layout.local_mesh`, parity + conservation gates, partition metrics, M1 fused-scan/wet-cell/residual fields, `--halo-refresh` per-step packed exchange). NOT stage-correct: owned-only reductions PASS everywhere, but no per-STAGE halo refreshes exist (only the implicit-PCG matvec exchanges); rows carry `stage_halo_correct=false`. NOTE: `make_voronoi_mpi_step` is the ATMOSPHERE step — no ocean equivalent exists. See `mpas_ocean_distributed_stage_audit.md` | (b) single-GPU throughput only (333 Mc/s fp32 impl_cn) | none | within-step halo staleness (stage-level refreshes are real infrastructure, scoped in the stage audit) | np≥2 CPU-MPI receipts on the gated lane; then per-stage refreshes (stage-audit "Deferred" list) |
 | **cubed-sphere** | (c) supported in `run_omip.py`; generic distributed layout, MPI conservation tested; no dedicated scaling lane | (c) same | none | no lane | only if a science driver demands it |
 
 ## CRM / LES (plane dycore) — see `crm_les_scaling.md`
@@ -69,7 +69,11 @@ Multi-node CRM/LES is unmeasured (c).
 4. **Ocean active/wet-cell compaction + wet-balanced partitioning** (~2× on
    ~40%-land grids; `--wet-balance` bands are the partial groundwork).
 5. **Tripole/eORCA SPMD fold wiring** (full-model MPI parity case first).
-6. **MPAS-ocean scaling lane** (bench the existing `voronoi_mpi` step).
+6. **MPAS-ocean scaling lane** — lane DONE (`bench_ocean_mpas_scaling.py`,
+   M1 contract fields since scaling-M3d inc-1); remaining: the stage-correct
+   distributed step itself (`mpas_ocean_distributed_stage_audit.md`
+   "Deferred" list — per-stage packed refreshes, wide-halo explicit
+   substeps, freshwater owned-mask threading).
 7. **Cubed-sphere atm sub-face tiled production step** — THE lever for >6
    GPUs (d_sw1/5/6 assembly remains).
 8. **Message aggregation/overlap for the latency-bound GPU legs** (f64 ≈ f32
