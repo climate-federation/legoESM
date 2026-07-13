@@ -3699,6 +3699,48 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         vertex_mask=vertex_mask,
     )
 
+    # --- Energy backscatter (post-viscosity; lateral-friction family). ---
+    # Jansen-Held (2014) energy backscatter (diagnostic-E, no
+    # carry; default OFF => bit-identical). A CFL-bounded NEGATIVE Laplacian
+    # ``-nu_bs*grad^2(u)`` that RE-INJECTS resolved KE, sourced from the resolved
+    # scale-selective (biharmonic + Leith) dissipation the lateral closure just
+    # removed -- the Jansen-Held energetic-consistency + stability pairing (see
+    # lateral_mixing/backscatter.py). ``nu_bs`` is bounded by BOTH ``E_max`` and
+    # the per-cell Laplacian viscous-CFL ceiling (``laplacian_smag_cfl_cap`` --
+    # the SAME cap the Smagorinsky closure uses), enforced EXACTLY at BOTH the
+    # h- and q-point coefficients. Feature-gated on the STATIC
+    # config (Python ``if`` on a compile-time bool, NOT ``jnp.where``): the whole
+    # block is skipped when off. ``diag_Bh_bilap``/``diag_Cl_leith`` are the
+    # APPLIED biharmonic + Leith tendencies returned above (no recompute); the
+    # harmonic ``A_h`` is deliberately EXCLUDED (a same-order harmonic sink does
+    # NOT stabilise a negative Laplacian -- module docstring).
+    _bs_u = None
+    _bs_v = None
+    _bscfg = getattr(config, "backscatter", None)
+    if _bscfg is not None and _bscfg.enabled:
+        from legoesm.ocean.physics.lateral_mixing.backscatter import (
+            diagnostic_backscatter_cgrid,
+        )
+        # The backscatter increment is applied to MOMENTUM, which steps with
+        # dt_mom = dt / dt_mom_ratio (model step; also the AB2 weight-1.0
+        # dissipative bucket) -- so the viscous-CFL ceiling must be built
+        # from dt_mom, NOT the tracer ``dt`` this function receives (codex
+        # MED-4 r2). Default dt_mom_ratio=1.0 => dt_mom == dt, bit-identical.
+        # Both the h- AND q-point ceilings are threaded so the independently
+        # interpolated vertex coefficient is capped too.
+        _bs_dt_mom = dt / getattr(config, "dt_mom_ratio", 1.0)
+        _bs_nu_max_h, _bs_nu_max_q = laplacian_smag_cfl_cap(
+            grid, _bs_dt_mom, _bscfg.nu_bs_cfl_safety)
+        _bs_u, _bs_v, _ = diagnostic_backscatter_cgrid(
+            u, v,
+            diag_Bh_bilap_u + diag_Cl_leith_u,
+            diag_Bh_bilap_v + diag_Cl_leith_v,
+            _bs_nu_max_h, _bs_nu_max_q, grid, _bscfg,
+            mask=mask, u_mask=u_mask, v_mask=v_mask, dz=h_k,
+        )
+        du_dt = du_dt + _bs_u
+        dv_dt = dv_dt + _bs_v
+
     # --- Bottom drag. ---
     du_dt, dv_dt, diag_botdrag_u, diag_botdrag_v = _bc_bottom_drag(
         du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid, h_k=h_k,
@@ -3724,6 +3766,12 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                        + diag_Cl_leith_u + diag_botdrag_u)
         dv_diss_raw = (diag_Ah_lap_v + diag_Bh_bilap_v + diag_Cs_smag_v
                        + diag_Cl_leith_v + diag_botdrag_v)
+        if _bs_u is not None:
+            # Backscatter rides with the lateral-friction family (weight-1.0,
+            # un-extrapolated) under AB2, like the dissipative closures it is
+            # the anti-diffusive sibling of. ``None`` when off => bit-identical.
+            du_diss_raw = du_diss_raw + _bs_u
+            dv_diss_raw = dv_diss_raw + _bs_v
         du_dt = du_dt - du_diss_raw
         dv_dt = dv_dt - dv_diss_raw
     else:

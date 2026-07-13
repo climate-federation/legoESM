@@ -60,6 +60,13 @@ def step_lake(
     # frozen lakes (coupler-conservation audit F17).
     L_eff = jnp.where(is_frozen, constants.L_s, constants.L_v)
 
+    # Frozen lakes are bright: absorb THIS step's shortwave through the
+    # ice/snow albedo, keyed on the same start-of-step frozen state as the
+    # q_sat / L_s switch above (not the open-water 0.08).  Keeps the
+    # in-step energy budget consistent with the albedo reported to the
+    # atmosphere in the response below.
+    albedo_eff = jnp.where(is_frozen, config.albedo_lake_ice, config.albedo_lake)
+
     # Bulk fluxes
     rho = forcing.rho_lowest
 
@@ -107,20 +114,60 @@ def step_lake(
     dT_epi_dt = (sw_net + lw_net - shflx - lhflx - F_mix) / cap_epi
     T_trial_epi = T_epi + dt * dT_epi_dt
 
-    # Lake freezing: clamp T at freezing point.
-    # Energy removed by clamping is diagnosed as Q_freeze (ice-formation
-    # latent heat flux).  This closes the layer energy budget:
-    #   cap * dT/dt = (net flux in) - Q_freeze
+    # ------------------------------------------------------------------
+    # Lake-ice latent-heat reservoir — energy-conserving freeze/thaw.
+    #
+    # Sign / energy convention (enthalpy positive = warmer):
+    #   E_ice >= 0 [J/m²] is the latent-heat DEBT held as lake ice — the
+    #   heat that must be RE-ABSORBED from the column to melt that ice back
+    #   to liquid at T_freeze.  The column enthalpy
+    #       H = cap_epi*T_epi + cap_hypo*T_hypo - E_ice
+    #   is INVARIANT under the freeze/melt update below (proven
+    #   analytically and by the freeze->thaw round-trip test), so the
+    #   freezing clamp no longer manufactures energy from nowhere.
+    #
+    #   FREEZE (T_trial < T_freeze): the heat cap*(T_freeze - T_trial) the
+    #     bare clamp would otherwise INJECT is instead BANKED as new ice —
+    #     E_ice += cap*(T_freeze - T_trial); water -> T_freeze.
+    #   MELT  (T_trial > T_freeze and E_ice > 0): enthalpy above freezing
+    #     first pays down the ice debt before the water may warm —
+    #     melt = min(cap*(T_trial - T_freeze), E_ice); E_ice -= melt;
+    #     T = T_freeze + (cap*(T_trial - T_freeze) - melt)/cap.
+    #   Both moves shuttle the SAME joules between water and ice, so a
+    #   freeze step followed by a thaw step conserves total energy.  This
+    #   replaces the old ``Q_freeze`` per-step flux, which was diagnosed
+    #   but consumed by NOTHING — the clamp created energy each freeze and
+    #   no melt cost was ever repaid on re-warming.
+    #
+    # ponytail: the fully-explicit upgrade is a dedicated prognostic
+    #   ``ice_energy: Field`` [J/m²] (or ice mass / thickness) on
+    #   LakeState, initialised in ``coupler.init_surface_state``, so ice
+    #   fraction can also drive albedo/emissivity and the deep layer can
+    #   melt its own banked ice.  Stored here in the existing ``Q_freeze``
+    #   slot to avoid rippling a new state field through every caller.
     T_freeze = config.T_freeze
-    T_epi_new = jnp.maximum(T_trial_epi, T_freeze)
-    Q_freeze_epi = cap_epi * jnp.maximum(T_freeze - T_trial_epi, 0.0) / dt
+    E_ice_prev = state.Q_freeze.data if state.Q_freeze is not None else 0.0
 
-    # Hypolimnion: receives mixing flux only
+    # Epilimnion (surface layer): banks freeze latent heat and repays it
+    # on melt.
+    freeze_epi = cap_epi * jnp.maximum(T_freeze - T_trial_epi, 0.0)
+    surplus_epi = cap_epi * jnp.maximum(T_trial_epi - T_freeze, 0.0)
+    melt_epi = jnp.minimum(surplus_epi, E_ice_prev)
+    E_ice = E_ice_prev + freeze_epi - melt_epi
+    T_epi_new = T_freeze + (surplus_epi - melt_epi) / cap_epi
+
+    # Hypolimnion: receives mixing flux only.  Deep water essentially never
+    # freezes, but if it does its latent heat is BANKED into the same
+    # column reservoir so the clamp stays energy-neutral.  Ice floats, so
+    # only the epilimnion above draws the reservoir down on melt (see the
+    # ponytail note); in normal operation the hypolimnion is well above
+    # freezing and this term is zero.
     cap_hypo = config.rho_water * config.c_water_mass * config.h_hypo
     dT_hypo_dt = F_mix / cap_hypo
     T_trial_hypo = T_hypo + dt * dT_hypo_dt
+    freeze_hypo = cap_hypo * jnp.maximum(T_freeze - T_trial_hypo, 0.0)
+    E_ice = E_ice + freeze_hypo
     T_hypo_new = jnp.maximum(T_trial_hypo, T_freeze)
-    Q_freeze_hypo = cap_hypo * jnp.maximum(T_freeze - T_trial_hypo, 0.0) / dt
 
     # Convective overturn for freshwater density inversion.
     # Freshwater density peaks at T_max ≈ 3.983 °C (277.133 K) — its
@@ -149,15 +196,20 @@ def step_lake(
     T_epi_new = jnp.where(unstable, T_mix, T_epi_new)
     T_hypo_new = jnp.where(unstable, T_mix, T_hypo_new)
 
-    Q_freeze_total = Q_freeze_epi + Q_freeze_hypo
-
-    Q_freeze_field = None
+    # Persist the ice-energy reservoir in the existing Q_freeze slot.
+    # Preserve the incoming Field metadata (name/units) when present so the
+    # pytree aux_data stays invariant across coupler scan steps (the
+    # coupler seeds this field in ``init_surface_state``); the stand-alone
+    # construction path labels it honestly in J/m².  NB in the coupler
+    # path the seed still carries the legacy "W/m2" label for a J/m²
+    # quantity — the honest fix is the dedicated ``ice_energy`` field named
+    # in the ponytail note above.
     if state.Q_freeze is not None:
-        Q_freeze_field = state.Q_freeze.replace(data=Q_freeze_total)
+        Q_freeze_field = state.Q_freeze.replace(data=E_ice)
     else:
         Q_freeze_field = Field(
-            data=Q_freeze_total, name="Q_freeze",
-            dims=state.T_epi.dims, units="W/m2",
+            data=E_ice, name="lake_ice_energy",
+            dims=state.T_epi.dims, units="J/m2",
         )
 
     new_state = LakeState(

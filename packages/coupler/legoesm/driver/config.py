@@ -199,6 +199,16 @@ class DycoreConfig(NamedTuple):
     # face-scatter until the reductions are allreduce-aware).  Appended last to
     # preserve positional ABI.
     moisture_flux_form: bool = False
+    # #930: vertical biharmonic (∂⁴/∂σ⁴) hyperdiffusion coefficient [1/s] for T
+    # on the MPAS hydrostatic dycore — scale-selective damping of the grid-scale
+    # 2Δσ vertical checkerboard that the adiabatic κ·T·ω/p term amplifies (no
+    # other vertical operator in that dycore opposes it) until it rides the
+    # silent T_min=50 K floor (#871/#912/#915).  del4 damps 2Δσ ~47× faster
+    # than an 8Δσ resolved wave, so resolved vertical structure is ~untouched;
+    # explicit-stable to huge dt (16·ν·dt≪1).  Only wired to the MPAS PE dycore
+    # (``component_factory``).  Set 0.0 to reproduce the pre-#930 dycore exactly.
+    # Appended last to preserve positional ABI.
+    mpas_nu_vert4_T: float = 2.0e-6
 
 
 class EvaluationConfig(NamedTuple):
@@ -450,13 +460,17 @@ class ExperimentConfig(NamedTuple):
     # morrison microphysics.  Physics-fidelity correction (no tunable knob).
     subgrid_autoconversion: bool = False
 
-    # Tiedtke convective precipitation efficiency [0,1] (Tiedtke 1989 in-
-    # updraft precipitation).  >0 diverts that fraction of convective
-    # condensate to rain (sediments via microphysics, invisible to radiation)
-    # instead of detraining it all as suspended cloud.  0 = off (legacy).
-    # Observed deep-convective CPE ~0.5-0.9.  Tiedtke-only (guarded in
-    # _resolve_convection).
-    convective_precip_efficiency: float = 0.0
+    # Convective in-updraft precipitation efficiency [0,1] (Tiedtke 1989 in-
+    # updraft precipitation).  A value >0 diverts that fraction of the
+    # convective condensate to rain (sediments via microphysics, invisible to
+    # radiation) instead of detraining it all as suspended cloud.  Observed
+    # deep-convective CPE ~0.5-0.9.  Supported by Tiedtke and Bechtold (threaded
+    # in _resolve_convection).  SENTINEL: ``None`` (default) = use each scheme's
+    # OWN default (Tiedtke 0.0 = legacy no-split; Bechtold 0.7 = ON, the #929
+    # anvil-drain fix); an EXPLICIT value overrides it (0.0 forces the legacy
+    # detrain-all path, dq_r None).  ``None`` distinguishes "unset" from an
+    # explicit 0.0 so Bechtold's ON-by-default is not silently disabled.
+    convective_precip_efficiency: float | None = None
 
     # Tiedtke plume buoyancy-death memory: when True the entraining plume,
     # once it exhausts its cumulative buoyancy budget, stays dead instead of
@@ -907,6 +921,16 @@ class ExperimentConfig(NamedTuple):
     # envelope (non-ssp_rk3 integrator, any extra damping term, duogrid)
     # LOUDLY.  Default off preserves every existing path.
     enable_tiled_dycore: bool = False
+    # M2b (scaling): run each lat-lon SPMD segment as ONE compiled
+    # ``lax.scan`` (``make_sharded_atm_latlon_segment`` — band-sharded
+    # geometry, one host dispatch + one in-graph finite-scalar read per
+    # segment) instead of the historical per-step Python loop.  Applies to
+    # the STATELESS ``run_atm_latlon_spmd`` lane (dynamics-only /
+    # Held-Suarez); the operator-split unified-physics SPMD lane has no
+    # compiled-scan segments yet and REFUSES this flag loudly (never a
+    # silent no-op).  Requires ``enable_latlon_spmd=True`` (validated).
+    # Default off = byte-identical per-step path.
+    latlon_spmd_compiled_segments: bool = False
 
     # Optional explicit turbulence scheme config (a
     # ``atmosphere.physics.turbulence.config.TurbulenceConfig``) overriding the
@@ -1031,6 +1055,13 @@ class ExperimentConfig(NamedTuple):
             # runtime in ModelDriver._latlon_spmd_mesh against the BUILT
             # LatLonGrid (GridConfig carries only ``resolution``, not the
             # derived n_lat/n_lon), so a wrong device count fails LOUDLY there.
+        if self.latlon_spmd_compiled_segments and not self.enable_latlon_spmd:
+            errors.append(
+                "latlon_spmd_compiled_segments=True requires "
+                "enable_latlon_spmd=True: the compiled-scan segment lane is a "
+                "mode OF the lat-band SPMD run loop (run_atm_latlon_spmd) and "
+                "is a silent no-op on every other path"
+            )
         if self.days <= 0:
             errors.append(f"days must be > 0, got {self.days}")
         if self.seed < 0:

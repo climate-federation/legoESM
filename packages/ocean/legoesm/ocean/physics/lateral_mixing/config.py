@@ -62,6 +62,8 @@ __param_spec__ = {
             "kappa_GM": {"units": "m^2/s", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
             "kappa_Redi": {"units": "m^2/s", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
             "surface_complement_depth": {"units": "m", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
+            "resfn_gamma": {"units": "1", "bounds": (1.0, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Hallberg 2013 (Ocean Modelling 72, 92) resolution function: grid points per deformation radius at half-suppression", "shape": None},
+            "resfn_cbcl_ms": {"units": "m s-1", "bounds": (0.5, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Hallberg 2013 / Chelton et al. 1998 (JPO 28, 433): fixed first-baroclinic gravity-wave speed for L_d = c/|f|", "shape": None},
         },
     },
 }
@@ -361,6 +363,46 @@ class GMRediConfig(NamedTuple):
     # NOT for forward-only runs (no effect); select it for long-horizon
     # gradient-based calibration/DA through GM/Redi. Validated fail-fast by
     # ``validate_adjoint_stabilization`` at every GM/Redi entry point.
+    # --- Hallberg (2013) resolution function for kappa_GM (default off) ---
+    resolution_function: bool = False
+    # ^ When True, multiply the EFFECTIVE GM coefficient ``kappa_GM`` (whatever
+    # the active closure produced -- constant / Visbeck / Treguier / prognostic
+    # EKE / GEOMETRIC) by the Hallberg (2013) resolution function
+    #     f_res = 1 / (1 + (L_d / (resfn_gamma * Delta))**2),
+    # with ``Delta = sqrt(cell area)`` the local grid spacing and the
+    # first-baroclinic deformation radius ``L_d = resfn_cbcl_ms / |f|`` (|f|
+    # floored near the equator).  ``f_res -> 1`` where ``Delta >> L_d`` (coarse,
+    # eddies unresolved: full GM) and ``-> 0`` where ``Delta << L_d`` (eddy-
+    # resolving: GM off, let the resolved eddies act), matching NEMO5 ldf_eiv /
+    # MOM6 resolution-scaled KhTh.  Applied to GM ONLY -- the Redi isopycnal
+    # diffusivity ``kappa_Redi`` is NOT scaled (NEMO/MOM6 scale the eddy-
+    # transport bolus coefficient, not the along-isopycnal tracer diffusion), so
+    # as ``f_res -> 0`` the scheme reduces to pure Redi.  Shared by the lat-lon
+    # C-grid, MPAS and cubed-sphere GM/Redi paths.  Default False => the
+    # kappa_GM object is returned untouched => BYTE-IDENTICAL.
+    #
+    # EKE-BUDGET COUPLING (lat-lon prognostic closures; codex MED-3 r2): when
+    # an EKE / GEOMETRIC closure is active, the model step scales the
+    # GM-DERIVED eddy-energy production by the SAME f_res — parameterized
+    # ``kappa*sigma^2`` via ``eke_apply_local_source(production_scale=...)``,
+    # the GEOMETRIC baroclinic conversion B_C, and the realized skew
+    # conversions (via the scaled kappa handed to the conversion builders) —
+    # so the E budget receives exactly the APE->EKE conversion the APPLIED
+    # (tapered) coefficient performs; an unscaled production would
+    # over-energise E (and hence kappa = c_k*L*sqrt(E)) relative to the
+    # realized GM work.  Redi-side terms (kappa_redi_override, -P_diss_iso,
+    # GEOMETRIC kappa_n) and the barotropic B_T (kappa_u) stay UNSCALED.
+    # See ``gm_resolution_factor`` (the single f_res definition) and
+    # ``ocean_model_latlon_cgrid`` step / ``_eke_3d_step``.
+    resfn_gamma: float = 2.0
+    # ^ Resolution-function width gamma (Hallberg 2013): grid points per
+    # deformation radius at which GM is half-suppressed (~1-2 typical).
+    resfn_cbcl_ms: float = 2.0
+    # ^ Fixed first-baroclinic gravity-wave speed c [m/s] for ``L_d = c/|f|``
+    # (Chelton et al. 1998: c1 ~ 2 m/s open-ocean).  A FIXED c bound is used
+    # (rather than the flow-dependent ``int(N dz)/pi``) so the resolution
+    # function applies uniformly to ALL closures incl. constant-kappa, which
+    # never computes ``int(N dz)``.
 
 
 class LateralMixingConfig(NamedTuple):

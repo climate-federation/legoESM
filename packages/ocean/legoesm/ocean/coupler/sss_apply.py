@@ -85,9 +85,12 @@ def apply_sss_restoring_step(
     if not config.enabled:
         return state
 
-    # Surface salinity from the existing state.
-    S_arr = np.asarray(state.S.data, dtype=np.float64)
-    S_top = S_arr[..., 0]
+    # Surface salinity from the existing state.  Slice FIRST (device-side),
+    # THEN convert: np.asarray on the full leaf would assemble the entire
+    # 3-D (possibly lat-band-sharded) S field on the host every step (codex
+    # batch4 HIGH); only the 2-D surface layer crosses.  Value-identical —
+    # slicing commutes with the elementwise f64 upcast.
+    S_top = np.asarray(state.S.data[..., 0], dtype=np.float64)
 
     # Region masks need the TRUE per-cell lat/lon.  On a CURVILINEAR grid
     # (tripole) ``grid.lat``/``grid.lon`` are 1-D row-mean / first-row
@@ -133,12 +136,22 @@ def apply_sss_restoring_step(
     dS_dt = np.asarray(out["dS_dt_top"], dtype=np.float64)
     land_mask = np.asarray(state.land_mask.data, dtype=np.float64)
 
-    S_new = S_arr.copy()
-    S_new[..., 0] = S_top + dt * dS_dt * land_mask
+    S_top_new = S_top + dt * dS_dt * land_mask
 
+    # Surface-only write-back: scatter the updated 2-D layer into the leaf
+    # DEVICE-SIDE instead of round-tripping the full 3-D field through the
+    # host (codex batch4 HIGH).  Deep layers keep the original device buffer
+    # (bit-identical — the old full round trip re-uploaded them unchanged;
+    # for f32 leaves the old f32->f64->f32 detour was exact).  The set()
+    # casts the f64 surface update to the leaf dtype exactly like the old
+    # in-place numpy assign, and PRESERVES the leaf dtype.  A plain-numpy
+    # host state (no ``.at``) uploads once — same cost as before.
+    S_dev = state.S.data
+    if not hasattr(S_dev, "at"):
+        S_dev = jnp.asarray(S_dev)
     return state._replace(
         S=Field(
-            jnp.asarray(S_new),
+            S_dev.at[..., 0].set(jnp.asarray(S_top_new)),
             name=state.S.name,
             dims=state.S.dims,
             units=state.S.units,
@@ -186,8 +199,9 @@ def apply_sss_restoring_step_mpas(
     if not config.enabled:
         return state
 
-    S_arr = np.asarray(state.S.data, dtype=np.float64)
-    S_top = S_arr[..., 0]                                    # (nCells,)
+    # Slice FIRST (device-side), THEN convert — same host-transfer contract
+    # as the lat-lon variant above: only the (nCells,) surface layer crosses.
+    S_top = np.asarray(state.S.data[..., 0], dtype=np.float64)   # (nCells,)
 
     lat_deg = np.degrees(np.asarray(mesh.latCell))           # (nCells,)
     lon_deg = np.degrees(np.asarray(mesh.lonCell))           # (nCells,)
@@ -211,12 +225,16 @@ def apply_sss_restoring_step_mpas(
     dS_dt = np.asarray(out["dS_dt_top"], dtype=np.float64)
     land_mask = np.asarray(state.land_mask.data, dtype=np.float64)
 
-    S_new = S_arr.copy()
-    S_new[..., 0] = S_top + dt * dS_dt * land_mask
+    S_top_new = S_top + dt * dS_dt * land_mask
 
+    # Surface-only device-side write-back (see the lat-lon variant above):
+    # no full-3-D host round trip; deep layers keep the original buffer.
+    S_dev = state.S.data
+    if not hasattr(S_dev, "at"):
+        S_dev = jnp.asarray(S_dev)
     return state._replace(
         S=Field(
-            jnp.asarray(S_new),
+            S_dev.at[..., 0].set(jnp.asarray(S_top_new)),
             name=state.S.name,
             dims=state.S.dims,
             units=state.S.units,

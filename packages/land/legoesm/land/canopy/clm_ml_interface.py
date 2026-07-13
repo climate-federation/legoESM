@@ -33,7 +33,7 @@ from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.canopy.sif import SIFConfig, multilayer_canopy_sif
 from legoesm.land.canopy.state import CanopyState
 from legoesm.land.surface_scheme import SurfaceFluxOutput
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 
 # CLM-ML unfilled array elements carry spval = 1e36; treat anything above this
 # guard (or non-finite) as invalid padding and drop it from the SIF sum.
@@ -991,7 +991,7 @@ def _extract_surface_fluxes(
     # soil surface relative humidity.  Using qsat(Tg) ignores this and
     # overestimates soil evaporation by ~30% at smp=-50000 mm (rhg≈0.70).
     # Use rhg_soil from mlcanopy if available; fall back to qsat only if absent.
-    q_sat_surface = saturation_mixing_ratio(T_surface, forcing.p_surface)
+    q_sat_surface = saturation_specific_humidity(T_surface, forcing.p_surface)
     if hasattr(mlcanopy, "rhg_soil"):
         rhg = jnp.stack([mlcanopy.rhg_soil[i + 1] for i in range(ncol)])
         # Clamp rhg to [0, 1] — spval=1e36 indicates uninitialised
@@ -1038,6 +1038,20 @@ def _extract_surface_fluxes(
     else:
         T_canopy_air = T_surface  # fallback: tg_soil
 
+    # Below-canopy GROUND latent heat [W/m²]: CLM-ML's soil-surface evaporation
+    # (``lhsoi_soil``, throttled by the Philip rhg_soil humidity), separate from
+    # the leaf transpiration + canopy-water evaporation folded into ``lhflx``.
+    # Exposing it lets the multilayer driver route the ground component to
+    # snowpack sublimation (L_s) over snow while leaf transpiration (LE_canopy =
+    # lhflx − LE_soil) draws soil water at L_v — the same phase-split the two-leaf
+    # scheme gets.  ``lhsoi_soil`` is a CORE MLSoilFluxes output (always present
+    # in a compatible clm-ml-jax), so read it directly: a missing field raises
+    # loudly here rather than silently reverting the driver to the pre-F13 all-
+    # L_v-soil routing (which would drain soil water for ground evaporation that
+    # should sublimate from the snowpack).
+    LE_soil = jnp.stack([mlcanopy.lhsoi_soil[i + 1] for i in range(ncol)])
+    LE_canopy = lhflx - LE_soil
+
     return SurfaceFluxOutput(
         shflx=shflx,
         lhflx=lhflx,
@@ -1058,6 +1072,8 @@ def _extract_surface_fluxes(
         stomatal_ratio=jnp.ones(ncol),
         stflx_air=stflx_air,
         stflx_veg=stflx_veg,
+        LE_canopy=LE_canopy,
+        LE_soil=LE_soil,
     )
 
 

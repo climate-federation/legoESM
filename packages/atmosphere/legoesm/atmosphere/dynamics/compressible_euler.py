@@ -570,7 +570,7 @@ def _theta_vert_advection_van_leer_kernel(
     """Monotone (van-Leer TVD) vertical advection tendency ``-(w/J) ∂θ/∂z``.
 
     Layout-agnostic ([..., nlev]) counterpart of the plane's
-    ``_vertical_advection_van_leer_plane`` (``J[..., None]`` broadcast so the
+    ``vertical_advection_van_leer_plane`` (``J[..., None]`` broadcast so the
     shared acoustic column kernels can call it). Returns the tendency to ADD
     (same sign + smooth-limit as the centred update it replaces — van-Leer
     reduces to the centred scheme for a smooth field with uniform ``w``).

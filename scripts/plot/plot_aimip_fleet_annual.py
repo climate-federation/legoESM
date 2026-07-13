@@ -145,18 +145,20 @@ def _global_annual(ds: xr.Dataset, varname: str = "tas") -> xr.DataArray:
 # Our variants' overlay colors on the fleet figure.
 LEGOESM_VARIANT_COLORS = {
     "classical": "#AA3377", "column_nn": "#EE7733", "sfno_physics": "#009988",
+    "column_nn_dense": "#CC3311", "sfno_physics_dense": "#33BBEE",
 }
 
 
 def _legoesm_variant_from_stem(stem: str) -> str:
     """Parse the variant out of a legoesm_<variant>_amip*.csv stem.
 
-    Falls back to the raw stem for a non-conforming name (still plotted,
+    Prefers the LONGEST matching key so a specific variant
+    (``column_nn_dense``) wins over its prefix (``column_nn``). Falls
+    back to the raw stem for a non-conforming name (still plotted,
     labelled by filename).
     """
-    return next(
-        (v for v in LEGOESM_VARIANT_COLORS if f"_{v}_" in f"_{stem}_"), stem,
-    )
+    matches = [v for v in LEGOESM_VARIANT_COLORS if f"_{v}_" in f"_{stem}_"]
+    return max(matches, key=len) if matches else stem
 
 
 def _subtract_baseline(arr: xr.DataArray, b0: int, b1: int) -> xr.DataArray:

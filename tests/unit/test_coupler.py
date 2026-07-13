@@ -443,10 +443,16 @@ def test_sea_ice_freshwater_flux_balances_under_ablation_clamp():
         f"ice+ocean+atmosphere water not conserved in clamp: "
         f"max |resid| = {float(jnp.max(jnp.abs(water_residual))):.3e}"
     )
-    # Ocean heat extraction stays in [0, F_ocean*conc]: the basal turbulent flux
-    # is scaled by the survived fraction, NOT reported in full while the state
-    # only absorbed the capped melt (the pre-fix over-extraction bug).
-    assert jnp.all(resp.ocean_heat_extraction >= -1e-9)
+    # Ocean heat extraction upper-bounded by F_ocean*conc: the basal turbulent
+    # flux is scaled by the survived fraction, NOT reported in full while the
+    # state only absorbed the capped melt (the pre-fix over-extraction bug).
+    # LOWER bound: extraction is legitimately NEGATIVE here — when the ice fully
+    # ablates the surplus surface-melt energy WARMS the ocean (finding #6,
+    # ``- surface_melt_ocean_gain``).  The old ``>= -1e-9`` assertion encoded the
+    # pre-#6 drop-the-surplus behaviour and is stale; the physical bound is that
+    # the ocean gain cannot exceed the surface energy delivered this step.
+    sw_in, lw_in = 600.0, 400.0  # this scenario's radiative forcing [W/m^2]
+    assert jnp.all(resp.ocean_heat_extraction >= -(sw_in + lw_in))
     assert jnp.all(resp.ocean_heat_extraction <= F_ocean * conc0 + 1e-6)
 
 

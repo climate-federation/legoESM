@@ -26,6 +26,7 @@ from legoesm.thermo import (
     saturation_vapor_pressure_aerk,
     d_saturation_vapor_pressure_aerk,
     dd_saturation_vapor_pressure_aerk,
+    vapor_pressure_from_specific_humidity,
 )
 from legoesm.land.leaf_biophysics import DIFFUSIVITY_RATIO_H2O_CO2
 from legoesm.land.stomata import ball_berry_gs, medlyn_gs
@@ -165,7 +166,7 @@ def canopy_met_variables(
       All in Pa (or Pa K-1 for derivatives; Pa K-2 for second derivative).
     """
     # Vapour pressure from specific humidity
-    e_c  = q_c * Ps / (constants.epsilon + (1.0 - constants.epsilon) * q_c)
+    e_c  = vapor_pressure_from_specific_humidity(q_c, Ps)
     TcC  = Tc - constants.T_freeze
     # Saturation vapour pressure + its analytic derivatives from the shared AERK
     # water+ice curve (one consistent curve; over-ice below freezing).  ddesTc

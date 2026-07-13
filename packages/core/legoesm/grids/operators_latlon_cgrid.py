@@ -279,19 +279,28 @@ def pad_lon_cgrid(f: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     * 2-D pencil (``LatLon2DLayout``) — longitude is split, so the wrap
       becomes an MPI ring exchange with the W/E neighbour
       (:func:`legoesm.parallel.latlon_mpi.exchange_halo_lon`).
+    * 2-D SPMD ``("lat", "lon")`` mesh (M3a) — the wrap becomes the cyclic
+      ring ``ppermute`` over the ``"lon"`` mesh axis
+      (:func:`legoesm.parallel.latlon_spmd.lon_ring_ghosts_spmd`); a
+      degenerate ``p_lon == 1`` axis takes that helper's STATIC local-wrap
+      branch (no collective — bit-identical to the band path).
 
     BIT-IDENTICAL at ``proc_lon == 1`` (``exchange_halo_lon``'s single-member
     ring is the same local wrap), so the cell→face / vertex operators that
     pad-then-stencil through this helper stay byte-for-byte unchanged on the
     serial / band / SPMD paths and only gain the true neighbour columns under
     a genuine longitude split.  AD-safe (the exchange uses the shared
-    sendrecv VJP).  ``f`` may be 2-D ``(n_lat, n_lon[_local], ...)`` or 3-D;
-    the lon axis is axis 1.
+    sendrecv VJP; ``ppermute`` is self-transposing).  ``f`` may be 2-D
+    ``(n_lat, n_lon[_local], ...)`` or 3-D; the lon axis is axis 1 and must
+    be CELL-ALIGNED (never an ``n_lon+1`` u-face field).
     """
     if halo <= 0:
         return f
-    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
-    if get_halo_backend() == "mpi":
+    from legoesm.grids.halo import (
+        get_halo_backend, get_mpi_topology, get_spmd_mesh,
+    )
+    backend = get_halo_backend()
+    if backend == "mpi":
         topology = get_mpi_topology()
         from legoesm.parallel.latlon_mpi import (
             LatLon2DLayout, exchange_halo_lon,
@@ -301,6 +310,12 @@ def pad_lon_cgrid(f: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
                 f, topology.west_rank, topology.east_rank,
                 topology.rank, halo=halo,
             )
+    elif backend == "spmd":
+        mesh = get_spmd_mesh()
+        if mesh is not None and "lon" in tuple(
+                getattr(mesh, "axis_names", ())):
+            from legoesm.parallel.latlon_spmd import lon_ring_ghosts_spmd
+            return lon_ring_ghosts_spmd(f, mesh, halo=halo)
     # Local periodic wrap (lon = axis 1); single Pad HLO.
     pad = [(0, 0)] * f.ndim
     pad[1] = (halo, halo)

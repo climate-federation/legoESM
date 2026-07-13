@@ -255,6 +255,17 @@ def main() -> int:
 
         multihost_utils.sync_global_devices("cube_tiled_bench_start")
 
+    if args.closed_loop:
+        # #921: the closed-loop step fuses the halo collective-permutes with
+        # the in-stage mass-fixer psum in ONE executable; on multi-process GPU
+        # the NCCL comm-init of those two clique kinds can be ordered
+        # differently per rank and DEADLOCK.  Prime every clique in a fixed,
+        # rank-independent order FIRST (no-op single-process / CPU-virtual).
+        from legoesm.parallel.tiled_production_cdgrid import (
+            warmup_tiled_cube_comms,
+        )
+        warmup_tiled_cube_comms(mesh, args.kt)
+
     # Time the AUDITED AOT executable itself — jit's dispatch cache does NOT
     # reuse lower().compile()'s output, so calling the jit wrapper would
     # recompile a second (unaudited) executable (codex).

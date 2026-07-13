@@ -305,11 +305,21 @@ def snow_ice_flooding(
     Freeboard:
         fb = ((rho_ocean - rho_ice) * h_ice - rho_snow * h_snow) / rho_ocean
 
-    When ``fb < 0`` (snow-load sinks the surface):
-        δi = -fb               (positive ice gain [m])
-        δs = (rho_ice / rho_snow) * δi   (snow consumed [m])
-    Mass balance verified by construction:
-        rho_snow * δs = rho_ice * δi
+    When ``fb < 0`` (snow-load sinks the surface), Leppäranta 1983 / Notz 2002:
+    the submerged basal snow is FLOODED by seawater filling its pore space and
+    then freezes, so a snow layer of thickness ``d`` becomes snow-ice of the
+    SAME thickness at ice density.  The flotation solve raises the freeboard to
+    exactly zero (``h_ice' = h_ice + d``, ``h_snow' = h_snow - d``):
+        d = rho_ocean * (-fb) / (rho_ocean - rho_ice + rho_snow)
+    Mass balance (per unit area):
+        rho_ice * d          (new snow-ice)
+      = rho_snow * d         (snow consumed)
+      + (rho_ice - rho_snow) * d   (SEAWATER drawn from the ocean into pores)
+    The ``(rho_ice - rho_snow) * d`` seawater is a real OCEAN mass sink (water +
+    its salt); the caller debits it from the ocean so flooding does not
+    spuriously freshen it (audit: the old ``d_s = (rho_ice/rho_snow)*d_i``
+    snow->ice form exchanged NO ocean mass yet the brine module still charged
+    the ocean the white-ice salt -> salt-without-water freshening).
 
     Parameters
     ----------
@@ -325,23 +335,21 @@ def snow_ice_flooding(
     h_snow_new : array
         Snow thickness after flooding [m].
     h_si_formed : array
-        Snow-ice thickness formed this step [m] — informational
-        diagnostic; subsequent brine module needs this to add the
-        seawater-salt contribution to ``S_ice``.
+        Snow-ice thickness ``d`` formed this step [m].  The caller derives the
+        ocean seawater withdrawal ``(rho_ice - rho_snow) * h_si_formed`` and the
+        brine module the white-ice salt it carries.
     """
     fb_num = (rho_ocean - rho_ice) * h_ice - rho_snow * h_snow
     fb = fb_num / rho_ocean
-    delta_i = jnp.maximum(-fb, 0.0)
-    # Cap snow consumption at the available snow column.
-    delta_s_request = (rho_ice / rho_snow) * delta_i
-    delta_s = jnp.minimum(delta_s_request, h_snow)
-    # When snow runs out, scale delta_i accordingly to preserve mass.
-    delta_i_eff = jnp.where(
-        delta_s_request > 0.0,
-        delta_i * delta_s / jnp.maximum(delta_s_request, 1e-30),
-        delta_i,
-    )
+    # Flotation-to-zero flooding thickness; denom > 0 for physical densities
+    # (rho_snow < rho_ice < rho_ocean).  Floor guards the divide only.
+    denom = jnp.maximum(rho_ocean - rho_ice + rho_snow, 1.0e-30)
+    delta = jnp.maximum(-fb, 0.0) * rho_ocean / denom
+    # Cannot flood more snow than the column holds; snow-limited cells flood
+    # partially (freeboard stays slightly negative) — mass stays consistent
+    # because ice gain, snow loss and seawater draw all scale with the same d.
+    delta = jnp.minimum(delta, h_snow)
 
-    h_ice_new = h_ice + delta_i_eff
-    h_snow_new = jnp.maximum(h_snow - delta_s, 0.0)
-    return h_ice_new, h_snow_new, delta_i_eff
+    h_ice_new = h_ice + delta
+    h_snow_new = jnp.maximum(h_snow - delta, 0.0)
+    return h_ice_new, h_snow_new, delta

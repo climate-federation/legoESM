@@ -14,7 +14,28 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.atmosphere.dynamics import plane_fd_advection as adv
 
-SCHEMES = ("upwind", "van_leer", "weno5")
+SCHEMES = ("upwind", "van_leer", "weno5", "weno7", "weno9", "central")
+
+
+def test_central_is_nondissipative_and_weno_order_reduces_diffusion():
+    """-u·∂φ/∂x of sin(kx) is pure -uk·cos(kx) — a scheme's DISSIPATION is the
+    in-phase sin(kx) component it adds. Central adds none (energy-conserving, the
+    fix for the pseudo core over-smoothing vs the spectral core); WENO is
+    upwind-dissipative, and higher order (weno5→7→9) reduces that dissipation."""
+    ny, nx, nz = 4, 32, 4
+    x = 2.0 * np.pi * np.arange(nx) / nx
+    s = np.sin(6.0 * x)                             # a high-k mode (~5 pts/wave) where upwind bites
+    phi = jnp.broadcast_to(jnp.asarray(s)[None, :, None], (ny, nx, nz))
+    u = jnp.ones((ny, nx, nz)); v = jnp.zeros((ny, nx, nz)); w = jnp.zeros((ny, nx, nz + 1))
+
+    def dissipation(scheme):
+        t = np.asarray(adv.advect_scalar(phi, u, v, w, 1.0, 1.0, 1.0, scheme))[0, :, 0]
+        return abs(float(np.sum(t * s) / np.sum(s ** 2)))   # in-phase (dissipative) coeff
+
+    d = {sc: dissipation(sc) for sc in ("central", "weno5", "weno7", "weno9")}
+    assert d["central"] < 1e-9                      # central: NO numerical dissipation (energy-conserving)
+    assert d["weno5"] > 1e-3                         # weno5 is strongly upwind-dissipative at high k
+    assert d["weno9"] < d["weno7"] < d["weno5"]     # higher order => less dissipation
 
 
 def _grid(ny=16, nx=16, nz=12):

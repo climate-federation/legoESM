@@ -1,6 +1,6 @@
 """Monotone (van-Leer TVD) vertical tracer advection — D5 (iter-44).
 
-``_vertical_advection_van_leer_plane`` is the positive-definite replacement for
+``vertical_advection_van_leer_plane`` is the positive-definite replacement for
 the centred ``_vertical_advection_plane`` in the plane CRM tracer transport.
 The centred scheme overshoots into NEGATIVE tracer at sharp convective vertical
 gradients (then clipped on the microphysics read → mass loss); van-Leer forbids
@@ -20,7 +20,7 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
     CompressibleEulerConfig,
 )
 from legoesm.atmosphere.dynamics.compressible_euler_plane import (
-    _vertical_advection_plane, _vertical_advection_van_leer_plane,
+    _vertical_advection_plane, vertical_advection_van_leer_plane,
 )
 from legoesm.grids.vertical import create_height_coordinate
 
@@ -42,7 +42,7 @@ def test_constant_field_zero_tendency():
     q·∂w/∂z`` cancels exactly for constant q (machine zero)."""
     hc, J, w, _ = _hc_w()
     f = jnp.ones((2, 2, 20)) * 0.01
-    tend = _vertical_advection_van_leer_plane(f, w, hc, J)
+    tend = vertical_advection_van_leer_plane(f, w, hc, J)
     assert float(jnp.max(jnp.abs(tend))) < 1.0e-18
 
 
@@ -64,7 +64,7 @@ def test_linear_field_matches_centered_uniform_w():
     w = jnp.asarray(wk)[None, None, :] * jnp.ones((2, 2, nlev + 1))
     z = np.asarray(hc.z_full)
     f = jnp.asarray(3.0e-6 * z)[None, None, :] * jnp.ones((2, 2, nlev))
-    t_vl = _vertical_advection_van_leer_plane(f, w, hc, J)
+    t_vl = vertical_advection_van_leer_plane(f, w, hc, J)
     t_ct = _vertical_advection_plane(f, w, hc, J)
     # deep interior (away from the 2-cell lid transition where w ramps 0→W)
     np.testing.assert_allclose(
@@ -87,7 +87,7 @@ def test_step_advection_is_monotone():
     q_vl = q_ct = f0
     dt = 2.0
     for _ in range(15):
-        q_vl = q_vl + dt * _vertical_advection_van_leer_plane(q_vl, w, hc, J)
+        q_vl = q_vl + dt * vertical_advection_van_leer_plane(q_vl, w, hc, J)
         q_ct = q_ct + dt * _vertical_advection_plane(q_ct, w, hc, J)
     # van-Leer: monotone — no overshoot below 0 or above 1 (tiny tol)
     assert float(jnp.min(q_vl)) >= -1.0e-9
@@ -104,7 +104,7 @@ def test_positive_definite_under_convergent_flow():
     q = f
     dt = 1.0
     for _ in range(25):
-        q = q + dt * _vertical_advection_van_leer_plane(q, w, hc, J)
+        q = q + dt * vertical_advection_van_leer_plane(q, w, hc, J)
     assert bool(jnp.all(q >= -1.0e-12))
     assert bool(jnp.all(jnp.isfinite(q)))
 
@@ -115,7 +115,7 @@ def test_boundary_and_finiteness():
     hc, J, w, _ = _hc_w()
     f = jnp.asarray(np.linspace(0.02, 0.0, 20))[None, None, :] \
         * jnp.ones((2, 2, 20))
-    tend = _vertical_advection_van_leer_plane(f, w, hc, J)
+    tend = vertical_advection_van_leer_plane(f, w, hc, J)
     assert tend.shape == (2, 2, 20)
     assert bool(jnp.all(jnp.isfinite(tend)))
 
@@ -127,7 +127,7 @@ def test_nlev_le_2_falls_back_to_centered():
     w = jnp.asarray([0.0, 0.5, 0.0])[None, None, :] * jnp.ones((2, 2, 3))
     f = jnp.asarray([0.01, 0.02])[None, None, :] * jnp.ones((2, 2, 2))
     np.testing.assert_array_equal(
-        np.asarray(_vertical_advection_van_leer_plane(f, w, hc, J)),
+        np.asarray(vertical_advection_van_leer_plane(f, w, hc, J)),
         np.asarray(_vertical_advection_plane(f, w, hc, J)))
 
 
@@ -138,7 +138,7 @@ def test_ad_grad_finite():
                      * 1.0e-3)
 
     def loss(f):
-        return jnp.sum(_vertical_advection_van_leer_plane(f, w, hc, J) ** 2)
+        return jnp.sum(vertical_advection_van_leer_plane(f, w, hc, J) ** 2)
 
     g = jax.grad(loss)(f0)
     assert g.shape == f0.shape
