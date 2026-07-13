@@ -88,6 +88,17 @@ are FINITE — a cold-bias / snow-tower **realism** issue, which is what Phase 2
 targets (no longer a NaN emergency). Re-run after the forcing fix should show
 `reverts.nc` ≈ 0 → confirming only the realism work remains.
 
+## RESOLVED — 1-yr confirmation run (2026-07-13)
+
+After the land-only regrid fix, the 1-yr 2° run: **0 NaN land cells → PASS**
+(was 357 → FAIL). The NaN-revert guard fired on just **72 / 8006 cells for 81
+total cell-steps** (worst cell 2 steps) — a ~0.0001% *transient* rate, all cleanly
+recovered. So the boreal/Arctic "NaN" was the coastal forcing gap; there is
+essentially no genuine physics divergence (Phase 2a + the guard handle the
+residual). land-cell count rose 6645 → 8006 (removing the 0.5 cutoff). The
+remaining cold cells (`T_soil 221 K`, `snow 1580 kg/m²`) are FINITE — the Phase 2b
+realism target, not a NaN. **The NaN emergency is closed.**
+
 ## The plan
 
 **Phase 1 — Robustness guard (DONE, 2026-07-13).** Atomic per-column NaN-revert
