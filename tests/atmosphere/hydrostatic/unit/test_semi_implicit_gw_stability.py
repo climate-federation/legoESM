@@ -22,14 +22,17 @@ offline stability analysis, but drives the *real* integrator):
     (div, T) pair is a clean GW oscillator) and a single-level sigma coordinate
     so ``precompute_si_matrices`` yields a real, positive scalar ``Gamma``.
   * A linear explicit tendency consistent with that ``si_data``:
-        dD/dt   =  eps_n * T ,     eps_n = Lambda_n * Gamma / T_ref
-        dT/dt   = -T_ref * D
-    where ``Lambda_n = n(n+1)/a^2``.  With ``gamma = T_ref`` this matches the
-    ``-alpha*dt*T_ref*delta_div`` temperature correction inside
+        dD/dt   =  eps_n * T ,     eps_n = Lambda_n * Gamma / g
+        dT/dt   = -g * D
+    where ``Lambda_n = n(n+1)/a^2`` and ``g = tau[0,0]`` is the scalar adiabatic
+    T-from-D coupling (#960: the consistent linearized ``kappa*T*omega/p``, not
+    the diagonal ``T_ref``).  With ``gamma = g`` this matches the
+    ``-alpha*dt*(tau @ delta_div)`` temperature correction inside
     ``si_correction`` exactly, so the closed (D, T) loop is the trapezoidal
     theta-method solve the SI scheme is supposed to implement.  The implicit
-    coupling ``M_n = alpha^2 dt^2 eps_n gamma`` then equals
-    ``alpha^2 dt^2 Lambda_n Gamma`` -- i.e. the actual ``si_matrices``.
+    coupling ``M_n = alpha^2 dt^2 eps_n g = alpha^2 dt^2 Lambda_n Gamma``
+    (invariant under the T_ref->g change, since eps_n*g = Lambda_n*Gamma) --
+    i.e. the actual ``si_matrices``.
   * The (D, T) 2x2 amplification block is the *exact* Jacobian of one real
     ``ssp_rk3_step_si`` at rest (``jax.jacfwd``; the map is linear so this is
     the amplification matrix itself).
@@ -39,20 +42,26 @@ post-fix it PASSES with ``|lambda| <= 1`` at alpha=0.5 (neutral Crank-Nicolson)
 and ``|lambda| < 1`` at alpha>0.5 (damping) for a representative sweep of
 resolved wavenumbers at each truncation.
 
-SCOPE / KNOWN LIMITATION (issue #920, second contributor).  This is an
-*integrator-formulation* gate: it locks in the two-line ``si_correction`` fix
-for a *well-conditioned* gravity-wave oscillator.  ``nlev=1`` is used
-deliberately so ``precompute_si_matrices`` yields a real, positive *scalar*
-``Gamma`` -- a clean single-mode oscillator with real frequency, exactly the
-system the fix is derived for.  It does NOT certify the full multi-level
-spectral dycore: the discretized ``Gamma`` is non-normal with complex
-eigenvalues at ``nlev >= 4`` (real+positive only at ``nlev <= 2``), which
-injects a *separate* growing gravity-wave mode (isolated ``|lambda| ~ 4.4`` at
-T106/nlev=8) that the trapezoidal SI cannot neutralize and hyperdiffusion
-cannot damp.  A real T85/nlev=8/dt=1800 SI rollout therefore still blows up at
-alpha=0.5 *after* this fix (it only delays the NaN); stabilizing it needs a
-follow-up ``Gamma`` symmetrization/positivity fix.  This test guards the
-formulation regression only.
+SCOPE (issue #920 formulation gate; the #960 ``Gamma`` fix is exercised too).
+This is an *integrator-formulation* gate: it locks in the two-line
+``si_correction`` fix for a *well-conditioned* gravity-wave oscillator.
+``nlev=1`` is used deliberately so ``precompute_si_matrices`` yields a real,
+positive *scalar* ``Gamma`` -- a clean single-mode oscillator with real
+frequency, exactly the system the #920 fix is derived for.  It does NOT itself
+certify the full multi-level spectral dycore.
+
+UPDATE (issue #960).  The 2nd T85 contributor -- a *non-normal* ``Gamma`` with
+complex eigenvalues at ``nlev >= 4`` (real+positive only at ``nlev <= 2``),
+which injected a separate growing gravity-wave mode (isolated ``|lambda| ~ 4.4``
+at T106/nlev=8) -- is now fixed by using the CONSISTENT reference thermodynamic
+coupling ``tau`` (the linearization of the model's own ``kappa*T*omega/p``)
+instead of the diagonal ``tau = T_ref*I``.  The real+positive-eigenvalue gate
+for the multi-level ``Gamma`` lives in
+``test_hybrid_vertical.py::TestSemiImplicitReferenceMatrixWellPosed``.
+Correspondingly, the scalar (``nlev=1``) coupling here becomes ``g = tau[0,0]``
+(= kappa*T_ref) -- this test now builds its oscillator AND its analytic
+reference around ``g``, not ``T_ref``.  This test still guards the #920
+integrator-formulation regression.
 """
 
 from __future__ import annotations
@@ -103,8 +112,16 @@ def _gw_oscillator_step(n_max, alpha, dt=_DT_S, T_ref=_T_REF_K):
     si_data = precompute_si_matrices(grid, sigma, T_ref=T_ref, alpha=alpha, dt=dt)
 
     Gamma = jnp.asarray(si_data.Gamma)[0, 0]                     # real positive scalar
-    # dD/dt coefficient per spectral coefficient: eps_n = Lambda_n * Gamma / T_ref.
-    eps = (si_data.eigenvalues[grid.ls] * Gamma / T_ref)        # (n_sh,)
+    # #960: the SI temperature correction uses the CONSISTENT adiabatic coupling
+    # ``tau`` (dT'/dt = -tau @ D), not the diagonal ``T_ref*I``.  At nlev=1 that
+    # is the scalar ``g = tau[0,0]`` (= kappa*T_ref here; the dropped ``kappa``
+    # was the #960 defect).  Build the oscillator around ``g`` so the explicit
+    # dT/dt coupling matches the implicit T-correction (a clean theta-method);
+    # ``eps_n = Lambda_n*Gamma/g`` keeps the GW frequency sqrt(eps_n*g) =
+    # sqrt(Lambda_n*Gamma) and the implicit M_n = alpha^2 dt^2 eps_n g =
+    # alpha^2 dt^2 Lambda_n Gamma (the real si_matrices) invariant.
+    g = jnp.asarray(si_data.tau)[0, 0]                          # scalar adiabatic coupling
+    eps = (si_data.eigenvalues[grid.ls] * Gamma / g)           # (n_sh,)
 
     n_sh = grid.n_sh
     zero_3d = jnp.zeros((n_sh, 1), dtype=jnp.complex128)
@@ -122,7 +139,7 @@ def _gw_oscillator_step(n_max, alpha, dt=_DT_S, T_ref=_T_REF_K):
     def _tendency(s):
         # Linearized gravity-wave oscillator consistent with ``si_data``.
         dD = eps[:, None] * s.T_hat.data
-        dT = -T_ref * s.div_hat.data
+        dT = -g * s.div_hat.data
         return s._replace(
             vor_hat=s.vor_hat.replace(data=jnp.zeros_like(s.vor_hat.data)),
             div_hat=s.div_hat.replace(data=dD),
@@ -159,27 +176,31 @@ def _amp_block_at_mode(step_fn, grid, j):
     return block.real
 
 
-def _analytic_rk3_si_fixed_block(eps_n, alpha, dt, T_ref=_T_REF_K):
+def _analytic_rk3_si_fixed_block(eps_n, alpha, dt, g):
     """Analytic 2x2 (D, T) amplification of the CORRECT scalar SSP-RK3-SI step.
 
     Replicates the theta-method-consistent per-stage correction -- BOTH lines of
-    the #920 fix -- for the oscillator dD/dt = eps_n*T, dT/dt = -T_ref*D:
+    the #920 fix -- for the oscillator dD/dt = eps_n*T, dT/dt = -g*D, where ``g``
+    is the scalar adiabatic T-from-D coupling ``tau[0,0]`` (#960: the consistent
+    linearized ``kappa*T*omega/p``, not the diagonal ``T_ref``):
 
         D_c = (D_e - ((1-alpha)/alpha)*mu*D) / (1+mu)   # RHS line
-        T_c =  T_e - alpha*dt*T_ref*(D_c - D)            # delta-off-OLD line
+        T_c =  T_e - alpha*dt*g*(D_c - D)                # delta-off-OLD line
 
-    with mu = alpha^2 dt^2 eps_n T_ref (= the real ``M``).  Reverting EITHER line
-    of ``si_correction`` in isolation changes this matrix, so matching the real
-    block to it pins both lines -- a ``|lambda| <= 1`` check alone does not (a
-    single-line revert stays inside the unit circle for low-kappa modes).
+    with mu = alpha^2 dt^2 eps_n g (= the real ``M`` = alpha^2 dt^2 Lambda_n
+    Gamma, invariant under the T_ref->g change since eps_n*g = Lambda_n*Gamma).
+    Reverting EITHER line of ``si_correction`` in isolation changes this matrix,
+    so matching the real block to it pins both lines -- a ``|lambda| <= 1`` check
+    alone does not (a single-line revert stays inside the unit circle for
+    low-kappa modes).
     """
-    mu = alpha ** 2 * dt ** 2 * eps_n * T_ref
+    mu = alpha ** 2 * dt ** 2 * eps_n * g
 
     def euler_si(D, T):
         d_e = D + dt * eps_n * T
-        t_e = T - dt * T_ref * D
+        t_e = T - dt * g * D
         d_c = (d_e - ((1.0 - alpha) / alpha) * mu * D) / (1.0 + mu)
-        t_c = t_e - alpha * dt * T_ref * (d_c - D)
+        t_c = t_e - alpha * dt * g * (d_c - D)
         return d_c, t_c
 
     def rk3(D, T):
@@ -223,7 +244,8 @@ def test_ssp_rk3_step_si_stable_across_truncation(n_max):
     stability check alone would not catch a half-revert.
     """
     for alpha, tol, strict in ((0.5, 1.0 + 1e-9, False), (0.55, 1.0, True)):
-        step_fn, grid, _si, eps = _gw_oscillator_step(n_max, alpha)
+        step_fn, grid, si, eps = _gw_oscillator_step(n_max, alpha)
+        g = float(jnp.asarray(si.tau)[0, 0])  # #960 scalar adiabatic coupling
         for n, j in _mode_indices(grid, n_max):
             block = _amp_block_at_mode(step_fn, grid, j)
             rho = float(np.abs(np.linalg.eigvals(block)).max())
@@ -240,7 +262,7 @@ def test_ssp_rk3_step_si_stable_across_truncation(n_max):
             # Pin BOTH #920 lines: the real block must equal the analytic
             # theta-method amplification for this mode.  A single-line revert
             # changes the block by ~20% (RHS) / ~O(1) (delta) -> rel >> 1e-6.
-            analytic = _analytic_rk3_si_fixed_block(float(eps[j]), alpha, _DT_S)
+            analytic = _analytic_rk3_si_fixed_block(float(eps[j]), alpha, _DT_S, g)
             rel = np.max(np.abs(block - analytic)) / np.max(np.abs(analytic))
             assert rel < 1e-6, (
                 f"T{n_max} alpha={alpha}: mode n={n} amplification block does not "
@@ -293,7 +315,8 @@ def _leapfrog_phys_eig(n_max, n, dt_base, alpha=0.5, T_ref=_T_REF_K, force_forwa
     dt2 = 2.0 * dt_base
     si_data = precompute_si_matrices(grid, sigma, T_ref=T_ref, alpha=alpha, dt=dt2)
     Gamma = jnp.asarray(si_data.Gamma)[0, 0]
-    eps = si_data.eigenvalues[grid.ls] * Gamma / T_ref
+    g = jnp.asarray(si_data.tau)[0, 0]  # #960: scalar adiabatic coupling (tau[0,0])
+    eps = si_data.eigenvalues[grid.ls] * Gamma / g
     omega = float(np.sqrt(float(si_data.eigenvalues[n]) * float(Gamma)))
     wdt = omega * dt_base
 
@@ -317,7 +340,7 @@ def _leapfrog_phys_eig(n_max, n, dt_base, alpha=0.5, T_ref=_T_REF_K, force_forwa
         return s._replace(
             vor_hat=s.vor_hat.replace(data=jnp.zeros_like(s.vor_hat.data)),
             div_hat=s.div_hat.replace(data=eps[:, None] * s.T_hat.data),
-            T_hat=s.T_hat.replace(data=-T_ref * s.div_hat.data),
+            T_hat=s.T_hat.replace(data=-g * s.div_hat.data),
             lnps_hat=s.lnps_hat.replace(data=jnp.zeros_like(s.lnps_hat.data)),
             phis_hat=s.phis_hat.replace(data=jnp.zeros_like(s.phis_hat.data)),
         )
