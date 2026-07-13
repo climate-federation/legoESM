@@ -415,29 +415,33 @@ def test_tier3_column_mse_conserved(name):
     strict=True,
     reason=(
         "DESIGN GAP (codex review-1 #4): the bulk mass-flux schemes "
-        "ZM / KF / Bechtold do NOT close column total water "
+        "ZM / Bechtold do NOT close column total water "
         "∫(dq_v + dq_c) dp/g in-scheme. Measured net water (vapor removed in "
         "excess of emitted cloud water) on the unstable validator column: "
-        "ZM ~ -0.68 mm/day-equiv, Bechtold ~ -6.4, KF ~ -22.7. The shared "
+        "ZM ~ -0.68 mm/day-equiv, Bechtold ~ -6.4. The shared "
         "apply_mass_flux_kernel compensating-subsidence term is vertical "
         "TRANSPORT whose column integral need not vanish, and the emitted "
         "dq_c is only the DETRAINED condensate — so for ZM/Bechtold the "
         "column budget is intended to close only once the orchestrator + "
-        "microphysics own the precip sink.  (KF previously leaked an "
-        "ADDITIONAL ~22 mm/day-equiv via a (1-PEFF) retention scaling with no "
-        "precip output; that leak was FIXED — see "
-        "test_tier3_kf_precip_efficiency_leak_removed — so KF now shows only "
-        "the same transport residual as ZM/Bechtold, still > the 1e-3 in-scheme "
-        "closure bar this strict-xfail asserts.)"
+        "microphysics own the precip sink.  ZM is asserted FIRST in the loop "
+        "below, so it carries this strict-xfail.  KF is NO LONGER a member of "
+        "this leak set — its coupled condensation water+energy budget now closes "
+        "∫(dq_v+dq_c) to MACHINE PRECISION in-scheme (gated by "
+        "test_tier3_kf_precip_efficiency_leak_removed), so it is excluded from "
+        "the leaking loop here."
     ),
 )
 def test_tier3_massflux_schemes_total_water_NOT_closed_in_scheme_KNOWN():
-    """# BUG (contract): ZM/KF/Bechtold leak column total water in-scheme."""
+    """# BUG (contract): ZM/Bechtold leak column total water in-scheme.
+
+    KF used to leak here too but now closes in-scheme (see
+    test_tier3_kf_precip_efficiency_leak_removed) and is excluded from the loop.
+    """
     T, q, pf, ph, u, v = _column()
     ncol, nlev = T.shape
     mc = jnp.full((ncol, nlev), 3.0e-6)
     dp = _dp(ph)
-    for name in ("zhang_mcfarlane", "kain_fritsch", "bechtold"):
+    for name in ("zhang_mcfarlane", "bechtold"):
         out = _all_schemes(T, q, pf, ph, u, v, None, mc)[name]()
         net = _col_int(out.dq_v_dt + out.dq_c_conv_dt, dp)
         scale = _col_int(jnp.abs(out.dq_v_dt), dp) + 1e-15
@@ -445,44 +449,29 @@ def test_tier3_massflux_schemes_total_water_NOT_closed_in_scheme_KNOWN():
             f"{name}: total water not closed: {net}"
 
 
-@pytest.mark.xfail(
-    reason=(
-        "PRE-EXISTING KF-Eta water+energy budget defect (kain_fritsch.py untouched by "
-        "recent branches). ROOT-CAUSED 2026-07-13 on this deep-tropical column: "
-        "net(dq_v+dq_c+dq_r)=+3.16e-4 kg/m^2/s spurious water SOURCE (130x ZM's "
-        "2.43e-6). Mechanism (measured, not the subsidence solve — implicit_flux "
-        "makes it WORSE, +5.17e-4): (1) the entraining plume delivers dq_c_conv_dt≈0 "
-        "to the environment (no detrainable cloud reaches microphysics); (2) CONDLOAD "
-        "generates precip_col=9.48e-4 of fallout and the downdraft re-evaporates "
-        "evap_col=5.17e-4 back into the column as +dq_v_dt, but the CONDENSATION that "
-        "produced that precip is NEVER debited from the column vapor (nor its latent "
-        "warming applied) — so re-evaporated water appears from nowhere; (3) net "
-        "surface rain (precip_col-evap_col=4.31e-4) is emitted as neither dq_r_conv_dt "
-        "nor a column sink. A correct fix is COUPLED: debit -precip_col from dq_v with "
-        "its +L_v/c_p latent warming, emit dq_r_conv_dt for the net rain, and use the "
-        "conservative implicit_flux kernel for the residual -2.01e-4 transport leak — "
-        "all sign-checked and VISUALLY validated vs KF's W2 cube imprint + AMIP day-5 "
-        "+ RCE realism (KF passes these today; a rushed budget rewrite risks "
-        "regressing them). Tracked as a validated-PR-sized effort. The RELATIVE gate "
-        "(test above, net/|int dq_v|<1e-3) still passes. xfail(strict=False) xpasses "
-        "when fixed."
-    ),
-    strict=False,
-)
 def test_tier3_kf_precip_efficiency_leak_removed():
-    """REGRESSION (was a BUG — kain_fritsch.py, codex review-2 #1; NOW FIXED):
-    KF previously scaled its cloud-water source down by ``(1-PEFF)`` while
-    leaving the vapor drying ``dq_v_dt`` intact.  Under the ConvectionOutput
-    contract (no precipitation field; the bridge routes only dq_v→vapor and
-    dq_c→cloud water, with NO convective-rain sink) the dropped PEFF fraction
-    reached neither cloud water nor a precip sink — silently LOST (~22
-    mm/day-equiv on this column, ~33x the ZM compensating-subsidence residual).
-    The retention scaling — and the now-dead PEFCBH polynomial +
-    ``apply_precip_efficiency`` / ``pef_min`` / ``pef_max`` config — was removed:
-    KF hands the FULL detrained condensate to microphysics, which owns precip
-    via autoconversion (as ZM / Bechtold / Emanuel already did).  KF's in-scheme
-    column-water residual is now pure compensating-subsidence TRANSPORT, the
-    same regime as the sister bulk-plume schemes (no longer a leak)."""
+    """REGRESSION (was a BUG — kain_fritsch.py; FIXED 2026-07-13, coupled
+    water+energy budget).  KF-Eta previously let the downdraft re-evaporate its
+    CONDLOAD fallout as a ``+dq_v_dt`` source with NO matching vapor sink or
+    latent warming for the CONDENSATION that produced that precip — water and
+    energy appeared from nowhere: ``net(dq_v+dq_c)=+3.16e-4`` kg/m^2/s spurious
+    water SOURCE (130x ZM) and ``~-1500`` W/m^2 of phantom COOLING on this
+    deep-tropical column (convection cooling+moistening a conditionally-unstable
+    column — backwards).
+
+    The fix books the condensation explicitly (see ``kain_fritsch.py`` "column
+    condensation water+energy budget"): the ``+L_v/c_p`` latent warming at the
+    condensation levels, a POSITIVITY-SAFE vapor sink of the same column
+    magnitude ``precip_col`` distributed over the post-transport vapor (so no
+    level goes negative), and the non-re-evaporated condensate routed to CLOUD
+    water ``dq_c_conv_dt`` (ZM/Emanuel convention: microphysics owns precip).
+    The kernel is switched to the conservative ``implicit_flux`` solve (residual
+    telescopes to machine precision) and its detrained-cloud latent is released
+    as warming so convection is MSE ``h=c_p T+L_v q_v`` conserving in-scheme.
+
+    Result on this column: column TOTAL WATER ``∫(dq_v+dq_c)`` and column MSE
+    ``∫(c_p dT + L_v dq_v)`` both close to MACHINE PRECISION, and the net column
+    response flips to the physically-correct WARM+DRY (``+L_v*`` net condensate)."""
     T, q, pf, ph, u, v = _column()
     ncol, nlev = T.shape
     mc = jnp.full((ncol, nlev), 3.0e-6)
@@ -492,12 +481,78 @@ def test_tier3_kf_precip_efficiency_leak_removed():
     out_zm = sch["zhang_mcfarlane"]()
     net_kf = _col_int(out_kf.dq_v_dt + out_kf.dq_c_conv_dt, dp)
     net_zm = _col_int(out_zm.dq_v_dt + out_zm.dq_c_conv_dt, dp)
-    # Leak gone: KF residual is now far below the old ~2.6e-4 kg/m²/s leak and
-    # in the same TRANSPORT regime as ZM (was ~33x larger).
-    assert jnp.all(jnp.abs(net_kf) < 1.0e-4), \
-        f"KF column-water residual {net_kf} too large — PEFF leak not removed"
-    assert jnp.all(jnp.abs(net_kf) < 12.0 * (jnp.abs(net_zm) + 1e-15)), \
-        f"KF residual {net_kf} >> ZM transport residual {net_zm}: leak suspected"
+    # (1) Column TOTAL WATER closes to machine precision (was +3.16e-4 leak),
+    #     now far below ZM's own compensating-subsidence transport residual.
+    assert jnp.all(jnp.abs(net_kf) < 1.0e-8), \
+        f"KF column-water residual {net_kf} not machine-zero — budget leak"
+    assert jnp.all(jnp.abs(net_kf) <= jnp.abs(net_zm) + 1e-12), \
+        f"KF residual {net_kf} > ZM transport residual {net_zm}: leak suspected"
+    # (2) Column MSE closes to machine precision (was -728 W/m^2 sink): the
+    #     +L_v condensation warming offsets the -L_v vapor sink; the -L_v re-evap
+    #     cooling offsets the +L_v re-evap moistening.  This is the ENERGY half
+    #     of the fix — a water-only patch would still leave this ~-728.
+    mse_kf = _col_int(constants.c_pd * out_kf.dT_dt
+                      + constants.L_v * out_kf.dq_v_dt, dp)
+    assert jnp.all(jnp.abs(mse_kf) < 1.0e-6), \
+        f"KF column MSE residual {mse_kf} W/m^2 not conserved — energy leak"
+    # (3) Net column response is now WARM+DRY (deep convection), not the old
+    #     cool+moisten: heating > 0 and vapor tendency < 0.
+    heat_kf = _col_int(constants.c_pd * out_kf.dT_dt, dp)
+    dry_kf = _col_int(out_kf.dq_v_dt, dp)
+    assert jnp.all(heat_kf > 0.0), f"KF net column heating {heat_kf} W/m^2 <= 0"
+    assert jnp.all(dry_kf < 0.0), f"KF net column drying {dry_kf} >= 0"
+
+
+def test_tier3_kf_mse_conserved_on_capped_finite_lnb_column():
+    """KF MSE closure must hold on the FINITE-LNB (capped) column too — KF's
+    real production regime (a real tropopause), where the plume detrains genuine
+    cloud.  The implicit_flux kernel books ``dq_v -= dq_c`` for that detrained
+    cloud with NO sensible heat (it defers the latent), which left column MSE
+    ``h=c_p T + L_v q_v`` short by ~-549 W/m^2 here.  KF now RELEASES the
+    detrained-cloud latent as warming (h-conserving in-scheme, ZM convention),
+    so both column total water and MSE close to machine precision on the capped
+    column, not only the uncapped one (codex review-2 #2)."""
+    T, q, pf, ph, u, v = _capped_column()
+    dp = _dp(ph)
+    out = _run_kf(T, q, pf, ph)
+    water = _col_int(out.dq_v_dt + out.dq_c_conv_dt, dp)
+    mse = _col_int(constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt, dp)
+    assert jnp.all(jnp.abs(water) < 1.0e-8), \
+        f"KF capped-column water residual {water} not machine-zero"
+    assert jnp.all(jnp.abs(mse) < 1.0e-5), \
+        f"KF capped-column MSE residual {mse} W/m^2 — detrained-cloud latent leak"
+
+
+@pytest.mark.parametrize("dt", [300.0, 1800.0, 3600.0])
+@pytest.mark.parametrize("q_scale", [1.0, 0.1, 0.02])
+def test_tier3_kf_vapor_stays_nonnegative(dt, q_scale):
+    """KF must never drive column vapor negative after a step: the CONDLOAD
+    condensation sink is drawn from the vapor the updraft ingests, distributed
+    over the available (post-transport) moisture and moisture-limited so
+    ``precip*dt <= column vapor``; a final CONSERVATIVE VAPOR RELOCATION fills any
+    residual kernel-transport over-dry from the surplus deposited elsewhere.
+    Probe the production dt range AND the drier / longer-dt corner (q_scale=0.02,
+    dt=3600) that actually exercises the relocation clamp (codex review-2 #1: the
+    earlier -cond_rate sink drove q_v to -4e-4; review-4: cover the relocation
+    path on a nonzero-vapor column).  ``dt`` is threaded into the KF call so its
+    internal moisture limiter / clamp see the same step used for the check."""
+    T, q, pf, ph, u, v = _column()
+    q = q * q_scale
+    ncol, nlev = T.shape
+    dp = _dp(ph)
+    out, _ = kain_fritsch_convection(
+        T, q, pf, ph, jnp.zeros((ncol, nlev)), jnp.zeros((ncol, nlev)),
+        dt, KainFritschConfig(),
+    )
+    q_new = q + out.dq_v_dt * dt
+    assert jnp.all(jnp.isfinite(out.dq_v_dt)) and jnp.all(jnp.isfinite(out.dT_dt))
+    assert jnp.all(q_new >= -1.0e-12), \
+        f"KF drove q_v negative (min={jnp.min(q_new)}) at dt={dt}, q_scale={q_scale}"
+    # On a nonzero-vapor column the vapor relocation is conservative: column
+    # total water stays closed (not the degenerate q_v==0 residual regime).
+    water = _col_int(out.dq_v_dt + out.dq_c_conv_dt, dp)
+    assert jnp.all(jnp.abs(water) < 1.0e-5), \
+        f"KF column-water residual {water} at dt={dt}, q_scale={q_scale}"
 
 
 def test_tier3_sbm_conserves_water_but_not_instantaneous_mse():
