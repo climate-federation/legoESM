@@ -1970,6 +1970,22 @@ def test_mpas_nu_vert4_t_flag_flows_to_dycore_config():
     assert cfg_set.dycore.mpas_nu_vert4_T == pytest.approx(5e-6)
 
 
+def test_mpas_vert4_t_filter_flag_flows_to_dycore_config():
+    """Shapiro-form per-step 2Δσ filter (the ERA5-IC MPAS lane cure):
+    --mpas-vert4-t-filter must reach DycoreConfig.mpas_vert4_t_filter (which
+    the component factory threads into MPASPrimitiveEquationConfig.
+    vert4_T_filter).  Default OFF (0.0) — opt-in, unlike the rate form."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.dycore.mpas_vert4_t_filter == 0.0
+
+    cfg_set = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-vert4-t-filter", "0.5",
+    ]), parser))
+    assert cfg_set.dycore.mpas_vert4_t_filter == pytest.approx(0.5)
+
+
 def test_multicontroller_coordinator_flags_parse():
     """Route-B flags round-trip through the parser (they are RUN args consumed
     in main() for the jax.distributed bootstrap, not ExperimentConfig fields)."""

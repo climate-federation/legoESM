@@ -434,6 +434,8 @@ def create_atmosphere_dycore(
             time_integrator=_ti,
             # #930 cure: vertical biharmonic damping of the 2Δσ T checkerboard.
             nu_vert4_T=dc.mpas_nu_vert4_T,
+            # Shapiro-form per-step 2Δσ filter (ERA5-IC lane; see DycoreConfig).
+            vert4_T_filter=getattr(dc, "mpas_vert4_t_filter", 0.0),
         )
         return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma, config=cfg)
 

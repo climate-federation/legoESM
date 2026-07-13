@@ -209,6 +209,12 @@ class DycoreConfig(NamedTuple):
     # (``component_factory``).  Set 0.0 to reproduce the pre-#930 dycore exactly.
     # Appended last to preserve positional ABI.
     mpas_nu_vert4_T: float = 2.0e-6
+    # Shapiro-form per-step strength of the same vertical del4 operator
+    # (fraction of the 2Δσ mode removed per step, unconditionally stable in
+    # (0,1]).  The ERA5-IC MPAS lane needs ~0.5 (the physics-forced
+    # checkerboard outgrows the explicit rate form's stability-limited
+    # damping at production dt); default 0.0 = off.
+    mpas_vert4_t_filter: float = 0.0
 
 
 class EvaluationConfig(NamedTuple):

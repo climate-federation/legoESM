@@ -139,6 +139,18 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # ``nu_del4`` "off by default, set in production" convention); the
     # coupled/AMIP path sets a small value.  Last field to preserve positional ABI.
     nu_vert4_T: float = 0.0
+    # Shapiro-form (per-STEP) application of the SAME conservative vertical
+    # del4 operator: remove this FRACTION of the 2Δσ mode per step
+    # (T += -(s/16)·∂⁴T/∂σ⁴ applied to the post-step state).  Unlike the
+    # explicit rate form above — whose stability limit ν·dt·16 < 1 caps the
+    # damping below the growth rate of the physics-forced ERA5-IC
+    # checkerboard at production dt — the filter form is dt-independent and
+    # unconditionally stable for s in (0, 1] (2Δσ amplification factor
+    # 1-s ≥ 0; all del4 eigenvalues damp monotonically).  Tradeoff: at s=0.5
+    # a RESOLVED 8Δσ vertical wave is damped ~1 %/step — acceptable for the
+    # AMIP lane, too dissipative to default ON for wave-resolving studies.
+    # 0.0 = off (exact no-op).
+    vert4_T_filter: float = 0.0
 
 
 # ============================================================================
@@ -786,6 +798,31 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             state, dyn_tendency_fn, dt, self.config.time_integrator,
         )
 
+        # TEMPORARY (#929-mpas triage): env-gated per-stage state stats to
+        # localize which split stage corrupts the state on the ERA5-IC lane.
+        # Static Python gate on an env var read at trace time; zero effect
+        # when unset.  Remove after the MPAS ERA5-IC NaN is fixed.
+        import os as _os
+        _mpas_dbg = _os.environ.get("LEGOESM_MPAS_STEP_DEBUG", "") == "1"
+        if _mpas_dbg:
+            # 2-delta-sigma checkerboard amplitude: max over cells of the
+            # |even-level mean - odd-level mean| T split (the #930 mode).
+            _T_dbg = state_new.T.data
+            _cb = jnp.max(jnp.abs(
+                jnp.mean(_T_dbg[:, 0::2], axis=1)
+                - jnp.mean(_T_dbg[:, 1::2], axis=1)))
+            jax.debug.print("[dbg-cb  ] checkerboard_max={cb:.2f} K", cb=_cb)
+            jax.debug.print(
+                "[dbg-dyn ] T=[{tmin:.1f},{tmax:.1f}] ps=[{pmin:.0f},{pmax:.0f}] "
+                "u_max={umax:.1f} nanT={nt} nanu={nu} nanps={np}",
+                tmin=jnp.min(state_new.T.data), tmax=jnp.max(state_new.T.data),
+                pmin=jnp.min(state_new.p_s.data), pmax=jnp.max(state_new.p_s.data),
+                umax=jnp.max(jnp.abs(state_new.u.data)),
+                nt=jnp.sum(~jnp.isfinite(state_new.T.data)),
+                nu=jnp.sum(~jnp.isfinite(state_new.u.data)),
+                np=jnp.sum(~jnp.isfinite(state_new.p_s.data)),
+            )
+
         # --- 2. Operator-split physics: evaluate ONCE on the post-dynamics
         #        state, apply forward over dt.  ``state += dt * tendency``
         #        recovers a scheme's internal dt integration when its tendency
@@ -799,6 +836,17 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 _pt, phys_state_out = _pr[0], _pr[1]
             else:
                 _pt = _pr
+            if _mpas_dbg:
+                jax.debug.print(
+                    "[dbg-phys] |dT|max={dt_:.3e} |du|max={du_:.3e} "
+                    "|dps|max={dp_:.3e} nan_dT={nt} nan_du={nu} nan_dps={np}",
+                    dt_=jnp.max(jnp.abs(_pt.dT_dt.data)),
+                    du_=jnp.max(jnp.abs(_pt.du_dt.data)),
+                    dp_=jnp.max(jnp.abs(_pt.dp_s_dt.data)),
+                    nt=jnp.sum(~jnp.isfinite(_pt.dT_dt.data)),
+                    nu=jnp.sum(~jnp.isfinite(_pt.du_dt.data)),
+                    np=jnp.sum(~jnp.isfinite(_pt.dp_s_dt.data)),
+                )
             state_new = MPASHydrostaticState(
                 u=state_new.u.replace(data=state_new.u.data + dt * _pt.du_dt.data),
                 T=state_new.T.replace(data=state_new.T.data + dt * _pt.dT_dt.data),
@@ -816,6 +864,18 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                         if k in _pt.tracer_tendencies else state_new.tracers[k])
                     for k in state_new.tracers
                 })
+
+        # --- 2b. Shapiro-form vertical 2Δσ filter (#930/#976 ERA5-IC lane) ---
+        # Applied to the FINAL post-physics T so the physics-forced
+        # checkerboard cannot accumulate step-over-step.  Same conservative
+        # operator as nu_vert4_T (column-integrated T unchanged); static
+        # Python gate on the config float (0.0 = exact no-op).
+        if self.config.vert4_T_filter > 0.0:
+            state_new = state_new._replace(
+                T=state_new.T.replace(
+                    data=state_new.T.data + vertical_del4_T_tendency(
+                        state_new.T.data,
+                        self.config.vert4_T_filter / 16.0)))
 
         # --- 3. Floors ---
         # Last-resort NaN-safety guard, now BEHIND the #930 cure (``nu_vert4_T``
