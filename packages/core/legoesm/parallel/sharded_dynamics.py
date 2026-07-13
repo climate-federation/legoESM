@@ -1758,6 +1758,25 @@ def check_voronoi_spmd_state_schema(state) -> tuple:
     return tuple(sorted(state.tracers)) if state.tracers is not None else ()
 
 
+def _pack_cell_state(T, p_s, phis, q_flat):
+    """Production cell-pack WIRE layout: ``T | p_s | phis | tracers``.
+
+    ``q_flat`` is the tracer block ``(n, nlev * n_q)`` concatenated in
+    the canonical SORTED-key order (width 0 for a dry run).  The single
+    source of truth for the packed exchange layout — the shard_map
+    kernel and the sentinel routing test both go through here, so an
+    omitted field or a swapped slot cannot hide in a hand-rolled copy.
+    """
+    return jnp.concatenate(
+        [T, p_s[:, jnp.newaxis], phis[:, jnp.newaxis], q_flat], axis=-1)
+
+
+def _unpack_cell_state(cell_buf, nlev):
+    """Inverse of :func:`_pack_cell_state`: ``(T, p_s, phis, q_flat)``."""
+    return (cell_buf[:, :nlev], cell_buf[:, nlev],
+            cell_buf[:, nlev + 1], cell_buf[:, nlev + 2:])
+
+
 def _ppermute_halo_fill(cell_pack, u_shard, halo_sl, ppermute_perms,
                         max_lc, max_le):
     """Fill (owned + halo) local buffers from owned shards via ppermute.
@@ -2099,14 +2118,11 @@ def make_voronoi_sharded_step(
             / ``halo_sl`` are this device's P("device") slices of the
             stacked local meshes and the halo schedule (leading axis 1).
             """
-            # Pack ALL cell-centred prognostics into a single buffer:
-            # (cells_per, nlev + 2 + nlev*n_q).
-            cell_pack = jnp.concatenate([
-                T_shard,                           # (cells_per, nlev)
-                ps_shard[:, jnp.newaxis],          # (cells_per, 1)
-                phis_shard[:, jnp.newaxis],        # (cells_per, 1)
-                q_shard,                           # (cells_per, nlev*n_q)
-            ], axis=-1)
+            # Pack ALL cell-centred prognostics into a single buffer
+            # (cells_per, nlev + 2 + nlev*n_q) via the shared wire-layout
+            # helper (also driven directly by the sentinel routing test).
+            cell_pack = _pack_cell_state(T_shard, ps_shard, phis_shard,
+                                         q_shard)
 
             if use_ppermute:
                 cell_local, u_local = _ppermute_halo_fill(
@@ -2122,10 +2138,9 @@ def make_voronoi_sharded_step(
                 cell_local = cell_full[gc[0]]
                 u_local = u_full[ge[0]]
 
-            # Unpack cell fields
-            T_local = cell_local[:, :nlev]
-            ps_local = cell_local[:, nlev]
-            phis_local = cell_local[:, nlev + 1]
+            # Unpack cell fields (inverse of the shared pack helper)
+            T_local, ps_local, phis_local, q_local = _unpack_cell_state(
+                cell_local, nlev)
 
             # This device's local mesh (leading axis is the length-1
             # device slice of the stacked meshes).
@@ -2133,7 +2148,6 @@ def make_voronoi_sharded_step(
 
             tracers_local = None
             if tkeys:
-                q_local = cell_local[:, nlev + 2:]
                 tracers_local = {
                     k: Field(data=q_local[:, i * nlev:(i + 1) * nlev],
                              name=k, dims=("nCells", "nlev"),
@@ -2204,9 +2218,15 @@ def make_voronoi_sharded_step(
         # with the p_s cell shards (elementwise product stays local;
         # GSPMD emits one allreduce for the sum) — local-only, and
         # multi-controller-safe because it is an argument, not a closure
-        # constant.  total_area is a host float allreduced once here.
+        # constant.  Take a HOST copy first (codex M3c-1 MAJOR): the
+        # caller's mesh may arrive REPLICATED (bench replicate_pytree),
+        # and multiprocess_safe_device_put passes non-fully-addressable
+        # arrays through UNCHANGED — a replicated leaf would silently
+        # stay replicated under multi-controller.  A host array is
+        # always fully addressable, so the P("device") shard is
+        # guaranteed on both controllers.  total_area is a host float.
         _area_for_mass = multiprocess_safe_device_put(
-            global_mesh.areaCell, dev_sharding)
+            np.asarray(global_mesh.areaCell), dev_sharding)
         # fp64 area sum to match the fp64 mass-budget accumulator below
         # (mirrors make_voronoi_mpi_step; identical under x64).
         _total_area = float(jnp.sum(
@@ -2374,9 +2394,20 @@ def make_voronoi_sharded_step(
                 ], axis=0) * area_acc[None]
                 masses = jnp.sum(ps_pair, axis=1)  # shape (2,)
                 correction = (masses[0] - masses[1]) / _total_area
+                # Apply in fp64, then return p_s to its pre-fix carry
+                # dtype (codex M3c-1 MAJOR): under an fp32 compute state
+                # with x64 enabled the fp64 correction would otherwise
+                # promote the carry — the downcast-skipping storage cast
+                # below cannot undo it, breaking the lax.scan carry-dtype
+                # contract and re-tracing host loops.  No-op (bit
+                # identical) whenever the compute state is already fp64.
+                # NB the serial _fix_mass_mpas_hydro deliberately leaves
+                # the promoted add (iter-11); parity in that corner mode
+                # differs only by the rounding of the correction add.
+                _ps = state_new.p_s.data
                 state_new = state_new._replace(
                     p_s=state_new.p_s.replace(
-                        data=state_new.p_s.data + correction))
+                        data=(_ps + correction).astype(_ps.dtype)))
 
             return cast_pytree(state_new, None, "storage"), phys_state_out
 

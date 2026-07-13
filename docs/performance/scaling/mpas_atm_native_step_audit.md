@@ -84,3 +84,67 @@ ordering; same envelope as `test_voronoi_sharded_equivalence.py`):
 u/T atol 1e-6, p_s atol 1e-1, tracers atol 1e-9. The np=2
 multicontroller moist bench gate passes with the same
 `MPAS_PARITY_TOLS` (T-tier tolerances for tracers, atol scaled 1e-3).
+
+Measured (job 8970923: moist BCW + kessler, sfc partition, 4 steps,
+dt=2400 s, x64, 2 virtual CPU devices, `--parity-gate
+--check-conservation`):
+
+```
+conservation dry-mass: rel drift = 0.000e+00  (tol 1e-11)
+parity   u: max|diff| = 1.631e-09
+parity   T: max|diff| = 2.853e-09
+parity p_s: max|diff| = 3.485e-07
+parity q_v: max|diff| = 6.508e-14   (q_c, q_r exactly 0)
+per-step ms: [1359 (compile), 1097 (output-layout promotion compile),
+              3.7, 3.5 (steady)]
+```
+
+The second compile is the one-time input→output sharding-layout
+promotion also pinned by the no-retrace gate in
+`test_mpas_atm_native_step.py` (steady-state steps with changing
+forcing values add ZERO traces).
+
+## Codex adversarial review (gpt-5.6-sol high, job 8970917)
+
+3 MAJOR + 2 MINOR, all addressed same-increment:
+
+1. MAJOR (fp32 carry promotion): the fp64 mass correction promoted an
+   fp32 `p_s` under x64 (the downcast-skipping storage cast cannot undo
+   it → `lax.scan` carry-dtype break). FIX: apply the correction in
+   fp64, then `.astype` back to the pre-fix carry dtype (bit-identical
+   whenever compute is fp64); gated by
+   `test_fp32_state_dtype_fixed_point_under_x64` (all-fp32 state+mesh
+   under x64, every output leaf stays float32).  NB the serial
+   `_fix_mass_mpas_hydro` deliberately leaves the promoted add
+   (iter-11) — parity in that corner differs only by the correction-add
+   rounding.
+2. MAJOR (areaCell resharding): a caller handing a REPLICATED mesh
+   (bench `replicate_pytree`) left `_area_for_mass` replicated under
+   multi-controller (`multiprocess_safe_device_put` passes
+   non-fully-addressable arrays through). FIX: host `np.asarray` copy
+   before placement — always fully addressable, P("device") guaranteed.
+3. MAJOR (cross-process ppermute untested): auto strategy picks
+   allgather at the selfspawn gate size. FIX: bench `--halo-strategy`
+   flag (recorded in the JSONL row); the moist selfspawn np=2 test
+   FORCES ppermute and asserts the recorded strategy.
+4. MINOR (sentinel bypassed production pack): factored
+   `_pack_cell_state`/`_unpack_cell_state` as the single wire-layout
+   source used by the kernel AND the sentinel test; test now checks
+   NAMED fields through the production helpers, nonzero phis, reversed
+   tracer insertion order vs sorted wire order, dry zero-width block,
+   and a 3-device multi-round schedule.
+5. MINOR (weak physics-application gate): added
+   `test_physics_tracer_tendencies_partial_key` — a one-tracer toy
+   physics moves exactly `q_c` by dt·rate (three orders above the
+   tracer tolerance) while `q_v`/`q_r` track the dynamics-only
+   trajectory; the Kessler advection non-vacuity threshold raised
+   above the tracer parity atol.
+
+Pre-existing (NOT this increment; flagged for a separate fix PR): the
+`test_no_private_cross_imports` ratchet fails on MAIN content —
+`tiled_production_cdgrid.py:2442` imports `_get_tiled_tables` /
+`_tiled_diag_perms` / `_tiled_guard_perms` from `cubesphere_exchange`
+(commit b52aa1220, PR #971); `test_no_module_top_jax_alloc` fails on
+MAIN (`sdm.init._SQRT2`, `sdm.kernels._HALL_*`,
+`training.neural_gcm_spectral._SFNO_FORCING_INPUT_SCALE`).  Verified by
+running the ratchet scanners against pristine-main file content.

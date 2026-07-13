@@ -86,8 +86,11 @@ def test_mpas_spmd_two_process_selfspawn_moist_kessler(tmp_path):
     (scaling-M3c increment 1): the moist baroclinic wave + Kessler
     microphysics drive the packed tracer halo exchange, the RK tracer
     advection and the tracer parity gate across a real process
-    boundary (cross-process ppermute rounds).  The dry twin above pins
-    the dynamics-only path."""
+    boundary.  ``--halo-strategy ppermute`` is FORCED (auto would pick
+    allgather at this per-device cell count — codex M3c-1 MAJOR), so
+    the cross-process ppermute rounds and their P("device")-sharded
+    schedule arguments are exactly what runs here.  The dry twin above
+    keeps the auto/allgather branch covered."""
     from multihost_harness import run_federated
 
     out = tmp_path / "mpas_spmd_moist.jsonl"
@@ -105,6 +108,7 @@ def test_mpas_spmd_two_process_selfspawn_moist_kessler(tmp_path):
             "--steps", "4", "--warmup", "1",
             "--partition-method", "sfc",  # deterministic, no pymetis dep
             "--physics", "kessler",
+            "--halo-strategy", "ppermute",
             "--parity-gate", "--check-conservation",
             "--out", str(out),
         ]
@@ -125,6 +129,7 @@ def test_mpas_spmd_two_process_selfspawn_moist_kessler(tmp_path):
     assert rec["component"] == "mpas_atm"
     assert rec["n_processes"] == N_PROC
     assert rec["physics"] == "kessler"
+    assert rec["halo_strategy"] == "ppermute"
     # Tracer parity lines printed by the extended gate (q_v/q_c/q_r) and
     # no field mismatched.
     assert "q_v" in outs[0], "tracer parity lines missing from the gate"

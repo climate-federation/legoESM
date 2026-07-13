@@ -173,6 +173,15 @@ def main() -> int:
                         "exchange + RK tracer advection on the gated "
                         "path) and extends the parity gate to the "
                         "tracer fields.")
+    p.add_argument("--halo-strategy",
+                   choices=["auto", "ppermute", "allgather"],
+                   default="auto",
+                   help="Halo strategy for make_voronoi_sharded_step. "
+                        "'auto' picks allgather below the per-device "
+                        "cell threshold — force 'ppermute' to exercise "
+                        "the neighbor-round schedule on small gate "
+                        "meshes (the multicontroller selfspawn tests "
+                        "do).  Recorded in the JSONL row.")
     p.add_argument("--steps", type=int, default=12)
     p.add_argument("--warmup", type=int, default=2)
     p.add_argument("--dt", type=float, default=None,
@@ -338,7 +347,8 @@ def main() -> int:
     if args.check_conservation:
         mass_before = _global_dry_mass(s0, mesh)
 
-    step = make_voronoi_sharded_step(model, dev_config)
+    step = make_voronoi_sharded_step(
+        model, dev_config, halo_strategy=args.halo_strategy)
     if dev_config.n_devices > 1:
         s = shard_pytree(s0, dev_config)
     else:
@@ -430,6 +440,7 @@ def main() -> int:
         subdivision=args.subdivision, n_devices=nd,
         n_cells=int(mesh.nCells), n_edges=int(mesh.nEdges), nlev=args.nlev,
         partition_method=args.partition_method, physics=args.physics,
+        halo_strategy=args.halo_strategy,
         steps=args.steps, dt=dt,
         platform=jax.default_backend(),
         n_processes=jax.process_count(),

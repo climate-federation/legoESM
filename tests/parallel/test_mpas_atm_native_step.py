@@ -175,6 +175,32 @@ def _toy_stateful_physics(state, mesh, sigma_coord, *,
 _toy_stateful_physics._requires_phys_state = True
 
 
+def _toy_one_tracer_physics(state, mesh, sigma_coord, *,
+                            phys_state=None, forcing=None):
+    """Stateless physics with a tendency for EXACTLY ONE tracer key.
+
+    Pins the partial-key tracer application (``if k in
+    tracer_tendencies``): only ``q_c`` may receive the physics
+    increment; ``q_v``/``q_r`` must follow the dynamics-only
+    trajectory.  Rate 1e-8 kg/kg/s over dt=200 s gives a 2e-6 signal,
+    three orders above the tracer parity tolerance."""
+    from legoesm.core.state import MPASHydrostaticTendencies
+
+    q_c = state.tracers["q_c"]
+    return MPASHydrostaticTendencies(
+        du_dt=state.u.replace(data=jnp.zeros_like(state.u.data)),
+        dT_dt=state.T.replace(data=jnp.zeros_like(state.T.data)),
+        dp_s_dt=state.p_s.replace(data=jnp.zeros_like(state.p_s.data)),
+        dphis_dt=state.phis.replace(data=jnp.zeros_like(state.phis.data)),
+        tracer_tendencies={
+            "q_c": q_c.replace(data=jnp.full_like(q_c.data, 1.0e-8)),
+        },
+    )
+
+
+_ONE_TRACER_RATE = 1.0e-8  # [kg/kg/s] must match _toy_one_tracer_physics
+
+
 def _assert_state_close(got, want, *, moist: bool, label: str):
     for name, tol in _TOLS.items():
         np.testing.assert_allclose(
@@ -229,12 +255,97 @@ class TestNativeFullProductionParity:
         # (a step that silently dropped tracer advection would keep q_v
         # frozen at the initial field and could still "match" a broken
         # reference).
+        # Threshold ABOVE the tracer comparison atol (1e-9): a frozen
+        # q_v could otherwise hide inside the parity envelope.
         dq = np.max(np.abs(np.asarray(ref.tracers["q_v"].data)
                            - np.asarray(state0.tracers["q_v"].data)))
-        assert dq > 1e-10, f"q_v unchanged after 2 steps (max dq={dq:.3e})"
+        assert dq > 1e-8, f"q_v unchanged after 2 steps (max dq={dq:.3e})"
 
         _assert_state_close(
             out, ref, moist=True, label=f"moist kessler [{halo_strategy}]")
+
+    def test_physics_tracer_tendencies_partial_key(self):
+        """Physics tracer tendencies are applied, and ONLY to the keys
+        the scheme returns (the ``if k in tracer_tendencies`` guard):
+        a one-tracer toy physics must move q_c by dt*rate while
+        q_v/q_r follow the dynamics-only trajectory — on the native
+        step AND in parity with serial (codex M3c-1 MINOR: the Kessler
+        gate alone could pass with the application deleted if the
+        scheme is inactive over a short window)."""
+        _need_multi_device(2)
+        mesh, sigma, cfg, model, state0 = _build(moist=True)
+
+        ref_dyn = model.step(state0, _DT)  # no physics
+        ref_phys = model.step(state0, _DT,
+                              physics_fn=_toy_one_tracer_physics)
+        step, _dc = _make_sharded_step(
+            mesh, model, 2, halo_strategy="ppermute")
+        out = step(state0, _DT, physics_fn=_toy_one_tracer_physics)
+
+        _assert_state_close(out, ref_phys, moist=True,
+                            label="one-tracer physics")
+        # Exactly q_c received the increment (q_c starts at 0 and is
+        # not produced by dynamics, so the signal is clean dt*rate).
+        dqc = (np.asarray(out.tracers["q_c"].data)
+               - np.asarray(ref_dyn.tracers["q_c"].data))
+        np.testing.assert_allclose(
+            dqc, _DT * _ONE_TRACER_RATE, rtol=1e-6,
+            err_msg="q_c did not receive the physics tendency")
+        for k in ("q_v", "q_r"):
+            np.testing.assert_allclose(
+                np.asarray(out.tracers[k].data),
+                np.asarray(ref_dyn.tracers[k].data),
+                atol=1e-9, rtol=1e-6,
+                err_msg=(f"{k} moved: physics increment leaked to a "
+                         f"key the scheme did not return"),
+            )
+
+    def test_fp32_state_dtype_fixed_point_under_x64(self):
+        """codex M3c-1 MAJOR: the fp64 mass-fix accumulator must not
+        promote an fp32 carry under x64 (the downcast-skipping storage
+        cast cannot undo it; a promoted p_s breaks the lax.scan
+        carry-dtype contract).  All-fp32 state AND mesh under the
+        default fp32 policy (compute/storage casts are no-ops, sigma
+        is policy-fp32 already): every float leaf out must stay
+        float32 across two fix_mass steps."""
+        if not jax.config.jax_enable_x64:
+            pytest.skip("needs x64 so the fp64 accumulator is real")
+        _need_multi_device(2)
+        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+            MPASPrimitiveEquationModel,
+        )
+
+        mesh, sigma, cfg, model, state0 = _build(moist=True)
+
+        def _to_f32(tree):
+            return jax.tree.map(
+                lambda x: (x.astype(jnp.float32)
+                           if (hasattr(x, "dtype")
+                               and jnp.issubdtype(x.dtype, jnp.floating))
+                           else x),
+                tree,
+            )
+
+        mesh32 = _to_f32(mesh)
+        state32 = _to_f32(state0)
+        model32 = MPASPrimitiveEquationModel(mesh32, sigma, cfg)
+        step, _dc = _make_sharded_step(
+            mesh32, model32, 2, halo_strategy="ppermute")
+        out = state32
+        for _ in range(2):
+            out = step(out, _DT)
+
+        bad = [
+            f"{path}: {leaf.dtype}"
+            for path, leaf in jax.tree_util.tree_leaves_with_path(out)
+            if jnp.issubdtype(leaf.dtype, jnp.floating)
+            and leaf.dtype != jnp.float32
+        ]
+        assert not bad, (
+            "fp32 carry promoted (scan carry-dtype contract broken): "
+            + "; ".join(str(b) for b in bad)
+        )
+        assert bool(jnp.all(jnp.isfinite(out.p_s.data)))
 
     def test_traced_forcing_threaded_no_retrace(self):
         """Per-step forcing values thread through as TRACED args: the
@@ -386,15 +497,44 @@ class TestNativeFullProductionParity:
 
 class TestPackedExchangeSentinelRouting:
 
-    def test_five_field_sentinel_routing(self):
-        """Five cell fields (T x nlev | p_s | phis | q_v x nlev | q_c x
-        nlev) + the edge field carry PER-SLOT sentinels
-        ``(slot+1)*1e4 + global_id`` through the packed ppermute fill:
-        every halo cell/edge must receive its owner's value in every
-        slot.  An omitted field (stale zero) or a swapped pack slot
-        (wrong base) fails loudly.  Bases stay below 2^24 so the test
+    def test_pack_unpack_roundtrip_dry_and_moist(self):
+        """The production pack/unpack pair round-trips named fields,
+        including the dry zero-width tracer block."""
+        from legoesm.parallel.sharded_dynamics import (
+            _pack_cell_state,
+            _unpack_cell_state,
+        )
+
+        n, nlev = 7, 3
+        rng = np.random.default_rng(0)
+        T = jnp.asarray(rng.normal(size=(n, nlev)))
+        ps = jnp.asarray(rng.normal(size=(n,)))
+        phis = jnp.asarray(rng.normal(size=(n,)))
+        for n_q in (0, 2):
+            q = jnp.asarray(rng.normal(size=(n, nlev * n_q)))
+            buf = _pack_cell_state(T, ps, phis, q)
+            assert buf.shape == (n, nlev + 2 + nlev * n_q)
+            T2, ps2, phis2, q2 = _unpack_cell_state(buf, nlev)
+            np.testing.assert_array_equal(np.asarray(T2), np.asarray(T))
+            np.testing.assert_array_equal(np.asarray(ps2), np.asarray(ps))
+            np.testing.assert_array_equal(
+                np.asarray(phis2), np.asarray(phis))
+            np.testing.assert_array_equal(np.asarray(q2), np.asarray(q))
+
+    @pytest.mark.parametrize("n_dev", [2, 3])
+    def test_five_field_sentinel_routing(self, n_dev):
+        """Five NAMED cell fields (T | p_s | phis | q_v | q_c) + the
+        edge field carry PER-SLOT sentinels ``(slot+1)*1e4 +
+        global_id`` through the PRODUCTION pack helper, the ppermute
+        fill, and the production unpack helper: every halo cell/edge
+        must receive its owner's value in every slot of every field.
+        An omitted field (stale zero), a swapped pack slot (wrong
+        base), or a tracer-order divergence (q built from a dict
+        inserted in REVERSED order but packed in sorted wire order)
+        fails loudly.  ``n_dev=3`` exercises a multi-round schedule
+        (edge-colored comm graph); bases stay below 2^24 so the test
         is exact in float32 too."""
-        _need_multi_device(2)
+        _need_multi_device(n_dev)
         from jax.sharding import Mesh, NamedSharding
         from jax.sharding import PartitionSpec as P
         from legoesm.grids.voronoi import create_voronoi_mesh
@@ -402,13 +542,14 @@ class TestPackedExchangeSentinelRouting:
         from legoesm.parallel.sharded_dynamics import (
             _build_ppermute_schedule,
             _build_voronoi_partition_infra,
+            _pack_cell_state,
             _ppermute_halo_fill,
+            _unpack_cell_state,
         )
         from legoesm.parallel.voronoi_partition import (
             reorder_voronoi_for_sharding,
         )
 
-        n_dev = 2
         nlev = 3
         mesh = create_voronoi_mesh(subdivision_level=2)
         mesh = reorder_voronoi_for_sharding(mesh, n_dev)
@@ -422,17 +563,36 @@ class TestPackedExchangeSentinelRouting:
             partitions, cell_owner, n_dev, cells_per, edges_per,
             max_lc, max_le)
         assert sched["n_rounds"] >= 1, "no comm rounds — test is vacuous"
+        if n_dev >= 3:
+            # 3 mutually-adjacent partitions edge-color to >= 2 rounds:
+            # the multi-round scatter path is genuinely exercised.
+            assert sched["n_rounds"] >= 2, (
+                "expected a multi-round schedule at 3 devices")
 
-        # Sentinels: value[g, slot] = (slot+1)*1e4 + g (cells);
-        # edges get +0.5 so a cell/edge cross-wire also fails.
-        W = 3 * nlev + 2  # T | p_s | phis | q_v | q_c
-        gcell = np.arange(nCells, dtype=np.float64)
-        cell_vals = np.stack(
-            [(j + 1) * 1.0e4 + gcell for j in range(W)], axis=-1)
+        # Named per-field sentinels: value[g, lev] = base + lev*1e4 + g.
+        def _cellf(base):
+            g = np.arange(nCells, dtype=np.float64)
+            return np.stack([base + lev * 1.0e4 + g
+                             for lev in range(nlev)], axis=-1)
+
+        fields = {
+            "T": _cellf(1.0e5),
+            "q_v": _cellf(3.0e5),   # dict INSERTED q_v before q_c ...
+            "q_c": _cellf(4.0e5),
+            "p_s": 2.0e5 + np.arange(nCells, dtype=np.float64),
+            "phis": 2.5e5 + np.arange(nCells, dtype=np.float64),
+        }
+        tkeys = tuple(sorted(("q_v", "q_c")))  # ... wire order is sorted
+        q_flat = np.concatenate([fields[k] for k in tkeys], axis=-1)
         gedge = np.arange(nEdges, dtype=np.float64)
         u_vals = np.stack(
-            [(lev + 1) * 1.0e4 + 0.5 + gedge for lev in range(nlev)],
+            [6.0e5 + lev * 1.0e4 + 0.5 + gedge for lev in range(nlev)],
             axis=-1)
+
+        # PRODUCTION wire layout (same helper the kernel uses).
+        cell_vals = np.asarray(_pack_cell_state(
+            jnp.asarray(fields["T"]), jnp.asarray(fields["p_s"]),
+            jnp.asarray(fields["phis"]), jnp.asarray(q_flat)))
 
         devices = jax.devices("cpu")[:n_dev]
         jmesh = Mesh(np.array(devices), axis_names=("device",))
@@ -456,6 +616,7 @@ class TestPackedExchangeSentinelRouting:
             out_specs=(P("device"), P("device")),
             check_vma=False,
         )
+        W = cell_vals.shape[-1]
         cell_out, u_out = fill(
             jnp.asarray(cell_vals), jnp.asarray(u_vals), halo_args)
         cell_out = np.asarray(cell_out).reshape(n_dev, max_lc, W)
@@ -464,20 +625,30 @@ class TestPackedExchangeSentinelRouting:
         n_halo_checked = 0
         for d, part in enumerate(partitions):
             # Owned passthrough + every HALO entity == owner's sentinel,
-            # in EVERY slot.
+            # checked FIELD BY FIELD through the production unpack.
             lc = np.asarray(part.local_cells)
-            expected_c = cell_vals[lc]  # (n_local_cells, W)
-            np.testing.assert_array_equal(
-                cell_out[d, : part.n_local_cells], expected_c,
-                err_msg=f"device {d}: cell pack slot routing wrong",
-            )
+            nl = part.n_local_cells
+            T_l, ps_l, phis_l, q_l = _unpack_cell_state(
+                cell_out[d], nlev)
+            got = {
+                "T": np.asarray(T_l)[:nl],
+                "p_s": np.asarray(ps_l)[:nl],
+                "phis": np.asarray(phis_l)[:nl],
+            }
+            for i, k in enumerate(tkeys):
+                got[k] = np.asarray(q_l)[:nl, i * nlev:(i + 1) * nlev]
+            for k, arr in got.items():
+                np.testing.assert_array_equal(
+                    arr, fields[k][lc],
+                    err_msg=(f"device {d}: field {k} slot routing wrong "
+                             f"(n_dev={n_dev})"),
+                )
             le = np.asarray(part.local_edges)
-            expected_e = u_vals[le]
             np.testing.assert_array_equal(
-                u_out[d, : part.n_local_edges], expected_e,
+                u_out[d, : part.n_local_edges], u_vals[le],
                 err_msg=f"device {d}: edge routing wrong",
             )
-            n_halo_checked += (part.n_local_cells - part.n_owned_cells)
+            n_halo_checked += (nl - part.n_owned_cells)
         assert n_halo_checked > 0, "no halo cells checked — vacuous"
 
 
