@@ -347,3 +347,37 @@ def test_upper_third_state_mode_removed_not_frozen():
     assert float(jnp.abs(out.T_hat.data[idx_hi, 2])) == 0.0
     # phis (static forcing) untouched by design.
     assert bool(jnp.array_equal(out.phis_hat.data, state.phis_hat.data))
+
+
+def test_upper_third_mode_removed_under_leapfrog_ra():
+    """Leapfrog twin: the RA/RAW filter mixes time-(n-1)/n states into
+    both outputs, so truncating only state_np1 leaks O(gamma) upper-third
+    power back every step and keeps _state_prev contaminated.  Both RA
+    outputs and the stored startup state are now truncated — the band
+    must be exactly clean in the RETURNED state and in _state_prev from
+    the first leapfrog step onward."""
+    grid = create_gaussian_grid(21)
+    sigma_coord = create_sigma_coordinate(5)
+    cfg = SpectralPEConfig(
+        hyperdiff_coeff=0.0, spectral_filter_strength=0.0,
+        dealiasing_fraction=0.667, time_integrator="leapfrog_si",
+        semi_implicit=True, fix_mass=False,
+    )
+    model = SpectralPrimitiveEquationModel(
+        grid=grid, sigma_coord=sigma_coord, config=cfg,
+    )
+    state = isothermal_rest_state_spectral(
+        grid, sigma_coord, perturbation_amplitude=0.0,
+    )
+    ls = np.asarray(grid.ls)
+    hi = ls > int(np.floor(cfg.dealiasing_fraction * grid.n_max))
+    idx_hi = int(np.argmax(ls == grid.n_max))
+    vor = state.vor_hat.data.at[idx_hi, 2].set(1e-8)
+    state = state._replace(vor_hat=state.vor_hat.replace(data=vor))
+
+    for _ in range(4):
+        state = model.step(state, 300.0)
+        assert float(jnp.max(jnp.abs(state.vor_hat.data[hi]))) == 0.0
+        assert float(jnp.max(jnp.abs(state.T_hat.data[hi]))) == 0.0
+    # Stored time level is band-limited too (no re-injection reservoir).
+    assert float(jnp.max(jnp.abs(model._state_prev.vor_hat.data[hi]))) == 0.0

@@ -1716,7 +1716,11 @@ class SpectralPrimitiveEquationModel:
                     and self.config.anchor_mass_to_initial
                     and self._target_mass is not None):
                 result = self._apply_mass_fixer(result)
-            self._state_prev = state
+            # Store the TRUNCATED input as the leapfrog time-(n-1) level:
+            # an unmasked _state_prev feeds its upper-third power straight
+            # back through the next leapfrog combination + RA filter
+            # (codex 2026-07-12 micro-review).
+            self._state_prev = self._apply_state_truncation(state)
             return result
         else:
             # --- Leapfrog + SI ---
@@ -1751,8 +1755,16 @@ class SpectralPrimitiveEquationModel:
                 state_n_filtered, state_np1_filtered = robert_asselin_filter(
                     self._state_prev, state, state_np1, gamma, alpha=alpha,
                 )
+                # The RA mix re-injects O(γ) upper-third power from the
+                # time-n / time-(n-1) states into BOTH outputs — truncate
+                # them so the band-limit is exact on the returned state
+                # AND on the stored _state_prev (codex 2026-07-12
+                # micro-review: an unmasked _state_prev feeds the leaked
+                # power back through every subsequent leapfrog step).
+                state_n_filtered = self._apply_state_truncation(state_n_filtered)
+                state_np1_filtered = self._apply_state_truncation(state_np1_filtered)
             else:
-                state_n_filtered = state
+                state_n_filtered = self._apply_state_truncation(state)
                 state_np1_filtered = state_np1
             # Iter-3: anchored mass fixer (leapfrog body).  Applied to
             # the time-(n+1) state AFTER the Robert-Asselin filter so
