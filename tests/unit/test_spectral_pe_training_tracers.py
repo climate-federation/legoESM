@@ -678,6 +678,18 @@ class TestColumnMLPTracers:
             nlev=NLEV, hidden_dim=16, n_layers=2,
             key=jax.random.PRNGKey(99), residual_scale=0.1,
         )
+        # NeuralPhysics zero-inits its FINAL layer (weight AND bias) so an
+        # UNTRAINED net emits EXACTLY zero for ANY input — the #797 rollout
+        # blow-up guard.  That makes an untrained forward pass input-INSENSITIVE
+        # by construction, so a plain untrained net gives identical (zero) output
+        # for any q_v and this test could not tell "q_v plumbed" from "q_v
+        # ignored".  Give the last layer a non-zero weight so the net actually
+        # responds to its input; this isolates the BRIDGE's q_v plumbing (the
+        # thing under test) from the deliberately-zeroed init.
+        last = nn.layers[-1]
+        nn = eqx.tree_at(
+            lambda m: m.layers[-1].weight, nn, jnp.ones_like(last.weight),
+        )
         physics_fn = make_column_mlp_spectral_physics(nn, _GRID)
         carry_a = _make_gaussian_carry(q_v_val=0.001)
         carry_b = _make_gaussian_carry(q_v_val=0.020)
