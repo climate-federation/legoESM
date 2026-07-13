@@ -156,16 +156,16 @@ def test_run_tiled_cube_spmd_completes_and_matches_direct_loop():
     assert day == pytest.approx(stub.config.start_day
                                 + n_steps * DT / 86400.0)
 
-    # Glue parity: the lane's gathered state == the direct blocked loop
-    # (same builders, same step count) — exact equality, same code path.
+    # Glue parity: the lane's gathered state == the direct SCANNED segment
+    # (same builders, same step count) — exact equality, same code path
+    # (M3b increment 1: the lane advances each segment via ONE compiled
+    # lax.scan, scan_tiled_cc_steps; scan-vs-per-step numerics parity is
+    # gated in tests/parallel/test_cube_tile_native_segment.py).
     from legoesm.atmosphere.dynamics.tiled_step_adapter import (
-        make_tiled_cc_loop,
+        make_tiled_cc_loop, scan_tiled_cc_steps,
     )
     enter, step, exit_ = make_tiled_cc_loop(model, dc.mesh, kt=KT, dt=DT)
-    step_jit = jax.jit(step)
-    blk = enter(hs)
-    for _ in range(n_steps):
-        blk = step_jit(blk)
+    blk = scan_tiled_cc_steps(step, n_steps)(enter(hs))
     ref = exit_(blk, hs)
     np.testing.assert_array_equal(np.asarray(stub.state.T.data),
                                   np.asarray(ref.T.data))
