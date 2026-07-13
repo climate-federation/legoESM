@@ -1,0 +1,41 @@
+# CHATS7 time-integration sensitivity recipe.
+#
+# Demonstrates a multi-case recipe: how close the adapter gets to the Fortran
+# CLM-ML v2 reference under two time-integration settings —
+#   (a) the adapter DEFAULT (Euler, num_ml_steps=1 -> dtime_ml=dt), vs
+#   (b) the Fortran-parity setting (RK4, num_ml_steps=30 -> dtime_ml=60 s).
+# The scorecard makes the "scheme-dominated vs physics-dominated" difference
+# from docs/MLC_experiment_plan/experiment_plan.md §1.2 quantitative.
+#
+# Produce both model outputs first:
+#   run_chats7_offline.py --output-dir results/chats7_euler_2007-05 \
+#       --met-type 3 --runge-kutta-type 10 --num-ml-steps 1
+#   run_chats7_offline.py --output-dir results/chats7_rk4_2007-05 \
+#       --met-type 3 --runge-kutta-type 41 --num-ml-steps 30
+# then:
+#   eval_land.py --recipe config/land_eval/chats7_timestep_sensitivity.yaml
+
+name: chats7_timestep_sensitivity
+description: >
+  Adapter Euler (default) vs RK4/60 s parity settings, each scored against
+  the Fortran CLM-ML v2 reference at CHATS7 May 2007.
+output_dir: validation_output
+
+cases:
+  - name: adapter_euler_vs_fortran
+    model:
+      label: adapter Euler (dt=1800 s)
+      path: results/chats7_euler_2007-05
+      tag: CHATS7_2007-05
+    references: [fortran_v2]
+    variables: [flux:shflx, flux:lhflx, flux:gpp, flux:ustar, fsun:tl_sun]
+    metrics: [bias, rmse, nrmse, corr, bias_score, rmse_score, taylor_score]
+
+  - name: adapter_rk4_vs_fortran
+    model:
+      label: adapter RK4 (dtime_ml=60 s)
+      path: results/chats7_rk4_2007-05
+      tag: CHATS7_2007-05
+    references: [fortran_v2]
+    variables: [flux:shflx, flux:lhflx, flux:gpp, flux:ustar, fsun:tl_sun]
+    metrics: [bias, rmse, nrmse, corr, bias_score, rmse_score, taylor_score]

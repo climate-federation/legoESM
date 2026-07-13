@@ -1,0 +1,58 @@
+# CHATS7 parity recipe (experiment E1 of docs/MLC_experiment_plan).
+#
+# Scores the legoESM CLM-ML adapter's CHATS7 May-2007 offline output against
+# the two in-tree CLM-ML references (Fortran v2 and the JAX standalone),
+# variable-by-variable and as an ILAMB-style scorecard.
+#
+# Produce the model output first (adapter, RK4 / 60 s sub-steps to match the
+# Fortran namelist):
+#   JAX_ENABLE_X64=1 .venv/bin/python scripts/run/run_chats7_offline.py \
+#       --output-dir results/chats7_adapter_2007-05 \
+#       --met-type 3 --runge-kutta-type 41 --num-ml-steps 30
+# then:
+#   JAX_ENABLE_X64=1 .venv/bin/python scripts/validate/eval_land.py \
+#       --recipe config/land_eval/chats7_parity.yaml
+#
+# References fortran_v2 + jax_standalone are 100% in-tree (no data pull).
+
+name: chats7_parity
+description: >
+  CHATS7 walnut-orchard May 2007 parity of the legoESM CLM-ML adapter vs the
+  Fortran CLM-ML v2 and JAX-standalone references.
+output_dir: validation_output
+
+cases:
+  - name: chats7_adapter_parity
+    model:
+      label: legoESM adapter
+      path: results/chats7_adapter_2007-05
+      tag: CHATS7_2007-05
+    references:
+      - fortran_v2
+      - jax_standalone
+    # Marquee turbulent + carbon fluxes (flux.out) plus the sun/shade leaf-T
+    # split (fsun.out) that only the multi-layer scheme resolves, and the
+    # plant-hydraulic stress (aux.out).
+    variables:
+      - flux:rnet
+      - flux:shflx
+      - flux:lhflx
+      - flux:gpp
+      - flux:ustar
+      - flux:G_soil
+      - flux:stflx_air
+      - flux:stflx_veg
+      - fsun:tl_sun
+      - fsun:tl_sha
+      - fsun:gpp_sun
+      - fsun:gpp_sha
+      - aux:btran
+      - aux:lwp_top
+    metrics:
+      - bias
+      - rmse
+      - nrmse
+      - corr
+      - bias_score
+      - rmse_score
+      - taylor_score

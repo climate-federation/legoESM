@@ -19,12 +19,25 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import numpy as np
 from scipy import stats
-from scipy.stats import pearsonr
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+# Bootstrap the federation package roots so the shared evaluation library is
+# importable when this validator is run as a script (mirrors the runners).
+_pkg_root = REPO_ROOT / "packages"
+for _p in [REPO_ROOT / "src", *sorted(
+    p for p in _pkg_root.iterdir() if p.is_dir() and (p / "legoesm").exists()
+)]:
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
+# Shared, tested comparison numerics + .out schema (single source of truth;
+# CLAUDE.md: "No duplicate numerics ... Plotters NOT exempt").
+from legoesm.land.evaluation import fluxio as _eval_fluxio  # noqa: E402
+from legoesm.land.evaluation import metrics as _eval_metrics  # noqa: E402
 REF_DIR = REPO_ROOT / "docs" / "output_files_clm_ml-v2"
 JAX_DIR = REPO_ROOT / "clm-ml-jax" / "src" / "output_files" / "JAX_outputs_05_2007_31days"
 OUT_DIR = REPO_ROOT / "validation_output"
@@ -144,24 +157,12 @@ FLUXPROFILE_VARS = [
 # ---------------------------------------------------------------------------
 
 def load_out(path: Path) -> np.ndarray:
-    """Load whitespace-delimited .out file → 2-D float array."""
-    rows = []
-    with open(path) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append([float(x) for x in line.split()])
-            except ValueError:
-                continue
-    if not rows:
-        return np.empty((0, 0))
-    lengths = {len(r) for r in rows}
-    if len(lengths) > 1:
-        most = max(lengths, key=lambda n: sum(1 for r in rows if len(r) == n))
-        rows = [r for r in rows if len(r) == most]
-    return np.array(rows)
+    """Load whitespace-delimited .out file → 2-D float array.
+
+    Delegates to the shared reader
+    (:func:`legoesm.land.evaluation.fluxio.load_out`).
+    """
+    return _eval_fluxio.load_out(path)
 
 
 def load_pair(tag: str) -> tuple[np.ndarray, np.ndarray]:
@@ -175,23 +176,13 @@ def load_pair(tag: str) -> tuple[np.ndarray, np.ndarray]:
 # ---------------------------------------------------------------------------
 
 def scalar_stats(ref: np.ndarray, jax: np.ndarray) -> dict:
-    """Return a dict of comparison metrics for 1-D arrays."""
-    mask = np.isfinite(ref) & np.isfinite(jax) & (np.abs(ref) < 1e30) & (np.abs(jax) < 1e30)
-    r, j = ref[mask], jax[mask]
-    if len(r) < 2:
-        return dict(n=0, rmse=np.nan, mae=np.nan, bias=np.nan, r2=np.nan, corr=np.nan, nrmse=np.nan)
-    rmse = float(np.sqrt(np.mean((r - j) ** 2)))
-    mae  = float(np.mean(np.abs(r - j)))
-    bias = float(np.mean(j - r))
-    scale = max(float(np.std(r)), 1e-6)
-    nrmse = rmse / scale
-    if np.std(r) > 1e-10 and np.std(j) > 1e-10:
-        corr, _ = pearsonr(r, j)
-        r2 = corr ** 2
-    else:
-        corr = 1.0 if np.allclose(r, j, atol=1e-8) else 0.0
-        r2 = corr ** 2
-    return dict(n=int(mask.sum()), rmse=rmse, mae=mae, bias=bias, r2=r2, corr=corr, nrmse=nrmse)
+    """Return a dict of comparison metrics for 1-D arrays.
+
+    Delegates to the shared, tested implementation
+    (:func:`legoesm.land.evaluation.metrics.scalar_stats`); the returned
+    keys are unchanged (``n, rmse, mae, bias, r2, corr, nrmse``).
+    """
+    return _eval_metrics.scalar_stats(ref, jax)
 
 
 def print_table(title: str, rows: list[tuple]):
@@ -264,16 +255,16 @@ def plot_scatter(ref_col, jax_col, label, unit, s, ax=None, title=""):
 
 
 def diurnal_cycle(time_arr, col_arr, dt_days=1 / 48):
-    """Average into 48 half-hourly bins (0 = 00:00 UTC)."""
-    frac = (time_arr % 1.0)
-    bins = np.round(frac / dt_days).astype(int) % 48
-    avg = np.full(48, np.nan)
-    for b in range(48):
-        vals = col_arr[bins == b]
-        vals = vals[np.isfinite(vals)]
-        if len(vals):
-            avg[b] = vals.mean()
-    return avg
+    """Average into 48 half-hourly bins (0 = 00:00 UTC).
+
+    Delegates to the shared composite
+    (:func:`legoesm.land.evaluation.metrics.diurnal_cycle`), which uses the
+    same round-and-wrap binning.
+    """
+    n_bins = int(round(1.0 / dt_days))
+    return _eval_metrics.diurnal_cycle(
+        np.asarray(time_arr), np.asarray(col_arr), n_bins=n_bins
+    )
 
 
 def plot_diurnal(time_ref, time_jax, ref_col, jax_col, label, unit, ax=None, title=""):
