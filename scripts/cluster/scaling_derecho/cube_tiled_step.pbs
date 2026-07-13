@@ -82,28 +82,35 @@ export NCCL_SOCKET_IFNAME=hsn
 # nccl_comm_splitting ON) the all-reduce clique and the permute cliques init
 # CONCURRENTLY and the background NCCL init thread can establish them in a
 # different relative order per rank -> cyclic wait / comm-init deadlock (ranks
-# reach channel/P2P setup but log ZERO "Init COMPLETE"). Force independent,
-# program-order-serial comm init. Bisect afterward: re-enable
-# latency_hiding_scheduler alone (keep nccl_comm_splitting=false) to recover
-# overlap perf if the split flag alone suffices. Confirm the mechanism first
-# with NCCL_DEBUG_SUBSYS=INIT,COLL (see issue #921).
+# reach channel/P2P setup but log ZERO "Init COMPLETE"). The code fix
+# (warmup_tiled_cube_comms, model_driver) primes each clique kind in isolation
+# in a fixed program order, removing the race. The XLA flags below are RETAINED
+# as defence-in-depth (force independent, program-order-serial comm init); drop
+# them to recover overlap perf once the warmup fix is confirmed sufficient
+# (bisect: re-enable latency_hiding_scheduler alone, keep
+# nccl_comm_splitting=false). Confirm with NCCL_DEBUG_SUBSYS=INIT,COLL (#921).
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_nccl_comm_splitting=false --xla_gpu_enable_latency_hiding_scheduler=false"
-# timeout + markers (#921 repro plan): stop wasting the 24-GPU allocation on a
-# hang and pinpoint WHICH lane stalls (single-shot is known-good; the
-# closed-loop mass-fixer lane is the suspect).
-timeout 1800 mpiexec -n $((6 * KT * KT)) --ppn 4 \
+# #921: a hung NCCL comm-init otherwise consumes the whole allocation with no
+# attribution.  Bound each lane (override LANE_TIMEOUT for slow first compiles)
+# and print date markers so a walltime kill is pinned to a lane at a glance.
+LANE_TIMEOUT="${LANE_TIMEOUT:-1800}"
+
+echo "== single-shot lane START $(date -Is) =="
+timeout "${LANE_TIMEOUT}" \
+mpiexec -n $((6 * KT * KT)) --ppn 4 \
     sh -c 'export CUDA_VISIBLE_DEVICES=$PALS_LOCAL_RANKID; exec "$@"' -- \
     "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
     --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
     --steps 12 --warmup 2 --multicontroller --out "${OUT}"
-echo "== single-shot done"
+echo "== single-shot lane DONE $(date -Is); closed-loop lane START $(date -Is) =="
 # Closed-loop production lane: the np>6 number that matters (real
 # multi-step integration, state resident tile-sharded across steps).
-echo "== closed-loop start"
-timeout 1800 mpiexec -n $((6 * KT * KT)) --ppn 4 \
+timeout "${LANE_TIMEOUT}" \
+mpiexec -n $((6 * KT * KT)) --ppn 4 \
     sh -c 'export CUDA_VISIBLE_DEVICES=$PALS_LOCAL_RANKID; exec "$@"' -- \
     "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
     --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
     --steps 12 --warmup 2 --multicontroller --closed-loop --out "${OUT}"
+echo "== closed-loop lane DONE $(date -Is) =="
 
 echo "done: ${OUT}"
