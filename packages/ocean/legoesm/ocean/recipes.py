@@ -159,6 +159,11 @@ LATLON_RECIPES = {
         "tracer_time_integrator": "euler",
         "implicit_vertical_mixing": True,
         "n_barotropic_substeps": 30,
+        # OMIP global freshwater correction — part of the proven configuration
+        # (run_omip _create_setup + nemo_match_tripole_model_config both set it);
+        # carried here so catalog-based assembly does not silently fall back to
+        # the config default False (codex).
+        "normalize_freshwater": True,
     },
     # Oracle dycores — the canonical numerics of the runnable oracle models. SINGLE
     # SOURCE for the *_canonical_ocean_config factory defaults (the factories splat
@@ -248,6 +253,8 @@ MPAS_RECIPES = {
         "barotropic_solver": "implicit_cn",
         "pv_scheme": "enstrophy",
         "implicit_vertical_mixing": True,
+        # Part of the proven configuration (see the tripole entry note).
+        "normalize_freshwater": True,
     },
 }
 
