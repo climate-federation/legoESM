@@ -85,12 +85,51 @@ Per step, per column, with `has_pack = total_column_SWE > eps`:
   (no version bump — in-flight "single" v1 restarts still load) in BOTH
   `land/restart.py` and `run_lmip.py`. Restart round-trip + init + merge-skew tests.
   Physics unchanged (multilayer path still raises).
-- **Stage 3 — couple it in (the physics).** Behind `snow_scheme=="multilayer"`,
-  replace the cell-mean `update_snow` with the coupling above; pack-top T as skin
-  T; drainage → soil/runoff; `G_bottom` → soil top BC. Conservation tests
-  (water + energy closure at the coupled seam) + a controlled cold-cell comparison
-  (single vs multilayer): the boreal soil must warm toward physical winter values
-  and stop overcooling to 221 K.
+- **Stage 3 — couple it in (the physics). ✅ DONE (2026-07-13).** Wired into
+  `step_multilayer_land` (two-leaf canopy), sequential operator split. Added the
+  `thermal_active_swe` (~10 kg/m²) **zero-layer-snow threshold** (CLM5 §8.1): a thin
+  dusting accumulates + brightens albedo but the surface flux passes through to the
+  soil — without it, a full `Q_top` dumped into a ~0-heat-capacity fresh layer melts
+  it in one step (found + fixed via the per-step probe). Verified: a cold column
+  (258 K air) builds a real pack and holds the **soil surface 8.8 K warmer** than the
+  snow-blind `"single"` budget (the cold-bias mechanism), **water conserves** to
+  <1e-6 kg/m² over a mixed snow+rain run, all finite. Guards: multilayer + non-
+  two-leaf → raise; multilayer + elev_bands → raise. Tests:
+  `tests/land/integration/test_multilayer_snow_coupling.py` (+ 3 helper conservation
+  tests in `test_snow_column.py`).
+  - **Known first-cut limitation (Stage 4):** sub-threshold (thin) snow gets `Q_top=0`
+    / `G_bottom=0`, so it accumulates + sublimates but does not melt-from-below off a
+    warm soil until it either crosses the activation threshold or the single-scheme
+    would have melted it; and rain-on-snow routes straight to soil infiltration
+    (no in-pack refreeze). Both are documented, mass-conserving, and deferred.
+- **Stage 3 (superseded design note).** Behind `snow_scheme=="multilayer"`,
+  **sequential operator split** (the seam is already explicit via `G_bottom`, so a
+  lagged canopy↔pack-top boundary is consistent, conservative, and avoids surgery on
+  the converged Newton closure): canopy(lagged pack-top T) → column(Q_top, G_bottom)
+  → soil(G_bottom). Scoped to the `two_leaf_canopy` surface scheme first (the LMIP +
+  flux-site config), with an explicit guard raising on other schemes + multilayer.
+  The module ingests **snowfall only**, so the coupler handles two mass terms outside
+  it, conservatively:
+  - **Sublimation** — the latent partition already removes `sublim_actual` from the
+    cell; for a packed column, remove that ICE mass (+ its sensible enthalpy) from the
+    pack top via `apply_sublimation` (the L_s energy is already in `Q_top` as
+    `−lhflx`, so mass-removal + Q_top together close the seam).
+  - **Rain-on-snow (v1)** — `precip_rain` on a packed cell routes straight to soil
+    infiltration (`flux_top`), mass-conserving but skipping in-pack refreeze; a Stage-4
+    refinement (main's #902 rain-on-snow refreeze is banded-path only anyway). Logged
+    as a known first-cut limitation.
+
+  `G_bottom = g_iface·(T_pack_base − T_soil_top)`, `g_iface` = harmonic mean of the
+  pack-base half-conductance (`snow_base_interface_conductance`) and the soil-top
+  half-conductance (`k_soil_top/(½·dz_top)` from `compute_thermal_conductivity`),
+  positive **downward**. Same `G_bottom` to `step_snow_column` base AND the soil top
+  BC; `drainage/rho_w` → `flux_top`; `drainage_heat/dt` → soil-top energy; `L_f`
+  handled inside the column (single-scheme `melt_energy`/`update_snow` bypassed for
+  packed columns). `snow_depth` (cell-mean) := column total SWE for
+  albedo/diagnostics/restart. Empty-pack columns: `G_bottom = Q_top`, column inert.
+  Conservation tests (water + energy seam residual ≈ 0) + a controlled cold-cell
+  comparison (single vs multilayer): the boreal soil must warm toward physical winter
+  values and stop overcooling to 221 K.
 - **Stage 4 — snow albedo + cap.** Blend snow into the canopy shortwave soil
   albedo (so the surface reflects like snow); the pack's own drainage handles the
   tower, but add an explicit `h2osno_max` shed-to-runoff as a belt-and-braces cap.

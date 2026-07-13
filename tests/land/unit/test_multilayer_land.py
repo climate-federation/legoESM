@@ -649,10 +649,13 @@ class TestMultilayerLandStep(unittest.TestCase):
             step_multilayer_land(state, forcing, cfg_bad, U_min=1.0, dt=600.0)
         self.assertIn("snow_scheme", str(ctx.exception))
 
-        # 'multilayer' is a valid future value but not yet coupled (Stage 1).
+        # 'multilayer' is scoped to the two-leaf canopy scheme (Stage 3); with the
+        # default SimpleSEB surface scheme it must raise a clear ValueError rather
+        # than silently run the single-node budget.
         cfg_ml = cfg_single._replace(snow_scheme="multilayer")
-        with self.assertRaises(NotImplementedError):
+        with self.assertRaises(ValueError) as ml_ctx:
             step_multilayer_land(state, forcing, cfg_ml, U_min=1.0, dt=600.0)
+        self.assertIn("TwoLeafCanopyConfig", str(ml_ctx.exception))
 
     def test_basic_step(self):
         """Single step should produce valid state and response."""

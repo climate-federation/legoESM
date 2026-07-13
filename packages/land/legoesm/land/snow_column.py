@@ -73,6 +73,15 @@ class SnowColumnConfig(NamedTuple):
     irreducible_liq_frac: float = 0.05   # liquid held per unit ice mass [-]
     k_conductivity_exponent: float = 2.0  # k ~ (rho/rho_ref)^exp (Sturm 1997)
     min_pack_swe: float = 1e-8           # [kg/m^2] below which the pack is empty
+    # SWE [kg/m^2] above which the pack is THERMALLY ACTIVE — i.e. gets its own
+    # surface energy budget and insulates the soil (the driver routes Q_top into the
+    # column and the soil sees only G_bottom).  Below this the pack is thermally
+    # negligible ("zero-layer snow", CLM5 Oleson 2013 §8.1): it still accumulates and
+    # brightens the albedo, but the surface flux passes through to the soil, which
+    # avoids dumping a full surface flux into a ~0-heat-capacity thin layer (that
+    # would melt a just-fallen dusting in one step).  Structural threshold, not a
+    # tunable closure.  ~10 kg/m^2 ≈ a few cm of fresh snow.
+    thermal_active_swe: float = 10.0     # [kg/m^2]
 
 
 __param_spec__ = {
@@ -82,6 +91,7 @@ __param_spec__ = {
             "compaction_timescale_s": "numerics: density-relaxation e-folding time",
             "k_conductivity_exponent": "material: Sturm (1997) conductivity exponent",
             "min_pack_swe": "numerics: empty-pack floor",
+            "thermal_active_swe": "structural: zero-layer-snow activation threshold",
         },
         "params": {
             "rho_snow_fresh": {
@@ -351,3 +361,71 @@ def column_enthalpy(state: SnowColumnState) -> jnp.ndarray:
     """Column enthalpy relative to T_freeze [J/m^2] (sensible + fusion of the
     liquid fraction), summed over layers — for energy-conservation checks."""
     return jnp.sum(_enthalpy(state.swe_ice, state.swe_liq, state.T), axis=-1)
+
+
+# ===========================================================================
+# Coupling helpers (snow column <-> soil surface energy balance)
+# ===========================================================================
+# These are the pieces the land driver needs to splice the column between the
+# surface energy balance and the top soil layer (Phase 2b Stage 3).  Kept here,
+# next to the physics they read, so the coupling is unit-testable in isolation.
+
+
+def pack_top_temperature(state: SnowColumnState) -> jnp.ndarray:
+    """Temperature of the pack TOP layer [K] — the skin the surface exchanges with
+    when snow is present (feeds the canopy ground boundary)."""
+    return state.T[..., 0]
+
+
+def snow_base_interface_conductance(
+    state: SnowColumnState, config: SnowColumnConfig = SnowColumnConfig()
+) -> jnp.ndarray:
+    """Half-layer conductance from the pack BASE node to its lower face [W/m^2/K].
+
+    ``= k_base / (½·dz_base)`` with ``k_base`` the Sturm (1997) snow conductivity of
+    the base layer.  Combine (harmonic mean) with the soil-top half-conductance to
+    form the snow<->soil interface conductance ``g_iface`` for the prescribed
+    ``G_bottom = g_iface·(T_pack_base − T_soil_top)`` (positive DOWNWARD into soil).
+    An empty pack has ~zero mass ⇒ near-zero conductance (bounded by ``_DZ_HALF_MIN``);
+    callers bypass the column entirely for empty packs (``G_bottom = Q_top``).
+    """
+    dz, k = _thickness_and_conductivity(
+        state.swe_ice, state.swe_liq, state.density, config)
+    return k[..., -1] / jnp.maximum(0.5 * dz[..., -1], _DZ_HALF_MIN)
+
+
+def apply_sublimation(
+    state: SnowColumnState, subl_mass: jnp.ndarray,
+    config: SnowColumnConfig = SnowColumnConfig(),
+) -> tuple[SnowColumnState, jnp.ndarray]:
+    """Remove ``subl_mass`` [kg/m^2] of ICE from the pack (sublimation), or deposit
+    frost if negative.  Conservative in mass AND enthalpy.
+
+    The L_s ENERGY of sublimation is booked separately in the surface energy balance
+    (it enters ``Q_top`` as ``−lhflx`` over snow); this function moves only the MASS
+    and the sublimated ice's own SENSIBLE enthalpy, so the coupled snow+soil budget
+    closes.  Sublimation (``subl_mass ≥ 0``) is removed proportionally from each
+    layer's ice (surface-biased detail deferred; proportional keeps the vertical
+    shape and is strictly conservative).  Deposition (``subl_mass < 0``) adds ice to
+    the TOP layer at the top-layer temperature (frost).
+
+    Returns ``(new_state, delta_H)`` where ``delta_H`` [J/m^2] is the enthalpy CHANGE
+    of the column from this mass exchange (negative for sublimation removal, positive
+    for deposition) — so ``ΔH_column = (Q_top−G_bottom)·dt + fresh_enth − drainage_heat
+    + delta_H`` closes.
+    """
+    swe_ice, swe_liq, T, density = state
+    total_ice = jnp.sum(swe_ice, axis=-1)
+    # Removal (subl_mass >= 0): proportional fraction of each layer's ice.
+    remove = jnp.maximum(subl_mass, 0.0)
+    frac = jnp.clip(remove / jnp.maximum(total_ice, _EPS), 0.0, 1.0)[..., None]
+    removed = swe_ice * frac
+    removed_enth = jnp.sum(removed * _C_ICE * (T - _TF), axis=-1)   # >= sign varies with T<Tf
+    swe_ice = swe_ice - removed
+    # Deposition (subl_mass < 0): add |subl_mass| ice to the TOP layer at its T.
+    deposit = jnp.maximum(-subl_mass, 0.0)
+    deposit_enth = deposit * _C_ICE * (T[..., 0] - _TF)
+    swe_ice = swe_ice.at[..., 0].add(deposit)
+    delta_H = deposit_enth - removed_enth
+    new_state = SnowColumnState(swe_ice=swe_ice, swe_liq=swe_liq, T=T, density=density)
+    return new_state, delta_H
