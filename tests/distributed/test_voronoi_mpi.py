@@ -60,9 +60,10 @@ def _get_mpi_info():
 # (mass fixer / global_sum_mpi), which drifts ~1e-9 vs serial under a jax/mpi4jax
 # stack outside legoESM's tested range (the point-to-point halo tests below stay
 # bit-correct).  xfail those two on an incompatible stack so they are not spurious
-# reds, while still REQUIRING a pass once a tested stack (mpi4jax >= 0.9, the FFI
-# rewrite, on jax 0.9 or 0.10) is installed -- the condition flips off
-# automatically then.
+# reds, while still REQUIRING a pass once a tested stack (the FFI generation:
+# mpi4jax >= 0.9 paired with jax >= 0.10) is installed -- the condition flips off
+# automatically then.  VERIFIED green on jax 0.10.1 + mpi4jax 0.9.0.post1
+# (2026-07-13): these run as ordinary passes, not xfail/xpass.
 from legoesm.parallel.reductions import mpi_stack_outside_tested_range
 
 _xfail_mpi_stack = pytest.mark.xfail(
@@ -100,10 +101,9 @@ def config(request):
     mpi4jax ``sendrecv`` halo exchange — INSIDE ``lax.scan``.  That ordered-
     effect-through-scan path is structurally different from the inline
     ``ssp_rk3``, so the serial-vs-MPI equivalence and mass-conservation tests
-    run under BOTH.  (Both currently fail on the out-of-range mpi4jax-0.9 /
-    jax-0.10 stack — see the mpi-stack-version memory — so this guard turns
-    green only once that env is repaired; it is the committed pin for the
-    shipped production path until then.)
+    run under BOTH.  (Both pass on the verified FFI stack jax 0.10.x +
+    mpi4jax 0.9.x; the ``_xfail_mpi_stack`` guard above only fires on a
+    genuinely-incompatible CROSS pairing, not on this shipped production path.)
     """
     return MPASPrimitiveEquationConfig(
         nu_del4=0.0,

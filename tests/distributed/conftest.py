@@ -1,4 +1,10 @@
-"""Distributed test fixtures — initialize MPI layout once per session."""
+"""Distributed test fixtures.
+
+The MPI face layout is (re-)initialized PER TEST via ``cube_face_layout``
+— a once-per-session init cannot work here because the autouse
+``_isolate_distributed_state`` teardown resets the process-global
+topology/layout/halo-backend after every test.
+"""
 
 import pytest
 
@@ -6,35 +12,38 @@ mpi4jax = pytest.importorskip("mpi4jax")
 MPI = pytest.importorskip("mpi4py.MPI")
 
 
-@pytest.fixture(autouse=True, scope="session")
-def _init_mpi_layout():
-    """Initialize the MPI distributed layout for the test session.
+@pytest.fixture()
+def cube_face_layout():
+    """(Re-)initialize the active MPI face layout + arm the MPI halo backend.
 
-    Creates a DistributedLayout that maps MPI ranks to cubed-sphere
-    faces.  Tests that need ``scatter_to_local`` / ``gather_to_global``
-    rely on this active layout.
+    ``_isolate_distributed_state`` (autouse below) resets the
+    process-global topology, layout and halo backend AFTER EVERY test —
+    correct leak protection, but it also tears down any module- or
+    session-scoped initialization after the first test.  Any test that
+    relies on the ACTIVE layout (bare ``scatter_to_local`` /
+    ``gather_to_global``) or on an armed ``'mpi'`` halo backend must
+    therefore re-establish them at test SETUP through this fixture.
+    (This mismatch was the long-standing 'broken local MPI stack':
+    deterministic ``No layout provided and no active layout is set``
+    failures that looked like an mpi4jax/jax version problem — the
+    mpi4jax primitives were fine all along.)
+
+    Safe to call repeatedly: after the reset the topology is None so
+    ``initialize_distributed`` runs the clean first-init path;
+    ``jax.distributed`` bootstrap is idempotent (single-node skips it).
     """
     from legoesm.parallel.distributed import (
         initialize_distributed,
         get_active_layout,
     )
 
-    # Only initialize if not already active (e.g., from a parent conftest)
-    if get_active_layout() is not None:
-        return
-
-    comm = MPI.COMM_WORLD
-    n_procs = comm.Get_size()
-
-    # Use the smallest grid that still tests face decomposition
-    # global_n must be divisible by n_procs for even face distribution
-    global_n = max(n_procs, 2)
-    try:
+    if get_active_layout() is None:
+        global_n = max(MPI.COMM_WORLD.Get_size(), 2)
         initialize_distributed(global_n=global_n)
-    except Exception:
-        # If initialization fails (e.g., single rank), tests will skip
-        # via the scatter_to_local ValueError.
-        pass
+    layout = get_active_layout()
+    if layout is None:
+        pytest.skip("MPI layout unavailable on this rank configuration")
+    return layout
 
 
 @pytest.fixture(autouse=True)
