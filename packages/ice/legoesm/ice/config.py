@@ -119,6 +119,13 @@ __param_spec__ = {
                 "transform": "sigmoid", "category": "radiation",
                 "reference": "sea-ice longwave emissivity", "shape": None,
             },
+            "sw_transmittance_const": {
+                "units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "radiation",
+                "reference": "constant-scheme SW transmittance through ice+snow "
+                             "to the ocean (Grenfell & Maykut 1977 order; "
+                             "delta_eddington computes its own)", "shape": None,
+            },
             "z0_ice": {
                 "units": "m", "bounds": (1.0e-4, 5.0e-3), "tunable_tier": 2,
                 "transform": "sigmoid", "category": "surface",
@@ -377,3 +384,14 @@ class SeaIceConfig(NamedTuple):
     #                         snow / pond modifications + interior SW
     #                         penetration coefficient ``i0_vis``.
     shortwave_scheme: str = "constant"
+    # SW transmittance through ice+snow to the ocean for the CONSTANT
+    # shortwave scheme (fraction of INCIDENT sw_down; bounded by the
+    # non-reflected column input).  Debited from the ice surface-absorbed SW
+    # and delivered to the ocean via the existing sw_penetrated ->
+    # ocean_heat_extraction channel, closing the energy budget the old
+    # ocean-side A*tau*swd surrogate left open (codex).  0.0 = bit-identical
+    # legacy (no penetration); the OMIP runner passes --ice-thermo-sw-trans.
+    # delta_eddington computes its own transmittance and ignores this.
+    # APPENDED at the tail (after every pre-existing field) so positional
+    # SeaIceConfig(...) constructors keep their meaning (codex L1-r1 #3).
+    sw_transmittance_const: float = 0.0

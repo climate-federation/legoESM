@@ -114,7 +114,11 @@ def test_coupling_fields_shapes():
     assert len(sfc) == 22
 
     tile = TileResponse(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
-    assert len(tile) == 20  # 19 + T_rad (optional emission-equiv skin T, default None)
+    # 19 required + T_rad (optional emission-equiv skin T) +
+    # ice_concentration_thermo (optional thermo-time ice area for the
+    # forced-ocean open-water partition) — both trailing None-defaults, so the
+    # 19-positional construction above stays valid.
+    assert len(tile) == 21
 
 
 # ==============================================================================
@@ -443,10 +447,17 @@ def test_sea_ice_freshwater_flux_balances_under_ablation_clamp():
         f"ice+ocean+atmosphere water not conserved in clamp: "
         f"max |resid| = {float(jnp.max(jnp.abs(water_residual))):.3e}"
     )
-    # Ocean heat extraction stays in [0, F_ocean*conc]: the basal turbulent flux
+    # Ocean heat extraction upper bound F_ocean*conc: the basal turbulent flux
     # is scaled by the survived fraction, NOT reported in full while the state
     # only absorbed the capped melt (the pre-fix over-extraction bug).
-    assert jnp.all(resp.ocean_heat_extraction >= -1e-9)
+    # LOWER bound: NEGATIVE extraction is now legitimate — a melt-out step's
+    # SURPLUS surface-melt energy warms the ocean (sea_ice finding #6:
+    # ``- surface_melt_ocean_gain``; previously that energy was dropped on the
+    # floor).  It is bounded by the incident surface energy scale over the ice
+    # fraction, so pin that instead of the stale >= 0 (which this full-melt-out
+    # scenario — 600 W/m^2 SW onto 2 cm of ice — legitimately violates).
+    _incident = (600.0 + 400.0) * conc0     # sw + lw of _make_forcing above
+    assert jnp.all(resp.ocean_heat_extraction >= -(_incident + 1e-6))
     assert jnp.all(resp.ocean_heat_extraction <= F_ocean * conc0 + 1e-6)
 
 

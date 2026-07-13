@@ -41,6 +41,14 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.grids.latlon import LatLonGrid
+# Donor-cell upwind face reconstructions: PROMOTED to the core substrate so
+# the sea-ice C-grid transport can share them without an ice->ocean layering
+# break (components-independence contract).  Re-imported under the historical
+# ocean names so every existing consumer import path keeps working.
+from legoesm.grids.operators_latlon_cgrid import (  # noqa: F401
+    upwind_cell_to_uface as upwind_to_u_points,
+    upwind_cell_to_vface as upwind_to_v_points,
+)
 from legoesm.ocean.eos import make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
@@ -436,101 +444,10 @@ def tvd_to_v_points(
     return f_tvd
 
 
-def upwind_to_u_points(
-    f: jnp.ndarray,
-    mass_flux_u: jnp.ndarray,
-) -> jnp.ndarray:
-    """First-order upwind interpolation of cell-center field to u-points.
-
-    Parameters
-    ----------
-    f : array, shape (n_lat, n_lon, ...) at cell centers.
-    mass_flux_u : array, shape (n_lat, n_lon+1, ...) at u-points.
-        Sign convention: positive = flow in +j (eastward) direction.
-
-    Returns
-    -------
-    f_u : array, shape (n_lat, n_lon+1, ...) at u-points.
-        Upwind value: uses the upstream cell based on mass_flux_u sign.
-    """
-    # Face j is between cell (j-1) mod n_lon and cell j.
-    # Positive flux => flow from cell j-1 to cell j => upwind is cell j-1.
-    # Negative flux => flow from cell j to cell j-1 => upwind is cell j.
-    f_left = jnp.roll(f, 1, axis=1)   # f_left[:, j] = f[:, j-1]
-    f_right = f                        # f_right[:, j] = f[:, j]
-
-    # Build upwind at interior faces (n_lat, n_lon)
-    f_upwind = jnp.where(mass_flux_u[:, :-1] > 0, f_left, f_right)
-
-    # Wrap: face n_lon is the same as face 0 (periodic in longitude)
-    if f.ndim >= 3:
-        return jnp.concatenate([f_upwind, f_upwind[:, 0:1, :]], axis=1)
-    else:
-        return jnp.concatenate([f_upwind, f_upwind[:, 0:1]], axis=1)
-
-
-def upwind_to_v_points(
-    f: jnp.ndarray,
-    mass_flux_v: jnp.ndarray,
-    grid=None,
-) -> jnp.ndarray:
-    """First-order upwind interpolation of cell-center field to v-points.
-
-    Parameters
-    ----------
-    f : array, shape (n_lat, n_lon, ...) at cell centers.
-    mass_flux_v : array, shape (n_lat+1, n_lon, ...) at v-points.
-        Sign convention: positive = flow in +i (northward) direction.
-    grid : optional LatLonGrid or LatLonCGridGeometry.
-        When provided and a tripolar fold is active, the north-boundary
-        v-face value is computed from the fold-partner cells.
-
-    Returns
-    -------
-    f_v : array, shape (n_lat+1, n_lon, ...) at v-points.
-        Upwind value: uses the upstream cell based on mass_flux_v sign.
-        Boundary faces (i=0 and i=n_lat) are zero (solid wall) at
-        physical poles; at an MPI band partition cut they carry the
-        true upwind value selected from the neighbour rank's cell row.
-
-    Notes
-    -----
-    Cell-pad-first (same recipe as :func:`tvd_to_v_points`): the cell
-    field is padded by one latitude row through the backend-dispatched
-    :func:`legoesm.grids.halo_latlon.pad_with_pole_bc_lat` (local
-    ``jnp.pad`` / AD-safe MPI sendrecv at interior cuts) BEFORE the
-    upwind selection, so every local v-face — including the duplicated
-    partition-cut faces — picks from true cell data.  Previously the
-    end faces were refilled by ``pad_ns_scalar``/``pad_ns_zero`` from
-    the neighbour's *face* rows — one face row off at a cut.  Serial
-    bit-identity: interior faces select between exactly the previous
-    operands; pole faces are zeroed (the old pad ends) and the tripolar
-    fold row is the fold-permuted last interior face row, exactly as
-    ``pad_ns_scalar`` built it.  One cell pad replaces one face pad —
-    same collective count on every rank.
-    """
-    from legoesm.grids.halo_latlon import (
-        pad_with_pole_bc_lat,
-        zero_polar_lat_ends,
-    )
-    # Face i sits between cell i-1 and cell i (m_pad rows i and i+1).
-    # Positive flux => flow from cell i-1 to cell i => upwind is cell i-1.
-    # Negative flux => flow from cell i to cell i-1 => upwind is cell i.
-    f_pad = pad_with_pole_bc_lat(
-        f, halo=1, south_value=0.0, north_value=0.0,
-    )
-    f_south = f_pad[:-1]   # cell i-1 for face i
-    f_north = f_pad[1:]    # cell i   for face i
-    f_v = jnp.where(mass_flux_v > 0, f_south, f_north)
-
-    # Wall BC at the physical pole faces only (backend-aware), then the
-    # tripolar north fold row exactly as pad_ns_scalar produced it.
-    f_v = zero_polar_lat_ends(f_v)
-    nmask = north_fold_mask(grid)
-    if fold_is_local(grid) or nmask is not None:
-        north = f_v[-2:-1][:, grid.fold.perm_T]
-        f_v = apply_north_fold(f_v, north, grid, north_mask=nmask)
-    return f_v
+# (upwind_to_u_points / upwind_to_v_points were defined here; PROMOTED to
+# legoesm.grids.operators_latlon_cgrid — see the re-import in the top import
+# block.  The numerics live in ONE place; every historical consumer import
+# path through this module keeps working.)
 
 
 def neumann_fill_cgrid(
