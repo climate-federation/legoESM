@@ -298,12 +298,23 @@ def create_atmosphere_dycore(
 
     # ----- Cubed-sphere C-D grid solvers -----
     if solver_name == "cdgrid_shallow_water":
+        # FV3 single-implementation program M2 (2026-07-13, codex-reviewed):
+        # the FV3-faithful cube SW core is `FV3EdgeShallowWaterModel`
+        # (edge-midpoint split-D winds + `fv3_sw_tendencies`) — the model the
+        # Williamson matrix validates.  The legacy corner-corner
+        # `CDGridShallowWaterModel` is a DIFFERENT discretization that cannot
+        # stabilize the cube W5/W6 wave class (it lacks the `damp_v`
+        # del6_vt_flux vorticity sink, which needs edge-midpoint winds; W5
+        # peaks 550+ m/s at every supported tuning while Edge stays ~45 m/s).
+        # So the driver now advertises the validated core + its
+        # resolution-robust preset (`williamson_cli_calibration`: matched
+        # hyperdiff + div_damp + damp_v, stable C24-C48).  See
+        # docs/architecture/fv3_single_implementation_program.md (Phase-1 M2).
         from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-            CDGridShallowWaterModel, CDGridShallowWaterConfig,
+            FV3EdgeShallowWaterModel, CDGridShallowWaterConfig,
+            williamson_cli_calibration,
         )
-        cfg = CDGridShallowWaterConfig(
-            A_h=diff.A_h,
-            hyperdiff_coeff=diff.hyperdiff,
+        cfg = williamson_cli_calibration(gc.resolution)._replace(
             use_conservation_fixer=dc.conservation_fixer,
             fix_mass=dc.fix_mass,
             # "auto" -> this dycore's own default; explicit names verbatim.
@@ -311,7 +322,7 @@ def create_atmosphere_dycore(
                              if dc.time_integrator == "auto"
                              else dc.time_integrator),
         )
-        return CDGridShallowWaterModel(grid, cfg)
+        return FV3EdgeShallowWaterModel(grid, cfg)
 
     if solver_name == "cdgrid_primitive_equations":
         from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (

@@ -74,13 +74,27 @@ class TestCDGridResolution:
     """Factory resolves the correct CDGrid solver for each model_type."""
 
     def test_shallow_water_creates_sw_model(self):
+        # FV3 single-implementation M2 (2026-07-13): the cube SW factory now
+        # returns the FV3-faithful edge-midpoint core (FV3EdgeShallowWaterModel
+        # + fv3_sw_tendencies), the model the Williamson matrix validates —
+        # NOT the legacy corner-corner CDGridShallowWaterModel (which cannot
+        # stabilize the cube W5/W6 wave class).  See
+        # docs/architecture/fv3_single_implementation_program.md (Phase-1 M2).
         config = _make_config(model_type="shallow_water")
         grid = _make_cubed_sphere_grid()
         sigma = _make_sigma()
         model = create_atmosphere_dycore(config, grid, sigma)
 
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterModel
-        assert isinstance(model, CDGridShallowWaterModel)
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            FV3EdgeShallowWaterModel, CDGridShallowWaterModel)
+        assert isinstance(model, FV3EdgeShallowWaterModel)
+        assert not isinstance(model, CDGridShallowWaterModel)
+        # The validated preset must be wired (div_damp + damp_v present),
+        # else the factory would advertise the faithful core with unstable
+        # defaults (the codex M2 scope-correction: swapping the class alone
+        # is insufficient).
+        assert model.config.div_damp > 0.0
+        assert model.config.damp_v > 0.0
 
     def test_hydrostatic_creates_pe_model(self):
         config = _make_config(model_type="hydrostatic")
@@ -276,8 +290,10 @@ class TestAtmosphereOnEveryGlobalGrid:
     @pytest.mark.parametrize(
         "grid_type,resolution,model_type,discretization,grid_kwargs,expected_cls,grid_attr",
         [
+            # M2 (2026-07-13): cube SW factory returns the FV3-faithful
+            # edge-midpoint core, not the legacy corner-corner CDGrid model.
             ("cubed_sphere", 8, "shallow_water", "cdgrid", {},
-             "CDGridShallowWaterModel", "grid"),
+             "FV3EdgeShallowWaterModel", "grid"),
             pytest.param(
                 "gaussian", 21, "shallow_water", "spectral", {},
                 "SpectralShallowWaterModel", "grid",
@@ -353,8 +369,11 @@ class TestDriverDelegation:
         driver.sigma = sigma
         driver._create_dycore()
 
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterModel
-        assert isinstance(driver.model, CDGridShallowWaterModel)
+        # M2 (2026-07-13): driver now builds the FV3-faithful edge-midpoint
+        # cube SW core, not the legacy corner-corner CDGrid model.
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            FV3EdgeShallowWaterModel)
+        assert isinstance(driver.model, FV3EdgeShallowWaterModel)
 
     def test_driver_creates_nonhydrostatic_model(self):
         config = _make_config(model_type="nonhydrostatic")
