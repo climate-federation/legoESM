@@ -8,6 +8,22 @@ Convention: newest entries on top. Each entry = what changed, why, how verified.
 
 ---
 
+## 2026-07-13 — Codex review CONVERGED ✅ (round 7 clean)
+
+`codex review --base 281f2b0ce`, round 7:
+> "The changes consistently gate the new JAX-native path, preserve the default
+> forward-only behavior, and thread the required structural and trainable inputs
+> through the land interface. **No discrete correctness regression was identified
+> in the modified code.**"
+
+Loop summary (7 rounds): R1 [P1] silent stale outputs → capability guard; R2 [P1]
+forward-path API coupling → conditional kwargs; R3 [P1] multi-step tracer →
+`grid_info` API + clear error, [P2] pin; R4 [P1] land-rollout `grid_info`
+threading; R5 [P2] traced solar geometry → clear guard, [P2] pin; R6 [P2]
+trainable params through land step → threaded, [P1] pin (accepted); R7 CLEAN.
+Only residual = the unpinnable non-PyPI `clm-ml-jax` (documented + runtime-guarded;
+requires publishing the package — out of scope).
+
 ## 2026-07-13 — M2 GATE PASSED ✅ (forcing-SW grad + trainable-Vcmax grad)
 
 Run as SEPARATE processes (each ~7 min; avoids the two-graph LLVM OOM):
