@@ -2080,9 +2080,17 @@ def test_latlon24_production_variant_pins_polar_filter():
     # re-develops a polar-night temperature runaway that blows the run at day
     # ~47 regardless of every numerics lever, while sbm is stable (95-day soak)
     # and lifts hfls 40->70 (#847).  The cube lane keeps bechtold.
+    # Top sponge is lane-critical too: the hydrostatic latlon dycore has no
+    # other lid braking (McFarlane radiates stress at the top), and the
+    # 2026-07-13 pilot year ran away in the TOP 5 levels (T +24 K, winds
+    # 98->208 m/s, blowup day 128) after this pin was lost in a YAML merge.
+    assert args.sponge_enabled is True
     cfg = build_config_from_args(args)
     assert cfg.convection == "sbm" and cfg.gravity_wave_drag == "mcfarlane"
-    assert cfg.convective_precip_efficiency == 0.0  # sbm rejects the bechtold knob
+    # `null` in the YAML = UNSET sentinel (each scheme keeps its own default;
+    # sbm ignores the bechtold/tiedtke knob).  The old `== 0.0` assert was
+    # stale (red on main since the YAML moved to null).
+    assert cfg.convective_precip_efficiency is None
 
 
 def test_explicit_zero_sic_scale_and_sst_offset_preserved():
