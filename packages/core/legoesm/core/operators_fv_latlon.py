@@ -32,12 +32,27 @@ from legoesm.grids.halo_latlon import (
 
 
 def lat_v_interfaces(grid):
-    """Compute v-face latitudes consistent with divergence_cgrid.
+    """v-face latitudes for the PPM meridional flux metric: ``grid.lat_v``.
 
-    Uses midpoints of cell-center latitudes for interior faces,
-    and exact pole values (±π/2) for boundaries.  This matches the
-    convention in ``latlon_cgrid_operators.divergence_cgrid`` and
-    supports non-uniform latitude grids.
+    Returns the grid's OWNED v-face latitudes (interior faces at
+    cell-center midpoints, end faces by half-cell extrapolation —
+    ``grids.latlon.compute_v_face_coords``), which land on ±π/2 only
+    when the grid actually reaches the poles.  Consistent with
+    ``latlon_cgrid_operators.divergence_cgrid`` (which reads
+    ``grid.cos_lat_v``) and with non-uniform / face-defined latitude
+    grids (Mercator, Veros-style), whose true faces are not
+    center-midpoints.
+
+    NEVER fabricate ±π/2 ends here: under the SPMD/MPI decompositions
+    ``grid`` is a lat-band or 2-D tile slice (``slice_latlon_grid_to_band``
+    / ``slice_latlon_grid_to_block_2d`` carry ``lat_v[s:e+1]``), so a
+    local end face is an INTERIOR partition cut.  A hard-coded pole
+    turned every cut face into a near-zero-length wall
+    (``cos(±π/2) -> 1e-10`` clamp) in the flux metric
+    ``hx = R*dlon*cos(lat_v)`` — spuriously blocking PPM meridional
+    transport through the cut (codex M3a findings 2/6; the same
+    regression class ``compute_v_face_coords`` documents from Codex
+    review Stage 3-E round 3).
 
     Parameters
     ----------
@@ -47,14 +62,7 @@ def lat_v_interfaces(grid):
     -------
     lat_v : jax.Array, shape (n_lat+1,)
     """
-    lat = grid.lat  # (n_lat,)
-    # Single Pad HLO op (constant_values=(-π/2, π/2)) replaces alloc-2-
-    # singletons + concatenate-of-three.
-    lat_interior = 0.5 * (lat[:-1] + lat[1:])  # (n_lat-1,)
-    return jnp.pad(
-        lat_interior, (1, 1),
-        constant_values=(-jnp.pi / 2, jnp.pi / 2),
-    )
+    return grid.lat_v
 
 
 # ==============================================================================

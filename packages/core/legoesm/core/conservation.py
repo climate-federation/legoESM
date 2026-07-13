@@ -295,6 +295,16 @@ def _spmd_lat_psum_or_none(local_sums: list[jax.Array]) -> list[jax.Array] | Non
             "is set; arm it via activate_latlon_spmd_halo(mesh).")
     if "lat" in tuple(mesh.axis_names):
         from legoesm.parallel.reductions import batch_psum_spmd
+        if ("lon" in tuple(mesh.axis_names)
+                and int(mesh.shape["lon"]) > 1):
+            # 2-D ("lat", "lon") tile mesh (M3a): every TILE holds a partial
+            # sum — reduce across BOTH axes, or the "global" mass integral
+            # would silently remain a per-lon-sector partial.  The 1-D band
+            # mesh — and the degenerate (N, 1) tile mesh, whose lon rings
+            # have one member — keep the bare "lat" psum (byte-unchanged /
+            # structurally identical to the band program for the (N, 1)
+            # bit-identity gate).
+            return batch_psum_spmd(local_sums, ("lat", "lon"))
         return batch_psum_spmd(local_sums, "lat")
     if (tuple(mesh.axis_names) == ("face", "tile_i", "tile_j")
             and _TILED_REDUCTION_SCOPE):
