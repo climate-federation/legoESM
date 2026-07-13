@@ -8,6 +8,32 @@ Convention: newest entries on top. Each entry = what changed, why, how verified.
 
 ---
 
+## 2026-07-13 — Codex rounds 2–3 fixes
+
+- **Round-2 [P1]** (forward-path API coupling): `grid=`/`vcmaxpft_jax=`/
+  `g1_MED_jax=` are now forwarded to `MLCanopyFluxes` ONLY when used (`**_opt_kwargs`),
+  so the default `differentiable=False` call keeps the original `_o2ref_py`-only
+  signature and does not depend on the newer upstream API.
+- **Round-3 [P1]** (multi-step tracer): in a differentiated rollout of ≥2 canopy
+  steps the carried `canopy_state.mlcanopy` is a tracer, so `int(ncan_canopy)`
+  would raise `ConcretizationTypeError`. Added:
+  - public `extract_clm_ml_grid_info(state) -> GridInfo` (concrete ints from a
+    warm state), and a `grid_info=` param on `compute_clm_ml_canopy_fluxes` to
+    thread them through every diff step;
+  - a clear `RuntimeError` (instead of a cryptic ConcretizationError) if the
+    structural ints are traced and `grid_info` was not supplied.
+  Tests: fast `extract_clm_ml_grid_info(None)` guard + `grid_info` pass-through
+  parity (matches the state-derived diff result to 1e-9) in the slow diff test.
+- **Round-3 [P2]** (can't pin non-PyPI clm-ml-jax): documented the required
+  diff-diagnostics revision in the `[canopy]` extra comment; the runtime
+  capability guard is the enforcement.
+- **M2 spike OOM:** the two-grad spike aborted in LLVM JIT (`Cannot allocate
+  memory`) — NOT a correctness bug but scope risk #2 (reverse-mode tape of the
+  ~20-layer canopy is compile/memory-heavy; two accumulated `jit_scan`
+  executables in one process exhausted contiguous JIT memory despite 170 GB free
+  / unlimited ulimit). Re-running the SW-grad and Vcmax-grad in SEPARATE
+  processes (M1-sized peak) to validate.
+
 ## 2026-07-13 — Codex review round 1: fix [P1] (silent stale outputs on old clm-ml-jax)
 
 `codex review --base 281f2b0ce` raised one **[P1]**: `differentiable=True`

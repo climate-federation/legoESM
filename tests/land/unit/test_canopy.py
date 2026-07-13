@@ -275,6 +275,12 @@ class TestCLMMLDifferentiability(unittest.TestCase):
             doy=180.0,
         )
 
+    def test_extract_grid_info_requires_warm_state(self):
+        """extract_clm_ml_grid_info(None) raises (needs a warm-started state)."""
+        from legoesm.land.canopy.clm_ml_interface import extract_clm_ml_grid_info
+        with self.assertRaises(ValueError):
+            extract_clm_ml_grid_info(None)
+
     @pytest.mark.slow
     def test_multicolumn_diff_is_hard_error(self):
         """differentiable=True with ncol>1 raises (no silent degrade to forward)."""
@@ -319,6 +325,27 @@ class TestCLMMLDifferentiability(unittest.TestCase):
         _, state0 = self._run(cfg_diff, T0, None, T_soil, psi_soil, theta_soil)
         self.assertIsNotNone(state0.mlcanopy)
 
+        # grid_info pass-through: extracting the concrete structural ints and
+        # threading them explicitly must reproduce the state-derived diff result
+        # (this is the multi-step-safe path — carried state may be a tracer).
+        from legoesm.land.canopy.clm_ml_interface import (
+            compute_clm_ml_canopy_fluxes,
+            extract_clm_ml_grid_info,
+        )
+        from legoesm.land.config import MultiLayerLandConfig
+        gi = extract_clm_ml_grid_info(state0)
+        self.assertGreaterEqual(int(gi.ncan), 1)
+        out_gi, _ = compute_clm_ml_canopy_fluxes(
+            T_soil_top=T_soil[:, 0],
+            forcing=_make_forcing(self._NCOL1)._replace(T_lowest=T0),
+            canopy_config=cfg_diff,
+            land_config=MultiLayerLandConfig(surface_scheme=cfg_diff),
+            land_params=None, w_frac_rz=jnp.full(self._NCOL1, 0.6),
+            wind_speed=jnp.full(self._NCOL1, 4.5), canopy_state=state0, dt=1800.0,
+            T_soil=T_soil, psi_soil=psi_soil, theta_soil=theta_soil,
+            lat=jnp.zeros(self._NCOL1), doy=180.0, grid_info=gi,
+        )
+
         # Forward/diff parity from the same warm state.
         out_diff, _ = self._run(cfg_diff, T0, state0, T_soil, psi_soil, theta_soil)
         out_fwd, _ = self._run(cfg_fwd, T0, state0, T_soil, psi_soil, theta_soil)
@@ -328,6 +355,12 @@ class TestCLMMLDifferentiability(unittest.TestCase):
             self.assertTrue(
                 abs(a - b) <= 1e-6 + 1e-6 * abs(b),
                 f"diff/forward parity failed for {name}: {a} vs {b}",
+            )
+            # grid_info path must reproduce the state-derived diff result.
+            c = float(getattr(out_gi, name)[0])
+            self.assertTrue(
+                abs(a - c) <= 1e-9 + 1e-9 * abs(a),
+                f"grid_info parity failed for {name}: {a} vs {c}",
             )
 
         # Gradient: finite, non-zero.

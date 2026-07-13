@@ -25,6 +25,7 @@ import sys
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -1104,6 +1105,51 @@ def _extract_surface_fluxes(
 # ---------------------------------------------------------------------------
 
 
+def extract_clm_ml_grid_info(canopy_state: CanopyState, patch: int = 1) -> Any:
+    """Extract the concrete ``GridInfo(p, ncan, ntop, nbot)`` from a warm state.
+
+    Call this ONCE on a concrete (non-traced) warm-start ``CanopyState`` — e.g.
+    the state returned by the first forward step — and thread the result through
+    every subsequent differentiable step via ``compute_clm_ml_canopy_fluxes(...,
+    grid_info=...)``.  This keeps the single-site structural integers
+    (``ncan``/``ntop``/``nbot``) CONCRETE even when the carried
+    ``canopy_state.mlcanopy`` becomes a ``jax.grad`` tracer in a multi-step
+    rollout (otherwise ``int(tracer)`` raises ``ConcretizationTypeError``).
+
+    Parameters
+    ----------
+    canopy_state:
+        A concrete warm-started state (``canopy_state.mlcanopy`` populated by a
+        prior forward step).  Must NOT be a tracer.
+    patch:
+        1-based patch index (single-site diff mode uses ``1``).
+
+    Returns
+    -------
+    GridInfo
+        ``multilayer_canopy.MLclm_varctl.GridInfo`` with concrete Python ints.
+    """
+    from multilayer_canopy.MLclm_varctl import GridInfo
+    if canopy_state is None or canopy_state.mlcanopy is None:
+        raise ValueError(
+            "extract_clm_ml_grid_info needs a warm-started canopy_state whose "
+            "mlcanopy is populated; got None. Run one forward step first."
+        )
+    m = canopy_state.mlcanopy
+    try:
+        return GridInfo(
+            p=int(patch),
+            ncan=int(m.ncan_canopy[patch]),
+            ntop=int(m.ntop_canopy[patch]),
+            nbot=int(m.nbot_canopy[patch]),
+        )
+    except jax.errors.ConcretizationTypeError as exc:  # pragma: no cover - guard
+        raise RuntimeError(
+            "extract_clm_ml_grid_info must be called on a CONCRETE canopy_state "
+            "(outside jax.grad tracing), not on a traced carry."
+        ) from exc
+
+
 def compute_clm_ml_canopy_fluxes(
     T_soil_top: jnp.ndarray,
     forcing: AtmToSurface,
@@ -1123,6 +1169,7 @@ def compute_clm_ml_canopy_fluxes(
     lai_override: jnp.ndarray | None = None,
     vcmaxpft_jax: jnp.ndarray | None = None,
     g1_medlyn_jax: jnp.ndarray | None = None,
+    grid_info: Any | None = None,
 ) -> tuple[SurfaceFluxOutput, CanopyState]:
     """Compute canopy fluxes via the CLM-ML-JAX multilayer canopy model.
 
@@ -1180,6 +1227,15 @@ def compute_clm_ml_canopy_fluxes(
         contract as ``vcmaxpft_jax``.  Only active when the canopy stomatal model
         is Medlyn (``MLclm_varctl.gs_type == 0``); inert under the default WUE
         conductance (``gs_type == 2``).  ``None`` keeps the PFT default.
+    grid_info:
+        Optional concrete ``GridInfo(p, ncan, ntop, nbot)`` structural constants
+        for the differentiable path.  REQUIRED for a MULTI-STEP differentiated
+        rollout: when a ``jax.grad`` loss unrolls ≥2 canopy steps and carries the
+        returned ``CanopyState`` forward, ``canopy_state.mlcanopy`` is a tracer, so
+        the structural ints cannot be read from it — extract them once from the
+        (concrete) warm-start state via :func:`extract_clm_ml_grid_info` and pass
+        the same object each step.  ``None`` (single warm step whose state is a
+        captured constant) reads the ints off the concrete template.
 
     Returns
     -------
@@ -1368,22 +1424,40 @@ def compute_clm_ml_canopy_fluxes(
                 "differentiable-diagnostics fix (adds grid= to _CanopyFluxesDiagnostics)."
             )
         _p = int(filter_exposedvegp[0])
-        _ncan_p = int(mlcanopy.ncan_canopy[_p])
-        # dpai_profile is (np_, nlev+…); a valid ncan is 1..that width.  An
-        # uninitialised ncan (0 or spval sentinel) fails this and reports clearly.
+        # Structural ints (ncan/ntop/nbot) must be CONCRETE Python ints — the diff
+        # path reads them at trace time.  Two sources:
+        #  (1) caller-supplied ``grid_info`` (REQUIRED for a multi-step
+        #      differentiated rollout: there the carried ``canopy_state.mlcanopy``
+        #      is itself a tracer, so reading ints off it would raise); or
+        #  (2) the warm template ``mlcanopy`` when it is concrete (single warm
+        #      step whose state is a captured constant under jax.grad).
+        # ``dpai_profile.shape`` is static, so the range check works either way.
         _ncan_max = int(mlcanopy.dpai_profile.shape[1])
+        if grid_info is not None:
+            _ncan_p = int(grid_info.ncan)
+            _ntop_p = int(grid_info.ntop)
+            _nbot_p = int(grid_info.nbot)
+        else:
+            try:
+                _ncan_p = int(mlcanopy.ncan_canopy[_p])
+                _ntop_p = int(mlcanopy.ntop_canopy[_p])
+                _nbot_p = int(mlcanopy.nbot_canopy[_p])
+            except jax.errors.ConcretizationTypeError as exc:
+                raise RuntimeError(
+                    "CLM-ML diff mode: the canopy_state.mlcanopy structural ints "
+                    "(ncan/ntop/nbot) are TRACED — this happens when a differentiated "
+                    "loss unrolls MULTIPLE canopy steps and carries the returned state "
+                    "as the jax.grad tape's carry. Extract the concrete structural "
+                    "ints once from the warm-start state and thread them through every "
+                    "step via grid_info=extract_clm_ml_grid_info(state0)."
+                ) from exc
         if not (1 <= _ncan_p <= _ncan_max):
             raise ValueError(
                 "CLM-ML diff mode needs a warm-started canopy_state whose vertical "
                 f"structure is initialised; got ncan={_ncan_p} (valid 1..{_ncan_max}). "
                 "Run one forward (differentiable=False or cold-start) step first."
             )
-        grid = GridInfo(
-            p=_p,
-            ncan=_ncan_p,
-            ntop=int(mlcanopy.ntop_canopy[_p]),
-            nbot=int(mlcanopy.nbot_canopy[_p]),
-        )
+        grid = GridInfo(p=_p, ncan=_ncan_p, ntop=_ntop_p, nbot=_nbot_p)
     else:
         grid = None
 
