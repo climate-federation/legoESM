@@ -2546,6 +2546,8 @@ def _resolve_convection(config):
             "M_b_max": getattr(config, 'bechtold_m_b_max', 0.02),
             "cmt_c_u": getattr(config, 'bechtold_cmt_c_u', 0.7),
             "cmt_c_d": getattr(config, 'bechtold_cmt_c_d', 0.7),
+            "cape_sink_heating_ratio": getattr(
+                config, 'bechtold_cape_sink_heating_ratio', 5.0),
         }
         if _pe is not None:
             _bechtold_kwargs["precip_efficiency"] = _pe

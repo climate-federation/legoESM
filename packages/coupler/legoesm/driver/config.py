@@ -829,6 +829,9 @@ class ExperimentConfig(NamedTuple):
     bechtold_m_b_max: float = 0.02
     bechtold_cmt_c_u: float = 0.7
     bechtold_cmt_c_d: float = 0.7
+    # Quasi-equilibrium heating-ceiling ratio (BechtoldConfig.
+    # cape_sink_heating_ratio; the C12 warm-runaway sink lever).
+    bechtold_cape_sink_heating_ratio: float = 5.0
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -866,6 +869,11 @@ class ExperimentConfig(NamedTuple):
     precision: str = "fp32"           # fp32, fp64, mixed, or mixed_fp64_storage
     gradient_checkpoint: bool = False  # wrap scan body with jax.checkpoint for AD
     debug_precision: bool = False     # log warnings when array dtypes mismatch policy
+    # MPAS-standalone RRTMGP optics precision (the coupled pipeline runs
+    # fp64 optics): True = fp32 tables+RTE (perf default), False = fp64
+    # (parity with cube/latlon; the ERA5-IC lane's extreme Antarctic
+    # columns are a suspected fp32-optics NaN trigger).
+    mpas_rrtmgp_fp32: bool = True
 
     # Reproducibility (Stage A1).  Master RNG seed for the run: every random key
     # descends from this via ``legoesm.runtime.rng.split_keys``, so the run is
@@ -1062,6 +1070,11 @@ class ExperimentConfig(NamedTuple):
         if self.bechtold_cmt_c_d < 0:
             errors.append(
                 f"bechtold_cmt_c_d must be >= 0, got {self.bechtold_cmt_c_d}"
+            )
+        if self.bechtold_cape_sink_heating_ratio <= 0:
+            errors.append(
+                f"bechtold_cape_sink_heating_ratio must be > 0, got "
+                f"{self.bechtold_cape_sink_heating_ratio}"
             )
         if self.physics_parameterization not in ("none", "ml"):
             errors.append(
@@ -1698,6 +1711,8 @@ class ExperimentConfig(NamedTuple):
             bechtold_m_b_max=getattr(amip_cfg, 'bechtold_m_b_max', 0.02),
             bechtold_cmt_c_u=getattr(amip_cfg, 'bechtold_cmt_c_u', 0.7),
             bechtold_cmt_c_d=getattr(amip_cfg, 'bechtold_cmt_c_d', 0.7),
+            bechtold_cape_sink_heating_ratio=getattr(
+                amip_cfg, 'bechtold_cape_sink_heating_ratio', 5.0),
             sigma_b=amip_cfg.sigma_b,
             k_BL_max_per_day=amip_cfg.k_BL_max_per_day,
             k_free_per_day=amip_cfg.k_free_per_day,

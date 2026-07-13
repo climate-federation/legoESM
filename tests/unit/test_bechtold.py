@@ -186,6 +186,101 @@ def test_bechtold_parcel_theta_cap_noop_for_surface_parcel():
 
 
 # ---------------------------------------------------------------------------
+# CAPE quasi-equilibrium heating ceiling (cape_relaxation_sink; C12 runaway)
+# ---------------------------------------------------------------------------
+
+def _lapse_column(T_sfc, lapse_K_km, q_sfc, ncol=1, nlev=16, p_s=1.0e5,
+                  p_top=5.0e3):
+    sigma = jnp.linspace(p_top / p_s, 1.0, nlev)
+    p_full = sigma[None, :] * jnp.full((ncol, 1), p_s)
+    inner = 0.5 * (p_full[:, :-1] + p_full[:, 1:])
+    p_half = jnp.concatenate(
+        [jnp.full((ncol, 1), p_top * 0.5), inner, jnp.full((ncol, 1), p_s)],
+        axis=1,
+    )
+    z = -8500.0 * jnp.log(p_full / p_s)
+    T = (T_sfc - lapse_K_km * 1e-3 * jnp.minimum(z, 11000.0)
+         - 2e-3 * jnp.maximum(z - 11000.0, 0.0))
+    q = q_sfc * jnp.exp(-z / 2500.0)
+    return T, q, p_full, p_half
+
+
+def _column_heating_W_m2(out, p_half):
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    return (constants.c_pd / constants.g) * jnp.sum(
+        jnp.maximum(out.dT_dt, 0.0) * dp, axis=-1)
+
+
+def test_bechtold_cape_sink_inert_on_vigorous_convection():
+    """A vigorous tower (large CAPE => large ceiling) must be BIT-identical
+    with the sink on: f = clip(big, 0, 1) == 1.0 exactly."""
+    T, q, pf, ph = _lapse_column(300.0, 9.8, 14e-3)  # ~18700 J/kg fixture
+    z0 = jnp.zeros_like(T)
+    st = jnp.zeros((T.shape[0],))
+    on, Mu_on, _ = bechtold_convection(
+        T, q, pf, ph, z0, z0, z0, st, None, dt=600.0,
+        config=BechtoldConfig(cape_relaxation_sink=True))
+    off, Mu_off, _ = bechtold_convection(
+        T, q, pf, ph, z0, z0, z0, st, None, dt=600.0,
+        config=BechtoldConfig(cape_relaxation_sink=False))
+    assert float(off.cape.max()) > 5000.0        # genuinely vigorous
+    assert jnp.array_equal(on.dT_dt, off.dT_dt)
+    assert jnp.array_equal(on.dq_v_dt, off.dq_v_dt)
+    assert jnp.array_equal(Mu_on, Mu_off)
+
+
+def test_bechtold_cape_sink_throttles_runaway_mode():
+    """The C12/RCE runaway mode — large sustained heating over MODEST CAPE
+    (pilot autopsy: 132 columns at 50-3943 W/m2 with CAPE 51-444 J/kg) —
+    must be throttled to the quasi-equilibrium ceiling eff*M_b*CAPE, while
+    the uniform rescale preserves the scheme's water bookkeeping."""
+    T, q, pf, ph = _lapse_column(296.0, 7.0, 8e-3)   # CAPE ~263, H ~59 W/m2
+    z0 = jnp.zeros_like(T)
+    st = jnp.zeros((T.shape[0],))
+    off, _, _ = bechtold_convection(
+        T, q, pf, ph, z0, z0, z0, st, None, dt=600.0,
+        config=BechtoldConfig(cape_relaxation_sink=False))
+    on, _, _ = bechtold_convection(
+        T, q, pf, ph, z0, z0, z0, st, None, dt=600.0,
+        config=BechtoldConfig(cape_relaxation_sink=True))
+    H_off = float(_column_heating_W_m2(off, ph)[0])
+    H_on = float(_column_heating_W_m2(on, ph)[0])
+    cape = float(off.cape[0])
+    assert 50.0 < cape < 1000.0                  # the modest-CAPE regime
+    assert H_off > 2.0 * H_on                    # sink bit hard
+    # throttled heating sits AT the ceiling (f<1 => H_on == eff*M_b*CAPE);
+    # M_b is internal, so bound the ceiling by its M_b_max upper limit and
+    # a generous positive floor instead of reconstructing M_b exactly.
+    cfg = BechtoldConfig()
+    assert H_on <= cfg.cape_sink_heating_ratio * cfg.M_b_max * cape * 1.001
+    assert H_on > 0.0                            # throttled, not silenced
+    # uniform rescale: the ON tendencies are an exact scalar multiple of OFF
+    ratio = H_on / H_off
+    assert jnp.allclose(on.dT_dt, off.dT_dt * ratio, rtol=1e-6, atol=1e-12)
+    assert jnp.allclose(on.dq_v_dt, off.dq_v_dt * ratio, rtol=1e-6, atol=1e-15)
+    tot_on = on.dq_c_conv_dt + (0.0 if on.dq_r_conv_dt is None else on.dq_r_conv_dt)
+    tot_off = off.dq_c_conv_dt + (0.0 if off.dq_r_conv_dt is None else off.dq_r_conv_dt)
+    assert jnp.allclose(tot_on, tot_off * ratio, rtol=1e-6, atol=1e-18)
+
+
+def test_bechtold_cape_sink_heating_ratio_gradient_finite():
+    """The ceiling must stay differentiable through the active bound (the
+    sink is a calibration knob for the SCM-RCE loop)."""
+    T, q, pf, ph = _lapse_column(296.0, 7.0, 8e-3)
+    z0 = jnp.zeros_like(T)
+    st = jnp.zeros((T.shape[0],))
+
+    def loss(eff):
+        out, _, _ = bechtold_convection(
+            T, q, pf, ph, z0, z0, z0, st, None, dt=600.0,
+            config=BechtoldConfig(cape_sink_heating_ratio=eff))
+        return jnp.sum(jnp.abs(out.dT_dt))
+
+    g = jax.grad(loss)(5.0)
+    assert jnp.isfinite(g) and float(g) != 0.0
+
+
+# ---------------------------------------------------------------------------
 # PBL-CAPE closure: switching to surface-parcel CAPE changes M_b
 # ---------------------------------------------------------------------------
 

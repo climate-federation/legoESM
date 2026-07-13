@@ -83,6 +83,7 @@ __param_spec__ = {
             "stochastic_decorrelation": {"units": "s", "bounds": (1800.0, 21600.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Bechtold et al. (2014) AR1 perturbation", "shape": None},
             "tau_M_u_relax": {"units": "s", "bounds": (600.0, 5400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Tiedtke (1989) profile relaxation", "shape": None},
             "tau_bl": {"units": "s", "bounds": (1188.0, 10800.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Bechtold et al. (2008) PBL closure", "shape": None},
+            "cape_sink_heating_ratio": {"units": "1", "bounds": (0.5, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Arakawa & Schubert (1974) quasi-equilibrium energy flux", "shape": None},
         },
     },
     "ConvectiveEDMFConfig": {
@@ -1355,6 +1356,26 @@ class BechtoldConfig(NamedTuple):
     parcel_theta_cap: bool = True
     cape_pbl_depth: float = 500.0
     tau_bl: float = 3600.0
+    # CAPE quasi-equilibrium heating ceiling (the C12/RCE warm-runaway
+    # harden).  Bechtold's M_b closure is a CAPE-relaxation SURROGATE with
+    # no quasi-equilibrium constraint on the APPLIED heating: at pinned
+    # M_b_max the scheme sustains large column heating for months while the
+    # PBL-parcel CAPE never drains (measured: the scheme's own tendencies
+    # GENERATE CAPE on a convecting fixture — downdraft below-LCL moistening
+    # feeds the parcel), so nothing bounds the warming (C12 pilot: mean T
+    # 267->312 K over days 90-170; SCM-RCE moist-adiabat bias ~50 K).  The
+    # sink caps the column-integrated positive convective heating by the
+    # quasi-equilibrium energy flux (Arakawa & Schubert 1974 lineage):
+    #     H = (c_p/g)·∫ max(dT_dt,0) dp  ≤  ratio · M_b · CAPE   [W/m²]
+    # scaling ALL tendencies (and the M_u carry) by
+    #     f = clip(ratio·M_b·CAPE / H, 0, 1).
+    # M_b·CAPE is the closure's own available-energy flux; `heating_ratio` absorbs the
+    # heating-to-KE-generation ratio (tunable, SCM-RCE-calibrated).  A
+    # vigorous tower (large CAPE) keeps its full heating; the runaway mode
+    # (heating at pinned M_b with modest CAPE) is throttled.  False =
+    # bit-exact legacy path.
+    cape_relaxation_sink: bool = True
+    cape_sink_heating_ratio: float = 5.0
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0

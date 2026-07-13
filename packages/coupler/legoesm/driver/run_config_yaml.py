@@ -190,6 +190,7 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.conv.BechtoldConfig.M_b_max": "bechtold_m_b_max",
     "atm.conv.BechtoldConfig.cmt_c_u": "bechtold_cmt_c_u",
     "atm.conv.BechtoldConfig.cmt_c_d": "bechtold_cmt_c_d",
+    "atm.conv.BechtoldConfig.cape_sink_heating_ratio": "bechtold_cape_sink_heating_ratio",
     # NOTE: the idealized GRAY radiation scheme threads a few of its params
     # (tau_equator, tau_pole via same-named scalars; sfc_albedo via the shared
     # `albedo_ocean` scalar) — deliberately NOT in this map.  Gray is not the

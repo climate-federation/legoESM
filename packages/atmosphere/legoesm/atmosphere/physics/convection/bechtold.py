@@ -648,6 +648,47 @@ def bechtold_convection(
         du_dt_conv = None
         dv_dt_conv = None
 
+    # -- CAPE quasi-equilibrium heating ceiling (C12/RCE warm runaway) -----
+    # SIGN CONVENTION in scope: tendencies are SOURCES (state += dt*tend);
+    # level index surface-LAST; dp_full > 0.  The M_b closure above is a
+    # CAPE-relaxation SURROGATE: nothing constrains the APPLIED column
+    # heating.  At pinned M_b_max the scheme sustains large heating for
+    # months while the PBL-parcel CAPE never drains (measured: the scheme's
+    # own tendencies GENERATE CAPE on a convecting fixture — the downdraft's
+    # below-LCL moistening feeds the parcel), so the column warms
+    # unboundedly (C12 pilot days 90-170: mean T 267->312 K; SCM-RCE
+    # moist-adiabat bias ~50 K).  Ceiling (Arakawa & Schubert 1974
+    # quasi-equilibrium lineage): the column-integrated POSITIVE convective
+    # heating may not exceed the closure's own available-energy flux,
+    #     H = (c_p/g)·∫ max(dT_dt, 0) dp  ≤  ratio · M_b · CAPE   [W/m²],
+    # applied as a uniform rescale of ALL tendencies (and the M_u carry, so
+    # the prognostic memory reflects the throttled convection):
+    #     f = clip(ratio·M_b·CAPE / H, 0, 1).
+    # A vigorous tower (large CAPE ⇒ large ceiling) keeps f = 1; the
+    # runaway mode (sustained heating at pinned M_b over modest CAPE) is
+    # throttled.  A uniform rescale of every species' tendency preserves
+    # the closed column water and enthalpy budgets exactly, and H -> 0
+    # gives f -> 1 through the clip (weak convection is a no-op).  Static
+    # Python gate on the config bool (feature-gate exception); False =
+    # bit-exact legacy.
+    if config.cape_relaxation_sink:
+        heat_applied = (constants.c_pd / constants.g) * jnp.sum(
+            jnp.maximum(dT_dt, 0.0) * dp_full, axis=-1,
+        )  # [W/m²]
+        heat_ceiling = (
+            config.cape_sink_heating_ratio * M_b * jnp.maximum(cape_pbl, 0.0)
+        )  # [kg/m²/s]·[J/kg] = [W/m²]
+        f_sink = jnp.clip(
+            heat_ceiling / jnp.maximum(heat_applied, 1e-6), 0.0, 1.0,
+        )[:, None]
+        dT_dt = dT_dt * f_sink
+        dq_v_dt = dq_v_dt * f_sink
+        dq_c_conv_dt = dq_c_conv_dt * f_sink
+        M_u_new = M_u_new * f_sink
+        if du_dt_conv is not None:
+            du_dt_conv = du_dt_conv * f_sink
+            dv_dt_conv = dv_dt_conv * f_sink
+
     convective_mask = cape_weight * (deep_weight + shallow_weight + midlevel_weight)
 
     # -- In-updraft precipitation (convective precipitation efficiency) ---
