@@ -171,7 +171,15 @@ Variables available (defaults; add more via `output.tapes[*].vars` in the YAML):
 | `transp` | mm/day (canopy transpiration, LE_canopy / L_v; canopy only) | mean |
 | `soil_evap` | mm/day (ground evaporation, LE_soil / L_v; canopy only) | mean |
 | `Rnet` | W/m² (net radiation into surface = sw_down·(1−α) + lw_down − lw_up) | mean |
+| `reverted` | 0–1 (per-cell fraction of steps the NaN-revert guard fired — a diverging-cell map) | mean |
 | `T_soil_top`, `theta_soil_top`, `snow_depth` | K, m³/m³, kg/m² | inst |
+
+**Diverging cells (boreal/Arctic).** Columns are independent, so a cell whose
+state goes non-finite is reverted to its previous step (its fluxes masked to NaN)
+instead of poisoning the run — the run finishes and `PASS`es. Two diagnostics:
+the `reverted` tape var above, and `lmip_biophys.reverts.nc` (per-cell count of
+reverted steps). A non-zero count means the physics diverged there; see
+`docs/land/boreal_nan_diagnosis_plan.md`.
 
 `transp + soil_evap ≈ ET` (they partition total evapotranspiration); the split is
 the key diagnostic for the #730 over-transpiration calibration.

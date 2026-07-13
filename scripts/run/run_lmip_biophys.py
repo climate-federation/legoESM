@@ -155,6 +155,26 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
     return ns
 
 
+def _nonfinite_per_col(tree, ncol: int):
+    """Per-column bool ``(ncol,)``: True where ANY state leaf is non-finite in
+    that column.  Columns are independent in the offline land model, so this
+    lets the driver revert only the failing columns (not the whole grid).
+    Assumes every per-column leaf has axis 0 = the column axis; non-column
+    leaves (wrong leading dim / scalars) are skipped.
+    """
+    flags = []
+    for leaf in jax.tree_util.tree_leaves(tree):
+        if getattr(leaf, "ndim", 0) < 1 or leaf.shape[0] != ncol:
+            continue
+        nf = ~jnp.isfinite(leaf)
+        if leaf.ndim > 1:
+            nf = jnp.any(nf, axis=tuple(range(1, leaf.ndim)))
+        flags.append(nf)
+    if not flags:
+        return jnp.zeros(ncol, dtype=bool)
+    return jnp.any(jnp.stack(flags, axis=0), axis=0)
+
+
 def resolve_lulcc(land_cover_dataset: str, n_cover_years: int, cover_years) -> str:
     """Validate the declared land-cover dataset against the loaded surfdata and
     return a one-line transient-cover status for the run banner.
@@ -474,9 +494,9 @@ def run(args) -> int:
 
     _ZEROS = jnp.zeros(ncol)                       # slab-mode placeholder for multilayer-only vars
 
-    # ----- scan body: (state, tape_accums) -> next; no per-step output returned.
+    # ----- scan body: (state, tape_accums, revert_count) -> next. -----
     def _step_body(carry, xs):
-        state, accums = carry
+        state, accums, revert_count = carry
         forcing_t, doy_t, year_t, per_tape_slot = xs
         theta_top_t = (state.theta_soil[:, 0] if is_multilayer else jnp.full(ncol, 0.2))
         land_params_t, lai_diag = update_land_params(theta_top_t, doy_t, year_t)
@@ -537,12 +557,30 @@ def run(args) -> int:
             values["T_soil_top"] = _ZEROS
             values["theta_soil_top"] = _ZEROS
             values["snow_depth"] = _ZEROS
+        # --- atomic per-column NaN-revert guard (ported from run_ec_site) ---
+        # Columns are independent, so if a column's state update goes non-finite,
+        # revert THAT column to its previous state (jnp.where): a diverging boreal
+        # cell can no longer poison its own future steps (it holds a finite state
+        # and may recover from a transient), and it never corrupts the run-level
+        # PASS/FAIL.  The reverted step's diagnostics are untrustworthy, so mask
+        # them to NaN; ``reverted`` (0/1) is tape-able as a per-cell failure-rate
+        # map and ``revert_count`` accumulates a per-cell total for the summary.
+        reverted = _nonfinite_per_col(new_state, ncol)          # (ncol,) bool
+        def _revert(n, o):
+            if getattr(n, "ndim", 0) < 1 or n.shape[0] != ncol:
+                return n
+            m = reverted.reshape((ncol,) + (1,) * (n.ndim - 1))
+            return jnp.where(m, o, n)
+        new_state = jax.tree_util.tree_map(_revert, new_state, state)
+        revert_count = revert_count + reverted.astype(revert_count.dtype)
+        values = {k: jnp.where(reverted, jnp.nan, v) for k, v in values.items()}
+        values["reverted"] = reverted.astype(jnp.float64)
         new_accums = {}
         for tape in tape_specs:                    # unrolled at trace time
             new_accums[tape.name] = accumulate_tape_step(
                 accums[tape.name], tape, per_tape_slot[tape.name],
                 {v: values[v] for v in tape.vars})
-        return (new_state, new_accums), None
+        return (new_state, new_accums, revert_count), None
 
     # ----- CHUNKED SCAN: stage forcing + lax.scan one year at a time.  --------
     # Tape accumulators are sized for the WHOLE run and threaded across chunks;
@@ -670,6 +708,7 @@ def run(args) -> int:
             print(f"(restart write skipped: {e})")
 
     steps_done = 0
+    revert_count = jnp.zeros(ncol)                  # per-cell NaN-revert tally
     for k, (year, mask) in enumerate(year_masks):
         # Year-local model times: the year's forcing clock resets to 0 at Jan 1.
         tq_year = tq[mask]
@@ -689,8 +728,8 @@ def run(args) -> int:
         # Slice each tape's GLOBAL slot indices to just this year's steps.
         slot_year_xs = {name: idx[mask] for name, idx in slot_idx_global.items()}
         print(f"  year {year} ({n_step_year} steps) ...")
-        (state, tape_accums), _ = jax.lax.scan(
-            _step_body, (state, tape_accums),
+        (state, tape_accums, revert_count), _ = jax.lax.scan(
+            _step_body, (state, tape_accums, revert_count),
             (forcing_year, doy_year, year_xs, slot_year_xs))
         del forcing_year, doy_year, year_xs, slot_year_xs      # free before next year
         steps_done += n_step_year
@@ -727,6 +766,35 @@ def run(args) -> int:
         print(f"  final T_soil_top {rng(T_final)} K | "
               f"theta_top {rng(np.asarray(state.theta_soil[:, 0]))} | "
               f"snow_depth {rng(np.asarray(state.snow_depth))} kg/m2")
+
+    # --- NaN-revert diagnostics: how many land cells needed the atomic revert
+    #     guard, and where.  A non-zero count = the physics diverged on those cells
+    #     (boreal/Arctic; see docs/land/boreal_nan_diagnosis_plan.md).  The run
+    #     still finishes with a finite state instead of NaN-poisoning. ---
+    rc = np.asarray(revert_count)
+    n_reverted_cells = int((rc[land] > 0).sum())
+    if n_reverted_cells:
+        print(f"NaN-revert guard: {n_reverted_cells}/{int(land.sum())} land cells "
+              f"reverted >=1 step | {int(rc[land].sum())} total cell-steps | "
+              f"worst cell {int(rc[land].max())} steps (fluxes masked; tape var "
+              f"'reverted' = per-cell revert fraction).")
+    else:
+        print("NaN-revert guard: no land cell required a revert (fully finite).")
+    try:
+        import xarray as xr
+        rc_map = np.where(land, rc, np.nan)
+        if is_latlon:
+            rc_da = xr.DataArray(rc_map.reshape(nlat, nlon), dims=("lat", "lon"),
+                                 coords={"lat": lat_1d, "lon": lon_1d})
+        else:
+            rc_da = xr.DataArray(rc_map, dims=("ncol",), coords={
+                "lat": (("ncol",), lat_deg), "lon": (("ncol",), lon_deg)})
+        xr.Dataset({"revert_count": rc_da},
+                   attrs={"desc": "per-cell count of NaN-revert steps"}).to_netcdf(
+            out_dir / "lmip_biophys.reverts.nc")
+        print(f"wrote {out_dir / 'lmip_biophys.reverts.nc'}")
+    except Exception as e:  # noqa: BLE001
+        print(f"(revert-map write skipped: {e})")
 
     # --- final COMBINED whole-run NetCDF (lmip_biophys.<tape>.nc) + end-of-run
     #     restart.  A multi-year run already flushed per-year annual files +
