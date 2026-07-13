@@ -1114,6 +1114,8 @@ def compute_clm_ml_canopy_fluxes(
     lon: jnp.ndarray | None = None,
     doy: float = 0.0,
     lai_override: jnp.ndarray | None = None,
+    vcmaxpft_jax: jnp.ndarray | None = None,
+    g1_medlyn_jax: jnp.ndarray | None = None,
 ) -> tuple[SurfaceFluxOutput, CanopyState]:
     """Compute canopy fluxes via the CLM-ML-JAX multilayer canopy model.
 
@@ -1161,6 +1163,16 @@ def compute_clm_ml_canopy_fluxes(
         to default to 0° (Greenwich); this is incorrect for most sites.
     doy:
         Day of year (0-based float, e.g. 120.0 = May 1 in a non-leap year).
+    vcmaxpft_jax:
+        Optional trainable per-PFT Vcmax25 override [µmol/m²/s], shape
+        ``(mxpft+1,)`` — replaces the module-global ``MLpftcon.vcmaxpft`` lookup
+        so ``jax.grad`` can flow into Vcmax25.  Injected as a TRACED leaf from
+        the loss (SegmentForcing doctrine); ``None`` keeps the PFT default.
+    g1_medlyn_jax:
+        Optional trainable per-PFT Medlyn ``g1`` override [kPa^0.5], same shape
+        contract as ``vcmaxpft_jax``.  Only active when the canopy stomatal model
+        is Medlyn (``MLclm_varctl.gs_type == 0``); inert under the default WUE
+        conductance (``gs_type == 2``).  ``None`` keeps the PFT default.
 
     Returns
     -------
@@ -1370,6 +1382,8 @@ def compute_clm_ml_canopy_fluxes(
         waterdiagnosticbulk_inst=stubs["waterdiagnosticbulk"],
         grid=grid,
         _o2ref_py=float(canopy_config.o2ref),
+        vcmaxpft_jax=vcmaxpft_jax,
+        g1_MED_jax=g1_medlyn_jax,
     )
 
     # ---- Extract SurfaceFluxOutput ----

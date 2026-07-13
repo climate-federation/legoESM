@@ -8,6 +8,21 @@ Convention: newest entries on top. Each entry = what changed, why, how verified.
 
 ---
 
+## 2026-07-13 — No regression + M2 trainable-param wiring
+
+- **Regression gate GREEN:** `tests/land/unit/test_canopy.py -m "not slow"` →
+  **25 passed, 1 xfailed** (113 s). The jnp SW partition, traced soil inputs, and
+  upstream diagnostics change did NOT alter any forward-path result. The
+  `differentiable=False` xfail (`test_grad_lhflx_wrt_T_lowest`) still correctly
+  raises under `jax.grad`, confirming the forward-only path is untouched and the
+  diff gate is what flips behaviour.
+- **M2 wiring:** `compute_clm_ml_canopy_fluxes` gains optional `vcmaxpft_jax`
+  (per-PFT Vcmax25 `(mxpft+1,)`) and `g1_medlyn_jax` overrides, forwarded to
+  `MLCanopyFluxes(vcmaxpft_jax=, g1_MED_jax=)`. These are TRACED leaves injected
+  from the loss (SegmentForcing doctrine) → Vcmax25 (and Medlyn g1 when
+  `gs_type==0`) become differentiable/trainable. Validated by `spike_m2.py`
+  (grad wrt sw_down through the jnp partition + grad wrt Vcmax25, both FD-checked).
+
 ## 2026-07-13 — M1 GATE PASSED ✅ (forward/diff parity + grad + FD)
 
 Spike `scratchpad/spike_m1.py` (single column, warm-start → diff forward → grad):
