@@ -1388,6 +1388,20 @@ def compute_clm_ml_canopy_fluxes(
         grid = None
 
     # ---- Call MLCanopyFluxes ----
+    # Only forward the diff-mode / trainable-param kwargs when they are actually
+    # used, so the DEFAULT forward-only path keeps the exact call signature the
+    # interface has always used (``_o2ref_py`` only) and does NOT depend on the
+    # newer ``grid=``/``vcmaxpft_jax=``/``g1_MED_jax=`` upstream API surface
+    # (Codex P1: an older clm-ml-jax would otherwise TypeError on every call,
+    # including production forward-only runs).  Diff mode is already gated by the
+    # capability guard above.
+    _opt_kwargs: dict[str, Any] = {}
+    if grid is not None:
+        _opt_kwargs["grid"] = grid
+    if vcmaxpft_jax is not None:
+        _opt_kwargs["vcmaxpft_jax"] = vcmaxpft_jax
+    if g1_medlyn_jax is not None:
+        _opt_kwargs["g1_MED_jax"] = g1_medlyn_jax
     mlcanopy_new = MLCanopyFluxes(
         bounds=bounds,
         num_exposedvegp=num_exposedvegp,
@@ -1405,10 +1419,8 @@ def compute_clm_ml_canopy_fluxes(
         mlcanopy_inst=mlcanopy,
         wateratm2lndbulk_inst=stubs["wateratm2lndbulk"],
         waterdiagnosticbulk_inst=stubs["waterdiagnosticbulk"],
-        grid=grid,
         _o2ref_py=float(canopy_config.o2ref),
-        vcmaxpft_jax=vcmaxpft_jax,
-        g1_MED_jax=g1_medlyn_jax,
+        **_opt_kwargs,
     )
 
     # ---- Extract SurfaceFluxOutput ----
