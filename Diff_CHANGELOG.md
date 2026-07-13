@@ -8,6 +8,22 @@ Convention: newest entries on top. Each entry = what changed, why, how verified.
 
 ---
 
+## 2026-07-13 — M1 GATE PASSED ✅ (forward/diff parity + grad + FD)
+
+Spike `scratchpad/spike_m1.py` (single column, warm-start → diff forward → grad):
+- **Forward/diff parity** (same warm state, `differentiable=True` vs `False`):
+  `shflx/lhflx/G_soil/sw_net/lw_up/gpp/T_surface` all match to **rel ≈ 1e-14**
+  (machine precision) → running `_CanopyFluxesDiagnostics` in diff mode with
+  `grid=` reproduces the forward physics exactly.
+- **`jax.grad(sum lhflx) / d(T_lowest) = 5.848`** — finite, non-zero.
+- **Finite-difference check:** analytic `5.84768` vs central-FD `5.84784`,
+  **rel_err 0.003%** (well under the 10% gate).
+- Cost (CPU, no GPU): warm-up cold call 34 s; diff forward 37 s; the grad's
+  first-trace `jit_scan` compile ~4 min → grad wall-time ~7 min (scope risk #2,
+  compile-bound; correctness unaffected). The durable test is marked `slow`.
+- `mlcanopy` ncan resolved to 20 layers (htop fallback 5 m → dz_short grid), not
+  the nominal `nlevmlcan=9` — pre-existing upstream layering, unrelated to diff.
+
 ## 2026-07-13 — Diff-mode activation (upstream + interface + config)
 
 **Upstream `clm-ml-jax` (editable install; separate git repo):**
