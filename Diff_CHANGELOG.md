@@ -8,6 +8,18 @@ Convention: newest entries on top. Each entry = what changed, why, how verified.
 
 ---
 
+## 2026-07-13 — Codex round-6
+
+- **[P2] trainable params through the land step (fixed):**
+  `step_multilayer_land` / `_with_diagnostics` / `_impl` now also thread
+  `clm_ml_vcmaxpft_jax` and `clm_ml_g1_medlyn_jax` to the CLM-ML interface, so
+  gradients w.r.t. the trainable per-PFT Vcmax25 / Medlyn-g1 flow through the
+  standard land rollout (not only the low-level interface).
+- **[P1] pin clm-ml-jax (accepted, maximally mitigated):** documented the exact
+  required upstream commit `517e044` in the `[canopy]` extra; runtime capability
+  guard prevents any silent wrong-answer. Not pinnable from here (package not on
+  PyPI — a pre-existing gap). Fully resolving = publish clm-ml-jax, out of scope.
+
 ## 2026-07-13 — Codex round-5 [P2]s
 
 - **Solar-geometry guard:** differentiating the WHOLE `AtmToSurface` pytree makes

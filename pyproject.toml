@@ -63,15 +63,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# clm-ml-jax is NOT on PyPI (local/gitignored checkout, install with
-# `pip install -e ./clm-ml-jax`); the version constraint below cannot pin a
-# specific commit. The DIFFERENTIABLE canopy path (CLMMLCanopyConfig(
-# differentiable=True)) additionally REQUIRES a clm-ml-jax revision whose
-# `_CanopyFluxesDiagnostics` accepts `grid=` (runs canopy diagnostics on the
-# jax.grad tape). `clm_ml_interface` probes this capability at runtime and
-# raises a clear error if the installed build is too old — see
-# docs/land/clm_ml_differentiable_integration_scope.md. Forward-only mode
-# (the default) works with any 0.1.0 build.
+# clm-ml-jax is NOT on PyPI — it is a local/gitignored git checkout installed
+# with `pip install -e ./clm-ml-jax`, so this constraint CANNOT pin a commit
+# (known pre-existing packaging gap; see the [canopy]-extra note in
+# docs/land/clm_ml_jax_session_report_2026-07-12.md). The DIFFERENTIABLE canopy
+# path (CLMMLCanopyConfig(differentiable=True)) additionally REQUIRES a
+# clm-ml-jax revision whose `_CanopyFluxesDiagnostics` accepts `grid=` (runs the
+# canopy-integrated flux diagnostics on the jax.grad tape) — commit
+# `517e044` "feat(diff): run _CanopyFluxesDiagnostics in differentiable mode"
+# in the clm-ml-jax repo, or any descendant. `clm_ml_interface` PROBES this
+# capability at runtime and raises a clear, actionable error if the installed
+# build is too old (so there is never a silent wrong answer). Forward-only mode
+# (the default) works with any 0.1.0 build. Fully resolving the pin requires
+# publishing clm-ml-jax (or pointing this extra at a Git URL once it has one),
+# which is out of scope for the differentiable-integration change.
 canopy = ["clm-ml-jax>=0.1.0"]
 # gcsfs/fsspec included: the ML training lane's DEFAULT ERA5 path is a gs://
 # zarr store (load_era5_samples / era5_to_state), so the ml extra must open it

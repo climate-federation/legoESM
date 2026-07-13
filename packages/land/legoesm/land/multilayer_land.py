@@ -160,6 +160,8 @@ def step_multilayer_land_with_diagnostics(
     doy: float = 0.0,
     land_params=None,
     clm_ml_grid_info=None,
+    clm_ml_vcmaxpft_jax=None,
+    clm_ml_g1_medlyn_jax=None,
 ):
     """Like :func:`step_multilayer_land` but also returns the ``SurfaceFluxOutput``.
 
@@ -173,7 +175,9 @@ def step_multilayer_land_with_diagnostics(
     return _step_multilayer_land_impl(
         state, forcing, config, U_min, dt,
         lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params,
-        clm_ml_grid_info=clm_ml_grid_info)
+        clm_ml_grid_info=clm_ml_grid_info,
+        clm_ml_vcmaxpft_jax=clm_ml_vcmaxpft_jax,
+        clm_ml_g1_medlyn_jax=clm_ml_g1_medlyn_jax)
 
 
 def root_zone_beta_soil(
@@ -245,6 +249,8 @@ def step_multilayer_land(
     doy: float = 0.0,
     land_params=None,
     clm_ml_grid_info=None,
+    clm_ml_vcmaxpft_jax=None,
+    clm_ml_g1_medlyn_jax=None,
 ) -> tuple[MultiLayerLandState, TileResponse, CarbonState | None]:
     """Step the multi-layer land model forward by ``dt`` seconds.
 
@@ -256,13 +262,18 @@ def step_multilayer_land(
     ``SurfaceFluxOutput`` for diagnostic inspection.
 
     ``clm_ml_grid_info`` threads a concrete CLM-ML ``GridInfo`` to the canopy
-    interface for multi-step differentiable rollouts (see
-    :func:`_step_multilayer_land_impl`); ``None`` for forward-only / non-CLM-ML.
+    interface for multi-step differentiable rollouts;
+    ``clm_ml_vcmaxpft_jax`` / ``clm_ml_g1_medlyn_jax`` thread the optional
+    trainable per-PFT Vcmax25 / Medlyn-g1 overrides (see
+    :func:`_step_multilayer_land_impl`); all ``None`` for forward-only /
+    non-CLM-ML.
     """
     new_state, response, carbon_new, _surface_out = _step_multilayer_land_impl(
         state, forcing, config, U_min, dt,
         lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params,
-        clm_ml_grid_info=clm_ml_grid_info)
+        clm_ml_grid_info=clm_ml_grid_info,
+        clm_ml_vcmaxpft_jax=clm_ml_vcmaxpft_jax,
+        clm_ml_g1_medlyn_jax=clm_ml_g1_medlyn_jax)
     return new_state, response, carbon_new
 
 
@@ -277,6 +288,8 @@ def _step_multilayer_land_impl(
     doy: float = 0.0,
     land_params=None,
     clm_ml_grid_info=None,
+    clm_ml_vcmaxpft_jax=None,
+    clm_ml_g1_medlyn_jax=None,
 ):
     """Internal 4-tuple (new_state, TileResponse, carbon, SurfaceFluxOutput).
 
@@ -289,7 +302,11 @@ def _step_multilayer_land_impl(
     from a warm-start state with
     ``legoesm.land.canopy.clm_ml_interface.extract_clm_ml_grid_info`` and close
     over it before the ``jax.grad`` scan, so the traced carried state is never
-    ``int()``-ed.  Ignored by the non-CLM-ML schemes and by forward-only runs.
+    ``int()``-ed.  ``clm_ml_vcmaxpft_jax`` / ``clm_ml_g1_medlyn_jax`` are the
+    optional TRAINABLE per-PFT Vcmax25 / Medlyn-g1 overrides (traced leaves
+    injected from the loss), forwarded so gradients w.r.t. these canopy
+    parameters flow through the standard land rollout.  All three are ignored by
+    the non-CLM-ML schemes and by forward-only runs.
     """
     lp = land_params
     T_soil = state.T_soil        # (ncol, n_layers)
@@ -544,6 +561,8 @@ def _step_multilayer_land_impl(
             doy=doy,
             lai_override=LAI_override,
             grid_info=clm_ml_grid_info,
+            vcmaxpft_jax=clm_ml_vcmaxpft_jax,
+            g1_medlyn_jax=clm_ml_g1_medlyn_jax,
         )
     elif isinstance(config.surface_scheme, SimpleSEBConfig):
         # SimpleSEB: bulk fluxes with skin T = T_soil[:, 0].
