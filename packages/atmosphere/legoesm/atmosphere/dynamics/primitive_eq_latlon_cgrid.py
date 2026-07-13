@@ -183,7 +183,16 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     #                                   at sponge_coeff*100/101 (see sponge_profile)
     sponge_width_m: float = 10000.0    # sponge-layer depth below the top [m]
     sponge_shape: str = "sin2"         # "sin2" | "sam_rational" (see sponge_profile)
-    sponge_scale_height_m: float = 7500.0  # log-pressure scale height for sigma->z. Last field to preserve positional ABI.
+    sponge_scale_height_m: float = 7500.0  # log-pressure scale height for sigma->z.
+    # Damp EDDIES only (deviations from the zonal mean).  A damp-to-rest
+    # sponge acting on the zonal-mean jet exerts a net Coriolis torque that
+    # drives poleward mass drift (measured on the latlon24 pilot: a 10/day
+    # driver-level sponge piled zonal-mean p_s to ~1120 hPa at the polar
+    # flanks by day 100 while draining the tropics).  Preserving the
+    # zonal-mean momentum removes the torque while still absorbing the wave
+    # energy (standard GCM sponge practice).  False = legacy damp-to-rest.
+    # Last field to preserve positional ABI.
+    sponge_eddy_only: bool = True
 
 
 def _zero_v_at_pole(v, *, south: bool, north: bool, offset: int = 0):
@@ -681,8 +690,19 @@ def cgrid_latlon_hydrostatic_tendencies(
             z_full, H_top, config.sponge_width_m, config.sponge_coeff,
             shape=config.sponge_shape,
         ).astype(du_dt.dtype)   # (nlev,), 0 below the sponge base
-        du_dt = du_dt - spge * u
-        dv_dt = dv_dt - spge * v
+        if config.sponge_eddy_only:
+            # Zonal-mean-preserving (eddy-only) damping: no net Coriolis
+            # torque, no poleward mass drift (see the config docstring).
+            # Zonal mean over the lon axis (axis 1); u lives on n_lon+1
+            # interfaces whose periodic duplicate biases the mean by
+            # O(1/n_lon) — irrelevant for a damping reference.
+            u_zm = jnp.mean(u, axis=1, keepdims=True)
+            v_zm = jnp.mean(v, axis=1, keepdims=True)
+            du_dt = du_dt - spge * (u - u_zm)
+            dv_dt = dv_dt - spge * (v - v_zm)
+        else:
+            du_dt = du_dt - spge * u
+            dv_dt = dv_dt - spge * v
 
     # Enforce zero tendency at poles (wall BC) so that intermediate RK
     # stages never see nonzero v at poles feeding into divergence/Coriolis.

@@ -1115,8 +1115,11 @@ class TestTopSponge:
         the sponge base), and increasing toward the lid."""
         state = self._uniform_wind_state(grid, sigma, u0=20.0)
         cfg_off = CGridLatLonPrimitiveEquationConfig(sponge_coeff=0.0)
+        # legacy damp-to-rest branch (a uniform wind is pure zonal mean, which
+        # the default eddy-only sponge deliberately does NOT touch)
         cfg_on = CGridLatLonPrimitiveEquationConfig(
-            sponge_coeff=1.0 / 86400.0, sponge_width_m=10000.0)
+            sponge_coeff=1.0 / 86400.0, sponge_width_m=10000.0,
+            sponge_eddy_only=False)
         du_off, dv_off, *_ = cgrid_latlon_hydrostatic_tendencies(
             state, grid, sigma, cfg_off)
         du_on, dv_on, *_ = cgrid_latlon_hydrostatic_tendencies(
@@ -1136,3 +1139,43 @@ class TestTopSponge:
         d_dv = dv_on - dv_off
         assert float(jnp.min(d_dv)) < 0.0     # v = +5 > 0 -> damped negative
         assert float(jnp.max(jnp.abs(d_dv[..., -1]))) == 0.0
+
+    def test_sponge_eddy_only_preserves_zonal_mean_momentum(self, grid, sigma):
+        """Default (eddy-only) sponge: a damp-to-rest sponge on the zonal-mean
+        jet exerts a net Coriolis torque -> poleward mass drift (measured on
+        the latlon24 pilot: 10/day driver sponge piled zonal-mean p_s to
+        ~1120 hPa at the polar flanks by day 100).  Eddy-only damping must
+        (a) be a NO-OP on a purely zonal-mean wind, (b) damp a zonal eddy,
+        and (c) contribute ZERO zonal-mean tendency for any wind."""
+        cfg_off = CGridLatLonPrimitiveEquationConfig(sponge_coeff=0.0)
+        cfg_on = CGridLatLonPrimitiveEquationConfig(
+            sponge_coeff=1.0 / 86400.0, sponge_width_m=10000.0)  # eddy-only default
+
+        # (a) uniform (pure zonal-mean) wind -> sponge adds nothing
+        state_zm = self._uniform_wind_state(grid, sigma, u0=20.0)
+        du_off, dv_off, *_ = cgrid_latlon_hydrostatic_tendencies(
+            state_zm, grid, sigma, cfg_off)
+        du_on, dv_on, *_ = cgrid_latlon_hydrostatic_tendencies(
+            state_zm, grid, sigma, cfg_on)
+        assert jnp.allclose(du_on, du_off, atol=1e-14)
+        assert jnp.allclose(dv_on, dv_off, atol=1e-14)
+
+        # (b)+(c) wind with a zonal eddy: eddy damped at the top, zonal-mean
+        # sponge contribution exactly zero at every (lat, lev)
+        n_lat, n_lon = grid.n_lat, grid.n_lon
+        nlev = sigma.n_levels
+        lon_wave = jnp.sin(2 * jnp.pi * jnp.arange(n_lon + 1) / n_lon)
+        state_eddy = state_zm._replace(
+            u=state_zm.u + 10.0 * lon_wave[None, :, None])
+        du_off, *_ = cgrid_latlon_hydrostatic_tendencies(
+            state_eddy, grid, sigma, cfg_off)
+        du_on, *_ = cgrid_latlon_hydrostatic_tendencies(
+            state_eddy, grid, sigma, cfg_on)
+        d_du = du_on - du_off                       # sponge contribution
+        per_lev = jnp.max(jnp.abs(d_du), axis=(0, 1))
+        assert float(per_lev[0]) > 0.0              # eddy damped at the lid
+        assert float(per_lev[-1]) == 0.0            # surface below sponge base
+        # zero net zonal-mean momentum tendency (the torque-free property);
+        # exclude the periodic-duplicate interface from the mean.
+        zm_contrib = jnp.mean(d_du[:, :-1, :], axis=1)
+        assert float(jnp.max(jnp.abs(zm_contrib))) < 1e-15 * 86400.0
