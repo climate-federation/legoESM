@@ -278,6 +278,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hyperdiff-scale", type=float,
                         default=_DYCORE_DEFAULTS.hyperdiff_scale,
                         help="Dycore hyperdiffusion multiplier")
+    parser.add_argument("--mpas-rrtmgp-fp32",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        dest="mpas_rrtmgp_fp32",
+                        help="MPAS-standalone RRTMGP optics precision: fp32 "
+                             "(default, perf) vs fp64 (--no-mpas-rrtmgp-fp32; "
+                             "parity with the coupled cube/latlon pipeline — "
+                             "the ERA5-IC lane's extreme Antarctic columns are "
+                             "a suspected fp32-optics NaN trigger).")
     parser.add_argument("--mpas-nu-vert4-t", type=float,
                         default=_DYCORE_DEFAULTS.mpas_nu_vert4_T,
                         help="MPAS vertical biharmonic hyperdiffusion of T "
@@ -1331,6 +1339,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sbm_RH_ref=args.sbm_rh_ref,
         sbm_cape_threshold=args.sbm_cape_threshold,
         bechtold_cape_threshold=args.bechtold_cape_threshold,
+        mpas_rrtmgp_fp32=args.mpas_rrtmgp_fp32,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
         physics_parameterization=args.physics_parameterization,

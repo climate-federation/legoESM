@@ -4706,7 +4706,12 @@ class ModelDriver:
             "rrtmgp" if cfg.radiation in ("rrtmg", "rrtmgp")
             else cfg.radiation
         )
-        _rrtmgp_fp32 = (_rad_scheme == "rrtmgp")
+        # fp32 optics is an MPAS-lane perf default; the coupled cube/latlon
+        # pipeline runs fp64 optics (RRTMGPConfig default).  Configurable
+        # because fp32 optics is a suspected NaN trigger on extreme ERA5
+        # columns (Antarctic p_s ~670 hPa / T ~193 K) this lane feeds it.
+        _rrtmgp_fp32 = (_rad_scheme == "rrtmgp"
+                        and getattr(cfg, "mpas_rrtmgp_fp32", True))
         # Cloud-radiation coupling: thread the configured cloud-fraction
         # scheme into RRTMGP (cloud optics from microphysics condensate +
         # number).  ``include_clouds`` must be consistent with the cloud
