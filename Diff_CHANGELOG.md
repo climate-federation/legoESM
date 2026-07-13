@@ -8,6 +8,17 @@ Convention: newest entries on top. Each entry = what changed, why, how verified.
 
 ---
 
+## 2026-07-13 — M2 GATE PASSED ✅ (forcing-SW grad + trainable-Vcmax grad)
+
+Run as SEPARATE processes (each ~7 min; avoids the two-graph LLVM OOM):
+- **grad w.r.t. `sw_down`** (through the jnp SW-partition path; loss couples
+  shflx+lhflx+gpp): analytic `0.7073034`, central-FD `0.7073040`,
+  **rel_err 0.000%** — the jnp `_sw_partition`/`_estimate_beam_fraction` rewrite
+  correctly keeps SW on the tape.
+- **grad w.r.t. trainable Vcmax25** (`vcmaxpft_jax`, active PFT 7):
+  `d(gpp)/d(vcmax[7]) = 2.43546e-6`, FD `2.43548e-6`, **rel_err 0.001%** — the
+  per-PFT Vcmax25 override is differentiable end-to-end.
+
 ## 2026-07-13 — Codex round-6
 
 - **[P2] trainable params through the land step (fixed):**
