@@ -226,11 +226,31 @@ def make_ocean_physics(
         # so adding enhanced_diffusion's A_v here would double-count (the
         # A_v fields are summed below).  Mirrors the ``vmix.scheme != "kpp"``
         # gate in compute_vertical_K_profiles (the implicit fallback path).
-        fns.append(make_convection_physics(
-            config.convection,
-            apply_diffusion=apply_vertical_diffusion,
-            emit_momentum_viscosity=(config.vertical_mixing.scheme != "kpp"),
-        ))
+        _fallback_owns_evd = (
+            config.vertical_mixing.scheme in ("tke", "catke")
+            and config.convection.scheme == "enhanced_diffusion"
+            and not apply_vertical_diffusion
+        )
+        if not _fallback_owns_evd:
+            fns.append(make_convection_physics(
+                config.convection,
+                apply_diffusion=apply_vertical_diffusion,
+                emit_momentum_viscosity=(
+                    config.vertical_mixing.scheme != "kpp"),
+            ))
+        # else: TKE/CATKE K profiles are computed INSIDE the implicit
+        # solve's compute_vertical_K_profiles fallback (their pipeline
+        # factory is a deliberate no-op with K_v=None), and that fallback
+        # ALREADY composes the enhanced-diffusion K/A on top
+        # (k_profiles.py).  Emitting EVD's K from the pipeline here would
+        # (a) double-count it on the fallback path and — far worse —
+        # (b) make the pipeline K_v/A_v sum non-None, which flips
+        # _apply_implicit_vertical_mixing onto its physics-provided-K FAST
+        # path and SILENTLY SKIPS the TKE/CATKE computation entirely.
+        # Symptom: under vmix="tke" + EVD the momentum solve saw only the
+        # convective A_v (zero in stable stratification), so the DINO
+        # r1_exact equatorial surface jet integrated raw wind stress
+        # unmixed and blew up by day ~30 (probe job 8818083).
 
     if config.mle is not None:
         fns.append(_make_mle(config.mle))

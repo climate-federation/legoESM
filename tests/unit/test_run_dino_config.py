@@ -313,3 +313,65 @@ def test_vmix_rejects_unknown(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run_dino.py", "--vmix", "bogus"])
     with pytest.raises(SystemExit):
         rd._parse_args()
+def test_r1_exact_preset(monkeypatch):
+    """--preset r1_exact loads the DINO_R1 exactness preset; explicit flags
+    still override on top; every already-exact oracle selection asserted."""
+    from legoesm.ocean.experiments.dino import dino_r1_exact_config
+    cfg = dino_r1_exact_config()
+    # oracle selections (DINO_R1/EXP00/namelist_cfg)
+    assert cfg.eos == "nemo_seos"                       # nameos ln_seos
+    assert cfg.vmix_scheme == "tke"                     # ln_zdftke
+    assert cfg.bottom_drag_scheme == "nemo_quadratic"   # namdrg ln_non_lin
+    assert cfg.use_gm_redi is False                     # ln_ldfeiv=.false.
+    assert cfg.A_h_floor == 0.0                         # no legoESM floor
+    assert cfg.A_h_eq_boost == 1.0                      # no legoESM boost
+    assert cfg.tracer_advection == "fct2"
+    assert cfg.vertical_coordinate == "masked_zco"
+    assert cfg.pgf_quadrature == "nemo_trapezoid"
+    assert cfg.forcing_annual_cycle is True          # ln_ann_cyc
+    # stabilizer TKE viscosity floor OFF -> effective A_v == avm0 exactly
+    assert cfg.tke_momentum_visc_bg == cfg.A_v_bg
+    assert cfg.A_v_bg_effective == cfg.A_v_bg == 1.2e-4  # rn_avm0
+    assert cfg.K_v_bg == 1.2e-5                          # rn_avt0
+    assert cfg.K_conv == 100.0                           # rn_evd
+    assert cfg.evd_on_momentum is True                   # nn_evdm=1
+    assert cfg.dt == 2700.0                              # rn_Dt
+    assert cfg.U_M == 0.27 and cfg.U_T == 0.027          # rn_Uv / rn_Ud
+    # overrides still win
+    cfg2 = dino_r1_exact_config(vmix_scheme="kpp")
+    assert cfg2.vmix_scheme == "kpp" and cfg2.eos == "nemo_seos"
+    # CLI wiring
+    monkeypatch.setattr(sys, "argv", ["run_dino.py", "--preset", "r1_exact"])
+    args = rd._parse_args()
+    assert args.preset == "r1_exact"
+
+
+def test_r1_exact_preset_flows_to_model_config():
+    """The preset's selections reach the built LatLonCGridOceanConfig."""
+    from legoesm.ocean.experiments.dino import (
+        dino_r1_exact_config, dino_lat_lon_grid, dino_lat_lon_model_config,
+    )
+    cfg = dino_r1_exact_config()
+    g = dino_lat_lon_grid(cfg, n_lon=12)
+    mc, _phys = dino_lat_lon_model_config(g, cfg, physics=True)
+    assert mc.eos == "nemo_seos"
+    assert mc.bottom_drag.bottom_drag_scheme == "nemo_quadratic"
+    assert mc.bottom_drag.bottom_drag_cd0 == cfg.C_d_bottom
+    assert mc.tracer_advection == "fct2"
+    # EIV off but iso-neutral Redi-only ON (ln_traldf_iso + msc):
+    assert mc.gm_redi is not None
+    assert mc.gm_redi.kappa_GM == 0.0            # no bolus transport
+    assert mc.gm_redi.implicit_K33 is True       # MSC
+    assert mc.K_h == 0.0                         # no iso-level double-count
+    assert mc.lateral_viscosity.A_h_floor == 0.0
+    assert mc.lateral_viscosity.A_h_eq_boost == 1.0
+
+
+def test_allow_multiyear_flag(monkeypatch):
+    """--days > 365 requires --allow-multiyear (GPU/SLURM opt-out)."""
+    monkeypatch.setattr(sys, "argv", ["run_dino.py", "--days", "720"])
+    args = rd._parse_args()
+    assert args.days == 720 and args.allow_multiyear is False
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino.py", "--days", "720", "--allow-multiyear"])
+    assert rd._parse_args().allow_multiyear is True

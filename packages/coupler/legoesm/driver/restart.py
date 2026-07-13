@@ -315,6 +315,26 @@ def _json_safe(obj):
         return float(obj)
     if isinstance(obj, np.ndarray):
         return [_json_safe(v) for v in obj.tolist()]
+    if hasattr(obj, "shape") and hasattr(obj, "dtype"):
+        # Non-NumPy array-like (a JAX ArrayImpl config leaf): summarise as
+        # shape/dtype/range + content digest instead of raising -- a raw device
+        # array crashed the whole provenance write (ocean runoff map).  NumPy
+        # ndarrays above keep their existing full-list encoding.  The ocean
+        # codec already summarises its own arrays; this covers other config
+        # kinds reaching _json_safe directly.
+        import hashlib as _hashlib
+        arr = np.asarray(obj)
+        if arr.ndim == 0:
+            return _json_safe(arr.item())
+        _c = np.ascontiguousarray(arr)
+        return {"__array_summary__": {
+            "shape": list(arr.shape), "dtype": str(arr.dtype),
+            "min": float(arr.min()) if arr.size else None,
+            "max": float(arr.max()) if arr.size else None,
+            "sha256": _hashlib.sha256(
+                str(arr.shape).encode() + str(arr.dtype).encode()
+                + _c.tobytes()).hexdigest(),
+        }}
     if obj is None or isinstance(obj, (str, bool, int, float)):
         return obj
     if isinstance(obj, Path):

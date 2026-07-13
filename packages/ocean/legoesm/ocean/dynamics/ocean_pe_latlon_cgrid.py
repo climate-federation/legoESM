@@ -133,7 +133,7 @@ VALID_MOMENTUM_ADVECTION = frozenset(
 # the flux-form tendency dispatch (its else-raise) plus the SOM special case
 # handled in step().  Keep in sync if a tracer scheme is added.
 VALID_TRACER_ADVECTION = frozenset(
-    {"upwind", "centered", "tvd", "superbee", "ppm", "ppm_fct",
+    {"upwind", "centered", "tvd", "superbee", "ppm", "ppm_fct", "fct2",
      "dst3", "dst3_multidim", "weno5", "weno7", "som"}
 )
 # WENO vector-invariant momentum-advection literals (Silvestri et al. 2024).
@@ -1314,6 +1314,7 @@ def _bc_geometry_and_density(
     else:
         _h_actual_pprime = None
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
+    _pgf_quadrature = getattr(config, "pgf_quadrature", "cell_integral")
     rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
         T, S, mask,
         lambda field: neumann_fill_cgrid(field, mask, grid=grid),
@@ -1322,6 +1323,20 @@ def _bc_geometry_and_density(
         hi_precision_pressure=True,
         h_actual=_h_actual_pprime,
         allow_baroclinic_f32=True,   # opt-in f32-EOS lever (LEGOESM_BAROCLINIC_F32)
+        # NEMO dynhpg trapezoid vs legacy cell-integral p' (DINO L1
+        # exactness; "cell_integral" default is bit-identical).  The
+        # seafloor ρ' mask matters only for the trapezoid rule.
+        quadrature=_pgf_quadrature,
+        is_active_3d=(z_coord.is_active
+                      if (isinstance(z_coord, OceanPartialCellCoordinate)
+                          and _pgf_quadrature == "nemo_trapezoid")
+                      else None),
+        # NEMO depth_to_e3 w-spacings from the coordinate's own t-depth
+        # ladder (analytic for the DINO masked-zco grid; algebraically
+        # the h-derived midpoint form otherwise).
+        trapezoid_t_depth_1d=(jnp.abs(z_coord.z_full_ref)
+                              if _pgf_quadrature == "nemo_trapezoid"
+                              else None),
     )
 
     p_prime_filled = neumann_fill_cgrid(p_prime, mask, grid=grid)

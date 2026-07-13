@@ -80,3 +80,20 @@ def test_coastal_spread_conserves_area_integral_and_reduces_peak():
     assert np.allclose(s0, s2, rtol=1e-6), (s0, s2)
     # peak reduced (spread smears the concentrated river mouths)
     assert R2.max() < R0.max()
+
+
+def test_arctic_salt_forcing_flags_registered(capsys):
+    """The three faithful-Arctic-salt levers are registered in the CLI."""
+    import sys
+
+    saved = sys.argv
+    sys.argv = ["run_omip_core2.py", "--help"]
+    try:
+        with pytest.raises(SystemExit):
+            R.main()
+    finally:
+        sys.argv = saved
+    out = capsys.readouterr().out
+    for flag in ("--sss-restore-file", "--nemo-monthly-init",
+                 "--nemo-init-month", "--runoff-depth-nemo-ini"):
+        assert flag in out, flag

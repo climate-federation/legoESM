@@ -28,6 +28,21 @@ import numpy as np
 from legoesm import constants
 
 
+def partial_cell_thickness(H_bathy, dz_ref):
+    """Partial-cell layer thickness (n_lat, n_lon, nlev) [m] reconstructed
+    from the bottom depth + z* reference thicknesses: full ``dz_ref`` above
+    the floor, a clipped bottom cell, zero below. The eta-driven z* stretch
+    (~0.1% of the column) is neglected — intended for depth-integrated
+    transport diagnostics from snapshots that store ``H_bathy`` but not the
+    instantaneous layer thicknesses.
+    """
+    dz_ref = np.asarray(dz_ref)
+    z_bot = np.cumsum(dz_ref)                       # (nlev,) interface depths
+    z_top = z_bot - dz_ref
+    H = np.asarray(H_bathy)[..., None]              # (n_lat, n_lon, 1)
+    return np.clip(np.minimum(z_bot, H) - z_top, 0.0, dz_ref)
+
+
 def _v_face_geometry(v, h_partial, mask, grid):
     """Shared v-face geometry for the meridional diagnostics (MOC + MHT).
 
