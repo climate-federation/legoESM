@@ -272,12 +272,12 @@ class TestFV3PEStepMPIFidelity:
         # iter-1056: set the halo backend to ``local`` BEFORE building
         # ``state_global``.  ``hydrostatic_to_fv3`` calls
         # ``pad_halo_vector_4d``, which under ``_halo_backend == "mpi"``
-        # routes through ``_pad_halo_mpi_face_only_4d``.  The
-        # session-scope ``conftest.py::_init_mpi_layout`` calls
-        # ``initialize_distributed(global_n=max(n_procs, 2))`` which
-        # leaves the module-level halo backend as ``"mpi"`` at test
-        # start.  Without resetting first, the MPI sendrecv runs with
-        # the conftest topology (set up for ``global_n=2``) on
+        # routes through ``_pad_halo_mpi_face_only_4d``.  A PRIOR test
+        # (or the conftest ``cube_face_layout`` fixture, at
+        # ``global_n=max(n_procs, 2)``) may have left the module-level
+        # halo backend as ``"mpi"`` at test start.  Without resetting
+        # first, the MPI sendrecv runs with a stale topology
+        # (set up for ``global_n=2``) on
         # ``(6, 8, 8, nlev)`` data → mis-sized halo strips → corrupt
         # ``state_global`` → single-rank reference blew up to ``1e+53``
         # in one step.  All other tests in this class already call
