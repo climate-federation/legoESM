@@ -8,6 +8,37 @@ Convention: newest entries on top. Each entry = what changed, why, how verified.
 
 ---
 
+## 2026-07-13 — DONE: integration correct, differentiable, bug-free ✅
+
+Final validation:
+- **Diff tests** (`TestCLMMLDifferentiability`, slow): **3 passed** (610 s) —
+  grad+FD+parity, `grid_info` pass-through parity (1e-9), None-guard,
+  multicolumn hard-error.
+- **Forward regression** (`test_canopy.py -m "not slow"`): **26 passed,
+  3 deselected, 0 failures** (108 s) — no forward-path regression; the old
+  strict-xfail is gone (replaced by the real diff test).
+- Codex review **converged (round 7 clean)**.
+
+Milestones: M1 (parity 1e-14, grad FD 0.003%) ✅ · M2 (SW-grad FD 0.000%,
+Vcmax-grad FD 0.001%) ✅ · M3 (config gate + `grid_info`/`vcmaxpft_jax`/
+`g1_medlyn_jax` threaded through `step_multilayer_land` for multi-step +
+trainable) ✅ · M4 (contract flipped `differentiable=True` gated, xfail→real
+test, docs) ✅.
+
+Two local git repos hold the change (both UNPUSHED — no GitHub creds on this
+host; run `!git push` from a credentialed context):
+- legoESM branch `aya/canopy-verified`: 15 commits ahead of `281f2b0ce`.
+- clm-ml-jax: commit `517e044` (diff-mode diagnostics).
+
+Not-mine / pre-existing (surfaced, not touched): (1) working-tree edit to
+`docs/land/clm_ml_differentiable_integration_scope.md` (one-line repo-path
+reference) — left uncommitted; (2) `test_no_hardcoded_constants` failure in
+`packages/land/legoesm/land/clm_surface_map.py`
+(`_TUNED_PFT_ROOT_DEPTH_MULTILAYER`, PRs #906/#893) — unrelated to this work.
+
+Environment: isolated `.venv_diffwork` (numpy≥2 over the shared `.local`);
+`scratchpad/run.sh` is the runner. Safe to delete `.venv_diffwork/` when done.
+
 ## 2026-07-13 — Codex review CONVERGED ✅ (round 7 clean)
 
 `codex review --base 281f2b0ce`, round 7:
