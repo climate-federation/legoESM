@@ -23,9 +23,15 @@ n_ranks > process_count) + voronoi partition-quality metrics.
 
 M1 measurement contract (scaling-M3d increment-1): the headline number is a
 fused ``lax.scan`` block (``metadata.timed_scan_blocks``; per-step
-dispatch latency probed SEPARATELY), cross-rank MAX-reduced; rows also carry
+dispatch latency probed SEPARATELY), cross-rank MAX-reduced, and it is what
+the aggregator-facing ``steady_median_ms`` carries (the same deliberate
+naming as ``bench_ocean_latlon_spmd_scaling``); the host-synced gate-loop
+median is dispatch+sync LATENCY and is recorded only under
+``step_latency_gate_loop_ms``, never as the headline.  Rows also carry
 ``wet_cell_metrics``, solver-iteration mode + a post-run zero-forcing
-Helmholtz residual probe (implicit_cn only, outside the timed loop), and
+Helmholtz residual probe (implicit_cn only, outside the timed loop; under
+``--halo-refresh none`` one packed exchange precedes the probe so it
+measures a cleanly-assembled system, not rotten halos), and
 ``--halo-refresh`` (default auto => one PACKED full-state halo exchange per
 step at n_ranks > 1 via ``exchange_state_mpas_ocean``).  STAGE CORRECTNESS:
 the ocean step consumes more stencil hops per step than halo_depth between
@@ -105,6 +111,55 @@ def weak_level_for(cells_per_rank: int, n_ranks: int) -> int:
         if ratio < best_ratio:
             best, best_ratio = lv, ratio
     return best
+
+
+def reduce_block_times(all_block_ms, block_steps: int) -> dict:
+    """Cross-rank per-block MAX reduction of fused-scan block times (M1).
+
+    ``all_block_ms``: (n_ranks, n_blocks) — every rank's per-block wall
+    times in ``comm.allgather`` order.  The parallel time of block ``b``
+    is the SLOWEST rank in that block (a per-rank median gathered alone
+    hides an alternating straggler); rank imbalance is the per-block
+    max/median ratio.  Pure NumPy so the reduction is unit-testable
+    without an MPI stack (codex finding 6).
+    """
+    arr = np.asarray(all_block_ms, dtype=np.float64)
+    if arr.ndim != 2:
+        raise ValueError(
+            "reduce_block_times expects (n_ranks, n_blocks), got shape "
+            f"{arr.shape}")
+    if block_steps < 1:
+        raise ValueError(
+            f"reduce_block_times needs block_steps >= 1, got {block_steps}")
+    par = np.max(arr, axis=0)
+    med = np.median(arr, axis=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        imb = np.where(med > 0.0, par / med, np.nan)
+    return {
+        "parallel_block_ms": [round(float(b), 2) for b in par],
+        "rank_imbalance_per_block": [round(float(r), 4) for r in imb],
+        "rank_imbalance": (round(float(np.nanmedian(imb)), 4)
+                           if np.isfinite(imb).any() else float("nan")),
+        "fused_step_ms": round(float(np.median(par)) / block_steps, 4),
+    }
+
+
+def stage_halo_note_for(n_ranks: int, halo_refresh: str):
+    """Row-metadata companion to ``stage_halo_correct``.
+
+    Must describe the ACTUAL refresh selection (codex finding 5): a
+    ``--halo-refresh none`` row suffers ACROSS-STEP halo rot on top of
+    the within-step staleness every multi-rank row has — labeling it
+    "per-step packed refresh" would misdescribe the evidence.
+    """
+    if n_ranks == 1:
+        return None
+    doc = "docs/performance/scaling/mpas_ocean_distributed_stage_audit.md"
+    if halo_refresh == "per_step":
+        return ("per-step packed refresh only; within-step staleness — "
+                "see " + doc)
+    return ("NO refresh: across-step halo rot (halo_refresh=none) on top "
+            "of within-step staleness — see " + doc)
 
 
 def build_global_problem(subdivision: int, nlev: int, seed: int = 0,
@@ -270,9 +325,11 @@ def main() -> int:
                         "(exchange_state_mpas_ocean). auto => per_step at "
                         "n_ranks>1, none single-rank.  'none' reproduces "
                         "the legacy no-refresh rows (halos rot across the "
-                        "window; timing omits exchange cost).  Within-step "
-                        "staleness remains either way — see the stage "
-                        "audit doc.")
+                        "window; timing omits exchange cost; the "
+                        "zero-forcing residual probe still refreshes ONCE "
+                        "before probing so it measures a cleanly-assembled "
+                        "system).  Within-step staleness remains either "
+                        "way — see the stage audit doc.")
     p.add_argument("--block-steps", type=int, default=8,
                    help="Steps per fused lax.scan timing block (M1 "
                         "contract; runs AFTER the gates). 0 disables the "
@@ -577,20 +634,10 @@ def main() -> int:
             probe_steps=args.probe_steps,
             sync_label="ocean_mpas_mpi_bench")
         if comm is not None and n_ranks > 1:
-            _all = np.asarray(comm.allgather(
-                np.asarray(_t["block_ms"], dtype=np.float64)))
-            _par = np.max(_all, axis=0)
-            _med = np.median(_all, axis=0)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                _imb = np.where(_med > 0.0, _par / _med, np.nan)
-            _t["parallel_block_ms"] = [round(float(b), 2) for b in _par]
-            _t["rank_imbalance_per_block"] = [round(float(r), 4)
-                                              for r in _imb]
-            _t["rank_imbalance"] = (
-                round(float(np.nanmedian(_imb)), 4)
-                if np.isfinite(_imb).any() else float("nan"))
-            _t["fused_step_ms"] = round(
-                float(np.median(_par)) / args.block_steps, 4)
+            _t.update(reduce_block_times(
+                comm.allgather(np.asarray(_t["block_ms"],
+                                          dtype=np.float64)),
+                args.block_steps))
         fused = _t
 
     # --- Solver iterations + zero-forcing residual probe (M1) --------------
@@ -625,6 +672,21 @@ def main() -> int:
         from legoesm.ocean.dynamics.barotropic_implicit_mpas import (
             barotropic_implicit_mpas,
         )
+        if n_ranks > 1 and halo_refresh != "per_step":
+            # --halo-refresh none: the final state's edge/cell halos have
+            # been stale for every preceding step, and the implicit
+            # solver's predictor/RHS read u, eta and derived transports
+            # BEFORE its in-loop cell exchange — a residual assembled
+            # from rotten halos is not solver-health evidence.  One
+            # packed refresh here (collective; OUTSIDE every timed loop)
+            # so the probe measures a cleanly-assembled system (codex
+            # finding 2).  Under per_step the last advance() already
+            # ended with this exact exchange, so the probe input is
+            # fresh on every path.
+            from legoesm.parallel.voronoi_mpi import (
+                exchange_state_mpas_ocean,
+            )
+            state = exchange_state_mpas_ocean(state, _layout)
         _probe_out = barotropic_implicit_mpas(
             state, model.mesh, z_coord, config, args.dt,
             return_residual=True)
@@ -638,7 +700,15 @@ def main() -> int:
                            "solve — no solver residual exists to measure")
 
     steady = per_step_ms[args.warmup:]
-    med = float(np.median(steady))
+    gate_loop_med = float(np.median(steady))
+    # M1 headline contract (mirrors bench_ocean_latlon_spmd_scaling): the
+    # aggregator-facing ``steady_median_ms`` carries the FUSED per-step
+    # number (cross-rank MAX-reduced per block); the host-synced gate-loop
+    # median measures dispatch+sync latency and is demoted to the
+    # explicitly-named ``step_latency_gate_loop_ms``.  Honest null when
+    # the fused measurement is disabled (--block-steps 0) — a latency
+    # number must never masquerade as fused throughput (codex finding 1).
+    fused_step_ms = fused.get("fused_step_ms") if fused is not None else None
     rec = dict(
         component="ocean",
         grid="voronoi",
@@ -648,8 +718,10 @@ def main() -> int:
         steps=args.steps, dt=args.dt,
         platform=jax.default_backend(),
         compile_ms=round(per_step_ms[0], 1),
-        steady_median_ms=round(med, 2),
-        steady_min_ms=round(float(np.min(steady)), 2),
+        steady_median_ms=(round(fused_step_ms, 4)
+                          if fused_step_ms is not None else None),
+        step_latency_gate_loop_ms=round(gate_loop_med, 2),
+        step_latency_gate_loop_min_ms=round(float(np.min(steady)), 2),
         per_step_ms=[round(x, 1) for x in per_step_ms],
         cells=int(mesh.nCells) * args.nlev,
         # HORIZONTAL cells/rank — the same unit as --cells-per-rank, so a
@@ -669,10 +741,7 @@ def main() -> int:
         # rows have no partition, hence trivially true.  Never report a
         # false row as a stage-correct scaling claim.
         stage_halo_correct=bool(n_ranks == 1),
-        stage_halo_note=(
-            None if n_ranks == 1 else
-            "per-step packed refresh only; within-step staleness — see "
-            "docs/performance/scaling/mpas_ocean_distributed_stage_audit.md"),
+        stage_halo_note=stage_halo_note_for(n_ranks, halo_refresh),
         fused=fused,
         wet_cell=wet_rec,
         solver_iters=solver_iters,
@@ -718,15 +787,18 @@ def main() -> int:
         with open(args.out, "a") as f:
             f.write(json.dumps(rec) + "\n")
         print(json.dumps(rec))
+        # Foreground the FUSED headline (M1 contract); the gate-loop
+        # median is explicitly labeled as latency, never the headline.
         _fused_txt = (
-            f" fused_step={fused['fused_step_ms']}ms"
-            f" (latency={fused['step_latency_ms']}ms)"
-            if fused is not None else "")
+            f"{fused_step_ms}ms/step"
+            f" (probe_latency={fused['step_latency_ms']}ms)"
+            if fused_step_ms is not None
+            else "n/a (--block-steps 0: fused measurement disabled)")
         print(f"[mpas-ocean np={n_ranks} L{subdivision} "
               f"nCells={mesh.nCells} nlev={args.nlev} "
               f"solver={args.barotropic_solver} halo={halo_refresh}] "
-              f"compile={rec['compile_ms']}ms "
-              f"steady_median={med:.2f}ms/step{_fused_txt}")
+              f"compile={rec['compile_ms']}ms fused={_fused_txt} "
+              f"gate_loop_latency={gate_loop_med:.2f}ms/step")
         if rec["metadata"]["virtual_cpu_devices"]:
             print("[virtual-cpu] forced host-platform CPU devices: this row "
                   "is a communication-overhead / correctness proxy, NOT "

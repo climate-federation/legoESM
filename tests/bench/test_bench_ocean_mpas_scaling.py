@@ -1,9 +1,13 @@
 """Direct tests for the MPAS/Voronoi OCEAN scaling lane (audit item 6).
 
 Covers the pure helpers (weak-level quantization, owned-cell gather
-coverage), the CLI rejections, and a single-process end-to-end main() run
-on the tiny L2 mesh with BOTH gates armed — locking the record schema
-(shared metadata v2 + partition fields) that downstream aggregation reads.
+coverage, cross-rank per-block MAX reduction, stage-halo-note selection),
+the CLI rejections (including the implicit_cn+parity multi-rank refusal,
+exercised EXECUTABLY via a faked 2-rank COMM_WORLD), and a single-process
+end-to-end main() run on the tiny L2 mesh with BOTH gates armed — locking
+the record schema (shared metadata v2 + partition fields + the M1
+headline contract: steady_median_ms carries the fused number) that
+downstream aggregation reads.
 """
 from __future__ import annotations
 
@@ -83,10 +87,83 @@ def test_m1_lane_flags_exist():
     # Unknown solver literals must be rejected by argparse choices.
     import argparse  # noqa: F401  (documents the surface under test)
     assert 'choices=["explicit_substep", "implicit_cn"]' in src
-    # implicit_cn parity at n_ranks>1 is impossible (the serial reference
-    # trips the solver's layout-less multi-rank refusal) — the bench must
-    # refuse the combination loudly, never crash mid-reference.
-    assert "layout-less multi-rank refusal" in src
+
+
+class _FakeMultiRankComm:
+    """Minimal COMM_WORLD stand-in: 2 ranks, no collectives.
+
+    Only Get_rank/Get_size are reachable before the guard under test
+    fires — any other attribute access is an AttributeError, so the test
+    fails loudly if the refusal ever moves after a real collective.
+    """
+
+    def Get_rank(self):
+        return 0
+
+    def Get_size(self):
+        return 2
+
+
+def test_implicit_cn_parity_multirank_refusal_executes(monkeypatch, tmp_path):
+    # Codex finding 6: the tripwire must exercise the executable GUARD,
+    # not prose (a comment kept + guard deleted stayed green before).
+    # Fake a 2-rank COMM_WORLD (the bench does `from mpi4py import MPI`
+    # inside main(), so a sys.modules stub is enough) and assert the
+    # implicit_cn+parity multi-rank combination refuses via SystemExit
+    # BEFORE any model construction or collective.
+    import types
+
+    fake_mpi4py = types.SimpleNamespace(
+        MPI=types.SimpleNamespace(COMM_WORLD=_FakeMultiRankComm()))
+    monkeypatch.setitem(sys.modules, "mpi4py", fake_mpi4py)
+    monkeypatch.setattr(sys, "argv", [
+        "bench", "--steps", "2", "--warmup", "0", "--parity-gate",
+        "--barotropic-solver", "implicit_cn",
+        "--out", str(tmp_path / "never.jsonl")])
+    with pytest.raises(SystemExit, match="implicit_cn"):
+        mod.main()
+    assert not (tmp_path / "never.jsonl").exists()
+
+
+def test_reduce_block_times_max_reduction():
+    # Codex finding 6: unit-test the cross-rank per-block MAX reduction
+    # with fake 2-rank block vectors (no MPI stack needed).  Alternating
+    # straggler: each rank's OWN median is fast (rank0: 15, rank1: 20),
+    # but every block has a slow rank — the per-block MAX must catch it.
+    out = mod.reduce_block_times([[10.0, 20.0], [30.0, 10.0]],
+                                 block_steps=4)
+    assert out["parallel_block_ms"] == [30.0, 20.0]
+    # fused headline = median(parallel per-block) / block_steps.
+    assert out["fused_step_ms"] == pytest.approx(25.0 / 4.0)
+    # Per-block imbalance = max/median: [30/20, 20/15].
+    assert out["rank_imbalance_per_block"] == [
+        pytest.approx(1.5), pytest.approx(20.0 / 15.0, abs=1e-4)]
+    assert out["rank_imbalance"] == pytest.approx(
+        float(np.median([1.5, 20.0 / 15.0])), abs=1e-3)
+
+
+def test_reduce_block_times_rejects_bad_inputs():
+    with pytest.raises(ValueError, match="n_ranks, n_blocks"):
+        mod.reduce_block_times([1.0, 2.0], block_steps=4)   # 1-D
+    with pytest.raises(ValueError, match="block_steps"):
+        mod.reduce_block_times([[1.0], [2.0]], block_steps=0)
+    # Degenerate all-zero blocks: NaN imbalance propagates honestly.
+    out = mod.reduce_block_times([[0.0], [0.0]], block_steps=1)
+    assert np.isnan(out["rank_imbalance"])
+    assert out["fused_step_ms"] == 0.0
+
+
+def test_stage_halo_note_reflects_selection():
+    # Codex finding 5: the note must describe the ACTUAL halo_refresh —
+    # a 'none' row must never claim a per-step refresh happened.
+    assert mod.stage_halo_note_for(1, "none") is None
+    per = mod.stage_halo_note_for(2, "per_step")
+    non = mod.stage_halo_note_for(2, "none")
+    assert "per-step packed refresh" in per
+    assert "per-step packed refresh" not in non
+    assert "across-step halo rot" in non
+    for note in (per, non):
+        assert "mpas_ocean_distributed_stage_audit.md" in note
 
 
 def test_main_rejects_long_parity_window(monkeypatch):
@@ -128,6 +205,14 @@ def test_main_single_rank_writes_gated_record(tmp_path, monkeypatch):
     assert fused["fused_step_ms"] > 0
     assert fused["step_latency_ms"] > 0
     assert fused["rank_imbalance"] == 1.0         # single process
+    # Headline contract (codex finding 1): the aggregator-facing
+    # steady_median_ms carries the FUSED number; the host-synced gate
+    # loop is demoted to explicitly-named latency keys and the legacy
+    # steady_min_ms (gate-loop min under a fused-sounding name) is gone.
+    assert rec["steady_median_ms"] == pytest.approx(fused["fused_step_ms"])
+    assert rec["step_latency_gate_loop_ms"] > 0
+    assert rec["step_latency_gate_loop_min_ms"] > 0
+    assert "steady_min_ms" not in rec
     # Wet-cell metrics: internally consistent (land presence at L2
     # depends on mesh orientation vs land_lat_threshold — not asserted).
     wet = rec["wet_cell"]
@@ -155,8 +240,12 @@ def test_main_single_rank_implicit_cn_residual_probe(tmp_path, monkeypatch):
     assert mod.main() == 0
     rec = json.loads(out.read_text().splitlines()[-1])
     assert rec["barotropic_solver"] == "implicit_cn"
-    # --block-steps 0 disables the fused measurement (honest null).
+    # --block-steps 0 disables the fused measurement (honest null) — and
+    # the headline must go null WITH it, never fall back to the host-
+    # synced gate-loop latency (codex finding 1).
     assert rec["fused"] is None
+    assert rec["steady_median_ms"] is None
+    assert rec["step_latency_gate_loop_ms"] > 0
     # Zero-forcing Helmholtz residual probe: measured, finite, converged
     # to the solver's ballpark on the tiny mesh (health evidence).
     assert rec["zero_forcing_probe_measured"] is True

@@ -77,7 +77,7 @@ refreshes per step; within-step staleness remains).
 | 0 | scatter / initial fill (`scatter_state_mpas_ocean`) | `voronoi_mpi.py:300` | — | initial (slice = fresh) | — | CORRECT; np=2 roundtrip-tested |
 | 1 | baroclinic tendencies (`mpas_ocean_baroclinic_tendencies`) | `ocean_pe_mpas.py:92` (called `ocean_model_mpas.py:401`) | up to 4 (B_h del4 `ocean_pe_mpas.py:585`; K_bih grad→div→grad→div `:846-854`; PV/curl/tangential 1–2; fills 1) | NONE | none on default path; `normalize_freshwater` rank-local mean is REFUSED multi-rank at the source (`ocean_pe_mpas.py:947-968`) | NOT stage-correct: consumes >2 hops with no refresh; owned boundary cells diverge |
 | 2 | tracer forward-Euler + land fill | `ocean_model_mpas.py:406-415` | 1 (`fill_land_cells_mpas`) | NONE | — | eats 1 more hop of stage-1 output |
-| 2a | implicit vertical tracer diffusion + KPP/TKE/conv K-profiles | `ocean_model_mpas.py:432-521` | 0 (column-local; EOS cell-local) | not needed | — | stage-correct given fresh inputs |
+| 2a | implicit vertical tracer diffusion + KPP/TKE/conv K-profiles | `ocean_model_mpas.py:432-521` | ≥1 — KPP and TKE profile entry both call `_reconstruct_mpas_cell_fields` (`mpas_integration.py:214`), whose `reconstruct_cell_velocity` (`mpas_integration.py:246`; KPP consumer `:304`, TKE `:707`) is a horizontal TRiSK/Perot edge→cell stencil on edge `u`; only the vertical solves/EOS are column/cell-local | NONE | — | NOT zero-hop: the shear-driver reconstruction reads edge-`u` halos (stale-able); eats 1 more hop |
 | 2b | GM/Redi + MLE bolus tendencies | `ocean_model_mpas.py:529-553` | 1–2 | NONE | — | further hop consumption |
 | 3 | momentum Euler + implicit vertical viscosity | `ocean_model_mpas.py:560-641` | 1 (`min_cell_to_edge`) | NONE | — | |
 | 3b | forward-backward Coriolis on u' | `ocean_model_mpas.py:59-136` (called `:647`) | 2 (`tangential_velocity_3d` ×2, `edgesOnEdge`) | NONE | — | |
@@ -100,7 +100,8 @@ refreshes per step; within-step staleness remains).
 2. **Stage-level halo refreshes: FAIL (structural).** No stage of the ocean
    step refreshes state halos; the only in-step exchange is the per-field
    cell exchange inside the implicit-PCG matvec. The cumulative hop count of
-   one step (≥10 even without the explicit substep loop; hundreds with it)
+   one step (≥11 even without the explicit substep loop — stage 2a's KPP/TKE
+   cell-velocity reconstruction included; hundreds with it)
    vastly exceeds `halo_depth=2`, so a multi-rank step silently diverges from
    serial near partition boundaries at a rate bounded by field evolution per
    step (slow flows ⇒ small parity error — why the smoke-window parity gate
@@ -117,17 +118,30 @@ refreshes per step; within-step staleness remains).
 
 * Packed full-state ocean halo refresh helper `exchange_state_mpas_ocean`
   (`voronoi_mpi.py`, batched union-neighbor exchange; schema tripwire matching
-  the scatter/gather pair; identity at np=1). Unit-tested single-process;
-  exercised np=2 by the bench lane.
+  the scatter/gather pair; identity at np=1). Unit-tested single-process:
+  np=1 identity PLUS a mocked-exchange sentinel test
+  (`tests/parallel/test_voronoi_mpi_ocean_exchange.py`) asserting all five
+  prognostic fields (u | T, S, eta, w) route through the packed call and land
+  in the right state slots — the np=1 identity path alone cannot see an
+  omitted/mis-wired field. Real multi-rank transport rides the generic
+  batched-halo distributed tests; the np≥2 bench-lane smokes drive this
+  helper on-cluster (not a CI gate).
 * Bench lane (`scripts/bench/bench_ocean_mpas_scaling.py`) extended to the M1
   measurement contract: fused-scan `timed_scan_blocks` timing (cross-rank
-  MAX-reduced), `wet_cell_metrics`, solver-iteration + zero-forcing
+  MAX-reduced via the unit-tested `reduce_block_times`), recorded as the
+  aggregator-facing `steady_median_ms` — the host-synced gate-loop median is
+  demoted to `step_latency_gate_loop_ms` (dispatch+sync latency, never the
+  headline); `wet_cell_metrics`; solver-iteration + zero-forcing
   Helmholtz residual probe (`barotropic_implicit_mpas(..., return_residual=True)`
-  outside the timed loop), `--barotropic-solver` selection, and a per-step
-  packed halo refresh (`--halo-refresh auto|per_step|none`, default auto ⇒
-  per_step at np>1) so multi-rank rows pay representative exchange cost and
-  the step INPUT is fresh each step. Rows are self-describing:
-  `stage_halo_correct=false` until the per-stage refreshes land.
+  outside the timed loop — under `--halo-refresh none` one packed
+  `exchange_state_mpas_ocean` refresh precedes the probe so it measures a
+  cleanly-assembled system, not rotten halos); `--barotropic-solver`
+  selection; and a per-step packed halo refresh
+  (`--halo-refresh auto|per_step|none`, default auto ⇒ per_step at np>1) so
+  multi-rank rows pay representative exchange cost and the step INPUT is
+  fresh each step. Rows are self-describing: `stage_halo_correct=false`
+  until the per-stage refreshes land, and `stage_halo_note` states the
+  ACTUAL refresh mode (per-step refresh vs across-step halo rot for `none`).
 
 ## Deferred (structural, precisely scoped)
 
@@ -137,6 +151,11 @@ milestone, NOT a small fix:
 * stage 1 entry exchange (u,T,S,eta packed — now available as
   `exchange_state_mpas_ocean`), plus `halo_depth ≥ 4` or operator-splitting
   of the del4/K_bih stencils;
+* the per-stage hop budget MUST count stage 2a: the KPP/TKE K-profiles are
+  not column-local — `_reconstruct_mpas_cell_fields` spends 1 horizontal hop
+  (edge-`u` → cell velocity, TRiSK/Perot) before any vertical solve, so the
+  refresh (or wide-halo) plan between the stage-1 entry exchange and the
+  barotropic section covers stages 2+2a+2b+3+3b ≈ 7 hops, not 6;
 * per-substep (or wide-halo, `halo_depth ≥ 2·n_substeps`-style) exchange of
   `(eta, u_bar)` inside `barotropic_substeps_mpas`'s scan — the same
   trade-off the lat-lon wide-halo split-explicit lane measures

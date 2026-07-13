@@ -1,14 +1,18 @@
 """Direct tests for ``voronoi_mpi.exchange_state_mpas_ocean`` (M3d inc-1).
 
-Single-process coverage of the packed MPAS-OCEAN state halo refresh:
-np=1 (empty union-neighbor schedule) is the documented identity path of
-``batched_halo_exchange`` and needs no MPI stack, so the wiring —
-field packing order, static-field pass-through, schema tripwire,
-hand-built-layout schedule rebuild, jit compatibility — is locked here.
-The np=2 exchange semantics ride the existing distributed machinery
-(``tests/distributed/test_voronoi_batched_halo.py`` for the transport;
-``scripts/bench/bench_ocean_mpas_scaling.py --halo-refresh per_step``
-drives this helper multi-rank).
+Single-process coverage of the packed MPAS-OCEAN state halo refresh.
+The np=1 empty-neighbor schedule makes ``batched_halo_exchange`` return
+before packing, so identity tests alone CANNOT detect an omitted or
+mis-wired field (codex finding 4) — the five-field wiring (u edge; T, S,
+eta, w cells, in that order) is therefore locked by a MOCKED exchange
+returning distinct per-field sentinels, plus the np=1 identity,
+static-field pass-through, schema tripwire, hand-built-layout schedule
+rebuild, and jit-compatibility tests.  What this file does NOT cover:
+real multi-rank transport semantics — those ride
+``tests/distributed/test_voronoi_batched_halo.py`` (the generic batched
+transport) and the np>=2 bench-lane smoke runs
+(``scripts/bench/bench_ocean_mpas_scaling.py --halo-refresh per_step``),
+which are cluster jobs, not CI gates.
 """
 
 from __future__ import annotations
@@ -107,3 +111,58 @@ def test_jit_compatible(single_rank_setup):
     out = fn(state)
     np.testing.assert_array_equal(
         np.asarray(out.S.data), np.asarray(state.S.data))
+
+
+def test_mocked_exchange_routes_all_five_fields(single_rank_setup,
+                                                monkeypatch):
+    """Kill the omitted-field blind spot (codex finding 4).
+
+    np=1 pass-through makes every identity test insensitive to the field
+    tuple at the ``batched_halo_exchange`` call site: dropping ``w`` or
+    ``eta`` (or swapping T/S) would still return the unchanged state.
+    Mock the exchange to return a DISTINCT sentinel per slot and assert
+    (a) all five prognostic fields are handed over, in the documented
+    (u | T, S, eta, w) order, by array identity, and (b) each output
+    state slot lands ITS OWN sentinel — an omitted field breaks the
+    tuple arity, a swapped field lands the wrong sentinel.
+    """
+    _mesh, state, layout = single_rank_setup
+    import legoesm.parallel.voronoi_mpi as vm
+
+    calls = []
+
+    def fake_exchange(edge_fields, cell_fields, sched, rank):
+        calls.append((tuple(edge_fields), tuple(cell_fields), sched, rank))
+        edge_out = tuple(f + 1000.0 * (i + 1)
+                         for i, f in enumerate(edge_fields))
+        cell_out = tuple(f + 1000.0 * (len(edge_fields) + j + 1)
+                         for j, f in enumerate(cell_fields))
+        return edge_out, cell_out
+
+    monkeypatch.setattr(vm, "batched_halo_exchange", fake_exchange)
+    out = vm.exchange_state_mpas_ocean(state, layout)
+
+    # (a) exactly one packed call, all five fields, documented order.
+    assert len(calls) == 1
+    edge_in, cell_in, sched, rank = calls[0]
+    assert len(edge_in) == 1 and len(cell_in) == 4
+    assert edge_in[0] is state.u.data
+    assert cell_in[0] is state.T.data
+    assert cell_in[1] is state.S.data
+    assert cell_in[2] is state.eta.data
+    assert cell_in[3] is state.w.data
+    assert sched is layout.batched_comm
+    assert rank == layout.rank
+
+    # (b) every state slot received its own sentinel (u:+1000, T:+2000,
+    # S:+3000, eta:+4000, w:+5000).
+    for name, offset in (("u", 1000.0), ("T", 2000.0), ("S", 3000.0),
+                         ("eta", 4000.0), ("w", 5000.0)):
+        np.testing.assert_allclose(
+            np.asarray(getattr(out, name).data),
+            np.asarray(getattr(state, name).data) + offset,
+            err_msg=f"{name} did not receive its own exchange sentinel")
+    # Static fields still pass through by reference, never exchanged.
+    assert out.H_bathy is state.H_bathy
+    assert out.land_mask is state.land_mask
+    assert out.rho_ref_z is state.rho_ref_z
