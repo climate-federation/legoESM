@@ -188,8 +188,13 @@ def compute_diffusion(grid, dc: DycoreConfig) -> DiffusionCoeffs:
 # their own implicit-stable hyperdiff (and zero the FV one); the plane dycore
 # zeroes hyperdiff; lat-lon clamps A_h itself — none belong here, so the guard
 # never cries wolf about a coefficient the selected solver discards.
+# NB: cube SW (``cdgrid_shallow_water``) is intentionally ABSENT — it now
+# builds FV3EdgeShallowWaterModel with a validated FIXED preset
+# (williamson_cli_calibration) that owns its own hyperdiff/div_damp, so the
+# generic ``diff.hyperdiff`` guard would cry wolf about a coefficient the
+# model discards (codex M2 review).  The cube-SW factory branch rejects
+# non-default diffusion scales directly instead.
 _EXPLICIT_HYPERDIFF_SOLVERS = frozenset({
-    "cdgrid_shallow_water",
     "cdgrid_primitive_equations",
     "cdgrid_compressible_euler",
     "mpas_primitive_equations",
@@ -314,7 +319,31 @@ def create_atmosphere_dycore(
             FV3EdgeShallowWaterModel, CDGridShallowWaterConfig,
             williamson_cli_calibration,
         )
-        cfg = williamson_cli_calibration(gc.resolution)._replace(
+        # The cube SW core ships a VALIDATED fixed damping preset
+        # (williamson_cli_calibration).  The generic driver diffusion knobs
+        # do NOT apply here: FV3EdgeShallowWaterModel has no A_h consumer, and
+        # hyperdiff/div_damp are owned by the preset.  Reject non-default
+        # scales LOUDLY rather than silently ignoring them (codex M2 review).
+        for _knob, _val in (("hyperdiff_scale", dc.hyperdiff_scale),
+                            ("a_h_scale", dc.a_h_scale),
+                            ("div_damp_scale", dc.div_damp_scale)):
+            if _val != 1.0:
+                raise ValueError(
+                    f"cube shallow-water uses the validated fixed preset "
+                    f"`williamson_cli_calibration`; dycore.{_knob}={_val!r} "
+                    f"(non-default) would be silently ignored.  Remove it, or "
+                    f"tune the preset coefficients directly.")
+        # Calibrate on the ACTUAL grid resolution (grid.n), not the config
+        # field, and refuse a grid/config mismatch (codex M2 review): a direct
+        # caller passing a C48 grid with gc.resolution=24 would otherwise get
+        # C24 damping on a C48 grid.
+        n = int(grid.n)
+        if n != gc.resolution:
+            raise ValueError(
+                f"cube SW grid resolution (grid.n={n}) does not match config "
+                f"resolution (gc.resolution={gc.resolution}); refusing to "
+                f"build a model with mismatched damping calibration.")
+        cfg = williamson_cli_calibration(n)._replace(
             use_conservation_fixer=dc.conservation_fixer,
             fix_mass=dc.fix_mass,
             # "auto" -> this dycore's own default; explicit names verbatim.

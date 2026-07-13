@@ -1044,6 +1044,20 @@ class ModelDriver:
         from legoesm.diagnostics.column_integrals import column_water_vapor
 
         cfg = self.config
+        # Shallow-water is NOT a runnable ModelDriver equation set: _init_state
+        # builds a hydrostatic primitive-equation state (held_suarez_init /
+        # isothermal_rest_state_spectral), never a shallow-water state.  A SW
+        # dycore would be handed a PE state and crash cryptically at the first
+        # step.  Fail loudly with the supported route (codex M2 review) — the
+        # factory still builds the correct FV3EdgeShallowWaterModel for
+        # component-registry / build-time use.
+        if cfg.dycore.model_type == "shallow_water":
+            raise NotImplementedError(
+                "shallow-water is not runnable via ModelDriver: _init_state "
+                "builds a hydrostatic primitive-equation state, not a "
+                "shallow-water state.  Use "
+                "`scripts/matrix/run_atmosphere_test_matrix.py --only sw` "
+                "(it constructs the SW model + initial state directly).")
         N = cfg.grid.resolution
         NLEV = cfg.grid.nlev
 
