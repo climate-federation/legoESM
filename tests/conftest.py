@@ -11,6 +11,45 @@ from legoesm.core.field import Field
 from legoesm.core.state import ShallowWaterState
 
 
+def _neutralize_broken_mps_gelu_patch() -> None:
+    """Undo ``jax-mps``'s broken monkeypatch of ``jax.nn.gelu`` / ``dot_product_attention``.
+
+    The installed ``jax-mps`` plugin (Apple Metal) monkeypatches ``jax.nn.gelu``
+    and ``jax.nn.dot_product_attention`` to route through fused ``mps.*``
+    primitives — but those primitives ship NO vmap batching rule, so ANY
+    ``vmap``-ed network (every ML-emulator: microphysics, GWD, SFNO) dies with
+    ``NotImplementedError: Batching rule for 'mps.gelu' not implemented`` even
+    under ``JAX_PLATFORMS=cpu`` (Metal is unused/broken here — see the
+    metal-backend memory).  The fused kernel is worthless on CPU, so restore the
+    stock JAX implementations the plugin saved.  No-op when the plugin is absent
+    (e.g. Linux CI) or has not patched.
+    """
+    try:
+        from jax_plugins.mps import ops as _mps_ops
+    except Exception:
+        return
+    # The patch is applied LAZILY on first backend init; force it so the plugin
+    # has saved the originals (``_gelu_original`` / ``_sdpa_original``) before we
+    # read them back.
+    jnp.zeros(())
+    import jax.nn as _jnn
+    from jax._src.nn import functions as _nnf
+
+    original_gelu = getattr(_mps_ops, "_gelu_original", None)
+    if original_gelu is not None and getattr(_jnn.gelu, "_mps_patched", False):
+        _jnn.gelu = original_gelu
+        _nnf.gelu = original_gelu
+    original_sdpa = getattr(_mps_ops, "_sdpa_original", None)
+    if original_sdpa is not None and getattr(
+        _jnn.dot_product_attention, "_mps_patched", False
+    ):
+        _jnn.dot_product_attention = original_sdpa
+        _nnf.dot_product_attention = original_sdpa
+
+
+_neutralize_broken_mps_gelu_patch()
+
+
 RESULTS_SUBDIRS = (
     "atmosphere/shallow_water",
     "atmosphere/hydrostatic",
