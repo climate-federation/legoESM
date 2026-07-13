@@ -8,6 +8,22 @@ Convention: newest entries on top. Each entry = what changed, why, how verified.
 
 ---
 
+## 2026-07-13 — Durable test + contract flip; ratchet status
+
+- Replaced the strict-xfail `test_grad_lhflx_wrt_T_lowest` with a real
+  differentiable-mode test (warm-start → forward/diff parity → grad + FD),
+  marked `slow`; added a `differentiable=True ∧ ncol>1 → ValueError` test. Fixed
+  the obsolete "requires JAX-native rewrite" comment.
+- `__physics_contract__["differentiable"] = True` (gated on the config).
+- **Ratchets:** `test_no_inline_physics_coeffs` / `test_no_saturation_reimpl`
+  pass; my `clm_ml_interface.py` + `config.py` edits are clean (kept `# coeff-ok`
+  escapes, `alpha=min(dt/(10·86400),1)` computed once — no literal-count growth).
+  `test_no_hardcoded_constants` has ONE failure in
+  `packages/land/legoesm/land/clm_surface_map.py`
+  (`_TUNED_PFT_ROOT_DEPTH_MULTILAYER`) — **pre-existing, unrelated** (file
+  untouched here; introduced by PRs #906/#893). Left for the owning feature to
+  annotate/baseline; flagged so it is not mistaken for diff-work fallout.
+
 ## 2026-07-13 — No regression + M2 trainable-param wiring
 
 - **Regression gate GREEN:** `tests/land/unit/test_canopy.py -m "not slow"` →
