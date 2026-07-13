@@ -594,3 +594,16 @@ class CLMMLCanopyConfig(NamedTuple):
     # canopy layers × sunlit/shaded leaves, sharing the same fluorescence core
     # as the two-leaf / big-leaf paths.  Static config leaf, never traced.
     sif: SIFConfig | None = None
+
+    # Differentiable-mode gate (static Python bool, resolved at trace time —
+    # never a traced leaf).  ``False`` (default) keeps PRODUCTION forward-only:
+    # the CLM-ML driver runs its Python for-loop / host-syncing checks and NO
+    # ``jax.grad`` tape is built (fast, no reverse-mode memory).  ``True`` opts
+    # a TRAINING run into the JAX-native diff path: the interface passes a
+    # ``GridInfo`` (``grid=``) and sets ``MLclm_varctl.DIFFERENTIABLE_MODE`` so
+    # ``MLCanopyFluxes`` runs ``lax.scan`` + ``jax.checkpoint`` and the forcing→
+    # flux map is fully on the ``jax.grad`` tape.  Diff mode is single-column
+    # (``ncol == 1``) — the diff path reads one concrete ``(ncan, ntop, nbot)``
+    # from the warm-start template; multi-column is vmapped separately.  See
+    # ``docs/land/clm_ml_differentiable_integration_scope.md``.
+    differentiable: bool = False

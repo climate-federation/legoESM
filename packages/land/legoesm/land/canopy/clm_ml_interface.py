@@ -407,9 +407,9 @@ def _compute_virtual_lon_deg(
 
 
 def _estimate_beam_fraction(
-    sw_down: np.ndarray,
+    sw_down: jnp.ndarray,
     cos_zen: np.ndarray,
-) -> np.ndarray:
+) -> jnp.ndarray:
     """Estimate direct-beam fraction from clearness index (Erbs et al. 1982).
 
     Clearness index  kt = SW_down / (S0 * cos_zen)  where S0 = 1361 W/m².
@@ -422,23 +422,29 @@ def _estimate_beam_fraction(
 
     Direct fraction: f_dir = 1 - Id/I, clamped to [0, 1].
     Returns f_dir per column.
+
+    JAX-native: ``sw_down`` is kept as a traced ``jnp`` array so that
+    ``d(f_dir)/d(sw_down)`` (via the clearness index ``kt``) stays on the
+    ``jax.grad`` tape.  ``cos_zen`` is solar geometry (a non-differentiated
+    constant); passing a NumPy array is fine — ``jnp`` ops upcast it.
     """
     S0 = constants.S_0  # solar constant [W/m²]
-    cos_zen_clamped = np.maximum(cos_zen, 0.01)  # coeff-ok: minimum cos_zen floor to avoid division by zero in clearness index
+    sw = jnp.asarray(sw_down, dtype=jnp.float64)
+    cos_zen_clamped = jnp.maximum(jnp.asarray(cos_zen, dtype=jnp.float64), 0.01)  # coeff-ok: minimum cos_zen floor to avoid division by zero in clearness index
     sw_toa = S0 * cos_zen_clamped
-    kt = np.where(sw_down > 1.0, np.minimum(sw_down / sw_toa, 1.0), 0.0)
+    kt = jnp.where(sw > 1.0, jnp.minimum(sw / sw_toa, 1.0), 0.0)
 
     # Erbs et al. (1982, Solar Energy 28:293-302) diffuse-fraction polynomial
     id_over_i_low = 1.0 - 0.09 * kt  # coeff-ok: Erbs et al. (1982, Solar Energy 28:293) low-kt regime
     id_over_i_mid = (0.9511 - 0.1604 * kt + 4.388 * kt**2  # coeff-ok: Erbs et al. (1982) mid-kt polynomial
                      - 16.638 * kt**3 + 12.336 * kt**4)     # coeff-ok: Erbs et al. (1982) mid-kt polynomial
-    id_over_i_high = np.full_like(kt, 0.165)  # coeff-ok: Erbs et al. (1982) high-kt (clear-sky) limit
-    id_over_i = np.where(kt <= 0.22, id_over_i_low,  # coeff-ok: Erbs et al. (1982) kt regime threshold
-                np.where(kt <= 0.80, id_over_i_mid, id_over_i_high))  # coeff-ok: Erbs et al. (1982) kt regime threshold
-    f_dir = np.clip(1.0 - id_over_i, 0.0, 1.0)
+    id_over_i_high = jnp.full_like(kt, 0.165)  # coeff-ok: Erbs et al. (1982) high-kt (clear-sky) limit
+    id_over_i = jnp.where(kt <= 0.22, id_over_i_low,  # coeff-ok: Erbs et al. (1982) kt regime threshold
+                jnp.where(kt <= 0.80, id_over_i_mid, id_over_i_high))  # coeff-ok: Erbs et al. (1982) kt regime threshold
+    f_dir = jnp.clip(1.0 - id_over_i, 0.0, 1.0)
 
     # At night (sw_down < 1 W/m²) force beam fraction to zero
-    return np.where(sw_down < 1.0, 0.0, f_dir).astype(np.float64)
+    return jnp.where(sw < 1.0, 0.0, f_dir)
 
 
 def _sw_partition(
@@ -476,26 +482,30 @@ def _sw_partition(
         Direct beam SW in VIS and NIR bands [W/m²].
     swskyd_vis, swskyd_nir : jnp.ndarray
         Diffuse SW in VIS and NIR bands [W/m²].
+
+    JAX-native: ``sw_down`` is kept traced end-to-end so ``d(swsky*)/d(sw_down)``
+    flows on the ``jax.grad`` tape (needed for differentiability w.r.t. the SW
+    forcing).  ``f_vis``/``f_dir``/``f_dir_fallback`` are static Python floats, so
+    the ``if f_dir < 0.0`` branch is resolved at trace time (not a traced select).
     """
-    sw_np = np.asarray(sw_down, dtype=np.float64)
+    sw = jnp.asarray(sw_down, dtype=jnp.float64)
 
     if f_dir < 0.0:
         # Physics-based estimate using clearness index
         if cos_zen is None:
             # Fallback: assume overcast (conservative, no zenith info)
-            f_dir_arr = np.full_like(sw_np, f_dir_fallback)
+            f_dir_arr = jnp.full_like(sw, f_dir_fallback)
         else:
-            f_dir_arr = _estimate_beam_fraction(sw_np, np.asarray(cos_zen, dtype=np.float64))
+            f_dir_arr = _estimate_beam_fraction(sw, cos_zen)
     else:
-        f_dir_arr = np.full_like(sw_np, float(f_dir))
+        f_dir_arr = jnp.full_like(sw, float(f_dir))
 
-    vis = jnp.array(f_vis * sw_np)
-    nir = jnp.array((1.0 - f_vis) * sw_np)
-    f_dir_jax = jnp.array(f_dir_arr)
-    swskyb_vis = f_dir_jax * vis
-    swskyb_nir = f_dir_jax * nir
-    swskyd_vis = (1.0 - f_dir_jax) * vis
-    swskyd_nir = (1.0 - f_dir_jax) * nir
+    vis = f_vis * sw
+    nir = (1.0 - f_vis) * sw
+    swskyb_vis = f_dir_arr * vis
+    swskyb_nir = f_dir_arr * nir
+    swskyd_vis = (1.0 - f_dir_arr) * vis
+    swskyd_nir = (1.0 - f_dir_arr) * nir
     return swskyb_vis, swskyb_nir, swskyd_vis, swskyd_nir
 
 
@@ -652,7 +662,9 @@ def _build_stubs(
                 from legoesm.land.soil_hydraulics import hydraulic_conductivity
                 K = hydraulic_conductivity(psi_soil[i, j - 1], theta_soil[i, j - 1],
                                            soil_hydraulics)
-                hk_l_col = hk_l_col.at[p, j].set(float(K) * 1000.0)  # m/s → mm/s
+                # Keep K traced (no float()) so d(hk)/d(psi,theta) stays on the
+                # jax.grad tape; numerically identical to the prior float() cast.
+                hk_l_col = hk_l_col.at[p, j].set(K * 1000.0)  # m/s → mm/s
             else:
                 hk_l_col = hk_l_col.at[p, j].set(float(canopy_config.hk_default_mm_s))
 
@@ -681,18 +693,21 @@ def _build_stubs(
     t_soisno_col = jnp.zeros((np_, nlevgrnd + 1), dtype=jnp.float64)
     for i in range(ncol):
         c = i + 1
+        # No float() casts below: soil temperature is kept traced so
+        # d(flux)/d(T_soil) / d(T_soil_top) flows on the jax.grad tape.  Values
+        # are identical to the prior float() path in the eager (production) mode.
         if T_soil_all is not None and T_soil_all.shape[1] >= 1:
             n_fill = min(T_soil_all.shape[1], nlevsoi)
             for j in range(1, n_fill + 1):
-                t_soisno_col = t_soisno_col.at[c, j].set(float(T_soil_all[i, j - 1]))
+                t_soisno_col = t_soisno_col.at[c, j].set(T_soil_all[i, j - 1])
             # Layers n_fill+1..nlevsoi: repeat deepest legoESM layer
-            deepest_T = float(T_soil_all[i, n_fill - 1])
+            deepest_T = T_soil_all[i, n_fill - 1]
             for j in range(n_fill + 1, nlevgrnd + 1):
                 t_soisno_col = t_soisno_col.at[c, j].set(deepest_T)
         else:
             # Fallback: fill all layers with surface soil temperature
             for j in range(1, nlevgrnd + 1):
-                t_soisno_col = t_soisno_col.at[c, j].set(float(T_soil_top[i]))
+                t_soisno_col = t_soisno_col.at[c, j].set(T_soil_top[i])
 
     # ---- canopystate ----
     htop_patch = jnp.zeros(np_, dtype=jnp.float64)
@@ -1164,6 +1179,25 @@ def compute_clm_ml_canopy_fluxes(
 
     ncol = T_soil_top.shape[0]
 
+    # ---- Differentiable-mode gate (static, resolved here — never traced) ----
+    # ``differentiable=True`` opts a training run into the JAX-native diff path
+    # (``grid=`` + ``lax.scan``).  It requires (a) a WARM canopy_state whose
+    # ``mlcanopy`` already carries the vertical structure (ncan/ntop/nbot) — the
+    # first cold-start step always runs forward-only to build it — and (b) a
+    # single column: the diff path reads one concrete ``(ncan, ntop, nbot)``.
+    # A multi-column diff request is a hard error (vmap over columns instead of
+    # silently degrading to the forward path), matching the dispatch-hardening
+    # rule.
+    _want_diff = bool(getattr(canopy_config, "differentiable", False))
+    if _want_diff and ncol != 1:
+        raise ValueError(
+            "CLMMLCanopyConfig.differentiable=True is single-column only "
+            f"(ncol == 1); got ncol={ncol}. vmap the interface over columns for "
+            "multi-column differentiation (M3)."
+        )
+    _warm_started = canopy_state is not None and canopy_state.mlcanopy is not None
+    _diff_mode = _want_diff and _warm_started  # ncol == 1 guaranteed above
+
     # ---- Build soil grid data ----
     grid = make_soil_grid(land_config.soil_grid)
     dz_soil = np.array(grid.dz, dtype=np.float64)     # (n_layers,)
@@ -1230,15 +1264,27 @@ def compute_clm_ml_canopy_fluxes(
     # update it here:
     #   T_a10_new = (1 - alpha) * T_a10_old + alpha * T_lowest
     #   alpha = dt / (10 * 86400)  (10-day e-folding, CLM default)
-    T_lowest_np = np.array(forcing.T_lowest, dtype=np.float64)
     alpha = min(dt / (10.0 * 86400.0), 1.0)
-    if canopy_state is not None and canopy_state.t_a10_arr is not None:
-        t_a10_prev = np.array(canopy_state.t_a10_arr, dtype=np.float64)
-        t_a10_now = ((1.0 - alpha) * t_a10_prev + alpha * T_lowest_np).astype(np.float64)
+    if _diff_mode:
+        # Traced running mean: t_a10 is the Vcmax temperature-acclimation state,
+        # a real function of T_lowest, so keep it on the jax.grad tape (a host
+        # np.array(forcing.T_lowest) would raise on a tracer — scope item A).
+        T_low = jnp.asarray(forcing.T_lowest, dtype=jnp.float64)
+        if canopy_state is not None and canopy_state.t_a10_arr is not None:
+            t_a10_prev = jnp.asarray(canopy_state.t_a10_arr, dtype=jnp.float64)
+            t_a10_now = (1.0 - alpha) * t_a10_prev + alpha * T_low
+        else:
+            t_a10_now = T_low
+        t_a10_prior = t_a10_now
     else:
-        # Cold start: initialize to instantaneous T (will converge in ~10 days)
-        t_a10_now = T_lowest_np.copy()
-    t_a10_prior = jnp.array(t_a10_now)
+        T_lowest_np = np.array(forcing.T_lowest, dtype=np.float64)
+        if canopy_state is not None and canopy_state.t_a10_arr is not None:
+            t_a10_prev = np.array(canopy_state.t_a10_arr, dtype=np.float64)
+            t_a10_now = ((1.0 - alpha) * t_a10_prev + alpha * T_lowest_np).astype(np.float64)
+        else:
+            # Cold start: initialize to instantaneous T (will converge in ~10 days)
+            t_a10_now = T_lowest_np.copy()
+        t_a10_prior = jnp.array(t_a10_now)
 
     # ---- Build stub CLM instances ----
     soil_hyd = land_config.hydraulics
@@ -1272,6 +1318,37 @@ def compute_clm_ml_canopy_fluxes(
     # dtime_ml: sub-step length. Must divide dt evenly.
     _ml_ctl.dtime_ml = dt / max(1, canopy_config.num_ml_steps)
     _ml_ctl.mlcan_to_clm = 0  # we read output directly from mlcanopy_type
+    # DIFFERENTIABLE_MODE is a static intent flag (currently vestigial upstream —
+    # every physics module switches on the ``grid`` argument, not this global —
+    # but set it to match the mode so any future read is consistent).
+    _ml_ctl.DIFFERENTIABLE_MODE = bool(_diff_mode)
+
+    # ---- Build GridInfo for the differentiable path ----
+    # Structural ints must be concrete Python ints extracted BEFORE jax.grad
+    # tracing (int() on a tracer raises ConcretizationTypeError).  The warm-start
+    # template ``mlcanopy`` is a captured constant under jax.grad, so these reads
+    # are concrete.  Mirrors make_clm_ml_forward (MLCanopyFluxesMod.py:2098).
+    if _diff_mode:
+        from multilayer_canopy.MLclm_varctl import GridInfo
+        _p = int(filter_exposedvegp[0])
+        _ncan_p = int(mlcanopy.ncan_canopy[_p])
+        # dpai_profile is (np_, nlev+…); a valid ncan is 1..that width.  An
+        # uninitialised ncan (0 or spval sentinel) fails this and reports clearly.
+        _ncan_max = int(mlcanopy.dpai_profile.shape[1])
+        if not (1 <= _ncan_p <= _ncan_max):
+            raise ValueError(
+                "CLM-ML diff mode needs a warm-started canopy_state whose vertical "
+                f"structure is initialised; got ncan={_ncan_p} (valid 1..{_ncan_max}). "
+                "Run one forward (differentiable=False or cold-start) step first."
+            )
+        grid = GridInfo(
+            p=_p,
+            ncan=_ncan_p,
+            ntop=int(mlcanopy.ntop_canopy[_p]),
+            nbot=int(mlcanopy.nbot_canopy[_p]),
+        )
+    else:
+        grid = None
 
     # ---- Call MLCanopyFluxes ----
     mlcanopy_new = MLCanopyFluxes(
@@ -1291,6 +1368,7 @@ def compute_clm_ml_canopy_fluxes(
         mlcanopy_inst=mlcanopy,
         wateratm2lndbulk_inst=stubs["wateratm2lndbulk"],
         waterdiagnosticbulk_inst=stubs["waterdiagnosticbulk"],
+        grid=grid,
         _o2ref_py=float(canopy_config.o2ref),
     )
 

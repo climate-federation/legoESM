@@ -8,6 +8,57 @@ Convention: newest entries on top. Each entry = what changed, why, how verified.
 
 ---
 
+## 2026-07-13 — Diff-mode activation (upstream + interface + config)
+
+**Upstream `clm-ml-jax` (editable install; separate git repo):**
+`src/multilayer_canopy/MLCanopyFluxesMod.py`
+- `_CanopyFluxesDiagnostics` gains `grid=None`. In diff mode it reads `ncan/ntop`
+  from `grid` (concrete pre-traced ints) instead of `int(mlcanopy_inst.*)`, and
+  the four host-syncing `abs(err) … endrun` energy-balance checks are skipped
+  (they concretise a traced scalar). Dropped the `float()` cast on `tref_forcing`
+  in the `flux_profile_type==1` path (LatVap already accepts a jnp scalar). Flux
+  arithmetic identical in both modes.
+- `MLCanopyFluxes`: removed the diff-mode **early return** that skipped
+  diagnostics; diagnostics now runs in BOTH modes (with `grid=`), so the
+  canopy-integrated outputs `shflx/lhflx/etflx/gpp/rnet/swveg/albcan/taveg/
+  stflx_air/stflx_veg` — exactly what `_extract_surface_fluxes` reads — are
+  populated on the grad tape. The sun/shade merge (already pure-JAX) also runs in
+  both modes, keeping the prognostic `tleaf/lwp` warm-start carry correct.
+- `DIFFERENTIABLE_MODE` is **vestigial** (imported in `MLCanopyTurbulenceMod` but
+  never read; every module switches on `grid`). Left in place; the interface
+  still sets it for intent/forward-compat. So the scope's "must set
+  DIFFERENTIABLE_MODE=True" is now really "pass `grid=`".
+
+**legoESM `clm_ml_interface.py`:**
+- `_estimate_beam_fraction` + `_sw_partition` rewritten **jnp-native** (were
+  `np.asarray`), so `d(swsky*)/d(sw_down)` (incl. the clearness-index `f_dir`
+  dependence) stays on the tape. `# coeff-ok:` Erbs escapes preserved. The
+  standalone `_estimate_beam_fraction` unit tests still pass numpy in and
+  `float()` out — values unchanged.
+- `_build_stubs`: dropped `float()` on the traced soil inputs (`t_soisno` from
+  `T_soil`/`T_soil_top`, `hk_l` from `K`), so `d(flux)/d(T_soil,psi,theta)` flows.
+- `compute_clm_ml_canopy_fluxes`: added the static `_diff_mode` gate
+  (`config.differentiable ∧ warm-started ∧ ncol==1`); a multi-column diff request
+  is a hard `ValueError` (no silent degrade). Cold start always runs forward to
+  build the vertical structure. Builds `GridInfo(p,ncan,ntop,nbot)` from the warm
+  template (concrete ints) and passes `grid=` to `MLCanopyFluxes`; sets
+  `MLclm_varctl.DIFFERENTIABLE_MODE`. The `t_a10` acclimation running mean is now
+  traced jnp in diff mode (was `np.array(forcing.T_lowest)` → would raise on a
+  tracer). Geometry (`cos_zenith`/lat/lon/doy) stays a non-differentiated host
+  constant, by design.
+
+**Config `CLMMLCanopyConfig`:** added `differentiable: bool = False` static gate
+(bool → not `__param_spec__`-eligible; no spec entry needed). Production stays
+forward-only; training opts in.
+
+**Known deferred (M3):** structural fields (`htop`/LAI/SAI/root) stay host
+constants; multi-column diff is via `vmap` (not yet wired into
+`multilayer_land.step_*`). Geometry is intentionally non-differentiated.
+
+**Push:** this host has no GitHub credentials (no `gh`, no token, no credential
+helper) → `git push` fails auth. Commits accumulate locally; push with `!git push`
+from a credentialed context.
+
 ## 2026-07-13 — Session start: environment repair + baseline
 
 **Environment (this Linux/burg host, not the report's Mac `.venv`):**
