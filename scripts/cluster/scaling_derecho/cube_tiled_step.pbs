@@ -144,14 +144,25 @@ inter_lane_gap() {
     fi
 }
 
+# Lane failures (incl. LANE_TIMEOUT kills, rc=124) must NOT abort the job
+# under set -e — the remaining experiment arms still carry signal (job
+# 6721989 lost its swapped single-shot arm this way). Record and continue;
+# exit nonzero at the end so the job still reports failure.
+rc_all=0
+run_gated() {  # $1 = gate value, $2 = lane fn name
+    if [ "$1" = "1" ]; then
+        "$2" || { rc=$?; echo "== $2 FAILED rc=${rc} $(date -Is) =="; rc_all=$rc; }
+    fi
+}
 if [ "${LANE_ORDER}" = "loop_first" ]; then
-    if [ "${RUN_CLOSED_LOOP}" = "1" ]; then closed_loop_lane; fi
+    run_gated "${RUN_CLOSED_LOOP}" closed_loop_lane
     inter_lane_gap
-    if [ "${RUN_SINGLE_SHOT}" = "1" ]; then single_shot_lane; fi
+    run_gated "${RUN_SINGLE_SHOT}" single_shot_lane
 else
-    if [ "${RUN_SINGLE_SHOT}" = "1" ]; then single_shot_lane; fi
+    run_gated "${RUN_SINGLE_SHOT}" single_shot_lane
     inter_lane_gap
-    if [ "${RUN_CLOSED_LOOP}" = "1" ]; then closed_loop_lane; fi
+    run_gated "${RUN_CLOSED_LOOP}" closed_loop_lane
 fi
 
-echo "done: ${OUT}"
+echo "done: ${OUT} (rc_all=${rc_all})"
+exit "${rc_all}"
