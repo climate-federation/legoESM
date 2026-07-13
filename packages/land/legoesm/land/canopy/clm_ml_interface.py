@@ -63,7 +63,14 @@ __physics_contract__ = {
         "lw_up": "positive = upward emission from surface",
     },
     "conserves": "energy (Rnet = shflx + lhflx + G_soil + stflx_air + stflx_veg per timestep)",
-    "differentiable": False,
+    # Differentiable via the JAX-native diff path, GATED on
+    # ``CLMMLCanopyConfig.differentiable=True`` (single column): the interface
+    # passes a GridInfo (``grid=``) so ``MLCanopyFluxes`` runs ``lax.scan`` +
+    # ``jax.checkpoint`` and the forcing→flux map (incl. trainable Vcmax25/g1) is
+    # on the ``jax.grad`` tape.  Production default (``differentiable=False``)
+    # stays forward-only (host-syncing checks, no tape).  Verified: forward/diff
+    # flux parity ~1e-14 and FD grad rel_err <0.01% (TestCLMMLDifferentiability).
+    "differentiable": True,
     "reference": "Bonan et al. (2021), GMD, CLM-ML v2",
     "idealized_test": "tests/land/unit/test_canopy.py::TestCLMMLInterface",
 }

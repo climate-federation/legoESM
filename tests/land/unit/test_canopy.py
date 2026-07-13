@@ -241,87 +241,116 @@ class TestCLMMLInterface(unittest.TestCase):
 
 
 class TestCLMMLDifferentiability(unittest.TestCase):
-    """Test that jax.grad can differentiate through the canopy interface."""
+    """jax.grad flows through the CLM-ML canopy interface in differentiable mode.
 
-    @pytest.mark.timeout(120)
-    @pytest.mark.xfail(
-        reason=(
-            "CLM-ML-JAX uses float() on traced arrays and Python control flow "
-            "throughout its Fortran port; these are incompatible with jax.grad "
-            "tracing. Full end-to-end differentiability requires a JAX-native "
-            "rewrite of the inner loops (tracked as future work)."
-        ),
-        strict=True,
-    )
-    def test_grad_lhflx_wrt_T_lowest(self):
-        """Expected to fail: CLM-ML uses Python/NumPy control flow and is not JAX-differentiable.
+    The CLM-ML-JAX repo exposes a JAX-native differentiable path selected by a
+    per-call ``GridInfo`` (``grid=``).  legoESM activates it via
+    ``CLMMLCanopyConfig(differentiable=True)`` (single column).  These tests
+    verify ``jax.grad`` is finite, non-zero, matches finite difference, and that
+    the diff path reproduces the forward-path fluxes exactly.  They are ``slow``
+    (the first grad trace compiles the whole multilayer-canopy scan, ~minutes).
+    """
 
-        This test documents that ``jax.grad`` raises or produces wrong results
-        through the CLM-ML path, because the Fortran port uses ``float()`` on
-        traced arrays and Python control flow throughout its inner loops —
-        incompatible with JAX tracing.
+    # ncol == 1: the diff path reads one concrete (ncan, ntop, nbot).
+    _NCOL1 = 1
 
-        If this test starts passing, CLM-ML-JAX has become JAX-compatible —
-        remove the xfail and add a proper gradient finite-difference check.
-        """
+    def _run(self, config, T_lowest, state, T_soil, psi_soil, theta_soil):
         from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
-        from legoesm.land.canopy.config import CLMMLCanopyConfig
         from legoesm.land.config import MultiLayerLandConfig
-
-        config = CLMMLCanopyConfig()
-        land_config = MultiLayerLandConfig(surface_scheme=config)
-        forcing = _make_forcing(NCOL)
-        T_soil, psi_soil, theta_soil = _make_soil_arrays(NCOL)
-
-        # First call to warm-start (avoids cold-start in grad path)
-        _, state0 = compute_clm_ml_canopy_fluxes(
+        forcing = _make_forcing(self._NCOL1)._replace(T_lowest=T_lowest)
+        return compute_clm_ml_canopy_fluxes(
             T_soil_top=T_soil[:, 0],
             forcing=forcing,
             canopy_config=config,
-            land_config=land_config,
+            land_config=MultiLayerLandConfig(surface_scheme=config),
             land_params=None,
-            w_frac_rz=jnp.full(NCOL, 0.6),
-            wind_speed=jnp.full(NCOL, 4.5),
-            canopy_state=None,
+            w_frac_rz=jnp.full(self._NCOL1, 0.6),
+            wind_speed=jnp.full(self._NCOL1, 4.5),
+            canopy_state=state,
             dt=1800.0,
             T_soil=T_soil,
             psi_soil=psi_soil,
             theta_soil=theta_soil,
-            lat=jnp.zeros(NCOL),
+            lat=jnp.zeros(self._NCOL1),
             doy=180.0,
         )
 
-        def _loss(T_lowest):
-            f2 = forcing._replace(T_lowest=T_lowest)
-            T_surf = jnp.full(NCOL, T_lowest[0])
-            T_s2 = jnp.stack([T_surf] * T_soil.shape[1], axis=-1)
-            out, _ = compute_clm_ml_canopy_fluxes(
-                T_soil_top=T_surf,
-                forcing=f2,
+    @pytest.mark.slow
+    def test_multicolumn_diff_is_hard_error(self):
+        """differentiable=True with ncol>1 raises (no silent degrade to forward)."""
+        from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
+        from legoesm.land.canopy.config import CLMMLCanopyConfig
+        from legoesm.land.config import MultiLayerLandConfig
+        config = CLMMLCanopyConfig(differentiable=True)
+        T_soil, psi_soil, theta_soil = _make_soil_arrays(2)
+        with self.assertRaises(ValueError):
+            compute_clm_ml_canopy_fluxes(
+                T_soil_top=T_soil[:, 0], forcing=_make_forcing(2),
                 canopy_config=config,
-                land_config=land_config,
-                land_params=None,
-                w_frac_rz=jnp.full(NCOL, 0.6),
-                wind_speed=jnp.full(NCOL, 4.5),
-                canopy_state=state0,
-                dt=1800.0,
-                T_soil=T_s2,
-                psi_soil=psi_soil,
-                theta_soil=theta_soil,
-                lat=jnp.zeros(NCOL),
-                doy=180.0,
+                land_config=MultiLayerLandConfig(surface_scheme=config),
+                land_params=None, w_frac_rz=jnp.full(2, 0.6),
+                wind_speed=jnp.full(2, 4.5), canopy_state=None, dt=1800.0,
+                T_soil=T_soil, psi_soil=psi_soil, theta_soil=theta_soil,
+                lat=jnp.zeros(2), doy=180.0,
             )
+
+    @pytest.mark.slow
+    def test_grad_lhflx_wrt_T_lowest(self):
+        """jax.grad(sum lhflx) w.r.t. T_lowest is finite, non-zero, FD-consistent,
+        and the diff path matches the forward path to floating point.
+
+        Replaces the historical strict-xfail: the CLM-ML-JAX diff mode
+        (``grid=`` + ``lax.scan``) is JAX-native, so the old "requires a
+        JAX-native rewrite" claim is obsolete.
+        """
+        from legoesm.land.canopy.config import CLMMLCanopyConfig
+
+        cfg_diff = CLMMLCanopyConfig(differentiable=True)
+        cfg_fwd = CLMMLCanopyConfig(differentiable=False)
+        n = self._NCOL1
+        # Soil state held FIXED (not derived from T_lowest) so T_lowest flows only
+        # through the atmospheric forcing — a clean analytic-vs-FD comparison.
+        T_soil = jnp.full((n, 8), 290.0)
+        psi_soil = jnp.full((n, 8), -0.5)
+        theta_soil = jnp.full((n, 8), 0.25)
+        T0 = jnp.full(n, 295.0)
+
+        # Warm-up cold call builds the vertical structure (forward, single step).
+        _, state0 = self._run(cfg_diff, T0, None, T_soil, psi_soil, theta_soil)
+        self.assertIsNotNone(state0.mlcanopy)
+
+        # Forward/diff parity from the same warm state.
+        out_diff, _ = self._run(cfg_diff, T0, state0, T_soil, psi_soil, theta_soil)
+        out_fwd, _ = self._run(cfg_fwd, T0, state0, T_soil, psi_soil, theta_soil)
+        for name in ("shflx", "lhflx", "G_soil", "sw_net", "gpp", "T_surface"):
+            a = float(getattr(out_diff, name)[0])
+            b = float(getattr(out_fwd, name)[0])
+            self.assertTrue(
+                abs(a - b) <= 1e-6 + 1e-6 * abs(b),
+                f"diff/forward parity failed for {name}: {a} vs {b}",
+            )
+
+        # Gradient: finite, non-zero.
+        def _loss(T_lowest):
+            out, _ = self._run(cfg_diff, T_lowest, state0, T_soil, psi_soil, theta_soil)
             return jnp.sum(out.lhflx)
 
-        # Should not raise — gradient may be zero through Python side effects
-        try:
-            grad_fn = jax.grad(_loss)
-            g = grad_fn(jnp.full(NCOL, 295.0))
-            # g must be finite
-            self.assertTrue(bool(jnp.all(jnp.isfinite(g))),
-                            f"Gradient contains non-finite values: {g}")
-        except Exception as exc:  # noqa: BLE001
-            self.fail(f"jax.grad raised unexpectedly: {exc}")
+        g = jax.grad(_loss)(T0)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(g))), f"grad non-finite: {g}")
+        self.assertGreater(float(jnp.max(jnp.abs(g))), 0.0,
+                           "grad is all-zero — forcing disconnected from lhflx")
+
+        # Central finite-difference check (loose tol for the non-smooth physics).
+        eps = 1e-2
+        fp = float(_loss(T0 + eps))
+        fm = float(_loss(T0 - eps))
+        g_fd = (fp - fm) / (2.0 * eps)
+        g_an = float(g[0])
+        rel = abs(g_an - g_fd) / (abs(g_fd) + 1e-12)
+        self.assertLess(
+            rel, 0.10,
+            f"FD gradient mismatch: analytic={g_an:.6e} fd={g_fd:.6e} rel={rel:.3%}",
+        )
 
 
 class TestCLMMLIntegration(unittest.TestCase):
