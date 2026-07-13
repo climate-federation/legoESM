@@ -53,6 +53,7 @@ from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     compute_visbeck_kappa_gm,
     dm95_taper,
     dm95_taper_scalar,
+    gm_resolution_scaled_kappa,
     validate_adjoint_stabilization,
     validate_slope_limit,
     vertical_flux_divergence,
@@ -1713,6 +1714,24 @@ def gm_redi_tracer_tendency_latlon(
         )
     else:
         kappa_GM = cfg.kappa_GM
+
+    # Hallberg (2013) resolution taper of the GM coefficient (default off =>
+    # byte-identical). Static Python gate on the config bool (feature-gating
+    # exception; no traced branching). Scales whatever the closure produced
+    # (override / Treguier / Visbeck / constant); the Redi diffusivity
+    # (kappa_Redi_eff below) is intentionally left unscaled -- GM-only.
+    # BUDGET COUPLING: when a prognostic EKE/GEOMETRIC closure supplies the
+    # override, the model step scales the GM-derived EKE production by the
+    # SAME f_res (gm_resolution_factor -- one definition), so the eddy-energy
+    # budget sees the conversion this scaled kappa actually performs (codex
+    # MED-3 r2; see the resolution_function note in config.py).
+    if getattr(cfg, "resolution_function", False):
+        if f_coriolis is None:
+            f_coriolis = jnp.broadcast_to(grid.f, mask.shape)
+        kappa_GM = gm_resolution_scaled_kappa(
+            kappa_GM, f_coriolis, jnp.sqrt(grid.area),
+            cfg.resfn_gamma, cfg.resfn_cbcl_ms,
+        )
 
     # Redi isopycnal diffusivity. K_iso = K_gm (prognostic) when the override is
     # supplied (Veros enable_eke_isopycnal_diffusion -> the step passes

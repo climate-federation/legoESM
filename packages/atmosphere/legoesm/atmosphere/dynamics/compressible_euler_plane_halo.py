@@ -44,8 +44,11 @@ Smagorinsky LES + vertical-θ diffusion (R4/R5)
 Higher-order horizontal advection
 ---------------------------------
 * ``config.horizontal_advection_scheme == "weno5"`` switches theta /
-  u / v / w / tracer horizontal advection to the 5th-order WENO-Z
-  stencil. Requires ``layout.halo >= 3`` (6-point WENO5 reconstruction
+  u / v / w horizontal advection to the 5th-order WENO-Z stencil. The
+  positive-definite TRACERS are instead kept on the monotone van_leer
+  limiter (WENO5 is NOT positivity-preserving — see the POSITIVITY GUARD
+  in the slow-tendency), mirroring the serial dycore.
+  Requires ``layout.halo >= 3`` (6-point WENO5 reconstruction
   reaches ±3 cells on each axis). Single-rank build with
   ``make_plane_pencil_layout(..., halo=3)`` is bit-identical to the
   serial ``_weno5_advection_x/y`` (tests in
@@ -80,6 +83,7 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
 from legoesm.atmosphere.dynamics.compressible_euler_plane import (
     full_level_centred_d_dz, moisture_buoyancy_w_half,
     safe_sqrt_strain, sgs_brunt_vaisala_sq,
+    vertical_advection_van_leer_plane,
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.core.state import (
@@ -211,8 +215,12 @@ def _compute_smagorinsky_K_m_plane_halo(
     ) / dz_full
     S33_center = dw_dz_center
 
-    du_dz_int = full_level_centred_d_dz(u_int, height_coord)
-    dv_dz_int = full_level_centred_d_dz(v_int, height_coord)
+    # Sign convention (mirrors the serial kernel): z positive UP, level index
+    # TOP→DOWN, so full_level_centred_d_dz returns −∂/∂z_physical. Negate to
+    # the physical sign — S13/S23 mix these with the already-physical ∂w/∂x,
+    # ∂w/∂y, so the sign does not square out of |S|².
+    du_dz_int = -full_level_centred_d_dz(u_int, height_coord)
+    dv_dz_int = -full_level_centred_d_dz(v_int, height_coord)
 
     # ∂w/∂x at x-face (i, j) needs w_full(i-1, j); ∂w/∂y at y-face needs
     # w_full(i, j-1). Reuse the padded w to slice both shifts.
@@ -230,14 +238,14 @@ def _compute_smagorinsky_K_m_plane_halo(
     # — pull from +1-in-x shifted positions.
     w_full_xp1 = w_full_pad[h:-h, h + 1 : (-h + 1) if h > 1 else None, :]
     u_xp1_int = u_xp1                                   # already sliced
-    du_dz_xp1 = full_level_centred_d_dz(u_xp1_int, height_coord)
+    du_dz_xp1 = -full_level_centred_d_dz(u_xp1_int, height_coord)  # +∂u/∂z_phys
     dw_dx_xface_xp1 = (w_full_xp1 - w_full_int) / grid.dx
     S13_xface_xp1 = 0.5 * (du_dz_xp1 + dw_dx_xface_xp1)
     S13_sq_center = 0.5 * (S13_xface ** 2 + S13_xface_xp1 ** 2)
 
     w_full_yp1 = w_full_pad[h + 1 : (-h + 1) if h > 1 else None, h:-h, :]
     v_yp1_int = v_yp1                                   # already sliced
-    dv_dz_yp1 = full_level_centred_d_dz(v_yp1_int, height_coord)
+    dv_dz_yp1 = -full_level_centred_d_dz(v_yp1_int, height_coord)  # +∂v/∂z_phys
     dw_dy_yface_yp1 = (w_full_yp1 - w_full_int) / grid.dy
     S23_yface_yp1 = 0.5 * (dv_dz_yp1 + dw_dy_yface_yp1)
     S23_sq_center = 0.5 * (S23_yface ** 2 + S23_yface_yp1 ** 2)
@@ -570,6 +578,38 @@ def plane_compressible_euler_slow_tendencies_halo(
             f"wiring in compressible_euler_plane_halo.py. Add the "
             f"adv_x / adv_y branch alongside upwind1 / van_leer / weno5."
         )
+    # POSITIVITY GUARD (codex CRM-dycore review): mirror the serial dycore —
+    # positive-definite TRACERS use the monotone van_leer limiter under weno5
+    # (θ′ below keeps weno5). van_leer_*_halo accepts halo>=2 and, given
+    # weno5's halo=3 wrap-padded inputs, picks the SAME neighbours as the
+    # serial van_leer ⇒ serial==MPI stays bit-identical. Non-weno5 schemes are
+    # already monotone (van_leer/upwind1) so tadv_* == adv_*.
+    if scheme == "weno5":
+        tadv_x = lambda f_pad, u_pad_, dx_, h_: (
+            oh.van_leer_advection_x_halo(f_pad, u_pad_, dx_, h_)
+        )
+        tadv_y = lambda f_pad, v_pad_, dy_, h_: (
+            oh.van_leer_advection_y_halo(f_pad, v_pad_, dy_, h_)
+        )
+    else:
+        tadv_x, tadv_y = adv_x, adv_y
+    # VERTICAL tracer scheme (codex CRM-dycore review): mirror the serial
+    # dispatch so vertical_tracer_advection="van_leer" is honored on the MPI
+    # path too — previously the halo tracer leg was hardcoded to centered,
+    # silently diverging from serial (van_leer is the RCE runner default).
+    # Vertical advection is column-local (no halo), so the serial van_leer
+    # kernel applies bit-identically to the interior tracer q_int.
+    _vert_tracer_scheme = getattr(
+        config, "vertical_tracer_advection", "centered")
+    if _vert_tracer_scheme == "van_leer":
+        _vertical_tracer_adv = vertical_advection_van_leer_plane
+    elif _vert_tracer_scheme == "centered":
+        _vertical_tracer_adv = _vertical_advection_plane
+    else:
+        raise ValueError(
+            f"Unknown vertical_tracer_advection: {_vert_tracer_scheme!r}. "
+            f"Expected 'centered' or 'van_leer'."
+        )
     dtheta_p_dt = (
         adv_x(theta_total_pad, u_center_pad, grid.dx, h)
         + adv_y(theta_total_pad, v_center_pad, grid.dy, h)
@@ -788,10 +828,11 @@ def plane_compressible_euler_slow_tendencies_halo(
         tracers_pad = tracers_flat_pad.reshape(ny_p, nx_p, nlev, n_tr)
 
         def _tracer_tend_one(q_pad, q_int):
+            # tadv_* = van_leer under weno5 (positivity guard); == adv_* else.
             return (
-                adv_x(q_pad, u_center_pad, grid.dx, h)
-                + adv_y(q_pad, v_center_pad, grid.dy, h)
-                + _vertical_advection_plane(q_int, w, height_coord, J)
+                tadv_x(q_pad, u_center_pad, grid.dx, h)
+                + tadv_y(q_pad, v_center_pad, grid.dy, h)
+                + _vertical_tracer_adv(q_int, w, height_coord, J)
             )
         dtracers_dt = jax.vmap(
             _tracer_tend_one, in_axes=(-1, -1), out_axes=-1,

@@ -347,6 +347,31 @@ class TestFallbackTransport:
 # Polar filter
 # ==============================================================================
 
+def _polar_perturbed_state(grid):
+    """Williamson 2 + an UNBALANCED polar perturbation.
+
+    * v: grid-scale (Nyquist zonal wavenumber) noise on the v-face rows
+      just inside each pole — exactly the modes the polar zonal CFL
+      forbids at the relaxed (equatorial-CFL) dt.
+    * u: a uniform (k=0) zonal wind on the polar u rows.  k=0 passes any
+      Fourier mask, and it strengthens the (zeta+f)*u_at_v coupling that
+      feeds the high-k v noise back into dv/dt (Williamson 2 alone has
+      u ~ u0*cos(lat) ~ 0 near the poles, which hides an unfiltered dv).
+
+    The balanced-W2 case used by the original polar-filter test has
+    dv ~ 0 everywhere, which is exactly why the missing dv filtering
+    went unnoticed.
+    """
+    state = williamson_test2_cgrid(grid)
+    n_lon = grid.n_lon
+    pert = 5.0 * jnp.where(jnp.arange(n_lon) % 2 == 0, 1.0, -1.0)
+    v = state.v.at[1, :].add(pert).at[2, :].add(pert)
+    v = v.at[-2, :].add(pert).at[-3, :].add(pert)
+    u = state.u.at[1, :].add(20.0).at[2, :].add(20.0)
+    u = u.at[-2, :].add(20.0).at[-3, :].add(20.0)
+    return state._replace(v=v, u=u)
+
+
 class TestPolarFilter:
 
     def test_polar_filter_stable_at_larger_dt(self, grid):
@@ -363,6 +388,83 @@ class TestPolarFilter:
             state = model.step(state, dt, target_mass=target_mass)
 
         assert jnp.all(jnp.isfinite(state.h))
+
+    def test_polar_filter_builds_v_face_mask(self, grid):
+        """Filter ON builds BOTH masks (cell rows for dh/du, v-face rows
+        for dv); filter OFF builds neither."""
+        dt = 300.0
+        cfg_on = CGridLatLonShallowWaterConfig(use_polar_filter=True)
+        model_on = CGridLatLonShallowWaterModel(grid, cfg_on, dt=dt)
+        n_freq = grid.n_lon // 2 + 1
+        assert model_on._polar_mask is not None
+        assert model_on._polar_mask.shape == (grid.n_lat, n_freq)
+        assert model_on._polar_mask_v is not None
+        assert model_on._polar_mask_v.shape == (grid.n_lat + 1, n_freq)
+        # The v-face mask must actually truncate at the polar rows.
+        assert float(jnp.sum(model_on._polar_mask_v[1] == 0.0)) > 0
+
+        model_off = CGridLatLonShallowWaterModel(
+            grid, CGridLatLonShallowWaterConfig(use_polar_filter=False), dt=dt)
+        assert model_off._polar_mask is None
+        assert model_off._polar_mask_v is None
+
+    def test_polar_filter_damps_v_like_u(self, grid):
+        """The per-step v increment must contain NO energy in the zonal
+        modes the v-face mask forbids at the polar rows — dv is filtered
+        exactly like du/dh.
+
+        Non-vacuous: before the dv filtering fix (dh/du filtered, dv
+        not), this same case leaves ~0.16 of spectral amplitude in the
+        forbidden band (measured by re-running with an all-pass v mask);
+        with the fix it is 0 to float noise.
+        """
+        dt = 300.0
+        config = CGridLatLonShallowWaterConfig(
+            fix_mass=True, use_polar_filter=True,
+            polar_filter_cutoff_deg=60.0, polar_filter_max_wave_speed=300.0,
+        )
+        model = CGridLatLonShallowWaterModel(grid, config, dt=dt)
+        state = _polar_perturbed_state(grid)
+        target_mass = model.compute_mass(state)
+        new = model.step(state, dt, target_mass=target_mass)
+
+        rows = (1, 2, -3, -2)
+        # v increment: forbidden-band energy per the v-face mask.
+        spec_v = jnp.abs(jnp.fft.rfft(new.v - state.v, axis=-1))
+        mask_v = model._polar_mask_v
+        e_v = sum(
+            float(jnp.sum(spec_v[r] * (mask_v[r] == 0.0))) for r in rows
+        )
+        assert e_v < 1e-8, (
+            f"dv increment leaks {e_v:.3e} spectral amplitude into the "
+            f"polar-forbidden band — v is not being polar-filtered"
+        )
+        # u increment (periodic interior columns): same property with the
+        # cell-row mask — v is damped LIKE u, not differently.
+        spec_u = jnp.abs(jnp.fft.rfft((new.u - state.u)[:, :-1], axis=-1))
+        mask_u = model._polar_mask
+        e_u = sum(
+            float(jnp.sum(spec_u[r] * (mask_u[r] == 0.0))) for r in (1, 2)
+        )
+        assert e_u < 1e-8
+
+    def test_polar_filter_unbalanced_perturbation_stable(self, grid):
+        """6 h at dt=300 (far above the ~80 s pole CFL) from the UNBALANCED
+        polar state stays finite and bounded with the filter on."""
+        dt = 300.0
+        config = CGridLatLonShallowWaterConfig(
+            fix_mass=True, use_polar_filter=True,
+            polar_filter_cutoff_deg=60.0, polar_filter_max_wave_speed=300.0,
+        )
+        model = CGridLatLonShallowWaterModel(grid, config, dt=dt)
+        state = _polar_perturbed_state(grid)
+        target_mass = model.compute_mass(state)
+        for _ in range(int(6 * 3600 / dt)):
+            state = model.step(state, dt, target_mass=target_mass)
+        assert jnp.all(jnp.isfinite(state.h))
+        assert jnp.all(jnp.isfinite(state.u))
+        assert jnp.all(jnp.isfinite(state.v))
+        assert float(jnp.max(jnp.abs(state.v))) < 100.0
 
 
 # ==============================================================================

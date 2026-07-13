@@ -55,7 +55,10 @@ def test_gate_symbols_and_flags_exist():
         assert flag in Path(_BENCH).read_text()
 
 
-@pytest.mark.timeout(600)
+# Budget: the smoke compiles the serial reference, the SPMD step, the fused
+# scan AND (increment-2) the post-run residual-probe solve — ~9.5 min x64 on
+# a shared 4-core CPU allocation (job 8914967); 570 s timed out there.
+@pytest.mark.timeout(1300)
 def test_single_process_two_virtual_devices_with_gates(tmp_path):
     out = tmp_path / "ocean_spmd.jsonl"
     env = dict(os.environ)
@@ -71,7 +74,7 @@ def test_single_process_two_virtual_devices_with_gates(tmp_path):
             "--parity-gate", "--check-conservation", "--cons-rtol", "1e-6",
             "--out", str(out),
         ],
-        env=env, capture_output=True, text=True, timeout=570,
+        env=env, capture_output=True, text=True, timeout=1200,
     )
     assert proc.returncode == 0, (
         f"rc={proc.returncode}\nstdout:\n{proc.stdout[-3000:]}\n"
@@ -81,6 +84,51 @@ def test_single_process_two_virtual_devices_with_gates(tmp_path):
     assert rec["component"] == "ocean"
     assert rec["n_devices"] == 2
     assert "parity" in proc.stdout and "MISMATCH" not in proc.stdout
+
+    # --- increment-2 fields (M1 audit items 4/6/8/9) present + HONEST ---
+    # item 6: default implicit_cn at nd=2 runs the fixed-iteration PCG.
+    # The canonical solver_residual is an honest NULL (the timed solve's
+    # residual is never captured); the standalone zero-slow-forcing probe
+    # must have MEASURED a converged residual under its own name (codex
+    # batch4: the probe solves a different RHS from the timed step).
+    assert rec["solver_iters"] >= 1
+    assert rec["solver_iters_mode"].startswith("fixed_pcg")
+    assert rec["solver_residual"] is None
+    assert rec["residual_reason"]
+    assert rec["zero_forcing_probe_measured"] is True
+    assert rec["zero_forcing_probe_residual"] is not None
+    assert rec["zero_forcing_probe_residual"] < 1e-6
+    assert rec["metadata"]["solver_residual"] is None
+    assert (rec["metadata"]["extra"]["zero_forcing_probe_measured"]
+            is True)
+    # item 4: bytes arithmetic consistent; fused scan never gathers; the
+    # partial (barotropic-only) census is flagged machine-readably; the
+    # split-explicit substep estimator must NOT be published on an
+    # implicit-CN row (codex batch4).
+    assert rec["full_state_gathers_per_step"] == 0
+    assert rec["halo_messages_per_step"] > 0
+    assert (rec["halo_bytes_per_step"]
+            == rec["halo_messages_per_step"] * rec["halo_bytes_per_message"])
+    assert rec["halo_bytes_is_lower_bound"] is True
+    assert rec["metadata"]["extra"]["barotropic_halo_messages"] is None
+    # item 8: nd=2 without --single-dev-fused-ms AND with the placeholder
+    # (uncalibrated) fabric -> the bound must be NULL + named-incomplete
+    # + uncalibrated, never fabricated.
+    assert rec["t_bound_ms"] is None
+    assert rec["measured_over_bound"] is None
+    assert rec["bound_calibrated"] is False
+    assert "single_device_fused_step_ms" in rec["bound_incomplete_reason"]
+    assert any("latency_us" in r for r in rec["bound_incomplete_reason"])
+    # item 9: IC-agnostic invariants (the default latlon rest state is
+    # flat-bottom but NOT all-wet — the polar land-cap rows are masked, so
+    # wet_fraction < 1 here; measured 0.875 on 16 lat rows = 2 cap rows).
+    assert 0 < rec["wet_cell_levels"] <= rec["cells"]
+    assert rec["wet_cell_levels"] == round(rec["wet_fraction"] * rec["cells"])
+    assert (rec["wet_cell_levels_per_device_min"]
+            <= rec["wet_cell_levels_per_device_max"])
+    # The loud non-informative note fires IFF wet == total.
+    assert (("NON-INFORMATIVE" in proc.stdout)
+            == bool(rec["wet_equals_total"]))
 
 
 def test_parity_gate_refuses_long_windows(tmp_path):

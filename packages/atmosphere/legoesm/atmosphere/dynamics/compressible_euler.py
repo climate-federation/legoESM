@@ -570,7 +570,7 @@ def _theta_vert_advection_van_leer_kernel(
     """Monotone (van-Leer TVD) vertical advection tendency ``-(w/J) ∂θ/∂z``.
 
     Layout-agnostic ([..., nlev]) counterpart of the plane's
-    ``_vertical_advection_van_leer_plane`` (``J[..., None]`` broadcast so the
+    ``vertical_advection_van_leer_plane`` (``J[..., None]`` broadcast so the
     shared acoustic column kernels can call it). Returns the tendency to ADD
     (same sign + smooth-limit as the centred update it replaces — van-Leer
     reduces to the centred scheme for a smooth field with uniform ``w``).
@@ -1017,8 +1017,15 @@ def semi_implicit_acoustic_column_kernel(
         w_new = w_new.at[..., 1:-1].set(w_filt)
 
     # --- Backward: update rho' using continuity ---
+    # Sign convention: z positive UP, level index TOP→DOWN, so
+    # (rho_w[k] − rho_w[k+1]) / dz[k] below is the physical +∂(ρw)/∂z and
+    # ρ' ← ρ' − dt·∂(ρw)/∂z is the flux-divergence sink form of continuity.
+    # Mass MUST be transported by the SAME post-filter w that θ-advection
+    # uses below and that is carried to the next substep — w_new is the
+    # single source of truth after the SI filter. At nu=0 this is
+    # bit-identical: w_new[..., 1:-1] == w_inner_new (pad-then-slice).
     rho_half = 0.5 * (rho_total[..., :-1] + rho_total[..., 1:])
-    rho_w = jnp.pad(rho_half * w_inner_new, (*pad_axes_w, (1, 1)))
+    rho_w = jnp.pad(rho_half * w_new[..., 1:-1], (*pad_axes_w, (1, 1)))
     vert_div = (rho_w[..., :-1] - rho_w[..., 1:]) / dz
     vert_div = vert_div / J[..., None]
     rho_p_new = rho_p_c - dt_s * vert_div

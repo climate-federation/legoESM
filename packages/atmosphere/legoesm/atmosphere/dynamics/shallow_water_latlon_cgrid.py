@@ -409,15 +409,29 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
     ):
         self.grid = grid
         self.config = config or CGridLatLonShallowWaterConfig()
-        # Precompute polar filter mask (cached, not traced)
+        # Precompute polar filter masks (cached, not traced): one for
+        # cell-centered rows (dh, du after lon-trim) and one for v-face
+        # rows (dv).  The v-face mask uses ``grid.cos_lat_v`` / the
+        # half-cell-offset lat-interface coordinates so the wavenumber
+        # cutoff matches the actual v-face CFL — mirrors the PE dycore
+        # (``primitive_eq_latlon_cgrid``), which fixed exactly this:
+        # filtering only dh/du leaves unfiltered high-k dv modes at the
+        # pole-adjacent v rows to violate CFL at the relaxed dt.
         if self.config.use_polar_filter:
             self._polar_mask = compute_polar_filter_mask(
                 grid, dt=dt,
                 max_wave_speed=self.config.polar_filter_max_wave_speed,
                 cutoff_lat_deg=self.config.polar_filter_cutoff_deg,
             )
+            self._polar_mask_v = compute_polar_filter_mask(
+                grid, dt=dt,
+                max_wave_speed=self.config.polar_filter_max_wave_speed,
+                cutoff_lat_deg=self.config.polar_filter_cutoff_deg,
+                is_v_face=True,
+            )
         else:
             self._polar_mask = None
+            self._polar_mask_v = None
 
         # Iter-4: anchored mass target (fp64, lazy on first step()).
         # Mirrors ``CGridLatLonPrimitiveEquationModel._target_mass``.
@@ -511,6 +525,9 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
                 dh = fourier_filter(dh, self.grid, self._polar_mask)
                 du_interior = fourier_filter(du[:, :-1], self.grid, self._polar_mask)
                 du = jnp.concatenate([du_interior, du_interior[:, 0:1]], axis=1)
+                # dv on lat-interface (v-face) rows, with its own mask —
+                # mirrors the PE dycore's polar_mask_v treatment.
+                dv = fourier_filter(dv, self.grid, self._polar_mask_v)
             return CGridLatLonShallowWaterState(
                 h=dh, u=du, v=dv,
                 h_s=jnp.zeros_like(s.h_s),

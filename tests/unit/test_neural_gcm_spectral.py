@@ -911,3 +911,193 @@ class TestSemiImplicitTrainingCore:
 
         g = jax.grad(loss)(jnp.zeros_like(state0.T_hat.data))
         assert bool(jnp.all(jnp.isfinite(g))), "SI rollout gradient not finite"
+
+
+class TestMidEpochResume:
+    """#942: a job killed mid-epoch resumes from the last completed CHUNK
+    (not the top of the epoch) and reproduces the uninterrupted run
+    bit-for-bit.
+
+    This is the structural fix for the Derecho walltime cliff: a T106
+    epoch (~13 h) exceeds the 12 h queue cap, so a per-epoch-only
+    checkpoint makes zero progress forever.  The proof below drives the
+    REAL ``_train_spectral_loop`` chunked path with a tiny SFNO + a
+    synthetic in-memory chunk loader (no GCS/network), simulates a kill
+    right after chunk 1 of epoch 0, resumes, and asserts the final
+    weights are byte-identical to an uninterrupted run — which can only
+    hold if BOTH the model weights and the full optimizer state are
+    restored and the chunk sequence is deterministic.
+    """
+
+    def _cfg(self, ckpt_dir):
+        from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
+        from legoesm.training.losses import LossConfig
+        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        return NeuralGCMSpectralConfig(
+            n_max=N_MAX, n_levels=NLEV, dt=1800.0,
+            pe_config=SpectralPEConfig(time_integrator="ssp_rk3"),
+            lr=1e-4, warmup_steps=0, optimizer="adamw",
+            rollout_curriculum=((1, 2),),   # 1h lead x 2 epochs
+            loss_config=LossConfig(
+                multi_step_hours=(1,), multi_step_weights=(1.0,)),
+            log_every=1, checkpoint_dir=str(ckpt_dir),
+        )
+
+    def _make_loader(self, n_chunks=3):
+        """A deterministic chunk loader with DISTINCT data per chunk index.
+
+        Data is keyed by the chunk INDEX (not a call counter), so a resume
+        that skips the first chunks still reads byte-identical data for the
+        chunks it does load — exactly like the real ``_make_chunk_loader``
+        partition of ``config.windows``.  Records the order of yielded
+        chunk indices so the test can prove the skip.
+        """
+        from legoesm.training.neural_gcm_spectral import carry_to_spectral_state
+        chunks = []
+        for c in range(n_chunks):
+            carry = _make_gaussian_carry(
+                T_val=280.0 + 4.0 * c, q_v_val=0.004 + 0.001 * c)
+            state = carry_to_spectral_state(carry, _GRID)
+            chunks.append(([state], [(carry,)]))  # 1 sample; lead-1 target tuple
+        yielded = []
+
+        def _loader(start_chunk=0):
+            for gi in range(n_chunks):
+                if gi < start_chunk:
+                    continue
+                yielded.append(gi)
+                ics, tgts = chunks[gi]
+                yield ics, tgts, None
+
+        _loader.n_chunks = n_chunks
+        _loader.yielded = yielded
+        return _loader
+
+    def _run(self, model, cfg, loader, resume_from_dir):
+        from legoesm.training.neural_gcm_spectral import (
+            _train_spectral_loop, make_sfno_spectral_physics)
+        return _train_spectral_loop(
+            model, make_sfno_spectral_physics, _GRID, _SIGMA,
+            None, None, cfg,
+            start_epoch=0, chunk_loader=loader,
+            n_samples_total=loader.n_chunks,
+            resume_from_dir=resume_from_dir,
+        )
+
+    def test_resume_midepoch_matches_uninterrupted_bitwise(
+            self, tmp_path, monkeypatch):
+        import legoesm.training.neural_gcm_spectral as mod
+
+        # --- (A) uninterrupted reference: 2 epochs x 3 chunks ---------------
+        dir_a = tmp_path / "A"
+        model_a, _ = self._run(
+            _make_small_sfno(), self._cfg(dir_a),
+            self._make_loader(3), resume_from_dir=dir_a)
+
+        # The run must actually have moved the weights off their init,
+        # else "bit-identical" would be vacuously true.
+        init_leaves = jax.tree_util.tree_leaves(
+            eqx.filter(_make_small_sfno(), eqx.is_array))
+        a_leaves = jax.tree_util.tree_leaves(eqx.filter(model_a, eqx.is_array))
+        assert any(
+            not jnp.array_equal(i, a) for i, a in zip(init_leaves, a_leaves)
+        ), "reference run did not update the weights"
+
+        # --- (B) killed run: die right after chunk 1 of epoch 0 ------------
+        dir_b = tmp_path / "B"
+        real_save = mod._save_midepoch_checkpoint
+        counter = {"n": 0}
+
+        class _Kill(Exception):
+            pass
+
+        def _save_then_kill(ckpt_dir, model, opt_state, epoch, next_chunk):
+            real_save(ckpt_dir, model, opt_state, epoch, next_chunk)
+            counter["n"] += 1
+            if counter["n"] == 2:   # after chunk idx 1 -> saved (epoch0, chunk2)
+                raise _Kill()
+
+        monkeypatch.setattr(mod, "_save_midepoch_checkpoint", _save_then_kill)
+        with pytest.raises(_Kill):
+            self._run(_make_small_sfno(), self._cfg(dir_b),
+                      self._make_loader(3), resume_from_dir=dir_b)
+        monkeypatch.undo()   # run C uses the real, unpatched save
+
+        # The atomic checkpoint survived the kill (written before the raise).
+        assert (dir_b / mod.MIDEPOCH_CHECKPOINT_NAME).exists()
+
+        # --- (C) resume from B's checkpoint dir ----------------------------
+        loader_c = self._make_loader(3)
+        model_c, _ = self._run(
+            _make_small_sfno(), self._cfg(dir_b),
+            loader_c, resume_from_dir=dir_b)
+
+        # Resumed at chunk 2 of epoch 0 (skipped the two done chunks), then
+        # ran epoch 1 in full — NOT restarting the epoch at chunk 0.
+        assert loader_c.yielded == [2, 0, 1, 2]
+
+        # Byte-identical to the uninterrupted run: proves model weights AND
+        # optimizer state (Adam moments + LR-schedule step count) were
+        # restored and the chunk order is deterministic.
+        c_leaves = jax.tree_util.tree_leaves(eqx.filter(model_c, eqx.is_array))
+        assert len(a_leaves) == len(c_leaves)
+        for la, lc in zip(a_leaves, c_leaves):
+            assert jnp.array_equal(la, lc), (
+                "mid-epoch resume diverged from the uninterrupted run")
+
+    def test_resume_without_optstate_would_diverge(self, tmp_path, monkeypatch):
+        """Guard-rail: if the resume dropped the optimizer state (restoring
+        only the weights, the old epoch-only behaviour), the Adam moments +
+        LR-schedule counter would restart and the run would NOT match.  We
+        assert divergence in that degraded mode so the bit-identical pass
+        above is known to be load-bearing, not luck."""
+        import legoesm.training.neural_gcm_spectral as mod
+
+        dir_a = tmp_path / "A"
+        model_a, _ = self._run(
+            _make_small_sfno(), self._cfg(dir_a),
+            self._make_loader(3), resume_from_dir=dir_a)
+        a_leaves = jax.tree_util.tree_leaves(eqx.filter(model_a, eqx.is_array))
+
+        dir_b = tmp_path / "B"
+        real_save = mod._save_midepoch_checkpoint
+        counter = {"n": 0}
+
+        class _Kill(Exception):
+            pass
+
+        def _save_then_kill(ckpt_dir, model, opt_state, epoch, next_chunk):
+            real_save(ckpt_dir, model, opt_state, epoch, next_chunk)
+            counter["n"] += 1
+            if counter["n"] == 2:
+                raise _Kill()
+
+        monkeypatch.setattr(mod, "_save_midepoch_checkpoint", _save_then_kill)
+        with pytest.raises(_Kill):
+            self._run(_make_small_sfno(), self._cfg(dir_b),
+                      self._make_loader(3), resume_from_dir=dir_b)
+        monkeypatch.undo()
+
+        # Degrade the loader: on load, keep weights but FORCE a fresh
+        # optimizer state (simulate the old model-only checkpoint).
+        real_load = mod._load_midepoch_checkpoint
+
+        def _load_drop_optstate(ckpt_dir, model_template, opt_state_template):
+            res = real_load(ckpt_dir, model_template, opt_state_template)
+            if res is None:
+                return None
+            m, _o, ep, nc = res
+            return m, opt_state_template, ep, nc   # fresh opt_state
+
+        monkeypatch.setattr(mod, "_load_midepoch_checkpoint", _load_drop_optstate)
+        model_c, _ = self._run(
+            _make_small_sfno(), self._cfg(dir_b),
+            self._make_loader(3), resume_from_dir=dir_b)
+        c_leaves = jax.tree_util.tree_leaves(eqx.filter(model_c, eqx.is_array))
+        assert any(
+            not jnp.array_equal(la, lc) for la, lc in zip(a_leaves, c_leaves)
+        ), (
+            "dropping optimizer state should have diverged from the "
+            "uninterrupted run — the bit-identical test is therefore "
+            "genuinely exercising optimizer-state restore, not luck"
+        )

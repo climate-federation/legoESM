@@ -299,7 +299,11 @@ def canopy_shortwave_rt(
     total_PAR = PAR_dir + PAR_diff + 1e-5   # coeff-ok: /0 guard on UV beam/diffuse split
     UV_dir  = UV * PAR_dir  / total_PAR
     UV_diff = UV - UV_dir
-    Q_U    = ((1.0 - _RHO_UV) * UV_diff * (1.0 - jnp.exp(-kk_Pb * L_CI))
+    # Beam component uses beam extinction kk_Pb, diffuse uses diffuse kk_Pd —
+    # mirrors the PAR Q_PDn split above.  (Previously both terms used UV_diff,
+    # applying beam extinction to the diffuse flux and dropping UV_dir, which
+    # mis-partitioned the beam/diffuse and leaf/soil UV split.)
+    Q_U    = ((1.0 - _RHO_UV) * UV_dir  * (1.0 - jnp.exp(-kk_Pb * L_CI))
             + (1.0 - _RHO_UV) * UV_diff * (1.0 - exp_kk_Pd))
     AUV_Sun  = Q_U * fSun
     AUV_Sh   = Q_U * (1.0 - fSun)

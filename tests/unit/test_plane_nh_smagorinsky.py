@@ -795,3 +795,92 @@ def test_sgs_tracer_diffusion_preserves_positivity():
         assert float(np.min(q + dt * dq)) >= 0.0, f"negative at dt={dt}"
     assert abs(float(np.sum(dq))) < 1e-18              # conservative
     assert float(np.max(np.abs(dq))) > 0.0             # SGS actually acted
+
+
+# --------------------------------------------------------------------------- #
+# Mixed-shear SIGN regression (2026-07-12). ``full_level_centred_d_dz``
+# returns the LEVEL-INDEX derivative = −∂/∂z_physical (z up, level index
+# top→down), and the strain call sites must negate it before MIXING with the
+# already-physical ∂w/∂x, ∂w/∂y. The pre-fix code formed
+# S13 = 0.5(−∂u/∂z + ∂w/∂x): the 2·(∂u/∂z)(∂w/∂x) cross term in S13² flipped,
+# giving |S|² = (b−a)² instead of (a+b)² under u = a·z, w = b·x.
+# --------------------------------------------------------------------------- #
+
+
+def _mixed_shear_fields(grid, hc, a, b):
+    """u = a·z (∂u/∂z_phys = a), w = b·x (∂w/∂x = b), v = 0."""
+    u = jnp.broadcast_to(
+        (a * hc.z_full)[None, None, :], (grid.ny, grid.nx, grid.nlev),
+    )
+    x_c = (jnp.arange(grid.nx, dtype=jnp.float64) + 0.5) * grid.dx
+    w = jnp.broadcast_to(
+        (b * x_c)[None, :, None], (grid.ny, grid.nx, grid.nlev + 1),
+    )
+    v = jnp.zeros_like(u)
+    return u, v, w
+
+
+def test_smagorinsky_mixed_shear_matches_analytic_a_plus_b():
+    """u = a·z, w = b·x with the SAME signs: only S13 = 0.5(a+b) is nonzero,
+    so |S|² = 2·(2·S13²) = (a+b)² and K_m = (c_s·Δ)²·(a+b) at interior
+    columns. The pre-fix sign flip gave |S|² = (b−a)², i.e. K_m 3× too small
+    for a = 1e-3, b = 2e-3 (under-mixing in sheared updrafts)."""
+    _, grid, hc, _, _ = _setup()
+    a, b = 1.0e-3, 2.0e-3
+    u, v, w = _mixed_shear_fields(grid, hc, a, b)
+    K = _compute_smagorinsky_K_m_plane(
+        u, v, w, grid, hc, c_s=0.2, wall_damping=False,
+    )
+    delta = (grid.dx * grid.dy * np.asarray(hc.dz)) ** (1.0 / 3.0)
+    expected = (0.2 * delta) ** 2 * (a + b)                       # (nlev,)
+    # Interior columns only: the periodic roll wraps the linear-in-x w, so
+    # cell centres i = 0 and i = nx−1 see the wrap jump.
+    K_int = np.asarray(K)[:, 1:-1, :]
+    np.testing.assert_allclose(
+        K_int, np.broadcast_to(expected, K_int.shape), rtol=1.0e-12,
+    )
+
+
+def test_velocity_gradients_plane_vertical_signs_are_physical():
+    """``_velocity_gradients_plane`` must return the PHYSICAL ∂/∂z (z up):
+    linear profiles u = a·z, v = b·z, w = c·z must give dudz = +a, dvdz = +b,
+    dwdz = +c everywhere (the raw level-index derivative is the negative
+    under top-down storage). Vreman/AMD consume these gradients in ODD
+    products and the dynamic closures in mixed strain products, so a global
+    flip changes their K_m / C_s."""
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        _velocity_gradients_plane,
+    )
+    _, grid, hc, _, _ = _setup()
+    a, b, c = 1.5e-3, -2.5e-3, 4.0e-4
+    shape = (grid.ny, grid.nx, grid.nlev)
+    u = jnp.broadcast_to((a * hc.z_full)[None, None, :], shape)
+    v = jnp.broadcast_to((b * hc.z_full)[None, None, :], shape)
+    w = jnp.broadcast_to(
+        (c * hc.z_half)[None, None, :], (grid.ny, grid.nx, grid.nlev + 1),
+    )
+    (_, _, _, _, _, dudz, _, _, dvdz, _, _, dwdz) = (
+        _velocity_gradients_plane(u, v, w, grid, hc))
+    np.testing.assert_allclose(np.asarray(dudz), a, rtol=1.0e-12)
+    np.testing.assert_allclose(np.asarray(dvdz), b, rtol=1.0e-12)
+    np.testing.assert_allclose(np.asarray(dwdz), c, rtol=1.0e-12)
+
+
+def test_centre_strain_mixed_shear_matches_analytic_a_plus_b():
+    """A-grid strain path shared by the dynamic/LASD closures (and built on
+    the same gradients Vreman/AMD consume): S13 = 0.5(∂u/∂z + ∂w/∂x)
+    = 0.5(a+b) and |S| = √(2 S_ij S_ij) = a+b under u = a·z, w = b·x at
+    interior columns. Pre-fix this gave 0.5(b−a) / |b−a|."""
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        _centre_velocities_and_strain_plane,
+    )
+    _, grid, hc, _, _ = _setup()
+    a, b = 1.0e-3, 2.0e-3
+    u, v, w = _mixed_shear_fields(grid, hc, a, b)
+    (_, _, _, _, _, _, _, S13, _, Smag) = (
+        _centre_velocities_and_strain_plane(u, v, w, grid, hc))
+    # Centred A-grid ∂w/∂x uses roll(±1): columns 0 and nx−1 see the wrap.
+    S13_int = np.asarray(S13)[:, 1:-1, :]
+    Smag_int = np.asarray(Smag)[:, 1:-1, :]
+    np.testing.assert_allclose(S13_int, 0.5 * (a + b), rtol=1.0e-12)
+    np.testing.assert_allclose(Smag_int, a + b, rtol=1.0e-12)

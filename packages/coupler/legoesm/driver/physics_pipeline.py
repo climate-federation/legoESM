@@ -2536,21 +2536,31 @@ def _resolve_convection(config):
         # coarse-resolution convective-precip deficit (default matches
         # BechtoldConfig.cape_threshold ⇒ byte-identical when unset).
         from legoesm.atmosphere.physics.convection.config import BechtoldConfig
-        conv_config = BechtoldConfig(
-            cape_threshold=getattr(config, 'bechtold_cape_threshold', 70.0),
-        )
+        # #929: thread the shared convective rain-split knob into Bechtold's
+        # precip_efficiency.  ``None`` (the ExperimentConfig default) keeps the
+        # scheme default (0.7 = ON, the #929 anvil-drain fix); an EXPLICIT value
+        # overrides it (0.0 restores the legacy detrain-all path, dq_r None).
+        _pe = getattr(config, "convective_precip_efficiency", None)
+        _bechtold_kwargs = {
+            "cape_threshold": getattr(config, 'bechtold_cape_threshold', 70.0),
+        }
+        if _pe is not None:
+            _bechtold_kwargs["precip_efficiency"] = _pe
+        conv_config = BechtoldConfig(**_bechtold_kwargs)
     else:
         cc = ConvectionConfig(scheme=scheme)
         conv_config = getattr(cc, scheme)
-        # #832: thread the ExperimentConfig convective rain-split knob into the
-        # schemes that support it (currently Tiedtke's ``precip_efficiency`` —
-        # Bechtold has no such field).  Without this the field was DEAD: the
-        # scheme always saw ``precip_efficiency=0`` (no rain split), so
-        # ``dq_r_conv_dt`` was never produced and the in-updraft-rain path (whose
-        # consumption is fixed in ``physics_step_no_rad``) was unreachable.
-        # Default 0.0 keeps the legacy no-split behaviour byte-identical.
-        _pe = getattr(config, "convective_precip_efficiency", 0.0)
-        if scheme == "tiedtke" and hasattr(conv_config, "precip_efficiency"):
+        # #832/#929: thread the shared ExperimentConfig convective rain-split
+        # knob into schemes that support it (Tiedtke here; Bechtold is threaded
+        # in its own branch above).  ``None`` (the default sentinel) keeps the
+        # scheme's OWN default (Tiedtke ``precip_efficiency=0.0`` = legacy
+        # no-split, byte-identical); an EXPLICIT value overrides it.  Without an
+        # explicit value the field was DEAD for Tiedtke (no rain split, so
+        # ``dq_r_conv_dt`` was never produced and the in-updraft-rain path
+        # consumed in ``physics_step_no_rad`` was unreachable).
+        _pe = getattr(config, "convective_precip_efficiency", None)
+        if (scheme == "tiedtke" and _pe is not None
+                and hasattr(conv_config, "precip_efficiency")):
             conv_config = conv_config._replace(precip_efficiency=_pe)
 
     _check_pipeline_convection_supported(scheme, conv_config)
@@ -2954,11 +2964,15 @@ def build_physics_pipeline(grid, sigma, config):
             if getattr(config, "cloud_scheme", "none") != "none" else ""
         )
         logger.warning(
-            "convection=%r with microphysics='none': convective condensate "
-            "detrains into q_c with no precipitation sink, so surface "
-            "precipitation is identically ZERO and cloud water accumulates "
-            "unbounded (water trap)%s. Enable a microphysics scheme "
-            "(e.g. --microphysics kessler) to close the water budget.",
+            "convection=%r with microphysics='none': the detrained ANVIL "
+            "cloud water (dq_c_conv_dt) has no precipitation sink and "
+            "accumulates unbounded (water trap)%s. Mass-flux schemes with an "
+            "in-updraft rain split (precip_efficiency>0 — e.g. Bechtold's 0.7 "
+            "default) DO precipitate their rain fraction (dq_r_conv_dt) to the "
+            "surface each step, so surface precipitation is NOT necessarily "
+            "zero, but the suspended anvil fraction still needs a microphysics "
+            "sink. Enable a microphysics scheme (e.g. --microphysics kessler) "
+            "to close the water budget.",
             config.convection, _extra,
         )
 

@@ -18,6 +18,24 @@ envelope so a config outside it can never silently run different numerics.
 The mass/moisture fixers are NOT applied here: the compiled-segment driver
 externalizes them (it disables the inner model's ``fix_mass`` and applies the
 target-anchored fixer after dynamics), which is the only production caller.
+
+Persistence ladder (M3b increment 1 state):
+
+* :func:`make_tiled_cc_step` — single-shot; full-cube layout conversions per
+  call (bench/parity probes only, never loop it).
+* :func:`make_tiled_cc_loop` — closed loop; carry persistently tile-sharded,
+  one host dispatch per STEP.
+* :func:`scan_tiled_cc_steps` / :func:`make_tiled_cc_segment` — the loop's
+  step scanned into ONE compiled executable per SEGMENT (what
+  ``_run_tiled_cube_spmd`` drives in production).
+
+REMAINDER (not this increment): the operator-split unified-physics tiled
+lane (``driver/tiled_operator_split_step``) still dispatches per step — its
+per-segment external ``forcing`` must ride the scan as a broadcast/xs
+argument (SegmentForcing doctrine) before it can be scanned; multicontroller
+route-B for either tiled lane; segment-scanning the bench
+(``scripts/bench/bench_cube_tiled_step_scaling.py`` measures the per-step
+loop).
 """
 
 from __future__ import annotations
@@ -172,6 +190,20 @@ def make_tiled_cc_step(model, mesh, kt: int, dt: float):
     from legoesm.core.precision import cast_pytree
 
     def step(state):
+        # Dynamics-only single-shot probe: the tiled dry core does not
+        # advance tracers, so re-attaching them unchanged would silently
+        # freeze them while serial advances/floors them
+        # (divergence-by-omission — mirrors make_tiled_cc_loop's dry
+        # refusal).  Tracer presence is pytree STRUCTURE, so this raises
+        # at trace time even under jit.
+        tracers = getattr(state, "tracers", None)
+        if tracers:
+            raise ValueError(
+                "make_tiled_cc_step: state carries tracers but the "
+                "single-shot tiled cc step is dynamics-only — it would "
+                "re-attach them FROZEN (divergence-by-omission). Use "
+                "make_tiled_cc_loop with a column_physics_fn for moist "
+                "runs, or drop the tracers.")
         # Entry: the SAME rotation-aware cc→corner vector interp the serial
         # _step_cell_centre uses (a scalar interp would re-inject the
         # cube-edge vorticity imprint).  Runs in the STORAGE dtype, exactly
@@ -202,7 +234,7 @@ def make_tiled_cc_step(model, mesh, kt: int, dt: float):
             T=state.T.replace(data=T2),
             p_s=state.p_s.replace(data=ps2),
             phis=state.phis,
-            tracers=getattr(state, "tracers", None),
+            tracers=tracers,  # None or empty — guarded above
         )
         # Exit: the serial step's own corner→centre conversion.
         return fv3_to_hydrostatic(fv3_new, cdgrid)
@@ -361,7 +393,19 @@ def make_tiled_cc_loop(model, mesh, kt: int, dt: float,
                 "phis": blocked["phis"]}
 
     def exit_(blocked, template_state):
-        """Blocked -> cc HydrostaticState (GLOBAL GATHER — I/O only)."""
+        """Blocked -> cc HydrostaticState (GLOBAL GATHER — I/O only).
+
+        The output is DONATION-INDEPENDENT: every leaf is a fresh buffer,
+        never an alias of the blocked carry.  ``u_d``/``v_d`` (dedup
+        slices) and the ``q_pack`` tracer slices are new by construction;
+        the cc passthrough leaves (``T``, ``p_s``) are explicitly copied —
+        ``fv3_to_hydrostatic`` threads them through unchanged, and a
+        donating segment caller (``scan_tiled_cc_steps`` default)
+        invalidates the carry buffers on its NEXT call, which would
+        otherwise poison a retained ``exit_`` state (e.g. a driver
+        callback holding ``driver.state`` for deferred I/O — codex M3b
+        MAJOR).
+        """
         u_d = dedup_tiled_corners(blocked["u_d"], kt, nl)
         v_d = dedup_tiled_corners(blocked["v_d"], kt, nl)
         tracers = getattr(template_state, "tracers", None)
@@ -374,14 +418,99 @@ def make_tiled_cc_loop(model, mesh, kt: int, dt: float,
         fv3 = FV3HydrostaticState(
             u_d=template_state.u.replace(data=u_d, name="u_d"),
             v_d=template_state.v.replace(data=v_d, name="v_d"),
-            T=template_state.T.replace(data=blocked["T"]),
-            p_s=template_state.p_s.replace(data=blocked["p_s"]),
+            T=template_state.T.replace(data=jnp.copy(blocked["T"])),
+            p_s=template_state.p_s.replace(data=jnp.copy(blocked["p_s"])),
             phis=template_state.phis,
             tracers=tracers,
         )
         return fv3_to_hydrostatic(fv3, cdgrid)
 
     return enter, step, exit_
+
+
+def scan_tiled_cc_steps(step, n_steps: int, *, donate: bool = True):
+    """ONE compiled executable advancing ``n_steps`` blocked tiled steps —
+    ``jit(lax.scan(step))`` over the closed-loop ``step`` from
+    :func:`make_tiled_cc_loop` (M3b increment 1: persistent tile-native
+    stepping).
+
+    Contrast with driving ``jax.jit(step)`` in a Python loop (the prior
+    production inner loop): ONE host dispatch per SEGMENT instead of per
+    STEP, and the no-full-face-all-gather property holds for the WHOLE
+    compiled program (gated on HLO text by
+    ``tests/parallel/test_cube_tile_native_segment.py`` — zero
+    ``all-gather``; collective counts n-INDEPENDENT past XLA's fixed
+    boundary-iteration peel, i.e. the only collectives are the scan
+    body's in-stage tile-halo ``collective-permute``s and, with
+    ``fix_mass``, the fixer ``psum``).
+    The scanned body is the SAME blocked step — input layout == output
+    layout (tile-sharded), so the carry never leaves tile layout and no
+    D-grid<->cell conversion runs inside the scan (those live in
+    ``enter``/``exit_`` only, once per segment boundary).
+
+    Carry dtype: leading steps are UNROLLED outside the ``lax.scan`` until
+    the blocked state's dtype signature is a fixed point of the step
+    (:func:`legoesm.atmosphere.dynamics.sharded_atm_latlon_step.
+    unroll_to_dtype_fixed_point` — the M2b lat-band segments' shared
+    helper; ``jax.eval_shape`` probe, zero FLOPs, trace-time constant).
+    This FIRES on the production cube carry: ``enter`` casts to the f32
+    compute dtype (mirroring serial ``_step_fv3``) while the in-stage
+    ``fix_ps_mass`` f64 accumulator promotes ``p_s`` on the first
+    application, cascading to ``T`` on the second — so a fresh production
+    segment unrolls those 1-2 leading steps and scans the rest, and a
+    later call on the now-stable carry is a pure ``scan(n_steps)`` (gated
+    by ``test_production_carry_dtype_unroll_fires``).
+
+    ``n_steps`` is STATIC (the compiled scan length): one compiled program
+    per distinct segment length (the driver lane caches per length — at
+    most two: the regular segment and the final remainder).
+
+    ``donate=True`` (default) donates the input carry: the previous
+    blocked state is dead after the call (``blocked = segment(blocked)``),
+    halving transient state memory.  Donation conflicts with reverse-mode
+    AD — a training caller must pass ``donate=False`` (or scan the raw
+    ``step`` itself under its own ``jax.checkpoint`` policy).
+    """
+    from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+        unroll_to_dtype_fixed_point,
+    )
+
+    if int(n_steps) < 1:
+        raise ValueError(
+            f"scan_tiled_cc_steps: n_steps must be >= 1, got {n_steps}")
+    n_steps = int(n_steps)
+
+    import jax
+
+    def _segment(blocked):
+        # Unroll to the scan-carry dtype fixed point (helper docstring).
+        out, n_left = unroll_to_dtype_fixed_point(step, blocked, n_steps)
+        if n_left > 0:
+            out, _ = jax.lax.scan(lambda c, _x: (step(c), None), out,
+                                  xs=None, length=n_left)
+        return out
+
+    return jax.jit(_segment, donate_argnums=(0,) if donate else ())
+
+
+def make_tiled_cc_segment(model, mesh, kt: int, dt: float, n_steps: int,
+                          column_physics_fn=None, *, donate: bool = True):
+    """Persistent tile-native SEGMENT stepping: ``(enter, segment, exit_)``
+    with ``segment(blocked) -> blocked`` advancing ``n_steps`` in ONE
+    compiled ``lax.scan`` (M3b increment 1).
+
+    Composition of :func:`make_tiled_cc_loop` (the blocked enter/step/exit
+    triple — layout conversion ONCE at the segment boundary) and
+    :func:`scan_tiled_cc_steps` (the jitted scan of the step).  State
+    ENTERS tile layout once, scans ``n_steps`` with only in-stage tile
+    halos (+ the fixer psum), and EXITS tile layout once — no full-face
+    all-gather and no D-grid<->cell conversion inside the scan.  Same
+    envelope refusals + moist (Kessler ``column_physics_fn``) contract as
+    the loop builder; see both docstrings.
+    """
+    enter, step, exit_ = make_tiled_cc_loop(
+        model, mesh, kt=kt, dt=dt, column_physics_fn=column_physics_fn)
+    return enter, scan_tiled_cc_steps(step, n_steps, donate=donate), exit_
 
 
 # Public alias for the tiled operator-split driver lane (the

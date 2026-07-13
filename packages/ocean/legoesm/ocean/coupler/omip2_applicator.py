@@ -47,6 +47,31 @@ from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.thermo import saturation_vapor_pressure
 from legoesm.ocean.bulk_flux_omip import air_sea_fluxes
+from legoesm.ocean.eos import VALID_FREEZE_SCHEMES, freezing_point
+
+# --- per-step host-transfer ledger (scaling-M2 honest-cost accounting) ------
+# The forcing builders below each pull ONE 2-D surface-T slice of the ocean
+# state to the host per call (device-side slice FIRST, so only the surface
+# layer crosses — never the full 3-D, possibly lat-band-sharded, leaf; codex
+# batch4 HIGH: ``np.asarray(full leaf)[..., 0]`` assembled the whole field).
+# Each pull is recorded here so the persistent-sharded OMIP driver
+# (``run_omip_core2 --spmd-persistent-state``) can report the TRUE per-step
+# leaf-transfer cost next to its full-state gather counter instead of
+# implying zero transfer cost.  Counters are process-global and MONOTONIC:
+# consumers snapshot :func:`host_pull_ledger` and take deltas.  Pure Python
+# int side effect at host level — the builders are host-loop functions and
+# are never jitted/traced, so this cannot leak into a trace.
+_HOST_PULL_LEDGER = {"surface_slice_pulls": 0}
+
+
+def host_pull_ledger() -> dict:
+    """Copy of the module's monotonic host-transfer counters (accessor per
+    the mutable-singleton rule — never import the dict itself)."""
+    return dict(_HOST_PULL_LEDGER)
+
+
+def _record_surface_slice_pull() -> None:
+    _HOST_PULL_LEDGER["surface_slice_pulls"] += 1
 
 
 def _bolton_q_sat(T_K, p_hpa: float = constants.p_atm_std / 100.0):
@@ -564,7 +589,9 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
                                      runoff_R=None,
                                      emp: bool = True,
                                      ramp: float = 1.0,
-                                     rho_air: float = constants.rho_air):
+                                     rho_air: float = constants.rho_air,
+                                     u_oce=None, v_oce=None,
+                                     wind_current_feedback_vfac: float = 0.0):
     """Build a :class:`FreshwaterForcing` (P, E, runoff) for the OMIP-2 run.
 
     Delivered to the ocean via the in-core channel
@@ -596,12 +623,26 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
     ramp : float
         Cold-start spin-up scale in [0, 1] applied to ALL freshwater components
         (matches the tau/q_net ramp).
+    u_oce, v_oce, wind_current_feedback_vfac :
+        NEMO ``ln_crt_dwn`` / ``rn_vfac`` relative-wind current feedback, passed
+        straight through to :func:`air_sea_fluxes` (geographic-frame currents;
+        see :func:`compute_omip2_surface_forcing`).  MUST match the ``vfac`` /
+        currents used for the heat + momentum forcing so the evaporative MASS
+        flux ``E`` (P - E salinity) stays the SAME physical flux as the latent
+        HEAT flux in ``q_net`` (``E = -lhflx / L_vap``).  ``vfac == 0.0``
+        (default) is byte-identical.
     """
     from legoesm.ocean.freshwater import FreshwaterForcing
 
     forc = _sample_omip2_forcing(forcing, idx_t, grid, grid_type)
     # MPAS state is (nCells,) at the surface; cube/latlon/tripole are (..., 0).
-    T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + float(constants.T_freeze)
+    # Slice FIRST (device-side), THEN convert: np.asarray on the full leaf
+    # would assemble the entire 3-D (possibly lat-band-sharded) T field on
+    # the host every step (codex batch4 HIGH); the [..., 0] child moves only
+    # the 2-D surface layer.  Value-identical — slicing commutes with the
+    # elementwise f64 upcast.  Counted in the module host-pull ledger.
+    _record_surface_slice_pull()
+    T_sfc_K = np.asarray(state.T.data[..., 0], dtype=np.float64) + float(constants.T_freeze)
     slp = forc.get("slp")
     # NCAR algo (NEMO-faithful): q_sfc = 0.98*q_sat_goff(SST, slp) computed
     # internally; evap returned directly (= -lh / L_vap(SST), consistent with
@@ -611,6 +652,7 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
         T_air_K=jnp.asarray(forc["T_air"]), q_air=jnp.asarray(forc["q_air"]),
         T_sfc_K=jnp.asarray(T_sfc_K),
         slp_Pa=None if slp is None else jnp.asarray(slp),
+        u_oce=u_oce, v_oce=v_oce, vfac=wind_current_feedback_vfac,
     )
     if emp:
         precip = np.asarray(forc["precip"], dtype=np.float64)
@@ -725,7 +767,8 @@ def _ice_surface_heat(sw_down, q_non_sw, ice_albedo, *,
 
 
 def under_ice_freeze_relax(T_top_C, ice_concentration, dt: float, *,
-                           tau_ice_days: float = 20.0, T_freeze_C=None):
+                           tau_ice_days: float = 20.0, T_freeze_C=None,
+                           S_top=None, freeze_scheme: str = "constant"):
     """Relax the under-ice surface ocean temperature toward the freezing point
     (prescribed-ice thermodynamic boundary; codex HIGH).  Returns the updated
     top-cell temperature [°C].
@@ -741,15 +784,56 @@ def under_ice_freeze_relax(T_top_C, ice_concentration, dt: float, *,
     alone (the missing reservoir is the prescribed ice's latent heat).  Host-loop
     helper (NumPy; the ``--ice-thermo`` host path, NOT the lax.scan path -- scan
     refuses it).  A convex relaxation, unconditionally stable: ``dt/τ`` is clipped
-    to <=1 so the update never overshoots ``T_freeze``."""
-    if T_freeze_C is None:
+    to <=1 so the update never overshoots ``T_freeze``.
+
+    Freezing-point target (MED-1 follow-up): ``T_freeze_C`` may be a SCALAR or a
+    PER-CELL array [°C].  With ``freeze_scheme != "constant"`` the target is
+    computed per cell from the LOCAL surface salinity ``S_top`` [PSU] via the
+    liquidus ``eos.freezing_point(S_top, scheme)`` (KELVIN, so the 0 °C
+    reference ``constants.T_freeze`` is subtracted) — the Arctic-relevant path:
+    fresher shelf water relaxes toward a warmer freezing point, saline water
+    colder (~-1.92 °C at S=35, not -1.8).  ``freeze_scheme="constant"``
+    (default) with ``T_freeze_C=None`` keeps the historical fixed
+    ``T_freeze_ocean - T_freeze`` scalar byte-identical.  Passing BOTH an
+    explicit ``T_freeze_C`` and a liquidus scheme raises (ambiguous), as does a
+    liquidus scheme without ``S_top`` (never a silent constant fallback)."""
+    # Dispatch hardening: validate the static selector at function entry
+    # against the single source of truth (eos.VALID_FREEZE_SCHEMES) so a typo
+    # can never silently run the constant path.
+    if freeze_scheme not in VALID_FREEZE_SCHEMES:
+        raise ValueError(
+            f"Unknown freezing-point scheme: {freeze_scheme!r}. "
+            f"Valid schemes: {sorted(VALID_FREEZE_SCHEMES)}."
+        )
+    if freeze_scheme != "constant":
+        if T_freeze_C is not None:
+            raise ValueError(
+                "under_ice_freeze_relax: pass EITHER an explicit T_freeze_C "
+                f"OR a liquidus freeze_scheme ({freeze_scheme!r}), not both "
+                "(ambiguous freezing-point target)."
+            )
+        if S_top is None:
+            raise ValueError(
+                f"under_ice_freeze_relax: freeze_scheme={freeze_scheme!r} "
+                "computes the per-cell liquidus from the LOCAL surface "
+                "salinity — pass S_top (PSU, shape of T_top_C)."
+            )
+        # eos.freezing_point returns KELVIN; this helper works in °C.
+        T_freeze_C = np.asarray(
+            freezing_point(np.asarray(S_top, dtype=np.float64), 0.0,
+                           scheme=freeze_scheme),
+            dtype=np.float64,
+        ) - float(constants.T_freeze)
+    elif T_freeze_C is None:
         T_freeze_C = float(constants.T_freeze_ocean) - float(constants.T_freeze)
     sic = np.clip(np.nan_to_num(np.asarray(ice_concentration, dtype=np.float64),
                                 nan=0.0), 0.0, 1.0)
     tau_s = float(tau_ice_days) * 86400.0
     alpha = np.minimum(float(dt) / max(tau_s, 1.0e-30), 1.0) * sic
     T = np.asarray(T_top_C, dtype=np.float64)
-    return T + alpha * (float(T_freeze_C) - T)
+    # Scalar T_freeze_C -> 0-d float64 array: IEEE-identical arithmetic to the
+    # historical float(...) path (byte-identical constant default).
+    return T + alpha * (np.asarray(T_freeze_C, dtype=np.float64) - T)
 
 
 def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
@@ -758,7 +842,9 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
                                   ice_albedo=None,
                                   under_ice: bool = False,
                                   tau_ice_sw: float = 0.03,
-                                  dm2dc_window=None):
+                                  dm2dc_window=None,
+                                  u_oce=None, v_oce=None,
+                                  wind_current_feedback_vfac: float = 0.0):
     """Build an :class:`OceanSurfaceForcing` (tau_x, tau_y, q_net, sw_down) on
     the model grid from CORE-II / JRA55 forcing, for INTEGRATION INSIDE
     ``model.step(state, dt, surface_forcing=...)`` -- the dynamics-core
@@ -790,6 +876,16 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
 
     Supports the lat-lon C-grid family (``latlon`` / ``latlon_regional`` via
     conservative regrid; ``tripole`` via nearest-neighbour on the 2-D T grid).
+
+    ``u_oce`` / ``v_oce`` / ``wind_current_feedback_vfac`` (NEMO ``ln_crt_dwn`` /
+    ``rn_vfac``): when ``vfac > 0`` the caller-supplied ocean surface current is
+    subtracted from the wind inside :func:`air_sea_fluxes` (relative-wind stress
+    + turbulent fluxes).  The current MUST already be in the wind frame
+    (GEOGRAPHIC east/north) -- the caller does the grid->geographic rotation (the
+    ``legoesm.ocean`` package may not import the coupler rotation helper under the
+    import-linter layering contract, so the top-layer run driver rotates and
+    passes geographic currents here).  ``vfac == 0.0`` (default) with
+    ``u_oce=v_oce=None`` is BYTE-IDENTICAL to the absolute-wind behaviour.
     """
     from legoesm.ocean.state import OceanSurfaceForcing
     sigma_sb = float(constants.sigma_sb)
@@ -807,8 +903,13 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
         forc = dict(forc)
         forc["sw_down"] = np.asarray(forc["sw_down"], dtype=np.float64) * _fac
 
-    # Top-cell ocean temperature (state stored in degC) -> K.
-    T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + T_freeze
+    # Top-cell ocean temperature (state stored in degC) -> K.  Slice FIRST
+    # (device-side), THEN convert — np.asarray on the full leaf would
+    # assemble the entire 3-D (possibly lat-band-sharded) T field on the
+    # host every step (codex batch4 HIGH); only the 2-D surface layer
+    # crosses.  Value-identical.  Counted in the module host-pull ledger.
+    _record_surface_slice_pull()
+    T_sfc_K = np.asarray(state.T.data[..., 0], dtype=np.float64) + T_freeze
     slp = forc.get("slp")
     tau_x, tau_y, sh, lh, evap = air_sea_fluxes(
         u10=jnp.asarray(forc["u10"]),
@@ -817,6 +918,7 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
         q_air=jnp.asarray(forc["q_air"]),
         T_sfc_K=jnp.asarray(T_sfc_K),
         slp_Pa=None if slp is None else jnp.asarray(slp),
+        u_oce=u_oce, v_oce=v_oce, vfac=wind_current_feedback_vfac,
     )
     # Non-solar open-water heat flux, assembled EXACTLY like NEMO blk_oce_2:
     #   qns = eps_w*(LW_down - sigma*T_s^4)            net LW (Kirchhoff: the

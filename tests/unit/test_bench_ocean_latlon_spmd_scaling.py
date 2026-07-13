@@ -54,23 +54,28 @@ def test_main_single_device_writes_record(tmp_path, monkeypatch):
     assert rec["component"] == "ocean"
     assert rec["n_devices"] == 1 and rec["n_lat"] == 8
     assert rec["multicontroller"] is False
-    assert len(rec["per_step_ms"]) == 2
+    # Measurement-contract fields (fused scan blocks + separate dispatch
+    # probe): per-block times, the fused headline, and the individually-
+    # synced latency — the retired per_step_ms key must NOT come back.
+    assert len(rec["block_ms"]) == 2            # default --blocks 2
+    assert rec["block_steps"] == 2              # --steps = per-block length
+    assert rec["fused_step_ms"] > 0.0
+    assert rec["step_latency_ms"] > 0.0
     assert rec["steady_median_ms"] > 0.0
+    assert "per_step_ms" not in rec
 
 
 def test_main_rejects_bad_timing_window(monkeypatch):
-    """--steps/--warmup validated BEFORE any model/device work: an empty
-    steady slice would otherwise NaN/raise only after the benchmark ran."""
+    """--steps validated BEFORE any model/device work (a bad block length
+    would otherwise surface only after the expensive build).  --warmup is
+    CLI-compat-only and IGNORED: a warmup >= steps combination that the
+    retired per-step slicing rejected must now be accepted (a one-step
+    parity run with the default --warmup=2 was spuriously refused)."""
     mod = _load()
     monkeypatch.setattr(sys, "argv", [
         "bench", "--n-lat", "8", "--n-lon", "16", "--nlev", "3",
         "--n-devices", "1", "--steps", "0"])
     with pytest.raises(SystemExit, match="--steps"):
-        mod.main()
-    monkeypatch.setattr(sys, "argv", [
-        "bench", "--n-lat", "8", "--n-lon", "16", "--nlev", "3",
-        "--n-devices", "1", "--steps", "2", "--warmup", "2"])
-    with pytest.raises(SystemExit, match="--warmup"):
         mod.main()
 
 

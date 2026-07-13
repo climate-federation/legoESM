@@ -18,10 +18,13 @@ __param_spec__ = {
     "ConstantVerticalMixingConfig": {
         "scheme_key": "ocean.vm.constant",
         "excluded": {
+            "N_ref": "Gregg et al. (2003) fixed published reference stratification N_0 (5.24e-3 1/s); the latitude-scaling normalisation, not a trained closure knob",
         },
         "params": {
             "A_v": {"units": "m^2/s", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "constant vertical mixing", "shape": None},
             "K_v": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "constant vertical mixing", "shape": None},
+            "K_bg_eq": {"units": "m^2/s", "bounds": (3.3e-06, 3e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gregg et al. (2003) latitude-dependent internal-wave background (CVMix bkgnd) — equatorial diffusivity", "shape": None},
+            "K_bg_pole": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gregg et al. (2003) latitude-dependent internal-wave background (CVMix bkgnd) — polar diffusivity", "shape": None},
         },
     },
     "RichardsonVerticalMixingConfig": {
@@ -43,6 +46,7 @@ __param_spec__ = {
             "bg_diff_arctan_coeff": "Bryan-Lewis 1979 fixed published arctan amplitude",
             "bg_diff_depth_m": "Bryan-Lewis 1979 fixed published transition depth",
             "bg_diff_width_m": "Bryan-Lewis 1979 fixed published transition width",
+            "cfl_cap_dt_s": "numerics: solver/CFL/smoothing parameter",
             "kappaH_min": "numerics: floor/cap",
             "kappaM_max": "numerics: floor/cap",
             "kappaM_min": "numerics: floor/cap",
@@ -140,9 +144,38 @@ __param_spec__ = {
 
 
 class ConstantVerticalMixingConfig(NamedTuple):
-    """Constant-coefficient vertical mixing."""
+    """Constant-coefficient vertical mixing.
+
+    With ``lat_dependent=False`` (default) the vertical viscosity ``A_v`` and
+    diffusivity ``K_v`` are spatial constants (BIT-IDENTICAL legacy).  With
+    ``lat_dependent=True`` the background is REPLACED, on the IMPLICIT
+    vertical-mixing path (``k_profiles.compute_vertical_K_profiles``), by the
+    Gregg et al. (2003) latitude/stratification-scaled internal-wave background
+    (CVMix ``bkgnd`` / MOM6 ``Henyey_IGW_background``): the diapycnal
+    diffusivity is reduced toward the equator — where the Coriolis parameter
+    vanishes and internal-wave breaking is suppressed — ranging from
+    ``K_bg_eq`` (equator) to ``K_bg_pole`` (poleward); the momentum viscosity is
+    scaled by the SAME factor, preserving the configured Prandtl ratio
+    ``A_v/K_v``.  REPLACED means end-to-end: the model-level fallback floors
+    the dynamics caller passes (``K_v_background``/``A_v_background``, i.e.
+    ``LatLonCGridOceanConfig.K_v``/``A_v``) are suppressed as well, so the
+    constant-BACKGROUND contribution lies exactly in ``[K_bg_eq, K_bg_pole]``
+    with the configured Prandtl ratio (no double-added constant floor).
+    Additive closures configured on top (``enhanced_diffusion`` convection,
+    internal-wave mixing) still stack onto that background, and non-wet
+    (sub-seafloor) interfaces are zeroed — the exact-range guarantee is for
+    the background term at wet interfaces, not the total after other
+    closures.  The EXPLICIT ``constant_vertical_mixing`` tendency path cannot
+    apply a latitude field and RAISES if ``lat_dependent=True`` (no silent
+    no-op).  See ``_shared.latitude_background_diffusivity``.
+    """
     A_v: float = 1e-3   # Vertical viscosity [m^2/s]
     K_v: float = 1e-4   # Vertical diffusivity [m^2/s]
+    # --- Latitude-dependent internal-wave background (Gregg 2003 / CVMix bkgnd) ---
+    lat_dependent: bool = False   # opt-in; False => spatial-constant A_v/K_v (legacy)
+    K_bg_eq: float = 1e-5         # equatorial background diffusivity [m^2/s]
+    K_bg_pole: float = 1e-4       # polar background diffusivity [m^2/s]
+    N_ref: float = 5.24e-3        # Gregg (2003) reference stratification N_0 [1/s]
 
 
 class RichardsonVerticalMixingConfig(NamedTuple):
@@ -447,6 +480,14 @@ class TKEConfig(NamedTuple):
     #   step, like Veros's zero-initialised dtke[taum1]). Requires
     #   ``prognostic=True`` (advecting a diagnostic TKE is a config error).
     advection_scheme: str = "none"
+    # Timestep [s] used to derive the explicit-diffusion CFL ceiling
+    # A_v_max = 0.25 * min(dz_k, dz_k+1)^2 / cfl_cap_dt_s on the MPAS path
+    # (make_tke_profiles_mpas caps the diagnostic K_M / K_H; mirrors the KPP
+    # MPAS bridge's KPPConfig.cfl_cap_dt_s exactly — same numerics parameter).
+    # MUST be set to the ocean dynamics dt for the cap to be correct: a
+    # value smaller than the real dt over-damps; larger risks instability.
+    # Default 300.0 preserves the historical hard-coded estimate.
+    cfl_cap_dt_s: float = 300.0
 
 
 class KPPConfig(NamedTuple):

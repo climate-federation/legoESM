@@ -20,7 +20,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 
 # Idealised-forcing shape constants (documented in make_synthetic_lmip_forcing).
 _T_BASE_EQUATOR_K = 288.0     # latitudinal-mean surface-air T at the equator [K]
@@ -123,9 +123,11 @@ def make_synthetic_lmip_forcing(
     lw_down = jnp.asarray(
         [_LW_EFF_EMISSIVITY * constants.sigma_sb * T_atm[0] ** 4], dtype=dtype)
 
-    # --- Humidity: prescribed RH using the model's saturation_mixing_ratio ---
+    # --- Humidity: prescribed RH using the model's saturation SPECIFIC humidity ---
+    # q_atm is consumed as specific humidity downstream, so use the specific-
+    # humidity saturation (not the mixing ratio r_sat).
     p_sfc = jnp.asarray([_P_SURFACE_PA], dtype=dtype)
-    q_sat = saturation_mixing_ratio(T_atm, p_sfc)
+    q_sat = saturation_specific_humidity(T_atm, p_sfc)
     q_atm = (_RH_FRACTION * q_sat).astype(dtype)
 
     # --- Precipitation: rain below the snow threshold becomes snow ---

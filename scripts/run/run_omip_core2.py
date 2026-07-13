@@ -51,6 +51,8 @@ if not _FP32:
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm.ocean.eos import VALID_FREEZE_SCHEMES
+
 _SEC_PER_DAY = 86400.0
 _SEC_PER_6H = 21600.0
 _YEAR_S = 365.0 * _SEC_PER_DAY
@@ -504,7 +506,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   min_levels=1, div_damp_2=None, div_damp_4=None,
                   smag_cfl_safety=None, convection="none",
                   convection_K_conv=1.0, convection_K_bg=1e-5,
-                  freeze_floor=None, ew_cyclic_overlap=None,
+                  freeze_floor=None, freezing=None, ew_cyclic_overlap=None,
                   runoff_depth_spread_m=None, tracer_advection=None,
                   mle=None, dz_ref_override=None,
                   bottom_drag_scheme=None, bottom_drag_cd0=None,
@@ -579,6 +581,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("div_damp_4", div_damp_4),
                               ("smag_cfl_safety", smag_cfl_safety),
                               ("freeze_floor", freeze_floor),
+                              ("freezing", freezing),
                               ("ew_cyclic_overlap", ew_cyclic_overlap),
                               ("runoff_depth_spread_m", runoff_depth_spread_m),
                               ("tracer_advection", tracer_advection),
@@ -836,7 +839,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   momentum_advection=None, slope_foot_alpha=None,
                   slope_foot_n_levels=None, slope_foot_threshold=None,
                   min_levels=1, div_damp_2=None, div_damp_4=None,
-                  smag_cfl_safety=None, freeze_floor=None,
+                  smag_cfl_safety=None, freeze_floor=None, freezing=None,
                   use_polar_filter=None, polar_filter_cutoff_lat_deg=None,
                   polar_filter_max_wave_speed=None,
                   polar_filter_safety_factor=None,
@@ -901,6 +904,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("div_damp_4", div_damp_4),
                               ("smag_cfl_safety", smag_cfl_safety),
                               ("freeze_floor", freeze_floor),
+                              ("freezing", freezing),
                               ("runoff_depth_spread_m", runoff_depth_spread_m),
                               ("tracer_advection", tracer_advection),
                               ("prescribed_flow", prescribed_flow),
@@ -1317,7 +1321,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      bottom_drag_bbl_thickness=None, bottom_drag_bg_velocity=None,
                      partial_cell=False, dz_ref_override=None,
                      n_barotropic_substeps=None,
-                     barotropic_solver=None, freeze_floor=None,
+                     barotropic_solver=None, freeze_floor=None, freezing=None,
                      runoff_depth_spread_m=None, mle=None,
                      bottom_drag_scheme=None, bottom_drag_cd0=None,
                      bottom_drag_cdmax=None, bottom_drag_z0=None,
@@ -1384,6 +1388,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                               ("n_barotropic_substeps", n_barotropic_substeps),
                               ("barotropic_solver", barotropic_solver),
                               ("freeze_floor", freeze_floor),
+                              ("freezing", freezing),
                               ("runoff_depth_spread_m", runoff_depth_spread_m))
             if v is not None}
     if _ovr:
@@ -1557,6 +1562,36 @@ def _area_conservative_scale(field, cell_area, wet_mask, target_integral):
 #              range, intentionally wider, not a tuning tier.
 _KPP_RI_CRIT_RANGE = (0.099, 0.9)
 _KPP_CV_RANGE = (0.5, 5.0)
+
+# NEMO rn_vfac (ln_crt_dwn current feedback): fraction of the surface current
+# subtracted from the wind before the bulk. NEMO bound is [0, 1] (0 = absolute
+# wind = default; 1 = full feedback).
+_WIND_VFAC_RANGE = (0.0, 1.0)
+
+
+def _resolve_wind_vfac(relative_winds: bool, wind_vfac):
+    """Resolve the NEMO ``rn_vfac`` current-feedback fraction from the CLI flags.
+
+    ``--wind-vfac X`` sets it explicitly; ``--relative-winds`` is the shorthand
+    for the NEMO ``ln_crt_dwn`` default ``rn_vfac = 1.0``.  Passing BOTH is only
+    accepted when they agree (``--wind-vfac 1.0``); a contradictory pair is a
+    user error and raises (never silently pick one -- the dispatch-hardening
+    rule).  Returns ``0.0`` (absolute wind, the byte-identical default) when
+    neither is given.  Validated finite and within ``_WIND_VFAC_RANGE``."""
+    if wind_vfac is None:
+        vfac = 1.0 if relative_winds else 0.0
+    else:
+        vfac = float(wind_vfac)
+        if relative_winds and vfac != 1.0:
+            raise SystemExit(
+                f"--relative-winds (rn_vfac=1.0) conflicts with --wind-vfac "
+                f"{wind_vfac}; pass only one (or --wind-vfac 1.0).")
+    lo, hi = _WIND_VFAC_RANGE
+    if not (np.isfinite(vfac) and lo <= vfac <= hi):
+        raise SystemExit(
+            f"--wind-vfac must be finite and within [{lo}, {hi}] (NEMO rn_vfac "
+            f"current-feedback fraction); got {vfac!r}.")
+    return vfac
 
 
 def _kpp_vmix_override(kpp_ri_crit=None, kpp_cv=None):
@@ -1956,8 +1991,12 @@ def _diag(state, lat2d=None, lon2d=None) -> dict:
     boundaries vs the bipolar cap/fold vs at depth), the key pin-point for
     the dynamics instability seed.
     """
-    T = np.asarray(state.T.data)[..., 0]
-    S = np.asarray(state.S.data)[..., 0]
+    # T/S: slice FIRST (device-side), THEN convert — only the 2-D surface
+    # layer crosses to host (converting the full leaf would assemble the
+    # whole 3-D sharded field; codex batch4 HIGH).  u/v genuinely need every
+    # level (3-D max|u| + its location), so those are full-leaf pulls.
+    T = np.asarray(state.T.data[..., 0])
+    S = np.asarray(state.S.data[..., 0])
     u = np.asarray(state.u.data)            # (nlat, nlon+1, nlev)
     # MPAS has no separate v field (u is edge-normal on (nEdges, nlev)).
     has_v = getattr(state, "v", None) is not None
@@ -2119,6 +2158,32 @@ def _apply_ice_init(ice_state, ic):
     return ice_state._replace(**upd)
 
 
+def _surface_uv_faces(state):
+    """Top-level (2-D) staggered u/v faces of a lat-lon C-grid family state,
+    read DEVICE-SIDE — slice-before-convert (M2 batch4 contract: the ``[..., 0]``
+    child never assembles the full, possibly lat-band-sharded, 3-D leaf).
+
+    Layout-polymorphic (scaling-M2 leftover): the ``--spmd-persistent-state``
+    lane carries ``v`` as the ``n_lat``-row ``v_lower`` (the staggered top row
+    dropped), detected here by ``v`` sharing ``u``'s leading dim (the GLOBAL
+    layout's v always has ``n_lat+1`` rows).  The missing top row is the
+    pole/cap WALL — identically zero under the v-carrier contract asserted in
+    ``shard_state_latlon`` — appended via the SAME shared reconstruction the
+    full-state gather uses (``append_vface_wall_row``), so the sharded-state
+    read is BIT-identical to reading the gathered state WITHOUT forcing the
+    per-step full-state gather (gated by
+    tests/parallel/test_persistent_sharded_ocean_loop.py).
+    """
+    u_face = jnp.asarray(state.u.data)[..., 0]       # (n_lat, n_lon+1)
+    v_face = jnp.asarray(state.v.data)[..., 0]       # (n_lat[+1], n_lon)
+    if v_face.shape[0] == u_face.shape[0]:           # v_lower carrier layout
+        from legoesm.ocean.dynamics.sharded_ocean_step import (
+            append_vface_wall_row,
+        )
+        v_face = append_vface_wall_row(v_face)       # -> (n_lat+1, n_lon)
+    return u_face, v_face
+
+
 def _surface_currents(state, grid, app_grid_type):
     """Top-level ocean currents (u_east, v_north) at T points / cells [m/s].
 
@@ -2129,21 +2194,62 @@ def _surface_currents(state, grid, app_grid_type):
     surface level directly on the T-shape they already carry — the ice model only
     needs an O(0.1 m/s) drift reference for the ocean-ice drag, so the face value
     at the matching index is an adequate cell-centre proxy (and avoids a bespoke
-    face->centre average)."""
+    face->centre average).  Reads via ``_surface_uv_faces`` (device-side,
+    persistent-sharded-layout aware — no full-state gather)."""
     if app_grid_type == "mpas":
         from legoesm.ocean.init_mpas import reconstruct_cell_velocity
         u_sfc, v_sfc = reconstruct_cell_velocity(state.u.data[:, 0], grid)
         return u_sfc, v_sfc
     # latlon / tripole C-grid: u on EW faces (n_lat, n_lon+1), v on NS faces
     # (n_lat+1, n_lon); crop to the T shape (n_lat, n_lon) at the surface level.
-    n_lat = int(np.asarray(grid.lat_T if app_grid_type == "tripole"
-                           else grid.lat).shape[0]) if app_grid_type != "latlon" \
-        else int(np.asarray(grid.lat).shape[0])
-    u_face = state.u.data[..., 0]
-    v_face = state.v.data[..., 0]
+    u_face, v_face = _surface_uv_faces(state)
     u_sfc = u_face[:, :-1]                      # drop the periodic wrap column
     v_sfc = 0.5 * (v_face[:-1, :] + v_face[1:, :])
     return u_sfc, v_sfc
+
+
+def _surface_currents_geographic(state, grid, app_grid_type):
+    """Top-layer ocean surface current in GEOGRAPHIC (east, north) [m/s] for the
+    NEMO ``ln_crt_dwn`` relative-wind subtraction (``rn_vfac``).
+
+    The CORE-II wind (``u10``/``v10``) arrives GEOGRAPHIC, so the current
+    subtracted from it in ``air_sea_fluxes`` MUST be geographic too -- subtracting
+    a grid-aligned current from a geographic wind corrupts the tripole-fold /
+    high-lat stress (the frame-consistency correctness point).  Frame handling:
+
+    * ``mpas`` -- ``_surface_currents`` already reconstructs geographic
+      (u_east, v_north) via the Perot ``reconstruct_cell_velocity``; pass through.
+    * lat-lon C-grid family (``latlon`` / ``latlon_regional`` / ``tripole``) --
+      average the two bracketing faces of each cell to the T-centre (grid-aligned
+      i-, j-components) and rotate to geographic with the canonical
+      ``coupler.grid_remap.rotate_tpoint_currents_to_geographic`` (angle from the
+      grid's ``cos_alpha_u`` / ``sin_alpha_u``; the IDENTITY outside the tripole
+      bipolar cap, so a regular lat-lon grid is exact).
+
+    The rotation lives HERE (the top-layer run driver), not in
+    ``compute_omip2_surface_forcing``, because the ``legoesm.ocean`` package may
+    not import ``legoesm.coupler`` under the import-linter component-independence
+    contract; the driver is above both layers and may.  Unsupported grids raise
+    (fail loud, never a silent absolute-wind fall-through)."""
+    if app_grid_type == "mpas":
+        return _surface_currents(state, grid, app_grid_type)
+    if app_grid_type not in ("latlon", "latlon_regional", "tripole"):
+        raise NotImplementedError(
+            f"--relative-winds (ln_crt_dwn) is wired for the lat-lon C-grid "
+            f"family + mpas; got app_grid_type={app_grid_type!r}.")
+    # Device-side staggered read (persistent-sharded-layout aware — no
+    # full-state gather; see _surface_uv_faces).
+    u_face, v_face = _surface_uv_faces(state)        # (n_lat, n_lon+1) grid-i,
+    #                                                  (n_lat+1, n_lon) grid-j
+    u_c = 0.5 * (u_face[:, :-1] + u_face[:, 1:])     # -> (n_lat, n_lon) T-centre
+    v_c = 0.5 * (v_face[:-1, :] + v_face[1:, :])     # -> (n_lat, n_lon) T-centre
+    cos_a_u = getattr(grid, "cos_alpha_u", None)
+    sin_a_u = getattr(grid, "sin_alpha_u", None)
+    if cos_a_u is None or sin_a_u is None:
+        # Regular lat-lon: grid-i == geographic east, grid-j == north (identity).
+        return u_c, v_c
+    from legoesm.coupler.grid_remap import rotate_tpoint_currents_to_geographic
+    return rotate_tpoint_currents_to_geographic(u_c, v_c, cos_a_u, sin_a_u)
 
 
 def _build_atm_to_surface_core2(forc, ramp=1.0):
@@ -2610,6 +2716,122 @@ def _cli_flags_given(argv=None) -> set:
     return given
 
 
+def _validate_spmd_persistent_state(persistent: bool, n_gpus: int,
+                                    distributed: bool) -> None:
+    """Fail-fast validation of the ``--spmd-persistent-state`` flag combos
+    (pure helper: runs BEFORE any device/data work so a bad combination costs
+    nothing; directly unit-tested).
+
+    * requires ``--n-gpus > 1`` — with one device there is no scatter/gather
+      to eliminate and the flag would silently mean nothing (dispatch
+      hardening: refuse, never no-op);
+    * refuses ``--distributed`` — the multi-process host loop runs on the
+      all-gathered REPLICATED state on every rank (process-0-gated I/O), and
+      the persistent lane's per-leaf host reads (``np.asarray`` of a
+      non-fully-addressable array) would crash mid-loop.  Multi-controller
+      persistence is the next increment.
+    """
+    if not persistent:
+        return
+    if n_gpus <= 1:
+        raise SystemExit(
+            "--spmd-persistent-state requires --n-gpus > 1: with a single "
+            "device there is no per-step scatter/gather to eliminate (the "
+            "plain model.step path is already gather-free). Drop the flag "
+            "or add --n-gpus N.")
+    if distributed:
+        raise SystemExit(
+            "--spmd-persistent-state is single-controller only (refused with "
+            "--distributed): the multi-process host loop operates on the "
+            "all-gathered replicated state on every rank, and the persistent "
+            "lane's per-leaf host reads (np.asarray on a non-fully-"
+            "addressable array) would crash. Run --distributed without "
+            "--spmd-persistent-state, or single-process with it.")
+
+
+class _PersistentStateResidency:
+    """Residency tracker for the ``--spmd-persistent-state`` lane (scaling-M2).
+
+    Owns the ONLY mutable residency flag: the persistent lane's ``state`` is
+    either lat-band SHARDED (``v``/``v_mask`` carried as the n_lat-row
+    ``v_lower``) or GLOBAL (full staggered ``v``), and every layout flip goes
+    through :meth:`ensure_sharded` / :meth:`ensure_global` — which also COUNT
+    each full-state transfer (the honest-cost contract: a forced per-step
+    gather is announced + counted, never silent).  ``enabled=False`` (flag
+    off, the default) makes both methods exact identity no-ops, so the
+    default driver path is byte-identical.
+
+    The full-STATE counters track LAYOUT FLIPS ONLY — they are NOT the total
+    host-transfer cost.  Per-step LEAF host transfers (the forcing builders'
+    surface-T slice pulls, the SSS-restore / ice-thermo surface pull+write-
+    backs, the WOA-nudge / spin-up-drag FULL-3-D leaf round trips, the
+    diag-cadence reads) remain in the persistent lane and are counted
+    SEPARATELY via :meth:`count_leaf_slice` / :meth:`count_leaf_full`
+    (codex batch4 HIGH: ``full_state_gathers_per_step=0`` must never read as
+    "zero transfer cost").  Leaf counting is unconditional — the transfers
+    happen on every lane; only the persistent lane REPORTS the totals.
+
+    The flag cannot desync from the state: it flips only here, both methods
+    are no-ops unless the flag is in the opposite residency, and every loop
+    reassignment of ``state`` either preserves residency (the sharded inner
+    step: sharded in -> sharded out; leaf-wise host BCs: layout-preserving
+    leaf replaces) or routes through these methods.  Module-level (not a
+    ``main()`` closure) so the interleavings are directly unit-tested
+    (tests/unit/test_run_omip_core2_spmd_persistent_cli.py — supplementary
+    review finding: closure-only bookkeeping was untestable).
+    """
+
+    def __init__(self, enabled: bool, shard_fn=None, gather_fn=None):
+        if enabled and (shard_fn is None or gather_fn is None):
+            raise ValueError(
+                "_PersistentStateResidency: enabled=True requires both "
+                "shard_fn and gather_fn (the lat-band layout flips).")
+        self.enabled = bool(enabled)
+        self._shard_fn = shard_fn
+        self._gather_fn = gather_fn
+        self.sharded = False           # current residency of the loop state
+        self.gathers = 0               # full-STATE sharded->global transfers
+        self.shards = 0                # full-STATE global->sharded transfers
+        # -- per-step LEAF host-transfer counters (honest cost, codex HIGH) --
+        self.leaf_slice_pulls = 0      # 2-D (surface/mask) leaf host READS
+        self.leaf_slice_writes = 0     # 2-D surface-layer device WRITE-backs
+        self.leaf_full_gathers = 0     # FULL-3-D single-leaf host reads
+        self.leaf_full_uploads = 0     # FULL-3-D single-leaf device uploads
+
+    def count_leaf_slice(self, *, pulls: int = 0, writes: int = 0) -> None:
+        """Record 2-D leaf host transfers: surface-layer / 2-D-mask host
+        READS (``pulls``) and surface-layer device WRITE-backs (``writes``).
+        Bookkeeping only — never moves data itself."""
+        self.leaf_slice_pulls += int(pulls)
+        self.leaf_slice_writes += int(writes)
+
+    def count_leaf_full(self, *, gathers: int = 0, uploads: int = 0) -> None:
+        """Record FULL-3-D single-leaf host transfers: host reads of an
+        entire leaf (``gathers``) and full-leaf device uploads (``uploads``).
+        Bookkeeping only — never moves data itself."""
+        self.leaf_full_gathers += int(gathers)
+        self.leaf_full_uploads += int(uploads)
+
+    def ensure_sharded(self, st):
+        """Lay ``st`` out lat-band sharded (identity when disabled or
+        already sharded)."""
+        if not self.enabled or self.sharded:
+            return st
+        self.sharded = True
+        self.shards += 1
+        return self._shard_fn(st)
+
+    def ensure_global(self, st):
+        """Gather ``st`` back to the global single-device layout (full
+        staggered v) for host-global consumers / I-O (identity when disabled
+        or already global)."""
+        if not self.enabled or not self.sharded:
+            return st
+        self.sharded = False
+        self.gathers += 1
+        return self._gather_fn(st)
+
+
 def _record_final_state_digest(manifest_path, state) -> None:
     """Record the final ocean state digest into the run manifest (#376 Phase 4).
 
@@ -2668,13 +2890,10 @@ def validate_prescribed_flow_args(prescribed_flow, grid: str,
             " Pass --no-gm-redi to run the circulation-isolation experiment.")
 
 
-def main() -> int:
-    # allow_abbrev=False: the module-level x64 toggle is decided by an EXACT
-    # "--fp32" argv match (``_FP32``), so the real parser must NOT accept an
-    # abbreviation (e.g. "--fp") of --fp32 — that would set args.fp32=True
-    # while x64 was already enabled, tripping the consistency guard below.
-    # All sbatch wrappers already use full flag names, so this is behaviour-
-    # preserving for existing callers.
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """CLI parser for run_omip_core2, extracted from ``main`` so the
+    argument set is unit-testable (e.g. the #939 ``--polar-filter``
+    tri-state disable). ``main`` calls this then ``parse_args``."""
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter,
                                 allow_abbrev=False)
@@ -2748,6 +2967,27 @@ def main() -> int:
                         "(replicated) state; I/O (manifest, CSV, snapshots, transports) "
                         "is written ONLY by process 0. Single-process (default, no "
                         "--distributed) is byte-unchanged.")
+    p.add_argument("--spmd-persistent-state", action="store_true",
+                   help="With --n-gpus > 1: keep the ocean state lat-band "
+                        "SHARDED across steps (make_sharded_ocean_step) instead "
+                        "of the global-in/global-out wrapper's full-state "
+                        "scatter+gather EVERY step (scaling-M2). Host post-step "
+                        "BCs run UNCHANGED: the leaf-wise host updates (SSS "
+                        "restore / ice-thermo / nudge / drag) read+write "
+                        "per-leaf on the addressable sharded arrays, and the "
+                        "jnp per-column BCs (geothermal / ISF / BBL) are "
+                        "sharding-transparent. The FULL state is gathered only "
+                        "at snapshot/abort/final boundaries — plus EVERY step "
+                        "when --prognostic-sea-ice or --relative-winds/"
+                        "--wind-vfac is active (both need the staggered global "
+                        "(n_lat+1) v for the surface currents; the forced "
+                        "per-step gather count is logged as "
+                        "full_state_gathers_per_step, never silent). Default "
+                        "OFF = the byte-identical per-step wrapper. Single-"
+                        "controller only: refused with --distributed (the "
+                        "multi-process host loop needs the replicated gathered "
+                        "state on every rank; persistent multi-controller is "
+                        "the next increment).")
     p.add_argument("--mpas-level", type=int, default=6,
                    help="MPAS Voronoi subdivision level (nCells=10*4^level+2): "
                         "5~230km, 6~115km (~ORCA1), 7~58km. For --grid mpas.")
@@ -2978,6 +3218,17 @@ def main() -> int:
                         "prognostic ice, so high-lat (esp. Arctic) cells over-cool "
                         "3-5 C below NEMO (LIM ice caps SST). NEMO-faithful; removes "
                         "~half the Arctic SST RMSE. Off = bit-exact legacy.")
+    p.add_argument("--freeze-scheme", type=str, default="constant",
+                   choices=sorted(VALID_FREEZE_SCHEMES),
+                   help="Seawater freezing-point (liquidus) scheme (MED-1) for the "
+                        "freeze surrogates: 'constant' (default, byte-exact -1.8 C), "
+                        "'linear_S' (MOM6 linear liquidus), 'unesco' (UNESCO/Millero, "
+                        "NEMO eos_fzp EOS-80: ~-1.92 C at S=35). Non-constant makes "
+                        "BOTH the --freeze-floor model clamp AND the --ice-thermo "
+                        "under-ice relaxation track the LOCAL surface salinity "
+                        "(Arctic-relevant: fresher shelf water freezes warmer). "
+                        "Requires --freeze-floor and/or --ice-thermo (else no "
+                        "consumer -> hard error).")
     p.add_argument("--prognostic-sea-ice", action="store_true",
                    help="Wire legoESM's REAL prognostic sea-ice model "
                         "(legoesm.ice.step_sea_ice: thermo + dynamics + brine) into "
@@ -3061,8 +3312,12 @@ def main() -> int:
                         "col[nx-1]<-col1) + overlap-fills the mask/bathy/IC. "
                         "ORCA-overlap-specific; do NOT use on a regular lat-lon grid. "
                         "Off = bit-exact legacy.")
-    p.add_argument("--polar-filter", action="store_true",
-                   help="Enable the mask-aware Fourier polar filter (lat-lon grid only): "
+    p.add_argument("--polar-filter", action=argparse.BooleanOptionalAction,
+                   default=None,
+                   help="Enable/disable the mask-aware Fourier polar filter (lat-lon "
+                        "grid only). Omitted -> the config default applies (the global "
+                        "bathy path forces it ON, #939); --no-polar-filter forces it "
+                        "OFF (for the #939 A/B or an emergency disable). "
                         "truncate the zonal modes exceeding the per-latitude CFL near the "
                         "converging-meridian poles, where a global lat-lon ocean otherwise "
                         "blows up ~day 0.25. Mask-aware (land filled with ocean zonal mean "
@@ -3316,6 +3571,18 @@ def main() -> int:
                         "top). Default 'none' is byte-identical. "
                         "STABILITY: TKE x superbee tracer advection blew up "
                         "on DINO in ~15 days — smoke-gate before long runs.")
+    p.add_argument("--relative-winds", action="store_true",
+                   help="NEMO ln_crt_dwn current feedback: subtract the ocean "
+                        "surface current from the 10-m wind before the bulk "
+                        "stress + turbulent fluxes (rn_vfac=1.0). Reduces "
+                        "tropical stress by ~20-30 percent, realigns the EUC and "
+                        "damps mesoscale (eddy-killing). Shorthand for "
+                        "--wind-vfac 1.0. lat-lon / tripole / mpas only "
+                        "(cubed_sphere parked). Default off (absolute wind).")
+    p.add_argument("--wind-vfac", type=float, default=None,
+                   help="NEMO rn_vfac current-feedback fraction in [0, 1] "
+                        "(0=absolute wind=default; 1=full feedback="
+                        "--relative-winds). Set BOTH only if equal to 1.0.")
     p.add_argument("--mle", action="store_true",
                    help="Enable the Fox-Kemper mixed-layer-eddy (MLE) "
                         "restratification (NEMO tramle nn_mle=1): a bolus "
@@ -3366,10 +3633,36 @@ def main() -> int:
     p.add_argument("--spinup-drag-days", type=float, default=0.0,
                    help="Duration [days] of the spin-up velocity-damping phase "
                         "(drag removed afterwards -> free run).")
+    return p
+
+
+def main() -> int:
+    # allow_abbrev=False: the module-level x64 toggle is decided by an EXACT
+    # "--fp32" argv match (``_FP32``), so the real parser must NOT accept an
+    # abbreviation (e.g. "--fp") of --fp32 — that would set args.fp32=True
+    # while x64 was already enabled, tripping the consistency guard below.
+    # All sbatch wrappers already use full flag names, so this is behaviour-
+    # preserving for existing callers.
+    p = _build_arg_parser()
     args = p.parse_args()
 
     # KPP MLD-deepening sensitivity flags are mpas-only (fail loud, never silent).
     _validate_kpp_grid(args.grid, args.kpp_ri_crit, args.kpp_cv)
+
+    # NEMO ln_crt_dwn relative-wind current feedback (rn_vfac): resolve + range-
+    # check the CLI up front (fail before the expensive setup).  0.0 = absolute
+    # wind (byte-identical default).  cubed_sphere is parked -> reject early
+    # rather than crash mid-loop (the applicator has no cube current rotation).
+    _wind_vfac = _resolve_wind_vfac(args.relative_winds, args.wind_vfac)
+    if _wind_vfac != 0.0 and args.grid == "cubed_sphere":
+        raise SystemExit(
+            "--relative-winds/--wind-vfac is not wired for --grid cubed_sphere "
+            "(parked); supported grids: tripole / latlon_bathy / mpas.")
+
+    # --spmd-persistent-state combo validation (scaling-M2): fail BEFORE the
+    # jax.distributed bootstrap / any expensive setup.
+    _validate_spmd_persistent_state(
+        args.spmd_persistent_state, args.n_gpus, args.distributed)
 
     # ------------------------------------------------------------------
     # Multi-PROCESS jax.distributed bootstrap (--distributed): MUST run BEFORE any
@@ -3424,6 +3717,21 @@ def main() -> int:
         if not (float(args.ice_thermo_tau_days) > 0.0):
             raise ValueError("--ice-thermo-tau-days must be > 0 (freezing-relaxation "
                              f"timescale [days]); got {args.ice_thermo_tau_days}.")
+
+    if args.freeze_scheme != "constant":
+        # The liquidus scheme only feeds the freeze surrogates -- with neither
+        # enabled it would be a silent no-op (dispatch-hardening: fail loud).
+        if not (args.freeze_floor or args.ice_thermo):
+            raise ValueError(
+                f"--freeze-scheme {args.freeze_scheme!r} has no consumer without "
+                "--freeze-floor (salinity-dependent model freeze floor) and/or "
+                "--ice-thermo (salinity-dependent under-ice relaxation target). "
+                "Add one of those flags or drop --freeze-scheme.")
+        if args.grid == "cubed_sphere":
+            raise ValueError(
+                "--freeze-scheme is not wired for --grid cubed_sphere (the cube "
+                "builder does not thread the freeze-floor config; matching its "
+                "existing --freeze-floor gap). Use tripole/latlon_bathy/mpas.")
 
     if args.prognostic_sea_ice:
         # The REAL prognostic ice model REPLACES the surrogates — never combine
@@ -3622,6 +3930,12 @@ def main() -> int:
         if args.ddm_rc is not None:
             _ddm_kw["rn_hsbfr"] = args.ddm_rc
         _ddm_cfg = _DDMConfig(enabled=True, **_ddm_kw)
+    # --freeze-scheme -> model-config freezing override (MED-1): None keeps the
+    # builders' validated default config untouched (byte-exact legacy).
+    _freezing_ovr = None
+    if args.freeze_scheme != "constant":
+        from legoesm.ocean.eos import FreezingPointConfig
+        _freezing_ovr = FreezingPointConfig(scheme=args.freeze_scheme)
     if args.grid == "tripole":
         grid, z_coord, model, state, H_bathy = build_tripole(
             args.nlev, args.H_max, args.mesh,
@@ -3635,6 +3949,7 @@ def main() -> int:
             bathy_smoothing_passes=args.bathy_smoothing_passes,
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
             freeze_floor=(True if args.freeze_floor else None),
+            freezing=_freezing_ovr,
             runoff_depth_spread_m=args.runoff_depth_spread_m,
             barotropic_solver=args.barotropic_solver,
             barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
@@ -3697,6 +4012,7 @@ def main() -> int:
             woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
             flat_bottom=args.flat_bottom, partial_cell=args.partial_cell,
             freeze_floor=(True if args.freeze_floor else None),
+            freezing=_freezing_ovr,
             runoff_depth_spread_m=args.runoff_depth_spread_m,
             mle=mle_cfg, dz_ref_override=_nemo_dz,
             bottom_drag_scheme=args.bottom_drag_scheme,
@@ -3733,6 +4049,7 @@ def main() -> int:
             bathy_smoothing_passes=args.bathy_smoothing_passes,
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
             freeze_floor=(True if args.freeze_floor else None),
+            freezing=_freezing_ovr,
             runoff_depth_spread_m=args.runoff_depth_spread_m,
             tracer_advection=args.tracer_advection,
             barotropic_solver=args.barotropic_solver,
@@ -3748,7 +4065,9 @@ def main() -> int:
             min_levels=args.min_levels,
             div_damp_2=args.div_damp_2, div_damp_4=args.div_damp_4,
             smag_cfl_safety=args.smag_cfl_safety,
-            use_polar_filter=(True if args.polar_filter else None),
+            # tri-state: None -> keep the config default (bathy forces ON, #939);
+            # True/False -> explicit override via build_latlon_bathy's _ovr.
+            use_polar_filter=args.polar_filter,
             polar_filter_cutoff_lat_deg=args.polar_filter_cutoff_lat,
             polar_filter_max_wave_speed=args.polar_filter_max_wave_speed,
             polar_filter_safety_factor=args.polar_filter_safety,
@@ -4447,6 +4766,10 @@ def main() -> int:
         _ocean_step = (lambda st, sf, fw, t_sec=None:
                        model.step(st, dt, surface_forcing=sf, freshwater=fw,
                                   t_seconds=t_sec))
+    # --spmd-persistent-state lane state (scaling-M2): OFF by default so the
+    # residency helpers below are no-ops and the loop is byte-identical.
+    _spmd_persistent = False
+    _pers_shard_fn = _pers_gather_fn = None
     if args.n_gpus > 1:
         if app_grid_type not in ("tripole", "latlon"):
             raise SystemExit(
@@ -4510,13 +4833,100 @@ def main() -> int:
                 "the lat-band sharded step does not thread t_seconds, so the "
                 "equilibrium tide would be SILENTLY inert. Run the tide "
                 "single-device, or disable tidal forcing for the SPMD run.")
-        _spmd_step = make_sharded_ocean_step_global(model, _spmd_mesh)
-        # t_sec is always None here (tide-enabled fail-fasts above).
-        _ocean_step = (lambda st, sf, fw, t_sec=None:
-                       _spmd_step(st, dt, surface_forcing=sf, freshwater=fw))
-        print(f"[setup] multi-GPU lat-band SPMD: {args.n_gpus} devices, "
-              f"n_lat={n_lat_final} ({n_lat_final // args.n_gpus} rows/band); "
-              f"global-in/global-out wrapper (host BCs on gathered state).")
+        if args.spmd_persistent_state:
+            # PERSISTENT lane (scaling-M2 increment 1): the state stays
+            # lat-band sharded ACROSS steps via the pure-dynamics inner step
+            # (the wrapper docstring's own guidance); shard_state_latlon /
+            # gather_state_latlon run only at the residency boundaries the
+            # helpers below manage (initial shard, snapshot/abort/final
+            # gathers, and the counted per-step gathers forced by host-global
+            # consumers).  t_sec is always None here (tide fail-fasts above).
+            from legoesm.ocean.dynamics.sharded_ocean_step import (
+                gather_state_latlon,
+                make_sharded_ocean_step,
+                shard_state_latlon,
+            )
+            _spmd_inner = make_sharded_ocean_step(model, _spmd_mesh)
+            _ocean_step = (lambda st, sf, fw, t_sec=None:
+                           _spmd_inner(st, dt, surface_forcing=sf,
+                                       freshwater=fw))
+
+            def _pers_shard_fn(st, _mesh=_spmd_mesh):
+                return shard_state_latlon(st, _mesh)
+
+            def _pers_gather_fn(st, _mesh=_spmd_mesh):
+                return gather_state_latlon(st, _mesh)
+
+            _spmd_persistent = True
+            print(f"[setup] multi-GPU lat-band SPMD: {args.n_gpus} devices, "
+                  f"n_lat={n_lat_final} ({n_lat_final // args.n_gpus} "
+                  f"rows/band); PERSISTENT sharded state "
+                  f"(--spmd-persistent-state): full-state gathers only at "
+                  f"snapshot/abort/final + counted per-step forcings.")
+        else:
+            _spmd_step = make_sharded_ocean_step_global(model, _spmd_mesh)
+            # t_sec is always None here (tide-enabled fail-fasts above).
+            _ocean_step = (lambda st, sf, fw, t_sec=None:
+                           _spmd_step(st, dt, surface_forcing=sf,
+                                      freshwater=fw))
+            print(f"[setup] multi-GPU lat-band SPMD: {args.n_gpus} devices, "
+                  f"n_lat={n_lat_final} ({n_lat_final // args.n_gpus} "
+                  f"rows/band); global-in/global-out wrapper (host BCs on "
+                  f"gathered state).")
+
+    # ------------------------------------------------------------------
+    # --spmd-persistent-state residency helpers (scaling-M2).  The persistent
+    # lane keeps ``state`` in the lat-band SHARDED layout (v/v_mask carried as
+    # the n_lat-row ``v_lower``) across steps; these two helpers flip the
+    # residency at the classified boundaries and COUNT every full-state
+    # transfer so the cost is visible in the run log (never silent).  With the
+    # flag OFF both are exact no-ops (byte-identical default path).
+    #
+    # Host-op classification (scaling-M2 audit):
+    # (a) sharded-safe, UNCHANGED on the persistent state: the leaf-wise host
+    #     BCs (SSS restore / ice-thermo freeze relax / WOA nudge / spin-up
+    #     drag) read+write single cell-centred leaves via np.asarray — an
+    #     addressable sharded array assembles to the identical host values,
+    #     and the drag's v touch operates on ``v_lower`` exactly (the dropped
+    #     pole row is identically 0 and 0*decay == 0); the jnp per-column BCs
+    #     (geothermal / ISF) are sharding-transparent under GSPMD; BBL is
+    #     value-exact too, but its static lat-neighbour slice updates may make
+    #     XLA insert device-side collectives / replicate T,S under eager GSPMD
+    #     (correct, device-resident — NOT a host-layout flip, so it is
+    #     intentionally outside the gather counters, which track full-state
+    #     LAYOUT flips only); the
+    #     forcing builders (compute_omip2_surface_forcing / _freshwater_)
+    #     np.asarray-read state.T identically (pre-existing per-step host
+    #     read, both lanes); _diag is EXACT on the sharded layout (the v top
+    #     row it cannot see is identically 0 in the gathered layout too).
+    # (b) global reductions: none on the host loop itself (the in-step
+    #     reductions run through the SPMD-safe psum paths inside shard_map).
+    # (c) host-global consumers needing the FULL (n_lat+1)-v global layout:
+    #     the momentum-term debug dump (runs model internals on the host
+    #     state) and the real I/O boundaries (snapshot / blowup abort /
+    #     final diags+digest) — these gather via _ensure_global_state below
+    #     (counted; snapshot-cadence ones re-shard lazily at the next step).
+    #     Prognostic sea ice + relative winds are NOT in this class any more
+    #     (scaling-M2 leftover): _surface_currents* read 2-D surface u/v
+    #     slices DEVICE-SIDE and reconstruct the one dropped staggered top
+    #     row as the wall zero (_surface_uv_faces -> append_vface_wall_row,
+    #     exact under the v-carrier contract), so they operate on the
+    #     sharded state directly — class (a), no forced full-state gather.
+    # The residency STATE MACHINE itself is the module-level, unit-tested
+    # ``_PersistentStateResidency`` (flag/counter interleavings gated in
+    # tests/unit/test_run_omip_core2_spmd_persistent_cli.py); main() only
+    # binds it to this run's shard/gather layout flips.
+    # ------------------------------------------------------------------
+    _pers_res = _PersistentStateResidency(
+        _spmd_persistent, _pers_shard_fn, _pers_gather_fn)
+    _ensure_sharded_state = _pers_res.ensure_sharded
+    _ensure_global_state = _pers_res.ensure_global
+    # Snapshot the applicator's monotonic host-pull ledger so the done line
+    # can report THIS run's forcing-builder surface-slice pulls (the builders
+    # record each 2-D surface-T pull; codex batch4 HIGH — those transfers
+    # must appear next to the full-state gather count, never implied zero).
+    from legoesm.ocean.coupler.omip2_applicator import host_pull_ledger
+    _ledger0 = host_pull_ledger()
 
     t_wall = time.time()
 
@@ -4555,6 +4965,16 @@ def main() -> int:
                     "enabled (those need per-step host updates)")
         print(f"[scan] --scan-block ignored: {why}.", flush=True)
     if use_scan:
+        # NEMO ln_crt_dwn relative winds are host-loop only: the on-device scan
+        # body (compute_omip2_surface_forcing_jax) has no current-feedback wiring,
+        # so --relative-winds under --scan-block would SILENTLY drop the feedback.
+        # Refuse rather than mislead (dispatch hardening).
+        if _wind_vfac != 0.0:
+            raise SystemExit(
+                "[scan] --relative-winds/--wind-vfac is not applied on the "
+                "--scan-block fast path (the on-device forcing kernel has no "
+                "current-feedback wiring); use the host Python loop "
+                "(omit --scan-block).")
         # The scan path applies NONE of the host-loop surface forcing extensions:
         # P - E (precip is not in the on-device stack), Dai-Trenberth runoff, SSS
         # restoring, OR the --ice-albedo SW reduction (siconc not on device).
@@ -4677,6 +5097,58 @@ def main() -> int:
               f"circulation pinned inside every step -- vertical physics "
               f"isolated from circulation feedback.", flush=True)
 
+    # --spmd-persistent-state: static classification of the per-step
+    # host-global consumers (class (c) above).  Forced per-step gathers are
+    # KEPT + COUNTED + logged up front — never a silent degradation.
+    # Prognostic ice / relative winds no longer force one (scaling-M2
+    # leftover): their surface-current reads are device-side on the sharded
+    # layout (_surface_uv_faces), bit-identical to the gathered read — the
+    # list stays as the wiring point for any future host-global consumer.
+    _pers_forced = []
+    if _spmd_persistent:
+        print(f"[spmd-persistent] full_state_gathers_per_step="
+              f"{1 if _pers_forced else 0} (full-STATE layout flips ONLY — "
+              f"NOT the total transfer cost)"
+              + (f" — forced by: {'; '.join(_pers_forced)}" if _pers_forced
+                 else "; otherwise full-state gathers only at snapshot/abort/"
+                      "final boundaries"), flush=True)
+        if ice_config is not None or _wind_vfac != 0.0:
+            print("[spmd-persistent] prognostic-ice / relative-winds surface "
+                  "currents read the SHARDED state device-side (2-D surface "
+                  "u/v slices; the dropped staggered top row is reconstructed "
+                  "as the wall zero — no forced per-step full-state gather).",
+                  flush=True)
+        # Honest-cost companion (codex batch4 HIGH): enumerate the per-step
+        # LEAF host transfers that REMAIN in the persistent lane, so a
+        # "0 full-state gathers" line is never read as "0 transfer cost".
+        # Measured totals are printed in the [spmd-persistent] done lines.
+        _leaf_srcs = ["surface-T 2-D slice per surface-forcing build"]
+        if args.emp_freshwater or runoff_monthly is not None:
+            _leaf_srcs.append("surface-T 2-D slice per freshwater build")
+        if sss_restore_cfg is not None:
+            _leaf_srcs.append("SSS-restore S-surface pull + write-back")
+        if args.ice_thermo:
+            _leaf_srcs.append(
+                "ice-thermo T-surface pull + write-back"
+                + (" (+ per-cell liquidus S-surface pull, --freeze-scheme)"
+                   if args.freeze_scheme != "constant" else ""))
+        if nudge_tau_s > 0:
+            _leaf_srcs.append(
+                "WOA-nudge FULL-3D T,S gather + re-upload (while active)")
+        if drag_tau_s > 0:
+            _leaf_srcs.append(
+                "spin-up-drag FULL-3D u,v gather + re-upload (while active)")
+        print(f"[spmd-persistent] per-step LEAF host transfers remain "
+              f"(counted separately, totals at [done]): "
+              f"{'; '.join(_leaf_srcs)}; plus T,S surface + FULL-3D u,v "
+              f"reads at diag cadence.", flush=True)
+        if args.diag_momentum_step >= 0:
+            print(f"[spmd-persistent] --diag-momentum-step "
+                  f"{args.diag_momentum_step}: additionally gathers each of "
+                  f"the first {args.diag_momentum_step} steps (debug window).",
+                  flush=True)
+    _pers_needs_prestep_global = bool(_pers_forced)
+
     for step in range(1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         _t_sec = jnp.asarray((step - 1) * dt) if _tide_on else None
@@ -4705,6 +5177,17 @@ def main() -> int:
                       f"(segment {visc_seg_idx + 1}/{len(visc_schedule)})",
                       flush=True)
                 visc_seg_idx += 1
+        # --spmd-persistent-state: consumers below that need the FULL global
+        # layout every step force a per-step gather — kept + counted (see the
+        # [spmd-persistent] setup log line), never silent.  Since the
+        # scaling-M2 leftover this is ONLY the momentum-term debug dump
+        # (model internals on the host state) + any future _pers_forced
+        # entry; prognostic ice / relative winds read the sharded state
+        # device-side (_surface_uv_faces reconstructs the staggered top row).
+        if _spmd_persistent and (_pers_needs_prestep_global
+                                 or (args.diag_momentum_step >= 0
+                                     and step <= args.diag_momentum_step)):
+            state = _ensure_global_state(state)
         # Build CORE-II surface forcing and integrate it INSIDE model.step (the
         # dynamics-core external-tau block) -- energetically consistent, unlike
         # the operator-split applicator (which pumped the runaway). Optional
@@ -4748,12 +5231,25 @@ def main() -> int:
                 _t_lo,
                 _t_lo + dt / _SEC_PER_DAY,
             )
+        # NEMO ln_crt_dwn relative-wind current feedback (rn_vfac): rotate the
+        # beginning-of-step ocean surface current to GEOGRAPHIC (the frame the
+        # CORE-II u10/v10 arrive in) and pass it to the bulk.  Computed ONCE and
+        # shared with the freshwater (evap) forcing below so the latent HEAT
+        # (q_net) and the evaporative MASS (P - E) stay the SAME physical flux
+        # (E = -lhflx / L_vap).  _wind_vfac == 0.0 (default) => None, no state
+        # pull, byte-identical to the absolute-wind path.
+        _u_oce = _v_oce = None
+        if _wind_vfac != 0.0:
+            _u_oce, _v_oce = _surface_currents_geographic(
+                state, grid, app_grid_type)
         sf = compute_omip2_surface_forcing(
             state, forcing=forcing, idx_t=it,
             grid=grid, grid_type=app_grid_type,
             ice_albedo=_ice_alb,
             under_ice=_under_ice, tau_ice_sw=args.ice_thermo_sw_trans,
             dm2dc_window=_dm2dc_win,
+            u_oce=_u_oce, v_oce=_v_oce,
+            wind_current_feedback_vfac=_wind_vfac,
         )
         if ramp < 1.0:
             sf = sf._replace(tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,
@@ -4848,7 +5344,9 @@ def main() -> int:
                 fw = compute_omip2_freshwater_forcing(
                     state, forcing=forcing, idx_t=it, grid=grid,
                     grid_type=app_grid_type, runoff_R=_R,
-                    emp=args.emp_freshwater, ramp=ramp)
+                    emp=args.emp_freshwater, ramp=ramp,
+                    u_oce=_u_oce, v_oce=_v_oce,
+                    wind_current_feedback_vfac=_wind_vfac)
                 sf = sf._replace(freshwater=net_freshwater_flux(fw))
             state = model.step(state, dt, surface_forcing=sf,
                                t_seconds=_t_sec)
@@ -4861,7 +5359,9 @@ def main() -> int:
                 fw = compute_omip2_freshwater_forcing(
                     state, forcing=forcing, idx_t=it, grid=grid,
                     grid_type=app_grid_type, runoff_R=_R,
-                    emp=args.emp_freshwater, ramp=ramp)
+                    emp=args.emp_freshwater, ramp=ramp,
+                    u_oce=_u_oce, v_oce=_v_oce,
+                    wind_current_feedback_vfac=_wind_vfac)
             if ice_resp is not None:
                 # ONE shared, mask-aware partition (coupler.ocean_forcing):
                 # open-water stress/evap/heat/SW x f_open=(1-A) at the SINGLE
@@ -4909,12 +5409,17 @@ def main() -> int:
                       f"R={_Rn:+.4f} ice={_Ic:+.4f} net(P-E+R+ice)="
                       f"{_P - _E + _Rn + _Ic:+.4f} Sv (raw pre-normalize, "
                       f"area-wtd over wet)", flush=True)
-            # _ocean_step = single-device model.step (default) OR the lat-band
-            # SPMD global-in/global-out step (--n-gpus > 1); both apply the
-            # in-core wind-stress / heat / freshwater forcing.  Returns a GLOBAL
-            # state, so the host post-step BCs below are unchanged.  t_seconds
-            # threads the equilibrium-tide model time (None when tide off; the
-            # SPMD path fail-fasts at setup if the tide is enabled).
+            # _ocean_step = single-device model.step (default), the lat-band
+            # SPMD global-in/global-out step (--n-gpus > 1), or the PERSISTENT
+            # sharded inner step (--spmd-persistent-state); all apply the
+            # in-core wind-stress / heat / freshwater forcing.  Default lanes
+            # return a GLOBAL state, so the host post-step BCs below are
+            # unchanged; the persistent lane keeps the state SHARDED — the
+            # leaf-wise/jnp post-step BCs below operate on it identically (see
+            # the residency-helper classification).  t_seconds threads the
+            # equilibrium-tide model time (None when tide off; the SPMD path
+            # fail-fasts at setup if the tide is enabled).
+            state = _ensure_sharded_state(state)
             state = _ocean_step(state, sf, fw, _t_sec)
         if sss_restore_cfg is not None:
             # NEMO-faithful ice gate (namsbc_ssr nn_sssr_ice=0: no SSS restoring
@@ -4941,6 +5446,10 @@ def main() -> int:
             _sss_tgt_step = (sss_restore_target[_runoff_month_idx(step, dt)]
                              if sss_restore_target.ndim == 3
                              else sss_restore_target)
+            # sss_apply pulls ONE 2-D S-surface slice to host and scatters
+            # the updated layer back device-side (slice-before-convert
+            # contract, locked by tests/unit/test_sss_apply.py) — counted.
+            _pers_res.count_leaf_slice(pulls=1, writes=1)
             if app_grid_type == "mpas":
                 from legoesm.ocean.coupler.sss_apply import apply_sss_restoring_step_mpas
                 state = apply_sss_restoring_step_mpas(
@@ -4962,11 +5471,32 @@ def main() -> int:
             # (>45S warm bias) + holds the Arctic near freezing.  Grid-agnostic
             # top-cell update (same host-state pattern as the SSS restoring).
             from legoesm.ocean.coupler.omip2_applicator import under_ice_freeze_relax
-            Tn = np.asarray(state.T.data).copy()   # copy: device arrays alias / are read-only
-            Tn[..., 0] = under_ice_freeze_relax(
-                Tn[..., 0], _sic, dt, tau_ice_days=args.ice_thermo_tau_days)
+            # Surface-only op: pull ONLY the 2-D top layer to host (converting
+            # the full leaf would assemble the whole 3-D sharded T — codex
+            # batch4 HIGH), relax it, scatter it back DEVICE-SIDE.  The
+            # in-place [...] assign reproduces the old full-array numpy cast
+            # semantics exactly (f64 relax result -> leaf dtype), and the
+            # untouched deep layers keep the original device buffer —
+            # bit-identical to the old full round trip.  Counted — including
+            # the extra S-surface liquidus pull when --freeze-scheme is
+            # per-cell (MED-1).
+            _pers_res.count_leaf_slice(
+                pulls=(2 if args.freeze_scheme != "constant" else 1),
+                writes=1)
+            T0 = np.asarray(state.T.data[..., 0]).copy()   # copy: device arrays alias
+            # --freeze-scheme != constant: per-cell liquidus target from the
+            # LOCAL surface salinity (MED-1); constant keeps the fixed -1.8 C
+            # scalar byte-identical (S_top=None short-circuits inside).  The
+            # S pull slices FIRST too (device-side) — only the 2-D surface
+            # layer crosses to host.
+            T0[...] = under_ice_freeze_relax(
+                T0, _sic, dt, tau_ice_days=args.ice_thermo_tau_days,
+                S_top=(np.asarray(state.S.data[..., 0])
+                       if args.freeze_scheme != "constant" else None),
+                freeze_scheme=args.freeze_scheme)
             state = state._replace(
-                T=Field(jnp.asarray(Tn), name=state.T.name,
+                T=Field(jnp.asarray(state.T.data).at[..., 0].set(jnp.asarray(T0)),
+                        name=state.T.name,
                         dims=state.T.dims, units=state.T.units))
         if args.geothermal:
             # Geothermal bottom heat-flux BC (NEMO ln_trabbc): warm the deepest
@@ -5033,6 +5563,12 @@ def main() -> int:
                 nlev=int(args.nlev))
         if nudge_tau_s > 0 and (nudge_release_s <= 0 or step * dt < nudge_release_s):
             a = dt / nudge_tau_s
+            # WOA nudging is genuinely FULL-3-D (every level relaxes toward
+            # the climatology), so this is an honest full-leaf host round
+            # trip: T and S gathered + re-uploaded every nudging step —
+            # counted, never hidden behind full_state_gathers=0 (codex
+            # batch4 HIGH).  Device-side nudging is scaling-M2 increment 2.
+            _pers_res.count_leaf_full(gathers=2, uploads=2)
             Tn = np.asarray(state.T.data)
             Sn = np.asarray(state.S.data)
             Tn = Tn + a * (nudge_T - Tn) * nudge_m3
@@ -5053,9 +5589,20 @@ def main() -> int:
                 _upd["v"] = Field(jnp.asarray(np.asarray(state.v.data) * df),
                                   name=state.v.name, dims=state.v.dims,
                                   units=state.v.units)
+            # Full-3-D leaf round trips (host scalar multiply of u and v) —
+            # counted while the spin-up drag is active (codex batch4 HIGH:
+            # honest accounting; device-side drag is scaling-M2 increment 2).
+            _pers_res.count_leaf_full(gathers=len(_upd), uploads=len(_upd))
             state = state._replace(**_upd)
         if step % diag_every == 0 or step == n_steps:
             state = jax.block_until_ready(state)
+            # _diag pulls the 2-D T,S surface slices + the 2-D land mask and
+            # the FULL 3-D u(,v) leaves (max|u| + its location need every
+            # level) — diag-cadence host reads, counted for the honest-cost
+            # done line.
+            _pers_res.count_leaf_slice(pulls=3)
+            _pers_res.count_leaf_full(
+                gathers=1 + int(getattr(state, "v", None) is not None))
             d = _diag(state, lat2d, lon2d)
             rate = step / (time.time() - t_wall)
             day = step * dt / _SEC_PER_DAY
@@ -5069,24 +5616,35 @@ def main() -> int:
                 print(f"[ice]  step {step}: {_ice_diag}", flush=True)
             if not d["finite"]:
                 print("[ABORT] non-finite state", flush=True)
+                # persistent lane: the snapshot needs the full staggered-v
+                # global layout (abort boundary — one gather, then exit).
+                state = _ensure_global_state(state)
                 _save_snapshot(out_dir, f"blowup_step{step}", state, lat2d, lon2d,
                                io_proc=_is_io_proc(), ice_state=ice_state)
                 _close_csv()
                 return 1
         if snap_every > 0 and step % snap_every == 0 and step != n_steps:
             day = step * dt / _SEC_PER_DAY
+            # persistent lane: snapshot cadence = a real output boundary; the
+            # state is gathered here (counted) and re-sharded lazily at the
+            # next step's _ensure_sharded_state.
+            state = _ensure_global_state(state)
             _save_snapshot(out_dir, f"day{int(round(day)):04d}", state, lat2d,
                            lon2d, z_coord=z_coord, io_proc=_is_io_proc(),
                            ice_state=ice_state)
             print(f"[snapshot] day {day:.0f} saved", flush=True)
         if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
             yr = step // steps_per_year
+            state = _ensure_global_state(state)
             _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d,
                            z_coord=z_coord, io_proc=_is_io_proc(),
                            ice_state=ice_state)
             print(f"[snapshot] year {yr} saved", flush=True)
 
     state = jax.block_until_ready(state)
+    # persistent lane: final I/O boundary — the snapshot / transport diags /
+    # state digest all need the full staggered-v global layout (one gather).
+    state = _ensure_global_state(state)
     _io = _is_io_proc()
     _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord,
                    io_proc=_io, ice_state=ice_state)
@@ -5097,6 +5655,31 @@ def main() -> int:
     _record_final_state_digest(manifest_path, state)
     _close_csv()
     rate = n_steps / (time.time() - t_wall)
+    if _spmd_persistent:
+        # The honest cost lines (codex batch4 HIGH): (1) FULL-STATE layout
+        # flips the persistent lane actually performed (the old wrapper does
+        # 2 per step: scatter + gather) — includes the snapshot/abort/final
+        # cadence gathers and any forced per-step ones announced at setup;
+        # (2) the per-step LEAF host transfers that REMAIN (forcing-builder
+        # surface-T pulls, SSS/ice-thermo surface pull+write-backs, nudge/
+        # drag full-3-D round trips, diag-cadence reads) — the persistent
+        # lane eliminates full-STATE round trips, NOT these, and they are
+        # never reported as zero cost.
+        _builder_pulls = (host_pull_ledger()["surface_slice_pulls"]
+                          - _ledger0["surface_slice_pulls"])
+        _slice_pulls = _pers_res.leaf_slice_pulls + _builder_pulls
+        print(f"[spmd-persistent] full-STATE gathers={_pers_res.gathers} "
+              f"shards={_pers_res.shards} over {n_steps} steps "
+              f"({_pers_res.gathers / max(1, n_steps):.4f} gathers/step; "
+              f"wrapper lane would be {n_steps} + {n_steps})", flush=True)
+        print(f"[spmd-persistent] LEAF host transfers (NOT in the full-STATE "
+              f"count above): 2-D surface-slice pulls={_slice_pulls} "
+              f"({_slice_pulls / max(1, n_steps):.2f}/step; {_builder_pulls} "
+              f"from the forcing builders), surface-slice "
+              f"write-backs={_pers_res.leaf_slice_writes}, FULL-3D leaf "
+              f"gathers={_pers_res.leaf_full_gathers} "
+              f"uploads={_pers_res.leaf_full_uploads} (WOA nudge / spin-up "
+              f"drag while active + diag-cadence u,v).", flush=True)
     print(f"[done] {n_steps} steps @ {rate:.2f} steps/s; final: {_diag(state, lat2d, lon2d)}")
     if args.smoke:
         yr_est = steps_per_year / rate / 3600.0

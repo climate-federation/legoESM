@@ -95,11 +95,6 @@ PARAM_SPEC_TODO: frozenset[str] = frozenset(
         # follow-up); the field baseline below pins its current float fields so
         # no NEW unspecced float can slip into it meanwhile.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py",
-        # Two-big-leaf canopy config landed via the land/stable merges
-        # (#742/#744) without a __param_spec__ — inherited-from-main gate
-        # red; classified for the land owner to author the spec (bounds/
-        # tiers for the canopy radiation + conductance parameters).
-        "packages/land/legoesm/land/canopy/config.py",
         # --- ocean ---------------------------------------------------------
         # --- land ----------------------------------------------------------
     }

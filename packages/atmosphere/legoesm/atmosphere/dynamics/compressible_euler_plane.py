@@ -685,7 +685,11 @@ def _centered_advection_y(
 
 
 # --------------------------------------------------------------------- #
-# WENO5-Z flux-form upwind advection (5th-order, monotone).             #
+# WENO5-Z flux-form upwind advection (5th-order; NOT monotone /         #
+# NOT positivity-preserving — a positive 6-cell stencil can still       #
+# reconstruct a negative face value. Safe for signed fields (θ′,        #
+# momentum); positive-definite tracers are guarded onto van_leer at     #
+# the dispatch below).                                                  #
 # Drop-in replacements for _upwind_advection_x/y with the same          #
 # co-located (field, velocity) convention. Periodic in both axes        #
 # via jnp.roll. Stencil width 6; needs only single-rank periodic        #
@@ -1200,6 +1204,9 @@ def _compute_smagorinsky_K_m_plane(
 
     # --- Vertical gradients (w at half levels, u/v at full levels) ---
     # ∂w/∂z = (w_half[k+1] - w_half[k]) / dz_full[k] at full level (cell centre).
+    # (Level-index difference = −∂w/∂z_physical under top-down storage; S33
+    # enters |S|² only SQUARED, so the sign is inert HERE — do not reuse this
+    # value where a signed ∂w/∂z_physical is required.)
     dz_full = height_coord.dz                          # (nlev,)
     dw_dz_center = (
         w_yxz_half[..., 1:] - w_yxz_half[..., :-1]
@@ -1209,9 +1216,12 @@ def _compute_smagorinsky_K_m_plane(
     # ∂u/∂z at x-face, vertical full-level: needs interior centred
     # difference of u between full levels k+1, k-1 (centred). Edges
     # use one-sided one-level differences.
-    # Build du/dz_full at x-face (same staggering as u).
-    du_dz = full_level_centred_d_dz(u_yxz, height_coord)
-    dv_dz = full_level_centred_d_dz(v_yxz, height_coord)
+    # Sign convention: z is positive UP, level index k runs TOP→DOWN, so
+    # full_level_centred_d_dz returns −∂/∂z_physical. Negate to the physical
+    # sign: S13/S23 MIX these with the already-physical ∂w/∂x, ∂w/∂y, so the
+    # sign does NOT square out — the 2·(∂u/∂z)(∂w/∂x) cross term in S13² flips.
+    du_dz = -full_level_centred_d_dz(u_yxz, height_coord)  # +∂u/∂z_phys, x-face
+    dv_dz = -full_level_centred_d_dz(v_yxz, height_coord)  # +∂v/∂z_phys, y-face
 
     # ∂w/∂x at x-face (cell-centre w_full needed first), ∂w/∂y at y-face.
     # Build w at full level (vertical midpoint of half-level pair) then
@@ -1372,9 +1382,14 @@ def _velocity_gradients_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord):
     dudy = (jnp.roll(uc, -1, axis=0) - jnp.roll(uc, 1, axis=0)) / (2.0 * grid.dy)
     dvdy = (jnp.roll(vc, -1, axis=0) - jnp.roll(vc, 1, axis=0)) / (2.0 * grid.dy)
     dwdy = (jnp.roll(wc, -1, axis=0) - jnp.roll(wc, 1, axis=0)) / (2.0 * grid.dy)
-    dudz = full_level_centred_d_dz(uc, height_coord)
-    dvdz = full_level_centred_d_dz(vc, height_coord)
-    dwdz = full_level_centred_d_dz(wc, height_coord)
+    # z is positive UP, level index k runs TOP→DOWN ⇒ full_level_centred_d_dz
+    # returns −∂/∂z_physical. Negate so this helper honours its contract
+    # (physically-signed a_cd = ∂u_c/∂x_d): the mixed strains S13/S23 and the
+    # Vreman/AMD/Germano gradient PRODUCTS are odd in these entries, so the
+    # sign does not square out downstream.
+    dudz = -full_level_centred_d_dz(uc, height_coord)   # +∂u/∂z_phys
+    dvdz = -full_level_centred_d_dz(vc, height_coord)   # +∂v/∂z_phys
+    dwdz = -full_level_centred_d_dz(wc, height_coord)   # +∂w/∂z_phys
     return uc, vc, wc, dudx, dudy, dudz, dvdx, dvdy, dvdz, dwdx, dwdy, dwdz
 
 
@@ -1564,12 +1579,14 @@ def full_level_centred_d_dz(
     ``z_full`` decreases with level index ``k`` (index 0 = model
     top, index ``nlev-1`` = surface), so the returned value is
     ``+(f[k+1] - f[k-1]) / (z[k-1] - z[k+1])``, i.e. the derivative
-    with respect to LEVEL INDEX. The sign relative to the physical
-    vertical coordinate ``z`` is opposite; this helper is consumed
-    exclusively inside SQUARED strain components ``S_13²``,
-    ``S_23²`` so the sign drops out of ``|S|²``. Do NOT use the raw
-    return value where a signed ``∂f/∂z_physical`` is required
-    without flipping the sign.
+    with respect to LEVEL INDEX = ``−∂f/∂z_physical``. The sign does
+    NOT "drop out when squared" for MIXED strain components —
+    ``S_13² = (0.5(∂u/∂z + ∂w/∂x))²`` carries an odd
+    ``(∂u/∂z)(∂w/∂x)`` cross term — nor in gradient products
+    (Vreman/AMD/Germano ``M_ij``) or in N². EVERY consumer needing a
+    signed ``∂f/∂z_physical`` must negate the raw return value; all
+    current call sites do (leading minus at the N² sites, negation at
+    the strain/gradient sites).
 
     Interior uses the 2-level centred difference; boundaries fall
     back to one-sided one-step differences (top: ``(f[0] - f[1]) /
@@ -1635,7 +1652,7 @@ def _vertical_advection_plane(
     return -w_full / J[:, :, None] * df_dz
 
 
-def _vertical_advection_van_leer_plane(
+def vertical_advection_van_leer_plane(
     field_yxz: jax.Array,
     w_yxz_half: jax.Array,
     height_coord: HeightCoordinate,
@@ -2015,6 +2032,19 @@ def plane_compressible_euler_slow_tendencies(
             f"Expected one of {sorted(HORIZONTAL_ADVECTION_HALO_REQUIREMENT)}."
         )
     adv_x, adv_y = _ADV_PAIRS[scheme]
+    # POSITIVITY GUARD (codex CRM-dycore review): the CRM tracers
+    # (q_v, q_c, q_r, q_i, q_s, q_g, N_c, N_r, N_i, …) are all
+    # positive-definite. WENO5-Z is 5th-order but NOT positivity-
+    # preserving, so it drives q<0 that then feeds microphysics as a
+    # spurious source. Advect TRACERS with the monotone van_leer
+    # limiter when weno5 is selected; θ′ (signed) keeps weno5 for its
+    # low tropopause dispersion. van_leer's 2-cell halo ⊆ weno5's
+    # 3-cell halo ⇒ never under-halos. Mirrors SAM (monotone scalars,
+    # non-diffusive θ/momentum) and the ADV-SPLIT momentum path below.
+    if scheme == "weno5":
+        tadv_x, tadv_y = _van_leer_advection_x, _van_leer_advection_y
+    else:
+        tadv_x, tadv_y = adv_x, adv_y
     # ADV-SPLIT (#86): MOMENTUM legs (u/v/w) may use a separate scheme (e.g.
     # "centered" = SAM-faithful non-diffusive advect2_mom) while scalars keep the
     # monotone van_leer. None ⇒ momentum = scalar scheme (legacy, both same).
@@ -2332,7 +2362,7 @@ def plane_compressible_euler_slow_tendencies(
     vert_tracer_scheme = getattr(
         config, "vertical_tracer_advection", "centered")
     if vert_tracer_scheme == "van_leer":
-        _vertical_tracer_adv = _vertical_advection_van_leer_plane
+        _vertical_tracer_adv = vertical_advection_van_leer_plane
     elif vert_tracer_scheme == "centered":
         _vertical_tracer_adv = _vertical_advection_plane
     else:
@@ -2343,9 +2373,11 @@ def plane_compressible_euler_slow_tendencies(
     tracers = state.tracers.data
     if tracers.shape[-1] > 0:
         def _tracer_tend_one(q):
+            # tadv_* = van_leer under weno5 (positivity guard above);
+            # == adv_* for every monotone scheme.
             return (
-                adv_x(q, u_center, grid.dx)
-                + adv_y(q, v_center, grid.dy)
+                tadv_x(q, u_center, grid.dx)
+                + tadv_y(q, v_center, grid.dy)
                 + _vertical_tracer_adv(q, w, height_coord, J)
             )
         dtracers_dt = jax.vmap(_tracer_tend_one, in_axes=-1, out_axes=-1)(

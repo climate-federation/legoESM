@@ -55,6 +55,7 @@ except ImportError:                    # pragma: no cover - JAX < 0.8 fallback
 from legoesm.parallel.latlon_spmd import (
     activate_latlon_spmd_halo,
     latlon_band_perms,
+    reconstruct_vface_lower_multi,
 )
 
 # Per-device band grids: the SPMD wrapper REUSES the tested band slicers from
@@ -378,6 +379,24 @@ def shard_forcing_stack_latlon(stack, mesh):
     return jax.tree.map(_put, stack)
 
 
+def append_vface_wall_row(v_lower):
+    """Rebuild the full ``(n_lat+1, ...)`` staggered v-array from the lat-band
+    carrier ``v_lower`` by appending the TOP wall row (zeros).
+
+    This is THE reconstruction of the row the carrier drops: the regular-grid
+    north pole wall / tripole cap row, identically zero under the v-carrier
+    contract (:func:`shard_state_latlon` REFUSES a state whose top v-face row
+    is live), so the result is bit-identical to the original staggered array.
+    Shared by :func:`gather_state_latlon` (full-state gather) and the
+    persistent-lane DEVICE-SIDE staggered reads (the OMIP driver's
+    surface-current consumers, ``run_omip_core2._surface_uv_faces``) so the
+    row reconstruction is written once.  Works on any trailing shape (3-D
+    leaves or 2-D surface slices) and preserves sharding under GSPMD.
+    """
+    wall = jnp.zeros_like(v_lower[:1])
+    return jnp.concatenate([v_lower, wall], axis=0)
+
+
 def gather_state_latlon(state, mesh):
     """Inverse of :func:`shard_state_latlon`: gather every leaf to a single device
     and rebuild the full ``(n_lat+1, ...)`` ``v`` / ``v_mask`` by appending the
@@ -408,9 +427,8 @@ def gather_state_latlon(state, mesh):
             updates[name] = None
             continue
         v_lower = _gather_arr(field.data)
-        pole = jnp.zeros_like(v_lower[:1])          # north pole-wall row
-        full = jnp.concatenate([v_lower, pole], axis=0)
-        updates[name] = field.replace(data=full)
+        # north pole-wall / cap row (the shared reconstruction helper)
+        updates[name] = field.replace(data=append_vface_wall_row(v_lower))
     for name in state._fields:
         if name in _V_STAGGERED_STATE_FIELDS:
             continue
@@ -542,8 +560,29 @@ def make_sharded_ocean_step(model, mesh):
                 return None
             return field.replace(data=field.data[:-1])
 
-        v_updates = {name: _reconstruct_v(getattr(state_local, name))
-                     for name in _V_STAGGERED_STATE_FIELDS}
+        # Fused v-carrier reconstruction (scaling-M4): under the SAME
+        # trace-time switch as the pad aggregation, pack the boundary-row
+        # ppermutes of ALL staggered carriers (v + v_mask) into one
+        # collective per dtype group — value-identical (a bit-copy
+        # exchange; the flag flip re-keys the sharded_step cache below so
+        # a reused step object rebuilds).  Default OFF = the historical
+        # per-field ppermutes, byte-identical.
+        import os as _os
+        _fused_v = _os.environ.get(
+            "LEGOESM_LATLON_SPMD_FUSED_HALO", "0") != "0"
+        present = [name for name in _V_STAGGERED_STATE_FIELDS
+                   if getattr(state_local, name) is not None]
+        if _fused_v and len(present) > 1:
+            fulls = reconstruct_vface_lower_multi(
+                tuple(getattr(state_local, n).data for n in present),
+                axis, perm_north)
+            v_updates = {n: getattr(state_local, n).replace(data=f)
+                         for n, f in zip(present, fulls)}
+            for name in _V_STAGGERED_STATE_FIELDS:
+                v_updates.setdefault(name, None)
+        else:
+            v_updates = {name: _reconstruct_v(getattr(state_local, name))
+                         for name in _V_STAGGERED_STATE_FIELDS}
         state_band = state_local._replace(**v_updates)
 
         result = _step_body(model, state_band, dt,
