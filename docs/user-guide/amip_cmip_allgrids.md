@@ -133,7 +133,7 @@ uniform IC until `era5_to_mpas_carry` lands.
 
 ## Pipeline proof (running 2026-06-11)
 
-`scripts/run/_amip_pipeline_proof.sh` — 30-day production-stack run on
+`scripts/run/amip_pipeline_proof.sh` — 30-day production-stack run on
 all 4 grids (synthetic forcing, `--dt-auto`, checkpoint at day 15),
 proving the full validated pipeline end-to-end before committing GPU
 months to the real science run.
