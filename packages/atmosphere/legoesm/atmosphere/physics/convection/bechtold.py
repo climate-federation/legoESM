@@ -236,6 +236,24 @@ def bechtold_convection(
 
     T_parcel = T_parcel_source + config.parcel_dT
     q_parcel = q_parcel_source + config.parcel_dq
+    if config.parcel_theta_cap:
+        # Polar-night harden (#929 deeper fix): cap the parcel's theta at the
+        # SURFACE parcel's theta (+ the same parcel_dT perturbation).  In a
+        # surface inversion the PBL-mean parcel is theta-warmer than the
+        # surface air, so inversion warmth leaks into the launch parcel and
+        # manufactures CAPE above the departure level (the #822 p_source mask
+        # only removed the below-departure part).  theta comparison at the
+        # parcel's own pressure: theta_sfc translated to p_parcel_source is
+        # (T_base + parcel_dT) * Pi(p_source)/Pi(p_base).  Well-mixed or
+        # superadiabatic BLs (theta_sfc >= theta_pbl_mean) are untouched;
+        # use_pbl_cape=False (surface parcel) makes the cap an exact no-op.
+        # Static Python gate on the config bool (feature-gate exception).
+        T_parcel = jnp.minimum(
+            T_parcel,
+            (T_base + config.parcel_dT)
+            * exner_function(jnp.maximum(p_parcel_source, 1.0))
+            / exner_function(p_base),
+        )
 
     # Launch the moist adiabat HUMIDITY-AWARE and from the correct pressure
     # origin (the over-firing fix; mirrors the Kain-Fritsch / Zhang-McFarlane

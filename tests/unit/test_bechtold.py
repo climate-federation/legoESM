@@ -89,6 +89,103 @@ def test_bechtold_shape_finiteness():
 
 
 # ---------------------------------------------------------------------------
+# Parcel theta cap (#929 polar-night deeper harden)
+# ---------------------------------------------------------------------------
+
+def _profile_column(profile, ncol=2, nlev=16, p_s=1.0e5, p_top=5.0e3,
+                    q_sfc=4e-4):
+    """Column with an arbitrary T(z) profile (z from the 8.5-km scale height)."""
+    sigma = jnp.linspace(p_top / p_s, 1.0, nlev)
+    p_full = sigma[None, :] * jnp.full((ncol, 1), p_s)
+    inner = 0.5 * (p_full[:, :-1] + p_full[:, 1:])
+    p_half = jnp.concatenate(
+        [jnp.full((ncol, 1), p_top * 0.5), inner, jnp.full((ncol, 1), p_s)],
+        axis=1,
+    )
+    z = -8500.0 * jnp.log(p_full / p_s)
+    T = profile(z)
+    q = q_sfc * jnp.exp(-z / 3000.0)
+    return T, q, p_full, p_half
+
+
+def test_bechtold_parcel_theta_cap_quiesces_polar_inversion():
+    """#929 deeper harden: a polar-night surface-inversion column must be
+    QUIESCENT.  Without the cap, the theta-warmer PBL-mean parcel manufactures
+    O(1000 J/kg) CAPE and tens of K/day heating in a column where no BL air
+    can convect (the mid-Feb ~71N latlon24 runaway); with the cap the parcel
+    collapses to the surface parcel (the coldest air) and CAPE is exactly 0."""
+    # T rises 18 K over the lowest 800 m (strong polar inversion), weak
+    # stable lapse aloft; nearly dry.
+    inv = lambda z: (245.0 + 18.0 * jnp.minimum(z, 800.0) / 800.0
+                     - 6.5e-3 * jnp.maximum(z - 800.0, 0.0))
+    T, q, pf, ph = _profile_column(inv, q_sfc=4e-4)
+    zeros = jnp.zeros_like(T)
+    stoch = jnp.zeros((T.shape[0],))
+
+    out_on, _, _ = bechtold_convection(
+        T, q, pf, ph, zeros, zeros, zeros, stoch, None, dt=600.0,
+        config=BechtoldConfig(parcel_theta_cap=True),
+    )
+    assert float(out_on.cape.max()) < 1.0
+    assert float(jnp.abs(out_on.dT_dt).max()) * 86400.0 < 1e-3   # K/day
+    assert float(out_on.convective_mask.max()) < 5e-3            # gate floor
+
+    # documents the leak the cap removes (empirical: cape ~1683 J/kg,
+    # heating ~39 K/day, mask 1.0 on this fixture)
+    out_off, _, _ = bechtold_convection(
+        T, q, pf, ph, zeros, zeros, zeros, stoch, None, dt=600.0,
+        config=BechtoldConfig(parcel_theta_cap=False),
+    )
+    assert float(out_off.cape.max()) > 100.0
+    assert float(out_off.convective_mask.max()) > 0.9
+
+
+def test_bechtold_parcel_theta_cap_inert_in_well_mixed_bl():
+    """The cap must not disturb genuinely convecting columns: in a well-mixed
+    (dry-adiabatic) BL the PBL-mean theta equals the surface theta, so the cap
+    is inert to within the parcel perturbation (empirical: CAPE differs ~1%,
+    heating within ~0.05 K/day on this fixture)."""
+    wm = lambda z: (300.0 - 9.8e-3 * jnp.minimum(z, 600.0)
+                    - 7.5e-3 * jnp.maximum(z - 600.0, 0.0))
+    T, q, pf, ph = _profile_column(wm, q_sfc=14e-3)
+    zeros = jnp.zeros_like(T)
+    stoch = jnp.zeros((T.shape[0],))
+    out_on, _, _ = bechtold_convection(
+        T, q, pf, ph, zeros, zeros, zeros, stoch, None, dt=600.0,
+        config=BechtoldConfig(parcel_theta_cap=True),
+    )
+    out_off, _, _ = bechtold_convection(
+        T, q, pf, ph, zeros, zeros, zeros, stoch, None, dt=600.0,
+        config=BechtoldConfig(parcel_theta_cap=False),
+    )
+    cape_on, cape_off = float(out_on.cape.max()), float(out_off.cape.max())
+    assert cape_off > 1000.0                    # the fixture convects
+    assert abs(cape_on - cape_off) / cape_off < 0.05
+    dheat = float(jnp.abs(out_on.dT_dt - out_off.dT_dt).max()) * 86400.0
+    assert dheat < 0.5                          # K/day
+
+
+def test_bechtold_parcel_theta_cap_noop_for_surface_parcel():
+    """With use_pbl_cape=False the parcel IS the surface parcel, so the cap
+    must be an exact no-op (bit-identical tendencies)."""
+    T, q, pf, ph, u, v = _column()
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    stoch = jnp.zeros((ncol,))
+    out_a, Mu_a, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        config=BechtoldConfig(use_pbl_cape=False, parcel_theta_cap=True),
+    )
+    out_b, Mu_b, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        config=BechtoldConfig(use_pbl_cape=False, parcel_theta_cap=False),
+    )
+    assert jnp.array_equal(out_a.dT_dt, out_b.dT_dt)
+    assert jnp.array_equal(out_a.dq_v_dt, out_b.dq_v_dt)
+    assert jnp.array_equal(Mu_a, Mu_b)
+
+
+# ---------------------------------------------------------------------------
 # PBL-CAPE closure: switching to surface-parcel CAPE changes M_b
 # ---------------------------------------------------------------------------
 

@@ -1341,6 +1341,18 @@ class BechtoldConfig(NamedTuple):
     depth_split_sharpness: float = 1.0e-3
     # Bechtold-specific
     use_pbl_cape: bool = True
+    # Polar-night harden (#929 deeper fix): cap the launch parcel's theta at
+    # the SURFACE parcel's theta (+ parcel_dT).  The mass-weighted PBL-mean
+    # parcel is theta-warmer than the surface air whenever the boundary layer
+    # holds a surface inversion (theta rising with height), so inversion
+    # warmth leaked into the launch parcel and manufactured CAPE in columns
+    # where no BL air can convect (mid-Feb ~71N polar-night runaway; the #822
+    # departure-level mask removed only the below-departure part of the
+    # artifact).  With the cap, an inversion column's parcel collapses to the
+    # surface parcel — the coldest air, CAPE ~ 0, true quiescence — while a
+    # well-mixed or superadiabatic BL (theta_sfc >= theta_mean) is untouched.
+    # False restores the legacy uncapped parcel.
+    parcel_theta_cap: bool = True
     cape_pbl_depth: float = 500.0
     tau_bl: float = 3600.0
     enable_stochastic: bool = False
