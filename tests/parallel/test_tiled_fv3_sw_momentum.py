@@ -58,8 +58,7 @@ def setup():
     v_d = jnp.asarray(rng.standard_normal((6, N + 1, N)))
     h_s = jnp.asarray(10.0 * rng.standard_normal((6, N, N)))
     # Global reference — BASE case (all optional terms off by default:
-    # div_damp=0, hyperdiff_coeff=0, boundary_fix=False,
-    # fortran_vector_corner_fill=False, use_fv3_dsw1_mass_transport=False).
+    # div_damp=0, hyperdiff_coeff=0, boundary_fix=False).
     _, du_g, dv_g = fv3_sw_tendencies(h, u_d, v_d, h_s, cdg)
     return cdg, h, u_d, v_d, h_s, np.asarray(du_g), np.asarray(dv_g)
 

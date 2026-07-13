@@ -10,7 +10,6 @@ Tests:
 import os
 import sys
 import unittest
-import warnings
 
 import jax
 import jax.numpy as jnp
@@ -1392,8 +1391,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         `FV3EdgeShallowWaterModel.step` under the default config, and
         asserts the tripwire count is zero.  If anyone adds a new
         caller of `d2a2c_vect` (direct or transitive) to the default
-        step — e.g. by flipping `use_experimental_csw` to True by
-        default, or by wiring FB-chain helpers into the default
+        step — e.g. by wiring FB-chain helpers into the default
         tendency function — the tripwire fires and the test fails
         with a pointer to re-evaluate the priority-3 claim.
         """
@@ -1409,18 +1407,6 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         n = 8
         grid = create_cubed_sphere(n)
         config = CDGridShallowWaterConfig()  # DEFAULT config
-
-        # Guard: the claim rests on the default being
-        # use_experimental_csw=False.  If the default flips to True,
-        # fail explicitly BEFORE the tripwire fires, so the error
-        # message is actionable.
-        self.assertFalse(
-            config.use_experimental_csw,
-            "CDGridShallowWaterConfig.use_experimental_csw default "
-            "flipped to True.  The iter-128 priority-3 claim assumes "
-            "False; either revert the default or fully port Fortran "
-            "sw_core.F90:3527-3545 and 3620-3640 overrides.",
-        )
 
         model = FV3EdgeShallowWaterModel(grid, config)
         state = FV3EdgeShallowWaterState(
@@ -1612,40 +1598,35 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                  "docs/fv3_fortran_fidelity_review.md accordingly; "
                  "otherwise restore the halo=2 path."))
 
-    def test_d2a2c_vect_reached_by_experimental_csw_and_fb_model(self):
+    def test_d2a2c_vect_reached_by_fb_model(self):
         """Iter-130 (Priority 3 complement): positive-case runtime
-        tripwire proving the EXPERIMENTAL paths DO reach `d2a2c_vect`.
+        tripwire proving the opt-in FB path DOES reach `d2a2c_vect`.
 
         The iter-129 negative-case test proves the default
         `FV3EdgeShallowWaterModel` path does NOT reach `d2a2c_vect`.
-        This test is the complement: it proves the two opt-in
-        experimental paths DO reach it.  Without this positive
-        assertion, one could satisfy the negative test by accidentally
-        breaking `d2a2c_vect` dispatch on BOTH paths, silently
-        leaving the experimental paths unreachable to their own
-        FB/csw logic — a different kind of regression.
+        This test is the complement: it proves the opt-in
+        `FV3FBShallowWaterModel` path DOES reach it.  Without this
+        positive assertion, one could satisfy the negative test by
+        accidentally breaking `d2a2c_vect` dispatch on BOTH paths,
+        silently leaving the FB path unreachable to its own
+        FB logic — a different kind of regression.
 
-        Paths checked:
-          1. `FV3EdgeShallowWaterModel(config with use_experimental_csw=True)`
-             → `fv3_csw_tendencies` → `d2a2c_vect` (N=3 hits per RK3 step).
-          2. `FV3FBShallowWaterModel(default config)` → `fv3_fb_sw_step`
-             → `_c_sw` → `d2a2c_vect` (N>=1 hit per step).
+        Path checked:
+          `FV3FBShallowWaterModel(default config)` → `fv3_fb_sw_step`
+          → `_c_sw` → `d2a2c_vect` (N>=1 hit per step).
 
         Together with the iter-129 negative test these pin down the
-        call graph: default → no reach; experimental → reach.
+        call graph: default (Edge) → no reach; FB → reach.
         """
         from unittest import mock
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-            FV3EdgeShallowWaterModel,
             FV3FBShallowWaterModel,
             FV3EdgeShallowWaterState,
-            CDGridShallowWaterConfig,
         )
         import legoesm.core.fv3_sw_core as sw_mod
 
         n = 8
-        grid = create_cubed_sphere(n)
         state = FV3EdgeShallowWaterState(
             h=jnp.full((6, n, n), 1000.0),
             u_d=jnp.zeros((6, n, n + 1)),
@@ -1655,32 +1636,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
 
         orig_d2a2c = sw_mod.d2a2c_vect
 
-        # Path 1: experimental CSW via FV3EdgeShallowWaterModel
-        csw_config = CDGridShallowWaterConfig(use_experimental_csw=True)
-        csw_model = FV3EdgeShallowWaterModel(grid, csw_config)
-        csw_model.set_initial_mass(state)
-        csw_hits = {"n": 0}
-
-        def csw_trip(*a, **kw):
-            csw_hits["n"] += 1
-            return orig_d2a2c(*a, **kw)
-
-        with mock.patch.object(sw_mod, "d2a2c_vect", csw_trip), \
-             warnings.catch_warnings():
-            warnings.simplefilter("ignore")  # suppress experimental warning
-            s1 = csw_model.step(state, 1.0)
-            s1.h.block_until_ready()
-        self.assertGreater(
-            csw_hits["n"], 0,
-            "use_experimental_csw=True path made ZERO `d2a2c_vect` "
-            "calls at runtime.  Either fv3_csw_tendencies was rewired "
-            "(update this test) or the dispatch is broken.  The "
-            "experimental CSW path is REQUIRED to go through "
-            "`d2a2c_vect` for its FV3-faithful C-grid tendency "
-            "computation.",
-        )
-
-        # Path 2: FV3FBShallowWaterModel (forward-backward experimental model)
+        # Path: FV3FBShallowWaterModel (forward-backward experimental model)
         # 2026-07-11 codex F1: FB entry points are duogrid-only (guarded),
         # so the FB model needs its own duogrid grid.
         fb_grid = create_cubed_sphere(n, use_duogrid=True)
@@ -1731,9 +1687,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
 
         For correctness: the gap affects the FB chain
         (fv3_forward_backward_step, fv3_fb_sw_step; stabilized by the
-        2026-07-10 covariant-convention fix, duogrid-only) and the
-        default-OFF `use_fv3_dsw5_corner_damping` post-RK3 hook in
-        FV3EdgeShallowWaterModel.step — both call
+        2026-07-10 covariant-convention fix, duogrid-only), which calls
         `d_sw5_corner_divergence` (2026-07-11: an OPT-IN attenuated
         cross-face ghost exists for nord==1; the zero-ring default was
         measured stabler on the 120d modon).  The default production
@@ -4331,493 +4285,6 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                  f"  (b) the opt-in was silently disabled — restore "
                  f"the kwarg threading in arakawa_lamb_gradient and "
                  f"fv3_sw_tendencies per iter-765b."))
-
-    def test_fortran_a2b_corner_avg_is_known_worse(self):
-        """Iter-766 regression sentinel: the
-        `fortran_a2b_corner_avg=True` opt-in path in
-        `fv3_sw_tendencies` / `CDGridShallowWaterConfig` is KNOWN
-        WORSE than the default 2-pt-avg on the canonical W2 matrix
-        config.
-
-        iter-766 (pre-iter-893) measurement on `apply_fortran_xppm
-        _boundary=False` config: ON makes W2 v_ll_Linf 1.89× worse
-        (0.159 → 0.300 m/s).  iter-897 update: tracking the iter-893
-        production matrix runner (which sets
-        `apply_fortran_xppm_boundary=True` per iter-893), the
-        measurement now reads OFF=0.132 / ON=0.346 (ratio 2.62×).
-        The known-worse property holds under either xppm_boundary
-        setting; iter-897 aligns this test config with the iter-893
-        production path so the regression sentinel measures the
-        SAME baseline as production.
-
-        Iter-766 Codex 2nd-pass: sentinel now runs BOTH the OFF
-        (default a2b_corner_avg=False) and ON paths and pins the
-        ON/OFF RATIO.  A float-pin on the ON path alone could miss
-        a regression that raises the OFF baseline and preserves the
-        absolute ON floor.  The ratio assertion is robust to
-        parallel drift of both.
-        """
-        import jax.numpy as jnp
-        import numpy as np
-        from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-            CDGridShallowWaterConfig,
-            FV3EdgeShallowWaterModel,
-            FV3EdgeShallowWaterState,
-        )
-        from tests.atmosphere.shallow_water.test_cases.williamson import (
-            williamson_test2,
-        )
-        from legoesm.grids.cubed_sphere_cdgrid import (
-            cell_centre_angles_from_4edge)
-        from legoesm.grids.regridding import (
-            get_cubedsphere_to_latlon_weights, apply_cubedsphere_to_latlon)
-
-        n = 36
-        dt = 300.0
-        n_steps = int(86400 / dt)
-        div_damp = 8.0 * 1.5e7 * (48.0 / n) ** 2
-        grid = create_cubed_sphere(n=n, use_duogrid=False)
-        sw = williamson_test2(grid)
-        u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
-        weights = get_cubedsphere_to_latlon_weights(n, n_lon=360, n_lat=181)
-
-        def _run_and_measure(flag: bool) -> float:
-            cfg = CDGridShallowWaterConfig(
-                hyperdiff_coeff=0.0,
-                div_damp=div_damp,
-                boundary_fix=True,
-                damp_v=0.06,
-                nord_v=2,
-                # Iter-897: align with iter-893 production matrix
-                # runner config so the OFF baseline matches the
-                # current production W2 baseline (0.132) rather than
-                # the pre-iter-893 baseline (0.159).  The known-worse
-                # property of `fortran_a2b_corner_avg` holds under
-                # both settings.
-                apply_fortran_xppm_boundary=True,
-                fortran_a2b_corner_avg=flag,
-            )
-            model = FV3EdgeShallowWaterModel(grid, config=cfg)
-            cdgrid = model.cdgrid
-            u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
-            v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
-            state = FV3EdgeShallowWaterState(
-                h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
-            model.set_initial_mass(state)
-            for _ in range(n_steps):
-                state = model.step(state, dt)
-            ca_4edge, sa_4edge = cell_centre_angles_from_4edge(cdgrid)
-            u_cc = 0.5 * (np.asarray(state.u_d)[:, :, :-1]
-                           + np.asarray(state.u_d)[:, :, 1:])
-            v_cc = 0.5 * (np.asarray(state.v_d)[:, :-1, :]
-                           + np.asarray(state.v_d)[:, 1:, :])
-            v_north = (np.asarray(sa_4edge) * u_cc
-                        + np.asarray(ca_4edge) * v_cc)
-            v_ll = apply_cubedsphere_to_latlon(v_north, weights)
-            return float(np.max(np.abs(v_ll)))
-
-        v_ll_linf_off = _run_and_measure(flag=False)
-        v_ll_linf_on = _run_and_measure(flag=True)
-
-        # Iter-898c: tighten OFF threshold from 0.16 to 0.145 so
-        # the assertion actually pins the iter-893 alignment.  The
-        # original < 0.16 admitted both 0.132 (xppm=True, iter-893)
-        # AND 0.159 (xppm=False, pre-iter-893), so a silent revert
-        # of `apply_fortran_xppm_boundary=True` would not fire the
-        # sentinel.  0.145 passes 0.132 with margin ~0.013 and FAILS
-        # 0.159 (catches alignment break).  Codex iter-898 stop-time
-        # review correctly flagged this on iter-898's iter-769/767
-        # sentinels; the same blind spot applies to iter-897/766.
-        self.assertLess(
-            v_ll_linf_off, 0.145,
-            msg=(f"OFF (default 2-pt-avg, xppm_boundary=True) "
-                 f"baseline v_ll_Linf={v_ll_linf_off:.3e} m/s "
-                 f"drifted above 0.145 m/s — iter-898c threshold "
-                 f"rejects silent xppm=True->False revert (would "
-                 f"give 0.1593 > 0.145) AND rejects upward drift "
-                 f"from iter-893 baseline (0.132).  Investigate "
-                 f"BEFORE relaxing."))
-
-        # iter-897: pin ON absolute upper bound.  Pre-iter-893 ON was
-        # 0.300; iter-897 ON is 0.346 (slightly higher because the
-        # OFF baseline shifted lower under iter-893).  1.0 m/s is a
-        # conservative ceiling that catches NaN/blowup.
-        self.assertLess(
-            v_ll_linf_on, 1.0,
-            msg=(f"ON (fortran_a2b_corner_avg=True, xppm_boundary=True) "
-                 f"v_ll_Linf={v_ll_linf_on:.3e} m/s exceeded 1.0 m/s "
-                 f"— iter-897 measurement was ~0.346 m/s.  "
-                 f"Regenerate the pins."))
-
-        # Pin ON path to be materially worse than OFF (>= 1.3× gap).
-        # iter-766 measured ratio ~1.89× (pre-iter-893; with
-        # xppm_boundary=False).  iter-897 measurement under iter-893
-        # alignment: ratio ~2.62× (because xppm_boundary=True lowers
-        # OFF more than ON).  iter-893b relaxed threshold to 1.3
-        # absorbs both regimes.
-        ratio = v_ll_linf_on / v_ll_linf_off
-        self.assertGreater(
-            ratio, 1.3,
-            msg=(f"fortran_a2b_corner_avg=True v_ll_Linf="
-                 f"{v_ll_linf_on:.3e} m/s produced ratio "
-                 f"{ratio:.3f}× over OFF baseline "
-                 f"({v_ll_linf_off:.3e} m/s) — UNEXPECTEDLY SMALL "
-                 f"gap.  Iter-766 falsified this path at 1.89× "
-                 f"blowup.  A new smaller ratio means either:\n"
-                 f"  (a) the a2b-corner-avg path has been repaired — "
-                 f"re-examine whether it now reduces mode A and can "
-                 f"replace the default 2-pt-avg, OR\n"
-                 f"  (b) the opt-in was silently disabled — restore "
-                 f"the kwarg threading in arakawa_lamb_gradient and "
-                 f"fv3_sw_tendencies per iter-766."))
-
-    def test_boundary_fix_skip_corners_is_known_worse(self):
-        """Iter-769 regression sentinel: the iter-769
-        `boundary_fix_skip_corners=True` opt-in path in
-        `fv3_sw_tendencies` / `CDGridShallowWaterConfig` is KNOWN
-        WORSE than the default (cascaded corner 4-point average).
-
-        iter-769 (pre-iter-893) measurement on `apply_fortran_xppm
-        _boundary=False` config:
-          OFF (default):                     v_ll_Linf = 0.159 m/s
-          ON  (skip 4 cube-corner cells):    v_ll_Linf = 1.04 m/s
-          Ratio ON/OFF ~= 6.5x worse.
-
-        iter-898 update: aligned with iter-893 production matrix
-        (apply_fortran_xppm_boundary=True):
-          OFF: v_ll_Linf = 0.132 m/s
-          ON:  v_ll_Linf = 0.605 m/s
-          Ratio ON/OFF ~= 4.59x worse.
-
-        The known-worse property holds under both alignment regimes;
-        iter-898 aligns the test config with the iter-893 production
-        path so the regression sentinel measures the same baseline
-        as production.
-
-        Interpretation.  The cascaded row-0/col-0 (+ row-n/col-n)
-        boundary_fix smoothing gives cube-corner cells [0,0],
-        [0,n-1], [n-1,0], [n-1,n-1] a DOUBLE update — effectively
-        a 4-point average of the 2x2 block at the corner.  That
-        double-smoothing is critical for W2 v-wind stability.
-        Without it, mode A grows 4.59x larger (iter-898 alignment).
-
-        This sentinel pins the known-worse outcome so if a future
-        edit inadvertently disables the corner smoothing (by
-        enabling skip_corners as default, or by refactoring the
-        row/col smoothing to no longer cascade at corners), the
-        regression is caught.
-
-        Pin thresholds (iter-898c update — actually pins iter-893
-        xppm=True alignment, not just an upper bound):
-          OFF (baseline) v_ll_Linf < 0.145  (iter-898c: tight enough
-                                              to REJECT a silent
-                                              xppm=True->False revert
-                                              which would give OFF=
-                                              0.1593 > 0.145; iter-898
-                                              measures 0.132 with
-                                              margin ~0.013)
-          ON  v_ll_Linf          > 0.40   (well above baseline,
-                                              well below measured 0.605)
-          ratio ON/OFF           > 3.0    (measured 4.59x)
-
-        Iter-898c rationale: the original iter-898 threshold of
-        < 0.16 was too loose — both the iter-893 OFF baseline
-        (0.1319) and the pre-iter-893 OFF baseline (0.1593) satisfy
-        < 0.16, so the assertion did NOT catch a silent removal of
-        `apply_fortran_xppm_boundary=True` from the config.  The
-        Codex iter-898 stop-time review correctly flagged this:
-        "iter-898's new assertions do not actually pin the
-        apply_fortran_xppm_boundary=True alignment they were added
-        to enforce".  Tightening to < 0.145 gives an assertion that
-        FIRES on a silent revert (0.1593 > 0.145) and PASSES under
-        the iter-893 alignment (0.1319 < 0.145).
-
-        If either the baseline drifts up, the ON path stops being
-        substantially worse, or the ratio collapses, the sentinel
-        fires and the editor should investigate BEFORE updating
-        pins.  Never silently relax.
-        """
-        import jax.numpy as jnp
-        import numpy as np
-        from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-            CDGridShallowWaterConfig,
-            FV3EdgeShallowWaterModel,
-            FV3EdgeShallowWaterState,
-        )
-        from tests.atmosphere.shallow_water.test_cases.williamson import (
-            williamson_test2,
-        )
-        from legoesm.grids.cubed_sphere_cdgrid import (
-            cell_centre_angles_from_4edge)
-        from legoesm.grids.regridding import (
-            get_cubedsphere_to_latlon_weights, apply_cubedsphere_to_latlon)
-
-        n = 36
-        dt = 300.0
-        n_steps = int(86400 / dt)
-        div_damp = 8.0 * 1.5e7 * (48.0 / n) ** 2
-        grid = create_cubed_sphere(n=n, use_duogrid=False)
-        sw = williamson_test2(grid)
-        u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
-        weights = get_cubedsphere_to_latlon_weights(n, n_lon=360, n_lat=181)
-
-        def _run_and_measure(flag: bool) -> float:
-            cfg = CDGridShallowWaterConfig(
-                hyperdiff_coeff=0.0,
-                div_damp=div_damp,
-                boundary_fix=True,
-                boundary_fix_skip_corners=flag,
-                damp_v=0.06,
-                nord_v=2,
-                # Iter-898: align with iter-893 production matrix
-                # runner config so the OFF baseline matches the
-                # current production W2 baseline (0.132) rather than
-                # the pre-iter-893 baseline (0.159).  The known-worse
-                # property of `boundary_fix_skip_corners` holds under
-                # both settings; iter-898 measurement gives ratio
-                # 4.59x (was 6.5x pre-iter-893).
-                apply_fortran_xppm_boundary=True,
-            )
-            model = FV3EdgeShallowWaterModel(grid, config=cfg)
-            cdgrid = model.cdgrid
-            u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
-            v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
-            state = FV3EdgeShallowWaterState(
-                h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
-            model.set_initial_mass(state)
-            for _ in range(n_steps):
-                state = model.step(state, dt)
-            ca_4edge, sa_4edge = cell_centre_angles_from_4edge(cdgrid)
-            u_cc = 0.5 * (np.asarray(state.u_d)[:, :, :-1]
-                           + np.asarray(state.u_d)[:, :, 1:])
-            v_cc = 0.5 * (np.asarray(state.v_d)[:, :-1, :]
-                           + np.asarray(state.v_d)[:, 1:, :])
-            v_north = (np.asarray(sa_4edge) * u_cc
-                        + np.asarray(ca_4edge) * v_cc)
-            v_ll = apply_cubedsphere_to_latlon(v_north, weights)
-            return float(np.max(np.abs(v_ll)))
-
-        v_ll_linf_off = _run_and_measure(flag=False)
-        v_ll_linf_on = _run_and_measure(flag=True)
-
-        # Iter-898c: 0.145 is the alignment-pinning threshold —
-        # iter-893 xppm=True yields 0.132 (passes with margin ~0.013);
-        # a silent xppm=True->False revert would give 0.1593 (FAILS,
-        # 0.1593 > 0.145).  This is what makes the alignment claim
-        # actually load-bearing on the assertion, not just descriptive.
-        self.assertLess(
-            v_ll_linf_off, 0.145,
-            msg=(f"OFF (default, xppm_boundary=True) baseline "
-                 f"v_ll_Linf={v_ll_linf_off:.3e} drifted above 0.145 "
-                 f"— iter-898c threshold rejects silent xppm=True->"
-                 f"False revert (would give 0.1593 > 0.145) AND "
-                 f"rejects upward numerical drift from iter-893 "
-                 f"baseline (0.132).  Investigate BEFORE relaxing."))
-
-        self.assertGreater(
-            v_ll_linf_on, 0.40,
-            msg=(f"ON (boundary_fix_skip_corners=True, xppm_boundary"
-                 f"=True) v_ll_Linf={v_ll_linf_on:.3e} is below the "
-                 f"known-worse threshold 0.40.  Iter-898 measured "
-                 f"0.605.  A smaller value means either the "
-                 f"corner-skip path was repaired (re-examine as a "
-                 f"mode-A candidate) or the opt-in was silently "
-                 f"disabled (restore kwarg threading)."))
-
-        ratio = v_ll_linf_on / v_ll_linf_off
-        self.assertGreater(
-            ratio, 3.0,
-            msg=(f"boundary_fix_skip_corners=True v_ll_Linf="
-                 f"{v_ll_linf_on:.3e} produced ratio {ratio:.3f}x "
-                 f"over OFF baseline {v_ll_linf_off:.3e}.  Iter-898 "
-                 f"measured ratio ~4.59x.  A smaller ratio means the "
-                 f"cascaded corner smoothing has become less load-"
-                 f"bearing than iter-769 established — re-examine."))
-
-    def test_fortran_vector_corner_fill_is_known_worse(self):
-        """Iter-767 regression sentinel: the
-        `fortran_vector_corner_fill=True` opt-in path in
-        `fv3_sw_tendencies` / `CDGridShallowWaterConfig` is KNOWN
-        WORSE than the default rotate-pad-rotate pipeline on the
-        canonical W2 matrix config — enabling it makes W2
-        v_ll_Linf ~18× worse (0.132 → 2.409 m/s) and h_L2 ~10×
-        worse (2.07e-4 → 2.07e-3).
-
-        Iter-767 implemented Fortran's `fill_corners_agrid_r8`
-        VECTOR (mySign=-1) formula from
-        fv_mp_mod.F90:1433-1457 as a post-processing overwrite of
-        the 4 cube-vertex halo cells produced by `pad_halo_vector`.
-        Formula at SW: u_pad[0,0] = -v_pad[0,1], v_pad[0,0] =
-        -u_pad[1,0] (cross-component swap with sign flip).  The
-        hypothesis was that Fortran's direct swap would avoid the
-        face-local grid-angle discontinuity at the 3-face cube
-        vertex in our rotate-pad-rotate pipeline.
-
-        FALSIFIED: the swap formula assumes the halo exchange did
-        NOT already rotate winds through geographic intermediary.
-        Our `pad_halo_vector` DOES rotate through geographic
-        components.  Applying Fortran's swap on top of already-
-        rotated halo cells produces algorithmically inconsistent
-        values at the cube vertex.
-
-        Iter-898 update: aligned with the canonical W2 matrix
-        config which now activates `apply_fortran_xppm_boundary=
-        True` (Fortran iord<7 cube-edge boundary formulas,
-        tp_core.F90:357-369).  The OFF baseline dropped from
-        pre-iter-893 0.159 m/s to 0.132 m/s; the ON measurement
-        landed at 2.409 m/s, giving ratio ~18.27× (pre-iter-893
-        ratio was ~16×).  Cross-table at C36 1-day:
-            vec=F xppm=T → 0.1319 m/s   (OFF, matrix-aligned)
-            vec=T xppm=T → 2.4087 m/s   (ON,  matrix-aligned)
-
-        Iter-898c update: tightened OFF baseline pin from < 0.16
-        to < 0.145.  The original < 0.16 admitted both 0.1319
-        (xppm=True) and 0.1593 (xppm=False), so the assertion did
-        NOT pin the iter-893 alignment claim — Codex iter-898
-        stop-time review correctly flagged "iter-898's new
-        assertions do not actually pin the apply_fortran_xppm_
-        boundary=True alignment they were added to enforce".
-        The < 0.145 threshold passes at 0.1319 (margin ~0.013) and
-        FIRES at 0.1593 (catches a silent xppm=True->False revert).
-        ON ceiling unchanged at < 5.0; ratio threshold unchanged
-        at > 5; h_L2 ratio unchanged at > 3.0.
-
-        This sentinel runs BOTH the OFF (default) and ON paths,
-        pins OFF < 0.145 (iter-898c — pins iter-893 alignment by
-        rejecting xppm=False's 0.1593),
-        pins ON < 5.0 (above iter-898-aligned 2.409 with margin),
-        and pins the ratio ON/OFF > 5 (iter-898 measured ~18.27×).
-        """
-        import jax.numpy as jnp
-        import numpy as np
-        from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-            CDGridShallowWaterConfig,
-            FV3EdgeShallowWaterModel,
-            FV3EdgeShallowWaterState,
-        )
-        from tests.atmosphere.shallow_water.test_cases.williamson import (
-            williamson_test2,
-        )
-        from legoesm.grids.cubed_sphere_cdgrid import (
-            cell_centre_angles_from_4edge)
-        from legoesm.grids.regridding import (
-            get_cubedsphere_to_latlon_weights, apply_cubedsphere_to_latlon)
-
-        n = 36
-        dt = 300.0
-        n_steps = int(86400 / dt)
-        div_damp = 8.0 * 1.5e7 * (48.0 / n) ** 2
-        grid = create_cubed_sphere(n=n, use_duogrid=False)
-        sw = williamson_test2(grid)
-        u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
-        weights = get_cubedsphere_to_latlon_weights(n, n_lon=360, n_lat=181)
-
-        def _run_and_measure(flag: bool):
-            """Return (v_ll_linf, h_L2) — iter-767 Codex 2nd-pass
-            added h_L2 pin so that a regression that preserves the
-            v_ll_Linf ratio while moving the h error also fires."""
-            cfg = CDGridShallowWaterConfig(
-                hyperdiff_coeff=0.0,
-                div_damp=div_damp,
-                boundary_fix=True,
-                damp_v=0.06,
-                nord_v=2,
-                fortran_vector_corner_fill=flag,
-                # Iter-898 alignment: matrix W2 config activates
-                # apply_fortran_xppm_boundary=True (iter-893).
-                # Mismatched OFF baseline if not aligned.
-                apply_fortran_xppm_boundary=True,
-            )
-            model = FV3EdgeShallowWaterModel(grid, config=cfg)
-            cdgrid = model.cdgrid
-            u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
-            v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
-            state = FV3EdgeShallowWaterState(
-                h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
-            model.set_initial_mass(state)
-            for _ in range(n_steps):
-                state = model.step(state, dt)
-            ca_4edge, sa_4edge = cell_centre_angles_from_4edge(cdgrid)
-            u_cc = 0.5 * (np.asarray(state.u_d)[:, :, :-1]
-                           + np.asarray(state.u_d)[:, :, 1:])
-            v_cc = 0.5 * (np.asarray(state.v_d)[:, :-1, :]
-                           + np.asarray(state.v_d)[:, 1:, :])
-            v_north = (np.asarray(sa_4edge) * u_cc
-                        + np.asarray(ca_4edge) * v_cc)
-            v_ll = apply_cubedsphere_to_latlon(v_north, weights)
-            v_ll_linf = float(np.max(np.abs(v_ll)))
-            h_exact = np.asarray(sw.h.data)
-            area = np.asarray(grid.area)
-            h_err = np.asarray(state.h) - h_exact
-            h_l2 = float(np.sqrt(np.sum(h_err ** 2 * area)
-                                  / np.sum(h_exact ** 2 * area)))
-            return v_ll_linf, h_l2
-
-        v_ll_linf_off, h_l2_off = _run_and_measure(flag=False)
-        v_ll_linf_on, h_l2_on = _run_and_measure(flag=True)
-
-        # Iter-898c: 0.145 is the alignment-pinning threshold —
-        # iter-893 xppm=True yields 0.132 (passes with margin ~0.013);
-        # a silent xppm=True->False revert would give 0.1593 (FAILS,
-        # 0.1593 > 0.145).  This makes the iter-898 alignment claim
-        # load-bearing on the assertion, not just descriptive.
-        self.assertLess(
-            v_ll_linf_off, 0.145,
-            msg=(f"OFF (default rotate-pad-rotate, with iter-893 "
-                 f"apply_fortran_xppm_boundary=True alignment) "
-                 f"baseline v_ll_Linf={v_ll_linf_off:.3e} m/s "
-                 f"drifted above 0.145 m/s — iter-898c threshold "
-                 f"rejects silent xppm=True->False revert (would give "
-                 f"0.1593 > 0.145) AND rejects upward numerical drift "
-                 f"from iter-893 baseline (0.132).  Investigate "
-                 f"BEFORE relaxing."))
-
-        # Iter-898 measured ON v_ll_Linf ~2.409 m/s (with iter-893
-        # matrix alignment).  Pre-iter-898 measurement was 2.555 m/s.
-        # Pin < 5.0 so a NaN/blowup to 10+ m/s fires, and a repair
-        # below 2.0 m/s (possible mode-A reduction) also fires.
-        self.assertLess(
-            v_ll_linf_on, 5.0,
-            msg=(f"ON (fortran_vector_corner_fill=True) v_ll_Linf="
-                 f"{v_ll_linf_on:.3e} m/s exceeded 5.0 m/s — the "
-                 f"iter-898 measurement (2.409 m/s) no longer "
-                 f"applies.  Regenerate the pins."))
-
-        ratio_v = v_ll_linf_on / v_ll_linf_off
-        self.assertGreater(
-            ratio_v, 5.0,
-            msg=(f"fortran_vector_corner_fill=True v_ll_Linf="
-                 f"{v_ll_linf_on:.3e} m/s produced ratio "
-                 f"{ratio_v:.3f}× over OFF baseline "
-                 f"({v_ll_linf_off:.3e} m/s) — UNEXPECTEDLY SMALL "
-                 f"gap.  Iter-898-aligned measurement falsified "
-                 f"this path at ~18.27× blowup (pre-iter-893 was "
-                 f"~16×).  A new smaller ratio means either:\n"
-                 f"  (a) the Fortran vector corner-fill path has "
-                 f"been repaired — re-examine whether it now "
-                 f"reduces mode A and can replace the default "
-                 f"rotate-pad-rotate chain, OR\n"
-                 f"  (b) the opt-in was silently disabled — "
-                 f"restore the kwarg threading through "
-                 f"fv3_sw_tendencies per iter-767."))
-
-        # Iter-767 measured h_L2 OFF=2.07e-4, ON=2.07e-3 → ratio 10×.
-        # Codex iter-767 2nd-pass: sentinel also pins h_L2 blowup
-        # so a regression that preserves v_ll_Linf ratio but shifts
-        # h error fires too.
-        ratio_h = h_l2_on / h_l2_off
-        self.assertGreater(
-            ratio_h, 3.0,
-            msg=(f"fortran_vector_corner_fill=True h_L2="
-                 f"{h_l2_on:.3e} produced ratio {ratio_h:.3f}× over "
-                 f"OFF baseline ({h_l2_off:.3e}) — UNEXPECTEDLY "
-                 f"SMALL gap.  Iter-767 falsified this path at "
-                 f"~10× h_L2 blowup.  If the h error gap narrowed, "
-                 f"re-examine whether the fill has been partially "
-                 f"repaired."))
 
     def test_iter780_cb_error_location_artifact(self):
         """Iter-780b sentinel: lock the iter-780 committed output
