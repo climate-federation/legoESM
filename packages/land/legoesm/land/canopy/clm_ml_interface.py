@@ -1273,6 +1273,31 @@ def compute_clm_ml_canopy_fluxes(
     _warm_started = canopy_state is not None and canopy_state.mlcanopy is not None
     _diff_mode = _want_diff and _warm_started  # ncol == 1 guaranteed above
 
+    # Solar geometry (lat / lon / doy / cos_zenith) is a NON-differentiated
+    # static input BY DESIGN: it is consumed by host-side CLM orbital setup
+    # (_setup_clm_time / _setup_clm_topology / shr_orb_cosz), not by the traced
+    # canopy physics.  You do not train through the Sun's position — it is fixed
+    # by lat/lon/time.  If a caller differentiates the WHOLE AtmToSurface pytree
+    # (so cos_zenith becomes a tracer), the host ``np.array(forcing.cos_zenith)``
+    # below would raise a cryptic TracerArrayConversionError.  Detect it here and
+    # fail with an actionable message instead.  (Differentiating the physical
+    # forcing leaves — T_lowest, sw_down, q, u, v, lw_down, p, co2 — is fully
+    # supported; only geometry must stay concrete.)
+    if _want_diff:
+        for _geo_name, _geo_val in (
+            ("forcing.cos_zenith", forcing.cos_zenith),
+            ("lat", lat),
+            ("lon", lon),
+        ):
+            if _geo_val is not None and isinstance(_geo_val, jax.core.Tracer):
+                raise ValueError(
+                    f"CLM-ML diff mode: {_geo_name} is a jax tracer, but solar "
+                    "geometry (lat/lon/doy/cos_zenith) is a NON-differentiated static "
+                    "input (host-side CLM orbital setup). Differentiate only the "
+                    "physical forcing leaves and keep geometry concrete (close over "
+                    "it, or jax.lax.stop_gradient it before the grad boundary)."
+                )
+
     # ---- Build soil grid data ----
     grid = make_soil_grid(land_config.soil_grid)
     dz_soil = np.array(grid.dz, dtype=np.float64)     # (n_layers,)

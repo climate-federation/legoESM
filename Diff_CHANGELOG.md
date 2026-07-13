@@ -8,6 +8,22 @@ Convention: newest entries on top. Each entry = what changed, why, how verified.
 
 ---
 
+## 2026-07-13 — Codex round-5 [P2]s
+
+- **Solar-geometry guard:** differentiating the WHOLE `AtmToSurface` pytree makes
+  `forcing.cos_zenith` a tracer → the host `np.array(cos_zenith)` would raise a
+  cryptic `TracerArrayConversionError`. Solar geometry (lat/lon/doy/cos_zenith)
+  is NON-differentiable by design (host-side CLM orbital setup — you don't train
+  through the Sun's position). Added a `jax.core.Tracer` check that raises a clear,
+  actionable `ValueError` in diff mode. Verified: concrete arrays pass, a
+  differentiated leaf is detected. Physical forcing leaves (T/q/u/v/sw/lw/p/co2)
+  stay fully differentiable.
+- **Pin clm-ml-jax [P2] — accepted known limitation:** the package is not on PyPI
+  (local/gitignored checkout; see session-report gap #1). It cannot be pinned to a
+  PyPI/Git revision from here. Enforcement is the runtime capability guard (raises
+  if the installed build lacks diff-diagnostics) + the `[canopy]`-extra doc note.
+  Fully resolving requires publishing clm-ml-jax (out of this integration's scope).
+
 ## 2026-07-13 — Codex round-4 [P1]: thread grid_info through the land rollout (M3)
 
 `step_multilayer_land` / `step_multilayer_land_with_diagnostics` /
