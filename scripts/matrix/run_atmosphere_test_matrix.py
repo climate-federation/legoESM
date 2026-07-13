@@ -597,6 +597,35 @@ from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
 )
 from legoesm.experiments.matrix.namelist import write_case_namelist
 
+# ---------------------------------------------------------------------------
+# Cube SW core selection (FV3 single-implementation program, Phase-1 M1)
+# ---------------------------------------------------------------------------
+# ``--sw-core fb`` routes the cubed-sphere SW cases through the faithful FV3
+# forward-backward chain (``FV3FBShallowWaterModel`` + the M1 validated
+# preset from ``fb_m1_preset_config``) instead of the production A-L RK3
+# path, enabling a permanent A/B until the Phase-1 M2 default flip.  Cube
+# only; every other grid ignores the flag.  NOTE: the cube cosine-bell cases
+# never call ``model.step`` (pure ``fv_tp_2d`` transport with streamfunction
+# fluxes shared by both cores), so they are core-independent by construction.
+_SW_CORE_CHOICES = ("production", "fb")
+_SW_CORE = "production"
+
+
+def _fb_cube_sw_model(n: int, test_num: int):
+    """Build the FB-lane cube SW model (duogrid-only; M1 preset).
+
+    The FB chain requires the duogrid cross-face halo (``require_duogrid_fb``
+    raises otherwise), so ALL FB-lane cases use ``use_duogrid=True`` — unlike
+    the production lane where only the modons (test 8) do.  Modons stay
+    non-rotating (omega=0), matching the production lane.
+    """
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        FV3FBShallowWaterModel, fb_m1_preset_config)
+    grid = (create_cubed_sphere(n, omega=0.0, use_duogrid=True)
+            if test_num == 8 else create_cubed_sphere(n, use_duogrid=True))
+    return FV3FBShallowWaterModel(grid, fb_m1_preset_config())
+
 
 def _modon_hyperdiff_coeff(n: int) -> float:
     """Colliding-modons biharmonic hyperdiff backstop from the env knobs (#521/#753).
@@ -2552,7 +2581,19 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             )
         else:
             config = iter1009_dual_target_config(n)
-        model = FV3EdgeShallowWaterModel(grid, config)
+        # Phase-1 M1 FB lane (--sw-core fb): swap in the faithful FV3
+        # forward-backward core.  Grid is rebuilt duogrid (FB requirement);
+        # everything downstream (IC recipe, metrics, regrid) is shared with
+        # the production lane so the A/B protocol is held fixed.
+        if _SW_CORE == "fb":
+            model = _fb_cube_sw_model(n, test_num)
+            grid = model.grid
+        elif _SW_CORE == "production":
+            model = FV3EdgeShallowWaterModel(grid, config)
+        else:
+            raise ValueError(
+                f"unknown --sw-core '{_SW_CORE}'; expected one of "
+                f"{_SW_CORE_CHOICES}")
         cdgrid = model.cdgrid
 
         # Initialise edge-midpoint D-grid winds analytically.
@@ -7640,6 +7681,16 @@ def build_parser() -> argparse.ArgumentParser:
              "NOT ppmv — passing ``8`` is an unphysical value and "
              "is rejected.  For 8 ppmv, use ``8e-6``.")
     p.add_argument(
+        "--sw-core", type=str, default="production",
+        choices=list(_SW_CORE_CHOICES),
+        help="Cube SW dynamical core (Phase-1 M1 A/B lane): 'production' "
+             "= FV3EdgeShallowWaterModel (A-L RK3, default); 'fb' = "
+             "FV3FBShallowWaterModel (faithful FV3 forward-backward chain, "
+             "duogrid, M1 preset nord=1 d4_bg=0.16 dddmp=0.2 damp_v=0.02 "
+             "nord_v=2).  Cubed-sphere SW cases only; other grids ignore "
+             "it, and the cube cosine-bell cases are core-independent "
+             "(pure transport, model.step never called).")
+    p.add_argument(
         "--resolution", type=str, default=None,
         help="Override baseline resolution (e.g. C48, 90x180, ico6)")
     p.add_argument(
@@ -7713,6 +7764,12 @@ def main():
     # Zero or negative values silently produce nonsensical runs.
     if args.days is not None and args.days <= 0:
         parser.error("--days must be positive")
+
+    # Phase-1 M1 FB lane: stash the cube SW core selection for
+    # run_shallow_water (argparse choices= already rejects unknowns;
+    # run_shallow_water raises again defensively for non-CLI callers).
+    global _SW_CORE
+    _SW_CORE = args.sw_core
 
     # iter-31: thread per-run GHG overrides through to
     # _make_rrtmgp_physics.  iter-32 codex MEDIUM: zero is a valid

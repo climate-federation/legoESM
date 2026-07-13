@@ -361,6 +361,34 @@ def iter1009_dual_target_config(
     )
 
 
+def fb_m1_preset_config(
+    damp_v: float = 0.02,
+    dddmp: float = 0.2,
+    d4_bg: float = 0.16,
+) -> CDGridShallowWaterConfig:
+    """Phase-1 M1 validated FB damping preset for ``FV3FBShallowWaterModel``.
+
+    ``nord=1, d4_bg=0.16, dddmp=0.2, damp_v=0.02, nord_v=2`` — the Phase-0
+    (PR #967) preset validated on the 120-day colliding-modon run (mass
+    drift ~1e-15).  The FB chain reads ONLY the d_sw5/d_sw6 knobs
+    (``d2_bg/dddmp/d4_bg/nord`` + ``damp_v/nord_v``); ``div_damp`` and
+    ``hyperdiff_coeff`` are production-path fields the FB step never
+    consumes, so they stay 0 here.  ``nord_v`` is pinned explicitly to 2
+    because the sentinel ``-1`` derives ``min(2, nord)=1`` for ``nord=1``
+    (the sentinel trap documented in the M1 program notes).
+
+    The tuning kwargs (``damp_v``/``dddmp``/``d4_bg``) exist for the M1
+    per-case calibration sweeps; defaults are the validated preset.
+
+    See ``docs/architecture/fv3_single_implementation_program.md`` (Phase 1
+    M1) for the calibration table produced with this preset.
+    """
+    return CDGridShallowWaterConfig(
+        nord=1, d4_bg=d4_bg, dddmp=dddmp, d2_bg=0.0,
+        damp_v=damp_v, nord_v=2,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Resolution-scaling helpers used by both the production matrix runner and
 # the ``legoesm test williamson`` CLI.  Iter-1030 calibration values; matching
