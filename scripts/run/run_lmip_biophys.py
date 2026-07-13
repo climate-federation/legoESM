@@ -630,7 +630,13 @@ def run(args) -> int:
     else:
         land_fraction = (_cover1d(gsd.f_land) + _cover1d(gsd.f_lake)
                          + _cover1d(gsd.f_glacier))
-    land = land_fraction >= args.land_frac_min
+    # A cell is "land" if the surfdata assigns it ANY land cover (land_frac_min
+    # default 0.0).  This is the surfdata's own land definition, not an arbitrary
+    # majority-land cutoff; the actual ``land_fraction`` is emitted in every output
+    # so analysis can area-weight or threshold as it sees fit.  (Forcing is now
+    # finite on every land column -- CRU-JRA regrids from land-only source -- so no
+    # threshold is needed to dodge unforced coastal cells.)
+    land = land_fraction > args.land_frac_min
 
     def _flush_tapes(accums, slot_ids_by_tape, label):
         """Write each tape's selected slots to ``lmip_biophys.<tape>[.<label>].nc``.
@@ -653,6 +659,12 @@ def run(args) -> int:
                 return arr2.reshape(ids.size, nlat, nlon) if is_latlon else arr2
 
             data_vars = {v: (dims, pack(finalized[v])) for v in tape.vars}
+            # Emit the per-cell land fraction so analysis can area-weight / mask
+            # without relying on a hard threshold at run time.
+            _lf = np.asarray(land_fraction, np.float64)
+            data_vars["land_fraction"] = (
+                (("lat", "lon"), _lf.reshape(nlat, nlon)) if is_latlon
+                else (("ncol",), _lf))
             coords = {"time": (("time",), st / _SEC_PER_DAY)}
             if is_latlon:
                 coords.update({"lat": (("lat",), lat_1d), "lon": (("lon",), lon_1d)})

@@ -179,6 +179,7 @@ def compute_latlon_to_voronoi_weights(
     tgt_lat: np.ndarray,
     tgt_lon: np.ndarray,
     k_neighbors: int = 4,
+    src_valid: np.ndarray | None = None,
 ) -> RegridWeights:
     """Compute regridding weights from regular lat-lon to unstructured points.
 
@@ -197,6 +198,15 @@ def compute_latlon_to_voronoi_weights(
         Target point longitudes in **radians** (e.g. ``mesh.lonCell``).
     k_neighbors : int
         Number of nearest neighbors for interpolation.
+    src_valid : array (n_lat, n_lon) or (n_lat*n_lon,), optional
+        Boolean mask of VALID source cells.  When given, the KD-tree is built
+        from valid cells ONLY, so every target's k neighbours are guaranteed
+        valid — each target maps to its nearest *actual* valid source, and no
+        target can end up with all-missing neighbours (the returned
+        ``src_indices`` still index the FULL flattened grid, so the field regrid
+        is unchanged).  Used for a land-only source (e.g. CRU-JRA ocean = NaN) so
+        coastal targets never draw only ocean neighbours.  ``None`` = every source
+        cell participates (the original behaviour).
 
     Returns
     -------
@@ -216,8 +226,23 @@ def compute_latlon_to_voronoi_weights(
         np.asarray(tgt_lat).ravel(), np.asarray(tgt_lon).ravel(),
     )
 
-    tree = cKDTree(src_xyz)
-    distances, indices = tree.query(tgt_xyz, k=k_neighbors)
+    if src_valid is not None:
+        # Build the tree from VALID source cells only; map neighbour indices back
+        # to full-grid coordinates so the downstream field regrid is unchanged.
+        valid_flat = np.asarray(src_valid).ravel().astype(bool)
+        valid_idx = np.nonzero(valid_flat)[0]
+        if valid_idx.size == 0:
+            raise ValueError("compute_latlon_to_voronoi_weights: src_valid masks out all source cells")
+        k = min(int(k_neighbors), int(valid_idx.size))
+        tree = cKDTree(src_xyz[valid_idx])
+        distances, local = tree.query(tgt_xyz, k=k)
+        if k == 1:
+            distances = distances[:, None]
+            local = local[:, None]
+        indices = valid_idx[local]
+    else:
+        tree = cKDTree(src_xyz)
+        distances, indices = tree.query(tgt_xyz, k=k_neighbors)
 
     distances = np.maximum(distances, 1e-12)
     inv_dist = 1.0 / distances

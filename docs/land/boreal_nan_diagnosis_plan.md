@@ -60,6 +60,34 @@ here). **Merging main would not fix the boreal NaN.** (Main does have unrelated
 good land fixes worth syncing eventually — a latent-mass-over-snow conservation
 fix, snow-age albedo — but keep that separate from this.)
 
+## Re-diagnosis from the 1-yr Phase-2a run (2026-07-13)
+
+The revert map (`reverts.nc`) overturned the original diagnosis. The NaN cells are
+**not** the cold thermal blow-up:
+- **357 cells revert EVERY one of 8760 steps** (median revert fraction 1.0) →
+  chronic init-NaN (the guard reverts to the previous state; if that was never
+  finite it stays NaN). They fail instantly, not gradually (count is identical at
+  10 days and 1 yr: 358→357).
+- They are **mid-latitude** (275), not Antarctica (0) — a coastline-following, not
+  polar, pattern.
+
+Root cause: **the CRU-JRA forcing regrid.** CRU-JRA is land-only (ocean = NaN);
+`build_forcing_weights` built the KD-tree over the FULL grid, so a coastal model
+column whose 4 nearest source cells are all ocean regridded to NaN → NaN
+cold-start → chronic NaN. This is a forcing/masking gap, **not** a physics
+divergence. Fixed by building the KD-tree from **land-only source cells**
+(`compute_latlon_to_voronoi_weights(src_valid=...)`), so every column draws its
+nearest *actual* land forcing (2026-07-13). Also removed the arbitrary
+`land_frac_min=0.5` output cutoff (default → 0.0 = any surfdata land) and now emit
+`land_fraction` per cell for area-weighting in analysis.
+
+Consequences for the plan: **Phase 2a was correct but not the cause** of these
+NaN (a real latent instability, kept). The revert map shows **no polar/thermal
+divergence at all**. The genuinely-cold cells (`T_soil 221 K`, `snow 1580 kg/m²`)
+are FINITE — a cold-bias / snow-tower **realism** issue, which is what Phase 2b now
+targets (no longer a NaN emergency). Re-run after the forcing fix should show
+`reverts.nc` ≈ 0 → confirming only the realism work remains.
+
 ## The plan
 
 **Phase 1 — Robustness guard (DONE, 2026-07-13).** Atomic per-column NaN-revert

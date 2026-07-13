@@ -26,7 +26,7 @@ def test_minimal_config_validates():
     assert cfg.grid["type"] == "latlon"
     assert cfg.forcing["k_neighbors"] == 4                # default applied
     assert cfg.restart["from"] == ""                       # default applied
-    assert cfg.land_frac_min == 0.5                        # default applied
+    assert cfg.land_frac_min == 0.0                        # default: any surfdata land (no arbitrary cutoff)
 
 
 def test_missing_required_field_raises():

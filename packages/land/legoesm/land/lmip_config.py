@@ -33,7 +33,7 @@ An experiment is fully described by a YAML file with this schema::
     restart:
       from: <path to a .npz or "">     # "" -> cold start
 
-    land_frac_min: float                # 0..1 mask threshold (default 0.5)
+    land_frac_min: float                # surfdata land threshold (default 0.0 = any land)
     land_mask_file: <optional CMIP6 sftlf path>
 
     output:
@@ -207,7 +207,7 @@ def validate_config(data: dict) -> LMIPConfig:
         time=time,
         restart=restart,
         output=output,
-        land_frac_min=float(data.get("land_frac_min", 0.5)),
+        land_frac_min=float(data.get("land_frac_min", 0.0)),
         land_mask_file=str(data.get("land_mask_file", "")),
         raw=data,
     )
