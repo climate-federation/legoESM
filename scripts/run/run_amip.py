@@ -278,6 +278,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hyperdiff-scale", type=float,
                         default=_DYCORE_DEFAULTS.hyperdiff_scale,
                         help="Dycore hyperdiffusion multiplier")
+    parser.add_argument("--mpas-nu-vert4-t", type=float,
+                        default=_DYCORE_DEFAULTS.mpas_nu_vert4_T,
+                        help="MPAS vertical biharmonic hyperdiffusion of T "
+                             "[1/s] — #930 2Δσ vertical-checkerboard cure "
+                             "(0 disables)")
     parser.add_argument("--div-damp-scale", type=float,
                         default=_DYCORE_DEFAULTS.div_damp_scale,
                         help="Dycore divergence-damping multiplier")
@@ -1117,6 +1122,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         hyperdiff_scale=args.hyperdiff_scale,
         div_damp_scale=args.div_damp_scale,
         moisture_flux_form=args.moisture_flux_form,
+        mpas_nu_vert4_T=args.mpas_nu_vert4_t,
         conservation_fixer=args.conservation_fixer,
         fix_mass=args.fix_mass,
         implicit_grav_wave_use_pcg=args.implicit_grav_wave_use_pcg,

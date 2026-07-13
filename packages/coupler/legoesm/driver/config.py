@@ -199,6 +199,16 @@ class DycoreConfig(NamedTuple):
     # face-scatter until the reductions are allreduce-aware).  Appended last to
     # preserve positional ABI.
     moisture_flux_form: bool = False
+    # #930: vertical biharmonic (∂⁴/∂σ⁴) hyperdiffusion coefficient [1/s] for T
+    # on the MPAS hydrostatic dycore — scale-selective damping of the grid-scale
+    # 2Δσ vertical checkerboard that the adiabatic κ·T·ω/p term amplifies (no
+    # other vertical operator in that dycore opposes it) until it rides the
+    # silent T_min=50 K floor (#871/#912/#915).  del4 damps 2Δσ ~47× faster
+    # than an 8Δσ resolved wave, so resolved vertical structure is ~untouched;
+    # explicit-stable to huge dt (16·ν·dt≪1).  Only wired to the MPAS PE dycore
+    # (``component_factory``).  Set 0.0 to reproduce the pre-#930 dycore exactly.
+    # Appended last to preserve positional ABI.
+    mpas_nu_vert4_T: float = 2.0e-6
 
 
 class EvaluationConfig(NamedTuple):
