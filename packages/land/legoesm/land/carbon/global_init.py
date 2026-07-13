@@ -69,6 +69,11 @@ _U_MIN = 1.0                       # wind-speed floor [m/s] (matches run_lmip)
 _DRIFT_WINDOW_MAX_YRS = 20         # cap on the drift-diagnostic averaging window
 _DRIFT_FLOOR = 1e-9                # divide-safety floor for the drift fraction
 
+# --- finidat->run carbon-IC loader: grid-match geometry (degrees, not physics) --
+_DEG_PER_CIRCLE = 360.0            # full longitude circle [deg]
+_DEG_HALF_CIRCLE = 180.0           # half circle [deg] (longitude wrap pivot)
+_COORD_MATCH_ATOL_DEG = 1e-3       # grid-match lat/lon tolerance [deg]
+
 # --- archetype spin-up carbon seeds [gC/m2] ---
 # Conservative, BELOW-equilibrium initial pools that GROW IN.  The semi-analytic
 # driver resets the slow wood/SOM pools analytically, so these seeds mostly set
@@ -1132,3 +1137,148 @@ def map_to_grid_frozen_fraction(table, cell_archetype_id, cell_archetype_weight,
     phi_cell = np.where(
         wsum > 0.0, (gathered * w).sum(axis=1) / np.maximum(wsum, 1e-30), 0.0)
     return jnp.asarray(phi_cell)
+
+
+def load_finidat_carbon_ic(path, *, expect_ncol=None, target_lat_deg=None,
+                           target_lon_deg=None, coord_atol_deg=_COORD_MATCH_ATOL_DEG):
+    """Load a per-cell 8-pool :class:`CarbonState` (+ permafrost ``phi``) from a
+    global-carbon finidat and STRICTLY grid-match it to a run's land columns.
+
+    The inverse of :func:`map_to_grid` (the eight pools) +
+    :func:`map_to_grid_frozen_fraction` (the ``soil_frozen_fraction`` ``phi``): it
+    reads the per-cell finidat ``global_carbon_ic.npz`` (written by
+    ``scripts/data/build_global_carbon_ic.py``) so a coupled run can INGEST the
+    seeded equilibrium instead of cold-starting carbon, AND thread the SAME
+    per-cell ``phi`` that scaled the seed into the coupler's permafrost/anaerobic
+    SOM protection (:func:`make_coupler(land_soil_frozen_fraction=...)
+    <legoesm.coupler.coupler.make_coupler>`) so the deep permafrost SOC PERSISTS.
+
+    Detection (static feature gate).  A ``.npz`` is a "carbon finidat" iff it
+    carries ALL eight :class:`~legoesm.land.carbon.config.CarbonState` pool fields.
+    A file missing any pool (a legacy land restart, an unrelated ``.npz``) is NOT
+    a carbon IC -> this returns ``(None, None)`` so the caller keeps its cold-start
+    EXACTLY (a static Python branch, never a partial / silent seed).
+
+    Grid match (the SIMPLER correct option: STRICT, fail-loud).  The finidat's
+    per-cell count must equal ``expect_ncol`` (the run's land columns) and -- when
+    ``target_lat_deg`` / ``target_lon_deg`` are supplied -- the finidat's per-cell
+    ``lat`` / ``lon`` must match the run grid's columns element-for-element
+    (latitude to ``coord_atol_deg``; longitude modulo 360, so a 0..360 vs
+    -180..180 store is not a false mismatch).  ANY mismatch RAISES with the exact
+    shapes / coords: the seeded pools are per-AREA stocks pinned to the finidat's
+    own cells, so silently reshaping or scatter-broadcasting them onto a different
+    (or differently-ordered) grid would corrupt the IC.  Cross-grid conservative
+    regridding (lat-lon -> a different lat-lon / Gaussian) is a documented
+    follow-up; a cubed-sphere / Voronoi run cannot match a lat-lon finidat and must
+    build the carbon IC on its own grid.
+
+    Parameters
+    ----------
+    path : str | pathlib.Path
+        The finidat ``global_carbon_ic.npz``.
+    expect_ncol : int, optional
+        The run's land-column count (``math.prod(grid_shape)``); enforced exactly.
+    target_lat_deg, target_lon_deg : array (ncol,), optional
+        The run grid's per-column latitude / longitude [degrees] (row-major -- the
+        SAME flatten the finidat used).  When given, the finidat coordinates must
+        match column-for-column (else :class:`ValueError`).
+    coord_atol_deg : float
+        Absolute tolerance [deg] for the latitude / longitude match.
+
+    Returns
+    -------
+    (CarbonState (ncol,) | None, jnp.ndarray (ncol,) | None)
+        The seeded per-cell carbon pools [gC/m2] and the per-cell permafrost
+        ``phi`` (``soil_frozen_fraction`` in ``[0, 1]``) if the finidat carries it,
+        else ``phi`` is ``None`` (a legacy finidat with no ``phi`` -> the coupler
+        runs unprotected, byte-identical).  ``(None, None)`` when ``path`` is not a
+        carbon finidat.
+    """
+    # Deferred (function-scope) import: keep Stage-A callers numpy-only, mirroring
+    # map_to_grid / map_to_grid_frozen_fraction.
+    import jax.numpy as jnp
+
+    from legoesm.land.carbon.config import CarbonState
+
+    pool_fields = CarbonState._fields
+    with np.load(path, allow_pickle=True) as z:
+        keys = set(z.files)
+        # Feature gate: not a carbon finidat unless EVERY pool is present.
+        if not all(f in keys for f in pool_fields):
+            return None, None
+        pools = {f: np.asarray(z[f], dtype=np.float64).reshape(-1)
+                 for f in pool_fields}
+        ncell = pools[pool_fields[0]].shape[0]
+        # Every pool must share the per-cell length (a corrupt / mismatched file).
+        for f in pool_fields:
+            if pools[f].shape != (ncell,):
+                raise ValueError(
+                    f"finidat carbon pool {f!r} has shape {pools[f].shape}; "
+                    f"expected ({ncell},) to match {pool_fields[0]!r}.")
+        lat_fin = (np.asarray(z["lat"], float).reshape(-1)
+                   if "lat" in keys else None)
+        lon_fin = (np.asarray(z["lon"], float).reshape(-1)
+                   if "lon" in keys else None)
+        phi = (np.asarray(z["soil_frozen_fraction"], float).reshape(-1)
+               if "soil_frozen_fraction" in keys else None)
+
+    # --- STRICT grid match (fail-loud; never a silent reshape / regrid) --------
+    if expect_ncol is not None and ncell != int(expect_ncol):
+        raise ValueError(
+            f"finidat carbon IC has {ncell} cells but the run's land grid has "
+            f"{int(expect_ncol)} columns; the seeded per-area pools are grid-bound "
+            "-- build the IC on the run grid (match --resolution).  Cross-grid "
+            "regridding is not yet supported for the carbon IC.")
+    if target_lat_deg is not None:
+        tlat = np.asarray(target_lat_deg, float).reshape(-1)
+        if lat_fin is None:
+            raise ValueError(
+                "finidat carbon IC has no 'lat' field to verify the grid match "
+                "against target_lat_deg; refusing to seed onto an unverified grid.")
+        if tlat.shape != lat_fin.shape:
+            raise ValueError(
+                f"finidat 'lat' has shape {lat_fin.shape} but target_lat_deg has "
+                f"{tlat.shape}; grid mismatch.")
+        dlat = float(np.max(np.abs(lat_fin - tlat))) if ncell else 0.0
+        if dlat > coord_atol_deg:
+            raise ValueError(
+                f"finidat latitude does not match the run grid (max |dlat|="
+                f"{dlat:.4g} deg > {coord_atol_deg} deg); the carbon IC is on a "
+                "different (or differently-ordered) grid.")
+    if target_lon_deg is not None:
+        tlon = np.asarray(target_lon_deg, float).reshape(-1)
+        if lon_fin is None:
+            raise ValueError(
+                "finidat carbon IC has no 'lon' field to verify the grid match "
+                "against target_lon_deg; refusing to seed onto an unverified grid.")
+        if tlon.shape != lon_fin.shape:
+            raise ValueError(
+                f"finidat 'lon' has shape {lon_fin.shape} but target_lon_deg has "
+                f"{tlon.shape}; grid mismatch.")
+        # Longitude modulo 360 (a 0..360 vs -180..180 store is the SAME grid); the
+        # signed angular difference wraps at the 0/360 seam.
+        dlon = (lon_fin - tlon + 180.0) % 360.0 - 180.0
+        dlon_max = float(np.max(np.abs(dlon))) if ncell else 0.0
+        if dlon_max > coord_atol_deg:
+            raise ValueError(
+                f"finidat longitude does not match the run grid (max |dlon|="
+                f"{dlon_max:.4g} deg > {coord_atol_deg} deg); the carbon IC is on a "
+                "different (or differently-ordered) grid.")
+
+    # --- phi validation (a malformed field fails loud, never silently seeds) ---
+    if phi is not None:
+        if phi.shape != (ncell,):
+            raise ValueError(
+                f"finidat 'soil_frozen_fraction' (phi) has shape {phi.shape}; "
+                f"expected ({ncell},).")
+        if not bool(np.all(np.isfinite(phi))):
+            raise ValueError("finidat 'soil_frozen_fraction' (phi) must be finite.")
+        lo = float(np.min(phi)); hi = float(np.max(phi))
+        if lo < 0.0 or hi > 1.0:
+            raise ValueError(
+                "finidat 'soil_frozen_fraction' (phi) must be in [0, 1] (an annual "
+                f"frozen fraction); got [{lo}, {hi}].")
+
+    carbon = CarbonState(**{f: jnp.asarray(pools[f]) for f in pool_fields})
+    phi_out = None if phi is None else jnp.asarray(phi)
+    return carbon, phi_out

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -1762,3 +1763,167 @@ def test_coupler_with_fv_ocean_tracer_transport():
     )
     assert jnp.all(jnp.isfinite(blended.T_sfc))
     assert jnp.all(jnp.isfinite(blended.shflx))
+
+
+# ===========================================================================
+# finidat -> run carbon-IC loader: init_surface_state(carbon_override) seeds the
+# prognostic pools from a spun-up finidat, and an end-to-end coupled surface
+# integration STARTS carbon at the seeded pools (not the cold-start defaults) and
+# PRESERVES the seeded high-latitude SOC when the finidat's per-cell permafrost
+# phi is threaded through make_coupler.  (The build-side map + the finidat schema
+# live in legoesm.land.carbon.global_init; this is the run-side ingestion.)
+# ===========================================================================
+def _differland_land_cfg():
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.soil_grid import SoilGridConfig
+    from legoesm.land.carbon.config import CarbonConfig
+    return MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=6, total_depth=2.0),
+        carbon=CarbonConfig(scheme="differland"))
+
+
+def _write_seeded_finidat(path, ncol, *, lat_deg, lon_deg, phi=None,
+                          with_phi=True):
+    """Write a tiny finidat global_carbon_ic.npz whose SOM pools are seeded FAR
+    above the cold-start default (a Yedoma-scale permafrost stock) so a seeded-vs-
+    cold and a preserved-vs-decomposed comparison have a clear separation."""
+    from legoesm.land.carbon.config import CarbonConfig, som_total
+    from legoesm.land.carbon.carbon_cycle import init_carbon_state
+    base = init_carbon_state((ncol,), CarbonConfig(scheme="differland"))
+    seeded = base._replace(
+        C_som_active=jnp.full((ncol,), 50000.0),
+        C_som_slow=jnp.full((ncol,), 15000.0),
+        C_som_passive=jnp.full((ncol,), 8000.0))
+    d = {f: np.asarray(getattr(seeded, f), dtype=np.float64)
+         for f in seeded._fields}
+    d["lat"] = np.asarray(lat_deg, float)
+    d["lon"] = np.asarray(lon_deg, float)
+    d["land_mask"] = np.ones(ncol, bool)
+    if with_phi:
+        d["soil_frozen_fraction"] = (np.asarray(phi, float) if phi is not None
+                                     else np.ones(ncol))
+    np.savez(path, **d)
+    return path, np.asarray(som_total(seeded))
+
+
+def test_init_surface_state_carbon_override_seeds_and_none_byte_identical():
+    """carbon_override SEEDS the prognostic pools from a spun-up IC (SOM == the
+    override, not the cold-start default); None is byte-identical to the cold-start
+    (a static gate, no data-dependent branch)."""
+    from legoesm.land.carbon.config import som_total
+    land_cfg = _differland_land_cfg()
+    ncol = math.prod(SHAPE)
+
+    cold = init_surface_state(SHAPE, land_config=land_cfg)
+    override = cold.carbon._replace(
+        C_som_active=jnp.full((ncol,), 50000.0),
+        C_som_slow=jnp.full((ncol,), 15000.0),
+        C_som_passive=jnp.full((ncol,), 8000.0))
+    seeded = init_surface_state(SHAPE, land_config=land_cfg,
+                                carbon_override=override)
+
+    # Seeded pools carry the override, far above the cold-start default.
+    npt.assert_allclose(np.asarray(seeded.carbon.C_som_active), 50000.0)
+    assert float(np.mean(np.asarray(som_total(seeded.carbon)))) > \
+        3.0 * float(np.mean(np.asarray(som_total(cold.carbon))))
+    # dtype matches the cold-start reference (carry pytree stays consistent).
+    assert seeded.carbon.C_som_active.dtype == cold.carbon.C_som_active.dtype
+
+    # None override -> byte-identical to the cold-start for EVERY pool.
+    none_seeded = init_surface_state(SHAPE, land_config=land_cfg,
+                                     carbon_override=None)
+    for f in cold.carbon._fields:
+        npt.assert_array_equal(np.asarray(getattr(none_seeded.carbon, f)),
+                               np.asarray(getattr(cold.carbon, f)))
+
+
+def test_init_surface_state_carbon_override_wrong_shape_raises():
+    land_cfg = _differland_land_cfg()
+    bad = init_surface_state(SHAPE, land_config=land_cfg).carbon._replace(
+        C_som_active=jnp.zeros((3,)))   # wrong per-pool shape
+    with pytest.raises(ValueError, match="shape"):
+        init_surface_state(SHAPE, land_config=land_cfg, carbon_override=bad)
+
+
+def test_init_surface_state_carbon_override_carbon_off_raises():
+    # A carbon override with the carbon cycle inactive is a caller error (fail
+    # loud, never a silent no-op).
+    from legoesm.land.carbon.config import CarbonConfig
+    from legoesm.land.carbon.carbon_cycle import init_carbon_state
+    override = init_carbon_state((math.prod(SHAPE),), CarbonConfig(scheme="differland"))
+    with pytest.raises(ValueError, match="carbon cycle is inactive"):
+        init_surface_state(SHAPE, land_config=LandConfig(),  # slab, no differland
+                           carbon_override=override)
+
+
+def test_finidat_carbon_ic_e2e_seeds_and_preserves_high_lat_soc(tmp_path):
+    """END-TO-END (the point): a coupled surface integration that INGESTS a seeded
+    permafrost finidat (i) STARTS land carbon at the seeded pools (not the cold-
+    start defaults) and (ii) PRESERVES the high-latitude SOC over the run when the
+    finidat's per-cell phi is threaded through make_coupler -- vs the same run
+    WITHOUT the IC (cold-start, low SOC) or with phi ABSENT (decomposes the seed).
+    Exercises the full load_finidat_carbon_ic -> init_surface_state(carbon_override)
+    -> make_coupler(land_soil_frozen_fraction) chain."""
+    from legoesm.land.carbon.config import som_total
+    from legoesm.land.carbon.global_init import load_finidat_carbon_ic
+
+    land_cfg = _differland_land_cfg()
+    ncol = math.prod(SHAPE)
+    # ~69degN permafrost column; a moist thaw-season forcing so decomposition
+    # (not input) dominates the seeded stock (mirrors the phi acceptance test).
+    lat_rad = jnp.full(SHAPE, 1.2)
+    lat_deg = np.full(ncol, float(np.rad2deg(1.2)))
+    lon_deg = np.zeros(ncol)
+
+    finidat, som0_seed = _write_seeded_finidat(
+        tmp_path / "global_carbon_ic.npz", ncol, lat_deg=lat_deg, lon_deg=lon_deg,
+        phi=np.ones(ncol))
+
+    # --- load + seed (the loader + init_surface_state override) ---------------
+    carbon_seeded, phi = load_finidat_carbon_ic(
+        finidat, expect_ncol=ncol, target_lat_deg=lat_deg, target_lon_deg=lon_deg)
+    assert carbon_seeded is not None and phi is not None
+    cold = init_surface_state(SHAPE, land_config=land_cfg)                 # cold-start
+    seeded = init_surface_state(SHAPE, land_config=land_cfg,
+                                carbon_override=carbon_seeded)
+
+    som0_cold = float(np.mean(np.asarray(som_total(cold.carbon))))
+    som0_seeded = float(np.mean(np.asarray(som_total(seeded.carbon))))
+    # (i) STARTS at the seeded pools, not the cold-start default.
+    npt.assert_allclose(np.asarray(som_total(seeded.carbon)), som0_seed)
+    assert som0_seeded > 3.0 * som0_cold
+
+    # --- integrate (the coupler; phi threaded / absent) -----------------------
+    forcing = _make_forcing(T_lowest=293.0, precip=5e-5)
+    tile_cfg = TileConfig(f_land=jnp.ones(SHAPE), f_lake=jnp.zeros(SHAPE))
+    sst = jnp.full(SHAPE, 293.0); zu = jnp.zeros(SHAPE)
+    dt_run = 86400.0
+    nsteps = 40
+
+    def _run(sfc0, phi_field):
+        step_fn = make_coupler(CouplerConfig(), land_cfg, SeaIceConfig(),
+                               LakeConfig(), lat=lat_rad,
+                               land_soil_frozen_fraction=phi_field)
+        jstep = jax.jit(
+            lambda s: step_fn(s, forcing, tile_cfg, sst, zu, zu, dt_run)[0])
+        s = sfc0
+        for _ in range(nsteps):
+            s = jstep(s)
+        return np.asarray(som_total(s.carbon))
+
+    som_seeded_phi = _run(seeded, phi)                 # seeded + protection
+    som_seeded_nophi = _run(seeded, None)              # seeded, unprotected
+    som_cold = _run(cold, None)                        # cold-start
+
+    # (ii) the seeded permafrost SOC PERSISTS with phi, and DECOMPOSES without it.
+    #   - not vacuous: the unprotected seeded run actually lost SOC.
+    assert np.all(som_seeded_nophi < som0_seed)
+    #   - protection RETAINS carbon: protected > unprotected in every cell.
+    assert np.all(som_seeded_phi > som_seeded_nophi)
+    drift_phi = (som0_seed - som_seeded_phi) / som0_seed
+    drift_nophi = (som0_seed - som_seeded_nophi) / som0_seed
+    assert float(np.max(drift_phi)) < float(np.min(drift_nophi))
+    assert float(np.max(drift_phi)) < 0.05          # protected stock ~preserved
+    #   - and the seeded+protected SOC stays FAR above the cold-start run (the IC
+    #     is honoured, not decomposed back toward the cold equilibrium).
+    assert float(np.mean(som_seeded_phi)) > 3.0 * float(np.mean(som_cold))

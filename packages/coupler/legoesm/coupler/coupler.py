@@ -109,6 +109,33 @@ def _validate_coupler_config(config: CouplerConfig) -> None:
         raise ValueError(f"Ch_ocean must be >= 0, got {config.Ch_ocean!r}")
 
 
+def _apply_carbon_override(cold_start: CarbonState,
+                           override: CarbonState,
+                           carbon_shape: tuple[int, ...]) -> CarbonState:
+    """Replace a cold-start :class:`CarbonState`'s pools with a seeded IC.
+
+    Validates each of the eight pools' shape against the cold-start reference and
+    casts to its dtype, so the seeded carry pytree is byte-for-byte structurally
+    identical to the cold-start one (same shapes + dtypes) whether or not a carbon
+    IC is supplied -- only the values differ.  Any per-pool shape / type mismatch
+    RAISES (never a silent broadcast).
+    """
+    if type(override) is not type(cold_start):
+        raise ValueError(
+            f"carbon_override must be a {type(cold_start).__name__}; got "
+            f"{type(override).__name__}.")
+    fields = {}
+    for f in cold_start._fields:
+        o = jnp.asarray(getattr(override, f))
+        ref = getattr(cold_start, f)
+        if o.shape != ref.shape:
+            raise ValueError(
+                f"carbon_override.{f} has shape {o.shape}; expected {ref.shape} "
+                f"(the run's carbon column shape {carbon_shape}).")
+        fields[f] = o.astype(ref.dtype)
+    return cold_start._replace(**fields)
+
+
 def init_surface_state(
     shape: tuple[int, ...],
     T_soil_init: float = 280.0,  # coeff-ok: initial condition [K]
@@ -117,6 +144,7 @@ def init_surface_state(
     T_hypo_init: float = 278.0,  # coeff-ok: initial condition [K]
     T_ice_init: float = 260.0,  # coeff-ok: initial condition [K]
     land_config: LandConfig | None = None,
+    carbon_override: CarbonState | None = None,
 ) -> SurfaceState:
     """Initialize all surface tile states.
 
@@ -127,6 +155,16 @@ def init_surface_state(
     land_config : LandConfig, optional
         If provided and ``land_config.carbon.scheme == "differland"``,
         initialises prognostic carbon pools.
+    carbon_override : CarbonState, optional
+        A spun-up per-cell carbon IC (e.g. the finidat ``global_carbon_ic.npz``
+        loaded by
+        :func:`legoesm.land.carbon.global_init.load_finidat_carbon_ic`) that SEEDS
+        the prognostic pools INSTEAD of the cold-start :func:`init_carbon_state`
+        defaults, so a coupled run starts carbon at its mapped equilibrium.  Its
+        per-pool shape is validated against the run's carbon-column shape and cast
+        to the cold-start dtype (a mismatch raises).  ``None`` (default) -> the
+        cold-start is byte-identical.  Only honoured when the carbon cycle is
+        active (``differland``); supplying it with carbon off raises.
     """
     dims_2d = ("face", "x", "y")
     _sd = get_policy().storage
@@ -202,6 +240,17 @@ def init_surface_state(
         else:
             carbon_shape = shape
         carbon = init_carbon_state(carbon_shape, land_config.carbon)
+        if carbon_override is not None:
+            # Seed the prognostic pools from a spun-up carbon IC (the finidat)
+            # instead of the cold-start defaults, so a coupled run starts carbon
+            # at its mapped equilibrium.  Shape-validated + dtype-matched to the
+            # cold-start reference (None => byte-identical cold-start).
+            carbon = _apply_carbon_override(carbon, carbon_override, carbon_shape)
+    elif carbon_override is not None:
+        raise ValueError(
+            "carbon_override was supplied but the land carbon cycle is inactive "
+            "(land_config.carbon.scheme != 'differland'); a seeded carbon IC "
+            "needs the differland scheme on the land config.")
 
     return SurfaceState(land=land, ice=ice, lake=lake, accumulator=acc,
                         carbon=carbon)

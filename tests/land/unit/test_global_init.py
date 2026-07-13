@@ -1,11 +1,12 @@
 import numpy as np, numpy.testing as npt, jax.numpy as jnp
+import pytest
 from legoesm.land.carbon.climate_features import (
     ClimateFeatures, reduce_climatology_to_features,
 )
 from legoesm.land.carbon.config import CarbonState
 from legoesm.land.carbon.global_init import (
-    ArchetypeTable, build_archetypes, equilibrate_archetypes, map_to_grid,
-    map_to_grid_frozen_fraction,
+    ArchetypeTable, build_archetypes, equilibrate_archetypes,
+    load_finidat_carbon_ic, map_to_grid, map_to_grid_frozen_fraction,
 )
 
 def _feats(mat, mapyr, seas, arid, sw):
@@ -454,3 +455,132 @@ def test_zonal_climate_varies_with_latitude():
     assert seas[1] > seas[0] + 2.0          # pole has a larger seasonal cycle
     assert swm[0] > swm[1]                   # tropics get more annual-mean SW
     assert np.all(np.isfinite(np.concatenate([t, pr, sw, nr], axis=1)))
+
+
+# ---------------------------------------------------------------------------
+# load_finidat_carbon_ic: the finidat->run carbon-IC loader (the inverse of
+# map_to_grid + map_to_grid_frozen_fraction).  Detection (a non-carbon .npz ->
+# None), STRICT grid-match (fail-loud), and phi validation.
+# ---------------------------------------------------------------------------
+def _write_finidat(path, ncol, *, lat_deg=None, lon_deg=None, phi=None,
+                   with_phi=True, drop_pool=None, som_scale=1000.0):
+    """Write a tiny finidat global_carbon_ic.npz with the 8 pools (+ optional phi).
+
+    Pool values are per-cell and DISTINCT per pool so a round-trip cannot alias
+    two fields; SOM is seeded large (``som_scale``) so a seeded-vs-cold test has a
+    clear separation.  ``drop_pool`` omits a pool (to exercise the detection gate);
+    ``with_phi=False`` omits ``soil_frozen_fraction`` (a legacy finidat).
+    """
+    fields = CarbonState._fields
+    d = {}
+    for i, f in enumerate(fields):
+        base = (som_scale if f.startswith("C_som") else 10.0 * (i + 1))
+        d[f] = np.full(ncol, base + np.arange(ncol), dtype=np.float64)
+    if drop_pool is not None:
+        d.pop(drop_pool)
+    d["lat"] = (np.asarray(lat_deg, float) if lat_deg is not None
+                else np.linspace(-80.0, 80.0, ncol))
+    d["lon"] = (np.asarray(lon_deg, float) if lon_deg is not None
+                else np.linspace(0.0, 350.0, ncol))
+    d["land_mask"] = np.ones(ncol, bool)
+    if with_phi:
+        d["soil_frozen_fraction"] = (np.asarray(phi, float) if phi is not None
+                                     else np.linspace(0.0, 1.0, ncol))
+    np.savez(path, **d)
+    return path
+
+
+def test_load_finidat_carbon_ic_round_trips_pools_and_phi(tmp_path):
+    ncol = 12
+    p = _write_finidat(tmp_path / "gcic.npz", ncol)
+    carbon, phi = load_finidat_carbon_ic(p, expect_ncol=ncol)
+    assert isinstance(carbon, CarbonState)
+    for f in CarbonState._fields:
+        got = np.asarray(getattr(carbon, f))
+        assert got.shape == (ncol,)
+        base = (1000.0 if f.startswith("C_som")
+                else 10.0 * (CarbonState._fields.index(f) + 1))
+        npt.assert_allclose(got, base + np.arange(ncol))
+    npt.assert_allclose(np.asarray(phi), np.linspace(0.0, 1.0, ncol))
+
+
+def test_load_finidat_carbon_ic_matches_target_lat_lon(tmp_path):
+    # STRICT grid-match passes when the finidat lat/lon equal the run grid columns.
+    ncol = 8
+    lat = np.linspace(-70.0, 70.0, ncol); lon = np.linspace(10.0, 340.0, ncol)
+    p = _write_finidat(tmp_path / "gcic.npz", ncol, lat_deg=lat, lon_deg=lon)
+    carbon, phi = load_finidat_carbon_ic(
+        p, expect_ncol=ncol, target_lat_deg=lat, target_lon_deg=lon)
+    assert carbon is not None and phi is not None
+
+
+def test_load_finidat_carbon_ic_lon_modulo_360_not_a_false_mismatch(tmp_path):
+    # A finidat stored in 0..360 vs a run grid in -180..180 is the SAME grid.
+    ncol = 6
+    lat = np.linspace(-50.0, 50.0, ncol)
+    lon_finidat = np.array([0.0, 60.0, 120.0, 200.0, 280.0, 350.0])   # 0..360
+    lon_target = np.where(lon_finidat > 180.0, lon_finidat - 360.0, lon_finidat)
+    p = _write_finidat(tmp_path / "gcic.npz", ncol,
+                       lat_deg=lat, lon_deg=lon_finidat)
+    carbon, _ = load_finidat_carbon_ic(
+        p, expect_ncol=ncol, target_lat_deg=lat, target_lon_deg=lon_target)
+    assert carbon is not None
+
+
+def test_load_finidat_carbon_ic_not_a_carbon_finidat_returns_none(tmp_path):
+    # A .npz missing a pool field is NOT a carbon finidat -> (None, None) so the
+    # caller keeps its cold-start (static feature gate).
+    ncol = 5
+    p = _write_finidat(tmp_path / "legacy.npz", ncol, drop_pool="C_som_active")
+    carbon, phi = load_finidat_carbon_ic(p, expect_ncol=ncol)
+    assert carbon is None and phi is None
+
+
+def test_load_finidat_carbon_ic_ncol_mismatch_raises(tmp_path):
+    p = _write_finidat(tmp_path / "gcic.npz", 12)
+    with pytest.raises(ValueError):
+        load_finidat_carbon_ic(p, expect_ncol=10)
+
+
+def test_load_finidat_carbon_ic_lat_mismatch_raises(tmp_path):
+    ncol = 8
+    lat = np.linspace(-70.0, 70.0, ncol); lon = np.linspace(10.0, 340.0, ncol)
+    p = _write_finidat(tmp_path / "gcic.npz", ncol, lat_deg=lat, lon_deg=lon)
+    with pytest.raises(ValueError):
+        # A shifted latitude (different / re-ordered grid) must fail loud.
+        load_finidat_carbon_ic(p, expect_ncol=ncol,
+                               target_lat_deg=lat + 5.0, target_lon_deg=lon)
+
+
+def test_load_finidat_carbon_ic_phi_absent_is_none(tmp_path):
+    # A legacy finidat with no soil_frozen_fraction -> phi None (coupler
+    # unprotected, byte-identical); the pools still load.
+    ncol = 7
+    p = _write_finidat(tmp_path / "gcic.npz", ncol, with_phi=False)
+    carbon, phi = load_finidat_carbon_ic(p, expect_ncol=ncol)
+    assert carbon is not None and phi is None
+
+
+def test_load_finidat_carbon_ic_phi_out_of_range_raises(tmp_path):
+    ncol = 6
+    bad = np.linspace(0.0, 1.5, ncol)   # > 1: not an annual frozen FRACTION
+    p = _write_finidat(tmp_path / "gcic.npz", ncol, phi=bad)
+    with pytest.raises(ValueError):
+        load_finidat_carbon_ic(p, expect_ncol=ncol)
+
+
+def test_load_finidat_carbon_ic_latlon_grid_glue(tmp_path):
+    # Exercise the EXACT conversion the coupled driver does: build a finidat on a
+    # real create_latlon_grid, then load with target lat/lon = rad2deg(grid).ravel()
+    # (row-major) -- the driver's grid-match glue, so a rad<->deg / ravel-order bug
+    # would fail here cheaply (no atmosphere compile).
+    from legoesm.grids.latlon import create_latlon_grid
+    grid = create_latlon_grid(n_lat=6, n_lon=8)
+    lat2d = np.rad2deg(np.asarray(grid.lat2d)); lon2d = np.rad2deg(np.asarray(grid.lon2d))
+    ncol = lat2d.size
+    p = _write_finidat(tmp_path / "gcic.npz", ncol,
+                       lat_deg=lat2d.ravel(), lon_deg=lon2d.ravel())
+    carbon, phi = load_finidat_carbon_ic(
+        p, expect_ncol=ncol,
+        target_lat_deg=lat2d.ravel(), target_lon_deg=lon2d.ravel())
+    assert carbon is not None and np.asarray(carbon.C_som_active).shape == (ncol,)
