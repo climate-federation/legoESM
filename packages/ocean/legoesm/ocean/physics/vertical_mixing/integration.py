@@ -77,6 +77,16 @@ def make_vertical_mixing_physics(
             "requires implicit_vertical_mixing=True on the host model "
             "config."
         )
+    if (apply_diffusion
+            and getattr(config, "ddm", None) is not None
+            and config.ddm.enabled):
+        raise NotImplementedError(
+            "VerticalMixingConfig.ddm.enabled=True is not consumed by the "
+            "EXPLICIT vertical-mixing composition.  Double-diffusive mixing "
+            "is applied inside compute_vertical_K_profiles (separate salt "
+            "diffusivity) and requires implicit_vertical_mixing=True on the "
+            "host model config."
+        )
 
     if scheme == "none":
         return make_none_physics_fn()

@@ -11,7 +11,7 @@ in ``docs/cubed_sphere_edge_artifacts.md`` (iteration 15), which showed:
 
 To reproduce the documented experiments, run the C36 validation manually::
 
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         FV3EdgeShallowWaterModel, CDGridShallowWaterConfig)
     config = CDGridShallowWaterConfig(
         div_damp=..., hyperdiff_coeff=..., boundary_fix=True)
@@ -28,7 +28,7 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterConfig,
     FV3EdgeShallowWaterModel,
     FV3EdgeShallowWaterState,

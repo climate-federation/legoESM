@@ -229,6 +229,10 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # dycore (fp64 replicated-vs-scattered bit-equivalence), so imports follow.
 "tests/parallel/test_cube_face_scatter.py" = ["E402"]
 "tests/distributed/test_cube_face_scatter_mpi.py" = ["E402"]
+# MPAS native-SPMD parity gates use the MPAS canonical symbol names (nCells,
+# nEdges, W) plus the mandated T_sfc / dT unit-suffixed physics names; same
+# rationale as the column-extractor tests above.
+"tests/parallel/test_mpas_atm_native_step.py" = ["N806"]
 
 [tool.mypy]
 python_version = "3.11"

@@ -19,7 +19,7 @@ from legoesm.core.operators_voronoi import (
     curl_vertex,
     vertex_thickness,
 )
-from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
     MPASShallowWaterConfig,
     MPASShallowWaterModel,
 )

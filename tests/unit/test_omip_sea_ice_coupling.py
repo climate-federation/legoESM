@@ -132,6 +132,23 @@ def test_partition_is_finite_and_shape_preserving():
         assert np.all(np.isfinite(a))
 
 
+def test_kpp_channel_carries_net_physical_freshwater():
+    """sf.freshwater (the KPP surface-buoyancy channel) must equal the BLENDED
+    physical net freshwater P - E + R + ice_fw — never the ice term alone and
+    never a second mass application (the mass lives on the returned fw struct,
+    consumed once via model.step(freshwater=fw)).  See blend_ice_ocean_forcing."""
+    from legoesm.ocean.freshwater import net_freshwater_flux
+    sf0, fw0 = _open_ocean_forcing()
+    sst_K = jnp.full(SHAPE, 274.0)
+    ice0 = _ice_state(conc=0.4, h_ice=0.8, T_ice=268.0)
+    _, fw, sf = omip_sea_ice_surface_forcing(
+        ice_state=ice0, ice_config=SeaIceConfig(), atm=_atm(263.0),
+        ocean_sst_K=sst_K, open_ocean_sf=sf0, open_ocean_fw=fw0, dt=DT,
+    )
+    np.testing.assert_allclose(np.asarray(sf.freshwater),
+                               np.asarray(net_freshwater_flux(fw)))
+
+
 def test_helper_is_jittable():
     sf0, fw0 = _open_ocean_forcing()
     sst_K = jnp.full(SHAPE, 274.0)

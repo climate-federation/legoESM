@@ -43,7 +43,7 @@ from legoesm.grids.halo import set_halo_backend
 from legoesm.grids.vertical import create_sigma_coordinate, make_hybrid_levels
 from legoesm.core.field import Field
 from legoesm.core.state import FV3HydrostaticState
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     fv3_hydrostatic_tendencies, CDGridPrimitiveEquationConfig,
 )
 from legoesm.parallel.tiled_production_cdgrid import (

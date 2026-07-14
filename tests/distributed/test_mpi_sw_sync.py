@@ -32,7 +32,7 @@ def reset_halo_backend():
 
 def _build_sw_model_and_state(n: int = 8):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig,
         CDGridShallowWaterModel,
         CDGridShallowWaterState,
@@ -131,7 +131,7 @@ class TestSWSyncDgridBoundaryMPI:
             pytest.skip("face-only mode only (1/2/3/6 ranks)")
 
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterConfig,
             CDGridShallowWaterModel,
             CDGridShallowWaterState,

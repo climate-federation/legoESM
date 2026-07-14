@@ -14,6 +14,7 @@ References
 
 from __future__ import annotations
 
+import os
 from typing import NamedTuple
 from pathlib import Path
 
@@ -247,21 +248,39 @@ def make_train_step(optimizer: optax.GradientTransformation, grid: GaussianGrid)
 
 
 def save_checkpoint(
-    model: eqx.Module,
+    model,
     path: str | Path,
 ) -> None:
-    """Save model checkpoint.
+    """Save a model / pytree checkpoint **atomically**.
+
+    Serialises ``model`` (any pytree whose array leaves ``eqx`` can
+    write — an :class:`eqx.Module`, or e.g. a ``(model, opt_state, ...)``
+    tuple) to a temp file in the destination directory and then
+    :func:`os.replace`-renames it onto ``path``.  The rename is atomic
+    on POSIX, so a walltime kill mid-write can never leave a truncated
+    or half-serialised checkpoint at ``path``: readers always see either
+    the previous complete checkpoint or the new complete one, never a
+    corrupt in-between (the non-atomic-write corruption source called
+    out in #942).
 
     Parameters
     ----------
-    model : eqx.Module
-        Model to save.
+    model : eqx.Module or pytree
+        Model / state to save.
     path : str or Path
-        File path for the checkpoint.
+        Destination file path for the checkpoint.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    eqx.tree_serialise_leaves(str(path), model)
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    try:
+        eqx.tree_serialise_leaves(str(tmp), model)
+        os.replace(tmp, path)
+    finally:
+        # ``os.replace`` consumes ``tmp`` on success; this only fires if
+        # serialisation raised, cleaning up the partial temp file.
+        if tmp.exists():
+            tmp.unlink()
 
 
 def load_checkpoint(

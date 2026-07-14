@@ -323,20 +323,20 @@ def main():
     # Initial atmospheric state (isothermal 280 K, at rest)
     # ---------------------------------------------------------------
     if grid_type == "cubed_sphere":
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
         state = held_suarez_init(grid, sigma, T_init=280.0)
     elif grid_type == "voronoi":
-        from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
         state = held_suarez_init_mpas(grid, sigma, T_init=280.0)
     elif grid_type == "gaussian":
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             isothermal_rest_state_spectral,
         )
         state = isothermal_rest_state_spectral(
             grid, sigma, T_init=280.0, perturbation_amplitude=0.5,
         )
     else:
-        from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
         state = held_suarez_init_latlon(grid, sigma, T_init=280.0)
 
     # Grid-specific adapters that bridge the differing state layouts
@@ -347,7 +347,7 @@ def main():
     # applies the per-level Rayleigh decay; ``is_finite`` powers the
     # blowup detector.
     if grid_type == "gaussian":
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             spectral_pe_to_grid,
         )
         from legoesm.grids.gaussian import sh_analysis_3d

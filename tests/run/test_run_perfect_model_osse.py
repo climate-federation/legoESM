@@ -17,8 +17,8 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig  # noqa: E402
-from legoesm.atmosphere.dynamics.les_regime import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig  # noqa: E402
+from legoesm.atmosphere.dynamics.les.les_regime import (  # noqa: E402
     LESRegimeConfig,
     LESResolutionConfig,
 )
@@ -65,7 +65,7 @@ def _ck_sensitive_base(cfg):
 
 
 def _mock_run_les_sheared(setup):
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import make_rest_state
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import make_rest_state
 
     grid, hc = setup.grid, setup.height_coord
     state = make_rest_state(grid, hc, dtype=jnp.float64)
@@ -714,7 +714,7 @@ def test_osse_main_prints_realism_breakdown(monkeypatch, capsys):
     from types import SimpleNamespace
 
     import jax.numpy as jnp
-    from legoesm.atmosphere.dynamics.column_les_diagnosis import LESRealismBreakdown
+    from legoesm.atmosphere.dynamics.les.column_les_diagnosis import LESRealismBreakdown
     from legoesm.training.perfect_model_osse import OSSEResult
 
     import scripts.run.run_correction_campaign as rcc

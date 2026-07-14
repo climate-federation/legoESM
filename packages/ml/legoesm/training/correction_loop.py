@@ -18,7 +18,7 @@ testable end-to-end and the production driver swaps in the real AMIP/LES runs:
   config and scores it against ERA5 (``scripts/validate/compare_amip_era5.py`` +
   :func:`legoesm.training.column_era5_metrics.score_columns`).
 * ``diagnose_fn(record, model_ctx) -> diagnosis`` spins off + diagnoses the
-  column LES (``legoesm.atmosphere.dynamics.column_les.process_column``).
+  column LES (``legoesm.atmosphere.dynamics.les.column_les.process_column``).
 
 The loop is the offline / iterative correction of §1 — restartable, with the LES
 batch embarrassingly parallel across columns.

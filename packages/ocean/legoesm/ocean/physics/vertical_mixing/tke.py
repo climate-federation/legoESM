@@ -1127,6 +1127,7 @@ def tke_vertical_mixing(
     g: float = constants.g,
     n_iterations: int = 1,
     *,
+    taum_surface: jnp.ndarray | None = None,
     p_cell: jnp.ndarray | None = None,
     dz_ref: jnp.ndarray | None = None,
     jacobian: jnp.ndarray | None = None,
@@ -1274,7 +1275,13 @@ def tke_vertical_mixing(
         adiabatic_over_dz_half=veros_slots,
     )
 
-    if tau_x_surface is None and tau_y_surface is None:
+    if taum_surface is not None:
+        # NEMO taum channel: the caller supplies the surface stress MODULUS
+        # directly (e.g. the DINO usrdef x1.3 westerly boost, which enters
+        # the TKE input but NOT the momentum stress).
+        taum = jnp.maximum(jnp.asarray(taum_surface), 0.0)
+        surface_flux = (taum / rho_0) ** 1.5
+    elif tau_x_surface is None and tau_y_surface is None:
         surface_flux = jnp.zeros(rho_cell.shape[:-1], dtype=rho_cell.dtype)
         taum = surface_flux  # |τ| = 0 (unforced)
     else:
@@ -1423,6 +1430,7 @@ def tke_set_diffusivities(
     rho_0: float,
     g: float,
     *,
+    taum_surface: jnp.ndarray | None = None,
     p_cell: jnp.ndarray,
     dz_ref: jnp.ndarray,
     jacobian: jnp.ndarray,
@@ -1459,7 +1467,11 @@ def tke_set_diffusivities(
         dz_ref=dz_ref, jacobian=jacobian, eos_fn=eos_fn,
         n2_mode=cfg.n2_mode, adiabatic_over_dz_half=True,
     )
-    if tau_x_surface is None and tau_y_surface is None:
+    if taum_surface is not None:
+        # NEMO taum channel (see tke_vertical_mixing).
+        surface_flux = (jnp.maximum(jnp.asarray(taum_surface), 0.0)
+                        / rho_0) ** 1.5
+    elif tau_x_surface is None and tau_y_surface is None:
         surface_flux = jnp.zeros(rho_cell.shape[:-1], dtype=rho_cell.dtype)
     else:
         tx = (tau_x_surface if tau_x_surface is not None

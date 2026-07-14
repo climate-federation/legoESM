@@ -20,7 +20,7 @@ from legoesm.grids.cubed_sphere import (
 # Reference-atmosphere theta_0(z) profiles now live in the package (audit item
 # 9: production spectral-NH initializers must not import from tests).  Re-export
 # them here so existing test imports keep working with a single source of truth.
-from legoesm.atmosphere.dynamics.dcmip2025_ic import (  # noqa: F401
+from legoesm.atmosphere.dynamics.gcm.dcmip2025_ic import (  # noqa: F401
     isothermal_theta_ref,
     piecewise_lapse_theta_ref,
 )

@@ -70,7 +70,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
 from legoesm.core.field import Field
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.grids.gaussian import create_gaussian_grid

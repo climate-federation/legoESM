@@ -25,10 +25,10 @@ from __future__ import annotations
 
 import inspect
 
-from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
     cdgrid_compressible_euler_slow_tendencies,
 )
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     fv3_hydrostatic_tendencies,
 )
 

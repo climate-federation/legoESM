@@ -95,16 +95,16 @@ def test_shared_helper_k2_threshold_005():
 def test_nh_pe_dycores_still_pass():
     """Sanity: NH + PE 1-step at C8 with the shared helper
     still produces finite state."""
-    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
         CDGridCompressibleEulerModel,
         make_fv3_faithful_nh_config,
     )
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
         hydrostatic_to_fv3,
         make_fv3_faithful_pe_config,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
     from legoesm.core.field import Field
     from legoesm.core.state import NonHydrostaticState
     from legoesm.grids.cubed_sphere import create_cubed_sphere

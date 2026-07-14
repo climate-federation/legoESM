@@ -70,7 +70,7 @@ def _build_tiny_cubed_sphere_case():
     from legoesm.core.cfl import (
         adaptive_hyperdiff_coeff, estimate_min_dx_cubed_sphere,
     )
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
         hydrostatic_to_fv3,
     )

@@ -47,8 +47,8 @@ from legoesm.atmosphere.physics.turbulence.config import (
     MYNN25Config,
     SurfaceLayerConfig,
 )
-from legoesm.atmosphere.scm import SingleColumnModel
-from legoesm.atmosphere.scm_forcing import SCMForcing
+from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
+from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
 
 from legoesm import constants
 

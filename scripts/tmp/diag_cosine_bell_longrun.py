@@ -51,7 +51,7 @@ def main():
 
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         FV3EdgeShallowWaterModel, iter1009_dual_target_config)
     from legoesm.core.fv_tp_2d import (
         streamfunction_mass_fluxes, streamfunction_transport_step)

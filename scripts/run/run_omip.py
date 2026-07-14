@@ -931,7 +931,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # Register the FV3 shallow-water barotropic core provider (fv3sw/fv3edge)
         # so the cube ocean can use the FV3-faithful C-D barotropic solver below
         # instead of the forbidden a_grid solver (never-A-grid directive).
-        import legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid  # noqa: F401
+        import legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid  # noqa: F401
 
         grid = create_cubed_sphere(params["n"])
         # Cubed-sphere OMIP-stability tuning.

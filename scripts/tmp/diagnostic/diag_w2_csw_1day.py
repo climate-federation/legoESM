@@ -11,7 +11,7 @@ import warnings
 from legoesm.grids.cubed_sphere import create_cubed_sphere, rotate_winds_geo_to_grid, rotate_winds_grid_to_geo
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.halo import pad_halo
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterConfig, FV3EdgeShallowWaterModel,
     FV3EdgeShallowWaterState,
 )

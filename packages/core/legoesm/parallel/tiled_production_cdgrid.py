@@ -893,16 +893,28 @@ def make_tiled_dp_s_dt_stage_2d(mesh, cdgrid, coord, n: int, kt: int, nlev: int)
     ``stage(u_d, v_d, p_s) -> dp_s_dt``: u_d/v_d corner D-winds 4D
     ``(6,n+1,n+1,nlev)`` + p_s 2D cc ``(6,n,n)``, all FACE-REPLICATED; tile-sharded
     ``dp_s_dt`` ``(6,n,n)`` out (exact cc partition — NO shared face).  Bit-identical
-    to the global ``cgrid_divergence(dgrid_to_cgrid(u_d,v_d))`` -> continuity
-    (all three ops cc/face-local).  ``coord`` sigma OR hybrid; the column-sum core
-    is dispatched on its type.  Excludes the downstream global zero_mean_tendency.
+    to the global FLUX-FORM continuity (primitive_eq_cdgrid sec 10b):
+    ``dgrid_to_cgrid`` -> dp at C-grid faces (2-point average on the halo-1
+    scalar pad) -> ``cgrid_divergence(dp·v)`` -> column sum.  ``coord`` sigma OR
+    hybrid.  Excludes the downstream global zero_mean_tendency.
     """
-    from legoesm.core.operators_cdgrid import cgrid_divergence_local
+    from legoesm.core.operators_cdgrid import (
+        cgrid_divergence_local, cgrid_interp_cc_to_faces_local)
     from legoesm.grids.vertical import (
         HybridSigmaPressureCoordinate,
-        compute_mass_flux_hybrid,
-        compute_sigma_dot_and_total,
+        dp_from_hybrid,
     )
+    from legoesm.parallel.cubesphere_exchange import make_tiled_pad_body
+    grid = cdgrid.base
+    # Fail-fast BEFORE mesh validation: the refusal must not depend on a
+    # constructible device mesh (codex 2026-07-12).
+    if grid.duogrid is not None:
+        raise NotImplementedError(
+            "make_tiled_dp_s_dt_stage_2d supports the orthogonal-rotation "
+            "(non-duogrid) cube only: the in-stage scalar halo does not "
+            "carry the duogrid kinked->extended remap, and the flux "
+            "divergence here has no seam-flux synchronization (the global "
+            "duogrid path uses cgrid_flux_divergence_sync).")
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
     _check_tiled_mesh(mesh, n, kt)
@@ -913,7 +925,6 @@ def make_tiled_dp_s_dt_stage_2d(mesh, cdgrid, coord, n: int, kt: int, nlev: int)
         raise ValueError(
             f"make_tiled_dp_s_dt_stage_2d: coord.n_levels={coord.n_levels} "
             f"!= nlev={nlev}")
-    grid = cdgrid.base
     nl = n // kt
     _hybrid = isinstance(coord, HybridSigmaPressureCoordinate)
     if not _hybrid:
@@ -923,15 +934,18 @@ def make_tiled_dp_s_dt_stage_2d(mesh, cdgrid, coord, n: int, kt: int, nlev: int)
     dy_edge_x = cdgrid.dy_edge_x                    # (6, n+1, n) — x-face length
     dx_edge_y = cdgrid.dx_edge_y                    # (6, n, n+1) — y-face length
     area = grid.area                               # (6, n, n)
+    offsets = grid.halo_interp_offsets             # (6, 4, n)
+    scalar_body = make_tiled_pad_body(mesh, ndim=4, halo=1, with_offsets=True)
 
     fo = P("face", None, None)                     # 2D-face metric / cc 2D
     fw = P("face", None, None, None)               # 4D winds
     co = P("face", "tile_i", "tile_j")             # 2D cc output
 
     @partial(shard_map, mesh=mesh,
-             in_specs=(fw, fw, fo, fo, fo, fo, fo),  # u_d,v_d,p_s,cosa_u,dye,dxe,area
+             in_specs=(fw, fw, fo, fo, fo, fo, fo,  # u_d,v_d,p_s,cosa_u,dye,dxe,area
+                       P()),                        # offsets
              out_specs=co, check_vma=False)
-    def _body(u_d, v_d, p_s, cu, dye, dxe, ar):
+    def _body(u_d, v_d, p_s, cu, dye, dxe, ar, offs):
         a_i = jax.lax.axis_index("tile_i") * nl
         a_j = jax.lax.axis_index("tile_j") * nl
 
@@ -939,26 +953,33 @@ def make_tiled_dp_s_dt_stage_2d(mesh, cdgrid, coord, n: int, kt: int, nlev: int)
             arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=1)
             return jax.lax.dynamic_slice_in_dim(arr, a_j, sj, axis=2)
 
-        # D->C (local within-face) -> C-grid flux divergence (local; the
-        # staggered u_c/v_c carry the tile boundary faces, no halo).
+        # D->C (local within-face) -> dp at faces (in-stage halo-1 scalar pad
+        # + shared 2-point average) -> C-grid FLUX-FORM divergence div(dp·v)
+        # (local; the staggered u_c/v_c carry the tile boundary faces).
         u_c, v_c = dgrid_to_cgrid_tile_2d(u_d, v_d, cu, a_i, a_j, nl)
-        div_v = cgrid_divergence_local(
-            u_c, v_c, _s(dye, nl + 1, nl), _s(dxe, nl, nl + 1),
-            _s(ar, nl, nl))                          # (1, nl, nl, nlev)
-
         p_s_t = _s(p_s, nl, nl)                      # (1, nl, nl)
         if _hybrid:
-            _mf, D_total = compute_mass_flux_hybrid(div_v, p_s_t, coord)
-            dp_s_dt = -D_total[..., 0] / coord.B_range
+            dp_t = dp_from_hybrid(coord, p_s_t)      # (1, nl, nl, nlev)
         else:
-            _sd, D_total = compute_sigma_dot_and_total(div_v, coord)
-            dp_s_dt = -p_s_t * D_total[..., 0] / _sigma_range
+            dp_t = p_s_t[..., None] * coord.dsigma.astype(p_s_t.dtype)
+        dp_pad = scalar_body(dp_t[0], offs)[None]    # (1, nl+2, nl+2, nlev)
+        dp_u, dp_v = cgrid_interp_cc_to_faces_local(dp_pad)
+        div_dp = cgrid_divergence_local(
+            dp_u * u_c, dp_v * v_c, _s(dye, nl + 1, nl), _s(dxe, nl, nl + 1),
+            _s(ar, nl, nl))                          # (1, nl, nl, nlev)
+
+        D_total_p = jnp.cumsum(div_dp, axis=-1)[..., -1:]   # (1, nl, nl, 1)
+        if _hybrid:
+            dp_s_dt = -D_total_p[..., 0] / coord.B_range
+        else:
+            dp_s_dt = -D_total_p[..., 0] / _sigma_range
         return dp_s_dt                               # (1, nl, nl)
 
     def stage(u_d, v_d, p_s):
         _check_shapes(n, u_d=(u_d, (n + 1, n + 1, nlev)),
                       v_d=(v_d, (n + 1, n + 1, nlev)), p_s=(p_s, (n, n)))
-        return _body(u_d, v_d, p_s, cosa_u, dy_edge_x, dx_edge_y, area)
+        return _body(u_d, v_d, p_s, cosa_u, dy_edge_x, dx_edge_y, area,
+                     offsets)
 
     return stage
 
@@ -1342,7 +1363,7 @@ def make_tiled_fv3_moist_tracer_tendency_stage_2d(mesh, cdgrid, n: int, kt: int,
     dq_r)`` (each ``(1, nl, nl, nlev)``) added to the advected pack.  Dependency
     injection keeps this core stage PHYSICS-AGNOSTIC: the caller builds the fn
     from a column-local scheme (e.g.
-    ``legoesm.atmosphere.kessler_forcing.kessler_column_tendencies`` with
+    ``legoesm.atmosphere.forcing.idealized.kessler_forcing.kessler_column_tendencies`` with
     sigma_coord/dt/config closed over).  Warm-rain microphysics is column-local
     (no halo) so the per-tile call is bit-identical to a global apply.  Output
     ``dq_pack`` ``(6, n, n, nlev, 3)`` is the EXACT cc partition
@@ -1582,12 +1603,14 @@ def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
     from legoesm import constants
     from legoesm.core.operators_cdgrid import (
         dgrid_to_center_vector, dgrid_vorticity_core, arakawa_lamb_gradient_core,
-        interp_center_to_corner, interp_corner_to_center, cgrid_divergence_local)
+        interp_center_to_corner, interp_corner_to_center, cgrid_divergence_local,
+        cgrid_interp_cc_to_faces_local)
     from legoesm.core.operators_3d import gradient_x_3d_core, gradient_y_3d_core
     from legoesm.core.precision import resolve_dtype
     from legoesm.grids.vertical import (
         compute_geopotential, compute_geopotential_hybrid, pressure_from_hybrid,
-        pressure_from_sigma, compute_mass_flux_hybrid, compute_sigma_dot_and_total,
+        pressure_from_sigma, dp_from_hybrid, compute_mass_flux_from_cumsum,
+        compute_sigma_dot_from_cumsum,
         vertical_advection, vertical_advection_hybrid,
         compute_omega_hybrid, compute_pressure_velocity,
         HybridSigmaPressureCoordinate)
@@ -1611,20 +1634,34 @@ def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
         ).reshape(1, nl, nl, nlev, 2)
         u_cc_va, v_cc_va = _uv_cc[..., 0], _uv_cc[..., 1]
 
-        # ---- CONTINUITY: D->C (local) -> divergence (local) -> dp_s/dt + vert ----
+        # ---- CONTINUITY: D->C (local) -> FLUX-FORM div(dp·v) -> dp_s/dt + vert ----
+        # Mirrors the serial flux-form continuity (primitive_eq_cdgrid sec 10b):
+        # dp at the C-grid faces via the shared 2-point average on the SAME
+        # in-stage scalar halo the thermo/momentum pads use, then the exact
+        # flux divergence.  NOT the advective div(v)·dp (differs when ∇p_s≠0).
         u_c, v_c = dgrid_to_cgrid_tile_2d(u_d_t, v_d_t, cosau_t, 0, 0, nl)
-        div_v = cgrid_divergence_local(
-            u_c, v_c, dye_t, dxe_t, ar_t)          # (1, nl, nl, nlev)
         if _hybrid:
-            mass_flux, D_total_p = compute_mass_flux_hybrid(div_v, p_s_t, coord)
-            dp_s_dt = -D_total_p[..., 0] / coord.B_range
+            dp_t = dp_from_hybrid(coord, p_s_t)     # (1, nl, nl, nlev)
+        else:
+            dp_t = p_s_t[..., None] * coord.dsigma.astype(p_s_t.dtype)
+        dp_pad = scalar_body(dp_t[0], offs)[None]   # (1, nl+2, nl+2, nlev)
+        dp_u, dp_v = cgrid_interp_cc_to_faces_local(dp_pad)
+        div_dp = cgrid_divergence_local(
+            dp_u * u_c, dp_v * v_c, dye_t, dxe_t, ar_t)  # (1, nl, nl, nlev)
+        _cumsum_dp = jnp.cumsum(div_dp, axis=-1)
+        _D_total_p = _cumsum_dp[..., -1:]           # (1, nl, nl, 1) [Pa/s]
+        if _hybrid:
+            dp_s_dt = -_D_total_p[..., 0] / coord.B_range
+            mass_flux = compute_mass_flux_from_cumsum(
+                _cumsum_dp, _D_total_p, coord)
             # base cut: _apply_zero_mean_per_stage=False (fix_mass path) -> raw.
             omega = compute_omega_hybrid(mass_flux, p_s_t, dp_s_dt, coord)
             _vadv_drive = mass_flux
             _vadv = vertical_advection_hybrid
         else:
-            sigma_dot, D_total = compute_sigma_dot_and_total(div_v, coord)
-            dp_s_dt = -p_s_t * D_total[..., 0] / _sigma_range
+            dp_s_dt = -_D_total_p[..., 0] / _sigma_range
+            sigma_dot = compute_sigma_dot_from_cumsum(
+                _cumsum_dp, _D_total_p, p_s_t, coord)
             omega = compute_pressure_velocity(sigma_dot, p_s_t, dp_s_dt, coord)
             _vadv_drive = sigma_dot
             _vadv = vertical_advection
@@ -2955,10 +2992,9 @@ def make_tiled_fv3_cc2c_stage_2d(mesh, cdgrid, n: int, kt: int):
 #
 # Scope of THIS increment — the BASE momentum path of fv3_sw_tendencies:
 #   div_damp=0, hyperdiff_coeff=0, boundary_fix=False,
-#   fortran_vector_corner_fill=False, all fortran_* corner diagnostics False,
 #   non-duogrid (orthogonal rotation) cube.
-# The optional terms (div damp / hyperdiff / boundary smoothing / Fortran
-# corner specials) are deferred — each rides the same per-op kernels + one more
+# The optional terms (div damp / hyperdiff / boundary smoothing) are deferred
+# — each rides the same per-op kernels + one more
 # in-stage halo and is its own increment.  The mass tendency dh_dt (PPM
 # ``cgrid_mass_flux_divergence``) is the separately-tracked hardest op.
 # ---------------------------------------------------------------------------

@@ -162,7 +162,7 @@ class TestApplyHardwareConfig:
             with patch(
                 "legoesm.runtime.config.bootstrap_from_yaml_config"
             ) as bootstrap_fn, patch(
-                "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid.CDGridShallowWaterModel",
+                "legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid.CDGridShallowWaterModel",
                 return_value=object(),
             ):
                 bootstrap_fn.return_value = None  # prevent actual bootstrap

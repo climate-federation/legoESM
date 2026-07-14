@@ -27,7 +27,7 @@ class TestAxiSymmetricCubedSphere:
     def setup(self):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterModel,
             CDGridShallowWaterConfig,
             CDGridShallowWaterState,
@@ -153,7 +153,7 @@ class TestHemisphericSymmetryMPAS:
 
     @pytest.fixture
     def setup(self):
-        from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
             MPASShallowWaterModel,
             MPASShallowWaterConfig,
             MPASShallowWaterState,
@@ -167,7 +167,7 @@ class TestHemisphericSymmetryMPAS:
 
     def _make_state(self, mesh, lat_center):
         """Create an MPAS state with a Gaussian bump at given latitude."""
-        from legoesm.atmosphere.dynamics.shallow_water_mpas import MPASShallowWaterState
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import MPASShallowWaterState
         H0 = constants.H_MEAN
         sigma = jnp.pi / 6.0
         r2 = (mesh.latCell - lat_center)**2 + (mesh.lonCell - jnp.pi)**2

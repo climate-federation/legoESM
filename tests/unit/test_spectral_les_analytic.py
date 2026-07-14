@@ -56,7 +56,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.dynamics import spectral_les_plane as sl
+from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl
 
 
 # ---------------------------------------------------------------------------

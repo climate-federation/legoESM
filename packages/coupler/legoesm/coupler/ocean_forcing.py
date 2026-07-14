@@ -1,16 +1,18 @@
 """Sea-ice -> ocean surface-forcing mappers for forced (OMIP) and coupled runs.
 
-Two public entry points:
+Three public entry points:
 
 * ``ice_ocean_forcing_from_ice_response(ice_resp, fracs)`` — the validated
   ICE-ONLY mapper (sign / conservation suite ``tests/unit/test_ice_ocean_two_way.py``)
   that turns a sea-ice ``TileResponse`` + resolved ``TileFractions`` into the
   ``(FreshwaterForcing, OceanSurfaceForcing)`` a prognostic ocean ingests.
+* ``blend_ice_ocean_forcing(...)`` — the ONE shared, mask-aware open-water /
+  ice partition: scales the caller's full-cell open-ocean forcing by
+  ``f_open = 1 - A`` (stress, evaporation, heat/SW), adds the ice->ocean
+  exchange exactly once, and sets the KPP freshwater-buoyancy channel.
 * ``omip_sea_ice_surface_forcing(...)`` — the forced-ocean (OMIP) driver step:
-  advance a slab sea-ice tile one step and partition the surface forcing
-  between the open-ocean fraction ``f_ocean = 1 - A`` (the caller's full-cell
-  bulk-flux forcing) and the ice tile (basal heat, melt/freeze freshwater,
-  brine salt, ice-ocean stress), returning the BLENDED forcing + new ice state.
+  advance a slab sea-ice tile one step and hand the partition to
+  ``blend_ice_ocean_forcing``, returning the BLENDED forcing + new ice state.
 
 Promoted out of ``coupler/_future/`` (2026-06-30) for the OMIP runner's
 prognostic sea-ice tile — the first forced-ocean use of the F11 ice->ocean
@@ -46,6 +48,11 @@ from legoesm.core.coupling_fields import TileResponse
 from legoesm.coupler.tile_fractions import TileFractions
 from legoesm.ocean.freshwater import FreshwaterForcing
 from legoesm.ocean.state import OceanSurfaceForcing
+
+# --- under-ice shortwave transmittance (Grenfell & Maykut 1977 / NEMO
+#     fr_sw-under-ice order of magnitude; same default as
+#     ocean.coupler.omip2_applicator._ice_surface_heat / --ice-thermo-sw-trans) ---
+_SW_TRANSMITTANCE_ICE = 0.03    # [-] fraction of SW penetrating ice+snow to ocean
 
 
 def ice_ocean_forcing_from_ice_response(
@@ -92,6 +99,157 @@ def ice_ocean_forcing_from_ice_response(
     return freshwater, surface_forcing
 
 
+def blend_ice_ocean_forcing(
+    *,
+    open_sf: OceanSurfaceForcing,
+    open_fw: FreshwaterForcing | None,
+    ice_resp: TileResponse,
+    ice_concentration,
+    ocean_mask=None,
+    sw_partition: str = "prescaled",
+    alpha_ocean: float | None = None,
+    sw_transmittance_ice: float = _SW_TRANSMITTANCE_ICE,
+):
+    """Partition a full-cell open-ocean forcing between the open-water fraction
+    ``f_open = 1 - A`` and the sea-ice tile, and add the ice->ocean exchange —
+    the ONE shared, mask-aware implementation of the OMIP ice/ocean forcing
+    split (used by :func:`omip_sea_ice_surface_forcing` and the CORE-II runner's
+    prognostic-ice path; do not re-derive the weights elsewhere).
+
+    ``ice_concentration`` (``A``) is a SINGLE concentration time level chosen by
+    the caller and used consistently for heat, SW, stress, AND evaporation.
+    The CORE-II runner passes the PRE-``step_sea_ice`` concentration — the
+    state the ice integrated its atmospheric fluxes over, so ice + open water
+    together receive exactly the incident flux (``A + (1-A) = 1``; codex r4);
+    ``omip_sea_ice_surface_forcing`` keeps its original post-step contract.
+    Partition:
+
+    * open-ocean stress, evaporation, and heat/SW scale with ``f_open = 1 - A``;
+    * ice basal heat, brine salt, melt/freeze freshwater, and ice stress are
+      each added exactly ONCE, via :func:`ice_ocean_forcing_from_ice_response`
+      (its validated F11 sign conventions: ``tau_ice = -A*ocean_stress`` so the
+      core's ``-tau`` consumer applies ``+A*stress`` on the ocean);
+    * precipitation and runoff stay full-cell inputs (no-snow-reservoir policy:
+      precip is not stored on ice), so only ``evap`` is rescaled in ``open_fw``.
+
+    ``ocean_mask`` (1 = ocean, 0 = land; ``None`` = all ocean) zeroes the ice
+    concentration AND every ice->ocean channel on land cells, so a spurious
+    land-ice budget never reaches the ocean and land keeps the (irrelevant,
+    core-masked) full-cell open forcing.
+
+    ``sw_partition`` selects the shortwave/heat convention of ``open_sf``:
+
+    * ``"prescaled"`` — ``open_sf.sw_down``/``q_net`` are already the FINAL
+      open-water values (any albedo applied by the caller): both simply scale
+      by ``f_open`` (the original ``omip_sea_ice_surface_forcing`` behaviour).
+    * ``"raw_core2"`` — ``open_sf`` is the UNMASKED CORE-II bulk forcing built
+      with ``ice_albedo=None`` (``sw_down`` = raw downwelling SW, ``q_net`` =
+      ``q_non_sw + sw_down``).  The open-water/under-ice SW split is applied
+      HERE (and only here — the caller must NOT also attenuate in
+      ``compute_omip2_surface_forcing``), reproducing ``_ice_surface_heat``'s
+      under-ice partition bit-exactly::
+
+          sw_ocean = sw_down * (f_open*(1 - alpha_ocean) + A*sw_transmittance_ice)
+          q_net    = sw_ocean + f_open*(q_net_open - sw_down) + q_ice
+
+      ``alpha_ocean`` is required in this mode (pass
+      ``constants.alpha_ocean_broadband``).
+
+    KPP freshwater-buoyancy contract: when ``open_fw`` is given, the returned
+    ``sf.freshwater`` is set to ``net_freshwater_flux(blended fw)`` — the
+    PHYSICAL ``P - E + R + ice_fw`` signal the vertical-mixing surface-buoyancy
+    diagnosis reads.  This is a BUOYANCY-ONLY channel on the direct-forced OMIP
+    paths (surface-forcing scheme ``"none"``): the freshwater MASS/salinity is
+    applied exactly once via ``model.step(freshwater=fw)``, never from
+    ``sf.freshwater``.  Callers running the ``"external"`` surface-forcing
+    scheme must NOT use this helper's ``sf`` (it would double-apply — the
+    CORE-II runner guards this at setup).  When ``open_fw`` is ``None`` the
+    channel carries the masked ice freshwater alone.
+
+    Returns ``(fw, sf)`` (blended; ``fw`` is ``None`` iff ``open_fw`` was).
+    """
+    from legoesm.ocean.freshwater import net_freshwater_flux
+
+    A_raw = jnp.clip(jnp.asarray(ice_concentration), 0.0, 1.0)
+    if ocean_mask is None:
+        m = jnp.ones_like(A_raw)
+    else:
+        m = jnp.asarray(ocean_mask, dtype=A_raw.dtype)
+    wet = m > 0.0
+    # jnp.where, NOT multiply-by-mask: a NaN concentration / ice flux in a dry
+    # cell survives `NaN * 0` (and jnp.clip passes NaN through), so masking by
+    # multiplication would poison f_open and every blended field (codex r2 #2).
+    A = jnp.where(wet, A_raw, 0.0)    # land: A -> 0 (no partition, no ice flux)
+    f_open = 1.0 - A
+    z = jnp.zeros_like(A)
+
+    fracs = TileFractions(f_ocean=f_open, f_ice=A, f_land=z, f_lake=z)
+    fw_ice, sf_ice = ice_ocean_forcing_from_ice_response(ice_resp, fracs)
+    # The exchange channels are weighted by f_water = f_open + A = 1 even on
+    # land — mask them explicitly (the stress is already ∝ A = 0 on land, but
+    # a dry-cell NaN would survive the multiply, hence jnp.where).
+    ice_fw = jnp.where(wet, fw_ice.ice_fw, 0.0)
+    q_ice = jnp.where(wet, sf_ice.q_net, 0.0)
+    salt_ice = jnp.where(wet, sf_ice.salt_flux, 0.0)
+    tau_x_ice = jnp.where(wet, sf_ice.tau_x, 0.0)
+    tau_y_ice = jnp.where(wet, sf_ice.tau_y, 0.0)
+
+    if sw_partition == "prescaled":
+        sw = (open_sf.sw_down * f_open
+              if open_sf.sw_down is not None else None)
+        q_open_part = (open_sf.q_net * f_open
+                       if open_sf.q_net is not None else 0.0)
+        q = q_open_part + q_ice
+    elif sw_partition == "raw_core2":
+        if alpha_ocean is None:
+            raise ValueError(
+                "blend_ice_ocean_forcing: sw_partition='raw_core2' requires "
+                "alpha_ocean (pass constants.alpha_ocean_broadband)")
+        swd = open_sf.sw_down
+        # open q_net was assembled as q_non_sw + sw_down (no albedo) — recover.
+        q_non_sw = open_sf.q_net - swd
+        sw = swd * (f_open * (1.0 - float(alpha_ocean))
+                    + A * float(sw_transmittance_ice))
+        q = sw + f_open * q_non_sw + q_ice
+    else:
+        raise ValueError(
+            f"blend_ice_ocean_forcing: unknown sw_partition {sw_partition!r} "
+            "(expected 'prescaled' or 'raw_core2')")
+
+    tau_x = ((open_sf.tau_x * f_open if open_sf.tau_x is not None else 0.0)
+             + tau_x_ice)
+    tau_y = ((open_sf.tau_y * f_open if open_sf.tau_y is not None else 0.0)
+             + tau_y_ice)
+
+    if open_fw is not None:
+        fw = FreshwaterForcing(
+            precip=open_fw.precip,
+            evap=(open_fw.evap * f_open if open_fw.evap is not None else z),
+            runoff=open_fw.runoff,
+            ice_fw=ice_fw,
+            restoring=open_fw.restoring,
+        )
+        # KPP buoyancy channel = PHYSICAL net freshwater ONLY: the numerical
+        # SSS-restoring virtual flux stays on the mass channel (fw.restoring,
+        # applied once by the core) but is EXCLUDED from the boundary-layer
+        # buoyancy signal (codex r1 #3 — a restoring correction is not a
+        # physical surface buoyancy flux).
+        kpp_freshwater = net_freshwater_flux(fw._replace(restoring=None))
+    else:
+        fw = None
+        kpp_freshwater = ice_fw
+
+    sf = open_sf._replace(
+        sw_down=sw,
+        q_net=q,
+        tau_x=tau_x,
+        tau_y=tau_y,
+        salt_flux=salt_ice,
+        freshwater=kpp_freshwater,
+    )
+    return fw, sf
+
+
 def omip_sea_ice_surface_forcing(
     *,
     ice_state,
@@ -122,6 +280,11 @@ def omip_sea_ice_surface_forcing(
       (this slab ice has no snow reservoir — ``SnowConfig`` off by default — so
       precip is not stored on ice); evaporation acts only on the open-ocean
       fraction (``f_ocean``); ice melt/freeze enters via ``ice_fw``.
+    * ``sf.freshwater`` carries the PHYSICAL net freshwater ``P - E + R +
+      ice_fw`` as the KPP surface-buoyancy signal (buoyancy-only under the
+      direct-forced scheme ``"none"``; the mass is applied once via the
+      ``model.step(freshwater=fw)`` channel — see
+      :func:`blend_ice_ocean_forcing`).
 
     Parameters
     ----------
@@ -159,47 +322,24 @@ def omip_sea_ice_surface_forcing(
         ice_state, atm, ocean_sst_K, u_o, v_o, ice_config, U_min, dt, grid,
     )
 
-    # Post-step ice concentration sets the open-ocean fraction.  No land/lake
-    # in an OMIP ocean-only run: f_water = 1, f_ice = A, f_ocean = 1 - A.
-    A = jnp.clip(new_ice.concentration.data, 0.0, 1.0)
-    f_ocean = 1.0 - A
-    z = jnp.zeros_like(A)
-    fracs = TileFractions(f_ocean=f_ocean, f_ice=A, f_land=z, f_lake=z)
-    fw_ice, sf_ice = ice_ocean_forcing_from_ice_response(ice_resp, fracs)
-
-    # --- Blend surface energy / momentum: open-ocean fluxes act on (1-A);
-    #     the ice tile adds its ice->ocean exchange. ---
-    def _blend(open_field, ice_field):
-        # open_field may be None on the OceanSurfaceForcing struct.
-        scaled = (open_field * f_ocean) if open_field is not None else 0.0
-        return scaled + ice_field
-
-    sw_down = (open_ocean_sf.sw_down * f_ocean
-               if open_ocean_sf.sw_down is not None else None)
-    sf = OceanSurfaceForcing(
-        sw_down=sw_down,
-        q_net=_blend(open_ocean_sf.q_net, sf_ice.q_net),
-        tau_x=_blend(open_ocean_sf.tau_x, sf_ice.tau_x),
-        tau_y=_blend(open_ocean_sf.tau_y, sf_ice.tau_y),
-        salt_flux=sf_ice.salt_flux,           # open ocean has no salt flux
-        freshwater=sf_ice.freshwater,         # KPP ice-buoyancy channel
-    )
-
-    # --- Blend freshwater: P + runoff over the whole cell; E over open ocean
-    #     only; ice melt/freeze via ice_fw. ---
-    evap = (open_ocean_fw.evap * f_ocean
-            if open_ocean_fw.evap is not None else z)
-    fw = FreshwaterForcing(
-        precip=open_ocean_fw.precip,
-        evap=evap,
-        runoff=open_ocean_fw.runoff,
-        ice_fw=fw_ice.ice_fw,
-        restoring=open_ocean_fw.restoring,
+    # Post-step ice concentration sets the open-ocean fraction (the ONE
+    # documented concentration time level for heat / SW / stress / evap).  No
+    # land/lake in an OMIP ocean-only run -> ocean_mask=None; the caller's
+    # sf carries FINAL open-water values -> sw_partition="prescaled".  The
+    # partition weights live ONLY in blend_ice_ocean_forcing.
+    fw, sf = blend_ice_ocean_forcing(
+        open_sf=open_ocean_sf,
+        open_fw=open_ocean_fw,
+        ice_resp=ice_resp,
+        ice_concentration=new_ice.concentration.data,
+        ocean_mask=None,
+        sw_partition="prescaled",
     )
     return new_ice, fw, sf
 
 
 __all__ = [
+    "blend_ice_ocean_forcing",
     "ice_ocean_forcing_from_ice_response",
     "omip_sea_ice_surface_forcing",
 ]

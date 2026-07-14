@@ -83,7 +83,7 @@ def test_owned_face_index_validation(grid):
 
 
 def test_make_rank_local_model_rejects_zero_mean_ps_tendency(grid):
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationConfig,
         CDGridPrimitiveEquationModel,
     )
@@ -97,7 +97,7 @@ def test_make_rank_local_model_rejects_zero_mean_ps_tendency(grid):
 
 
 def test_make_rank_local_model_slices_and_clears_target(grid):
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationConfig,
         CDGridPrimitiveEquationModel,
     )

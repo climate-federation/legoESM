@@ -884,7 +884,7 @@ class TestIntegrationHydrostatic:
     def setup(self):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -1099,7 +1099,7 @@ class TestCheckpointWithHydrometeors:
     def setup(self, tmp_path):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
         from legoesm.forcing.amip_config import (
             AMIPExperimentConfig, save_checkpoint, load_checkpoint,
         )

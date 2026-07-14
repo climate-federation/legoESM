@@ -31,12 +31,12 @@ from legoesm.core.state import (
     MPASNonHydrostaticState,
     MPASNonHydrostaticTendencies,
 )
-from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
     MPASPrimitiveEquationConfig,
     MPASPrimitiveEquationModel,
     mpas_hydrostatic_tendencies,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas import (
     MPASCompressibleEulerConfig,
     MPASCompressibleEulerModel,
     mpas_compressible_euler_slow_tendencies,

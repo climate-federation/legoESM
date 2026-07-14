@@ -2,7 +2,7 @@
 
 Stage 7 glue of ``docs/COMPARE_REANALYSIS.md``: take the per-worst-column closure
 diagnoses produced by the column-LES library
-(``legoesm.atmosphere.dynamics.column_les``, iter 15/39) and assemble them into
+(``legoesm.atmosphere.dynamics.les.column_les``, iter 15/39) and assemble them into
 the spatially-varying parameter field that
 :func:`legoesm.training.feedback.apply_column_parameter_field` splices into the
 next AMIP/CMIP config — closing the loop:

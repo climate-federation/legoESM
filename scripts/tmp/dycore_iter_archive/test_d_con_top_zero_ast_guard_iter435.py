@@ -30,8 +30,8 @@ import pytest
 from tests.legoesm_paths import legoesm_source_path
 
 
-NH_SRC = legoesm_source_path("atmosphere/dynamics/compressible_euler_cdgrid.py")
-PE_SRC = legoesm_source_path("atmosphere/dynamics/primitive_eq_cdgrid.py")
+NH_SRC = legoesm_source_path("atmosphere/dynamics/gcm/compressible_euler_cdgrid.py")
+PE_SRC = legoesm_source_path("atmosphere/dynamics/gcm/primitive_eq_cdgrid.py")
 
 
 @pytest.fixture(scope="module")

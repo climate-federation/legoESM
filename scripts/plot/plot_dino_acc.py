@@ -53,19 +53,26 @@ def _grid_and_z(run_dir: Path):
     n_lon = int(meta["args"].get("n_lon", 50))
     cfg = DINOConfig()
     grid = dino_lat_lon_grid(cfg, n_lon=n_lon)
-    z = create_dino_z_star(cfg)
+    # Level count from the first snapshot: 35 = the NEMO-exact
+    # masked-zco ladder (r1_exact preset), 36 = legacy z*.
+    import dataclasses
+
+    from legoesm.ocean.experiments.dino import dino_lat_lon_vertical
+    snaps = _snaps(run_dir)
+    nlev = None
+    if snaps:
+        with np.load(snaps[0]) as f0:
+            nlev = int(f0["T"].shape[-1])
+    if nlev == cfg.n_levels - 1:
+        cfg = dataclasses.replace(cfg, vertical_coordinate="masked_zco")
+        z = dino_lat_lon_vertical(grid, cfg)
+    elif nlev in (None, cfg.n_levels):
+        z = create_dino_z_star(cfg)
+    else:
+        raise SystemExit(
+            f"snapshots have {nlev} levels; expected {cfg.n_levels} "
+            f"(legacy z*) or {cfg.n_levels - 1} (masked_zco)")
     return cfg, grid, np.asarray(z.dz_ref)
-
-
-def _partial_cell_h(H_bathy, dz_ref):
-    """Partial-cell layer thickness (n_lat, n_lon, nlev) [m] from the bottom
-    depth + z* reference thicknesses: full dz above the floor, a clipped bottom
-    cell, zero below. The eta-driven z* stretch (~0.1% of the column) is
-    neglected for this depth-integrated transport diagnostic."""
-    z_bot = np.cumsum(dz_ref)                       # (nlev,) interface depths below surface
-    z_top = z_bot - dz_ref
-    H = np.asarray(H_bathy)[..., None]              # (n_lat, n_lon, 1)
-    return np.clip(np.minimum(z_bot, H) - z_top, 0.0, dz_ref)  # (n_lat, n_lon, nlev)
 
 
 def _snaps(run_dir: Path):
@@ -75,7 +82,9 @@ def _snaps(run_dir: Path):
 def main():
     args = _parse_args()
     cfg, grid, dz_ref = _grid_and_z(args.run_dir)
-    from legoesm.ocean.diagnostics_streamfunction import barotropic_streamfunction
+    from legoesm.ocean.diagnostics_streamfunction import (
+        barotropic_streamfunction, partial_cell_thickness,
+    )
     from legoesm.ocean.diagnostics_climate import acc_transport
     lat_deg = np.degrees(np.asarray(grid.lat))
     lon_deg = np.degrees(np.asarray(grid.lon))
@@ -90,7 +99,7 @@ def main():
             H_bathy = np.asarray(d["H_bathy"]); day = float(d["time_days"])
         if not np.isfinite(u).all():       # require ALL finite (skip blown snapshots)
             continue
-        h_partial = _partial_cell_h(H_bathy, dz_ref)
+        h_partial = partial_cell_thickness(H_bathy, dz_ref)
         psi_Sv = np.asarray(barotropic_streamfunction(u, h_partial, mask, grid))
         a = acc_transport(psi_Sv * _SV, lat_deg,
                           drake_lat_south=cfg.channel_lat_south_deg,

@@ -85,6 +85,87 @@ def compute_power_law_filter_weights(
     )
 
 
+def compute_nemo_boxcar_centred_weights(
+    n_substeps: int,
+    dtype: jnp.dtype,
+):
+    """NEMO dynspg_ts centred boxcar averaging (ln_bt_fw=F, nn_bt_flt=1).
+
+    NEMO's centred split-explicit runs the barotropic past the
+    baroclinic step and averages η/U over a boxcar of width ``nn_e``
+    CENTRED on the new-time point (ts_wgt: ``zwgt1(jn)=1`` where
+    ``|jn − jic|/nn_e < 0.5``; in the forward frame the centre ``jic``
+    is the substep that lands on t+Δt, i.e. ``jn = n_substeps``).  The
+    window therefore spans τ ∈ (0.5, 1.5) baroclinic steps: substeps
+    before it evolve the state with zero averaging weight, and the loop
+    runs to the last in-window substep (``n_loop ≈ 1.5·n``).  The
+    secondary (transport) weights are the SM2005/ts_wgt tail sums
+    ``w_transport[j] = Σ_{i≥j} w_i / n_substeps`` — the unique choice
+    that keeps ``div(Hu_avg) == (η_old − η_avg)/dt`` (uniform-tracer
+    preservation), exactly as the other filters in this module.
+
+    NOTE the MLF-frame remainder (ladder step 4): NEMO starts the
+    barotropic from the BEFORE state (t−Δt) so its window is centred at
+    t+Δt of a 2Δt integration.  On the forward core the start is t; the
+    window centring and width above are the faithful forward-frame
+    reduction, and the before-state start arrives with the MLF
+    integrator.
+
+    Returns
+    -------
+    (w_avg, w_total, w_transport, n_loop)
+        Per-substep averaging weights (length ``n_loop``, leading
+        entries zero until the window opens), their sum (== 1), the
+        transport weights, and the number of substeps to run.
+    """
+    import numpy as _np
+    if n_substeps < 2:
+        raise ValueError(
+            f"nemo_boxcar_centred needs n_substeps >= 2, got {n_substeps!r}")
+    jn = _np.arange(1, 3 * n_substeps + 1, dtype=_np.float64)
+    w = (_np.abs(jn - n_substeps) / n_substeps < 0.5).astype(_np.float64)
+    m_star = int(_np.max(_np.where(w > 0.0)[0]) + 1)   # last in-window substep
+    w = w[:m_star]
+    w = w / w.sum()
+    w_transport = _np.array(
+        [w[i:].sum() for i in range(m_star)], dtype=_np.float64
+    ) / n_substeps
+    return (
+        jnp.asarray(w, dtype=dtype),
+        jnp.asarray(w.sum(), dtype=dtype),
+        jnp.asarray(w_transport, dtype=dtype),
+        m_star,
+    )
+
+
+def nemo_auto_substeps(
+    dt: float,
+    H_max_wet: float,
+    inv_e1_sq_plus_inv_e2_sq_max: float,
+    g: float,
+    cmax: float = 0.8,
+) -> int:
+    """NEMO ln_bt_auto substep count (dynspg_ts.F90:1223-1240).
+
+    ``zcu = sqrt(g·H·(1/e1² + 1/e2²))`` per wet T-cell; ``nn_e =
+    CEILING(dt / cmax · max(zcu))``.  The caller supplies the maximum of
+    ``g``-free metric factor and the deepest wet column so the helper
+    stays grid-agnostic:  pass ``max over wet cells of
+    (1/e1² + 1/e2²)`` evaluated AT the same cells used for ``H``
+    (conservative: pass the global maxima of each — an upper bound that
+    can only increase the substep count).
+    """
+    import math as _math
+    zcmax = _math.sqrt(g * max(H_max_wet, 0.0)
+                       * inv_e1_sq_plus_inv_e2_sq_max)
+    n = int(_math.ceil(dt / cmax * zcmax))
+    if n < 2:
+        raise ValueError(
+            f"nemo_auto_substeps computed n={n!r} (dt={dt}, cmax={cmax}) — "
+            "check the metric/H inputs.")
+    return n
+
+
 def compute_filter_weights(
     n_substeps: int,
     dtype: jnp.dtype,

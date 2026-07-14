@@ -98,9 +98,9 @@ def test_anisotropy_direction_weights():
 def test_plane_config_validation_accepts_amd():
     """The plane dycore validation accepts turbulence_closure='amd' and rejects
     a non-positive amd_c (dispatch hardening)."""
-    from legoesm.atmosphere.dynamics.compressible_euler import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
         CompressibleEulerConfig)
-    from legoesm.atmosphere.dynamics import compressible_euler_plane as cep
+    from legoesm.atmosphere.dynamics.les import compressible_euler_plane as cep
 
     cep.validate_plane_config(
         CompressibleEulerConfig(turbulence_closure="amd", amd_c=0.3))
@@ -113,9 +113,9 @@ def test_plane_config_validation_rejects_amd_incompatibilities():
     """AMD is a static, self-contained closure with a K_h = K_m/Pr split, so the
     validation rejects a dynamic-Smagorinsky coefficient and a non-positive
     Prandtl number (dispatch hardening on the nested closure config)."""
-    from legoesm.atmosphere.dynamics.compressible_euler import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
         CompressibleEulerConfig)
-    from legoesm.atmosphere.dynamics import compressible_euler_plane as cep
+    from legoesm.atmosphere.dynamics.les import compressible_euler_plane as cep
 
     with pytest.raises(ValueError, match="smagorinsky_dynamic"):
         cep.validate_plane_config(CompressibleEulerConfig(
@@ -138,11 +138,11 @@ def test_amd_falls_back_on_halo_fast_path_not_silently_inviscid():
     not dropped.  (Reachable in production via scripts/bench/bench_dd_scaling.py.)
     """
     import jax.numpy as jnp
-    from legoesm.atmosphere.dynamics.compressible_euler import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
         CompressibleEulerConfig)
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         make_flat_plane_terrain_metric, make_rest_state)
-    from legoesm.atmosphere.dynamics.compressible_euler_plane_halo import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane_halo import (
         slow_tendency_jit_split)
     from legoesm.grids.plane import create_plane_grid
     from legoesm.grids.vertical import create_stretched_height_coordinate

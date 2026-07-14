@@ -22,7 +22,7 @@ Tests
 """
 from __future__ import annotations
 
-from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
     CDGridCompressibleEulerConfig,
 )
 

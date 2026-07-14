@@ -29,6 +29,7 @@ Relationship to other modules
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import NamedTuple
@@ -38,7 +39,7 @@ import jax.numpy as jnp
 import equinox as eqx
 import optax
 
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     SpectralPEConfig,
     spectral_pe_tendencies,
@@ -229,6 +230,84 @@ def maybe_resume_model(model_template, resume_from_dir):
         f"continuing at epoch {start_epoch}"
     )
     return model, start_epoch
+
+
+# =============================================================================
+# Mid-epoch (per-CHUNK) checkpoint for the dense/chunked all-years trainer.
+#
+# The per-epoch ``epoch_NNNN.eqx`` above is fine when one epoch fits inside
+# one walltime link.  For the DENSE all-years T106 config a single epoch is
+# ~13 h of GCS-streamed chunks while the Derecho main queue caps walltime at
+# 12 h (#942): a kill during chunk 8/8 loses the whole epoch and the
+# self-chaining resubmit restarts epoch 0 forever -> zero progress.
+#
+# ``chunk_latest.eqx`` closes that gap.  After every CHUNK completes we save
+# enough to resume EXACTLY where the kill happened -- and, unlike the
+# per-epoch model-only checkpoint, we save the OPTIMIZER STATE too, so the
+# Adam/MUON moments and the warmup+cosine step counter continue unbroken
+# (an epoch-boundary resume off ``epoch_NNNN.eqx`` re-inits them; a chunk
+# resume off ``chunk_latest.eqx`` does not).  The saved position ``(epoch,
+# next_chunk)`` is the chunk to RESUME AT; the last chunk of epoch e is
+# normalised to ``(e+1, 0)``.  The write is atomic (temp + os.replace via
+# ``save_checkpoint``) so a walltime kill mid-write can't corrupt it.
+#
+# What a chunk resume reproduces exactly: model weights + optimizer state
+# are restored bit-for-bit; the chunk/sample order is a deterministic,
+# unshuffled partition of ``config.windows`` (``_make_chunk_loader``) so
+# skipping the already-done chunks and replaying the rest yields the same
+# training trajectory an uninterrupted run would have taken.  There is no
+# per-step RNG (SFNO/rollout are deterministic, M=1 "CRPS" is MAE) and the
+# curriculum position is a pure function of ``epoch`` (``epoch_plan``), so
+# ``(epoch, next_chunk)`` is the complete resume state.
+# =============================================================================
+
+MIDEPOCH_CHECKPOINT_NAME = "chunk_latest.eqx"
+
+
+def _save_midepoch_checkpoint(ckpt_dir, model, opt_state, epoch, next_chunk):
+    """Atomically save the mid-epoch (per-chunk) resume state.
+
+    Serialises ``(model, opt_state, epoch, next_chunk)`` as one payload
+    via :func:`legoesm.ml.training.save_checkpoint` (temp file + atomic
+    ``os.replace``), so the model weights, the optimizer state and the
+    resume position land together or not at all.
+
+    ``epoch``/``next_chunk`` give the position to RESUME AT (the last
+    chunk of epoch ``e`` is stored as ``(e+1, 0)``).
+    """
+    from legoesm.ml.training import save_checkpoint
+    ckpt_dir = Path(ckpt_dir)
+    payload = (
+        model,
+        opt_state,
+        jnp.asarray(int(epoch), dtype=jnp.int32),
+        jnp.asarray(int(next_chunk), dtype=jnp.int32),
+    )
+    save_checkpoint(payload, ckpt_dir / MIDEPOCH_CHECKPOINT_NAME)
+
+
+def _load_midepoch_checkpoint(ckpt_dir, model_template, opt_state_template):
+    """Load the mid-epoch resume state, or ``None`` if absent.
+
+    Returns ``(model, opt_state, epoch:int, next_chunk:int)``.  The
+    templates must match the structure that ``_save_midepoch_checkpoint``
+    wrote (a freshly built model + ``optimizer.init(...)`` opt_state).
+    """
+    if ckpt_dir is None:
+        return None
+    path = Path(ckpt_dir) / MIDEPOCH_CHECKPOINT_NAME
+    if not path.exists():
+        return None
+    template = (
+        model_template,
+        opt_state_template,
+        jnp.asarray(0, dtype=jnp.int32),
+        jnp.asarray(0, dtype=jnp.int32),
+    )
+    model, opt_state, epoch, next_chunk = eqx.tree_deserialise_leaves(
+        str(path), template,
+    )
+    return model, opt_state, int(epoch), int(next_chunk)
 
 
 # =============================================================================
@@ -1818,6 +1897,7 @@ def _train_spectral_loop(
     sample_forcings: list | None = None,
     chunk_loader=None,
     n_samples_total: int | None = None,
+    resume_from_dir=None,
 ):
     """Shared training loop for any learned-physics model coupled to the
     spectral PE dycore.
@@ -1854,6 +1934,13 @@ def _train_spectral_loop(
         step is reused across chunks (no retrace).
     n_samples_total : int or None
         Per-epoch sample count when ``chunk_loader`` is used.
+    resume_from_dir : str | Path | None
+        Directory scanned for a mid-epoch ``chunk_latest.eqx`` checkpoint
+        (chunked path only).  When found and at least as advanced as
+        ``start_epoch``, the model + optimizer state are restored and the
+        already-trained chunks of the resumed epoch are skipped (#942).
+        The per-chunk checkpoint is also WRITTEN to
+        ``config.checkpoint_dir`` after every chunk on the chunked path.
 
     Returns
     -------
@@ -1969,12 +2056,45 @@ def _train_spectral_loop(
         optimizer = base_optimizer
 
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
-    if start_epoch > 0:
-        # Only model weights are checkpointed: a resumed run re-inits the
-        # optimizer, so the warmup+cosine schedule replays from step 0
-        # while the epoch counter skips ahead (extra warmup at resume,
-        # decay horizon restarts). Known limitation of chained SLURM
-        # resumes — harmless for weights, but LR != the unbroken run.
+
+    # --- mid-epoch (per-chunk) resume (#942) ---------------------------------
+    # On the chunked all-years path, prefer the ``chunk_latest.eqx`` written
+    # after each chunk over the per-epoch ``epoch_NNNN.eqx`` the caller
+    # resumed from: it carries the OPTIMIZER STATE (moments + LR-schedule
+    # step count) and the exact ``(epoch, next_chunk)`` position, so a job
+    # killed mid-epoch continues from the next un-done chunk with the
+    # optimizer trajectory unbroken.  Honoured only when it is at least as
+    # advanced as the epoch-granular resume (``m_epoch >= start_epoch``);
+    # a stale one (older epoch) is ignored.
+    resume_chunk = 0
+    midepoch_restored = False
+    if chunk_loader is not None and resume_from_dir is not None:
+        _mid = _load_midepoch_checkpoint(resume_from_dir, model, opt_state)
+        if _mid is not None:
+            m_model, m_opt_state, m_epoch, m_next_chunk = _mid
+            if m_epoch >= start_epoch:
+                model, opt_state = m_model, m_opt_state
+                start_epoch = m_epoch
+                resume_chunk = m_next_chunk
+                midepoch_restored = True
+                logger.info(
+                    f"Mid-epoch resume: restored model + optimizer state at "
+                    f"epoch {start_epoch}, chunk {resume_chunk} "
+                    f"({MIDEPOCH_CHECKPOINT_NAME}); skipping the "
+                    f"{resume_chunk} already-trained chunk(s) of this epoch."
+                )
+            else:
+                logger.info(
+                    f"Ignoring stale {MIDEPOCH_CHECKPOINT_NAME} "
+                    f"(epoch {m_epoch} < resume epoch {start_epoch})."
+                )
+    if start_epoch > 0 and not midepoch_restored:
+        # No mid-epoch checkpoint to restore from (epoch-boundary resume off
+        # a model-only ``epoch_NNNN.eqx``, or the non-chunked path): the
+        # optimizer is re-init'd, so the warmup+cosine schedule replays from
+        # step 0 while the epoch counter skips ahead.  Known limitation of a
+        # model-only resume — harmless for weights, but LR != the unbroken
+        # run.  The chunked path avoids this via ``chunk_latest.eqx`` above.
         logger.warning(
             f"Resume at epoch {start_epoch}: optimizer state is fresh; "
             f"the LR schedule restarts from step 0 (weights unaffected)."
@@ -2215,12 +2335,26 @@ def _train_spectral_loop(
             _step_cache[spec] = _make_train_step(spec)
         return _step_cache[spec]
 
-    def _iter_epoch_data():
-        """Yield (ic_states, target_carries, sample_forcings) chunks."""
+    def _iter_epoch_data(start_chunk=0):
+        """Yield (ic_states, target_carries, sample_forcings) chunks.
+
+        ``start_chunk`` skips the first N chunks WITHOUT loading them
+        (mid-epoch resume): the already-trained chunks of a resumed
+        epoch are never re-streamed from GCS.
+        """
         if chunk_loader is None:
+            # A single in-memory pass == one chunk; nothing to skip.
             yield ic_states, target_carries, sample_forcings
         else:
-            yield from chunk_loader()
+            yield from chunk_loader(start_chunk=start_chunk)
+
+    # Chunks per epoch is constant across epochs (deterministic window
+    # partition); used to normalise the last chunk of epoch e to the
+    # resume position (e+1, 0) for the mid-epoch checkpoint.
+    n_chunks_per_epoch = (
+        int(getattr(chunk_loader, "n_chunks", 1))
+        if chunk_loader is not None else 1
+    )
 
     best_loss = float("inf")
     patience_counter = 0
@@ -2243,7 +2377,12 @@ def _train_spectral_loop(
         grad_norm_val = 0.0
 
         sample_idx = -1
-        for chunk_ics, chunk_targets, chunk_forcings in _iter_epoch_data():
+        # Mid-epoch resume: skip the chunks already trained in this epoch
+        # (only the first resumed epoch has chunk_skip > 0).
+        chunk_skip = resume_chunk if epoch == start_epoch else 0
+        chunk_pos = chunk_skip - 1
+        for chunk_ics, chunk_targets, chunk_forcings in _iter_epoch_data(chunk_skip):
+            chunk_pos += 1  # absolute chunk index within the epoch
             for chunk_i, (ic, target) in enumerate(
                     zip(chunk_ics, chunk_targets)):
                 sample_idx += 1
@@ -2272,6 +2411,28 @@ def _train_spectral_loop(
                 epoch_loss += loss_val
                 for key in epoch_components:
                     epoch_components[key] += float(components[key])
+
+            # --- mid-epoch (per-chunk) checkpoint (#942) ---------------------
+            # After EACH chunk on the chunked all-years path, atomically save
+            # model + optimizer state + the resume position so a walltime kill
+            # loses at most one chunk instead of the whole epoch.  The last
+            # chunk of epoch e normalises to (e+1, 0).  (No-op on the single
+            # in-memory path, whose epoch == one chunk == the per-epoch save.)
+            if chunk_loader is not None:
+                _next_chunk = chunk_pos + 1
+                if _next_chunk >= n_chunks_per_epoch:
+                    _save_epoch, _save_chunk = epoch + 1, 0
+                else:
+                    _save_epoch, _save_chunk = epoch, _next_chunk
+                _save_midepoch_checkpoint(
+                    config.checkpoint_dir, model, opt_state,
+                    _save_epoch, _save_chunk,
+                )
+                logger.info(
+                    f"Saved mid-epoch checkpoint {MIDEPOCH_CHECKPOINT_NAME} "
+                    f"(epoch {epoch}, chunk {chunk_pos} done -> resume at "
+                    f"epoch {_save_epoch}, chunk {_save_chunk})"
+                )
 
         n_samples = max(sample_idx + 1, 1)
         avg_loss = epoch_loss / n_samples
@@ -2356,8 +2517,16 @@ def _make_chunk_loader(config, grid, sigma, cache_dir,
         f"({n_total} samples/epoch)"
     )
 
-    def _chunks():
-        for group in groups:
+    def _chunks(start_chunk=0):
+        # ``start_chunk`` skips (does NOT load) the first N groups so a
+        # mid-epoch resume never re-streams the already-trained chunks.
+        # The partition ``groups`` is a fixed, unshuffled slice of
+        # ``config.windows`` and ``load_training_data`` reads snapshots in
+        # deterministic time order, so chunk k is byte-identical across
+        # runs -> a resume replays the exact same trajectory.
+        for gi, group in enumerate(groups):
+            if gi < start_chunk:
+                continue
             ics, tgts, times = load_training_data(
                 config, grid, sigma, cache_dir, windows=group,
             )
@@ -2366,6 +2535,9 @@ def _make_chunk_loader(config, grid, sigma, cache_dir,
             )
             yield ics, tgts, forcings
 
+    # Number of chunks per epoch (constant): the mid-epoch checkpoint reads
+    # this to normalise the last chunk of an epoch to the next epoch's start.
+    _chunks.n_chunks = len(groups)
     return _chunks, n_total
 
 
@@ -2455,6 +2627,7 @@ def train_neural_gcm_spectral(
             grid, sigma, None, None, config,
             start_epoch=start_epoch,
             chunk_loader=chunk_loader, n_samples_total=n_total,
+            resume_from_dir=resume_from_dir,
         )
 
     ic_states, target_carries, ic_times = load_training_data(
@@ -2500,7 +2673,7 @@ def train_sfno_full_spectral(
 
     Returns (trained_sfno, loss_history).
     """
-    from legoesm.atmosphere.dynamics.sfno_pe import (
+    from legoesm.atmosphere.dynamics.neural.sfno_pe import (
         SFNOPrimitiveEquationConfig,
     )
 
@@ -2569,7 +2742,7 @@ def _train_sfno_full_loop(
     segment schedule is reused verbatim from ``config.loss_config``,
     but segment lengths are converted into SFNO macro steps.
     """
-    from legoesm.atmosphere.dynamics.sfno_pe import (
+    from legoesm.atmosphere.dynamics.neural.sfno_pe import (
         SFNOPrimitiveEquationModel,
     )
     from legoesm.ml.training import TrainingConfig, create_optimizer
@@ -2831,6 +3004,7 @@ def train_column_mlp_spectral(
             grid, sigma, None, None, config,
             start_epoch=start_epoch,
             chunk_loader=chunk_loader, n_samples_total=n_total,
+            resume_from_dir=resume_from_dir,
         )
 
     ic_states, target_carries, ic_times = load_training_data(

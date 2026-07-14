@@ -95,7 +95,7 @@ def run_sw_float32_validation(
     # Deferred imports: keep the heavy dycore graph off module import so the
     # CLI ``--help`` and the threshold-only unit test stay light.
     from legoesm.grids.latlon import create_latlon_grid
-    from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
         CGridLatLonShallowWaterConfig,
         CGridLatLonShallowWaterModel,
         williamson_test2_cgrid,

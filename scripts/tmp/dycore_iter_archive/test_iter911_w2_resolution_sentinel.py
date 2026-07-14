@@ -52,7 +52,7 @@ def _run_w2_v_ll_linf(n: int) -> float:
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.cubed_sphere_cdgrid import (
         cell_centre_angles_from_4edge)
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig, FV3EdgeShallowWaterModel,
         FV3EdgeShallowWaterState)
     from tests.atmosphere.shallow_water.test_cases.williamson import (

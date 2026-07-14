@@ -43,16 +43,16 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     PlaneCompressibleEulerModel,
     compute_dry_mass_plane,
     make_flat_plane_terrain_metric,
     make_rest_state,
 )
-from legoesm.atmosphere.dynamics.tracer_positivity import (
+from legoesm.atmosphere.dynamics.shared.tracer_positivity import (
     apply_positive_filter_state,
 )
 from legoesm.atmosphere.idealized.land_rce import (
@@ -493,7 +493,7 @@ def make_rcemip_physics(
     a configurable interval.
 
     ``ls_forcing_physics`` (optional): a plane physics_fn from
-    :func:`legoesm.atmosphere.dynamics.plane_large_scale_forcing
+    :func:`legoesm.atmosphere.forcing.plane_large_scale_forcing
     .make_plane_ls_forcing_physics` adding SAM-style large-scale forcing
     (subsidence + advective tendencies + nudging). ``None`` (the RCE
     default) leaves the column free-running.
@@ -626,7 +626,7 @@ def emit_crm_profiles(state, height_coord, out_dir, label="run",
     by the GATE / LBA / RCE plane drivers for the docs' SAM comparison protocol
     (by MAGNITUDE + profile SHAPE, NOT snapshots)."""
     import numpy as _np
-    from legoesm.atmosphere.dynamics.rce_diagnostics import (
+    from legoesm.atmosphere.dynamics.crm.rce_diagnostics import (
         crm_comparison_profiles_plane,
     )
     prof = crm_comparison_profiles_plane(state, height_coord)
@@ -666,7 +666,7 @@ def emit_crm_profiles(state, height_coord, out_dir, label="run",
     return prof
 
 
-from legoesm.atmosphere.dynamics.sam_case_setup import (  # noqa: E402
+from legoesm.atmosphere.dynamics.crm.sam_case_setup import (  # noqa: E402
     band_limited_seed_pattern as _band_limited_seed_pattern,
 )
 
@@ -1796,7 +1796,7 @@ def _emit_profile_npz(snap_dir: Path, step: int, t_s: float,
     # Convective-intensity signatures for the SAM comparison (w'² variance,
     # updraft mass flux, condensate breakdown, cloud fraction) from the LIVE
     # tested diagnostics — NOT re-derived here (avoids numeric duplication).
-    from legoesm.atmosphere.dynamics.rce_diagnostics import (
+    from legoesm.atmosphere.dynamics.crm.rce_diagnostics import (
         condensate_profile_plane, cloud_fraction_profile_plane,
         updraft_mass_flux_plane, vertical_velocity_variance_plane,
     )

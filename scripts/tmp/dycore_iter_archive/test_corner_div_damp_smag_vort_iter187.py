@@ -62,16 +62,16 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
     CDGridCompressibleEulerConfig,
     CDGridCompressibleEulerModel,
 )
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationConfig,
     CDGridPrimitiveEquationModel,
     hydrostatic_to_fv3,
 )
-from legoesm.atmosphere.held_suarez import held_suarez_init
+from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 from legoesm.core.field import Field
 from legoesm.core.state import NonHydrostaticState
 from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -406,8 +406,8 @@ def test_smag_vort_uses_relative_vorticity_via_a2b_ord4():
     The literal substring matched is robust to small whitespace changes
     but unique to the iter-187 site (``_zeta_smag_corner`` is unused
     elsewhere)."""
-    pe_path = legoesm_source_path("atmosphere/dynamics/primitive_eq_cdgrid.py")
-    nh_path = legoesm_source_path("atmosphere/dynamics/compressible_euler_cdgrid.py")
+    pe_path = legoesm_source_path("atmosphere/dynamics/gcm/primitive_eq_cdgrid.py")
+    nh_path = legoesm_source_path("atmosphere/dynamics/gcm/compressible_euler_cdgrid.py")
 
     for label, p in [("PE", pe_path), ("NH", nh_path)]:
         src = p.read_text()

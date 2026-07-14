@@ -2129,6 +2129,54 @@ def compute_mass_flux_from_cumsum(
     return jnp.pad(mass_flux_inner[..., :-1], pad_axes)
 
 
+def compute_sigma_dot_from_cumsum(
+    cumsum_mass_div: jax.Array,
+    D_total_p: jax.Array,
+    p_s: jax.Array,
+    sigma_coord: SigmaCoordinate,
+) -> jax.Array:
+    """σ̇ at half-levels from a precomputed cumulative FLUX-FORM mass divergence.
+
+    σ-coordinate analogue of :func:`compute_mass_flux_from_cumsum` —
+    single-sources the flux-form continuity integration + boundary closure::
+
+        σ̇_{k+1/2} = [frac_k · D_total_p − cumsum_k(div(dp·v))] / p_s
+
+    where ``div(dp·v)`` is the exact flux-form layer-mass divergence
+    (``dp_k = p_s · Δσ_k``) — NOT the advective ``div(v)·Δσ_k`` that
+    :func:`compute_sigma_dot` integrates.  The two differ wherever
+    ``∇p_s ≠ 0``; only the flux form telescopes to a globally
+    mass-conserving ``dp_s/dt``.  Shared by the lat-lon C-grid, cubed-sphere
+    and MPAS PE dycores (CLAUDE.md: no duplicate dycore numerics).
+
+    Boundary closure: σ̇ = 0 at top and surface (drop the ∼0 last element,
+    pad both ends — ``fractional_sigma[-1] = 1`` makes the surface element
+    exact cancellation ``D_total_p − D_total_p``).
+
+    Parameters
+    ----------
+    cumsum_mass_div : jax.Array
+        ``cumsum(div(dp·v), axis=-1)``, shape (..., nlev) [Pa/s].
+    D_total_p : jax.Array
+        Column total ``cumsum_mass_div[..., -1:]``, shape (..., 1) [Pa/s].
+    p_s : jax.Array
+        Surface pressure, shape (...,) [Pa].
+    sigma_coord : SigmaCoordinate
+
+    Returns
+    -------
+    jax.Array
+        σ̇ at half-levels, shape (..., nlev+1) [1/s]; 0 at top + surface.
+    """
+    frac = sigma_coord.fractional_sigma  # (nlev,)
+    # 1e-10 Pa: division-safety floor only (p_s is clipped far above this).
+    sigma_dot_inner = (frac * D_total_p - cumsum_mass_div) / (
+        p_s[..., jnp.newaxis] + 1e-10
+    )  # (..., nlev)
+    pad_axes = ((0, 0),) * (sigma_dot_inner.ndim - 1) + ((1, 1),)
+    return jnp.pad(sigma_dot_inner[..., :-1], pad_axes)
+
+
 def compute_mass_flux_hybrid(
     div_3d: jax.Array,
     p_s: jax.Array,

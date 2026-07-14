@@ -29,7 +29,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
     CDGridCompressibleEulerModel,
     make_fv3_faithful_nh_config,
 )
@@ -127,7 +127,7 @@ def test_nh_duogrid_edge_ratio_with_clip(capsys):
 
         # Run with clip (patched)
         with patch(
-            "legoesm.atmosphere.dynamics.compressible_euler_cdgrid."
+            "legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid."
             "_pad_halo_4d_module",
             _clipped_pad_halo_4d,
         ):

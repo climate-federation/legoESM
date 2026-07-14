@@ -65,7 +65,7 @@ def main() -> None:
     import matplotlib.pyplot as plt
 
     from legoesm import constants
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig,
         CDGridShallowWaterModel,
         CDGridShallowWaterState,

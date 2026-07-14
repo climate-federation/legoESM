@@ -31,7 +31,7 @@ from tests.legoesm_paths import legoesm_source_path
 
 
 _PE_SRC_PATH = legoesm_source_path(
-    "atmosphere/dynamics/primitive_eq_cdgrid.py"
+    "atmosphere/dynamics/gcm/primitive_eq_cdgrid.py"
 )
 
 

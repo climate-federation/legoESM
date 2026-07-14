@@ -22,7 +22,7 @@ def test_reuses_sibling_helpers():
                "_corr_vs_time", "_snap_for_day"):
         assert hasattr(pub.XG, fn), f"missing reused helper plot_dino_cross_grid.{fn}"
     # ACC helpers
-    for fn in ("_grid_and_z", "_partial_cell_h", "_snaps"):
+    for fn in ("_grid_and_z", "_snaps"):
         assert hasattr(pub.ACC, fn), f"missing reused helper plot_dino_acc.{fn}"
 
 

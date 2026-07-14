@@ -181,6 +181,10 @@ _FROZEN_TRIPOLE_DYCORE = {
     "bottom_drag_bbl_thickness": 100.0,
     "bottom_drag_bg_velocity": 0.1,
     "freshwater_closure": "virtual_salt_flux",
+    # OMIP global freshwater correction — _create_setup("tripole") sets it True
+    # (run_omip.py); the recipe omitting it silently fell back to the config
+    # default False (codex).  MUST stay True.
+    "normalize_freshwater": True,
 }
 
 # The shared GM/Redi block both proven configs use (frozen, #500).
@@ -224,6 +228,26 @@ class TestOMIPNemoMatchFactories:
         assert mc.gm_redi.visbeck.enabled is False
         for k, v in _FROZEN_GM_REDI.items():
             assert getattr(mc.gm_redi, k) == v, k
+
+    def test_tripole_recipe_enables_freshwater_normalization(self):
+        """Regression (codex fix C): the NEMO-match tripole recipe MUST enable
+        the OMIP global freshwater normalization — the recipe config exposes
+        normalize_freshwater=True and passes it into LatLonCGridOceanConfig
+        (previously silently fell back to the base default False, diverging
+        from _create_setup("tripole")'s proven normalize_freshwater=True)."""
+        from legoesm.ocean.fidelity.nemo_match_recipe import (
+            NEMOMatchTripoleRecipeConfig,
+            nemo_match_tripole_model_config,
+        )
+        assert NEMOMatchTripoleRecipeConfig().normalize_freshwater is True
+        mc = nemo_match_tripole_model_config()
+        assert mc.flat_get("normalize_freshwater") is True
+        # ...and the CATALOG bundles carry it too, so catalog-based assembly
+        # cannot silently fall back to the config default False (codex r3).
+        assert get_recipe("omip_nemo_match_tripole_v1",
+                          "latlon")["normalize_freshwater"] is True
+        assert get_recipe("omip_nemo_match_mpas_v1",
+                          "mpas")["normalize_freshwater"] is True
 
     def test_mpas_factory_equals_create_setup_dycore(self):
         """Tie the factory + catalog to the PROVEN driver config: every dycore

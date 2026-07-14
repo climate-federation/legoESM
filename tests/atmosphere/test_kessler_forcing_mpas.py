@@ -18,7 +18,7 @@ from legoesm.core.field import Field
 from legoesm.core.state import MPASHydrostaticState, MPASHydrostaticTendencies
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.thermo import saturation_mixing_ratio
-from legoesm.atmosphere.kessler_forcing import make_kessler_forcing_mpas
+from legoesm.atmosphere.forcing.idealized.kessler_forcing import make_kessler_forcing_mpas
 
 
 def _make_state(nCells=4, nEdges=5, nlev=12):

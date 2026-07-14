@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     validate_corner_div_damp_nord,
 )
 

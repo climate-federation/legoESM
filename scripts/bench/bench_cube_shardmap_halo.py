@@ -165,7 +165,7 @@ def _build_cube_model(n_grid: int, n_lev: int, dt: float):
     ``tests/parallel/test_cubed_sphere_spmd_step.py`` so the timed integrand is
     the production step, not a reduced proxy.
     """
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationConfig,
         CDGridPrimitiveEquationModel,
         fv3_to_hydrostatic,

@@ -23,11 +23,11 @@ import pytest
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
 )
-from legoesm.atmosphere.held_suarez import held_suarez_init
-from legoesm.atmosphere.dynamics.tiled_step_adapter import make_tiled_cc_step
+from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
+from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import make_tiled_cc_step
 
 N, NLEV, KT = 8, 4, 2
 DT = 60.0
@@ -130,10 +130,33 @@ def test_adapter_refuses_inner_mass_fixer():
         make_tiled_cc_step(model, mesh, kt=KT, dt=DT)
 
 
+def test_single_shot_step_refuses_tracers():
+    """The single-shot cc step is dynamics-only: a tracer-carrying state
+    must refuse LOUDLY — silently re-attaching the tracers unchanged would
+    freeze them while serial advances/floors them (divergence-by-omission,
+    mirroring make_tiled_cc_loop's dry refusal).  An EMPTY tracer dict is
+    equivalent to no tracers and must still step."""
+    mesh = _mesh()
+    model, state = _model_and_state()
+    step = make_tiled_cc_step(model, mesh, kt=KT, dt=DT)
+
+    moist = state._replace(tracers={
+        "q_v": state.T.replace(data=jnp.zeros_like(state.T.data),
+                               name="q_v"),
+    })
+    with pytest.raises(ValueError, match="dynamics-only"):
+        step(moist)
+
+    # No-tracer states step fine (the full-parity gate above exercises
+    # tracers=None end-to-end); pin the empty-dict case explicitly.
+    out = step(state._replace(tracers={}))
+    assert np.all(np.isfinite(np.asarray(out.T.data)))
+
+
 def test_dedup_tiled_corners_synthetic():
     """Block-concatenated tiled corners (with the duplicated shared face)
     reassemble to the exact global corner array."""
-    from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+    from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import (
         dedup_tiled_corners,
     )
     kt, nl = 2, 4

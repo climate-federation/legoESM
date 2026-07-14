@@ -1,8 +1,17 @@
-"""Hines (1997) Doppler-spread gravity wave drag parameterization.
+"""Single-bulk-amplitude WKB gravity wave drag (Hines-1997-inspired).
 
-Non-orographic GWD scheme based on Doppler shifting and spectral
-saturation of gravity waves. Uses bottom-up propagation with smooth
-sigmoid activation for full differentiability.
+.. warning::
+
+   This is **NOT** the full Hines (1997) Doppler-spread *spectrum*.  It is
+   a single-bulk-amplitude WKB approximation: one rms wave amplitude is
+   propagated and saturated per column (see the disclosed-simplification
+   note below), rather than the full azimuthal + vertical-wavenumber
+   Doppler-spread spectrum.
+
+Non-orographic GWD scheme: a single bulk wave amplitude grows with
+decreasing density and is capped by a smooth saturation amplitude. Uses
+bottom-up propagation with smooth sigmoid activation for full
+differentiability.
 
 .. note::
 

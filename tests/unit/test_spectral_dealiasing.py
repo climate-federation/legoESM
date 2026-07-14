@@ -38,7 +38,7 @@ from legoesm.grids.vertical import (
     create_height_coordinate,
     compute_terrain_metric,
 )
-from legoesm.atmosphere.dynamics.spectral_sw import (
+from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
     SpectralSWState,
     SpectralSWConfig,
     SpectralShallowWaterModel,
@@ -47,7 +47,7 @@ from legoesm.atmosphere.dynamics.spectral_sw import (
     compute_spectral_diagnostics,
     spectral_to_grid,
 )
-from legoesm.atmosphere.dynamics.spectral_nh import (
+from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
     SpectralNHConfig,
     spectral_nh_slow_tendencies,
     nh_rest_state_spectral,

@@ -517,7 +517,7 @@ def test_iter888c_config_field_default_off():
     as a field with default False.  Locked by the iter-873 sentinel
     via the inventory list (see test_fortran_fidelity_default_flags_iter873.py).
     """
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig)
 
     cfg = CDGridShallowWaterConfig()
@@ -538,7 +538,7 @@ def test_iter888c_fb_model_step_forwards_config_field():
     model class.
     """
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig,
         FV3FBShallowWaterModel,
         FV3EdgeShallowWaterState,
@@ -602,7 +602,7 @@ def test_iter889_production_fv3edge_model_responds_to_flag():
     test below).
     """
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig,
         FV3EdgeShallowWaterModel,
         FV3EdgeShallowWaterState,
@@ -690,7 +690,7 @@ def test_iter889_w2_legacy_is_known_worse_on_flag():
     (would shift the W2 sentinel baseline + several iter-873 inputs).
     """
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig,
         FV3EdgeShallowWaterModel,
         FV3EdgeShallowWaterState,
@@ -790,7 +790,7 @@ def test_iter889b_duogrid_bypasses_boundary_override():
     (i.e., the gate bypasses the override exactly as Fortran does).
     """
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig,
         FV3EdgeShallowWaterModel,
         FV3EdgeShallowWaterState,
@@ -853,7 +853,7 @@ def test_iter889b_legacy_non_duogrid_still_responds_to_flag():
     duogrid-bypass case above.
     """
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig,
         FV3EdgeShallowWaterModel,
         FV3EdgeShallowWaterState,
@@ -1083,7 +1083,7 @@ def test_iter890_fb_chain_duogrid_no_op_with_or_without_flag():
     production (FV3EdgeShallowWaterModel.step).
     """
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig,
         FV3FBShallowWaterModel,
         FV3EdgeShallowWaterState,

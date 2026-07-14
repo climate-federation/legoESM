@@ -80,7 +80,7 @@ print(f"  du relative to u0: {float(jnp.max(jnp.abs(du)))/float(u0):.4e}")
 
 # Run 10 steps
 print("\n--- Running 10 steps with csw + RK3 ---")
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterConfig, FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
 )
 state = FV3EdgeShallowWaterState(h=h, u_d=u_d, v_d=v_d, h_s=h_s)

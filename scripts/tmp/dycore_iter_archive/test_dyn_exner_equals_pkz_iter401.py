@@ -26,7 +26,7 @@ import numpy as np
 import pytest
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     compute_exner_perturbation,
 )
 from legoesm.grids.vertical import create_height_coordinate

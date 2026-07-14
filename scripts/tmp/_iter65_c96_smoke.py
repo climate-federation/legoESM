@@ -61,11 +61,11 @@ def _run_c96_smoke(
     handles C36, C48, C72, C96, C144, etc.
     """
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import (
+    from legoesm.atmosphere.forcing.idealized.held_suarez import (
         held_suarez_init,
         held_suarez_forcing,
     )
