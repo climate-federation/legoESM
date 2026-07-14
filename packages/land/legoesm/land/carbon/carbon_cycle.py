@@ -115,8 +115,15 @@ def compute_gpp(
         co2 = jnp.full(T.shape, co2_ppmv, dtype=T.dtype)
     f_CO2 = co2 / (co2 + config.K_CO2)
 
+    # Cold-deciduous freeze dormancy (Mechanism 2): zero foliar GPP when the
+    # canopy is frozen/dormant.  STATIC gates -> Python if (feature gating, not a
+    # traced jnp.where); d == 1.0 when off => byte-identical.
+    if config.cold_deciduous_dormancy and config.cold_deciduous:
+        d = _cold_deciduous_dormancy_factor(T, config)
+    else:
+        d = 1.0
     # GPP = epsilon * APAR * f_T * f_CO2 * beta  [gC/m2/s]
-    return jnp.maximum(config.epsilon * APAR * f_T * f_CO2 * beta, 0.0)
+    return jnp.maximum(config.epsilon * APAR * f_T * f_CO2 * beta, 0.0) * d
 
 
 # ===================================================================
@@ -310,6 +317,64 @@ def _freeze_modifier(
     # [floor, 1].  floor in [0, 1) keeps (1 - floor) > 0 so the curve stays
     # monotonically increasing and bounded, and floor <= f_freeze <= 1.
     return floor + (1.0 - floor) * jax.nn.sigmoid((T - constants.T_freeze) / w)
+
+
+def _nsc_respiration_factor(
+    C_lab: jnp.ndarray,
+    C_fol: jnp.ndarray,
+    C_root: jnp.ndarray,
+    C_wood: jnp.ndarray,
+    config: CarbonConfig,
+) -> jnp.ndarray:
+    """Substrate (NSC) limitation of maintenance respiration, ``f_nsc`` in
+    ``[r_maint_floor_frac, 1]``.
+
+    Respiratory downregulation under carbon starvation (Atkin & Tjoelker 2003):
+    when the labile / non-structural-carbon reserve ``C_lab`` is depleted
+    relative to a fraction of LIVE BIOMASS, maintenance respiration throttles
+    toward a small basal floor instead of demanding the full biomass-proportional
+    amount and cannibalising structural pools to death::
+
+        C_lab_ref = nsc_ref_labile_frac * (C_fol + C_root + C_wood)
+        f_nsc = r_maint_floor_frac
+                + (1 - r_maint_floor_frac) * smoothstep(C_lab / C_lab_ref)
+
+    ``smoothstep`` is the C1 Hermite ``x^2 (3 - 2x)`` on a ``[0, 1]``-clamped
+    argument -> differentiable; ``f_nsc -> 1`` for ample reserve
+    (``C_lab >= C_lab_ref``; healthy plants unaffected -> temperate/tropical
+    no-regression) and ``-> r_maint_floor_frac`` as ``C_lab -> 0``.
+
+    The reference scales with LIVE BIOMASS, not foliage: a winter-leafless plant
+    has ``C_fol -> 0``, so a foliage-only reference would collapse and leave the
+    root+wood winter drain ungated (the exact death-spiral case).  ``C_root`` /
+    ``C_wood`` persist through the leafless season and keep the reference finite.
+    A ``1e-10`` epsilon guards ``ref`` so a fully bare column yields the floor,
+    not ``0/0``.
+    """
+    ref = config.nsc_ref_labile_frac * (C_fol + C_root + C_wood)
+    x = jnp.clip(C_lab / jnp.maximum(ref, 1e-10), 0.0, 1.0)
+    smoothstep = x * x * (3.0 - 2.0 * x)
+    floor = config.r_maint_floor_frac
+    return floor + (1.0 - floor) * smoothstep
+
+
+def _cold_deciduous_dormancy_factor(
+    T: jnp.ndarray,
+    config: CarbonConfig,
+) -> jnp.ndarray:
+    """Cold-deciduous winter-dormancy factor ``d`` in ``(0, 1]``.
+
+    Smooth freeze-onset sigmoid ``d = sigmoid((T - freeze_dormancy_threshold_K)
+    / dormancy_transition_width_K)`` -> ``1`` for warm (active canopy), ``-> 0``
+    when frozen (leaves shed / metabolically dormant).  Callers multiply it onto
+    the FOLIAR GPP and FOLIAR maintenance-respiration terms so a cold-deciduous
+    PFT neither photosynthesises nor pays foliar respiration through the frozen
+    season (larch/tundra strategy).  Differentiable; the ``cold_deciduous`` /
+    ``cold_deciduous_dormancy`` STATIC gates are applied by the caller (feature
+    gating), so this returns the smooth factor unconditionally.
+    """
+    z = (T - config.freeze_dormancy_threshold_K) / config.dormancy_transition_width_K
+    return jax.nn.sigmoid(z)
 
 
 def perennial_frost_protection(
@@ -659,10 +724,26 @@ def step_carbon_differland(
     # reference multiplies temp_factor_ra by exp(-Q10_exp*dref) at EVERY fixed
     # temperature, UNIFORMLY lowering R_maint and RAISING NPP.
     temp_factor_ra = jnp.exp(config.Q10_exp * (T - config.T_ref_ra))
+    # High-latitude productivity rescue (opt-in, static-flag feature gates).
+    # Mechanism 1 (NSC gate) throttles ALL maintenance terms as the labile
+    # reserve depletes; Mechanism 2 (cold-deciduous dormancy) additionally zeros
+    # the FOLIAR term when frozen.  f_nsc == 1.0 and d == 1.0 when off =>
+    # byte-identical to the ungated (r_maint_fol*C_fol + ...)·temp_factor_ra.
+    # Sign (carbon, positive-out): R_maint is a LOSS plant->atmosphere; f_nsc, d
+    # in (0, 1] REDUCE the loss (survival), never increase it.
+    if config.nsc_gated_respiration:
+        f_nsc = _nsc_respiration_factor(
+            state.C_lab, state.C_fol, state.C_root, state.C_wood, config)
+    else:
+        f_nsc = 1.0
+    if config.cold_deciduous_dormancy and config.cold_deciduous:
+        d = _cold_deciduous_dormancy_factor(T, config)
+    else:
+        d = 1.0
     R_maint_day = (
-        config.r_maint_fol * state.C_fol
-        + config.r_maint_root * state.C_root
-        + config.r_maint_wood * state.C_wood
+        config.r_maint_fol * state.C_fol * f_nsc * d
+        + config.r_maint_root * state.C_root * f_nsc
+        + config.r_maint_wood * state.C_wood * f_nsc
     ) * temp_factor_ra  # gC/m2/day
 
     # Growth respiration: fraction of net assimilation (GPP minus maintenance)

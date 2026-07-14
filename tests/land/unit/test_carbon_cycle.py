@@ -42,6 +42,8 @@ from legoesm.land.carbon.carbon_cycle import (
     _freeze_modifier,
     _som_decomp_modifier,
     _effective_rate,
+    _nsc_respiration_factor,
+    _cold_deciduous_dormancy_factor,
     annual_frozen_fraction,
     perennial_frost_protection,
 )
@@ -638,6 +640,114 @@ class TestSomCascade(unittest.TestCase):
             expected = -(flux / _GC_TO_KG_CO2) * 86400.0
             npt.assert_allclose(dC, expected, rtol=1e-9, atol=1e-9,
                                 err_msg=f"evergreen column not closed (sw={sw})")
+
+
+# ===================================================================
+# High-latitude productivity rescue (opt-in NSC gate + cold-deciduous dormancy)
+# ===================================================================
+
+class TestArcticProductivityRescue(unittest.TestCase):
+    """Opt-in mechanisms fixing the boreal/tundra carbon death spiral.  Both
+    default OFF -> byte-identical; ON they throttle winter maintenance
+    respiration so a starved high-latitude column survives."""
+
+    def test_nsc_respiration_factor_throttles_and_saturates(self):
+        cfg = _default_config(scheme="differland", nsc_gated_respiration=True,
+                              nsc_ref_labile_frac=0.02, r_maint_floor_frac=0.10)
+        C_root, C_wood = 100.0, 800.0
+
+        def f(cl, cf=100.0):
+            return float(_nsc_respiration_factor(
+                jnp.asarray(cl), jnp.asarray(cf), jnp.asarray(C_root),
+                jnp.asarray(C_wood), cfg))
+
+        ref = 0.02 * (100.0 + C_root + C_wood)           # 20 gC/m2
+        self.assertAlmostEqual(f(0.0), 0.10, places=6)   # empty reserve -> floor
+        self.assertAlmostEqual(f(ref), 1.0, places=6)    # saturates at reference
+        self.assertAlmostEqual(f(10 * ref), 1.0, places=6)  # stays 1 above
+        self.assertTrue(0.10 < f(ref / 2) < 1.0)         # monotone between
+        # Winter-leafless robustness: C_fol=0, still gates root+wood off (the
+        # foliage-only reference would collapse here and leave the drain ungated).
+        self.assertAlmostEqual(f(0.0, cf=0.0), 0.10, places=6)
+
+    def test_cold_deciduous_dormancy_factor_zeros_when_frozen(self):
+        cfg = _default_config(scheme="differland", cold_deciduous_dormancy=True,
+                              cold_deciduous=True, dormancy_transition_width_K=2.0)
+
+        def d(T):
+            return float(_cold_deciduous_dormancy_factor(jnp.asarray(T), cfg))
+
+        self.assertLess(d(constants.T_freeze - 10.0), 0.01)     # frozen -> dormant
+        self.assertAlmostEqual(d(constants.T_freeze), 0.5, places=6)  # midpoint
+        self.assertGreater(d(constants.T_freeze + 10.0), 0.99)  # warm -> active
+
+    def _step(self, cfg, state, sw=250.0, T=295.0, beta=0.8, doy=180.0):
+        return step_carbon_differland(
+            state, jnp.full(1, sw), jnp.full(1, T), jnp.full(1, 400.0),
+            jnp.full(1, beta), jnp.full(1, 0.7), doy, jnp.full(1, 3e-5),
+            cfg, 86400.0)
+
+    def test_gates_off_are_byte_identical_to_param_changes(self):
+        # Gates OFF: perturbing the new params must not change the step at all
+        # (proves the static gate leaves the pre-change numerics untouched).
+        state = _make_carbon_state(shape=(1,))
+        base = _default_config(scheme="differland")          # gates default off
+        pert = base._replace(nsc_ref_labile_frac=0.5, r_maint_floor_frac=0.9,
+                             freeze_dormancy_threshold_K=250.0,
+                             dormancy_transition_width_K=8.0)
+        a, fa = self._step(base, state)
+        b, fb = self._step(pert, state)
+        for field in state._fields:
+            npt.assert_array_equal(getattr(a, field), getattr(b, field))
+        npt.assert_array_equal(fa, fb)
+
+    def test_nsc_gate_reduces_respiration_and_conserves(self):
+        # Depleted labile, cold + dark: the gate ON retains more carbon (less
+        # respired) than OFF, and the 8-pool budget still closes exactly.
+        depleted = _make_carbon_state(shape=(1,), C_lab=jnp.full(1, 1.0))
+        off = _default_config(scheme="differland", nsc_gated_respiration=False)
+        on = _default_config(scheme="differland", nsc_gated_respiration=True,
+                             nsc_ref_labile_frac=0.02, r_maint_floor_frac=0.10)
+        s_off, _ = self._step(off, depleted, sw=0.0, T=280.0, beta=0.1, doy=15.0)
+        s_on, flux_on = self._step(on, depleted, sw=0.0, T=280.0, beta=0.1, doy=15.0)
+        tot = lambda s: sum(float(getattr(s, f).sum()) for f in s._fields)
+        self.assertGreater(tot(s_on), tot(s_off))    # gate retains carbon
+        dC = sum(getattr(s_on, f) - getattr(depleted, f) for f in depleted._fields)
+        expected = -(flux_on / _GC_TO_KG_CO2) * 86400.0
+        npt.assert_allclose(dC, expected, rtol=1e-9, atol=1e-9)
+
+    def test_nsc_gate_preserves_winter_labile_reserve(self):
+        # THE death-spiral mechanism: through a dark, cold winter (GPP == 0,
+        # sw == 0) the maintenance-respiration deficit is paid from the labile
+        # reserve C_lab first.  With the gate OFF the reserve drains toward 0
+        # (spring has nothing to regrow from -> death spiral); with the gate ON,
+        # R_maint throttles as C_lab depletes, so the reserve is PRESERVED.
+        # Deterministic and non-vacuous: fails if the gate does not protect C_lab.
+        def winter(cfg, n=400):
+            s0 = _make_carbon_state(
+                shape=(1,), C_lab=jnp.full(1, 40.0), C_fol=jnp.full(1, 80.0),
+                C_root=jnp.full(1, 120.0), C_wood=jnp.full(1, 4000.0))
+
+            def body(_i, s):
+                s2, _ = step_carbon_differland(
+                    s, jnp.full(1, 0.0), jnp.full(1, 280.0), jnp.full(1, 400.0),
+                    jnp.full(1, 0.1), jnp.full(1, 1.1), 15.0, jnp.full(1, 1e-6),
+                    cfg, 86400.0)
+                return s2
+
+            sN = jax.lax.fori_loop(0, n, body, s0)
+            return float(sN.C_lab.sum())
+
+        clab_off = winter(_default_config(scheme="differland",
+                                          nsc_gated_respiration=False))
+        clab_on = winter(_default_config(scheme="differland",
+                                         nsc_gated_respiration=True,
+                                         nsc_ref_labile_frac=0.02,
+                                         r_maint_floor_frac=0.10))
+        # Gate ON preserves strictly more reserve, and OFF drains it meaningfully
+        # (both start at 40 gC) -- so the assertion actually exercises the deficit.
+        self.assertGreater(clab_on, clab_off)
+        self.assertLess(clab_off, 36.0)
 
 
 # ===================================================================

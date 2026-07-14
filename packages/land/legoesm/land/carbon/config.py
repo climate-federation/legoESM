@@ -6,6 +6,8 @@ from typing import NamedTuple
 
 import jax
 
+from legoesm import constants
+
 
 __param_spec__ = {
     "CarbonConfig": {
@@ -20,6 +22,7 @@ __param_spec__ = {
             "T_ref": "heterotrophic (soil-decomposition) reference temperature [K]",
             "T_ref_ra": "autotrophic maintenance-respiration reference temperature [K]; fixed normalization confounded with the bulk r_maint_* amplitudes (25 degC; not trained)",
             "som_freeze_width_K": "numerics: SOM freeze-suppression curve half-width [K]",
+            "dormancy_transition_width_K": "numerics: cold-deciduous dormancy sigmoid half-width [K]",
             "permafrost_frozen_fraction_width": "numerics: perennial-frost protection sigmoid half-width in frozen-fraction space [-]",
         },
         "params": {
@@ -52,6 +55,9 @@ __param_spec__ = {
             "r_maint_fol": {"units": "day^-1", "bounds": (0.00066, 0.006), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "recalibrated to observed cross-biome CUE ~0.45 (He et al. 2018; Collalti & Prentice 2019); DifferLand bulk maintenance closure", "shape": None},
             "r_maint_root": {"units": "day^-1", "bounds": (0.000264, 0.0024), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "recalibrated to observed cross-biome CUE ~0.45 (He et al. 2018; Collalti & Prentice 2019); DifferLand bulk maintenance closure", "shape": None},
             "r_maint_wood": {"units": "day^-1", "bounds": (6.6e-06, 6e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "recalibrated to observed cross-biome CUE ~0.45 (He et al. 2018; Collalti & Prentice 2019); DifferLand bulk maintenance closure", "shape": None},
+            "nsc_ref_labile_frac": {"units": "1", "bounds": (0.005, 0.1), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "labile/NSC as a fraction of live biomass at which maintenance respiration is unthrottled; respiratory downregulation under substrate limitation (Atkin & Tjoelker 2003)", "shape": None},
+            "r_maint_floor_frac": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "basal maintenance-respiration floor retained under full NSC depletion (Atkin & Tjoelker 2003)", "shape": None},
+            "freeze_dormancy_threshold_K": {"units": "K", "bounds": (263.0, 278.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "cold-deciduous winter-dormancy onset temperature (~0 degC); larch/tundra phenology", "shape": None},
             "tor_litter": {"units": "1", "bounds": (0.00066, 0.006), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "tor_root": {"units": "1", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "tor_som_active": {"units": "1/day", "bounds": (3e-04, 3e-03), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CENTURY/CLM4.5 active-SOM MRT ~1-5 yr (Parton et al. 1987; Koven et al. 2013)", "shape": None},
@@ -116,6 +122,27 @@ class CarbonConfig(NamedTuple):
     r_maint_fol: float = 0.002    # Foliage maintenance respiration rate [day^-1]
     r_maint_root: float = 0.0008  # Root maintenance respiration rate [day^-1]
     r_maint_wood: float = 2e-5    # Wood maintenance respiration rate [day^-1]
+
+    # --- High-latitude productivity rescue (opt-in, default-off, PFT-scoped) ---
+    # Two mechanisms that fix the boreal/tundra carbon death spiral (annual GPP <
+    # annual R_maint -> biomass -> 0).  Both default OFF -> byte-identical.
+    # Mechanism 1 -- NSC/substrate-gated maintenance respiration (Atkin &
+    # Tjoelker 2003): as the labile reserve C_lab depletes relative to LIVE
+    # biomass, R_maint throttles toward a floor instead of cannibalising
+    # structural pools to death (carbon_cycle._nsc_respiration_factor).
+    nsc_gated_respiration: bool = False
+    nsc_ref_labile_frac: float = 0.02   # C_lab_ref = this*(C_fol+C_root+C_wood) [-]
+    r_maint_floor_frac: float = 0.10    # f_nsc floor as C_lab -> 0 [-]
+    # Mechanism 2 -- cold-deciduous freeze dormancy: for cold-deciduous PFTs
+    # (surface_params.is_cold_deciduous: larch / arctic grass / boreal shrub),
+    # zero foliar GPP and foliar R_maint below a freeze threshold -- the larch
+    # leaf-drop strategy (carbon_cycle._cold_deciduous_dormancy_factor).
+    # ``cold_deciduous`` is the per-PFT trait; ``cold_deciduous_dormancy`` the
+    # master enable (both must be True for the gate to engage).
+    cold_deciduous_dormancy: bool = False
+    cold_deciduous: bool = False
+    freeze_dormancy_threshold_K: float = constants.T_freeze  # dormancy below this T [K]
+    dormancy_transition_width_K: float = 2.0                 # sigmoid half-width [K]
 
     # --- NPP allocation (sequential partition) ---
     f_fol: float = 0.15           # Fraction NPP -> foliage
