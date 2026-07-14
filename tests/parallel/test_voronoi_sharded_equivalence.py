@@ -187,7 +187,7 @@ class TestVoronoiShardedEquivalence:
         ``_build_timed_scan_runner`` shape — and must match too.
         """
         _need_multi_device(2)
-        from legoesm.atmosphere.held_suarez import held_suarez_forcing_mpas
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_mpas
 
         common = dict(reorder_for=2, n_steps=2, subdivision_level=4)
         ref_nophys = self._run(devices=1, **common)

@@ -65,7 +65,7 @@ def _run_c96_smoke(
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import (
+    from legoesm.atmosphere.forcing.idealized.held_suarez import (
         held_suarez_init,
         held_suarez_forcing,
     )

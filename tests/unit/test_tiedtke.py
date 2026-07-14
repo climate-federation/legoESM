@@ -27,7 +27,7 @@ import pytest
 from legoesm.core.field import Field
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.held_suarez import held_suarez_init
+from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
 from legoesm.atmosphere.physics.physics_state import init_physics_state
 from legoesm.atmosphere.physics.radiation.config import RadiationConfig

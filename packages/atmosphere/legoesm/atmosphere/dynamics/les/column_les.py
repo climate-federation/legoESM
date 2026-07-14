@@ -26,7 +26,7 @@ from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
-from legoesm.atmosphere.column_forcing import (
+from legoesm.atmosphere.forcing.idealized.column_forcing import (
     ColumnLargeScaleState,
     build_column_scm_forcing,
     coriolis_f_c,
@@ -199,7 +199,7 @@ def build_column_les_setup(
     the large-scale forcing.  The LES top must lie within the GCM column
     (:func:`build_top_relaxation` raises otherwise).
     """
-    from legoesm.atmosphere.dynamics.plane_large_scale_forcing import (
+    from legoesm.atmosphere.forcing.plane_large_scale_forcing import (
         make_plane_ls_forcing_physics,
     )
     from legoesm.grids.plane import create_plane_grid
@@ -613,7 +613,7 @@ def extract_gcm_column(
     turbulence driver.  ``surface_config`` (a :class:`SurfaceLayerConfig`) overrides the
     default bulk coefficients.
     """
-    from legoesm.atmosphere.dynamics.column_large_scale_extract import (
+    from legoesm.atmosphere.forcing.column_large_scale_extract import (
         extract_column_forcing,
     )
     from legoesm.atmosphere.physics._shared import (

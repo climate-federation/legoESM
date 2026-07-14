@@ -4,8 +4,8 @@ Stage 4 of ``docs/COMPARE_REANALYSIS.md`` (gap #3, **grid-side** half): derive
 the large-scale environment of a flagged GCM column — large-scale subsidence
 (``ω`` from the continuity equation), and horizontal advective tendencies of
 potential temperature and water vapour (``−V·∇θ``, ``−V·∇q``) — and pack them
-into the :class:`~legoesm.atmosphere.column_forcing.ColumnLargeScaleState` that
-:func:`~legoesm.atmosphere.column_forcing.build_column_scm_forcing` (iter 5)
+into the :class:`~legoesm.atmosphere.forcing.idealized.column_forcing.ColumnLargeScaleState` that
+:func:`~legoesm.atmosphere.forcing.idealized.column_forcing.build_column_scm_forcing` (iter 5)
 turns into the LES forcing.  Forcing the LES from the *GCM* column's large-scale
 state is what makes the LES↔GCM discrepancy attribute to the physics/closure.
 
@@ -18,7 +18,7 @@ Reuse only (CLAUDE.md — no re-derived numerics):
   :func:`legoesm.grids.vertical.compute_sigma_dot_and_total` +
   :func:`~legoesm.grids.vertical.compute_pressure_velocity`.
 * Potential temperature via :func:`legoesm.atmosphere.physics._shared.exner_function`.
-* Coriolis handled in :func:`~legoesm.atmosphere.column_forcing.build_column_scm_forcing`.
+* Coriolis handled in :func:`~legoesm.atmosphere.forcing.idealized.column_forcing.build_column_scm_forcing`.
 
 Geostrophic wind (``∇Φ``, iter 29): :func:`geostrophic_wind_from_gradients`
 diagnoses ``u_geo``/``v_geo`` from the sigma-surface geopotential + surface-
@@ -52,7 +52,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-from legoesm.atmosphere.column_forcing import ColumnLargeScaleState
+from legoesm.atmosphere.forcing.idealized.column_forcing import ColumnLargeScaleState
 from legoesm.atmosphere.physics._shared import (
     compute_heights_from_sigma,
     exner_function,
@@ -329,7 +329,7 @@ def extract_column_forcing_latlon(
     latitude.  Returns the column's
     profiles plus ``ω`` (large-scale subsidence) and ``θ``/``q_v`` advective
     tendencies — ready for
-    :func:`~legoesm.atmosphere.column_forcing.build_column_scm_forcing`.
+    :func:`~legoesm.atmosphere.forcing.idealized.column_forcing.build_column_scm_forcing`.
 
     Pressures use the model's coordinate (``sigma_coord.pressure_at_full`` — hybrid
     correct, iter 341/348; ``== σ·p_s`` for a pure-sigma coordinate); ``ω`` (via the

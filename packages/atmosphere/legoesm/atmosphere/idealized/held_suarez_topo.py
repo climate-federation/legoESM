@@ -1,13 +1,13 @@
 """Held-Suarez with idealized analytical topography.
 
-Wraps the existing :mod:`legoesm.atmosphere.held_suarez` forcing with a
+Wraps the existing :mod:`legoesm.atmosphere.forcing.idealized.held_suarez` forcing with a
 DCMIP-§2-0-0-style ridged cosine-bell mountain.  The relaxation /
 friction kernels are unchanged — only the surface geopotential and
 surface pressure differ from the flat-Earth baseline.  This is the
 ``HS-Topo`` entry in :doc:`/docs/validation/dycore_validation_catalog`.
 
 The forcing functions are aliased directly from
-:mod:`legoesm.atmosphere.held_suarez` (no behavioural change):
+:mod:`legoesm.atmosphere.forcing.idealized.held_suarez` (no behavioural change):
 
 - ``held_suarez_topo_forcing``        ↔ :func:`held_suarez_forcing`
 - ``held_suarez_topo_forcing_latlon`` ↔ :func:`held_suarez_forcing_latlon`
@@ -24,7 +24,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.held_suarez import (
+from legoesm.atmosphere.forcing.idealized.held_suarez import (
     held_suarez_forcing,
     held_suarez_forcing_latlon,
     held_suarez_forcing_mpas,

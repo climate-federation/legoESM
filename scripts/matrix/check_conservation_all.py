@@ -237,7 +237,7 @@ def probe_pe_cubed_sphere(n_steps=20, dt=300.0, with_fixers=False):
         CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
         hydrostatic_to_fv3, fv3_to_hydrostatic,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
     from legoesm.core.operators_cdgrid import dgrid_to_center_vector
 
     grid = create_cubed_sphere(24)
@@ -285,7 +285,7 @@ def probe_pe_latlon(n_steps=20, dt=30.0, with_fixers=False):
         CGridLatLonPrimitiveEquationModel,
         CGridLatLonPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
 
     grid = create_latlon_grid(n_lat=36, radius=constants.R_earth, omega=constants.Omega)
     sigma = create_sigma_coordinate(8)
@@ -323,7 +323,7 @@ def probe_pe_mpas(n_steps=20, dt=300.0, with_fixers=False):
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
     mesh = create_voronoi_mesh(subdivision_level=4)
     sigma = create_sigma_coordinate(8)
     state = held_suarez_init_mpas(mesh, sigma, T_init=280.0)

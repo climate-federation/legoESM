@@ -111,7 +111,7 @@ class TestTaylorDynamics:
             CGridLatLonPrimitiveEquationConfig,
             hydrostatic_to_cgrid,
         )
-        from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
 
         n_lat, n_lon, nlev = 8, 16, 5
         grid = create_latlon_grid(n_lat, n_lon)
@@ -163,7 +163,7 @@ class TestTaylorPhysics:
     def test_held_suarez(self):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_forcing
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing
         from legoesm.core.state import HydrostaticState
 
         n, nlev = 4, 5

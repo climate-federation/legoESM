@@ -25,8 +25,8 @@ from legoesm.atmosphere.physics import (
 )
 from legoesm.atmosphere.physics.microphysics.integration import get_microphysics_fn
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
-from legoesm.atmosphere.scm import SingleColumnModel
-from legoesm.atmosphere.scm_forcing import SCMForcing
+from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
+from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
 from legoesm.thermo import saturation_mixing_ratio
 
 from scripts.run import run_scm_rce_campaign as campaign

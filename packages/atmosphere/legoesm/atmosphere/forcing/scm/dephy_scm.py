@@ -4,7 +4,7 @@ DEPHY-SCM cases are atmospheric SCM/LES forcing files in a common NetCDF
 format.  This module maps the SCM-format files onto legoESM's atmospheric
 single-column model by constructing initial profiles and an :class:`SCMForcing`
 object.  It is intentionally host-side I/O: the returned forcing callables are
-static Python callables, matching :mod:`legoesm.atmosphere.scm_forcing`.
+static Python callables, matching :mod:`legoesm.atmosphere.forcing.scm.scm_forcing`.
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.atmosphere.physics._shared import compute_rho, exner_function
-from legoesm.atmosphere.scm import SingleColumnModel
-from legoesm.atmosphere.scm_forcing import SCMForcing
+from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
+from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.thermo import (
     mixing_ratio_to_specific_humidity,

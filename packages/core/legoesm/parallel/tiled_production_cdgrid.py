@@ -1363,7 +1363,7 @@ def make_tiled_fv3_moist_tracer_tendency_stage_2d(mesh, cdgrid, n: int, kt: int,
     dq_r)`` (each ``(1, nl, nl, nlev)``) added to the advected pack.  Dependency
     injection keeps this core stage PHYSICS-AGNOSTIC: the caller builds the fn
     from a column-local scheme (e.g.
-    ``legoesm.atmosphere.kessler_forcing.kessler_column_tendencies`` with
+    ``legoesm.atmosphere.forcing.idealized.kessler_forcing.kessler_column_tendencies`` with
     sigma_coord/dt/config closed over).  Warm-rain microphysics is column-local
     (no halo) so the per-tile call is bit-identical to a global apply.  Output
     ``dq_pack`` ``(6, n, n, nlev, 3)`` is the EXACT cc partition

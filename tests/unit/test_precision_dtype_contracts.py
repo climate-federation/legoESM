@@ -106,7 +106,7 @@ class TestHeldSuarezInit:
 
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(4)
         sigma = create_sigma_coordinate(5)
@@ -127,7 +127,7 @@ class TestHeldSuarezInit:
 
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_init_latlon,
         )
 

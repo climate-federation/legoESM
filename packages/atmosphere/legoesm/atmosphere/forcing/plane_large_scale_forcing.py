@@ -2,7 +2,7 @@
 
 Provides the GATE/LBA-style external forcing that SAM applies through
 ``forcing.f90`` + ``subsidence.f90`` (see
-:mod:`legoesm.atmosphere.large_scale_forcing` for the shared upwind operator
+:mod:`legoesm.atmosphere.forcing.idealized.large_scale_forcing` for the shared upwind operator
 and the SAM background):
 
 * **Subsidence** — first-order upwind vertical advection ``-w_ls·∂φ/∂z`` of the
@@ -40,10 +40,10 @@ import jax.numpy as jnp
 
 import numpy as np
 
-from legoesm.atmosphere.large_scale_forcing import (
+from legoesm.atmosphere.forcing.idealized.large_scale_forcing import (
     subsidence_tendency_top2bottom,
 )
-from legoesm.atmosphere.sam_case_forcing import (
+from legoesm.atmosphere.forcing.sam_case_forcing import (
     interp_forcing_to_levels,
     read_sam_lsf,
 )

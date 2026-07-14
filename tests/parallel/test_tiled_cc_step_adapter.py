@@ -26,7 +26,7 @@ from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
 )
-from legoesm.atmosphere.held_suarez import held_suarez_init
+from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import make_tiled_cc_step
 
 N, NLEV, KT = 8, 4, 2

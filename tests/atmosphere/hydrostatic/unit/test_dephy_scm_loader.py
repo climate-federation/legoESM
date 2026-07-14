@@ -11,7 +11,7 @@ import pytest
 import xarray as xr
 
 from legoesm import constants
-from legoesm.atmosphere.dephy_scm import load_dephy_scm_case
+from legoesm.atmosphere.forcing.scm.dephy_scm import load_dephy_scm_case
 from legoesm.atmosphere.physics import (
     ConvectionConfig,
     GravityWaveDragConfig,

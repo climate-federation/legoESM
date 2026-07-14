@@ -27,7 +27,7 @@ def _make_hydrostatic_setup():
     """Create a minimal hydrostatic state, grid, sigma for testing."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
     grid = create_cubed_sphere(8)
     sigma = create_sigma_coordinate(10)

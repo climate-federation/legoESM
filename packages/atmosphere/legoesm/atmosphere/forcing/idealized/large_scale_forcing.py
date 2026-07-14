@@ -17,8 +17,8 @@ SAM imposes large-scale forcing on a CRM/SCM column through three channels
    optionally θ, q) toward a target profile on a timescale ``τ``.
 
 This module holds the *array-level* primitives (no model-state types) so both
-:mod:`legoesm.atmosphere.scm_forcing` (single column, ``HydrostaticState``) and
-the plane CRM (:mod:`legoesm.atmosphere.dynamics.plane_large_scale_forcing`,
+:mod:`legoesm.atmosphere.forcing.scm.scm_forcing` (single column, ``HydrostaticState``) and
+the plane CRM (:mod:`legoesm.atmosphere.forcing.plane_large_scale_forcing`,
 ``PlaneNonHydrostaticState``) build on the SAME upwind operator rather than
 re-deriving it.  Both models store columns **top-to-bottom** (index 0 = model
 top, index ``nlev-1`` = surface), so ``z_full`` decreases with index.

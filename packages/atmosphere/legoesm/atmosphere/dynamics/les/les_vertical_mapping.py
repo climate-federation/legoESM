@@ -12,7 +12,7 @@ Reuse (CLAUDE.md — no re-derived numerics):
 * Vertical interpolation via ``jnp.interp`` (the codebase's z-interpolation
   primitive, e.g. ``sam_case_setup``); the relaxation *application* and the
   large-scale subsidence/advection forcing reuse
-  :func:`legoesm.atmosphere.dynamics.plane_large_scale_forcing.make_plane_ls_forcing_physics`.
+  :func:`legoesm.atmosphere.forcing.plane_large_scale_forcing.make_plane_ls_forcing_physics`.
 * The relaxation **rate** profile reuses the canonical Rayleigh-damping shape
   :func:`legoesm.atmosphere.dynamics.gcm.compressible_euler.sponge_profile`
   (``"sin2"`` / ``"sam_rational"``; raises on unknown shape).

@@ -2,7 +2,7 @@
 
 A minimal, dynamics-free driver that exercises the ocean *column* physics
 pipeline on a single water column.  It is the ocean counterpart of
-:class:`legoesm.atmosphere.scm.SingleColumnModel` and is built for the same
+:class:`legoesm.atmosphere.forcing.scm.scm.SingleColumnModel` and is built for the same
 purposes: parameterization integration tests, vertical-mixing / convection
 process studies, and stability sweeps.
 

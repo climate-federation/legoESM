@@ -933,22 +933,22 @@ def _build_physics_fn(physics_level: str, grid_type: str):
         return None
 
     if grid_type == "spectral":
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing_spectral,
         )
         return held_suarez_forcing_spectral
     elif grid_type == "latlon":
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing_latlon,
         )
         return held_suarez_forcing_latlon
     elif grid_type == "icosahedral":
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing_mpas,
         )
         return held_suarez_forcing_mpas
     else:  # cubed-sphere
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing,
         )
         return held_suarez_forcing
@@ -967,7 +967,7 @@ def _build_moist_physics_fn(grid_type: str, dt: float):
     Raises ValueError on an unknown grid (dispatch hardening — a silent
     ``None`` would benchmark dycore-only under a 'moist' label).
     """
-    from legoesm.atmosphere.kessler_forcing import (
+    from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
         make_kessler_forcing_cube,
         make_kessler_forcing_latlon,
         make_kessler_forcing_mpas,

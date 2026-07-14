@@ -453,7 +453,7 @@ def test_stochastic_draw_is_decomposition_invariant():
         # Mirrors the Bechtold invariant-draw pattern: per-GLOBAL-column
         # fold of a per-step sub-key, AR1 carry in conv_stoch_state, and
         # a T tendency scaled by the noise — trajectory-coupled.
-        from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_latlon
         tend = held_suarez_forcing_latlon(hs, grid, sigma)
         nlat_loc, nlon_loc, _ = hs.T.data.shape
         sub, master_new = _jax.random.split(ps.prng_key, 2)
@@ -498,7 +498,7 @@ def _stateful_hs_physics():
     temperature — the carry both INFLUENCES the trajectory and EVOLVES, so
     equivalence is non-vacuous in both directions.  Shapes derive from the
     state itself (band or global), never from the grid statics."""
-    from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_latlon
 
     def _phys(hs, grid, sigma, ps):
         tend = held_suarez_forcing_latlon(hs, grid, sigma)
@@ -538,7 +538,7 @@ def test_run_atm_latlon_spmd_segment_stateful_carry_matches_serial():
     assert float(np.max(np.abs(
         np.asarray(ps_b.tke) - np.asarray(ps0.tke)))) > 1e-6
     # Non-vacuity 2: the carry influenced the trajectory (vs stateless HS).
-    from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_latlon
     hs_nostate = run_atm_latlon_spmd_segment(
         spmd_model, mesh, hs0, dt, n_steps,
         physics_fn=held_suarez_forcing_latlon)
@@ -579,7 +579,7 @@ def test_run_atm_latlon_spmd_segment_physics_matches_serial():
     SPMD segment and matches the serial model.step(hs, physics_fn=...) loop at
     the Stage-5 integrated bound. Non-vacuity: physics must actually change the
     trajectory vs dynamics-only."""
-    from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_latlon
     mesh = _mesh()
     serial, c_state = _model_and_state(use_polar_filter=False)
     spmd_model, _ = _model_and_state(use_polar_filter=False)
@@ -635,7 +635,7 @@ def test_run_atm_latlon_spmd_blowup_detection():
     step N', not integrate garbage. mesh=None keeps it cheap."""
     from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
         run_atm_latlon_spmd)
-    from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_latlon
     model, c_state = _model_and_state(use_polar_filter=False)
     hs0 = _hs_from_cgrid_state(model, c_state)
 

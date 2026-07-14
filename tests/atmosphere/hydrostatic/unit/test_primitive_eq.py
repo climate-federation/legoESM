@@ -703,7 +703,7 @@ class TestTemperatureStability:
 
     def test_held_suarez_temperature_bounds(self, grid, sigma_20):
         """Held-Suarez forcing should keep T within bounds over 100 steps."""
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing,
             held_suarez_init,
         )

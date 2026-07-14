@@ -547,7 +547,7 @@ def test_2d_state_layout_roundtrip():
 def test_2d_step_with_held_suarez_matches_serial():
     """Stateless column-local physics threads through the 2-D step (evaluated
     on the TILE geometry) and matches the serial physics loop."""
-    from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_latlon
     mesh = _mesh2d(2, 2)
     model, c_state = _model_and_state()
     n_steps = 3

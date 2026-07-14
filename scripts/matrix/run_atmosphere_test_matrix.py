@@ -3704,7 +3704,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel as PrimitiveEquationModel,
             CDGridPrimitiveEquationConfig as PrimitiveEquationConfig)
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing, held_suarez_init)
         from legoesm.core.operators import global_integral
 
@@ -3862,7 +3862,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
             hydrostatic_to_cgrid)
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing_latlon, held_suarez_init_latlon)
 
         n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
@@ -3930,7 +3930,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing_mpas, held_suarez_init_mpas)
 
         level = int(tc.resolution.replace("ico", ""))
@@ -3990,7 +3990,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             SpectralPrimitiveEquationModel, SpectralPEConfig,
             isothermal_rest_state_spectral, spectral_pe_to_grid,
         )
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing_spectral,
         )
 
@@ -4903,10 +4903,10 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel as PrimitiveEquationModel,
             CDGridPrimitiveEquationConfig as PrimitiveEquationConfig)
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
         from legoesm.core.operators import global_integral
 
-        from legoesm.atmosphere.held_suarez import held_suarez_forcing
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing
 
         n = int(tc.resolution[1:])
         grid = create_cubed_sphere(n)
@@ -4991,7 +4991,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
             hydrostatic_to_cgrid)
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_init_latlon, held_suarez_forcing_latlon)
 
         n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
@@ -5055,7 +5055,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.vertical import standard_hybrid_levels
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing_mpas, held_suarez_init_mpas)
         from legoesm.ocean.init_mpas import reconstruct_cell_velocity
 
@@ -5113,7 +5113,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
             SpectralPrimitiveEquationModel, SpectralPEConfig,
             isothermal_rest_state_spectral, spectral_pe_to_grid,
         )
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing_spectral,
         )
 

@@ -8,7 +8,7 @@ NOT committed (``data/`` is gitignored). This script is the reproducible way to
 populate the cache from any gSAM checkout — point it at the checkout root (the
 directory containing ``CASES/``) via ``--gsam-root`` or ``$LEGOESM_GSAM_ROOT``.
 
-``legoesm.atmosphere.sam_case_forcing.resolve_sam_case_dir`` falls back to this
+``legoesm.atmosphere.forcing.sam_case_forcing.resolve_sam_case_dir`` falls back to this
 cache, so once populated the gSAM drivers (BOMEX/RICO/DYCOMS/GATE/LBA) find
 their decks with no flag.
 

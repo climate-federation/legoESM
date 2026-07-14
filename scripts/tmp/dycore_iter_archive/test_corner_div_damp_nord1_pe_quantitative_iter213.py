@@ -31,7 +31,7 @@ from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationModel,
     hydrostatic_to_fv3,
 )
-from legoesm.atmosphere.held_suarez import held_suarez_init
+from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 from legoesm.core.operators_cdgrid import (
     dgrid_to_cgrid, cgrid_divergence,
 )

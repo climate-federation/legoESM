@@ -103,7 +103,7 @@ def test_latlon_polar_filter_stable_at_relaxed_dt(mat):
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
         hydrostatic_to_cgrid)
-    from legoesm.atmosphere.held_suarez import (
+    from legoesm.atmosphere.forcing.idealized.held_suarez import (
         held_suarez_forcing_latlon, held_suarez_init_latlon)
 
     n_lat, n_lon, nlev = 32, 64, 20

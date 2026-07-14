@@ -25,7 +25,7 @@ from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
 from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
     run_atm_latlon_spmd,
 )
-from legoesm.atmosphere.held_suarez import (
+from legoesm.atmosphere.forcing.idealized.held_suarez import (
     held_suarez_forcing_latlon, held_suarez_init_latlon)
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.grids.vertical import create_sigma_coordinate

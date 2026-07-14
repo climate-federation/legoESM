@@ -97,7 +97,7 @@ def test_anchor_lifecycle_latlon_pe():
         CGridLatLonPrimitiveEquationConfig,
         hydrostatic_to_cgrid,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
 
     grid = create_latlon_grid(36, 72)
     sigma = create_sigma_coordinate(8)
@@ -160,7 +160,7 @@ def test_anchor_lazy_snapshot_is_sticky():
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
     grid = create_cubed_sphere(8)
     sigma = create_sigma_coordinate(8)
@@ -261,7 +261,7 @@ def test_anchored_step_scan_compat_under_fp64_policy():
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
     saved = get_policy()
     try:
@@ -317,7 +317,7 @@ def test_anchored_step_supports_jax_grad():
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
     saved = get_policy()
     try:
@@ -380,7 +380,7 @@ def test_anchored_step_supports_jax_grad_multistep():
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
     saved = get_policy()
     try:
@@ -598,7 +598,7 @@ def test_anchored_step_supports_jax_grad_latlon_pe():
         CGridLatLonPrimitiveEquationConfig,
         hydrostatic_to_cgrid,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
 
     saved = get_policy()
     try:
@@ -688,7 +688,7 @@ def test_anchored_step_supports_jax_grad_mpas_pe():
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
 
     saved = get_policy()
     try:
@@ -742,7 +742,7 @@ def test_anchored_step_no_tracer_leak_across_traces():
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
     saved = get_policy()
     try:
@@ -933,7 +933,7 @@ def test_anchored_step_no_tracer_leak_mpas_pe():
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
 
     saved = get_policy()
     try:

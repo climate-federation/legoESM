@@ -55,7 +55,7 @@ from legoesm.atmosphere.physics.microphysics.config import (  # noqa: E402
     MicrophysicsConfig,
     MorrisonConfig,
 )
-from legoesm.atmosphere.sam_case_forcing import (  # noqa: E402
+from legoesm.atmosphere.forcing.sam_case_forcing import (  # noqa: E402
     read_sam_lsf,
     read_sam_snd,
     read_sam_sfc,
@@ -65,7 +65,7 @@ from legoesm.atmosphere.sam_case_forcing import (  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import les_record  # noqa: E402
 
-from legoesm.atmosphere.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
+from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
 
 # Default case dir: external LEGOESM_GSAM_ROOT if set, else the repo-local
 # cache (scripts/data/fetch_les_forcing.py); --case-dir overrides. See

@@ -146,7 +146,7 @@ def main() -> int:
         make_tiled_cc_loop,
         make_tiled_cc_step,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.halo import set_halo_backend
     from legoesm.grids.vertical import create_sigma_coordinate

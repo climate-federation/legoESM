@@ -1673,7 +1673,7 @@ class TestHeldSuarezInitConsistency:
         """Import the held_suarez module once for all tests."""
         import importlib
         return importlib.import_module(
-            "legoesm.atmosphere.held_suarez",
+            "legoesm.atmosphere.forcing.idealized.held_suarez",
         )
 
     def test_forcing_constants_match_held_suarez_1994(self, hs_module):

@@ -1,7 +1,7 @@
 """Tests for the LES/CRM forcing cache: the fetch script + the resolver.
 
 Covers ``scripts/data/fetch_les_forcing.py`` (case map + ``copy_deck`` skip
-rules) and ``legoesm.atmosphere.sam_case_forcing.resolve_sam_case_dir`` (the
+rules) and ``legoesm.atmosphere.forcing.sam_case_forcing.resolve_sam_case_dir`` (the
 env / repo-local-cache precedence the gSAM drivers default to).
 """
 from __future__ import annotations
@@ -57,7 +57,7 @@ def test_copy_deck_skips_fortran_and_oversized(tmp_path):
 
 
 def test_resolve_prefers_gsam_root_then_local_cache(tmp_path, monkeypatch):
-    from legoesm.atmosphere.sam_case_forcing import resolve_sam_case_dir
+    from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir
 
     gsam = tmp_path / "gsam"
     cache = tmp_path / "cache"
