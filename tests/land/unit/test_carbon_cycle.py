@@ -749,6 +749,44 @@ class TestArcticProductivityRescue(unittest.TestCase):
         self.assertGreater(clab_on, clab_off)
         self.assertLess(clab_off, 36.0)
 
+    def test_cold_dormancy_gates_the_gpp_override(self):
+        # codex P1: the coupled/archetype path passes a nonzero Farquhar
+        # gpp_override, bypassing compute_gpp.  The dormancy gate must still
+        # suppress that override GPP at frozen T (else a dormant larch keeps
+        # photosynthesising in the global build).  Checked via the gpp diagnostic.
+        state = _make_carbon_state(shape=(1,))
+        frozen_T = jnp.full(1, constants.T_freeze - 15.0)
+        override = jnp.full(1, 5e-8)   # nonzero Farquhar GPP [gC/m2/s]
+        common = dict(sw_down=jnp.full(1, 0.0), co2_ppmv=jnp.full(1, 400.0),
+                      beta=jnp.full(1, 0.5), lat=jnp.full(1, 1.1), doy=15.0,
+                      precip=jnp.full(1, 1e-6), dt=86400.0,
+                      gpp_override=override, return_diagnostics=True)
+        cd = _default_config(scheme="differland", cold_deciduous_dormancy=True,
+                             cold_deciduous=True)
+        off = _default_config(scheme="differland", cold_deciduous_dormancy=False)
+        *_, diag_dorm = step_carbon_differland(state, T=frozen_T, config=cd, **common)
+        *_, diag_no = step_carbon_differland(state, T=frozen_T, config=off, **common)
+        # dormancy on -> the override GPP is suppressed ~0; off -> full override.
+        self.assertLess(float(diag_dorm.gpp.sum()),
+                        0.1 * float(diag_no.gpp.sum()))
+
+    def test_nsc_gate_rejects_invalid_params(self):
+        # codex P2: an out-of-[0,1] floor would make f_nsc>1 (INCREASE R_maint) or
+        # negative; a nonpositive reference collapses the gate.  Fail loud.
+        one = jnp.asarray(1.0)
+        with self.assertRaises(ValueError):
+            _nsc_respiration_factor(one, one, one, one, _default_config(
+                scheme="differland", r_maint_floor_frac=1.5))
+        with self.assertRaises(ValueError):
+            _nsc_respiration_factor(one, one, one, one, _default_config(
+                scheme="differland", nsc_ref_labile_frac=0.0))
+
+    def test_cold_deciduous_dormancy_rejects_nonpositive_width(self):
+        # codex P2: zero width -> 0/0 NaN at T==threshold; negative reverses it.
+        with self.assertRaises(ValueError):
+            _cold_deciduous_dormancy_factor(jnp.asarray(270.0), _default_config(
+                scheme="differland", dormancy_transition_width_K=0.0))
+
 
 # ===================================================================
 # SOM transfer-fraction validation (fail-early on out-of-[0,1] config)

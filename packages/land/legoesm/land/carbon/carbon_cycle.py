@@ -115,15 +115,11 @@ def compute_gpp(
         co2 = jnp.full(T.shape, co2_ppmv, dtype=T.dtype)
     f_CO2 = co2 / (co2 + config.K_CO2)
 
-    # Cold-deciduous freeze dormancy (Mechanism 2): zero foliar GPP when the
-    # canopy is frozen/dormant.  STATIC gates -> Python if (feature gating, not a
-    # traced jnp.where); d == 1.0 when off => byte-identical.
-    if config.cold_deciduous_dormancy and config.cold_deciduous:
-        d = _cold_deciduous_dormancy_factor(T, config)
-    else:
-        d = 1.0
-    # GPP = epsilon * APAR * f_T * f_CO2 * beta  [gC/m2/s]
-    return jnp.maximum(config.epsilon * APAR * f_T * f_CO2 * beta, 0.0) * d
+    # GPP = epsilon * APAR * f_T * f_CO2 * beta  [gC/m2/s].  The cold-deciduous
+    # freeze-dormancy gate is applied in step_carbon_differland (on the FINAL
+    # gpp, whether an override or this computed value) so the coupled Farquhar
+    # gpp_override path is gated too -- see there.
+    return jnp.maximum(config.epsilon * APAR * f_T * f_CO2 * beta, 0.0)
 
 
 # ===================================================================
@@ -351,10 +347,20 @@ def _nsc_respiration_factor(
     A ``1e-10`` epsilon guards ``ref`` so a fully bare column yields the floor,
     not ``0/0``.
     """
-    ref = config.nsc_ref_labile_frac * (C_fol + C_root + C_wood)
+    # Fail-early on the STATIC config values (dispatch-hardening; the
+    # __param_spec__ bounds only constrain training, so a direct
+    # CarbonConfig(r_maint_floor_frac=1.5) would otherwise give f_nsc > 1 and
+    # INCREASE R_maint, violating the pure-reduction invariant).  ``is_concrete``
+    # so a sigmoid-constrained TRACED leaf in the calibration path is skipped.
+    floor = config.r_maint_floor_frac
+    if is_concrete(floor) and not 0.0 <= floor <= 1.0:
+        raise ValueError(f"r_maint_floor_frac must be in [0, 1], got {floor!r}.")
+    ref_frac = config.nsc_ref_labile_frac
+    if is_concrete(ref_frac) and not ref_frac > 0.0:
+        raise ValueError(f"nsc_ref_labile_frac must be > 0, got {ref_frac!r}.")
+    ref = ref_frac * (C_fol + C_root + C_wood)
     x = jnp.clip(C_lab / jnp.maximum(ref, 1e-10), 0.0, 1.0)
     smoothstep = x * x * (3.0 - 2.0 * x)
-    floor = config.r_maint_floor_frac
     return floor + (1.0 - floor) * smoothstep
 
 
@@ -373,7 +379,11 @@ def _cold_deciduous_dormancy_factor(
     ``cold_deciduous_dormancy`` STATIC gates are applied by the caller (feature
     gating), so this returns the smooth factor unconditionally.
     """
-    z = (T - config.freeze_dormancy_threshold_K) / config.dormancy_transition_width_K
+    w = config.dormancy_transition_width_K
+    if not w > 0.0:
+        raise ValueError(
+            f"dormancy_transition_width_K must be > 0, got {w!r}.")
+    z = (T - config.freeze_dormancy_threshold_K) / w
     return jax.nn.sigmoid(z)
 
 
@@ -707,6 +717,13 @@ def step_carbon_differland(
         gpp = gpp_override
     else:
         gpp = compute_gpp(sw_down, T, LAI, co2_ppmv, beta, config)  # gC/m2/s
+    # Cold-deciduous freeze dormancy (Mechanism 2): zero foliar GPP when the
+    # canopy is frozen/dormant.  Applied HERE, on the FINAL gpp, so the coupled
+    # archetype path's nonzero Farquhar gpp_override is gated too (codex P1 --
+    # gating only compute_gpp left the override path un-suppressed).  STATIC
+    # gate -> Python if (feature gating); d == 1.0 when off => byte-identical.
+    if config.cold_deciduous_dormancy and config.cold_deciduous:
+        gpp = gpp * _cold_deciduous_dormancy_factor(T, config)
     gpp_day = gpp * _SPD  # gC/m2/day rate
 
     # --- Autotrophic respiration & NPP -------------------------------------
