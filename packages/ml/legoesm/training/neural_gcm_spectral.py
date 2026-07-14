@@ -2009,6 +2009,29 @@ def _dp_updates_per_epoch(chunk_sizes, nproc: int) -> int:
     return sum(s // nproc for s in sizes)
 
 
+def _dp_chunk_sizes(chunk_loader, n_samples_epoch: int) -> list[int]:
+    """Per-chunk sample counts used to size + guard the DP schedule.
+
+    Sharding happens PER CHUNK, so DP needs the real per-chunk sizes — NOT the
+    epoch total treated as one chunk (that would size the schedule wrong AND
+    hide an undersized chunk that silently trains zero samples).  A ``chunk_loader``
+    MUST therefore expose ``chunk_sizes`` (the built-in ``_make_chunk_loader``
+    does); a custom loader that omits it is rejected rather than mis-sized.  The
+    single in-memory pass (``chunk_loader is None``) is exactly one chunk.
+    """
+    if chunk_loader is None:
+        return [int(n_samples_epoch)]
+    cs = getattr(chunk_loader, "chunk_sizes", None)
+    if cs is None:
+        raise ValueError(
+            "data_parallel requires the chunk loader to expose `chunk_sizes` "
+            "(per-chunk sample counts) so per-chunk sharding is sized and "
+            "guarded correctly; _make_chunk_loader sets it — a custom loader "
+            "must too."
+        )
+    return [int(s) for s in cs]
+
+
 def _train_spectral_loop(
     model: eqx.Module,
     make_physics_fn,
@@ -2143,9 +2166,7 @@ def _train_spectral_loop(
             all_reduce_grad_mean as _all_reduce_grad_mean,
             shard_samples as _shard_samples,
         )
-        _chunk_sizes = list(
-            getattr(chunk_loader, "chunk_sizes", None) or [n_samples_epoch]
-        )
+        _chunk_sizes = _dp_chunk_sizes(chunk_loader, n_samples_epoch)
         _updates_per_epoch = _dp_updates_per_epoch(_chunk_sizes, dp_nproc)
         _dropped = sum(s % dp_nproc for s in _chunk_sizes)
         if _dropped:

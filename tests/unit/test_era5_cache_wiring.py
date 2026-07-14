@@ -53,7 +53,9 @@ def _synth_era5(n_time: int) -> xr.Dataset:
     time = np.datetime64("2015-01-01") + np.arange(n_time) * np.timedelta64(6, "h")
     lat = np.array([-45.0, 0.0, 45.0])
     lon = np.array([0.0, 120.0, 240.0])
-    level = np.array([850.0, 500.0])
+    # 850/500 are configured (WB2) levels; 999 is NOT -> the window cache must
+    # drop it (footprint guard), the full-year path keeps everything.
+    level = np.array([850.0, 500.0, 999.0])
     j = np.arange(n_time, dtype=np.float32)
     d3 = j[:, None, None, None] * np.ones((n_time, len(level), len(lat), len(lon)), np.float32)
     d2 = j[:, None, None] * np.ones((n_time, len(lat), len(lon)), np.float32)
@@ -155,6 +157,10 @@ def test_window_scoped_cache_subsets_and_preserves_timestamps(tmp_path, _patched
     # Static field carried through; marker records the scoped count.
     assert "z_sfc" in cached
     assert _read_cache_marker(path)["n_time"] == len(sel)
+    # Non-configured levels dropped: the window cache holds only config.levels.
+    _cached_levels = set(np.asarray(cached.level.values).tolist())
+    assert 999.0 not in _cached_levels
+    assert _cached_levels <= set(cfg.levels)
 
 
 def test_window_cache_fingerprint_distinguishes_equal_count_selections(

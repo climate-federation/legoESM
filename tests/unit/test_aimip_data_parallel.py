@@ -57,6 +57,28 @@ def test_dp_updates_per_epoch_raises_on_undersized_chunk():
         _dp_updates_per_epoch([], 2)
 
 
+def test_dp_chunk_sizes_requires_attribute_on_custom_loader():
+    # DP shards PER CHUNK, so a multi-chunk loader must expose chunk_sizes or the
+    # schedule is mis-sized and an undersized chunk is silently skipped (#985).
+    from legoesm.training.neural_gcm_spectral import _dp_chunk_sizes
+
+    assert _dp_chunk_sizes(None, 40) == [40]          # single in-memory pass = 1 chunk
+
+    def _loader_with(sizes):
+        def _l(start_chunk=0):
+            yield from ()
+        _l.chunk_sizes = sizes
+        return _l
+
+    assert _dp_chunk_sizes(_loader_with([5, 3]), 8) == [5, 3]
+
+    def _loader_without(start_chunk=0):
+        yield from ()
+
+    with pytest.raises(ValueError, match="chunk_sizes"):
+        _dp_chunk_sizes(_loader_without, 8)
+
+
 def test_mpi_rank_size_no_launcher_is_single():
     # With no multi-rank launcher env, discovery returns (0, 1) so callers stay
     # on their serial path.

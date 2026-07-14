@@ -380,6 +380,17 @@ def ensure_local_cache(
             if r is not None and r in ds_sub and r not in keep:
                 keep.append(r)
         ds = ds_sub[keep]
+        # Keep only the CONFIGURED pressure levels: the reader selects these
+        # anyway, so caching every level of a 37-level source would inflate the
+        # window-cache footprint ~3x for no benefit (codex #985).
+        _ldim = next(
+            (d for d in ("level", "pressure_level") if d in ds.dims), None
+        )
+        if _ldim is not None:
+            _have = set(np.asarray(ds[_ldim].values).tolist())
+            _want = [lv for lv in config.levels if lv in _have]
+            if _want:
+                ds = ds.sel({_ldim: _want})
     else:
         logger.info(f"Downloading ERA5 {years[0]}-{years[1]} to {cache_path}...")
         era5_cfg = ERA5Config(

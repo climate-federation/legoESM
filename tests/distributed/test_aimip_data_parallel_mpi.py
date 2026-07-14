@@ -92,6 +92,7 @@ def _loader_2samples(grid):
         yield [s0, s1], [(t0,), (t1,)], None
 
     _loader.n_chunks = 1
+    _loader.chunk_sizes = [2]   # required by the DP schedule/guard contract
     return _loader
 
 
