@@ -278,6 +278,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hyperdiff-scale", type=float,
                         default=_DYCORE_DEFAULTS.hyperdiff_scale,
                         help="Dycore hyperdiffusion multiplier")
+    parser.add_argument("--a-h-scale", dest="a_h_scale", type=float,
+                        default=_DYCORE_DEFAULTS.a_h_scale,
+                        help="Dycore Laplacian (del^2) background-viscosity "
+                             "multiplier (A_h = a_h_scale*3e-3*dx_min^2/dt; "
+                             "0 = rely on hyperdiff alone). NON-scale-"
+                             "selective: damps jets/eddies, not just grid "
+                             "noise — the 2026-07-14 cube jet-collapse "
+                             "investigation's remaining dissipation knob.")
     parser.add_argument("--mpas-rrtmgp-fp32",
                         action=argparse.BooleanOptionalAction, default=True,
                         dest="mpas_rrtmgp_fp32",
@@ -1169,6 +1177,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         dt=args.dt,
         hyperdiff_scale=args.hyperdiff_scale,
         div_damp_scale=args.div_damp_scale,
+        a_h_scale=args.a_h_scale,
         moisture_flux_form=args.moisture_flux_form,
         mpas_nu_vert4_T=args.mpas_nu_vert4_t,
         mpas_vert4_t_filter=args.mpas_vert4_t_filter,

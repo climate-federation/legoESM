@@ -889,6 +889,7 @@ def test_issue484_new_amip_flags_flow_to_config():
         "--dataset", "analytical",
         "--hyperdiff-scale", "1.25",
         "--div-damp-scale", "0.75",
+        "--a-h-scale", "0.5",
         "--no-conservation-fixer",
         "--no-fix-mass",
         "--max-wallclock-seconds", "7200",
@@ -919,6 +920,7 @@ def test_issue484_new_amip_flags_flow_to_config():
 
     assert cfg.dycore.hyperdiff_scale == 1.25
     assert cfg.dycore.div_damp_scale == 0.75
+    assert cfg.dycore.a_h_scale == 0.5
     assert cfg.dycore.conservation_fixer is False
     assert cfg.dycore.fix_mass is False
     assert cfg.output.max_wallclock_seconds == 7200
