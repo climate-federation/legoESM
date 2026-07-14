@@ -73,7 +73,7 @@ from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.surface_albedo import LandAlbedoConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
 from legoesm.land.soil_thermal import SoilThermalConfig
-from legoesm.land.carbon.stomata import StomataConfig
+from legoesm.land.stomata import StomataConfig
 from legoesm.land.carbon.config import CarbonConfig
 from legoesm.land.carbon.carbon_cycle import init_carbon_state
 from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_land_state

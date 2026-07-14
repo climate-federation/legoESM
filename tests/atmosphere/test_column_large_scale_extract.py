@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`legoesm.atmosphere.dynamics.column_large_scale_extract`.
+"""Unit tests for :mod:`legoesm.atmosphere.forcing.column_large_scale_extract`.
 
 Stage-4 grid-side extractor: ω from continuity + horizontal advective
 tendencies on a lat-lon GCM state.  Analytic checks on the pure cores plus
@@ -12,11 +12,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from legoesm.atmosphere.column_forcing import (
+from legoesm.atmosphere.forcing.idealized.column_forcing import (
     ColumnLargeScaleState,
     build_column_scm_forcing,
 )
-from legoesm.atmosphere.dynamics.column_large_scale_extract import (
+from legoesm.atmosphere.forcing.column_large_scale_extract import (
     _MIN_GEOSTROPHIC_LAT_DEG,
     advective_tendency,
     extract_column_forcing_latlon,
@@ -228,7 +228,7 @@ def test_extract_latlon_threads_hybrid_coord_to_omega_over_terrain():
     (:func:`_divergence_latlon_3d`), gathered at the column.  Non-vacuity: that hybrid ω
     differs materially (>10%) from the pure-sigma ω the pre-fix extractor produced.
     """
-    from legoesm.atmosphere.dynamics.column_large_scale_extract import (
+    from legoesm.atmosphere.forcing.column_large_scale_extract import (
         _divergence_latlon_3d,
     )
     from legoesm.grids.vertical import (
@@ -302,7 +302,7 @@ def test_extract_nonuniform_gives_finite_forcing():
 
     # Wiring/sign check: the extractor's theta_adv at the column equals
     # -(u·∂θ/∂x + v·∂θ/∂y) from the SAME operator gradient (v=0 here).
-    from legoesm.atmosphere.dynamics.column_large_scale_extract import (
+    from legoesm.atmosphere.forcing.column_large_scale_extract import (
         _gradient_latlon_3d,
     )
     from legoesm.atmosphere.physics._shared import exner_function
@@ -430,7 +430,7 @@ def test_extract_geostrophic_orographic_term_from_phis():
     (phis=None) is unchanged (covered by the tests above)."""
     import math
 
-    from legoesm.atmosphere.dynamics.column_large_scale_extract import (
+    from legoesm.atmosphere.forcing.column_large_scale_extract import (
         _gradient_latlon_3d,
     )
 

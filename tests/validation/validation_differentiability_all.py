@@ -145,7 +145,7 @@ class TestShallowWaterDifferentiability:
 
     @pytest.mark.xfail(reason="Pre-existing Field subscript issue in SW cdgrid")
     def test_cdgrid(self, grid):
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterModel, CDGridShallowWaterConfig,
         )
         sw_state = make_sw_state()
@@ -160,7 +160,7 @@ class TestShallowWaterDifferentiability:
 class TestHydrostaticDifferentiability:
 
     def test_cdgrid(self, grid, sigma):
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
         )
         pe_state = make_pe_state(sigma)
@@ -176,7 +176,7 @@ class TestNonHydrostaticDifferentiability:
 
     @pytest.mark.xfail(reason="Zero initial perturbation produces zero gradients")
     def test_cdgrid(self, grid, height_coord, terrain_metric):
-        from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
             CDGridCompressibleEulerModel, CDGridCompressibleEulerConfig,
         )
         ce_state = make_ce_state(height_coord)

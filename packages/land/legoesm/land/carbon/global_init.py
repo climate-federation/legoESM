@@ -358,7 +358,7 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
     )
     from legoesm.land.carbon.carbon_cycle import annual_frozen_fraction
     from legoesm.land.carbon.config import CarbonConfig
-    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.land.stomata import StomataConfig
     from legoesm.land.climate_forcing import make_climatological_forcing
 
     pft_id = np.asarray(table.pft_id, int)

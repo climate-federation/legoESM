@@ -30,7 +30,7 @@ from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.halo import set_halo_backend
 from legoesm.core.operators_cdgrid import dgrid_to_center_vector
-from legoesm.atmosphere.dynamics.tracer_transport import advective_tracer_tendency
+from legoesm.atmosphere.dynamics.shared.tracer_transport import advective_tracer_tendency
 from legoesm.parallel.tiled_production_cdgrid import (
     make_tiled_fv3_tracer_advection_stage_2d,
 )
@@ -150,7 +150,7 @@ def _kessler_injected_fn(sigma_coord, dt, cfg):
     cc field (1,nl,nl,nlev) to (ncol,nlev) for the shared kessler column core,
     return the 3 tracer rates back in tile shape.  Mirrors kessler_forcing
     _gridspace's flatten/unflatten but on the TILE (so it shards)."""
-    from legoesm.atmosphere.kessler_forcing import kessler_column_tendencies
+    from legoesm.atmosphere.forcing.idealized.kessler_forcing import kessler_column_tendencies
 
     def fn(T_t, p_s_t, q_v_t, q_c_t, q_r_t):
         shp = T_t.shape
@@ -176,7 +176,7 @@ def test_tiled_moist_tracer_tendency_matches_global(cdg, KT):
             f"(--xla_force_host_platform_device_count={ndev})")
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
-    from legoesm.atmosphere.kessler_forcing import kessler_column_tendencies
+    from legoesm.atmosphere.forcing.idealized.kessler_forcing import kessler_column_tendencies
     from legoesm.parallel.tiled_production_cdgrid import (
         make_tiled_fv3_moist_tracer_tendency_stage_2d,
     )

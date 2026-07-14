@@ -31,14 +31,18 @@
 # Tracking: GitHub issues #636, #811.
 # =============================================================================
 
-# --- Grid + dycore: cubed-sphere C12 / L20, cd-grid, dt 450 s -----------------
-# Lowered from C48/L40 (dt 150) to C12/L20 for cheap turnaround while validating
-# the multilayer Richards land switch; relaxed CFL permits dt 450 at ~7.5 deg.
+# --- Grid + dycore: cubed-sphere C48 / L40, cd-grid, dt 150 s -----------------
+# Publication-grade AMIP resolution (restored from #821's C12/L20 dt450 screen,
+# which was for cheap land-switch turnaround only).
+# NOTE: bechtold convection at C48 REQUIRES precision fp64 (below) — fp32 overflows
+# in the cd-grid barotropic subcycle (XLA fusion) and blows up ~day 5; `mixed`
+# does NOT cover that subcycle (it promotes only the spectral-dycore kernels).
 grid_type: cubed_sphere
-resolution: 12
-nlev: 20
+resolution: 48
+nlev: 40
 discretization: cdgrid
-dt: 450.0
+dt: 150.0
+precision: fp64             # bechtold @ C48/L40 needs full fp64 (see note above)
 
 # --- Atmospheric physics (Bechtold mass-flux convection, directive 2026-07-06)
 radiation: rrtmg            # rrtmg = the rrtmgp builder alias (true CMIP6 RT)
@@ -53,10 +57,29 @@ diurnal_cycle: true
 orbital_insolation: true    # AMIP-II realistic orbit (Berger 1978): orbital
                             # declination + (a/r)^2 eccentricity asymmetry
 
-# --- Cloud tuning -------------------------------------------------------------
-# rh_crit intentionally left at the calibrated default (0.77, commit 3f376730e)
-# — NOT pinned here.
-cloud_q_c_diagnostic: 3.0e-4   # tuned "thinner cloud" value (== cmip_tuned_physics.yaml)
+# --- Cloud tuning (mass-flux over-bright-anvil fix — PROVISIONAL) --------------
+# The mass-flux schemes (bechtold/edmf/tiedtke) over-cloud the AMIP troposphere.
+# A day-90 pe=0 scorecard: edmf clt 85% (ref 67), albedo 0.60-0.71 (ref 0.29),
+# from excessive sundqvist stratiform cloud over an over-moist column. Two levers:
+#   cloud_rh_crit        — Sundqvist critical RH; RAISE => less stratiform cloud
+#                          FRACTION (edmf clt 85.5 -> 63.5 at 0.85, day-35 partial).
+#   cloud_q_c_diagnostic — in-cloud condensate / optical THICKNESS; LOWER => less
+#                          reflective cloud (targets the residual albedo that
+#                          rh_crit alone leaves, 0.695 -> 0.637).
+# PROVISIONAL: values are day-35 partials; day-90 validation (edmf full-recipe
+# run) in progress. To restore the prior default: rh_crit 0.77, q_c 3.0e-4,
+# convective_precip_efficiency 0.0.
+cloud_rh_crit: 0.85            # was the calibrated default 0.77 (commit 3f376730e)
+cloud_q_c_diagnostic: 1.0e-4   # was 3.0e-4 ("thinner cloud" -> lower albedo)
+convective_precip_efficiency: 0.0  # detrained-condensate -> convective-rain split
+                            # (raises pr, drains column moisture). The intended
+                            # 0.5 REQUIRES the bechtold rain-split scheme code,
+                            # which is not on main yet — and run_amip's guard
+                            # hard-errors on >0 with a non-tiedtke scheme, so
+                            # 0.5 made EVERY run of this YAML die at argparse
+                            # (#932). Keep 0.0 until the bechtold rain-split
+                            # lands (tracked with the #929 bechtold campaign),
+                            # then restore 0.5 as #899 intended.
 # convective_cloud (Slingo-1987 cumulus cloud fraction): ON, to MIRROR the
 # canonical tuned-physics base (config/cmip/cmip_tuned_physics.yaml ships
 # convective_cloud: true) so this AMIP runs the SAME tuned slab parameters as the

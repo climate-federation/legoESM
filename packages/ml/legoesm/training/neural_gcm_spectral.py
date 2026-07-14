@@ -29,6 +29,7 @@ Relationship to other modules
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import NamedTuple
@@ -38,7 +39,7 @@ import jax.numpy as jnp
 import equinox as eqx
 import optax
 
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     SpectralPEConfig,
     spectral_pe_tendencies,
@@ -56,8 +57,7 @@ from legoesm.grids.gaussian import (
     create_gaussian_grid,
     sh_analysis,
     sh_analysis_3d,
-    sh_analysis_oc2_3d,
-    sh_analysis_dmu_3d,
+    vordiv_from_uv_exact_3d,
 )
 from legoesm.grids.vertical import SigmaCoordinate, create_sigma_coordinate
 from legoesm.ml.sfno import SFNO, SFNOConfig
@@ -129,6 +129,14 @@ class NeuralGCMSpectralConfig(NamedTuple):
     # sampling would not fit in host RAM as one list). 0 = load everything
     # at once (legacy).
     chunk_windows: int = 0
+    # Internal perf flag (not a science knob): when True and chunk_windows>0,
+    # chunk k+1 is loaded (GCS read + regrid) on a background host thread while
+    # chunk k trains, overlapping ~0.5 h/chunk of serial load time with GPU
+    # compute (#985 item 2). Doubles the in-RAM chunk footprint (1-ahead buffer).
+    # Off by default so a running chain's behaviour is unchanged until the owner
+    # opts in at a link boundary. Ordering + start_chunk resume are identical to
+    # the serial path (see _prefetch_iter).
+    chunk_prefetch: bool = False
 
     # Data
     n_train_days: int = 365      # Number of daily IC/target pairs
@@ -232,6 +240,84 @@ def maybe_resume_model(model_template, resume_from_dir):
 
 
 # =============================================================================
+# Mid-epoch (per-CHUNK) checkpoint for the dense/chunked all-years trainer.
+#
+# The per-epoch ``epoch_NNNN.eqx`` above is fine when one epoch fits inside
+# one walltime link.  For the DENSE all-years T106 config a single epoch is
+# ~13 h of GCS-streamed chunks while the Derecho main queue caps walltime at
+# 12 h (#942): a kill during chunk 8/8 loses the whole epoch and the
+# self-chaining resubmit restarts epoch 0 forever -> zero progress.
+#
+# ``chunk_latest.eqx`` closes that gap.  After every CHUNK completes we save
+# enough to resume EXACTLY where the kill happened -- and, unlike the
+# per-epoch model-only checkpoint, we save the OPTIMIZER STATE too, so the
+# Adam/MUON moments and the warmup+cosine step counter continue unbroken
+# (an epoch-boundary resume off ``epoch_NNNN.eqx`` re-inits them; a chunk
+# resume off ``chunk_latest.eqx`` does not).  The saved position ``(epoch,
+# next_chunk)`` is the chunk to RESUME AT; the last chunk of epoch e is
+# normalised to ``(e+1, 0)``.  The write is atomic (temp + os.replace via
+# ``save_checkpoint``) so a walltime kill mid-write can't corrupt it.
+#
+# What a chunk resume reproduces exactly: model weights + optimizer state
+# are restored bit-for-bit; the chunk/sample order is a deterministic,
+# unshuffled partition of ``config.windows`` (``_make_chunk_loader``) so
+# skipping the already-done chunks and replaying the rest yields the same
+# training trajectory an uninterrupted run would have taken.  There is no
+# per-step RNG (SFNO/rollout are deterministic, M=1 "CRPS" is MAE) and the
+# curriculum position is a pure function of ``epoch`` (``epoch_plan``), so
+# ``(epoch, next_chunk)`` is the complete resume state.
+# =============================================================================
+
+MIDEPOCH_CHECKPOINT_NAME = "chunk_latest.eqx"
+
+
+def _save_midepoch_checkpoint(ckpt_dir, model, opt_state, epoch, next_chunk):
+    """Atomically save the mid-epoch (per-chunk) resume state.
+
+    Serialises ``(model, opt_state, epoch, next_chunk)`` as one payload
+    via :func:`legoesm.ml.training.save_checkpoint` (temp file + atomic
+    ``os.replace``), so the model weights, the optimizer state and the
+    resume position land together or not at all.
+
+    ``epoch``/``next_chunk`` give the position to RESUME AT (the last
+    chunk of epoch ``e`` is stored as ``(e+1, 0)``).
+    """
+    from legoesm.ml.training import save_checkpoint
+    ckpt_dir = Path(ckpt_dir)
+    payload = (
+        model,
+        opt_state,
+        jnp.asarray(int(epoch), dtype=jnp.int32),
+        jnp.asarray(int(next_chunk), dtype=jnp.int32),
+    )
+    save_checkpoint(payload, ckpt_dir / MIDEPOCH_CHECKPOINT_NAME)
+
+
+def _load_midepoch_checkpoint(ckpt_dir, model_template, opt_state_template):
+    """Load the mid-epoch resume state, or ``None`` if absent.
+
+    Returns ``(model, opt_state, epoch:int, next_chunk:int)``.  The
+    templates must match the structure that ``_save_midepoch_checkpoint``
+    wrote (a freshly built model + ``optimizer.init(...)`` opt_state).
+    """
+    if ckpt_dir is None:
+        return None
+    path = Path(ckpt_dir) / MIDEPOCH_CHECKPOINT_NAME
+    if not path.exists():
+        return None
+    template = (
+        model_template,
+        opt_state_template,
+        jnp.asarray(0, dtype=jnp.int32),
+        jnp.asarray(0, dtype=jnp.int32),
+    )
+    model, opt_state, epoch, next_chunk = eqx.tree_deserialise_leaves(
+        str(path), template,
+    )
+    return model, opt_state, int(epoch), int(next_chunk)
+
+
+# =============================================================================
 # State conversion: SegmentCarry -> SpectralHydrostaticState
 # =============================================================================
 
@@ -290,23 +376,15 @@ def carry_to_spectral_state(
     # Surface geopotential -> spectral
     phis_hat = sh_analysis(grid, phis)
 
-    # (u, v) -> (vor_hat, div_hat) via spectral curl/divergence
-    a = grid.radius
-    im_over_a = 1j * grid.ms.astype(jnp.float64) / a
-    one_over_a = 1.0 / a
-    cos_lat_3d = grid.cos_lat[:, None, None]
-
-    u_cos = u * cos_lat_3d
-    v_cos = v * cos_lat_3d
-
-    vor_hat = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, v_cos)
-        + one_over_a * sh_analysis_dmu_3d(grid, u_cos)
-    )
-    div_hat = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, v_cos)
-    )
+    # (u, v) -> (vor_hat, div_hat) via the EXACT left-inverse of
+    # the spectral wind synthesis (spectral_pe_to_grid / uv_from_vordiv_3d).
+    # The plain Bourke ``oc2``/``dmu`` analysis (vordiv_from_uv_3d) is NOT an
+    # exact left-inverse at the truncation boundary and amplifies pole-row
+    # wind error ~×21/pass at T85, which makes the WB2 eval round trip
+    # (era5 -A-> state -S-> carry -A-> state) explode (#976).
+    # ``vordiv_from_uv_exact_3d`` solves the per-m least-squares system so the
+    # carry<->state round trip is idempotent, pole rows included.
+    vor_hat, div_hat = vordiv_from_uv_exact_3d(grid, u, v)
 
     dims_3d = ("spectral", "level")
     dims_2d = ("spectral",)
@@ -407,8 +485,13 @@ def spectral_state_to_carry(
 N_SFNO_FORCING_CHANNELS = 3
 # Per-plane normalization: T [K] ~300, sic already in [0,1], insolation
 # [W/m^2] ~1400 (matches the column-MLP feature scales in
-# ``atmosphere.physics.neural_physics``).
-_SFNO_FORCING_INPUT_SCALE = jnp.array([300.0, 1.0, 1400.0])
+# ``atmosphere.physics.neural_physics``).  Kept as a plain Python tuple, NOT a
+# module-top ``jnp.array``: an import-time device allocation is forbidden by
+# test_no_module_top_jax_alloc (crashes the import chain on the experimental
+# Metal backend).  It enters the graph lazily via ``jnp.asarray`` at the use
+# site below, cast to ``in_scale``'s dtype so the concatenate result dtype is
+# identical to the former module-top ``jnp.array`` (in both x32 and x64).
+_SFNO_FORCING_INPUT_SCALE = (300.0, 1.0, 1400.0)
 
 
 def _channel_input_scale(nlev: int) -> jnp.ndarray:
@@ -545,7 +628,10 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
         )
         # Normalize inputs to O(1)
         packed_norm = packed_in / jnp.maximum(
-            jnp.concatenate([in_scale, _SFNO_FORCING_INPUT_SCALE]), 1e-10,
+            jnp.concatenate([
+                in_scale,
+                jnp.asarray(_SFNO_FORCING_INPUT_SCALE, dtype=in_scale.dtype),
+            ]), 1e-10,
         )
         # SFNO forward: O(1) in, O(1) out
         output_norm = sfno(packed_norm.astype(jnp.float32), grid_)
@@ -1128,7 +1214,14 @@ def spectral_amip_rollout(
     tracer_filter = _compute_tracer_filter(grid, pe_config, spectral_filter, dt)
 
     # Inject the (traced) prescribed SST as the surface-temperature anchor.
-    phys_state = sizing_phys_state._replace(surface_T_sfc_override=sst_col)
+    # Prescribed SST is NaN over land; map those to the finite no-override
+    # sentinel so the PERSISTED physics state stays finite (#911) — land
+    # columns then fall back to the model surface T in both resolvers.
+    from legoesm.atmosphere.physics.physics_state import NO_SFC_T_OVERRIDE
+    # isfinite (not isnan): map NaN AND +/-Inf to the sentinel so the persisted
+    # state is strictly finite (codex).
+    _sst_override = jnp.where(jnp.isfinite(sst_col), sst_col, NO_SFC_T_OVERRIDE)
+    phys_state = sizing_phys_state._replace(surface_T_sfc_override=_sst_override)
     _doy0 = jnp.asarray(day_of_year_base, dtype=jnp.float64)
     _off = jnp.asarray(seconds_offset, dtype=jnp.float64)
 
@@ -1462,6 +1555,29 @@ def spectral_state_vs_carry_loss(
 # Data loading
 # =============================================================================
 
+def _training_year_range(windows, config) -> tuple[int, int]:
+    """``(min_year, max_year + 1)`` spanned by the windows THIS call loads.
+
+    Prefer the explicit ``windows`` argument (the data ``load_training_data``
+    actually reads this call) over ``config.windows`` — a caller can pass a
+    ``windows`` set that differs from ``config.windows``, and the cache must
+    cover what is read, not what is configured.  Falls back to
+    ``start_year`` + ``n_train_days`` when neither is given.
+
+    The ``+1`` on the max year covers TARGET snapshots that spill into the
+    following year (the rollout lead / ``n_days`` stride).  The cache store is
+    scoped by this range, so each distinct span is its own store and
+    ``ensure_local_cache``'s existence check is never stale across spans.
+    """
+    wins = windows or getattr(config, "windows", None) or ()
+    if wins:
+        years = [int(w[0]) for w in wins]
+        return (min(years), max(years) + 1)
+    start = int(getattr(config, "start_year", 2015) or 2015)
+    n_days = int(getattr(config, "n_train_days", 0) or 0)
+    return (start, start + max(0, (n_days - 1) // 365) + 1)
+
+
 def load_training_data(
     config: NeuralGCMSpectralConfig,
     grid: GaussianGrid,
@@ -1503,12 +1619,34 @@ def load_training_data(
     """
     import numpy as np
     from legoesm.training.era5_to_state import (
-        open_era5_zarr, resolve_var, ERA5Slice,
+        open_era5_zarr, resolve_var, ERA5Slice, ensure_local_cache,
     )
     era5_config = TrainingERA5Config(dt_hours=6)
 
-    # Open store once
+    # Open store once.  Wire the (previously DEAD) ``cache_dir`` to the local
+    # ERA5 zarr cache: without it every epoch re-fetched the SAME windows from
+    # GCS (#895, ~50 h/run wasted).  Scope the one-time download to the FULL
+    # training span (``config.windows``, NOT the per-chunk ``windows`` arg) so
+    # the single shared cache store is not built for one chunk's years and then
+    # read stale for the others.  ensure_local_cache is idempotent (skips if the
+    # store already exists), so only the first call pays the download.
     store = era5_config.zarr_store
+    # OPT-IN (default OFF -> byte-identical to the old GCS-every-epoch path):
+    # set LEGOESM_ERA5_LOCAL_CACHE=1 to materialise each span to a local zarr
+    # once and read it locally thereafter (#895, ~50 h/run).  Gated behind an
+    # env flag rather than on by default because the ensure_local_cache path is
+    # unexercised on this repo and its speedup + output compatibility must be
+    # validated on the target cluster (Derecho/GCS) — not reachable from CI.
+    import os
+    if cache_dir and os.environ.get("LEGOESM_ERA5_LOCAL_CACHE"):
+        # Year-SCOPE the cache store.  ensure_local_cache keys only on path
+        # existence — it does NOT verify an existing store covers the requested
+        # years — so a shared cache_dir reused across runs/phases with different
+        # spans would silently read a stale/narrow subset (codex).  Give each
+        # distinct span its own subdir so the existence check is never stale.
+        _yrs = _training_year_range(windows, config)
+        _scoped = os.path.join(os.fspath(cache_dir), f"y{_yrs[0]}_{_yrs[1]}")
+        store = str(ensure_local_cache(era5_config, _scoped, years=_yrs))
     ds = open_era5_zarr(store)
 
     # Resolve start offset from config.start_year (defaults to 2015).
@@ -1766,6 +1904,7 @@ def _train_spectral_loop(
     sample_forcings: list | None = None,
     chunk_loader=None,
     n_samples_total: int | None = None,
+    resume_from_dir=None,
 ):
     """Shared training loop for any learned-physics model coupled to the
     spectral PE dycore.
@@ -1802,6 +1941,13 @@ def _train_spectral_loop(
         step is reused across chunks (no retrace).
     n_samples_total : int or None
         Per-epoch sample count when ``chunk_loader`` is used.
+    resume_from_dir : str | Path | None
+        Directory scanned for a mid-epoch ``chunk_latest.eqx`` checkpoint
+        (chunked path only).  When found and at least as advanced as
+        ``start_epoch``, the model + optimizer state are restored and the
+        already-trained chunks of the resumed epoch are skipped (#942).
+        The per-chunk checkpoint is also WRITTEN to
+        ``config.checkpoint_dir`` after every chunk on the chunked path.
 
     Returns
     -------
@@ -1917,12 +2063,45 @@ def _train_spectral_loop(
         optimizer = base_optimizer
 
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
-    if start_epoch > 0:
-        # Only model weights are checkpointed: a resumed run re-inits the
-        # optimizer, so the warmup+cosine schedule replays from step 0
-        # while the epoch counter skips ahead (extra warmup at resume,
-        # decay horizon restarts). Known limitation of chained SLURM
-        # resumes — harmless for weights, but LR != the unbroken run.
+
+    # --- mid-epoch (per-chunk) resume (#942) ---------------------------------
+    # On the chunked all-years path, prefer the ``chunk_latest.eqx`` written
+    # after each chunk over the per-epoch ``epoch_NNNN.eqx`` the caller
+    # resumed from: it carries the OPTIMIZER STATE (moments + LR-schedule
+    # step count) and the exact ``(epoch, next_chunk)`` position, so a job
+    # killed mid-epoch continues from the next un-done chunk with the
+    # optimizer trajectory unbroken.  Honoured only when it is at least as
+    # advanced as the epoch-granular resume (``m_epoch >= start_epoch``);
+    # a stale one (older epoch) is ignored.
+    resume_chunk = 0
+    midepoch_restored = False
+    if chunk_loader is not None and resume_from_dir is not None:
+        _mid = _load_midepoch_checkpoint(resume_from_dir, model, opt_state)
+        if _mid is not None:
+            m_model, m_opt_state, m_epoch, m_next_chunk = _mid
+            if m_epoch >= start_epoch:
+                model, opt_state = m_model, m_opt_state
+                start_epoch = m_epoch
+                resume_chunk = m_next_chunk
+                midepoch_restored = True
+                logger.info(
+                    f"Mid-epoch resume: restored model + optimizer state at "
+                    f"epoch {start_epoch}, chunk {resume_chunk} "
+                    f"({MIDEPOCH_CHECKPOINT_NAME}); skipping the "
+                    f"{resume_chunk} already-trained chunk(s) of this epoch."
+                )
+            else:
+                logger.info(
+                    f"Ignoring stale {MIDEPOCH_CHECKPOINT_NAME} "
+                    f"(epoch {m_epoch} < resume epoch {start_epoch})."
+                )
+    if start_epoch > 0 and not midepoch_restored:
+        # No mid-epoch checkpoint to restore from (epoch-boundary resume off
+        # a model-only ``epoch_NNNN.eqx``, or the non-chunked path): the
+        # optimizer is re-init'd, so the warmup+cosine schedule replays from
+        # step 0 while the epoch counter skips ahead.  Known limitation of a
+        # model-only resume — harmless for weights, but LR != the unbroken
+        # run.  The chunked path avoids this via ``chunk_latest.eqx`` above.
         logger.warning(
             f"Resume at epoch {start_epoch}: optimizer state is fresh; "
             f"the LR schedule restarts from step 0 (weights unaffected)."
@@ -2163,12 +2342,26 @@ def _train_spectral_loop(
             _step_cache[spec] = _make_train_step(spec)
         return _step_cache[spec]
 
-    def _iter_epoch_data():
-        """Yield (ic_states, target_carries, sample_forcings) chunks."""
+    def _iter_epoch_data(start_chunk=0):
+        """Yield (ic_states, target_carries, sample_forcings) chunks.
+
+        ``start_chunk`` skips the first N chunks WITHOUT loading them
+        (mid-epoch resume): the already-trained chunks of a resumed
+        epoch are never re-streamed from GCS.
+        """
         if chunk_loader is None:
+            # A single in-memory pass == one chunk; nothing to skip.
             yield ic_states, target_carries, sample_forcings
         else:
-            yield from chunk_loader()
+            yield from chunk_loader(start_chunk=start_chunk)
+
+    # Chunks per epoch is constant across epochs (deterministic window
+    # partition); used to normalise the last chunk of epoch e to the
+    # resume position (e+1, 0) for the mid-epoch checkpoint.
+    n_chunks_per_epoch = (
+        int(getattr(chunk_loader, "n_chunks", 1))
+        if chunk_loader is not None else 1
+    )
 
     best_loss = float("inf")
     patience_counter = 0
@@ -2191,7 +2384,12 @@ def _train_spectral_loop(
         grad_norm_val = 0.0
 
         sample_idx = -1
-        for chunk_ics, chunk_targets, chunk_forcings in _iter_epoch_data():
+        # Mid-epoch resume: skip the chunks already trained in this epoch
+        # (only the first resumed epoch has chunk_skip > 0).
+        chunk_skip = resume_chunk if epoch == start_epoch else 0
+        chunk_pos = chunk_skip - 1
+        for chunk_ics, chunk_targets, chunk_forcings in _iter_epoch_data(chunk_skip):
+            chunk_pos += 1  # absolute chunk index within the epoch
             for chunk_i, (ic, target) in enumerate(
                     zip(chunk_ics, chunk_targets)):
                 sample_idx += 1
@@ -2220,6 +2418,28 @@ def _train_spectral_loop(
                 epoch_loss += loss_val
                 for key in epoch_components:
                     epoch_components[key] += float(components[key])
+
+            # --- mid-epoch (per-chunk) checkpoint (#942) ---------------------
+            # After EACH chunk on the chunked all-years path, atomically save
+            # model + optimizer state + the resume position so a walltime kill
+            # loses at most one chunk instead of the whole epoch.  The last
+            # chunk of epoch e normalises to (e+1, 0).  (No-op on the single
+            # in-memory path, whose epoch == one chunk == the per-epoch save.)
+            if chunk_loader is not None:
+                _next_chunk = chunk_pos + 1
+                if _next_chunk >= n_chunks_per_epoch:
+                    _save_epoch, _save_chunk = epoch + 1, 0
+                else:
+                    _save_epoch, _save_chunk = epoch, _next_chunk
+                _save_midepoch_checkpoint(
+                    config.checkpoint_dir, model, opt_state,
+                    _save_epoch, _save_chunk,
+                )
+                logger.info(
+                    f"Saved mid-epoch checkpoint {MIDEPOCH_CHECKPOINT_NAME} "
+                    f"(epoch {epoch}, chunk {chunk_pos} done -> resume at "
+                    f"epoch {_save_epoch}, chunk {_save_chunk})"
+                )
 
         n_samples = max(sample_idx + 1, 1)
         avg_loss = epoch_loss / n_samples
@@ -2274,6 +2494,104 @@ def _train_spectral_loop(
     return model, loss_history
 
 
+def _prefetch_iter(gen, buffer=1):
+    """Run ``gen`` on a background host thread, at most ``buffer`` items ahead.
+
+    A drop-in wrapper that overlaps the producer (chunk load: GCS read + regrid)
+    with the consumer (training). Yields items in the SAME order the underlying
+    generator produces them — the resume/ordering contract of ``_chunks`` is
+    preserved exactly. A producer exception is re-raised on the consumer side
+    (after the items already buffered), so a failed chunk load is not swallowed.
+
+    RAM bound: the producer must ACQUIRE a permit before it calls ``next(gen)``,
+    so it never loads more than ``buffer`` chunks ahead of the one the consumer
+    holds — peak footprint is ``buffer + 1`` chunks (2 for the default), NOT the
+    3 a plain ``Queue(maxsize=buffer)`` would reach (it eagerly loads one more
+    before blocking on the full queue). The consumer releases a permit each time
+    it takes an item.
+
+    Cleanup: if the consumer stops early (``break`` / an exception in the
+    training loop), the ``finally`` sets a stop flag, releases a permit, and
+    drains one slot so a producer parked in ``acquire``/``put`` wakes and exits
+    instead of leaking a blocked thread holding chunk memory.
+
+    ponytail: stdlib threading + a bounded Queue + a load-gating semaphore; no
+    executor pool, no asyncio. Ceiling: the cleanup runs from the generator's
+    ``finally``, which fires when the iterator is closed/GC'd. The training loop
+    consumes to exhaustion or the process exits, so this always fires there; a
+    caller that ``break``s and then indefinitely RETAINS the live iterator would
+    leave the producer parked — bounded harmless because the thread is a daemon
+    (it never blocks process exit). Upgrade to an explicit context manager if a
+    caller ever needs deterministic mid-iteration teardown.
+    """
+    import queue
+    import threading
+
+    buffer = max(1, int(buffer))                # buffer=0 would deadlock acquire
+    q: "queue.Queue" = queue.Queue(maxsize=buffer)
+    load_permit = threading.Semaphore(buffer)   # permits to LOAD the next item
+    stop = threading.Event()
+    _DONE = object()
+    it = iter(gen)
+
+    def _safe_put(msg):
+        # Block for backpressure while the consumer is live, but NEVER block
+        # forever: once the consumer has left (stop set) a full queue means
+        # nobody will drain it, so drop the message rather than hang the thread.
+        while not stop.is_set():
+            try:
+                q.put(msg, timeout=0.2)
+                return
+            except queue.Full:
+                continue
+        try:
+            q.put_nowait(msg)
+        except queue.Full:
+            pass
+
+    def _produce():
+        try:
+            while True:
+                load_permit.acquire()           # wait for room BEFORE loading
+                if stop.is_set():
+                    return
+                try:
+                    item = next(it)             # the chunk load happens here
+                except StopIteration:
+                    break
+                except BaseException as exc:     # propagate load failure
+                    _safe_put((None, exc))
+                    return
+                _safe_put((item, None))
+        finally:
+            _safe_put((_DONE, None))
+
+    t = threading.Thread(target=_produce, name="chunk-prefetch", daemon=True)
+    t.start()
+    try:
+        while True:
+            item, exc = q.get()
+            if exc is not None:
+                raise exc
+            if item is _DONE:
+                return
+            # Release BEFORE yielding (not after): the consumer has taken this
+            # item, so the producer may load the next one WHILE the consumer
+            # trains on this one — that overlap is the whole point. Releasing
+            # after the yield would keep the producer blocked during training.
+            load_permit.release()
+            yield item
+    finally:
+        # Unblock a producer parked in acquire (permit) or put (drain a slot) so
+        # it can observe stop and exit rather than leak.
+        stop.set()
+        load_permit.release()
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            pass
+
+
 def _make_chunk_loader(config, grid, sigma, cache_dir,
                        surface_forcing_path, forcing_cache_path):
     """Streaming/chunked data source for DENSE all-years training.
@@ -2304,16 +2622,37 @@ def _make_chunk_loader(config, grid, sigma, cache_dir,
         f"({n_total} samples/epoch)"
     )
 
-    def _chunks():
-        for group in groups:
-            ics, tgts, times = load_training_data(
-                config, grid, sigma, cache_dir, windows=group,
-            )
-            forcings = _maybe_build_sample_forcings(
-                surface_forcing_path, times, grid, forcing_cache_path,
-            )
-            yield ics, tgts, forcings
+    prefetch = bool(getattr(config, "chunk_prefetch", False))
 
+    def _load_group(group):
+        ics, tgts, times = load_training_data(
+            config, grid, sigma, cache_dir, windows=group,
+        )
+        forcings = _maybe_build_sample_forcings(
+            surface_forcing_path, times, grid, forcing_cache_path,
+        )
+        return ics, tgts, forcings
+
+    def _chunks(start_chunk=0):
+        # ``start_chunk`` skips (does NOT load) the first N groups so a
+        # mid-epoch resume never re-streams the already-trained chunks.
+        # The partition ``groups`` is a fixed, unshuffled slice of
+        # ``config.windows`` and ``load_training_data`` reads snapshots in
+        # deterministic time order, so chunk k is byte-identical across
+        # runs -> a resume replays the exact same trajectory.
+        def _serial():
+            for gi, group in enumerate(groups):
+                if gi < start_chunk:
+                    continue
+                yield _load_group(group)
+
+        # Prefetch preserves order + the start_chunk skip exactly (it only wraps
+        # the same _serial generator), so the resume contract is unchanged.
+        yield from (_prefetch_iter(_serial()) if prefetch else _serial())
+
+    # Number of chunks per epoch (constant): the mid-epoch checkpoint reads
+    # this to normalise the last chunk of an epoch to the next epoch's start.
+    _chunks.n_chunks = len(groups)
     return _chunks, n_total
 
 
@@ -2403,6 +2742,7 @@ def train_neural_gcm_spectral(
             grid, sigma, None, None, config,
             start_epoch=start_epoch,
             chunk_loader=chunk_loader, n_samples_total=n_total,
+            resume_from_dir=resume_from_dir,
         )
 
     ic_states, target_carries, ic_times = load_training_data(
@@ -2448,7 +2788,7 @@ def train_sfno_full_spectral(
 
     Returns (trained_sfno, loss_history).
     """
-    from legoesm.atmosphere.dynamics.sfno_pe import (
+    from legoesm.atmosphere.dynamics.neural.sfno_pe import (
         SFNOPrimitiveEquationConfig,
     )
 
@@ -2517,7 +2857,7 @@ def _train_sfno_full_loop(
     segment schedule is reused verbatim from ``config.loss_config``,
     but segment lengths are converted into SFNO macro steps.
     """
-    from legoesm.atmosphere.dynamics.sfno_pe import (
+    from legoesm.atmosphere.dynamics.neural.sfno_pe import (
         SFNOPrimitiveEquationModel,
     )
     from legoesm.ml.training import TrainingConfig, create_optimizer
@@ -2779,6 +3119,7 @@ def train_column_mlp_spectral(
             grid, sigma, None, None, config,
             start_epoch=start_epoch,
             chunk_loader=chunk_loader, n_samples_total=n_total,
+            resume_from_dir=resume_from_dir,
         )
 
     ic_states, target_carries, ic_times = load_training_data(

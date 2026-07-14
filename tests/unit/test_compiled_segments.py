@@ -1976,3 +1976,67 @@ class TestNestedCheckpointedScan:
         got = _sqrt_checkpointed_scan(self._step, x0, n_steps)
         np.testing.assert_allclose(np.asarray(got), np.asarray(ref), rtol=1e-6,
                                    err_msg="remainder steps dropped/miscounted")
+
+
+class TestTiledStepFnRouting:
+    """P4 increment 1b: ``tiled_step_fn`` replaces ONLY the dynamics core
+    of the scan body — same cc HydrostaticState contract; everything else
+    (physics mock, fixers, carry plumbing) untouched."""
+
+    def _run(self, tiled_step_fn, explicit_none=False, q_v_fill=0.01):
+        args = _make_segment_fn_args()
+        if tiled_step_fn is not None or explicit_none:
+            args["tiled_step_fn"] = tiled_step_fn
+        run_segment = build_segment_fn(**args)
+        state = _make_hydrostatic_state()
+        shape_3d = (N_FACES, N, N, NLEV)
+        shape_2d = (N_FACES, N, N)
+        carry = pack_carry(
+            state,
+            q_v=jnp.ones(shape_3d) * q_v_fill,
+            q_c=jnp.zeros(shape_3d),
+            q_r=jnp.zeros(shape_3d),
+            held_dT_rad=jnp.zeros(shape_3d),
+            held_sw_net_sfc=jnp.zeros(shape_2d),
+            held_lw_net_sfc=jnp.zeros(shape_2d),
+            held_sw_up_toa=jnp.zeros(shape_2d),
+            held_lw_up_toa=jnp.zeros(shape_2d),
+            held_sw_down_toa=jnp.zeros(shape_2d),
+            step_index=0,
+        )
+        out = run_segment(carry, 2, _FORCING)
+        jax.block_until_ready(out.T)
+        return out
+
+    def test_tiled_step_fn_routes_dynamics(self):
+        """A marker tiled step (T += 7 K/step) must drive the trajectory
+        instead of the mock model's +dt/86400 K/step increment."""
+        def _marker_step(state):
+            return state._replace(
+                T=state.T.replace(data=state.T.data + 7.0))
+
+        # DRY column (q_v=0): microphysics="none" activates the segment's
+        # T-DEPENDENT saturation adjustment (do_sat_adjust), which at
+        # q_v=0.01 releases ~9 K more latent heat on the cooler base
+        # trajectory than on the +7 K/step marker one at the lowest level
+        # (measured: level sigma=1.0 delta 4.73 vs 13.99) — zero vapor
+        # makes it inert so the dynamics delta is exactly pinnable.
+        out = self._run(_marker_step, q_v_fill=0.0)
+        base = self._run(None, q_v_fill=0.0)
+        # ONLY the dynamics core differs: tiled = 2*7 K, mock dynamics =
+        # 2*DT/86400 K, physics identical in both branches.  Pinning the
+        # elementwise difference to that exact value catches (a) the mock
+        # dynamics still running in the tiled branch and (b) the physics
+        # increment (2 * 1e-5 K/s * DT) being dropped from either branch —
+        # a >threshold check alone would not (codex round-14 Low).
+        expected = 14.0 - 2.0 * DT / 86400.0
+        np.testing.assert_allclose(
+            np.asarray(out.T - base.T), expected, atol=1e-3)
+
+    def test_default_none_is_untouched(self):
+        """Passing tiled_step_fn=None EXPLICITLY is byte-identical to
+        omitting the kwarg (the legacy body)."""
+        a = self._run(None)
+        b = self._run(None, explicit_none=True)
+        assert float(jnp.max(jnp.abs(a.T - b.T))) == 0.0
+        assert float(jnp.max(jnp.abs(a.p_s - b.p_s))) == 0.0

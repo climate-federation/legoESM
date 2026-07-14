@@ -1,7 +1,7 @@
 """External surface forcing API for the ocean single-column model (SCM).
 
 Closure-style time-dependent surface forcing that mirrors the atmosphere
-SCM's :class:`legoesm.atmosphere.scm_forcing.SCMForcing`: each physical
+SCM's :class:`legoesm.atmosphere.forcing.scm.scm_forcing.SCMForcing`: each physical
 channel is a callable ``f(t_seconds) -> scalar`` (``None`` disables it),
 and the whole object is registered as a **flat-static** pytree so JAX
 never treats the Python callables as array leaves.

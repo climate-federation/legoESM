@@ -19,8 +19,8 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm import constants  # noqa: E402
-from legoesm.atmosphere.sam_case_forcing import read_sam_snd  # noqa: E402
-from legoesm.atmosphere.dynamics.sam_case_setup import (  # noqa: E402
+from legoesm.atmosphere.forcing.sam_case_forcing import read_sam_snd  # noqa: E402
+from legoesm.atmosphere.dynamics.crm.sam_case_setup import (  # noqa: E402
     band_limited_seed_pattern,
     build_gate_ideal_setup,
     build_lba_setup,
@@ -202,7 +202,7 @@ def test_snd_top_theta_ref_ic_consistent_above_snd_top(case_dir, builder_kw):
     so θ' = θ_ic − θ_ref ≈ 0 ABOVE the original sounding top (where there is no BL
     seed) — proving the extension is consistent, not just present. H is set ABOVE
     each case's snd top (GATE ~17 km, LBA ~30 km) to force extrapolation."""
-    from legoesm.atmosphere.sam_case_forcing import read_sam_snd
+    from legoesm.atmosphere.forcing.sam_case_forcing import read_sam_snd
     z_snd_top = float(np.asarray(read_sam_snd(os.path.join(case_dir, "snd")).z).max())
     H = z_snd_top + 6000.0          # model top 6 km ABOVE the snd top
     grid = create_plane_grid(nx=4, ny=4, nlev=64, dx=1000.0, dy=1000.0,
@@ -247,7 +247,7 @@ def test_snd_top_reference_T_follows_std_atm_ratio():
     the GATE reference state and assert the constructed T_ref(z)/T_top matches
     T_std(z)/T_std(z_top) above the original sounding top (the SAM extrapolation
     oracle), not a flat-isothermal or clamped profile."""
-    from legoesm.atmosphere.sam_case_forcing import (
+    from legoesm.atmosphere.forcing.sam_case_forcing import (
         read_sam_snd, us_standard_atmosphere_temperature)
     grid = create_plane_grid(nx=4, ny=4, nlev=64, dx=1000.0, dy=1000.0,
                              coriolis_mode="none", dtype=jnp.float64)
@@ -349,7 +349,7 @@ def test_prescribed_surface_momentum_drag(tmp_path):
 
 def test_apply_prescribed_radiative_cooling(tmp_path):
     """Prescribed dT/dt|_rad cools θ' at ALL levels (negative ⇒ θ' decreases)."""
-    from legoesm.atmosphere.dynamics.sam_case_setup import (
+    from legoesm.atmosphere.dynamics.crm.sam_case_setup import (
         apply_prescribed_radiative_cooling_plane)
     snd = read_sam_snd(_case(tmp_path) / "snd")
     hc = build_sam_case_height_coord(snd, _NLEV, _H, 100000.0)

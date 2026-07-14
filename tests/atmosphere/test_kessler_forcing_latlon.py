@@ -23,7 +23,7 @@ from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState, HydrostaticTendencies
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.thermo import saturation_mixing_ratio
-from legoesm.atmosphere.kessler_forcing import make_kessler_forcing_latlon
+from legoesm.atmosphere.forcing.idealized.kessler_forcing import make_kessler_forcing_latlon
 
 
 def _make_state(n_lat=2, n_lon=2, nlev=12):
@@ -173,7 +173,7 @@ def test_cube_wrapper_shapes_dims_and_conservation():
     """make_kessler_forcing_cube (thin wrapper over the shared grid-space
     adapter) must handle the 4-D cube layout: cube dim labels, correct shapes,
     no momentum source, and total-water conservation at zero hydrometeors."""
-    from legoesm.atmosphere.kessler_forcing import make_kessler_forcing_cube
+    from legoesm.atmosphere.forcing.idealized.kessler_forcing import make_kessler_forcing_cube
 
     state, sigma = _make_cube_state()
     out = make_kessler_forcing_cube(dt=300.0)(state, None, sigma)

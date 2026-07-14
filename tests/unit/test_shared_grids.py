@@ -42,7 +42,7 @@ def _assert_same_gaussian_grid(model_grid, base) -> None:
 
 
 def test_cubed_sphere_grid_shared_by_atmosphere_and_ocean() -> None:
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig,
         CDGridShallowWaterModel,
     )
@@ -62,7 +62,7 @@ def test_cubed_sphere_grid_shared_by_atmosphere_and_ocean() -> None:
 
 
 def test_latlon_grid_shared_by_atmosphere_and_ocean() -> None:
-    from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
         CGridLatLonShallowWaterModel,
     )
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -87,7 +87,7 @@ def test_latlon_grid_shared_by_atmosphere_and_ocean() -> None:
 
 
 def test_mpas_mesh_shared_by_atmosphere_and_ocean() -> None:
-    from legoesm.atmosphere.dynamics.shallow_water_mpas import MPASShallowWaterModel
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import MPASShallowWaterModel
     from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
     from legoesm.ocean.vertical import create_ocean_z_star
 
@@ -102,7 +102,7 @@ def test_mpas_mesh_shared_by_atmosphere_and_ocean() -> None:
 
 @_needs_x64
 def test_gaussian_grid_shared_by_spectral_atmosphere_and_ocean() -> None:
-    from legoesm.atmosphere.dynamics.spectral_sw import SpectralShallowWaterModel
+    from legoesm.atmosphere.dynamics.gcm.spectral_sw import SpectralShallowWaterModel
     from legoesm.ocean.dynamics.spectral_ocean_pe import SpectralOceanModel
     from legoesm.ocean.vertical import create_ocean_z_star
 
@@ -122,7 +122,7 @@ def test_gaussian_grid_shared_by_spectral_atmosphere_and_ocean() -> None:
 
 @_needs_x64
 def test_gaussian_grid_shared_by_sfno_atmosphere_and_ocean() -> None:
-    from legoesm.atmosphere.dynamics.sfno_pe import SFNOPrimitiveEquationModel
+    from legoesm.atmosphere.dynamics.neural.sfno_pe import SFNOPrimitiveEquationModel
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.ocean.dynamics.sfno_ocean import SFNOOceanModel
     from legoesm.ocean.vertical import create_ocean_z_star

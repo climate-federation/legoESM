@@ -6,7 +6,7 @@ from typing import Any, NamedTuple
 
 from legoesm import constants
 from legoesm.land.carbon.config import CarbonConfig
-from legoesm.land.carbon.stomata import StomataConfig
+from legoesm.land.stomata import StomataConfig
 from legoesm.land.snow_bands import ElevationSnowBandConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
@@ -25,17 +25,17 @@ __param_spec__ = {
             "z_ref": "convention: reference height [m]",
         },
         "params": {
-            "C_soil": {"units": "1", "bounds": (660000.0, 6000000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "legoESM land surface", "shape": None},
+            "C_soil": {"units": "J m-3 K-1", "bounds": (660000.0, 6000000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "legoESM land surface", "shape": None},
             "Cd_land": {"units": "1", "bounds": (0.00099, 0.009), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "legoESM land surface", "shape": None},
             "Ch_land": {"units": "1", "bounds": (0.00099, 0.009), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "legoESM land surface", "shape": None},
-            "W_max": {"units": "1", "bounds": (49.5, 450.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "legoESM land surface", "shape": None},
+            "W_max": {"units": "kg m-2", "bounds": (49.5, 450.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "legoESM land surface", "shape": None},
             "K_infiltration": {"units": "m/s", "bounds": (1e-7, 1e-4), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "Rawls Brakensiek Miller 1983 (Green-Ampt K_s)", "shape": None},
             "infil_suction_boost": {"units": "1", "bounds": (0.0, 10.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "Mein & Larson 1973 (Green-Ampt psi_f/L_f)", "shape": None},
             "albedo_land": {"units": "1", "bounds": (0.066, 0.6), "tunable_tier": 1, "transform": "sigmoid", "category": "radiation", "reference": "legoESM land surface", "shape": None},
-            "d_soil": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "legoESM land surface", "shape": None},
+            "d_soil": {"units": "m", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "legoESM land surface", "shape": None},
             "emissivity_land": {"units": "1", "bounds": (0.3168, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "radiation", "reference": "legoESM land surface", "shape": None},
-            "snow_melt_rate": {"units": "1", "bounds": (1.65e-06, 1.5e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "legoESM land surface", "shape": None},
-            "z0_land": {"units": "1", "bounds": (0.0165, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "legoESM land surface", "shape": None},
+            "snow_melt_rate": {"units": "kg m-2 s-1 K-1", "bounds": (1.65e-06, 1.5e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "legoESM land surface", "shape": None},
+            "z0_land": {"units": "m", "bounds": (0.0165, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "legoESM land surface", "shape": None},
         },
     },
     "MultiLayerLandConfig": {
@@ -49,13 +49,13 @@ __param_spec__ = {
             "Ch_land": {"units": "1", "bounds": (0.00099, 0.009), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "legoESM land surface", "shape": None},
             "albedo_land": {"units": "1", "bounds": (0.066, 0.6), "tunable_tier": 1, "transform": "sigmoid", "category": "radiation", "reference": "legoESM land surface", "shape": None},
             "emissivity_land": {"units": "1", "bounds": (0.3168, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "radiation", "reference": "legoESM land surface", "shape": None},
-            "root_depth": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "legoESM land surface", "shape": None},
-            "snow_melt_rate": {"units": "1", "bounds": (1.65e-06, 1.5e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "legoESM land surface", "shape": None},
+            "root_depth": {"units": "m", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "legoESM land surface", "shape": None},
+            "snow_melt_rate": {"units": "kg m-2 s-1 K-1", "bounds": (1.65e-06, 1.5e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "legoESM land surface", "shape": None},
             "soil_evap_resistance_exp": {"units": "1", "bounds": (0.0, 6.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "Sellers 1992 / Lee & Pielke 1992 (bare-soil evap resistance)", "shape": None},
             "soil_evap_litter_resistance_s_m": {"units": "s m-1", "bounds": (0.0, 400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "Sakaguchi & Zeng 2009 (forest-floor litter resistance)", "shape": None},
             "theta_fc": {"units": "1", "bounds": (0.099, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "legoESM land surface", "shape": None},
             "theta_wp": {"units": "1", "bounds": (0.0495, 0.45), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "legoESM land surface", "shape": None},
-            "z0_land": {"units": "1", "bounds": (0.0165, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "legoESM land surface", "shape": None},
+            "z0_land": {"units": "m", "bounds": (0.0165, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "legoESM land surface", "shape": None},
         },
     },
 }

@@ -50,9 +50,9 @@ from legoesm.parallel.latlon_spmd import (
 from legoesm.parallel.shard_map_compat import shard_map
 from legoesm.forcing.time_utils import day_to_calendar
 from legoesm.core.conservation import fix_ps_mass_target
-from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
     build_band_grids_atm, atm_grid_array_field_names, lat_spec)
-from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonHydrostaticState, cgrid_to_hydrostatic)
 from legoesm.driver.compiled_segments import (
     SegmentCarry, SegmentForcing, GRID_SHAPED_FORCING_FIELDS,
@@ -348,3 +348,8 @@ def make_sharded_operator_split_step(
             set_halo_backend(_prev_backend, _prev_topo)
 
     return sharded_split_step
+
+
+# Public alias for the tiled operator-split lane (tiled_operator_split_step)
+# — the no-private-cross-imports ratchet's sanctioned surface.  Same object.
+need_rad_and_time = _need_rad_and_time

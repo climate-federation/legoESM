@@ -181,7 +181,7 @@ def main(argv=None) -> int:
     print(
         "  JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \\\n"
         "  .venv/bin/python scripts/run/run_amip_cmip6_deck.py \\\n"
-        "    --forcing-dir forcing_amip --auto-generate \\\n"
+        "    --forcing-dir data/forcing_amip --auto-generate \\\n"
         "    --start-year 1979 --end-year 2009 \\\n"
         "    --grid-type cubed_sphere --discretization finite_volume \\\n"
         "    --resolution 36 --days 10950 --dt-auto \\\n"

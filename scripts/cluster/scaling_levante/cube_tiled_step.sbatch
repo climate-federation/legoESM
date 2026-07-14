@@ -45,16 +45,33 @@ if [ "${KT}" != "2" ]; then
     exit 1
 fi
 
-echo "== Stage A: CPU-virtual parity gate =="
+echo "== Stage A: CPU-virtual parity gates =="
 JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=24 \
 srun -N1 -n1 "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
     --kt "${KT}" --resolution 48 --nlev 10 --steps 4 --warmup 1 \
     --parity-gate --out "${OUT%.jsonl}_parity.jsonl"
+JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=24 \
+srun -N1 -n1 "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
+    --kt "${KT}" --resolution 48 --nlev 10 --steps 4 --warmup 1 \
+    --closed-loop --parity-gate --out "${OUT%.jsonl}_loop_parity.jsonl"
 
-echo "== Stage B: 24-GPU multicontroller timed run =="
+echo "== Stage B: 24-GPU multicontroller timed runs =="
 export JAX_PLATFORMS=cuda
-srun "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
+# #921 (same defect as the Derecho twin): the closed-loop lane adds the
+# dry-mass fixer's GLOBAL all-reduce (_tile_fix_ps_mass_delta psum over
+# ("face","tile_i","tile_j")) on top of the halo ppermute cliques. Under XLA
+# GPU defaults those clique kinds init concurrently and can be ordered
+# differently per rank -> NCCL comm-init deadlock. Force serial comm init (see
+# cube_tiled_step.pbs for the full rationale + bisection).
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_nccl_comm_splitting=false --xla_gpu_enable_latency_hiding_scheduler=false"
+timeout 1800 srun "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
     --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
     --steps 12 --warmup 2 --multicontroller --out "${OUT}"
+echo "== single-shot done"
+# Closed-loop production lane (state resident tile-sharded across steps).
+echo "== closed-loop start"
+timeout 1800 srun "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
+    --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
+    --steps 12 --warmup 2 --multicontroller --closed-loop --out "${OUT}"
 
 echo "done: ${OUT}"

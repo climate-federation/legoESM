@@ -133,6 +133,68 @@ def _apply_structured_regrid_3d(
     )
 
 
+# --- Run-time blow-up bounds (physical Earth-atmosphere range).  A state
+#     outside these is a blow-up, not a bias.  ONE source of truth shared by the
+#     compiled ``check_stability`` and the raw MPAS/spectral daily checks — the
+#     #871 MPAS autopsy found an 8e8 K state that ran 1138 steps under a
+#     finiteness-only guard because those daily checks lacked bounds. ---
+_T_BLOWUP_MIN_K = 100.0
+_T_BLOWUP_MAX_K = 400.0
+_PS_BLOWUP_MIN_PA = 40000.0
+_PS_BLOWUP_MAX_PA = 115000.0
+# Tolerance for "global T_min sits AT the dycore floor": the clip is an exact
+# jnp.maximum, so a pinned column reports T_min == floor up to fp rounding.
+_T_FLOOR_TOL_K = 1e-3
+
+
+def physical_state_blowup_reason(elapsed_day, T_min, T_max,
+                                 ps_min=None, ps_max=None):
+    """BLOWUP reason string if T (and optional p_s) are outside the physical
+    Earth-atmosphere range, else ``None``.  Pure/scalar so every run-time
+    detector shares the SAME bounds — a runaway T aborts at the first daily
+    check instead of running hundreds of steps under a finiteness-only guard."""
+    if T_min < _T_BLOWUP_MIN_K or T_max > _T_BLOWUP_MAX_K:
+        return (
+            f"BLOWUP at day {elapsed_day:.0f}: temperature out of physical "
+            f"bounds (min={T_min:.1f}K, max={T_max:.1f}K). "
+            "Check dt, hyperdiffusion, and physics configuration."
+        )
+    if ps_min is not None and ps_max is not None:
+        if ps_min < _PS_BLOWUP_MIN_PA or ps_max > _PS_BLOWUP_MAX_PA:
+            return (
+                f"BLOWUP at day {elapsed_day:.0f}: surface pressure out of "
+                f"bounds (min={ps_min:.0f}Pa, max={ps_max:.0f}Pa). "
+                "Check dt and dynamics configuration."
+            )
+    return None
+
+
+def t_min_floor_blowup_reason(elapsed_day, T_min, T_floor):
+    """BLOWUP reason string when the global minimum temperature is pinned at
+    the ``T_min`` dycore floor, else ``None``.
+
+    The eager MPAS path silently clips T to ``config.T_min`` each step
+    (``primitive_eq_mpas`` step "Floors").  A column pinned at the floor is an
+    unbudgeted energy source that MASKS a runaway (#930): the clip holds the
+    reported minimum steady even as the instability grows, so a diverging run
+    can look "successful".  This LOUD guard labels that specific failure.
+
+    Pure/scalar and gated on ``T_floor > 0`` (floor disabled ⇒ never fires, to
+    match the ``config.T_min > 0`` gate on the clip itself), so it *composes
+    with* — and is deliberately MORE specific than —
+    :func:`physical_state_blowup_reason`: when a floor of, say, 150 K sits
+    above the 100 K generic lower bound, this catches a masked runaway the
+    generic bounds check would miss entirely.
+    """
+    if T_floor > 0.0 and T_min <= T_floor + _T_FLOOR_TOL_K:
+        return (
+            f"BLOWUP at day {elapsed_day:.0f}: T_min floor activated "
+            f"(min T={T_min:.2f}K pinned at the {T_floor:.0f}K dycore floor "
+            "— masked runaway; see #930)."
+        )
+    return None
+
+
 class DiagnosticCollector:
     """Accumulates diagnostics during a simulation.
 
@@ -1651,13 +1713,20 @@ class DiagnosticCollector:
         # integration loop) costs one GPU stall per call instead of
         # 6-7.  The boolean ``isfinite`` checks on u and T are folded
         # into the same stack as 0/1 floats.
+        # Wind finiteness covers BOTH components: a NaN in v makes
+        # wind_term = max(sqrt(u^2+v^2)) NaN, and NaN > 500 is False, so a
+        # v-only blow-up would otherwise pass the max-wind check silently.
         if hasattr(state, 'v'):
             wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
+            wind_finite = jnp.logical_and(
+                jnp.all(jnp.isfinite(state.u.data)),
+                jnp.all(jnp.isfinite(state.v.data)))
         else:
             wind_term = jnp.max(jnp.abs(state.u.data))
+            wind_finite = jnp.all(jnp.isfinite(state.u.data))
         has_p_s = hasattr(state, 'p_s')
         terms = [
-            jnp.all(jnp.isfinite(state.u.data)).astype(state.T.data.dtype),
+            wind_finite.astype(state.T.data.dtype),
             jnp.all(jnp.isfinite(state.T.data)).astype(state.T.data.dtype),
             wind_term.astype(state.T.data.dtype),
             jnp.min(state.T.data).astype(state.T.data.dtype),
@@ -1666,40 +1735,33 @@ class DiagnosticCollector:
         if has_p_s:
             terms.append(jnp.min(state.p_s.data).astype(state.T.data.dtype))
             terms.append(jnp.max(state.p_s.data).astype(state.T.data.dtype))
+            # Finiteness of p_s explicitly: a NaN p_s makes BOTH bound
+            # comparisons below False and would otherwise pass the probe (the
+            # min/max are NaN, and NaN < lo / NaN > hi are both False), letting
+            # a garbage state be checkpointed at a wallclock-graceful exit.
+            terms.append(
+                jnp.all(jnp.isfinite(state.p_s.data)).astype(state.T.data.dtype))
         host = np.asarray(jnp.stack(terms))
-        u_finite = bool(host[0] > 0.5)
+        wind_finite = bool(host[0] > 0.5)
         T_finite = bool(host[1] > 0.5)
         max_v = float(host[2])
         T_min_val = float(host[3])
         T_max_val = float(host[4])
 
-        if not u_finite:
+        if not wind_finite:
             return f"BLOWUP at day {elapsed_day:.0f}: non-finite winds"
         if max_v > 500:
             return f"BLOWUP at day {elapsed_day:.0f}: max wind {max_v:.1f} m/s"
         if not T_finite:
             return f"BLOWUP at day {elapsed_day:.0f}: non-finite T"
+        if has_p_s and not bool(host[7] > 0.5):
+            return f"BLOWUP at day {elapsed_day:.0f}: non-finite surface pressure"
 
-        # Temperature bounds (physical range for Earth atmosphere)
-        if T_min_val < 100.0 or T_max_val > 400.0:
-            return (
-                f"BLOWUP at day {elapsed_day:.0f}: temperature out of physical bounds "
-                f"(min={T_min_val:.1f}K, max={T_max_val:.1f}K). "
-                f"Check dt, hyperdiffusion, and physics configuration."
-            )
-
-        # Surface pressure bounds
-        if has_p_s:
-            ps_min = float(host[5])
-            ps_max = float(host[6])
-            if ps_min < 40000.0 or ps_max > 115000.0:
-                return (
-                    f"BLOWUP at day {elapsed_day:.0f}: surface pressure out of bounds "
-                    f"(min={ps_min:.0f}Pa, max={ps_max:.0f}Pa). "
-                    f"Check dt and dynamics configuration."
-                )
-
-        return None
+        # Physical-plausibility bounds (shared helper — one source of truth).
+        ps_min = float(host[5]) if has_p_s else None
+        ps_max = float(host[6]) if has_p_s else None
+        return physical_state_blowup_reason(
+            elapsed_day, T_min_val, T_max_val, ps_min=ps_min, ps_max=ps_max)
 
 
 class EnsembleDiagnosticCollector:

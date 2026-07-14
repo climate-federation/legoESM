@@ -44,7 +44,7 @@ def _load_yaml(path: Path) -> dict:
 
 
 def _build_spectral_config(base_cfg: dict):
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
     from legoesm.training.losses import LossConfig
     from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
 
@@ -132,7 +132,7 @@ def main():
 
     spec_cfg = _build_spectral_config(base)
 
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         compute_spectral_filter,
         compute_sponge_factor,
         spectral_pe_to_grid,

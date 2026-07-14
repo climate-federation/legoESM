@@ -8,7 +8,7 @@ Unlike the SOM-SOC forward
 (:func:`legoesm.land.carbon.global_init.equilibrate_archetypes_traced`), SIF is a
 **single-step** photosynthesis diagnostic -- there is NO multi-year spin-up scan.
 It reuses the model's OWN coupled-Farquhar solve
-(:func:`legoesm.land.carbon.stomata.solve_coupled_farquhar_ci`) to obtain the electron-
+(:func:`legoesm.land.stomata.solve_coupled_farquhar_ci`) to obtain the electron-
 transport inputs (net assimilation ``An``, intercellular CO2 ``Ci``, CO2 compensation
 point ``Gamma*``, absorbed PAR) and the BEPS-SIF / van der Tol (2014) leaf fluorescence
 kernel (:func:`legoesm.land.canopy.sif.leaf_sif`) -- exactly the SIF path in
@@ -68,7 +68,7 @@ def _archetype_leaf_state(table):
         REF_LAI,
         build_archetype_forcing,
     )
-    from legoesm.land.carbon.stomata import StomataConfig, solve_coupled_farquhar_ci
+    from legoesm.land.stomata import StomataConfig, solve_coupled_farquhar_ci
 
     forcing = build_archetype_forcing(table)
     stomata = StomataConfig(

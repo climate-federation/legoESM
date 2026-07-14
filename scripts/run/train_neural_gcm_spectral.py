@@ -99,7 +99,7 @@ def main():
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
     from legoesm.training.neural_gcm_spectral import (
         NeuralGCMSpectralConfig,
         train_neural_gcm_spectral,

@@ -54,7 +54,7 @@ from legoesm.land.surface_params import (
     is_woody,
 )
 from legoesm.land.carbon.config import CarbonConfig
-from legoesm.land.carbon.stomata import StomataConfig
+from legoesm.land.stomata import StomataConfig
 from legoesm.land.carbon.carbon_cycle import init_carbon_state
 from legoesm.land.carbon.realism_ranges import LITERATURE_BIOME_RANGES
 from legoesm.land.carbon.spinup import run_semi_analytic_spinup

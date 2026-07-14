@@ -31,7 +31,7 @@ from legoesm.atmosphere.physics import (
     RadiationConfig,
     TurbulenceConfig,
 )
-from legoesm.atmosphere.scm import SingleColumnModel, TIME_INTEGRATORS
+from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel, TIME_INTEGRATORS
 
 
 NLEV = 16
@@ -177,7 +177,7 @@ def test_ab2_first_step_evaluates_tend_fn_exactly_once():
         call_count["n"] += 1
         return jnp.asarray(285.0)
 
-    from legoesm.atmosphere.scm_forcing import SCMForcing
+    from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
     forcing = SCMForcing(prescribe="T_s", T_s=counting_T_s)
     scm = SingleColumnModel.create(
         physics_config=_no_physics_cfg(), nlev=NLEV, dt=60.0,
@@ -207,7 +207,7 @@ def test_ab2_subsequent_step_evaluates_tend_fn_exactly_once():
         call_count["n"] += 1
         return jnp.asarray(285.0)
 
-    from legoesm.atmosphere.scm_forcing import SCMForcing
+    from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
     forcing = SCMForcing(prescribe="T_s", T_s=counting_T_s)
     scm = SingleColumnModel.create(
         physics_config=_no_physics_cfg(), nlev=NLEV, dt=60.0,

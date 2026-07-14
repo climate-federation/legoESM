@@ -129,8 +129,53 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         restart_from=cli_args.restart_from or cfg.restart.get("from", ""),
         output_config="",                        # embedded output block is used directly
         _cfg_output_tapes=cfg.output,            # -> load_output_config indirection below
+        _cfg_luc=cfg.raw.get("land_use_change") or {},   # E_LUC bookkeeping block
+        _cfg_land_cover_dataset=cfg.surfdata.get("land_cover_dataset", "clm5"),
     )
     return ns
+
+
+def _report_eluc(args, gsd) -> None:
+    """Compute + report annual E_LUC when land-use-change bookkeeping is enabled.
+
+    A post-run diagnostic: the bookkeeping is annual and independent of the
+    biophysics scan, so it runs once over the transient cover series (no effect
+    on the physics run).  No-op unless ``land_use_change.scheme == "bookkeeping"``.
+    """
+    luc_block = getattr(args, "_cfg_luc", None) or {}
+    if luc_block.get("scheme", "none") != "bookkeeping":
+        return
+    from legoesm.land.land_use_change import (
+        LandUseChangeConfig, annual_eluc_series, validate_luc_config)
+
+    fields = LandUseChangeConfig._fields
+    luc_cfg = LandUseChangeConfig(**{k: v for k, v in luc_block.items() if k in fields})
+    validate_luc_config(luc_cfg)
+    nyear = int(np.asarray(gsd.pft_frac).shape[0])
+    if nyear <= 1:
+        print("E_LUC: bookkeeping enabled but surfdata is single-year (static "
+              "cover) — no land-use transitions to bookkeep.")
+        return
+
+    eluc_pgc, _ = annual_eluc_series(gsd.pft_frac, gsd.cell_area, luc_cfg)
+    years = np.asarray(gsd.years).astype(int)
+    eluc = np.asarray(eluc_pgc)
+    print(f"E_LUC (bookkeeping): {int(years[0])}-{int(years[-1])} | "
+          f"cumulative {eluc.sum():.4f} PgC | mean {eluc.mean():.4f} PgC/yr | "
+          f"final year {eluc[-1]:.4f} PgC/yr")
+    # Fidelity: the bookkeeping is driven by NET year-to-year cover change. For a
+    # dataset that natively carries gross transitions (LUH2/LUH3) this understates
+    # shifting-cultivation emissions until the gross-transition path is wired.
+    from legoesm.land.surface_data.datasets import has_gross_transitions
+    dataset = getattr(args, "_cfg_land_cover_dataset", "clm5")
+    if has_gross_transitions(dataset):
+        print(f"  NOTE: {dataset} carries native gross transitions, but E_LUC here "
+              f"uses NET cover change — gross-transition emissions are understated.")
+    out = Path(f"{args.output}.eluc_annual.txt")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    np.savetxt(out, np.column_stack([years, eluc]),
+               header="year  E_LUC_PgC_per_yr", fmt=["%d", "%.6e"])
+    print(f"  wrote {out}")
 
 
 def run(args) -> int:
@@ -323,9 +368,9 @@ def run(args) -> int:
     # ----- scan body: (state, tape_accums) -> next; no per-step output returned.
     def _step_body(carry, xs):
         state, accums = carry
-        forcing_t, doy_t, per_tape_slot = xs
+        forcing_t, doy_t, year_t, per_tape_slot = xs
         theta_top_t = (state.theta_soil[:, 0] if is_multilayer else jnp.full(ncol, 0.2))
-        land_params_t, lai_diag = update_land_params(theta_top_t, doy_t)
+        land_params_t, lai_diag = update_land_params(theta_top_t, doy_t, year_t)
         new_state, resp, _ = step_fn(state, forcing_t, config, U_MIN, dt,
                                      lat=lat_rad, land_params=land_params_t, doy=doy_t)
         # Available variables per step -> selected by each tape's spec.
@@ -387,13 +432,21 @@ def run(args) -> int:
             prefix=args.prefix, suffix=args.suffix,
             k_neighbors=args.k_neighbors, allow_synthetic=allow_syn)
         doy_year = jnp.asarray(tq_year / _SEC_PER_DAY)
+        # Transient cover: broadcast this chunk's calendar year across its steps as
+        # a TRACED scan input (not a Python constant baked into the closure) so
+        # interp_annual selects the right LUH2 slice WITHOUT recompiling the scan
+        # each year (SegmentForcing doctrine).
+        year_xs = jnp.full(n_step_year, float(year))
         # Slice each tape's GLOBAL slot indices to just this year's steps.
         slot_year_xs = {name: idx[mask] for name, idx in slot_idx_global.items()}
         print(f"  year {year} ({n_step_year} steps) ...")
         (state, tape_accums), _ = jax.lax.scan(
             _step_body, (state, tape_accums),
-            (forcing_year, doy_year, slot_year_xs))
-        del forcing_year, doy_year, slot_year_xs               # free before next year
+            (forcing_year, doy_year, year_xs, slot_year_xs))
+        del forcing_year, doy_year, year_xs, slot_year_xs      # free before next year
+
+    # --- E_LUC land-use-change bookkeeping (post-run annual diagnostic). ---
+    _report_eluc(args, gsd)
 
     # --- land mask + NaN-over-land validation (the smoke PASS/FAIL). ---
     def cover1d(a):

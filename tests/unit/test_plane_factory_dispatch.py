@@ -38,7 +38,7 @@ def test_driver_dispatch_table_contains_plane():
 
 
 def test_driver_factory_creates_plane_dycore_from_experiment_config():
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         PlaneCompressibleEulerModel,
     )
     from legoesm.driver.component_factory import create_atmosphere_dycore
@@ -113,7 +113,7 @@ def test_lazy_class_lookup_resolves_plane_model():
     from legoesm.atmosphere.dynamics import (
         PlaneCompressibleEulerModel as _Lazy,
     )
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         PlaneCompressibleEulerModel as _Direct,
     )
     assert _Lazy is _Direct
@@ -150,7 +150,7 @@ def test_supported_matrix_contains_plane_entry():
     assert entry.canonical_name == "plane_compressible_euler"
     assert entry.class_name == "PlaneCompressibleEulerModel"
     assert entry.module == (
-        "legoesm.atmosphere.dynamics.compressible_euler_plane"
+        "legoesm.atmosphere.dynamics.les.compressible_euler_plane"
     )
 
 

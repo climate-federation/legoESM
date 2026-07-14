@@ -279,19 +279,28 @@ def pad_lon_cgrid(f: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     * 2-D pencil (``LatLon2DLayout``) — longitude is split, so the wrap
       becomes an MPI ring exchange with the W/E neighbour
       (:func:`legoesm.parallel.latlon_mpi.exchange_halo_lon`).
+    * 2-D SPMD ``("lat", "lon")`` mesh (M3a) — the wrap becomes the cyclic
+      ring ``ppermute`` over the ``"lon"`` mesh axis
+      (:func:`legoesm.parallel.latlon_spmd.lon_ring_ghosts_spmd`); a
+      degenerate ``p_lon == 1`` axis takes that helper's STATIC local-wrap
+      branch (no collective — bit-identical to the band path).
 
     BIT-IDENTICAL at ``proc_lon == 1`` (``exchange_halo_lon``'s single-member
     ring is the same local wrap), so the cell→face / vertex operators that
     pad-then-stencil through this helper stay byte-for-byte unchanged on the
     serial / band / SPMD paths and only gain the true neighbour columns under
     a genuine longitude split.  AD-safe (the exchange uses the shared
-    sendrecv VJP).  ``f`` may be 2-D ``(n_lat, n_lon[_local], ...)`` or 3-D;
-    the lon axis is axis 1.
+    sendrecv VJP; ``ppermute`` is self-transposing).  ``f`` may be 2-D
+    ``(n_lat, n_lon[_local], ...)`` or 3-D; the lon axis is axis 1 and must
+    be CELL-ALIGNED (never an ``n_lon+1`` u-face field).
     """
     if halo <= 0:
         return f
-    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
-    if get_halo_backend() == "mpi":
+    from legoesm.grids.halo import (
+        get_halo_backend, get_mpi_topology, get_spmd_mesh,
+    )
+    backend = get_halo_backend()
+    if backend == "mpi":
         topology = get_mpi_topology()
         from legoesm.parallel.latlon_mpi import (
             LatLon2DLayout, exchange_halo_lon,
@@ -301,6 +310,12 @@ def pad_lon_cgrid(f: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
                 f, topology.west_rank, topology.east_rank,
                 topology.rank, halo=halo,
             )
+    elif backend == "spmd":
+        mesh = get_spmd_mesh()
+        if mesh is not None and "lon" in tuple(
+                getattr(mesh, "axis_names", ())):
+            from legoesm.parallel.latlon_spmd import lon_ring_ghosts_spmd
+            return lon_ring_ghosts_spmd(f, mesh, halo=halo)
     # Local periodic wrap (lon = axis 1); single Pad HLO.
     pad = [(0, 0)] * f.ndim
     pad[1] = (halo, halo)
@@ -738,6 +753,94 @@ def gradient_y_cgrid(
         df_dy = apply_north_fold(df_dy, df_fold, grid, north_mask=nmask)
 
     return df_dy
+
+
+def upwind_cell_to_uface(
+    f: jnp.ndarray,
+    flux_u: jnp.ndarray,
+) -> jnp.ndarray:
+    """First-order (donor-cell) upwind reconstruction of a cell-center field
+    at u-faces, selected by the face-normal flux/velocity sign.
+
+    PROMOTED from ``ocean.dynamics.ocean_pe_latlon_cgrid.upwind_to_u_points``
+    (verbatim numerics) so non-ocean components (sea-ice C-grid transport) can
+    use it without an ice->ocean layering break; the ocean re-imports this as
+    its canonical implementation.
+
+    Parameters
+    ----------
+    f : array, shape (n_lat, n_lon, ...) at cell centers.
+    flux_u : array, shape (n_lat, n_lon+1, ...) at u-faces.
+        Sign convention: positive = flow in +j (eastward) direction.
+
+    Returns
+    -------
+    f_u : array, shape (n_lat, n_lon+1, ...) at u-faces.
+    """
+    # Face j is between cell (j-1) mod n_lon and cell j.
+    # Positive flux => flow from cell j-1 to cell j => upwind is cell j-1.
+    # Negative flux => flow from cell j to cell j-1 => upwind is cell j.
+    f_left = jnp.roll(f, 1, axis=1)   # f_left[:, j] = f[:, j-1]
+    f_right = f                        # f_right[:, j] = f[:, j]
+
+    # Build upwind at interior faces (n_lat, n_lon)
+    f_upwind = jnp.where(flux_u[:, :-1] > 0, f_left, f_right)
+
+    # Wrap: face n_lon is the same as face 0 (periodic in longitude)
+    if f.ndim >= 3:
+        return jnp.concatenate([f_upwind, f_upwind[:, 0:1, :]], axis=1)
+    else:
+        return jnp.concatenate([f_upwind, f_upwind[:, 0:1]], axis=1)
+
+
+def upwind_cell_to_vface(
+    f: jnp.ndarray,
+    flux_v: jnp.ndarray,
+    grid=None,
+) -> jnp.ndarray:
+    """First-order (donor-cell) upwind reconstruction of a cell-center field
+    at v-faces, wall-zeroed at physical poles and fold-aware on the tripolar
+    north seam.
+
+    PROMOTED from ``ocean.dynamics.ocean_pe_latlon_cgrid.upwind_to_v_points``
+    (verbatim numerics — cell-pad-first through the backend-dispatched
+    ``pad_with_pole_bc_lat``; pole faces zeroed; tripolar fold row = the
+    fold-permuted last interior face row, exactly as ``pad_ns_scalar`` built
+    it) so non-ocean components can use it; the ocean re-imports this.
+
+    Parameters
+    ----------
+    f : array, shape (n_lat, n_lon, ...) at cell centers.
+    flux_v : array, shape (n_lat+1, n_lon, ...) at v-faces.
+        Sign convention: positive = flow in +i (northward) direction.
+    grid : optional LatLonGrid or LatLonCGridGeometry (fold handling).
+
+    Returns
+    -------
+    f_v : array, shape (n_lat+1, n_lon, ...) at v-faces.
+    """
+    from legoesm.grids.halo_latlon import (
+        pad_with_pole_bc_lat,
+        zero_polar_lat_ends,
+    )
+    # Face i sits between cell i-1 and cell i (m_pad rows i and i+1).
+    # Positive flux => flow from cell i-1 to cell i => upwind is cell i-1.
+    # Negative flux => flow from cell i to cell i-1 => upwind is cell i.
+    f_pad = pad_with_pole_bc_lat(
+        f, halo=1, south_value=0.0, north_value=0.0,
+    )
+    f_south = f_pad[:-1]   # cell i-1 for face i
+    f_north = f_pad[1:]    # cell i   for face i
+    f_v = jnp.where(flux_v > 0, f_south, f_north)
+
+    # Wall BC at the physical pole faces only (backend-aware), then the
+    # tripolar north fold row exactly as pad_ns_scalar produced it.
+    f_v = zero_polar_lat_ends(f_v)
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
+        north = f_v[-2:-1][:, grid.fold.perm_T]
+        f_v = apply_north_fold(f_v, north, grid, north_mask=nmask)
+    return f_v
 
 
 def divergence_cgrid(

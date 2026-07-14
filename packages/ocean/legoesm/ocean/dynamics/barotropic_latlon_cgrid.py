@@ -53,6 +53,7 @@ from legoesm.ocean.dynamics.eta_floor import clamp_and_redistribute as _clamp_re
 from legoesm.ocean.dynamics.barotropic_common import (
     bebt_blend,
     compute_filter_weights,
+    compute_nemo_boxcar_centred_weights,
     compute_power_law_filter_weights,
     coriolis_at_faces,
     maxvel_clip,
@@ -463,6 +464,11 @@ def _compute_weights(config, n_substeps: int, dtype):
         w_filter, w_total, w_transport, n_loop = compute_power_law_filter_weights(
             n_substeps, dtype,
         )
+    elif config.barotropic.barotropic_time_filter == "nemo_boxcar_centred":
+        # NEMO dynspg_ts ln_bt_fw=F + nn_bt_flt=1 (forward-frame
+        # reduction; see compute_nemo_boxcar_centred_weights).
+        w_filter, w_total, w_transport, n_loop = (
+            compute_nemo_boxcar_centred_weights(n_substeps, dtype))
     else:
         use_cosine_filter = config.barotropic.barotropic_time_filter == "cosine"
         w_filter, w_total, w_transport = compute_filter_weights(

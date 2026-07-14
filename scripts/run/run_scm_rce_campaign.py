@@ -70,8 +70,8 @@ from legoesm.atmosphere.physics.radiation.config import (
     RRTMGPConfig,
 )
 from legoesm.atmosphere.physics.radiation.integration import sam_ocean_albedo
-from legoesm.atmosphere.scm import SingleColumnModel, apply_tendencies
-from legoesm.atmosphere.scm_forcing import (
+from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel, apply_tendencies
+from legoesm.atmosphere.forcing.scm.scm_forcing import (
     SCMForcing,
     add_tendencies,
     compute_forcing_tendencies,

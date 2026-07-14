@@ -58,10 +58,25 @@ from legoesm.land.boundary_data._internals import (
 # ===========================================================================
 # Coverage / mask inspectors
 # ===========================================================================
-def dominant_pft_index(gsd) -> np.ndarray:
-    """Dominant PFT index per column from the (year-mean) ``pft_frac``."""
-    mean_frac = np.asarray(jnp.mean(gsd.pft_frac, axis=0))   # (ncol, npft)
-    return np.argmax(mean_frac, axis=-1)                     # (ncol,)
+def cover_fracs(gsd, year=None) -> jnp.ndarray:
+    """Per-column PFT cover ``(ncol, npft)`` from the transient ``pft_frac``.
+
+    ``year=None`` (default) returns the year-mean — the legacy static snapshot the
+    surfdata builders used.  A concrete ``year`` returns the transient slice at that
+    calendar year via :func:`legoesm.land.global_surface_data.interp_annual`
+    (single-year surfdata -> the one slice), so a driver can request a dated cover
+    (e.g. its run start year) instead of collapsing a multi-century series to a mean.
+    The single cover-collapse used by every ``surface_data_*`` builder below.
+    """
+    if year is None:
+        return jnp.mean(gsd.pft_frac, axis=0)               # (ncol, npft)
+    from legoesm.land.global_surface_data import interp_annual
+    return interp_annual(gsd.pft_frac, gsd.years, jnp.asarray(float(year)))
+
+
+def dominant_pft_index(gsd, year=None) -> np.ndarray:
+    """Dominant PFT index per column from the ``pft_frac`` (year-mean, or ``year``)."""
+    return np.argmax(np.asarray(cover_fracs(gsd, year)), axis=-1)    # (ncol,)
 
 
 def glacier_mask(gsd) -> np.ndarray:
@@ -86,6 +101,7 @@ def build_canopy_params(
     tgc_C: float = TGC_DEFAULT_C,
     glacier_alb_vis: float = GLACIER_ALB_VIS,
     glacier_alb_nir: float = GLACIER_ALB_NIR,
+    year=None,
 ) -> CanopyLandParams:
     """Per-column :class:`CanopyLandParams` from surface data at ``day_of_year``.
 
@@ -99,7 +115,7 @@ def build_canopy_params(
     surface**: no vegetation (LAI=0, FNonVeg=1) and a high snow/ice albedo
     (``glacier_alb_vis``/``glacier_alb_nir``) instead of the soil background.
     """
-    dom = dominant_pft_index(gsd)                            # (ncol,)
+    dom = dominant_pft_index(gsd, year)                     # (ncol,)
     ncol = dom.shape[0]
     lut = pft_lookup_arrays()
 
@@ -209,6 +225,7 @@ class SurfaceDataParamProvider(eqx.Module):
     soil_bg: jax.Array              # (ncol,) broadband soil-colour albedo
     f_veg: jax.Array               # (ncol,) canopy cover fraction 1-exp(-0.5*LAI)
     is_glacier: jax.Array          # (ncol,) 1.0 where glacier-dominant
+    fc4: jax.Array                 # (ncol,) PFT-weighted C4 area fraction [0,1]
     glacier_albedo: float = eqx.field(static=True)
 
     def __call__(self, features=None) -> LandSurfaceParams:
@@ -216,9 +233,12 @@ class SurfaceDataParamProvider(eqx.Module):
         soil_bg = jax.lax.stop_gradient(self.soil_bg)
         f_veg = jax.lax.stop_gradient(self.f_veg)
         is_glacier = jax.lax.stop_gradient(self.is_glacier)
+        # C4 fraction is boundary data (PFT flags), not a knob -> stop_gradient,
+        # mirroring soil_bg / f_veg / pft_fractions.
+        fc4 = jax.lax.stop_gradient(self.fc4)
         alb = lp.albedo_veg * f_veg + soil_bg * (1.0 - f_veg)
         alb = jnp.where(is_glacier > 0.0, self.glacier_albedo, alb)
-        return lp._replace(albedo_veg=alb)
+        return lp._replace(albedo_veg=alb, fC4=fc4)
 
 
 def surface_data_param_provider(
@@ -227,15 +247,16 @@ def surface_data_param_provider(
     theta_top: jnp.ndarray,
     *,
     glacier_albedo: float = GLACIER_ALBEDO_DEFAULT,
+    year=None,
 ) -> SurfaceDataParamProvider:
     """Build a :class:`SurfaceDataParamProvider` from regridded surface data.
 
-    PFT weights are the (year-mean) ``pft_frac`` (uncovered columns -> zero; the
-    mask-reconciliation pass :func:`fill_land_param_gaps` handles them).  The
-    canopy-cover LAI for the albedo blend is the PFT-weighted column LAI, so it is
-    consistent with the PFT-weighted parameters.
+    PFT weights are the ``pft_frac`` at ``year`` (or the year-mean when ``year`` is
+    None; uncovered columns -> zero, handled by the mask-reconciliation pass
+    :func:`fill_land_param_gaps`).  The canopy-cover LAI for the albedo blend is the
+    PFT-weighted column LAI, so it is consistent with the PFT-weighted parameters.
     """
-    fracs = np.nan_to_num(np.asarray(jnp.mean(gsd.pft_frac, axis=0)), nan=0.0)  # (ncol,npft)
+    fracs = np.nan_to_num(np.asarray(cover_fracs(gsd, year)), nan=0.0)          # (ncol,npft)
     # Zero-cover columns (no PFT info: ocean/ice/desert gaps) -> bare soil (PFT 0),
     # matching the dominant-PFT fallback (argmax of all-zeros = bare_soil) so they
     # get the valid bare-soil table row (nonzero C_soil/W_max) instead of an
@@ -254,11 +275,18 @@ def surface_data_param_provider(
     soil_bg = np.asarray(
         soil_albedo_broadband(jnp.asarray(np.asarray(gsd.soil_color)), jnp.asarray(theta_top)))
     f_veg = 1.0 - np.exp(-0.5 * lai_col)
+    # Big-leaf C4 flag from the DOMINANT PFT (0/1), matching build_canopy_params'
+    # ``lut["fc4"][dom]``. A big leaf is a single photosynthetic pathway, so the
+    # column runs pure C3 or pure C4 with its (PFT-weighted) Vcmax — not a
+    # blend of both branches sharing one capacity. Continuous sub-grid C3/C4
+    # mixing with separate C3/C4 capacities is the two-leaf canopy's role.
+    fc4_col = np.asarray(pft_lookup_arrays()["fc4"])[dominant_pft_index(gsd)]   # (ncol,) 0/1
     return SurfaceDataParamProvider(
         pft_provider=pft_provider,
         soil_bg=jnp.asarray(soil_bg),
         f_veg=jnp.asarray(f_veg),
         is_glacier=jnp.asarray(glacier_mask(gsd).astype(float)),
+        fc4=jnp.asarray(fc4_col),
         glacier_albedo=float(glacier_albedo),
     )
 
@@ -266,14 +294,14 @@ def surface_data_param_provider(
 # ===========================================================================
 # Scheme-agnostic dispatcher + simulation-start entry
 # ===========================================================================
-def prescribed_canopy_structure(gsd, day_of_year):
+def prescribed_canopy_structure(gsd, day_of_year, year=None):
     """PFT-weighted monthly canopy structure ``(LAI, SAI, htop)`` — each
     ``(ncol,)`` — for the CLM-ML canopy's PRESCRIBED-LAI mode.
 
     Reuses the same PFT weights as the albedo blend in
-    :func:`surface_data_param_provider` (year-mean ``pft_frac``, zero-cover
-    columns collapsed to the bare-soil PFT row) so the prescribed LAI here is
-    identical to the ``lai_col`` that drives the surfdata albedo.
+    :func:`surface_data_param_provider` (``pft_frac`` at ``year`` or the year-mean,
+    zero-cover columns collapsed to the bare-soil PFT row) so the prescribed LAI
+    here is identical to the ``lai_col`` that drives the surfdata albedo.
 
     - ``LAI``/``SAI`` are area-additive (total leaf/stem area per unit ground =
       ``sum_pft frac * pft_value``), so the PFT-weighted sum is the physical
@@ -286,7 +314,7 @@ def prescribed_canopy_structure(gsd, day_of_year):
     al. 2021 GMD default), so it already tracks the prescribed ``htop`` and a
     separate prescribed ``hbot`` would be populated-but-unread.
     """
-    fracs = np.nan_to_num(np.asarray(jnp.mean(gsd.pft_frac, axis=0)), nan=0.0)  # (ncol,npft)
+    fracs = np.nan_to_num(np.asarray(cover_fracs(gsd, year)), nan=0.0)          # (ncol,npft)
     zero_cover = fracs.sum(axis=-1) < 1e-6
     fracs[zero_cover, :] = 0.0
     fracs[zero_cover, 0] = 1.0   # uncovered -> bare-soil PFT row (LAI/SAI/height ~ 0)
@@ -304,7 +332,7 @@ def prescribed_canopy_structure(gsd, day_of_year):
             _wcol(gsd.htop_monthly))
 
 
-def surface_data_to_land_params(gsd, surface_scheme, day_of_year, theta_top):
+def surface_data_to_land_params(gsd, surface_scheme, day_of_year, theta_top, *, year=None):
     """Dispatch to the right per-column land-params object for ``surface_scheme``.
 
     ``TwoLeafCanopyConfig`` -> :class:`CanopyLandParams` (built directly — land/dev
@@ -320,15 +348,16 @@ def surface_data_to_land_params(gsd, surface_scheme, day_of_year, theta_top):
     from legoesm.land.canopy import CanopyConfig
     from legoesm.land.canopy.config import CLMMLCanopyConfig
     if isinstance(surface_scheme, CanopyConfig):
-        return build_canopy_params(gsd, day_of_year, theta_top)
-    lp = surface_data_param_provider(gsd, day_of_year, theta_top)()
+        return build_canopy_params(gsd, day_of_year, theta_top, year=year)
+    lp = surface_data_param_provider(gsd, day_of_year, theta_top, year=year)()
     if isinstance(surface_scheme, CLMMLCanopyConfig):
-        lai, sai, htop = prescribed_canopy_structure(gsd, day_of_year)
+        lai, sai, htop = prescribed_canopy_structure(gsd, day_of_year, year)
         lp = lp._replace(LAI=lai, SAI=sai, htop=htop)
     return lp
 
 
-def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *, theta_top=None):
+def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *,
+                           theta_top=None, year=None):
     """Load the surfdata, regrid to ``grid``, and adapt to ``land_config``'s scheme.
 
     The single entry a driver calls at simulation start.  Returns
@@ -337,7 +366,10 @@ def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *, the
     the surfdata via :func:`build_soil_hydraulics` (params are ``(ncol, n_layer)``
     arrays that align with the model's soil state cell-for-cell).
     ``theta_top`` (top-layer wetness for the soil-colour albedo) defaults to a
-    nominal 0.2 when no state exists yet.
+    nominal 0.2 when no state exists yet.  ``year`` selects the transient cover
+    slice for the returned ``land_params`` (None -> the legacy year-mean); the
+    returned ``gsd`` still carries the full ``pft_frac``/``years`` series so a
+    driver can rebuild params at other years.
     """
     from legoesm.land.config import MultiLayerLandConfig
     from legoesm.land.global_surface_data import get_surfdata_preset, load_global_surface_data
@@ -353,5 +385,5 @@ def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *, the
             hydraulics=build_soil_hydraulics(gsd, base=land_config.hydraulics))
 
     land_params = surface_data_to_land_params(
-        gsd, land_config.surface_scheme, day_of_year, theta_top)
+        gsd, land_config.surface_scheme, day_of_year, theta_top, year=year)
     return land_config, land_params, gsd

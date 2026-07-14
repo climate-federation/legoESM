@@ -132,7 +132,7 @@ def _surface_forcing_cfg(cfg: dict[str, Any]) -> tuple[str | None, str | None]:
 
 def _build_spectral_config(cfg: dict[str, Any]):
     """Translate AIMIP YAML dict into NeuralGCMSpectralConfig."""
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
     from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
     from legoesm.training.losses import LossConfig
 
@@ -201,6 +201,7 @@ def _build_spectral_config(cfg: dict[str, Any]):
         rollout_hours=int(cfg.get("aimip_rollout_hours", 0)),
         rollout_curriculum=curriculum,
         chunk_windows=int(cfg.get("aimip_chunk_windows", 0)),
+        chunk_prefetch=bool(cfg.get("aimip_chunk_prefetch", False)),
         spatial_lr_scale=float(cfg.get("aimip_spatial_lr_scale", 1.0)),
         rad_update_interval=int(cfg.get("aimip_rad_update_interval", 1)),
         loss_config=loss_config,
@@ -477,7 +478,7 @@ def _evaluate_variant(
     training objective so the scorecard is directly comparable across
     variants.
     """
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         compute_spectral_filter,
         compute_sponge_factor,
     )
@@ -613,7 +614,7 @@ def _evaluate_variant(
     elif variant == "sfno_physics":
         physics_fn = make_sfno_spectral_physics(trained_model, grid)
     elif variant == "sfno_full":
-        from legoesm.atmosphere.dynamics.sfno_pe import (
+        from legoesm.atmosphere.dynamics.neural.sfno_pe import (
             SFNOPrimitiveEquationConfig,
             SFNOPrimitiveEquationModel,
         )
@@ -663,7 +664,7 @@ def _evaluate_variant(
     else:
         raise ValueError(f"Unknown variant in eval: {variant!r}")
 
-    from legoesm.atmosphere.dynamics.spectral_pe import spectral_pe_to_grid
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import spectral_pe_to_grid
 
     losses: list[float] = []
     # ``T`` reports the mid-level (~500 hPa) cross-section for direct

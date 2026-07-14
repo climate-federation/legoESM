@@ -47,8 +47,8 @@ if not _F32:
 import jax.numpy as jnp  # noqa: E402
 
 from legoesm import constants  # noqa: E402
-from legoesm.atmosphere.dynamics import spectral_les_plane as sl  # noqa: E402
-from legoesm.atmosphere.dynamics.spectral_les_moist import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl  # noqa: E402
+from legoesm.atmosphere.dynamics.les.spectral_les_moist import (  # noqa: E402
     LagrangianSDMSegmentDiagnostics,
     conserving_positive,
     make_lagrangian_sdm_step_segment,
@@ -69,7 +69,7 @@ from legoesm.atmosphere.physics.microphysics.sdm import (  # noqa: E402
     set_diagnostic_liquid_tracers,
     total_water_mass,
 )
-from legoesm.atmosphere.sam_case_forcing import (  # noqa: E402
+from legoesm.atmosphere.forcing.sam_case_forcing import (  # noqa: E402
     read_sam_lsf,
     read_sam_snd,
     read_sam_sfc,
@@ -80,7 +80,7 @@ from legoesm.timestepping.split_explicit import select_dt  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import les_record  # noqa: E402
 
-from legoesm.atmosphere.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
+from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
 
 # Default case dir: external LEGOESM_GSAM_ROOT if set, else the repo-local
 # cache (scripts/data/fetch_les_forcing.py); --case-dir overrides. See

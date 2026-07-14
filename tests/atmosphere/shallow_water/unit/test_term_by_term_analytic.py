@@ -45,7 +45,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
     CGridLatLonShallowWaterConfig,
     CGridLatLonShallowWaterState,
     cgrid_latlon_sw_tendencies,
@@ -417,7 +417,7 @@ class TestLaplacianViscousTendencySW:
 # Shared helpers for CFL-aware convergence tests (atmosphere SW)
 # ===========================================================================
 
-from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
     CGridLatLonShallowWaterModel,
 )
 

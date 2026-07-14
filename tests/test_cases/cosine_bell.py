@@ -154,7 +154,7 @@ def cosine_bell_cubesphere(grid, cdgrid, beta=jnp.pi / 4):
     -------
     FV3EdgeShallowWaterState
     """
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         FV3EdgeShallowWaterState)
 
     R = grid.radius
@@ -253,7 +253,7 @@ def cosine_bell_spectral(grid, beta=jnp.pi / 4):
     -------
     SpectralSWState
     """
-    from legoesm.atmosphere.dynamics.spectral_sw import SpectralSWState
+    from legoesm.atmosphere.dynamics.gcm.spectral_sw import SpectralSWState
     from legoesm.grids.gaussian import sh_analysis
 
     R = grid.radius

@@ -23,7 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 from mpi4py import MPI
 
-from legoesm.atmosphere.dynamics import plane_operators_halo as oh
+from legoesm.atmosphere.dynamics.les import plane_operators_halo as oh
 from legoesm.grids.plane import create_plane_grid
 from legoesm.parallel.plane_mpi import (
     exchange_halo_plane_yxz, make_plane_pencil_layout,

@@ -24,7 +24,7 @@ from legoesm.grids.vertical import (
     create_height_coordinate,
     compute_terrain_metric,
 )
-from legoesm.atmosphere.dynamics.spectral_nh import (
+from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
     SpectralNHState,
     SpectralNHConfig,
     SpectralCompressibleEulerModel,
@@ -32,7 +32,7 @@ from legoesm.atmosphere.dynamics.spectral_nh import (
     _acoustic_substeps_grid,
     nh_rest_state_spectral,
 )
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     compute_exner_perturbation,
 )
 from legoesm.core.field import Field
@@ -485,3 +485,37 @@ class TestSpectralNHSolverAxis:
             name = resolve_solver_name(dynamics=dyn, discretization=disc)
             assert name == expected_name, \
                 f"({dyn}, {disc}) -> {name}, expected {expected_name}"
+
+
+def test_batched_cpu_step_honors_threaded_target_mass():
+    """codex 2026-07-12 round 2: _step_on_cpu must consume the THREADED
+    target mass, not a closure-captured self._target_mass (which froze
+    the first target into the compiled step)."""
+    import jax.numpy as jnp
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
+        SpectralCompressibleEulerModel, SpectralNHConfig,
+        dcmip25_tc1_init_spectral,
+    )
+
+    grid = create_gaussian_grid(21)
+    state, hcoord, tmetric = dcmip25_tc1_init_spectral(grid, n_levels=8)
+    cfg = SpectralNHConfig(
+        n_acoustic_substeps=4, semi_implicit_acoustic=True,
+        fix_mass=True, anchor_mass_to_initial=True,
+    )
+    model = SpectralCompressibleEulerModel(
+        grid, hcoord, tmetric, cfg, allow_unsupported_backend=True,
+    )
+    m0 = float(model.compute_dry_mass(state))
+
+    out1 = model._step_on_cpu(state, 2.0, jnp.float64(m0))
+    m1 = float(model.compute_dry_mass(out1))
+    assert abs(m1 - m0) / m0 < 1e-12
+
+    # SAME compiled step, new threaded target — must be honored.
+    out2 = model._step_on_cpu(state, 2.0, jnp.float64(1.01 * m0))
+    m2 = float(model.compute_dry_mass(out2))
+    assert abs(m2 - 1.01 * m0) / m0 < 1e-9, (
+        f"threaded target ignored: {m2} vs {1.01 * m0}"
+    )

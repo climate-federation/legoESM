@@ -51,7 +51,7 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.land.canopy.config",
     "legoesm.land.canopy.sif",
     "legoesm.land.carbon.config",
-    "legoesm.land.carbon.stomata",
+    "legoesm.land.stomata",
     "legoesm.land.config",
     "legoesm.land.global_surface_data",
     "legoesm.land.pedotransfer",
@@ -69,6 +69,7 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.ocean.physics.surface_forcing.config",
     "legoesm.ocean.physics.tidal_forcing",
     "legoesm.ocean.physics.vertical_mixing.config",
+    "legoesm.ocean.physics.vertical_mixing.double_diffusion",
     "legoesm.ocean.physics.vertical_mixing.internal_wave_mixing",
     "legoesm.ocean.physics.vertical_mixing.tidal",
     # --- atmosphere physics (Phase 4 spec migration) ---

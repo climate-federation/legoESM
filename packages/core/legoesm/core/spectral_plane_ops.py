@@ -1,6 +1,6 @@
 """2D-horizontal Fourier operators for the doubly-periodic plane CRM.
 
-Companion to :mod:`legoesm.atmosphere.dynamics.plane_operators` (the
+Companion to :mod:`legoesm.atmosphere.dynamics.les.plane_operators` (the
 finite-difference Arakawa-C operator set). This module provides the
 pseudo-spectral counterpart: exact differential operators on the
 horizontal axes via 2D FFT, with vertical structure handled by the

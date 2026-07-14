@@ -80,7 +80,7 @@ def test_platecarree_winds_use_geographic_rotation():
     """
     pytest.importorskip("matplotlib")
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         create_cubed_sphere_cdgrid,
     )
     from legoesm.core.operators_cdgrid import (

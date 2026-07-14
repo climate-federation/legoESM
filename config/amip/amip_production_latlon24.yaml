@@ -20,3 +20,21 @@ resolution: 24            # n_lat (n_lon = 2*n_lat)
 nlev: 20
 use_polar_filter: true
 dt: 600.0
+
+# Convection: override the inherited `bechtold` with `sbm` on THIS lane (#869).
+# A controlled single-variable bisect from the day-45 restart state (conv carry
+# stripped) showed bechtold re-develops a polar-night (mid-Feb, ~71N/lev-1)
+# temperature runaway that blows the run at day ~47 REGARDLESS of every numerics
+# lever (polar filter on/off, GWD off/hines-swap, fp32/fp64, hyperdiff x2,
+# sponge x2, dt/2, stale-carry) — while sbm from the SAME state completes to day
+# 60 and a 95-day soak is stable.  sbm also lifts hfls from ~40 to ~70 W/m2
+# (#847).  The cube C12 lane (amip_production.yaml) keeps bechtold; the bechtold
+# polar-night blowup is tracked as a separate convection-scheme bug.
+convection: sbm
+# The base pins convective_precip_efficiency: 0.5 for bechtold; sbm has its own
+# rain-split (sbm_precip_efficiency) and rejects the bechtold/tiedtke knob, so
+# clear it here.  null = UNSET -> each scheme uses its own default (the #929
+# sentinel: an explicit 0.0 would now mean "force legacy no-split", NOT "unset");
+# sbm ignores the bechtold/tiedtke knob, so null just avoids the
+# "requires --convection tiedtke/bechtold" guard without pinning an explicit 0.
+convective_precip_efficiency: null

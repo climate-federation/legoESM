@@ -44,11 +44,11 @@ def _templates_dir() -> Path:
 
 
 def _machines_dir() -> Path:
-    return _ROOT / "configs" / "machines"
+    return _ROOT / "config" / "machines"
 
 
 def _load_machine(name: str) -> dict:
-    """Load a machine profile YAML — e.g. configs/machines/derecho.yaml."""
+    """Load a machine profile YAML — e.g. config/machines/derecho.yaml."""
     import yaml
     path = _machines_dir() / f"{name}.yaml"
     if not path.exists():
@@ -187,7 +187,7 @@ def _write_run_sh(path: Path, config_path: Path, output_dir: Path,
     if env_setup and not env_setup.endswith("\n"):
         env_setup += "\n"
     env_block = (
-        f"# --- Machine env setup (from configs/machines/) ---\n{env_setup}\n"
+        f"# --- Machine env setup (from config/machines/) ---\n{env_setup}\n"
         if env_setup else "")
     body = (
         "#!/bin/bash\n"
@@ -223,7 +223,7 @@ def main() -> None:
                     metavar="key.path=value",
                     help="override a config field (repeatable; YAML-parsed values)")
     ap.add_argument("--machine", default="",
-                    help="machine profile from configs/machines/<name>.yaml "
+                    help="machine profile from config/machines/<name>.yaml "
                          "(e.g. 'derecho'); adds scheduler headers + env setup "
                          "to run.sh.  Project account is NEVER emitted — pass "
                          "on qsub: `qsub -A <ACCT> run.sh`.")

@@ -9,7 +9,7 @@ solution** — net assimilation ``An``, intercellular CO2 ``Ci``, the CO2
 compensation point ``Gamma*`` and absorbed PAR.  It deliberately does **not**
 re-implement photosynthesis, electron transport or stomatal conductance; those
 come from the caller (``canopy/photosynthesis.py`` for the two-leaf canopy,
-``carbon/stomata.py`` for the SimpleSEB big-leaf).  SIF is a passive diagnostic:
+``land/stomata.py`` for the SimpleSEB big-leaf).  SIF is a passive diagnostic:
 it never feeds back into the prognostic land state.
 
 Model (all per leaf-class, following BEPS-SIF ``SIF_y``)::

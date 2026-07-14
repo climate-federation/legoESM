@@ -95,7 +95,7 @@ def test_simulated_d13c_in_physical_c3_range():
 
     jax.config.update("jax_enable_x64", True)
     from legoesm.land.carbon.d13c_forward import simulate_archetype_d13c
-    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.land.stomata import StomataConfig
 
     table = _lit_c3()
     d13c = np.asarray(simulate_archetype_d13c(
@@ -119,7 +119,7 @@ def test_simulated_d13c_more_negative_with_higher_ball_berry_slope():
 
     jax.config.update("jax_enable_x64", True)
     from legoesm.land.carbon.d13c_forward import simulate_archetype_d13c
-    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.land.stomata import StomataConfig
 
     table = _lit_c3()
     lo = np.asarray(simulate_archetype_d13c(
@@ -139,7 +139,7 @@ def test_build_d13c_forward_matches_simulate():
 
     jax.config.update("jax_enable_x64", True)
     from legoesm.land.carbon.d13c_forward import build_d13c_forward, simulate_archetype_d13c
-    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.land.stomata import StomataConfig
 
     table = _lit_c3()
     d13c_fn = build_d13c_forward(table)
@@ -161,7 +161,7 @@ def test_d13c_forward_differentiable_in_ball_berry_slope():
 
     jax.config.update("jax_enable_x64", True)
     from legoesm.land.carbon.d13c_forward import simulate_archetype_d13c
-    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.land.stomata import StomataConfig
 
     table = _lit_c3()
     target = jnp.asarray([-27.0, -29.0, -28.0, -26.5], dtype=jnp.float64)
@@ -186,7 +186,7 @@ def test_d13c_forward_differentiable_through_param_override_path():
 
     jax.config.update("jax_enable_x64", True)
     from legoesm.land.carbon.d13c_forward import simulate_archetype_d13c
-    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.land.stomata import StomataConfig
     from legoesm.training.param_collector import (
         apply_param_overrides,
         build_trainable_params,
@@ -250,7 +250,7 @@ def test_simulated_d13c_selects_c3_and_c4_pathways_in_their_bands():
 
     jax.config.update("jax_enable_x64", True)
     from legoesm.land.carbon.d13c_forward import simulate_archetype_d13c
-    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.land.stomata import StomataConfig
     from legoesm.land.surface_params import is_c4_pft_id
 
     table = _c3_and_c4()
@@ -282,7 +282,7 @@ def test_d13c_both_levers_reach_the_loss_on_a_mixed_c3_c4_table():
     jax.config.update("jax_enable_x64", True)
     from legoesm.land.carbon.config import D13CConfig
     from legoesm.land.carbon.d13c_forward import simulate_archetype_d13c
-    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.land.stomata import StomataConfig
 
     table = _c3_and_c4()
     target = jnp.asarray([-27.0, -26.0, -12.5, -12.5], dtype=jnp.float64)
@@ -310,7 +310,7 @@ def test_c3_c4_pathways_are_fully_decoupled_by_the_selector():
     jax.config.update("jax_enable_x64", True)
     from legoesm.land.carbon.config import D13CConfig
     from legoesm.land.carbon.d13c_forward import simulate_archetype_d13c
-    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.land.stomata import StomataConfig
     from legoesm.land.surface_params import is_c4_pft_id
 
     table = _c3_and_c4()

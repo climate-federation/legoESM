@@ -17,8 +17,8 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics import spectral_les_plane as sl
-from legoesm.atmosphere.dynamics.spectral_les_moist import (
+from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl
+from legoesm.atmosphere.dynamics.les.spectral_les_moist import (
     SpectralRefState,
     make_anelastic_reference,
     make_les_microphysics_fn,
@@ -383,7 +383,7 @@ def test_stabilization_flags_default_off_and_plumbed():
 
 
 def test_moist_diagnostics_bundle():
-    from legoesm.atmosphere.dynamics.spectral_les_moist import moist_diagnostics
+    from legoesm.atmosphere.dynamics.les.spectral_les_moist import moist_diagnostics
     ny = nx = 6; nz = 10
     u = np.zeros((ny, nx, nz)); v = np.zeros((ny, nx, nz))
     wc = np.zeros((ny, nx, nz)); wc[0, 0, 5] = 2.0

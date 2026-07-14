@@ -1,6 +1,6 @@
 """Unit tests for the U-Cast primitive-equation emulator.
 
-Exercises :class:`~legoesm.atmosphere.dynamics.ucast_pe.UCastPrimitiveEquationModel`
+Exercises :class:`~legoesm.atmosphere.dynamics.neural.ucast_pe.UCastPrimitiveEquationModel`
 directly: both operating modes (``state_update`` / ``hybrid_tendencies``), the
 moisture-tracer round-trip, post-hoc dry-air-mass conservation, physics
 coupling, the MC-Dropout ensemble step (the probabilistic-forecast headline),
@@ -21,11 +21,11 @@ import pytest
 
 from legoesm.grids.gaussian import create_gaussian_grid, sh_synthesis
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     isothermal_rest_state_spectral,
 )
-from legoesm.atmosphere.dynamics.ucast_pe import (
+from legoesm.atmosphere.dynamics.neural.ucast_pe import (
     UCastPrimitiveEquationModel,
     UCastPrimitiveEquationConfig,
 )

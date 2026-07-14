@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from legoesm import constants
+from legoesm.ocean.eos import FreezingPointConfig
 
 
 class MPASOceanConfig(NamedTuple):
@@ -385,11 +386,27 @@ class MPASOceanConfig(NamedTuple):
     # applies).  Off by default so conserving runs are bit-exact unaffected.
     freeze_floor: bool = False
     freeze_floor_temp_c: float = constants.T_freeze_ocean - constants.T_freeze
+    # Seawater freezing-point (liquidus) scheme for the freeze_floor above.
+    # "constant" (default) keeps freeze_floor_temp_c byte-identical; a liquidus
+    # scheme makes the surface floor track the LOCAL surface salinity.  Consumed
+    # by ocean_model_mpas._step_impl freeze block.  MED-1.
+    freezing: FreezingPointConfig = FreezingPointConfig()
     # River-runoff depth spreading (NEMO sbcrnf rn_dep_max): when > 0 the
     # runoff freshwater dilutes the top this-many metres instead of a single
     # surface cell (Amazon plume fidelity).  Column-integral salt tendency
     # unchanged; 0 = legacy top-cell (bit-exact).
     runoff_depth_spread_m: float = 0.0
+    # NEMO ln_rnf_depth_ini per-cell spread-depth MAP [m] (array shape
+    # (nCells,) on the flattened Voronoi state, or None): depth proportional
+    # to the local climatological runoff maximum so small Arctic/Siberian
+    # rivers stay near-surface (more shelf-surface freshening) while the
+    # Amazon spreads to ~150 m — a FLAT runoff_depth_spread_m dilutes small
+    # river plumes through the whole shelf column and leaves the Siberian/
+    # Beaufort SSS several PSU too salty.  Build with
+    # forcing.runoff_depth.nemo_runoff_depth_map; mutually exclusive with a
+    # nonzero runoff_depth_spread_m (resolve_runoff_spread_arg validates).
+    # Column-integral salt tendency unchanged; None = legacy top-cell.
+    runoff_depth_spread_map: object = None
 
 
 class MPASSimpleOceanConfig(NamedTuple):
@@ -433,6 +450,14 @@ class MPASSimpleOceanConfig(NamedTuple):
         Deep layer reference temperature [K].
     tau_deep : float
         Deep layer restoring timescale [s].
+    freezing : FreezingPointConfig
+        Seawater freezing-point (liquidus) scheme for the slab/two-layer
+        freeze clamp AND its ``Q_freeze`` diagnostic.  ``"constant"``
+        (default) keeps ``T_freeze`` above byte-identical; a liquidus scheme
+        is evaluated at ``constants.S_ocean_ref`` (the slab carries no
+        prognostic salinity) via the shared owner
+        ``eos.slab_freeze_point_K`` — mirrors
+        ``SimpleOceanConfig.freezing``.  MED-1 follow-up.
     """
     mode: str = "fixed"
     sst_constant: float = 300.0
@@ -451,3 +476,6 @@ class MPASSimpleOceanConfig(NamedTuple):
     restore_deep: bool = False
     T_deep_ref: float = 278.0
     tau_deep: float = 365.25 * 86400.0
+    # Appended at the END to preserve positional construction (same convention
+    # as LatLonCGridOceanConfig field additions).
+    freezing: FreezingPointConfig = FreezingPointConfig()

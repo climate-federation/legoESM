@@ -53,7 +53,9 @@ from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     compute_visbeck_kappa_gm,
     dm95_taper,
     dm95_taper_scalar,
+    gm_resolution_scaled_kappa,
     validate_adjoint_stabilization,
+    validate_slope_limit,
     vertical_flux_divergence,
 )
 from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
@@ -845,7 +847,8 @@ def _w_triad_slopes_tapers(drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon,
                            drdT_wb=None, drdS_wb=None, drho_dz_w_b=None,
                            dTdx_u=None, dSdx_u=None, dTdy_v=None, dSdy_v=None,
                            u_face_act=None, v_face_act=None,
-                           adjoint_stabilization="none"):
+                           adjoint_stabilization="none",
+                           slope_limit="dm95_taper"):
     """W-face (vertical-flux) triad isopycnal slopes + DM95 tapers.
 
     Shared by the explicit ``F_z`` assembly (in
@@ -869,12 +872,16 @@ def _w_triad_slopes_tapers(drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon,
     what makes the neutral K_33 track Veros (ratio ~1.0 at the thermocline).
     """
     validate_adjoint_stabilization(adjoint_stabilization)
+    validate_slope_limit(slope_limit)
     (nx_W, nx_E, nx_Wb, nx_Eb, ny_S, ny_N, ny_Sb, ny_Nb) = _w_triad_numerators(
         slope_density, drho_dx_u, drho_dy_v, drdT_w, drdS_w,
         dTdx_u, dSdx_u, dTdy_v, dSdy_v, n_lat, n_lon,
         drdT_wb=drdT_wb, drdS_wb=drdS_wb,
         u_face_act=u_face_act, v_face_act=v_face_act)
-    clip = slope_density != "neutral"
+    # nemo_cap: ALWAYS cap the slope at ±S_max (NEMO ldfslp rn_slpmax)
+    # and skip the DM95 taper — the flux keeps diffusing along the
+    # capped direction at steep fronts instead of dying.
+    clip = (slope_density != "neutral") or (slope_limit == "nemo_cap")
     # kr-sum: the B-triads divide by the LOWER cell's drodzb (Veros pairs the
     # same kr-cell derivatives in numerator and denominator).  in_situ has no
     # per-cell derivative, so both levels share the single face denominator
@@ -900,9 +907,12 @@ def _w_triad_slopes_tapers(drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon,
     S_Wy2 = _slope(ny_N)                    # N,A
     S_Wy3 = _slope(ny_Sb, drho_dz_w_B)      # S,B
     S_Wy4 = _slope(ny_Nb, drho_dz_w_B)      # N,B
-    tw = lambda s: dm95_taper_scalar(
-        s, S_max, transition_width_frac=taper_width_frac,
-        stop_gradient_taper=_sg_taper)[1]
+    if slope_limit == "nemo_cap":
+        tw = lambda s: jnp.ones_like(s)
+    else:
+        tw = lambda s: dm95_taper_scalar(
+            s, S_max, transition_width_frac=taper_width_frac,
+            stop_gradient_taper=_sg_taper)[1]
     return (S_Wx1, S_Wx2, S_Wx3, S_Wx4, S_Wy1, S_Wy2, S_Wy3, S_Wy4,
             tw(S_Wx1), tw(S_Wx2), tw(S_Wx3), tw(S_Wx4),
             tw(S_Wy1), tw(S_Wy2), tw(S_Wy3), tw(S_Wy4))
@@ -924,6 +934,7 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     implicit_K33: bool = False,
     K_iso_steep: float = 0.0,
     slope_density: str = "in_situ",
+    slope_limit: str = "dm95_taper",
     T_tracer: jnp.ndarray | None = None,
     S_tracer: jnp.ndarray | None = None,
     eos_fn=None,
@@ -1265,7 +1276,7 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     # is bit-identical there.  in_situ clips to ±S_max (legoESM safety); neutral
     # leaves the slope UNCLIPPED (Veros relies on the DM95 taper — see
     # _w_triad_slopes_tapers) since neutral slopes routinely exceed S_max.
-    _clip_slope = slope_density != "neutral"
+    _clip_slope = (slope_density != "neutral") or (slope_limit == "nemo_cap")
 
     def _uvslope(num, dz):
         s = -num / dz
@@ -1278,9 +1289,12 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     S_T3 = _uvslope(drho_dx_u_east, drho_dz_T3)
     S_T4 = _uvslope(drho_dx_u_east, drho_dz_T4)
 
-    _tw_uv = lambda s: dm95_taper_scalar(
-        s, S_max, transition_width_frac=taper_width_frac,
-        stop_gradient_taper=_sg_taper)[1]
+    if slope_limit == "nemo_cap":
+        _tw_uv = lambda s: jnp.ones_like(s)
+    else:
+        _tw_uv = lambda s: dm95_taper_scalar(
+            s, S_max, transition_width_frac=taper_width_frac,
+            stop_gradient_taper=_sg_taper)[1]
     taper_T1 = _tw_uv(S_T1)
     taper_T2 = _tw_uv(S_T2)
     taper_T3 = _tw_uv(S_T3)
@@ -1477,7 +1491,8 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
      taper_Wx1, taper_Wx2, taper_Wx3, taper_Wx4,
      taper_Wy1, taper_Wy2, taper_Wy3, taper_Wy4) = _w_triad_slopes_tapers(
         drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon, S_max, taper_width_frac,
-        slope_density=slope_density, drdT_w=drdT_w, drdS_w=drdS_w,
+        slope_density=slope_density, slope_limit=slope_limit,
+        drdT_w=drdT_w, drdS_w=drdS_w,
         drdT_wb=drdT_wb, drdS_wb=drdS_wb,
         drho_dz_w_b=(drho_dz_w_b if slope_density == "neutral" else None),
         dTdx_u=dTdx_u, dSdx_u=dSdx_u, dTdy_v=dTdy_v, dSdy_v=dSdy_v,
@@ -1700,12 +1715,37 @@ def gm_redi_tracer_tendency_latlon(
     else:
         kappa_GM = cfg.kappa_GM
 
+    # Hallberg (2013) resolution taper of the GM coefficient (default off =>
+    # byte-identical). Static Python gate on the config bool (feature-gating
+    # exception; no traced branching). Scales whatever the closure produced
+    # (override / Treguier / Visbeck / constant); the Redi diffusivity
+    # (kappa_Redi_eff below) is intentionally left unscaled -- GM-only.
+    # BUDGET COUPLING: when a prognostic EKE/GEOMETRIC closure supplies the
+    # override, the model step scales the GM-derived EKE production by the
+    # SAME f_res (gm_resolution_factor -- one definition), so the eddy-energy
+    # budget sees the conversion this scaled kappa actually performs (codex
+    # MED-3 r2; see the resolution_function note in config.py).
+    if getattr(cfg, "resolution_function", False):
+        if f_coriolis is None:
+            f_coriolis = jnp.broadcast_to(grid.f, mask.shape)
+        kappa_GM = gm_resolution_scaled_kappa(
+            kappa_GM, f_coriolis, jnp.sqrt(grid.area),
+            cfg.resfn_gamma, cfg.resfn_cbcl_ms,
+        )
+
     # Redi isopycnal diffusivity. K_iso = K_gm (prognostic) when the override is
     # supplied (Veros enable_eke_isopycnal_diffusion -> the step passes
     # kappa_redi_override = kappa_gm_override); else the constant cfg.kappa_Redi.
     kappa_Redi_eff = cfg.kappa_Redi if kappa_redi_override is None else kappa_redi_override
 
     scheme = getattr(cfg, "slope_scheme", "triads")
+    _slope_limit = getattr(cfg, "slope_limit", "dm95_taper")
+    validate_slope_limit(_slope_limit)
+    if _slope_limit == "nemo_cap" and scheme != "triads":
+        raise ValueError(
+            "GMRediConfig.slope_limit='nemo_cap' is only wired for "
+            "slope_scheme='triads' (the centered path keeps the DM95 "
+            "taper).")
     _double_diag = bool(getattr(cfg, "double_redi_diagonal", False))
     _vtw = bool(getattr(cfg, "veros_triad_weights", False))
     _adj_stab = getattr(cfg, "adjoint_stabilization", "none")
@@ -1721,7 +1761,8 @@ def gm_redi_tracer_tendency_latlon(
             T, rho, mask, u_mask, v_mask,
             z_coord, jacobian, grid, kappa_GM, kappa_Redi_eff, cfg.S_max,
             cfg.taper_width_frac, cfg.implicit_K33, cfg.K_iso_steep,
-            slope_density=slope_density, T_tracer=T, S_tracer=S,
+            slope_density=slope_density, slope_limit=_slope_limit,
+            T_tracer=T, S_tracer=S,
             eos_fn=eos_fn, rho_0=rho_0, g=g,
             double_diag_kappa=_ddk, double_diag_steep=cfg.K_iso_steep,
             veros_triad_weights=_vtw,
@@ -1731,7 +1772,8 @@ def gm_redi_tracer_tendency_latlon(
             S, rho, mask, u_mask, v_mask,
             z_coord, jacobian, grid, kappa_GM, kappa_Redi_eff, cfg.S_max,
             cfg.taper_width_frac, cfg.implicit_K33, cfg.K_iso_steep,
-            slope_density=slope_density, T_tracer=T, S_tracer=S,
+            slope_density=slope_density, slope_limit=_slope_limit,
+            T_tracer=T, S_tracer=S,
             eos_fn=eos_fn, rho_0=rho_0, g=g,
             double_diag_kappa=_ddk, double_diag_steep=cfg.K_iso_steep,
             veros_triad_weights=_vtw,
@@ -1860,6 +1902,7 @@ def compute_isoneutral_K33_latlon(
         taper_width_frac=cfg.taper_width_frac,
         u_face_act=_ufa, v_face_act=_vfa,
         adjoint_stabilization=getattr(cfg, "adjoint_stabilization", "none"),
+        slope_limit=getattr(cfg, "slope_limit", "dm95_taper"),
         **w_inputs)
     K_33 = 0.25 * kappa_Redi_w * (
         tWx1 * S_Wx1 ** 2 + tWx2 * S_Wx2 ** 2 + tWx3 * S_Wx3 ** 2 + tWx4 * S_Wx4 ** 2
@@ -2105,6 +2148,7 @@ def compute_realized_gm_skew_conversion(
         taper_width_frac=cfg.taper_width_frac,
         u_face_act=_ufa, v_face_act=_vfa,
         adjoint_stabilization=getattr(cfg, "adjoint_stabilization", "none"),
+        slope_limit=getattr(cfg, "slope_limit", "dm95_taper"),
         **w_inputs)
     # Per-triad slope variance <S²>_triad = 0.25·Σ taper·S²  (= K_33/κ_Redi).
     S2_triad = 0.25 * (
@@ -2300,6 +2344,7 @@ def compute_realized_signed_conversions(
             q, rho_filled, mask, u_mask, v_mask, z_coord, jacobian, grid,
             kappa_GM_arg, kappa_Redi_arg, cfg.S_max, cfg.taper_width_frac,
             cfg.implicit_K33, _steep, slope_density=slope_density,
+            slope_limit=getattr(cfg, "slope_limit", "dm95_taper"),
             T_tracer=T, S_tracer=S, eos_fn=eos_fn, rho_0=rho_0, g=g,
             return_fluxes=True,
             double_diag_kappa=double_diag_kappa,

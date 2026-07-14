@@ -8,7 +8,7 @@ from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.core.field import Field
 from legoesm.core.state import TracerState
-from legoesm.atmosphere.dynamics.tracer_transport import (
+from legoesm.atmosphere.dynamics.shared.tracer_transport import (
     TracerTransportModel,
     TracerTransportConfig,
     tracer_tendencies,
@@ -429,7 +429,7 @@ class TestLatLonTracerTransportFaceEval:
         """
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.tracer_transport_latlon import (
+        from legoesm.atmosphere.dynamics.gcm.tracer_transport_latlon import (
             _uface_coords, _vface_coords,
         )
 
@@ -453,7 +453,7 @@ class TestLatLonTracerTransportFaceEval:
         """
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.tracer_transport_latlon import (
+        from legoesm.atmosphere.dynamics.gcm.tracer_transport_latlon import (
             TracerTransportLatLonModel, TracerTransportLatLonConfig,
         )
 

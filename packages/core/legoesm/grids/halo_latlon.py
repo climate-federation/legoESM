@@ -146,13 +146,23 @@ def _try_spmd_latlon_pad(data: jnp.ndarray, halo: int, negate: bool):
     backend + a ``"lat"`` mesh are active; else return ``None`` (caller falls
     through to mpi/local).  Used by every ``pad_halo_latlon*`` dispatcher so the
     ocean/atm lat-lon step is backend-oblivious — same pattern as the cube.
-    Handles 2-D and 3-D (the body's lon-pad is ndim-agnostic)."""
+    Handles 2-D and 3-D (the body's lon-pad is ndim-agnostic).
+
+    A 2-D ``("lat", "lon")`` mesh (M3a native 2-D tiling) routes to
+    :func:`legoesm.parallel.latlon_spmd.make_latlon_2d_pad_body` — lat
+    ppermute + periodic lon ring ppermute + the exact serial 180-deg pole
+    fold (all_gather'd over the lon ring at the pole tiles).  A degenerate
+    ``p_lon == 1`` lon axis takes the body's static local-wrap branch,
+    bit-identical to the 1-D band body."""
     from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
     if get_halo_backend() != "spmd":
         return None
     mesh = get_spmd_mesh()
     if mesh is None or "lat" not in getattr(mesh, "axis_names", ()):
         return None
+    if "lon" in tuple(mesh.axis_names):
+        from legoesm.parallel.latlon_spmd import make_latlon_2d_pad_body
+        return make_latlon_2d_pad_body(mesh, halo=halo, negate=negate)(data)
     from legoesm.parallel.latlon_spmd import make_latlon_band_pad_body
     return make_latlon_band_pad_body(mesh, halo=halo, negate=negate)(data)
 

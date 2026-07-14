@@ -6,7 +6,7 @@ leaf carbon-isotope discrimination) both need the SAME per-archetype canopy forc
 model's OWN single-column growing-season climate + the archetype's PFT photosynthetic
 capacity, evaluated at a representative daytime sampling point.  This module owns that
 ONE forcing-construction (no copy-paste across the two forwards) and returns the concrete
-per-archetype arrays :func:`legoesm.land.carbon.stomata.solve_coupled_farquhar_ci`
+per-archetype arrays :func:`legoesm.land.stomata.solve_coupled_farquhar_ci`
 consumes.
 
 For each archetype the canopy is evaluated at a REPRESENTATIVE growing-season climate,
@@ -58,7 +58,7 @@ REF_BETA = 1.0         # well-watered growing-season soil-moisture factor [-]
 class ArchetypeForcing(NamedTuple):
     """Per-archetype representative growing-season leaf forcing (concrete ``(n_arch,)``).
 
-    The exact inputs :func:`legoesm.land.carbon.stomata.solve_coupled_farquhar_ci` takes
+    The exact inputs :func:`legoesm.land.stomata.solve_coupled_farquhar_ci` takes
     (``T_leaf, sw_down, co2_ppmv, q_air, p_surface``) plus the per-archetype PFT
     photosynthetic capacity ``Vc_max25`` [umol/m2/s].  Independent of every trained
     parameter, so a forward precomputes it once.
@@ -82,7 +82,7 @@ def build_archetype_forcing(table) -> ArchetypeForcing:
     and reads each archetype's ``Vc_max25`` from the SAME CLM5 table + column order
     (:func:`legoesm.land.surface_params.clm5_pft_table`) the archetype IC builder uses -- no
     re-derived forcing or physiology.  The returned arrays are the model's own, never
-    re-derived here, and feed :func:`legoesm.land.carbon.stomata.solve_coupled_farquhar_ci`.
+    re-derived here, and feed :func:`legoesm.land.stomata.solve_coupled_farquhar_ci`.
     """
     import jax
     import jax.numpy as jnp

@@ -103,14 +103,25 @@ def make_tiled_transport_sweep_stage(mesh, n: int, kt: int, h3: int = 4):
 # ---------------------------------------------------------------------------
 
 def transport_sweep_tile_2d(vp_g, courant, rd_g, a_i, a_j, nl: int, h3: int = 4,
-                            cross_nl: int | None = None):
+                            cross_nl: int | None = None,
+                            apply_d_sw3_boundary_fix: bool = False,
+                            boundary_fix_dx_field=None,
+                            boundary_fix_edges=None):
     """Per-tile i-sweep (xtp_u, axis=1) PPM flux on a 2-D ``(tile_i, tile_j)``
     tiling.  Slice the SWEEP axis=1 to the window ``[a_i : a_i+nl+2*h3]`` AND
     the CROSS axis=2 to the tile's ``[a_j : a_j+cross_nl]`` (NO j-halo — the
     i-sweep is an independent 1-D PPM per j-row).  ``cross_nl`` defaults to
     ``nl`` (CELL cross, the synthetic/U3b case); pass ``nl+1`` for the REAL
     xtp_u whose cross axis is the ``n+1`` CORNER axis (U3d, shapes from job
-    8480355).  ``vp_g`` ``(F, n+2*h3, n_cross)``; returns ``(F, nl+1, cn)``."""
+    8480355).  ``vp_g`` ``(F, n+2*h3, n_cross)``; returns ``(F, nl+1, cn)``.
+
+    d_sw3 boundary fix (2026-07-10 follow-up — the serial sweeps now run
+    ``apply_d_sw3_boundary_fix=True`` always-on): pass the GLOBAL interior
+    ``boundary_fix_dx_field`` (sliced to the tile here) plus the static
+    ``boundary_fix_edges=(sweep_lo, sweep_hi, cross_lo, cross_hi)`` flags for
+    the global face edges the tile touches (e.g. ``(a_i == 0, ti == kt-1,
+    a_j == 0, tj == kt-1)``) — the one-sided overrides + vertex zeroing are
+    only valid at GLOBAL face boundaries, never at tile cuts."""
     from legoesm.core.fv3_sw_core import ppm_transport_1d
 
     cn = nl if cross_nl is None else cross_nl
@@ -132,18 +143,36 @@ def transport_sweep_tile_2d(vp_g, courant, rd_g, a_i, a_j, nl: int, h3: int = 4,
     c_t = jax.lax.dynamic_slice_in_dim(c_t, a_j, cn, axis=2)
     rd_t = jax.lax.dynamic_slice_in_dim(rd_g, a_i, nl + 2, axis=1)
     rd_t = jax.lax.dynamic_slice_in_dim(rd_t, a_j, cn, axis=2)
+    dx_t = None
+    if boundary_fix_dx_field is not None:
+        # GLOBAL interior dx (sweep axis=1 length n) → tile window.  Only
+        # the ≤2 cells nearest an ACTIVE global edge are read, where the
+        # tile's internal edge-pad matches the global one bit-for-bit.
+        dx_t = jax.lax.dynamic_slice_in_dim(
+            boundary_fix_dx_field, a_i, nl, axis=1)
+        dx_t = jax.lax.dynamic_slice_in_dim(dx_t, a_j, cn, axis=2)
     return ppm_transport_1d(
-        vp_t, c_t, rd_t, 1, external_halo=h3, rd_prepadded=True)
+        vp_t, c_t, rd_t, 1, external_halo=h3, rd_prepadded=True,
+        apply_d_sw3_boundary_fix=apply_d_sw3_boundary_fix,
+        boundary_fix_dx_field=dx_t,
+        boundary_fix_edges=boundary_fix_edges)
 
 
 def transport_jsweep_tile_2d(vp_g, courant, rd_g, a_i, a_j, nl: int, h3: int = 4,
-                             cross_nl: int | None = None):
+                             cross_nl: int | None = None,
+                             apply_d_sw3_boundary_fix: bool = False,
+                             boundary_fix_dx_field=None,
+                             boundary_fix_edges=None):
     """Per-tile j-sweep (ytp_v, axis=2) PPM flux — the symmetric counterpart
     of :func:`transport_sweep_tile_2d` with the sweep/cross axes swapped.
     Slice the SWEEP axis=2 to ``[a_j : a_j+nl+2*h3]`` AND the CROSS axis=1 to
     ``[a_i : a_i+cross_nl]`` (NO i-halo).  ``cross_nl`` defaults to ``nl``;
     pass ``nl+1`` for the REAL ytp_v (cross axis = ``n+1`` CORNER, U3d).
-    ``vp_g`` ``(F, n_cross, n+2*h3)``; returns ``(F, cn, nl+1)``."""
+    ``vp_g`` ``(F, n_cross, n+2*h3)``; returns ``(F, cn, nl+1)``.
+
+    d_sw3 boundary-fix args: as :func:`transport_sweep_tile_2d`, with the
+    sweep on the j axis — ``boundary_fix_edges=(a_j-lo, a_j-hi, a_i-lo,
+    a_i-hi)`` global-edge flags."""
     from legoesm.core.fv3_sw_core import ppm_transport_1d
 
     cn = nl if cross_nl is None else cross_nl
@@ -163,13 +192,25 @@ def transport_jsweep_tile_2d(vp_g, courant, rd_g, a_i, a_j, nl: int, h3: int = 4
     c_t = jax.lax.dynamic_slice_in_dim(c_t, a_i, cn, axis=1)
     rd_t = jax.lax.dynamic_slice_in_dim(rd_g, a_j, nl + 2, axis=2)
     rd_t = jax.lax.dynamic_slice_in_dim(rd_t, a_i, cn, axis=1)
+    dx_t = None
+    if boundary_fix_dx_field is not None:
+        # GLOBAL interior dx (sweep axis=2 length n) → tile window.
+        dx_t = jax.lax.dynamic_slice_in_dim(
+            boundary_fix_dx_field, a_j, nl, axis=2)
+        dx_t = jax.lax.dynamic_slice_in_dim(dx_t, a_i, cn, axis=1)
     return ppm_transport_1d(
-        vp_t, c_t, rd_t, 2, external_halo=h3, rd_prepadded=True)
+        vp_t, c_t, rd_t, 2, external_halo=h3, rd_prepadded=True,
+        apply_d_sw3_boundary_fix=apply_d_sw3_boundary_fix,
+        boundary_fix_dx_field=dx_t,
+        boundary_fix_edges=boundary_fix_edges)
 
 
 def make_tiled_transport_sweep_stage_2d(
     mesh, n: int, kt: int, h3: int = 4, sweep: str = "i",
     cross_nl: int | None = None,
+    apply_d_sw3_boundary_fix: bool = False,
+    boundary_fix_dx_field=None,
+    boundary_fix_edges=None,
 ):
     """Build a sharded PPM transport stage on a ``(6, kt, kt)`` mesh with axis
     names ``("face", "tile_i", "tile_j")``.
@@ -182,7 +223,25 @@ def make_tiled_transport_sweep_stage_2d(
     / ``(6, kt*nl, kt*(nl+1))`` for ``j``.  ``cross_nl=nl+1`` (the REAL
     _bgrid_ke_transport case, cross axis = the ``n+1`` CORNER axis, U3d) →
     gathered ``(6, kt*(nl+1), kt*(nl+1))``; both axes reassemble
-    lower-tile-owns-shared to ``(6, n+1, n+1)``."""
+    lower-tile-owns-shared to ``(6, n+1, n+1)``.
+
+    d_sw3 boundary fix (codex 2026-07-11 F3): the always-on one-sided edge
+    PPM overrides need PER-TILE ``boundary_fix_edges`` masks derived from
+    each tile's ``axis_index`` (only tiles touching a global face edge may
+    fire the override) — not yet ported to this shard-map stage.  Raises
+    ``NotImplementedError`` if requested, so a shard-map composition can
+    never silently reproduce the pre-fix numerics; use the host-side tiled
+    helpers (:func:`transport_sweep_tile_2d` /
+    :func:`transport_jsweep_tile_2d`), which accept the fix args per tile.
+    """
+    if (apply_d_sw3_boundary_fix or boundary_fix_dx_field is not None
+            or boundary_fix_edges is not None):
+        raise NotImplementedError(
+            "make_tiled_transport_sweep_stage_2d: shard-map per-tile edge "
+            "masks for the d_sw3 boundary fix are not yet ported — use the "
+            "host-side tiled helpers (transport_sweep_tile_2d / "
+            "transport_jsweep_tile_2d) which take per-tile "
+            "boundary_fix_edges.")
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
     if sweep not in ("i", "j"):
@@ -220,7 +279,7 @@ def make_tiled_transport_sweep_stage_2d(
 # is DISTINCT from the d2a2c ut/vt (d2a2c_tile_unified:1225/1235 uses the
 # D-grid wind directly, `ut = (uc - v_d*cosa_u)*rsin_u`).  The box stencil is
 # fully LOCAL once uc/vc carry their 1-cell cross halo — supplied by the
-# GLOBAL face-replicated pre-pad `_pad_halo_uc_vc_new_via_old_delta` (the same
+# GLOBAL face-replicated pre-pad `_pad_halo_uc_vc_new_via_neighbor_delta` (the same
 # pre-pad proven in U3f) — so each tile only dynamic_slices, NO in-stage
 # exchange.  Reassembly: lower tile owns the shared staggered face (ut: i-axis
 # n+1; vt: j-axis n+1), the cell axis tiles exactly across kt.
@@ -234,7 +293,7 @@ def dsw1_ut_vt_tile_2d(uc, vc, uc_pad, vc_pad,
     ``uc`` ``(F, n+1, n)``, ``vc`` ``(F, n, n+1)`` are the (face-replicated)
     UPDATED C-grid winds; ``uc_pad`` ``(F, n+1, n+2)`` / ``vc_pad``
     ``(F, n+2, n+1)`` are their GLOBAL cross-halo pre-pad
-    (``_pad_halo_uc_vc_new_via_old_delta``).  ``cosa_u``/``rsin_u``
+    (``_pad_halo_uc_vc_new_via_neighbor_delta``).  ``cosa_u``/``rsin_u``
     ``(F, n+1, n)`` and ``cosa_v``/``rsin_v`` ``(F, n, n+1)`` are the static
     metrics.  Slices the tile at start ``(a_i, a_j)`` (``axis_index*nl`` in a
     shard, ``t*nl`` in a host test) and returns the staggered tile blocks
@@ -323,7 +382,7 @@ def make_tiled_dsw1_ut_vt_stage_2d(mesh, cdgrid, n: int, kt: int):
     ``cosa_v``/``rsin_v``) like :func:`tiled_d2a2c.make_tiled_d2a2c_stage`.
     Returns ``stage(uc, vc, uc_pad, vc_pad) -> (ut, vt)`` where the four
     inputs are FACE-REPLICATED (``uc``/``vc`` the updated C-grid winds,
-    ``uc_pad``/``vc_pad`` their global ``_pad_halo_uc_vc_new_via_old_delta``
+    ``uc_pad``/``vc_pad`` their global ``_pad_halo_uc_vc_new_via_neighbor_delta``
     pre-pad) and the outputs are tile-sharded
     ``P("face","tile_i","tile_j")`` with gathered extents
     ``ut (6, kt*(nl+1), kt*nl)`` / ``vt (6, kt*nl, kt*(nl+1))`` (the staggered
@@ -356,7 +415,7 @@ def make_tiled_dsw1_ut_vt_stage_2d(mesh, cdgrid, n: int, kt: int):
 
     def stage(uc, vc, uc_pad, vc_pad):
         """uc/vc the updated C-grid winds; uc_pad/vc_pad their global
-        ``_pad_halo_uc_vc_new_via_old_delta`` pre-pad — all FACE-REPLICATED."""
+        ``_pad_halo_uc_vc_new_via_neighbor_delta`` pre-pad — all FACE-REPLICATED."""
         return _body(uc, vc, uc_pad, vc_pad,
                      cosa_u, rsin_u, cosa_v, rsin_v)
 

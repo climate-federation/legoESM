@@ -589,7 +589,7 @@ def _make_d13c_forward(table):
     through the C4 archetypes."""
     from legoesm.land.carbon.config import D13CConfig
     from legoesm.land.carbon.d13c_forward import build_d13c_forward
-    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.land.stomata import StomataConfig
     from legoesm.training.param_collector import apply_param_overrides
 
     d13c_fn = build_d13c_forward(table)
@@ -1811,7 +1811,7 @@ def _write_tuned_json(path: Path, *, tuned_params, initial_params, loss_history,
     from legoesm.training.param_collector import build_registry
     from legoesm.land.carbon.config import CarbonConfig
     from legoesm.land.canopy.sif import SIFConfig
-    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.land.stomata import StomataConfig
 
     registry = {m.qualified_name: m for m in build_registry()}
     # Per-scheme production defaults (carbon + SIF + stomata); a field is looked up in the

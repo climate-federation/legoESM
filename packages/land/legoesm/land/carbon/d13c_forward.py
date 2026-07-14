@@ -3,7 +3,7 @@
 The MODELLED counterpart of :mod:`legoesm.land.carbon.d13c_observations` (the OBSERVED
 side): a per-archetype simulated LEAF delta13C [permil], differentiable in the coupled
 stomatal / water-use-efficiency parameters (the Ball-Berry slope ``g1_bb`` etc.) of
-:class:`legoesm.land.carbon.stomata.StomataConfig`.
+:class:`legoesm.land.stomata.StomataConfig`.
 
 Leaf delta13C is a WATER-USE-EFFICIENCY constraint: photosynthetic 13C discrimination is
 set by the intercellular-to-ambient CO2 ratio ``Ci/Ca`` (Farquhar, Ehleringer & Hubick
@@ -17,7 +17,7 @@ Like the SIF forward and UNLIKE the SOM-SOC forward
 (:func:`legoesm.land.carbon.global_init.equilibrate_archetypes_traced`), this is a
 **single-step** photosynthesis diagnostic -- there is NO multi-year spin-up scan.  It
 reuses the model's OWN coupled-Farquhar solve
-(:func:`legoesm.land.carbon.stomata.solve_coupled_farquhar_ci`) and the SHARED per-archetype
+(:func:`legoesm.land.stomata.solve_coupled_farquhar_ci`) and the SHARED per-archetype
 growing-season forcing (:func:`legoesm.land.carbon.archetype_forcing.build_archetype_forcing`,
 also used by the SIF forward -- one forcing definition, no copy-paste).
 
@@ -47,7 +47,7 @@ differentiable, so the C4 archetypes now return a FAITHFUL C4 value and are INCL
 calibration delta13C loss (no more C4 masking).
 
 Why a FIXED C4 Ci/Ca (option (a)).  The model's Farquhar biochemistry is C3-only
-(:mod:`legoesm.land.carbon.stomata` -- the C4 PFTs ``c4_grass`` / ``crop_c4`` are run through
+(:mod:`legoesm.land.stomata` -- the C4 PFTs ``c4_grass`` / ``crop_c4`` are run through
 C3 kinetics), so the solved ``Ci`` is NOT a faithful C4 leaf state (it lacks the CO2-
 concentrating bundle-sheath step).  Rather than feed a wrong C3-kinetics Ci into the C4 form,
 the C4 branch regulates to a prescribed C4-characteristic Ci/Ca (C4 leaves hold Ci/Ca ~ 0.4
@@ -234,7 +234,7 @@ def _select_c3_c4(is_c4, ci_ca_c3, d13c_config):
 def _leaf_ci_ca(table, stomata_config):
     """Per-archetype ``Ci/Ca`` from the model's own coupled Farquhar-stomata solve ``(n_arch,)``.
 
-    Solves :func:`legoesm.land.carbon.stomata.solve_coupled_farquhar_ci` at the shared
+    Solves :func:`legoesm.land.stomata.solve_coupled_farquhar_ci` at the shared
     representative growing-season forcing (built ONCE, parameter-independent) with the
     per-archetype PFT ``Vc_max25`` spliced in and the (possibly TRACED) stomatal
     water-use-efficiency leaves from ``stomata_config``.  Returns ``Ci / Ca`` -- the
@@ -248,7 +248,7 @@ def _leaf_ci_ca(table, stomata_config):
         REF_LAI,
         build_archetype_forcing,
     )
-    from legoesm.land.carbon.stomata import solve_coupled_farquhar_ci
+    from legoesm.land.stomata import solve_coupled_farquhar_ci
 
     forcing = build_archetype_forcing(table)
     # Per-archetype PFT capacity (Vc_max25) + the traced stomatal leaves; enabled=True
@@ -322,7 +322,7 @@ def build_d13c_forward(table):
         build_archetype_forcing,
     )
     from legoesm.land.carbon.config import D13CConfig
-    from legoesm.land.carbon.stomata import solve_coupled_farquhar_ci
+    from legoesm.land.stomata import solve_coupled_farquhar_ci
 
     forcing = build_archetype_forcing(table)   # static, parameter-independent
     is_c4 = jnp.asarray(_archetype_is_c4(table))   # static per-archetype C3/C4 selector

@@ -219,6 +219,9 @@ def main() -> None:
     # background albedo (from the evolving top-layer wetness).  This lets the
     # entire time loop run inside a single ``lax.scan``.
     update_land_params = make_step_land_params_updater(gsd, config.surface_scheme)
+    # Idealised smoke uses single-year surfdata; interp_annual returns the one
+    # slice for any year, so cover is constant across the run.
+    cover_year = jnp.asarray(float(np.asarray(gsd.years)[0]))
 
     # ----- scan body: state -> state' + diagnostics, fully JAX-traceable -----
     is_multilayer = (args.land_mode == "multilayer")
@@ -234,7 +237,7 @@ def main() -> None:
         forcing_t = make_global_forcing(lat_rad, lon_rad, doy_t, hour_t)
         theta_top_t = (state.theta_soil[:, 0] if is_multilayer
                        else jnp.full(ncol, 0.2))
-        land_params_t, lai_diag = update_land_params(theta_top_t, doy_t)
+        land_params_t, lai_diag = update_land_params(theta_top_t, doy_t, cover_year)
         new_state, resp, _ = step_fn(state, forcing_t, config, U_MIN, dt,
                                      lat=lat_rad,
                                      land_params=land_params_t, doy=doy_t)

@@ -80,14 +80,26 @@ def test_ift_grad_matches_fd_trainable_param():
 
 
 def test_per_field_masking_keeps_finite_grads():
-    """A NaN cotangent for the MOST forcing (Ta) must not zero La's gradient."""
+    """Grads through the canopy closure are finite for every forcing field.
+
+    Previously the 4-regime MOST stability produced a NaN cotangent for the air
+    temperature Ta (out-of-domain sqrt/log/cbrt in the where-combined branches),
+    which a per-field mask had to zero to keep La's gradient finite.  With the
+    MOST branches now grad-safe (2026-07-09 audit F5), Ta's cotangent flows as a
+    genuine finite value that agrees with finite differences, so BOTH La and Ta
+    carry finite, physically-signed, correct gradients.
+    """
     def tf(La, Ta):
         return solve_canopy_closure(_X0, _bundle(La=La, Ta=Ta), _CFG)[0][0]
 
     g_La, g_Ta = jax.grad(tf, argnums=(0, 1))(_a(350.0), _a(298.0))
     assert float(g_La) > 0.0           # preserved, finite, nonzero
     assert jnp.isfinite(g_La)
-    assert float(g_Ta) == 0.0          # MOST-forcing NaN cotangent zeroed
+    assert jnp.isfinite(g_Ta)          # MOST is grad-safe now: real Ta gradient
+    # The Ta gradient is now genuine (not a masked-away NaN): validate it against
+    # a central finite difference.
+    g_Ta_fd = (tf(_a(350.0), _a(298.0 + 0.05)) - tf(_a(350.0), _a(298.0 - 0.05))) / 0.1
+    assert jnp.allclose(g_Ta, g_Ta_fd, rtol=5e-3, atol=1e-5)
 
 
 def test_initial_guess_cotangent_is_zero():

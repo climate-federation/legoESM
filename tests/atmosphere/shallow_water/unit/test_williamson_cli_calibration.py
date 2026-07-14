@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import pytest
 
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterConfig,
     cdgrid_div_damp_cube,
     cdgrid_hyperdiff_cube,
@@ -210,12 +210,12 @@ class TestCliUsesHelper:
         # and the helper symbol is reachable through the CLI's import
         # path. Guards against accidental removal of the import or a
         # rename without the test runner's awareness.
-        import legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid as m
+        import legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid as m
         assert hasattr(m, "williamson_cli_calibration")
         # The CLI's cmd_test imports `williamson_cli_calibration` from
         # this module; if the name disappears or moves, this assertion
         # is what fails first.
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             williamson_cli_calibration as imported,
         )
         assert imported is m.williamson_cli_calibration

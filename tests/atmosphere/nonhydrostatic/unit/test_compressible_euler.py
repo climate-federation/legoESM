@@ -26,11 +26,11 @@ from legoesm.grids.vertical import (
 )
 from legoesm.core.field import Field
 from legoesm.core.state import NonHydrostaticState, NonHydrostaticTendencies
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
     compute_exner_perturbation,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
     CDGridCompressibleEulerModel as CompressibleEulerModel,
     CDGridCompressibleEulerConfig,
     cdgrid_compressible_euler_slow_tendencies,

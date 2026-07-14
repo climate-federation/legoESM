@@ -18,16 +18,16 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     compute_dry_mass_plane,
     fix_mass_nonhydrostatic_plane,
     make_flat_plane_terrain_metric,
     make_rest_state,
 )
-from legoesm.atmosphere.dynamics.rce_mpi import (
+from legoesm.atmosphere.dynamics.crm.rce_mpi import (
     _plane_volume_weight_mpi,
     compute_dry_mass_plane_mpi,
     fix_mass_nonhydrostatic_plane_mpi,
@@ -176,7 +176,7 @@ def test_step_halo_raises_when_fix_mass_without_owned_mask_multirank():
     config.fix_mass=True must raise when owned_mask is omitted, not
     silently let dry mass drift. Construct a fake n_ranks=2 layout
     (no real MPI) and verify the gate fires before any compute."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         PlaneCompressibleEulerModel,
     )
     grid, hc, tm, state, _layout, _mask = _setup()
@@ -200,7 +200,7 @@ def test_step_halo_raises_when_fix_mass_without_owned_mask_multirank():
 def test_step_halo_with_fix_mass_anchored_single_rank():
     """End-to-end: step_halo on single rank with owned_mask + fix_mass
     must preserve the initial dry mass to round-off across many steps."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         PlaneCompressibleEulerModel,
     )
     grid, hc, tm, state, layout, mask = _setup()

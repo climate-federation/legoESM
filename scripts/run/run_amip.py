@@ -278,6 +278,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hyperdiff-scale", type=float,
                         default=_DYCORE_DEFAULTS.hyperdiff_scale,
                         help="Dycore hyperdiffusion multiplier")
+    parser.add_argument("--mpas-nu-vert4-t", type=float,
+                        default=_DYCORE_DEFAULTS.mpas_nu_vert4_T,
+                        help="MPAS vertical biharmonic hyperdiffusion of T "
+                             "[1/s] — #930 2Δσ vertical-checkerboard cure "
+                             "(0 disables)")
     parser.add_argument("--div-damp-scale", type=float,
                         default=_DYCORE_DEFAULTS.div_damp_scale,
                         help="Dycore divergence-damping multiplier")
@@ -653,14 +658,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "the non-linear KK2000 rate is not under-fed by "
                              "the grid-mean.  Requires --microphysics morrison.")
     parser.add_argument("--convective-precip-efficiency", type=float,
-                        default=0.0,
-                        help="Tiedtke convective precipitation efficiency "
-                             "[0,1] (1989 in-updraft precipitation). >0 "
+                        default=None,
+                        help="Convective in-updraft precipitation efficiency "
+                             "[0,1] (Tiedtke 1989 in-updraft precipitation). >0 "
                              "diverts that fraction of convective condensate "
                              "to rain (sediments via microphysics, invisible "
                              "to radiation) instead of detraining it all as "
                              "suspended cloud. Observed CPE ~0.5-0.9. Requires "
-                             "--convection tiedtke.")
+                             "--convection tiedtke or bechtold. Unset (default) "
+                             "uses each scheme's own default (Tiedtke 0.0=off, "
+                             "Bechtold 0.7=on, the #929 fix); pass 0.0 to force "
+                             "the legacy no-split path.")
     parser.add_argument("--convective-buoyancy-death-memory",
                         action="store_true",
                         help="Tiedtke plume buoyancy-death memory: once a "
@@ -707,6 +715,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "for --use-multilayer-land. Required on compute nodes "
                              "with no outbound internet (empty => download from UCAR "
                              "to /tmp, which fails there).")
+    parser.add_argument("--transient-land-cover", action="store_true",
+                        default=_EXPERIMENT_DEFAULTS.transient_land_cover,
+                        help="Enable transient land-use/land-cover (LULC): re-weight "
+                             "the multilayer land vegetation params every segment at "
+                             "cover_year=start_year+elapsed/365 from "
+                             "--land-cover-surfdata (soil/LAI frozen). Requires "
+                             "--use-multilayer-land.")
+    parser.add_argument("--land-cover-surfdata", type=str,
+                        default=_EXPERIMENT_DEFAULTS.land_cover_surfdata,
+                        help="Transient legoesm_surfdata NetCDF "
+                             "(pft_frac(year, npft, lat, lon) in percent on the CLM5 "
+                             "17-PFT axis; built by scripts/data/build_*_surfdata.py "
+                             "from LUH2/HYDE/Pongratz/KK10) for "
+                             "--transient-land-cover.")
     parser.add_argument("--land-ic", type=str,
                         default=_EXPERIMENT_DEFAULTS.land_ic_path,
                         help="Spun-up land IC (#746): a MultiLayerLandState "
@@ -798,7 +820,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         dest="land_stomatal_beta",
                         help="Route the soil-water availability through the shared "
                              "land Jarvis (1976) stomatal model "
-                             "(legoesm.land.carbon.stomata) instead of the bare "
+                             "(legoesm.land.stomata) instead of the bare "
                              "bucket ramp: beta=min(beta_soil, beta_canopy), closing "
                              "stomata in low light / high VPD. Requires "
                              "--land-soil-bucket.")
@@ -1029,12 +1051,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
               "single-controller, job 8686550; gate "
               "scripts/validate/validate_driver_cs_spmd_parity.py."))
     parser.add_argument(
+        "--enable-tiled-dycore", action="store_true", default=False,
+        help=("P4 (cube >6 devices): route the compiled segment's dynamics "
+              "through the sub-face-TILED cube step (make_tiled_cc_step, "
+              "(6,kt,kt) device mesh, n_devices=6*kt^2). Dynamics-only swap "
+              "(physics/fixers untouched); refuses configs outside the tiled "
+              "base-cut envelope. Requires --grid-type cubed_sphere."))
+    parser.add_argument(
         "--enable-latlon-spmd", action="store_true", default=False,
         help=("Multi-device lat-BAND SPMD for the lat-lon C-grid dycore (A1). "
               "Requires --grid-type latlon, n_lat %% n_devices == 0. Runs the "
               "operator-split unified physics (or dynamics-only / --held-suarez) "
               "band-local. Single-process by default; add --multicontroller for "
               "the multi-node route-B lane. Distinct from --distributed (MPI)."))
+    parser.add_argument(
+        "--latlon-spmd-compiled-segments", action="store_true", default=False,
+        help=("M2b: run each lat-lon SPMD segment as ONE compiled lax.scan "
+              "(band-sharded geometry, one host dispatch per segment) instead "
+              "of the per-step Python loop. Requires --enable-latlon-spmd; "
+              "stateless lane only (dynamics-only / --held-suarez) — the "
+              "operator-split unified-physics lane refuses it loudly. "
+              "Default off = byte-identical per-step path."))
     parser.add_argument(
         "--multicontroller", action="store_true", default=False,
         help=("Promote --enable-latlon-spmd to ROUTE-B (jax.distributed, "
@@ -1100,6 +1137,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         hyperdiff_scale=args.hyperdiff_scale,
         div_damp_scale=args.div_damp_scale,
         moisture_flux_form=args.moisture_flux_form,
+        mpas_nu_vert4_T=args.mpas_nu_vert4_t,
         conservation_fixer=args.conservation_fixer,
         fix_mass=args.fix_mass,
         implicit_grav_wave_use_pcg=args.implicit_grav_wave_use_pcg,
@@ -1141,6 +1179,18 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         ),
     )
 
+    # Preset datasets carry their own SST/SIC unit conversions (cobe SIC is
+    # percent -> sic_scale=0.01; hadisst SST is Celsius -> sst_offset=T_freeze).
+    # Fall back to those when the user did not pass --sst-offset/--sic-scale, so a
+    # bare ``--dataset cobe`` keeps correct units; an explicit flag still wins
+    # (model_driver forwards cfg.sst_offset/sic_scale into the preset config).
+    try:
+        from legoesm.forcing.amip import get_amip_preset
+        _preset = get_amip_preset(args.dataset)
+        _sst_default, _sic_default = _preset.sst_offset, _preset.sic_scale
+    except ValueError:
+        _sst_default, _sic_default = 0.0, 1.0
+
     return ExperimentConfig(
         grid=grid_config,
         dycore=dycore_config,
@@ -1155,8 +1205,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         time_var=args.time_var or "",
         lat_var=args.lat_var or "",
         lon_var=args.lon_var or "",
-        sst_offset=args.sst_offset or 0.0,
-        sic_scale=args.sic_scale or 1.0,
+        sst_offset=args.sst_offset if args.sst_offset is not None else _sst_default,
+        # ``is not None`` (not ``or``) so an explicit 0.0 offset / 0.0 scale — a
+        # legitimate no-op-conversion or no-sea-ice sensitivity run — is not
+        # silently replaced by the preset/default fallback.
+        sic_scale=args.sic_scale if args.sic_scale is not None else _sic_default,
         radiation=args.radiation,
         rad_update_steps=args.rad_update_steps,
         unfused_radiation=args.unfused_radiation,
@@ -1219,6 +1272,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         multilayer_n_layers=args.multilayer_n_layers,
         multilayer_soil_depth=args.multilayer_soil_depth,
         clm_surfdata_path=args.clm_surfdata_path,
+        transient_land_cover=args.transient_land_cover,
+        land_cover_surfdata=args.land_cover_surfdata,
         albedo_land_path=args.albedo_land_file,
         albedo_land_month=args.albedo_land_month,
         subgrid_orography_path=args.subgrid_orography_file,
@@ -1266,6 +1321,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_cape_threshold=args.bechtold_cape_threshold,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
+        latlon_spmd_compiled_segments=args.latlon_spmd_compiled_segments,
         physics_parameterization=args.physics_parameterization,
         physics_parameterization_checkpoint=args.physics_parameterization_checkpoint,
         physics_parameterization_stats=args.physics_parameterization_stats,
@@ -1276,6 +1332,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         gradient_checkpoint=args.gradient_checkpoint,
         distributed=args.distributed,
         distributed_mode=args.distributed_mode,
+        enable_tiled_dycore=args.enable_tiled_dycore,
         shard_radiation_columns=args.shard_radiation_columns,
         allow_level_fallback=args.allow_level_fallback,
         ensemble_size=args.ensemble_size,
@@ -1325,6 +1382,13 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
         parser.error("--ic-path required when --ic era5")
     if args.ghg_forcing == "external" and not args.ghg_file:
         parser.error("--ghg-file required when --ghg-forcing is external")
+    # Ozone/aerosol "external" with an empty path silently substitutes the
+    # built-in reference climatology (use_reference_if_missing) while the run log
+    # still prints the channel as ACTIVE — require the file, as solar/ghg do.
+    if args.ozone_forcing == "external" and not args.ozone_file:
+        parser.error("--ozone-file required when --ozone-forcing is external")
+    if args.aerosol_forcing == "external" and not args.aerosol_file:
+        parser.error("--aerosol-file required when --aerosol-forcing is external")
     if args.aerosol_ccn:
         if args.aerosol_forcing != "external":
             parser.error("--aerosol-ccn requires --aerosol-forcing external "
@@ -1347,10 +1411,13 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
         parser.error("--subgrid-autoconversion requires --microphysics "
                      "morrison (the in-cloud closure lives in the Morrison "
                      "warm-rain path)")
-    if args.convective_precip_efficiency > 0.0 and args.convection != "tiedtke":
+    if (args.convective_precip_efficiency is not None
+            and args.convective_precip_efficiency > 0.0
+            and args.convection not in ("tiedtke", "bechtold")):
         parser.error("--convective-precip-efficiency requires --convection "
-                     "tiedtke (only Tiedtke implements in-updraft "
-                     "precipitation)")
+                     "tiedtke or bechtold (only the mass-flux schemes "
+                     "implement the in-updraft precipitation split; other "
+                     "schemes ignore the knob)")
     if args.convective_buoyancy_death_memory and args.convection != "tiedtke":
         parser.error("--convective-buoyancy-death-memory requires --convection "
                      "tiedtke (plume buoyancy-death memory is a Tiedtke "

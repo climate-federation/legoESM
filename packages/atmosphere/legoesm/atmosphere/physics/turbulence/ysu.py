@@ -1,4 +1,4 @@
-"""YSU (Yonsei University) PBL turbulence scheme.
+"""YSU (Yonsei University) PBL turbulence scheme — differentiable variant.
 
 Nonlocal K-profile with an explicit entrainment flux at the PBL top.
 The K-profile follows the same structure as Holtslag-Boville but adds
@@ -6,6 +6,24 @@ the Hong et al. (2006) prescribed PBL-top entrainment heat flux
 ``(w'θ')_h = −e_ratio·(w'θ')_0``, applied as a flux-matched diffusivity
 localized at the inversion (see the entrainment block in
 :func:`ysu_turbulence`).
+
+.. note::
+
+   **Implementation note vs published YSU.** Published YSU (Hong et al.
+   2006) prescribes the PBL-top entrainment as an explicit
+   *gradient-independent* flux boundary condition at the inversion
+   (proportional to the surface buoyancy flux,
+   ``w'θ'_h ≈ -0.15·w'θ'_0``).  Because this module builds K profiles
+   and integrates them with implicit vertical diffusion, the prescribed
+   flux enters instead as a FLUX-MATCHED eddy diffusivity
+   ``K_h,ent = e_ratio·(w'θ')_0 / max(∂θ_v/∂z, floor)`` under a
+   Gaussian envelope centred on ``h_pbl`` (width
+   ``config.entrainment_width_frac``): the resulting down-gradient flux
+   ``−K_ent·∂θ_v/∂z`` at the inversion reproduces the prescribed
+   ``(w'θ')_h`` exactly where the inversion gradient exceeds the floor,
+   and saturates (stability-capped) in weakly stratified interfaces.
+   Chosen as a smooth, fully differentiable closure (no flux-BC
+   branch) at GCM-typical vertical resolution.
 
 References
 ----------

@@ -45,7 +45,7 @@ from legoesm.grids.gaussian import (
     uv_from_vordiv_3d,
 )
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralPEConfig,
     SpectralPrimitiveEquationModel,
     isothermal_rest_state_spectral,

@@ -63,7 +63,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # under rec["metadata"] so a virtual-CPU-device proxy, a gloo/TCP fabric run,
 # or an f32 ablation is falsifiable from the JSONL row alone.  metadata.py
 # imports JAX lazily, so this is safe before jax.distributed.initialize.
-from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
+from metadata import annotate_incomplete, scaling_metadata, tidy_throughput_fields  # noqa: E402
 
 # SPMD full-step parity tolerances — the FLOATING-POINT RE-ASSOCIATION floor
 # of the sharded step (ppermute halo + mass-fix psum reduction-order change),
@@ -85,15 +85,19 @@ MPAS_PARITY_MAX_STEPS = 8
 MASS_RTOL_DEFAULTS = {"float64": 1.0e-11, "float32": 1.0e-5}
 
 
-def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method):
+def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
+                          moist=False):
     """Reordered+padded global mesh, MPAS PE model, baroclinic-wave IC.
 
     ``reorder_target`` sets the PARTITION (and ghost padding) so every run
     of a strong-scaling ladder times the IDENTICAL mesh; ``run_nd`` is the
     device count of THIS run's mesh/model (the two differ for the
     single-device reference leg of a ladder, via ``--reorder-for``).
+    ``moist=True`` attaches the q_v/q_c/q_r tracers (moist baroclinic
+    wave) so the sharded step's packed tracer halo exchange + RK tracer
+    advection sit on the timed/gated path.
     """
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationConfig,
         MPASPrimitiveEquationModel,
     )
@@ -129,7 +133,8 @@ def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method):
     else:
         mesh_model = mesh
     model = MPASPrimitiveEquationModel(mesh_model, sigma, cfg)
-    state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True)
+    state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True,
+                                      moist=moist)
     return mesh, model, state, dev_config
 
 
@@ -160,8 +165,23 @@ def main() -> int:
     p.add_argument("--partition-method",
                    choices=["auto", "geometric", "metis", "sfc"],
                    default="auto")
-    p.add_argument("--physics", choices=["none", "held_suarez"],
-                   default="none")
+    p.add_argument("--physics", choices=["none", "held_suarez", "kessler"],
+                   default="none",
+                   help="Operator-split physics on the timed path. "
+                        "'kessler' also attaches the q_v/q_c/q_r moist-"
+                        "baroclinic-wave tracers (packed tracer halo "
+                        "exchange + RK tracer advection on the gated "
+                        "path) and extends the parity gate to the "
+                        "tracer fields.")
+    p.add_argument("--halo-strategy",
+                   choices=["auto", "ppermute", "allgather"],
+                   default="auto",
+                   help="Halo strategy for make_voronoi_sharded_step. "
+                        "'auto' picks allgather below the per-device "
+                        "cell threshold — force 'ppermute' to exercise "
+                        "the neighbor-round schedule on small gate "
+                        "meshes (the multicontroller selfspawn tests "
+                        "do).  Recorded in the JSONL row.")
     p.add_argument("--steps", type=int, default=12)
     p.add_argument("--warmup", type=int, default=2)
     p.add_argument("--dt", type=float, default=None,
@@ -264,7 +284,8 @@ def main() -> int:
             f"the ghost padding only guarantees divisibility for the "
             f"partition target.")
     mesh, model, s0, dev_config = build_model_and_state(
-        args.subdivision, args.nlev, reorder_for, nd, args.partition_method)
+        args.subdivision, args.nlev, reorder_for, nd, args.partition_method,
+        moist=(args.physics == "kessler"))
 
     if args.multicontroller:
         # Every process computed the reorder independently — assert the
@@ -294,15 +315,23 @@ def main() -> int:
 
     physics_fn = None
     if args.physics == "held_suarez":
-        from legoesm.atmosphere.held_suarez import held_suarez_forcing_mpas
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_mpas
         physics_fn = held_suarez_forcing_mpas
+    elif args.physics == "kessler":
+        # Warm-rain microphysics over the moist BCW tracers.  Kessler's
+        # saturation adjustment is a rate over the dt bound HERE, so it
+        # must match the stepping dt (make_kessler_forcing_mpas contract).
+        from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
+            make_kessler_forcing_mpas,
+        )
+        physics_fn = make_kessler_forcing_mpas(dt)
 
     # Parity reference: the plain single-device trajectory on the SAME
     # reordered mesh, computed BEFORE any sharding (deterministic identical
     # build on every process).  model.step's signature is call-compatible.
     serial_final = None
     if args.parity_gate:
-        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel,
         )
         ref_model = (model if dev_config.n_devices <= 1
@@ -318,7 +347,8 @@ def main() -> int:
     if args.check_conservation:
         mass_before = _global_dry_mass(s0, mesh)
 
-    step = make_voronoi_sharded_step(model, dev_config)
+    step = make_voronoi_sharded_step(
+        model, dev_config, halo_strategy=args.halo_strategy)
     if dev_config.n_devices > 1:
         s = shard_pytree(s0, dev_config)
     else:
@@ -366,9 +396,30 @@ def main() -> int:
         if args.parity_gate:
             tols = MPAS_PARITY_TOLS[prec]
             ok = True
-            for name, (rtol, atol) in tols.items():
-                want = np.asarray(getattr(serial_final, name).data)
-                got = np.asarray(getattr(final_global, name).data)
+            checks = [
+                (name, getattr(serial_final, name).data,
+                 getattr(final_global, name).data, rtol, atol)
+                for name, (rtol, atol) in tols.items()
+            ]
+            if serial_final.tracers is not None:
+                # Moist run: the tracer fields ride the packed exchange +
+                # RK advection — gate them too (q re-association floor is
+                # far below the q_v scale; reuse the T tolerances).
+                q_rtol, q_atol = tols["T"]
+                if set(final_global.tracers or {}) != set(
+                        serial_final.tracers):
+                    if rank0:
+                        print("ERROR: sharded run dropped tracer fields.",
+                              flush=True)
+                    return 5
+                checks += [
+                    (k, serial_final.tracers[k].data,
+                     final_global.tracers[k].data, q_rtol, q_atol * 1e-3)
+                    for k in sorted(serial_final.tracers)
+                ]
+            for name, want, got, rtol, atol in checks:
+                want = np.asarray(want)
+                got = np.asarray(got)
                 field_ok = bool(np.allclose(got, want, rtol=rtol, atol=atol))
                 ok &= field_ok
                 if rank0:
@@ -389,6 +440,12 @@ def main() -> int:
         subdivision=args.subdivision, n_devices=nd,
         n_cells=int(mesh.nCells), n_edges=int(mesh.nEdges), nlev=args.nlev,
         partition_method=args.partition_method, physics=args.physics,
+        # Requested vs EFFECTIVE (post-"auto") strategy — a JSONL row
+        # saying "auto" would not reveal whether ppermute or allgather
+        # was actually measured (codex M3c-2 MINOR).
+        halo_strategy_requested=args.halo_strategy,
+        halo_strategy_effective=getattr(
+            step, "_halo_strategy_effective", "serial"),
         steps=args.steps, dt=dt,
         platform=jax.default_backend(),
         n_processes=jax.process_count(),
@@ -398,6 +455,21 @@ def main() -> int:
         steady_min_ms=round(float(np.min(steady)), 2),
         per_step_ms=[round(x, 1) for x in per_step_ms],
         cells=int(mesh.nCells) * args.nlev,
+    )
+    # Flat aggregator-compatible identity + metric fields (see the latlon
+    # twin): resolution = subdivision level, matching run_cpu_mpi_scaling's
+    # icosahedral convention so both lanes land on the same plot curves.
+    rec.update(
+        grid_type="icosahedral",
+        resolution=args.subdivision,
+        n_levels=args.nlev,
+        mode="strong",  # this bench fixes the mesh and sweeps devices
+        precision="float64" if jax.config.jax_enable_x64 else "float32",
+        physics_level=args.physics,
+        backend=jax.default_backend(),
+        **tidy_throughput_fields(
+            dt_seconds=dt, time_per_step_ms=med,
+            total_cells=int(mesh.nCells) * args.nlev),
     )
     rec["metadata"] = annotate_incomplete(scaling_metadata(
         grid="icosahedral",

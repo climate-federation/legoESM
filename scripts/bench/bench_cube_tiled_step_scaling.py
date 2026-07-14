@@ -53,7 +53,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
+from metadata import annotate_incomplete, scaling_metadata, tidy_throughput_fields  # noqa: E402
 
 #: Parity tolerances vs the serial untiled step — the adapter gate's
 #: f32-honest bounds (exact f32 ulps of the field scales; a real stage
@@ -89,6 +89,13 @@ def main() -> int:
     p.add_argument("--parity-gate", action="store_true",
                    help="Gate vs the serial untiled step (single-process "
                         "smoke windows only).")
+    p.add_argument("--closed-loop", action="store_true",
+                   help="Persistent BLOCKED-layout lane (the np>6 production "
+                        "assembly): state stays tile-sharded across steps "
+                        "(make_tiled_cc_loop), s = step(s) feedback with the "
+                        "in-stage telescoping mass fixer (production "
+                        "conservation config).  Default off = the single-shot "
+                        "adapter lane (dynamics-only, pristine-input samples).")
     p.add_argument("--multicontroller", action="store_true",
                    help="Route-B: one process per GPU; shared hardened "
                         "init (jax.distributed) BEFORE any JAX use.")
@@ -131,25 +138,35 @@ def main() -> int:
             "and gathered comparison are process-local).")
 
     from jax.sharding import Mesh
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationConfig,
         CDGridPrimitiveEquationModel,
     )
-    from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+    from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import (
+        make_tiled_cc_loop,
         make_tiled_cc_step,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.halo import set_halo_backend
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.parallel.cubesphere_exchange import find_fullcube_allgathers
 
-    # Base-cut envelope config (the adapter validates + refuses anything
-    # outside it): dynamics only, fixers externalized.
     grid = create_cubed_sphere(args.resolution)
     coord = create_sigma_coordinate(args.nlev)
-    cfg = CDGridPrimitiveEquationConfig(
-        use_conservation_fixer=False, fix_mass=False)
+    if args.closed_loop:
+        # PRODUCTION conservation config: the blocked loop applies the
+        # serial telescoping post-step fix_ps_mass IN-STAGE (make_tiled_cc_
+        # loop validates the envelope; anchor stays off so serial + tiled
+        # both telescope the per-step pre-step mass).
+        cfg = CDGridPrimitiveEquationConfig(
+            use_conservation_fixer=True, fix_mass=True,
+            anchor_mass_to_initial=False, zero_mean_ps_tendency=True)
+    else:
+        # Base-cut envelope config (the single-shot adapter refuses
+        # anything outside it): dynamics only, fixers externalized.
+        cfg = CDGridPrimitiveEquationConfig(
+            use_conservation_fixer=False, fix_mass=False)
     model = CDGridPrimitiveEquationModel(grid, coord, cfg)
     state0 = held_suarez_init(grid, coord)
 
@@ -173,15 +190,26 @@ def main() -> int:
     set_halo_backend("local")
     dev = np.array(jax.devices()[:n_devices]).reshape(6, args.kt, args.kt)
     mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
-    tiled_step = jax.jit(make_tiled_cc_step(model, mesh, kt=args.kt,
-                                            dt=args.dt))
+    if args.closed_loop:
+        # Persistent blocked layout: enter ONCE, feed the step its own
+        # output (input layout == output layout — the production loop).
+        enter, loop_step, loop_exit = make_tiled_cc_loop(
+            model, mesh, kt=args.kt, dt=args.dt)
+        blk0 = enter(state0)
+        jax.block_until_ready(jax.tree.leaves(blk0))
+        tiled_step = jax.jit(loop_step)
+        _lower_arg = blk0
+    else:
+        tiled_step = jax.jit(make_tiled_cc_step(model, mesh, kt=args.kt,
+                                                dt=args.dt))
+        _lower_arg = state0
 
     # --- Anti-fake HLO census on the compiled step --------------------------
     # The SAME jitted callable is audited AND timed (auditing a separate
     # jit while timing the bare adapter would census a different
     # executable; codex) — and the audit compile is reused by the timed
     # loop (per_step_ms[0] is then dispatch, not compile; recorded).
-    lowered = tiled_step.lower(state0)
+    lowered = tiled_step.lower(_lower_arg)
     _t_compile0 = time.perf_counter()
     compiled = lowered.compile()
     compile_ms = (time.perf_counter() - _t_compile0) * 1e3
@@ -204,11 +232,14 @@ def main() -> int:
     # (--parity-gate runs only in the small Stage-A config); no timing row is
     # ever produced for an unverified execution (codex).
     if args.parity_gate:
-        s = compiled(state0)
+        s = compiled(_lower_arg)
         jax.block_until_ready(jax.tree.leaves(s))
+        # Closed loop: reassemble the blocked state to cc (the exit path)
+        # so BOTH lanes gate the same cc fields vs the same serial step.
+        s_cc = loop_exit(s, state0) if args.closed_loop else s
         ok = True
         for nm in ("u", "v", "T", "p_s"):
-            got = np.asarray(getattr(s, nm).data)
+            got = np.asarray(getattr(s_cc, nm).data)
             mx = float(np.max(np.abs(got - serial_ref[nm])))
             field_ok = mx < TILED_PARITY_ATOL[nm]
             ok &= field_ok
@@ -224,17 +255,33 @@ def main() -> int:
 
         multihost_utils.sync_global_devices("cube_tiled_bench_start")
 
+    if args.closed_loop:
+        # #921: the closed-loop step fuses the halo collective-permutes with
+        # the in-stage mass-fixer psum in ONE executable; on multi-process GPU
+        # the NCCL comm-init of those two clique kinds can be ordered
+        # differently per rank and DEADLOCK.  Prime every clique in a fixed,
+        # rank-independent order FIRST (no-op single-process / CPU-virtual).
+        from legoesm.parallel.tiled_production_cdgrid import (
+            warmup_tiled_cube_comms,
+        )
+        warmup_tiled_cube_comms(mesh, args.kt)
+
     # Time the AUDITED AOT executable itself — jit's dispatch cache does NOT
     # reuse lower().compile()'s output, so calling the jit wrapper would
-    # recompile a second (unaudited) executable (codex).  Each sample re-runs
-    # the SAME pristine tile-replicated input: the adapter is single-shot
-    # (tile-sharded out != tile-replicated in), so this measures per-step
-    # latency at the given device count WITHOUT the fake output
-    # re-replication a feedback loop would require.
+    # recompile a second (unaudited) executable (codex).
+    #
+    #   closed loop: s = compiled(s) FEEDBACK — valid because the blocked
+    #     step's input layout == output layout (the production contract);
+    #     the timed trajectory is a real multi-step integration.
+    #   single-shot: each sample re-runs the SAME pristine tile-replicated
+    #     input (tile-sharded out != tile-replicated in), measuring
+    #     per-step latency WITHOUT the fake output re-replication a
+    #     feedback loop would require.
     per_step_ms = []
+    s = _lower_arg
     for _ in range(args.steps):
         t0 = time.perf_counter()
-        s = compiled(state0)
+        s = compiled(s) if args.closed_loop else compiled(_lower_arg)
         jax.block_until_ready(jax.tree.leaves(s))
         per_step_ms.append((time.perf_counter() - t0) * 1e3)
 
@@ -243,6 +290,16 @@ def main() -> int:
 
         multihost_utils.sync_global_devices("cube_tiled_bench_end")
 
+    if args.closed_loop:
+        # A feedback trajectory can blow up where pristine-input samples
+        # cannot — never record a timing row for a non-finite integration.
+        _finite = all(bool(np.all(np.isfinite(np.asarray(x))))
+                      for x in jax.tree.leaves(s))
+        if not _finite:
+            print("ERROR: closed-loop state went non-finite during the "
+                  "timed window — refusing to record the row.", flush=True)
+            return 6
+
     steady = per_step_ms[args.warmup:]
     med = float(np.median(steady))
     total_cells = 6 * args.resolution ** 2 * args.nlev
@@ -250,6 +307,7 @@ def main() -> int:
         component="atmosphere",
         grid="cubed-sphere",
         mode="strong",
+        closed_loop=bool(args.closed_loop),
         kt=args.kt, n_devices=n_devices,
         resolution=args.resolution, nlev=args.nlev,
         steps=args.steps, dt=args.dt,
@@ -269,6 +327,18 @@ def main() -> int:
         cells=total_cells,
         hlo_collective_permutes=n_ppermute,
     )
+    # Flat aggregator-compatible identity + metric fields (see the latlon
+    # twin).  grid_type (not just rec["grid"]) is the aggregator's key.
+    rec.update(
+        grid_type="cubed-sphere",
+        n_levels=args.nlev,
+        precision="float64" if jax.config.jax_enable_x64 else "float32",
+        physics_level="none",
+        backend=jax.default_backend(),
+        **tidy_throughput_fields(
+            dt_seconds=args.dt, time_per_step_ms=med,
+            total_cells=total_cells),
+    )
     from legoesm.parallel.early_init import nccl_transport_report
     _nccl_report = nccl_transport_report()
     rec["metadata"] = annotate_incomplete(scaling_metadata(
@@ -280,7 +350,8 @@ def main() -> int:
         n_gpus=(n_devices if jax.default_backend() in ("gpu", "cuda",
                                                        "rocm") else 0),
         decomposition="subface_tile",
-        solver_variant="tiled_cc_base_cut",
+        solver_variant=("tiled_blocked_loop+fix_mass" if args.closed_loop
+                        else "tiled_cc_base_cut"),
         cells_per_rank=total_cells // max(int(jax.process_count()), 1),
         scaling_kind="strong",
         extra={
@@ -293,8 +364,13 @@ def main() -> int:
             "multicontroller": bool(args.multicontroller),
             "cells_per_device": total_cells // n_devices,
             "hlo_collective_permutes": n_ppermute,
-            "envelope": "dynamics-only base cut (adapter-refused knobs "
-                        "documented in tiled_step_adapter)",
+            "closed_loop": bool(args.closed_loop),
+            "envelope": (
+                "blocked closed loop + in-stage telescoping mass fixer "
+                "(production conservation config; adapter-refused knobs "
+                "documented in tiled_step_adapter)" if args.closed_loop
+                else "dynamics-only base cut (adapter-refused knobs "
+                     "documented in tiled_step_adapter)"),
         },
     ))
     if jax.process_index() == 0:

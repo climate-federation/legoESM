@@ -2,7 +2,7 @@
 
 Stage 7 of ``docs/COMPARE_REANALYSIS.md`` (gap #7, **assembly** half): take the
 closure coefficients diagnosed per worst-performing column
-(:mod:`legoesm.atmosphere.dynamics.les_closure_diagnosis`) and turn them into a
+(:mod:`legoesm.atmosphere.dynamics.les.les_closure_diagnosis`) and turn them into a
 full-grid parameter field that the next AMIP/CMIP iteration consumes.
 
 Two generalization strategies (the §6 open question), both pure-JAX and

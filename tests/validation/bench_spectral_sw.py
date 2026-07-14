@@ -36,7 +36,7 @@ import numpy as np
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.grids.gaussian import create_gaussian_grid
-from legoesm.atmosphere.dynamics.spectral_sw import (
+from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
     SpectralSWConfig,
     SpectralShallowWaterModel,
     williamson_test2_spectral,

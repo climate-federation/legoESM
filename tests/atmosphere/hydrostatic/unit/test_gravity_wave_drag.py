@@ -586,7 +586,7 @@ class TestIntegration:
     def test_hydrostatic_shapes(self):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
         from legoesm.core.field import Field
 
         grid = create_cubed_sphere(8)
@@ -650,7 +650,7 @@ class TestIntegration:
     def test_nonzero_momentum_drag(self):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
         from legoesm.core.field import Field
 
         grid = create_cubed_sphere(8)
@@ -673,7 +673,7 @@ class TestIntegration:
     def test_grad_through_hydrostatic(self):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
         from legoesm.core.field import Field
 
         grid = create_cubed_sphere(8)
@@ -710,7 +710,7 @@ class TestIntegration:
     def test_none_scheme_zeros(self):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -728,7 +728,7 @@ class TestIntegration:
         """PhysicsConfig with GWD produces valid output."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
         from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
         from legoesm.atmosphere.physics.radiation.config import RadiationConfig
         from legoesm.atmosphere.physics.convection.config import ConvectionConfig

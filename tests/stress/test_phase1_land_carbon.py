@@ -12,7 +12,7 @@ from legoesm.land.carbon.carbon_cycle import (
     step_carbon_differland,
     init_carbon_state,
 )
-from legoesm.land.carbon.stomata import StomataConfig, coupled_farquhar_stomata
+from legoesm.land.stomata import StomataConfig, coupled_farquhar_stomata
 
 
 class TestLandCarbon:

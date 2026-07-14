@@ -50,7 +50,7 @@ from legoesm import constants
 
 # Default parameters
 # Default parameters (single source of truth in the package; audit item 9).
-from legoesm.atmosphere.dynamics.dcmip2025_ic import TC2_PARAMS  # noqa: E402,F401
+from legoesm.atmosphere.dynamics.gcm.dcmip2025_ic import TC2_PARAMS  # noqa: E402,F401
 
 
 def dcmip25_tc2a_topography(

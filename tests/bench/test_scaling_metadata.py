@@ -312,3 +312,51 @@ def test_validate_catches_missing_v2_keys():
         assert k in md.validate_scaling_metadata(rec, strict=False)
         with pytest.raises(ValueError):
             md.validate_scaling_metadata(rec)
+
+
+# ---------------------------------------------------------------------------
+# tidy_throughput_fields: flat SYPD/throughput metrics for SPMD bench lanes
+# ---------------------------------------------------------------------------
+
+def test_tidy_throughput_fields_canonical_formulas():
+    # 600 s of model time per 50 ms wall step: sypd = (600/0.05)/(365.25*
+    # 86400)*86400 = 12000/365.25; mcells = 1e6 cells / 0.05 s / 1e6.
+    out = md.tidy_throughput_fields(
+        dt_seconds=600.0, time_per_step_ms=50.0, total_cells=1_000_000)
+    assert out["sypd"] == pytest.approx(12000.0 / 365.25)
+    assert out["mcells_per_s"] == pytest.approx(20.0)
+    assert out["dt_seconds"] == 600.0
+    assert out["time_per_step_ms"] == 50.0
+    assert out["total_cells"] == 1_000_000
+
+
+def test_tidy_throughput_fields_matches_run_cpu_mpi_formula():
+    # Parity with the canonical run_cpu_mpi_scaling.py computation so SPMD
+    # rows and MPI rows are directly comparable on one plot.
+    dt_used, time_per_step, total_cells = 390.0, 0.123, 6 * 48 * 48 * 26
+    expect_sypd = (dt_used / time_per_step) / (365.25 * 86400) * 86400.0
+    expect_mcells = (total_cells / time_per_step) / 1e6
+    out = md.tidy_throughput_fields(
+        dt_seconds=dt_used, time_per_step_ms=time_per_step * 1e3,
+        total_cells=total_cells)
+    assert out["sypd"] == pytest.approx(expect_sypd, rel=1e-12)
+    assert out["mcells_per_s"] == pytest.approx(expect_mcells, rel=1e-12)
+
+
+def test_tidy_throughput_fields_zero_time_is_flagged_not_inf():
+    out = md.tidy_throughput_fields(
+        dt_seconds=600.0, time_per_step_ms=0.0, total_cells=10)
+    assert out["sypd"] == 0.0
+    assert out["mcells_per_s"] == 0.0
+
+
+def test_tidy_throughput_fields_none_time_emits_honest_nulls():
+    """A run with NO per-step time (the zero-length block_steps=0 parity
+    path) must propagate nulls — a throughput is never fabricated."""
+    out = md.tidy_throughput_fields(
+        dt_seconds=600.0, time_per_step_ms=None, total_cells=10)
+    assert out["time_per_step_ms"] is None
+    assert out["sypd"] is None
+    assert out["mcells_per_s"] is None
+    assert out["dt_seconds"] == 600.0
+    assert out["total_cells"] == 10

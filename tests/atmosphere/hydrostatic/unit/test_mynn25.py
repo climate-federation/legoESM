@@ -42,8 +42,8 @@ from legoesm.atmosphere.physics.turbulence.mynn25 import (
     _filter_121,
     mynn25_turbulence,
 )
-from legoesm.atmosphere.scm import SingleColumnModel
-from legoesm.atmosphere.scm_forcing import SCMForcing
+from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
+from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
 
 
 NLEV = 32
@@ -214,7 +214,7 @@ def test_mynn_combined_physics_jits_under_jax_jit():
     import jax
     from legoesm.atmosphere.physics.combined import make_physics
     from legoesm.atmosphere.physics.physics_state import init_physics_state
-    from legoesm.atmosphere.scm import make_column_state, make_scm_grid
+    from legoesm.atmosphere.forcing.scm.scm import make_column_state, make_scm_grid
     from legoesm.grids.vertical import create_sigma_coordinate
 
     T0, qv0 = _baseline_profile()

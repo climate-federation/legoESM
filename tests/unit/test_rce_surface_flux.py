@@ -8,10 +8,10 @@ import numpy as np
 import pytest
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     make_flat_plane_terrain_metric, make_rest_state,
 )
-from legoesm.atmosphere.dynamics.rce_surface_flux import (
+from legoesm.atmosphere.dynamics.crm.rce_surface_flux import (
     apply_rce_surface_fluxes,
     compose_rce_surface_scalar_tendencies,
     wind_speed_at_lowest_level_cs,

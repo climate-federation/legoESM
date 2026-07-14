@@ -278,13 +278,13 @@ def _build_operators(grid_type: str, grid: Any) -> Any:
         return mpas_edge_operators(grid)
     if family == "plane_operators":
         # The plane grid's operators are the module-level Cartesian operators in
-        # the atmosphere component (legoesm.atmosphere.dynamics.plane_operators);
+        # the atmosphere component (legoesm.atmosphere.dynamics.les.plane_operators);
         # the substrate cannot import a component, so the plane carries its own
         # operators with it — the caller uses them directly, not via an adapter.
         raise ValueError(
             f"plane (doubly-periodic) operators are Cartesian and live with the "
             f"plane dynamics, not in a substrate adapter; build the grid here and "
-            f"use legoesm.atmosphere.dynamics.plane_operators directly."
+            f"use legoesm.atmosphere.dynamics.les.plane_operators directly."
         )
     raise ValueError(  # pragma: no cover — every family handled above
         f"no operator adapter wired for grid {grid_type!r} (family {family!r})."

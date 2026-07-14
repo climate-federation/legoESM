@@ -161,7 +161,7 @@ def test_compute_plane_sw_heating_warms_and_shapes():
 # --------------------------------------------------------------------------- #
 
 def _plane_setup():
-  from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+  from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
       make_flat_plane_terrain_metric, make_rest_state,
   )
   from legoesm.grids.plane import create_plane_grid

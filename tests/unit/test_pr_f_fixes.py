@@ -15,13 +15,13 @@ import pytest
 def test_pe_configs_expose_p_ceil_default():
     """The surface-pressure ceiling is a per-dycore config field now (mirroring
     p_floor), not a hardcoded 2.0e6 literal in the clip — and it is tunable."""
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationConfig,
     )
 

@@ -165,7 +165,7 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         from legoesm.ocean.state import OceanConfig
         # Register the FV3 SW barotropic provider (fv3sw) — the cube uses the
         # FV3-faithful C-D barotropic, not the forbidden a_grid (never-A-grid).
-        import legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid  # noqa: F401
+        import legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid  # noqa: F401
 
         # Phase B.1 parity with the monolithic runner: cubed_sphere
         # ``OceanConfig`` now exposes ``bottom_drag_r`` and the cd-grid backend
