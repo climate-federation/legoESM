@@ -274,6 +274,12 @@ class TestFV3NativeGuards:
         with pytest.raises(NotImplementedError, match="walled panel"):
             create_cubed_sphere_panel(
                 8, dtype=np.float64, gnomonic="ed", return_cdgrid=True)
+        # codex p2-r3 bypass: handing the ED panel base DIRECTLY to the
+        # generic C/D builder must fail closed too.
+        panel_ed = create_cubed_sphere_panel(8, dtype=np.float64,
+                                             gnomonic="ed")
+        with pytest.raises(NotImplementedError, match="single-face panel"):
+            create_cubed_sphere_cdgrid(panel_ed)
         # equiangular panel cdgrid route unchanged
         panel, cd = create_cubed_sphere_panel(
             8, dtype=np.float64, return_cdgrid=True)

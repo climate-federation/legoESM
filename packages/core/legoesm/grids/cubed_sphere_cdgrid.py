@@ -659,6 +659,19 @@ def create_cubed_sphere_cdgrid(
     # inference was built to avoid — now a hard error.
     if gnomonic == "auto":
         gnomonic = base.gnomonic_form
+        if gnomonic == "ed" and base.lat.shape[0] != 6:
+            # codex p2-r3: a single-face (walled panel) base reaching the
+            # generic builder directly would pair a regional base with the
+            # GLOBAL six-face FV3 metric construction (cube-seam ×2 edge
+            # conventions mislabeled as wall metrics).  Same fail-closed
+            # policy as create_cubed_sphere_panel(..., return_cdgrid=True);
+            # global duogrid/MPI cases all carry the full 6-face base here.
+            raise NotImplementedError(
+                "create_cubed_sphere_cdgrid: FV3-native (ED) C/D metrics "
+                "are the GLOBAL six-face construction; a single-face panel "
+                "base would mislabel cube-seam edge conventions as wall "
+                "metrics. A bounded-domain FV3 metric builder is not "
+                "implemented — use an equiangular panel instead.")
     elif gnomonic in ("ed", "equiangular") and gnomonic != base.gnomonic_form:
         raise ValueError(
             f"create_cubed_sphere_cdgrid: requested gnomonic={gnomonic!r} but "
