@@ -129,6 +129,14 @@ class NeuralGCMSpectralConfig(NamedTuple):
     # sampling would not fit in host RAM as one list). 0 = load everything
     # at once (legacy).
     chunk_windows: int = 0
+    # Internal perf flag (not a science knob): when True and chunk_windows>0,
+    # chunk k+1 is loaded (GCS read + regrid) on a background host thread while
+    # chunk k trains, overlapping ~0.5 h/chunk of serial load time with GPU
+    # compute (#985 item 2). Doubles the in-RAM chunk footprint (1-ahead buffer).
+    # Off by default so a running chain's behaviour is unchanged until the owner
+    # opts in at a link boundary. Ordering + start_chunk resume are identical to
+    # the serial path (see _prefetch_iter).
+    chunk_prefetch: bool = False
 
     # Data
     n_train_days: int = 365      # Number of daily IC/target pairs
@@ -2486,6 +2494,104 @@ def _train_spectral_loop(
     return model, loss_history
 
 
+def _prefetch_iter(gen, buffer=1):
+    """Run ``gen`` on a background host thread, at most ``buffer`` items ahead.
+
+    A drop-in wrapper that overlaps the producer (chunk load: GCS read + regrid)
+    with the consumer (training). Yields items in the SAME order the underlying
+    generator produces them — the resume/ordering contract of ``_chunks`` is
+    preserved exactly. A producer exception is re-raised on the consumer side
+    (after the items already buffered), so a failed chunk load is not swallowed.
+
+    RAM bound: the producer must ACQUIRE a permit before it calls ``next(gen)``,
+    so it never loads more than ``buffer`` chunks ahead of the one the consumer
+    holds — peak footprint is ``buffer + 1`` chunks (2 for the default), NOT the
+    3 a plain ``Queue(maxsize=buffer)`` would reach (it eagerly loads one more
+    before blocking on the full queue). The consumer releases a permit each time
+    it takes an item.
+
+    Cleanup: if the consumer stops early (``break`` / an exception in the
+    training loop), the ``finally`` sets a stop flag, releases a permit, and
+    drains one slot so a producer parked in ``acquire``/``put`` wakes and exits
+    instead of leaking a blocked thread holding chunk memory.
+
+    ponytail: stdlib threading + a bounded Queue + a load-gating semaphore; no
+    executor pool, no asyncio. Ceiling: the cleanup runs from the generator's
+    ``finally``, which fires when the iterator is closed/GC'd. The training loop
+    consumes to exhaustion or the process exits, so this always fires there; a
+    caller that ``break``s and then indefinitely RETAINS the live iterator would
+    leave the producer parked — bounded harmless because the thread is a daemon
+    (it never blocks process exit). Upgrade to an explicit context manager if a
+    caller ever needs deterministic mid-iteration teardown.
+    """
+    import queue
+    import threading
+
+    buffer = max(1, int(buffer))                # buffer=0 would deadlock acquire
+    q: "queue.Queue" = queue.Queue(maxsize=buffer)
+    load_permit = threading.Semaphore(buffer)   # permits to LOAD the next item
+    stop = threading.Event()
+    _DONE = object()
+    it = iter(gen)
+
+    def _safe_put(msg):
+        # Block for backpressure while the consumer is live, but NEVER block
+        # forever: once the consumer has left (stop set) a full queue means
+        # nobody will drain it, so drop the message rather than hang the thread.
+        while not stop.is_set():
+            try:
+                q.put(msg, timeout=0.2)
+                return
+            except queue.Full:
+                continue
+        try:
+            q.put_nowait(msg)
+        except queue.Full:
+            pass
+
+    def _produce():
+        try:
+            while True:
+                load_permit.acquire()           # wait for room BEFORE loading
+                if stop.is_set():
+                    return
+                try:
+                    item = next(it)             # the chunk load happens here
+                except StopIteration:
+                    break
+                except BaseException as exc:     # propagate load failure
+                    _safe_put((None, exc))
+                    return
+                _safe_put((item, None))
+        finally:
+            _safe_put((_DONE, None))
+
+    t = threading.Thread(target=_produce, name="chunk-prefetch", daemon=True)
+    t.start()
+    try:
+        while True:
+            item, exc = q.get()
+            if exc is not None:
+                raise exc
+            if item is _DONE:
+                return
+            # Release BEFORE yielding (not after): the consumer has taken this
+            # item, so the producer may load the next one WHILE the consumer
+            # trains on this one — that overlap is the whole point. Releasing
+            # after the yield would keep the producer blocked during training.
+            load_permit.release()
+            yield item
+    finally:
+        # Unblock a producer parked in acquire (permit) or put (drain a slot) so
+        # it can observe stop and exit rather than leak.
+        stop.set()
+        load_permit.release()
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            pass
+
+
 def _make_chunk_loader(config, grid, sigma, cache_dir,
                        surface_forcing_path, forcing_cache_path):
     """Streaming/chunked data source for DENSE all-years training.
@@ -2516,6 +2622,17 @@ def _make_chunk_loader(config, grid, sigma, cache_dir,
         f"({n_total} samples/epoch)"
     )
 
+    prefetch = bool(getattr(config, "chunk_prefetch", False))
+
+    def _load_group(group):
+        ics, tgts, times = load_training_data(
+            config, grid, sigma, cache_dir, windows=group,
+        )
+        forcings = _maybe_build_sample_forcings(
+            surface_forcing_path, times, grid, forcing_cache_path,
+        )
+        return ics, tgts, forcings
+
     def _chunks(start_chunk=0):
         # ``start_chunk`` skips (does NOT load) the first N groups so a
         # mid-epoch resume never re-streams the already-trained chunks.
@@ -2523,16 +2640,15 @@ def _make_chunk_loader(config, grid, sigma, cache_dir,
         # ``config.windows`` and ``load_training_data`` reads snapshots in
         # deterministic time order, so chunk k is byte-identical across
         # runs -> a resume replays the exact same trajectory.
-        for gi, group in enumerate(groups):
-            if gi < start_chunk:
-                continue
-            ics, tgts, times = load_training_data(
-                config, grid, sigma, cache_dir, windows=group,
-            )
-            forcings = _maybe_build_sample_forcings(
-                surface_forcing_path, times, grid, forcing_cache_path,
-            )
-            yield ics, tgts, forcings
+        def _serial():
+            for gi, group in enumerate(groups):
+                if gi < start_chunk:
+                    continue
+                yield _load_group(group)
+
+        # Prefetch preserves order + the start_chunk skip exactly (it only wraps
+        # the same _serial generator), so the resume contract is unchanged.
+        yield from (_prefetch_iter(_serial()) if prefetch else _serial())
 
     # Number of chunks per epoch (constant): the mid-epoch checkpoint reads
     # this to normalise the last chunk of an epoch to the next epoch's start.
