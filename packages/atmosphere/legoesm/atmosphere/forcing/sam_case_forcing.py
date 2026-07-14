@@ -41,9 +41,23 @@ from typing import NamedTuple
 import numpy as np
 
 # Repo-local forcing cache populated by ``scripts/data/fetch_les_forcing.py``.
-# This module lives at packages/atmosphere/legoesm/atmosphere/; the repo root is
-# four parents up (…/legoESM/).
-_LOCAL_FORCING_CACHE = Path(__file__).resolve().parents[4] / "data" / "les_cases"
+# Walk up from this module to the repo root (the dir holding ``.git``) rather
+# than a fixed ``parents[N]`` — the federation restructure moved this file deeper
+# (added the ``packages/<pkg>/`` nesting) and a hardcoded index silently pointed
+# at ``packages/data/les_cases`` (LES auto-resolve broke). ``.git`` (not
+# ``pyproject.toml``) is the marker because the federation ships a per-package
+# ``pyproject.toml`` that would stop the walk early; ``.exists()`` covers both a
+# ``.git`` dir and the ``.git`` file a worktree uses.
+def _repo_root() -> Path:
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / ".git").exists():
+            return parent
+    # Fallback: original layout depth (…/legoESM/) if no marker found.
+    return here.parents[5]
+
+
+_LOCAL_FORCING_CACHE = _repo_root() / "data" / "les_cases"
 
 
 def resolve_sam_case_dir(case_name: str) -> str:
