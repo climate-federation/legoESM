@@ -308,7 +308,7 @@ NEXT: run on Derecho against the glade CRU-JRA archive; codex review.
   `lax.scan` carry (scatter-add for mean, scatter-set for inst).  Each tape
   produces its own NetCDF: `<output>.<tape_name>.nc` with a (time, lat, lon)
   layout for latlon.  Configured via YAML:
-  * default: `configs/output/lmip_biophys_default.yaml` — monthly `monthly`
+  * default: `config/output/lmip_biophys_default.yaml` — monthly `monthly`
     time-mean fluxes + monthly `monthly_state` instantaneous soil snapshots
     (filenames: `<output>.monthly.nc` and `<output>.monthly_state.nc`);
   * override with `--output-config path.yaml`.
