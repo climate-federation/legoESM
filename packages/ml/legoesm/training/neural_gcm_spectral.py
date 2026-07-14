@@ -3062,6 +3062,18 @@ def train_sfno_full_spectral(
 
     Returns (trained_sfno, loss_history).
     """
+    if bool(getattr(config, "data_parallel", False)):
+        # sfno_full uses _train_sfno_full_loop, which does NOT resolve the DP
+        # context or average gradients — an MPI launch would run independent
+        # serial training on every rank (with competing checkpoint writes).
+        # Reject the combination rather than silently mis-train (#985); DP is
+        # implemented only for the chunked _train_spectral_loop variants.
+        raise NotImplementedError(
+            "data_parallel is not implemented for the sfno_full variant "
+            "(its _train_sfno_full_loop is not DP-aware). Use sfno_physics / "
+            "column_nn / classical for data-parallel training, or add DP to "
+            "_train_sfno_full_loop first."
+        )
     from legoesm.atmosphere.dynamics.neural.sfno_pe import (
         SFNOPrimitiveEquationConfig,
     )

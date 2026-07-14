@@ -79,6 +79,17 @@ def test_dp_chunk_sizes_requires_attribute_on_custom_loader():
         _dp_chunk_sizes(_loader_without, 8)
 
 
+def test_sfno_full_rejects_data_parallel():
+    # sfno_full uses a separate loop that does NOT average gradients, so DP would
+    # silently run independent serial training on every rank -> reject up front.
+    from legoesm.training.neural_gcm_spectral import (
+        NeuralGCMSpectralConfig,
+        train_sfno_full_spectral,
+    )
+    with pytest.raises(NotImplementedError, match="sfno_full"):
+        train_sfno_full_spectral(config=NeuralGCMSpectralConfig(data_parallel=True))
+
+
 def test_mpi_rank_size_no_launcher_is_single():
     # With no multi-rank launcher env, discovery returns (0, 1) so callers stay
     # on their serial path.
