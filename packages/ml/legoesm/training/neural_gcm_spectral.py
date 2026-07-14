@@ -486,8 +486,13 @@ def spectral_state_to_carry(
 N_SFNO_FORCING_CHANNELS = 3
 # Per-plane normalization: T [K] ~300, sic already in [0,1], insolation
 # [W/m^2] ~1400 (matches the column-MLP feature scales in
-# ``atmosphere.physics.neural_physics``).
-_SFNO_FORCING_INPUT_SCALE = jnp.array([300.0, 1.0, 1400.0])
+# ``atmosphere.physics.neural_physics``).  Kept as a plain Python tuple, NOT a
+# module-top ``jnp.array``: an import-time device allocation is forbidden by
+# test_no_module_top_jax_alloc (crashes the import chain on the experimental
+# Metal backend).  It enters the graph lazily via ``jnp.asarray`` at the use
+# site below, cast to ``in_scale``'s dtype so the concatenate result dtype is
+# identical to the former module-top ``jnp.array`` (in both x32 and x64).
+_SFNO_FORCING_INPUT_SCALE = (300.0, 1.0, 1400.0)
 
 
 def _channel_input_scale(nlev: int) -> jnp.ndarray:
@@ -624,7 +629,10 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
         )
         # Normalize inputs to O(1)
         packed_norm = packed_in / jnp.maximum(
-            jnp.concatenate([in_scale, _SFNO_FORCING_INPUT_SCALE]), 1e-10,
+            jnp.concatenate([
+                in_scale,
+                jnp.asarray(_SFNO_FORCING_INPUT_SCALE, dtype=in_scale.dtype),
+            ]), 1e-10,
         )
         # SFNO forward: O(1) in, O(1) out
         output_norm = sfno(packed_norm.astype(jnp.float32), grid_)
