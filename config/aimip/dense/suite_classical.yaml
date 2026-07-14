@@ -432,15 +432,19 @@ cfg_overrides:
   n_eval_days: 4
   train_year: 1979
   eval_year: 2013
-  # NO rollout curriculum for classical. The ACE2-gap curriculum path unrolls
-  # RRTMGP over the rollout WITHOUT the base rollout's per-g-point +
-  # nothing_saveable jax.checkpoint on the spectral_rollout scan body — so the
-  # rrtmgp graph compiles fully and stalls XLA (12h/6h/3-lead all froze >2.5 h
-  # at the cloud-optics graph build, never reaching epoch-0). The base
-  # (non-curriculum) rollout keeps that gradient checkpointing, which is what
-  # makes the sparse rrtmgp adjoint tractable — the same recipe the working
-  # ace2 classical training used. Train classical on all years via the base
-  # checkpointed rollout; NN variants keep the curriculum (no rrtmgp in loop).
+  # Classical DOES use the curriculum. It already runs the same per-g-point +
+  # nothing_saveable jax.checkpoint on the spectral_rollout scan body as the
+  # base rollout (via _rollout_one_segment). The apparent "won't compile" was a
+  # genuinely slow XLA compile of the rrtmgp+AD training step (~6 h cold),
+  # UNCACHED (_env.sh disables the JIT cache for benchmarking). Fix: run this
+  # suite with LEGOESM_JIT_CACHE_DIR set (persistent cache) so each lead's graph
+  # compiles once, caches to disk, and reuses across epochs/resumes/reruns.
+  # 72h dropped — its 432-step graph is the worst compile; 12h+24h suffice.
+  aimip_rollout_curriculum:
+  - - 12
+    - 3
+  - - 24
+    - 2
   aimip_chunk_windows: 34
   aimip_n_epochs: 5
   loss:
