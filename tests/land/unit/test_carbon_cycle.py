@@ -814,6 +814,20 @@ class TestArcticProductivityRescue(unittest.TestCase):
         expected = -(flux_boot / _GC_TO_KG_CO2) * 86400.0
         npt.assert_allclose(dC, expected, rtol=1e-9, atol=1e-9)
 
+    def test_leaf_bootstrap_rejects_negative_params(self):
+        # codex: a negative frac/lai makes the transfer negative -> C_fol clipped
+        # below 0 -> created carbon.  Fail loud on the concrete config.
+        leafless = _make_carbon_state(shape=(1,), C_fol=jnp.full(1, 0.0))
+        common = dict(sw_down=jnp.full(1, 200.0),
+                      T=jnp.full(1, constants.T_freeze + 10.0),
+                      co2_ppmv=jnp.full(1, 400.0), beta=jnp.full(1, 0.5),
+                      lat=jnp.full(1, 1.1), doy=180.0,
+                      precip=jnp.full(1, 3e-5), dt=86400.0)
+        with self.assertRaises(ValueError):
+            step_carbon_differland(leafless, config=_default_config(
+                scheme="differland", cold_deciduous_dormancy=True,
+                cold_deciduous=True, leaf_bootstrap_frac=-1.0), **common)
+
 
 # ===================================================================
 # SOM transfer-fraction validation (fail-early on out-of-[0,1] config)

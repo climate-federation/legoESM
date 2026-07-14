@@ -812,13 +812,28 @@ def step_carbon_differland(
     # would create leaf mass).  STATIC gate -> Python if (feature gating); a
     # no-op when the flag is off => byte-identical.
     if config.cold_deciduous_dormancy and config.cold_deciduous:
+        # Input hardening (codex): the __param_spec__ bounds only constrain
+        # training, so validate the concrete config -- a NEGATIVE frac/lai would
+        # make the transfer negative and drive C_fol below 0 (clipped by
+        # _soft_pos -> CREATED carbon).
+        frac = config.leaf_bootstrap_frac
+        if is_concrete(frac) and not frac >= 0.0:
+            raise ValueError(f"leaf_bootstrap_frac must be >= 0, got {frac!r}.")
+        lai_min = config.leaf_bootstrap_lai
+        if is_concrete(lai_min) and not lai_min >= 0.0:
+            raise ValueError(f"leaf_bootstrap_lai must be >= 0, got {lai_min!r}.")
         d_boot = _cold_deciduous_dormancy_factor(T, config)     # ~1 active, ~0 dormant
-        fol_target = config.leaf_bootstrap_lai * config.LCMA    # min leaf mass [gC/m2]
+        fol_target = lai_min * config.LCMA                      # min leaf mass [gC/m2]
         fol_gap = jnp.maximum(fol_target - state.C_fol, 0.0)    # leaf shortfall [gC/m2]
-        boot = d_boot * jnp.minimum(
-            fol_gap, state.C_lab * config.leaf_bootstrap_frac) / dt_days  # gC/m2/day
-        # Cap total labile release at the reserve so C_lab stays >= 0 (conserving).
-        lab_release = jnp.minimum(lab_release + boot, state.C_lab / dt_days)
+        # Cap the extra transfer to the reserve REMAINING after the natural
+        # labile release, as a MASS subtraction (not a C_lab/dt_days rate
+        # round-trip), so C_lab - (lab_release + boot)*dt_days >= 0 without an
+        # fp32 ULP underflow (codex P3; exact closure holds in the x64 carbon
+        # regime).  dt_days is guarded > 0 (codex P2: a direct dt=0 caller).
+        reserve_left = jnp.maximum(state.C_lab - lab_release * dt_days, 0.0)   # gC/m2
+        boot_mass = d_boot * jnp.minimum(
+            jnp.minimum(fol_gap, state.C_lab * frac), reserve_left)           # gC/m2
+        lab_release = lab_release + boot_mass / jnp.maximum(dt_days, 1e-10)
 
     # --- Structural turnover -----------------------------------------------
     wood_litter = state.C_wood * _effective_rate(
