@@ -205,6 +205,10 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # clearer than snake_case. Same rationale as the column-extractor tests above.
 "tests/atmosphere/hydrostatic/unit/test_semi_implicit_gw_stability.py" = ["N803", "N806"]
 "tests/unit/test_check_cross_grid_deploy.py" = ["N803"]
+# NEMO Roquet EOS-80 test: physical symbols ``T``/``S`` as args + locals, and
+# ``jax_enable_x64`` set before the module import (E402) -- same rationale as the
+# scientific-kernel test entries above.
+"tests/ocean/unit/test_nemo_roquet_eos.py" = ["E402", "N803", "N806"]
 # Run-as-a-script sys.path bootstrap (iter 321) must precede the ``scripts.*`` import, so the
 # subsequent module-level imports trip E402; the bootstrap makes ``python scripts/...`` work.
 "scripts/validate/run_perfect_model_osse.py" = ["E402"]
