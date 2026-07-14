@@ -58,9 +58,18 @@ Multiply `R_maint` by a smooth substrate-limitation factor:
 ```
 R_maint_eff = R_maint · f_nsc
 f_nsc = r_maint_floor_frac + (1 − r_maint_floor_frac) · smoothstep(C_lab / C_lab_ref)
-C_lab_ref = nsc_ref_labile_to_fol · C_fol            # healthy labile-to-foliage scale
+C_lab_ref = nsc_ref_labile_frac · (C_fol + C_root + C_wood)   # labile / live-biomass scale
 ```
 
+- **Reference is live biomass, NOT foliage.** Tying `C_lab_ref` to `C_fol` alone would
+  fail in the exact case being fixed: a winter-leafless plant has `C_fol → 0`, so a
+  foliage-scaled reference collapses (`C_lab/ref → large → f_nsc → 1`) and the gate never
+  engages while root+wood respiration keeps draining. Scaling to persistent live biomass
+  `(C_fol + C_root + C_wood)` keeps the reference finite through the leafless season, so the
+  gate throttles the root+wood drain — the actual death driver. `nsc_ref_labile_frac`
+  defaults **below** typical healthy NSC (~0.02) so a healthy plant sits at `C_lab ≥ C_lab_ref`
+  (f_nsc = 1, no temperate/tropical regression); the no-regression gate empirically confirms
+  and tier-2-tunes it.
 - `f_nsc → 1` when `C_lab ≥ C_lab_ref` (ample reserve → healthy plants unaffected).
 - `f_nsc → r_maint_floor_frac` (small floor > 0, basal metabolism) as `C_lab → 0`.
 - `smoothstep` = C¹ Hermite (`3x²−2x³` on a clamped `[0,1]` argument) — differentiable,
@@ -114,7 +123,7 @@ New fields (each float gets a `__param_spec__` entry; `__physics_contract__` upd
 | field | type | default | units | tier | note |
 |-------|------|---------|-------|------|------|
 | `nsc_gated_respiration` | bool | `False` | — | static gate | Mechanism 1 on/off |
-| `nsc_ref_labile_to_fol` | float | 0.20 | — | 2 | `C_lab_ref = this · C_fol` |
+| `nsc_ref_labile_frac` | float | 0.02 | — | 2 | `C_lab_ref = this · (C_fol+C_root+C_wood)` |
 | `r_maint_floor_frac` | float | 0.10 | — | 2 | `f_nsc` floor at `C_lab→0` |
 | `cold_deciduous_dormancy` | bool | `False` | — | static gate | Mechanism 2 on/off |
 | `cold_deciduous` | bool | `False` | — | static (per-PFT) | set from `is_cold_deciduous` |
