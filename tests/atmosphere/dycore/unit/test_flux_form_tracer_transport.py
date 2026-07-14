@@ -20,7 +20,7 @@ from legoesm import constants
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.core.fv3_sw_core import d2a2c_vect
-from legoesm.atmosphere.dynamics.flux_form_tracer_transport import (
+from legoesm.atmosphere.dynamics.shared.flux_form_tracer_transport import (
     flux_form_tracer_step,
 )
 

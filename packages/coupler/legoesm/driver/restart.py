@@ -791,7 +791,7 @@ def load_restart(
     if path.is_file() and path.suffix == ".npz":
         with np.load(path) as d:
             if "spectral_layout" in d.files:
-                from legoesm.atmosphere.dynamics.spectral_pe import (
+                from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
                     reconstruct_spectral_state_from_npz,
                 )
                 # strict (default): validate the coefficient shapes against the

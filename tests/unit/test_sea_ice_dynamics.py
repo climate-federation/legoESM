@@ -41,7 +41,9 @@ from legoesm.ice.dynamics import (
     free_drift_velocity,
     air_ice_stress,
     ocean_ice_stress,
+    _grid_coriolis,
 )
+from legoesm import constants as _constants
 # ITD
 from legoesm.ice.itd import (
     category_bounds,
@@ -66,6 +68,13 @@ from legoesm.core.field import Field
 
 
 # ---- Helpers ----
+
+# Production dynamics defaults (single source of truth = SeaIceConfig), used
+# by the analytic / stability checks so no drag coefficient is hardcoded.
+_DYN_H_MIN = SeaIceConfig().h_ice_min
+_DYN_C_AI = SeaIceConfig().drag_atm
+_DYN_C_OI = SeaIceConfig().drag_ocean
+
 
 def _make_grid(n=8):
     return create_cubed_sphere(n)
@@ -429,6 +438,49 @@ class TestEVPSolver:
         assert jnp.all(jnp.isfinite(u_m_heavy))
         assert jnp.max(jnp.abs(u_m_heavy)) < jnp.max(jnp.abs(u_m_light))
 
+    def test_shear_deformation_adds_ridging_closing(self):
+        """Audit: shear deformation must contribute to the ridging closing rate
+        (Rothrock 1975 / CICE), not convergence alone.  The shear term is
+        non-negative and additive, so cs_shear>0 gives closing >= the
+        convergence-only rate everywhere, strictly greater where there is shear.
+        """
+        import numpy as np
+        from legoesm.ice.sea_ice import _closing_rate_from_velocity
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        rng = np.arange(n, dtype=float)
+        u = jnp.asarray(np.broadcast_to(np.sin(rng)[None, None, :], shape).copy())
+        v = jnp.asarray(np.broadcast_to(np.cos(rng)[None, :, None], shape).copy())
+        conv_only = _closing_rate_from_velocity(u, v, grid, cap=1.0, cs_shear=0.0)
+        with_shear = _closing_rate_from_velocity(
+            u, v, grid, cap=1.0, cs_shear=0.25, e_yield=2.0)
+        assert jnp.all(with_shear >= conv_only - 1e-12)         # shear only adds
+        assert float(jnp.max(with_shear - conv_only)) > 1e-9    # strictly more
+
+    def test_sea_surface_tilt_drives_downslope_drift(self):
+        """Audit: the optional sea-surface-tilt force ``-g grad(eta)`` drives
+        ice DOWN the SSH slope.  With no wind / current / stress, a positive
+        ssh_grad_x accelerates the ice toward lower SSH (u < 0); ssh_grad None
+        applies no force (u ~ 0).  Both EVP and mEVP paths."""
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        z = jnp.zeros(shape)
+        base = dict(
+            h_ice=jnp.full(shape, 1.0), concentration=jnp.ones(shape),
+            wind_u=z, wind_v=z, ocean_u=z, ocean_v=z,
+            grid=grid, dt=3600.0, P_star=0.0, differentiable=False,
+        )
+        slope = jnp.full(shape, 1e-5)  # dη/dx > 0 -> force toward -x
+        u_none, *_ = evp_solver(z, z, z, z, z, N_evp=30, **base)
+        u_tilt, *_ = evp_solver(z, z, z, z, z, N_evp=30, ssh_grad_x=slope, **base)
+        assert jnp.all(jnp.isfinite(u_tilt))
+        assert float(jnp.mean(jnp.abs(u_none))) < 1e-9   # no forcing -> no drift
+        assert float(jnp.mean(u_tilt)) < -1e-4           # down-gradient drift
+        u_m, *_ = mevp_solver(z, z, z, z, z, N_mevp=30, ssh_grad_x=slope, **base)
+        assert float(jnp.mean(u_m)) < -1e-4
+
     def test_high_strength_resists_motion(self):
         """With higher P_star, ice velocity should be smaller."""
         grid = _make_grid()
@@ -483,6 +535,175 @@ class TestEVPSolver:
         )
         for arr in [u_new, v_new, s11, s22, s12]:
             assert jnp.all(jnp.isfinite(arr)), f"Non-finite values found"
+
+
+# ==============================================================================
+# Ocean-drag implicit-solve stability (Hunke & Dukowicz 1997 / CICE stepu)
+# ==============================================================================
+
+class TestOceanDragImplicitStability:
+    """Guards the semi-implicit ocean-drag fix in the EVP/mEVP velocity
+    solve.  With thin ice (small mass m) and strong ocean-current shear,
+    the EXPLICIT drag treatment used previously has stability bound
+    dt_s < 2 m / vrel; at the production subcycle timestep this is
+    violated in marginal-ice-zone cells and the velocity oscillates and
+    blows up.  Treating the linear u^{n+1} drag term implicitly is
+    unconditionally stable.
+    """
+
+    # Thin-ice MIZ regime: h = 0.1 m, conc = 0.5, dt = 3600 s, default
+    # N_evp/N_mevp (=> dt_s = 30 s), and a strong ocean current U_w = 5
+    # m/s.  Numbers: m = rho_ice*max(0.1, h_ice_min) = 91.7 kg/m^2,
+    # vrel ~ rho_ocean*C_oi*5 = 28.2 kg/m^2/s, so 2 m / vrel ~ 6.5 s
+    # << dt_s = 30 s: the explicit scheme is firmly unstable here.
+    _H = 0.1
+    _CONC = 0.5
+    _DT = 3600.0
+    _U_OCN = 5.0
+
+    def _fields(self, grid):
+        n = grid.n
+        shape = (6, n, n)
+        z = jnp.zeros(shape)
+        return dict(
+            h_ice=jnp.full(shape, self._H),
+            concentration=jnp.full(shape, self._CONC),
+            wind_u=jnp.full(shape, 10.0),
+            wind_v=z,
+            ocean_u=jnp.full(shape, self._U_OCN),
+            ocean_v=z,
+            grid=grid, dt=self._DT,
+        )
+
+    def _explicit_evp_reference(self, grid, fields, N_evp):
+        """Reproduce the OLD explicit-ocean-drag EVP velocity update to
+        demonstrate it diverges at this dt_s.  Mirrors the pre-fix code:
+        ocean stress uses vrel*(u_ocn - u^n) with u^{n+1} nowhere on the
+        LHS (drag fully explicit), Coriolis semi-implicit."""
+        m_ice = _constants.rho_ice * max(self._H, _DYN_H_MIN)
+        f = _grid_coriolis(grid)
+        dt_s = self._DT / N_evp
+        alpha = 0.5 * f * dt_s
+        denom = 1.0 + alpha ** 2
+        u = jnp.zeros_like(fields["wind_u"])
+        v = jnp.zeros_like(u)
+        ocean_u = fields["ocean_u"]
+        ocean_v = fields["ocean_v"]
+        wind_u = fields["wind_u"]
+        C_ai = _DYN_C_AI
+        C_oi = _DYN_C_OI
+        for _ in range(N_evp):
+            # air stress (explicit)
+            dua = wind_u - u
+            dva = -v
+            spa = jnp.sqrt(dua ** 2 + dva ** 2 + 1e-10)
+            tau_ax = _constants.rho_air * C_ai * spa * dua
+            tau_ay = _constants.rho_air * C_ai * spa * dva
+            # ocean stress fully EXPLICIT: vrel*(u_ocn - u^n)
+            duo = ocean_u - u
+            dvo = ocean_v - v
+            spo = jnp.sqrt(duo ** 2 + dvo ** 2 + 1e-10)
+            tau_ox = _constants.rho_ocean * C_oi * spo * duo
+            tau_oy = _constants.rho_ocean * C_oi * spo * dvo
+            ax = (tau_ax + tau_ox) / m_ice
+            ay = (tau_ay + tau_oy) / m_ice
+            rhs_u = u + dt_s * ax + alpha * v
+            rhs_v = v + dt_s * ay - alpha * u
+            u = (rhs_u + alpha * rhs_v) / denom
+            v = (rhs_v - alpha * rhs_u) / denom
+        return u, v
+
+    def test_evp_thin_ice_strong_current_stays_bounded(self):
+        """Implicit EVP stays finite and bounded; explicit reference
+        blows up at the same thin-ice / dt_s regime."""
+        grid = _make_grid()
+        fields = self._fields(grid)
+        z = jnp.zeros_like(fields["wind_u"])
+        u_new, v_new, *_ = evp_solver(
+            z, z, z, z, z, P_star=0.0, differentiable=False, **fields,
+        )
+        assert jnp.all(jnp.isfinite(u_new))
+        assert jnp.all(jnp.isfinite(v_new))
+        # Ice cannot outrun the faster of wind/ocean forcing by much;
+        # a generous physical bound.  The explicit scheme violates this.
+        speed = jnp.sqrt(u_new ** 2 + v_new ** 2)
+        assert float(jnp.max(speed)) < 12.0
+
+        # The OLD explicit scheme, same inputs, diverges.
+        u_exp, v_exp = self._explicit_evp_reference(grid, fields, N_evp=120)
+        exp_speed = jnp.sqrt(u_exp ** 2 + v_exp ** 2)
+        exp_max = float(jnp.nan_to_num(jnp.max(exp_speed), nan=jnp.inf))
+        assert (not jnp.all(jnp.isfinite(u_exp))) or exp_max > 1e3, (
+            "explicit reference should diverge in this thin-ice regime; "
+            f"got max speed {exp_max}"
+        )
+
+    def test_mevp_thin_ice_strong_current_stays_bounded(self):
+        """Implicit mEVP stays finite and bounded in the same regime."""
+        grid = _make_grid()
+        fields = self._fields(grid)
+        z = jnp.zeros_like(fields["wind_u"])
+        u_new, v_new, *_ = mevp_solver(
+            z, z, z, z, z, P_star=0.0, differentiable=False, **fields,
+        )
+        assert jnp.all(jnp.isfinite(u_new))
+        assert jnp.all(jnp.isfinite(v_new))
+        speed = jnp.sqrt(u_new ** 2 + v_new ** 2)
+        assert float(jnp.max(speed)) < 12.0
+
+    def test_evp_free_drift_matches_analytic_balance(self):
+        """At convergence (P*=0, no internal stress) the implicit solve
+        reproduces the exact steady free-drift momentum balance
+            tau_air + vrel*(u_ocn - u) + m f (k x u) = 0
+        component-wise, where the Coriolis sign convention is +f v in the
+        u-equation and -f u in the v-equation (unchanged by this fix).
+
+        EVP subcycling relaxes over a total pseudo-time equal to one dt,
+        so the steady balance is reached only when dt >> m/vrel (the
+        inertial/drag time).  Thin ice (m = 91.7 kg/m^2, m/vrel ~ 30-80 s)
+        converges within dt = 3600 s to many e-foldings; thick ice would
+        not.  Face-edge cells carry cubed-sphere metric/halo residual
+        unrelated to this fix, so the balance is checked on the interior."""
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        z = jnp.zeros(shape)
+        wind_u = jnp.full(shape, 8.0)
+        wind_v = jnp.full(shape, -3.0)
+        ocean_u = jnp.full(shape, 0.2)
+        ocean_v = jnp.full(shape, 0.05)
+        h_ice = jnp.full(shape, self._H)  # thin -> converges within one dt
+        conc = jnp.ones(shape)
+        u_new, v_new, *_ = evp_solver(
+            z, z, z, z, z,
+            h_ice=h_ice, concentration=conc,
+            wind_u=wind_u, wind_v=wind_v,
+            ocean_u=ocean_u, ocean_v=ocean_v,
+            grid=grid, dt=self._DT, N_evp=400, P_star=0.0,
+            differentiable=False,
+        )
+        assert jnp.all(jnp.isfinite(u_new))
+
+        # Reconstruct the steady momentum residual (F = 0 since P* = 0).
+        m_ice = _constants.rho_ice * jnp.maximum(h_ice, _DYN_H_MIN)
+        f = _grid_coriolis(grid)
+        tau_ax, tau_ay = air_ice_stress(
+            u_new, v_new, wind_u, wind_v, _constants.rho_air, _DYN_C_AI,
+        )
+        tau_ox, tau_oy = ocean_ice_stress(
+            u_new, v_new, ocean_u, ocean_v, _constants.rho_ocean, _DYN_C_OI,
+        )
+        res_x = tau_ax + tau_ox + m_ice * f * v_new
+        res_y = tau_ay + tau_oy - m_ice * f * u_new
+        # Normalise by the wind-stress scale; interior residual -> 0.
+        scale = float(jnp.max(jnp.abs(tau_ax)) + jnp.max(jnp.abs(tau_ay)))
+        assert scale > 0.0
+        # Interior only (strip the 2-cell face border where cubed-sphere
+        # metric/halo effects dominate — same convention as the one-step
+        # analytic tests that sample the face centre).
+        res = (jnp.abs(res_x) + jnp.abs(res_y))[:, 2:-2, 2:-2]
+        rel = float(jnp.max(res)) / scale
+        assert rel < 1e-3, f"steady free-drift balance residual too large: {rel}"
 
 
 # ==============================================================================
@@ -1229,11 +1450,16 @@ class TestMEVPSolver:
         velocity, zero ocean current, and ``f`` zeroed in the grid:
             σ^1 = 0  (VP target is 0 when P=0)
             ∇·σ^1 = 0
-            τ_oi = 0  (relative velocity zero)
             τ_ai = ρ_air · C_ai · |U_a| · U_a
             ax = τ_ai_x / m,   ay = τ_ai_y / m
-            rhs_u = β·0 + 0 + dt·ax
-            (β + 1) u^1 = rhs_u  →  u^1 = dt·ax / (β + 1)
+            rhs_u = β·0 + 0 + dt·ax + drag·U_w   (U_w = 0)
+            (β + 1 + drag) u^1 = rhs_u  →  u^1 = dt·ax / (β + 1 + drag)
+
+        Ocean drag is now treated IMPLICITLY (Hunke & Dukowicz 1997):
+        the linear u^{n+1} term folds into the diagonal as
+        drag = dt·vrel/m with vrel = ρ_oc·C_oi·|U_w − u^0|.  At u^0 = 0,
+        U_w = 0 the relative velocity is only the 1e-10 sqrt floor, so
+        ``drag`` is tiny but nonzero and MUST appear in the closed form.
         """
         grid = _make_grid()
         # Zero Coriolis everywhere
@@ -1270,7 +1496,12 @@ class TestMEVPSolver:
 
         tau_ai_x = rho_air * C_ai * abs(U_a) * U_a
         ax = tau_ai_x / m_val
-        u_expected = dt * ax / (beta + 1.0)
+        # Implicit ocean drag at u^0 = 0, U_w = 0: vrel is only the eps
+        # floor, drag = dt·vrel/m folds into the (beta+1) diagonal.
+        C_oi = SeaIceConfig().drag_ocean
+        vrel = constants.rho_ocean * C_oi * (1e-10) ** 0.5
+        drag = dt * vrel / m_val
+        u_expected = dt * ax / (beta + 1.0 + drag)
 
         # σ should remain zero (P*=0 ⇒ σ_VP=0; σ^0=0 ⇒ σ^1=0)
         assert float(jnp.max(jnp.abs(s11))) < 1e-12
@@ -1329,7 +1560,12 @@ class TestMEVPSolver:
             differentiable=False,
         )
 
-        A_cor = beta + 1.0
+        # Implicit ocean drag folds into the diagonal A (drag = dt·vrel/m;
+        # vrel is only the eps floor here since u^0 = U_w = 0).
+        C_oi = SeaIceConfig().drag_ocean
+        vrel = constants.rho_ocean * C_oi * (1e-10) ** 0.5
+        drag = dt * vrel / m_val
+        A_cor = beta + 1.0 + drag
         B_cor = dt * f_val
         det = A_cor ** 2 + B_cor ** 2
         ax = rho_air * C_ai * abs(U_a) * U_a / m_val
@@ -2827,6 +3063,32 @@ class TestAllOceanGridsCoupled:
         from legoesm.grids.voronoi import create_voronoi_mesh
         mesh = create_voronoi_mesh(subdivision_level=2, lloyd_iterations=5)
         self._run_grid(mesh, (mesh.nCells,), "free_drift")
+
+
+class TestVoronoiTransportUpwind:
+    """First-order upwind Voronoi transport must be POSITIVITY-preserving: a
+    non-negative scalar advected at CFL<=1 stays >= 0.  The old centered
+    0.5*(q1+q2) edge reconstruction undershoots to negative volume, which the
+    downstream jnp.maximum(vol,0)/clip(conc,0,1) silently turn into a mass
+    SOURCE (audit finding #1)."""
+
+    def test_upwind_preserves_positivity(self):
+        import numpy as np
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.ice.transport import fv_flux_divergence_voronoi
+        mesh = create_voronoi_mesh(subdivision_level=2, lloyd_iterations=5)
+        nC = int(mesh.nCells)
+        # Sharp step field in [0,1] -> strong gradients at every interface.
+        q = jnp.asarray((np.arange(nC) % 2).astype(np.float64))
+        u = jnp.ones((nC,)); v = jnp.zeros((nC,))   # uniform east, |u_edge|<=1
+        # CFL ~ 0.5: |u|=1 m/s, dx = smallest cell spacing.
+        dt = 0.5 * float(jnp.min(mesh.dcEdge))
+        q_new = q + dt * fv_flux_divergence_voronoi(q, u, v, mesh)
+        # Positivity is the property the audit bug violated (negative volume).
+        # (No upper-bound check: uniform east flow on a sphere is not
+        # divergence-free, so flux-form legitimately amplifies converging cells.)
+        assert float(jnp.min(q_new)) >= -1e-9, (
+            f"upwind produced negative volume: {float(jnp.min(q_new)):.3e}")
 
 
 # ==============================================================================

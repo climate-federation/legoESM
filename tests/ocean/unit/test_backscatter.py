@@ -119,9 +119,10 @@ class TestBackscatterLatLon:
         cfg = BackscatterConfig(enabled=True, c_bs=0.1)
         tu, tv = backscatter_tendency_cgrid(
             u, v, E, grid, cfg, mask=mask, u_mask=u_mask, v_mask=v_mask)
-        # E = 0 ⇒ ν_bs ≈ Δ · √ε with ε = 1e-30 ⇒ O(1e-15·ν_bs·|∇²u|); tiny.
-        assert float(jnp.max(jnp.abs(tu))) < 1e-6
-        assert float(jnp.max(jnp.abs(tv))) < 1e-6
+        # E = 0 ⇒ ν_bs EXACTLY 0 (double-where safe sqrt; the former
+        # sqrt(E + 1e-30) leaked a ~1e-15·Δ nonzero negative viscosity).
+        assert jnp.count_nonzero(tu) == 0
+        assert jnp.count_nonzero(tv) == 0
 
     def test_sqrt_E_scaling(self, latlon_grid):
         """Quadrupling E must double the tendency (νbs ∝ √E)."""
@@ -299,7 +300,7 @@ class TestBackscatterMPAS:
         assert tend.shape == u.shape
         assert jnp.all(jnp.isfinite(tend))
 
-    def test_zero_energy_small_tendency(self, mpas_mesh):
+    def test_zero_energy_zero_tendency(self, mpas_mesh):
         rng = np.random.RandomState(7)
         n_edges = mpas_mesh.dcEdge.shape[0]
         n_cells = mpas_mesh.areaCell.shape[0]
@@ -307,8 +308,8 @@ class TestBackscatterMPAS:
         E = jnp.zeros((n_cells,))
         tend = backscatter_tendency_mpas(
             u, E, mpas_mesh, BackscatterConfig(enabled=True, c_bs=0.1))
-        # Same epsilon argument as the latlon test.
-        assert float(jnp.max(jnp.abs(tend))) < 1e-3
+        # E = 0 ⇒ ν_bs EXACTLY 0 — same double-where argument as latlon.
+        assert jnp.count_nonzero(tend) == 0
 
     def test_sqrt_E_scaling(self, mpas_mesh):
         rng = np.random.RandomState(7)

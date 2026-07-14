@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     make_rest_state,
 )
 from legoesm.core.state import (

@@ -46,6 +46,7 @@ from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     EPS_DIV as _EPS_DIV,
     compute_visbeck_kappa_gm,
     dm95_taper_scalar,
+    gm_resolution_scaled_kappa,
     validate_adjoint_stabilization,
     vertical_flux_divergence,
 )
@@ -699,6 +700,18 @@ def gm_redi_tracer_tendency_mpas(
         )
     else:
         kappa_GM = cfg.kappa_GM
+
+    # Hallberg (2013) resolution taper of the GM coefficient (default off =>
+    # byte-identical). Static Python gate on the config bool. GM-only: the Redi
+    # diffusivity cfg.kappa_Redi passed below is left unscaled. dx = sqrt(cell
+    # area) matches the lat-lon / cube local-grid-spacing convention.
+    if getattr(cfg, "resolution_function", False):
+        if f_coriolis is None:
+            f_coriolis = 2.0 * constants.Omega * jnp.sin(mesh.latCell)
+        kappa_GM = gm_resolution_scaled_kappa(
+            kappa_GM, f_coriolis, jnp.sqrt(mesh.areaCell),
+            cfg.resfn_gamma, cfg.resfn_cbcl_ms,
+        )
 
     scheme = getattr(cfg, "slope_scheme", "centered")
     if scheme == "centered":

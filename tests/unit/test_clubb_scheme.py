@@ -1277,7 +1277,7 @@ def test_prognostic_clubb_runs_in_combined_physics_pipeline():
     cubed-sphere state, carrying PhysicsState.clubb_moments across TWO steps —
     the moments persist and evolve, tendencies stay finite. This is the
     'legoESM can be run+tested with the prognostic clubb scheme' check."""
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
     from legoesm.atmosphere.physics.convection.config import ConvectionConfig
     from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
@@ -1324,7 +1324,7 @@ def test_prognostic_clubb_differentiable_through_pipeline():
     loss on the temperature tendency is differentiable w.r.t. the input T, with a
     finite, nonzero gradient. Confirms the new scheme keeps the model jax.grad-
     compatible in production (not just in isolated unit tests)."""
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
     from legoesm.atmosphere.physics.convection.config import ConvectionConfig
     from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
@@ -1369,7 +1369,7 @@ def test_prognostic_clubb_pipeline_multistep_stable():
     moment closure reaches a stable quasi-equilibrium with the column, it does not
     blow up. Repeated physics calls evolve PhysicsState.clubb_moments while the
     (smooth) mean state is held fixed."""
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
     from legoesm.atmosphere.physics.convection.config import ConvectionConfig
     from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig

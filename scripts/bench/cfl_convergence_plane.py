@@ -27,10 +27,10 @@ import numpy as np
 from pathlib import Path
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     PlaneCompressibleEulerModel, make_flat_plane_terrain_metric,
     make_rest_state,
 )

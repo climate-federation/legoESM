@@ -21,7 +21,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     _centre_velocities_and_strain_plane,
     _compute_scale_dependent_dynamic_smag_cs_plane,
 )

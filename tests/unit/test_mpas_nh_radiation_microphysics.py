@@ -137,6 +137,45 @@ class TestMPASNHMicrophysics:
         assert bool(jnp.all(jnp.isfinite(tend.dtheta_prime_dt.data)))
         assert bool(jnp.all(jnp.isfinite(tend.dtracers_dt.data)))
 
+    def test_bridge_clips_negative_tracer_read(self, mpas_setup, monkeypatch):
+        """The MPAS-NH microphysics bridge clips negative tracer READS to ≥0
+        BEFORE the scheme sees them — isolated from Kessler's OWN internal
+        negative guards (codex CRM-dycore review). A SPY wrapping the scheme
+        records the q_r it is handed: with the bridge clip it sees q_r ≥ 0
+        despite a state with q_r<0; with ``clip_positive`` monkeypatched to
+        identity it sees the raw negative. Mirrors the plane bridge test."""
+        from legoesm.atmosphere.physics.microphysics import integration
+        state = mpas_setup["state"]
+        ncol, nlev = mpas_setup["ncol"], mpas_setup["nlev"]
+        tr = jnp.zeros((ncol, nlev, 3), dtype=jnp.float64)
+        tr = tr.at[..., 0].set(1.5e-2)                   # q_v near/above sat
+        tr = tr.at[:, -1, 2].set(-5.0e-3)                # NEGATIVE rain
+        s = state._replace(tracers=state.tracers.replace(data=tr))
+
+        captured = {}
+        real_kessler = integration.kessler_microphysics
+
+        def _spy(T, q_v, hydro, *args, **kwargs):
+            captured["qr_min"] = float(jnp.min(hydro.q_r))
+            return real_kessler(T, q_v, hydro, *args, **kwargs)
+
+        def _run():
+            make_microphysics_physics(
+                MicrophysicsConfig(scheme="kessler", kessler=KesslerConfig()),
+                model_type="mpas_nh", dt=20.0,
+            )(s, mpas_setup["mesh"], mpas_setup["hc"], mpas_setup["tm"])
+
+        monkeypatch.setattr(integration, "kessler_microphysics", _spy)
+        _run()
+        assert captured["qr_min"] >= 0.0, (
+            f"MPAS-NH bridge fed q_r<0 to microphysics: {captured['qr_min']:.3e}")
+        # Disable the clip → the spy MUST now see the raw negative.
+        monkeypatch.setattr(integration, "clip_positive", lambda x: x)
+        _run()
+        assert captured["qr_min"] < 0.0, (
+            "clip disabled but microphysics still saw q_r≥0 — not exercising "
+            "the bridge clip")
+
     def test_none_returns_zero_tendencies(self, mpas_setup):
         cfg = MicrophysicsConfig(scheme="none")
         tend = make_microphysics_physics(

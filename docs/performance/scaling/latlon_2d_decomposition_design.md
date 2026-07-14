@@ -221,3 +221,52 @@ as multinode-GPU SPMD. The 2-D FOUNDATION shipped this campaign
 validated, AD-safe capability for that future regime — no further
 near-term investment. Revisit when (a) an IB/NVLink fabric is available,
 or (b) a grid/rank-count regime with `np > n_lat` is the target.
+
+## M3a increment-1 (2026-07): the SPMD (shard_map) 2-D leg SHIPPED for the atmosphere
+
+The deferral verdict above concerns the **MPI (mpi4jax, Gloo-TCP) leg** —
+latency-bound fabric, one collective per direction per pad, `np ≤ 32 ≪
+n_lat`.  The **single-controller SPMD leg** (`shard_map` + `ppermute` over
+a `("lat", "lon")` device mesh — NVLink/PCIe intra-node, `jax.distributed`
+multi-node GPU) is the bandwidth-fabric regime the deferral pointed to, and
+increment-1 wires it natively for the atmosphere step
+(`perf/m3a-latlon-2d-tiling`):
+
+* **Periodic longitude = cyclic ring ppermute** (`latlon_lon_ring_perms`,
+  `lon_ring_ghosts_spmd`); `p_lon == 1` is a STATIC local-wrap branch —
+  bit-identical to the 1-D band path (gated).
+* **True 180° pole fold under a lon split** — the piece the MPI leg lacks
+  (its `proc_lon > 1` benchmark substitutes a wall pole): the pole tiles
+  `all_gather` their `(halo, w)` edge rows over the `"lon"` ring, apply the
+  SERIAL `_pole_fold` on the reassembled circle, and dynamic-slice their own
+  padded window back out (`make_latlon_2d_pad_body`) — bit-identical to the
+  serial fold by construction, gated per tile against the serial pad window.
+  Follow-up optimisation: a 180°-partner ppermute pair (even `p_lon`)
+  instead of the all_gather (which every tile executes uniformly).
+* **Staggered ownership**: `v_lower = v[:n_lat]` (as 1-D) + `u_left =
+  u[:, :n_lon]` — the u seam column is reconstructed from the east
+  neighbour on the wrap (`reconstruct_uface_left`), relying on the
+  step-preserved periodic-closure identity `u[:, n_lon] == u[:, 0]`.
+* **Corners**: lat-then-lon two-pass exchange composition; the C-grid
+  operator chain has no explicit-diagonal stencil (vertex circulations
+  combine lat-padded u with lon-padded v), so no corner messages exist.
+* **Topology choice** (`choose_latlon_2d_topology`): minimize the modeled
+  per-tile received VOLUME of one full pad,
+  `(w if p_lat>1) + (nl + n_lon if p_lon>1)` over feasible factorizations —
+  the `n_lon` term is the two pole-fold `all_gather`s every `p_lon > 1` pad
+  executes on EVERY tile (both `jnp.where` fold operands evaluate; codex
+  M3a finding 4: a perimeter-only score mis-ranked lon splits by ignoring
+  them).  Consequence: the band `(N, 1)` wins whenever FEASIBLE under the
+  current fold implementation; the 2-D tiling is selected exactly in the
+  beyond-band regime (`n_lat % N != 0` or `n_lat/N < 2`) it exists for.
+  The 1.25× `band_preference` hysteresis is retained for when the
+  partner-ppermute fold lands and removes the gather term.  The 1-D band
+  lane stays the default production path.
+
+REMAINDER (increment-2+): the ocean 2-D SPMD step; a stateful
+`PhysicsState` carry under 2-D tiles (the `(ncol,)` lat-major flatten is
+band-contiguous only — refused loudly); polar-filter FFT under a lon split
+(lon-gather FFT — refused loudly); tripolar fold × lon split (refused, as
+on the MPI leg); GPU A/B of the fold all_gather vs partner-ppermute; wiring
+`run_atm_latlon_spmd` / the production driver to the 2-D factories once a
+`np > n_lat` or bandwidth-fabric target exists.

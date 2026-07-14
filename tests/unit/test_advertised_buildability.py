@@ -157,12 +157,12 @@ class TestDataDrivenRowsBuildable:
         "model_type,disc,expected_cls_module,expected_cls_name",
         [
             ("shallow_water", "sfno",
-             "legoesm.atmosphere.dynamics.sfno_sw", "SFNOShallowWaterModel"),
+             "legoesm.atmosphere.dynamics.neural.sfno_sw", "SFNOShallowWaterModel"),
             ("hydrostatic", "sfno",
-             "legoesm.atmosphere.dynamics.sfno_pe",
+             "legoesm.atmosphere.dynamics.neural.sfno_pe",
              "SFNOPrimitiveEquationModel"),
             ("hydrostatic", "u_cast",
-             "legoesm.atmosphere.dynamics.ucast_pe",
+             "legoesm.atmosphere.dynamics.neural.ucast_pe",
              "UCastPrimitiveEquationModel"),
         ],
     )

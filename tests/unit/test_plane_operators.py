@@ -1,4 +1,4 @@
-"""Unit tests for ``src/legoesm/atmosphere/dynamics/plane_operators.py``.
+"""Unit tests for ``src/legoesm/atmosphere/dynamics/les/plane_operators.py``.
 
 Two test categories:
 
@@ -22,7 +22,7 @@ import jax.test_util
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.dynamics.plane_operators import (
+from legoesm.atmosphere.dynamics.les.plane_operators import (
     curl_3d,
     divergence_3d,
     grad_x_3d,

@@ -34,7 +34,7 @@ MPI = pytest.importorskip("mpi4py.MPI")
 
 from legoesm.grids.halo import set_halo_backend
 from legoesm.grids.latlon import create_latlon_grid
-from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
     absolute_vorticity_coriolis,
 )
 from legoesm.grids.operators_latlon_cgrid import (

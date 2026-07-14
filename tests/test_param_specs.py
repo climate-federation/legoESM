@@ -95,10 +95,6 @@ PARAM_SPEC_TODO: frozenset[str] = frozenset(
         # follow-up); the field baseline below pins its current float fields so
         # no NEW unspecced float can slip into it meanwhile.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py",
-        # (canopy/config.py GRADUATED 2026-07-13: main #897 shipped its
-        # __param_spec__ after the p4p5-era TODO classification, so the
-        # merge left it doubly classified — TODO entry removed, shrink-only
-        # honored.)
         # --- ocean ---------------------------------------------------------
         # --- land ----------------------------------------------------------
     }

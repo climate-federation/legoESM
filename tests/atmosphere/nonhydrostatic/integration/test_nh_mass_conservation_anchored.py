@@ -31,7 +31,7 @@ def test_nh_mass_conservation_cubed_sphere():
     ``CompressibleEulerConfig.fix_mass=True, anchor_mass_to_initial=True``.
     """
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
         CDGridCompressibleEulerModel,
         CDGridCompressibleEulerConfig,
     )
@@ -62,7 +62,7 @@ def test_nh_mass_conservation_mpas():
     ``fix_mass_nonhydrostatic_mpas`` in ``core/conservation.py``.
     """
     from legoesm.grids.voronoi import create_voronoi_mesh
-    from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas import (
         MPASCompressibleEulerModel, MPASCompressibleEulerConfig,
     )
     from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1_mpas import (
@@ -92,7 +92,7 @@ def test_nh_mass_conservation_mpas():
 def test_nh_mass_conservation_spectral():
     """Spectral NH (iter-9): ``rho_prime_hat[0,:] += Δρ·sqrt(4π)``."""
     from legoesm.grids.gaussian import create_gaussian_grid
-    from legoesm.atmosphere.dynamics.spectral_nh import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
         SpectralCompressibleEulerModel, SpectralNHConfig,
         dcmip25_tc1_init_spectral,
     )
@@ -121,7 +121,7 @@ def test_nh_mass_conservation_spectral():
 def test_long_run_nh_mass_conservation_cubed_sphere():
     """100-step cube NH: anchored dry mass must NOT random-walk."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
         CDGridCompressibleEulerModel, CDGridCompressibleEulerConfig,
     )
     from tests.test_cases.dcmip2025 import dcmip25_tc1_init
@@ -157,7 +157,7 @@ def test_long_run_nh_mass_conservation_mpas():
     over 100 steps on level-4 Voronoi mesh + 10 levels.
     """
     from legoesm.grids.voronoi import create_voronoi_mesh
-    from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas import (
         MPASCompressibleEulerModel, MPASCompressibleEulerConfig,
     )
     from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1_mpas import (
@@ -196,7 +196,7 @@ def test_long_run_nh_mass_conservation_spectral():
     = 1.94e-16 on T21 spectral NH with DCMIP-2025 TC1 init.
     """
     from legoesm.grids.gaussian import create_gaussian_grid
-    from legoesm.atmosphere.dynamics.spectral_nh import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
         SpectralCompressibleEulerModel, SpectralNHConfig,
         dcmip25_tc1_init_spectral,
     )

@@ -27,7 +27,7 @@ from legoesm.grids.gaussian import (
     spectral_hyperdiffusion_3d,
 )
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     SpectralPEConfig,
     SpectralPrimitiveEquationModel,
@@ -231,7 +231,7 @@ class TestSpectralPEState:
         RHS must propagate the tracer pytree structure as zeros into
         the tendency state.  Otherwise ``jax.tree.map(state, tendency)``
         in the RK step fails with "Expected dict, got None"."""
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPEConfig,
             SpectralPrimitiveEquationModel,
         )
@@ -272,7 +272,7 @@ class TestSpectralPEState:
         with ``AttributeError: DynamicJaxprTracer has no attribute
         replace``.
         """
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPEConfig,
             SpectralPrimitiveEquationModel,
         )
@@ -307,7 +307,7 @@ class TestSpectralPEState:
         """A ``tracers`` dict mixing ``Field`` and raw-array values
         should round-trip through the dycore step without crashing.
         Each value preserves its original container."""
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPEConfig,
             SpectralPrimitiveEquationModel,
         )
@@ -348,7 +348,7 @@ class TestSpectralPEState:
         tendency had ``tracers=None`` which broke any downstream
         tree.map that expected matching pytree structure.
         """
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPEConfig,
             SpectralPrimitiveEquationModel,
         )

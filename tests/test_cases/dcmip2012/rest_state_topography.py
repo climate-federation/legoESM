@@ -175,7 +175,7 @@ def rest_state_topography_init_spectral(
     T_init: float = T_0,
 ):
     """Initialise rest state with DCMIP §2-0-0 mountain in spectral space."""
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
     from legoesm.grids.gaussian import sh_analysis, sh_analysis_3d
 
     n_lat = grid.n_lat

@@ -16,10 +16,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     sponge_profile, make_flat_plane_terrain_metric, make_rest_state,
     plane_compressible_euler_slow_tendencies,
 )
@@ -133,7 +133,7 @@ def test_sam_rational_profile_ramps_faster_than_sin2():
 
 
 def test_unknown_sponge_shape_raises():
-    from legoesm.atmosphere.dynamics.compressible_euler import sponge_profile
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler import sponge_profile
     import pytest
     with pytest.raises(ValueError, match="Unknown sponge profile shape"):
         sponge_profile(jnp.zeros(3), 1000.0, 500.0, 0.05, shape="bogus")

@@ -31,7 +31,7 @@ def _latlon_cfg(**over):
 
 def test_physics_fn_held_suarez():
     """held_suarez_forcing=True -> the column-local Held-Suarez forcing."""
-    from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_latlon
     fn = ModelDriver._latlon_spmd_physics_fn(
         _Stub(_latlon_cfg(held_suarez_forcing=True)))
     assert fn is held_suarez_forcing_latlon

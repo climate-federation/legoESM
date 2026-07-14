@@ -8,6 +8,9 @@ an equator-pole value structure, and the dispatcher wiring.  (Full physical
 validation against real ERA5 is deferred to when a zarr path is provided.)
 """
 
+import ast
+import pathlib
+
 import numpy as np
 import pytest
 from legoesm.grids.vertical import create_sigma_coordinate
@@ -41,23 +44,17 @@ def _carry_field(carry, name):
     return np.asarray(f.data if hasattr(f, "data") else f)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="#565 draft defect: era5_to_state.py defines era5_to_mpas_carry twice "
-    "(compare-reanalysis cell-centred builder shadowed by the dycore-IC "
-    "edge-normal builder), so the imported symbol returns edge-normal u with no "
-    "cell-centred v and this compare-reanalysis contract cannot hold. Fails on "
-    "the #565 branch independently of the merge; the author must rename one "
-    "builder and rewire select_era5_regrid before the draft ships.",
-)
 def test_mpas_carry_shapes_and_physical():
+    # #948: the dead cell-centred SegmentCarry builder was deleted; the sole
+    # surviving era5_to_mpas_carry is the edge-normal dycore-IC builder, so u is
+    # the edge-normal component on mesh EDGES (nEdges), not cell-centred.
     mesh = create_voronoi_mesh(2)
     sigma = create_sigma_coordinate(30)
     carry = era5_to_mpas_carry(_synthetic_era5(), mesh, sigma)
     T = _carry_field(carry, "T")
     u = _carry_field(carry, "u")
-    assert T.shape == (mesh.nCells, 30)          # 1-D cell axis, not (n_lat, n_lon)
-    assert u.shape == (mesh.nCells, 30)
+    assert T.shape == (mesh.nCells, 30)          # scalars at cell centres
+    assert u.shape == (mesh.nEdges, 30)          # edge-normal wind on edges
     assert np.all(np.isfinite(T)) and np.all(np.isfinite(u))  # incl. dateline cells
     assert 180.0 < T.min() and T.max() < 320.0
     assert np.abs(u).max() > 5.0, "zonal jet did not survive the regrid"
@@ -114,18 +111,13 @@ def test_select_era5_regrid_routes_mpas_and_aliases():
         select_era5_regrid("octahedral")                         # still raises
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="#565 draft defect: era5_to_mpas_carry name collision in "
-    "era5_to_state.py (see test_mpas_carry_shapes_and_physical). The winning "
-    "dycore-IC builder does not expose the cell-centred v this test asserts; "
-    "fails on the #565 branch independently of the merge.",
-)
 def test_mpas_carry_dtype_is_floating():
     mesh = create_voronoi_mesh(2)
     sigma = create_sigma_coordinate(20)
     carry = era5_to_mpas_carry(_synthetic_era5(), mesh, sigma)
-    for name in ("T", "u", "v", "p_s", "q_v"):
+    # #948: MPASCarry fields are (u [edge-normal], T, p_s, phis, q_v) — no
+    # cell-centred v (that belonged to the deleted SegmentCarry builder).
+    for name in ("T", "u", "p_s", "phis", "q_v"):
         arr = _carry_field(carry, name)
         assert np.issubdtype(arr.dtype, np.floating), name   # never int/object
 
@@ -213,3 +205,18 @@ def test_voronoi_weights_cache_separates_different_meshes():
     w2 = _get_voronoi_weights(asc.lat, asc.lon, mesh2)
     w3 = _get_voronoi_weights(asc.lat, asc.lon, mesh3)
     assert w2 is not w3
+
+
+def test_era5_to_state_has_no_duplicate_toplevel_defs():
+    """#948 guard: era5_to_state.py defined ``era5_to_mpas_carry`` TWICE (the
+    cell-centred SegmentCarry builder silently shadowed by the edge-normal
+    dycore-IC builder — #565/#797 merge residue).  Any future duplicate
+    top-level def/class name in the module now fails here LOUDLY instead of
+    binding the name to the last definition and shadowing the rest."""
+    import legoesm.training.era5_to_state as mod
+    tree = ast.parse(pathlib.Path(mod.__file__).read_text())
+    names = [n.name for n in tree.body
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                               ast.ClassDef))]
+    dups = sorted({n for n in names if names.count(n) > 1})
+    assert not dups, f"duplicate top-level defs in era5_to_state.py: {dups}"

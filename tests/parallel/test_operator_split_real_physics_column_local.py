@@ -31,7 +31,7 @@ from legoesm import constants
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.driver.physics_pipeline import build_physics_pipeline
-from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
     build_band_grids_atm)
 
 N_LAT = 8

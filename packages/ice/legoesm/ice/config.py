@@ -61,6 +61,11 @@ __param_spec__ = {
                 "transform": "sigmoid", "category": "closure",
                 "reference": "CICE donor-snow retention fraction in ridges", "shape": None,
             },
+            "cs_shear_ridging": {
+                "units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "Rothrock (1975) / CICE shear-ridging fraction Cs", "shape": None,
+            },
         },
     },
     "MeltPondConfig": {
@@ -240,6 +245,10 @@ class RidgingConfig(NamedTuple):
     snow_fraction_retained: float = 0.5  # Fraction of donor snow retained
                                           # in ridges (remainder enters ocean
                                           # via runoff, CICE convention).
+    cs_shear_ridging: float = 0.25     # Shear-ridging participation fraction
+                                        # Cs (Rothrock 1975 / CICE): fraction of
+                                        # shear deformation that drives ridging
+                                        # in addition to pure convergence.
     closing_rate_max: float = 1.0      # Cap on convergence rate [1/s]
                                         # (sanity bound; physical Δ rarely
                                         # exceeds 1e-5)

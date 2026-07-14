@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.dynamics.tracer_positivity import (
+from legoesm.atmosphere.dynamics.shared.tracer_positivity import (
     apply_positive_filter_state, clip_positive,
     clip_positive_compensated,
 )
@@ -91,7 +91,7 @@ def test_clip_positive_compensated_jax_grad_finite():
 
 @pytest.fixture
 def plane_state_with_negative_qv():
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         make_flat_plane_terrain_metric, make_rest_state,
     )
     from legoesm.grids.plane import create_plane_grid

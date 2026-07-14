@@ -38,7 +38,7 @@ import pytest
 mpi4jax = pytest.importorskip("mpi4jax")
 MPI = pytest.importorskip("mpi4py.MPI")
 
-from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonHydrostaticState,
     CGridLatLonPrimitiveEquationConfig,
     CGridLatLonPrimitiveEquationModel,

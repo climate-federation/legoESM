@@ -17,7 +17,7 @@ it into a target scheme ``*Config`` as a per-column (traced-in-loss) leaf.
   traced; production keeps the static scalar default (SegmentForcing doctrine).
 
 The diagnosed coefficient itself comes from
-:mod:`legoesm.atmosphere.dynamics.les_closure_diagnosis`; this module is the
+:mod:`legoesm.atmosphere.dynamics.les.les_closure_diagnosis`; this module is the
 grid-agnostic glue that turns it into the config the GCM runs with.
 
 NOTE on the consuming scheme: promoting a *specific* production coefficient to a

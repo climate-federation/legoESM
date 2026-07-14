@@ -37,7 +37,7 @@ from legoesm.grids.vertical import (
 from legoesm import constants
 
 from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     spectral_pe_to_grid,
 )

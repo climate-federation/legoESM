@@ -21,8 +21,8 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from legoesm.atmosphere.column_forcing import ColumnLargeScaleState  # noqa: E402
-from legoesm.atmosphere.dynamics.column_large_scale_extract import (  # noqa: E402
+from legoesm.atmosphere.forcing.idealized.column_forcing import ColumnLargeScaleState  # noqa: E402
+from legoesm.atmosphere.forcing.column_large_scale_extract import (  # noqa: E402
     _gradient_gaussian_3d,
     extract_column_forcing,
     extract_column_forcing_gaussian,

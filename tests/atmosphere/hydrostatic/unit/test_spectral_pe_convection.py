@@ -24,7 +24,7 @@ from legoesm.grids.gaussian import (
     vordiv_from_uv_3d,
 )
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     isothermal_rest_state_spectral,
     spectral_pe_to_grid,
@@ -509,7 +509,7 @@ class TestSpectralPECMT:
         the SSP-RK3 ``jax.tree.map`` because the tendency state's
         ``tracers`` field was None while the input state's was a dict.
         """
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPEConfig, SpectralPrimitiveEquationModel,
         )
         nlev = sigma_coord.n_levels
@@ -631,7 +631,19 @@ class TestSpectralPECMT:
 def profile_scheme_config(request):
     """Yield a (name, ConvectionConfig) pair for each new scheme."""
     name, scheme_field, scheme_cls = request.param
-    kwargs = {scheme_field: scheme_cls()}
+    # #929: this dispatch / finite-output regression shares one condensate-less
+    # (``q_v``-only) spectral state across all five schemes.  Default Bechtold
+    # now emits an in-updraft rain split (``precip_efficiency=0.7``) that the
+    # spectral bridge REQUIRES a ``q_c``/``q_r`` tracer to receive — otherwise
+    # it raises loudly rather than silently leaking the un-booked rain water.
+    # Pin ``precip_efficiency=0.0`` here so Bechtold exercises its pre-#929
+    # no-split dispatch path on this condensate-less state; the rain-split
+    # routing and the raise are covered by
+    # ``test_convection_rain_split_bridges.py``.
+    if scheme_cls is BechtoldConfig:
+        kwargs = {scheme_field: scheme_cls(precip_efficiency=0.0)}
+    else:
+        kwargs = {scheme_field: scheme_cls()}
     return name, ConvectionConfig(scheme=name, **kwargs)
 
 

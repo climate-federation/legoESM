@@ -43,7 +43,7 @@ from legoesm.atmosphere.physics.radiation.config import (
 )
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
 from legoesm.atmosphere.physics.radiation.output import RadiationOutput
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     spectral_pe_to_grid,
 )

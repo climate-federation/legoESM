@@ -15,8 +15,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.dynamics import plane_operators as _ops
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les import plane_operators as _ops
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     curl_vlast,
     divergence_vlast,
     grad_x_vlast,

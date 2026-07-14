@@ -11,7 +11,7 @@ import pytest
 
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.model_driver import ModelDriver
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationConfig,
 )
 
@@ -106,7 +106,7 @@ def test_refuses_effective_zero_mean_active(monkeypatch):
 
 def _capture_adapter(monkeypatch):
     """Intercept make_tiled_cc_step; return the captured-call dict."""
-    import legoesm.atmosphere.dynamics.tiled_step_adapter as _ad
+    import legoesm.atmosphere.dynamics.gcm.tiled_step_adapter as _ad
     seen = {}
 
     def _fake(model, mesh, kt, dt):

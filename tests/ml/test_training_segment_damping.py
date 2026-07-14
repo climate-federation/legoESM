@@ -19,14 +19,23 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
+import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 _ROOT = Path(__file__).resolve().parents[2]
 _ENTRY = _ROOT / "scripts" / "run" / "train_weatherbench_scale.py"
 _spec = importlib.util.spec_from_file_location("train_wb_scale_damp", _ENTRY)
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
+
+# The sfno mode builds a Gaussian grid, which hard-requires x64 (spectral
+# transforms). neural_gcm has no such dependency and always runs.
+_needs_x64 = pytest.mark.skipif(
+    not jax.config.read("jax_enable_x64"),
+    reason="sfno mode builds a Gaussian grid; needs JAX_ENABLE_X64=1",
+)
 
 _SMOKE_YML = {
     "n_lat": 32, "n_lon": 64, "nlev": 8, "dt": 300.0,
@@ -60,9 +69,13 @@ def test_build_training_segment_threads_fric_decay(monkeypatch):
     assert bool(jnp.all(recorded["fric_decay"] == 1.0))
 
 
-def test_wb_modes_receive_driver_friction(monkeypatch):
-    """build_mode_components hands the DRIVER's boundary-layer friction
-    profile (non-trivial: < 1 near the surface) to the training segment."""
+def _record_threaded_fric(monkeypatch, mode, *, yml_overrides=None):
+    """Return the ``fric_decay`` ``build_mode_components`` threads to the
+    training segment for the given WB ``mode``.
+
+    ``build_training_segment`` is monkeypatched to capture kwargs, so the
+    segment is built (fric_decay threaded) but never run.
+    """
     from legoesm.training import training_driver as td
     from legoesm.training.scale_build import build_mode_components
 
@@ -74,14 +87,56 @@ def test_wb_modes_receive_driver_friction(monkeypatch):
 
     monkeypatch.setattr(td, "build_training_segment", _recorder)
 
-    cfg = _mod.build_scale_config_from_args(["--mode", "physics", "--smoke"])
-    yml = dict(_SMOKE_YML)
+    cfg = _mod.build_scale_config_from_args(["--mode", mode, "--smoke"])
+    yml = dict(_SMOKE_YML, **(yml_overrides or {}))
     _, _, _, params, make_run_seg, _, _ = build_mode_components(cfg, yml)
     make_run_seg(params)
 
     fric = recorded.get("fric_decay")
     assert fric is not None, "fric_decay not threaded to the training segment"
-    fric = jnp.asarray(fric)
-    # BL Rayleigh friction: decay < 1 at the lowest level, ~free atmosphere aloft
+    return jnp.asarray(fric)
+
+
+def test_wb_modes_receive_driver_friction(monkeypatch):
+    """build_mode_components hands the DRIVER's friction profile to the
+    training segment, correctly GATED by whether a real BL scheme owns
+    surface momentum (#931).
+
+    - turbulence="louis": the rollout applies the physical Louis surface
+      stress, so the Held-Suarez Rayleigh surrogate is gated to an exact no-op
+      (decay == 1 at the surface) -- keeping it would double-count surface drag
+      (#931).  Physics-mode adjoint stability comes from Louis, not this term.
+    - turbulence="none": no BL scheme owns momentum, so the driver keeps the
+      Rayleigh dissipation profile (decay < 1 near the surface) that the
+      pure-dycore adjoint needs (#797 bug 11).
+    """
+    # Louis owns surface momentum -> Rayleigh drag gated off (no-op).
+    fric_louis = _record_threaded_fric(monkeypatch, "physics",
+                                       yml_overrides={"turbulence": "louis"})
+    assert float(fric_louis[-1]) == 1.0
+    assert bool(jnp.all(fric_louis > 0.0)) and bool(jnp.all(fric_louis <= 1.0))
+
+    # No BL scheme -> the Rayleigh dissipation profile is retained and threaded.
+    fric_none = _record_threaded_fric(monkeypatch, "physics",
+                                      yml_overrides={"turbulence": "none"})
+    assert float(fric_none[-1]) < 1.0
+    assert bool(jnp.all(fric_none > 0.0)) and bool(jnp.all(fric_none <= 1.0))
+
+
+@pytest.mark.parametrize(
+    "mode", ["neural_gcm", pytest.param("sfno", marks=_needs_x64)]
+)
+def test_pure_dycore_wb_modes_keep_rayleigh_damping(monkeypatch, mode):
+    """End-to-end #797 guard: the pure-dycore WB modes (neural_gcm / sfno) run
+    NO boundary-layer scheme, so `build_latlon_config` declares
+    turbulence="none" for them -> the #931 gate KEEPS the Held-Suarez Rayleigh
+    drag, which is their SOLE adjoint dissipation of the undamped dycore.
+
+    Critically the yml here does NOT set turbulence (it defaults to "louis"),
+    yet the threaded fric_decay is still the non-trivial Rayleigh profile
+    (surface < 1), NOT the louis no-op -- proving the mode-driven override,
+    byte-identical to the pre-#931 always-on drag these modes relied on.
+    """
+    fric = _record_threaded_fric(monkeypatch, mode)  # yml turbulence -> "louis"
     assert float(fric[-1]) < 1.0
     assert bool(jnp.all(fric > 0.0)) and bool(jnp.all(fric <= 1.0))

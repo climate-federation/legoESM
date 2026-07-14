@@ -45,7 +45,7 @@ class TestCubedSphereSPMDStep:
         from legoesm.core.cfl import (
             adaptive_hyperdiff_coeff, estimate_min_dx_cubed_sphere,
         )
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
             hydrostatic_to_fv3, fv3_to_hydrostatic,
         )
@@ -100,11 +100,11 @@ class TestCubedSphereSPMDStep:
         from legoesm.core.cfl import (
             adaptive_hyperdiff_coeff, estimate_min_dx_cubed_sphere,
         )
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
             hydrostatic_to_fv3, fv3_to_hydrostatic,
         )
-        from legoesm.atmosphere.held_suarez import held_suarez_forcing
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing
         from tests.test_cases.baroclinic_wave import baroclinic_wave_init
 
         n_grid, n_lev, dt = 24, 8, 450.0
@@ -249,7 +249,7 @@ class TestCubedSphereSPMDStep:
         from legoesm.core.cfl import (
             adaptive_hyperdiff_coeff, estimate_min_dx_cubed_sphere,
         )
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
             hydrostatic_to_fv3, fv3_to_hydrostatic,
         )
@@ -316,7 +316,7 @@ class TestCubedSphereSPMDStep:
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
             hydrostatic_to_fv3, fv3_to_hydrostatic,
         )
@@ -385,7 +385,7 @@ class TestCubedSphereSPMDStep:
         from legoesm.core.cfl import (
             adaptive_hyperdiff_coeff, estimate_min_dx_cubed_sphere,
         )
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
             hydrostatic_to_fv3, fv3_to_hydrostatic,
         )

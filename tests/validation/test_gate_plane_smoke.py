@@ -24,7 +24,7 @@ if str(_SCRIPTS) not in sys.path:
 
 import run_gate_plane  # noqa: E402
 
-from legoesm.atmosphere.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
+from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
 
 # Repo-local cache (scripts/data/fetch_les_forcing.py) or external
 # LEGOESM_GSAM_ROOT; skip if neither has the deck.

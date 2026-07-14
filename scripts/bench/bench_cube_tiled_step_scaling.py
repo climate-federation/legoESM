@@ -138,15 +138,15 @@ def main() -> int:
             "and gathered comparison are process-local).")
 
     from jax.sharding import Mesh
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationConfig,
         CDGridPrimitiveEquationModel,
     )
-    from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+    from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import (
         make_tiled_cc_loop,
         make_tiled_cc_step,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.halo import set_halo_backend
     from legoesm.grids.vertical import create_sigma_coordinate
@@ -254,6 +254,17 @@ def main() -> int:
         from jax.experimental import multihost_utils
 
         multihost_utils.sync_global_devices("cube_tiled_bench_start")
+
+    if args.closed_loop:
+        # #921: the closed-loop step fuses the halo collective-permutes with
+        # the in-stage mass-fixer psum in ONE executable; on multi-process GPU
+        # the NCCL comm-init of those two clique kinds can be ordered
+        # differently per rank and DEADLOCK.  Prime every clique in a fixed,
+        # rank-independent order FIRST (no-op single-process / CPU-virtual).
+        from legoesm.parallel.tiled_production_cdgrid import (
+            warmup_tiled_cube_comms,
+        )
+        warmup_tiled_cube_comms(mesh, args.kt)
 
     # Time the AUDITED AOT executable itself — jit's dispatch cache does NOT
     # reuse lower().compile()'s output, so calling the jit wrapper would

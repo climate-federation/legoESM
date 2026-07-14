@@ -7,7 +7,11 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from legoesm.parallel.reductions import batch_allreduce_mpi, is_multi_process
+from legoesm.parallel.reductions import (
+    batch_allreduce_mpi,
+    batch_psum_spmd,
+    is_multi_process,
+)
 
 
 def _global_sum_pair(a: jnp.ndarray, b: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -42,8 +46,17 @@ def _global_sum_pair(a: jnp.ndarray, b: jnp.ndarray) -> tuple[jnp.ndarray, jnp.n
                 "_global_sum_pair: halo backend is 'spmd' but no SPMD mesh is "
                 "set; arm it via activate_latlon_spmd_halo(mesh).")
         if "lat" in tuple(mesh.axis_names):
-            import jax
-            return jax.lax.psum(a, "lat"), jax.lax.psum(b, "lat")
+            # ONE packed psum for the pair instead of two separate psums
+            # (M4 quick win: route through the canonical batched helper,
+            # the same message-aggregation lever as the MPI leg below and
+            # barotropic_implicit_latlon_cgrid's mass-fix reduction).
+            # Packing is BIT-identical: the per-element reduction order
+            # across the "lat" axis is unchanged by concatenation — gated
+            # by tests/parallel/test_latlon_spmd_fused_halo.py
+            # (test_global_sum_pair_spmd_batched_*).  psum stays
+            # self-transposing ⇒ AD-safe.
+            a_g, b_g = batch_psum_spmd([a, b], "lat")
+            return a_g, b_g
     if is_multi_process():
         a_g, b_g = batch_allreduce_mpi([a, b], op="sum")
         return a_g, b_g

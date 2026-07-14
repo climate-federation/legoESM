@@ -13,14 +13,14 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     make_flat_plane_terrain_metric, make_rest_state,
     plane_compressible_euler_slow_tendencies,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane_halo import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane_halo import (
     plane_compressible_euler_slow_tendencies_halo,
 )
 from legoesm.grids.plane import create_plane_grid
@@ -30,7 +30,8 @@ from legoesm.parallel.plane_mpi import make_plane_pencil_layout
 jax.config.update("jax_enable_x64", True)
 
 
-def _setup(use_coriolis=False, hyperdiff=0.0, with_tracers=False):
+def _setup(use_coriolis=False, hyperdiff=0.0, with_tracers=False,
+           scheme="upwind1", halo=1):
     grid = create_plane_grid(
         nx=8, ny=6, nlev=10, dx=1000.0, dy=2000.0, dtype=jnp.float64,
     )
@@ -44,6 +45,7 @@ def _setup(use_coriolis=False, hyperdiff=0.0, with_tracers=False):
         smagorinsky_cs=0.0,
         use_coriolis=use_coriolis,
         n_acoustic_substeps=12,
+        horizontal_advection_scheme=scheme,
     )
     rest = make_rest_state(grid, hc, dtype=jnp.float64)
     rng = jax.random.PRNGKey(0)
@@ -71,7 +73,7 @@ def _setup(use_coriolis=False, hyperdiff=0.0, with_tracers=False):
         )
     layout = make_plane_pencil_layout(
         rank=0, n_ranks=1, n_ranks_y=1, n_ranks_x=1,
-        ny_global=6, nx_global=8,
+        ny_global=6, nx_global=8, halo=halo,
     )
     return grid, hc, tm, cfg, state, layout
 
@@ -165,6 +167,42 @@ def test_halo_equiv_with_tracers():
     )
     actual = plane_compressible_euler_slow_tendencies_halo(
         state, grid, hc, tm, cfg, layout,
+    )
+    _eq_tendencies(actual, expected)
+
+
+def test_halo_equiv_weno5_tracers():
+    """WENO5 + tracers: the positivity guard routes the TRACER legs onto
+    van_leer in BOTH the serial and halo paths (θ′ stays on weno5), so
+    serial==MPI stays bit-identical on the new ``tadv_*`` path. The
+    van_leer/upwind1 tracer equiv tests above cannot lock this (the guard is
+    inactive for a monotone scheme); this halo=3 case is the one that does."""
+    grid, hc, tm, cfg, state, layout = _setup(
+        with_tracers=True, scheme="weno5", halo=3,
+    )
+    expected = plane_compressible_euler_slow_tendencies(
+        state, grid, hc, tm, cfg,
+    )
+    actual = plane_compressible_euler_slow_tendencies_halo(
+        state, grid, hc, tm, cfg, layout,
+    )
+    _eq_tendencies(actual, expected)
+
+
+def test_halo_equiv_van_leer_vertical_tracers():
+    """VERTICAL van_leer tracer advection is honored on the MPI halo path
+    (codex CRM-dycore review): previously the halo tracer leg was hardcoded to
+    centered, silently diverging from serial whenever
+    ``vertical_tracer_advection="van_leer"`` (the RCE runner default). With
+    nonzero w + tracers, serial and halo slow-tendencies must stay
+    bit-identical now that the halo mirrors the serial vertical dispatch."""
+    grid, hc, tm, cfg, state, layout = _setup(with_tracers=True)
+    cfg_vl = cfg._replace(vertical_tracer_advection="van_leer")
+    expected = plane_compressible_euler_slow_tendencies(
+        state, grid, hc, tm, cfg_vl,
+    )
+    actual = plane_compressible_euler_slow_tendencies_halo(
+        state, grid, hc, tm, cfg_vl, layout,
     )
     _eq_tendencies(actual, expected)
 
@@ -323,7 +361,7 @@ def test_halo_equiv_smag_plus_vertical_theta_diff_plus_hyperdiff():
 def test_halo_uses_cached_f_pad():
     """Codex iter-3 perf: caller can pre-compute f_pad to skip per-step
     MPI exchange of static f_y. Bit-identical to non-cached path."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane_halo import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane_halo import (
         precompute_coriolis_halo,
     )
     grid, hc, tm, cfg, state, layout = _setup(use_coriolis=True)

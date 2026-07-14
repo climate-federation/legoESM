@@ -26,7 +26,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     make_flat_plane_terrain_metric,
     make_rest_state,
 )
@@ -340,10 +340,10 @@ class TestRCEMIPCompose:
 
     def test_compose_gray_kessler_runs_5_steps(self, plane_setup):
         from scripts.run.run_rcemip_plane import make_rcemip_physics
-        from legoesm.atmosphere.dynamics.compressible_euler import (
+        from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
             CompressibleEulerConfig,
         )
-        from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
             PlaneCompressibleEulerModel,
         )
 
@@ -380,16 +380,15 @@ class TestRCEMIPCompose:
         """Codex review 2026-05-24: ``_sum_plane_tendencies()`` with no
         inputs has no canonical empty tendency to return — must raise
         rather than IndexError on ``tendencies[0]`` inside the helper."""
-        from scripts.run.run_rcemip_plane import _sum_plane_tendencies
+        from legoesm.atmosphere.idealized.land_rce import sum_plane_tendencies
         with pytest.raises(ValueError, match="at least one tendency"):
-            _sum_plane_tendencies()
+            sum_plane_tendencies()
 
     def test_sum_plane_tendencies_field_wise_correctness(self, plane_setup):
         """Summing surface_flux + radiation tendencies must equal the
         element-wise sum on every field's ``.data`` array."""
-        from scripts.run.run_rcemip_plane import (
-            _make_surface_flux_physics, _sum_plane_tendencies,
-        )
+        from scripts.run.run_rcemip_plane import _make_surface_flux_physics
+        from legoesm.atmosphere.idealized.land_rce import sum_plane_tendencies
         rad_cfg = RadiationConfig(
             scheme="gray", gray=GrayRadiationConfig(),
         )
@@ -406,7 +405,7 @@ class TestRCEMIPCompose:
             plane_setup["state"], plane_setup["grid"],
             plane_setup["hc"], plane_setup["tm"],
         )
-        t_sum = _sum_plane_tendencies(t_sfc, t_rad)
+        t_sum = sum_plane_tendencies(t_sfc, t_rad)
         # dtheta_prime_dt: radiation cools/warms aloft; surface heats
         # the lowest level. Sum must equal element-wise.
         assert jnp.allclose(

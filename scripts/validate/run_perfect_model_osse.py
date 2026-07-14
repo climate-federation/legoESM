@@ -399,7 +399,7 @@ def _run_cross_resolution_main(
     resolution differs) the identical way the run does, then run the cross-resolution
     OSSE — learn the kernel coarse, deploy + measure the paired bias change fine — and
     print the transfer verdict (exit 0 iff the kernel TRANSFERRED)."""
-    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
+    from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
     from legoesm.driver.model_driver import ModelDriver
     from legoesm.training.perfect_model_osse import cross_res_osse_verdict
@@ -453,7 +453,7 @@ def _run_multi_osse_main(args, *, base_cfg, grid, sigma, build_base_driver, extr
     DEFAULT coefficients from a ``--multi-bias-factor``-perturbed start, mirroring the campaign's
     ``--coefficients`` so a multi-coefficient run is pre-flightable. Exit-code-gated on the
     verdict (0 = all recovered + bias fell), like the single mode."""
-    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
+    from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
     from legoesm.training.perfect_model_osse import multi_osse_verdict
 
@@ -494,7 +494,7 @@ def _run_multi_osse_main(args, *, base_cfg, grid, sigma, build_base_driver, extr
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     """CLI: build the real driver, run the OSSE, print the recovery verdict."""
-    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
+    from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
     from legoesm.training.perfect_model_osse import osse_verdict
 

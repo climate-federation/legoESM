@@ -95,7 +95,7 @@ def discover_violations() -> dict[tuple[str, str, str], int]:
         # root is gone; pin a real CLI module under the ml namespace root instead.
         "packages/ml/legoesm/ml/s2s/sfno_slab/cli.py",
         "packages/core/legoesm/grids/halo.py",
-        "packages/atmosphere/legoesm/atmosphere/dynamics/primitive_eq_cdgrid.py",
+        "packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_cdgrid.py",
         "packages/ocean/legoesm/ocean/eos.py",
         "packages/coupler/legoesm/driver/physics_pipeline.py",
         "packages/ml/legoesm/training/era5_to_state.py",

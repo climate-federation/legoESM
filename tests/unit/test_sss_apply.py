@@ -247,3 +247,87 @@ class TestLat2dOverride:
         dS_trop = np.mean(35.5 - np.asarray(trop.S.data)[..., 0])
         assert dS_arc > 0.0 and dS_trop > 0.0
         assert dS_arc > 5.0 * dS_trop      # Arctic tau=30 d >> interior tau=365 d
+
+
+class _DeviceLeafGuard:
+    """Device-leaf stand-in for the persistent-sharded lane's S leaf.
+
+    Encodes the host-transfer contract of ``apply_sss_restoring_step``
+    mechanically (scaling-M2, codex batch4 HIGH): a FULL-leaf host conversion
+    (``np.asarray`` on the whole 3-D array — the old
+    ``np.asarray(state.S.data)[..., 0]`` + full-copy write-back pattern)
+    raises, while device-side slicing (``[..., 0]``) and the device-side
+    ``.at[...].set`` surface scatter delegate to the wrapped jax array.
+    """
+
+    def __init__(self, jarr):
+        self._jarr = jnp.asarray(jarr)
+
+    def __getitem__(self, idx):
+        return self._jarr[idx]          # device-side slice
+
+    @property
+    def at(self):
+        return self._jarr.at            # device-side functional update
+
+    def __array__(self, dtype=None, copy=None):
+        raise AssertionError(
+            "full-3-D host conversion of the S leaf in the SSS-restoring "
+            "per-step path (slice-before-convert contract violated)")
+
+    @property
+    def ndim(self):
+        return self._jarr.ndim
+
+    @property
+    def shape(self):
+        return self._jarr.shape
+
+    @property
+    def dtype(self):
+        return self._jarr.dtype
+
+
+class TestHostTransferContract:
+    """Slice-before-convert + device-side surface write-back (scaling-M2)."""
+
+    def _config(self):
+        return SSSRestoringConfig(
+            enabled=True, tau_restore_days_default=10.0, regions=(),
+        )
+
+    def test_guard_is_not_vacuous(self):
+        with pytest.raises(AssertionError, match="slice-before-convert"):
+            np.asarray(_DeviceLeafGuard(jnp.zeros((4, 5, 3))))
+
+    def test_slice_before_convert_and_device_write_back(self):
+        """With an S leaf whose FULL-array host conversion raises, the
+        restoring step must still run (only the 2-D surface slice crosses to
+        host; the write-back is a device-side surface scatter) and produce
+        bit-identical values to the plain-leaf call."""
+        grid = _FakeGrid()
+        state = _FakeState(S_init=35.5, nlev=3)
+        common = dict(
+            S_target=np.full((grid.n_lat, grid.n_lon), 34.7),
+            ice_concentration=None,
+            config=self._config(),
+            grid=grid,
+            z_coord=_FakeZCoord(),
+            dt=86400.0,
+        )
+        ref = apply_sss_restoring_step(state, **common)
+
+        guarded = state._replace(S=Field(
+            _DeviceLeafGuard(state.S.data),
+            name=state.S.name, dims=state.S.dims, units=state.S.units,
+        ))
+        out = apply_sss_restoring_step(guarded, **common)
+
+        S_out = np.asarray(out.S.data)      # real jax array: .at().set output
+        S_ref = np.asarray(ref.S.data)
+        np.testing.assert_array_equal(
+            S_out, S_ref,
+            err_msg="guarded-leaf SSS restoring diverged from plain leaf")
+        # Deep layers untouched; surface actually restored (non-vacuous).
+        assert np.allclose(S_out[..., 1:], 35.5)
+        assert np.all(S_out[..., 0] < 35.5)

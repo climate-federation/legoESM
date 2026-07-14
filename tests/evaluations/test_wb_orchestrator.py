@@ -12,7 +12,7 @@ from evaluations.wb_forecast import diagnose_and_regrid, HEADLINE_FIELD_KEYS
 
 
 def _rest_state():
-    from legoesm.atmosphere.dynamics.spectral_pe import isothermal_rest_state_spectral
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import isothermal_rest_state_spectral
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
 
@@ -51,6 +51,48 @@ def test_orchestrator_rejects_lead_not_multiple_of_dt():
         # 1 h = 3600 s is not a multiple of dt = 1000 s -> would round -> wrong valid time
         run_wb_forecast_eval(None, grid, sigma, None, 1000.0, [case], [1], clim,
                              rollout_fn=lambda s, *a, **k: s)
+
+
+def test_orchestrator_threads_forcing_to_rollout():
+    """#919: a case carrying `forcing` passes it as `forcing_base=` to the
+    rollout (the neural_gcm/sfno prescribed-SST pathway)."""
+    state, grid, sigma = _rest_state()
+    vf, vv, _, _ = diagnose_and_regrid(state, grid, sigma)
+    clim = {k: np.zeros_like(vf[k]) for k in vf}
+    forcing = {"T_sfc": jnp.zeros(4), "sic": jnp.zeros(4),
+               "day_of_year": jnp.asarray(1.0), "seconds_of_day": jnp.asarray(0.0)}
+    case = ForecastCase(state, {6: {"fields": vf, "valid": vv}}, forcing=forcing)
+
+    recorded = {}
+
+    def recording_rollout(s, *a, forcing_base="MISSING", **k):
+        recorded["forcing_base"] = forcing_base
+        return s
+
+    run_wb_forecast_eval(None, grid, sigma, None, 1800.0, [case], [6], clim,
+                         rollout_fn=recording_rollout)
+    assert recorded["forcing_base"] is forcing        # threaded through by identity
+
+
+def test_orchestrator_unforced_signature_when_no_forcing():
+    """#919: with `forcing=None` (the default), the rollout is called WITHOUT a
+    `forcing_base` kwarg — the classical-physics/default `spectral_rollout`
+    signature is preserved (ABI-safe positional construction)."""
+    state, grid, sigma = _rest_state()
+    vf, vv, _, _ = diagnose_and_regrid(state, grid, sigma)
+    clim = {k: np.zeros_like(vf[k]) for k in vf}
+    case = ForecastCase(state, {6: {"fields": vf, "valid": vv}})   # forcing defaults None
+    assert case.forcing is None
+
+    seen = {}
+
+    def rollout(s, *a, **k):
+        seen["has_forcing_kw"] = "forcing_base" in k
+        return s
+
+    run_wb_forecast_eval(None, grid, sigma, None, 1800.0, [case], [6], clim,
+                         rollout_fn=rollout)
+    assert seen["has_forcing_kw"] is False
 
 
 def test_orchestrator_averages_over_cases():

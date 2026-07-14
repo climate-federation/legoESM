@@ -26,9 +26,6 @@ from __future__ import annotations
 # clubb.py graduates (ships a __param_spec__). Re-seed with
 # scripts/tmp/_seed_param_spec_baseline.py.
 PARAM_SPEC_FIELD_BASELINE: dict[str, frozenset[str]] = {
-    # (canopy/config.py entry REMOVED 2026-07-13: main #897 shipped its
-    # __param_spec__, graduating it out of PARAM_SPEC_TODO — the baseline
-    # shrinks with it, else the stale-entry check goes red.)
     'packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py': frozenset({
         'CLUBBConfig.T0',
         'CLUBBConfig.clubb_dt',

@@ -27,12 +27,12 @@ jax.config.update("jax_enable_x64", True)
 mpi4jax = pytest.importorskip("mpi4jax")
 MPI = pytest.importorskip("mpi4py.MPI")
 
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationConfig,
     CDGridPrimitiveEquationModel,
     hydrostatic_to_fv3,
 )
-from legoesm.atmosphere.dynamics.flux_form_tracer_transport import (
+from legoesm.atmosphere.dynamics.shared.flux_form_tracer_transport import (
     flux_form_tracer_step,
 )
 from legoesm.core.field import Field
@@ -103,11 +103,13 @@ def test_scattered_rollout_matches_replicated_reference():
     rank = MPI.COMM_WORLD.Get_rank()
     nproc = MPI.COMM_WORLD.Get_size()
 
-    # Fully reset distributed state BEFORE building anything.  The session-scoped
-    # conftest fixture ``_init_mpi_layout`` pre-arms
-    # ``initialize_distributed(global_n=max(np,2))`` (a SMALL grid), leaving the
-    # "mpi" halo backend + a stale topology armed process-wide.  If we build the
-    # IC under that backend, ``hydrostatic_to_fv3`` halo-pads through the stale
+    # Fully reset distributed state BEFORE building anything.  A PRIOR test in
+    # the same pytest process may have left the "mpi" halo backend + a stale
+    # (wrong-grid) topology armed process-wide (e.g. via the conftest
+    # ``cube_face_layout`` fixture at ``global_n=max(np,2)``, a SMALL grid).  The
+    # autouse ``_isolate_distributed_state`` teardown normally clears that, but
+    # we reset here too as belt-and-suspenders.  If we build the
+    # IC under a stale backend, ``hydrostatic_to_fv3`` halo-pads through the stale
     # (wrong-grid) topology and produces a per-rank-CORRUPTED initial state — the
     # reference then diverges across ranks.  reset_distributed_topology() clears
     # topology/layout + sets the "local" backend, so the IC + reference are clean

@@ -316,7 +316,7 @@ class TestOneStepMassConservation(unittest.TestCase):
 
         The conservation fixer operates in float32, so precision is ~1e-7.
         """
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
             CDGridShallowWaterConfig,
         )
@@ -348,7 +348,7 @@ class TestOneStepMassConservation(unittest.TestCase):
 
     def test_one_step_without_fixer(self):
         """Without conservation fixer, mass error should still be small."""
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
             CDGridShallowWaterConfig,
         )
@@ -457,7 +457,7 @@ class TestCosineBellTransport(unittest.TestCase):
 
     def test_cosine_bell_100_steps_stable(self):
         """100 steps of cosine bell should remain stable and finite."""
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             FV3EdgeShallowWaterModel, CDGridShallowWaterConfig,
         )
         from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -488,7 +488,7 @@ class TestCosineBellTransport(unittest.TestCase):
 
     def test_cosine_bell_mass_conservation(self):
         """Mass should be conserved during cosine bell transport."""
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             FV3EdgeShallowWaterModel, CDGridShallowWaterConfig,
         )
         from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -527,7 +527,7 @@ class TestWilliamson2(unittest.TestCase):
     """Williamson Test 2 validation on the production FV3 edge-midpoint path."""
 
     def _run_tc2(self, n, nsteps, dt):
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
             CDGridShallowWaterConfig,
         )
@@ -631,7 +631,7 @@ class TestWilliamson5(unittest.TestCase):
 
     def test_tc5_5day_c8_stable(self):
         """5-day TC5 at C8 should remain stable."""
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
             CDGridShallowWaterConfig,
         )
@@ -674,7 +674,7 @@ class TestWilliamson5(unittest.TestCase):
 
     def test_tc5_mass_conservation(self):
         """TC5 mass should be conserved with fixer."""
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
             CDGridShallowWaterConfig,
         )

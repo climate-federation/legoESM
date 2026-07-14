@@ -18,7 +18,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from legoesm.atmosphere.dynamics.spectral_pe import (  # noqa: E402
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (  # noqa: E402
     SpectralHydrostaticState,
     reconstruct_spectral_state_from_npz,
 )

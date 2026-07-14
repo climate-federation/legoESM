@@ -101,8 +101,10 @@ __physics_contract__ = {
 
 __param_spec__ = {
     "DoubleDiffusionConfig": {
-        "scheme_key": "ocean.double_diffusion",
-        "excluded": {},
+        "scheme_key": "ocean.vm.ddm",
+        "excluded": {
+            "k_max": "numerics: bound (diffusivity cap)",
+        },
         "params": {
             "rn_avts": {
                 "units": "m^2/s", "bounds": (1e-5, 5e-4), "tunable_tier": 1,
@@ -112,13 +114,7 @@ __param_spec__ = {
             "rn_hsbfr": {
                 "units": "1", "bounds": (1.2, 2.0), "tunable_tier": 2,
                 "transform": "none", "category": "double_diffusion",
-                "reference": "NEMO namzdf_ddm (fingering cutoff R_c)",
-                "shape": None,
-            },
-            "k_max": {
-                "units": "m^2/s", "bounds": (1e-3, 1e-1), "tunable_tier": 0,
-                "transform": "none", "category": "double_diffusion",
-                "reference": "numerical cap", "shape": None,
+                "reference": "NEMO namzdf_ddm (fingering cutoff R_c)", "shape": None,
             },
         },
     },

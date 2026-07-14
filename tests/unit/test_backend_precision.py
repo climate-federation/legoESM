@@ -41,7 +41,7 @@ from legoesm.core.hardware import get_backend
 
 def _sw_to_cdgrid(state, cdgrid):
     """Convert generic ShallowWaterState to CDGridShallowWaterState."""
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterState
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import CDGridShallowWaterState
     from legoesm.grids.halo import pad_halo_vector
     h = state.h.data
     u_center = state.u.data
@@ -134,7 +134,7 @@ class TestFVFloat32:
 
     def test_full_sw_step(self, grid):
         """Full FV shallow water step in float32."""
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterModel,
             CDGridShallowWaterConfig,
         )
@@ -230,7 +230,7 @@ class TestFVFloat64:
     def test_full_sw_step_float64(self, grid):
         """Full FV shallow water step in float64."""
         _requires_x64()
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterModel,
             CDGridShallowWaterConfig,
         )
@@ -325,7 +325,7 @@ class TestSpectralFloat64:
     def test_spectral_sw_step(self, grid):
         """Spectral shallow water single step in float64."""
         _requires_x64()
-        from legoesm.atmosphere.dynamics.spectral_sw import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
             SpectralShallowWaterModel,
             williamson_test2_spectral,
         )
@@ -340,7 +340,7 @@ class TestSpectralFloat64:
     def test_spectral_sw_differentiable(self, grid):
         """jax.grad through spectral SW step."""
         _requires_x64()
-        from legoesm.atmosphere.dynamics.spectral_sw import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
             SpectralShallowWaterModel,
             williamson_test2_spectral,
         )
@@ -413,7 +413,7 @@ class TestMetalBackend:
     def test_spectral_metal_cpu_routing(self):
         """Spectral model should detect the Apple GPU (mps) and route to CPU."""
         _requires_metal()
-        from legoesm.atmosphere.dynamics.spectral_sw import SpectralShallowWaterModel
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import SpectralShallowWaterModel
         from legoesm.grids.gaussian import create_gaussian_grid
 
         grid = create_gaussian_grid(n_lat=32)

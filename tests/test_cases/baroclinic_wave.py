@@ -646,7 +646,7 @@ def baroclinic_wave_init_spectral(
         Initial state for the baroclinic wave test.
     """
     import numpy as np
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
     from legoesm.grids.gaussian import (
         sh_analysis,
         sh_analysis_3d,

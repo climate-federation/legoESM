@@ -199,6 +199,11 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # The canonical SST symbol is ``sst_K`` (used 100s of times); N806/N803 flag the local
 # variable / monkeypatch arg in the cross-grid deploy CLI + its test (not CI-enforced).
 "scripts/experiment/check_cross_grid_deploy.py" = ["N806"]
+# Semi-implicit gravity-wave stability gate (#920): physical symbol names --
+# ``T`` for temperature (argument + local) and ``Gamma`` for the
+# Hoskins-Simmons vertical-coupling matrix (matching semi_implicit.py) read
+# clearer than snake_case. Same rationale as the column-extractor tests above.
+"tests/atmosphere/hydrostatic/unit/test_semi_implicit_gw_stability.py" = ["N803", "N806"]
 "tests/unit/test_check_cross_grid_deploy.py" = ["N803"]
 # Run-as-a-script sys.path bootstrap (iter 321) must precede the ``scripts.*`` import, so the
 # subsequent module-level imports trip E402; the bootstrap makes ``python scripts/...`` work.
@@ -224,6 +229,10 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # dycore (fp64 replicated-vs-scattered bit-equivalence), so imports follow.
 "tests/parallel/test_cube_face_scatter.py" = ["E402"]
 "tests/distributed/test_cube_face_scatter_mpi.py" = ["E402"]
+# MPAS native-SPMD parity gates use the MPAS canonical symbol names (nCells,
+# nEdges, W) plus the mandated T_sfc / dT unit-suffixed physics names; same
+# rationale as the column-extractor tests above.
+"tests/parallel/test_mpas_atm_native_step.py" = ["N806"]
 
 [tool.mypy]
 python_version = "3.11"

@@ -219,7 +219,7 @@ def williamson2_cdgrid_initial_condition(
     Side-effect-free shared helper (no global jax.config mutation) used by both
     ``test_williamson2_cdgrid`` and the Stage-A2 Williamson Experiment rung.
     """
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterState,
     )
 

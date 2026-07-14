@@ -30,7 +30,7 @@ class TestHydrostaticBalanceCubedSphere:
 
     @pytest.fixture(autouse=True)
     def setup(self):
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel,
             CDGridPrimitiveEquationConfig,
         )
@@ -107,7 +107,7 @@ class TestGeostrophicBalanceCDGrid:
 
     @pytest.fixture(autouse=True)
     def setup(self):
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterModel,
             CDGridShallowWaterConfig,
             CDGridShallowWaterState,
@@ -171,7 +171,7 @@ class TestGeostrophicBalanceMPAS:
 
     @pytest.fixture(autouse=True)
     def setup(self):
-        from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
             MPASShallowWaterModel,
             MPASShallowWaterConfig,
             MPASShallowWaterState,
@@ -228,7 +228,7 @@ class TestHydrostaticBalanceMPAS:
 
     @pytest.fixture(autouse=True)
     def setup(self):
-        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel,
             MPASPrimitiveEquationConfig,
         )

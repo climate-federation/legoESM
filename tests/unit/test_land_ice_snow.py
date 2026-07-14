@@ -93,8 +93,30 @@ class Test5e_SnowAgeEvolution:
         )
         assert float(age_new[0]) == 1000.0 + dt
 
-    def test_age_resets_with_snowfall(self):
+    def test_age_partial_rejuvenation_with_snowfall(self):
+        # Mass-weighted grain-age mixing: a trace flurry (0.36 kg/m2) onto a 5 kg/m2
+        # aged pack only NUDGES the age down proportional to the fresh mass fraction --
+        # it does NOT hard-reset to 0 (the old bug that over-brightened aged snow on any
+        # dusting).  Expected: (age+dt)*swe_old/(swe_old+fresh)
+        #   = (100000+3600)*5/5.36 ~ 96642 s, i.e. barely below the aged clock.
         snow = jnp.array([5.0])
+        snow_age = jnp.array([100000.0])
+        T_sfc = jnp.array([260.0])           # below freezing -> no melt
+        precip_snow = jnp.array([1e-4])      # 0.36 kg/m2 fresh over the step
+        dt = 3600.0
+        _, age_new, _ = update_snow(
+            snow, snow_age, T_sfc, precip_snow, dt, Q_net=jnp.array([0.0]),
+        )
+        fresh = float(precip_snow[0]) * dt
+        expected = (100000.0 + dt) * 5.0 / (5.0 + fresh)
+        assert jnp.allclose(age_new, expected, rtol=1e-6)
+        assert float(age_new[0]) < 100000.0            # rejuvenated (younger)
+        assert float(age_new[0]) > 0.9 * 100000.0      # but only slightly (trace fresh)
+
+    def test_age_resets_on_bare_ground_snowfall(self):
+        # Fresh snow accumulating on BARE ground (swe_old -> 0) yields age ~0: the pack
+        # is entirely fresh, so the mass-weighted mix collapses to the fresh (age-0) snow.
+        snow = jnp.array([0.0])
         snow_age = jnp.array([100000.0])
         T_sfc = jnp.array([260.0])
         precip_snow = jnp.array([1e-4])
