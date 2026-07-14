@@ -181,6 +181,112 @@ class TestCDGridExactMetrics:
 # 3. Dispatch: no approximate fallback on the FV3-native path; legacy
 #    equiangular still takes exactly the legacy builder
 # ---------------------------------------------------------------------------
+class TestAngleOracle:
+    """Phase 2B: exact grid_utils_init staggered angle/tangent fields."""
+
+    @pytest.mark.parametrize("im", [1, 8, 36])
+    def test_builder_angles_match_fv3_oracle(self, im):
+        from legoesm.grids.cubed_sphere import make_fv3_native_grid
+        from legoesm.grids.fv3_native_metrics import (
+            compute_fv3_native_angles,
+        )
+
+        d = np.load(_FIXTURE)
+        lon6, lat6 = (np.asarray(a) for a in make_fv3_native_grid(im, 0))
+        ang = compute_fv3_native_angles(lon6, lat6)
+        # cos_sg positions: oracle keys cos_sg1..9 (FV3 1-based) map to
+        # builder index ip-1
+        for ip in range(1, 10):
+            ref = d[f"cos_sg{ip}_c{im}"]
+            got = ang["cos_sg"][..., ip - 1]
+            assert np.abs(got - ref).max() < 1e-13, f"cos_sg{ip}"
+        for name in ("cosa_u", "sina_u", "cosa_v", "sina_v"):
+            ref = d[f"{name}_c{im}"]
+            got = ang[name]
+            assert got.shape == ref.shape, name
+            assert np.abs(got - ref).max() < 1e-13, (
+                f"{name}: {np.abs(got - ref).max():.3e}")
+        # B-nodes: compare away from the 4 cube vertices (oracle sentinel
+        # -9999, builder NaN — the fill_corners ghost convention is phase-4)
+        for name in ("cosa_b", "sina_b"):
+            ref = d[f"{name}_c{im}"]
+            got = ang[name]
+            mask = ref > -9000  # non-sentinel
+            assert np.isnan(got[~mask]).all(), f"{name} vertex NaN"
+            if mask.any():  # at C1 every B-node is a cube vertex
+                assert np.abs(got[mask] - ref[mask]).max() < 1e-13, name
+
+    @pytest.mark.parametrize("im", [8, 36])
+    def test_ed_cdgrid_angle_fields_match_remapped_oracle(self, im):
+        # fv3_native_angles is OPT-IN: the exact seam-averaged cosa_u/v
+        # differ from the legacy single-sided values at O(1), and the
+        # shipped stabilized solver is tuned to the legacy discretization
+        # (codex p2b): only the phase-4 native core flips the default.
+        d = np.load(_FIXTURE)
+        g = create_cubed_sphere(im, dtype=np.float64, gnomonic="ed")
+        cd = create_cubed_sphere_cdgrid(
+            g, metric_dtype=np.float64, fv3_native_angles=True)
+
+        # cell-centre family.  cosa_s is a SIGNED tangent-handedness
+        # quantity: rot90 by odd k maps (e_i, e_j) -> (e_j, -e_i), so the
+        # remapped reference flips sign on odd-rotation slots.  rsin2 is
+        # even in the angle — no flip.
+        ref = _remap_square(d[f"cosa_s_c{im}"])
+        for F in range(6):
+            if _GNOMONIC_ED_FACE_ROT[F] % 2 == 1:
+                ref[F] = -ref[F]
+        got = np.asarray(cd.cosa_cell)
+        assert np.abs(got - ref).max() < 1e-12, "cosa_cell"
+        ref = _remap_square(d[f"rsin2_c{im}"])
+        got = np.asarray(cd.rsin2_cell)
+        rel = np.abs(got - ref) / np.abs(ref).max()
+        assert rel.max() < 1e-12, "rsin2_cell"
+        # staggered u/v family incl the FV3 cross-face edge averages and
+        # the rsin edge conventions (1/sin at panel edges, 1/sin^2 interior).
+        # cosa_* are signed tangent-handedness quantities: odd-k slots flip
+        # sign like cosa_s above; sina/rsin are even in the angle.
+        cu_ref, cv_ref = _remap_staggered_pair(d[f"cosa_u_c{im}"],
+                                               d[f"cosa_v_c{im}"])
+        for F in range(6):
+            if _GNOMONIC_ED_FACE_ROT[F] % 2 == 1:
+                cu_ref[F] = -cu_ref[F]
+                cv_ref[F] = -cv_ref[F]
+        assert np.abs(np.asarray(cd.cosa_u) - cu_ref).max() < 1e-13
+        assert np.abs(np.asarray(cd.cosa_v) - cv_ref).max() < 1e-13
+        ru_ref, rv_ref = _remap_staggered_pair(d[f"rsin_u_c{im}"],
+                                               d[f"rsin_v_c{im}"])
+        rel = np.abs(np.asarray(cd.rsin_u) - ru_ref) / np.abs(ru_ref).max()
+        assert rel.max() < 1e-12, f"rsin_u {rel.max():.3e}"
+        rel = np.abs(np.asarray(cd.rsin_v) - rv_ref) / np.abs(rv_ref).max()
+        assert rel.max() < 1e-12, f"rsin_v {rel.max():.3e}"
+
+    def test_angle_gating_default_legacy_optin_exact(self, monkeypatch):
+        # DEFAULT (both forms): legacy supergrid tangents — the stabilized
+        # solver's tuned discretization stays byte-identical.  With
+        # fv3_native_angles=True on ED, the legacy builder is never called.
+        import legoesm.grids.cubed_sphere_cdgrid as cdg
+
+        calls = {"n": 0}
+        orig = cdg._compute_sin_cos_sg
+
+        def _spy(*a, **k):
+            calls["n"] += 1
+            return orig(*a, **k)
+
+        monkeypatch.setattr(cdg, "_compute_sin_cos_sg", _spy)
+        g = create_cubed_sphere(4, dtype=np.float64)
+        cdg.create_cubed_sphere_cdgrid(g, metric_dtype=np.float64)
+        assert calls["n"] == 1
+        calls["n"] = 0
+        g_ed = create_cubed_sphere(4, dtype=np.float64, gnomonic="ed")
+        cdg.create_cubed_sphere_cdgrid(g_ed, metric_dtype=np.float64)
+        assert calls["n"] == 1  # default ED = legacy angles
+        calls["n"] = 0
+        cdg.create_cubed_sphere_cdgrid(
+            g_ed, metric_dtype=np.float64, fv3_native_angles=True)
+        assert calls["n"] == 0  # opt-in = exact angles, no legacy call
+
+
 class TestRemapIndependence:
     def test_remap_table_pinned_to_derived_literals(self):
         # Breaks the shared-table circularity (codex P2): the production

@@ -73,6 +73,8 @@ module fv3_grid_oracle_mod
   private
   public :: gnomonic_grids, mirror_grid, cell_center2, R_GRID
   public :: get_area, get_area_tri, great_circle_dist, mid_pt_sphere
+  public :: cos_angle, inner_prod, normalize_vect, cell_center3
+  public :: latlon2xyz, mid_pt3_cart, vect_cross
 
   integer, parameter :: R_GRID = selected_real_kind(15)   ! r8_kind
   ! FV3 ENABLE_QUAD_PRECISION: higher precision (kind=16) for grid factors
@@ -861,6 +863,100 @@ contains
 
       end function get_angle
 
+ real(kind=R_GRID) function cos_angle(p1, p2, p3)
+! As spherical_angle, but returns the cos(angle)
+!       p3
+!       ^
+!       |
+!       |
+!       p1 ---> p2
+!
+ real(kind=R_GRID), intent(in):: p1(3), p2(3), p3(3)
+
+ real (f_p):: e1(3), e2(3), e3(3)
+ real (f_p):: px, py, pz
+ real (f_p):: qx, qy, qz
+ real (f_p):: angle, ddd
+ integer n
+
+  do n=1,3
+     e1(n) = p1(n)
+     e2(n) = p2(n)
+     e3(n) = p3(n)
+  enddo
+
+!-------------------------------------------------------------------
+! Page 41, Silverman's book on Vector Algebra; spherical trigonmetry
+!-------------------------------------------------------------------
+! Vector P:= e1 X e2
+   px = e1(2)*e2(3) - e1(3)*e2(2)
+   py = e1(3)*e2(1) - e1(1)*e2(3)
+   pz = e1(1)*e2(2) - e1(2)*e2(1)
+
+! Vector Q: e1 X e3
+   qx = e1(2)*e3(3) - e1(3)*e3(2)
+   qy = e1(3)*e3(1) - e1(1)*e3(3)
+   qz = e1(1)*e3(2) - e1(2)*e3(1)
+
+! ddd = sqrt[ (P*P) (Q*Q) ]
+   ddd = sqrt( (px**2+py**2+pz**2)*(qx**2+qy**2+qz**2) )
+   if ( ddd > 0.d0 ) then
+        angle = (px*qx+py*qy+pz*qz) / ddd
+   else
+        angle = 1.d0
+   endif
+   cos_angle = angle
+
+ end function cos_angle
+
+ real function inner_prod(v1, v2)
+       real(kind=R_GRID),intent(in):: v1(3), v2(3)
+       real (f_p) :: vp1(3), vp2(3), prod16
+       integer k
+
+         do k=1,3
+            vp1(k) = real(v1(k),kind=f_p)
+            vp2(k) = real(v2(k),kind=f_p)
+         enddo
+         prod16 = vp1(1)*vp2(1) + vp1(2)*vp2(2) + vp1(3)*vp2(3)
+         inner_prod = prod16
+
+  end function inner_prod
+
+ subroutine normalize_vect(e)
+!                              Make e an unit vector
+ real(kind=R_GRID), intent(inout):: e(3)
+ real(f_p):: pdot
+ integer k
+
+    pdot = e(1)**2 + e(2)**2 + e(3)**2
+    pdot = sqrt( pdot )
+
+    do k=1,3
+       e(k) = e(k) / pdot
+    enddo
+
+ end subroutine normalize_vect
+
+ subroutine cell_center3(p1, p2, p3, p4, ec)
+! Get center position of a cell
+         real(kind=R_GRID) , intent(IN)  :: p1(3), p2(3), p3(3), p4(3)
+         real(kind=R_GRID) , intent(OUT) :: ec(3)
+! Local
+         real (kind=R_GRID)dd
+         integer k
+
+         do k=1,3
+            ec(k) = p1(k) + p2(k) + p3(k) + p4(k)
+         enddo
+         dd = sqrt( ec(1)**2 + ec(2)**2 + ec(3)**2 )
+
+         do k=1,3
+            ec(k) = ec(k) / dd
+         enddo
+
+ end subroutine cell_center3
+
       real(kind=R_GRID)  function get_area_tri(ndims, p_1, p_2, p_3) &
                         result (myarea)
 
@@ -896,7 +992,10 @@ end module fv3_grid_oracle_mod
 program fv3_gnomonic_oracle
   use fv3_grid_oracle_mod, only: gnomonic_grids, mirror_grid, cell_center2, &
                                  R_GRID, get_area, get_area_tri,           &
-                                 great_circle_dist, mid_pt_sphere
+                                 great_circle_dist, mid_pt_sphere,         &
+                                 cos_angle, inner_prod, normalize_vect,    &
+                                 cell_center3, latlon2xyz, mid_pt3_cart,   &
+                                 vect_cross
   implicit none
   integer, parameter :: sizes(3) = (/ 1, 8, 36 /)
   integer :: s, im, i, j, f, unit_no
@@ -1192,6 +1291,26 @@ program fv3_gnomonic_oracle
      write(*,'(A,I0,A,ES24.16)') 'C', im, &
           ' area_c closure sum/4pi - 1 = ', closure / (4.0d0*pi_val()) - 1.0d0
 
+     ! ------------------------------------------------------------------
+     ! Angle/tangent oracle (grid_utils_init, fv_grid_utils.F90:240-561):
+     ! cos_sg/sin_sg 9-position per cell (corners 6-9 via cos_angle at the
+     ! cell corner nodes with the upstream sign pattern; edge mid-points
+     ! 1-4 via mid_pt3_cart + agrid centre — the "No averaging" exact
+     ! branch; centre 5 via inner_prod(ec1,ec2) from get_center_vect's
+     ! cell-local construction), then the derived staggered families:
+     !   cosa_u/sina_u/rsin_u (u-faces), cosa_v/sina_v/rsin_v (v-faces),
+     !   cosa_s/rsin2 (centres), cosa/sina (B-nodes, 0.5*(sg8+sg6)).
+     ! sg is also evaluated on SIDE-halo cells (cross-face, via the
+     ! reconstructed halo lines) because panel-edge staggered values
+     ! average with the neighbour face's cells, exactly as the mpp-filled
+     ! upstream loops do.  The FOUR cube-vertex B-nodes per face are
+     ! emitted as -9999: upstream computes them from fill_corners
+     ! XDir-mirrored ghost geometry (and rsina there is big_number
+     ! poison) — that convention bundle belongs to the phase-4 native
+     ! solver port and is deliberately out of the phase-2B pin.
+     ! ------------------------------------------------------------------
+     call angle_oracle(im, gridh, agridh)
+
      write(fname, '(A,I0,A)') 'fv3_metrics_c', im, '.txt'
      open(newunit=unit_no, file=trim(fname), status='replace', action='write')
      write(unit_no, '(A)') '# FV3 init_grid/grid_area metrics (unit sphere): fieldid f i j value'
@@ -1425,5 +1544,168 @@ contains
     e(2) = cos(p(2)) * sin(p(1))
     e(3) = sin(p(2))
   end subroutine latlon2xyz_local
+
+  !--------------------------------------------------------------------
+  ! Per-cell 9-position cos_sg via the exact grid_utils_init formulas
+  ! (fv_grid_utils.F90:327-357).  Nodes: A=(i,j) SW, B=(i+1,j) SE,
+  ! C=(i,j+1) NW, D=(i+1,j+1) NE; centre from the halo agrid.
+  !--------------------------------------------------------------------
+  subroutine cell_sg(a, b, c, d, ctr, sg)
+    real(kind=R_GRID), intent(in) :: a(2), b(2), c(2), d(2), ctr(2)
+    real(kind=R_GRID), intent(out) :: sg(9)
+    real(kind=R_GRID) :: g_a(3), g_b(3), g_c(3), g_d(3), p3c(3)
+    real(kind=R_GRID) :: p1(3), p2(3), pc(3), pv(3), u1(3), u2(3)
+
+    call latlon2xyz(a, g_a)
+    call latlon2xyz(b, g_b)
+    call latlon2xyz(c, g_c)
+    call latlon2xyz(d, g_d)
+    call latlon2xyz(ctr, p3c)
+
+    ! corners (upstream sign pattern)
+    sg(6) =  cos_angle( g_a, g_b, g_c )
+    sg(7) = -cos_angle( g_b, g_a, g_d )
+    sg(8) =  cos_angle( g_d, g_b, g_c )
+    sg(9) = -cos_angle( g_c, g_a, g_d )
+    ! edge mid-points ("No averaging" exact branch)
+    call mid_pt3_cart(g_a, g_c, p1)
+    sg(1) = cos_angle( p1, p3c, g_c )
+    call mid_pt3_cart(g_a, g_b, p1)
+    sg(2) = cos_angle( p1, g_b, p3c )
+    call mid_pt3_cart(g_b, g_d, p1)
+    sg(3) = cos_angle( p1, p3c, g_b )
+    call mid_pt3_cart(g_c, g_d, p1)
+    sg(4) = cos_angle( p1, g_c, p3c )
+    ! centre via get_center_vect's cell-local ec1/ec2
+    call cell_center3(g_a, g_b, g_c, g_d, pc)
+    call mid_pt3_cart(g_a, g_c, p1)
+    call mid_pt3_cart(g_b, g_d, p2)
+    call vect_cross(pv, p2, p1)
+    call vect_cross(u1, pc, pv)
+    call normalize_vect(u1)
+    call mid_pt3_cart(g_a, g_b, p1)
+    call mid_pt3_cart(g_c, g_d, p2)
+    call vect_cross(pv, p2, p1)
+    call vect_cross(u2, pc, pv)
+    call normalize_vect(u2)
+    sg(5) = inner_prod(u1, u2)
+  end subroutine cell_sg
+
+  subroutine angle_oracle(im, gridh, agridh)
+    integer, intent(in) :: im
+    real(kind=R_GRID), intent(in) :: gridh(0:im+2, 0:im+2, 2, 6)
+    real(kind=R_GRID), intent(in) :: agridh(0:im+1, 0:im+1, 2, 6)
+
+    integer :: npx, f, i, j, ip, u
+    character(len=64) :: fname
+    real(kind=R_GRID), parameter :: tiny_number = 1.0d-8
+    real(kind=R_GRID), parameter :: sentinel = -9999.0d0
+    ! sg over cells incl. the SIDE halo ring (diagonal halo cells unused)
+    real(kind=R_GRID), allocatable :: csg(:,:,:), ssg(:,:,:)
+    real(kind=R_GRID) :: sg(9)
+    real(kind=R_GRID) :: cu, su, cv, sv, cb, sb, val
+
+    npx = im + 1
+    allocate(csg(9, 0:im+1, 0:im+1))
+    allocate(ssg(9, 0:im+1, 0:im+1))
+
+    write(fname, '(A,I0,A)') 'fv3_angles_c', im, '.txt'
+    open(newunit=u, file=trim(fname), status='replace', action='write')
+    write(u, '(A)') '# FV3 grid_utils_init angle fields: fieldid f i j value'
+    write(u, '(A)') '# 10+ip=cos_sg(ip) 20=cosa_u 21=sina_u 22=rsin_u 23=cosa_v'
+    write(u, '(A)') '# 24=sina_v 25=rsin_v 26=cosa_s 27=rsin2 28=cosa 29=sina 30=rsina'
+    write(u, '(A)') '# cube-vertex B-nodes / edge rsina = -9999 sentinel (phase-4 bundle)'
+    write(u, '(A,I0)') '# im = ', im
+
+    do f = 1, 6
+       csg = sentinel
+       ssg = sentinel
+       ! interior + side-halo cells (skip the 4 diagonal halo cells)
+       do j = 0, im+1
+          do i = 0, im+1
+             if ( (i==0 .or. i==im+1) .and. (j==0 .or. j==im+1) ) cycle
+             call cell_sg(gridh(i,  j,  :, f), gridh(i+1,j,  :, f),   &
+                          gridh(i,  j+1,:, f), gridh(i+1,j+1,:, f),   &
+                          agridh(i, j, :, f), sg)
+             csg(:, i, j) = sg
+             do ip = 1, 9
+                ssg(ip, i, j) = min(1.0d0, sqrt(max(0.0d0, 1.0d0 - sg(ip)**2)))
+             enddo
+          enddo
+       enddo
+
+       ! interior sg dump
+       do j = 1, im
+          do i = 1, im
+             do ip = 1, 9
+                write(u,'(I2,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') &
+                     10+ip, f, i, j, csg(ip, i, j)
+             enddo
+          enddo
+       enddo
+       ! cosa_u / sina_u / rsin_u on u-faces (i=1..npx, j=1..im)
+       do j = 1, im
+          do i = 1, npx
+             cu = 0.5d0 * (csg(3, i-1, j) + csg(1, i, j))
+             su = 0.5d0 * (ssg(3, i-1, j) + ssg(1, i, j))
+             write(u,'(I2,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') 20, f, i, j, cu
+             write(u,'(I2,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') 21, f, i, j, su
+             if (i == 1 .or. i == npx) then
+                val = 1.0d0 / sign(max(tiny_number, abs(su)), su)
+             else
+                val = 1.0d0 / max(tiny_number, su**2)
+             endif
+             write(u,'(I2,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') 22, f, i, j, val
+          enddo
+       enddo
+       ! cosa_v / sina_v / rsin_v on v-faces (i=1..im, j=1..npx)
+       do j = 1, npx
+          do i = 1, im
+             cv = 0.5d0 * (csg(4, i, j-1) + csg(2, i, j))
+             sv = 0.5d0 * (ssg(4, i, j-1) + ssg(2, i, j))
+             write(u,'(I2,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') 23, f, i, j, cv
+             write(u,'(I2,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') 24, f, i, j, sv
+             if (j == 1 .or. j == npx) then
+                val = 1.0d0 / sign(max(tiny_number, abs(sv)), sv)
+             else
+                val = 1.0d0 / max(tiny_number, sv**2)
+             endif
+             write(u,'(I2,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') 25, f, i, j, val
+          enddo
+       enddo
+       ! cosa_s / rsin2 at centres
+       do j = 1, im
+          do i = 1, im
+             write(u,'(I2,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') &
+                  26, f, i, j, csg(5, i, j)
+             write(u,'(I2,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') &
+                  27, f, i, j, 1.0d0 / max(tiny_number, ssg(5, i, j)**2)
+          enddo
+       enddo
+       ! cosa / sina / rsina at B-nodes (sentinel at the 4 cube vertices;
+       ! rsina additionally sentinel on all panel edges — upstream poison)
+       do j = 1, npx
+          do i = 1, npx
+             if ( (i==1 .or. i==npx) .and. (j==1 .or. j==npx) ) then
+                cb = sentinel
+                sb = sentinel
+             else
+                cb = 0.5d0 * (csg(8, i-1, j-1) + csg(6, i, j))
+                sb = 0.5d0 * (ssg(8, i-1, j-1) + ssg(6, i, j))
+             endif
+             write(u,'(I2,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') 28, f, i, j, cb
+             write(u,'(I2,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') 29, f, i, j, sb
+             if (i==1 .or. i==npx .or. j==1 .or. j==npx) then
+                val = sentinel
+             else
+                val = 1.0d0 / max(tiny_number, sb**2)
+             endif
+             write(u,'(I2,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') 30, f, i, j, val
+          enddo
+       enddo
+    enddo
+    close(u)
+    deallocate(csg, ssg)
+  end subroutine angle_oracle
 
 end program fv3_gnomonic_oracle

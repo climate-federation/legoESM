@@ -76,6 +76,30 @@ for im in (1, 8, 36):
         fields[int(fid)][int(f) - 1, int(i) - 1, int(j) - 1] = v
     for fid, (name, _) in shapes.items():
         arrays[f"{name}_unit_c{im}"] = fields[fid]
+
+    # grid_utils_init angle fields: fieldid f i j value (dimensionless)
+    ang_shapes = {}
+    for ip in range(1, 10):
+        ang_shapes[10 + ip] = (f"cos_sg{ip}", (6, im, im))
+    ang_shapes.update({
+        20: ("cosa_u", (6, im + 1, im)),
+        21: ("sina_u", (6, im + 1, im)),
+        22: ("rsin_u", (6, im + 1, im)),
+        23: ("cosa_v", (6, im, im + 1)),
+        24: ("sina_v", (6, im, im + 1)),
+        25: ("rsin_v", (6, im, im + 1)),
+        26: ("cosa_s", (6, im, im)),
+        27: ("rsin2", (6, im, im)),
+        28: ("cosa_b", (6, im + 1, im + 1)),
+        29: ("sina_b", (6, im + 1, im + 1)),
+        30: ("rsina_b", (6, im + 1, im + 1)),
+    })
+    ang = {fid: np.zeros(shp) for fid, (_, shp) in ang_shapes.items()}
+    data = np.loadtxt(f"{workdir}/fv3_angles_c{im}.txt")
+    for fid, f, i, j, v in data.reshape(-1, 5):
+        ang[int(fid)][int(f) - 1, int(i) - 1, int(j) - 1] = v
+    for fid, (name, _) in ang_shapes.items():
+        arrays[f"{name}_c{im}"] = ang[fid]
 np.savez_compressed(out_path, **arrays)
 print(f"wrote {out_path}")
 EOF

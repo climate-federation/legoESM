@@ -611,6 +611,7 @@ def create_cubed_sphere_cdgrid(
     omega: float | None = None,
     metric_dtype=None,
     gnomonic: str = "auto",
+    fv3_native_angles: bool = False,
 ) -> CubedSphereCDGrid:
     """Create a C-D grid from an existing cell-centre grid.
 
@@ -635,6 +636,19 @@ def create_cubed_sphere_cdgrid(
         when it MATCHES that provenance; a contradicting request raises
         ``ValueError`` (mixing metric families across staggers silently
         runs different numerics).
+    fv3_native_angles : bool, default False
+        Phase-2B opt-in (ED only): use the exact ``grid_utils_init``
+        staggered angle/tangent fields (``sin_sg``/``cos_sg`` per-position
+        exact; ``cosa_u/v``/``sina_u/v`` averaged ACROSS cube seams with
+        cross-face cells, as upstream mpp does).  Default False keeps the
+        legacy supergrid tangents + single-sided seam values: the shipped
+        stabilized solver's operators (c_sw, d2a2c, KE/vorticity fluxes)
+        are TUNED to that discretization, and the seam values differ at
+        O(1) (single-sided ~±0.49 vs cross-face ~0 at C36) — flipping them
+        under the legacy solver is a phase-4 (native forward-backward
+        core) decision, not a metrics bugfix.  The exact fields are
+        oracle-pinned either way in
+        ``tests/grids/test_fv3_native_metrics_phase2.py``.
 
     Returns
     -------
@@ -1050,7 +1064,30 @@ def create_cubed_sphere_cdgrid(
     # ------------------------------------------------------------------
     # Padded supergrid (2n+3 per axis) for sin_sg/cos_sg — built above per
     # grid type (`_psg_lon/_psg_lat`).
-    sin_sg, cos_sg = _compute_sin_cos_sg(n, _psg_lon, _psg_lat)
+    if gnomonic == "ed" and fv3_native_angles:
+        # Phase-2B (OPT-IN, see the fv3_native_angles docstring): exact
+        # grid_utils_init angle fields, oracle-pinned in
+        # tests/grids/test_fv3_native_metrics_phase2.py.  Computed directly
+        # on the OWNER-SYNCHRONISED create-layout corner grid (bitwise
+        # seam-identical on both sides) — the construction is face-local
+        # + geometrically matched halos, so no face remap or sub-grid
+        # position permutation is needed.  Supersedes the single-sided
+        # panel-edge shortcut below: FV3 averages sg ACROSS the cube seam
+        # (the two faces' coordinate lines kink there, so their sg values
+        # genuinely differ).  The phase-4 native solver consumes this;
+        # the legacy stabilized solver keeps the legacy tangents.
+        import numpy as _np
+
+        from legoesm.grids.fv3_native_metrics import (
+            compute_fv3_native_angles,
+        )
+
+        _ang = compute_fv3_native_angles(
+            _np.asarray(lon_corner), _np.asarray(lat_corner))
+        cos_sg = jnp.asarray(_ang["cos_sg"])
+        sin_sg = jnp.asarray(_ang["sin_sg"])
+    else:
+        sin_sg, cos_sg = _compute_sin_cos_sg(n, _psg_lon, _psg_lat)
 
     # ------------------------------------------------------------------
     # C-grid face metrics from sin_sg/cos_sg (FV3 fv_grid_utils.F90:505-518)
@@ -1075,24 +1112,33 @@ def create_cubed_sphere_cdgrid(
     # Boundary: cos_sg sub-grid positions are face-local, so cross-face halo
     # gives wrong sub-grid values. Use local cell edge value (geometrically
     # exact: both sides of the face boundary measure the same angle).
-    cosa_u_int = 0.5 * (cos_sg_E[:, :-1, :] + cos_sg_W[:, 1:, :])  # (6, n-1, n)
-    sina_u_int = 0.5 * (sin_sg_E[:, :-1, :] + sin_sg_W[:, 1:, :])
-    cosa_u = jnp.concatenate([
-        cos_sg_W[:, :1, :], cosa_u_int, cos_sg_E[:, -1:, :]
-    ], axis=1)  # (6, n+1, n)
-    sina_u = jnp.concatenate([
-        sin_sg_W[:, :1, :], sina_u_int, sin_sg_E[:, -1:, :]
-    ], axis=1)
+    if gnomonic == "ed" and fv3_native_angles:
+        # Phase-2B exact staggered averages incl. the cross-face cells at
+        # panel edges (upstream mpp-halo semantics) — computed alongside
+        # sin_sg/cos_sg above.
+        cosa_u = jnp.asarray(_ang["cosa_u"])
+        sina_u = jnp.asarray(_ang["sina_u"])
+        cosa_v = jnp.asarray(_ang["cosa_v"])
+        sina_v = jnp.asarray(_ang["sina_v"])
+    else:
+        cosa_u_int = 0.5 * (cos_sg_E[:, :-1, :] + cos_sg_W[:, 1:, :])  # (6, n-1, n)
+        sina_u_int = 0.5 * (sin_sg_E[:, :-1, :] + sin_sg_W[:, 1:, :])
+        cosa_u = jnp.concatenate([
+            cos_sg_W[:, :1, :], cosa_u_int, cos_sg_E[:, -1:, :]
+        ], axis=1)  # (6, n+1, n)
+        sina_u = jnp.concatenate([
+            sin_sg_W[:, :1, :], sina_u_int, sin_sg_E[:, -1:, :]
+        ], axis=1)
 
-    # v-faces (6, n, n+1): average N-edge of bottom cell + S-edge of top cell
-    cosa_v_int = 0.5 * (cos_sg_N[:, :, :-1] + cos_sg_S[:, :, 1:])  # (6, n, n-1)
-    sina_v_int = 0.5 * (sin_sg_N[:, :, :-1] + sin_sg_S[:, :, 1:])
-    cosa_v = jnp.concatenate([
-        cos_sg_S[:, :, :1], cosa_v_int, cos_sg_N[:, :, -1:]
-    ], axis=2)  # (6, n, n+1)
-    sina_v = jnp.concatenate([
-        sin_sg_S[:, :, :1], sina_v_int, sin_sg_N[:, :, -1:]
-    ], axis=2)
+        # v-faces (6, n, n+1): average N-edge of bottom cell + S-edge of top
+        cosa_v_int = 0.5 * (cos_sg_N[:, :, :-1] + cos_sg_S[:, :, 1:])  # (6, n, n-1)
+        sina_v_int = 0.5 * (sin_sg_N[:, :, :-1] + sin_sg_S[:, :, 1:])
+        cosa_v = jnp.concatenate([
+            cos_sg_S[:, :, :1], cosa_v_int, cos_sg_N[:, :, -1:]
+        ], axis=2)  # (6, n, n+1)
+        sina_v = jnp.concatenate([
+            sin_sg_S[:, :, :1], sina_v_int, sin_sg_N[:, :, -1:]
+        ], axis=2)
 
     # rsin_u/rsin_v follow FV3 fv_grid_utils.F90:509-561:
     #   - Interior u/v faces: rsin_u = 1/sina_u² (line 509, 517)

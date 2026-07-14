@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import numpy as np
 
-__all__ = ["compute_fv3_native_metrics"]
+__all__ = ["compute_fv3_native_metrics", "compute_fv3_native_angles"]
 
 
 # --------------------------------------------------------------------------
@@ -380,4 +380,145 @@ def compute_fv3_native_metrics(
         "area_c": area_c * radius**2,
         "agrid_lon": agrid6[..., 0],
         "agrid_lat": agrid6[..., 1],
+    }
+
+
+# --------------------------------------------------------------------------
+# Exact staggered angle/tangent fields (grid_utils_init,
+# fv_grid_utils.F90:240-561) — phase 2B
+# --------------------------------------------------------------------------
+def _cos_angle_ld(e1: np.ndarray, e2: np.ndarray, e3: np.ndarray) -> np.ndarray:
+    """cos of the angle at e1 between great circles to e2 and e3 (cos_angle).
+
+    Longdouble intermediates mirror the upstream quad ``f_p``; the result is
+    double-rounded like the R_GRID return upstream.
+    """
+    e1 = np.asarray(e1, dtype=np.longdouble)
+    e2 = np.asarray(e2, dtype=np.longdouble)
+    e3 = np.asarray(e3, dtype=np.longdouble)
+    p = np.cross(e1, e2)
+    q = np.cross(e1, e3)
+    ddd = np.sqrt(np.einsum("...i,...i", p, p)
+                  * np.einsum("...i,...i", q, q))
+    dot = np.einsum("...i,...i", p, q)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        c = np.where(ddd > 0.0, dot / np.where(ddd > 0, ddd, 1.0),
+                     np.longdouble(1.0))
+    return np.asarray(c, dtype=np.float64)
+
+
+def _mid_pt3(e1: np.ndarray, e2: np.ndarray) -> np.ndarray:
+    """mid_pt3_cart: normalized cartesian midpoint (xyz in, xyz out)."""
+    e = e1 + e2
+    return e / np.linalg.norm(e, axis=-1, keepdims=True)
+
+
+def compute_fv3_native_angles(lon6: np.ndarray, lat6: np.ndarray) -> dict:
+    """Exact FV3 staggered angle/tangent fields from 6-face corner grids.
+
+    Replicates ``grid_utils_init``'s exact ("No averaging") construction:
+
+    - ``cos_sg``/``sin_sg`` (6, n, n, 9), positions 0-indexed as legoESM's
+      convention (0=W,1=S,2=E,3=N mid-edges; 4=centre; 5=SW,6=SE,7=NE,8=NW
+      corners — FV3's 1..9 shifted by one): corners via ``cos_angle`` at the
+      cell corner nodes with the upstream sign pattern; edge mid-points via
+      ``mid_pt3_cart`` + the agrid centre; centre via
+      ``inner_prod(ec1, ec2)`` from ``get_center_vect``'s cell-local vectors.
+    - ``cosa_u``/``sina_u`` (6, n+1, n) and ``cosa_v``/``sina_v`` (6, n, n+1):
+      the 0.5*(sg_E + sg_W) staggered averages INCLUDING the cross-face
+      cells at panel edges (via the geometric halo reconstruction) — the
+      upstream mpp-halo semantics.  The legacy single-sided edge shortcut is
+      wrong across a cube seam: the two faces' coordinate lines kink there,
+      so their sg values differ.
+    - ``cosa_b``/``sina_b`` (6, n+1, n+1): B-node averages
+      0.5*(sg_NE[i-1,j-1] + sg_SW[i,j]); the four cube-vertex nodes are NaN
+      (upstream computes them from fill_corners XDir ghost geometry and
+      poisons ``rsina`` there — that convention bundle is phase-4).
+
+    Reciprocal fields (rsin_u/v/rsin2/rsina) are left to the caller: their
+    edge conventions are solver-facing policy (see the cdgrid factory).
+
+    Layout-agnostic: any consistent 6-face corner layout works (constructions
+    are face-local plus geometrically matched halos).  float64 in/out.
+    """
+    lon6 = np.asarray(lon6, dtype=np.float64)
+    lat6 = np.asarray(lat6, dtype=np.float64)
+    nf, npx, _ = lon6.shape
+    if nf != 6:  # pragma: no cover - guard
+        raise ValueError(f"expected 6 faces, got {nf}")
+    n = npx - 1
+    grid6 = np.stack([lon6, lat6], axis=-1)
+    agrid6 = _cell_center2(grid6[:, :-1, :-1], grid6[:, 1:, :-1],
+                           grid6[:, :-1, 1:], grid6[:, 1:, 1:])
+    gridh, agridh = _fill_halos(grid6, agrid6)
+
+    cos_sg = np.zeros((6, n, n, 9))
+    sin_sg = np.zeros((6, n, n, 9))
+    cosa_u = np.zeros((6, npx, n))
+    sina_u = np.zeros((6, npx, n))
+    cosa_v = np.zeros((6, n, npx))
+    sina_v = np.zeros((6, n, npx))
+    cosa_b = np.full((6, npx, npx), np.nan)
+    sina_b = np.full((6, npx, npx), np.nan)
+
+    for f in range(6):
+        X = _latlon2xyz(gridh[f])          # (npx+2, npx+2, 3) nodes w/ halo
+        ctr = _latlon2xyz(agridh[f])       # (n+2, n+2, 3) centres w/ halo
+        # cell-window corner arrays over ALL (n+2)x(n+2) halo cells
+        # (diagonal halo cells produce garbage from poison nodes; they are
+        # never read — only side-halo cells feed the staggered averages)
+        A = X[:-1, :-1]
+        B = X[1:, :-1]
+        C = X[:-1, 1:]
+        D = X[1:, 1:]
+
+        csg = np.empty((n + 2, n + 2, 9))
+        # corners (upstream sign pattern; FV3 6,7,8,9 -> idx 5,6,7,8)
+        csg[..., 5] = _cos_angle_ld(A, B, C)
+        csg[..., 6] = -_cos_angle_ld(B, A, D)
+        csg[..., 7] = _cos_angle_ld(D, B, C)
+        csg[..., 8] = -_cos_angle_ld(C, A, D)
+        # edge mid-points (FV3 1..4 -> idx 0..3): W, S, E, N
+        csg[..., 0] = _cos_angle_ld(_mid_pt3(A, C), ctr, C)
+        csg[..., 1] = _cos_angle_ld(_mid_pt3(A, B), B, ctr)
+        csg[..., 2] = _cos_angle_ld(_mid_pt3(B, D), ctr, B)
+        csg[..., 3] = _cos_angle_ld(_mid_pt3(C, D), C, ctr)
+        # centre (FV3 5 -> idx 4): inner_prod(ec1, ec2), get_center_vect
+        pc = A + B + C + D
+        pc = pc / np.linalg.norm(pc, axis=-1, keepdims=True)  # cell_center3
+        p3 = np.cross(_mid_pt3(B, D), _mid_pt3(A, C))
+        ec1 = np.cross(pc, p3)
+        ec1 = ec1 / np.linalg.norm(ec1, axis=-1, keepdims=True)
+        p3 = np.cross(_mid_pt3(C, D), _mid_pt3(A, B))
+        ec2 = np.cross(pc, p3)
+        ec2 = ec2 / np.linalg.norm(ec2, axis=-1, keepdims=True)
+        csg[..., 4] = np.einsum(
+            "...i,...i", ec1.astype(np.longdouble),
+            ec2.astype(np.longdouble)).astype(np.float64)
+
+        ssg = np.minimum(1.0, np.sqrt(np.maximum(0.0, 1.0 - csg**2)))
+
+        cos_sg[f] = csg[1:-1, 1:-1]
+        sin_sg[f] = ssg[1:-1, 1:-1]
+
+        # staggered averages over the halo cell window: u-face k (0..n)
+        # sits between window-cells k and k+1 (halo coords)
+        cosa_u[f] = 0.5 * (csg[:-1, 1:-1, 2] + csg[1:, 1:-1, 0])
+        sina_u[f] = 0.5 * (ssg[:-1, 1:-1, 2] + ssg[1:, 1:-1, 0])
+        cosa_v[f] = 0.5 * (csg[1:-1, :-1, 3] + csg[1:-1, 1:, 1])
+        sina_v[f] = 0.5 * (ssg[1:-1, :-1, 3] + ssg[1:-1, 1:, 1])
+        # B-nodes: 0.5*(sg_NE of SW cell + sg_SW of NE cell); the four
+        # cube-vertex nodes would read diagonal halo cells -> stay NaN
+        cb = 0.5 * (csg[:-1, :-1, 7] + csg[1:, 1:, 5])
+        sb = 0.5 * (ssg[:-1, :-1, 7] + ssg[1:, 1:, 5])
+        cb[0, 0] = cb[0, -1] = cb[-1, 0] = cb[-1, -1] = np.nan
+        sb[0, 0] = sb[0, -1] = sb[-1, 0] = sb[-1, -1] = np.nan
+        cosa_b[f] = cb
+        sina_b[f] = sb
+
+    return {
+        "cos_sg": cos_sg, "sin_sg": sin_sg,
+        "cosa_u": cosa_u, "sina_u": sina_u,
+        "cosa_v": cosa_v, "sina_v": sina_v,
+        "cosa_b": cosa_b, "sina_b": sina_b,
     }
