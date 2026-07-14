@@ -727,9 +727,11 @@ def create_cubed_sphere_cdgrid(
         # (duogrid handles its own edges), whereas upstream bounded_domain
         # means regional/nested (fv_arrays.F90:1512) — a global cube with
         # duogrid still takes FV3's global metric branch.  A true regional
-        # FV3 bounded metric builder does not exist on this path; single-face
-        # panels inherit the pre-existing slice semantics of
-        # create_cubed_sphere_panel (same as equiangular panels).
+        # FV3 bounded metric builder does not exist; the ONE route that
+        # would have produced a regional ED C/D grid
+        # (create_cubed_sphere_panel(gnomonic='ed', return_cdgrid=True))
+        # fails closed with NotImplementedError rather than mislabeling
+        # global cube-seam ×2 conventions as wall metrics.
         import numpy as _np
 
         from legoesm.grids.cubed_sphere import make_fv3_native_grid

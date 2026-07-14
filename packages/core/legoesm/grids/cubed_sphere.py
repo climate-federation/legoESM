@@ -4266,6 +4266,22 @@ def create_cubed_sphere_panel(
     if not return_cdgrid:
         return panel
 
+    if gnomonic == "ed":
+        # Phase-2 codex finding: slicing the GLOBAL ED C/D metrics into a
+        # walled single-face panel would carry the FV3 ×2 cube-seam edge
+        # conventions onto what are physically WALLS — the FV3 bounded
+        # (regional) metric construction differs and is not implemented.
+        # The exact-metrics claim of the FV3-native path must not silently
+        # degrade here, so fail closed.  (The A-grid ED panel above is fine:
+        # its metrics are cell-local.)
+        raise NotImplementedError(
+            "create_cubed_sphere_panel(gnomonic='ed', return_cdgrid=True): "
+            "the FV3-native C/D metrics are the GLOBAL-cube construction; "
+            "slicing them into a walled panel would mislabel cube-seam "
+            "edge conventions as wall metrics. A bounded-domain FV3 metric "
+            "builder is not implemented — use the equiangular panel or "
+            "request the A-grid ED panel (return_cdgrid=False).")
+
     # Also build single-face C-D grid from the full cdgrid.
     from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
     full_cdgrid = create_cubed_sphere_cdgrid(full, omega=omega)

@@ -265,6 +265,21 @@ class TestFV3NativeGuards:
             capture_output=True, text=True, timeout=600)
         assert "FAILED_CLOSED_OK" in out.stdout, (out.stdout, out.stderr)
 
+    def test_ed_panel_cdgrid_fails_closed(self):
+        # codex p2-r2 P1: the ONE route to a regional ED C/D grid must not
+        # silently reuse sliced GLOBAL metrics (cube-seam ×2 conventions
+        # would be mislabeled as wall metrics).  A-grid ED panels stay fine.
+        from legoesm.grids.cubed_sphere import create_cubed_sphere_panel
+
+        with pytest.raises(NotImplementedError, match="walled panel"):
+            create_cubed_sphere_panel(
+                8, dtype=np.float64, gnomonic="ed", return_cdgrid=True)
+        # equiangular panel cdgrid route unchanged
+        panel, cd = create_cubed_sphere_panel(
+            8, dtype=np.float64, return_cdgrid=True)
+        assert panel.gnomonic_form == "equiangular"
+        assert cd.base.gnomonic_form == "equiangular"
+
     def test_duogrid_global_cube_gets_same_global_metrics(self):
         # legoESM's bounded_domain flag is the duogrid OPERATOR shim, not
         # FV3's regional/nested flag — a global duogrid'd ED cube must get
