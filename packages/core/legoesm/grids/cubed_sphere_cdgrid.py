@@ -659,19 +659,6 @@ def create_cubed_sphere_cdgrid(
     # inference was built to avoid — now a hard error.
     if gnomonic == "auto":
         gnomonic = base.gnomonic_form
-        if gnomonic == "ed" and base.lat.shape[0] != 6:
-            # codex p2-r3: a single-face (walled panel) base reaching the
-            # generic builder directly would pair a regional base with the
-            # GLOBAL six-face FV3 metric construction (cube-seam ×2 edge
-            # conventions mislabeled as wall metrics).  Same fail-closed
-            # policy as create_cubed_sphere_panel(..., return_cdgrid=True);
-            # global duogrid/MPI cases all carry the full 6-face base here.
-            raise NotImplementedError(
-                "create_cubed_sphere_cdgrid: FV3-native (ED) C/D metrics "
-                "are the GLOBAL six-face construction; a single-face panel "
-                "base would mislabel cube-seam edge conventions as wall "
-                "metrics. A bounded-domain FV3 metric builder is not "
-                "implemented — use an equiangular panel instead.")
     elif gnomonic in ("ed", "equiangular") and gnomonic != base.gnomonic_form:
         raise ValueError(
             f"create_cubed_sphere_cdgrid: requested gnomonic={gnomonic!r} but "
@@ -679,6 +666,22 @@ def create_cubed_sphere_cdgrid(
             f"{base.gnomonic_form!r}. Mixing metric families silently ran "
             "different numerics per stagger; rebuild the base grid with the "
             "matching create_cubed_sphere(..., gnomonic=...) instead.")
+    # codex p2-r3/r4: AFTER resolution (so explicit gnomonic='ed' requests
+    # are covered too, not just 'auto'), reject any non-6-face ED base —
+    # single-face walled panels and MPI face slices
+    # (parallel/cube_face_scatter) would pair a regional/partial base with
+    # the GLOBAL six-face FV3 metric construction, mislabeling cube-seam
+    # ×2 edge conventions as wall metrics.  Global duogrid/MPI production
+    # paths build C/D metrics from the full 6-face base BEFORE slicing.
+    if gnomonic == "ed" and base.lat.shape[0] != 6:
+        raise NotImplementedError(
+            "create_cubed_sphere_cdgrid: FV3-native (ED) C/D metrics are "
+            "the GLOBAL six-face construction; a "
+            f"{base.lat.shape[0]}-face base (walled panel or MPI face "
+            "slice) would mislabel cube-seam edge conventions as wall "
+            "metrics. Build C/D metrics from the full 6-face grid before "
+            "slicing, or use an equiangular panel. A bounded-domain FV3 "
+            "metric builder is not implemented.")
 
     # ------------------------------------------------------------------
     # The C-D supergrid metrics all derive from 4 node-grids: the 2n+1
