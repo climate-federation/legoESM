@@ -20,7 +20,7 @@ import pytest
 
 # DO NOT enable x64 — test float32 default.
 
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationConfig,
     CDGridPrimitiveEquationModel,
     hydrostatic_to_fv3,

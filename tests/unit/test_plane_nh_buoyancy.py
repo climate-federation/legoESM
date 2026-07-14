@@ -17,10 +17,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     PlaneCompressibleEulerModel,
     moisture_buoyancy_w_half,
     make_flat_plane_terrain_metric,

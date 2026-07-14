@@ -57,15 +57,15 @@ jax.config.update("jax_enable_x64",
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_rcemip_plane as rcp  # noqa: E402
 
-from legoesm.atmosphere.dynamics.compressible_euler import (  # noqa: E402
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (  # noqa: E402
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (  # noqa: E402
     PlaneCompressibleEulerModel,
     compute_dry_mass_plane,
     make_flat_plane_terrain_metric,
 )
-from legoesm.atmosphere.dynamics.sam_case_setup import (  # noqa: E402
+from legoesm.atmosphere.dynamics.crm.sam_case_setup import (  # noqa: E402
     build_gate_ideal_setup,
 )
 from legoesm.grids.plane import create_plane_grid  # noqa: E402

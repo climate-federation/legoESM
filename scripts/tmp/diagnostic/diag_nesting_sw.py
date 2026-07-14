@@ -47,13 +47,13 @@ import matplotlib.pyplot as plt
 from legoesm import constants
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.grids.nesting import create_nested_latlon_grid
-from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
     CGridLatLonShallowWaterModel,
     CGridLatLonShallowWaterConfig,
     williamson_test2_cgrid,
     williamson_test5_cgrid,
 )
-from legoesm.atmosphere.dynamics.shallow_water_nesting import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_nesting import (
     initial_nested_state,
     step_child,
     interior_mass,
@@ -115,7 +115,7 @@ def _run_nest(nest, ic_fn, label):
     m1 = float(interior_mass(child, nest))
     drift = abs(m1 - m0) / abs(m0)
     print(f"  [{label}] done; child interior mass rel drift = {drift:.3e}")
-    from legoesm.atmosphere.dynamics.shallow_water_nesting import NestedSWState
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_nesting import NestedSWState
     return NestedSWState(parent=parent, child=child), drift
 
 

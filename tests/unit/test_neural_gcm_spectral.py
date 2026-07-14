@@ -239,7 +239,7 @@ class TestSpectralRollout:
             make_sfno_spectral_physics,
             spectral_rollout,
         )
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
         carry = _make_gaussian_carry()
         state = carry_to_spectral_state(carry, _GRID)
@@ -264,7 +264,7 @@ class TestSpectralRollout:
             make_sfno_spectral_physics,
             spectral_rollout,
         )
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
         carry = _make_gaussian_carry()
         state = carry_to_spectral_state(carry, _GRID)
@@ -299,7 +299,7 @@ class TestSpectralRollout:
             make_sfno_spectral_physics,
             spectral_rollout,
         )
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
         carry = _make_gaussian_carry()
         state = carry_to_spectral_state(carry, _GRID)
@@ -328,7 +328,7 @@ class TestSpectralRollout:
             make_sfno_spectral_physics,
             spectral_rollout,
         )
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
         carry = _make_gaussian_carry()
         state = carry_to_spectral_state(carry, _GRID)
@@ -397,7 +397,7 @@ class TestGradientFlow:
             spectral_rollout,
             spectral_state_vs_carry_loss,
         )
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
         carry_ic = _make_gaussian_carry(T_val=280.0)
         carry_target = _make_gaussian_carry(T_val=282.0)
@@ -518,7 +518,7 @@ class TestColumnMLPSpectralPhysics:
             make_column_mlp_spectral_physics,
             spectral_rollout,
         )
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
         carry = _make_gaussian_carry()
         state = carry_to_spectral_state(carry, _GRID)
@@ -542,7 +542,7 @@ class TestColumnMLPSpectralPhysics:
             spectral_rollout,
             spectral_state_vs_carry_loss,
         )
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
         carry_ic = _make_gaussian_carry(T_val=280.0)
         carry_target = _make_gaussian_carry(T_val=282.0)
@@ -603,7 +603,7 @@ class TestPhysicsParamsSpectral:
             spectral_rollout,
             spectral_state_vs_carry_loss,
         )
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
         carry_ic = _make_gaussian_carry(T_val=280.0)
         carry_target = _make_gaussian_carry(T_val=282.0)
@@ -710,7 +710,7 @@ class TestBudgetConstraints:
         negative q_v tendency that would drive q_v to ~-7e-5 over the
         rollout absent the clip, so removing the clip fails the assert.
         """
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
         from legoesm.training.neural_gcm_spectral import (
             carry_to_spectral_state, spectral_rollout,
         )
@@ -753,7 +753,7 @@ class TestRolloutCurriculum:
     def _cfg(self, curriculum, leads):
         from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
         from legoesm.training.losses import LossConfig
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
         return NeuralGCMSpectralConfig(
             n_max=N_MAX, n_levels=NLEV, dt=1800.0,
             pe_config=SpectralPEConfig(time_integrator="ssp_rk3"),
@@ -844,7 +844,7 @@ class TestSemiImplicitTrainingCore:
 
     @staticmethod
     def _configs():
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
         explicit = SpectralPEConfig(
             time_integrator="ssp_rk3", semi_implicit=False, hyperdiff_coeff=0.0)
         si = SpectralPEConfig(
@@ -875,7 +875,7 @@ class TestSemiImplicitTrainingCore:
         finite (the model's _do_step sub-stepping, made scan-safe)."""
         from legoesm.training.neural_gcm_spectral import (
             carry_to_spectral_state, spectral_rollout)
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
         state = carry_to_spectral_state(_make_gaussian_carry(), _GRID)
         cfg = SpectralPEConfig(
             time_integrator="ssp_rk3", semi_implicit=True, si_substeps=3,
@@ -932,7 +932,7 @@ class TestMidEpochResume:
     def _cfg(self, ckpt_dir):
         from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
         from legoesm.training.losses import LossConfig
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
         return NeuralGCMSpectralConfig(
             n_max=N_MAX, n_levels=NLEV, dt=1800.0,
             pe_config=SpectralPEConfig(time_integrator="ssp_rk3"),

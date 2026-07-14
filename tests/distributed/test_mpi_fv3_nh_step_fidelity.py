@@ -40,7 +40,7 @@ def _build_nh_model_and_state(n: int = 8, nlev: int = 5, **config_overrides):
         compute_terrain_metric,
         create_height_coordinate,
     )
-    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
         CDGridCompressibleEulerConfig,
         CDGridCompressibleEulerModel,
     )
@@ -360,7 +360,7 @@ class TestFV3NHStepMPIFidelity:
         if size > 6 or 6 % size != 0:
             pytest.skip("Face-only mode only (1/2/3/6 ranks).")
 
-        from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
             CDGridCompressibleEulerModel,
             make_fv3_faithful_nh_config,
         )

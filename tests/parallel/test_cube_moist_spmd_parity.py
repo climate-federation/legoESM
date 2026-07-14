@@ -25,7 +25,7 @@ from legoesm.parallel.mesh import create_device_mesh, shard_pytree
 from legoesm.parallel.sharded_dynamics import make_sharded_step
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationModel,
     CDGridPrimitiveEquationConfig,
     hydrostatic_to_fv3,

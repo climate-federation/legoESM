@@ -469,7 +469,7 @@ def test_fb_entry_points_forward_iter862_iter869b_flags():
     """
     from legoesm.core.fv3_sw_core import (
         fv3_fb_sw_step, fv3_forward_backward_step)
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig, FV3FBShallowWaterModel,
         FV3EdgeShallowWaterState)
 

@@ -27,12 +27,12 @@ jax.config.update("jax_enable_x64", True)
 mpi4jax = pytest.importorskip("mpi4jax")
 MPI = pytest.importorskip("mpi4py.MPI")
 
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationConfig,
     CDGridPrimitiveEquationModel,
     hydrostatic_to_fv3,
 )
-from legoesm.atmosphere.dynamics.flux_form_tracer_transport import (
+from legoesm.atmosphere.dynamics.shared.flux_form_tracer_transport import (
     flux_form_tracer_step,
 )
 from legoesm.core.field import Field

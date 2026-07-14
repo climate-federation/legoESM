@@ -68,7 +68,7 @@ if _n > 1:
 jax.config.update("jax_enable_x64", True)
 
 import numpy as np  # noqa: E402
-from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (  # noqa: E402
+from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (  # noqa: E402
     gather_state_atm_latlon,
     make_sharded_atm_latlon_step,
     shard_state_atm_latlon,

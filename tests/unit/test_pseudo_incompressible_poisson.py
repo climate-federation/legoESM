@@ -15,7 +15,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics import pseudo_incompressible_poisson as pip
+from legoesm.atmosphere.dynamics.les import pseudo_incompressible_poisson as pip
 
 
 def _grid(ny=16, nx=16, nz=12, Lx=1600.0, Ly=1600.0, Lz=1200.0):

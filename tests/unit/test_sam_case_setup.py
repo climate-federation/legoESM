@@ -20,7 +20,7 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.sam_case_forcing import read_sam_snd  # noqa: E402
-from legoesm.atmosphere.dynamics.sam_case_setup import (  # noqa: E402
+from legoesm.atmosphere.dynamics.crm.sam_case_setup import (  # noqa: E402
     band_limited_seed_pattern,
     build_gate_ideal_setup,
     build_lba_setup,
@@ -349,7 +349,7 @@ def test_prescribed_surface_momentum_drag(tmp_path):
 
 def test_apply_prescribed_radiative_cooling(tmp_path):
     """Prescribed dT/dt|_rad cools θ' at ALL levels (negative ⇒ θ' decreases)."""
-    from legoesm.atmosphere.dynamics.sam_case_setup import (
+    from legoesm.atmosphere.dynamics.crm.sam_case_setup import (
         apply_prescribed_radiative_cooling_plane)
     snd = read_sam_snd(_case(tmp_path) / "snd")
     hc = build_sam_case_height_coord(snd, _NLEV, _H, 100000.0)

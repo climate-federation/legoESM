@@ -17,7 +17,7 @@ from tests.test_cases.dcmip_transport import (
     _height_from_sigma,
     _mountain_height,
 )
-from legoesm.atmosphere.dynamics.tracer_transport import (
+from legoesm.atmosphere.dynamics.shared.tracer_transport import (
     TracerTransportModel,
     TracerTransportConfig,
 )

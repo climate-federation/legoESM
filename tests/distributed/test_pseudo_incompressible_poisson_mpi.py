@@ -16,8 +16,8 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
-from legoesm.atmosphere.dynamics import pseudo_incompressible_poisson as ser  # noqa: E402
-from legoesm.atmosphere.dynamics import pseudo_incompressible_poisson_mpi as mpi  # noqa: E402
+from legoesm.atmosphere.dynamics.les import pseudo_incompressible_poisson as ser  # noqa: E402
+from legoesm.atmosphere.dynamics.les import pseudo_incompressible_poisson_mpi as mpi  # noqa: E402
 
 NY, NX, NZ = 16, 8, 12
 LX, LY, LZ = 1600.0, 800.0, 2400.0

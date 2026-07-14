@@ -33,7 +33,7 @@ jax.config.update("jax_enable_x64", True)
 pytest.importorskip("mpi4py")
 from mpi4py import MPI  # noqa: E402
 
-from legoesm.atmosphere.dynamics.spectral_les_plane import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les.spectral_les_plane import (  # noqa: E402
     SpectralLESConfig, SpectralLESLayout, SpectralLESState, make_grid, step)
 from legoesm.atmosphere.physics.turbulence.lasd_core import (  # noqa: E402
     lasd_cs2, spectral_test_filter, imfilter_box3)

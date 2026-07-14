@@ -100,7 +100,7 @@ def _spectral_pe_config(yml):
     ``spectral: {semi_implicit: false}`` to opt back into the explicit
     integrator (then use an explicit-CFL-safe ``spectral.dt``).
     """
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
     spec = dict(yml.get("spectral", {}))
     return SpectralPEConfig(
@@ -143,7 +143,7 @@ def _build_mode_components_spectral(cfg, yml):
 
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         compute_sponge_factor, compute_spectral_filter,
     )
     from legoesm.training.neural_gcm_spectral import (

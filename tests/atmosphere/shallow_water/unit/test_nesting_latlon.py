@@ -3,7 +3,7 @@
 Covers the substrate grid construct (:mod:`legoesm.grids.nesting`), the
 capability wiring (``instantiate(..., nesting=True)``), and the shallow-water
 1-way nest stepping driver
-(:mod:`legoesm.atmosphere.dynamics.shallow_water_nesting`).
+(:mod:`legoesm.atmosphere.dynamics.gcm.shallow_water_nesting`).
 
 The LOAD-BEARING numerical check is interior mass conservation through the nest
 boundary on a Williamson-2 (steady geostrophic) flow: with the child boundary
@@ -29,11 +29,11 @@ from legoesm.grids.nesting import (
     apply_boundary_interp,
 )
 from legoesm.grids.capability import instantiate, capability_matrix
-from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
     williamson_test2_cgrid,
     CGridLatLonShallowWaterConfig,
 )
-from legoesm.atmosphere.dynamics.shallow_water_nesting import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_nesting import (
     NestedSWState,
     initial_nested_state,
     make_nested_stepper,
@@ -343,7 +343,7 @@ class TestStepping:
         # We wrap the tendency function the nest stepper calls and assert the
         # hard band of every state it receives matches the BC — this is the
         # "before the next tendency evaluation" invariant the bug violated.
-        import legoesm.atmosphere.dynamics.shallow_water_nesting as swn
+        import legoesm.atmosphere.dynamics.gcm.shallow_water_nesting as swn
 
         parent_ic = williamson_test2_cgrid(nest.parent)
         state = initial_nested_state(nest, parent_ic)

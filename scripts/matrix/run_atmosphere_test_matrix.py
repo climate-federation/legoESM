@@ -582,12 +582,12 @@ def _area_weighted_sum(field, area) -> float:
 # ---------------------------------------------------------------------------
 # Hyperdiffusion helpers
 # ---------------------------------------------------------------------------
-# Canonical source: ``legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid``
+# Canonical source: ``legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid``
 # (issue #269 — pulled the iter-1030 cube-resolution scaling formulas into
 # a shared module so the CLI, matrix runner, and tests reference one place).
 # Sentinel tests under ``tests/test_iter9*`` keep their own bit-identical
 # mirrors so that pinning is independent of script imports.
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
     MODON_DAMP_V,
     MODON_DIV_DAMP_FACTOR,
     MODON_HYPERDIFF_FACTOR,
@@ -620,7 +620,7 @@ def _fb_cube_sw_model(n: int, test_num: int):
     non-rotating (omega=0), matching the production lane.
     """
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         FV3FBShallowWaterModel, fb_m1_preset_config)
     grid = (create_cubed_sphere(n, omega=0.0, use_duogrid=True)
             if test_num == 8 else create_cubed_sphere(n, use_duogrid=True))
@@ -1194,7 +1194,7 @@ def _make_rrtmgp_physics(model_type: str, dt: float, hs_fn=None,
             rrtmgp_tend = rrtmgp_result[0] if isinstance(rrtmgp_result, tuple) else rrtmgp_result
             phys_state_out = rrtmgp_result[1] if isinstance(rrtmgp_result, tuple) else None
             hs_tend = hs_fn(state, grid, sigma_coord)
-            from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+            from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
             summed = SpectralHydrostaticState(
                 vor_hat=rrtmgp_tend.vor_hat.replace(
                     data=rrtmgp_tend.vor_hat.data + hs_tend.vor_hat.data),
@@ -2419,7 +2419,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
             CDGridShallowWaterConfig)
         from tests.test_cases.williamson import (
@@ -2487,7 +2487,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # duplicate; future calibration updates land in the helper +
         # propagate here automatically.  Bit-identical at C36 (helper
         # uses ``div_damp_factor=8.0, damp_v=0.030`` defaults).
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             iter1009_dual_target_config,
         )
         # new_test_dycores iter-31: W6 (Rossby-Haurwitz wave-4) needs
@@ -2719,7 +2719,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
             CGridLatLonShallowWaterModel, CGridLatLonShallowWaterConfig,
             CGridLatLonShallowWaterState,
             williamson_test2_cgrid, williamson_test5_cgrid,
@@ -2856,7 +2856,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
             MPASShallowWaterModel, MPASShallowWaterConfig)
         from tests.atmosphere.shallow_water.test_cases.williamson_mpas import (
             williamson_test2_mpas, williamson_test5_mpas,
@@ -2934,7 +2934,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
     elif tc.grid_type == "spectral":
         from legoesm.grids.gaussian import (
             create_gaussian_grid, sh_synthesis, uv_from_vordiv)
-        from legoesm.atmosphere.dynamics.spectral_sw import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
             SpectralShallowWaterModel, SpectralSWConfig,
             williamson_test2_spectral, williamson_test5_spectral,
         )
@@ -3102,7 +3102,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # initial state for W2: ``williamson_test2_spectral``
         # is itself the closed-form geostrophic balance).
         from legoesm.grids.gaussian import sh_synthesis as _sh_syn
-        from legoesm.atmosphere.dynamics.spectral_sw import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
             williamson_test2_spectral as _w2_spec)
         from legoesm import constants as _consts
         _init_state = _w2_spec(grid)
@@ -3216,7 +3216,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
             CDGridShallowWaterConfig)
 
@@ -3235,7 +3235,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         # helper used by the W2/W5 cube paths so the matrix runner
         # has ONE canonical cube SW config source.  Numerical
         # behaviour unchanged (config is unused for CB).
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             iter1009_dual_target_config,
         )
         config = iter1009_dual_target_config(n)
@@ -3313,7 +3313,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
             CGridLatLonShallowWaterState)
         from legoesm.grids.operators_latlon_cgrid import cell_to_cgrid_winds
         from legoesm.core.operators_fv_latlon import cgrid_fv_flux_divergence_latlon
@@ -3419,7 +3419,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
             MPASShallowWaterModel, MPASShallowWaterConfig)
         from legoesm.core.state import MPASShallowWaterState
 
@@ -3519,7 +3519,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
     elif tc.grid_type == "spectral":
         from legoesm.grids.gaussian import (
             create_gaussian_grid, sh_synthesis, sh_analysis)
-        from legoesm.atmosphere.dynamics.spectral_sw import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
             SpectralShallowWaterModel, SpectralSWConfig,
             SpectralSWState, spectral_sw_tendencies)
         from legoesm import constants as C
@@ -3701,7 +3701,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
 
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel as PrimitiveEquationModel,
             CDGridPrimitiveEquationConfig as PrimitiveEquationConfig)
         from legoesm.atmosphere.held_suarez import (
@@ -3859,7 +3859,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
             hydrostatic_to_cgrid)
         from legoesm.atmosphere.held_suarez import (
@@ -3928,7 +3928,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
         from legoesm.atmosphere.held_suarez import (
             held_suarez_forcing_mpas, held_suarez_init_mpas)
@@ -3986,7 +3986,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             create_gaussian_grid, sh_synthesis_3d,
         )
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPrimitiveEquationModel, SpectralPEConfig,
             isothermal_rest_state_spectral, spectral_pe_to_grid,
         )
@@ -4219,7 +4219,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel as PrimitiveEquationModel,
             CDGridPrimitiveEquationConfig as PrimitiveEquationConfig)
         from tests.test_cases.baroclinic_wave import (
@@ -4376,7 +4376,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
             hydrostatic_to_cgrid)
         from tests.test_cases.baroclinic_wave import (
@@ -4458,7 +4458,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
         from tests.test_cases.baroclinic_wave import (
             baroclinic_wave_init_mpas)
@@ -4526,7 +4526,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             create_gaussian_grid, sh_synthesis, sh_synthesis_3d,
         )
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPrimitiveEquationModel, SpectralPEConfig,
             spectral_pe_to_grid,
         )
@@ -4720,7 +4720,7 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import (
             create_cubed_sphere, rotate_winds_geo_to_grid)
-        from legoesm.atmosphere.dynamics.tracer_transport import (
+        from legoesm.atmosphere.dynamics.shared.tracer_transport import (
             TracerTransportModel, TracerTransportConfig)
         from tests.test_cases.dcmip_transport import (
             dcmip11_wind, dcmip11_init, dcmip12_wind, dcmip12_init,
@@ -4740,7 +4740,7 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.tracer_transport_latlon import (
+        from legoesm.atmosphere.dynamics.gcm.tracer_transport_latlon import (
             TracerTransportLatLonModel, TracerTransportLatLonConfig)
         from tests.test_cases.dcmip_transport import (
             dcmip11_init_latlon, dcmip12_init_latlon, dcmip13_init_latlon)
@@ -4770,7 +4770,7 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.atmosphere.dynamics.tracer_transport_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import (
             TracerTransportMPASModel, TracerTransportMPASConfig)
         from tests.test_cases.dcmip_transport import (
             dcmip11_init_mpas, dcmip12_init_mpas, dcmip13_init_mpas)
@@ -4900,7 +4900,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import standard_hybrid_levels
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel as PrimitiveEquationModel,
             CDGridPrimitiveEquationConfig as PrimitiveEquationConfig)
         from legoesm.atmosphere.held_suarez import held_suarez_init
@@ -4988,7 +4988,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.grids.vertical import standard_hybrid_levels
-        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
             hydrostatic_to_cgrid)
         from legoesm.atmosphere.held_suarez import (
@@ -5053,7 +5053,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.grids.vertical import standard_hybrid_levels
-        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
         from legoesm.atmosphere.held_suarez import (
             held_suarez_forcing_mpas, held_suarez_init_mpas)
@@ -5109,7 +5109,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
             create_gaussian_grid, sh_synthesis_3d,
         )
         from legoesm.grids.vertical import standard_hybrid_levels
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPrimitiveEquationModel, SpectralPEConfig,
             isothermal_rest_state_spectral, spectral_pe_to_grid,
         )
@@ -5254,7 +5254,7 @@ def _make_kessler_nh_physics_fn(height_coord, dt_phys, tendencies_cls):
     tendencies_cls : type
         NonHydrostaticTendencies or MPASNonHydrostaticTendencies.
     """
-    from legoesm.atmosphere.dynamics.compressible_euler import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
         compute_exner_perturbation,
     )
     from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
@@ -5379,7 +5379,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
 
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
             CDGridCompressibleEulerModel as CompressibleEulerModel,
             CDGridCompressibleEulerConfig as CompressibleEulerConfig)
 
@@ -5688,7 +5688,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas import (
             MPASCompressibleEulerModel, MPASCompressibleEulerConfig)
 
         level = int(tc.resolution.replace("ico", ""))
@@ -5832,7 +5832,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.gaussian import (
             create_gaussian_grid, sh_synthesis_3d,
         )
-        from legoesm.atmosphere.dynamics.spectral_nh import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
             SpectralCompressibleEulerModel, SpectralNHConfig,
             dcmip25_tc1_init_spectral,
             dcmip25_tc2_init_spectral,

@@ -18,11 +18,11 @@ import pytest
 from legoesm import constants
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.model_driver import ModelDriver
-from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonPrimitiveEquationConfig,
     CGridLatLonPrimitiveEquationModel,
 )
-from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
     run_atm_latlon_spmd,
 )
 from legoesm.atmosphere.held_suarez import (
@@ -155,7 +155,7 @@ def test_run_compiled_latlon_spmd_passes_compiled_segments_flag(monkeypatch):
     compiled scan's last-bit compilation-order roundoff to ~1e-6, which is a
     property of the lanes, not of the driver wiring under test."""
     _require_devices()
-    import legoesm.atmosphere.dynamics.sharded_atm_latlon_step as sas
+    import legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step as sas
 
     n_steps = 4
     # driver run with the flag ON + a spy asserting the kwarg flows through

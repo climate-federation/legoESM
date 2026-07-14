@@ -14,7 +14,7 @@ import jax, jax.numpy as jnp
 from legoesm import constants
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
     hydrostatic_to_cgrid, cgrid_to_hydrostatic)
 from legoesm.atmosphere.held_suarez import (

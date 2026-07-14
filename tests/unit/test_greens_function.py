@@ -115,7 +115,7 @@ class TestGravityWaveSpeed:
 
     def test_gravity_wave_speed_mpas(self, voronoi_mesh):
         """Gravity wave on MPAS shallow water model."""
-        from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
             MPASShallowWaterModel, MPASShallowWaterConfig,
             MPASShallowWaterState,
         )
@@ -308,7 +308,7 @@ class TestGravityWaveCDGrid:
     def test_gravity_wave_cdgrid(self, cs_grid):
         """A height perturbation should disperse on the C-D grid SW model."""
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterModel,
             CDGridShallowWaterConfig,
             CDGridShallowWaterState,
@@ -368,7 +368,7 @@ class TestGravityWaveSpectral:
         from legoesm.grids.gaussian import (
             create_gaussian_grid, sh_analysis, sh_synthesis,
         )
-        from legoesm.atmosphere.dynamics.spectral_sw import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
             SpectralShallowWaterModel,
             SpectralSWConfig,
             SpectralSWState,

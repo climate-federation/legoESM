@@ -450,7 +450,7 @@ class TestCombinedSpectralPE:
         """Create a minimal spectral PE state."""
         from legoesm.grids.gaussian import create_gaussian_grid
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             isothermal_rest_state_spectral,
         )
 

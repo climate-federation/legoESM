@@ -12,7 +12,7 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.grids.voronoi import create_voronoi_mesh
-from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
     MPASShallowWaterModel,
     MPASShallowWaterConfig,
 )

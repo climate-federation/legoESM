@@ -219,7 +219,7 @@ def isothermal_state_spectral(
     transformed to spherical-harmonic coefficients before being
     packaged into a :class:`SpectralHydrostaticState`.
     """
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
     from legoesm.grids.gaussian import (
         sh_analysis,
         sh_analysis_3d,

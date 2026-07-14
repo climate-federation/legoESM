@@ -138,11 +138,11 @@ def main() -> int:
             "and gathered comparison are process-local).")
 
     from jax.sharding import Mesh
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationConfig,
         CDGridPrimitiveEquationModel,
     )
-    from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+    from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import (
         make_tiled_cc_loop,
         make_tiled_cc_step,
     )

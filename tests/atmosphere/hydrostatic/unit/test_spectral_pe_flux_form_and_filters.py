@@ -24,7 +24,7 @@ import pytest
 from legoesm import constants
 from legoesm.grids.gaussian import create_gaussian_grid, sh_synthesis
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralPEConfig,
     SpectralPrimitiveEquationModel,
     isothermal_rest_state_spectral,

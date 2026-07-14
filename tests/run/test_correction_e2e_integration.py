@@ -23,7 +23,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.dynamics.les_regime import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les.les_regime import (  # noqa: E402
     LESRegimeConfig,
     LESResolutionConfig,
 )
@@ -76,7 +76,7 @@ def _run_tiny_latlon_coupled(days=1, n_lat=8, nlev=5):
 @pytest.mark.slow
 @pytest.mark.filterwarnings("error::FutureWarning")  # iter 208/210: no f64->f32 scatter
 def test_full_pipeline_real_model_and_les():
-    from legoesm.atmosphere.dynamics.column_les import (
+    from legoesm.atmosphere.dynamics.les.column_les import (
         ColumnLESConfig,
         process_column,
         run_forced_les,
@@ -265,7 +265,7 @@ def test_full_loop_real_model_real_les_rerun_and_gate(surface_flux):
     (from the coupled ocean), so the shared make_les_diagnose_fn threads it."""
     from functools import partial as _partial
 
-    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig, run_forced_les
+    from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig, run_forced_les
     from legoesm.training.compare_reanalysis import column_state_from_hydrostatic
     from legoesm.training.correction_loop import make_compare_fn, run_correction_iteration
 
@@ -331,7 +331,7 @@ def test_full_loop_ocean_only_excludes_masked_columns():
     would be the #1 worst)."""
     from functools import partial as _partial
 
-    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig, run_forced_les
+    from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig, run_forced_les
     from legoesm.training.compare_reanalysis import column_state_from_hydrostatic
     from legoesm.training.correction_loop import make_compare_fn, run_correction_iteration
 
@@ -408,7 +408,7 @@ def test_full_loop_ocean_only_on_cubed_sphere():
     column, so ocean-only must exclude it from the worst columns."""
     from functools import partial as _partial
 
-    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig, run_forced_les
+    from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig, run_forced_les
     from legoesm.training.compare_reanalysis import column_state_from_hydrostatic
     from legoesm.training.correction_loop import make_compare_fn, run_correction_iteration
 
@@ -485,7 +485,7 @@ def test_full_loop_environment_strategy_builds_a_deployable_kernel():
     own environment (the cross-grid deploy's core operation)."""
     from functools import partial as _partial
 
-    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig, run_forced_les
+    from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig, run_forced_les
     from legoesm.training.compare_reanalysis import column_state_from_hydrostatic
     from legoesm.training.correction_loop import make_compare_fn, run_correction_iteration
     from legoesm.training.deploy_correction import (
@@ -563,7 +563,7 @@ def test_full_loop_multi_coefficient_corrects_all_from_one_les():
     multi-method diagnose_fn the SAME way ``build_multi_correction_campaign`` does."""
     from functools import partial as _partial
 
-    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig, run_forced_les
+    from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig, run_forced_les
     from legoesm.training.compare_reanalysis import column_state_from_hydrostatic
     from legoesm.training.correction_loop import (
         CorrectionSpec,
@@ -687,7 +687,7 @@ def test_full_offline_amip_loop_forcing_drives_correction_and_persists(tmp_path)
     reduction (the gate may correctly REJECT, as it did against real ERA5)."""
     from functools import partial as _partial
 
-    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig, run_forced_les
+    from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig, run_forced_les
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
     from legoesm.training.correction_loop import make_compare_fn, run_correction_iteration
     from legoesm.training.run_to_column_mean import amip_column_state

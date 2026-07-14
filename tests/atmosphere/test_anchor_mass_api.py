@@ -28,29 +28,29 @@ import pytest
     "import_path",
     [
         # SW
-        "legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid."
+        "legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid."
         "CGridLatLonShallowWaterModel",
-        "legoesm.atmosphere.dynamics.shallow_water_mpas."
+        "legoesm.atmosphere.dynamics.gcm.shallow_water_mpas."
         "MPASShallowWaterModel",
-        "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid."
+        "legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid."
         "FV3EdgeShallowWaterModel",
-        "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid."
+        "legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid."
         "FV3FBShallowWaterModel",
         # PE
-        "legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid."
+        "legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid."
         "CGridLatLonPrimitiveEquationModel",
-        "legoesm.atmosphere.dynamics.primitive_eq_mpas."
+        "legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas."
         "MPASPrimitiveEquationModel",
-        "legoesm.atmosphere.dynamics.primitive_eq_cdgrid."
+        "legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid."
         "CDGridPrimitiveEquationModel",
-        "legoesm.atmosphere.dynamics.spectral_pe."
+        "legoesm.atmosphere.dynamics.gcm.spectral_pe."
         "SpectralPrimitiveEquationModel",
         # NH
-        "legoesm.atmosphere.dynamics.compressible_euler_mpas."
+        "legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas."
         "MPASCompressibleEulerModel",
-        "legoesm.atmosphere.dynamics.compressible_euler_cdgrid."
+        "legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid."
         "CDGridCompressibleEulerModel",
-        "legoesm.atmosphere.dynamics.spectral_nh."
+        "legoesm.atmosphere.dynamics.gcm.spectral_nh."
         "SpectralCompressibleEulerModel",
     ],
 )
@@ -74,7 +74,7 @@ def test_spectral_sw_compute_mass_present():
     """iter-35: spectral SW has no anchor (baseline drift already
     bit-clean) but exposes ``compute_mass`` for API parity with the
     cube / lat-lon / MPAS SW twins."""
-    from legoesm.atmosphere.dynamics.spectral_sw import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
         SpectralShallowWaterModel,
     )
     assert hasattr(SpectralShallowWaterModel, "compute_mass"), (
@@ -92,7 +92,7 @@ def test_anchor_lifecycle_latlon_pe():
     re-arms it.  Uses lat-lon PE as the canonical SW/PE/NH twin (iter-2)."""
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationModel,
         CGridLatLonPrimitiveEquationConfig,
         hydrostatic_to_cgrid,
@@ -156,7 +156,7 @@ def test_anchor_lazy_snapshot_is_sticky():
     """
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
     )
@@ -257,7 +257,7 @@ def test_anchored_step_scan_compat_under_fp64_policy():
     from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
     )
@@ -313,7 +313,7 @@ def test_anchored_step_supports_jax_grad():
     from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
     )
@@ -376,7 +376,7 @@ def test_anchored_step_supports_jax_grad_multistep():
     from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
     )
@@ -437,7 +437,7 @@ def test_anchored_step_supports_jax_grad_spectral_pe():
     from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         SpectralPrimitiveEquationModel,
         SpectralPEConfig,
         isothermal_rest_state_spectral,
@@ -495,7 +495,7 @@ def test_anchored_step_supports_jax_grad_cube_nh():
     """
     from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
         CDGridCompressibleEulerModel,
         CDGridCompressibleEulerConfig,
     )
@@ -546,7 +546,7 @@ def test_anchored_step_supports_jax_grad_spectral_nh():
     """
     from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
     from legoesm.grids.gaussian import create_gaussian_grid
-    from legoesm.atmosphere.dynamics.spectral_nh import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
         SpectralCompressibleEulerModel, SpectralNHConfig,
         dcmip25_tc1_init_spectral,
     )
@@ -593,7 +593,7 @@ def test_anchored_step_supports_jax_grad_latlon_pe():
     from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationModel,
         CGridLatLonPrimitiveEquationConfig,
         hydrostatic_to_cgrid,
@@ -642,7 +642,7 @@ def test_anchored_step_supports_jax_grad_mpas_sw():
     """
     from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
     from legoesm.grids.voronoi import create_voronoi_mesh
-    from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
         MPASShallowWaterModel, MPASShallowWaterConfig,
     )
     from tests.atmosphere.shallow_water.test_cases.williamson_mpas import (
@@ -685,7 +685,7 @@ def test_anchored_step_supports_jax_grad_mpas_pe():
     from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
     )
     from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
@@ -738,7 +738,7 @@ def test_anchored_step_no_tracer_leak_across_traces():
     from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
     )
@@ -830,7 +830,7 @@ def test_anchored_step_supports_jax_grad_mpas_nh():
     """
     from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
     from legoesm.grids.voronoi import create_voronoi_mesh
-    from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas import (
         MPASCompressibleEulerModel, MPASCompressibleEulerConfig,
     )
     from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1_mpas import (
@@ -893,7 +893,7 @@ def _assert_no_traced_cache(model, state, step_once, scan_two):
 def test_anchored_step_no_tracer_leak_mpas_sw():
     from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
     from legoesm.grids.voronoi import create_voronoi_mesh
-    from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
         MPASShallowWaterModel, MPASShallowWaterConfig,
     )
     from tests.atmosphere.shallow_water.test_cases.williamson_mpas import (
@@ -930,7 +930,7 @@ def test_anchored_step_no_tracer_leak_mpas_pe():
     from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
     )
     from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
@@ -967,7 +967,7 @@ def test_anchored_step_no_tracer_leak_mpas_pe():
 
 def test_anchored_step_no_tracer_leak_mpas_nh():
     from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
-    from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas import (
         MPASCompressibleEulerModel, MPASCompressibleEulerConfig,
     )
     from tests.unit.test_mpas_atmosphere import (

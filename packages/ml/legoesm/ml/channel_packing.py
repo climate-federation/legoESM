@@ -22,8 +22,8 @@ from typing import NamedTuple, TYPE_CHECKING
 import jax.numpy as jnp
 
 if TYPE_CHECKING:
-    from legoesm.atmosphere.dynamics.spectral_sw import SpectralSWState
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+    from legoesm.atmosphere.dynamics.gcm.spectral_sw import SpectralSWState
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
 
 from legoesm.grids.gaussian import (
     GaussianGrid,
@@ -35,8 +35,8 @@ from legoesm.grids.gaussian import (
     sh_analysis_dmu_3d,
     uv_from_vordiv_3d,
 )
-from legoesm.atmosphere.dynamics.spectral_sw import SpectralSWState
-from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+from legoesm.atmosphere.dynamics.gcm.spectral_sw import SpectralSWState
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
 from legoesm.atmosphere.physics._shared import zero_like_tracers
 
 # WeatherBench2 standard pressure levels [hPa]

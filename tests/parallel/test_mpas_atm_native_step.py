@@ -72,7 +72,7 @@ def _build(*, moist: bool, reorder_for: int = 2,
     serial and sharded paths so cell/edge indices match for direct
     array comparison (the test_voronoi_sharded_equivalence pattern).
     """
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationConfig,
         MPASPrimitiveEquationModel,
     )
@@ -314,7 +314,7 @@ class TestNativeFullProductionParity:
         if not jax.config.jax_enable_x64:
             pytest.skip("needs x64 so the fp64 accumulator is real")
         _need_multi_device(2)
-        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel,
         )
 

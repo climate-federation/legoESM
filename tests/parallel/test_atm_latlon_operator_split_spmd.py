@@ -33,7 +33,7 @@ from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig)
 from legoesm.core.conservation import global_area_sum
 from legoesm.core.operators_latlon_3d import hyperdiffusion_3d

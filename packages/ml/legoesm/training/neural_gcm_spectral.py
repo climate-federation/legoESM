@@ -39,7 +39,7 @@ import jax.numpy as jnp
 import equinox as eqx
 import optax
 
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     SpectralPEConfig,
     spectral_pe_tendencies,
@@ -2673,7 +2673,7 @@ def train_sfno_full_spectral(
 
     Returns (trained_sfno, loss_history).
     """
-    from legoesm.atmosphere.dynamics.sfno_pe import (
+    from legoesm.atmosphere.dynamics.neural.sfno_pe import (
         SFNOPrimitiveEquationConfig,
     )
 
@@ -2742,7 +2742,7 @@ def _train_sfno_full_loop(
     segment schedule is reused verbatim from ``config.loss_config``,
     but segment lengths are converted into SFNO macro steps.
     """
-    from legoesm.atmosphere.dynamics.sfno_pe import (
+    from legoesm.atmosphere.dynamics.neural.sfno_pe import (
         SFNOPrimitiveEquationModel,
     )
     from legoesm.ml.training import TrainingConfig, create_optimizer

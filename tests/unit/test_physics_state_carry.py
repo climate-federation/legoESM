@@ -107,7 +107,7 @@ def test_mpas_step_threads_seeded_carry():
     and step 2 consumes step 1's output (no silent reseed)."""
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel,
         MPASPrimitiveEquationConfig,
     )
@@ -197,7 +197,7 @@ def _toy_carry_physics_fn():
 def _cdgrid_setup(n=6, nlev=6):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
     )
@@ -214,7 +214,7 @@ def _cdgrid_setup(n=6, nlev=6):
 def _mpas_setup(n=3, nlev=8):
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel,
         MPASPrimitiveEquationConfig,
     )
@@ -299,7 +299,7 @@ def test_latlon_step_threads_seeded_carry():
     from legoesm import constants
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonHydrostaticState,
         CGridLatLonPrimitiveEquationModel,
         CGridLatLonPrimitiveEquationConfig,
@@ -807,7 +807,7 @@ def test_latlon_step_refuses_stateful_physics_without_carry():
     from legoesm import constants
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonHydrostaticState,
         CGridLatLonPrimitiveEquationModel,
         CGridLatLonPrimitiveEquationConfig,
@@ -1098,7 +1098,7 @@ def test_spectral_family_step_refuses_stateful_physics():
     sigma = create_sigma_coordinate(n_levels=3)
     n_ch = PE3DChannelSpec(nlev=sigma.n_levels).n_channels
 
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         SpectralPrimitiveEquationModel,
         SpectralPEConfig,
     )
@@ -1109,7 +1109,7 @@ def test_spectral_family_step_refuses_stateful_physics():
     with pytest.raises(NotImplementedError, match="405"):
         spec.step_with_physics(None, 1.0, physics_fn=fn)
 
-    from legoesm.atmosphere.dynamics.ucast_pe import (
+    from legoesm.atmosphere.dynamics.neural.ucast_pe import (
         UCastPrimitiveEquationModel,
         UCastPrimitiveEquationConfig,
     )
@@ -1125,7 +1125,7 @@ def test_spectral_family_step_refuses_stateful_physics():
     with pytest.raises(NotImplementedError, match="405"):
         ucast.step_with_physics(None, 1.0, fn)
 
-    from legoesm.atmosphere.dynamics.sfno_pe import (
+    from legoesm.atmosphere.dynamics.neural.sfno_pe import (
         SFNOPrimitiveEquationModel,
         SFNOPrimitiveEquationConfig,
     )
@@ -1206,7 +1206,7 @@ def test_nonhydrostatic_cdgrid_step_refuses_stateful_physics():
     from legoesm.grids.vertical import (
         create_height_coordinate, compute_terrain_metric,
     )
-    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
         CDGridCompressibleEulerModel,
         CDGridCompressibleEulerConfig,
     )

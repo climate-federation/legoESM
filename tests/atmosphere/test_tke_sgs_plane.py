@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`legoesm.atmosphere.dynamics.tke_sgs_plane`.
+"""Unit tests for :mod:`legoesm.atmosphere.dynamics.les.tke_sgs_plane`.
 
 Gap #4: the 1.5-order TKE SGS closure for the plane LES.  Analytic checks on
 ν_t, mixing length, dissipation, Prandtl, the local-equilibrium TKE (production
@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.dynamics.tke_sgs_plane import (
+from legoesm.atmosphere.dynamics.les.tke_sgs_plane import (
     TKESGSConfig,
     smagorinsky_equivalent_cs,
     tke_dissipation_rate,

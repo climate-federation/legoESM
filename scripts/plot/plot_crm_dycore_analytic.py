@@ -24,8 +24,8 @@ import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig  # noqa: E402
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (  # noqa: E402
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import CompressibleEulerConfig  # noqa: E402
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (  # noqa: E402
     make_flat_plane_terrain_metric, make_rest_state,
     plane_compressible_euler_slow_tendencies as slow_tend,
 )

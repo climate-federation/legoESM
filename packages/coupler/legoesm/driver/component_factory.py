@@ -315,7 +315,7 @@ def create_atmosphere_dycore(
         # resolution-robust preset (`williamson_cli_calibration`: matched
         # hyperdiff + div_damp + damp_v, stable C24-C48).  See
         # docs/architecture/fv3_single_implementation_program.md (Phase-1 M2).
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             FV3EdgeShallowWaterModel, CDGridShallowWaterConfig,
             williamson_cli_calibration,
         )
@@ -354,7 +354,7 @@ def create_atmosphere_dycore(
         return FV3EdgeShallowWaterModel(grid, cfg)
 
     if solver_name == "cdgrid_primitive_equations":
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
         )
         cfg = CDGridPrimitiveEquationConfig(
@@ -380,7 +380,7 @@ def create_atmosphere_dycore(
         return CDGridPrimitiveEquationModel(grid, sigma, cfg)
 
     if solver_name == "cdgrid_compressible_euler":
-        from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
             CDGridCompressibleEulerModel, CDGridCompressibleEulerConfig,
         )
         # Forward the driver-level mass fixer (mirrors the plane / NH
@@ -415,11 +415,11 @@ def create_atmosphere_dycore(
 
     # ----- Spectral solvers (Gaussian grid) -----
     if solver_name == "spectral_shallow_water":
-        from legoesm.atmosphere.dynamics.spectral_sw import SpectralShallowWaterModel
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import SpectralShallowWaterModel
         return SpectralShallowWaterModel(grid=grid)
 
     if solver_name == "spectral_primitive_equations":
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPrimitiveEquationModel, SpectralPEConfig,
         )
         # Compute hyperdiffusion from truncation: 0.5-hour e-folding at max wavenumber
@@ -458,7 +458,7 @@ def create_atmosphere_dycore(
         )
 
     if solver_name == "spectral_compressible_euler":
-        from legoesm.atmosphere.dynamics.spectral_nh import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
             SpectralCompressibleEulerModel, SpectralNHConfig,
         )
         # Non-hydrostatic uses a height (z-star) coordinate, not sigma:
@@ -488,7 +488,7 @@ def create_atmosphere_dycore(
 
     # ----- MPAS icosahedral -----
     if solver_name == "mpas_primitive_equations":
-        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
         )
         # Integrator: ``"auto"`` (run_amip CLI default) resolves to the
@@ -521,7 +521,7 @@ def create_atmosphere_dycore(
         return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma, config=cfg)
 
     if solver_name == "mpas_compressible_euler":
-        from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas import (
             MPASCompressibleEulerModel, MPASCompressibleEulerConfig,
         )
         # Non-hydrostatic uses a height (z-star) coordinate, not sigma:
@@ -551,10 +551,10 @@ def create_atmosphere_dycore(
 
     # ----- Doubly-periodic plane -----
     if solver_name == "plane_compressible_euler":
-        from legoesm.atmosphere.dynamics.compressible_euler import (
+        from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
             CompressibleEulerConfig,
         )
-        from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
             PlaneCompressibleEulerModel,
             make_flat_plane_terrain_metric,
         )
@@ -684,7 +684,7 @@ def create_atmosphere_dycore(
             )
 
     if solver_name == "latlon_cgrid_shallow_water":
-        from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
             CGridLatLonShallowWaterModel, CGridLatLonShallowWaterConfig,
         )
         cfg = CGridLatLonShallowWaterConfig(
@@ -703,7 +703,7 @@ def create_atmosphere_dycore(
         return model
 
     if solver_name == "latlon_cgrid_primitive_equations":
-        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
         )
         cfg = CGridLatLonPrimitiveEquationConfig(
@@ -741,16 +741,16 @@ def create_atmosphere_dycore(
 
     # ----- SFNO data-driven -----
     if solver_name == "sfno_shallow_water":
-        from legoesm.atmosphere.dynamics.sfno_sw import SFNOShallowWaterModel
+        from legoesm.atmosphere.dynamics.neural.sfno_sw import SFNOShallowWaterModel
         return SFNOShallowWaterModel(grid=grid)
 
     if solver_name == "sfno_primitive_equations":
-        from legoesm.atmosphere.dynamics.sfno_pe import SFNOPrimitiveEquationModel
+        from legoesm.atmosphere.dynamics.neural.sfno_pe import SFNOPrimitiveEquationModel
         return SFNOPrimitiveEquationModel(grid=grid, sigma_coord=sigma)
 
     # ----- U-Cast data-driven (convolutional U-Net emulator) -----
     if solver_name == "ucast_primitive_equations":
-        from legoesm.atmosphere.dynamics.ucast_pe import (
+        from legoesm.atmosphere.dynamics.neural.ucast_pe import (
             UCastPrimitiveEquationConfig,
             UCastPrimitiveEquationModel,
         )
@@ -1147,7 +1147,7 @@ def resolve_model_complexity(level, *, grid_type: str = "cubed_sphere"):
         # the FV3-faithful fv3sw barotropic — NOT the default a_grid barotropic
         # (forbidden by the never-A-grid / FV3-faithfulness directive).  Import
         # the SW core provider so its registry entry exists before construction.
-        import legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid  # noqa: F401
+        import legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid  # noqa: F401
         ocean_config = OceanConfig(barotropic_staggering="fv3sw")
     else:
         ocean_config = rungs.ocean  # simple rung — grid-agnostic, factory resolves

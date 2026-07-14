@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonHydrostaticState,
     CGridLatLonPrimitiveEquationConfig,
     CGridLatLonPrimitiveEquationModel,
@@ -91,10 +91,10 @@ def main():
            ("du", du), ("dv", dv), ("dT", dT), ("dps", dps))
 
     # Step into the tendency to find WHICH sub-op first hits NaN/Inf.
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         _face_to_cell_u, _face_to_cell_v,
     )
-    from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
         absolute_vorticity_coriolis,
     )
     from legoesm.grids.vertical import (

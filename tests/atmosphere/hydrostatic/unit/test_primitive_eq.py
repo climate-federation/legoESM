@@ -19,7 +19,7 @@ from legoesm.grids.vertical import (
     vertical_advection,
     compute_pressure_velocity,
 )
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationConfig as PrimitiveEquationConfig,
     CDGridPrimitiveEquationModel as PrimitiveEquationModel,
     cdgrid_hydrostatic_tendencies as hydrostatic_tendencies,
@@ -805,7 +805,7 @@ class TestHydrostaticToFV3VectorHalo:
         on the JW BCW IC must preserve cell-centre winds to within ~1
         m/s (vector-aware halo); the pre-fix scalar halo distorted u
         by ~20 m/s out of a 28 m/s field at C24."""
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             hydrostatic_to_fv3, fv3_to_hydrostatic,
         )
         from tests.test_cases.baroclinic_wave import baroclinic_wave_init
@@ -841,7 +841,7 @@ class TestHydrostaticToFV3VectorHalo:
         halo produced |div_v|_max = 5.3e-5 s^-1 (146× too high) and
         drove the BCW blow-up at day 0.35.
         """
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             hydrostatic_to_fv3,
         )
         from legoesm.core.operators_cdgrid import dgrid_to_cgrid, cgrid_divergence
@@ -872,7 +872,7 @@ class TestHydrostaticToFV3VectorHalo:
         right gate: catches a reversion (which gives 1000+ Pa) without
         false-positives on legitimate gravity-wave adjustment.
         """
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
             hydrostatic_to_fv3, fv3_to_hydrostatic,
         )

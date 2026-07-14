@@ -25,7 +25,7 @@ from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.grids.vertical import create_sigma_coordinate, hybrid_from_sigma
 from legoesm.grids.halo import pad_halo_vector
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationConfig as PrimitiveEquationConfig,
     cdgrid_hydrostatic_tendencies as hydrostatic_tendencies,
 )
@@ -433,7 +433,7 @@ class TestHybridHeldSuarezCompatibility:
             pytest.skip("Spectral hybrid Held-Suarez test requires jax_enable_x64")
 
         from legoesm.grids.gaussian import create_gaussian_grid
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             isothermal_rest_state_spectral,
         )
         from legoesm.atmosphere.held_suarez import held_suarez_forcing_spectral

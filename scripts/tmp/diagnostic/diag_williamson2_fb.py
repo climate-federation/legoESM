@@ -14,7 +14,7 @@ import numpy as np
 from legoesm import constants
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
     FV3FBShallowWaterModel,
     FV3EdgeShallowWaterState,
     CDGridShallowWaterConfig,

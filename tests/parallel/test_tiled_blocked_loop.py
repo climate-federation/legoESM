@@ -35,14 +35,14 @@ from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.halo import set_halo_backend
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
 )
 from legoesm.parallel.tiled_production_cdgrid import (
     expand_corners_to_blocks,
     make_tiled_fv3_hydrostatic_step_blocked_2d,
 )
-from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import (
     dedup_tiled_corners,
 )
 
@@ -299,7 +299,7 @@ def test_adapter_moist_loop_kessler_matches_serial():
     from legoesm.atmosphere.kessler_forcing import (
         make_kessler_column_physics_fn, make_kessler_forcing_cube,
     )
-    from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+    from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import (
         _TILED_TRACERS, make_tiled_cc_loop,
     )
 
@@ -363,7 +363,7 @@ def test_adapter_loop_refuses_tracer_state():
     """The loop adapter is dry-only: silently freezing tracers while the
     serial step advances them is a divergence-by-omission (codex BLOCKER)."""
     from legoesm.atmosphere.held_suarez import held_suarez_init
-    from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+    from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import (
         make_tiled_cc_loop,
     )
 
@@ -413,7 +413,7 @@ def test_blocked_step_refuses_q_physics_mismatch():
 def test_adapter_loop_matches_serial_from_same_entry():
     from legoesm.core.operators_cdgrid import center_to_dgrid_vector
     from legoesm.atmosphere.held_suarez import held_suarez_init
-    from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+    from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import (
         make_tiled_cc_loop,
     )
 
@@ -472,7 +472,7 @@ def test_adapter_loop_matches_serial_from_same_entry():
 
 
 def test_adapter_loop_envelope_refusals():
-    from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+    from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import (
         make_tiled_cc_loop,
     )
 

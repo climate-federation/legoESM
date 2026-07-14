@@ -504,7 +504,7 @@ class TestInitialization(unittest.TestCase):
 
     def test_spectral_with_phis(self):
         """isothermal_rest_state_spectral should accept phis."""
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             isothermal_rest_state_spectral,
             spectral_pe_to_grid,
         )

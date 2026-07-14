@@ -26,7 +26,7 @@ import pytest
 from tests.legoesm_paths import legoesm_source_path
 
 
-SRC_PATH = legoesm_source_path("atmosphere/dynamics/primitive_eq_cdgrid.py")
+SRC_PATH = legoesm_source_path("atmosphere/dynamics/gcm/primitive_eq_cdgrid.py")
 
 
 @pytest.fixture(scope="module")

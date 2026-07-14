@@ -7,7 +7,7 @@ periodic direction).
 This file provides the halo-exchange and padded-grid machinery
 together with the per-step driver ``make_latlon_mpi_step``, which is
 fully implemented: it delegates to the existing serial C-grid step in
-:mod:`legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid` via the
+:mod:`legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid` via the
 backend-aware MPI halo path.
 
 Conventions

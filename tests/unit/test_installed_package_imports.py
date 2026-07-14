@@ -24,7 +24,7 @@ fail at parse time, so the original held_suarez-specific narrow guard
 is now structurally enforced. But the underlying anti-pattern —
 production code importing from the ``tests/`` tree at all — is broader
 than held_suarez and is not enforced anywhere else. ``src/legoesm/cli.
-py``, ``src/legoesm/atmosphere/dynamics/spectral_nh.py``, and a number
+py``, ``src/legoesm/atmosphere/dynamics/gcm/spectral_nh.py``, and a number
 of scripts currently exhibit the same pattern for ``williamson``,
 ``baroclinic_wave``, ``dcmip2025``, ``cosine_bell``, ``dcmip_transport``,
 and ``test_williamson2_cdgrid``. Each of those is a latent #188-style
