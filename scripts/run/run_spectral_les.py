@@ -48,10 +48,19 @@ _KAPPA = constants.kappa_von_karman
 
 
 def build(args, dtype):
+    # --sgs-model (smagorinsky|vreman) selects the STATIC sub-closure and is only
+    # consulted when the dynamic LASD closure is OFF (i.e. --static). Now that
+    # dynamic is the default, a non-default static sub-closure requested WITHOUT
+    # --static would be silently ignored (LASD runs instead). Make that an
+    # explicit error rather than a silent no-op (codex review; dispatch-hardening).
+    if not args.static and args.sgs_model != "smagorinsky":
+        raise ValueError(
+            f"--sgs-model {args.sgs_model!r} is a static SGS sub-closure but the "
+            "dynamic LASD closure is active (the default); pass --static to use it.")
     cfg = sl.SpectralLESConfig(
         nx=args.nx, ny=args.ny, nz=args.nz, Lx=args.Lx, Ly=args.Ly, Lz=args.Lz,
         z0=args.z0, c_s=args.cs, wall_damping=True, dealias=True,
-        smagorinsky_dynamic=args.dynamic, nu_floor=args.nu_floor,
+        smagorinsky_dynamic=not args.static, nu_floor=args.nu_floor,
         sgs_model=args.sgs_model, time_scheme=args.time_scheme)
     g = sl.make_grid(cfg, dtype=dtype)
     z = g.z_c
@@ -95,7 +104,7 @@ def profiles(st, g):
     return um, vm, uu, vv, ww, uw, vw
 
 
-def main():
+def make_parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--nx", type=int, default=96)
     p.add_argument("--ny", type=int, default=96)
@@ -110,7 +119,29 @@ def main():
     p.add_argument("--dt", type=float, default=0.4)
     p.add_argument("--hours", type=float, default=1.5)
     p.add_argument("--f32", action="store_true")
-    p.add_argument("--dynamic", action="store_true", help="Bou-Zeid LASD scale-dependent dynamic C_s(x,y,z)")
+    # SGS closure: dynamic LASD is the DEFAULT (consistent with the sibling
+    # run_spectral_sbl.py / run_spectral_cbl.py drivers). The static
+    # constant-coefficient Smagorinsky closure cannot self-transition the
+    # pure-shear neutral/ekman cases from small IC perturbations — it applies
+    # mean-shear-based eddy viscosity to the laminar field and damps the
+    # instabilities that trigger turbulence (the constant-Smagorinsky
+    # deficiency that motivated dynamic models; Germano 1991). Verified: static
+    # SUSTAINS a developed neutral field (warm-start u*_res≈0.13, wvar≈0.10) but
+    # relaminarises it from rest, whereas dynamic LASD self-transitions and
+    # sustains (u*_res≈0.26). The buoyancy-forced gabls1/wangara cases transition
+    # fine under static; only the cold-start pure-shear cases need dynamic.
+    sgs = p.add_mutually_exclusive_group()
+    sgs.add_argument("--dynamic", action="store_true",
+                     help="Bou-Zeid LASD scale-dependent dynamic C_s(x,y,z) — the "
+                          "DEFAULT. Kept for back-compat/explicitness; dynamic is on "
+                          "unless --static is given.")
+    sgs.add_argument("--static", action="store_true",
+                     help="use the static constant-coefficient Smagorinsky closure "
+                          "instead of dynamic LASD. NOTE: static relaminarises the "
+                          "pure-shear neutral/ekman cases from a cold start (it sustains "
+                          "a developed field but cannot self-transition) — use it for "
+                          "warm-started/developed runs, the buoyancy-forced cases, or "
+                          "anisotropic dx<dz grids where LASD destabilises.")
     p.add_argument("--ekman", action="store_true",
                    help="neutral ROTATING Ekman layer: geostrophic wind Ug + "
                         "Coriolis fcor instead of the non-rotating PG channel")
@@ -142,7 +173,11 @@ def main():
     p.add_argument("--case-label", type=str, default="ekman",
                    help="case name stored in the frames (plot title).")
     p.add_argument("--output", type=Path, default=Path("results/spectral_neutral"))
-    args = p.parse_args()
+    return p
+
+
+def main():
+    args = make_parser().parse_args()
     dtype = jnp.float32 if args.f32 else jnp.float64
     args.output.mkdir(parents=True, exist_ok=True)
 
@@ -209,7 +244,7 @@ def main():
     tau = args.Lz / args.ustar                              # eddy turnover [s]
     print(f"[spectral-LES neutral] {args.nx}x{args.ny}x{args.nz} "
           f"L=({args.Lx},{args.Ly},{args.Lz}) m  u*_tar={args.ustar}  "
-          f"{args.time_scheme} sgs={'LASD' if args.dynamic else args.sgs_model}  "
+          f"{args.time_scheme} sgs={'LASD' if not args.static else args.sgs_model}  "
           f"dt={'adaptive cfl='+str(args.cfl) if args.adaptive_dt else args.dt}  "
           f"turnover~{tau:.0f}s  dtype={dtype.__name__}")
     rec = args.record_frames > 0

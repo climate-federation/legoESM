@@ -135,3 +135,87 @@ u\* for gabls1; per-run case-dict copy; strengthened CLI test).
 Spectral (production) unchanged and on-target; compressible failures are the
 documented relaminarisation + acoustic burst; pseudo f32-buoyant NaN is a new
 *characterisation* of a WIP core, not a regression (no prior f32 buoyant baseline).
+
+## 2026-07-14 all-grids GPU re-run — no regression; neutral/ekman confound resolved
+
+Re-ran the full LES (3 cores) + CRM (all NH grids) suite on GPU after PR #1006
+(matrix regrid/validator) merged, to check for regression.
+
+- **PR #1006 (`74fe9c7ea`) touched ZERO LES/CRM/dynamics/physics files** (only
+  the matrix runner + validator + 2 tests) — no merged change *can* regress
+  LES/CRM by construction.
+- **Entire spectral neutral/ekman code path byte-identical since this doc**:
+  production core `spectral_les_plane.py` = R100 rename in the `production_reorg`
+  bucket move; `run_spectral_les.py` untouched; the JAX stack (0.10.0 /
+  jaxlib 0.10.0 / cuda12 plugin 0.10.0) was installed 2026-06-04/05, > 1 month
+  before this doc, unchanged.
+- **CRM** (plane_fd / plane_spectral / cubed_sphere / mpas + rcemip_plane):
+  finite, `mass_drift = 0.0` exact, no blowup, all grids. `rcemip_plane`
+  convects normally (max|w|=0.64, θ′∈[−1.5, 3.5]).
+- **Spectral gabls1 / cbl**: match this doc (u\*≈0.256; σ_w/w\*=0.65).
+
+**Neutral/ekman "laminarization" was a CONFOUND, not a regression — SGS closure
+flag.** This doc's neutral/ekman numbers were produced with the **Bou-Zeid LASD
+dynamic SGS (`--dynamic`)**; the 2026-07-14 first pass mistakenly ran the
+**static-Smagorinsky default** (`--cs 0.25`), which is over-dissipative and
+deterministically laminarizes the resolved field. Controlled 48³ f32 1 h sweep
+(changing only the SGS closure):
+
+| SGS closure | u\*_res | verdict |
+|-------------|---------|---------|
+| static Cs=0.25 (default) | 0.000 | laminar (deterministic across reruns) |
+| static Cs=0.16 | 0.001 | laminar |
+| static Cs=0.25, 6 h | 0.004 | laminar (not a spin-up issue) |
+| **dynamic LASD (`--dynamic`)** — neutral | **0.263** | **sustains, ≈ doc 0.283** |
+| **dynamic LASD (`--dynamic`)** — ekman | **0.279** | **sustains, ≈ doc ~0.28** |
+
+Falsified precision (f32≡f64 laminar for static), grid (48/64/96³), IC-amp
+(0.05→0.40), and duration (1→6 h) as causes — all irrelevant; the lever is
+**static-vs-dynamic SGS**. With the doc's actual `--dynamic` config the neutral
+and ekman resolved stresses reproduce to within run/duration scatter. The
+static default laminarizing is expected physics, documented in the driver's own
+`--cs` help ("the Bou-Zeid LASD dynamic coefficient is the proper fix"), and is
+the known static-Smagorinsky laminar-collapse behaviour, not a new fault.
+**Net: no regression on any core or grid.** Figure:
+`results/spectral_neutral_sweep_2026-07-14.png`.
+
+### Static vs dynamic SGS — closure characterisation + driver-default fix
+
+Followed up on the static-Smagorinsky laminarisation to confirm it is not an
+implementation bug. **Warm-start test** (spin up with dynamic LASD to a
+developed turbulent field, then feed the SAME field through each closure, 48³
+f32): dynamic control u\*_res 0.28; **static Cs=0.16 → 0.149, static Cs=0.25 →
+0.129 — both SUSTAIN** (wvar ≈ 0.096, comparable to dynamic's 0.093). So static
+**sustains developed turbulence**; its only failure is **self-transition from
+small IC perturbations** — the textbook constant-Smagorinsky deficiency (it
+applies mean-shear eddy viscosity to the laminar field and damps the
+instabilities that trigger turbulence; Germano 1991). The static closure
+implementation is correct (Mason 1989 wall damping `l=min(C_s Δ, κz)`, standard
+`ν_t=l²|S|`, strain, stress divergence, MOST wall model all standard).
+
+**{case} × {SGS} matrix** (48³ f32 1 h):
+
+| case | dynamic LASD | static Smagorinsky |
+|------|--------------|--------------------|
+| neutral (pure shear) | u\*_res 0.259 ✅ | 0.000 ❌ laminar (cold-start) |
+| ekman (pure shear) | u\*_res 0.271 ✅ | 0.001 ❌ laminar (cold-start) |
+| gabls1 (stable/buoyant) | u\*=0.254 ✅ | u\*=0.193 ✅ works |
+| wangara (convective) | ww_max 0.518 ✅ | ww_max 0.479 ✅ works |
+
+Dynamic works for all four; static works for the two **buoyancy-forced** cases
+(they self-transition on buoyant instability) and only relaminarises the two
+**pure-shear cold-start** cases — exactly consistent with the warm-start.
+
+**Fix (the real defect was a driver inconsistency, not the closure):**
+`run_spectral_les.py` (neutral/ekman) defaulted to STATIC while its siblings
+`run_spectral_sbl.py`/`run_spectral_cbl.py` default to DYNAMIC — so the
+out-of-box neutral/ekman invocation laminarised. Flipped `run_spectral_les.py`
+to **default to dynamic LASD** (matches siblings + the driver's own `--cs`
+help), added a `--static` opt-out (mutually exclusive with the now-redundant
+`--dynamic`; guards `--sgs-model vreman` against a silent no-op when dynamic is
+active), extracted `make_parser()`, and added `tests/unit/test_run_spectral_les_cli.py`.
+End-to-end verified: bare invocation now `sgs=LASD`, u\*_res 0.263 (was 0.000);
+`--static` still available (u\*_res 0.000 from a cold start, sustains a warm
+start). **Behaviour change:** a bare `run_spectral_les.py` now runs dynamic, not
+static — no non-tmp caller relied on the old default (all docs already pass
+`--dynamic`).
