@@ -2105,7 +2105,11 @@ def test_latlon24_production_variant_pins_polar_filter():
     parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
     args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
     assert args.use_polar_filter is True
-    assert args.dt == 600.0
+    # dt=300 (2026-07-14): dt=600 dies at day ~125 in a deterministic
+    # fast-wave non-finite-winds event (probes 26243424/26: dt=600 restart
+    # re-dies, dt=300 from the same day-124 checkpoint runs 70 clean days).
+    # Return to 600 only if the seeding operator is found and fixed.
+    assert args.dt == 300.0
     assert args.grid_type == "latlon" and args.discretization == "latlon_cgrid"
     assert args.resolution == 24 and args.nlev == 20
     # Physics inherited from the production include (one source of truth),
@@ -2113,11 +2117,15 @@ def test_latlon24_production_variant_pins_polar_filter():
     # re-develops a polar-night temperature runaway that blows the run at day
     # ~47 regardless of every numerics lever, while sbm is stable (95-day soak)
     # and lifts hfls 40->70 (#847).  The cube lane keeps bechtold.
-    # Top sponge is lane-critical too: the hydrostatic latlon dycore has no
-    # other lid braking (McFarlane radiates stress at the top), and the
-    # 2026-07-13 pilot year ran away in the TOP 5 levels (T +24 K, winds
-    # 98->208 m/s, blowup day 128) after this pin was lost in a YAML merge.
-    assert args.sponge_enabled is True
+    # Top sponge (2026-07-14): the EDDY-ONLY DYCORE sponge, not the driver
+    # damp-to-rest sponge — damp-to-rest exerts a Coriolis torque on the
+    # damped zonal-mean flow -> poleward mass drift -> p_s 1134 hPa deaths;
+    # the eddy sponge (dycore default sponge_eddy_only=True) cures the jet
+    # runaway (55 vs 208 m/s) with no mass drift.  A silent flip of any of
+    # these three re-opens a validated failure mode.
+    assert args.sponge_enabled is False
+    assert args.sponge_coeff == pytest.approx(1.157e-4)
+    assert args.sponge_width_m == pytest.approx(17000.0)
     cfg = build_config_from_args(args)
     assert cfg.convection == "sbm" and cfg.gravity_wave_drag == "mcfarlane"
     # UNSET (#929 None sentinel; an explicit 0.0 now means "force legacy

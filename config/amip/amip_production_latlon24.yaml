@@ -9,8 +9,14 @@
 #     point blowup.  The 12-day one-variable A/B convicted filter-off (blowup
 #     day 1 vs COMPLETED 12 d), and the 30-day soak of the fixed config ran
 #     clean past the old day-9/10 wall.
-#   * dt: 600.0 — the filter handles the pole CFL, lifting the pole-cell
-#     auto-clamp (dt 60-145 s -> 600 s, ~10x throughput; 30-day soak clean).
+#   * dt: 300.0 — dt=600 dies at day ~125 in a sudden (<1 day, CFL 0.20 the
+#     day before) non-finite-winds fast-wave event, DETERMINISTICALLY
+#     reproducible from the day-124 checkpoint (2026-07-14 probes 26243424/26:
+#     dt=600 restart re-dies day 125; dt=300 from the SAME checkpoint runs 70
+#     clean days through every previous death day). The polar filter still
+#     lifts the pole-cell auto-clamp (dt 60-145 s floor). The seeding operator
+#     is unlocalized (JAX_DEBUG_NANS stops at the scan boundary; eager mode
+#     cannot trace this stack) — if it is found and fixed, dt may return to 600.
 # Physics/forcing/diagnostics inherit the production set via `include`.
 # Pinned by the production-YAML round-trip test (test_run_amip_cli).
 include: amip_production.yaml
@@ -19,17 +25,19 @@ discretization: latlon_cgrid
 resolution: 24            # n_lat (n_lon = 2*n_lat)
 nlev: 20
 use_polar_filter: true
-dt: 600.0
-# Top sponge (#836 driver-level Rayleigh damping): MANDATORY on this lane.
-# The hydrostatic latlon-cgrid dycore has NO other lid braking (McFarlane GWD
-# deliberately RADIATES stress reaching the top rather than depositing it), so
-# without the sponge wave energy reflects off the rigid ~35 hPa lid and the
-# 2026-07-13 pilot year ran away in the TOP ~5 LEVELS: top-level mean T
-# 209->233 K and top winds 98->208 m/s between days 60-100, blowup day 128
-# (autopsy /scratch/.../pilot1y_ll24). The setting was ON on the pre-#913
-# lane and silently LOST in a YAML merge; pinned here + in the round-trip
-# test so it cannot be dropped again.
-sponge_enabled: true
+dt: 300.0
+# Top sponge — EDDY-ONLY DYCORE sponge (zonal-mean-preserving), NOT the #836
+# driver damp-to-rest sponge. The lane needs lid braking (McFarlane GWD
+# deliberately RADIATES stress reaching the top; the 2026-07-13 pilot year ran
+# away in the top ~5 levels and died day 128 with no sponge at all), but the
+# driver damp-to-rest sponge exerts a Coriolis torque on the damped zonal-mean
+# flow -> poleward mass drift -> p_s 1120-1134 hPa deaths (sweep_ll24_L30 day
+# 142 autopsy). The dycore eddy sponge (sponge_eddy_only=True default, commit
+# c33d06993) damps u - [u]_zonal only: jet runaway cured (55 vs 208 m/s) with
+# no mass drift (validated 2026-07-13/14, incl. the 70-day dt=300 leg).
+sponge_enabled: false     # driver damp-to-rest sponge OFF (mass-drift hazard)
+sponge_coeff: 1.157e-4    # dycore eddy-only sponge: 10/day at the lid
+sponge_width_m: 17000.0   # sponge base ~17 km below the lid
 
 # Convection: override the inherited `bechtold` with `sbm` on THIS lane (#869).
 # A controlled single-variable bisect from the day-45 restart state (conv carry
