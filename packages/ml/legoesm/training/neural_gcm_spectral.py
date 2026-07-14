@@ -137,6 +137,13 @@ class NeuralGCMSpectralConfig(NamedTuple):
     # opts in at a link boundary. Ordering + start_chunk resume are identical to
     # the serial path (see _prefetch_iter).
     chunk_prefetch: bool = False
+    # Data-parallel (#985 item 1): when True AND launched under a multi-rank MPI
+    # job (nproc>1), each chunk's samples are sharded across ranks and gradients
+    # are averaged every step -> ~N x throughput on the 72 h-lead phase's GPU
+    # time.  Off / single-rank -> byte-identical serial path.  This shifts the
+    # effective batch from 1 (serial SGD) to N (one synced update per N samples),
+    # so it is a training-trajectory change, not just a speedup — opt in per run.
+    data_parallel: bool = False
 
     # Data
     n_train_days: int = 365      # Number of daily IC/target pairs
@@ -1937,6 +1944,25 @@ def load_training_data(
 # Training entry point
 # =============================================================================
 
+def _resolve_dp_context(config):
+    """``(dp_on, rank, nproc, comm)`` for the chunked spectral trainer (#985).
+
+    Data-parallel training is active only when ``config.data_parallel`` is set
+    AND a multi-rank MPI launcher yields ``nproc > 1``.  Off / single-rank ->
+    ``(False, 0, 1, None)``: the caller takes the serial fused-step path, which
+    is byte-identical to the pre-#985 loop (the default run is unchanged).
+    ``comm=None`` lets the reductions default to ``MPI.COMM_WORLD``.
+    """
+    if not bool(getattr(config, "data_parallel", False)):
+        return False, 0, 1, None
+    from legoesm.training.data_parallel import mpi_rank_size
+
+    rank, nproc = mpi_rank_size()
+    if nproc <= 1:
+        return False, rank, 1, None
+    return True, rank, nproc, None
+
+
 def _train_spectral_loop(
     model: eqx.Module,
     make_physics_fn,
@@ -2308,62 +2334,69 @@ def _train_spectral_loop(
     else:
         epoch_plan = [(None, None, None)] * n_epochs_total
 
-    def _make_train_step(phase_spec):
-        """Jitted train step for one epoch-plan spec.
+    def _loss_components(m, ic_spectral, target_carry, forcing_base, phase_spec):
+        """Per-sample loss + components for ``phase_spec``.
 
         ``(None, None, None)`` = the default path (chained multi-step or
         legacy single-rollout).  A curriculum spec = single rollout of
-        ``n_steps_phase`` scored against target index ``k_target``.
+        ``n_steps_phase`` scored against target index ``k_target``.  SHARED by
+        the serial fused step and the data-parallel grad-only step, so both run
+        byte-identical physics (nproc==1 DP reproduces serial exactly).
         """
         _, k_target, n_steps_phase = phase_spec
-
-        def _train_step(model, opt_state, ic_spectral, target_carry, forcing_base):
-            def loss_fn(m):
-                physics = make_physics_fn(m, grid)
-                if k_target is not None:
-                    # Curriculum phase: one rollout to the phase lead.
-                    tgt = (target_carry[k_target]
-                           if type(target_carry) is tuple else target_carry)
-                    pred = _rollout_one_segment(
-                        ic_spectral, physics, n_steps_phase, 0.0,
-                        forcing_base=forcing_base,
-                    )
-                    return _spectral_state_loss_components(
-                        pred, tgt, grid, sigma, sigma_full, loss_cfg_train,
-                    )
-                if segment_steps:
-                    state = ic_spectral
-                    total = jnp.float32(0.0)
-                    comp_total = {
-                        "mse": jnp.float32(0.0),
-                        "bias": jnp.float32(0.0),
-                        "crps": jnp.float32(0.0),
-                        "spec_crps": jnp.float32(0.0),
-                    }
-                    t_offset = 0.0
-                    for k, n_seg in enumerate(segment_steps):
-                        state = _rollout_one_segment(
-                            state, physics, n_seg, t_offset,
-                            forcing_base=forcing_base,
-                        )
-                        seg_loss, seg_comp = _spectral_state_loss_components(
-                            state, target_carry[k], grid, sigma,
-                            sigma_full, loss_cfg_train,
-                        )
-                        total = total + ms_weights[k] * seg_loss
-                        for key in comp_total:
-                            comp_total[key] = comp_total[key] + ms_weights[k] * seg_comp[key]
-                        t_offset = t_offset + float(n_seg) * config.dt
-                    inv = 1.0 / ms_weight_sum
-                    return total * inv, {k: v * inv for k, v in comp_total.items()}
-                # Legacy single-step path.
-                pred = _rollout_one_segment(
-                    ic_spectral, physics, n_steps_rollout, 0.0,
+        physics = make_physics_fn(m, grid)
+        if k_target is not None:
+            # Curriculum phase: one rollout to the phase lead.
+            tgt = (target_carry[k_target]
+                   if type(target_carry) is tuple else target_carry)
+            pred = _rollout_one_segment(
+                ic_spectral, physics, n_steps_phase, 0.0,
+                forcing_base=forcing_base,
+            )
+            return _spectral_state_loss_components(
+                pred, tgt, grid, sigma, sigma_full, loss_cfg_train,
+            )
+        if segment_steps:
+            state = ic_spectral
+            total = jnp.float32(0.0)
+            comp_total = {
+                "mse": jnp.float32(0.0),
+                "bias": jnp.float32(0.0),
+                "crps": jnp.float32(0.0),
+                "spec_crps": jnp.float32(0.0),
+            }
+            t_offset = 0.0
+            for k, n_seg in enumerate(segment_steps):
+                state = _rollout_one_segment(
+                    state, physics, n_seg, t_offset,
                     forcing_base=forcing_base,
                 )
-                return _spectral_state_loss_components(
-                    pred, target_carry, grid, sigma,
+                seg_loss, seg_comp = _spectral_state_loss_components(
+                    state, target_carry[k], grid, sigma,
                     sigma_full, loss_cfg_train,
+                )
+                total = total + ms_weights[k] * seg_loss
+                for key in comp_total:
+                    comp_total[key] = comp_total[key] + ms_weights[k] * seg_comp[key]
+                t_offset = t_offset + float(n_seg) * config.dt
+            inv = 1.0 / ms_weight_sum
+            return total * inv, {k: v * inv for k, v in comp_total.items()}
+        # Legacy single-step path.
+        pred = _rollout_one_segment(
+            ic_spectral, physics, n_steps_rollout, 0.0,
+            forcing_base=forcing_base,
+        )
+        return _spectral_state_loss_components(
+            pred, target_carry, grid, sigma,
+            sigma_full, loss_cfg_train,
+        )
+
+    def _make_train_step(phase_spec):
+        """Jitted fused (grad + optax update) train step — the serial path."""
+        def _train_step(model, opt_state, ic_spectral, target_carry, forcing_base):
+            def loss_fn(m):
+                return _loss_components(
+                    m, ic_spectral, target_carry, forcing_base, phase_spec,
                 )
             (loss, components), grads = eqx.filter_value_and_grad(
                 loss_fn, has_aux=True,
@@ -2379,14 +2412,40 @@ def _train_spectral_loop(
 
         return eqx.filter_jit(_train_step)
 
+    def _make_dp_grad_step(phase_spec):
+        """Jitted GRAD-ONLY step for data-parallel training.
+
+        Returns ``(loss, components, grads)`` for THIS rank's sample; the caller
+        averages ``grads`` across ranks (``all_reduce_grad_mean``) BEFORE the
+        optax update, so the cross-rank collective sits between grad and update
+        and the cheap update stays outside JIT (matches the WB DP path).
+        """
+        def _grad_step(model, ic_spectral, target_carry, forcing_base):
+            def loss_fn(m):
+                return _loss_components(
+                    m, ic_spectral, target_carry, forcing_base, phase_spec,
+                )
+            (loss, components), grads = eqx.filter_value_and_grad(
+                loss_fn, has_aux=True,
+            )(model)
+            return loss, components, eqx.filter(grads, eqx.is_array)
+
+        return eqx.filter_jit(_grad_step)
+
     # One jitted step per distinct phase spec (compile once, reuse across
     # that phase's epochs AND across chunks — shapes are constant).
     _step_cache: dict = {}
+    _dp_step_cache: dict = {}
 
     def _train_step_for(spec):
         if spec not in _step_cache:
             _step_cache[spec] = _make_train_step(spec)
         return _step_cache[spec]
+
+    def _dp_grad_step_for(spec):
+        if spec not in _dp_step_cache:
+            _dp_step_cache[spec] = _make_dp_grad_step(spec)
+        return _dp_step_cache[spec]
 
     def _iter_epoch_data(start_chunk=0):
         """Yield (ic_states, target_carries, sample_forcings) chunks.
@@ -2414,6 +2473,25 @@ def _train_spectral_loop(
     early_stop_patience = int(getattr(config, "early_stop_patience", 0) or 0)
     early_stop_min_delta = float(getattr(config, "early_stop_min_delta", 1.0e-3))
 
+    # --- data-parallel context (#985) ----------------------------------------
+    # When config.data_parallel AND a multi-rank MPI launcher is present, N
+    # ranks train the SAME replicated model on DISJOINT shards of each chunk's
+    # samples, averaging gradients every step.  nproc==1 (laptop / no launcher /
+    # flag off) -> serial fused step, byte-identical to the pre-#985 loop.
+    dp_on, dp_rank, dp_nproc, dp_comm = _resolve_dp_context(config)
+    _all_reduce_grad_mean = _global_sum_mpi = _shard_samples = None
+    if dp_on:
+        from legoesm.parallel.reductions import global_sum_mpi as _global_sum_mpi
+        from legoesm.training.data_parallel import (
+            all_reduce_grad_mean as _all_reduce_grad_mean,
+            shard_samples as _shard_samples,
+        )
+        logger.info(
+            f"Data-parallel training: rank {dp_rank}/{dp_nproc}; each chunk's "
+            f"samples sharded across ranks (drop_remainder), gradients averaged "
+            f"per step, checkpoints written by rank 0 only."
+        )
+
     if start_epoch >= n_epochs_total:
         logger.info(
             f"Resume: start_epoch={start_epoch} >= n_epochs={n_epochs_total}; "
@@ -2423,7 +2501,8 @@ def _train_spectral_loop(
 
     for epoch in range(start_epoch, n_epochs_total):
         phase_spec = epoch_plan[epoch]
-        train_step = _train_step_for(phase_spec)
+        train_step = None if dp_on else _train_step_for(phase_spec)
+        dp_grad_step = _dp_grad_step_for(phase_spec) if dp_on else None
         epoch_loss = 0.0
         epoch_components = {"mse": 0.0, "bias": 0.0, "crps": 0.0, "spec_crps": 0.0}
         t0 = time.time()
@@ -2436,16 +2515,50 @@ def _train_spectral_loop(
         chunk_pos = chunk_skip - 1
         for chunk_ics, chunk_targets, chunk_forcings in _iter_epoch_data(chunk_skip):
             chunk_pos += 1  # absolute chunk index within the epoch
-            for chunk_i, (ic, target) in enumerate(
-                    zip(chunk_ics, chunk_targets)):
-                sample_idx += 1
-                model, opt_state, loss, grad_norm, components = train_step(
-                    model, opt_state, ic, target,
-                    chunk_forcings[chunk_i] if chunk_forcings is not None
-                    else None,
+            # Data-parallel: deterministic CONTIGUOUS shard of this chunk's
+            # samples to this rank (drop_remainder keeps ranks balanced so the
+            # per-step gradient allreduce never deadlocks).  The shard depends
+            # only on (rank, nproc, chunk order), all deterministic -> a resume
+            # re-shards identically, so chunk_latest.eqx stays reproducible.
+            if dp_on:
+                _sh = _shard_samples(
+                    list(range(len(chunk_ics))), dp_rank, dp_nproc,
                 )
+                _ics = [chunk_ics[i] for i in _sh]
+                _tgts = [chunk_targets[i] for i in _sh]
+                _forc = ([chunk_forcings[i] for i in _sh]
+                         if chunk_forcings is not None else None)
+            else:
+                _ics, _tgts, _forc = chunk_ics, chunk_targets, chunk_forcings
+
+            for chunk_i, (ic, target) in enumerate(zip(_ics, _tgts)):
+                sample_idx += 1
+                _fb = _forc[chunk_i] if _forc is not None else None
+                if dp_on:
+                    # Local grad on this rank's sample -> average across ranks
+                    # BEFORE the update, so every replica applies the identical
+                    # gradient and stays in sync (no weight broadcast).
+                    loss, components, grads = dp_grad_step(
+                        model, ic, target, _fb,
+                    )
+                    grads = _all_reduce_grad_mean(
+                        grads, dp_nproc, comm=dp_comm,
+                    )
+                    grad_norm = optax.global_norm(grads)
+                    updates, opt_state = optimizer.update(
+                        grads, opt_state, eqx.filter(model, eqx.is_array),
+                    )
+                    model = eqx.apply_updates(model, updates)
+                else:
+                    model, opt_state, loss, grad_norm, components = train_step(
+                        model, opt_state, ic, target, _fb,
+                    )
 
                 # --- NaN / Inf detection (outside JIT, values materialized) ---
+                # ponytail: a rank hitting NaN raises and exits; its peers then
+                # abort at the next allreduce (mpirun kills the job on any rank's
+                # non-zero exit). A NaN-consensus allreduce would only make the
+                # message tidier, not the outcome — skipped.
                 loss_val = float(loss)
                 if jnp.isnan(loss) or jnp.isinf(loss):
                     raise RuntimeError(
@@ -2471,7 +2584,10 @@ def _train_spectral_loop(
             # loses at most one chunk instead of the whole epoch.  The last
             # chunk of epoch e normalises to (e+1, 0).  (No-op on the single
             # in-memory path, whose epoch == one chunk == the per-epoch save.)
-            if chunk_loader is not None:
+            # Rank 0 only under DP: every rank holds the identical replicated
+            # model + optimizer state, so one writer is correct and avoids a
+            # shared-filesystem write race.  All ranks resume by reading it.
+            if chunk_loader is not None and dp_rank == 0:
                 _next_chunk = chunk_pos + 1
                 if _next_chunk >= n_chunks_per_epoch:
                     _save_epoch, _save_chunk = epoch + 1, 0
@@ -2488,11 +2604,32 @@ def _train_spectral_loop(
                 )
 
         n_samples = max(sample_idx + 1, 1)
-        avg_loss = epoch_loss / n_samples
-        avg_components = {k: v / n_samples for k, v in epoch_components.items()}
+        if dp_on:
+            # Global epoch means across ranks (n_samples/epoch_loss are per-rank
+            # local under sharding).  All ranks call this collective in lockstep
+            # — balanced shards guarantee equal per-rank step counts — so it can
+            # never deadlock; the shared avg_loss also keeps any early-stop
+            # decision identical on every rank.
+            _keys = ("mse", "bias", "crps", "spec_crps")
+            _acc = _global_sum_mpi(
+                jnp.asarray(
+                    [epoch_loss] + [epoch_components[k] for k in _keys]
+                    + [float(n_samples)]
+                ),
+                comm=dp_comm,
+            )
+            _accl = [float(x) for x in _acc]
+            _gn = max(_accl[-1], 1.0)
+            avg_loss = _accl[0] / _gn
+            avg_components = {k: _accl[1 + i] / _gn for i, k in enumerate(_keys)}
+        else:
+            avg_loss = epoch_loss / n_samples
+            avg_components = {k: v / n_samples for k, v in epoch_components.items()}
         loss_history.append(avg_loss)
 
-        if epoch % config.log_every == 0 or epoch == n_epochs_total - 1:
+        if (epoch % config.log_every == 0 or epoch == n_epochs_total - 1) and (
+            dp_rank == 0
+        ):
             elapsed = time.time() - t0
             _lead_tag = (f" [lead={phase_spec[0]}h]"
                          if phase_spec[0] is not None else "")
@@ -2507,13 +2644,15 @@ def _train_spectral_loop(
 
         # Save a per-epoch checkpoint so the chained-resubmit driver
         # (run_aimip.py --resume) can pick up from epoch+1 if SLURM
-        # walltime kills the job mid-training.
+        # walltime kills the job mid-training.  Rank 0 only under DP (identical
+        # replicated model on every rank).
         from legoesm.ml.training import save_checkpoint
         ckpt_dir = Path(config.checkpoint_dir)
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-        ckpt_path = ckpt_dir / f"epoch_{epoch:04d}.eqx"
-        save_checkpoint(model, ckpt_path)
-        logger.info(f"Saved checkpoint: {ckpt_path}")
+        if dp_rank == 0:
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            ckpt_path = ckpt_dir / f"epoch_{epoch:04d}.eqx"
+            save_checkpoint(model, ckpt_path)
+            logger.info(f"Saved checkpoint: {ckpt_path}")
 
         # AIMIP-style early stopping.  Stop when the rolling loss has
         # not improved by more than ``early_stop_min_delta`` for

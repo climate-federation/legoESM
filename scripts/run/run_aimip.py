@@ -202,6 +202,7 @@ def _build_spectral_config(cfg: dict[str, Any]):
         rollout_curriculum=curriculum,
         chunk_windows=int(cfg.get("aimip_chunk_windows", 0)),
         chunk_prefetch=bool(cfg.get("aimip_chunk_prefetch", False)),
+        data_parallel=bool(cfg.get("aimip_data_parallel", False)),
         spatial_lr_scale=float(cfg.get("aimip_spatial_lr_scale", 1.0)),
         rad_update_interval=int(cfg.get("aimip_rad_update_interval", 1)),
         loss_config=loss_config,
