@@ -63,13 +63,28 @@ class NemoState(NamedTuple):
     rhd: np.ndarray | None   # in-situ density anomaly (rho-rho0)/rho0, if dumped
 
 
+def _check_hls(nn_hls: int) -> None:
+    # a[h:-h] silently returns an empty slice for h=0, so a no-halo file would
+    # have its whole interior chopped. Require an explicit halo.
+    if nn_hls < 1:
+        raise ValueError(
+            f"nn_hls must be >= 1 (NEMO always writes a >=1-cell halo); got "
+            f"{nn_hls}. Pass the file's actual halo width."
+        )
+
+
 def _strip_halo_2d(a: np.ndarray, nn_hls: int) -> np.ndarray:
+    _check_hls(nn_hls)
     h = nn_hls
-    return np.asarray(a, dtype=np.float64)[h:-h, h:-h]
+    a = np.asarray(a, dtype=np.float64)
+    out = a[h:-h, h:-h]
+    assert out.shape == (a.shape[0] - 2 * h, a.shape[1] - 2 * h)
+    return out
 
 
 def _to_latlon_lev(a: np.ndarray, nn_hls: int) -> np.ndarray:
     """``(z, y, x)`` with halo -> ``(y-h, x-h, z)`` interior, vertical last."""
+    _check_hls(nn_hls)
     a = np.asarray(a, dtype=np.float64)
     h = nn_hls
     return np.moveaxis(a[:, h:-h, h:-h], 0, -1)
