@@ -13,11 +13,15 @@ salt/freshwater applicator.  These tests pin the glue contract:
 (b) one ``step_sea_ice`` call on a tiny synthetic MPAS (Voronoi) grid returns a
     TileResponse with finite ``salt_flux`` / ``freshwater_flux`` /
     ``ocean_heat_extraction``;
-(c) the routing helper puts ``salt_flux`` on the OceanSurfaceForcing AND folds
-    ``ocean_heat_extraction`` into ``q_net``, and the ocean core's EXISTING
-    salt application (``salt_flux_salinity_tendency`` — the literal function
-    ``ocean_pe_mpas`` calls) moves SSS in the expected direction;
-(d) the --prognostic-sea-ice mutual-exclusion / prerequisite validation.
+(c) the runner partitions via the ONE shared mask-aware blend
+    (``legoesm.coupler.ocean_forcing.blend_omip_ice_ocean_forcing``: open
+    heat/SW/stress/evap x f_open = 1 - A + each ice term once — full partition
+    suite in ``tests/unit/test_omip_sea_ice_coupling.py``), and the ocean
+    core's EXISTING salt application (``salt_flux_salinity_tendency`` — the
+    literal function ``ocean_pe_mpas`` calls) moves SSS in the expected
+    direction;
+(d) the --prognostic-sea-ice mutual-exclusion / prerequisite validation;
+(e) --runoff/--isf never double-count the ice-shelf melt channel (sornfisf).
 
 Fast + synthetic; run under JAX_ENABLE_X64=1.
 """
@@ -223,8 +227,12 @@ def test_surface_currents_mpas_reconstructs_cell_centres(_mpas_mesh):
 
 
 # ===========================================================================
-# (c) routing -> OceanSurfaceForcing.salt_flux + q_net; ocean core's EXISTING
-#     salt application moves SSS in the expected direction.
+# (c) the runner partitions via the ONE shared blend; the corrected stress /
+#     evap partition (f_open-scaled open forcing + ice terms once) replaces
+#     the old full-atmospheric-stress-plus-ice-stress routing.  The FULL
+#     partition suite (spec tests 1-6) lives in
+#     tests/unit/test_omip_sea_ice_coupling.py — here we pin only the runner-
+#     facing defect: open stress/evap must scale by f_open = 1 - A.
 # ===========================================================================
 def _zero_tile(shape):
     z = jnp.zeros(shape)
@@ -235,10 +243,16 @@ def _zero_tile(shape):
         ocean_stress_x=z, ocean_stress_y=z, surface_mass_flux=z, salt_flux=z)
 
 
-def test_route_ice_response_sets_salt_flux_and_qnet_and_ice_fw():
+def test_blend_scales_open_stress_and_evap_by_open_fraction():
+    """The shared blend the runner calls must NOT deliver the full open-water
+    atmospheric stress/evaporation under ice (the reviewed defect): open
+    channels scale by f_open = 1 - A, the ice stress enters once weighted by
+    A (atmospheric sign convention), and each exchange channel enters once."""
+    from legoesm.coupler.ocean_forcing import blend_omip_ice_ocean_forcing
+
     shape = (10,)
-    q0 = jnp.full(shape, -30.0)               # pre-existing net heat [W/m2]
-    tau0_x = jnp.full(shape, 0.08)            # pre-existing CORE-II wind stress
+    q0 = jnp.full(shape, -30.0)               # open-water net heat [W/m2]
+    tau0_x = jnp.full(shape, 0.08)            # full-cell CORE-II wind stress
     tau0_y = jnp.full(shape, -0.03)
     sf = OceanSurfaceForcing(
         tau_x=tau0_x, tau_y=tau0_y, q_net=q0, sw_down=jnp.full(shape, 80.0))
@@ -256,65 +270,35 @@ def test_route_ice_response_sets_salt_flux_and_qnet_and_ice_fw():
         salt_flux=salt, ocean_heat_extraction=heat, freshwater_flux=icefw,
         ocean_stress_x=sx, ocean_stress_y=sy)
 
-    ocean_mask = jnp.ones(shape)              # all ocean
-    conc = jnp.full(shape, 0.7)               # 70% ice cover
+    A = 0.7
+    fw2, sf2 = blend_omip_ice_ocean_forcing(
+        ice_resp=resp, ice_concentration=jnp.full(shape, A),
+        open_ocean_sf=sf, open_ocean_fw=fw, ocean_mask=jnp.ones(shape))
 
-    sf2, fw2 = R._route_ice_response_to_ocean(sf, fw, resp, ocean_mask, conc)
-
-    # salt_flux placed directly on the surface forcing (the in-core channel).
+    f_open = 1.0 - A
+    # salt_flux on the surface forcing (the in-core real-salt channel), once.
     np.testing.assert_allclose(np.asarray(sf2.salt_flux), np.asarray(salt))
-    # q_net REDUCED by ocean_heat_extraction (positive = ocean loses heat).
+    # q_net: open part x f_open MINUS the basal heat extraction.
     np.testing.assert_allclose(np.asarray(sf2.q_net),
-                               np.asarray(q0) - np.asarray(heat))
-    # tau gets the ice back-reaction ADDED: tau += -conc*ocean_stress (so the
-    # core's -tau consumer applies +conc*stress force on the ocean).
-    np.testing.assert_allclose(
-        np.asarray(sf2.tau_x),
-        np.asarray(tau0_x) - 0.7 * np.asarray(sx))
-    np.testing.assert_allclose(
-        np.asarray(sf2.tau_y),
-        np.asarray(tau0_y) - 0.7 * np.asarray(sy))
-    # ice melt freshwater enters the EXISTING ice_fw channel (not P-E).
-    np.testing.assert_allclose(np.asarray(fw2.ice_fw), np.asarray(icefw))
+                               f_open * np.asarray(q0) - np.asarray(heat))
+    # Stress: NOT full tau0 + ice stress — f_open*tau0 - A*ocean_stress.
+    np.testing.assert_allclose(np.asarray(sf2.tau_x),
+                               f_open * np.asarray(tau0_x) - A * np.asarray(sx))
+    np.testing.assert_allclose(np.asarray(sf2.tau_y),
+                               f_open * np.asarray(tau0_y) - A * np.asarray(sy))
+    # Evaporation acts on the open fraction only; P stays full-cell.
+    np.testing.assert_allclose(np.asarray(fw2.evap),
+                               f_open * np.asarray(fw.evap))
     np.testing.assert_allclose(np.asarray(fw2.precip), np.asarray(fw.precip))
-    np.testing.assert_allclose(np.asarray(fw2.evap), np.asarray(fw.evap))
-    # net freshwater now includes the ice melt (P - E + R + ice_fw).
+    # Ice melt freshwater enters the EXISTING ice_fw channel (not P-E).
+    np.testing.assert_allclose(np.asarray(fw2.ice_fw), np.asarray(icefw))
+    # net freshwater includes the ice melt (P - E_open + R + ice_fw).
     np.testing.assert_allclose(
         np.asarray(net_freshwater_flux(fw2)),
-        np.asarray(fw.precip - fw.evap + fw.runoff + icefw))
-
-
-def test_route_ice_response_masks_land_cells():
-    """Land/dry cells (ocean_mask=0) get ZERO ice->ocean flux on every channel —
-    a spurious land-ice budget never reaches the ocean salt/heat/FW/tau."""
-    shape = (6,)
-    sf = OceanSurfaceForcing(
-        tau_x=jnp.zeros(shape), tau_y=jnp.zeros(shape),
-        q_net=jnp.full(shape, -10.0), sw_down=jnp.zeros(shape))
-    fw = FreshwaterForcing(
-        precip=jnp.zeros(shape), evap=jnp.zeros(shape), runoff=jnp.zeros(shape),
-        ice_fw=jnp.zeros(shape), restoring=jnp.zeros(shape))
-    resp = _zero_tile(shape)._replace(
-        salt_flux=jnp.full(shape, 5e-6),
-        ocean_heat_extraction=jnp.full(shape, 20.0),
-        freshwater_flux=jnp.full(shape, 1e-5),
-        ocean_stress_x=jnp.full(shape, 0.03),
-        ocean_stress_y=jnp.full(shape, 0.03))
-    # First half ocean, second half land.
-    mask = jnp.asarray([1.0, 1.0, 1.0, 0.0, 0.0, 0.0])
-    conc = jnp.full(shape, 0.5)
-    sf2, fw2 = R._route_ice_response_to_ocean(sf, fw, resp, mask, conc)
-    land = np.asarray(mask) < 0.5
-    # All ice->ocean channels are zero on land.
-    assert np.all(np.asarray(sf2.salt_flux)[land] == 0.0)
-    np.testing.assert_allclose(np.asarray(sf2.q_net)[land], -10.0)  # unchanged
-    assert np.all(np.asarray(sf2.tau_x)[land] == 0.0)
-    assert np.all(np.asarray(sf2.tau_y)[land] == 0.0)
-    assert np.all(np.asarray(fw2.ice_fw)[land] == 0.0)
-    # Ocean cells DO receive the flux.
-    ocean = ~land
-    assert np.all(np.asarray(sf2.salt_flux)[ocean] != 0.0)
-    assert np.all(np.asarray(fw2.ice_fw)[ocean] != 0.0)
+        np.asarray(fw.precip - f_open * fw.evap + fw.runoff + icefw))
+    # KPP buoyancy channel mirrors the same physical net (restoring is zero).
+    np.testing.assert_allclose(np.asarray(sf2.freshwater),
+                               np.asarray(net_freshwater_flux(fw2)))
 
 
 def test_core_salt_application_raises_sss_for_positive_salt_flux():
@@ -422,25 +406,36 @@ def test_validation_block_matches_runner_source():
     assert "cannot run under --scan-block" in src
 
 
-def test_runner_attenuates_open_water_flux_under_live_ice():
-    """Under --prognostic-sea-ice the runner must pass the LIVE ice concentration
-    + under_ice=True to compute_omip2_surface_forcing so ice-covered cells do not
-    receive the full open-water q_net/SW (on top of the ice basal extraction).
-    Source-introspection guard (drift): the wiring must set under_ice for the
-    prognostic path and feed the live concentration."""
+def test_runner_partitions_via_shared_blend_not_attenuation():
+    """Under --prognostic-sea-ice the runner builds the UNMASKED full-cell
+    open-ocean bulk forcing (NO under-ice attenuation inside
+    compute_omip2_surface_forcing — that would double-suppress once the blend
+    scales by f_open) and partitions with the ONE shared mask-aware blend
+    using the POST-step concentration + the ocean/land mask.  Source-
+    introspection guard (drift): the prognostic path must call the blend and
+    must NOT re-enable the prescribed-ice attenuation override."""
     import inspect
     src = inspect.getsource(R.main)
-    assert "_under_ice = True" in src
-    assert "ice_albedo=_ice_alb" in src
-    assert "under_ice=_under_ice" in src
+    # The shared partitioning is wired with mask + post-step concentration.
+    assert "blend_omip_ice_ocean_forcing(" in src
+    assert "ocean_mask=state.land_mask.data" in src
+    # The old prognostic-path attenuation override is gone: under_ice is only
+    # ever the --ice-thermo prescribed surrogate, never forced True for the
+    # live ice.
+    assert "_under_ice = True" not in src
+    assert "_under_ice = args.ice_thermo" in src
+    # KPP/vmix freshwater-buoyancy contract: the physical net freshwater is
+    # placed on the surface forcing for the boundary-layer closures.
+    assert "physical_net_freshwater_flux" in src
 
 
 def test_under_ice_heat_attenuation_reduces_qnet():
-    """The EXISTING under-ice mechanism the wiring leverages
-    (_ice_surface_heat, under_ice=True) cuts under-ice SW + suppresses open-ocean
-    turbulent+LW by (1-conc) -> ice-covered cells get LESS ocean heating than
-    full open water.  This is the function the runner now drives with the live
-    prognostic concentration."""
+    """The under-ice mechanism of the PRESCRIBED-siconc surrogate
+    (--ice-thermo; _ice_surface_heat, under_ice=True) cuts under-ice SW +
+    suppresses open-ocean turbulent+LW by (1-conc) -> ice-covered cells get
+    LESS ocean heating than full open water.  The prognostic-ice path does
+    NOT use it (it partitions via the shared blend instead); this pins the
+    legacy surrogate only."""
     from legoesm.ocean.coupler.omip2_applicator import _ice_surface_heat
     shape = (5,)
     sw_down = np.full(shape, 150.0)
@@ -458,3 +453,36 @@ def test_under_ice_heat_attenuation_reduces_qnet():
                                   under_ice=True, tau_ice_sw=0.03)
     # only the small transmitted SW remains; far below open water.
     assert np.all(q_full < 0.2 * q_open)
+
+
+# ===========================================================================
+# (e) --runoff/--isf ice-shelf-melt double count (sornfisf).
+# ===========================================================================
+def test_runoff_channels_exclude_sornfisf_when_isf_active():
+    """--runoff sums rivers + ice-shelf melt + icebergs; --isf applies the
+    SAME sornfisf channel separately as a depth-banded melt.  With both flags
+    the loader must DROP sornfisf from the surface-runoff sum — the meltwater
+    enters exactly once."""
+    full = R.runoff_source_channels(exclude_isf=False)
+    assert full == ("sorunoff", "sornfisf", "Icb_flux")
+    excl = R.runoff_source_channels(exclude_isf=True)
+    assert "sornfisf" not in excl
+    # Rivers + icebergs are NEVER dropped (only the ISF channel moves).
+    assert excl == ("sorunoff", "Icb_flux")
+
+
+def test_runner_wires_isf_exclusion_into_runoff_loader():
+    """Source-introspection guard (drift): the --runoff call site must pass
+    exclude_isf=args.isf so the exclusion can never silently detach from the
+    --isf flag, and the loader must select channels via the tested helper.
+    The provenance guard must also be present: excluding _RUNOFF_NC's
+    sornfisf while --isf applies a DIFFERENT file is a silent dataset
+    substitution and must warn loudly."""
+    import inspect
+    src = inspect.getsource(R.main)
+    assert "exclude_isf=args.isf" in src
+    loader_src = inspect.getsource(R.load_runoff_monthly)
+    assert "runoff_source_channels(exclude_isf)" in loader_src
+    # Provenance guard (codex r2): resolve-compare the two forcing paths.
+    assert "Path(args.isf_forcing_file).resolve()" in src
+    assert "Path(_RUNOFF_NC).resolve()" in src

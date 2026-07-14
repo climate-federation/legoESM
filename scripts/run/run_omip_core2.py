@@ -1412,12 +1412,30 @@ def _area_conservative_scale(field, cell_area, wet_mask, target_integral):
     return field
 
 
+def runoff_source_channels(exclude_isf: bool) -> tuple:
+    """NEMO Dai-Trenberth runoff-file channels summed by :func:`load_runoff_monthly`.
+
+    The full total is rivers (``sorunoff``) + ice-shelf melt (``sornfisf``) +
+    icebergs (``Icb_flux``).  ``--isf`` applies ``sornfisf`` SEPARATELY from
+    the SAME file family as a depth-banded prescribed melt
+    (``load_isf_spe_forcing`` + ``apply_isf_prescribed_melt_step``), so with
+    ``exclude_isf=True`` the runoff loader drops ``sornfisf`` — running
+    ``--runoff --isf`` together must never inject the ice-shelf meltwater
+    twice (once at the surface via runoff AND once at depth via ISF)."""
+    if exclude_isf:
+        return ("sorunoff", "Icb_flux")
+    return ("sorunoff", "sornfisf", "Icb_flux")
+
+
 def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
-                        land_mask=None, spread_passes=2):
+                        land_mask=None, spread_passes=2, exclude_isf=False):
     """Load NEMO's Dai-Trenberth runoff (the SAME file NEMO ORCA1 uses) and regrid
     each climatological month onto the model grid. Total freshwater = rivers
     (sorunoff) + ice-shelf melt (sornfisf) + icebergs (Icb_flux) [kg/m²/s, +INTO
-    ocean]. Returns (12, *lat2d_deg.shape). Ungates the SSS comparison (runoff=0
+    ocean]. ``exclude_isf=True`` (set when --isf delivers sornfisf separately as
+    a depth-banded melt) drops the sornfisf channel from the sum — see
+    :func:`runoff_source_channels` (no double count). Returns
+    (12, *lat2d_deg.shape). Ungates the SSS comparison (runoff=0
     made SSS only informational). Curvilinear -> model grid via the same IDW used
     for bathy; eORCA1 nav_lat/lon are the runoff file's own coords."""
     import xarray as xr
@@ -1427,7 +1445,8 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
     src_lat = _squeeze2d(ds["nav_lat"].values)
     src_lon = _squeeze2d(ds["nav_lon"].values)
     total = np.zeros_like(np.asarray(ds["sorunoff"].values), dtype=np.float64)
-    for v in ("sorunoff", "sornfisf", "Icb_flux"):
+    _channels = runoff_source_channels(exclude_isf)
+    for v in _channels:
         if v in ds:
             total = total + np.nan_to_num(np.asarray(ds[v].values, dtype=np.float64))
     # SOURCE = the DISCHARGE cells only (annual runoff > 0): a coastal river-mouth
@@ -1499,7 +1518,10 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
     _wet = ocean if ocean is not None else np.ones(out.shape[1:], dtype=bool)
     _src_Sv = float((total.mean(axis=0) * A_src).sum()) / 1.0e9
     _tgt_Sv = float((out.mean(axis=0) * A_tgt * _wet).sum()) / 1.0e9
-    print(f"[setup] runoff: Dai-Trenberth (river+isf+icb) from {int(src_valid.sum())} "
+    _chan_tag = "+".join(_channels) + (
+        " (sornfisf EXCLUDED: --isf applies it separately at depth)"
+        if exclude_isf else "")
+    print(f"[setup] runoff: Dai-Trenberth [{_chan_tag}] from {int(src_valid.sum())} "
           f"discharge cells, 12 months, {spread_passes} spread passes, "
           f"max {out.max():.2e} kg/m^2/s | conserved total src={_src_Sv:.4f} Sv "
           f"-> target={_tgt_Sv:.4f} Sv (area-weighted, grid-independent)")
@@ -1820,9 +1842,11 @@ def _grid_lat2d_deg(grid, grid_type):
 # model — instead of the freeze-floor / prescribed-siconc / relaxation
 # surrogates).  Pure integration glue: it samples the CORE-II forcing with the
 # SAME sampler the momentum/heat path uses (sample_omip2_forcing), feeds the
-# canonical step_sea_ice, and routes the returned TileResponse into the
-# EXISTING OceanSurfaceForcing (salt_flux + q_net) and FreshwaterForcing
-# (ice_fw) channels.  No new sea-ice physics; no new ocean salt/FW applicator.
+# canonical step_sea_ice, and partitions the full-cell open-ocean forcing
+# against the returned TileResponse with the ONE shared mask-aware blend
+# (legoesm.coupler.ocean_forcing.blend_omip_ice_ocean_forcing: open heat/SW/
+# stress/evap x f_open = 1 - A, ice basal-heat/brine-salt/melt-freshwater/
+# stress each once).  No new sea-ice physics; no new ocean salt/FW applicator.
 # ===========================================================================
 
 def _ice_state_spatial_shape(grid, app_grid_type):
@@ -1978,65 +2002,6 @@ def _build_atm_to_surface_core2(forc, ramp=1.0):
         cos_zenith=zero, co2_ppmv=jnp.asarray(0.0),
         has_radiation=jnp.asarray(1.0), has_precipitation=jnp.asarray(1.0),
     )
-
-
-def _route_ice_response_to_ocean(sf, fw, resp, ocean_mask, ice_conc):
-    """Route a sea-ice :class:`TileResponse` into the EXISTING ocean forcing
-    channels (NO new applicator).  Returns ``(sf, fw)`` updated.
-
-    * ``resp.salt_flux`` [kg(salt)/m2/s, + INTO ocean] -> ``sf.salt_flux``.  The
-      ocean cores apply it in-core (ocean_pe_mpas.py salt_flux_salinity_tendency
-      / physics/surface_forcing/external.py) under scheme in {none, external}.
-    * ``resp.ocean_heat_extraction`` [W/m2, + = ocean LOSES heat] -> SUBTRACT
-      from ``sf.q_net`` (q_net is + INTO ocean), so basal-melt + lead-freeze
-      latent draw cools the ocean column.
-    * ``resp.freshwater_flux`` [kg/m2/s, + INTO ocean] -> ``fw.ice_fw`` (the ice
-      melt/freeze freshwater the FreshwaterForcing channel already carries;
-      ``net_freshwater_flux`` sums P - E + R + ice_fw, so it is NOT double-counted
-      with P - E).
-    * ``resp.ocean_stress_x/y`` [Pa, + = force ON the ocean] -> ADD into
-      ``sf.tau_x/tau_y`` weighted by the ice concentration.  Per the EXISTING F11
-      convention (``coupler.ocean_forcing``: ``tau = -f_ice*ocean_stress``), the
-      core applies ``-tau`` as the ocean reaction, so a per-cell ``-conc*stress``
-      delivers ``+conc*stress`` force on the ocean — the ice's drag back-reaction
-      ADDED to the open-water CORE-II wind stress already on ``sf``.
-
-    ``ocean_mask`` (1=ocean, 0=land) zeroes every ice->ocean flux on land/dry
-    columns so spurious land-ice budgets never reach the ocean (the cores mask
-    too, but masking here keeps the diagnostics + tau honest).  All masking uses
-    EXISTING fields; the salt is applied ONLY via ``sf.salt_flux`` (the in-core
-    path) and NEVER additionally as a manual state update — single application,
-    no double count.
-
-    The ice freshwater is delivered ONLY via ``fw.ice_fw`` (NOT also
-    ``sf.freshwater``): on the latlon/MPAS faithful path the runner passes
-    ``model.step(..., freshwater=fw)`` and leaves ``sf.freshwater`` unset on
-    purpose — the ``external`` surface-forcing scheme applies ``sf.freshwater``
-    AND ``sf.salt_flux`` as virtual+real salt, so additionally setting
-    ``sf.freshwater`` here would DOUBLE-APPLY the ice freshwater (once in-core via
-    ``fw``, once via ``external.py``).  This matches the EXISTING P-E-R routing
-    (``fw``-only on latlon/MPAS), so the KPP buoyancy treatment of ice freshwater
-    is identical to that of P-E-R — consistent, not a regression.
-    """
-    m = jnp.asarray(ocean_mask, dtype=sf.q_net.dtype)
-    conc = jnp.asarray(ice_conc, dtype=sf.q_net.dtype)
-    salt = jnp.asarray(resp.salt_flux, dtype=sf.q_net.dtype) * m
-    heat = jnp.asarray(resp.ocean_heat_extraction, dtype=sf.q_net.dtype) * m
-    # Ice back-reaction stress (atmosphere convention so the core's -tau
-    # consumer applies +conc*stress force on the ocean), masked + area-weighted.
-    tau_x_ice = -conc * jnp.asarray(resp.ocean_stress_x, dtype=sf.q_net.dtype) * m
-    tau_y_ice = -conc * jnp.asarray(resp.ocean_stress_y, dtype=sf.q_net.dtype) * m
-    sf = sf._replace(
-        salt_flux=salt,
-        q_net=sf.q_net - heat,
-        tau_x=(sf.tau_x + tau_x_ice) if sf.tau_x is not None else tau_x_ice,
-        tau_y=(sf.tau_y + tau_y_ice) if sf.tau_y is not None else tau_y_ice,
-    )
-    if fw is not None:
-        ice_fw = jnp.asarray(resp.freshwater_flux, dtype=fw.precip.dtype) \
-            * jnp.asarray(ocean_mask, dtype=fw.precip.dtype)
-        fw = fw._replace(ice_fw=ice_fw)
-    return sf, fw
 
 
 def _ice_global_stats(ice_state, grid, ocean_mask):
@@ -3670,9 +3635,29 @@ def main() -> int:
                 f"(got {args.runoff_spread_passes})")
         _spread = int(args.runoff_spread_passes) if args.runoff_spread_passes is not None \
             else (8 if app_grid_type == "mpas" else 2)
+        # --runoff + --isf: the Dai-Trenberth total normally includes the
+        # ice-shelf melt channel (sornfisf), which --isf applies SEPARATELY
+        # as a depth-banded prescribed melt from the same NEMO forcing
+        # family.  Exclude it from the surface-runoff sum so the meltwater
+        # enters exactly once (the campaign sbatches run both flags).
+        if args.isf and args.isf_forcing_file:
+            # Provenance guard (codex r2): the sornfisf exclusion below
+            # assumes --isf re-applies the SAME dataset's ice-shelf melt at
+            # depth.  A different (layout-valid) --isf-forcing-file swaps in
+            # another dataset's ISF component — legitimate for byte-copies of
+            # the Depoorter file in other trees, but never silently.
+            if (Path(args.isf_forcing_file).resolve()
+                    != Path(_RUNOFF_NC).resolve()):
+                warnings.warn(
+                    f"--runoff excludes sornfisf from {_RUNOFF_NC} while "
+                    f"--isf applies {args.isf_forcing_file}: paths differ — "
+                    "the ice-shelf meltwater now comes ENTIRELY from the ISF "
+                    "file. Verify both carry the same Depoorter dataset.",
+                    RuntimeWarning)
         runoff_monthly = load_runoff_monthly(
             grid, app_grid_type, lat2d, lon2d, args.mesh,
-            land_mask=np.asarray(state.land_mask.data), spread_passes=_spread)
+            land_mask=np.asarray(state.land_mask.data), spread_passes=_spread,
+            exclude_isf=args.isf)
     if ((args.runoff_dep_max is not None or args.runoff_rnf_max is not None)
             and not args.runoff_depth_nemo_ini):
         raise SystemExit(
@@ -3797,6 +3782,9 @@ def main() -> int:
             grid_supports_ice_dynamics,
         )
         from legoesm.ice.config import BrineConfig
+        # The ONE shared, mask-aware ice/open-ocean flux partitioning (also
+        # exercised by run_omip.py's slab-ice path + its unit suite).
+        from legoesm.coupler.ocean_forcing import blend_omip_ice_ocean_forcing
         # Free-drift fallback if the grid lacks strain-rate/transport operators
         # (NOT 'none', which yields no drift/export).
         _ice_dyn = args.prognostic_ice_dynamics
@@ -4149,26 +4137,19 @@ def main() -> int:
         # --sss-restore is set), so the albedo is gated on --ice-albedo explicitly
         # to keep an SSS-only run's heat budget unchanged (codex HIGH).
         _sic = _siconc_at_step(siconc_clim, step, dt, siconc_monthly)
-        # Open-water surface-flux attenuation under sea ice.  Two paths feed the
-        # EXISTING under-ice mechanism (_ice_surface_heat: cut under-ice SW to
-        # tau_ice_sw, suppress open-ocean turbulent+LW by (1-conc)):
-        #  * --ice-thermo  -> the PRESCRIBED NEMO siconc surrogate (legacy).
-        #  * --prognostic-sea-ice -> the LIVE (ocean-masked) prognostic ice
-        #    concentration (beginning-of-step), so ice-covered cells do NOT also
-        #    receive the full open-water q_net/SW on top of the ice tile's basal/
-        #    lead heat extraction (codex MED: would otherwise double-heat under
-        #    ice).  The ice tile's ocean_heat_extraction is then added in the
-        #    routing below -> open-water-fraction flux + ice basal draw, the
-        #    physically-correct split.
+        # Open-water surface-flux attenuation under sea ice:
+        #  * --ice-thermo -> the PRESCRIBED NEMO siconc surrogate (legacy) feeds
+        #    the EXISTING under-ice mechanism (_ice_surface_heat: cut under-ice
+        #    SW to tau_ice_sw, suppress open-ocean turbulent+LW by (1-conc)).
+        #  * --prognostic-sea-ice -> NO attenuation here.  The runner builds the
+        #    UNMASKED full-cell open-ocean bulk forcing and the shared
+        #    partitioning (blend_omip_ice_ocean_forcing, below) scales heat /
+        #    SW / stress / evaporation by f_open = 1 - A ONCE, using the
+        #    POST-step ice concentration — attenuating here too would apply the
+        #    open-water suppression twice (the codex-flagged double count in
+        #    reverse), and the stress/evap channels would still be missed.
         _ice_alb = _sic if (args.ice_albedo or args.ice_thermo) else None
         _under_ice = args.ice_thermo
-        if ice_config is not None:
-            _lc0 = ice_state.concentration.data
-            if _lc0.ndim > np.asarray(state.land_mask.data).ndim:
-                _lc0 = jnp.sum(_lc0, axis=-1)
-            _ice_alb = jnp.clip(
-                _lc0 * jnp.asarray(state.land_mask.data, _lc0.dtype), 0.0, 1.0)
-            _under_ice = True
         # NEMO ln_dm2dc window for THIS step: NEMO zlo = (nsec_day - dt/2)/rday,
         # zup = zlo + dt/rday (nn_fsbc-equivalent = 1: forcing rebuilt every
         # step here).  Perpetual 365-day calendar, day-of-year 1-based.
@@ -4221,11 +4202,14 @@ def main() -> int:
               if runoff_monthly is not None else None)
         _want_fw = args.emp_freshwater or (_R is not None)
         # Prognostic sea ice: step the REAL model on the SAME CORE-II forcing
-        # (sampled with the SAME sampler the heat/momentum path uses), then route
-        # its brine-salt / melt-freshwater / ocean-heat response into the
-        # EXISTING surface_forcing (salt_flux, q_net) + freshwater (ice_fw)
-        # channels.  Carry the new ice state.  (Validated host-loop only; the cube
-        # path is rejected upstream, so this only runs in the else branch below.)
+        # (sampled with the SAME sampler the heat/momentum path uses), then
+        # partition the UNMASKED full-cell open-ocean forcing against the ice
+        # tile with the ONE shared blend (blend_omip_ice_ocean_forcing): open
+        # heat/SW/stress/evap scale by f_open = 1 - A (POST-step concentration,
+        # ocean-masked), and the tile's brine-salt / melt-freshwater / basal-
+        # heat / ice-stress each enter exactly once.  Carry the new ice state.
+        # (Validated host-loop only; the cube path is rejected upstream, so
+        # this only runs in the else branch below.)
         ice_resp = None
         if ice_config is not None:
             from legoesm.ocean.coupler import sample_omip2_forcing
@@ -4266,8 +4250,36 @@ def main() -> int:
                 _ice_conc = ice_state.concentration.data
                 if _ice_conc.ndim > np.asarray(state.land_mask.data).ndim:
                     _ice_conc = jnp.sum(_ice_conc, axis=-1)  # multi-cat (n/a here)
-                sf, fw = _route_ice_response_to_ocean(
-                    sf, fw, ice_resp, state.land_mask.data, _ice_conc)
+                # ONE shared, mask-aware partitioning (coupler.ocean_forcing).
+                # POST-step concentration for ALL four open-water channels;
+                # land cells (land_mask=0) receive no ice->ocean forcing.
+                fw, sf = blend_omip_ice_ocean_forcing(
+                    ice_resp=ice_resp, ice_concentration=_ice_conc,
+                    open_ocean_sf=sf, open_ocean_fw=fw,
+                    ocean_mask=state.land_mask.data)
+            # KPP/vmix freshwater-buoyancy contract (direct OMIP forcing,
+            # latlon/tripole/MPAS): OceanSurfaceForcing.freshwater is the
+            # BUOYANCY-ONLY channel — consumed exclusively by the vertical-
+            # mixing closures (vertical_mixing/{integration,k_profiles,
+            # mpas_integration}.py).  No core on this path applies it as a
+            # mass/salt source: the sole mass consumer (physics/surface_
+            # forcing/external.py, the CUBED-SPHERE physics pipeline) never
+            # runs here — the lat-lon C-grid build REJECTS scheme='external'
+            # outright, and the OMIP MPAS build's scheme='external' is the
+            # SEPARATE mpas_physics.py block, which deposits tau/q_net (+SW)
+            # only and by contract never reads sf.freshwater (its freshwater
+            # is "delivered separately through the step(freshwater=) arg";
+            # the real salt is the in-core ocean_pe_mpas source).  The
+            # PHYSICAL freshwater mass (P - E + R + ice) is applied exactly
+            # ONCE via model.step(freshwater=fw) (virtual salt + eta source);
+            # the numerical SSS-restoring flux is EXCLUDED from the buoyancy
+            # signal (it is a relaxation, not a physical buoyancy flux — and
+            # this runner applies restoring as a post-step host update
+            # anyway).  The ice blend above populates the same channel from
+            # the same formula; this covers the ice-free runs too.
+            if fw is not None:
+                from legoesm.ocean.freshwater import physical_net_freshwater_flux
+                sf = sf._replace(freshwater=physical_net_freshwater_flux(fw))
             if app_grid_type == "mpas":
                 # MPASOceanModel.step has no t_seconds (the dm2dc diurnal-SW
                 # window is the only consumer and --dm2dc is gated to

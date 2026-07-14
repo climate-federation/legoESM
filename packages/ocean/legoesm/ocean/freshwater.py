@@ -93,12 +93,30 @@ def net_freshwater_flux(fw: FreshwaterForcing) -> jnp.ndarray:
     jax.Array, shape (nCells,)
         Net freshwater flux [kg/m²/s], positive into ocean.
     """
-    base = fw.precip - fw.evap + fw.runoff + fw.ice_fw
+    base = physical_net_freshwater_flux(fw)
     # ``restoring is None`` is a Python (trace-time) check — safe
     # under JIT because the field is structural metadata.
     if fw.restoring is None:
         return base
     return base + fw.restoring
+
+
+def physical_net_freshwater_flux(fw: FreshwaterForcing) -> jnp.ndarray:
+    """PHYSICAL net freshwater flux into the ocean [kg/m²/s]:
+
+        F_phys = P - E + R + M   (precip - evap + runoff + ice melt/freeze)
+
+    EXCLUDING the numerical ``restoring`` channel (the SSS-restoring virtual
+    flux is a relaxation toward climatology, not a physical surface buoyancy
+    flux).  This is the KPP/vmix surface-BUOYANCY contract for the direct
+    OMIP-forced paths: ``OceanSurfaceForcing.freshwater`` carries this signal
+    for the boundary-layer closures (``vertical_mixing/{integration,
+    k_profiles,mpas_integration}.py``) while the freshwater MASS is applied
+    exactly once via ``model.step(freshwater=fw)`` (virtual salt + eta).
+    Also the flux whose area-mean :func:`normalized_virtual_salt_flux`
+    removes (restoring is a local relaxation and must not be globally
+    redistributed)."""
+    return fw.precip - fw.evap + fw.runoff + fw.ice_fw
 
 
 def freshwater_eta_tendency(fw: FreshwaterForcing, rho_0: float) -> jnp.ndarray:
@@ -270,8 +288,7 @@ def normalized_virtual_salt_flux(
     MPI/SPMD-correct over OWNED cells; ``None`` keeps the bit-identical
     single-rank local sum (see :func:`normalize_freshwater_net`).
     """
-    F_phys = (freshwater.precip - freshwater.evap
-              + freshwater.runoff + freshwater.ice_fw)
+    F_phys = physical_net_freshwater_flux(freshwater)
     wet = mask * (h_top > 1.0e-3).astype(mask.dtype)
     F_phys = normalize_freshwater_net(F_phys, area, wet, owned_mask=owned_mask)
     restoring = getattr(freshwater, "restoring", None)

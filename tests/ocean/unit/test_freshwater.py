@@ -17,6 +17,7 @@ from legoesm.ocean.freshwater import (
     FreshwaterForcing,
     zero_freshwater,
     net_freshwater_flux,
+    physical_net_freshwater_flux,
     freshwater_eta_tendency,
     virtual_salt_flux,
     virtual_salt_flux_from_net,
@@ -115,6 +116,24 @@ class TestFreshwaterForcing:
         )
         F = net_freshwater_flux(fw)
         assert jnp.all(F < 0)  # net loss of freshwater
+
+    def test_physical_net_excludes_restoring(self):
+        """physical_net_freshwater_flux (the KPP/vmix buoyancy contract):
+        P - E + R + M, EXCLUDING the numerical SSS-restoring channel —
+        net_freshwater_flux minus exactly the restoring term."""
+        n = 5
+        fw = FreshwaterForcing(
+            precip=jnp.full(n, 3e-5), evap=jnp.full(n, 1e-5),
+            runoff=jnp.full(n, 0.5e-5), ice_fw=jnp.full(n, 0.5e-5),
+            restoring=jnp.full(n, 2e-5),
+        )
+        F_phys = physical_net_freshwater_flux(fw)
+        assert jnp.allclose(F_phys, 3e-5)                    # P - E + R + M
+        assert jnp.allclose(net_freshwater_flux(fw) - fw.restoring, F_phys)
+        # Without restoring the two nets agree.
+        fw0 = fw._replace(restoring=jnp.zeros(n))
+        assert jnp.allclose(physical_net_freshwater_flux(fw0),
+                            net_freshwater_flux(fw0))
 
 
 # ============================================================================

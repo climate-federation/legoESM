@@ -178,6 +178,12 @@ class NEMOMatchTripoleRecipeConfig:
 
     # freshwater
     freshwater_closure: str = "virtual_salt_flux"
+    # OMIP global freshwater normalization: remove the area-mean of the
+    # physical P-E+R+ice flux so global salt is conserved under the CORE-II
+    # net-imbalanced forcing (matches the MPAS card + run_omip.py's lat-lon
+    # bathy branch; previously not exposed here, so tripole silently kept the
+    # LatLonCGridOceanConfig default False).
+    normalize_freshwater: bool = True
 
     # GM/Redi (mesoscale eddy parameterization)
     gm_redi: bool = True
@@ -328,6 +334,7 @@ def nemo_match_tripole_model_config(
         bottom_drag_bbl_thickness=cfg.bottom_drag_bbl_thickness,
         bottom_drag_bg_velocity=cfg.bottom_drag_bg_velocity,
         freshwater_closure=cfg.freshwater_closure,
+        normalize_freshwater=cfg.normalize_freshwater,
         gm_redi=_nemo_match_gm_redi(cfg),
         physics=physics,
     )

@@ -181,6 +181,10 @@ _FROZEN_TRIPOLE_DYCORE = {
     "bottom_drag_bbl_thickness": 100.0,
     "bottom_drag_bg_velocity": 0.1,
     "freshwater_closure": "virtual_salt_flux",
+    # OMIP requires global freshwater normalization (salt conservation under
+    # the net-imbalanced CORE-II P-E+R): the tripole card must enable it like
+    # the MPAS card — regression for the silently-False default gap.
+    "normalize_freshwater": True,
 }
 
 # The shared GM/Redi block both proven configs use (frozen, #500).
