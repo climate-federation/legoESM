@@ -23,6 +23,7 @@ verbatim ``fv_grid_tools``/``fv_grid_utils`` extraction):
 """
 from __future__ import annotations
 
+import os
 import pathlib
 
 import numpy as np
@@ -180,6 +181,105 @@ class TestCDGridExactMetrics:
 # 3. Dispatch: no approximate fallback on the FV3-native path; legacy
 #    equiangular still takes exactly the legacy builder
 # ---------------------------------------------------------------------------
+class TestRemapIndependence:
+    def test_remap_table_pinned_to_derived_literals(self):
+        # Breaks the shared-table circularity (codex P2): the production
+        # PERM/ROT constants are pinned to the values derived independently
+        # from the phase-1 old-layout invariance analysis.  A regression in
+        # the production table now fails HERE even though the factory test
+        # remaps oracle and builder through the same table.
+        assert _GNOMONIC_ED_FACE_PERM == (0, 1, 3, 4, 2, 5)
+        assert _GNOMONIC_ED_FACE_ROT == (0, 0, 3, 3, 1, 0)
+
+    def test_remapped_oracle_faces_land_on_create_faces(self):
+        # Independent orientation check: the remapped ORACLE agrid centres
+        # must lie on the same cube face as create's EQUIANGULAR layout
+        # (which shares no ED remap code).  Face-mean separation between the
+        # two layouts is well under half a face width when the mapping is
+        # right, and ~a full face width when any slot/rotation is wrong.
+        d = np.load(_FIXTURE)
+        lon_o = _remap_square(d["agrid_lon_c8"])
+        lat_o = _remap_square(d["agrid_lat_c8"])
+        g_eq = create_cubed_sphere(8, dtype=np.float64)
+        lon_e, lat_e = np.asarray(g_eq.lon), np.asarray(g_eq.lat)
+
+        def mean_xyz(lon, lat):
+            v = np.stack([np.cos(lat) * np.cos(lon),
+                          np.cos(lat) * np.sin(lon),
+                          np.sin(lat)], -1).reshape(6, -1, 3).mean(axis=1)
+            return v / np.linalg.norm(v, axis=-1, keepdims=True)
+
+        vo, ve = mean_xyz(lon_o, lat_o), mean_xyz(lon_e, lat_e)
+        sep = np.arccos(np.clip(np.sum(vo * ve, axis=-1), -1, 1))
+        assert sep.max() < 0.35, f"face-slot mismatch: {np.degrees(sep)}"
+        # rotation pin: the [0,0] corner cell of each remapped face must be
+        # the corner nearest the equiangular layout's own [0,0] corner cell.
+        for F in range(6):
+            po = np.array([lon_o[F, 0, 0], lat_o[F, 0, 0]])
+            corners = {
+                (0, 0): (lon_e[F, 0, 0], lat_e[F, 0, 0]),
+                (0, 1): (lon_e[F, 0, -1], lat_e[F, 0, -1]),
+                (1, 0): (lon_e[F, -1, 0], lat_e[F, -1, 0]),
+                (1, 1): (lon_e[F, -1, -1], lat_e[F, -1, -1]),
+            }
+
+            def gcd(a, b):
+                return np.arccos(np.clip(
+                    np.sin(a[1]) * np.sin(b[1])
+                    + np.cos(a[1]) * np.cos(b[1]) * np.cos(a[0] - b[0]),
+                    -1, 1))
+
+            best = min(corners, key=lambda k: gcd(po, corners[k]))
+            assert best == (0, 0), f"slot {F} rotated: [0,0] nearest {best}"
+
+
+class TestFV3NativeGuards:
+    def test_fp32_grid_construction_fails_closed(self):
+        # codex P1: without x64 the ED grid is generated in fp32 — seam
+        # nodes stop being bit-equal and 'exact' metrics would be a lie.
+        # Must raise, never fall back to chord metrics.  Run in a clean
+        # subprocess so this file's module-scope x64 enable can't mask it.
+        import subprocess
+        import sys
+
+        code = (
+            "import jax\n"
+            "import numpy as np\n"
+            "from legoesm.grids.cubed_sphere import create_cubed_sphere\n"
+            "from legoesm.grids.cubed_sphere_cdgrid import "
+            "create_cubed_sphere_cdgrid\n"
+            "g = create_cubed_sphere(4, gnomonic='ed')\n"
+            "try:\n"
+            "    create_cubed_sphere_cdgrid(g)\n"
+            "except ValueError as e:\n"
+            "    assert 'float64' in str(e), e\n"
+            "    print('FAILED_CLOSED_OK')\n"
+            "else:\n"
+            "    raise SystemExit('fp32 ED cdgrid did NOT fail closed')\n"
+        )
+        env = dict(os.environ)
+        env.pop("JAX_ENABLE_X64", None)
+        env["JAX_PLATFORMS"] = "cpu"
+        out = subprocess.run(
+            [sys.executable, "-c", code], env=env,
+            capture_output=True, text=True, timeout=600)
+        assert "FAILED_CLOSED_OK" in out.stdout, (out.stdout, out.stderr)
+
+    def test_duogrid_global_cube_gets_same_global_metrics(self):
+        # legoESM's bounded_domain flag is the duogrid OPERATOR shim, not
+        # FV3's regional/nested flag — a global duogrid'd ED cube must get
+        # byte-identical global FV3 metrics.
+        g_plain = create_cubed_sphere(8, dtype=np.float64, gnomonic="ed")
+        g_duo = create_cubed_sphere(
+            8, dtype=np.float64, gnomonic="ed", use_duogrid=True)
+        cd_plain = create_cubed_sphere_cdgrid(g_plain, metric_dtype=np.float64)
+        cd_duo = create_cubed_sphere_cdgrid(g_duo, metric_dtype=np.float64)
+        assert np.array_equal(np.asarray(cd_plain.area_corner),
+                              np.asarray(cd_duo.area_corner))
+        assert np.array_equal(np.asarray(cd_plain.dxc),
+                              np.asarray(cd_duo.dxc))
+
+
 class TestNoApproximateFallback:
     def test_ed_never_calls_chord_builder(self, monkeypatch):
         import legoesm.grids.cubed_sphere_cdgrid as cdg

@@ -214,8 +214,12 @@ def _fill_halos(grid6: np.ndarray, agrid6: np.ndarray):
     """1-deep cross-face halo lines for grid nodes and agrid centres.
 
     Returns ``gridh`` of shape (6, npx+2, npx+2, 2) and ``agridh`` of shape
-    (6, n+2, n+2, 2) with interiors at [1:-1, 1:-1]; diagonal halo entries
-    hold a poison value (never read by the replicated FV3 formulas).
+    (6, n+2, n+2, 2) with interiors at [1:-1, 1:-1].  Diagonal halo entries
+    hold a poison value: the vectorized area_c step-1 quad sweep DOES read
+    them at the four outermost B-nodes, but every one of those nodes is
+    overwritten by the corner-triangle and then the W/E/S/N edge blocks
+    before the field is returned, so poison never reaches an output (same
+    garbage-then-overwrite pattern as FV3's own fill_ghost big_number use).
     """
     npx = grid6.shape[1]
     n = npx - 1

@@ -720,6 +720,16 @@ def create_cubed_sphere_cdgrid(
         # built in FV3 face numbering and remapped to create's layout.  The
         # legacy chord/supergrid approximation below is NEVER used on this
         # path (guard test monkeypatches it to raise).
+        #
+        # These are the GLOBAL-cube FV3 metrics (fv_grid_tools non-bounded
+        # branch).  legoESM's `base.bounded_domain` is deliberately NOT
+        # consulted here: that flag is the iter-865b OPERATOR-dispatch shim
+        # (duogrid handles its own edges), whereas upstream bounded_domain
+        # means regional/nested (fv_arrays.F90:1512) — a global cube with
+        # duogrid still takes FV3's global metric branch.  A true regional
+        # FV3 bounded metric builder does not exist on this path; single-face
+        # panels inherit the pre-existing slice semantics of
+        # create_cubed_sphere_panel (same as equiangular panels).
         import numpy as _np
 
         from legoesm.grids.cubed_sphere import make_fv3_native_grid
@@ -728,6 +738,19 @@ def create_cubed_sphere_cdgrid(
         )
 
         _lon6, _lat6 = make_fv3_native_grid(n, grid_type=0)
+        if jnp.asarray(_lon6).dtype != jnp.float64:
+            # fp32 grid generation leaves ~4e-8 residue at the cube seams:
+            # the seam nodes are no longer bit-equal across faces, the
+            # geometric halo matching cannot (and should not) succeed, and
+            # "exact FV3 metrics" from fp32 coordinates would be false
+            # advertising.  Fail closed — never fall back to the chord
+            # approximation.  (metric_dtype only controls STORAGE; the
+            # construction itself must be float64.)
+            raise ValueError(
+                "FV3-native (ED) C/D metrics require float64 grid "
+                "construction: enable x64 (JAX_ENABLE_X64=1 or "
+                "jax.config.update('jax_enable_x64', True)) before building "
+                "the grid. Refusing to fall back to approximate metrics.")
         _m = compute_fv3_native_metrics(
             _np.asarray(_lon6), _np.asarray(_lat6), radius=radius)
         area_c_sg, dxc_sg, dyc_sg, dxa_sg, dya_sg = (
