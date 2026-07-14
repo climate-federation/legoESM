@@ -88,6 +88,27 @@ def test_cwd_humification_flag_flows_to_config():
     assert cfg.land.carbon.cwd_humification_eff == 0.15
 
 
+def test_arctic_productivity_flags_flow_to_config():
+    """The opt-in NSC-gate + cold-deciduous-dormancy flags flow to CarbonConfig;
+    default off (byte-identical production)."""
+    cfg = build_config_from_args(_parse_args([
+        "--lat", "60.0",
+        "--nsc-gated-respiration", "--cold-deciduous-dormancy", "--cold-deciduous",
+        "--nsc-ref-labile-frac", "0.03", "--r-maint-floor-frac", "0.15",
+        "--freeze-dormancy-threshold-k", "271.0"]))
+    cc = cfg.land.carbon
+    assert cc.nsc_gated_respiration is True
+    assert cc.cold_deciduous_dormancy is True
+    assert cc.cold_deciduous is True
+    assert cc.nsc_ref_labile_frac == 0.03
+    assert cc.r_maint_floor_frac == 0.15
+    assert cc.freeze_dormancy_threshold_K == 271.0
+    d = build_config_from_args(_parse_args(["--lat", "60.0"])).land.carbon
+    assert d.nsc_gated_respiration is False
+    assert d.cold_deciduous_dormancy is False
+    assert d.cold_deciduous is False
+
+
 def test_carbon_q10_het_flag_flows_to_config():
     """--carbon-q10-het flows to CarbonConfig.Q10_het_exp."""
     cfg = build_config_from_args(

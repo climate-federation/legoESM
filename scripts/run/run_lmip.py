@@ -208,6 +208,12 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
             woody=args.carbon_woody,
             cwd_humification_eff=args.cwd_humification_eff,
             Q10_het_exp=args.carbon_q10_het,
+            nsc_gated_respiration=args.nsc_gated_respiration,
+            nsc_ref_labile_frac=args.nsc_ref_labile_frac,
+            r_maint_floor_frac=args.r_maint_floor_frac,
+            cold_deciduous_dormancy=args.cold_deciduous_dormancy,
+            cold_deciduous=args.cold_deciduous,
+            freeze_dormancy_threshold_K=args.freeze_dormancy_threshold_k,
         ),
     )
     # Sub-grid elevation-band snow (opt-in): for an offline column, the sub-grid
@@ -626,6 +632,38 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Soil heterotrophic-decomposition temperature "
                         "sensitivity exp(Q10_het_exp*(T-T_ref)); higher = "
                         "faster warm-soil SOM turnover (Q10~2.5 at 0.09).")
+    # --- High-latitude productivity rescue (opt-in; carbon_cycle gates) ---
+    p.add_argument("--nsc-gated-respiration",
+                   action=argparse.BooleanOptionalAction,
+                   default=CarbonConfig().nsc_gated_respiration,
+                   help="Throttle maintenance respiration as the labile reserve "
+                        "depletes (Atkin & Tjoelker 2003), breaking the boreal/"
+                        "tundra death spiral. Default off (byte-identical).")
+    p.add_argument("--nsc-ref-labile-frac", type=float,
+                   default=CarbonConfig().nsc_ref_labile_frac,
+                   help="Labile/NSC as a fraction of live biomass at which "
+                        "R_maint is unthrottled (C_lab_ref = this*(C_fol+C_root+"
+                        "C_wood)); the NSC gate engages below it.")
+    p.add_argument("--r-maint-floor-frac", type=float,
+                   default=CarbonConfig().r_maint_floor_frac,
+                   help="Basal fraction of R_maint retained at full NSC "
+                        "depletion (the f_nsc floor).")
+    p.add_argument("--cold-deciduous-dormancy",
+                   action=argparse.BooleanOptionalAction,
+                   default=CarbonConfig().cold_deciduous_dormancy,
+                   help="Enable cold-deciduous freeze dormancy: zero foliar GPP "
+                        "and foliar R_maint below the freeze threshold for "
+                        "cold-deciduous PFTs (larch leaf-drop). Default off.")
+    p.add_argument("--cold-deciduous",
+                   action=argparse.BooleanOptionalAction,
+                   default=CarbonConfig().cold_deciduous,
+                   help="Mark this column's PFT as cold-deciduous (the per-PFT "
+                        "trait the dormancy gate scopes on; set automatically "
+                        "from is_cold_deciduous in the global-IC build).")
+    p.add_argument("--freeze-dormancy-threshold-k", type=float,
+                   default=CarbonConfig().freeze_dormancy_threshold_K,
+                   help="Air temperature [K] below which a cold-deciduous PFT "
+                        "enters winter dormancy (~0 degC).")
     p.add_argument("--carbon-spinup", default="none",
                    choices=("none", "semi_analytic"),
                    help="Soil-carbon spin-up mode after the transient run. "
