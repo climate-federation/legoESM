@@ -33,7 +33,7 @@ from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl  # noqa: E4
 from legoesm.atmosphere.dynamics.les.spectral_les_moist import (  # noqa: E402
     make_anelastic_reference, make_les_microphysics_fn)
 from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig  # noqa: E402
-from legoesm.atmosphere.sam_case_forcing import (  # noqa: E402
+from legoesm.atmosphere.forcing.sam_case_forcing import (  # noqa: E402
     read_sam_snd, read_sam_lsf, read_sam_sfc, surface_at_day)
 
 _FCOR = 0.376e-4

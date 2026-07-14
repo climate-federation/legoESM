@@ -2,7 +2,7 @@
 
 Stage 4 of ``docs/COMPARE_REANALYSIS.md`` (gap #3, **assembly** half): turn the
 large-scale state extracted from a worst-performing GCM column into a *steady*
-(snapshot) :class:`~legoesm.atmosphere.scm_forcing.SCMForcing` that drives the
+(snapshot) :class:`~legoesm.atmosphere.forcing.scm.scm_forcing.SCMForcing` that drives the
 standalone LES exactly like that column's environment, so any LES↔GCM
 discrepancy attributes to the physics/closure given the same large-scale state.
 
@@ -21,7 +21,7 @@ Reuse (CLAUDE.md — no re-derived numerics):
   (hydrostatic ``w = -ω/(ρg)`` with virtual-temperature density).
 * Coriolis ``f_c = 2Ω sinφ`` via
   :func:`legoesm.grids.cubed_sphere.coriolis_parameter_fv3`.
-* ``SCMForcing`` schema + :func:`legoesm.atmosphere.scm_forcing.validate_forcing`.
+* ``SCMForcing`` schema + :func:`legoesm.atmosphere.forcing.scm.scm_forcing.validate_forcing`.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.atmosphere.physics._shared import diagnose_grid_w_from_omega
-from legoesm.atmosphere.scm_forcing import (
+from legoesm.atmosphere.forcing.scm.scm_forcing import (
     ProfileFn,
     ScalarFn,
     SCMForcing,

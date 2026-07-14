@@ -5,7 +5,7 @@ SAM drives a CRM case from three ASCII files in ``CASES/<NAME>/`` (parsed by
 plane CRM can run the SAME deep-convection cases.  All parsing + interpolation
 is host-side NumPy (it runs once at setup), returning plain arrays the driver
 converts to JAX and feeds to the D3 large-scale-forcing operator
-(:mod:`legoesm.atmosphere.dynamics.plane_large_scale_forcing`).
+(:mod:`legoesm.atmosphere.forcing.plane_large_scale_forcing`).
 
 File formats
 ------------

@@ -189,7 +189,7 @@ def test_segment_single_device_matches_serial_loop():
 def test_segment_with_held_suarez_matches_sequential():
     """The production physics envelope (stateless Held-Suarez) threads through
     the compiled scan identically to the per-step path."""
-    from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_latlon
     mesh = _mesh()
     seg_model, c0 = _model_and_state()
     seq_model, _ = _model_and_state()

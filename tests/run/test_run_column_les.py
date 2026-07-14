@@ -14,7 +14,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from legoesm.atmosphere.column_forcing import ColumnLargeScaleState
+from legoesm.atmosphere.forcing.idealized.column_forcing import ColumnLargeScaleState
 from legoesm.atmosphere.dynamics.les.column_les import (
     ColumnLESConfig,
     ColumnLESSetup,
@@ -280,7 +280,7 @@ def test_surface_kinematic_flux_tendency_helper():
     import jax
     import jax.numpy as jnp
     import numpy as np
-    from legoesm.atmosphere.dynamics.plane_large_scale_forcing import (
+    from legoesm.atmosphere.forcing.plane_large_scale_forcing import (
         surface_kinematic_flux_tendency,
     )
     from legoesm.grids.vertical import create_stretched_height_coordinate
@@ -307,7 +307,7 @@ def test_surface_flux_tendency_column_budget():
     correct boundary SOURCE (it is NOT internally conservative; it injects the surface
     flux's worth of heat/moisture, no more, no less, and only at the surface cell)."""
     import numpy as np
-    from legoesm.atmosphere.dynamics.plane_large_scale_forcing import (
+    from legoesm.atmosphere.forcing.plane_large_scale_forcing import (
         surface_kinematic_flux_tendency,
     )
     from legoesm.grids.vertical import create_stretched_height_coordinate
@@ -331,7 +331,7 @@ def test_build_setup_applies_prescribed_surface_fluxes():
     import jax.numpy as jnp
     import numpy as np
     from legoesm.atmosphere.dynamics.les.compressible_euler_plane import make_rest_state
-    from legoesm.atmosphere.dynamics.plane_large_scale_forcing import (
+    from legoesm.atmosphere.forcing.plane_large_scale_forcing import (
         surface_kinematic_flux_tendency,
     )
 

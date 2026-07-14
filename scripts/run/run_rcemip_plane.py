@@ -493,7 +493,7 @@ def make_rcemip_physics(
     a configurable interval.
 
     ``ls_forcing_physics`` (optional): a plane physics_fn from
-    :func:`legoesm.atmosphere.dynamics.plane_large_scale_forcing
+    :func:`legoesm.atmosphere.forcing.plane_large_scale_forcing
     .make_plane_ls_forcing_physics` adding SAM-style large-scale forcing
     (subsidence + advective tendencies + nudging). ``None`` (the RCE
     default) leaves the column free-running.

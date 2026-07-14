@@ -17,7 +17,7 @@ from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
     hydrostatic_to_cgrid, cgrid_to_hydrostatic)
-from legoesm.atmosphere.held_suarez import (
+from legoesm.atmosphere.forcing.idealized.held_suarez import (
     held_suarez_init_latlon, held_suarez_forcing_latlon)
 
 

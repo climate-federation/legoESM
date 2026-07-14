@@ -16,7 +16,7 @@ from legoesm.grids.voronoi import create_voronoi_mesh, reconstruct_cell_velocity
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
     MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
-from legoesm.atmosphere.held_suarez import (
+from legoesm.atmosphere.forcing.idealized.held_suarez import (
     held_suarez_init_mpas, held_suarez_forcing_mpas)
 
 

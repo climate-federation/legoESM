@@ -339,7 +339,7 @@ class TestLatLonPE:
             CGridLatLonPrimitiveEquationConfig,
             hydrostatic_to_cgrid,
         )
-        from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
 
         n_lat, n_lon, nlev = 8, 16, 5
         grid = create_latlon_grid(n_lat, n_lon)

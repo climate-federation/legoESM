@@ -404,11 +404,11 @@ class TestHybridHeldSuarezCompatibility:
     """Hybrid coordinates should work with Held-Suarez forcing on all grids."""
 
     def test_cubed_and_latlon_hybrid_forcing_finite(self):
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing,
             held_suarez_init,
         )
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing_latlon,
             held_suarez_init_latlon,
         )
@@ -436,7 +436,7 @@ class TestHybridHeldSuarezCompatibility:
         from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             isothermal_rest_state_spectral,
         )
-        from legoesm.atmosphere.held_suarez import held_suarez_forcing_spectral
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_spectral
 
         sigma = create_sigma_coordinate(4)
         hybrid = hybrid_from_sigma(sigma)

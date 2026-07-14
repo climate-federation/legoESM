@@ -719,7 +719,7 @@ class TestLatLonPoleCFL:
     def test_clamped_model_runs_stable(self):
         """Multi-step stability with factory-clamped parameters."""
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
         grid = create_latlon_grid(16)
         sigma = _make_sigma(5)
         config = ExperimentConfig(

@@ -14,7 +14,7 @@ import os
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.sam_case_forcing import (
+from legoesm.atmosphere.forcing.sam_case_forcing import (
     extend_sounding_to_top,
     interp_forcing_to_levels,
     interp_sounding_to_levels,
@@ -279,7 +279,7 @@ _GRD = """ 25.0 1 50.0
 
 
 def test_read_sam_grd_uniform(tmp_path):
-    from legoesm.atmosphere.sam_case_forcing import read_sam_grd
+    from legoesm.atmosphere.forcing.sam_case_forcing import read_sam_grd
     grd = read_sam_grd(_write(tmp_path, "grd", _GRD))
     assert grd.z_full_bottom_up.shape == (4,)
     np.testing.assert_allclose(grd.z_full_bottom_up, [25.0, 75.0, 125.0, 175.0])
@@ -293,7 +293,7 @@ def test_read_sam_grd_uniform(tmp_path):
 
 
 def test_read_sam_grd_rejects_nonmonotone(tmp_path):
-    from legoesm.atmosphere.sam_case_forcing import read_sam_grd
+    from legoesm.atmosphere.forcing.sam_case_forcing import read_sam_grd
     bad = " 75.0 1 50.0\n 25.0 2 50.0\n"   # decreasing scalar levels
     with pytest.raises(ValueError, match="strictly increasing"):
         read_sam_grd(_write(tmp_path, "grd_bad", bad))
@@ -331,7 +331,7 @@ def test_real_gate_grd_reproduces_sam_grid():
     the deep-convection layer (5-17 km) — the profile the geometric stretch
     cannot match (codex VGRID-B)."""
     import jax.numpy as jnp
-    from legoesm.atmosphere.sam_case_forcing import read_sam_grd
+    from legoesm.atmosphere.forcing.sam_case_forcing import read_sam_grd
     from legoesm.grids.vertical import create_height_coordinate_from_z_half
     grd = read_sam_grd(os.path.join(_GSAM, "grd"))
     assert grd.z_full_bottom_up.shape[0] == 266
@@ -362,7 +362,7 @@ _RAD = """ p[mb] or z(m)   (dt/dt)rad [K/s]
 
 
 def test_read_sam_rad(tmp_path):
-    from legoesm.atmosphere.sam_case_forcing import read_sam_rad
+    from legoesm.atmosphere.forcing.sam_case_forcing import read_sam_rad
     rad = read_sam_rad(_write(tmp_path, "rad", _RAD))
     assert rad.days.shape == (2,)
     assert rad.dTdt_rad.shape == (2, 3)
@@ -371,7 +371,7 @@ def test_read_sam_rad(tmp_path):
 
 
 def test_interp_rad_to_levels(tmp_path):
-    from legoesm.atmosphere.sam_case_forcing import (
+    from legoesm.atmosphere.forcing.sam_case_forcing import (
         read_sam_rad, interp_rad_to_levels)
     rad = read_sam_rad(_write(tmp_path, "rad", _RAD))
     # z=2500 (midpoint 0..5000) at day=0: between -1.6e-5 and -2.0e-5 ⇒ -1.8e-5

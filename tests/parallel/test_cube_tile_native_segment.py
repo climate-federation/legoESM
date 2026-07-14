@@ -54,7 +54,7 @@ from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
 from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import (
     make_tiled_cc_loop, make_tiled_cc_segment, scan_tiled_cc_steps,
 )
-from legoesm.atmosphere.held_suarez import held_suarez_init
+from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
 # Shared tiny-cube constants + helpers (single source — the shipped blocked
 # loop gate; N/NLEV/KT identical so the mesh/skip logic composes).
@@ -254,7 +254,7 @@ def test_moist_segment_matches_per_step_loop():
     """The Kessler moist carry (q_pack) rides the SAME scan — segment ==
     per-step loop with the production Kessler bridge injected."""
     from legoesm.core.field import Field
-    from legoesm.atmosphere.kessler_forcing import (
+    from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
         make_kessler_column_physics_fn,
     )
     from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import _TILED_TRACERS

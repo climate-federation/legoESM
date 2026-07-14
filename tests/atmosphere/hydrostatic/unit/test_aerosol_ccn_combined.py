@@ -52,7 +52,7 @@ def _morrison_aerosol_config():
 
 def _moist_state(grid, sigma):
     """Cubed-sphere hydrostatic state with a warm cloud-water layer."""
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
     state = held_suarez_init(grid, sigma)
     n, nlev = grid.n, sigma.n_levels

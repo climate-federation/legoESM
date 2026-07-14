@@ -315,13 +315,13 @@ def main() -> int:
 
     physics_fn = None
     if args.physics == "held_suarez":
-        from legoesm.atmosphere.held_suarez import held_suarez_forcing_mpas
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_mpas
         physics_fn = held_suarez_forcing_mpas
     elif args.physics == "kessler":
         # Warm-rain microphysics over the moist BCW tracers.  Kessler's
         # saturation adjustment is a rate over the dt bound HERE, so it
         # must match the stepping dt (make_kessler_forcing_mpas contract).
-        from legoesm.atmosphere.kessler_forcing import (
+        from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
             make_kessler_forcing_mpas,
         )
         physics_fn = make_kessler_forcing_mpas(dt)

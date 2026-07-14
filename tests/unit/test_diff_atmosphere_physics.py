@@ -75,7 +75,7 @@ class TestHeldSuarezGrad:
         self.state = make_hydrostatic_state(n, nlev)
 
     def test_grad_wrt_T(self):
-        from legoesm.atmosphere.held_suarez import held_suarez_forcing
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing
         grid, sigma, state = self.grid, self.sigma, self.state
 
         def loss(T_data):

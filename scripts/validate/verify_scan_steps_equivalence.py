@@ -77,7 +77,7 @@ def probe_icosahedral_i4():
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
     mesh = create_voronoi_mesh(subdivision_level=4)
     sigma = create_sigma_coordinate(8)
     state0 = held_suarez_init_mpas(mesh, sigma, T_init=280.0)
@@ -105,7 +105,7 @@ def probe_cubed_sphere_c24():
         CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
         hydrostatic_to_fv3,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
     grid = create_cubed_sphere(24)
     cdgrid = create_cubed_sphere_cdgrid(grid)
     sigma = create_sigma_coordinate(8)

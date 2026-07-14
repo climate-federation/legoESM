@@ -74,7 +74,7 @@ from legoesm.grids.plane import create_plane_grid  # noqa: E402
 # Default case dir: external LEGOESM_GSAM_ROOT if set, else the repo-local
 # cache (scripts/data/fetch_les_forcing.py); --case-dir overrides. See
 # resolve_sam_case_dir.
-from legoesm.atmosphere.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
+from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
 _GSAM_GATE = resolve_sam_case_dir("GATE_IDEAL")
 
 
@@ -153,7 +153,7 @@ def run_gate_ideal(case_dir, *, nx=8, ny=8, nlev=64, H=20000.0, dx=1000.0,
             f"radiation_interval must be >= 1, got {radiation_interval}")
     if use_sam_grd:
         # the grid nlev MUST match the grd's level count (else shape mismatch)
-        from legoesm.atmosphere.sam_case_forcing import read_sam_grd
+        from legoesm.atmosphere.forcing.sam_case_forcing import read_sam_grd
         nlev = int(read_sam_grd(_os.path.join(case_dir, "grd")).z_full_bottom_up.shape[0])
     # GATE_IDEAL prm: docoriolis=.false. ⇒ no Coriolis on the grid.
     # lat0=8.5°N (GATE_IDEAL prm latitude0) so the radiation insolation sees

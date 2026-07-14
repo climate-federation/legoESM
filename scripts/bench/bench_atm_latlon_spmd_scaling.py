@@ -89,7 +89,7 @@ def _build(n_lat, n_lon, nlev):
     from legoesm import constants
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationConfig, CGridLatLonPrimitiveEquationModel)
-    from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         hydrostatic_to_cgrid)
     from legoesm.grids.latlon import create_latlon_grid
@@ -194,7 +194,7 @@ def main() -> int:
         raise SystemExit(f"--segment-steps must be >= 0, got {seg_n}")
     physics_fn = None
     if args.physics == "held_suarez":
-        from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_latlon
         physics_fn = held_suarez_forcing_latlon
 
     nd = args.n_devices

@@ -32,7 +32,7 @@ from legoesm.atmosphere.physics import (
     ConvectionConfig,
     GravityWaveDragConfig,
 )
-from legoesm.atmosphere.scm import SingleColumnModel
+from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
 
 
 def build_initial_profiles(nlev: int, p_s: float, T_sfc: float):

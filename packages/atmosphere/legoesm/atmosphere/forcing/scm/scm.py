@@ -20,8 +20,8 @@ combined and integrated with forward Euler, RK2, or RK4.
 
 Example
 -------
->>> from legoesm.atmosphere.scm import SingleColumnModel
->>> from legoesm.atmosphere.scm_forcing import SCMForcing
+>>> from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
+>>> from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
 >>> from legoesm.atmosphere.physics import (
 ...     PhysicsConfig, RadiationConfig, TurbulenceConfig,
 ... )
@@ -65,7 +65,7 @@ from legoesm.atmosphere.physics.physics_state import (
     PhysicsState,
     init_physics_state,
 )
-from legoesm.atmosphere.scm_forcing import (
+from legoesm.atmosphere.forcing.scm.scm_forcing import (
     SCMForcing,
     add_tendencies,
     compute_forcing_tendencies,

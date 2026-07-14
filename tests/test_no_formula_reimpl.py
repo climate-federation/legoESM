@@ -279,7 +279,7 @@ CANONICAL_FORMULAS = {
         "budget": {
             "packages/atmosphere/legoesm/atmosphere/dynamics/gcm/_fv3_lin_pgf.py": 2,
             "packages/atmosphere/legoesm/atmosphere/dynamics/les/compressible_euler_plane.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/held_suarez.py": 1,
+            "packages/atmosphere/legoesm/atmosphere/forcing/idealized/held_suarez.py": 1,
             "packages/atmosphere/legoesm/atmosphere/idealized/rcemip_initial_conditions.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/convection/dca.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/convection/integration.py": 1,
@@ -301,8 +301,8 @@ CANONICAL_FORMULAS = {
             # ysu) migrated to physics._shared.exner_function (forward Π or
             # 1/Π for the inverse direction) → budgets ratcheted to 0
             # (entries removed).
-            "packages/atmosphere/legoesm/atmosphere/sam_case_forcing.py": 2,
-            "packages/atmosphere/legoesm/atmosphere/scm_forcing.py": 1,
+            "packages/atmosphere/legoesm/atmosphere/forcing/sam_case_forcing.py": 2,
+            "packages/atmosphere/legoesm/atmosphere/forcing/scm/scm_forcing.py": 1,
             "packages/core/legoesm/grids/vertical.py": 4,
         },
     },

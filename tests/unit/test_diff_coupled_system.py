@@ -87,7 +87,7 @@ def _hs_temperature_tendency(fv3_state, grid, sigma):
     temperature relaxation, so a zero-wind A-grid HydrostaticState is a
     faithful input for the thermal tendency.
     """
-    from legoesm.atmosphere.held_suarez import held_suarez_forcing
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing
     from legoesm.core.state import HydrostaticState
 
     n, nlev = _N, _NLEV

@@ -52,7 +52,7 @@ from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     fv3_hydrostatic_tendencies,
     hydrostatic_to_fv3,
 )
-from legoesm.atmosphere.held_suarez import held_suarez_init
+from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 from legoesm.core.field import Field
 from legoesm.core.state import NonHydrostaticState
 from legoesm.grids.cubed_sphere import create_cubed_sphere

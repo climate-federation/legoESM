@@ -234,7 +234,7 @@ class TestNativeFullProductionParity:
         strategies are forced (auto would pick allgather at this size,
         leaving the production ppermute rounds untested)."""
         _need_multi_device(2)
-        from legoesm.atmosphere.kessler_forcing import (
+        from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
             make_kessler_forcing_mpas,
         )
 
@@ -666,7 +666,7 @@ class TestScanStability:
         for 10 steps (state AND phys_state as the scan carry, traced
         forcing broadcast) with finite output and a dtype fixed point."""
         _need_multi_device(2)
-        from legoesm.atmosphere.kessler_forcing import (
+        from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
             make_kessler_forcing_mpas,
         )
 
@@ -806,7 +806,7 @@ class TestRouteACrossCheck:
         fixer allreduces even at np=1)."""
         pytest.importorskip("mpi4jax")
         _need_multi_device(2)
-        from legoesm.atmosphere.kessler_forcing import (
+        from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
             make_kessler_forcing_mpas,
         )
         from legoesm.parallel.voronoi_mpi import (

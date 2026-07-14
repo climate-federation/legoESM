@@ -33,7 +33,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.large_scale_forcing import (
+from legoesm.atmosphere.forcing.idealized.large_scale_forcing import (
     mask_inflow_endpoint_tendency as _mask_inflow_endpoint_tendency,
     upwind_dphi_dz_top2bottom as _upwind_dphi_dz_top2bottom,
 )

@@ -217,7 +217,7 @@ def run_cubed_sphere(days, nlev, vertical_coord):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig)
-    from legoesm.atmosphere.held_suarez import (
+    from legoesm.atmosphere.forcing.idealized.held_suarez import (
         held_suarez_init, held_suarez_forcing)
     from legoesm.core.operators import global_integral
 
@@ -264,7 +264,7 @@ def run_latlon(days, nlev, vertical_coord):
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig)
-    from legoesm.atmosphere.held_suarez import (
+    from legoesm.atmosphere.forcing.idealized.held_suarez import (
         held_suarez_init_latlon, held_suarez_forcing_latlon)
 
     n_lat, n_lon = 72, 144
@@ -321,7 +321,7 @@ def run_icosahedral(days, nlev):
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
-    from legoesm.atmosphere.held_suarez import (
+    from legoesm.atmosphere.forcing.idealized.held_suarez import (
         held_suarez_init_mpas, held_suarez_forcing_mpas)
 
     level = 5
@@ -365,7 +365,7 @@ def run_spectral(days, nlev, vertical_coord):
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         SpectralPrimitiveEquationModel, SpectralPEConfig,
         isothermal_rest_state_spectral, spectral_pe_to_grid)
-    from legoesm.atmosphere.held_suarez import held_suarez_forcing_spectral
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_spectral
 
     n_max = 21
     grid = create_gaussian_grid(n_max)

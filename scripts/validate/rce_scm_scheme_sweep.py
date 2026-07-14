@@ -1,7 +1,7 @@
 """RCE single-column scheme sweep: stability + moist-adiabat realism.
 
 Runs radiative-convective equilibrium (gray radiation + Kessler
-microphysics) in **SCM mode** (:class:`legoesm.atmosphere.scm.SingleColumnModel`,
+microphysics) in **SCM mode** (:class:`legoesm.atmosphere.forcing.scm.scm.SingleColumnModel`,
 no dynamical core) while swapping, in turn,
 
   * every moist-convection scheme (turbulence held at ``louis``), and
@@ -53,7 +53,7 @@ from legoesm.atmosphere.physics import (
     GravityWaveDragConfig,
 )
 from legoesm.atmosphere.physics.thermodynamics import compute_moist_adiabat
-from legoesm.atmosphere.scm import SingleColumnModel
+from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
 
 # Schemes to sweep (excluding "none").  Mirrors the factory dispatch in
 # convection/integration.py and turbulence/integration.py.

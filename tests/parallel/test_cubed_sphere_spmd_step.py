@@ -104,7 +104,7 @@ class TestCubedSphereSPMDStep:
             CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
             hydrostatic_to_fv3, fv3_to_hydrostatic,
         )
-        from legoesm.atmosphere.held_suarez import held_suarez_forcing
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing
         from tests.test_cases.baroclinic_wave import baroclinic_wave_init
 
         n_grid, n_lev, dt = 24, 8, 450.0

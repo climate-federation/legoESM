@@ -38,7 +38,7 @@ from legoesm.atmosphere.physics.microphysics.config import (
 from legoesm.atmosphere.physics.microphysics.integration import (
     make_microphysics_physics,
 )
-from legoesm.atmosphere.held_suarez import held_suarez_init
+from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.thermo import saturation_mixing_ratio

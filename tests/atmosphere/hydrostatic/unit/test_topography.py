@@ -482,7 +482,7 @@ class TestInitialization(unittest.TestCase):
 
     def test_held_suarez_with_phis(self):
         """held_suarez_init should accept phis and adjust p_s."""
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
         from legoesm.grids.vertical import create_sigma_coordinate
 
         grid = create_cubed_sphere(8)

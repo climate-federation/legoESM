@@ -47,7 +47,7 @@ def test_mass_conservation_cubed_sphere_pe():
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
     grid = create_cubed_sphere(12)
     sigma = create_sigma_coordinate(10)
@@ -80,7 +80,7 @@ def test_mass_conservation_latlon_pe():
         CGridLatLonPrimitiveEquationConfig,
         hydrostatic_to_cgrid,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
 
     grid = create_latlon_grid(36, 72)
     sigma = create_sigma_coordinate(10)
@@ -127,7 +127,7 @@ def test_mass_conservation_mpas_pe():
         MPASPrimitiveEquationModel,
         MPASPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
 
     saved = get_policy()
     try:
@@ -203,7 +203,7 @@ def test_long_run_mass_conservation_cubed_sphere_pe():
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
     grid = create_cubed_sphere(12)
     sigma = create_sigma_coordinate(10)
@@ -293,7 +293,7 @@ def test_long_run_mass_conservation_latlon_pe():
         CGridLatLonPrimitiveEquationConfig,
         hydrostatic_to_cgrid,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
 
     grid = create_latlon_grid(36, 72)
     sigma = create_sigma_coordinate(10)
@@ -342,7 +342,7 @@ def test_long_run_mass_conservation_mpas_pe():
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
 
     saved = get_policy()
     try:

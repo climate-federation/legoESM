@@ -26,7 +26,7 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     isothermal_rest_state_spectral,
     spectral_pe_to_grid,
 )
-from legoesm.atmosphere.held_suarez import held_suarez_forcing_spectral
+from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_spectral
 from legoesm.atmosphere.physics.microphysics.config import (
     MicrophysicsConfig,
     KesslerConfig,

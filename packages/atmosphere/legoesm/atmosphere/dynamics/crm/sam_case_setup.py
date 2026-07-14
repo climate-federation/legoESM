@@ -1,8 +1,8 @@
 """Assemble a legoESM plane-CRM run from a SAM CASE directory (GATE/LBA/…).
 
-Ties the SAM CASE reader (:mod:`legoesm.atmosphere.sam_case_forcing`) and the
+Ties the SAM CASE reader (:mod:`legoesm.atmosphere.forcing.sam_case_forcing`) and the
 D3 large-scale-forcing operator
-(:mod:`legoesm.atmosphere.dynamics.plane_large_scale_forcing`) into the pieces a
+(:mod:`legoesm.atmosphere.forcing.plane_large_scale_forcing`) into the pieces a
 plane-CRM driver needs:
 
 * a :class:`HeightCoordinate` whose reference θ(z) **is** the case sounding (so
@@ -29,11 +29,11 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.atmosphere.dynamics.les.compressible_euler_plane import make_rest_state
-from legoesm.atmosphere.dynamics.plane_large_scale_forcing import (
+from legoesm.atmosphere.forcing.plane_large_scale_forcing import (
     make_plane_ls_forcing_from_sam_case,
     make_plane_ls_forcing_physics,
 )
-from legoesm.atmosphere.sam_case_forcing import (
+from legoesm.atmosphere.forcing.sam_case_forcing import (
     extend_sounding_to_top,
     interp_sounding_to_levels,
     read_sam_rad,
@@ -59,7 +59,7 @@ def _model_top_z(H: float, grd_file: str | None) -> float:
     Used to size the SND-TOP sounding extension so it always covers the model
     top (the grd top ≈30 km exceeds the H≈20 km stretched smoke top)."""
     if grd_file is not None:
-        from legoesm.atmosphere.sam_case_forcing import read_sam_grd
+        from legoesm.atmosphere.forcing.sam_case_forcing import read_sam_grd
         return float(read_sam_grd(grd_file).z_full_bottom_up[-1])
     return float(H)
 
@@ -93,7 +93,7 @@ def build_sam_case_height_coord(
         return jnp.interp(z, z_snd, theta_snd)
 
     if grd_file is not None:
-        from legoesm.atmosphere.sam_case_forcing import read_sam_grd
+        from legoesm.atmosphere.forcing.sam_case_forcing import read_sam_grd
         grd = read_sam_grd(grd_file)
         hc = create_height_coordinate_from_z_half(
             jnp.asarray(grd.z_half, dtype=dtype),

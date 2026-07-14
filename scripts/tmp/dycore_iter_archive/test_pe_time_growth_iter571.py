@@ -22,7 +22,7 @@ from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     hydrostatic_to_fv3,
     make_fv3_faithful_pe_config,
 )
-from legoesm.atmosphere.held_suarez import held_suarez_init
+from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.halo import make_clipped_step

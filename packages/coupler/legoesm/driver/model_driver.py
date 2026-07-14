@@ -1075,7 +1075,7 @@ class ModelDriver:
         NLEV = cfg.grid.nlev
 
         if cfg.grid.grid_type == "mpas":
-            from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
+            from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
             shape_3d = (self.grid.nCells, NLEV)
             self.state = held_suarez_init_mpas(
                 self.grid, self.sigma, T_init=cfg.T_init,
@@ -1093,7 +1093,7 @@ class ModelDriver:
             )
         else:
             if cfg.grid.grid_type == "cubed_sphere":
-                from legoesm.atmosphere.held_suarez import held_suarez_init
+                from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
                 shape_3d = (6, N, N, NLEV)
                 self.state = held_suarez_init(
                     self.grid, self.sigma, T_init=cfg.T_init, phis=self._phis_data
@@ -1106,7 +1106,7 @@ class ModelDriver:
                 # *after* construction, leaving p_s flat over terrain; that is
                 # the reference state the ic='standard' p_s recompute corrects
                 # relative to, and is also more correct for ic='default'.
-                from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+                from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
                 shape_3d = (self.grid.n_lat, self.grid.n_lon, NLEV)
                 self.state = held_suarez_init_latlon(
                     self.grid, self.sigma, T_init=cfg.T_init,
@@ -2432,7 +2432,7 @@ class ModelDriver:
 
         # Held-Suarez Newtonian temperature relaxation (precomputed coefficients)
         if cfg.held_suarez_forcing:
-            from legoesm.atmosphere.held_suarez import (
+            from legoesm.atmosphere.forcing.idealized.held_suarez import (
                 held_suarez_equilibrium_temperature,
                 K_A, K_S, SIGMA_B,
             )
@@ -5076,7 +5076,7 @@ class ModelDriver:
         # so the SAME wrap applies to BOTH radiation sub-cycle variants (the
         # full ``physics_fn`` and the held ``physics_fn_norad``).
         if cfg.held_suarez_forcing:
-            from legoesm.atmosphere.held_suarez import held_suarez_forcing_mpas
+            from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_mpas
             from legoesm.core.state import HydrostaticTendencies
             from legoesm.atmosphere.physics.combined import (
                 physics_config_requires_phys_state,
@@ -6339,7 +6339,7 @@ class ModelDriver:
         yet SPMD-routed). Supports Held-Suarez forcing and dynamics-only."""
         cfg = self.config
         if cfg.held_suarez_forcing:
-            from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+            from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_latlon
             return held_suarez_forcing_latlon
         active = {
             name: val for name, val in (
@@ -6490,7 +6490,7 @@ class ModelDriver:
         if not active:
             return None                     # dynamics-only (dry)
         if active == {"microphysics": "kessler"}:
-            from legoesm.atmosphere.kessler_forcing import (
+            from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
                 make_kessler_column_physics_fn,
             )
             return make_kessler_column_physics_fn(

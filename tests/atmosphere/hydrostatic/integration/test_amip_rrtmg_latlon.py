@@ -42,7 +42,7 @@ from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonPrimitiveEquationModel,
     CGridLatLonPrimitiveEquationConfig,
 )
-from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
 from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import rrtmgp_radiation

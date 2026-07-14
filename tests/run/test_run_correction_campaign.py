@@ -2252,7 +2252,7 @@ def test_build_correction_campaign_gaussian_one_round(monkeypatch):
       3. The float64 ``T`` survives the campaign into the extractor's float64 guard
          (a float32 ``T`` would raise; the other fields are widened to T's dtype).
     Mock driver + mock LES; the C_K-changes-model-output mechanism is iter 35/37."""
-    from legoesm.atmosphere.dynamics import column_large_scale_extract as clse
+    from legoesm.atmosphere.forcing import column_large_scale_extract as clse
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate

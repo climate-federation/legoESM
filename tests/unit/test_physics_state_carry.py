@@ -111,7 +111,7 @@ def test_mpas_step_threads_seeded_carry():
         MPASPrimitiveEquationModel,
         MPASPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
     from legoesm.atmosphere.physics.combined import make_physics
 
     mesh = create_voronoi_mesh(3)
@@ -201,7 +201,7 @@ def _cdgrid_setup(n=6, nlev=6):
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
     grid = create_cubed_sphere(n)
     sigma = create_sigma_coordinate(nlev)
@@ -218,7 +218,7 @@ def _mpas_setup(n=3, nlev=8):
         MPASPrimitiveEquationModel,
         MPASPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
 
     mesh = create_voronoi_mesh(n)
     sigma = create_sigma_coordinate(nlev)

@@ -34,7 +34,7 @@ from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationConfig,
     CDGridPrimitiveEquationModel,
 )
-from legoesm.atmosphere.held_suarez import (
+from legoesm.atmosphere.forcing.idealized.held_suarez import (
     held_suarez_forcing, held_suarez_init,
 )
 from legoesm.grids.cubed_sphere import create_cubed_sphere

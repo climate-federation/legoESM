@@ -36,7 +36,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from legoesm.atmosphere.held_suarez import (
+from legoesm.atmosphere.forcing.idealized.held_suarez import (
     held_suarez_init_latlon,
     held_suarez_init_mpas,
 )

@@ -36,8 +36,8 @@ import optax
 from jax import lax
 
 from legoesm.atmosphere.physics import PhysicsConfig
-from legoesm.atmosphere.scm import SingleColumnModel
-from legoesm.atmosphere.scm_forcing import SCMForcing
+from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
+from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
 from legoesm.ml.training import TrainingConfig, create_optimizer
 from legoesm.training.param_collector import (
     apply_param_overrides,
