@@ -21,6 +21,7 @@ References
 
 from __future__ import annotations
 
+import warnings
 from functools import partial
 from typing import NamedTuple
 
@@ -1081,6 +1082,27 @@ class CDGridShallowWaterModel(IntegrationMixin):
 # FV3 Forward-Backward Shallow Water Model (EXPERIMENTAL — DO NOT USE)
 # ==============================================================================
 
+def _warn_if_not_fv3_native_grid(model_name: str, grid) -> None:
+    """Phase-1 FV3-native compatibility migration.
+
+    FV3-named models constructed on a non-ED grid keep working (the historic
+    equiangular behavior is an explicitly preserved legacy choice) but warn:
+    FV3's native grid is gnomonic_ed (``fv_arrays.F90`` default
+    ``grid_type=0``), and the FV3-native path will require it.
+    """
+    if grid.gnomonic_form != "ed":
+        warnings.warn(
+            f"{model_name} was constructed on the legacy "
+            f"{grid.gnomonic_form!r} cubed-sphere grid. FV3's native grid is "
+            "gnomonic_ed (grid_type=0); build it with "
+            "create_fv3_native_cubed_sphere(n) or "
+            "create_cubed_sphere(n, gnomonic='ed'). The FV3-native path "
+            "will make ED the default for FV3-named models.",
+            FutureWarning,
+            stacklevel=3,
+        )
+
+
 class FV3FBShallowWaterModel:
     """EXPERIMENTAL: FV3 forward-backward shallow water model.
 
@@ -1104,6 +1126,7 @@ class FV3FBShallowWaterModel:
     """
 
     def __init__(self, grid, config=None):
+        _warn_if_not_fv3_native_grid("FV3FBShallowWaterModel", grid)
         self.grid = grid
         self.cdgrid = create_cubed_sphere_cdgrid(grid)
         self.config = config or CDGridShallowWaterConfig()
@@ -1226,6 +1249,7 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
     """
 
     def __init__(self, grid, config=None):
+        _warn_if_not_fv3_native_grid("FV3EdgeShallowWaterModel", grid)
         self.grid = grid
         self.cdgrid = create_cubed_sphere_cdgrid(grid)
         self.config = config or CDGridShallowWaterConfig()
