@@ -178,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
                              "omitted the script auto-generates a 1-year "
                              "deck in a temp dir so the smoke test is "
                              "self-contained on a clean checkout where "
-                             "``forcing_amip/`` (gitignored) is absent.")
+                             "``data/forcing_amip/`` (gitignored) is absent.")
     args = parser.parse_args(argv)
 
     print(f"=== AMIP CMIP6 deck smoke test ({args.days}-day runs) ===")
