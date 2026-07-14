@@ -85,6 +85,13 @@ CONS_THRESH = {
     "sea_ice": {"volume_rel_drift": 0.05, "mass_rel_drift": 0.01},
 }
 
+# The "grew Nx" runaway heuristic divides final/initial, so it is meaningless
+# for a drift/anomaly column that is ~0 by design (e.g. a machine-precision
+# volume anomaly, ~1e-16): the ratio of two near-zero numbers explodes to a
+# spurious 500x / -4096x.  Only evaluate it when the series carries a
+# physically meaningful magnitude.
+_RUNAWAY_MIN_MAGNITUDE = 1e-6
+
 
 @dataclass
 class Finding:
@@ -117,6 +124,12 @@ def _find_case_dir(domain: str, rec: dict) -> Path | None:
         candidates.append(pat)
     elif domain == "ocean":
         candidates.append(base / case / grid / resolution)
+        # rest_state_* variants are grouped one level down under rest_state/
+        # (results/ocean/rest_state/<case>/<grid>/<res>) by the ocean runner.
+        # Require the trailing underscore so an unrelated "rest_stateful_*" case
+        # cannot match the grouped path.  (Candidate is only used if is_dir.)
+        if case.startswith("rest_state_"):
+            candidates.append(base / "rest_state" / case / grid / resolution)
     else:  # sea_ice
         category = rec.get("category", "")
         if category:
@@ -150,38 +163,61 @@ def _fraction_out_of_range(arr: np.ndarray, lo: float, hi: float) -> float:
 
 
 def _range_check(findings: list[Finding], domain: str, case: str, grid: str,
-                 arrays: dict[str, np.ndarray], ranges: dict[str, tuple]):
+                 arrays: dict[str, np.ndarray], ranges: dict[str, tuple],
+                 eq_set: str = ""):
+    # Shallow-water cases have no true tropospheric surface pressure: the runner
+    # stores a derived `p_s` (rho*g*h from the SW layer thickness) only for
+    # plotting, and a large-amplitude Rossby-Haurwitz layer swings it well past
+    # realistic-atmosphere bounds.  Do not range-check SW `p_s` against the
+    # hydrostatic surface-pressure limits (hydrostatic p_s is still checked).
+    skip_fields = (
+        {"p_s", "surface_pressure"} if eq_set == "shallow_water" else set()
+    )
     # Reference land_mask: regional ocean/atmosphere cases regrid to a global
     # 181x360 mesh and leave out-of-domain cells as NaN by design, so we only
     # count NaN/Inf in cells the model actually integrates.
     land_mask = arrays.get("land_mask")
+    active = None
     if land_mask is not None and land_mask.ndim >= 2:
         # Ocean cells: non-NaN and ≠ 0 (land_mask==1 for ocean in legoESM).
-        # Take the first time-slice as the static mask.
+        # Take the first time-slice as the static mask.  Only use it as an
+        # (nlat, nlon) spatial mask when it really is 2-D — an unstructured
+        # (time, ncells) or an unexpected-rank mask is left unapplied rather
+        # than crashing the unpack below.
         lm0 = land_mask[0] if land_mask.ndim >= 3 else land_mask
-        active = np.isfinite(lm0) & (lm0 > 0.5)
-    else:
-        active = None
+        if lm0.ndim == 2:
+            active = np.isfinite(lm0) & (lm0 > 0.5)
 
     def _select_active(arr: np.ndarray):
-        """Broadcast `active` to arr's spatial shape; return a 1-D view of
-        the cells we care about.  Falls back to the full array when shapes
-        don't match."""
+        """Return a 1-D view of the cells the model actually integrates, using
+        the (nlat, nlon) `active` mask.  Locate the consecutive spatial axes in
+        arr explicitly so it works for (lat,lon), (time,lat,lon),
+        (time,lat,lon,nlev) and (lat,lon,nlev).  Falls back to the full array
+        only when no (nlat,nlon) axis pair is found.
+
+        NOTE: the previous shape-guessing loop broadcast the mask to
+        (nlat,nlon,1,1) for a 4-D (time,lat,lon,nlev) field, which does NOT
+        align with (time,lat,lon,nlev); the broadcast raised and the except
+        clause returned the FULL array, so out-of-domain NaN fill in regional /
+        channel cases (regridded onto the global 181x360 mesh) was counted as
+        active-cell NaN — every ``*_3d`` field in those cases false-FAILed."""
         if active is None:
             return arr
-        try:
-            mask = active
-            # Match the trailing 2D spatial axes of arr (e.g. (time, lat, lon)
-            # or (time, lat, lon, nlev)).  Broadcast-expand up from the right.
-            while mask.ndim < arr.ndim:
-                mask = mask[..., np.newaxis] if mask.shape[-1] != arr.shape[-1] \
-                    else mask[np.newaxis, ...]
-            return arr[np.broadcast_to(mask, arr.shape)]
-        except Exception:
-            return arr
+        nlat, nlon = active.shape
+        # Scan right-to-left so the (lat, lon) pair is matched ahead of any
+        # leading axis of a coincidentally-equal size (e.g. a square native
+        # grid where time or nlev also equals nlat): lat/lon sit to the right
+        # of a leading time axis and to the left of a trailing nlev axis.
+        for ax in range(arr.ndim - 2, -1, -1):
+            if arr.shape[ax] == nlat and arr.shape[ax + 1] == nlon:
+                shp = [1] * arr.ndim
+                shp[ax], shp[ax + 1] = nlat, nlon
+                mask = active.reshape(shp)
+                return arr[np.broadcast_to(mask, arr.shape)]
+        return arr
 
     for name, arr in arrays.items():
-        if name in SKIP_FIELDS:
+        if name in SKIP_FIELDS or name in skip_fields:
             continue
         if arr.dtype.kind not in "fc":
             continue
@@ -252,8 +288,13 @@ def _conservation_check(findings: list[Finding], domain: str, case: str,
                 findings.append(Finding(
                     "FAIL", domain, case, grid,
                     f"{k} peak={peak:.3e} exceeds {thr:.3e}"))
-        # Runaway growth in means
-        if v0 != 0 and abs(vN / v0) > 10:
+        # Runaway growth.  Only skip series whose whole magnitude is machine-
+        # negligible (a drift/anomaly column that is ~0 by design: the ratio of
+        # two ~1e-16 numbers explodes to a spurious 500x).  A genuinely small-
+        # but-real baseline that blows up (e.g. 1e-12 -> 1e-4) still trips the
+        # ratio, since series_max clears the floor and v0 != 0.
+        series_max = max((abs(v) for v in vals), default=0.0)
+        if series_max > _RUNAWAY_MIN_MAGNITUDE and v0 != 0 and abs(vN / v0) > 10:
             findings.append(Finding(
                 "WARN", domain, case, grid,
                 f"{k} grew {vN/v0:.2f}x from t=0 to t=end"))
@@ -335,7 +376,8 @@ def validate_domain(domain: str) -> tuple[list[Finding], list[dict]]:
         if npz.is_file():
             arrays = _load_npz_safely(npz)
             if arrays is not None:
-                _range_check(findings, domain, case, grid, arrays, ranges)
+                _range_check(findings, domain, case, grid, arrays, ranges,
+                             rec.get("equation_set", ""))
         _conservation_check(findings, domain, case, grid, case_dir)
         _mean_sanity(findings, domain, case, grid, case_dir)
 
