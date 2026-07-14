@@ -71,15 +71,19 @@ orbital_insolation: true    # AMIP-II realistic orbit (Berger 1978): orbital
 # convective_precip_efficiency 0.0.
 cloud_rh_crit: 0.85            # was the calibrated default 0.77 (commit 3f376730e)
 cloud_q_c_diagnostic: 1.0e-4   # was 3.0e-4 ("thinner cloud" -> lower albedo)
-convective_precip_efficiency: 0.0  # detrained-condensate -> convective-rain split
-                            # (raises pr, drains column moisture). The intended
-                            # 0.5 REQUIRES the bechtold rain-split scheme code,
-                            # which is not on main yet — and run_amip's guard
-                            # hard-errors on >0 with a non-tiedtke scheme, so
-                            # 0.5 made EVERY run of this YAML die at argparse
-                            # (#932). Keep 0.0 until the bechtold rain-split
-                            # lands (tracked with the #929 bechtold campaign),
-                            # then restore 0.5 as #899 intended.
+convective_precip_efficiency: 0.8  # detrained-condensate -> convective-rain split
+                            # (raises pr, drains column moisture). The bechtold
+                            # rain-split scheme is on this branch (#929), so the
+                            # old #932 argparse hard-error no longer applies.
+                            # PINNED 0.8 from the 2026-07-14 C12/60d dose-response
+                            # (one-variable vs the 365d pilot control, identical
+                            # Jan+Feb protocol): 0 -> 0.5 -> 0.8 moves EVERY
+                            # hydro/TOA metric monotonically toward obs —
+                            # pr 0.60->1.09->1.40 mm/d, hfls 49.9->60.2->65.9,
+                            # prw 30.6->28.3->26.1 (obs 24), clivi 0.10->0.05->
+                            # 0.03 (=obs), rlut 175->179->187, rsut 231->223->219.
+                            # 0.0 = bit-exact legacy no-split (kept for A/Bs).
+                            # History: #899 intended 0.5; #932 blocked it pre-#929.
 # convective_cloud (Slingo-1987 cumulus cloud fraction): ON, to MIRROR the
 # canonical tuned-physics base (config/cmip/cmip_tuned_physics.yaml ships
 # convective_cloud: true) so this AMIP runs the SAME tuned slab parameters as the

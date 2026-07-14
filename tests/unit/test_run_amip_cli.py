@@ -1579,9 +1579,14 @@ def test_config_yaml_round_trips_authoritative_values():
     # PROVISIONAL cloud tuning (#899): rh_crit 0.85 / q_c 1e-4 (was 0.77/3e-4)
     assert cfg.cloud_rh_crit == pytest.approx(0.85)
     assert cfg.cloud_q_c_diagnostic == pytest.approx(1e-4)
-    # 0.0 until the bechtold rain-split lands (#932/#929): 0.5 with a
-    # non-tiedtke scheme trips run_amip's hard guard at argparse.
-    assert cfg.convective_precip_efficiency == 0.0
+    # PINNED 0.8 (2026-07-14): the bechtold rain-split (#929) is on this
+    # branch, and the C12/60d one-variable dose-response (0 -> 0.5 -> 0.8 vs
+    # the 365d pilot control) moved EVERY hydro/TOA metric monotonically
+    # toward obs (pr 0.60->1.40 mm/d, hfls 49.9->65.9, prw 30.6->26.1,
+    # clivi 0.10->0.03 = obs).  The 0-value legacy no-split remains an A/B
+    # option only.  A silent drop of this pin re-opens the global-overcast
+    # TOA pathology (rsut 231 / rlut 175 / clt 94% vs obs 99/240/67).
+    assert cfg.convective_precip_efficiency == pytest.approx(0.8)
 
 
 def test_config_yaml_explicit_cli_flag_overrides_file():
