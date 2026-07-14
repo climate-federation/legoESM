@@ -1,0 +1,70 @@
+&MICRO_DRIZZLE
+ Nc0 = 55.         ! prescribed cloud drop concentration for drizzle scheme
+/
+&SGS_TKE
+dosmagor = .false.
+/
+
+
+&PARAMETERS
+
+ caseid ='128x128x96_50m_5m_0.5s',
+
+ nrestart = 0,
+ perturb_type = 1,
+
+ OCEAN = .true.,
+
+ ug =  4.0
+ vg = -7.0
+
+ dosgs		= .true.,
+ dodamping 	= .true.,
+ doupperbound  	= .true.,
+ docloud 	= .true.,
+ doprecip 	= .true.,
+ dolongwave	= .true.,
+ doshortwave	= .false.,
+ dosurface 	= .true.,
+ dolargescale 	= .true.,
+ doradforcing   = .false.,
+ doradsimple    = .true., 
+ dosfcforcing   = .true.,
+ docoriolis 	= .true.,
+ donudging_uv   = .false.,
+ donudging_tq   = .false.,
+
+ SFC_FLX_FXD    = .true.,
+ SFC_TAU_FXD    = .true.,
+
+ latitude0 = 31.5,
+
+ dx = 	50.,
+ dy = 	50.,
+
+ dt = 	0.5,
+
+ day0=0.,
+
+nstop 	= 57600,
+nelapse = 10800,
+nprint  = 30,
+nstat 	= 600,
+nstatfrq= 20,
+
+doSAMconditionals = .true.
+dosatupdnconditionals = .true.
+
+ nsave2D	= 3600,
+ nsave2Dstart	= 997200,
+ nsave2Dend	= 99997200,
+ save2Dbin      = .true.
+
+ nsave3D	= 3600,
+ nsave3Dstart	= 997200,
+ nsave3Dend	= 999999999,
+ save3Dbin      = .true.
+
+/ 
+
+

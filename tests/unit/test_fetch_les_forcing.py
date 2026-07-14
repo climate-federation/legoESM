@@ -79,6 +79,33 @@ def test_resolve_prefers_gsam_root_then_local_cache(tmp_path, monkeypatch):
     assert resolve_sam_case_dir("NOPE") == str(cache / "NOPE")
 
 
+def test_default_cache_points_at_repo_root_data_les_cases():
+    """Regression: the federation restructure moved sam_case_forcing.py deeper
+    (added the packages/<pkg>/ nesting); a hardcoded ``parents[N]`` silently
+    pointed the default cache at ``packages/data/les_cases`` (nonexistent) so
+    LES auto-resolve broke. The monkeypatched test above never caught it because
+    it overrides the cache. Pin the DEFAULT to the real repo-root dir.
+    """
+    from pathlib import Path
+
+    from legoesm.atmosphere.forcing import sam_case_forcing
+
+    cache = Path(sam_case_forcing._LOCAL_FORCING_CACHE)
+    assert cache.name == "les_cases"
+    assert cache.parent.name == "data"
+    # repo root == the dir holding .git; must NOT be under packages/.
+    repo_root = cache.parent.parent
+    assert (repo_root / ".git").exists(), f"cache not anchored at repo root: {cache}"
+    assert "packages" not in cache.parts, f"cache leaked under packages/: {cache}"
+    # The committed BOMEX deck must resolve here (no env override, no gSAM root).
+    import os
+
+    for var in ("LEGOESM_GSAM_ROOT", "LEGOESM_LES_FORCING"):
+        os.environ.pop(var, None)
+    assert (cache / "BOMEX").is_dir(), "committed BOMEX deck not found at default cache"
+
+
 if __name__ == "__main__":
     test_case_map_covers_the_eight_gsam_cases()
+    test_default_cache_points_at_repo_root_data_les_cases()
     print("ok (run the tmp_path/monkeypatch tests under pytest)")
