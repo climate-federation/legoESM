@@ -435,11 +435,11 @@ cfg_overrides:
   # Classical uses RRTMGP radiation unrolled over the rollout — the 24h (144-step)
   # and 72h (432-step) curriculum phases build an XLA graph too large to compile
   # in reasonable walltime (the 12h graph alone took >2.5 h on the first attempt).
-  # Keep classical on a single 12h lead for all 5 epochs: one tractable graph,
-  # compiled once and reused. The NN variants (no rrtmgp in the loop) keep the
+  # Keep classical on a single 6h lead for all 5 epochs (a 12h rollout graph
+  # would not compile in walltime — two attempts stalled >2.75 h in XLA). The NN variants (no rrtmgp in the loop) keep the
   # full 12/24/72h curriculum.
   aimip_rollout_curriculum:
-  - - 12
+  - - 6
     - 5
   aimip_chunk_windows: 34
   aimip_n_epochs: 5
