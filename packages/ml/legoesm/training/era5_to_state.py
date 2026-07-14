@@ -303,6 +303,39 @@ def _cache_is_complete(
     return True
 
 
+def wait_for_cache(
+    cache_dir: str | Path,
+    expected_n_time: int | None,
+    expected_fingerprint: str | None = None,
+    *,
+    timeout_s: float = 3600.0,
+    poll_s: float = 5.0,
+) -> Path:
+    """Block until the cache under ``cache_dir`` is complete, then return its path.
+
+    Filesystem-based coordination for the multi-rank case: rank 0 BUILDS the
+    window cache while the other ranks call this to WAIT for the completeness
+    marker to appear (the write is atomic, so the marker flips true exactly when
+    the store is ready).  Crucially this issues NO MPI collective, so it is safe
+    to call from the background prefetch thread while the main thread is running
+    gradient allreduces on ``COMM_WORLD`` — an MPI barrier there would interleave
+    with those allreduces and deadlock (codex #985).  Raises ``TimeoutError`` if
+    the builder never finishes (e.g. rank 0 died).
+    """
+    import time
+
+    cache_path = Path(cache_dir) / _CACHE_STORE_NAME
+    start = time.monotonic()
+    while not _cache_is_complete(cache_path, expected_n_time, expected_fingerprint):
+        if time.monotonic() - start > timeout_s:
+            raise TimeoutError(
+                f"ERA5 cache {cache_path} not complete after {timeout_s}s "
+                f"(the rank-0 builder may have failed)."
+            )
+        time.sleep(poll_s)
+    return cache_path
+
+
 def selection_fingerprint(
     time_selection: Sequence[int], config: TrainingERA5Config
 ) -> str:

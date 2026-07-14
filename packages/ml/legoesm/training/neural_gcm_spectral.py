@@ -1805,7 +1805,9 @@ def load_training_data(
                 "LEGOESM_ERA5_WINDOW_CACHE needs a readable ds.time to scope "
                 "the cache by timestamp."
             )
-        from legoesm.training.era5_to_state import selection_fingerprint
+        from legoesm.training.era5_to_state import (
+            selection_fingerprint, wait_for_cache,
+        )
         _uniq = sorted({int(t) for t in time_indices})
         _yrs = _training_year_range(windows, config)
         # Fingerprint the EXACT selection + source config into BOTH the cache
@@ -1816,25 +1818,23 @@ def load_training_data(
             os.fspath(cache_dir), f"ywin_{_yrs[0]}_{_yrs[1]}_{_fp}",
         )
 
-        def _build_window_cache():
-            return ensure_local_cache(
+        # Multi-rank: serialize the WRITE so the ranks don't race on the shared
+        # `.building` dir / os.replace (codex #985).  Coordinate via the
+        # FILESYSTEM MARKER, NOT an MPI barrier: this loader can run on the
+        # background prefetch thread while the main thread is mid gradient-
+        # allreduce on COMM_WORLD, and a barrier there would interleave with
+        # those collectives and deadlock.  Rank 0 (or a single rank) builds; the
+        # others poll for the marker.  ensure_local_cache is idempotent, so an
+        # already-complete store just returns.
+        from legoesm.training.data_parallel import mpi_rank_size
+        _rank, _nproc = mpi_rank_size()
+        if _nproc > 1 and _rank != 0:
+            _cache_path = wait_for_cache(_scoped, len(_uniq), _fp)
+        else:
+            _cache_path = ensure_local_cache(
                 era5_config, _scoped, years=_yrs,
                 time_selection=_uniq, fingerprint=_fp,
             )
-
-        # Under a multi-rank launcher every rank runs this loader, so serialize
-        # the WRITE: rank 0 builds the store, the others wait at a barrier, then
-        # ALL open the finished (marker-complete) cache.  Without this the ranks
-        # race on the shared `.building` dir / os.replace (codex #985).  Single
-        # rank / no launcher -> mpi_rank_size() is (0, 1) and it just builds.
-        from legoesm.training.data_parallel import mpi_rank_size
-        _rank, _nproc = mpi_rank_size()
-        if _nproc > 1:
-            from mpi4py import MPI
-            if _rank == 0:
-                _build_window_cache()
-            MPI.COMM_WORLD.Barrier()
-        _cache_path = _build_window_cache()
         read_ds = open_era5_zarr(str(_cache_path))
         read_by_time = True
         logger.info(

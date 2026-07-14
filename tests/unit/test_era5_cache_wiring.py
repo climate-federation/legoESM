@@ -163,6 +163,20 @@ def test_window_scoped_cache_subsets_and_preserves_timestamps(tmp_path, _patched
     assert _cached_levels <= set(cfg.levels)
 
 
+def test_wait_for_cache_returns_when_complete_else_times_out(tmp_path, _patched_remote):
+    # Multi-rank coordination is filesystem-based (no MPI barrier from the
+    # loader/prefetch thread): non-zero ranks wait for the marker rank 0 writes.
+    from legoesm.training.era5_to_state import wait_for_cache
+    _full, _calls = _patched_remote
+    cfg = TrainingERA5Config()
+    cdir = tmp_path / "c"
+    with pytest.raises(TimeoutError):  # no builder yet -> times out fast
+        wait_for_cache(cdir, expected_n_time=None, timeout_s=0.2, poll_s=0.05)
+    ensure_local_cache(cfg, cdir, years=(2015, 2015))   # "rank 0" builds
+    path = wait_for_cache(cdir, expected_n_time=None, timeout_s=0.5, poll_s=0.05)
+    assert (path / ".cache_complete.json").is_file()
+
+
 def test_window_cache_fingerprint_distinguishes_equal_count_selections(
     tmp_path, _patched_remote
 ):
