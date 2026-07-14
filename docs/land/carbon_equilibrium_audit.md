@@ -181,3 +181,72 @@ allocation defect; the column stays carbon-conserving and non-negative.
 
 Artifacts: `results/land_carbon_equilibrium/{scorecard.json,report.md,
 pool_trajectories.png,gpp_npp.png,allocation.png}`.
+
+## Global initial-condition map (Stage A)
+
+The per-region audit above equilibrates a handful of hand-placed pixels. Stage A
+generalizes it to a **global** near-equilibrium IC map, so a coupled run starts
+every land cell from its own spun-up carbon pools instead of an unphysical
+uniform cold start. Design spec + plan:
+`docs/superpowers/specs/2026-07-07-global-carbon-ic-map-design.md`,
+`docs/superpowers/plans/2026-07-07-global-carbon-ic-map.md`.
+
+**Pipeline** (all in `legoesm.land.carbon`, resolution-agnostic — every core
+function takes `(ncell, …)`):
+
+1. `climate_features.reduce_climatology_to_features` reduces a monthly
+   climatology to five per-cell features `(mat_k, map_yr, t_seasonal_amp_k,
+   aridity, sw_mean_w)` (aridity = MAP/PET, Priestley–Taylor PET).
+2. `global_init.build_archetypes` clusters the occupied **PFT × climate** space
+   with a per-PFT, seeded k-means over standardized features → an
+   `ArchetypeTable` of O(hundreds) representative (PFT, climate, soil)
+   archetypes + each cell's cover-weighted archetype membership.
+3. `global_init.equilibrate_archetypes` spins up only those archetypes with the
+   shared **semi-analytic** driver (`spinup.run_semi_analytic_spinup`, Xia 2012 —
+   the same slow-pool solve the per-region scorecard uses), batched by
+   `(is_woody, soil_class)` group with per-archetype physiology threaded through
+   `LandSurfaceParams` (verified per-column, not collapsed).
+4. `global_init.map_to_grid` cover-weight-mixes the archetype equilibria onto
+   every cell: `pools[c] = Σ_p w[c,p]·eq[id[c,p]]` (bare fraction holds less
+   carbon; no renormalization).
+
+**Driver:** `scripts/data/build_global_carbon_ic.py` loads real CLM5 PFT cover +
+HWSD/CLM soil texture (17-PFT `CLM5_PFT_NAMES` axis reconstructed from
+`natpft=15 + cft=2`) + a climatology, runs the pipeline, and writes
+`global_carbon_ic.npz` (per-pool `(ncell,)` + geometry) and `archetypes.npz`.
+
+**Validator:** `scripts/validate/global_carbon_ic_map.py` re-integrates each
+archetype from the mapped IC vs. a cold start on the *stored* soil column. This
+is **indicative archetype-level QC, not a per-cell proof**: `map_to_grid` is
+linear in the IC pools, but re-integrating a *mixed* cell is nonlinear
+(GPP/LAI/stomata/respiration depend nonlinearly on the summed foliar carbon and
+a shared soil column), so small per-archetype drift is a *necessary condition*
+and strong signal that each archetype equilibrium is stationary — **not** a
+proof that every mixed grid cell starts at equilibrium. Rigorous per-cell
+validation (re-integrating a sample of *actual* mixed grid cells) is a
+documented follow-up. On the real CLM5 cover (13 824 cells, 17 PFTs, 51
+archetypes) the mapped IC drifts **0.76 %/yr vs. 4.51 %/yr cold** — every
+archetype starts ~6× closer to equilibrium than a cold start.
+
+**Known Stage-A approximations.** (1) *Sub-`w_min` cover is dropped.* PFT
+fractions below `--w-min` cover in a cell get no archetype (→ zero carbon), and
+many small fractions can sum to material area; the driver prints the mean/max
+dropped vegetated land-cover fraction so the omitted area is visible (F3). The
+follow-up maps each trace PFT to its nearest same-PFT archetype instead of
+dropping it. (2) *Bare ground (PFT 0) is excluded outright* — it is inert
+(`Vc_max25 = 0`, no carbon), so it neither clusters nor equilibrates. (3)
+*Archetype climate means are cover-weighted* by each PFT's cover in its member
+cells, so an archetype reflects where the PFT dominates; fully cover-weighted
+k-means *assignment* is a follow-up. (4) The drift validator is indicative
+archetype-level QC, not a per-cell proof (see Validator above).
+
+**Demonstration caveat.** `--climate-from-latitude` runs the pipeline on real
+cover with a **zonal** (latitude-only) climatology reusing the idealized LMIP
+forcing — a labeled demonstration that collapses longitudinal climate (deserts
+and rainforests at one latitude share a climate). The science-grade map needs a
+real 2-D monthly climatology (ERA5/GSWP3 assembled to the target grid via the
+existing `--climatology <nc>` path); assembling that forcing is the documented
+next data-prep step. Stage B (global multi-observation parameter training,
+warm-started from this IC map) gets its own spec.
+
+Artifacts (gitignored): `results/global_carbon_ic*/`.

@@ -237,6 +237,14 @@ R_universal = 8.314462618       # [J/(mol·K)] ≈ N_A·k_B (value truncated at
 # above is truncated (deriving would be off by ~2e-11 relative).
 k_B = 1.380649e-23              # [J/K] (exact, SI)
 
+# Planck constant and speed of light — exact by the 2019 SI redefinition.
+# Needed to convert a spectral radiance / irradiance [W/m^2] into a photon flux
+# [mol photons / m^2 / s] through the photon energy E = h*c/lambda — e.g. the
+# satellite-SIF radiance -> emitted-photon-flux conversion in
+# scripts/data/build_sif_observations.py (and any PAR / quantum-yield code).
+h_planck = 6.62607015e-34       # [J·s]  Planck constant        (exact, SI 2019)
+c_light = 2.99792458e8          # [m/s]  speed of light in vacuum (exact, SI)
+
 # ==============================================================================
 # Mathematical Constants
 # ==============================================================================

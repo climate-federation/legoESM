@@ -1913,18 +1913,20 @@ def _configure_jax_compilation_cache(cache_dir, min_compile_secs: float = 30.0):
     cache key includes the HLO + jaxlib version + backend/platform, so a code change or a
     different node type MISSES (recompiles) rather than serving a stale / wrong-arch binary.
     MUST run before the first JAX compilation — the campaign calls it at the top of main(),
-    before any driver build. Returns the configured dir (or ``None`` when disabled)."""
-    if not cache_dir:
-        return None
-    import jax
+    before any driver build. Returns the configured dir (or ``None`` when disabled).
 
-    jax.config.update("jax_compilation_cache_dir", str(cache_dir))
-    jax.config.update(
-        "jax_persistent_cache_min_compile_time_secs", float(min_compile_secs))
-    print(f"[campaign] JAX persistent compilation cache: {cache_dir} (caching compiles > "
-          f"{min_compile_secs:g}s) — amortizes the rrtmgp JIT across the self-requeue + "
-          "repeated launches.", flush=True)
-    return str(cache_dir)
+    Thin campaign-specific wrapper over the shared
+    :func:`legoesm.ml.training.configure_jax_compilation_cache` (the ONE
+    implementation of the caching policy + its HLO/jaxlib/backend-keyed safety);
+    this wrapper only adds the campaign's progress log line."""
+    from legoesm.ml.training import configure_jax_compilation_cache
+
+    configured = configure_jax_compilation_cache(cache_dir, min_compile_secs)
+    if configured is not None:
+        print(f"[campaign] JAX persistent compilation cache: {cache_dir} (caching compiles > "
+              f"{min_compile_secs:g}s) — amortizes the rrtmgp JIT across the self-requeue + "
+              "repeated launches.", flush=True)
+    return configured
 
 
 def _print_round_progress(round_idx: int, res: Any, total_rounds: int) -> None:

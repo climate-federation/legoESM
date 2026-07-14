@@ -329,6 +329,15 @@ def validate_param_spec(
 
 # --- discovery / partition -------------------------------------------------
 def _in_scope(rel: str) -> bool:
+    # `_future/` holds parked, non-production code (CLAUDE.md: NOT wired into any
+    # factory / __init__ / prod driver). Its scheme configs must never enter the
+    # production trainable registry (``param_collector.SPEC_MODULES`` / the
+    # ``build_trainable_params`` collector) — a scheme that no driver runs cannot
+    # be a live trainable. So `_future/` modules are OUT of the param-spec roster;
+    # wire the module into prod (moving it out of `_future/`) in the same PR that
+    # should make it a registered trainable scheme.
+    if "/_future/" in rel:
+        return False
     return any(rel.startswith(p) for p in _ROSTER_PREFIXES)
 
 
