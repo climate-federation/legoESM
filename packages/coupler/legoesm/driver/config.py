@@ -421,6 +421,12 @@ class ExperimentConfig(NamedTuple):
     # water path (plane-parallel albedo bias); LOWER => thinner optics => lower
     # albedo. None => CloudConfig default 1.0 (homogeneous, no change).
     cloud_inhomogeneity_factor: float | None = None
+    # Sub-grid cloud-optics inhomogeneity scheme: "constant" (Cahalan scalar,
+    # legacy/byte-identical) or "two_region" (tau-dependent Shonk-Hogan optic
+    # that breaks the plane-parallel tau-saturation). cloud_fsd = fractional
+    # std-dev of in-cloud water for two_region (Shonk-Hogan ~0.75).
+    cloud_optics_inhomogeneity: str = "constant"
+    cloud_fsd: float | None = None
     #   cloud_p_xr / cloud_alpha_xr — Xu-Randall cloud-fraction sensitivity
     #   knobs; HIGHER p_xr / LOWER alpha_xr => fraction stays fractional as
     #   moisture rises (flattens the overcast runaway).
@@ -1122,6 +1128,12 @@ class ExperimentConfig(NamedTuple):
                 f"{_valid_diag_condensate}, "
                 f"got {self.cloud_diagnostic_condensate_scheme!r}"
             )
+        _valid_inhom = ("constant", "two_region")
+        if self.cloud_optics_inhomogeneity not in _valid_inhom:
+            errors.append(
+                f"cloud_optics_inhomogeneity must be one of {_valid_inhom}, "
+                f"got {self.cloud_optics_inhomogeneity!r}"
+            )
         # The adiabatic in-cloud floor reaches radiation through the SHARED
         # physics pipeline (build_physics_pipeline -> build_cloud_config), which
         # serves the cd-grid family (cdgrid + aliases 'centered'/'finite_volume'),
@@ -1348,6 +1360,7 @@ class ExperimentConfig(NamedTuple):
             ("cloud_conv_cloud_max", 0.1, 1.0),
             ("cloud_conv_cloud_condensate", 1.0e-5, 1.0e-3),
             ("cloud_inhomogeneity_factor", 0.3, 1.0),
+            ("cloud_fsd", 0.0, 1.0),
             ("cloud_p_xr", 0.05, 1.0),
             ("cloud_alpha_xr", 10.0, 1000.0),
             ("cloud_adiabatic_lwc_rate", 5.0e-7, 3.0e-6),

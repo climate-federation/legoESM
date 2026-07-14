@@ -191,6 +191,7 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # cloud inhomogeneity (Cahalan) + convective autoconversion split (Sundqvist)
     # -> build_cloud_config / _resolve_convection (physics_pipeline)
     "atm.clouds.CloudConfig.cloud_inhomogeneity_factor": "cloud_inhomogeneity_factor",
+    "atm.clouds.CloudConfig.cloud_fsd": "cloud_fsd",
     "atm.conv.BechtoldConfig.autoconv_pe_max": "autoconv_pe_max",
     "atm.conv.BechtoldConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
     "atm.conv.TiedtkeConfig.autoconv_pe_max": "autoconv_pe_max",

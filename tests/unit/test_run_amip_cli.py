@@ -1972,6 +1972,45 @@ def test_cloud_inhomogeneity_validate_bounds():
     ExperimentConfig(cloud_inhomogeneity_factor=0.7).validate_strict()
 
 
+def test_cloud_optics_inhomogeneity_round_trips_and_threads():
+    """--cloud-optics-inhomogeneity / --cloud-fsd round-trip into
+    ExperimentConfig and thread into the hot-loop CloudConfig (the two_region
+    sub-grid optic); default is 'constant' + None (byte-identical)."""
+    from legoesm.atmosphere.physics.clouds.config import build_cloud_config
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--cloud-optics-inhomogeneity", "two_region", "--cloud-fsd", "0.8",
+    ]), parser))
+    assert cfg.cloud_optics_inhomogeneity == "two_region"
+    assert cfg.cloud_fsd == 0.8
+    cc = build_cloud_config(
+        cfg.cloud_scheme,
+        cloud_optics_inhomogeneity=cfg.cloud_optics_inhomogeneity,
+        cloud_fsd=cfg.cloud_fsd)
+    assert cc.cloud_optics_inhomogeneity == "two_region"
+    assert cc.cloud_fsd == 0.8
+    # default: 'constant' scheme + None fsd => CloudConfig defaults
+    d = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert d.cloud_optics_inhomogeneity == "constant"
+    assert d.cloud_fsd is None
+    dcc = build_cloud_config(d.cloud_scheme,
+                             cloud_optics_inhomogeneity=d.cloud_optics_inhomogeneity)
+    assert dcc.cloud_optics_inhomogeneity == "constant"
+    assert dcc.cloud_fsd == 0.75
+
+
+def test_cloud_optics_inhomogeneity_validate():
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match="cloud_optics_inhomogeneity"):
+        ExperimentConfig(cloud_optics_inhomogeneity="bogus").validate_strict()
+    with pytest.raises(ValueError, match="cloud_fsd"):
+        ExperimentConfig(cloud_fsd=1.5).validate_strict()   # > 1.0
+    ExperimentConfig(cloud_optics_inhomogeneity="two_region",
+                     cloud_fsd=0.75).validate_strict()
+
+
 def test_louis_cloudtop_entrainment_efficiency_flows_to_config():
     """--cloudtop-entrainment-efficiency round-trips (marine-Sc BL-top
     ventilation: thins excess Sc liquid cloud without an evap trade; the

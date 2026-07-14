@@ -20,6 +20,7 @@ __param_spec__ = {
             # spectral-width, not a tunable closure coefficient. Paired with
             # the pgam_max cap (Morrison module_mp_mg.F90).
             "pgam_min": "numerics: lower clip/cap on the gamma-PSD shape parameter (regulariser, paired with pgam_max)",
+            "cloud_optics_asymmetry_g": "numerics: scattering asymmetry g of the two-region inhomogeneity two-stream reflectance (shapes the reduction; the real per-band g lives in RRTMGP, not trained here)",
         },
         "params": {
             # --- critical_rh: primary cloud-onset RH (Sundqvist + Xu-Randall lower bound) ---
@@ -37,6 +38,7 @@ __param_spec__ = {
             "r_eff_liq": {"units": "m", "bounds": (4.0e-6, 30.0e-6), "tunable_tier": 2, "transform": "sigmoid", "category": "optical_radius", "reference": "cloud-optics fallback default", "shape": None},
             "r_eff_ice": {"units": "m", "bounds": (10.0e-6, 90.0e-6), "tunable_tier": 2, "transform": "sigmoid", "category": "optical_radius", "reference": "cloud-optics fallback default", "shape": None},
             "cloud_inhomogeneity_factor": {"units": "1", "bounds": (0.3, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "optical_radius", "reference": "Cahalan et al. (1994) plane-parallel albedo bias", "shape": None},
+            "cloud_fsd": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "optical_radius", "reference": "Shonk & Hogan (2008, 2010) fractional standard deviation of in-cloud water", "shape": None},
             # --- droplet_psd: Morrison M2005 liquid effective-radius PSD (gamma-shape from Nc) ---
             "Nc_default": {"units": "1/m^3", "bounds": (1.0e7, 1.0e9), "tunable_tier": 2, "transform": "sigmoid", "category": "droplet_psd", "reference": "Morrison et al. (2005) M2005 (SAM Nc_0)", "shape": None},
             "martin_pgam_slope": {"units": "cm^3", "bounds": (1.0e-4, 2.0e-3), "tunable_tier": 3, "transform": "sigmoid", "category": "droplet_psd", "reference": "Martin et al. (1994)", "shape": None},
@@ -218,6 +220,21 @@ class CloudConfig(NamedTuple):
     adiabatic_lwc_rate: float = 1.5e-6   # in-cloud LWC growth per metre of cloudy
     # depth [kg/kg/m] ~ 1.5 g/kg per km (adiabatic marine-Sc gradient); only read
     # when diagnostic_condensate_scheme="adiabatic".
+    # --- Sub-grid cloud-optics inhomogeneity (appended at the END of the
+    # NamedTuple so positional / checkpoint callers keep their field order) ---
+    # Scheme: "constant" (Cahalan scalar cloud_inhomogeneity_factor above;
+    # legacy, byte-identical default) or "two_region" (tau-DEPENDENT
+    # Shonk & Hogan 2008 factor chi_eff = 1 - fsd^2 tau/(gamma0+tau) that reduces
+    # a THICK cloud more than a thin one; asymptote 1-fsd^2).  Unknown => raise.
+    cloud_optics_inhomogeneity: str = "constant"
+    # Fractional standard deviation of in-cloud water for two_region (Shonk &
+    # Hogan 2010 global mean ~0.75; broken marine Sc -> ~1).  fsd -> 0 is
+    # homogeneous (chi_eff -> 1); higher fsd => larger reduction (floor 1-fsd^2).
+    cloud_fsd: float = 0.75
+    # Scattering asymmetry g of the two_region conservative two-stream
+    # reflectance R(t) = t/(t + 2/(1-g)).  ~0.85 for liquid clouds (Mie, SW).
+    # A numerics constant of the optic (the real per-band g lives in RRTMGP).
+    cloud_optics_asymmetry_g: float = 0.85
 
 
 def build_cloud_config(
@@ -229,6 +246,8 @@ def build_cloud_config(
     conv_cloud_max: float | None = None,
     conv_cloud_condensate: float | None = None,
     cloud_inhomogeneity_factor: float | None = None,
+    cloud_optics_inhomogeneity: str | None = None,
+    cloud_fsd: float | None = None,
     p_xr: float | None = None,
     alpha_xr: float | None = None,
     diagnostic_condensate_scheme: str | None = None,
@@ -255,6 +274,10 @@ def build_cloud_config(
         overrides["conv_cloud_condensate"] = conv_cloud_condensate
     if cloud_inhomogeneity_factor is not None:
         overrides["cloud_inhomogeneity_factor"] = cloud_inhomogeneity_factor
+    if cloud_optics_inhomogeneity is not None:
+        overrides["cloud_optics_inhomogeneity"] = cloud_optics_inhomogeneity
+    if cloud_fsd is not None:
+        overrides["cloud_fsd"] = cloud_fsd
     if p_xr is not None:
         overrides["p_xr"] = p_xr
     if alpha_xr is not None:

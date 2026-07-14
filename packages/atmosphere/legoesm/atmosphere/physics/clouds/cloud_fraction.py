@@ -82,6 +82,10 @@ __physics_contract__ = {
 _CLOUD_R_EFF_MAX_M = 60.0e-6     # max liquid effective radius for lamc clip [m]
 _R_EFF_ICE_PSD_COEFF = 1.5       # ice effective-radius PSD coefficient
 _R_EFF_ICE_DEFAULT_M = 25.0e-6   # fallback ice effective radius [m]
+# --- two_region sub-grid cloud-optics inhomogeneity ---
+_INHOM_CF_FLOOR = 1.0e-3         # min cloud fraction for the in-cloud water path
+_INHOM_R_EFF_FLOOR_M = 1.0e-6    # min effective radius in the tau estimate [m]
+_TAU_GEOMETRIC_COEFF = 1.5       # 3 Q_ext/4 with Q_ext≈2 (geometric-optics extinction)
 
 
 
@@ -370,6 +374,48 @@ def _adiabatic_incloud_condensate(cf, dp, T, p_full, config):
                        config.q_c_diagnostic)
 
 
+def _two_region_inhomogeneity_factor(
+    tau: jnp.ndarray, fsd, g,
+) -> jnp.ndarray:
+    r"""Tau-dependent sub-grid cloud-optics inhomogeneity factor (chi_eff).
+
+    Two-region (Shonk & Hogan 2008 "Tripleclouds") split of the in-cloud
+    optical depth ``tau`` into equal-area optically-THIN ``tau(1-fsd)`` and
+    optically-THICK ``tau(1+fsd)`` sub-columns.  Inverting the domain-mean
+    conservative two-stream reflectance
+    ``R_bar = 1/2[R(tau(1-fsd)) + R(tau(1+fsd))]``, ``R(t) = t/(t+gamma0)``,
+    ``gamma0 = 2/(1-g)``, to an effective optical depth ``tau_eff`` and taking
+    ``chi_eff = tau_eff/tau`` has the exact CLOSED FORM
+
+        chi_eff = 1 - fsd^2 * tau / (gamma0 + tau).
+
+    Written closed-form (not via ``gamma0 R_bar/(1-R_bar)``) so there is NO
+    ``1/(1-R_bar)`` division (fp32-unsafe as ``R_bar -> 1`` for a thick cloud),
+    NO overflow, and NO clip/zero-guard: the value is analytically bounded in
+    ``[1 - fsd^2, 1]``, monotone-decreasing in ``tau``, and smooth =>
+    ``jax.grad``-safe everywhere.
+
+    Behaviour: ``chi_eff = 1`` for a thin cloud (``tau -> 0``) or a homogeneous
+    one (``fsd -> 0``), and DECREASES with ``tau`` toward the asymptote
+    ``1 - fsd^2`` -- so a THICK cloud is reduced MORE than a thin one (unlike a
+    constant scalar).  Note the reduction is BOUNDED by ``1 - fsd^2``: for
+    ``fsd < 1`` the effective ``tau`` still grows without limit, so this
+    corrects the plane-parallel albedo bias by the physically-correct
+    inhomogeneity amount but does NOT drive a very thick cloud optically thin.
+    A genuine "clear sub-column" that caps a thick cloud's albedo (breaking the
+    saturation outright) is the ``fsd -> 1`` limit, where ``tau_eff -> gamma0``.
+    """
+    gamma0 = 2.0 / jnp.maximum(1.0 - g, 1.0e-6)   # g is a fixed numerics const
+    fsd2 = fsd * fsd
+    # Formed as (1 - fsd^2) + fsd^2 gamma0/(gamma0 + tau), NOT the equal
+    # 1 - fsd^2 tau/(gamma0 + tau): this builds the small residual DIRECTLY,
+    # avoiding the 1-minus-almost-1 fp32 cancellation for a thick cloud.
+    # 0 < gamma0/(gamma0 + tau) <= 1 (gamma0 > 0, tau >= 0) => chi_eff in
+    # [1 - fsd^2, 1], smooth and finite (no clip/where; caller validates
+    # fsd in [0, 1] via ExperimentConfig.validate_strict).
+    return (1.0 - fsd2) + fsd2 * gamma0 / (gamma0 + tau)
+
+
 def compute_cloud_properties(
     T: jnp.ndarray,
     p_full: jnp.ndarray,
@@ -572,14 +618,12 @@ def compute_cloud_properties(
     # Grid-mean water/ice paths: q * dp / g
     # These are grid-mean (not in-cloud) values, which is what RRTMGP expects
     # when treating each layer independently (no overlap assumption).
-    # The Cahalan et al. (1994) inhomogeneity factor scales the RADIATIVE water
-    # path down to account for horizontal cloud-water variability: a patchy real
-    # cloud is less reflective than a plane-parallel homogeneous layer of the
-    # same mean water (the plane-parallel albedo bias).  chi = 1.0 (default) is
-    # the legacy homogeneous path (byte-identical); chi < 1 thins the optics.
-    _chi = getattr(config, "cloud_inhomogeneity_factor", 1.0)
-    lwp = q_c * dp / constants.g * _chi
-    iwp = q_i * dp / constants.g * _chi
+    # Grid-mean water/ice paths [kg/m^2].  The sub-grid inhomogeneity
+    # correction (Cahalan scalar OR the tau-dependent two_region optic) is
+    # applied AFTER the effective radii below, because the two_region scheme
+    # needs the in-cloud optical depth = f(water path, r_eff).
+    lwp = q_c * dp / constants.g
+    iwp = q_i * dp / constants.g
 
     # Effective radii (constant for now): ``broadcast_to`` produces a
     # zero-copy logical view, whereas ``jnp.full_like(T, scalar)``
@@ -648,6 +692,38 @@ def compute_cloud_properties(
     else:
         r_eff_ice = jnp.broadcast_to(
             jnp.asarray(config.r_eff_ice, dtype=_scalar_dtype), T.shape,
+        )
+
+    # --- Sub-grid cloud-optics inhomogeneity (applied to the radiative paths) -
+    # Real clouds are horizontally PATCHY, so a plane-parallel HOMOGENEOUS layer
+    # carrying the same mean water is too reflective (the plane-parallel albedo
+    # bias).  This THINS the radiative lwp/iwp; SIGN: chi <= 1 (never brightens).
+    # Dispatch raises on an unknown scheme (fn-entry, static config value).
+    _inhom_scheme = getattr(config, "cloud_optics_inhomogeneity", "constant")
+    if _inhom_scheme == "constant":
+        # Cahalan et al. (1994) fixed scalar (legacy; chi=1 => byte-identical).
+        _chi = getattr(config, "cloud_inhomogeneity_factor", 1.0)
+        lwp = lwp * _chi
+        iwp = iwp * _chi
+    elif _inhom_scheme == "two_region":
+        # In-cloud optical depth tau = (3 Q_ext / 4) * WP_incloud / (rho_p r_eff)
+        # with Q_ext≈2 => coeff 1.5; WP_incloud = grid-mean WP / cf.  Apply the
+        # inhomogeneity factor PER PHASE, each from its OWN optical depth (a
+        # patchy LIQUID cloud must not thin a horizontally-uniform ICE layer).
+        # tau -> 0 => chi_eff -> 1 (no change).
+        cf_safe = jnp.clip(cf, _INHOM_CF_FLOOR, 1.0)
+        r_liq = jnp.maximum(r_eff_liq, _INHOM_R_EFF_FLOOR_M)
+        r_ice = jnp.maximum(r_eff_ice, _INHOM_R_EFF_FLOOR_M)
+        tau_liq = _TAU_GEOMETRIC_COEFF * (lwp / cf_safe) / (constants.rho_water * r_liq)
+        tau_ice = _TAU_GEOMETRIC_COEFF * (iwp / cf_safe) / (config.rho_cloud_ice * r_ice)
+        _fsd = config.cloud_fsd
+        _g = config.cloud_optics_asymmetry_g
+        lwp = lwp * _two_region_inhomogeneity_factor(tau_liq, _fsd, _g)
+        iwp = iwp * _two_region_inhomogeneity_factor(tau_ice, _fsd, _g)
+    else:
+        raise ValueError(
+            f"unknown cloud_optics_inhomogeneity {_inhom_scheme!r}; "
+            "expected 'constant' or 'two_region'"
         )
 
     return CloudProperties(

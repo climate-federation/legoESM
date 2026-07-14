@@ -576,7 +576,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[0.3,1.0] scaling the radiative cloud water path "
                              "(plane-parallel albedo bias). LOWER => thinner "
                              "optics => lower albedo. None=CloudConfig default 1.0 "
-                             "(homogeneous). ~0.7 is the observed correction.")
+                             "(homogeneous). ~0.7 is the observed correction. "
+                             "Only used when --cloud-optics-inhomogeneity=constant.")
+    parser.add_argument("--cloud-optics-inhomogeneity",
+                        dest="cloud_optics_inhomogeneity",
+                        choices=["constant", "two_region"], default="constant",
+                        help="Sub-grid cloud-optics inhomogeneity scheme: "
+                             "'constant' (Cahalan scalar chi, legacy default) or "
+                             "'two_region' (TAU-DEPENDENT Shonk-Hogan 2008 optic "
+                             "that breaks the plane-parallel tau-saturation a "
+                             "scalar cannot -- a thick cloud is reduced MORE than "
+                             "a thin one).")
+    parser.add_argument("--cloud-fsd", dest="cloud_fsd", type=float, default=None,
+                        help="Fractional std-dev of in-cloud water for the "
+                             "two_region optic [0,1] (Shonk-Hogan ~0.75; HIGHER "
+                             "=> thinner leaking sub-column => lower albedo). "
+                             "None=CloudConfig default 0.75.")
     parser.add_argument("--cloud-p-xr", dest="cloud_p_xr", type=float, default=None,
                         help="Xu-Randall cloud-fraction RH exponent p_xr (None="
                              "default 0.25; bounds 0.05..1.0). HIGHER => cloud "
@@ -1303,6 +1318,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
         cloud_rh_crit=args.cloud_rh_crit,
         cloud_inhomogeneity_factor=args.cloud_inhomogeneity_factor,
+        cloud_optics_inhomogeneity=args.cloud_optics_inhomogeneity,
+        cloud_fsd=args.cloud_fsd,
         cloud_p_xr=args.cloud_p_xr,
         cloud_alpha_xr=args.cloud_alpha_xr,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
