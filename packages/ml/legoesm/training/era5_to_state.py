@@ -11,9 +11,12 @@ Also provides a local Zarr cache to avoid repeated GCS downloads.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import shutil
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Sequence
 
 import numpy as np
 import jax.numpy as jnp
@@ -244,60 +247,148 @@ class TrainingERA5Config(NamedTuple):
 # Local Zarr cache
 # ---------------------------------------------------------------------------
 
+_CACHE_STORE_NAME = "era5_training_cache.zarr"
+# The completeness marker is written LAST, INSIDE the store dir, so it exists
+# iff the ``to_zarr`` finished.  Read-side keys on THIS, never on ``.zarr``
+# existence: a walltime-killed build leaves the dir + fill-value (NaN) chunks
+# but no marker, which the old existence-only check silently read as complete
+# (#942/#985 — silent data corruption, not an error).
+_CACHE_MARKER_NAME = ".cache_complete.json"
+
+
+def _read_cache_marker(cache_path: Path) -> dict | None:
+    """Return the completeness-marker dict, or ``None`` when the cache is
+    absent / interrupted (no marker => it must be rebuilt)."""
+    marker = cache_path / _CACHE_MARKER_NAME
+    if not marker.is_file():
+        return None
+    try:
+        return json.loads(marker.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _cache_is_complete(cache_path: Path, expected_n_time: int | None) -> bool:
+    """A cached store is trusted only if it carries the marker AND (when the
+    expected snapshot count is known) that count matches what was requested."""
+    marker = _read_cache_marker(cache_path)
+    if marker is None:
+        return False
+    if expected_n_time is not None and int(marker.get("n_time", -1)) != int(
+        expected_n_time
+    ):
+        logger.warning(
+            f"ERA5 cache {cache_path} holds n_time={marker.get('n_time')} but "
+            f"{expected_n_time} snapshots were requested; rebuilding."
+        )
+        return False
+    return True
+
+
 def ensure_local_cache(
     config: TrainingERA5Config,
     cache_dir: str | Path,
     years: tuple[int, int] = (2015, 2020),
+    *,
+    time_selection: Sequence[int] | None = None,
 ) -> Path:
-    """Download a subset of ERA5 to a local Zarr store.
+    """Materialise a subset of ERA5 to a local Zarr store, atomically.
 
-    Caches the specified year range with all configured variables
-    and levels.  Subsequent calls skip download if the store exists.
+    Two scoping modes:
 
-    Parameters
-    ----------
-    config : TrainingERA5Config
-    cache_dir : Path
-        Directory for the local cache.
-    years : tuple
-        (start_year, end_year) to cache.
+    * ``time_selection=None`` (default): cache the FULL ``years`` span with all
+      configured variables/levels (the year-span behaviour).
+    * ``time_selection=[abs_idx, ...]``: WINDOW-scoped — cache only the given
+      absolute time indices of the remote store (the snapshots the training
+      windows actually touch, +lead spillover), preserving the real ``time``
+      coordinate so the reader can select them back by timestamp.  ~0.5 TB
+      instead of ~10 TB for the AIMIP T106 workload (#985).
 
-    Returns
-    -------
-    Path to the local Zarr store.
+    Correctness (#942/#985): the build is atomic (write to a ``.building`` tmp
+    dir, then ``os.replace`` into place) and gated by a completeness marker
+    written last, so an interrupted build is rebuilt — never read as
+    fill-value NaNs.  Subsequent calls with a matching, complete store skip the
+    download.
+
+    Returns the path to the local Zarr store.
     """
+    cache_path = Path(cache_dir) / _CACHE_STORE_NAME
+    expected_n_time = (
+        len(time_selection) if time_selection is not None else None
+    )
 
-    cache_path = Path(cache_dir) / "era5_training_cache.zarr"
-    if cache_path.exists():
+    if _cache_is_complete(cache_path, expected_n_time):
         logger.info(f"Using cached ERA5 at {cache_path}")
         return cache_path
 
-    logger.info(f"Downloading ERA5 {years[0]}-{years[1]} to {cache_path}...")
+    if time_selection is not None:
+        # Window-scoped: subset the remote store to exactly the requested
+        # absolute snapshots (keeping the real ``time`` coord + only the
+        # pressure/surface/static vars the reader consumes).
+        logger.info(
+            f"Downloading {len(time_selection)} window-scoped ERA5 snapshots "
+            f"to {cache_path}..."
+        )
+        ds_full = open_era5_zarr(config.zarr_store)
+        ds_sub = ds_full.isel(time=list(int(i) for i in time_selection))
+        keep: list[str] = []
+        for name in (
+            list(config.pressure_variables)
+            + list(config.surface_variables)
+            + ["geopotential_at_surface"]
+        ):
+            r = resolve_var(ds_sub, name)
+            if r is not None and r in ds_sub and r not in keep:
+                keep.append(r)
+        ds = ds_sub[keep]
+    else:
+        logger.info(f"Downloading ERA5 {years[0]}-{years[1]} to {cache_path}...")
+        era5_cfg = ERA5Config(
+            zarr_store=config.zarr_store,
+            variables=config.pressure_variables,
+            levels=config.levels,
+            time_range=(f"{years[0]}-01-01", f"{years[1]}-12-31"),
+            dt_hours=config.dt_hours,
+        )
+        ds = create_era5_dataset(era5_cfg)
 
-    # Open remote
-    era5_cfg = ERA5Config(
-        zarr_store=config.zarr_store,
-        variables=config.pressure_variables,
-        levels=config.levels,
-        time_range=(f"{years[0]}-01-01", f"{years[1]}-12-31"),
-        dt_hours=config.dt_hours,
+        # Also grab surface variables
+        ds_full = open_era5_zarr(config.zarr_store)
+        ds_full = ds_full.sel(
+            time=slice(f"{years[0]}-01-01", f"{years[1]}-12-31")
+        )
+        for svar in config.surface_variables:
+            resolved = [v for v in [resolve_var(ds_full, svar)] if v]
+            for r in resolved:
+                if r in ds_full and r not in ds:
+                    ds[r] = ds_full[r]
+
+    # --- Atomic write: build to a tmp store, mark complete, then swap in. -----
+    # A kill mid-``to_zarr`` leaves only ``tmp_path`` (no marker at the final
+    # path), so the next call rebuilds instead of reading a torn store.
+    tmp_path = Path(cache_dir) / (_CACHE_STORE_NAME + ".building")
+    tmp_path.parent.mkdir(parents=True, exist_ok=True)
+    if tmp_path.exists():
+        shutil.rmtree(tmp_path)
+    ds.to_zarr(str(tmp_path), mode="w")
+    n_time = int(ds.sizes.get("time", 0))
+    # Marker LAST, inside the tmp store, so it is present iff the write finished.
+    (tmp_path / _CACHE_MARKER_NAME).write_text(
+        json.dumps(
+            {
+                "n_time": n_time,
+                "years": list(years),
+                "windowed": time_selection is not None,
+            }
+        )
     )
-    ds = create_era5_dataset(era5_cfg)
-
-    # Also grab surface variables
-    ds_full = open_era5_zarr(config.zarr_store)
-    ds_full = ds_full.sel(time=slice(f"{years[0]}-01-01", f"{years[1]}-12-31"))
-
-    for svar in config.surface_variables:
-        resolved = [v for v in [resolve_var(ds_full, svar)] if v]
-        for r in resolved:
-            if r in ds_full and r not in ds:
-                ds[r] = ds_full[r]
-
-    # Write to local Zarr
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    ds.to_zarr(str(cache_path), mode="w")
-    logger.info(f"Cached ERA5 to {cache_path}")
+    # Atomic swap: drop any stale (incomplete) final store, then rename.
+    # ponytail: rmtree+os.replace over a 2-phase commit — the tiny gap between
+    # them can only ever cost a rebuild (correct), never a silent-NaN read.
+    if cache_path.exists():
+        shutil.rmtree(cache_path)
+    os.replace(tmp_path, cache_path)
+    logger.info(f"Cached ERA5 to {cache_path} ({n_time} snapshots)")
     return cache_path
 
 

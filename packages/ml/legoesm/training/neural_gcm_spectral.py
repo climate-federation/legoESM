@@ -1631,19 +1631,27 @@ def load_training_data(
     # read stale for the others.  ensure_local_cache is idempotent (skips if the
     # store already exists), so only the first call pays the download.
     store = era5_config.zarr_store
-    # OPT-IN (default OFF -> byte-identical to the old GCS-every-epoch path):
-    # set LEGOESM_ERA5_LOCAL_CACHE=1 to materialise each span to a local zarr
-    # once and read it locally thereafter (#895, ~50 h/run).  Gated behind an
-    # env flag rather than on by default because the ensure_local_cache path is
-    # unexercised on this repo and its speedup + output compatibility must be
-    # validated on the target cluster (Derecho/GCS) — not reachable from CI.
     import os
-    if cache_dir and os.environ.get("LEGOESM_ERA5_LOCAL_CACHE"):
-        # Year-SCOPE the cache store.  ensure_local_cache keys only on path
-        # existence — it does NOT verify an existing store covers the requested
-        # years — so a shared cache_dir reused across runs/phases with different
-        # spans would silently read a stale/narrow subset (codex).  Give each
-        # distinct span its own subdir so the existence check is never stale.
+    # WINDOW-scoped cache (#985): supersedes the year-span cache for the AIMIP
+    # T106 workload — materialise ONLY the ~2,880 snapshots the training
+    # windows touch (~0.5 TB) instead of full 6-hourly year spans (~10 TB), and
+    # read them back BY TIMESTAMP.  The scoped store is built AFTER the absolute
+    # time indices are known (below), so the calendar is read from the REMOTE
+    # store here; ``LEGOESM_ERA5_WINDOW_CACHE=1`` opts in.
+    _window_cache = bool(
+        cache_dir and os.environ.get("LEGOESM_ERA5_WINDOW_CACHE")
+    )
+    # OPT-IN year-span cache (default OFF -> byte-identical to the GCS-every-
+    # epoch path): LEGOESM_ERA5_LOCAL_CACHE=1 materialises each YEAR span once
+    # and reads it locally thereafter (#895).  Superseded by the window cache
+    # above when both are set.
+    if not _window_cache and cache_dir and os.environ.get(
+        "LEGOESM_ERA5_LOCAL_CACHE"
+    ):
+        # Year-SCOPE the cache store.  ensure_local_cache now keys on a
+        # completeness marker (not bare path existence), so a walltime-killed
+        # build is rebuilt, not read as fill-value NaNs (#942/#985); the
+        # per-span subdir still keeps distinct spans from colliding.
         _yrs = _training_year_range(windows, config)
         _scoped = os.path.join(os.fspath(cache_dir), f"y{_yrs[0]}_{_yrs[1]}")
         store = str(ensure_local_cache(era5_config, _scoped, years=_yrs))
@@ -1763,23 +1771,62 @@ def load_training_data(
             f"opening Zarr store once, reading {len(time_indices)} snapshots)..."
         )
 
-    # Read lat/lon and pressure levels
-    lat = np.deg2rad(ds.lat.values.astype(np.float64))
-    lon = np.deg2rad(ds.lon.values.astype(np.float64))
+    # Real wall-clock timestamp per sample POSITION (index into time_indices).
+    # Used for ic_times in EVERY mode, and — in window-cache mode — to select
+    # snapshots from the scoped store by timestamp instead of absolute index.
+    try:
+        _full_times = np.array(ds.time.values, dtype="datetime64[ns]")
+        sample_times = [_full_times[t] for t in time_indices]
+    except Exception as exc:  # zarr store without a readable time coord
+        sample_times = None
+        logger.warning(
+            f"load_training_data: ds.time unavailable ({exc!r}); ic_times will "
+            f"be None (prescribed-forcing training needs it)."
+        )
+
+    # Window-scoped read store (#985): build the cache from the REMOTE store at
+    # exactly the (unique) touched indices, then read snapshots back BY
+    # TIMESTAMP.  Reading by timestamp — not by a remapped integer position — is
+    # robust to overlapping windows / target spillover that make time_indices
+    # non-unique: the scoped store holds each timestamp once and ``.sel`` finds
+    # it regardless of how many sample positions reference it.
+    read_by_time = False
+    read_ds = ds
+    if _window_cache:
+        if sample_times is None:
+            raise RuntimeError(
+                "LEGOESM_ERA5_WINDOW_CACHE needs a readable ds.time to scope "
+                "the cache by timestamp."
+            )
+        _uniq = sorted({int(t) for t in time_indices})
+        _yrs = _training_year_range(windows, config)
+        _scoped = os.path.join(os.fspath(cache_dir), f"ywin_{_yrs[0]}_{_yrs[1]}")
+        _cache_path = ensure_local_cache(
+            era5_config, _scoped, years=_yrs, time_selection=_uniq,
+        )
+        read_ds = open_era5_zarr(str(_cache_path))
+        read_by_time = True
+        logger.info(
+            f"Window-scoped ERA5 cache: {len(_uniq)} unique snapshots at "
+            f"{_cache_path}"
+        )
+
+    # Read lat/lon and pressure levels (from the store actually read).
+    lat = np.deg2rad(read_ds.lat.values.astype(np.float64))
+    lon = np.deg2rad(read_ds.lon.values.astype(np.float64))
     plev_hPa = np.array(era5_config.levels, dtype=np.float64)
     plev_Pa = np.sort(plev_hPa * 100.0)
-    level_dim = "level" if "level" in ds.dims else "pressure_level"
+    level_dim = "level" if "level" in read_ds.dims else "pressure_level"
 
     # Load surface geopotential (static, no time dim)
-    phis_var = resolve_var(ds, "geopotential_at_surface")
+    phis_var = resolve_var(read_ds, "geopotential_at_surface")
     if phis_var:
-        phis_era5 = ds[phis_var].values.astype(np.float32)
+        phis_era5 = read_ds[phis_var].values.astype(np.float32)
     else:
         phis_era5 = np.zeros((len(lat), len(lon)), dtype=np.float32)
 
-    def _load_one_snapshot(time_idx):
-        """Load one ERA5 snapshot and regrid to model grid."""
-        ds_t = ds.isel(time=time_idx)
+    def _load_one_snapshot(ds_t):
+        """Regrid one already-selected ERA5 time slice to the model grid."""
 
         def _get_3d(name):
             r = resolve_var(ds_t, name)
@@ -1801,10 +1848,10 @@ def load_training_data(
         def _get_2d(name):
             r = resolve_var(ds_t, name)
             if r is None:
-                r = resolve_var(ds, name)
+                r = resolve_var(read_ds, name)
                 if r is None:
                     return np.zeros((len(lat), len(lon)), dtype=np.float32)
-                return ds[r].values.squeeze().astype(np.float32)
+                return read_ds[r].values.squeeze().astype(np.float32)
             data = ds_t[r].values
             data = data.squeeze()
             while data.ndim > 2:
@@ -1823,15 +1870,21 @@ def load_training_data(
         )
         return era5_to_spectral_carry(era5, grid, sigma)
 
-    # Load all snapshots
+    # Load all snapshots.  Position ``j`` maps to absolute index
+    # ``time_indices[j]`` in the full store; window-cache mode selects the SAME
+    # snapshot from the scoped store by its wall-clock timestamp.
     import time as _time
     t0 = _time.time()
     carries = []
-    for i, tidx in enumerate(time_indices):
-        carries.append(_load_one_snapshot(tidx))
-        if (i + 1) % 50 == 0:
+    for j in range(len(time_indices)):
+        if read_by_time:
+            ds_t = read_ds.sel(time=sample_times[j])
+        else:
+            ds_t = read_ds.isel(time=time_indices[j])
+        carries.append(_load_one_snapshot(ds_t))
+        if (j + 1) % 50 == 0:
             elapsed = _time.time() - t0
-            logger.info(f"  Loaded {i+1}/{len(time_indices)} snapshots ({elapsed:.0f}s)")
+            logger.info(f"  Loaded {j+1}/{len(time_indices)} snapshots ({elapsed:.0f}s)")
 
     logger.info(f"Loaded {len(time_indices)} snapshots ({_time.time()-t0:.0f}s)")
 
@@ -1842,16 +1895,10 @@ def load_training_data(
     # lead in ``multi_step_hours``.  Downstream callers detect the
     # tuple form and run K chained 6-hour rollouts.
     # Wall-clock IC times (np.datetime64) per sample — consumed by the
-    # prescribed-surface-forcing path (``build_amip_sample_forcings``)
-    # to evaluate SST/sea-ice + the orbital calendar at each sample.
-    try:
-        _era5_times = np.array(ds.time.values, dtype="datetime64[ns]")
-    except Exception as exc:  # zarr store without a readable time coord
-        _era5_times = None
-        logger.warning(
-            f"load_training_data: ds.time unavailable ({exc!r}); "
-            f"ic_times will be None (prescribed-forcing training needs it)."
-        )
+    # prescribed-surface-forcing path (``build_amip_sample_forcings``) to
+    # evaluate SST/sea-ice + the orbital calendar at each sample.  ``sample_times``
+    # (position -> real timestamp) was computed up front from the full-store
+    # calendar, so it is correct in every cache mode.
     ic_states = []
     target_carries: list = []
     ic_times: list = []
@@ -1861,8 +1908,7 @@ def load_training_data(
         for d in range(n_w):
             ic_states.append(carry_to_spectral_state(carries[base + d], grid))
             ic_times.append(
-                _era5_times[time_indices[base + d]]
-                if _era5_times is not None else None
+                sample_times[base + d] if sample_times is not None else None
             )
             if multi_step:
                 targets_seq = tuple(
