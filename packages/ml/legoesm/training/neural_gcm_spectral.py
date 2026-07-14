@@ -57,8 +57,7 @@ from legoesm.grids.gaussian import (
     create_gaussian_grid,
     sh_analysis,
     sh_analysis_3d,
-    sh_analysis_oc2_3d,
-    sh_analysis_dmu_3d,
+    vordiv_from_uv_exact_3d,
 )
 from legoesm.grids.vertical import SigmaCoordinate, create_sigma_coordinate
 from legoesm.ml.sfno import SFNO, SFNOConfig
@@ -369,23 +368,15 @@ def carry_to_spectral_state(
     # Surface geopotential -> spectral
     phis_hat = sh_analysis(grid, phis)
 
-    # (u, v) -> (vor_hat, div_hat) via spectral curl/divergence
-    a = grid.radius
-    im_over_a = 1j * grid.ms.astype(jnp.float64) / a
-    one_over_a = 1.0 / a
-    cos_lat_3d = grid.cos_lat[:, None, None]
-
-    u_cos = u * cos_lat_3d
-    v_cos = v * cos_lat_3d
-
-    vor_hat = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, v_cos)
-        + one_over_a * sh_analysis_dmu_3d(grid, u_cos)
-    )
-    div_hat = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, v_cos)
-    )
+    # (u, v) -> (vor_hat, div_hat) via the EXACT left-inverse of
+    # the spectral wind synthesis (spectral_pe_to_grid / uv_from_vordiv_3d).
+    # The plain Bourke ``oc2``/``dmu`` analysis (vordiv_from_uv_3d) is NOT an
+    # exact left-inverse at the truncation boundary and amplifies pole-row
+    # wind error ~×21/pass at T85, which makes the WB2 eval round trip
+    # (era5 -A-> state -S-> carry -A-> state) explode (#976).
+    # ``vordiv_from_uv_exact_3d`` solves the per-m least-squares system so the
+    # carry<->state round trip is idempotent, pole rows included.
+    vor_hat, div_hat = vordiv_from_uv_exact_3d(grid, u, v)
 
     dims_3d = ("spectral", "level")
     dims_2d = ("spectral",)
