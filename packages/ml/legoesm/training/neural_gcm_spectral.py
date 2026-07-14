@@ -1805,12 +1805,36 @@ def load_training_data(
                 "LEGOESM_ERA5_WINDOW_CACHE needs a readable ds.time to scope "
                 "the cache by timestamp."
             )
+        from legoesm.training.era5_to_state import selection_fingerprint
         _uniq = sorted({int(t) for t in time_indices})
         _yrs = _training_year_range(windows, config)
-        _scoped = os.path.join(os.fspath(cache_dir), f"ywin_{_yrs[0]}_{_yrs[1]}")
-        _cache_path = ensure_local_cache(
-            era5_config, _scoped, years=_yrs, time_selection=_uniq,
+        # Fingerprint the EXACT selection + source config into BOTH the cache
+        # dir and its marker, so two different window sets that happen to share a
+        # year span + snapshot count never reuse each other's store (codex #985).
+        _fp = selection_fingerprint(_uniq, era5_config)
+        _scoped = os.path.join(
+            os.fspath(cache_dir), f"ywin_{_yrs[0]}_{_yrs[1]}_{_fp}",
         )
+
+        def _build_window_cache():
+            return ensure_local_cache(
+                era5_config, _scoped, years=_yrs,
+                time_selection=_uniq, fingerprint=_fp,
+            )
+
+        # Under a multi-rank launcher every rank runs this loader, so serialize
+        # the WRITE: rank 0 builds the store, the others wait at a barrier, then
+        # ALL open the finished (marker-complete) cache.  Without this the ranks
+        # race on the shared `.building` dir / os.replace (codex #985).  Single
+        # rank / no launcher -> mpi_rank_size() is (0, 1) and it just builds.
+        from legoesm.training.data_parallel import mpi_rank_size
+        _rank, _nproc = mpi_rank_size()
+        if _nproc > 1:
+            from mpi4py import MPI
+            if _rank == 0:
+                _build_window_cache()
+            MPI.COMM_WORLD.Barrier()
+        _cache_path = _build_window_cache()
         read_ds = open_era5_zarr(str(_cache_path))
         read_by_time = True
         logger.info(
@@ -1963,6 +1987,28 @@ def _resolve_dp_context(config):
     return True, rank, nproc, None
 
 
+def _dp_updates_per_epoch(chunk_sizes, nproc: int) -> int:
+    """Per-rank optimizer updates in ONE epoch under data-parallel sharding:
+    ``sum_chunks floor(chunk_size / nproc)`` (each rank does one update per
+    LOCAL sample; drop_remainder discards ``chunk_size % nproc``).
+
+    Raises if any chunk is smaller than the world size — a rank would then get
+    an empty shard and the epoch would do zero updates (silent no-op).  Used to
+    size the LR schedule to the real update count AND as the fail-fast guard.
+    """
+    sizes = [int(s) for s in chunk_sizes]
+    if not sizes:
+        raise ValueError("data_parallel: no chunks to train on.")
+    if min(sizes) < nproc:
+        raise ValueError(
+            f"data_parallel needs every chunk >= the world size ({nproc} "
+            f"ranks), but the smallest chunk has {min(sizes)} sample(s): with "
+            f"drop_remainder sharding a rank would get an empty shard and the "
+            f"epoch would do zero updates. Reduce ranks or raise chunk_windows."
+        )
+    return sum(s // nproc for s in sizes)
+
+
 def _train_spectral_loop(
     model: eqx.Module,
     make_physics_fn,
@@ -2083,7 +2129,40 @@ def _train_spectral_loop(
                     f"Curriculum lead {h}h has no loaded target "
                     f"(multi_step_hours={_leads_loaded})."
                 )
-    total_steps = max(1, n_epochs_total * max(1, n_samples_epoch))
+    # --- data-parallel context (#985), resolved BEFORE the optimizer so the
+    # warmup+cosine schedule is sized by the ACTUAL number of optimizer updates.
+    # Under DP each rank performs one update per LOCAL sample, i.e. only
+    # sum_chunks floor(chunk_size / nproc) updates per epoch — sizing the
+    # schedule by the unsharded sample count would leave the LR ~nproc x too
+    # high at the end of training.  Off / single-rank -> serial, byte-identical.
+    dp_on, dp_rank, dp_nproc, dp_comm = _resolve_dp_context(config)
+    _all_reduce_grad_mean = _global_sum_mpi = _shard_samples = None
+    if dp_on:
+        from legoesm.parallel.reductions import global_sum_mpi as _global_sum_mpi
+        from legoesm.training.data_parallel import (
+            all_reduce_grad_mean as _all_reduce_grad_mean,
+            shard_samples as _shard_samples,
+        )
+        _chunk_sizes = list(
+            getattr(chunk_loader, "chunk_sizes", None) or [n_samples_epoch]
+        )
+        _updates_per_epoch = _dp_updates_per_epoch(_chunk_sizes, dp_nproc)
+        _dropped = sum(s % dp_nproc for s in _chunk_sizes)
+        if _dropped:
+            logger.warning(
+                f"data_parallel drops {_dropped} remainder sample(s) per epoch "
+                f"(chunk sizes not divisible by {dp_nproc} ranks)."
+            )
+        logger.info(
+            f"Data-parallel training: rank {dp_rank}/{dp_nproc}; each chunk's "
+            f"samples sharded across ranks (drop_remainder), gradients averaged "
+            f"per step, checkpoints written by rank 0 only. "
+            f"{_updates_per_epoch} updates/epoch/rank."
+        )
+    else:
+        _updates_per_epoch = n_samples_epoch
+
+    total_steps = max(1, n_epochs_total * max(1, _updates_per_epoch))
     base_optimizer = create_optimizer(TrainingConfig(
         lr=config.lr,
         warmup_steps=config.warmup_steps,
@@ -2473,24 +2552,7 @@ def _train_spectral_loop(
     early_stop_patience = int(getattr(config, "early_stop_patience", 0) or 0)
     early_stop_min_delta = float(getattr(config, "early_stop_min_delta", 1.0e-3))
 
-    # --- data-parallel context (#985) ----------------------------------------
-    # When config.data_parallel AND a multi-rank MPI launcher is present, N
-    # ranks train the SAME replicated model on DISJOINT shards of each chunk's
-    # samples, averaging gradients every step.  nproc==1 (laptop / no launcher /
-    # flag off) -> serial fused step, byte-identical to the pre-#985 loop.
-    dp_on, dp_rank, dp_nproc, dp_comm = _resolve_dp_context(config)
-    _all_reduce_grad_mean = _global_sum_mpi = _shard_samples = None
-    if dp_on:
-        from legoesm.parallel.reductions import global_sum_mpi as _global_sum_mpi
-        from legoesm.training.data_parallel import (
-            all_reduce_grad_mean as _all_reduce_grad_mean,
-            shard_samples as _shard_samples,
-        )
-        logger.info(
-            f"Data-parallel training: rank {dp_rank}/{dp_nproc}; each chunk's "
-            f"samples sharded across ranks (drop_remainder), gradients averaged "
-            f"per step, checkpoints written by rank 0 only."
-        )
+    # (data-parallel context was resolved above, before the optimizer schedule.)
 
     if start_epoch >= n_epochs_total:
         logger.info(
@@ -2838,6 +2900,12 @@ def _make_chunk_loader(config, grid, sigma, cache_dir,
     # Number of chunks per epoch (constant): the mid-epoch checkpoint reads
     # this to normalise the last chunk of an epoch to the next epoch's start.
     _chunks.n_chunks = len(groups)
+    # Per-chunk sample counts (deterministic from the window partition): the DP
+    # path sizes the LR schedule by the exact per-rank update count and guards
+    # against a chunk smaller than the world size (#985).
+    _chunks.chunk_sizes = [
+        sum(nd * _SNAPSHOTS_PER_DAY for (_, _, nd) in g) for g in groups
+    ]
     return _chunks, n_total
 
 

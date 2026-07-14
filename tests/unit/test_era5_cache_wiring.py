@@ -15,7 +15,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import xarray as xr
-
 from legoesm.training import era5_to_state as e2s
 from legoesm.training.era5_to_state import (
     TrainingERA5Config,
@@ -156,3 +155,25 @@ def test_window_scoped_cache_subsets_and_preserves_timestamps(tmp_path, _patched
     # Static field carried through; marker records the scoped count.
     assert "z_sfc" in cached
     assert _read_cache_marker(path)["n_time"] == len(sel)
+
+
+def test_window_cache_fingerprint_distinguishes_equal_count_selections(
+    tmp_path, _patched_remote
+):
+    # #985: two DIFFERENT window selections with the SAME snapshot count must
+    # NOT reuse each other's store (that would train on the wrong snapshots).
+    from legoesm.training.era5_to_state import selection_fingerprint
+    _full, _calls = _patched_remote
+    cfg = TrainingERA5Config()
+    sel_a, sel_b = [0, 1, 2, 3], [10, 11, 12, 13]      # same count, different times
+    fp_a = selection_fingerprint(sel_a, cfg)
+    fp_b = selection_fingerprint(sel_b, cfg)
+    assert fp_a != fp_b
+    path = ensure_local_cache(
+        cfg, tmp_path / "c", years=(2015, 2015),
+        time_selection=sel_a, fingerprint=fp_a,
+    )
+    # The store built for sel_a is complete for sel_a but REJECTED for sel_b
+    # (same n_time, wrong fingerprint) -> a rebuild, not a silent wrong read.
+    assert _cache_is_complete(path, len(sel_a), fp_a)
+    assert not _cache_is_complete(path, len(sel_b), fp_b)

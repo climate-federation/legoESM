@@ -15,8 +15,9 @@ import json
 import logging
 import os
 import shutil
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, NamedTuple, Sequence
+from typing import Any, NamedTuple
 
 import numpy as np
 import jax.numpy as jnp
@@ -268,9 +269,17 @@ def _read_cache_marker(cache_path: Path) -> dict | None:
         return None
 
 
-def _cache_is_complete(cache_path: Path, expected_n_time: int | None) -> bool:
-    """A cached store is trusted only if it carries the marker AND (when the
-    expected snapshot count is known) that count matches what was requested."""
+def _cache_is_complete(
+    cache_path: Path,
+    expected_n_time: int | None,
+    expected_fingerprint: str | None = None,
+) -> bool:
+    """A cached store is trusted only if it carries the marker AND matches the
+    request: the snapshot count AND (for window-scoped caches) the fingerprint
+    of the exact selected timestamps + source-store + variable config.  The
+    fingerprint guard stops two DIFFERENT window sets with the same snapshot
+    count (e.g. distinct chunks in the same year span) from silently reusing
+    each other's store — a data-integrity failure, not just a stale read."""
     marker = _read_cache_marker(cache_path)
     if marker is None:
         return False
@@ -282,7 +291,36 @@ def _cache_is_complete(cache_path: Path, expected_n_time: int | None) -> bool:
             f"{expected_n_time} snapshots were requested; rebuilding."
         )
         return False
+    if expected_fingerprint is not None and str(
+        marker.get("fingerprint", "")
+    ) != str(expected_fingerprint):
+        logger.warning(
+            f"ERA5 cache {cache_path} fingerprint {marker.get('fingerprint')!r} "
+            f"!= requested {expected_fingerprint!r}; rebuilding (different "
+            f"window selection or variable set)."
+        )
+        return False
     return True
+
+
+def selection_fingerprint(
+    time_selection: Sequence[int], config: TrainingERA5Config
+) -> str:
+    """Short stable hash of the EXACT window selection + source-store + variable
+    config.  Used as the window-cache identity so two different selections (even
+    with the same snapshot count / year span) never collide on one store."""
+    import hashlib
+
+    src = repr(
+        (
+            tuple(int(i) for i in time_selection),
+            config.zarr_store,
+            tuple(config.pressure_variables),
+            tuple(config.surface_variables),
+            tuple(config.levels),
+        )
+    )
+    return hashlib.blake2b(src.encode(), digest_size=8).hexdigest()
 
 
 def ensure_local_cache(
@@ -291,6 +329,7 @@ def ensure_local_cache(
     years: tuple[int, int] = (2015, 2020),
     *,
     time_selection: Sequence[int] | None = None,
+    fingerprint: str | None = None,
 ) -> Path:
     """Materialise a subset of ERA5 to a local Zarr store, atomically.
 
@@ -317,7 +356,7 @@ def ensure_local_cache(
         len(time_selection) if time_selection is not None else None
     )
 
-    if _cache_is_complete(cache_path, expected_n_time):
+    if _cache_is_complete(cache_path, expected_n_time, fingerprint):
         logger.info(f"Using cached ERA5 at {cache_path}")
         return cache_path
 
@@ -379,6 +418,7 @@ def ensure_local_cache(
                 "n_time": n_time,
                 "years": list(years),
                 "windowed": time_selection is not None,
+                "fingerprint": fingerprint,
             }
         )
     )

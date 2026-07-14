@@ -37,6 +37,26 @@ def test_dp_on_when_flag_and_multirank(monkeypatch):
     assert _resolve_dp_context(SimpleNamespace(data_parallel=True)) == (True, 3, 4, None)
 
 
+def test_dp_updates_per_epoch_sums_floors():
+    # The LR schedule must be sized by the REAL per-rank update count under
+    # sharding: sum_chunks floor(chunk_size / nproc), not the unsharded total
+    # (#985 -- else the cosine schedule runs ~nproc x too long).
+    from legoesm.training.neural_gcm_spectral import _dp_updates_per_epoch
+    assert _dp_updates_per_epoch([10, 8, 9], 4) == 6   # 2 + 2 + 2
+    assert _dp_updates_per_epoch([16, 16], 4) == 8
+    assert _dp_updates_per_epoch([100], 1) == 100      # nproc==1 identity
+
+
+def test_dp_updates_per_epoch_raises_on_undersized_chunk():
+    # A chunk smaller than the world size would hand a rank an empty shard ->
+    # zero updates for a whole epoch; fail fast instead of silently no-op'ing.
+    from legoesm.training.neural_gcm_spectral import _dp_updates_per_epoch
+    with pytest.raises(ValueError, match="world size"):
+        _dp_updates_per_epoch([10, 3], 4)
+    with pytest.raises(ValueError):
+        _dp_updates_per_epoch([], 2)
+
+
 def test_mpi_rank_size_no_launcher_is_single():
     # With no multi-rank launcher env, discovery returns (0, 1) so callers stay
     # on their serial path.
