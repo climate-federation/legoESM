@@ -1276,13 +1276,17 @@ class ModelDriver:
             if cfg.dycore.discretization == "spectral":
                 # The spectral state holds prognostics as SH coefficients,
                 # not grid-point Fields.  Forward-transform the grid-space
-                # ERA5 carry: (u, v) -> (vor_hat, div_hat) via the validated
-                # ``vordiv_from_uv_3d`` (inverse of the dycore's
-                # ``uv_from_vordiv_3d``); T/ln(p_s)/phis via ``sh_analysis``.
+                # ERA5 carry: (u, v) -> (vor_hat, div_hat) via the EXACT
+                # left-inverse of the dycore's ``uv_from_vordiv_3d`` synthesis
+                # (``vordiv_from_uv_exact_3d``, #976).  The plain Bourke
+                # ``vordiv_from_uv_3d`` seeds a pole-row artifact at n=n_max
+                # into the IC; the exact inverse keeps the winds clean so the
+                # spectral IC matches the ERA5 winds, pole rows included.
+                # T/ln(p_s)/phis via ``sh_analysis``.
                 from legoesm.grids.gaussian import (
-                    vordiv_from_uv_3d, sh_analysis_3d, sh_analysis,
+                    vordiv_from_uv_exact_3d, sh_analysis_3d, sh_analysis,
                 )
-                vor_hat, div_hat = vordiv_from_uv_3d(
+                vor_hat, div_hat = vordiv_from_uv_exact_3d(
                     self.grid, carry.u, carry.v
                 )
                 T_hat = sh_analysis_3d(self.grid, carry.T)
