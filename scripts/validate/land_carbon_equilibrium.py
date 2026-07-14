@@ -153,7 +153,7 @@ def build_pixel_config(pft: str, texture: str, freeze_thaw: bool,
                        n_layers: int, soil_depth: float, biome: str,
                        nsc_gated_respiration: bool = False,
                        cold_deciduous_dormancy: bool = False,
-                       nsc_ref_labile_frac: float = CarbonConfig().nsc_ref_labile_frac,
+                       nsc_reserve_days: float = CarbonConfig().nsc_reserve_days,
                        r_maint_floor_frac: float = CarbonConfig().r_maint_floor_frac,
                        freeze_dormancy_threshold_K: float = (
                            CarbonConfig().freeze_dormancy_threshold_K),
@@ -172,7 +172,7 @@ def build_pixel_config(pft: str, texture: str, freeze_thaw: bool,
         nsc_gated_respiration=nsc_gated_respiration,
         cold_deciduous_dormancy=cold_deciduous_dormancy,
         cold_deciduous=is_cold_deciduous(pft),
-        nsc_ref_labile_frac=nsc_ref_labile_frac,
+        nsc_reserve_days=nsc_reserve_days,
         r_maint_floor_frac=r_maint_floor_frac,
         freeze_dormancy_threshold_K=freeze_dormancy_threshold_K,
         **_biome_carbon_init(biome, woody, row["LCMA"]),
@@ -524,11 +524,10 @@ def main(argv=None):
                    help="Enable cold-deciduous freeze dormancy (Mechanism 2); "
                         "PFT-scoped via is_cold_deciduous, so it only affects "
                         "larch / arctic-grass / boreal-shrub pixels.")
-    p.add_argument("--nsc-ref-labile-frac", type=float,
-                   default=CarbonConfig().nsc_ref_labile_frac,
-                   help="NSC-gate reference: labile as a fraction of live biomass "
-                        "at which R_maint is unthrottled (tune to avoid biting "
-                        "healthy plants).")
+    p.add_argument("--nsc-reserve-days", type=float,
+                   default=CarbonConfig().nsc_reserve_days,
+                   help="NSC gate: days of maintenance-respiration demand the "
+                        "labile reserve must cover before R_maint throttles.")
     p.add_argument("--r-maint-floor-frac", type=float,
                    default=CarbonConfig().r_maint_floor_frac,
                    help="NSC-gate floor: basal R_maint fraction at full depletion.")
@@ -556,7 +555,7 @@ def main(argv=None):
             pft, texture, ft, args.n_layers, args.soil_depth, biome,
             nsc_gated_respiration=args.nsc_gated_respiration,
             cold_deciduous_dormancy=args.cold_deciduous_dormancy,
-            nsc_ref_labile_frac=args.nsc_ref_labile_frac,
+            nsc_reserve_days=args.nsc_reserve_days,
             r_maint_floor_frac=args.r_maint_floor_frac,
             freeze_dormancy_threshold_K=args.freeze_dormancy_threshold_k)
         annual, _fs, final_carbon = run_pixel(

@@ -651,23 +651,29 @@ class TestArcticProductivityRescue(unittest.TestCase):
     default OFF -> byte-identical; ON they throttle winter maintenance
     respiration so a starved high-latitude column survives."""
 
-    def test_nsc_respiration_factor_throttles_and_saturates(self):
+    def test_nsc_respiration_factor_reserve_days_and_selectivity(self):
         cfg = _default_config(scheme="differland", nsc_gated_respiration=True,
-                              nsc_ref_labile_frac=0.02, r_maint_floor_frac=0.10)
-        C_root, C_wood = 100.0, 800.0
+                              nsc_reserve_days=10.0, r_maint_floor_frac=0.10)
 
-        def f(cl, cf=100.0):
+        def f(cl, cf=100.0, cr=100.0, cw=800.0):
             return float(_nsc_respiration_factor(
-                jnp.asarray(cl), jnp.asarray(cf), jnp.asarray(C_root),
-                jnp.asarray(C_wood), cfg))
+                jnp.asarray(cl), jnp.asarray(cf), jnp.asarray(cr),
+                jnp.asarray(cw), cfg))
 
-        ref = 0.02 * (100.0 + C_root + C_wood)           # 20 gC/m2
-        self.assertAlmostEqual(f(0.0), 0.10, places=6)   # empty reserve -> floor
-        self.assertAlmostEqual(f(ref), 1.0, places=6)    # saturates at reference
-        self.assertAlmostEqual(f(10 * ref), 1.0, places=6)  # stays 1 above
-        self.assertTrue(0.10 < f(ref / 2) < 1.0)         # monotone between
-        # Winter-leafless robustness: C_fol=0, still gates root+wood off (the
-        # foliage-only reference would collapse here and leave the drain ungated).
+        # r_maint_demand = 0.002*100 + 0.0008*100 + 2e-5*800 = 0.296 gC/day;
+        # reserve_days = C_lab/0.296; saturates at reserve_days >= 10 (C_lab>=2.96).
+        demand = 0.002 * 100.0 + 0.0008 * 100.0 + 2e-5 * 800.0   # 0.296
+        c_sat = 10.0 * demand                                    # 2.96 gC (= 10 days)
+        self.assertAlmostEqual(f(0.0), 0.10, places=6)          # empty reserve -> floor
+        self.assertAlmostEqual(f(c_sat), 1.0, places=6)         # 10 days -> saturated
+        self.assertAlmostEqual(f(10 * c_sat), 1.0, places=6)    # stays 1 above
+        self.assertTrue(0.10 < f(c_sat / 2) < 1.0)              # monotone between
+        # SELECTIVITY: a HEALTHY tree (huge inert C_wood, modest reserve) still
+        # reads many reserve days -> f_nsc ~ 1 (NOT throttled).  The raw-biomass
+        # reference wrongly throttled it (this is the temperate/tropical fix).
+        self.assertAlmostEqual(f(50.0, cw=10000.0), 1.0, places=6)
+        # Winter-leafless robustness: C_fol=0 (root+wood still set the demand) and
+        # an empty reserve -> floor (no 0/0).
         self.assertAlmostEqual(f(0.0, cf=0.0), 0.10, places=6)
 
     def test_cold_deciduous_dormancy_factor_zeros_when_frozen(self):
@@ -692,7 +698,7 @@ class TestArcticProductivityRescue(unittest.TestCase):
         # (proves the static gate leaves the pre-change numerics untouched).
         state = _make_carbon_state(shape=(1,))
         base = _default_config(scheme="differland")          # gates default off
-        pert = base._replace(nsc_ref_labile_frac=0.5, r_maint_floor_frac=0.9,
+        pert = base._replace(nsc_reserve_days=99.0, r_maint_floor_frac=0.9,
                              freeze_dormancy_threshold_K=250.0,
                              dormancy_transition_width_K=8.0,
                              leaf_bootstrap_lai=1.5, leaf_bootstrap_frac=0.3)
@@ -708,7 +714,7 @@ class TestArcticProductivityRescue(unittest.TestCase):
         depleted = _make_carbon_state(shape=(1,), C_lab=jnp.full(1, 1.0))
         off = _default_config(scheme="differland", nsc_gated_respiration=False)
         on = _default_config(scheme="differland", nsc_gated_respiration=True,
-                             nsc_ref_labile_frac=0.02, r_maint_floor_frac=0.10)
+                             nsc_reserve_days=10.0, r_maint_floor_frac=0.10)
         s_off, _ = self._step(off, depleted, sw=0.0, T=280.0, beta=0.1, doy=15.0)
         s_on, flux_on = self._step(on, depleted, sw=0.0, T=280.0, beta=0.1, doy=15.0)
         tot = lambda s: sum(float(getattr(s, f).sum()) for f in s._fields)
@@ -724,9 +730,13 @@ class TestArcticProductivityRescue(unittest.TestCase):
         # (spring has nothing to regrow from -> death spiral); with the gate ON,
         # R_maint throttles as C_lab depletes, so the reserve is PRESERVED.
         # Deterministic and non-vacuous: fails if the gate does not protect C_lab.
-        def winter(cfg, n=400):
+        def winter(cfg, n=15):
+            # Start DEPLETED: C_lab=3 gC is only ~9 days of the maintenance demand
+            # (< nsc_reserve_days=10), so the reserve-days gate is engaged from the
+            # first step -- a healthy C_lab would read many reserve days and (by
+            # design) NOT throttle.
             s0 = _make_carbon_state(
-                shape=(1,), C_lab=jnp.full(1, 40.0), C_fol=jnp.full(1, 80.0),
+                shape=(1,), C_lab=jnp.full(1, 3.0), C_fol=jnp.full(1, 80.0),
                 C_root=jnp.full(1, 120.0), C_wood=jnp.full(1, 4000.0))
 
             def body(_i, s):
@@ -743,12 +753,12 @@ class TestArcticProductivityRescue(unittest.TestCase):
                                           nsc_gated_respiration=False))
         clab_on = winter(_default_config(scheme="differland",
                                          nsc_gated_respiration=True,
-                                         nsc_ref_labile_frac=0.02,
+                                         nsc_reserve_days=10.0,
                                          r_maint_floor_frac=0.10))
-        # Gate ON preserves strictly more reserve, and OFF drains it meaningfully
-        # (both start at 40 gC) -- so the assertion actually exercises the deficit.
+        # ON drains the depleted reserve strictly slower than OFF; OFF drains most
+        # of it over the window (non-vacuous; both start at 3 gC).
         self.assertGreater(clab_on, clab_off)
-        self.assertLess(clab_off, 36.0)
+        self.assertLess(clab_off, 2.5)
 
     def test_cold_dormancy_gates_the_gpp_override(self):
         # codex P1: the coupled/archetype path passes a nonzero Farquhar
@@ -780,7 +790,7 @@ class TestArcticProductivityRescue(unittest.TestCase):
                 scheme="differland", r_maint_floor_frac=1.5))
         with self.assertRaises(ValueError):
             _nsc_respiration_factor(one, one, one, one, _default_config(
-                scheme="differland", nsc_ref_labile_frac=0.0))
+                scheme="differland", nsc_reserve_days=0.0))
 
     def test_cold_deciduous_dormancy_rejects_nonpositive_width(self):
         # codex P2: zero width -> 0/0 NaN at T==threshold; negative reverses it.

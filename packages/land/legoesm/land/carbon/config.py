@@ -55,7 +55,7 @@ __param_spec__ = {
             "r_maint_fol": {"units": "day^-1", "bounds": (0.00066, 0.006), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "recalibrated to observed cross-biome CUE ~0.45 (He et al. 2018; Collalti & Prentice 2019); DifferLand bulk maintenance closure", "shape": None},
             "r_maint_root": {"units": "day^-1", "bounds": (0.000264, 0.0024), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "recalibrated to observed cross-biome CUE ~0.45 (He et al. 2018; Collalti & Prentice 2019); DifferLand bulk maintenance closure", "shape": None},
             "r_maint_wood": {"units": "day^-1", "bounds": (6.6e-06, 6e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "recalibrated to observed cross-biome CUE ~0.45 (He et al. 2018; Collalti & Prentice 2019); DifferLand bulk maintenance closure", "shape": None},
-            "nsc_ref_labile_frac": {"units": "1", "bounds": (0.005, 0.1), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "labile/NSC as a fraction of live biomass at which maintenance respiration is unthrottled; respiratory downregulation under substrate limitation (Atkin & Tjoelker 2003)", "shape": None},
+            "nsc_reserve_days": {"units": "day", "bounds": (1.0, 60.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "labile-reserve adequacy: days of maintenance-respiration demand the NSC reserve must cover before the gate throttles; respiratory downregulation under substrate limitation (Atkin & Tjoelker 2003)", "shape": None, "legacy_name": "nsc_ref_labile_frac"},
             "r_maint_floor_frac": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "basal maintenance-respiration floor retained under full NSC depletion (Atkin & Tjoelker 2003)", "shape": None},
             "freeze_dormancy_threshold_K": {"units": "K", "bounds": (263.0, 278.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "cold-deciduous winter-dormancy onset temperature (~0 degC); larch/tundra phenology", "shape": None},
             "leaf_bootstrap_lai": {"units": "1", "bounds": (0.1, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "minimum leaf area a cold-deciduous plant regrows from labile in the growing season to escape the 0-leaf GPP lock (larch/tundra leaf-out)", "shape": None},
@@ -129,16 +129,19 @@ class CarbonConfig(NamedTuple):
     # Two mechanisms that fix the boreal/tundra carbon death spiral (annual GPP <
     # annual R_maint -> biomass -> 0).  Both default OFF -> byte-identical.
     # Mechanism 1 -- NSC/substrate-gated maintenance respiration (Atkin &
-    # Tjoelker 2003): as the labile reserve C_lab depletes relative to LIVE
-    # biomass, R_maint throttles toward a floor instead of cannibalising
-    # structural pools to death (carbon_cycle._nsc_respiration_factor).
+    # Tjoelker 2003): when the labile reserve C_lab no longer covers a few days of
+    # the maintenance DEMAND (rate-weighted, temperature-independent), R_maint
+    # throttles toward a floor -- SELECTIVE, a healthy tree's large inert wood
+    # store does not trigger it (carbon_cycle._nsc_respiration_factor).
     nsc_gated_respiration: bool = False
-    nsc_ref_labile_frac: float = 0.02   # C_lab_ref = this*(C_fol+C_root+C_wood) [-]
+    nsc_reserve_days: float = 10.0      # C_lab must cover this many days of R_maint demand [days]
     r_maint_floor_frac: float = 0.10    # f_nsc floor as C_lab -> 0 [-]
     # Mechanism 2 -- cold-deciduous freeze dormancy: for cold-deciduous PFTs
     # (surface_params.is_cold_deciduous: larch / arctic grass / boreal shrub),
-    # zero foliar GPP and foliar R_maint below a freeze threshold -- the larch
-    # leaf-drop strategy (carbon_cycle._cold_deciduous_dormancy_factor).
+    # below a freeze threshold suppress GPP and WHOLE-PLANT R_maint (foliar +
+    # root + wood -- a dormant larch's cambium and frozen-soil roots are
+    # quiescent), so the reserve survives winter for the spring leaf bootstrap
+    # (carbon_cycle._cold_deciduous_dormancy_factor).
     # ``cold_deciduous`` is the per-PFT trait; ``cold_deciduous_dormancy`` the
     # master enable (both must be True for the gate to engage).
     cold_deciduous_dormancy: bool = False

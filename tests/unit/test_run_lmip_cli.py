@@ -94,13 +94,13 @@ def test_arctic_productivity_flags_flow_to_config():
     cfg = build_config_from_args(_parse_args([
         "--lat", "60.0",
         "--nsc-gated-respiration", "--cold-deciduous-dormancy", "--cold-deciduous",
-        "--nsc-ref-labile-frac", "0.03", "--r-maint-floor-frac", "0.15",
+        "--nsc-reserve-days", "12.0", "--r-maint-floor-frac", "0.15",
         "--freeze-dormancy-threshold-k", "271.0"]))
     cc = cfg.land.carbon
     assert cc.nsc_gated_respiration is True
     assert cc.cold_deciduous_dormancy is True
     assert cc.cold_deciduous is True
-    assert cc.nsc_ref_labile_frac == 0.03
+    assert cc.nsc_reserve_days == 12.0
     assert cc.r_maint_floor_frac == 0.15
     assert cc.freeze_dormancy_threshold_K == 271.0
     d = build_config_from_args(_parse_args(["--lat", "60.0"])).land.carbon

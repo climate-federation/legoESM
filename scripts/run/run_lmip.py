@@ -209,7 +209,7 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
             cwd_humification_eff=args.cwd_humification_eff,
             Q10_het_exp=args.carbon_q10_het,
             nsc_gated_respiration=args.nsc_gated_respiration,
-            nsc_ref_labile_frac=args.nsc_ref_labile_frac,
+            nsc_reserve_days=args.nsc_reserve_days,
             r_maint_floor_frac=args.r_maint_floor_frac,
             cold_deciduous_dormancy=args.cold_deciduous_dormancy,
             cold_deciduous=args.cold_deciduous,
@@ -639,11 +639,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Throttle maintenance respiration as the labile reserve "
                         "depletes (Atkin & Tjoelker 2003), breaking the boreal/"
                         "tundra death spiral. Default off (byte-identical).")
-    p.add_argument("--nsc-ref-labile-frac", type=float,
-                   default=CarbonConfig().nsc_ref_labile_frac,
-                   help="Labile/NSC as a fraction of live biomass at which "
-                        "R_maint is unthrottled (C_lab_ref = this*(C_fol+C_root+"
-                        "C_wood)); the NSC gate engages below it.")
+    p.add_argument("--nsc-reserve-days", type=float,
+                   default=CarbonConfig().nsc_reserve_days,
+                   help="NSC gate: days of maintenance-respiration demand the "
+                        "labile reserve must cover before R_maint throttles "
+                        "(selective; a healthy tree's inert wood does not trigger it).")
     p.add_argument("--r-maint-floor-frac", type=float,
                    default=CarbonConfig().r_maint_floor_frac,
                    help="Basal fraction of R_maint retained at full NSC "

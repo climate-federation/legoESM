@@ -326,40 +326,41 @@ def _nsc_respiration_factor(
     ``[r_maint_floor_frac, 1]``.
 
     Respiratory downregulation under carbon starvation (Atkin & Tjoelker 2003):
-    when the labile / non-structural-carbon reserve ``C_lab`` is depleted
-    relative to a fraction of LIVE BIOMASS, maintenance respiration throttles
-    toward a small basal floor instead of demanding the full biomass-proportional
-    amount and cannibalising structural pools to death::
+    maintenance respiration throttles toward a small basal floor when the labile
+    reserve ``C_lab`` no longer covers a few days of the maintenance DEMAND::
 
-        C_lab_ref = nsc_ref_labile_frac * (C_fol + C_root + C_wood)
+        r_maint_demand = r_maint_fol*C_fol + r_maint_root*C_root + r_maint_wood*C_wood
+        reserve_days   = C_lab / r_maint_demand              # at the reference T
         f_nsc = r_maint_floor_frac
-                + (1 - r_maint_floor_frac) * smoothstep(C_lab / C_lab_ref)
+                + (1 - r_maint_floor_frac) * smoothstep(reserve_days / nsc_reserve_days)
 
-    ``smoothstep`` is the C1 Hermite ``x^2 (3 - 2x)`` on a ``[0, 1]``-clamped
-    argument -> differentiable; ``f_nsc -> 1`` for ample reserve
-    (``C_lab >= C_lab_ref``; healthy plants unaffected -> temperate/tropical
-    no-regression) and ``-> r_maint_floor_frac`` as ``C_lab -> 0``.
-
-    The reference scales with LIVE BIOMASS, not foliage: a winter-leafless plant
-    has ``C_fol -> 0``, so a foliage-only reference would collapse and leave the
-    root+wood winter drain ungated (the exact death-spiral case).  ``C_root`` /
-    ``C_wood`` persist through the leafless season and keep the reference finite.
-    A ``1e-10`` epsilon guards ``ref`` so a fully bare column yields the floor,
-    not ``0/0``.
+    The reference is the rate-weighted maintenance DEMAND, not raw biomass, and it
+    is TEMPERATURE-INDEPENDENT (the ``r_maint_*`` at ``T_ref_ra``, no
+    ``temp_factor``) so the gate throttles by RESERVE ADEQUACY, not season -- a
+    cold winter's low instantaneous R_maint must not mask a depleting reserve.
+    This is what makes the gate SELECTIVE where a raw-biomass reference was NOT:
+    the inert wood store, weighted by its tiny ``r_maint_wood``, contributes only
+    modestly, so a HEALTHY tree (large ``C_wood`` but small ``C_lab`` / biomass)
+    still reads many reserve days -> ``f_nsc ~ 1`` (no temperate/tropical
+    regression), while a STARVED plant (``C_lab -> 0``) reads < 1 day -> throttled
+    to the floor.  ``smoothstep`` is the C1 Hermite ``x^2 (3 - 2x)`` ->
+    differentiable; a ``1e-10`` epsilon guards the demand (a fully bare column
+    yields the floor, not ``0/0``).
     """
     # Fail-early on the STATIC config values (dispatch-hardening; the
-    # __param_spec__ bounds only constrain training, so a direct
-    # CarbonConfig(r_maint_floor_frac=1.5) would otherwise give f_nsc > 1 and
-    # INCREASE R_maint, violating the pure-reduction invariant).  ``is_concrete``
-    # so a sigmoid-constrained TRACED leaf in the calibration path is skipped.
+    # __param_spec__ bounds only constrain training).  ``is_concrete`` so a
+    # sigmoid-constrained TRACED leaf in the calibration path is skipped.
     floor = config.r_maint_floor_frac
     if is_concrete(floor) and not 0.0 <= floor <= 1.0:
         raise ValueError(f"r_maint_floor_frac must be in [0, 1], got {floor!r}.")
-    ref_frac = config.nsc_ref_labile_frac
-    if is_concrete(ref_frac) and not ref_frac > 0.0:
-        raise ValueError(f"nsc_ref_labile_frac must be > 0, got {ref_frac!r}.")
-    ref = ref_frac * (C_fol + C_root + C_wood)
-    x = jnp.clip(C_lab / jnp.maximum(ref, 1e-10), 0.0, 1.0)
+    days = config.nsc_reserve_days
+    if is_concrete(days) and not days > 0.0:
+        raise ValueError(f"nsc_reserve_days must be > 0, got {days!r}.")
+    r_maint_demand = (config.r_maint_fol * C_fol
+                      + config.r_maint_root * C_root
+                      + config.r_maint_wood * C_wood)      # gC/m2/day at T_ref_ra
+    reserve_days = C_lab / jnp.maximum(r_maint_demand, 1e-10)
+    x = jnp.clip(reserve_days / days, 0.0, 1.0)
     smoothstep = x * x * (3.0 - 2.0 * x)
     return floor + (1.0 - floor) * smoothstep
 
@@ -742,12 +743,16 @@ def step_carbon_differland(
     # temperature, UNIFORMLY lowering R_maint and RAISING NPP.
     temp_factor_ra = jnp.exp(config.Q10_exp * (T - config.T_ref_ra))
     # High-latitude productivity rescue (opt-in, static-flag feature gates).
-    # Mechanism 1 (NSC gate) throttles ALL maintenance terms as the labile
-    # reserve depletes; Mechanism 2 (cold-deciduous dormancy) additionally zeros
-    # the FOLIAR term when frozen.  f_nsc == 1.0 and d == 1.0 when off =>
-    # byte-identical to the ungated (r_maint_fol*C_fol + ...)·temp_factor_ra.
-    # Sign (carbon, positive-out): R_maint is a LOSS plant->atmosphere; f_nsc, d
-    # in (0, 1] REDUCE the loss (survival), never increase it.
+    # Mechanism 1 (NSC gate) throttles ALL maintenance terms as the reserve
+    # depletes; Mechanism 2 (cold-deciduous dormancy) additionally suppresses ALL
+    # terms -- WHOLE-PLANT winter dormancy -- for a cold-deciduous PFT: a dormant
+    # larch sheds its canopy AND drops its woody/root metabolism (sap flow stops,
+    # cambium + frozen-soil roots quiescent), so its large wood R_maint no longer
+    # drains the labile reserve the leaf bootstrap needs to re-flush in spring.
+    # f_nsc == 1.0 and d == 1.0 when off => byte-identical to the ungated
+    # (r_maint_fol*C_fol + ...)·temp_factor_ra.  Sign (carbon, positive-out):
+    # R_maint is a LOSS plant->atmosphere; f_nsc, d in (0, 1] REDUCE it, never
+    # increase it.
     if config.nsc_gated_respiration:
         f_nsc = _nsc_respiration_factor(
             state.C_lab, state.C_fol, state.C_root, state.C_wood, config)
@@ -759,8 +764,8 @@ def step_carbon_differland(
         d = 1.0
     R_maint_day = (
         config.r_maint_fol * state.C_fol * f_nsc * d
-        + config.r_maint_root * state.C_root * f_nsc
-        + config.r_maint_wood * state.C_wood * f_nsc
+        + config.r_maint_root * state.C_root * f_nsc * d
+        + config.r_maint_wood * state.C_wood * f_nsc * d
     ) * temp_factor_ra  # gC/m2/day
 
     # Growth respiration: fraction of net assimilation (GPP minus maintenance)
