@@ -1504,6 +1504,19 @@ def _regrid_latlon_to_181x360(arr: np.ndarray, lon_deg: np.ndarray,
     tgt_lat = _canvas_lat()
     tgt_lon = _canvas_lon() % 360.0
     la, lo = np.meshgrid(tgt_lat, tgt_lon, indexing="ij")
+    # Clamp the target latitude into the source grid's latitude span before
+    # interpolation.  The canvas reaches the poles (+-90) but the source rows
+    # stop short of them (lat-lon cell-centers at ~+-88.75; T21 gaussian lats at
+    # ~+-85), so uncorrected polar target rows fell OUTSIDE the source range and
+    # RegularGridInterpolator LINEAR-EXTRAPOLATED (bounds_error=False,
+    # fill_value=None).  That extrapolation overshot: it drove the nonnegative
+    # wind-speed magnitude negative and inflated |u|,|v|,T extrema in the polar
+    # rows on the lat-lon and spectral(gaussian) regrid paths (cube/icosa use
+    # bounded inverse-distance weights and were unaffected -> the cross-grid
+    # inconsistency).  Clamping makes the poles a bounded nearest-edge hold of
+    # the outermost source row instead.  lon is periodic (handled via lon_per)
+    # so it needs no clamp.
+    la = np.clip(la, lat_src.min(), lat_src.max())
     out = rgi(np.stack([la.ravel(), lo.ravel()], axis=-1))
     return out.reshape((tgt_lat.size, tgt_lon.size) + a.shape[2:])
 
