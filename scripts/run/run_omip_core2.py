@@ -2185,23 +2185,37 @@ def _surface_uv_faces(state):
 
 
 def _surface_currents(state, grid, app_grid_type):
-    """Top-level ocean currents (u_east, v_north) at T points / cells [m/s].
+    """Top-level ocean currents as GEOGRAPHIC (u_east, v_north) at T points /
+    cells [m/s].
 
-    Reused as ``ocean_u`` / ``ocean_v`` for ``step_sea_ice``.  MPAS stores the
-    edge-normal ``u`` (nEdges, nlev); reconstruct cell-centred (u, v) with the
-    canonical Perot ``reconstruct_cell_velocity`` (init_mpas).  The C-grid
-    families (latlon / tripole) store cell-centred ``u`` / ``v`` faces; take the
-    surface level directly on the T-shape they already carry — the ice model only
-    needs an O(0.1 m/s) drift reference for the ocean-ice drag, so the face value
-    at the matching index is an adequate cell-centre proxy (and avoids a bespoke
-    face->centre average).  Reads via ``_surface_uv_faces`` (device-side,
+    Reused as ``ocean_u`` / ``ocean_v`` for ``step_sea_ice`` — the ice model's
+    velocity contract is geographic E/N (free drift mixes them with the
+    geographic winds, and the C-grid ice transport rotates E/N onto the local
+    faces).  MPAS stores the edge-normal ``u`` (nEdges, nlev); reconstruct
+    cell-centred (u, v) with the canonical Perot ``reconstruct_cell_velocity``
+    (init_mpas).  Regular lat-lon: the grid axes ARE geographic, so the face
+    value at the matching index is an adequate cell-centre proxy for the
+    O(0.1 m/s) ocean-ice drag reference (avoids a bespoke face->centre
+    average).  TRIPOLE: ``state.u``/``state.v`` are GRID-RELATIVE i/j face
+    components — passing them as E/N mixed frames (codex r2 #3: free drift
+    then blended them with geographic winds and the transport rotated the mix
+    AGAIN in the bipolar cap), so delegate to ``_surface_currents_geographic``
+    (face->T-centre average + the canonical renormalised rotation).  All
+    C-grid reads go via ``_surface_uv_faces`` (device-side,
     persistent-sharded-layout aware — no full-state gather)."""
     if app_grid_type == "mpas":
         from legoesm.ocean.init_mpas import reconstruct_cell_velocity
         u_sfc, v_sfc = reconstruct_cell_velocity(state.u.data[:, 0], grid)
         return u_sfc, v_sfc
     # latlon / tripole C-grid: u on EW faces (n_lat, n_lon+1), v on NS faces
-    # (n_lat+1, n_lon); crop to the T shape (n_lat, n_lon) at the surface level.
+    # (n_lat+1, n_lon).  Tripole MUST come back geographic (grid-relative i/j
+    # would be frame-mixed with the geographic winds in free drift and rotated
+    # a second time by the C-grid ice transport, codex r2 #3): reuse the
+    # canonical geographic helper (T-centre average + renormalised rotation).
+    if app_grid_type == "tripole":
+        return _surface_currents_geographic(state, grid, app_grid_type)
+    # Regular lat-lon: grid axes ARE geographic; crop to the T shape
+    # (n_lat, n_lon) at the surface level (cheap face proxy, no gather).
     u_face, v_face = _surface_uv_faces(state)
     u_sfc = u_face[:, :-1]                      # drop the periodic wrap column
     v_sfc = 0.5 * (v_face[:-1, :] + v_face[1:, :])
@@ -2304,6 +2318,28 @@ def _build_atm_to_surface_core2(forc, ramp=1.0):
         cos_zenith=zero, co2_ppmv=jnp.asarray(0.0),
         has_radiation=jnp.asarray(1.0), has_precipitation=jnp.asarray(1.0),
     )
+
+
+def _ice_apply_ew_overlap(ice_pytree):
+    """Slave a sea-ice pytree's two longitude HALO columns to their ORCA
+    2-point cyclic-overlap partners (``--ew-cyclic-overlap``): every ice
+    state field AND every TileResponse array is CELL-CENTRED, so the cell
+    rule applies uniformly — ``col[0] <- col[nx-2]``, ``col[nx-1] <- col[1]``
+    (same physical columns).
+
+    The ocean model re-imposes this on ITS prognostic state at the end of
+    every step (``_apply_ew_cyclic_overlap``), but the ice state + response
+    live in the HOST loop and were never projected (codex): the C-grid ice
+    transport assumes regular period-``nx`` longitude wrap, off by one on an
+    ORCA overlap grid, so the duplicated seam columns would drift apart step
+    by step (and the response's halo stresses would feed inconsistent seam
+    forcing).  Applied after ice init and after every ``step_sea_ice`` (state
+    + response)."""
+    def _ovl(a):
+        nx = a.shape[1]
+        a = a.at[:, 0].set(a[:, nx - 2])
+        return a.at[:, nx - 1].set(a[:, 1])
+    return jax.tree.map(_ovl, ice_pytree)
 
 
 def _validate_kpp_freshwater_contract(app_grid_type: str, sf_scheme: str):
@@ -4550,29 +4586,30 @@ def main() -> int:
     if args.prognostic_sea_ice:
         from legoesm.ice import (
             SeaIceConfig, init_dynamic_ice_state, step_sea_ice,
-            grid_supports_ice_dynamics,
+            grid_supports_ice_dynamics, grid_supports_ice_transport,
         )
         from legoesm.ice.config import BrineConfig
-        # Free-drift fallback if the grid lacks strain-rate/transport operators
+        # Free-drift fallback if the grid lacks strain-rate operators
         # (NOT 'none', which yields no drift/export).
         _ice_dyn = args.prognostic_ice_dynamics
-        # NOTE: the tripole grid object is a LatLonCGridGeometry, which
-        # grid_supports_ice_dynamics() does NOT recognise (it matches LatLonGrid
-        # / VoronoiMesh / CubedSphereGrid).  So tripole degrades to free_drift +
-        # transport='none'.  The brine SALT flux + melt/freeze FRESHWATER + ocean
-        # HEAT extraction (the channels that balance Arctic runoff) are produced
-        # by the thermodynamics regardless of the rheology, so export is PRESERVED
-        # under free_drift — only the velocity-driven tracer advection / ridging
-        # are dropped.  MPAS (VoronoiMesh) is the primary, fully-supported target.
-        _supports = grid_supports_ice_dynamics(grid)
-        if not _supports and _ice_dyn in ("mevp", "evp"):
+        # The tripole grid object is a LatLonCGridGeometry: it now supports
+        # TRANSPORT (fold-aware donor-cell C-grid advection,
+        # grid_supports_ice_transport) but still lacks the curvilinear
+        # strain-rate/stress-divergence ops for EVP/mEVP
+        # (grid_supports_ice_dynamics), so the rheology degrades to
+        # free_drift while the free-drift velocities ADVECT the ice tracers
+        # (Fram/Bering export, marginal-zone divergence).  MPAS (VoronoiMesh)
+        # remains the fully-supported mEVP target.
+        _supports_dyn = grid_supports_ice_dynamics(grid)
+        _supports_transport = grid_supports_ice_transport(grid)
+        if not _supports_dyn and _ice_dyn in ("mevp", "evp"):
             print(f"[setup] prognostic ice: grid {type(grid).__name__} lacks "
-                  f"strain-rate/transport ops -> dynamics {_ice_dyn!r} -> "
-                  "'free_drift', transport 'none' (brine salt + melt freshwater + "
-                  "ocean-heat export PRESERVED; tracer advection/ridging dropped). "
-                  "Use --grid mpas for full mEVP + transport.")
+                  f"strain-rate ops -> dynamics {_ice_dyn!r} -> 'free_drift' "
+                  f"(transport {'advect' if _supports_transport else 'none'}; "
+                  "brine salt + melt freshwater + ocean-heat export PRESERVED). "
+                  "Use --grid mpas for full mEVP.")
             _ice_dyn = "free_drift"
-        _transport = "advect" if _supports else "none"
+        _transport = "advect" if _supports_transport else "none"
         _brine = BrineConfig(enabled=True)
         if args.prognostic_ice_salinity is not None:
             _brine = _brine._replace(S_ice_new=float(args.prognostic_ice_salinity))
@@ -4580,6 +4617,13 @@ def main() -> int:
             dynamics=_ice_dyn,
             transport=_transport,
             brine=_brine,            # brine-rejection salt flux -> ocean salt_flux
+            # Under-ice transmitted SW is owned by the ICE model (constant-
+            # scheme transmittance): the ice EB is debited and the ocean
+            # receives it via resp.ocean_heat_extraction (-= sw_penetrated),
+            # closing the SW budget the old ocean-side A*tau*swd surrogate
+            # left open (codex L1).  The blend below therefore passes
+            # sw_transmittance_ice=0.0.
+            sw_transmittance_const=float(args.ice_thermo_sw_trans),
         )
         ice_shape = _ice_state_spatial_shape(grid, app_grid_type)
         # Zero-ice cold start (h=0, concentration=0); spins up from the forcing.
@@ -4608,6 +4652,10 @@ def main() -> int:
                   f"{',ht_s' if _ice_ic.h_snow is not None else ''}"
                   f"{',sm_i' if _ice_ic.S_ice is not None else ''}"
                   f"{',tmsu' if _ice_ic.T_su is not None else ''})")
+        if args.ew_cyclic_overlap and app_grid_type == "tripole":
+            # Slave the duplicated ORCA halo columns from the start (the
+            # transport step re-imposes this every step below).
+            ice_state = _ice_apply_ew_overlap(ice_state)
         from legoesm import constants as _ice_const
         _ice_T_freeze = float(_ice_const.T_freeze)   # degC ocean T -> K for ice
         print(f"[setup] PROGNOSTIC SEA ICE: step_sea_ice dynamics={_ice_dyn!r} "
@@ -5303,27 +5351,33 @@ def main() -> int:
             atm_ice = _build_atm_to_surface_core2(forc_ice, ramp=ramp)
             sst_K = jnp.asarray(state.T.data)[..., 0] + _ice_T_freeze
             ocn_u, ocn_v = _surface_currents(state, grid, app_grid_type)
-            # PRE-step concentration = the partition time level (codex r4 #1):
-            # step_sea_ice integrates the atmospheric fluxes over its INPUT
-            # state, so the ice tile intercepted A_pre of the incident flux
-            # this step; giving open water (1 - A_pre) conserves the delivered
-            # atmospheric flux exactly (A_pre + (1-A_pre) = 1).  A post-step A
-            # would let a melt-to-open cell receive full open-water forcing
-            # over the SAME interval whose energy already melted the ice.
-            # KNOWN APPROXIMATION (codex r5 #1): on advective ice runs (MPAS
-            # transport='advect') step_sea_ice transports concentration BEFORE
-            # thermodynamics, so the exact thermo-time area is post-transport;
-            # the per-step difference is O(u*dt/dx) ~ 1e-4 in fraction (CFL-
-            # limited) and A_pre is EXACT on the latlon/tripole campaign paths
-            # (transport='none').  Exposing the post-transport pre-thermo conc
-            # would require an ice-model API change — revisit if MPAS ice
-            # budgets ever matter at that order.
+            # Partition time level (codex r4 #1 + r5 #1): the ice model
+            # exposes the AGGREGATE concentration its THERMODYNAMICS
+            # integrated the atmospheric fluxes over
+            # (resp.ice_concentration_thermo = post-transport, pre-thermo),
+            # so ice + open water together receive exactly the incident flux
+            # (A + (1-A) = 1) even under transport='advect'.  The pre-call
+            # concentration is the fallback for response paths that do not
+            # populate the field (slab ice).
             _ice_conc_pre = ice_state.concentration.data
             if _ice_conc_pre.ndim > np.asarray(state.land_mask.data).ndim:
                 _ice_conc_pre = jnp.sum(_ice_conc_pre, axis=-1)  # multi-cat
             ice_state, ice_resp = step_sea_ice(
                 ice_state, atm_ice, sst_K, ocn_u, ocn_v,
                 ice_config, U_min=0.0, dt=dt, grid=grid)
+            if args.ew_cyclic_overlap and app_grid_type == "tripole":
+                # Re-slave the duplicated ORCA halo columns after transport
+                # (codex: the C-grid ice advection wraps with period nx, off
+                # by one on the 2-point-overlap grid — without this the
+                # duplicated seam columns drift apart; the ocean does the same
+                # on its own state in _apply_ew_cyclic_overlap).  The RESPONSE
+                # is slaved too (codex r2 #4): its halo-column stresses/fluxes
+                # feed the blended forcing at the physical seam next to the
+                # halo, so unslaved duplicates would diverge there as well.
+                ice_state = _ice_apply_ew_overlap(ice_state)
+                ice_resp = _ice_apply_ew_overlap(ice_resp)
+            if getattr(ice_resp, "ice_concentration_thermo", None) is not None:
+                _ice_conc_pre = ice_resp.ice_concentration_thermo
             # The TileResponse is passed to the ocean UNSCALED even under the
             # cold-start ramp (codex r2 #1): step_sea_ice has already committed
             # the FULL exchange to ice_state (ice grew/melted against the full
@@ -5369,12 +5423,12 @@ def main() -> int:
                 # ice basal heat, brine salt, melt/freeze freshwater, and ice
                 # stress added exactly once.  sf was built UNMASKED
                 # (ice_albedo=None -> raw SW), so the SW split happens here and
-                # only here (raw_core2 mode).  KNOWN SURROGATE (codex r4 #2,
-                # pre-existing): the A*tau_ice_sw*sw_down under-ice SW dribble
-                # is NOT subtracted from the ice tile's own energy balance (the
-                # simple ice model absorbs all non-reflected SW, no penetration
-                # channel), a ~tau_ice_sw non-closure of SW over ice —
-                # calibratable to 0 via --ice-thermo-sw-trans.
+                # only here (raw_core2 mode).  sw_transmittance_ice=0.0: the
+                # under-ice transmitted SW is delivered by the ICE MODEL
+                # (SeaIceConfig.sw_transmittance_const debits the ice EB and
+                # routes tau*SW to the ocean via resp.ocean_heat_extraction),
+                # so adding the old ocean-side A*tau*swd surrogate here would
+                # now DOUBLE-COUNT it (codex L1 — budget closed).
                 from legoesm.coupler.ocean_forcing import blend_ice_ocean_forcing
                 fw, sf = blend_ice_ocean_forcing(
                     open_sf=sf, open_fw=fw, ice_resp=ice_resp,
@@ -5382,7 +5436,7 @@ def main() -> int:
                     ocean_mask=state.land_mask.data,
                     sw_partition="raw_core2",
                     alpha_ocean=float(_ice_const.alpha_ocean_broadband),
-                    sw_transmittance_ice=float(args.ice_thermo_sw_trans),
+                    sw_transmittance_ice=0.0,
                 )
             elif fw is not None:
                 # KPP freshwater-buoyancy contract (codex): sf.freshwater is
