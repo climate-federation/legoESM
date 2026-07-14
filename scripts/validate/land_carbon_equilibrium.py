@@ -49,6 +49,7 @@ from legoesm.land.surface_params import (
     CLM5_PFT_NAMES,
     _CLM5_PFT_TABLE_RAW,
     PARAM_NAMES,
+    is_cold_deciduous,
     is_evergreen,
     is_woody,
 )
@@ -90,6 +91,10 @@ PIXELS = [
      "sandy_loam", 296.0, 1.3e-5, False, "shrubland"),
     ("arctic_tundra",       70.0,  -150.0, "c3_arctic_grass",
      "loam", 266.0, 1.0e-5, True, "tundra"),
+    # Larch: the headline death-spiral defect (needleleaf_deciduous_boreal is
+    # dead 0/0 in the global build).  Cold-deciduous, so BOTH mechanisms engage.
+    ("boreal_larch",        62.0,  100.0, "needleleaf_deciduous_boreal",
+     "loam", 269.0, 1.3e-5, True, "boreal_forest"),
 ]
 
 # Published biome realism ranges (SOC / biomass / GPP / NPP / LAI) are the
@@ -145,16 +150,24 @@ def _biome_carbon_init(biome: str, woody: bool, LCMA: float) -> dict:
 
 
 def build_pixel_config(pft: str, texture: str, freeze_thaw: bool,
-                       n_layers: int, soil_depth: float,
-                       biome: str) -> MultiLayerLandConfig:
+                       n_layers: int, soil_depth: float, biome: str,
+                       nsc_gated_respiration: bool = False,
+                       cold_deciduous_dormancy: bool = False,
+                       ) -> MultiLayerLandConfig:
     """MultiLayerLandConfig for one pixel: texture -> hydraulics, PFT ->
     surface + photosynthesis params, DifferLand carbon + Farquhar stomata on.
-    Carbon pools are seeded region-realistically (``_biome_carbon_init``)."""
+    Carbon pools are seeded region-realistically (``_biome_carbon_init``).  The
+    opt-in high-latitude productivity gates (default off -> byte-identical) are
+    PFT-scoped: ``cold_deciduous`` is set from ``is_cold_deciduous(pft)`` so the
+    dormancy gate engages only on larch / arctic-grass / boreal-shrub pixels."""
     row = _pft_row(pft)
     woody = is_woody(pft)
     carbon = CarbonConfig(
         scheme="differland", LCMA=row["LCMA"], woody=woody,
         evergreen=is_evergreen(pft),
+        nsc_gated_respiration=nsc_gated_respiration,
+        cold_deciduous_dormancy=cold_deciduous_dormancy,
+        cold_deciduous=is_cold_deciduous(pft),
         **_biome_carbon_init(biome, woody, row["LCMA"]),
     )
     return MultiLayerLandConfig(
@@ -497,6 +510,13 @@ def main(argv=None):
     p.add_argument("--output", default="results/land_carbon_equilibrium")
     p.add_argument("--only", default=None,
                    help="Run only this pixel name (debug).")
+    p.add_argument("--nsc-gated-respiration", action="store_true",
+                   help="Enable NSC-gated maintenance respiration (arctic "
+                        "productivity rescue Mechanism 1) for every pixel.")
+    p.add_argument("--cold-deciduous-dormancy", action="store_true",
+                   help="Enable cold-deciduous freeze dormancy (Mechanism 2); "
+                        "PFT-scoped via is_cold_deciduous, so it only affects "
+                        "larch / arctic-grass / boreal-shrub pixels.")
     args = p.parse_args(argv)
 
     out_dir = Path(args.output)
@@ -512,7 +532,9 @@ def main(argv=None):
         print(f"[{name}] pft={pft} texture={texture} lat={lat} "
               f"T_init={T_init} precip={precip:.1e} freeze_thaw={ft}", flush=True)
         config = build_pixel_config(
-            pft, texture, ft, args.n_layers, args.soil_depth, biome)
+            pft, texture, ft, args.n_layers, args.soil_depth, biome,
+            nsc_gated_respiration=args.nsc_gated_respiration,
+            cold_deciduous_dormancy=args.cold_deciduous_dormancy)
         annual, _fs, final_carbon = run_pixel(
             config, lat, lon, T_init, precip, args.spinup_years, args.dt,
             n_verify=args.verify_years)
