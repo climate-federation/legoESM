@@ -298,6 +298,43 @@ def test_iter_archetype_batches_splits_evergreen_from_deciduous():
     assert by_pft[7].config.carbon.woody is True
 
 
+def test_iter_archetype_batches_splits_and_flags_cold_deciduous():
+    """Two WOODY DECIDUOUS archetypes on the SAME soil differing only in the
+    cold-deciduous trait (needleleaf_deciduous_boreal larch vs
+    broadleaf_deciduous_temperate) must land in SEPARATE groups; with
+    cold_deciduous_dormancy=True the larch group carries cold_deciduous=True and
+    the master flag, the temperate group cold_deciduous=False.  Neither is
+    evergreen, so the leaf-habit key alone would NOT have separated them."""
+    from legoesm.land.surface_params import CLM5_PFT_NAMES
+    from legoesm.land.carbon.global_init import iter_archetype_batches
+    larch = CLM5_PFT_NAMES.index("needleleaf_deciduous_boreal")
+    temp = CLM5_PFT_NAMES.index("broadleaf_deciduous_temperate")
+    table = ArchetypeTable(
+        pft_id=np.array([larch, temp]),
+        mat_k=np.array([270.0, 285.0]),
+        map_yr=np.array([400.0, 900.0]),
+        t_seasonal_amp_k=np.array([20.0, 12.0]),
+        aridity=np.array([1.0, 1.1]),
+        sw_mean_w=np.array([150.0, 200.0]),
+        soil_class=np.array(["loam", "loam"], dtype=object),
+    )
+    batches = iter_archetype_batches(
+        table, n_layers=6, soil_depth=2.0, dt=7200.0,
+        cold_deciduous_dormancy=True)
+    assert len(batches) == 2
+    by_pft = {int(table.pft_id[np.asarray(b.g_idx)[0]]): b for b in batches}
+    assert by_pft[larch].config.carbon.cold_deciduous is True
+    assert by_pft[larch].config.carbon.cold_deciduous_dormancy is True
+    assert by_pft[temp].config.carbon.cold_deciduous is False
+    # master flag on for both; the per-PFT trait scopes the gate.
+    assert by_pft[temp].config.carbon.cold_deciduous_dormancy is True
+    assert by_pft[larch].config.carbon.evergreen is False
+    assert by_pft[temp].config.carbon.evergreen is False
+    # Default (no flag) -> master off everywhere (byte-identical).
+    for b in iter_archetype_batches(table, n_layers=6, soil_depth=2.0, dt=7200.0):
+        assert b.config.carbon.cold_deciduous_dormancy is False
+
+
 # ---------------------------------------------------------------------------
 # Integration gate for Tasks 2-5: features -> archetypes -> equilibrate -> map
 # on a synthetic world (no data files).  Compute-node scale (JIT-compiles the

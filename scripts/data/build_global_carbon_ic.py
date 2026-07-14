@@ -161,7 +161,7 @@ _CACHE_MIN_COMPILE_SECS_DEFAULT = 1.0   # only cache XLA compiles slower than th
 # subdir), so a CPU-built cache never serves a GPU run or vice versa.  A jaxlib
 # upgrade that alters bits on the SAME backend is the user's responsibility (bump
 # the version), mirroring the trainer's documented same-code/backend assumption.
-_EQUILIBRIUM_CACHE_VERSION = "v4"  # v4: + perennial-frost/anaerobic SOM protection (f_perma on the SOM modifier, keyed on the annual frozen fraction) -- coupled-spin-up equilibrium rises for perennially-frozen high-latitude archetypes (permafrost carbon; v3 was the r_maint_* CUE recalibration)
+_EQUILIBRIUM_CACHE_VERSION = "v5"  # v5: + opt-in NSC-gated R_maint / cold-deciduous freeze-dormancy gates change the high-latitude equilibria when enabled (the cache key ALSO hashes both flags, so on/off never alias). v4: + perennial-frost/anaerobic SOM protection (f_perma on the SOM modifier, keyed on the annual frozen fraction) -- coupled-spin-up equilibrium rises for perennially-frozen high-latitude archetypes (permafrost carbon; v3 was the r_maint_* CUE recalibration)
 # COUPLED-RUN MAINTENANCE (now wired): this map is built WITH the perennial-
 # frost/anaerobic SOM protection (annual_frozen_fraction -> soil_frozen_fraction
 # threaded into the archetype spin-up), and the drift validator applies the SAME
@@ -764,7 +764,9 @@ def _equilibrium_cache_key(table, spin: dict) -> str:
     h.update(b"|soil_class|")
     h.update(soil_class.encode("utf-8"))
     spin_key = (f"|spin|{spin['n_spinup']}|{spin['n_verify']}|{spin['dt']!r}|"
-                f"{spin['n_layers']}|{spin['soil_depth']!r}|")
+                f"{spin['n_layers']}|{spin['soil_depth']!r}|"
+                f"nsc{int(spin.get('nsc_gated_respiration', False))}|"
+                f"cd{int(spin.get('cold_deciduous_dormancy', False))}|")
     h.update(spin_key.encode("utf-8"))
     return h.hexdigest()
 
@@ -850,7 +852,9 @@ def _load_or_equilibrate(table, spin: dict, *, cache_dir: str, rebuild: bool):
     t0 = time.time()
     eq, qc = equilibrate_archetypes(
         table, n_spinup=spin["n_spinup"], n_verify=spin["n_verify"],
-        dt=spin["dt"], n_layers=spin["n_layers"], soil_depth=spin["soil_depth"])
+        dt=spin["dt"], n_layers=spin["n_layers"], soil_depth=spin["soil_depth"],
+        nsc_gated_respiration=spin.get("nsc_gated_respiration", False),
+        cold_deciduous_dormancy=spin.get("cold_deciduous_dormancy", False))
     elapsed = time.time() - t0
     if path is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -906,6 +910,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-layers", type=int, default=10, help="soil layers")
     p.add_argument("--soil-depth", type=float, default=3.0,
                    help="soil column depth [m]")
+    p.add_argument("--nsc-gated-respiration", action="store_true",
+                   help="Enable opt-in NSC-gated maintenance respiration in the "
+                        "archetype spin-up (arctic productivity rescue); changes "
+                        "the high-latitude equilibria (cache key includes it).")
+    p.add_argument("--cold-deciduous-dormancy", action="store_true",
+                   help="Enable opt-in cold-deciduous freeze dormancy in the "
+                        "archetype spin-up (PFT-scoped via is_cold_deciduous).")
     p.add_argument("--seed", type=int, default=0, help="base k-means RNG seed")
     p.add_argument("--output", type=str, default="results/global_carbon_ic",
                    help="output DIRECTORY for the two .npz files")
@@ -1047,6 +1058,8 @@ def main(argv=None):
     spin = {
         "n_spinup": args.n_spinup, "n_verify": args.n_verify, "dt": args.dt,
         "n_layers": args.n_layers, "soil_depth": args.soil_depth,
+        "nsc_gated_respiration": args.nsc_gated_respiration,
+        "cold_deciduous_dormancy": args.cold_deciduous_dormancy,
     }
     eq, qc = _load_or_equilibrate(
         table, spin, cache_dir=args.equilibrium_cache_dir,

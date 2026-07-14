@@ -294,7 +294,9 @@ class ArchetypeBatch(NamedTuple):
 
 
 def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
-                           carbon_overrides=None):
+                           carbon_overrides=None,
+                           nsc_gated_respiration=False,
+                           cold_deciduous_dormancy=False):
     """Build the per-``(is_woody, is_evergreen, soil_class)`` GROUP construction
     shared by the archetype equilibration (:func:`equilibrate_archetypes`) and
     the drift validator (``scripts/validate/global_carbon_ic_map.py``).
@@ -352,7 +354,7 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
     from legoesm.land.soil_texture import SOIL_TEXTURE_VG
     from legoesm.land.surface_params import (
         CLM5_PFT_NAMES, PARAM_NAMES, array_to_params, clm5_pft_table,
-        is_evergreen, is_woody,
+        is_cold_deciduous, is_evergreen, is_woody,
     )
     from legoesm.land.carbon.carbon_cycle import annual_frozen_fraction
     from legoesm.land.carbon.config import CarbonConfig
@@ -401,15 +403,20 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
     groups: dict = {}
     for a in range(n_arch):
         pft_name = CLM5_PFT_NAMES[pft_id[a]]
-        key = (is_woody(pft_name), is_evergreen(pft_name), str(soil_class[a]))
+        key = (is_woody(pft_name), is_evergreen(pft_name),
+               is_cold_deciduous(pft_name), str(soil_class[a]))
         groups.setdefault(key, []).append(a)
 
     batches: list[ArchetypeBatch] = []
-    for (group_woody, group_evergreen, soil), members in groups.items():
+    for (group_woody, group_evergreen, group_cold_deciduous, soil), members \
+            in groups.items():
         g_idx = np.asarray(members, int)
         carbon_cfg = CarbonConfig(
             scheme="differland", woody=group_woody,
             evergreen=group_evergreen,
+            cold_deciduous=group_cold_deciduous,
+            nsc_gated_respiration=nsc_gated_respiration,
+            cold_deciduous_dormancy=cold_deciduous_dormancy,
             C_lab_init=_C_LAB_SEED, C_fol_init=_C_FOL_SEED,
             C_root_init=_C_ROOT_SEED, C_wood_init=_C_WOOD_SEED,
             C_lit_init=_C_LIT_SEED, C_som_init=_C_SOM_SEED)
@@ -587,6 +594,8 @@ def equilibrate_archetypes(
     dt: float = _DT_DEFAULT,
     n_layers: int = _N_LAYERS_DEFAULT,
     soil_depth: float = _SOIL_DEPTH_DEFAULT,
+    nsc_gated_respiration: bool = False,
+    cold_deciduous_dormancy: bool = False,
 ):
     """Spin every climate archetype to a verified soil-carbon equilibrium.
 
@@ -646,7 +655,9 @@ def equilibrate_archetypes(
     n_arch = np.asarray(table.pft_id, int).shape[0]
     pool_fields = CarbonState._fields  # ("C_lab", ..., "C_som_passive")
     batches = iter_archetype_batches(
-        table, n_layers=n_layers, soil_depth=soil_depth, dt=dt)
+        table, n_layers=n_layers, soil_depth=soil_depth, dt=dt,
+        nsc_gated_respiration=nsc_gated_respiration,
+        cold_deciduous_dormancy=cold_deciduous_dormancy)
 
     # Archetype-ordered output accumulators (scattered per group via g_idx).
     pools_out = {p: np.zeros(n_arch) for p in pool_fields}
