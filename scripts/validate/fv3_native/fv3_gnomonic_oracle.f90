@@ -30,7 +30,32 @@
 !     slices (Fortran-legal adaptation of the upstream scalar actual args);
 !   - `radius` used by mirror_grid is set to 1 (it enters only as the radial
 !     coordinate fed through rot_3d's spherical->cartesian->spherical
-!     round-trip, where it cancels exactly).
+!     round-trip, where it cancels exactly);
+!   - metric outputs are UNIT-SPHERE (earth_radius = 1): R enters every
+!     upstream formula only as a final multiplicative factor (R for
+!     distances, R**2 for areas), so consumers rescale exactly;
+!   - MUST be compiled with -fdefault-real-8: great_circle_dist returns
+!     default `real` upstream (FV3 production builds use r8 default reals);
+!   - dy is computed by direct great_circle_dist instead of upstream
+!     get_symmetry (an MPI transpose-copy of dx used for bit
+!     reproducibility; values agree to fp roundoff by grid symmetry);
+!   - the sorted_index (sorted_inta/sorted_intb) vertex orderings are
+!     replaced by the stretched-branch natural orderings — the spherical
+!     excess/area sums are relabel-invariant, so this affects values only
+!     at fp-roundoff level (~1e-16 relative);
+!   - cross-face halo grid/agrid lines (filled by mpp_update_domains +
+!     fill_corners upstream) are reconstructed geometrically in the
+!     driver: shared cube-edge nodes are bit-equal between faces by the
+!     mirror construction, so side pairing/orientation is recovered by
+!     exact node matching (see fill_halos).
+!
+! The metric driver replicates the fv_grid_tools init_grid + grid_area
+! WRITE ORDER for the generated (non-stretched, non-bounded) cubed sphere:
+! interior agrid-quad area_c -> cube-corner get_area_tri -> the x2
+! half-dual edge overwrites in W,E,S,N code order.  The dumped fields are
+! therefore the FINAL post-overwrite FV3 state, whatever formula "wins"
+! at each node — including the cube corners, where the W/E/S/N edge
+! blocks overwrite the get_area_tri values (last writer: S/N blocks).
 !
 ! The driver writes, for grid_type=0 (gnomonic_ed, the FV3 default
 ! fv_arrays.F90 grid_type=0) at C1, C8, C36:
@@ -47,15 +72,23 @@ module fv3_grid_oracle_mod
   implicit none
   private
   public :: gnomonic_grids, mirror_grid, cell_center2, R_GRID
+  public :: get_area, get_area_tri, great_circle_dist, mid_pt_sphere
 
   integer, parameter :: R_GRID = selected_real_kind(15)   ! r8_kind
   ! FV3 ENABLE_QUAD_PRECISION: higher precision (kind=16) for grid factors
   integer, parameter :: f_p = selected_real_kind(20)
   real(kind=R_GRID), parameter :: pi = 4.0d0 * atan(1.0d0)
   real(kind=R_GRID), parameter :: torad = pi / 180.0d0
+  real(kind=R_GRID), parameter :: todeg = 180.0d0 / pi
   ! mirror_grid feeds `radius` through rot_3d's spherical round-trip, where
   ! it cancels; any positive value gives identical lon/lat.
   real(kind=R_GRID), parameter :: radius = 1.0d0
+  ! Metric substitution (documented in the header): upstream areas/distances
+  ! scale by the module-global Earth radius; the oracle emits UNIT-SPHERE
+  ! metrics (earth_radius = 1) because R enters every formula only as a final
+  ! multiplicative factor — consumers scale by R (distances) / R**2 (areas)
+  ! exactly.
+  real(kind=R_GRID), parameter :: earth_radius = 1.0d0
 
 contains
 
@@ -631,12 +664,239 @@ contains
 
       end subroutine cartesian_to_spherical
 
+ subroutine mid_pt_sphere(p1, p2, pm)
+      real(kind=R_GRID) , intent(IN)  :: p1(2), p2(2)
+      real(kind=R_GRID) , intent(OUT) :: pm(2)
+!------------------------------------------
+      real(kind=R_GRID) e1(3), e2(3), e3(3)
+
+      call latlon2xyz(p1, e1)
+      call latlon2xyz(p2, e2)
+      call mid_pt3_cart(e1, e2, e3)
+      call cart_to_latlon(1, e3, pm(1:1), pm(2:2))
+
+ end subroutine mid_pt_sphere
+
+ subroutine mid_pt3_cart(p1, p2, e)
+       real(kind=R_GRID), intent(IN)  :: p1(3), p2(3)
+       real(kind=R_GRID), intent(OUT) :: e(3)
+!
+       real (f_p):: q1(3), q2(3)
+       real (f_p):: dd, e1, e2, e3
+       integer k
+
+       do k=1,3
+          q1(k) = p1(k)
+          q2(k) = p2(k)
+       enddo
+
+       e1 = q1(1) + q2(1)
+       e2 = q1(2) + q2(2)
+       e3 = q1(3) + q2(3)
+
+       dd = sqrt( e1**2 + e2**2 + e3**2 )
+       e1 = e1 / dd
+       e2 = e2 / dd
+       e3 = e3 / dd
+
+       e(1) = e1
+       e(2) = e2
+       e(3) = e3
+
+ end subroutine mid_pt3_cart
+
+ real function great_circle_dist( q1, q2, radius )
+      real(kind=R_GRID), intent(IN)           :: q1(2), q2(2)
+      real(kind=R_GRID), intent(IN), optional :: radius
+
+      real (f_p):: p1(2), p2(2)
+      real (f_p):: beta
+      integer n
+
+      do n=1,2
+         p1(n) = q1(n)
+         p2(n) = q2(n)
+      enddo
+
+      beta = asin( sqrt( sin((p1(2)-p2(2))/2.)**2 + cos(p1(2))*cos(p2(2))*   &
+                         sin((p1(1)-p2(1))/2.)**2 ) ) * 2.
+
+      if ( present(radius) ) then
+           great_circle_dist = radius * beta
+      else
+           great_circle_dist = beta   ! Returns the angle
+      endif
+
+  end function great_circle_dist
+
+ real(kind=R_GRID) function spherical_angle(p1, p2, p3)
+
+!           p3
+!         /
+!        /
+!       p1 ---> angle
+!         \
+!          \
+!           p2
+
+ real(kind=R_GRID) p1(3), p2(3), p3(3)
+
+ real (f_p):: e1(3), e2(3), e3(3)
+ real (f_p):: px, py, pz
+ real (f_p):: qx, qy, qz
+ real (f_p):: angle, ddd
+ integer n
+
+  do n=1,3
+     e1(n) = p1(n)
+     e2(n) = p2(n)
+     e3(n) = p3(n)
+  enddo
+
+!-------------------------------------------------------------------
+! Page 41, Silverman's book on Vector Algebra; spherical trigonmetry
+!-------------------------------------------------------------------
+! Vector P:
+   px = e1(2)*e2(3) - e1(3)*e2(2)
+   py = e1(3)*e2(1) - e1(1)*e2(3)
+   pz = e1(1)*e2(2) - e1(2)*e2(1)
+! Vector Q:
+   qx = e1(2)*e3(3) - e1(3)*e3(2)
+   qy = e1(3)*e3(1) - e1(1)*e3(3)
+   qz = e1(1)*e3(2) - e1(2)*e3(1)
+
+   ddd = (px*px+py*py+pz*pz)*(qx*qx+qy*qy+qz*qz)
+
+   if ( ddd <= 0.0d0 ) then
+        angle = 0.d0
+   else
+        ddd = (px*qx+py*qy+pz*qz) / sqrt(ddd)
+        if ( abs(ddd)>1.d0) then
+             angle = 2.d0*atan(1.0)    ! 0.5*pi
+           !FIX (lmh) to correctly handle co-linear points (angle near pi or 0)
+           if (ddd < 0.d0) then
+              angle = 4.d0*atan(1.0d0) !should be pi
+           else
+              angle = 0.d0
+           end if
+        else
+             angle = acos( ddd )
+        endif
+   endif
+
+   spherical_angle = angle
+
+ end function spherical_angle
+
+ real(kind=R_GRID) function get_area(p1, p4, p2, p3, radius)
+!-----------------------------------------------
+ real(kind=R_GRID), intent(in), dimension(2):: p1, p2, p3, p4
+ real(kind=R_GRID), intent(in), optional:: radius
+!-----------------------------------------------
+ real(kind=R_GRID) e1(3), e2(3), e3(3)
+ real(kind=R_GRID) ang1, ang2, ang3, ang4
+
+! S-W: 1
+       call latlon2xyz(p1, e1)   ! p1
+       call latlon2xyz(p2, e2)   ! p2
+       call latlon2xyz(p4, e3)   ! p4
+       ang1 = spherical_angle(e1, e2, e3)
+!----
+! S-E: 2
+!----
+       call latlon2xyz(p2, e1)
+       call latlon2xyz(p3, e2)
+       call latlon2xyz(p1, e3)
+       ang2 = spherical_angle(e1, e2, e3)
+!----
+! N-E: 3
+!----
+       call latlon2xyz(p3, e1)
+       call latlon2xyz(p4, e2)
+       call latlon2xyz(p2, e3)
+       ang3 = spherical_angle(e1, e2, e3)
+!----
+! N-W: 4
+!----
+       call latlon2xyz(p4, e1)
+       call latlon2xyz(p3, e2)
+       call latlon2xyz(p1, e3)
+       ang4 = spherical_angle(e1, e2, e3)
+
+       if ( present(radius) ) then
+            get_area = (ang1 + ang2 + ang3 + ang4 - 2.*pi) * radius**2
+       else
+            get_area = ang1 + ang2 + ang3 + ang4 - 2.*pi
+       endif
+
+ end function get_area
+
+ real(kind=R_GRID) function get_angle(ndims, p1, p2, p3, rad) result (angle)
+!     get_angle :: get angle between 3 points on a sphere in lat/lon coords or
+!                  xyz coords (determined by ndims argument 2=lat/lon, 3=xyz)
+!                  [angle is returned in degrees]
+
+         integer, intent(IN) :: ndims         ! 2=lat/lon, 3=xyz
+         real(kind=R_GRID) , intent(IN)   :: p1(ndims)
+         real(kind=R_GRID) , intent(IN)   :: p2(ndims)
+         real(kind=R_GRID) , intent(IN)   :: p3(ndims)
+         integer, intent(in), optional:: rad
+
+         real(kind=R_GRID)  :: e1(3), e2(3), e3(3)
+
+         if (ndims == 2) then
+            call spherical_to_cartesian(p2(1), p2(2), real(1.,kind=R_GRID), e1(1), e1(2), e1(3))
+            call spherical_to_cartesian(p1(1), p1(2), real(1.,kind=R_GRID), e2(1), e2(2), e2(3))
+            call spherical_to_cartesian(p3(1), p3(2), real(1.,kind=R_GRID), e3(1), e3(2), e3(3))
+         else
+            e1 = p2; e2 = p1; e3 = p3
+         endif
+
+! High precision version:
+         if ( present(rad) ) then
+           angle = spherical_angle(e1, e2, e3)
+         else
+           angle = todeg * spherical_angle(e1, e2, e3)
+         endif
+
+      end function get_angle
+
+      real(kind=R_GRID)  function get_area_tri(ndims, p_1, p_2, p_3) &
+                        result (myarea)
+
+!     get_area_tri :: get the surface area of a cell defined as a triangle
+!                  on the sphere. Area is computed as the spherical excess
+!                  [area units are based on the units of radius]
+
+
+      integer, intent(IN)    :: ndims          ! 2=lat/lon, 3=xyz
+      real(kind=R_GRID) , intent(IN)    :: p_1(ndims) !
+      real(kind=R_GRID) , intent(IN)    :: p_2(ndims) !
+      real(kind=R_GRID) , intent(IN)    :: p_3(ndims) !
+
+      real(kind=R_GRID)  :: angA, angB, angC
+
+        if ( ndims==3 ) then
+            angA = spherical_angle(p_1, p_2, p_3)
+            angB = spherical_angle(p_2, p_3, p_1)
+            angC = spherical_angle(p_3, p_1, p_2)
+        else
+            angA = get_angle(ndims, p_1, p_2, p_3, 1)
+            angB = get_angle(ndims, p_2, p_3, p_1, 1)
+            angC = get_angle(ndims, p_3, p_1, p_2, 1)
+        endif
+
+        myarea = (angA+angB+angC - pi) * earth_radius**2
+
+      end function get_area_tri
+
 end module fv3_grid_oracle_mod
 
 
 program fv3_gnomonic_oracle
   use fv3_grid_oracle_mod, only: gnomonic_grids, mirror_grid, cell_center2, &
-                                 R_GRID
+                                 R_GRID, get_area, get_area_tri,           &
+                                 great_circle_dist, mid_pt_sphere
   implicit none
   integer, parameter :: sizes(3) = (/ 1, 8, 36 /)
   integer :: s, im, i, j, f, unit_no
@@ -644,6 +904,18 @@ program fv3_gnomonic_oracle
   real(kind=R_GRID), allocatable :: grid_global(:,:,:,:)
   real(kind=R_GRID) :: q1(2), q2(2), q3(2), q4(2), e2(2)
   character(len=64) :: fname
+  ! --- metric-oracle work arrays (unit sphere) ---
+  real(kind=R_GRID), allocatable :: agrid6(:,:,:,:)      ! (im,im,2,6)
+  real(kind=R_GRID), allocatable :: gridh(:,:,:,:)       ! (0:npx+1,0:npx+1,2,6)
+  real(kind=R_GRID), allocatable :: agridh(:,:,:,:)      ! (0:im+1,0:im+1,2,6)
+  real(kind=R_GRID), allocatable :: area(:,:,:)          ! (im,im,6)
+  real(kind=R_GRID), allocatable :: dxm(:,:,:), dym(:,:,:)   ! (im,im+1,6)/(im+1,im,6)
+  real(kind=R_GRID), allocatable :: dxa(:,:,:), dya(:,:,:)   ! (im,im,6)
+  real(kind=R_GRID), allocatable :: dxc(:,:,:), dyc(:,:,:)   ! (im+1,im,6)/(im,im+1,6)
+  real(kind=R_GRID), allocatable :: area_c(:,:,:)        ! (im+1,im+1,6)
+  real(kind=R_GRID) :: p1(2), p2(2), p3(2), p4(2), pm1(2), pm2(2)
+  real(kind=R_GRID) :: closure, mult
+  integer :: npx
 
   do s = 1, size(sizes)
      im = sizes(s)
@@ -687,6 +959,7 @@ program fv3_gnomonic_oracle
      close(unit_no)
 
      ! --- A-grid cell centres per face via cell_center2 (FV3 agrid) ---
+     allocate(agrid6(im, im, 2, 6))
      write(fname, '(A,I0,A)') 'fv3_gnomonic_ed_agrid_c', im, '.txt'
      open(newunit=unit_no, file=trim(fname), status='replace', action='write')
      write(unit_no, '(A)') '# FV3 cell_center2 A-grid centres: face i j lon lat [rad]'
@@ -701,6 +974,8 @@ program fv3_gnomonic_oracle
               q3(1) = grid_global(i,  j+1,1,f); q3(2) = grid_global(i,  j+1,2,f)
               q4(1) = grid_global(i+1,j+1,1,f); q4(2) = grid_global(i+1,j+1,2,f)
               call cell_center2(q1, q2, q3, q4, e2)
+              agrid6(i, j, 1, f) = e2(1)
+              agrid6(i, j, 2, f) = e2(2)
               write(unit_no, '(I2,1X,I4,1X,I4,1X,ES26.17E3,1X,ES26.17E3)') &
                    f, i, j, e2(1), e2(2)
            enddo
@@ -708,9 +983,447 @@ program fv3_gnomonic_oracle
      enddo
      close(unit_no)
 
+     ! ------------------------------------------------------------------
+     ! Metric oracle (unit sphere), replicating fv_grid_tools init_grid +
+     ! grid_area for the generated (non-stretched, non-bounded) cubed
+     ! sphere, INCLUDING the code-order overwrites:
+     !   1. dx/dy corner-to-corner edge lengths
+     !   2. dxa/dya through-cell mid-point distances
+     !   3. dxc/dyc interior agrid distances, panel edges = 2*(mid->centre)
+     !   4. grid_area: area (corner quads), area_c (agrid quads, using
+     !      cross-face halo agrid), cube-corner triangles (get_area_tri)
+     !   5. init_grid ×2 edge overwrites of area_c in W,E,S,N order using
+     !      halo grid/agrid — replicated with the SAME write order, so the
+     !      dumped fields are the FINAL post-overwrite FV3 state.
+     ! Cross-face halo lines are reconstructed geometrically (shared cube
+     ! edges match bit-exactly between faces by the mirror construction).
+     ! ------------------------------------------------------------------
+     npx = im + 1
+     allocate(gridh(0:npx+1, 0:npx+1, 2, 6))
+     allocate(agridh(0:im+1, 0:im+1, 2, 6))
+     call fill_halos(im, grid_global, agrid6, gridh, agridh)
+
+     allocate(area(im, im, 6))
+     allocate(dxm(im, im+1, 6), dym(im+1, im, 6))
+     allocate(dxa(im, im, 6), dya(im, im, 6))
+     allocate(dxc(im+1, im, 6), dyc(im, im+1, 6))
+     allocate(area_c(im+1, im+1, 6))
+
+     do f = 1, 6
+        ! --- dx(i,j): great_circle_dist(grid(i,j), grid(i+1,j)), j=1..npx
+        do j = 1, npx
+           do i = 1, im
+              p1(1) = gridh(i,  j, 1, f); p1(2) = gridh(i,  j, 2, f)
+              p2(1) = gridh(i+1,j, 1, f); p2(2) = gridh(i+1,j, 2, f)
+              dxm(i, j, f) = great_circle_dist(p2, p1)
+           enddo
+        enddo
+        ! --- dy(i,j): great_circle_dist(grid(i,j), grid(i,j+1)), i=1..npx
+        do j = 1, im
+           do i = 1, npx
+              p1(1) = gridh(i, j,  1, f); p1(2) = gridh(i, j,  2, f)
+              p2(1) = gridh(i, j+1,1, f); p2(2) = gridh(i, j+1,2, f)
+              dym(i, j, f) = great_circle_dist(p2, p1)
+           enddo
+        enddo
+        ! --- dxa/dya: mid-point-to-mid-point through the cell
+        do j = 1, im
+           do i = 1, im
+              p1(1) = gridh(i,  j, 1, f); p1(2) = gridh(i,  j, 2, f)
+              p2(1) = gridh(i,  j+1,1,f); p2(2) = gridh(i,  j+1,2,f)
+              call mid_pt_sphere(p1, p2, pm1)
+              p1(1) = gridh(i+1,j, 1, f); p1(2) = gridh(i+1,j, 2, f)
+              p2(1) = gridh(i+1,j+1,1,f); p2(2) = gridh(i+1,j+1,2,f)
+              call mid_pt_sphere(p1, p2, pm2)
+              dxa(i, j, f) = great_circle_dist(pm2, pm1)
+              p1(1) = gridh(i,  j, 1, f); p1(2) = gridh(i,  j, 2, f)
+              p2(1) = gridh(i+1,j, 1, f); p2(2) = gridh(i+1,j, 2, f)
+              call mid_pt_sphere(p1, p2, pm1)
+              p1(1) = gridh(i,  j+1,1,f); p1(2) = gridh(i,  j+1,2,f)
+              p2(1) = gridh(i+1,j+1,1,f); p2(2) = gridh(i+1,j+1,2,f)
+              call mid_pt_sphere(p1, p2, pm2)
+              dya(i, j, f) = great_circle_dist(pm2, pm1)
+           enddo
+        enddo
+        ! --- dxc: interior agrid-to-agrid; panel edges 2*(mid->centre)
+        do j = 1, im
+           do i = 2, im
+              p1(1) = agridh(i,  j, 1, f); p1(2) = agridh(i,  j, 2, f)
+              p2(1) = agridh(i-1,j, 1, f); p2(2) = agridh(i-1,j, 2, f)
+              dxc(i, j, f) = great_circle_dist(p1, p2)
+           enddo
+           ! i = 1 (west edge): dxc = 2*gcd(mid(grid(1,j),grid(1,j+1)), agrid(1,j))
+           p1(1) = gridh(1, j,  1, f); p1(2) = gridh(1, j,  2, f)
+           p2(1) = gridh(1, j+1,1, f); p2(2) = gridh(1, j+1,2, f)
+           call mid_pt_sphere(p1, p2, pm1)
+           p2(1) = agridh(1, j, 1, f); p2(2) = agridh(1, j, 2, f)
+           dxc(1, j, f) = 2.0d0 * great_circle_dist(pm1, p2)
+           ! i = npx (east edge)
+           p1(1) = agridh(im, j, 1, f); p1(2) = agridh(im, j, 2, f)
+           p2(1) = gridh(npx, j,  1, f); p2(2) = gridh(npx, j,  2, f)
+           p3(1) = gridh(npx, j+1,1, f); p3(2) = gridh(npx, j+1,2, f)
+           call mid_pt_sphere(p2, p3, pm1)
+           dxc(npx, j, f) = 2.0d0 * great_circle_dist(p1, pm1)
+        enddo
+        ! --- dyc analog
+        do i = 1, im
+           do j = 2, im
+              p1(1) = agridh(i, j,  1, f); p1(2) = agridh(i, j,  2, f)
+              p2(1) = agridh(i, j-1,1, f); p2(2) = agridh(i, j-1,2, f)
+              dyc(i, j, f) = great_circle_dist(p1, p2)
+           enddo
+           p1(1) = gridh(i,  1, 1, f); p1(2) = gridh(i,  1, 2, f)
+           p2(1) = gridh(i+1,1, 1, f); p2(2) = gridh(i+1,1, 2, f)
+           call mid_pt_sphere(p1, p2, pm1)
+           p2(1) = agridh(i, 1, 1, f); p2(2) = agridh(i, 1, 2, f)
+           dyc(i, 1, f) = 2.0d0 * great_circle_dist(pm1, p2)
+           p1(1) = agridh(i, im, 1, f); p1(2) = agridh(i, im, 2, f)
+           p2(1) = gridh(i,  npx,1, f); p2(2) = gridh(i,  npx,2, f)
+           p3(1) = gridh(i+1,npx,1, f); p3(2) = gridh(i+1,npx,2, f)
+           call mid_pt_sphere(p2, p3, pm1)
+           dyc(i, npx, f) = 2.0d0 * great_circle_dist(p1, pm1)
+        enddo
+        ! --- area: spherical-excess corner quads,
+        !     get_area(p_lL, p_uL, p_lR, p_uR)
+        do j = 1, im
+           do i = 1, im
+              p1(1) = gridh(i,  j,  1, f); p1(2) = gridh(i,  j,  2, f)  ! lL
+              p2(1) = gridh(i,  j+1,1, f); p2(2) = gridh(i,  j+1,2, f)  ! uL
+              p3(1) = gridh(i+1,j,  1, f); p3(2) = gridh(i+1,j,  2, f)  ! lR
+              p4(1) = gridh(i+1,j+1,1, f); p4(2) = gridh(i+1,j+1,2, f)  ! uR
+              area(i, j, f) = get_area(p1, p2, p3, p4)
+           enddo
+        enddo
+        ! --- area_c step 1 (grid_area): agrid quads everywhere (halo agrid
+        !     at panel borders), get_area(p_lL, p_uL, p_lR, p_uR)
+        do j = 1, npx
+           do i = 1, npx
+              p1(1) = agridh(i-1,j-1,1, f); p1(2) = agridh(i-1,j-1,2, f)  ! lL
+              p2(1) = agridh(i-1,j,  1, f); p2(2) = agridh(i-1,j,  2, f)  ! uL
+              p3(1) = agridh(i,  j-1,1, f); p3(2) = agridh(i,  j-1,2, f)  ! lR
+              p4(1) = agridh(i,  j,  1, f); p4(2) = agridh(i,  j,  2, f)  ! uR
+              area_c(i, j, f) = get_area(p1, p2, p3, p4)
+           enddo
+        enddo
+        ! --- area_c step 2 (grid_area corners): triangular dual cells,
+        !     3 surrounding cell centres (stretched-branch point sets)
+        p1(1) = agridh(0,1,1,f); p1(2) = agridh(0,1,2,f)
+        p2(1) = agridh(1,1,1,f); p2(2) = agridh(1,1,2,f)
+        p3(1) = agridh(1,0,1,f); p3(2) = agridh(1,0,2,f)
+        area_c(1, 1, f) = get_area_tri(2, p1, p2, p3)
+        p1(1) = agridh(im,1,1,f);   p1(2) = agridh(im,1,2,f)
+        p2(1) = agridh(im,0,1,f);   p2(2) = agridh(im,0,2,f)
+        p3(1) = agridh(im+1,1,1,f); p3(2) = agridh(im+1,1,2,f)
+        area_c(npx, 1, f) = get_area_tri(2, p1, p2, p3)
+        p1(1) = agridh(im,im,1,f);   p1(2) = agridh(im,im,2,f)
+        p2(1) = agridh(im+1,im,1,f); p2(2) = agridh(im+1,im,2,f)
+        p3(1) = agridh(im,im+1,1,f); p3(2) = agridh(im,im+1,2,f)
+        area_c(npx, npx, f) = get_area_tri(2, p1, p2, p3)
+        p1(1) = agridh(1,im,1,f);   p1(2) = agridh(1,im,2,f)
+        p2(1) = agridh(1,im+1,1,f); p2(2) = agridh(1,im+1,2,f)
+        p3(1) = agridh(0,im,1,f);   p3(2) = agridh(0,im,2,f)
+        area_c(1, npx, f) = get_area_tri(2, p1, p2, p3)
+        ! --- area_c step 3 (init_grid): ×2 half-dual overwrites, W,E,S,N
+        !     code order — replicated verbatim (arg slots of
+        !     get_area(p1, p4, p2, p3) as in the source)
+        ! West (i=1), j = 1..npx:
+        do j = 1, npx
+           p1(1) = gridh(1, j-1,1, f); p1(2) = gridh(1, j-1,2, f)
+           p2(1) = gridh(1, j,  1, f); p2(2) = gridh(1, j,  2, f)
+           call mid_pt_sphere(p1, p2, pm1)
+           p1(1) = gridh(1, j+1,1, f); p1(2) = gridh(1, j+1,2, f)
+           call mid_pt_sphere(p2, p1, pm2)
+           p3(1) = agridh(1, j-1,1, f); p3(2) = agridh(1, j-1,2, f)
+           p4(1) = agridh(1, j,  1, f); p4(2) = agridh(1, j,  2, f)
+           area_c(1, j, f) = 2.0d0 * get_area(pm1, pm2, p3, p4)
+        enddo
+        ! East (i=npx):
+        do j = 1, npx
+           p1(1) = agridh(im, j-1,1, f); p1(2) = agridh(im, j-1,2, f)
+           p2(1) = gridh(npx, j-1,1, f); p2(2) = gridh(npx, j-1,2, f)
+           p3(1) = gridh(npx, j,  1, f); p3(2) = gridh(npx, j,  2, f)
+           call mid_pt_sphere(p2, p3, pm1)
+           p2(1) = gridh(npx, j+1,1, f); p2(2) = gridh(npx, j+1,2, f)
+           call mid_pt_sphere(p3, p2, pm2)
+           p4(1) = agridh(im, j, 1, f); p4(2) = agridh(im, j, 2, f)
+           area_c(npx, j, f) = 2.0d0 * get_area(p1, p4, pm1, pm2)
+        enddo
+        ! South (j=1):
+        do i = 1, npx
+           p1(1) = gridh(i-1,1, 1, f); p1(2) = gridh(i-1,1, 2, f)
+           p2(1) = gridh(i,  1, 1, f); p2(2) = gridh(i,  1, 2, f)
+           call mid_pt_sphere(p1, p2, pm1)
+           p1(1) = gridh(i+1,1, 1, f); p1(2) = gridh(i+1,1, 2, f)
+           call mid_pt_sphere(p2, p1, pm2)
+           p3(1) = agridh(i,  1, 1, f); p3(2) = agridh(i,  1, 2, f)
+           p4(1) = agridh(i-1,1, 1, f); p4(2) = agridh(i-1,1, 2, f)
+           area_c(i, 1, f) = 2.0d0 * get_area(pm1, p4, pm2, p3)
+        enddo
+        ! North (j=npx):
+        do i = 1, npx
+           p1(1) = agridh(i-1,im,1, f); p1(2) = agridh(i-1,im,2, f)
+           p2(1) = agridh(i,  im,1, f); p2(2) = agridh(i,  im,2, f)
+           p3(1) = gridh(i,  npx,1, f); p3(2) = gridh(i,  npx,2, f)
+           p4(1) = gridh(i+1,npx,1, f); p4(2) = gridh(i+1,npx,2, f)
+           call mid_pt_sphere(p3, p4, pm1)
+           p4(1) = gridh(i-1,npx,1, f); p4(2) = gridh(i-1,npx,2, f)
+           call mid_pt_sphere(p4, p3, pm2)
+           area_c(i, npx, f) = 2.0d0 * get_area(p1, pm2, p2, pm1)
+        enddo
+     enddo
+
+     ! closure diagnostics (unit sphere): cell areas tile exactly once;
+     ! area_c nodes are shared by 2 faces on cube edges, 3 at vertices.
+     closure = sum(area)
+     write(*,'(A,I0,A,ES24.16)') 'C', im, &
+          ' area closure  sum/4pi - 1 = ', closure / (4.0d0*pi_val()) - 1.0d0
+     closure = 0.0d0
+     do f = 1, 6
+        do j = 1, npx
+           do i = 1, npx
+              mult = 1.0d0
+              if (i == 1 .or. i == npx) mult = mult * 2.0d0
+              if (j == 1 .or. j == npx) mult = mult * 2.0d0
+              if (mult > 3.0d0) mult = 3.0d0   ! cube vertex: 3 faces
+              closure = closure + area_c(i, j, f) / mult
+           enddo
+        enddo
+     enddo
+     write(*,'(A,I0,A,ES24.16)') 'C', im, &
+          ' area_c closure sum/4pi - 1 = ', closure / (4.0d0*pi_val()) - 1.0d0
+
+     write(fname, '(A,I0,A)') 'fv3_metrics_c', im, '.txt'
+     open(newunit=unit_no, file=trim(fname), status='replace', action='write')
+     write(unit_no, '(A)') '# FV3 init_grid/grid_area metrics (unit sphere): fieldid f i j value'
+     write(unit_no, '(A)') '# 1=area 2=dx 3=dy 4=dxa 5=dya 6=dxc 7=dyc 8=area_c'
+     write(unit_no, '(A,I0)') '# im = ', im
+     do f = 1, 6
+        do j = 1, im
+           do i = 1, im
+              write(unit_no,'(I1,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') 1,f,i,j,area(i,j,f)
+           enddo
+        enddo
+        do j = 1, npx
+           do i = 1, im
+              write(unit_no,'(I1,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') 2,f,i,j,dxm(i,j,f)
+           enddo
+        enddo
+        do j = 1, im
+           do i = 1, npx
+              write(unit_no,'(I1,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') 3,f,i,j,dym(i,j,f)
+           enddo
+        enddo
+        do j = 1, im
+           do i = 1, im
+              write(unit_no,'(I1,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') 4,f,i,j,dxa(i,j,f)
+              write(unit_no,'(I1,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') 5,f,i,j,dya(i,j,f)
+           enddo
+        enddo
+        do j = 1, im
+           do i = 1, npx
+              write(unit_no,'(I1,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') 6,f,i,j,dxc(i,j,f)
+           enddo
+        enddo
+        do j = 1, npx
+           do i = 1, im
+              write(unit_no,'(I1,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') 7,f,i,j,dyc(i,j,f)
+           enddo
+        enddo
+        do j = 1, npx
+           do i = 1, npx
+              write(unit_no,'(I1,1X,I2,1X,I4,1X,I4,1X,ES26.17E3)') 8,f,i,j,area_c(i,j,f)
+           enddo
+        enddo
+     enddo
+     close(unit_no)
+
+     deallocate(area, dxm, dym, dxa, dya, dxc, dyc, area_c)
+     deallocate(gridh, agridh, agrid6)
      deallocate(grid_global)
      deallocate(lon, lat)
   enddo
 
-  write(*,*) 'fv3_gnomonic_oracle: wrote C1/C8/C36 panel, 6-face, agrid files'
+  write(*,*) 'fv3_gnomonic_oracle: wrote C1/C8/C36 panel, 6-face, agrid, metric files'
+
+contains
+
+  function pi_val() result(v)
+    real(kind=R_GRID) :: v
+    v = 4.0d0 * atan(1.0d0)
+  end function pi_val
+
+  !--------------------------------------------------------------------
+  ! Reconstruct 1-deep cross-face halo lines for grid corners and agrid
+  ! centres.  Shared cube-edge corner NODES are bit-equal between faces
+  ! (mirror construction), so side pairing is found by matching the great-
+  ! circle midpoint of each side's two END nodes (the cube-edge midpoint,
+  ! unique to each of the 12 cube edges); orientation by matching the
+  ! first node.  Halo grid line = neighbour's second node line inward;
+  ! halo agrid line = neighbour's first cell line inward.
+  ! Diagonal halo entries are left at a poison value — the replicated
+  ! FV3 formulas never read them.
+  !--------------------------------------------------------------------
+  subroutine fill_halos(im, grid6, agrid6, gridh, agridh)
+    integer, intent(in) :: im
+    real(kind=R_GRID), intent(in)  :: grid6(im+1, im+1, 2, 6)
+    real(kind=R_GRID), intent(in)  :: agrid6(im, im, 2, 6)
+    real(kind=R_GRID), intent(out) :: gridh(0:im+2, 0:im+2, 2, 6)
+    real(kind=R_GRID), intent(out) :: agridh(0:im+1, 0:im+1, 2, 6)
+
+    integer :: npx, f, g, s, sp, k, n
+    logical :: rev, found
+    real(kind=R_GRID) :: e1(3), e2(3), m_f(3), m_g(3), d
+    real(kind=R_GRID) :: pa(2), pb(2)
+    real(kind=R_GRID) :: nodeline(im+1, 2), cellline(im, 2)
+
+    npx = im + 1
+    gridh  = -1.0d25
+    agridh = -1.0d25
+    do f = 1, 6
+       gridh(1:npx, 1:npx, :, f) = grid6(:, :, :, f)
+       agridh(1:im, 1:im, :, f)  = agrid6(:, :, :, f)
+    enddo
+
+    do f = 1, 6
+       do s = 1, 4   ! 1=S(j=1), 2=N(j=npx), 3=W(i=1), 4=E(i=npx)
+          call side_midpoint(im, grid6, f, s, m_f)
+          found = .false.
+          do g = 1, 6
+             if (g == f) cycle
+             do sp = 1, 4
+                call side_midpoint(im, grid6, g, sp, m_g)
+                d = (m_f(1)-m_g(1))**2 + (m_f(2)-m_g(2))**2 + (m_f(3)-m_g(3))**2
+                if (d < 1.0d-20) then
+                   found = .true.
+                   exit
+                endif
+             enddo
+             if (found) exit
+          enddo
+          if (.not. found) then
+             write(*,*) 'fill_halos: no neighbour for face', f, 'side', s
+             stop 1
+          endif
+          ! orientation: does f-side node 1 equal g-side node 1?
+          call side_node(im, grid6, f, s, 1, pa)
+          call side_node(im, grid6, g, sp, 1, pb)
+          call latlon2xyz_local(pa, e1)
+          call latlon2xyz_local(pb, e2)
+          d = (e1(1)-e2(1))**2 + (e1(2)-e2(2))**2 + (e1(3)-e2(3))**2
+          rev = (d > 1.0d-20)
+
+          ! neighbour's inward node line (one step off the shared edge)
+          do k = 1, npx
+             n = k
+             if (rev) n = npx + 1 - k
+             call side_inner_node(im, grid6, g, sp, n, pa)
+             nodeline(k, :) = pa
+          enddo
+          ! neighbour's first cell line
+          do k = 1, im
+             n = k
+             if (rev) n = im + 1 - k
+             call side_inner_cell(im, agrid6, g, sp, n, pa)
+             cellline(k, :) = pa
+          enddo
+
+          select case (s)
+          case (1)  ! S: fill (k, 0)
+             do k = 1, npx
+                gridh(k, 0, :, f) = nodeline(k, :)
+             enddo
+             do k = 1, im
+                agridh(k, 0, :, f) = cellline(k, :)
+             enddo
+          case (2)  ! N: fill (k, npx+1) nodes / (k, im+1) cells
+             do k = 1, npx
+                gridh(k, npx+1, :, f) = nodeline(k, :)
+             enddo
+             do k = 1, im
+                agridh(k, im+1, :, f) = cellline(k, :)
+             enddo
+          case (3)  ! W
+             do k = 1, npx
+                gridh(0, k, :, f) = nodeline(k, :)
+             enddo
+             do k = 1, im
+                agridh(0, k, :, f) = cellline(k, :)
+             enddo
+          case (4)  ! E
+             do k = 1, npx
+                gridh(npx+1, k, :, f) = nodeline(k, :)
+             enddo
+             do k = 1, im
+                agridh(im+1, k, :, f) = cellline(k, :)
+             enddo
+          end select
+       enddo
+    enddo
+  end subroutine fill_halos
+
+  subroutine side_node(im, grid6, f, s, k, p)
+    integer, intent(in) :: im, f, s, k
+    real(kind=R_GRID), intent(in) :: grid6(im+1, im+1, 2, 6)
+    real(kind=R_GRID), intent(out) :: p(2)
+    integer :: npx
+    npx = im + 1
+    select case (s)
+    case (1); p = grid6(k, 1, :, f)
+    case (2); p = grid6(k, npx, :, f)
+    case (3); p = grid6(1, k, :, f)
+    case (4); p = grid6(npx, k, :, f)
+    end select
+  end subroutine side_node
+
+  subroutine side_inner_node(im, grid6, f, s, k, p)
+    ! node one step INWARD from side s (the neighbour-face line that fills
+    ! the requesting face's halo)
+    integer, intent(in) :: im, f, s, k
+    real(kind=R_GRID), intent(in) :: grid6(im+1, im+1, 2, 6)
+    real(kind=R_GRID), intent(out) :: p(2)
+    integer :: npx
+    npx = im + 1
+    select case (s)
+    case (1); p = grid6(k, 2, :, f)
+    case (2); p = grid6(k, npx-1, :, f)
+    case (3); p = grid6(2, k, :, f)
+    case (4); p = grid6(npx-1, k, :, f)
+    end select
+  end subroutine side_inner_node
+
+  subroutine side_inner_cell(im, agrid6, f, s, k, p)
+    integer, intent(in) :: im, f, s, k
+    real(kind=R_GRID), intent(in) :: agrid6(im, im, 2, 6)
+    real(kind=R_GRID), intent(out) :: p(2)
+    select case (s)
+    case (1); p = agrid6(k, 1, :, f)
+    case (2); p = agrid6(k, im, :, f)
+    case (3); p = agrid6(1, k, :, f)
+    case (4); p = agrid6(im, k, :, f)
+    end select
+  end subroutine side_inner_cell
+
+  subroutine side_midpoint(im, grid6, f, s, m)
+    ! cube-edge midpoint: normalized xyz sum of the side's two END nodes
+    integer, intent(in) :: im, f, s
+    real(kind=R_GRID), intent(in) :: grid6(im+1, im+1, 2, 6)
+    real(kind=R_GRID), intent(out) :: m(3)
+    real(kind=R_GRID) :: pa(2), pb(2), ea(3), eb(3), dd
+    call side_node(im, grid6, f, s, 1, pa)
+    call side_node(im, grid6, f, s, im+1, pb)
+    call latlon2xyz_local(pa, ea)
+    call latlon2xyz_local(pb, eb)
+    m = ea + eb
+    dd = sqrt(m(1)**2 + m(2)**2 + m(3)**2)
+    m = m / dd
+  end subroutine side_midpoint
+
+  subroutine latlon2xyz_local(p, e)
+    real(kind=R_GRID), intent(in)  :: p(2)
+    real(kind=R_GRID), intent(out) :: e(3)
+    e(1) = cos(p(2)) * cos(p(1))
+    e(2) = cos(p(2)) * sin(p(1))
+    e(3) = sin(p(2))
+  end subroutine latlon2xyz_local
+
 end program fv3_gnomonic_oracle

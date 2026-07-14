@@ -167,11 +167,12 @@ jobs:
           JAX_ENABLE_X64: "1"
         run: |
           python -m pytest tests/grids/test_fv3_native_grid_phase1.py \
+            tests/grids/test_fv3_native_metrics_phase2.py \
             tests/grids/test_gnomonic_ed_gate_iter68.py \
             tests/grids/test_gnomonic_ed_centers_iter62.py \
             tests/grids/test_gnomonic_ed_halo_nocollapse_iter73.py \
             -x --timeout=600 --tb=short -q
-        timeout-minutes: 25
+        timeout-minutes: 30
 
   restart-smoke:
     name: Restart Roundtrip

@@ -563,6 +563,49 @@ def _compute_supergrid_metrics(n, supergrid_lon, supergrid_lat, radius):
     return area_c_all, dxc_all, dyc_all, dxa_all, dya_all
 
 
+def _remap_fv3_metrics_to_create(m: dict) -> tuple:
+    """Remap FV3-numbered metric fields onto create_cubed_sphere's layout.
+
+    Pure index shuffling (face permutation + rot90) via the phase-1
+    ``_GNOMONIC_ED_FACE_PERM/_ROT`` table; rot90 by an odd k maps
+    x-staggered fields onto y-staggered positions, so staggered pairs swap.
+    Numerics live entirely in :mod:`legoesm.grids.fv3_native_metrics`;
+    the oracle test performs the same remap independently on the REFERENCE
+    side, so an error here cannot self-cancel.
+    """
+    import numpy as np
+
+    from legoesm.grids.cubed_sphere import (
+        _GNOMONIC_ED_FACE_PERM,
+        _GNOMONIC_ED_FACE_ROT,
+    )
+
+    def _square(a):
+        return np.stack([
+            np.rot90(a[_GNOMONIC_ED_FACE_PERM[F]], _GNOMONIC_ED_FACE_ROT[F])
+            for F in range(6)
+        ])
+
+    def _pair(ax, ay):
+        out_x, out_y = [], []
+        for F in range(6):
+            g = _GNOMONIC_ED_FACE_PERM[F]
+            k = _GNOMONIC_ED_FACE_ROT[F]
+            if k % 2 == 0:
+                out_x.append(np.rot90(ax[g], k))
+                out_y.append(np.rot90(ay[g], k))
+            else:
+                out_x.append(np.rot90(ay[g], k))
+                out_y.append(np.rot90(ax[g], k))
+        return np.stack(out_x), np.stack(out_y)
+
+    area_c = _square(m["area_c"])
+    dxc, dyc = _pair(m["dxc"], m["dyc"])
+    dxa, dya = _pair(m["dxa"], m["dya"])
+    return (jnp.asarray(area_c), jnp.asarray(dxc), jnp.asarray(dyc),
+            jnp.asarray(dxa), jnp.asarray(dya))
+
+
 def create_cubed_sphere_cdgrid(
     base: CubedSphereGrid,
     omega: float | None = None,
@@ -623,6 +666,22 @@ def create_cubed_sphere_cdgrid(
             f"{base.gnomonic_form!r}. Mixing metric families silently ran "
             "different numerics per stagger; rebuild the base grid with the "
             "matching create_cubed_sphere(..., gnomonic=...) instead.")
+    # codex p2-r3/r4: AFTER resolution (so explicit gnomonic='ed' requests
+    # are covered too, not just 'auto'), reject any non-6-face ED base —
+    # single-face walled panels and MPI face slices
+    # (parallel/cube_face_scatter) would pair a regional/partial base with
+    # the GLOBAL six-face FV3 metric construction, mislabeling cube-seam
+    # ×2 edge conventions as wall metrics.  Global duogrid/MPI production
+    # paths build C/D metrics from the full 6-face base BEFORE slicing.
+    if gnomonic == "ed" and base.lat.shape[0] != 6:
+        raise NotImplementedError(
+            "create_cubed_sphere_cdgrid: FV3-native (ED) C/D metrics are "
+            "the GLOBAL six-face construction; a "
+            f"{base.lat.shape[0]}-face base (walled panel or MPI face "
+            "slice) would mislabel cube-seam edge conventions as wall "
+            "metrics. Build C/D metrics from the full 6-face grid before "
+            "slicing, or use an equiangular panel. A bounded-domain FV3 "
+            "metric builder is not implemented.")
 
     # ------------------------------------------------------------------
     # The C-D supergrid metrics all derive from 4 node-grids: the 2n+1
@@ -669,10 +728,56 @@ def create_cubed_sphere_cdgrid(
         raise ValueError(
             f"gnomonic must be 'equiangular' or 'ed', got {gnomonic!r}")
 
-    # FV3 supergrid metrics: area_c, dxc, dyc from the 2x-refined supergrid
-    # (same supergrid as sin_sg/cos_sg → mutual consistency).
-    area_c_sg, dxc_sg, dyc_sg, dxa_sg, dya_sg = _compute_supergrid_metrics(
-        n, _sg_lon, _sg_lat, radius)
+    if gnomonic == "ed":
+        # Phase-2 FV3-native metrics: the exact init_grid/grid_area
+        # construction (spherical-excess areas, agrid distances, the ×2
+        # half-dual edge conventions — oracle-pinned against the verbatim
+        # Fortran extraction in tests/grids/test_fv3_native_metrics_phase2.py)
+        # built in FV3 face numbering and remapped to create's layout.  The
+        # legacy chord/supergrid approximation below is NEVER used on this
+        # path (guard test monkeypatches it to raise).
+        #
+        # These are the GLOBAL-cube FV3 metrics (fv_grid_tools non-bounded
+        # branch).  legoESM's `base.bounded_domain` is deliberately NOT
+        # consulted here: that flag is the iter-865b OPERATOR-dispatch shim
+        # (duogrid handles its own edges), whereas upstream bounded_domain
+        # means regional/nested (fv_arrays.F90:1512) — a global cube with
+        # duogrid still takes FV3's global metric branch.  A true regional
+        # FV3 bounded metric builder does not exist; the ONE route that
+        # would have produced a regional ED C/D grid
+        # (create_cubed_sphere_panel(gnomonic='ed', return_cdgrid=True))
+        # fails closed with NotImplementedError rather than mislabeling
+        # global cube-seam ×2 conventions as wall metrics.
+        import numpy as _np
+
+        from legoesm.grids.cubed_sphere import make_fv3_native_grid
+        from legoesm.grids.fv3_native_metrics import (
+            compute_fv3_native_metrics,
+        )
+
+        _lon6, _lat6 = make_fv3_native_grid(n, grid_type=0)
+        if jnp.asarray(_lon6).dtype != jnp.float64:
+            # fp32 grid generation leaves ~4e-8 residue at the cube seams:
+            # the seam nodes are no longer bit-equal across faces, the
+            # geometric halo matching cannot (and should not) succeed, and
+            # "exact FV3 metrics" from fp32 coordinates would be false
+            # advertising.  Fail closed — never fall back to the chord
+            # approximation.  (metric_dtype only controls STORAGE; the
+            # construction itself must be float64.)
+            raise ValueError(
+                "FV3-native (ED) C/D metrics require float64 grid "
+                "construction: enable x64 (JAX_ENABLE_X64=1 or "
+                "jax.config.update('jax_enable_x64', True)) before building "
+                "the grid. Refusing to fall back to approximate metrics.")
+        _m = compute_fv3_native_metrics(
+            _np.asarray(_lon6), _np.asarray(_lat6), radius=radius)
+        area_c_sg, dxc_sg, dyc_sg, dxa_sg, dya_sg = (
+            _remap_fv3_metrics_to_create(_m))
+    else:
+        # Legacy supergrid metrics: area_c, dxc, dyc from the 2x-refined
+        # supergrid (same supergrid as sin_sg/cos_sg → mutual consistency).
+        area_c_sg, dxc_sg, dyc_sg, dxa_sg, dya_sg = _compute_supergrid_metrics(
+            n, _sg_lon, _sg_lat, radius)
 
     all_lon_c, all_lat_c = [], []
     all_angle_c = []
