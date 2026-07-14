@@ -58,6 +58,8 @@ __param_spec__ = {
             "nsc_ref_labile_frac": {"units": "1", "bounds": (0.005, 0.1), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "labile/NSC as a fraction of live biomass at which maintenance respiration is unthrottled; respiratory downregulation under substrate limitation (Atkin & Tjoelker 2003)", "shape": None},
             "r_maint_floor_frac": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "basal maintenance-respiration floor retained under full NSC depletion (Atkin & Tjoelker 2003)", "shape": None},
             "freeze_dormancy_threshold_K": {"units": "K", "bounds": (263.0, 278.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "cold-deciduous winter-dormancy onset temperature (~0 degC); larch/tundra phenology", "shape": None},
+            "leaf_bootstrap_lai": {"units": "1", "bounds": (0.1, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "minimum leaf area a cold-deciduous plant regrows from labile in the growing season to escape the 0-leaf GPP lock (larch/tundra leaf-out)", "shape": None},
+            "leaf_bootstrap_frac": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "max fraction of the labile reserve drawn per step to bootstrap the leaf area (rate-limits the C_lab->C_fol regrowth)", "shape": None},
             "tor_litter": {"units": "1", "bounds": (0.00066, 0.006), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "tor_root": {"units": "1", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "tor_som_active": {"units": "1/day", "bounds": (3e-04, 3e-03), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CENTURY/CLM4.5 active-SOM MRT ~1-5 yr (Parton et al. 1987; Koven et al. 2013)", "shape": None},
@@ -143,6 +145,14 @@ class CarbonConfig(NamedTuple):
     cold_deciduous: bool = False
     freeze_dormancy_threshold_K: float = constants.T_freeze  # dormancy below this T [K]
     dormancy_transition_width_K: float = 2.0                 # sigmoid half-width [K]
+    # Leaf bootstrap (part of the cold-deciduous mechanism): a cold-deciduous
+    # plant that lost its canopy (C_fol -> 0) but kept a labile reserve (the NSC
+    # gate preserved it) must regrow a minimum leaf area from labile in the
+    # growing season -- else GPP (computed from the ENTRY C_fol) is 0 forever ->
+    # no NPP allocation -> permanent death (the leaf-out lock).  A pure
+    # C_lab -> C_fol transfer (carbon_cycle: added to lab_release), conserving.
+    leaf_bootstrap_lai: float = 0.5      # target min LAI regrown from labile [m2/m2]
+    leaf_bootstrap_frac: float = 0.1     # max fraction of C_lab drawn per step [-]
 
     # --- NPP allocation (sequential partition) ---
     f_fol: float = 0.15           # Fraction NPP -> foliage

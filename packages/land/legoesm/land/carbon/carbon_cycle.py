@@ -798,6 +798,28 @@ def step_carbon_differland(
     lab_release = state.C_lab * _effective_rate(lrf, dt_days)   # gC/m2/day
     leaf_litter = state.C_fol * _effective_rate(lff, dt_days)
 
+    # --- Cold-deciduous leaf bootstrap (Mechanism 2, opt-in) ----------------
+    # A cold-deciduous plant that lost its canopy (C_fol -> 0) but kept a labile
+    # reserve (the NSC gate preserved it) must REGROW a minimum leaf area from
+    # labile in the growing season; otherwise GPP -- computed once per step from
+    # the ENTRY C_fol (LAI = C_fol / LCMA) -- stays 0, so NPP < 0, A_fol = 0, and
+    # the plant is locked dead (larch / tundra).  Draw EXTRA labile toward a
+    # minimum leaf mass when ACTIVE (dormancy factor ~1, growing season),
+    # LEAFLESS (C_fol below target), and the reserve allows it.  This is a PURE
+    # C_lab -> C_fol transfer: it is added to lab_release, which the pool update
+    # DEBITS from C_lab and CREDITS to C_fol symmetrically, and it is capped at
+    # the reserve, so carbon is CONSERVED (NOT a jnp.maximum C_fol floor, which
+    # would create leaf mass).  STATIC gate -> Python if (feature gating); a
+    # no-op when the flag is off => byte-identical.
+    if config.cold_deciduous_dormancy and config.cold_deciduous:
+        d_boot = _cold_deciduous_dormancy_factor(T, config)     # ~1 active, ~0 dormant
+        fol_target = config.leaf_bootstrap_lai * config.LCMA    # min leaf mass [gC/m2]
+        fol_gap = jnp.maximum(fol_target - state.C_fol, 0.0)    # leaf shortfall [gC/m2]
+        boot = d_boot * jnp.minimum(
+            fol_gap, state.C_lab * config.leaf_bootstrap_frac) / dt_days  # gC/m2/day
+        # Cap total labile release at the reserve so C_lab stays >= 0 (conserving).
+        lab_release = jnp.minimum(lab_release + boot, state.C_lab / dt_days)
+
     # --- Structural turnover -----------------------------------------------
     wood_litter = state.C_wood * _effective_rate(
         jnp.asarray(config.tor_wood), dt_days,

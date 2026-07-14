@@ -694,7 +694,8 @@ class TestArcticProductivityRescue(unittest.TestCase):
         base = _default_config(scheme="differland")          # gates default off
         pert = base._replace(nsc_ref_labile_frac=0.5, r_maint_floor_frac=0.9,
                              freeze_dormancy_threshold_K=250.0,
-                             dormancy_transition_width_K=8.0)
+                             dormancy_transition_width_K=8.0,
+                             leaf_bootstrap_lai=1.5, leaf_bootstrap_frac=0.3)
         a, fa = self._step(base, state)
         b, fb = self._step(pert, state)
         for field in state._fields:
@@ -786,6 +787,32 @@ class TestArcticProductivityRescue(unittest.TestCase):
         with self.assertRaises(ValueError):
             _cold_deciduous_dormancy_factor(jnp.asarray(270.0), _default_config(
                 scheme="differland", dormancy_transition_width_K=0.0))
+
+    def test_leaf_bootstrap_regrows_leaves_and_conserves(self):
+        # A leafless cold-deciduous plant (C_fol=0) with a labile reserve, in the
+        # growing season (T > threshold), must REGROW C_fol from labile -- escaping
+        # the 0-leaf -> 0-GPP -> dead lock.  Conserving (pure C_lab -> C_fol).
+        leafless = _make_carbon_state(shape=(1,), C_fol=jnp.full(1, 0.0),
+                                      C_lab=jnp.full(1, 100.0))
+        warm_T = jnp.full(1, constants.T_freeze + 10.0)   # growing season, d~1
+        common = dict(sw_down=jnp.full(1, 200.0), co2_ppmv=jnp.full(1, 400.0),
+                      beta=jnp.full(1, 0.5), lat=jnp.full(1, 1.1), doy=180.0,
+                      precip=jnp.full(1, 3e-5), dt=86400.0)
+        cd = _default_config(scheme="differland", cold_deciduous_dormancy=True,
+                             cold_deciduous=True, leaf_bootstrap_lai=0.5,
+                             leaf_bootstrap_frac=0.1)
+        off = _default_config(scheme="differland", cold_deciduous_dormancy=False)
+        s_boot, flux_boot = step_carbon_differland(leafless, T=warm_T, config=cd, **common)
+        s_off, _ = step_carbon_differland(leafless, T=warm_T, config=off, **common)
+        # bootstrap grows leaves from labile; off leaves the canopy at ~0.
+        self.assertGreater(float(s_boot.C_fol.sum()), 1.0)
+        self.assertGreater(float(s_boot.C_fol.sum()), float(s_off.C_fol.sum()))
+        # the drawn labile leaves C_lab (pure internal transfer, no creation).
+        self.assertLess(float(s_boot.C_lab.sum()), float(leafless.C_lab.sum()))
+        # conservation still closes exactly.
+        dC = sum(getattr(s_boot, f) - getattr(leafless, f) for f in leafless._fields)
+        expected = -(flux_boot / _GC_TO_KG_CO2) * 86400.0
+        npt.assert_allclose(dC, expected, rtol=1e-9, atol=1e-9)
 
 
 # ===================================================================
