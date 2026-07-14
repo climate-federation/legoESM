@@ -313,6 +313,29 @@ def is_evergreen(pft_name: str) -> bool:
     return "evergreen" in pft_name
 
 
+_COLD_DECIDUOUS_PFTS = frozenset({
+    "needleleaf_deciduous_boreal",
+    "c3_arctic_grass",
+    "broadleaf_deciduous_boreal_shrub",
+})
+
+
+def is_cold_deciduous(pft_name: str) -> bool:
+    """True for cold-deciduous / winter-dormant high-latitude PFTs.
+
+    These PFTs (larch ``needleleaf_deciduous_boreal``, arctic graminoids
+    ``c3_arctic_grass``, ``broadleaf_deciduous_boreal_shrub``) shed or
+    metabolically shut down their foliage over the frozen season, so both canopy
+    GPP and foliar maintenance respiration should stop when frozen
+    (``carbon.carbon_cycle`` cold-deciduous freeze dormancy, gated by
+    ``CarbonConfig.cold_deciduous`` + ``cold_deciduous_dormancy``).  An
+    EXACT-name membership set, NOT a substring match: the already-productive
+    ``broadleaf_deciduous_boreal`` tree is intentionally excluded (a substring on
+    ``"deciduous_boreal"`` would wrongly include it).
+    """
+    return pft_name in _COLD_DECIDUOUS_PFTS
+
+
 def is_c4(pft_name: str) -> bool:
     """True for C4-pathway PFTs (``c4_grass`` / ``crop_c4``); False for C3 (all others).
 

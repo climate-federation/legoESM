@@ -15,9 +15,29 @@ from legoesm.land.surface_params import (
     CLM5_PFT_NAMES,
     is_c4,
     is_c4_pft_id,
+    is_cold_deciduous,
     is_evergreen,
     is_woody,
 )
+
+
+def test_is_cold_deciduous_selects_larch_arctic_grass_and_boreal_shrub():
+    # Cold-deciduous / winter-dormant high-latitude PFTs get the freeze-dormancy
+    # gate; the already-healthy boreal broadleaf tree does NOT.
+    for name in (
+        "needleleaf_deciduous_boreal",
+        "c3_arctic_grass",
+        "broadleaf_deciduous_boreal_shrub",
+    ):
+        assert is_cold_deciduous(name) is True, name
+    for name in (
+        "broadleaf_deciduous_boreal",       # healthy tree, excluded
+        "needleleaf_evergreen_boreal",
+        "broadleaf_deciduous_temperate",
+        "c3_grass",
+        "broadleaf_evergreen_tropical",
+    ):
+        assert is_cold_deciduous(name) is False, name
 
 
 def test_is_woody_trees_and_shrubs_true():
