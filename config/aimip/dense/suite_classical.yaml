@@ -432,15 +432,15 @@ cfg_overrides:
   n_eval_days: 4
   train_year: 1979
   eval_year: 2013
-  # Classical uses RRTMGP radiation unrolled over the rollout — the 24h (144-step)
-  # and 72h (432-step) curriculum phases build an XLA graph too large to compile
-  # in reasonable walltime (the 12h graph alone took >2.5 h on the first attempt).
-  # Keep classical on a single 6h lead for all 5 epochs (a 12h rollout graph
-  # would not compile in walltime — two attempts stalled >2.75 h in XLA). The NN variants (no rrtmgp in the loop) keep the
-  # full 12/24/72h curriculum.
-  aimip_rollout_curriculum:
-  - - 6
-    - 5
+  # NO rollout curriculum for classical. The ACE2-gap curriculum path unrolls
+  # RRTMGP over the rollout WITHOUT the base rollout's per-g-point +
+  # nothing_saveable jax.checkpoint on the spectral_rollout scan body — so the
+  # rrtmgp graph compiles fully and stalls XLA (12h/6h/3-lead all froze >2.5 h
+  # at the cloud-optics graph build, never reaching epoch-0). The base
+  # (non-curriculum) rollout keeps that gradient checkpointing, which is what
+  # makes the sparse rrtmgp adjoint tractable — the same recipe the working
+  # ace2 classical training used. Train classical on all years via the base
+  # checkpointed rollout; NN variants keep the curriculum (no rrtmgp in loop).
   aimip_chunk_windows: 34
   aimip_n_epochs: 5
   loss:
