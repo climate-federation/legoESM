@@ -356,9 +356,12 @@ def _regrid_to_target(
     )
 
     target_shape = target_lat_deg.shape
+    # Wrap target longitudes into the source periodic frame ([0, 360) +
+    # the 1-column pad): a target convention like [-180, 180) would
+    # otherwise fall past the pad and silently read fill_value=0.
     points = np.stack([
         target_lat_deg.ravel(),
-        target_lon_deg.ravel(),
+        target_lon_deg.ravel() % 360.0,
     ], axis=-1)
 
     result = interp(points).reshape(target_shape)
@@ -422,7 +425,17 @@ def _derive_land_fraction(
 
     for dlat in offsets:
         for dlon in offsets:
-            pts = np.stack([flat_lat + dlat, flat_lon + dlon], axis=-1)
+            # Wrap sample longitudes into the source periodic frame: the
+            # ±1-column pad above only covers ~1 source cell beyond the
+            # seam, while sub-samples reach ±grid_spacing/2 (e.g. ±3.75°
+            # for a 7.5° target cell). Unwrapped samples past the pad hit
+            # fill_value=0 and are miscounted as OCEAN — on latlon24 the
+            # lon-0 column of fully-land rows got f_land = 9/15 = 0.6
+            # (phantom 40% ocean over the Antarctic plateau = the
+            # polar-night blowup heat source).
+            pts = np.stack(
+                [flat_lat + dlat, (flat_lon + dlon) % 360.0], axis=-1
+            )
             elev = interp(pts)
             land_frac += (elev > 0.0).astype(np.float64)
 

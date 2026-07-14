@@ -179,6 +179,58 @@ class TestLandFraction(unittest.TestCase):
         self.assertGreater(float(f_land[0]), 0.2)
         self.assertLess(float(f_land[0]), 0.8)
 
+    def test_seam_cell_all_land(self):
+        """A lon=0 target cell over all-land source must get f_land=1.
+
+        Regression for the phantom-ocean seam bug: sub-samples reaching
+        past the interpolator's 1-column wrap pad (e.g. lon -3.75 for a
+        7.5 deg cell centered at 0) read fill_value=0 and were counted
+        as ocean, giving f_land = 0.6 on the lon-0 column of latlon24
+        (the Antarctic polar-night blowup heat source). Samples must be
+        wrapped mod 360 into the source frame instead.
+        """
+        lat_src = np.linspace(-90, 90, 181)
+        lon_src = np.linspace(0, 359, 360)
+        elev = np.full((181, 360), 500.0)
+
+        # latlon24-like cells: 7.5 deg spacing, first column centered at 0
+        target_lat = np.array([-86.25, -78.75, 0.0])
+        target_lon = np.array([0.0, 0.0, 0.0])
+
+        f_land = _derive_land_fraction(
+            lat_src, lon_src, elev, target_lat, target_lon, 7.5
+        )
+        npt.assert_allclose(f_land, 1.0)
+
+    def test_seam_cell_land_across_seam(self):
+        """Land spanning the 350E-10E seam scores fully at a lon=0 cell."""
+        lat_src = np.linspace(-90, 90, 181)
+        lon_src = np.linspace(0, 359, 360)
+        _, lon2d = np.meshgrid(lat_src, lon_src, indexing="ij")
+        # Land only within 10 deg of the prime meridian (both sides)
+        elev = np.where((lon2d <= 10.0) | (lon2d >= 350.0), 500.0, -3000.0)
+
+        target_lat = np.array([0.0, 0.0])
+        target_lon = np.array([0.0, 180.0])
+
+        f_land = _derive_land_fraction(
+            lat_src, lon_src, elev, target_lat, target_lon, 7.5
+        )
+        npt.assert_allclose(f_land[0], 1.0)
+        npt.assert_allclose(f_land[1], 0.0)
+
+    def test_regrid_negative_lon_convention(self):
+        """_regrid_to_target must wrap [-180,180) target lons (not fill 0)."""
+        lat_src = np.linspace(-90, 90, 181)
+        lon_src = np.linspace(0, 359, 360)
+        elev = np.full((181, 360), 500.0)
+
+        target_lat = np.array([0.0])
+        target_lon = np.array([-90.0])  # == 270E
+
+        z = _regrid_to_target(lat_src, lon_src, elev, target_lat, target_lon)
+        npt.assert_allclose(z, 500.0)
+
 
 class TestSmoothing(unittest.TestCase):
     """Test Laplacian smoothing."""
