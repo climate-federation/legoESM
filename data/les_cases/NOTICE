@@ -1,0 +1,29 @@
+Third-party forcing data — provenance and attribution
+======================================================
+
+The per-case subdirectories here (BOMEX/, RICO/, DYCOMS_RF01/, DYCOMS_RF02/,
+ARM9707/, ASTEX209/, TOGA/, LBA/, GATE_IDEAL/) contain SAM/gSAM CASE decks
+(ASCII `grd`, `lsf`, `prm`, `snd`, `sfc`, `rad` files) used to drive the legoESM
+LES/CRM idealized cases.
+
+Source
+------
+These decks originate from the System for Atmospheric Modeling (SAM) / gSAM,
+authored by Marat Khairoutdinov (Stony Brook University).
+  - SAM: http://rossby.msrc.sunysb.edu/~marat/SAM.html
+  - Reference: Khairoutdinov, M. F., and D. A. Randall (2003), "Cloud Resolving
+    Modeling of the ARM Summer 1997 IOP: Model Formulation, Results,
+    Uncertainties, and Sensitivities", J. Atmos. Sci., 60, 607-625.
+
+They are redistributed here (unmodified idealized-case input decks) for
+reproducibility of the legoESM smoke/validation cases. Credit for the case
+setups belongs to the SAM/gSAM authors and the respective field-campaign
+communities (BOMEX, RICO, DYCOMS-II, ARM, GATE, LBA, etc.).
+
+Regenerating / refreshing
+-------------------------
+`scripts/data/fetch_les_forcing.py` repopulates this cache from any gSAM
+checkout (point it at the checkout root via `--gsam-root` or `$LEGOESM_GSAM_ROOT`).
+`legoesm.atmosphere.forcing.sam_case_forcing.resolve_sam_case_dir` falls back to
+this cache, so once populated the gSAM-backed drivers find their decks with no
+external checkout.

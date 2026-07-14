@@ -151,3 +151,20 @@ docs/_build/
 # sampling subset), not a runtime artifact; override the broad `data/` ignore.
 !packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/data/
 !packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/data/mie_lut_sampling.npz
+
+# --- Committed forcing / boundary-condition INPUT data (small, tracked so a
+# fresh clone can run the AMIP/LES/OMIP smokes without a data download). These
+# are model INPUTS, not runtime OUTPUTS — the `data/` and `*.nc` ignores above
+# are for transient outputs. Narrow, path-scoped negations only.
+# Provenance: data/les_cases = third-party gSAM SAM CASES decks (Khairoutdinov,
+# SAM/gSAM); see data/les_cases/NOTICE. data/forcing_amip = synthetic, regen via
+# scripts/data/generate_amip_forcing.py. data/bathymetry = NOAA ETOPO (public).
+!data/
+data/*
+!data/forcing_amip/
+!data/forcing_amip/*.nc
+!data/bathymetry/
+!data/bathymetry/*.nc
+!data/les_cases/
+!data/les_cases/**/
+!data/les_cases/**
