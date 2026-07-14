@@ -155,6 +155,8 @@ def build_pixel_config(pft: str, texture: str, freeze_thaw: bool,
                        cold_deciduous_dormancy: bool = False,
                        nsc_ref_labile_frac: float = CarbonConfig().nsc_ref_labile_frac,
                        r_maint_floor_frac: float = CarbonConfig().r_maint_floor_frac,
+                       freeze_dormancy_threshold_K: float = (
+                           CarbonConfig().freeze_dormancy_threshold_K),
                        ) -> MultiLayerLandConfig:
     """MultiLayerLandConfig for one pixel: texture -> hydraulics, PFT ->
     surface + photosynthesis params, DifferLand carbon + Farquhar stomata on.
@@ -172,6 +174,7 @@ def build_pixel_config(pft: str, texture: str, freeze_thaw: bool,
         cold_deciduous=is_cold_deciduous(pft),
         nsc_ref_labile_frac=nsc_ref_labile_frac,
         r_maint_floor_frac=r_maint_floor_frac,
+        freeze_dormancy_threshold_K=freeze_dormancy_threshold_K,
         **_biome_carbon_init(biome, woody, row["LCMA"]),
     )
     return MultiLayerLandConfig(
@@ -529,6 +532,12 @@ def main(argv=None):
     p.add_argument("--r-maint-floor-frac", type=float,
                    default=CarbonConfig().r_maint_floor_frac,
                    help="NSC-gate floor: basal R_maint fraction at full depletion.")
+    p.add_argument("--freeze-dormancy-threshold-k", type=float,
+                   default=CarbonConfig().freeze_dormancy_threshold_K,
+                   help="Cold-deciduous dormancy onset T [K]; below it foliar GPP + "
+                        "R_maint are suppressed. The T_freeze (0 degC) default is too "
+                        "high for boreal/tundra growing seasons -- try ~265 (-8 degC, "
+                        "deep-cold only).")
     args = p.parse_args(argv)
 
     out_dir = Path(args.output)
@@ -548,7 +557,8 @@ def main(argv=None):
             nsc_gated_respiration=args.nsc_gated_respiration,
             cold_deciduous_dormancy=args.cold_deciduous_dormancy,
             nsc_ref_labile_frac=args.nsc_ref_labile_frac,
-            r_maint_floor_frac=args.r_maint_floor_frac)
+            r_maint_floor_frac=args.r_maint_floor_frac,
+            freeze_dormancy_threshold_K=args.freeze_dormancy_threshold_k)
         annual, _fs, final_carbon = run_pixel(
             config, lat, lon, T_init, precip, args.spinup_years, args.dt,
             n_verify=args.verify_years)
