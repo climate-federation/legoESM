@@ -1118,12 +1118,13 @@ class TiedtkeConfig(NamedTuple):
     First scheme that actually exercises the new ``(ncol, nlev)``
     profile carry for ``M_u(k)``.
 
-    The full Tiedtke 1989 closure uses column moisture convergence
-    for the deep branch.  Until the PR-0 ``compute_moisture_convergence``
-    diagnostic ships, we use a saturation-deficit proxy
-    ``MC_proxy = (q_sat - q_v) / tau_relax_s`` that has the same
-    qualitative behavior (positive in moist columns, zero in dry
-    columns).
+    The full Tiedtke 1989 closure uses column moisture convergence for
+    the deep branch.  Production passes the real per-level
+    ``compute_moisture_convergence`` field (column-integrated inside the
+    scheme); when it is ``None`` the scheme falls back to a
+    saturation-EXCESS proxy ``MC_proxy = ∫ max(q_v - RH_crit·q_sat, 0)
+    dp / (g·tau_MC_proxy)`` with the same qualitative behavior (positive
+    in moist columns, zero in dry).
 
     Fields
     ------
@@ -1140,8 +1141,9 @@ class TiedtkeConfig(NamedTuple):
     downdraft_RH_min : float
         Below this column-mean RH the downdraft fires (default 0.2).
     moisture_convergence_threshold : float
-        Saturation-deficit proxy threshold [kg/kg/s].  Below this the
-        deep branch is suppressed (default 1e-8).
+        Column moisture-convergence (or saturation-excess proxy)
+        threshold [kg/kg/s].  Below this the deep branch is suppressed
+        (default 1e-8).
     moisture_convergence_sharpness : float
         Sigmoid sharpness on the MC threshold [s/(kg/kg)] (default 1e8).
     cape_threshold : float
