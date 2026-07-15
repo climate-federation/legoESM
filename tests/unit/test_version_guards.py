@@ -16,9 +16,22 @@ from legoesm.parallel.reductions import (
     _format_range,
     _mpi4jax_transport_action,
     _parse_version_triplet,
+    _stack_in_tested_generation,
     _validate_mpi_runtime_versions,
     check_mpi4jax_transport,
+    mpi_stack_outside_tested_range,
 )
+
+# Warm the mpi4jax import ONCE at collection, outside any ``simplefilter("error")``
+# block below.  mpi4jax emits a one-time import-time UserWarning when the installed
+# jax PATCH is newer than its packaged pin (e.g. jax 0.10.1 vs mpi4jax's 0.10.0) —
+# unrelated to the behaviour these tests assert.  Consuming it here keeps it from
+# leaking into ``test_*_passes_silently`` (whose ``_validate_mpi_runtime_versions``
+# call imports mpi4jax internally) and turning an environmental warning into a red.
+try:  # pragma: no cover - depends on the installed MPI stack
+    import mpi4jax  # noqa: F401
+except Exception:
+    pass
 
 # -----------------------------------------------------------------------
 # _parse_version_triplet
@@ -145,6 +158,57 @@ class TestValidate:
             _validate_mpi_runtime_versions("0.7.0", "0.8.0")     # pre-tested jax
         msg = str(rec[0].message)
         assert "mpi4jax>=0.8,<0.9" in msg                        # legacy line recommended
+
+
+# -----------------------------------------------------------------------
+# _stack_in_tested_generation — the shared two-generation regime predicate
+# -----------------------------------------------------------------------
+
+class TestStackInTestedGeneration:
+    """The single source of truth shared by the runtime preflight and the
+    test xfail gate: a stack is compatible iff it sits WITHIN one generation.
+    """
+
+    @pytest.mark.parametrize("jt,mt", [
+        ((0, 8, 0), (0, 8, 0)),    # legacy lower edge
+        ((0, 8, 5), (0, 8, 9)),    # legacy interior
+        ((0, 9, 9), (0, 8, 0)),    # legacy jax upper interior
+        ((0, 10, 0), (0, 9, 0)),   # FFI lower edge
+        ((0, 10, 1), (0, 9, 0)),   # FFI — the installed stack (jax 0.10.1)
+        ((0, 10, 5), (0, 9, 5)),   # FFI interior
+    ])
+    def test_paired_generations_accepted(self, jt, mt):
+        assert _stack_in_tested_generation(jt, mt) is True
+
+    @pytest.mark.parametrize("jt,mt", [
+        ((0, 10, 0), (0, 8, 0)),   # CROSS: FFI-era jax + legacy mpi4jax (removed API)
+        ((0, 8, 0), (0, 9, 0)),    # CROSS: legacy jax + FFI mpi4jax (needs jax>=0.10)
+        ((0, 11, 0), (0, 9, 0)),   # future jax beyond verified FFI minor
+        ((0, 10, 0), (0, 10, 0)),  # future mpi4jax beyond verified FFI minor
+        ((0, 7, 0), (0, 8, 0)),    # jax below both generations
+    ])
+    def test_cross_and_out_of_range_rejected(self, jt, mt):
+        assert _stack_in_tested_generation(jt, mt) is False
+
+    def test_gate_is_negation_of_helper_on_installed_stack(self):
+        """The xfail gate must never disagree with the shared predicate on the
+        ACTUALLY-installed versions — the invariant that killed the phantom
+        'broken MPI stack' (a verified stack simultaneously accepted by the
+        runtime yet xfailed by the suite).  Environment-robust: both sides read
+        the same installed jax/mpi4jax.
+        """
+        import importlib.metadata as md
+        import importlib.util as ilu
+
+        import jax as _jax
+        if ilu.find_spec("mpi4jax") is None:
+            assert mpi_stack_outside_tested_range() is True
+            return
+        jt = _parse_version_triplet(_jax.__version__)
+        mt = _parse_version_triplet(md.version("mpi4jax"))
+        assert mpi_stack_outside_tested_range() == (
+            not _stack_in_tested_generation(jt, mt)
+        )
 
 
 # -----------------------------------------------------------------------

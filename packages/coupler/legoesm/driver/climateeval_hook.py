@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # scripts/validate/run_amip_climateeval.py, relative to this package module
 # (packages/coupler/legoesm/driver/ -> repo root is 4 parents up). Mirrors
-# the precedent in atmosphere/sam_case_forcing.py::_LOCAL_FORCING_CACHE.
+# the precedent in atmosphere/forcing/sam_case_forcing.py::_LOCAL_FORCING_CACHE.
 RUNNER_SCRIPT = (
     Path(__file__).resolve().parents[4] / "scripts" / "validate" / "run_amip_climateeval.py"
 )

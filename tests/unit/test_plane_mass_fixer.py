@@ -1,6 +1,6 @@
 """Tests for ``compute_dry_mass_plane`` and
 ``fix_mass_nonhydrostatic_plane`` in
-``src/legoesm/atmosphere/dynamics/compressible_euler_plane.py``.
+``src/legoesm/atmosphere/dynamics/les/compressible_euler_plane.py``.
 
 Covers:
 
@@ -21,7 +21,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     _assert_flat_terrain,
     compute_dry_mass_plane,
     fix_mass_nonhydrostatic_plane,

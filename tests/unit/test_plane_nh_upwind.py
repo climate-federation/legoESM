@@ -17,10 +17,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     PlaneCompressibleEulerModel,
     _upwind_advection_x,
     _upwind_advection_y,
@@ -64,7 +64,7 @@ def test_centered_advection_x_reduces_to_centered_difference():
     to the classic 2nd-order centred difference ``-u·(f[i+1]-f[i-1])/(2dx)``
     (non-diffusive, dispersive — = gSAM `advect2_mom_xy.f90`). Guards the
     momentum-leg scheme used by the ADV-SPLIT #86 per-field split."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         _centered_advection_x,
     )
     nx = 8
@@ -129,7 +129,7 @@ def test_centered_momentum_is_non_dissipative_vs_van_leer():
       systematic dissipation — so it PRESERVES convective KE/extremes).
 
     This is why centered restores the updraft extremes van_leer damps."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         _centered_advection_x, _van_leer_advection_x,
     )
     rng = np.random.default_rng(5)

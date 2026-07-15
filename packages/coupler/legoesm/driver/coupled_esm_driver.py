@@ -782,12 +782,56 @@ class CoupledESMDriver:
         if cfg.use_pft and cfg.land_mode != "none":
             land_param_provider = self._build_pft_provider(shape_2d)
 
+        # Optional spun-up land carbon IC (the finidat global_carbon_ic.npz):
+        # INGEST the seeded per-cell 8-pool CarbonState + the per-cell permafrost
+        # phi so the coupled run starts carbon at its mapped equilibrium and
+        # MAINTAINS the seeded permafrost SOC (phi -> make_coupler's f_perma
+        # protection), instead of cold-starting carbon and decomposing the seed.
+        # Only meaningful for the multilayer differland carbon column; a carbon IC
+        # with slab / carbon-off land is a caller error (fail loud, never a silent
+        # no-op).  ""/None (default) => cold-start + no protection (byte-identical).
+        carbon_override = None
+        land_soil_frozen_fraction = None
+        carbon_ic_path = getattr(cfg, "carbon_ic_path", "")
+        if carbon_ic_path:
+            import math
+
+            from legoesm.land.carbon.global_init import load_finidat_carbon_ic
+            from legoesm.land.config import MultiLayerLandConfig as _MLLC
+            if not (isinstance(land_cfg, _MLLC)
+                    and land_cfg.carbon.scheme == "differland"):
+                raise ValueError(
+                    f"carbon_ic_path={carbon_ic_path!r} requires multilayer land "
+                    "with the differland carbon scheme (land_mode='multilayer', "
+                    f"carbon active); got land_config {type(land_cfg).__name__} / "
+                    f"carbon scheme {land_cfg.carbon.scheme!r}.")
+            if self._atm._grid_lat is None or self._atm._grid_lon is None:
+                raise ValueError(
+                    "carbon_ic_path needs the atmosphere grid lat/lon to grid-"
+                    "match the finidat; the atmosphere exposes none.")
+            ncol = int(math.prod(shape_2d))
+            lat_deg = np.rad2deg(np.asarray(self._atm._grid_lat)).reshape(-1)
+            lon_deg = np.rad2deg(np.asarray(self._atm._grid_lon)).reshape(-1)
+            carbon_override, land_soil_frozen_fraction = load_finidat_carbon_ic(
+                carbon_ic_path, expect_ncol=ncol,
+                target_lat_deg=lat_deg, target_lon_deg=lon_deg)
+            if carbon_override is None:
+                raise ValueError(
+                    f"carbon_ic_path={carbon_ic_path!r} is not a carbon finidat "
+                    "(missing the 8 CarbonState pool fields); expected a "
+                    "global_carbon_ic.npz from build_global_carbon_ic.py.")
+            logger.info(
+                "  Land carbon IC: seeded %d-column CarbonState from finidat %s "
+                "(permafrost phi %s)", ncol, carbon_ic_path,
+                "threaded" if land_soil_frozen_fraction is not None else "absent")
+
         # Build coupler step function
         self._step_surface = make_coupler(
             coupler_cfg, land_cfg, ice_cfg, lake_cfg,
             lat=self._atm._grid_lat,
             grid=self._atm.grid,
             land_param_provider=land_param_provider,
+            land_soil_frozen_fraction=land_soil_frozen_fraction,
         )
 
         # Initialize surface state.  Optionally warm-start the soil at the
@@ -799,7 +843,8 @@ class CoupledESMDriver:
             soil_kwargs["T_soil_init"] = self._atm.state.T.data[..., -1]
             logger.info("  Soil warm-start: T_soil init = atm near-surface air T")
         self._sfc_state = init_surface_state(
-            shape_2d, land_config=land_cfg, **soil_kwargs,
+            shape_2d, land_config=land_cfg, carbon_override=carbon_override,
+            **soil_kwargs,
         )
 
         # Tile fractions

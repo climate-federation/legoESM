@@ -37,10 +37,10 @@ from run_rcemip_plane import (  # type: ignore
     _rcemip_theta_profile,
 )
 
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     PlaneCompressibleEulerModel,
     compute_dry_mass_plane,
     make_flat_plane_terrain_metric,

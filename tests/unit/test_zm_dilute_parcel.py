@@ -15,8 +15,14 @@ undilute moist adiabat.  These tests pin:
 * outputs are finite and ``q``/CAPE are physical.
 
 The quantitative match to the compiled E3SM/CAM Fortran oracle (CAPE
-within ~1.5 % on tropical soundings) is checked offline in
-``.physics-validator/zhang_mcfarlane/oracle/compare.py``.
+within ~1.5 % on tropical soundings) was validated OFFLINE against a
+compiled ``zm_conv.F90`` reference — a LOCAL, untracked harness (like the
+oracle source clones, never committed and not present in a fresh checkout,
+so do not rely on a specific path here). The CI-enforced faithfulness bounds
+are the qualitative pins in this file (dilute CAPE strictly < undilute, and
+< 0.6× on a tropical sounding); the scheme-level use of the faithful dilute
+CAPE is pinned in
+``tests/atmosphere/hydrostatic/unit/test_zhang_mcfarlane_faithful.py``.
 """
 
 from __future__ import annotations
@@ -32,6 +38,19 @@ from legoesm.atmosphere.physics.convection._zm_dilute import (
     _invert_entropy,
 )
 from legoesm.atmosphere.physics.thermodynamics import parcel_profile_and_cape
+
+
+@pytest.fixture(autouse=True)
+def _enable_x64():
+    # The Newton entropy inversion + eager/jit parity checks below need x64:
+    # ``test_dilute_jit_vmap_match_eager`` compares eager vs jit at rtol=1e-10,
+    # which float32 cannot meet (~0.02 J/kg XLA-fusion drift on CAPE).
+    prev = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    try:
+        yield
+    finally:
+        jax.config.update("jax_enable_x64", prev)
 
 
 def _sounding(nlev=30, T_sfc=300.0, lapse=8.0, rh0=0.85, p_s=1.0e5, p_top=5.0e3):

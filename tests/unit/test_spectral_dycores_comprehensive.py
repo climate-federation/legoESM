@@ -34,7 +34,7 @@ from legoesm.grids.gaussian import (
     _sh_idx,
 )
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.spectral_sw import (
+from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
     SpectralSWConfig,
     SpectralShallowWaterModel,
     spectral_sw_tendencies,
@@ -44,7 +44,7 @@ from legoesm.atmosphere.dynamics.spectral_sw import (
     compute_spectral_diagnostics,
     SpectralSWState,
 )
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralPEConfig,
     SpectralPrimitiveEquationModel,
     spectral_pe_tendencies,
@@ -876,9 +876,9 @@ class TestCrossDiscretization:
     def test_7b_shared_operator_verification(self):
         """Verify SW, PE, NH all use the same spectral operators."""
         # Check at the module level that the imported functions are identical
-        from legoesm.atmosphere.dynamics import spectral_sw
-        from legoesm.atmosphere.dynamics import spectral_pe
-        from legoesm.atmosphere.dynamics import spectral_nh
+        from legoesm.atmosphere.dynamics.gcm import spectral_sw
+        from legoesm.atmosphere.dynamics.gcm import spectral_pe
+        from legoesm.atmosphere.dynamics.gcm import spectral_nh
 
         from legoesm.grids import gaussian
 
@@ -1235,7 +1235,7 @@ class TestCAMSEReference:
         terrain_metric = compute_terrain_metric(z_s, height_coord)
 
         nu = _proper_hyperdiff(grid)
-        from legoesm.atmosphere.dynamics.spectral_nh import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
             SpectralNHConfig, SpectralCompressibleEulerModel,
             nh_rest_state_spectral,
         )
@@ -1283,7 +1283,7 @@ class TestCAMSEReference:
         scheme produces the correct barotropic wave speed.
         """
         from legoesm.grids.vertical import create_height_coordinate, compute_terrain_metric
-        from legoesm.atmosphere.dynamics.spectral_nh import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
             SpectralNHConfig, SpectralCompressibleEulerModel,
             nh_rest_state_spectral,
         )

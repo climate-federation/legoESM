@@ -5,6 +5,16 @@ functions applied to the eddy diffusivity. The mixing length follows
 an asymptotic formula, and the Richardson number controls the
 stability functions.
 
+The stability functions f_m, f_h are the shared
+``physics._shared.louis_stability_functions`` — see its docstring's
+"Faithfulness to Louis (1979) / LTG82" section (and
+``tests/atmosphere/hydrostatic/unit/test_louis_faithful.py``) for the
+term-by-term match to the published Eqs. (19)-(20) and the documented
+departures: the default ``c_louis=16.6`` is Holtslag & De Bruin (1988), not
+Louis (1979)'s 5.0 (``b``=``d``=5 ARE the Louis values), and a continuous
+sigmoid blend replaces Louis's hard Ri<0/Ri>=0 branch switch (AD-safe; the
+``√|Ri|`` floor leaves a small slope kink at exactly Ri=0, not strictly C¹ there).
+
 References
 ----------
 - Louis, J.-F. (1979). A parametric model of vertical eddy fluxes in the
@@ -13,6 +23,9 @@ References
   the operational PBL parameterization at ECMWF. ECMWF Workshop on
   Planetary Boundary Layer Parameterization, 59-79.  (Separate momentum
   vs heat stability functions, ``b_h/b_m = 3/2``.)
+- Holtslag, A. A. M. & De Bruin, H. A. R. (1988). Applied modeling of the
+  nighttime surface energy balance over land. J. Appl. Meteorol., 27, 689-704.
+  (Unstable-branch coefficient ``c_louis=16.6``.)
 """
 
 from __future__ import annotations

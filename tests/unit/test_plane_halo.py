@@ -1,5 +1,5 @@
 """Unit tests for ``pad_halo_plane_4d`` in
-``src/legoesm/atmosphere/dynamics/plane_operators.py``.
+``src/legoesm/atmosphere/dynamics/les/plane_operators.py``.
 
 Covers shape correctness, round-trip recovery of the interior, edge
 wrap, corner wrap (NE, NW, SE, SW), input validation, and
@@ -14,7 +14,7 @@ import jax.test_util
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.dynamics.plane_operators import pad_halo_plane_4d
+from legoesm.atmosphere.dynamics.les.plane_operators import pad_halo_plane_4d
 
 
 jax.config.update("jax_enable_x64", True)

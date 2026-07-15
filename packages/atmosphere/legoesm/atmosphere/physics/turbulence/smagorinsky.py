@@ -4,15 +4,62 @@ Strain-dependent (deformation-based) eddy viscosity
 
     K_m = (C_s · l)^2 · |S| · √(max(0, 1 − Ri/Pr_t)),   K_h = K_m / Pr_t
 
-following Smagorinsky (1963) with the Lilly (1962) buoyancy correction
-that shuts mixing off in strongly stable layers (Ri ≥ Pr_t).  The
-deformation is the resolved vertical shear of the horizontal wind,
-|S| = √((∂u/∂z)² + (∂v/∂z)²), the only strain component available in a
-single-column model; the mixing length ``l`` is the Blackadar (1962)
-asymptotic form shared with the other turbulence closures.
+following Smagorinsky (1963), with a Lilly-type buoyancy cutoff that shuts
+mixing off in strongly stable layers (Ri ≥ Pr_t).  Lilly (1962) left the Ri
+dependence and ``K_h/K_m`` as undetermined functions in his GENERAL theory,
+but his equilibrium EXPERIMENT already gives THIS ``√(1 − Ri/Pr_t)`` stability
+factor with ``K_h/K_m = 1`` (hence ``Pr_t = 1``) and ``K_m = 0`` for ``Ri > 1``
+— all reproduced here.  Only the JAX AD-safe NUMERICS are modern: the
+``max(0, ·)`` clamp and the double-``where`` guard keep the ``√`` and its
+reverse-mode cotangent finite at the ``Ri = Pr_t`` kink (plus a ``S²+1e-10``
+floor); the ``√`` ramp itself is Lilly's, not a modern replacement of a hard
+on/off.  The deformation is a 1-D PROXY: the resolved vertical shear |S| =
+√((∂u/∂z)² + (∂v/∂z)²) is SUBSTITUTED for Smagorinsky's horizontal deformation
+(a single column carries no horizontal strain); the mixing length ``l`` is the
+Blackadar (1962) asymptotic form shared with the other turbulence closures.
 
 Vertical mixing is applied implicitly using the Thomas algorithm
 to ensure numerical stability at any time step.
+
+Faithfulness to Smagorinsky (1963) / Lilly (1962)
+-------------------------------------------------
+This is a MODERN 1-D specialization of the Smagorinsky-Lilly idea, NOT the literal
+published scheme: Smagorinsky (1963) used the HORIZONTAL deformation and a GRID
+length scale (reporting ``k_s ≈ 0.28``).  Lilly (1962) left ``K_h/K_m`` and the
+Richardson dependence as undetermined functions in his GENERAL theory, but his
+EXPERIMENTS fixed ``K_h/K_m = 1`` and ``K_m → 0`` for ``Ri > 1``.
+FAITHFUL (Smagorinsky deformation structure — the only truly-faithful piece):
+  * **Deformation eddy viscosity** ``K_m = (C_s·l)²·|S|`` — the Smagorinsky
+    length²·strain form (with the length/strain modernized; see below).
+LILLY-EXPERIMENT-CONSISTENT (matches Lilly's specific 1962 equilibrium experiment, not
+his undetermined general theory):
+  * **Buoyancy stability factor + cutoff + Prandtl closure**: the ``√(1 − Ri/Pr_t)``
+    stability factor, the ``Ri ≥ Pr_t`` shut-off, and the default ``Pr_t = 1`` (so
+    ``K_h = K_m/Pr_t = K_m``) all match Lilly's equilibrium experiment — his ``√``
+    stability factor with ``K_h/K_m = 1`` and ``K_m → 0`` for ``Ri > 1``.  The ``√``
+    ramp is Lilly's OWN form (not a modern replacement); only the AD-safe numerics
+    (below) are modern.  ``Pr_t`` is exposed as a tunable that generalizes Lilly's
+    fixed unity.
+MODERN additions (from other authors / not in either 1962-63 paper):
+  * **Blackadar (1962) master mixing length** ``l = κz/(1 + κz/l_∞)`` — a separate
+    author's length scale, not from Smagorinsky/Lilly.
+DEPARTURES / RE-TUNED (vs the published papers):
+  * **Modern deformation constant**: ``C_s = 0.2`` (Smagorinsky reported
+    ``k_s ≈ 0.28``) and ``l_mix_max = 100 m`` are modern atmospheric single-column
+    choices, NOT the 1962/1963 constants.
+  * **1-D vertical-shear PROXY for the horizontal deformation**: ``|S| = √((∂u/∂z)² +
+    (∂v/∂z)²)`` is the resolved VERTICAL shear.  Smagorinsky (1963) used the
+    HORIZONTAL strain + a horizontal grid length; the full strain-rate tensor
+    ``√(2·S_ij·S_ij)`` is the modern 3-D LES extension.  Vertical shear is not a
+    surviving *component* of the horizontal deformation — it is a CHOSEN 1-D
+    substitution for a single-column model (no horizontal strain is available).
+  * **AD-safety numerics** (not Smagorinsky): the ``S² + 1e-10`` floor slightly
+    perturbs ``K_m`` and ``Ri`` even where mixing is active (negligibly at resolved
+    shear), and the double-``where`` at the Lilly-type cutoff yields a finite SELECTED
+    reverse-mode cotangent at ``Ri = Pr_t``.  This is the ``differentiable: True``
+    AD-safety sense — the forward is continuous but NON-C¹ at the cutoff (the on-side
+    √ slope diverges); a bare ``√(max(·,0))`` would instead leak a 0·∞ NaN.
+Behavior/assembly pins: ``tests/atmosphere/hydrostatic/unit/test_smagorinsky_faithful.py``.
 """
 
 from __future__ import annotations
@@ -58,12 +105,15 @@ __physics_contract__ = {
     },
     "sign_convention": (
         "Down-gradient mixing: du_dt ~ (1/rho) d/dz(rho Km du/dz); Km, Kh >= 0 "
-        "and vanish where Ri >= Pr_t (Lilly stable cutoff). shflx, lhflx are "
+        "and vanish where Ri >= Pr_t (Lilly-type stable cutoff). shflx, lhflx are "
         "positive UPWARD from the surface and are injected as the lower "
         "boundary condition (a source/sink), so the resolved column budget is "
         "NOT closed. z increases upward; level index -1 is the surface."
     ),
     "conserves": ["none"],
+    # AD-safe (finite selected reverse-mode VJP via the double-where guard); NOT a
+    # claim of a C1-smooth forward -- the Lilly-type cutoff is a non-C1 point at
+    # Ri = Pr_t (the on-side sqrt ramp's slope diverges).
     "differentiable": True,
     "reference": (
         "Smagorinsky (1963), Mon. Wea. Rev. 91, 99-164; "
@@ -92,7 +142,7 @@ def smagorinsky_turbulence(
     dt: float,
     config: SmagorinskyConfig,
 ) -> TurbulenceOutput:
-    """Compute turbulence tendencies using constant eddy diffusivity.
+    """Compute turbulence tendencies from the deformation/stability-dependent eddy diffusivity.
 
     Parameters
     ----------
@@ -134,9 +184,10 @@ def smagorinsky_turbulence(
     dz_half = jnp.abs(z_full[:, :-1] - z_full[:, 1:])       # (ncol, nlev-1)
     dz_half = jnp.clip(dz_half, 1.0, None)
 
-    # Resolved deformation = vertical shear of the horizontal wind, the
-    # only strain component a single-column model carries.  Floor S2 so
-    # both ``S = √S2`` and ``Ri = N²/S2`` stay finite and differentiable.
+    # Resolved deformation: the vertical shear of the horizontal wind is
+    # CHOSEN as a 1-D proxy for Smagorinsky's horizontal deformation (a
+    # single column carries no horizontal strain).  Floor S2 so both
+    # ``S = √S2`` and ``Ri = N²/S2`` stay finite and differentiable.
     du_dz = (u[:, :-1] - u[:, 1:]) / dz_half
     dv_dz = (v[:, :-1] - v[:, 1:]) / dz_half
     S2 = du_dz ** 2 + dv_dz ** 2 + 1e-10
@@ -152,10 +203,13 @@ def smagorinsky_turbulence(
     N2 = buoyancy_coefficient(jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
     Ri = N2 / S2
 
-    # Lilly (1962) buoyancy factor √(max(0, 1 − Ri/Pr_t)): enhances mixing
-    # when unstable (Ri<0), shuts it off at Ri ≥ Pr_t.  Double-``where``
-    # keeps the cutoff exact AND the gradient finite at Ri = Pr_t (a bare
-    # √(max(·,0)) leaks a 0·∞ NaN cotangent through the dead branch).
+    # Lilly (1962) buoyancy stability factor √(max(0, 1 − Ri/Pr_t)) — the √
+    # form is Lilly's equilibrium result (K_h/K_m = 1, K_m→0 for Ri>1); only
+    # the max/double-``where`` guard here (and the S²+1e-10 floor above) are
+    # modern numerics (AD-safety):
+    # enhances mixing when unstable (Ri<0), shuts it off at Ri ≥ Pr_t.
+    # Double-``where`` keeps the cutoff exact AND the gradient finite at
+    # Ri = Pr_t (a bare √(max(·,0)) leaks a 0·∞ NaN cotangent).
     buoy_arg = 1.0 - Ri / config.Pr_t
     buoy_safe = jnp.where(buoy_arg > 0.0, buoy_arg, 1.0)
     f_buoy = jnp.where(buoy_arg > 0.0, jnp.sqrt(buoy_safe), 0.0)

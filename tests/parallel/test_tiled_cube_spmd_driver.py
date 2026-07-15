@@ -26,10 +26,10 @@ import pytest
 
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.model_driver import ModelDriver
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
 )
-from legoesm.atmosphere.held_suarez import held_suarez_init
+from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.halo import set_halo_backend
 from legoesm.grids.vertical import create_sigma_coordinate
@@ -156,16 +156,16 @@ def test_run_tiled_cube_spmd_completes_and_matches_direct_loop():
     assert day == pytest.approx(stub.config.start_day
                                 + n_steps * DT / 86400.0)
 
-    # Glue parity: the lane's gathered state == the direct blocked loop
-    # (same builders, same step count) — exact equality, same code path.
-    from legoesm.atmosphere.dynamics.tiled_step_adapter import (
-        make_tiled_cc_loop,
+    # Glue parity: the lane's gathered state == the direct SCANNED segment
+    # (same builders, same step count) — exact equality, same code path
+    # (M3b increment 1: the lane advances each segment via ONE compiled
+    # lax.scan, scan_tiled_cc_steps; scan-vs-per-step numerics parity is
+    # gated in tests/parallel/test_cube_tile_native_segment.py).
+    from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import (
+        make_tiled_cc_loop, scan_tiled_cc_steps,
     )
     enter, step, exit_ = make_tiled_cc_loop(model, dc.mesh, kt=KT, dt=DT)
-    step_jit = jax.jit(step)
-    blk = enter(hs)
-    for _ in range(n_steps):
-        blk = step_jit(blk)
+    blk = scan_tiled_cc_steps(step, n_steps)(enter(hs))
     ref = exit_(blk, hs)
     np.testing.assert_array_equal(np.asarray(stub.state.T.data),
                                   np.asarray(ref.T.data))
@@ -173,6 +173,35 @@ def test_run_tiled_cube_spmd_completes_and_matches_direct_loop():
                                   np.asarray(ref.u.data))
     np.testing.assert_array_equal(np.asarray(stub.state.p_s.data),
                                   np.asarray(ref.p_s.data))
+
+
+def test_run_tiled_cube_spmd_uneven_tail_segments(tmp_path):
+    """5 steps at a 2-step segment cadence -> segments 2+2+1: exercises
+    the per-length ``_scanned`` cache REUSE (the second 2-step segment,
+    donated carry from the first), the distinct-length TAIL executable
+    (``_scanned(1)``), and donation across differently-compiled segment
+    functions (codex M3b review: no prior test drove the tail/cache
+    path)."""
+    dc = _device_config()
+    model, hs = _model_and_state()
+    n_steps = 5
+    cfg = _exp_cfg(n_steps)
+    cfg = cfg._replace(output=cfg.output._replace(
+        diag_days=2 * DT / 86400.0))   # segment gcd -> 2 steps
+    stub = _DriverStub(model, hs, cfg, dc)
+    stub._output_dir = tmp_path
+    seen = []
+    stub._segment_callback = lambda drv, day, dt_seg: seen.append(dt_seg)
+
+    status = stub._run_tiled_cube_spmd()
+    assert status == "COMPLETED"
+    # 2 + 2 + 1 steps -> three segment callbacks with those dt lengths.
+    assert seen == [pytest.approx(2 * DT), pytest.approx(2 * DT),
+                    pytest.approx(1 * DT)]
+    # The gathered state is current + finite after the tail segment.
+    assert np.all(np.isfinite(np.asarray(stub.state.T.data)))
+    assert stub._current_day == pytest.approx(
+        stub.config.start_day + n_steps * DT / 86400.0)
 
 
 def test_run_tiled_cube_spmd_moist_from_driver_tracer_store():

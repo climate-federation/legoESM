@@ -21,12 +21,12 @@ import numpy as np
 import pytest
 
 from legoesm import constants as C
-from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import CompressibleEulerConfig
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     PlaneCompressibleEulerModel,
     make_flat_plane_terrain_metric,
 )
-from legoesm.atmosphere.dynamics.sam_case_setup import build_gate_ideal_setup
+from legoesm.atmosphere.dynamics.crm.sam_case_setup import build_gate_ideal_setup
 from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
 from legoesm.atmosphere.physics.microphysics.integration import (
     make_microphysics_physics,

@@ -39,7 +39,7 @@ import jax.numpy as jnp
 import equinox as eqx
 import optax
 
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     SpectralPEConfig,
     spectral_pe_tendencies,
@@ -57,8 +57,7 @@ from legoesm.grids.gaussian import (
     create_gaussian_grid,
     sh_analysis,
     sh_analysis_3d,
-    sh_analysis_oc2_3d,
-    sh_analysis_dmu_3d,
+    vordiv_from_uv_exact_3d,
 )
 from legoesm.grids.vertical import SigmaCoordinate, create_sigma_coordinate
 from legoesm.ml.sfno import SFNO, SFNOConfig
@@ -130,6 +129,21 @@ class NeuralGCMSpectralConfig(NamedTuple):
     # sampling would not fit in host RAM as one list). 0 = load everything
     # at once (legacy).
     chunk_windows: int = 0
+    # Internal perf flag (not a science knob): when True and chunk_windows>0,
+    # chunk k+1 is loaded (GCS read + regrid) on a background host thread while
+    # chunk k trains, overlapping ~0.5 h/chunk of serial load time with GPU
+    # compute (#985 item 2). Doubles the in-RAM chunk footprint (1-ahead buffer).
+    # Off by default so a running chain's behaviour is unchanged until the owner
+    # opts in at a link boundary. Ordering + start_chunk resume are identical to
+    # the serial path (see _prefetch_iter).
+    chunk_prefetch: bool = False
+    # Data-parallel (#985 item 1): when True AND launched under a multi-rank MPI
+    # job (nproc>1), each chunk's samples are sharded across ranks and gradients
+    # are averaged every step -> ~N x throughput on the 72 h-lead phase's GPU
+    # time.  Off / single-rank -> byte-identical serial path.  This shifts the
+    # effective batch from 1 (serial SGD) to N (one synced update per N samples),
+    # so it is a training-trajectory change, not just a speedup — opt in per run.
+    data_parallel: bool = False
 
     # Data
     n_train_days: int = 365      # Number of daily IC/target pairs
@@ -369,23 +383,15 @@ def carry_to_spectral_state(
     # Surface geopotential -> spectral
     phis_hat = sh_analysis(grid, phis)
 
-    # (u, v) -> (vor_hat, div_hat) via spectral curl/divergence
-    a = grid.radius
-    im_over_a = 1j * grid.ms.astype(jnp.float64) / a
-    one_over_a = 1.0 / a
-    cos_lat_3d = grid.cos_lat[:, None, None]
-
-    u_cos = u * cos_lat_3d
-    v_cos = v * cos_lat_3d
-
-    vor_hat = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, v_cos)
-        + one_over_a * sh_analysis_dmu_3d(grid, u_cos)
-    )
-    div_hat = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, v_cos)
-    )
+    # (u, v) -> (vor_hat, div_hat) via the EXACT left-inverse of
+    # the spectral wind synthesis (spectral_pe_to_grid / uv_from_vordiv_3d).
+    # The plain Bourke ``oc2``/``dmu`` analysis (vordiv_from_uv_3d) is NOT an
+    # exact left-inverse at the truncation boundary and amplifies pole-row
+    # wind error ~×21/pass at T85, which makes the WB2 eval round trip
+    # (era5 -A-> state -S-> carry -A-> state) explode (#976).
+    # ``vordiv_from_uv_exact_3d`` solves the per-m least-squares system so the
+    # carry<->state round trip is idempotent, pole rows included.
+    vor_hat, div_hat = vordiv_from_uv_exact_3d(grid, u, v)
 
     dims_3d = ("spectral", "level")
     dims_2d = ("spectral",)
@@ -486,8 +492,13 @@ def spectral_state_to_carry(
 N_SFNO_FORCING_CHANNELS = 3
 # Per-plane normalization: T [K] ~300, sic already in [0,1], insolation
 # [W/m^2] ~1400 (matches the column-MLP feature scales in
-# ``atmosphere.physics.neural_physics``).
-_SFNO_FORCING_INPUT_SCALE = jnp.array([300.0, 1.0, 1400.0])
+# ``atmosphere.physics.neural_physics``).  Kept as a plain Python tuple, NOT a
+# module-top ``jnp.array``: an import-time device allocation is forbidden by
+# test_no_module_top_jax_alloc (crashes the import chain on the experimental
+# Metal backend).  It enters the graph lazily via ``jnp.asarray`` at the use
+# site below, cast to ``in_scale``'s dtype so the concatenate result dtype is
+# identical to the former module-top ``jnp.array`` (in both x32 and x64).
+_SFNO_FORCING_INPUT_SCALE = (300.0, 1.0, 1400.0)
 
 
 def _channel_input_scale(nlev: int) -> jnp.ndarray:
@@ -624,7 +635,10 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
         )
         # Normalize inputs to O(1)
         packed_norm = packed_in / jnp.maximum(
-            jnp.concatenate([in_scale, _SFNO_FORCING_INPUT_SCALE]), 1e-10,
+            jnp.concatenate([
+                in_scale,
+                jnp.asarray(_SFNO_FORCING_INPUT_SCALE, dtype=in_scale.dtype),
+            ]), 1e-10,
         )
         # SFNO forward: O(1) in, O(1) out
         output_norm = sfno(packed_norm.astype(jnp.float32), grid_)
@@ -1624,19 +1638,27 @@ def load_training_data(
     # read stale for the others.  ensure_local_cache is idempotent (skips if the
     # store already exists), so only the first call pays the download.
     store = era5_config.zarr_store
-    # OPT-IN (default OFF -> byte-identical to the old GCS-every-epoch path):
-    # set LEGOESM_ERA5_LOCAL_CACHE=1 to materialise each span to a local zarr
-    # once and read it locally thereafter (#895, ~50 h/run).  Gated behind an
-    # env flag rather than on by default because the ensure_local_cache path is
-    # unexercised on this repo and its speedup + output compatibility must be
-    # validated on the target cluster (Derecho/GCS) — not reachable from CI.
     import os
-    if cache_dir and os.environ.get("LEGOESM_ERA5_LOCAL_CACHE"):
-        # Year-SCOPE the cache store.  ensure_local_cache keys only on path
-        # existence — it does NOT verify an existing store covers the requested
-        # years — so a shared cache_dir reused across runs/phases with different
-        # spans would silently read a stale/narrow subset (codex).  Give each
-        # distinct span its own subdir so the existence check is never stale.
+    # WINDOW-scoped cache (#985): supersedes the year-span cache for the AIMIP
+    # T106 workload — materialise ONLY the ~2,880 snapshots the training
+    # windows touch (~0.5 TB) instead of full 6-hourly year spans (~10 TB), and
+    # read them back BY TIMESTAMP.  The scoped store is built AFTER the absolute
+    # time indices are known (below), so the calendar is read from the REMOTE
+    # store here; ``LEGOESM_ERA5_WINDOW_CACHE=1`` opts in.
+    _window_cache = bool(
+        cache_dir and os.environ.get("LEGOESM_ERA5_WINDOW_CACHE")
+    )
+    # OPT-IN year-span cache (default OFF -> byte-identical to the GCS-every-
+    # epoch path): LEGOESM_ERA5_LOCAL_CACHE=1 materialises each YEAR span once
+    # and reads it locally thereafter (#895).  Superseded by the window cache
+    # above when both are set.
+    if not _window_cache and cache_dir and os.environ.get(
+        "LEGOESM_ERA5_LOCAL_CACHE"
+    ):
+        # Year-SCOPE the cache store.  ensure_local_cache now keys on a
+        # completeness marker (not bare path existence), so a walltime-killed
+        # build is rebuilt, not read as fill-value NaNs (#942/#985); the
+        # per-span subdir still keeps distinct spans from colliding.
         _yrs = _training_year_range(windows, config)
         _scoped = os.path.join(os.fspath(cache_dir), f"y{_yrs[0]}_{_yrs[1]}")
         store = str(ensure_local_cache(era5_config, _scoped, years=_yrs))
@@ -1756,23 +1778,86 @@ def load_training_data(
             f"opening Zarr store once, reading {len(time_indices)} snapshots)..."
         )
 
-    # Read lat/lon and pressure levels
-    lat = np.deg2rad(ds.lat.values.astype(np.float64))
-    lon = np.deg2rad(ds.lon.values.astype(np.float64))
+    # Real wall-clock timestamp per sample POSITION (index into time_indices).
+    # Used for ic_times in EVERY mode, and — in window-cache mode — to select
+    # snapshots from the scoped store by timestamp instead of absolute index.
+    try:
+        _full_times = np.array(ds.time.values, dtype="datetime64[ns]")
+        sample_times = [_full_times[t] for t in time_indices]
+    except Exception as exc:  # zarr store without a readable time coord
+        sample_times = None
+        logger.warning(
+            f"load_training_data: ds.time unavailable ({exc!r}); ic_times will "
+            f"be None (prescribed-forcing training needs it)."
+        )
+
+    # Window-scoped read store (#985): build the cache from the REMOTE store at
+    # exactly the (unique) touched indices, then read snapshots back BY
+    # TIMESTAMP.  Reading by timestamp — not by a remapped integer position — is
+    # robust to overlapping windows / target spillover that make time_indices
+    # non-unique: the scoped store holds each timestamp once and ``.sel`` finds
+    # it regardless of how many sample positions reference it.
+    read_by_time = False
+    read_ds = ds
+    if _window_cache:
+        if sample_times is None:
+            raise RuntimeError(
+                "LEGOESM_ERA5_WINDOW_CACHE needs a readable ds.time to scope "
+                "the cache by timestamp."
+            )
+        from legoesm.training.era5_to_state import (
+            selection_fingerprint, wait_for_cache,
+        )
+        _uniq = sorted({int(t) for t in time_indices})
+        _yrs = _training_year_range(windows, config)
+        # Fingerprint the EXACT selection + source config into BOTH the cache
+        # dir and its marker, so two different window sets that happen to share a
+        # year span + snapshot count never reuse each other's store (codex #985).
+        _fp = selection_fingerprint(_uniq, era5_config)
+        _scoped = os.path.join(
+            os.fspath(cache_dir), f"ywin_{_yrs[0]}_{_yrs[1]}_{_fp}",
+        )
+
+        # Multi-rank: serialize the WRITE so the ranks don't race on the shared
+        # `.building` dir / os.replace (codex #985).  Coordinate via the
+        # FILESYSTEM MARKER, NOT an MPI barrier: this loader can run on the
+        # background prefetch thread while the main thread is mid gradient-
+        # allreduce on COMM_WORLD, and a barrier there would interleave with
+        # those collectives and deadlock.  Rank 0 (or a single rank) builds; the
+        # others poll for the marker.  ensure_local_cache is idempotent, so an
+        # already-complete store just returns.
+        from legoesm.training.data_parallel import mpi_rank_size
+        _rank, _nproc = mpi_rank_size()
+        if _nproc > 1 and _rank != 0:
+            _cache_path = wait_for_cache(_scoped, len(_uniq), _fp)
+        else:
+            _cache_path = ensure_local_cache(
+                era5_config, _scoped, years=_yrs,
+                time_selection=_uniq, fingerprint=_fp,
+            )
+        read_ds = open_era5_zarr(str(_cache_path))
+        read_by_time = True
+        logger.info(
+            f"Window-scoped ERA5 cache: {len(_uniq)} unique snapshots at "
+            f"{_cache_path}"
+        )
+
+    # Read lat/lon and pressure levels (from the store actually read).
+    lat = np.deg2rad(read_ds.lat.values.astype(np.float64))
+    lon = np.deg2rad(read_ds.lon.values.astype(np.float64))
     plev_hPa = np.array(era5_config.levels, dtype=np.float64)
     plev_Pa = np.sort(plev_hPa * 100.0)
-    level_dim = "level" if "level" in ds.dims else "pressure_level"
+    level_dim = "level" if "level" in read_ds.dims else "pressure_level"
 
     # Load surface geopotential (static, no time dim)
-    phis_var = resolve_var(ds, "geopotential_at_surface")
+    phis_var = resolve_var(read_ds, "geopotential_at_surface")
     if phis_var:
-        phis_era5 = ds[phis_var].values.astype(np.float32)
+        phis_era5 = read_ds[phis_var].values.astype(np.float32)
     else:
         phis_era5 = np.zeros((len(lat), len(lon)), dtype=np.float32)
 
-    def _load_one_snapshot(time_idx):
-        """Load one ERA5 snapshot and regrid to model grid."""
-        ds_t = ds.isel(time=time_idx)
+    def _load_one_snapshot(ds_t):
+        """Regrid one already-selected ERA5 time slice to the model grid."""
 
         def _get_3d(name):
             r = resolve_var(ds_t, name)
@@ -1794,10 +1879,10 @@ def load_training_data(
         def _get_2d(name):
             r = resolve_var(ds_t, name)
             if r is None:
-                r = resolve_var(ds, name)
+                r = resolve_var(read_ds, name)
                 if r is None:
                     return np.zeros((len(lat), len(lon)), dtype=np.float32)
-                return ds[r].values.squeeze().astype(np.float32)
+                return read_ds[r].values.squeeze().astype(np.float32)
             data = ds_t[r].values
             data = data.squeeze()
             while data.ndim > 2:
@@ -1816,15 +1901,21 @@ def load_training_data(
         )
         return era5_to_spectral_carry(era5, grid, sigma)
 
-    # Load all snapshots
+    # Load all snapshots.  Position ``j`` maps to absolute index
+    # ``time_indices[j]`` in the full store; window-cache mode selects the SAME
+    # snapshot from the scoped store by its wall-clock timestamp.
     import time as _time
     t0 = _time.time()
     carries = []
-    for i, tidx in enumerate(time_indices):
-        carries.append(_load_one_snapshot(tidx))
-        if (i + 1) % 50 == 0:
+    for j in range(len(time_indices)):
+        if read_by_time:
+            ds_t = read_ds.sel(time=sample_times[j])
+        else:
+            ds_t = read_ds.isel(time=time_indices[j])
+        carries.append(_load_one_snapshot(ds_t))
+        if (j + 1) % 50 == 0:
             elapsed = _time.time() - t0
-            logger.info(f"  Loaded {i+1}/{len(time_indices)} snapshots ({elapsed:.0f}s)")
+            logger.info(f"  Loaded {j+1}/{len(time_indices)} snapshots ({elapsed:.0f}s)")
 
     logger.info(f"Loaded {len(time_indices)} snapshots ({_time.time()-t0:.0f}s)")
 
@@ -1835,16 +1926,10 @@ def load_training_data(
     # lead in ``multi_step_hours``.  Downstream callers detect the
     # tuple form and run K chained 6-hour rollouts.
     # Wall-clock IC times (np.datetime64) per sample — consumed by the
-    # prescribed-surface-forcing path (``build_amip_sample_forcings``)
-    # to evaluate SST/sea-ice + the orbital calendar at each sample.
-    try:
-        _era5_times = np.array(ds.time.values, dtype="datetime64[ns]")
-    except Exception as exc:  # zarr store without a readable time coord
-        _era5_times = None
-        logger.warning(
-            f"load_training_data: ds.time unavailable ({exc!r}); "
-            f"ic_times will be None (prescribed-forcing training needs it)."
-        )
+    # prescribed-surface-forcing path (``build_amip_sample_forcings``) to
+    # evaluate SST/sea-ice + the orbital calendar at each sample.  ``sample_times``
+    # (position -> real timestamp) was computed up front from the full-store
+    # calendar, so it is correct in every cache mode.
     ic_states = []
     target_carries: list = []
     ic_times: list = []
@@ -1854,8 +1939,7 @@ def load_training_data(
         for d in range(n_w):
             ic_states.append(carry_to_spectral_state(carries[base + d], grid))
             ic_times.append(
-                _era5_times[time_indices[base + d]]
-                if _era5_times is not None else None
+                sample_times[base + d] if sample_times is not None else None
             )
             if multi_step:
                 targets_seq = tuple(
@@ -1883,6 +1967,70 @@ def load_training_data(
 # =============================================================================
 # Training entry point
 # =============================================================================
+
+def _resolve_dp_context(config):
+    """``(dp_on, rank, nproc, comm)`` for the chunked spectral trainer (#985).
+
+    Data-parallel training is active only when ``config.data_parallel`` is set
+    AND a multi-rank MPI launcher yields ``nproc > 1``.  Off / single-rank ->
+    ``(False, 0, 1, None)``: the caller takes the serial fused-step path, which
+    is byte-identical to the pre-#985 loop (the default run is unchanged).
+    ``comm=None`` lets the reductions default to ``MPI.COMM_WORLD``.
+    """
+    if not bool(getattr(config, "data_parallel", False)):
+        return False, 0, 1, None
+    from legoesm.training.data_parallel import mpi_rank_size
+
+    rank, nproc = mpi_rank_size()
+    if nproc <= 1:
+        return False, rank, 1, None
+    return True, rank, nproc, None
+
+
+def _dp_updates_per_epoch(chunk_sizes, nproc: int) -> int:
+    """Per-rank optimizer updates in ONE epoch under data-parallel sharding:
+    ``sum_chunks floor(chunk_size / nproc)`` (each rank does one update per
+    LOCAL sample; drop_remainder discards ``chunk_size % nproc``).
+
+    Raises if any chunk is smaller than the world size — a rank would then get
+    an empty shard and the epoch would do zero updates (silent no-op).  Used to
+    size the LR schedule to the real update count AND as the fail-fast guard.
+    """
+    sizes = [int(s) for s in chunk_sizes]
+    if not sizes:
+        raise ValueError("data_parallel: no chunks to train on.")
+    if min(sizes) < nproc:
+        raise ValueError(
+            f"data_parallel needs every chunk >= the world size ({nproc} "
+            f"ranks), but the smallest chunk has {min(sizes)} sample(s): with "
+            f"drop_remainder sharding a rank would get an empty shard and the "
+            f"epoch would do zero updates. Reduce ranks or raise chunk_windows."
+        )
+    return sum(s // nproc for s in sizes)
+
+
+def _dp_chunk_sizes(chunk_loader, n_samples_epoch: int) -> list[int]:
+    """Per-chunk sample counts used to size + guard the DP schedule.
+
+    Sharding happens PER CHUNK, so DP needs the real per-chunk sizes — NOT the
+    epoch total treated as one chunk (that would size the schedule wrong AND
+    hide an undersized chunk that silently trains zero samples).  A ``chunk_loader``
+    MUST therefore expose ``chunk_sizes`` (the built-in ``_make_chunk_loader``
+    does); a custom loader that omits it is rejected rather than mis-sized.  The
+    single in-memory pass (``chunk_loader is None``) is exactly one chunk.
+    """
+    if chunk_loader is None:
+        return [int(n_samples_epoch)]
+    cs = getattr(chunk_loader, "chunk_sizes", None)
+    if cs is None:
+        raise ValueError(
+            "data_parallel requires the chunk loader to expose `chunk_sizes` "
+            "(per-chunk sample counts) so per-chunk sharding is sized and "
+            "guarded correctly; _make_chunk_loader sets it — a custom loader "
+            "must too."
+        )
+    return [int(s) for s in cs]
+
 
 def _train_spectral_loop(
     model: eqx.Module,
@@ -2004,7 +2152,38 @@ def _train_spectral_loop(
                     f"Curriculum lead {h}h has no loaded target "
                     f"(multi_step_hours={_leads_loaded})."
                 )
-    total_steps = max(1, n_epochs_total * max(1, n_samples_epoch))
+    # --- data-parallel context (#985), resolved BEFORE the optimizer so the
+    # warmup+cosine schedule is sized by the ACTUAL number of optimizer updates.
+    # Under DP each rank performs one update per LOCAL sample, i.e. only
+    # sum_chunks floor(chunk_size / nproc) updates per epoch — sizing the
+    # schedule by the unsharded sample count would leave the LR ~nproc x too
+    # high at the end of training.  Off / single-rank -> serial, byte-identical.
+    dp_on, dp_rank, dp_nproc, dp_comm = _resolve_dp_context(config)
+    _all_reduce_grad_mean = _global_sum_mpi = _shard_samples = None
+    if dp_on:
+        from legoesm.parallel.reductions import global_sum_mpi as _global_sum_mpi
+        from legoesm.training.data_parallel import (
+            all_reduce_grad_mean as _all_reduce_grad_mean,
+            shard_samples as _shard_samples,
+        )
+        _chunk_sizes = _dp_chunk_sizes(chunk_loader, n_samples_epoch)
+        _updates_per_epoch = _dp_updates_per_epoch(_chunk_sizes, dp_nproc)
+        _dropped = sum(s % dp_nproc for s in _chunk_sizes)
+        if _dropped:
+            logger.warning(
+                f"data_parallel drops {_dropped} remainder sample(s) per epoch "
+                f"(chunk sizes not divisible by {dp_nproc} ranks)."
+            )
+        logger.info(
+            f"Data-parallel training: rank {dp_rank}/{dp_nproc}; each chunk's "
+            f"samples sharded across ranks (drop_remainder), gradients averaged "
+            f"per step, checkpoints written by rank 0 only. "
+            f"{_updates_per_epoch} updates/epoch/rank."
+        )
+    else:
+        _updates_per_epoch = n_samples_epoch
+
+    total_steps = max(1, n_epochs_total * max(1, _updates_per_epoch))
     base_optimizer = create_optimizer(TrainingConfig(
         lr=config.lr,
         warmup_steps=config.warmup_steps,
@@ -2255,62 +2434,69 @@ def _train_spectral_loop(
     else:
         epoch_plan = [(None, None, None)] * n_epochs_total
 
-    def _make_train_step(phase_spec):
-        """Jitted train step for one epoch-plan spec.
+    def _loss_components(m, ic_spectral, target_carry, forcing_base, phase_spec):
+        """Per-sample loss + components for ``phase_spec``.
 
         ``(None, None, None)`` = the default path (chained multi-step or
         legacy single-rollout).  A curriculum spec = single rollout of
-        ``n_steps_phase`` scored against target index ``k_target``.
+        ``n_steps_phase`` scored against target index ``k_target``.  SHARED by
+        the serial fused step and the data-parallel grad-only step, so both run
+        byte-identical physics (nproc==1 DP reproduces serial exactly).
         """
         _, k_target, n_steps_phase = phase_spec
-
-        def _train_step(model, opt_state, ic_spectral, target_carry, forcing_base):
-            def loss_fn(m):
-                physics = make_physics_fn(m, grid)
-                if k_target is not None:
-                    # Curriculum phase: one rollout to the phase lead.
-                    tgt = (target_carry[k_target]
-                           if type(target_carry) is tuple else target_carry)
-                    pred = _rollout_one_segment(
-                        ic_spectral, physics, n_steps_phase, 0.0,
-                        forcing_base=forcing_base,
-                    )
-                    return _spectral_state_loss_components(
-                        pred, tgt, grid, sigma, sigma_full, loss_cfg_train,
-                    )
-                if segment_steps:
-                    state = ic_spectral
-                    total = jnp.float32(0.0)
-                    comp_total = {
-                        "mse": jnp.float32(0.0),
-                        "bias": jnp.float32(0.0),
-                        "crps": jnp.float32(0.0),
-                        "spec_crps": jnp.float32(0.0),
-                    }
-                    t_offset = 0.0
-                    for k, n_seg in enumerate(segment_steps):
-                        state = _rollout_one_segment(
-                            state, physics, n_seg, t_offset,
-                            forcing_base=forcing_base,
-                        )
-                        seg_loss, seg_comp = _spectral_state_loss_components(
-                            state, target_carry[k], grid, sigma,
-                            sigma_full, loss_cfg_train,
-                        )
-                        total = total + ms_weights[k] * seg_loss
-                        for key in comp_total:
-                            comp_total[key] = comp_total[key] + ms_weights[k] * seg_comp[key]
-                        t_offset = t_offset + float(n_seg) * config.dt
-                    inv = 1.0 / ms_weight_sum
-                    return total * inv, {k: v * inv for k, v in comp_total.items()}
-                # Legacy single-step path.
-                pred = _rollout_one_segment(
-                    ic_spectral, physics, n_steps_rollout, 0.0,
+        physics = make_physics_fn(m, grid)
+        if k_target is not None:
+            # Curriculum phase: one rollout to the phase lead.
+            tgt = (target_carry[k_target]
+                   if type(target_carry) is tuple else target_carry)
+            pred = _rollout_one_segment(
+                ic_spectral, physics, n_steps_phase, 0.0,
+                forcing_base=forcing_base,
+            )
+            return _spectral_state_loss_components(
+                pred, tgt, grid, sigma, sigma_full, loss_cfg_train,
+            )
+        if segment_steps:
+            state = ic_spectral
+            total = jnp.float32(0.0)
+            comp_total = {
+                "mse": jnp.float32(0.0),
+                "bias": jnp.float32(0.0),
+                "crps": jnp.float32(0.0),
+                "spec_crps": jnp.float32(0.0),
+            }
+            t_offset = 0.0
+            for k, n_seg in enumerate(segment_steps):
+                state = _rollout_one_segment(
+                    state, physics, n_seg, t_offset,
                     forcing_base=forcing_base,
                 )
-                return _spectral_state_loss_components(
-                    pred, target_carry, grid, sigma,
+                seg_loss, seg_comp = _spectral_state_loss_components(
+                    state, target_carry[k], grid, sigma,
                     sigma_full, loss_cfg_train,
+                )
+                total = total + ms_weights[k] * seg_loss
+                for key in comp_total:
+                    comp_total[key] = comp_total[key] + ms_weights[k] * seg_comp[key]
+                t_offset = t_offset + float(n_seg) * config.dt
+            inv = 1.0 / ms_weight_sum
+            return total * inv, {k: v * inv for k, v in comp_total.items()}
+        # Legacy single-step path.
+        pred = _rollout_one_segment(
+            ic_spectral, physics, n_steps_rollout, 0.0,
+            forcing_base=forcing_base,
+        )
+        return _spectral_state_loss_components(
+            pred, target_carry, grid, sigma,
+            sigma_full, loss_cfg_train,
+        )
+
+    def _make_train_step(phase_spec):
+        """Jitted fused (grad + optax update) train step — the serial path."""
+        def _train_step(model, opt_state, ic_spectral, target_carry, forcing_base):
+            def loss_fn(m):
+                return _loss_components(
+                    m, ic_spectral, target_carry, forcing_base, phase_spec,
                 )
             (loss, components), grads = eqx.filter_value_and_grad(
                 loss_fn, has_aux=True,
@@ -2326,14 +2512,40 @@ def _train_spectral_loop(
 
         return eqx.filter_jit(_train_step)
 
+    def _make_dp_grad_step(phase_spec):
+        """Jitted GRAD-ONLY step for data-parallel training.
+
+        Returns ``(loss, components, grads)`` for THIS rank's sample; the caller
+        averages ``grads`` across ranks (``all_reduce_grad_mean``) BEFORE the
+        optax update, so the cross-rank collective sits between grad and update
+        and the cheap update stays outside JIT (matches the WB DP path).
+        """
+        def _grad_step(model, ic_spectral, target_carry, forcing_base):
+            def loss_fn(m):
+                return _loss_components(
+                    m, ic_spectral, target_carry, forcing_base, phase_spec,
+                )
+            (loss, components), grads = eqx.filter_value_and_grad(
+                loss_fn, has_aux=True,
+            )(model)
+            return loss, components, eqx.filter(grads, eqx.is_array)
+
+        return eqx.filter_jit(_grad_step)
+
     # One jitted step per distinct phase spec (compile once, reuse across
     # that phase's epochs AND across chunks — shapes are constant).
     _step_cache: dict = {}
+    _dp_step_cache: dict = {}
 
     def _train_step_for(spec):
         if spec not in _step_cache:
             _step_cache[spec] = _make_train_step(spec)
         return _step_cache[spec]
+
+    def _dp_grad_step_for(spec):
+        if spec not in _dp_step_cache:
+            _dp_step_cache[spec] = _make_dp_grad_step(spec)
+        return _dp_step_cache[spec]
 
     def _iter_epoch_data(start_chunk=0):
         """Yield (ic_states, target_carries, sample_forcings) chunks.
@@ -2361,6 +2573,8 @@ def _train_spectral_loop(
     early_stop_patience = int(getattr(config, "early_stop_patience", 0) or 0)
     early_stop_min_delta = float(getattr(config, "early_stop_min_delta", 1.0e-3))
 
+    # (data-parallel context was resolved above, before the optimizer schedule.)
+
     if start_epoch >= n_epochs_total:
         logger.info(
             f"Resume: start_epoch={start_epoch} >= n_epochs={n_epochs_total}; "
@@ -2370,7 +2584,8 @@ def _train_spectral_loop(
 
     for epoch in range(start_epoch, n_epochs_total):
         phase_spec = epoch_plan[epoch]
-        train_step = _train_step_for(phase_spec)
+        train_step = None if dp_on else _train_step_for(phase_spec)
+        dp_grad_step = _dp_grad_step_for(phase_spec) if dp_on else None
         epoch_loss = 0.0
         epoch_components = {"mse": 0.0, "bias": 0.0, "crps": 0.0, "spec_crps": 0.0}
         t0 = time.time()
@@ -2383,16 +2598,50 @@ def _train_spectral_loop(
         chunk_pos = chunk_skip - 1
         for chunk_ics, chunk_targets, chunk_forcings in _iter_epoch_data(chunk_skip):
             chunk_pos += 1  # absolute chunk index within the epoch
-            for chunk_i, (ic, target) in enumerate(
-                    zip(chunk_ics, chunk_targets)):
-                sample_idx += 1
-                model, opt_state, loss, grad_norm, components = train_step(
-                    model, opt_state, ic, target,
-                    chunk_forcings[chunk_i] if chunk_forcings is not None
-                    else None,
+            # Data-parallel: deterministic CONTIGUOUS shard of this chunk's
+            # samples to this rank (drop_remainder keeps ranks balanced so the
+            # per-step gradient allreduce never deadlocks).  The shard depends
+            # only on (rank, nproc, chunk order), all deterministic -> a resume
+            # re-shards identically, so chunk_latest.eqx stays reproducible.
+            if dp_on:
+                _sh = _shard_samples(
+                    list(range(len(chunk_ics))), dp_rank, dp_nproc,
                 )
+                _ics = [chunk_ics[i] for i in _sh]
+                _tgts = [chunk_targets[i] for i in _sh]
+                _forc = ([chunk_forcings[i] for i in _sh]
+                         if chunk_forcings is not None else None)
+            else:
+                _ics, _tgts, _forc = chunk_ics, chunk_targets, chunk_forcings
+
+            for chunk_i, (ic, target) in enumerate(zip(_ics, _tgts)):
+                sample_idx += 1
+                _fb = _forc[chunk_i] if _forc is not None else None
+                if dp_on:
+                    # Local grad on this rank's sample -> average across ranks
+                    # BEFORE the update, so every replica applies the identical
+                    # gradient and stays in sync (no weight broadcast).
+                    loss, components, grads = dp_grad_step(
+                        model, ic, target, _fb,
+                    )
+                    grads = _all_reduce_grad_mean(
+                        grads, dp_nproc, comm=dp_comm,
+                    )
+                    grad_norm = optax.global_norm(grads)
+                    updates, opt_state = optimizer.update(
+                        grads, opt_state, eqx.filter(model, eqx.is_array),
+                    )
+                    model = eqx.apply_updates(model, updates)
+                else:
+                    model, opt_state, loss, grad_norm, components = train_step(
+                        model, opt_state, ic, target, _fb,
+                    )
 
                 # --- NaN / Inf detection (outside JIT, values materialized) ---
+                # ponytail: a rank hitting NaN raises and exits; its peers then
+                # abort at the next allreduce (mpirun kills the job on any rank's
+                # non-zero exit). A NaN-consensus allreduce would only make the
+                # message tidier, not the outcome — skipped.
                 loss_val = float(loss)
                 if jnp.isnan(loss) or jnp.isinf(loss):
                     raise RuntimeError(
@@ -2418,7 +2667,10 @@ def _train_spectral_loop(
             # loses at most one chunk instead of the whole epoch.  The last
             # chunk of epoch e normalises to (e+1, 0).  (No-op on the single
             # in-memory path, whose epoch == one chunk == the per-epoch save.)
-            if chunk_loader is not None:
+            # Rank 0 only under DP: every rank holds the identical replicated
+            # model + optimizer state, so one writer is correct and avoids a
+            # shared-filesystem write race.  All ranks resume by reading it.
+            if chunk_loader is not None and dp_rank == 0:
                 _next_chunk = chunk_pos + 1
                 if _next_chunk >= n_chunks_per_epoch:
                     _save_epoch, _save_chunk = epoch + 1, 0
@@ -2435,11 +2687,32 @@ def _train_spectral_loop(
                 )
 
         n_samples = max(sample_idx + 1, 1)
-        avg_loss = epoch_loss / n_samples
-        avg_components = {k: v / n_samples for k, v in epoch_components.items()}
+        if dp_on:
+            # Global epoch means across ranks (n_samples/epoch_loss are per-rank
+            # local under sharding).  All ranks call this collective in lockstep
+            # — balanced shards guarantee equal per-rank step counts — so it can
+            # never deadlock; the shared avg_loss also keeps any early-stop
+            # decision identical on every rank.
+            _keys = ("mse", "bias", "crps", "spec_crps")
+            _acc = _global_sum_mpi(
+                jnp.asarray(
+                    [epoch_loss] + [epoch_components[k] for k in _keys]
+                    + [float(n_samples)]
+                ),
+                comm=dp_comm,
+            )
+            _accl = [float(x) for x in _acc]
+            _gn = max(_accl[-1], 1.0)
+            avg_loss = _accl[0] / _gn
+            avg_components = {k: _accl[1 + i] / _gn for i, k in enumerate(_keys)}
+        else:
+            avg_loss = epoch_loss / n_samples
+            avg_components = {k: v / n_samples for k, v in epoch_components.items()}
         loss_history.append(avg_loss)
 
-        if epoch % config.log_every == 0 or epoch == n_epochs_total - 1:
+        if (epoch % config.log_every == 0 or epoch == n_epochs_total - 1) and (
+            dp_rank == 0
+        ):
             elapsed = time.time() - t0
             _lead_tag = (f" [lead={phase_spec[0]}h]"
                          if phase_spec[0] is not None else "")
@@ -2454,13 +2727,15 @@ def _train_spectral_loop(
 
         # Save a per-epoch checkpoint so the chained-resubmit driver
         # (run_aimip.py --resume) can pick up from epoch+1 if SLURM
-        # walltime kills the job mid-training.
+        # walltime kills the job mid-training.  Rank 0 only under DP (identical
+        # replicated model on every rank).
         from legoesm.ml.training import save_checkpoint
         ckpt_dir = Path(config.checkpoint_dir)
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-        ckpt_path = ckpt_dir / f"epoch_{epoch:04d}.eqx"
-        save_checkpoint(model, ckpt_path)
-        logger.info(f"Saved checkpoint: {ckpt_path}")
+        if dp_rank == 0:
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            ckpt_path = ckpt_dir / f"epoch_{epoch:04d}.eqx"
+            save_checkpoint(model, ckpt_path)
+            logger.info(f"Saved checkpoint: {ckpt_path}")
 
         # AIMIP-style early stopping.  Stop when the rolling loss has
         # not improved by more than ``early_stop_min_delta`` for
@@ -2485,6 +2760,104 @@ def _train_spectral_loop(
                     break
 
     return model, loss_history
+
+
+def _prefetch_iter(gen, buffer=1):
+    """Run ``gen`` on a background host thread, at most ``buffer`` items ahead.
+
+    A drop-in wrapper that overlaps the producer (chunk load: GCS read + regrid)
+    with the consumer (training). Yields items in the SAME order the underlying
+    generator produces them — the resume/ordering contract of ``_chunks`` is
+    preserved exactly. A producer exception is re-raised on the consumer side
+    (after the items already buffered), so a failed chunk load is not swallowed.
+
+    RAM bound: the producer must ACQUIRE a permit before it calls ``next(gen)``,
+    so it never loads more than ``buffer`` chunks ahead of the one the consumer
+    holds — peak footprint is ``buffer + 1`` chunks (2 for the default), NOT the
+    3 a plain ``Queue(maxsize=buffer)`` would reach (it eagerly loads one more
+    before blocking on the full queue). The consumer releases a permit each time
+    it takes an item.
+
+    Cleanup: if the consumer stops early (``break`` / an exception in the
+    training loop), the ``finally`` sets a stop flag, releases a permit, and
+    drains one slot so a producer parked in ``acquire``/``put`` wakes and exits
+    instead of leaking a blocked thread holding chunk memory.
+
+    ponytail: stdlib threading + a bounded Queue + a load-gating semaphore; no
+    executor pool, no asyncio. Ceiling: the cleanup runs from the generator's
+    ``finally``, which fires when the iterator is closed/GC'd. The training loop
+    consumes to exhaustion or the process exits, so this always fires there; a
+    caller that ``break``s and then indefinitely RETAINS the live iterator would
+    leave the producer parked — bounded harmless because the thread is a daemon
+    (it never blocks process exit). Upgrade to an explicit context manager if a
+    caller ever needs deterministic mid-iteration teardown.
+    """
+    import queue
+    import threading
+
+    buffer = max(1, int(buffer))                # buffer=0 would deadlock acquire
+    q: "queue.Queue" = queue.Queue(maxsize=buffer)
+    load_permit = threading.Semaphore(buffer)   # permits to LOAD the next item
+    stop = threading.Event()
+    _DONE = object()
+    it = iter(gen)
+
+    def _safe_put(msg):
+        # Block for backpressure while the consumer is live, but NEVER block
+        # forever: once the consumer has left (stop set) a full queue means
+        # nobody will drain it, so drop the message rather than hang the thread.
+        while not stop.is_set():
+            try:
+                q.put(msg, timeout=0.2)
+                return
+            except queue.Full:
+                continue
+        try:
+            q.put_nowait(msg)
+        except queue.Full:
+            pass
+
+    def _produce():
+        try:
+            while True:
+                load_permit.acquire()           # wait for room BEFORE loading
+                if stop.is_set():
+                    return
+                try:
+                    item = next(it)             # the chunk load happens here
+                except StopIteration:
+                    break
+                except BaseException as exc:     # propagate load failure
+                    _safe_put((None, exc))
+                    return
+                _safe_put((item, None))
+        finally:
+            _safe_put((_DONE, None))
+
+    t = threading.Thread(target=_produce, name="chunk-prefetch", daemon=True)
+    t.start()
+    try:
+        while True:
+            item, exc = q.get()
+            if exc is not None:
+                raise exc
+            if item is _DONE:
+                return
+            # Release BEFORE yielding (not after): the consumer has taken this
+            # item, so the producer may load the next one WHILE the consumer
+            # trains on this one — that overlap is the whole point. Releasing
+            # after the yield would keep the producer blocked during training.
+            load_permit.release()
+            yield item
+    finally:
+        # Unblock a producer parked in acquire (permit) or put (drain a slot) so
+        # it can observe stop and exit rather than leak.
+        stop.set()
+        load_permit.release()
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            pass
 
 
 def _make_chunk_loader(config, grid, sigma, cache_dir,
@@ -2517,6 +2890,17 @@ def _make_chunk_loader(config, grid, sigma, cache_dir,
         f"({n_total} samples/epoch)"
     )
 
+    prefetch = bool(getattr(config, "chunk_prefetch", False))
+
+    def _load_group(group):
+        ics, tgts, times = load_training_data(
+            config, grid, sigma, cache_dir, windows=group,
+        )
+        forcings = _maybe_build_sample_forcings(
+            surface_forcing_path, times, grid, forcing_cache_path,
+        )
+        return ics, tgts, forcings
+
     def _chunks(start_chunk=0):
         # ``start_chunk`` skips (does NOT load) the first N groups so a
         # mid-epoch resume never re-streams the already-trained chunks.
@@ -2524,20 +2908,25 @@ def _make_chunk_loader(config, grid, sigma, cache_dir,
         # ``config.windows`` and ``load_training_data`` reads snapshots in
         # deterministic time order, so chunk k is byte-identical across
         # runs -> a resume replays the exact same trajectory.
-        for gi, group in enumerate(groups):
-            if gi < start_chunk:
-                continue
-            ics, tgts, times = load_training_data(
-                config, grid, sigma, cache_dir, windows=group,
-            )
-            forcings = _maybe_build_sample_forcings(
-                surface_forcing_path, times, grid, forcing_cache_path,
-            )
-            yield ics, tgts, forcings
+        def _serial():
+            for gi, group in enumerate(groups):
+                if gi < start_chunk:
+                    continue
+                yield _load_group(group)
+
+        # Prefetch preserves order + the start_chunk skip exactly (it only wraps
+        # the same _serial generator), so the resume contract is unchanged.
+        yield from (_prefetch_iter(_serial()) if prefetch else _serial())
 
     # Number of chunks per epoch (constant): the mid-epoch checkpoint reads
     # this to normalise the last chunk of an epoch to the next epoch's start.
     _chunks.n_chunks = len(groups)
+    # Per-chunk sample counts (deterministic from the window partition): the DP
+    # path sizes the LR schedule by the exact per-rank update count and guards
+    # against a chunk smaller than the world size (#985).
+    _chunks.chunk_sizes = [
+        sum(nd * _SNAPSHOTS_PER_DAY for (_, _, nd) in g) for g in groups
+    ]
     return _chunks, n_total
 
 
@@ -2673,7 +3062,19 @@ def train_sfno_full_spectral(
 
     Returns (trained_sfno, loss_history).
     """
-    from legoesm.atmosphere.dynamics.sfno_pe import (
+    if bool(getattr(config, "data_parallel", False)):
+        # sfno_full uses _train_sfno_full_loop, which does NOT resolve the DP
+        # context or average gradients — an MPI launch would run independent
+        # serial training on every rank (with competing checkpoint writes).
+        # Reject the combination rather than silently mis-train (#985); DP is
+        # implemented only for the chunked _train_spectral_loop variants.
+        raise NotImplementedError(
+            "data_parallel is not implemented for the sfno_full variant "
+            "(its _train_sfno_full_loop is not DP-aware). Use sfno_physics / "
+            "column_nn / classical for data-parallel training, or add DP to "
+            "_train_sfno_full_loop first."
+        )
+    from legoesm.atmosphere.dynamics.neural.sfno_pe import (
         SFNOPrimitiveEquationConfig,
     )
 
@@ -2742,7 +3143,7 @@ def _train_sfno_full_loop(
     segment schedule is reused verbatim from ``config.loss_config``,
     but segment lengths are converted into SFNO macro steps.
     """
-    from legoesm.atmosphere.dynamics.sfno_pe import (
+    from legoesm.atmosphere.dynamics.neural.sfno_pe import (
         SFNOPrimitiveEquationModel,
     )
     from legoesm.ml.training import TrainingConfig, create_optimizer

@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`legoesm.atmosphere.column_forcing`.
+"""Unit tests for :mod:`legoesm.atmosphere.forcing.idealized.column_forcing`.
 
 Pins Stage 4 (assembly half) of ``docs/COMPARE_REANALYSIS.md``: building a
 steady SCMForcing from a flagged GCM column's large-scale state — Coriolis,
@@ -12,7 +12,7 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm import constants
-from legoesm.atmosphere.column_forcing import (
+from legoesm.atmosphere.forcing.idealized.column_forcing import (
     ColumnLargeScaleState,
     build_column_scm_forcing,
     coriolis_f_c,

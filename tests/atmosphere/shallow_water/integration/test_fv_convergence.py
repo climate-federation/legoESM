@@ -15,7 +15,7 @@ from legoesm.grids.cubed_sphere import create_cubed_sphere
 
 def _sw_to_cdgrid(state, cdgrid):
     """Convert generic ShallowWaterState to CDGridShallowWaterState."""
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterState
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import CDGridShallowWaterState
     from legoesm.grids.halo import pad_halo_vector
     h = state.h.data
     u_center = state.u.data
@@ -36,7 +36,7 @@ def _sw_to_cdgrid(state, cdgrid):
 
 def _run_tc2_cdgrid(n, nsteps, dt):
     """Run Williamson TC2 on the native CDGrid model at resolution Cn."""
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig,
         CDGridShallowWaterModel,
     )
@@ -103,7 +103,7 @@ class TestMassConservation:
 
     def test_mass_conservation_precision(self):
         """Mass should be conserved to high precision over 100 steps."""
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterConfig,
             CDGridShallowWaterModel,
         )
@@ -155,7 +155,7 @@ class TestMassConservation:
         import numpy as np
         from legoesm.core.operators_cdgrid import fv3_sw_tendencies
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             FV3EdgeShallowWaterState,
         )
         from tests.test_cases.williamson import williamson_test2

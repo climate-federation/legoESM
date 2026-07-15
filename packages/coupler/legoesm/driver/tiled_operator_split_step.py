@@ -338,7 +338,7 @@ def make_tiled_operator_split_step(
     # integrate different dynamics.  Same envelope as the blocked-loop
     # adapter; the fixer flags are irrelevant here (this lane externalizes
     # the fixer like the compiled-segment driver).
-    from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+    from legoesm.atmosphere.dynamics.gcm.tiled_step_adapter import (
         validate_tiled_envelope,
     )
     validate_tiled_envelope(cfg, cdgrid, inner_fix_mass_ok=True)

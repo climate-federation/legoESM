@@ -30,10 +30,10 @@ from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.core.field import Field
 from legoesm.core.state import FV3HydrostaticState
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     fv3_hydrostatic_tendencies, fv3_to_hydrostatic, CDGridPrimitiveEquationConfig,
 )
-from legoesm.atmosphere.kessler_forcing import (
+from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
     make_kessler_forcing_cube, kessler_column_tendencies,
 )
 from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
@@ -67,7 +67,7 @@ def _phys_injected(coord, dt, cfg):
     helper was promoted into ``make_kessler_column_physics_fn``; keep the
     test on the shipped factory so there is exactly one copy of the
     reshape-wrap numerics)."""
-    from legoesm.atmosphere.kessler_forcing import (
+    from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
         make_kessler_column_physics_fn,
     )
     return make_kessler_column_physics_fn(coord, dt, config=cfg)

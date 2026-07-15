@@ -49,17 +49,17 @@ __param_spec__ = {
         "excluded": {
             "theta_tol": "numerics: Newton convergence tolerance",
             "pond_max": "numerics: surface ponding cap before overland runoff [m]",
+            "fc_drain_saturation": "config-level knob (not auto-collected): the "
+            "RichardsConfig field default is 0.0 (limiter OFF, guarded by `> 0.0`), which "
+            "is the value the collector would seed — the lower bound of (0.0, 0.8), with no "
+            "interior sigmoid seed. It IS used in production (MultiLayerLandConfig sets "
+            "0.5), but as an explicit config choice, not an auto-seeded trainable — so tune "
+            "it by setting an interior S_e_fc in config, not from the 0.0 field default. "
+            "(Aligning the field default to 0.5 would make it collector-tunable but changes "
+            "~15 bare RichardsConfig() call sites that rely on the 0.0=off default, so it is "
+            "left a config knob.)",
         },
-        "params": {
-            "fc_drain_saturation": {
-                "units": "1", "bounds": (0.0, 0.8), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "closure",
-                "reference": "effective field-capacity gravity-drainage limiter — "
-                "suppress gravity drainage below S_e_fc so the root zone retains water "
-                "to the field-observed / HTESSEL-CLM5 effective fc (wetter than the "
-                "-33 kPa van-Genuchten point)",
-                "shape": None},
-        },
+        "params": {},
     },
 }
 

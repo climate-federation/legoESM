@@ -125,6 +125,16 @@ class CoupledConfig(NamedTuple):
     carbon_ocean: bool = False
     co2_tracer: bool = False
     co2_ppmv_init: float = 415.0
+    # Spun-up land carbon IC (finidat).  Path to a ``global_carbon_ic.npz`` built
+    # by ``scripts/data/build_global_carbon_ic.py``.  When set (and the land is
+    # multilayer + differland carbon), the coupled run INGESTS the seeded 8-pool
+    # per-cell CarbonState + the per-cell permafrost ``phi`` INSTEAD of cold-
+    # starting carbon: it starts at the mapped equilibrium and MAINTAINS the
+    # seeded permafrost SOC (``phi`` -> ``make_coupler`` permafrost protection).
+    # ``""`` (default) => cold-start (byte-identical).  Requires a run grid
+    # matching the finidat (STRICT grid-match; see
+    # ``legoesm.land.carbon.global_init.load_finidat_carbon_ic``).
+    carbon_ic_path: str = ""
     # Tile fractions.  f_land_mode ∈ {"zero", "analytical", "from_ocean"}.
     #   "from_ocean": f_land = 1 - (dynamic-ocean WOA-derived ocean mask), so
     #   the atmosphere land fraction and the 3D-ocean wet mask come from one

@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`legoesm.atmosphere.dynamics.column_les` (the column-LES
+"""Unit tests for :mod:`legoesm.atmosphere.dynamics.les.column_les` (the column-LES
 orchestration; the manifest-looping CLI lives in ``scripts/run/run_column_les.py``).
 
 The heavy plane-LES run (``run_forced_les``) and ``main`` need real data and are
@@ -14,8 +14,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from legoesm.atmosphere.column_forcing import ColumnLargeScaleState
-from legoesm.atmosphere.dynamics.column_les import (
+from legoesm.atmosphere.forcing.idealized.column_forcing import ColumnLargeScaleState
+from legoesm.atmosphere.dynamics.les.column_les import (
     ColumnLESConfig,
     ColumnLESSetup,
     build_column_les_setup,
@@ -25,11 +25,11 @@ from legoesm.atmosphere.dynamics.column_les import (
     run_column_les_pipeline,
     validate_column_les_config,
 )
-from legoesm.atmosphere.dynamics.les_regime import (
+from legoesm.atmosphere.dynamics.les.les_regime import (
     LESRegimeConfig,
     LESResolutionConfig,
 )
-from legoesm.atmosphere.dynamics.les_vertical_mapping import (
+from legoesm.atmosphere.dynamics.les.les_vertical_mapping import (
     interpolate_column_to_les,
 )
 from legoesm.grids.latlon import create_latlon_grid
@@ -95,7 +95,7 @@ def test_relaxation_target_equals_theta_ref_so_sponge_damps_perturbation():
     relaxation layer and contaminate the LES near the top). gcm_theta varies (300→320),
     so target==theta_ref is a non-trivial profile match, and the damping assertion would
     FAIL if a future change built the target or theta_ref differently."""
-    from legoesm.atmosphere.dynamics.les_vertical_mapping import relaxation_tendency
+    from legoesm.atmosphere.dynamics.les.les_vertical_mapping import relaxation_tendency
 
     gcm_z, gcm_theta, ls = _gcm_column()
     setup = build_column_les_setup(
@@ -280,7 +280,7 @@ def test_surface_kinematic_flux_tendency_helper():
     import jax
     import jax.numpy as jnp
     import numpy as np
-    from legoesm.atmosphere.dynamics.plane_large_scale_forcing import (
+    from legoesm.atmosphere.forcing.plane_large_scale_forcing import (
         surface_kinematic_flux_tendency,
     )
     from legoesm.grids.vertical import create_stretched_height_coordinate
@@ -307,7 +307,7 @@ def test_surface_flux_tendency_column_budget():
     correct boundary SOURCE (it is NOT internally conservative; it injects the surface
     flux's worth of heat/moisture, no more, no less, and only at the surface cell)."""
     import numpy as np
-    from legoesm.atmosphere.dynamics.plane_large_scale_forcing import (
+    from legoesm.atmosphere.forcing.plane_large_scale_forcing import (
         surface_kinematic_flux_tendency,
     )
     from legoesm.grids.vertical import create_stretched_height_coordinate
@@ -330,8 +330,8 @@ def test_build_setup_applies_prescribed_surface_fluxes():
     zero at every interior level, equal to the helper value at the surface cell."""
     import jax.numpy as jnp
     import numpy as np
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import make_rest_state
-    from legoesm.atmosphere.dynamics.plane_large_scale_forcing import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import make_rest_state
+    from legoesm.atmosphere.forcing.plane_large_scale_forcing import (
         surface_kinematic_flux_tendency,
     )
 
@@ -393,7 +393,7 @@ def test_prescribed_surface_flux_warms_les_surface_real_dycore():
     wrong-cell or wrong-sign bug would fail: the surface would not warm/moisten). Heavy
     (real LES, two dycore compiles) ⇒ slow."""
     import numpy as np
-    from legoesm.atmosphere.dynamics.column_les import run_forced_les
+    from legoesm.atmosphere.dynamics.les.column_les import run_forced_les
 
     gcm_z, gcm_theta, ls = _gcm_column()
     common = dict(cape_J_kg=200.0, lat_rad=0.3, gcm_z=gcm_z, gcm_theta=gcm_theta,
@@ -548,7 +548,7 @@ def s_nlev(setup):
 
 
 def _synthetic_plane_state(grid, hc):
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         make_rest_state,
     )
 
@@ -618,7 +618,7 @@ def test_column_surface_kinematic_fluxes_sign_and_reuse():
     warm SST warms+moistens the surface air (w'θ'_s>0, w'q'_s>0); the result EQUALS
     compute_surface_fluxes converted directly (so it shares the GCM's flux, not a
     re-derived one); a COLD SST flips the sign (surface cools — non-vacuity)."""
-    from legoesm.atmosphere.dynamics.column_les import column_surface_kinematic_fluxes
+    from legoesm.atmosphere.dynamics.les.column_les import column_surface_kinematic_fluxes
     from legoesm.atmosphere.physics._shared import virtual_temperature
     from legoesm.atmosphere.physics.turbulence.surface_layer import (
         SurfaceLayerConfig,
@@ -670,7 +670,7 @@ def test_column_surface_kinematic_fluxes_independent_analytic():
     DIRECTION: ``p_s < p_ref`` (high terrain) AMPLIFIES w'θ' (a classic
     inverted-exner bug would damp it).  Uses ``Ch_neutral`` from the config (not a
     hardcoded coefficient) and the shared saturation helper (no re-derivation)."""
-    from legoesm.atmosphere.dynamics.column_les import (
+    from legoesm.atmosphere.dynamics.les.column_les import (
         column_surface_kinematic_fluxes,
     )
     from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
@@ -865,7 +865,7 @@ def test_process_column_threads_sst_only_when_surface_flux(monkeypatch):
     """process_column passes sst_K to extract_gcm_column ONLY when config.surface_flux is
     set (else None ⇒ the surface-flux-free LES, iter-148 unchanged).  Spies on
     extract_gcm_column so the wiring is locked without inspecting the opaque forcing."""
-    from legoesm.atmosphere.dynamics import column_les
+    from legoesm.atmosphere.dynamics.les import column_les
 
     captured = {}
     real = column_les.extract_gcm_column
@@ -897,7 +897,7 @@ def test_process_column_surface_flux_composes_with_multi_coefficient(monkeypatch
     ``extract_gcm_column`` in the MULTI path AND (b) return the ``{method: diagnosis}``
     dict.  The existing spy test covers only the SINGLE path; this guards against a
     future refactor moving the surface-flux threading into a single-only branch."""
-    from legoesm.atmosphere.dynamics import column_les
+    from legoesm.atmosphere.dynamics.les import column_les
 
     captured = {}
     real = column_les.extract_gcm_column
@@ -1034,11 +1034,11 @@ def test_process_column_real_dycore_integration():
     (run_forced_les, a few real steps with the large-scale forcing + top
     relaxation) -> diagnose. Validates the run path the unit tests mock out
     (the compressible-Euler plane LES actually runs and stays finite)."""
-    from legoesm.atmosphere.dynamics.column_les import (
+    from legoesm.atmosphere.dynamics.les.column_les import (
         build_column_les_setup,
         run_forced_les,
     )
-    from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.column_les_diagnosis import (
         diagnose_column_coefficient,
     )
 
@@ -1088,7 +1088,7 @@ def test_process_column_real_dycore_surface_flux_warms_vs_noflux():
     wiring against a MOCK LES; this is the only test that runs the helper's flux through
     the actual compressible-Euler integration, locking that prescribe='fluxes' is not a
     silent no-op and warms in the physically correct direction."""
-    from legoesm.atmosphere.dynamics.column_les import (
+    from legoesm.atmosphere.dynamics.les.column_les import (
         build_column_les_setup,
         run_forced_les,
     )
@@ -1140,7 +1140,7 @@ def test_run_forced_les_rejects_acoustically_unstable_dt():
     CFL — caught BEFORE the multi-day run, not as a mid-run blow-up (iter 103). The
     raise fires before the time loop, so this is cheap (no LES steps); the tested-
     stable dt_s=0.5 (C_a≈0.57) is covered by the real-dycore test above."""
-    from legoesm.atmosphere.dynamics.column_les import (
+    from legoesm.atmosphere.dynamics.les.column_les import (
         build_column_les_setup,
         extract_gcm_column,
         run_forced_les,
@@ -1168,8 +1168,8 @@ def test_run_forced_les_warming_margin_rejects_marginal_dt():
     Courant is just BELOW 1.0 but exceeds it once inflated — a config that is marginal
     at rest but unstable once the column warms (iter 103 Codex). Computed (not a magic
     dt) so it is robust to the setup's exact c_sound."""
-    from legoesm.atmosphere.dynamics.cfl_diagnostic import acoustic_courant_horizontal
-    from legoesm.atmosphere.dynamics.column_les import (
+    from legoesm.atmosphere.dynamics.shared.cfl_diagnostic import acoustic_courant_horizontal
+    from legoesm.atmosphere.dynamics.les.column_les import (
         _LES_ACOUSTIC_WARMING_MARGIN,
         build_column_les_setup,
         extract_gcm_column,
@@ -1205,7 +1205,7 @@ def test_column_les_cli_main_wiring_monkeypatched(tmp_path, monkeypatch):
     call, or the np.savez key/format) would surface only at launch."""
     from types import SimpleNamespace
 
-    import legoesm.atmosphere.dynamics.column_les as cl
+    import legoesm.atmosphere.dynamics.les.column_les as cl
     import legoesm.driver.restart as restart_mod
     import legoesm.grids.factory as gf
     import legoesm.grids.vertical as gv
@@ -1248,7 +1248,7 @@ def test_realism_verdict_names_failing_criteria():
     """_realism_verdict (iter 511) turns a LESRealismBreakdown into the operator's per-column
     debug line: REALISTIC when all pass, else REJECTED naming each failing mode — so a debug
     run says whether a diagnosed coefficient can be believed and, if not, why."""
-    from legoesm.atmosphere.dynamics.column_les_diagnosis import LESRealismBreakdown
+    from legoesm.atmosphere.dynamics.les.column_les_diagnosis import LESRealismBreakdown
 
     from scripts.run.run_column_les import _realism_verdict
 
@@ -1274,8 +1274,8 @@ def test_column_les_cli_reports_realism_when_les_runs(tmp_path, monkeypatch, cap
     exercising the capture→breakdown→output wiring, not just the mocked no-LES path."""
     from types import SimpleNamespace
 
-    import legoesm.atmosphere.dynamics.column_les as cl
-    import legoesm.atmosphere.dynamics.column_les_diagnosis as cld
+    import legoesm.atmosphere.dynamics.les.column_les as cl
+    import legoesm.atmosphere.dynamics.les.column_les_diagnosis as cld
     import legoesm.driver.restart as restart_mod
     import legoesm.grids.factory as gf
     import legoesm.grids.vertical as gv
@@ -1332,8 +1332,8 @@ def test_run_pipeline_excludes_the_top_sponge_layer(monkeypatch):
     diagnosis interface at/above it. Mock the diagnosis to an ALL-VALID profile spanning the
     domain so the ONLY invalidation is the sponge — pinning the z_max computation + the mask
     application precisely (below-sponge stays valid, sponge is excluded)."""
-    import legoesm.atmosphere.dynamics.column_les as cl
-    from legoesm.atmosphere.dynamics.column_les_diagnosis import ClubbCoefficientProfile
+    import legoesm.atmosphere.dynamics.les.column_les as cl
+    from legoesm.atmosphere.dynamics.les.column_les_diagnosis import ClubbCoefficientProfile
 
     gcm_z, gcm_theta, ls = _gcm_column()
     setup = build_column_les_setup(

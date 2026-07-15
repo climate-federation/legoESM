@@ -43,7 +43,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     the matrix ``test_num == 8``), so the two paths cannot drift back apart."""
     # Function-scope import keeps module import light (no heavy SW module at
     # ``import`` time); the constants are the same ones the matrix consumes.
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         MODON_DAMP_V, MODON_DIV_DAMP_FACTOR, MODON_HYPERDIFF_FACTOR,
         MODON_HYPERDIFF_SCALING,
     )
@@ -80,7 +80,7 @@ def main():
     jax.config.update("jax_enable_x64", True)
 
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         FV3EdgeShallowWaterModel, cdgrid_hyperdiff_cube,
         iter1009_dual_target_config)
     from tests.test_cases.colliding_modons import colliding_modons_cdgrid

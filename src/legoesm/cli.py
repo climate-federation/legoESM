@@ -330,7 +330,7 @@ def cmd_test(args):
 
     import jax
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterModel as ShallowWaterModel,
         williamson_cli_calibration,
     )
@@ -365,7 +365,7 @@ def cmd_test(args):
 
     # Convert cell-centre ShallowWaterState -> CDGridShallowWaterState
     from legoesm.core.operators_cdgrid import center_to_dgrid_vector
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterState, create_cubed_sphere_cdgrid,
     )
     _cdgrid_tmp = create_cubed_sphere_cdgrid(grid)
@@ -548,7 +548,7 @@ def cmd_benchmark(args):
 
     import jax
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterModel as ShallowWaterModel
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import CDGridShallowWaterModel as ShallowWaterModel
     from tests.test_cases.williamson import williamson_test2
 
     logger.info(f"legoESM v{__version__} | Benchmark")

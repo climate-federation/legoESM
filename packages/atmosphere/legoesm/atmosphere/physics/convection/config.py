@@ -57,7 +57,7 @@ __param_spec__ = {
             "downdraft_RH_min": "trigger: column-mean RH threshold below which the downdraft fires (not sigmoid-tunable, fix via config)",
             "downdraft_rh_sharpness": "numerics: sigmoid sharpness on the downdraft RH trigger [1/RH-fraction]",
             "epsilon_deep": "entrainment: IFS base rate scaled by the height-dependent (1.3-RH) factor in-scheme, not a constant tunable",
-            "epsilon_midlevel": "entrainment: IFS mid-level base rate scaled in-scheme",
+            "epsilon_midlevel": "entrainment: TUNED transition-blend base rate (1e-4, intentionally below IFS ENTSHALP*ENTRORG=3.5e-3; see audit F6), scaled in-scheme",
             "epsilon_shallow": "entrainment: IFS shallow base rate scaled in-scheme",
             "lcl_membership_sharpness": "numerics: sigmoid sharpness on the below-LCL level membership [1/level index]",
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
@@ -632,7 +632,8 @@ class ZhangMcFarlaneConfig(NamedTuple):
         (default 70.0, the classic ZM 1995 value).
     cape_sharpness : float
         Sigmoid sharpness on the CAPE trigger [1/(J/kg)].  Default
-        ``0.02`` gives ~95% activation 100 J/kg above threshold.
+        ``0.1`` — ≈0.5 activation at threshold and ~95% activation
+        ~30 J/kg above it.
     parcel_dT : float
         Sub-cloud parcel temperature perturbation [K] (default 0.5).
     parcel_dq : float
@@ -650,7 +651,10 @@ class ZhangMcFarlaneConfig(NamedTuple):
         al. 1997 closure (default 0.55 each — the canonical value).
     M_b_max : float
         Hard upper bound on the cloud-base mass flux ``M_b`` [kg/m²/s]
-        (default 0.005 — about 1/20 of the literature peak tropical value 0.1; tighter than peak because the unbounded CAPE/tau closure can spike to ~2 kg/m²/s in a high-CAPE column and the per-layer heating ~M·(T_u−T)·δ scales linearly).  The
+        (default 0.05 — about half the literature peak tropical value
+        ~0.1; tighter than peak because the unbounded CAPE/tau closure
+        can spike to ~2 kg/m²/s in a high-CAPE column and the per-layer
+        heating ~M·(T_u−T)·δ scales linearly).  The
         CAPE/τ_cape closure is unbounded above; without this cap a
         column with CAPE >> 5 kJ/kg yields M_b that drives
         column-integrated heating > 10⁴ W/m² and blows up the
@@ -1118,12 +1122,13 @@ class TiedtkeConfig(NamedTuple):
     First scheme that actually exercises the new ``(ncol, nlev)``
     profile carry for ``M_u(k)``.
 
-    The full Tiedtke 1989 closure uses column moisture convergence
-    for the deep branch.  Until the PR-0 ``compute_moisture_convergence``
-    diagnostic ships, we use a saturation-deficit proxy
-    ``MC_proxy = (q_sat - q_v) / tau_relax_s`` that has the same
-    qualitative behavior (positive in moist columns, zero in dry
-    columns).
+    The full Tiedtke 1989 closure uses column moisture convergence for
+    the deep branch.  Production passes the real per-level
+    ``compute_moisture_convergence`` field (column-integrated inside the
+    scheme); when it is ``None`` the scheme falls back to a
+    saturation-EXCESS proxy ``MC_proxy = ∫ max(q_v - RH_crit·q_sat, 0)
+    dp / (g·tau_MC_proxy)`` with the same qualitative behavior (positive
+    in moist columns, zero in dry).
 
     Fields
     ------
@@ -1140,8 +1145,9 @@ class TiedtkeConfig(NamedTuple):
     downdraft_RH_min : float
         Below this column-mean RH the downdraft fires (default 0.2).
     moisture_convergence_threshold : float
-        Saturation-deficit proxy threshold [kg/kg/s].  Below this the
-        deep branch is suppressed (default 1e-8).
+        Column moisture-convergence (or saturation-excess proxy)
+        threshold [kg/kg/s].  Below this the deep branch is suppressed
+        (default 1e-8).
     moisture_convergence_sharpness : float
         Sigmoid sharpness on the MC threshold [s/(kg/kg)] (default 1e8).
     cape_threshold : float
@@ -1276,7 +1282,15 @@ class BechtoldConfig(NamedTuple):
         conservation, so ``delta_shallow`` is the shallow detrainment
         base directly.
     epsilon_midlevel, delta_midlevel : float
-        Mid-level branch [1/m] (default 1e-4, 2e-4).
+        Mid-level branch [1/m] (default 1e-4, 2e-4).  IFS applies the ENTSHALP=2
+        factor to KTYPE>=2 — BOTH shallow (KTYPE=2) and mid (KTYPE=3) — so its
+        elevated-source mid-level entrainment is ENTSHALP*ENTRORG=3.5e-3
+        (cuascn.F90:500-507).  Our ``midlevel_weight`` is NOT that source/type
+        trigger, though: it is the cloud-depth transition blend between shallow
+        and deep (see ``bechtold.py``), so attaching 3.5e-3 to it over-entrains
+        deepening surface plumes (audit F6, +19 K SCM-RCE regression).  Held at
+        the tuned 1e-4 pending a proper elevated-source classifier — a documented
+        fidelity gap, not a claim the coefficient value is wrong.
     cape_pbl_depth : float
         PBL depth [m] for the parcel-source mass weighting (default
         500.0).
@@ -1313,7 +1327,30 @@ class BechtoldConfig(NamedTuple):
     delta_deep: float = 0.75e-4
     epsilon_shallow: float = 3.5e-3
     delta_shallow: float = 0.75e-4
+    # IFS-faithfulness audit F6 (documented fidelity gap — kept at the tuned
+    # 1.0e-4): IFS gates the ENTSHALP=2 entrainment factor on KTYPE>=2, i.e. BOTH
+    # shallow (KTYPE=2) and elevated mid-level (KTYPE=3) convection, giving
+    # epsilon = ENTSHALP*ENTRORG = 3.5e-3 (cuascn.F90:500-507).  That is already
+    # reflected in ``epsilon_shallow`` (=3.5e-3).  Our ``midlevel_weight`` is NOT
+    # an IFS KTYPE trigger, though: it is the smooth cloud-depth transition blend
+    # (1 - deep - shallow) between the shallow and deep classes, so it also tags
+    # deepening SURFACE-based plumes as they grow through intermediate depth.
+    # Attaching 3.5e-3 to that blend over-entrains (2x) those growing deep plumes
+    # and regressed equilibrium SCM-RCE by +19 K mean moist-adiabat deviation
+    # (isolated controlled comparison, 100-day Wing-2018 gray-RCEMIP).  The
+    # coefficient value is IFS-correct; it is structurally MIS-ATTACHED to our
+    # depth-blend object.  A faithful mid-level treatment needs an elevated-source
+    # (KTYPE=3) classifier and branch, which this depth-blend scheme does not have
+    # — so the blend keeps its tuned 1.0e-4 (below the deep rate that surface
+    # plumes actually carry) as a documented fidelity gap.
     epsilon_midlevel: float = 1.0e-4
+    # IFS ties mid-level detrainment to entrainment (D=E*(1.6-RH) for KTYPE>=2,
+    # cuascn.F90:507,510).  We keep a PRESCRIBED delta_midlevel here for the SAME
+    # documented conservation reason as delta_shallow (tying D=E on coarse grids
+    # regressed the column MSE budget); note delta_midlevel > delta_shallow, so
+    # the mid-level net entrainment (eps-delta) is LESS aggressive than the
+    # already-shipping shallow branch.  Residual faithfulness gap, conservation
+    # takes precedence (CLAUDE.md).
     delta_midlevel: float = 2.0e-4
     enable_downdraft: bool = True
     downdraft_alpha: float = 0.3
@@ -1343,6 +1380,17 @@ class BechtoldConfig(NamedTuple):
     use_pbl_cape: bool = True
     cape_pbl_depth: float = 500.0
     tau_bl: float = 3600.0
+    # IFS convective-turnover CAPE-closure timescale (audit F1).  When True
+    # (default) the deep closure divides PBL-CAPE by the state-dependent
+    # tau_conv = cloud_depth/(2+w_mean), clamped [720,10800] s (cumastrn.F90:773),
+    # rather than the fixed tau_bl; False restores the byte-identical fixed-tau_bl
+    # closure.  The closure STRUCTURE follows IFS; the resolution-dependent
+    # ZTAURES magnitude factor is held at 1.0 (no grid spacing in a column scheme),
+    # a documented approximation (see bechtold.py), so this is IFS-structured, not
+    # byte-level IFS at a given resolution.  tau_bl stays the reference/fallback
+    # timescale (used when False and as the numerator of the tau_bl/tau_conv
+    # rescale).  Static Python bool feature-gate in bechtold.py (not a traced leaf).
+    use_convective_turnover_tau: bool = True
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0

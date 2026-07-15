@@ -556,6 +556,17 @@ def build_parser():
                              "up — dragging global near-surface air T down. "
                              "Default off (byte-identical); recommended ON for a "
                              "faster, more realistic land spin-up.")
+    parser.add_argument("--carbon-ic", dest="carbon_ic", type=str, default="",
+                        help="Spun-up land carbon IC: path to a "
+                             "global_carbon_ic.npz finidat "
+                             "(scripts/data/build_global_carbon_ic.py).  With "
+                             "multilayer + differland carbon, the coupled run "
+                             "INGESTS the seeded 8-pool per-cell CarbonState + the "
+                             "per-cell permafrost phi INSTEAD of cold-starting "
+                             "carbon (starts at the mapped equilibrium; maintains "
+                             "the seeded permafrost SOC).  Requires a run grid "
+                             "matching the finidat (STRICT grid-match).  Default "
+                             "(unset): cold-start carbon.")
     parser.add_argument("--stomata", dest="stomata",
                         action=argparse.BooleanOptionalAction, default=True,
                         help="STOMATAL CONDUCTANCE control of land "
@@ -994,6 +1005,10 @@ def main():
         overrides["use_pft"] = True
     overrides["land_diurnal_surface"] = args.land_diurnal_surface
     overrides["land_elev_bands"] = args.land_elev_bands
+    # Spun-up land carbon IC (finidat): honoured when land is multilayer +
+    # differland (validated in the driver); unset => cold-start carbon.
+    if getattr(args, "carbon_ic", ""):
+        overrides["carbon_ic_path"] = args.carbon_ic
     overrides["transient_land_cover"] = args.transient_land_cover
     overrides["land_cover_surfdata"] = args.land_cover_surfdata
 

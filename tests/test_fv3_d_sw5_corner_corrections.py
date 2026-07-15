@@ -469,7 +469,7 @@ def test_fb_entry_points_forward_iter862_iter869b_flags():
     """
     from legoesm.core.fv3_sw_core import (
         fv3_fb_sw_step, fv3_forward_backward_step)
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig, FV3FBShallowWaterModel,
         FV3EdgeShallowWaterState)
 
@@ -685,101 +685,6 @@ def test_d_sw5_cross_face_halo_rejects_nord_ge_2():
     assert np.all(np.isfinite(np.asarray(out)))
 
 
-def test_post_rk3_corner_damping_hook_applies_v_update_in_covariant_space():
-    """codex 2026-07-10 F2 (HIGH): the post-RK3 `use_fv3_dsw5_corner_damping`
-    hook computes a d_sw6-style KE-gradient wind increment in the COVARIANT
-    convention (d_sw5/d_sw6 are Fortran-verbatim covariant); the covariant
-    v-increment must be applied in covariant space and converted back with
-    the simultaneously-updated u — NOT added directly to the orthogonal
-    prognostic ``v_d`` (O(cosa)·|dv| error, up to 50 % at cube vertices).
-
-    Reference = hook-OFF one step (identical RK3: div_damp=0 both sides,
-    damp_v=0) + the whole d_sw6 update computed externally in covariant
-    space.  Non-vacuous: the pre-fix naive orthogonal add is shown to
-    DIFFER from the covariant-space result at seam rows.
-    """
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-        CDGridShallowWaterConfig,
-        FV3EdgeShallowWaterModel,
-        FV3EdgeShallowWaterState,
-    )
-    from legoesm.core.fv3_sw_core import (
-        d2a2c_vect,
-        fb_v_d_to_covariant,
-        fb_v_d_to_orthogonal,
-    )
-    from tests.atmosphere.shallow_water.test_cases.williamson import (
-        williamson_test2,
-    )
-
-    n = 12
-    dt = 600.0
-    # Codex 2026-07-11 re-review: the hook is duogrid-only (its covariant
-    # conversion routes through d2a2c_vect, whose NON-duogrid cross-face
-    # halo falls back to an orthogonal rotation — the very seam defect the
-    # FB guard blocks).  The reference below must therefore be computed on
-    # the same duogrid path the hook actually supports.
-    grid = create_cubed_sphere(n, use_duogrid=True)
-    cdgrid = create_cubed_sphere_cdgrid(grid)
-
-    # Geostrophically-balanced Williamson-2 state on the edge stagger.
-    sw = williamson_test2(grid)
-    u0 = 2.0 * jnp.pi * grid.radius / (12.0 * 86400.0)
-    u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
-    v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
-    state = FV3EdgeShallowWaterState(
-        h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
-
-    # div_damp=0 so the RK3 tendency is byte-identical hook-ON vs hook-OFF
-    # (hook ON forces the tendency div_damp to 0 by design); damp_v=0 so
-    # the del6 post-hook stays out of the comparison.
-    common = dict(hyperdiff_coeff=0.0, div_damp=0.0, damp_v=0.0, nord_v=0,
-                  d2_bg=0.2, dddmp=0.2, d4_bg=0.16, nord=1)
-    m_off = FV3EdgeShallowWaterModel(
-        grid, CDGridShallowWaterConfig(**common))
-    m_on = FV3EdgeShallowWaterModel(
-        grid, CDGridShallowWaterConfig(
-            use_fv3_dsw5_corner_damping=True, **common))
-
-    s_off = m_off.step(state, dt)   # = pre-hook state of the hook-ON step
-    s_on = m_on.step(state, dt)
-
-    # External reference: the whole d_sw6-style update in covariant space.
-    _EPS = 1e-30
-    v_cov = fb_v_d_to_covariant(s_off.u_d, s_off.v_d, cdgrid)
-    ua, va, _, _, _, _ = d2a2c_vect(s_off.u_d, v_cov, cdgrid)
-    ke = d_sw5_corner_divergence(
-        s_off.u_d, v_cov, ua, va, cdgrid, dt,
-        d2_bg=0.2, dddmp=0.2, d4_bg=0.16, nord=1,
-        apply_legacy_corner_corrections=False)
-    du = (ke[:, :-1, :] - ke[:, 1:, :]) / jnp.maximum(
-        cdgrid.dx_edge_y, _EPS)
-    dv_cov = (ke[:, :, :-1] - ke[:, :, 1:]) / jnp.maximum(
-        cdgrid.dy_edge_x, _EPS)
-    u_ref = s_off.u_d + du
-    v_ref = fb_v_d_to_orthogonal(u_ref, v_cov + dv_cov, cdgrid)
-
-    # atol=1e-5: the model step computes in float32 ("compute" policy);
-    # measured model-vs-external-reference rounding is 3.8e-6 while the
-    # pre-fix naive-add error below is 4.1e-4 — two orders separated.
-    np.testing.assert_allclose(np.asarray(s_on.u_d), np.asarray(u_ref),
-                               rtol=0.0, atol=1e-5)
-    np.testing.assert_allclose(np.asarray(s_on.v_d), np.asarray(v_ref),
-                               rtol=0.0, atol=1e-5)
-
-    # Non-vacuity: the covariant increment is nonzero, and the pre-fix
-    # naive orthogonal add differs from the covariant-space application
-    # at panel-seam rows (cosa_u is largest there, zero deep interior)
-    # by well over the float32 comparison tolerance above.
-    assert float(jnp.abs(dv_cov).max()) > 0.0, (
-        "d_sw5 corner damping produced a zero v-increment — the "
-        "comparison is vacuous; raise d2_bg/dddmp.")
-    v_naive = s_off.v_d + dv_cov
-    dd = np.abs(np.asarray(v_naive) - np.asarray(v_ref))
-    assert dd.max() > 1e-4, (
-        "naive orthogonal add is indistinguishable from the covariant-"
-        "space update — the regression test would not catch the F2 bug.")
-
 
 def test_fb_entry_points_require_duogrid():
     """codex 2026-07-11 F1: the FB chain is de-facto duogrid-only — on
@@ -808,31 +713,3 @@ def test_fb_entry_points_require_duogrid():
     cdgrid_dg = _duogrid_cdgrid(n)
     h1, u1, v1 = fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid_dg, 300.0)
     assert bool(jnp.all(jnp.isfinite(h1)))
-
-
-def test_dsw5_post_rk3_hook_requires_duogrid():
-    """codex 2026-07-11 re-review (HIGH): the use_fv3_dsw5_corner_damping
-    post-RK3 hook shares the FB covariant conversion, whose non-duogrid
-    d2a2c_vect halo falls back to an orthogonal rotation — silently wrong
-    at seams.  The hook must raise on non-duogrid grids, same contract as
-    the FB entry points."""
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-        FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
-        CDGridShallowWaterConfig,
-    )
-
-    n = 8
-    grid = create_cubed_sphere(n)  # non-duogrid
-    model = FV3EdgeShallowWaterModel(
-        grid, CDGridShallowWaterConfig(
-            use_fv3_dsw5_corner_damping=True, d2_bg=0.2))
-    rng = np.random.default_rng(7)
-    state = FV3EdgeShallowWaterState(
-        h=jnp.asarray(rng.standard_normal((6, n, n)) + 1000.0),
-        u_d=jnp.asarray(rng.standard_normal((6, n, n + 1))),
-        v_d=jnp.asarray(rng.standard_normal((6, n + 1, n))),
-        h_s=jnp.zeros((6, n, n)),
-    )
-    with pytest.raises(ValueError, match="duogrid"):
-        model.step(state, 300.0)

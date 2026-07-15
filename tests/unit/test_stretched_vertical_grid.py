@@ -165,10 +165,10 @@ def test_stretched_grid_works_with_plane_dycore_smoke():
     """1-step smoke: build a plane dycore with the stretched HC and
     confirm rest-state preservation. Validates that downstream
     consumers don't accidentally rely on uniform-dz assumptions."""
-    from legoesm.atmosphere.dynamics.compressible_euler import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
         CompressibleEulerConfig,
     )
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         PlaneCompressibleEulerModel, make_flat_plane_terrain_metric,
         make_rest_state,
     )

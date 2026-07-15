@@ -41,8 +41,8 @@ if not _F32:
 import jax.numpy as jnp  # noqa: E402
 
 from legoesm import constants  # noqa: E402
-from legoesm.atmosphere.dynamics import pseudo_incompressible_plane as pip  # noqa: E402
-from legoesm.atmosphere.dynamics.spectral_les_plane import most_surface_flux  # noqa: E402
+from legoesm.atmosphere.dynamics.les import pseudo_incompressible_plane as pip  # noqa: E402
+from legoesm.atmosphere.dynamics.les.spectral_les_plane import most_surface_flux  # noqa: E402
 
 # --- dry-ABL cases -----------------------------------------------------------
 # theta0 [K], Ug [m/s], fcor [1/s], z0 [m], Lz [m], cooling_rate [K/hr],

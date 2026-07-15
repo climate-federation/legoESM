@@ -1,26 +1,40 @@
-"""Smoothed McFarlane (1987) orographic gravity wave drag.
+"""McFarlane (1987)-INSPIRED single-wave orographic gravity-wave drag.
 
-Extends the Lindzen approach with explicit launch flux control,
-minimum wind activation, and directional spreading. Uses smooth
-(sigmoid) approximations for full differentiability.
+A compact, mostly-smooth single-wave (c = 0) orographic drag: a
+Froude-capped launch stress saturates upward (Lindzen breaking) and deposits
+its stress-divergence as a momentum sink, with frictional heating.
 
-.. note::
+Faithfulness (read before using as an oracle)
+----------------------------------------------
+This is **McFarlane-INSPIRED, not a faithful E3SM ``gw_oro`` port** — use
+``e3sm_cam`` for the E3SM-faithful orographic GWD.  Faithful ONLY in the
+**Froude-capped source FORM** ``min(h², fcrit2·(U/N)²)`` (E3SM ``gw_oro_src``,
+verified by ``_mcfarlane_launch_stress`` + tests).  Documented DEPARTURES from
+E3SM ``gw_oro``/``gw_common``:
 
-   **Critical-level treatment (disclosed single-wave simplification).** This is
-   a single-wave (c = 0) orographic scheme.  Most of the launched momentum is
-   deposited BELOW the critical level by ordinary saturation breaking as the
-   source-projected wind decreases toward it.  Any residual carried stress that
-   reaches the critical level (where ``U_proj`` reverses) is ABSORBED — removed
-   from the wave and treated as radiated — rather than deposited as a force on
-   the locally-reversed flow, because the single-wave drag is rigidly directed
-   along the source (depositing it on opposing flow would unphysically
-   accelerate it, ``du/dt*u > 0``).  E3SM's full spectral solver instead
-   deposits the convergence at the interface just below the critical level; this
-   single-wave scheme therefore slightly UNDER-deposits at a *sharp* critical
-   level (~17 % of the launched stress for a discontinuous reversal; ~0 % for a
-   smoothly-reversing jet).  The drag stays a physically-signed momentum sink
-   bounded by the launched stress, fully differentiable, with no spurious
-   acceleration.  Use ``e3sm_cam`` for the spectrally-faithful deposition.
+* **Source amplitude** uses ``h_topo`` (a subgrid-orography std dev) DIRECTLY as
+  the displacement, i.e. ``0.5·k·h²``; E3SM forms the displacement
+  ``hdsp = 2·sgh`` and launches ``0.5·k·hdsp² = 2·k·sgh²`` — so at equal ``sgh``
+  this scheme launches ~4× LESS **below the Froude cap** (where ``h²`` enters;
+  above the cap both use the same ``fcrit2·(U/N)²`` limit and agree).  (Fixing
+  this is behavioral → RCE-gated; the ``h_topo`` default is effectively a tuned
+  displacement, not a raw std dev.)
+* **Surface-only source** — the source ``ρ``, ``N``, ``U`` are taken at the
+  bottom level, not E3SM's depth-averaged low-level source.
+* **Saturation** is a Lindzen-style ``τ_sat ∝ ρ·U³·k/N`` smooth cap, not the
+  E3SM ``gw_common`` spectral ``gw_drag_prof`` solver.
+* **Critical level** (c = 0): the gated residual stress is RADIATED (removed),
+  not deposited in the crossing layer as E3SM does — because the rigid
+  single-wave drag is directed along the source and depositing it on the
+  reversed flow would accelerate it (``du/dt·u > 0``).  This UNDER-deposits at a
+  sharp reversal (in one discontinuous-reversal experiment ≈17 % of the launched
+  stress; the exact fraction depends on grid, profile, and gate parameters).
+
+The drag is a physically-signed momentum sink bounded by the launched stress.
+It is **AD-traceable (finite ``jax.grad`` in tested regimes) but NOT
+mathematically differentiable** at the hard ``U_proj > 0`` mask discontinuity or
+the ``jnp.minimum`` kinks (the mask's gradient is zero on the reversed side,
+which is correct: no source-direction physics there).
 
 References
 ----------
@@ -28,8 +42,10 @@ References
   wave drag on the general circulation of the lower stratosphere and
   troposphere. J. Atmos. Sci., 44, 1775-1800.
 - E3SM ``gw_oro.F90`` (``gw_oro_src``) + ``gw_common.F90`` (``gw_drag_prof``):
-  launch ``tauoro = 0.5*k*min(hdsp^2, fcrit2*(U/N)^2)*rho*N*U``; critical-level
-  filter (gw_common.F90:492); tendency limiters (gw_common.F90:642-643).
+  launch ``tauoro = 0.5*k*min(hdsp^2, fcrit2*(U/N)^2)*rho*N*U`` with
+  ``hdsp = 2*sgh``; critical-level filter (gw_common.F90:492); tendency limiters
+  (gw_common.F90:642-643).  The Froude-cap FORM is shared; the rest is not — see
+  ``e3sm_cam`` for the faithful port.
 """
 
 from __future__ import annotations
@@ -45,10 +61,11 @@ from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
 # Machine-checked scheme contract (see tests/test_physics_contracts.py).
 __physics_contract__ = {
     "summary": (
-        "McFarlane (1987) orographic (c=0) gravity-wave drag: a launched "
-        "subgrid-orography wave stress (Froude-capped) saturates upward "
-        "(Lindzen breaking) and deposits its stress-divergence as a momentum "
-        "sink on the resolved flow, with frictional heating."
+        "McFarlane (1987)-INSPIRED single-wave (c=0) orographic gravity-wave "
+        "drag (NOT a faithful E3SM gw_oro port — see e3sm_cam): a launched "
+        "subgrid-orography wave stress (Froude-capped, E3SM gw_oro_src form) "
+        "saturates upward (Lindzen breaking) and deposits its stress-divergence "
+        "as a momentum sink on the resolved flow, with frictional heating."
     ),
     "inputs": {
         "u": "m/s", "v": "m/s", "T": "K",
@@ -84,6 +101,39 @@ __physics_contract__ = {
         "c_pd*sum(rho*dT_dt*dz) == eps_gwd >= 0 (KE->heat closure)"
     ),
 }
+
+
+def _mcfarlane_launch_stress(
+    rho_sfc: jax.Array,
+    N_sfc: jax.Array,
+    U_activated: jax.Array,
+    h_topo_sq: jax.Array,
+    config: McFarlaneConfig,
+) -> jax.Array:
+    """Froude-capped orographic launch stress ``tau_0`` [Pa].
+
+    The E3SM ``gw_oro_src`` source FORM (the one piece this scheme is faithful
+    to)::
+
+        tau_0 = G_0 * rho * N * k * min(h^2, fcrit2 * (U / N)^2) * U
+
+    ``min(h^2, fcrit2*(U/N)^2)`` is the Froude cap: the streamline-displacement
+    amplitude saturates at the value that makes the low-level flow marginally
+    unstable (Fr = 1), so above the cap ``tau_0`` is INDEPENDENT of ``h`` and
+    scales as ``U^3 / N``.  Returned BEFORE the optional ``directional_spread``
+    scaling and the operational ``tau_max`` clip so the cap can be probed
+    directly (the total deposited drag is downstream of the Lindzen saturation
+    ``tau_sat`` and cannot isolate it).
+
+    NOTE (departure): E3SM forms the displacement ``hdsp = 2*sgh`` and launches
+    ``0.5*k*hdsp^2``; here ``h_topo`` is used directly, so at equal ``sgh`` the
+    launched stress is ~4x smaller (see the module docstring).
+    """
+    froude_h_sq = config.fcrit2 * safe_divide(
+        U_activated ** 2, N_sfc ** 2, eps=1e-30,
+    )
+    h_eff_sq = jnp.minimum(h_topo_sq, froude_h_sq)
+    return config.G_0 * rho_sfc * N_sfc * config.k_wave * h_eff_sq * U_activated
 
 
 def mcfarlane_gwd(
@@ -165,17 +215,8 @@ def mcfarlane_gwd(
     # ``tau_max`` clip masked.  ``fcrit2`` lives in config; ``N_sfc`` is the
     # source-level Brunt-Väisälä frequency.  ``oroko2 = 0.5*k`` is folded into
     # the ``G_0`` prefactor (G_0 defaults to 0.5).
-    froude_h_sq = config.fcrit2 * safe_divide(
-        U_activated ** 2, N_sfc ** 2, eps=1e-30,
-    )
-    h_eff_sq = jnp.minimum(h_topo_sq, froude_h_sq)
-    tau_0 = (
-        config.G_0
-        * rho_sfc
-        * N_sfc
-        * config.k_wave
-        * h_eff_sq
-        * U_activated
+    tau_0 = _mcfarlane_launch_stress(
+        rho_sfc, N_sfc, U_activated, h_topo_sq, config,
     )
     tau_0 = tau_0 * config.directional_spread
     tau_0 = jnp.clip(tau_0, 0.0, config.tau_max)

@@ -27,7 +27,7 @@ def _rel_drift(m0: float, m1: float) -> float:
 def test_sw_mass_conservation_fv3_cube():
     """FV3 cube SW: set_initial_mass + fp64 budget acc (iter-5)."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
         CDGridShallowWaterConfig,
     )
@@ -68,7 +68,7 @@ def test_sw_mass_conservation_fv3_cube():
 def test_sw_mass_conservation_latlon():
     """C-grid lat-lon SW: anchor_mass_to_initial + fp64 acc (iter-4)."""
     from legoesm.grids.latlon import create_latlon_grid
-    from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
         CGridLatLonShallowWaterModel,
         CGridLatLonShallowWaterConfig,
         williamson_test5_cgrid,
@@ -99,7 +99,7 @@ def test_sw_mass_conservation_latlon():
 def test_sw_mass_conservation_mpas():
     """MPAS SW: anchor_mass_to_initial (iter-6)."""
     from legoesm.grids.voronoi import create_voronoi_mesh
-    from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
         MPASShallowWaterModel, MPASShallowWaterConfig,
     )
     from tests.atmosphere.shallow_water.test_cases.williamson_mpas import (
@@ -132,7 +132,7 @@ def test_sw_mass_conservation_mpas():
 def test_long_run_sw_mass_conservation_fv3_cube():
     """100-step FV3 cube SW: anchor must NOT random-walk."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
         CDGridShallowWaterConfig,
     )
@@ -176,7 +176,7 @@ def test_long_run_sw_mass_conservation_latlon():
     """iter-64: 100-step lat-lon SW long-run guard."""
     import math
     from legoesm.grids.latlon import create_latlon_grid
-    from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
         CGridLatLonShallowWaterModel,
         CGridLatLonShallowWaterConfig,
         williamson_test5_cgrid,
@@ -210,7 +210,7 @@ def test_long_run_sw_mass_conservation_latlon():
 def test_long_run_sw_mass_conservation_mpas():
     """iter-64: 100-step MPAS SW long-run guard."""
     from legoesm.grids.voronoi import create_voronoi_mesh
-    from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
         MPASShallowWaterModel, MPASShallowWaterConfig,
     )
     from tests.atmosphere.shallow_water.test_cases.williamson_mpas import (

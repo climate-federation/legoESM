@@ -41,13 +41,13 @@ import numpy as np
 import pytest
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonHydrostaticState,
     CGridLatLonPrimitiveEquationConfig,
     CGridLatLonPrimitiveEquationModel,
     cgrid_to_hydrostatic,
 )
-from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
     atm_latlon_geometry_bytes,
     gather_state_atm_latlon,
     make_sharded_atm_latlon_segment,
@@ -189,7 +189,7 @@ def test_segment_single_device_matches_serial_loop():
 def test_segment_with_held_suarez_matches_sequential():
     """The production physics envelope (stateless Held-Suarez) threads through
     the compiled scan identically to the per-step path."""
-    from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_latlon
     mesh = _mesh()
     seg_model, c0 = _model_and_state()
     seq_model, _ = _model_and_state()

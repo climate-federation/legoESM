@@ -32,7 +32,7 @@ def test_dycore_protocol_is_structural() -> None:
 
 def test_real_solver_class_conforms_to_dycore_protocol() -> None:
     """An existing dycore exposes the contract's ``step`` — the contract is real."""
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterModel,
     )
 

@@ -28,7 +28,7 @@ class TestEnergyConservation:
 
     @pytest.fixture(autouse=True)
     def setup(self):
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterModel,
             CDGridShallowWaterConfig,
             CDGridShallowWaterState,
@@ -122,7 +122,7 @@ class TestEnstrophyBudgetMPAS:
     @staticmethod
     def _run_enstrophy_test(pv_scheme: str, n_steps: int = 50):
         """Run MPAS SW with given PV scheme and return initial/final enstrophy."""
-        from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
             MPASShallowWaterModel,
             MPASShallowWaterConfig,
             MPASShallowWaterState,
@@ -200,7 +200,7 @@ class TestMPASEnergyConservation:
 
     @pytest.fixture(autouse=True)
     def setup(self):
-        from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
             MPASShallowWaterModel,
             MPASShallowWaterConfig,
             MPASShallowWaterState,

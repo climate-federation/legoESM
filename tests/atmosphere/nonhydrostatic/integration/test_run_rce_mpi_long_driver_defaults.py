@@ -301,7 +301,7 @@ def test_driver_argparse_advection_choices_derived_from_shared_map():
     aliases = set()
     for node in tree.body:
         if isinstance(node, ast.ImportFrom) and node.module == (
-            "legoesm.atmosphere.dynamics.compressible_euler_plane"
+            "legoesm.atmosphere.dynamics.les.compressible_euler_plane"
         ):
             for alias in node.names:
                 if alias.name == "HORIZONTAL_ADVECTION_HALO_REQUIREMENT":
@@ -378,7 +378,7 @@ def test_driver_consults_shared_halo_requirement_map():
     for node in tree.body:  # top-level only — no commented or
         # inside-function code paths.
         if isinstance(node, ast.ImportFrom) and node.module == (
-            "legoesm.atmosphere.dynamics.compressible_euler_plane"
+            "legoesm.atmosphere.dynamics.les.compressible_euler_plane"
         ):
             for alias in node.names:
                 if alias.name == "HORIZONTAL_ADVECTION_HALO_REQUIREMENT":

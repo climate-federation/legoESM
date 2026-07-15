@@ -12,11 +12,11 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationConfig as PrimitiveEquationConfig,
     cdgrid_hydrostatic_tendencies as hydrostatic_tendencies,
 )
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterModel, CDGridShallowWaterConfig, CDGridShallowWaterState,
 )
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid

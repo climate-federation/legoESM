@@ -305,16 +305,16 @@ def _build_physics_fn(physics_level: str, grid_type: str):
     if physics_level != "held_suarez":
         return None
     if grid_type == "spectral":
-        from legoesm.atmosphere.held_suarez import held_suarez_forcing_spectral
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_spectral
         return held_suarez_forcing_spectral
     elif grid_type == "latlon":
-        from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_latlon
         return held_suarez_forcing_latlon
     elif grid_type == "icosahedral":
-        from legoesm.atmosphere.held_suarez import held_suarez_forcing_mpas
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_mpas
         return held_suarez_forcing_mpas
     else:
-        from legoesm.atmosphere.held_suarez import held_suarez_forcing
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing
         return held_suarez_forcing
 
 # Weak scaling base values (constant cells/rank)
@@ -514,7 +514,7 @@ def _build_cubedsphere(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
 
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
         hydrostatic_to_fv3,
@@ -553,7 +553,7 @@ def _build_cubedsphere(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
         # Kessler warm-rain bound to this step's dt (the physics_fn convention
         # passes no timestep).  Column-local, so it adds NO horizontal halo
         # coupling beyond the dycore's tracer exchange.
-        from legoesm.atmosphere.kessler_forcing import make_kessler_forcing_cube
+        from legoesm.atmosphere.forcing.idealized.kessler_forcing import make_kessler_forcing_cube
         physics_fn = make_kessler_forcing_cube(dt)
     else:
         physics_fn = _build_physics_fn(physics_level, "cubed-sphere")
@@ -591,7 +591,7 @@ def _build_cubed_sphere_spmd(resolution, nlev, dt, dtype, physics_level,
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
     from tests.test_cases.baroclinic_wave import baroclinic_wave_init
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
         hydrostatic_to_fv3,
@@ -660,7 +660,7 @@ def _build_cubed_sphere_spmd(resolution, nlev, dt, dtype, physics_level,
         # SPMD path).  Threaded via the sharded step's call-time physics_fn,
         # which dispatches to model.step_with_physics inside the jitted, sharded
         # program — so the column physics runs SPMD-local on each shard.
-        from legoesm.atmosphere.kessler_forcing import make_kessler_forcing_cube
+        from legoesm.atmosphere.forcing.idealized.kessler_forcing import make_kessler_forcing_cube
         _phys = make_kessler_forcing_cube(dt)
         step_fn = lambda s, d: sharded_step(s, d, physics_fn=_phys)
     else:
@@ -695,7 +695,7 @@ def _build_cubed_sphere_tiled_loop(resolution, nlev, dt, physics_level,
         expand_corners_to_blocks,
         make_tiled_fv3_hydrostatic_step_blocked_2d,
     )
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationConfig,
         hydrostatic_to_fv3,
         create_cubed_sphere_cdgrid,
@@ -748,7 +748,7 @@ def _build_cubed_sphere_tiled_loop(resolution, nlev, dt, physics_level,
     # inside the blocked step, tracer floor included).
     column_physics_fn = None
     if _moist:
-        from legoesm.atmosphere.kessler_forcing import (
+        from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
             make_kessler_column_physics_fn,
         )
         column_physics_fn = make_kessler_column_physics_fn(sigma, dt)
@@ -848,7 +848,7 @@ def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     import jax.numpy as jnp
 
     from legoesm.grids.latlon import create_latlon_grid
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationModel,
         CGridLatLonPrimitiveEquationConfig,
         hydrostatic_to_cgrid,
@@ -887,7 +887,7 @@ def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
         # passes no timestep).  Column-local, so it adds NO horizontal halo
         # coupling beyond the dycore's existing mass-consistent tracer
         # exchange — moist scales on the same ladder as dry.
-        from legoesm.atmosphere.kessler_forcing import make_kessler_forcing_latlon
+        from legoesm.atmosphere.forcing.idealized.kessler_forcing import make_kessler_forcing_latlon
         physics_fn = make_kessler_forcing_latlon(dt)
     else:
         physics_fn = _build_physics_fn(physics_level, "latlon")
@@ -996,7 +996,7 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     import jax.numpy as jnp
 
     from legoesm.grids.voronoi import create_voronoi_mesh
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel,
         MPASPrimitiveEquationConfig,
     )
@@ -1041,7 +1041,7 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
         # Kessler warm-rain forcing bound to this step's dt (the dycore's
         # operator-split physics_fn convention passes no timestep).  Column-
         # local ⇒ no extra halo; applied once per step over dt.
-        from legoesm.atmosphere.kessler_forcing import make_kessler_forcing_mpas
+        from legoesm.atmosphere.forcing.idealized.kessler_forcing import make_kessler_forcing_mpas
         physics_fn = make_kessler_forcing_mpas(dt)
     else:
         physics_fn = _build_physics_fn(physics_level, "icosahedral")
@@ -1093,7 +1093,7 @@ def _build_spectral(resolution, nlev, sigma, dt, dtype, physics_level, cast_fn):
     import jax.numpy as jnp
 
     from legoesm.grids.gaussian import create_gaussian_grid
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         SpectralPrimitiveEquationModel,
         SpectralPEConfig,
     )
@@ -1117,7 +1117,7 @@ def _build_spectral(resolution, nlev, sigma, dt, dtype, physics_level, cast_fn):
     if _moist:
         # Kessler warm-rain bound to this step's dt (the physics_fn convention
         # passes no timestep); column-local, so no halo (spectral is 1 device).
-        from legoesm.atmosphere.kessler_forcing import make_kessler_forcing_spectral
+        from legoesm.atmosphere.forcing.idealized.kessler_forcing import make_kessler_forcing_spectral
         physics_fn = make_kessler_forcing_spectral(dt)
     else:
         physics_fn = _build_physics_fn(physics_level, "spectral")

@@ -12,7 +12,7 @@ from evaluations.wb_forecast import diagnose_and_regrid, HEADLINE_FIELD_KEYS
 
 
 def _rest_state():
-    from legoesm.atmosphere.dynamics.spectral_pe import isothermal_rest_state_spectral
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import isothermal_rest_state_spectral
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
 

@@ -2,9 +2,9 @@
 
 Provides configuration NamedTuples for:
 1. Surface layer: bulk aerodynamic surface fluxes
-2. Smagorinsky: constant eddy diffusivity (simplest baseline)
+2. Smagorinsky: deformation/stability-dependent eddy diffusivity (simplest baseline)
 3. Louis (1979): stability-dependent diffusion
-4. TKE / Mellor-Yamada 2.5: prognostic TKE closure
+4. TKE: Mellor-Yamada-2.5-INSPIRED prognostic k-l closure
 5. CLUBB-lite: higher-order closure skeleton
 6. Holtslag-Boville: nonlocal K-profile with counter-gradient
 7. YSU: nonlocal K-profile with entrainment flux
@@ -117,19 +117,19 @@ __param_spec__ = {
     "MYNN25Config": {
         "scheme_key": "atm.turb.MYNN25Config",
         "excluded": {
-            "C4": "default 0 = disabled/off (enable via config, not training)",
+            "C4": "NN09 sets C4=0 (drops its shear pressure-covariance term); not read here",
             "tke_min": "numerics: solver/smoothing/tolerance/iteration parameter",
         },
         "params": {
-            "A1": {"units": "1", "bounds": (0.6, 2.4), "tunable_tier": 1, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN stability-function constant A1", "shape": None},
-            "A2": {"units": "1", "bounds": (0.3, 1.4), "tunable_tier": 1, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN stability-function constant A2", "shape": None},
-            "B1": {"units": "1", "bounds": (12.0, 48.0), "tunable_tier": 2, "transform": "sigmoid", "category": "tke_closure", "reference": "Nakanishi & Niino (2009) MYNN master-length / dissipation constant B1", "shape": None},
-            "B2": {"units": "1", "bounds": (7.5, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "tke_closure", "reference": "Nakanishi & Niino (2009) MYNN dissipation-length constant B2", "shape": None},
-            "C1": {"units": "1", "bounds": (0.05, 0.4), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN pressure-covariance constant C1", "shape": None},
-            "C2": {"units": "1", "bounds": (0.25, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN pressure-covariance constant C2", "shape": None},
-            "C3": {"units": "1", "bounds": (0.12, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN pressure-covariance constant C3", "shape": None},
-            "C5": {"units": "1", "bounds": (0.066, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN pressure-covariance constant C5", "shape": None},
-            "gamma1": {"units": "1", "bounds": (0.1, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN critical-flux-Ri numerator gamma1", "shape": None},
+            "A1": {"units": "1", "bounds": (0.6, 2.4), "tunable_tier": 1, "transform": "sigmoid", "category": "return_to_isotropy", "reference": "Nakanishi & Niino (2009) MYNN return-to-isotropy (Rotta) constant A1", "shape": None},
+            "A2": {"units": "1", "bounds": (0.3, 1.4), "tunable_tier": 1, "transform": "sigmoid", "category": "return_to_isotropy", "reference": "Nakanishi & Niino (2009) MYNN return-to-isotropy (Rotta) constant A2", "shape": None},
+            "B1": {"units": "1", "bounds": (12.0, 48.0), "tunable_tier": 2, "transform": "sigmoid", "category": "tke_closure", "reference": "Nakanishi & Niino (2009) MYNN TKE-dissipation closure constant B1 (eq. 12)", "shape": None},
+            "B2": {"units": "1", "bounds": (7.5, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "tke_closure", "reference": "Nakanishi & Niino (2009) MYNN scalar second-moment dissipation constant B2 (eqs. 13-15)", "shape": None},
+            "C1": {"units": "1", "bounds": (0.05, 0.4), "tunable_tier": 2, "transform": "sigmoid", "category": "pressure_covariance", "reference": "Nakanishi & Niino (2009) MYNN velocity pressure-strain constant C1 (eq. 16)", "shape": None},
+            "C2": {"units": "1", "bounds": (0.25, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "pressure_covariance", "reference": "Nakanishi & Niino (2009) MYNN velocity pressure-strain constant C2 (eq. 16)", "shape": None},
+            "C3": {"units": "1", "bounds": (0.12, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "pressure_covariance", "reference": "Nakanishi & Niino (2009) MYNN pressure-temperature-gradient covariance constant C3 (eq. 17)", "shape": None},
+            "C5": {"units": "1", "bounds": (0.066, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "pressure_covariance", "reference": "Nakanishi & Niino (2009) MYNN pressure-temperature-gradient covariance constant C5 (eq. 17)", "shape": None},
+            "gamma1": {"units": "1", "bounds": (0.1, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "critical_flux_richardson", "reference": "Nakanishi & Niino (2009) MYNN critical-flux-Ri numerator gamma1 (appendix A)", "shape": None},
         },
     },
     "SmagorinskyConfig": {
@@ -162,8 +162,8 @@ __param_spec__ = {
             "tke_min": "numerics: solver/smoothing/tolerance/iteration parameter",
         },
         "params": {
-            "Ce": {"units": "1", "bounds": (0.06, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "tke_closure", "reference": "Mellor & Yamada (1982) TKE dissipation coefficient", "shape": None},
-            "Ck": {"units": "1", "bounds": (0.03, 0.3), "tunable_tier": 1, "transform": "sigmoid", "category": "diffusivity", "reference": "Mellor & Yamada (1982) TKE->Km coefficient (Km = Ck·l·sqrt(TKE))", "shape": None},
+            "Ce": {"units": "1", "bounds": (0.06, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "tke_closure", "reference": "MY82-shaped dissipation eps=Ce·TKE^{3/2}/l; scheme-default coefficient (MY 2^{3/2}/B1~0.17)", "shape": None},
+            "Ck": {"units": "1", "bounds": (0.03, 0.3), "tunable_tier": 1, "transform": "sigmoid", "category": "diffusivity", "reference": "fixed replacement for MY2.5 Sm(GM,GH); Km=Ck·l·sqrt(max(TKE,tke_min))", "shape": None},
             "Pr_t": {"units": "1", "bounds": (0.3, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "turbulent Prandtl number Kh = Km/Pr_t", "shape": None},
             "l_mix_max": {"units": "m", "bounds": (10.0, 300.0), "tunable_tier": 1, "transform": "sigmoid", "category": "mixing_length", "reference": "Blackadar (1962) asymptotic mixing length", "shape": None},
         },
@@ -270,7 +270,14 @@ class SmagorinskyConfig(NamedTuple):
 
     Deformation-based eddy viscosity
     ``K_m = (C_s · l)^2 · |S| · √(max(0, 1 − Ri/Pr_t))`` with ``K_h =
-    K_m / Pr_t`` (Smagorinsky 1963; Lilly 1962 buoyancy correction).
+    K_m / Pr_t``.  The ``(C_s·l)²·|S|`` core is the Smagorinsky (1963)
+    deformation structure.  The ``√(1 − Ri/Pr_t)`` stability factor, the
+    ``Ri ≥ Pr_t`` cutoff, and default ``Pr_t = 1`` all match Lilly (1962)'s
+    equilibrium EXPERIMENT (his ``√`` stability factor with ``K_h/K_m = 1``
+    and ``K_m → 0`` for ``Ri > 1``); the ``√`` ramp is Lilly's own form, NOT a
+    modern replacement.  Only the AD-safe numerics — the ``max(0, ·)`` clamp,
+    the double-``where`` guard (non-C¹ at the cutoff), and the ``S²+1e-10``
+    shear floor — are modern.  His general theory left these as free functions.
 
     Fields
     ------
@@ -329,20 +336,34 @@ class LouisConfig(NamedTuple):
 
 
 class TKEConfig(NamedTuple):
-    """Configuration for prognostic TKE / Mellor-Yamada 2.5 turbulence.
+    """Configuration for a prognostic-TKE, Mellor-Yamada-2.5-INSPIRED k-l closure.
+
+    NOTE: this is MY2.5-INSPIRED, not literal level 2.5 — ``Ck`` and ``Pr_t``
+    are CONSTANTS that replace MY2.5's algebraic stability functions
+    ``Sm(GM, GH)`` and the ratio ``Sh(GM, GH)/Sm(GM, GH)`` (which depend on
+    BOTH shear ``GM`` and buoyancy ``GH``; see the tke.py "Faithfulness"
+    section).
 
     Fields
     ------
     l_mix_max : float
-        Maximum mixing length [m] (default 100.0).
+        Fixed asymptotic (Blackadar) mixing length [m] (default 100.0):
+        ``l = kappa z / (1 + kappa z / l_mix_max)``. MY's diagnostic length is
+        likewise Blackadar-like near the wall but with an integral,
+        turbulence-dependent asymptote ``l0 = 0.1 integral(q z dz)/integral(q dz)``.
     Ck : float
-        TKE -> Km coefficient (default 0.1).
+        Constant TKE -> Km coefficient, ``Km = Ck·l·sqrt(max(TKE, tke_min))``
+        (default 0.1). Lumps a constant effective momentum stability coefficient
+        (``Ck = sqrt(2)·Sm_eff``) in place of MY2.5's ``Sm(GM, GH)``.
     Ce : float
-        TKE dissipation coefficient (default 0.19).
+        TKE dissipation coefficient, ``eps = Ce·TKE^{3/2}/l`` (default 0.19);
+        MY's ``q^3/(B1 l)`` gives ``Ce = 2^{3/2}/B1 ~ 0.17``.
     tke_min : float
         Minimum TKE [m^2/s^2] (default 1e-6).
     Pr_t : float
-        Turbulent Prandtl number (default 0.33).
+        Constant turbulent Prandtl number, ``Kh = Km/Pr_t`` (default 0.33, so
+        ``Kh/Km ~ 3``). This is the scheme's own fixed value, NOT the MY ratio
+        (MY's neutral ``Sh/Sm ~ 1.06``); MY2.5's ``Sh/Sm`` is stability-dependent.
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
@@ -357,23 +378,39 @@ class TKEConfig(NamedTuple):
 class MYNN25Config(NamedTuple):
     """Configuration for the MYNN-2.5 turbulence scheme (Nakanishi & Niino 2009).
 
-    Default constants are taken from NN09 Table 1 / eq. 66 and match
-    jax_scm's MYNNParams so the oracle-driven SCM benchmarks (GABLS1,
-    Wangara, Ekman) can run with bit-equivalent closure coefficients.
+    Default constants are taken from NN09 eq. 66 (``gamma1`` from appendix A)
+    and match jax_scm's MYNNParams so the oracle-driven SCM benchmarks
+    (GABLS1, Wangara, Ekman) can run with bit-equivalent closure coefficients.
+
+    See the ``mynn25`` module's "Faithfulness to NN09" section and
+    ``tests/atmosphere/hydrostatic/unit/test_mynn25_faithful.py`` for the
+    FAITHFUL-vs-DEPARTURE classification: the level-2.5 SM/SH stability
+    functions are live (Km responds to N²), while the dry-θ_v buoyancy, the
+    1-2-1 vertical filter, and the K>=0 numerical clamp are documented as
+    departures/numerics.
 
     Fields
     ------
     A1, A2 : float
-        Stability-function coefficients (momentum, heat).
+        Return-to-isotropy (Rotta) pressure-covariance coefficients (NN09);
+        they set the level-2.5 stability functions downstream (A1 → momentum,
+        A2 → heat).
     B1 : float
-        Master length-scale coefficient.  Surface boundary value
-        ``qke_sfc = B1^(2/3) · u*²`` (MY82 eq. 54) flows from this.
+        TKE-dissipation closure constant (NN09 eq. 12:
+        ``ε = qke^(3/2) / (B1·L)``).  The surface boundary value
+        ``qke_sfc = B1^(2/3) · u*²`` (the MY82/MYNN surface
+        production-dissipation balance) also flows from this.
     B2 : float
-        Dissipation length-scale coefficient.
+        Scalar second-moment (variance) dissipation constant (NN09
+        eqs. 13-15) — the scalar-variance analogue of ``B1``.
     C1, C2, C3, C4, C5 : float
-        Pressure-covariance / return-to-isotropy coefficients.  ``C4`` is
-        the cross-correlation coefficient (unused at level 2.5; kept for
-        symmetry with the full NN09 closure).
+        Pressure-covariance closure coefficients: C1, C2, C4 in the velocity
+        pressure-strain parameterization (NN09 eq. 16) and C3, C5 in the
+        pressure-temperature-gradient covariance (eq. 17); the
+        return-to-isotropy role is carried by A1/A2, not these.  ``C4`` is a
+        pressure-strain coefficient that NN09 sets to 0 to drop its term
+        (this implementation likewise never reads ``C4``), so it is not
+        intrinsically absent from the closure.
     gamma1 : float
         Critical-flux-Richardson-number numerator coefficient
         (NN09 below eq. A4).
@@ -582,11 +619,13 @@ class YSUConfig(NamedTuple):
     Pr_t : float
         Turbulent Prandtl number (default 1.0).
     entrainment_ratio : float
-        Prescribed PBL-top entrainment flux ratio ``e_ratio`` in
-        ``(w'θ_v')_h = −e_ratio·(w'θ_v')_0`` (Hong et al. 2006 entrainment
-        closure; default 0.15).  Applied as a flux-matched diffusivity at
-        the inversion (see ``ysu.py``).  Renamed from ``entrainment_coeff``
-        (the old Gaussian-K magnitude coefficient, a different quantity).
+        PBL-top entrainment flux ratio ``e_ratio`` in the FREE-CONVECTIVE-limit
+        law ``(w'θ_v')_h = −e_ratio·(w'θ_v')_0`` (default 0.15, the Hong et al.
+        2006 free-convective coefficient).  Full Hong06 scales entrainment by
+        ``w_m³ = w*³ + 5·u*³`` (shear-dependent); this fixed surface-flux fraction
+        is a surrogate.  Applied as a flux-matched diffusivity at the inversion
+        (see ``ysu.py``).  Renamed from ``entrainment_coeff`` (the old Gaussian-K
+        magnitude coefficient, a different quantity).
     Ri_crit : float
         Critical Richardson number (default 0.25).
     pbl_smooth_sharpness : float
@@ -715,7 +754,7 @@ class TurbulenceConfig(NamedTuple):
     louis : LouisConfig
         Configuration for Louis scheme.
     tke : TKEConfig
-        Configuration for TKE scheme (Mellor-Yamada 1982).
+        Configuration for the MY2.5-INSPIRED prognostic-TKE k-l scheme.
     mynn25 : MYNN25Config
         Configuration for MYNN-2.5 scheme (Nakanishi-Niino 2009).
     clubb_lite : CLUBBLiteConfig

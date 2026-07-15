@@ -165,7 +165,7 @@ class TestDycoreTargetMass:
 
     def test_pe_grad_with_mass_fixer(self, grid, sigma):
         """PE dycore with mass fixer is differentiable."""
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
         )
 

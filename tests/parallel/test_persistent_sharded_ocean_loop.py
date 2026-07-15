@@ -21,10 +21,21 @@ so the in-step psum reduction is load-bearing):
   reshards the mixed-sharding input per its in_specs.
 * one mid-loop GATHER-FOR-OUTPUT round-trip (the snapshot boundary: gather,
   host-read the full staggered ``(n_lat+1, ...)`` v, re-shard) is lossless.
+* the SURFACE-CURRENT consumer (scaling-M2 leftover: the prognostic-ice /
+  relative-winds read) — ``run_omip_core2._surface_currents`` fed back into
+  the wind stress EVERY step — is exact on the SHARDED state: the persistent
+  lane reads the ``n_lat``-row ``v_lower`` carrier and reconstructs the
+  staggered top row as the wall zero (``_surface_uv_faces`` ->
+  ``append_vface_wall_row``) with NO full-state gather, bit-identical to the
+  wrapper lane's read of the full staggered global v.
+* an --ice-thermo-style host BC (slice-pull ONLY the 2-D T top layer,
+  update host-side, scatter back DEVICE-side via ``.at[..., 0].set``) is
+  exact on the sharded state.
 * GATHER COUNTS — old wrapper lane: N_STEPS shards + N_STEPS gathers
   (2 full-state transfers per step); persistent lane: 2 + 2 TOTAL
   (initial shard + mid re-shard; mid output gather + final gather),
-  independent of step count ⇒ 0 per-step transfers.
+  independent of step count ⇒ 0 per-step transfers — PROVING the per-step
+  surface-current + ice-thermo consumers above force no extra layout flip.
 
 Run: ``XLA_FLAGS=--xla_force_host_platform_device_count=2 JAX_ENABLE_X64=1
 pytest tests/parallel/test_persistent_sharded_ocean_loop.py``
@@ -86,15 +97,24 @@ def test_persistent_loop_matches_wrapper_loop_and_gather_counts(monkeypatch):
     from legoesm.ocean.vertical import create_ocean_z_star
     from legoesm.parallel.mesh import create_latlon_mesh
 
+    # The PRODUCTION surface-current consumer (scaling-M2 leftover): the
+    # prognostic-ice / relative-winds read, fed back into the wind stress so
+    # it is LOAD-BEARING — any divergence between the sharded (v_lower
+    # carrier) read and the global staggered read propagates into the
+    # trajectory and fails the bitwise gate below.
+    from scripts.run.run_omip_core2 import _surface_currents
+
     n_lat, n_lon, nlev = 48, 96, 10          # the calibrated sibling-gate size
     dt, n_steps = 600.0, 10
     # DISTINCT steps (codex r1): the host-BC leaf write must land on a step
     # WITHOUT the gather round-trip, so the UNSHARDED written-back leaf feeds
     # the NEXT sharded step directly (the production SSS-restore condition —
     # an immediate re-shard would mask it); the snapshot boundary follows two
-    # steps later.
+    # steps later; the ice-thermo-style device-scatter BC two steps after that.
     bc_step = 3                              # leaf-wise host BC write-back
     snap_step = 5                            # gather-for-output round-trip
+    ice_bc_step = 7                          # ice-thermo-style T slice BC
+    cur_probe_step = 4                       # cross-lane surface-current probe
 
     grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
     z_coord = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
@@ -129,11 +149,38 @@ def test_persistent_loop_matches_wrapper_loop_and_gather_counts(monkeypatch):
         S_new[..., 0] = S_new[..., 0] + 0.01
         return S_new
 
+    def _ice_thermo_touch_T(st):
+        """The --ice-thermo host BC pattern (slice-before-convert): pull ONLY
+        the 2-D T top layer to host, relax it, scatter it back DEVICE-side
+        via ``.at[..., 0].set`` — identical op in both lanes."""
+        T0 = np.asarray(st.T.data[..., 0]).copy()
+        T0[...] = T0 - 0.002 * (T0 + 1.8)
+        return st._replace(T=st.T.replace(
+            data=jnp.asarray(st.T.data).at[..., 0].set(jnp.asarray(T0))))
+
+    def _sf_with_current_feedback(st):
+        """The per-step surface-current consumer (prognostic-ice /
+        relative-winds shape): read the top-level currents off WHATEVER
+        layout ``st`` carries and fold them into the wind stress."""
+        u_sfc, v_sfc = _surface_currents(st, grid, "latlon")
+        assert u_sfc.shape == (n_lat, n_lon)
+        assert v_sfc.shape == (n_lat, n_lon)
+        return (sf._replace(tau_x=sf.tau_x + 5.0e-3 * u_sfc,
+                            tau_y=sf.tau_y + 5.0e-3 * v_sfc),
+                u_sfc, v_sfc)
+
     # ---------------- OLD lane: per-step global-in/global-out wrapper --------
     glob = sos.make_sharded_ocean_step_global(model, mesh)
     sg = state0
+    cur_probe = {}
     for k in range(1, n_steps + 1):
-        sg = glob(sg, dt, surface_forcing=sf, freshwater=fw)
+        # surface-current consumer on the GLOBAL state (full staggered v)
+        assert sg.v.data.shape[0] == n_lat + 1
+        sf_k, u_sfc, v_sfc = _sf_with_current_feedback(sg)
+        if k == cur_probe_step:
+            cur_probe["u"] = np.asarray(u_sfc).copy()
+            cur_probe["v"] = np.asarray(v_sfc).copy()
+        sg = glob(sg, dt, surface_forcing=sf_k, freshwater=fw)
         if k == bc_step:
             # host BC on the (gathered) global state
             S_new = _bc_touch_S(np.asarray(sg.S.data))
@@ -142,6 +189,8 @@ def test_persistent_loop_matches_wrapper_loop_and_gather_counts(monkeypatch):
             # the snapshot host read
             v_out = np.asarray(sg.v.data)
             assert v_out.shape[0] == n_lat + 1   # full staggered v for output
+        if k == ice_bc_step:
+            sg = _ice_thermo_touch_T(sg)
     sg = jax.block_until_ready(sg)
     old_calls = dict(calls)
     # the wrapper lane pays 2 full-state transfers PER STEP
@@ -152,7 +201,23 @@ def test_persistent_loop_matches_wrapper_loop_and_gather_counts(monkeypatch):
     inner = sos.make_sharded_ocean_step(model, mesh)
     ss = sos.shard_state_latlon(state0, mesh)          # ONE initial shard
     for k in range(1, n_steps + 1):
-        ss = inner(ss, dt, surface_forcing=sf, freshwater=fw)
+        # surface-current consumer on the SHARDED state: v is the n_lat-row
+        # v_lower carrier at every loop top (the snapshot boundary re-shards
+        # back to it); _surface_currents reconstructs the staggered top row
+        # as the wall zero DEVICE-SIDE — the gather counters below prove no
+        # full-state layout flip happens here.
+        assert ss.v.data.shape[0] == n_lat        # carrier layout, not n_lat+1
+        sf_k, u_sfc, v_sfc = _sf_with_current_feedback(ss)
+        if k == cur_probe_step:
+            # cross-lane probe: the sharded-carrier read must be BIT-identical
+            # to the wrapper lane's global staggered read.
+            np.testing.assert_array_equal(
+                np.asarray(u_sfc), cur_probe["u"],
+                err_msg="sharded surface-current u diverged from global read")
+            np.testing.assert_array_equal(
+                np.asarray(v_sfc), cur_probe["v"],
+                err_msg="sharded surface-current v diverged from global read")
+        ss = inner(ss, dt, surface_forcing=sf_k, freshwater=fw)
         if k == bc_step:
             # host BC leaf-wise ON THE SHARDED STATE (driver semantics:
             # np.asarray assembles the addressable sharded leaf to the
@@ -169,11 +234,16 @@ def test_persistent_loop_matches_wrapper_loop_and_gather_counts(monkeypatch):
             v_out = np.asarray(ss.v.data)
             assert v_out.shape[0] == n_lat + 1
             ss = sos.shard_state_latlon(ss, mesh)      # lazy re-shard
+        if k == ice_bc_step:
+            # ice-thermo-style BC on the SHARDED state (2-D slice pull +
+            # device-side .at[..., 0].set scatter — the production pattern).
+            ss = _ice_thermo_touch_T(ss)
     ss = sos.gather_state_latlon(ss, mesh)             # final output gather
     ss = jax.block_until_ready(ss)
     new_calls = dict(calls)
     # step-count-INDEPENDENT totals: initial shard + mid re-shard, mid output
-    # gather + final gather => 0 per-step full-state transfers.
+    # gather + final gather => 0 per-step full-state transfers — the per-step
+    # surface-current + ice-thermo consumers forced NO extra layout flips.
     assert new_calls == {"shard": 2, "gather": 2}, new_calls
 
     # ---------------- equivalence: bitwise, far inside the 1e-12 bar ---------

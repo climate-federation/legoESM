@@ -83,7 +83,7 @@ def backend_spy(monkeypatch):
 
 
 def _plane_state(n_slots):
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         make_flat_plane_terrain_metric,
         make_rest_state,
     )

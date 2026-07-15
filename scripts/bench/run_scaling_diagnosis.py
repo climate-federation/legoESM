@@ -243,7 +243,7 @@ def _setup_cubed_sphere(n: int, nlev: int, dt: float, precision: str,
     # lives under tests/test_cases — same routine the GPU/CPU scaling
     # drivers use).
     from tests.test_cases.baroclinic_wave import baroclinic_wave_init
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
         hydrostatic_to_fv3,

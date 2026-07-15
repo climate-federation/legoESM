@@ -120,30 +120,21 @@ __param_spec__ = {
             "nu_molecular": "physical constant (molecular viscosity reference)",
             "k_min": "numerics: bound (molecular diffusivity floor)",
             "k_max": "numerics: bound (NEMO 100 cm²/s cap)",
+            "power_bot_wm2": "boundary-default: default 1e-10 = ~zero uniform-fallback "
+            "placeholder (production reads a spatial abyssal-hill power map); at the "
+            "lower bound of (0, 5e-3), so it has no interior sigmoid seed",
+            "power_cri_wm2": "boundary-default: default 1e-10 = ~zero uniform-fallback "
+            "placeholder (production reads a spatial critical-slope power map); at the "
+            "lower bound of (0, 5e-3), so it has no interior sigmoid seed",
+            "power_sho_wm2": "boundary-default: default 1e-10 = ~zero uniform-fallback "
+            "placeholder (production reads a spatial shoaling power map); at the lower "
+            "bound of (0, 5e-3), so it has no interior sigmoid seed",
         },
         "params": {
-            "power_bot_wm2": {
-                "units": "W/m^2", "bounds": (0.0, 5.0e-3), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "vertical_mixing",
-                "reference": "de Lavergne 2020 abyssal-hill power (uniform fallback)",
-                "shape": None,
-            },
-            "power_cri_wm2": {
-                "units": "W/m^2", "bounds": (0.0, 5.0e-3), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "vertical_mixing",
-                "reference": "de Lavergne 2020 critical-slope power (uniform fallback)",
-                "shape": None,
-            },
             "power_nsq_wm2": {
                 "units": "W/m^2", "bounds": (0.0, 5.0e-3), "tunable_tier": 2,
                 "transform": "sigmoid", "category": "vertical_mixing",
                 "reference": "de Lavergne 2020 N²-scaled power (uniform fallback)",
-                "shape": None,
-            },
-            "power_sho_wm2": {
-                "units": "W/m^2", "bounds": (0.0, 5.0e-3), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "vertical_mixing",
-                "reference": "de Lavergne 2020 shoaling power (uniform fallback)",
                 "shape": None,
             },
             "scale_bot_m": {

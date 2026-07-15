@@ -31,7 +31,12 @@ class GWDOutput(NamedTuple):
         Temperature tendency from wave breaking [K/s], shape (ncol, nlev).
     eps_gwd : jax.Array
         Column-integrated wave energy dissipation [W/m^2], shape (ncol,).
-        Positive-definite: eps_gwd = -sum(rho * (u*du_dt + v*dv_dt) * dz).
+        eps_gwd = -sum(rho * (u*du_dt + v*dv_dt) * dz).  Positive for the
+        wind-opposing diagnostic schemes (rayleigh/lindzen/mcfarlane/hines),
+        where drag removes KE from the mean flow; ``prognostic_spectral``
+        is positive by construction since the launch-level
+        ``sign(c - U_launch)`` deposition factor landed (#856 closed
+        F-GWD-1 -- the earlier deposition could accelerate the mean flow).
     """
     du_dt: jax.Array
     dv_dt: jax.Array

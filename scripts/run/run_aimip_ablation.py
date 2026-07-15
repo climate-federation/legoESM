@@ -69,7 +69,7 @@ def _load_yaml(path: Path) -> dict:
 
 
 def _build_spectral_config(base_cfg: dict):
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
     from legoesm.training.losses import LossConfig
     from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
 
@@ -141,7 +141,7 @@ def _per_var_metrics(pred_grid, target_carry, grid):
 def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
     """Train the classical AIMIP pipeline with the given scheme overrides,
     evaluate on the held-out eval windows, return metrics."""
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         compute_spectral_filter,
         compute_sponge_factor,
         spectral_pe_to_grid,

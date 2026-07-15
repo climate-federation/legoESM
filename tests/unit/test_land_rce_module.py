@@ -30,7 +30,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm import constants  # noqa: E402
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (  # noqa: E402
     make_flat_plane_terrain_metric,
     make_rest_state,
 )

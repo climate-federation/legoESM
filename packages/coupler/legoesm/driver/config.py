@@ -177,11 +177,11 @@ class DycoreConfig(NamedTuple):
     # speedup — meaningful for the 100-y AMIP submission where the
     # smoke jobs were paying ~2.5 h of compile per rank-count.
     #
-    # Default ``"ssp_rk3"`` preserves bit-equivalent behaviour for
-    # the existing scientific validation suite.  ``"ssp_rk3_scan"``
-    # is the opt-in for production at scale.
+    # On cube / lat-lon, ``"auto"`` resolves to ``ssp_rk3`` — bit-
+    # equivalent behaviour for the existing scientific validation
+    # suite.  ``"ssp_rk3_scan"`` is the opt-in for production at scale.
     #
-    # ``"auto"`` (the run_amip CLI default since 2026-06-10) selects
+    # ``"auto"`` (the default here AND the run_amip CLI default) selects
     # each dycore's own stable default in ``component_factory``:
     # cube / lat-lon keep ``ssp_rk3``; MPAS gets ``ssp_rk54_scan``
     # (its biharmonic hyperdiffusion eigenvalues at production dt fall
@@ -189,7 +189,14 @@ class DycoreConfig(NamedTuple):
     # blow-up); spectral keeps ``ssp_rk54``.  Any explicit scheme name
     # (including ``ssp_rk3`` on MPAS) is forwarded verbatim, so
     # deliberate integrator-sensitivity runs are still possible.
-    time_integrator: str = "ssp_rk3"
+    # Default flipped ``"ssp_rk3"`` → ``"auto"`` (2026-07-12): a direct
+    # ``DycoreConfig()`` on MPAS previously inherited the documented-
+    # unstable ssp_rk3 (diverges within ~3 steps at dt=600 with
+    # hyperdiff ON) — only the run_amip CLI got the safe per-dycore
+    # resolution.  ``"auto"`` never reaches ``dispatch_integrator``
+    # (every factory branch maps it first; dispatch raises loudly on
+    # unknown names as defense in depth).
+    time_integrator: str = "auto"
     # #771: transport the (attached) moisture tracers horizontally with the
     # mass-conserving flux-form post-RK3 substep instead of the in-RK3 advective
     # -(u·∇q).  Fixes the cube column-water non-conservation / day-150 blow-up.
@@ -912,6 +919,25 @@ class ExperimentConfig(NamedTuple):
     # STATELESS physics (Held-Suarez / per-column); a stateful PhysicsState
     # carry is not yet SPMD-routed.  Default off preserves all existing paths.
     enable_latlon_spmd: bool = False
+    # P4 (cube >6 devices): opt-in sub-face-TILED dynamics — the compiled
+    # segment's dynamics core routes through
+    # ``make_tiled_cc_step`` (tiled D-grid SSP-RK3 on a (6,kt,kt) mesh)
+    # when the device layout is sub-face tiled (n_devices = 6*kt^2 > 6).
+    # Dynamics-only swap: physics/fixers/tracers in the segment are
+    # untouched.  The adapter refuses configs outside the tiled base-cut
+    # envelope (non-ssp_rk3 integrator, any extra damping term, duogrid)
+    # LOUDLY.  Default off preserves every existing path.
+    enable_tiled_dycore: bool = False
+    # M2b (scaling): run each lat-lon SPMD segment as ONE compiled
+    # ``lax.scan`` (``make_sharded_atm_latlon_segment`` — band-sharded
+    # geometry, one host dispatch + one in-graph finite-scalar read per
+    # segment) instead of the historical per-step Python loop.  Applies to
+    # the STATELESS ``run_atm_latlon_spmd`` lane (dynamics-only /
+    # Held-Suarez); the operator-split unified-physics SPMD lane has no
+    # compiled-scan segments yet and REFUSES this flag loudly (never a
+    # silent no-op).  Requires ``enable_latlon_spmd=True`` (validated).
+    # Default off = byte-identical per-step path.
+    latlon_spmd_compiled_segments: bool = False
 
     # Optional explicit turbulence scheme config (a
     # ``atmosphere.physics.turbulence.config.TurbulenceConfig``) overriding the
@@ -1000,6 +1026,24 @@ class ExperimentConfig(NamedTuple):
             # to host replicas on every process first.  All flush/save
             # sites are root-gated via ``_mpi_rank = jax.process_index()``.
             pass
+        if self.enable_tiled_dycore:
+            # P4 sub-face-tiled cube dynamics (single-controller multi-device;
+            # (6,kt,kt) mesh).  Cube-only; mpi4jax-distributed runs have no
+            # tiled device mesh (the driver helper also fails loudly there).
+            if g.grid_type != "cubed_sphere":
+                errors.append(
+                    "enable_tiled_dycore=True requires "
+                    f"grid.grid_type='cubed_sphere' (got {g.grid_type!r}): "
+                    "the tiled step is the cube sub-face decomposition"
+                )
+            if self.distributed and self.distributed_mode == "mpi":
+                errors.append(
+                    "enable_tiled_dycore=True is a device-mesh (SPMD) path "
+                    "and cannot run under the mpi4jax replicated-faces mode "
+                    "(distributed_mode='mpi'); use single-process multi-GPU "
+                    "or distributed_mode='spmd'"
+                )
+
         if self.enable_latlon_spmd:
             # Single-process multi-device lat-band path (NOT distributed_mode).
             if g.grid_type != "latlon":
@@ -1018,6 +1062,13 @@ class ExperimentConfig(NamedTuple):
             # runtime in ModelDriver._latlon_spmd_mesh against the BUILT
             # LatLonGrid (GridConfig carries only ``resolution``, not the
             # derived n_lat/n_lon), so a wrong device count fails LOUDLY there.
+        if self.latlon_spmd_compiled_segments and not self.enable_latlon_spmd:
+            errors.append(
+                "latlon_spmd_compiled_segments=True requires "
+                "enable_latlon_spmd=True: the compiled-scan segment lane is a "
+                "mode OF the lat-band SPMD run loop (run_atm_latlon_spmd) and "
+                "is a silent no-op on every other path"
+            )
         if self.days <= 0:
             errors.append(f"days must be > 0, got {self.days}")
         if self.seed < 0:

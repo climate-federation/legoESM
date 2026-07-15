@@ -16,15 +16,15 @@ import pytest
 MPI = pytest.importorskip("mpi4py.MPI")
 mpi4jax = pytest.importorskip("mpi4jax")  # noqa: F401
 
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     PlaneCompressibleEulerModel,
     make_flat_plane_terrain_metric, make_rest_state,
     plane_compressible_euler_slow_tendencies,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane_halo import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane_halo import (
     plane_compressible_euler_slow_tendencies_halo,
 )
 from legoesm.grids.plane import create_plane_grid

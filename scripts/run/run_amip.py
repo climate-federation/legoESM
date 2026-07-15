@@ -1051,12 +1051,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
               "single-controller, job 8686550; gate "
               "scripts/validate/validate_driver_cs_spmd_parity.py."))
     parser.add_argument(
+        "--enable-tiled-dycore", action="store_true", default=False,
+        help=("P4 (cube >6 devices): route the compiled segment's dynamics "
+              "through the sub-face-TILED cube step (make_tiled_cc_step, "
+              "(6,kt,kt) device mesh, n_devices=6*kt^2). Dynamics-only swap "
+              "(physics/fixers untouched); refuses configs outside the tiled "
+              "base-cut envelope. Requires --grid-type cubed_sphere."))
+    parser.add_argument(
         "--enable-latlon-spmd", action="store_true", default=False,
         help=("Multi-device lat-BAND SPMD for the lat-lon C-grid dycore (A1). "
               "Requires --grid-type latlon, n_lat %% n_devices == 0. Runs the "
               "operator-split unified physics (or dynamics-only / --held-suarez) "
               "band-local. Single-process by default; add --multicontroller for "
               "the multi-node route-B lane. Distinct from --distributed (MPI)."))
+    parser.add_argument(
+        "--latlon-spmd-compiled-segments", action="store_true", default=False,
+        help=("M2b: run each lat-lon SPMD segment as ONE compiled lax.scan "
+              "(band-sharded geometry, one host dispatch per segment) instead "
+              "of the per-step Python loop. Requires --enable-latlon-spmd; "
+              "stateless lane only (dynamics-only / --held-suarez) — the "
+              "operator-split unified-physics lane refuses it loudly. "
+              "Default off = byte-identical per-step path."))
     parser.add_argument(
         "--multicontroller", action="store_true", default=False,
         help=("Promote --enable-latlon-spmd to ROUTE-B (jax.distributed, "
@@ -1306,6 +1321,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_cape_threshold=args.bechtold_cape_threshold,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
+        latlon_spmd_compiled_segments=args.latlon_spmd_compiled_segments,
         physics_parameterization=args.physics_parameterization,
         physics_parameterization_checkpoint=args.physics_parameterization_checkpoint,
         physics_parameterization_stats=args.physics_parameterization_stats,
@@ -1316,6 +1332,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         gradient_checkpoint=args.gradient_checkpoint,
         distributed=args.distributed,
         distributed_mode=args.distributed_mode,
+        enable_tiled_dycore=args.enable_tiled_dycore,
         shard_radiation_columns=args.shard_radiation_columns,
         allow_level_fallback=args.allow_level_fallback,
         ensemble_size=args.ensemble_size,
