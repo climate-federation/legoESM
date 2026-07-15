@@ -1310,6 +1310,14 @@ class LatLonCGridOceanConfig(NamedTuple):
     # (DINO L1 exactness; the two agree on uniform grids and differ by
     # (g/4)·Δdz·Δρ' per interface on stretched levels).
     pgf_quadrature: str = "cell_integral"
+    # Depth the EOS pressure term sees.  "insitu" (default, bit-identical):
+    # the in-situ hydrostatic pressure integral p=g·Σρ·dz — recovers depth
+    # ~(ρ̄/ρ0)·gdept (a ~0.5% stretch).  "geometric": feed p=ρ0·g·gdept from
+    # the coordinate's geometric T-depth ladder (z_coord.t_depth_ref, NEMO
+    # gdept_1d) so the EOS reconstructs gdept exactly — matches NEMO
+    # eos_insitu.  Only the NEMO-fidelity path selects "geometric"; requires
+    # z_coord to carry t_depth_ref and eos rho0 == config.rho_0 (auto-wired).
+    eos_depth: str = "insitu"
     # Tracer time integration for the flux-form advection step.
     # "euler" (default): forward Euler (1st-order).
     # "ab2": Adams-Bashforth 2 with stabilization (MITgcm convention).

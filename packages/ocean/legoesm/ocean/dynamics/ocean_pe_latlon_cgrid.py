@@ -1230,7 +1230,13 @@ def _bc_geometry_and_density(
         )
     else:
         _h_actual_pprime = None
-    eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
+    _eos_depth = getattr(config, "eos_depth", "insitu")
+    # Geometric-depth NEMO-fidelity path: build the EOS with rho0=config.rho_0
+    # so its zh depth term is consistent with p=rho_0·g·gdept (value cancels,
+    # exact gdept).  Default "insitu" -> no rho0 kwarg -> byte-identical.
+    _eos_mk_kw = {"rho0": rho_0} if _eos_depth == "geometric" else {}
+    eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None),
+                         **_eos_mk_kw)
     _pgf_quadrature = getattr(config, "pgf_quadrature", "cell_integral")
     rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
         T, S, mask,
@@ -1259,6 +1265,13 @@ def _bc_geometry_and_density(
             if getattr(z_coord, "t_depth_ref", None) is None
             else jnp.asarray(z_coord.t_depth_ref)
         ) if _pgf_quadrature == "nemo_trapezoid" else None,
+        eos_depth=_eos_depth,
+        # Geometric gdept ladder for the "geometric" EOS depth (NEMO gdept_1d).
+        eos_geometric_depth_1d=(
+            jnp.abs(z_coord.z_full_ref)
+            if getattr(z_coord, "t_depth_ref", None) is None
+            else jnp.asarray(z_coord.t_depth_ref)
+        ) if _eos_depth == "geometric" else None,
     )
 
     p_prime_filled = neumann_fill_cgrid(p_prime, mask, grid=grid)

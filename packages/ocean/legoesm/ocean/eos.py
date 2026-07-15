@@ -1710,7 +1710,8 @@ def make_eos_fn(eos="wright", eos_linear=None,
                 eos_nemo_seos: NemoSEOSConfig | None = None,
                 eos_veros_nonlin2: VerosNonlin2Config | None = None,
                 eos_veros_nonlin3: VerosNonlin3Config | None = None,
-                eos_veros_gsw: VerosGswConfig | None = None):
+                eos_veros_gsw: VerosGswConfig | None = None,
+                rho0: float = rho_0):
     """Return an EOS callable ``fn(T, S, p) -> rho``.
 
     Parameters
@@ -1733,6 +1734,16 @@ def make_eos_fn(eos="wright", eos_linear=None,
     eos_nemo_seos : NemoSEOSConfig or None
         Coefficients for the NEMO simplified EOS.  Ignored unless *eos*
         is ``"nemo_seos"``.  If ``None``, the DINO defaults are used.
+    rho0 : float
+        Boussinesq reference density [kg/m^3] for the depth reconstruction
+        ``zh = (p/(rho0*g))*r1_Z0`` in the ``"nemo_eos80"`` polynomial.
+        Defaults to the module ``rho_0`` (1025) so the default call is
+        BYTE-IDENTICAL; pass the config ``rho_0`` (e.g. NEMO's 1026) so it
+        stays consistent with the pressure fed to the EOS — required for the
+        geometric-depth NEMO-fidelity path where ``zh`` must recover ``gdept``
+        exactly (the value itself cancels when it matches the pressure's
+        rho0; a MISMATCH stretches the recovered depth).  Ignored by every
+        other EOS branch (their depth conversion carries its own rho0).
 
     Returns
     -------
@@ -1766,7 +1777,7 @@ def make_eos_fn(eos="wright", eos_linear=None,
         # NEMO Roquet-55 EOS-80 polynomial (the full ln_eos80 EOS, distinct from
         # the 3-term nemo_seos). Fixed published coefficients; no config.
         def _nemo_eos80(T, S, p):
-            return nemo_roquet_eos(T, S, p, coeffs=_ROQUET_EOS80)
+            return nemo_roquet_eos(T, S, p, coeffs=_ROQUET_EOS80, rho0=rho0)
         return _eos_compute_dtype_adapter(_nemo_eos80)
     elif eos == "unesco80":
         return _eos_compute_dtype_adapter(unesco80_eos)
@@ -2059,7 +2070,8 @@ def maybe_partial_h_actual(state, z_coord):
     return None
 
 
-def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None):
+def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None,
+                      *, eos_depth="insitu", rho0=None):
     """Compute in-situ density from ocean state.
 
     Used by vertical mixing, lateral mixing, and convection integration
@@ -2085,6 +2097,19 @@ def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None):
         to use ``compute_ocean_jacobian`` which dispatches.
     eos_fn : callable or None
         EOS function ``fn(T, S, p) -> rho``.  If None, uses ``wright_eos``.
+    eos_depth : str, default ``"insitu"``
+        Depth the EOS pressure term sees.  ``"insitu"`` (default,
+        BYTE-IDENTICAL): the 2-pass in-situ hydrostatic pressure integral
+        ``p = g*Sum(rho*dz)`` — recovers depth ~(rho_bar/rho0)*gdept.
+        ``"geometric"``: feed ``p = rho0*g*gdept`` from the coordinate's
+        geometric T-depth ladder (``z_coord.t_depth_ref``, NEMO ``gdept_1d``)
+        so the EOS reconstructs geometric depth exactly — matches NEMO's
+        ``eos_insitu`` which uses ``gdept`` directly.  The *eos_fn* MUST have
+        been built with the SAME ``rho0`` (``make_eos_fn(rho0=...)``) so the
+        value cancels; otherwise the recovered depth is stretched.
+    rho0 : float or None
+        Reference density for the geometric ``p = rho0*g*gdept``.  ``None``
+        (default) uses the module ``rho_0``.  Ignored for ``"insitu"``.
 
     Returns
     -------
@@ -2092,6 +2117,18 @@ def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None):
     """
     if eos_fn is None:
         eos_fn = wright_eos
+    if eos_depth not in ("insitu", "geometric"):
+        raise ValueError(
+            f"Unknown eos_depth {eos_depth!r}; expected 'insitu' or 'geometric'")
+    if eos_depth == "geometric":
+        # NEMO eos_insitu: density from the GEOMETRIC gdept, not the in-situ
+        # hydrostatic integral.  p = rho0*g*gdept -> zh recovers gdept exactly.
+        depth = getattr(z_coord, "t_depth_ref", None)
+        if depth is None:
+            depth = jnp.abs(z_coord.z_full_ref)
+        r0 = rho_0 if rho0 is None else rho0
+        p_eos = (r0 * constants.g) * jnp.asarray(depth, dtype=state.T.data.dtype)
+        return eos_fn(state.T.data, state.S.data, p_eos)
     h_actual = maybe_partial_h_actual(state, z_coord)
     # Two EOS iterations for density-pressure consistency, matching the
     # dynamical core (ocean_pe_cdgrid.py).
