@@ -80,9 +80,10 @@ DEPARTURES / DESIGN:
   * the antiparallel "deceleration rigidly along the source direction" + the
     KE→heat closure (all mean-flow KE loss returned as local frictional
     heating, ``dT_dt = −(u·du_dt+v·dv_dt)/c_pd``) are single-wave DESIGN
-    choices. NOTE: this KE→heat identity is DEFINITIONAL (``dT_dt`` is defined
-    FROM the final tendency), so ``c_pd·Σρ·dT·dz == eps_gwd`` is a tautology,
-    NOT an independent energy-conservation law — see the ``conserves`` note.
+    choices. NOTE: ``dT_dt`` is computed FROM the final tendency, so
+    ``c_pd·Σρ·dT·dz == eps_gwd`` holds BY CONSTRUCTION — and for a c=0 wave
+    (zero vertical wave-energy flux, F_E = c·F_momentum = 0) that IS the exact
+    resolved-energy conservation the ``conserves = ["energy"]`` note declares.
   * the ``tndmax`` / ``umcfac`` tendency limiters (E3SM ``gw_common.F90``
     provenance) are post-flux magnitude caps that break the exact
     stress-divergence balance where they bind (a bounded sink, never a source).
@@ -144,20 +145,25 @@ __physics_contract__ = {
         "upward and bounded by the launched stress. eps_gwd>=0 is the column KE "
         "loss returned as frictional heating dT_dt = -(u*du_dt + v*dv_dt)/c_pd."
     ),
-    # conserves = none. The resolved mean-flow KE removed is returned exactly as
-    # frictional heating (c_pd*sum(rho*dT_dt*dz) == eps_gwd), but that closure is
-    # DEFINITIONAL (dT_dt is defined FROM the final tendency) — a tautology, NOT
-    # an independent energy-conservation law. Total wave+mean energy is NOT
-    # conserved: the launched orographic wave is an external/unbudgeted source,
-    # the critical-level absorption radiates the residual stress away, and the
-    # tendency limiter discards the implied carry loss where it binds. Momentum
-    # is not conserved either (external source; absorbed at a critical level).
-    # This follows the stricter hines.py precedent (a launched-wave scheme -> no
-    # robust total-energy claim). FOLLOW-UP: mcfarlane.py and e3sm_cam.py still
-    # declare ["energy"] with the same external-wave budget and need the same
-    # sweep to ["none"]; rayleigh.py stays ["energy"] (Rayleigh friction is a
-    # direct resolved KE->internal-energy conversion with NO launched wave).
-    "conserves": ["none"],
+    # conserves=["energy"]: a STATIONARY orographic wave (phase speed c=0) carries
+    # ZERO vertical wave-energy flux (F_E = c*F_momentum = 0, Eliassen-Palm), so
+    # it transports momentum WITHOUT transporting energy. Hence ALL mean-flow KE
+    # removed where the wave breaks is returned LOCALLY as heat: dT_dt =
+    # -(u*du+v*dv)/c_pd from the FINAL applied tendency gives c_pd*sum(rho*dT*dz)
+    # == eps_gwd EXACTLY, so resolved KE + internal energy is conserved pointwise.
+    # The identity is "definitional" (dT_dt SET from the tendency) but that makes
+    # it conservation BY CONSTRUCTION, which for c=0 (zero wave-energy flux) is the
+    # COMPLETE energy story -- not merely bookkeeping. MOMENTUM is NOT conserved
+    # (absorbed by the subgrid mountain / at a critical level); the critical-level
+    # radiation + post-flux tendency limiter break MOMENTUM closure, not energy
+    # (both rescale dT_dt with the same limited du_dt). The discriminator is
+    # "does the launched wave carry vertical energy flux (c!=0)?": c=0 orographic
+    # (this scheme, mcfarlane.py #1045, rayleigh direct-drag) => ["energy"]; c!=0
+    # launched spectra (hines.py, prognostic_spectral.py) whose waves carry energy
+    # the limiter discards => ["none"]; e3sm_cam.py => ["none"] via its c=0(+)c!=0
+    # multi-source intersection. (Corrects the prior ["none"] ruling, which
+    # over-applied the hines c!=0 precedent to this c=0 scheme -- codex #1045.)
+    "conserves": ["energy"],
     "differentiable": True,
     "reference": (
         "Lindzen (1981), J. Geophys. Res. 86, 9707-9714, "
@@ -166,7 +172,8 @@ __physics_contract__ = {
     "idealized_test": (
         "tests/atmosphere/hydrostatic/unit/test_gravity_wave_drag.py: rest / "
         "zero-orography column -> zero tendency; u*du_dt + v*dv_dt <= 0 at every "
-        "level (vector sink); c_pd*sum(rho*dT_dt*dz) == eps_gwd >= 0 (KE->heat)"
+        "level (vector sink); c_pd*sum(rho*dT_dt*dz) == eps_gwd >= 0 (exact "
+        "KE->heat energy closure for the c=0 wave)"
     ),
 }
 

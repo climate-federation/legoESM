@@ -11,8 +11,10 @@ ADDITIONS / DEPARTURES (canaries):
   * the upper sin² SPONGE is NOT HS94 — a numerical sponge-layer damping active only where
     ``σ < sponge_top``; it HEATS the removed KE (energy-conserving), unlike a physical radiation
     sponge that removes GW energy from the domain;
-  * ``conserves = ["energy"]`` is correct (no external launched wave — a direct resolved KE→heat
-    conversion; contrast hines/lindzen = ["none"]); the KE→heat closure is definitional.
+  * ``conserves = ["energy"]`` is correct: Rayleigh is a DIRECT drag (no wave at all) — a resolved
+    KE→heat conversion, both tracked. Contrast the c≠0 launched-SPECTRUM schemes hines/
+    prognostic_spectral = ["none"] (propagating waves carry off vertical energy flux the limiter
+    discards); the c=0 orographic mcfarlane/lindzen ALSO conserve energy (zero wave-energy flux).
 Dispatch hardening: an unknown GWD scheme raises ValueError.
 """
 
@@ -181,10 +183,11 @@ def test_rayleigh_sign_is_a_sink():
 
 
 def test_rayleigh_energy_closure_ke_to_heat():
-    """DESIGN (definitional): c_pd·Σρ·dT_dt·dz == eps_gwd ≥ 0 (KE→heat closure).
+    """c_pd·Σρ·dT_dt·dz == eps_gwd ≥ 0 — the exact KE→heat energy closure.
 
-    Definitional (dT_dt is defined FROM the tendency), but here — with NO external wave source — it
-    IS the full resolved energy budget, which is why conserves=["energy"] is correct for Rayleigh.
+    dT_dt is computed FROM the tendency so the identity holds BY CONSTRUCTION; here Rayleigh is a
+    DIRECT drag (no wave at all), so that by-construction closure IS the full resolved energy
+    budget, which is why conserves=["energy"] is correct for Rayleigh.
     """
     out, inp = _run(RayleighConfig())
     rho, z_half = np.asarray(inp[7]), np.asarray(inp[6])
