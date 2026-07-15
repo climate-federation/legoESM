@@ -177,7 +177,7 @@ __param_spec__ = {
         "scheme_key": "atm.gwd.PrognosticSpectralConfig",
         "excluded": {
             "breaking_sharpness": "sigmoid sharpness of the breaking transition; a differentiability/smoothing width, not a closure",
-            "direction_sign_width": "tanh width of the smooth sign(c - U_proj) directional deposition factor; a differentiability/smoothing width, not a closure",
+            "direction_sign_width": "tanh width of the smooth sign(c - U_launch) launch-fixed directional deposition factor; a differentiability/smoothing width, not a closure",
         },
         "params": {
             # --- launch source spectrum ---
@@ -432,11 +432,12 @@ class PrognosticSpectralConfig(NamedTuple):
     breaking_sharpness : float
         Sigmoid sharpness for breaking transition (default 10.0).
     direction_sign_width : float
-        Width [m/s] of the smooth ``tanh((c - U_proj)/width)`` directional
+        Width [m/s] of the smooth ``tanh((c - U_launch)/width)`` directional
         sign factor in the stress deposition (default 1.0).  A differentiable
-        stand-in for ``sign(c - U_proj)``; small against typical intrinsic
-        phase speeds (O(1-100 m/s)) so the sign saturates to +-1 except
-        within ~1 m/s of a critical level.
+        stand-in for ``sign(c - U_launch)`` evaluated at the LAUNCH (surface)
+        level and held FIXED with height (F-GWD-1); small against typical
+        intrinsic phase speeds (O(1-100 m/s)) so the sign saturates to +-1
+        except within ~1 m/s of a launch-level critical line.
     tau_decay : float
         Relaxation timescale for prognostic spectrum [s] (default 86400).
     thermal_tendency : bool
