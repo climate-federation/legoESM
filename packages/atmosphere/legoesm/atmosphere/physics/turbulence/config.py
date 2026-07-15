@@ -2,7 +2,7 @@
 
 Provides configuration NamedTuples for:
 1. Surface layer: bulk aerodynamic surface fluxes
-2. Smagorinsky: constant eddy diffusivity (simplest baseline)
+2. Smagorinsky: deformation/stability-dependent eddy diffusivity (simplest baseline)
 3. Louis (1979): stability-dependent diffusion
 4. TKE / Mellor-Yamada 2.5: prognostic TKE closure
 5. CLUBB-lite: higher-order closure skeleton
@@ -270,7 +270,14 @@ class SmagorinskyConfig(NamedTuple):
 
     Deformation-based eddy viscosity
     ``K_m = (C_s · l)^2 · |S| · √(max(0, 1 − Ri/Pr_t))`` with ``K_h =
-    K_m / Pr_t`` (Smagorinsky 1963; Lilly 1962 buoyancy correction).
+    K_m / Pr_t``.  The ``(C_s·l)²·|S|`` core is the Smagorinsky (1963)
+    deformation structure.  The ``√(1 − Ri/Pr_t)`` stability factor, the
+    ``Ri ≥ Pr_t`` cutoff, and default ``Pr_t = 1`` all match Lilly (1962)'s
+    equilibrium EXPERIMENT (his ``√`` stability factor with ``K_h/K_m = 1``
+    and ``K_m → 0`` for ``Ri > 1``); the ``√`` ramp is Lilly's own form, NOT a
+    modern replacement.  Only the AD-safe numerics — the ``max(0, ·)`` clamp,
+    the double-``where`` guard (non-C¹ at the cutoff), and the ``S²+1e-10``
+    shear floor — are modern.  His general theory left these as free functions.
 
     Fields
     ------
