@@ -175,14 +175,25 @@ NEMO_DEFERRED_BLOCKS: tuple[str, ...] = (
     "Exact NEMO split-explicit Higdon/doubled-boxcar free-surface filtering is "
     "not a separate selector; explicit_substep + cosine is the closest existing "
     "canonical barotropic block.",
-    "Exact NEMO TKE namelist/coefficient parity remains deferred; the card uses "
-    "the existing prognostic Gaspar/Burchard-style TKE block.",
+    "NEMO TKE amplitude (√e), Ri-Prandtl (nn_pdl=1, slope 1/ri_cri=4.5), c_k/c_eps "
+    "(rn_ediff/rn_ediss) and background Kz (rn_avm0/rn_avt0) are now dump-verified "
+    "NEMO-exact; the nn_mxl=3 mixing-length form (separate lup/ldn sweeps, "
+    "l_visc=MIN, l_dissl=geomean) and the Dirichlet surface-TKE BC remain the "
+    "deferred TKE items (the end-to-end length match is also blocked on NEMO not "
+    "dumping rn2/N^2 — see TKE_FIDELITY_FINDINGS.md).",
     "Implicit quadratic NEMO bottom drag is approximated by the existing "
     "quadratic-with-floor model-level drag knobs.",
 )
 
 
 def _nemo_tke_config() -> TKEConfig:
+    # NEMO zdftke coefficient parity (verified vs the GYRE step-12 dump —
+    # avm_k/avt_k/en; TKE_FIDELITY_FINDINGS.md).  The amplitude
+    # (kappa_convention="veros_sqrte" ⇒ K=c_k·l·√e, not √(2e) — removes an exact
+    # √2 overshoot), the Ri-Prandtl (prandtl_ri_coeff=1/ri_cri), and the
+    # background floors below are now NEMO-exact; c_k=0.1/c_eps=0.7 already match
+    # rn_ediff/rn_ediss by default.  The remaining deferred item is the nn_mxl=3
+    # length form (see NEMO_DEFERRED_BLOCKS).
     return TKEConfig(
         prognostic=True,
         n2_mode="adiabatic",
@@ -192,6 +203,14 @@ def _nemo_tke_config() -> TKEConfig:
         buoyancy_timing="post_mixing_veros",
         shear_production="realized_veros",
         prandtl_mode="richardson",
+        # NEMO nn_pdl=1: Pr = min(10, max(1, Ri/ri_cri)), ri_cri = 2/(2+rn_ediss/
+        # rn_ediff) = 2/(2+0.7/0.1) = 2/9 ⇒ slope 1/ri_cri = 4.5 (NOT the Veros
+        # 6.6 default). legoESM Pr=max(1,min(10,coeff·Ri)) is bit-identical (clamp
+        # to [1,10] is order-independent), so this reproduces NEMO's pdl exactly.
+        prandtl_ri_coeff=4.5,
+        # NEMO background Kz: rn_avm0=1.2e-4 (avmb), rn_avt0=1.2e-5 (avtb).
+        kappaM_min=1.2e-4,
+        kappaH_min=1.2e-5,
     )
 
 

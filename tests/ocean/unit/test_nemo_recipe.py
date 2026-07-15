@@ -75,6 +75,11 @@ def test_nemo_model_config_selects_canonical_blocks():
     assert tke.buoyancy_timing == "post_mixing_veros"
     assert tke.shear_production == "realized_veros"
     assert tke.prandtl_mode == "richardson"
+    # NEMO zdftke coefficient parity (TKE_FIDELITY_FINDINGS.md, dump-verified):
+    # Ri-Prandtl slope 1/ri_cri = 4.5 (nn_pdl=1), background Kz rn_avm0/rn_avt0.
+    assert tke.prandtl_ri_coeff == 4.5
+    assert tke.kappaM_min == 1.2e-4
+    assert tke.kappaH_min == 1.2e-5
 
     assert cfg.gm_redi is not None
     assert cfg.gm_redi.slope_scheme == "triads"
@@ -149,6 +154,36 @@ def test_nemo_mapping_and_deferred_blocks_are_explicit():
         for name, _, selected in NEMO_BLOCK_MAPPING
     )
     assert any("leapfrog" in item for item in NEMO_DEFERRED_BLOCKS)
+
+
+def test_nemo_tke_prandtl_bit_reproduces_nemo_pdl():
+    """The card's richardson-Prandtl (coeff 4.5) is NEMO nn_pdl=1 exactly.
+
+    NEMO zdftke: pdlr = MAX(0.1, ri_cri/MAX(ri_cri, Ri)) with
+    ri_cri = 2/(2 + rn_ediss/rn_ediff) = 2/(2 + 0.7/0.1) = 2/9, so the Prandtl
+    number Pr = 1/pdlr = MIN(10, MAX(1, Ri/ri_cri)) = MIN(10, MAX(1, 4.5·Ri)).
+    legoESM `_prandtl_number` (richardson) returns MAX(1, MIN(10, coeff·Ri));
+    clamp-to-[1,10] is order-independent, so coeff = 1/ri_cri = 4.5 must match
+    NEMO's Pr to machine precision across the whole Ri range (incl. the Ri<0
+    convective branch where both give Pr=1).
+    """
+    import numpy as np
+
+    from legoesm.ocean.physics.vertical_mixing.tke import _prandtl_number
+    from legoesm.ocean.fidelity.nemo_recipe import _nemo_tke_config
+
+    cfg = _nemo_tke_config()
+    assert cfg.prandtl_ri_coeff == 4.5
+    ri_cri = 2.0 / (2.0 + 0.7 / 0.1)          # NEMO 2/9
+    # _prandtl_number forms Ri = N2 / max(shear_sq, 1e-12); drive Ri via N2 with
+    # unit shear (kappaM is unused in the richardson branch).
+    Ri = np.linspace(-2.0, 20.0, 2001)
+    N2 = jnp.asarray(Ri)
+    shear_sq = jnp.ones_like(N2)
+    pr_lego = np.asarray(_prandtl_number(N2, shear_sq, jnp.ones_like(N2), cfg))
+    pdlr_nemo = np.maximum(0.1, ri_cri / np.maximum(ri_cri, Ri))
+    pr_nemo = 1.0 / pdlr_nemo                  # NEMO Pr = 1/pdlr
+    np.testing.assert_allclose(pr_lego, pr_nemo, rtol=0, atol=1e-12)
 
 
 def test_nemo_recipe_is_lazy_registered():
