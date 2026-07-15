@@ -245,6 +245,14 @@ def _nemo_physics_config(cfg: NEMOModelRecipeConfig) -> OceanPhysicsConfig:
         lateral_mixing=LateralMixingConfig(scheme="none"),
         surface_forcing=SurfaceForcingConfig(scheme="none"),
         bottom_drag=BottomDragConfig(scheme="none"),
+        # NEMO ln_zdfevd is a convective ADJUSTMENT (homogenise the unstable
+        # layer to neutral), NOT a fixed diffusivity. legoESM enhanced_diffusion
+        # (a K-diffusivity) can't match it: K_conv=100 mixes ~1200m/step
+        # (SST 20->14C collapse); K_conv=1 fixes the mixed layer at 2yr but the
+        # persistent Fickian mixing over-corrects by 5yr (circulation 1.6x NEMO,
+        # SST drifts to 16.5). ROOT CAUSE of the SST-cold / weak-circulation gap =
+        # legoESM under-mixes the (unstable) surface layer vs NEMO's ~75m well-mixed
+        # layer; the faithful fix is a convective-adjustment-to-neutral scheme, TODO.
         convection=OceanConvectionConfig(scheme="none"),
         shortwave_penetration=(
             ShortwavePenetrationConfig(scheme="rgb_chl")
@@ -480,6 +488,12 @@ _NEMO_GYRE_HANEY_A: float = 40.0             # usrdef_sbc ztrp magnitude [W/m^2/
 _NEMO_GYRE_TAU_S_INERT: float = 1.0e30       # GYRE_BARE has ~no SSS restoring
 _NEMO_GYRE_YEAR_DAYS: float = 360.0          # nn_leapy=30 (12 x 30-day months)
 _NEMO_QSR_PI: float = 3.1415                 # usrdef_sbc literal (NOT math pi)
+# usrdef_sbc E-P freshwater flux emp(lat): sin-profile split at 37.2N (evap S,
+# precip N), seasonal, domain-mean removed => net-zero. Virtual salt flux.
+_NEMO_GYRE_EMP_S: float = 0.7                # zemp_S intensity of COS in the South
+_NEMO_GYRE_EMP_N: float = 0.8                # zemp_N intensity of COS in the North
+_NEMO_GYRE_EMP_SAIS: float = 0.1             # zemp_sais seasonal amplitude
+_NEMO_GYRE_EMP_CONV: float = 3.16e-5         # zconv: 1 m/yr => 3.16e-5 mm/s
 
 
 def _nemo_gyre_vertical_ladder() -> tuple[np.ndarray, np.ndarray]:
@@ -605,6 +619,26 @@ def nemo_gyre_t_star(lat_deg, t_seconds: float = 0.0):
         / (53.5 * (1.0 + 11.0 / 53.5 * zcos_sais2) * 2.0)))
 
 
+def nemo_gyre_emp(lat_deg, t_seconds: float = 0.0):
+    """NEMO GYRE analytic E-P freshwater flux ``emp(lat)`` [kg/m^2/s] (usrdef_sbc).
+
+    sin-profile split at 37.2N: net evaporation (emp>0) equatorward, net precip
+    (emp<0) poleward, with a seasonal modulation.  The caller removes the wet
+    domain mean so the flux is net-zero, then applies it as a virtual salt flux.
+    """
+    import jax.numpy as jnp
+
+    lat = jnp.asarray(lat_deg)
+    zcos_sais1, _ = nemo_gyre_seasonal_cosines(t_seconds)
+    south = (_NEMO_GYRE_EMP_S * _NEMO_GYRE_EMP_CONV
+             * jnp.sin(jnp.pi / 2.0 * (lat - 37.2) / (24.6 - 37.2))
+             * (1.0 - _NEMO_GYRE_EMP_SAIS / _NEMO_GYRE_EMP_S * zcos_sais1))
+    north = (-_NEMO_GYRE_EMP_N * _NEMO_GYRE_EMP_CONV
+             * jnp.sin(jnp.pi / 2.0 * (lat - 37.2) / (46.8 - 37.2))
+             * (1.0 - _NEMO_GYRE_EMP_SAIS / _NEMO_GYRE_EMP_N * zcos_sais1))
+    return jnp.where((lat >= 14.845) & (lat <= 37.2), south, north)
+
+
 # The GYRE-configured NEMO card: ENE vorticity + c2 KE (ln_dynvor_ene,
 # nn_dynkeg=0) + EOS-80 + adcroft PGF + traldf_iso pure Redi (ln_ldfeiv=F).
 # n_barotropic_substeps=120 (NOT the card default 30): the deep (H=4300 m)
@@ -617,6 +651,14 @@ _NEMO_GYRE_CARD_CONFIG = NEMOModelRecipeConfig(
     pgf_scheme="adcroft",
     lateral_operator="nemo_iso_lap",
     n_barotropic_substeps=120,
+    # --- GYRE_BARE namelist knobs (were inheriting ORCA-ish class defaults) ---
+    tracer_advection="fct2",          # ln_traadv_fct, nn_fct_h=2 nn_fct_v=2
+    A_h=1.0e5,                         # nn_ahm_ijk_t=0: CONSTANT 1/2*rn_Uv*rn_Lv = 1e5
+    A_h_lat_scaling=False,             # NO cos-lat scaling (nn_ahm_ijk_t=0)
+    C_smag_lap=0.0,                    # NO Smagorinsky
+    A_h_floor=1.0e5,                   # inert while A_h_lat_scaling=False; set = A_h defensively
+    kappa_Redi=1000.0,                 # ln_traldf_iso: 1/2*rn_Ud*rn_Ld = 1000
+    bottom_drag_scheme="nemo_quadratic",  # namdrg ln_non_lin, rn_Cd0=1e-3, rn_ke0=2.5e-3
 )
 
 
@@ -797,9 +839,21 @@ def apply_nemo_gyre_surface_forcing(state, z_coord, dt, *, t_seconds=0.0):
         config=ShortwavePenetrationConfig(scheme="jerlov_2band", water_type="I"),
         rho_0=NEMO_CONSTANTS_CONFIG.rho_0, c_sw=NEMO_CONSTANTS_CONFIG.c_sw,
     )
+    # NEMO usrdef_sbc E-P freshwater (emp) as a virtual salt flux on the TOP layer.
+    # Sign: emp>0 (net evaporation) removes freshwater => salinity INCREASES, so
+    # dS/dt|surf = +emp * S_surf / (rho0 * dz_top).  Domain-mean removed over wet
+    # cells first (net-zero E-P, matching NEMO's zsumemp subtraction).
+    # NB: NEMO also adds the E-P heat content to qns (qns -= emp*sst*rcp,
+    # usrdef_sbc:144, ~1-2 W/m^2); omitted here — this is the salt-flux term only.
+    emp_2d = jnp.broadcast_to(nemo_gyre_emp(lat_t, t_seconds)[:, None], shape_2d)
+    emp_2d = emp_2d - jnp.sum(emp_2d * cell_mask) / jnp.sum(cell_mask)
+    dS_dt_emp_top = (emp_2d * state.S.data[..., 0] / (
+        NEMO_CONSTANTS_CONFIG.rho_0 * dz_0)).astype(out.dS_dt.dtype)
+    dS_dt = out.dS_dt.at[..., 0].add(dS_dt_emp_top)
+
     mask3 = cell_mask[..., None]
     new_T = state.T.data + dt * (out.dT_dt + dT_dt_sw) * mask3
-    new_S = state.S.data + dt * out.dS_dt * mask3
+    new_S = state.S.data + dt * dS_dt * mask3
     return state._replace(
         T=Field(data=new_T, name=state.T.name, dims=state.T.dims, units=state.T.units),
         S=Field(data=new_S, name=state.S.name, dims=state.S.dims, units=state.S.units),
