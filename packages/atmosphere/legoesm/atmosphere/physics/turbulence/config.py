@@ -117,19 +117,19 @@ __param_spec__ = {
     "MYNN25Config": {
         "scheme_key": "atm.turb.MYNN25Config",
         "excluded": {
-            "C4": "default 0 = disabled/off (enable via config, not training)",
+            "C4": "NN09 sets C4=0 (drops its shear pressure-covariance term); not read here",
             "tke_min": "numerics: solver/smoothing/tolerance/iteration parameter",
         },
         "params": {
-            "A1": {"units": "1", "bounds": (0.6, 2.4), "tunable_tier": 1, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN stability-function constant A1", "shape": None},
-            "A2": {"units": "1", "bounds": (0.3, 1.4), "tunable_tier": 1, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN stability-function constant A2", "shape": None},
-            "B1": {"units": "1", "bounds": (12.0, 48.0), "tunable_tier": 2, "transform": "sigmoid", "category": "tke_closure", "reference": "Nakanishi & Niino (2009) MYNN master-length / dissipation constant B1", "shape": None},
-            "B2": {"units": "1", "bounds": (7.5, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "tke_closure", "reference": "Nakanishi & Niino (2009) MYNN dissipation-length constant B2", "shape": None},
-            "C1": {"units": "1", "bounds": (0.05, 0.4), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN pressure-covariance constant C1", "shape": None},
-            "C2": {"units": "1", "bounds": (0.25, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN pressure-covariance constant C2", "shape": None},
-            "C3": {"units": "1", "bounds": (0.12, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN pressure-covariance constant C3", "shape": None},
-            "C5": {"units": "1", "bounds": (0.066, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN pressure-covariance constant C5", "shape": None},
-            "gamma1": {"units": "1", "bounds": (0.1, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN critical-flux-Ri numerator gamma1", "shape": None},
+            "A1": {"units": "1", "bounds": (0.6, 2.4), "tunable_tier": 1, "transform": "sigmoid", "category": "return_to_isotropy", "reference": "Nakanishi & Niino (2009) MYNN return-to-isotropy (Rotta) constant A1", "shape": None},
+            "A2": {"units": "1", "bounds": (0.3, 1.4), "tunable_tier": 1, "transform": "sigmoid", "category": "return_to_isotropy", "reference": "Nakanishi & Niino (2009) MYNN return-to-isotropy (Rotta) constant A2", "shape": None},
+            "B1": {"units": "1", "bounds": (12.0, 48.0), "tunable_tier": 2, "transform": "sigmoid", "category": "tke_closure", "reference": "Nakanishi & Niino (2009) MYNN TKE-dissipation closure constant B1 (eq. 12)", "shape": None},
+            "B2": {"units": "1", "bounds": (7.5, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "tke_closure", "reference": "Nakanishi & Niino (2009) MYNN scalar second-moment dissipation constant B2 (eqs. 13-15)", "shape": None},
+            "C1": {"units": "1", "bounds": (0.05, 0.4), "tunable_tier": 2, "transform": "sigmoid", "category": "pressure_covariance", "reference": "Nakanishi & Niino (2009) MYNN velocity pressure-strain constant C1 (eq. 16)", "shape": None},
+            "C2": {"units": "1", "bounds": (0.25, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "pressure_covariance", "reference": "Nakanishi & Niino (2009) MYNN velocity pressure-strain constant C2 (eq. 16)", "shape": None},
+            "C3": {"units": "1", "bounds": (0.12, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "pressure_covariance", "reference": "Nakanishi & Niino (2009) MYNN pressure-temperature-gradient covariance constant C3 (eq. 17)", "shape": None},
+            "C5": {"units": "1", "bounds": (0.066, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "pressure_covariance", "reference": "Nakanishi & Niino (2009) MYNN pressure-temperature-gradient covariance constant C5 (eq. 17)", "shape": None},
+            "gamma1": {"units": "1", "bounds": (0.1, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "critical_flux_richardson", "reference": "Nakanishi & Niino (2009) MYNN critical-flux-Ri numerator gamma1 (appendix A)", "shape": None},
         },
     },
     "SmagorinskyConfig": {
@@ -378,23 +378,39 @@ class TKEConfig(NamedTuple):
 class MYNN25Config(NamedTuple):
     """Configuration for the MYNN-2.5 turbulence scheme (Nakanishi & Niino 2009).
 
-    Default constants are taken from NN09 Table 1 / eq. 66 and match
-    jax_scm's MYNNParams so the oracle-driven SCM benchmarks (GABLS1,
-    Wangara, Ekman) can run with bit-equivalent closure coefficients.
+    Default constants are taken from NN09 eq. 66 (``gamma1`` from appendix A)
+    and match jax_scm's MYNNParams so the oracle-driven SCM benchmarks
+    (GABLS1, Wangara, Ekman) can run with bit-equivalent closure coefficients.
+
+    See the ``mynn25`` module's "Faithfulness to NN09" section and
+    ``tests/atmosphere/hydrostatic/unit/test_mynn25_faithful.py`` for the
+    FAITHFUL-vs-DEPARTURE classification: the level-2.5 SM/SH stability
+    functions are live (Km responds to N²), while the dry-θ_v buoyancy, the
+    1-2-1 vertical filter, and the K>=0 numerical clamp are documented as
+    departures/numerics.
 
     Fields
     ------
     A1, A2 : float
-        Stability-function coefficients (momentum, heat).
+        Return-to-isotropy (Rotta) pressure-covariance coefficients (NN09);
+        they set the level-2.5 stability functions downstream (A1 → momentum,
+        A2 → heat).
     B1 : float
-        Master length-scale coefficient.  Surface boundary value
-        ``qke_sfc = B1^(2/3) · u*²`` (MY82 eq. 54) flows from this.
+        TKE-dissipation closure constant (NN09 eq. 12:
+        ``ε = qke^(3/2) / (B1·L)``).  The surface boundary value
+        ``qke_sfc = B1^(2/3) · u*²`` (the MY82/MYNN surface
+        production-dissipation balance) also flows from this.
     B2 : float
-        Dissipation length-scale coefficient.
+        Scalar second-moment (variance) dissipation constant (NN09
+        eqs. 13-15) — the scalar-variance analogue of ``B1``.
     C1, C2, C3, C4, C5 : float
-        Pressure-covariance / return-to-isotropy coefficients.  ``C4`` is
-        the cross-correlation coefficient (unused at level 2.5; kept for
-        symmetry with the full NN09 closure).
+        Pressure-covariance closure coefficients: C1, C2, C4 in the velocity
+        pressure-strain parameterization (NN09 eq. 16) and C3, C5 in the
+        pressure-temperature-gradient covariance (eq. 17); the
+        return-to-isotropy role is carried by A1/A2, not these.  ``C4`` is a
+        pressure-strain coefficient that NN09 sets to 0 to drop its term
+        (this implementation likewise never reads ``C4``), so it is not
+        intrinsically absent from the closure.
     gamma1 : float
         Critical-flux-Richardson-number numerator coefficient
         (NN09 below eq. A4).
