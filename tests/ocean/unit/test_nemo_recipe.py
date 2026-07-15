@@ -250,6 +250,39 @@ def test_nemo_tke_prandtl_bit_reproduces_nemo_pdl():
     np.testing.assert_allclose(pr_lego, pr_nemo, rtol=0, atol=1e-12)
 
 
+def test_nemo_tke_deep_floor_is_constant_avtb_not_bryan_lewis():
+    """The NEMO recipe TKE floors the quiescent deep at the constant avtb
+    (kappaH_min=1.2e-5), NOT the Veros Bryan-Lewis abyssal depth profile.
+
+    NEMO GYRE runs ln_zdfcst=F with a CONSTANT background avtb; the legoESM
+    default enable_kappaH_profile=True would floor the deep K_H at the Bryan-Lewis
+    profile (~1e-4 at 3000 m, ~8x avtb), masking the independent-kappaH_min
+    flooring fix. This guards the abyssal fix at the SHIPPED config (Prandtl + BL
+    off), which the isolated tke test can't (it sets BL off by hand).
+    """
+    import numpy as np
+
+    from legoesm.ocean.physics.vertical_mixing.tke import compute_K_from_tke
+    from legoesm.ocean.fidelity.nemo_recipe import _nemo_tke_config
+
+    cfg = _nemo_tke_config()
+    assert cfg.enable_kappaH_profile is False
+    # Quiescent deep cell (raw K = c_k*l*sqrt(e) = 1e-5 << kappaM_min) at 3000 m,
+    # where Bryan-Lewis (if on) would floor K_H ~1e-4. Ri=0.86 -> Pr=3.87.
+    e = jnp.array([1.0e-6]); l_k = jnp.array([0.1])
+    N2 = jnp.array([0.86]); shear_sq = jnp.array([1.0])
+    z_int = jnp.array([-3000.0])
+    _K_M, K_H = compute_K_from_tke(
+        e, l_k, cfg, N2=N2, shear_sq=shear_sq, z_interface=z_int)
+    np.testing.assert_allclose(float(K_H[0]), 1.2e-5, rtol=1e-6)  # = avtb, not BL
+    # non-vacuity: the same cell WITH Bryan-Lewis on floors far higher (~1e-4),
+    # so BL-off is what makes the deep match NEMO's constant avtb.
+    _KM_bl, K_H_bl = compute_K_from_tke(
+        e, l_k, cfg._replace(enable_kappaH_profile=True),
+        N2=N2, shear_sq=shear_sq, z_interface=z_int)
+    assert float(K_H_bl[0]) > 5.0 * 1.2e-5
+
+
 def test_nemo_recipe_is_lazy_registered():
     import legoesm.ocean.fidelity as fidelity
 

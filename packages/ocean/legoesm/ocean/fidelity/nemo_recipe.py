@@ -220,6 +220,12 @@ def _nemo_tke_config() -> TKEConfig:
         # NEMO background Kz: rn_avm0=1.2e-4 (avmb), rn_avt0=1.2e-5 (avtb).
         kappaM_min=1.2e-4,
         kappaH_min=1.2e-5,
+        # NEMO GYRE (ln_zdfcst=F) uses a CONSTANT background avtb=1.2e-5, NOT the
+        # Veros Bryan-Lewis abyssal depth profile. With BL on (the legoESM
+        # default) the deep tracer floor would be ~3e-5..1.3e-4 (10x NEMO's
+        # background), masking the independent-kappaH_min flooring fix. Turn it
+        # off so the deep floor is NEMO's constant avtb.
+        enable_kappaH_profile=False,
     )
 
 

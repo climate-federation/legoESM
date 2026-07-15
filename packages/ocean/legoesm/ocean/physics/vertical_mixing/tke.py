@@ -920,8 +920,11 @@ def compute_K_from_tke(
       ``K_H = max(K_M, kappaH_min)`` — the MOMENTUM floor ``kappaM_min``
       leaks into the tracer floor.
     - ``prandtl_mode in {"constant", "richardson"}``: Veros's
-      ``K_H = max(kappaH_min, K_M / Pr)`` (see :func:`_prandtl_number`);
-      requires ``N2`` and ``shear_sq`` for the ``"richardson"`` Pr.
+      ``K_H = max(kappaH_min, K_M / Pr)`` where ``K_M`` here is the
+      ceilinged-but-UN-``kappaM_min``-floored viscosity, so the momentum floor
+      does NOT leak into the tracer floor (NEMO floors ``avt`` at ``avtb``
+      INDEPENDENTLY of ``avm`` at ``avmb``); requires ``N2`` and ``shear_sq``
+      for the ``"richardson"`` Pr.
 
     Amplitude convention (``cfg.kappa_convention``):
 
@@ -963,13 +966,23 @@ def compute_K_from_tke(
         # c_k*mxl*sqrttke) then max(kappaM_min, kappaM)). Only on the
         # opt-in Prandtl path so the default stays bit-identical.
         K_M = jnp.minimum(cfg.kappaM_max, K_M)
-        K_M = jnp.maximum(K_M, cfg.kappaM_min)
         if N2 is None or shear_sq is None:
             raise ValueError(
                 f"prandtl_mode={cfg.prandtl_mode!r} requires N2 and "
                 f"shear_sq for the Prandtl-number computation."
             )
         Pr = _prandtl_number(N2, shear_sq, K_M, cfg)
+        # Tracer floor is INDEPENDENT of the momentum floor (NEMO zdftke:
+        # avt = max(avtb, pdlr*zav), avm = max(avmb, zav), both from the raw K).
+        # Divide the ceilinged-but-UN-kappaM_min-floored K_M by Pr, then floor at
+        # kappaH_min — else the momentum floor kappaM_min leaks into the tracer
+        # floor (K_H -> kappaM_min/Pr > kappaH_min) in quiescent cells where the
+        # raw K < kappaM_min (the abyss). Only those cells change; active/interior
+        # cells (raw K >= kappaM_min) are unaffected, so the verified avt match
+        # (corr 0.9998) holds. NB: the quiescent deep K_H settles to kappaH_min
+        # ONLY when the Bryan-Lewis profile below is off (enable_kappaH_profile=
+        # False, as the NEMO recipe sets for NEMO's constant avtb); with BL on the
+        # BL depth floor becomes the binding deep floor instead.
         K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr)
         # Bryan-Lewis (1979) arctan depth floor on K_H (Veros
         # enable_kappaH_profile). Previously recorded-but-ignored; now wired
@@ -978,6 +991,9 @@ def compute_K_from_tke(
         # depths.
         if cfg.enable_kappaH_profile and z_interface is not None:
             K_H = jnp.maximum(K_H, _bryan_lewis_kappaH_floor(z_interface, cfg))
+        # Momentum floor, applied AFTER K_H so kappaM_min stays out of the tracer
+        # floor (NEMO avm = max(avmb, zav)).
+        K_M = jnp.maximum(K_M, cfg.kappaM_min)
     return K_M, K_H
 
 
