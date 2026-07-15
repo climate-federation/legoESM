@@ -259,12 +259,14 @@ def test_fortran_oracle_rebuild_matches_fixture(tmp_path, oracle):
 def test_rsin_override_sign_transfer_semantics():
     """Fortran SIGN(max(tiny,|s|), s) semantics incl BOTH signed zeros
     (gfortran default -fsign-zero; codex r2 P2-4)."""
+    from legoesm.grids.fv3_native_gridstruct import rsin_border_override
+
     tiny = 1.0e-8
     s = np.array([0.0, -0.0, 0.5, -0.5, 1e-12, -1e-12])
-    got = np.copysign(np.maximum(tiny, np.abs(s)), s)
-    want = np.array([tiny, -tiny, 0.5, -0.5, tiny, -tiny])
+    got = rsin_border_override(s)
+    want = 1.0 / np.array([tiny, -tiny, 0.5, -0.5, tiny, -tiny])
     assert np.array_equal(got, want)
-    assert np.signbit(got[1])
+    assert got[1] < 0 and np.isfinite(got).all()
 
 
 def test_area_c_halo_strips_match_neighbor_faces(inputs):
@@ -305,10 +307,11 @@ def test_area_c_halo_strips_match_neighbor_faces(inputs):
                 if ii % 2 == 0 or jj % 2 == 0:  # pragma: no cover
                     continue
                 bi, bj = (ii + 1) // 2, (jj + 1) // 2
-                if not (1 <= bi <= npx and 1 <= bj <= npx):
-                    continue
+                assert 1 <= bi <= npx and 1 <= bj <= npx, (fi, fj)
                 want = 1.0 / cert["area_c"][n_src - 1][bi - 1, bj - 1]
                 got = area_c[fi - lo, fj - lo]
                 assert abs(got - want) <= 1e-12 * abs(want), (fi, fj)
                 checked += 1
-    assert checked >= 4 * ng * npx - 8   # full strips minus vertex overlaps
+    # EVERY strip slot must map and match — the 8 outermost seam slots
+    # were exactly the ones a lenient count would have skipped (codex r3)
+    assert checked == 4 * ng * npx

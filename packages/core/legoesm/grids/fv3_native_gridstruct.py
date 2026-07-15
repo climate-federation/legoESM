@@ -87,6 +87,16 @@ class fort:
         self.a[(i - self.ilo, j - self.jlo, *k)] = v
 
 
+def rsin_border_override(s: np.ndarray) -> np.ndarray:
+    """1/SIGN(max(tiny,|s|), s) — the fv_grid_utils panel-border rsin rule.
+
+    np.copysign is Fortran SIGN exactly, including BOTH signed zeros
+    (gfortran default -fsign-zero makes SIGN(x, -0.0) negative; np.sign
+    and ``s >= 0`` selections each get one of the zeros wrong).
+    """
+    return 1.0 / np.copysign(np.maximum(TINY_NUMBER, np.abs(s)), s)
+
+
 def build_tile1_kinked_corner_lonlat(n: int, ng: int = 3,
                                      sentinel: float = BIG_NUMBER):
     """Tile-1 convenience wrapper over ``build_kinked_corner_lonlat``."""
@@ -434,18 +444,12 @@ def build_fv3_native_gridstruct(n: int, ng: int = 3, *, tile: int = 1,
     ghost = ~cell_ok
     cosa_s[ghost] = BIG_NUMBER
 
-    # rsin_u/v panel-border overrides: 1/SIGN(max(tiny,|s|), s).
-    # np.copysign is Fortran SIGN exactly, including BOTH signed zeros
-    # (gfortran default -fsign-zero makes SIGN(x, -0.0) negative — codex
-    # r2 P2-4; np.sign(0)=0 and s>=0 tests both got zeros wrong).
+    # rsin_u/v panel-border overrides (rsin_border_override: Fortran
+    # SIGN semantics incl BOTH signed zeros — codex r2 P2-4 / r3 P2-b)
     for irow in (i1, inpx):
-        s = sina_u[irow, :]
-        rsin_u[irow, :] = 1.0 / np.copysign(
-            np.maximum(TINY_NUMBER, np.abs(s)), s)
+        rsin_u[irow, :] = rsin_border_override(sina_u[irow, :])
     for jcol in (i1, inpx):
-        s = sina_v[:, jcol]
-        rsin_v[:, jcol] = 1.0 / np.copysign(
-            np.maximum(TINY_NUMBER, np.abs(s)), s)
+        rsin_v[:, jcol] = rsin_border_override(sina_v[:, jcol])
 
     # fill_ghost on sin/cos_sg (tiny/big), then v2 patches (sin AND cos;
     # note the nw x-strip source differs from v1: npx-i, not npx+i)
