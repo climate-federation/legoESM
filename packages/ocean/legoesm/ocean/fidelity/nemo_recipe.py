@@ -16,7 +16,10 @@ import numpy as np
 from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
-from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+from legoesm.ocean.physics.convection.config import (
+    EnhancedDiffusionConfig,
+    OceanConvectionConfig,
+)
 from legoesm.ocean.physics.lateral_mixing.config import (
     GMRediConfig,
     LateralMixingConfig,
@@ -245,14 +248,8 @@ def _nemo_physics_config(cfg: NEMOModelRecipeConfig) -> OceanPhysicsConfig:
         lateral_mixing=LateralMixingConfig(scheme="none"),
         surface_forcing=SurfaceForcingConfig(scheme="none"),
         bottom_drag=BottomDragConfig(scheme="none"),
-        # NEMO ln_zdfevd is a convective ADJUSTMENT (homogenise the unstable
-        # layer to neutral), NOT a fixed diffusivity. legoESM enhanced_diffusion
-        # (a K-diffusivity) can't match it: K_conv=100 mixes ~1200m/step
-        # (SST 20->14C collapse); K_conv=1 fixes the mixed layer at 2yr but the
-        # persistent Fickian mixing over-corrects by 5yr (circulation 1.6x NEMO,
-        # SST drifts to 16.5). ROOT CAUSE of the SST-cold / weak-circulation gap =
-        # legoESM under-mixes the (unstable) surface layer vs NEMO's ~75m well-mixed
-        # layer; the faithful fix is a convective-adjustment-to-neutral scheme, TODO.
+        # convection: default off on the shared card; build_nemo_gyre_recipe turns
+        # on the NEMO-faithful ln_zdfevd (see _nemo_gyre_evd_convection).
         convection=OceanConvectionConfig(scheme="none"),
         shortwave_penetration=(
             ShortwavePenetrationConfig(scheme="rgb_chl")
@@ -743,8 +740,22 @@ def build_nemo_gyre_recipe(
     # the model builds + steps unconditionally; all thermal forcing is the
     # applicator's.  mle off (nn_mle=0).
     model_config = nemo_lat_lon_model_config(cfg)
+    # NEMO ln_zdfevd (rn_evd=100, nn_evdm=1): SET avt=avm=100 at interfaces where
+    # MIN(rn2,rn2b)<=-1e-12 (HARD N^2<0 threshold; zdfevd.F90:52-80), then the
+    # implicit solve mixes locally. smooth_transition=False selects legoESM's hard
+    # jnp.where(N2<0, K_conv, K_bg) path == NEMO's operator exactly. (The DEFAULT
+    # sigmoid path applies large K to near-neutral STABLE interfaces (K~27 at
+    # N2=1e-6) -> over-mixes -> SST 20->14C collapse; that was the earlier
+    # "K_conv=100 collapses" artifact, NOT NEMO's behaviour.) Reproduces NEMO's
+    # warm well-mixed ~83m surface layer (warmest column [18.68]x8 vs NEMO
+    # [18.98]x7). GYRE-specific (kept off the shared card).
     physics_config = model_config.physics._replace(
-        shortwave_penetration=None, mle=None)
+        shortwave_penetration=None, mle=None,
+        convection=OceanConvectionConfig(
+            scheme="enhanced_diffusion",
+            enhanced_diffusion=EnhancedDiffusionConfig(
+                K_conv=100.0, nu_conv=100.0, K_bg=0.0, nu_bg=0.0,
+                smooth_transition=False)))
     # Coriolis COUPLED with the pressure gradient inside the RK3 momentum stages
     # (coriolis_scheme="explicit_ab2" → f×u enters du_dt, integrated by SSP-RK3),
     # NOT operator-split as a separate Matsuno step after RK3. The split incurs an
