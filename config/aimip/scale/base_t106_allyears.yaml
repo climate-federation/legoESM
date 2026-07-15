@@ -514,3 +514,14 @@ aimip_rollout_curriculum:
 - - 120
   - 1
 aimip_chunk_windows: 18
+# --- #985 throughput (both inert without their runtime precondition) ---
+# Prefetch: chunk k+1 loads on a host thread while chunk k trains (pure I/O
+# overlap, no training-dynamics change; LEGOESM_CHUNK_PREFETCH=0 kills it).
+aimip_chunk_prefetch: true
+# Data-parallel: shards each chunk's samples across MPI ranks (gradients
+# averaged via mpi4jax). ACTIVE ONLY under an mpiexec launch with nproc>1
+# (train_aimip_derecho.pbs auto-detects from the select line); single-process
+# runs take the serial path unchanged. NOTE: DP changes the effective batch
+# (1 -> nproc samples/update) — a DP run is a new training arm, not a
+# continuation of a serial trajectory.
+aimip_data_parallel: true

@@ -8,15 +8,25 @@
 #PBS -j oe
 #PBS -k eod
 # ===========================================================================
-# AIMIP AT SCALE on NCAR Derecho — single A100-80GB, T106 (~1.1 deg), ALL
-# training years 1979-2014 (576 IC/target pairs), one variant per job.
+# AIMIP AT SCALE on NCAR Derecho — T106 (~1.1 deg), ALL training years
+# 1979-2014 (576 IC/target pairs), one variant per job.
 #
-# AIMIP training is SINGLE-DEVICE by design (the spectral semi-implicit solver
-# all-gathers vertical levels and the SH transforms carry no collectives), so
-# "at scale" here = a bigger GPU (80 GB vs Ginsburg's 24-40 GB) running the
-# full-resolution, all-years, higher-capacity config — NOT multi-GPU sharding.
-# The 80 GB card is what makes T106 + RRTMGP + K=2 autoregressive rollout +
-# spatial-surface coefs fit.
+# Default = single A100-80GB (the model itself is single-device: the spectral
+# SI solver and SH transforms carry no collectives; the 80 GB card is what
+# makes T106 + RRTMGP + K=2 autoregressive rollout + spatial-surface coefs
+# fit).  DATA-PARALLEL (#985 ask 1, PR #1020) shards each chunk's SAMPLES
+# across MPI ranks (model replicated, gradients averaged via mpi4jax,
+# host-staged) — ~Nx wall-clock on N GPUs.  The launch below auto-detects the
+# rank count from PBS_NODEFILE: 1 rank -> plain python (byte-identical to the
+# old behavior), >1 -> mpiexec with per-rank GPU pinning.  DP submit (4 GPUs):
+#   qsub -l select=1:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB \
+#        -v VARIANT=sfno_physics,SELECT=1:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB \
+#        scripts/cluster/aimip_scale/train_aimip_derecho.pbs
+# SELECT must repeat the -l select string: the self-chaining qsub cannot read
+# this job's resource request, so it re-applies $SELECT on every chained link
+# (otherwise link 2 would silently fall back to the 1-GPU #PBS default).
+# The yaml flag aimip_data_parallel is TRUE in base_t106_allyears.yaml and is
+# inert in single-process runs (nproc==1 -> serial path).
 #
 # The run self-CHAINS: run_aimip.py writes a per-epoch checkpoint AND a
 # mid-epoch per-chunk checkpoint (chunk_latest.eqx: model + optimizer state +
@@ -73,9 +83,27 @@ if ls "$OUT"/*/epoch_*.eqx >/dev/null 2>&1 \
   RESUME_FLAG="--resume"
 fi
 
-echo "[aimip-scale] $(date) variant=$VARIANT link=$CHAIN suite=$SUITE resume=${RESUME_FLAG:-no}"
-"$PY" -u scripts/run/run_aimip.py --suite "$SUITE" $RESUME_FLAG
-RC=$?
+# Rank count from the PBS allocation (mpiprocs in the select line). 1 -> the
+# original single-GPU serial launch; >1 -> data-parallel MPI launch (#1020),
+# one rank per GPU, PALS_LOCAL_RANKID -> CUDA_VISIBLE_DEVICES pinning (the
+# train_wb.pbs convention). Gradient averaging is mpi4jax host-staged: GPU-aware
+# MPI stays OFF (MPI4JAX_USE_CUDA_MPI=0) — cross-node GPU-direct is not needed
+# and was broken on cray-mpich 8.x (#660).
+NRANKS=$(wc -l < "$PBS_NODEFILE")
+NNODES=$(sort -u "$PBS_NODEFILE" | wc -l)
+PPN=$((NRANKS / NNODES))
+echo "[aimip-scale] $(date) variant=$VARIANT link=$CHAIN suite=$SUITE resume=${RESUME_FLAG:-no} nranks=$NRANKS ppn=$PPN"
+if [ "$NRANKS" -gt 1 ]; then
+  export MPICH_GPU_SUPPORT_ENABLED=1
+  export MPI4JAX_USE_CUDA_MPI=0
+  mpiexec -n "$NRANKS" --ppn "$PPN" bash -c '
+    export CUDA_VISIBLE_DEVICES=${PALS_LOCAL_RANKID:-0}
+    exec "$@"' _ "$PY" -u scripts/run/run_aimip.py --suite "$SUITE" $RESUME_FLAG
+  RC=$?
+else
+  "$PY" -u scripts/run/run_aimip.py --suite "$SUITE" $RESUME_FLAG
+  RC=$?
+fi
 echo "[aimip-scale] run_aimip rc=$RC $(date)"
 
 # Chain until params.eqx (final) exists or CHAIN_MAX reached. run_aimip writes
@@ -84,7 +112,13 @@ echo "[aimip-scale] run_aimip rc=$RC $(date)"
 FINAL="$OUT/${VARIANT}/params.eqx"
 if [ "$RC" -eq 0 ] && [ ! -f "$FINAL" ] && [ "$CHAIN" -lt "$CHAIN_MAX" ]; then
   echo "[aimip-scale] not complete -> chaining link $((CHAIN+1))/$CHAIN_MAX"
-  qsub -v VARIANT="$VARIANT",CHAIN="$((CHAIN+1))",CHAIN_MAX="$CHAIN_MAX",RESUME=1 \
+  # SELECT (set on the first DP submit) re-applies the multi-GPU resource
+  # request on every chained link; without it the chained qsub falls back to
+  # the single-GPU #PBS default and a DP run silently degrades to 1 rank.
+  SELECT_ARGS=()
+  [ -n "${SELECT:-}" ] && SELECT_ARGS=(-l "select=${SELECT}")
+  qsub "${SELECT_ARGS[@]}" \
+    -v VARIANT="$VARIANT",CHAIN="$((CHAIN+1))",CHAIN_MAX="$CHAIN_MAX",RESUME=1,SELECT="${SELECT:-}",LEGOESM_REPO="${LEGOESM_REPO:-}" \
     "$PBS_O_WORKDIR/scripts/cluster/aimip_scale/train_aimip_derecho.pbs"
 elif [ -f "$FINAL" ]; then
   echo "[aimip-scale] DONE: $FINAL"
