@@ -3642,13 +3642,13 @@ def run_oracle_case(fixture_dir: str) -> dict:
     ua = npz["ua"]
     va = npz["va"]
 
-    # Accumulators not carried in the fixture start at zero (verified vs
-    # the oracle: CX/CY/XFLUX/YFLUX outputs are pure single-step
-    # accumulations from 0).  divg_d is the one exception: the oracle
-    # driver poison-inits it to -9e9 everywhere (its DELPC output, which
-    # is the REAL c_sw divergence (exporter DIVGD_IN); the unread halo is
-    # NaN->0.  Reproduce that exact input state so the run matches the
-    # oracle bit-for-bit and a2b_ord4's output is discriminated.
+    # Accumulators not carried in the fixture start at zero (CX/CY/XFLUX/
+    # YFLUX are pure single-step accumulations from 0).  divg_d in is the
+    # REAL c_sw divergence (exporter DIVGD_IN): compute B-nodes plus the
+    # immediate B-node halo filled by the 6-face CORNER scalar exchange;
+    # only the unread corner-diagonal region is 0.  Reproduce that input
+    # state so the run matches the oracle bit-for-bit and a2b is
+    # discriminated (the damping n-loop reads the exchanged halo).
     if "divg_d_in" in npz.files:
         divg_d = np.array(npz["divg_d_in"], dtype=np.float64, copy=True)
     else:  # legacy fixture without the real divergence
