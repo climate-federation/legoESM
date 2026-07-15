@@ -191,19 +191,171 @@ def _selftest(ncol=128, nsteps=240):
           f"(cell0={Mb[0]:.2e}, masked)")
 
 
+# ---------------------------------------------------------------------------
+# Real-data run (Derecho): spin-up restart + CRU-JRA forcing -> global memory map
+# ---------------------------------------------------------------------------
+def _forward_good_mask(state0, forcing_seq, doy_seq, config, lat, dt, land_params_fn):
+    """No-grad forward pass over the window -> good_mask (ncol,): cells whose GPP and
+    state stay FINITE throughout (this clean harness has NO revert guard, so a NaN
+    cell stays NaN; we exclude it from the summed loss so its NaN cannot poison the
+    map -- columns are independent, but the summed VALUE must also stay finite)."""
+    ncol = state0.theta_soil.shape[0]
+
+    def body(carry, xs):
+        st, ok = carry
+        Fi, doy_i = xs
+        new_st, gpp = _step_and_gpp(st, Fi, doy_i, config, lat, dt, land_params_fn)
+        ok = ok & jnp.isfinite(gpp) & jnp.isfinite(new_st.theta_soil).all(axis=-1)
+        return (new_st, ok), None
+
+    (_stf, ok), _ = jax.lax.scan(body, (state0, jnp.ones(ncol, bool)), (forcing_seq, doy_seq))
+    return ok
+
+
+def run_real(args) -> int:
+    """Global memory map from a spin-up restart + real CRU-JRA forcing.  Reuses the
+    LMIP driver's grid / surfdata / forcing / restart setup so the physics is
+    identical to the production run."""
+    jax.config.update("jax_enable_x64", True)
+    import importlib.util
+    from legoesm.land.config import resolve_land_config
+    from legoesm.land.soil_grid import SoilGridConfig
+    from legoesm.land.soil_thermal import SoilThermalConfig
+    from legoesm.land.boundary_data import (
+        init_land_surface_data, make_step_land_params_updater)
+    from legoesm.land.forcing import stage_forcing
+    from legoesm.land.restart import load_land_restart, merge_land_restart_into_template
+
+    # reuse the driver's grid helpers (local to run_lmip_biophys) by path import
+    drv_path = Path(__file__).resolve().parents[1] / "run" / "run_lmip_biophys.py"
+    spec = importlib.util.spec_from_file_location("_run_lmip_biophys", drv_path)
+    drv = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(drv)
+
+    grid = drv.make_grid(args.grid_type, args.resolution)
+    lat_rad, lon_rad = drv.grid_latlon_rad(grid)
+    ncol = int(lat_rad.shape[0])
+    dt = float(args.dt)
+    year = int(args.year)
+    DAY = 86400.0
+
+    # production LMIP physics (single snow scheme; two-leaf canopy + MOST + freeze/thaw)
+    base_cfg = MultiLayerLandConfig(
+        surface_scheme=TwoLeafCanopyConfig(max_iters=50, tol=1e-2),
+        soil_grid=SoilGridConfig(), bulk_scheme="most", snow_scheme="single",
+        snow_albedo_feedback=True, thermal=SoilThermalConfig(enable_freeze_thaw=True))
+    base_cfg = resolve_land_config("multilayer", base_cfg)
+    config, _p, gsd = init_land_surface_data(args.surfdata, grid, base_cfg, 0.0)
+
+    loaded, meta = load_land_restart(
+        args.restart, expected_land_mode="multilayer", expected_ncol=ncol,
+        expected_n_layers=config.soil_grid.n_layers)
+    template = init_multilayer_land_state(ncol, config, T_init=288.0)
+    state_jan1 = merge_land_restart_into_template(loaded, template)
+    print(f"restart: {args.restart} (t_end_s={meta['t_end_s']:.0f})")
+
+    update_lp = make_step_land_params_updater(gsd, config.surface_scheme)
+    lp_fn = lambda theta_top, doy: update_lp(theta_top, doy, float(year))[0]
+
+    # step times [s since Jan 1]: spin Jan1->perturb_doy (no grad); window perturb_doy->end
+    n_spin = int(args.perturb_doy * DAY / dt)
+    n_win = int((args.window_end_doy - args.perturb_doy) * DAY / dt)
+    spin_t = dt * np.arange(n_spin)
+    win_t = args.perturb_doy * DAY + dt * np.arange(n_win)
+    fk = dict(year=year, data_dir=args.forcing_dir, prefix=args.prefix,
+              suffix=args.suffix, k_neighbors=args.k_neighbors)
+    print(f"grid={args.grid_type} R{args.resolution} | {ncol} cols | year {year} | "
+          f"spin Jan1->doy{args.perturb_doy} ({n_spin} steps) | "
+          f"window doy{args.perturb_doy}->{args.window_end_doy} ({n_win} steps) | "
+          f"late-GPP from doy{args.late_doy}")
+
+    F_spin = stage_forcing(lat_rad, lon_rad, spin_t, **fk)
+    doy_spin = jnp.asarray(spin_t / DAY)
+    state_p = spin_forward(state_jan1, F_spin, doy_spin, config,
+                           lat=lat_rad, dt=dt, land_params_fn=lp_fn)
+    del F_spin
+    print("spin complete -> perturbation-point state")
+
+    F_win = stage_forcing(lat_rad, lon_rad, win_t, **fk)
+    doy_win = jnp.asarray(win_t / DAY)
+    late_flags = jnp.asarray((win_t / DAY) >= args.late_doy)
+
+    good = _forward_good_mask(state_p, F_win, doy_win, config, lat_rad, dt, lp_fn)
+    print(f"good cells (finite over window): {int(np.asarray(good).sum())}/{ncol}")
+
+    M, late_gpp = water_memory_map(
+        state_p, F_win, doy_win, late_flags, config, lat=lat_rad, dt=dt,
+        good_mask=good, land_params_fn=lp_fn, use_checkpoint=True)
+    M = np.where(np.asarray(good), np.asarray(M), np.nan)          # mask bad cells
+    late_gpp = np.where(np.asarray(good), np.asarray(late_gpp), np.nan)
+    print(f"memory map: finite cells={int(np.isfinite(M).sum())} | "
+          f"range [{np.nanmin(M):.3e}, {np.nanmax(M):.3e}] gC/m2 per (m3/m3)")
+    _write_map(args.out, M, late_gpp, np.asarray(good), lat_rad, lon_rad,
+               args.resolution, year, args)
+    return 0
+
+
+def _write_map(out, M, late_gpp, good, lat_rad, lon_rad, resolution, year, args):
+    import xarray as xr
+    nlat, nlon = resolution, 2 * resolution
+    lat = np.rad2deg(np.asarray(lat_rad)).reshape(nlat, nlon)[:, 0]
+    lon = np.rad2deg(np.asarray(lon_rad)).reshape(nlat, nlon)[0, :]
+    ds = xr.Dataset(
+        {"dGPP_dtheta": (("lat", "lon"), M.reshape(nlat, nlon),
+                         {"long_name": "d(late-season GPP) / d(spring soil water)",
+                          "units": "gC m-2 per (m3 m-3)"}),
+         "late_gpp": (("lat", "lon"), late_gpp.reshape(nlat, nlon),
+                      {"long_name": "late-window GPP (unperturbed)", "units": "gC m-2"}),
+         "good_cell": (("lat", "lon"), good.reshape(nlat, nlon).astype("i1"),
+                       {"long_name": "1 = finite over window (else masked)"})},
+        coords={"lat": ("lat", lat, {"units": "degrees_north"}),
+                "lon": ("lon", lon, {"units": "degrees_east"})},
+        attrs={"title": "water-memory gradient (differentiable land demo)",
+               "Conventions": "CF-1.8", "year": year, "restart": args.restart,
+               "perturb_doy": args.perturb_doy, "window_end_doy": args.window_end_doy,
+               "late_doy": args.late_doy, "note": "uncalibrated; pattern is the demo"})
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    ds.to_netcdf(out)
+    print(f"wrote {out}")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--selftest", action="store_true",
                     help="run the synthetic feasibility checks (A/B/C) locally")
     ap.add_argument("--ncol", type=int, default=128)
-    ap.add_argument("--nsteps", type=int, default=96)
+    ap.add_argument("--nsteps", type=int, default=240)
+    # --- real-data run (Derecho) ---
+    ap.add_argument("--run", action="store_true", help="real-data global memory map")
+    ap.add_argument("--restart", help="spin-up restart (.npz, Jan-1 state)")
+    ap.add_argument("--surfdata", help="surfdata NetCDF")
+    ap.add_argument("--forcing-dir", dest="forcing_dir", help="CRU-JRA data dir")
+    ap.add_argument("--prefix",
+                    default="clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5")
+    ap.add_argument("--suffix", default="")
+    ap.add_argument("--year", type=int, default=1985)
+    ap.add_argument("--grid-type", dest="grid_type", default="latlon")
+    ap.add_argument("--resolution", type=int, default=45)          # 45 = 4deg
+    ap.add_argument("--k-neighbors", dest="k_neighbors", type=int, default=4)
+    ap.add_argument("--dt", type=float, default=3600.0)
+    ap.add_argument("--perturb-doy", dest="perturb_doy", type=float, default=120.0)   # May 1
+    ap.add_argument("--window-end-doy", dest="window_end_doy", type=float, default=273.0)  # Sep 30
+    ap.add_argument("--late-doy", dest="late_doy", type=float, default=181.0)          # Jul 1
+    ap.add_argument("--out", default="results/water_memory/memory_map.nc")
     args = ap.parse_args(argv)
+
     if args.selftest:
         jax.config.update("jax_enable_x64", True)
         _selftest(args.ncol, args.nsteps)
         return 0
-    ap.error("real-data --run path is wired on Derecho (needs a spin-up restart + "
-             "CRU-JRA forcing); use --selftest locally. See the module docstring.")
+    if args.run:
+        missing = [f"--{k}" for k in ("restart", "surfdata", "forcing_dir")
+                   if not getattr(args, k.replace("-", "_"), None)]
+        if missing:
+            ap.error(f"--run needs {', '.join(missing)}")
+        return run_real(args)
+    ap.error("use --selftest (local) or --run --restart ... --surfdata ... "
+             "--forcing-dir ... (Derecho). See the module docstring.")
     return 2
 
 
