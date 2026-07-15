@@ -283,8 +283,16 @@ contains
       do i = bd%is, bd%ie
         write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'HEAT', i, j, heat_source(i, j)
         write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'DISS', i, j, diss_est(i, j)
-        ! delp/pt ARE updated on the production (inline_q=F) else arm
-        ! (sw_core.F90:1050-1065), over the compute cells is..ie, js..je
+      end do
+    end do
+    ! delp/pt (INOUT): the production else arm (sw_core.F90:1050-1065)
+    ! updates the compute rectangle is..ie/js..je, AND the pt/delp
+    ! fv_tp_2d calls (tp_core copy_corners, both directions) deterministically
+    ! rewrite the four ng x ng cube-corner ghost blocks.  Dump the FULL data
+    ! domain so both the physical update and the corner ghosts are certified;
+    ! the remaining slots hold the (identical) input value.
+    do j = bd%jsd, bd%jed
+      do i = bd%isd, bd%ied
         write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'DELPO', i, j, delp(i, j)
         write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'PTO', i, j, pt(i, j)
       end do
