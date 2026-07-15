@@ -92,15 +92,26 @@ fi
 NRANKS=$(wc -l < "$PBS_NODEFILE")
 NNODES=$(sort -u "$PBS_NODEFILE" | wc -l)
 PPN=$((NRANKS / NNODES))
-echo "[aimip-scale] $(date) variant=$VARIANT link=$CHAIN suite=$SUITE resume=${RESUME_FLAG:-no} nranks=$NRANKS ppn=$PPN"
+
+# LINK BUDGET: stop training OURSELVES before PBS kills the whole script.
+# The chain qsub below can only run if this script is still alive — a PBS
+# walltime kill terminates script + python together, so the old layout NEVER
+# chained on a walltime-bound link (#942 zero-progress loops were restarted by
+# hand). Budget = walltime minus a 45 min margin (resubmit + I/O + the SIGKILL
+# grace). timeout rc: 124 = budget hit (TERM), 137 = needed the -k SIGKILL —
+# both mean "out of time, checkpoint is on disk (per-chunk), CHAIN".
+LINK_BUDGET_S="${LINK_BUDGET_S:-40500}"   # 11h15m for the 12h queue cap
+echo "[aimip-scale] $(date) variant=$VARIANT link=$CHAIN suite=$SUITE resume=${RESUME_FLAG:-no} nranks=$NRANKS ppn=$PPN budget=${LINK_BUDGET_S}s"
 if [ "$NRANKS" -gt 1 ]; then
   export MPICH_GPU_SUPPORT_ENABLED=1
   export MPI4JAX_USE_CUDA_MPI=0
+  timeout -k 120 "$LINK_BUDGET_S" \
   mpiexec -n "$NRANKS" --ppn "$PPN" bash -c '
     export CUDA_VISIBLE_DEVICES=${PALS_LOCAL_RANKID:-0}
     exec "$@"' _ "$PY" -u scripts/run/run_aimip.py --suite "$SUITE" $RESUME_FLAG
   RC=$?
 else
+  timeout -k 120 "$LINK_BUDGET_S" \
   "$PY" -u scripts/run/run_aimip.py --suite "$SUITE" $RESUME_FLAG
   RC=$?
 fi
@@ -110,7 +121,13 @@ echo "[aimip-scale] run_aimip rc=$RC $(date)"
 # results/aimip_scale_t106/<variant>/<variant>/params.eqx only after the last
 # epoch; while it is absent and the last run exited cleanly, resubmit.
 FINAL="$OUT/${VARIANT}/params.eqx"
-if [ "$RC" -eq 0 ] && [ ! -f "$FINAL" ] && [ "$CHAIN" -lt "$CHAIN_MAX" ]; then
+# Chain on: clean-but-unfinished exit (rc=0, no FINAL) OR a link-budget stop
+# (rc 124/137 from timeout — the NORMAL way a mid-curriculum link ends).
+CHAINABLE=0
+if [ ! -f "$FINAL" ] && [ "$CHAIN" -lt "$CHAIN_MAX" ]; then
+  case "$RC" in 0|124|137) CHAINABLE=1 ;; esac
+fi
+if [ "$CHAINABLE" = "1" ]; then
   echo "[aimip-scale] not complete -> chaining link $((CHAIN+1))/$CHAIN_MAX"
   # SELECT (set on the first DP submit) re-applies the multi-GPU resource
   # request on every chained link; without it the chained qsub falls back to
