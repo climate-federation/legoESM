@@ -65,15 +65,17 @@ def main() -> None:
     args = ap.parse_args()
 
     from legoesm.core.fv3_native_sw_core import Bounds, c_sw
-    from legoesm.grids.fv3_native_gridstruct import exchange_cgrid_vector_halos
+    from legoesm.grids.fv3_native_gridstruct import (
+        exchange_bgrid_scalar_halos,
+        exchange_cgrid_vector_halos,
+    )
 
     bd = Bounds.single_tile(args.res, args.ng)
 
-    # run the certified python c_sw on ALL SIX faces: dyn_core
-    # mpp-exchanges uc/vc (CGRID_NE vector) between c_sw/p_grad_c and
-    # d_sw, so the deep uc/vc halos carry the NEIGHBOUR faces' c_sw
-    # results mapped through the vector-exchange semantics.
-    uc6, vc6 = [], []
+    # run the certified python c_sw on ALL SIX faces: dyn_core exchanges
+    # uc/vc (CGRID_NE vector) AND divgd (CORNER scalar) between c_sw and
+    # d_sw, so the deep halos carry the NEIGHBOUR faces' c_sw results.
+    uc6, vc6, divg6 = [], [], []
     gs = st = None
     for t in range(1, 7):
         gs_t = build_fv3_native_gridstruct(args.res, args.ng, tile=t,
@@ -92,10 +94,16 @@ def main() -> None:
             csw_t[key] = a
         uc6.append(csw_t["uc"])
         vc6.append(csw_t["vc"])
+        divg6.append(np.asarray(csw_t["divg_d"], dtype=np.float64).copy())
         if t == 1:
             gs, st, csw = gs_t, st_t, csw_t
 
     exchange_cgrid_vector_halos(uc6, vc6, 1, args.res, args.ng)
+    # divg_d halo: the CORNER scalar exchange fills tile-1's B-node halo
+    # from the neighbour faces (dyn_core.F90:451/577).  d_sw (nord=1) reads
+    # divg_d(0,npx+1, 1:npx) and (1:npx, 0,npy+1) in the divergence-damping
+    # n-loop, so a zeroed halo is materially wrong (codex p4b r2).
+    exchange_bgrid_scalar_halos(divg6, 1, args.res, args.ng)
 
     state = dict(st)
     state["w"] = np.zeros_like(st["delp"])
@@ -103,14 +111,9 @@ def main() -> None:
     state["vc"] = vc6[0]
     state["ua"] = csw["ua"]
     state["va"] = csw["va"]
-    # d_sw reads its INOUT divg_d only on the compute B-nodes (the halo
-    # copy_corners in the n-loop is nt!=0 guarded, false at nord=1), where
-    # it copies divg_d -> delpc and feeds the Smagorinsky
-    # sqrt(delpc**2 + a2b_ord4(vort)**2).  Feeding the REAL c_sw divg_d
-    # (dyn_core corner-exchanges it before d_sw) makes a2b_ord4's output
-    # DISCRIMINATED — a -9e9 sentinel there would swamp the a2b term and
-    # leave it dead (codex p4b r1 P1-2).  The unread halo is left NaN.
-    divg_in = np.asarray(csw["divg_d"], dtype=np.float64).copy()
+    # real c_sw divergence (compute + exchanged halo); the remaining
+    # corner-diagonal region (unread by d_sw at nord=1) stays NaN->0.
+    divg_in = divg6[0].copy()
     divg_in[~np.isfinite(divg_in)] = 0.0
     state["divg_d_in"] = divg_in
 

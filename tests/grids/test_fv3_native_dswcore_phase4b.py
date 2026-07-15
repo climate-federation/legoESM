@@ -41,8 +41,8 @@ _CFG = dict(hord_tr=8, hord_mt=6, hord_vt=6, hord_tm=6, hord_dp=6,
 # write range; ``heat_source``/``diss_est`` verify the production zeroing;
 # ``divg_d`` in is the REAL c_sw divergence (feeds the Smagorinsky
 # sqrt(delpc**2 + a2b**2)), so a2b_ord4's output is discriminated.
-_FIELDS = ["delpc", "u", "vc", "v", "uc", "ua", "va", "divg_d",
-           "crx_adv", "xfx_adv", "cx", "cry_adv", "yfx_adv", "cy",
+_FIELDS = ["delp", "pt", "delpc", "u", "vc", "v", "uc", "ua", "va",
+           "divg_d", "crx_adv", "xfx_adv", "cx", "cry_adv", "yfx_adv", "cy",
            "xflux", "yflux", "heat_source", "diss_est"]
 
 

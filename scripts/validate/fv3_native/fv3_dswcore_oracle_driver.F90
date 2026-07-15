@@ -14,7 +14,8 @@
 ! into the PG update).  Post-d_sw u/v magnitudes ~ u*dx (1e7-scale) are
 ! CORRECT, not blown.
 !
-! Configuration (production-representative, a2b/dissipation paths off):
+! Configuration (production-representative; a2b divergence-damping ON
+! via dddmp=0.2/nord=1, dissipation-estimate heating OFF):
 !   hord_mt=hord_vt=hord_tm=hord_dp=6, hord_tr=8, nord=1, nord_v=1,
 !   dddmp=0.2, d2_bg=0., d4_bg=0.12, damp_v=0.2, d_con=0., zvir=0.,
 !   inline_q=F, nq=1 (dummy tracer, untouched), km=k=1, kgb=0.,
@@ -282,6 +283,10 @@ contains
       do i = bd%is, bd%ie
         write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'HEAT', i, j, heat_source(i, j)
         write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'DISS', i, j, diss_est(i, j)
+        ! delp/pt ARE updated on the production (inline_q=F) else arm
+        ! (sw_core.F90:1050-1065), over the compute cells is..ie, js..je
+        write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'DELPO', i, j, delp(i, j)
+        write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'PTO', i, j, pt(i, j)
       end do
     end do
     do j = jsd, jed + 1

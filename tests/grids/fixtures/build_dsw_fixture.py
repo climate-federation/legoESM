@@ -40,6 +40,8 @@ def build(txt_path: str, npz_path: str, res: int = 12, ng: int = 3) -> None:
         "YFLUX": ("yflux", (res, res + 1), 1, 1),
         "HEAT": ("heat_source", (res, res), 1, 1),
         "DISS": ("diss_est", (res, res), 1, 1),
+        "DELPO": ("delp", (m_a, m_a), lo, lo),
+        "PTO": ("pt", (m_a, m_a), lo, lo),
     }
     out = {pk: np.full(sh, np.nan) for (pk, sh, _, _) in spec.values()}
     origin = {nm: (sp[0], sp[2], sp[3]) for nm, sp in spec.items()}

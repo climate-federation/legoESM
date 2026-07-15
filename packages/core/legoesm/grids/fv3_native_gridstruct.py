@@ -672,6 +672,41 @@ def build_fv3_native_gridstruct(n: int, ng: int = 3, *, tile: int = 1,
     }
 
 
+def exchange_bgrid_scalar_halos(field6: list, tile: int, n: int, ng: int):
+    """mpp_update_domains(field, position=CORNER) for one tile, B-grid scalar.
+
+    Fills the side-strip halos of ``field6[tile-1]`` (numpy, shape
+    (n+2ng+1, n+2ng+1), Fortran B-node index ``1-ng..n+1+ng``) from the six
+    faces' stored B-node arrays.  A CORNER scalar exchange is a plain index
+    copy of the neighbour's value at the shared B node (no component
+    rotation) — the exact map is the certified phase-3 neighbour index on
+    the odd-odd supergrid.  dyn_core starts this exchange on ``divgd`` right
+    after c_sw and completes it before d_sw (dyn_core.F90:451/577); d_sw
+    (nord=1) reads the immediate B-node halo in the divergence-damping
+    n-loop.  Corner-diagonal regions are left untouched.  Mutates in place.
+    """
+    sg_npx = 2 * n + 1
+    npx = n + 1
+    lo = 1 - ng
+    fld = field6[tile - 1]
+    nw, ne, ns, nn = neighbor_tiles(tile)
+    strips = (
+        (nw, range(1 - ng, 0 + 1), range(1, npx + 1)),
+        (ne, range(npx + 1, npx + ng + 1), range(1, npx + 1)),
+        (ns, range(1, npx + 1), range(1 - ng, 0 + 1)),
+        (nn, range(1, npx + 1), range(npx + 1, npx + ng + 1)),
+    )
+    for n_src, fi_range, fj_range in strips:
+        src = field6[n_src - 1]
+        for fi in fi_range:
+            for fj in fj_range:
+                si, sj = 2 * fi - 1, 2 * fj - 1     # B node -> supergrid
+                ii, jj = neighbor_index(si, sj, tile, n_src, sg_npx, sg_npx)
+                bi, bj = (ii + 1) // 2, (jj + 1) // 2
+                if 1 <= bi <= npx and 1 <= bj <= npx:
+                    fld[fi - lo, fj - lo] = src[bi - lo, bj - lo]
+
+
 def exchange_cgrid_vector_halos(uc6: list, vc6: list, tile: int,
                                 n: int, ng: int):
     """mpp_update_domains(uc, vc, gridtype=CGRID_NE) for one tile.
