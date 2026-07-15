@@ -498,6 +498,11 @@ _NEMO_GYRE_EMP_S: float = 0.7                # zemp_S intensity of COS in the So
 _NEMO_GYRE_EMP_N: float = 0.8                # zemp_N intensity of COS in the North
 _NEMO_GYRE_EMP_SAIS: float = 0.1             # zemp_sais seasonal amplitude
 _NEMO_GYRE_EMP_CONV: float = 3.16e-5         # zconv: 1 m/yr => 3.16e-5 mm/s
+# usrdef_sbc double-gyre WIND STRESS (:161-176): ztaun=ztau-ztau_sais*cos_sais1,
+# utau=-ztaun*sin(pi*(phi-15)/14), vtau=+ztaun*sin(...). ztau=0.105/sqrt2 (0.105
+# mean, /sqrt2 = 45-deg projection). Applied as top-layer momentum du/dt=tau/(rho0*dz0).
+_NEMO_GYRE_WIND_TAU0: float = 0.105          # mean wind intensity [Pa]
+_NEMO_GYRE_WIND_SAIS: float = 0.015          # seasonal amplitude [Pa]
 
 
 def _nemo_gyre_vertical_ladder() -> tuple[np.ndarray, np.ndarray]:
@@ -641,6 +646,23 @@ def nemo_gyre_emp(lat_deg, t_seconds: float = 0.0):
              * jnp.sin(jnp.pi / 2.0 * (lat - 37.2) / (46.8 - 37.2))
              * (1.0 - _NEMO_GYRE_EMP_SAIS / _NEMO_GYRE_EMP_N * zcos_sais1))
     return jnp.where((lat >= 14.845) & (lat <= 37.2), south, north)
+
+
+def nemo_gyre_wind(lat_deg, t_seconds: float = 0.0):
+    """NEMO GYRE double-gyre wind stress ``(utau, vtau)`` [Pa] (usrdef_sbc:161-176).
+
+    ``ztaun = 0.105/sqrt2 - 0.015*cos_sais1`` (seasonal); the zonal/meridional
+    components are the 45-deg projection ``utau=-ztaun*sin(pi*(phi-15)/14)``,
+    ``vtau=+ztaun*sin(...)``.  Evaluate at u-point latitudes for utau and at
+    v-point latitudes for vtau.
+    """
+    import jax.numpy as jnp
+
+    lat = jnp.asarray(lat_deg)
+    zcos_sais1, _ = nemo_gyre_seasonal_cosines(t_seconds)
+    ztaun = _NEMO_GYRE_WIND_TAU0 / jnp.sqrt(2.0) - _NEMO_GYRE_WIND_SAIS * zcos_sais1
+    s = jnp.sin(jnp.pi * (lat - 15.0) / (29.0 - 15.0))
+    return -ztaun * s, ztaun * s
 
 
 # The GYRE-configured NEMO card: ENE vorticity + c2 KE (ln_dynvor_ene,
@@ -872,9 +894,34 @@ def apply_nemo_gyre_surface_forcing(state, z_coord, dt, *, t_seconds=0.0):
     mask3 = cell_mask[..., None]
     new_T = state.T.data + dt * (out.dT_dt + dT_dt_sw) * mask3
     new_S = state.S.data + dt * dS_dt * mask3
+
+    # NEMO usrdef_sbc double-gyre WIND STRESS as a top-layer momentum forcing:
+    # du/dt = tau / (rho0 * dz_top) (matches NEMO dynzdf surface-stress injection
+    # u(1) += rDt*utau/(e3u1*rho0)). utau at u-point (T) latitudes; vtau at v-face
+    # latitudes (T-lat midpoints, extrapolated at the two poles).
+    rho0 = NEMO_CONSTANTS_CONFIG.rho_0
+    dlat = lat_t[1] - lat_t[0]
+    lat_v = jnp.concatenate([lat_t[:1] - dlat / 2.0,
+                             0.5 * (lat_t[:-1] + lat_t[1:]),
+                             lat_t[-1:] + dlat / 2.0])
+    utau, _ = nemo_gyre_wind(lat_t, t_seconds)
+    _, vtau = nemo_gyre_wind(lat_v, t_seconds)
+    du = (dt * utau / (rho0 * dz_0)).astype(state.u.data.dtype)
+    dv = (dt * vtau / (rho0 * dz_0)).astype(state.v.data.dtype)
+    um2 = state.u_mask.data
+    vm2 = state.v_mask.data
+    if um2.ndim == 3:
+        um2 = um2[..., 0]
+    if vm2.ndim == 3:
+        vm2 = vm2[..., 0]
+    new_u = state.u.data.at[:, :, 0].add(du[:, None] * um2)
+    new_v = state.v.data.at[:, :, 0].add(dv[:, None] * vm2)
+
     return state._replace(
         T=Field(data=new_T, name=state.T.name, dims=state.T.dims, units=state.T.units),
         S=Field(data=new_S, name=state.S.name, dims=state.S.dims, units=state.S.units),
+        u=state.u.replace(data=new_u),
+        v=state.v.replace(data=new_v),
     )
 
 
