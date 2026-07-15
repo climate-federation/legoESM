@@ -1564,7 +1564,10 @@ def test_config_yaml_round_trips_authoritative_values():
     assert args.grid_type == "cubed_sphere"
     cfg = build_config_from_args(args)
     assert cfg.convection == "bechtold"   # mass-flux, water-conserving (#771)
-    assert cfg.gravity_wave_drag == "mcfarlane"
+    # oro (McFarlane) + non-oro (Hines) composite, directive 2026-07-15:
+    # +hines pushed the latlon24 topo-wave blowup day 100->179 and is
+    # metric-neutral on cube (matched d31-60 A/B vs mcfarlane-only).
+    assert cfg.gravity_wave_drag == "mcfarlane+hines"
     assert cfg.microphysics == "morrison"
     assert cfg.cloud_scheme == "sundqvist"
     assert cfg.radiation == "rrtmg"          # rrtmgp builder alias
@@ -2114,27 +2117,24 @@ def test_latlon24_production_variant_pins_polar_filter():
     assert args.dt == 300.0
     assert args.grid_type == "latlon" and args.discretization == "latlon_cgrid"
     assert args.resolution == 24 and args.nlev == 20
-    # Physics inherited from the production include (one source of truth),
-    # except convection: this lane pins `sbm` (#869) because bechtold
-    # re-develops a polar-night temperature runaway that blows the run at day
-    # ~47 regardless of every numerics lever, while sbm is stable (95-day soak)
-    # and lifts hfls 40->70 (#847).  The cube lane keeps bechtold.
+    # Physics inherited from the production include (one source of truth):
+    # bechtold convection + the mcfarlane+hines GWD composite + cpe 0.8
+    # (user directive 2026-07-15, reversing the #869 sbm pin — the bechtold
+    # polar-night day-47 runaway is cured by parcel_theta_cap + the CAPE
+    # sink; +hines pushed the lane's topo-wave blowup day 100->179).
     # Top sponge (2026-07-14): the EDDY-ONLY DYCORE sponge, not the driver
     # damp-to-rest sponge — damp-to-rest exerts a Coriolis torque on the
     # damped zonal-mean flow -> poleward mass drift -> p_s 1134 hPa deaths;
     # the eddy sponge (dycore default sponge_eddy_only=True) cures the jet
     # runaway (55 vs 208 m/s) with no mass drift.  A silent flip of any of
-    # these three re-opens a validated failure mode.
+    # these re-opens a validated failure mode.
     assert args.sponge_enabled is False
     assert args.sponge_coeff == pytest.approx(1.157e-4)
     assert args.sponge_width_m == pytest.approx(17000.0)
     cfg = build_config_from_args(args)
-    assert cfg.convection == "sbm" and cfg.gravity_wave_drag == "mcfarlane"
-    # UNSET (#929 None sentinel; an explicit 0.0 now means "force legacy
-    # no-split", not "unset"): the latlon24 YAML clears the inherited bechtold
-    # knob to null, and sbm ignores it (sbm_precip_efficiency is its own knob)
-    # — see the convective_precip_efficiency note in amip_production_latlon24.yaml.
-    assert cfg.convective_precip_efficiency is None
+    assert cfg.convection == "bechtold"
+    assert cfg.gravity_wave_drag == "mcfarlane+hines"
+    assert cfg.convective_precip_efficiency == pytest.approx(0.8)
 
 
 def test_enable_tiled_dycore_flag_flows_to_config():

@@ -39,20 +39,14 @@ sponge_enabled: false     # driver damp-to-rest sponge OFF (mass-drift hazard)
 sponge_coeff: 1.157e-4    # dycore eddy-only sponge: 10/day at the lid
 sponge_width_m: 17000.0   # sponge base ~17 km below the lid
 
-# Convection: override the inherited `bechtold` with `sbm` on THIS lane (#869).
-# A controlled single-variable bisect from the day-45 restart state (conv carry
-# stripped) showed bechtold re-develops a polar-night (mid-Feb, ~71N/lev-1)
-# temperature runaway that blows the run at day ~47 REGARDLESS of every numerics
-# lever (polar filter on/off, GWD off/hines-swap, fp32/fp64, hyperdiff x2,
-# sponge x2, dt/2, stale-carry) — while sbm from the SAME state completes to day
-# 60 and a 95-day soak is stable.  sbm also lifts hfls from ~40 to ~70 W/m2
-# (#847).  The cube C12 lane (amip_production.yaml) keeps bechtold; the bechtold
-# polar-night blowup is tracked as a separate convection-scheme bug.
-convection: sbm
-# The base pins convective_precip_efficiency: 0.5 for bechtold; sbm has its own
-# rain-split (sbm_precip_efficiency) and rejects the bechtold/tiedtke knob, so
-# clear it here.  null = UNSET -> each scheme uses its own default (the #929
-# sentinel: an explicit 0.0 would now mean "force legacy no-split", NOT "unset");
-# sbm ignores the bechtold/tiedtke knob, so null just avoids the
-# "requires --convection tiedtke/bechtold" guard without pinning an explicit 0.
-convective_precip_efficiency: null
+# Convection: BECHTOLD, inherited from the base (user directive 2026-07-15,
+# reversing the #869 sbm pin — sbm is purged from the AMIP campaign).  The
+# historical bechtold polar-night day-47 runaway that motivated sbm here is
+# CURED by parcel_theta_cap (commit 2b4c94e90) + the CAPE-relaxation sink:
+# the 2026-07-15 bechtold leg (ll24_bech_gwd) sailed through the old day-47
+# and day-100 walls and died only at day 179 from an unrelated topographic
+# lid-wave mode (#1029 family; stationary Andes wave at lev 1, mitigation
+# A/B via stronger eddy-sponge in flight).  convection and
+# convective_precip_efficiency (0.8) both inherit from amip_production.yaml;
+# gravity_wave_drag inherits the mcfarlane+hines composite (the +hines lid
+# braking bought +79 days on this lane: death day 100 -> 179).
