@@ -308,7 +308,7 @@ def create_cubed_sphere(
     omega: float = constants.Omega,
     dtype=None,
     use_duogrid: bool = False,
-    k2e_nord: int = 2,
+    k2e_nord: int | None = None,
     duogrid_ng: int | None = None,
     stretch_fac: float = 1.0,
     target_lon: float = 0.0,
@@ -456,12 +456,34 @@ def create_cubed_sphere(
     # too small for face-boundary artifacts to be meaningful.
     duogrid = None
     if use_duogrid and n >= 4:
-        from legoesm.grids.duogrid import create_duogrid_data
         # Default ng: min(3, n//2) — FV3 uses 3 at production resolutions,
         # but small test grids need a smaller halo to fit the stencil.
         ng = duogrid_ng if duogrid_ng is not None else min(3, n // 2)
-        duogrid = create_duogrid_data(n, radius=radius, ng=ng,
-                                       k2e_nord=k2e_nord)
+        if gnomonic == "ed":
+            # Phase-3b: ED grids pair with the ED-NATIVE duo-grid tables
+            # (oracle-pinned k2e + ED gnomonic extension).  The legacy
+            # builder's equiangular extension lines are the wrong
+            # interpolants on ED (~4e-2 coefficient error) — this is a
+            # correctness pairing, not a tuned-solver discretization choice,
+            # so it is not gated.  Requires the FV3 upstream k2e_nord=4.
+            from legoesm.grids.fv3_native_halos import (
+                create_fv3_native_duogrid_data,
+            )
+            # k2e_nord on the ED route is the upstream duo-grid order and
+            # only 4 is oracle-pinned.  DEFAULT (None) maps to 4; any
+            # EXPLICIT non-4 request fails loudly (codex p3: never silently
+            # ignore a user's numerical order).
+            if k2e_nord is not None and k2e_nord != 4:
+                raise NotImplementedError(
+                    f"gnomonic='ed' duogrid: k2e_nord={k2e_nord} is not the "
+                    "oracle-pinned upstream duo-grid order (4); omit the "
+                    "argument or pass 4")
+            duogrid = create_fv3_native_duogrid_data(n, ng=ng, k2e_nord=4)
+        else:
+            from legoesm.grids.duogrid import create_duogrid_data
+            duogrid = create_duogrid_data(
+                n, radius=radius, ng=ng,
+                k2e_nord=2 if k2e_nord is None else k2e_nord)
 
     # Grid arrays use the storage dtype from the precision policy.
     # Defaults to float32 for backward compatibility.
@@ -526,7 +548,7 @@ def create_fv3_native_cubed_sphere(
     omega: float = constants.Omega,
     dtype=None,
     use_duogrid: bool = False,
-    k2e_nord: int = 2,
+    k2e_nord: int | None = None,
     duogrid_ng: int | None = None,
 ) -> CubedSphereGrid:
     """Create the FV3-native cubed-sphere grid (gnomonic_ed, FV3 grid_type=0).
