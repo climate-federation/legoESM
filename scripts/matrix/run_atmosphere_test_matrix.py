@@ -393,8 +393,14 @@ TEST_MATRIX = _build_test_matrix()
 ALL_RESULTS: list[dict[str, Any]] = []
 
 
-def record(tc: TestCase, status: str, wall_time: float, notes: str = ""):
-    icon = {"PASS": "  ", "FAIL": "**", "ERROR": "!!", "SKIP": "--"}[status]
+def record(tc: TestCase, status: str, wall_time: float, notes: str = "",
+           days: float = 0.0):
+    # #1029: waive a known full-run blow-up (FAIL->XFAIL) / flag its fix
+    # (PASS->XPASS); duration- and signature-aware so short runs and
+    # differently-caused failures report their true status.
+    status = _apply_known_failure(tc, status, days, notes)
+    icon = {"PASS": "  ", "FAIL": "**", "ERROR": "!!", "SKIP": "--",
+            "XFAIL": "xf", "XPASS": "XP"}[status]
     ALL_RESULTS.append({
         "test": tc.case, "grid": tc.grid_type,
         "equation_set": tc.equation_set, "resolution": tc.resolution,
@@ -502,6 +508,77 @@ def _apply_mass_drift_tolerance(
         ok, notes, mass_drift, tol,
         label="mass", n_samples=n_samples,
     )
+
+
+# --- Held-Suarez jet-strength floor (#1028) ---------------------------------
+# Held-Suarez equilibrates at ~30 m/s zonal-mean midlatitude jets; a fully
+# spun-up run whose max wind stays far below that has a DEAD circulation, which
+# the mass-drift + finiteness gates alone score as PASS. The cd-grid cube ends a
+# 200 d run at max|v|=7.3 m/s (#1028) while spectral/latlon/icosahedral reach
+# 27-66; the 20 m/s floor sits safely between. Only the flat-topography case is
+# gated (topo runs may blow up first — #1029), and only FULL runs (jet needs the
+# climatology spin-up; quick 30 d runs are too short to judge and skip the gate).
+_HELD_SUAREZ_MIN_JET_MS = 20.0
+_HELD_SUAREZ_JET_MIN_DAYS = 100.0
+
+
+def _apply_jet_strength_floor(
+    ok: bool, notes: str, max_wind: float, case: str, days: float,
+) -> tuple[bool, str]:
+    """FAIL a fully spun-up flat-topography Held-Suarez run with no jet (#1028)."""
+    if case != "held_suarez" or days < _HELD_SUAREZ_JET_MIN_DAYS:
+        return ok, notes
+    # ``not (max_wind >= floor)`` also catches NaN (which compares False).
+    if not (max_wind >= _HELD_SUAREZ_MIN_JET_MS):
+        return False, (
+            f"{notes}; DEAD JET max|v|={max_wind:.1f} < "
+            f"{_HELD_SUAREZ_MIN_JET_MS:.0f} m/s (Held-Suarez needs ~30; #1028)")
+    return ok, notes
+
+
+# --- Matrix known-failures (#1029) ------------------------------------------
+# (case, grid, vertical_coord) -> {issue, min_days} for cases whose numerical
+# BLOWUP (status FAIL) is EXPECTED and tracked by an open issue — reported as
+# XFAIL (does not exit-1) instead of a red regression. Two guards keep the
+# waiver from masking unrelated breakage (codex round 1):
+#   * only FAIL is waived — an ERROR (import/setup/infra breakage) is NEVER
+#     masked; it stays ERROR and exit-gates as usual.
+#   * only runs at least ``min_days`` long are waived — the blow-up reproduces
+#     only in the full-length regime, so a legitimately-clean short ``--quick``
+#     run reports its true PASS (not a spurious XPASS).
+#   * a FAIL is waived ONLY when its notes carry the reproduced ``expect_note``
+#     signature (the ``BLOWUP:`` tag from _blowup_info) — a DIFFERENT full-run
+#     FAIL on the same case (mass-drift or another physics-gate regression) has
+#     no blow-up tag, so it stays a red FAIL and exit-gates (codex round 2).
+# A registered case that PASSes a FULL run is reported XPASS (loud, non-exit) so
+# the entry gets removed. Keep this list SHORT and issue-linked; it is a
+# regression-triage aid, never a place to bury a real break.
+KNOWN_FAILURES: dict[tuple[str, str, str], dict[str, Any]] = {
+    # latlon held_suarez_topo: topographic jet runaway 131 m/s -> NaN ~step
+    # 27700 (~day 96), physics-free reproducer of the AMIP latlon topography
+    # instability. Reproduces only in a full-length run (the 2-day --quick lane
+    # never reaches the blow-up step and legitimately passes).
+    ("held_suarez_topo", "latlon", "hybrid"): {
+        "issue": "#1029", "min_days": 100.0, "expect_note": "BLOWUP"},
+}
+
+
+def _apply_known_failure(tc: "TestCase", status: str, days: float,
+                         notes: str = "") -> str:
+    """Remap the reproduced BLOWUP -> XFAIL and a full-run PASS -> XPASS (#1029).
+
+    A ``FAIL`` is waived only when the run is at least ``min_days`` long AND its
+    notes carry the ``expect_note`` blow-up signature; ``ERROR`` (infra
+    breakage), short runs, and any differently-caused FAIL pass through
+    unchanged so the waiver cannot mask an unrelated regression."""
+    entry = KNOWN_FAILURES.get((tc.case, tc.grid_type, tc.vertical_coord))
+    if entry is None or days < entry["min_days"]:
+        return status
+    if status == "FAIL" and entry["expect_note"] in notes:
+        return "XFAIL"
+    if status == "PASS":
+        return "XPASS"
+    return status   # ERROR / SKIP / differently-caused FAIL pass through
 
 
 def _grid_cell_area(grid_or_mesh):
@@ -4112,6 +4189,15 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
     ok, notes = _apply_mass_drift_tolerance(
         ok, notes, mass_drift, HELD_SUAREZ_MASS_DRIFT_TOL,
         n_samples=len(diag.get("mass", [])))
+    # #1028: a full run that never develops a jet is a dead-circulation FAIL,
+    # not a PASS. No-op for quick runs and the topo case (see helper).
+    ok, notes = _apply_jet_strength_floor(ok, notes, max_wind, tc.case, days)
+    # #1029 (codex round 2): tag a numerical blow-up so the known-failure waiver
+    # can key on the reproduced signature, not status alone — a mass-drift or
+    # other regression on the same case has no _blowup_info and stays a red FAIL.
+    _bi = diag.get("_blowup_info")
+    if _bi is not None:
+        notes = f"{notes}; BLOWUP: {_bi.get('reason', 'non-finite')}"
 
     level_values = np.asarray(
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
@@ -8062,11 +8148,11 @@ def main():
         try:
             status, wall, notes = runner(
                 tc, out_dir, days, radiation=args.radiation)
-            record(tc, status, wall, notes)
+            record(tc, status, wall, notes, days=days)
         except NotImplementedError as e:
-            record(tc, "SKIP", 0, str(e)[:120])
+            record(tc, "SKIP", 0, str(e)[:120], days=days)
         except Exception as e:
-            record(tc, "ERROR", 0, str(e)[:120])
+            record(tc, "ERROR", 0, str(e)[:120], days=days)
             traceback.print_exc()
         finally:
             _ensure_required_artifacts(out_dir)
@@ -8081,10 +8167,10 @@ def main():
           f"{'Case':<22}  {'Time':>8}  Notes")
     print("-" * 105)
 
-    n_pass = n_fail = n_error = n_skip = 0
+    n_pass = n_fail = n_error = n_skip = n_xfail = n_xpass = 0
     for r in ALL_RESULTS:
-        icon = {"PASS": "  ", "FAIL": "**", "ERROR": "!!",
-                "SKIP": "--"}[r["status"]]
+        icon = {"PASS": "  ", "FAIL": "**", "ERROR": "!!", "SKIP": "--",
+                "XFAIL": "xf", "XPASS": "XP"}[r["status"]]
         print(f"  {icon}{r['status']:5}  {r['grid']:<14}  "
               f"{r['equation_set']:<16}  {r['test']:<22}  "
               f"{r['wall_time']:7.1f}s  {r['notes']}")
@@ -8094,14 +8180,21 @@ def main():
             n_fail += 1
         elif r["status"] == "SKIP":
             n_skip += 1
+        elif r["status"] == "XFAIL":   # #1029 expected failure — not exit-gated
+            n_xfail += 1
+        elif r["status"] == "XPASS":   # #1029 known-failure now passing — alert
+            n_xpass += 1
         else:
             n_error += 1
 
     print("-" * 105)
     print(f"  Total: {len(ALL_RESULTS)} tests | "
           f"PASS: {n_pass} | FAIL: {n_fail} | SKIP: {n_skip} | "
-          f"ERROR: {n_error} | Wall: {total_wall:.1f}s "
-          f"({total_wall / 60:.1f} min)")
+          f"ERROR: {n_error} | XFAIL: {n_xfail} | XPASS: {n_xpass} | "
+          f"Wall: {total_wall:.1f}s ({total_wall / 60:.1f} min)")
+    if n_xpass:
+        print(f"  [ALERT] {n_xpass} KNOWN_FAILURES now PASS — remove them from "
+              f"the registry (#1029).")
     print("=" * 78)
 
     # MPI: each rank writes its own per-rank summary; rank 0 merges
@@ -8117,6 +8210,8 @@ def main():
             n_fail = sum(1 for r in ALL_RESULTS if r["status"] == "FAIL")
             n_skip = sum(1 for r in ALL_RESULTS if r["status"] == "SKIP")
             n_error = sum(1 for r in ALL_RESULTS if r["status"] == "ERROR")
+            n_xfail = sum(1 for r in ALL_RESULTS if r["status"] == "XFAIL")
+            n_xpass = sum(1 for r in ALL_RESULTS if r["status"] == "XPASS")
         if mpi_rank != 0:
             return  # non-root ranks exit before summary/comparison
 
@@ -8126,7 +8221,8 @@ def main():
         json.dump({
             "results": ALL_RESULTS, "total_wall_time": total_wall,
             "n_pass": n_pass, "n_fail": n_fail, "n_skip": n_skip,
-            "n_error": n_error, "quick_mode": args.quick,
+            "n_error": n_error, "n_xfail": n_xfail, "n_xpass": n_xpass,
+            "quick_mode": args.quick,
             "radiation": args.radiation,
         }, f, indent=2)
     with open(output_base / "summary.txt", "w") as f:
@@ -8134,7 +8230,7 @@ def main():
         f.write("=" * 60 + "\n")
         f.write(f"Total: {len(ALL_RESULTS)} tests | "
                 f"PASS: {n_pass} | FAIL: {n_fail} | SKIP: {n_skip} | "
-                f"ERROR: {n_error}\n")
+                f"ERROR: {n_error} | XFAIL: {n_xfail} | XPASS: {n_xpass}\n")
         f.write(f"Wall time: {total_wall:.1f}s ({total_wall / 60:.1f} min)\n")
         f.write(f"Radiation: {args.radiation}\n")
         f.write(f"Quick mode: {args.quick}\n\n")

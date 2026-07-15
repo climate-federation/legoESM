@@ -27,6 +27,26 @@ import numpy as np
 _REPO = Path(__file__).resolve().parents[4]   # packages/ml/legoesm/training/ -> repo root
 
 
+def _resolve_n_days(cfg, yml):
+    """Training-window length [days] per train year (#1047 ask a).
+
+    Precedence: explicit ``cfg.n_days`` (CLI ``--n-days``) > YAML
+    ``n_training_days`` > 3 (the historical hardcoded default). ``--smoke``
+    always forces 1 (single-window wiring check). This replaced a hardcoded
+    ``n_days = 3`` in both ERA5 loaders that capped every WeatherBench arm at
+    ~60 samples/year and left the column-MLP data-starved (#1047 finding 2).
+    """
+    if getattr(cfg, "smoke", False):
+        return 1
+    n = getattr(cfg, "n_days", None)
+    if n is None:
+        n = yml.get("n_training_days", 3)
+    n = int(n)
+    if n < 1:
+        raise ValueError(f"n_days (training window) must be >= 1, got {n}")
+    return n
+
+
 def _load_run_amip():
     """Exec scripts/run/run_amip.py as a module to reuse its arg parser + config builder."""
     path = _REPO / "scripts" / "run" / "run_amip.py"
@@ -428,7 +448,7 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma):
     roll_h = rollout_hours(cfg, yml)
     stride = int(roll_h) // era5_cfg.dt_hours
 
-    n_days = 3 if not cfg.smoke else 1
+    n_days = _resolve_n_days(cfg, yml)
     samples = []
     for year in yml["train_years"]:
         base = int(np.searchsorted(times, np.datetime64(f"{year}-01-01")))
@@ -479,7 +499,7 @@ def load_era5_samples(cfg, yml, grid, sigma):
     driver = _driver_for_ctx(config)
     ctx = driver._prepare_run_context(0, config.start_day, restore_carry=False)
 
-    n_days = 3 if not cfg.smoke else 1
+    n_days = _resolve_n_days(cfg, yml)
     samples = []
     for year in yml["train_years"]:
         base = int(np.searchsorted(times, np.datetime64(f"{year}-01-01")))
