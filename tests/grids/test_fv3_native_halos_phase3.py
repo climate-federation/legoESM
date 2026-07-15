@@ -82,16 +82,41 @@ class TestK2EOracle:
         for res in (12, 24):
             kx = {tuple(k): float(v) for k, v in zip(
                 d[f"coords_KX_key_c{res}"], d[f"coords_KX_val_c{res}"])}
+            ky = {tuple(k): float(v) for k, v in zip(
+                d[f"coords_KY_key_c{res}"], d[f"coords_KY_val_c{res}"])}
             ij = d[f"k2e_A_ij_c{res}"]
             loc = d[f"k2e_A_loc_c{res}"]
             for (i, j), l in zip(ij, loc):
-                if not (1 <= i <= res and (j < 1 or j > res)):
-                    continue  # production rows: interior targets on halo rows
-                layer = 2 * j
-                for srcnode in range(l - 1, l + 3):   # window klo-1..klo+2
-                    key = (2 * srcnode, layer)
-                    if key in kx:
-                        assert abs(kx[key]) < 900, (res, (i, j), key)
+                # production ROWS (interior i targets on halo rows j)
+                if 1 <= i <= res and (j < 1 or j > res):
+                    layer = 2 * j
+                    for srcnode in range(l - 1, l + 3):  # window klo-1..klo+2
+                        key = (2 * srcnode, layer)
+                        if key in kx:
+                            assert abs(kx[key]) < 900, (res, (i, j), key)
+                # production COLUMNS (interior j targets on halo cols i) —
+                # the mirrored KY check (codex p3 r2)
+                if 1 <= j <= res and (i < 1 or i > res):
+                    layer = 2 * i
+                    for srcnode in range(l - 1, l + 3):
+                        key = (2 * srcnode, layer)
+                        if key in ky:
+                            assert abs(ky[key]) < 900, (res, (i, j), key)
+
+    def test_default_ed_duogrid_corners_are_averaging_fallback(self):
+        # codex p3 r2 blocker: corner Lagrange VALUES are un-oracled, so the
+        # PUBLIC ED route must not enable them by default — corner_xp None
+        # selects the legacy-validated averaging corner fill.
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+
+        g = create_cubed_sphere(8, dtype=np.float64, gnomonic="ed",
+                                use_duogrid=True)
+        assert g.duogrid.corner_xp is None
+        from legoesm.grids.fv3_native_halos import (
+            create_fv3_native_duogrid_data,
+        )
+        dgd = create_fv3_native_duogrid_data(8, ng=3, corner_lagrange=True)
+        assert dgd.corner_xp is not None
 
     def test_partition_of_unity(self):
         tab = compute_fv3_native_k2e(12)
@@ -175,12 +200,20 @@ class TestGhostValues:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.halo import pad_halo
 
+        from legoesm.grids.fv3_native_halos import (
+            create_fv3_native_duogrid_data,
+        )
+
         g = create_cubed_sphere(n, dtype=np.float64, gnomonic="ed",
                                 use_duogrid=True, duogrid_ng=3)
+        # opt into the EXPERIMENTAL Lagrange corners for the accuracy /
+        # convergence gates (the default path uses the legacy-validated
+        # averaging corner fill until the dg-level corner oracle lands)
+        dgd = create_fv3_native_duogrid_data(n, ng=3, corner_lagrange=True)
         f = field_fn(np.asarray(g.lon), np.asarray(g.lat))
         padded = np.asarray(pad_halo(jax.numpy.asarray(f), halo=halo,
-                                     duogrid=g.duogrid))
-        return g, padded
+                                     duogrid=dgd))
+        return g._replace(duogrid=dgd), padded
 
     @pytest.mark.parametrize("halo", [1, 2, 3])
     def test_constant_field_ghosts_exact(self, halo):

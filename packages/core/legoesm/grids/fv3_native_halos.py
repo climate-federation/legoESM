@@ -555,7 +555,8 @@ def _compute_ext_vectors_native(a_lon, a_lat, b_lon, b_lat):
     return vlon, vlat, ew, es
 
 
-def create_fv3_native_duogrid_data(n: int, ng: int = 3, k2e_nord: int = 4):
+def create_fv3_native_duogrid_data(n: int, ng: int = 3, k2e_nord: int = 4,
+                                   corner_lagrange: bool = False):
     """ED-native DuoGridData: certified duo-grid k2e tables + ED extension.
 
     Drop-in replacement for :func:`legoesm.grids.duogrid.create_duogrid_data`
@@ -614,7 +615,18 @@ def create_fv3_native_duogrid_data(n: int, ng: int = 3, k2e_nord: int = 4):
             f"({np.abs(s - 1.0).max():.2e})")
 
     ext_lon, ext_lat = _ed_ext_agrid_lonlat(n, ng)
-    xp, xm, yp, ym = _compute_corner_lagrange_coeff(n, ng, ext_lon, ext_lat)
+    if corner_lagrange:
+        # EXPERIMENTAL (codex p3 r2): the corner Lagrange APPLICATION is
+        # order-ported (iter-803) and functionally convergent, but its
+        # VALUES are not yet pinned to a dg-level Fortran oracle (staged
+        # with the phase-4 c_sw harness).  Until then the DEFAULT path
+        # uses the pre-existing averaging corner fill (corner_xp=None ->
+        # _fill_corner_region_averaging), whose behavior is legacy-
+        # validated; opt in here for the Lagrange corners.
+        xp, xm, yp, ym = _compute_corner_lagrange_coeff(
+            n, ng, ext_lon, ext_lat)
+    else:
+        xp = xm = yp = ym = None
     # codex p3 P1: a2stag vectors from REAL odd-supergrid B points (the
     # legacy builder synthesizes B from A-averages; upstream uses dg%b_pt).
     b_lon, b_lat = _ed_ext_stagger_lonlat(n, ng, "B")
