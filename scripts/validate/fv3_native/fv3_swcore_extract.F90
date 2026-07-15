@@ -3,7 +3,8 @@
 ! fill3_4corners, fill2_4corners, fill_4corners. Only the module wrapper and
 ! type shims (fv3_swcore_shim.F90) are new; subroutine bodies are unmodified.
 module sw_core_extract_mod
-  use swcore_shim_mod
+  use swcore_shim_mod, only: fv_grid_bounds_type, fv_grid_type, &
+                             fv_flags_type
   implicit none
   ! sw_core.F90 module-level constants (verbatim, non-SW_DYNAMICS
   ! big_number branch matches the production build)
