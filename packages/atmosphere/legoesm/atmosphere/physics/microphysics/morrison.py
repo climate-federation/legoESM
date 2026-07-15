@@ -26,8 +26,10 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     saturation_adjustment,
     effective_Nc,
     autoconversion_sb,
+    autoconversion_sb2001,
     autoconversion_kk2000,
     accretion,
+    accretion_sb2001,
     accretion_kk2000,
     self_collection_breakup,
     self_collection_breakup_sb2001,
@@ -239,10 +241,32 @@ def morrison_microphysics(
         dq_c_au = dq_c_au * cf_eff
         dN_r_au = dN_r_au * cf_eff
         dq_c_ac = accretion(q_c_ic, q_r_ic, rho, config.k_ac) * cf_eff
+    elif config.warm_rain_scheme == "seifert_beheng_sb2001":
+        # PUBLISHED SB2001 universal functions (phi_au, phi_ac) — the faithful
+        # gSAM IRAIN=1 MASS rates (module_mp_graupel.f90:1835-1844, :1960-1962),
+        # as opposed to the simplified "seifert_beheng" proxy above. tau is a
+        # scale-invariant ratio so the in-cloud (q/cf) rescaling leaves it
+        # unchanged. NOTE the subgrid enhancement is NOT the same across the
+        # laws: with N_c_eff held at the grid-mean (not rescaled by cf), the
+        # q_c^4 autoconversion gets a cf^-3 enhancement vs cf^-1 for accretion —
+        # STRONGER than the kk2000 path. This (and the un-rescaled in-cloud N_c)
+        # is a known subgrid-closure limitation, moot at the default
+        # ``subgrid_autoconversion=False`` (cf_eff=1). The SB2001-specific
+        # cloud-NUMBER autoconv factor (2·PRC·rho/x_*) is not applied — the
+        # generic ``-dq_c_au·rho/x_c`` sink below (predict_Nc=True) is used
+        # instead; see ``autoconversion_sb2001``.
+        dq_c_au, dN_r_au, x_c = autoconversion_sb2001(
+            q_c_ic, q_r_ic, N_c_eff, rho,
+        )
+        dq_c_au = dq_c_au * cf_eff
+        dN_r_au = dN_r_au * cf_eff
+        dq_c_ac = accretion_sb2001(q_c_ic, q_r_ic, rho) * cf_eff
     else:
         raise ValueError(
-            f"Unknown warm_rain_scheme: {config.warm_rain_scheme!r}; "
-            f"choose 'kk2000' (SAM M2005 default) or 'seifert_beheng'."
+            f"Unknown warm_rain_scheme: {config.warm_rain_scheme!r}; choose "
+            f"'kk2000' (SAM M2005 default), 'seifert_beheng' (simplified "
+            f"proxy) or 'seifert_beheng_sb2001' (published SB2001 universal "
+            f"functions)."
         )
     # Rain self-collection + breakup. "sb2001" (SAM NRAGG) self-collects
     # ~5580× faster than the legacy k_sc=1e-3 sigmoid form, so rain coalesces
