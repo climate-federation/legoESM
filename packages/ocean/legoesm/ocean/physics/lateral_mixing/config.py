@@ -215,6 +215,17 @@ class GMRediConfig(NamedTuple):
       small residual that accumulates through dynamical feedback).
       Kept as a regression-coverage option and as a fallback for
       cheap short integrations.
+    - ``"nemo_iso_lap"`` — NEMO 5.0.2's standard rotated-Laplacian
+      iso-neutral operator (``traldf_iso``, ``#define iso_lap``),
+      ported term-by-term and verified against NEMO's dumped
+      ``ttrd_ldf`` (T corr 0.9997 with NEMO's own slopes; 0.96 with
+      legoESM's centered slopes).  This is a **pure Redi** operator
+      (NEMO ``traldf_iso`` has no GM bolus term): the dispatcher raises
+      if ``kappa_GM != 0`` is requested with this scheme.  The explicit
+      operator is the skew / off-diagonal iso-neutral part
+      (``ln_traldf_msc=F`` ⇒ the K33 diagonal goes to the implicit
+      vertical solve).  v1 flat-bottom / single-slope-field (mode-(b))
+      approximation — see the operator docstring.
     """
     kappa_GM: float = 1e3       # GM bolus transport coefficient [m^2/s]
     kappa_Redi: float = 1e3     # Redi isopycnal diffusivity [m^2/s]
@@ -230,7 +241,7 @@ class GMRediConfig(NamedTuple):
     # Treguier-1997 adaptive κ (NEMO nn_aei_ijk_t=21, the oracle scaling) —
     # mutually exclusive with visbeck.enabled (dispatch raises on both).
     treguier: TreguierConfig = TreguierConfig()
-    slope_scheme: str = "triads"     # "triads" (default) or "centered"
+    slope_scheme: str = "triads"     # "triads" (default), "centered", or "nemo_iso_lap"
     slope_density: str = "in_situ"   # "in_situ" (default) or "neutral"
     # ^ Density gradient used to build the isoneutral SLOPES (NOT the tracer
     # gradients, which are always the raw T/S gradients).
