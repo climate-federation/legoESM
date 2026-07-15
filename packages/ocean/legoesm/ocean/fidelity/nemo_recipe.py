@@ -248,6 +248,17 @@ def _momentum_options(momentum_core: str) -> dict[str, object]:
             "momentum_advection": "vector_invariant",
             "ke_gradient_scheme": "hollingsworth",
         }
+    if momentum_core == "vector_invariant_ene":
+        # NEMO GYRE_BARE dynamical core: ln_dynvor_ene (Sadourny-1975 energy-
+        # conserving vorticity) + nn_dynkeg=0 (c2 mean-of-squares KE gradient).
+        # Distinct from vector_invariant_een above (which uses the al81 enstrophy
+        # vorticity default + Hollingsworth KE for ORCA-style configs). Verified
+        # term-by-term vs GYRE's utrd_rvo/pvo/keg dumps.
+        return {
+            "momentum_advection": "vector_invariant",
+            "vorticity_scheme": "ene",
+            "ke_gradient_scheme": "c2",
+        }
     if momentum_core == "flux_form_upwind3":
         return {
             "momentum_advection": "flux_form",
@@ -256,8 +267,8 @@ def _momentum_options(momentum_core: str) -> dict[str, object]:
         }
     raise ValueError(
         "unknown NEMO momentum_core "
-        f"{momentum_core!r}; expected 'vector_invariant_een' or "
-        "'flux_form_upwind3'."
+        f"{momentum_core!r}; expected 'vector_invariant_een', "
+        "'vector_invariant_ene', or 'flux_form_upwind3'."
     )
 
 

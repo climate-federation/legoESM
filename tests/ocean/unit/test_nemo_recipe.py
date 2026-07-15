@@ -170,6 +170,31 @@ def test_nemo_mapping_and_deferred_blocks_are_explicit():
     assert any("leapfrog" in item for item in NEMO_DEFERRED_BLOCKS)
 
 
+def test_nemo_gyre_momentum_core_selects_ene_c2():
+    """A GYRE_BARE-faithful card config selects NEMO's actual GYRE schemes.
+
+    GYRE_BARE runs ln_dynvor_ene (ENE vorticity) + nn_dynkeg=0 (c2 KE) + EOS-80 +
+    adcroft PGF — NOT the ORCA-style een/hollingsworth/veros_gsw/smc03 the card
+    defaults to. The assembled-single-step audit had to override these by hand;
+    this pins that the card CAN express GYRE (momentum_core='vector_invariant_ene'
+    + eos/pgf knobs) so the whole GYRE dynamical core is reachable via the card.
+    """
+    gyre = nemo_lat_lon_model_config(NEMOModelRecipeConfig(
+        momentum_core="vector_invariant_ene",
+        eos="nemo_eos80",
+        pgf_scheme="adcroft",
+        lateral_operator="nemo_iso_lap",
+    ))
+    assert gyre.vorticity_scheme == "ene"
+    assert gyre.ke_gradient_scheme == "c2"
+    assert gyre.eos == "nemo_eos80"
+    assert gyre.pgf_scheme == "adcroft"
+    assert gyre.gm_redi.slope_scheme == "nemo_iso_lap"
+    # default card stays ORCA-style (een/hollingsworth), unchanged
+    d = nemo_lat_lon_model_config()
+    assert d.ke_gradient_scheme == "hollingsworth"
+
+
 def test_nemo_lateral_operator_selects_iso_lap_pure_redi():
     """lateral_operator='nemo_iso_lap' selects NEMO traldf_iso, pure Redi.
 
