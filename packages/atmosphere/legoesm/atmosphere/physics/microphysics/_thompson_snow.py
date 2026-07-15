@@ -26,8 +26,10 @@ process rates is the analytic gamma-function integral
 This module provides the mass-weighted snow FALL SPEED and the vapour
 DEPOSITION/sublimation rate built from those exact moment integrals with the
 Thompson-2008 fall-speed (``av_s/bv_s/fv_s``) and ventilation (``Sc``,
-``t1_qs_sd``, ``t2_qs_sd``, capacitance ``C_sqrd``) constants.  All operations
-are smooth / AD-safe.
+``t1_qs_sd``, ``t2_qs_sd``, capacitance ``C_sqrd``) constants.  The rates are
+finite and finite-gradient (AD-safe) everywhere, including at q_s→0; they are
+NOT globally smooth — the activation gate, speed cap, and availability clamps
+are non-differentiable ``where``/``clip`` guards by design.
 """
 
 from __future__ import annotations
@@ -149,8 +151,25 @@ def snow_fall_speed(q_s, rho, T):
     the density correction ``ρ_f = √(ρ0/ρ)``.  The ``exp(-fv_s D)`` shifts each
     PSD-mode slope (Λ0→Λ0+fv_s, Λ1→Λ1+fv_s) and is folded into the integral
     analytically.
+
+    FAITHFUL (closed-form algebra): in the active, uncapped, un-floored regime
+    this is a term-for-term transcription of the gSAM/WRF Thompson ``vts`` block
+    (module_mp_thompson.f90:2751-2762) — oracle-pinned at coefficient level
+    (av_s/bv_s/fv_s/mu_s/Kap0/Kap1/Lam0/Lam1 + the cse gamma exponents) by
+    ``tests/unit/test_thompson_snow_fall_speed_faithful.py``.  The surrounding
+    JAX numerical guards are DELIBERATE departures, not the oracle: the
+    q_s>_QS_SMALL activation gate (vs gSAM's R1=1e-18 threshold + next-level
+    inheritance), the [0, _VT_CLIP_SNOW] speed clip, the [-55, -0.1] °C Field-fit
+    tc clamp (gSAM clamps only the −0.1 upper end), and the safe_pow/clip floors.
     """
-    M2, M3, ratio = _snow_moments(q_s, rho, T)
+    # Evaluate the PSD moments on a floored q_s so the zero-snow branch cannot
+    # drive lam0->0: den ~ lam0^-(bm_s+1) then underflows to +inf in float32 and
+    # poisons the VJP (grad -> NaN). The `active` gate below still returns V=0
+    # there, so the active-regime value is unchanged (maximum picks q_s when
+    # q_s>_QS_SMALL). float32 is the default finite-volume dtype, so this matters.
+    q_pos = jnp.clip(q_s, 0.0)
+    active = q_pos > _QS_SMALL
+    M2, M3, ratio = _snow_moments(jnp.maximum(q_pos, _QS_SMALL), rho, T)
     lam0 = _LAM0 * ratio
     lam1 = _LAM1 * ratio
     p_v = _BM_S + _BV_S
@@ -169,8 +188,7 @@ def snow_fall_speed(q_s, rho, T):
     rhof = jnp.sqrt(_RHO_NOT / jnp.clip(rho, _RHO_FLOOR))
     V_s = _AV_S * rhof * num / jnp.clip(den, 1.0e-30)
     # Gate on actual snow; cap at a realistic aggregate fall speed.
-    V_s = jnp.where(jnp.clip(q_s, 0.0) > _QS_SMALL, V_s, 0.0)
-    return jnp.clip(V_s, 0.0, _VT_CLIP_SNOW)
+    return jnp.where(active, jnp.clip(V_s, 0.0, _VT_CLIP_SNOW), 0.0)
 
 
 def snow_deposition(q_v, q_s, q_sat_i, T, p_full, rho, dt):
@@ -197,8 +215,25 @@ def snow_deposition(q_v, q_s, q_sat_i, T, p_full, rho, dt):
     implicitly — its prefactor ``rvs = ρ·qvsi`` cancels the 1/ρ.  Deposition
     (S_i>1) is capped at the available supersaturation EXCESS ``q_v−q_sat_i``
     [kg/kg]; sublimation (S_i<1) is donor-clamped to the snow mass.
+
+    DEPARTURE (documented, not pinned): the snow capacitance ``_C_SQRD = 0.15``
+    is FIXED, whereas gSAM ramps it with temperature
+    ``C_snow = clip(C_sqrd + (tc+15)(C_cube-C_sqrd)/(-15), C_sqrd, C_cube)`` over
+    ``[C_sqrd, C_cube] = [0.3, 0.5]`` (module_mp_thompson.f90:2032-2033). legoESM's
+    0.15 is 50-70% lower than that ramp (gSAM's capacitance is 2-3⅓× larger),
+    so it SCALES DOWN the uncapped C-dependent raw deposition rate by that same
+    factor -- an identified follow-up (adopting the ramped C would change snow
+    growth and needs its own validation), which is why PRDS is not
+    coefficient-pinned like the fall speed above.  (The final PRDS is not
+    categorically smaller: the availability cap and donor clamp can bind first.)
     """
-    M2, M3, ratio = _snow_moments(q_s, rho, T)
+    # Floor q_s for the PSD moments (see snow_fall_speed): at zero snow lam0->0
+    # so _psd_integral's bare lam0^-(p+1) underflows to +inf while norm underflows
+    # to 0, giving 0*inf = NaN in the PRIMAL that poisons the final where's VJP.
+    # The q_s>_QS_SMALL gate below still returns 0, so the active value is intact.
+    q_pos = jnp.clip(q_s, 0.0)
+    active = q_pos > _QS_SMALL
+    M2, M3, ratio = _snow_moments(jnp.maximum(q_pos, _QS_SMALL), rho, T)
     lam0 = _LAM0 * ratio
     lam1 = _LAM1 * ratio
     # Thermodynamic resistance A+B (ice): A = L_s²/(K_a R_v T²),
@@ -255,4 +290,4 @@ def snow_deposition(q_v, q_s, q_sat_i, T, p_full, rho, dt):
     subl_neg = jnp.maximum(jnp.minimum(prds, 0.0),
                            -jnp.clip(q_s, 0.0) / jnp.clip(dt, 1.0))
     out = dep_pos + subl_neg
-    return jnp.where(jnp.clip(q_s, 0.0) > _QS_SMALL, out, 0.0)
+    return jnp.where(active, out, 0.0)
