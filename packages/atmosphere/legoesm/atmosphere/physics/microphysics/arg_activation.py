@@ -42,6 +42,56 @@ competition factor, no ``p_v/p_vs`` prefactor, no moist ``R_m``): these are
 CliMA refinements that recover the textbook form when ``N_liq=N_ice=0`` and
 ``RH=1`` and are documented as the natural next step.
 
+Faithfulness
+------------
+Oracle = the ARG2000 paper closed form.  The ALGEBRAIC STRUCTURE of the S_max
+balance is a term-for-term transcription of the on-disk gSAM/M2005 reference
+code ``MICRO_M2005/module_mp_graupel.f90:2307-2340`` (``IACT=2``, non-
+equilibrium "DROPLET ACTIVATION FROM ABDUL-RAZZAK AND GHAN (2000)" path).  Each
+symbol maps onto a gSAM line:
+
+  A/AACT, alpha/ALPHA, gamma/GAMM, G/GG, zeta/PSI, eta_i/ETA, S_m,i/SM,
+  f_i/F11, g_i/F21, the (1/S_m^2)[f(zeta/eta)^1.5 + g(S_m^2/(eta+3 zeta))^0.75]
+  summand/DUM1, S_max/SMAX, the standard-erf activated fraction/(1-DERF1(UU)).
+
+The multi-mode ``sum_i`` here is the ARG2000 Part-2 generalization of gSAM's
+fixed two-mode (NANEW1/NANEW2) block.  This is a STRUCTURAL (form) match, NOT a
+numerical/full-scheme reproduction: legoESM evaluates the same forms with its
+own constants and thermodynamics, so the numbers differ from gSAM's.
+``tests/unit/test_arg_activation_faithful.py`` pins legoESM's OWN closed form
+against an independent NumPy transcription (rel 1e-9, single- AND two-mode) and
+canaries the f/g/exponent constants against their literals.
+
+SELECTED differences (not exhaustive; legoESM follows the ARG2000 PAPER / CliMA
+constant-coefficient form, gSAM/M2005 substitutes empirical fits — documented,
+NOT pinned; only the SIGVL and 3*sqrt(2) items below carry a test canary):
+  * Kelvin term uses a CONSTANT surface tension ``constants.sigma_water``
+    (=0.0728 N/m) via :func:`.._warm_rain.kelvin_coefficient`, vs gSAM's
+    T-ramped ``SIGVL = 0.0761 - 1.55e-4*(T - T_freeze)`` [N/m].  (canaried)
+  * the erfc denominator uses the EXACT ``3*sqrt(2)`` (=4.24264...), vs gSAM's
+    rounded literal ``4.242``; legoESM is closer to the paper here.  (canaried)
+  * ``G`` uses CONSTANT ``constants.D_vapor``/``constants.k_air`` (the ARG/CliMA
+    published form, see :func:`condensation_growth_coeff_G`), vs gSAM's
+    T,p-dependent ``DV`` and T-dependent ``KAP`` (=1.414e3*MU, Sutherland MU(T)).
+  * saturation ``e_s`` is the shared legoESM Tetens curve
+    (:func:`..thermo.saturation_vapor_pressure`), vs gSAM's POLYSVP Flatau
+    polynomial.
+  * gSAM's molar constants ``MW=0.018``/``MA=0.0284``/``RR=8.3187`` give
+    effective ``R_d~=293``, ``epsilon~=0.634`` — legoESM uses ``constants.R_d``
+    / ``constants.epsilon`` (both a few % smaller) in alpha/gamma.
+  * ``S_m`` maps onto gSAM ``SM`` only under the identification
+    ``kappa_i = BACT``; gSAM fixes ``BACT`` from a prescribed ammonium-sulfate
+    composition (~0.509), whereas ``kappa_i`` is a per-mode config field.
+  * the driving updraft: legoESM takes ``w`` directly (defaulting to a
+    characteristic ``w_char_m_s``); gSAM builds ``DUM`` from the resolved plus
+    an optional sub-grid velocity (0.10 m/s minimum), with cloud-water / upward-
+    motion / ``IBASE`` cloud-edge gating and a SEPARATE equilibrium-interior
+    activation path — none of that column logic is modelled here.
+  * CDNC is per-VOLUME [1/m^3]; gSAM carries per-MASS number and divides by rho.
+  * :func:`arg_cdnc` returns the DIAGNOSTIC total activated number; gSAM emits a
+    source-only tendency ``max(0,(N_act - N_c)/dt)`` capped at the total aerosol
+    (the ``>= N_c`` guard + cap are a coupling choice, not the S_max algebra).
+
 References
 ----------
 Abdul-Razzak, H. & Ghan, S. J. (2000): A parameterization of aerosol
