@@ -4,7 +4,7 @@ Provides configuration NamedTuples for:
 1. Surface layer: bulk aerodynamic surface fluxes
 2. Smagorinsky: deformation/stability-dependent eddy diffusivity (simplest baseline)
 3. Louis (1979): stability-dependent diffusion
-4. TKE / Mellor-Yamada 2.5: prognostic TKE closure
+4. TKE: Mellor-Yamada-2.5-INSPIRED prognostic k-l closure
 5. CLUBB-lite: higher-order closure skeleton
 6. Holtslag-Boville: nonlocal K-profile with counter-gradient
 7. YSU: nonlocal K-profile with entrainment flux
@@ -162,8 +162,8 @@ __param_spec__ = {
             "tke_min": "numerics: solver/smoothing/tolerance/iteration parameter",
         },
         "params": {
-            "Ce": {"units": "1", "bounds": (0.06, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "tke_closure", "reference": "Mellor & Yamada (1982) TKE dissipation coefficient", "shape": None},
-            "Ck": {"units": "1", "bounds": (0.03, 0.3), "tunable_tier": 1, "transform": "sigmoid", "category": "diffusivity", "reference": "Mellor & Yamada (1982) TKE->Km coefficient (Km = Ck·l·sqrt(TKE))", "shape": None},
+            "Ce": {"units": "1", "bounds": (0.06, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "tke_closure", "reference": "MY82-shaped dissipation eps=Ce·TKE^{3/2}/l; scheme-default coefficient (MY 2^{3/2}/B1~0.17)", "shape": None},
+            "Ck": {"units": "1", "bounds": (0.03, 0.3), "tunable_tier": 1, "transform": "sigmoid", "category": "diffusivity", "reference": "fixed replacement for MY2.5 Sm(GM,GH); Km=Ck·l·sqrt(max(TKE,tke_min))", "shape": None},
             "Pr_t": {"units": "1", "bounds": (0.3, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "turbulent Prandtl number Kh = Km/Pr_t", "shape": None},
             "l_mix_max": {"units": "m", "bounds": (10.0, 300.0), "tunable_tier": 1, "transform": "sigmoid", "category": "mixing_length", "reference": "Blackadar (1962) asymptotic mixing length", "shape": None},
         },
@@ -336,20 +336,34 @@ class LouisConfig(NamedTuple):
 
 
 class TKEConfig(NamedTuple):
-    """Configuration for prognostic TKE / Mellor-Yamada 2.5 turbulence.
+    """Configuration for a prognostic-TKE, Mellor-Yamada-2.5-INSPIRED k-l closure.
+
+    NOTE: this is MY2.5-INSPIRED, not literal level 2.5 — ``Ck`` and ``Pr_t``
+    are CONSTANTS that replace MY2.5's algebraic stability functions
+    ``Sm(GM, GH)`` and the ratio ``Sh(GM, GH)/Sm(GM, GH)`` (which depend on
+    BOTH shear ``GM`` and buoyancy ``GH``; see the tke.py "Faithfulness"
+    section).
 
     Fields
     ------
     l_mix_max : float
-        Maximum mixing length [m] (default 100.0).
+        Fixed asymptotic (Blackadar) mixing length [m] (default 100.0):
+        ``l = kappa z / (1 + kappa z / l_mix_max)``. MY's diagnostic length is
+        likewise Blackadar-like near the wall but with an integral,
+        turbulence-dependent asymptote ``l0 = 0.1 integral(q z dz)/integral(q dz)``.
     Ck : float
-        TKE -> Km coefficient (default 0.1).
+        Constant TKE -> Km coefficient, ``Km = Ck·l·sqrt(max(TKE, tke_min))``
+        (default 0.1). Lumps a constant effective momentum stability coefficient
+        (``Ck = sqrt(2)·Sm_eff``) in place of MY2.5's ``Sm(GM, GH)``.
     Ce : float
-        TKE dissipation coefficient (default 0.19).
+        TKE dissipation coefficient, ``eps = Ce·TKE^{3/2}/l`` (default 0.19);
+        MY's ``q^3/(B1 l)`` gives ``Ce = 2^{3/2}/B1 ~ 0.17``.
     tke_min : float
         Minimum TKE [m^2/s^2] (default 1e-6).
     Pr_t : float
-        Turbulent Prandtl number (default 0.33).
+        Constant turbulent Prandtl number, ``Kh = Km/Pr_t`` (default 0.33, so
+        ``Kh/Km ~ 3``). This is the scheme's own fixed value, NOT the MY ratio
+        (MY's neutral ``Sh/Sm ~ 1.06``); MY2.5's ``Sh/Sm`` is stability-dependent.
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
@@ -724,7 +738,7 @@ class TurbulenceConfig(NamedTuple):
     louis : LouisConfig
         Configuration for Louis scheme.
     tke : TKEConfig
-        Configuration for TKE scheme (Mellor-Yamada 1982).
+        Configuration for the MY2.5-INSPIRED prognostic-TKE k-l scheme.
     mynn25 : MYNN25Config
         Configuration for MYNN-2.5 scheme (Nakanishi-Niino 2009).
     clubb_lite : CLUBBLiteConfig
