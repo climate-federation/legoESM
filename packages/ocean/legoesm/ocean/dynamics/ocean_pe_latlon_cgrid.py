@@ -1502,10 +1502,22 @@ def _bc_ke_and_pressure_gradients(
             u_cell = 0.5 * (u[:, :-1, :] + u[:, 1:, :])
             v_cell = 0.5 * (v[:-1, :, :] + v[1:, :, :])
             KE = 0.5 * (u_cell ** 2 + v_cell ** 2)
+        elif config.ke_gradient_scheme == "c2":
+            # NEMO nkeg_C2 (nn_dynkeg=0), the GYRE default. dynkeg.F90:
+            #   zu = u(i-1,j)² + u(i,j)² ; zv = v(i,j-1)² + v(i,j)²
+            #   zhke(T) = 0.25 * (zu + zv)
+            # MEAN-of-squares of the surrounding faces (vs "centered"'s
+            # square-of-mean). Identical for uniform flow; C2 is smaller
+            # under shear, closing legoESM's ~26% keg overshoot vs NEMO.
+            # u(i-1,j)=u[:, :-1], u(i,j)=u[:, 1:]; v(i,j-1)=v[:-1], v(i,j)=v[1:].
+            KE = 0.25 * (
+                u[:, :-1, :] ** 2 + u[:, 1:, :] ** 2
+                + v[:-1, :, :] ** 2 + v[1:, :, :] ** 2
+            )
         else:
             raise ValueError(
                 f"Unknown ke_gradient_scheme: {config.ke_gradient_scheme!r}. "
-                f"Must be 'centered' or 'hollingsworth'."
+                f"Must be 'centered', 'c2', or 'hollingsworth'."
             )
         _Kp_stack = jnp.stack([KE, p_prime_filled], axis=-1)
         _Kp_flat = _Kp_stack.reshape(n_lat_g, n_lon_g, nlev_g * 2)
