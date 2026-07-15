@@ -1716,11 +1716,18 @@ def _bc_pv_flux(
     vertex_mask=None,
     enstrophy_metric=False,
     reconstruct_zeta=False,
+    vorticity_scheme="al81",
 ):
     """Stage 7b: vector-invariant potential-vorticity (vorticity) flux
     (Sadourny EC / Arakawa-Lamb-81 triad, or WENO-Z when momentum_advection is
     weno5/weno7/weno9). Pure verbatim extraction (Q8). Threads the momentum
     accumulators; returns ``(du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v)``."""
+    # Fail-early on an unknown vorticity scheme (static config value) so a typo
+    # raises even on the WENO path where the al81/ene branch is not reached.
+    if vorticity_scheme not in ("al81", "ene"):
+        raise ValueError(
+            f"unknown vorticity_scheme {vorticity_scheme!r}; expected 'al81' or 'ene'"
+        )
     # --- 7b. Potential vorticity flux (#160, Sadourny EC) ---
     # Vector-invariant advection: (u·∇)u = ∇(KE) + (f+ζ) × u.
     # Coriolis (f × u) handled in step function; here only ζ × u.
@@ -1935,10 +1942,23 @@ def _bc_pv_flux(
     else:
         vtx_mask_va = (vertex_mask if vertex_mask is not None
                        else compute_vertex_mask(mask, grid=grid))
-        diag_vortcor_u, diag_vortcor_v = pv_flux_al81_partial_cell(
-            zeta, h_vtx, h_v, v, h_u, u,
-            u_mask_3d, v_mask_3d, vtx_mask_va,
-        )
+        # Vector-invariant vorticity flux dispatch (membership already
+        # validated at function entry — 'al81' or 'ene').
+        if vorticity_scheme == "al81":
+            diag_vortcor_u, diag_vortcor_v = pv_flux_al81_partial_cell(
+                zeta, h_vtx, h_v, v, h_u, u,
+                u_mask_3d, v_mask_3d, vtx_mask_va,
+            )
+        else:  # "ene"
+            # NEMO vor_ene Sadourny 2-point.  f_vtx=None → relative-only
+            # (rvo trend); the planetary Coriolis stays in its own path
+            # (matsuno_split / explicit_ab2), matching the NEMO utrd_rvo /
+            # utrd_pvo diagnostic split.
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import pv_flux_ene
+            diag_vortcor_u, diag_vortcor_v = pv_flux_ene(
+                zeta, h_vtx, h_v, v, h_u, u,
+                u_mask_3d, v_mask_3d, vtx_mask_va,
+            )
 
     # Capture PV-flux advection contribution as the `vortcor` diagnostic
     # (per-step closure: Σ components == total to machine precision; see
@@ -3535,6 +3555,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             vertex_mask=vertex_mask,
             enstrophy_metric=config.vortcor_enstrophy_metric,
             reconstruct_zeta=config.vortcor_reconstruct_zeta,
+            vorticity_scheme=getattr(config, "vorticity_scheme", "al81"),
         )
 
     # --- Stage 7b': PLANETARY Coriolis as an explicit tendency (Veros-faithful).

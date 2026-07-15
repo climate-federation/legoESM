@@ -1250,6 +1250,21 @@ class LatLonCGridOceanConfig(NamedTuple):
     # cases): the q-form is retained by default because it conserves potential enstrophy
     # on partial-cell topography (AL81 triad; real ETOPO). False (default) = q-form.
     vortcor_reconstruct_zeta: bool = False
+    # Vector-invariant vorticity flux scheme (relative + optionally planetary).
+    #   "al81" (default) — Arakawa-Lamb 1981 / EEN 12-point triad
+    #     (``pv_flux_al81_partial_cell``): energy + potential-enstrophy
+    #     conserving, robust on partial-cell ETOPO.  Planetary Coriolis handled
+    #     separately (matsuno_split / explicit_ab2).
+    #   "ene" — NEMO ``vor_ene`` Sadourny-1975 2-point ENERGY-conserving form
+    #     (``pv_flux_ene``, NEMO ``ln_dynvor_ene``, the GYRE default). Selects
+    #     ENE for the RELATIVE-vorticity flux stencil ONLY (wired with
+    #     ``f_vtx=None``); the planetary Coriolis is NOT routed here — it stays in
+    #     the separate path (``coriolis_cgrid`` / matsuno_split / explicit_ab2),
+    #     which is byte-identical to ENE-planetary on a uniform-metric grid.
+    #     ``pv_flux_ene`` CAN fold planetary f into the same ``q=(f+ζ)/h`` operator
+    #     (pass ``f_vtx``), but that is not the wired default. NEMO oracle fidelity.
+    #     Dispatched in ``_bc_pv_flux``; an unknown value raises ValueError there.
+    vorticity_scheme: str = "al81"
     # WENO vertical momentum advection of the FULL velocity (matches Oceananigans, which
     # advects the full horizontal momentum vertically) instead of legoESM's default
     # baroclinic PERTURBATION u'=u−U_bar. The two differ by the flux-form redistribution

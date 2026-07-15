@@ -3574,6 +3574,124 @@ def density_jacobian_pgf_smc03_y(
         return diff / _dy_v_full_cell_pad_first(grid)[bcast]
 
 
+def pv_flux_ene(
+    zeta: jnp.ndarray,
+    h_vtx: jnp.ndarray,
+    h_v: jnp.ndarray,
+    v: jnp.ndarray,
+    h_u: jnp.ndarray,
+    u: jnp.ndarray,
+    u_mask_3d: jnp.ndarray,
+    v_mask_3d: jnp.ndarray,
+    vtx_mask: jnp.ndarray,
+    f_vtx: jnp.ndarray | None = None,
+    eps_h: float = 1.0e-10,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """NEMO ``vor_ene`` — Sadourny (1975) ENERGY-conserving 2-point PV flux.
+
+    Transcription of NEMO ``dynvor.F90::vor_ene`` (the GYRE default
+    ``ln_dynvor_ene``) into the ``latlon_cgrid_operators`` index convention
+    (see :func:`pv_flux_al81_partial_cell` for the vertex/face indexing).
+    Faithful to NEMO's stencil pairing/signs, but NOT term-for-term on a
+    varying-``cos(φ)`` grid: this module folds the metric into ``ζ`` and carries
+    bare ``h·u``/``h·v`` mass fluxes, dropping NEMO's explicit ``e1v/e1u`` =
+    ``cos(φ_v)/cos(φ_u)`` half-cell ratio (an ``O(dφ·tan φ)`` difference —
+    sub-1% across GYRE's 24-44°N, larger at high latitude). This matches the
+    AL81 sibling's convention and conserves this module's discrete energy exactly.
+    NEMO forms the potential vorticity ``q = (f + ζ)/e3f`` at F-points and
+    applies the Sadourny 2-point averaging::
+
+        voru = 1/e1u · mj-1[ q · mi(e1v·e3v·v) ]       (NEMO comment)
+        vorv = 1/e2v · mi-1[ q · mj(e2u·e3u·u) ]
+
+    which in this module's metric-in-ζ convention (``ζ`` from
+    :func:`curl_vertex_cgrid` already carries the ``1/e1e2f`` area factor, and
+    the ``e1v/e1u`` horizontal metric cancels on a regular grid) reduces to::
+
+        du/dt[j,i] = +¼ ( q[j  ,i]·(F_v[j  ,i-1]+F_v[j  ,i])
+                        + q[j+1,i]·(F_v[j+1,i-1]+F_v[j+1,i]) )
+        dv/dt[j,i] = -¼ ( q[j,i  ]·(F_u[j-1,i  ]+F_u[j,i  ])
+                        + q[j,i+1]·(F_u[j-1,i+1]+F_u[j,i+1]) )
+
+    with ``F_v = h·v`` (v-face mass flux), ``F_u = h·u`` (u-face mass flux).
+    Each F-point ``q`` multiplies ONLY the two mass fluxes on its own side
+    (south/north for u, west/east for v) — the property that makes the scheme
+    exactly energy-conserving (Sadourny 1975; the paired ``¼·q·u·v`` terms
+    appear identically in ``du`` and ``dv`` and cancel in ``Σ u·du+v·dv``).
+
+    This is the ENE sibling of :func:`pv_flux_al81_partial_cell` (EEN/AL81,
+    the 12-point triad).  On a uniform, fully-wet grid ENE is the plain
+    2-point Sadourny form, AL81 the 9-vertex energy-AND-enstrophy compromise;
+    they differ at the grid scale.
+
+    Parameters
+    ----------
+    f_vtx : (n_lat+1, n_lon+1) or None
+        Planetary Coriolis at F-points (vertices).  When given, the FULL ENE
+        operator ``q = (f+ζ)/h`` (NEMO ``np_CRV``) — replaces BOTH the
+        planetary Coriolis and the relative-vorticity flux.  When ``None``,
+        the relative-only form ``q = ζ/h`` (NEMO ``np_RVO``), for isolating
+        the ``rvo`` trend.
+    Other parameters : identical to :func:`pv_flux_al81_partial_cell`.
+
+    Returns
+    -------
+    (diag_vortcor_u, diag_vortcor_v) : the ``+q·F_v`` / ``-q·F_u`` momentum
+    tendency contributions, same shapes as the AL81 sibling.
+    """
+    # --- 1. PV at vertices.  q = (f + ζ)/h_vtx (CRV) or ζ/h_vtx (RVO) ---
+    # ``h_vtx`` carries the BIG_H sentinel at dry vertices so q ≈ 0 there.
+    # f is added BEFORE the /h division (matching NEMO: zwz = ff_f + ζ,
+    # then zwz /= e3f) so the planetary term also gets the F-point
+    # thickness weighting — the two are one operator, not two.
+    total_vort = zeta if f_vtx is None else (zeta + f_vtx[..., jnp.newaxis])
+    q = total_vort / jnp.maximum(h_vtx, eps_h)
+    # Neumann-fill only the RELATIVE part's discontinuity at the coast; the
+    # planetary f is smooth everywhere, so fill the whole q (idempotent at
+    # interior wet vertices).
+    q = neumann_fill_vertex(q, vtx_mask)
+
+    # --- 2. Mass fluxes at u/v faces (h·u, h·v), closed faces → 0 ---
+    F_u = h_u * u * u_mask_3d            # (n_lat, n_lon+1, nlev)
+    F_v = h_v * v * v_mask_3d            # (n_lat+1, n_lon, nlev)
+
+    # --- 3. u-face flux: ¼ ( q_S·(F_v_SW+F_v_SE) + q_N·(F_v_NW+F_v_NE) ) ---
+    # q already has shape (n_lat+1, n_lon+1, nlev) with the periodic wrap
+    # column, so q[:-1]/q[1:] are the south/north vertices of each u-face.
+    q_S_u = q[:-1, :, :]                 # (n_lat, n_lon+1, nlev)
+    q_N_u = q[1:, :, :]
+    # F_v at the four u-face corners — identical construction to AL81.
+    F_v_south = F_v[:-1, :, :]           # south v-face of each u-row
+    F_v_north = F_v[1:, :, :]
+    F_v_S_E = jnp.concatenate([F_v_south, F_v_south[:, 0:1, :]], axis=1)
+    F_v_N_E = jnp.concatenate([F_v_north, F_v_north[:, 0:1, :]], axis=1)
+    F_v_S_W = jnp.roll(F_v_S_E, 1, axis=1)
+    F_v_N_W = jnp.roll(F_v_N_E, 1, axis=1)
+    diag_vortcor_u = 0.25 * (
+        q_S_u * (F_v_S_W + F_v_S_E) + q_N_u * (F_v_N_W + F_v_N_E)
+    )
+
+    # --- 4. v-face flux: -¼ ( q_W·(F_u_SW+F_u_NW) + q_E·(F_u_SE+F_u_NE) ) ---
+    # q[:, :-1]/q[:, 1:] are the west/east vertices of each v-face.
+    q_W_v = q[:, :-1, :]                 # (n_lat+1, n_lon, nlev)
+    q_E_v = q[:, 1:, :]
+    # F_u at the four v-face corners — MPI/pole handling identical to AL81
+    # (zero-pad at physical poles, halo sendrecv at interior band cuts).
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
+    (F_u_pad,) = pad_with_pole_bc_lat_multi((F_u,), halo=1)  # (n_lat+2, n_lon+1, nlev)
+    F_u_south = F_u_pad[:-1, :, :]       # (n_lat+1, n_lon+1, nlev)
+    F_u_north = F_u_pad[1:, :, :]
+    F_u_S_W = F_u_south[:, :-1, :]       # (n_lat+1, n_lon, nlev)
+    F_u_S_E = F_u_south[:, 1:, :]
+    F_u_N_W = F_u_north[:, :-1, :]
+    F_u_N_E = F_u_north[:, 1:, :]
+    diag_vortcor_v = -0.25 * (
+        q_W_v * (F_u_S_W + F_u_N_W) + q_E_v * (F_u_S_E + F_u_N_E)
+    )
+
+    return diag_vortcor_u, diag_vortcor_v
+
+
 def pv_flux_al81_partial_cell(
     zeta: jnp.ndarray,
     h_vtx: jnp.ndarray,
