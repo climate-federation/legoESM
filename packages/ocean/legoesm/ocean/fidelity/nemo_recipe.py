@@ -103,6 +103,12 @@ class NEMOModelRecipeConfig:
     kappa_GM: float = 600.0
     kappa_Redi: float = 600.0
     redi_S_max: float = 0.005
+    # Iso-neutral tracer operator. "triads" (default) = the GM+Redi triad scheme
+    # for a GM-on NEMO (ln_ldfeiv=T, ln_traldf_triad=T; ORCA-style, kappa_GM>0).
+    # "nemo_iso_lap" = NEMO's standard rotated-Laplacian Redi (traldf_iso,
+    # ln_traldf_triad=F) — verified vs GYRE's dumped ttrd_ldf (T corr 0.96); it is
+    # PURE Redi (NEMO GYRE has ln_ldfeiv=F, no GM), so it forces kappa_GM=0.
+    lateral_operator: str = "triads"
 
     mle: bool = True
     rgb_shortwave: bool = True
@@ -261,16 +267,27 @@ def nemo_lat_lon_model_config(
         cfg = NEMOModelRecipeConfig()
 
     bottom_drag_r = cfg.bottom_drag_cd * cfg.bottom_drag_bg_velocity
+    if cfg.lateral_operator not in ("triads", "nemo_iso_lap"):
+        raise ValueError(
+            f"Unknown NEMOModelRecipeConfig.lateral_operator="
+            f"{cfg.lateral_operator!r}; expected 'triads' or 'nemo_iso_lap'.")
     gm_redi_cfg = None
     if cfg.gm_redi:
+        # nemo_iso_lap (NEMO traldf_iso, ln_traldf_triad=F) is PURE Redi — NEMO
+        # GYRE runs ln_ldfeiv=F (no GM bolus), and the operator raises on
+        # kappa_GM≠0, so force kappa_GM=0 when it is selected.
+        _kappa_gm = 0.0 if cfg.lateral_operator == "nemo_iso_lap" else cfg.kappa_GM
         gm_redi_cfg = GMRediConfig(
-            kappa_GM=cfg.kappa_GM,
+            kappa_GM=_kappa_gm,
             kappa_Redi=cfg.kappa_Redi,
             S_max=cfg.redi_S_max,
             visbeck=VisbeckConfig(enabled=False),
-            slope_scheme="triads",
+            slope_scheme=cfg.lateral_operator,
             slope_density="neutral",
             implicit_K33=True,
+            # nemo_iso_lap wants NEMO's ldfslp ML ramp + Shapiro slope fidelity.
+            nemo_mld_slope_ramp=(cfg.lateral_operator == "nemo_iso_lap"),
+            nemo_slope_shapiro=(cfg.lateral_operator == "nemo_iso_lap"),
         )
 
     return LatLonCGridOceanConfig.from_flat(

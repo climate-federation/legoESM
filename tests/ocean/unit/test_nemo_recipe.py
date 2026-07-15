@@ -126,6 +126,20 @@ def test_nemo_card_one_step_rest_sanity_is_finite():
     assert bool(jnp.all(jnp.isfinite(new_state.eta.data)))
 
 
+def test_nemo_iso_lap_card_one_step_is_finite():
+    """The nemo_iso_lap card steps finite through the full model — proves the
+    card wiring reaches the build-7 operator (kappa_GM=0 guard, active_3d, the
+    ramp+shapiro slopes) without error, not just that the config is built."""
+    recipe = build_nemo_rest_recipe(
+        n_lat=8, n_lon=12, nlev=4,
+        cfg=NEMOModelRecipeConfig(lateral_operator="nemo_iso_lap"))
+    model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, recipe.model_config)
+    new_state = model.step(recipe.initial_state, dt=60.0)
+    assert bool(jnp.all(jnp.isfinite(new_state.T.data)))
+    assert bool(jnp.all(jnp.isfinite(new_state.S.data)))
+    assert bool(jnp.all(jnp.isfinite(new_state.u.data)))
+
+
 def test_named_recipe_wrapper_dispatches_and_rejects_unknown_setup():
     rest = build_nemo_rest_recipe(n_lat=6, n_lon=8, nlev=3)
     eady = build_nemo_recipe(setup="eady", n_lat=12, n_lon=12, nlev=4)
@@ -154,6 +168,31 @@ def test_nemo_mapping_and_deferred_blocks_are_explicit():
         for name, _, selected in NEMO_BLOCK_MAPPING
     )
     assert any("leapfrog" in item for item in NEMO_DEFERRED_BLOCKS)
+
+
+def test_nemo_lateral_operator_selects_iso_lap_pure_redi():
+    """lateral_operator='nemo_iso_lap' selects NEMO traldf_iso, pure Redi.
+
+    GYRE runs ln_traldf_triad=F (standard rotated-Laplacian) + ln_ldfeiv=F (no
+    GM), so the card option must select slope_scheme='nemo_iso_lap', force
+    kappa_GM=0 (the operator raises otherwise), and turn on the NEMO ldfslp slope
+    fidelity (ML ramp + Shapiro). Default stays the GM-on triad scheme.
+    """
+    # default: GM-on triads, unchanged
+    d = nemo_lat_lon_model_config()
+    assert d.gm_redi.slope_scheme == "triads"
+    assert d.gm_redi.kappa_GM == 600.0
+    # nemo_iso_lap: standard operator, pure Redi, NEMO slope fidelity on
+    n = nemo_lat_lon_model_config(
+        NEMOModelRecipeConfig(lateral_operator="nemo_iso_lap"))
+    assert n.gm_redi.slope_scheme == "nemo_iso_lap"
+    assert n.gm_redi.kappa_GM == 0.0
+    assert n.gm_redi.nemo_mld_slope_ramp is True
+    assert n.gm_redi.nemo_slope_shapiro is True
+    # unknown selector raises (dispatch hardening)
+    with pytest.raises(ValueError, match="lateral_operator"):
+        nemo_lat_lon_model_config(
+            NEMOModelRecipeConfig(lateral_operator="bogus"))
 
 
 def test_nemo_tke_prandtl_bit_reproduces_nemo_pdl():
