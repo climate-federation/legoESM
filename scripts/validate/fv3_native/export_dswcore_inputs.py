@@ -52,7 +52,8 @@ _EDGES = (("EDGE_S", "edge_s"), ("EDGE_N", "edge_n"),
           ("EDGE_W", "edge_w"), ("EDGE_E", "edge_e"))
 _STATE = (("DELP", "delp"), ("PT", "pt"), ("W", "w"),
           ("U", "u"), ("V", "v"),
-          ("UC", "uc"), ("VC", "vc"), ("UA", "ua"), ("VA", "va"))
+          ("UC", "uc"), ("VC", "vc"), ("UA", "ua"), ("VA", "va"),
+          ("DIVGD_IN", "divg_d_in"))
 
 
 def main() -> None:
@@ -64,8 +65,7 @@ def main() -> None:
     args = ap.parse_args()
 
     from legoesm.core.fv3_native_sw_core import Bounds, c_sw
-    from legoesm.grids.fv3_native_gridstruct import (
-        exchange_cgrid_vector_halos)
+    from legoesm.grids.fv3_native_gridstruct import exchange_cgrid_vector_halos
 
     bd = Bounds.single_tile(args.res, args.ng)
 
@@ -103,6 +103,16 @@ def main() -> None:
     state["vc"] = vc6[0]
     state["ua"] = csw["ua"]
     state["va"] = csw["va"]
+    # d_sw reads its INOUT divg_d only on the compute B-nodes (the halo
+    # copy_corners in the n-loop is nt!=0 guarded, false at nord=1), where
+    # it copies divg_d -> delpc and feeds the Smagorinsky
+    # sqrt(delpc**2 + a2b_ord4(vort)**2).  Feeding the REAL c_sw divg_d
+    # (dyn_core corner-exchanges it before d_sw) makes a2b_ord4's output
+    # DISCRIMINATED — a -9e9 sentinel there would swamp the a2b term and
+    # leave it dead (codex p4b r1 P1-2).  The unread halo is left NaN.
+    divg_in = np.asarray(csw["divg_d"], dtype=np.float64).copy()
+    divg_in[~np.isfinite(divg_in)] = 0.0
+    state["divg_d_in"] = divg_in
 
     lo = 1 - args.ng
     txt = os.path.join(args.outdir, "dswcore_input.txt")

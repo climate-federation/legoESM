@@ -1388,10 +1388,14 @@ def a2b_ord4(qin: fort, qout: fort, gridstruct: dict, npx: int, npy: int,
     AGRID_LAT = gridstruct["agrid_lat"]
     DXA = gridstruct["dxa"]
     DYA = gridstruct["dya"]
-    EDGE_W = gridstruct["edge_w"]
-    EDGE_E = gridstruct["edge_e"]
-    EDGE_S = gridstruct["edge_s"]
-    EDGE_N = gridstruct["edge_n"]
+    # edge_{w,e,s,n} are 1-D Fortran arrays edge(1..npx); the gs dict holds
+    # them 0-based (edge[k] == Fortran edge(k+1)).  Wrap as fort1 origin 1
+    # so EDGE_?[j] returns the Fortran edge(j) — NOT the raw edge[j], which
+    # is off by one (the a2b edge interpolation bug the -9e9 divg_d masked).
+    EDGE_W = fort1(gridstruct["edge_w"], 1)
+    EDGE_E = fort1(gridstruct["edge_e"], 1)
+    EDGE_S = fort1(gridstruct["edge_s"], 1)
+    EDGE_N = fort1(gridstruct["edge_n"], 1)
 
     def _grid(i, j):
         return (GRID_LON[i, j], GRID_LAT[i, j])
@@ -2766,6 +2770,35 @@ def d_sw(delp, pt, w, u, v, uc, vc, ua, va, divg_d, xflux, yflux, cx, cy,
     da_min = gs["da_min"]
     da_min_c = gs["da_min_c"]
 
+    # ---- fail-loud entry guards (dispatch-hardening, codex p4b r1 P1-4) ----
+    # Several Fortran branches are transcribed for structural fidelity but
+    # NOT supported end-to-end on this single-tile cubed-sphere lane: the
+    # a2b/Smagorinsky path has no smag_corner (grid_type>=3), and the
+    # inline_q / use_cond / do_f3d / non-hydrostatic arms need real q /
+    # q_con / z_rat / pkc inputs that the oracle harness does not supply
+    # (they run on zero/one dummies).  Raise here instead of silently
+    # running wrong physics if a caller requests them.
+    if bounded_domain:
+        raise NotImplementedError(
+            "d_sw port: bounded_domain not supported (cubed-sphere only)")
+    if grid_type >= 3:
+        raise NotImplementedError(
+            "d_sw port: grid_type>=3 (doubly-periodic / smag_corner) "
+            "not supported")
+    if inline_q:
+        raise NotImplementedError(
+            "d_sw port: inline_q requires a real tracer array q")
+    if use_cond:
+        raise NotImplementedError(
+            "d_sw port: use_cond requires a real q_con array")
+    if do_f3d:
+        raise NotImplementedError(
+            "d_sw port: do_f3d (ROT3 w-source) not supported")
+    if not hydrostatic:
+        raise NotImplementedError(
+            "d_sw port: non-hydrostatic w-transport requires a real w "
+            "field / pkc; hydrostatic only")
+
     # ---- gridstruct pointer wraps (Fortran 101-124), origin (isd, jsd) ----
     area = fort(gs["area"], isd, jsd)
     rarea = fort(gs["rarea"], isd, jsd)
@@ -3613,10 +3646,13 @@ def run_oracle_case(fixture_dir: str) -> dict:
     # the oracle: CX/CY/XFLUX/YFLUX outputs are pure single-step
     # accumulations from 0).  divg_d is the one exception: the oracle
     # driver poison-inits it to -9e9 everywhere (its DELPC output, which
-    # is divg_d saved before the damping, is -9e9 on the whole compute
-    # region; the halo of the DIVGD output stays -9e9).  Reproduce that
-    # exact input state so the run matches the oracle bit-for-bit.
-    divg_d = np.full((ied + 1 - isd + 1, jed + 1 - jsd + 1), -9.0e9)  # (isd:ied+1,jsd:jed+1)
+    # is the REAL c_sw divergence (exporter DIVGD_IN); the unread halo is
+    # NaN->0.  Reproduce that exact input state so the run matches the
+    # oracle bit-for-bit and a2b_ord4's output is discriminated.
+    if "divg_d_in" in npz.files:
+        divg_d = np.array(npz["divg_d_in"], dtype=np.float64, copy=True)
+    else:  # legacy fixture without the real divergence
+        divg_d = np.full((ied + 1 - isd + 1, jed + 1 - jsd + 1), -9.0e9)
     xflux = np.zeros((ie + 1 - is_ + 1, je - js + 1))            # (is:ie+1,js:je)
     yflux = np.zeros((ie - is_ + 1, je + 1 - js + 1))            # (is:ie,js:je+1)
     cx = np.zeros((ie + 1 - is_ + 1, jed - jsd + 1))            # (is:ie+1,jsd:jed)

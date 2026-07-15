@@ -33,14 +33,17 @@ _CFG = dict(hord_tr=8, hord_mt=6, hord_vt=6, hord_tm=6, hord_dp=6,
             hydrostatic=True, do_diss_est=False)
 
 # oracle fixture key == python d_sw return key (fixture is stored on the
-# python array origin), so the comparison is a same-shape masked diff.
-# ``ptc`` is EXCLUDED: it is INTENT(OUT) scratch written only by the
-# nord==0 circulation branch (skipped at nord=1) — undefined in this
-# config, and the Fortran driver merely dumps its -9e9 poison.  ``delpc``
-# IS certified: the higher-order damping block writes delpc = divg_d.
+# python array origin), so the comparison is a same-shape masked diff over
+# the finite (== source-defined) region.  ``ptc`` is EXCLUDED: INTENT(OUT)
+# scratch written only by the nord==0 circulation branch (skipped at
+# nord=1) and the inline_q arm — genuinely undefined on this path, so the
+# driver does not dump it.  ``delpc`` IS certified over its full 1..res+1
+# write range; ``heat_source``/``diss_est`` verify the production zeroing;
+# ``divg_d`` in is the REAL c_sw divergence (feeds the Smagorinsky
+# sqrt(delpc**2 + a2b**2)), so a2b_ord4's output is discriminated.
 _FIELDS = ["delpc", "u", "vc", "v", "uc", "ua", "va", "divg_d",
            "crx_adv", "xfx_adv", "cx", "cry_adv", "yfx_adv", "cy",
-           "xflux", "yflux"]
+           "xflux", "yflux", "heat_source", "diss_est"]
 
 
 @pytest.fixture(scope="module")
@@ -68,11 +71,15 @@ def _run(inp, gs, dt_scale=1.0):
 
     res, ng = int(inp["res"]), int(inp["ng"])
     bd = Bounds.single_tile(res, ng)
-    m_a, m_b = res + 2 * ng, res + 2 * ng + 1
+    m_a = res + 2 * ng
+    # divg_d in = the REAL c_sw divergence (exporter's DIVGD_IN); the
+    # unread halo is NaN.  d_sw copies it into delpc and feeds the
+    # Smagorinsky a2b term, so a2b_ord4 is discriminated (codex p4b P1-2).
+    divg_in = np.array(inp["divg_d_in"], dtype=np.float64, copy=True)
     return d_sw(
         delp=inp["delp"], pt=inp["pt"], w=inp["w"], u=inp["u"], v=inp["v"],
         uc=inp["uc"], vc=inp["vc"], ua=inp["ua"], va=inp["va"],
-        divg_d=np.full((m_b, m_b), -9.0e9),
+        divg_d=divg_in,
         xflux=np.zeros((res + 1, res)), yflux=np.zeros((res, res + 1)),
         cx=np.zeros((res + 1, m_a)), cy=np.zeros((m_a, res + 1)),
         gs=gs, bd=bd, npx=res + 1, npy=res + 1,
@@ -86,9 +93,11 @@ def result(inputs):
 
 @pytest.mark.parametrize("field", _FIELDS)
 def test_d_sw_matches_fortran(result, oracle, field):
-    """Bit-exact (rel err < 1e-11) on the source-defined region.  The
-    Fortran driver dumps only slots its write loops define; the fixture
-    holds NaN elsewhere, so the finite mask IS the defined region."""
+    """Bit-exact (rel err < 1e-11) over the finite fixture region.  The
+    Fortran driver dumps only the source-defined write-loop ranges of each
+    field (documented per-field in the driver's dump_all); the builder
+    stores them on the python array origin and leaves every other slot
+    NaN, so the finite mask is exactly the compared region."""
     want = np.asarray(oracle[field], dtype=np.float64)
     got = np.asarray(result[field], dtype=np.float64)
     assert got.shape == want.shape, field
@@ -109,3 +118,24 @@ def test_oracle_comparison_has_teeth(inputs, oracle):
     err = (np.abs(got[finite] - want[finite])
            / np.maximum(np.abs(want[finite]), 1.0)).max()
     assert err > 1e-6, "perturbed dt still matches — vacuous gate"
+
+
+def test_a2b_ord4_is_discriminated(inputs, oracle, monkeypatch):
+    """The Smagorinsky divergence damping actually depends on a2b_ord4's
+    output — with the REAL c_sw divg_d fed in, zeroing a2b_ord4 must break
+    the u update (codex p4b P1-2: a -9e9 divg_d left a2b's result dead)."""
+    import legoesm.core.fv3_native_d_sw as mod
+
+    def _a2b_zero(qin, qout, *a, **k):
+        for i in range(qout.a.shape[0]):
+            for j in range(qout.a.shape[1]):
+                qout.a[i, j] = 0.0
+
+    monkeypatch.setattr(mod, "a2b_ord4", _a2b_zero)
+    out = _run(inputs, _make_gs(inputs))
+    want = np.asarray(oracle["u"], dtype=np.float64)
+    got = np.asarray(out["u"], dtype=np.float64)
+    finite = np.isfinite(want)
+    err = (np.abs(got[finite] - want[finite])
+           / np.maximum(np.abs(want[finite]), 1.0)).max()
+    assert err > 1e-8, "zeroing a2b_ord4 left u unchanged — a2b is dead"

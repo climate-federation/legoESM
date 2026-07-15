@@ -160,6 +160,7 @@ program fv3_dswcore_oracle_driver
       case ('VC');      vc(i, j) = val
       case ('UA');      ua(i, j) = val
       case ('VA');      va(i, j) = val
+      case ('DIVGD_IN'); divg_d(i, j) = val
       case default
         stop 'unknown record name'
       end select
@@ -248,29 +249,39 @@ contains
 
   subroutine dump_all()
     ! d_sw source-defined output regions (sw_core.F90 d_sw write loops;
-    ! INTENT(OUT) args dumped only where defined):
-    !   delpc/ptc   : compute cells [1..res]^2  (final flux updates)
+    ! INTENT(OUT) / INOUT args dumped only where the source DEFINES them):
+    !   delpc       : the higher-order damping block writes 1..res+1 in
+    !                 both directions (sw_core.F90:1376, delpc=divg_d over
+    !                 is..ie+1, js..je+1) -> (res+1)^2 = 169, not res^2.
+    !   ptc         : NOT dumped — INTENT(OUT) scratch written only by the
+    !                 nord==0 circulation branch (skipped at nord=1) and
+    !                 the inline_q arm; genuinely undefined on this path.
     !   u/v (INOUT) : D-wind update loops  u i 1..res, j 1..res+1;
     !                                      v i 1..res+1, j 1..res
     !   uc/vc/ua/va : INOUT, updated on compute + consumed rings; dump
-    !                 the full data domain (they were fully defined
-    !                 INPUTS — every slot has a defined value)
-    !   divg_d      : INOUT (fully defined input; damping updates B ring)
-    !   crx/xfx_adv : i 1..res+1, j jsd..jed;  cry/yfx transposed
+    !                 the full data domain (fully defined INPUTS).
+    !   divg_d      : INOUT (real c_sw divergence in; damping updates the
+    !                 B ring 1..res+1).
+    !   crx/xfx_adv : i 1..res+1, j jsd..jed;  cry/yfx transposed.
     !   cx/xflux    : i 1..res+1 (cx j jsd..jed; xflux j 1..res); cy/yflux
-    !                 transposed
-    !   heat_source/diss_est: compute (d_con=0 -> zeros, still defined? —
-    !                 NOT dumped: with d_con=0. and do_diss_est=F the
-    !                 source never writes them)
+    !                 transposed.
+    !   heat_source/diss_est: production #ifndef SW_DYNAMICS zeroes them on
+    !                 the compute domain is..ie, js..je (d_con=0/do_diss_est
+    !                 =F leave them at 0) — a real defined output.
     integer :: isd, ied, jsd, jed
     isd = bd%isd; ied = bd%ied; jsd = bd%jsd; jed = bd%jed
     open(newunit=u_out, file='dswcore_output.txt', status='replace', &
          action='write')
     write(u_out, '(A,I0)') '# res ', res
-    do j = 1, res
-      do i = 1, res
+    do j = 1, res + 1
+      do i = 1, res + 1
         write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'DELPC', i, j, delpc(i, j)
-        write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'PTC', i, j, ptc(i, j)
+      end do
+    end do
+    do j = bd%js, bd%je
+      do i = bd%is, bd%ie
+        write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'HEAT', i, j, heat_source(i, j)
+        write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'DISS', i, j, diss_est(i, j)
       end do
     end do
     do j = jsd, jed + 1

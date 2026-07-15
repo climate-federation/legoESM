@@ -19,5 +19,8 @@ gfortran $FF -J "$W" -c "$HERE/fv3_dswcore_extract.F90" -o "$W/dsw.o"
 gfortran $FF -J "$W" "$HERE/fv3_dswcore_oracle_driver.F90" \
     "$W/shim.o" "$W/ext.o" "$W/dsw.o" -o "$W/oracle"
 "$W/oracle"
-echo "oracle dump: $W/dswcore_output.txt (npz twin: $W/dswcore_input.npz)"
-echo "rebuild the fixture npz with tests/grids/fixtures/build_dsw_fixture.py"
+# build the oracle npz on the python-return array origins
+"$PY" "$REPO/tests/grids/fixtures/build_dsw_fixture.py" \
+    "$W/dswcore_output.txt" "$W/dswcore_oracle_c12.npz" "$RES" "$NG"
+echo "fixtures: $W/dswcore_input.npz + $W/dswcore_oracle_c12.npz"
+echo "install into tests/grids/fixtures/ to update the committed pair"
