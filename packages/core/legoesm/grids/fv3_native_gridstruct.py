@@ -351,8 +351,128 @@ def build_fv3_native_gridstruct(n: int, ng: int = 3, *,
 
     rarea_c = np.full((m_b, m_b), BIG_NUMBER)
     rarea_c[sl_b, sl_b] = 1.0 / cert["area_c"][0]
+    area_c = np.full((m_b, m_b), BIG_NUMBER)
+    area_c[sl_b, sl_b] = cert["area_c"][0]
+
+    # ---- d_sw additions (phase 4b) ----
+    def recip(x):
+        return np.where(x != BIG_NUMBER, 1.0 / x, BIG_NUMBER)
+
+    rdx, rdy = recip(dx), recip(dy)
+    rdxa, rdya = recip(dxa), recip(dya)
+
+    # f0: Coriolis at cell centres (test_cases init formula on agrid)
+    f0 = np.full((m_a, m_a), BIG_NUMBER)
+    f0[cell_ok] = 2.0 * omega * (
+        -np.cos(agrid_ll[..., 0][cell_ok]) * np.cos(agrid_ll[..., 1][cell_ok])
+        * np.sin(rotation_alpha)
+        + np.sin(agrid_ll[..., 1][cell_ok]) * np.cos(rotation_alpha))
+
+    # B-node cosa/sina (grid_utils_init loop js..je+1 — compute B only) and
+    # rsina with the panel-border big_number rule (the (npx,npy) branch is
+    # an upstream no-op: that node keeps the big_number initialisation)
+    cosa_b = np.full((m_b, m_b), BIG_NUMBER)
+    sina_b = np.full((m_b, m_b), BIG_NUMBER)
+    rsina = np.full((m_b, m_b), BIG_NUMBER)
+    cosa_b[sl_b, sl_b] = 0.5 * (csg[ng - 1:ng + n, ng - 1:ng + n, 7]
+                                + csg[ng:ng + n + 1, ng:ng + n + 1, 5])
+    sina_b[sl_b, sl_b] = 0.5 * (ssg[ng - 1:ng + n, ng - 1:ng + n, 7]
+                                + ssg[ng:ng + n + 1, ng:ng + n + 1, 5])
+    inner = slice(ng + 1, ng + n)      # Fortran B 2..npx-1
+    rsina[inner, inner] = 1.0 / np.maximum(TINY_NUMBER,
+                                           sina_b[inner, inner] ** 2)
+
+    # divg_u/del6_u (u-position: cell-i x node-j) over the FULL data domain
+    # with the seam-row special at Fortran j==1/npy — the same rows carry
+    # the neighbours' own border specials in the halo strips (seam-aligned,
+    # axis-swapped CGRID pair), so one uniform rule reproduces the
+    # post-mpp state.
+    divg_u = np.full((m_a, m_b), BIG_NUMBER)
+    del6_u = np.full((m_a, m_b), BIG_NUMBER)
+    okj = cell_ok[:, :-1] & cell_ok[:, 1:]         # dyc-style validity
+    with np.errstate(invalid="ignore", divide="ignore"):
+        plain_u = sina_v * dyc / np.where(dx != BIG_NUMBER, dx, np.nan)
+        plain6_u = sina_v * dx / np.where(dyc != BIG_NUMBER, dyc, np.nan)
+    ok_u = (sina_v != BIG_NUMBER) & (dyc != BIG_NUMBER) & (dx != BIG_NUMBER)
+    divg_u[ok_u] = plain_u[ok_u]
+    del6_u[ok_u] = plain6_u[ok_u]
+    SSGf = fort(ssg, clo, clo)
+    for jrow in (1, npx):              # Fortran node j == 1, npy
+        jn = jrow + ng - 1
+        for icell in range(1 - ng, n + ng + 1):
+            ic = icell + ng - 1
+            if not (cell_ok[ic, jn - 1] if jn - 1 >= 0 else False) \
+                    or not (cell_ok[ic, jn] if jn < m_a else False):
+                continue
+            s = 0.5 * (SSGf[icell, jrow, 2 - 1]
+                       + SSGf[icell, jrow - 1, 4 - 1])
+            divg_u[ic, jn] = s * dyc[ic, jn] / dx[ic, jn]
+            del6_u[ic, jn] = s * dx[ic, jn] / dyc[ic, jn]
+
+    divg_v = np.full((m_b, m_a), BIG_NUMBER)
+    del6_v = np.full((m_b, m_a), BIG_NUMBER)
+    ok_v = (sina_u != BIG_NUMBER) & (dxc != BIG_NUMBER) & (dy != BIG_NUMBER)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        plain_v = sina_u * dxc / np.where(dy != BIG_NUMBER, dy, np.nan)
+        plain6_v = sina_u * dy / np.where(dxc != BIG_NUMBER, dxc, np.nan)
+    divg_v[ok_v] = plain_v[ok_v]
+    del6_v[ok_v] = plain6_v[ok_v]
+    for irow in (1, npx):              # Fortran face i == 1, npx
+        ic = irow + ng - 1
+        for jcell in range(1 - ng, n + ng + 1):
+            jn = jcell + ng - 1
+            if not (cell_ok[ic - 1, jn] if ic - 1 >= 0 else False) \
+                    or not (cell_ok[ic, jn] if ic < m_a else False):
+                continue
+            s = 0.5 * (SSGf[irow, jcell, 1 - 1]
+                       + SSGf[irow - 1, jcell, 3 - 1])
+            divg_v[ic, jn] = s * dxc[ic, jn] / dy[ic, jn]
+            del6_v[ic, jn] = s * dy[ic, jn] / dxc[ic, jn]
+
+    # A->B edge interpolation factors (edge_factors, non_ortho route)
+    edge_w = np.full(n + 1, BIG_NUMBER)
+    edge_e = np.full(n + 1, BIG_NUMBER)
+    edge_s = np.full(n + 1, BIG_NUMBER)
+    edge_n = np.full(n + 1, BIG_NUMBER)
+    for j in range(2, n + 1):          # Fortran j = 2..npy-1
+        jn = j + ng - 1
+        # west/east: py(j) = mid(agrid(i-1, j), agrid(i, j)) at Fortran
+        # i = 1 / npx — the i-index pair straddles the border into the
+        # halo strip on the east side (cell npx == first halo cell)
+        for arr, irow in ((edge_w, ng), (edge_e, npx + ng - 1)):
+            py0 = mid_pt_sphere(agrid_ll[irow - 1, jn - 1],
+                                agrid_ll[irow, jn - 1])
+            py1 = mid_pt_sphere(agrid_ll[irow - 1, jn],
+                                agrid_ll[irow, jn])
+            gpt = grid_ll[irow, jn]
+            d1 = great_circle_dist(py0, gpt)
+            d2 = great_circle_dist(py1, gpt)
+            arr[j - 1] = d2 / (d1 + d2)
+        for arr, jrow in ((edge_s, ng), (edge_n, npx + ng - 1)):
+            px0 = mid_pt_sphere(agrid_ll[jn - 1, jrow - 1],
+                                agrid_ll[jn - 1, jrow])
+            px1 = mid_pt_sphere(agrid_ll[jn, jrow - 1],
+                                agrid_ll[jn, jrow])
+            gpt = grid_ll[jn, jrow]
+            d1 = great_circle_dist(px0, gpt)
+            d2 = great_circle_dist(px1, gpt)
+            arr[j - 1] = d2 / (d1 + d2)
+
+    da_min = float(cert["area"].min())
+    da_max = float(cert["area"].max())
+    da_min_c = float(cert["area_c"][:, :n, :n].min())
+    da_max_c = float(cert["area_c"][:, :n, :n].max())
 
     return {
+        "rdx": rdx, "rdy": rdy, "rdxa": rdxa, "rdya": rdya,
+        "f0": f0, "cosa": cosa_b, "sina": sina_b, "rsina": rsina,
+        "divg_u": divg_u, "divg_v": divg_v,
+        "del6_u": del6_u, "del6_v": del6_v,
+        "edge_s": edge_s, "edge_n": edge_n,
+        "edge_w": edge_w, "edge_e": edge_e,
+        "area_c": area_c,
+        "da_min": da_min, "da_max": da_max,
+        "da_min_c": da_min_c, "da_max_c": da_max_c,
         "n": n, "ng": ng, "npx": npx,
         "grid_lon": g_lon, "grid_lat": g_lat,
         "agrid_lon": agrid_ll[..., 0], "agrid_lat": agrid_ll[..., 1],
