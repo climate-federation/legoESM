@@ -59,6 +59,9 @@ diagnostics/
 # Local-only research-PDF stash (papers consulted while planning).
 # See CLAUDE.md "Code Hygiene Rules" — never committed.
 docs/references/
+# Local-only oracle source clones consulted for faithfulness audits
+# (e.g. ecmwf-ifs/openifs for the Bechtold convection audit) — never committed.
+ifs-source/
 
 # Exceptions: the `.nc` files under
 # `src/legoesm/atmosphere/physics/radiation/rrtmgp/optics/rrtmgp_data/`
