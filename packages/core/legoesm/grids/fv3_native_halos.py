@@ -61,6 +61,86 @@ class _F:
         self.a[f - self.lo] = v
 
 
+def _ed_line(n: int, sg_ng: int) -> "_F":
+    """gen_lonlat_equal_edge 1-D supergrid line (grid_type == 0), ghosted.
+
+    Returns the ED gnomonic tangent coordinates on supergrid indices
+    ``1-sg_ng .. 2n+1+sg_ng`` (Fortran numbering via ``_F``): interior
+    equal-angle tangents, lower ghosts by the reference's own
+    ``tan(-pi/2 - atan(...))`` continuation, upper half mirrored.  One
+    construction shared by every extended/kinked lattice builder here.
+    """
+    sg_is, sg_ie = 1, 2 * n + 1
+    sg_nc = 1 + n
+    sg_isd, sg_ied = sg_is - sg_ng, sg_ie + sg_ng
+
+    line = _F(sg_isd, sg_ied)
+    rsq3 = 1.0 / np.sqrt(3.0)
+    alpha = np.arcsin(rsq3)
+    dela = 2.0 * alpha / (sg_ie - sg_is)
+    line[sg_is] = -1.0
+    line[sg_nc] = 0.0
+    for j in range(sg_is + 1, sg_nc):
+        line[j] = np.tan((j - 1) * dela - alpha) * np.sqrt(2.0)
+    # ghost continuation below the panel
+    for j in range(sg_isd, sg_is):
+        jj = 2 * sg_is - j
+        line[j] = np.tan(-0.5 * np.pi - np.arctan(line[jj]))
+    # mirror to the upper half (incl. upper ghosts)
+    for j in range(sg_isd, sg_nc):
+        line[sg_ie - j + 1] = -line[j]
+    return line
+
+
+# The six reference-numbering cube-face embeddings of the [-1, 1]^2 tangent
+# plane (global_grid's tile order).
+_ED_CARTS = (
+    lambda x, y: (np.ones_like(x), x, y),        # tile 1
+    lambda x, y: (-x, np.ones_like(x), y),       # tile 2
+    lambda x, y: (-x, -y, np.ones_like(x)),      # tile 3
+    lambda x, y: (-np.ones_like(x), -y, -x),     # tile 4
+    lambda x, y: (y, -np.ones_like(x), -x),      # tile 5
+    lambda x, y: (y, x, -np.ones_like(x)),       # tile 6
+)
+
+
+def ed_supergrid_lonlat_ref(n: int):
+    """Compute-domain ED supergrid lon/lat, REFERENCE face numbering.
+
+    Returns ``lon6, lat6`` of shape (6, 2n+1, 2n+1) over supergrid nodes
+    1..2n+1 (index 0 == supergrid 1) — every stagger's physical positions
+    (corners at odd-odd, centres at even-even, face mid-points mixed).
+    Used by the phase-4 single-tile gridstruct builder to sample KINKED
+    (neighbour-face) halo coordinates, i.e. exactly what an mpp halo
+    exchange delivers.
+    """
+    line = _ed_line(n, 0)
+    vals = np.array([line[j] for j in range(1, 2 * n + 2)])
+    X, Y = np.meshgrid(vals, vals, indexing="ij")
+    m = len(vals)
+    lon6 = np.zeros((6, m, m))
+    lat6 = np.zeros((6, m, m))
+    for t in range(6):
+        cx, cy, cz = _ED_CARTS[t](X, Y)
+        r = np.sqrt(cx * cx + cy * cy + cz * cz)
+        lon6[t] = np.mod(np.arctan2(cy, cx), 2.0 * np.pi)
+        lat6[t] = np.arcsin(cz / r)
+    return lon6, lat6
+
+
+# Public aliases for the certified neighbour maps (cross-module consumers:
+# fv3_native_gridstruct; private names retained for the oracle-pinned k2e
+# internals below).
+def neighbor_tiles(n: int) -> tuple[int, int, int, int]:
+    """Public wrapper over the certified ``get_neighbor_tile_num`` port."""
+    return _neighbor_tiles(n)
+
+
+def neighbor_index(i: int, j: int, n: int, n_src: int, npx: int, npy: int):
+    """Public wrapper over the certified ``get_neighbor_index`` port."""
+    return _neighbor_index(i, j, n, n_src, npx, npy)
+
+
 def _neighbor_tiles(n: int) -> tuple[int, int, int, int]:
     """get_neighbor_tile_num (tiles 1..6) -> (nw, ne, ns, nn)."""
     if n % 2 == 0:
@@ -145,38 +225,17 @@ def compute_fv3_native_k2e(res: int, remap_ng: int = 3,
 
     # ---- supergrid 1-D line (gen_lonlat_equal_edge, grid_type == 0) ----
     sg_is, sg_ie = 1, 2 * res + 1
-    sg_nc = 1 + res
+    sg_nc = 1 + res          # panel-centre index (gen_coords reuses it)
     sg_ng = 2 * gg_ng
     sg_isd, sg_ied = sg_is - sg_ng, sg_ie + sg_ng
 
-    line = _F(sg_isd, sg_ied)
-    rsq3 = 1.0 / np.sqrt(3.0)
-    alpha = np.arcsin(rsq3)
-    dela = 2.0 * alpha / (sg_ie - sg_is)
-    line[sg_is] = -1.0
-    line[sg_nc] = 0.0
-    for j in range(sg_is + 1, sg_nc):
-        line[j] = np.tan((j - 1) * dela - alpha) * np.sqrt(2.0)
-    # ghost continuation below the panel
-    for j in range(sg_isd, sg_is):
-        jj = 2 * sg_is - j
-        line[j] = np.tan(-0.5 * np.pi - np.arctan(line[jj]))
-    # mirror to the upper half (incl. upper ghosts)
-    for j in range(sg_isd, sg_nc):
-        line[sg_ie - j + 1] = -line[j]
+    line = _ed_line(res, sg_ng)
 
     # ---- six cube-face embeddings -> pt_ext latitudes ----
     idx = np.arange(sg_isd, sg_ied + 1)
     lv = np.array([line[j] for j in idx])
     X, Y = np.meshgrid(lv, lv, indexing="ij")
-    carts = (
-        lambda x, y: (np.ones_like(x), x, y),        # tile 1
-        lambda x, y: (-x, np.ones_like(x), y),       # tile 2
-        lambda x, y: (-x, -y, np.ones_like(x)),      # tile 3
-        lambda x, y: (-np.ones_like(x), -y, -x),     # tile 4
-        lambda x, y: (y, -np.ones_like(x), -x),      # tile 5
-        lambda x, y: (y, x, -np.ones_like(x)),       # tile 6
-    )
+    carts = _ED_CARTS
     npts = sg_ied - sg_isd + 1
     lat_ext = np.full((6, npts, npts), np.nan)
     for t in range(6):
@@ -379,40 +438,16 @@ def _ed_ext_agrid_lonlat(n: int, ng: int):
         _GNOMONIC_ED_FACE_ROT,
     )
 
-    sg_is, sg_ie = 1, 2 * n + 1
-    sg_nc = 1 + n
     # supergrid ghost width: need A-points to i = n+ng -> supergrid 2(n+ng),
     # i.e. sg_ie + 2*ng - 1; build with the reference's own sg_ng = 2*(ng+2)
     # ghost layers, which covers every ng <= 3 use.
-    sg_ng = 2 * (ng + 2)
-    sg_isd, sg_ied = sg_is - sg_ng, sg_ie + sg_ng
-
-    line = _F(sg_isd, sg_ied)
-    rsq3 = 1.0 / np.sqrt(3.0)
-    alpha = np.arcsin(rsq3)
-    dela = 2.0 * alpha / (sg_ie - sg_is)
-    line[sg_is] = -1.0
-    line[sg_nc] = 0.0
-    for j in range(sg_is + 1, sg_nc):
-        line[j] = np.tan((j - 1) * dela - alpha) * np.sqrt(2.0)
-    for j in range(sg_isd, sg_is):
-        jj = 2 * sg_is - j
-        line[j] = np.tan(-0.5 * np.pi - np.arctan(line[jj]))
-    for j in range(sg_isd, sg_nc):
-        line[sg_ie - j + 1] = -line[j]
+    line = _ed_line(n, 2 * (ng + 2))
 
     # A-point 1-D values: supergrid even indices 2i for i = 1-ng .. n+ng
     ai = np.arange(1 - ng, n + ng + 1)
     av = np.array([line[2 * i] for i in ai])
     X, Y = np.meshgrid(av, av, indexing="ij")
-    carts = (
-        lambda x, y: (np.ones_like(x), x, y),
-        lambda x, y: (-x, np.ones_like(x), y),
-        lambda x, y: (-x, -y, np.ones_like(x)),
-        lambda x, y: (-np.ones_like(x), -y, -x),
-        lambda x, y: (y, -np.ones_like(x), -x),
-        lambda x, y: (y, x, -np.ones_like(x)),
-    )
+    carts = _ED_CARTS
     m = len(ai)
     lon6 = np.zeros((6, m, m))
     lat6 = np.zeros((6, m, m))
@@ -444,24 +479,7 @@ def _ed_ext_stagger_lonlat(n: int, ng: int, parity: str):
         _GNOMONIC_ED_FACE_ROT,
     )
 
-    sg_is, sg_ie = 1, 2 * n + 1
-    sg_nc = 1 + n
-    sg_ng = 2 * (ng + 2)
-    sg_isd, sg_ied = sg_is - sg_ng, sg_ie + sg_ng
-
-    line = _F(sg_isd, sg_ied)
-    rsq3 = 1.0 / np.sqrt(3.0)
-    alpha = np.arcsin(rsq3)
-    dela = 2.0 * alpha / (sg_ie - sg_is)
-    line[sg_is] = -1.0
-    line[sg_nc] = 0.0
-    for j in range(sg_is + 1, sg_nc):
-        line[j] = np.tan((j - 1) * dela - alpha) * np.sqrt(2.0)
-    for j in range(sg_isd, sg_is):
-        jj = 2 * sg_is - j
-        line[j] = np.tan(-0.5 * np.pi - np.arctan(line[jj]))
-    for j in range(sg_isd, sg_nc):
-        line[sg_ie - j + 1] = -line[j]
+    line = _ed_line(n, 2 * (ng + 2))
 
     if parity == "A":
         idx = np.arange(1 - ng, n + ng + 1)
@@ -472,14 +490,7 @@ def _ed_ext_stagger_lonlat(n: int, ng: int, parity: str):
     else:  # pragma: no cover - guard
         raise ValueError(parity)
     X, Y = np.meshgrid(vals, vals, indexing="ij")
-    carts = (
-        lambda x, y: (np.ones_like(x), x, y),
-        lambda x, y: (-x, np.ones_like(x), y),
-        lambda x, y: (-x, -y, np.ones_like(x)),
-        lambda x, y: (-np.ones_like(x), -y, -x),
-        lambda x, y: (y, -np.ones_like(x), -x),
-        lambda x, y: (y, x, -np.ones_like(x)),
-    )
+    carts = _ED_CARTS
     m = len(idx)
     lon6 = np.zeros((6, m, m))
     lat6 = np.zeros((6, m, m))

@@ -387,6 +387,38 @@ def compute_fv3_native_metrics(
 # Exact staggered angle/tangent fields (grid_utils_init,
 # fv_grid_utils.F90:240-561) — phase 2B
 # --------------------------------------------------------------------------
+# Public aliases for the certified geometric primitives (cross-module
+# consumers: fv3_native_gridstruct).  Defined after the private bodies below.
+def latlon2xyz(p: np.ndarray) -> np.ndarray:
+    """Public wrapper over the certified ``latlon2xyz`` port."""
+    return _latlon2xyz(p)
+
+
+def great_circle_dist(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    """Public wrapper over the certified ``great_circle_dist`` port."""
+    return _great_circle_dist(q1, q2)
+
+
+def mid_pt_sphere(p1: np.ndarray, p2: np.ndarray) -> np.ndarray:
+    """Public wrapper over the certified ``mid_pt_sphere`` port."""
+    return _mid_pt_sphere(p1, p2)
+
+
+def cell_center2(q1, q2, q3, q4) -> np.ndarray:
+    """Public wrapper over the certified ``cell_center2`` port."""
+    return _cell_center2(q1, q2, q3, q4)
+
+
+def get_area_quad(p1, p2, p3, p4) -> np.ndarray:
+    """Public wrapper over the certified spherical-excess quad area port."""
+    return _get_area_quad(p1, p2, p3, p4)
+
+
+def mid_pt3(e1: np.ndarray, e2: np.ndarray) -> np.ndarray:
+    """Public wrapper over the certified ``mid_pt3_cart`` port."""
+    return _mid_pt3(e1, e2)
+
+
 def _cos_angle_ld(e1: np.ndarray, e2: np.ndarray, e3: np.ndarray) -> np.ndarray:
     """cos of the angle at e1 between great circles to e2 and e3 (cos_angle).
 
@@ -411,6 +443,59 @@ def _mid_pt3(e1: np.ndarray, e2: np.ndarray) -> np.ndarray:
     """mid_pt3_cart: normalized cartesian midpoint (xyz in, xyz out)."""
     e = e1 + e2
     return e / np.linalg.norm(e, axis=-1, keepdims=True)
+
+
+def sg_window_fields(X: np.ndarray, ctr: np.ndarray):
+    """cos_sg/sin_sg over a cell window (grid_utils_init "No averaging").
+
+    Parameters
+    ----------
+    X : (M+1, M+1, 3) float64
+        Corner-node cartesian positions (any window; halo-inclusive OK).
+    ctr : (M, M, 3) float64
+        Cell-centre cartesian positions for the same cells.
+
+    Returns
+    -------
+    csg, ssg : (M, M, 9) float64 with FV3 positions 1..9 at index 0..8
+        (0=W, 1=S, 2=E, 3=N mid-edges; 4=centre; 5=SW, 6=SE, 7=NE, 8=NW).
+        ``ssg = min(1, sqrt(max(0, 1 - csg**2)))`` exactly as upstream.
+
+    Shared by ``compute_fv3_native_angles`` (phase 2B) and the phase-4
+    single-tile gridstruct builder — one construction, never re-derived.
+    """
+    A = X[:-1, :-1]
+    B = X[1:, :-1]
+    C = X[:-1, 1:]
+    D = X[1:, 1:]
+
+    m0, m1 = ctr.shape[0], ctr.shape[1]
+    csg = np.empty((m0, m1, 9))
+    # corners (upstream sign pattern; FV3 6,7,8,9 -> idx 5,6,7,8)
+    csg[..., 5] = _cos_angle_ld(A, B, C)
+    csg[..., 6] = -_cos_angle_ld(B, A, D)
+    csg[..., 7] = _cos_angle_ld(D, B, C)
+    csg[..., 8] = -_cos_angle_ld(C, A, D)
+    # edge mid-points (FV3 1..4 -> idx 0..3): W, S, E, N
+    csg[..., 0] = _cos_angle_ld(_mid_pt3(A, C), ctr, C)
+    csg[..., 1] = _cos_angle_ld(_mid_pt3(A, B), B, ctr)
+    csg[..., 2] = _cos_angle_ld(_mid_pt3(B, D), ctr, B)
+    csg[..., 3] = _cos_angle_ld(_mid_pt3(C, D), C, ctr)
+    # centre (FV3 5 -> idx 4): inner_prod(ec1, ec2), get_center_vect
+    pc = A + B + C + D
+    pc = pc / np.linalg.norm(pc, axis=-1, keepdims=True)  # cell_center3
+    p3 = np.cross(_mid_pt3(B, D), _mid_pt3(A, C))
+    ec1 = np.cross(pc, p3)
+    ec1 = ec1 / np.linalg.norm(ec1, axis=-1, keepdims=True)
+    p3 = np.cross(_mid_pt3(C, D), _mid_pt3(A, B))
+    ec2 = np.cross(pc, p3)
+    ec2 = ec2 / np.linalg.norm(ec2, axis=-1, keepdims=True)
+    csg[..., 4] = np.einsum(
+        "...i,...i", ec1.astype(np.longdouble),
+        ec2.astype(np.longdouble)).astype(np.float64)
+
+    ssg = np.minimum(1.0, np.sqrt(np.maximum(0.0, 1.0 - csg**2)))
+    return csg, ssg
 
 
 def compute_fv3_native_angles(lon6: np.ndarray, lat6: np.ndarray) -> dict:
@@ -464,39 +549,10 @@ def compute_fv3_native_angles(lon6: np.ndarray, lat6: np.ndarray) -> dict:
     for f in range(6):
         X = _latlon2xyz(gridh[f])          # (npx+2, npx+2, 3) nodes w/ halo
         ctr = _latlon2xyz(agridh[f])       # (n+2, n+2, 3) centres w/ halo
-        # cell-window corner arrays over ALL (n+2)x(n+2) halo cells
-        # (diagonal halo cells produce garbage from poison nodes; they are
-        # never read — only side-halo cells feed the staggered averages)
-        A = X[:-1, :-1]
-        B = X[1:, :-1]
-        C = X[:-1, 1:]
-        D = X[1:, 1:]
-
-        csg = np.empty((n + 2, n + 2, 9))
-        # corners (upstream sign pattern; FV3 6,7,8,9 -> idx 5,6,7,8)
-        csg[..., 5] = _cos_angle_ld(A, B, C)
-        csg[..., 6] = -_cos_angle_ld(B, A, D)
-        csg[..., 7] = _cos_angle_ld(D, B, C)
-        csg[..., 8] = -_cos_angle_ld(C, A, D)
-        # edge mid-points (FV3 1..4 -> idx 0..3): W, S, E, N
-        csg[..., 0] = _cos_angle_ld(_mid_pt3(A, C), ctr, C)
-        csg[..., 1] = _cos_angle_ld(_mid_pt3(A, B), B, ctr)
-        csg[..., 2] = _cos_angle_ld(_mid_pt3(B, D), ctr, B)
-        csg[..., 3] = _cos_angle_ld(_mid_pt3(C, D), C, ctr)
-        # centre (FV3 5 -> idx 4): inner_prod(ec1, ec2), get_center_vect
-        pc = A + B + C + D
-        pc = pc / np.linalg.norm(pc, axis=-1, keepdims=True)  # cell_center3
-        p3 = np.cross(_mid_pt3(B, D), _mid_pt3(A, C))
-        ec1 = np.cross(pc, p3)
-        ec1 = ec1 / np.linalg.norm(ec1, axis=-1, keepdims=True)
-        p3 = np.cross(_mid_pt3(C, D), _mid_pt3(A, B))
-        ec2 = np.cross(pc, p3)
-        ec2 = ec2 / np.linalg.norm(ec2, axis=-1, keepdims=True)
-        csg[..., 4] = np.einsum(
-            "...i,...i", ec1.astype(np.longdouble),
-            ec2.astype(np.longdouble)).astype(np.float64)
-
-        ssg = np.minimum(1.0, np.sqrt(np.maximum(0.0, 1.0 - csg**2)))
+        # sg over ALL (n+2)x(n+2) halo cells (diagonal halo cells produce
+        # garbage from poison nodes; they are never read — only side-halo
+        # cells feed the staggered averages)
+        csg, ssg = sg_window_fields(X, ctr)
 
         cos_sg[f] = csg[1:-1, 1:-1]
         sin_sg[f] = ssg[1:-1, 1:-1]
