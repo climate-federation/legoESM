@@ -1,0 +1,362 @@
+"""Exact FV3 duo-grid halo remap tables (phase 3 of the FV3-native path).
+
+Python replication of the duo-grid variant's ``global_grid_mod`` k2e
+(kinked-to-extended) construction — the machinery behind Mouallem, Harris &
+Chen (2023)'s cube-edge halo interpolation — validated record-by-record
+against the VERBATIM Fortran oracle
+(``scripts/validate/fv3_native/gen_duogrid_oracle.sh``, reference mirror
+``luanfs/FV3_container`` @ 7d06431e, fixture
+``tests/grids/fixtures/fv3_duogrid_oracle.npz``) at C12/C24 in
+``tests/grids/test_fv3_native_halos_phase3.py``.
+
+Pipeline (all init-time float64 numpy; Fortran 1-based index bookkeeping is
+preserved internally so oracle records compare key-for-key):
+
+1. the ED ("equal_edge") supergrid 1-D ``line`` with its gnomonic ghost
+   continuation and mirror symmetry (``global_grid_gen_lonlat_equal_edge``);
+2. the six gnomonic cube-face embeddings -> ``pt_ext`` latitudes;
+3. ``pt_kik``: neighbour-tile values via the odd/even tile orientation index
+   maps (``global_grid_update_kik`` / ``get_neighbor_*``);
+4. per-halo-layer 1-D remap coordinates as latitude offsets along meridians
+   (``global_grid_gen_coords`` — "take advantage of meridians");
+5. per-stagger (A, B, CX, CY, DX, DY) bisection + Lagrange coefficient
+   tables (``global_grid_gen_k2e`` ``get_loc_*`` bodies, incl. the
+   ``[is+np, ie-np-1]`` window clamps).
+
+These tables drive the FV3-native cross-face halo interpolation
+(``ext_scalar``/``ext_vector``/``cube_rmp`` consumption); the legacy
+equiangular duogrid in :mod:`legoesm.grids.duogrid` is untouched.
+"""
+from __future__ import annotations
+
+import numpy as np
+
+__all__ = ["compute_fv3_native_k2e"]
+
+_STAGGERS = ("A", "B", "CX", "CY", "DX", "DY")
+
+
+def _lagrange_coef(x: float, vx: np.ndarray) -> np.ndarray:
+    """lib_interp_lag_get_coef: standard Lagrange weights at x over nodes vx."""
+    n = len(vx)
+    coef = np.ones(n)
+    for j in range(n):
+        for i in range(n):
+            if i != j:
+                coef[j] *= (x - vx[i]) / (vx[j] - vx[i])
+    return coef
+
+
+class _F:
+    """1-based (Fortran-index) view over a numpy array with negative bounds."""
+
+    def __init__(self, lo: int, hi: int, extra_dims: tuple = ()):
+        self.lo = lo
+        self.a = np.full((hi - lo + 1,) + extra_dims, -999.0)
+
+    def __getitem__(self, f):
+        return self.a[f - self.lo]
+
+    def __setitem__(self, f, v):
+        self.a[f - self.lo] = v
+
+
+def _neighbor_tiles(n: int) -> tuple[int, int, int, int]:
+    """get_neighbor_tile_num (tiles 1..6) -> (nw, ne, ns, nn)."""
+    if n % 2 == 0:
+        nn = (n + 0) % 6 + 1
+        ne = (n + 1) % 6 + 1
+        ns = (n + 3) % 6 + 1
+        nw = (n + 4) % 6 + 1
+    else:
+        ne = (n + 0) % 6 + 1
+        nn = (n + 1) % 6 + 1
+        nw = (n + 3) % 6 + 1
+        ns = (n + 4) % 6 + 1
+    return nw, ne, ns, nn
+
+
+def _neighbor_index(i: int, j: int, n: int, n_src: int, npx: int, npy: int):
+    """get_neighbor_index: (i, j) on tile n -> (ii, jj) on neighbour n_src."""
+    isc, jsc, iec, jec = 1, 1, npx, npy
+    nw, ne, ns, nn = _neighbor_tiles(n)
+    if n % 2 != 0:
+        if n_src == nw:
+            return iec - (j - jsc), jec + (i - isc)
+        if n_src == ne:
+            return isc + (i - iec), jsc + (j - jsc)
+        if n_src == ns:
+            return isc + (i - isc), jec + (j - jsc)
+        if n_src == nn:
+            return isc + (j - jec), jec - (i - isc)
+    else:
+        if n_src == nw:
+            return iec + (i - isc), jsc + (j - jsc)
+        if n_src == ne:
+            return iec - (j - jsc), jsc + (i - iec)
+        if n_src == ns:
+            return iec + (j - jsc), jec - (i - isc)
+        if n_src == nn:
+            return isc + (i - isc), jsc + (j - jec)
+    raise ValueError("n_src is not a neighbour of n")  # pragma: no cover
+
+
+def _neighbor_bounds(n: int, n_src: int, npx: int, npy: int, ng: int):
+    """get_neighbor_bounds: halo strip of tile n filled from n_src."""
+    isc, jsc, iec, jec = 1, 1, npx, npy
+    nw, ne, ns, nn = _neighbor_tiles(n)
+    if n_src == nw:
+        return isc - ng, isc - 1, jsc, jec
+    if n_src == ne:
+        return iec + 1, iec + ng, jsc, jec
+    if n_src == ns:
+        return isc, iec, jsc - ng, jsc - 1
+    if n_src == nn:
+        return isc, iec, jec + 1, jec + ng
+    raise ValueError("n_src is not a neighbour of n")  # pragma: no cover
+
+
+def compute_fv3_native_k2e(res: int, remap_ng: int = 3,
+                           k2e_nord: int = 4) -> dict:
+    """Exact duo-grid k2e remap tables for the ED cubed sphere.
+
+    Parameters
+    ----------
+    res : int
+        Cells per face edge (C``res``).
+    remap_ng : int
+        Number of halo remap rings (upstream ``gg%ng - 2``; driver uses 3).
+    k2e_nord : int
+        Lagrange stencil width (upstream struct default 4).
+
+    Returns
+    -------
+    dict with, per stagger in ``("A","B","CX","CY","DX","DY")``:
+        ``<S>_ij``   (m, 2) int 1-based Fortran (i, j) record keys,
+        ``<S>_loc``  (m,)   int 1-based ``klo`` window anchors,
+        ``<S>_coef`` (m, k2e_nord) Lagrange weights,
+    sorted by (i, j) — the exact record set the Fortran oracle emits
+    (tables are tile- and side-symmetric; tile 1 stored).
+    """
+    if k2e_nord != 4:
+        raise NotImplementedError(
+            "k2e_nord != 4 not oracle-pinned (upstream struct default is 4)")
+    gg_ng = remap_ng + 2
+
+    # ---- supergrid 1-D line (gen_lonlat_equal_edge, grid_type == 0) ----
+    sg_is, sg_ie = 1, 2 * res + 1
+    sg_nc = 1 + res
+    sg_ng = 2 * gg_ng
+    sg_isd, sg_ied = sg_is - sg_ng, sg_ie + sg_ng
+
+    line = _F(sg_isd, sg_ied)
+    rsq3 = 1.0 / np.sqrt(3.0)
+    alpha = np.arcsin(rsq3)
+    dela = 2.0 * alpha / (sg_ie - sg_is)
+    line[sg_is] = -1.0
+    line[sg_nc] = 0.0
+    for j in range(sg_is + 1, sg_nc):
+        line[j] = np.tan((j - 1) * dela - alpha) * np.sqrt(2.0)
+    # ghost continuation below the panel
+    for j in range(sg_isd, sg_is):
+        jj = 2 * sg_is - j
+        line[j] = np.tan(-0.5 * np.pi - np.arctan(line[jj]))
+    # mirror to the upper half (incl. upper ghosts)
+    for j in range(sg_isd, sg_nc):
+        line[sg_ie - j + 1] = -line[j]
+
+    # ---- six cube-face embeddings -> pt_ext latitudes ----
+    idx = np.arange(sg_isd, sg_ied + 1)
+    lv = np.array([line[j] for j in idx])
+    X, Y = np.meshgrid(lv, lv, indexing="ij")
+    carts = (
+        lambda x, y: (np.ones_like(x), x, y),        # tile 1
+        lambda x, y: (-x, np.ones_like(x), y),       # tile 2
+        lambda x, y: (-x, -y, np.ones_like(x)),      # tile 3
+        lambda x, y: (-np.ones_like(x), -y, -x),     # tile 4
+        lambda x, y: (y, -np.ones_like(x), -x),      # tile 5
+        lambda x, y: (y, x, -np.ones_like(x)),       # tile 6
+    )
+    npts = sg_ied - sg_isd + 1
+    lat_ext = np.full((6, npts, npts), np.nan)
+    for t in range(6):
+        cx, cy, cz = carts[t](X, Y)
+        r = np.sqrt(cx * cx + cy * cy + cz * cz)
+        lat_ext[t] = np.arcsin(cz / r)
+
+    def ext_lat(t, i, j):
+        return lat_ext[t - 1, i - sg_isd, j - sg_isd]
+
+    # ---- pt_kik latitudes (update_kik neighbour maps, supergrid space) ----
+    # Default -999.0 exactly as upstream (pt_kik(:,:,:,:) = -999.): a handful
+    # of extreme corner-window records legitimately reach an UNFILLED
+    # position (e.g. supergrid (26, -5) at C12), where upstream's mirror
+    # turns -999 into +999 and the Lagrange window carries that node with an
+    # ~1e-11 weight.  Replicating the sentinel — not NaN — reproduces the
+    # oracle's exact coefficients for those records.
+    kik = np.full((6, npts, npts), -999.0)
+    ss = sg_ng  # halo width used by update_kik (its `ng` arg)
+    # inner copy: is-2 .. ie+2
+    for t in range(1, 7):
+        sl = slice(sg_is - 2 - sg_isd, sg_ie + 2 - sg_isd + 1)
+        kik[t - 1][sl, sl] = lat_ext[t - 1][sl, sl]
+    for t in range(1, 7):
+        nw, ne, ns, nn = _neighbor_tiles(t)
+        for n_src in (nw, ne, ns, nn):
+            i0, i1, j0, j1 = _neighbor_bounds(t, n_src, sg_ie, sg_ie, ss)
+            for j in range(j0, j1 + 1):
+                for i in range(i0, i1 + 1):
+                    ii, jj = _neighbor_index(i, j, t, n_src, sg_ie, sg_ie)
+                    kik[t - 1][i - sg_isd, j - sg_isd] = \
+                        lat_ext[n_src - 1][ii - sg_isd, jj - sg_isd]
+
+    def kik_lat(t, i, j):
+        return kik[t - 1, i - sg_isd, j - sg_isd]
+
+    # ---- gen_coords: per-layer 1-D remap coordinates (tile 1) ----
+    # ext_x/kik_x supergrid tables, filled exactly where gen_coords fills
+    # them (rows/cols at layer offsets); everything else stays -999.
+    ext_x = _F(sg_isd, sg_ied, (npts,))   # ext_x[i][j-index]
+    kik_x = _F(sg_isd, sg_ied, (npts,))
+
+    def _set(table, a, b, v):
+        table[a][b - sg_isd] = v
+
+    def _get(table, a, b):
+        return table[a][b - sg_isd]
+
+    # gen_coords uses its OWN ng = 2*gg%ng (supergrid halo width) for the
+    # layer loop — layers run to is-2*gg_ng (verified against the raw
+    # kik/ext dumps: layers -5, -6, ... are filled).
+    for k in range(0, sg_ng + 1):
+        # kik layer line
+        kl = _F(sg_isd, sg_ied)
+        kl[sg_nc] = 0.0
+        for j in range(sg_is - 1, sg_nc + 1):
+            kl[j] = kik_lat(1, sg_is - k, j) - kik_lat(1, sg_is - k, sg_nc)
+            kl[sg_ie - j + 1] = -kl[j]
+        for j in range(sg_is - 1, sg_ie + 2):
+            for i_layer in (sg_is - k, sg_ie + k):
+                _set(kik_x, j, i_layer, kl[j])   # kik_x(j, i) = line(j)
+        # ext layer line
+        el = _F(sg_isd, sg_ied)
+        el[sg_nc] = 0.0
+        for j in range(sg_isd, sg_nc + 1):
+            el[j] = ext_lat(1, sg_is - k, j) - ext_lat(1, sg_is - k, sg_nc)
+            el[sg_ie - j + 1] = -el[j]
+        for j in range(sg_isd, sg_ied + 1):
+            for i_layer in (sg_is - k, sg_ie + k):
+                _set(ext_x, j, i_layer, el[j])
+
+    # ---- gen_k2e per stagger ----
+    is_, ie_ = 1, res
+    ng = remap_ng
+    npd = k2e_nord // 2 - 1
+    isd_, ied_ = is_ - ng, ie_ + ng
+
+    # parity samplers: (ii, jj) supergrid indices for stagger point (i, j)
+    par = {
+        "A": lambda i, j: (2 * i, 2 * j),
+        "B": lambda i, j: (2 * i - 1, 2 * j - 1),
+        "C": lambda i, j: (2 * i - 1, 2 * j),
+        "D": lambda i, j: (2 * i, 2 * j - 1),
+    }
+
+    def sample_x(table, stag, i, j):
+        """gg%{kik,ext}_x(ii, jj): position ii on layer jj."""
+        ii, jj = par[stag](i, j)
+        return _get(table, ii, jj)
+
+    def sample_y(table, stag, i, j):
+        """gg%{kik,ext}_y(ii, jj) == _x(jj, ii): position jj on layer ii
+        (gen_coords stores the y tables layer-first — the transpose)."""
+        ii, jj = par[stag](i, j)
+        return _get(table, jj, ii)
+
+    out = {}
+
+    def _run(stag_key, parity, x_hi_off, y_hi_off, row_calls, col_calls):
+        """One stagger's get_loc_x/get_loc_y pair.
+
+        x_hi_off: +1 when the x (row-direction) 1-D problem has ie+1 sources
+        (B, CX, DX); y_hi_off likewise for the column problem (B, CY, DY).
+        row_calls/col_calls: the halo row/col target lines per upstream loop.
+        """
+        recs = {}
+        xe = ie_ + x_hi_off
+        ye = ie_ + y_hi_off
+        for iiw in range(1, ng + 1):
+            for j in row_calls(iiw):
+                x = np.array([sample_x(kik_x, parity, i, j)
+                              for i in range(is_, xe + 1)])
+                y = {i: sample_x(ext_x, parity, i, j)
+                     for i in range(isd_, ied_ + x_hi_off + 1)}
+                for i in range(is_ - iiw + 1, xe + iiw - 1 + 1):
+                    yy = y[i]
+                    klo, khi = is_, xe
+                    while khi - klo > 1:
+                        k = (khi + klo) // 2
+                        if x[k - is_] > yy:
+                            khi = k
+                        else:
+                            klo = k
+                    klo = max(klo, is_ + npd)
+                    klo = min(klo, xe - npd - 1)
+                    khi = klo + 1
+                    coef = _lagrange_coef(
+                        yy, x[klo - npd - is_: khi + npd - is_ + 1])
+                    recs[(i, j)] = (klo, coef)
+            for i in col_calls(iiw):
+                x = np.array([sample_y(kik_x, parity, i, j)
+                              for j in range(is_, ye + 1)])
+                y = {j: sample_y(ext_x, parity, i, j)
+                     for j in range(isd_, ied_ + y_hi_off + 1)}
+                for j in range(is_ - iiw + 1, ye + iiw - 1 + 1):
+                    yy = y[j]
+                    klo, khi = is_, ye
+                    while khi - klo > 1:
+                        k = (khi + klo) // 2
+                        if x[k - is_] > yy:
+                            khi = k
+                        else:
+                            klo = k
+                    klo = max(klo, is_ + npd)
+                    klo = min(klo, ye - npd - 1)
+                    khi = klo + 1
+                    coef = _lagrange_coef(
+                        yy, x[klo - npd - is_: khi + npd - is_ + 1])
+                    recs[(i, j)] = (klo, coef)
+        keys = sorted(recs)
+        out[f"{stag_key}_ij"] = np.array(keys, dtype=np.int64)
+        out[f"{stag_key}_loc"] = np.array(
+            [recs[k][0] for k in keys], dtype=np.int64)
+        out[f"{stag_key}_coef"] = np.stack([recs[k][1] for k in keys])
+
+    # A: unstaggered rows/cols; halo rows j = 1-iiw and ie+iiw
+    _run("A", "A", 0, 0,
+         lambda w: (is_ - w, ie_ + w),
+         lambda w: (is_ - w, ie_ + w))
+    # B: both directions have ie+1 sources; halo lines at 1-iiw / ie+1+iiw
+    _run("B", "B", 1, 1,
+         lambda w: (is_ - w, ie_ + 1 + w),
+         lambda w: (is_ - w, ie_ + 1 + w))
+    # CX: x problem has ie+1 sources (rows at 1-iiw / ie+iiw);
+    #     y problem plain (cols at 1-iiw / ie+1+iiw)
+    _run("CX", "C", 1, 0,
+         lambda w: (is_ - w, ie_ + w),
+         lambda w: (is_ - w, ie_ + 1 + w))
+    # CY: x plain (rows at 1-iiw / ie+1+iiw); y has ie+1 sources
+    _run("CY", "C", 0, 1,
+         lambda w: (is_ - w, ie_ + 1 + w),
+         lambda w: (is_ - w, ie_ + w))
+    # D staggers mirror C with the D parity
+    _run("DX", "D", 1, 0,
+         lambda w: (is_ - w, ie_ + w),
+         lambda w: (is_ - w, ie_ + 1 + w))
+    _run("DY", "D", 0, 1,
+         lambda w: (is_ - w, ie_ + 1 + w),
+         lambda w: (is_ - w, ie_ + w))
+
+    out["k2e_nord"] = k2e_nord
+    out["remap_ng"] = remap_ng
+    return out
