@@ -54,12 +54,16 @@ Scheme classification
   critical-level test is applied as "remains finite and a sink through a wind
   reversal".
 * ``prognostic_spectral`` -- directional deposition (F-GWD-1 FIXED): the
-  deposition carries ``tanh((c - U_proj)/w) ~ sign(c - U_proj)`` so momentum
-  relaxes the projected wind TOWARD the wave phase speed.  A wave FASTER than
-  the flow legitimately accelerates it toward ``c`` (QBO-style forcing), so
-  the drag-opposes-flow invariant is asserted on a SLOW spectrum
-  (``c_max < min u``); the dissipative heating uses the intrinsic form
-  ``(c - U_proj) * deposit`` and is non-negative by construction for ANY
+  deposition carries the CONSTANT launch-level sign ``tanh((c - U_launch)/w) ~
+  sign(c - U_launch)`` (fixed with height), which drives the projected wind
+  toward the wave phase speed WHILE the local wind stays on the launch side of
+  ``c`` (deceleration for a slow-launched wave, acceleration for a fast one).
+  A wave launched FASTER than the flow legitimately accelerates
+  it (toward ``c`` while the local wind is below ``c``; QBO-style forcing), so
+  the drag-opposes-flow invariant is
+  asserted on a SLOW spectrum (``c_max < min u``, where launch and local sign
+  agree); the dissipative heating uses the intrinsic MAGNITUDE form
+  ``|c - U_proj| * deposit`` and is non-negative by construction for ANY
   spectrum.  The scheme remains opt-in (default GWD is ``"none"``) pending a
   QBO/momentum-deposition benchmark.
 * ``ml_emulator`` -- learned surrogate, NOT physics-faithful.  Only the
@@ -578,14 +582,18 @@ def test_hines_grad_jit_vmap():
 # Prognostic spectral -- directional deposition (F-GWD-1 fixed)
 # ===========================================================================
 #
-# The deposition in prognostic_spectral.py carries the smooth directional
-# factor ``tanh((c - U_proj)/w) ~ sign(c - U_proj)``: momentum deposited by a
-# breaking wave relaxes the projected wind toward the wave phase speed ``c``.
-# A wave FASTER than the flow legitimately accelerates it toward ``c``
-# (QBO-style forcing), so "drag opposes flow" is a true invariant only for a
-# spectrum SLOWER than the wind everywhere -- asserted below with a
-# slow-spectrum config.  The dissipative heating uses the intrinsic form
-# ``(c - U_proj) * deposit >= 0`` and holds for ANY spectrum/wind.
+# The deposition in prognostic_spectral.py carries the CONSTANT launch-level
+# sign ``tanh((c - U_launch)/w) ~ sign(c - U_launch)`` (fixed with height):
+# momentum deposited by a breaking wave drives the projected wind toward
+# the wave phase speed ``c`` WHILE the local wind stays on the launch side of
+# ``c`` (deceleration for a slow-launched wave, acceleration for a fast one).
+# A wave launched FASTER than the flow legitimately accelerates it
+# (toward ``c`` while the local wind is below ``c``; QBO-style forcing), so
+# "drag opposes flow" is a true invariant only for a
+# spectrum SLOWER than the wind everywhere (launch and local sign agree) --
+# asserted below with a slow-spectrum config.  The dissipative heating uses the
+# intrinsic MAGNITUDE form ``|c - U_proj| * deposit >= 0`` (>= 0 for ANY
+# spectrum/wind).
 
 def _run_prognostic(u_profile="monotone", cfg=None, launch=None, u=None):
     col = _idealized_column(u_profile=u_profile)
