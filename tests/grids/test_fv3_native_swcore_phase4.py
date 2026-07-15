@@ -104,12 +104,33 @@ def test_sin_sg_transport_patches_present(inputs):
     def at(i, j, k):
         return ssg[i - lo, j - lo, k - 1]
 
+    csg = inputs["cos_sg"]
+
+    def atc(i, j, k):
+        return csg[i - lo, j - lo, k - 1]
+
     for i in range(0, -2 - 1, -1):   # sw corner strip
         assert at(0, i, 3) == at(i, 1, 2)
         assert at(i, 0, 4) == at(1, i, 1)
+        assert atc(0, i, 3) == atc(i, 1, 2)
+        assert atc(i, 0, 4) == atc(1, i, 1)
+    for i in range(npx, npx + 2 + 1):    # nw (v2 source: npx - i)
+        assert at(0, i, 3) == at(npx - i, npx - 1, 4)
+        assert atc(0, i, 3) == atc(npx - i, npx - 1, 4)
+    for i in range(0, -2 - 1, -1):
+        assert at(i, npx, 2) == at(1, npx - i, 1)
+        assert atc(i, npx, 2) == atc(1, npx - i, 1)
+    for j in range(0, -2 - 1, -1):       # se
+        assert at(npx, j, 1) == at(npx - j, 1, 2)
+        assert atc(npx, j, 1) == atc(npx - j, 1, 2)
+    for i in range(npx, npx + 2 + 1):
+        assert at(i, 0, 4) == at(npx - 1, npx - i, 3)
+        assert atc(i, 0, 4) == atc(npx - 1, npx - i, 3)
     for i in range(0, 2 + 1):        # ne corner strip
         assert at(npx, npx + i, 1) == at(npx + i, npx - 1, 4)
         assert at(npx + i, npx, 2) == at(npx - 1, npx + i, 3)
+        assert atc(npx, npx + i, 1) == atc(npx + i, npx - 1, 4)
+        assert atc(npx + i, npx, 2) == atc(npx - 1, npx + i, 3)
 
 
 # ---- the phase-4a acceptance: field-by-field c_sw agreement ----
@@ -129,12 +150,8 @@ def test_c_sw_matches_fortran_compute_domain(csw_result, oracle,
     assert err < 1e-13, f"{field}: rel err {err:.3e}"
 
 
-def test_oracle_comparison_has_teeth(inputs, oracle):
-    """Synthetic violation: a perturbed step must FAIL the comparison.
-
-    Guards against a vacuous gate (wrong slices, all-sentinel filters,
-    fixture/key mixups silently comparing nothing).
-    """
+@pytest.fixture(scope="module")
+def perturbed_result(inputs):
     from legoesm.core.fv3_native_sw_core import Bounds, c_sw
 
     res = int(inputs["res"])
@@ -142,7 +159,7 @@ def test_oracle_comparison_has_teeth(inputs, oracle):
     bd = Bounds.single_tile(res, ng)
     gs = {k: inputs[k] for k in inputs.files
           if k not in ("res", "ng", "dt2", "nord", "delp", "pt", "u", "v")}
-    perturbed = c_sw(
+    return c_sw(
         delp=inputs["delp"].copy(), pt=inputs["pt"].copy(),
         w=np.zeros_like(inputs["delp"]),
         u=inputs["u"].copy(), v=inputs["v"].copy(),
@@ -150,10 +167,23 @@ def test_oracle_comparison_has_teeth(inputs, oracle):
         dt2=float(inputs["dt2"]) * (1.0 + 1.0e-6),
         nord=int(inputs["nord"]),
         hydrostatic=True, dord4=True, grid_type=0)
-    want = oracle["uc"]
+
+
+@pytest.mark.parametrize("field", ["delpc", "ptc", "uc", "vc",
+                                   "ut", "vt"])
+def test_oracle_comparison_has_teeth(perturbed_result, oracle,
+                                     inputs, field):
+    """Synthetic violation: a perturbed step must FAIL every dt2-sensitive
+    field's comparison (ua/va and divg_d are computed before the dt2
+    scaling — legitimately dt2-blind).
+    Guards against a vacuous gate (wrong slices, all-sentinel filters,
+    fixture/key mixups silently comparing nothing)."""
+    want = oracle[field]
+    res, ng = int(inputs["res"]), int(inputs["ng"])
     sl = _compute_slices(res, ng, want.shape)
-    err = np.abs(perturbed["uc"][sl] - want[sl]).max() / np.abs(want[sl]).max()
-    assert err > 1e-13, "perturbed run still matches — the gate is vacuous"
+    scale = np.abs(want[sl]).max()
+    err = np.abs(perturbed_result[field][sl] - want[sl]).max() / scale
+    assert err > 1e-13, f"{field}: perturbed run still matches — vacuous gate"
 
 
 @pytest.mark.parametrize("field", ["delpc", "ptc", "uc", "vc",
@@ -170,8 +200,42 @@ def test_c_sw_matches_fortran_full_arrays(csw_result, oracle,
     got = np.asarray(csw_result[field], dtype=np.float64)
     want = np.asarray(oracle[field], dtype=np.float64)
     assert got.shape == want.shape
-    written = np.abs(want) < 8.9e8       # excludes driver poison echoes
+    # exact driver sentinel: a slot is unwritten iff it still holds the
+    # -9e9 poison (or a poison-scaled product for ut/vt, which c_sw scales
+    # in place after d2a2c wrote them) — everything else must match
+    written = want != -9.0e9
+    res, ng = int(inputs["res"]), int(inputs["ng"])
+    sl = _compute_slices(res, ng, want.shape)
+    n_compute = want[sl].size
+    # divergence_corner writes exactly the compute B nodes; every other
+    # field's Fortran writes extend into the halo ring
+    min_written = n_compute if field == "divg_d" else n_compute + 1
+    assert int(written.sum()) >= min_written, \
+        f"{field}: write-mask smaller than the compute domain"
     g, w = got[written], want[written]
     denom = np.maximum(np.abs(w), 1.0)
     err = (np.abs(g - w) / denom).max()
     assert err < 1e-12, f"{field}: rel err {err:.3e} over written slots"
+
+
+def test_fortran_oracle_rebuild_matches_fixture(tmp_path, oracle):
+    """Rebuild + rerun the VERBATIM Fortran oracle and compare against the
+    committed fixture (codex r1 P1-3: CI otherwise never executes the
+    extraction).  Skipped where no gfortran toolchain is available."""
+    import shutil
+    import subprocess
+
+    if shutil.which("gfortran") is None:
+        pytest.skip("no gfortran")
+    import sys
+
+    repo = os.path.join(os.path.dirname(__file__), "..", "..")
+    script = os.path.join(repo, "scripts", "validate", "fv3_native",
+                          "gen_swcore_oracle.sh")
+    env = dict(os.environ, PYTHON=sys.executable)
+    subprocess.run(["bash", script, str(tmp_path), "12", "3"],
+                   check=True, env=env, capture_output=True, text=True)
+    fresh = np.load(tmp_path / "swcore_oracle_c12.npz")
+    for key in ("delpc", "ptc", "uc", "vc", "ut", "vt",
+                "ua", "va", "divg_d"):
+        assert np.array_equal(fresh[key], oracle[key]), key

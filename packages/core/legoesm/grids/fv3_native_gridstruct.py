@@ -23,13 +23,15 @@ consumes, on ONE whole-face tile (reference numbering, tile 1) with
   set) and the halo constructions are self-verified against them on the
   overlap.
 
-Known, documented divergence from upstream: inside the four corner-diagonal
-regions the *derived* angle fields (``cosa_u``/``cosa_v``/``cosa_s``/
-``rsin*``) are computed from this module's sentinel-lattice ``sg`` garbage,
-while upstream derives them from ``fill_corners``-extended grid geometry.
-Both are deterministic garbage; FV3's ``c_sw`` consumes those slots only in
-halo-ring outputs (never in compute-domain results), which the phase-4
-oracle test pins by comparing full arrays produced from *identical* inputs.
+The corner-diagonal regions of the metric fields carry FV3's own
+``fill_corners`` ghost values (ported r8 index maps below), the grid and
+agrid corner regions carry the upstream mirrored geometry, and the sg /
+cosa pipelines therefore see upstream-exact inputs everywhere (codex r1
+P1-2).  Remaining known-junk slots match upstream's own uninitialized
+choices: the ``cosa_u`` isd/ied+1 columns, ``rsina`` borders, and the
+``divg_u``/``divg_v`` outermost rows/cols where the ``sina_u/v`` factor is
+big_number (upstream computes the same junk locally before an mpp update
+whose outermost-slot values d_sw never consumes within its ring depth).
 
 Fortran index convention: arrays are plain numpy with row 0 == Fortran
 ``isd = 1-ng`` (cell/lower-node axes) — helper ``fort`` views give
@@ -134,6 +136,93 @@ def build_tile1_kinked_corner_lonlat(n: int, ng: int = 3,
     return lon, lat
 
 
+# ---------------------------------------------------------------------------
+# fill_corners ports (tools/fv_mp_mod.F90 r8 bodies, verbatim index maps).
+# These fill the four corner-diagonal ng x ng regions from side-strip values
+# exactly as FV3 does after each mpp metric exchange.  All metric-pair calls
+# use mySign = +1 (VECTOR fills use -1).
+# ---------------------------------------------------------------------------
+def _fill_corners_bgrid_x(Q: fort, npx: int, ng: int) -> None:
+    npy = npx
+    for j in range(1, ng + 1):
+        for i in range(1, ng + 1):
+            Q[1 - i, 1 - j] = Q[1 - j, i + 1]
+            Q[1 - i, npy + j] = Q[1 - j, npy - i]
+            Q[npx + i, 1 - j] = Q[npx + j, i + 1]
+            Q[npx + i, npy + j] = Q[npx + j, npy - i]
+
+
+def _fill_corners_agrid_x(Q: fort, npx: int, ng: int) -> None:
+    npy = npx
+    for j in range(1, ng + 1):
+        for i in range(1, ng + 1):
+            Q[1 - i, 1 - j] = Q[1 - j, i]
+            Q[1 - i, npy - 1 + j] = Q[1 - j, npy - i]
+            Q[npx - 1 + i, 1 - j] = Q[npx - 1 + j, i]
+            Q[npx - 1 + i, npy - 1 + j] = Q[npx - 1 + j, npy - i]
+
+
+def _fill_corners_agrid_y(Q: fort, npx: int, ng: int) -> None:
+    npy = npx
+    for j in range(1, ng + 1):
+        for i in range(1, ng + 1):
+            Q[1 - j, 1 - i] = Q[i, 1 - j]
+            Q[1 - j, npy - 1 + i] = Q[i, npy - 1 + j]
+            Q[npx - 1 + j, 1 - i] = Q[npx - i, 1 - j]
+            Q[npx - 1 + j, npy - 1 + i] = Q[npx - i, npy - 1 + j]
+
+
+def _fill_corners_dgrid(X: fort, Y: fort, npx: int, ng: int,
+                        sign: float = 1.0) -> None:
+    npy = npx
+    for j in range(1, ng + 1):
+        for i in range(1, ng + 1):
+            X[1 - i, 1 - j] = sign * Y[1 - j, i]
+            X[1 - i, npy + j] = Y[1 - j, npy - i]
+            X[npx - 1 + i, 1 - j] = Y[npx + j, i]
+            X[npx - 1 + i, npy + j] = sign * Y[npx + j, npy - i]
+    for j in range(1, ng + 1):
+        for i in range(1, ng + 1):
+            Y[1 - i, 1 - j] = sign * X[j, 1 - i]
+            Y[1 - i, npy - 1 + j] = X[j, npy + i]
+            Y[npx + i, 1 - j] = X[npx - j, 1 - i]
+            Y[npx + i, npy - 1 + j] = sign * X[npx - j, npy + i]
+
+
+def _fill_corners_cgrid(X: fort, Y: fort, npx: int, ng: int,
+                        sign: float = 1.0) -> None:
+    npy = npx
+    for j in range(1, ng + 1):
+        for i in range(1, ng + 1):
+            X[1 - i, 1 - j] = Y[j, 1 - i]
+            X[1 - i, npy - 1 + j] = sign * Y[j, npy + i]
+            X[npx + i, 1 - j] = sign * Y[npx - j, 1 - i]
+            X[npx + i, npy - 1 + j] = Y[npx - j, npy + i]
+    for j in range(1, ng + 1):
+        for i in range(1, ng + 1):
+            Y[1 - i, 1 - j] = X[1 - j, i]
+            Y[1 - i, npy + j] = sign * X[1 - j, npy - i]
+            Y[npx - 1 + i, 1 - j] = sign * X[npx + j, i]
+            Y[npx - 1 + i, npy + j] = X[npx + j, npy - i]
+
+
+def _fill_corners_agrid_pair(X: fort, Y: fort, npx: int, ng: int,
+                             sign: float = 1.0) -> None:
+    npy = npx
+    for j in range(1, ng + 1):
+        for i in range(1, ng + 1):
+            X[1 - i, 1 - j] = sign * Y[1 - j, i]
+            X[1 - i, npy - 1 + j] = Y[1 - j, npy - i]
+            X[npx - 1 + i, 1 - j] = Y[npx - 1 + j, i]
+            X[npx - 1 + i, npy - 1 + j] = sign * Y[npx - 1 + j, npy - i]
+    for j in range(1, ng + 1):
+        for i in range(1, ng + 1):
+            Y[1 - j, 1 - i] = sign * X[i, 1 - j]
+            Y[1 - j, npy - 1 + i] = X[i, npy - 1 + j]
+            Y[npx - 1 + j, 1 - i] = X[npx - i, 1 - j]
+            Y[npx - 1 + j, npy - 1 + i] = sign * X[npx - i, npy - 1 + j]
+
+
 def _node_real_mask(n: int, ng: int) -> np.ndarray:
     """True where a corner node exists (interior or side strip)."""
     idx = np.arange(1 - ng, n + 1 + ng + 1)   # Fortran node index per row
@@ -167,9 +256,33 @@ def build_fv3_native_gridstruct(n: int, ng: int = 3, *,
     g_lon, g_lat = build_tile1_kinked_corner_lonlat(n, ng)
     node_ok = _node_real_mask(n, ng)
     cell_ok = _cell_real_mask(n, ng)
-    grid_ll = np.stack([g_lon, g_lat], axis=-1)
-    agrid_ll = cell_center2(grid_ll[:-1, :-1], grid_ll[1:, :-1],
-                            grid_ll[:-1, 1:], grid_ll[1:, 1:])   # (m_a, m_a, 2)
+
+    # grid corner regions: fill_corners(grid(:,:,1..2), XDir, BGRID)
+    # (fv_grid_tools.F90:727-729) — replaces the construction sentinels
+    # with FV3's mirrored ghost geometry (codex r1 P1-2).  Built one ring
+    # WIDER than requested: the outermost dxc/dyc rows are mpp-filled
+    # upstream and need centres one cell beyond the data domain.
+    ngw = ng + 1
+    g_lon_w, g_lat_w = build_tile1_kinked_corner_lonlat(n, ngw)
+    wlo = 1 - ngw
+    _fill_corners_bgrid_x(fort(g_lon_w, wlo, wlo), npx, ngw)
+    _fill_corners_bgrid_x(fort(g_lat_w, wlo, wlo), npx, ngw)
+    grid_w = np.stack([g_lon_w, g_lat_w], axis=-1)
+
+    # agrid: local cell_center2, then corner regions from
+    # fill_corners(agrid lon XDir / lat YDir, AGRID)  (fv_grid_tools:811-814)
+    agrid_w = cell_center2(grid_w[:-1, :-1], grid_w[1:, :-1],
+                           grid_w[:-1, 1:], grid_w[1:, 1:])
+    aw_lon = np.ascontiguousarray(agrid_w[..., 0])
+    aw_lat = np.ascontiguousarray(agrid_w[..., 1])
+    _fill_corners_agrid_x(fort(aw_lon, wlo, wlo), npx, ngw)
+    _fill_corners_agrid_y(fort(aw_lat, wlo, wlo), npx, ngw)
+    agrid_w = np.stack([aw_lon, aw_lat], axis=-1)
+
+    g_lon = g_lon_w[1:-1, 1:-1]
+    g_lat = g_lat_w[1:-1, 1:-1]
+    grid_ll = grid_w[1:-1, 1:-1]
+    agrid_ll = agrid_w[1:-1, 1:-1]
 
     # ---- certified compute-domain metrics (6-face, reference layout) ----
     lon6, lat6 = ed_supergrid_lonlat_ref(n)
@@ -178,60 +291,66 @@ def build_fv3_native_gridstruct(n: int, ng: int = 3, *,
     corner6_lat = lat6[:, sgc - 1][:, :, sgc - 1]
     cert = compute_fv3_native_metrics(corner6_lon, corner6_lat, radius)
 
-    # ---- halo-complete length/area fields from the kinked lattice ----
+    # ---- halo-complete length/area fields (post-mpp state) ----
     def gcd_scaled(p, q):
         return great_circle_dist(p, q) * radius
 
-    dx = np.full((m_a, m_b), BIG_NUMBER)
-    ok = node_ok[:-1, :] & node_ok[1:, :]
-    dx[ok] = gcd_scaled(grid_ll[:-1, :], grid_ll[1:, :])[ok]
+    # dx/dy: strips are the mpp copies (kinked formula); corner regions
+    # from fill_corners(dx, dy, DGRID)  (fv_grid_tools:781-784)
+    dx = gcd_scaled(grid_ll[:-1, :], grid_ll[1:, :])
+    dy = gcd_scaled(grid_ll[:, :-1], grid_ll[:, 1:])
+    _fill_corners_dgrid(fort(dx, clo, clo), fort(dy, clo, clo), npx, ng)
 
-    dy = np.full((m_b, m_a), BIG_NUMBER)
-    ok = node_ok[:, :-1] & node_ok[:, 1:]
-    dy[ok] = gcd_scaled(grid_ll[:, :-1], grid_ll[:, 1:])[ok]
-
-    # per-cell mid-points of the four edges
+    # per-cell mid-points of the four edges (from the FILLED grid — this is
+    # upstream's own local data-domain computation for dxa/dya)
     mid_w = mid_pt_sphere(grid_ll[:-1, :-1], grid_ll[:-1, 1:])   # (m_a, m_a, 2)
     mid_e = mid_pt_sphere(grid_ll[1:, :-1], grid_ll[1:, 1:])
     mid_s = mid_pt_sphere(grid_ll[:-1, :-1], grid_ll[1:, :-1])
     mid_n = mid_pt_sphere(grid_ll[:-1, 1:], grid_ll[1:, 1:])
 
-    dxa = np.full((m_a, m_a), BIG_NUMBER)
-    dxa[cell_ok] = gcd_scaled(mid_e, mid_w)[cell_ok]
-    dya = np.full((m_a, m_a), BIG_NUMBER)
-    dya[cell_ok] = gcd_scaled(mid_n, mid_s)[cell_ok]
+    # dxa/dya: full-data-domain formulas (the upstream mpp update is
+    # commented out — local compute IS the semantics), then
+    # fill_corners(dxa, dya, AGRID)  (fv_grid_tools:816-828)
+    dxa = gcd_scaled(mid_e, mid_w)
+    dya = gcd_scaled(mid_n, mid_s)
+    _fill_corners_agrid_pair(fort(dxa, clo, clo), fort(dya, clo, clo),
+                             npx, ng)
 
-    area = np.full((m_a, m_a), BIG_NUMBER)
-    area_all = get_area_quad(grid_ll[:-1, :-1], grid_ll[1:, :-1],
-                             grid_ll[1:, 1:], grid_ll[:-1, 1:]) * radius**2
-    area[cell_ok] = area_all[cell_ok]
-    rarea = np.full((m_a, m_a), BIG_NUMBER)
-    rarea[cell_ok] = 1.0 / area[cell_ok]
+    # area: strips = mpp copies (kinked quads); corner regions =
+    # fill_ghost(area, -big_number); rarea = 1/area over the FULL domain
+    # so the corner regions carry upstream's -1e-8  (fv_grid_tools:978-1009)
+    area = get_area_quad(grid_ll[:-1, :-1], grid_ll[1:, :-1],
+                         grid_ll[1:, 1:], grid_ll[:-1, 1:]) * radius**2
+    area[~cell_ok] = -BIG_NUMBER
+    rarea = 1.0 / area
 
     # dxc: agrid spacing in x with the upstream panel-border special at
-    # Fortran i == 1 and i == npx (the special holds in the halo rows too —
-    # there it is the neighbour's own border special, seam-aligned).
+    # Fortran i == 1 and i == npx.  The specials are computed upstream on
+    # the compute rows only, but the mpp exchange delivers the neighbours'
+    # own (seam-aligned, axis-swapped) specials at the same Fortran rows in
+    # the strips — one uniform rule.  Corner regions from
+    # fill_corners(dxc, dyc, CGRID)  (fv_grid_tools:939-943; the pre-mpp
+    # isd/ied+1 replication is dead state on the cubed sphere).
     i1 = ng          # np row of Fortran node/face index 1
     inpx = npx + ng - 1
-    dxc = np.full((m_b, m_a), BIG_NUMBER)
-    okc = cell_ok[:-1, :] & cell_ok[1:, :]
-    dxc[1:-1, :][okc] = gcd_scaled(agrid_ll[:-1, :], agrid_ll[1:, :])[okc]
-    ok_row = cell_ok[i1, :]
-    dxc[i1, ok_row] = 2.0 * gcd_scaled(mid_w[i1, :], agrid_ll[i1, :])[ok_row]
-    ok_row = cell_ok[inpx - 1, :]
-    dxc[inpx, ok_row] = 2.0 * gcd_scaled(agrid_ll[inpx - 1, :],
-                                         mid_e[inpx - 1, :])[ok_row]
-    rdxc = np.where(dxc != BIG_NUMBER, 1.0 / dxc, BIG_NUMBER)
-
-    dyc = np.full((m_a, m_b), BIG_NUMBER)
-    okc = cell_ok[:, :-1] & cell_ok[:, 1:]
-    dyc[:, 1:-1][okc] = gcd_scaled(agrid_ll[:, :-1], agrid_ll[:, 1:])[okc]
-    ok_col = cell_ok[:, i1]
-    dyc[ok_col, i1] = 2.0 * gcd_scaled(mid_s[:, i1], agrid_ll[:, i1])[ok_col]
-    ok_col = cell_ok[:, inpx - 1]
-    dyc[ok_col, inpx] = 2.0 * gcd_scaled(agrid_ll[:, inpx - 1],
-                                         mid_n[:, inpx - 1])[ok_col]
-    rdyc = np.where(dyc != BIG_NUMBER, 1.0 / dyc, BIG_NUMBER)
+    dxc = np.empty((m_b, m_a))
+    dxc[1:-1, :] = gcd_scaled(agrid_ll[:-1, :], agrid_ll[1:, :])
+    # outermost rows: the mpp copy needs the centre one beyond the domain
+    dxc[0, :] = gcd_scaled(agrid_w[0, 1:-1], agrid_w[1, 1:-1])
+    dxc[-1, :] = gcd_scaled(agrid_w[-2, 1:-1], agrid_w[-1, 1:-1])
+    dxc[i1, :] = 2.0 * gcd_scaled(mid_w[i1, :], agrid_ll[i1, :])
+    dxc[inpx, :] = 2.0 * gcd_scaled(agrid_ll[inpx - 1, :],
+                                    mid_e[inpx - 1, :])
+    dyc = np.empty((m_a, m_b))
+    dyc[:, 1:-1] = gcd_scaled(agrid_ll[:, :-1], agrid_ll[:, 1:])
+    dyc[:, 0] = gcd_scaled(agrid_w[1:-1, 0], agrid_w[1:-1, 1])
+    dyc[:, -1] = gcd_scaled(agrid_w[1:-1, -2], agrid_w[1:-1, -1])
+    dyc[:, i1] = 2.0 * gcd_scaled(mid_s[:, i1], agrid_ll[:, i1])
+    dyc[:, inpx] = 2.0 * gcd_scaled(agrid_ll[:, inpx - 1],
+                                    mid_n[:, inpx - 1])
+    _fill_corners_cgrid(fort(dxc, clo, clo), fort(dyc, clo, clo), npx, ng)
+    rdxc = 1.0 / dxc
+    rdyc = 1.0 / dyc
 
     # ---- self-verification: halo constructions == certified builders on
     #      the compute domain (same formulas, same inputs -> byte-equal) ----
@@ -345,31 +464,74 @@ def build_fv3_native_gridstruct(n: int, ng: int = 3, *,
         CSG[npx, npx + i, 1 - 1] = CSG[npx + i, npx - 1, 4 - 1]
         CSG[npx + i, npx, 2 - 1] = CSG[npx - 1, npx + i, 3 - 1]
 
-    # ---- Coriolis at B nodes + rarea_c (compute domain certified) ----
-    fC = np.full((m_b, m_b), BIG_NUMBER)
-    fC[node_ok] = 2.0 * omega * (
-        -np.cos(g_lon[node_ok]) * np.cos(g_lat[node_ok])
-        * np.sin(rotation_alpha)
-        + np.sin(g_lat[node_ok]) * np.cos(rotation_alpha))
+    # ---- Coriolis at B nodes (formula over the FULL filled lattice; the
+    # test_cases fill_corners(fC,...,XDir) call passes no AGRID/BGRID flag
+    # and is an upstream no-op) ----
+    fC = 2.0 * omega * (
+        -np.cos(g_lon) * np.cos(g_lat) * np.sin(rotation_alpha)
+        + np.sin(g_lat) * np.cos(rotation_alpha))
 
-    rarea_c = np.full((m_b, m_b), BIG_NUMBER)
-    rarea_c[sl_b, sl_b] = 1.0 / cert["area_c"][0]
-    area_c = np.full((m_b, m_b), BIG_NUMBER)
+    # area_c: certified compute B + strip B-quads on kinked centres with
+    # the seam x2 half-dual specials, corner regions from
+    # fill_corners(area_c, XDir, BGRID), then rarea_c over the FULL node
+    # domain (fv_grid_tools:974-981, 1011-1014).
+    area_c = np.empty((m_b, m_b))
+    area_c[1:-1, 1:-1] = get_area_quad(
+        agrid_ll[:-1, :-1], agrid_ll[1:, :-1],
+        agrid_ll[1:, 1:], agrid_ll[:-1, 1:]) * radius**2
+    area_c[0, 1:-1] = get_area_quad(
+        agrid_w[0, 1:-2], agrid_w[1, 1:-2],
+        agrid_w[1, 2:-1], agrid_w[0, 2:-1]) * radius**2
+    area_c[-1, 1:-1] = get_area_quad(
+        agrid_w[-2, 1:-2], agrid_w[-1, 1:-2],
+        agrid_w[-1, 2:-1], agrid_w[-2, 2:-1]) * radius**2
+    area_c[:, 0] = np.concatenate((
+        [area_c[1, 1]],   # placeholder; corner slots overwritten below
+        get_area_quad(agrid_w[1:-2, 0], agrid_w[2:-1, 0],
+                      agrid_w[2:-1, 1], agrid_w[1:-2, 1]) * radius**2,
+        [area_c[-2, 1]]))
+    area_c[:, -1] = np.concatenate((
+        [area_c[1, -2]],
+        get_area_quad(agrid_w[1:-2, -2], agrid_w[2:-1, -2],
+                      agrid_w[2:-1, -1], agrid_w[1:-2, -1]) * radius**2,
+        [area_c[-2, -2]]))
+    # seam x2 specials along the full Fortran i==1/npx columns and
+    # j==1/npy rows (strips carry the neighbours' own border specials);
+    # per-side point orders mirror the certified step-3 constructions
+    gm_y0 = mid_pt_sphere(grid_ll[:, :-1], grid_ll[:, 1:])   # (m_b, m_a, 2)
+    gm_x0 = mid_pt_sphere(grid_ll[:-1, :], grid_ll[1:, :])   # (m_a, m_b, 2)
+    pm = gm_y0[i1]
+    cw = agrid_ll[i1]
+    area_c[i1, 1:-1] = 2.0 * get_area_quad(
+        pm[:-1], cw[:-1], cw[1:], pm[1:]) * radius**2        # west
+    pm = gm_y0[inpx]
+    cw = agrid_ll[inpx - 1]
+    area_c[inpx, 1:-1] = 2.0 * get_area_quad(
+        cw[:-1], pm[:-1], pm[1:], cw[1:]) * radius**2        # east
+    pm = gm_x0[:, i1]
+    cw = agrid_ll[:, i1]
+    area_c[1:-1, i1] = 2.0 * get_area_quad(
+        pm[:-1], pm[1:], cw[1:], cw[:-1]) * radius**2        # south
+    pm = gm_x0[:, inpx]
+    cw = agrid_ll[:, inpx - 1]
+    area_c[1:-1, inpx] = 2.0 * get_area_quad(
+        cw[:-1], cw[1:], pm[1:], pm[:-1]) * radius**2        # north
+    # certified compute-domain values (incl. the x2 borders and x3 cube
+    # vertices) take precedence over the generic constructions above
     area_c[sl_b, sl_b] = cert["area_c"][0]
+    _fill_corners_bgrid_x(fort(area_c, clo, clo), npx, ng)
+    rarea_c = 1.0 / area_c
 
     # ---- d_sw additions (phase 4b) ----
-    def recip(x):
-        return np.where(x != BIG_NUMBER, 1.0 / x, BIG_NUMBER)
+    rdx, rdy = 1.0 / dx, 1.0 / dy
+    rdxa, rdya = 1.0 / dxa, 1.0 / dya
 
-    rdx, rdy = recip(dx), recip(dy)
-    rdxa, rdya = recip(dxa), recip(dya)
-
-    # f0: Coriolis at cell centres (test_cases init formula on agrid)
-    f0 = np.full((m_a, m_a), BIG_NUMBER)
-    f0[cell_ok] = 2.0 * omega * (
-        -np.cos(agrid_ll[..., 0][cell_ok]) * np.cos(agrid_ll[..., 1][cell_ok])
+    # f0: Coriolis at cell centres over the full filled lattice
+    # (test_cases init; its no-flag fill_corners call is a no-op)
+    f0 = 2.0 * omega * (
+        -np.cos(agrid_ll[..., 0]) * np.cos(agrid_ll[..., 1])
         * np.sin(rotation_alpha)
-        + np.sin(agrid_ll[..., 1][cell_ok]) * np.cos(rotation_alpha))
+        + np.sin(agrid_ll[..., 1]) * np.cos(rotation_alpha))
 
     # B-node cosa/sina (grid_utils_init loop js..je+1 — compute B only) and
     # rsina with the panel-border big_number rule (the (npx,npy) branch is
