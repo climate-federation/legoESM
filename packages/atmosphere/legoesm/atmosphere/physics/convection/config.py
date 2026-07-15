@@ -632,7 +632,8 @@ class ZhangMcFarlaneConfig(NamedTuple):
         (default 70.0, the classic ZM 1995 value).
     cape_sharpness : float
         Sigmoid sharpness on the CAPE trigger [1/(J/kg)].  Default
-        ``0.02`` gives ~95% activation 100 J/kg above threshold.
+        ``0.1`` — ≈0.5 activation at threshold and ~95% activation
+        ~30 J/kg above it.
     parcel_dT : float
         Sub-cloud parcel temperature perturbation [K] (default 0.5).
     parcel_dq : float
@@ -650,7 +651,10 @@ class ZhangMcFarlaneConfig(NamedTuple):
         al. 1997 closure (default 0.55 each — the canonical value).
     M_b_max : float
         Hard upper bound on the cloud-base mass flux ``M_b`` [kg/m²/s]
-        (default 0.005 — about 1/20 of the literature peak tropical value 0.1; tighter than peak because the unbounded CAPE/tau closure can spike to ~2 kg/m²/s in a high-CAPE column and the per-layer heating ~M·(T_u−T)·δ scales linearly).  The
+        (default 0.05 — about half the literature peak tropical value
+        ~0.1; tighter than peak because the unbounded CAPE/tau closure
+        can spike to ~2 kg/m²/s in a high-CAPE column and the per-layer
+        heating ~M·(T_u−T)·δ scales linearly).  The
         CAPE/τ_cape closure is unbounded above; without this cap a
         column with CAPE >> 5 kJ/kg yields M_b that drives
         column-integrated heating > 10⁴ W/m² and blows up the
