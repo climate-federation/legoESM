@@ -1624,14 +1624,23 @@ class LatLonCGridOceanModel:
                 f"coriolis_scheme must be one of "
                 f"{sorted(VALID_CORIOLIS_SCHEME)}, got {_cor_scheme!r}")
         if _cor_scheme == "explicit_ab2":
-            if config.outer_integrator != "ab2":
+            # The explicit f×u tendency needs a stably-rotating outer integrator.
+            # AB2(-eps) has a stable rotation region; SSP-RK3 does too (|G|<=1 up to
+            # f·dt~sqrt(3)), and — unlike operator-splitting the Coriolis AFTER the
+            # RK3 PGF stages — it keeps PGF and Coriolis COUPLED inside the stages,
+            # holding geostrophic balance (the fix for the O(dt^2) split-growth of
+            # the GYRE forced current). Forward-Euler alone is unstable (|G|>1).
+            if config.outer_integrator != "ab2" and getattr(
+                    config, "momentum_time_integrator", "euler") != "rk3":
                 raise ValueError(
                     'coriolis_scheme="explicit_ab2" requires '
-                    'outer_integrator="ab2": an explicit forward-Euler Coriolis '
-                    "at weight 1.0 is unconditionally UNSTABLE for pure rotation "
-                    "(|G|=sqrt(1+(f·dt)²)>1 every step); only the AB2(-eps) outer "
-                    "integrator has a stable region covering the ACC's f·dt_mom. "
-                    f"Got outer_integrator={config.outer_integrator!r}.")
+                    'outer_integrator="ab2" OR momentum_time_integrator="rk3": '
+                    "an explicit forward-Euler Coriolis at weight 1.0 is "
+                    "unconditionally UNSTABLE for pure rotation "
+                    "(|G|=sqrt(1+(f·dt)²)>1); AB2(-eps) or SSP-RK3 have a stable "
+                    "rotation region. Got outer_integrator="
+                    f"{config.outer_integrator!r}, momentum_time_integrator="
+                    f"{getattr(config, 'momentum_time_integrator', 'euler')!r}.")
             if config.barotropic.barotropic_solver not in (
                     "rigid_lid", "implicit_cn", "implicit_unsplit",
                     "explicit_substep"):

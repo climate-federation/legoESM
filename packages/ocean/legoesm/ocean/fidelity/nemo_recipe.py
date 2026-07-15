@@ -696,7 +696,18 @@ def build_nemo_gyre_recipe(
     model_config = nemo_lat_lon_model_config(cfg)
     physics_config = model_config.physics._replace(
         shortwave_penetration=None, mle=None)
-    model_config = model_config._replace(physics=physics_config)
+    # Coriolis COUPLED with the pressure gradient inside the RK3 momentum stages
+    # (coriolis_scheme="explicit_ab2" → f×u enters du_dt, integrated by SSP-RK3),
+    # NOT operator-split as a separate Matsuno step after RK3. The split incurs an
+    # O(dt^2) geostrophic-balance error that pumps the forced GYRE current into an
+    # exponential blow-up at NEMO's dt=14400 (f·dt~1); coupling holds the balance
+    # and the run stays laminar (max|u|~5e-3, was NaN by day 12). This is
+    # consistent with NEMO 4.2+ RK3 (Coriolis in the momentum trend); the
+    # barotropic/baroclinic split and frozen stage-1 F_slow are legoESM-specific.
+    # The barotropic mode gets Coriolis via the F_slow depth-mean (explicit_substep
+    # gates its in-substep f×U off).
+    model_config = model_config._replace(
+        physics=physics_config, coriolis_scheme="explicit_ab2")
 
     return NEMORecipe(
         model_config=model_config,
