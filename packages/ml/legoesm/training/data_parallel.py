@@ -19,6 +19,7 @@ gradient must match a serial batch-mean gradient bit-closely.
 from __future__ import annotations
 
 __all__ = [
+    "mpi_rank_size",
     "shard_samples",
     "all_reduce_grad_mean",
     "mpi_data_parallel_train_step",
@@ -26,6 +27,38 @@ __all__ = [
     "data_parallel_value_and_grad",
     "data_parallel_training_loop",
 ]
+
+
+def mpi_rank_size():
+    """``(rank, num_processes)`` from MPI.
+
+    RAISES if a multi-rank launcher IS present (SLURM/PMI/OMPI/MPICH env) but
+    ``mpi4py`` init fails — otherwise every rank would silently train
+    independently with NO cross-rank gradient average (16 diverging replicas,
+    not one data-parallel model). Returns ``(0, 1)`` only when no multi-rank
+    launcher is detected (single process / laptop), so ``num_processes <= 1``
+    callers take their identity/serial path unchanged.
+    """
+    import os
+
+    launcher = 1
+    for v in ("SLURM_NTASKS", "PMI_SIZE", "OMPI_COMM_WORLD_SIZE", "MPI_LOCALNRANKS"):
+        val = os.environ.get(v, "")
+        if val.isdigit():
+            launcher = max(launcher, int(val))
+    try:
+        from mpi4py import MPI
+
+        comm = MPI.COMM_WORLD
+        return comm.Get_rank(), comm.Get_size()
+    except Exception as exc:
+        if launcher > 1:
+            raise RuntimeError(
+                f"multi-rank launcher detected (size={launcher}) but mpi4py init "
+                f"failed ({exc}); gradients would NOT be averaged across ranks -- "
+                f"aborting"
+            ) from exc
+        return 0, 1
 
 
 def shard_samples(items, process_id, num_processes, *, drop_remainder=True):

@@ -154,26 +154,10 @@ def _check_resolution_matches_yaml(cfg: ScaleConfig, yml: dict) -> float:
 
 
 def _mpi_rank_size():
-    """(rank, num_processes) from MPI. RAISES if a multi-rank launcher is present
-    but mpi4py init fails -- otherwise every rank would silently train
-    independently (no cross-rank gradient average). Returns (0, 1) only when no
-    multi-rank launcher is detected."""
-    import os
-    launcher = 1
-    for v in ("SLURM_NTASKS", "PMI_SIZE", "OMPI_COMM_WORLD_SIZE", "MPI_LOCALNRANKS"):
-        val = os.environ.get(v, "")
-        if val.isdigit():
-            launcher = max(launcher, int(val))
-    try:
-        from mpi4py import MPI
-        comm = MPI.COMM_WORLD
-        return comm.Get_rank(), comm.Get_size()
-    except Exception as exc:
-        if launcher > 1:
-            raise RuntimeError(
-                f"multi-rank launcher detected (size={launcher}) but mpi4py init failed "
-                f"({exc}); gradients would NOT be averaged across ranks -- aborting") from exc
-        return 0, 1
+    """(rank, num_processes) — shared impl in legoesm.training.data_parallel
+    (one copy for both this driver and the AIMIP chunked DP loop)."""
+    from legoesm.training.data_parallel import mpi_rank_size
+    return mpi_rank_size()
 
 
 def main(argv=None):
