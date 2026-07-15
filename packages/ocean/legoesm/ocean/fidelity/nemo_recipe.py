@@ -182,11 +182,14 @@ NEMO_DEFERRED_BLOCKS: tuple[str, ...] = (
     "not a separate selector; explicit_substep + cosine is the closest existing "
     "canonical barotropic block.",
     "NEMO TKE amplitude (√e), Ri-Prandtl (nn_pdl=1, slope 1/ri_cri=4.5), c_k/c_eps "
-    "(rn_ediff/rn_ediss) and background Kz (rn_avm0/rn_avt0) are now dump-verified "
-    "NEMO-exact; the nn_mxl=3 mixing-length form (separate lup/ldn sweeps, "
-    "l_visc=MIN, l_dissl=geomean) and the Dirichlet surface-TKE BC remain the "
-    "deferred TKE items (the end-to-end length match is also blocked on NEMO not "
-    "dumping rn2/N^2 — see TKE_FIDELITY_FINDINGS.md).",
+    "(rn_ediff/rn_ediss), background Kz (rn_avm0/rn_avt0) AND the interior "
+    "mixing-length response are now dump-verified NEMO-exact: fed NEMO's own N² "
+    "(rn2), legoESM's diffusivity matches avm_k to corr 0.9998 for levels >=2 (the "
+    "Veros nn_mxl=2 length is scalar-identical to NEMO nn_mxl=3 in the interior, so "
+    "nn_mxl=3 is NOT the lever — TKE_DECONFOUNDED_FINDINGS.md). The one remaining "
+    "TKE item is the ln_mxl0 surface mixing-length anchor + NEMO Dirichlet "
+    "surface-TKE BC (top ~2 interfaces only), which matters solely for a full "
+    "PROGNOSTIC spinup match, not the diagnostic/tendency oracle.",
     "Implicit quadratic NEMO bottom drag is approximated by the existing "
     "quadratic-with-floor model-level drag knobs.",
 )
