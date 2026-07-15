@@ -1,7 +1,10 @@
-"""Smoothed Lindzen (1981) orographic gravity wave drag.
+"""Smoothed Lindzen (1981)-saturation orographic gravity wave drag.
 
-Orographic GWD with smooth sigmoid activation for wave breaking,
-fully differentiable via jax.lax.scan for the vertical stress profile.
+Orographic GWD with smooth sigmoid activation for wave breaking, AD-safe via
+jax.lax.scan for the vertical stress profile — differentiable ALMOST
+EVERYWHERE (the smooth sigmoids are C-infinity, but the HARD ``U_proj > 0``
+critical-level mask is a step with zero a.e. gradient, and the ``clip`` /
+``minimum`` saturation + tendency limiters are subgradient kinks).
 
 .. note::
 
@@ -11,13 +14,97 @@ fully differentiable via jax.lax.scan for the vertical stress profile.
    reaching the critical level (where ``U_proj`` reverses) is absorbed/radiated
    rather than deposited on the opposing flow, so it slightly under-deposits at
    a sharp critical level relative to E3SM's spectral solver.  The drag remains
-   a physically-signed, differentiable momentum sink with no spurious
-   acceleration.  See ``mcfarlane.py`` for the full discussion.
+   a physically-signed, AD-safe momentum sink with no spurious acceleration.
+   See ``mcfarlane.py`` for the full discussion.
+
+Faithfulness to Lindzen (1981)
+------------------------------
+Reference oracle: Lindzen (1981) for the SATURATION mechanism; the on-disk
+E3SM path ``e3sm_cam.py`` (``gw_oro_src`` McFarlane + ``gw_drag_prof`` Lindzen
+saturation + WKB damping) as a faithful sibling for the orographic launch +
+solver. This module is a Lindzen-style SINGLE-WAVE scheme with a McFarlane-type
+``h²`` launch — NOT a parameter-restricted SUBSET of ``e3sm_cam.py`` (E3SM
+builds a source REGION with ``hdsp = 2·sgh`` and a ``0.5·k·min(hdsp², …)`` cap,
+then WKB-damps; this uses a plain surface-level ``ρ·N·k·h²·U`` and saturation
+only).
+FAITHFUL to Lindzen — the saturation core:
+  * ``tau_sat = 0.5·ρ·k·|U_proj|³ / N`` is Lindzen's marginal-convective-
+    instability saturation stress (the ½ and the ``k·U³/N`` form are Lindzen's;
+    matches E3SM ``effkwv·rhoi·ubmc³/(2·ni)``);
+  * the saturation-breaking HYPOTHESIS: the sigmoid ``f_break`` turns ON where
+    the carried stress exceeds ``critical_Fr·tau_sat`` (this ratio enters ONLY
+    the sigmoid activation, NOT a hard cap value); the broken wave sheds stress
+    as the momentum-flux divergence ``accel = −(tau_carry − tau_new)/(ρ·dz)``
+    (a deceleration; equivalently ``+∂τ/∂z / ρ`` for the code's ``≥ 0`` stress
+    ``τ`` that DECREASES upward — a monotone-non-increasing, physically-signed
+    sink). The saturation is SOFT:
+    ``tau_new = tau_carry·(1−f_break) + tau_sat·f_break`` then
+    ``min(tau_new, tau_carry)`` — the relaxation TARGET is the UNSCALED
+    ``tau_sat``. So (a) with finite ``Fr_sharpness`` (``f_break < 1``) and
+    ``tau_carry > tau_sat`` the blend stays ABOVE ``tau_sat`` (it approaches
+    ``tau_sat`` only as ``f_break → 1``) — there is NO exact hard cap; (b) the
+    ``min`` guard only prevents stress GROWTH, so for ``critical_Fr < 1`` the
+    sub-``tau_sat`` activation cannot reduce stress until ``tau_carry > tau_sat``.
+DEPARTURES / DESIGN:
+  * **``critical_Fr`` is a linear STRESS-RATIO activation threshold, NOT a Froude
+    number.** Lindzen's saturation limit scales with ``Fr_c²``
+    (``F_sat = Fr_c²·ρ·k·U³/2N``; E3SM uses ``fcrit2``), but the code uses
+    ``critical_Fr`` only as the sigmoid activation threshold ``tau_carry/tau_sat
+    > critical_Fr`` (relaxing toward the unscaled ``tau_sat``), not a cap value.
+    Default ``critical_Fr = 1`` sets the breaking THRESHOLD at the exact Lindzen
+    ``tau_sat`` (``Fr_c = 1``), but the saturation itself is SOFT (finite-sharpness
+    sigmoid, carried stress can remain above ``tau_sat``) — NOT an exact hard cap.
+    A non-default value is a stress-ratio multiplier, not ``Fr_c`` (it plays the
+    role of ``Fr_c²``); the config field name over-labels it "Froude number";
+  * **LAUNCH is McFarlane (1987), not Lindzen (1981)**: ``tau_0 =
+    ρ_sfc·N_sfc·k·h_topo²·U_ll``. Lindzen (1981) is a saturation/breakdown
+    theory (tidal + upward-propagating waves), NOT an orographic source; the
+    ``h²`` launch is the McFarlane/Pierrehumbert orographic form;
+  * **NO ``sghmax`` Froude cap on the launch** (E3SM caps the source-region
+    displacement; here ``tau_0`` is only clipped ≥ 0, so it grows without bound
+    as ``h²``) and **NO WKB radiative damping** (E3SM ``min(taudmp, tausat)``;
+    here saturation breaking + critical-level absorption are the only sinks);
+  * **critical-level treatment is DESIGN, not deposition**: at ``c = 0`` (where
+    ``U_proj`` reverses) the smooth ``crit_gate`` drives the CARRIED stress → ~0
+    but the DEPOSITED drag is ``drag_sat·crit_gate·pos_mask`` (NOT all of
+    ``drag_sat`` — the gate + hard mask scale it down toward the critical
+    level), so the gate-removed RESIDUAL stress is radiated/discarded (never
+    deposited on the
+    reversed flow), so the scheme under-deposits at a sharp critical level;
+  * ``crit_level_floor = 0.5 m/s``: the smooth gate ``sigmoid(sharpness·(U_proj
+    − 0.5))`` is half-on at SIGNED ``U_proj = +0.5 m/s`` (not ``|U_proj|``), so
+    absorption ramps in as the wind DROPS toward +0.5 — marginally BEFORE the
+    true ``c = 0`` reversal; the sigmoid only ASYMPTOTICALLY → 0 for reversed
+    ``U_proj < 0`` (never identically 0), so it is the SEPARATE hard ``U_proj > 0``
+    mask that makes the DEPOSITED drag EXACTLY zero on the reversed flow;
+  * the antiparallel "deceleration rigidly along the source direction" + the
+    KE→heat closure (all mean-flow KE loss returned as local frictional
+    heating, ``dT_dt = −(u·du_dt+v·dv_dt)/c_pd``) are single-wave DESIGN
+    choices. NOTE: this KE→heat identity is DEFINITIONAL (``dT_dt`` is defined
+    FROM the final tendency), so ``c_pd·Σρ·dT·dz == eps_gwd`` is a tautology,
+    NOT an independent energy-conservation law — see the ``conserves`` note.
+  * the ``tndmax`` / ``umcfac`` tendency limiters (E3SM ``gw_common.F90``
+    provenance) are post-flux magnitude caps that break the exact
+    stress-divergence balance where they bind (a bounded sink, never a source).
+NUMERICS (AD-safety): the smooth sigmoid breaking (``Fr_sharpness``) and smooth
+critical-level gate (``crit_level_sharpness``) replace hard on/off switches; a
+HARD ``U_proj > 0`` positivity mask forces the VECTOR sink
+``u·du_dt + v·dv_dt ≤ 0`` strictly (the drag is antiparallel to the SOURCE-wind
+direction, so componentwise ``du_dt·u`` can be positive for an oblique/veering
+column wind; only the vector projection is guaranteed) — the smooth gate alone
+leaves a tiny accelerating leak at weakly-negative ``U_proj``;
+``safe_divide`` for ``1/N`` (issue #249); the ``|U_proj|`` floor (0.1 m/s), the
+``tau_sat`` floor (1e-10), the ``min(tau_new, tau_carry)`` monotonicity clamp,
+and the ``dz`` / ``ρ·dz`` floors.
+Non-behavioral pins: ``tests/atmosphere/hydrostatic/unit/test_lindzen_gwd_faithful.py``.
 
 References
 ----------
 - Lindzen, R. S. (1981). Turbulence and stress owing to gravity wave and
   tidal breakdown. J. Geophys. Res., 86, 9707-9714.
+- McFarlane, N. A. (1987). The effect of orographically excited gravity wave
+  drag on the general circulation of the lower stratosphere and troposphere.
+  J. Atmos. Sci., 44, 1775-1800 (the orographic launch).
 """
 
 from __future__ import annotations
@@ -49,18 +136,28 @@ __physics_contract__ = {
     },
     "sign_convention": (
         "z up; orographic phase speed c=0. Drag is a deceleration directed "
-        "along the source (surface-wind) direction, so du_dt opposes the "
-        "source-projected wind (du_dt*u <= 0, made strict by a hard U_proj>0 "
-        "mask); carried stress is monotone non-increasing upward and bounded "
-        "by the launched stress. eps_gwd>=0 is the column KE loss returned as "
-        "frictional heating dT_dt = -(u*du_dt + v*dv_dt)/c_pd."
+        "along the SOURCE (surface-wind) direction, so it opposes the "
+        "source-projected wind: the VECTOR sink u*du_dt + v*dv_dt <= 0 (== "
+        "accel*U_proj) is made strict by a hard U_proj>0 mask. (Componentwise "
+        "du_dt*u can be >0 for an oblique/veering column wind; only the vector "
+        "projection is guaranteed.) Carried stress is monotone non-increasing "
+        "upward and bounded by the launched stress. eps_gwd>=0 is the column KE "
+        "loss returned as frictional heating dT_dt = -(u*du_dt + v*dv_dt)/c_pd."
     ),
-    # KE removed from the mean flow is returned exactly as frictional heating,
-    # so total ENERGY is conserved. Momentum is NOT conserved (a sink to the
-    # surface / absorbed at a critical level). The post-flux tendency limiter
-    # can break the exact stress-divergence balance where it binds but never
-    # adds momentum.
-    "conserves": ["energy"],
+    # conserves = none. The resolved mean-flow KE removed is returned exactly as
+    # frictional heating (c_pd*sum(rho*dT_dt*dz) == eps_gwd), but that closure is
+    # DEFINITIONAL (dT_dt is defined FROM the final tendency) — a tautology, NOT
+    # an independent energy-conservation law. Total wave+mean energy is NOT
+    # conserved: the launched orographic wave is an external/unbudgeted source,
+    # the critical-level absorption radiates the residual stress away, and the
+    # tendency limiter discards the implied carry loss where it binds. Momentum
+    # is not conserved either (external source; absorbed at a critical level).
+    # This follows the stricter hines.py precedent (a launched-wave scheme -> no
+    # robust total-energy claim). FOLLOW-UP: mcfarlane.py and e3sm_cam.py still
+    # declare ["energy"] with the same external-wave budget and need the same
+    # sweep to ["none"]; rayleigh.py stays ["energy"] (Rayleigh friction is a
+    # direct resolved KE->internal-energy conversion with NO launched wave).
+    "conserves": ["none"],
     "differentiable": True,
     "reference": (
         "Lindzen (1981), J. Geophys. Res. 86, 9707-9714, "
@@ -68,10 +165,33 @@ __physics_contract__ = {
     ),
     "idealized_test": (
         "tests/atmosphere/hydrostatic/unit/test_gravity_wave_drag.py: rest / "
-        "zero-orography column -> zero tendency; du_dt*u <= 0 at every level; "
-        "c_pd*sum(rho*dT_dt*dz) == eps_gwd >= 0 (KE->heat closure)"
+        "zero-orography column -> zero tendency; u*du_dt + v*dv_dt <= 0 at every "
+        "level (vector sink); c_pd*sum(rho*dT_dt*dz) == eps_gwd >= 0 (KE->heat)"
     ),
 }
+
+
+def _lindzen_launch_stress(rho_sfc, N_sfc, k_wave, h_topo_sq, U_ll):
+    """McFarlane (1987) orographic launch stress ``tau_0 = ρ·N·k·h²·U`` (clipped ≥ 0).
+
+    The ``h²`` orographic source is McFarlane/Pierrehumbert, NOT Lindzen (1981); there is NO
+    ``sghmax`` Froude cap (cf. E3SM ``gw_oro_src``), so ``tau_0`` grows unbounded in ``h``.
+    """
+    return jnp.clip(rho_sfc * N_sfc * k_wave * h_topo_sq * U_ll, 0.0, None)
+
+
+def _lindzen_saturation_stress(rho, U_proj, k_wave, N_full):
+    """Lindzen (1981) marginal-instability saturation stress ``tau_sat = 0.5·ρ·k·|U_proj|³ / N``.
+
+    ``U_proj`` is floored at 0.1 m/s (near-zero-wind / AD guard) and the result at 1e-10 Pa. This
+    is the E3SM ``effkwv·rhoi·ubmc³/(2·ni)`` form; ``safe_divide`` keeps the ``1/N`` VJP finite in
+    nearly-neutral layers (issue #249).
+    """
+    U_proj_abs = jnp.clip(jnp.abs(U_proj), 0.1, None)  # coeff-ok: projected-wind floor [m/s]
+    tau_sat = 0.5 * rho * U_proj_abs ** 3 * k_wave * safe_divide(
+        jnp.ones_like(N_full), N_full, eps=1e-6,
+    )
+    return jnp.clip(tau_sat, 1e-10, None)
 
 
 def lindzen_gwd(
@@ -132,23 +252,15 @@ def lindzen_gwd(
         h_topo_sq = config.h_topo ** 2
     else:
         h_topo_sq = jnp.clip(h_topo_col, 0.0, None) ** 2
-    tau_0 = rho_sfc * N_sfc * config.k_wave * h_topo_sq * U_ll
-    tau_0 = jnp.clip(tau_0, 0.0, None)
+    tau_0 = _lindzen_launch_stress(rho_sfc, N_sfc, config.k_wave, h_topo_sq, U_ll)
 
-    # Saturation stress per level: tau_sat = rho * k * (u - c)^3 / (2 N)
+    # Saturation stress per level: tau_sat = 0.5 * rho * k * |U_proj|^3 / N
     # (Lindzen 1981; identical to the faithful E3SM path in e3sm_cam.py,
     # which uses ``effkwv*rhoi*ubmc**3/(2*ni)``).  The factor of 1/2 was
     # previously missing here, making the saturation stress ~2x too large.
-    # Wave breaks where carried stress exceeds local saturation.
-    # AD-safe divide by ``N`` (issue #249): ``N_full`` can hit the
-    # ``1e-8`` clip floor in nearly neutral layers, where the prior
-    # ``clip + divide`` form left ``-rho*U^3*k / N**2`` cotangents that
-    # blow up under reverse-mode AD.
-    U_proj_abs = jnp.clip(jnp.abs(U_proj), 0.1, None)  # coeff-ok: projected-wind floor [m/s]
-    tau_sat = 0.5 * rho * U_proj_abs ** 3 * config.k_wave * safe_divide(
-        jnp.ones_like(N_full), N_full, eps=1e-6,
-    )
-    tau_sat = jnp.clip(tau_sat, 1e-10, None)
+    # Wave breaks where carried stress exceeds local saturation.  See
+    # ``_lindzen_saturation_stress`` for the AD-safe divide by ``N`` (#249).
+    tau_sat = _lindzen_saturation_stress(rho, U_proj, config.k_wave, N_full)
 
     # Smooth critical-level absorption gate (E3SM gw_common.F90:492
     # ``where ubmc*(ubi_above - c) > 0``).  The orographic wave has phase
@@ -158,10 +270,12 @@ def lindzen_gwd(
     # — it merely drops to a small value near ``U = 0`` and recovers above,
     # which is not the physical critical-level filter (codex round-1 #2).  The
     # gate is applied to the carried-forward stress inside the scan so the
-    # propagated stress is driven to ~0 AT the critical level regardless of the
-    # saturation ratio, and the upward ``jnp.minimum`` monotonicity keeps it
-    # zero above.  ``crit_gate -> 1`` well below any critical level, so the
-    # forward path is unchanged there.
+    # propagated stress is driven SMALL (asymptotically ~0, since the sigmoid is
+    # never identically 0 at finite reversed ``U_proj``) at the critical level
+    # regardless of the saturation ratio; the upward ``jnp.minimum`` monotonicity
+    # then only prevents the (small) carried stress from re-growing above — it
+    # does not force it exactly to 0.  ``crit_gate -> 1`` well below any critical
+    # level, so the forward path is unchanged there.
     crit_gate = jax.nn.sigmoid(
         config.crit_level_sharpness * (U_proj - config.crit_level_floor)
     )
@@ -198,7 +312,9 @@ def lindzen_gwd(
         # The single-wave drag is rigidly along the source direction, so a HARD
         # ``U_proj > 0`` positivity mask makes the deposited drag EXACTLY zero in
         # any reversed layer (the smooth sigmoid alone leaves a tiny accelerating
-        # leak at weakly-negative ``U_proj``) — du/dt·u <= 0 is STRICT.
+        # leak at weakly-negative ``U_proj``) — the VECTOR sink
+        # ``u*du_dt + v*dv_dt <= 0`` is STRICT (componentwise ``du_dt*u`` can be
+        # >0 for an oblique wind; only the source-direction projection is signed).
         gate_k = crit_gate[:, k]
         pos_mask = (U_proj[:, k] > 0.0).astype(tau_carry.dtype)
         tau_new = tau_new * gate_k
