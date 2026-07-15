@@ -145,7 +145,15 @@ def bridge_nemo_to_legoesm(
             "bridging topographic configs."
         )
 
-    z_coord = create_z_star_from_thicknesses(np.asarray(grid.e3t_1d))
+    # Supply NEMO's EXACT analytic T-point depths (gdept_1d) so the
+    # nemo_trapezoid PGF quadrature reconstructs NEMO's e3w W-spacings
+    # (e3w(1)=2·gdept(1), e3w(k)=gdept(k)−gdept(k−1)) to roundoff.  These
+    # differ from the interface-midpoint z_full_ref by up to ~3.6 m on the
+    # stretched MI96 grid, which is the entire ~0.5% depth-signed PGF gap.
+    z_coord = create_z_star_from_thicknesses(
+        np.asarray(grid.e3t_1d),
+        t_depth_ref_m=np.asarray(grid.gdept_1d).ravel(),
+    )
     H_max = float(np.sum(np.asarray(grid.e3t_1d)[:n_wet]))   # depth of the n_wet wet cells
 
     base = rest_state_latlon_cgrid_ocean(

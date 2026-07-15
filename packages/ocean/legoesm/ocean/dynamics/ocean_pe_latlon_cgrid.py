@@ -1249,11 +1249,16 @@ def _bc_geometry_and_density(
                           and _pgf_quadrature == "nemo_trapezoid")
                       else None),
         # NEMO depth_to_e3 w-spacings from the coordinate's own t-depth
-        # ladder (analytic for the DINO masked-zco grid; algebraically
-        # the h-derived midpoint form otherwise).
-        trapezoid_t_depth_1d=(jnp.abs(z_coord.z_full_ref)
-                              if _pgf_quadrature == "nemo_trapezoid"
-                              else None),
+        # ladder.  Prefer the EXACT external-model T-depths when the
+        # coordinate carries them (``t_depth_ref``, e.g. NEMO ``gdept_1d``
+        # ≠ interface midpoint) — this makes e3w(1)=2·gdept(1),
+        # e3w(k)=gdept(k)−gdept(k−1) reproduce NEMO ``hpg_zco`` to
+        # roundoff.  Fall back to |z_full_ref| (midpoint) otherwise.
+        trapezoid_t_depth_1d=(
+            jnp.abs(z_coord.z_full_ref)
+            if getattr(z_coord, "t_depth_ref", None) is None
+            else jnp.asarray(z_coord.t_depth_ref)
+        ) if _pgf_quadrature == "nemo_trapezoid" else None,
     )
 
     p_prime_filled = neumann_fill_cgrid(p_prime, mask, grid=grid)

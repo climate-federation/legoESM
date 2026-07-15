@@ -60,6 +60,18 @@ class OceanZStarCoordinate(NamedTuple):
         Reference layer thickness [m], shape (nlev,). Positive.
     dz_half_ref : array
         Distance between adjacent full levels [m], shape (nlev-1,).
+    t_depth_ref : array or None
+        Optional EXACT positive T-point reference depths [m], shape
+        (nlev,).  ``None`` (default) means ``|z_full_ref|`` (the
+        cell-centre midpoint) is the T-point depth ladder — correct for
+        legoESM's own z* grid.  A fidelity bridge that must reproduce an
+        external model whose T-points are NOT the interface midpoints
+        (e.g. NEMO's analytic MI96 ``gdept_1d`` ≠ midpoint of
+        ``gdepw_1d``) supplies that model's exact T-depths here so the
+        ``nemo_trapezoid`` PGF quadrature reconstructs the identical
+        ``e3w`` (W-spacing) recurrence.  Read ONLY by the hydrostatic
+        pressure quadrature; ``dz_half_ref`` and every other operator
+        keep using the midpoint ``z_full_ref``.
     """
     n_levels: int
     H_max: float
@@ -67,6 +79,7 @@ class OceanZStarCoordinate(NamedTuple):
     z_half_ref: jnp.ndarray
     dz_ref: jnp.ndarray
     dz_half_ref: jnp.ndarray
+    t_depth_ref: jnp.ndarray | None = None
 
 
 def create_ocean_z_star(
@@ -152,7 +165,9 @@ def create_ocean_z_star(
     )
 
 
-def create_z_star_from_thicknesses(dz_ref_m) -> OceanZStarCoordinate:
+def create_z_star_from_thicknesses(
+    dz_ref_m, t_depth_ref_m=None,
+) -> OceanZStarCoordinate:
     """Build a z* coordinate from EXPLICIT reference layer thicknesses.
 
     Reproduces an external model's vertical grid EXACTLY -- pass another model's
@@ -171,6 +186,13 @@ def create_z_star_from_thicknesses(dz_ref_m) -> OceanZStarCoordinate:
     ----------
     dz_ref_m : 1-D array-like
         Reference layer thicknesses [m], top -> bottom, all > 0.
+    t_depth_ref_m : 1-D array-like or None
+        Optional EXACT positive T-point depths [m], shape (nlev,), stored
+        on the coordinate's ``t_depth_ref`` field for the fidelity PGF
+        quadrature (see :class:`OceanZStarCoordinate`).  ``None`` (default)
+        leaves ``t_depth_ref=None`` → the midpoint ``z_full_ref`` is used.
+        Pass an external model's true T-depths (e.g. NEMO ``gdept_1d``)
+        when they differ from the interface midpoint.
 
     Returns
     -------
@@ -201,6 +223,22 @@ def create_z_star_from_thicknesses(dz_ref_m) -> OceanZStarCoordinate:
     dz_ref = z_half_ref[:-1] - z_half_ref[1:]
     dz_half_ref = z_full_ref[:-1] - z_full_ref[1:]
 
+    t_depth_ref = None
+    if t_depth_ref_m is not None:
+        t_np = np.asarray(t_depth_ref_m, dtype=np.float64)
+        if t_np.ndim != 1 or t_np.size != n_levels:
+            raise ValueError(
+                f"t_depth_ref_m must be a 1-D array of length n_levels="
+                f"{n_levels}, got shape {t_np.shape}")
+        if not np.all(t_np > 0.0):
+            raise ValueError("t_depth_ref_m depths must all be > 0")
+        # Monotone-increasing: the PGF e3w recurrence uses gdept(k)-gdept(k-1) as
+        # a positive W-spacing; a non-monotone ladder would give a negative e3w
+        # and a silently nonphysical pressure gradient.
+        if not np.all(np.diff(t_np) > 0.0):
+            raise ValueError("t_depth_ref_m depths must be strictly increasing")
+        t_depth_ref = jnp.asarray(t_np, dtype=get_policy().control)
+
     return OceanZStarCoordinate(
         n_levels=n_levels,
         H_max=H_max,
@@ -208,6 +246,7 @@ def create_z_star_from_thicknesses(dz_ref_m) -> OceanZStarCoordinate:
         z_half_ref=z_half_ref,
         dz_ref=dz_ref,
         dz_half_ref=dz_half_ref,
+        t_depth_ref=t_depth_ref,
     )
 
 
@@ -488,6 +527,11 @@ def create_partial_cell_coordinate(
     h_partial = jnp.where(is_bottom, partial_thickness[..., jnp.newaxis], h_full)
     h_partial = jnp.where(is_active, h_partial, 0.0)
 
+    # NOTE: the z*-only ``t_depth_ref`` (exact NEMO gdept for the fidelity PGF
+    # quadrature) is intentionally NOT carried here — OceanPartialCellCoordinate
+    # has no such field, so a partial-cell wrap of a NEMO z* coord reverts the PGF
+    # to midpoint depths. Harmless today (the NEMO bridge builds a plain z* coord);
+    # propagate it here if partial-cell NEMO fidelity is ever added.
     return OceanPartialCellCoordinate(
         n_levels=nlev,
         H_max=z_coord.H_max,
