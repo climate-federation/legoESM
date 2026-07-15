@@ -6,6 +6,9 @@
 base: config/aimip/aimip_era5.yaml
 cfg_overrides:
   aimip_surface_forcing: true
+  # Fast rrtmgp compile: one reused g-point body (answer-identical) instead of
+  # the per-g-point prevent_cse body that inflated the GPU compile to hours.
+  aimip_rrtmgp_gpoint_checkpoint: false
   train_windows:
   - - 1979
     - 0
@@ -432,14 +435,12 @@ cfg_overrides:
   n_eval_days: 4
   train_year: 1979
   eval_year: 2013
-  # Classical DOES use the curriculum. It already runs the same per-g-point +
-  # nothing_saveable jax.checkpoint on the spectral_rollout scan body as the
-  # base rollout (via _rollout_one_segment). The apparent "won't compile" was a
-  # genuinely slow XLA compile of the rrtmgp+AD training step (~6 h cold),
-  # UNCACHED (_env.sh disables the JIT cache for benchmarking). Fix: run this
-  # suite with LEGOESM_JIT_CACHE_DIR set (persistent cache) so each lead's graph
-  # compiles once, caches to disk, and reuses across epochs/resumes/reruns.
-  # 72h dropped — its 432-step graph is the worst compile; 12h+24h suffice.
+  # Classical uses the curriculum. The multi-hour rrtmgp compile was the
+  # per-g-point prevent_cse=True body (~Ng-fold code inflation) — fixed above by
+  # aimip_rrtmgp_gpoint_checkpoint:false (one reused g-point body, answer-
+  # identical, compiles in minutes; the outer nothing_saveable rollout
+  # checkpoint still bounds the adjoint memory). 72h dropped — its 432-step
+  # graph is still the heaviest; 12h+24h give the stability benefit.
   aimip_rollout_curriculum:
   - - 12
     - 3
