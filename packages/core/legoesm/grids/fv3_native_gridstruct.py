@@ -27,11 +27,13 @@ The corner-diagonal regions of the metric fields carry FV3's own
 ``fill_corners`` ghost values (ported r8 index maps below), the grid and
 agrid corner regions carry the upstream mirrored geometry, and the sg /
 cosa pipelines therefore see upstream-exact inputs everywhere (codex r1
-P1-2).  Remaining known-junk slots match upstream's own uninitialized
-choices: the ``cosa_u`` isd/ied+1 columns, ``rsina`` borders, and the
-``divg_u``/``divg_v`` outermost rows/cols where the ``sina_u/v`` factor is
-big_number (upstream computes the same junk locally before an mpp update
-whose outermost-slot values d_sw never consumes within its ring depth).
+P1-2).  Remaining known-junk slots: the ``cosa_u`` isd/ied+1 columns and
+``rsina`` borders match upstream's uninitialized choices exactly; the
+``divg_u``/``divg_v`` outermost rows/cols hold big_number-derived junk
+that upstream instead overwrites via its final mpp exchange — a
+DOCUMENTED, NOT-UPSTREAM-EQUAL region.  Safe because d_sw's divergence
+damping loops run ``nt <= nord <= ng-1`` deep and never reach the
+outermost row/col (codex r2 finding 5; tripwire-tested).
 
 Fortran index convention: arrays are plain numpy with row 0 == Fortran
 ``isd = 1-ng`` (cell/lower-node axes) — helper ``fort`` views give
@@ -424,18 +426,18 @@ def build_fv3_native_gridstruct(n: int, ng: int = 3, *,
     ghost = ~cell_ok
     cosa_s[ghost] = BIG_NUMBER
 
-    # rsin_u/v panel-border overrides: 1/SIGN(max(tiny,|s|), s).  Fortran
-    # SIGN transfers a NON-NEGATIVE sign for s == 0 (+tiny), where
-    # np.sign(0) would give 0 and hence inf (codex r1 P2-4).
-    def _fsign(mag, s):
-        return np.where(s >= 0.0, mag, -mag)
-
+    # rsin_u/v panel-border overrides: 1/SIGN(max(tiny,|s|), s).
+    # np.copysign is Fortran SIGN exactly, including BOTH signed zeros
+    # (gfortran default -fsign-zero makes SIGN(x, -0.0) negative — codex
+    # r2 P2-4; np.sign(0)=0 and s>=0 tests both got zeros wrong).
     for irow in (i1, inpx):
         s = sina_u[irow, :]
-        rsin_u[irow, :] = 1.0 / _fsign(np.maximum(TINY_NUMBER, np.abs(s)), s)
+        rsin_u[irow, :] = 1.0 / np.copysign(
+            np.maximum(TINY_NUMBER, np.abs(s)), s)
     for jcol in (i1, inpx):
         s = sina_v[:, jcol]
-        rsin_v[:, jcol] = 1.0 / _fsign(np.maximum(TINY_NUMBER, np.abs(s)), s)
+        rsin_v[:, jcol] = 1.0 / np.copysign(
+            np.maximum(TINY_NUMBER, np.abs(s)), s)
 
     # fill_ghost on sin/cos_sg (tiny/big), then v2 patches (sin AND cos;
     # note the nw x-strip source differs from v1: npx-i, not npx+i)
@@ -497,25 +499,30 @@ def build_fv3_native_gridstruct(n: int, ng: int = 3, *,
         [area_c[-2, -2]]))
     # seam x2 specials along the full Fortran i==1/npx columns and
     # j==1/npy rows (strips carry the neighbours' own border specials);
-    # per-side point orders mirror the certified step-3 constructions
-    gm_y0 = mid_pt_sphere(grid_ll[:, :-1], grid_ll[:, 1:])   # (m_b, m_a, 2)
-    gm_x0 = mid_pt_sphere(grid_ll[:-1, :], grid_ll[1:, :])   # (m_a, m_b, 2)
-    pm = gm_y0[i1]
-    cw = agrid_ll[i1]
-    area_c[i1, 1:-1] = 2.0 * get_area_quad(
-        pm[:-1], cw[:-1], cw[1:], pm[1:]) * radius**2        # west
-    pm = gm_y0[inpx]
-    cw = agrid_ll[inpx - 1]
-    area_c[inpx, 1:-1] = 2.0 * get_area_quad(
-        cw[:-1], pm[:-1], pm[1:], cw[1:]) * radius**2        # east
-    pm = gm_x0[:, i1]
-    cw = agrid_ll[:, i1]
-    area_c[1:-1, i1] = 2.0 * get_area_quad(
-        pm[:-1], pm[1:], cw[1:], cw[:-1]) * radius**2        # south
-    pm = gm_x0[:, inpx]
-    cw = agrid_ll[:, inpx - 1]
-    area_c[1:-1, inpx] = 2.0 * get_area_quad(
-        cw[:-1], cw[1:], pm[1:], pm[:-1]) * radius**2        # north
+    # per-side point orders mirror the certified step-3 constructions.
+    # Evaluated on the WIDE window so the outermost B slots (which need a
+    # centre/node one beyond the cropped domain) also carry the special —
+    # codex r2 finding 1.
+    iw = i1 + 1              # wide np index of Fortran node/cell 1
+    inpxw = inpx + 1
+    gm_y_w = mid_pt_sphere(grid_w[:, :-1], grid_w[:, 1:])   # (m_b+2, m_a+2, 2)
+    gm_x_w = mid_pt_sphere(grid_w[:-1, :], grid_w[1:, :])   # (m_a+2, m_b+2, 2)
+    pm = gm_y_w[iw]                       # mids indexed by wide cell
+    cw = agrid_w[iw]
+    area_c[i1, :] = 2.0 * get_area_quad(
+        pm[:m_b], cw[:m_b], cw[1:m_b + 1], pm[1:m_b + 1]) * radius**2  # west
+    pm = gm_y_w[inpxw]
+    cw = agrid_w[inpxw - 1]
+    area_c[inpx, :] = 2.0 * get_area_quad(
+        cw[:m_b], pm[:m_b], pm[1:m_b + 1], cw[1:m_b + 1]) * radius**2  # east
+    pm = gm_x_w[:, iw]
+    cw = agrid_w[:, iw]
+    area_c[:, i1] = 2.0 * get_area_quad(
+        pm[:m_b], pm[1:m_b + 1], cw[1:m_b + 1], cw[:m_b]) * radius**2  # south
+    pm = gm_x_w[:, inpxw]
+    cw = agrid_w[:, inpxw - 1]
+    area_c[:, inpx] = 2.0 * get_area_quad(
+        cw[:m_b], cw[1:m_b + 1], pm[1:m_b + 1], pm[:m_b]) * radius**2  # north
     # certified compute-domain values (incl. the x2 borders and x3 cube
     # vertices) take precedence over the generic constructions above
     area_c[sl_b, sl_b] = cert["area_c"][0]

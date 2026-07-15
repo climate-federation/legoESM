@@ -168,10 +168,23 @@ jobs:
         run: |
           python -m pytest tests/grids/test_fv3_native_grid_phase1.py \
             tests/grids/test_fv3_native_metrics_phase2.py \
+            tests/grids/test_fv3_native_halos_phase3.py \
             tests/grids/test_gnomonic_ed_gate_iter68.py \
             tests/grids/test_gnomonic_ed_centers_iter62.py \
             tests/grids/test_gnomonic_ed_halo_nocollapse_iter73.py \
             -x --timeout=600 --tb=short -q
+      - name: FV3 phase-4 c_sw oracle (Fortran rebuild REQUIRED)
+        # codex r2 P1-3a: the verbatim-Fortran rebuild-and-compare test
+        # must EXECUTE in CI, not sit behind a skipif.  gfortran is
+        # asserted so a toolchain regression fails loudly instead of
+        # silently skipping the oracle.
+        env:
+          JAX_ENABLE_X64: "1"
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq gfortran
+          gfortran --version
+          python -m pytest tests/grids/test_fv3_native_swcore_phase4.py \
+            -x --timeout=900 --tb=short -q
         timeout-minutes: 30
 
   restart-smoke:

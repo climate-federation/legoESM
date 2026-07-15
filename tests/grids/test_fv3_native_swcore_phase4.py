@@ -200,22 +200,37 @@ def test_c_sw_matches_fortran_full_arrays(csw_result, oracle,
     got = np.asarray(csw_result[field], dtype=np.float64)
     want = np.asarray(oracle[field], dtype=np.float64)
     assert got.shape == want.shape
-    # exact driver sentinel: a slot is unwritten iff it still holds the
-    # -9e9 poison (or a poison-scaled product for ut/vt, which c_sw scales
-    # in place after d2a2c wrote them) — everything else must match
-    written = want != -9.0e9
     res, ng = int(inputs["res"]), int(inputs["ng"])
-    sl = _compute_slices(res, ng, want.shape)
-    n_compute = want[sl].size
-    # divergence_corner writes exactly the compute B nodes; every other
-    # field's Fortran writes extend into the halo ring
-    min_written = n_compute if field == "divg_d" else n_compute + 1
-    assert int(written.sum()) >= min_written, \
-        f"{field}: write-mask smaller than the compute domain"
+    # SOURCE-DERIVED defined regions (codex r2 P1-3b): the driver dumps
+    # only slots the c_sw/d2a2c write loops define; everything else is
+    # NaN in the fixture.  Bounds mirror the driver's citations.
+    npx = res + 1
+    # Fortran index bounds (is=js=1, ie=je=npx-1):
+    #   delpc/ptc [is-1..ie+1]^2 = [0..npx]; ua/va [is-2..ie+2]^2 =
+    #   [-1..npx+1]; uc/ut i in [0..npx+1], j in [0..npx];
+    #   vc/vt transposed; divg_d [1..npx]^2
+    ring = {
+        "delpc": (0, npx, 0, npx), "ptc": (0, npx, 0, npx),
+        "ua": (-1, npx + 1, -1, npx + 1),
+        "va": (-1, npx + 1, -1, npx + 1),
+        "uc": (0, npx + 1, 0, npx), "ut": (0, npx + 1, 0, npx),
+        "vc": (0, npx, 0, npx + 1), "vt": (0, npx, 0, npx + 1),
+        "divg_d": (1, npx, 1, npx),
+    }[field]
+    lo = 1 - ng
+
+    def rows(a, b):
+        return slice(a - lo, b - lo + 1)
+
+    expect = np.zeros(want.shape, dtype=bool)
+    expect[rows(ring[0], ring[1]), rows(ring[2], ring[3])] = True
+    written = np.isfinite(want)
+    assert np.array_equal(written, expect), \
+        f"{field}: fixture defined-region differs from the source bounds"
     g, w = got[written], want[written]
     denom = np.maximum(np.abs(w), 1.0)
     err = (np.abs(g - w) / denom).max()
-    assert err < 1e-12, f"{field}: rel err {err:.3e} over written slots"
+    assert err < 1e-12, f"{field}: rel err {err:.3e} over defined slots"
 
 
 def test_fortran_oracle_rebuild_matches_fixture(tmp_path, oracle):
@@ -238,4 +253,62 @@ def test_fortran_oracle_rebuild_matches_fixture(tmp_path, oracle):
     fresh = np.load(tmp_path / "swcore_oracle_c12.npz")
     for key in ("delpc", "ptc", "uc", "vc", "ut", "vt",
                 "ua", "va", "divg_d"):
-        assert np.array_equal(fresh[key], oracle[key]), key
+        assert np.array_equal(fresh[key], oracle[key], equal_nan=True), key
+
+
+def test_rsin_override_sign_transfer_semantics():
+    """Fortran SIGN(max(tiny,|s|), s) semantics incl BOTH signed zeros
+    (gfortran default -fsign-zero; codex r2 P2-4)."""
+    tiny = 1.0e-8
+    s = np.array([0.0, -0.0, 0.5, -0.5, 1e-12, -1e-12])
+    got = np.copysign(np.maximum(tiny, np.abs(s)), s)
+    want = np.array([tiny, -tiny, 0.5, -0.5, tiny, -tiny])
+    assert np.array_equal(got, want)
+    assert np.signbit(got[1])
+
+
+def test_area_c_halo_strips_match_neighbor_faces(inputs):
+    """Six-face mpp map: every non-corner-region area_c halo slot must
+    equal the neighbouring face's own stored value (codex r2 finding 1 —
+    the outermost seam slots were generic quads instead of the x2
+    specials)."""
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_OMEGA, FV3_RADIUS_M, build_fv3_native_gridstruct)
+    from legoesm.grids.fv3_native_halos import (
+        ed_supergrid_lonlat_ref, neighbor_index, neighbor_tiles)
+    from legoesm.grids.fv3_native_metrics import compute_fv3_native_metrics
+
+    res, ng = int(inputs["res"]), int(inputs["ng"])
+    npx = res + 1
+    gs = build_fv3_native_gridstruct(res, ng,
+                                     radius=FV3_RADIUS_M, omega=FV3_OMEGA)
+    area_c = gs["rarea_c"]
+    lon6, lat6 = ed_supergrid_lonlat_ref(res)
+    sgc = 2 * np.arange(1, res + 2) - 1
+    cert = compute_fv3_native_metrics(lon6[:, sgc - 1][:, :, sgc - 1],
+                                      lat6[:, sgc - 1][:, :, sgc - 1],
+                                      FV3_RADIUS_M)
+    lo = 1 - ng
+    sg_npx = 2 * res + 1
+    nw, ne, ns, nn = neighbor_tiles(1)
+    strips = ((nw, range(1 - ng, 0 + 1), range(1, npx + 1)),
+              (ne, range(npx + 1, npx + ng + 1), range(1, npx + 1)),
+              (ns, range(1, npx + 1), range(1 - ng, 0 + 1)),
+              (nn, range(1, npx + 1), range(npx + 1, npx + ng + 1)))
+    checked = 0
+    for n_src, irange, jrange in strips:
+        for fi in irange:
+            for fj in jrange:
+                # B node -> supergrid odd-odd -> neighbour B node
+                si, sj = 2 * fi - 1, 2 * fj - 1
+                ii, jj = neighbor_index(si, sj, 1, n_src, sg_npx, sg_npx)
+                if ii % 2 == 0 or jj % 2 == 0:  # pragma: no cover
+                    continue
+                bi, bj = (ii + 1) // 2, (jj + 1) // 2
+                if not (1 <= bi <= npx and 1 <= bj <= npx):
+                    continue
+                want = 1.0 / cert["area_c"][n_src - 1][bi - 1, bj - 1]
+                got = area_c[fi - lo, fj - lo]
+                assert abs(got - want) <= 1e-12 * abs(want), (fi, fj)
+                checked += 1
+    assert checked >= 4 * ng * npx - 8   # full strips minus vertex overlaps

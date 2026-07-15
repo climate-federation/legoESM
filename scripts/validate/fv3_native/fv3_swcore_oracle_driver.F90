@@ -167,30 +167,45 @@ program fv3_swcore_oracle_driver
   call c_sw(delpc, delp, ptc, pt, u, v, w, uc, vc, ua, va, wc, &
             ut, vt, divg_d, nord, dt2, .true., .true., bd, gs, fl)
 
+  ! Dump ONLY the source-defined regions (codex r2 P1-3b: INTENT(OUT)
+  ! actual arguments are undefined outside the written loops; a pre-set
+  ! sentinel is not a language-guaranteed write bitmap).  Bounds cite the
+  ! c_sw/d2a2c_vect write loops:
+  !   delpc/ptc  sw_core hydrostatic update  : is-1..ie+1,  js-1..je+1
+  !   ua/va      d2a2c id=1 + corner slots   : is-2..ie+2,  js-2..je+2
+  !   uc/ut      d2a2c cols 0..npx+1 + edges : is-1..ie+2,  js-1..je+1
+  !   vc/vt      d2a2c rows 0..npy+1         : is-1..ie+1,  js-1..je+2
+  !   divg_d     divergence_corner           : is..ie+1,    js..je+1
+  ! (uc/vc rows/cols outside these were zero-initialized INOUT echoes; the
+  ! INTENT(OUT) fields have no defined value elsewhere.)
   open(newunit=u_out, file='swcore_output.txt', status='replace', action='write')
   write(u_out, '(A,I0)') '# res ', res
-  do j = bd%jsd, bd%jed
-    do i = bd%isd, bd%ied
+  do j = bd%js - 1, bd%je + 1
+    do i = bd%is - 1, bd%ie + 1
       write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'DELPC', i, j, delpc(i, j)
       write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'PTC', i, j, ptc(i, j)
+    end do
+  end do
+  do j = bd%js - 2, bd%je + 2
+    do i = bd%is - 2, bd%ie + 2
       write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'UA', i, j, ua(i, j)
       write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'VA', i, j, va(i, j)
+    end do
+  end do
+  do j = bd%js - 1, bd%je + 1
+    do i = bd%is - 1, bd%ie + 2
+      write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'UC', i, j, uc(i, j)
       write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'UT', i, j, ut(i, j)
+    end do
+  end do
+  do j = bd%js - 1, bd%je + 2
+    do i = bd%is - 1, bd%ie + 1
+      write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'VC', i, j, vc(i, j)
       write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'VT', i, j, vt(i, j)
     end do
   end do
-  do j = bd%jsd, bd%jed
-    do i = bd%isd, bd%ied + 1
-      write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'UC', i, j, uc(i, j)
-    end do
-  end do
-  do j = bd%jsd, bd%jed + 1
-    do i = bd%isd, bd%ied
-      write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'VC', i, j, vc(i, j)
-    end do
-  end do
-  do j = bd%jsd, bd%jed + 1
-    do i = bd%isd, bd%ied + 1
+  do j = bd%js, bd%je + 1
+    do i = bd%is, bd%ie + 1
       write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'DIVG_D', i, j, divg_d(i, j)
     end do
   end do
