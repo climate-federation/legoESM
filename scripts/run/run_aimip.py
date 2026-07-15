@@ -348,6 +348,9 @@ def _train_aimip_classical(
     # True; set aimip_rrtmgp_gpoint_checkpoint=false for classical training.
     rrtmgp_gpoint_checkpoint = bool(
         cfg.get("aimip_rrtmgp_gpoint_checkpoint", True))
+    # G-point vmap block size: >0 -> fast compile (one block body) with bounded
+    # backward memory (holds block_size g-points, not all ~256). 0 = scan path.
+    rrtmgp_gpoint_batch_size = int(cfg.get("aimip_rrtmgp_gpoint_batch_size", 0))
 
     # Derive the land mask from surface geopotential (phis > 0 over
     # land).  Static across samples so we extract it once.  Using a
@@ -425,6 +428,7 @@ def _train_aimip_classical(
             land_mask=land_mask,
             split_rad=split_rad,
             rrtmgp_gpoint_checkpoint=rrtmgp_gpoint_checkpoint,
+            rrtmgp_gpoint_batch_size=rrtmgp_gpoint_batch_size,
         )
         if _ghg_mid is None:
             return built

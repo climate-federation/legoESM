@@ -594,6 +594,7 @@ def make_aimip_classical_spectral_physics(
     land_mask: "jax.Array | None" = None,
     split_rad: bool = False,
     rrtmgp_gpoint_checkpoint: bool = True,
+    rrtmgp_gpoint_batch_size: int = 0,
 ):
     """Build a SpectralPE physics function for the AIMIP classical variant.
 
@@ -706,18 +707,20 @@ def make_aimip_classical_spectral_physics(
         # make cloud-radiation coupling trainable end-to-end).  Mirrors
         # ``physics_pipeline._build_rrtmgp_radiation_fn`` and is required by
         # the ``make_radiation_physics`` gate-consistency check.
-        # ``gpoint_checkpoint=False`` compiles ONE reused g-point body instead
-        # of the prevent_cse=True per-g-point body (~Ng-fold code inflation ->
-        # multi-hour GPU compile). Answer-identical. Safe for training here
-        # because the OUTER spectral_rollout step is already wrapped in
-        # ``jax.checkpoint(nothing_saveable)`` — the backward recomputes each
-        # step, so the g-point scan's adjoint memory is bounded to one step
-        # regardless of the inner g-point checkpoint. Exploits the g-point
-        # sparsity (independent, scanned) to cut the compile from hours to
-        # minutes without an OOM.
+        # G-point compile/memory tradeoff (exploit g-point sparsity):
+        #  * gpoint_checkpoint=True, batch=0 (legacy): scan+checkpoint per
+        #    g-point — memory-frugal but prevent_cse=True emits a distinct body
+        #    per g-point (~Ng-fold code) => multi-hour GPU compile.
+        #  * gpoint_checkpoint=False, batch=0: one reused body (fast compile)
+        #    but backward holds ALL g-points' activations => OOM (113 GiB).
+        #  * gpoint_batch_size>0 (e.g. 16): vmap g-points in blocks — ONE
+        #    compiled block body (fast compile) holding only block_size
+        #    g-points' activations (bounded memory). The middle ground that
+        #    trains: fast compile AND fits memory.
         rrtmgp_cfg = rrtmgp_cfg._replace(
             include_clouds=(cloud_scheme != "none"),
             gpoint_checkpoint=rrtmgp_gpoint_checkpoint,
+            gpoint_batch_size=rrtmgp_gpoint_batch_size,
         )
         rad_cfg = RadiationConfig(
             scheme="rrtmgp",
