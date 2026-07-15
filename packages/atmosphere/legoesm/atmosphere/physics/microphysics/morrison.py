@@ -392,7 +392,10 @@ def morrison_microphysics(
         jnp.clip(N_i, 0.0) / jnp.maximum(q_i_eff, 1.0e-20), 1.0 / 3.0)
     n0i_ac = jnp.clip(N_i, 0.0) * lami_ac
     if config.ice_deposition_scheme == "m2005":
-        # Faithful bulk diffusional growth:
+        # M2005-FORM bulk diffusional growth (gSAM EPSI/ABI/CONS12 structure;
+        # legoESM applies its OWN q_sat_i, the ice_deposition_efficiency
+        # multiplier, and the q_i floors/non-negative clips in place of gSAM's
+        # pre-EPSI LAMI bounds / N0I-NI3D update — see test_m_prd_ice_deposition):
         #   PRD = EPSI·(q_v − q_sat_i)/ABI
         #   EPSI = 2π·N_i·ρ·DV/LAMI, LAMI = (CONS12·N_i/q_i)^(1/3)
         #        = (2π/CONS12^⅓)·ρ·DV·N_i^⅔·q_i^⅓   (the q_i^⅓·N_i^⅔ scaling)
