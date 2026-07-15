@@ -105,28 +105,35 @@ class GrayRadiationConfig(NamedTuple):
     Fields
     ------
     tau_equator : float
-        Equatorial LW optical depth (default 7.2).
+        Equatorial LW optical depth (default 7.2; Isca B_FRIERSON default 6.0).
     tau_pole : float
-        Polar LW optical depth (default 1.8).
+        Polar LW optical depth (default 1.8; Isca B_FRIERSON default 1.5).
     linear_frac : float
-        Fraction f_l of linear sigma weighting vs sigma^4 (default 0.2).
+        Fraction f_l of linear sigma weighting vs sigma^4 (default 0.2;
+        Isca B_FRIERSON ``linear_tau`` default 0.1).
     tau_moist_coeff : float
         Moisture optical depth coefficient [m^2/kg]: dtau_k = coeff * q_v * dp_k / g
-        (default 0.0115, Frierson 2006).
+        (default 0.0115). NOTE: interactive-vapor LW is a Byrne & O'Gorman (2013)-
+        style add-on; Frierson (2006) / Isca B_FRIERSON have NO moisture LW term
+        (their tau is a prescribed dry function of lat & sigma). See the module
+        docstring's Faithfulness section. Set ``q_v=None`` to drop this term
+        (recovers the prescribed-dry LW optical depth, not full Frierson).
     lw_diff_factor : float
-        Diffusivity factor D for hemispheric-mean (default 1.66, ~5/3).
+        Diffusivity factor D applied as exp(-D*dtau) (default 1.66, ~5/3).
+        DEPARTURE: Isca/FHZ06 apply NO separate D (their prescribed tau is already
+        diffusive); set D=1.0 to reproduce the oracle for a given tau.
     sfc_emissivity : float
-        Surface emissivity for LW (default 1.0).
+        Surface emissivity for LW (default 1.0 = Isca's black ``b_surf``).
     sw_tau_0 : float
-        SW optical depth scale (default 0.22). Set to 0.0 for the
-        strict surface-absorbing SW limit often used in Frierson-style
-        gray setups. The SW optical depth profile is:
+        SW optical depth scale (default 0.22). Set to 0.0 for the strict
+        surface-absorbing SW limit; Isca B_FRIERSON's default ``atm_abs=0.0``
+        is a fully transparent SW atmosphere. The SW optical depth profile is:
         tau_sw(sigma) = sw_tau_0 * sigma^sw_exponent.
     sw_exponent : float
-        Exponent for the SW optical-depth profile (default 2.0).
-        Controls how SW absorption is distributed vertically.
-        Only the downward SW beam is absorbed; reflected upward
-        SW escapes directly to TOA (Frierson/Isca convention).
+        Exponent for the SW optical-depth profile (default 2.0; Isca
+        ``solar_exponent`` default 4.0). Controls how SW absorption is
+        distributed vertically. Only the downward SW beam is absorbed;
+        reflected upward SW escapes directly to TOA (Frierson/Isca convention).
     S_0 : float
         Total solar irradiance [W/m^2] (default constants.S_0 = 1361.0).
     sfc_albedo : float
@@ -139,7 +146,7 @@ class GrayRadiationConfig(NamedTuple):
     tau_equator: float = 7.2
     tau_pole: float = 1.8
     linear_frac: float = 0.2
-    tau_moist_coeff: float = 0.0115  # [m²/kg] moisture LW optical depth (Frierson 2006)
+    tau_moist_coeff: float = 0.0115  # [m²/kg] Byrne&O'Gorman(2013)-style moisture LW; NOT in Frierson dry LW
     lw_diff_factor: float = 1.66
     sfc_emissivity: float = 1.0
     sw_tau_0: float = 0.22
