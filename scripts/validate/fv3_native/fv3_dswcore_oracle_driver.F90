@@ -7,6 +7,13 @@
 ! differences), runs the VERBATIM d_sw extraction ONCE on a single tile,
 ! and dumps the outputs over their source-defined regions.
 !
+! CONVENTION: d_sw's final wind update is the vector-invariant
+! CIRCULATION form (u <- u*dx + d(ke) + vorticity flux; sw_core final
+! loops) — the rdx/rdy division happens downstream inside the D-grid
+! pressure-gradient routines (dyn_core one_grad_p/nh_p_grad fold *rdx
+! into the PG update).  Post-d_sw u/v magnitudes ~ u*dx (1e7-scale) are
+! CORRECT, not blown.
+!
 ! Configuration (production-representative, a2b/dissipation paths off):
 !   hord_mt=hord_vt=hord_tm=hord_dp=6, hord_tr=8, nord=1, nord_v=1,
 !   dddmp=0.2, d2_bg=0., d4_bg=0.12, damp_v=0.2, d_con=0., zvir=0.,
@@ -28,6 +35,7 @@ program fv3_dswcore_oracle_driver
 
   integer :: res, nhalo
   real :: dt
+  real :: dddmp_in, d4bg_in, dampv_in
   integer :: ios, i, j, k, u_in, u_out
   character(len=32) :: name
   character(len=256) :: line
@@ -43,6 +51,9 @@ program fv3_dswcore_oracle_driver
   ! ---- pass 1: header ----
   open(newunit=u_in, file='dswcore_input.txt', status='old', action='read')
   res = -1; nhalo = -1; dt = -1.
+  ! damping knobs default to the oracle configuration; optional header
+  ! overrides support config bisection without touching the extraction
+  dddmp_in = 0.2; d4bg_in = 0.12; dampv_in = 0.2
   do
     read(u_in, '(A)', iostat=ios) line
     if (ios /= 0) exit
@@ -50,6 +61,9 @@ program fv3_dswcore_oracle_driver
     if (index(line, '# res ') == 1) read(line(7:), *) res
     if (index(line, '# ng ') == 1) read(line(6:), *) nhalo
     if (index(line, '# dt ') == 1) read(line(6:), *) dt
+    if (index(line, '# dddmp ') == 1) read(line(9:), *) dddmp_in
+    if (index(line, '# d4_bg ') == 1) read(line(9:), *) d4bg_in
+    if (index(line, '# damp_v ') == 1) read(line(10:), *) dampv_in
   end do
   close(u_in)
   if (res <= 0 .or. nhalo <= 0 .or. dt <= 0.) stop 'bad header'
@@ -161,8 +175,8 @@ program fv3_dswcore_oracle_driver
             xflux, yflux, cx, cy, crx_adv, cry_adv, xfx_adv, yfx_adv,  &
             q_con, z_rat, 0.0, heat_source, diss_est, 0.0, 1, 1, q,    &
             1, 1, .false., dt, 8, 6, 6, 6, 6, 1, 1, 0, 0,              &
-            0.2, 0.0, 0.12, 0.2, 0.0, 0.0, 0.0, .true., gs, fl,        &
-            .false., bd)
+            dddmp_in, 0.0, d4bg_in, dampv_in, 0.0, 0.0, 0.0, .true.,   &
+            gs, fl, .false., bd)
 
   call dump_all()
   write(*, *) 'fv3_dswcore_oracle: one d_sw step dumped'
