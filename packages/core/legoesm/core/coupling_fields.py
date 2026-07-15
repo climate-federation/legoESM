@@ -126,6 +126,15 @@ class TileResponse(NamedTuple):
     # path — so it MUST set ``T_rad`` explicitly, else the tile blend would use
     # the soil temperature and break LW conservation for vegetated cells.
     T_rad: jax.Array | None = None
+    # Sea-ice tiles only: the AGGREGATE ice concentration [0-1] the
+    # THERMODYNAMICS integrated its atmospheric fluxes over (post-transport,
+    # pre-thermo — under transport='advect' the ice moves BEFORE the thermo,
+    # so the pre-call concentration is not the flux time level).  Forced-ocean
+    # drivers partition the open-water atmospheric forcing with (1 - A) at
+    # THIS time level so ice + open water together receive exactly the
+    # incident flux (codex r5 #1).  ``None`` for every non-ice tile and for
+    # the slab-ice paths (consumers fall back to the pre-call concentration).
+    ice_concentration_thermo: jax.Array | None = None
 
 
 class SurfaceToAtm(NamedTuple):

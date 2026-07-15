@@ -121,6 +121,17 @@ class CubedSphereGrid(NamedTuple):
     duogrid : DuoGridData or None
         Duo-Grid kinked-to-extended remapping data. When not None,
         pad_halo applies the Duo-Grid remap instead of interp_offsets.
+    gnomonic_form : str
+        Static grid provenance: which gnomonic node distribution built this
+        grid — ``"equiangular"`` (legoESM's historical default, the FV3
+        gnomonic_angl family) or ``"ed"`` (FV3's operational gnomonic_ed).
+        Stored as pytree aux_data (never a traced leaf, never inferred from
+        dx/dy aspect ratios).  Set by ``create_cubed_sphere``; immutable.
+    fv3_grid_type : int
+        Static grid provenance: the FV3 ``grid_type`` this distribution
+        corresponds to (0 = gnomonic_ed, the FV3 default; 2 = the
+        equiangular gnomonic_angl family).  Aux_data like
+        ``gnomonic_form``.
     """
     n: int
     radius: float
@@ -155,6 +166,8 @@ class CubedSphereGrid(NamedTuple):
     hx_ext_h3: jax.Array
     hy_ext_h3: jax.Array
     duogrid: object  # DuoGridData | None — use object to avoid circular import
+    gnomonic_form: str = "equiangular"  # static provenance (pytree aux_data)
+    fv3_grid_type: int = 2              # static provenance (pytree aux_data)
 
     @property
     def n_cells(self) -> int:
@@ -262,6 +275,31 @@ class CubedSphereGrid(NamedTuple):
     def from_columns(self, cols):
         extra = cols.shape[1:]
         return cols.reshape(6, self.n, self.n, *extra)
+
+
+# Number of trailing provenance fields excluded from the pytree leaves.
+_GRID_PROVENANCE_FIELDS = ("gnomonic_form", "fv3_grid_type")
+
+
+def _cubed_sphere_grid_flatten(g: "CubedSphereGrid"):
+    n_prov = len(_GRID_PROVENANCE_FIELDS)
+    return tuple(g[:-n_prov]), tuple(g[-n_prov:])
+
+
+def _cubed_sphere_grid_unflatten(aux, children) -> "CubedSphereGrid":
+    return CubedSphereGrid(*children, *aux)
+
+
+# Explicit registration overrides JAX's built-in NamedTuple handling so the
+# string/int grid provenance travels as STATIC aux_data instead of pytree
+# leaves: a str leaf breaks jit/grad tracing (the iter72 finding that forced
+# the old dx/dy aspect-ratio inference), while aux_data participates in the
+# treedef, so grids of different gnomonic form can never be silently
+# substituted for one another under jit.  All pre-existing fields remain
+# leaves — flatten order and content are unchanged for them.
+jax.tree_util.register_pytree_node(
+    CubedSphereGrid, _cubed_sphere_grid_flatten, _cubed_sphere_grid_unflatten,
+)
 
 
 def create_cubed_sphere(
@@ -469,6 +507,8 @@ def create_cubed_sphere(
         hx_ext_h3=hx_ext_h3.astype(_dt),
         hy_ext_h3=hy_ext_h3.astype(_dt),
         duogrid=duogrid,
+        gnomonic_form=gnomonic,
+        fv3_grid_type=0 if gnomonic == "ed" else 2,
     )
 
     # Eagerly populate the vectorized halo index cache so that the
@@ -478,6 +518,44 @@ def create_cubed_sphere(
     precompute_halo_tables(n)
 
     return grid
+
+
+def create_fv3_native_cubed_sphere(
+    n: int,
+    radius: float = constants.R_earth,
+    omega: float = constants.Omega,
+    dtype=None,
+    use_duogrid: bool = False,
+    k2e_nord: int = 2,
+    duogrid_ng: int | None = None,
+) -> CubedSphereGrid:
+    """Create the FV3-native cubed-sphere grid (gnomonic_ed, FV3 grid_type=0).
+
+    Phase-1 FV3-native entry point: the grid FV3 actually runs on
+    (``fv_arrays.F90`` default ``grid_type = 0`` → ``gnomonic_ed`` in
+    ``fv_grid_utils.F90``), with static provenance stamped on the returned
+    grid (``gnomonic_form="ed"``, ``fv3_grid_type=0``).
+
+    This selects only the FV3-native NODE DISTRIBUTION.  Metric construction
+    (phase 2), cross-face duogrid halos (phase 3), and the forward-backward
+    solver core (phase 4) are separate fidelity phases — a grid built here
+    does NOT by itself make a model run FV3-faithful.
+
+    The historic legoESM default remains ``create_cubed_sphere(n)``
+    (equiangular); it is unchanged by this factory.  Schmidt/stretch/shift
+    transforms are not supported on the ED path and are deliberately not
+    accepted here.
+    """
+    return create_cubed_sphere(
+        n,
+        radius=radius,
+        omega=omega,
+        dtype=dtype,
+        use_duogrid=use_duogrid,
+        k2e_nord=k2e_nord,
+        duogrid_ng=duogrid_ng,
+        gnomonic="ed",
+    )
 
 
 def schmidt_transform(
@@ -760,12 +838,15 @@ def _compute_gnomonic_ed_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
 
 # Face permutation + D4 rotation mapping make_fv3_native_grid's FV3 face
 # numbering/orientation onto create_cubed_sphere's _face_to_cartesian numbering.
-# Derived + validated iter66 by matching the EQUIANGULAR grid on both sides
-# (residual 2.46e-4 = the two equiangular constructions' diff; the integer
-# (face, rot) selection is unambiguous) and confirmed SEAM-CONTINUOUS
-# (cross-face ratio 1.22 through create's halo tables).
-_GNOMONIC_ED_FACE_PERM = (0, 1, 3, 4, 5, 2)
-_GNOMONIC_ED_FACE_ROT = (0, 0, 1, 1, 0, 3)  # k for jnp.rot90 (counter-clockwise)
+# Originally derived iter66 against the pre-oracle mirror; re-derived after
+# the phase-1 mirror_grid fix (polar tiles were hemisphere-swapped vs FV3 —
+# scripts/tmp/_derive_remap_table.py match ≤1e-11, unique over rot90×flips)
+# such that the FINAL create-layout grid is UNCHANGED.  Now canonical:
+# FV3 face 3 (north tile, index 2) lands on create's +z slot 4 and FV3
+# face 6 (south, index 5) on create's -z slot 5.  Seam continuity through
+# create's halo tables is unchanged (byte-identical composite).
+_GNOMONIC_ED_FACE_PERM = (0, 1, 3, 4, 2, 5)
+_GNOMONIC_ED_FACE_ROT = (0, 0, 3, 3, 1, 0)  # k for jnp.rot90 (counter-clockwise)
 
 
 def gnomonic_ed_remap_to_create(
@@ -1514,17 +1595,29 @@ def mirror_grid_face1_symmetrize(
 def mirror_grid_faces(
     face1_lon: jax.Array, face1_lat: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
-    """FV3_3D iter 624: build 6-face cubed-sphere from face 1.
+    """Build the 6-face cubed-sphere from face 1 — exact FV3 ``mirror_grid``.
 
-    Faithful port of FV3 ``mirror_grid`` faces-2-to-6 construction
-    (fv_grid_tools.F90:2809-2897).  Takes face-1 (lon, lat) and
-    builds faces 2-6 via FV3's exact rot_3d (iter 623) sequences:
+    Transcription of FV3 ``mirror_grid`` faces 2-6 (fv_grid_tools.F90:2666-
+    2754 @ 6f658bd0) including two details the original iter-624 port got
+    wrong (caught by the phase-1 Fortran oracle,
+    tests/grids/test_fv3_native_grid_phase1.py):
+
+    1. FV3 rotates via ``rot_3d(..., convert=1)``, whose spherical<->cartesian
+       converters use the DEFAULT build convention (``RIGHT_HAND`` undefined):
+       ``z = -sin(lat)`` and ``lat = acos(z) - pi/2``.  Rotating right-handed
+       cartesian vectors instead (the old port) flips the polar tiles: face 3
+       must be the NORTH tile and face 6 the SOUTH tile — the convention the
+       mirror's own pole-forcing lines hard-code.
+    2. The odd-npx pole/dateline-consistency forcing rows (faces 3, 4, 6)
+       were missing entirely.
+
+    Rotation sequences (FV3 comments; angles in degrees):
 
         face 2: rot_z(-90°)
-        face 3: rot_z(-90°) → rot_x(+90°)
+        face 3: rot_z(-90°) → rot_x(+90°)   (north-pole tile)
         face 4: rot_z(-180°) → rot_x(+90°)
         face 5: rot_z(+90°) → rot_y(+90°)
-        face 6: rot_y(+90°)  (FV3 also applies rot_z(0°) = identity)
+        face 6: rot_y(+90°) → rot_z(0°)     (south-pole tile)
 
     Parameters
     ----------
@@ -1535,38 +1628,72 @@ def mirror_grid_faces(
     Returns
     -------
     lons, lats : jax.Array, shape ``(6, n+1, n+1)``
-        6-face cubed-sphere corner positions in radians.  Face 1
-        is the input.
+        6-face cubed-sphere corner positions in radians, FV3 face
+        numbering/orientation.  Face 1 is the input.  Longitudes of faces
+        2-6 are in atan2 range [-pi, pi] as in FV3 (face 1 keeps its input
+        range).
 
-    Note: this port covers the rotation sequence for faces 2-6.
-    FV3's first loop (lines 2774-2807, intra-face-1 symmetrization
-    via SIGN-of-(|...|) averaging) is NOT included — input is
-    assumed already symmetrized (e.g., post-``symm_ed``).
+    Note: this covers the rotation sequence for faces 2-6.  FV3's first
+    loop (nreg=1 sign-symmetrization) is ``mirror_grid_face1_symmetrize`` —
+    input here is assumed already symmetrized (post-``symm_ed``).
     """
-    x1, y1, z1 = latlon2xyz(face1_lon, face1_lat)
+    npx, npy = face1_lon.shape
 
-    # Face 2: rot_z(-90°)
-    x2, y2, z2 = rot_3d(3, x1, y1, z1, jnp.asarray(-90.0), degrees=True)
-    lon2, lat2 = xyz2latlon(x2, y2, z2)
+    # FV3 default-build spherical<->cartesian (fv_grid_tools.F90
+    # spherical_to_cartesian / cartesian_to_spherical with RIGHT_HAND
+    # undefined): z = -sin(lat), lat = acos(z) - pi/2.  The rot_3d cartesian
+    # cores are the shared ones (rot_3d below).
+    def _sph2cart(lon, lat):
+        return (jnp.cos(lon) * jnp.cos(lat),
+                jnp.sin(lon) * jnp.cos(lat),
+                -jnp.sin(lat))
 
-    # Face 3: rot_z(-90°) → rot_x(+90°)
-    xa, ya, za = rot_3d(3, x1, y1, z1, jnp.asarray(-90.0), degrees=True)
-    x3, y3, z3 = rot_3d(1, xa, ya, za, jnp.asarray(90.0), degrees=True)
-    lon3, lat3 = xyz2latlon(x3, y3, z3)
+    def _cart2sph(x, y, z):
+        r = jnp.sqrt(x * x + y * y + z * z)
+        lon = jnp.where(jnp.abs(x) + jnp.abs(y) < 1e-10,
+                        0.0, jnp.arctan2(y, x))
+        lat = jnp.arccos(jnp.clip(z / r, -1.0, 1.0)) - 0.5 * jnp.pi
+        return lon, lat
 
-    # Face 4: rot_z(-180°) → rot_x(+90°)
-    xa, ya, za = rot_3d(3, x1, y1, z1, jnp.asarray(-180.0), degrees=True)
-    x4, y4, z4 = rot_3d(1, xa, ya, za, jnp.asarray(90.0), degrees=True)
-    lon4, lat4 = xyz2latlon(x4, y4, z4)
+    x1, y1, z1 = _sph2cart(face1_lon, face1_lat)
 
-    # Face 5: rot_z(+90°) → rot_y(+90°)
-    xa, ya, za = rot_3d(3, x1, y1, z1, jnp.asarray(90.0), degrees=True)
-    x5, y5, z5 = rot_3d(2, xa, ya, za, jnp.asarray(90.0), degrees=True)
-    lon5, lat5 = xyz2latlon(x5, y5, z5)
+    def _rot_seq(*ops):
+        x, y, z = x1, y1, z1
+        for axis, ang in ops:
+            x, y, z = rot_3d(axis, x, y, z, jnp.asarray(ang), degrees=True)
+        return _cart2sph(x, y, z)
 
-    # Face 6: rot_y(+90°)  (rot_z(0°) is identity, omitted)
-    x6, y6, z6 = rot_3d(2, x1, y1, z1, jnp.asarray(90.0), degrees=True)
-    lon6, lat6 = xyz2latlon(x6, y6, z6)
+    lon2, lat2 = _rot_seq((3, -90.0))
+    lon3, lat3 = _rot_seq((3, -90.0), (1, 90.0))
+    lon4, lat4 = _rot_seq((3, -180.0), (1, 90.0))
+    lon5, lat5 = _rot_seq((3, 90.0), (2, 90.0))
+    lon6, lat6 = _rot_seq((2, 90.0), (3, 0.0))
+
+    # Odd-npx pole / dateline-Greenwich consistency forcing
+    # (fv_grid_tools.F90:2686-2698, 2709-2714, 2733-2745).  npx/npy are
+    # static Python ints — this is init-time control flow, not traced.
+    if npx % 2 != 0:
+        ci = (npx - 1) // 2  # 0-based centre index (Fortran 1+(npx-1)/2)
+        cj = (npy - 1) // 2
+        ii = jnp.arange(npx)[:, None]
+        jj = jnp.arange(npy)[None, :]
+
+        # face 3 (north tile): centre point -> exact pole; centre row ->
+        # Greenwich west of centre, dateline east of centre.
+        lat3 = jnp.where((ii == ci) & (jj == ci), 0.5 * jnp.pi, lat3)
+        lon3 = jnp.where((ii == ci) & (jj == ci), 0.0, lon3)
+        lon3 = jnp.where((jj == cj) & (ii < ci), 0.0, lon3)
+        lon3 = jnp.where((jj == cj) & (ii > ci), jnp.pi, lon3)
+
+        # face 4: centre row on the dateline.
+        lon4 = jnp.where(jj == cj, jnp.pi, lon4)
+
+        # face 6 (south tile): centre point -> exact pole; centre column ->
+        # Greenwich north of centre, dateline south of centre.
+        lat6 = jnp.where((ii == ci) & (jj == ci), -0.5 * jnp.pi, lat6)
+        lon6 = jnp.where((ii == ci) & (jj == ci), 0.0, lon6)
+        lon6 = jnp.where((ii == ci) & (jj > cj), 0.0, lon6)
+        lon6 = jnp.where((ii == ci) & (jj < cj), jnp.pi, lon6)
 
     lons = jnp.stack([face1_lon, lon2, lon3, lon4, lon5, lon6], axis=0)
     lats = jnp.stack([face1_lat, lat2, lat3, lat4, lat5, lat6], axis=0)
@@ -4011,10 +4138,14 @@ def apply_small_earth_scaling(
         return grid
 
     from legoesm import constants
+    # Forward the static provenance: rebuilding without it silently turned an
+    # ED grid back into equiangular (codex P1, phase-1 FV3-native work).
+    # NOTE: dtype/duogrid are NOT forwarded — pre-existing behavior kept.
     return create_cubed_sphere(
         grid.n,
         radius=constants.R_earth / factor,
         omega=constants.Omega * factor,
+        gnomonic=grid.gnomonic_form,
     )
 
 
@@ -4036,6 +4167,7 @@ def create_cubed_sphere_panel(
     omega: float = constants.Omega,
     dtype=None,
     return_cdgrid: bool = False,
+    gnomonic: str = "equiangular",
 ) -> "CubedSphereGrid | tuple[CubedSphereGrid, ...]":
     """Create a single-face cubed-sphere panel for regional experiments.
 
@@ -4057,6 +4189,10 @@ def create_cubed_sphere_panel(
         Sphere radius [m].
     omega : float
         Rotation rate [rad/s].
+    gnomonic : str, default "equiangular"
+        Node distribution of the underlying full grid — forwarded to
+        :func:`create_cubed_sphere` and stamped as static provenance on the
+        returned panel (``"equiangular"`` legacy or ``"ed"`` FV3-native).
 
     Returns
     -------
@@ -4068,7 +4204,8 @@ def create_cubed_sphere_panel(
         When ``return_cdgrid=True``, also returns the single-face
         C-D grid needed by the ocean baroclinic solver.
     """
-    full = create_cubed_sphere(n, radius=radius, omega=omega, dtype=dtype)
+    full = create_cubed_sphere(
+        n, radius=radius, omega=omega, dtype=dtype, gnomonic=gnomonic)
 
     # Extract single face, keeping leading dimension
     f = face_id
@@ -4122,6 +4259,8 @@ def create_cubed_sphere_panel(
         hx_ext_h3=_repad(_s(full.hx_ext_h3), halo=3),
         hy_ext_h3=_repad(_s(full.hy_ext_h3), halo=3),
         duogrid=None,  # regional panel: no cross-face duogrid data
+        gnomonic_form=full.gnomonic_form,
+        fv3_grid_type=full.fv3_grid_type,
     )
 
     if not return_cdgrid:

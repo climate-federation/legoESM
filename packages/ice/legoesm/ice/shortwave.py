@@ -337,6 +337,7 @@ def compute_ice_sw(
     *,
     scheme: str,
     albedo_const: float,
+    sw_transmittance_const: float = 0.0,
 ) -> IceSWResult:
     """Compute albedo and absorbed / penetrated SW for ice tile.
 
@@ -354,6 +355,13 @@ def compute_ice_sw(
     scheme : {"constant", "maykut_untersteiner", "delta_eddington"}
     albedo_const : float
         Fallback albedo for the constant scheme.
+    sw_transmittance_const : float
+        Constant-scheme SW transmittance through ice+snow to the ocean
+        (fraction of INCIDENT ``sw_down``; bounded by the non-reflected
+        column input so ``reflected + absorbed + penetrated == sw_down``
+        exactly).  Default 0.0 = bit-identical legacy.  Ignored by the
+        other schemes (delta_eddington computes its own transmittance;
+        maykut_untersteiner remains a no-penetration albedo fit).
 
     Returns
     -------
@@ -361,8 +369,14 @@ def compute_ice_sw(
     """
     if scheme == "constant":
         alpha = jnp.full_like(T_sfc, albedo_const)
-        absorbed = (1.0 - alpha) * sw_down
-        penetrated = jnp.zeros_like(sw_down)
+        # SW budget (positive into the column): reflected + absorbed +
+        # penetrated == sw_down exactly — the penetrated flux is DEBITED from
+        # the surface-absorbed part (same closure as delta_eddington below),
+        # so transmitting SW to the ocean costs the ice energy balance.
+        net_into_column = (1.0 - alpha) * sw_down
+        penetrated = jnp.minimum(
+            sw_transmittance_const * sw_down, net_into_column)
+        absorbed = net_into_column - penetrated
     elif scheme == "maykut_untersteiner":
         alpha = maykut_untersteiner_albedo(T_sfc, h_ice)
         absorbed = (1.0 - alpha) * sw_down

@@ -425,6 +425,40 @@ dai_trenberth.py` exists) onto the forcing → ungate the freshwater metrics.
   The nemo-gaps-p4p5 worktree needs these fixes ported (its `--runoff-depth-nemo-ini` branch flag
   is unaffected by D but shares the ice/KPP defects).
 
+- **2026-07-13b (residual-limitation closure + p4p5 merge + all-grid relaunch):**
+  Merged `ocean-nemo-gaps-p4-p5` (42 commits: --ice-init NEMO SI3 IC, --tripole-vmix tke,
+  --nemo-monthly-init/--sss-restore-file, ln_rnf_depth_ini runoff-depth map, --prescribed-flow
+  SCM twins, NEMO centred split-explicit barotropic + DINO r1_exact) into
+  `omip-faithful-nemo-comparison` → ONE tree for every grid. Then closed the three disclosed
+  limitations, 6-round codex loop:
+  **L1** `SeaIceConfig.sw_transmittance_const` (tail field, spec'd tier-2): constant-scheme SW
+  transmittance is debited from the ice EB inside `compute_ice_sw` (reflected+absorbed+
+  penetrated == sw_down EXACTLY) and reaches the ocean via the existing
+  `sw_penetrated → ocean_heat_extraction` channel; runner retires the ocean-side A·τ·swd
+  surrogate (`sw_transmittance_ice=0.0`) — SW budget over ice CLOSED; `--ice-thermo-sw-trans`
+  now feeds the ice model and is validated for the prognostic path.
+  **L2** `TileResponse.ice_concentration_thermo` (trailing None-default): v2 response exposes the
+  post-transport pre-thermo aggregate concentration; the runner partitions open water at that
+  exact flux time level (advective grids included).
+  **L3 (tripole ice TRANSPORT)**: `upwind_to_u/v_points` PROMOTED ocean→core
+  (`upwind_cell_to_uface/vface`; ocean re-imports); new fold-aware donor-cell C-grid advection
+  `transport.fv_flux_divergence_latlon_cgrid` — E-N→face rotation with local angles; SEAM =
+  ONE shared donor-cell upwind flux per fold pair (last-cell-row projection onto the seam
+  normal, partner via vector-parity perm_v flip; `pad_ns_scalar`'s fold row is SIDE-SWAPPED,
+  caught by a positivity test + hand trace) → exact pair cancellation + positivity; REAL
+  eORCA1.2-mesh closure test (was 2.8e-4 leak, now <1e-10); gate split
+  `grid_supports_ice_transport` (tripole YES) vs `grid_supports_ice_dynamics` (mEVP still
+  MPAS/latlon/cube — curvilinear strain-rate ops = future dycore project); `--ew-cyclic-overlap`
+  now slaves ice_state AND ice_resp halo columns; `_surface_currents` returns true geographic
+  E/N on tripole via the canonical `rotate_tpoint_currents_to_geographic` (renormalized).
+  Merge-artifact fixes: canopy param-spec double-classification (graduated), #928 ddm spec
+  format, stale slab-ice heat-bound test (finding-#6 surplus melt-out warming is legitimate,
+  verified pre-existing at the merge commit).
+  **RELAUNCH (all grids, post-fix tree)**: ll3_ri015 (latlon_bathy, ll2 command verbatim),
+  trp3_tke_iceinit (tripole full stack from MAIN checkout; stale trp2 on old code cancelled),
+  mpas7 kppdeep r2 (ico7), DINO pub campaign r2 (latlon 365d wright+seos + MPAS 90d + figures),
+  DINO L2 recipe intercomparison r2. Score day-90 vs NEMO month-3 as before.
+
 ## Next actions (gated)
 
 DONE iter1: probe, stage, BUILD, smoke-validated, WOA, ref-run 8089712 + mesh 8089713 launched.

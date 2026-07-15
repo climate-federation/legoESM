@@ -130,7 +130,7 @@ def test_spectral_rce_smoke_stable_and_conservative():
         microphysics_config=MicrophysicsConfig(
             scheme="kessler", kessler=KesslerConfig(),
         ),
-        dt=DT, T_sfc=300.0, q_sfc=Q_V_SFC,
+        dt=DT, T_sfc=300.0,
     )
 
     spec = spec_state_from_physical(phys)
@@ -200,7 +200,7 @@ def test_spectral_rce_dycore_natural_conservation():
         microphysics_config=MicrophysicsConfig(
             scheme="kessler", kessler=KesslerConfig(),
         ),
-        dt=DT, T_sfc=300.0, q_sfc=Q_V_SFC,
+        dt=DT, T_sfc=300.0,
     )
     spec = spec_state_from_physical(phys)
     mass_0 = float(spec_model.compute_dry_mass(spec))
@@ -246,7 +246,7 @@ def test_spectral_extras_off_matches_fd_plane_within_tolerance():
         microphysics_config=MicrophysicsConfig(
             scheme="kessler", kessler=KesslerConfig(),
         ),
-        dt=DT, T_sfc=300.0, q_sfc=Q_V_SFC,
+        dt=DT, T_sfc=300.0,
     )
 
     phys = phys0
@@ -289,7 +289,7 @@ def test_spectral_buoyancy_sign_consistent_with_fd():
         microphysics_config=MicrophysicsConfig(
             scheme="kessler", kessler=KesslerConfig(),
         ),
-        dt=DT, T_sfc=300.0, q_sfc=Q_V_SFC,
+        dt=DT, T_sfc=300.0,
     )
     spec = spec_state_from_physical(phys)
     for _ in range(N_STEPS):

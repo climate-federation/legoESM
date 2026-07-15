@@ -1125,7 +1125,7 @@ def _build_tiled_tables(kt: int) -> _TiledTables:
 _TILED_TABLE_CACHE: dict[int, _TiledTables] = {}
 
 
-def _get_tiled_tables(kt: int) -> _TiledTables:
+def get_tiled_tables(kt: int) -> _TiledTables:
     if kt not in _TILED_TABLE_CACHE:
         _TILED_TABLE_CACHE[kt] = _build_tiled_tables(kt)
     return _TILED_TABLE_CACHE[kt]
@@ -1167,7 +1167,7 @@ def _tiled_corner_modes(kt: int) -> np.ndarray:
     return modes
 
 
-def _tiled_diag_perms(kt: int):
+def tiled_diag_perms(kt: int):
     """Four intra-face diagonal partial permutations (towards the
     (lo,lo)/(lo,hi)/(hi,lo)/(hi,hi) corners of the RECEIVER): receiver
     corner (lo,lo) needs the (ti-1, tj-1) tile's (hi,hi) interior cell,
@@ -1190,7 +1190,7 @@ def _tiled_diag_perms(kt: int):
     return tuple(map(tuple, (to_ll, to_lh, to_hl, to_hh)))
 
 
-def _tiled_guard_perms(kt: int):
+def tiled_guard_perms(kt: int):
     """Static perms for the guard-sliver rounds along each tile axis.
 
     After the cross-face strip rounds, every tile's received segment
@@ -1297,10 +1297,10 @@ def _build_tiled_pad(mesh, ndim, halo=1, with_offsets=False):
             f"kt >= 2; got {shape}."
         )
     kt = shape[1]
-    tables = _get_tiled_tables(kt)
+    tables = get_tiled_tables(kt)
     g = 2  # guard depth: |offsets| <~ 0.5 + quadratic stencil reach
-    j_fwd, j_bwd, i_fwd, i_bwd = _tiled_guard_perms(kt)
-    diag_perms = _tiled_diag_perms(kt)
+    j_fwd, j_bwd, i_fwd, i_bwd = tiled_guard_perms(kt)
+    diag_perms = tiled_diag_perms(kt)
     corner_mode_j = jnp.asarray(_tiled_corner_modes(kt))
     AXES = ("face", "tile_i", "tile_j")
 

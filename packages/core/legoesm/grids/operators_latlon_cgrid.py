@@ -755,6 +755,94 @@ def gradient_y_cgrid(
     return df_dy
 
 
+def upwind_cell_to_uface(
+    f: jnp.ndarray,
+    flux_u: jnp.ndarray,
+) -> jnp.ndarray:
+    """First-order (donor-cell) upwind reconstruction of a cell-center field
+    at u-faces, selected by the face-normal flux/velocity sign.
+
+    PROMOTED from ``ocean.dynamics.ocean_pe_latlon_cgrid.upwind_to_u_points``
+    (verbatim numerics) so non-ocean components (sea-ice C-grid transport) can
+    use it without an ice->ocean layering break; the ocean re-imports this as
+    its canonical implementation.
+
+    Parameters
+    ----------
+    f : array, shape (n_lat, n_lon, ...) at cell centers.
+    flux_u : array, shape (n_lat, n_lon+1, ...) at u-faces.
+        Sign convention: positive = flow in +j (eastward) direction.
+
+    Returns
+    -------
+    f_u : array, shape (n_lat, n_lon+1, ...) at u-faces.
+    """
+    # Face j is between cell (j-1) mod n_lon and cell j.
+    # Positive flux => flow from cell j-1 to cell j => upwind is cell j-1.
+    # Negative flux => flow from cell j to cell j-1 => upwind is cell j.
+    f_left = jnp.roll(f, 1, axis=1)   # f_left[:, j] = f[:, j-1]
+    f_right = f                        # f_right[:, j] = f[:, j]
+
+    # Build upwind at interior faces (n_lat, n_lon)
+    f_upwind = jnp.where(flux_u[:, :-1] > 0, f_left, f_right)
+
+    # Wrap: face n_lon is the same as face 0 (periodic in longitude)
+    if f.ndim >= 3:
+        return jnp.concatenate([f_upwind, f_upwind[:, 0:1, :]], axis=1)
+    else:
+        return jnp.concatenate([f_upwind, f_upwind[:, 0:1]], axis=1)
+
+
+def upwind_cell_to_vface(
+    f: jnp.ndarray,
+    flux_v: jnp.ndarray,
+    grid=None,
+) -> jnp.ndarray:
+    """First-order (donor-cell) upwind reconstruction of a cell-center field
+    at v-faces, wall-zeroed at physical poles and fold-aware on the tripolar
+    north seam.
+
+    PROMOTED from ``ocean.dynamics.ocean_pe_latlon_cgrid.upwind_to_v_points``
+    (verbatim numerics — cell-pad-first through the backend-dispatched
+    ``pad_with_pole_bc_lat``; pole faces zeroed; tripolar fold row = the
+    fold-permuted last interior face row, exactly as ``pad_ns_scalar`` built
+    it) so non-ocean components can use it; the ocean re-imports this.
+
+    Parameters
+    ----------
+    f : array, shape (n_lat, n_lon, ...) at cell centers.
+    flux_v : array, shape (n_lat+1, n_lon, ...) at v-faces.
+        Sign convention: positive = flow in +i (northward) direction.
+    grid : optional LatLonGrid or LatLonCGridGeometry (fold handling).
+
+    Returns
+    -------
+    f_v : array, shape (n_lat+1, n_lon, ...) at v-faces.
+    """
+    from legoesm.grids.halo_latlon import (
+        pad_with_pole_bc_lat,
+        zero_polar_lat_ends,
+    )
+    # Face i sits between cell i-1 and cell i (m_pad rows i and i+1).
+    # Positive flux => flow from cell i-1 to cell i => upwind is cell i-1.
+    # Negative flux => flow from cell i to cell i-1 => upwind is cell i.
+    f_pad = pad_with_pole_bc_lat(
+        f, halo=1, south_value=0.0, north_value=0.0,
+    )
+    f_south = f_pad[:-1]   # cell i-1 for face i
+    f_north = f_pad[1:]    # cell i   for face i
+    f_v = jnp.where(flux_v > 0, f_south, f_north)
+
+    # Wall BC at the physical pole faces only (backend-aware), then the
+    # tripolar north fold row exactly as pad_ns_scalar produced it.
+    f_v = zero_polar_lat_ends(f_v)
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
+        north = f_v[-2:-1][:, grid.fold.perm_T]
+        f_v = apply_north_fold(f_v, north, grid, north_mask=nmask)
+    return f_v
+
+
 def divergence_cgrid(
     u: jnp.ndarray,
     v: jnp.ndarray,
