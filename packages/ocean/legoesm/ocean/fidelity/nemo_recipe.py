@@ -349,6 +349,13 @@ def nemo_lat_lon_model_config(
         B_h=cfg.B_h,
         K_h=cfg.K_h,
         K_bih=cfg.K_bih,
+        # NEMO GYRE background vertical mixing = avmb=rn_avm0=1.2e-4 / avtb=1.2e-5,
+        # supplied by the TKE floors (kappaM_min/kappaH_min in _nemo_tke_config).
+        # The LatLonCGridOceanConfig defaults (A_v=1e-3/K_v=1e-4) are ADDED on top
+        # of the TKE viscosity/diffusivity -> ~9x NEMO's background => set 0 here so
+        # the TKE floors alone set the background (matches NEMO; fixes warm-SST bias).
+        A_v=0.0,
+        K_v=0.0,
         bottom_drag_r=bottom_drag_r,
         bottom_drag_bg_velocity=cfg.bottom_drag_bg_velocity,
         bottom_drag_bbl_thickness=cfg.bottom_drag_bbl_thickness,
