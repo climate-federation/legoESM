@@ -20,8 +20,9 @@ DEPARTURE / DESIGN canaries:
   * critical-level treatment is DESIGN: at ``c = 0`` (``U_proj`` reversal) the residual carried
     stress is radiated/discarded (nothing deposited on the reversed flow), NOT a deposition;
   * the antiparallel deceleration + the KE→heat closure ``dT_dt = −(u·du+v·dv)/c_pd`` are
-    single-wave DESIGN choices; the KE→heat identity is DEFINITIONAL (a tautology, not an
-    independent conservation law);
+    single-wave DESIGN choices; ``dT_dt`` is computed FROM the final tendency so
+    ``c_pd·Σρ·dT·dz == eps_gwd`` holds BY CONSTRUCTION — and for a c=0 wave (zero vertical
+    wave-energy flux) that IS the exact resolved-energy conservation (``conserves=["energy"]``);
   * ``crit_level_floor``/``Fr_sharpness``/``crit_level_sharpness`` are smoothing knobs; a HARD
     ``U_proj > 0`` mask forces the VECTOR sink ``u·du_dt + v·dv_dt ≤ 0`` strictly (componentwise
     ``du_dt·u`` can be >0 for oblique winds).
@@ -41,6 +42,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.config import (
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.integration import get_gwd_fn
 from legoesm.atmosphere.physics.gravity_wave_drag.lindzen import (
+    __physics_contract__,
     _lindzen_launch_stress,
     _lindzen_saturation_stress,
     lindzen_gwd,
@@ -249,13 +251,15 @@ def test_lindzen_sign_and_sink():
 
 
 # ===========================================================================
-# DESIGN: KE->heat closure (definitional) + rest state
+# KE->heat closure = the pointwise energy conservation (c=0 wave) + rest state
 # ===========================================================================
 def test_lindzen_energy_closure_ke_to_heat():
-    """DESIGN (definitional): c_pd·Σρ·dT_dt·dz == eps_gwd ≥ 0.
+    """c_pd·Σρ·dT_dt·dz == eps_gwd ≥ 0 — the exact energy closure (conserves=["energy"]).
 
-    A tautology (dT_dt is defined FROM the final tendency), NOT an independent conservation law —
-    it is a regression pin of the KE→heat closure form, labeled honestly.
+    ``dT_dt`` is computed FROM the final tendency, so the identity holds BY CONSTRUCTION; for a
+    c=0 wave (zero vertical wave-energy flux, F_E = c·F_momentum = 0) that by-construction closure
+    IS the exact resolved KE+internal energy conservation the contract declares. This is a
+    regression pin of that closure against accidental desync, not an independent re-derivation.
     """
     out, inp = _run(LindzenConfig(), h_topo_col=jnp.full((3,), 800.0), u_sfc=25.0, u_top=6.0)
     rho, z_half = np.asarray(inp[7]), np.asarray(inp[6])
@@ -264,6 +268,22 @@ def test_lindzen_energy_closure_ke_to_heat():
     eps = np.asarray(out.eps_gwd)
     assert np.any(eps > 1e-12)
     assert np.allclose(col_heat, eps, rtol=1e-9, atol=1e-12)
+
+
+def test_lindzen_conserves_energy():
+    """``conserves == ["energy"]`` — a STATIONARY orographic wave (c=0) carries ZERO vertical
+    wave-energy flux (F_E = c·F_momentum = 0, Eliassen–Palm), so all mean-flow KE removed is
+    returned LOCALLY as heat and resolved KE+internal energy is conserved pointwise (see the
+    KE→heat closure test above).
+
+    The discriminator is "does the launched wave carry vertical energy flux?": c=0 orographic
+    (this scheme, ``mcfarlane`` #1045, ``rayleigh`` direct-drag) ⇒ ``["energy"]``; c≠0 launched
+    spectra (``hines``, ``prognostic_spectral``) whose waves carry energy the limiter discards ⇒
+    ``["none"]``. MOMENTUM is not conserved (external source; critical-level radiation + limiter)
+    — that breaks MOMENTUM, not energy, closure. (Corrects the prior ``["none"]`` ruling, which
+    over-applied the hines c≠0 precedent to this c=0 scheme — codex #1045.)
+    """
+    assert __physics_contract__["conserves"] == ["energy"]
 
 
 def test_lindzen_frictional_heating_form():

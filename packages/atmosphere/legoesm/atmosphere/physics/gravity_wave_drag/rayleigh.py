@@ -33,12 +33,15 @@ ADDITIONS / DEPARTURES from HS94:
     physical radiation sponge, which removes gravity-wave energy from the domain
     (radiated to space) rather than converting it to local heat. A design choice
     that keeps the column energy budget closed; not how a physical sponge acts;
-  * ``conserves = ["energy"]`` is CORRECT here (unlike the launched-wave schemes
-    ``hines.py``/``lindzen.py`` = ["none"]): there is NO external wave source —
-    the drag + sponge convert RESOLVED mean-flow KE directly to heat, both
-    tracked, so the resolved-KE→heat closure ``c_pd·Σρ·dT·dz == eps_gwd`` IS the
-    full energy budget (it remains definitional, but there is no unbudgeted
-    external source to make it incomplete). Momentum is NOT conserved (a sink).
+  * ``conserves = ["energy"]`` is CORRECT here (unlike the c≠0 launched-SPECTRUM
+    schemes ``hines.py``/``prognostic_spectral.py`` = ["none"], whose propagating
+    waves carry off vertical energy flux the limiter discards): Rayleigh friction
+    is a DIRECT drag with NO wave at all — the drag + sponge convert RESOLVED
+    mean-flow KE directly to heat, both tracked, so the resolved-KE→heat closure
+    ``c_pd·Σρ·dT·dz == eps_gwd`` IS the full energy budget. (The c=0 orographic
+    schemes ``mcfarlane.py``/``lindzen.py`` ALSO conserve energy — a stationary
+    wave carries zero energy flux — so they are NOT the contrast; the contrast is
+    the c≠0 spectra.) Momentum is NOT conserved (a sink).
 NUMERICS: the ``k_bl`` UPPER clip at 1 is a redundant guard (``(σ−σ_b)/(1−σ_b)
 ≤ 1`` for any physical ``σ ≤ 1``; bites only if ``σ > 1``, i.e. ``p_full >
 p_sfc``); the ``sponge_arg`` clip to [0, 1]; the ``p_sfc`` floor at 1 Pa.
@@ -84,11 +87,14 @@ __physics_contract__ = {
     # Momentum is NOT conserved (a drag/sponge removes momentum to the surface /
     # absorbs it at the top), but total ENERGY is: the kinetic energy lost by the
     # mean flow is returned as frictional heating, dT_dt = -(u*du_dt + v*dv_dt)/c_pd
-    # (eps_gwd = column-integrated KE loss). Unlike the launched-wave GWD schemes
-    # (hines.py/lindzen.py = ["none"]) there is NO external wave source here — the
-    # drag + sponge convert RESOLVED mean-flow KE directly to heat (both tracked),
-    # so the resolved-KE->heat closure IS the full energy budget. (The sponge
-    # heating the removed KE is a design choice; a physical radiation sponge would
+    # (eps_gwd = column-integrated KE loss). Unlike the c!=0 launched-SPECTRUM GWD
+    # schemes (hines.py/prognostic_spectral.py = ["none"], whose propagating waves
+    # carry off vertical energy flux the limiter discards) Rayleigh is a DIRECT
+    # drag with NO wave — the drag + sponge convert RESOLVED mean-flow KE directly
+    # to heat (both tracked), so the resolved-KE->heat closure IS the full energy
+    # budget. (The c=0 orographic schemes mcfarlane.py/lindzen.py ALSO conserve
+    # energy — a stationary wave carries zero energy flux.) (The sponge heating
+    # the removed KE is a design choice; a physical radiation sponge would
     # remove the GW energy from the domain instead.) So conserved quantity = energy.
     "conserves": ["energy"],
     "differentiable": True,
