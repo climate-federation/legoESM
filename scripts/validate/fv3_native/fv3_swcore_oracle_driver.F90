@@ -13,11 +13,14 @@
 ! Output (swcore_output_c<res>.txt): NAME i j value for
 !   delpc, ptc, uc, vc, ut, vt, divg_d, ua, va, wc (+ echo of inputs' u,v).
 !
-! Build (see gen_swcore_oracle.sh):
-!   gfortran -O2 -fdefault-real-8 -fdefault-double-8 -cpp -DSW_DYNAMICS \
+! Build (gen_swcore_oracle.sh is the one command that does all of this):
+!   gfortran -O2 -fdefault-real-8 -fdefault-double-8 -cpp \
 !            -ffree-line-length-none shim + extract + driver
+! PRODUCTION branch: no -DSW_DYNAMICS (ptc transports pt), no OVERLOAD_R4
+! (sw_core big_number = 1.E30).
 program fv3_swcore_oracle_driver
-  use swcore_shim_mod
+  use swcore_shim_mod, only: fv_grid_bounds_type, fv_grid_type, &
+                             fv_flags_type
   use sw_core_extract_mod
   implicit none
 

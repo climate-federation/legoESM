@@ -6,13 +6,13 @@ module sw_core_extract_mod
   use swcore_shim_mod, only: fv_grid_bounds_type, fv_grid_type, &
                              fv_flags_type
   implicit none
-  ! sw_core.F90 module-level constants (verbatim, non-SW_DYNAMICS
-  ! big_number branch matches the production build)
+  ! sw_core.F90 module-level constants (verbatim; big_number is the
+  ! non-OVERLOAD_R4 production branch value 1.E30 — codex r1 P1-1)
   real, parameter:: r3 = 1./3.
   real, parameter:: t11=27./28., t12=-13./28., t13=3./7., t14=6./7., t15=3./28.
   real, parameter:: s11=11./14., s13=-13./14., s14=4./7., s15=3./14.
   real, parameter:: near_zero = 1.E-9
-  real, parameter:: big_number = 1.E8
+  real, parameter:: big_number = 1.E30
   real, parameter:: p1 =  7./12.
   real, parameter:: p2 = -1./12.
   real, parameter:: a1 =  0.5625

@@ -36,8 +36,9 @@ import numpy as np
 
 from legoesm.grids.fv3_native_gridstruct import fort
 
-# sw_core.F90 module constants (verbatim; production big_number branch)
-BIG_NUMBER = 1.0e8
+# sw_core.F90 module constants (verbatim; big_number is the production
+# non-OVERLOAD_R4 branch value — codex r1 P1-1)
+BIG_NUMBER = 1.0e30
 A1 = 0.5625
 A2 = -0.0625
 C1 = -2.0 / 14.0

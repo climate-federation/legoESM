@@ -305,15 +305,18 @@ def build_fv3_native_gridstruct(n: int, ng: int = 3, *,
     ghost = ~cell_ok
     cosa_s[ghost] = BIG_NUMBER
 
-    # rsin_u/v panel-border overrides: signed 1/sina at i==1 / i==npx
+    # rsin_u/v panel-border overrides: 1/SIGN(max(tiny,|s|), s).  Fortran
+    # SIGN transfers a NON-NEGATIVE sign for s == 0 (+tiny), where
+    # np.sign(0) would give 0 and hence inf (codex r1 P2-4).
+    def _fsign(mag, s):
+        return np.where(s >= 0.0, mag, -mag)
+
     for irow in (i1, inpx):
         s = sina_u[irow, :]
-        rsin_u[irow, :] = 1.0 / (np.sign(s)
-                                 * np.maximum(TINY_NUMBER, np.abs(s)))
+        rsin_u[irow, :] = 1.0 / _fsign(np.maximum(TINY_NUMBER, np.abs(s)), s)
     for jcol in (i1, inpx):
         s = sina_v[:, jcol]
-        rsin_v[:, jcol] = 1.0 / (np.sign(s)
-                                 * np.maximum(TINY_NUMBER, np.abs(s)))
+        rsin_v[:, jcol] = 1.0 / _fsign(np.maximum(TINY_NUMBER, np.abs(s)), s)
 
     # fill_ghost on sin/cos_sg (tiny/big), then v2 patches (sin AND cos;
     # note the nw x-strip source differs from v1: npx-i, not npx+i)
