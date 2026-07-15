@@ -454,6 +454,46 @@ def _apply_nemo_mld_slope_ramp(S_x, S_y, T, S, mask, z_coord, eos_fn, rho_c):
     return S_x, S_y
 
 
+def _shapiro_smooth_slopes(S_x, S_y, mask):
+    """NEMO ldfslp horizontal Shapiro filter + coastal taper (ldfslp.F90:301-315).
+
+    NEMO smooths the (already mixed-layer-flattened) interface slopes with a
+    ``(1-2-1)⊗(1-2-1)`` nine-point binomial, divides by the fixed weight-sum 16,
+    then multiplies by a coastal taper ``zcofw`` that SHRINKS the slope toward
+    land — it is NOT a wet-renormalization.  Land neighbours enter the binomial
+    sum as the masked zero they already are (``zwz = (...) * wmask``), and the
+    fixed ``/16`` divisor plus ``zcofw`` make the slope decay near coasts:
+
+        zcofw = tmask/16 · (uE + uW) · (vN + vS) · 0.25   (= tmask/16 in interior)
+        wslp  = [ 9-pt binomial SUM of masked slope ] · zcofw
+
+    The C-grid face masks are the products of adjacent T-mask cells (= NEMO
+    ``umask``/``vmask`` for a flat-bottom GYRE/DINO domain).  Applied to the FINAL
+    slopes after the ML ramp (NEMO's per-level order).  JIT/AD-safe: fixed-weight
+    pad + weighted sum, no data-dependent control flow.
+    """
+    nlat, nlon = mask.shape
+    m = mask[:, :, None]                                  # (n_lat, n_lon, 1)
+    # C-grid face masks from the T-mask: a face is wet iff both bracketing
+    # cells are wet (NEMO umask/vmask = product of adjacent tmask).
+    wE = mask * jnp.pad(mask, ((0, 0), (0, 1)))[:, 1:]    # wet(i,j) & wet(i,j+1)
+    wW = mask * jnp.pad(mask, ((0, 0), (1, 0)))[:, :-1]   # wet(i,j) & wet(i,j-1)
+    wN = mask * jnp.pad(mask, ((0, 1), (0, 0)))[1:, :]    # wet(i,j) & wet(i+1,j)
+    wS = mask * jnp.pad(mask, ((1, 0), (0, 0)))[:-1, :]   # wet(i,j) & wet(i-1,j)
+    zcofw = (m / 16.0) * (wE + wW)[:, :, None] * (wN + wS)[:, :, None] * 0.25
+
+    w = (1.0, 2.0, 1.0)                                   # 1-D binomial kernel
+    def smooth(f):
+        fp = jnp.pad(f * m, ((1, 1), (1, 1), (0, 0)))    # masked, zero ghost
+        acc = jnp.zeros_like(f)
+        for a in range(3):
+            for b in range(3):
+                acc = acc + w[a] * w[b] * fp[a:a + nlat, b:b + nlon, :]
+        return acc * zcofw
+
+    return smooth(S_x), smooth(S_y)
+
+
 # =====================================================================
 # Isopycnal slope computation
 # =====================================================================
@@ -571,6 +611,13 @@ def compute_isopycnal_slopes_latlon_cgrid(
         S_x_t, S_y_t = _apply_nemo_mld_slope_ramp(
             S_x_t, S_y_t, T, S, mask, z_coord, eos_fn, cfg.mld_rho_c,
         )
+
+    # NEMO ldfslp horizontal Shapiro smoother (default OFF => byte-identical).
+    # ponytail: the 2D T-mask stands in for NEMO's per-level umask/vmask/wmask;
+    # exact only for a flat-bottom domain (GYRE/DINO). Pass 3D masks when
+    # partial-cell topography lands.
+    if cfg.nemo_slope_shapiro:
+        S_x_t, S_y_t = _shapiro_smooth_slopes(S_x_t, S_y_t, mask)
     return S_x_t, S_y_t, taper
 
 

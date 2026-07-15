@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from legoesm import constants
@@ -1225,5 +1226,75 @@ class TestNemoMixedLayerSlopeRamp:
                 eos_fn(Tf, S, jnp.zeros_like(Tf)), mask, z_coord, jac, grid,
                 on, T=Tf, S=S, eos_fn=eos_fn)[1] ** 2)
         g = jax.grad(_loss)(T)
+        assert jnp.all(jnp.isfinite(g))
+        assert float(jnp.max(jnp.abs(g))) > 0.0
+
+
+class TestNemoSlopeShapiro:
+    """``GMRediConfig.nemo_slope_shapiro`` = NEMO ldfslp horizontal Shapiro filter.
+
+    A ``(1-2-1)⊗(1-2-1)/16`` nine-point binomial on the masked interface slopes,
+    times a coastal taper ``zcofw`` that shrinks slopes toward land (NOT a
+    wet-renormalization).  Verified as an isolated operator: interior points
+    equal the hand-computed binomial mean; a coast damps the slope; land stays 0.
+    """
+
+    def test_shapiro_off_byte_identical(self):
+        grid, z_coord, mask, jac, rho, T, S, eos_fn = (
+            TestNemoMixedLayerSlopeRamp._mixed_layer_setup())
+        base = GMRediConfig(kappa_GM=1000.0, kappa_Redi=1000.0)
+        off = GMRediConfig(kappa_GM=1000.0, kappa_Redi=1000.0,
+                           nemo_slope_shapiro=False)
+        Sx_b, Sy_b, _ = compute_isopycnal_slopes_latlon_cgrid(
+            rho, mask, z_coord, jac, grid, base, T=T, S=S, eos_fn=eos_fn)
+        Sx_o, Sy_o, _ = compute_isopycnal_slopes_latlon_cgrid(
+            rho, mask, z_coord, jac, grid, off, T=T, S=S, eos_fn=eos_fn)
+        assert jnp.array_equal(Sx_b, Sx_o)
+        assert jnp.array_equal(Sy_b, Sy_o)
+
+    def test_interior_equals_binomial_mean(self):
+        """Interior wet point == the (1-2-1)²/16 weighted mean of its 3x3 nbhd."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _shapiro_smooth_slopes,
+        )
+        rng = np.random.default_rng(0)
+        Sx = jnp.asarray(rng.standard_normal((5, 6, 2)))
+        Sy = jnp.asarray(rng.standard_normal((5, 6, 2)))
+        mask = jnp.ones((5, 6))                    # all wet -> zcofw = 1/16
+        Sxs, Sys = _shapiro_smooth_slopes(Sx, Sy, mask)
+        # Hand binomial at interior point (2,3): weights [[1,2,1],[2,4,2],[1,2,1]]/16.
+        w = np.array([[1., 2., 1.], [2., 4., 2.], [1., 2., 1.]]) / 16.0
+        for arr, out in ((Sx, Sxs), (Sy, Sys)):
+            patch = np.asarray(arr)[1:4, 2:5, 0]
+            expect = float((w * patch).sum())
+            np.testing.assert_allclose(float(np.asarray(out)[2, 3, 0]), expect,
+                                       rtol=1e-12)
+
+    def test_coast_damps_and_land_zero(self):
+        """A wet point beside land is damped below the interior binomial mean,
+        and land points stay exactly 0."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _shapiro_smooth_slopes,
+        )
+        Sx = jnp.ones((5, 6, 1))
+        mask = jnp.ones((5, 6)).at[2, 5].set(0.0)   # one land cell at east edge
+        Sxs, _ = _shapiro_smooth_slopes(Sx, Sx, mask)
+        # Interior far from land -> 1.0 (binomial mean of all-ones = 1).
+        np.testing.assert_allclose(float(np.asarray(Sxs)[2, 2, 0]), 1.0, rtol=1e-12)
+        # Wet neighbour of the land cell (2,4): east u-face dry -> zcofw < 1/16
+        # AND a zero enters the sum -> strictly damped below 1.
+        assert float(np.asarray(Sxs)[2, 4, 0]) < 0.999
+        # The land cell itself stays exactly 0 (masked input, tmask factor).
+        assert float(np.asarray(Sxs)[2, 5, 0]) == 0.0
+
+    def test_shapiro_grad_flows(self):
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _shapiro_smooth_slopes,
+        )
+        mask = jnp.ones((5, 6))
+        def _loss(Sx):
+            out, _ = _shapiro_smooth_slopes(Sx, Sx, mask)
+            return jnp.sum(out ** 2)
+        g = jax.grad(_loss)(jnp.ones((5, 6, 2)))
         assert jnp.all(jnp.isfinite(g))
         assert float(jnp.max(jnp.abs(g))) > 0.0

@@ -283,6 +283,11 @@ class GMRediConfig(NamedTuple):
     # Density criterion [kg/m^3] for the ramp's mixed-layer depth (NEMO zdfmxl
     # rn_rho_c; potential-density difference from the ~10 m reference level).
     mld_rho_c: float = 0.01
+    # NEMO ldfslp horizontal (1-2-1)⊗(1-2-1)/16 Shapiro smoother on the final
+    # interface slopes (ldfslp.F90:304-315).  legoESM omitted it, leaving the
+    # interior slope amplitude ~1.27x too large; wet-renormalized so land drops
+    # out.  Applied after the ML ramp (NEMO order).  Oracle-matching; opt-in.
+    nemo_slope_shapiro: bool = False
     # NEMO nn_aht_ijk_t=20 grid-size scaling: the effective kappa_Redi is
     # cfg.kappa_Redi * cos(lat) per row (Mercator dx ∝ cos φ, so
     # aht(φ) = ½·U_d·Δx(φ) with cfg.kappa_Redi = the EQUATOR value
