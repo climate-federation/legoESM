@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import numpy as np
 
-__all__ = ["compute_fv3_native_k2e"]
+__all__ = ["compute_fv3_native_k2e", "create_fv3_native_duogrid_data"]
 
 _STAGGERS = ("A", "B", "CX", "CY", "DX", "DY")
 
@@ -360,3 +360,160 @@ def compute_fv3_native_k2e(res: int, remap_ng: int = 3,
     out["k2e_nord"] = k2e_nord
     out["remap_ng"] = remap_ng
     return out
+
+
+# --------------------------------------------------------------------------
+# ED-native DuoGridData (phase 3b): the certified k2e tables + ED extended
+# grids, packaged for legoESM's existing duogrid consumption machinery
+# (cube_rmp_vectorized, corner Lagrange fill, a2stag vectors).
+# --------------------------------------------------------------------------
+def _ed_ext_agrid_lonlat(n: int, ng: int):
+    """ED extended A-grid lon/lat (create layout), shape (6, n+2ng, n+2ng).
+
+    A-grid extended positions are the EVEN supergrid nodes of the duo-grid
+    line construction (own-face gnomonic extension) — the exact ``pt_ext``
+    A-points the reference uses, remapped to create's face layout.
+    """
+    from legoesm.grids.cubed_sphere import (
+        _GNOMONIC_ED_FACE_PERM,
+        _GNOMONIC_ED_FACE_ROT,
+    )
+
+    sg_is, sg_ie = 1, 2 * n + 1
+    sg_nc = 1 + n
+    # supergrid ghost width: need A-points to i = n+ng -> supergrid 2(n+ng),
+    # i.e. sg_ie + 2*ng - 1; build with the reference's own sg_ng = 2*(ng+2)
+    # ghost layers, which covers every ng <= 3 use.
+    sg_ng = 2 * (ng + 2)
+    sg_isd, sg_ied = sg_is - sg_ng, sg_ie + sg_ng
+
+    line = _F(sg_isd, sg_ied)
+    rsq3 = 1.0 / np.sqrt(3.0)
+    alpha = np.arcsin(rsq3)
+    dela = 2.0 * alpha / (sg_ie - sg_is)
+    line[sg_is] = -1.0
+    line[sg_nc] = 0.0
+    for j in range(sg_is + 1, sg_nc):
+        line[j] = np.tan((j - 1) * dela - alpha) * np.sqrt(2.0)
+    for j in range(sg_isd, sg_is):
+        jj = 2 * sg_is - j
+        line[j] = np.tan(-0.5 * np.pi - np.arctan(line[jj]))
+    for j in range(sg_isd, sg_nc):
+        line[sg_ie - j + 1] = -line[j]
+
+    # A-point 1-D values: supergrid even indices 2i for i = 1-ng .. n+ng
+    ai = np.arange(1 - ng, n + ng + 1)
+    av = np.array([line[2 * i] for i in ai])
+    X, Y = np.meshgrid(av, av, indexing="ij")
+    carts = (
+        lambda x, y: (np.ones_like(x), x, y),
+        lambda x, y: (-x, np.ones_like(x), y),
+        lambda x, y: (-x, -y, np.ones_like(x)),
+        lambda x, y: (-np.ones_like(x), -y, -x),
+        lambda x, y: (y, -np.ones_like(x), -x),
+        lambda x, y: (y, x, -np.ones_like(x)),
+    )
+    m = len(ai)
+    lon6 = np.zeros((6, m, m))
+    lat6 = np.zeros((6, m, m))
+    for t in range(6):
+        cx, cy, cz = carts[t](X, Y)
+        r = np.sqrt(cx * cx + cy * cy + cz * cz)
+        lon6[t] = np.mod(np.arctan2(cy, cx), 2.0 * np.pi)
+        lat6[t] = np.arcsin(cz / r)
+    # remap FV3 face numbering -> create layout
+    lon_c = np.stack([
+        np.rot90(lon6[_GNOMONIC_ED_FACE_PERM[F]], _GNOMONIC_ED_FACE_ROT[F])
+        for F in range(6)
+    ])
+    lat_c = np.stack([
+        np.rot90(lat6[_GNOMONIC_ED_FACE_PERM[F]], _GNOMONIC_ED_FACE_ROT[F])
+        for F in range(6)
+    ])
+    return lon_c, lat_c
+
+
+def create_fv3_native_duogrid_data(n: int, ng: int = 3, k2e_nord: int = 4):
+    """ED-native DuoGridData: certified duo-grid k2e tables + ED extension.
+
+    Drop-in replacement for :func:`legoesm.grids.duogrid.create_duogrid_data`
+    on ED-provenance grids: the edge remap coefficients come from the
+    oracle-pinned :func:`compute_fv3_native_k2e` A-grid tables (the legacy
+    builder's equiangular extension lines are the WRONG interpolants on ED —
+    measured ~4e-2 coefficient error), and the extended-grid lon/lat (and
+    everything derived from them: corner Lagrange fill, a2stag vectors) use
+    the ED gnomonic extension.  Fails loudly on unsupported widths — never
+    approximates.
+    """
+    from legoesm.grids.duogrid import (
+        DuoGridData,
+        MAX_K2E_NORD,
+        _compute_corner_lagrange_coeff,
+        _compute_ext_vectors,
+    )
+    from legoesm.grids.halo import EAST, NORTH, SOUTH, WEST
+    import jax.numpy as jnp
+
+    if k2e_nord != 4:
+        raise NotImplementedError(
+            "fv3-native duogrid: only the upstream default k2e_nord=4 is "
+            "oracle-pinned")
+    if ng not in (1, 2, 3):
+        raise NotImplementedError(
+            f"fv3-native duogrid: ng={ng} unsupported (oracle-pinned remap "
+            "rings are 1..3); refusing to approximate")
+    if ng > n // 2:
+        raise ValueError(f"ng={ng} too large for n={n} (need ng <= n//2)")
+
+    tab = compute_fv3_native_k2e(n, remap_ng=3, k2e_nord=k2e_nord)
+    ij = tab["A_ij"]
+    loc = tab["A_loc"]
+    coef = tab["A_coef"]
+    rec = {tuple(k): (int(l), c) for k, l, c in zip(ij, loc, coef)}
+
+    npd = k2e_nord // 2 - 1
+    k2e_coef = np.zeros((6, 4, ng, n, MAX_K2E_NORD))
+    k2e_lo = np.zeros((6, 4, ng, n), dtype=np.int32)
+    for d in range(ng):
+        for t in range(1, n + 1):
+            # rows: south j = -d, north j = n+1+d; cols: west i = -d,
+            # east i = n+1+d (1-based record keys; targets 1..n)
+            for edge, key in ((SOUTH, (t, -d)), (NORTH, (t, n + 1 + d)),
+                              (WEST, (-d, t)), (EAST, (n + 1 + d, t))):
+                l, c = rec[key]
+                # 0-based stencil start into the interior strip:
+                # window klo-np .. klo+1+np -> start = klo - np - 1
+                k2e_coef[:, edge, d, t - 1, :k2e_nord] = c
+                k2e_lo[:, edge, d, t - 1] = l - npd - 1
+
+    s = k2e_coef.sum(axis=-1)
+    if np.abs(s - 1.0).max() > 1e-10:
+        raise AssertionError(
+            "fv3-native duogrid: partition of unity violated "
+            f"({np.abs(s - 1.0).max():.2e})")
+
+    ext_lon, ext_lat = _ed_ext_agrid_lonlat(n, ng)
+    xp, xm, yp, ym = _compute_corner_lagrange_coeff(n, ng, ext_lon, ext_lat)
+    vlon_ext, vlat_ext, ew_ext, es_ext = _compute_ext_vectors(
+        n, ng, ext_lon, ext_lat)
+
+    def _maybe_jnp(arr):
+        return jnp.array(arr, dtype=jnp.float64) if arr is not None else None
+
+    return DuoGridData(
+        n=n,
+        ng=ng,
+        k2e_nord=k2e_nord,
+        k2e_coef=jnp.array(k2e_coef, dtype=jnp.float64),
+        k2e_lo=jnp.array(k2e_lo, dtype=jnp.int32),
+        ext_lon=jnp.array(ext_lon, dtype=jnp.float64),
+        ext_lat=jnp.array(ext_lat, dtype=jnp.float64),
+        corner_xp=_maybe_jnp(xp),
+        corner_xm=_maybe_jnp(xm),
+        corner_yp=_maybe_jnp(yp),
+        corner_ym=_maybe_jnp(ym),
+        vlon_ext=jnp.array(vlon_ext, dtype=jnp.float64),
+        vlat_ext=jnp.array(vlat_ext, dtype=jnp.float64),
+        ew_ext=jnp.array(ew_ext, dtype=jnp.float64),
+        es_ext=jnp.array(es_ext, dtype=jnp.float64),
+    )
