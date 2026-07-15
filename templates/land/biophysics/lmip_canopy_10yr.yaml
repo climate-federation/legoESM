@@ -28,6 +28,12 @@ physics:
   # --- composable knobs (defaults shown; all optional) ---
   stomatal_model: ball_berry        # canopy leaf conductance: ball_berry | medlyn
   snow_albedo_feedback: true
+  # Snow thermal scheme: "single" (default single-node bulk SWE budget) — the
+  # stable, production-consistent scheme (also what AMIP + the EC-site harness run).
+  # NOT the multilayer snow column, which is unstable at global scale (see
+  # docs/land/phase2b_snow_thermal_plan.md).  High-latitude soil carries a known
+  # cold bias + snow tower under "single" — a documented realism limit, not a crash.
+  snow_scheme: single
   # Soil-water freeze/thaw (apparent-heat-capacity zero-curtain).  ON for the
   # production run: without it, boreal/Arctic winter columns lose their energy
   # budget once the top soil layer crosses freezing and drift to NaN (~3-8% of
