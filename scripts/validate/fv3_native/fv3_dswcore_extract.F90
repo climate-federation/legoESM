@@ -1928,7 +1928,7 @@ module dsw_extract_mod
   ! module bounds provided by swcore_shim_mod::set_fill_corner_bounds).
   use swcore_shim_mod
   use sw_core_extract_mod, only: d2a2c_vect, fill2_4corners, fill_4corners
-  use tp_core_mod, only: fv_tp_2d, copy_corners
+  use tp_core_mod, only: fv_tp_2d, copy_corners, pert_ppm
   use a2b_edge_mod, only: a2b_ord4
   implicit none
   ! sw_core.F90 module-level constants (verbatim, production branch)
@@ -1948,6 +1948,15 @@ module dsw_extract_mod
   interface fill_corners
      module procedure fill_corners_2d_r8
      module procedure fill_corners_xy_2d_r8
+  end interface
+  interface fill_corners_dgrid
+     module procedure fill_corners_dgrid_r8
+  end interface
+  interface fill_corners_cgrid
+     module procedure fill_corners_cgrid_r8
+  end interface
+  interface fill_corners_agrid
+     module procedure fill_corners_agrid_r8
   end interface
 
 contains
@@ -4230,5 +4239,92 @@ end subroutine ytp_v
          endif
 
       end subroutine fill_corners_xy_2d_r8
+
+      subroutine fill_corners_dgrid_r8(x, y, npx, npy, mySign)
+         real(kind=8), DIMENSION(isd:,jsd:), intent(INOUT):: x
+         real(kind=8), DIMENSION(isd:,jsd:), intent(INOUT):: y
+         integer, intent(IN):: npx,npy
+         real(kind=8), intent(IN) :: mySign
+         integer :: i,j
+
+               do j=1,ng
+                  do i=1,ng
+                   !   if ((is  ==  1) .and. (js  ==  1)) x(1-i    ,1-j  ) =        y(j+1  ,1-i    )  !SW Corner
+                   !   if ((is  ==  1) .and. (je+1==npy)) x(1-i    ,npy+j) = mySign*y(j+1  ,npy-1+i)  !NW Corner
+                   !   if ((ie+1==npx) .and. (js  ==  1)) x(npx-1+i,1-j  ) = mySign*y(npx-j,1-i    )  !SE Corner
+                   !   if ((ie+1==npx) .and. (je+1==npy)) x(npx-1+i,npy+j) =        y(npx-j,npy-1+i)  !NE Corner
+                      if ((is  ==  1) .and. (js  ==  1)) x(1-i    ,1-j  ) = mySign*y(1-j  ,i    )  !SW Corner
+                      if ((is  ==  1) .and. (je+1==npy)) x(1-i    ,npy+j) =        y(1-j  ,npy-i)  !NW Corner
+                      if ((ie+1==npx) .and. (js  ==  1)) x(npx-1+i,1-j  ) =        y(npx+j,i    )  !SE Corner
+                      if ((ie+1==npx) .and. (je+1==npy)) x(npx-1+i,npy+j) = mySign*y(npx+j,npy-i)  !NE Corner
+                  enddo
+               enddo
+               do j=1,ng
+                  do i=1,ng
+                   !  if ((is  ==  1) .and. (js  ==  1)) y(1-i    ,1-j    ) =        x(1-j    ,i+1  )  !SW Corner
+                   !  if ((is  ==  1) .and. (je+1==npy)) y(1-i    ,npy-1+j) = mySign*x(1-j    ,npy-i)  !NW Corner
+                   !  if ((ie+1==npx) .and. (js  ==  1)) y(npx+i  ,1-j    ) = mySign*x(npx-1+j,i+1  )  !SE Corner
+                   !  if ((ie+1==npx) .and. (je+1==npy)) y(npx+i  ,npy-1+j) =        x(npx-1+j,npy-i)  !NE Corner
+                     if ((is  ==  1) .and. (js  ==  1)) y(1-i    ,1-j    ) = mySign*x(j      ,1-i  )  !SW Corner
+                     if ((is  ==  1) .and. (je+1==npy)) y(1-i    ,npy-1+j) =        x(j      ,npy+i)  !NW Corner
+                     if ((ie+1==npx) .and. (js  ==  1)) y(npx+i  ,1-j    ) =        x(npx-j  ,1-i  )  !SE Corner
+                     if ((ie+1==npx) .and. (je+1==npy)) y(npx+i  ,npy-1+j) = mySign*x(npx-j  ,npy+i)  !NE Corner
+                  enddo
+               enddo
+
+      end subroutine fill_corners_dgrid_r8
+
+      subroutine fill_corners_cgrid_r8(x, y, npx, npy, mySign)
+         real(kind=8), DIMENSION(isd:,jsd:), intent(INOUT):: x
+         real(kind=8), DIMENSION(isd:,jsd:), intent(INOUT):: y
+         integer, intent(IN):: npx,npy
+         real(kind=8), intent(IN) :: mySign
+         integer :: i,j
+
+                  do j=1,ng
+                     do i=1,ng
+                        if ((is  ==  1) .and. (js  ==  1)) x(1-i    ,1-j    ) =        y(j      ,1-i  )  !SW Corner
+                        if ((is  ==  1) .and. (je+1==npy)) x(1-i    ,npy-1+j) = mySign*y(j      ,npy+i)  !NW Corner
+                        if ((ie+1==npx) .and. (js  ==  1)) x(npx+i  ,1-j    ) = mySign*y(npx-j  ,1-i  )  !SE Corner
+                        if ((ie+1==npx) .and. (je+1==npy)) x(npx+i  ,npy-1+j) =        y(npx-j  ,npy+i)  !NE Corner
+                     enddo
+                  enddo
+                  do j=1,ng
+                     do i=1,ng
+                        if ((is  ==  1) .and. (js  ==  1)) y(1-i    ,1-j  ) =        x(1-j  ,i    )  !SW Corner
+                        if ((is  ==  1) .and. (je+1==npy)) y(1-i    ,npy+j) = mySign*x(1-j  ,npy-i)  !NW Corner
+                        if ((ie+1==npx) .and. (js  ==  1)) y(npx-1+i,1-j  ) = mySign*x(npx+j,i    )  !SE Corner
+                        if ((ie+1==npx) .and. (je+1==npy)) y(npx-1+i,npy+j) =        x(npx+j,npy-i)  !NE Corner
+                     enddo
+                  enddo
+
+      end subroutine fill_corners_cgrid_r8
+
+      subroutine fill_corners_agrid_r8(x, y, npx, npy, mySign)
+         real(kind=8), DIMENSION(isd:,jsd:), intent(INOUT):: x
+         real(kind=8), DIMENSION(isd:,jsd:), intent(INOUT):: y
+         integer, intent(IN):: npx,npy
+         real(kind=8), intent(IN) :: mySign
+         integer :: i,j
+
+                 do j=1,ng
+                    do i=1,ng
+                       if ((is==    1) .and. (js==    1)) x(1-i    ,1-j    ) = mySign*y(1-j    ,i        )  !SW Corner
+                       if ((is==    1) .and. (je==npy-1)) x(1-i    ,npy-1+j) =        y(1-j    ,npy-1-i+1)  !NW Corner
+                       if ((ie==npx-1) .and. (js==    1)) x(npx-1+i,1-j    ) =        y(npx-1+j,i        )  !SE Corner
+                       if ((ie==npx-1) .and. (je==npy-1)) x(npx-1+i,npy-1+j) = mySign*y(npx-1+j,npy-1-i+1)  !NE Corner
+                    enddo
+                 enddo
+                 do j=1,ng
+                    do i=1,ng
+                       if ((is==    1) .and. (js==    1)) y(1-j    ,1-i    ) = mySign*x(i        ,1-j    )  !SW Corner
+                       if ((is==    1) .and. (je==npy-1)) y(1-j    ,npy-1+i) =        x(i        ,npy-1+j)  !NW Corner
+                       if ((ie==npx-1) .and. (js==    1)) y(npx-1+j,1-i    ) =        x(npx-1-i+1,1-j    )  !SE Corner
+                       if ((ie==npx-1) .and. (je==npy-1)) y(npx-1+j,npy-1+i) = mySign*x(npx-1-i+1,npy-1+j)  !NE Corner
+                    enddo
+                 enddo
+
+      end subroutine fill_corners_agrid_r8
+
 
 end module dsw_extract_mod
