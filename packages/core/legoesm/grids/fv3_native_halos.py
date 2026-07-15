@@ -433,6 +433,128 @@ def _ed_ext_agrid_lonlat(n: int, ng: int):
     return lon_c, lat_c
 
 
+def _ed_ext_stagger_lonlat(n: int, ng: int, parity: str):
+    """ED extended lon/lat at a supergrid parity, create layout.
+
+    parity "A": even nodes (2i, 2j), shape (6, n+2ng, n+2ng);
+    parity "B": odd nodes (2i-1, 2j-1), shape (6, n+2ng+1, n+2ng+1).
+    """
+    from legoesm.grids.cubed_sphere import (
+        _GNOMONIC_ED_FACE_PERM,
+        _GNOMONIC_ED_FACE_ROT,
+    )
+
+    sg_is, sg_ie = 1, 2 * n + 1
+    sg_nc = 1 + n
+    sg_ng = 2 * (ng + 2)
+    sg_isd, sg_ied = sg_is - sg_ng, sg_ie + sg_ng
+
+    line = _F(sg_isd, sg_ied)
+    rsq3 = 1.0 / np.sqrt(3.0)
+    alpha = np.arcsin(rsq3)
+    dela = 2.0 * alpha / (sg_ie - sg_is)
+    line[sg_is] = -1.0
+    line[sg_nc] = 0.0
+    for j in range(sg_is + 1, sg_nc):
+        line[j] = np.tan((j - 1) * dela - alpha) * np.sqrt(2.0)
+    for j in range(sg_isd, sg_is):
+        jj = 2 * sg_is - j
+        line[j] = np.tan(-0.5 * np.pi - np.arctan(line[jj]))
+    for j in range(sg_isd, sg_nc):
+        line[sg_ie - j + 1] = -line[j]
+
+    if parity == "A":
+        idx = np.arange(1 - ng, n + ng + 1)
+        vals = np.array([line[2 * i] for i in idx])
+    elif parity == "B":
+        idx = np.arange(1 - ng, n + ng + 2)
+        vals = np.array([line[2 * i - 1] for i in idx])
+    else:  # pragma: no cover - guard
+        raise ValueError(parity)
+    X, Y = np.meshgrid(vals, vals, indexing="ij")
+    carts = (
+        lambda x, y: (np.ones_like(x), x, y),
+        lambda x, y: (-x, np.ones_like(x), y),
+        lambda x, y: (-x, -y, np.ones_like(x)),
+        lambda x, y: (-np.ones_like(x), -y, -x),
+        lambda x, y: (y, -np.ones_like(x), -x),
+        lambda x, y: (y, x, -np.ones_like(x)),
+    )
+    m = len(idx)
+    lon6 = np.zeros((6, m, m))
+    lat6 = np.zeros((6, m, m))
+    for t in range(6):
+        cx, cy, cz = carts[t](X, Y)
+        r = np.sqrt(cx * cx + cy * cy + cz * cz)
+        lon6[t] = np.mod(np.arctan2(cy, cx), 2.0 * np.pi)
+        lat6[t] = np.arcsin(cz / r)
+    lon_c = np.stack([
+        np.rot90(lon6[_GNOMONIC_ED_FACE_PERM[F]], _GNOMONIC_ED_FACE_ROT[F])
+        for F in range(6)
+    ])
+    lat_c = np.stack([
+        np.rot90(lat6[_GNOMONIC_ED_FACE_PERM[F]], _GNOMONIC_ED_FACE_ROT[F])
+        for F in range(6)
+    ])
+    return lon_c, lat_c
+
+
+def _compute_ext_vectors_native(a_lon, a_lat, b_lon, b_lat):
+    """a2stag_metrics with REAL staggered B points (fv_duogrid:2871-2992).
+
+    The legacy builder synthesizes B-grid points from A-point averages;
+    upstream uses the actual odd-supergrid ``dg%b_pt`` values (codex p3 P1).
+    Shapes follow legoESM's DuoGridData conventions:
+    ew (6, m+1, m, 3, 2), es (6, m, m+1, 3, 2), vlon/vlat (6, m, m, 3)
+    where m = n + 2*ng.  Boundary lines outside the upstream loop ranges
+    (ew i=0, es j=0) replicate their inner neighbour (upstream leaves them
+    undefined-and-unused).
+    """
+    def xyz(lon, lat):
+        return np.stack([np.cos(lat) * np.cos(lon),
+                         np.cos(lat) * np.sin(lon),
+                         np.sin(lat)], axis=-1)
+
+    def norm(v):
+        return v / np.linalg.norm(v, axis=-1, keepdims=True)
+
+    A = xyz(a_lon, a_lat)                     # (6, m, m, 3)
+    B = xyz(b_lon, b_lat)                     # (6, m+1, m+1, 3)
+    nf, m, _, _ = A.shape
+
+    # ew at u-positions (i between A(i-1) and A(i)), i = 1..m-1 upstream
+    ppw = norm(B[:, 1:-1, :-1] + B[:, 1:-1, 1:])   # mid(B(i,j), B(i,j+1)), (6, m-1, m)
+    p2 = np.cross(A[:, :-1], A[:, 1:])             # cross(A(i-1,j), A(i,j)), (6, m-1, m)
+    ew1 = norm(np.cross(p2, ppw))
+    gb = np.cross(B[:, 1:-1, :-1], B[:, 1:-1, 1:])  # cross(B(i,j), B(i,j+1))
+    ew2 = norm(np.cross(gb, ppw))
+    ew = np.zeros((nf, m + 1, m, 3, 2))
+    ew[:, 1:m, :, :, 0] = ew1
+    ew[:, 1:m, :, :, 1] = ew2
+    ew[:, 0] = ew[:, 1]
+    ew[:, m] = ew[:, m - 1]
+
+    # es at v-positions (j between A(j-1) and A(j)), j = 1..m-1 upstream
+    pps = norm(B[:, :-1, 1:-1] + B[:, 1:, 1:-1])   # mid(B(i,j), B(i+1,j))
+    p2s = np.cross(A[:, :, :-1], A[:, :, 1:])      # cross(A(i,j-1), A(i,j))
+    es2 = norm(np.cross(p2s, pps))
+    gbs = np.cross(B[:, :-1, 1:-1], B[:, 1:, 1:-1])
+    es1 = norm(np.cross(gbs, pps))
+    es = np.zeros((nf, m, m + 1, 3, 2))
+    es[:, :, 1:m, :, 0] = es1
+    es[:, :, 1:m, :, 1] = es2
+    es[:, :, 0] = es[:, :, 1]
+    es[:, :, m] = es[:, :, m - 1]
+
+    # vlon/vlat: geographic unit vectors at A points (unit_vect_latlon)
+    sin_lon, cos_lon = np.sin(a_lon), np.cos(a_lon)
+    sin_lat, cos_lat = np.sin(a_lat), np.cos(a_lat)
+    vlon = np.stack([-sin_lon, cos_lon, np.zeros_like(a_lon)], axis=-1)
+    vlat = np.stack([-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat],
+                    axis=-1)
+    return vlon, vlat, ew, es
+
+
 def create_fv3_native_duogrid_data(n: int, ng: int = 3, k2e_nord: int = 4):
     """ED-native DuoGridData: certified duo-grid k2e tables + ED extension.
 
@@ -449,7 +571,6 @@ def create_fv3_native_duogrid_data(n: int, ng: int = 3, k2e_nord: int = 4):
         DuoGridData,
         MAX_K2E_NORD,
         _compute_corner_lagrange_coeff,
-        _compute_ext_vectors,
     )
     from legoesm.grids.halo import EAST, NORTH, SOUTH, WEST
     import jax.numpy as jnp
@@ -494,8 +615,11 @@ def create_fv3_native_duogrid_data(n: int, ng: int = 3, k2e_nord: int = 4):
 
     ext_lon, ext_lat = _ed_ext_agrid_lonlat(n, ng)
     xp, xm, yp, ym = _compute_corner_lagrange_coeff(n, ng, ext_lon, ext_lat)
-    vlon_ext, vlat_ext, ew_ext, es_ext = _compute_ext_vectors(
-        n, ng, ext_lon, ext_lat)
+    # codex p3 P1: a2stag vectors from REAL odd-supergrid B points (the
+    # legacy builder synthesizes B from A-averages; upstream uses dg%b_pt).
+    b_lon, b_lat = _ed_ext_stagger_lonlat(n, ng, "B")
+    vlon_ext, vlat_ext, ew_ext, es_ext = _compute_ext_vectors_native(
+        ext_lon, ext_lat, b_lon, b_lat)
 
     def _maybe_jnp(arr):
         return jnp.array(arr, dtype=jnp.float64) if arr is not None else None

@@ -308,7 +308,7 @@ def create_cubed_sphere(
     omega: float = constants.Omega,
     dtype=None,
     use_duogrid: bool = False,
-    k2e_nord: int = 2,
+    k2e_nord: int | None = None,
     duogrid_ng: int | None = None,
     stretch_fac: float = 1.0,
     target_lon: float = 0.0,
@@ -469,14 +469,21 @@ def create_cubed_sphere(
             from legoesm.grids.fv3_native_halos import (
                 create_fv3_native_duogrid_data,
             )
-            # k2e_nord is pinned to the upstream duo-grid default (4); the
-            # 2-point option is a legacy-equiangular knob with no FV3
-            # counterpart, so a lower request is coerced up, never down.
+            # k2e_nord on the ED route is the upstream duo-grid order and
+            # only 4 is oracle-pinned.  DEFAULT (None) maps to 4; any
+            # EXPLICIT non-4 request fails loudly (codex p3: never silently
+            # ignore a user's numerical order).
+            if k2e_nord is not None and k2e_nord != 4:
+                raise NotImplementedError(
+                    f"gnomonic='ed' duogrid: k2e_nord={k2e_nord} is not the "
+                    "oracle-pinned upstream duo-grid order (4); omit the "
+                    "argument or pass 4")
             duogrid = create_fv3_native_duogrid_data(n, ng=ng, k2e_nord=4)
         else:
             from legoesm.grids.duogrid import create_duogrid_data
-            duogrid = create_duogrid_data(n, radius=radius, ng=ng,
-                                          k2e_nord=k2e_nord)
+            duogrid = create_duogrid_data(
+                n, radius=radius, ng=ng,
+                k2e_nord=2 if k2e_nord is None else k2e_nord)
 
     # Grid arrays use the storage dtype from the precision policy.
     # Defaults to float32 for backward compatibility.
@@ -541,7 +548,7 @@ def create_fv3_native_cubed_sphere(
     omega: float = constants.Omega,
     dtype=None,
     use_duogrid: bool = False,
-    k2e_nord: int = 2,
+    k2e_nord: int | None = None,
     duogrid_ng: int | None = None,
 ) -> CubedSphereGrid:
     """Create the FV3-native cubed-sphere grid (gnomonic_ed, FV3 grid_type=0).

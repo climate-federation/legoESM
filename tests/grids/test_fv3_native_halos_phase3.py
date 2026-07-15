@@ -53,6 +53,46 @@ class TestK2EOracle:
             # all regular records agree to ~1e-15.
             assert dmax < 5e-13, f"{stag}: coef max dev {dmax:.3e}"
 
+    def test_coords_records_sane_and_sentinel_isolated(self):
+        # codex p3 P2: the raw-coordinate oracle now dumps ONLY the strips
+        # gen_coords defines (dense dumps carried allocation garbage).  The
+        # ext lines must be clean gnomonic values; the kik lines legitimately
+        # carry upstream's ±999-derived entries ONLY at the extreme
+        # position/layer tips (upstream-tainted, replicated faithfully).
+        d = np.load(_FIXTURE)
+        for res in (12, 24):
+            for kind in ("EX", "EY"):
+                v = d[f"coords_{kind}_val_c{res}"]
+                assert np.isfinite(v).all()
+                assert np.abs(v).max() < 2.0, kind
+            for kind in ("KX", "KY"):
+                v = d[f"coords_{kind}_val_c{res}"]
+                k = d[f"coords_{kind}_key_c{res}"]
+                assert np.isfinite(v).all()
+                tainted = np.abs(v) > 900
+                # tainted entries only at the strip END positions
+                pos = k[tainted, 0]
+                assert np.isin(pos, (0, 2 * res + 2)).all(), kind
+
+    def test_production_a_windows_never_touch_sentinels(self):
+        # codex p3: isolate the ±999 upstream-tainted records — the
+        # PRODUCTION-consumed A-table subset (targets 1..n, depths 1..ng)
+        # must never place a tainted node inside its Lagrange window.
+        d = np.load(_FIXTURE)
+        for res in (12, 24):
+            kx = {tuple(k): float(v) for k, v in zip(
+                d[f"coords_KX_key_c{res}"], d[f"coords_KX_val_c{res}"])}
+            ij = d[f"k2e_A_ij_c{res}"]
+            loc = d[f"k2e_A_loc_c{res}"]
+            for (i, j), l in zip(ij, loc):
+                if not (1 <= i <= res and (j < 1 or j > res)):
+                    continue  # production rows: interior targets on halo rows
+                layer = 2 * j
+                for srcnode in range(l - 1, l + 3):   # window klo-1..klo+2
+                    key = (2 * srcnode, layer)
+                    if key in kx:
+                        assert abs(kx[key]) < 900, (res, (i, j), key)
+
     def test_partition_of_unity(self):
         tab = compute_fv3_native_k2e(12)
         for stag in _STAGGERS:
@@ -96,6 +136,37 @@ class TestK2EOracle:
         with pytest.raises(NotImplementedError, match="ng="):
             create_fv3_native_duogrid_data(12, ng=4)
 
+    def test_ed_route_explicit_nord_request_raises(self):
+        # codex p3 P2: the public dispatcher must not silently ignore an
+        # EXPLICIT k2e_nord request on the ED route; the default (None)
+        # maps to the upstream duo-grid order 4.
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+
+        with pytest.raises(NotImplementedError, match="k2e_nord=2"):
+            create_cubed_sphere(8, dtype=np.float64, gnomonic="ed",
+                                use_duogrid=True, k2e_nord=2)
+        g = create_cubed_sphere(8, dtype=np.float64, gnomonic="ed",
+                                use_duogrid=True)  # default: fine, order 4
+        assert int(g.duogrid.k2e_nord) == 4
+
+    def test_fp32_constant_field_tolerance(self):
+        # codex p3 P3: cube_rmp casts coefficients to field dtype; fp32
+        # partition-of-unity residual is ~1.2e-7 in the C12 tables.  Pin an
+        # explicit fp32 tolerance so the (x64) 1e-12 claim is not
+        # over-generalized.
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import pad_halo
+
+        g = create_cubed_sphere(12, dtype=np.float64, gnomonic="ed",
+                                use_duogrid=True, duogrid_ng=3)
+        f32 = jax.numpy.ones((6, 12, 12), dtype=jax.numpy.float32)
+        padded = np.asarray(pad_halo(f32, halo=3, duogrid=g.duogrid))
+        assert padded.dtype == np.float32
+        # measured 5.7e-6 at C12 h=3 (edge remap + corner-fill compounding
+        # of the ~1.2e-7 fp32 partition-of-unity residual); gate with
+        # headroom — the 1e-12 constant claim holds only under x64.
+        assert np.abs(padded - 1.0).max() < 2e-5
+
 
 class TestGhostValues:
     """Functional certification of the applied halos on the ED path."""
@@ -119,11 +190,21 @@ class TestGhostValues:
 
     @staticmethod
     def _regions(n, h):
+        """(corner, edge_ring, interior) boolean masks over (n+2h, n+2h).
+
+        codex p3 P2: ``~corner`` alone mislabels the interior as 'edge';
+        the halo-ring mask must EXCLUDE the interior so (a) interior
+        preservation is asserted exactly and separately, (b) the edge
+        metric measures only the remapped rings.
+        """
         m = n + 2 * h
         corner = np.zeros((m, m), bool)
         corner[:h, :h] = corner[:h, -h:] = True
         corner[-h:, :h] = corner[-h:, -h:] = True
-        return corner
+        interior = np.zeros((m, m), bool)
+        interior[h:-h, h:-h] = True
+        edge_ring = ~(corner | interior)
+        return corner, edge_ring, interior
 
     @pytest.mark.parametrize("halo", [1, 2, 3])
     def test_smooth_field_ghosts_match_extension_positions(self, halo):
@@ -150,9 +231,17 @@ class TestGhostValues:
         sl = slice(ng - h, ng + n + h)
         ref = field(ext_lon[:, sl, sl], ext_lat[:, sl, sl])
         err = np.abs(padded - ref)
-        corner = self._regions(n, h)
-        edge_err = err[:, ~corner].max()
-        corner_err = err[:, corner].max() if corner.any() else 0.0
+        corner, edge_ring, interior = self._regions(n, h)
+        # interior must be EXACTLY the input field (pad never rewrites it) —
+        # note the interior reference here is the model's own cell_center2
+        # A-grid values, NOT field-at-even-node positions: the upstream
+        # duo grid itself mixes those conventions (dg%a_pt = even supergrid
+        # nodes for the remap tables/corner weights, while the solver's var
+        # lives at the fv_grid_tools cell_center2 agrid).
+        f_in = field(np.asarray(g.lon), np.asarray(g.lat))
+        assert np.array_equal(padded[:, interior].reshape(6, n, n), f_in)
+        edge_err = err[:, edge_ring].max()
+        corner_err = err[:, corner].max()
         assert edge_err < 5e-3, f"halo={halo}: edge ghost error {edge_err:.3e}"
         assert corner_err < 0.5, (
             f"halo={halo}: corner ghost error {corner_err:.3e}")
@@ -171,8 +260,8 @@ class TestGhostValues:
             sl = slice(ng - 3, ng + n + 3)
             ref = field(ext_lon[:, sl, sl], ext_lat[:, sl, sl])
             err = np.abs(padded - ref)
-            corner = self._regions(n, 3)
-            errs_edge[n] = err[:, ~corner].max()
+            corner, edge_ring, _ = self._regions(n, 3)
+            errs_edge[n] = err[:, edge_ring].max()
             errs_corner[n] = err[:, corner].max()
         # 4th order => ~16x; slack for metric variation
         r_edge = errs_edge[12] / errs_edge[24]

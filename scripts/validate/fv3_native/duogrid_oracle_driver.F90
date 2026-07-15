@@ -26,7 +26,7 @@ program duogrid_oracle_driver
   type(global_grid_type) :: gg
   integer, parameter :: nres = 2
   integer, parameter :: res_list(nres) = (/ 12, 24 /)
-  integer :: r, res, ng, n, i, j, k, u
+  integer :: r, res, ng, n, i, j, k, u, jj2
   integer :: is, ie, isd, ied, sgis, sgie
   real(kind=r8_kind) :: tlon, tlat
   character(len=64) :: fname
@@ -102,16 +102,36 @@ program duogrid_oracle_driver
     end do
     close(u)
 
+    ! Only the strips gen_coords actually DEFINES are dumped (codex p3 P2:
+    ! the arrays are allocated uninitialized, so a dense dump contains
+    ! garbage outside the layer strips).  Per layer k = 0..2*gg%ng and both
+    ! layer sides (is-k, ie+k): kik lines cover positions js-1..je+1, ext
+    ! lines cover positions jsd..jed; both orientations are recorded
+    ! (KX/EX position-first, KY/EY layer-first).
     write(fname, '(A,I0,A)') 'duogrid_coords_c', res, '.txt'
     open(newunit=u, file=trim(fname), status='replace', action='write')
-    write(u,'(A)') '# duogrid ext/kik supergrid coords: n i j ext_x ext_y kik_x kik_y'
+    write(u,'(A)') '# duogrid DEFINED remap-coord records: kind n pos layer value'
     write(u,'(A,I0,1X,I0)') '# res ng = ', res, ng
     do n = 1, 6
-      do j = sgis, sgie
-        do i = sgis, sgie
-          write(u,'(I1,1X,I6,1X,I6,1X,4ES26.17E3)') n, i, j, &
-               gg%ext_x(i, j, n), gg%ext_y(i, j, n), &
-               gg%kik_x(i, j, n), gg%kik_y(i, j, n)
+      do k = 0, 2*ng
+        do i = 1, 2
+          if (i == 1) then
+            j = 1 - k
+          else
+            j = 2*res + 1 + k
+          end if
+          do jj2 = 0, 2*res + 2
+            write(u,'(A,1X,I1,1X,I6,1X,I6,1X,ES26.17E3)') 'KX', n, jj2, j, &
+                 gg%kik_x(jj2, j, n)
+            write(u,'(A,1X,I1,1X,I6,1X,I6,1X,ES26.17E3)') 'KY', n, jj2, j, &
+                 gg%kik_y(j, jj2, n)
+          end do
+          do jj2 = sgis, sgie
+            write(u,'(A,1X,I1,1X,I6,1X,I6,1X,ES26.17E3)') 'EX', n, jj2, j, &
+                 gg%ext_x(jj2, j, n)
+            write(u,'(A,1X,I1,1X,I6,1X,I6,1X,ES26.17E3)') 'EY', n, jj2, j, &
+                 gg%ext_y(j, jj2, n)
+          end do
         end do
       end do
     end do

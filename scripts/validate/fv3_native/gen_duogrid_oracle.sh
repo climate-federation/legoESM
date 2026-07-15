@@ -68,18 +68,26 @@ for res in (12, 24):
         arrays[f"k2e_{stag}_coef_c{res}"] = coefs
     arrays[f"k2e_nord_c{res}"] = np.array(nord)
 
-    # ext/kik supergrid coords (tile 1; verified tile-symmetric)
-    data = np.loadtxt(f"{workdir}/duogrid_coords_c{res}.txt")
-    t1 = data[data[:, 0] == 1]
-    ii = t1[:, 1].astype(int)
-    jj = t1[:, 2].astype(int)
-    lo = ii.min()
-    size = ii.max() - lo + 1
-    for col, name in ((3, "ext_x"), (4, "ext_y"), (5, "kik_x"), (6, "kik_y")):
-        a = np.full((size, size), np.nan)
-        a[ii - lo, jj - lo] = t1[:, col]
-        arrays[f"duo_{name}_c{res}"] = a
-    arrays[f"duo_index_lo_c{res}"] = np.array(lo)
+    # DEFINED remap-coord records (kind n pos layer value); tile symmetry
+    # verified at pack time, tile 1 stored as keyed record arrays.
+    recs = {}
+    for line in open(f"{workdir}/duogrid_coords_c{res}.txt"):
+        if line.startswith("#"):
+            continue
+        p = line.split()
+        kind, tile, pos, layer, v = (p[0], int(p[1]), int(p[2]),
+                                     int(p[3]), float(p[4]))
+        recs.setdefault(kind, {}).setdefault(tile, {})[(pos, layer)] = v
+    for kind, tiles in recs.items():
+        t1 = tiles[1]
+        for t, r in tiles.items():
+            for key, v in r.items():
+                assert abs(t1[key] - v) < 1e-13, (
+                    f"coords tile asymmetry {kind} {t} {key}")
+        keys = np.array(sorted(t1), dtype=np.int64)
+        vals = np.array([t1[tuple(k)] for k in keys])
+        arrays[f"coords_{kind}_key_c{res}"] = keys
+        arrays[f"coords_{kind}_val_c{res}"] = vals
 np.savez_compressed(out_path, **arrays)
 print(f"wrote {out_path}")
 EOF
