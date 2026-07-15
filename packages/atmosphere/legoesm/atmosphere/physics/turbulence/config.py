@@ -582,11 +582,13 @@ class YSUConfig(NamedTuple):
     Pr_t : float
         Turbulent Prandtl number (default 1.0).
     entrainment_ratio : float
-        Prescribed PBL-top entrainment flux ratio ``e_ratio`` in
-        ``(w'θ_v')_h = −e_ratio·(w'θ_v')_0`` (Hong et al. 2006 entrainment
-        closure; default 0.15).  Applied as a flux-matched diffusivity at
-        the inversion (see ``ysu.py``).  Renamed from ``entrainment_coeff``
-        (the old Gaussian-K magnitude coefficient, a different quantity).
+        PBL-top entrainment flux ratio ``e_ratio`` in the FREE-CONVECTIVE-limit
+        law ``(w'θ_v')_h = −e_ratio·(w'θ_v')_0`` (default 0.15, the Hong et al.
+        2006 free-convective coefficient).  Full Hong06 scales entrainment by
+        ``w_m³ = w*³ + 5·u*³`` (shear-dependent); this fixed surface-flux fraction
+        is a surrogate.  Applied as a flux-matched diffusivity at the inversion
+        (see ``ysu.py``).  Renamed from ``entrainment_coeff`` (the old Gaussian-K
+        magnitude coefficient, a different quantity).
     Ri_crit : float
         Critical Richardson number (default 0.25).
     pbl_smooth_sharpness : float
