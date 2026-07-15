@@ -56,6 +56,7 @@ __param_spec__ = {
         "excluded": {
             "K_iso_steep": "default 0 = disabled/off (enable via config, not training)",
             "taper_width_frac": "numerics: solver/CFL/smoothing parameter",
+            "mld_rho_c": "convention: mixed-layer-depth density criterion (NEMO ldfslp ramp)",
         },
         "params": {
             "S_max": {"units": "1", "bounds": (0.0033, 0.03), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
@@ -270,6 +271,18 @@ class GMRediConfig(NamedTuple):
     # REMAINING NEMO deviation (documented): the ldfslp mixed-layer
     # linear slope ramp toward the surface is not implemented yet.
     slope_limit: str = "dm95_taper"
+    # NEMO ldfslp mixed-layer slope ramp (default False = BYTE-IDENTICAL).
+    # When True, isoneutral slopes are linearly ramped to 0 through the surface
+    # mixed layer (ldfslp.F90:284-297 w-point branch: wslp(k) = gdepw(k)/max(hml,10)
+    # * wslp_base, wslp_base = slope just below the ML base), matching NEMO's
+    # ldfslp which flattens slopes in the ML where stratification -> 0 makes the
+    # raw slope blow up.  MLD from the zdfmxl density criterion (below).  Applied
+    # to the final tapered slopes; the interior / below-ML numerics (which already
+    # match NEMO) are untouched.  Oracle-matching option; opt-in.
+    nemo_mld_slope_ramp: bool = False
+    # Density criterion [kg/m^3] for the ramp's mixed-layer depth (NEMO zdfmxl
+    # rn_rho_c; potential-density difference from the ~10 m reference level).
+    mld_rho_c: float = 0.01
     # NEMO nn_aht_ijk_t=20 grid-size scaling: the effective kappa_Redi is
     # cfg.kappa_Redi * cos(lat) per row (Mercator dx ∝ cos φ, so
     # aht(φ) = ½·U_d·Δx(φ) with cfg.kappa_Redi = the EQUATOR value

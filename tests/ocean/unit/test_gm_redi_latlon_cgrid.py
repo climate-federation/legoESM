@@ -1147,3 +1147,83 @@ class TestKappa3DInterface:
             T, S, eta, H_bathy, grid, z_coord, cfg, mask=mask,
             kappa_redi_override=k0)
         assert jnp.allclose(K33_3d_uniform, K33_scalar, rtol=1e-12, atol=1e-30)
+
+
+# =====================================================================
+# NEMO ldfslp mixed-layer slope ramp (default OFF -> byte-identical)
+# =====================================================================
+
+class TestNemoMixedLayerSlopeRamp:
+    """``GMRediConfig.nemo_mld_slope_ramp`` linearly flattens ML slopes.
+
+    Manufactured density with a well-mixed surface layer (top 3 levels
+    constant in z) over a stratified, meridionally-tilted interior.  In the
+    mixed layer the vertical density gradient -> 0, so the raw isoneutral slope
+    blows up; the NEMO ramp must taper it linearly to ~0 at the surface while
+    leaving the stratified interior untouched (default OFF => byte-identical).
+    """
+
+    @staticmethod
+    def _mixed_layer_setup(n_lat=8, n_lon=12, nlev=10):
+        from legoesm.ocean.eos import make_eos_fn
+        grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+        z_coord = create_ocean_z_star(
+            n_levels=nlev, H_max=2000.0, dz_surface=20.0, dz_deep=400.0)
+        mask = jnp.ones((n_lat, n_lon))
+        eta = jnp.zeros((n_lat, n_lon))
+        H_bathy = jnp.full((n_lat, n_lon), 2000.0)
+        jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
+        # Vertical T: 3-level mixed layer (constant), stratified below.
+        Tz = jnp.concatenate(
+            [jnp.full(3, 15.0), jnp.linspace(15.0, 2.0, nlev - 3)])
+        y_idx = jnp.arange(n_lat, dtype=jnp.float64)
+        # Meridional tilt (warmer south) -> nonzero horizontal density gradient.
+        T = Tz[None, None, :] + 0.3 * y_idx[:, None, None]
+        S = jnp.full((n_lat, n_lon, nlev), 35.0, dtype=jnp.float64)
+        eos_fn = make_eos_fn("linear")
+        rho = eos_fn(T, S, jnp.zeros_like(T))
+        return grid, z_coord, mask, jacobian, rho, T, S, eos_fn
+
+    def test_ramp_off_is_byte_identical(self):
+        grid, z_coord, mask, jac, rho, T, S, eos_fn = self._mixed_layer_setup()
+        base = GMRediConfig(kappa_GM=1000.0, kappa_Redi=1000.0)
+        off = GMRediConfig(kappa_GM=1000.0, kappa_Redi=1000.0,
+                           nemo_mld_slope_ramp=False)
+        Sx_b, Sy_b, _ = compute_isopycnal_slopes_latlon_cgrid(
+            rho, mask, z_coord, jac, grid, base, T=T, S=S, eos_fn=eos_fn)
+        Sx_o, Sy_o, _ = compute_isopycnal_slopes_latlon_cgrid(
+            rho, mask, z_coord, jac, grid, off, T=T, S=S, eos_fn=eos_fn)
+        # Default and explicit-off are bit-identical (ramp changes nothing).
+        assert jnp.array_equal(Sx_b, Sx_o)
+        assert jnp.array_equal(Sy_b, Sy_o)
+
+    def test_ramp_flattens_mixed_layer_only(self):
+        grid, z_coord, mask, jac, rho, T, S, eos_fn = self._mixed_layer_setup()
+        off = GMRediConfig(kappa_GM=1000.0, kappa_Redi=1000.0)
+        on = GMRediConfig(kappa_GM=1000.0, kappa_Redi=1000.0,
+                          nemo_mld_slope_ramp=True)
+        Sy_off, = (compute_isopycnal_slopes_latlon_cgrid(
+            rho, mask, z_coord, jac, grid, off, T=T, S=S, eos_fn=eos_fn)[1],)
+        Sy_on = compute_isopycnal_slopes_latlon_cgrid(
+            rho, mask, z_coord, jac, grid, on, T=T, S=S, eos_fn=eos_fn)[1]
+        # The MLD criterion places the ML base a few levels down for this
+        # synthetic column; the shallowest interface (0) must be flattened
+        # toward zero by the ramp.
+        surf_off = float(jnp.mean(jnp.abs(Sy_off[:, :, 0])))
+        surf_on = float(jnp.mean(jnp.abs(Sy_on[:, :, 0])))
+        assert surf_on < 0.34 * surf_off, (surf_on, surf_off)
+        # Below the mixed layer the ramp is a NO-OP: bit-identical to the
+        # un-ramped slopes. The computed MLD base for this synthetic column sits
+        # around interface ~4 (deeper than the nominal "top 3 levels"), so check
+        # interfaces 5+ are untouched.
+        assert jnp.array_equal(Sy_on[:, :, 5:], Sy_off[:, :, 5:])
+        # grad is AD-safe AND actually FLOWS to T through the below-ML base slope
+        # (the MLD level is quantized -> zero grad through hml, but the base slope
+        # is differentiable), so it must be finite AND non-zero.
+        def _loss(Tf):
+            return jnp.sum(compute_isopycnal_slopes_latlon_cgrid(
+                eos_fn(Tf, S, jnp.zeros_like(Tf)), mask, z_coord, jac, grid,
+                on, T=Tf, S=S, eos_fn=eos_fn)[1] ** 2)
+        g = jax.grad(_loss)(T)
+        assert jnp.all(jnp.isfinite(g))
+        assert float(jnp.max(jnp.abs(g))) > 0.0

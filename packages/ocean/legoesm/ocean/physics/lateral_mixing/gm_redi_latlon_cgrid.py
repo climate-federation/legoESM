@@ -117,6 +117,14 @@ _S_GRAD_FLOOR = 1.0e-3
 # Default GM/Redi taper transition width (fraction of taper range).
 _DEFAULT_TAPER_WIDTH_FRAC = 0.1
 
+# --- NEMO ldfslp mixed-layer slope ramp (zdfmxl.F90 + ldfslp.F90) ---
+# Reference depth [m] for the mixed-layer-depth density criterion (NEMO's
+# ``nlb10`` ~ 10 m level; zdfmxl integrates N^2 from here).
+_NEMO_MLD_REF_DEPTH_M = 10.0
+# Floor [m] on the mixed-layer depth used in the w-point slope ramp normaliser
+# (ldfslp.F90:161 ``r1_hmlw = 1/MAX(hmlp - gdepw_top, 10.)``).
+_NEMO_HMLW_FLOOR_M = 10.0
+
 def _kappa_is_interface_3d(kappa, nlev: int) -> bool:
     """True iff ``kappa`` is a depth-resolved *interface* (W-grid) diffusivity.
 
@@ -350,6 +358,103 @@ def _slope_density_face_grads(
 
 
 # =====================================================================
+# NEMO ldfslp mixed-layer slope ramp
+# =====================================================================
+
+
+def _nemo_mld_from_potential_density(T, S, mask, z_coord, eos_fn, rho_c):
+    """Mixed-layer depth [m] via NEMO's zdfmxl density criterion.
+
+    NEMO (``zdfmxl.F90:95-104``) integrates the buoyancy frequency ``N^2`` from
+    the ~10 m reference level and sets the mixed-layer w-level ``nmln`` where the
+    cumulative ``integral(N^2 dz) = g/rho0 * Delta_rho_neutral`` first reaches
+    ``g*rho_c/rho0`` — i.e. a NEUTRAL density difference of ``rho_c`` from the
+    reference level.  We reproduce that with a POTENTIAL density (EOS referenced
+    to the surface, ``p=0``), which removes the in-situ compressibility bias
+    (~0.45 kg/m^3 over 100 m, ≫ ``rho_c``) that a raw in-situ column difference
+    would carry — the textbook sigma_theta MLD criterion, matching NEMO's N^2
+    integral over the mixed layer to within the EOS reference-pressure choice.
+
+    Returns ``(hml, m_base)``: the MLD ``hml`` [m, positive] = w-interface depth
+    at the ML base, and ``m_base`` the legoESM *interface* index (0..nlev-2) of
+    that base (the deepest interface still in the mixed layer).  Both are
+    ``(n_lat, n_lon)``.  AD-safe (no stop_gradient), but the MLD *level* ``m_base``
+    is index-selected (argmax/searchsorted over the static depth ladder), so it is
+    a quantized step function of T/S with ZERO gradient through the ramp
+    normaliser ``hml``; ``grad`` reaches T/S through the below-ML base slope (and
+    the unchanged below-ML slopes), which is genuinely differentiable and finite.
+    (Mirrors NEMO's discrete ``nmln``; unlike the tramle MLD diagnostic, no
+    stop_gradient is applied.)
+    """
+    T_filled = neumann_fill_cgrid(T, mask)
+    S_filled = neumann_fill_cgrid(S, mask)
+    rho_pot = eos_fn(T_filled, S_filled, jnp.zeros_like(T_filled))  # (...,nlev)
+    nlev = rho_pot.shape[-1]
+    dz_ref = z_coord.dz_ref
+    z_iface = jnp.cumsum(dz_ref)                      # (nlev,) bottom-of-cell depths
+    z_centers = z_iface - 0.5 * dz_ref               # (nlev,) cell-centre depths
+    # Reference density at the nearest cell centre at/below ~10 m (NEMO nlb10).
+    iref = jnp.clip(
+        jnp.searchsorted(z_centers, jnp.asarray(_NEMO_MLD_REF_DEPTH_M, z_centers.dtype)),
+        0, nlev - 1)
+    rho_ref = jnp.take(rho_pot, iref, axis=-1)        # (n_lat, n_lon)
+    z_ref = jnp.take(z_centers, iref)                 # scalar
+    below_ref = (z_centers > z_ref).reshape((1, 1, nlev))
+    exceed = (rho_pot > rho_ref[:, :, None] + rho_c) & below_ref
+    has = jnp.any(exceed, axis=-1)                    # (n_lat, n_lon)
+    first = jnp.argmax(exceed.astype(jnp.int32), axis=-1)   # first stratified cell
+    first = jnp.where(has, first, nlev - 1)           # unstratified col -> deepest
+    # ML-base w-interface = top of the first stratified cell = bottom of the last
+    # mixed cell = interface index (first-1), clamped into [0, nlev-2].
+    m_base = jnp.clip(first - 1, 0, nlev - 2)
+    hml = jnp.take(z_iface, m_base)                   # (n_lat, n_lon)
+    return hml, m_base
+
+
+def _apply_nemo_mld_slope_ramp(S_x, S_y, T, S, mask, z_coord, eos_fn, rho_c):
+    """Linearly ramp interface slopes to 0 through the mixed layer (NEMO ldfslp).
+
+    NEMO (``ldfslp.F90:284-297``, w-point branch): inside the mixed layer
+    (``jk <= nmln``) the neutral slope is REPLACED by a linear profile
+
+        wslp(k) = gdepw(k) / MAX(hmlp, 10) * wslp_base
+
+    where ``wslp_base = wslp(nmln+1)`` is the computed slope at the first w-level
+    BELOW the ML base (bounded and well-stratified — NOT the ML-base value, which
+    still carries the surface weak-stratification blow-up) and ``hmlp`` the
+    mixed-layer depth — a straight line from the below-ML slope down to 0 at the
+    surface.  Below the ML the slope is unchanged.  (NEMO's ``wmask`` zeroes the
+    ocean-floor w-face, ``ldfslp.F90:302-315``, but that face is NOT an element of
+    this interior-interface array — legoESM carries the ``nlev-1`` interior
+    interfaces only — so there is no bottom face to zero here.)
+
+    Applied to the FINAL (tapered/clipped) legoESM slopes, so the interior /
+    below-ML numerics — which already match NEMO — are untouched; only the
+    mixed-layer interfaces are overwritten by the ramp.  ``rho_c`` [kg/m^3] is
+    the MLD density criterion.  JIT/AD-safe (clip + where + take_along_axis).
+
+    ponytail: the MLD depth ``hml`` is built from reference thicknesses
+    (``z_coord.dz_ref``), ignoring z-star ``eta``/jacobian stretching — negligible
+    for the flat-bottom, ``eta~0`` oracle configs (GYRE/DINO) this targets; carry
+    the jacobian when a stretched/topography oracle needs it.
+    """
+    nlev_m1 = S_x.shape[-1]
+    hml, m_base = _nemo_mld_from_potential_density(
+        T, S, mask, z_coord, eos_fn, rho_c)
+    z_iface = jnp.cumsum(z_coord.dz_ref)[:-1]         # (nlev-1,) interface depths
+    # wslp_base = slope one interface BELOW the ML base (NEMO nmln+1).
+    m_ref = jnp.clip(m_base + 1, 0, nlev_m1 - 1)
+    Sx_base = jnp.take_along_axis(S_x, m_ref[:, :, None], axis=-1)  # (n_lat,n_lon,1)
+    Sy_base = jnp.take_along_axis(S_y, m_ref[:, :, None], axis=-1)
+    ramp = z_iface[None, None, :] / jnp.maximum(
+        hml[:, :, None], _NEMO_HMLW_FLOOR_M)          # (n_lat, n_lon, nlev-1)
+    in_ml = z_iface[None, None, :] <= hml[:, :, None]
+    S_x = jnp.where(in_ml, ramp * Sx_base, S_x)
+    S_y = jnp.where(in_ml, ramp * Sy_base, S_y)
+    return S_x, S_y
+
+
+# =====================================================================
 # Isopycnal slope computation
 # =====================================================================
 
@@ -451,10 +556,22 @@ def compute_isopycnal_slopes_latlon_cgrid(
         S_y_raw = jax.lax.stop_gradient(S_y_raw)
 
     # DM95 tapering via shared helper (identical formula across grids).
-    return dm95_taper(
+    S_x_t, S_y_t, taper = dm95_taper(
         S_x_raw, S_y_raw, cfg.S_max, EPS, cfg.taper_width_frac,
         stop_gradient_taper=(adj_stab == "stop_gradient_taper"),
     )
+
+    # NEMO ldfslp mixed-layer slope ramp (default OFF => byte-identical).
+    if getattr(cfg, "nemo_mld_slope_ramp", False):
+        if T is None or S is None or eos_fn is None:
+            raise ValueError(
+                "compute_isopycnal_slopes_latlon_cgrid: nemo_mld_slope_ramp=True "
+                "requires T, S and eos_fn to build the mixed-layer-depth ramp."
+            )
+        S_x_t, S_y_t = _apply_nemo_mld_slope_ramp(
+            S_x_t, S_y_t, T, S, mask, z_coord, eos_fn, cfg.mld_rho_c,
+        )
+    return S_x_t, S_y_t, taper
 
 
 # =====================================================================
