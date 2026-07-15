@@ -843,4 +843,13 @@ def analytic_swcore_state(gs: dict, *, u0: float = 40.0,
                   node_ok[:-1, :] & node_ok[1:, :])
     v = covariant(grid_ll[:, :-1], grid_ll[:, 1:],
                   node_ok[:, :-1] & node_ok[:, 1:])
+    # D-wind corner regions: upstream initialization runs
+    # fill_corners(u, v, VECTOR=.true., DGRID=.true.) after the mpp
+    # exchange (test_cases), and d_sw's PPM halo-row stencils DO read
+    # them (c_sw never did) — mirror the fill with the vector sign.
+    n = gs["n"]
+    ng = gs["ng"]
+    clo = 1 - ng
+    _fill_corners_dgrid(fort(u, clo, clo), fort(v, clo, clo),
+                        n + 1, ng, sign=-1.0)
     return {"delp": delp, "pt": pt, "u": u, "v": v}
