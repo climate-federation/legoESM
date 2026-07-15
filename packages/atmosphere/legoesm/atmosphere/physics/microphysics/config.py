@@ -386,7 +386,17 @@ class MorrisonConfig(NamedTuple):
     #   "kk2000" (default) = Khairoutdinov-Kogan 2000, the SAM M2005
     #     DEFAULT (IRAIN=0): PRC=1350·qc^2.47·(Nc[#/cm³])^-1.79,
     #     PRA=67·(qc·qr)^1.15. Faithful to the gSAM oracle.
-    #   "seifert_beheng" = the legacy SB onset (k_au/x_star/onset sigmoid).
+    #   "seifert_beheng" = the legacy simplified SB proxy (k_au·q_c^2·onset
+    #     sigmoid autoconv + bilinear k_ac·rho·q_c·q_r accretion). NOT the
+    #     published universal functions — only the au/x_* number closure is
+    #     SB-faithful.
+    #   "seifert_beheng_sb2001" = the PUBLISHED SB2001 universal functions —
+    #     the gSAM IRAIN=1 MASS closures (module_mp_graupel.f90:1835-1844,
+    #     :1960-1962): phi_au=600·tau^0.68·(1−tau^0.68)^3 with the q_c^4·N_c^-2
+    #     rate, phi_ac=(tau/(tau+5e-4))^4 with the fixed 5.78 kernel, plus the
+    #     au/x_* rain-number source. Faithful for a SUPPLIED nu; the default
+    #     fixed nu (0.4315) is an approximation of gSAM's spatially-diagnosed
+    #     pgam, and the SB2001-specific cloud-NUMBER sinks are not represented.
     warm_rain_scheme: str = "kk2000"
     predict_Nc: bool = False         # SAM M2005 dopredictNc. False (SAM DEFAULT) =
                                      # SPECIFIED constant droplet number Nc_0: the
@@ -429,8 +439,10 @@ class MorrisonConfig(NamedTuple):
     D_eq: float = 1.1e-3
     breakup_sharpness: float = 1e4
     # Rain self-collection + breakup:
-    #   "sb2001" (default, faithful) = SAM NRAGG (Seifert-Beheng 2001,
-    #     module_mp_graupel.f90:1980): NRAGG=−5.78·dum·q_r·N_r·ρ with dum=1 for
+    #   "sb2001" (default) = the SAM NRAGG (Seifert-Beheng 2001,
+    #     module_mp_graupel.f90:1980) functional form with a lambda clamp and an
+    #     explicit-Euler non-overshoot limiter (NOT the raw Fortran rate):
+    #     NRAGG=−5.78·dum·q_r·N_r·ρ with dum=1 for
     #     mean drops < 300µm (self-collection) and dum=2−exp(2300·(1/LAMR−300µm))
     #     for larger drops (→ active breakup as dum<0). Uses the prognostic N_r.
     #     (legoESM's legacy k_sc=1e-3 self-collected ~5580× too WEAKLY.)
