@@ -5,25 +5,28 @@ Train the AIMIP variants (`classical`, `column_nn`, `sfno_physics`) at
 80 GB A100. This is the scaled-up version of the Ginsburg T63 (~1.9°, subset of
 years) runs.
 
-## Why single-GPU (not multi-node)
+## Parallelism: the MODEL is single-device; TRAINING is data-parallel (#985)
 
-AIMIP training is **single-device by design**: the spectral semi-implicit
-dynamical core all-gathers the vertical levels into a dense `(nlev,nlev)`
-per-wavenumber solve, and the spherical-harmonic transforms carry no
-collectives. So there is no data/model-parallel axis to shard the training step
-across GPUs. "At scale" therefore means a **bigger card** — the 80 GB A100 on
-Derecho/Levante fits what Ginsburg's 24–40 GB could not:
+The model step itself is single-device (the spectral SI solve is a dense
+`(nlev,nlev)` per-wavenumber system; the SH transforms carry no collectives) —
+there is no model-parallel axis. But since PR #1020 the TRAINER shards each
+chunk's **samples** across MPI ranks (model replicated, gradients averaged via
+mpi4jax host-staged allreduce), giving ~N× wall clock on N GPUs: measured
+**~3.4× on 4×A100** (chunk incl. compile; ~4× steady-state), 288 updates/
+epoch/rank at 4 ranks. `aimip_data_parallel: true` in the base YAML is inert at
+nproc==1; the Derecho launcher auto-detects the rank count from the `-l select`
+line (see Run below). `sfno_full` is the one DP-rejected variant.
 
-- T106 (51 200 columns vs T63's 12 288) + 8 levels,
-- RRTMGP radiation (not the gray fallback),
-- 2-step autoregressive rollout,
-- spatial-surface trainable coefficients,
-- higher NN capacity (SFNO `embed_dim=96`/6 blocks; column MLP 512/6).
+An 80 GB card is still required per rank — that is what fits T106 (51 200
+columns vs T63's 12 288) + 8 levels, autoregressive rollout backprop, and
+spatial-surface coefficients. NOTE the in-practice sfno_physics capacity is
+`embed_dim=64`/4 blocks with physics off (`variant_sfno_physics.yaml`) — the
+96/6 + RRTMGP combination in the original plan OOM'd at gradient init even at
+80 GB; the 120 h curriculum phase was cut for the same reason (72 h cap).
 
-If you want to go beyond one card, the levers are ensemble (one variant/seed per
-GPU, already how the three variants run) or the lat-lon C-grid PE training path
-(`run_aimip_latlon.py`), which *can* SPMD-shard — but that path is separate and
-not wired to this config.
+Beyond one node the same DP launch extends (`select=2:...` etc.; ppn is
+derived), and the other levers remain ensemble (one variant/seed per job) or
+the separate SPMD lat-lon path (`run_aimip_latlon.py`, not wired here).
 
 ## Data (v2 — dense + curriculum, the ACE2-gap upgrades)
 
@@ -66,21 +69,60 @@ Edit the site env first — **`scripts/cluster/scaling_{derecho,levante}/_env.sh
 account. Then submit **one job per variant**:
 
 ```bash
-# Derecho (PBS)
-qsub -v VARIANT=sfno_physics scripts/cluster/aimip_scale/train_aimip_derecho.pbs
-qsub -v VARIANT=classical    scripts/cluster/aimip_scale/train_aimip_derecho.pbs
-qsub -v VARIANT=column_nn    scripts/cluster/aimip_scale/train_aimip_derecho.pbs
+# Derecho (PBS) — data-parallel, 4 GPUs (the production default).
+# SELECT must REPEAT the -l select string: the self-chaining qsub re-applies it
+# on every link (it cannot read this job's request). LEGOESM_REPO is required
+# when running from a git worktree (and is propagated down the chain).
+qsub -l select=1:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB \
+     -v VARIANT=sfno_physics,LEGOESM_REPO=<repo>,SELECT=1:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB \
+     scripts/cluster/aimip_scale/train_aimip_derecho.pbs
+# Single-GPU (serial trainer path, byte-identical to the pre-DP behavior):
+qsub -v VARIANT=classical,LEGOESM_REPO=<repo> scripts/cluster/aimip_scale/train_aimip_derecho.pbs
 
-# Levante (SLURM)
+# Levante (SLURM) — serial launcher (DP wiring is Derecho-only so far)
 SBATCH_ACCOUNT=<proj> VARIANT=sfno_physics \
   sbatch --export=ALL scripts/cluster/aimip_scale/train_aimip_levante.slurm
 ```
 
-Each job **self-chains**: `run_aimip.py` writes a per-epoch checkpoint and
-`--resume` continues at the next epoch, so a 15-epoch T106 run that exceeds one
-walltime (12 h Derecho / 8 h Levante) resubmits itself (up to `CHAIN_MAX=12`
-links) until `results/aimip_scale_t106/<variant>/<variant>/params.eqx` appears.
-A manual resubmit resumes automatically (it detects existing epoch checkpoints).
+Each Derecho job **self-chains**. How that actually works (fixed 2026-07-15 —
+the original layout NEVER chained on a walltime-bound link, because the PBS
+walltime kill terminates the script before its resubmit line runs):
+
+- The launcher stops training ITSELF at `LINK_BUDGET_S` (default 11 h 15 m,
+  i.e. 45 min before the 12 h cap) via `timeout`; the per-chunk checkpoint
+  (`chunk_latest.eqx`: model + optimizer state + position, #972) is already on
+  disk, so nothing is lost but the in-flight chunk.
+- A budget stop (rc 124/137) or a clean-but-unfinished exit chains the next
+  link (up to `CHAIN_MAX`), re-applying `$SELECT` and `$LEGOESM_REPO`. Real
+  failures (OOM, crash) stop the chain.
+- Every link resumes automatically off `chunk_latest.eqx` / `epoch_*.eqx`; so
+  does a manual resubmit of the same qsub line.
+
+Mixing serial and DP links in ONE training run is legal for resume but changes
+the effective batch (1 → nranks samples/update) mid-trajectory — pick one mode
+per run.
+
+## Monitoring a chain (2-minute daily check)
+
+```bash
+qstat -u $USER                                   # one link R or Q at all times
+LOG=$(ls -t aimip_scale_t106.o* | head -1)
+head -1 "$LOG"                                   # link=N advancing; resume=--resume; nranks as submitted
+grep "Saved mid-epoch" "$LOG" | tail -3          # chunk counter advancing
+grep -iE "nan|Traceback|RESOURCE_EXHAUSTED" "$LOG" | tail -5
+ls -l results/aimip_scale_t106/<variant>/<variant>/   # chunk_latest.eqx mtime fresh
+```
+
+Compare losses same-chunk across epochs (chunks are different data — within-
+epoch variation is meaningless). Known danger moments needing a deliberate
+look: the FIRST chunk of each curriculum phase (new rollout length → full
+recompile + a larger memory peak; the 72 h phase is the historical OOM point).
+A stale `chunk_latest.eqx` mtime with the job still running = a hang —
+investigate, don't wait for walltime.
+
+`aimip_chunk_prefetch` is OFF at T106: the prefetched chunk currently
+materialises on the GPU and OOMs the DP first step (#985; re-enable once the
+producer pins to host).
 
 ## Cost estimate
 
