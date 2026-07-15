@@ -461,5 +461,4 @@ packages/land/legoesm/land/
   restart.py                        — .npz state save/load
 docs/land/
   lmip_biophys_runbook.md           — this file
-  lmip_s3_scope.md                  — dev-facing scope + phase history
 ```

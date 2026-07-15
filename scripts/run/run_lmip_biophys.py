@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Global **biophysics-only** land driver forced by CRU-JRA reanalysis (LMIP).
 
-This is the M3 driver of the LMIP forcing workplan (``docs/land/lmip_s3_scope.md``).
+Operational runbook: ``docs/land/lmip_biophys_runbook.md``.
 It is a copy of the ``run_lmip_smoke.py`` template with the *idealised* per-step
 forcing replaced by **real CRU-JRA reanalysis** (CLM datm format), disaggregated
 from 6-hourly to the model timestep and streamed through ``lax.scan`` as an

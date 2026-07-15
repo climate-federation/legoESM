@@ -35,10 +35,10 @@ KD-tree / inverse-distance machinery (``legoesm.grids.regridding``) into the lan
 model's column space, and the variable map produces the standard
 :class:`legoesm.core.coupling_fields.AtmToSurface`.
 
-This module is M1 of the LMIP forcing workplan (``docs/land/lmip_s3_scope.md``):
-read + regrid + variable map with **nearest-time** selection.  The 6h->dt
-temporal disaggregation (zenith-weighted SW, constant-hold precip, linear interp
-for the rest) is M2 and builds on the two time axes carried here.
+This module reads + regrids + variable-maps the CRU-JRA streams with
+**nearest-time** selection.  The 6h->dt temporal disaggregation (zenith-weighted
+SW, constant-hold precip, linear interp for the rest) builds on the two time axes
+carried here.
 """
 
 from __future__ import annotations
