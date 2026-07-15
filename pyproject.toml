@@ -167,6 +167,7 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # = kernel args/vars, N801 = the fort view classes.
 "packages/core/legoesm/core/fv3_native_sw_core.py" = ["N803", "N806", "N801"]
 "packages/core/legoesm/core/fv3_native_d_sw.py" = ["N803", "N806", "N801"]
+"packages/core/legoesm/core/fv3_native_duo_sw_core.py" = ["N803", "N806", "N801"]
 "packages/core/legoesm/grids/fv3_native_gridstruct.py" = ["N801", "N803", "N806"]
 # Fuller CLUBB port (PORT_CLUBB.md): the closure coefficients, model flags and
 # intermediate variables mirror CLUBB's canonical symbol names 1:1 (c_K1,

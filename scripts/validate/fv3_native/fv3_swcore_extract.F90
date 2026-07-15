@@ -626,6 +626,111 @@ contains
 
 end subroutine divergence_corner_nest
 
+ subroutine divergence_corner_duo(u, v, ua, va, divg_d, gridstruct, flagstruct, bd)
+ type(fv_grid_bounds_type), intent(IN) :: bd
+ real, intent(in),  dimension(bd%isd:bd%ied,  bd%jsd:bd%jed+1):: u
+ real, intent(in),  dimension(bd%isd:bd%ied+1,bd%jsd:bd%jed):: v
+ real, intent(in),  dimension(bd%isd:bd%ied,bd%jsd:bd%jed):: ua, va
+ real, intent(out), dimension(bd%isd:bd%ied+1,bd%jsd:bd%jed+1):: divg_d
+ type(fv_grid_type), intent(IN), target :: gridstruct
+ type(fv_flags_type), intent(IN), target :: flagstruct
+
+! local
+ real uf(bd%isd:bd%ied,bd%jsd:bd%jed+1)
+ real vf(bd%isd:bd%ied+1,bd%jsd:bd%jed)
+ integer i,j
+
+
+  real, pointer, dimension(:,:) :: rarea_c
+
+  real, pointer, dimension(:,:,:) :: sin_sg, cos_sg
+  real, pointer, dimension(:,:)   :: cosa_u, cosa_v
+  real, pointer, dimension(:,:)   :: sina_u, sina_v
+  real, pointer, dimension(:,:) ::  dxc,dyc
+
+      integer :: is, ie, js, je
+      integer :: isd, ied, jsd, jed
+      integer :: npx, npy
+
+      is = bd%is
+      ie = bd%ie
+      js = bd%js
+      je = bd%je
+      isd = bd%isd
+      ied = bd%ied
+      jsd = bd%jsd
+      jed = bd%jed
+
+      npx = flagstruct%npx
+      npy = flagstruct%npy
+
+      rarea_c    => gridstruct%rarea_c
+      sin_sg     => gridstruct%sin_sg
+      cos_sg     => gridstruct%cos_sg
+      cosa_u     => gridstruct%cosa_u
+      cosa_v     => gridstruct%cosa_v
+      sina_u     => gridstruct%sina_u
+      sina_v     => gridstruct%sina_v
+      dxc        => gridstruct%dxc
+      dyc        => gridstruct%dyc
+
+ divg_d = 1.e25
+
+    if (flagstruct%grid_type > 3) then
+        do j=jsd,jed
+           do i=isd,ied
+              uf(i,j) = u(i,j)*dyc(i,j)
+           enddo
+        enddo
+        do j=jsd,jed
+           do i=isd,ied
+              vf(i,j) = v(i,j)*dxc(i,j)
+           enddo
+        enddo
+        do j=jsd+1,jed
+           do i=isd+1,ied
+              divg_d(i,j) = rarea_c(i,j)*(vf(i,j-1)-vf(i,j)+uf(i-1,j)-uf(i,j))
+           enddo
+        enddo
+    else
+
+       do j=jsd+1,jed
+          do i=isd,ied
+            uf(i,j) = (u(i,j)-0.25*(va(i,j-1)+va(i,j))*(cos_sg(i,j-1,4)+cos_sg(i,j,2)))   &
+                                        * dyc(i,j)*0.5*(sin_sg(i,j-1,4)+sin_sg(i,j,2))
+          enddo
+       enddo
+
+       do j=jsd,jed
+          do i=isd+1,ied
+             vf(i,j) = (v(i,j) - 0.25*(ua(i-1,j)+ua(i,j))*(cos_sg(i-1,j,3)+cos_sg(i,j,1)))  &
+                  *dxc(i,j)*0.5*(sin_sg(i-1,j,3)+sin_sg(i,j,1))
+          enddo
+       enddo
+
+       do j=jsd+1,jed
+          do i=isd+1,ied
+             divg_d(i,j) = (vf(i,j-1) - vf(i,j) + uf(i-1,j) - uf(i,j))*rarea_c(i,j)
+
+       if (  is   ==  1 .and. i==is) divg_d(i,j)=0.
+       if ( (ie+1)==npx .and. i==ie+1)  divg_d(i,j)= 0.
+       if (   js==1   .and. j==1)  divg_d(i,j)=0.
+       if ( je+1==npx .and. j==je+1)  divg_d(i,j)=0.
+
+!improve rosby a bit more +100days but decrease mag very little
+       if (  is   ==  1 .and. i==is+1) divg_d(i,j)=0.25*divg_d(i,j)
+       if ( (ie+1)==npx .and. i==ie)  divg_d(i,j)= 0.25*divg_d(i,j)
+       if (   js==1   .and. j==1+1)  divg_d(i,j)=0.25*divg_d(i,j)
+       if ( je+1==npx .and. j==je)  divg_d(i,j)=0.25*divg_d(i,j)
+          enddo
+       enddo
+
+    endif
+
+
+end subroutine divergence_corner_duo
+
+
  subroutine d2a2c_vect(u, v, ua, va, uc, vc, ut, vt, dord4, gridstruct, &
                        bd, npx, npy, bounded_domain, grid_type)
   type(fv_grid_bounds_type), intent(IN) :: bd
