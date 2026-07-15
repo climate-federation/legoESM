@@ -43,8 +43,6 @@ Fortran-indexed access for the verbatim patch loops.
 from __future__ import annotations
 
 import numpy as np
-
-from legoesm import constants
 from legoesm.grids.fv3_native_halos import (
     ed_supergrid_lonlat_ref,
     neighbor_index,
@@ -60,13 +58,16 @@ from legoesm.grids.fv3_native_metrics import (
     sg_window_fields,
 )
 
+from legoesm import constants
+
 # --- upstream fill/sentinel constants (fv_grid_utils.F90) ---
 BIG_NUMBER = 1.0e8       # fv_grid_utils big_number
 TINY_NUMBER = 1.0e-8     # fv_grid_utils tiny_number (rsin floors + sin_sg ghost)
 
 # --- FV3/FMS physical constants for oracle pinning (FMS constants_mod,
 #     GFDL flavour); legoESM production paths use legoesm.constants ---
-FV3_RADIUS_M = 6371.0e3  # const-ok: FMS RADIUS differs from legoESM R_earth; the oracle must pin upstream's value
+# const-ok: FMS RADIUS differs from legoESM R_earth; oracle pins upstream's
+FV3_RADIUS_M = 6371.0e3
 FV3_OMEGA = constants.Omega  # FMS OMEGA equals legoESM's rotation rate
 
 
@@ -573,7 +574,6 @@ def build_fv3_native_gridstruct(n: int, ng: int = 3, *, tile: int = 1,
     # post-mpp state.
     divg_u = np.full((m_a, m_b), BIG_NUMBER)
     del6_u = np.full((m_a, m_b), BIG_NUMBER)
-    okj = cell_ok[:, :-1] & cell_ok[:, 1:]         # dyc-style validity
     with np.errstate(invalid="ignore", divide="ignore"):
         plain_u = sina_v * dyc / np.where(dx != BIG_NUMBER, dx, np.nan)
         plain6_u = sina_v * dx / np.where(dyc != BIG_NUMBER, dyc, np.nan)

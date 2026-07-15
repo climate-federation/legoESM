@@ -33,7 +33,6 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import numpy as np
-
 from legoesm.grids.fv3_native_gridstruct import fort
 
 # sw_core.F90 module constants (verbatim; big_number is the production
@@ -60,7 +59,7 @@ class Bounds(NamedTuple):
     ng: int
 
     @classmethod
-    def single_tile(cls, n: int, ng: int) -> "Bounds":
+    def single_tile(cls, n: int, ng: int) -> Bounds:
         return cls(1, n, 1, n, 1 - ng, n + ng, 1 - ng, n + ng, ng)
 
 
