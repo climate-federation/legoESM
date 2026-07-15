@@ -18,6 +18,7 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.atmosphere.physics.gravity_wave_drag.config import McFarlaneConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.mcfarlane import (
+    __physics_contract__,
     mcfarlane_gwd,
     _mcfarlane_launch_stress,
 )
@@ -164,13 +165,16 @@ def test_mcfarlane_critical_level_no_reversed_acceleration():
 
 
 def test_mcfarlane_ke_heat_diagnostic_consistency():
-    """Diagnostic tie-back regression (NOT an independent energy proof).
+    """KE→heat tie-back = the pointwise energy closure (``conserves=["energy"]``).
 
-    ``dT_dt`` is DEFINED as ``-(u·du+v·dv)/c_pd`` and ``eps_gwd`` as the same
-    column KE loss with the same ``ρ·dz``, so ``c_pd·∫ρ (dT/dt) dz == eps_gwd``
-    holds BY CONSTRUCTION.  This locks that imposed heating/KE tie-back against
-    accidental desync (e.g. a future edit changing one but not the other); it is
-    a consistency regression, not evidence of energy conservation or faithfulness.
+    ``dT_dt`` is computed as ``-(u·du+v·dv)/c_pd`` from the FINAL applied tendency
+    and ``eps_gwd`` as the same column KE loss with the same ``ρ·dz``, so
+    ``c_pd·∫ρ (dT/dt) dz == eps_gwd`` holds BY CONSTRUCTION.  For a c=0 wave (zero
+    wave-energy flux) that by-construction identity IS the exact resolved-energy
+    conservation the contract declares — this test locks it against accidental
+    desync (a future edit changing one term but not the other).  It is a
+    consistency/regression pin of the conservation closure, not an independent
+    re-derivation of it (and NOT an E3SM-faithfulness claim).
     """
     u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column(
         nlev=24, u_sfc=25.0, u_top=8.0,
@@ -181,3 +185,73 @@ def test_mcfarlane_ke_heat_diagnostic_consistency():
     heat_col = constants.c_pd * jnp.sum(rho * out.dT_dt * dz, axis=1)
     assert jnp.allclose(heat_col, out.eps_gwd, rtol=1e-6, atol=1e-10)
     assert float(out.eps_gwd[0]) >= 0.0, "eps_gwd (column KE loss) must be >= 0"
+
+
+# ---------------------------------------------------------------------------
+# Conservation disclosure (matches the Hines/Lindzen launched-wave precedent)
+# ---------------------------------------------------------------------------
+
+def test_mcfarlane_conserves_energy():
+    """``conserves == ["energy"]`` — a STATIONARY orographic wave (c=0) carries
+    ZERO vertical wave-energy flux (F_E = c·F_momentum = 0, Eliassen–Palm), so
+    all mean-flow KE removed is returned LOCALLY as heat and resolved KE +
+    internal energy is conserved pointwise (``dT_dt`` from the FINAL tendency ⇒
+    ``c_pd*sum(rho*dT*dz)==eps_gwd`` exactly; see the tie-back test below).
+
+    The discriminator is "does the launched wave carry vertical energy flux?":
+    c=0 orographic (this scheme, ``rayleigh`` direct-drag) ⇒ ``["energy"]``;
+    c≠0 launched spectra (``hines``, ``prognostic_spectral``) whose waves carry
+    energy the limiter discards ⇒ ``["none"]``. MOMENTUM is not conserved (sink
+    to the subgrid mountain / critical level) — the critical-level radiation and
+    the tendency limiter break MOMENTUM, not energy, closure.
+    """
+    assert __physics_contract__["conserves"] == ["energy"]
+
+
+def test_mcfarlane_vector_ke_sink_not_componentwise_for_veering_wind():
+    """The guaranteed KE-sink invariant is the VECTOR ``u·du+v·dv ≤ 0``, NOT the
+    componentwise ``du_dt·u ≤ 0`` (which the pre-audit sign_convention claimed).
+
+    The drag is directed along the FIXED surface-wind direction
+    ``(cos_a, sin_a)``; for a wind that VEERS with height a deposition level can
+    have its local ``u`` anti-parallel to that fixed direction, so
+    ``du_dt·u = accel·cos_a·u`` flips POSITIVE there while the vector projection
+    ``u·du_dt + v·dv_dt = accel·U_proj`` stays ≤ 0 (``U_proj > 0`` at any
+    deposition level by the hard mask, ``accel ≤ 0``). This pins that the vector
+    form is the correct invariant and the componentwise form is NOT.
+    """
+    ncol, nlev = 1, 24
+    p_half = jnp.broadcast_to(
+        jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1),
+    )
+    p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    T = jnp.broadcast_to(jnp.linspace(220.0, 290.0, nlev)[None, :], (ncol, nlev))
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    dz = jnp.abs(constants.R_d * T * dp / (constants.g * jnp.clip(p_full, 1.0, None)))
+    z_half = jnp.concatenate(
+        [jnp.cumsum(dz[:, ::-1], axis=1)[:, ::-1], jnp.zeros((ncol, 1))], axis=1,
+    )
+    z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
+    rho = p_full / (constants.R_d * T)
+    # Surface wind (15, 15) m/s (source dir = 45 deg); VEER so u flips negative
+    # aloft while v grows -> U_proj stays > 0 (wave still propagates & deposits).
+    u = jnp.broadcast_to(jnp.linspace(-10.0, 15.0, nlev)[None, :], (ncol, nlev))
+    v = jnp.broadcast_to(jnp.linspace(25.0, 15.0, nlev)[None, :], (ncol, nlev))
+    lat = jnp.full((ncol,), 0.5)
+    cfg = McFarlaneConfig(h_topo=1500.0)
+    out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, cfg)
+
+    # (a) VECTOR invariant holds at every level.
+    ke_rate = u * out.du_dt + v * out.dv_dt
+    assert jnp.all(ke_rate <= 1e-12), (
+        f"vector KE sink violated: max(u*du+v*dv)={float(jnp.max(ke_rate)):.3e}"
+    )
+    # (b) NON-VACUOUS: at some deposition level the COMPONENTWISE du_dt*u is > 0,
+    # so the componentwise claim is genuinely false for this veering column.
+    comp = out.du_dt[0] * u[0]
+    active = jnp.abs(out.du_dt[0]) > 1e-12
+    assert jnp.any(active & (comp > 1e-10)), (
+        "veering column did not produce a componentwise du_dt*u > 0 -> test "
+        "vacuous; strengthen the veer so a deposition level has u anti-parallel "
+        "to the surface-wind direction"
+    )
