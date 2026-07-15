@@ -1345,12 +1345,17 @@ def test_bechtold_f1_turnover_deep_weighted_integration_live_and_bounded():
                                      q_sfc=q_sfc, lapse_rate=lapse_rate)
         ncol, nlev = T.shape
         cpp = jnp.zeros((ncol, nlev)); st = jnp.zeros((ncol,))
+        # cape_relaxation_sink=False isolates the turnover knob: the QE heating
+        # ceiling zeroes this fixture's marginal shallow column (M_u ~ 6e-8) in
+        # BOTH branches, which would make the on/off delta vacuously 0.
         _, mu_on, _ = bechtold_convection(
             T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
-            config=BechtoldConfig(use_convective_turnover_tau=True, M_b_max=10.0))
+            config=BechtoldConfig(use_convective_turnover_tau=True, M_b_max=10.0,
+                                  cape_relaxation_sink=False))
         _, mu_off, _ = bechtold_convection(
             T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
-            config=BechtoldConfig(use_convective_turnover_tau=False, M_b_max=10.0))
+            config=BechtoldConfig(use_convective_turnover_tau=False, M_b_max=10.0,
+                                  cape_relaxation_sink=False))
         assert jnp.all(jnp.isfinite(mu_on)) and jnp.all(jnp.isfinite(mu_off))
         denom = float(jnp.maximum(jnp.max(jnp.abs(mu_off)), 1e-12))
         rel = float(jnp.max(jnp.abs(mu_on - mu_off))) / denom
