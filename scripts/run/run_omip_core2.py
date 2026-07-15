@@ -767,6 +767,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   bottom_drag_scheme=None, bottom_drag_cd0=None,
                   bottom_drag_cdmax=None, bottom_drag_z0=None,
                   bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
+                  vertical_mixing=None,
                   prescribed_flow=None, no_gm_redi=False):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
@@ -791,6 +792,12 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
         # cannot pin, and the model constructor rejects the combination.
         no_gm_redi=no_gm_redi,
         dz_ref_override=dz_ref_override,
+        # KPP boundary-layer-depth override (Ri_crit / Cv): None reproduces the
+        # default KPPConfig byte-for-byte; a custom VerticalMixingConfig shoals
+        # the diagnosed-too-deep JANUARY winter mixed layer (ll2: NH-midlat Jan
+        # MLD 174 m vs NEMO 93 m -> over-mixes away the warm 100 m mode water ->
+        # -2.83 C SST). The use_bathymetry path threads this into bathy_physics.
+        vertical_mixing=vertical_mixing,
     )
     _ovr = {k: v for k, v in (("K_bih", K_bih),
                               ("ke_gradient_scheme", ke_gradient_scheme),
@@ -1214,7 +1221,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      runoff_depth_spread_m=None, mle=None,
                      bottom_drag_scheme=None, bottom_drag_cd0=None,
                      bottom_drag_cdmax=None, bottom_drag_z0=None,
-                     bottom_drag_ke0=None, iwm=None):
+                     bottom_drag_ke0=None, iwm=None, vertical_mixing=None):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
     comparison — the 4th grid.  Reuses ``run_omip._create_setup('mpas', ...)``
     (the wired MPASOceanModel: KPP + GM/Redi + smc03 PGF + implicit-CN
@@ -1239,6 +1246,11 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
         "mpas", f"ico{level}", nlev, H_max,
         physics_preset="full", water_type="II",
         dz_ref_override=dz_ref_override,
+        # KPP boundary-layer-depth sensitivity override (Ri_crit / Cv).  None
+        # -> _create_setup builds the default KPPConfig (byte-identical to the
+        # pre-flag runs); a custom VerticalMixingConfig deepens/shoals the
+        # diagnosed-too-shallow subtropical mixed layer (MLD ~half of NEMO).
+        vertical_mixing=vertical_mixing,
     )
     # Faithful EXTERNAL surface-forcing contract: the CORE-II tau/q_net from
     # compute_omip2_surface_forcing is deposited by mpas_physics (it negates +
@@ -1410,6 +1422,79 @@ def _area_conservative_scale(field, cell_area, wet_mask, target_integral):
     if cur > 0.0:
         return field * (float(target_integral) / cur)
     return field
+
+
+# --- KPP boundary-layer-depth sensitivity (vmix structural-residual lever) ---
+# Diagnosis (2026-06-22): the OMIP subtropical mixed layer is ~half of NEMO
+# (MLD bias -35 m NH-subtropics, model-wide MPAS == tripole, NOT spin-up), so
+# surface heat + freshwater fluxes are trapped in a too-thin top layer -> the
+# subtropical surface warm+fresh bias.  KPP sets h_bl where the bulk Richardson
+# number Ri_b crosses ``Ri_crit``; deepening the layer is a one-knob lever via
+# Ri_crit (the threshold) or Cv (the unresolved-shear V_t^2 coefficient).  These
+# helpers expose the two knobs WITHOUT mutating the production KPPConfig default.
+#
+# Accepted ranges (reject parameter-abuse runs that collapse the experiment):
+#   Ri_crit -> the KPPConfig ``__param_spec__`` tunable-tier-2 bounds
+#              (Large et al. 1994); outside this the BL diagnosis is unphysical.
+#   Cv      -> Cv is NOMINALLY a FIXED LMD94 constant (1.6, no tunable bound in
+#              the spec); this band is an EXPLICIT experimental sensitivity
+#              range, intentionally wider, not a tuning tier.
+_KPP_RI_CRIT_RANGE = (0.099, 0.9)
+_KPP_CV_RANGE = (0.5, 5.0)
+
+
+def _kpp_vmix_override(kpp_ri_crit=None, kpp_cv=None):
+    """Build a KPP ``VerticalMixingConfig`` overriding ONLY the CLI-set knobs.
+
+    Returns ``None`` when neither knob is given so the caller falls through to
+    ``_create_setup``'s default ``VerticalMixingConfig(scheme="kpp")`` — i.e.
+    byte-for-byte the pre-flag config (no silent re-defaulting of the other
+    KPP fields).  ``Ri_crit`` / ``Cv`` must be finite and within their accepted
+    range (see ``_KPP_RI_CRIT_RANGE`` / ``_KPP_CV_RANGE``)."""
+    if kpp_ri_crit is None and kpp_cv is None:
+        return None
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        KPPConfig, VerticalMixingConfig,
+    )
+
+    def _check(name, val, rng):
+        lo, hi = rng
+        if not (np.isfinite(val) and lo <= val <= hi):
+            raise ValueError(
+                f"--{name} must be finite and within [{lo}, {hi}] "
+                f"(physical KPP boundary-layer range); got {val!r}.")
+
+    kpp = KPPConfig()
+    if kpp_ri_crit is not None:
+        _check("kpp-ri-crit", kpp_ri_crit, _KPP_RI_CRIT_RANGE)
+        kpp = kpp._replace(Ri_crit=float(kpp_ri_crit))
+    if kpp_cv is not None:
+        _check("kpp-cv", kpp_cv, _KPP_CV_RANGE)
+        kpp = kpp._replace(Cv=float(kpp_cv))
+    return VerticalMixingConfig(scheme="kpp", kpp=kpp)
+
+
+def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None):
+    """Reject the KPP override flags on grids whose CORE-II builder does not
+    thread ``vertical_mixing`` INTO A LIVE KPP scheme (a flag that silently does
+    nothing is the dispatch footgun CLAUDE.md forbids).  ``mpas`` and
+    ``latlon_bathy`` run KPP (``bathy_physics.vertical_mixing``) so the override
+    reaches ``KPPConfig.Ri_crit``/``Cv``.  The tripole base ships
+    ``physics=None`` (the dynamics-core implicit vertical solve, NO KPP
+    boundary layer); its opt-in closure is ``--tripole-vmix`` (tke/kpp at
+    scheme DEFAULTS, which does not accept these knobs) -> a KPP override
+    would be a silent no-op there, so it is still rejected; ``cubed_sphere``
+    is not wired.  Extend this set only when the builder actually threads the
+    override into live KPP."""
+    if (kpp_ri_crit is not None or kpp_cv is not None) and grid not in (
+            "mpas", "latlon_bathy"):
+        raise SystemExit(
+            f"--kpp-ri-crit/--kpp-cv are wired for --grid mpas/latlon_bathy "
+            f"(grids that run the KPP boundary layer), not --grid {grid!r}. "
+            f"The tripole base has no KPP boundary layer; its closure is "
+            f"selected by --tripole-vmix (kpp = KPP at scheme defaults, no "
+            f"Ri_crit/Cv knobs), so the override would silently do nothing "
+            f"there.")
 
 
 def runoff_source_channels(exclude_isf: bool) -> tuple:
@@ -2983,6 +3068,21 @@ def main() -> int:
                         "--convection enhanced_diffusion (default 1.0).")
     p.add_argument("--convection-K-bg", type=float, default=1e-5,
                    help="Background diffusivity K_bg [m^2/s] for convection.")
+    p.add_argument("--kpp-ri-crit", type=float, default=None,
+                   help="Override the KPP critical bulk Richardson number "
+                        "(default 0.3 = LMD94/MOM6). RAISING it deepens the "
+                        "boundary layer (mpas: fix subtropical MLD ~half of "
+                        "NEMO); LOWERING it shoals it (latlon_bathy: fix the "
+                        "too-deep JANUARY winter ML, 174 m vs NEMO 93 m, that "
+                        "cools the 100 m mode water). --grid mpas/latlon_bathy "
+                        "only (both run KPP); the tripole closure is selected "
+                        "by --tripole-vmix (its kpp option runs scheme "
+                        "defaults, no Ri_crit/Cv knobs).")
+    p.add_argument("--kpp-cv", type=float, default=None,
+                   help="Override the KPP unresolved-shear coefficient Cv "
+                        "(default 1.6). RAISING it increases V_t^2 -> deeper "
+                        "boundary layer, LOWERING it shoals it (same MLD lever "
+                        "as --kpp-ri-crit). --grid mpas/latlon_bathy only.")
     p.add_argument("--tripole-vmix", type=str, default="none",
                    choices=["none", "tke", "kpp"],
                    help="Vertical-mixing CLOSURE on the tripole grid (the "
@@ -3048,6 +3148,10 @@ def main() -> int:
                    help="Duration [days] of the spin-up velocity-damping phase "
                         "(drag removed afterwards -> free run).")
     args = p.parse_args()
+
+    # KPP MLD sensitivity flags are mpas/latlon_bathy-only (fail loud, never
+    # silent; the tripole closure path is --tripole-vmix).
+    _validate_kpp_grid(args.grid, args.kpp_ri_crit, args.kpp_cv)
 
     if args.ice_thermo:   # codex LOW: reject unphysical prescribed-ice params early
         if not (0.0 <= float(args.ice_thermo_sw_trans) <= 1.0):
@@ -3280,6 +3384,7 @@ def main() -> int:
             bottom_drag_z0=args.bottom_drag_z0,
             bottom_drag_ke0=args.bottom_drag_ke0,
             iwm=_iwm_cfg,
+            vertical_mixing=_kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv),
         )
         app_grid_type = "mpas"
     else:
@@ -3322,6 +3427,9 @@ def main() -> int:
             bottom_drag_z0=args.bottom_drag_z0,
             bottom_drag_ke0=args.bottom_drag_ke0,
             iwm=_iwm_cfg, iwm_forcing_file=args.iwm_forcing_file,
+            # KPP Ri_crit/Cv override (shoal the too-deep winter ML). None
+            # unless --kpp-ri-crit/--kpp-cv given -> default KPPConfig unchanged.
+            vertical_mixing=_kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv),
             prescribed_flow=args.prescribed_flow,
             no_gm_redi=args.no_gm_redi,
         )
@@ -3360,6 +3468,18 @@ def main() -> int:
                     "(~1 m surface) grid and blows the cold-start. Remove the "
                     "override (the OMIP builders force implicit) or use a coarse "
                     "vertical grid where the explicit-diffusion CFL is satisfied.")
+            # A YAML ocean.physics block REPLACES the whole physics config, which
+            # would silently clobber a CLI --kpp-ri-crit/--kpp-cv override that
+            # build_latlon_bathy already threaded into live KPP (codex). Fail
+            # loud on the conflict rather than let YAML win over the explicit CLI.
+            if "physics" in _ovr and (args.kpp_ri_crit is not None
+                                      or args.kpp_cv is not None):
+                raise ValueError(
+                    "--kpp-ri-crit/--kpp-cv conflict with a --config ocean.physics "
+                    "block: the YAML physics config would overwrite the CLI KPP "
+                    "override. Set Ri_crit/Cv in the YAML "
+                    "(ocean.physics.vertical_mixing.kpp) OR drop the ocean.physics "
+                    "section and use the CLI flags -- not both.")
             model = LatLonCGridOceanModel(
                 grid, z_coord, model.config.replace_flat(**_ovr),
                 # Preserve the zdfiwm maps through the YAML rebuild (codex
