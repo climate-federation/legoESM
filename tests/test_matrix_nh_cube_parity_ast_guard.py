@@ -855,6 +855,7 @@ def test_w2_calibration_baseline_independent_from_matrix_hyperdiff():
         / "legoesm"
         / "atmosphere"
         / "dynamics"
+        / "gcm"
         / "shallow_water_fv3_cdgrid.py"
     )
     pkg_mod = _parse_module(pkg_path)
