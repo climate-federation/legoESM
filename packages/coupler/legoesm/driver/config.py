@@ -163,6 +163,19 @@ class DycoreConfig(NamedTuple):
     sponge_shape: str = "sin2"            # "sin2" | "sam_rational"
     sponge_scale_height_m: float = 7500.0  # log-pressure scale height for sigma->z
 
+    # #1029: lat-lon C-grid PE energy-consistency options (threaded into
+    # ``CGridLatLonPrimitiveEquationConfig`` by ``component_factory``).
+    # ``energy_paired_conversion=True`` computes the κT v·∇ln p part of the
+    # adiabatic conversion as the face-averaged product u·pg_corr/c_p —
+    # discretely adjoint to the momentum PGF-correction work.  The legacy
+    # product-of-cell-averages (False) is a spurious energy source over
+    # steep terrain ridges: the DCMIP 2-0-0 rest state grows at 2.6
+    # e-folds/day (the AMIP latlon Andes lid-wave killer; ablation probe
+    # 26276143).  ``pgf_scheme`` selects the momentum PGF discretisation
+    # ("two_term" legacy | "lin1997" FV3-faithful cross-product).
+    energy_paired_conversion: bool = False
+    pgf_scheme: str = "two_term"
+
     # Task #25: time integrator override.  Lat-lon C-grid uses
     # ``ssp_rk3`` by default — three RK3 stages unrolled with the
     # tendency function inlined 3×.  Setting

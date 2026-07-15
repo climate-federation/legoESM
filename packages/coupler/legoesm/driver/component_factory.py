@@ -729,6 +729,11 @@ def create_atmosphere_dycore(
             sponge_width_m=dc.sponge_width_m,
             sponge_shape=dc.sponge_shape,
             sponge_scale_height_m=dc.sponge_scale_height_m,
+            # #1029: energy-consistency options (defaults preserve the
+            # legacy discretisation bit-for-bit; direct attribute access —
+            # no getattr-literal fallback that would mask a rename).
+            energy_paired_conversion=dc.energy_paired_conversion,
+            pgf_scheme=dc.pgf_scheme,
             # Task #25: time integrator (default ssp_rk3, opt into
             # ssp_rk3_scan for ~1.5× JIT compile speedup at scale).
             # "auto" -> this dycore's own default; explicit names verbatim.

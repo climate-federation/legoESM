@@ -224,6 +224,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=["sin2", "sam_rational"],
         help="Top-sponge ramp shape (default 'sin2').",
     )
+    # #1029: lat-lon C-grid PE energy-consistency options.
+    parser.add_argument(
+        "--energy-paired-conversion", default=_DYCORE_DEFAULTS.energy_paired_conversion,
+        action=argparse.BooleanOptionalAction,
+        dest="energy_paired_conversion",
+        help="Compute the κT v·∇ln p adiabatic-conversion term as the "
+             "face-averaged u·pg_corr/c_p product, discretely adjoint to "
+             "the momentum PGF-correction work (lat-lon C-grid PE). The "
+             "legacy product-of-cell-averages is a spurious energy source "
+             "over steep terrain ridges (#1029: DCMIP 2-0-0 rest state "
+             "grows at 2.6 e-folds/day — the latlon Andes lid-wave killer).")
+    parser.add_argument(
+        "--pgf-scheme", type=str, default=_DYCORE_DEFAULTS.pgf_scheme,
+        choices=["two_term", "lin1997"], dest="pgf_scheme",
+        help="Lat-lon C-grid PE pressure-gradient discretisation: "
+             "'two_term' legacy | 'lin1997' FV3-faithful cross-product "
+             "(#1029; experimental).")
     parser.add_argument(
         "--sponge-scale-height-m", type=float,
         default=_DYCORE_DEFAULTS.sponge_scale_height_m,
@@ -1194,6 +1211,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sponge_width_m=args.sponge_width_m,
         sponge_shape=args.sponge_shape,
         sponge_scale_height_m=args.sponge_scale_height_m,
+        # #1029 energy-consistency options (lat-lon C-grid PE).
+        energy_paired_conversion=args.energy_paired_conversion,
+        pgf_scheme=args.pgf_scheme,
         # Task #25: time integrator selection.
         time_integrator=args.time_integrator,
     )

@@ -2069,6 +2069,35 @@ def test_top_sponge_flags_flow_to_dycore_config():
     assert cfg_on.dycore.sponge_scale_height_m == 8000.0
 
 
+def test_energy_consistency_flags_flow_to_dycore_config():
+    """#1029: --energy-paired-conversion / --pgf-scheme round-trip into
+    DycoreConfig; defaults preserve the legacy discretisation bit-for-bit."""
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.dycore.energy_paired_conversion is False   # legacy default
+    assert cfg_off.dycore.pgf_scheme == "two_term"
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--energy-paired-conversion",
+        "--pgf-scheme", "lin1997",
+    ]), parser))
+    assert cfg_on.dycore.energy_paired_conversion is True
+    assert cfg_on.dycore.pgf_scheme == "lin1997"
+
+    # BooleanOptionalAction: a YAML-true value stays CLI-overridable (#872).
+    cfg_neg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-energy-paired-conversion",
+    ]), parser))
+    assert cfg_neg.dycore.energy_paired_conversion is False
+
+    import pytest as _pytest
+    with _pytest.raises(SystemExit):
+        parser.parse_args(["--dataset", "analytical",
+                           "--pgf-scheme", "lin97"])   # choices-validated
+
+
 def test_yaml_settable_bools_have_no_switches():
     """#872 sweep: every store_true flag a shipped YAML can set true is now
     BooleanOptionalAction, so a --config that enables it stays CLI-overridable

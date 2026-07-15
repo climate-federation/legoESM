@@ -192,8 +192,32 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # flanks by day 100 while draining the tropics).  Preserving the
     # zonal-mean momentum removes the torque while still absorbing the wave
     # energy (standard GCM sponge practice).  False = legacy damp-to-rest.
-    # Last field to preserve positional ABI.
     sponge_eddy_only: bool = True
+    # --- Pressure-gradient force discretisation (#1029) ---
+    # "two_term": legacy −∇(Φ+KE) − R_d T (B p_s/p) ∇ln p_s.  Over steep
+    # ridged terrain-following coordinates this pair is a linearly UNSTABLE
+    # discretisation on this grid: the DCMIP 2-0-0 rest state (which must
+    # stay at rest) grows terrain-locked noise at ~2.6 e-folds/day at
+    # 72x144 L40 — dt-independent (2.64 at dt 100/50), only suppressed by
+    # climate-killing A_h×16 — reaching tens of m/s in 10 days with NO
+    # forcing.  This is the AMIP latlon Andes lid-wave killer and the
+    # held_suarez_topo matrix blowup.
+    # "lin1997": FV3-faithful Lin (1997) cross-product PGF at the C-grid
+    # faces (shared operator with the cube port in ``_fv3_lin_pgf``) —
+    # zero-by-construction in hydrostatically balanced columns, no
+    # two-term cancellation for discretisation to break.
+    pgf_scheme: str = "two_term"
+    # --- Energy-paired conversion term (#1029 FIX) ---
+    # True: the κT v·∇_η(ln p) part of the adiabatic conversion is the
+    # face-averaged product u·pg_corr/c_p — discretely adjoint to the
+    # momentum pg_corr work, so the PGF cannot create net energy at
+    # grid-scale terrain ridges.  False = legacy product-of-cell-averages,
+    # which is a spurious energy SOURCE over steep topography (rest state
+    # over the DCMIP 2-0-0 mountain grows at 2.6 e-folds/day — the AMIP
+    # latlon Andes killer; ablation probe 26276143 convicted this term).
+    # two_term PGF path only (lin1997 pairs differently; legacy there).
+    # Appended last to preserve positional ABI.
+    energy_paired_conversion: bool = False
 
 
 def _zero_v_at_pole(v, *, south: bool, north: bool, offset: int = 0):
@@ -348,6 +372,15 @@ def cgrid_latlon_hydrostatic_tendencies(
 
     _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
 
+    # PGF dispatch guard (#1029): static config string, validated at fn
+    # entry (JIT-safe Python branch; a typo must never silently run the
+    # unstable legacy PGF).
+    if config.pgf_scheme not in ("two_term", "lin1997"):
+        raise ValueError(
+            f"Unknown pgf_scheme {config.pgf_scheme!r}: "
+            "expected 'two_term' or 'lin1997'")
+    _lin_pgf = config.pgf_scheme == "lin1997"
+
     # Positivity protections
     T = jnp.maximum(T, config.T_min)
     p_s = jnp.clip(p_s, config.p_floor, config.p_ceil)
@@ -356,22 +389,30 @@ def cgrid_latlon_hydrostatic_tendencies(
     if _hybrid:
         p_full = pressure_from_hybrid(sigma_coord, p_s)
         dp = dp_from_hybrid(sigma_coord, p_s)
+        if _lin_pgf:
+            p_half = pressure_from_hybrid(sigma_coord, p_s, full=False)
     else:
         p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
+        if _lin_pgf:
+            p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)
 
-    # --- 2. Geopotential via hydrostatic integration ---
-    if _hybrid:
-        Phi = compute_geopotential_hybrid(T, p_s, sigma_coord, phis)
-    else:
-        Phi = compute_geopotential(T, p_s, sigma_coord, phis)
+    # --- 2. Geopotential via hydrostatic integration (two-term PGF only:
+    # the Lin 1997 path builds its own half-level gz inside the
+    # cross-product operator) ---
+    if not _lin_pgf:
+        if _hybrid:
+            Phi = compute_geopotential_hybrid(T, p_s, sigma_coord, phis)
+        else:
+            Phi = compute_geopotential(T, p_s, sigma_coord, phis)
 
     # --- 3. KE at cell centres from C-grid face velocities ---
     u_c = _face_to_cell_u(u)
     v_c = _face_to_cell_v(v)
     KE = 0.5 * (u_c**2 + v_c**2)
 
-    # --- 4. Bernoulli function B = Φ + KE ---
-    B = Phi + KE
+    # --- 4. Bernoulli function B = Φ + KE (two-term) / KE only (lin1997:
+    # the geopotential part of the PGF lives in the cross-product) ---
+    B = KE if _lin_pgf else Phi + KE
 
     # --- 5/6. Bernoulli + ln(p_s) gradients (batched at faces) ---
     # ``B`` is (n_lat, n_lon, nlev) and ``ln_ps`` is (n_lat, n_lon).
@@ -436,23 +477,37 @@ def cgrid_latlon_hydrostatic_tendencies(
         _T_lat_pad, _u_lat_pad, _dp_lat_pad = pad_with_pole_bc_lat_multi(
             (T, u, dp), halo=1)
 
-    T_u = interp_cell_to_uface(T)
-    T_v = interp_cell_to_vface_halo(T, f_pad=_T_lat_pad)
-
-    pg_corr_x = R_d * T_u * dln_dx[:, :, jnp.newaxis]
-    pg_corr_y = R_d * T_v * dln_dy[:, :, jnp.newaxis]
-
-    # Hybrid coordinate correction: in sigma coords grad_eta(ln p) = grad(ln p_s),
-    # but in hybrid coords grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
-    if _hybrid:
-        hf_u = interp_cell_to_uface(hybrid_factor)
-        hf_v = interp_cell_to_vface_halo(hybrid_factor, f_pad=_hf_lat_pad)
-        pg_corr_x = pg_corr_x * hf_u
-        pg_corr_y = pg_corr_y * hf_v
-
     # --- 7. Momentum tendencies ---
-    du_dt = -(dB_dx + pg_corr_x)
-    dv_dt = -(dB_dy + pg_corr_y)
+    if _lin_pgf:
+        # Lin (1997) cross-product PGF (#1029): the full hydrostatic PGF
+        # (geopotential + pressure terms) in one well-conditioned face
+        # operation; ``dB_dx``/``dB_dy`` carry only the KE gradient here.
+        # Sign: the operator returns the tendency to ADD (see
+        # ``_fv3_lin_pgf`` sign-convention note).
+        from legoesm.atmosphere.dynamics.gcm._fv3_lin_pgf import (
+            lin1997_pgf_latlon_cgrid)
+        pgf_x, pgf_y = lin1997_pgf_latlon_cgrid(
+            T, p_s, phis, p_half, p_full, grid)
+        du_dt = -dB_dx + pgf_x
+        dv_dt = -dB_dy + pgf_y
+    else:
+        T_u = interp_cell_to_uface(T)
+        T_v = interp_cell_to_vface_halo(T, f_pad=_T_lat_pad)
+
+        pg_corr_x = R_d * T_u * dln_dx[:, :, jnp.newaxis]
+        pg_corr_y = R_d * T_v * dln_dy[:, :, jnp.newaxis]
+
+        # Hybrid coordinate correction: in sigma coords grad_eta(ln p) =
+        # grad(ln p_s), but in hybrid coords grad_eta(ln p) =
+        # (B*p_s/p) * grad(ln p_s).
+        if _hybrid:
+            hf_u = interp_cell_to_uface(hybrid_factor)
+            hf_v = interp_cell_to_vface_halo(hybrid_factor, f_pad=_hf_lat_pad)
+            pg_corr_x = pg_corr_x * hf_u
+            pg_corr_y = pg_corr_y * hf_v
+
+        du_dt = -(dB_dx + pg_corr_x)
+        dv_dt = -(dB_dy + pg_corr_y)
 
     # --- 8. Coriolis using absolute vorticity (ζ+f) ---
     cor_u, cor_v = absolute_vorticity_coriolis(
@@ -565,18 +620,42 @@ def cgrid_latlon_hydrostatic_tendencies(
     # for all levels with p < 100 Pa).
     adiabatic = kappa * T * omega / (p_full + 1e-10)
 
-    # v · grad(ln p_s) at cell centres (average face gradients to centres)
-    dln_dx_cc = _face_to_cell_u(
-        jnp.broadcast_to(dln_dx[:, :, jnp.newaxis], u.shape))
-    dln_dy_cc = _face_to_cell_v(
-        jnp.broadcast_to(dln_dy[:, :, jnp.newaxis], v.shape))
-    v_dot_grad_lnps = u_c * dln_dx_cc + v_c * dln_dy_cc
-    # In sigma coords: grad_eta(ln p) = grad(ln p_s).
-    # In hybrid coords: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
-    if _hybrid:
-        v_dot_grad_lnps = v_dot_grad_lnps * (
-            sigma_coord.B_full * p_s[..., jnp.newaxis] / (p_full + 1e-10))
-    adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
+    # κ T v·∇_η(ln p): the horizontal part of the energy-conversion term.
+    if config.energy_paired_conversion and not _lin_pgf:
+        # (#1029 FIX) ENERGY-PAIRED form: the conversion term is computed
+        # as the average of the FACE products u·pg_corr — the exact
+        # discrete counterpart of the momentum equation's pressure-
+        # gradient-correction work (du/dt ⊃ −pg_corr, KE budget ⊃
+        # −u·pg_corr, internal-energy budget ⊃ +u·pg_corr/c_p).  The
+        # legacy form below multiplies CELL-AVERAGED u_c by CELL-AVERAGED
+        # ∇ln p_s: at grid-scale terrain ridges (2Δx p_s structure) the
+        # product-of-averages misses the face-scale correlation the
+        # momentum equation injects, so KE created by the PGF is never
+        # returned to T — a spurious energy source that makes the rest
+        # state over the DCMIP 2-0-0 ridged mountain grow at 2.6
+        # e-folds/day (dt-independent; ablation probe 26276143: κ→0
+        # kills the growth, all other term families exonerated).
+        # Sign convention: pg_corr enters du/dt with a MINUS; the
+        # conversion enters dT/dt with a PLUS ⇒ face-summed
+        # c_p·dT + d(KE) work cancels by construction.
+        adiabatic = adiabatic + (
+            _face_to_cell_u(u * pg_corr_x)
+            + _face_to_cell_v(v * pg_corr_y)
+        ) / constants.c_pd
+    else:
+        # Legacy: v · grad(ln p_s) at cell centres (average face
+        # gradients to centres, then multiply cell-centre averages).
+        dln_dx_cc = _face_to_cell_u(
+            jnp.broadcast_to(dln_dx[:, :, jnp.newaxis], u.shape))
+        dln_dy_cc = _face_to_cell_v(
+            jnp.broadcast_to(dln_dy[:, :, jnp.newaxis], v.shape))
+        v_dot_grad_lnps = u_c * dln_dx_cc + v_c * dln_dy_cc
+        # In sigma coords: grad_eta(ln p) = grad(ln p_s).
+        # In hybrid coords: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
+        if _hybrid:
+            v_dot_grad_lnps = v_dot_grad_lnps * (
+                sigma_coord.B_full * p_s[..., jnp.newaxis] / (p_full + 1e-10))
+        adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
     dT_dt = horiz_adv_T + vert_adv_T + adiabatic
 
@@ -768,6 +847,12 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         self.grid = grid
         self.sigma_coord = sigma_coord
         self.config = config or CGridLatLonPrimitiveEquationConfig()
+
+        # Dispatch hardening (#1029): fail at construction, not first step.
+        if self.config.pgf_scheme not in ("two_term", "lin1997"):
+            raise ValueError(
+                f"Unknown pgf_scheme {self.config.pgf_scheme!r}: "
+                "expected 'two_term' or 'lin1997'")
 
         # Stash the constructor ``dt`` so callers downstream (notably
         # ``make_latlon_mpi_step`` rebuilding an MPI-aware model) can
