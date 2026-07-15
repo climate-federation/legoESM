@@ -89,10 +89,16 @@ class fort:
 
 def build_tile1_kinked_corner_lonlat(n: int, ng: int = 3,
                                      sentinel: float = BIG_NUMBER):
-    """Kinked (mpp-equivalent) corner-node lon/lat for tile 1.
+    """Tile-1 convenience wrapper over ``build_kinked_corner_lonlat``."""
+    return build_kinked_corner_lonlat(n, ng, tile=1, sentinel=sentinel)
+
+
+def build_kinked_corner_lonlat(n: int, ng: int = 3, *, tile: int = 1,
+                               sentinel: float = BIG_NUMBER):
+    """Kinked (mpp-equivalent) corner-node lon/lat for one reference tile.
 
     Returns ``lon, lat`` of shape (n+2ng+1, n+2ng+1) over Fortran node
-    indices ``1-ng .. n+1+ng``: interior from tile 1's own ED supergrid,
+    indices ``1-ng .. n+1+ng``: interior from the tile's own ED supergrid,
     side strips sampled from the neighbour faces via the certified
     neighbour maps (== what the mpp corner-position exchange delivers),
     corner-diagonal regions at ``sentinel``.
@@ -110,14 +116,15 @@ def build_tile1_kinked_corner_lonlat(n: int, ng: int = 3,
         lon[i_node - 1 + ng, j_node - 1 + ng] = lo
         lat[i_node - 1 + ng, j_node - 1 + ng] = la
 
-    # interior (tile 1 own supergrid odd-odd nodes)
+    # interior (the tile's own supergrid odd-odd nodes)
     for i_node in range(1, n + 2):
         for j_node in range(1, n + 2):
             si, sj = 2 * i_node - 1, 2 * j_node - 1
-            put(i_node, j_node, lon6[0][si - 1, sj - 1], lat6[0][si - 1, sj - 1])
+            put(i_node, j_node, lon6[tile - 1][si - 1, sj - 1],
+                lat6[tile - 1][si - 1, sj - 1])
 
-    # side strips from neighbours (supergrid index space, tile 1)
-    nw, ne, ns, nn = neighbor_tiles(1)
+    # side strips from neighbours (supergrid index space)
+    nw, ne, ns, nn = neighbor_tiles(tile)
     strips = (
         (nw, range(1 - 2 * ng, 0 + 1), range(1, sg_npx + 1)),
         (ne, range(sg_npx + 1, sg_npx + 2 * ng + 1), range(1, sg_npx + 1)),
@@ -131,7 +138,8 @@ def build_tile1_kinked_corner_lonlat(n: int, ng: int = 3,
             for sj in sj_range:
                 if sj % 2 == 0:
                     continue
-                ii_s, jj_s = neighbor_index(si, sj, 1, n_src, sg_npx, sg_npx)
+                ii_s, jj_s = neighbor_index(si, sj, tile, n_src,
+                                            sg_npx, sg_npx)
                 put((si + 1) // 2, (sj + 1) // 2,
                     lon6[n_src - 1][ii_s - 1, jj_s - 1],
                     lat6[n_src - 1][ii_s - 1, jj_s - 1])
@@ -239,7 +247,7 @@ def _cell_real_mask(n: int, ng: int) -> np.ndarray:
     return in_face[:, None] | in_face[None, :]
 
 
-def build_fv3_native_gridstruct(n: int, ng: int = 3, *,
+def build_fv3_native_gridstruct(n: int, ng: int = 3, *, tile: int = 1,
                                 radius: float = constants.R_earth,
                                 omega: float = constants.Omega,
                                 rotation_alpha: float = 0.0) -> dict:
@@ -265,7 +273,7 @@ def build_fv3_native_gridstruct(n: int, ng: int = 3, *,
     # WIDER than requested: the outermost dxc/dyc rows are mpp-filled
     # upstream and need centres one cell beyond the data domain.
     ngw = ng + 1
-    g_lon_w, g_lat_w = build_tile1_kinked_corner_lonlat(n, ngw)
+    g_lon_w, g_lat_w = build_kinked_corner_lonlat(n, ngw, tile=tile)
     wlo = 1 - ngw
     _fill_corners_bgrid_x(fort(g_lon_w, wlo, wlo), npx, ngw)
     _fill_corners_bgrid_x(fort(g_lat_w, wlo, wlo), npx, ngw)
@@ -359,13 +367,13 @@ def build_fv3_native_gridstruct(n: int, ng: int = 3, *,
     sl_a = slice(ng, ng + n)       # Fortran cells 1..n
     sl_b = slice(ng, ng + n + 1)   # Fortran nodes/faces 1..n+1
     checks = (
-        ("dx", dx[sl_a, sl_b], cert["dx"][0]),
-        ("dy", dy[sl_b, sl_a], cert["dy"][0]),
-        ("dxa", dxa[sl_a, sl_a], cert["dxa"][0]),
-        ("dya", dya[sl_a, sl_a], cert["dya"][0]),
-        ("area", area[sl_a, sl_a], cert["area"][0]),
-        ("dxc", dxc[sl_b, sl_a], cert["dxc"][0]),
-        ("dyc", dyc[sl_a, sl_b], cert["dyc"][0]),
+        ("dx", dx[sl_a, sl_b], cert["dx"][tile - 1]),
+        ("dy", dy[sl_b, sl_a], cert["dy"][tile - 1]),
+        ("dxa", dxa[sl_a, sl_a], cert["dxa"][tile - 1]),
+        ("dya", dya[sl_a, sl_a], cert["dya"][tile - 1]),
+        ("area", area[sl_a, sl_a], cert["area"][tile - 1]),
+        ("dxc", dxc[sl_b, sl_a], cert["dxc"][tile - 1]),
+        ("dyc", dyc[sl_a, sl_b], cert["dyc"][tile - 1]),
     )
     for name, got, want in checks:
         if not np.array_equal(got, want):  # pragma: no cover - tripwire
@@ -525,7 +533,7 @@ def build_fv3_native_gridstruct(n: int, ng: int = 3, *,
         cw[:m_b], cw[1:m_b + 1], pm[1:m_b + 1], pm[:m_b]) * radius**2  # north
     # certified compute-domain values (incl. the x2 borders and x3 cube
     # vertices) take precedence over the generic constructions above
-    area_c[sl_b, sl_b] = cert["area_c"][0]
+    area_c[sl_b, sl_b] = cert["area_c"][tile - 1]
     _fill_corners_bgrid_x(fort(area_c, clo, clo), npx, ng)
     rarea_c = 1.0 / area_c
 
@@ -658,6 +666,93 @@ def build_fv3_native_gridstruct(n: int, ng: int = 3, *,
         "fC": fC,
         "cell_ok": cell_ok, "node_ok": node_ok,
     }
+
+
+def exchange_cgrid_vector_halos(uc6: list, vc6: list, tile: int,
+                                n: int, ng: int):
+    """mpp_update_domains(uc, vc, gridtype=CGRID_NE) for one tile.
+
+    Fills the side-strip halos of ``uc6[tile-1]``/``vc6[tile-1]`` (numpy,
+    Fortran shapes: uc (n+2ng+1, n+2ng), vc (n+2ng, n+2ng+1)) from the six
+    faces' stored arrays.  Component selection and orientation sign follow
+    the discrete rotation of the certified neighbour index map: components
+    transform like basis vectors, so halo_x picks the source component
+    whose supergrid axis maps onto the local +i direction, with the sign
+    of that map derivative (mpp's NE-vector convention).  Corner-diagonal
+    regions are left untouched (dyn_core's exchange does not fill them;
+    d_sw's own fill_corners(VECTOR) handles what it consumes).
+
+    Returns nothing; mutates the tile's arrays in place.
+    """
+    sg_npx = 2 * n + 1
+    npx = n + 1
+    lo = 1 - ng
+    uc = uc6[tile - 1]
+    vc = vc6[tile - 1]
+    nw, ne, ns, nn = neighbor_tiles(tile)
+    # halo strips in Fortran FACE indices per stagger:
+    #   uc x-faces (i in isd..ied+1, j in jsd..jed), supergrid (2i-1, 2j)
+    #   vc y-faces (i in isd..ied,   j in jsd..jed+1), supergrid (2i, 2j-1)
+    strips = (
+        (nw, range(1 - ng, 0 + 1), "i"), (ne, range(npx + 1, npx + ng + 1), "i"),
+        (ns, range(1 - ng, 0 + 1), "j"), (nn, range(npx + 1, npx + ng + 1), "j"),
+    )
+
+    def src_value(si: int, sj: int, n_src: int) -> float:
+        """Source component + sign for a local x-face supergrid slot."""
+        sii, sjj = neighbor_index(si, sj, tile, n_src, sg_npx, sg_npx)
+        # map derivative along the local +i supergrid direction
+        sii2, sjj2 = neighbor_index(si + 2, sj, tile, n_src, sg_npx, sg_npx)
+        dii, djj = sii2 - sii, sjj2 - sjj
+        src_uc = uc6[n_src - 1]
+        src_vc = vc6[n_src - 1]
+        if dii != 0:                      # axes aligned: uc <- uc
+            sgn = 1.0 if dii > 0 else -1.0
+            fi, fj = (sii + 1) // 2, sjj // 2
+            return sgn * src_uc[fi - lo, fj - lo]
+        sgn = 1.0 if djj > 0 else -1.0    # axes swapped: uc <- vc
+        fi, fj = sii // 2, (sjj + 1) // 2
+        return sgn * src_vc[fi - lo, fj - lo]
+
+    def src_value_y(si: int, sj: int, n_src: int) -> float:
+        """Source component + sign for a local y-face supergrid slot."""
+        sii, sjj = neighbor_index(si, sj, tile, n_src, sg_npx, sg_npx)
+        sii2, sjj2 = neighbor_index(si, sj + 2, tile, n_src, sg_npx, sg_npx)
+        dii, djj = sii2 - sii, sjj2 - sjj
+        src_uc = uc6[n_src - 1]
+        src_vc = vc6[n_src - 1]
+        if djj != 0:                      # axes aligned: vc <- vc
+            sgn = 1.0 if djj > 0 else -1.0
+            fi, fj = sii // 2, (sjj + 1) // 2
+            return sgn * src_vc[fi - lo, fj - lo]
+        sgn = 1.0 if dii > 0 else -1.0    # axes swapped: vc <- uc
+        fi, fj = (sii + 1) // 2, sjj // 2
+        return sgn * src_uc[fi - lo, fj - lo]
+
+    for n_src, rng, axis in strips:
+        if axis == "i":
+            # uc: halo x-face columns; vc: halo cell columns
+            for fi in rng:
+                for fj in range(1, n + 1):        # compute rows only
+                    uc[fi - lo, fj - lo] = src_value(2 * fi - 1, 2 * fj,
+                                                     n_src)
+            vc_cols = (range(1 - ng, 0 + 1) if rng.start < 1
+                       else range(npx, npx + ng))     # cells beyond face
+            for fi in vc_cols:
+                for fj in range(1, n + 2):        # y-faces 1..npx
+                    vc[fi - lo, fj - lo] = src_value_y(2 * fi, 2 * fj - 1,
+                                                       n_src)
+        else:
+            for fj in rng:
+                for fi in range(1, n + 1):
+                    vc[fi - lo, fj - lo] = src_value_y(2 * fi, 2 * fj - 1,
+                                                       n_src)
+            uc_rows = (range(1 - ng, 0 + 1) if rng.start < 1
+                       else range(npx, npx + ng))
+            for fj in uc_rows:
+                for fi in range(1, n + 2):
+                    uc[fi - lo, fj - lo] = src_value(2 * fi - 1, 2 * fj,
+                                                     n_src)
 
 
 def _get_unit_vect2(ll1: np.ndarray, ll2: np.ndarray) -> np.ndarray:

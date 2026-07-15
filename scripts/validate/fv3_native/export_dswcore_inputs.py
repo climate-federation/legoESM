@@ -63,28 +63,46 @@ def main() -> None:
     ap.add_argument("--outdir", default=".")
     args = ap.parse_args()
 
-    gs = build_fv3_native_gridstruct(args.res, args.ng,
-                                     radius=FV3_RADIUS_M, omega=FV3_OMEGA)
-    st = analytic_swcore_state(gs)
-
-    # time-centred C winds from the CERTIFIED python c_sw (phase 4a)
     from legoesm.core.fv3_native_sw_core import Bounds, c_sw
+    from legoesm.grids.fv3_native_gridstruct import (
+        exchange_cgrid_vector_halos)
+
     bd = Bounds.single_tile(args.res, args.ng)
-    csw = c_sw(delp=st["delp"], pt=st["pt"],
-               w=np.zeros_like(st["delp"]),
-               u=st["u"], v=st["v"], gs=gs, bd=bd,
-               npx=args.res + 1, npy=args.res + 1,
-               dt2=0.5 * args.dt, nord=1,
-               hydrostatic=True, dord4=True, grid_type=0)
-    # uc/vc/ua/va are the c_sw INOUT results; NaN-in-unwritten slots is
-    # fine for text export except d_sw READS full arrays — replace the
-    # never-written slots with zeros (both sides then share those bytes)
+
+    # run the certified python c_sw on ALL SIX faces: dyn_core
+    # mpp-exchanges uc/vc (CGRID_NE vector) between c_sw/p_grad_c and
+    # d_sw, so the deep uc/vc halos carry the NEIGHBOUR faces' c_sw
+    # results mapped through the vector-exchange semantics.
+    uc6, vc6 = [], []
+    gs = st = None
+    for t in range(1, 7):
+        gs_t = build_fv3_native_gridstruct(args.res, args.ng, tile=t,
+                                           radius=FV3_RADIUS_M,
+                                           omega=FV3_OMEGA)
+        st_t = analytic_swcore_state(gs_t)
+        csw_t = c_sw(delp=st_t["delp"], pt=st_t["pt"],
+                     w=np.zeros_like(st_t["delp"]),
+                     u=st_t["u"], v=st_t["v"], gs=gs_t, bd=bd,
+                     npx=args.res + 1, npy=args.res + 1,
+                     dt2=0.5 * args.dt, nord=1,
+                     hydrostatic=True, dord4=True, grid_type=0)
+        for key in ("uc", "vc", "ua", "va"):
+            a = np.asarray(csw_t[key], dtype=np.float64).copy()
+            a[~np.isfinite(a)] = 0.0
+            csw_t[key] = a
+        uc6.append(csw_t["uc"])
+        vc6.append(csw_t["vc"])
+        if t == 1:
+            gs, st, csw = gs_t, st_t, csw_t
+
+    exchange_cgrid_vector_halos(uc6, vc6, 1, args.res, args.ng)
+
     state = dict(st)
     state["w"] = np.zeros_like(st["delp"])
-    for key in ("uc", "vc", "ua", "va"):
-        a = np.asarray(csw[key], dtype=np.float64).copy()
-        a[~np.isfinite(a)] = 0.0
-        state[key] = a
+    state["uc"] = uc6[0]
+    state["vc"] = vc6[0]
+    state["ua"] = csw["ua"]
+    state["va"] = csw["va"]
 
     lo = 1 - args.ng
     txt = os.path.join(args.outdir, "dswcore_input.txt")
