@@ -21,6 +21,10 @@ gfortran $FF -J $W -c $S/fv3_swcore_shim.F90 -o $W/shim.o
 gfortran $FF -J $W -c $S/fv3_swcore_extract.F90 -o $W/ext.o
 gfortran $FF -J $W $S/fv3_divduo_driver.F90 $W/shim.o $W/ext.o -o $W/drv
 cd $W && ./drv
+# pack the committed fixture from the Fortran output (reproducible)
+PYTHONPATH=$REPO/packages/core:$REPO/src \
+  /burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python \
+  $S/gen_divduo_oracle.py $W --pack
 PYTHONPATH=$REPO/packages/core:$REPO/src \
   /burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python - $W <<'PY'
 import sys, numpy as np
