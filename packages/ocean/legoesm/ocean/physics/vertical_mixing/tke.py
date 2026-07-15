@@ -1153,6 +1153,8 @@ def tke_vertical_mixing(
     dz_surface: jnp.ndarray | None = None,
     boundary_cap: jnp.ndarray | None = None,
     lat_deg: jnp.ndarray | None = None,
+    T_n2: jnp.ndarray | None = None,
+    S_n2: jnp.ndarray | None = None,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
 
@@ -1283,9 +1285,14 @@ def tke_vertical_mixing(
     # form (BIT-IDENTICAL); ``"adiabatic"`` is the SIGNED Veros parcel-
     # displacement form that lets the TKE convect (N^2 < 0).
     signed_n2 = cfg.n2_mode == "adiabatic"
+    # Diffusivity-stage N² time level (TKEConfig.n2_before_advection): the
+    # before-advection (Nnow) T/S override, when supplied by the caller (see
+    # tke_set_diffusivities). Python-static; None ⇒ BIT-IDENTICAL.
+    _Tn2 = T_cell if T_n2 is None else T_n2
+    _Sn2 = S_cell if S_n2 is None else S_n2
     N2 = _compute_N2(
         rho_cell, dz_half, rho_0, g,
-        T_cell=T_cell, S_cell=S_cell, p_cell=p_cell,
+        T_cell=_Tn2, S_cell=_Sn2, p_cell=p_cell,
         dz_ref=dz_ref, jacobian=jacobian, eos_fn=eos_fn,
         n2_mode=cfg.n2_mode,
         adiabatic_over_dz_half=veros_slots,
@@ -1454,6 +1461,8 @@ def tke_set_diffusivities(
     z_interface: jnp.ndarray,
     dz_surface: jnp.ndarray,
     boundary_cap: jnp.ndarray | None = None,
+    T_n2: jnp.ndarray | None = None,
+    S_n2: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, TKEPostMixingContext]:
     """Veros ``set_tke_diffusivities`` (tke.py:20-113) from the CARRIED TKE.
 
@@ -1477,9 +1486,19 @@ def tke_set_diffusivities(
         )
     dz_cell = dz_ref * jacobian[..., jnp.newaxis]
     shear_sq = _vertical_shear_squared(u_cell, v_cell, dz_half)
+    # Diffusivity-stage N² time level (TKEConfig.n2_before_advection, NEMO
+    # eosbn2 Nnow sequencing): when the caller supplies the BEFORE-advection
+    # T/S (``T_n2``/``S_n2``), the static-stability contrast is evaluated on
+    # them instead of the post-advection ``T_cell``/``S_cell``. Only the T/S
+    # parcel pair changes; ``p_cell`` (the reference pressure) stays as-is —
+    # sign-neutral by construction (BOTTOM_N2_DIAGNOSIS_FINDINGS.md: the deep
+    # marginal interface flips on the T/S contrast, not the reference
+    # pressure). Python-static (None ⇒ BIT-IDENTICAL), not a traced branch.
+    _Tn2 = T_cell if T_n2 is None else T_n2
+    _Sn2 = S_cell if S_n2 is None else S_n2
     N2 = _compute_N2(
         rho_cell, dz_half, rho_0, g,
-        T_cell=T_cell, S_cell=S_cell, p_cell=p_cell,
+        T_cell=_Tn2, S_cell=_Sn2, p_cell=p_cell,
         dz_ref=dz_ref, jacobian=jacobian, eos_fn=eos_fn,
         n2_mode=cfg.n2_mode, adiabatic_over_dz_half=True,
     )

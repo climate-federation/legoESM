@@ -206,6 +206,12 @@ def _nemo_tke_config() -> TKEConfig:
     return TKEConfig(
         prognostic=True,
         n2_mode="adiabatic",
+        # NEMO stp ordering: eosbn2 runs at step start (bn2(Nnow)), BEFORE
+        # tra_adv. Sampling the diffusivity-stage N² on the before-advection
+        # T/S stops the single-step fct2 bottom-cell drift from flipping the
+        # marginal deepest interface to N²<0 (spurious deep convection;
+        # BOTTOM_N2_DIAGNOSIS_FINDINGS.md).
+        n2_before_advection=True,
         veros_dz_slots=True,
         positivity="veros_surface_correction",
         kappa_convention="veros_sqrte",

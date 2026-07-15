@@ -3249,6 +3249,11 @@ class LatLonCGridOceanModel:
                 # so there is NO lag in the synchronous (non-AB2) path. Falls back
                 # to the carried state.eke_diss when state_new has none yet.
                 _tke_source = self._assemble_tke_source(state, state_new, tend)
+                # NEMO eosbn2 Nnow sequencing: sample the diffusivity-stage
+                # N² on the STEP-ENTRY (before-advection) T/S when the flag is
+                # set. ``state`` here is the step-entry state (never rebound;
+                # ``state_new`` is the working copy). None ⇒ BIT-IDENTICAL.
+                _n2_tracers = self._n2_before_advection_tracers(state)
                 state_new, tke_new = self._apply_implicit_vertical_mixing(
                     state_new, dt, surface_forcing,
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
@@ -3256,16 +3261,17 @@ class LatLonCGridOceanModel:
                     surface_tracer_forcing=tend.surface_tracer_forcing,
                     tracer_source=tend.tracer_source,
                     tke_old=_tke_old, tke_source=_tke_source, return_tke=True,
-                    grid=_grid,
+                    grid=_grid, n2_tracers=_n2_tracers,
                 )
             else:
+                _n2_tracers = self._n2_before_advection_tracers(state)
                 state_new = self._apply_implicit_vertical_mixing(
                     state_new, dt, surface_forcing,
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
                     K33_iso=k33_implicit, dt_mom=dt_mom,
                     surface_tracer_forcing=tend.surface_tracer_forcing,
                     tracer_source=tend.tracer_source,
-                    grid=_grid,
+                    grid=_grid, n2_tracers=_n2_tracers,
                 )
         if tke_new is not None:
             # Veros order (integrate_tke): the implicit solve writes
@@ -3377,6 +3383,33 @@ class LatLonCGridOceanModel:
         tke_cfg = self.config.physics.vertical_mixing.tke
         return (getattr(tke_cfg, "buoyancy_timing", "pre_mixing")
                 == "post_mixing_veros")
+
+    def _n2_before_advection_tracers(self, entry_state):
+        """Before-advection (Nnow) T/S for the vmix diffusivity-stage N².
+
+        Static Python predicate (config-only): returns ``(T, S)`` from the
+        STEP-ENTRY state when ``vertical_mixing.scheme=="tke"`` and
+        ``tke.n2_before_advection`` is set — the NEMO ``eosbn2`` sequencing
+        (``bn2(Nnow)`` at step start, before ``fct2`` tracer advection drifts
+        the deepest wet cell). ``None`` (default) ⇒ the closure keeps sampling
+        N² on the post-advection state ⇒ BIT-IDENTICAL.
+
+        Only the ``adiabatic`` N² path reads the T/S contrast; ``n2_mode !=
+        "adiabatic"`` with the flag set would be a SILENT no-op, so raise
+        (dispatch hardening — a mis-wired flag must fail loudly).
+        """
+        vmix = getattr(getattr(self.config, "physics", None),
+                       "vertical_mixing", None)
+        if vmix is None or vmix.scheme != "tke":
+            return None
+        if not getattr(vmix.tke, "n2_before_advection", False):
+            return None
+        if getattr(vmix.tke, "n2_mode", "insitu") != "adiabatic":
+            raise ValueError(
+                "vertical_mixing.tke.n2_before_advection=True requires "
+                "n2_mode='adiabatic' (the only N² path that reads the T/S "
+                f"contrast); got n2_mode={vmix.tke.n2_mode!r}.")
+        return (entry_state.T.data, entry_state.S.data)
 
     def _tke_realized_kdiss_active(self) -> bool:
         """True iff the post-mixing TKE charges the REALIZED implicit-friction
@@ -3878,6 +3911,7 @@ class LatLonCGridOceanModel:
         K_diss_v_w=None,
         return_K_diss_v: bool = False,
         grid=None,
+        n2_tracers=None,
     ) -> LatLonCGridOceanState:
         """Backward-Euler vertical diffusion for ``u, v, T, S``.
 
@@ -4091,6 +4125,7 @@ class LatLonCGridOceanModel:
                     # nlev-1) columns inside nemo_etau_injection.
                     lat_deg=jnp.degrees(self.grid.lat_T),
                     iwm_fields=self._iwm_forcing,
+                    n2_tracers=n2_tracers,
                 )
                 if _post_mixing:
                     # Phase 1 only (Veros set_tke_diffusivities from the
@@ -4106,6 +4141,7 @@ class LatLonCGridOceanModel:
                     eos_fn=_vmix_eos_fn,
                     lat_deg=jnp.degrees(self.grid.lat_T),
                     iwm_fields=self._iwm_forcing,
+                    n2_tracers=n2_tracers,
                 )
 
         # dz at cell centers (jacobian-corrected so the eta-stretched
@@ -5119,6 +5155,11 @@ class LatLonCGridOceanModel:
                 # integrate_tke (veros.py:266→285). Off ⇒ no extra return ⇒
                 # bit-identical.
                 _want_kdv = self._tke_realized_kdiss_active()
+                # Momentum-only: this call already acts on the step-entry
+                # ``state`` (before advection), so its N² is ALREADY Nnow —
+                # no n2_tracers override needed (and it must stay that way so
+                # friction + tracer N² sources remain consistent under the
+                # n2_before_advection flag).
                 _fric = self._apply_implicit_vertical_mixing(
                     state, dt, surface_forcing,
                     K_v_phys=K_v_phys, A_v_phys=A_v_phys,
@@ -5144,6 +5185,8 @@ class LatLonCGridOceanModel:
                     return_tke=_tke_prog,
                     K_diss_v_w=_kdiss_v_w,
                     grid=_grid,
+                    # NEMO eosbn2 Nnow N²: step-entry (before-advection) T/S.
+                    n2_tracers=self._n2_before_advection_tracers(state),
                 )
                 if _tke_prog:
                     state_ab2, tke_new_ab2 = _trac
@@ -5166,6 +5209,8 @@ class LatLonCGridOceanModel:
                     tke_old=_tke_old, tke_source=tke_source,
                     return_tke=_tke_prog,
                     grid=_grid,
+                    # NEMO eosbn2 Nnow N²: step-entry (before-advection) T/S.
+                    n2_tracers=self._n2_before_advection_tracers(state),
                 )
                 if _tke_prog:
                     state_ab2, tke_new_ab2 = _seq
@@ -5351,7 +5396,9 @@ class LatLonCGridOceanModel:
         # 4. Implicit vertical mixing once (recomputes K_v/A_v from state_corr;
         #    applies the surface wind/tracer BC + restoring internally).
         state_new = self._apply_implicit_vertical_mixing(
-            state_corr, dt, surface_forcing, K33_iso=k33_iso, grid=_grid)
+            state_corr, dt, surface_forcing, K33_iso=k33_iso, grid=_grid,
+            # NEMO eosbn2 Nnow N²: step-entry (before-advection) T/S.
+            n2_tracers=self._n2_before_advection_tracers(state))
 
         # 5. Carry the explicit increments for the next AB2 step.
         return state_new._replace(
