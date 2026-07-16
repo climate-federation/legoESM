@@ -1,4 +1,8 @@
-"""Smoke tests for atmosphere/physics/learned_column.py."""
+"""Smoke tests for the spectral column adapter in neural_physics.py.
+
+(Formerly learned_column.py; folded into neural_physics.py — file kept to
+preserve the physics-contract idealized_test reference.)
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from legoesm.atmosphere.physics.learned_column import (
+from legoesm.atmosphere.physics.neural_physics import (
     build_column_physics,
     make_column_physics_fn,
 )
