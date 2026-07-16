@@ -195,27 +195,33 @@ spurious mid-depth flow (same lesson as the 0.805 pre-linssh episode);
 surface rms changed only 0.617 → 0.576. The depth-resolved profile is the
 metric of record.
 
-**G. Residual surface-circulation amplitude (surf rms 0.58-0.59x NEMO) —
-DIAGNOSED 2026-07-16 as a coarse-grid WBC SHAPE difference, not an amplitude
-deficit and NOT a wiring mismatch.** WBC surface-speed transects
-(`gap_audit/_plot_two_way_final.py` + the transect probe): the PEAK western-
-boundary speed MATCHES (mid-basin j=8 NEMO 0.150 vs lego 0.148; j=11 0.080 vs
-0.083) but the SHAPE differs — NEMO's boundary current sits OFFSET from the
-wall (peak ~4 cells in, half-power width ~8 cells) with a stronger interior
-return; legoESM's is a thin WALL-TRAPPED spike (peak at cell 1, gone by cell
-3) with a ~half-strength interior. Hence the wet-masked RMS reads low (fewer
-cells carry flow) while the SSH RANGE is larger (sharper wall gradient:
-lego ±0.39/0.36 m vs NEMO ±0.29/0.33 m). The three natural levers for the
-boundary-current shape are ALL already NEMO-faithful in the card: A_h
-operator (NEMO ln_dynldf_lap+ln_dynldf_lev = the div-rot vector Laplacian ==
-`lateral_viscosity_operator="vector_laplacian"`, A_h=1e5 constant), vorticity
-(ene_total == np_CRV combined f+ζ), and free-slip (rn_shlat=0). So the
-residual lives in the FINE boundary-stencil detail at a Munk layer
-`(A_h/β)^{1/3}` ≈ 1.7 cells wide — a re-implementation floor at 106 km, not a
-missing knob; expected to shrink at higher resolution where the Munk layer is
-resolved. Chasing it further means bit-matching NEMO's exact wall stencils
-(free-slip curl-curl term + ene_total boundary vorticity flux + momentum
-advection at the wall row) — deep, uncertain payoff at this resolution.
+**G. Residual surface-circulation amplitude (surf rms 0.63x NEMO) — ROOT
+DIAGNOSED 2026-07-16 as SUBTROPICAL THERMOCLINE EROSION, a vertical-mixing
+lever (NOT a resolution floor, NOT a WBC/boundary-stencil issue).**
+CORRECTION of two earlier mis-diagnoses in this section: (1) the "coarse-grid
+Munk floor" framing was WRONG — both models run the IDENTICAL 32x22x30 grid
+(masks bit-identical, 600 wet cells each), so any difference is a findable
+numerics difference, not a resolution floor; (2) the "wall-trapped WBC spike /
+one-cell mask offset" was a STAGGERING/indexing ARTIFACT in the transect probe
+(compared NEMO U-face vs legoESM T-centre; NEMO umask(i)=T(i)·T(i+1) vs
+legoESM's face convention — same physical faces). Clean staggering-correct
+T-centre comparison (`gap_audit/_plot_two_way_final.py`): the deficit is
+~uniform west(0.65x)/interior(0.62x) — NOT wall-trapping — and by LATITUDE
+the SUBTROPICAL gyre MATCHES NEMO (rows j7/10/13 ratio 1.04/1.11/1.05) while
+the SUBPOLAR north is ~half (j16 0.57, j19 0.54). Root: the yr-5 SUBTROPICAL
+column (j6-10) is VERTICALLY HOMOGENISED — uniform T=15.24 from surface to
+428 m, surf-to-200 m contrast **0.00** vs NEMO's **0.76** (NEMO keeps a proper
+thermocline 15.1->13.3 over the top 428 m); the missing surface heat is buried
+(+1.9 C too warm at 428 m). No thermocline -> no baroclinic thermal-wind shear
+-> weak surface gyre (worst in the north where stratification is weakest).
+This is the SAME over-mixing family chased all campaign, now localised BELOW
+the surface ML that the mxl3 fix (§F) cured: a residual deep-mixing lever
+eroding the thermocline over years. Exact source TBD (candidates: EVD reach /
+convective-adjustment firing on a marginal column, TKE mxl still too deep at
+depth, background/numerical mixing from the fct2 tracer advection). Column is
+NEUTRAL now (N²≈0, uniform T,S), so it is the mixed END STATE — the mechanism
+must be caught mid-erosion (dump avt / trace the thermocline over the first
+1-2 years). This is a REAL lever to pursue, not a floor.
 
 **Minors (low priority):** TKE buoyancy N² adiabatic → in-situ; residual
 winter-ML depth (111 vs 91 m at day 15) — candidates: EVD reach interplay,
