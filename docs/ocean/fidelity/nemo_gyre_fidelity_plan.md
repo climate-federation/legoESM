@@ -95,6 +95,10 @@ but only inside the inactive (nn_etau=0) sub-ML penetration path. Implement a
 proper Dirichlet surface-TKE option (NEMO nn_bc_surf=1) in tke.py as a selectable
 config; expect a deeper wind-mixed layer + stronger Ekman response. Effort:
 low-medium (bounded, one module + tests + review).
+**DONE 2026-07-16 (76b239532)**: TKEConfig.surface_bc="nemo_dirichlet", hard
+Dirichlet in both solves, review SOUND (NEMO's en(1) confirmed hard-Dirichlet in
+the Fortran). RMS ratio 0.61 → **0.805**; WBC peak **104%** of NEMO; mid-depth
+rms(u) ratio 1.02. Remaining deficit = the deep abyssal-drift flow (item A).
 
 **C. PGF / hydrostatic pressure at depth.**
 NEMO `ln_hpg_zco` (z-coord, e3w-weighted integral of the 2-level-averaged density
