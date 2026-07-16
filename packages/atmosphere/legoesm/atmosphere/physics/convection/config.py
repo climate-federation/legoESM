@@ -478,7 +478,7 @@ class DCAConfig(NamedTuple):
         100.0).  Columns with CAPE below this are not adjusted.
     cape_sharpness : float
         (Manabe only) Sigmoid sharpness [1/(J/kg)] for smooth CAPE gating
-        (default 0.02).
+        (default 0.1).
     instability_blend_sharpness : float
         (Manabe only) Dimensionless sigmoid sharpness on the
         superadiabatic-instability metric controlling per-pair adjustment
