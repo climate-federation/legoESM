@@ -108,8 +108,44 @@ def test_any_mismatch_is_rejected(atm_scheme, ocean_scheme):
         )
 
 
-def test_none_coupler_config_is_skipped():
-    """``coupler_config=None`` means the driver builds its own defaults, which
-    are self-consistent by construction."""
+def test_none_coupler_config_is_validated_against_the_driver_default():
+    """``coupler_config=None`` must NOT be waved through.
+
+    An earlier version of this file asserted the opposite, on the claim that the
+    driver's defaults are "self-consistent by construction". They are not:
+    ``setup()`` materializes a bare ``CouplerConfig()`` whose bulk_scheme is
+    "constant" regardless of the atmosphere, so this exact call produced the
+    split the guard exists to catch -- and the guard skipped it.
+    """
     atm = ExperimentConfig(surface_bulk_scheme="coare3", turbulence="louis")
-    _validate_air_sea_scheme_consistency(atm, None)  # must not raise
+    with pytest.raises(ValueError, match="air-sea bulk-flux scheme mismatch"):
+        _validate_air_sea_scheme_consistency(atm, None)
+
+
+def test_none_coupler_config_ok_when_atmosphere_matches_the_default():
+    """The default atmosphere ('constant') matches the driver's default tile, so
+    an untouched run is unaffected."""
+    _validate_air_sea_scheme_consistency(ExperimentConfig(), None)
+
+
+@pytest.mark.xfail(
+    reason="SEPARATE, VERIFIED pre-existing bug: CouplerConfig.gustiness_w_zi is "
+           "`float = 0.0` and so CANNOT express 'scheme-native', while the "
+           "atmosphere's SurfaceLayerConfig.gustiness_w_zi is `float | None = "
+           "None` (-> 600 m for coare3, bulk_flux._COARE_GUSTINESS_ZI). So "
+           "`--surface-bulk-scheme coare3` WITHOUT --gustiness-zi splits the "
+           "interface again: atmosphere 600 m vs ocean tile 0.0 (off). Fixing it "
+           "means making the coupler field nullable -- a further physics change "
+           "on top of this PR's, so it is pinned here rather than silently "
+           "absorbed.",
+    strict=True,
+)
+def test_gustiness_is_consistent_when_left_scheme_native():
+    mod = _coupled_parser()
+    args = mod.build_parser().parse_args(["--surface-bulk-scheme", "coare3"])
+    cpl = mod.build_coupler_config(args)
+    # atmosphere: surface_gustiness_zi=None -> SurfaceLayerConfig keeps its own
+    # None -> coare3 resolves scheme-native 600 m.
+    assert args.surface_gustiness_zi is None
+    # the tile should mean the same thing; today it is coerced to 0.0 == OFF.
+    assert cpl.gustiness_w_zi is None or cpl.gustiness_w_zi == 600.0

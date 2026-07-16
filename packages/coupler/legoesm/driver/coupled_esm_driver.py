@@ -72,16 +72,24 @@ def _validate_air_sea_scheme_consistency(atm_config, coupler_config) -> None:
     own log line both claimed the tile used the requested scheme.
 
     Validated on STATIC Python config values at construction, never in a traced
-    body.  ``coupler_config=None`` means "driver builds the defaults", which are
-    self-consistent by construction, so it is skipped.  The LAND and SLAB tiles
-    legitimately run their own scheme (``--land-bulk-scheme`` /
-    ``--slab-bulk-scheme``) and are deliberately out of scope here -- this guards
-    the air-sea interface only.
+    body.  The LAND and SLAB tiles legitimately run their own scheme
+    (``--land-bulk-scheme`` / ``--slab-bulk-scheme``) and are deliberately out of
+    scope -- this guards the air-sea interface only.
+
+    ``coupler_config=None`` is NOT skipped.  An earlier version of this guard
+    returned early there, on the assumption that the driver's own defaults are
+    "self-consistent by construction" -- they are not: ``setup()`` materializes a
+    bare ``CouplerConfig()``, whose ``bulk_scheme`` is "constant" REGARDLESS of
+    the atmosphere, so ``CoupledESMDriver(ExperimentConfig(
+    surface_bulk_scheme="coare3"))`` produced exactly the split this guard
+    exists to catch, and the guard waved it through.  So validate against the
+    config the driver will ACTUALLY materialize.
     """
-    if coupler_config is None:
-        return
+    from legoesm.coupler.config import CouplerConfig
+
+    effective = coupler_config if coupler_config is not None else CouplerConfig()
     atm_scheme = getattr(atm_config, "surface_bulk_scheme", None)
-    ocean_scheme = getattr(coupler_config, "bulk_scheme", None)
+    ocean_scheme = getattr(effective, "bulk_scheme", None)
     if atm_scheme is None or ocean_scheme is None:
         return
     if atm_scheme != ocean_scheme:
