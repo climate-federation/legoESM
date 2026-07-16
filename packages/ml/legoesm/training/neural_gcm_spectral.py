@@ -675,9 +675,9 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
 # =============================================================================
 
 # The column MLP physics component lives in the physics directory:
-#   legoesm.atmosphere.physics.learned_column
+#   legoesm.atmosphere.physics.neural_physics
 # Re-export the coupling function for training convenience.
-from legoesm.atmosphere.physics.learned_column import (  # noqa: E402
+from legoesm.atmosphere.physics.neural_physics import (  # noqa: E402
     make_column_physics_fn as make_column_mlp_spectral_physics,
     build_column_physics,
 )
