@@ -9,7 +9,7 @@ cfg_overrides:
   # G-point vmap blocks: fast compile (one block body) + bounded backward
   # memory. gpoint_checkpoint=false alone compiled in 2min but OOMd (113 GiB,
   # held all ~256 g-points); batch_size=16 holds only 16/block.
-  aimip_rrtmgp_gpoint_batch_size: 16
+  aimip_rrtmgp_gpoint_batch_size: 8   # 16 OOMd at 15GiB on this GPU; halve the block
   train_windows:
   - - 1979
     - 0
