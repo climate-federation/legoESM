@@ -146,8 +146,16 @@ def test_null_physics_block_raises_clearly():
         _ec({"physics": None})
 
 
-def test_physics_forcing_none_leaves_held_suarez_off():
-    assert _ec({"physics": {"forcing": "none"}}).held_suarez_forcing is False
+def test_physics_forcing_none_is_accepted_and_leaves_held_suarez_off():
+    """``forcing: none`` must be an ACCEPTED spelling (not caught by the
+    unknown-value guard) and must leave HS off.
+
+    The assertion on ``held_suarez_forcing is False`` alone would be vacuous —
+    it is also the default — so the load-bearing half is that this does not
+    raise, i.e. 'none' is in the accepted set.
+    """
+    ec = _ec({"physics": {"forcing": "none"}})  # must not raise
+    assert ec.held_suarez_forcing is False
 
 
 def test_time_integrator_reaches_dycore_config():
