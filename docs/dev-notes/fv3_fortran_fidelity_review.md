@@ -3868,7 +3868,7 @@ halo, Part 1's full formula is the preferred path.
    negative-result.
 
 No new sentinel — the iter-951 v_ll_Linf gate already locks the
-Fortran-faithful FB chain numbers.
+Fortran-faithful FB chain one-step numbers (kernel-level; not whole-chain).
 
 **Insight.**  Iter-953/954 reveal a general principle: with iter-947
 giving Part 1 the correct halo, the Fortran Part 2/3/4 boundary
@@ -3909,7 +3909,7 @@ without the strip + corner-solve overrides — separate experiment.
    updated comment block records the iter-953 negative-result.
 
 No new sentinel — iter-947's sentinel + iter-951's v_ll_Linf gate
-already lock the Fortran-faithful FB chain numbers.
+already lock the Fortran-faithful FB chain one-step numbers (kernel-level).
 
 ### Iter-952 — Diagnostic: v_north max localized at cube-face I-boundaries (i=0, i=n-1)
 

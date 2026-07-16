@@ -100,12 +100,19 @@ metrics (imprint 43.8→58.9, WORSE); D→E = native seam angles (→ blow-up).
    is already the best cube and is close to lat-lon / MPAS** (L2 4.68e-4 vs
    lat-lon 1.41e-3, MPAS 1.25e-4).  The science goal — cube W2 close to
    other grids — is met on the *production* configuration.
-2. The FV3-native **ED grid does NOT reduce imprint** in the one clean
-   single-factor test available: **C→D (FB core, ED metrics only, duo +
-   config held) goes 43.8→58.9 — WORSE.**  A→B (A-L 0.54→22.5) is
-   *bundled* (it also flips no-duo→duo), so it is not an ED-only datum; it
-   only shows the equiangular-tuned A-L config does not transfer to ED+duo
-   (`cubed_sphere_cdgrid.py:639`).
+2. The FV3-native **ED grid config does NOT reduce imprint**: C→D (FB core,
+   equiangular-duo → ED-native-duo, same solver + M1 config) goes
+   43.8→58.9 — WORSE.  CAVEAT: no rung is a single-*metric* isolation.
+   C→D switches the whole ED-native grid config — the ED gnomonic metrics
+   AND their *mandatory* `k2e_nord=4` duo tables (order-2 is the wrong
+   interpolant on ED, ~4e-2 coeff error, so ED forces order 4;
+   `cubed_sphere.py:462`), which are inseparable from the metric family.
+   A→B (A-L 0.54→22.5) is bundled differently (it also flips no-duo→duo).
+   So the rungs compare whole grid/solver *configs*, giving directional
+   evidence (every ED/FB config here is worse than production-A-L-
+   equiangular), not clean per-knob attribution.  The equiangular-tuned
+   A-L config in particular does not transfer to ED (`cubed_sphere_cdgrid
+   .py:639`).
 3. Row A (0.54) vs row C (43.8) is a **~80× gap between the tuned
    production A-L config and the FB M1 config** — but this is a *bundled*
    difference (solver A-L↔FB, no-duo↔duo halo, AND damping/calibration),
