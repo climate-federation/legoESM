@@ -139,3 +139,69 @@ class TestUnknownSchemeRaises:
         K, A = compute_vertical_K_profiles(state, z, None, cfg)
         assert jnp.allclose(K, 0.0)
         assert jnp.allclose(A, 0.0)
+
+
+class TestSchemeReachability:
+    """Reachability audit (execution half): every member of the single
+    ``VALID_VERTICAL_MIXING_SCHEMES`` source must be DISPATCHABLE -- not a
+    phantom that is selectable (reaches the runtime config, pinned in
+    ``test_config_footguns.test_vertical_mixing_reachable_via_the_yaml_ocean_key``)
+    yet falls straight through to the unknown-scheme ``raise`` at runtime.
+
+    Behavioural, not AST: we actually invoke each dispatcher and assert the
+    branch is ENTERED. A scheme that needs more inputs than the minimal call
+    supplies (``catke`` wants ``dt_tke``; ``kpp``/``richardson`` want cell-centre
+    velocities) still raises -- but NOT the unknown-scheme error -- which proves
+    its branch was reached. Only a genuinely absent branch produces the
+    unknown-scheme ``ValueError``.  Both the implicit K-profile dispatcher and
+    the explicit-composition factory are covered, since a scheme can be
+    unreachable on either path (codex finding #2)."""
+
+    _UNKNOWN = "unknown vertical_mixing.scheme"
+
+    def test_implicit_kprofile_dispatch_reaches_every_canonical_scheme(
+        self, grid_z_state
+    ):
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            VALID_VERTICAL_MIXING_SCHEMES,
+        )
+
+        _, z, state = grid_z_state
+        for scheme in sorted(VALID_VERTICAL_MIXING_SCHEMES):
+            cfg = OceanPhysicsConfig(
+                vertical_mixing=VerticalMixingConfig(scheme=scheme), **_base())
+            try:
+                compute_vertical_K_profiles(state, z, None, cfg)
+            except Exception as exc:  # noqa: BLE001 - any non-unknown error = branch reached
+                assert self._UNKNOWN not in str(exc), (
+                    f"scheme {scheme!r} hit the unknown-scheme raise in "
+                    f"compute_vertical_K_profiles -- it is selectable but has no "
+                    f"dispatch branch (phantom): {exc}"
+                )
+
+    def test_explicit_factory_dispatch_reaches_every_canonical_scheme(self):
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            VALID_VERTICAL_MIXING_SCHEMES,
+        )
+        from legoesm.ocean.physics.vertical_mixing.integration import (
+            make_vertical_mixing_physics,
+        )
+
+        for scheme in sorted(VALID_VERTICAL_MIXING_SCHEMES):
+            cfg = VerticalMixingConfig(scheme=scheme)
+            # apply_diffusion=False (the implicit/host-model route) avoids the
+            # explicit-only iwm/ddm NotImplementedError guards.
+            fn = make_vertical_mixing_physics(cfg, apply_diffusion=False)
+            assert callable(fn), (
+                f"scheme {scheme!r} did not yield a callable from the explicit "
+                f"vertical-mixing factory"
+            )
+
+    def test_explicit_factory_rejects_unknown_scheme(self):
+        from legoesm.ocean.physics.vertical_mixing.integration import (
+            make_vertical_mixing_physics,
+        )
+
+        with pytest.raises(ValueError, match="unknown vertical_mixing.scheme"):
+            make_vertical_mixing_physics(
+                VerticalMixingConfig(scheme="kpp_typo"), apply_diffusion=False)

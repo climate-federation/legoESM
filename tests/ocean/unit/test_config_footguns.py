@@ -136,6 +136,40 @@ def test_shipped_global_ocean_templates_load_with_their_eos():
         )
 
 
+def test_vertical_mixing_reachable_via_the_yaml_ocean_key():
+    """Every ``VALID_VERTICAL_MIXING_SCHEMES`` member must be SELECTABLE through
+    the public YAML ``ocean.physics.vertical_mixing.scheme:`` key, i.e. reach the
+    runtime config's ``physics.vertical_mixing.scheme`` field.
+
+    The flat lat-lon OMIP driver hands the runtime a fixed KPP override, so the
+    ``--config`` YAML adapter is the only general selection path for the mixing
+    scheme; a rename of the flat field or a break in the flat->runtime mapping
+    would silently strand every non-KPP scheme (e.g. catke) while leaving the
+    dispatch green. Pins the reachability direction (implemented ⇒ selectable),
+    the vertical-mixing analogue of the EOS pin above.
+
+    This is the config-path HALF of reachability (the YAML value survives into
+    the runtime field); the execution half -- that every canonical scheme is
+    actually dispatched, not a phantom that hits the unknown-scheme raise -- is
+    pinned behaviourally against both dispatchers in
+    ``test_vmix_k_profiles_direct.py`` (``TestSchemeReachability``)."""
+    from legoesm.ocean.config import OceanExperimentConfig
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        VALID_VERTICAL_MIXING_SCHEMES,
+    )
+
+    for scheme in VALID_VERTICAL_MIXING_SCHEMES:
+        d = {"grid": {"type": "latlon_cgrid", "nlev": 15},
+             "ocean": {"physics": {"vertical_mixing": {"scheme": scheme}}}}
+        rt = OceanExperimentConfig.from_dict(d).to_ocean_config()
+        got = rt.physics.vertical_mixing.scheme
+        assert got == scheme, (
+            f"ocean.physics.vertical_mixing.scheme: {scheme!r} did not reach "
+            f"the runtime config (got {got!r}); the YAML->runtime mapping is "
+            f"broken"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Footgun 2 — A_h single source of truth (lat-lon C-grid)
 # ---------------------------------------------------------------------------

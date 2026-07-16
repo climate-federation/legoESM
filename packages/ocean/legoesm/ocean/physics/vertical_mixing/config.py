@@ -632,9 +632,20 @@ class CATKEConfig(NamedTuple):
     maximum_tke_diffusivity: float = float("inf")     # K_e cap [m^2/s]
 
 
+#: Canonical set of vertical-mixing closures ``compute_vertical_K_profiles``
+#: dispatches. SINGLE SOURCE OF TRUTH -- the k_profiles.py fail-loud raise reads
+#: this instead of a hand-copied literal list, exactly as ``VALID_EOS_SCHEMES``
+#: backs ``make_eos_fn`` (so the dispatch and the "valid schemes" message can
+#: never drift). Every member is reachable through the public YAML key
+#: ``ocean.physics.vertical_mixing.scheme`` (pinned by test_config_footguns).
+VALID_VERTICAL_MIXING_SCHEMES = frozenset(
+    {"none", "constant", "richardson", "tke", "catke", "kpp"}
+)
+
+
 class VerticalMixingConfig(NamedTuple):
     """Top-level vertical mixing configuration."""
-    scheme: str = "constant"  # "constant", "richardson", "kpp", "tke", "catke", "none"
+    scheme: str = "constant"  # one of VALID_VERTICAL_MIXING_SCHEMES
     constant: ConstantVerticalMixingConfig = ConstantVerticalMixingConfig()
     richardson: RichardsonVerticalMixingConfig = RichardsonVerticalMixingConfig()
     kpp: KPPConfig = KPPConfig()
