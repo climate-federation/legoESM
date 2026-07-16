@@ -609,17 +609,26 @@ from legoesm.experiments.matrix.namelist import write_case_namelist
 # fluxes shared by both cores), so they are core-independent by construction.
 _SW_CORE_CHOICES = ("production", "fb")
 _SW_CORE = "production"
-# --fv3-native-grid (phase-4c): swap the cube SW production-lane grid from
-# the legacy equiangular gnomonic to the FV3-native ED gnomonic (+ duo
-# halos) — the grid family certified bit-exact in the phase-4 one-step
-# oracles (c_sw / d_sw / divergence_corner_duo).  The ED *metric* family
+# --fv3-native-grid (phase-4c): build the cube SW production-lane grid as
+# the FV3-native PRODUCTION config — ED gnomonic + duo halos (order-4) —
+# instead of the legacy equiangular, no-duo default.  The ED gnomonic
+# family is the one certified bit-exact in the phase-4 one-step oracles
+# (c_sw / d_sw / divergence_corner_duo).  The ED *metric* family
 # (dxc/dyc/area/sin_sg) flows through create_cubed_sphere_cdgrid's
 # gnomonic="auto" provenance read, so the A-L RK3 solver runs on it
 # unchanged.  fv3_native_angles (cross-face seam angles) is deliberately
 # NOT enabled: those O(1) seam values are tuned-incompatible with the
 # shipped A-L operators and are a native-FB-core concern
-# (cubed_sphere_cdgrid.py:639).  This makes the grid the ONLY variable in
-# an ED-vs-equiangular cube-imprint A/B (solver + config + IC held fixed).
+# (cubed_sphere_cdgrid.py:639).
+#
+# HONESTY (codex p4c flag-review P1): vs the legacy default this flips TWO
+# coupled things — gnomonic family (equiangular->ED) AND cross-face halo
+# (none->duo for Williamson; order-2->4 for modons).  Duo halos change
+# operator behaviour, not only geometry, so the resulting A/B is "legacy
+# default vs FV3-native production config", NOT an isolated ED-vs-
+# equiangular metric swap.  Solver, config, IC, dt, resolution ARE held
+# fixed.  Incompatible with --sw-core fb (which rebuilds its own grid);
+# that combination raises.
 _FV3_NATIVE_GRID = False
 
 
@@ -2429,7 +2438,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
     test_num = tc.run_kwargs["test_num"]
 
     if tc.grid_type == "cubed_sphere":
-        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere import (
+            create_cubed_sphere, create_fv3_native_cubed_sphere)
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
         from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
@@ -2454,14 +2464,34 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # (day-10 max|u| 18 m/s vs 111 m/s, peak vorticity 0.7x vs 6.6x
         # initial).  Williamson cases keep the production non-duogrid
         # path (balanced flows; calibrated separately).
+        if _FV3_NATIVE_GRID and _SW_CORE == "fb":
+            # The FB core rebuilds its OWN grid (_fb_cube_sw_model below),
+            # so --fv3-native-grid would be silently discarded — a
+            # contradictory request.  Fail loudly rather than mislabel an
+            # FB run as native (codex p4c flag-review P1; main() rejects it
+            # too, this is the defense-in-depth for non-CLI callers).
+            raise ValueError(
+                "--fv3-native-grid is incompatible with --sw-core fb: the "
+                "FB core rebuilds its own grid, so the native-grid "
+                "selection would be silently discarded. Use --sw-core "
+                "production (the default).")
         if _FV3_NATIVE_GRID:
-            # phase-4c: the FV3-native ED gnomonic + duo halos on ALL cube
-            # SW cases.  omega=0 for the non-rotating modons (test 8),
-            # rotating otherwise (constants.Omega).  The model builds its
-            # cdgrid internally and auto-selects ED metrics from the grid
-            # provenance; see the _FV3_NATIVE_GRID module note.
+            # phase-4c: the FV3-native production grid config = ED gnomonic
+            # + duo halos (order-4) on ALL cube SW cases.  omega=0 for the
+            # non-rotating modons (test 8), rotating otherwise
+            # (constants.Omega).  The model builds its cdgrid internally and
+            # auto-selects ED metrics from the grid provenance.
+            #
+            # NB (codex p4c flag-review P1): vs the legacy default this
+            # changes TWO things together — the gnomonic family
+            # (equiangular->ED) AND the cross-face halo (none->duo order-4
+            # for W2/W5/W6; order-2->order-4 for modons).  Duo halos alter
+            # operator behaviour, not only geometry.  So the A/B is
+            # "legacy default vs FV3-native production config", NOT an
+            # isolated ED-vs-equiangular metric swap — attribute the
+            # imprint change to the native config bundle, not the grid
+            # metrics alone.  See the _FV3_NATIVE_GRID module note.
             from legoesm import constants
-            from legoesm.grids.cubed_sphere import create_fv3_native_cubed_sphere
             grid = create_fv3_native_cubed_sphere(
                 n, omega=(0.0 if test_num == 8 else constants.Omega),
                 use_duogrid=True, k2e_nord=4)
@@ -7716,14 +7746,18 @@ def build_parser() -> argparse.ArgumentParser:
              "(pure transport, model.step never called).")
     p.add_argument(
         "--fv3-native-grid", action="store_true",
-        help="Cube SW production lane: build the grid with the FV3-native "
-             "ED gnomonic + duo halos (create_fv3_native_cubed_sphere) "
-             "instead of the legacy equiangular gnomonic.  The grid family "
-             "certified bit-exact in the phase-4 one-step oracles; the ED "
-             "metric family flows through create_cubed_sphere_cdgrid's "
-             "gnomonic='auto'.  Enables the ED-vs-equiangular cube-imprint "
-             "A/B with solver+config+IC held fixed.  Production core only "
-             "(--sw-core fb rebuilds its own grid; non-cube grids ignore).")
+        help="Cube SW production lane: build the grid as the FV3-native "
+             "PRODUCTION config — ED gnomonic + duo halos "
+             "(create_fv3_native_cubed_sphere) — instead of the legacy "
+             "equiangular, no-duo default.  The ED gnomonic family is the "
+             "one certified bit-exact in the phase-4 one-step oracles; its "
+             "metrics flow through create_cubed_sphere_cdgrid's "
+             "gnomonic='auto'.  NOTE: vs the default this flips BOTH the "
+             "gnomonic family AND the cross-face halo (duo), so it is a "
+             "'legacy default vs FV3-native config' A/B, not an isolated "
+             "ED-vs-equiangular swap (solver+config+IC+dt+resolution held "
+             "fixed).  Production core only — incompatible with --sw-core "
+             "fb (which rebuilds its own grid); non-cube grids ignore it.")
     p.add_argument(
         "--resolution", type=str, default=None,
         help="Override baseline resolution (e.g. C48, 90x180, ico6)")
@@ -7807,6 +7841,13 @@ def main():
 
     # phase-4c: stash the FV3-native ED-grid selection for the cube SW
     # production lane in run_shallow_water (see the _FV3_NATIVE_GRID note).
+    # Reject the contradictory --fv3-native-grid + --sw-core fb up front
+    # (the FB core rebuilds its own grid; codex flag-review P1).
+    if args.fv3_native_grid and args.sw_core == "fb":
+        parser.error(
+            "--fv3-native-grid is incompatible with --sw-core fb: the FB "
+            "core rebuilds its own grid, so the native-grid selection would "
+            "be silently discarded. Drop one of the two flags.")
     global _FV3_NATIVE_GRID
     _FV3_NATIVE_GRID = args.fv3_native_grid
 

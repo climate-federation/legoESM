@@ -38,7 +38,9 @@ def test_fv3_native_grid_flag_round_trip():
 
 
 def _spy_native_ctor():
-    """Patch the source function run_shallow_water imports at call time."""
+    """Patch the source function run_shallow_water imports at call time,
+    capturing both the kwargs AND the returned grid so a test can prove ED
+    provenance actually reached the model."""
     import legoesm.grids.cubed_sphere as cs
     calls = {}
     orig = cs.create_fv3_native_cubed_sphere
@@ -46,7 +48,9 @@ def _spy_native_ctor():
     def _spy(n, **kw):
         calls["n"] = n
         calls["kw"] = dict(kw)
-        return orig(n, **kw)
+        grid = orig(n, **kw)
+        calls["grid"] = grid
+        return grid
 
     cs.create_fv3_native_cubed_sphere = _spy
     return cs, orig, calls
@@ -71,9 +75,31 @@ def test_run_shallow_water_fv3_native_grid_w2_branch(tmp_path):
     assert calls["kw"].get("k2e_nord") == 4
     # Williamson runs rotating: omega == constants.Omega
     assert abs(calls["kw"].get("omega") - constants.Omega) < 1e-12
-    # ED provenance actually reached the model (not the legacy equiangular)
+    # ED provenance actually reached the model, with duo halos on (codex
+    # flag-review P2): the constructed grid is gnomonic_ed, not equiangular
+    grid = calls["grid"]
+    assert grid.gnomonic_form == "ed"
+    assert grid.duogrid is not None
     assert status in ("PASS", "FAIL")
     assert "L2=" in notes
+
+
+def test_fv3_native_grid_incompatible_with_fb_core_raises(tmp_path):
+    """--fv3-native-grid + --sw-core fb is contradictory (the FB core
+    rebuilds its own grid) — run_shallow_water must raise, not silently run
+    a non-native FB grid (codex flag-review P1)."""
+    import pytest
+    mod = _load_matrix_module()
+    mod._FV3_NATIVE_GRID = True
+    mod._SW_CORE = "fb"
+    try:
+        tc = mod.TestCase("shallow_water", "williamson2", "cubed_sphere",
+                          "C12", "none", 5, 1, {"test_num": 2})
+        with pytest.raises(ValueError, match="incompatible with --sw-core fb"):
+            mod.run_shallow_water(tc, tmp_path, 0.02)
+    finally:
+        mod._FV3_NATIVE_GRID = False
+        mod._SW_CORE = "production"
 
 
 def test_run_shallow_water_fv3_native_grid_modon_nonrotating(tmp_path):
