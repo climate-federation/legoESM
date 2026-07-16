@@ -1315,14 +1315,14 @@ def fv_tp_2d(q: fort, crx: fort, cry: fort, npx: int, npy: int, hord: int,
             if damp_c > 1.0e-4:
                 damp = (damp_c * gridstruct["da_min"]) ** (nord + 1)
                 deln_flux(nord, is_, ie, js, je, npx, npy, damp, q,
-                          fx, fy, gridstruct, bd, mass=mass)
+                          fx, fy, gridstruct, bd, mass=mass, duogrid=duogrid)
         if (damp_smag is not None) and (damp_km is not None) \
                 and (mass is not None):
             if damp_smag > 1.0e-3:
                 damp = damp_smag * gridstruct["da_min"]   # 2nd order
                 deln_flux(0, is_, ie, js, je, npx, npy, damp, q,
                           fx, fy, gridstruct, bd, mass=mass,
-                          damp_km=damp_km)
+                          damp_km=damp_km, duogrid=duogrid)
     else:
         # ---------------------------------
         # For transport of delp, vorticity
@@ -1337,12 +1337,12 @@ def fv_tp_2d(q: fort, crx: fort, cry: fort, npx: int, npy: int, hord: int,
             if damp_c > 1.0e-4:
                 damp = (damp_c * gridstruct["da_min"]) ** (nord + 1)
                 deln_flux(nord, is_, ie, js, je, npx, npy, damp, q,
-                          fx, fy, gridstruct, bd)
+                          fx, fy, gridstruct, bd, duogrid=duogrid)
         if (damp_smag is not None) and (damp_km is not None):
             if damp_smag > 1.0e-3:
                 damp = damp_smag * gridstruct["da_min"]   # 2nd order
                 deln_flux(0, is_, ie, js, je, npx, npy, damp, q,
-                          fx, fy, gridstruct, bd, damp_km=damp_km)
+                          fx, fy, gridstruct, bd, damp_km=damp_km, duogrid=duogrid)
 
 
 # =====================================================================
