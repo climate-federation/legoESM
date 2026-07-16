@@ -427,3 +427,58 @@ def test_barotropic_wide_halo_refused_off_latlon():
     with _pytest.raises(SystemExit, match="wide-halo"):
         _apply_drag_iwm_overrides(
             args, "cubed_sphere", None, None, _StubCfg(), object())
+
+
+# ===========================================================================
+# Double-diffusive mixing (zdfddm) reachability
+# ===========================================================================
+
+def test_ddm_flag_flows_to_config():
+    """--ddm round-trips into VerticalMixingConfig.ddm.
+
+    Before this flag existed, DDM was UNREACHABLE: it is implemented and
+    oracle-pinned (PR #1074), defaults OFF, and its only gate --
+    ``DoubleDiffusionConfig.enabled`` -- is a BOOL. Only ``:float`` fields are
+    ``__param_spec__``-eligible, so ``--params`` can set ddm's rn_avts/rn_hsbfr
+    but can NEVER set the switch that makes them do anything.
+    """
+    off = build_config_from_args(parse_args(["--grid", "latlon"]))
+    assert off.vertical_mixing.ddm.enabled is False, "default must stay OFF"
+
+    on = build_config_from_args(parse_args(["--grid", "latlon", "--ddm"]))
+    assert on.vertical_mixing.ddm.enabled is True
+
+
+def test_ddm_float_knobs_stay_on_params_not_flags():
+    """The float knobs are reachable via --params, per the repo convention that
+    spec'd float tunables need no dedicated flag -- so this PR adds ONLY the
+    bool gate. Pins that they really are reachable that way."""
+    from legoesm.ocean.physics.vertical_mixing.double_diffusion import (
+        __param_spec__ as ddm_spec,
+    )
+    params = ddm_spec["DoubleDiffusionConfig"]["params"]
+    assert {"rn_avts", "rn_hsbfr"} <= set(params)
+    assert ddm_spec["DoubleDiffusionConfig"]["scheme_key"] == "ocean.vm.ddm"
+    # and `enabled` must NOT be spec'd (it is a bool -- not spec-eligible)
+    assert "enabled" not in params
+
+
+@pytest.mark.parametrize("scheme", [None, "catke", "kpp"])
+@pytest.mark.parametrize("flag,attr", [("--iwm", "iwm"), ("--ddm", "ddm")])
+def test_additive_mixing_flags_reach_every_scheme(scheme, flag, attr):
+    """iwm/ddm are ADDITIVE onto avt/avs/avm inside compute_vertical_K_profiles,
+    AFTER the primary closure (NEMO zdfphy ordering) -- so they are independent
+    of which closure ran and must survive every --vertical-mixing-scheme.
+
+    REGRESSION: the catke branch of build_vertical_mixing_config_from_args
+    returned early WITHOUT passing iwm=, so `--iwm --vertical-mixing-scheme
+    catke` parsed fine and then ran with internal-wave mixing silently OFF.
+    Only the KPP-tuning flags are legitimately inapplicable to catke.
+    """
+    argv = ["--grid", "latlon", flag]
+    if scheme is not None:
+        argv += ["--vertical-mixing-scheme", scheme]
+    vm = build_config_from_args(parse_args(argv)).vertical_mixing
+    assert getattr(vm, attr).enabled is True, (
+        f"{flag} was silently dropped for --vertical-mixing-scheme {scheme}"
+    )

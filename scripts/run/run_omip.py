@@ -148,8 +148,20 @@ def build_vertical_mixing_config_from_args(
     if scheme == "catke":
         # CATKE (Wagner 2025) uses its own VerticalMixingConfig.catke defaults
         # (calibrated); the kpp-tuning CLI flags don't apply.  Implicit-only.
+        #
+        # iwm/ddm DO apply: both are ADDITIVE onto avt/avs/avm INSIDE
+        # compute_vertical_K_profiles, AFTER the primary closure (NEMO's zdfphy
+        # ordering), so they are independent of which closure ran.  This branch
+        # previously omitted them, silently DROPPING `--iwm` whenever the user
+        # also passed `--vertical-mixing-scheme catke` -- the flag parsed, and
+        # the run just had no internal-wave mixing.  Only the KPP-tuning flags
+        # are legitimately inapplicable here.
         from legoesm.ocean.physics.vertical_mixing.config import CATKEConfig
-        return VerticalMixingConfig(scheme="catke", catke=CATKEConfig())
+        return VerticalMixingConfig(
+            scheme="catke", catke=CATKEConfig(),
+            iwm=build_iwm_config_from_args(args),
+            ddm=build_ddm_config_from_args(args),
+        )
     return VerticalMixingConfig(
         scheme=scheme,
         kpp=KPPConfig(
@@ -163,7 +175,21 @@ def build_vertical_mixing_config_from_args(
             langmuir_number_default=args.langmuir_number_default,
         ),
         iwm=build_iwm_config_from_args(args),
+        ddm=build_ddm_config_from_args(args),
     )
+
+
+def build_ddm_config_from_args(args):
+    """Resolve the zdfddm (Merryfield 1999 / Large-CVMix) CLI flag into config.
+
+    Only ``enabled`` is threaded: the float knobs (rn_avts, rn_hsbfr) carry a
+    ``__param_spec__`` and so are reachable via ``--params ocean.vm.ddm.*``,
+    which is the repo's convention for spec'd float tunables.
+    """
+    from legoesm.ocean.physics.vertical_mixing.double_diffusion import (
+        DoubleDiffusionConfig,
+    )
+    return DoubleDiffusionConfig(enabled=bool(getattr(args, "ddm", False)))
 
 
 def build_iwm_config_from_args(args) -> "IWMConfig":
@@ -553,6 +579,18 @@ def parse_args(argv: list[str] | None = None):
                         "it so chunk x stencil-reach <= min band height.")
     # --- internal wave-driven mixing (NEMO zdfiwm, de Lavergne 2020) ---
     _IWM_DEF = _DEFAULT_IWM_CONFIG
+    # Double-diffusive mixing (NEMO zdfddm / Large-CVMix). ADDITIVE like --iwm
+    # and applied after the primary closure, so it is scheme-independent.
+    # ``DoubleDiffusionConfig.enabled`` is a BOOL, and only ``:float`` fields are
+    # __param_spec__-eligible -- so --params can reach ddm's rn_avts/rn_hsbfr but
+    # can NEVER reach this gate. Without this flag the whole scheme was
+    # unreachable: implemented, oracle-pinned (PR #1074), and impossible to turn
+    # on from any driver.
+    p.add_argument("--ddm", action="store_true",
+                   help="Enable double-diffusive mixing (salt fingering + "
+                        "diffusive convection; additive avt/avs). Requires "
+                        "implicit vertical mixing. Default off => bit-exact "
+                        "legacy. Tune via --params ocean.vm.ddm.rn_avts=...")
     p.add_argument("--iwm", action="store_true",
                    help="Enable internal wave-driven mixing (NEMO zdfiwm; "
                         "additive avt/avm through the implicit vertical "
