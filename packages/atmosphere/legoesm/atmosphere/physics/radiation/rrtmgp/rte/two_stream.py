@@ -292,8 +292,10 @@ def _accumulate_over_gpoints(step_fn, n_gpt, init_val, gpoint_batch_size,
   launches one tiny kernel per g-point and starves the GPU (~26x slower in a
   GPU microbench); blocking restores parallelism.  The forward result differs
   from the scan path only by summation re-association (validated bit/ulp-close).
-  NOT for reverse-mode AD at high resolution: it holds ``gpoint_batch_size``
-  g-points' activations for the backward pass.
+  Reverse-mode-AD safe when ``checkpoint`` (gpoint_checkpoint) is True: the
+  block scan body is checkpointed (nothing_saveable), so backward recompute
+  bounds peak memory to a single ``gpoint_batch_size`` block; with checkpoint
+  False the scan is plain (forward/inference).
   """
   if gpoint_batch_size and gpoint_batch_size > 0:
     bs = int(gpoint_batch_size)
@@ -319,7 +321,18 @@ def _accumulate_over_gpoints(step_fn, n_gpt, init_val, gpoint_batch_size,
       new = jax.tree.map(lambda c, s: c + s.astype(c.dtype), carry, block_sum)
       return new, None
 
-    fluxes, _ = jax.lax.scan(block_step, init_val, jnp.arange(n_blocks))
+    # Checkpoint the block body for reverse-mode AD: without this the
+    # uncheckpointed scan saves every block's activations, so backward memory
+    # scales to ALL g-points (n_blocks x bs), not one block — the OOM the batch
+    # path is meant to avoid.  ``block_step`` is ONE vmapped body (bs g-points),
+    # so nothing_saveable recompute bounds backward memory to a single block
+    # while the compile stays a single reused kernel (no prevent_cse Ng-fold
+    # blow-up — that pathology is specific to the per-g-point scan path).
+    block_step_ckpt = (
+        jax.checkpoint(block_step, policy=jax.checkpoint_policies.nothing_saveable)
+        if checkpoint else block_step
+    )
+    fluxes, _ = jax.lax.scan(block_step_ckpt, init_val, jnp.arange(n_blocks))
     return fluxes
 
   # Memory-frugal checkpointed scan (training / default).
