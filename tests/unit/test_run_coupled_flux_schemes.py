@@ -9,6 +9,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import sys
+
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
@@ -414,3 +416,76 @@ def test_ice_bulk_offers_every_scheme_the_dispatch_accepts(scheme):
         assert cfg is None      # == the default, nothing requested
     else:
         assert cfg.bulk_scheme == scheme
+
+
+def test_main_really_passes_the_cli_ice_config_to_the_driver(monkeypatch):
+    """EXECUTION-level pin: run main() and capture what the driver receives.
+
+    The AST test above proves the name assigned from build_sea_ice_config is
+    the name passed as ice_config=. That is NOT sufficient (codex): main()
+    REBINDS ice_config through apply_coupled_params when --params is given, so
+    a refactor that reassigns or sanitizes it to None in between still matches
+    by name. Only running the thing settles it.
+
+    CoupledESMDriver is imported inside main(), so patch it at its source
+    module. The recorder raises immediately -- we want the constructor
+    ARGUMENTS, not a driver (which would build grids and cost far more than a
+    unit test can afford).
+    """
+    import legoesm.driver.coupled_esm_driver as ced
+
+    captured = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _recorder(*a, **kw):
+        captured.update(kw)
+        raise _Stop
+
+    monkeypatch.setattr(ced, "CoupledESMDriver", _recorder)
+    monkeypatch.setattr(sys, "argv", ["run_coupled", "--ice-snow", "--days", "0"])
+
+    with pytest.raises(_Stop):
+        mod.main()
+
+    ice = captured.get("ice_config")
+    assert ice is not None, (
+        "main() passed ice_config=None despite --ice-snow -- the flag parsed "
+        "and was dropped before the driver"
+    )
+    assert ice.snow.enabled is True, "--ice-snow did not survive to the driver"
+
+
+def test_main_ice_config_survives_the_params_rebinding(monkeypatch):
+    """The specific hole the AST test cannot see (codex): --params REBINDS
+    ice_config via apply_coupled_params. A rebinding that dropped the CLI
+    config would keep the same variable name and pass the AST check.
+    """
+    import json
+    import tempfile
+    from pathlib import Path
+
+    import legoesm.driver.coupled_esm_driver as ced
+
+    captured = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _recorder(*a, **kw):
+        captured.update(kw)
+        raise _Stop
+
+    monkeypatch.setattr(ced, "CoupledESMDriver", _recorder)
+    pf = Path(tempfile.mkdtemp()) / "params.json"
+    pf.write_text(json.dumps({"ice.ridging.e_star": 0.5}))
+    monkeypatch.setattr(sys, "argv", ["run_coupled", "--ice-snow",
+                                      "--params", str(pf), "--days", "0"])
+
+    with pytest.raises(_Stop):
+        mod.main()
+
+    ice = captured["ice_config"]
+    assert ice.snow.enabled is True, "--ice-snow lost to the --params rebinding"
+    assert ice.ridging.e_star == 0.5, "--params did not apply"
