@@ -214,14 +214,31 @@ column (j6-10) is VERTICALLY HOMOGENISED — uniform T=15.24 from surface to
 thermocline 15.1->13.3 over the top 428 m); the missing surface heat is buried
 (+1.9 C too warm at 428 m). No thermocline -> no baroclinic thermal-wind shear
 -> weak surface gyre (worst in the north where stratification is weakest).
-This is the SAME over-mixing family chased all campaign, now localised BELOW
-the surface ML that the mxl3 fix (§F) cured: a residual deep-mixing lever
-eroding the thermocline over years. Exact source TBD (candidates: EVD reach /
-convective-adjustment firing on a marginal column, TKE mxl still too deep at
-depth, background/numerical mixing from the fct2 tracer advection). Column is
-NEUTRAL now (N²≈0, uniform T,S), so it is the mixed END STATE — the mechanism
-must be caught mid-erosion (dump avt / trace the thermocline over the first
-1-2 years). This is a REAL lever to pursue, not a floor.
+ISOLATION EXPERIMENTS (2026-07-16, 5-yr runs + single-column avt certificate):
+- **TIME EVOLUTION reframes it**: NEMO does NOT preserve the IC thermocline
+  either — at yr1 NEMO's subtropical contrast is only 0.11 (IC was ~5.1), then
+  it BUILDS UP: 0.11→0.44→0.82→1.10→1.34 over yrs 1-5 (Ekman-pumping spin-up of
+  the subtropical thermocline). legoESM collapses to 0.00 by day 182 and stays
+  flat. So the failure is INABILITY TO ACCUMULATE stratification over years,
+  not a one-time over-mix.
+- **Iso diffusion is NOT the eroder**: kappa_Redi=0 (GYRE_KREDI=0) 5-yr run
+  leaves the thermocline just as eroded (contrast 0.00). [The S_max=0.005 vs
+  NEMO 0.01 mismatch found here IS real and is now FIXED (redi_S_max=0.01) as a
+  matched-parameter fix, but it is thermocline-neutral.]
+- **EVD contributes only partially**: GYRE_CONV=none 5-yr → contrast 0.079
+  (vs baseline 0.00, NEMO 1.34). So EVD over-fires vs NEMO (a trigger
+  difference) but is not the dominant eroder.
+- **Interior background avt MATCHES NEMO EXACTLY**: single-column certificate
+  (NEMO EXP_15D day-5 en/T/S seeded into legoESM's closure) gives subtropical
+  interior K_H = 1.20e-5 at every level below the ML == NEMO avt_k. And
+  background 1.2e-5 mixes only ~14 m in 6 months — so the 428 m homogenisation
+  is NOT slow interior diffusion.
+- **=> Dominant eroder = DEEP WINTER CONVECTIVE mixing** (reaches 428 m) from
+  the TKE convective response itself (not EVD, not background, not iso, not
+  advection-tested-yet), OR the vertical tracer advection — must be caught
+  mid-erosion by INSTRUMENTING legoESM's own avt over the seasonal cycle
+  (harness dumps only T/S/u/v/eta today). This is the concrete next step and
+  the real remaining lever. NOT a resolution floor.
 
 **Minors (low priority):** TKE buoyancy N² adiabatic → in-situ; residual
 winter-ML depth (111 vs 91 m at day 15) — candidates: EVD reach interplay,

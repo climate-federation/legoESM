@@ -769,6 +769,10 @@ _NEMO_GYRE_CARD_CONFIG = NEMOModelRecipeConfig(
     C_smag_lap=0.0,                    # NO Smagorinsky
     A_h_floor=1.0e5,                   # inert while A_h_lat_scaling=False; set = A_h defensively
     kappa_Redi=1000.0,                 # ln_traldf_iso: 1/2*rn_Ud*rn_Ld = 1000
+    redi_S_max=0.01,                   # NEMO rn_slpmax=0.01 (was 0.005 default) — real
+                                       # matched-parameter fix; thermocline-neutral
+                                       # (kappa_Redi=0 isolation leaves the erosion
+                                       # unchanged, plan §G) but the correct NEMO value
     bottom_drag_scheme="nemo_quadratic",  # namdrg ln_non_lin, rn_Cd0=1e-3, rn_ke0=2.5e-3
 )
 
