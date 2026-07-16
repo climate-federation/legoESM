@@ -247,20 +247,35 @@ ISOLATION EXPERIMENTS (2026-07-16, 5-yr runs + single-column avt certificate):
   in spring (d30 contrast 0.22 → d61 0.00). Each summer surface heating tries
   to restratify the top but the sustained mixing homogenises it as fast as it
   is applied → mixing wins → thermocline never rebuilds.
-- **=> It is NOT a single eroder term but an EQUILIBRIUM-SELECTION problem**:
-  the coupled TKE-stratification system is BISTABLE (mixed vs stratified);
-  from the same IC legoESM settles on the MIXED branch, NEMO on the
-  STRATIFIED branch. The lever is the summer TKE DECAY in near-neutral water:
-  legoESM's e stays ~1000x too high so restratification can never win. NEMO's
-  mxl3 length + √(2e)/N formula MATCH legoESM's (checked), so the divergence
-  is in the prognostic TKE ENERGY budget (dissipation/production/advection
-  balance in a near-neutral column), not the diagnostic length. NB the §F
-  l_eps fix (dissipation length √(lup·ldn) ≥ min(lup,ldn)) slightly REDUCES
-  dissipation in this regime — verify it did not deepen the lock; the erosion
-  predates it (present in the mxl3/l_k run too). CONCRETE NEXT: compare
-  legoESM's vs NEMO's summer subtropical TKE budget term-by-term (need a NEMO
-  summer avt/en dump — EXP_15D is winter-only; run a NEMO summer-solstice
-  restart). NOT a resolution floor.
+- **=> It is a BISTABILITY / REBUILD-FAILURE, not a single eroder term.**
+  NEMO SUMMER dump obtained (EXP_LONG has 30-day restarts with instantaneous
+  en/avt_k; day1260/1620 are spun-up summers): NEMO's subtropical TKE decays
+  to en=1.0e-6 (the rn_emin FLOOR) below ~55 m, avt→background 1.2e-5, thermo-
+  cline contrast 3.17. legoESM's summer en stays 8e-4..1.9e-3 (~1000x NEMO) to
+  380 m. First-year timeline (both homogenise by winter day90, contrast 0):
+  at spring day150 NEMO's deep en drops 220x to the floor and the thermocline
+  REBUILDS (0→0.40→1.07 by day180); legoESM's en stays 1.4e-3 and it never
+  rebuilds. **DECISIVE IC-SWAP TEST** (legoESM from NEMO's spun-up stratified
+  summer T,S + matched summer forcing phase, GYRE_IC_NEMO+GYRE_TOFFSET_DAY):
+  legoESM HOLDS the thermocline through summer (3.2→1.9 at day90, NOT
+  catastrophic), winter homogenises it (like NEMO), then the NEXT summer FAILS
+  to rebuild (0.04→0.02). So legoESM's mixing is NOT catastrophically too
+  strong — the specific failure is the MIXED→STRATIFIED transition (rebuild).
+- **RULED OUT as the lock lever (all 5-yr / 2-yr runs, subtropical contrast
+  stays ~0)**: iso diffusion (GYRE_KREDI=0), Langmuir (GYRE_LC=0), TKE
+  dissipation ×3 (GYRE_CEPS=2.0), shear-production mode (GYRE_SHEAR=pre_solve,
+  the NEMO avm·S² form); EVD (GYRE_CONV=none) only partial (0.079). Interior
+  background avt MATCHES NEMO (1.2e-5). TKE floors MATCH NEMO
+  (tke_background=1e-6=rn_emin, tke_surface_min=1e-4=rn_emin0). c_k/c_eps match
+  rn_ediff/rn_ediss. So NO TKE-scheme knob enables the rebuild.
+- **CONCRETE NEXT (leading hypothesis)**: the rebuild needs a SHALLOW summer
+  mixed layer to form (heat concentrating in the top ~30 m to seed
+  restratification, as NEMO does); legoESM's residual mixed-state TKE +
+  surface-heat vertical distribution prevents it. Check the summer surface
+  heat-flux depth distribution / 2-band solar penetration + whether a shallow
+  warm ML forms at all from a mixed state; and whether it is DYNAMICAL (weak
+  gyre → weak Ekman downwelling can't build the thermocline, the coupled
+  weak-gyre↔no-thermocline loop). NOT a resolution floor, NOT a simple param.
 
 **Minors (low priority):** TKE buoyancy N² adiabatic → in-situ; residual
 winter-ML depth (111 vs 91 m at day 15) — candidates: EVD reach interplay,
