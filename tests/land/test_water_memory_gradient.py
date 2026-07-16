@@ -174,6 +174,28 @@ def test_forward_window_diag_runs_and_detects_onset():
     assert np.all(np.asarray(msnow) < 1.0)   # no snow in the warm synthetic case
 
 
+def test_forward_window_diag_lai_onset_gates_on_greenup():
+    """With an lai_fn that stays LEAFLESS (LAI=0) for the first `g` steps then greens up,
+    onset must land exactly at `g` -- not at step 0 (snow-free from the start). This is
+    the LAI-based green-up onset: it keeps the leafless LAI~0 canopy-Newton singularity
+    (TODO-1) out of the differentiated boreal/arctic gradient path, instead of firing the
+    moment the snow clears. Without lai_fn the warm synthetic onsets at 0 (covered above)."""
+    cfg, F, doy_seq, late_flags, lat, st0 = _case()
+    g = 20                                                     # green-up step
+    ncol = _NCOL
+
+    def lai_fn(theta_top, doy):
+        # leafless (0) before green-up doy, leafed-out (2) after -- keyed off doy so the
+        # scan sees a step-varying LAI without threading a step counter into lai_fn.
+        return jnp.where(doy >= float(np.asarray(doy_seq)[g]), 2.0, 0.0) * jnp.ones(ncol)
+
+    ok, msnow, mtsoil, onset = wm._forward_window_diag(
+        st0, F, doy_seq, cfg, lat, _DT, None,
+        min_onset_doy=float(np.asarray(doy_seq)[0]), lai_fn=lai_fn, lai_thresh=0.5)
+    onset = np.asarray(onset)
+    assert np.all(onset == g), f"LAI-gated onset should fire at green-up step {g}, got {onset}"
+
+
 def test_spin_forward_is_nograd_and_finite():
     """The no-grad spin-to-perturb-point runs and returns a finite state."""
     cfg, F, doy_seq, late_flags, lat, st0 = _case()

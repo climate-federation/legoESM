@@ -299,19 +299,22 @@ def monthly_memory_kernel(
 
 
 def _forward_window_diag(state0, forcing_seq, doy_seq, config, lat, dt, land_params_fn,
-                         *, snow_thresh=1.0, freeze_margin=0.5, min_onset_doy=0.0):
+                         *, snow_thresh=1.0, min_onset_doy=0.0,
+                         lai_fn=None, lai_thresh=0.5):
     """No-grad forward pass over the window -> per-cell diagnostics:
       good       : GPP + state stay FINITE throughout (no revert guard here, so a NaN
                    cell stays NaN; exclude it from the summed loss).
       max_snow   : max snow_depth [kg/m2] over the window.
       min_tsoil  : min top-soil temperature [K] over the window.
-      onset_step : FIRST window step at which the cell is snow-free (< snow_thresh) AND
-                   thawed (T_soil_top > T_freeze + freeze_margin) AND doy >= min_onset_doy
-                   -- the growing-season onset.  ``nsteps`` (sentinel) if never reached.
-    max_snow/min_tsoil flag SNOW / FREEZE-THAW cells where the canopy Newton solve is
-    near-singular (TODO-1) -> a contaminated *gradient* even with finite forward GPP.
-    onset_step drives the per-cell growing-season mode, which injects the perturbation
-    only AFTER thaw so the gradient never flows back through the singularity."""
+      onset_step : FIRST window step where the canopy has GREENED UP (LAI > lai_thresh)
+                   AND is snow-free (< snow_thresh) AND doy >= min_onset_doy -- the
+                   growing-season onset.  ``nsteps`` (sentinel) if never reached.
+    The onset gates on LAI, not just snow/thaw: the TODO-1 canopy-Newton singularity is
+    at LAI->0 (leafless), which PERSISTS for weeks after snowmelt.  Injecting the
+    growing-season perturbation only AFTER green-up keeps the LAI~0 singular steps out
+    of the differentiated gradient path -> boreal/arctic cells stay clean WITHOUT
+    masking.  ``lai_fn(theta_top, doy) -> lai_col``; if None, LAI is treated as
+    always-high (onset gated by snow only -- fine for the warm synthetic selftest)."""
     ncol = state0.theta_soil.shape[0]
     nsteps = int(np.asarray(forcing_seq.T_lowest).shape[0])
     steps = jnp.arange(nsteps)                                  # int64 under x64, int32 else
@@ -319,14 +322,16 @@ def _forward_window_diag(state0, forcing_seq, doy_seq, config, lat, dt, land_par
     def body(carry, xs):
         st, ok, msnow, mtsoil, onset, found = carry
         Fi, doy_i, step_i = xs
-        # onset criterion on the INCOMING state (so injecting at onset_step lands on a
-        # snow-free, thawed cell) -- first step meeting it, at/after min_onset_doy.
-        is_free = ((st.snow_depth < snow_thresh)
-                   & (st.T_soil[:, 0] > constants.T_freeze + freeze_margin)
-                   & (doy_i >= min_onset_doy))
-        newly = is_free & (~found)
+        # onset on the INCOMING state: greened-up (LAI>thresh, so the canopy Newton is
+        # well-conditioned) AND snow-free, at/after min_onset_doy.
+        lai = (lai_fn(st.theta_soil[:, 0], doy_i) if lai_fn is not None
+               else jnp.full(ncol, 1e3))
+        is_grown = ((lai > lai_thresh)
+                    & (st.snow_depth < snow_thresh)
+                    & (doy_i >= min_onset_doy))
+        newly = is_grown & (~found)
         onset = jnp.where(newly, step_i, onset)
-        found = found | is_free
+        found = found | is_grown
         new_st, gpp = _step_and_gpp(st, Fi, doy_i, config, lat, dt, land_params_fn)
         ok = ok & jnp.isfinite(gpp) & jnp.isfinite(new_st.theta_soil).all(axis=-1)
         msnow = jnp.maximum(msnow, new_st.snow_depth)
@@ -379,6 +384,11 @@ def run_real(args) -> int:
 
     update_lp = make_step_land_params_updater(gsd, config.surface_scheme)
     lp_fn = lambda theta_top, doy: update_lp(theta_top, doy, float(year))[0]
+    # LAI column (the [1] of the updater) drives the LAI-based green-up onset: the
+    # per-cell growing-season injection fires only once the canopy has leafed out
+    # (LAI > --onset-lai-thresh), keeping the leafless LAI~0 canopy-Newton singularity
+    # (TODO-1) out of the differentiated boreal/arctic gradient path.
+    lai_fn = lambda theta_top, doy: update_lp(theta_top, doy, float(year))[1]
 
     # step times [s since Jan 1]: spin Jan1->perturb_doy (no grad); window perturb_doy->end
     n_spin = int(args.perturb_doy * DAY / dt)
@@ -422,12 +432,13 @@ def run_real(args) -> int:
     doy_win = jnp.asarray(win_t / DAY)
     late_flags = jnp.asarray((win_t / DAY) >= args.late_doy)
 
-    # per-cell onset: first snow-free/thawed window step at/after --onset-min-doy
-    # (default = window start).  Drives the growing-season mode.
+    # per-cell onset: first greened-up (LAI>thresh) + snow-free window step at/after
+    # --onset-min-doy (default = window start).  Drives the growing-season mode.
     min_onset = args.onset_min_doy if args.onset_min_doy is not None else args.perturb_doy
     good, max_snow, min_tsoil, onset_step = _forward_window_diag(
         state_p, F_win, doy_win, config, lat_rad, dt, lp_fn,
-        snow_thresh=args.onset_snow_thresh, min_onset_doy=min_onset)
+        snow_thresh=args.onset_snow_thresh, min_onset_doy=min_onset,
+        lai_fn=lai_fn, lai_thresh=args.onset_lai_thresh)
     max_snow = np.asarray(max_snow); min_tsoil = np.asarray(min_tsoil)
     onset_np = np.asarray(onset_step)
     nwin = int(win_t.shape[0])
@@ -629,6 +640,11 @@ def main(argv=None) -> int:
                          "--perturb-doy, the window start)")
     ap.add_argument("--onset-snow-thresh", dest="onset_snow_thresh", type=float,
                     default=1.0, help="snow_depth [kg/m2] below which a cell is 'snow-free'")
+    ap.add_argument("--onset-lai-thresh", dest="onset_lai_thresh", type=float,
+                    default=0.5, help="growing-season mode: LAI [m2/m2] above which the "
+                         "canopy has 'greened up' -> onset fires (default 0.5). Gating on "
+                         "LAI (not just snow/thaw) keeps the leafless LAI~0 canopy-Newton "
+                         "singularity out of the boreal/arctic gradient path (TODO-1)")
     ap.add_argument("--kernel-bin-days", dest="kernel_bin_days", type=float, default=30.0,
                     help="growing-season kernel (--kernel --growing-season): bin width in "
                          "days since onset (default 30 = ~monthly)")
