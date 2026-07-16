@@ -763,6 +763,40 @@ class ModelDriver:
                 f"(land fraction mean={float(jnp.mean(self._f_land)):.3f})"
             )
 
+        # Per-column subgrid orographic stddev for the orographic GWD launch
+        # (tau_0 ∝ h_topo²). Attached to the grid pytree so the physics
+        # integration's ``_extract_subgrid_topo_stddev`` finds it; without it
+        # McFarlane/Lindzen fall back to the scalar ``config.h_topo`` — a
+        # uniform 500 m mountain over ocean columns too. Only loaded when the
+        # active GWD has an orographic member; otherwise the file is unused
+        # (and non-cube/Gaussian grids could not even carry the field).
+        sso_path = getattr(self.config, "subgrid_orography_path", "")
+        if sso_path:
+            _oro_members = ("mcfarlane", "lindzen", "e3sm_cam")
+            _gwd = str(getattr(self.config, "gravity_wave_drag", "none"))
+            if not any(p in _oro_members for p in _gwd.split("+")):
+                logger.warning(
+                    "  subgrid_orography_path=%s set but gravity_wave_drag=%r "
+                    "has no orographic member (%s) — file NOT loaded",
+                    sso_path, _gwd, "/".join(_oro_members),
+                )
+            else:
+                from legoesm.grids.topography import load_subgrid_orography
+                sso = load_subgrid_orography(self.grid, sso_path).astype(_sd)
+                try:
+                    self.grid = self.grid._replace(subgrid_topo_stddev=sso)
+                except (ValueError, AttributeError) as e:
+                    raise ValueError(
+                        f"subgrid_orography_path is set but grid type "
+                        f"{type(self.grid).__name__} has no subgrid_topo_stddev "
+                        f"field (supported: CubedSphereGrid, GaussianGrid)"
+                    ) from e
+                logger.info(
+                    f"  Subgrid orography: {sso_path} "
+                    f"(stddev max={float(jnp.max(sso)):.0f} m, "
+                    f"mean={float(jnp.mean(sso)):.1f} m)"
+                )
+
     def _create_dycore(self) -> None:
         """Create the dynamical core model via the component factory.
 
@@ -1419,6 +1453,15 @@ class ModelDriver:
         # Two modes, distinguished by whether an explicit --land-mask-file was
         # given (full slab, slab_land_active=True) or only --topography was
         # given (passive: albedo + T_sfc blend, T_land carried but not stepped).
+        # Thread the per-column subgrid orography into the compiled physics
+        # pipeline. The grid attachment (``_create_topography``) feeds the
+        # make_gwd_physics/spectral factories, which read the grid per call;
+        # the pipeline's column hot path reads this attribute instead — both
+        # are views of the same field and are re-scattered together under MPI.
+        _sso = getattr(self.grid, "subgrid_topo_stddev", None)
+        if _sso is not None:
+            self.physics.subgrid_topo_stddev = _sso
+
         _has_land = (
             self._f_land is not None
             and bool(jnp.any(self._f_land > 0))
@@ -2114,6 +2157,15 @@ class ModelDriver:
                 convective_cloud=False,  # stratiform-only clt (see above)
                 rh_crit=getattr(self.config, "cloud_rh_crit", None),
                 q_c_diagnostic=getattr(self.config, "cloud_q_c_diagnostic", None),
+                # p_xr/alpha_xr set the Xu-Randall cloud FRACTION, so the clt
+                # diagnostic must thread them too or published clt drifts from
+                # the radiation cloud fraction (codex review, pre-existing gap).
+                p_xr=getattr(self.config, "cloud_p_xr", None),
+                alpha_xr=getattr(self.config, "cloud_alpha_xr", None),
+                diagnostic_condensate_scheme=getattr(
+                    self.config, "cloud_diagnostic_condensate_scheme", None),
+                adiabatic_lwc_rate=getattr(
+                    self.config, "cloud_adiabatic_lwc_rate", None),
             )
         self.diagnostics = DiagnosticCollector(
             nlev=self.config.grid.nlev,
@@ -2915,6 +2967,18 @@ class ModelDriver:
                 self._physics_lat = scatter(self._grid_lat, layout)
                 self._physics_lon = scatter(self._grid_lon, layout)
 
+                # Scatter the per-column subgrid orography so the orographic
+                # GWD launch reads this rank's owned-face columns (same
+                # ownership as _physics_lat above). Without this, the GWD
+                # integration's reshape(-1)[:ncol] would hand every rank the
+                # first ncol GLOBAL columns — geographically wrong SSO.
+                if getattr(self.grid, "subgrid_topo_stddev", None) is not None:
+                    self.grid = self.grid._replace(
+                        subgrid_topo_stddev=scatter(
+                            self.grid.subgrid_topo_stddev, layout
+                        )
+                    )
+
                 # Rebuild physics adapter for rank-local column count
                 from legoesm.core.grid_adapters import ColumnAdapter
                 local_shape_2d = tuple(int(s) for s in self._physics_lat.shape)
@@ -2932,6 +2996,12 @@ class ModelDriver:
                             self.physics.f_land, layout)
                         self.physics.albedo_land = scatter(
                             self.physics.albedo_land, layout)
+                    # Rank-local SSO for the pipeline's column GWD path
+                    # (same ownership as f_land / _physics_lat).
+                    if getattr(self.physics, "subgrid_topo_stddev", None) \
+                            is not None:
+                        self.physics.subgrid_topo_stddev = scatter(
+                            self.physics.subgrid_topo_stddev, layout)
 
                 # Wrap SST/SIC forcing to return rank-local arrays
                 _global_get_sst_sic = self.get_sst_sic

@@ -56,15 +56,19 @@ __param_spec__ = {
             "depth_split_sharpness": "numerics: sigmoid sharpness on the deep/shallow depth blend",
             "downdraft_RH_min": "trigger: column-mean RH threshold below which the downdraft fires (not sigmoid-tunable, fix via config)",
             "downdraft_rh_sharpness": "numerics: sigmoid sharpness on the downdraft RH trigger [1/RH-fraction]",
+            "downdraft_detrain_scale_m": "numerics: near-surface height scale [m] over which the penetrative-downdraft mass flux tapers to zero (structural deposit depth, not a trained closure)",
             "epsilon_deep": "entrainment: IFS base rate scaled by the height-dependent (1.3-RH) factor in-scheme, not a constant tunable",
             "epsilon_midlevel": "entrainment: TUNED transition-blend base rate (1e-4, intentionally below IFS ENTSHALP*ENTRORG=3.5e-3; see audit F6), scaled in-scheme",
             "epsilon_shallow": "entrainment: IFS shallow base rate scaled in-scheme",
             "lcl_membership_sharpness": "numerics: sigmoid sharpness on the below-LCL level membership [1/level index]",
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
             "precip_efficiency": "off/on precip-efficiency discontinuity gated by a static Python branch (`if config.precip_efficiency > 0.0` in bechtold.py); not a differentiable trainable leaf (a traced leaf breaks the JIT gate). Retune via config, not sigmoid-trained across the off/on discontinuity.",
+            "p_conv_top_pa": "numerics: convective-top pressure [Pa] terminating the plume/subsidence gate (stability, not a trained closure); 150 hPa deep-convection top",
             "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
         },
         "params": {
+            "autoconv_q_c_crit": {"units": "kg/kg", "bounds": (1.0e-4, 2.0e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Sundqvist (1978) autoconversion critical cloud water", "shape": None},
+            "autoconv_pe_max": {"units": "1", "bounds": (0.5, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "convective precip-efficiency ceiling (Sundqvist 1978 form)", "shape": None},
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Bechtold et al. (2008) stability cap", "shape": None},
             "cape_pbl_depth": {"units": "m", "bounds": (200.0, 1500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Bechtold et al. (2008)", "shape": None},
             "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Bechtold et al. (2008)", "shape": None},
@@ -77,6 +81,7 @@ __param_spec__ = {
             "delta_shallow": {"units": "1/m", "bounds": (2.475e-05, 0.000225), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Bechtold et al. (2008) IFS Cy49r1", "shape": None},
             "downdraft_alpha": {"units": "1", "bounds": (0.0, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Tiedtke (1989) downdraft", "shape": None},
             "downdraft_evap_efficiency": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Tiedtke (1989) downdraft", "shape": None},
+            "downdraft_entrain_rate": {"units": "1/m", "bounds": (1.0e-4, 2.0e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Tiedtke (1989) penetrative-downdraft entrainment", "shape": None},
             "mc_normalize_scale": {"units": "kg/m^2/s", "bounds": (0.005, 0.2), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "Bechtold et al. (2008) Fig. 2", "shape": None},
             "parcel_dq": {"units": "kg/kg", "bounds": (0.0, 0.003), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Bechtold et al. (2008) scheme default", "shape": None},
             "stochastic_amplitude": {"units": "1", "bounds": (0.0, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Bechtold et al. (2014) AR1 perturbation", "shape": None},
@@ -88,6 +93,7 @@ __param_spec__ = {
     "ConvectiveEDMFConfig": {
         "scheme_key": "atm.conv.ConvectiveEDMFConfig",
         "excluded": {
+            "precip_efficiency": "default 0 = disabled (legacy no rain-split, shared split_convective_rain gated `if > 0.0`); enable + retune via config, not sigmoid-trained from the off state",
             "epsilon_0": "entrainment: bulk-plume base rate held fixed in the EDMF mass-flux core",
             "w_u_min": "numerics: minimum updraft velocity floor",
             "w_u_max": "numerics: physical cap on the updraft velocity sqrt(2*CAPE) (stability, not a tunable closure)",
@@ -163,6 +169,7 @@ __param_spec__ = {
     "KainFritschConfig": {
         "scheme_key": "atm.conv.KainFritschConfig",
         "excluded": {
+            "precip_efficiency": "default 0 = disabled (legacy no rain-split, shared split_convective_rain gated `if > 0.0`); enable + retune via config, not sigmoid-trained from the off state",
             "cape_or_sharpness": "numerics: sigmoid sharpness on the CAPE-OR fallback trigger",
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
             "cape_threshold": "default 0 = disabled/off (KF gates on the trigger function, not CAPE)",
@@ -224,6 +231,7 @@ __param_spec__ = {
     "MassFluxConfig": {
         "scheme_key": "atm.conv.MassFluxConfig",
         "excluded": {
+            "precip_efficiency": "default 0 = disabled (legacy no rain-split, shared split_convective_rain gated `if > 0.0`); enable + retune via config, not sigmoid-trained from the off state",
             "M_c_init": "default 0 = disabled/off (initial base mass flux, enable via config, not training)",
             "epsilon_0": "entrainment: bulk-plume base rate held fixed in the prognostic mass-flux core",
         },
@@ -264,6 +272,8 @@ __param_spec__ = {
             "precip_efficiency": "default 0 = disabled (legacy no rain-split, gated `if > 0.0` in tiedtke.py); enable + retune via config, not sigmoid-trained from the off state",
         },
         "params": {
+            "autoconv_q_c_crit": {"units": "kg/kg", "bounds": (1.0e-4, 2.0e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Sundqvist (1978) autoconversion critical cloud water", "shape": None},
+            "autoconv_pe_max": {"units": "1", "bounds": (0.5, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "convective precip-efficiency ceiling (Sundqvist 1978 form)", "shape": None},
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Tiedtke (1989) stability cap", "shape": None},
             "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Tiedtke (1989)", "shape": None},
             "cloud_depth_deep": {"units": "m", "bounds": (1500.0, 5000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
@@ -287,6 +297,7 @@ __param_spec__ = {
     "ZhangMcFarlaneConfig": {
         "scheme_key": "atm.conv.ZhangMcFarlaneConfig",
         "excluded": {
+            "precip_efficiency": "default 0 = disabled (legacy no rain-split, shared split_convective_rain gated `if > 0.0`); enable + retune via config, not sigmoid-trained from the off state",
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE trigger",
             "epsilon_0": "entrainment: bulk-plume base rate held fixed (dilute CAPE uses dmpdz)",
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
@@ -613,6 +624,7 @@ class MassFluxConfig(NamedTuple):
     # script flags.
     cape_activation_scale: float = 10.0
     cape_threshold: float = 70.0
+    precip_efficiency: float = 0.0  # shared split_convective_rain rain-split (default off = legacy)
     M_c_init: float = 0.0
     M_b_max: float = 0.05   # see ZhangMcFarlaneConfig.M_b_max
 
@@ -703,6 +715,7 @@ class ZhangMcFarlaneConfig(NamedTuple):
     # preserves the legacy local-only filter behaviour that all
     # existing scheme test fixtures were calibrated against.
     buoyancy_death_memory: bool = False
+    precip_efficiency: float = 0.0  # shared split_convective_rain rain-split (default off = legacy)
 
 
 class KainFritschConfig(NamedTuple):
@@ -896,6 +909,7 @@ class KainFritschConfig(NamedTuple):
     # bulk one-pass closure removes CAPE over TIMEC so this is the nominal
     # fraction removed per call, used only for diagnostics/documentation).
     cape_removal_fraction: float = 0.90
+    precip_efficiency: float = 0.0  # shared split_convective_rain rain-split (default off = legacy)
     # NOTE: a cloud-base-height precipitation-efficiency retention scaling was
     # removed (validator codex review-2 #1): under the ConvectionOutput
     # contract microphysics owns precipitation, so scaling the cloud-water
@@ -1238,6 +1252,12 @@ class TiedtkeConfig(NamedTuple):
     # existing behaviour); without it 100% of convective condensate loads the
     # grid-scale cloud + radiation, which microphysics cannot drain.
     precip_efficiency: float = 0.0
+    # Precipitation split scheme (see BechtoldConfig): "constant" (fixed
+    # precip_efficiency, legacy) or "autoconversion" (physical Sundqvist-1978
+    # split on the plume updraft cloud water q_c_u). Unknown => raise at entry.
+    precip_split_scheme: str = "constant"
+    autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
+    autoconv_pe_max: float = 0.9        # [1] ceiling on the precipitating fraction
 
 
 class BechtoldConfig(NamedTuple):
@@ -1357,6 +1377,34 @@ class BechtoldConfig(NamedTuple):
     downdraft_RH_min: float = 0.2
     # See TiedtkeConfig.downdraft_evap_efficiency for definition.
     downdraft_evap_efficiency: float = 0.05
+    # -- Penetrative downdraft thermodynamic transport (opt-in, default OFF) --
+    # The downdraft branch above drives ONLY rain re-evaporation (locally
+    # MOISTENS + cools the sub-cloud layer) and CMT momentum — it has NO
+    # mass-flux transport of air, so it can only WET the marine boundary
+    # layer (strengthening it makes the BL more humid, not less).
+    # ``downdraft_transport`` adds the Tiedtke-1989 penetrative-downdraft
+    # thermodynamic transport: a downdraft initiated at the level of minimum
+    # moist static energy (the level of free sinking) advects low-MSE (dry,
+    # low-q_v) mid-tropospheric air DOWN into the sub-cloud layer, DRYING it.
+    # Physically this is the missing marine-BL ventilation: a drier sub-cloud
+    # layer -> a larger sea-air humidity gradient (stronger surface
+    # evaporation) AND less BL liquid cloud (lower planetary albedo).
+    # Conservative flux form: transports s = c_p T + g z and q_v with the
+    # downdraft mass flux vanishing at BOTH the origin and the surface, so the
+    # column integrals of s and q_v are conserved to machine precision (the
+    # rain re-evaporation phase source above is the separate, already
+    # budget-closed term).  Default False => BYTE-IDENTICAL to the
+    # re-evaporation-only downdraft.
+    downdraft_transport: bool = False
+    # Fractional entrainment rate [1/m] of the descending downdraft plume
+    # (mixes it toward the environment as it sinks; Tiedtke 1989 downdraft
+    # entrainment is O(1e-4 - 1e-3) 1/m).  Larger => the downdraft arrives
+    # less dry => weaker BL drying.
+    downdraft_entrain_rate: float = 5.0e-4
+    # Near-surface height scale [m] over which the downdraft mass flux tapers
+    # to zero as it detrains its air into the sub-cloud layer (the depth of
+    # the drying deposit ~ a marine sub-cloud-layer depth).
+    downdraft_detrain_scale_m: float = 700.0
     enable_cmt: bool = True
     cmt_c_u: float = 0.7
     cmt_c_d: float = 0.7
@@ -1427,9 +1475,29 @@ class BechtoldConfig(NamedTuple):
     # anvil cloud (dq_c_conv_dt).  Default 0.7 = ON (unlike Tiedtke's 0.0):
     # without the split, undrained anvil cloud radiatively loads the
     # polar-night column and runs the equilibrium away (#929).  0.0 restores
-    # the legacy no-split behaviour (dq_r_conv_dt=None) byte-for-byte.  See
-    # bechtold.py in-updraft precipitation block; mirrors TiedtkeConfig.
+    # the legacy no-split behaviour (dq_r_conv_dt=None) byte-for-byte.  Used by
+    # the "constant" precip_split_scheme below; mirrors TiedtkeConfig.
     precip_efficiency: float = 0.7
+    # Precipitation split scheme for the detrained condensate:
+    #   "constant"       — fixed `precip_efficiency` fraction (above).
+    #   "autoconversion" — PHYSICAL Sundqvist (1978) autoconversion on the
+    #                      plume updraft cloud water q_c_u (convective_
+    #                      autoconversion_split): the precip efficiency EMERGES
+    #                      from the updraft loading (thin updraft -> anvil,
+    #                      loaded updraft -> rain) instead of a tuned constant.
+    # Unknown values raise at scheme entry (dispatch-hardening).
+    precip_split_scheme: str = "constant"
+    # Autoconversion params (used only when precip_split_scheme="autoconversion"):
+    autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
+    autoconv_pe_max: float = 0.9        # [1] ceiling on the precipitating fraction
+    # Convective-top pressure [Pa]: the plume mass-flux carry AND the shared
+    # kernel's compensating-subsidence gate vanish above this cutoff, so the
+    # (non-self-detraining) Bechtold plume terminates here instead of
+    # plateauing at M_b_max to the model top. 150 hPa is a physical deep-
+    # convection top, TIGHTER than the kernel's 100 hPa default — required
+    # because Bechtold's plume does not decay at its LNB; the top-heavy
+    # subsidence otherwise bakes the lower stratosphere into a slow blow-up.
+    p_conv_top_pa: float = 15000.0
 
 
 class ConvectiveEDMFConfig(NamedTuple):
@@ -1483,6 +1551,7 @@ class ConvectiveEDMFConfig(NamedTuple):
     # non-detraining updraft profile, drove a day-5 full-physics AMIP blowup.
     subsidence_solve: str = "implicit_flux"
     theta_implicit: float = 1.0
+    precip_efficiency: float = 0.0  # shared split_convective_rain rain-split (default off = legacy)
 
 
 class ConvectionConfig(NamedTuple):

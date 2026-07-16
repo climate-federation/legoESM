@@ -641,6 +641,40 @@ def test_bechtold_mse_conservation_within_tolerance():
 
 
 # ---------------------------------------------------------------------------
+# In-updraft precipitation: the shared convective rain split
+# ---------------------------------------------------------------------------
+
+def test_bechtold_precip_efficiency_splits_rain_conserving_mass():
+    """precip_efficiency>0 emits a rain source (dq_r_conv_dt) that is exactly
+    the pe-fraction of the detrained condensate; cloud+rain conserves the
+    positive condensate; the default (0) is byte-identical with no rain."""
+    T, q, pf, ph, u, v = _column(ncol=3, nlev=16)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    stoch = jnp.zeros((ncol,))
+
+    base, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        config=BechtoldConfig(precip_efficiency=0.0),   # explicit no-split ref
+    )
+    assert base.dq_r_conv_dt is None                 # pe=0 => no split
+
+    pe = 0.6
+    split, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        config=BechtoldConfig(precip_efficiency=pe),
+    )
+    assert split.dq_r_conv_dt is not None
+    # cloud + rain == the ORIGINAL positive condensate (base cloud), so the
+    # split introduces no extra source/sink
+    total = split.dq_c_conv_dt + split.dq_r_conv_dt
+    assert jnp.allclose(total, base.dq_c_conv_dt, atol=1e-20)
+    # rain is exactly pe of the original condensate
+    assert jnp.allclose(split.dq_r_conv_dt, base.dq_c_conv_dt * pe, rtol=1e-6,
+                        atol=1e-20)
+    # heating / vapor tendencies are untouched by the diagnostic split
+    assert jnp.allclose(split.dT_dt, base.dT_dt, atol=1e-20)
+    assert jnp.allclose(split.dq_v_dt, base.dq_v_dt, atol=1e-20)
 # Trigger sharpness fields (fix 2026-07) — same defect class as Tiedtke:
 # BechtoldConfig.smooth_trigger_sharpness was dead; the downdraft RH trigger
 # and below-LCL membership hardcoded 10.0 / 2.0.
@@ -683,6 +717,122 @@ def test_bechtold_downdraft_sharpness_fields_wired():
 
 
 # ---------------------------------------------------------------------------
+# Penetrative-downdraft thermodynamic transport (marine-BL ventilation)
+# ---------------------------------------------------------------------------
+
+from legoesm.atmosphere.physics.convection.bechtold import (  # noqa: E402
+    _penetrative_downdraft_transport,
+)
+
+
+def _humid_bl_dry_midtrop_column(ncol=1, nlev=24):
+    """Synthetic column: a humid marine BL over a dry mid-troposphere.
+
+    Moist static energy has a mid-tropospheric minimum (the downdraft origin)
+    whose ``q_v`` is far below the boundary-layer value, so a penetrative
+    downdraft MUST dry the sub-cloud layer.  Surface-last (index -1 =
+    surface).
+    """
+    p_s, p_top = 1.0e5, 5.0e3
+    sigma = jnp.linspace(p_top / p_s, 1.0, nlev)
+    p_full = sigma[None, :] * jnp.full((ncol, 1), p_s)
+    p_half_inner = 0.5 * (p_full[:, :-1] + p_full[:, 1:])
+    p_half = jnp.concatenate(
+        [jnp.full((ncol, 1), p_top * 0.5), p_half_inner,
+         jnp.full((ncol, 1), p_s)], axis=1)
+    dp_full = p_half[:, 1:] - p_half[:, :-1]
+    z = -8500.0 * jnp.log(p_full / p_s)              # height [m], 0 at surface
+    T = 300.0 - 7.0e-3 * z
+    # Humid BL (~16 g/kg near surface) decaying with height + a tiny floor:
+    # gives a dry (~0.2 g/kg) mid-/upper troposphere => low-MSE origin aloft.
+    q_v = 16.0e-3 * jnp.exp(-z / 1500.0) + 2.0e-4
+    levels_arr = jnp.arange(nlev, dtype=p_full.dtype)
+    # LCL ~1 km above the surface -> a fractional level index near the surface.
+    k_lcl = jnp.interp(jnp.array([-1000.0]), -z[0], levels_arr)
+    k_lcl_smooth = jnp.broadcast_to(k_lcl, (ncol,))
+    return T, q_v, z, dp_full, k_lcl_smooth, levels_arr
+
+
+def test_penetrative_downdraft_transport_conserves_column():
+    """Flux form => the column integrals of q_v and dry static energy vanish
+    (the transport is adiabatic redistribution, not a source/sink)."""
+    T, q_v, z, dp_full, k_lcl, lev = _humid_bl_dry_midtrop_column()
+    dT_dd, dq_dd = _penetrative_downdraft_transport(
+        T, q_v, z, dp_full, k_lcl, lev,
+        jnp.array([0.02]), entrain_rate=5.0e-4,
+        detrain_scale_m=700.0, dt=150.0,
+    )
+    g = constants.g
+    col_q = jnp.sum(dq_dd * dp_full / g, axis=1)
+    col_s = jnp.sum(dT_dd * constants.c_pd * dp_full / g, axis=1)
+    q_scale = jnp.sum(jnp.abs(dq_dd) * dp_full / g, axis=1) + 1e-30
+    s_scale = jnp.sum(jnp.abs(dT_dd) * constants.c_pd * dp_full / g, axis=1) + 1e-30
+    assert float(jnp.abs(col_q)[0] / q_scale[0]) < 1e-9, "q_v not conserved"
+    assert float(jnp.abs(col_s)[0] / s_scale[0]) < 1e-9, "dry static energy not conserved"
+    assert bool(jnp.all(jnp.isfinite(dT_dd)) & jnp.all(jnp.isfinite(dq_dd)))
+
+
+def test_penetrative_downdraft_transport_dries_subcloud():
+    """The penetrative downdraft NET-dries the sub-cloud layer — the whole
+    point of the lever (a re-evaporation-only downdraft would moisten it)."""
+    T, q_v, z, dp_full, k_lcl, lev = _humid_bl_dry_midtrop_column()
+    _, dq_dd = _penetrative_downdraft_transport(
+        T, q_v, z, dp_full, k_lcl, lev,
+        jnp.array([0.02]), entrain_rate=5.0e-4,
+        detrain_scale_m=700.0, dt=150.0,
+    )
+    g = constants.g
+    below_lcl = lev[None, :] > k_lcl[:, None]
+    subcloud_dq = jnp.sum(jnp.where(below_lcl, dq_dd * dp_full / g, 0.0), axis=1)
+    assert float(subcloud_dq[0]) < 0.0            # net sub-cloud drying
+    assert float(dq_dd[0, -1]) < 0.0              # the surface level dries
+
+
+def test_penetrative_downdraft_transport_differentiable():
+    """Finite gradient of the sub-cloud drying wrt the entrainment rate
+    (the tunable knob) — the lever must stay ``jax.grad``-safe."""
+    T, q_v, z, dp_full, k_lcl, lev = _humid_bl_dry_midtrop_column()
+
+    def _subcloud_drying(eps):
+        _, dq_dd = _penetrative_downdraft_transport(
+            T, q_v, z, dp_full, k_lcl, lev, jnp.array([0.02]),
+            entrain_rate=eps, detrain_scale_m=700.0, dt=150.0,
+        )
+        return jnp.sum(dq_dd[:, -6:])
+
+    grad = jax.grad(_subcloud_drying)(5.0e-4)
+    assert bool(jnp.isfinite(grad))
+
+
+def test_bechtold_downdraft_transport_toggle_dries_bl():
+    """End-to-end: enabling the transport dries the BL vs the re-evap-only
+    default, and the OFF default is byte-identical to the pre-existing path."""
+    T, q, pf, ph, u, v = _column(ncol=2, nlev=20, q_sfc=18e-3, lapse_rate=8.0)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    stoch = jnp.zeros((ncol,))
+    base = BechtoldConfig()
+    assert base.downdraft_transport is False       # opt-in default OFF
+    out_off, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0, config=base,
+    )
+    out_default, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+    )
+    out_on, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        config=base._replace(downdraft_transport=True),
+    )
+    # OFF branch leaves the default path untouched (feature-gated on a static
+    # bool => byte-identical to before the transport existed).
+    assert bool(jnp.array_equal(out_off.dq_v_dt, out_default.dq_v_dt))
+    # Turning it ON changes the moisture tendency and NET-dries the BL.
+    assert float(jnp.sum(jnp.abs(out_on.dq_v_dt - out_off.dq_v_dt))) > 1e-12, (
+        "downdraft_transport had no effect (column may not be convecting)"
+    )
+    bl = slice(nlev - 4, nlev)                      # lowest 4 levels = the BL
+    dq_bl = jnp.sum(out_on.dq_v_dt[:, bl] - out_off.dq_v_dt[:, bl])
+    assert float(dq_bl) < 0.0, "transport must dry the boundary layer"
 # In-updraft precipitation split (#929) — divert precip_efficiency of the
 # detrained condensate to RAIN (dq_r_conv_dt) so microphysics can drain the
 # polar-night anvil instead of it radiatively loading the column to runaway.

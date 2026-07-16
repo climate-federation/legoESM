@@ -63,7 +63,10 @@ from legoesm.atmosphere.physics.convection.config import (
     ConvectiveEDMFConfig,
     MassFluxConfig,
 )
-from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.atmosphere.physics.convection.output import (
+    ConvectionOutput,
+    split_convective_rain,
+)
 
 
 __physics_contract__ = {
@@ -725,12 +728,18 @@ def mass_flux_convection_from_closure(
         M_u_max=config.M_b_max,
     )
 
+    # In-updraft precipitation: shared rain-split (same knob + mass proof as
+    # Tiedtke/Bechtold). precip_efficiency=0 (default) => no split, byte-identical.
+    dq_c_conv_dt, dq_r_conv_dt = split_convective_rain(
+        dq_c_conv_dt, config.precip_efficiency)
+
     return ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
         dq_c_conv_dt=dq_c_conv_dt,
         cape=cape,
         convective_mask=convective_mask,
+        dq_r_conv_dt=dq_r_conv_dt,
     )
 
 
@@ -927,11 +936,16 @@ def edmf_convection(
         theta_implicit=config.theta_implicit,
     )
 
+    # In-updraft precipitation: shared rain-split (EDMF config knob).
+    dq_c_conv_dt, dq_r_conv_dt = split_convective_rain(
+        dq_c_conv_dt, config.precip_efficiency)
+
     conv_out = ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
         dq_c_conv_dt=dq_c_conv_dt,
         cape=cape,
         convective_mask=convective_mask,
+        dq_r_conv_dt=dq_r_conv_dt,
     )
     return conv_out, a_u_new

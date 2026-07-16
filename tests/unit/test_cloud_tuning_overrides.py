@@ -104,6 +104,64 @@ def test_pipeline_default_overrides_none() -> None:
     assert pipe._cloud_conv_cloud_max is None
 
 
+def test_cloudconfig_inhomogeneity_roundtrips() -> None:
+    cc = CloudConfig(scheme="sundqvist", cloud_inhomogeneity_factor=0.7)
+    assert cc.cloud_inhomogeneity_factor == 0.7
+    # default is homogeneous (no change)
+    assert CloudConfig(scheme="sundqvist").cloud_inhomogeneity_factor == 1.0
+
+
+def test_build_cloud_config_applies_inhomogeneity() -> None:
+    cc = build_cloud_config("sundqvist", cloud_inhomogeneity_factor=0.6)
+    assert cc.cloud_inhomogeneity_factor == 0.6
+    # all-None => default 1.0 (byte-identical)
+    assert build_cloud_config("sundqvist").cloud_inhomogeneity_factor == 1.0
+
+
+def test_pipeline_threads_inhomogeneity() -> None:
+    grid = create_cubed_sphere(4)
+    sigma = make_hybrid_levels(NLEV)
+    pipe = build_physics_pipeline(
+        grid, sigma, _config(cloud_inhomogeneity_factor=0.7))
+    assert pipe._cloud_inhomogeneity_factor == 0.7
+    assert build_physics_pipeline(
+        grid, sigma, _config())._cloud_inhomogeneity_factor is None
+
+
+def test_inhomogeneity_scales_radiative_water_path() -> None:
+    """chi linearly scales the LWP/IWP fed to radiation (Cahalan plane-parallel
+    correction): chi=0.5 halves the path vs the homogeneous chi=1.0."""
+    import jax.numpy as jnp
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+        compute_cloud_properties)
+    from legoesm import constants
+
+    ncol, nlev = 2, NLEV
+    p_s = 1.0e5
+    sh = jnp.linspace(0.0, 1.0, nlev + 1)
+    sf = 0.5 * (sh[:-1] + sh[1:])
+    p_full = jnp.broadcast_to((sf * p_s)[None, :], (ncol, nlev))
+    dp = jnp.broadcast_to(((sh[1:] - sh[:-1]) * p_s)[None, :], (ncol, nlev))
+    T = jnp.full((ncol, nlev), 280.0)
+    q_v = jnp.full((ncol, nlev), 8e-3)
+    q_cloud = jnp.full((ncol, nlev), 2e-4)     # explicit prognostic cloud water
+    q_ice = jnp.zeros((ncol, nlev))
+
+    def _lwp(chi):
+        cfg = CloudConfig(scheme="sundqvist", cloud_inhomogeneity_factor=chi)
+        out = compute_cloud_properties(T=T, p_full=p_full, q_v=q_v, dp=dp,
+                                       config=cfg, q_cloud=q_cloud, q_ice=q_ice)
+        return jnp.asarray(out.lwp)
+
+    lwp_full = _lwp(1.0)
+    lwp_half = _lwp(0.5)
+    assert float(jnp.max(lwp_full)) > 0.0
+    # chi=0.5 halves the radiative water path, everywhere
+    import numpy as np
+    np.testing.assert_allclose(np.asarray(lwp_half), 0.5 * np.asarray(lwp_full),
+                               rtol=1e-6, atol=1e-20)
+
+
 def test_pipeline_threads_subgrid_autoconv() -> None:
     # --subgrid-autoconv (#613) must reach the hot-loop MorrisonConfig.
     grid = create_cubed_sphere(4)

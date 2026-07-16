@@ -253,6 +253,7 @@ class GaussianGrid(NamedTuple):
     ms: jax.Array           # Zonal wavenumber m for each SH index, (n_sh,)
     lap: jax.Array          # Spectral Laplacian = -n(n+1)/a^2, (n_sh,)
     ilap: jax.Array         # Inverse Laplacian (0 for n=0), (n_sh,)
+    subgrid_topo_stddev: object = None  # jax.Array (n_lat, n_lon) [m] | None — oro-GWD launch h_topo
 
     # ------------------------------------------------------------------
     # GridProtocol properties

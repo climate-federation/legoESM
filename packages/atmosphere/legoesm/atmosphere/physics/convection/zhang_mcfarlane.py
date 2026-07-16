@@ -83,7 +83,10 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 
 from legoesm.atmosphere.physics.convection.config import ZhangMcFarlaneConfig
-from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.atmosphere.physics.convection.output import (
+    ConvectionOutput,
+    split_convective_rain,
+)
 from legoesm.atmosphere.physics.convection.mass_flux import (
     apply_mass_flux_kernel,
     compute_column_geometry,
@@ -342,6 +345,11 @@ def zhang_mcfarlane_convection(
     # -- Convective mask (column-mean diagnostic) ---------------------------
     convective_mask = cape_weight  # already a smooth (ncol,) indicator
 
+    # In-updraft precipitation: shared rain-split (same knob + mass proof as
+    # Tiedtke/Bechtold). precip_efficiency=0 (default) => no split, byte-identical.
+    dq_c_conv_dt, dq_r_conv_dt = split_convective_rain(
+        dq_c_conv_dt, config.precip_efficiency)
+
     out = ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
@@ -350,6 +358,7 @@ def zhang_mcfarlane_convection(
         convective_mask=convective_mask,
         du_dt_conv=du_dt_conv,
         dv_dt_conv=dv_dt_conv,
+        dq_r_conv_dt=dq_r_conv_dt,
     )
 
     # Pack the relaxed M_b back into the surface-adjacent carry slot

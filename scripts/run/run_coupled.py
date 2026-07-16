@@ -442,6 +442,18 @@ def build_parser():
                              "(CloudConfig.q_c_diagnostic). LOWER => optically "
                              "THINNER cloud => lower albedo, still LW-active. "
                              "Range [5e-5, 1e-3]. Default: CloudConfig default.")
+    parser.add_argument("--diagnostic-condensate-scheme",
+                        dest="cloud_diagnostic_condensate_scheme",
+                        choices=["constant", "adiabatic"], default="constant",
+                        help="Vertical structure of the stratiform in-cloud "
+                             "condensate floor: 'constant' (flat q_c_diagnostic, "
+                             "default) or 'adiabatic' (depth-scaled, dims thin "
+                             "warm marine Sc). FV cd-grid radiation path only.")
+    parser.add_argument("--adiabatic-lwc-rate", dest="cloud_adiabatic_lwc_rate",
+                        type=float, default=None,
+                        help="In-cloud LWC growth per metre of cloudy depth "
+                             "[kg/kg/m] for --diagnostic-condensate-scheme="
+                             "adiabatic (None=default 1.5e-6; range 5e-7..3e-6).")
     parser.add_argument("--conv-cloud-max", dest="cloud_conv_cloud_max",
                         type=float, default=None,
                         help="Override convective (Slingo) cloud-cover cap "
@@ -892,6 +904,8 @@ def main():
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
         cloud_conv_cloud_max=args.cloud_conv_cloud_max,
         cloud_conv_cloud_condensate=args.cloud_conv_cloud_condensate,
+        cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
+        cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         microphysics=args.microphysics,
         days=args.days,
         experiment=args.experiment,

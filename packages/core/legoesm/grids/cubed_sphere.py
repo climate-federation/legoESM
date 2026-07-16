@@ -121,6 +121,12 @@ class CubedSphereGrid(NamedTuple):
     duogrid : DuoGridData or None
         Duo-Grid kinked-to-extended remapping data. When not None,
         pad_halo applies the Duo-Grid remap instead of interp_offsets.
+    subgrid_topo_stddev : jax.Array or None
+        Per-column subgrid orographic stddev [m], shape (6, n, n), set by
+        the driver from ``subgrid_orography_path`` (see
+        ``topography.load_subgrid_orography``). Read by the orographic
+        GWD launch (``_extract_subgrid_topo_stddev``); ``None`` falls
+        back to the scalar ``GWD config.h_topo``.
     gnomonic_form : str
         Static grid provenance: which gnomonic node distribution built this
         grid — ``"equiangular"`` (legoESM's historical default, the FV3
@@ -166,6 +172,7 @@ class CubedSphereGrid(NamedTuple):
     hx_ext_h3: jax.Array
     hy_ext_h3: jax.Array
     duogrid: object  # DuoGridData | None — use object to avoid circular import
+    subgrid_topo_stddev: object = None  # jax.Array (6,n,n) [m] | None — oro-GWD launch h_topo
     gnomonic_form: str = "equiangular"  # static provenance (pytree aux_data)
     fv3_grid_type: int = 2              # static provenance (pytree aux_data)
 

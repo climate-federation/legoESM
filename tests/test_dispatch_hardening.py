@@ -151,6 +151,11 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/integration.py", "_get_convection_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/integration.py", "make_convection_physics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/kuo.py", "kuo_convection"),
+        # Convective precip-split selector (precip_split_scheme: constant vs the
+        # physical Sundqvist-1978 autoconversion on the plume q_c_u); a typo must
+        # raise, not silently run the wrong precip physics.
+        ("packages/atmosphere/legoesm/atmosphere/physics/convection/bechtold.py", "bechtold_convection"),
+        ("packages/atmosphere/legoesm/atmosphere/physics/convection/tiedtke.py", "tiedtke_convection"),
         # Renamed _get_gwd_fn -> get_gwd_fn (private-import promotion,
         # 2026-06-10); the unknown-scheme raise itself is unchanged.
         ("packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/integration.py", "get_gwd_fn"),
