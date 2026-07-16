@@ -66,13 +66,16 @@ def test_fixture_input_hash_enforced(oracle):
     stored = str(oracle["input_sha256"])
     assert len(stored) == 64 and all(c in "0123456789abcdef" for c in stored)
     assert recomputed == stored
-    tampered = dict(fields)
-    tampered["u"] = fields["u"].copy()
-    tampered["u"].flat[0] = np.nextafter(tampered["u"].flat[0], np.inf)
-    bad = hashlib.sha256(
-        gen.serialize_dchain_inputs(tampered, int(oracle["res"]),
-                                    int(oracle["ng"]))).hexdigest()
-    assert bad != stored
+    # tamper EVERY one of the 15 union inputs — each must change the hash
+    # (codex p4c dchain P2)
+    for k in _ALL_INPUTS:
+        tampered = dict(fields)
+        tampered[k] = fields[k].copy()
+        tampered[k].flat[0] = np.nextafter(tampered[k].flat[0], np.inf)
+        bad = hashlib.sha256(
+            gen.serialize_dchain_inputs(tampered, int(oracle["res"]),
+                                        int(oracle["ng"]))).hexdigest()
+        assert bad != stored, k
 
 
 def test_dchain_divg_d_bit_exact(oracle):
@@ -91,22 +94,73 @@ def test_dchain_divg_d_bit_exact(oracle):
     u, v = np.asarray(oracle["u"]), np.asarray(oracle["v"])
     duo = d2a2c_vect_duo(u, v, gs, bd, RES + 1, RES + 1, dord4=True,
                          grid_type=0)
+    ua, va = np.asarray(duo["ua"]), np.asarray(duo["va"])
+    # the duo ua/va are FULLY written (no 1e30 sentinel can reach the
+    # divergence formula's active region) — codex p4c dchain P2
+    assert (np.abs(ua) < 1e29).all() and (np.abs(va) < 1e29).all()
     got = np.asarray(
-        divergence_corner_duo(u, v, np.asarray(duo["ua"]),
-                              np.asarray(duo["va"]), gs, bd, RES + 1, RES + 1,
+        divergence_corner_duo(u, v, ua, va, gs, bd, RES + 1, RES + 1,
                               grid_type=0), dtype=np.float64)
     want = np.asarray(oracle["divg_d"], dtype=np.float64)
     assert got.shape == want.shape == (M_B, M_B)
     active = _active_mask()
     assert int(active.sum()) == 289
-    assert np.isfinite(want[active]).all()
-    # non-vacuity: divg_d has real structure (not all-zero / constant), so
-    # the bit-exact match is meaningful.  d2a2c_vect_duo's difference from
-    # plain-c_sw ua/va (288 nodes) is certified in its own gate.
-    assert np.ptp(want[active]) > 1e-12
+    # active divg_d is the real divergence, NOT the 1.e25 init sentinel
+    assert (np.abs(want[active]) < 1e24).all()
+    assert np.ptp(want[active]) > 1e-12          # real structure
     n_diff = int((got[active].view(np.uint64)
                   != want[active].view(np.uint64)).sum())
     assert n_diff == 0, f"{n_diff}/289 divg_d nodes differ bitwise"
+
+
+def test_divg_d_depends_on_the_duo_uava(oracle):
+    """Non-vacuity: divg_d actually CONSUMES the duo ua/va — perturbing ua
+    changes the active divg_d.  (The duo ua/va differ from plain-c_sw at 288
+    cells, certified in the d2a2c gate; codex measured 196/289 active divg_d
+    words change under plain substitution.)"""
+    from legoesm.core.fv3_native_duo_sw_core import (
+        d2a2c_vect_duo,
+        divergence_corner_duo,
+    )
+    from legoesm.core.fv3_native_sw_core import Bounds
+
+    bd = Bounds.single_tile(RES, NG)
+    gs = {k: np.asarray(oracle[k]) for k in _ALL_INPUTS if k not in ("u", "v")}
+    u, v = np.asarray(oracle["u"]), np.asarray(oracle["v"])
+    duo = d2a2c_vect_duo(u, v, gs, bd, RES + 1, RES + 1, dord4=True,
+                         grid_type=0)
+    base = np.asarray(divergence_corner_duo(
+        u, v, np.asarray(duo["ua"]), np.asarray(duo["va"]), gs, bd,
+        RES + 1, RES + 1, grid_type=0), dtype=np.float64)
+    ua2 = np.asarray(duo["ua"]).copy()
+    ua2 += 1.0                                    # perturb the A-grid wind
+    pert = np.asarray(divergence_corner_duo(
+        u, v, ua2, np.asarray(duo["va"]), gs, bd, RES + 1, RES + 1,
+        grid_type=0), dtype=np.float64)
+    active = _active_mask()
+    assert int((np.abs(base[active] - pert[active]) > 1e-9).sum()) >= 50
+
+
+def _block_sha(path, subroutine):
+    txt = open(path, encoding="utf-8").read().split("\n")
+    i0 = next(i for i, ln in enumerate(txt)
+              if ln.strip().startswith(f"subroutine {subroutine}"))
+    i1 = next(i for i, ln in enumerate(txt)
+              if ln.strip() == f"end subroutine {subroutine}")
+    return hashlib.sha256(("\n".join(txt[i0:i1 + 1]) + "\n").encode()).hexdigest()
+
+
+def test_both_leaf_extract_blocks_pinned():
+    """Both chained Fortran leaves are unchanged (codex p4c dchain P2 — pin
+    both blocks locally, not only in the leaf gates): the DUO d2a2c_vect and
+    divergence_corner_duo extractions match their authoritative SHAs."""
+    s = os.path.join(REPO, "scripts", "validate", "fv3_native")
+    assert _block_sha(os.path.join(s, "fv3_d2a2c_duo_extract.F90"),
+                      "d2a2c_vect") == (
+        "36ab66fa91643cfbc8fb321f9e39025e2f64ef87651365628ab4e320a1e474f0")
+    assert _block_sha(os.path.join(s, "fv3_swcore_extract.F90"),
+                      "divergence_corner_duo") == (
+        "9a6d43f52c9ffc60bea3b3c8aa0901603cf2909b97ef7c9eea0c462caa61b81c")
 
 
 def test_fixture_input_provenance(oracle):

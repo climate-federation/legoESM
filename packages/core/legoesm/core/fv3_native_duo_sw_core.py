@@ -22,13 +22,14 @@ its extraction pinned byte-identical to sw_core.F90:2345-2447 (SHA-256).
 SCOPE: the duo c_sw feeds ``divergence_corner_duo`` (and the KE/vorticity
 path) with ua/va from ``d2a2c_vect``'s dg-initialized cross-face branch,
 which differs from the plain ``c_sw`` ua/va at panel edges/corners.  That
-duo ``d2a2c_vect`` is now ported + certified here as ``d2a2c_vect_duo``
+duo ``d2a2c_vect`` is ported + certified here as ``d2a2c_vect_duo``
 (bit-exact vs the authoritative Fortran DUO branch,
-``test_fv3_native_d2a2c_duo``) — certifying the duo ua/va SOURCE as a leaf
-(NOT yet chained into the divergence oracle).  The remaining phase-4c work
-is threading these certified duo leaves
-(``d2a2c_vect_duo`` + ``divergence_corner_duo``) into a full no-corner-fill
-/ no-``sin_sg``-edge duo c_sw body for end-to-end pipeline certification.
+``test_fv3_native_d2a2c_duo``), and its ua/va are now CHAINED into
+``divergence_corner_duo`` and certified bit-exact end-to-end
+(``test_fv3_native_duo_chain``) — so the divergence sub-pipeline is closed
+on the real duo ua/va.  The remaining phase-4c work is assembling these
+certified duo leaves into a full no-corner-fill / no-``sin_sg``-edge duo
+c_sw body (+ the simple upwind KE/vorticity) for full-c_sw certification.
 
 Conventions match ``fv3_native_sw_core`` / ``fv3_native_d_sw`` (``fort``
 views, ``Bounds``).
@@ -138,9 +139,10 @@ def d2a2c_vect_duo(u: np.ndarray, v: np.ndarray, gs: dict, bd: Bounds,
     This is the ua/va source the duo c_sw actually feeds
     ``divergence_corner_duo`` (the plain ``c_sw`` used by the phase-4a
     reference takes d2a2c_vect's NON-duo branch, so its ua/va differ at
-    panel edges/corners).  Certifying this LEAF bit-exact is a step toward
-    the full duo pipeline; it does NOT itself chain these ua/va into the
-    divergence oracle (that end-to-end run remains).
+    panel edges/corners).  This LEAF is certified bit-exact here, and its
+    ua/va -> ``divergence_corner_duo`` chain is certified end-to-end in
+    ``test_fv3_native_duo_chain``; the full duo c_sw pipeline (KE/vorticity
+    + the delp/pt/u/v update) remains.
 
     Returns ``{ua, va, uc, vc, ut, vt}`` (numpy).  u (isd:ied, jsd:jed+1);
     v (isd:ied+1, jsd:jed).  ``dord4``/``id`` is UNUSED on the duo branch
