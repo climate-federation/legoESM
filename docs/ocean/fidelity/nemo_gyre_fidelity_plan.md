@@ -279,15 +279,28 @@ ISOLATION EXPERIMENTS (2026-07-16, 5-yr runs + single-column avt certificate):
   over ~60 m before it can stratify. In NEMO's stratified column that downward
   TKE diffusion is blocked by the small thermocline mixing length; legoESM
   never gets stratified enough to block it → self-locking race legoESM loses.
-- **STATUS: research-level bistability, mechanism fully characterized, fix
-  open.** All matched knobs verified (floors, c_k/c_eps, shear form, Langmuir,
-  iso) — none tip it. Candidate fixes to try next: (a) is legoESM's TKE
-  vertical diffusion (avm-for-TKE) transporting the surface source too deep in
-  near-neutral water vs NEMO's? (b) does strengthening the gyre (dynamical
-  Ekman downwelling) build the thermocline and break the loop? (c) a term-by-
-  term TKE-budget diff at a fixed near-neutral summer column (NEMO en/avt now
-  available from EXP_LONG 30-day restarts). NOT a resolution floor, NOT a
-  simple parameter.
+- **THE UNMATCHED NUMERIC FOUND + FIXED (alpha_tke 30->1, commit on branch):**
+  candidate (a) was it. NEMO diffuses TKE with avm x1 (zdftke.F90:130
+  "d(avm d(en)/dz)/dz"; tridiag coeff = face-avg avm, zfact1=-0.5*rn_Dt). The
+  ported Veros/CATKE scheme defaulted alpha_tke=30 -> TKE diffused 30x too
+  fast, flooding the surface Dirichlet TKE source down the near-neutral column,
+  sustaining deep e ~1000x rn_emin and blocking the shallow summer ML. This is
+  the "identical numerics must land on the same branch" difference the user
+  flagged: the numerics were NOT identical (30x vs 1x), and the bistability
+  amplified it into opposite branches. Fix: alpha_tke=1 in _nemo_tke_config.
+  EFFECT: deep summer e drops 1-2 orders (54m 2.5e-3->4.8e-5) toward NEMO's
+  floor; the seasonal thermocline REBUILD unlocks (phased-from-NEMO: winter
+  0.19 not 0.04, next summer rebuilds 0.5-1.0 vs stuck 0.02); baroclinicity
+  surf/deep 3.87->4.93 (NEMO 8.23).
+- **RESIDUAL (still open):** from a true COLD START (rest, winter phase) the
+  thermocline still does not establish (all summers ~0) even with alpha_tke=1,
+  and deep e is still 5-50x NEMO's floor — so at least ONE more unmatched term
+  remains. The phased-from-stratified test rebuilds, the cold-start does not =>
+  the residual is in the first-winter erosion depth OR the cold-start dynamical
+  spin-up (weak gyre -> weak Ekman downwelling can't seed the thermocline).
+  NEXT: (b) does the deep e drop to NEMO's 1e-6 floor if the remaining factor
+  is found (term-by-term TKE budget vs the NEMO summer en/avt now in hand from
+  EXP_LONG 30-day restarts); (c) first-winter convection-depth vs NEMO.
 
 **Minors (low priority):** TKE buoyancy N² adiabatic → in-situ; residual
 winter-ML depth (111 vs 91 m at day 15) — candidates: EVD reach interplay,
