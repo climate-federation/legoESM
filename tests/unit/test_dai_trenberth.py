@@ -10,6 +10,7 @@ from legoesm.ocean.forcing.dai_trenberth import (
     load_dai_trenberth,
     synthetic_dai_trenberth,
     project_runoff_to_grid,
+    project_runoff_to_mpas_cells,
     _nearest_cell_indices,
 )
 
@@ -254,3 +255,108 @@ class TestProjectRunoffToGrid:
         )
         # 1e7 kg/s / 1e10 m² = 1e-3 kg/m²/s.
         assert out[0, 0] == pytest.approx(1.0e-3, rel=1e-6)
+
+
+class TestProjectRunoffToMPASCells:
+    """The unstructured (MPAS) counterpart of project_runoff_to_grid.
+
+    apply_runoff_step_mpas was implemented and imported by run_centennial_spinup
+    but the runoff SETUP warned "not yet supported on grid=mpas" because there
+    was no river->cell projector for an unstructured mesh. These pin the new
+    conservative nearest-ocean-cell projector.
+    """
+
+    def _mesh(self, n=64):
+        # A crude quasi-uniform scatter of cells on the sphere.
+        rng = np.random.RandomState(0)  # noqa: NPY002 - fixed seed, test only
+        lat = rng.uniform(-80.0, 80.0, n)
+        lon = rng.uniform(0.0, 360.0, n)
+        area = np.full(n, 1.0e10)
+        return lat, lon, area
+
+    def test_single_river_conserves_flux(self):
+        lat, lon, area = self._mesh()
+        rivers = RiverRunoffData(
+            latitudes=np.array([lat[3]]),           # sits exactly on a cell
+            longitudes=np.array([lon[3]]),
+            monthly_flux_kg_s=np.full((12, 1), 1.0e7),
+            names=("test",),
+        )
+        out = project_runoff_to_mpas_cells(
+            rivers, lat_cell_deg=lat, lon_cell_deg=lon, area_cell_m2=area,
+        )
+        assert out.shape == (lat.size,)
+        assert float((out * area).sum()) == pytest.approx(1.0e7, rel=1e-6)
+        assert int(np.argmax(out)) == 3           # landed on the nearest cell
+
+    def test_total_flux_preserved_all_ocean(self):
+        lat, lon, area = self._mesh(n=128)
+        rivers = synthetic_dai_trenberth()
+        # No-drop radius: isolate CONSERVATION from the drop behaviour (which
+        # has its own test). On a sparse toy mesh a 5deg cutoff would correctly
+        # drop rivers falling in the ~30deg gaps -- orthogonal to conservation.
+        out = project_runoff_to_mpas_cells(
+            rivers, lat_cell_deg=lat, lon_cell_deg=lon, area_cell_m2=area,
+            max_search_deg=180.0,
+        )
+        expected = float(rivers.monthly_flux_kg_s.mean(axis=0).sum())
+        assert float((out * area).sum()) == pytest.approx(expected, rel=1e-6)
+
+    def test_land_river_relocates_to_nearest_ocean_cell(self):
+        # Two cells close together; the nearest one to the river is LAND, so the
+        # flux must go to the other (ocean) cell -- not be dropped.
+        lat = np.array([10.0, 10.5, -40.0])
+        lon = np.array([200.0, 200.0, 100.0])
+        area = np.full(3, 1.0e10)
+        ocean = np.array([0, 1, 1])          # cell 0 is land
+        rivers = RiverRunoffData(
+            latitudes=np.array([10.01]),     # nearest is cell 0 (land)
+            longitudes=np.array([200.0]),
+            monthly_flux_kg_s=np.full((12, 1), 5.0e6),
+            names=("r",),
+        )
+        out = project_runoff_to_mpas_cells(
+            rivers, lat_cell_deg=lat, lon_cell_deg=lon, area_cell_m2=area,
+            ocean_mask=ocean,
+        )
+        assert out[0] == 0.0                 # land cell receives nothing
+        assert out[1] > 0.0                  # relocated to the ocean neighbour
+        assert float((out * area).sum()) == pytest.approx(5.0e6, rel=1e-6)
+
+    def test_river_with_no_ocean_cell_in_radius_is_dropped(self):
+        # Only ocean cell is on the far side of the planet -> outside 5°.
+        lat = np.array([0.0, 80.0])
+        lon = np.array([0.0, 180.0])
+        area = np.full(2, 1.0e10)
+        ocean = np.array([0, 1])             # only the antipodal cell is ocean
+        rivers = RiverRunoffData(
+            latitudes=np.array([0.0]),
+            longitudes=np.array([0.0]),
+            monthly_flux_kg_s=np.full((12, 1), 3.0e6),
+            names=("r",),
+        )
+        out = project_runoff_to_mpas_cells(
+            rivers, lat_cell_deg=lat, lon_cell_deg=lon, area_cell_m2=area,
+            ocean_mask=ocean, max_search_deg=5.0,
+        )
+        assert float(out.sum()) == 0.0       # dropped, not misassigned
+
+    def test_no_ocean_cells_returns_zero_field(self):
+        lat, lon, area = self._mesh(n=8)
+        rivers = synthetic_dai_trenberth()
+        out = project_runoff_to_mpas_cells(
+            rivers, lat_cell_deg=lat, lon_cell_deg=lon, area_cell_m2=area,
+            ocean_mask=np.zeros(8),
+        )
+        assert out.shape == (8,) and float(out.sum()) == 0.0
+
+    def test_monthly_snapshot_conserves_per_month_total(self):
+        lat, lon, area = self._mesh(n=128)
+        rivers = synthetic_dai_trenberth(seasonal_amplitude=0.5)
+        for m in (1, 6, 12):
+            out = project_runoff_to_mpas_cells(
+                rivers, lat_cell_deg=lat, lon_cell_deg=lon, area_cell_m2=area,
+                month=m, max_search_deg=180.0,
+            )
+            expected = float(rivers.monthly_flux_kg_s[(m - 1) % 12].sum())
+            assert float((out * area).sum()) == pytest.approx(expected, rel=1e-6)

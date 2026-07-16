@@ -166,6 +166,7 @@ def main() -> int:
     )
     from legoesm.ocean.forcing.dai_trenberth import (
         load_dai_trenberth, project_runoff_to_grid,
+        project_runoff_to_mpas_cells,
     )
     from legoesm.ocean.physics.ice_shelf import IceShelfConfig
     from legoesm.ocean.physics.vertical_mixing.tidal import (
@@ -240,10 +241,11 @@ def main() -> int:
 
     # --- Dai-Trenberth runoff setup ----------------------------------
     runoff_on_grid = None
+    runoff_area = None
     if args.runoff:
-        if args.grid != "latlon":
+        if args.grid not in ("latlon", "mpas"):
             print(
-                f"==> WARNING: --runoff not yet supported on grid="
+                f"==> WARNING: --runoff not supported on grid="
                 f"{args.grid!r}; ignoring."
             )
         else:
@@ -252,33 +254,51 @@ def main() -> int:
                 f"(cache: {args.runoff_cache or 'synthetic'})"
             )
             rivers = load_dai_trenberth(cache_dir=args.runoff_cache)
-            lat_deg = np.degrees(np.asarray(grid.lat))
-            lon_deg = np.degrees(np.asarray(grid.lon))
-            cell_area = np.asarray(getattr(grid, "area", None))
-            if cell_area is None or cell_area.shape != (
-                lat_deg.size, lon_deg.size
-            ):
-                # Fallback: cos(lat)-weighted nominal cell area.
-                R_e = float(getattr(grid, "radius", constants.R_earth))
-                dlon_g = 2.0 * np.pi / lon_deg.size
-                dlat_g = np.pi / lat_deg.size
-                cell_area = (
-                    R_e * R_e * dlon_g * dlat_g
-                    * np.cos(np.deg2rad(lat_deg))[:, None]
-                    * np.ones((1, lon_deg.size))
-                )
             ocean_mask = np.asarray(state.land_mask.data, dtype=np.int32)
-            runoff_on_grid = project_runoff_to_grid(
-                rivers,
-                grid_lat_deg=lat_deg,
-                grid_lon_deg=lon_deg,
-                cell_area_m2=cell_area,
-                month=None,
-                ocean_mask=ocean_mask,
-            )
+            if args.grid == "mpas":
+                # Unstructured mesh: bin river mouths onto cell centres by
+                # great-circle nearest-ocean-cell (project_runoff_to_mpas_cells),
+                # the counterpart of the lat-lon binning below. Cell area is the
+                # mesh's own areaCell (no cos(lat) fallback needed).
+                lat_cell = np.degrees(np.asarray(grid.latCell))
+                lon_cell = np.degrees(np.asarray(grid.lonCell))
+                runoff_area = np.asarray(grid.areaCell, dtype=np.float64)
+                runoff_on_grid = project_runoff_to_mpas_cells(
+                    rivers,
+                    lat_cell_deg=lat_cell,
+                    lon_cell_deg=lon_cell,
+                    area_cell_m2=runoff_area,
+                    month=None,
+                    ocean_mask=ocean_mask,
+                )
+            else:
+                lat_deg = np.degrees(np.asarray(grid.lat))
+                lon_deg = np.degrees(np.asarray(grid.lon))
+                cell_area = np.asarray(getattr(grid, "area", None))
+                if cell_area is None or cell_area.shape != (
+                    lat_deg.size, lon_deg.size
+                ):
+                    # Fallback: cos(lat)-weighted nominal cell area.
+                    R_e = float(getattr(grid, "radius", constants.R_earth))
+                    dlon_g = 2.0 * np.pi / lon_deg.size
+                    dlat_g = np.pi / lat_deg.size
+                    cell_area = (
+                        R_e * R_e * dlon_g * dlat_g
+                        * np.cos(np.deg2rad(lat_deg))[:, None]
+                        * np.ones((1, lon_deg.size))
+                    )
+                runoff_area = cell_area
+                runoff_on_grid = project_runoff_to_grid(
+                    rivers,
+                    grid_lat_deg=lat_deg,
+                    grid_lon_deg=lon_deg,
+                    cell_area_m2=cell_area,
+                    month=None,
+                    ocean_mask=ocean_mask,
+                )
             print(
                 f"   Runoff grid total: "
-                f"{float((runoff_on_grid * cell_area).sum()):.3e} kg/s"
+                f"{float((runoff_on_grid * runoff_area).sum()):.3e} kg/s"
             )
 
     # --- Ice-shelf setup ---------------------------------------------
@@ -492,14 +512,25 @@ def main() -> int:
                 z_coord=z_coord, grid=grid, grid_type=args.grid,
                 dt=dt,
             )
-            # Dai-Trenberth runoff (when enabled + lat-lon).
+            # Dai-Trenberth runoff (when enabled). Grid-dispatched like the
+            # SSS / ice-shelf steps: the mpas apply shares the same virtual-salt
+            # + eta-rise convention. Both R fields carry the (spatial,) shape
+            # their projector produced -- (n_lat, n_lon) or (nCells,).
             if runoff_on_grid is not None:
-                state = apply_runoff_step(
-                    state,
-                    R_kg_m2_s=runoff_on_grid,
-                    z_coord=z_coord,
-                    dt=dt,
-                )
+                if args.grid == "mpas":
+                    state = apply_runoff_step_mpas(
+                        state,
+                        R_kg_m2_s=runoff_on_grid,
+                        z_coord=z_coord,
+                        dt=dt,
+                    )
+                else:
+                    state = apply_runoff_step(
+                        state,
+                        R_kg_m2_s=runoff_on_grid,
+                        z_coord=z_coord,
+                        dt=dt,
+                    )
 
             # Ice-shelf basal melt (when enabled). Grid-dispatched exactly like
             # the SSS-restoring / runoff steps above: the lat-lon and MPAS apply
