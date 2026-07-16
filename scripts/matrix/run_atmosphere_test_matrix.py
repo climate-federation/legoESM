@@ -609,6 +609,18 @@ from legoesm.experiments.matrix.namelist import write_case_namelist
 # fluxes shared by both cores), so they are core-independent by construction.
 _SW_CORE_CHOICES = ("production", "fb")
 _SW_CORE = "production"
+# --fv3-native-grid (phase-4c): swap the cube SW production-lane grid from
+# the legacy equiangular gnomonic to the FV3-native ED gnomonic (+ duo
+# halos) — the grid family certified bit-exact in the phase-4 one-step
+# oracles (c_sw / d_sw / divergence_corner_duo).  The ED *metric* family
+# (dxc/dyc/area/sin_sg) flows through create_cubed_sphere_cdgrid's
+# gnomonic="auto" provenance read, so the A-L RK3 solver runs on it
+# unchanged.  fv3_native_angles (cross-face seam angles) is deliberately
+# NOT enabled: those O(1) seam values are tuned-incompatible with the
+# shipped A-L operators and are a native-FB-core concern
+# (cubed_sphere_cdgrid.py:639).  This makes the grid the ONLY variable in
+# an ED-vs-equiangular cube-imprint A/B (solver + config + IC held fixed).
+_FV3_NATIVE_GRID = False
 
 
 def _fb_cube_sw_model(n: int, test_num: int):
@@ -2442,8 +2454,20 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # (day-10 max|u| 18 m/s vs 111 m/s, peak vorticity 0.7x vs 6.6x
         # initial).  Williamson cases keep the production non-duogrid
         # path (balanced flows; calibrated separately).
-        grid = (create_cubed_sphere(n, omega=0.0, use_duogrid=True)
-                if test_num == 8 else create_cubed_sphere(n))
+        if _FV3_NATIVE_GRID:
+            # phase-4c: the FV3-native ED gnomonic + duo halos on ALL cube
+            # SW cases.  omega=0 for the non-rotating modons (test 8),
+            # rotating otherwise (constants.Omega).  The model builds its
+            # cdgrid internally and auto-selects ED metrics from the grid
+            # provenance; see the _FV3_NATIVE_GRID module note.
+            from legoesm import constants
+            from legoesm.grids.cubed_sphere import create_fv3_native_cubed_sphere
+            grid = create_fv3_native_cubed_sphere(
+                n, omega=(0.0 if test_num == 8 else constants.Omega),
+                use_duogrid=True, k2e_nord=4)
+        else:
+            grid = (create_cubed_sphere(n, omega=0.0, use_duogrid=True)
+                    if test_num == 8 else create_cubed_sphere(n))
         cdgrid = create_cubed_sphere_cdgrid(grid)
         dt = 300.0
         # Iter-760: switch to Fortran-faithful del-n vorticity damping
@@ -7691,6 +7715,16 @@ def build_parser() -> argparse.ArgumentParser:
              "it, and the cube cosine-bell cases are core-independent "
              "(pure transport, model.step never called).")
     p.add_argument(
+        "--fv3-native-grid", action="store_true",
+        help="Cube SW production lane: build the grid with the FV3-native "
+             "ED gnomonic + duo halos (create_fv3_native_cubed_sphere) "
+             "instead of the legacy equiangular gnomonic.  The grid family "
+             "certified bit-exact in the phase-4 one-step oracles; the ED "
+             "metric family flows through create_cubed_sphere_cdgrid's "
+             "gnomonic='auto'.  Enables the ED-vs-equiangular cube-imprint "
+             "A/B with solver+config+IC held fixed.  Production core only "
+             "(--sw-core fb rebuilds its own grid; non-cube grids ignore).")
+    p.add_argument(
         "--resolution", type=str, default=None,
         help="Override baseline resolution (e.g. C48, 90x180, ico6)")
     p.add_argument(
@@ -7770,6 +7804,11 @@ def main():
     # run_shallow_water raises again defensively for non-CLI callers).
     global _SW_CORE
     _SW_CORE = args.sw_core
+
+    # phase-4c: stash the FV3-native ED-grid selection for the cube SW
+    # production lane in run_shallow_water (see the _FV3_NATIVE_GRID note).
+    global _FV3_NATIVE_GRID
+    _FV3_NATIVE_GRID = args.fv3_native_grid
 
     # iter-31: thread per-run GHG overrides through to
     # _make_rrtmgp_physics.  iter-32 codex MEDIUM: zero is a valid
