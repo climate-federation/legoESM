@@ -73,10 +73,14 @@ def load_run_day5_v(npz_path: str) -> np.ndarray:
         if key not in z.files:
             raise ContractError(f"npz missing '{key}'")
     t = np.asarray(z["times_days"], dtype=np.float64)
-    if t.ndim != 1 or abs(float(t[-1]) - REF_DAY) > 1e-6:
+    if t.ndim != 1 or t.size == 0 or not np.isfinite(t).all():
+        raise ContractError("times_days must be 1-D, non-empty, finite")
+    if np.any(np.diff(t) <= 0):
+        raise ContractError("times_days must be strictly increasing")
+    if abs(float(t[-1]) - REF_DAY) > 1e-6:
         raise ContractError(
-            f"times_days[-1] must be {REF_DAY} d (got "
-            f"{float(t[-1]) if t.size else 'empty'}) — not a full W2 run")
+            f"times_days[-1] must be {REF_DAY} d (got {float(t[-1])}) — "
+            "not a full W2 run")
     v = np.asarray(z["v"], dtype=np.float64)
     if v.ndim != 3 or v.shape[1:] != (181, 360) or v.shape[0] != t.size:
         raise ContractError(
@@ -84,10 +88,14 @@ def load_run_day5_v(npz_path: str) -> np.ndarray:
             f"{v.shape} vs nt={t.size}")
     lat = np.asarray(z["lat"], dtype=np.float64)
     lon = np.asarray(z["lon"], dtype=np.float64)
-    if lat.shape != (181,) or abs(lat[0] + 90) > 1e-6 or abs(lat[-1] - 90) > 1e-6:
-        raise ContractError("lat must be the canonical -90..90 (181)")
-    if lon.shape != (360,):
-        raise ContractError("lon must have 360 points")
+    if lat.shape != (181,) or not np.allclose(
+            lat, np.linspace(-90.0, 90.0, 181), atol=1e-6):
+        raise ContractError("lat must be the canonical linspace(-90, 90, 181)")
+    if lon.shape != (360,) or not np.isfinite(lon).all() \
+            or np.any(np.diff(lon) <= 0) \
+            or abs((lon[-1] - lon[0]) - 359.0) > 1.0:
+        raise ContractError(
+            "lon must be 360 strictly-increasing canonical degrees")
     v5 = v[-1]
     if not np.isfinite(v5).all():
         raise ContractError("day-5 v contains non-finite values")
@@ -138,6 +146,11 @@ def main() -> int:
     print(f"run: max|v|={r['got_max']:.4f}  rms={r['got_rms']:.4f}  "
           f"(ratio to envelope: max {r['got_max'] / r['env_max']:.1f}x, "
           f"rms {r['got_rms'] / r['env_rms']:.1f}x)")
+    print("protocol: EXTERNAL TARGET (ref C48/hord6/dt3600 Fortran vs run "
+          f"C{args.res}/legoESM/dt300) — NOT a controlled comparison; "
+          "(48/N)^2 scaling AND the tolerance factor are ASSUMPTIONS; "
+          "--res is caller-reported (trusted-input diagnostic, not an "
+          "authenticated gate).")
     print("W2_DUO_TARGET_GATE:", "PASS" if r["ok"] else
           "FAIL (distance to the duo target quantified above)")
     return 0 if r["ok"] else 1

@@ -98,6 +98,41 @@ def test_contract_rejects_bad_coords_and_missing_keys(tmp_path):
         g.load_run_day5_v(p2)
 
 
+def test_contract_rejects_malformed_times(tmp_path):
+    """codex w2gate-r2: NaN / non-monotone / length-mismatched times."""
+    g = _load_gate()
+    t_nan = np.linspace(0.0, 5.0, 11)
+    t_nan[3] = np.nan
+    with pytest.raises(g.ContractError, match="finite"):
+        g.load_run_day5_v(_write_npz(tmp_path, t=t_nan))
+    t_dec = np.array([0.0, 2.0, 1.0, 5.0])
+    with pytest.raises(g.ContractError, match="increasing"):
+        g.load_run_day5_v(_write_npz(tmp_path,
+                                     v=np.zeros((4, 181, 360)), t=t_dec))
+    # nt mismatch between v and times_days
+    with pytest.raises(g.ContractError, match="aligned"):
+        g.load_run_day5_v(_write_npz(tmp_path, v=np.zeros((7, 181, 360))))
+
+
+def test_contract_rejects_bad_lon_values(tmp_path):
+    """codex w2gate-r2: 360 points with wrong VALUES must be rejected."""
+    g = _load_gate()
+    lon_bad = np.linspace(0.0, 35.9, 360)     # wrong span
+    with pytest.raises(g.ContractError, match="lon"):
+        g.load_run_day5_v(_write_npz(tmp_path, lon=lon_bad))
+    lon_dec = np.linspace(179.0, -180.0, 360)  # decreasing
+    with pytest.raises(g.ContractError, match="lon"):
+        g.load_run_day5_v(_write_npz(tmp_path, lon=lon_dec))
+
+
+def test_contract_rejects_noncanonical_interior_lat(tmp_path):
+    """codex w2gate-r2: correct endpoints but warped interior spacing."""
+    g = _load_gate()
+    lat = np.linspace(-90.0, 90.0, 181) ** 3 / 90.0 ** 2   # warped, same ends
+    with pytest.raises(g.ContractError, match="lat"):
+        g.load_run_day5_v(_write_npz(tmp_path, lat=lat))
+
+
 def test_score_validates_args():
     g = _load_gate()
     v5 = np.zeros((181, 360))
