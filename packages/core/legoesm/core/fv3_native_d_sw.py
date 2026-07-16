@@ -2760,10 +2760,11 @@ def d_sw(delp, pt, w, u, v, uc, vc, ua, va, divg_d, xflux, yflux, cx, cy,
     interior vb/ub (1260/1270/1327), the d_sw5 nord==0 ptc/vort + skipped
     delpc corner-removal (1644/1709), ``fill_c`` forced False + skipped
     divg_d corner-removal (1742/1771), and the xtp_u/ytp_v unclamped
-    is3/js3 (2566/2923).  The ``.not.bounded .or. .not.duogrid`` guards
-    (d_sw1 edges 656-813, d_sw4 KE corner fix, del6 copy_corners,
-    xtp_u/ytp_v edge reconstructions) are ALWAYS TRUE on the global cube
-    and deliberately NOT gated.
+    is3/js3 (2566/2923).  The remaining two-flag guards (d_sw1 edges
+    656-813 + d_sw4 KE corner fix + del6 copy_corners + ytp_v edges, all
+    ``.not.bounded .or. .not.dg``; xtp_u 2586/2842, ``.not.bounded .or.
+    dg``) are ALWAYS TRUE on the global cube (``.not.bounded`` dominates
+    either ``.or.`` form) and deliberately NOT gated.
 
     ``duogrid=True`` currently RAISES: unlike the duo c_sw (whose duo
     branches fully define every read cell — certified bit-exact), the

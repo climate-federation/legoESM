@@ -65,6 +65,7 @@ def _call(inp, duogrid):
     bd = Bounds.single_tile(res, ng)
     m_a = res + 2 * ng
     divg_in = np.array(inp["divg_d_in"], dtype=np.float64, copy=True)
+    kw = {} if duogrid is None else {"duogrid": duogrid}
     return d_sw(
         delp=inp["delp"], pt=inp["pt"], w=inp["w"], u=inp["u"], v=inp["v"],
         uc=inp["uc"], vc=inp["vc"], ua=inp["ua"], va=inp["va"],
@@ -72,7 +73,7 @@ def _call(inp, duogrid):
         xflux=np.zeros((res + 1, res)), yflux=np.zeros((res, res + 1)),
         cx=np.zeros((res + 1, m_a)), cy=np.zeros((m_a, res + 1)),
         gs=_make_gs(inp), bd=bd, npx=res + 1, npy=res + 1,
-        dt=float(inp["dt"]), duogrid=duogrid, **_CFG)
+        dt=float(inp["dt"]), **kw, **_CFG)
 
 
 def test_duogrid_true_raises_not_single_tile_well_posed(inputs):
@@ -83,10 +84,17 @@ def test_duogrid_true_raises_not_single_tile_well_posed(inputs):
         _call(inputs, duogrid=True)
 
 
-def test_duogrid_false_default_runs_plain(inputs):
-    """duogrid=False (and the default omitted) run the plain path — the
-    byte-identity itself is certified by the phase-4b oracle (22 tests);
-    this asserts the gated code did not disturb reachability."""
-    out = _call(inputs, duogrid=False)
-    a = np.asarray(out["delp"], dtype=np.float64)
-    assert np.isfinite(a).any()
+def test_duogrid_false_equals_omitted_default(inputs):
+    """duogrid=False and the OMITTED default produce byte-identical output
+    on every field (codex duo-d_sw P2 — the earlier test passed False
+    explicitly and only checked finiteness).  Byte-identity to the
+    pre-gate plain d_sw itself is certified by the phase-4b oracle."""
+    out_false = _call(inputs, duogrid=False)
+    out_default = _call(inputs, duogrid=None)    # argument omitted
+    assert set(out_false) == set(out_default)
+    for k in out_false:
+        a = np.asarray(out_false[k], dtype=np.float64)
+        b = np.asarray(out_default[k], dtype=np.float64)
+        assert a.shape == b.shape, k
+        # NaN-safe byte equality (unwritten slots are NaN on both sides)
+        assert np.array_equal(a.view(np.uint64), b.view(np.uint64)), k
