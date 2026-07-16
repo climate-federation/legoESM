@@ -121,8 +121,14 @@ native seam angles (→ blow-up).
    alone.  The M1 preset is a coarse, un-tuned damping, not a calibrated
    production config.
 4. **Native seam angles + the current FB halo blow the FB core up (row
-   E → NaN).**  What D→E cleanly establishes: native cross-face seam angles
-   *with the FB `d_sw5` zero-ring halo* are inconsistent → instability.
+   E → NaN by step 200 ≈ 0.69 d).**  This is the closest-to-isolated rung:
+   D and E differ ONLY in `fv3_native_angles`, same ED grid + FB core + M1
+   config.  D (legacy angles) survives the full 5-day window (v_ll_Linf
+   58.9); E (native angles) goes NaN by step 200 — ~10× faster than the
+   baseline FB equiangular seam mode (which NaNs ~day 7.5 per
+   `fv3_single_implementation_program.md`).  So native cross-face seam
+   angles *with the FB `d_sw5` zero-ring halo* are inconsistent →
+   instability, and they sharply ACCELERATE the known FB seam mode.
    HYPOTHESIS (untested here): FV3 pairs the native seam angles *with* the
    faithful d_sw5 cross-face halo, and legoESM currently runs the stable
    zero-ring approximation instead (the faithful attenuated ghost itself
