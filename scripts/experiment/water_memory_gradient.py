@@ -314,7 +314,7 @@ def _forward_window_diag(state0, forcing_seq, doy_seq, config, lat, dt, land_par
     only AFTER thaw so the gradient never flows back through the singularity."""
     ncol = state0.theta_soil.shape[0]
     nsteps = int(np.asarray(forcing_seq.T_lowest).shape[0])
-    steps = jnp.arange(nsteps)
+    steps = jnp.arange(nsteps)                                  # int64 under x64, int32 else
 
     def body(carry, xs):
         st, ok, msnow, mtsoil, onset, found = carry
@@ -333,8 +333,10 @@ def _forward_window_diag(state0, forcing_seq, doy_seq, config, lat, dt, land_par
         mtsoil = jnp.minimum(mtsoil, new_st.T_soil[:, 0])
         return (new_st, ok, msnow, mtsoil, onset, found), None
 
+    # onset sentinel dtype MUST match ``steps`` (jnp.where promotes it in-loop),
+    # else lax.scan rejects the carry as int32-in / int64-out under x64.
     init = (state0, jnp.ones(ncol, bool), jnp.zeros(ncol), jnp.full(ncol, 1e3),
-            jnp.full(ncol, nsteps, dtype=jnp.int32), jnp.zeros(ncol, bool))
+            jnp.full(ncol, nsteps, dtype=steps.dtype), jnp.zeros(ncol, bool))
     (_stf, ok, msnow, mtsoil, onset, _f), _ = jax.lax.scan(
         body, init, (forcing_seq, doy_seq, steps))
     return ok, msnow, mtsoil, onset

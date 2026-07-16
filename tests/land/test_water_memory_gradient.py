@@ -159,6 +159,21 @@ def test_growing_season_kernel_bins_sum_to_map():
         f"bin-sum {K_sum} != full post-onset map {np.asarray(M_all)}")
 
 
+def test_forward_window_diag_runs_and_detects_onset():
+    """_forward_window_diag scans without a carry-dtype error and returns sensible
+    per-cell diagnostics. The synthetic forcing is warm + snow-free, so onset = step 0
+    for all cells. (This exercises the scan whose int32/int64 onset-carry mismatch broke
+    the growing-season run -- a run_real-only path the other tests don't cover.)"""
+    cfg, F, doy_seq, late_flags, lat, st0 = _case()
+    ok, msnow, mtsoil, onset = wm._forward_window_diag(
+        st0, F, doy_seq, cfg, lat, _DT, None, min_onset_doy=float(np.asarray(doy_seq)[0]))
+    onset = np.asarray(onset); nsteps = int(np.asarray(F.sw_down).shape[0])
+    assert np.all(np.asarray(ok)), "warm synthetic cells should stay finite"
+    assert np.all((onset >= 0) & (onset <= nsteps)), f"onset out of range: {onset}"
+    assert np.all(onset == 0), f"warm snow-free cells should onset at step 0, got {onset}"
+    assert np.all(np.asarray(msnow) < 1.0)   # no snow in the warm synthetic case
+
+
 def test_spin_forward_is_nograd_and_finite():
     """The no-grad spin-to-perturb-point runs and returns a finite state."""
     cfg, F, doy_seq, late_flags, lat, st0 = _case()
