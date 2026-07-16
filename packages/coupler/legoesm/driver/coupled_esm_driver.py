@@ -55,6 +55,48 @@ def enable_diurnal_surface_land(land_cfg):
     return cfg
 
 
+def _validate_air_sea_scheme_consistency(atm_config, coupler_config) -> None:
+    """The atmosphere surface layer and the coupler OCEAN tile must agree.
+
+    ``ExperimentConfig.surface_bulk_scheme`` drives the ATMOSPHERE surface layer
+    and ``CouplerConfig.bulk_scheme`` drives the coupler OCEAN tile (the
+    3D-ocean air-sea flux).  They describe the SAME interface, so a mismatch
+    means the latent heat the ocean loses is not the moisture flux the
+    atmosphere gains -- and nothing failed, it just quietly stopped conserving.
+
+    This is a real bug this guard is the fix for: ``run_coupled`` built
+    ``CouplerConfig`` without ``bulk_scheme``, so ``--surface-bulk-scheme
+    coare3`` gave the atmosphere COARE3 while the ocean tile stayed on the
+    "constant" default, and ``--gustiness-zi`` (a COARE3 term, absent from the
+    constant scheme) was inert on the tile.  The flag's help and the driver's
+    own log line both claimed the tile used the requested scheme.
+
+    Validated on STATIC Python config values at construction, never in a traced
+    body.  ``coupler_config=None`` means "driver builds the defaults", which are
+    self-consistent by construction, so it is skipped.  The LAND and SLAB tiles
+    legitimately run their own scheme (``--land-bulk-scheme`` /
+    ``--slab-bulk-scheme``) and are deliberately out of scope here -- this guards
+    the air-sea interface only.
+    """
+    if coupler_config is None:
+        return
+    atm_scheme = getattr(atm_config, "surface_bulk_scheme", None)
+    ocean_scheme = getattr(coupler_config, "bulk_scheme", None)
+    if atm_scheme is None or ocean_scheme is None:
+        return
+    if atm_scheme != ocean_scheme:
+        raise ValueError(
+            "air-sea bulk-flux scheme mismatch: the atmosphere surface layer "
+            f"runs ExperimentConfig.surface_bulk_scheme={atm_scheme!r} while "
+            f"the coupler ocean tile runs CouplerConfig.bulk_scheme="
+            f"{ocean_scheme!r}. These parameterize the SAME air-sea interface; "
+            "a split means the ocean's latent-heat loss is not the "
+            "atmosphere's moisture gain. Set CouplerConfig.bulk_scheme to "
+            f"{atm_scheme!r} (run_coupled threads --surface-bulk-scheme into "
+            "both)."
+        )
+
+
 def _flatten_pytree_to_npz(state, prefix: str) -> dict:
     """Flatten a registered pytree (a NamedTuple of ``Field`` leaves) into a
     flat ``{prefix+path: np.ndarray}`` dict for ``np.savez`` serialization.
@@ -159,6 +201,7 @@ class CoupledESMDriver:
     ):
         self.atm_config = atm_config
         self.coupled_cfg = coupled_config or CoupledConfig()
+        _validate_air_sea_scheme_consistency(atm_config, coupler_config)
         self._atm = ModelDriver(atm_config, output_dir=output_dir)
         self._coupler_config = coupler_config
         self._ice_config = ice_config

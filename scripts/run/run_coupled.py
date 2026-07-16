@@ -131,6 +131,48 @@ def build_params_bundle(coupled_cfg, coupler_config=None) -> _CoupledParamsBundl
     )
 
 
+def build_coupler_config(args):
+    """The ``CouplerConfig`` for this run, or ``None`` to take the driver's
+    defaults.
+
+    Exposed (not inlined in ``main``) so a test can assert the CONSTRUCTED
+    config rather than re-deriving it -- a mirror in the test would pass even if
+    this function were wrong, which is exactly how the ``bulk_scheme`` omission
+    below survived parser-only coverage.
+
+    Keeps the coupler ocean-tile bulk-flux scheme consistent with the atmosphere
+    surface layer (interface energy balance: the flux leaving the ocean must
+    match the flux entering the atmosphere).  Returns ``None`` while the user
+    stays on the defaults so a default run is byte-identical -- the driver
+    builds the identical CouplerConfig when it gets ``None``.
+    """
+    if (args.surface_bulk_scheme == "constant"
+            and args.surface_stability_scheme == "dyer1974"):
+        return None
+    from legoesm.coupler.config import CouplerConfig
+
+    # ``bulk_scheme`` was OMITTED here, so it stayed at its "constant" default
+    # while the atmosphere ran the requested MOST scheme: the air-sea interface
+    # silently SPLIT (atmosphere coare3 vs ocean tile constant) -- the very
+    # inconsistency the --surface-bulk-scheme NOTE warns about, created by
+    # omission rather than by offering "most".  The omission also made the
+    # gustiness inert on the tile: w* is a COARE3 term and the "constant" scheme
+    # has no gustiness at all, so the energy-consistency this block exists to
+    # enforce could not hold.  The flag's help and main()'s log line both
+    # already claimed the tile used this scheme.
+    # ``gustiness_w_zi`` threads the SAME convective-gustiness BL depth the
+    # atmosphere surface layer uses (--gustiness-zi) onto the ocean tile: the
+    # latent heat the ocean loses == the moisture flux the atmosphere gains.
+    # Without it the 3D-ocean q_net used the non-gusty tile flux -> weak
+    # evaporation -> dry atmosphere -> cold collapse (cmip_air_sea_decoupling).
+    return CouplerConfig(
+        bulk_scheme=args.surface_bulk_scheme,
+        gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
+        thermo_convention=args.bulk_thermo_convention,
+        stability_scheme=args.surface_stability_scheme,
+    )
+
+
 def apply_coupled_params(params_path, land_params, atm_config, coupled_cfg,
                          coupler_config):
     """Apply the --params calibration layer (issue #691) across EVERY component
@@ -1135,26 +1177,8 @@ def main():
     # Create and run driver
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
 
-    # Keep the coupler ocean-tile bulk-flux scheme consistent with the
-    # atmosphere surface layer (interface energy balance: the flux leaving the
-    # slab must match the flux entering the atmosphere).  Only override when the
-    # user opts out of "constant" so the default run stays byte-identical (the
-    # driver builds the default CouplerConfig when coupler_config is None).
-    coupler_config = None
-    if (args.surface_bulk_scheme != "constant"
-            or args.surface_stability_scheme != "dyer1974"):
-        from legoesm.coupler.config import CouplerConfig
-        # Thread the SAME convective-gustiness BL depth onto the coupler ocean
-        # tile that the atmosphere surface layer uses (--gustiness-zi), so the
-        # air-sea interface flux is energy-consistent: the latent heat the
-        # ocean loses == the moisture flux the atmosphere gains.  Without this
-        # the 3D-ocean q_net used the non-gusty tile flux -> weak evaporation
-        # -> dry atmosphere -> cold collapse (cmip_air_sea_decoupling).
-        coupler_config = CouplerConfig(
-            gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
-            thermo_convention=args.bulk_thermo_convention,
-            stability_scheme=args.surface_stability_scheme,
-        )
+    coupler_config = build_coupler_config(args)
+    if coupler_config is not None:
         logger.info("  Surface bulk-flux scheme: %s (thermo: %s; stability: %s; "
                     "atmosphere + coupler ocean tile); convective "
                     "gustiness z_i=%.0f m",
