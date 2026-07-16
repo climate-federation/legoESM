@@ -38,19 +38,32 @@ cache_dir: ".cache/wb_scale_era5"
 train_years: [2015, 2016, 2017, 2018, 2019]
 eval_years: [2020]        # the WB2 canonical test year
 era5_cadence_hours: 6
-# Optional: scatter training samples across the calendar instead of the first
-# n_training_days of January per train_year (#1047 finding 2 -- consecutive Jan
-# days are ~1 independent synoptic scene per 2-4 days, all winter). Each entry
-# is (year, day_offset, n_days). Uncomment for seasonal coverage; overrides
-# train_years/n_training_days when present. Example: one 2-day window per quarter
-# over 5 years (~40 pairs, all seasons) instead of ~60 autocorrelated Jan pairs.
-# train_windows:
-#   - [2015, 0,   2]   # Jan
-#   - [2015, 91,  2]   # Apr
-#   - [2015, 182, 2]   # Jul
-#   - [2015, 273, 2]   # Oct
-#   - [2016, 0,   2]
-#   # ... (repeat per year)
+# Scattered training windows (#1047 note 5 — the DISCRIMINATING experiment):
+# EXACTLY the baseline arm's 60-sample budget (5y x 12 pairs/y), but placed
+# across three seasons (Jan/May/Sep; 1-day windows x 4 snapshots = 4 pairs
+# each) instead of the first 3 January days. Every other knob (mode, loss,
+# epochs, lr, dt, ranks) is byte-identical to the #1047 baseline, so any skill
+# change is attributable to SEASONAL COVERAGE alone: if the trained arm now
+# matches/beats the zero-init dycore at its 6-12 h training leads, coverage was
+# the binding constraint (scale the count next); if it still degrades, count
+# is binding (needs shard-aware loading first). Comment this block out to
+# recover the consecutive-January baseline sampling.
+train_windows:
+  - [2015, 0,   1]   # Jan
+  - [2015, 121, 1]   # May
+  - [2015, 243, 1]   # Sep
+  - [2016, 0,   1]
+  - [2016, 121, 1]
+  - [2016, 243, 1]
+  - [2017, 0,   1]
+  - [2017, 121, 1]
+  - [2017, 243, 1]
+  - [2018, 0,   1]
+  - [2018, 121, 1]
+  - [2018, 243, 1]
+  - [2019, 0,   1]
+  - [2019, 121, 1]
+  - [2019, 243, 1]
 
 # --- training ---
 mode: "neural_gcm"        # physics | neural_gcm | sfno  (CLI --mode wins)
