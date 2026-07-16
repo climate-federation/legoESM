@@ -893,9 +893,9 @@ class ExperimentConfig(NamedTuple):
     # mirrors BechtoldConfig.use_ifs_subcloud_evap (fallbacks match).
     bechtold_use_ifs_subcloud_evap: bool = True
     # IFS in-updraft precipitation formation (cuascn.F90:718-773).  Default
-    # OFF pending RCE/AMIP validation; mirrors
-    # BechtoldConfig.use_ifs_inplume_precip (fallbacks match).
-    bechtold_use_ifs_inplume_precip: bool = False
+    # ON (2026-07-16, validated: codex x3 + gray-RCE A/B + C24 AMIP A/B);
+    # mirrors BechtoldConfig.use_ifs_inplume_precip (fallbacks match).
+    bechtold_use_ifs_inplume_precip: bool = True
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -1924,7 +1924,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_use_ifs_subcloud_evap=getattr(
                 amip_cfg, 'bechtold_use_ifs_subcloud_evap', True),
             bechtold_use_ifs_inplume_precip=getattr(
-                amip_cfg, 'bechtold_use_ifs_inplume_precip', False),
+                amip_cfg, 'bechtold_use_ifs_inplume_precip', True),
             # Convective precip split family — copy through AMIP/checkpoint
             # restore so the physical autoconversion isn't dropped to defaults
             # (codex MED; convective_precip_efficiency was a pre-existing gap).

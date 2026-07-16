@@ -1478,10 +1478,13 @@ class BechtoldConfig(NamedTuple):
     # precip_split_scheme variants are bypassed when on; the sub-cloud evap
     # then acts on the formed rain — the full cuascn->cuflxn chain).
     # One-pass replay: plume buoyancy loading keeps the unconverted (heavier)
-    # condensate — a documented O(0.1-0.3 K) approximation.  Default False
-    # pending RCE/AMIP A/B validation (two-step ship pattern); False is
-    # byte-identical legacy.
-    use_ifs_inplume_precip: bool = False
+    # condensate — a documented O(0.1-0.3 K) approximation.  Default True
+    # since 2026-07-16: codex CLEAN x3, 100-day gray-RCE A/B (stable; moist-
+    # adiabat realism IMPROVES 10.27 -> 9.82 K) and 15-day C24 AMIP A/B
+    # (stable, near-neutral: energy residual +1.9 W/m^2 on the pre-existing
+    # 297 baseline with the residual std improved, moisture residual
+    # improved).  False restores the legacy split path byte-identically.
+    use_ifs_inplume_precip: bool = True
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0

@@ -164,7 +164,8 @@ def test_bechtold_downdraft_evap_conserves_water_locally():
         # re-evaporation machinery; the default-on IFS Kessler evap replaces
         # it (own conservation tests in the subcloud_evap section).
         config=BechtoldConfig(enable_downdraft=False, enable_stochastic=False,
-                              use_ifs_subcloud_evap=False),
+                              use_ifs_subcloud_evap=False,
+                              use_ifs_inplume_precip=False),
         moisture_convergence=jnp.zeros_like(T),
     )
     out_on, _, _ = bechtold_convection(
@@ -172,7 +173,8 @@ def test_bechtold_downdraft_evap_conserves_water_locally():
         conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
         dt=300.0,
         config=BechtoldConfig(enable_downdraft=True, enable_stochastic=False,
-                              use_ifs_subcloud_evap=False),
+                              use_ifs_subcloud_evap=False,
+                              use_ifs_inplume_precip=False),
         moisture_convergence=jnp.zeros_like(T),
     )
     dT_diff = out_on.dT_dt - out_off.dT_dt
@@ -669,7 +671,8 @@ def test_bechtold_precip_efficiency_splits_rain_conserving_mass():
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
         # evap pinned OFF: this test pins the bit-exact pe-fraction split.
         config=BechtoldConfig(precip_efficiency=0.0,
-                              use_ifs_subcloud_evap=False),
+                              use_ifs_subcloud_evap=False,
+                              use_ifs_inplume_precip=False),
     )
     assert base.dq_r_conv_dt is None                 # pe=0 => no split
 
@@ -677,7 +680,8 @@ def test_bechtold_precip_efficiency_splits_rain_conserving_mass():
     split, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
         config=BechtoldConfig(precip_efficiency=pe,
-                              use_ifs_subcloud_evap=False),
+                              use_ifs_subcloud_evap=False,
+                              use_ifs_inplume_precip=False),
     )
     assert split.dq_r_conv_dt is not None
     # cloud + rain == the ORIGINAL positive condensate (base cloud), so the
@@ -715,19 +719,22 @@ def test_bechtold_downdraft_sharpness_fields_wired():
     out_default, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
         config=BechtoldConfig(enable_downdraft=True,
-                              use_ifs_subcloud_evap=False),
+                              use_ifs_subcloud_evap=False,
+                              use_ifs_inplume_precip=False),
     )
     out_rh_flat, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
         config=BechtoldConfig(enable_downdraft=True,
                               downdraft_rh_sharpness=1e-6,
-                              use_ifs_subcloud_evap=False),
+                              use_ifs_subcloud_evap=False,
+                              use_ifs_inplume_precip=False),
     )
     out_lcl_flat, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
         config=BechtoldConfig(enable_downdraft=True,
                               lcl_membership_sharpness=1e-6,
-                              use_ifs_subcloud_evap=False),
+                              use_ifs_subcloud_evap=False,
+                              use_ifs_inplume_precip=False),
     )
     assert float(jnp.max(jnp.abs(out_rh_flat.dT_dt - out_default.dT_dt))) > 1e-10, (
         "downdraft_rh_sharpness is not wired"
@@ -875,7 +882,8 @@ def _run_pe(pe):
         # downstream of the split (its own conservation is tested in the
         # subcloud_evap section).
         config=BechtoldConfig(precip_efficiency=pe,
-                              use_ifs_subcloud_evap=False),
+                              use_ifs_subcloud_evap=False,
+                              use_ifs_inplume_precip=False),
     )
     return out
 
@@ -1878,6 +1886,7 @@ def test_ifs_subcloud_evap_no_rain_noop_and_grad():
     out, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
         config=BechtoldConfig(use_ifs_subcloud_evap=True,
+                              use_ifs_inplume_precip=False,
                               precip_efficiency=0.0))
     assert out.dq_r_conv_dt is None
     assert jnp.all(jnp.isfinite(out.dT_dt))
@@ -2024,11 +2033,11 @@ def test_ifs_inplume_conversion_analytic_fortran_mirror():
 
 
 def test_ifs_inplume_toggle_and_leaf_integration():
-    """Default OFF (byte-identical legacy split); ON produces rain from the
+    """Default ON (2026-07-16 flip); ON produces rain from the
     in-plume formation (dq_r>0 without any precip split), reduces the
     detrained anvil condensate, stays finite, and a stable column stays
     quiescent."""
-    assert BechtoldConfig().use_ifs_inplume_precip is False
+    assert BechtoldConfig().use_ifs_inplume_precip is True
     T, q, pf, ph, u, v = _column(ncol=2, nlev=40, T_sfc=299.0, q_sfc=13e-3,
                                  lapse_rate=6.5)
     ncol, nlev = T.shape
