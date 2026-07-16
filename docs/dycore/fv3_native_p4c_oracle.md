@@ -136,6 +136,32 @@ native seam angles (→ blow-up).
    faithful halo may be the missing piece.  D→E does NOT itself test the
    faithful halo.
 
+## Campaign EXIT battery part 1 — full SW matrix (2026-07-16)
+
+`scripts/cluster/fv3_native/sw_full_battery.sbatch` (job 9043862): every
+SW case × every grid, PRODUCTION configuration.  **24/24 PASS.**
+
+| case | cube C36 | latlon | MPAS (ico5) | spectral (T21) |
+|------|----------|--------|-------------|-----------------|
+| W2 (L2)          | **4.68e-4** | 1.41e-3 | 1.25e-4 | 1.8e-7 |
+| W5 (mass drift)  | 9.7e-16 | 3.2e-16 | 0.0     | 3.2e-16 |
+| W6 (mass drift)  | 1.3e-15 | 1.9e-16 | 0.0     | 9.6e-16 |
+| modons 100d (mass)| 7.3e-16 | 0.0    | 1.8e-16 | 7.3e-16 |
+| cosine bell (L2) | 0.20    | 0.13   | 0.62    | 0.38 |
+
+- Cube W2 error is BETTER than lat-lon and the same order as MPAS; the
+  W2 v-wind imprint is 0.54 m/s (production A-L calibration).
+- Mass is machine-zero on every grid for W5/W6/modons; the colliding
+  modons run the full 100 days on the cube cleanly.
+- The **no-artifacts gate passed**: `visual_regression.py --check` gives
+  SSIM=1.0000 (min 0.985), hamming=0 (max 4), edge_ratio == reference
+  exactly (1.349).
+
+The Williamson + colliding-modons + no-artifacts components of the
+campaign exit criterion are MET on the production configuration.
+Held-Suarez cross-grid (part 2) is running (job 9044126 + supplementary
+9044520/9044521).
+
 ## Duo D-grid finding (2026-07-16): not single-tile certifiable
 
 Attempting the duo d_sw analog of the (certified) duo c_sw exposed a hard
