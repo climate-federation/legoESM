@@ -382,6 +382,18 @@ def apply_land_runoff_scheme(coupled_cfg, runoff_scheme):
           must not accept-then-ignore one.
     * a non-slab land config -- MultiLayerLandConfig resolves runoff through its
       Richards column and has no runoff_scheme field.
+
+    LIMIT, stated rather than overclaimed (codex): this guard is CONFIG-level,
+    so it cannot be complete. ``f_land_mode='from_ocean'`` derives f_land from
+    the WOA wet mask at RUNTIME, and the analytical branch falls back to zeros
+    when the grid has no latitude -- either can yield f_land == 0 with
+    land_mode='slab', which no config predicate can see. Every CLI-reachable
+    normal path is covered (codex confirmed, incl. --ocean woa, which forces
+    from_ocean + slab); the residue needs an all-wet ocean mask or a degenerate
+    grid. In those cases the ENTIRE land tile is silently dead, which is a
+    bigger and pre-existing problem than runoff selection, and the right fix is
+    a driver-level invariant on the materialized f_land -- tracked separately,
+    not smuggled into a CLI helper.
     """
     from legoesm.land.config import LandConfig
 
