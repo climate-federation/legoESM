@@ -880,7 +880,7 @@ class ExperimentConfig(NamedTuple):
     # albedo).  Default OFF => byte-identical to the re-evaporation-only
     # downdraft.  See BechtoldConfig.downdraft_transport.
     bechtold_downdraft_transport: bool = False
-    bechtold_downdraft_entrain_rate: float = 5.0e-4
+    bechtold_downdraft_entrain_rate: float = 3.0e-4  # IFS ENTRDD (sucumf.F90:144)
     bechtold_downdraft_detrain_scale_m: float = 700.0
     # Full IFS deep CAPE closure ZMFUB1=ZCAPE*ZMFUB/(ZHEAT*ZXTAU)
     # (openifs cumastrn.F90:704-833; PR #1095).  Default ON (2026-07-16,
@@ -1913,7 +1913,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_downdraft_transport=getattr(
                 amip_cfg, 'bechtold_downdraft_transport', False),
             bechtold_downdraft_entrain_rate=getattr(
-                amip_cfg, 'bechtold_downdraft_entrain_rate', 5.0e-4),
+                amip_cfg, 'bechtold_downdraft_entrain_rate', 3.0e-4),
             bechtold_downdraft_detrain_scale_m=getattr(
                 amip_cfg, 'bechtold_downdraft_detrain_scale_m', 700.0),
             # Missing-field fallback = True (the scheme default): a legacy

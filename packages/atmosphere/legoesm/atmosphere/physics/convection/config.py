@@ -1397,10 +1397,13 @@ class BechtoldConfig(NamedTuple):
     # re-evaporation-only downdraft.
     downdraft_transport: bool = False
     # Fractional entrainment rate [1/m] of the descending downdraft plume
-    # (mixes it toward the environment as it sinks; Tiedtke 1989 downdraft
-    # entrainment is O(1e-4 - 1e-3) 1/m).  Larger => the downdraft arrives
-    # less dry => weaker BL drying.
-    downdraft_entrain_rate: float = 5.0e-4
+    # (mixes it toward the environment as it sinks).  Default = the IFS
+    # ENTRDD = 3.0e-4 (sucumf.F90:144, "average entrainment rate for
+    # downdrafts"); the earlier 5.0e-4 was an unsourced mid-range pick from
+    # the Tiedtke O(1e-4 - 1e-3) band.  Larger => the downdraft arrives
+    # less dry => weaker BL drying.  Only active with the opt-in
+    # downdraft_transport (default OFF => no production change).
+    downdraft_entrain_rate: float = 3.0e-4
     # Near-surface height scale [m] over which the downdraft mass flux tapers
     # to zero as it detrains its air into the sub-cloud layer (the depth of
     # the drying deposit ~ a marine sub-cloud-layer depth).

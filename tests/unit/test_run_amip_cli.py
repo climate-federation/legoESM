@@ -2145,7 +2145,7 @@ def test_bechtold_downdraft_transport_round_trips_and_threads():
     dcc = _resolve_convection(d)[1]
     assert dcc.downdraft_transport is False
     assert (dcc.downdraft_entrain_rate,
-            dcc.downdraft_detrain_scale_m) == (5.0e-4, 700.0)
+            dcc.downdraft_detrain_scale_m) == (3.0e-4, 700.0)  # IFS ENTRDD
     # --no- turns OFF a config-file default
     off = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--convection", "bechtold",
