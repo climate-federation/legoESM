@@ -19,9 +19,10 @@ _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38
 # Pole-detection threshold on ``cos_lat * cos_delta``.  Must exceed the
 # fp32 roundoff of ``cos(π/2) ≈ -4.37e-8`` so that any latitude
 # numerically reaching the pole is treated as the singular branch and
-# routed through the AD-safe fill (issue #249 codex round 5).  At the
-# minimum tropical ``cos_delta ≈ 0.91``, this corresponds to a
-# latitude shell of width ``arccos(1 − 1e-7) ≈ 4.5e-4 rad ≈ 0.025°``
+# routed through the AD-safe fill (issue #249 codex round 5).  The
+# threshold is on the PRODUCT ``cos_lat cos_delta``: at the minimum
+# tropical ``cos_delta ≈ 0.91`` it fires for ``cos_lat < 1e-7/0.91 ≈
+# 1.1e-7``, i.e. a latitude shell of width ``≈ 1.1e-7 rad ≈ 6e-6°``
 # around each pole — far below any physical or grid resolution.
 _POLE_THRESHOLD = 1.0e-7
 
@@ -101,9 +102,11 @@ def _orbital_solar_longitude(
     """True solar ecliptic longitude lambda [rad], measured from the
     vernal equinox.
 
-    Berger (1978) eccentricity series (the implementation matches CESM
-    ``shr_orb_mod`` / climlab ``solar_longitude``).  Captures the
-    non-uniform apparent motion of the Sun caused by the elliptical orbit,
+    Berger (1978) eccentricity series: the series COEFFICIENTS match CESM
+    ``shr_orb_mod`` / climlab ``solar_longitude``, while the vernal-equinox
+    calendar day (``_SOLSTICE_OFFSET_DAYS = 80``) follows climlab's convention
+    (CESM/CLM5 document ``d_ve = 80.5`` — a ~½-day calendar offset).  Captures
+    the non-uniform apparent motion of the Sun caused by the elliptical orbit,
     which the simple ``obliquity·sin`` declination ignores.
     """
     e = orbit.eccentricity
@@ -287,11 +290,16 @@ def daily_mean_insolation(
     # d/dx arccos(x) = -1/sqrt(1 - x²) stays finite at the boundary.
     # Clipping exactly to ±1 makes the next ``arccos`` blow up to ±∞ on
     # the backward pass; combined with the zero subgradient through the
-    # ``clip`` itself, JAX evaluates 0 · ∞ = NaN.  An ε = 1e-7 cap shrinks
-    # the daily-mean insolation by at most ``(S_0/π) · ε ≈ 4e-5 W/m²`` at
-    # the polar-day boundary — far below any physical or observational
-    # threshold — while keeping ``|d arccos / dx| ≤ 1/sqrt(2ε) ≈ 2236``,
-    # safely within fp64 and fp32 dynamic range.
+    # ``clip`` itself, JAX evaluates 0 · ∞ = NaN.  The ε = 1e-7 cap caps the
+    # sunset angle at ``√(2ε) ≈ 4.5e-4`` from 0 (or ``π − √(2ε)`` from π deep in
+    # polar day).  DEEP in polar day the shrink of the daily-mean insolation is
+    # ``≈ (S_0/π)·√(2ε)·(a/r)²·sinφ sinδ`` (dominated by the h_s ANGULAR error
+    # √(2ε), NOT the cos-clip magnitude ε) — for present-day S_0≈1361 that is
+    # ≲ 0.2 W/m² (S_0-/orbit-dependent).  AT the exact polar-day boundary
+    # (sinφ sinδ = cosφ cosδ) it collapses to the far smaller
+    # ``(S_0/π)(a/r)² sinφ sinδ·(α−sin α), α=√(2ε)``, i.e. O(ε^{3/2}) ~ 2e-9 W/m².
+    # Either way far below any physical or observational threshold, while keeping
+    # ``|d arccos / dx| ≤ 1/sqrt(2ε) ≈ 2236``, safely in fp64/fp32 dynamic range.
     _AD_SAFE_BOUND = 1.0 - 1.0e-7
     # AD-safe polar singularity (issue #249 codex round 5).  The legacy
     # ``-sin_lat sin_delta / clip(cos_lat cos_delta, _TINY, None)`` form
@@ -310,14 +318,23 @@ def daily_mean_insolation(
     near_pole = denom < _POLE_THRESHOLD
     safe_denom = jnp.where(near_pole, jnp.asarray(1.0, denom.dtype), denom)
     ratio_div = numerator / safe_denom
-    # In the pole branch, drive ``cos_hs`` to the saturation bound from
-    # the *correct* side using the numerator's sign:
+    # In the pole branch, drive ``cos_hs`` from the *correct* side using the
+    # numerator's sign:
     #   numerator > 0 → polar night (``cos_hs → +bound``)
     #   numerator < 0 → polar day  (``cos_hs → -bound``)
+    #   numerator = 0 → equinox at the pole (sin_delta = 0): ``cos_hs = 0``
+    #                   (h_s = π/2, daylight 0.5) — the grazing-sun limit.
     pole_fill = jnp.where(
         numerator > 0.0,
         jnp.asarray(1.0e30, denom.dtype),
-        jnp.asarray(-1.0e30, denom.dtype),
+        jnp.where(
+            numerator < 0.0,
+            jnp.asarray(-1.0e30, denom.dtype),
+            # numerator == 0 (sin_delta = 0, i.e. equinox AT the pole): the sun
+            # grazes the horizon all day ⇒ cos_hs = 0, h_s = π/2 (daylight 0.5),
+            # NOT the polar-day/night saturation the 2-way tie would pick.
+            jnp.asarray(0.0, denom.dtype),
+        ),
     )
     ratio = jnp.where(near_pole, pole_fill, ratio_div)
     cos_hs = jnp.clip(ratio, -_AD_SAFE_BOUND, _AD_SAFE_BOUND)
@@ -383,7 +400,14 @@ def daylight_fraction(
     pole_fill = jnp.where(
         numerator > 0.0,
         jnp.asarray(1.0e30, denom.dtype),
-        jnp.asarray(-1.0e30, denom.dtype),
+        jnp.where(
+            numerator < 0.0,
+            jnp.asarray(-1.0e30, denom.dtype),
+            # numerator == 0 (sin_delta = 0, i.e. equinox AT the pole): the sun
+            # grazes the horizon all day ⇒ cos_hs = 0, h_s = π/2 (daylight 0.5),
+            # NOT the polar-day/night saturation the 2-way tie would pick.
+            jnp.asarray(0.0, denom.dtype),
+        ),
     )
     ratio = jnp.where(near_pole, pole_fill, ratio_div)
     cos_hs = jnp.clip(ratio, -_AD_SAFE_BOUND, _AD_SAFE_BOUND)
