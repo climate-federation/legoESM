@@ -95,8 +95,7 @@ def _clm_with_ocean_coast(nlat=1, nlon=3):
 def test_clm5_reader_gates_cover_on_landfrac():
     """f_land / f_lake / f_glacier and pft_frac must be gated by LANDFRAC_PFT so the
     percent-of-LAND landunit values become percent-of-GRIDCELL. Ocean/coastal cells
-    carry the SAME raw natveg=100 as land; without the gate they'd all read 100% land
-    (the c250617 +27% over-count). Regression guard for the surfdata land-mask bug."""
+    carry the SAME raw natveg=100 as land; without the gate they'd all read 100% land."""
     d = read_clm5_cover_veg(dataset=_clm_with_ocean_coast())
     # land: 100*1.0=100 | coast: 100*0.2=20 | ocean: 100*0.0=0  (NOT 100/100/100)
     np.testing.assert_allclose(d["f_land"][0], [100.0, 20.0, 0.0])
@@ -115,7 +114,7 @@ def test_assert_cover_within_landfrac_tripwire():
     landfrac = np.array([[1.0, 0.2, 0.0]])
     gated = np.array([[100.0, 20.0, 0.0]])       # correctly gated -> passes
     assert_cover_within_landfrac(gated, z, z, landfrac)
-    ungated = np.array([[100.0, 100.0, 100.0]])  # the bug: land smeared into coast/ocean
+    ungated = np.array([[100.0, 100.0, 100.0]])  # un-gated: land in coast/ocean cells
     with pytest.raises(ValueError, match="exceeds land fraction"):
         assert_cover_within_landfrac(ungated, z, z, landfrac)
 

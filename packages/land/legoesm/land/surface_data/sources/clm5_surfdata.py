@@ -60,16 +60,14 @@ class CLM5SurfdataConfig(NamedTuple):
 
 
 def assert_cover_within_landfrac(f_land, f_lake, f_glacier, landfrac, *, tol=1e-6):
-    """Tripwire: the soil/veg + lake + glacier cover [percent-of-gridcell] must not
-    exceed the gridcell land fraction ``landfrac`` [0,1] times 100.
+    """Check: the soil/veg + lake + glacier cover [percent-of-gridcell] must not exceed
+    the gridcell land fraction ``landfrac`` [0,1] times 100.
 
-    CLM landunit percentages (PCT_NATVEG/CROP/LAKE/GLACIER) sum to 100 *of the land
-    part of the cell* and are populated EVEN OVER OCEAN (mksurfdata fills a land
-    template everywhere; ``LANDFRAC_PFT`` gates which cells are active).  Using them
-    un-gated as percent-of-gridcell smears land into coastal/ocean cells (the c250617
-    +27% land over-count).  After gating by ``landfrac`` the cover is bounded by
-    100*landfrac; this asserts that, so a regression that drops the gating fails loudly.
-    Raises ``ValueError`` on the worst offending cell."""
+    CLM landunit percentages (PCT_NATVEG/CROP/LAKE/GLACIER) sum to 100 *of the land part
+    of the cell* and are populated on ocean cells too (mksurfdata fills a land template
+    everywhere; ``LANDFRAC_PFT`` marks the active cells).  Gated by ``landfrac`` the cover
+    is bounded by 100*landfrac; this asserts that so a change dropping the gating fails
+    loudly.  Raises ``ValueError`` on the worst offending cell."""
     total = np.asarray(f_land) + np.asarray(f_lake) + np.asarray(f_glacier)
     bound = 100.0 * np.asarray(landfrac) + tol
     over = total - bound
@@ -169,8 +167,8 @@ def read_clm5_cover_veg(
         cft = arr(config.cft_var)                # (cft, lat, lon) % within crop
         # LANDFRAC_PFT [0,1] gates the landunit percentages to percent-of-GRIDCELL.
         # PCT_NATVEG/CROP/LAKE/GLACIER sum to 100 of the LAND part and are populated
-        # even over ocean (mksurfdata fills a land template everywhere); without this
-        # gate coastal/ocean cells acquire spurious land (the c250617 +27% over-count).
+        # even over ocean (mksurfdata fills a land template everywhere), so coastal/ocean
+        # cells need the gate to avoid spurious land.
         landfrac = np.clip(arr(config.landfrac_var), 0.0, 1.0)   # (lat, lon)
 
         # 17-PFT weight as percent of gridcell, aligned to CLM5_PFT_NAMES order (single

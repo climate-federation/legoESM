@@ -82,10 +82,8 @@ def build_v1_surfdata(
         monthly_lai=clm["monthly_lai"], monthly_sai=clm["monthly_sai"],
         monthly_height_top=clm["monthly_height_top"],
         monthly_height_bot=clm["monthly_height_bot"],
-        # Self-documenting provenance: name the CLM source and record that cover was
-        # gated by LANDFRAC_PFT (percent-of-land -> percent-of-gridcell). A file whose
-        # source string lacks "LANDFRAC_PFT-gated" predates the land-mask fix and
-        # over-counts land ~27% (the c250617 bug).
+        # Provenance: name the CLM source and record that cover is gated by
+        # LANDFRAC_PFT (percent-of-land -> percent-of-gridcell).
         source=("legoESM v1 surfdata: CLM5 cover/PFT/LAI (LANDFRAC_PFT-gated) + "
                 f"HWSD v2.0 soil; CLM source={os.path.basename(clm_path)}"),
     )
