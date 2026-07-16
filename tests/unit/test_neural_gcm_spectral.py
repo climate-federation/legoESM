@@ -1212,8 +1212,22 @@ def test_chunk_loader_prefetch_matches_serial(monkeypatch):
     assert serial1 == pref1 == serial[1:]
 
 
+def test_stage_tree_moves_arrays_skips_non_arrays():
+    """``_stage_tree`` device_puts array leaves and leaves None / non-array leaves
+    untouched, so a (ics, tgts, forcings=None) chunk stages without choking."""
+    from legoesm.training.neural_gcm_spectral import _stage_tree
+
+    cpu = jax.devices("cpu")[0]
+    tree = {"arr": jnp.arange(3.0), "none": None, "meta": "label", "n": 2}
+    out = _stage_tree(tree, cpu)
+    assert list(out["arr"].devices()) == [cpu]   # array moved
+    assert out["none"] is None                    # None passthrough
+    assert out["meta"] == "label" and out["n"] == 2  # non-array leaves untouched
+
+
 if __name__ == "__main__":
     test_prefetch_iter_preserves_order_and_completes()
     test_prefetch_iter_propagates_producer_exception()
     test_prefetch_iter_is_lazy_bounded()
+    test_stage_tree_moves_arrays_skips_non_arrays()
     print("ok (run test_chunk_loader_prefetch_matches_serial under pytest)")
