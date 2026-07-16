@@ -91,8 +91,9 @@ fv3_native_angles=)`.
 | —   | ref    | lat-lon         | —         | 1.41e-03 |
 | —   | ref    | MPAS (ico5)     | —         | 1.25e-04 |
 
-Single-factor transitions (only these isolate one variable): C→D = ED
-metrics (imprint 43.8→58.9, WORSE); D→E = native seam angles (→ blow-up).
+Closest-to-isolated rungs (still whole-config, NOT single-metric — see
+finding 2): C→D = the ED-native grid config (43.8→58.9, WORSE); D→E =
+native seam angles (→ blow-up).
 
 **Findings (largely negative for the native-grid FB path as assembled):**
 

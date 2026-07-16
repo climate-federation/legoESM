@@ -472,7 +472,7 @@ Scalar transport uses upwind C-grid mass fluxes:
 where $u_c,v_c$ are diagnosed from $u_d,v_d$ by face-edge averaging.
 
 \paragraph{FV3 forward--backward shallow-water core (\texttt{fv3\_sw\_core.py}).}
-An FV3-exact implementation of the complete c\_sw/d\_sw forward--backward stepping algorithm \citep{Lin2004}.  The forward step (c\_sw) computes C-grid mass fluxes and height tendencies; the backward step (d\_sw) updates D-grid winds using the vorticity flux and pressure gradient.  Key components:
+An FV3-style implementation (kernels certified bit-exact; whole-chain fidelity in progress) of the c\_sw/d\_sw forward--backward stepping algorithm \citep{Lin2004}.  The forward step (c\_sw) computes C-grid mass fluxes and height tendencies; the backward step (d\_sw) updates D-grid winds using the vorticity flux and pressure gradient.  Key components:
 \begin{itemize}[nosep]
   \item \textbf{d2a2c\_vect}: D-grid $\to$ A-grid $\to$ C-grid vector conversion, faithfully porting the GFDL FV3 algorithm including edge-boundary stencils, one-sided interpolation near cube edges, and non-orthogonality corrections via $\cos\alpha$/$\sin^{-2}\!\alpha$ metrics.
   \item \textbf{PPM wind advection}: Piecewise Parabolic Method reconstruction for C-grid wind tendencies (\texttt{xtp\_u}, \texttt{ytp\_v}), with FV3-specific interpolation coefficients ($A_1$, $A_2$, $C_1$--$C_3$).
