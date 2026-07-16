@@ -369,12 +369,17 @@ def apply_land_runoff_scheme(coupled_cfg, runoff_scheme):
 
     Refuses where the flag cannot take effect:
 
-    * ``f_land_mode == "zero"`` -- the LAND FRACTION, not land_mode, is what
-      decides whether any land runs. `--preset aquaplanet --land-scheme slab`
-      yields land_mode='slab' while f_land_mode stays 'zero', so the driver
-      builds f_land = 0 everywhere (coupled_esm_driver.py) and the tile has no
-      area: runoff would be physically inert. Checking land_mode alone missed
-      exactly this (codex).
+    * NO LAND AREA -- the land FRACTION, not the land model, decides whether any
+      land runs, and EITHER field can zero it. Both are needed, and each caught
+      a case the other missed (codex, twice):
+        - ``f_land_mode == "zero"``: `--preset aquaplanet --land-scheme slab`
+          gives land_mode='slab' and a real LandConfig while f_land_mode stays
+          'zero', so the driver builds f_land = 0 everywhere.
+        - ``land_mode == "none"``: with f_land_mode='analytical' the driver
+          only generates its analytical mask when land_mode != "none"
+          (coupled_esm_driver.py), so f_land stays 0 here too. Not reachable
+          from the current CLI, but this helper takes any CoupledConfig and
+          must not accept-then-ignore one.
     * a non-slab land config -- MultiLayerLandConfig resolves runoff through its
       Richards column and has no runoff_scheme field.
     """
@@ -382,12 +387,15 @@ def apply_land_runoff_scheme(coupled_cfg, runoff_scheme):
 
     if runoff_scheme is None:
         return coupled_cfg                     # never requested
-    if getattr(coupled_cfg, "f_land_mode", None) == "zero":
+    if (getattr(coupled_cfg, "f_land_mode", None) == "zero"
+            or getattr(coupled_cfg, "land_mode", None) == "none"):
         raise SystemExit(
             f"--land-runoff-scheme {runoff_scheme!r} cannot take effect: the "
-            f"resolved configuration has NO land area (f_land_mode='zero', so "
-            f"the driver builds f_land = 0 everywhere), whatever the land "
-            f"model. Use a preset with land (e.g. --preset slab_simple)."
+            f"resolved configuration has NO land area (f_land_mode="
+            f"{getattr(coupled_cfg, 'f_land_mode', None)!r}, land_mode="
+            f"{getattr(coupled_cfg, 'land_mode', None)!r} -> the driver builds "
+            f"f_land = 0 everywhere), whatever the land model. Use a preset "
+            f"with land (e.g. --preset slab_simple)."
         )
     land_cfg = getattr(coupled_cfg, "land_config", None)
     if not isinstance(land_cfg, LandConfig):
@@ -809,7 +817,11 @@ def build_parser():
                         help="Slab-land runoff partitioning: 'bucket' (default, "
                              "Green-Ampt Hortonian + Dunne saturation-excess) or "
                              "'topmodel' (SIMTOP saturated fraction + "
-                             "topographic baseflow). Requires --land-scheme slab.")
+                             "topographic baseflow). Applies to whichever SLAB "
+                             "land model the run resolves -- a slab preset, "
+                             "--land-scheme slab, or --ocean woa's implicit "
+                             "slab. Refused (never ignored) on the multilayer "
+                             "land model or a run with no land area.")
     parser.add_argument("--land-scheme", choices=_LAND_SCHEMES,
                         default=None,
                         help="Override the preset's land surface model. 'slab' = "

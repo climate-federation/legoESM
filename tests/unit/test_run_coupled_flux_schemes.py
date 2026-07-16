@@ -231,6 +231,32 @@ def test_land_runoff_rejects_zero_land_fraction_even_with_a_slab_land_model():
         mod.apply_land_runoff_scheme(cfg, "topmodel")
 
 
+def test_land_runoff_rejects_landless_via_land_mode_none():
+    """The OTHER way to have no land area (codex): with f_land_mode='analytical'
+    the driver generates its analytical mask only when land_mode != "none", so
+    land_mode='none' yields f_land = 0 too. Not reachable from the current CLI,
+    but this helper takes any CoupledConfig and must not accept-then-ignore one.
+    Both fields are needed -- each caught a case the other missed.
+    """
+    from legoesm.driver.coupled_config import PRESETS
+
+    cfg = PRESETS["slab_simple"]()._replace(land_mode="none")
+    assert cfg.f_land_mode == "analytical"     # not the 'zero' case
+    with pytest.raises(SystemExit, match="NO land area"):
+        mod.apply_land_runoff_scheme(cfg, "topmodel")
+
+
+def test_land_runoff_help_does_not_overclaim():
+    """The help said "Requires --land-scheme slab", which is false: slab presets
+    and --ocean woa's implicit slab work too. (My first attempt at this fix used
+    a regex that silently did not match -- codex caught that it never landed.)
+    """
+    action = next(a for a in mod.build_parser()._actions
+                  if a.dest == "land_runoff_scheme")
+    assert "Requires --land-scheme slab" not in action.help
+    assert "SLAB" in action.help.upper()
+
+
 def test_explicit_bucket_is_refused_where_runoff_cannot_apply():
     """An explicit request must be honoured or refused, never ignored (codex).
 
