@@ -101,10 +101,10 @@ def resolve_effective_atm_surface(atm_config):
     """The ``SurfaceLayerConfig`` the ATMOSPHERE will ACTUALLY run.
 
     Resolved through the SAME production path the physics pipeline uses, so the
-    guard cannot drift from the model.  Returns ``None`` when the active
-    turbulence scheme carries no surface sub-config (``turbulence="none"``, or a
-    scheme such as clubb whose sub-config has no ``surface``) -- there is then no
-    atmosphere-side surface layer to compare against.
+    guard cannot drift from the model.  Returns ``None`` ONLY for
+    ``turbulence="none"``, which genuinely has no surface layer to compare
+    against; every other scheme -- clubb included, once its default sub-config is
+    materialized -- carries a real ``SurfaceLayerConfig``.
 
     Reading the DECLARED ``ExperimentConfig.surface_bulk_scheme`` instead would
     miss a real split: ``apply_surface_flux_config`` returns the
