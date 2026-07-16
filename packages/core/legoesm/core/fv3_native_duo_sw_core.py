@@ -13,9 +13,11 @@ plain ones.
 
 This module ports the duo-specific routines loop-faithfully (index-exact,
 plain numpy, Fortran statement order).  ``divergence_corner_duo`` is a
-verified-faithful TRANSLATION of the authoritative Fortran — bit-exact on
-identical inputs (``test_fv3_native_duo_phase4c``), and its extraction is
-byte-identical to sw_core.F90:2345-2447 (SHA-256).
+verified-faithful TRANSLATION of the authoritative Fortran — bit-exact
+(uint64 words) on the ONE stored C12, ``grid_type=0`` cubed-sphere fixture
+(``grid_type>3`` is not ported), with the fixture's ``input_sha256``
+ENFORCED against its stored arrays (``test_fv3_native_duo_phase4c``), and
+its extraction pinned byte-identical to sw_core.F90:2345-2447 (SHA-256).
 
 SCOPE CAVEAT: this is not yet a full-DUO-PIPELINE certification.  The duo
 c_sw feeds ``divergence_corner_duo`` (and the KE/vorticity path) with

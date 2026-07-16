@@ -5,35 +5,64 @@ The DUO-GRID FV3 (Mouallem/Xi-Chen, Zenodo 8327578,
 (nest interior + panel-seam zeroing/quartering) under
 ``flagstruct%duogrid`` — the branch legoESM's production solver runs.
 
-SCOPE (codex p4c r1/r2): this gate certifies that the python
+SCOPE (codex p4c r1/r2/r3): this gate certifies that the python
 ``fv3_native_duo_sw_core.divergence_corner_duo`` is a FAITHFUL
 TRANSLATION of the authoritative Fortran — the port run on the fixture's
 STORED input bytes reproduces the authoritative Fortran divg_d
-BIT-for-BIT (uint64 word compare) over the 289 written B-nodes.  The
-extracted Fortran routine is byte-identical to sw_core.F90:2345-2447
-(SHA-256).  It does NOT yet certify the FULL DUO PIPELINE: the stored
-ua/va come from the plain phase-4a ``c_sw``, whereas the real duo
-pipeline feeds ua/va from ``d2a2c_vect``'s dg-initialized cross-face path
-(different edge/corner values) — the next phase-4c brick.  The fixture
-carries the input SHA-256 + a lineage note so the caveat travels with it.
+BIT-for-BIT (uint64 word compare) over the 289 written B-nodes on the ONE
+stored C12, ``grid_type=0`` cubed-sphere fixture (``grid_type>3`` is not
+ported).  ``input_sha256`` is ENFORCED: the test re-serialises the stored
+arrays through the SAME canonical writer the generator used and asserts
+the hash equals the fixture's — so a bogus hash or a swapped input array
+fails (codex p4c r3 P1).  The extracted Fortran routine's SHA is pinned
+against silent drift; it was verified byte-identical to the authoritative
+sw_core.F90:2345-2447 at extraction time.
+
+It does NOT yet certify the FULL DUO PIPELINE: the stored ua/va come from
+the plain phase-4a ``c_sw``, whereas the real duo pipeline feeds ua/va
+from ``d2a2c_vect``'s dg-initialized cross-face path (different
+edge/corner values) — the next phase-4c brick.  The fixture carries the
+input SHA-256 + a lineage note so the caveat travels with it.
 
 Fixture ``divduo_oracle_c12.npz`` (re)generated reproducibly by
 ``scripts/cluster/divduo_oracle.sbatch``: gen_divduo_oracle.py builds the
 inputs + a staging snapshot, fv3_divduo_driver.F90 runs the authoritative
 Fortran on THOSE inputs, and ``--pack`` writes the committed npz from that
-one generation (stored inputs + output + full input hash — no
-regeneration drift).
+one generation (stored inputs + output + full input hash, and refuses to
+pack if input.txt disagrees with the staged arrays — no regeneration
+drift).
 """
 
+import hashlib
+import importlib.util
 import os
 
 import numpy as np
 import pytest
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures")
+REPO = os.path.join(os.path.dirname(__file__), "..", "..")
 RES, NG = 12, 3
 LO = 1 - NG
 M_B = RES + 2 * NG + 1
+
+# SHA-256 of the extracted ``divergence_corner_duo`` subroutine block
+# (fv3_swcore_extract.F90 lines 629-731), pinned as an in-repo drift
+# guard; verified byte-identical to the authoritative symmetryclean
+# sw_core.F90:2345-2447 at extraction time (codex p4c r3 P2).
+_EXTRACT_BLOCK_SHA256 = (
+    "9a6d43f52c9ffc60bea3b3c8aa0901603cf2909b97ef7c9eea0c462caa61b81c")
+
+
+def _load_generator():
+    """Import the oracle generator as a module (it is import-safe: the
+    argv-driven gen/pack only run under ``__main__``)."""
+    path = os.path.join(REPO, "scripts", "validate", "fv3_native",
+                        "gen_divduo_oracle.py")
+    spec = importlib.util.spec_from_file_location("gen_divduo_oracle", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 @pytest.fixture(scope="module")
@@ -58,11 +87,53 @@ def _active_mask():
     return m
 
 
+def test_fixture_input_hash_enforced(oracle):
+    """ENFORCE provenance: re-serialise the fixture's STORED arrays with
+    the generator's canonical writer and assert the SHA-256 equals the
+    stored ``input_sha256``.  So the recorded hash is provably the hash of
+    exactly these input arrays — a bogus hash or a swapped array fails
+    (codex p4c r3 P1)."""
+    gen = _load_generator()
+    fields = {k: np.asarray(oracle[k]) for k in
+              ("u", "v", "ua", "va", "rarea_c", "dxc", "dyc",
+               "sin_sg", "cos_sg")}
+    recomputed = hashlib.sha256(
+        gen.serialize_divduo_inputs(fields, int(oracle["res"]),
+                                    int(oracle["ng"]))).hexdigest()
+    stored = str(oracle["input_sha256"])
+    assert len(stored) == 64 and all(c in "0123456789abcdef" for c in stored)
+    assert recomputed == stored, (
+        f"stored input_sha256 {stored} != hash of stored arrays {recomputed}")
+    # tamper check: perturbing one input byte MUST change the hash (the
+    # gate is non-vacuous)
+    tampered = dict(fields)
+    tampered["u"] = fields["u"].copy()
+    tampered["u"].flat[0] = np.nextafter(tampered["u"].flat[0], np.inf)
+    bad = hashlib.sha256(
+        gen.serialize_divduo_inputs(tampered, int(oracle["res"]),
+                                    int(oracle["ng"]))).hexdigest()
+    assert bad != stored
+
+
+def test_extract_block_sha_pinned():
+    """The extracted authoritative divergence_corner_duo Fortran block is
+    unchanged (in-repo drift guard, codex p4c r3 P2)."""
+    f = os.path.join(REPO, "scripts", "validate", "fv3_native",
+                     "fv3_swcore_extract.F90")
+    txt = open(f, encoding="utf-8").read().split("\n")
+    i0 = next(i for i, ln in enumerate(txt)
+              if ln.strip().startswith("subroutine divergence_corner_duo"))
+    i1 = next(i for i, ln in enumerate(txt)
+              if ln.strip() == "end subroutine divergence_corner_duo")
+    block = ("\n".join(txt[i0:i1 + 1]) + "\n").encode()
+    assert hashlib.sha256(block).hexdigest() == _EXTRACT_BLOCK_SHA256
+
+
 def test_divergence_corner_duo_bit_exact_on_stored_inputs(oracle):
     """Run the port on the fixture's STORED inputs; the result must equal
     the authoritative Fortran divg_d BIT-for-BIT (uint64 words) over the
-    289 geometry-active B-nodes — so 'bit-exact on identical inputs' is
-    genuinely enforced (codex p4c r2 P1/P2)."""
+    289 geometry-active B-nodes on the stored C12 grid_type=0 fixture
+    (codex p4c r2 P1/P2)."""
     from legoesm.core.fv3_native_duo_sw_core import divergence_corner_duo
     from legoesm.core.fv3_native_sw_core import Bounds
 
