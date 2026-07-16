@@ -358,11 +358,12 @@ class ExperimentConfig(NamedTuple):
     # and ``False`` on CPU.  Explicit ``True``/``False`` overrides.
     rrtmgp_use_scan: bool | None = None
     # G-point parallelism in the RRTMGP two-stream solve (see
-    # ``RRTMGPConfig.gpoint_batch_size``).  0 = memory-frugal checkpointed scan
-    # (REQUIRED for reverse-mode AD / training).  >0 = process g-points in
-    # parallel blocks of this size via vmap — FORWARD/inference only, ~6x faster
-    # radiation on GPU; ~16-32 recovers most parallelism while bounding memory.
-    rrtmgp_gpoint_batch_size: int = 0
+    # ``RRTMGPConfig.gpoint_batch_size``).  DEFAULT 16 (was 0): the vmap-block
+    # path compiles ONE reused body (the scan path's per-g-point prevent_cse
+    # body inflated the reverse-mode-AD compile to ~9 h) and runs ~26x faster,
+    # with peak memory bounded to this many g-points.  Set 0 only to reproduce
+    # the exact legacy g-point accumulation order.
+    rrtmgp_gpoint_batch_size: int = 16
     # G-point checkpointing in the RRTMGP two-stream scan (see
     # ``RRTMGPConfig.gpoint_checkpoint``).  True (default) = ``jax.checkpoint``
     # with ``prevent_cse=True`` per g-point — memory-frugal, REQUIRED for

@@ -6,6 +6,10 @@
 base: config/aimip/aimip_era5.yaml
 cfg_overrides:
   aimip_surface_forcing: true
+  # G-point vmap blocks: fast compile (one block body) + bounded backward
+  # memory. gpoint_checkpoint=false alone compiled in 2min but OOMd (113 GiB,
+  # held all ~256 g-points); batch_size=16 holds only 16/block.
+  aimip_rrtmgp_gpoint_batch_size: 16
   train_windows:
   - - 1979
     - 0
@@ -432,13 +436,16 @@ cfg_overrides:
   n_eval_days: 4
   train_year: 1979
   eval_year: 2013
+  # Classical uses the curriculum. The multi-hour rrtmgp compile was the
+  # per-g-point prevent_cse=True body (~Ng-fold code) — fixed above by the
+  # gpoint vmap-block path (aimip_rrtmgp_gpoint_batch_size:16): one compiled
+  # block body (fast) holding only 16 g-points' activations (bounded memory).
+  # 72h dropped — its 432-step graph is still the heaviest; 12h+24h suffice.
   aimip_rollout_curriculum:
   - - 12
-    - 2
+    - 3
   - - 24
     - 2
-  - - 72
-    - 1
   aimip_chunk_windows: 34
   aimip_n_epochs: 5
   loss:

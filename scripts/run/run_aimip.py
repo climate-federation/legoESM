@@ -343,6 +343,16 @@ def _train_aimip_classical(
     dt = spec_cfg.dt
     radiation = str(cfg.get("aimip_radiation", "gray"))
     rad_update_interval = int(cfg.get("aimip_rad_update_interval", 6))
+    # RRTMGP g-point checkpoint: True (default) = byte-for-byte legacy but the
+    # prevent_cse=True per-g-point body inflates the GPU compile ~Ng-fold
+    # (multi-hour). False = one reused g-point body (answer-identical, minutes
+    # to compile) — safe for the rollout-checkpointed training path. Default
+    # True; set aimip_rrtmgp_gpoint_checkpoint=false for classical training.
+    rrtmgp_gpoint_checkpoint = bool(
+        cfg.get("aimip_rrtmgp_gpoint_checkpoint", True))
+    # G-point vmap block size: >0 -> fast compile (one block body) with bounded
+    # backward memory (holds block_size g-points, not all ~256). 0 = scan path.
+    rrtmgp_gpoint_batch_size = int(cfg.get("aimip_rrtmgp_gpoint_batch_size", 16))
 
     # Derive the land mask from surface geopotential (phis > 0 over
     # land).  Static across samples so we extract it once.  Using a
@@ -419,6 +429,8 @@ def _train_aimip_classical(
             cloud_scheme=cloud_scheme,
             land_mask=land_mask,
             split_rad=split_rad,
+            rrtmgp_gpoint_checkpoint=rrtmgp_gpoint_checkpoint,
+            rrtmgp_gpoint_batch_size=rrtmgp_gpoint_batch_size,
         )
         if _ghg_mid is None:
             return built
