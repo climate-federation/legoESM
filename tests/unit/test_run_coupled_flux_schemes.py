@@ -312,14 +312,33 @@ def test_main_actually_threads_the_cli_sea_ice_config():
         "main() never calls build_sea_ice_config -- every --ice-* flag would "
         "parse and be silently dropped before reaching CoupledESMDriver"
     )
-    # and the driver must receive it
+    # ...and the RESULT must be what the driver receives. Checking only that
+    # the kwarg EXISTS is tautological: `ice_config = None` followed by
+    # `CoupledESMDriver(..., ice_config=None)` satisfies it while dropping
+    # every flag -- exactly the regression this test claims to catch (codex).
+    # So follow the dataflow: name assigned from the builder == name passed.
+    built = {
+        t.id for n in ast.walk(main_fn)
+        if isinstance(n, ast.Assign)
+        and isinstance(n.value, ast.Call)
+        and isinstance(n.value.func, ast.Name)
+        and n.value.func.id == "build_sea_ice_config"
+        for t in n.targets if isinstance(t, ast.Name)
+    }
+    assert built, "build_sea_ice_config() result is never assigned"
+
     driver_call = next(
         n for n in ast.walk(main_fn)
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
         and n.func.id == "CoupledESMDriver"
     )
-    kw = {k.arg for k in driver_call.keywords}
-    assert "ice_config" in kw, "CoupledESMDriver is not given ice_config"
+    passed = {k.arg: k.value for k in driver_call.keywords}
+    assert "ice_config" in passed, "CoupledESMDriver is not given ice_config"
+    val = passed["ice_config"]
+    assert isinstance(val, ast.Name) and val.id in built, (
+        f"CoupledESMDriver(ice_config=...) is not the build_sea_ice_config "
+        f"result (got {ast.dump(val)}); every --ice-* flag would be dropped"
+    )
 
 
 # --- no --ice-* flag may be silently INERT ---------------------------------

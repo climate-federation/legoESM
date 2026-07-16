@@ -155,7 +155,7 @@ def build_sea_ice_config(args):
         CESM melt PONDS are each gated by a ``bool = False``, and bools are not
         ``:float``-spec-eligible -- so ``--params`` can never reach them either.
         Ridging is oracle-pinned; nothing could switch it on.
-      * shortwave_scheme / itd_remap / bulk_scheme / stability_scheme are `str`,
+      * shortwave_scheme / bulk_scheme / stability_scheme are `str`,
         which ``--params`` also cannot carry.
 
     Returns ``None`` when nothing was requested, so the driver builds its own
@@ -170,7 +170,6 @@ def build_sea_ice_config(args):
         if getattr(args, flag, False):
             changed[sub] = getattr(base, sub)._replace(enabled=True)
     for flag, field in (("ice_shortwave_scheme", "shortwave_scheme"),
-                        ("ice_itd_remap", "itd_remap"),
                         ("ice_bulk_scheme", "bulk_scheme"),
                         ("ice_stability_scheme", "stability_scheme")):
         v = getattr(args, flag, None)
@@ -746,8 +745,13 @@ def build_parser():
     parser.add_argument("--ice-snow", action="store_true",
                         help="Track snow on sea ice (SeaIceConfig.snow).")
     parser.add_argument("--ice-brine", action="store_true",
-                        help="Track bulk ice salinity + route the salt flux "
-                             "(SeaIceConfig.brine).")
+                        help="Track bulk ice salinity, evolving S_ice via "
+                             "brine drainage (SeaIceConfig.brine). NOTE: the "
+                             "resulting ocean salt_flux is consumed ONLY by "
+                             "--ocean dynamic; the slab/two_layer/fixed oceans "
+                             "have no prognostic salinity and deliberately "
+                             "discard it (CoupledESMDriver._step_ocean). The "
+                             "ice-side salinity still evolves either way.")
     parser.add_argument("--ice-ridging", action="store_true",
                         help="Lipscomb 2007 mechanical ridging "
                              "(SeaIceConfig.ridging).")
