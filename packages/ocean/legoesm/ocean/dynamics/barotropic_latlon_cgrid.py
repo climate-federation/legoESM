@@ -69,16 +69,21 @@ _NEMO_BT_ALPHA = 0.07              # rn_bt_alpha [1]
 _NEMO_AB3_ZA = (1.781105, -1.06221, 0.281105)   # 3/2+bet, -(1/2+2bet), bet
 
 
-def nemo_ab3am4_coeff_arrays(n_loop: int, alpha: float = _NEMO_BT_ALPHA):
+def nemo_ab3am4_coeff_arrays(n_loop: int, alpha: float = _NEMO_BT_ALPHA,
+                             ramp: bool = True):
     """Per-substep coefficient arrays for the NEMO nn_bt_flt=3 scheme.
 
     Returns ``(za, zb)`` with shapes ``(n, 3)`` / ``(n, 4)``: the AB3
     mid-step velocity-extrapolation weights and the AM4 backward ssh
     interpolation weights (Demange temporal dissipation, ts_bck_interp).
-    The first two substeps use NEMO's ``ll_init`` ramp (forward, then
-    AB2-AM3) — applied PER WINDOW here, where NEMO carries the substep
-    history across windows in module SAVE arrays (a documented
-    per-window-restart difference; ~2 of n substeps).
+
+    ``ramp=True`` applies NEMO's ``ll_init`` startup on the first two
+    substeps (forward, then AB2-AM3) — NEMO does this ONLY at cold start
+    (``nn_bt_flt=3`` sets ``ll_bt_av=F`` so ``ll_init=F`` except at
+    ``nit000`` without barotropic restart fields, dynspg_ts.F90:200-226).
+    Continuation windows (``state.bt_hist`` carried) use ``ramp=False``:
+    full AB3/AM4 rows from substep 0, extrapolating across the window
+    boundary exactly like NEMO's persistent ``ubb_e/ub_e/sshbb_e/sshb_e``.
     """
     import numpy as np
 
@@ -88,12 +93,13 @@ def nemo_ab3am4_coeff_arrays(n_loop: int, alpha: float = _NEMO_BT_ALPHA):
     za = np.tile(np.asarray(_NEMO_AB3_ZA, dtype=np.float64), (n_loop, 1))
     zb = np.tile(np.asarray(
         [zb0, 1.0 - zb0 - gam - eps, gam, eps], dtype=np.float64), (n_loop, 1))
-    # ll_init ramp (dynspg_ts:536-543 + ts_bck_interp jn==1/jn==2 branches)
-    za[0] = (1.0, 0.0, 0.0)
-    zb[0] = (1.0, 0.0, 0.0, 0.0)
-    if n_loop > 1:
-        za[1] = (1.0, 0.0, 0.0)
-        zb[1] = (1.0833333333333, -0.1666666666666, 0.0833333333333, 0.0)
+    if ramp:
+        # ll_init ramp (dynspg_ts:536-543 + ts_bck_interp jn==1/jn==2 branches)
+        za[0] = (1.0, 0.0, 0.0)
+        zb[0] = (1.0, 0.0, 0.0, 0.0)
+        if n_loop > 1:
+            za[1] = (1.0, 0.0, 0.0)
+            zb[1] = (1.0833333333333, -0.1666666666666, 0.0833333333333, 0.0)
     return jnp.asarray(za), jnp.asarray(zb)
 
 
@@ -270,7 +276,7 @@ def _run_substep_loop(
     f_u, f_v, add_barotropic_coriolis,
     coeffs, local_subcycle_clamp,
     linear_free_surface=False,
-    ab3_za=None, ab3_zb=None,
+    ab3_za=None, ab3_zb=None, ab3_hist=None,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -496,9 +502,37 @@ def _run_substep_loop(
                 Hu_sum_new, Hv_sum_new, eta_sum_new, U_sum_new, V_sum_new)
 
     if ab3_za is not None:
-        # per-window ramp: histories start equal to the window-start values
+        if ab3_hist is not None:
+            # NEMO continuation (dynspg_ts ll_init=F): now-values reset to the
+            # baroclinic state (ln_bt_fw), b/bb histories carried from the end
+            # of the PREVIOUS window — one continuous AB3 series across windows.
+            # DEVIATION form: ab3_hist holds (X_final - X_b, X_final - X_bb)
+            # of the previous window, reconstructed against THIS window's
+            # now-values. NEMO re-imposes the stp2d barotropic mean on the 3D
+            # velocity after every stage (stprk3_stg.F90:440 zub correction),
+            # so its raw-carried histories never see a window-boundary jump;
+            # legoESM's implicit vmix/bottom drag shift the depth mean after
+            # the solve, and a raw carry would feed that jump into the AB3
+            # extrapolation (x1.78 amplification) every window — pumping a
+            # spurious deep barotropic mode. Deviation form is identical to
+            # NEMO's raw carry when the mean is preserved (NEMO's case) and
+            # jump-transparent when it is not.
+            (dU_b, dU_bb, dV_b, dV_bb, deta_b, deta_bb) = (
+                h.astype(dtype) for h in ab3_hist)
+            Ub0 = U_bar - dU_b
+            Ubb0 = U_bar - dU_bb
+            Vb0 = V_bar - dV_b
+            Vbb0 = V_bar - dV_bb
+            etab0 = eta - deta_b
+            etabb0 = eta - deta_bb
+        else:
+            # cold start: histories = window-start values; with the ll_init
+            # ramp rows 0-1 these never reach a full-AB3 row (NEMO-exact).
+            Ub0 = Ubb0 = U_bar
+            Vb0 = Vbb0 = V_bar
+            etab0 = etabb0 = eta
         init_carry = (eta, U_bar, V_bar, Hu_sum, Hv_sum, eta_sum, U_sum,
-                      V_sum, U_bar, U_bar, V_bar, V_bar, eta, eta)
+                      V_sum, Ub0, Ubb0, Vb0, Vbb0, etab0, etabb0)
         _xs = (w_filter, w_transport, ab3_za, ab3_zb)
     else:
         init_carry = (eta, U_bar, V_bar, Hu_sum, Hv_sum, eta_sum, U_sum, V_sum)
@@ -679,8 +713,16 @@ def barotropic_substeps_latlon_cgrid(
     # Depth-averaged velocity.  Cast h_k to _dt because z_coord.sigma_w
     # may be float64 (jnp.linspace default under x64), which would
     # promote U_bar/V_bar and break the fori_loop carry-type invariant.
+    # NEMO key_linssh: depth-average weights use the FIXED reference
+    # thicknesses (dynspg_ts.F90:471 ``zhup2_e = hu_0``, r1_hu_0 convention).
+    # For z-star this is a defensive no-op (compute_ocean_jacobian already
+    # discards eta under linssh); it is load-bearing for the partial-cell
+    # coordinate, whose compute_layer_thickness branch ignores the flag
+    # (pre-existing inconsistency, vertical.py:685-692).
+    _h_eta = (jnp.zeros_like(eta)
+              if getattr(z_coord, 'linear_free_surface', False) else eta)
     h_k = compute_layer_thickness(
-        eta, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
+        _h_eta, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
     ).astype(_dt)
     U_bar, V_bar = _depth_average_to_faces(
         u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,
@@ -697,13 +739,21 @@ def barotropic_substeps_latlon_cgrid(
 
     _ab3 = config.barotropic.barotropic_time_filter == "nemo_ab3am4"
     if _ab3:
-        _ab3_za, _ab3_zb = nemo_ab3am4_coeff_arrays(n_loop)
+        # Cross-window AB3/AM4 substep histories (NEMO restart state
+        # ubb_e/ub_e/vbb_e/vb_e/sshbb_e/sshb_e): None on the first step
+        # ⇒ NEMO cold-start ll_init ramp; carried tuple afterwards ⇒ full
+        # AB3/AM4 rows continuing the substep series across the window
+        # boundary (dynspg_ts.F90:200-226, 806-808). Static Python gate on
+        # pytree structure — same pattern as the prognostic state.tke seed.
+        _ab3_hist = getattr(state, "bt_hist", None)
+        _ab3_za, _ab3_zb = nemo_ab3am4_coeff_arrays(
+            n_loop, ramp=_ab3_hist is None)
         # cast to the state dtype: f64 coefficients would silently promote the
         # f32 carry and break the scan carry-type invariant.
         _ab3_za = _ab3_za.astype(eta.dtype)
         _ab3_zb = _ab3_zb.astype(eta.dtype)
     else:
-        _ab3_za = _ab3_zb = None
+        _ab3_za = _ab3_zb = _ab3_hist = None
     _finals = _run_substep_loop(
         eta, U_bar, V_bar,
         dt_s=dt_s, n_loop=n_loop, w_filter=w_filter, w_transport=w_transport,
@@ -715,7 +765,7 @@ def barotropic_substeps_latlon_cgrid(
         coeffs=coeffs,
         local_subcycle_clamp=config.barotropic.barotropic_local_subcycle_clamp,
         linear_free_surface=getattr(z_coord, 'linear_free_surface', False),
-        ab3_za=_ab3_za, ab3_zb=_ab3_zb,
+        ab3_za=_ab3_za, ab3_zb=_ab3_zb, ab3_hist=_ab3_hist,
     )
     (eta_f, U_bar_f, V_bar_f,
      Hu_sum_f, Hv_sum_f, eta_sum_f, U_sum_f, V_sum_f) = _finals[:8]
@@ -765,6 +815,17 @@ def barotropic_substeps_latlon_cgrid(
         u=state.u.replace(data=u_new),
         v=state.v.replace(data=v_new),
     )
+    if _ab3 and hasattr(state, "bt_hist"):
+        # store the end-of-window (b, bb) histories in DEVIATION form
+        # (X_final - X_b, X_final - X_bb) for the next window (finals
+        # positions 8-13: Ub, Ubb, Vb, Vbb, etab, etabb after the final
+        # dynspg_ts:806-808 rotation; finals 0-2: eta_f, U_bar_f, V_bar_f).
+        # See the reconstruction comment in _run_substep_loop.
+        state_new = state_new._replace(bt_hist=(
+            _finals[1] - _finals[8], _finals[1] - _finals[9],
+            _finals[2] - _finals[10], _finals[2] - _finals[11],
+            _finals[0] - _finals[12], _finals[0] - _finals[13],
+        ))
     return state_new, (Hu_avg, Hv_avg)
 
 

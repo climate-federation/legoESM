@@ -134,8 +134,29 @@ implemented (AB3 extrapolation + AM4 backward ssh interpolation alpha=0.07 +
 final-value output + uniform transports; review: numerics EXACT, direct tests
 added). The cosine window-averaging was retarding the gyre by ~dt/2 per step.
 RMS ratio 0.50 → **0.71** (yr-1 0.93), surface rms +55%, surf/deep 11.6
-(brackets NEMO 8.2). Remaining minors: per-window ramp difference (documented),
-substeps 120 vs NEMO 50. Original description:
+(brackets NEMO 8.2). **Cross-window histories (sweep #5) DONE 2026-07-16**:
+`state.bt_hist` carries the AB3/AM4 substep histories across windows in
+DEVIATION form (X_final−X_b, X_final−X_bb) reconstructed against the new
+window's now-values; NEMO's ll_init ramp is now cold-start-only (dynspg_ts
+:200-226 exactly). Deviation form, not raw values: NEMO re-imposes the stp2d
+barotropic mean on the 3D velocity after every stage (stprk3_stg.F90:440
+zub correction) so its raw histories never see a window-boundary jump —
+legoESM's post-solve implicit vmix can shift the depth mean, and a raw
+carry would feed that jump into the ×1.781 AB3 extrapolation each window;
+deviation form is jump-transparent and identical to NEMO's raw carry when
+the mean is preserved (NEMO's invariant). Empirically BOTH forms are
+trajectory-NEUTRAL on the 5-yr GYRE (yr-1 0.962 / yr-5 0.758 / identical
+depth structure, matching the WS-RK3 baseline — the vmix mean shift is
+small here); deviation form is kept on structural-safety grounds. Gate:
+two carried windows == one continuous 2n-substep window at 1e-13 (f64).
+NB an intermediate scare (surf/deep "collapse") was a STALE-DIAG artifact —
+the gap_audit diag scripts hardcoded old npz paths; they now honor argv. NEW STRUCTURAL ITEM surfaced: NEMO's
+per-stage barotropic-mean IMPOSITION (:440) — legoESM lets implicit vmix +
+bottom drag modify the depth mean after the barotropic solve, NEMO discards
+that increment from the state (it re-enters via the next step's slow
+forcing). Candidate item F if the residual amplitude gap needs it.
+Remaining minors: substeps 120 vs NEMO 50 (card already 50). Original
+description:
 NEMO uses temporal dissipation (AB3-AM4, rn_bt_alpha=0.07), NO spatial diffusion;
 legoESM uses cosine time-averaging + `barotropic_diffusion_alpha=0.01` (spatial,
 ×120 substeps) which damps the WBC η-gradient. Also substeps 120 vs NEMO's 50.
