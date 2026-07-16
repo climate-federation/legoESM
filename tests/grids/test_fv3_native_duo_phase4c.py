@@ -18,11 +18,13 @@ fails (codex p4c r3 P1).  The extracted Fortran routine's SHA is pinned
 against silent drift; it was verified byte-identical to the authoritative
 sw_core.F90:2345-2447 at extraction time.
 
-It does NOT yet certify the FULL DUO PIPELINE: the stored ua/va come from
-the plain phase-4a ``c_sw``, whereas the real duo pipeline feeds ua/va
-from ``d2a2c_vect``'s dg-initialized cross-face path (different
-edge/corner values) — the next phase-4c brick.  The fixture carries the
-input SHA-256 + a lineage note so the caveat travels with it.
+This leaf gate feeds ua/va from the plain phase-4a ``c_sw``, whereas the
+real duo pipeline feeds ua/va from ``d2a2c_vect``'s dg-initialized
+cross-face path (different edge/corner values).  That REAL duo ua/va ->
+divergence_corner_duo chain is now certified end-to-end in
+``test_fv3_native_duo_chain`` (with the certified ``d2a2c_vect_duo``); the
+still-remaining work is the full duo ``c_sw`` body.  The fixture carries
+the input SHA-256 + a lineage note so the leaf caveat travels with it.
 
 Fixture ``divduo_oracle_c12.npz`` (re)generated reproducibly by
 ``scripts/cluster/divduo_oracle.sbatch``: gen_divduo_oracle.py builds the

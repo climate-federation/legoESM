@@ -129,16 +129,21 @@ def test_divg_d_depends_on_the_duo_uava(oracle):
     u, v = np.asarray(oracle["u"]), np.asarray(oracle["v"])
     duo = d2a2c_vect_duo(u, v, gs, bd, RES + 1, RES + 1, dord4=True,
                          grid_type=0)
+    ua, va = np.asarray(duo["ua"]), np.asarray(duo["va"])
     base = np.asarray(divergence_corner_duo(
-        u, v, np.asarray(duo["ua"]), np.asarray(duo["va"]), gs, bd,
-        RES + 1, RES + 1, grid_type=0), dtype=np.float64)
-    ua2 = np.asarray(duo["ua"]).copy()
-    ua2 += 1.0                                    # perturb the A-grid wind
-    pert = np.asarray(divergence_corner_duo(
-        u, v, ua2, np.asarray(duo["va"]), gs, bd, RES + 1, RES + 1,
-        grid_type=0), dtype=np.float64)
+        u, v, ua, va, gs, bd, RES + 1, RES + 1, grid_type=0),
+        dtype=np.float64)
     active = _active_mask()
-    assert int((np.abs(base[active] - pert[active]) > 1e-9).sum()) >= 50
+    # perturbing EITHER A-grid wind must move the active divg_d — divg_d
+    # genuinely consumes both duo ua AND va (codex p4c dchain-r2 P2)
+    pert_ua = np.asarray(divergence_corner_duo(
+        u, v, ua + 1.0, va, gs, bd, RES + 1, RES + 1, grid_type=0),
+        dtype=np.float64)
+    pert_va = np.asarray(divergence_corner_duo(
+        u, v, ua, va + 1.0, gs, bd, RES + 1, RES + 1, grid_type=0),
+        dtype=np.float64)
+    assert int((np.abs(base[active] - pert_ua[active]) > 1e-9).sum()) >= 50
+    assert int((np.abs(base[active] - pert_va[active]) > 1e-9).sum()) >= 50
 
 
 def _block_sha(path, subroutine):
