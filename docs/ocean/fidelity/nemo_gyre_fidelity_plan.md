@@ -233,12 +233,34 @@ ISOLATION EXPERIMENTS (2026-07-16, 5-yr runs + single-column avt certificate):
   interior K_H = 1.20e-5 at every level below the ML == NEMO avt_k. And
   background 1.2e-5 mixes only ~14 m in 6 months — so the 428 m homogenisation
   is NOT slow interior diffusion.
-- **=> Dominant eroder = DEEP WINTER CONVECTIVE mixing** (reaches 428 m) from
-  the TKE convective response itself (not EVD, not background, not iso, not
-  advection-tested-yet), OR the vertical tracer advection — must be caught
-  mid-erosion by INSTRUMENTING legoESM's own avt over the seasonal cycle
-  (harness dumps only T/S/u/v/eta today). This is the concrete next step and
-  the real remaining lever. NOT a resolution floor.
+- **MECHANISM CAUGHT (2026-07-16, harness now dumps `state.tke`; avt
+  reconstructed per-snapshot via the validated `tke_set_diffusivities`,
+  `gap_audit/_diag_avt_seasonal.py`): the subtropical column SELF-LOCKS in a
+  mixed state.** Summer subtropical avt NEVER drops to background — it stays
+  0.03-0.09 (3000-6000x the 1.2e-5 floor) down to ~380 m ALL YEAR. Depth
+  profile at day152 (summer): N²≈+4e-10 (essentially NEUTRAL, T uniform
+  17.36), TKE energy e=1.5-2.9e-3 (≈1000x the ~1e-6 floor) SUSTAINED to
+  234 m, mixing length l_k grows to ~200 m (buoyancy length √(2e)/N blows up
+  as N→0, capped only by distance-to-surface). Feedback: N²≈0 → l~200 m →
+  avt large → column stays neutral → l~200 m. The first winter (d30) is still
+  STRATIFIED (N²=+6.3e-5, e=0 at depth, thermocline intact) — the lock closes
+  in spring (d30 contrast 0.22 → d61 0.00). Each summer surface heating tries
+  to restratify the top but the sustained mixing homogenises it as fast as it
+  is applied → mixing wins → thermocline never rebuilds.
+- **=> It is NOT a single eroder term but an EQUILIBRIUM-SELECTION problem**:
+  the coupled TKE-stratification system is BISTABLE (mixed vs stratified);
+  from the same IC legoESM settles on the MIXED branch, NEMO on the
+  STRATIFIED branch. The lever is the summer TKE DECAY in near-neutral water:
+  legoESM's e stays ~1000x too high so restratification can never win. NEMO's
+  mxl3 length + √(2e)/N formula MATCH legoESM's (checked), so the divergence
+  is in the prognostic TKE ENERGY budget (dissipation/production/advection
+  balance in a near-neutral column), not the diagnostic length. NB the §F
+  l_eps fix (dissipation length √(lup·ldn) ≥ min(lup,ldn)) slightly REDUCES
+  dissipation in this regime — verify it did not deepen the lock; the erosion
+  predates it (present in the mxl3/l_k run too). CONCRETE NEXT: compare
+  legoESM's vs NEMO's summer subtropical TKE budget term-by-term (need a NEMO
+  summer avt/en dump — EXP_15D is winter-only; run a NEMO summer-solstice
+  restart). NOT a resolution floor.
 
 **Minors (low priority):** TKE buoyancy N² adiabatic → in-situ; residual
 winter-ML depth (111 vs 91 m at day 15) — candidates: EVD reach interplay,
