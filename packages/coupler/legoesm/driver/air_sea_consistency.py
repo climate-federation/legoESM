@@ -29,6 +29,19 @@ physics across fields whose defaults intentionally differ (see KNOWN-UNGUARDED
 below) -- exactly the kind of quiet coupling this module exists to forbid. Fail
 loud, per the repo's dispatch-hardening doctrine.
 
+What this guard does NOT prove
+-----------------------------
+Passing it means the two sides SELECT the same scheme and feed it the same
+solver settings.  It does NOT prove the two sides compute an identical flux, and
+must not be read that way (codex): the coupler tile always applies a 0.98 saline
+factor via ``ocean_surface_q_sat`` while the atmosphere builds a FRESH-water
+q_sat, and under ``aerobulk`` MOST the tile switches to Goff where the
+atmosphere does not.  Those predate this module and are genuine physics
+questions (seawater q_sat really is ~0.98x fresh), not config drift -- which is
+exactly why they are out of scope for a config-consistency gate.  Scheme
+equality is a NECESSARY condition for a conserving interface, not a sufficient
+one.
+
 KNOWN-UNGUARDED (verified, deliberately NOT gated here)
 -------------------------------------------------------
 These split the same interface but cannot be fixed without an answer-changing
@@ -107,15 +120,26 @@ def resolve_effective_atm_surface(atm_config):
     this guard was written to catch, one layer up (codex).
     """
     # Deferred: physics_pipeline is heavy and imports across the driver package.
-    from legoesm.driver.physics_pipeline import (
-        apply_surface_flux_config,
-        turbulence_config_for,
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        materialize_sub_config,
     )
+    from legoesm.driver.physics_pipeline import turbulence_config_for
 
-    tc = apply_surface_flux_config(turbulence_config_for(atm_config), atm_config)
+    # `turbulence_config_for` ALREADY ends in `apply_surface_flux_config`, so
+    # calling that again here would double-apply it -- idempotent, but then this
+    # would not literally be the pipeline's path, which is the entire point of
+    # resolving through production code (codex).
+    tc = turbulence_config_for(atm_config)
+    # `None` sub-config does not mean "no surface layer": dispatch substitutes a
+    # default (CLUBBConfig() for clubb), and that default carries a real
+    # constant surface config it runs fluxes with. Reading the None straight
+    # would skip validation on a config that DOES have a surface -- e.g.
+    # turbulence="clubb" + CouplerConfig(bulk_scheme="coare3") is a genuine
+    # split (atmosphere constant vs tile COARE3) the guard must catch (codex).
+    tc = materialize_sub_config(tc)
     sub = getattr(tc, getattr(tc, "scheme", ""), None)
     if sub is None:
-        return None
+        return None  # scheme="none": genuinely no surface layer
     return getattr(sub, "surface", None)
 
 
@@ -168,6 +192,23 @@ def validate_air_sea_consistency(atm_config, coupler_config) -> None:
             continue  # a side that does not carry this axis cannot split on it
         if atm_v != ocn_v:
             split.append((axis, atm_v, ocn_v))
+
+    # The T/q measurement heights are NOT same-named across the interface: the
+    # coupler passes z_t_atm/z_q_atm explicitly, while the atmosphere's MOST call
+    # omits z_t/z_q entirely, so compute_most_fluxes defaults them to its z_ref.
+    # The atmosphere therefore has no field to compare -- its effective value IS
+    # z_ref -- and a name-matching loop silently misses the split (codex):
+    # CouplerConfig(z_ref=10, z_t_atm=2, z_q_atm=2, bulk_scheme="coare3") passes
+    # while the two sides use different reference-height conventions.
+    if atm_scheme in _ATM_MOST_SCHEMES:
+        atm_z_ref = getattr(surf, "z_ref", None)
+        for axis in ("z_t_atm", "z_q_atm"):
+            ocn_v = getattr(effective, axis, None)
+            if atm_z_ref is None or ocn_v is None:
+                continue
+            if ocn_v != atm_z_ref:
+                split.append((f"{axis} (vs the atmosphere's z_ref, which its "
+                              "MOST call defaults z_t/z_q to)", atm_z_ref, ocn_v))
     if not split:
         return
 

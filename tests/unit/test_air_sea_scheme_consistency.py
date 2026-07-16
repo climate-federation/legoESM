@@ -195,6 +195,78 @@ def test_no_surface_sub_config_is_skipped():
                                  CouplerConfig(bulk_scheme="coare3"))
 
 
+# --- clubb: None sub-config means "the default one", not "no config" --------
+
+def test_surface_bulk_scheme_reaches_clubb():
+    """THE REACHABILITY BUG: --surface-bulk-scheme was silently ignored here.
+
+    ``TurbulenceConfig.clubb`` defaults to None and dispatch substitutes a fresh
+    ``CLUBBConfig()``, so ``apply_surface_flux_config``'s bail-out on the None
+    sub-config dropped the injection entirely: the run used CLUBB's own default
+    'constant' surface layer while the user asked for coare3, and nothing said
+    so (codex). This is the same class of bug as the rest of this PR -- a
+    parameterization that cannot be selected from config.
+    """
+    cfg = ExperimentConfig(turbulence="clubb", surface_bulk_scheme="coare3")
+    cfg.validate_strict()
+    surf = resolve_effective_atm_surface(cfg)
+    assert surf is not None, "clubb's surface config must be materialized"
+    assert surf.bulk_scheme == "coare3", (
+        "--surface-bulk-scheme did not reach the CLUBB surface layer"
+    )
+
+
+def test_clubb_dispatch_and_injection_agree():
+    """The production dispatch and the injection must materialize the SAME
+    sub-config, or the guard reasons about a config the model never runs."""
+    from legoesm.atmosphere.physics.turbulence.integration import get_turbulence_fn
+
+    cfg = ExperimentConfig(turbulence="clubb", surface_bulk_scheme="coare3")
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    _, _, sub = get_turbulence_fn(turbulence_config_for(cfg))
+    assert sub.surface.bulk_scheme == "coare3"
+
+
+def test_clubb_split_against_the_ocean_tile_is_caught():
+    """Default clubb runs its own 'constant' surface; a COARE3 tile splits the
+    interface. The guard previously skipped it (resolver returned None)."""
+    cfg = ExperimentConfig(turbulence="clubb")     # default => constant surface
+    assert resolve_effective_atm_surface(cfg).bulk_scheme == "constant"
+    with pytest.raises(ValueError, match="air-sea bulk-flux scheme mismatch"):
+        validate_air_sea_consistency(cfg, CouplerConfig(bulk_scheme="coare3"))
+
+
+def test_default_clubb_config_is_untouched():
+    """The all-defaults early return still returns tc UNCHANGED (same object),
+    so materializing cannot perturb a default run."""
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    from legoesm.driver.physics_pipeline import apply_surface_flux_config
+
+    tc = TurbulenceConfig(scheme="clubb")
+    assert apply_surface_flux_config(tc, ExperimentConfig(turbulence="clubb")) is tc
+    assert tc.clubb is None
+
+
+# --- T/q measurement heights are not same-named across the interface -------
+
+@pytest.mark.parametrize("axis", ["z_t_atm", "z_q_atm"])
+def test_coupler_tq_height_must_match_the_atmosphere_z_ref(axis):
+    """The atmosphere's MOST call OMITS z_t/z_q, so compute_most_fluxes defaults
+    them to its z_ref; the coupler passes z_t_atm/z_q_atm explicitly. There is no
+    same-named atm field, so a name-matching loop misses this split (codex)."""
+    atm = ExperimentConfig(surface_bulk_scheme="coare3", turbulence="louis")
+    with pytest.raises(ValueError, match=axis):
+        validate_air_sea_consistency(
+            atm, CouplerConfig(bulk_scheme="coare3", **{axis: 2.0}))
+
+
+def test_tq_heights_not_compared_under_the_constant_closure():
+    """The constant closure runs no MOST solve, so the heights are inert."""
+    validate_air_sea_consistency(
+        ExperimentConfig(turbulence="louis"),
+        CouplerConfig(z_t_atm=2.0, z_q_atm=2.0))
+
+
 # --- the interface splits on more than the scheme name ---------------------
 
 @pytest.mark.parametrize("axis,atm_kw,cpl_kw", [
