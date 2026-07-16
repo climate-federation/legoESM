@@ -714,6 +714,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "--no-bechtold-use-ifs-subcloud-evap disables a "
                              "config-file default. Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_subcloud_evap}.")
+    parser.add_argument("--bechtold-use-ifs-inplume-precip",
+                        dest="bechtold_use_ifs_inplume_precip",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_inplume_precip,
+                        help="Enable the IFS in-updraft precipitation formation "
+                             "(openifs cuascn.F90:718-773 analytic Sundqvist "
+                             "conversion; bypasses the post-hoc precip split). "
+                             "--no-bechtold-use-ifs-inplume-precip disables a "
+                             "config-file default. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_inplume_precip}.")
     parser.add_argument("--bechtold-downdraft-entrain-rate", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_downdraft_entrain_rate,
                         dest="bechtold_downdraft_entrain_rate",
@@ -1485,6 +1495,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_downdraft_detrain_scale_m=args.bechtold_downdraft_detrain_scale_m,
         bechtold_use_ifs_cape_closure=args.bechtold_use_ifs_cape_closure,
         bechtold_use_ifs_subcloud_evap=args.bechtold_use_ifs_subcloud_evap,
+        bechtold_use_ifs_inplume_precip=args.bechtold_use_ifs_inplume_precip,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
         latlon_spmd_compiled_segments=args.latlon_spmd_compiled_segments,

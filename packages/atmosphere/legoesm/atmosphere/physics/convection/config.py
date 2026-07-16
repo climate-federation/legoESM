@@ -1469,6 +1469,19 @@ class BechtoldConfig(NamedTuple):
     # precip 1.21->1.19 mm/day, CWV +0.05 — the physically-expected evap
     # signature).  False restores the legacy re-evaporation byte-identically.
     use_ifs_subcloud_evap: bool = True
+    # IFS in-updraft precipitation formation (cuascn.F90:718-773; see
+    # bechtold._ifs_inplume_precip_conversion): the plume condensate converts
+    # to rain DURING the ascent via the oracle analytic L-integration
+    # (RPRCON=1.4e-3 Kessler-Sundqvist rate / (0.75*w_u), Bergeron-Findeisen
+    # enhancement, ZDNOPRC=3e-4 threshold, 5e-3 condensate cap), replacing
+    # the post-hoc precip split of the DETRAINED condensate (both
+    # precip_split_scheme variants are bypassed when on; the sub-cloud evap
+    # then acts on the formed rain — the full cuascn->cuflxn chain).
+    # One-pass replay: plume buoyancy loading keeps the unconverted (heavier)
+    # condensate — a documented O(0.1-0.3 K) approximation.  Default False
+    # pending RCE/AMIP A/B validation (two-step ship pattern); False is
+    # byte-identical legacy.
+    use_ifs_inplume_precip: bool = False
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0

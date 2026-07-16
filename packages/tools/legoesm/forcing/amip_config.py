@@ -93,6 +93,9 @@ class AMIPExperimentConfig(NamedTuple):
     # IFS Kessler sub-cloud rain evaporation (cuflxn.F90; default ON
     # 2026-07-16) — in the flat schema so round-trips cannot drop it.
     bechtold_use_ifs_subcloud_evap: bool = True
+    # IFS in-updraft precipitation formation (cuascn.F90; default OFF pending
+    # validation) — in the flat schema so round-trips cannot drop it.
+    bechtold_use_ifs_inplume_precip: bool = False
     # Convective in-updraft rain-split efficiency [0,1] (shared across the
     # mass-flux schemes); 0 = disabled (legacy no split).
     convective_precip_efficiency: float = 0.0

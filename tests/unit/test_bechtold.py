@@ -1922,3 +1922,273 @@ def test_ifs_subcloud_evap_fractional_gate_is_convex_blend():
     e_half = evap_with_gate(0.5)
     assert e_full > 0.0
     assert abs(e_half - 0.5 * e_full) < 1e-12 + 1e-9 * e_full
+
+
+# ---------------------------------------------------------------------------
+# IFS in-updraft precipitation formation (cuascn.F90:718-773)
+# ---------------------------------------------------------------------------
+
+from legoesm.atmosphere.physics.convection.bechtold import (  # noqa: E402
+    _ifs_inplume_precip_conversion,
+    _ifs_updraft_ke_profile,
+    _ifs_liquid_fraction_cu,
+    _IFS_RPRCON,
+    _IFS_ZDNOPRC,
+    _IFS_Z_CLDMAX,
+    _IFS_Z_CPRC2,
+    _IFS_RTBERCU_OFFSET_K,
+    _IFS_RTICECU_OFFSET_K,
+)
+
+
+def test_ifs_inplume_constants_and_liquid_fraction():
+    """Constants are the oracle's (sucumf.F90:164, cuascn.F90:277-280,
+    suphec.F90:200-202); FOEALFCU is 1 above freezing, 0 at/below -23C and
+    the quadratic in between (fcttre.func.h:130)."""
+    assert _IFS_RPRCON == 1.4e-3
+    assert _IFS_ZDNOPRC == 3.0e-4
+    assert _IFS_Z_CLDMAX == 5.0e-3
+    assert _IFS_Z_CPRC2 == 0.5
+    assert _IFS_RTBERCU_OFFSET_K == 5.0
+    assert _IFS_RTICECU_OFFSET_K == 23.0
+    tf = constants.T_freeze
+    assert float(_ifs_liquid_fraction_cu(jnp.array(tf + 5.0))) == 1.0
+    assert float(_ifs_liquid_fraction_cu(jnp.array(tf - 23.0))) == 0.0
+    assert float(_ifs_liquid_fraction_cu(jnp.array(tf - 40.0))) == 0.0
+    mid = float(_ifs_liquid_fraction_cu(jnp.array(tf - 11.5)))
+    assert abs(mid - 0.25) < 1e-12          # ((23-11.5)/23)^2 = 0.25
+
+
+def test_ifs_inplume_conversion_analytic_fortran_mirror():
+    """Hand-computed Fortran-shaped upward recurrence (cuascn.F90:721-773) on
+    a 4-level ascent reproduces the helper: dilution + fresh condensation
+    recovered from the plume outputs, ZWU from the level-below KE, Bergeron
+    factor, ZDNOPRC threshold IF, Z_CLDMAX clip — a sign/orientation/factor
+    bug goes red."""
+    import numpy as np
+    g = constants.g
+    tf = constants.T_freeze
+    # surface-last inputs (index 0 = top).
+    q_c = np.array([[1.2e-3, 2.0e-3, 8.0e-4, 0.0]])
+    T_u = np.array([[tf - 15.0, tf - 2.0, tf + 8.0, tf + 16.0]])
+    z = np.array([[9000.0, 6000.0, 3000.0, 500.0]])
+    eps = np.array([[2e-4, 4e-4, 8e-4, 1e-3]])
+    ke = np.array([[4.0, 6.0, 2.0, 0.3]])
+
+    # upward order (surface-first): reverse.
+    q_sf, T_sf, z_sf = q_c[0, ::-1], T_u[0, ::-1], z[0, ::-1]
+    eps_sf, ke_sf = eps[0, ::-1], ke[0, ::-1]
+    L_prev = 0.0
+    L_exp, P_exp = np.zeros(4), np.zeros(4)
+    for k in range(4):
+        dz = max(z_sf[k] - z_sf[k - 1], 1.0) if k > 0 else 0.0
+        decay = np.exp(-eps_sf[k] * dz)
+        q_prev = q_sf[k - 1] if k > 0 else 0.0
+        cond = max(q_sf[k] - q_prev * decay, 0.0)
+        L_pre = L_prev * decay + cond
+        ke_below = ke_sf[k - 1] if k > 0 else ke_sf[k]
+        zwu = min(15.0, np.sqrt(2.0 * max(0.5, ke_below)))
+        alpha = min(1.0, ((min(max(T_sf[k], tf - 23.0), tf) - (tf - 23.0)) / 23.0) ** 2)
+        zdt = min(23.0 - 5.0, max((tf - 5.0) - T_sf[k], 0.0))
+        zcbf = 1.0 + 0.5 * np.sqrt(zdt)
+        zlcrit = 3.0e-4 / zcbf
+        zzco = (1.4e-3 / g) / (0.75 * zwu) * (1.0 + 0.3 * alpha) * zcbf
+        # Oracle mapping: ZLUOLD = diluted condensate (cuascn.F90:543),
+        # ZC = fresh condensation alone (cuascn.F90:761); launch level
+        # (dz=0) never converts (ascent loop starts above departure).
+        L_old = L_prev * decay
+        if L_pre > 3.0e-4 and dz > 0.0:
+            zc = cond
+            zd = zzco * (1.0 - np.exp(-((L_pre / zlcrit) ** 2))) * g * dz
+            zint = np.exp(-zd)
+            src = zc / zd * (1.0 - zint) if zd > 1e-8 else zc * (1.0 - 0.5 * zd)
+            L_new = min(max(L_old * zint + src, 0.0), min(L_pre, 5.0e-3))
+        else:
+            L_new = L_pre
+        P_exp[k] = max(L_pre - L_new, 0.0)
+        L_exp[k] = L_new
+        L_prev = L_new
+
+    L_got, P_got = _ifs_inplume_precip_conversion(
+        jnp.asarray(q_c), jnp.asarray(T_u), jnp.asarray(z),
+        jnp.asarray(eps), jnp.asarray(ke),
+    )
+    tol = 1e-9 if L_got.dtype == jnp.float64 else 1e-5
+    assert np.allclose(np.asarray(L_got)[0, ::-1], L_exp, rtol=tol, atol=1e-18)
+    assert np.allclose(np.asarray(P_got)[0, ::-1], P_exp, rtol=tol, atol=1e-18)
+    assert P_exp.sum() > 0.0, "fixture must actually convert"
+    # invariants: converted L never exceeds the pre-conversion condensate and
+    # never the 5e-3 cap; precip non-negative.
+    assert np.all(np.asarray(L_got) <= np.maximum(np.asarray(q_c), 5.0e-3) + 1e-15)
+    assert np.all(np.asarray(P_got) >= 0.0)
+
+
+def test_ifs_inplume_toggle_and_leaf_integration():
+    """Default OFF (byte-identical legacy split); ON produces rain from the
+    in-plume formation (dq_r>0 without any precip split), reduces the
+    detrained anvil condensate, stays finite, and a stable column stays
+    quiescent."""
+    assert BechtoldConfig().use_ifs_inplume_precip is False
+    T, q, pf, ph, u, v = _column(ncol=2, nlev=40, T_sfc=299.0, q_sfc=13e-3,
+                                 lapse_rate=6.5)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    st = jnp.zeros((ncol,))
+    dp = ph[:, 1:] - ph[:, :-1]
+    # precip_efficiency=0: the legacy path would emit NO rain (dq_r None), so
+    # any rain under the flag comes from the in-plume formation alone.
+    out_on, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_inplume_precip=True,
+                              use_ifs_subcloud_evap=False,
+                              precip_efficiency=0.0))
+    out_off, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_inplume_precip=False,
+                              use_ifs_subcloud_evap=False,
+                              precip_efficiency=0.0))
+    assert out_off.dq_r_conv_dt is None
+    assert out_on.dq_r_conv_dt is not None
+    assert jnp.all(jnp.isfinite(out_on.dq_r_conv_dt))
+    assert float(jnp.min(out_on.dq_r_conv_dt)) >= 0.0
+    rain_on = float(jnp.sum(out_on.dq_r_conv_dt * dp / constants.g))
+    assert rain_on > 0.0, "in-plume formation must rain on a deep column"
+    # anvil source shrinks (condensate converted out before detrainment).
+    anvil_on = float(jnp.sum(out_on.dq_c_conv_dt * dp / constants.g))
+    anvil_off = float(jnp.sum(out_off.dq_c_conv_dt * dp / constants.g))
+    assert anvil_on < anvil_off
+    for o in (out_on, out_off):
+        assert jnp.all(jnp.isfinite(o.dT_dt))
+        assert jnp.all(jnp.isfinite(o.dq_v_dt))
+    # stable column quiesces under the flag (<1 W/m^2 bar, as elsewhere).
+    Ts, qs, pfs, phs, us, vs = _column(ncol=2, nlev=40, T_sfc=280.0,
+                                       q_sfc=2e-3, lapse_rate=3.0)
+    out_s, _, _ = bechtold_convection(
+        Ts, qs, pfs, phs, us, vs, jnp.zeros((2, 40)), jnp.zeros((2,)),
+        None, dt=600.0, config=BechtoldConfig(use_ifs_inplume_precip=True))
+    w_m2 = float(jnp.max(jnp.abs(out_s.dT_dt)) * constants.c_pd * 1e5 / constants.g)
+    assert w_m2 < 1.0
+
+
+def test_ifs_inplume_chain_with_subcloud_evap_and_grad():
+    """The formed rain feeds the sub-cloud evaporation (cuascn->cuflxn chain:
+    evap reduces surface-reaching rain vs evap-off, both flags on) and
+    jax.grad stays finite through the conversion + KE scans."""
+    T, q, pf, ph, u, v = _column(ncol=2, nlev=40, T_sfc=299.0, q_sfc=13e-3,
+                                 lapse_rate=6.5)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    st = jnp.zeros((ncol,))
+    dp = ph[:, 1:] - ph[:, :-1]
+    kw = dict(use_ifs_inplume_precip=True, precip_efficiency=0.0,
+              downdraft_evap_efficiency=0.0)
+    r_evap = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_subcloud_evap=True, **kw))[0]
+    r_noev = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_subcloud_evap=False, **kw))[0]
+    rain_evap = float(jnp.sum(r_evap.dq_r_conv_dt * dp / constants.g))
+    rain_noev = float(jnp.sum(r_noev.dq_r_conv_dt * dp / constants.g))
+    # COMPLETE sub-cloud evaporation is permitted by the oracle-style flux
+    # limiter (a dry-enough BL under the RH break can consume all the rain
+    # — fp32 rounding lands there on this fixture), so the lower bound is
+    # inclusive (codex R2).
+    assert 0.0 <= rain_evap < rain_noev
+    assert rain_noev > 0.0
+
+    if jnp.asarray(0.0).dtype != jnp.float64:
+        import pytest
+        pytest.skip("full-scheme grad NaNs under fp32 on main (pre-existing); "
+                    "grad coverage runs under x64")
+
+    def loss(eps_deep):
+        cfg = BechtoldConfig(epsilon_deep=eps_deep,
+                             use_ifs_inplume_precip=True)
+        o, _, _ = bechtold_convection(T, q, pf, ph, u, v, cpp, st, None,
+                                      dt=600.0, config=cfg)
+        return jnp.sum(o.dq_v_dt ** 2) + jnp.sum(o.dq_r_conv_dt ** 2)
+
+    assert jnp.isfinite(jax.grad(loss)(1.75e-3))
+
+
+def test_ifs_inplume_dilution_and_launch_edge_cases():
+    """Codex R1 #1/#3 regressions: (a) a strongly-entraining layer with NO
+    fresh condensation must not spuriously convert (dilution is not a source
+    — ZC is condensation only, so with cond=0 the analytic solution decays
+    from the DILUTED state and precip only reflects the conversion sink, not
+    the dilution); (b) a supersaturated LAUNCH level (dz=0) sheds no rain."""
+    import numpy as np
+    tf = constants.T_freeze
+    # 3 levels surface-first geometry via surface-last arrays.
+    z = jnp.asarray([[7000.0, 3500.0, 500.0]])
+    T_u = jnp.full((1, 3), tf + 10.0)
+    ke = jnp.full((1, 3), 2.0)
+    # (a) plume condensate DECAYS upward exactly as pure dilution would:
+    # q_c(k) = q_c(below)*exp(-eps*dz) => recovered cond = 0 everywhere.
+    eps = jnp.full((1, 3), 2.5e-3)                    # strong entrainment
+    L0 = 2.0e-3
+    d1 = float(jnp.exp(-eps[0, 1] * (z[0, 1] - z[0, 2])))
+    d2 = float(jnp.exp(-eps[0, 0] * (z[0, 0] - z[0, 1])))
+    q_c = jnp.asarray([[L0 * d1 * d2, L0 * d1, L0]])
+    L_new, precip = _ifs_inplume_precip_conversion(q_c, T_u, z, eps, ke)
+    # zero fresh condensation => the analytic source term vanishes; the
+    # converted L is the diluted state damped by the (small) sink only, and
+    # the total precip must be FAR below the dilution-driven spurious value
+    # (which converted nearly all of L0 under the old ZC = L_pre - L_prev).
+    assert float(jnp.sum(precip)) < 0.5 * L0
+    assert jnp.all(L_new <= q_c + 1e-15)
+    # (b) launch level above Z_CLDMAX: no zero-path-length rain.
+    q_c_launch = jnp.asarray([[0.0, 0.0, 8.0e-3]])    # > 5e-3 at launch
+    L2, P2 = _ifs_inplume_precip_conversion(
+        q_c_launch, T_u, z, jnp.full((1, 3), 1e-4), ke)
+    assert float(P2[0, 2]) == 0.0, "launch level must not convert (dz=0)"
+
+
+def test_ifs_inplume_rain_water_budget_coupled():
+    """Codex R1 #2 regression: the in-plume rain carries a COLUMN-exact
+    vapor sink (distributed by moisture mass q_v*dp — a per-level debit at
+    the formation level overdrew dry upper levels into negative q_v in the
+    100-day RCE gate), so switching the flag on changes the column total
+    water sum(dq_v + dq_c + dq_r) by EXACTLY zero relative to the flag-off
+    run (evap off isolates the pairing)."""
+    T, q, pf, ph, u, v = _column(ncol=2, nlev=40, T_sfc=299.0, q_sfc=13e-3,
+                                 lapse_rate=6.5)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    st = jnp.zeros((ncol,))
+    dp = ph[:, 1:] - ph[:, :-1]
+
+    # Closure OFF in both runs: the default CAPE closure would rescale M_u
+    # via the CONVERTED condensate loading (a real feedback, but a CONFOUND
+    # here) — with a fixed M_u the level-wise pairings make the total-water
+    # sum EXACTLY flag-invariant (dq_c and dq_r are both vapor-sink paired,
+    # transport identical).
+    # implicit_flux kernel: the budget-closed solve whose dq_c carries the
+    # vapor-sink pairing (the default advective kernel's documented
+    # non-closure would mask the rain pairing under the L-dependent dq_c
+    # change).
+    common = dict(use_ifs_subcloud_evap=False, enable_downdraft=False,
+                  precip_efficiency=0.0, use_ifs_cape_closure=False,
+                  use_convective_turnover_tau=False,
+                  subsidence_solve="implicit_flux")
+
+    def run(flag):
+        return bechtold_convection(
+            T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+            config=BechtoldConfig(use_ifs_inplume_precip=flag, **common))[0]
+
+    o_on, o_off = run(True), run(False)
+
+    def total_water(o):
+        dqr = o.dq_r_conv_dt if o.dq_r_conv_dt is not None else 0.0
+        return float(jnp.sum((o.dq_v_dt + o.dq_c_conv_dt + dqr) * dp
+                             / constants.g))
+
+    rain_total = float(jnp.sum(o_on.dq_r_conv_dt * dp / constants.g))
+    assert rain_total > 0.0
+    shift = abs(total_water(o_on) - total_water(o_off))
+    assert shift < 1e-9 * rain_total + 1e-18, (
+        f"budget shift {shift:.3e} vs rain {rain_total:.3e} — "
+        "vapor-sink pairing broken"
+    )

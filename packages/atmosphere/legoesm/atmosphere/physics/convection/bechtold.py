@@ -356,6 +356,35 @@ _IFS_RHEBC_OCEAN_DEEP = 0.85            # deep KTYPE=1 over water (cuflxn.F90:22
 # does not receive — documented gap; the ocean values are used everywhere.
 _IFS_EVAP_FLUX_TINY = 1.0e-12           # IF(ZRFL > 1.E-12) evap gate (cuflxn.F90:450)
 
+# --- IFS in-updraft precipitation formation (cuascn.F90:718-773, sucumf/suphec) ---
+# Analytic integration of the plume condensate equation dL/dPhi = S - K*L with
+# the Sundqvist-form conversion sink K = ZZCO*(1-exp(-(L/Lcrit)^2)).  Published
+# IFS constants (fixed):
+_IFS_RPRCON = 1.4e-3                    # RPRCON [1/m geopot] (sucumf.F90:164)
+_IFS_ZDNOPRC = 3.0e-4                   # condensate threshold for precip (cuascn.F90:277)
+_IFS_Z_CLDMAX = 5.0e-3                  # max plume condensate [kg/kg] (cuascn.F90:278)
+_IFS_Z_CPRC2 = 0.5                      # Bergeron-Findeisen sqrt coeff (cuascn.F90:280)
+_IFS_RTBERCU_OFFSET_K = 5.0             # RTBERCU = RTT - 5 (suphec.F90:200)
+_IFS_RTICECU_OFFSET_K = 23.0            # RTICECU = RTT - 23 (suphec.F90:202; the
+#                                         LMFGLAC=-38 override is not taken)
+_IFS_LIQ_CONV_ENHANCE = 0.3             # ZZCO = 1 + 0.3*alpha_liq (cuascn.F90:727)
+_IFS_WU_DRAG_FACTOR = 0.75              # ZPRCON = (RPRCON/g)/(0.75*ZWU) (cuascn.F90:735)
+_IFS_WU_KE_FLOOR = 0.5                  # ZWU = min(15, sqrt(2*max(0.5, KE))) (cuascn.F90:724)
+_IFS_WU_MAX = 15.0                      # (cuascn.F90:724)
+
+
+def _ifs_liquid_fraction_cu(T: jax.Array) -> jax.Array:
+    """IFS convective mixed-phase liquid fraction FOEALFCU (fcttre.func.h:130).
+
+    ``min(1, ((clamp(T, RTICECU, RTWAT) - RTICECU)/(RTWAT - RTICECU))**2)``
+    with RTWAT = T_freeze and RTICECU = T_freeze - 23 K: 1 above freezing,
+    0 below -23 C, quadratic in between.  Smooth except the clamp kinks.
+    """
+    t_ice = constants.T_freeze - _IFS_RTICECU_OFFSET_K
+    frac = (jnp.clip(T, t_ice, constants.T_freeze) - t_ice) / _IFS_RTICECU_OFFSET_K
+    return jnp.minimum(1.0, frac**2)
+
+
 # --- IFS deep CAPE closure ZMFUB1 = ZCAPE*ZMFUB/(ZHEAT*ZXTAU) (cumastrn.F90:704-833)
 _IFS_RETV = 1.0 / constants.epsilon - 1.0       # RETV = R_v/R_d - 1 (yomcst.F90:342)
 _IFS_ZCAPE_MAX_PA = 5000.0                      # ZCAPE = MIN(ZCAPE, 5000) (cumastrn.F90:825)
@@ -423,6 +452,36 @@ def _ifs_updraft_mean_velocity(
     Returns
     -------
     w_mean : (ncol,)  mean updraught velocity [m/s], in [sqrt(0.02), 15].
+    """
+    pkineu = _ifs_updraft_ke_profile(
+        B_u, T_env, q_v_env, dz, eps_profile, dlt_profile, above_base,
+    )
+    _dtype = pkineu.dtype
+    # In-cloud pressure-weighted mean KE, floored at the IFS 1e-2 m^2/s^2
+    # (=> w_mean >= sqrt(0.02) ~ 0.14 m/s), then sqrt(2*KE), capped at 15 m/s
+    # (cuascn.F90:845-846, cumastrn.F90:773).  The KE floor also keeps grad(sqrt)
+    # finite at zero KE.
+    w = in_cloud * dp.astype(_dtype)
+    mean_ke = jnp.sum(w * pkineu, axis=-1) / jnp.clip(jnp.sum(w, axis=-1), 1e-6, None)
+    w_mean = jnp.sqrt(2.0 * jnp.maximum(mean_ke, _IFS_KE_FLOOR))
+    return jnp.minimum(w_mean, _IFS_WMEAN_MAX)
+
+
+def _ifs_updraft_ke_profile(
+    B_u: jax.Array,
+    T_env: jax.Array,
+    q_v_env: jax.Array,
+    dz: jax.Array,
+    eps_profile: jax.Array,
+    dlt_profile: jax.Array,
+    above_base: jax.Array,
+) -> jax.Array:
+    """Per-level IFS updraught kinetic energy PKINEU (cuascn.F90:638-654).
+
+    The scan formerly inline in :func:`_ifs_updraft_mean_velocity` — extracted
+    so the in-plume precipitation conversion (which needs the LEVEL-BELOW KE
+    for ``ZWU``, cuascn.F90:724) shares the exact same budget instead of
+    re-deriving it.  Returns ``(ncol, nlev)`` surface-last KE [m^2/s^2].
     """
     # Pin the scan carry to one dtype (geometry/thermo can promote f32 -> f64;
     # lax.scan requires carry-in dtype == carry-out dtype).  See CLAUDE.md
@@ -493,15 +552,168 @@ def _ifs_updraft_mean_velocity(
         B_acc[:, ::-1][:, 0].astype(_dtype),
     )
     _, ke_sf = jax.lax.scan(_ke_step, init, inputs)      # (nlev, ncol)
-    pkineu = jnp.moveaxis(ke_sf, 0, 1)[:, ::-1]          # surface-last (ncol, nlev)
-    # In-cloud pressure-weighted mean KE, floored at the IFS 1e-2 m^2/s^2
-    # (=> w_mean >= sqrt(0.02) ~ 0.14 m/s), then sqrt(2*KE), capped at 15 m/s
-    # (cuascn.F90:845-846, cumastrn.F90:773).  The KE floor also keeps grad(sqrt)
-    # finite at zero KE.
-    w = in_cloud * dp.astype(_dtype)
-    mean_ke = jnp.sum(w * pkineu, axis=-1) / jnp.clip(jnp.sum(w, axis=-1), 1e-6, None)
-    w_mean = jnp.sqrt(2.0 * jnp.maximum(mean_ke, _IFS_KE_FLOOR))
-    return jnp.minimum(w_mean, _IFS_WMEAN_MAX)
+    return jnp.moveaxis(ke_sf, 0, 1)[:, ::-1]            # surface-last (ncol, nlev)
+
+
+def _ifs_inplume_precip_conversion(
+    q_c_u: jax.Array,
+    T_u: jax.Array,
+    z: jax.Array,
+    eps_profile: jax.Array,
+    pkineu: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    r"""IFS in-updraft precipitation formation (cuascn.F90:718-773).
+
+    Analytic per-layer integration of the plume-condensate equation
+    ``dL/dPhi = S - K*L`` marched UPWARD along the ascent::
+
+        ZWU    = min(15, sqrt(2*max(0.5, KE_below)))         (cuascn.F90:724)
+        ZZCO   = (RPRCON/g)/(0.75*ZWU) * (1 + 0.3*alpha_liq(T_u)) * ZCBF
+        ZDT    = min(RTBERCU-RTICECU, max(RTBERCU - T_u, 0))
+        ZCBF   = 1 + 0.5*sqrt(ZDT)          (Bergeron-Findeisen enhancement)
+        ZLCRIT = ZDNOPRC/ZCBF
+        ZD     = ZZCO * (1 - exp(-(L_pre/ZLCRIT)**2)) * g*dz  (Sundqvist form)
+        ZLNEW  = clip(L_prev*exp(-ZD) + ZC/ZD*(1-exp(-ZD)), 0, min(L_pre, 5e-3))
+        precip = max(0, L_pre - ZLNEW)      applied only where L_pre > ZDNOPRC
+
+    with ``L_old = L_prev*exp(-eps*dz)`` the transported/diluted condensate at
+    this level (the oracle's ``ZLUOLD``, cuascn.F90:543 — set BEFORE the
+    cuadjtq saturation adjustment), ``ZC = cond_k`` the FRESH CONDENSATION
+    alone (the oracle's ``ZC = PLU - ZLUOLD``, cuascn.F90:761) and ``L_pre =
+    L_old + cond_k`` the pre-conversion condensate.  The fresh-condensation
+    increment ``cond_k`` is RECOVERED from the plume outputs — ``cond_k =
+    q_c_u(k) - q_c_u(k-below)*exp(-eps*dz)``, the exact inverse of the plume
+    scan's ``q_c_u = q_c_u_prev*decay + cond`` — so this one-pass replay
+    shares the plume's dilution/condensation numerics without touching the
+    shared plume integrator.  The launch level (zero path length) never
+    converts, matching the oracle loop starting one level above departure.
+
+    ONE-PASS APPROXIMATION (documented): the plume's buoyancy water loading
+    ``T_v_u*(1 - q_c_u)`` and vapor budget were computed with the UNCONVERTED
+    (heavier) condensate; IFS removes rain inside the same ascent loop, so
+    its plume is slightly MORE buoyant.  The loading effect is O(0.1-0.3 K);
+    a feedback-faithful version needs the conversion inside the shared plume
+    scan (interface change for six schemes) — deferred.  The converted
+    profile IS used everywhere downstream (detrained anvil source, kernel
+    transports, ZCAPE condensate loading — matching the oracle's converted
+    ``PLU``/``-PLU(JL,JK)`` in ZCAPE).
+
+    AD-safety: the ``ZC/ZD`` ratio takes a guarded double-``where`` with the
+    second-order Taylor limit ``ZC*(1 - ZD/2)`` below ``ZD = 1e-8`` (the
+    oracle divides unguardedly; at ``L_pre > ZDNOPRC`` the Sundqvist factor
+    keeps ZD > 0 but it can underflow in fp32); the ``L_pre > ZDNOPRC``
+    threshold is the oracle's own discrete IF, applied as a branch-selecting
+    ``jnp.where`` (finite one-sided gradients, like the eps==0 drag switch).
+
+    Parameters
+    ----------
+    q_c_u : (ncol, nlev)  plume condensate from the (unconverted) ascent [kg/kg].
+    T_u : (ncol, nlev)  plume temperature [K] (mixed-phase/Bergeron factors).
+    z : (ncol, nlev)  full-level heights [m] (surface-last; layer dz and dPhi).
+    eps_profile : (ncol, nlev)  fractional entrainment [1/m] (the dilution).
+    pkineu : (ncol, nlev)  updraught KE profile [m^2/s^2]
+        (:func:`_ifs_updraft_ke_profile`).
+
+    Returns
+    -------
+    (L_new, precip_frac) : converted plume condensate [kg/kg] and per-level
+        precipitation formation per unit plume mass flux [kg/kg]; the caller
+        forms the rain source ``dq_r = precip_frac * M_u * g/dp``.
+    """
+    _dtype = jnp.result_type(q_c_u, T_u, z, eps_profile)
+    g = constants.g
+
+    # Per-level thermodynamic factors (level-local, precomputable).
+    alpha_liq = _ifs_liquid_fraction_cu(T_u.astype(_dtype))
+    zdt = jnp.clip(
+        (constants.T_freeze - _IFS_RTBERCU_OFFSET_K) - T_u.astype(_dtype),
+        0.0,
+        _IFS_RTICECU_OFFSET_K - _IFS_RTBERCU_OFFSET_K,
+    )
+    # Guarded sqrt: zdt clips to EXACTLY 0 at every warm level and
+    # d(sqrt)/dx -> inf at 0 would NaN the whole-scheme gradient (the JAX
+    # double-where pattern; forward unchanged).
+    zdt_safe = jnp.where(zdt > 0.0, zdt, 1.0)
+    zcbf = jnp.where(
+        zdt > 0.0, 1.0 + _IFS_Z_CPRC2 * jnp.sqrt(zdt_safe), 1.0,
+    )
+    zlcrit = _IFS_ZDNOPRC / zcbf
+
+    # Ascent geometry, surface-first for the scan (matches the plume scan).
+    z_sf = z[:, ::-1].astype(_dtype)
+    dz_sf = jnp.maximum(jnp.diff(z_sf, axis=1, prepend=z_sf[:, :1]), 1.0)
+    dz_sf = dz_sf.at[:, 0].set(0.0)          # launch level: no layer below
+    # ZWU from the LEVEL-BELOW KE (cuascn.F90:724 uses PKINEU(JK+1)); at the
+    # launch level reuse its own KE (no level below).
+    ke_sf = pkineu[:, ::-1].astype(_dtype)
+    ke_below_sf = jnp.concatenate([ke_sf[:, :1], ke_sf[:, :-1]], axis=1)
+    zwu_sf = jnp.minimum(
+        _IFS_WU_MAX,
+        jnp.sqrt(2.0 * jnp.maximum(ke_below_sf, _IFS_WU_KE_FLOOR)),
+    )
+
+    q_c_sf = q_c_u[:, ::-1].astype(_dtype)
+    decay_sf = jnp.exp(-eps_profile[:, ::-1].astype(_dtype) * dz_sf)
+    # Fresh condensation increment per level, inverted from the plume outputs
+    # (>= 0 up to roundoff; clipped for safety).
+    q_c_prev_sf = jnp.concatenate(
+        [jnp.zeros_like(q_c_sf[:, :1]), q_c_sf[:, :-1]], axis=1,
+    )
+    cond_sf = jnp.maximum(q_c_sf - q_c_prev_sf * decay_sf, 0.0)
+
+    zzco_sf = (
+        (_IFS_RPRCON / g)
+        / (_IFS_WU_DRAG_FACTOR * zwu_sf)
+        * (1.0 + _IFS_LIQ_CONV_ENHANCE * alpha_liq[:, ::-1])
+        * zcbf[:, ::-1]
+    )
+    zlcrit_sf = zlcrit[:, ::-1]
+
+    inputs = tuple(
+        jnp.moveaxis(a, 1, 0)
+        for a in (decay_sf, cond_sf, zzco_sf, zlcrit_sf, dz_sf)
+    )
+
+    def _step(L_prev, layer):
+        decay_k, cond_k, zzco_k, zlcrit_k, dz_k = layer
+        # Oracle state mapping (codex R1 #1): ZLUOLD is the TRANSPORTED /
+        # DILUTED condensate at the current level (cuascn.F90:543, before
+        # cuadjtq) and ZC = PLU - ZLUOLD is the FRESH CONDENSATION alone
+        # (cuascn.F90:761).  Starting the analytic solution from the
+        # UN-diluted L_prev with ZC = L_pre - L_prev let dilution drive ZC
+        # negative and spuriously converted strongly-entraining layers.
+        L_old = L_prev * decay_k
+        L_pre = L_old + cond_k
+        zc = cond_k
+        sundq = 1.0 - jnp.exp(-((L_pre / zlcrit_k) ** 2))
+        zd = zzco_k * sundq * g * dz_k
+        zint = jnp.exp(-zd)
+        # Guarded ZC/ZD*(1-ZINT): Taylor limit ZC*(1 - ZD/2) as ZD -> 0.
+        zd_safe = jnp.where(zd > 1e-8, zd, 1.0)
+        src_term = jnp.where(
+            zd > 1e-8, zc / zd_safe * (1.0 - zint), zc * (1.0 - 0.5 * zd),
+        )
+        L_conv = jnp.clip(
+            L_old * zint + src_term,
+            0.0,
+            jnp.minimum(L_pre, _IFS_Z_CLDMAX),
+        )
+        # Conversion only where the oracle's threshold IF fires — and never
+        # at the launch level (dz = 0): the oracle ascent loop starts one
+        # level above the departure level, so a supersaturated LAUNCH state
+        # must not shed zero-path-length rain via the Z_CLDMAX clip
+        # (codex R1 #3).
+        convert = (L_pre > _IFS_ZDNOPRC) & (dz_k > 0.0)
+        L_new = jnp.where(convert, L_conv, L_pre)
+        precip_k = jnp.maximum(L_pre - L_new, 0.0)
+        return L_new.astype(_dtype), (L_new, precip_k)
+
+    ncol = q_c_u.shape[0]
+    init = jnp.zeros((ncol,), dtype=_dtype)
+    _, (L_sf, precip_sf) = jax.lax.scan(_step, init, inputs)   # (nlev, ncol)
+    L_new = jnp.moveaxis(L_sf, 0, 1)[:, ::-1]
+    precip_frac = jnp.moveaxis(precip_sf, 0, 1)[:, ::-1]
+    return L_new, precip_frac
 
 
 def _ifs_subcloud_rain_evaporation(
@@ -1404,7 +1616,12 @@ def bechtold_convection(
     # flux exceeds the cap when ``r < 1``.  We therefore build the deep target from
     # ``M_b_uncapped`` and cap once, then express the change as a scale on the
     # plume's pre-cap ``M_u`` (``M_u ∝ M_b`` exactly).
-    if config.use_ifs_cape_closure or config.use_convective_turnover_tau:
+    _need_ke = (
+        config.use_ifs_inplume_precip
+        or config.use_ifs_cape_closure
+        or config.use_convective_turnover_tau
+    )
+    if _need_ke:
         # SHARP (4/level) cloud-base and cloud-top gates so the KE mean is taken
         # over an essentially exclusive [LNB, LCL] cloud window; a broad
         # unit-sharpness sigmoid leaked sub-cloud / above-top KE into w_mean
@@ -1413,6 +1630,21 @@ def bechtold_convection(
         in_cloud = above_base * jax.nn.sigmoid(
             4.0 * (levels_arr[None, :] - k_lnb_smooth[:, None])
         )
+    if config.use_ifs_inplume_precip:
+        # -- IFS in-updraft precipitation formation (cuascn.F90:718-773) ----
+        # One-pass replay of the ascent condensate with the oracle analytic
+        # conversion (see _ifs_inplume_precip_conversion).  Runs BEFORE the
+        # CAPE closure so ZCAPE's condensate loading uses the CONVERTED L —
+        # matching the oracle's post-conversion PLU in its ZCAPE integrand.
+        # ``precip_frac`` becomes the rain source after M_u_new exists.
+        pkineu = _ifs_updraft_ke_profile(
+            plume.B_u, T, q_v, dz, eps_profile, dlt_profile, above_base,
+        )
+        L_converted, precip_frac = _ifs_inplume_precip_conversion(
+            plume.q_c_u, plume.T_u, z, eps_profile, pkineu,
+        )
+        plume = plume._replace(q_c_u=L_converted)
+    if config.use_ifs_cape_closure or config.use_convective_turnover_tau:
         w_mean = _ifs_updraft_mean_velocity(
             plume.B_u, T, q_v, dz, eps_profile, dlt_profile, dp_full,
             above_base, in_cloud,
@@ -1603,7 +1835,44 @@ def bechtold_convection(
     # original op order — byte-identical.  Same dispatch (incl. the
     # unknown-scheme raise) as the late block.
     _split_done = False
-    if config.use_ifs_subcloud_evap:
+    if config.use_ifs_inplume_precip:
+        # Rain comes from the IN-PLUME formation (the PDMFUP analog:
+        # dq_r = precip_frac * M_u * g/dp, same stratosphere gate as the
+        # detrained-anvil source); the detrained condensate is anvil cloud
+        # and is NOT split further — the split's job (rain vs anvil) is done
+        # by the oracle conversion physics itself.  Downstream sub-cloud
+        # evaporation then acts on this rain, completing the cuascn -> cuflxn
+        # chain.
+        dq_c_conv_dt = jnp.nan_to_num(jnp.maximum(dq_c_conv_dt, 0.0))
+        dq_r_conv_dt = (
+            jnp.maximum(precip_frac, 0.0) * M_u_new * p_gate_qc
+            * constants.g / dp_full
+        )
+        # Water-budget coupling (codex R1 #2): the rain is a NEW environment
+        # source not carved from the detrained condensate, so it needs a
+        # matching vapor sink (a zero-detrainment plume must not rain with
+        # no compensating sink — column water creation).  The sink is
+        # COLUMN-exact but distributed over levels by MOISTURE MASS
+        # ``q_v*dp`` — NOT debited per-level at the formation level: the
+        # rain's water was collected by the plume across the whole ascent
+        # (entrained from the moist lower troposphere), and a per-level
+        # ``dq_v -= dq_r`` overdrew the dry upper-tropospheric formation
+        # levels into NEGATIVE q_v within a few steps (100-day RCE gate:
+        # min q_v = -1.4e-4 — positivity outranks the strict per-level
+        # pairing convention).  Mass-weighting by q_v gives every level the
+        # SAME small relative drying rate, so positivity is structurally
+        # safe for any dt with rain_total*g*dt << column vapor.
+        _qv_mass = jnp.maximum(q_v, 0.0) * dp_full          # [kg/kg * Pa]
+        _w_sink = _qv_mass / jnp.maximum(
+            jnp.sum(_qv_mass, axis=-1, keepdims=True), 1e-30,
+        )                                                    # sums to 1
+        _rain_flux_total = jnp.sum(
+            dq_r_conv_dt * dp_full, axis=-1, keepdims=True,
+        ) / constants.g                                      # [kg/m^2/s]
+        # sink_k [kg/kg/s]: sum(sink*dp/g) == rain flux total exactly.
+        dq_v_dt = dq_v_dt - _rain_flux_total * constants.g * _w_sink / dp_full
+        _split_done = True
+    elif config.use_ifs_subcloud_evap:
         dq_c_conv_dt = jnp.nan_to_num(jnp.maximum(dq_c_conv_dt, 0.0))
         if config.precip_split_scheme == "constant":
             dq_c_conv_dt, dq_r_conv_dt = split_convective_rain(
