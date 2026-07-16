@@ -1017,10 +1017,12 @@ def test_bechtold_f1_turnover_toggle_changes_result():
     st = jnp.zeros((ncol,))
     on, mu_on, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
-        config=BechtoldConfig(use_convective_turnover_tau=True, M_b_max=1.0))
+        config=BechtoldConfig(use_convective_turnover_tau=True,
+                              use_ifs_cape_closure=False, M_b_max=1.0))
     off, mu_off, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
-        config=BechtoldConfig(use_convective_turnover_tau=False, M_b_max=1.0))
+        config=BechtoldConfig(use_convective_turnover_tau=False,
+                              use_ifs_cape_closure=False, M_b_max=1.0))
     assert jnp.all(jnp.isfinite(mu_on)) and jnp.all(jnp.isfinite(mu_off))
     assert float(jnp.max(jnp.abs(mu_on - mu_off))) > 0.0, "toggle must be live"
     # a deep, buoyant column has tau_conv < tau_bl (fast turnover) => turnover
@@ -1037,7 +1039,8 @@ def test_bechtold_f1_turnover_stable_column_quiesces():
     ncol, nlev = T.shape
     out, mu, _ = bechtold_convection(
         T, q, pf, ph, u, v, jnp.zeros((ncol, nlev)), jnp.zeros((ncol,)),
-        None, dt=600.0, config=BechtoldConfig(use_convective_turnover_tau=True))
+        None, dt=600.0, config=BechtoldConfig(use_convective_turnover_tau=True,
+                                              use_ifs_cape_closure=False))
     # crude column heating rate proxy: max|dT/dt| * c_pd * p_s/g  [W/m^2]
     w_m2 = float(jnp.max(jnp.abs(out.dT_dt)) * constants.c_pd * 1e5 / constants.g)
     assert w_m2 < 1.0, f"stable column not quiescent: {w_m2:.3f} W/m^2"
@@ -1052,7 +1055,8 @@ def test_bechtold_f1_turnover_grad_finite():
 
     def loss(eps_deep):
         cfg = BechtoldConfig(epsilon_deep=eps_deep,
-                             use_convective_turnover_tau=True)
+                             use_convective_turnover_tau=True,
+                             use_ifs_cape_closure=False)
         o, _, _ = bechtold_convection(T, q, pf, ph, u, v, cpp, st, None,
                                       dt=600.0, config=cfg)
         return jnp.sum(o.dT_dt ** 2)
@@ -1074,7 +1078,8 @@ def test_bechtold_f1_turnover_grad_finite_on_quiescent_column():
 
     def loss(eps_deep):
         cfg = BechtoldConfig(epsilon_deep=eps_deep,
-                             use_convective_turnover_tau=True)
+                             use_convective_turnover_tau=True,
+                             use_ifs_cape_closure=False)
         o, _, _ = bechtold_convection(T, q, pf, ph, u, v, cpp, st, None,
                                       dt=600.0, config=cfg)
         return jnp.sum(o.dT_dt ** 2)
@@ -1242,10 +1247,12 @@ def test_bechtold_f1_turnover_deep_weighted_integration_live_and_bounded():
         cpp = jnp.zeros((ncol, nlev)); st = jnp.zeros((ncol,))
         _, mu_on, _ = bechtold_convection(
             T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
-            config=BechtoldConfig(use_convective_turnover_tau=True, M_b_max=10.0))
+            config=BechtoldConfig(use_convective_turnover_tau=True,
+                                  use_ifs_cape_closure=False, M_b_max=10.0))
         _, mu_off, _ = bechtold_convection(
             T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
-            config=BechtoldConfig(use_convective_turnover_tau=False, M_b_max=10.0))
+            config=BechtoldConfig(use_convective_turnover_tau=False,
+                                  use_ifs_cape_closure=False, M_b_max=10.0))
         assert jnp.all(jnp.isfinite(mu_on)) and jnp.all(jnp.isfinite(mu_off))
         denom = float(jnp.maximum(jnp.max(jnp.abs(mu_off)), 1e-12))
         rel = float(jnp.max(jnp.abs(mu_on - mu_off))) / denom
@@ -1265,7 +1272,8 @@ def test_bechtold_f5_supersaturated_column_finite_and_convecting():
     q_super = jnp.maximum(q, 1.15 * q_sat)      # force RH ~ 1.15 (supersaturated)
     out, mu, _ = bechtold_convection(
         T, q_super, pf, ph, u, v, jnp.zeros((ncol, nlev)), jnp.zeros((ncol,)),
-        None, dt=600.0, config=BechtoldConfig(use_convective_turnover_tau=True))
+        None, dt=600.0, config=BechtoldConfig(use_convective_turnover_tau=True,
+                                              use_ifs_cape_closure=False))
     assert jnp.all(jnp.isfinite(out.dT_dt)) and jnp.all(jnp.isfinite(mu))
     assert float(jnp.max(out.convective_mask)) > 0.0, "supersaturated column must convect"
 
@@ -1500,10 +1508,11 @@ def test_ifs_deep_target_scale_caps_after_rescale_and_shallow_noop():
     assert abs(float(s_turn[0]) - 0.7) < 1e-6
 
 
-def test_ifs_cape_closure_default_off_and_toggle_live():
-    """Default False (pending the SCM-RCE realism gate); enabling it changes
-    the mass-flux profile on a deep convecting column (the closure is live)."""
-    assert BechtoldConfig().use_ifs_cape_closure is False
+def test_ifs_cape_closure_default_on_and_toggle_live():
+    """Default True (2026-07-16: codex x11 + gray-RCE A/B + AMIP smoke A/B);
+    toggling it changes the mass-flux profile on a deep convecting column
+    (the closure is live, False restores the legacy surrogate)."""
+    assert BechtoldConfig().use_ifs_cape_closure is True
     T, q, pf, ph, u, v = _column(ncol=2, nlev=40, T_sfc=299.0, q_sfc=13e-3,
                                  lapse_rate=6.5)
     ncol, nlev = T.shape

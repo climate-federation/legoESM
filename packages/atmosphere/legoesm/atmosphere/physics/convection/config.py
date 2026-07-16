@@ -1449,10 +1449,13 @@ class BechtoldConfig(NamedTuple):
     # the F1 behavior.  Deep-weighted, cap-after-rescale, quiescence-gated
     # floor — same smoothing doctrine as F1.  The RCAPQADV advection
     # correction, RCAPDCYCL diurnal subtraction and CFL-form ZMFMAX are
-    # documented gaps (unplumbed inputs).  Default False pending the
-    # equilibrium-SCM-RCE realism gate (CLAUDE.md: atmospheric
-    # parameterization edits are high-risk); flip after validation.
-    use_ifs_cape_closure: bool = False
+    # documented gaps (unplumbed inputs).  Default True since 2026-07-16 after
+    # the validation stack: codex adversarial review CLEAN (11 rounds), exact
+    # hand-computed oracle mirror, controlled 100-day gray-RCE SCM A/B
+    # (neutral-to-slightly-better; stable) and a 15-day C24 analytical-AMIP
+    # A/B (stable, near-neutral deltas).  False restores the legacy surrogate
+    # deep closure byte-identically.
+    use_ifs_cape_closure: bool = True
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0

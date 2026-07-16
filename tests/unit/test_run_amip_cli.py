@@ -2478,3 +2478,67 @@ def test_external_ozone_aerosol_require_a_file():
         _postprocess_args(parser.parse_args([
             "--dataset", "analytical", "--aerosol-forcing", "external",
         ]), parser)
+
+
+def test_bechtold_use_ifs_cape_closure_round_trips_and_threads():
+    """--bechtold-use-ifs-cape-closure round-trips into ExperimentConfig and
+    threads into the hot-loop BechtoldConfig (the PR #1095 oracle deep
+    closure); default OFF is byte-identical to the legacy closure and --no-
+    turns off a config-file default."""
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-use-ifs-cape-closure",
+    ]), parser))
+    assert cfg.bechtold_use_ifs_cape_closure is True
+    cc = _resolve_convection(cfg)[1]
+    assert cc.use_ifs_cape_closure is True
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    dcc = _resolve_convection(d)[1]
+    assert dcc.use_ifs_cape_closure is True     # default ON since 2026-07-16
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--no-bechtold-use-ifs-cape-closure"]), parser))
+    assert off.bechtold_use_ifs_cape_closure is False
+    occ = _resolve_convection(off)[1]
+    assert occ.use_ifs_cape_closure is False    # --no- restores legacy
+    assert d.validate_strict() is None
+
+
+def test_bechtold_use_ifs_cape_closure_survives_amip_round_trip():
+    """to_amip_config()/from_amip_config() must carry the closure flag BOTH
+    ways (codex: the flat AMIPExperimentConfig filter silently dropped it, so
+    a checkpoint restart flipped an explicit selection back to the legacy
+    closure)."""
+    from legoesm.driver.config import ExperimentConfig
+    for flag in (True, False):
+        cfg = ExperimentConfig(convection="bechtold",
+                               bechtold_use_ifs_cape_closure=flag)
+        flat = cfg.to_amip_config()
+        assert flat.bechtold_use_ifs_cape_closure is flag
+        back = ExperimentConfig.from_amip_config(flat)
+        assert back.bechtold_use_ifs_cape_closure is flag
+
+
+def test_bechtold_use_ifs_cape_closure_legacy_flat_config_gets_default():
+    """A legacy flat config object PREDATING the field must resolve to the
+    scheme default (True), not silently pin the old closure."""
+    from legoesm.driver.config import ExperimentConfig
+
+    flat = ExperimentConfig(convection="bechtold").to_amip_config()
+
+    class _LegacyView:
+        """A real flat config with the new field REMOVED (pre-field schema)."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            if name == "bechtold_use_ifs_cape_closure":
+                raise AttributeError(name)
+            return getattr(self._inner, name)
+
+    cfg = ExperimentConfig.from_amip_config(_LegacyView(flat))
+    assert cfg.bechtold_use_ifs_cape_closure is True

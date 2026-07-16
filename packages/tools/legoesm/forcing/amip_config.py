@@ -86,6 +86,10 @@ class AMIPExperimentConfig(NamedTuple):
     bechtold_downdraft_evap: float = 0.05
     bechtold_downdraft_alpha: float = 0.3
     bechtold_downdraft_rh_min: float = 0.2
+    # Full IFS deep CAPE closure (PR #1095; default ON 2026-07-16).  Present in
+    # the flat schema so the to_amip_config/from_amip_config round-trip cannot
+    # silently drop an explicit selection across a checkpoint/restart boundary.
+    bechtold_use_ifs_cape_closure: bool = True
     # Convective in-updraft rain-split efficiency [0,1] (shared across the
     # mass-flux schemes); 0 = disabled (legacy no split).
     convective_precip_efficiency: float = 0.0

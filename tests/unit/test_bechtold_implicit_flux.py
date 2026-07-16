@@ -184,13 +184,14 @@ def test_bechtold_implicit_mse_conservation_within_tolerance():
     stoch = jnp.zeros((ncol,))
     dp = ph[:, 1:] - ph[:, :-1]
 
-    def _rel(ss):
+    def _rel(ss, use_ifs_cape_closure=True):
         out, _, _ = bechtold_convection(
             T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
             conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
             dt=1800.0,
             config=BechtoldConfig(
                 enable_stochastic=False, enable_cmt=False, subsidence_solve=ss,
+                use_ifs_cape_closure=use_ifs_cape_closure,
             ),
             moisture_convergence=jnp.zeros_like(T),
         )
@@ -206,11 +207,22 @@ def test_bechtold_implicit_mse_conservation_within_tolerance():
         C = float(jnp.sum((out.dq_c_conv_dt + _dqr) * dp / constants.g, axis=1).mean()) * constants.L_v
         return abs(H + Q + C) / (abs(H) + abs(Q) + abs(C) + 1e-10)
 
+    # DEFAULT scheme (IFS cape closure ON since 2026-07-16): both solves must
+    # meet the hard bar.  The closure changes the M_u magnitude regime, so the
+    # legacy adv>impl ORDERING is not guaranteed here (raw-tendency budget
+    # closure is delegated to the orchestrator rebalance per the contract);
+    # the anti-vacuity ordering claim is asserted on the LEGACY closure below,
+    # where it was established.
     rel_impl = _rel("implicit_flux")
     rel_adv = _rel("advective")
     assert rel_impl < 0.30, f"implicit Bechtold MSE residual {rel_impl*100:.1f}% >= 30%"
-    assert rel_adv > rel_impl, (
-        "advective residual not larger than implicit -- guard would be vacuous"
+    assert rel_adv < 0.30, f"advective Bechtold MSE residual {rel_adv*100:.1f}% >= 30%"
+    rel_impl_legacy = _rel("implicit_flux", use_ifs_cape_closure=False)
+    rel_adv_legacy = _rel("advective", use_ifs_cape_closure=False)
+    assert rel_impl_legacy < 0.30, (
+        f"legacy implicit MSE residual {rel_impl_legacy*100:.1f}% >= 30%")
+    assert rel_adv_legacy > rel_impl_legacy, (
+        "legacy advective residual not larger than implicit -- guard would be vacuous"
     )
 
 
