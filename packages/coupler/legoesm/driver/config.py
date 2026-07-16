@@ -635,6 +635,14 @@ class ExperimentConfig(NamedTuple):
     topography: str = "flat"
     topo_smoothing: int = 4
     topo_edge_blend: float = 0.3
+    # Extra truly-diffusive (unanchored) smoothing passes applied after the
+    # anchored ``topo_smoothing`` passes.  The anchored smoother SATURATES
+    # (re-blends with the original field each pass, so values beyond ~4 are
+    # a no-op); these passes keep removing grid-scale terrain power.  #1029:
+    # 4 passes eliminate the episodic mountain-wave breaking blowup of the
+    # coarse lat-lon lane over real ETOPO terrain (~84% Tibet peak retained
+    # at 24x48).  0 = bit-identical legacy topography.
+    topo_diffusive_smoothing: int = 0
     # Optional land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm).  When set,
     # the land fraction is taken from this file and the slab-land tile
     # is activated; empty → ocean-only surface.
@@ -1711,6 +1719,8 @@ class ExperimentConfig(NamedTuple):
             topography=amip_cfg.topography,
             topo_smoothing=amip_cfg.topo_smoothing,
             topo_edge_blend=amip_cfg.topo_edge_blend,
+            topo_diffusive_smoothing=getattr(
+                amip_cfg, 'topo_diffusive_smoothing', 0),
             land_mask_path=getattr(amip_cfg, 'land_mask_path', ''),
             albedo_land_path=getattr(amip_cfg, 'albedo_land_path', ''),
             albedo_land_month=getattr(amip_cfg, 'albedo_land_month', 0),
@@ -1866,6 +1876,7 @@ class ExperimentConfig(NamedTuple):
             topography=self.topography,
             topo_smoothing=self.topo_smoothing,
             topo_edge_blend=self.topo_edge_blend,
+            topo_diffusive_smoothing=self.topo_diffusive_smoothing,
             T_init=self.T_init,
             rh_init=self.rh_init,
             dynamic_albedo=self.dynamic_albedo,

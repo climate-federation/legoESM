@@ -2098,6 +2098,23 @@ def test_energy_consistency_flags_flow_to_dycore_config():
                            "--pgf-scheme", "lin97"])   # choices-validated
 
 
+def test_topo_diffusive_smoothing_flows_to_config():
+    """#1029 stability lever: --topo-diffusive-smoothing round-trips into
+    ExperimentConfig.topo_diffusive_smoothing; default 0 = bit-identical
+    legacy topography (the anchored --topo-smoothing passes saturate, so
+    this is the only knob that actually strengthens terrain smoothing)."""
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.topo_diffusive_smoothing == 0       # legacy default
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--topo-diffusive-smoothing", "4",
+    ]), parser))
+    assert cfg_on.topo_diffusive_smoothing == 4
+
+
 def test_yaml_settable_bools_have_no_switches():
     """#872 sweep: every store_true flag a shipped YAML can set true is now
     BooleanOptionalAction, so a --config that enables it stays CLI-overridable

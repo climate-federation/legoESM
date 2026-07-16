@@ -745,6 +745,7 @@ class ModelDriver:
                 source="file", path=topo,
                 smoothing_passes=self.config.topo_smoothing,
                 edge_blend_strength=self.config.topo_edge_blend,
+                diffusive_smoothing_passes=self.config.topo_diffusive_smoothing,
             )
             self._phis_data, self._f_land = load_real_topography(
                 self.grid, config=topo_config

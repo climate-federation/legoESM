@@ -269,6 +269,72 @@ class TestSmoothing(unittest.TestCase):
         smoothed = _laplacian_smooth_gaussian(arr, passes=4)
         npt.assert_allclose(np.mean(smoothed), np.mean(arr), rtol=0.1)
 
+    # ---- anchored-vs-diffusive semantics (#1029 stability lever) ----
+
+    @staticmethod
+    def _steep_peak(n_lat=24, n_lon=48):
+        arr = np.zeros((n_lat, n_lon))
+        arr[8, 12] = 3.8e4  # ETOPO-Tibet-like single-cell spike
+        return arr
+
+    def test_gaussian_anchored_saturates(self):
+        """Anchored passes converge: 8 vs 16 passes nearly identical.
+
+        This is the documented reason ``smoothing_passes`` is not a usable
+        strength knob (production smooth-4 vs smooth-8 changed the Tibet
+        peak by only 0.2%).
+        """
+        arr = self._steep_peak()
+        s8 = _laplacian_smooth_gaussian(arr, passes=8)
+        s16 = _laplacian_smooth_gaussian(arr, passes=16)
+        npt.assert_allclose(s16.max(), s8.max(), rtol=0.01)
+        # and the fixed point retains much of the peak (an isolated delta
+        # keeps ~59%; the broad real-ETOPO Tibet plateau keeps ~99.8%)
+        self.assertGreater(s16.max(), 0.55 * arr.max())
+
+    def test_gaussian_diffusive_keeps_reducing(self):
+        """Unanchored passes keep removing peak amplitude monotonically."""
+        arr = self._steep_peak()
+        peaks = [
+            _laplacian_smooth_gaussian(arr, passes=p, anchor=False).max()
+            for p in (4, 8, 16)
+        ]
+        self.assertGreater(peaks[0], peaks[1])
+        self.assertGreater(peaks[1], peaks[2])
+        # meaningfully stronger than the anchored fixed point
+        anchored = _laplacian_smooth_gaussian(arr, passes=16).max()
+        self.assertLess(peaks[2], 0.9 * anchored)
+
+    def test_gaussian_anchor_default_unchanged(self):
+        """Default anchor=True is bit-identical to the legacy behaviour."""
+        rng = np.random.default_rng(7)
+        arr = rng.normal(500, 100, (16, 32))
+        npt.assert_array_equal(
+            _laplacian_smooth_gaussian(arr, passes=4),
+            _laplacian_smooth_gaussian(arr, passes=4, anchor=True),
+        )
+
+    def test_gaussian_diffusive_preserves_mean(self):
+        """Diffusive smoothing is still (approximately) conservative."""
+        rng = np.random.default_rng(42)
+        arr = rng.normal(500, 100, (32, 64))
+        smoothed = _laplacian_smooth_gaussian(arr, passes=8, anchor=False)
+        npt.assert_allclose(np.mean(smoothed), np.mean(arr), rtol=0.1)
+
+    def test_cubed_sphere_diffusive_keeps_reducing(self):
+        """Cube smoother has the same anchored/diffusive semantics."""
+        arr = np.zeros((6, 16, 16))
+        arr[2, 8, 8] = 3.8e4
+        anchored = _laplacian_smooth_cubed_sphere(arr, passes=16).max()
+        diffusive = _laplacian_smooth_cubed_sphere(
+            arr, passes=16, anchor=False).max()
+        self.assertLess(diffusive, 0.9 * anchored)
+
+    def test_topography_config_diffusive_default_off(self):
+        """diffusive_smoothing_passes defaults to 0 (bit-identical legacy)."""
+        from legoesm.grids.topography import TopographyConfig
+        self.assertEqual(TopographyConfig().diffusive_smoothing_passes, 0)
+
 
 class TestSmoothPhisGaussian(unittest.TestCase):
     """Public lat-lon phis smoother used by the ERA5 lat-lon IC carry."""
