@@ -888,6 +888,10 @@ class ExperimentConfig(NamedTuple):
     # neutral); --no-bechtold-use-ifs-cape-closure restores the legacy
     # surrogate byte-identically.  Mirrors BechtoldConfig.use_ifs_cape_closure.
     bechtold_use_ifs_cape_closure: bool = True
+    # IFS Kessler sub-cloud rain evaporation (cuflxn.F90:436-475).  Default
+    # OFF pending RCE/AMIP validation; mirrors
+    # BechtoldConfig.use_ifs_subcloud_evap (fallbacks match that default).
+    bechtold_use_ifs_subcloud_evap: bool = False
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -1913,6 +1917,8 @@ class ExperimentConfig(NamedTuple):
             # fresh default run gets, not silently pin the old one.
             bechtold_use_ifs_cape_closure=getattr(
                 amip_cfg, 'bechtold_use_ifs_cape_closure', True),
+            bechtold_use_ifs_subcloud_evap=getattr(
+                amip_cfg, 'bechtold_use_ifs_subcloud_evap', False),
             # Convective precip split family — copy through AMIP/checkpoint
             # restore so the physical autoconversion isn't dropped to defaults
             # (codex MED; convective_precip_efficiency was a pre-existing gap).
@@ -2066,6 +2072,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_downdraft_entrain_rate=self.bechtold_downdraft_entrain_rate,
             bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
             bechtold_use_ifs_cape_closure=self.bechtold_use_ifs_cape_closure,
+            bechtold_use_ifs_subcloud_evap=self.bechtold_use_ifs_subcloud_evap,
             sigma_b=self.sigma_b,
             k_BL_max_per_day=self.k_BL_max_per_day,
             k_free_per_day=self.k_free_per_day,

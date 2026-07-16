@@ -1456,6 +1456,17 @@ class BechtoldConfig(NamedTuple):
     # A/B (stable, near-neutral deltas).  False restores the legacy surrogate
     # deep closure byte-identically.
     use_ifs_cape_closure: bool = True
+    # IFS Kessler sub-cloud evaporation of convective rain (cuflxn.F90:436-475;
+    # see bechtold._ifs_subcloud_rain_evaporation): the post-split rain flux
+    # accumulates downward and evaporates below cloud base at the oracle
+    # RCPECONS Kessler rate, limited by the ZRHEBC RH break (deep-ocean 0.85 /
+    # non-deep 0.92, deep-weight blended; land values need an absent land
+    # mask).  Supersedes the crude ``downdraft_evap_efficiency``-bounded
+    # re-evaporation (which fires only below downdraft_RH_min=0.2 — IFS
+    # evaporates routinely up to the break).  Default False pending RCE/AMIP
+    # A/B validation (two-step ship pattern, as for use_ifs_cape_closure);
+    # False is byte-identical legacy.
+    use_ifs_subcloud_evap: bool = False
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0
