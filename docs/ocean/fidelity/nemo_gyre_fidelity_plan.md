@@ -70,7 +70,10 @@ vs Demange nn_bt_flt=3), RK3 variant (Shu-Osher vs Wicker-Skamarock), plus minor
 ## 6. Remaining worklist (ranked; pick up here)
 Each item: what NEMO does, what legoESM does, the fix, expected effect, effort.
 
-**A. z-star → linear free surface (`key_linssh`)** — RECOMMENDED FIRST.
+**A. z-star → linear free surface (`key_linssh`)** — NOW THE PRIME DRIFT
+CANDIDATE (2026-07-16: Redi ruled out — with Redi OFF the abyssal contrast grows
+5-50× WORSE, i.e. Redi DAMPS the deep gradient; tracer integrator ruled out;
+the drift is ADVECTIVE, pointing at the deep w / thickness-breathing difference).
 NEMO holds layer thicknesses FIXED (ssh evolves but doesn't stretch the column);
 legoESM uses z-star (thicknesses stretch). Most fundamental deep-ocean structural
 difference; directly affects the deep pressure/coordinate. legoESM's
@@ -78,11 +81,20 @@ difference; directly affects the deep pressure/coordinate. legoESM's
 implementation (a fixed-thickness mode or a frozen Jacobian). Effort: medium-high
 (load-bearing coordinate change; design + review + conservation checks required).
 
-**B. Tracer time-stepping: forward-Euler → RK3.**
-NEMO steps tracers with the same RK3 (FCT at stage 3, centred stages 1-2);
-legoESM uses forward Euler (`tracer_time_integrator=euler`). First-order Euler can
-accumulate deep tracer drift over 5 yr (10 950 steps) — a plausible abyssal-drift
-seed. Check for/route to a tracer-RK3 path. Effort: medium.
+**B. Tracer time-stepping: forward-Euler → RK3. TESTED 2026-07-16 — RULED OUT
+as the drift lever.** The `_ssp_rk3_tracer_pair_step` path already exists (config
+flip, `tracer_time_integrator="rk3"`); a 5-yr run is IDENTICAL to Euler (ratio
+0.615, surf/deep 0.17, bottom rms unchanged). Still the NEMO-faithful choice and
+empirically neutral — optional card adoption, but not the abyssal-drift seed.
+
+**B'. NEMO Dirichlet surface-TKE BC (NEW, from the 2026-07-16 audit).**
+The wind now reaches TKE (571530df2) but via the Veros flux BC
+`surface_flux=(taum/ρ0)^1.5` — surface TKE ~7.7e-5, ~60× below NEMO's Dirichlet
+`en(1)=max(rn_emin0, rn_ebb·|τ|/ρ0)` ≈ 4.9e-3. The formula exists in tke.py:1117
+but only inside the inactive (nn_etau=0) sub-ML penetration path. Implement a
+proper Dirichlet surface-TKE option (NEMO nn_bc_surf=1) in tke.py as a selectable
+config; expect a deeper wind-mixed layer + stronger Ekman response. Effort:
+low-medium (bounded, one module + tests + review).
 
 **C. PGF / hydrostatic pressure at depth.**
 NEMO `ln_hpg_zco` (z-coord, e3w-weighted integral of the 2-level-averaged density
