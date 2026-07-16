@@ -268,14 +268,26 @@ ISOLATION EXPERIMENTS (2026-07-16, 5-yr runs + single-column avt certificate):
   background avt MATCHES NEMO (1.2e-5). TKE floors MATCH NEMO
   (tke_background=1e-6=rn_emin, tke_surface_min=1e-4=rn_emin0). c_k/c_eps match
   rn_ediff/rn_ediss. So NO TKE-scheme knob enables the rebuild.
-- **CONCRETE NEXT (leading hypothesis)**: the rebuild needs a SHALLOW summer
-  mixed layer to form (heat concentrating in the top ~30 m to seed
-  restratification, as NEMO does); legoESM's residual mixed-state TKE +
-  surface-heat vertical distribution prevents it. Check the summer surface
-  heat-flux depth distribution / 2-band solar penetration + whether a shallow
-  warm ML forms at all from a mixed state; and whether it is DYNAMICAL (weak
-  gyre → weak Ekman downwelling can't build the thermocline, the coupled
-  weak-gyre↔no-thermocline loop). NOT a resolution floor, NOT a simple param.
+- **MECHANISM COMPLETE — the SHALLOW SUMMER ML fails to form.** Summer rebuild
+  from a mixed state, top-60 m T profile: NEMO concentrates the summer heat in
+  the top ~48 m (61 m LAGS — day180 surface 0.42 C warmer than 61 m) → a
+  shallow ML forms → seeds restratification → thermocline rebuilds. legoESM
+  warms the whole top 60 m UNIFORMLY (5 m only 0.007 C warmer than 61 m) → no
+  shallow ML → no seed → stays mixed. Root: the residual mixed-state TKE
+  (~1e-3) + the surface Dirichlet TKE source (en(1)=rn_ebb·|τ|/ρ0≈5e-3)
+  diffuse down through the NEUTRAL column and mix the top-~23 m solar heat down
+  over ~60 m before it can stratify. In NEMO's stratified column that downward
+  TKE diffusion is blocked by the small thermocline mixing length; legoESM
+  never gets stratified enough to block it → self-locking race legoESM loses.
+- **STATUS: research-level bistability, mechanism fully characterized, fix
+  open.** All matched knobs verified (floors, c_k/c_eps, shear form, Langmuir,
+  iso) — none tip it. Candidate fixes to try next: (a) is legoESM's TKE
+  vertical diffusion (avm-for-TKE) transporting the surface source too deep in
+  near-neutral water vs NEMO's? (b) does strengthening the gyre (dynamical
+  Ekman downwelling) build the thermocline and break the loop? (c) a term-by-
+  term TKE-budget diff at a fixed near-neutral summer column (NEMO en/avt now
+  available from EXP_LONG 30-day restarts). NOT a resolution floor, NOT a
+  simple parameter.
 
 **Minors (low priority):** TKE buoyancy N² adiabatic → in-situ; residual
 winter-ML depth (111 vs 91 m at day 15) — candidates: EVD reach interplay,
