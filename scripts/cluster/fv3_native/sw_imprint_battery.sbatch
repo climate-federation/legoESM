@@ -20,12 +20,17 @@ set -uo pipefail   # NOT -e: rows are allowed to fail; we aggregate below
 #   D  FB core,        FV3-native ED + duo
 #   E  FB core,        FV3-native ED + duo + native seam angles
 #
-# CONTROLLED-COMPARISON HONESTY (codex p4c FB-review P1): this is NOT a
-# clean single-factor ladder.  Only two transitions isolate ONE variable:
-#   C -> D : ED gnomonic metrics only (same FB core, config, duo)
-#   D -> E : native cross-face seam angles only
+# CONTROLLED-COMPARISON HONESTY (codex p4c FB-review P1/P1b): this is NOT a
+# clean single-factor ladder.  NO rung isolates a single METRIC:
+#   C -> D : the whole ED-native grid config (ED gnomonic metrics AND their
+#            mandatory k2e_nord=4 duo tables — ED forces order 4, order-2 is
+#            the wrong interpolant, ~4e-2 err; cubed_sphere.py:462), same FB
+#            core + M1 config.  Closest to an ED-only rung, but still bundled.
+#   D -> E : native cross-face seam angles (closest to a seam-angle-only rung)
 # A->B bundles ED geometry AND no-duo->duo; B->C changes grid, solver
-# (A-L->FB) AND calibration together.  So attribute grid/angle effects only
+# (A-L->FB) AND calibration together.  Treat every rung as a whole-CONFIG
+# comparison (directional evidence), not per-knob attribution.  So read
+# grid/angle effects only
 # from C->D and D->E; A/B/C are different-solver baselines, not rungs.
 # E is 'native ED + native-angles FB experiment', NOT the fully Fortran-
 # faithful FV3 config: the FB d_sw5 cross-face halo is the stable zero-ring
@@ -64,7 +69,8 @@ run "E  FB core, FV3-native ED + duo + native seam angles" \
 echo
 echo "=================================================================="
 echo " W2 IMPRINT TABLE  (v-wind == 0 exact; v_ll_Linf = pure imprint)"
-echo " single-factor transitions: C->D (ED metrics), D->E (seam angles)"
+echo " whole-CONFIG rungs (NOT single-metric): C->D (ED-native config, incl."
+echo " mandatory k2e_nord=4), D->E (native seam angles) — directional only"
 echo "=================================================================="
 for row in A_prod_legacy B_prod_ed C_fb_legacy D_fb_ed E_fb_ed_angles; do
   echo "--- $row ---"
