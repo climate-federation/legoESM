@@ -1136,3 +1136,30 @@ class TestTopSponge:
         d_dv = dv_on - dv_off
         assert float(jnp.min(d_dv)) < 0.0     # v = +5 > 0 -> damped negative
         assert float(jnp.max(jnp.abs(d_dv[..., -1]))) == 0.0
+
+    def test_sponge_is_differentiable(self, grid):
+        """grad through the ISOLATED sponge (du_on - du_off == -k(z)*u) is finite
+        AND actually driven by the sponge — not by an unrelated term. Loss on the
+        on-minus-off contribution ONLY: its grad must be nonzero at the lid (sponge
+        live) and EXACTLY zero at the surface (below the sponge base). Differencing
+        cancels every term the sponge does not touch, so a deleted/no-op sponge
+        gives an all-zero grad here (a bare grad(loss_on)!=0 would pass via
+        Coriolis even with no sponge — codex R1). Exercises the hybrid-L40 matrix
+        path, not the L10 sigma fixture."""
+        from legoesm.grids.vertical import standard_hybrid_levels
+        hyb = standard_hybrid_levels(40)
+        state = self._uniform_wind_state(grid, hyb, u0=20.0)
+        cfg_off = CGridLatLonPrimitiveEquationConfig(sponge_coeff=0.0)
+        cfg_on = CGridLatLonPrimitiveEquationConfig(
+            sponge_coeff=1.0 / 3600.0, sponge_width_m=10000.0)
+
+        def sponge_only_loss(u):
+            s = state._replace(u=u)
+            du_on, *_ = cgrid_latlon_hydrostatic_tendencies(s, grid, hyb, cfg_on)
+            du_off, *_ = cgrid_latlon_hydrostatic_tendencies(s, grid, hyb, cfg_off)
+            return jnp.sum((du_on - du_off) ** 2)   # == sum((k(z)*u)^2), sponge-only
+
+        g = jax.grad(sponge_only_loss)(state.u)
+        assert jnp.all(jnp.isfinite(g))                 # no NaN-grad trap
+        assert float(jnp.max(jnp.abs(g[..., 0]))) > 0.0   # lid: sponge drives grad
+        assert float(jnp.max(jnp.abs(g[..., -1]))) == 0.0  # surface: sponge absent
