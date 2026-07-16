@@ -30,6 +30,10 @@
 #   KERNEL=0                        — 1 => also emit the monthly memory kernel
 #                                     dGPP(month)/dtheta_May (one reverse pass/month;
 #                                     the memory-decay/timescale product). ~5x cost.
+#   SNOWFREE=0                      — 1 => restrict to snow-free, never-freezing cells
+#                                     (excludes the spring-thaw canopy singularity that
+#                                     contaminates the boreal/arctic gradient). RECOMMENDED
+#                                     for a clean map.
 #   OUT=results/water_memory/memory_${YEAR}_R${RESOLUTION}.nc
 #
 #PBS -N water_memory
@@ -65,13 +69,15 @@ PERTURB_DOY="${PERTURB_DOY:-120}"
 WINDOW_END_DOY="${WINDOW_END_DOY:-273}"
 LATE_DOY="${LATE_DOY:-181}"
 KERNEL="${KERNEL:-0}"
+SNOWFREE="${SNOWFREE:-0}"
 OUT="${OUT:-results/water_memory/memory_${YEAR}_R${RESOLUTION}.nc}"
 
 EXTRA=()
 if [[ -n "$RESTART" ]]; then EXTRA+=(--restart "$RESTART"); fi
 if [[ "$KERNEL" == "1" ]]; then EXTRA+=(--kernel); fi
+if [[ "$SNOWFREE" == "1" ]]; then EXTRA+=(--snowfree-only); fi
 
-echo "env=$LEGOESM_CONDA_ENV | R$RESOLUTION | year=$YEAR | restart=${RESTART:-<cold start>} | kernel=$KERNEL | out=$OUT"
+echo "env=$LEGOESM_CONDA_ENV | R$RESOLUTION | year=$YEAR | restart=${RESTART:-<cold start>} | kernel=$KERNEL | snowfree=$SNOWFREE | out=$OUT"
 python scripts/experiment/water_memory_gradient.py --run \
     "${EXTRA[@]}" \
     --surfdata "$SURFDATA" \
