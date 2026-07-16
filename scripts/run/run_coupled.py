@@ -336,7 +336,7 @@ def apply_coupled_params(params_path, land_params, atm_config, coupled_cfg,
     return atm_config, coupled_cfg, coupler_config, ice_config, lake_config
 
 
-def land_scheme_overrides(land_scheme: str, runoff_scheme: str = "bucket") -> dict:
+def land_scheme_overrides(land_scheme: str) -> dict:
     """CoupledConfig overrides selecting the land surface model.
 
     The coupler dispatches on the land-config TYPE, so the (land_mode,
@@ -344,33 +344,61 @@ def land_scheme_overrides(land_scheme: str, runoff_scheme: str = "bucket") -> di
     thermal + Richards soil-moisture column tile; ``LandConfig`` -> 1-layer slab.
     Raises on an unknown scheme (dispatch hardening).
 
-    ``runoff_scheme`` is SLAB-ONLY: ``runoff_scheme``/``topmodel`` are fields of
-    ``LandConfig``, and ``MultiLayerLandConfig`` has neither (it resolves runoff
-    through its Richards column instead).  ``LandConfig()`` was built with NO
-    arguments here, so ``runoff_scheme`` was pinned at its "bucket" default and
-    TOPMODEL -- implemented in slab_land, param-spec'd as ``land.topmodel``, and
-    guarded by a real dispatch raise -- could not be selected from any driver.
+    Runoff selection is NOT handled here -- see apply_land_runoff_scheme, which
+    resolves it against the EFFECTIVE land config after the preset is built.
+    Gating it on --land-scheme meant `run_coupled --land-runoff-scheme topmodel`
+    alone was SILENTLY IGNORED (codex), the exact inert-flag failure this branch
+    exists to remove.
     """
     from legoesm.land.config import LandConfig, MultiLayerLandConfig
     if land_scheme == "multilayer":
-        if runoff_scheme != "bucket":
-            # Reject rather than silently ignore: MultiLayerLandConfig has no
-            # runoff_scheme field, so honouring the flag here is impossible and
-            # dropping it quietly is the exact failure this branch exists to
-            # remove (cf. `--iwm --vertical-mixing-scheme catke`).
-            raise SystemExit(
-                f"--land-runoff-scheme {runoff_scheme!r} applies to the SLAB "
-                "land model only (it selects LandConfig.runoff_scheme); "
-                "--land-scheme multilayer resolves runoff through its Richards "
-                "soil column and has no such field. Use --land-scheme slab, or "
-                "drop --land-runoff-scheme."
-            )
         return {"land_mode": "multilayer", "land_config": MultiLayerLandConfig()}
     if land_scheme == "slab":
-        return {"land_mode": "slab",
-                "land_config": LandConfig(runoff_scheme=runoff_scheme)}
+        return {"land_mode": "slab", "land_config": LandConfig()}
     raise ValueError(
         f"land_scheme must be one of {_LAND_SCHEMES}, got {land_scheme!r}.")
+
+
+def apply_land_runoff_scheme(coupled_cfg, runoff_scheme: str):
+    """Select LandConfig.runoff_scheme on the EFFECTIVE land config.
+
+    Runs AFTER the preset resolves, so it sees what the run will ACTUALLY use --
+    whether that came from a preset or from --land-scheme. The previous version
+    applied runoff only inside `if args.land_scheme is not None`, so
+    `--land-runoff-scheme topmodel` on its own (or with --preset slab_simple)
+    was silently dropped (codex). Same doctrine as air_sea_consistency: resolve
+    through the production path, never re-read the declared field.
+
+    TOPMODEL is implemented in slab_land, param-spec'd as ``land.topmodel``, and
+    dispatch-guarded -- it was simply unselectable.
+
+    Refuses rather than ignores where it cannot apply:
+      * land_mode='none' (aquaplanet): no land tile runs at all;
+      * MultiLayerLandConfig (slab_richards/slab_carbon/full_coupled): resolves
+        runoff through its Richards column and has no runoff_scheme field.
+    """
+    from legoesm.land.config import LandConfig
+
+    if runoff_scheme == LandConfig().runoff_scheme:
+        return coupled_cfg          # the default: nothing requested
+    mode = getattr(coupled_cfg, "land_mode", None)
+    if mode == "none":
+        raise SystemExit(
+            f"--land-runoff-scheme {runoff_scheme!r} has no effect: the "
+            f"resolved configuration runs NO land tile (land_mode='none'). "
+            f"Use a preset with land (e.g. --preset slab_simple)."
+        )
+    land_cfg = getattr(coupled_cfg, "land_config", None)
+    if not isinstance(land_cfg, LandConfig):
+        raise SystemExit(
+            f"--land-runoff-scheme {runoff_scheme!r} applies to the SLAB land "
+            f"model only (it selects LandConfig.runoff_scheme); the resolved "
+            f"land model is {type(land_cfg).__name__}, which resolves runoff "
+            f"through its Richards soil column and has no such field. Use "
+            f"--land-scheme slab, or drop --land-runoff-scheme."
+        )
+    return coupled_cfg._replace(
+        land_config=land_cfg._replace(runoff_scheme=runoff_scheme))
 
 
 #: Max atm-ocean coupling interval [days] for the dynamic 3D ocean.  diag_days
@@ -752,9 +780,13 @@ def build_parser():
                              "have no prognostic salinity and deliberately "
                              "discard it (CoupledESMDriver._step_ocean). The "
                              "ice-side salinity still evolves either way.")
+    # NOT advertised: ridging needs multi-category ice that NO driver builds,
+    # so --help must not offer it (codex: a flag that always exits is still a
+    # phantom). Kept parseable-but-SUPPRESSed so that anyone who tries it gets
+    # _reject_unreachable_sea_ice_options' explanation of the real gap rather
+    # than argparse's uninformative "unrecognized arguments: --ice-ridging".
     parser.add_argument("--ice-ridging", action="store_true",
-                        help="Lipscomb 2007 mechanical ridging "
-                             "(SeaIceConfig.ridging).")
+                        help=argparse.SUPPRESS)
     parser.add_argument("--ice-ponds", action="store_true",
                         help="CESM-style melt ponds (SeaIceConfig.ponds).")
     parser.add_argument("--ice-shortwave-scheme",
@@ -1251,8 +1283,7 @@ def main():
             # Select the land surface model (coupler dispatches on the config
             # type: MultiLayerLandConfig -> Richards column tile, else slab).
             # woa defaults to slab when --land-scheme is unset.
-            overrides.update(land_scheme_overrides(
-                args.land_scheme or "slab", args.land_runoff_scheme))
+            overrides.update(land_scheme_overrides(args.land_scheme or "slab"))
             # With real continents the atmospheric radiative surface boundary
             # SHOULD be the tile-blended (land+ocean) skin T / albedo, not the
             # ocean SST everywhere (else land cells radiate at the dynamic-ocean
@@ -1302,10 +1333,11 @@ def main():
     # (the woa branch already applied its own default above; re-applying the same
     # explicit value is idempotent). Unset -> keep the preset's land choice.
     if args.land_scheme is not None:
-        overrides.update(land_scheme_overrides(
-            args.land_scheme, args.land_runoff_scheme))
+        overrides.update(land_scheme_overrides(args.land_scheme))
 
     coupled_cfg = PRESETS[args.preset](**overrides)
+    # Runoff resolves against the EFFECTIVE land config (preset OR --land-scheme).
+    coupled_cfg = apply_land_runoff_scheme(coupled_cfg, args.land_runoff_scheme)
 
     # Land snow-albedo feedback + lat-varying vegetation albedo (opt-in): the
     # presets build the land config with snow_albedo_feedback=False, which holds

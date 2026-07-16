@@ -118,6 +118,63 @@ def test_scheme_reachability_matches_baseline(parsers):
     )
 
 
+#: (driver, axis) pairs that MUST expose a choices= flag. GROW-ONLY.
+#:
+#: _compute_unreachable deliberately SKIPS an axis with no flag (absence of a
+#: flag is a different gap from a flag that omits a scheme). That skip is a
+#: vacuity hole on its own: DELETING an entire --flag would silently drop the
+#: axis from the audit and pass (codex). This pins the surface so a deletion
+#: goes red and has to be argued for.
+_REQUIRED_FLAGS = {
+    ("run_amip", "convection"), ("run_amip", "microphysics"),
+    ("run_amip", "turbulence"), ("run_amip", "clouds"),
+    ("run_amip", "radiation"), ("run_amip", "surface_bulk_scheme"),
+    ("run_coupled", "convection"), ("run_coupled", "microphysics"),
+    ("run_coupled", "turbulence"), ("run_coupled", "clouds"),
+    ("run_coupled", "radiation"), ("run_coupled", "surface_bulk_scheme"),
+}
+
+
+@pytest.mark.parametrize("key", sorted(_REQUIRED_FLAGS))
+def test_the_audited_surface_still_exists(parsers, key):
+    """Closes the audit's other vacuity hole: a deleted flag must not pass.
+
+    Without this, removing --convection from run_coupled entirely would make
+    the ratchet skip the axis and stay green -- an unselectable scheme is the
+    very thing this file exists to catch, and deleting the flag makes EVERY
+    scheme on that axis unselectable at once.
+    """
+    driver, axis = key
+    action = parsers[driver].get(_AXES[axis][1])
+    assert action is not None, (
+        f"{driver} no longer has a --{axis} flag; the reachability audit would "
+        f"silently SKIP this axis. If the removal is intentional, remove the "
+        f"entry from _REQUIRED_FLAGS and say why."
+    )
+    assert getattr(action, "choices", None), (
+        f"{driver} --{axis} lost its choices=; the audit skips choice-less "
+        f"actions, so every scheme on this axis would go unaudited. (GWD is "
+        f"the one legitimate exception -- it has its own pins below.)"
+    )
+
+
+def test_the_audit_would_catch_a_deleted_flag(parsers):
+    """Non-vacuity for the guard above (codex: the existing regression test
+    only removes ONE choice, so a whole-flag deletion slipped through)."""
+    mutated = {d: dict(a) for d, a in parsers.items()}
+    del mutated["run_coupled"]["convection"]
+    # the ratchet itself stays green -- that IS the hole...
+    assert not any(k[0] == "run_coupled" and k[1] == "convection"
+                   for k in _compute_unreachable(mutated)), (
+        "precondition: _compute_unreachable skips a missing flag")
+    # ...so _REQUIRED_FLAGS is what must catch it.
+    assert mutated["run_coupled"].get("convection") is None
+    assert ("run_coupled", "convection") in _REQUIRED_FLAGS, (
+        "the deleted flag is not pinned by _REQUIRED_FLAGS -- nothing would "
+        "notice its removal"
+    )
+
+
 def test_every_baseline_entry_has_a_reason():
     """An exclusion without a reason is indistinguishable from an oversight."""
     for key, reason in UNREACHABLE_SCHEMES.items():

@@ -158,36 +158,97 @@ def test_slab_ocean_unknown_scheme_raises():
 # Land runoff scheme reachability
 # ===========================================================================
 
-def test_land_runoff_scheme_reaches_the_slab_land_config():
+def test_land_runoff_scheme_reaches_the_effective_slab_land_config():
     """--land-runoff-scheme topmodel must reach LandConfig.runoff_scheme.
 
     TOPMODEL is implemented in slab_land, param-spec'd as ``land.topmodel``, and
-    its dispatch already raises on an unknown name -- but land_scheme_overrides
-    built ``LandConfig()`` with NO arguments, pinning runoff_scheme at its
-    "bucket" default. The scheme was unselectable from any driver.
+    dispatch-guarded -- but LandConfig was built with NO arguments, pinning
+    runoff_scheme at "bucket". The scheme was unselectable from any driver.
+
+    Resolved against the EFFECTIVE config (post-preset), which is the fix for
+    the codex High: the override used to be gated on `if args.land_scheme is not
+    None`, so `--land-runoff-scheme topmodel` ALONE, or with --preset
+    slab_simple, was silently dropped.
     """
+    from legoesm.driver.coupled_config import PRESETS
+
     assert mod.build_parser().parse_args([]).land_runoff_scheme == "bucket"
-    ov = mod.land_scheme_overrides("slab", "topmodel")
-    assert ov["land_config"].runoff_scheme == "topmodel"
+    out = mod.apply_land_runoff_scheme(PRESETS["slab_simple"](), "topmodel")
+    assert out.land_config.runoff_scheme == "topmodel"
 
 
-def test_land_runoff_default_is_unchanged():
-    """A default run must stay byte-identical."""
-    assert mod.land_scheme_overrides("slab", "bucket")["land_config"].runoff_scheme == "bucket"
+def test_land_runoff_default_is_a_no_op():
+    """A default run must stay byte-identical -- same object, not a rebuild."""
+    from legoesm.driver.coupled_config import PRESETS
+
+    cfg = PRESETS["slab_simple"]()
+    assert mod.apply_land_runoff_scheme(cfg, "bucket") is cfg
 
 
 def test_land_runoff_scheme_rejects_multilayer_loudly():
     """MultiLayerLandConfig has NO runoff_scheme field (it resolves runoff
-    through its Richards column), so the flag cannot be honoured there. Reject
-    rather than silently ignore -- the same failure as `--iwm` being dropped
-    under `--vertical-mixing-scheme catke`."""
+    through its Richards column), so the flag cannot be honoured. Reject rather
+    than silently ignore -- the same failure as `--iwm` dropped under
+    `--vertical-mixing-scheme catke`.
+
+    Checked on the PRESET, not on --land-scheme: --preset full_coupled is
+    multilayer without anyone naming a land scheme, and that path used to be
+    missed entirely.
+    """
+    from legoesm.driver.coupled_config import PRESETS
+
     with pytest.raises(SystemExit, match="SLAB"):
-        mod.land_scheme_overrides("multilayer", "topmodel")
+        mod.apply_land_runoff_scheme(PRESETS["full_coupled"](), "topmodel")
+
+
+def test_land_runoff_scheme_rejects_a_landless_preset():
+    """aquaplanet runs NO land tile (land_mode='none'), so runoff is
+    meaningless there -- say so instead of accepting it."""
+    from legoesm.driver.coupled_config import PRESETS
+
+    with pytest.raises(SystemExit, match="NO land tile"):
+        mod.apply_land_runoff_scheme(PRESETS["aquaplanet"](), "topmodel")
 
 
 def test_land_runoff_multilayer_ok_at_default():
     """multilayer + the default bucket must NOT raise (nothing was requested)."""
-    assert mod.land_scheme_overrides("multilayer", "bucket")["land_mode"] == "multilayer"
+    from legoesm.driver.coupled_config import PRESETS
+
+    cfg = PRESETS["full_coupled"]()
+    assert mod.apply_land_runoff_scheme(cfg, "bucket") is cfg
+
+
+def test_main_really_applies_land_runoff_to_the_driver_config(monkeypatch):
+    """PRODUCTION reachability, not the helper (the earlier tests pinned only
+    land_scheme_overrides and so missed the codex High entirely).
+
+    This is the exact command that was silently ignored: topmodel with NO
+    --land-scheme.
+    """
+    import legoesm.driver.coupled_esm_driver as ced
+
+    captured = {}
+
+    class _StopError(Exception):
+        pass
+
+    def _recorder(*a, **kw):
+        captured["args"] = a
+        captured.update(kw)
+        raise _StopError
+
+    monkeypatch.setattr(ced, "CoupledESMDriver", _recorder)
+    monkeypatch.setattr(sys, "argv", [
+        "run_coupled", "--preset", "slab_simple",
+        "--land-runoff-scheme", "topmodel", "--days", "1"])
+
+    with pytest.raises(_StopError):
+        mod.main()
+
+    coupled_cfg = captured["args"][1]
+    assert coupled_cfg.land_config.runoff_scheme == "topmodel", (
+        "--land-runoff-scheme topmodel was dropped before the driver"
+    )
 
 
 def test_land_runoff_cli_rejects_unknown():
