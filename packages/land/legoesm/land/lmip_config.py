@@ -21,7 +21,8 @@ An experiment is fully described by a YAML file with this schema::
       k_neighbors: int                 # forcing regrid IDW neighbours (default 4)
 
     surfdata:
-      path: <path to CLM5 surfdata NetCDF>
+      path: <path to a surfdata NetCDF (static CLM5 or transient LUH2/HYDE/...)>
+      land_cover_dataset: clm5 | luh2 | luh3 | hyde | pongratz | kk10  # default clm5
 
     time:
       dt: float                        # seconds
@@ -136,6 +137,26 @@ def validate_config(data: dict) -> LMIPConfig:
 
     req("surfdata", ("path",))
     surfdata = data["surfdata"]
+    # Which reconstruction built the surfdata: provenance, and (Phase 2) selects
+    # E_LUC's gross-vs-net transition handling.  Default = static CLM5 base.
+    from legoesm.land.surface_data.datasets import validate_land_cover_dataset
+    surfdata.setdefault("land_cover_dataset", "clm5")
+    validate_land_cover_dataset(surfdata["land_cover_dataset"])
+
+    # E_LUC land-use-change bookkeeping (optional block; scheme fail-fast here,
+    # the numeric knobs are validated by validate_luc_config at run entry).
+    luc = data.get("land_use_change") or {}
+    from legoesm.land.land_use_change import LUC_SCHEMES, LandUseChangeConfig
+    if luc.get("scheme", "none") not in LUC_SCHEMES:
+        raise ValueError(
+            f"land_use_change.scheme={luc.get('scheme')!r} not in {LUC_SCHEMES}")
+    # A typo'd knob (e.g. clear_brun_frac) would otherwise be silently dropped and
+    # the bookkeeping would run with defaults — a hard error instead.
+    _luc_unknown = set(luc) - set(LandUseChangeConfig._fields)
+    if _luc_unknown:
+        raise ValueError(
+            f"land_use_change: unknown key(s) {sorted(_luc_unknown)}; "
+            f"valid keys: {sorted(LandUseChangeConfig._fields)}")
 
     req("time", ("dt", "n_steps", "start_doy"))
     time = data["time"]

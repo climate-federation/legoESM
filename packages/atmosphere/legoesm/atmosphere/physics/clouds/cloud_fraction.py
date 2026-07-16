@@ -9,10 +9,39 @@ Implements two cloud fraction schemes:
    AD-safe double-``where`` implementation.
 
 2. **Xu-Randall (1996)**: RH + condensate-based, more physical.
-   ``cf = RH^p * [1 - exp(-alpha * q_c / ((1 - RH) * q_s))]``
+   ``cf = RH^p * [1 - exp(-alpha * q_c / ((1 - RH) * q_s)^gamma)]``
 
 Both schemes compute cloud fraction per column per layer and derive
 cloud liquid/ice water paths for RRTMGP cloud optics.
+
+Faithfulness to Xu-Randall (1996) / Sundqvist-Berge-Kristjansson (1989)
+----------------------------------------------------------------------
+FAITHFUL (forms + published constants):
+  * **Xu-Randall (1996)** cloud fraction is the paper's semiempirical Eq. (6)
+    ``cf = RH^p · [1 − exp(−α·q_c / ((1−RH)·q_sat)^γ)]`` with the PAPER-RECOMMENDED
+    constants ``α = 100``, ``p = 0.25``, ``γ = 0.49`` (``alpha_xr``/``p_xr``/
+    ``gamma_xr`` config defaults). ``q_c`` is the total cloud condensate.
+  * **Sundqvist-Berge-Kristjansson (1989)** cloud fraction is the √-form
+    ``cf = 1 − √((1−RH)/(1−RH_crit))`` for RH ≥ RH_crit (else 0), as used by ECHAM
+    — NOT a linear RH ramp (an earlier mislabeled linear form was replaced).
+DEPARTURES / SURROGATES:
+  * **AD guards** (Xu-Randall): the denominator base ``(1−RH)·q_sat`` is floored at
+    1e-10 BEFORE the fractional power γ<1, and the ``RH`` base of ``RH^p`` (p<1) is
+    clipped to [1e-6, 1], so the otherwise-infinite fractional-power DERIVATIVES at
+    0 cannot leak an inf/NaN reverse-mode cotangent. For physical inputs (q_c ≥ 0,
+    q_sat > 0) the forward value equals the bare Eq. (6) wherever NEITHER guard
+    alters its argument (RH ≥ 1e-6 AND (1−RH)·q_sat ≥ 1e-10); in a guarded cell it
+    CAN differ from bare Eq. (6), and the diagnosed cf → 0 as q_c → 0 (or, at fixed
+    RH < 1, as q_sat → ∞).
+  * **Boundary enforcement**: both cloud fractions are clipped to [0, 1]. For
+    Sundqvist this clip IS the ``RH < RH_crit → 0`` branch; for Xu-Randall the clip
+    is redundant for physical inputs (q_c ≥ 0, q_sat > 0 ⇒ both factors in [0, 1] ⇒
+    cf ∈ [0, 1]; the upper end is reached when exp underflows to 0 at saturation).
+  * **Model choices** (not Xu-Randall/Sundqvist forms): ``rh_crit = 0.77`` is a
+    TUNED critical RH (the cloud-fraction diagnostic value, distinct from the
+    microphysics ``SundqvistConfig.rh_crit``), and the temperature ice-fraction
+    split is a linear ramp (T_freeze → T_ice_only).
+Non-behavioral pins: ``tests/atmosphere/hydrostatic/unit/test_xu_randall_faithful.py``.
 
 References
 ----------
@@ -171,8 +200,10 @@ def sundqvist_cloud_fraction(
 
     This √-form (used by ECHAM and most Sundqvist implementations) is the
     faithful scheme; the earlier code here used a *linear* ramp
-    ``(RH−RH_crit)/(1−RH_crit)`` mislabeled as Sundqvist — the √-form
-    rises faster just above RH_crit (e.g. 0.29 vs 0.5 at the midpoint).
+    ``(RH−RH_crit)/(1−RH_crit)`` mislabeled as Sundqvist.  The √-form stays
+    BELOW the linear ramp on the whole interior (e.g. 1−√½ ≈ 0.29 vs 0.5 at
+    the midpoint): its slope at RH_crit is ``0.5/(1−RH_crit)`` — HALF the
+    linear ramp's ``1/(1−RH_crit)`` — and diverges only as RH → 1⁻.
 
     Parameters
     ----------
@@ -227,9 +258,10 @@ def xu_randall_cloud_fraction(
     # Floor the RH base of the fractional power at 1e-6 (not 0): p_xr < 1, so
     # ``RH**p_xr`` has an infinite derivative at RH=0 (0**-0.75), giving an inf
     # reverse-mode gradient d(cf)/d(q_v) for any dry layer (RH=0 ⇒ q_v=0, e.g.
-    # upper stratosphere / dry init).  The forward is unaffected — cf -> 0 there
-    # anyway via the (1 - exp) factor — and the clip zeroes the gradient chain
-    # below the floor.
+    # upper stratosphere / dry init).  The forward value CAN change below the floor
+    # (RH**p_xr evaluated at 1e-6, not RH; identical only where q_c = 0, as both
+    # forms are then 0); the clip's role is to zero the reverse-mode gradient chain
+    # there.  (A dry layer physically carries q_c ~ 0, so cf ~ 0 regardless.)
     cf = jnp.power(jnp.clip(RH, 1.0e-6, 1.0), config.p_xr) * (
         1.0 - jnp.exp(exponent)
     )

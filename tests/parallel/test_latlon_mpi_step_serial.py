@@ -27,7 +27,7 @@ import numpy as np
 import pytest
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonHydrostaticState,
     CGridLatLonPrimitiveEquationConfig,
     CGridLatLonPrimitiveEquationModel,

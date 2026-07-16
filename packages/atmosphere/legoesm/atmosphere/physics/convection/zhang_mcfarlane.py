@@ -25,6 +25,41 @@ Convective momentum transport (CMT) is enabled by default via the
 Gregory et al. 1997 closure
 (:func:`legoesm.atmosphere.physics.convection._plume.cmt_gregory_1997`).
 
+Faithfulness to Zhang-McFarlane (1995) / E3SM ``zm_conv.F90`` (oracle)
+---------------------------------------------------------------------
+FAITHFUL (ports of / matched to the E3SM/CAM ``zm_conv.F90`` algorithm):
+  * The DILUTE-parcel CAPE (:func:`._zm_dilute.dilute_parcel_cape`) is a
+    faithful port of the oracle ``parcel_dilute``/``buoyan_dilute`` (Raymond &
+    Blyth 1992 entropy-conserving entraining plume): max-MSE PBL launch,
+    fractional-entrainment ascent, entropy inversion, condensate loading +
+    freezing. Its quantitative agreement with the compiled E3SM/CAM Fortran was
+    checked offline against a local, untracked oracle harness — no committed test
+    certifies a specific percentage (see the note in ``test_zm_dilute_parcel``).
+    What IS CI-pinned is the qualitative dilute-parcel behavior (dilute CAPE
+    strictly < undilute, < 0.6× on a tropical sounding) in
+    ``tests/unit/test_zm_dilute_parcel.py``.
+  * The dilute-parcel entrainment constants are the E3SM/CAM defaults:
+    ``dmpdz=-1e-3`` 1/m and ``tiedke_add=0.5`` K. (The ``cape_threshold=70`` J/kg
+    ZM95 value is a TRIGGER/closure setting, not a dilute-parcel constant.)
+DEPARTURES / SURROGATES (documented; NOT the ZM95 closed forms):
+  * The cloud-base mass-flux closure is a GENERIC first-order CAPE-relaxation
+    SURROGATE. With ``Δ = CAPE - cape_threshold`` and sharpness ``s``, the
+    equilibrium flux is
+    ``M_b_eq = sigmoid(s·Δ) · rho_BL · softplus(s·Δ)/(s · g · tau_cape)``
+    (a smooth trigger ``sigmoid(s·Δ)`` times the ``(Δ)+`` softplus positive part),
+    implicit-Euler relaxed toward ``M_b_eq`` and clipped to ``[0, M_b_max]``. This
+    is NOT the ZM95 cloud-work-function / quasi-equilibrium closure (which sets the
+    CAPE-consumption rate from a work-function sensitivity), and NOT a Kain-2004
+    iterated M_b. The ``g/rho_BL`` factor is a dimensional stand-in for the
+    CAPE-consumption sensitivity. See the inline note at the closure.
+  * The plume (single bulk entraining/detraining plume, constant ``epsilon_0``/
+    ``delta_0``) and the environmental subsidence+detrainment use the SHARED
+    ``_plume``/``mass_flux`` kernels (advective solve, conservative only to
+    truncation order on the default path), not a ZM-specific microphysics/
+    downdraft package. CMT is Gregory et al. (1997), not the ZM95 momentum term.
+Scheme-level use of the faithful dilute CAPE + the surrogate closure form are
+pinned in ``tests/atmosphere/hydrostatic/unit/test_zhang_mcfarlane_faithful.py``.
+
 References
 ----------
 - Zhang, G. J., & McFarlane, N. A. (1995). Sensitivity of climate
@@ -185,8 +220,9 @@ def zhang_mcfarlane_convection(
     # of that DILUTE parcel.  Entraining dry air reduces buoyancy and CAPE
     # by a factor ~3 in a tropical sounding — the single most important ZM
     # fidelity property (without it ZM over-fires in marginal columns).
-    # The dilute CAPE matches the compiled E3SM/CAM Fortran oracle to
-    # ~1.5 % on tropical soundings (.physics-validator/zhang_mcfarlane).
+    # The dilute CAPE's quantitative agreement with the compiled E3SM/CAM
+    # Fortran oracle was checked offline against a local, untracked harness;
+    # CI pins only the qualitative bounds (see test_zm_dilute_parcel).
     if config.use_dilute_cape:
         dparcel = dilute_parcel_cape(
             T, q_v, p_full, p_half, z,
@@ -234,11 +270,12 @@ def zhang_mcfarlane_convection(
         / (constants.g * config.tau_cape)
     )
     # Implicit-Euler relaxation toward equilibrium — stable for any
-    # ``dt / tau_cape`` ratio:
-    #     M_b_new = (M_b_old + (dt/tau) * M_b_eq) / (1 + dt/tau).
+    # ratio ``r = dt / max(tau_cape, 1e-30)`` (the max() floors tau away
+    # from 0; see the final sentence):
+    #     M_b_new = (M_b_old + r * M_b_eq) / (1 + r).
     # For ``dt >> tau`` this approaches ``M_b_eq`` (full
     # equilibration); for ``dt << tau`` it approaches a small
-    # fractional adjustment ``(dt/tau) * (M_b_eq - M_b_old)``.  An
+    # fractional adjustment ``r * (M_b_eq - M_b_old)``.  An
     # earlier form ``dt / max(tau, dt)`` clamped the ratio to ≤ 1 —
     # under-stepping by up to ``r/(r+1) - 1/2 ≈ 41%`` at ``r=10`` —
     # which is *not* what the comment claims (audit Codex finding:
@@ -247,8 +284,9 @@ def zhang_mcfarlane_convection(
     M_b_old = conv_prog_profile[:, -1]
     dt_over_tau = dt / jnp.maximum(config.tau_cape, 1e-30)
     M_b = (M_b_old + dt_over_tau * M_b_eq) / (1.0 + dt_over_tau)
-    # Bound M_b to a literature peak tropical value (config.M_b_max,
-    # default 0.1 kg/m²/s).  Without this cap a column with very large
+    # Bound M_b to a fraction of the literature peak tropical value
+    # (config.M_b_max, default 0.05 kg/m²/s ~ half the ~0.1 peak).
+    # Without this cap a column with very large
     # CAPE drives M_b unboundedly and emits column heating that breaks
     # the next dynamics step on the lat-lon FV pole-cell CFL.
     M_b = jnp.clip(M_b, 0.0, config.M_b_max)

@@ -12,7 +12,7 @@ directory* on ``sys.path``, not the repo root, so ``tests/`` is not
 discoverable in that context.
 
 The original fix moved the Held-Suarez implementation into the
-installed package (``legoesm.atmosphere.held_suarez``) and left a
+installed package (``legoesm.atmosphere.forcing.idealized.held_suarez``) and left a
 back-compat shim at ``tests/test_cases/held_suarez.py``. The shim was
 later removed; existing test callers were migrated to import the
 canonical location directly.
@@ -24,7 +24,7 @@ fail at parse time, so the original held_suarez-specific narrow guard
 is now structurally enforced. But the underlying anti-pattern —
 production code importing from the ``tests/`` tree at all — is broader
 than held_suarez and is not enforced anywhere else. ``src/legoesm/cli.
-py``, ``src/legoesm/atmosphere/dynamics/spectral_nh.py``, and a number
+py``, ``src/legoesm/atmosphere/dynamics/gcm/spectral_nh.py``, and a number
 of scripts currently exhibit the same pattern for ``williamson``,
 ``baroclinic_wave``, ``dcmip2025``, ``cosine_bell``, ``dcmip_transport``,
 and ``test_williamson2_cdgrid``. Each of those is a latent #188-style
@@ -351,7 +351,7 @@ def _ast_find_tests_imports(source: str) -> list[tuple[int, str, str]]:
 
 def test_held_suarez_is_installed_package():
     """The canonical location for Held-Suarez is the installed package."""
-    import legoesm.atmosphere.held_suarez as hs
+    import legoesm.atmosphere.forcing.idealized.held_suarez as hs
 
     for name in (
         "held_suarez_init",
@@ -372,7 +372,7 @@ def test_held_suarez_is_installed_package():
 
 def test_no_held_suarez_imports_from_tests_in_production():
     """Issue #188 narrow guard — production code must import
-    Held-Suarez from ``legoesm.atmosphere.held_suarez``, never from
+    Held-Suarez from ``legoesm.atmosphere.forcing.idealized.held_suarez``, never from
     ``tests.test_cases.held_suarez``.
 
     The shim has been removed, so any such import would also raise
@@ -391,7 +391,7 @@ def test_no_held_suarez_imports_from_tests_in_production():
                     offenders.append(f"  - {rel}:{lineno}: {stmt}")
     assert not offenders, (
         "Production code must import Held-Suarez from "
-        "legoesm.atmosphere.held_suarez (issue #188):\n"
+        "legoesm.atmosphere.forcing.idealized.held_suarez (issue #188):\n"
         + "\n".join(offenders)
     )
 
@@ -545,7 +545,7 @@ def test_held_suarez_resolves_without_tests_on_path():
     Companion to ``test_run_amip_help_starts_without_tests_on_path``:
     that test verifies the script's full import closure is clean; this
     one verifies the specific submodule the closure depends on
-    (``legoesm.atmosphere.held_suarez``) loads without any ``tests/``
+    (``legoesm.atmosphere.forcing.idealized.held_suarez``) loads without any ``tests/``
     reference. If a future refactor moved Held-Suarez back into the
     tests tree (reversing the #188 fix), this test would fail with
     ``ModuleNotFoundError`` even before the script-level test ran.
@@ -556,7 +556,7 @@ def test_held_suarez_resolves_without_tests_on_path():
     # that the *canonical* Held-Suarez resolves without relying on
     # this repo's tests tree, which the import below verifies directly.
     result = _run_subprocess_without_repo_root(
-        "from legoesm.atmosphere.held_suarez import (\n"
+        "from legoesm.atmosphere.forcing.idealized.held_suarez import (\n"
         "    held_suarez_init, held_suarez_init_latlon,\n"
         "    held_suarez_init_mpas, held_suarez_forcing_mpas,\n"
         "    K_A, K_S, SIGMA_B,\n"

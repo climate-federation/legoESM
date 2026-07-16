@@ -2,7 +2,7 @@
 
 A minimal, dynamics-free driver that exercises the ocean *column* physics
 pipeline on a single water column.  It is the ocean counterpart of
-:class:`legoesm.atmosphere.scm.SingleColumnModel` and is built for the same
+:class:`legoesm.atmosphere.forcing.scm.scm.SingleColumnModel` and is built for the same
 purposes: parameterization integration tests, vertical-mixing / convection
 process studies, and stability sweeps.
 
@@ -533,6 +533,24 @@ class OceanColumnModel:
                 "applies wind stress / heat / freshwater itself). Set it to "
                 "'none' (or 'restoring' for interior tracer nudging) and use "
                 "OceanSCMForcing for the surface fluxes."
+            )
+        # TKE / CATKE are fallback-computed schemes: their pipeline
+        # factories are deliberate no-ops (K_v=None); the K profiles are
+        # computed inside the 3-D models' compute_vertical_K_profiles
+        # fallback, which the SCM does not have — it consumes the pipeline
+        # K directly (``tend.K_v`` in _apply_implicit_vertical_mixing).
+        # Under the SCM they would run with NO closure mixing at all
+        # (background floors only) — reject rather than silently degrade
+        # (dispatch discipline).
+        if physics_config.vertical_mixing.scheme in ("tke", "catke"):
+            raise NotImplementedError(
+                f"vertical_mixing.scheme="
+                f"{physics_config.vertical_mixing.scheme!r} is not wired "
+                "for the ocean SCM: its K profiles come from the 3-D "
+                "models' compute_vertical_K_profiles fallback, which the "
+                "SCM path does not call — the closure would silently "
+                "contribute no mixing here. Use 'kpp', 'constant' or "
+                "'richardson'."
             )
         # Lateral mixing (horizontal ∇² viscosity / diffusion) is
         # identically zero on a single column — there are no horizontal

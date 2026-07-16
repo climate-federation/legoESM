@@ -57,7 +57,10 @@ def make_mpas_ocean_physics(
     bd_config = config.bottom_drag
     vm_config = getattr(config, "vertical_mixing", None)
 
-    # Vertical mixing dispatch (currently only KPP is wired into MPAS).
+    # Vertical mixing dispatch.  KPP has an explicit-tendency path (built here)
+    # AND an implicit-profile path (make_kpp_profiles_mpas in the model step);
+    # TKE is implicit-only (make_tke_profiles_mpas in the model step) — this
+    # factory only validates it here (guarded below) and builds no explicit fn.
     vm_scheme = (vm_config.scheme
                  if vm_config is not None else "none")
     apply_kpp = vm_scheme == "kpp"
@@ -75,10 +78,27 @@ def make_mpas_ocean_physics(
     # closed rather than silently mis-run (dispatch discipline; codex review).
     if vm_config is not None and vm_scheme == "catke":
         raise ValueError(
-            "vertical_mixing.scheme='catke' is not supported on the MPAS "
-            "ocean (CATKE is wired for the lat-lon C-grid only) and would "
-            "silently no-op here. Use 'kpp', or run CATKE on the lat-lon "
-            "C-grid."
+            "vertical_mixing.scheme='catke' is an unsupported vertical-mixing "
+            "scheme on the MPAS ocean (CATKE is wired for the lat-lon C-grid "
+            "only) and would silently no-op here. Use 'kpp', or run CATKE on "
+            "the lat-lon C-grid."
+        )
+
+    # TKE (Gaspar/Burchard) on MPAS runs through the implicit vertical solver
+    # ONLY (like the lat-lon TKE path): its diagnostic K-profiles are routed
+    # through the backward-Euler solve in MPASOceanModel.step (via
+    # ``make_tke_profiles_mpas``), and there is NO explicit-tendency TKE
+    # operator on the edge-normal C-grid.  Fail-fast when implicit vmix is off
+    # rather than silently producing no TKE mixing.  ``vm_scheme`` +
+    # ``implicit_vertical_mixing`` are static ⇒ raising at build time is jit-safe.
+    if (vm_config is not None and vm_scheme == "tke"
+            and not implicit_vertical_mixing):
+        raise ValueError(
+            "vertical_mixing.scheme='tke' on the MPAS ocean requires "
+            "implicit_vertical_mixing=True (the TKE K-profiles are applied by "
+            "the backward-Euler implicit solver in MPASOceanModel.step; there "
+            "is no explicit-tendency TKE path on the edge-normal C-grid). Set "
+            "implicit_vertical_mixing=True, or use scheme='kpp'."
         )
 
     # Bail loudly on a vertical_mixing scheme whose K-PROFILE the MPAS factory
@@ -90,19 +110,24 @@ def make_mpas_ocean_physics(
     #                  implicit vertical solver (ocean_model_mpas.step), NOT through
     #                  this physics K-profile, so accepting it is correct (no silent
     #                  drop of a scheme-specific profile).
-    # "richardson"/"tke" DO compute a scheme-specific K-profile that MPAS would
+    #   - "tke"      : diagnostic Gaspar/Burchard K-profile applied through the
+    #                  implicit solver (make_tke_profiles_mpas); requires
+    #                  implicit_vertical_mixing=True (guarded above).
+    # "richardson" DOES compute a scheme-specific K-profile that MPAS would
     # silently ignore, and "catke" is rejected above — so reject those (and any
     # typo) rather than warn-and-drop, matching the sibling surface_forcing
     # (NotImplementedError) and convection guards (dispatch discipline; CLAUDE.md
     # "Dispatch").  ``vm_scheme`` is the static config value -> raising at factory
     # build time is jit-safe.
-    if vm_config is not None and vm_scheme not in ("none", "kpp", "constant"):
+    if vm_config is not None and vm_scheme not in (
+            "none", "kpp", "constant", "tke"):
         raise NotImplementedError(
             f"MPAS ocean physics does not implement vertical_mixing scheme "
             f"{vm_scheme!r} (its K-profile would be silently ignored). Supported "
-            "on MPAS: {'none', 'kpp', 'constant'} ('constant' via the "
-            "MPASOceanConfig.A_v/K_v background + implicit solver).  'catke' is "
-            "rejected separately; 'richardson'/'tke' are wired for the lat-lon "
+            "on MPAS: {'none', 'kpp', 'constant', 'tke'} ('constant' via the "
+            "MPASOceanConfig.A_v/K_v background + implicit solver; 'tke' via the "
+            "diagnostic quasi-steady closure + implicit solver).  'catke' is "
+            "rejected separately; 'richardson' is wired for the lat-lon "
             "C-grid only."
         )
 
@@ -400,9 +425,23 @@ def make_mpas_ocean_physics(
             # (du/dv = None).  Convective momentum on MPAS is a separate
             # follow-up (like its KPP edge-momentum path); nu_conv only
             # affects the lat-lon / cubed-sphere cell-centred grids.
-            c_out = enhanced_diffusion_convection(
-                state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,
-            )
+            # ``n2_mode='adiabatic'`` computes the true static-stability
+            # trigger from T/S/p_cell via the EOS, so it needs cell-centre
+            # pressure; compute it ONLY on that path (default 'insitu' path
+            # stays byte-identical — no extra pressure solve).
+            if getattr(cfg_c, "n2_mode", "insitu") == "adiabatic":
+                from legoesm.ocean.eos import compute_ocean_rho_and_pressure
+                _, p_cell = compute_ocean_rho_and_pressure(
+                    state, z_coord, jacobian, eos_fn=eos_fn,
+                )
+                c_out = enhanced_diffusion_convection(
+                    state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,
+                    p_cell=p_cell, eos_fn=eos_fn,
+                )
+            else:
+                c_out = enhanced_diffusion_convection(
+                    state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,
+                )
             dT_dt = dT_dt + c_out.dT_dt * mask[:, None]
             dS_dt = dS_dt + c_out.dS_dt * mask[:, None]
 

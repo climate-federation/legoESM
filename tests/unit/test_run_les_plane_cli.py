@@ -40,3 +40,13 @@ def test_pbl_column_cases_in_sync_with_case_registry():
     silently running the wrong surface forcing."""
     m = _load_driver()
     assert set(m._PBL_COLUMN_CASES) == set(m._CASES)
+
+
+def test_compressible_les_is_research_only_gated(monkeypatch):
+    """This core does not sustain LES turbulence (relaminarises / can NaN), so the
+    driver refuses to run without an explicit --research-only opt-in — it exits at
+    the gate BEFORE any build/sim."""
+    m = _load_driver()
+    monkeypatch.setattr("sys.argv", ["run_les_plane.py", "--case", "neutral"])
+    with pytest.raises(SystemExit):
+        m.main()

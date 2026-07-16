@@ -118,15 +118,13 @@ def root_zone_moisture_stress(theta, beta_min, root_depth, theta_wp, theta_fc,
 
     root_frac = jnp.exp(-z_centers[None, :] / root_depth_c[:, None])
     root_frac = root_frac / jnp.sum(root_frac, axis=-1, keepdims=True)
-    # Audit #6 / Iter-65: floor the (theta_fc - theta_wp) range at 1e-3 m^3/m^3
-    # (~1 % of theta_sat) so a pathological PFT row (theta_fc ~ theta_wp) cannot
-    # explode beta_root through a ~0 denominator.
-    _denom = jnp.maximum(
-        theta_fc_c[:, None] - theta_wp_c[:, None], 1e-3,  # coeff-ok: floor (theta_fc - theta_wp) range to avoid /~0 in beta_root
-    )
-    beta_root = jnp.clip((theta - theta_wp_c[:, None]) / _denom, 0.0, 1.0)
+    # Delegate the moisture-stress arithmetic (beta_root, beta_soil, and the
+    # audit-#6 theta_fc-theta_wp range floor) to the single kernel
+    # root_zone_beta_soil so the formula lives in exactly one place; add
+    # root_frac + w_frac_rz here for callers that need the per-layer pieces.
+    beta_soil, beta_root = root_zone_beta_soil(
+        theta, root_frac, theta_wp_c, theta_fc_c, beta_min, spatial=True)
     w_frac_rz = jnp.clip(jnp.sum(root_frac * beta_root, axis=-1), 0.0, 1.0)
-    beta_soil = beta_min + (1.0 - beta_min) * w_frac_rz
     return beta_soil, root_frac, beta_root, w_frac_rz
 
 
@@ -161,6 +159,7 @@ def step_multilayer_land_with_diagnostics(
     carbon_state: CarbonState | None = None,
     doy: float = 0.0,
     land_params=None,
+    soil_frozen_fraction: jnp.ndarray | None = None,
 ):
     """Like :func:`step_multilayer_land` but also returns the ``SurfaceFluxOutput``.
 
@@ -173,7 +172,8 @@ def step_multilayer_land_with_diagnostics(
     """
     return _step_multilayer_land_impl(
         state, forcing, config, U_min, dt,
-        lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params)
+        lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params,
+        soil_frozen_fraction=soil_frozen_fraction)
 
 
 def root_zone_beta_soil(
@@ -244,6 +244,7 @@ def step_multilayer_land(
     carbon_state: CarbonState | None = None,
     doy: float = 0.0,
     land_params=None,
+    soil_frozen_fraction: jnp.ndarray | None = None,
 ) -> tuple[MultiLayerLandState, TileResponse, CarbonState | None]:
     """Step the multi-layer land model forward by ``dt`` seconds.
 
@@ -256,7 +257,8 @@ def step_multilayer_land(
     """
     new_state, response, carbon_new, _surface_out = _step_multilayer_land_impl(
         state, forcing, config, U_min, dt,
-        lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params)
+        lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params,
+        soil_frozen_fraction=soil_frozen_fraction)
     return new_state, response, carbon_new
 
 
@@ -270,6 +272,7 @@ def _step_multilayer_land_impl(
     carbon_state: CarbonState | None = None,
     doy: float = 0.0,
     land_params=None,
+    soil_frozen_fraction: jnp.ndarray | None = None,
 ):
     """Internal 4-tuple (new_state, TileResponse, carbon, SurfaceFluxOutput).
 
@@ -432,6 +435,19 @@ def _step_multilayer_land_impl(
         LAI_override = compute_prognostic_lai(
             carbon_state, config, config.surface_scheme)
 
+        # Kelvin pore relative humidity h_r = exp(psi_top g/(R_v T)) — the
+        # thermodynamic vapour-pressure lowering of the drying surface (bites only
+        # near residual water).  Shape (ncol,), in state precision.
+        _h_r_top = jnp.exp(jnp.minimum(
+            psi[:, 0] * constants.g
+            / (constants.R_v * jnp.maximum(T_soil[:, 0], 1.0)), 0.0)).astype(theta.dtype)
+        # Top-layer RELATIVE saturation W_1 = theta_1/theta_sat for the Sellers-1992
+        # surface resistance (computed in layer space then sliced, same broadcast-safe
+        # pattern as _S_top above).
+        _W1_top = jnp.clip(
+            theta / jnp.maximum(config.hydraulics.theta_sat, 1e-6),
+            1e-6, 1.0)[:, 0].astype(theta.dtype)
+
         surface_out = compute_two_leaf_canopy_fluxes(
             T_soil_top=T_surface,
             forcing=forcing,
@@ -453,22 +469,27 @@ def _step_multilayer_land_impl(
             #   * Kelvin pore RELATIVE HUMIDITY  h_r = exp(psi_top g /(R_v T))
             #     — thermodynamic vapour-pressure lowering; only bites as the
             #     surface approaches residual (psi -> -inf).
-            #   * Sellers-1992 / Lee-Pielke-1992 diffusion-crust resistance,
-            #     S_top**soil_evap_resistance_exp with S_top the top-layer
-            #     effective saturation — throttles evaporation even when the
-            #     surface is WET (S_top<1), the regime the EC + DifferBESS
-            #     comparison showed over-predicts soil evaporation several-fold.
-            # This is the canopy-path counterpart of the SimpleSEB S_top**exp
-            # throttle (#671); exp=0 recovers the Kelvin-only behaviour.
+            #   * Soil-moisture control, ONE of two mutually-exclusive forms
+            #     (never both — same Sellers-1992 physics, or the limitation
+            #     double-counts):
+            #       - series_resistance ON (default): Kelvin h_r ONLY here; the
+            #         moisture control is the Sellers-1992 SURFACE RESISTANCE r_ss
+            #         (+ SZ09 litter), added in SERIES with raw_below inside the
+            #         canopy soil energy balance via ``soil_surface_relsat`` below.
+            #         Fixes the aerodynamic-only path that let a wet forest floor
+            #         evaporate at near-potential rate (LE_soil ~57% of total at
+            #         US-MMS; <15% is physical).
+            #       - series_resistance OFF (legacy): the beta EFFICIENCY
+            #         S_top**soil_evap_resistance_exp (Sellers-1992 / Lee-Pielke-1992
+            #         diffusion crust; the SimpleSEB #671 counterpart), which
+            #         throttles the conductance but barely helps a surface that
+            #         rewets to S_top~1.  exp=0 recovers Kelvin-only.
             w_frac_soil_evap=(
-                jnp.exp(jnp.minimum(
-                    psi[:, 0] * constants.g
-                    / (constants.R_v * jnp.maximum(T_soil[:, 0], 1.0)), 0.0))
-                # _S_top (top-layer effective saturation) is floored at 1e-6 (not 0)
-                # in its shared definition above: keeps d(S_top**exp)/dS_top finite at
-                # the residual-water boundary for a trainable exp < 1 (0**exp has an
-                # infinite gradient) — AD-safe, negligible forward effect.
-                * _S_top ** config.soil_evap_resistance_exp),
+                _h_r_top if config.soil_evap_series_resistance
+                # _S_top floored at 1e-6 keeps d(S_top**exp)/dS_top finite at the
+                # residual boundary for a trainable exp<1 (AD-safe; see above).
+                else _h_r_top * _S_top ** config.soil_evap_resistance_exp),
+            soil_surface_relsat=_W1_top,
         )
     elif isinstance(config.surface_scheme, CLMMLCanopyConfig):
         # CLM-ML-JAX multilayer canopy scheme (Phase 3 implementation).
@@ -641,14 +662,51 @@ def _step_multilayer_land_impl(
                    + blow_subl * constants.L_s)
     G_surface = G_surface - melt_energy
 
-    # --- Latent mass partition (sublimation vs soil evap, water-limited) ---
+    # --- Latent mass partition (component- and phase-correct, water-limited) ---
+    # The surface latent flux is split into a SNOWPACK-sublimation energy stream
+    # (charged at L_s, drawn from / deposited on the pack) and a SOIL / plant-
+    # water evaporation stream (charged at L_v), by COMPONENT and phase, so each
+    # unit of latent ENERGY removes the correct vapour MASS from the correct
+    # reservoir:
+    #   * SimpleSEB (bare surface): the whole lhflx is the ground flux -> the
+    #     snowpack when snow covers the cell (L_s), else the soil top (L_v).
+    #   * Two-leaf / CLM-ML canopy: lhflx = LE_canopy (leaf transpiration + wet-
+    #     leaf evaporation drawn from soil / plant water ABOVE the snow, at L_v) +
+    #     LE_soil (the BELOW-canopy GROUND latent).  Over snow the ground surface
+    #     IS the snowpack, so LE_soil sublimates from the pack at L_s while the
+    #     transpiration stream still draws soil water at L_v.  A NEGATIVE
+    #     transpiration flux over snow is canopy dew with no canopy-water
+    #     reservoir, so it frosts the pack (L_s) alongside the ground component.
+    #     Charging the WHOLE canopy latent at L_s (pre-audit) mis-phased the
+    #     transpiration (~12% mass error, wrong reservoir); charging it all at
+    #     L_v soil (first audit pass) mis-routed the ground sublimation off the
+    #     pack.  ``surface_out.LE_soil`` carries the ground component for BOTH
+    #     canopy schemes (two-leaf ``LE_Soil``; CLM-ML ``lhsoi_soil``).  The
+    #     ``LE_soil is None`` fallback (whole positive latent -> L_v soil) is a
+    #     bounded last resort for a canopy scheme that does not expose a ground
+    #     component (e.g. an older clm-ml-jax lacking ``lhsoi_soil``).
+    # ``scheme_is_seb`` and ``LE_soil is None`` are STATIC (trace-time) branches;
+    # ``transp_to_snow`` is the (traced) canopy-dew-over-snow mask.
     rho_w = constants.rho_water
-    L_eff = jnp.where(has_snow, constants.L_s, constants.L_v)
-    evap_rate_demand = lhflx / L_eff
+    scheme_is_seb = isinstance(config.surface_scheme, SimpleSEBConfig)
+    if scheme_is_seb:
+        lhflx_ground = lhflx
+        lhflx_transp = jnp.zeros_like(lhflx)
+    elif surface_out.LE_soil is not None:
+        lhflx_ground = surface_out.LE_soil
+        lhflx_transp = lhflx - lhflx_ground
+    else:  # canopy scheme without an exposed ground component (CLM-ML)
+        lhflx_ground = jnp.zeros_like(lhflx)
+        lhflx_transp = lhflx
+    transp_to_snow = has_snow & (lhflx_transp < 0.0)
+    snow_latent = (jnp.where(has_snow, lhflx_ground, 0.0)
+                   + jnp.where(transp_to_snow, lhflx_transp, 0.0))
+    soil_latent = lhflx - snow_latent
 
+    # --- Snowpack sublimation / frost (L_s), pack-limited ---
     snow_after_melt = snow_new
     max_sublim = jnp.maximum(snow_after_melt / dt, 0.0)
-    sublim_demand = jnp.where(has_snow, evap_rate_demand, 0.0)
+    sublim_demand = snow_latent / constants.L_s
     sublim_actual = jnp.minimum(sublim_demand, max_sublim)
     sublim_actual = jnp.where(sublim_demand < 0.0, sublim_demand, sublim_actual)
     snow_new = jnp.maximum(snow_new - sublim_actual * dt, 0.0)
@@ -669,7 +727,8 @@ def _step_multilayer_land_impl(
     # Rain that refroze into the pack (gap 6) is now snow, so it no longer infiltrates.
     precip_rain = forcing.precip_total - precip_snow_eff - refreeze / dt
     melt_rate = snow_melt / dt
-    soil_evap_demand = jnp.where(has_snow, 0.0, evap_rate_demand)
+    # --- Soil / plant-water evaporation (L_v), water-limited ---
+    soil_evap_demand = soil_latent / constants.L_v
     # Bare-soil evaporation resistance (#671, Sellers 1992 / Lee & Pielke 1992):
     # throttle the (positive, evaporative) bare-soil demand by the TOP-layer
     # effective saturation S_top**exp — the surface dries into a high-resistance
@@ -702,28 +761,40 @@ def _step_multilayer_land_impl(
         extractable_water / dt + precip_rain + melt_rate, 0.0)
     soil_evap = jnp.minimum(soil_evap_demand, max_soil_evap)
 
-    evap_rate = jnp.where(has_snow, sublim_actual, soil_evap)
-    evap_excess_energy = (evap_rate_demand - evap_rate) * L_eff
-    lhflx_actual = evap_rate * L_eff
+    # --- Combine the two phase streams ---
+    # Total vapour mass leaving the surface = pack sublimation + soil / plant
+    # evaporation; total latent energy = their L_s / L_v weighted sum.  Demand
+    # unmet by a reservoir cap or the bare-soil resistance returns to the ground
+    # heat flux as ``evap_excess_energy`` so the surface energy budget still
+    # closes (in - out - dStorage = 0).
+    lhflx_actual = sublim_actual * constants.L_s + soil_evap * constants.L_v
+    evap_excess_energy = lhflx - lhflx_actual
 
     # --- Root water uptake partition ---
-    # iter-23 + dew handling (ported from main 2026-06-03):
-    # (a) Snow gate: the snowpack already swallowed sublim_actual upstream
-    #     (line above), so the soil should NOT see any latent flux when
-    #     ``has_snow`` is True — routing snow deposition through
-    #     ``flux_top`` would double-count the mass (codex iter-23
-    #     stop-time review).
-    # (b) Dew handling: within the snow-free regime, negative ``evap_rate``
-    #     (dew / downward deposition on bare soil) routes ENTIRELY to
-    #     ``flux_top`` so the column water budget closes; transpiration
-    #     sink is set to 0.  Vegetated-fraction dew on a snow-free cell
-    #     is treated as bare-soil input (no separate canopy-storage
-    #     reservoir in this model).
+    # ``soil_flux`` is the L_v soil / plant-water stream ONLY: the snowpack
+    # already swallowed the sublimation / frost stream (``sublim_actual``)
+    # upstream, so routing any of it through ``flux_top`` would double-count the
+    # mass (codex iter-23 stop-time review).  Within this stream a negative value
+    # is dew / downward deposition on bare soil, which routes ENTIRELY to
+    # ``flux_top`` (transpiration sink = 0) so the column water budget closes;
+    # vegetated-fraction dew on a snow-free cell is treated as bare-soil input
+    # (no separate canopy-storage reservoir in this model).
+    #
+    # Bare-soil-top vs root-sink partition: the snow-free MIXED stream (bare-soil
+    # surface evaporation + transpiration) is split by the root-zone wetness
+    # ``f_veg`` heuristic, sending (1 - f_veg) through the top boundary.  OVER SNOW
+    # the soil stream is PURE canopy transpiration — the below-canopy ground
+    # component (LE_soil) has already sublimated from the pack — so it must be
+    # drawn from the ROOT ZONE in full (transp_frac = 1), never partly through the
+    # top-soil boundary (which would corrupt the surface water balance under
+    # snow).  SimpleSEB over snow leaves soil_flux == 0, so the branch is a no-op
+    # for it.
     f_veg = jnp.clip(w_frac_rz, 0.0, 1.0)
-    soil_flux = jnp.where(has_snow, 0.0, evap_rate)
+    transp_frac = jnp.where(has_snow, 1.0, f_veg)
+    soil_flux = soil_evap
     is_dew = soil_flux < 0.0
-    evap_bare = jnp.where(is_dew, soil_flux, soil_flux * (1.0 - f_veg))
-    evap_transp = jnp.where(is_dew, 0.0, soil_flux * f_veg)
+    evap_bare = jnp.where(is_dew, soil_flux, soil_flux * (1.0 - transp_frac))
+    evap_transp = jnp.where(is_dew, 0.0, soil_flux * transp_frac)
     flux_top = (precip_rain + melt_rate - evap_bare) / rho_w
 
     E_pot_transp = jnp.maximum(evap_transp, 0.0) / rho_w
@@ -901,6 +972,7 @@ def _step_multilayer_land_impl(
             carbon_state, forcing.sw_down, T_surface_new, forcing.co2_ppmv,
             beta_soil_new, lat_arr, doy, forcing.precip_total, config.carbon,
             dt, gpp_override=gpp_override,
+            soil_frozen_fraction=soil_frozen_fraction,
         )
     else:
         carbon_state_new = carbon_state
@@ -956,10 +1028,11 @@ def _step_multilayer_land_impl(
         ocean_heat_extraction=jnp.zeros(ncol),
         ocean_stress_x=jnp.zeros(ncol),
         ocean_stress_y=jnp.zeros(ncol),
-        # Phase-aware moisture mass flux (up): the evaporative/sublimation demand
-        # (lhflx_actual / L_eff) PLUS the blowing-snow sublimated SWE that left as
-        # vapor (gap 5) — so the vapor mass balances the reported latent heat.
-        surface_mass_flux=lhflx_actual / L_eff + blow_subl,
+        # Phase-aware moisture mass flux (up): pack sublimation (``sublim_actual``,
+        # L_s) + soil / plant-water evaporation (``soil_evap``, L_v) + the blowing-
+        # snow sublimated SWE that left as vapor (gap 5) — so the vapor mass
+        # balances the reported latent heat across BOTH phases.
+        surface_mass_flux=sublim_actual + soil_evap + blow_subl,
         # Land tile does not exchange salt with the ocean directly.
         salt_flux=jnp.zeros(ncol),
     )

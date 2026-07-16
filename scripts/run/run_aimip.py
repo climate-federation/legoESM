@@ -132,7 +132,7 @@ def _surface_forcing_cfg(cfg: dict[str, Any]) -> tuple[str | None, str | None]:
 
 def _build_spectral_config(cfg: dict[str, Any]):
     """Translate AIMIP YAML dict into NeuralGCMSpectralConfig."""
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
     from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
     from legoesm.training.losses import LossConfig
 
@@ -145,6 +145,21 @@ def _build_spectral_config(cfg: dict[str, Any]):
         k: (tuple(v) if k in _tuple_fields and v is not None else v)
         for k, v in loss_kwargs.items() if k in LossConfig._fields
     })
+
+    # Rollout curriculum (aimip_rollout_curriculum: [[lead_hours, epochs],
+    # ...]): the loader must build a target at EVERY curriculum lead, so
+    # loss.multi_step_hours is forced to the sorted unique leads (equal
+    # weights; the curriculum path scores one lead per phase anyway).
+    curriculum = tuple(
+        (int(h), int(ep))
+        for h, ep in (cfg.get("aimip_rollout_curriculum") or ())
+    ) or None
+    if curriculum:
+        _leads = tuple(sorted({h for h, _ in curriculum}))
+        loss_config = loss_config._replace(
+            multi_step_hours=_leads,
+            multi_step_weights=(1.0,) * len(_leads),
+        )
 
     sfno_embed = int(cfg.get("sfno_embed_dim", 128))
     sfno_n_blocks = int(cfg.get("sfno_n_blocks", 4))
@@ -184,6 +199,10 @@ def _build_spectral_config(cfg: dict[str, Any]):
         ) or None,
         rollout_days=int(cfg.get("aimip_rollout_days", 1)),
         rollout_hours=int(cfg.get("aimip_rollout_hours", 0)),
+        rollout_curriculum=curriculum,
+        chunk_windows=int(cfg.get("aimip_chunk_windows", 0)),
+        chunk_prefetch=bool(cfg.get("aimip_chunk_prefetch", False)),
+        data_parallel=bool(cfg.get("aimip_data_parallel", False)),
         spatial_lr_scale=float(cfg.get("aimip_spatial_lr_scale", 1.0)),
         rad_update_interval=int(cfg.get("aimip_rad_update_interval", 1)),
         loss_config=loss_config,
@@ -371,8 +390,25 @@ def _train_aimip_classical(
         f"rad={radiation}"
     )
 
+    # Training-period-mean GHG for the classical RRTMGP (CO2 matters for the
+    # CLASSICAL variant: a physical radiation scheme trained at present-day
+    # defaults sees a systematically wrong forcing for 1979-2012 samples).
+    # A per-sample transient value is unwarranted at 6-12 h forecast leads
+    # (the radiative signal of a few ppm is far below the loss floor) and
+    # the transient path already runs in the AMIP fine-tune + inference;
+    # here the STATIC mid-training-period concentration removes the mean
+    # bias at zero plumbing cost (closure constants — no retrace).
+    _ghg_mid = None
+    if radiation == "rrtmgp" and spec_cfg.windows:
+        from legoesm.training.aimip_amip_forcing import ghg_vmr_at_year
+        _years = [int(w[0]) for w in spec_cfg.windows]
+        _mid_year = int(round(sum(_years) / len(_years)))
+        _ghg_mid = {k: float(v) for k, v in ghg_vmr_at_year(_mid_year).items()}
+        logger.info(f"Classical RRTMGP GHG pinned to training-period mid-year "
+                    f"{_mid_year}: co2={_ghg_mid['co2']:.2e}")
+
     def _make_physics_fn(p, grid_):
-        return make_aimip_classical_spectral_physics(
+        built = make_aimip_classical_spectral_physics(
             p, grid_, dt,
             radiation=radiation,
             rad_update_interval_steps=rad_update_interval,
@@ -384,6 +420,30 @@ def _train_aimip_classical(
             land_mask=land_mask,
             split_rad=split_rad,
         )
+        if _ghg_mid is None:
+            return built
+        # Wrap the rad fn so every call carries the mid-period GHG unless
+        # the caller supplied its own (transient) value in ``forcing``.
+        def _with_ghg(rad_fn):
+            def _wrapped(*args, forcing=None, **kwargs):
+                fc = dict(forcing or {})
+                fc.setdefault("ghg_vmr", _ghg_mid)
+                return rad_fn(*args, forcing=fc, **kwargs)
+            return _wrapped
+        if isinstance(built, tuple):
+            non_rad_fn, rad_fn = built
+            return non_rad_fn, _with_ghg(rad_fn)
+        # Non-split combined fn: its forcing-kwarg contract is not
+        # guaranteed — leave unwrapped (rrtmgp effectively always runs
+        # split_rad; the combined path is the gray/no-gating config where
+        # GHG does not apply). Say so loudly rather than silently
+        # dropping the pinned concentration.
+        logger.warning(
+            "GHG pinning computed but NOT applied: physics fn is not "
+            "split-rad (rad_update_interval<=1?) — training runs with "
+            "the radiation scheme's default GHG."
+        )
+        return built
 
     return _train_spectral_loop(
         params, _make_physics_fn,
@@ -419,7 +479,7 @@ def _evaluate_variant(
     training objective so the scorecard is directly comparable across
     variants.
     """
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         compute_spectral_filter,
         compute_sponge_factor,
     )
@@ -555,7 +615,7 @@ def _evaluate_variant(
     elif variant == "sfno_physics":
         physics_fn = make_sfno_spectral_physics(trained_model, grid)
     elif variant == "sfno_full":
-        from legoesm.atmosphere.dynamics.sfno_pe import (
+        from legoesm.atmosphere.dynamics.neural.sfno_pe import (
             SFNOPrimitiveEquationConfig,
             SFNOPrimitiveEquationModel,
         )
@@ -605,7 +665,7 @@ def _evaluate_variant(
     else:
         raise ValueError(f"Unknown variant in eval: {variant!r}")
 
-    from legoesm.atmosphere.dynamics.spectral_pe import spectral_pe_to_grid
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import spectral_pe_to_grid
 
     losses: list[float] = []
     # ``T`` reports the mid-level (~500 hPa) cross-section for direct
@@ -790,6 +850,14 @@ def main():
         "variants": {},
     }
 
+    # Under an MPI launch (aimip_data_parallel), _train_variant returns on EVERY
+    # rank holding the identical replicated model. Only rank 0 evaluates +
+    # persists (params.eqx / the scorecard) so the ranks don't clobber those
+    # files or multiply the eval work; a barrier after each variant resyncs the
+    # ranks before the next variant's collective (DP) training phase.
+    from legoesm.training.data_parallel import mpi_rank_size
+    _rank, _nproc = mpi_rank_size()
+
     for variant in variants:
         overlay = _load_yaml(
             args.suite.parent / f"variant_{variant}.yaml"
@@ -810,57 +878,74 @@ def main():
         )
         train_elapsed = time.time() - t0
 
-        # Evaluate on BOTH the training windows (in-sample skill, for
-        # the AIMIP-fleet annual-mean overlay during 2015-2016) and
-        # the held-out test windows (default 2017).  Both reports use
-        # an identical loss / rollout horizon so they are directly
-        # comparable in absolute K.
-        eval_metrics_test = _evaluate_variant(
-            variant, model, cfg, cache_dir, period="test",
-        )
-        eval_metrics_train = _evaluate_variant(
-            variant, model, cfg, cache_dir, period="train",
-        )
-        ckpt_path = output_dir / variant / "params.eqx"
-        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        # Evaluate + persist on rank 0 ONLY (all ranks share the identical
+        # replicated model; concurrent writers would clobber params.eqx / the
+        # scorecard and N x the eval cost).
+        if _rank == 0:
+            # Evaluate on BOTH the training windows (in-sample skill, for
+            # the AIMIP-fleet annual-mean overlay during 2015-2016) and
+            # the held-out test windows (default 2017).  Both reports use
+            # an identical loss / rollout horizon so they are directly
+            # comparable in absolute K.
+            eval_metrics_test = _evaluate_variant(
+                variant, model, cfg, cache_dir, period="test",
+            )
+            eval_metrics_train = _evaluate_variant(
+                variant, model, cfg, cache_dir, period="train",
+            )
+            ckpt_path = output_dir / variant / "params.eqx"
+            ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
-        from legoesm.ml.training import save_checkpoint
-        save_checkpoint(model, ckpt_path)
+            from legoesm.ml.training import save_checkpoint
+            save_checkpoint(model, ckpt_path)
 
-        results["variants"][variant] = {
-            "train_loss_history": [float(x) for x in loss_history],
-            "train_seconds": train_elapsed,
-            "eval_metrics": eval_metrics_test,
-            "eval_metrics_train_period": eval_metrics_train,
-            "checkpoint": str(ckpt_path),
-        }
-        # ``loss_history`` is empty on an eval-only resume (all epochs already
-        # done, start_epoch == n_epochs -> zero training iterations); guard the
-        # [-1] so the scorecard write below still runs (e.g. scorecard regen).
-        last_train_loss = loss_history[-1] if loss_history else float("nan")
-        logger.info(
-            f"{variant}: train_loss[-1]={last_train_loss:.6f}, "
-            f"test_loss={eval_metrics_test['loss']['mean']:.6f}, "
-            f"test RMSE T={eval_metrics_test['rmse']['T']['mean']:.3f}K "
-            f"T_sfc={eval_metrics_test['rmse']['T_sfc']['mean']:.3f}K | "
-            f"train RMSE T={eval_metrics_train['rmse']['T']['mean']:.3f}K "
-            f"T_sfc={eval_metrics_train['rmse']['T_sfc']['mean']:.3f}K, "
-            f"train_time={train_elapsed:.1f}s"
-        )
+            results["variants"][variant] = {
+                "train_loss_history": [float(x) for x in loss_history],
+                "train_seconds": train_elapsed,
+                "eval_metrics": eval_metrics_test,
+                "eval_metrics_train_period": eval_metrics_train,
+                "checkpoint": str(ckpt_path),
+            }
+            # ``loss_history`` is empty on an eval-only resume (all epochs already
+            # done, start_epoch == n_epochs -> zero training iterations); guard the
+            # [-1] so the scorecard write below still runs (e.g. scorecard regen).
+            last_train_loss = loss_history[-1] if loss_history else float("nan")
+            logger.info(
+                f"{variant}: train_loss[-1]={last_train_loss:.6f}, "
+                f"test_loss={eval_metrics_test['loss']['mean']:.6f}, "
+                f"test RMSE T={eval_metrics_test['rmse']['T']['mean']:.3f}K "
+                f"T_sfc={eval_metrics_test['rmse']['T_sfc']['mean']:.3f}K | "
+                f"train RMSE T={eval_metrics_train['rmse']['T']['mean']:.3f}K "
+                f"T_sfc={eval_metrics_train['rmse']['T_sfc']['mean']:.3f}K, "
+                f"train_time={train_elapsed:.1f}s"
+            )
+
+        # Resync ranks before the next variant's collective (DP) training so a
+        # fast rank does not enter the next allreduce while rank 0 is still
+        # evaluating. Safe here: training + its prefetch threads are done, so no
+        # other collective is in flight.
+        if _nproc > 1:
+            from mpi4py import MPI
+            MPI.COMM_WORLD.Barrier()
 
     # Merge with any existing scorecard so multiple --variants invocations
-    # share one results/.../aimip_scorecard.json.
-    scorecard_path = output_dir / "aimip_scorecard.json"
-    if scorecard_path.exists():
-        with scorecard_path.open() as fh:
-            existing = json.load(fh)
-        existing_variants = existing.get("variants", {}) if isinstance(existing, dict) else {}
-        merged = dict(existing_variants)
-        merged.update(results["variants"])
-        results["variants"] = merged
-    with scorecard_path.open("w") as fh:
-        json.dump(results, fh, indent=2)
-    logger.info(f"Wrote AIMIP scorecard: {scorecard_path}")
+    # share one results/.../aimip_scorecard.json.  Rank 0 only (the other ranks
+    # never populated ``results`` and must not race on the file).
+    if _rank == 0:
+        scorecard_path = output_dir / "aimip_scorecard.json"
+        if scorecard_path.exists():
+            with scorecard_path.open() as fh:
+                existing = json.load(fh)
+            existing_variants = existing.get("variants", {}) if isinstance(existing, dict) else {}
+            merged = dict(existing_variants)
+            merged.update(results["variants"])
+            results["variants"] = merged
+        with scorecard_path.open("w") as fh:
+            json.dump(results, fh, indent=2)
+        logger.info(f"Wrote AIMIP scorecard: {scorecard_path}")
+
+    if _rank != 0:
+        return   # non-zero ranks are done; only rank 0 prints the summary
 
     # Final scorecard summary table -- printed to stdout (and the SLURM
     # log) so the per-variant in-sample (training) and held-out (test)

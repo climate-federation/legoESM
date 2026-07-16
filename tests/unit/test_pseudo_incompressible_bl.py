@@ -11,7 +11,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.dynamics import pseudo_incompressible_plane as pip
+from legoesm.atmosphere.dynamics.les import pseudo_incompressible_plane as pip
 
 
 def _cfg(**kw):

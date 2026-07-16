@@ -584,7 +584,7 @@ def make_volcanic(out_path: Path, start_year: int, end_year: int, *,
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--out", type=Path, default=Path("forcing_amip"),
+    parser.add_argument("--out", type=Path, default=Path("data/forcing_amip"),
                         help="Output directory for forcing files")
     parser.add_argument("--start-year", type=int, default=1979)
     parser.add_argument("--end-year", type=int, default=2014)

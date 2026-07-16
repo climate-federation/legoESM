@@ -12,7 +12,7 @@ __param_spec__ = {
         "scheme_key": "ocean.lat.treguier",
         "excluded": {},
         "params": {
-            "aei0": {"units": "m2 s-1", "bounds": (500.0, 10000.0), "tunable_tier": 2, "transform": "softplus", "category": "lateral_mixing", "reference": "NEMO ldftra nn_aei_ijk_t=21 (Treguier 1997); aei0=rn_Ue*rn_Le", "shape": None},
+            "aei0": {"units": "m2 s-1", "bounds": (500.0, 10000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "NEMO ldftra nn_aei_ijk_t=21 (Treguier 1997); aei0=rn_Ue*rn_Le", "shape": None},
         },
     },
     "HarmonicConfig": {
@@ -62,6 +62,8 @@ __param_spec__ = {
             "kappa_GM": {"units": "m^2/s", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
             "kappa_Redi": {"units": "m^2/s", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
             "surface_complement_depth": {"units": "m", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
+            "resfn_gamma": {"units": "1", "bounds": (1.0, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Hallberg 2013 (Ocean Modelling 72, 92) resolution function: grid points per deformation radius at half-suppression", "shape": None},
+            "resfn_cbcl_ms": {"units": "m s-1", "bounds": (0.5, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Hallberg 2013 / Chelton et al. 1998 (JPO 28, 433): fixed first-baroclinic gravity-wave speed for L_d = c/|f|", "shape": None},
         },
     },
 }
@@ -88,13 +90,26 @@ class BiharmonicConfig(NamedTuple):
     """Biharmonic lateral mixing.
 
     Explicit biharmonic CFL is ``B_h · dt / dx⁴ ≤ 1/16`` (2-D, with a
-    safety factor).  See ``HarmonicConfig`` for the analogous CFL knobs.
+    safety factor) for the legacy wide outer stencil; the compact outer
+    stencil (``compact_outer=True``) has a tighter ``≤ 1/512`` bound
+    (its 2Δx eigenvalue is ~1024/dx⁴, vs ~0 for the wide form).  See
+    ``HarmonicConfig`` for the analogous CFL knobs.
+
+    ``compact_outer`` selects the outer Laplacian of ``∇⁴ = ∇²(∇²)``:
+    ``False`` (default) keeps the legacy wide ``div(grad)`` outer stage,
+    which has an EXACT 2Δx null (does NOT damp the grid-scale checkerboard
+    the biharmonic exists to remove) — retained as the default so
+    coefficients tuned against it stay bit-identical.  ``True`` uses the
+    compact outer Laplacian (``(1,-4,6,-4,1)`` stencil, maximal 2Δx
+    damping, MOM/MPAS-faithful) and correspondingly narrows the coastal
+    Neumann fill reach and the CFL cap.
     """
     B_h_momentum: float = 0.0   # Biharmonic viscosity [m^4/s]
     B_h_tracer: float = 0.0     # Biharmonic tracer diffusivity [m^4/s]
     enforce_cfl: bool = False
     cfl_dt_estimate: float = 3600.0
     cfl_safety: float = 0.05    # Margin below 1/16 stability bound
+    compact_outer: bool = False  # Compact 2Δx-damping outer ∇² (MOM/MPAS del4)
 
 
 class VisbeckConfig(NamedTuple):
@@ -244,6 +259,23 @@ class GMRediConfig(NamedTuple):
                                       # KPP boundary-layer depth when available).
                                       # Only active for slope_scheme="centered".
     surface_complement_depth: float = 100.0  # Depth [m] of the surface layer
+    # Steep-slope limiting of the isoneutral operator (triads only):
+    # "dm95_taper" (default, bit-identical) — Danabasoglu-McWilliams 95
+    # tanh taper sends kappa·taper -> 0 for |S| >> S_max (Veros
+    # convention; the flux DIES at steep slopes).  "nemo_cap" — NEMO
+    # ldfslp convention: the SLOPE is capped at ±S_max and the taper is
+    # 1, so the flux keeps diffusing ALONG the capped direction at
+    # steep fronts (rn_slpmax).  Physically different at fronts: the
+    # taper lets them steepen unchecked, the cap keeps flattening them.
+    # REMAINING NEMO deviation (documented): the ldfslp mixed-layer
+    # linear slope ramp toward the surface is not implemented yet.
+    slope_limit: str = "dm95_taper"
+    # NEMO nn_aht_ijk_t=20 grid-size scaling: the effective kappa_Redi is
+    # cfg.kappa_Redi * cos(lat) per row (Mercator dx ∝ cos φ, so
+    # aht(φ) = ½·U_d·Δx(φ) with cfg.kappa_Redi = the EQUATOR value
+    # ½·U_d·R·dλ).  Applied by the lat-lon model as a per-column
+    # kappa_redi_override; scalar-kappa paths (MPAS/cube) reject it.
+    kappa_redi_lat_scaling: bool = False
     # --- Veros-faithful isoneutral options (oracle-matching; default off) ---
     implicit_K33: bool = False
     # ^ When True, the vertical isoneutral diagonal K_33 = kappa_Redi·S² (the
@@ -348,6 +380,46 @@ class GMRediConfig(NamedTuple):
     # NOT for forward-only runs (no effect); select it for long-horizon
     # gradient-based calibration/DA through GM/Redi. Validated fail-fast by
     # ``validate_adjoint_stabilization`` at every GM/Redi entry point.
+    # --- Hallberg (2013) resolution function for kappa_GM (default off) ---
+    resolution_function: bool = False
+    # ^ When True, multiply the EFFECTIVE GM coefficient ``kappa_GM`` (whatever
+    # the active closure produced -- constant / Visbeck / Treguier / prognostic
+    # EKE / GEOMETRIC) by the Hallberg (2013) resolution function
+    #     f_res = 1 / (1 + (L_d / (resfn_gamma * Delta))**2),
+    # with ``Delta = sqrt(cell area)`` the local grid spacing and the
+    # first-baroclinic deformation radius ``L_d = resfn_cbcl_ms / |f|`` (|f|
+    # floored near the equator).  ``f_res -> 1`` where ``Delta >> L_d`` (coarse,
+    # eddies unresolved: full GM) and ``-> 0`` where ``Delta << L_d`` (eddy-
+    # resolving: GM off, let the resolved eddies act), matching NEMO5 ldf_eiv /
+    # MOM6 resolution-scaled KhTh.  Applied to GM ONLY -- the Redi isopycnal
+    # diffusivity ``kappa_Redi`` is NOT scaled (NEMO/MOM6 scale the eddy-
+    # transport bolus coefficient, not the along-isopycnal tracer diffusion), so
+    # as ``f_res -> 0`` the scheme reduces to pure Redi.  Shared by the lat-lon
+    # C-grid, MPAS and cubed-sphere GM/Redi paths.  Default False => the
+    # kappa_GM object is returned untouched => BYTE-IDENTICAL.
+    #
+    # EKE-BUDGET COUPLING (lat-lon prognostic closures; codex MED-3 r2): when
+    # an EKE / GEOMETRIC closure is active, the model step scales the
+    # GM-DERIVED eddy-energy production by the SAME f_res — parameterized
+    # ``kappa*sigma^2`` via ``eke_apply_local_source(production_scale=...)``,
+    # the GEOMETRIC baroclinic conversion B_C, and the realized skew
+    # conversions (via the scaled kappa handed to the conversion builders) —
+    # so the E budget receives exactly the APE->EKE conversion the APPLIED
+    # (tapered) coefficient performs; an unscaled production would
+    # over-energise E (and hence kappa = c_k*L*sqrt(E)) relative to the
+    # realized GM work.  Redi-side terms (kappa_redi_override, -P_diss_iso,
+    # GEOMETRIC kappa_n) and the barotropic B_T (kappa_u) stay UNSCALED.
+    # See ``gm_resolution_factor`` (the single f_res definition) and
+    # ``ocean_model_latlon_cgrid`` step / ``_eke_3d_step``.
+    resfn_gamma: float = 2.0
+    # ^ Resolution-function width gamma (Hallberg 2013): grid points per
+    # deformation radius at which GM is half-suppressed (~1-2 typical).
+    resfn_cbcl_ms: float = 2.0
+    # ^ Fixed first-baroclinic gravity-wave speed c [m/s] for ``L_d = c/|f|``
+    # (Chelton et al. 1998: c1 ~ 2 m/s open-ocean).  A FIXED c bound is used
+    # (rather than the flow-dependent ``int(N dz)/pi``) so the resolution
+    # function applies uniformly to ALL closures incl. constant-kappa, which
+    # never computes ``int(N dz)``.
 
 
 class LateralMixingConfig(NamedTuple):

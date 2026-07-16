@@ -2129,6 +2129,54 @@ def compute_mass_flux_from_cumsum(
     return jnp.pad(mass_flux_inner[..., :-1], pad_axes)
 
 
+def compute_sigma_dot_from_cumsum(
+    cumsum_mass_div: jax.Array,
+    D_total_p: jax.Array,
+    p_s: jax.Array,
+    sigma_coord: SigmaCoordinate,
+) -> jax.Array:
+    """σ̇ at half-levels from a precomputed cumulative FLUX-FORM mass divergence.
+
+    σ-coordinate analogue of :func:`compute_mass_flux_from_cumsum` —
+    single-sources the flux-form continuity integration + boundary closure::
+
+        σ̇_{k+1/2} = [frac_k · D_total_p − cumsum_k(div(dp·v))] / p_s
+
+    where ``div(dp·v)`` is the exact flux-form layer-mass divergence
+    (``dp_k = p_s · Δσ_k``) — NOT the advective ``div(v)·Δσ_k`` that
+    :func:`compute_sigma_dot` integrates.  The two differ wherever
+    ``∇p_s ≠ 0``; only the flux form telescopes to a globally
+    mass-conserving ``dp_s/dt``.  Shared by the lat-lon C-grid, cubed-sphere
+    and MPAS PE dycores (CLAUDE.md: no duplicate dycore numerics).
+
+    Boundary closure: σ̇ = 0 at top and surface (drop the ∼0 last element,
+    pad both ends — ``fractional_sigma[-1] = 1`` makes the surface element
+    exact cancellation ``D_total_p − D_total_p``).
+
+    Parameters
+    ----------
+    cumsum_mass_div : jax.Array
+        ``cumsum(div(dp·v), axis=-1)``, shape (..., nlev) [Pa/s].
+    D_total_p : jax.Array
+        Column total ``cumsum_mass_div[..., -1:]``, shape (..., 1) [Pa/s].
+    p_s : jax.Array
+        Surface pressure, shape (...,) [Pa].
+    sigma_coord : SigmaCoordinate
+
+    Returns
+    -------
+    jax.Array
+        σ̇ at half-levels, shape (..., nlev+1) [1/s]; 0 at top + surface.
+    """
+    frac = sigma_coord.fractional_sigma  # (nlev,)
+    # 1e-10 Pa: division-safety floor only (p_s is clipped far above this).
+    sigma_dot_inner = (frac * D_total_p - cumsum_mass_div) / (
+        p_s[..., jnp.newaxis] + 1e-10
+    )  # (..., nlev)
+    pad_axes = ((0, 0),) * (sigma_dot_inner.ndim - 1) + ((1, 1),)
+    return jnp.pad(sigma_dot_inner[..., :-1], pad_axes)
+
+
 def compute_mass_flux_hybrid(
     div_3d: jax.Array,
     p_s: jax.Array,
@@ -2234,6 +2282,60 @@ def vertical_advection_hybrid(
     grad = jnp.where(F_full > 0, grad_bwd, grad_fwd)
 
     return -F_full * grad
+
+
+def vertical_advection_theta_hybrid(
+    T: jax.Array,
+    mass_flux: jax.Array,
+    p_s: jax.Array,
+    coord: HybridSigmaPressureCoordinate,
+) -> jax.Array:
+    """Combined vertical advection + adiabatic mass-flux term for T (hybrid).
+
+    Hybrid-coordinate mirror of :func:`vertical_advection_theta`.  Instead of
+    computing  -F·∂T/∂p  and  κ·T·F/p  separately (which involves catastrophic
+    cancellation at upper levels where 1/p → ∞), this advects potential
+    temperature θ and converts back:
+
+        -F·∂T/∂p + κ·T·F/p  =  -(p/p₀)^κ · F·∂θ/∂p
+
+    with θ = T·(p₀/p)^κ.  This is the *same continuous operator* — no sign
+    flip — but it cancels the two large, near-equal terms **before**
+    discretization, so it eliminates the 1/p amplification of the mismatched-
+    stencil 2Δz residual at the stretched top levels (#930).  The σ-convention
+    (index 0 = model top, F > 0 downward) is inherited verbatim from the reused
+    :func:`vertical_advection_hybrid`.
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature, shape (..., nlev).
+    mass_flux : jax.Array
+        Mass flux at half-levels from :func:`compute_mass_flux_hybrid`,
+        shape (..., nlev+1).
+    p_s : jax.Array
+        Surface pressure, shape (...,).
+    coord : HybridSigmaPressureCoordinate
+
+    Returns
+    -------
+    jax.Array
+        Combined tendency: -F·∂T/∂p + κ·T·F/p, shape (..., nlev).
+    """
+    kappa = constants.kappa
+    P_0 = constants.p_ref
+
+    # Pressure at full levels; single exner used both directions so the
+    # θ round-trip is exact even where p_full < 1 Pa (matches the sigma
+    # sibling's ``jnp.maximum(p_full, 1.0)`` floor).
+    p_full = pressure_from_hybrid(coord, p_s, full=True)  # (..., nlev)
+    exner = (jnp.maximum(p_full, 1.0) / P_0) ** kappa  # (p/p₀)^κ
+
+    # Potential temperature θ = T / exner = T·(p₀/p)^κ
+    theta = T / exner
+
+    # Advect θ with the SAME upwind operator, then convert back: -exner·F·∂θ/∂p
+    return exner * vertical_advection_hybrid(theta, mass_flux, p_s, coord)
 
 
 def compute_omega_hybrid(

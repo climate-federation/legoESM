@@ -1,6 +1,6 @@
 """Direct unit tests for MPAS Voronoi-mesh tracer transport.
 
-Target: ``legoesm.atmosphere.dynamics.tracer_transport_mpas`` — a registered
+Target: ``legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas`` — a registered
 production solver that had ZERO direct tests.  These tests exercise the leaf
 tendency function ``tracer_tendencies_mpas`` and the ``TracerTransportMPASModel``
 class directly (not via a factory), asserting the physical properties the
@@ -50,7 +50,7 @@ from legoesm.core.operators_voronoi import (
     divergence_cell_3d,
     gradient_edge_3d,
 )
-from legoesm.atmosphere.dynamics.tracer_transport_mpas import (
+from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import (
     TracerTransportMPASConfig,
     TracerTransportMPASModel,
     tracer_tendencies_mpas,

@@ -25,8 +25,8 @@ from legoesm.atmosphere.physics import (
 )
 from legoesm.atmosphere.physics.microphysics.integration import get_microphysics_fn
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
-from legoesm.atmosphere.scm import SingleColumnModel
-from legoesm.atmosphere.scm_forcing import SCMForcing
+from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
+from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
 from legoesm.thermo import saturation_mixing_ratio
 
 from scripts.run import run_scm_rce_campaign as campaign
@@ -138,12 +138,17 @@ def _campaign_style_min_qcond(scheme: str, microphysics_substeps: int) -> float:
 
 
 def test_scm_substeps_prevent_campaign_negative_condensate() -> None:
-    # morrison has NO scheme-level positivity guard for its stiff ice/sedimentation
-    # removal, so a single forward-Euler microphysics step at dt=600 s overshoots
-    # negative — the SCM substep coupling is what keeps it non-negative.
+    # morrison now keeps condensate non-negative even at a single forward-Euler
+    # microphysics step (dt=600 s): its scheme-level positivity floor clamps the
+    # stiff ice/sedimentation removal at exactly zero (min qcond == 0.0, not a
+    # negative overshoot).  The SCM substep coupling is then redundant-but-
+    # harmless defense.  (This mirrors the thompson #477 fix below; the earlier
+    # premise that single-step morrison OVERSHOOTS negative is stale — it was
+    # already clamped at base, so the old ``< -1e-6`` assertion was a
+    # permanent red.)  Assert BOTH paths stay non-negative.
     morrison_single = _campaign_style_min_qcond("morrison", microphysics_substeps=1)
     morrison_subbed = _campaign_style_min_qcond("morrison", microphysics_substeps=_SUBSTEPS)
-    assert morrison_single < -1.0e-6   # non-vacuous: single-step DOES go negative
+    assert morrison_single >= _TINY_NEGATIVE
     assert morrison_subbed >= _TINY_NEGATIVE
 
     # thompson gained a scheme-level sublimation/sedimentation flux-limiter fix

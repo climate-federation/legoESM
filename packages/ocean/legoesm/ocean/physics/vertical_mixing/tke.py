@@ -170,6 +170,21 @@ _NEMO_TKE_HTAU_MAX_M = 30.0
 _NEMO_TKE_HTAU_SLOPE_M = 45.0
 
 
+def _safe_stress_modulus(tx: jnp.ndarray, ty: jnp.ndarray) -> jnp.ndarray:
+    """AD-safe |τ| = sqrt(τx² + τy²) with a finite (zero) gradient at τ=0.
+
+    The plain ``jnp.sqrt(tx*tx + ty*ty)`` has a NaN reverse-mode gradient at
+    ``tx = ty = 0`` (``d/dx sqrt(x) = 1/(2 sqrt(x))`` → ``0 * inf`` in the VJP),
+    though the analytic limit of the stress modulus and its contribution to the
+    surface TKE flux ``(|τ|/ρ₀)^{3/2}`` is 0 there. The double-``where`` keeps
+    the primal BIT-IDENTICAL to the plain form where ``|τ|² > 0`` and yields a
+    finite 0 (with 0 gradient) at zero stress — the same pattern used for the
+    AD-safe sqrt elsewhere in this module (see ``_veros_buoyancy_length``).
+    """
+    t2 = tx * tx + ty * ty
+    return jnp.where(t2 > 0.0, jnp.sqrt(jnp.where(t2 > 0.0, t2, 1.0)), 0.0)
+
+
 class TKEOutput(NamedTuple):
     """Output of :func:`tke_vertical_mixing`."""
     K_M: jnp.ndarray       # (..., nlev-1) momentum eddy viscosity at interfaces
@@ -1112,6 +1127,7 @@ def tke_vertical_mixing(
     g: float = constants.g,
     n_iterations: int = 1,
     *,
+    taum_surface: jnp.ndarray | None = None,
     p_cell: jnp.ndarray | None = None,
     dz_ref: jnp.ndarray | None = None,
     jacobian: jnp.ndarray | None = None,
@@ -1259,13 +1275,19 @@ def tke_vertical_mixing(
         adiabatic_over_dz_half=veros_slots,
     )
 
-    if tau_x_surface is None and tau_y_surface is None:
+    if taum_surface is not None:
+        # NEMO taum channel: the caller supplies the surface stress MODULUS
+        # directly (e.g. the DINO usrdef x1.3 westerly boost, which enters
+        # the TKE input but NOT the momentum stress).
+        taum = jnp.maximum(jnp.asarray(taum_surface), 0.0)
+        surface_flux = (taum / rho_0) ** 1.5
+    elif tau_x_surface is None and tau_y_surface is None:
         surface_flux = jnp.zeros(rho_cell.shape[:-1], dtype=rho_cell.dtype)
         taum = surface_flux  # |τ| = 0 (unforced)
     else:
         tx = tau_x_surface if tau_x_surface is not None else jnp.zeros_like(rho_cell[..., 0])
         ty = tau_y_surface if tau_y_surface is not None else jnp.zeros_like(rho_cell[..., 0])
-        taum = jnp.sqrt(tx * tx + ty * ty)
+        taum = _safe_stress_modulus(tx, ty)
         surface_flux = (taum / rho_0) ** 1.5
 
     # --- NEMO zdftke surface terms (static feature gates; see TKEConfig) ---
@@ -1408,6 +1430,7 @@ def tke_set_diffusivities(
     rho_0: float,
     g: float,
     *,
+    taum_surface: jnp.ndarray | None = None,
     p_cell: jnp.ndarray,
     dz_ref: jnp.ndarray,
     jacobian: jnp.ndarray,
@@ -1444,14 +1467,18 @@ def tke_set_diffusivities(
         dz_ref=dz_ref, jacobian=jacobian, eos_fn=eos_fn,
         n2_mode=cfg.n2_mode, adiabatic_over_dz_half=True,
     )
-    if tau_x_surface is None and tau_y_surface is None:
+    if taum_surface is not None:
+        # NEMO taum channel (see tke_vertical_mixing).
+        surface_flux = (jnp.maximum(jnp.asarray(taum_surface), 0.0)
+                        / rho_0) ** 1.5
+    elif tau_x_surface is None and tau_y_surface is None:
         surface_flux = jnp.zeros(rho_cell.shape[:-1], dtype=rho_cell.dtype)
     else:
         tx = (tau_x_surface if tau_x_surface is not None
               else jnp.zeros_like(rho_cell[..., 0]))
         ty = (tau_y_surface if tau_y_surface is not None
               else jnp.zeros_like(rho_cell[..., 0]))
-        surface_flux = (jnp.sqrt(tx * tx + ty * ty) / rho_0) ** 1.5
+        surface_flux = (_safe_stress_modulus(tx, ty) / rho_0) ** 1.5
 
     l_k, _l_eps = compute_mixing_lengths(
         tke_old, N2, dz_half, cfg, signed_n2=True, dz_cell=dz_cell,

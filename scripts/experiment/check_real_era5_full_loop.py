@@ -83,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
 
     import jax.numpy as jnp
     import numpy as np
-    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig, run_forced_les
+    from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig, run_forced_les
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
     from legoesm.training.compare_reanalysis import (
         column_state_from_carry,

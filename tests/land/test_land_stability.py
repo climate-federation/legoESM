@@ -571,14 +571,14 @@ class TestCarbonCycleIntegration:
     def test_pools_positive(self, run30_carbon):
         """All carbon pools remain positive."""
         cs = run30_carbon["carbon_state"]
-        for pool in ["C_lab", "C_fol", "C_root", "C_wood", "C_lit", "C_som"]:
+        for pool in ["C_lab", "C_fol", "C_root", "C_wood", "C_lit", "C_som_active"]:
             val = np.asarray(getattr(cs, pool))
             assert np.all(val > 0), f"{pool} has non-positive values: min={val.min()}"
 
     def test_pools_finite(self, run30_carbon):
         """All carbon pools are finite."""
         cs = run30_carbon["carbon_state"]
-        for pool in ["C_lab", "C_fol", "C_root", "C_wood", "C_lit", "C_som"]:
+        for pool in ["C_lab", "C_fol", "C_root", "C_wood", "C_lit", "C_som_active"]:
             val = np.asarray(getattr(cs, pool))
             assert np.all(np.isfinite(val)), f"{pool} has NaN/Inf"
 
@@ -665,7 +665,7 @@ class TestMultiLayerCarbon:
     def test_pools_positive(self, run_ml_carbon):
         """All carbon pools remain positive in multi-layer run."""
         cs = run_ml_carbon["carbon_state"]
-        for pool in ["C_lab", "C_fol", "C_root", "C_wood", "C_lit", "C_som"]:
+        for pool in ["C_lab", "C_fol", "C_root", "C_wood", "C_lit", "C_som_active"]:
             val = np.asarray(getattr(cs, pool))
             assert np.all(val > 0), f"{pool} min = {val.min()}"
 

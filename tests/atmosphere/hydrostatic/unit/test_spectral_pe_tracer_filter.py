@@ -31,7 +31,7 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.core.field import Field
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralPEConfig,
     SpectralPrimitiveEquationModel,
     SpectralHydrostaticState,

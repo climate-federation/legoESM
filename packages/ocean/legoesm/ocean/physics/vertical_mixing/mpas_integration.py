@@ -37,6 +37,7 @@ from legoesm.ocean.physics.mixing import (
 )
 from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
 from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
+from legoesm.ocean.physics.vertical_mixing.tke import tke_vertical_mixing
 from legoesm.ocean.physics.vertical_mixing._shared import surface_buoyancy_flux
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
@@ -46,10 +47,11 @@ from legoesm.ocean.vertical import (
 
 __physics_contract__ = {
     "summary": (
-        "MPAS Voronoi-mesh adapters wiring KPP vertical mixing onto the C-grid: "
-        "tracers at cells, edge-normal momentum via TRiSK cell-velocity "
-        "reconstruction; produce cell/edge (K_v, A_v) profiles and the "
-        "edge-normal momentum + cell tracer tendencies."
+        "MPAS Voronoi-mesh adapters wiring KPP and (diagnostic) Gaspar/Burchard "
+        "TKE vertical mixing onto the C-grid: tracers at cells, edge-normal "
+        "momentum via TRiSK cell-velocity reconstruction (single shared "
+        "reconstruction); produce cell (K_v, A_v) profiles for the implicit "
+        "solver and, for KPP, the edge-normal momentum + cell tracer tendencies."
     ),
     "inputs": {
         "state.T": "degC", "state.S": "psu", "state.u": "m/s (edge-normal)",
@@ -74,19 +76,30 @@ __physics_contract__ = {
     "conserves": ["energy", "salt", "momentum"],
     "differentiable": True,
     "reference": (
-        "Large, McWilliams & Doney (1994) KPP on the MPAS/TRiSK C-grid "
-        "(Perot 2000 reconstruction; Ringler et al. 2013, Ocean Modelling 69)"
+        "Large, McWilliams & Doney (1994) KPP + Gaspar et al. (1990) / "
+        "Burchard (2002) TKE on the MPAS/TRiSK C-grid (Perot 2000 "
+        "reconstruction; Ringler et al. 2013, Ocean Modelling 69)"
     ),
     "idealized_test": (
         "tests/ocean/unit/test_vmix_mpas_integration.py — cell-reconstructed "
-        "KPP viscosity applied to edge-normal u matches the lat-lon path; an "
-        "unknown scheme raises ValueError."
+        "KPP viscosity applied to edge-normal u matches the lat-lon path; "
+        "tests/ocean/unit/test_mpas_tke.py — the MPAS TKE profiles match a "
+        "direct grid-agnostic tke_vertical_mixing call; unsupported schemes "
+        "raise ValueError."
     ),
 }
 
 
 # Placeholder salinity for dry cells so the EOS stays well-defined [PSU].
 _EOS_SAFE_SALINITY_PSU = 35.0
+
+# Diagnostic (Mode-B) quasi-steady TKE on MPAS: a long pseudo-timestep drives
+# the backward-Euler TKE solve toward local equilibrium in a few sub-iterations
+# (mirrors the lat-lon ``k_profiles`` Mode-B default used when no prognostic TKE
+# field is carried on the state; ``TKEConfig.prognostic=False`` path).  Fixed
+# solver settings, NOT tunables.
+_TKE_DIAGNOSTIC_DT_S = 86400.0   # [s] 1-day pseudo-step → quasi-steady K
+_TKE_DIAGNOSTIC_N_ITER = 3       # backward-Euler sub-iterations (K within ~few %)
 
 
 def _mpas_surface_buoyancy_flux(q_net, fw, salt, T_3d, S_3d, eos_fn=None):
@@ -198,24 +211,27 @@ def _vertical_diffusion_edge_partial(
     return flux_divergence_zero_flux(flux, h_safe)
 
 
-def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg,
-                  eos_fn=None):
-    """Prepare MPAS-KPP inputs and run ``kpp_vertical_mixing`` (#518 item 2).
+def _reconstruct_mpas_cell_fields(state: MPASOceanState, mesh, z_coord,
+                                  eos_fn=None):
+    """Shared MPAS cell-field prep for the vertical-mixing bridges.
 
-    ``eos_fn`` (``None`` ⇒ Wright default) is the model-selected EOS callable
-    used for the KPP density / Richardson / buoyancy diagnostics — threaded so
-    a non-Wright EOS (e.g. ``nemo_seos`` for DINO) drives the mixing decision
-    consistently with the baroclinic dycore, not silently via Wright.
+    Single-sources the edge→cell velocity reconstruction + land/partial-cell
+    conditioning that BOTH the KPP (``_run_mpas_kpp``) and the diagnostic-TKE
+    (``make_tke_profiles_mpas``) bridges need, so there is exactly ONE
+    reconstruction on MPAS (CLAUDE.md "no duplicate numerics"; the KPP path
+    stays byte-identical — this is a pure extraction):
 
-    ``make_kpp_physics_mpas`` and ``make_kpp_profiles_mpas`` shared this entire
-    input-preparation block verbatim (the two copies differed only in comment
-    verbosity): TRiSK/Perot cell-velocity reconstruction, land-safe Jacobian +
-    density, surface-forcing buoyancy flux, land-zeroing, and the partial-cell
-    sub-seafloor T/S/u/v fill — then the KPP call.
+    * TRiSK/Perot cell-centred (u_east, v_north) from edge-normal ``u`` — the
+      shear both closures diagnose (Richardson number for KPP, ∂u/∂z shear
+      production for TKE);
+    * land-safe Jacobian ``J`` (land → 1.0) and in-situ density ``rho`` (land →
+      ``rho_0``) via the model-selected ``eos_fn`` (``None`` ⇒ Wright default);
+    * land-zeroing + the partial-cell sub-seafloor T/S/u/v fill (deepest active
+      value) so neither closure sees a spurious T=0/u=0 discontinuity.
 
-    Returns ``(kpp_out, J)``.  ``J`` (the land-safe Jacobian) is returned because
-    the physics path reuses it for the cell→edge Jacobian average; the profiles
-    path uses only ``kpp_out`` (``J`` is then dead and pruned).
+    Returns ``(u_east_w, v_north_w, T_w, S_w, rho, J, mask)`` — the land-safe
+    Jacobian ``J`` is returned because the KPP physics path reuses it for the
+    cell→edge Jacobian average.
     """
     T_3d = state.T.data       # (nCells, nlev)
     S_3d = state.S.data
@@ -224,33 +240,21 @@ def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg,
     H_bathy = state.H_bathy.data
     mask = state.land_mask.data  # (nCells,) — 1=ocean, 0=land
 
-    # Cell-centred (u_east, v_north) from edge-normal u via TRiSK/Perot — KPP
-    # needs it to diagnose Richardson-number shear instability.  (Sub-seafloor
-    # momentum leak is closed by the fill + masking below, so real velocities
-    # are safe to pass.)
+    # Cell-centred (u_east, v_north) from edge-normal u via TRiSK/Perot — the
+    # shear driver for both closures.  (Sub-seafloor momentum leak is closed by
+    # the fill + masking below, so real velocities are safe to pass.)
     u_east_raw, v_north_raw = reconstruct_cell_velocity(u_edge, mesh)
 
-    # Density at cells.  KPP divides by the Jacobian internally; it is 0 on land
-    # (H_bathy=0) → NaN, so replace land J with 1.0 and land density with rho_0
-    # (those cells are masked out downstream).
+    # Density at cells.  The closures divide by the Jacobian internally; it is 0
+    # on land (H_bathy=0) → NaN, so replace land J with 1.0 and land density
+    # with rho_0 (those cells are masked out downstream).
     J_real = compute_ocean_jacobian(eta, H_bathy, z_coord)
     J = jnp.where(mask > 0.5, J_real, 1.0)
     rho_real = compute_ocean_rho(state, z_coord, J_real, eos_fn=eos_fn)
     rho = jnp.where(mask[:, None] > 0.5, rho_real, _RHO_0)
 
-    # Surface forcing channels (None → KPP uses interior proxies).
-    tau_x = getattr(surface_forcing, "tau_x", None) if surface_forcing else None
-    tau_y = getattr(surface_forcing, "tau_y", None) if surface_forcing else None
-    q_net = getattr(surface_forcing, "q_net", None) if surface_forcing else None
-    fw = getattr(surface_forcing, "freshwater", None) if surface_forcing else None
-    salt = getattr(surface_forcing, "salt_flux", None) if surface_forcing else None
-
-    # Surface buoyancy + kinematic T/S fluxes (shared MPAS helper).
-    B_f, Q_sfc_T, Q_sfc_S = _mpas_surface_buoyancy_flux(
-        q_net, fw, salt, T_3d, S_3d, eos_fn=eos_fn)
-
-    # Land-zero KPP inputs; on partial cells fill sub-seafloor levels with the
-    # deepest active value so KPP sees no spurious T=0/u=0 discontinuity.
+    # Land-zero inputs; on partial cells fill sub-seafloor levels with the
+    # deepest active value so the closure sees no spurious T=0/u=0 discontinuity.
     m3 = mask[:, None]
     u_east_w = jnp.where(m3 > 0.5, u_east_raw, 0.0)
     v_north_w = jnp.where(m3 > 0.5, v_north_raw, 0.0)
@@ -269,6 +273,50 @@ def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg,
         S_w = jnp.where(_active, S_w, _S_bot[:, None])
         u_east_w = jnp.where(_active, u_east_w, _u_bot[:, None])
         v_north_w = jnp.where(_active, v_north_w, _v_bot[:, None])
+
+    return u_east_w, v_north_w, T_w, S_w, rho, J, mask
+
+
+def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg,
+                  eos_fn=None):
+    """Prepare MPAS-KPP inputs and run ``kpp_vertical_mixing`` (#518 item 2).
+
+    ``eos_fn`` (``None`` ⇒ Wright default) is the model-selected EOS callable
+    used for the KPP density / Richardson / buoyancy diagnostics — threaded so
+    a non-Wright EOS (e.g. ``nemo_seos`` for DINO) drives the mixing decision
+    consistently with the baroclinic dycore, not silently via Wright.
+
+    ``make_kpp_physics_mpas`` and ``make_kpp_profiles_mpas`` shared this entire
+    input-preparation block verbatim: the TRiSK/Perot cell-velocity
+    reconstruction, land-safe Jacobian + density, land-zeroing, and the
+    partial-cell sub-seafloor fill are now factored into
+    :func:`_reconstruct_mpas_cell_fields` (shared with the TKE bridge); this
+    function adds only the KPP-specific surface-forcing buoyancy flux and the
+    KPP call.
+
+    Returns ``(kpp_out, J)``.  ``J`` (the land-safe Jacobian) is returned because
+    the physics path reuses it for the cell→edge Jacobian average; the profiles
+    path uses only ``kpp_out`` (``J`` is then dead and pruned).
+    """
+    # Shared edge→cell reconstruction + land/partial-cell conditioning.
+    # (``mask`` is returned for the TKE bridge; KPP masks downstream from
+    # ``state.land_mask`` directly, so it is unused here.)
+    u_east_w, v_north_w, T_w, S_w, rho, J, _ = _reconstruct_mpas_cell_fields(
+        state, mesh, z_coord, eos_fn=eos_fn)
+    T_3d = state.T.data       # (nCells, nlev) — RAW surface T/S for buoyancy flux
+    S_3d = state.S.data
+    eta = state.eta.data
+
+    # Surface forcing channels (None → KPP uses interior proxies).
+    tau_x = getattr(surface_forcing, "tau_x", None) if surface_forcing else None
+    tau_y = getattr(surface_forcing, "tau_y", None) if surface_forcing else None
+    q_net = getattr(surface_forcing, "q_net", None) if surface_forcing else None
+    fw = getattr(surface_forcing, "freshwater", None) if surface_forcing else None
+    salt = getattr(surface_forcing, "salt_flux", None) if surface_forcing else None
+
+    # Surface buoyancy + kinematic T/S fluxes (shared MPAS helper).
+    B_f, Q_sfc_T, Q_sfc_S = _mpas_surface_buoyancy_flux(
+        q_net, fw, salt, T_3d, S_3d, eos_fn=eos_fn)
 
     kpp_out = kpp_vertical_mixing(
         u_east_w, v_north_w, T_w, S_w,
@@ -343,8 +391,43 @@ def make_kpp_physics_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callable
             _kpp_mask_full = _kpp_mask_3d * _active_3d
         else:
             _kpp_mask_full = _kpp_mask_3d
-        dT_dt = jnp.where(_kpp_mask_full > 0.5, kpp_out.dT_dt, 0.0)
-        dS_dt = jnp.where(_kpp_mask_full > 0.5, kpp_out.dS_dt, 0.0)
+
+        # --- Partial-cell conservation rescale (tracer tendencies) ---
+        # ``kpp_vertical_mixing`` builds dT/dt, dS/dt as flux-form vertical
+        # divergences divided by the REFERENCE-grid thickness ``dz_ref * J``
+        # (kpp.py ``dz_actual``; both the local diffusion AND the non-local
+        # counter-gradient term use it).  The dycore, however, advances heat
+        # / salt content weighted by the LIVE partial-cell thickness
+        # ``h_k = compute_layer_thickness(eta, H_bathy, z_coord)``
+        # (ocean_model_mpas.py: ``T_new = T + dt*dT_dt`` with the budget
+        # measured as ``sum(dT_dt * h_k * area)``).  On a partial bottom cell
+        # ``dz_ref*J > h_partial*J = h_k``, so the LIVE-thickness column
+        # integral of a purely REDISTRIBUTIVE (interior-mixing) tendency is
+        # NONZERO — a spurious heat/salt source/sink on partial/live cells.
+        #
+        # Convention: z positive up; the vertical flux is down-gradient
+        # (``F = -K dT/dz``) with zero flux at the surface AND at the seafloor
+        # (the sub-seafloor T/S fill above makes the seafloor-interface
+        # gradient — hence its flux — exactly zero).  Rescaling by
+        # ``dz_used / h_k`` turns ``dT/dt = D / dz_used`` into ``D / h_k``
+        # (``D`` = interface-flux divergence, thickness-independent), so
+        # ``sum_k h_k * dT/dt = sum_k D = F_surface - F_seafloor = 0`` is
+        # conserved to machine precision.  On full cells (and on any
+        # non-partial z*/z-level coord) ``dz_used == h_k`` exactly, so
+        # ``thickness_rescale == 1`` and this is a byte-exact no-op — mirroring
+        # the live-thickness edge-momentum path (``_vertical_diffusion_edge_partial``)
+        # applied below.
+        if isinstance(z_coord, OceanPartialCellCoordinate):
+            h_live = compute_layer_thickness(eta, H_bathy, z_coord)  # (nCells, nlev)
+            dz_used = z_coord.dz_ref * J[:, jnp.newaxis]  # what KPP divided by
+            thickness_rescale = dz_used / jnp.maximum(h_live, 1.0e-10)
+            dT_dt = kpp_out.dT_dt * thickness_rescale
+            dS_dt = kpp_out.dS_dt * thickness_rescale
+        else:
+            dT_dt = kpp_out.dT_dt
+            dS_dt = kpp_out.dS_dt
+        dT_dt = jnp.where(_kpp_mask_full > 0.5, dT_dt, 0.0)
+        dS_dt = jnp.where(_kpp_mask_full > 0.5, dS_dt, 0.0)
 
         # A_v is at half-levels (nCells, nlev-1).  Mask land cells.
         # Cap A_v to CFL-safe maximum based on the thinner of the two
@@ -504,6 +587,199 @@ def make_kpp_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
             k_idx = jnp.arange(nlev_half, dtype=z_coord.bottom_level.dtype)
             bot_c = z_coord.bottom_level  # (nCells,)
             active_half_c = (k_idx[None, :] < bot_c[:, None]).astype(A_v_cells.dtype)
+            A_v_cells = A_v_cells * active_half_c
+            K_v_cells = K_v_cells * active_half_c
+
+        return A_v_cells, K_v_cells
+
+    return profiles_fn
+
+
+def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callable:
+    """Build a DIAGNOSTIC prognostic-TKE profile function for MPAS implicit vmix.
+
+    Wires the grid-agnostic Gaspar (1990) / Burchard (2002) TKE closure
+    (:func:`legoesm.ocean.physics.vertical_mixing.tke.tke_vertical_mixing`) onto
+    the MPAS Voronoi C-grid, returning ``(A_v_cells, K_v_cells)`` at half-levels
+    (nCells, nlev-1) — the raw TKE-derived viscosity ``K_M`` and tracer
+    diffusivity ``K_H`` for the backward-Euler implicit solver, EXACTLY like
+    :func:`make_kpp_profiles_mpas`.  TKE requires ``implicit_vertical_mixing=True``
+    (rejected in ``make_mpas_ocean_physics``); there is no explicit-tendency TKE
+    path on MPAS.
+
+    Reuse (no re-derivation):
+
+    * :func:`_reconstruct_mpas_cell_fields` — the SAME edge→cell (u_east,
+      v_north) TRiSK/Perot reconstruction + land-safe J/ρ + partial-cell fill
+      that KPP uses (single reconstruction on MPAS);
+    * ``tke_vertical_mixing`` — the whole closure (shear/buoyancy production,
+      dissipation, Bougeault-Lacarrère mixing lengths); NO new closure here;
+    * the KPP MPAS CFL cap ``A_v_max = 0.25·min(dz)²/cfl_cap_dt_s``
+      (``TKEConfig.cfl_cap_dt_s``) on both K_M and K_H (defense-in-depth: the
+      profiles feed the unconditionally-stable implicit solver, but a
+      convecting column can drive ``l_k`` — and K — large before ``kappaM_max``
+      binds).
+
+    DIAGNOSTIC (Mode B) only: the closure is seeded at ``tke_background`` and
+    sub-iterated to quasi-steady each call (``tke_old=None``); NO prognostic TKE
+    field is carried on ``MPASOceanState``.  This mirrors the lat-lon
+    ``k_profiles`` Mode-B DEFAULT (``TKEConfig.prognostic=False``).  The
+    PROGNOSTIC carry (``prognostic=True``) is NOT wired on MPAS — it needs a
+    seeded ``MPASOceanState.tke`` field stable across the production ``lax.scan``
+    (the None→Field seed the lat-lon ``seed_scan_carry`` performs).  Reject it
+    (and the other options whose extra inputs this bridge does not plumb) LOUDLY
+    at factory-build time rather than silently running a different closure
+    (dispatch discipline; ``vm_scheme``/cfg are static → jit-safe).
+
+    Parameters
+    ----------
+    config : VerticalMixingConfig
+        Must have ``scheme="tke"`` and ``tke`` sub-config populated.
+
+    Returns
+    -------
+    Callable
+        ``profiles_fn(state, mesh, z_coord, surface_forcing=None)`` returning
+        ``(A_v_cells, K_v_cells)`` both shape (nCells, nlev-1), >= 0, finite.
+    """
+    cfg = config.tke
+
+    # --- Reject options whose extra inputs the MPAS diagnostic bridge does not
+    #     plumb (dispatch discipline: fail loud, never silently run a different
+    #     closure).  All are static config values ⇒ raising here is jit-safe. ---
+    if bool(getattr(cfg, "prognostic", False)):
+        raise NotImplementedError(
+            "vertical_mixing.tke.prognostic=True is not wired on the MPAS "
+            "ocean yet: a prognostic TKE carry needs a seeded MPASOceanState.tke "
+            "field kept pytree-stable across the production lax.scan (the "
+            "None->Field seed the lat-lon seed_scan_carry performs). MPAS runs "
+            "the DIAGNOSTIC quasi-steady TKE (prognostic=False), matching the "
+            "lat-lon Mode-B default. Set vertical_mixing.tke.prognostic=False, "
+            "or run prognostic TKE on the lat-lon C-grid.")
+    if getattr(cfg, "n2_mode", "insitu") != "insitu":
+        raise NotImplementedError(
+            f"vertical_mixing.tke.n2_mode={getattr(cfg, 'n2_mode', 'insitu')!r} "
+            "is not wired on the MPAS ocean (the adiabatic/signed-N^2 path needs "
+            "the cell-centre hydrostatic pressure that this bridge does not "
+            "compute). MPAS supports n2_mode='insitu'.")
+    if bool(getattr(cfg, "veros_dz_slots", False)):
+        raise NotImplementedError(
+            "vertical_mixing.tke.veros_dz_slots=True is not wired on the MPAS "
+            "ocean (the Veros metric slots need dz_ref/jacobian/dz_surface "
+            "geometry this bridge does not plumb). Set veros_dz_slots=False.")
+    if getattr(cfg, "buoyancy_timing", "pre_mixing") != "pre_mixing":
+        raise NotImplementedError(
+            "vertical_mixing.tke.buoyancy_timing="
+            f"{getattr(cfg, 'buoyancy_timing', 'pre_mixing')!r} is not wired on "
+            "the MPAS ocean (post_mixing_veros needs the prognostic model-step "
+            "ordering). MPAS supports buoyancy_timing='pre_mixing'.")
+    if bool(getattr(cfg, "lc", False)) or getattr(cfg, "etau_mode", "none") != "none":
+        raise NotImplementedError(
+            "vertical_mixing.tke NEMO surface terms (lc / etau_mode) are not "
+            "wired on the MPAS ocean (they need the etau latitude profile this "
+            "bridge does not plumb). Set lc=False and etau_mode='none'.")
+    if getattr(cfg, "advection_scheme", "none") != "none":
+        raise NotImplementedError(
+            "vertical_mixing.tke.advection_scheme="
+            f"{getattr(cfg, 'advection_scheme', 'none')!r} requires the "
+            "prognostic TKE carry (advecting a diagnostic TKE is meaningless) "
+            "and is not wired on MPAS. Set advection_scheme='none'.")
+    if bool(getattr(cfg, "source_eke_diss", False)):
+        raise NotImplementedError(
+            "vertical_mixing.tke.source_eke_diss=True requires the prognostic "
+            "TKE carry (the EKE-dissipation recycling source) and is not wired "
+            "on MPAS. Set source_eke_diss=False.")
+    if getattr(config, "iwm", None) is not None and config.iwm.enabled:
+        raise NotImplementedError(
+            "VerticalMixingConfig.iwm.enabled=True is not wired on the MPAS "
+            "vertical-mixing bridge yet (lat-lon / tripole only) — reject "
+            "rather than silently drop the wave-driven mixing.")
+
+    def profiles_fn(
+        state: MPASOceanState,
+        mesh,
+        z_coord,
+        surface_forcing=None,
+    ):
+        # Shared edge→cell reconstruction + land/partial-cell conditioning
+        # (the SAME helper KPP uses — one reconstruction on MPAS).
+        u_east_w, v_north_w, T_w, S_w, rho, J, mask = (
+            _reconstruct_mpas_cell_fields(state, mesh, z_coord, eos_fn=eos_fn)
+        )
+
+        # Cell-centre spacing dz_half = dz_half_ref · J (nCells, nlev-1), the
+        # centre-to-centre distance the closure differentiates over — matches
+        # the lat-lon k_profiles broadcast (dz_half_ref · J).
+        dz_half = z_coord.dz_half_ref * J[:, jnp.newaxis]  # (nCells, nlev-1)
+        # Interior interface reference heights (nlev-1) for the Bryan-Lewis
+        # kappaH floor (only read on the opt-in Prandtl path; harmless on the
+        # default 'unit' path).  z_half_ref is negative-down; drop surface+bottom.
+        z_interface = z_coord.z_half_ref[1:-1]
+
+        # Surface wind stress → TKE surface flux (|tau|/rho_0)^{3/2}; None ⇒
+        # unforced (the closure zeroes the surface flux).
+        tau_x = (getattr(surface_forcing, "tau_x", None)
+                 if surface_forcing is not None else None)
+        tau_y = (getattr(surface_forcing, "tau_y", None)
+                 if surface_forcing is not None else None)
+
+        # Veros tke_mxl_choice=1 distance-to-boundary cap (mirrors the lat-lon
+        # k_profiles branch): the buoyancy mixing length may not exceed the
+        # distance to surface/seafloor.  Built from the STATIC reference geometry
+        # + per-column ocean depth.  choice=2 (default) is bounded by the
+        # MITgcm/OPA recursion and needs no cap.
+        boundary_cap = None
+        if getattr(cfg, "tke_mxl_choice", 2) == 1:
+            from legoesm.ocean.physics.vertical_mixing.tke import (
+                veros_mxl_choice1_boundary_cap,
+            )
+            boundary_cap = veros_mxl_choice1_boundary_cap(
+                z_interface, z_coord.dz_half_ref, state.H_bathy.data,
+            )
+
+        # --- The grid-agnostic TKE closure (DIAGNOSTIC Mode B) ---
+        # A_v = K_M (momentum viscosity), K_v = K_H (tracer diffusivity), both
+        # at interior interfaces (nCells, nlev-1).  insitu N^2 needs only
+        # rho + dz_half (no p_cell/dz_ref/jacobian), so nothing else is passed.
+        tke_out = tke_vertical_mixing(
+            u_east_w, v_north_w, T_w, S_w, rho, dz_half,
+            tke_old=None,
+            tau_x_surface=tau_x, tau_y_surface=tau_y,
+            dt=_TKE_DIAGNOSTIC_DT_S, cfg=cfg,
+            rho_0=_RHO_0, g=constants.g,
+            n_iterations=_TKE_DIAGNOSTIC_N_ITER,
+            z_interface=z_interface,
+            boundary_cap=boundary_cap,
+        )
+        A_v_cells = tke_out.K_M   # (nCells, nlev-1) momentum viscosity >= 0
+        K_v_cells = tke_out.K_H   # (nCells, nlev-1) tracer diffusivity >= 0
+
+        # Mask land cells (whole column) — no shallow-cell exclusion: TKE is a
+        # local closure and the CFL cap below bounds K in thin cells, so KPP's
+        # <5-level open-ocean heuristic does not apply here.
+        m_half = mask[:, None]   # broadcast to (nCells, nlev-1)
+        A_v_cells = jnp.where(m_half > 0.5, A_v_cells, 0.0)
+        K_v_cells = jnp.where(m_half > 0.5, K_v_cells, 0.0)
+
+        # CFL cap (SAME as KPP MPAS): A_v_max = 0.25·min(dz_k, dz_k+1)^2 /
+        # cfl_cap_dt_s.  Applied to BOTH K_M and K_H (the explicit-diffusion
+        # stability bound is the same for momentum and tracer viscosity).  Only
+        # reduces K (>= 0 preserved); 0.25 for safety margin.
+        _dt_phys = cfg.cfl_cap_dt_s
+        _dz = z_coord.dz_ref            # (nlev,)
+        _dz_min_half = jnp.minimum(_dz[:-1], _dz[1:])   # (nlev-1,)
+        _Av_max = 0.25 * _dz_min_half ** 2 / _dt_phys   # (nlev-1,)
+        A_v_cells = jnp.minimum(A_v_cells, _Av_max[None, :])
+        K_v_cells = jnp.minimum(K_v_cells, _Av_max[None, :])
+
+        # Sub-seafloor interface masking on partial cells: zero K at interfaces
+        # below the deepest active full level (mirrors make_kpp_profiles_mpas).
+        if hasattr(z_coord, 'bottom_level'):
+            nlev_half = A_v_cells.shape[1]
+            k_idx = jnp.arange(nlev_half, dtype=z_coord.bottom_level.dtype)
+            bot_c = z_coord.bottom_level  # (nCells,)
+            active_half_c = (k_idx[None, :] < bot_c[:, None]).astype(
+                A_v_cells.dtype)
             A_v_cells = A_v_cells * active_half_c
             K_v_cells = K_v_cells * active_half_c
 

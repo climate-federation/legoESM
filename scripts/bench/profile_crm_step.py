@@ -65,10 +65,10 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.90")
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 
-from legoesm.atmosphere.dynamics.compressible_euler import (  # noqa: E402
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (  # noqa: E402
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (  # noqa: E402
     PlaneCompressibleEulerModel,
     make_flat_plane_terrain_metric,
     make_rest_state,
@@ -76,7 +76,7 @@ from legoesm.atmosphere.dynamics.compressible_euler_plane import (  # noqa: E402
     plane_compressible_euler_slow_tendencies,
     laplacian_vlast,
 )
-from legoesm.atmosphere.dynamics.compressible_euler import (  # noqa: E402
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (  # noqa: E402
     sponge_profile,
 )
 from legoesm.grids.plane import create_plane_grid  # noqa: E402

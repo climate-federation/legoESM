@@ -58,7 +58,7 @@ from legoesm import constants
 from legoesm.parallel.tiled_production_cdgrid import (
     make_tiled_fv3_hydrostatic_thermo_stage_2d,
 )
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationConfig,
 )
 

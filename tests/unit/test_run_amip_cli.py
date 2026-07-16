@@ -37,6 +37,105 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.multilayer_soil_depth == 4.5
 
 
+def test_convective_precip_efficiency_cli_wiring_929():
+    """#929: the shared --convective-precip-efficiency knob reaches the config
+    for BOTH Tiedtke and Bechtold; UNSET is the ``None`` sentinel (each scheme
+    keeps its own default) — never a silent 0.0 that would disable Bechtold's
+    ON-by-default rain split."""
+    parser = build_arg_parser()
+
+    # Unset -> None sentinel (NOT 0.0): Bechtold keeps its own 0.7 default.
+    cfg_unset = build_config_from_args(_postprocess_args(
+        parser.parse_args(
+            ["--dataset", "analytical", "--convection", "bechtold"]),
+        parser))
+    assert cfg_unset.convective_precip_efficiency is None
+
+    # Bechtold + explicit PE now ALLOWED (the guard was Tiedtke-only) and
+    # reaches the config.
+    cfg_bech = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--convective-precip-efficiency", "0.7",
+    ]), parser))
+    assert cfg_bech.convective_precip_efficiency == 0.7
+
+    # Explicit 0.0 for Bechtold (legacy no-split) is accepted and threaded.
+    cfg_bech0 = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--convective-precip-efficiency", "0.0",
+    ]), parser))
+    assert cfg_bech0.convective_precip_efficiency == 0.0
+
+    # Tiedtke still reaches the config.
+    cfg_tied = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "tiedtke",
+        "--convective-precip-efficiency", "0.5",
+    ]), parser))
+    assert cfg_tied.convective_precip_efficiency == 0.5
+
+
+def test_convective_precip_efficiency_rejected_for_non_massflux_929():
+    """#929: --convective-precip-efficiency>0 requires a mass-flux scheme
+    (tiedtke or bechtold); other schemes ignore the knob, so the run-guard
+    rejects it rather than silently no-op.  (0.0 / unset are fine everywhere.)"""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--convection", "sbm",
+            "--convective-precip-efficiency", "0.7",
+        ]), parser)
+
+
+def test_no_use_multilayer_land_overrides_yaml_default():
+    """--no-use-multilayer-land flips a set_defaults(True) (i.e. a --config YAML
+    that enables the multilayer land) back off — needed to run a production
+    YAML on the MPAS/spectral standalone backends (#869 MPAS probe)."""
+    parser = build_arg_parser()
+    parser.set_defaults(use_multilayer_land=True)  # what a YAML would do
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-use-multilayer-land",
+    ]), parser))
+    assert cfg.use_multilayer_land is False
+
+
+def test_no_sponge_overrides_yaml_default():
+    """--no-sponge flips a set_defaults(True) (a --config YAML enabling the
+    #836 top sponge) back off — needed for the #847 drift-lever walk's
+    sponge-off leg against amip_production.yaml."""
+    parser = build_arg_parser()
+    parser.set_defaults(sponge_enabled=True)  # what a YAML would do
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-sponge",
+    ]), parser))
+    assert cfg.sponge_enabled is False
+
+
+def test_no_surface_tiled_overrides_yaml_default():
+    """--no-surface-tiled flips a set_defaults(True) (a --config YAML enabling
+    the tiled mosaic surface) back off — same MPAS/spectral escape hatch as
+    --no-use-multilayer-land (the standalone backends don't run the tiled
+    coupled pipeline; validate_strict otherwise demands an active land tile)."""
+    parser = build_arg_parser()
+    parser.set_defaults(surface_tiled=True)  # what a YAML would do
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-surface-tiled",
+    ]), parser))
+    assert cfg.surface_tiled is False
+
+
+def test_multilayer_land_rejected_on_mpas():
+    """use_multilayer_land + MPAS grid must fail EARLY at argparse with a clear
+    message (not an AttributeError deep in _setup_multilayer_land: VoronoiMesh
+    has no lat/lat2d — the crash mode of the first MPAS AMIP probe)."""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical",
+            "--grid-type", "mpas", "--discretization", "mpas",
+            "--use-multilayer-land",
+        ]), parser)
+
+
 def test_clm_surfdata_path_flows_to_config():
     """--clm-surfdata-path round-trips into ExperimentConfig (empty default =>
     UCAR download; a set path lets a compute node with no internet use a staged
@@ -51,6 +150,61 @@ def test_clm_surfdata_path_flows_to_config():
         "--clm-surfdata-path", "/data/clm_surfdata.nc",
     ]), parser))
     assert cfg.clm_surfdata_path == "/data/clm_surfdata.nc"
+
+
+def test_transient_land_cover_flags_flow_to_config():
+    """--transient-land-cover / --land-cover-surfdata round-trip into
+    ExperimentConfig (off + empty by default => static single-year cover)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.transient_land_cover is False
+    assert cfg_default.land_cover_surfdata == ""
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--land-mask-file", "lsm.nc", "--use-multilayer-land",
+        "--transient-land-cover",
+        "--land-cover-surfdata", "/data/luh2_transient_surfdata.nc",
+    ]), parser))
+    assert cfg.transient_land_cover is True
+    assert cfg.land_cover_surfdata == "/data/luh2_transient_surfdata.nc"
+
+
+def test_transient_land_cover_validate_strict_requires_multilayer_and_surfdata():
+    """validate_strict() rejects transient cover without a multilayer tile or
+    without a surfdata path — both would silently no-op the requested LULC."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--land-mask-file", "lsm.nc", "--use-multilayer-land",
+        "--transient-land-cover",
+        "--land-cover-surfdata", "/data/luh2_transient_surfdata.nc",
+    ]), parser))
+    cfg.validate_strict()  # complete config: no error
+
+    # transient cover but no surfdata path -> reject
+    with pytest.raises(ValueError, match="land_cover_surfdata"):
+        cfg._replace(land_cover_surfdata="").validate_strict()
+    # transient cover but slab land (no multilayer) -> reject
+    with pytest.raises(ValueError, match="use_multilayer_land"):
+        cfg._replace(use_multilayer_land=False).validate_strict()
+
+
+def test_land_ic_path_flows_to_config():
+    """--land-ic round-trips into ExperimentConfig.land_ic_path (#746): a
+    spun-up MultiLayerLandState restart from run_land_spinup replaces the
+    cold-start soil column in a coupled multilayer AMIP run."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_ic_path == ""
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--land-ic", "/scratch/land_spinup/land_ic.npz",
+    ]), parser))
+    assert cfg.land_ic_path == "/scratch/land_spinup/land_ic.npz"
 
 
 def test_snow_albedo_feedback_flag_flows_to_config():
@@ -281,6 +435,34 @@ def test_enable_latlon_spmd_flag_flows_to_config():
     assert cfg_on.enable_latlon_spmd is True
 
 
+def test_latlon_spmd_compiled_segments_flag_flows_to_config():
+    """--latlon-spmd-compiled-segments (M2b) round-trips into
+    ExperimentConfig (default off), and validate_strict rejects it without
+    --enable-latlon-spmd (silent-no-op hardening) while accepting the pair."""
+    import pytest
+
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--time-var", "month",
+            "--lat-var", "ylat", "--lon-var", "xlon"]
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(base), parser))
+    assert cfg_off.latlon_spmd_compiled_segments is False
+
+    cfg_on = build_config_from_args(_postprocess_args(
+        parser.parse_args(base + ["--enable-latlon-spmd", "--grid-type",
+                                  "latlon", "--latlon-spmd-compiled-segments"]),
+        parser))
+    assert cfg_on.latlon_spmd_compiled_segments is True
+    assert cfg_on.enable_latlon_spmd is True
+    cfg_on.validate_strict()                       # valid pair passes
+
+    cfg_orphan = build_config_from_args(_postprocess_args(
+        parser.parse_args(base + ["--latlon-spmd-compiled-segments"]), parser))
+    assert cfg_orphan.latlon_spmd_compiled_segments is True
+    with pytest.raises(ValueError, match="requires\\s+enable_latlon_spmd"):
+        cfg_orphan.validate_strict()
+
+
 def test_convection_cli_choices_match_config_single_source():
     """--convection CLI choices MUST equal the driver config's authoritative
     VALID_CONVECTION_SCHEMES.  Regression guard: a stale hardcoded CLI choices
@@ -425,6 +607,7 @@ _AEROSOL_CCN_BASE = [
     "--dataset", "analytical",
     "--aerosol-ccn",
     "--aerosol-forcing", "external",
+    "--aerosol-file", "/tmp/aer.nc",   # external forcing requires a file
     "--microphysics", "morrison",
 ]
 
@@ -709,6 +892,7 @@ def test_issue484_new_amip_flags_flow_to_config():
         "--k-bl-max-per-day", "1.5",
         "--k-free-per-day", "0.2",
         "--aerosol-forcing", "external",
+        "--aerosol-file", "/dummy/aero.nc",   # external forcing requires a file
         "--microphysics", "morrison",
         "--nc-from-aerosol",
     ])
@@ -1349,7 +1533,9 @@ def test_config_yaml_round_trips_authoritative_values():
     parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
     args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
     # grid geometry (resolution/nlev/discretization are CLI dests baked into
-    # cfg.grid, so assert them at the args level the YAML controls)
+    # cfg.grid, so assert them at the args level the YAML controls).  The
+    # production YAML is the C48/L40 publication lane (#899 restored it from
+    # the C12/L20 land-switch screen; dt=150, fp64 — see the YAML header).
     assert args.resolution == 48
     assert args.nlev == 40
     assert args.discretization == "cdgrid"
@@ -1370,7 +1556,12 @@ def test_config_yaml_round_trips_authoritative_values():
     assert cfg.convective_cloud is True
     # the run_coupled-mirrored (#647) tuned knobs round-trip from the YAML
     assert cfg.surface_gustiness_zi == 300.0
-    assert cfg.cloud_q_c_diagnostic == pytest.approx(3e-4)
+    # PROVISIONAL cloud tuning (#899): rh_crit 0.85 / q_c 1e-4 (was 0.77/3e-4)
+    assert cfg.cloud_rh_crit == pytest.approx(0.85)
+    assert cfg.cloud_q_c_diagnostic == pytest.approx(1e-4)
+    # 0.0 until the bechtold rain-split lands (#932/#929): 0.5 with a
+    # non-tiedtke scheme trips run_amip's hard guard at argparse.
+    assert cfg.convective_precip_efficiency == 0.0
 
 
 def test_config_yaml_explicit_cli_flag_overrides_file():
@@ -1666,19 +1857,24 @@ def test_cloud_sensitivity_flags_round_trip_and_validate():
             bad.validate_strict()
 
 
-def test_cloud_sensitivity_flags_rejected_on_mpas_spectral():
-    """--cloud-p-xr/--cloud-alpha-xr are refused on MPAS/spectral (they rebuild
-    CloudConfig at run() and would silently ignore the pipeline override)."""
+def test_cloud_sensitivity_flags_allowed_on_mpas_spectral():
+    """#870 Phase 1 FLIPS the old rejection: --cloud-p-xr/--cloud-alpha-xr now
+    REACH the standalone MPAS/spectral radiation (via
+    model_driver._standalone_cloud_config reading the same experiment fields),
+    so the guard must accept them on every backend — the pre-#870 hard
+    rejection blocked a working feature with a false message."""
     from scripts.run.run_amip import _validate_cloud_sensitivity_flags
     parser = build_arg_parser()
+    # MPAS + the flags: NO raise (they thread via _standalone_cloud_config).
     mpas = parser.parse_args(["--dataset", "analytical", "--grid-type", "voronoi",
                               "--cloud-p-xr", "0.7"])
-    with pytest.raises(SystemExit):
-        _validate_cloud_sensitivity_flags(mpas, parser)
-    # FV path + no flags: no raise
-    _validate_cloud_sensitivity_flags(
-        parser.parse_args(["--dataset", "analytical", "--grid-type", "voronoi"]),
-        parser)
+    _validate_cloud_sensitivity_flags(mpas, parser)
+    # And the values flow into ExperimentConfig on the MPAS path too.
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--grid-type", "voronoi",
+         "--cloud-p-xr", "0.7", "--cloud-alpha-xr", "20.0"]), parser))
+    assert cfg.cloud_p_xr == 0.7 and cfg.cloud_alpha_xr == 20.0
+    # FV path unchanged: no raise with or without flags.
     _validate_cloud_sensitivity_flags(
         parser.parse_args(["--dataset", "analytical", "--cloud-p-xr", "0.7"]),
         parser)
@@ -1727,6 +1923,26 @@ def test_moisture_flux_form_flag_flows_to_dycore_config():
         "--dataset", "analytical", "--no-moisture-flux-form",
     ]), parser))
     assert cfg_off.dycore.moisture_flux_form is False
+
+
+def test_mpas_nu_vert4_t_flag_flows_to_dycore_config():
+    """#930: --mpas-nu-vert4-t must reach the DycoreConfig (which the component
+    factory threads into MPASPrimitiveEquationConfig.nu_vert4_T — the vertical
+    2Δσ-checkerboard cure).  Production default is ON (nonzero); 0 disables."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.dycore.mpas_nu_vert4_T > 0.0   # cure on by default
+
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-nu-vert4-t", "0",
+    ]), parser))
+    assert cfg_off.dycore.mpas_nu_vert4_T == 0.0
+
+    cfg_set = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-nu-vert4-t", "5e-6",
+    ]), parser))
+    assert cfg_set.dycore.mpas_nu_vert4_T == pytest.approx(5e-6)
 
 
 def test_multicontroller_coordinator_flags_parse():
@@ -2133,3 +2349,132 @@ def test_diagnostic_condensate_scheme_validate_strict():
         ExperimentConfig(
             cloud_scheme="sundqvist", radiation="gray",
             cloud_diagnostic_condensate_scheme="adiabatic").validate_strict()
+def test_yaml_settable_bools_have_no_switches():
+    """#872 sweep: every store_true flag a shipped YAML can set true is now
+    BooleanOptionalAction, so a --config that enables it stays CLI-overridable
+    (--no-<flag> => False). The old store_true form made a YAML-true value
+    permanently un-overridable (no negative form), breaking one-lever A/B legs
+    — hit three times on 2026-07-08 alone (#873 converted the first three)."""
+    swept = [
+        "aerosol_ccn", "clear_sky_diag", "cmip_output", "diurnal_cycle",
+        "land_stomatal_beta", "monthly_means", "orbital_insolation",
+        "snow_albedo_feedback", "slab_land_active", "dynamic_albedo",
+        # amip_production_latlon24.yaml sets it true (#869) — the filter-off
+        # A/B leg needs --no-use-polar-filter (codex: the variant YAML created
+        # a fresh instance of exactly this pattern).
+        "use_polar_filter",
+    ]
+    for dest in swept:
+        parser = build_arg_parser()
+        # Simulate the YAML layer enabling the flag (load_yaml_config applies
+        # file values via parser.set_defaults).
+        parser.set_defaults(**{dest: True})
+        flag = "--no-" + dest.replace("_", "-")
+        args = parser.parse_args(["--dataset", "analytical", flag])
+        assert getattr(args, dest) is False, (
+            f"{flag} must override a YAML-set {dest}=true")
+        # And the positive default still holds without the switch.
+        args = parser.parse_args(["--dataset", "analytical"])
+        assert getattr(args, dest) is True
+
+
+def test_latlon24_production_variant_pins_polar_filter():
+    """#869: the lat-lon production lane variant MUST carry the polar filter
+    (the 12-day one-variable A/B convicted filter-off: blowup day 1 vs
+    COMPLETED) and the filter-enabled dt=600 (pole clamp lifted, ~10x
+    throughput, 30-day soak clean). A silent drop of either re-opens the
+    day-9/10 blowup."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    cfg_file = _repo_root() / "config" / "amip" / "amip_production_latlon24.yaml"
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
+    args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
+    assert args.use_polar_filter is True
+    assert args.dt == 600.0
+    assert args.grid_type == "latlon" and args.discretization == "latlon_cgrid"
+    assert args.resolution == 24 and args.nlev == 20
+    # Physics inherited from the production include (one source of truth),
+    # except convection: this lane pins `sbm` (#869) because bechtold
+    # re-develops a polar-night temperature runaway that blows the run at day
+    # ~47 regardless of every numerics lever, while sbm is stable (95-day soak)
+    # and lifts hfls 40->70 (#847).  The cube lane keeps bechtold.
+    cfg = build_config_from_args(args)
+    assert cfg.convection == "sbm" and cfg.gravity_wave_drag == "mcfarlane"
+    # UNSET (#929 None sentinel; an explicit 0.0 now means "force legacy
+    # no-split", not "unset"): the latlon24 YAML clears the inherited bechtold
+    # knob to null, and sbm ignores it (sbm_precip_efficiency is its own knob)
+    # — see the convective_precip_efficiency note in amip_production_latlon24.yaml.
+    assert cfg.convective_precip_efficiency is None
+
+
+def test_enable_tiled_dycore_flag_flows_to_config():
+    """--enable-tiled-dycore round-trips into ExperimentConfig (P4 cube
+    sub-face tiling) and validate_strict enforces cube-only."""
+    import pytest
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.enable_tiled_dycore is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--enable-tiled-dycore",
+    ]), parser))
+    assert cfg_on.enable_tiled_dycore is True
+    cfg_on.validate_strict()   # default grid = cubed_sphere -> legal
+
+    cfg_bad = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--grid-type", "latlon",
+        "--enable-tiled-dycore",
+    ]), parser))
+    with pytest.raises(ValueError, match="cubed_sphere"):
+        cfg_bad.validate_strict()
+
+
+def test_explicit_zero_sic_scale_and_sst_offset_preserved():
+    """An explicit ``--sic-scale 0.0`` / ``--sst-offset 0.0`` must reach the
+    config as 0.0 — the builder uses ``is not None``, not ``or``, so a
+    legitimate no-sea-ice / no-conversion sensitivity value is not silently
+    replaced by the fallback default (1.0 / 0.0)."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--sic-scale", "0.0", "--sst-offset", "0.0",
+    ]), parser))
+    assert cfg.sic_scale == 0.0
+    assert cfg.sst_offset == 0.0
+    # The default path still yields the fallbacks.
+    cfg_def = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_def.sic_scale == 1.0 and cfg_def.sst_offset == 0.0
+
+
+def test_preset_dataset_defaults_and_override():
+    """A preset dataset defaults sic_scale/sst_offset to the preset's own unit
+    conversions (cobe SIC is percent -> 0.01), so a bare ``--dataset cobe`` keeps
+    correct units without needing --sic-scale. An explicit ``--sic-scale 0`` (a
+    no-sea-ice run) still overrides — the value model_driver forwards into the
+    preset config, which used to be dropped by ``_replace(path, T_ice)``."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "cobe", "--forcing-path", "/tmp/cobe.nc",
+    ]), parser))
+    assert cfg.sic_scale == 0.01          # cobe percent -> fraction (preset default)
+    assert cfg.sst_offset == 0.0          # cobe already Kelvin
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "cobe", "--forcing-path", "/tmp/cobe.nc", "--sic-scale", "0",
+    ]), parser))
+    assert cfg0.sic_scale == 0.0          # explicit no-ice override honored
+
+
+def test_external_ozone_aerosol_require_a_file():
+    """``--ozone-forcing external`` / ``--aerosol-forcing external`` without a
+    file must fail loudly rather than silently substitute the built-in reference
+    climatology (parity with the solar/ghg guards)."""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--ozone-forcing", "external",
+        ]), parser)
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--aerosol-forcing", "external",
+        ]), parser)

@@ -19,6 +19,7 @@ References
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 from typing import NamedTuple
@@ -1318,6 +1319,203 @@ def vordiv_from_uv_3d(
 
     div_hat = im_over_a[:, None] * A_oc2 - one_over_a * B_dmu
     vor_hat = im_over_a[:, None] * B_oc2 + one_over_a * A_dmu
+    return vor_hat, div_hat
+
+
+# ---------------------------------------------------------------------------
+# Exact left-inverse grid-winds -> spectral vor/div analysis (#976)
+# ---------------------------------------------------------------------------
+#
+# ``vordiv_from_uv_3d`` above implements the Bourke (1972) / Hack-Jakob (1992)
+# ``oc2``/``dmu`` divergence-curl operators.  Those are the CORRECT spectral
+# divergence/vorticity operators for the dycore's own de-aliased nonlinear
+# FLUX products, and are cheap.  They are NOT, however, an exact left-inverse
+# of the streamfunction/velocity-potential wind synthesis
+# (:func:`uv_from_vordiv_3d`) at the TRUNCATION BOUNDARY: the meridional
+# derivative maps a mode of total wavenumber ``n`` to ``n±1``, so the
+# reconstructed winds carry power at ``n = n_max + 1`` that the truncated
+# analysis basis cannot represent.  Continuously the telescoping
+# ``∫(1-µ²)P'_nP'_{n'} = n(n+1)δ_{nn'} - m²∫P_nP_{n'}/(1-µ²)`` closes and
+# ``A∘S = Id``; discretely the missing ``n_max+1`` partner leaves the
+# ``n = n_max`` row unbalanced.  The result is a pole-concentrated
+# amplifier — every input mode leaks spurious power into ``(n_max, m)`` and
+# the ``(n_max, m)`` mode self-amplifies (~×21 per pass at T85), which
+# blows up the ``carry -> state -> carry -> state`` round trip used by the
+# WB2 eval driver (#951).  Adding Gaussian latitudes does NOT help
+# (verified: identical gain for linear/quadratic/cubic grids) because it is
+# an operator-truncation defect, not a quadrature-resolution defect.
+#
+# The exact left-inverse of the synthesis on the band-limited subspace,
+# pole rows included, is obtained by solving the (per zonal wavenumber ``m``)
+# least-squares system ``[U_m; V_m] = B_m · [psi; chi]`` where ``B_m`` is the
+# real synthesis matrix built from the SAME ``Pnm``/``Hnm`` operators
+# ``uv_from_vordiv_3d`` uses.  ``pinv(B_m)`` recovers ``(psi, chi)`` exactly
+# for any winds in ``range(B_m)`` and gives the stable least-squares
+# projection otherwise (no pole amplification).  ``B_m`` and its pseudo-
+# inverse depend only on the grid, so they are precomputed once (host,
+# numpy) and cached; the runtime path is a differentiable FFT + batched
+# matmul + scatter (JIT/``jax.grad``/pytree safe, complex128).
+_VORDIV_PINV_CACHE: dict = {}
+
+
+def _vordiv_pinv_operators(grid: GaussianGrid):
+    """Build & cache the per-``m`` pseudo-inverse of the wind synthesis.
+
+    Returns ``(BP, lap_pad, sh_index, n_sh, n_pad)`` where ``BP`` has shape
+    ``(n_max+1, 2*n_pad, 2*n_lat)`` (complex128), ``lap_pad`` is
+    ``(n_max+1, n_pad)`` and ``sh_index`` is an int32 scatter map
+    ``(n_max+1, n_pad)`` (``-1`` for padding slots).
+
+    The operators depend only on ``grid`` (``Pnm``/``Hnm``/``lap``), so this
+    reads *concrete* grid arrays; ``grid`` must be a static/closure object
+    (the established contract for every spectral transform here), never a
+    JIT-traced argument.
+    """
+    n_max = int(grid.n_max)
+    n_lat = int(grid.n_lat)
+    a = float(grid.radius)
+    Pnm = np.asarray(grid.Pnm, dtype=np.float64)
+    Hnm = np.asarray(grid.Hnm, dtype=np.float64)
+    lap = np.asarray(grid.lap, dtype=np.float64)
+    ms = np.asarray(grid.ms)
+    ls = np.asarray(grid.ls)
+    n_sh = int(Pnm.shape[1])
+    # Max modes for any single m: (m..n_max) => at most n_max+1 (the m=0 column).
+    n_pad = n_max + 1
+
+    # Cache key: the scalar shape signature PLUS a byte-exact content hash of
+    # every operator the inverse depends on, so a custom/modified/reordered
+    # grid (same scalars, different Pnm/Hnm/lap/ms/ls) does NOT alias another
+    # grid's inverse.
+    _h = hashlib.blake2b(digest_size=16)
+    for _arr in (Pnm, Hnm, lap, ms, ls):
+        _c = np.ascontiguousarray(_arr)
+        _h.update(str((_c.shape, _c.dtype.str)).encode())
+        _h.update(_c.tobytes())
+    key = (n_max, n_lat, a, _h.hexdigest())
+    ops = _VORDIV_PINV_CACHE.get(key)
+    if ops is not None:
+        return ops
+
+    # Guard against silent OOM at very high truncation: the padded operator is
+    # ``64·(n_max+1)²·n_lat`` bytes (complex128).  ~117 MiB at T106, ~460 MiB
+    # at T170, ~3.5 GiB at T340.  ``carry_to_spectral_state`` is an IC/eval
+    # conversion (not the dycore hot loop); fail LOUDLY rather than thrash.
+    bp_bytes = 16 * (n_max + 1) * (2 * n_pad) * (2 * n_lat)
+    _bp_budget = int(os.environ.get("LEGOESM_VORDIV_PINV_MAX_BYTES",
+                                    str(2 * 1024**3)))  # 2 GiB default
+    if bp_bytes > _bp_budget:
+        raise MemoryError(
+            f"vordiv_from_uv_exact_3d operator for T{n_max} needs "
+            f"{bp_bytes / 1024**3:.2f} GiB (> "
+            f"{_bp_budget / 1024**3:.2f} GiB budget). Raise "
+            "LEGOESM_VORDIV_PINV_MAX_BYTES to allow it, or keep the exact "
+            "wind round trip to eval/IC at supported truncations."
+        )
+
+    BP = np.zeros((n_max + 1, 2 * n_pad, 2 * n_lat), dtype=np.complex128)
+    lap_pad = np.zeros((n_max + 1, n_pad), dtype=np.float64)
+    sh_index = np.full((n_max + 1, n_pad), -1, dtype=np.int32)
+
+    for m in range(n_max + 1):
+        idx = np.where((ms == m) & (ls > 0))[0]  # exclude n=0 (no vor/div mean)
+        k = int(idx.size)
+        if k == 0:
+            continue
+        P = Pnm[:, idx]
+        H = Hnm[:, idx]
+        imP = (1j * m) * P
+        # Synthesis (see uv_from_vordiv_3d):
+        #   U_m = (H · psi + im·P · chi) / a
+        #   V_m = (im·P · psi - H · chi) / a
+        top = np.concatenate([H, imP], axis=1)          # (n_lat, 2k)  -> U_m
+        bot = np.concatenate([imP, -H], axis=1)         # (n_lat, 2k)  -> V_m
+        B = np.concatenate([top, bot], axis=0) / a      # (2 n_lat, 2k)
+        Bp = np.linalg.pinv(B)                           # (2k, 2 n_lat)
+        BP[m, :k, :] = Bp[:k, :]                         # psi rows
+        BP[m, n_pad:n_pad + k, :] = Bp[k:, :]            # chi rows
+        lap_pad[m, :k] = lap[idx]
+        sh_index[m, :k] = idx
+
+    ops = (
+        jnp.asarray(BP),
+        jnp.asarray(lap_pad),
+        jnp.asarray(sh_index),
+        n_sh,
+        n_pad,
+    )
+    _VORDIV_PINV_CACHE[key] = ops
+    return ops
+
+
+def vordiv_from_uv_exact_3d(
+    grid: GaussianGrid,
+    u_grid: jax.Array,
+    v_grid: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Exact left-inverse of :func:`uv_from_vordiv_3d` (#976).
+
+    Grid-space winds ``(u, v)`` (physical units, NOT pre-multiplied by
+    ``cos φ``) -> spectral ``(vor_hat, div_hat)``.  Unlike
+    :func:`vordiv_from_uv_3d` this is the exact LEFT-INVERSE of the
+    streamfunction/velocity-potential synthesis on the band-limited
+    subspace (``range(B_m)``): for winds that are a synthesis of some
+    band-limited ``(vor, div)`` it recovers them to machine precision, pole
+    rows included, so ``carry -> state -> carry`` round trips are idempotent
+    at every truncation (no polar amplification).  For winds OUTSIDE that
+    subspace (raw ERA5) it returns the minimum-Euclidean-residual fit at the
+    Gaussian nodes — a stable projection, but NOT the area-weighted (metric)
+    adjoint; the fixed point of the round trip is still exact.
+
+    Solves, per zonal wavenumber ``m``, the least-squares system
+    ``[U_m; V_m] = B_m · [psi; chi]`` (``B_m`` built from the SAME
+    ``Pnm``/``Hnm`` the synthesis uses) with the precomputed ``pinv(B_m)``,
+    then ``vor = lap · psi`` / ``div = lap · chi``.  Differentiable
+    (FFT + matmul + scatter), complex128; ``n=0`` vor/div are exactly zero.
+
+    Parameters
+    ----------
+    u_grid, v_grid : (n_lat, n_lon, nlev) real arrays.
+
+    Returns
+    -------
+    vor_hat, div_hat : (n_sh, nlev) complex arrays.
+    """
+    BP, lap_pad, sh_index, n_sh, n_pad = _vordiv_pinv_operators(grid)
+
+    n_max = grid.n_max
+    nlev = u_grid.shape[2]
+    cos_lat_3d = grid.cos_lat[:, None, None]
+    u_cos = u_grid * cos_lat_3d
+    v_cos = v_grid * cos_lat_3d
+
+    # Fourier coefficients (m = 0..n_max) — same normalization as sh_analysis.
+    U = jnp.fft.rfft(u_cos, axis=1)[:, : n_max + 1, :] / grid.n_lon
+    V = jnp.fft.rfft(v_cos, axis=1)[:, : n_max + 1, :] / grid.n_lon
+    # (n_lat, n_max+1, nlev) -> (n_max+1, n_lat, nlev)
+    U = jnp.moveaxis(U, 1, 0)
+    V = jnp.moveaxis(V, 1, 0)
+    rhs = jnp.concatenate([U, V], axis=1)  # (n_max+1, 2 n_lat, nlev)
+
+    # Per-m least-squares solve:
+    # (n_max+1, 2 n_pad, 2 n_lat) @ (n_max+1, 2 n_lat, nlev)
+    sol = jnp.einsum("mij,mjl->mil", BP, rhs)  # (n_max+1, 2 n_pad, nlev)
+    psi = sol[:, :n_pad, :]
+    chi = sol[:, n_pad:, :]
+    vor_pad = lap_pad[:, :, None] * psi  # (n_max+1, n_pad, nlev)
+    div_pad = lap_pad[:, :, None] * chi
+
+    # Scatter (m, local-n) -> flat SH index.  Each valid index appears once;
+    # padding slots map to index 0 with a zeroed contribution.
+    flat_idx = sh_index.reshape(-1)             # ((n_max+1)*n_pad,)
+    valid = (flat_idx >= 0)[:, None]            # (·, 1)
+    safe_idx = jnp.where(flat_idx >= 0, flat_idx, 0)
+    zero_c = jnp.zeros((), dtype=jnp.complex128)
+    vp = jnp.where(valid, vor_pad.reshape(-1, nlev), zero_c)
+    dp = jnp.where(valid, div_pad.reshape(-1, nlev), zero_c)
+    zeros = jnp.zeros((n_sh, nlev), dtype=jnp.complex128)
+    vor_hat = zeros.at[safe_idx].add(vp)
+    div_hat = zeros.at[safe_idx].add(dp)
     return vor_hat, div_hat
 
 

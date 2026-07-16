@@ -36,10 +36,10 @@ def _build_model(nx: int, ny: int, nlev: int, dx: float, dtype_x64: bool,
                  substep_horizontal_acoustic: bool = True,
                  fix_mass: bool = False):
     import jax.numpy as jnp
-    from legoesm.atmosphere.dynamics.compressible_euler import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
         CompressibleEulerConfig,
     )
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         PlaneCompressibleEulerModel, make_flat_plane_terrain_metric,
         make_rest_state,
     )

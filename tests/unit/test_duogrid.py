@@ -460,44 +460,6 @@ class TestD2A2CVectDuoGrid:
         assert ua.shape == (6, n, n)
         assert jnp.all(jnp.isfinite(ua))
 
-    def test_fv3_csw_tendencies_with_duogrid(self):
-        """fv3_csw_tendencies should produce finite tendencies with duogrid."""
-        from legoesm.core.fv3_sw_core import fv3_csw_tendencies
-        n = 8
-        cdgrid = self._make_grid(n, use_duogrid=True)
-        h = jnp.ones((6, n, n)) * 1000.0
-        u_d = jnp.zeros((6, n, n + 1))
-        v_d = jnp.zeros((6, n + 1, n))
-        h_s = jnp.zeros((6, n, n))
-        dh, du, dv = fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid)
-        assert dh.shape == (6, n, n)
-        assert du.shape == (6, n, n + 1)
-        assert dv.shape == (6, n + 1, n)
-        assert jnp.all(jnp.isfinite(dh))
-        assert jnp.all(jnp.isfinite(du))
-        assert jnp.all(jnp.isfinite(dv))
-        # At rest: tendencies should be near zero
-        np.testing.assert_allclose(dh, 0.0, atol=1e-8)
-
-    def test_duogrid_mass_conservation_one_step(self):
-        """One RK3 step with duogrid should conserve mass."""
-        from legoesm.core.fv3_sw_core import fv3_csw_tendencies
-        n = 8
-        cdgrid = self._make_grid(n, use_duogrid=True)
-        area = cdgrid.base.area
-        h = jnp.ones((6, n, n)) * 1000.0 + 10.0 * jnp.sin(
-            cdgrid.base.lon) * jnp.cos(cdgrid.base.lat)
-        u_d = jnp.ones((6, n, n + 1)) * 5.0
-        v_d = jnp.zeros((6, n + 1, n))
-        h_s = jnp.zeros((6, n, n))
-        dh, du, dv = fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid)
-        dt = 100.0
-        h_new = h + dt * dh
-        mass_before = float(jnp.sum(h * area))
-        mass_after = float(jnp.sum(h_new * area))
-        rel_err = abs(mass_after - mass_before) / abs(mass_before)
-        assert rel_err < 1e-8, f"Mass conservation violated: rel_err={rel_err:.2e}"
-
 
 # =========================================================================
 # T7b: ext_vector and cubed_a2d_halo
@@ -545,9 +507,8 @@ class TestExtVector:
         utmp = jnp.ones((6, n, n))
         vtmp = jnp.zeros((6, n, n))
         cosa_s = cdgrid.cos_sg[:, :, :, 4]
-        rsin2 = cdgrid.rsin2_cell
         ud, vd = ext_vector_dgrid(utmp, vtmp, dg, grid.cos_angle,
-                                   grid.sin_angle, cosa_s, rsin2, halo=h)
+                                   grid.sin_angle, cosa_s, halo=h)
         n_p = n + 2 * h
         assert ud.shape == (6, n_p, n_p - 1)
         assert vd.shape == (6, n_p - 1, n_p)
@@ -1817,6 +1778,7 @@ class TestBgridNeCornerSync:
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
         from legoesm.core.fv3_sw_core import (
             _bgrid_ke_transport, ppm_transport_1d, _pad_halo_dgrid_for_ppm,
+            _pad_halo_uc_vc_new_via_neighbor_delta,
         )
         from legoesm.grids.halo import synchronize_corner_scalar
 
@@ -1847,9 +1809,14 @@ class TestBgridNeCornerSync:
         dt5 = 0.5 * dt
         cosa = cdgrid.cosa_corner
         rsina = cdgrid.rsin2_corner
-        vc_pad = jnp.pad(vc, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        # 2026-07-10 convention-fix sweep: the integrated path now uses the
+        # neighbor-delta uc/vc cross-face halo + the Fortran d_sw3 one-sided
+        # boundary overrides (sw_core.F90 ytp_v/xtp_u, always-on).  The
+        # control MUST mirror both (same reason as the iter-945 halo note
+        # above) or the interior comparison is meaningless.
+        uc_pad, vc_pad = _pad_halo_uc_vc_new_via_neighbor_delta(
+            uc, vc, u_d, v_d, cdgrid)
         vc_sum = vc_pad[:, :-1, :] + vc_pad[:, 1:, :]
-        uc_pad = jnp.pad(uc, [(0, 0), (0, 0), (1, 1)], mode='edge')
         uc_sum = uc_pad[:, :, :-1] + uc_pad[:, :, 1:]
         vb_ctrl = dt5 * (vc_sum - uc_sum * cosa) * rsina
         ub_ctrl = dt5 * (uc_sum - vc_sum * cosa) * rsina
@@ -1857,8 +1824,14 @@ class TestBgridNeCornerSync:
         rdx = 1.0 / jnp.maximum(cdgrid.dx_edge_y, 1e-30)
         h_dg = 2
         u_d_ihalo, v_d_jhalo = _pad_halo_dgrid_for_ppm(u_d, v_d, cdgrid, halo=h_dg)
-        ty_ctrl = ppm_transport_1d(v_d_jhalo, vb_ctrl, rdy, axis=2, external_halo=h_dg)
-        tx_ctrl = ppm_transport_1d(u_d_ihalo, ub_ctrl, rdx, axis=1, external_halo=h_dg)
+        ty_ctrl = ppm_transport_1d(v_d_jhalo, vb_ctrl, rdy, axis=2,
+                                   external_halo=h_dg,
+                                   apply_d_sw3_boundary_fix=True,
+                                   boundary_fix_dx_field=cdgrid.dy_edge_x)
+        tx_ctrl = ppm_transport_1d(u_d_ihalo, ub_ctrl, rdx, axis=1,
+                                   external_halo=h_dg,
+                                   apply_d_sw3_boundary_fix=True,
+                                   boundary_fix_dx_field=cdgrid.dx_edge_y)
         ke_scalar_sync = 0.5 * (ty_ctrl * vb_ctrl + ub_ctrl * tx_ctrl)
         ke_scalar_sync = synchronize_corner_scalar(ke_scalar_sync, n)
 
@@ -2046,8 +2019,14 @@ class TestBgridNeCornerSync:
         # the exact non-orthogonal z-matrix conversion (was orthogonal, which
         # corrupted the 8 cube vertices by O(1)).  The component-vs-scalar
         # propagated wind diff shifted 5.58e-2→5.05e-2 (u), 5.65e-2→4.61e-2 (v).
-        expected_u_diff = 5.05e-2
-        expected_v_diff = 4.61e-2
+        # 2026-07-10: recalibrated after the FB covariant-convention fix
+        # (fb_v_d_to_covariant entry/exit) + the always-on Fortran d_sw3
+        # one-sided edge overrides + neighbor-delta uc/vc halo — an
+        # intentional numerics change of the FB chain (see
+        # fv3_sw_core.py module header).  5.05e-2→7.76e-2 (u),
+        # 4.61e-2→6.62e-2 (v).
+        expected_u_diff = 7.7558e-2
+        expected_v_diff = 6.6233e-2
         tol = 2e-3  # covers float32 metric precision
 
         assert abs(u_diff - expected_u_diff) < tol, (

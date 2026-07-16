@@ -20,10 +20,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     PlaneCompressibleEulerModel,
     _compute_smagorinsky_K_m_plane,
     make_flat_plane_terrain_metric,
@@ -240,7 +240,7 @@ def test_smag_tendency_is_dissipative():
     the original ``K_m * Lap(u)`` which is not dissipative for
     variable K_m. Discrete integration by parts gives
     ``= -sum_faces K_face * (grad_face u)^2 <= 0``."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         _variable_K_diffusion_vlast, _compute_smagorinsky_K_m_plane,
     )
     _, grid, hc, _, _ = _setup()
@@ -265,7 +265,7 @@ def test_smag_diffusion_conserves_field_under_periodic_bc():
     """``sum(div(K grad f)) = 0`` to machine epsilon under periodic
     BC. Flux-form is conservative; the cell-centred ``K * Lap(f)``
     is not (Codex iter-1 finding M1)."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         _variable_K_diffusion_vlast, _compute_smagorinsky_K_m_plane,
     )
     _, grid, hc, _, _ = _setup()
@@ -292,7 +292,7 @@ def test_vertical_sgs_diffusion_conserves_column_integral():
     (the compressible conserved measure) to machine epsilon — ``Σ_k tend_k·
     ρ_ref[k]·dz_k = F_top − F_bot = 0`` (codex iter-64 [HIGH]: plain ``dz`` is
     NOT the conserved measure for a density-weighted vertical flux)."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         _vertical_K_diffusion_full,
     )
     _, grid, hc, _, _ = _setup()
@@ -315,7 +315,7 @@ def test_vertical_sgs_diffusion_is_dissipative():
     """SGS-VERT #81: ``Σ_k f_k·tend_k·ρ_ref[k]·dz_k ≤ 0`` for K≥0 (discrete
     integration by parts ⇒ ``−Σ ρ_w·K·(∂_z f)²/dz_half ≤ 0``). Guards the
     sign of the mass-weighted vertical flux divergence."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         _vertical_K_diffusion_full,
     )
     _, grid, hc, _, _ = _setup()
@@ -339,7 +339,7 @@ def test_vertical_sgs_w_diffusion_is_dissipative_and_respects_rigid_bc():
     ≤ 0`` (Abel summation, w=0 at the rigid ends). Guards the half-level
     staggering — a wrong index/sign would break the energy sign or leak a
     boundary tendency."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         _vertical_K_diffusion_w,
     )
     _, grid, hc, _, _ = _setup()
@@ -368,7 +368,7 @@ def test_vertical_sgs_diffusion_zero_on_vertically_uniform_field():
     """SGS-VERT #81: a z-constant field has ZERO vertical gradient ⇒ no
     SGS flux ⇒ exactly zero tendency. Catches index/sign/boundary bugs
     (a stencil that leaked a spurious top/bottom flux would fail here)."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         _vertical_K_diffusion_full,
     )
     _, grid, hc, _, _ = _setup()
@@ -386,7 +386,7 @@ def test_vertical_sgs_diffusion_zero_on_vertically_uniform_field():
 def test_validate_rejects_zero_prandtl():
     """Codex iter-1 M2: zero Prandtl number produces inf K_h. Must
     raise ``ValueError`` at config-validation time."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         validate_plane_config,
     )
     cfg = CompressibleEulerConfig(
@@ -400,7 +400,7 @@ def test_validate_rejects_zero_prandtl():
 
 def test_validate_rejects_negative_prandtl():
     """Negative Pr turns thermal diffusion into anti-diffusion."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         validate_plane_config,
     )
     cfg = CompressibleEulerConfig(
@@ -414,7 +414,7 @@ def test_validate_rejects_negative_prandtl():
 
 def test_validate_rejects_negative_smagorinsky_cs():
     """Negative C_s would invert the Smag damping sign."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         validate_plane_config,
     )
     cfg = CompressibleEulerConfig(
@@ -431,7 +431,7 @@ def test_variable_K_diffusion_rejects_shape_mismatch():
     full vs half-level vertical-axis difference is the most common
     way this fails (e.g. K_m at full levels passed against w at
     half levels would broadcast silently)."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         _variable_K_diffusion_vlast,
     )
     _, grid, _, _, _ = _setup()
@@ -447,7 +447,7 @@ def test_smag_w_branch_shape_consistency():
     nlev-1)`` followed by ``(1, 1)`` pad. Verifies it matches w
     shape ``(ny, nx, nlev+1)`` so the diffusion helper does not
     raise."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         _variable_K_diffusion_vlast, _compute_smagorinsky_K_m_plane,
     )
     _, grid, hc, _, _ = _setup()
@@ -473,7 +473,7 @@ def test_full_3D_strain_picks_up_pure_vertical_shear():
     Pure ∂u/∂z shear must give K_m > 0 — the previous horizontal-only
     pilot returned zero here, masking the vertical mixing path. This
     is the upgrade pinned by the user request (2026-05-24)."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         _compute_smagorinsky_K_m_plane,
     )
     _, grid, hc, _, _ = _setup()
@@ -500,7 +500,7 @@ def test_full_level_centred_d_dz_linear_field_returns_constant():
     absolute magnitude because the helper returns the per-level-
     index derivative, which is ``-∂u/∂z_physical`` under the
     top-to-bottom storage order.)"""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         full_level_centred_d_dz,
     )
     _, grid, hc, _, _ = _setup()
@@ -523,7 +523,7 @@ def test_full_level_centred_d_dz_linear_field_returns_constant():
 def test_full_3D_strain_picks_up_pure_dw_dz():
     """Pure ∂w/∂z divergence (no horizontal shear, no w-tilt) must
     give K_m > 0 via the S_33² term."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         _compute_smagorinsky_K_m_plane,
     )
     _, grid, hc, _, _ = _setup()
@@ -627,7 +627,7 @@ def test_sgs_brunt_vaisala_unsaturated_equals_virtual_theta_n2():
     must return the CLEAR branch ``N² = (g/θ_v)·∂θ_v/∂z`` with
     ``θ_v = virtual_temperature(θ, q_v)`` (SAM unsaturated buoy_sgs)."""
     from legoesm import constants
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         full_level_centred_d_dz, sgs_brunt_vaisala_sq,
     )
     from legoesm.atmosphere.physics._shared import virtual_temperature
@@ -658,7 +658,7 @@ def test_sgs_brunt_vaisala_saturated_reduces_stability():
     sounding — latent-heat release on adiabatic ascent reduces the
     effective static stability, so the ``dosmagor`` shutoff lets the LES
     keep mixing inside cloud."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         sgs_brunt_vaisala_sq,
     )
     from legoesm.thermo import saturation_mixing_ratio
@@ -697,7 +697,7 @@ def test_sgs_brunt_vaisala_ad_safe_across_saturation():
     even for a column straddling the clear↔moist transition — the smooth
     sigmoid blend (not a hard ``where``) is what guarantees this (Codex
     iter-2 adversarial-review)."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         sgs_brunt_vaisala_sq,
     )
     from legoesm.thermo import saturation_mixing_ratio
@@ -736,7 +736,7 @@ def test_sgs_diffuses_tracers_conservatively():
     dycore must add K_h diffusion to the tracers — nonzero (a horizontal tracer
     gradient IS mixed) and CONSERVATIVE (domain-sum tendency = 0), and exactly
     zero when c_s=0 (rest state ⇒ no advection either)."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         make_rest_state,
     )
     grid = create_plane_grid(nx=8, ny=8, nlev=6, dx=1000.0, dy=1000.0,
@@ -776,7 +776,7 @@ def test_sgs_tracer_diffusion_preserves_positivity():
     loses, neighbours gain — a positive-weight stencil within the diffusion CFL
     K·dt/dx²≪½) and is conservative (Σ tendency = 0). Advection positivity is a
     separate (scheme-dependent) property, so this isolates the SGS operator."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         _variable_K_diffusion_vlast, _compute_smagorinsky_K_m_plane,
     )
     grid = create_plane_grid(nx=8, ny=8, nlev=6, dx=1000.0, dy=1000.0,
@@ -795,3 +795,92 @@ def test_sgs_tracer_diffusion_preserves_positivity():
         assert float(np.min(q + dt * dq)) >= 0.0, f"negative at dt={dt}"
     assert abs(float(np.sum(dq))) < 1e-18              # conservative
     assert float(np.max(np.abs(dq))) > 0.0             # SGS actually acted
+
+
+# --------------------------------------------------------------------------- #
+# Mixed-shear SIGN regression (2026-07-12). ``full_level_centred_d_dz``
+# returns the LEVEL-INDEX derivative = −∂/∂z_physical (z up, level index
+# top→down), and the strain call sites must negate it before MIXING with the
+# already-physical ∂w/∂x, ∂w/∂y. The pre-fix code formed
+# S13 = 0.5(−∂u/∂z + ∂w/∂x): the 2·(∂u/∂z)(∂w/∂x) cross term in S13² flipped,
+# giving |S|² = (b−a)² instead of (a+b)² under u = a·z, w = b·x.
+# --------------------------------------------------------------------------- #
+
+
+def _mixed_shear_fields(grid, hc, a, b):
+    """u = a·z (∂u/∂z_phys = a), w = b·x (∂w/∂x = b), v = 0."""
+    u = jnp.broadcast_to(
+        (a * hc.z_full)[None, None, :], (grid.ny, grid.nx, grid.nlev),
+    )
+    x_c = (jnp.arange(grid.nx, dtype=jnp.float64) + 0.5) * grid.dx
+    w = jnp.broadcast_to(
+        (b * x_c)[None, :, None], (grid.ny, grid.nx, grid.nlev + 1),
+    )
+    v = jnp.zeros_like(u)
+    return u, v, w
+
+
+def test_smagorinsky_mixed_shear_matches_analytic_a_plus_b():
+    """u = a·z, w = b·x with the SAME signs: only S13 = 0.5(a+b) is nonzero,
+    so |S|² = 2·(2·S13²) = (a+b)² and K_m = (c_s·Δ)²·(a+b) at interior
+    columns. The pre-fix sign flip gave |S|² = (b−a)², i.e. K_m 3× too small
+    for a = 1e-3, b = 2e-3 (under-mixing in sheared updrafts)."""
+    _, grid, hc, _, _ = _setup()
+    a, b = 1.0e-3, 2.0e-3
+    u, v, w = _mixed_shear_fields(grid, hc, a, b)
+    K = _compute_smagorinsky_K_m_plane(
+        u, v, w, grid, hc, c_s=0.2, wall_damping=False,
+    )
+    delta = (grid.dx * grid.dy * np.asarray(hc.dz)) ** (1.0 / 3.0)
+    expected = (0.2 * delta) ** 2 * (a + b)                       # (nlev,)
+    # Interior columns only: the periodic roll wraps the linear-in-x w, so
+    # cell centres i = 0 and i = nx−1 see the wrap jump.
+    K_int = np.asarray(K)[:, 1:-1, :]
+    np.testing.assert_allclose(
+        K_int, np.broadcast_to(expected, K_int.shape), rtol=1.0e-12,
+    )
+
+
+def test_velocity_gradients_plane_vertical_signs_are_physical():
+    """``_velocity_gradients_plane`` must return the PHYSICAL ∂/∂z (z up):
+    linear profiles u = a·z, v = b·z, w = c·z must give dudz = +a, dvdz = +b,
+    dwdz = +c everywhere (the raw level-index derivative is the negative
+    under top-down storage). Vreman/AMD consume these gradients in ODD
+    products and the dynamic closures in mixed strain products, so a global
+    flip changes their K_m / C_s."""
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
+        _velocity_gradients_plane,
+    )
+    _, grid, hc, _, _ = _setup()
+    a, b, c = 1.5e-3, -2.5e-3, 4.0e-4
+    shape = (grid.ny, grid.nx, grid.nlev)
+    u = jnp.broadcast_to((a * hc.z_full)[None, None, :], shape)
+    v = jnp.broadcast_to((b * hc.z_full)[None, None, :], shape)
+    w = jnp.broadcast_to(
+        (c * hc.z_half)[None, None, :], (grid.ny, grid.nx, grid.nlev + 1),
+    )
+    (_, _, _, _, _, dudz, _, _, dvdz, _, _, dwdz) = (
+        _velocity_gradients_plane(u, v, w, grid, hc))
+    np.testing.assert_allclose(np.asarray(dudz), a, rtol=1.0e-12)
+    np.testing.assert_allclose(np.asarray(dvdz), b, rtol=1.0e-12)
+    np.testing.assert_allclose(np.asarray(dwdz), c, rtol=1.0e-12)
+
+
+def test_centre_strain_mixed_shear_matches_analytic_a_plus_b():
+    """A-grid strain path shared by the dynamic/LASD closures (and built on
+    the same gradients Vreman/AMD consume): S13 = 0.5(∂u/∂z + ∂w/∂x)
+    = 0.5(a+b) and |S| = √(2 S_ij S_ij) = a+b under u = a·z, w = b·x at
+    interior columns. Pre-fix this gave 0.5(b−a) / |b−a|."""
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
+        _centre_velocities_and_strain_plane,
+    )
+    _, grid, hc, _, _ = _setup()
+    a, b = 1.0e-3, 2.0e-3
+    u, v, w = _mixed_shear_fields(grid, hc, a, b)
+    (_, _, _, _, _, _, _, S13, _, Smag) = (
+        _centre_velocities_and_strain_plane(u, v, w, grid, hc))
+    # Centred A-grid ∂w/∂x uses roll(±1): columns 0 and nx−1 see the wrap.
+    S13_int = np.asarray(S13)[:, 1:-1, :]
+    Smag_int = np.asarray(Smag)[:, 1:-1, :]
+    np.testing.assert_allclose(S13_int, 0.5 * (a + b), rtol=1.0e-12)
+    np.testing.assert_allclose(Smag_int, a + b, rtol=1.0e-12)

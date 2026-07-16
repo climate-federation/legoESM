@@ -245,9 +245,14 @@ def hall_kernel(r_i: jax.Array, r_j: jax.Array, dv: jax.Array) -> jax.Array:
     # AD-safe where-before-divide (a plain where still NaNs the gradient).
     ratio = safe_divide(r_s, r_l, 1.0e-30)
 
-    r0 = _HALL_R0_UM.astype(r_l.dtype)
-    rat = _HALL_RAT.astype(r_l.dtype)
-    ecoll = _HALL_ECOLL.astype(r_l.dtype)
+    # Host tables (module-top np — no import-time device alloc) → device arrays
+    # here so the traced index gathers (rat[iqq], ecoll[iqq, irr_b], …) run under
+    # jit/vmap. `.astype` on a numpy array stays numpy, which a traced index
+    # cannot gather (TracerArrayConversionError under vmap); jnp.asarray fixes it
+    # and constant-folds.
+    r0 = jnp.asarray(_HALL_R0_UM, dtype=r_l.dtype)
+    rat = jnp.asarray(_HALL_RAT, dtype=r_l.dtype)
+    ecoll = jnp.asarray(_HALL_ECOLL, dtype=r_l.dtype)
 
     # Oracle index search: irr = first i with r_um <= r0[i] (15 if beyond);
     # iqq = first i in 1..20 with ratio <= rat[i].

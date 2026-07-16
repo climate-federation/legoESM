@@ -275,7 +275,7 @@ def apply_params_to_config(config, params: dict, *, driver: str = "run",
 
     Note (soft limitation): a union config that holds ALL of a family's scheme
     sub-configs simultaneously (``VerticalMixingConfig`` carries kpp/tke/catke;
-    ``MultiLayerLandConfig`` carries carbon/stomata) is always "present", so an
+    ``MultiLayerLandConfig`` carries carbon + stomata) is always "present", so an
     override for a scheme that is not the *selected* one is applied to that
     (inert) sub-config rather than raising — it simply has no effect on the run.
     The strict absent-raise still catches wrong-component params (e.g. an

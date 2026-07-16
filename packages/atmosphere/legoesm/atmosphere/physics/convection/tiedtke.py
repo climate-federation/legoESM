@@ -14,16 +14,99 @@ Smooth-everywhere implementation:
   threshold.
 * Downdraft RH trigger — sigmoid on (downdraft_RH_min - column_RH).
 * CAPE gate — sigmoid via :func:`._triggers.cape_trigger`.
-* Moisture-convergence proxy — saturation-deficit
-  ``MC_proxy = max(q_sat - q_v, 0) / tau_MC_proxy`` (a placeholder
-  until the PR-0 ``compute_moisture_convergence`` diagnostic ships).
+* Deep (penetrative) closure — driven by the large-scale moisture
+  convergence: production passes the real PER-LEVEL
+  ``_shared.compute_moisture_convergence`` field, which this closure
+  column-integrates.  When ``moisture_convergence`` is ``None`` (configs
+  where large-scale MC is unavailable) it falls back to the
+  saturation-EXCESS proxy
+  ``MC_proxy = ∫ max(q_v - RH_crit·q_sat, 0) dp / (g·tau_MC_proxy)``.
 * Plume integrator's mass-flux profile is gated by buoyancy sigmoid.
+
+Faithfulness to Tiedtke (1989)
+------------------------------
+Audited term-by-term against Tiedtke (1989) — the ORIGINAL
+moisture-convergence-closure scheme.  Note the widely-used code
+descendants (ECMWF IFS ``cumastrn``, WRF ``module_cu_tiedtke``) adopt
+the later Nordeng (1994) CAPE closure for deep convection, so the 1989
+*paper* — not those codes — is the oracle for the closure below.  The
+downdraft ratio matches the cloned IFS source (``sucumf``:
+``RMFDEPS = 0.30``); the turbulent ENTRAINMENT rates below are the
+Tiedtke-1989 PAPER values, which the IFS later retuned (e.g. deep
+detrainment ``DETRPEN = 0.75e-4``), so those follow the paper, not the
+modern IFS.  One legoESM DETRAINMENT default (mid-level ``δ = 2e-4``)
+departs from the paper — see DEPARTURES.
+
+FAITHFUL to Tiedtke (1989):
+
+* Turbulent ENTRAINMENT rates — deep ε = δ = 1e-4 m⁻¹, shallow
+  ε = δ = 3e-4 m⁻¹, mid-level ε = 1e-4 m⁻¹ (``TiedtkeConfig`` defaults;
+  the canonical Tiedtke-1989 turbulent-mixing coefficients).  The
+  mid-level DETRAINMENT default (δ = 2e-4) departs — see below.
+* Downdraft — mass flux at the level of free sinking is
+  ``downdraft_alpha`` (0.3) × the diagnosed cloud-base updraft mass flux
+  in the RH-gate's active limit (Tiedtke-1989 downdraft closure; the
+  ratio matches IFS ``RMFDEPS = 0.30``, verified in the cloned source).
+* Deep (penetrative, Type-1) closure driven by large-scale moisture
+  convergence — production passes the real PER-LEVEL
+  ``_shared.compute_moisture_convergence`` field, which this closure
+  column-integrates.
+* Three cloud types (deep / shallow / mid-level) — Tiedtke's discrete
+  type SELECTION rendered as a smooth cloud-depth blend (differentiable
+  surrogate; identical to the discrete choice in the crisp limit).
+
+DEPARTURES / SURROGATES (NOT faithful to the 1989 paper — documented):
+
+* **Shallow closure** uses a CAPE-relaxation SURROGATE, not Tiedtke's
+  sub-cloud moisture-supply closure (``M_b`` balancing surface
+  evaporation + sub-cloud turbulent moisture-flux convergence).  The
+  surface latent-heat flux is a coupler quantity NOT passed to the
+  convection scheme, so the exact 1989 shallow closure is not currently
+  computable here — a structural input gap, not a numerical choice.
+* **Mid-level closure** is tied to the shallow surrogate
+  (``M_b = M_b_shallow × midlevel_M_b_fraction``) rather than Tiedtke's
+  elevated large-scale moisture convergence.  Unlike the shallow case
+  the required input (``mc_col``) is available in gridded configurations,
+  so this is fixable there; it is deferred pending an RCE-gated
+  controlled test — a closure can be oracle-faithful yet regress
+  equilibrium (cf. the Bechtold F6 mismapping, +19 K RCE).
+* **Mid-level detrainment** default ``delta_midlevel = 2e-4 m⁻¹``
+  exceeds the 1e-4 turbulent entrainment (a legoESM tuning choice;
+  Tiedtke's turbulent ε and δ are symmetric), so mid-level plumes
+  detrain faster than the paper.
+* **Deep closure** is a proportional response to the (gated) moisture
+  convergence, not Tiedtke's exact balance requiring the convective
+  moisture SINK to equal the large-scale supply; it also carries a CAPE
+  weight (a Nordeng-flavoured trigger), not a pure 1989 parcel test.
+* **Attenuation of the deep MC closure (known issue, deferred).** The
+  shallow CAPE-surrogate cloud-base mass flux
+  ``M_b_shallow = cape_weight·ρ_BL·(CAPE−thr)₊/(g·tau_shallow_M_b)``
+  exceeds the ``M_b_max`` cap (0.05) for moderate-and-larger CAPE
+  (≈0.16 kg/m²/s at CAPE≈5000, ≈0.7 at CAPE≈22000), so wherever the
+  shallow class weight is non-negligible the class-blended ``M_b`` clips
+  at the cap and the deep moisture-convergence contribution is
+  attenuated.  This compounds with a small deep-class weight from the
+  smooth ``cloud_depth = z_lnb − z_lcl`` metric under-detecting the cloud
+  top (a CAPE≈5000 sounding reports ~1.8 km depth).  For one deep test
+  sounding, feeding a large ``moisture_convergence`` changed the summed
+  updraft mass flux by ≈0 at the default config but by ≈+0.004 kg/m²/s
+  once the shallow surrogate was suppressed — i.e. the deep MC closure
+  functions but has limited influence in typical columns.  Unmasking it
+  (raising the shallow saturation and/or fixing the depth metric) is
+  BEHAVIORAL and must pass the SCM-RCE realism gate (cf. Bechtold F6) —
+  tracked as a follow-up, not fixed here.
+* **Organized entrainment/detrainment** (Tiedtke's cloud-base organized
+  inflow / cloud-top organized outflow) is not represented — entrainment
+  is purely turbulent (constant per class).
 
 References
 ----------
 * Tiedtke, M. (1989). A comprehensive mass flux scheme for cumulus
   parameterization in large-scale models.  *Mon. Wea. Rev.*, 117,
   1779–1800.
+* Nordeng, T. E. (1994). Extended versions of the convective
+  parametrization scheme at ECMWF.  ECMWF Tech. Memo. 206 (CAPE closure
+  adopted by the IFS/WRF descendants; not used for the deep closure here).
 * Gregory, D., et al. (1997). Parametrization of momentum transport
   by convection. II.  *Quart. J. Roy. Meteor. Soc.*, 123, 1153–1183.
 """
@@ -243,12 +326,13 @@ def tiedtke_convection(
 
     # -- Closure: deep uses moisture convergence; shallow and midlevel
     # use a CAPE-relaxation closure.  Combined per-column closure is a
-    # class-weighted blend.  When the bridge supplies a real
-    # ``moisture_convergence`` array (from
+    # class-weighted blend.  When the bridge supplies a real per-level
+    # ``moisture_convergence`` field (from
     # ``_shared.compute_moisture_convergence``, available for cubed-
-    # sphere and lat-lon dycores), use it directly; otherwise fall
-    # back to a saturation-deficit proxy that is qualitatively similar
-    # (positive in moist columns, vanishing in dry ones).
+    # sphere and lat-lon dycores), column-integrate and use it directly;
+    # otherwise (argument None) fall back to a saturation-EXCESS proxy
+    # that is qualitatively similar (positive in moist columns, vanishing
+    # in dry ones).
     q_sat_env = saturation_mixing_ratio(T, p_full)
     dp = p_half[:, 1:] - p_half[:, :-1]
     if moisture_convergence is not None:

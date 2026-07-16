@@ -32,7 +32,13 @@ import numpy as np
 
 # Restart format version — bump when the payload schema changes so old
 # checkpoints refuse to load rather than silently corrupt a run.
-_RESTART_VERSION = 1
+#   v1: core prognostic fields + optional TgC.
+#   v2: adds the optional elevation-band / ponding water reservoirs
+#       (surface_water, snow_bands, snow_age_bands, ice_bands) so a warm start
+#       does not silently zero that water mass.  v1 files still load (they carry
+#       none of the optional reservoirs — the legacy single-column case).
+_RESTART_VERSION = 2
+_SUPPORTED_VERSIONS = (1, 2)
 
 # Only multilayer runs use this path today.  Slab is a natural next addition
 # using the same version-tagged .npz layout.
@@ -40,6 +46,15 @@ _MULTILAYER_FIELDS = (
     "T_soil", "psi_soil", "theta_soil",
     "runoff_surface", "runoff_subsurface",
     "snow_depth", "snow_age",
+)
+
+# Optional prognostic WATER reservoirs (arrays or None).  Present only when the
+# corresponding feature is enabled (elevation-band snow, surface ponding); each
+# holds real mass, so it must round-trip or the warm start leaks it.  Serialised
+# like ``TgC``: written only when not None, grafted on merge only when both the
+# restart and the template carry it.
+_MULTILAYER_OPTIONAL_ARRAY_FIELDS = (
+    "surface_water", "snow_bands", "snow_age_bands", "ice_bands",
 )
 
 
@@ -88,11 +103,25 @@ def save_land_restart(
         "n_steps_completed": np.array(int(n_steps_completed), dtype=np.int64),
         "metadata_json": np.array(json.dumps(metadata or {}), dtype="U65536"),
     }
+    # The CLM-ML canopy carries a nested mlcanopy pytree, not a plain array; it
+    # has no serialiser yet, so refuse loudly rather than silently drop it.
+    if getattr(state, "canopy_state", None) is not None:
+        raise NotImplementedError(
+            "save_land_restart cannot yet serialise the CLM-ML canopy_state "
+            "(nested pytree); restart support for the multilayer canopy scheme "
+            "is not implemented."
+        )
+
     for field in _MULTILAYER_FIELDS:
         payload[field] = np.asarray(getattr(state, field))
     tgc = getattr(state, "TgC", None)
     if tgc is not None:
         payload["TgC"] = np.asarray(tgc)
+    # Optional water reservoirs — write each only when the feature is active.
+    for field in _MULTILAYER_OPTIONAL_ARRAY_FIELDS:
+        val = getattr(state, field, None)
+        if val is not None:
+            payload[field] = np.asarray(val)
 
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -127,10 +156,10 @@ def load_land_restart(
 
     data = np.load(str(path), allow_pickle=False)
     version = int(data["restart_version"])
-    if version != _RESTART_VERSION:
+    if version not in _SUPPORTED_VERSIONS:
         raise ValueError(
             f"restart version {version} in {path} is not supported by this "
-            f"loader (expected {_RESTART_VERSION}); the schema has changed."
+            f"loader (supported {_SUPPORTED_VERSIONS}); the schema has changed."
         )
     land_mode = str(data["land_mode"])
     if land_mode != expected_land_mode:
@@ -150,6 +179,11 @@ def load_land_restart(
             f"{expected_n_layers}"
         )
 
+    optional = {
+        field: jnp.asarray(data[field])
+        for field in _MULTILAYER_OPTIONAL_ARRAY_FIELDS
+        if field in data.files
+    }
     state = MultiLayerLandState(
         T_soil=T,
         psi_soil=jnp.asarray(data["psi_soil"]),
@@ -159,6 +193,7 @@ def load_land_restart(
         snow_depth=jnp.asarray(data["snow_depth"]),
         snow_age=jnp.asarray(data["snow_age"]),
         TgC=jnp.asarray(data["TgC"]) if "TgC" in data.files else None,
+        **optional,
     )
     meta = {
         "restart_version": version,
@@ -170,4 +205,53 @@ def load_land_restart(
     return state, meta
 
 
-__all__ = ["save_land_restart", "load_land_restart"]
+def merge_land_restart_into_template(loaded, template):
+    """Return ``template`` with its prognostic fields replaced by ``loaded``'s.
+
+    A restart round-trips the core prognostic fields (``_MULTILAYER_FIELDS`` +
+    ``TgC``) and the optional water reservoirs
+    (``_MULTILAYER_OPTIONAL_ARRAY_FIELDS``: ``surface_water``, ``snow_bands``,
+    ``snow_age_bands``, ``ice_bands``).  ``step_multilayer_land`` populates the
+    optional fields as arrays, so feeding a bare loaded state straight into a
+    ``lax.scan`` (the coupled-AMIP segment, or a chained spin-up) raises a carry
+    input/output pytree-structure mismatch.  Building from a freshly-initialised
+    ``template`` (canonical structure) and grafting the restart's prognostic
+    columns onto it fixes the structure while keeping the equilibrated values.
+
+    Each optional reservoir is grafted only when BOTH the restart and the
+    template carry it (same feature enabled on both ends); a v1 restart (no
+    reservoirs) or a bands-off template falls back to the template's value, so
+    no mass is invented and pytree structure is preserved.
+
+    Mirrors the land-ml CHECKPOINT restore in ``model_driver`` (``template.
+    _replace(**fields)``), with a shape check per field so a resolution /
+    soil-layer skew fails loudly rather than silently reshaping.
+    """
+    fields = {}
+    for name in _MULTILAYER_FIELDS:
+        arr = getattr(loaded, name)
+        ref = getattr(template, name)
+        if ref is not None and hasattr(arr, "shape") and arr.shape != ref.shape:
+            raise ValueError(
+                f"land restart field '{name}' has shape {tuple(arr.shape)}, "
+                f"expected {tuple(ref.shape)} (resolution / soil-layer skew)")
+        fields[name] = arr
+    if getattr(loaded, "TgC", None) is not None:
+        fields["TgC"] = loaded.TgC
+    for name in _MULTILAYER_OPTIONAL_ARRAY_FIELDS:
+        arr = getattr(loaded, name, None)
+        ref = getattr(template, name, None)
+        if arr is None or ref is None:
+            continue  # feature off on one end -> keep template structure, invent no mass
+        if hasattr(arr, "shape") and hasattr(ref, "shape") and arr.shape != ref.shape:
+            raise ValueError(
+                f"land restart field '{name}' has shape {tuple(arr.shape)}, "
+                f"expected {tuple(ref.shape)} (band-count / resolution skew)")
+        fields[name] = arr
+    return template._replace(**fields)
+
+
+__all__ = [
+    "save_land_restart", "load_land_restart",
+    "merge_land_restart_into_template",
+]

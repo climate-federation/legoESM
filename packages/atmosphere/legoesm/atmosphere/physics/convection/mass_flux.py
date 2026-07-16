@@ -505,6 +505,27 @@ def apply_mass_flux_kernel_implicit_flux(
     g = constants.g
     c_pd = constants.c_pd
     ncol, nlev = T.shape
+
+    # Pin the whole solve to ONE working dtype = the state precision.  The
+    # tridiagonal solve requires a/b/c (from M / Δp) and d (from s = c_p T + g z
+    # and q_v) to share a dtype, but z / geometry can arrive at a DIFFERENT
+    # precision than the state fields — a float32 orchestrator passes float64 z,
+    # which would leave d=float64 while a/b/c stay float32 and trip
+    # thomas_solve_batched's mixed-dtype guard.  result_type(T, q_v) keeps a
+    # float32 run all-float32 and an x64 run all-float64 (pin-to-state doctrine;
+    # jax-scan-carry-dtype-stability).
+    work_dtype = jnp.result_type(T, q_v)
+    T = T.astype(work_dtype)
+    q_v = q_v.astype(work_dtype)
+    p_full = p_full.astype(work_dtype)
+    p_half = p_half.astype(work_dtype)
+    T_u = T_u.astype(work_dtype)
+    q_v_u = q_v_u.astype(work_dtype)
+    q_c_u = q_c_u.astype(work_dtype)
+    M_profile = M_profile.astype(work_dtype)
+    z = z.astype(work_dtype)
+    rho = rho.astype(work_dtype)
+
     rho_safe = jnp.clip(rho, 0.01, None)  # coeff-ok: density floor
 
     # Same per-level cap + stratospheric gate as the advective kernel so

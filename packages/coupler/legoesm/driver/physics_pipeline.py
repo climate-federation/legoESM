@@ -370,7 +370,7 @@ class PhysicsPipeline:
         soil availability is routed through the SHARED land Jarvis (1976)
         stomatal model: ``beta = compute_stomatal_beta(jarvis_gs(...),
         beta_soil)`` = ``min(beta_soil, clip(gs/gs_ref))`` — REUSING
-        ``legoesm.land.carbon.stomata`` (no re-derived conductance numerics,
+        ``legoesm.land.stomata`` (no re-derived conductance numerics,
         the same fallback path ``compute_effective_beta`` takes when the
         carbon state is unavailable).  ``gs`` closes the canopy term in low
         light (so ``beta -> 0`` at night) and high VPD.  Without the forcing
@@ -386,7 +386,7 @@ class PhysicsPipeline:
             return beta_soil
         # Shared Jarvis stomatal limitation (carbon state unavailable on the
         # AMIP slab path -> LAI=None -> min(beta_soil, beta_canopy)).
-        from legoesm.land.carbon.stomata import (
+        from legoesm.land.stomata import (
             compute_stomatal_beta,
             jarvis_gs,
         )
@@ -503,7 +503,8 @@ class PhysicsPipeline:
         return T_land + dt_rad * flux / (self.C_land - dt_rad * dflux_dT)
 
     def _step_multilayer_land_tile(self, land_ml, sw_down_col, lw_down_col,
-                                   T, p_s, q_v, u, v, precip_col, dt):
+                                   T, p_s, q_v, u, v, precip_col, dt,
+                                   land_ml_params=None):
         """Advance the MULTILAYER (Richards) land tile one radiation step and return
         ``(land_ml_new, T_sfc_col, albedo_col)`` — all in flattened COLUMN space.
 
@@ -533,13 +534,17 @@ class PhysicsPipeline:
         # carbon_state is PRESCRIBED (fixed LAI) when set — the returned, evolved
         # carbon pools are discarded so the prescribed leaf carbon is reused every
         # step (no carbon spin-up), activating the Farquhar Vc_max25/g1/LCMA path.
+        # Transient land-use cover threads the per-segment params as a traced arg
+        # (SegmentForcing doctrine); None -> the baked self.land_ml_params, so the
+        # static path is byte-identical.
+        _lmp = land_ml_params if land_ml_params is not None else self.land_ml_params
         land_new, resp, _ = step_multilayer_land(
             land_ml, forcing, self.land_ml_cfg, self.land_ml_u_min, dt_rad,
             lat=self.land_ml_lat, doy=self.land_ml_doy,
-            land_params=self.land_ml_params, carbon_state=self.land_ml_carbon)
+            land_params=_lmp, carbon_state=self.land_ml_carbon)
         return land_new, resp.T_sfc, resp.albedo
 
-    def _land_qsfc_multilayer(self, land_ml, T_land, p_s):
+    def _land_qsfc_multilayer(self, land_ml, T_land, p_s, land_ml_params=None):
         """Effective land-tile surface humidity for the multilayer land tile,
         ``q_sfc = beta_soil * q_sat(T_land)`` (the alpha-method, matching
         ``simple_seb``'s ``q_sfc = beta_effective * q_sat_sfc``), in GRID format.
@@ -557,8 +562,9 @@ class PhysicsPipeline:
         """
         from legoesm.land.multilayer_land import land_tile_beta_soil
         ad = self.adapter
+        _lmp = land_ml_params if land_ml_params is not None else self.land_ml_params
         beta_col = land_tile_beta_soil(
-            land_ml.theta_soil, self.land_ml_cfg, self.land_ml_params)
+            land_ml.theta_soil, self.land_ml_cfg, _lmp)
         q_sat_land_col = ad.flatten_2d(
             saturation_specific_humidity(T_land, p_s))
         return ad.unflatten_2d(beta_col * q_sat_land_col)
@@ -660,7 +666,8 @@ class PhysicsPipeline:
                             T_land=None, aerosol_od=None,
                             sfc_shflx_override=None, sfc_lhflx_override=None,
                             tke=None, qke=None, gwd_spectrum=None,
-                            w_land=None, snow=None, land_ml=None):
+                            w_land=None, snow=None, land_ml=None,
+                            land_ml_params=None):
         """Convection + microphysics + BL exchange with held radiation.
 
         ``T_land`` is the slab-land skin temperature.  When the land tile
@@ -1316,7 +1323,8 @@ class PhysicsPipeline:
                 # the land model's soil-moisture-throttled q_sfc so the BL
                 # latent flux is not the beta=1 saturated potential rate.
                 _q_sfc_land_ml = (
-                    self._land_qsfc_multilayer(land_ml, T_land, p_s)
+                    self._land_qsfc_multilayer(land_ml, T_land, p_s,
+                                               land_ml_params=land_ml_params)
                     if land_ml is not None else None
                 )
                 _turb_kwargs["surface_flux"] = self._tiled_surface_flux(
@@ -1580,7 +1588,7 @@ class PhysicsPipeline:
                                sfc_T_override=None,
                                sfc_emissivity_override=None,
                                conv_precip=None, land_ml=None, w_land=None,
-                               snow=None):
+                               snow=None, land_ml_params=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
         Returns ``(dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa,
@@ -1649,11 +1657,17 @@ class PhysicsPipeline:
         # per-column albedo/emissivity; else the scalar-T_land slab.
         _ml_active = self.land_ml_cfg is not None and land_ml is not None
         _land_active = self.f_land is not None and (T_land is not None or _ml_active)
+        # Transient land-use cover: per-segment traced multilayer params (None ->
+        # the baked self.land_ml_params, byte-identical static path).  Resolved
+        # once here so it is in scope for BOTH the radiation-albedo blend and the
+        # land skin-T update below whenever the multilayer tile is active.
+        _lmp_rad = (land_ml_params if land_ml_params is not None
+                    else self.land_ml_params) if _ml_active else None
         if _land_active:
             if _ml_active:
                 T_land_grid = ad.unflatten_2d(land_ml.T_soil[:, 0])
-                alb_land = ad.unflatten_2d(self.land_ml_params.albedo_veg)
-                emis_land = ad.unflatten_2d(self.land_ml_params.emissivity)
+                alb_land = ad.unflatten_2d(_lmp_rad.albedo_veg)
+                emis_land = ad.unflatten_2d(_lmp_rad.emissivity)
             else:
                 # Snow-brightened land albedo (snow-albedo feedback); the
                 # static vegetation albedo when off (byte-identical).
@@ -1894,7 +1908,7 @@ class PhysicsPipeline:
                           if conv_precip is not None else None)
             land_ml_new, T_sfc_ml_col, _ = self._step_multilayer_land_tile(
                 land_ml, rad_out.sw_flux_down[:, -1], rad_out.lw_flux_down[:, -1],
-                T, p_s, q_v, u, v, precip_col, dt)
+                T, p_s, q_v, u, v, precip_col, dt, land_ml_params=_lmp_rad)
             # Couple the multilayer land SKIN TEMPERATURE back to T_land so the
             # atmospheric BL surface fluxes (tiled _tiled_surface_flux / the non-
             # tiled T_sfc blend) see the EVOLVING Richards soil column.  Previously
@@ -2033,7 +2047,7 @@ class PhysicsPipeline:
                          sfc_lhflx_override=None,
                          tke=None, qke=None, gwd_spectrum=None,
                          conv_precip=None, land_ml=None, w_land=None,
-                         snow=None):
+                         snow=None, land_ml_params=None):
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -2048,7 +2062,7 @@ class PhysicsPipeline:
                  sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                  sfc_shflx_override, sfc_lhflx_override,
                  tke, qke, gwd_spectrum,
-                 conv_precip, land_ml, w_land, snow) = args
+                 conv_precip, land_ml, w_land, snow, land_ml_params) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
                  sw_up_toa, lw_up_toa, sw_down_toa, T_land_new, land_ml_new) = \
@@ -2067,7 +2081,7 @@ class PhysicsPipeline:
                         sfc_T_override=sfc_T_override,
                         sfc_emissivity_override=sfc_emissivity_override,
                         conv_precip=conv_precip, land_ml=land_ml, w_land=w_land,
-                        snow=snow,
+                        snow=snow, land_ml_params=land_ml_params,
                     )
 
                 # Radiation-as-forcing: cut radiation's reverse-mode so the
@@ -2095,6 +2109,7 @@ class PhysicsPipeline:
                     sfc_lhflx_override=sfc_lhflx_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                     w_land=w_land, snow=snow, land_ml=land_ml,
+                    land_ml_params=land_ml_params,
                 )
 
                 # Cast to storage dtype so both lax.cond branches match.
@@ -2133,7 +2148,7 @@ class PhysicsPipeline:
                  sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                  sfc_shflx_override, sfc_lhflx_override,
                  tke, qke, gwd_spectrum,
-                 conv_precip, land_ml, w_land, snow) = args
+                 conv_precip, land_ml, w_land, snow, land_ml_params) = args
                 del conv_precip  # radiation-only input; unused on the no-rad path
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -2148,6 +2163,7 @@ class PhysicsPipeline:
                     sfc_lhflx_override=sfc_lhflx_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                     w_land=w_land, snow=snow, land_ml=land_ml,
+                    land_ml_params=land_ml_params,
                 )
 
                 # Cast to storage dtype — must match _rad_branch
@@ -2184,7 +2200,7 @@ class PhysicsPipeline:
                     sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                     sfc_shflx_override, sfc_lhflx_override,
                     tke, qke, gwd_spectrum,
-                    conv_precip, land_ml, w_land, snow)
+                    conv_precip, land_ml, w_land, snow, land_ml_params)
 
             # Issue #316 fix: when the caller knows at build time which
             # branch to take, skip the cond — keeps only the live branch
@@ -2558,61 +2574,47 @@ def _resolve_convection(config):
         # dq_r_conv_dt), the over-bright-anvil / dry-column-runaway failure
         # mode; precip_efficiency > 0 drains it as rain like Tiedtke.
         from legoesm.atmosphere.physics.convection.config import BechtoldConfig
-        conv_config = BechtoldConfig(
+        # #929 None-sentinel precip_efficiency + campaign split/downdraft
+        # threading, combined.  ``None`` keeps BechtoldConfig's 0.7 default (ON,
+        # the anvil-drain fix); an EXPLICIT value overrides (0.0 = legacy).
+        _pe = getattr(config, "convective_precip_efficiency", None)
+        _bechtold_kwargs = dict(
             cape_threshold=getattr(config, 'bechtold_cape_threshold', 70.0),
             p_conv_top_pa=getattr(config, 'bechtold_conv_top_pa', 15000.0),
-            precip_efficiency=getattr(
-                config, 'convective_precip_efficiency', 0.0),
-            # Bechtold takes this dedicated branch (never the shared _split block
-            # below), so thread the precip-split selector + autoconv params HERE
-            # or "--convection bechtold --convective-precip-split autoconversion"
-            # silently runs the constant split (codex HIGH).
+            # Bechtold takes this dedicated branch (never the shared _split
+            # block below), so thread the precip-split selector + autoconv
+            # params HERE or "--convective-precip-split autoconversion" silently
+            # runs the constant split (codex HIGH).
             precip_split_scheme=getattr(config, 'convective_precip_split', 'constant'),
             autoconv_q_c_crit=getattr(config, 'autoconv_q_c_crit', 5.0e-4),
             autoconv_pe_max=getattr(config, 'autoconv_pe_max', 0.9),
-            # Convective-downdraft strength (marine-evaporation / precip lever,
-            # #847). MECHANISM (per codex review of bechtold.py:~624): the
-            # downdraft's only sub-cloud thermodynamic term is rain re-evaporation
-            # (dq_v += evap, dT -= L_v/c_pd·evap) — it COOLS + locally MOISTENS
-            # (it does NOT advect dry mid-level air; M_d is momentum/CMT only).
-            # A stronger downdraft therefore acts INDIRECTLY: the extra sub-cloud
-            # COOLING drives cold pools that enhance convective triggering
-            # (Tompkins 2001) -> more convection + precip -> net column drying ->
-            # larger sea-air gradient -> higher surface evaporation. Empirically
-            # (A/B evap 0.3, rh_min 0.6) q_air 13.7->10.6 g/kg, precip 0.52->3.28.
-            # Defaults reproduce BechtoldConfig
-            # (byte-identical when unset).
-            downdraft_evap_efficiency=getattr(
-                config, 'bechtold_downdraft_evap', 0.05),
+            # Convective-downdraft strength (#847) + penetrative transport
+            # (opt-in): re-evaporation moistens the sub-cloud layer; the
+            # transport advects low-MSE dry air down (downdraft_alpha·M_b),
+            # drying the BL.  Defaults reproduce BechtoldConfig (byte-identical).
+            downdraft_evap_efficiency=getattr(config, 'bechtold_downdraft_evap', 0.05),
             downdraft_alpha=getattr(config, 'bechtold_downdraft_alpha', 0.3),
             downdraft_RH_min=getattr(config, 'bechtold_downdraft_rh_min', 0.2),
-            # Penetrative-downdraft thermodynamic transport (opt-in). UNLIKE
-            # the re-evaporation above (which only moistens the sub-cloud
-            # layer and is gated on LOW sub-cloud RH), the transport is driven
-            # by the convective mass flux (downdraft_alpha·M_b) and advects
-            # low-MSE dry mid-level air DOWN into the humid marine BL, DRYING
-            # it -> stronger surface evaporation + less BL liquid cloud.
-            # Default OFF => byte-identical when unset.
-            downdraft_transport=getattr(
-                config, 'bechtold_downdraft_transport', False),
-            downdraft_entrain_rate=getattr(
-                config, 'bechtold_downdraft_entrain_rate', 5.0e-4),
-            downdraft_detrain_scale_m=getattr(
-                config, 'bechtold_downdraft_detrain_scale_m', 700.0),
+            downdraft_transport=getattr(config, 'bechtold_downdraft_transport', False),
+            downdraft_entrain_rate=getattr(config, 'bechtold_downdraft_entrain_rate', 5.0e-4),
+            downdraft_detrain_scale_m=getattr(config, 'bechtold_downdraft_detrain_scale_m', 700.0),
         )
+        if _pe is not None:
+            _bechtold_kwargs["precip_efficiency"] = _pe
+        conv_config = BechtoldConfig(**_bechtold_kwargs)
     else:
         cc = ConvectionConfig(scheme=scheme)
         conv_config = getattr(cc, scheme)
-        # #832 + follow-up: thread the ExperimentConfig convective rain-split
+        # #832/#929: thread the shared ExperimentConfig convective rain-split
         # knob into EVERY mass-flux scheme whose config exposes
         # ``precip_efficiency`` (tiedtke, zhang_mcfarlane, kain_fritsch,
-        # mass_flux, edmf — all now use the shared ``split_convective_rain``).
-        # Without this the field is DEAD: the scheme sees ``precip_efficiency=0``
-        # (no rain split), so ``dq_r_conv_dt`` is never produced and the
-        # in-updraft-rain path is unreachable.  Default 0.0 keeps the legacy
-        # no-split behaviour byte-identical for any scheme left at the default.
-        _pe = getattr(config, "convective_precip_efficiency", 0.0)
-        if _pe > 0.0 and hasattr(conv_config, "precip_efficiency"):
+        # mass_flux, edmf — the shared ``split_convective_rain``; Bechtold is
+        # threaded in its own branch above).  ``None`` (the default sentinel)
+        # keeps each scheme's OWN default (Tiedtke 0.0 = legacy no-split,
+        # byte-identical); an EXPLICIT >0 value overrides it.
+        _pe = getattr(config, "convective_precip_efficiency", None)
+        if (_pe is not None and _pe > 0.0
+                and hasattr(conv_config, "precip_efficiency")):
             conv_config = conv_config._replace(precip_efficiency=_pe)
 
         # Convective precip-split SCHEME (Bechtold / Tiedtke expose
@@ -2800,6 +2802,53 @@ def _resolve_microphysics(config):
 # Turbulence resolver
 # ---------------------------------------------------------------------------
 
+def apply_surface_flux_config(tc, config):
+    """Propagate the experiment-level surface bulk-flux settings into the
+    active scheme's ``SurfaceLayerConfig``.
+
+    Single source of truth for EVERY dycore backend (#870): the FV pipeline,
+    the MPAS standalone physics, and the spectral path all consume the
+    ``TurbulenceConfig`` this returns, so ``surface_bulk_scheme=coare3`` /
+    ``surface_gustiness_zi`` / ``surface_thermo_convention`` /
+    ``surface_stability_scheme`` reach the surface fluxes identically on all
+    grids.  (Previously this injection lived only in the FV
+    ``_resolve_turbulence`` — the MPAS AMIP lane silently ran the default
+    constant-coefficient surface layer.)
+
+    Default experiment settings => ``tc`` returned UNCHANGED (same object,
+    byte-identical; the override identity contract in
+    ``test_turbulence_config_for_default_vs_override`` relies on this).
+    """
+    sbs = getattr(config, "surface_bulk_scheme", "constant")
+    gzi = getattr(config, "surface_gustiness_zi", None)
+    stc = getattr(config, "surface_thermo_convention", "legoesm")
+    sss = getattr(config, "surface_stability_scheme", "dyer1974")
+    if (sbs == "constant" and gzi is None and stc == "legoesm"
+            and sss == "dyer1974"):
+        return tc
+    sub = getattr(tc, tc.scheme, None)  # e.g. tc.louis; "none"/clubb=None safe
+    if sub is None or getattr(sub, "surface", None) is None:
+        return tc
+    surf = sub.surface
+    if sbs != "constant":
+        surf = surf._replace(bulk_scheme=sbs)
+    if gzi is not None:
+        # COARE convective-gustiness BL depth (only effective with a MOST
+        # bulk_scheme); the diagnosed fix for the calm-warm-ocean low hfls.
+        surf = surf._replace(gustiness_w_zi=gzi)
+    if stc != "legoesm":
+        # AeroBulk thermodynamic-constants parity (#762; only effective
+        # with a MOST bulk_scheme).
+        surf = surf._replace(thermo_convention=stc)
+    if sss != "dyer1974":
+        # Stable-regime MOST functions: keep the atmosphere surface layer
+        # on the SAME stable functions as the coupler ocean tile (both
+        # driven by the one --surface-stability-scheme flag) so the
+        # interface cannot split Dyer-vs-SHEBA across its two sides.
+        surf = surf._replace(stability_scheme=sss)
+    return tc._replace(**{tc.scheme: sub._replace(surface=surf)})
+
+
 def turbulence_config_for(config):
     """The ``TurbulenceConfig`` to build the turbulence kernel from.
 
@@ -2810,6 +2859,10 @@ def turbulence_config_for(config):
     every dycore backend (FV ``_resolve_turbulence``, MPAS, spectral) honours an
     injected override consistently (e.g. a corrected per-column
     ``clubb_lite.C_K`` from the LES-informed correction loop).
+
+    The experiment-level surface bulk-flux settings are applied here too
+    (``apply_surface_flux_config``) so every backend gets the same surface
+    layer (#870).
     """
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
 
@@ -2831,7 +2884,7 @@ def turbulence_config_for(config):
                     and "cloudtop_entrainment_efficiency" in getattr(nested, "_fields", ())):
                 tc = tc._replace(**{scheme: nested._replace(
                     cloudtop_entrainment_efficiency=eff)})
-        return tc
+        return apply_surface_flux_config(tc, config)
     # Under MPI a GLOBAL per-column override must be sliced to the rank's columns
     # (else broadcast_column_param mismatches the rank-local l_mix). Deferred so the
     # parallel layout machinery is only touched when an override is actually set;
@@ -2843,9 +2896,9 @@ def turbulence_config_for(config):
     )
 
     layout = active_column_layout()
-    if layout is None:
-        return override
-    return localize_turbulence_override(override, layout)
+    tc = override if layout is None else localize_turbulence_override(
+        override, layout)
+    return apply_surface_flux_config(tc, config)
 
 
 def _resolve_turbulence(config):
@@ -2860,38 +2913,11 @@ def _resolve_turbulence(config):
     from legoesm.atmosphere.physics.turbulence.integration import get_turbulence_fn
 
     tc = turbulence_config_for(config)
+    # The experiment-level surface bulk-flux settings (coare3 / gustiness /
+    # thermo convention / stability scheme) are already applied by
+    # ``turbulence_config_for`` -> ``apply_surface_flux_config`` (#870), so
+    # the sub-config returned here carries the patched SurfaceLayerConfig.
     _name, turb_fn, turb_config = get_turbulence_fn(tc)
-    # Propagate the experiment-level surface bulk-flux algorithm into the
-    # scheme's SurfaceLayerConfig.  Default "constant" => unchanged (byte-
-    # identical).  The stability-dependent MOST schemes (coare3/large_yeager)
-    # add the convective-gustiness w* term absent from the constant neutral
-    # coefficients — the fix for anemic evaporation over a calm warm ocean.
-    sbs = getattr(config, "surface_bulk_scheme", "constant")
-    gzi = getattr(config, "surface_gustiness_zi", None)
-    stc = getattr(config, "surface_thermo_convention", "legoesm")
-    sss_scheme = getattr(config, "surface_stability_scheme", "dyer1974")
-    if (turb_config is not None
-            and getattr(turb_config, "surface", None) is not None
-            and (sbs != "constant" or gzi is not None or stc != "legoesm"
-                 or sss_scheme != "dyer1974")):
-        surf = turb_config.surface
-        if sbs != "constant":
-            surf = surf._replace(bulk_scheme=sbs)
-        if gzi is not None:
-            # COARE convective-gustiness BL depth (only effective with a MOST
-            # bulk_scheme); the diagnosed fix for the calm-warm-ocean low hfls.
-            surf = surf._replace(gustiness_w_zi=gzi)
-        if stc != "legoesm":
-            # AeroBulk thermodynamic-constants parity (#762; only effective
-            # with a MOST bulk_scheme).
-            surf = surf._replace(thermo_convention=stc)
-        if sss_scheme != "dyer1974":
-            # Stable-regime MOST functions: keep the atmosphere surface layer
-            # on the SAME stable functions as the coupler ocean tile (both
-            # driven by the one --surface-stability-scheme flag) so the
-            # interface cannot split Dyer-vs-SHEBA across its two sides.
-            surf = surf._replace(stability_scheme=sss_scheme)
-        turb_config = turb_config._replace(surface=surf)
     return turb_fn, turb_config
 
 
@@ -3028,11 +3054,15 @@ def build_physics_pipeline(grid, sigma, config):
             if getattr(config, "cloud_scheme", "none") != "none" else ""
         )
         logger.warning(
-            "convection=%r with microphysics='none': convective condensate "
-            "detrains into q_c with no precipitation sink, so surface "
-            "precipitation is identically ZERO and cloud water accumulates "
-            "unbounded (water trap)%s. Enable a microphysics scheme "
-            "(e.g. --microphysics kessler) to close the water budget.",
+            "convection=%r with microphysics='none': the detrained ANVIL "
+            "cloud water (dq_c_conv_dt) has no precipitation sink and "
+            "accumulates unbounded (water trap)%s. Mass-flux schemes with an "
+            "in-updraft rain split (precip_efficiency>0 — e.g. Bechtold's 0.7 "
+            "default) DO precipitate their rain fraction (dq_r_conv_dt) to the "
+            "surface each step, so surface precipitation is NOT necessarily "
+            "zero, but the suspended anvil fraction still needs a microphysics "
+            "sink. Enable a microphysics scheme (e.g. --microphysics kessler) "
+            "to close the water budget.",
             config.convection, _extra,
         )
 

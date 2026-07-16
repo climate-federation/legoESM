@@ -43,7 +43,7 @@ from legoesm.atmosphere.physics.radiation.config import (
 )
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
 from legoesm.atmosphere.physics.radiation.output import RadiationOutput
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     spectral_pe_to_grid,
 )
@@ -78,10 +78,13 @@ def _apply_T_sfc_override(T_sfc, override):
     or ``None``.  ``T_sfc`` may be ``(face, x, y)`` (cubed sphere),
     ``(ny, nx)`` (plane), ``(nCells,)`` (MPAS), ``(n_lat, n_lon)``
     (spectral PE Gaussian grid), or any other shape whose flattened
-    size matches ``ncol``.  Sentinel ``NaN`` entries in ``override``
-    keep the per-column fallback ``T_sfc.reshape(-1)``; finite entries
-    win.  Output is reshaped back to ``T_sfc.shape`` so downstream code
-    sees the same layout it always saw — no broadcasting surprises.
+    size matches ``ncol``.  Sentinel entries (the finite
+    ``NO_SFC_T_OVERRIDE`` value, or a legacy ``NaN``) keep the
+    per-column fallback ``T_sfc.reshape(-1)``; physical entries (above
+    ``SFC_T_OVERRIDE_VALID_MIN``) win — the SAME validity predicate the
+    turbulence resolver uses, so both consumers agree (#911).  Output is
+    reshaped back to ``T_sfc.shape`` so downstream code sees the same
+    layout it always saw — no broadcasting surprises.
 
     A wrong-sized ``override`` (scalar, shape-``(1,)``, etc.) raises
     ``ValueError`` rather than silently broadcasting across every
@@ -101,7 +104,12 @@ def _apply_T_sfc_override(T_sfc, override):
             "column; broadcasting from a scalar or shape-(1,) override "
             "would silently corrupt every column with a single value."
         )
-    out_flat = jnp.where(jnp.isnan(ov_arr), flat, ov_arr)
+    from legoesm.atmosphere.physics.physics_state import (
+        SFC_T_OVERRIDE_VALID_MIN,
+    )
+    # Physical override wins; the finite sentinel (and any legacy NaN) keeps
+    # the fallback.  Matches the turbulence resolver's predicate exactly.
+    out_flat = jnp.where(ov_arr > SFC_T_OVERRIDE_VALID_MIN, ov_arr, flat)
     return out_flat.reshape(orig_shape)
 
 

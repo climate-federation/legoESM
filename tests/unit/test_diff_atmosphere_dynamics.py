@@ -45,7 +45,7 @@ class TestCDGridShallowWater:
     @pytest.fixture(autouse=True)
     def setup(self):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterModel, CDGridShallowWaterConfig,
             CDGridShallowWaterState,
         )
@@ -98,7 +98,7 @@ class TestLatLonShallowWater:
     @pytest.fixture(autouse=True)
     def setup(self):
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
             CGridLatLonShallowWaterModel, CGridLatLonShallowWaterConfig,
             williamson_test2_cgrid,
         )
@@ -158,7 +158,7 @@ class TestSpectralShallowWater:
     @pytest.fixture(autouse=True)
     def setup(self):
         from legoesm.grids.gaussian import create_gaussian_grid
-        from legoesm.atmosphere.dynamics.spectral_sw import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
             SpectralShallowWaterModel, SpectralSWConfig, SpectralSWState,
         )
 
@@ -219,7 +219,7 @@ class TestMPASShallowWater:
     @pytest.fixture(autouse=True)
     def setup(self):
         from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
             MPASShallowWaterModel, MPASShallowWaterConfig,
         )
         from legoesm.core.state import MPASShallowWaterState
@@ -272,7 +272,7 @@ class TestCDGridPE:
     def setup(self):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel,
         )
         from legoesm.core.state import FV3HydrostaticState
@@ -334,12 +334,12 @@ class TestLatLonPE:
         import math
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationModel,
             CGridLatLonPrimitiveEquationConfig,
             hydrostatic_to_cgrid,
         )
-        from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
 
         n_lat, n_lon, nlev = 8, 16, 5
         grid = create_latlon_grid(n_lat, n_lon)
@@ -395,7 +395,7 @@ class TestCompressibleEuler:
     def setup(self):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_height_coordinate, compute_terrain_metric
-        from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
             CDGridCompressibleEulerModel, CDGridCompressibleEulerConfig,
         )
         from legoesm.core.state import NonHydrostaticState
@@ -459,7 +459,7 @@ class TestSpectralPE:
     def setup(self):
         from legoesm.grids.gaussian import create_gaussian_grid
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPrimitiveEquationModel, SpectralPEConfig,
             SpectralHydrostaticState,
         )

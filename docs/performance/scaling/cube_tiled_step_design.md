@@ -14,10 +14,122 @@ BIT-IDENTITY vs the global `_step_fv3` base cut, never a wall-clock number.
 > b66f82bb7) are all in `parallel/tiled_production_cdgrid.py`, bit-identity- /
 > conservation-gated (np24/np54), cavecrew-clean and codex-reviewed (3 findings
 > fixed: mesh/kt + nl≥2 guards 0f50c4afe, f32 delta-first fixer b66f82bb7).
-> **Still UNWIRED into production** (`ModelDriver` / `make_sharded_step` do not
-> call the tiled step — the driver warns) — by design: np>6 anti-scales on Gloo,
-> so wiring is deferred to NVLink/IB/TPU hardware. The capability exists and is
-> verified; the production hookup is the remaining future-HW task.
+>
+> **UPDATE (2026-07-09) — WIRED (the production assembly).** The fast-
+> interconnect hardware arrived (Derecho A100 + NCCL/Slingshot route-B), so
+> the deferred hookup shipped, closing the single-shot gap (the step stages
+> consume face-replicated state and emit tile-sharded state — feeding back
+> required a full-cube gather per step):
+>
+> * `make_tiled_fv3_hydrostatic_step_blocked_2d` (tiled_production_cdgrid):
+>   BLOCKED persistent layout, input layout == output layout, so
+>   `s = step(s)` closes the loop with no per-step gather; optional
+>   in-stage telescoping `fix_ps_mass` (shared `_tile_fix_ps_mass_delta`
+>   psum) matching the serial `use_conservation_fixer+fix_mass` branch;
+>   optional moist `column_physics_fn` (same contract as the moist stage).
+>   BIT-IDENTICAL to the gated single-shot stage
+>   (`test_tiled_blocked_loop.py::test_blocked_step_bit_identical_to_
+>   shipped_stage`, Held-Suarez state, exact zeros).
+> * `make_tiled_cc_loop` (tiled_step_adapter): `enter/step/exit_` over the
+>   blocked layout (`expand_corners_to_blocks` at entry, adapter dedup at
+>   exit — both one-time); production conservation config INSIDE its
+>   envelope (unlike the single-shot adapter).
+> * Wiring: `run_cpu_mpi_scaling --cs-spmd` at 6·kt² devices dispatches to
+>   the blocked loop (kt≥2 previously fell into the non-tile-aware generic
+>   `make_sharded_step`); `bench_cube_tiled_step_scaling --closed-loop` is
+>   the honest feedback-timed lane (the prior lane could only time repeated
+>   single shots on the pristine input); `cube_tiled_step.pbs/.sbatch` run
+>   both parity + timed arms.
+> * Gates: `tests/parallel/test_tiled_blocked_loop.py` — np24 multi-step
+>   parity vs serial `model.step` (production conservation config, mass
+>   conserved to 1e-12, duplicated shared faces bit-identical after N
+>   steps), expand/dedup round-trip, envelope refusals.
+> * Known pre-existing class (NOT introduced by the loop; bounded by the
+>   shipped adapter gate): on production-magnitude states the tiled step
+>   differs from serial by an O(1e-6 abs) face-corner wind term (level-
+>   decaying, step-constant) — invisible on the gentle-random stage gates,
+>   bounded at TILED_PARITY_ATOL in the adapter gates.
+>
+> **UPDATE (2026-07-09b) — the two remaining hookups shipped:**
+>
+> * **Kessler bridge**: `make_kessler_column_physics_fn`
+>   (kessler_forcing.py) — the per-tile column contract over the SAME
+>   shared `kessler_column_tendencies` core the face-sharded
+>   `make_kessler_forcing_cube` lane runs (one controlled comparison
+>   across the device ladder).  `make_tiled_cc_loop` gained the moist
+>   mode (q_pack pack/step/unpack, exact-{q_v,q_c,q_r} refusals);
+>   `run_cpu_mpi_scaling --cs-spmd --physics moist` now dispatches at
+>   6·kt² devices.  Gate: `test_adapter_moist_loop_kessler_matches_serial`
+>   (vs serial `model.step(physics_fn=make_kessler_forcing_cube)`).
+> * **ModelDriver hookup**: `run()` dispatches cube runs with a sub-face
+>   device tiling to `_run_tiled_cube_spmd` — a dedicated segment loop
+>   over the blocked tiled loop (the `_run_compiled_latlon_spmd`
+>   precedent; state tile-sharded across steps, per-SEGMENT gather for
+>   the coupler callback + blowup guard).  Envelope: dynamics-only or
+>   Kessler-microphysics-only (`_tiled_cube_column_physics_fn`); the
+>   unified physics pipeline, Held-Suarez-on-cube, and the
+>   diagnostics/checkpoint writers refuse loudly.  Gates:
+>   `tests/parallel/test_tiled_cube_spmd_driver.py`.
+>
+> **UPDATE (2026-07-09c) — writers + unified-physics tiling core:**
+>
+> * **Writers**: `_run_tiled_cube_spmd` now runs the lightweight
+>   `timeseries.npz` diagnostics (`diag_days`) and the checkpoint hook
+>   (`checkpoint_days`, run()'s `_checkpoint_callback`-or-
+>   `save_checkpoint` contract) — segment length = gcd of the active
+>   cadences with the 1-day coupling cadence, so writers only ever see
+>   the gathered cc state.
+> * **Unified-pipeline physics tiling
+>   (`driver/tiled_operator_split_step.py`)** — the tiled-cube twin of
+>   the lat-band `sharded_operator_split_step`: ONE shard_map runs the
+>   serial `_single_step` composition (cc→D dynamics RK3 → target-mass
+>   fixer → `step_unified` column physics → Euler write-back →
+>   saturation/moisture-fixer/Rayleigh tail → carry pack) per tile.
+>   The **tile-aware SegmentCarry/PhysicsState shard**
+>   (`shard_tiled_split_carry` + `pack_carry_tiled`/`unpack_carry_tiled`)
+>   reshapes the FLATTENED per-column leaves (conv_prog, held radiation,
+>   accumulators) grid-shaped — the row-major ncol order is not
+>   tile-contiguous, so grid-shaped is the only shardable layout — and
+>   the conservation reductions gained a tiled-mesh psum branch
+>   (`conservation._spmd_lat_psum_or_none`), so the moisture/mass fixers
+>   reduce correctly inside the tiled shard_map.  np24 gate
+>   (`test_tiled_operator_split_step.py`): 2-step parity vs the serial
+>   composition with a shape-agnostic column mock (the lat-band lane's
+>   "2b" staging) — dynamics fields in the documented corner class,
+>   physics carry/held/accumulators at 1e-12, global moisture conserved
+>   to 1e-9.  Envelope refusals: `qv_smooth_coeff != 0` (full-cube ∇⁴
+>   halo), `owned_mask` (MPI-replicated semantics).
+>
+> **UPDATE (2026-07-09d) — the REAL unified pipeline runs tiled.**  The
+> driver statics build shipped: `build_tile_step_unified` constructs the
+> PhysicsPipeline at TILE ncol (`_TilePhysicsGrid` shape-only view —
+> `make_adapter` bakes ncol/shape_2d from it; land-active pipelines and
+> horizontal-operator convection (w-grid / moisture-convergence traits)
+> refuse loudly).  `make_tiled_operator_split_step` now takes the
+> per-segment `forcing` as a per-call traced argument (SegmentForcing
+> doctrine) with flat per-column forcing packed per call, validates the
+> model's dynamics envelope (`validate_tiled_envelope` — driver
+> `hyperdiff_scale`>0 etc. refuse), rebuilds transient GHG per step
+> (`ghg_keys`), and flatten/re-grid-brackets the pipeline's per-column-
+> NATIVE carry fields (`conv_prog`/`tke`/`qke`/`gwd_spectrum`, shape-
+> validated at (ncol,...)) around the physics call.  The driver
+> dispatches: `_tiled_cube_unified_active` (unified schemes or HS, minus
+> Kessler-alone which keeps the simple blocked lane) routes
+> `_run_tiled_cube_spmd` into `_run_operator_split_tiled_cube` — the
+> full `_run_operator_split_spmd` mirror (tile-ncol `step_unified`,
+> carry seed/shard/thread, per-segment forcing resample, gather for
+> callback + blowup only).  END-TO-END GATE
+> (`test_operator_split_tiled_cube_driver_parity.py`): full
+> `ModelDriver.setup()+run()` with REAL gray radiation + prognostic-TKE
+> turbulence, serial `_run_compiled` vs the np24 tiled lane — parity in
+> the documented corner/abs classes, q_v 1e-8; hyperdiff refusal;
+> dispatch predicate units.
+>
+> Remaining (refused loudly where reachable): multicontroller
+> (cross-process) tiled operator-split; land-active / multilayer-land
+> tiling; resolved-wind moisture advection under tiles; the writers in
+> the operator-split lane (the simple tiled lane has them); w-grid /
+> moisture-convergence convection schemes per tile.
 
 ## The layout problem (the crux)
 

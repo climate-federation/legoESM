@@ -217,6 +217,20 @@ def _apply_drag_iwm_overrides(args, grid_type, grid, z_coord, config, model):
             bottom_drag_z0=args.bottom_drag_z0,
             bottom_drag_ke0=args.bottom_drag_ke0,
         )
+    # Wide-halo split-explicit barotropic (lat-lon band scaling lever):
+    # nested BarotropicConfig fields, reachable via the flat-name mapping.
+    want_wide_halo = bool(getattr(args, "barotropic_wide_halo", False))
+    if want_wide_halo:
+        drag_flat = dict(
+            drag_flat,
+            barotropic_wide_halo=True,
+            barotropic_wide_halo_chunk=getattr(
+                args, "barotropic_wide_halo_chunk", 0),
+            # The wide path's per-substep clamp is LOCAL by construction;
+            # the config validator REQUIRES the local-clamp scheme to be
+            # explicit, so the flag sets it (documented in --help).
+            barotropic_local_subcycle_clamp=True,
+        )
     want_iwm = bool(getattr(args, "iwm", False))
     if not drag_flat and not want_iwm:
         return config, model
@@ -303,6 +317,11 @@ def _apply_drag_iwm_overrides(args, grid_type, grid, z_coord, config, model):
             f"--iwm is supported on the lat-lon / tripole grids only "
             f"(the {grid_type} vertical-mixing bridge does not consume "
             f"IWM yet)")
+    if want_wide_halo:
+        raise SystemExit(
+            f"--barotropic-wide-halo is supported on the lat-lon / tripole "
+            f"C-grid ocean only (the wide-halo subcycle is a lat-band "
+            f"path); the {grid_type} grid has no wide-halo barotropic")
     # Non-latlon models with flat drag fields (MPAS Voronoi, cubed-sphere):
     # replace the flat NamedTuple fields and rebuild the same model class.
     if not hasattr(config, "bottom_drag_scheme"):
@@ -514,6 +533,24 @@ def parse_args(argv: list[str] | None = None):
     p.add_argument("--kpp-a-bg", type=float,
                    default=_DEFAULT_KPP_CONFIG.A_bg,
                    help="KPP background viscosity [m^2/s]")
+    # --- wide-halo split-explicit barotropic (scaling-audit item 3) ---
+    p.add_argument("--barotropic-wide-halo", action="store_true",
+                   dest="barotropic_wide_halo",
+                   help="Opt-in wide-halo split-explicit barotropic: one "
+                        "fused wide lat-halo exchange per chunk of substeps "
+                        "instead of ~4 halo pads per substep (lat-lon band "
+                        "MPI/SPMD latency lever at >=16 ranks; serial "
+                        "value-identical). Regular lat-lon C-grid only "
+                        "(tripole fold refused at construction); requires "
+                        "barotropic_solver=explicit_substep and ALSO SETS "
+                        "barotropic_local_subcycle_clamp=True (the wide "
+                        "path's per-substep clamp is local; global mass is "
+                        "restored once per step).")
+    p.add_argument("--barotropic-wide-halo-chunk", type=int, default=0,
+                   dest="barotropic_wide_halo_chunk",
+                   help="Substeps per wide exchange (0 = auto from the local "
+                        "band height). With uneven --wet-balance bands set "
+                        "it so chunk x stencil-reach <= min band height.")
     # --- internal wave-driven mixing (NEMO zdfiwm, de Lavergne 2020) ---
     _IWM_DEF = _DEFAULT_IWM_CONFIG
     p.add_argument("--iwm", action="store_true",
@@ -894,7 +931,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # Register the FV3 shallow-water barotropic core provider (fv3sw/fv3edge)
         # so the cube ocean can use the FV3-faithful C-D barotropic solver below
         # instead of the forbidden a_grid solver (never-A-grid directive).
-        import legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid  # noqa: F401
+        import legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid  # noqa: F401
 
         grid = create_cubed_sphere(params["n"])
         # Cubed-sphere OMIP-stability tuning.
@@ -1041,6 +1078,23 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 gm_redi=None if no_gm_redi else bathy_gm_redi,
                 barotropic_solver="implicit_cn",
                 pgf_scheme=pgf_scheme if pgf_scheme is not None else "smc03",
+                # Fourier polar filter ON by default for the GLOBAL regular
+                # lat-lon bathy path.  A global lat-lon ocean has converging
+                # meridians: dx = R*dlon*cos(lat) -> 0 at the N-pole, so the
+                # explicit advection/metric terms violate CFL poleward and the
+                # WOA cold-start blows up (~day 0.25) regardless of the time
+                # integrator (implicit_cn barotropic / implicit vmix do NOT
+                # cure it -- see PolarFilterConfig docstring, #939).  Force it
+                # on structurally, mirroring implicit_vertical_mixing=True
+                # above, so a recipe that omits --polar-filter can't silently
+                # reintroduce the pole blowup.  60.0 is the cutoff LATITUDE
+                # [deg] (a filter config value, not a physical constant) and
+                # matches the documented stable latlon config.  Safe for the
+                # tripole: it is built via the separate _create_setup("tripole")
+                # branch (dlon>0), so this default never reaches a dlon==0 grid
+                # (which _apply_polar_filter rejects).
+                use_polar_filter=True,
+                polar_filter_cutoff_lat_deg=60.0,
                 # MOM6 MAXVEL: clip barotropic velocities to prevent
                 # blowup from WBC intensification at coarse resolution.
                 # MOM6 default is 6.0 m/s; we use 3.0 since realistic

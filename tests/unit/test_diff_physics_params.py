@@ -605,7 +605,7 @@ class TestHeldSuarezParams:
         ("T_min", 200.0),
     ])
     def test_held_suarez_param_reachable(self, name, default):
-        from legoesm.atmosphere.held_suarez import held_suarez_forcing
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing
         grid, sigma, state = self.grid, self.sigma, self.state
 
         def loss(p):

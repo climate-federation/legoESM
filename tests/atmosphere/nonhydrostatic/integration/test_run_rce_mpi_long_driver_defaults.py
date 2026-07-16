@@ -211,6 +211,60 @@ def test_advection_production_default(driver_defaults):
     assert driver_defaults["--advection"] == "van_leer"
 
 
+def test_vertical_tracer_advection_default_van_leer(driver_defaults):
+    """codex CRM-dycore review: --vertical-tracer-advection defaults to
+    van_leer, matching the serial run_rcemip_plane default so serial and MPI
+    RCE use the SAME (positive-definite) vertical tracer scheme. Now that the
+    MPI halo path HONORS the config (previously it silently used centered), a
+    flip to 'centered' would re-introduce non-monotone vertical tracer
+    transport (negative q at sharp convective gradients) and re-diverge the
+    MPI RCE driver from serial."""
+    assert driver_defaults["--vertical-tracer-advection"] == "van_leer"
+
+
+def test_precision_default_float64(driver_defaults):
+    """--precision defaults to float64. f32 is opt-in and REQUIRES env
+    LEGOESM_RCE_MPI_FP32=1 (x64 is a module-import toggle); main() cross-checks
+    --precision against the env var and SystemExits on a mismatch. A silent flip
+    of this default to float32 without the env var would immediately fail that
+    guard, but lock it here so the fp64 production contract is explicit."""
+    assert driver_defaults["--precision"] == "float64"
+
+
+def test_precision_x64_mismatch_rejected(tmp_path):
+    """codex: the precision guard checks the ACTUAL ``jax_enable_x64`` state, not
+    just our env var, so ``JAX_ENABLE_X64=1`` + ``--precision float32`` (which
+    would otherwise silently run float64) MUST be rejected with a clear message.
+    Skips where the MPI runtime is unavailable (the driver imports mpi4jax at
+    module load, so the guard can only be exercised where MPI libs resolve)."""
+    import subprocess
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    env["JAX_ENABLE_X64"] = "1"                 # x64 ON …
+    env.pop("LEGOESM_RCE_MPI_FP32", None)
+    cmd = [
+        sys.executable, str(DRIVER),
+        "--nx", "8", "--ny", "8", "--nlev", "10", "--dx", "2000.0",
+        "--dt", "20.0", "--days", "0.0",
+        "--precision", "float32",              # … but asks for float32 → conflict
+        "--output", str(tmp_path / "out"),
+    ]
+    result = subprocess.run(
+        cmd, env=env, capture_output=True, text=True, timeout=120,
+    )
+    err = (result.stderr + result.stdout).lower()
+    if "libmpi" in err or "cannot open shared object" in err:
+        pytest.skip("MPI runtime unavailable in this env; guard runs in CI")
+    assert result.returncode != 0, (
+        "JAX_ENABLE_X64=1 + --precision float32 was NOT rejected (silent "
+        f"float64 risk). stdout: {result.stdout[-400:]}"
+    )
+    assert "jax_enable_x64" in err, (
+        f"precision-guard message missing 'jax_enable_x64' marker; "
+        f"stderr: {result.stderr[-400:]}"
+    )
+
+
 def test_sponge_production_defaults(driver_defaults):
     """iter-1 sponge layer config."""
     assert driver_defaults["--sponge-coeff"] == 0.05
@@ -247,7 +301,7 @@ def test_driver_argparse_advection_choices_derived_from_shared_map():
     aliases = set()
     for node in tree.body:
         if isinstance(node, ast.ImportFrom) and node.module == (
-            "legoesm.atmosphere.dynamics.compressible_euler_plane"
+            "legoesm.atmosphere.dynamics.les.compressible_euler_plane"
         ):
             for alias in node.names:
                 if alias.name == "HORIZONTAL_ADVECTION_HALO_REQUIREMENT":
@@ -324,7 +378,7 @@ def test_driver_consults_shared_halo_requirement_map():
     for node in tree.body:  # top-level only — no commented or
         # inside-function code paths.
         if isinstance(node, ast.ImportFrom) and node.module == (
-            "legoesm.atmosphere.dynamics.compressible_euler_plane"
+            "legoesm.atmosphere.dynamics.les.compressible_euler_plane"
         ):
             for alias in node.names:
                 if alias.name == "HORIZONTAL_ADVECTION_HALO_REQUIREMENT":

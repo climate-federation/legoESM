@@ -103,7 +103,7 @@ def diagnose_headline_fields(state, grid, sigma_coord) -> HeadlineDiagnosis:
         global-neutral proxy that does not resolve land/ocean roughness or
         stability, so surface-wind scores carry that caveat.
     """
-    from legoesm.atmosphere.dynamics.spectral_pe import spectral_pe_to_grid
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import spectral_pe_to_grid
 
     gridded = spectral_pe_to_grid(state, grid, sigma_coord)
     T, u, v = gridded["T"], gridded["u"], gridded["v"]   # (n_lat, n_lon, nlev)

@@ -32,7 +32,7 @@ _GRID = create_gaussian_grid(N_MAX, dealiasing="quadratic")
 _SIGMA = create_sigma_coordinate(NLEV, sigma_top=0.1)
 
 
-def _make_gaussian_carry(T_val=280.0, p_s_val=101325.0):
+def _make_gaussian_carry(T_val=280.0, p_s_val=101325.0, q_v_val=0.005):
     """Create a synthetic SegmentCarry on the Gaussian grid."""
     n_lat = _GRID.lat.shape[0]
     n_lon = _GRID.lon.shape[0]
@@ -48,7 +48,7 @@ def _make_gaussian_carry(T_val=280.0, p_s_val=101325.0):
     )
     return pack_carry(
         state,
-        q_v=jnp.ones(s3) * 0.005,
+        q_v=jnp.ones(s3) * q_v_val,
         q_c=jnp.zeros(s3),
         q_r=jnp.zeros(s3),
         held_dT_rad=jnp.zeros(s3),
@@ -239,7 +239,7 @@ class TestSpectralRollout:
             make_sfno_spectral_physics,
             spectral_rollout,
         )
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
         carry = _make_gaussian_carry()
         state = carry_to_spectral_state(carry, _GRID)
@@ -264,7 +264,7 @@ class TestSpectralRollout:
             make_sfno_spectral_physics,
             spectral_rollout,
         )
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
         carry = _make_gaussian_carry()
         state = carry_to_spectral_state(carry, _GRID)
@@ -299,7 +299,7 @@ class TestSpectralRollout:
             make_sfno_spectral_physics,
             spectral_rollout,
         )
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
         carry = _make_gaussian_carry()
         state = carry_to_spectral_state(carry, _GRID)
@@ -328,7 +328,7 @@ class TestSpectralRollout:
             make_sfno_spectral_physics,
             spectral_rollout,
         )
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
         carry = _make_gaussian_carry()
         state = carry_to_spectral_state(carry, _GRID)
@@ -397,7 +397,7 @@ class TestGradientFlow:
             spectral_rollout,
             spectral_state_vs_carry_loss,
         )
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
         carry_ic = _make_gaussian_carry(T_val=280.0)
         carry_target = _make_gaussian_carry(T_val=282.0)
@@ -518,7 +518,7 @@ class TestColumnMLPSpectralPhysics:
             make_column_mlp_spectral_physics,
             spectral_rollout,
         )
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
         carry = _make_gaussian_carry()
         state = carry_to_spectral_state(carry, _GRID)
@@ -542,7 +542,7 @@ class TestColumnMLPSpectralPhysics:
             spectral_rollout,
             spectral_state_vs_carry_loss,
         )
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
         carry_ic = _make_gaussian_carry(T_val=280.0)
         carry_target = _make_gaussian_carry(T_val=282.0)
@@ -603,7 +603,7 @@ class TestPhysicsParamsSpectral:
             spectral_rollout,
             spectral_state_vs_carry_loss,
         )
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
         carry_ic = _make_gaussian_carry(T_val=280.0)
         carry_target = _make_gaussian_carry(T_val=282.0)
@@ -675,6 +675,164 @@ class TestAreaWeightedLoss:
 
 
 # ---------------------------------------------------------------------------
+# ACE2-gap fixes: budget constraints, curriculum, chunked streaming
+# ---------------------------------------------------------------------------
+
+class TestBudgetConstraints:
+
+    def test_sfno_tendency_conserves_dry_mass(self):
+        """The (l=0,m=0) spectral coefficient of the SFNO's dlnps/dt — the
+        global-mean surface-pressure (mass) tendency — must be projected
+        to zero (ACE2-style dry-mass fixer)."""
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state, make_sfno_spectral_physics,
+        )
+        import numpy as np
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        physics_fn = make_sfno_spectral_physics(_make_small_sfno(), _GRID)
+        tend = physics_fn(state, _GRID, _SIGMA)
+        mean_idx = np.where(
+            (np.asarray(_GRID.ls) == 0) & (np.asarray(_GRID.ms) == 0)
+        )[0]
+        assert mean_idx.size == 1
+        coeff = tend.lnps_hat.data[mean_idx[0]]
+        assert float(jnp.abs(coeff)) == 0.0, (
+            f"global-mean lnps tendency not projected out ({coeff})"
+        )
+
+    def test_forced_rollout_keeps_qv_nonnegative(self):
+        """Moisture positivity on forced learned-physics runs: q_v must be
+        clipped >= 0 after every step (negative water fed the *1e3 NN
+        feature and drove the runaway class).
+
+        Deterministic (non-vacuous): the physics fn applies a constant
+        negative q_v tendency that would drive q_v to ~-7e-5 over the
+        rollout absent the clip, so removing the clip fails the assert.
+        """
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state, spectral_rollout,
+        )
+        carry = _make_gaussian_carry(q_v_val=1.0e-6)  # near-zero: clip bites
+        state = carry_to_spectral_state(carry, _GRID)
+
+        def _neg_qv_physics(st, grid_, sigma_, **_kw):  # forced path passes forcing=
+            # Zero every tendency except a constant drying of q_v strong
+            # enough to cross zero on step 1 (1e-8/s * 1800s >> 1e-6).
+            tend = jax.tree.map(jnp.zeros_like, st)
+            qv = st.tracers["q_v"]
+            drying = jnp.full_like(qv.data, -1.0e-8)
+            return tend._replace(
+                tracers=dict(tend.tracers, q_v=qv.replace(data=drying)),
+            )
+
+        ncol = len(_GRID.lat) * len(_GRID.lon)
+        fb = {
+            "T_sfc": jnp.full((ncol,), 290.0, dtype=jnp.float64),
+            "sic": jnp.zeros((ncol,), dtype=jnp.float64),
+            "day_of_year": jnp.asarray(1.0),
+            "seconds_of_day": jnp.asarray(0.0),
+        }
+        out = spectral_rollout(
+            state, _neg_qv_physics, _GRID, _SIGMA,
+            SpectralPEConfig(time_integrator="ssp_rk3"),
+            dt=1800.0, n_steps=4, forcing_base=fb,
+        )
+        qv = out.tracers["q_v"]
+        qv = qv.data if hasattr(qv, "data") else qv
+        assert float(jnp.min(qv)) >= 0.0, "q_v went negative on a forced run"
+        # The drying really was applied: without the clip the mean would
+        # be ~-7e-5; with it the column must sit essentially at zero,
+        # far below the 1e-6 initial value.
+        assert float(jnp.mean(qv)) < 5.0e-7
+
+
+class TestRolloutCurriculum:
+
+    def _cfg(self, curriculum, leads):
+        from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
+        from legoesm.training.losses import LossConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
+        return NeuralGCMSpectralConfig(
+            n_max=N_MAX, n_levels=NLEV, dt=1800.0,
+            pe_config=SpectralPEConfig(time_integrator="ssp_rk3"),
+            n_epochs=1, lr=1e-4, warmup_steps=0,  # total_steps=1: keep decay_steps>0
+            rollout_curriculum=curriculum,
+            loss_config=LossConfig(
+                multi_step_hours=leads,
+                multi_step_weights=(1.0,) * len(leads) if leads else None,
+            ),
+            log_every=1, checkpoint_dir="/tmp/_curr_test_ckpt",
+        )
+
+    def test_missing_lead_target_raises(self):
+        """A curriculum lead without a loaded target must be a hard error."""
+        from legoesm.training.neural_gcm_spectral import (
+            _train_spectral_loop, carry_to_spectral_state,
+            make_sfno_spectral_physics,
+        )
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        cfg = self._cfg(((24, 1),), (1,))  # 24h lead, only 1h target loaded
+        with pytest.raises(ValueError, match="no loaded target"):
+            _train_spectral_loop(
+                _make_small_sfno(), make_sfno_spectral_physics,
+                _GRID, _SIGMA, [state], [(carry,)], cfg,
+            )
+
+    def test_single_phase_curriculum_trains(self):
+        """A 1-epoch curriculum phase runs end-to-end: one rollout to the
+        phase lead, scored against that lead's target, finite loss."""
+        from legoesm.training.neural_gcm_spectral import (
+            _train_spectral_loop, carry_to_spectral_state,
+            make_sfno_spectral_physics,
+        )
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        cfg = self._cfg(((1, 1),), (1,))  # one 1h-lead epoch (2 steps)
+        model, hist = _train_spectral_loop(
+            _make_small_sfno(), make_sfno_spectral_physics,
+            _GRID, _SIGMA, [state], [(carry,)], cfg,
+        )
+        assert len(hist) == 1 and jnp.isfinite(hist[0])
+
+
+class TestChunkLoader:
+
+    def test_partitioning_and_total(self, monkeypatch):
+        """_make_chunk_loader partitions windows into <=chunk_windows groups
+        and reports samples/epoch = sum(n_days)*4 (6-hourly cadence)."""
+        import legoesm.training.neural_gcm_spectral as mod
+        calls = []
+
+        def _fake_load(config, grid, sigma, cache_dir, windows=None):
+            calls.append(tuple(windows))
+            n = sum(w[2] for w in windows) * 4
+            return ["ic"] * n, ["tgt"] * n, [None] * n
+
+        monkeypatch.setattr(mod, "load_training_data", _fake_load)
+        cfg = mod.NeuralGCMSpectralConfig(
+            windows=tuple((1979 + i, 0, 1) for i in range(5)),
+            chunk_windows=2,
+        )
+        loader, n_total = mod._make_chunk_loader(
+            cfg, _GRID, _SIGMA, "unused", None, None,
+        )
+        assert n_total == 5 * 4
+        chunks = list(loader())
+        assert len(chunks) == 3           # 2 + 2 + 1 windows
+        assert len(calls) == 3
+        assert sum(len(c[0]) for c in chunks) == n_total
+
+    def test_requires_windows(self):
+        import legoesm.training.neural_gcm_spectral as mod
+        cfg = mod.NeuralGCMSpectralConfig(windows=None, chunk_windows=4)
+        with pytest.raises(ValueError, match="requires config.windows"):
+            mod._make_chunk_loader(cfg, _GRID, _SIGMA, "unused", None, None)
+
+
+# ---------------------------------------------------------------------------
 # #817. Semi-implicit training core for the WB lane
 # ---------------------------------------------------------------------------
 
@@ -686,7 +844,7 @@ class TestSemiImplicitTrainingCore:
 
     @staticmethod
     def _configs():
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
         explicit = SpectralPEConfig(
             time_integrator="ssp_rk3", semi_implicit=False, hyperdiff_coeff=0.0)
         si = SpectralPEConfig(
@@ -717,7 +875,7 @@ class TestSemiImplicitTrainingCore:
         finite (the model's _do_step sub-stepping, made scan-safe)."""
         from legoesm.training.neural_gcm_spectral import (
             carry_to_spectral_state, spectral_rollout)
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
         state = carry_to_spectral_state(_make_gaussian_carry(), _GRID)
         cfg = SpectralPEConfig(
             time_integrator="ssp_rk3", semi_implicit=True, si_substeps=3,
@@ -753,3 +911,309 @@ class TestSemiImplicitTrainingCore:
 
         g = jax.grad(loss)(jnp.zeros_like(state0.T_hat.data))
         assert bool(jnp.all(jnp.isfinite(g))), "SI rollout gradient not finite"
+
+
+class TestMidEpochResume:
+    """#942: a job killed mid-epoch resumes from the last completed CHUNK
+    (not the top of the epoch) and reproduces the uninterrupted run
+    bit-for-bit.
+
+    This is the structural fix for the Derecho walltime cliff: a T106
+    epoch (~13 h) exceeds the 12 h queue cap, so a per-epoch-only
+    checkpoint makes zero progress forever.  The proof below drives the
+    REAL ``_train_spectral_loop`` chunked path with a tiny SFNO + a
+    synthetic in-memory chunk loader (no GCS/network), simulates a kill
+    right after chunk 1 of epoch 0, resumes, and asserts the final
+    weights are byte-identical to an uninterrupted run — which can only
+    hold if BOTH the model weights and the full optimizer state are
+    restored and the chunk sequence is deterministic.
+    """
+
+    def _cfg(self, ckpt_dir):
+        from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
+        from legoesm.training.losses import LossConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
+        return NeuralGCMSpectralConfig(
+            n_max=N_MAX, n_levels=NLEV, dt=1800.0,
+            pe_config=SpectralPEConfig(time_integrator="ssp_rk3"),
+            lr=1e-4, warmup_steps=0, optimizer="adamw",
+            rollout_curriculum=((1, 2),),   # 1h lead x 2 epochs
+            loss_config=LossConfig(
+                multi_step_hours=(1,), multi_step_weights=(1.0,)),
+            log_every=1, checkpoint_dir=str(ckpt_dir),
+        )
+
+    def _make_loader(self, n_chunks=3):
+        """A deterministic chunk loader with DISTINCT data per chunk index.
+
+        Data is keyed by the chunk INDEX (not a call counter), so a resume
+        that skips the first chunks still reads byte-identical data for the
+        chunks it does load — exactly like the real ``_make_chunk_loader``
+        partition of ``config.windows``.  Records the order of yielded
+        chunk indices so the test can prove the skip.
+        """
+        from legoesm.training.neural_gcm_spectral import carry_to_spectral_state
+        chunks = []
+        for c in range(n_chunks):
+            carry = _make_gaussian_carry(
+                T_val=280.0 + 4.0 * c, q_v_val=0.004 + 0.001 * c)
+            state = carry_to_spectral_state(carry, _GRID)
+            chunks.append(([state], [(carry,)]))  # 1 sample; lead-1 target tuple
+        yielded = []
+
+        def _loader(start_chunk=0):
+            for gi in range(n_chunks):
+                if gi < start_chunk:
+                    continue
+                yielded.append(gi)
+                ics, tgts = chunks[gi]
+                yield ics, tgts, None
+
+        _loader.n_chunks = n_chunks
+        _loader.yielded = yielded
+        return _loader
+
+    def _run(self, model, cfg, loader, resume_from_dir):
+        from legoesm.training.neural_gcm_spectral import (
+            _train_spectral_loop, make_sfno_spectral_physics)
+        return _train_spectral_loop(
+            model, make_sfno_spectral_physics, _GRID, _SIGMA,
+            None, None, cfg,
+            start_epoch=0, chunk_loader=loader,
+            n_samples_total=loader.n_chunks,
+            resume_from_dir=resume_from_dir,
+        )
+
+    def test_resume_midepoch_matches_uninterrupted_bitwise(
+            self, tmp_path, monkeypatch):
+        import legoesm.training.neural_gcm_spectral as mod
+
+        # --- (A) uninterrupted reference: 2 epochs x 3 chunks ---------------
+        dir_a = tmp_path / "A"
+        model_a, _ = self._run(
+            _make_small_sfno(), self._cfg(dir_a),
+            self._make_loader(3), resume_from_dir=dir_a)
+
+        # The run must actually have moved the weights off their init,
+        # else "bit-identical" would be vacuously true.
+        init_leaves = jax.tree_util.tree_leaves(
+            eqx.filter(_make_small_sfno(), eqx.is_array))
+        a_leaves = jax.tree_util.tree_leaves(eqx.filter(model_a, eqx.is_array))
+        assert any(
+            not jnp.array_equal(i, a) for i, a in zip(init_leaves, a_leaves)
+        ), "reference run did not update the weights"
+
+        # --- (B) killed run: die right after chunk 1 of epoch 0 ------------
+        dir_b = tmp_path / "B"
+        real_save = mod._save_midepoch_checkpoint
+        counter = {"n": 0}
+
+        class _Kill(Exception):
+            pass
+
+        def _save_then_kill(ckpt_dir, model, opt_state, epoch, next_chunk):
+            real_save(ckpt_dir, model, opt_state, epoch, next_chunk)
+            counter["n"] += 1
+            if counter["n"] == 2:   # after chunk idx 1 -> saved (epoch0, chunk2)
+                raise _Kill()
+
+        monkeypatch.setattr(mod, "_save_midepoch_checkpoint", _save_then_kill)
+        with pytest.raises(_Kill):
+            self._run(_make_small_sfno(), self._cfg(dir_b),
+                      self._make_loader(3), resume_from_dir=dir_b)
+        monkeypatch.undo()   # run C uses the real, unpatched save
+
+        # The atomic checkpoint survived the kill (written before the raise).
+        assert (dir_b / mod.MIDEPOCH_CHECKPOINT_NAME).exists()
+
+        # --- (C) resume from B's checkpoint dir ----------------------------
+        loader_c = self._make_loader(3)
+        model_c, _ = self._run(
+            _make_small_sfno(), self._cfg(dir_b),
+            loader_c, resume_from_dir=dir_b)
+
+        # Resumed at chunk 2 of epoch 0 (skipped the two done chunks), then
+        # ran epoch 1 in full — NOT restarting the epoch at chunk 0.
+        assert loader_c.yielded == [2, 0, 1, 2]
+
+        # Byte-identical to the uninterrupted run: proves model weights AND
+        # optimizer state (Adam moments + LR-schedule step count) were
+        # restored and the chunk order is deterministic.
+        c_leaves = jax.tree_util.tree_leaves(eqx.filter(model_c, eqx.is_array))
+        assert len(a_leaves) == len(c_leaves)
+        for la, lc in zip(a_leaves, c_leaves):
+            assert jnp.array_equal(la, lc), (
+                "mid-epoch resume diverged from the uninterrupted run")
+
+    def test_resume_without_optstate_would_diverge(self, tmp_path, monkeypatch):
+        """Guard-rail: if the resume dropped the optimizer state (restoring
+        only the weights, the old epoch-only behaviour), the Adam moments +
+        LR-schedule counter would restart and the run would NOT match.  We
+        assert divergence in that degraded mode so the bit-identical pass
+        above is known to be load-bearing, not luck."""
+        import legoesm.training.neural_gcm_spectral as mod
+
+        dir_a = tmp_path / "A"
+        model_a, _ = self._run(
+            _make_small_sfno(), self._cfg(dir_a),
+            self._make_loader(3), resume_from_dir=dir_a)
+        a_leaves = jax.tree_util.tree_leaves(eqx.filter(model_a, eqx.is_array))
+
+        dir_b = tmp_path / "B"
+        real_save = mod._save_midepoch_checkpoint
+        counter = {"n": 0}
+
+        class _Kill(Exception):
+            pass
+
+        def _save_then_kill(ckpt_dir, model, opt_state, epoch, next_chunk):
+            real_save(ckpt_dir, model, opt_state, epoch, next_chunk)
+            counter["n"] += 1
+            if counter["n"] == 2:
+                raise _Kill()
+
+        monkeypatch.setattr(mod, "_save_midepoch_checkpoint", _save_then_kill)
+        with pytest.raises(_Kill):
+            self._run(_make_small_sfno(), self._cfg(dir_b),
+                      self._make_loader(3), resume_from_dir=dir_b)
+        monkeypatch.undo()
+
+        # Degrade the loader: on load, keep weights but FORCE a fresh
+        # optimizer state (simulate the old model-only checkpoint).
+        real_load = mod._load_midepoch_checkpoint
+
+        def _load_drop_optstate(ckpt_dir, model_template, opt_state_template):
+            res = real_load(ckpt_dir, model_template, opt_state_template)
+            if res is None:
+                return None
+            m, _o, ep, nc = res
+            return m, opt_state_template, ep, nc   # fresh opt_state
+
+        monkeypatch.setattr(mod, "_load_midepoch_checkpoint", _load_drop_optstate)
+        model_c, _ = self._run(
+            _make_small_sfno(), self._cfg(dir_b),
+            self._make_loader(3), resume_from_dir=dir_b)
+        c_leaves = jax.tree_util.tree_leaves(eqx.filter(model_c, eqx.is_array))
+        assert any(
+            not jnp.array_equal(la, lc) for la, lc in zip(a_leaves, c_leaves)
+        ), (
+            "dropping optimizer state should have diverged from the "
+            "uninterrupted run — the bit-identical test is therefore "
+            "genuinely exercising optimizer-state restore, not luck"
+        )
+
+
+# --- #985 item 2: chunk prefetch (host-thread double-buffering) ---
+# The prefetch wrapper must be a drop-in that preserves order + resume
+# semantics exactly and never swallows a producer failure. Pure Python — no
+# GCS/ERA5/JAX needed.
+
+def test_prefetch_iter_preserves_order_and_completes():
+    from legoesm.training.neural_gcm_spectral import _prefetch_iter
+
+    src = list(range(20))
+    out = list(_prefetch_iter(iter(src), buffer=1))
+    assert out == src
+
+
+def test_prefetch_iter_propagates_producer_exception():
+    from legoesm.training.neural_gcm_spectral import _prefetch_iter
+
+    def _boom():
+        yield 0
+        yield 1
+        raise RuntimeError("chunk load failed")
+
+    got = []
+    with pytest.raises(RuntimeError, match="chunk load failed"):
+        for x in _prefetch_iter(_boom(), buffer=1):
+            got.append(x)
+    assert got == [0, 1]  # items before the failure are still delivered
+
+
+def test_prefetch_iter_is_lazy_bounded():
+    # With buffer=1 the producer runs at most `buffer+1` items ahead of a
+    # consumer that never advances — it must NOT drain the whole source.
+    from legoesm.training.neural_gcm_spectral import _prefetch_iter
+
+    produced = []
+
+    def _counting():
+        for i in range(1000):
+            produced.append(i)
+            yield i
+
+    it = _prefetch_iter(_counting(), buffer=1)
+    first = next(it)
+    assert first == 0
+    # The load-gating semaphore caps the producer at buffer+1 loads ahead of a
+    # stalled consumer: chunk 0 (taken) + chunk 1 (one permit released on take).
+    import time
+    time.sleep(0.05)
+    assert len(produced) <= 2, f"prefetch over-ran: produced {len(produced)}"
+
+
+def test_prefetch_iter_early_break_stops_producer():
+    # Consumer breaks after one item: the producer must stop (stop flag +
+    # drained slot) instead of streaming the whole source or hanging a thread.
+    import time
+    from legoesm.training.neural_gcm_spectral import _prefetch_iter
+
+    produced = []
+
+    def _counting():
+        for i in range(1000):
+            produced.append(i)
+            yield i
+
+    for x in _prefetch_iter(_counting(), buffer=1):
+        break  # take exactly one, then abandon the iterator
+    time.sleep(0.05)
+    # bounded ahead-of-consumer load; must NOT have drained all 1000
+    assert len(produced) <= 3, f"producer did not stop on break: {len(produced)}"
+
+
+def test_chunk_loader_prefetch_matches_serial(monkeypatch):
+    """_chunks with prefetch on/off yields identical chunks and honours
+    start_chunk (the mid-epoch resume skip)."""
+    import legoesm.training.neural_gcm_spectral as mod
+
+    windows = [(2015, d, 1) for d in range(1, 7)]  # 6 windows
+
+    def _fake_load(config, grid, sigma, cache_dir, windows):
+        # Return a marker keyed by the group so we can assert ordering; times
+        # is a 1-elem list so _maybe_build_sample_forcings (off) returns None.
+        return (f"ics{windows}", f"tgt{windows}", [0])
+
+    monkeypatch.setattr(mod, "load_training_data", _fake_load)
+
+    class _Cfg:
+        def __init__(self, prefetch):
+            self.windows = windows
+            self.chunk_windows = 2
+            self.chunk_prefetch = prefetch
+
+    def _collect(prefetch, start_chunk=0):
+        loader, n_total = mod._make_chunk_loader(
+            _Cfg(prefetch), grid=None, sigma=None, cache_dir=None,
+            surface_forcing_path=None, forcing_cache_path=None,
+        )
+        return list(loader(start_chunk=start_chunk)), n_total, loader.n_chunks
+
+    serial, n_s, nc_s = _collect(False)
+    pref, n_p, nc_p = _collect(True)
+    assert serial == pref                 # identical chunk sequence + order
+    # 6 windows x 1 day x 4 snapshots/day = 24 samples; 3 chunks of 2 windows.
+    assert (n_s, nc_s) == (n_p, nc_p) == (24, 3)
+
+    # Resume skip: start_chunk=1 drops the first chunk, same for both paths.
+    serial1, _, _ = _collect(False, start_chunk=1)
+    pref1, _, _ = _collect(True, start_chunk=1)
+    assert serial1 == pref1 == serial[1:]
+
+
+if __name__ == "__main__":
+    test_prefetch_iter_preserves_order_and_completes()
+    test_prefetch_iter_propagates_producer_exception()
+    test_prefetch_iter_is_lazy_bounded()
+    print("ok (run test_chunk_loader_prefetch_matches_serial under pytest)")

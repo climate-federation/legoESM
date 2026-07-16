@@ -84,6 +84,24 @@ def grid_supports_ice_dynamics(grid) -> bool:
     return isinstance(grid, (CubedSphereGrid, LatLonGrid, VoronoiMesh))
 
 
+def grid_supports_ice_transport(grid) -> bool:
+    """True when ``grid`` has implemented sea-ice TRACER-TRANSPORT ops.
+
+    Superset of :func:`grid_supports_ice_dynamics`: every dynamics-capable
+    grid can also transport, and the curvilinear lat-lon C-grid
+    (``LatLonCGridGeometry`` — the tripole eORCA geometry) additionally
+    supports transport via the fold-aware donor-cell C-grid advection
+    (``transport.fv_flux_divergence_latlon_cgrid``, built on the core
+    ``upwind_cell_to_uface/vface`` + ``divergence_cgrid`` operators) while
+    remaining dynamics-INcapable (no curvilinear strain-rate/stress-
+    divergence — EVP/mEVP still degrade to ``free_drift`` there).
+    """
+    if grid_supports_ice_dynamics(grid):
+        return True
+    from legoesm.grids.latlon import LatLonCGridGeometry
+    return isinstance(grid, LatLonCGridGeometry)
+
+
 # Backward-compatible private alias (internal call sites below + any importer
 # predating the public promotion).
 _grid_supports_ice_dynamics = grid_supports_ice_dynamics
@@ -92,18 +110,19 @@ _grid_supports_ice_dynamics = grid_supports_ice_dynamics
 def _base_spatial_ndim(grid):
     """Spatial rank of a per-cell ice field for ``grid`` (no category axis).
 
-    MPAS Voronoi → 1 ``(nCells,)``; lat-lon → 2 ``(n_lat, n_lon)``;
-    cubed-sphere → 3 ``(6, n, n)``.  Returns ``None`` for an unknown / None
-    grid so callers fall back to the cubed-sphere convention.  Mirrors the
-    per-grid base rank in ``transport.advect_ice_tracers``; lets the
-    multi-category trailing axis be detected correctly on every grid rather
-    than via the cubed-sphere-only ``h.ndim > 3`` heuristic.
+    MPAS Voronoi → 1 ``(nCells,)``; lat-lon / tripole C-grid → 2
+    ``(n_lat, n_lon)``; cubed-sphere → 3 ``(6, n, n)``.  Returns ``None``
+    for an unknown / None grid so callers fall back to the cubed-sphere
+    convention.  Mirrors the per-grid base rank in
+    ``transport.advect_ice_tracers``; lets the multi-category trailing axis
+    be detected correctly on every grid rather than via the
+    cubed-sphere-only ``h.ndim > 3`` heuristic.
     """
-    from legoesm.grids.latlon import LatLonGrid
+    from legoesm.grids.latlon import LatLonCGridGeometry, LatLonGrid
     from legoesm.grids.voronoi import VoronoiMesh
     if isinstance(grid, VoronoiMesh):
         return 1
-    if isinstance(grid, LatLonGrid):
+    if isinstance(grid, (LatLonGrid, LatLonCGridGeometry)):
         return 2
     return 3 if grid is not None else None
 
@@ -157,6 +176,10 @@ def _uses_new_physics(config: SeaIceConfig) -> bool:
         or config.ridging.enabled
         or config.ponds.enabled
         or config.shortwave_scheme != "constant"
+        # Constant-scheme SW transmittance is a v2-path feature (the legacy
+        # _step_dynamic surface EB has no penetration channel); route to v2 so
+        # a nonzero setting is never a silent no-op.
+        or config.sw_transmittance_const > 0.0
         or config.itd_remap != "simple"
     )
 
@@ -226,25 +249,33 @@ def step_sea_ice(
             "Pass grid=<CubedSphereGrid> to step_sea_ice()."
         )
 
-    # Grid-TYPE guard: dynamics (EVP/mEVP), tracer transport, and ridging
-    # call grid-specific strain-rate / flux-divergence operators that exist
-    # only for cubed-sphere, lat-lon, and MPAS/Voronoi grids.  Reject an
+    # Grid-TYPE guards: dynamics (EVP/mEVP) + ridging call grid-specific
+    # STRAIN-RATE operators (cubed-sphere / lat-lon / MPAS only); tracer
+    # transport calls FLUX-DIVERGENCE operators, which additionally exist on
+    # the tripole/curvilinear C-grid (grid_supports_ice_transport).  Reject an
     # unsupported non-None grid up front with a clear message rather than
     # letting it fall through to the cubed-sphere branch and raise an opaque
     # AttributeError deep in the EVP loop (e.g. Gaussian spectral / Plane).
-    _needs_grid_ops = (
-        config.dynamics in ("evp", "mevp")
-        or config.transport == "advect"
-        or config.ridging.enabled
-    )
-    if grid is not None and _needs_grid_ops and not _grid_supports_ice_dynamics(grid):
-        raise ValueError(
-            "Sea-ice dynamics/transport/ridging require a grid with "
-            "implemented strain-rate and flux-divergence operators "
-            "(CubedSphereGrid, LatLonGrid, or VoronoiMesh); got "
-            f"{type(grid).__name__}.  Use dynamics='none', transport='none', "
-            "and ridging.enabled=False for thermodynamics-only on this grid."
+    if grid is not None:
+        _needs_strain_ops = (
+            config.dynamics in ("evp", "mevp") or config.ridging.enabled
         )
+        if _needs_strain_ops and not _grid_supports_ice_dynamics(grid):
+            raise ValueError(
+                "Sea-ice dynamics/ridging require a grid with implemented "
+                "strain-rate operators (CubedSphereGrid, LatLonGrid, or "
+                f"VoronoiMesh); got {type(grid).__name__}.  Use "
+                "dynamics='none'/'free_drift' and ridging.enabled=False on "
+                "this grid."
+            )
+        if config.transport == "advect" and not grid_supports_ice_transport(grid):
+            raise ValueError(
+                "Sea-ice tracer transport requires a grid with implemented "
+                "flux-divergence operators (CubedSphereGrid, LatLonGrid, "
+                "VoronoiMesh, or the tripole LatLonCGridGeometry); got "
+                f"{type(grid).__name__}.  Use transport='none' for "
+                "thermodynamics-only on this grid."
+            )
     if config.ridging.enabled and grid is None:
         raise ValueError(
             "ridging.enabled=True requires a grid argument: mechanical "
@@ -1190,6 +1221,14 @@ def _thermo_single(
 
     freeze_flux_open = jnp.maximum(-Q_sfc, 0.0)
     dh_dt_open_raw = freeze_flux_open / (config.rho_ice * config.L_f)
+    # Lead ice can form only where the ocean mixed layer is already at (or
+    # below) its freezing point.  The atmospheric surface deficit
+    # ``freeze_flux_open`` alone will otherwise grow ice over an
+    # above-freezing ocean (audit finding #2: ~8 cm/day on a +3.6 K ocean),
+    # because ``Q_sfc`` here is the ICE-skin balance and never sees the warm
+    # SST.  Gate on ``ocean_sst <= T_freeze_ocean`` (data-dependent select).
+    ocean_at_freezing = ocean_sst <= config.T_freeze_ocean
+    dh_dt_open_raw = jnp.where(ocean_at_freezing, dh_dt_open_raw, 0.0)
     # Multi-category: only deposit lead-freeze in category 0.  Cats
     # with ``enable_lead_freeze=False`` see ``dh_dt_open = 0`` so the
     # same open-water freeze does not fire per-category.
@@ -1583,19 +1622,38 @@ def _closing_rate_from_velocity(
     v_ice: jnp.ndarray,
     grid,
     cap: float,
+    cs_shear: float = 0.0,
+    e_yield: float = 2.0,
 ) -> jnp.ndarray:
-    """Net convergence rate ``max(0, −div(u_ice))`` from the velocity field.
+    """Ridging closing rate from the velocity field (Rothrock 1975 / CICE).
+
+    Combines CONVERGENCE and SHEAR deformation, not convergence alone::
+
+        div     = eps_11 + eps_22
+        shear   = sqrt((eps_11 - eps_22)^2 + 4 eps_12^2)
+        Delta   = sqrt(div^2 + shear^2 / e^2)
+        closing = 0.5 * Cs * (Delta - |div|) + max(0, -div)
+
+    The first term is shear ridging (``Delta >= |div|`` so it is ``>= 0``);
+    without it pure-shear deformation produced ZERO ridging -> under-ridged,
+    over-thin ice in shear zones (audit).  ``e_yield`` is the VP yield-curve
+    ellipse ratio; ``cs_shear`` (Cs) the shear-ridging participation fraction
+    (0 recovers the old convergence-only closing).
 
     The grid is validated for operator support at ``step_sea_ice`` entry
     (``_grid_supports_ice_dynamics``), so ``strain_rates`` is called
     directly — no exception-swallowing fallback, which would silently
     disable ridging and detach the gradient w.r.t. velocity (forbidden by
-    the repo AD rules).
+    the repo AD rules).  The ``1e-20`` sqrt floors keep the gradient finite at
+    zero deformation (numerics floor, not tunable).
     """
     from legoesm.ice.rheology import strain_rates
-    eps_11, eps_22, _eps_12 = strain_rates(u_ice, v_ice, grid)
+    eps_11, eps_22, eps_12 = strain_rates(u_ice, v_ice, grid)
     div = eps_11 + eps_22
-    return jnp.clip(-div, 0.0, cap)
+    shear = jnp.sqrt((eps_11 - eps_22) ** 2 + 4.0 * eps_12 ** 2 + 1e-20)
+    delta = jnp.sqrt(div ** 2 + (shear / e_yield) ** 2 + 1e-20)
+    closing = 0.5 * cs_shear * (delta - jnp.abs(div)) + jnp.maximum(-div, 0.0)
+    return jnp.clip(closing, 0.0, cap)
 
 
 def _thermo_v2(
@@ -1661,6 +1719,7 @@ def _thermo_v2(
         pond_area, pond_depth,
         scheme=config.shortwave_scheme,
         albedo_const=config.albedo_ice,
+        sw_transmittance_const=config.sw_transmittance_const,
     )
     alpha = sw_result.albedo_eff
     sw_absorbed = sw_result.sw_absorbed_surface
@@ -1835,6 +1894,13 @@ def _thermo_v2(
     # ``dh_dt_open`` is the local lead-ice thickening rate per unit
     # lead area, driven by the destabilising surface flux.
     dh_dt_open_raw = freeze_flux_open / (config.rho_ice * config.L_f)
+    # Gate on ocean supercooling: lead ice cannot form over an above-freezing
+    # mixed layer.  ``freeze_flux_open`` is the ICE-skin atmospheric deficit and
+    # never sees the SST, so without this gate ice grows over warm water (audit
+    # finding #2).  ``ocean_sst <= T_freeze_ocean`` (data-dependent select).
+    dh_dt_open_raw = jnp.where(
+        ocean_sst <= config.T_freeze_ocean, dh_dt_open_raw, 0.0,
+    )
     dh_dt_open = dh_dt_open_raw if enable_lead_freeze else jnp.zeros_like(dh_dt_open_raw)
     # Per-grid-cell new volume contributed by lead-freezing this step.
     delta_V_lead_freeze = jnp.maximum(dh_dt_open * lead_area * dt, 0.0)
@@ -2032,7 +2098,24 @@ def _thermo_v2(
             rho_ice=config.rho_ice,
             dt=dt,
             S_lead_ice=config.brine.S_ice_new,
-            S_white_ice=0.5 * config.brine.S_ocean_ref,
+            # White ice forms by seawater flooding the snow pores.  Its salinity
+            # is the salt the drawn seawater would leave if fully retained,
+            # S_pore = S_ocean * (rho_ice - rho_snow)/rho_ice (the pore-water
+            # mass fraction of the new ice) — paired with the ``(rho_ice -
+            # rho_snow)*ΔV_white`` seawater WATER debited from the ocean
+            # freshwater below.  The brine step then clamps the stored salinity
+            # at S_ice_max and REJECTS the excess brine back to the ocean
+            # (physical snow-ice brine drainage): the ocean loses the pore water
+            # but keeps most of its salt, so it SALINIFIES.  Water and salt are
+            # each conserved between ice and ocean by construction (the brine
+            # salt flux is the drop in stored salt).  This replaces the old
+            # hardcoded 0.5*S_ocean that had NO matching ocean water withdrawal
+            # (the salt-without-water freshening bug).
+            S_white_ice=(
+                config.brine.S_ocean_ref
+                * (config.rho_ice - config.snow.rho_snow)
+                / config.rho_ice
+            ),
             # Basal congelation freezes seawater onto the ice base — a
             # salty-ice source.  Pass the per-cell basal-freeze volume
             # (per-ice-area growth × ice fraction) at the first-year
@@ -2095,15 +2178,44 @@ def _thermo_v2(
             pond_captured_melt_m_liquid * constants.rho_water * conc_new / dt
         )
         pond_drain_per_cell = pond_drain_to_ocean_kg_s * conc_new
+        # Rain over the ice fraction is collected by the ponds (captured or
+        # drained) — no separate runoff channel needed.
+        rain_runoff_per_cell = jnp.zeros_like(h_new)
     else:
         pond_drain_per_cell = pond_drain_to_ocean_kg_s  # zero array
+        # No pond scheme: rain falling on the ice fraction runs off directly to
+        # the ocean this step (snow instead enters the pack via
+        # ``accumulate_snowfall`` and returns on melt).  Without this the f_ice
+        # share of rain vanished from the water budget — the ocean tile only
+        # delivers the OPEN-water (f_ocean) precip share (audit HIGH:
+        # precip-on-ice leak).  ``precip_total - precip_snow`` is the rain MASS
+        # flux [kg/m^2/s]; gate by ``has_precipitation`` (like the snow path) so
+        # no phantom rain is injected, and weight by ``conc_new`` so only the
+        # ice-fraction rain is delivered (× f_water in ``blend_tiles`` = f_ice).
+        rain_rate = jnp.maximum(
+            forcing.precip_total - forcing.precip_snow, 0.0,
+        ) * jnp.asarray(forcing.has_precipitation, dtype=h_new.dtype)
+        rain_runoff_per_cell = rain_rate * conc_new
     fw_from_lead_freeze_per_cell = -delta_V_lead_freeze * config.rho_ice / dt
+    # Snow-ice flooding draws seawater ``(rho_ice - rho_snow)*ΔV_white`` [kg/m^2
+    # per ice area] into the snow pores; the ocean LOSES that water (negative
+    # freshwater flux), paired with the pore salt charged in the brine step so
+    # flooding removes pure seawater instead of spuriously freshening the ocean
+    # (audit: salt-without-water).  Per-cell via ``conc_new`` (the frame
+    # ``delta_V_white_ice`` is weighted into for the brine budget above).
+    fw_from_flooding_per_cell = -(
+        (config.rho_ice - config.snow.rho_snow)
+        * delta_V_white_ice * conc_new / dt
+    )
     freshwater_to_ocean = (
         fw_from_melt_per_cell
         # NOTE: open-water snowfall is intentionally NOT included here — the
         # ocean tile delivers it via ``precip_total`` (F11; see snow step).
         + pond_drain_per_cell
+        # Rain runoff over the ice fraction (no-pond path; zero when ponds on).
+        + rain_runoff_per_cell
         + fw_from_lead_freeze_per_cell
+        + fw_from_flooding_per_cell
         # Orphaned ice/snow/pond mass from fully-ablated cells (11b) — sent
         # to the ocean as freshwater so the column mass budget closes.
         + ablation_fw_per_cell
@@ -2117,9 +2229,26 @@ def _thermo_v2(
     #     the ocean — sign convention: positive = ocean LOSES energy
     #     to the ice tile.  The lead-freeze contribution removes L_f
     #     per kg of ice formed from the ocean.
+    #   * Melt-pond REFREEZE re-forms ice and must RELEASE its latent heat of
+    #     fusion, otherwise the melt->pond->refreeze cycle destroys energy: the
+    #     surface melt that filled the pond already CREDITED the ocean via
+    #     ``surface_melt_ocean_gain`` (ocean gained L_f), so refreezing that
+    #     water must DEBIT the same L_f back (positive extraction) to close the
+    #     cycle (audit HIGH: pond refreeze deleted latent every diurnal cycle).
+    #     ``refreeze_ice_m`` is per-ice-area; weight by ``conc_new`` so the heat
+    #     frame MATCHES the volume/salt budget (``delta_V_fresh_refreeze =
+    #     refreeze_ice_m * conc_new`` above) — using the pre-step ``conc`` would
+    #     over/under-charge the latent when the ice area changed this step
+    #     (codex).
+    #     ponytail: the physically-exact sink is the atmosphere (refreeze is
+    #     driven by cold air); routing to the ocean mirrors the melt-surplus
+    #     channel and closes the energy budget without a skin re-solve — upgrade
+    #     to an atmospheric credit if/when the 0-layer skin gains an enthalpy
+    #     channel.
     ocean_heat_extraction = (
         F_ocean * conc * ocean_heat_scale
         + delta_V_lead_freeze * config.rho_ice * config.L_f / dt
+        + refreeze_ice_m * config.rho_ice * config.L_f / dt * conc_new
         # Surplus surface-melt heat from a melt-out step warms the ocean
         # (ocean GAINS -> NEGATIVE extraction); previously this energy was
         # dropped on the floor (finding #6).
@@ -2561,6 +2690,7 @@ def _step_dynamic_v2(
     if config.ridging.enabled and is_multicat and grid is not None:
         closing_rate = _closing_rate_from_velocity(
             u_ice, v_ice, grid, cap=config.ridging.closing_rate_max,
+            cs_shear=config.ridging.cs_shear_ridging, e_yield=config.e_yield,
         )
         ridge_result = apply_ridging(
             conc, h, h_snow * conc, S_ice, closing_rate,
@@ -2637,6 +2767,7 @@ def _step_dynamic_v2(
             h_snow, pond_area, pond_depth,
             scheme=config.shortwave_scheme,
             albedo_const=config.albedo_ice,
+            sw_transmittance_const=config.sw_transmittance_const,
         )
         alpha_resp = (
             jnp.sum(sw_cat.albedo_eff * conc, axis=-1)
@@ -2648,6 +2779,7 @@ def _step_dynamic_v2(
             h_snow, pond_area, pond_depth,
             scheme=config.shortwave_scheme,
             albedo_const=config.albedo_ice,
+            sw_transmittance_const=config.sw_transmittance_const,
         )
         alpha_resp = sw_agg.albedo_eff
 
@@ -2684,6 +2816,15 @@ def _step_dynamic_v2(
         # matches the state through melt-out (#28, codex).
         surface_mass_flux=sublim_mass_total,
         salt_flux=salt_flux_total,
+        # Aggregate concentration at the THERMO time level (post-transport,
+        # pre-thermo ``conc_old``): the ice area the atmospheric fluxes were
+        # integrated over this step.  Forced-ocean drivers partition the
+        # open-water forcing with (1 - A) at THIS level (codex r5 #1 — the
+        # pre-call concentration is one transport substep stale under
+        # transport='advect').
+        ice_concentration_thermo=jnp.clip(
+            (jnp.sum(conc_old, axis=-1) if is_multicat else conc_old),
+            0.0, 1.0),
     )
 
     new_state = DynamicSeaIceState(

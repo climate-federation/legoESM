@@ -1,8 +1,8 @@
 """Large-scale forcing for the plane CRM (iter-31, D3).
 
 Covers both the shared array-level upwind operator
-(:mod:`legoesm.atmosphere.large_scale_forcing`) and the plane physics_fn
-(:mod:`legoesm.atmosphere.dynamics.plane_large_scale_forcing`) that applies
+(:mod:`legoesm.atmosphere.forcing.idealized.large_scale_forcing`) and the plane physics_fn
+(:mod:`legoesm.atmosphere.forcing.plane_large_scale_forcing`) that applies
 SAM-style subsidence + prescribed advective tendencies + wind nudging to the
 double-periodic f-plane state.
 
@@ -20,12 +20,12 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.large_scale_forcing import (  # noqa: E402
+from legoesm.atmosphere.forcing.idealized.large_scale_forcing import (  # noqa: E402
     mask_inflow_endpoint_tendency,
     subsidence_tendency_top2bottom,
     upwind_dphi_dz_top2bottom,
 )
-from legoesm.atmosphere.dynamics.plane_large_scale_forcing import (  # noqa: E402
+from legoesm.atmosphere.forcing.plane_large_scale_forcing import (  # noqa: E402
     make_plane_ls_forcing_physics,
 )
 from legoesm.core.field import Field  # noqa: E402
@@ -236,7 +236,7 @@ _LSF_SYNTH = """ z[m] p[mb] tls qls uls vls wls
 def test_forcing_from_sam_case_file(tmp_path):
     """End-to-end: SAM lsf file → interpolated profiles → forcing physics_fn
     producing nonzero subsidence + advective tendencies on the plane state."""
-    from legoesm.atmosphere.dynamics.plane_large_scale_forcing import (
+    from legoesm.atmosphere.forcing.plane_large_scale_forcing import (
         make_plane_ls_forcing_from_sam_case,
     )
     p = tmp_path / "lsf"
@@ -268,7 +268,7 @@ def test_forcing_from_sam_case_converts_tls_T_to_theta_via_exner(tmp_path):
     via ``dθ/dt = (dT/dt)/exner_ref`` — applying it RAW (the old bug) under-cools
     by the exner factor (~22 % at 500 mb, worse aloft), biasing the GATE T
     profile warm. Subsidence OFF isolates the advective channel."""
-    from legoesm.atmosphere.dynamics.plane_large_scale_forcing import (
+    from legoesm.atmosphere.forcing.plane_large_scale_forcing import (
         make_plane_ls_forcing_from_sam_case,
     )
     p = tmp_path / "lsf"

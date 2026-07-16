@@ -149,6 +149,11 @@ class TestBatchAllreduce:
 
     def test_mixed_dtypes_promoted(self):
         """Values with different dtypes are promoted to common dtype."""
+        if not jax.config.read("jax_enable_x64"):
+            pytest.skip(
+                "distinguishes float32 from float64; without JAX_ENABLE_X64=1 the "
+                "float64 array silently truncates to float32 and the test is vacuous"
+            )
         f32 = jnp.array(1.0, dtype=jnp.float32)
         f64 = jnp.array(2.0, dtype=jnp.float64)
 

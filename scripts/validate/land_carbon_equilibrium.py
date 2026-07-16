@@ -49,18 +49,15 @@ from legoesm.land.surface_params import (
     CLM5_PFT_NAMES,
     _CLM5_PFT_TABLE_RAW,
     PARAM_NAMES,
+    is_cold_deciduous,
+    is_evergreen,
+    is_woody,
 )
 from legoesm.land.carbon.config import CarbonConfig
-from legoesm.land.carbon.stomata import StomataConfig
-from legoesm.land.carbon.carbon_cycle import (
-    init_carbon_state,
-    _GC_TO_KG_CO2,
-    _SPD,
-)
-from legoesm.land.carbon.spinup import (
-    SlowPoolFluxes,
-    analytic_slow_pool_equilibrium,
-)
+from legoesm.land.stomata import StomataConfig
+from legoesm.land.carbon.carbon_cycle import init_carbon_state
+from legoesm.land.carbon.realism_ranges import LITERATURE_BIOME_RANGES
+from legoesm.land.carbon.spinup import run_semi_analytic_spinup
 from legoesm.land.carbon_diagnostics import reconstruct_carbon_diagnostics
 from legoesm.land.multilayer_land import (
     step_multilayer_land,
@@ -94,32 +91,23 @@ PIXELS = [
      "sandy_loam", 296.0, 1.3e-5, False, "shrubland"),
     ("arctic_tundra",       70.0,  -150.0, "c3_arctic_grass",
      "loam", 266.0, 1.0e-5, True, "tundra"),
+    # Larch: the headline death-spiral defect (needleleaf_deciduous_boreal is
+    # dead 0/0 in the global build).  Cold-deciduous, so BOTH mechanisms engage.
+    ("boreal_larch",        62.0,  100.0, "needleleaf_deciduous_boreal",
+     "loam", 269.0, 1.3e-5, True, "boreal_forest"),
 ]
 
-# Published biome ranges (annual GPP / NPP [gC/m2/yr], live biomass C
-# [kgC/m2], soil organic C to ~1 m [kgC/m2], peak LAI [m2/m2]).  Sources:
-# Beer et al. 2010 (GPP); Saugier/Roy/Mooney 2001 (NPP, biomass); Jobbagy &
-# Jackson 2000 (SOC); GLASS/MODIS LAI climatology.  These are order-of-
-# magnitude realism gates, not a calibration target.
-LITERATURE = {
-    "tropical_forest":  dict(gpp=(2500, 3500), npp=(900, 1500), biomass=(15, 25), soc=(8, 15),  lai=(4.5, 7.0)),
-    "savanna":          dict(gpp=(1000, 2000), npp=(400, 900),  biomass=(2, 8),   soc=(4, 12),  lai=(1.0, 3.0)),
-    "temperate_forest": dict(gpp=(1200, 2000), npp=(600, 1000), biomass=(8, 18),  soc=(8, 20),  lai=(3.0, 6.0)),
-    "grassland":        dict(gpp=(500, 1300),  npp=(200, 600),  biomass=(0.2, 1.5), soc=(6, 20), lai=(1.0, 3.0)),
-    "boreal_forest":    dict(gpp=(600, 1200),  npp=(200, 500),  biomass=(4, 12),  soc=(10, 30), lai=(1.5, 4.0)),
-    "shrubland":        dict(gpp=(300, 900),   npp=(100, 400),  biomass=(0.5, 4), soc=(3, 10),  lai=(0.5, 2.0)),
-    "tundra":           dict(gpp=(150, 600),   npp=(50, 250),   biomass=(0.2, 1.5), soc=(15, 40), lai=(0.3, 1.5)),
-}
+# Published biome realism ranges (SOC / biomass / GPP / NPP / LAI) are the
+# single-source-of-truth table in ``legoesm.land.carbon.realism_ranges``,
+# shared with the global-carbon-IC-map validator (scripts/validate/
+# global_carbon_ic_map.py).  Aliased to ``LITERATURE`` for this harness's
+# existing call sites (``_biome_carbon_init`` / ``assess_pixel``).
+LITERATURE = LITERATURE_BIOME_RANGES
 
 
 def _pft_row(pft: str) -> dict:
     idx = CLM5_PFT_NAMES.index(pft)
     return dict(zip(PARAM_NAMES, _CLM5_PFT_TABLE_RAW[idx]))
-
-
-def _is_woody(pft: str) -> bool:
-    """Trees and shrubs are woody; grasses and crops are herbaceous."""
-    return not any(tag in pft for tag in ("grass", "crop"))
 
 
 def _biome_carbon_init(biome: str, woody: bool, LCMA: float) -> dict:
@@ -162,15 +150,31 @@ def _biome_carbon_init(biome: str, woody: bool, LCMA: float) -> dict:
 
 
 def build_pixel_config(pft: str, texture: str, freeze_thaw: bool,
-                       n_layers: int, soil_depth: float,
-                       biome: str) -> MultiLayerLandConfig:
+                       n_layers: int, soil_depth: float, biome: str,
+                       nsc_gated_respiration: bool = False,
+                       cold_deciduous_dormancy: bool = False,
+                       nsc_reserve_days: float = CarbonConfig().nsc_reserve_days,
+                       r_maint_floor_frac: float = CarbonConfig().r_maint_floor_frac,
+                       freeze_dormancy_threshold_K: float = (
+                           CarbonConfig().freeze_dormancy_threshold_K),
+                       ) -> MultiLayerLandConfig:
     """MultiLayerLandConfig for one pixel: texture -> hydraulics, PFT ->
     surface + photosynthesis params, DifferLand carbon + Farquhar stomata on.
-    Carbon pools are seeded region-realistically (``_biome_carbon_init``)."""
+    Carbon pools are seeded region-realistically (``_biome_carbon_init``).  The
+    opt-in high-latitude productivity gates (default off -> byte-identical) are
+    PFT-scoped: ``cold_deciduous`` is set from ``is_cold_deciduous(pft)`` so the
+    dormancy gate engages only on larch / arctic-grass / boreal-shrub pixels."""
     row = _pft_row(pft)
-    woody = _is_woody(pft)
+    woody = is_woody(pft)
     carbon = CarbonConfig(
         scheme="differland", LCMA=row["LCMA"], woody=woody,
+        evergreen=is_evergreen(pft),
+        nsc_gated_respiration=nsc_gated_respiration,
+        cold_deciduous_dormancy=cold_deciduous_dormancy,
+        cold_deciduous=is_cold_deciduous(pft),
+        nsc_reserve_days=nsc_reserve_days,
+        r_maint_floor_frac=r_maint_floor_frac,
+        freeze_dormancy_threshold_K=freeze_dormancy_threshold_K,
         **_biome_carbon_init(biome, woody, row["LCMA"]),
     )
     return MultiLayerLandConfig(
@@ -195,17 +199,8 @@ def build_pixel_config(pft: str, texture: str, freeze_thaw: bool,
 
 
 # ---------------------------------------------------------------------------
-# Nested-scan equilibrium integration
+# Semi-analytic equilibrium integration (shared driver)
 # ---------------------------------------------------------------------------
-
-# Per-year accumulated diagnostics (all carbon amounts gC/m2, integrated over
-# the year; LAI is a running max / mean helper).
-_ACC_FIELDS = (
-    "gpp", "npp", "r_auto", "r_maint", "r_growth", "r_het", "r_het_lit",
-    "r_het_som", "r_het_cwd", "nee", "nee_model", "a_fol", "a_lab", "a_root",
-    "a_wood", "lab_release", "leaf_litter", "root_litter", "wood_litter",
-    "wood_to_som", "lit_to_som", "alloc_resid", "lai_sum", "lai_max", "nsteps",
-)
 
 
 def run_pixel(config: MultiLayerLandConfig, lat_deg: float, lon_deg: float,
@@ -236,7 +231,6 @@ def run_pixel(config: MultiLayerLandConfig, lat_deg: float, lon_deg: float,
     lat_rad = float(lat_deg * _DEG2RAD)
     lon_rad = float(lon_deg * _DEG2RAD)
     lat_jnp = jnp.asarray([lat_rad])
-    dt_days = dt / _SECS_PER_DAY
     steps_per_year = int(round(_SECS_PER_DAY * _YEAR_DAYS / dt))
 
     grid = make_soil_grid(config.soil_grid)
@@ -250,94 +244,34 @@ def run_pixel(config: MultiLayerLandConfig, lat_deg: float, lon_deg: float,
     state0 = init_multilayer_land_state(1, config, T_init=T_init)
     carbon0 = init_carbon_state((1,), config.carbon)
 
-    def inner_step(carry, step_in_year):
-        state, carbon = carry
-        t_day = step_in_year * dt_days
-        doy = jnp.mod(t_day, _YEAR_DAYS)
-        hour = jnp.mod(step_in_year * dt / 3600.0, 24.0)
-        forcing = make_synthetic_lmip_forcing(
+    def forcing_fn(doy, hour):
+        return make_synthetic_lmip_forcing(
             lat_rad, lon_rad, doy, hour, precip_rate=precip_rate)
 
-        new_state, response, carbon_new = step_multilayer_land(
+    def step_fn(state, carbon, forcing, doy):
+        new_state, _response, carbon_new = step_multilayer_land(
             state, forcing, config, _U_MIN, dt,
             lat=lat_jnp, carbon_state=carbon, doy=doy)
-
-        # Reconstruct the carbon-flux breakdown from the end-of-step soil
-        # state via the shared helper (same routine run_lmip's semi-analytic
-        # spin-up uses).
+        # Reconstruct the carbon-flux breakdown from the end-of-step soil state
+        # via the shared helper (same routine run_lmip's spin-up uses); the
+        # shared driver derives the model's NEE from the closed-column mass
+        # balance, so the discarded TileResponse is not needed here.
         diag = reconstruct_carbon_diagnostics(
             new_state, forcing, carbon, config, root_frac, theta_wp, theta_fc,
             beta_min, lat_jnp, doy, dt, spatial=False)
+        return new_state, carbon_new, diag
 
-        nee_model = response.co2_flux / _GC_TO_KG_CO2 * dt  # gC/m2 this step
-        alloc_resid = jnp.abs(
-            diag.a_fol + diag.a_lab + diag.a_root + diag.a_wood
-            - jnp.maximum(diag.npp, 0.0))
+    # The three-phase transient -> analytic slow-pool reset -> verify loop lives
+    # in the shared driver (legoesm.land.carbon.spinup); this validator and the
+    # batched archetype map (global_init.equilibrate_archetypes) do not
+    # re-derive it.  It returns per-verify-year annual diagnostics.
+    final_state, final_carbon, annual, _reset_fluxes = run_semi_analytic_spinup(
+        step_fn, state0, carbon0, forcing_fn,
+        n_spinup=n_spinup, n_verify=n_verify, steps_per_year=steps_per_year,
+        dt=dt, cwd_humification_eff=config.carbon.cwd_humification_eff,
+        f_active_to_slow=config.carbon.f_active_to_slow,
+        f_slow_to_passive=config.carbon.f_slow_to_passive)
 
-        # gC/m2 integrated over the step (rate[gC/m2/day] * dt_days)
-        inc = {
-            "gpp": diag.gpp * dt_days, "npp": diag.npp * dt_days,
-            "r_auto": diag.r_auto * dt_days, "r_maint": diag.r_maint * dt_days,
-            "r_growth": diag.r_growth * dt_days, "r_het": diag.r_het * dt_days,
-            "r_het_lit": diag.r_het_lit * dt_days,
-            "r_het_som": diag.r_het_som * dt_days,
-            "r_het_cwd": diag.r_het_cwd * dt_days,
-            "nee": diag.nee * dt_days, "nee_model": nee_model,
-            "a_fol": diag.a_fol * dt_days, "a_lab": diag.a_lab * dt_days,
-            "a_root": diag.a_root * dt_days, "a_wood": diag.a_wood * dt_days,
-            "lab_release": diag.lab_release * dt_days,
-            "leaf_litter": diag.leaf_litter * dt_days,
-            "root_litter": diag.root_litter * dt_days,
-            "wood_litter": diag.wood_litter * dt_days,
-            "wood_to_som": diag.wood_to_som * dt_days,
-            "lit_to_som": diag.lit_to_som * dt_days,
-            "alloc_resid": alloc_resid * dt_days,
-            "lai_sum": diag.lai, "lai_max": diag.lai,
-            "nsteps": jnp.ones_like(diag.lai),
-        }
-        return (new_state, carbon_new), inc
-
-    def year_step(carry, year_idx):
-        (state, carbon), incs = jax.lax.scan(
-            inner_step, carry, jnp.arange(steps_per_year))
-        # Reduce the inner increments into per-year totals.
-        annual = {}
-        for k in incs:
-            if k == "lai_max":
-                annual[k] = jnp.max(incs[k])
-            else:
-                annual[k] = jnp.sum(incs[k])
-        annual["C_lab"] = carbon.C_lab[0]
-        annual["C_fol"] = carbon.C_fol[0]
-        annual["C_root"] = carbon.C_root[0]
-        annual["C_wood"] = carbon.C_wood[0]
-        annual["C_lit"] = carbon.C_lit[0]
-        annual["C_som"] = carbon.C_som[0]
-        return (state, carbon), annual
-
-    # --- Phase 1: transient spin-up (fast pools + wood + stationary fluxes) ---
-    (state_A, carbon_A), annual_A = jax.lax.scan(
-        year_step, (state0, carbon0), jnp.arange(n_spinup))
-
-    # --- Phase 2: analytic linear-pool equilibrium for the slow pools ---
-    # Use the final spin-up year's mean annual fluxes (gC/m2/yr) + end pools.
-    # Stationary mean-annual slow-pool fluxes from the final spin-up year, fed
-    # to the shared semi-analytic solver (legoesm.land.carbon.spinup) — the
-    # SAME routine the run_lmip driver's --carbon-spinup semi_analytic uses.
-    def _lastA(k):
-        return float(np.asarray(annual_A[k]).reshape(n_spinup, -1)[-1, 0])
-    fluxes = SlowPoolFluxes(
-        a_wood=jnp.full_like(carbon_A.C_wood, _lastA("a_wood")),
-        wood_litter=jnp.full_like(carbon_A.C_wood, _lastA("wood_litter")),
-        lit_to_som=jnp.full_like(carbon_A.C_som, _lastA("lit_to_som")),
-        r_het_som=jnp.full_like(carbon_A.C_som, _lastA("r_het_som")),
-    )
-    carbon_eq = analytic_slow_pool_equilibrium(
-        carbon_A, fluxes, config.carbon.cwd_humification_eff)
-
-    # --- Phase 3: verification segment from the analytic equilibrium ---
-    (final_state, final_carbon), annual = jax.lax.scan(
-        year_step, (state_A, carbon_eq), jnp.arange(n_verify))
     annual = {k: np.asarray(v).reshape(n_verify, -1).squeeze()
               for k, v in annual.items()}
     return annual, final_state, final_carbon
@@ -364,7 +298,12 @@ def assess_pixel(name: str, biome: str, annual: dict, final_carbon) -> dict:
     alloc_resid = float(annual["alloc_resid"][last])
 
     pools = {k: float(annual[k][last]) / 1000.0  # kgC/m2
-             for k in ("C_lab", "C_fol", "C_root", "C_wood", "C_lit", "C_som")}
+             for k in ("C_lab", "C_fol", "C_root", "C_wood", "C_lit")}
+    # Total SOM = active + slow + passive (slow/passive inert == 0 in phase A1);
+    # the downstream realism/equilibrium diagnostics use bulk SOM.
+    pools["C_som"] = float(
+        annual["C_som_active"][last] + annual["C_som_slow"][last]
+        + annual["C_som_passive"][last]) / 1000.0
     biomass = pools["C_lab"] + pools["C_fol"] + pools["C_root"] + pools["C_wood"]
     total_c = biomass + pools["C_lit"] + pools["C_som"]
 
@@ -389,7 +328,9 @@ def assess_pixel(name: str, biome: str, annual: dict, final_carbon) -> dict:
     # Drift over the last min(20, ny//2) years (fractional per year) for total C.
     win = max(2, min(20, ny // 2))
     tc_series = (annual["C_lab"] + annual["C_fol"] + annual["C_root"]
-                 + annual["C_wood"] + annual["C_lit"] + annual["C_som"]) / 1000.0
+                 + annual["C_wood"] + annual["C_lit"]
+                 + annual["C_som_active"] + annual["C_som_slow"]
+                 + annual["C_som_passive"]) / 1000.0
     tc0, tc1 = float(tc_series[-win]), float(tc_series[-1])
     total_c_drift_frac_per_yr = (tc1 - tc0) / (win * max(tc1, 1e-9))
 
@@ -461,9 +402,11 @@ def make_plots(out_dir: Path, results: list[dict], annuals: dict[str, dict]):
         a = annuals[r["name"]]
         yrs = np.arange(a["gpp"].shape[0])
         for pool, lab in [("C_fol", "foliage"), ("C_root", "root"),
-                          ("C_wood", "wood"), ("C_lit", "litter"),
-                          ("C_som", "SOM")]:
+                          ("C_wood", "wood"), ("C_lit", "litter")]:
             ax.plot(yrs, a[pool] / 1000.0, label=lab, lw=1.3)
+        # Total SOM = active + slow + passive (the passive pool dominates).
+        som = a["C_som_active"] + a["C_som_slow"] + a["C_som_passive"]
+        ax.plot(yrs, som / 1000.0, label="SOM", lw=1.3)
         ax.set_title(f"{r['name']}\n({r['biome']})", fontsize=8)
         ax.set_xlabel("year"); ax.set_ylabel("kgC/m²")
         ax.set_yscale("symlog", linthresh=1.0)
@@ -574,6 +517,26 @@ def main(argv=None):
     p.add_argument("--output", default="results/land_carbon_equilibrium")
     p.add_argument("--only", default=None,
                    help="Run only this pixel name (debug).")
+    p.add_argument("--nsc-gated-respiration", action="store_true",
+                   help="Enable NSC-gated maintenance respiration (arctic "
+                        "productivity rescue Mechanism 1) for every pixel.")
+    p.add_argument("--cold-deciduous-dormancy", action="store_true",
+                   help="Enable cold-deciduous freeze dormancy (Mechanism 2); "
+                        "PFT-scoped via is_cold_deciduous, so it only affects "
+                        "larch / arctic-grass / boreal-shrub pixels.")
+    p.add_argument("--nsc-reserve-days", type=float,
+                   default=CarbonConfig().nsc_reserve_days,
+                   help="NSC gate: days of maintenance-respiration demand the "
+                        "labile reserve must cover before R_maint throttles.")
+    p.add_argument("--r-maint-floor-frac", type=float,
+                   default=CarbonConfig().r_maint_floor_frac,
+                   help="NSC-gate floor: basal R_maint fraction at full depletion.")
+    p.add_argument("--freeze-dormancy-threshold-k", type=float,
+                   default=CarbonConfig().freeze_dormancy_threshold_K,
+                   help="Cold-deciduous dormancy onset T [K]; below it foliar GPP + "
+                        "R_maint are suppressed. The T_freeze (0 degC) default is too "
+                        "high for boreal/tundra growing seasons -- try ~265 (-8 degC, "
+                        "deep-cold only).")
     args = p.parse_args(argv)
 
     out_dir = Path(args.output)
@@ -589,7 +552,12 @@ def main(argv=None):
         print(f"[{name}] pft={pft} texture={texture} lat={lat} "
               f"T_init={T_init} precip={precip:.1e} freeze_thaw={ft}", flush=True)
         config = build_pixel_config(
-            pft, texture, ft, args.n_layers, args.soil_depth, biome)
+            pft, texture, ft, args.n_layers, args.soil_depth, biome,
+            nsc_gated_respiration=args.nsc_gated_respiration,
+            cold_deciduous_dormancy=args.cold_deciduous_dormancy,
+            nsc_reserve_days=args.nsc_reserve_days,
+            r_maint_floor_frac=args.r_maint_floor_frac,
+            freeze_dormancy_threshold_K=args.freeze_dormancy_threshold_k)
         annual, _fs, final_carbon = run_pixel(
             config, lat, lon, T_init, precip, args.spinup_years, args.dt,
             n_verify=args.verify_years)

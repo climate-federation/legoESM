@@ -14,6 +14,7 @@ References
 
 from __future__ import annotations
 
+import os
 from typing import NamedTuple
 from pathlib import Path
 
@@ -24,6 +25,123 @@ import optax
 
 from legoesm.grids.gaussian import GaussianGrid
 from legoesm.ml.loss import area_weighted_mse, weighted_mae
+
+
+def configure_jax_compilation_cache(cache_dir, min_compile_secs: float = 30.0):
+    """Enable JAX's PERSISTENT on-disk compilation cache so an EXPENSIVE XLA
+    compile is written to disk ONCE and REUSED across process launches -- EXCEPT
+    on the CPU backend, where the cache is DISABLED for safety (see below).
+
+    This is the single shared implementation used by every legoESM driver that
+    pays a large cold-compile cost -- the correction campaign (rrtmgp radiation
+    graph, >16 min) and the Stage-B carbon calibration (the per-archetype-group
+    coupled-land-model graph, ~20 min cold across a diverse real archetype set).
+    With the cache each distinct graph is compiled once and every later launch
+    with the same code/backend reuses the on-disk binary, so a re-run drops from
+    minutes to seconds.  Keep it in ONE place so the caching policy (and its
+    safety key) never drifts between callers.
+
+    Parameters
+    ----------
+    cache_dir : str or os.PathLike
+        Directory for JAX's persistent compilation cache.  MUST live on a
+        SHARED filesystem when compute nodes write it (never node-local
+        ``/local``).  An empty / falsy value is a NO-OP: the function returns
+        ``None`` WITHOUT mutating any ``jax.config`` state (and without even
+        probing the backend), so the default (cache-disabled) JAX behavior is
+        preserved exactly.
+    min_compile_secs : float, default 30.0
+        Only compiles SLOWER than this [s] are written to the cache, so trivial
+        sub-second kernels never churn it; 30 s targets the genuinely expensive
+        physics / coupled graphs.
+
+    Returns
+    -------
+    str or None
+        ``str(cache_dir)`` when the persistent cache is ENABLED, otherwise
+        ``None`` -- either because ``cache_dir`` was empty/falsy OR because the
+        active backend is CPU (the CPU safety gate below).
+
+    Notes
+    -----
+    MUST be called BEFORE the first JAX compilation -- callers invoke it at the
+    very top of their entry point, before any driver build / precompute.  The
+    persistent-cache KEY includes the serialized HLO, the jaxlib version, and
+    the backend/platform, so a code change, a jaxlib upgrade, or a different
+    accelerator MISSES (recompiles) rather than serving a stale binary.
+
+    CPU SAFETY GATE.  That key does NOT include the specific CPU FEATURE set
+    (avx512, ...).  On a HETEROGENEOUS CPU partition (e.g. Ginsburg ``short``)
+    an AOT binary compiled on an avx512 node can be loaded on a node without it,
+    which JAX warns "could lead to execution errors such as SIGILL" (observed
+    live on a real global-IC build).  GPU/TPU keys DO include the device arch
+    and stay safe, so their behavior is UNCHANGED.  We therefore DISABLE the
+    persistent COMPILE cache when the active backend is CPU
+    (``jax.default_backend() == "cpu"``, probed here AFTER the caller configured
+    x64; a failed probe fails SAFE == treated as CPU == disabled).  Disabling
+    only forgoes recompilation -- the deterministic RESULT caches (the trainer's
+    precompute cache and the build's equilibrium cache) already amortize CPU
+    re-run cost.  A user whose CPU pool is PROVEN homogeneous (identical
+    microarch on every node sharing ``cache_dir``) can opt back in by setting
+    ``LEGOESM_ALLOW_CPU_COMPILE_CACHE=1``.
+    """
+    if not cache_dir:
+        return None
+
+    # CPU SAFETY GATE: the persistent-cache key is NOT microarch-specific, so a
+    # binary AOT-compiled on one CPU can be loaded on a different CPU that lacks
+    # its target features -> SIGILL / silently-wrong results on a heterogeneous
+    # partition.  Disable on CPU (unless the homogeneous-pool opt-in is set);
+    # GPU/TPU keep the arch in the key and stay enabled.  Probe is fail-safe.
+    if _active_backend_is_cpu() and not _cpu_compile_cache_opt_in():
+        print(
+            "[compile-cache] disabled on the CPU backend: JAX's persistent "
+            "compile cache is not keyed on the CPU microarchitecture, so a "
+            "cross-node AOT load risks SIGILL / silently-wrong results; the "
+            "deterministic result caches cover CPU re-run cost. "
+            f"Set {_CPU_COMPILE_CACHE_OPT_IN_ENV}=1 to override on a "
+            "homogeneous CPU pool.",
+            flush=True,
+        )
+        return None
+
+    jax.config.update("jax_compilation_cache_dir", str(cache_dir))
+    jax.config.update(
+        "jax_persistent_cache_min_compile_time_secs", float(min_compile_secs))
+    return str(cache_dir)
+
+
+# Opt-in env override: force-enable the persistent COMPILE cache on the CPU
+# backend for a user who KNOWS every node sharing ``cache_dir`` has the SAME
+# CPU microarchitecture (so a wrong-arch AOT load cannot happen).  Default OFF
+# -> CPU is disabled (cross-microarch SIGILL risk).  GPU/TPU ignore this.
+_CPU_COMPILE_CACHE_OPT_IN_ENV = "LEGOESM_ALLOW_CPU_COMPILE_CACHE"
+
+
+def _cpu_compile_cache_opt_in() -> bool:
+    """Return whether the user opted into the CPU persistent COMPILE cache."""
+    return (
+        os.environ.get(_CPU_COMPILE_CACHE_OPT_IN_ENV, "0").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+
+
+def _active_backend_is_cpu() -> bool:
+    """Return whether the active JAX backend is CPU (fail-SAFE).
+
+    Probes ``jax.default_backend()`` -- the same call as the canonical
+    :func:`legoesm.runtime.backend.get_backend` -- AFTER the caller has already
+    configured x64.  Any probe failure returns ``True`` ("treat as CPU"): the
+    microarch-mismatch SIGILL hazard is CPU-specific, so when we cannot
+    POSITIVELY confirm a non-CPU accelerator we fail SAFE and let the caller
+    disable the persistent compile cache.  This never degrades a WORKING
+    GPU/TPU launch, which reports ``"gpu"``/``"tpu"`` here; a throw means JAX is
+    unusable in this process (the run fails regardless of the cache).
+    """
+    try:
+        return jax.default_backend().lower() == "cpu"
+    except Exception:
+        return True
 
 
 class TrainingConfig(NamedTuple):
@@ -110,11 +228,24 @@ def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
     ValueError
         If ``config.optimizer`` is not one of the supported names.
     """
+    # Clamp the schedule lengths so a tiny-steps smoke run cannot crash.
+    # optax.warmup_cosine_decay_schedule builds its cosine leg with
+    # ``decay_steps - warmup_steps`` and optax.cosine_decay_schedule raises
+    # ``requires positive decay_steps`` when that is <= 0.  With the carbon
+    # trainer's ``total_steps=max(args.steps, 1)`` and an unclamped
+    # ``warmup_steps`` (e.g. --steps 6 with the sbatch default WARMUP=10) the
+    # cosine leg would be ``6 - 10 = -4`` and abort the whole run.  Guarantee
+    # ``decay_steps - warmup_steps >= 1``: ``total_steps >= 1`` and
+    # ``warmup_steps <= total_steps - 1`` (a warmup no longer than the run,
+    # leaving >=1 cosine step).  ``warmup_steps == 0`` is fine: linear_schedule
+    # disables the warmup leg for ``transition_steps <= 0``.
+    total_steps = max(1, int(config.total_steps))
+    warmup_steps = min(int(config.warmup_steps), max(0, total_steps - 1))
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
         peak_value=config.lr,
-        warmup_steps=config.warmup_steps,
-        decay_steps=config.total_steps,
+        warmup_steps=warmup_steps,
+        decay_steps=total_steps,
         end_value=0.0,
     )
 
@@ -247,21 +378,39 @@ def make_train_step(optimizer: optax.GradientTransformation, grid: GaussianGrid)
 
 
 def save_checkpoint(
-    model: eqx.Module,
+    model,
     path: str | Path,
 ) -> None:
-    """Save model checkpoint.
+    """Save a model / pytree checkpoint **atomically**.
+
+    Serialises ``model`` (any pytree whose array leaves ``eqx`` can
+    write — an :class:`eqx.Module`, or e.g. a ``(model, opt_state, ...)``
+    tuple) to a temp file in the destination directory and then
+    :func:`os.replace`-renames it onto ``path``.  The rename is atomic
+    on POSIX, so a walltime kill mid-write can never leave a truncated
+    or half-serialised checkpoint at ``path``: readers always see either
+    the previous complete checkpoint or the new complete one, never a
+    corrupt in-between (the non-atomic-write corruption source called
+    out in #942).
 
     Parameters
     ----------
-    model : eqx.Module
-        Model to save.
+    model : eqx.Module or pytree
+        Model / state to save.
     path : str or Path
-        File path for the checkpoint.
+        Destination file path for the checkpoint.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    eqx.tree_serialise_leaves(str(path), model)
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    try:
+        eqx.tree_serialise_leaves(str(tmp), model)
+        os.replace(tmp, path)
+    finally:
+        # ``os.replace`` consumes ``tmp`` on success; this only fires if
+        # serialisation raised, cleaning up the partial temp file.
+        if tmp.exists():
+            tmp.unlink()
 
 
 def load_checkpoint(

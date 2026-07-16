@@ -20,7 +20,7 @@ from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.canopy import CanopyLandParams, SIFConfig
 from legoesm.land.carbon.carbon_cycle import init_carbon_state
 from legoesm.land.carbon.config import CarbonConfig
-from legoesm.land.carbon.stomata import StomataConfig
+from legoesm.land.stomata import StomataConfig
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.multilayer_land import (
     init_multilayer_land_state,

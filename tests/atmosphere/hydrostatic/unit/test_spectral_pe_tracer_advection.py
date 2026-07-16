@@ -27,7 +27,7 @@ from legoesm.grids.gaussian import (
     sh_analysis_3d,
 )
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralPEConfig,
     SpectralPrimitiveEquationModel,
     isothermal_rest_state_spectral,
@@ -264,7 +264,7 @@ class TestSpectralPEHybridTracerVerticalAdvection:
             compute_mass_flux_hybrid,
             pressure_from_hybrid,
         )
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             spectral_pe_tendencies,
         )
 

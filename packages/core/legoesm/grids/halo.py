@@ -509,6 +509,31 @@ def set_spmd_mesh(mesh) -> None:
     _spmd_mesh = mesh
 
 
+@contextlib.contextmanager
+def local_halo_pads():
+    """Force every ``pad_halo*`` dispatch to the LOCAL (serial) backend
+    within the ``with`` block, then restore the previous backend state.
+
+    This is a TRACE-TIME switch for wide-halo compute regions: after a code
+    path has already exchanged a wide halo (width = its full stencil reach),
+    its interior operators must run their internal pads as plain local
+    ``jnp.pad`` — re-dispatching them to MPI sendrecv / SPMD ppermute would
+    re-communicate every substep, defeating the wide exchange (and, on the
+    extended arrays, exchange the WRONG rows).  The flag is read when the
+    operators trace, so wrap the traced region, not the runtime call.
+
+    Neutralizes all three dispatch signals: backend name, MPI topology, and
+    the SPMD mesh.  Re-entrant and exception-safe.
+    """
+    global _halo_backend, _mpi_topology, _spmd_mesh
+    saved = (_halo_backend, _mpi_topology, _spmd_mesh)
+    _halo_backend, _mpi_topology, _spmd_mesh = "local", None, None
+    try:
+        yield
+    finally:
+        _halo_backend, _mpi_topology, _spmd_mesh = saved
+
+
 # ==============================================================================
 # Scalar halo exchange
 # ==============================================================================
@@ -2909,21 +2934,21 @@ def monotone_halo_clip_context(slack: float = 0.5):
     import functools
 
     scalar_targets = [
-        "legoesm.atmosphere.dynamics.compressible_euler_cdgrid."
+        "legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid."
         "_pad_halo_4d_module",
         "legoesm.core.operators_3d.pad_halo_4d",
         "legoesm.core.operators_cdgrid.pad_halo_4d",
         # FV3_3D iter 527: PE-side import aliases.
-        "legoesm.atmosphere.dynamics.primitive_eq_cdgrid."
+        "legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid."
         "_pad_halo_4d",
-        "legoesm.atmosphere.dynamics.primitive_eq_cdgrid."
+        "legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid."
         "_pad_halo_4d_module",
     ]
     vector_targets = [
         "legoesm.core.operators_cdgrid.pad_halo_vector_4d",
         "legoesm.core.operators_3d.pad_halo_vector_4d",
         # FV3_3D iter 527: PE-side import alias.
-        "legoesm.atmosphere.dynamics.primitive_eq_cdgrid."
+        "legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid."
         "pad_halo_vector_4d",
     ]
     pad_halo_3d_targets = [
@@ -2942,7 +2967,7 @@ def monotone_halo_clip_context(slack: float = 0.5):
         # via C-D coupling. NH residual leaks through this path.
         "legoesm.core.fv3_sw_core.pad_halo_vector",
         # FV3_3D iter 527: PE-side import alias.
-        "legoesm.atmosphere.dynamics.primitive_eq_cdgrid."
+        "legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid."
         "pad_halo_vector",
     ]
 

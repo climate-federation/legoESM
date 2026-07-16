@@ -197,3 +197,79 @@ def test_manifest_write_read_digest_roundtrip_ocean(tmp_path):
     # Post-run digest recording (the reproduce reference).
     record_state_digest(path, "deadbeefcafe")
     assert recorded_state_digest(read_run_manifest(path)) == "deadbeefcafe"
+
+
+def test_manifest_write_survives_array_config_leaf(tmp_path):
+    """A config carrying an ARRAY leaf (the per-cell NEMO ln_rnf_depth_ini
+    runoff_depth_spread_map) must not crash write_run_manifest with
+    'Object of type ArrayImpl is not JSON serializable' -- the dump summarises
+    array-likes as shape/dtype/min/max (best-effort provenance; the ico7_dm30
+    MPAS run lost its whole manifest to this)."""
+    import json as _json
+    import numpy as np
+
+    from legoesm.driver.restart import write_run_manifest
+
+    cfg = _latlon_cfg()._replace(
+        runoff_depth_spread_map=np.linspace(1.0, 150.0, 7))
+    rec = _run_record(runtime_config=cfg)
+    path = write_run_manifest(tmp_path, rec, config_kind="ocean",
+                              runner_tag="test")
+    data = _json.loads(path.read_text())
+    blob = _json.dumps(data)
+    assert "ArrayImpl" not in blob
+    assert "__array_summary__" in blob
+    # locate the summary and check the numbers survived
+    def _find(d):
+        if isinstance(d, dict):
+            if "__array_summary__" in d:
+                return d["__array_summary__"]
+            for v in d.values():
+                r = _find(v)
+                if r is not None:
+                    return r
+        elif isinstance(d, list):
+            for v in d:
+                r = _find(v)
+                if r is not None:
+                    return r
+        return None
+    s = _find(data)
+    assert s is not None and s["shape"] == [7]
+    assert s["min"] == 1.0 and s["max"] == 150.0
+    # the manifest must validate on its own output (hash consistency under the
+    # summarised encoding), not just be JSON-writable (codex)
+    from legoesm.driver.restart import validate_run_manifest
+    validate_run_manifest(data)
+
+
+def test_numpy_scalar_config_leaf_encoding_unchanged():
+    """A NumPy SCALAR leaf (np.float64 A_h) must keep the plain scalar
+    encoding -- not become an __array_summary__ dict -- so configs without
+    arrays stay byte-identical and rebuild exactly (codex)."""
+    import numpy as np
+
+    cfg = _latlon_cfg()._replace(rho_0=np.float64(1026.5))
+    d = ocean_config_to_dict(cfg)
+    assert d["rho_0"] == 1026.5 and not isinstance(d["rho_0"], dict)
+    rebuilt = ocean_config_from_dict(d)
+    assert float(rebuilt.rho_0) == 1026.5
+    assert (compute_config_hash(cfg, "ocean")
+            == compute_config_hash(cfg._replace(rho_0=1026.5), "ocean"))
+
+
+def test_array_summary_hash_is_content_sensitive():
+    """Two maps with the SAME shape/dtype/min/max but different interior
+    values must hash differently (the map affects physics; shape+range alone
+    collided -- codex)."""
+    import numpy as np
+
+    a = np.array([1.0, 2.0, 150.0])
+    b = np.array([1.0, 3.0, 150.0])          # same shape/min/max, different content
+    ca = _latlon_cfg()._replace(runoff_depth_spread_map=a)
+    cb = _latlon_cfg()._replace(runoff_depth_spread_map=b)
+    assert compute_config_hash(ca, "ocean") != compute_config_hash(cb, "ocean")
+    # and identical content hashes identically
+    assert (compute_config_hash(ca, "ocean")
+            == compute_config_hash(_latlon_cfg()._replace(
+                runoff_depth_spread_map=a.copy()), "ocean"))

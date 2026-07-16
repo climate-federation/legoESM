@@ -193,7 +193,7 @@ def test_clm_multilayer_setup_preserves_surface_snow_stomata(tmp_path):
     partial regression.  A silent reset here would re-introduce that regression."""
     from legoesm.land.clm_surface_map import load_clm_surface, clm_multilayer_setup
     from legoesm.land.config import MultiLayerLandConfig
-    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.land.stomata import StomataConfig
     from legoesm.land.soil_grid import SoilGridConfig
 
     f = str(tmp_path / "s.nc")

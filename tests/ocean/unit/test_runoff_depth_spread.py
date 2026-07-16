@@ -195,3 +195,46 @@ def test_river_mouth_gate_zeroes_restoring_at_mouths():
     out_none = compute_sss_restoring_flux(
         S_m, S_t, lat, lon, ice, cfg, river_runoff=None)
     assert np.array_equal(np.asarray(out_none["dS_dt_top"]), l)
+
+
+def test_per_cell_map_equals_scalar_per_cell():
+    """A per-cell spread-depth MAP (NEMO ln_rnf_depth_ini mode) must
+    reproduce, cell by cell, what the scalar mode gives when called with
+    that cell's depth — same math, broadcast over cells."""
+    from legoesm.ocean.freshwater import (
+        runoff_spread_virtual_salt_tendency_3d,
+    )
+    n, nlev = 8, 6
+    fw = _fw(n)
+    h_k, mask, _area = _column_geometry(n, nlev)
+    rng = np.random.default_rng(3)
+    depth_map = jnp.asarray(rng.uniform(3.0, 200.0, mask.shape))
+    got = runoff_spread_virtual_salt_tendency_3d(
+        fw, 35.0, h_k, 1026.0, mask, runoff_spread_m=depth_map)
+    # reference: scalar call per unique depth, assembled cell-wise
+    ref = np.zeros_like(np.asarray(got))
+    for idx in np.ndindex(*mask.shape):
+        one = runoff_spread_virtual_salt_tendency_3d(
+            fw, 35.0, h_k, 1026.0, mask,
+            runoff_spread_m=float(depth_map[idx]))
+        ref[idx] = np.asarray(one)[idx]
+    np.testing.assert_allclose(np.asarray(got), ref, rtol=1e-12)
+
+
+def test_per_cell_map_conserves_column_integral():
+    from legoesm.ocean.freshwater import (
+        runoff_spread_virtual_salt_tendency_3d, virtual_salt_flux,
+    )
+    n, nlev = 8, 6
+    fw = _fw(n)
+    h_k, mask, _area = _column_geometry(n, nlev)
+    depth_map = jnp.asarray(
+        np.random.default_rng(4).uniform(1.0, 150.0, mask.shape))
+    dS3 = runoff_spread_virtual_salt_tendency_3d(
+        fw, 35.0, h_k, 1026.0, mask, runoff_spread_m=depth_map)
+    col = jnp.sum(dS3 * h_k, axis=-1)
+    dS_top_legacy = virtual_salt_flux(
+        fw, S_ref=35.0, dz_0=h_k[..., 0], rho_0=1026.0)
+    np.testing.assert_allclose(
+        np.asarray(col), np.asarray(dS_top_legacy * h_k[..., 0]),
+        rtol=1e-10)

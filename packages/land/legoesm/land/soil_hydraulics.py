@@ -57,20 +57,20 @@ __param_spec__ = {
                              "trainable closure",
         },
         "params": {
-            "K_sat": {"units": "1", "bounds": (9.537e-07, 8.67e-06), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
-            "alpha_vg": {"units": "1", "bounds": (1.188, 10.8), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "K_sat": {"units": "m s-1", "bounds": (9.537e-07, 8.67e-06), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "alpha_vg": {"units": "m-1", "bounds": (1.188, 10.8), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
             "b_ch": {"units": "1", "bounds": (1.7787, 16.17), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
-            "c_film": {"units": "1", "bounds": (4.455e-09, 4.05e-08), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
-            "h0_pdi": {"units": "1", "bounds": (20790.0, 189000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
-            "h_a": {"units": "1", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
-            "h_cav": {"units": "1", "bounds": (16.5, 150.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
-            "h_crit": {"units": "1", "bounds": (0.0198, 0.18), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "c_film": {"units": "m5/2 s-1", "bounds": (4.455e-09, 4.05e-08), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "h0_pdi": {"units": "m", "bounds": (20790.0, 189000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "h_a": {"units": "m", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "h_cav": {"units": "m", "bounds": (16.5, 150.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "h_crit": {"units": "m", "bounds": (0.0198, 0.18), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
             "lambda_bc": {"units": "1", "bounds": (0.06138, 0.558), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
             "n_a": {"units": "1", "bounds": (0.165, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
             "n_vg": {"units": "1", "bounds": (1.05, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
             "omega_pdi": {"units": "1", "bounds": (0.165, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
-            "psi_b": {"units": "1", "bounds": (-1.434, -0.15774), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
-            "psi_sat": {"units": "1", "bounds": (-1.434, -0.15774), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "psi_b": {"units": "m", "bounds": (-1.434, -0.15774), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "psi_sat": {"units": "m", "bounds": (-1.434, -0.15774), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
             "sigma_cav": {"units": "1", "bounds": (0.3, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
             "tau_s": {"units": "1", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
             "theta_a": {"units": "1", "bounds": (0.0066, 0.06), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
@@ -478,8 +478,17 @@ def lu_K(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
         1e-10, 1.0,
     )
     m = 1.0 - 1.0 / config.n_vg
-    inner = 1.0 - (1.0 - Se ** (1.0 / m)) ** m
-    K_cap = config.K_sat * jnp.sqrt(Se) * inner ** 2
+    # where-before-pow guard (identical to van_genuchten_K): at saturation
+    # Se=1 the Mualem base u = 1 - Se^(1/m) = 0, and u**m (m<1) has an infinite
+    # slope, so the outer where(psi>=0, K_sat, K) would give 0*inf = NaN in the
+    # reverse-mode gradient wrt theta_sat/theta_r.  Masking keeps that gradient
+    # finite while the forward stays exact (u=0 -> inner=1 -> K_cap=K_sat).
+    Se_safe = jnp.maximum(Se, 1e-12)
+    u = 1.0 - Se_safe ** (1.0 / m)
+    mask = u > 1e-12
+    u_pow = jnp.where(mask, jnp.where(mask, u, 1.0) ** m, 0.0)
+    inner = 1.0 - u_pow
+    K_cap = config.K_sat * jnp.sqrt(Se_safe) * inner ** 2
     # Film-flow floor: prevents K=0 in the adsorptive regime
     K_film = config.K_sat * 1e-10
     K = jnp.maximum(K_cap, K_film)
@@ -581,10 +590,16 @@ def moisture_capacity(psi: jnp.ndarray, theta: jnp.ndarray,
     elif curve == "lu":
         C = lu_C(psi, config)
     elif curve == "brooks_corey":
-        # Brooks-Corey: use finite difference approximation
+        # Brooks-Corey: finite-difference the RAW retention curve.  Using
+        # theta_from_psi here would double-count the elastic S_s*theta_sat term
+        # (theta_from_psi adds S_s*theta_sat*psi for psi>=0, and the block below
+        # adds S_s*theta_sat again) -> C ~= 2*S_s*theta_sat at saturation,
+        # inconsistent with dtheta/dpsi and the mixed-form Picard mass balance.
+        # Every other scheme (van_genuchten_C, clapp_hornberger_C, pdi_C, lu_C)
+        # differentiates the raw curve, so the S_s term is supplied exactly once.
         eps = 1e-4  # coeff-ok: finite-difference / safety epsilon
-        theta_p = theta_from_psi(psi + eps, config)
-        theta_m = theta_from_psi(psi - eps, config)
+        theta_p = brooks_corey_theta(psi + eps, config)
+        theta_m = brooks_corey_theta(psi - eps, config)
         C = (theta_p - theta_m) / (2.0 * eps)
     else:
         raise ValueError(f"Unknown retention curve: {curve}")

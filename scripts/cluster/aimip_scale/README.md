@@ -25,15 +25,39 @@ GPU, already how the three variants run) or the lat-lon C-grid PE training path
 (`run_aimip_latlon.py`), which *can* SPMD-shard — but that path is separate and
 not wired to this config.
 
-## Data
+## Data (v2 — dense + curriculum, the ACE2-gap upgrades)
 
 `config/aimip/scale/base_t106_allyears.yaml`:
-`train_windows` = 1979–2014 × 4 seasons (Jan/Apr/Jul/Oct), `n_days=1` →
-**576 IC/target pairs** (full ENSO + seasonal cycle). Eval held out on
+`train_windows` = 1979–2014 × 4 seasons (Jan/Apr/Jul/Oct), `n_days=2` →
+**1152 IC/target pairs** (full ENSO + seasonal cycle). Eval held out on
 2015–2017. Prescribed-SST/sea-ice/insolation forcing is on (the
 interannual-variability pathway). Needs the ERA5 WeatherBench-2 Zarr reachable
 from the compute node (the training driver streams it; set the store in
 `legoesm.training.era5_to_state.TrainingERA5Config` or the site cache).
+
+v2 additions (all driven by the base YAML, nothing extra to configure):
+
+- **Chunked streaming** (`aimip_chunk_windows: 18`): the 1152-pair set is
+  loaded 18 windows (144 samples) at a time per epoch, so host RAM stays
+  bounded; sample shapes are constant across chunks → the jitted train
+  step never retraces.
+- **Rollout curriculum** (`aimip_rollout_curriculum: 12h×2, 24h×2, 72h×2,
+  120h×1` epochs): each phase supervises one autoregressive rollout to
+  the phase lead against the ERA5 target at that lead — free-run
+  stability is trained in, NeuralGCM-style, instead of bolted on by a
+  post-hoc finetune.
+- **Budget constraints** (NN paths): the SFNO's global-mean lnps tendency
+  is projected out (approximate dry-mass fixer) and q_v is clipped ≥ 0
+  after every forced rollout step.
+- **Classical GHG pin**: with `aimip_radiation: rrtmgp`, training
+  radiation carries the mid-training-period (≈1996) GHG concentrations
+  via the traced forcing dict. NN variants get no CO₂ input (AIMIP-1
+  convention).
+
+The `variant_*.yaml` overlays MUST sit next to the suite files in
+`config/aimip/scale/` — `run_aimip.py --suite` loads
+`variant_<name>.yaml` from the suite's own directory and hard-fails
+otherwise.
 
 ## Run
 
@@ -60,14 +84,20 @@ A manual resubmit resumes automatically (it detects existing epoch checkpoints).
 
 ## Cost estimate
 
-At T106, RRTMGP + 2-step at 576 samples is ~10–15× the Ginsburg T63 per-epoch
-cost. Budget roughly:
+At T106, RRTMGP at 1152 samples is ~20–30× the Ginsburg T63 per-epoch cost,
+and the curriculum's later phases (72 h / 120 h rollouts) cost proportionally
+more per sample than the 12 h phase. Budget roughly (7 curriculum epochs):
 
-| variant       | ~time/epoch (A100-80) | 15 epochs |
-|---------------|-----------------------|-----------|
-| sfno_physics  | ~1–1.5 h              | ~18 h (2 links) |
-| column_nn     | ~1–1.5 h              | ~18 h |
-| classical     | ~3–4 h (RRTMGP)       | ~50 h (5 links) |
+| variant       | ~12h-phase epoch (A100-80) | full curriculum |
+|---------------|----------------------------|-----------------|
+| sfno_physics  | ~2–3 h                     | ~40–60 h (4–6 links) |
+| column_nn     | ~2–3 h                     | ~40–60 h |
+| classical     | ~6–8 h (RRTMGP)            | ~120 h+ (chain) |
+
+The self-chaining handles the walltime; note the LR schedule restarts at each
+resume (warned in the log — weights are unaffected). Lower the curriculum
+epoch counts in the base, or set `aimip_radiation: gray` for the NN variants
+(they replace physics anyway) to cut wall clock.
 
 Lower `aimip_n_epochs` in the base, or set `aimip_radiation: gray` for the NN
 variants (they replace physics anyway) to cut wall clock.

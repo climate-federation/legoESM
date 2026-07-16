@@ -18,9 +18,11 @@
 # The 80 GB card is what makes T106 + RRTMGP + K=2 autoregressive rollout +
 # spatial-surface coefs fit.
 #
-# The run self-CHAINS: run_aimip.py writes a per-epoch checkpoint and --resume
-# picks up at the next epoch, so a 15-epoch T106 run that exceeds one 12 h
-# walltime resubmits itself until all epochs are done (or CHAIN_MAX links).
+# The run self-CHAINS: run_aimip.py writes a per-epoch checkpoint AND a
+# mid-epoch per-chunk checkpoint (chunk_latest.eqx: model + optimizer state +
+# chunk index, #942), and --resume picks up at the exact chunk it left off, so
+# a T106 run whose SINGLE epoch (~13 h) exceeds one 12 h walltime resubmits
+# itself and makes monotonic progress instead of restarting epoch 0 forever.
 #
 # SUBMIT (one per variant):
 #   qsub -v VARIANT=sfno_physics scripts/cluster/aimip_scale/train_aimip_derecho.pbs
@@ -34,7 +36,7 @@ set -uo pipefail
 
 VARIANT="${VARIANT:-sfno_physics}"     # classical | column_nn | sfno_physics
 CHAIN="${CHAIN:-0}"
-CHAIN_MAX="${CHAIN_MAX:-12}"
+CHAIN_MAX="${CHAIN_MAX:-24}"  # v2 curriculum (72h/120h phases) needs more links
 
 cd "$PBS_O_WORKDIR"
 source scripts/cluster/scaling_derecho/_env.sh   # sets REPO, PY, conda, JAX env
@@ -48,10 +50,16 @@ SUITE="config/aimip/scale/suite_${VARIANT}.yaml"
 OUT="results/aimip_scale_t106/${VARIANT}"
 mkdir -p "$OUT/logs"
 
-# Resume automatically if any epoch checkpoint already exists for this variant
-# (so a manual resubmit or a chained link both continue rather than restart).
+# Resume automatically if ANY checkpoint already exists for this variant --
+# either a completed-epoch checkpoint (epoch_*.eqx) OR a mid-epoch per-chunk
+# checkpoint (chunk_latest.eqx).  The latter is the #942 fix: a job killed by
+# the 12 h walltime cap PART-WAY through the ~13 h epoch writes chunk_latest.eqx
+# but no epoch_*.eqx, so detecting only epoch_*.eqx would (wrongly) restart the
+# epoch from scratch on the next link -- the "zero progress forever" bug.
 RESUME_FLAG=""
-if ls "$OUT"/*/epoch_*.eqx >/dev/null 2>&1 || [ "${RESUME:-0}" = "1" ]; then
+if ls "$OUT"/*/epoch_*.eqx >/dev/null 2>&1 \
+   || ls "$OUT"/*/chunk_latest.eqx >/dev/null 2>&1 \
+   || [ "${RESUME:-0}" = "1" ]; then
   RESUME_FLAG="--resume"
 fi
 

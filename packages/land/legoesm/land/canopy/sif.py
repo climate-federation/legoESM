@@ -9,7 +9,7 @@ solution** — net assimilation ``An``, intercellular CO2 ``Ci``, the CO2
 compensation point ``Gamma*`` and absorbed PAR.  It deliberately does **not**
 re-implement photosynthesis, electron transport or stomatal conductance; those
 come from the caller (``canopy/photosynthesis.py`` for the two-leaf canopy,
-``carbon/stomata.py`` for the SimpleSEB big-leaf).  SIF is a passive diagnostic:
+``land/stomata.py`` for the SimpleSEB big-leaf).  SIF is a passive diagnostic:
 it never feeds back into the prognostic land state.
 
 Model (all per leaf-class, following BEPS-SIF ``SIF_y``)::
@@ -273,16 +273,34 @@ def multilayer_canopy_sif(
     that validates the multilayer path against the big-leaf / two-leaf paths
     (identical fluorescence core).
 
-    CALIBRATION NOTE: ``je_leaf`` is the model's FULL Farquhar electron-transport
-    rate ``J``, whereas the big-leaf inversion is the BEPS-SIF *proxy*
-    ``An*(Ci+2*Gamma*)/(Ci-Gamma*)`` ≈ ``J/4`` (no ``/4``, no ``Rd``).  The two
-    je definitions therefore differ in absolute scale, so the light-saturation
-    knob ``max_electron_yield`` (BEPS-calibrated for the proxy) sets a *different*
-    absolute magnitude on this native path — a real CHATS7 tower run shows the
-    two paths track in diurnal SHAPE but diverge up to ~35 % at midday
-    saturation.  The diurnal shape is correct as-is; recalibrate
-    ``max_electron_yield`` (and ``fesc``) against satellite SIF for absolute
-    magnitude — it is a tier-1 trainable for exactly this.
+    JE CONVENTION (validated at CHATS7 — do NOT rescale ``je_leaf``):
+    ``je_leaf`` is the model's FULL Farquhar electron-transport rate ``J``,
+    whereas the big-leaf inversion is the BEPS-SIF *proxy*
+    ``An*(Ci+2*Gamma*)/(Ci-Gamma*)`` ≈ ``J/4`` — so the two je definitions differ
+    ~4-5x in absolute scale.  Despite that, feeding ``je_leaf`` directly is
+    CORRECT.  With ``max_electron_yield`` (BEPS-calibrated ~0.05) applied to
+    ABSORBED PAR, the full-J ``je_leaf`` drives ``x`` onto its 0-clamp for the
+    high-light daytime elements, where ``fluorescence_yield(0)`` is je-INDEPENDENT
+    (``SIF ~ fs(0)*APAR*fesc``) so the je scale drops out there.  Rescaling
+    ``je_leaf`` to the proxy convention (÷4) instead lifts ``x`` off the clamp at
+    the sub-saturated sunrise/sunset steps, raising the yield and OVERSHOOTING the
+    multilayer SIF -- it BREAKS the agreement rather than improving it.  An EC-site
+    diurnal cross-check (``scripts/validate/compare_ml_bigleaf_ec.py``, CHATS7)
+    confirms the direction INTERNALLY to the multilayer path (same APAR, same leaf
+    areas, so it isolates the je convention): the ÷4-rescaled canopy SIF OVERSHOOTS
+    the native-``je_leaf`` SIF by ~15 % on the diurnal mean -- more near the
+    sub-saturated sunrise/sunset steps where ``x`` lifts off the clamp -- so the
+    native ``je_leaf`` is the correct feed and the ÷4 rescale breaks it (the
+    ~15 %/~5x magnitudes are EMPIRICAL, not derivable from the code).  This
+    native-vs-÷4 test is SEPARATE from how the multilayer SIF MAGNITUDE compares to
+    the two-leaf big-leaf: that cross-scheme match is set by canopy STRUCTURE (the
+    two-leaf's single green LAI absorbs less than CLM-ML's plant-area profile) and
+    runs ~10 % below, tracking the latent-heat/radiation bias -- NOT a je-convention
+    effect.  (An earlier ~1 % cross-scheme match was an artifact of driving the
+    two-leaf with plant-area index; green LAI is physiology-correct and exposes the
+    structural ~10 %.)
+    ``max_electron_yield`` and ``fesc`` remain tier-1 trainables for ABSOLUTE
+    calibration against satellite SIF (a separate concern from the je convention).
     """
     per_leaf = leaf_sif_from_je(je, apar, cfg)
     fesc = jnp.clip(cfg.escape_probability, 0.0, 1.0)

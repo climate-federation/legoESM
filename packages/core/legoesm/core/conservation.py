@@ -295,8 +295,51 @@ def _spmd_lat_psum_or_none(local_sums: list[jax.Array]) -> list[jax.Array] | Non
             "is set; arm it via activate_latlon_spmd_halo(mesh).")
     if "lat" in tuple(mesh.axis_names):
         from legoesm.parallel.reductions import batch_psum_spmd
+        if ("lon" in tuple(mesh.axis_names)
+                and int(mesh.shape["lon"]) > 1):
+            # 2-D ("lat", "lon") tile mesh (M3a): every TILE holds a partial
+            # sum — reduce across BOTH axes, or the "global" mass integral
+            # would silently remain a per-lon-sector partial.  The 1-D band
+            # mesh — and the degenerate (N, 1) tile mesh, whose lon rings
+            # have one member — keep the bare "lat" psum (byte-unchanged /
+            # structurally identical to the band program for the (N, 1)
+            # bit-identity gate).
+            return batch_psum_spmd(local_sums, ("lat", "lon"))
         return batch_psum_spmd(local_sums, "lat")
+    if (tuple(mesh.axis_names) == ("face", "tile_i", "tile_j")
+            and _TILED_REDUCTION_SCOPE):
+        # Sub-face-tiled cube shard_map (the tiled operator-split lane):
+        # each TILE holds a partial sum — combine across all three mesh
+        # axes.  DOUBLE-gated (codex): the exact tiled axis tuple keeps a
+        # face-only ``("face",)`` SPMD mesh on the jit-auto path, and the
+        # explicit :func:`tiled_reduction_scope` context keeps a reduction
+        # that merely RUNS while a tiled mesh is armed — but outside the
+        # tiled shard_map body — from emitting an out-of-scope psum.
+        from legoesm.parallel.reductions import batch_psum_spmd
+        return batch_psum_spmd(local_sums, ("face", "tile_i", "tile_j"))
     return None
+
+
+# Explicit opt-in scope for the tiled-mesh psum branch above: ONLY the tiled
+# operator-split step's shard_map body runs with tile-partial sums; any other
+# reduction (writers, diagnostics, another module) executing while the tiled
+# mesh happens to be armed must fall through to the serial path.
+_TILED_REDUCTION_SCOPE: list = []
+
+
+class tiled_reduction_scope:
+    """Context manager arming the tiled-mesh psum branch of
+    :func:`_spmd_lat_psum_or_none` — enter ONLY around code that traces
+    INSIDE a ``("face","tile_i","tile_j")`` shard_map body (the tiled
+    operator-split step)."""
+
+    def __enter__(self):
+        _TILED_REDUCTION_SCOPE.append(True)
+        return self
+
+    def __exit__(self, *exc):
+        _TILED_REDUCTION_SCOPE.pop()
+        return False
 
 
 def batch_global_area_sums(

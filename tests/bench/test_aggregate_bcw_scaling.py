@@ -248,3 +248,85 @@ def test_cube_and_latlon_lanes_are_distinct_curves(tmp_path):
     same_dev = [r for r in rows if r["n_devices"] == 6]
     assert dropped == 0 and len(same_dev) == 2      # NOT merged into one
     assert {r["grid"] for r in same_dev} == {"cubed-sphere", "latlon"}
+
+
+# ---------------------------------------------------------------------------
+# SPMD bench-lane JSONL ingestion (bench_*_spmd_scaling append-per-line recs)
+# ---------------------------------------------------------------------------
+
+def _spmd_rec(**over):
+    """A bench_atm_latlon_spmd_scaling-shaped flat record (one JSONL line)."""
+    rec = {
+        "mode": "strong", "n_devices": 4, "n_lat": 128, "n_lon": 256,
+        "nlev": 30, "physics": "none", "steps": 12, "platform": "gpu",
+        "steady_median_ms": 25.0,
+        "grid_type": "latlon", "resolution": 128, "n_levels": 30,
+        "precision": "float32", "physics_level": "none", "backend": "gpu",
+        "dt_seconds": 60.0, "time_per_step_ms": 25.0,
+        "total_cells": 128 * 256 * 30, "sypd": 5.67,
+        "mcells_per_s": 39.3,
+        "metadata": {"virtual_cpu_devices": False},
+    }
+    rec.update(over)
+    return rec
+
+
+def _write_jsonl(d: Path, name: str, recs: list) -> None:
+    (d / name).parent.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+
+
+def test_ingests_spmd_jsonl_lane(tmp_path):
+    _write_jsonl(tmp_path / "latlon_gpu_1", "spmd_scaling.jsonl", [
+        _spmd_rec(n_devices=1, sypd=2.0, mcells_per_s=10.0),
+        _spmd_rec(n_devices=4, sypd=5.67, mcells_per_s=39.3),
+    ])
+    rows, dropped = agg.collect(tmp_path)
+    assert dropped == 0
+    assert len(rows) == 2
+    by_n = {r["n_devices"]: r for r in rows}
+    # n_devices (NOT n_ranks/process count) is the ladder axis: a single-
+    # process 4-device SPMD run must land at n=4.
+    assert set(by_n) == {1, 4}
+    assert by_n[4]["backend"] == "GPU"       # from the 'backend'/'platform' key
+    assert by_n[4]["sypd"] == 5.67           # SYPD now present for latlon GPU
+    assert by_n[4]["mcells_per_s"] == 39.3
+    assert by_n[4]["component"] == "atm"
+    assert by_n[4]["grid"] == "latlon"
+
+
+def test_spmd_jsonl_ocean_component_is_kept(tmp_path):
+    _write_jsonl(tmp_path / "ocean_gpu_1", "ocean_spmd.jsonl", [
+        _spmd_rec(component="ocean", grid_type="latlon", sypd=1.5),
+    ])
+    rows, _ = agg.collect(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["component"] == "ocean"
+    assert rows[0]["case"] == "ocean"
+
+
+def test_spmd_jsonl_virtual_cpu_proxy_rows_are_skipped(tmp_path):
+    # Forced host-platform CPU devices = communication-overhead proxy, not
+    # hardware scaling; the aggregator must never chart it as a CPU curve.
+    _write_jsonl(tmp_path / "latlon_cpu_1", "spmd_scaling.jsonl", [
+        _spmd_rec(platform="cpu", backend="cpu",
+                  metadata={"virtual_cpu_devices": True}),
+    ])
+    rows, _ = agg.collect(tmp_path)
+    assert rows == []
+
+
+def test_spmd_jsonl_skips_ab_and_val_dirs(tmp_path):
+    _write_jsonl(tmp_path / "_ab_fused" / "x", "spmd.jsonl", [_spmd_rec()])
+    _write_jsonl(tmp_path / "val_smoke", "spmd.jsonl", [_spmd_rec()])
+    rows, _ = agg.collect(tmp_path)
+    assert rows == []
+
+
+def test_spmd_jsonl_blank_and_corrupt_lines_are_skipped(tmp_path):
+    p = tmp_path / "latlon_gpu_1"
+    p.mkdir(parents=True)
+    (p / "spmd.jsonl").write_text(
+        json.dumps(_spmd_rec()) + "\n\nnot-json{{{\n")
+    rows, _ = agg.collect(tmp_path)
+    assert len(rows) == 1

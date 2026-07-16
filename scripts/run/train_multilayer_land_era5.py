@@ -73,7 +73,7 @@ from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.surface_albedo import LandAlbedoConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
 from legoesm.land.soil_thermal import SoilThermalConfig
-from legoesm.land.carbon.stomata import StomataConfig
+from legoesm.land.stomata import StomataConfig
 from legoesm.land.carbon.config import CarbonConfig
 from legoesm.land.carbon.carbon_cycle import init_carbon_state
 from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_land_state
@@ -293,6 +293,24 @@ def baked_init_params() -> dict:
         th_glacier_cboost=_inv_ext(C.TUNED_GLACIER_CBOOST_MULTILAYER, "th_glacier_cboost"),
     )
     p.update({k: jnp.asarray(v) for k, v in over.items()})
+    return p
+
+
+def json_init_params(path: str) -> dict:
+    """Raw (unconstrained) params warm-started from a saved CONSTRAINED tuned JSON
+    (the inverse of the ``constrain_ext`` applied at save time), layered over the baked
+    raw defaults so any key absent from an older checkpoint keeps its baked value.
+
+    Lets a re-tune REFINE an existing tuned checkpoint (e.g. ``land_tuned_allgaps.json``,
+    the current production params) instead of restarting from the baked/CLM5 prior — the
+    correct warm start when the point of the re-tune is to beat the CURRENT best.
+    """
+    p = baked_init_params()
+    with open(path) as f:
+        cp = json.load(f)
+    for k, v in cp.items():
+        if k in BOUNDS_EXT:
+            p[k] = jnp.asarray(_inv_ext(np.asarray(v, dtype=float), k))
     return p
 
 
@@ -901,6 +919,11 @@ def main():
                          "production _TUNED_*_MULTILAYER params -> REFINE the well-tuned "
                          "model with the elevation bands active, instead of climbing "
                          "from the prior)")
+    ap.add_argument("--init-json", default=None,
+                    help="warm start from a saved CONSTRAINED tuned JSON (e.g. "
+                         "results/land_tuned_allgaps.json), inverse-constrained to raw "
+                         "and layered over the baked defaults; overrides --init-from so a "
+                         "re-tune REFINES the current best instead of the baked prior")
     args = ap.parse_args()
     _BULK_SCHEME, _STOMATA_ON = args.bulk, args.stomata
     _ELEV_BANDS_ON = args.elev_bands
@@ -932,9 +955,13 @@ def main():
               f"{int(test_data['lat'].shape[0])} test (holdout {args.holdout:.0%}, "
               f"seed {args.seed})", flush=True)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    init_params = baked_init_params() if args.init_from == "baked" else None
-    if init_params is not None:
-        print("# warm-start: refining the production baked multilayer params", flush=True)
+    if args.init_json:
+        init_params = json_init_params(args.init_json)
+        print(f"# warm-start: refining tuned checkpoint {args.init_json}", flush=True)
+    else:
+        init_params = baked_init_params() if args.init_from == "baked" else None
+        if init_params is not None:
+            print("# warm-start: refining the production baked multilayer params", flush=True)
     tuned = train(data, n_iter=args.iters, lr=args.lr, ckpt_path=args.out, clip=args.clip,
                   prefilter=prefilter, batch=args.batch, init_params=init_params)
     with open(args.out, "w") as f:

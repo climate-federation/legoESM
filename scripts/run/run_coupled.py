@@ -526,6 +526,14 @@ def build_parser():
                              "classification + reference soil map (downloaded + "
                              "cached on first use). 'analytical' = latitude-band "
                              "PFT fractions, no soil map.")
+    parser.add_argument("--transient-land-cover", dest="transient_land_cover",
+                        action="store_true", default=False,
+                        help="Re-weight the CLM land vegetation params each segment "
+                             "from --land-cover-surfdata's transient pft_frac(year,...) "
+                             "(LUH2/HYDE/...); soil frozen.  Requires --land-params clm.")
+    parser.add_argument("--land-cover-surfdata", dest="land_cover_surfdata", default="",
+                        help="Transient legoesm_surfdata NetCDF (multi-year "
+                             "pft_frac) for --transient-land-cover.")
     parser.add_argument("--land-diurnal-surface", dest="land_diurnal_surface",
                         action=argparse.BooleanOptionalAction, default=True,
                         help="Coupled diurnal surface model for multilayer land (ON "
@@ -560,6 +568,17 @@ def build_parser():
                              "up — dragging global near-surface air T down. "
                              "Default off (byte-identical); recommended ON for a "
                              "faster, more realistic land spin-up.")
+    parser.add_argument("--carbon-ic", dest="carbon_ic", type=str, default="",
+                        help="Spun-up land carbon IC: path to a "
+                             "global_carbon_ic.npz finidat "
+                             "(scripts/data/build_global_carbon_ic.py).  With "
+                             "multilayer + differland carbon, the coupled run "
+                             "INGESTS the seeded 8-pool per-cell CarbonState + the "
+                             "per-cell permafrost phi INSTEAD of cold-starting "
+                             "carbon (starts at the mapped equilibrium; maintains "
+                             "the seeded permafrost SOC).  Requires a run grid "
+                             "matching the finidat (STRICT grid-match).  Default "
+                             "(unset): cold-start carbon.")
     parser.add_argument("--stomata", dest="stomata",
                         action=argparse.BooleanOptionalAction, default=True,
                         help="STOMATAL CONDUCTANCE control of land "
@@ -1000,6 +1019,12 @@ def main():
         overrides["use_pft"] = True
     overrides["land_diurnal_surface"] = args.land_diurnal_surface
     overrides["land_elev_bands"] = args.land_elev_bands
+    # Spun-up land carbon IC (finidat): honoured when land is multilayer +
+    # differland (validated in the driver); unset => cold-start carbon.
+    if getattr(args, "carbon_ic", ""):
+        overrides["carbon_ic_path"] = args.carbon_ic
+    overrides["transient_land_cover"] = args.transient_land_cover
+    overrides["land_cover_surfdata"] = args.land_cover_surfdata
 
     # Explicit --land-scheme overrides the preset's land model for ANY ocean mode
     # (the woa branch already applied its own default above; re-applying the same

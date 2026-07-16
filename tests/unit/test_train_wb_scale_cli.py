@@ -73,6 +73,28 @@ def test_config_yaml_loads():
     assert y["train_years"] and y["eval_years"] == [2020]
 
 
+def test_n_days_cli_roundtrip_and_reject():
+    """#1047 ask a: --n-days sets the training-window length; default None."""
+    assert mod.build_scale_config_from_args([]).n_days is None
+    assert mod.build_scale_config_from_args(["--n-days", "60"]).n_days == 60
+    with pytest.raises(SystemExit, match="--n-days must be >= 1"):
+        mod.build_scale_config_from_args(["--n-days", "0"])
+
+
+def test_resolve_n_days_precedence():
+    """CLI cfg.n_days > YAML n_training_days > 3; --smoke forces 1 (#1047)."""
+    from legoesm.training.scale_build import _resolve_n_days
+
+    base = mod.build_scale_config_from_args([])          # n_days=None, smoke=False
+    assert _resolve_n_days(base, {}) == 3                # historical default
+    assert _resolve_n_days(base, {"n_training_days": 60}) == 60   # YAML wins over 3
+    cli = mod.build_scale_config_from_args(["--n-days", "10"])
+    assert _resolve_n_days(cli, {"n_training_days": 60}) == 10    # CLI wins over YAML
+    assert _resolve_n_days(base._replace(smoke=True), {"n_training_days": 60}) == 1
+    with pytest.raises(ValueError, match="must be >= 1"):
+        _resolve_n_days(base, {"n_training_days": 0})
+
+
 def test_rollout_hours_matches_first_lead():
     """The training rollout horizon = the FIRST multi_step_hours lead — the same
     lead load_era5_samples uses to pick the target, so pred and target stay at

@@ -57,15 +57,15 @@ jax.config.update("jax_enable_x64",
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_rcemip_plane as rcp  # noqa: E402
 
-from legoesm.atmosphere.dynamics.compressible_euler import (  # noqa: E402
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (  # noqa: E402
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (  # noqa: E402
     PlaneCompressibleEulerModel,
     compute_dry_mass_plane,
     make_flat_plane_terrain_metric,
 )
-from legoesm.atmosphere.dynamics.sam_case_setup import (  # noqa: E402
+from legoesm.atmosphere.dynamics.crm.sam_case_setup import (  # noqa: E402
     build_gate_ideal_setup,
 )
 from legoesm.grids.plane import create_plane_grid  # noqa: E402
@@ -74,7 +74,7 @@ from legoesm.grids.plane import create_plane_grid  # noqa: E402
 # Default case dir: external LEGOESM_GSAM_ROOT if set, else the repo-local
 # cache (scripts/data/fetch_les_forcing.py); --case-dir overrides. See
 # resolve_sam_case_dir.
-from legoesm.atmosphere.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
+from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
 _GSAM_GATE = resolve_sam_case_dir("GATE_IDEAL")
 
 
@@ -153,7 +153,7 @@ def run_gate_ideal(case_dir, *, nx=8, ny=8, nlev=64, H=20000.0, dx=1000.0,
             f"radiation_interval must be >= 1, got {radiation_interval}")
     if use_sam_grd:
         # the grid nlev MUST match the grd's level count (else shape mismatch)
-        from legoesm.atmosphere.sam_case_forcing import read_sam_grd
+        from legoesm.atmosphere.forcing.sam_case_forcing import read_sam_grd
         nlev = int(read_sam_grd(_os.path.join(case_dir, "grd")).z_full_bottom_up.shape[0])
     # GATE_IDEAL prm: docoriolis=.false. ⇒ no Coriolis on the grid.
     # lat0=8.5°N (GATE_IDEAL prm latitude0) so the radiation insolation sees

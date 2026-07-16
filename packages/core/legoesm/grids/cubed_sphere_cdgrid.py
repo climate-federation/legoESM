@@ -152,6 +152,16 @@ class CubedSphereCDGrid(NamedTuple):
     def radius(self) -> float:
         return self.base.radius
 
+    @property
+    def gnomonic_form(self) -> str:
+        """Static grid provenance, delegated to the base grid."""
+        return self.base.gnomonic_form
+
+    @property
+    def fv3_grid_type(self) -> int:
+        """Static FV3 grid_type provenance, delegated to the base grid."""
+        return self.base.fv3_grid_type
+
 
 def _compute_sin_cos_sg(n, padded_supergrid_lon, padded_supergrid_lat):
     """Compute Duo-Grid sub-grid metrics at 9 positions per cell.
@@ -575,6 +585,13 @@ def create_cubed_sphere_cdgrid(
     metric_dtype : dtype or None
         Dtype for corner-critical metrics (gradient matrix, rsin, rarea,
         cosa, sin_sg, dxc/dyc).  Defaults to float32.
+    gnomonic : str, default "auto"
+        C/D metric family.  ``"auto"`` follows the base grid's static
+        provenance (``base.gnomonic_form``) — the only self-consistent
+        choice.  An explicit ``"ed"``/``"equiangular"`` is accepted only
+        when it MATCHES that provenance; a contradicting request raises
+        ``ValueError`` (mixing metric families across staggers silently
+        runs different numerics).
 
     Returns
     -------
@@ -589,26 +606,23 @@ def create_cubed_sphere_cdgrid(
     n = base.n
     radius = base.radius
 
-    # iter72 (codex finding): the base CubedSphereGrid is a JAX-pytree NamedTuple
-    # so it cannot carry a string `gnomonic` field (non-traceable leaf would
-    # break JIT/grad).  Instead INFER the grid type from `base` by its cell-
-    # aspect signature so an ed A-grid never silently gets equiangular C/D
-    # metrics (the model constructors call this with no explicit flag): FV3
-    # gnomonic_ed has near-uniform cells (max aspect ≤ ~1.057 across all n)
-    # while equiangular — incl. Schmidt-stretched — has max aspect ≥ ~1.16 for
-    # every n≥4 (the only resolutions used in practice), degenerating to ~1.0
-    # only at n=2 where the two constructions are indistinguishable by aspect
-    # alone.  A single cut at 1.10 sits safely inside the [1.057, 1.16] gap for
-    # all n≥4, so an ed base grid is never silently given equiangular C/D
-    # metrics (the codex-flagged bug) — while a legitimate low-n equiangular
-    # grid (n=4 → 1.163, n=6 → 1.239) is no longer mis-rejected.  The n=2
-    # degenerate case falls to the historical equiangular default; pass
-    # `gnomonic="ed"` explicitly for an n=2 ed grid.  Explicit
-    # `gnomonic="ed"/"equiangular"` always overrides the inference.
+    # Phase-1 FV3-native grid work: the base CubedSphereGrid now carries
+    # STATIC provenance (`gnomonic_form`, pytree aux_data — see the explicit
+    # register_pytree_node in cubed_sphere.py), so the C/D metric family is
+    # READ from the base grid instead of the old iter72 dx/dy aspect-ratio
+    # inference (which was provably blind at n=2 and fragile by construction).
+    # "auto" = follow the base grid's provenance.  An explicit request that
+    # CONTRADICTS the provenance is the silent-metric-mixing bug class the
+    # inference was built to avoid — now a hard error.
     if gnomonic == "auto":
-        _dx = jnp.asarray(base.dx); _dy = jnp.asarray(base.dy)
-        _aspect = float(jnp.max(jnp.maximum(_dx, _dy) / jnp.maximum(jnp.minimum(_dx, _dy), 1e-30)))
-        gnomonic = "ed" if _aspect < 1.10 else "equiangular"
+        gnomonic = base.gnomonic_form
+    elif gnomonic in ("ed", "equiangular") and gnomonic != base.gnomonic_form:
+        raise ValueError(
+            f"create_cubed_sphere_cdgrid: requested gnomonic={gnomonic!r} but "
+            f"the base grid's provenance is gnomonic_form="
+            f"{base.gnomonic_form!r}. Mixing metric families silently ran "
+            "different numerics per stagger; rebuild the base grid with the "
+            "matching create_cubed_sphere(..., gnomonic=...) instead.")
 
     # ------------------------------------------------------------------
     # The C-D supergrid metrics all derive from 4 node-grids: the 2n+1

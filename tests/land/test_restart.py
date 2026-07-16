@@ -89,3 +89,54 @@ def test_slab_mode_save_not_implemented(tmp_path):
     with pytest.raises(NotImplementedError, match="slab"):
         save_land_restart(tmp_path / "r.npz", _fake_state(),
                           land_mode="slab", t_end_s=0.0, n_steps_completed=0)
+
+
+def test_merge_land_restart_into_template_fixes_structure():
+    """#746: a loaded restart carries only the core prognostic fields (optional
+    structural fields default to None); merging it onto a template that HAS the
+    optional fields as arrays restores the full pytree structure while keeping
+    the restart's prognostic values — so the resumed/coupled lax.scan carry
+    input matches its output."""
+    from legoesm.land.restart import merge_land_restart_into_template
+
+    loaded = _fake_state(seed=1)                      # optional fields = None
+    assert loaded.surface_water is None
+    # Template with the optional fields populated as arrays (what
+    # init_multilayer_land_state / a stepped state looks like).
+    template = _fake_state(seed=2)._replace(
+        surface_water=jnp.zeros((_NCOL,)),
+        snow_bands=jnp.zeros((_NCOL, 3)),
+        ice_bands=jnp.zeros((_NCOL, 3)),
+    )
+    merged = merge_land_restart_into_template(loaded, template)
+
+    # Core prognostic fields come from the LOADED restart (bit-identical).
+    for f in ("T_soil", "psi_soil", "theta_soil", "runoff_surface",
+              "runoff_subsurface", "snow_depth", "snow_age", "TgC"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(merged, f)), np.asarray(getattr(loaded, f)))
+    # Optional structural fields come from the TEMPLATE (arrays, not None) — the
+    # pytree structure now matches a stepped state.
+    assert merged.surface_water is not None
+    assert merged.snow_bands is not None
+    import jax
+    assert (jax.tree_util.tree_structure(merged)
+            == jax.tree_util.tree_structure(template))
+
+
+def test_merge_land_restart_shape_skew_raises():
+    """A soil-layer / resolution skew between the restart and the template must
+    raise, not silently reshape."""
+    from legoesm.land.restart import merge_land_restart_into_template
+
+    loaded = _fake_state(seed=3)                      # (5, 8)
+    template = MultiLayerLandState(
+        T_soil=jnp.zeros((_NCOL, 10)),               # 10 layers != restart's 8
+        psi_soil=jnp.zeros((_NCOL, 10)),
+        theta_soil=jnp.zeros((_NCOL, 10)),
+        runoff_surface=jnp.zeros(_NCOL),
+        runoff_subsurface=jnp.zeros(_NCOL),
+        snow_depth=jnp.zeros(_NCOL), snow_age=jnp.zeros(_NCOL),
+    )
+    with pytest.raises(ValueError, match="soil-layer skew"):
+        merge_land_restart_into_template(loaded, template)

@@ -7,10 +7,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     make_flat_plane_terrain_metric, make_rest_state,
 )
-from legoesm.atmosphere.dynamics.moist_mass_fixer import (
+from legoesm.atmosphere.dynamics.crm.moist_mass_fixer import (
     compute_total_water_mass_plane, fix_moist_mass_plane,
 )
 from legoesm.grids.plane import create_plane_grid

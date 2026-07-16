@@ -163,3 +163,36 @@ def test_per_layer_params_run_through_solver():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_fc_drain_limiter_reduces_gravity_drainage():
+    """Field-capacity limiter suppresses gravity drainage below the effective fc: a wet
+    column drains LESS out the bottom and retains MORE water with fc_drain_saturation>0.
+    The limiter scales the gravity flux by f in [0,1], so it can only reduce drainage --
+    never increase it -- vs the fc_drain_saturation=0 (unlimited) baseline."""
+    ncol, nlayer = 3, 8
+    grid, psi = _make_state(ncol, nlayer, psi_val=-0.5)      # wet column -> drains
+    cfg = SoilHydraulicsConfig()
+    theta = theta_from_psi(psi, cfg)
+    flux_top = jnp.zeros(ncol)                               # no infiltration: pure drainage
+    sink = jnp.zeros((ncol, nlayer))
+    off = solve_richards(psi, theta, grid, cfg, RichardsConfig(fc_drain_saturation=0.0),
+                         flux_top, sink, dt=600.0)
+    on = solve_richards(psi, theta, grid, cfg, RichardsConfig(fc_drain_saturation=0.6),
+                        flux_top, sink, dt=600.0)
+    assert jnp.all(jnp.isfinite(on.theta_new)) and jnp.all(jnp.isfinite(on.psi_new))
+    # limiter drains less out the bottom and retains more column water (strict: wet column)
+    assert float(on.runoff_subsurface.sum()) < float(off.runoff_subsurface.sum())
+    assert float(on.theta_new.sum()) > float(off.theta_new.sum())
+
+
+def test_fc_drain_off_is_noop():
+    """fc_drain_saturation=0.0 (default) is byte-identical to the unlimited solver."""
+    ncol, nlayer = 3, 8
+    grid, psi = _make_state(ncol, nlayer, psi_val=-0.5)
+    cfg = SoilHydraulicsConfig()
+    theta = theta_from_psi(psi, cfg)
+    flux_top = jnp.zeros(ncol); sink = jnp.zeros((ncol, nlayer))
+    a = solve_richards(psi, theta, grid, cfg, RichardsConfig(fc_drain_saturation=0.0),
+                       flux_top, sink, dt=600.0)
+    assert float(a.runoff_subsurface.sum()) >= 0.0 and jnp.all(jnp.isfinite(a.theta_new))

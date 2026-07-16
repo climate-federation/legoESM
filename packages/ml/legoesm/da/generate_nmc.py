@@ -128,7 +128,7 @@ def _era5_to_spectral(era5, grid, sigma, include_tracers: bool = True):
     -------
     SpectralHydrostaticState
     """
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
     from legoesm.core.field import Field
     from legoesm.grids.gaussian import (
         sh_analysis,
@@ -235,7 +235,7 @@ def _spectral_to_hydrostatic(spec_state, grid, sigma, include_tracers=False):
     -------
     HydrostaticState
     """
-    from legoesm.atmosphere.dynamics.spectral_pe import spectral_pe_to_grid
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import spectral_pe_to_grid
     from legoesm.core.field import Field
     from legoesm.core.state import HydrostaticState
 
@@ -298,7 +298,7 @@ def _build_spectral_physics_fn(driver, gray_config, n_levels: int):
     day_ref : _DayRef
         Mutable day reference; set day_ref.day before each model step.
     """
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         spectral_pe_to_grid,
         SpectralHydrostaticState,
     )

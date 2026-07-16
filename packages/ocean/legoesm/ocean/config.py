@@ -169,6 +169,7 @@ def _nested_ocean_entry_types() -> dict:
     from legoesm.ocean.eos import LinearEOSConfig
     from legoesm.ocean.physics.combined import OceanPhysicsConfig
     from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    from legoesm.ocean.physics.lateral_mixing.backscatter import BackscatterConfig
     from legoesm.ocean.physics.tidal_forcing import TidalForcingConfig
     return {
         "eos_linear": LinearEOSConfig,
@@ -179,6 +180,10 @@ def _nested_ocean_entry_types() -> dict:
         # the ocean.* namespace) so `ocean.tidal_forcing: {enabled: true, …}`
         # builds a real TidalForcingConfig instead of passing a raw dict through.
         "tidal_forcing": TidalForcingConfig,
+        # Jansen–Held energy backscatter: opt-in nested entry point (default
+        # None ⇒ off/bit-identical), so `ocean.backscatter: {enabled: true,
+        # c_bs: 0.01, …}` builds a real BackscatterConfig.
+        "backscatter": BackscatterConfig,
     }
 
 
@@ -713,6 +718,36 @@ def _encode_config(obj):
         return {k: _encode_config(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_encode_config(v) for v in obj]
+    if hasattr(obj, "shape") and hasattr(obj, "dtype"):
+        import numpy as _np
+        arr = _np.asarray(obj)
+        if arr.ndim == 0:
+            # NumPy/JAX SCALAR leaf (np.float64(3e4) etc.): keep the plain
+            # scalar encoding -- summarising it would break the byte-identical
+            # invariant for configs without arrays and rebuild scalars as
+            # dicts (codex).
+            return _encode_config(arr.item())
+        # Array-valued config leaf (e.g. runoff_depth_spread_map, the per-cell
+        # NEMO ln_rnf_depth_ini map): summarise ONCE here so BOTH the config
+        # hash (json.dumps at compute_config_hash) and the manifest dump see
+        # the same JSON-safe value -- a raw ndarray/ArrayImpl crashed the
+        # whole provenance write.  The sha256 over the contiguous bytes (+
+        # shape/dtype) keeps the config HASH content-sensitive: two maps with
+        # equal shape/min/max but different values must not collide (codex --
+        # the map affects physics).  min/max stay for human provenance.
+        # Lossy by design for RECONSTRUCTION: the map is derived from input
+        # files; ocean_config_from_dict keeps the summary dict (documented).
+        import hashlib as _hashlib
+        _c = _np.ascontiguousarray(arr)
+        _digest = _hashlib.sha256(
+            str(arr.shape).encode() + str(arr.dtype).encode() + _c.tobytes()
+        ).hexdigest()
+        return {"__array_summary__": {
+            "shape": list(arr.shape), "dtype": str(arr.dtype),
+            "min": float(arr.min()) if arr.size else None,
+            "max": float(arr.max()) if arr.size else None,
+            "sha256": _digest,
+        }}
     return obj
 
 

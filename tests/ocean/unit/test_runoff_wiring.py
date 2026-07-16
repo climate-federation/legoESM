@@ -55,9 +55,14 @@ def test_load_runoff_monthly_latlon():
 
 @pytest.mark.skipif(not os.path.exists(R._RUNOFF_NC),
                     reason="NEMO runoff file not present on host")
-def test_coastal_spread_conserves_sum_and_reduces_peak():
-    """The coastal-spread option preserves the per-month ocean SUM (sum-conserving)
-    while reducing the over-concentrated peak (better SSS)."""
+def test_coastal_spread_conserves_area_integral_and_reduces_peak():
+    """The coastal-spread option preserves the per-month AREA-INTEGRAL of the
+    runoff [kg/s] (the loader's contract: the area-conservative renorm pins the
+    target integral to the source total on EVERY grid) while reducing the
+    over-concentrated peak (better SSS).  NOTE: the plain CELL-sum is NOT
+    conserved on a lat-lon grid — spreading moves mass across cos(lat)-varying
+    cell areas (~1e-4 relative shift), which is exactly why the renorm is
+    area-weighted; asserting the cell sum was the pre-renorm (stale) contract."""
     from legoesm.grids.latlon import create_latlon_grid
     n_lat, n_lon = 90, 180
     grid = create_latlon_grid(n_lat, n_lon)
@@ -68,8 +73,27 @@ def test_coastal_spread_conserves_sum_and_reduces_peak():
                                land_mask=land, spread_passes=0)
     R2 = R.load_runoff_monthly(grid, "latlon", lat2d, lon2d, None,
                                land_mask=land, spread_passes=3)
-    # sum conserved per month (renormalised) to ~1e-6 relative
-    s0 = R0.sum(axis=(1, 2)); s2 = R2.sum(axis=(1, 2))
-    assert np.allclose(s0, s2, rtol=1e-5), (s0, s2)
+    # area-integral conserved per month (renormalised): identical totals with
+    # and without spread.
+    A = np.asarray(grid.area)
+    s0 = (R0 * A).sum(axis=(1, 2)); s2 = (R2 * A).sum(axis=(1, 2))
+    assert np.allclose(s0, s2, rtol=1e-6), (s0, s2)
     # peak reduced (spread smears the concentrated river mouths)
     assert R2.max() < R0.max()
+
+
+def test_arctic_salt_forcing_flags_registered(capsys):
+    """The three faithful-Arctic-salt levers are registered in the CLI."""
+    import sys
+
+    saved = sys.argv
+    sys.argv = ["run_omip_core2.py", "--help"]
+    try:
+        with pytest.raises(SystemExit):
+            R.main()
+    finally:
+        sys.argv = saved
+    out = capsys.readouterr().out
+    for flag in ("--sss-restore-file", "--nemo-monthly-init",
+                 "--nemo-init-month", "--runoff-depth-nemo-ini"):
+        assert flag in out, flag

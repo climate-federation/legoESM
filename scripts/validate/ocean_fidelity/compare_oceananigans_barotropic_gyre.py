@@ -123,6 +123,11 @@ def main():
     nsteps = int(round(days * 86400.0 / dt))
 
     grid, wall_mask, state, model = build_gyre()
+    # Seed F_slow_{u,v}_prev: the canonical factory now defaults
+    # barotropic_slow_forcing_ab2=True for the effective explicit_ab2 x
+    # implicit_cn x ab2 combo (FE-Coriolis fix); the step raises on an
+    # unseeded prev. No-op when the flag is off.
+    state = model.seed_scan_carry(state, dt)
     wind = build_wind(grid)
     print(f"[legoESM gyre] {NY}x{NX}, g={G_REDUCED}, A_h={A_H:.0f}, "
           f"run {days}d @ dt={dt}s ({nsteps} steps)", flush=True)

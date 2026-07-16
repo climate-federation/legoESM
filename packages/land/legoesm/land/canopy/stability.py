@@ -34,6 +34,14 @@ _ZETAM = 1.574                # momentum stability-regime transition
 _ZETAT = 0.465                # heat stability-regime transition
 _MOST_MOM_CONV_COEF  = 1.14   # very-unstable momentum convective correction
 _MOST_HEAT_CONV_COEF = 0.8    # very-unstable heat convective correction
+# Positivity floor applied to log/cbrt arguments in the OUT-OF-REGIME MOST
+# branches only (a no-op inside each branch's own regime).  Every regime's
+# ustar/ch is evaluated unconditionally and combined with jnp.where, whose VJP
+# runs both sides — an out-of-domain sqrt/log/cbrt would return NaN and
+# 0*NaN = NaN poisons the reverse-mode gradient of every surface turbulent
+# flux.  Flooring keeps the discarded branch finite without touching the
+# selected value.  (<=1e-6 grad-safety floor.)
+_MOST_ARG_FLOOR = 1e-12
 _VIRT_T_COEF = 0.61           # virtual-temperature coefficient (≈ 1/ε − 1, rounded)
 _RIB_MAX = 0.19               # bulk Richardson-number cap (Zeng et al. 1998 init)
 
@@ -115,7 +123,13 @@ def compute_aerodynamics(
 # ---------------------------------------------------------------------------
 
 def _stability_func_momentum(zeta: jax.Array) -> jax.Array:
-    """Ψ_m(ζ) — momentum stability function (unstable branch)."""
+    """Ψ_m(ζ) — momentum stability function (unstable branch).
+
+    Valid only for ζ ≤ 0.  Callers in the stable regimes never use it, but the
+    where-combined ustar evaluates it unconditionally, so clamp ζ ≤ 0 here to
+    keep the sqrt argument ≥ 1 (grad-safe); a no-op for every in-regime call.
+    """
+    zeta = jnp.minimum(zeta, 0.0)
     chik2 = jnp.sqrt(1.0 - _MOST_GAMMA_UNSTABLE * zeta)
     chik  = jnp.sqrt(chik2)
     return (2.0 * jnp.log((1.0 + chik) * 0.5)
@@ -125,7 +139,12 @@ def _stability_func_momentum(zeta: jax.Array) -> jax.Array:
 
 
 def _stability_func_heat(zeta: jax.Array) -> jax.Array:
-    """Ψ_h(ζ) — heat stability function (unstable branch)."""
+    """Ψ_h(ζ) — heat stability function (unstable branch).
+
+    Valid only for ζ ≤ 0 (see ``_stability_func_momentum``); clamp for
+    grad-safety, a no-op for every in-regime call.
+    """
+    zeta = jnp.minimum(zeta, 0.0)
     chik2 = jnp.sqrt(1.0 - _MOST_GAMMA_UNSTABLE * zeta)
     return 2.0 * jnp.log((1.0 + chik2) * 0.5)
 
@@ -136,12 +155,13 @@ def _friction_velocity(zldis: jax.Array, z0m: jax.Array,
     zetam = _ZETAM  # momentum regime transition
     zeta = zldis / obu
 
-    # Very unstable
+    # Very unstable (valid: obu < 0, zeta < -zetam).  Floor the log/cbrt args so
+    # the discarded (obu > 0) branch stays finite; both floors are no-ops here.
     ustar1 = constants.kappa_vk * um / (
-        jnp.log(-zetam * obu / z0m)
+        jnp.log(jnp.maximum(-zetam * obu / z0m, _MOST_ARG_FLOOR))
         - _stability_func_momentum(-zetam)
         + _stability_func_momentum(z0m / obu)
-        + _MOST_MOM_CONV_COEF * (jnp.cbrt(-zeta) - jnp.cbrt(zetam))
+        + _MOST_MOM_CONV_COEF * (jnp.cbrt(jnp.maximum(-zeta, zetam)) - jnp.cbrt(zetam))
     )
     # Unstable
     ustar2 = constants.kappa_vk * um / (
@@ -152,10 +172,12 @@ def _friction_velocity(zldis: jax.Array, z0m: jax.Array,
     # Stable
     ustar3 = constants.kappa_vk * um / (
         jnp.log(zldis / z0m) + _MOST_BETA_STABLE * zeta - _MOST_BETA_STABLE * z0m / obu)
-    # Very stable
+    # Very stable (valid: obu > 0, zeta > 1).  Floor the two log args so the
+    # discarded (obu < 0, zeta < 0) branch stays finite; no-ops here.
     ustar4 = constants.kappa_vk * um / (
-        jnp.log(obu / z0m) + _MOST_BETA_STABLE - _MOST_BETA_STABLE * z0m / obu
-        + (_MOST_BETA_STABLE * jnp.log(zeta) + zeta - 1.0)
+        jnp.log(jnp.maximum(obu / z0m, _MOST_ARG_FLOOR))
+        + _MOST_BETA_STABLE - _MOST_BETA_STABLE * z0m / obu
+        + (_MOST_BETA_STABLE * jnp.log(jnp.maximum(zeta, 1.0)) + zeta - 1.0)
     )
 
     ustar = jnp.where(zeta < -zetam, ustar1,
@@ -170,11 +192,13 @@ def _temperature_humidity_relation(zldis: jax.Array, obu: jax.Array,
     zetat = _ZETAT
     zeta  = zldis / obu
 
+    # Very unstable (valid: obu < 0, zeta < -zetat).  Floor log/cbrt args; no-ops here.
     ch1 = constants.kappa_vk / (
-        jnp.log(-zetat * obu / z0h)
+        jnp.log(jnp.maximum(-zetat * obu / z0h, _MOST_ARG_FLOOR))
         - _stability_func_heat(-zetat)
         + _stability_func_heat(z0h / obu)
-        + _MOST_HEAT_CONV_COEF * (1.0 / jnp.cbrt(zetat) - 1.0 / jnp.cbrt(-zeta))
+        + _MOST_HEAT_CONV_COEF * (1.0 / jnp.cbrt(zetat)
+                                  - 1.0 / jnp.cbrt(jnp.maximum(-zeta, zetat)))
     )
     ch2 = constants.kappa_vk / (
         jnp.log(zldis / z0h)
@@ -183,9 +207,11 @@ def _temperature_humidity_relation(zldis: jax.Array, obu: jax.Array,
     )
     ch3 = constants.kappa_vk / (
         jnp.log(zldis / z0h) + _MOST_BETA_STABLE * zeta - _MOST_BETA_STABLE * z0h / obu)
+    # Very stable (valid: obu > 0, zeta > 1).  Floor the two log args; no-ops here.
     ch4 = constants.kappa_vk / (
-        jnp.log(obu / z0h) + _MOST_BETA_STABLE - _MOST_BETA_STABLE * z0h / obu
-        + (_MOST_BETA_STABLE * jnp.log(zeta) + zeta - 1.0)
+        jnp.log(jnp.maximum(obu / z0h, _MOST_ARG_FLOOR))
+        + _MOST_BETA_STABLE - _MOST_BETA_STABLE * z0h / obu
+        + (_MOST_BETA_STABLE * jnp.log(jnp.maximum(zeta, 1.0)) + zeta - 1.0)
     )
 
     ch = jnp.where(zeta < -zetat, ch1,
@@ -241,8 +267,12 @@ def _stability_step(carry: jax.Array, _xs: None,
     zeta_stable = jnp.clip(zeta, 0.01, _ZETA_MAX_STABLE)   # coeff-ok: near-neutral stable floor on ζ
     um_stable   = jnp.maximum(ur, 0.1)                     # coeff-ok: 0.1 m/s wind floor
     zeta_unstable = jnp.clip(zeta, -100.0, -0.01)          # coeff-ok: near-neutral unstable clamp on ζ
+    # Floor the cbrt argument to a POSITIVE value, not 0: cbrt'(0)=inf and the
+    # maximum's subgradient is 0 below the clamp, so cbrt(maximum(x, 0)) gives
+    # 0*inf = NaN in the reverse-mode gradient whenever x<=0 (the stable regime,
+    # where this unstable-branch wc is discarded).  cbrt(1e-12)~1e-4 m/s ~ 0.
     wc_unstable = jnp.cbrt(jnp.maximum(
-        -constants.g * ustar * thvstar * _CONV_BDY_HEIGHT / Tv_atm, 0.0))
+        -constants.g * ustar * thvstar * _CONV_BDY_HEIGHT / Tv_atm, _MOST_ARG_FLOOR))
     um_unstable = jnp.sqrt(ur**2 + wc_unstable**2)
 
     is_stable = zeta >= 0.0

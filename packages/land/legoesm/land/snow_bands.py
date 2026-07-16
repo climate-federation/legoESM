@@ -68,6 +68,18 @@ __param_spec__ = {
                                    "unconstrained by an offline surface-flux fit",
             "ice_expose_kg_m2": "numerics: ice-exposure threshold for the albedo "
                                 "switch (regulariser, not a physical closure)",
+            "sky_view_min": "boundary-default: default 1.0 = flat/open sky (terrain "
+                            "shading disabled); sits at the upper bound of the "
+                            "(0.5, 1.0) range, so it has no interior sigmoid seed and "
+                            "zero gradient at saturation — enable by setting <1 in "
+                            "config, not by training from the boundary",
+            "refreeze_frac": "boundary-default: default 1.0 = complete rain refreeze; "
+                             "sits at the upper bound of (0, 1), a saturated boundary "
+                             "default that is not an interior-seedable sigmoid tunable",
+            "blow_snow_subl_rate": "boundary-default: default 0.0 = off (blowing-snow "
+                                   "sublimation disabled); sits at the lower bound of "
+                                   "(0, 1e-5), a feature-off boundary default with no "
+                                   "interior sigmoid seed — enable by setting >0 in config",
         },
         "params": {
             "lapse_rate_K_m": {
@@ -98,32 +110,11 @@ __param_spec__ = {
                              "bare-ice observations 0.2-0.4",
                 "shape": None,
             },
-            "sky_view_min": {
-                "units": "1", "bounds": (0.5, 1.0), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "closure",
-                "reference": "terrain sky-view factor of the deepest valley band "
-                             "(gap 5); 1 = flat/open sky",
-                "shape": None,
-            },
             "blow_snow_wind_thresh_ms": {
                 "units": "m/s", "bounds": (4.0, 12.0), "tunable_tier": 2,
                 "transform": "sigmoid", "category": "closure",
                 "reference": "blowing-snow mobilisation wind threshold "
                              "(Pomeroy / CROCUS, gap 5)",
-                "shape": None,
-            },
-            "blow_snow_subl_rate": {
-                "units": "kg/m2/s/(m/s)", "bounds": (0.0, 1.0e-5), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "closure",
-                "reference": "blowing-snow sublimation rate over threshold (gap 5); "
-                             "0 = off",
-                "shape": None,
-            },
-            "refreeze_frac": {
-                "units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "closure",
-                "reference": "fraction of rain refreezing into a sub-freezing snow band "
-                             "(gap 6 cold content)",
                 "shape": None,
             },
         },
@@ -347,9 +338,31 @@ def step_snow_bands(
     #     liquid store, so this is the dominant cold-content path (multi-layer retained
     #     liquid is the upgrade).
     if precip_rain_bands is not None:
+        # Sign/energy walk (energy convention: L_f RELEASED into the pack, +into surface;
+        # T_freeze convention, no z-axis here).  Rain freezing releases L_f [J/kg] which
+        # the caller adds to the ground heat flux G (+into surface) -- so refreezing is
+        # bounded by how much cold the pack can absorb.  A single-layer band carries NO
+        # thermal state, so we bound the refrozen mass by a COLD-CONTENT proxy from the
+        # band skin temperature: the energy to warm the SWE to freezing is
+        #   Q_cold = c_snow * swe * max(T_freeze - T_band, 0)   [J/m2],
+        # and it can refreeze at most Q_cold / L_f [kg/m2] of rain.  Without this bound
+        # refreeze_frac=1 refroze ALL band rain every step, releasing L_f UNBOUNDED by
+        # the pack cold content (a thin, barely sub-freezing band would "absorb" arbitrary
+        # latent heat).  Residual rain above the cap stays liquid -> runoff/infiltration.
         _cold_snow = (T_sfc_band < T_snow_melt) & (swe_after_melt > 1e-6)
+        # ponytail: cap refreeze at the pack cold content so the released
+        # L_f can't exceed swe*c_ice*(Tf - T_skin).  Uncapped, 20 mm/hr rain
+        # on cold thin snow released ~1850 W/m2 of spurious surface heating.
+        # Single-layer band has no pack T, so T_sfc_band is the proxy; the
+        # multi-layer retained-liquid store is the upgrade.
+        _refreeze_max = (
+            swe_after_melt * constants.c_pi
+            * jnp.maximum(T_snow_melt - T_sfc_band, 0.0) / constants.L_f
+        )
         refreeze_bands = jnp.where(
-            _cold_snow, _refreeze_frac * precip_rain_bands * dt, 0.0)
+            _cold_snow,
+            jnp.minimum(_refreeze_frac * precip_rain_bands * dt, _refreeze_max),
+            0.0)
         swe_after_melt = swe_after_melt + refreeze_bands
     else:
         refreeze_bands = jnp.zeros_like(swe_after_melt)

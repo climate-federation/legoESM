@@ -127,6 +127,15 @@ def test_port_pbs_jobid_honored(monkeypatch):
 
 _LAUNCHER_ENV_VARS = (
     "SLURM_JOB_ID", "OMPI_COMM_WORLD_SIZE", "PALS_RANKID", "PMI_RANK",
+    # World-size vars too: a test suite RUNNING INSIDE a SLURM job inherits
+    # SLURM_NTASKS/SLURM_STEP_NUM_TASKS from the host job; leaving them set
+    # makes the fake-jax process_count and the guard's launcher_world_size
+    # disagree (host SLURM_NTASKS=1 vs the test's OMPI=4) and the
+    # silent-fallback guard fires on a correctly-federated fake (found
+    # running the suite under sbatch on Ginsburg).
+    "SLURM_NTASKS", "SLURM_STEP_NUM_TASKS", "PMI_SIZE",
+    "OMPI_COMM_WORLD_RANK", "SLURM_PROCID", "PALS_LOCAL_RANKID",
+    "SLURM_LOCALID", "OMPI_COMM_WORLD_LOCAL_RANK", "MV2_COMM_WORLD_LOCAL_RANK",
 )
 
 
@@ -146,11 +155,28 @@ class _FakeDistributed:
             raise RuntimeError(self._fail_bare_with)
 
 
-def _with_fake_jax(monkeypatch, fake):
+def _with_fake_jax(monkeypatch, fake, process_count: int | None = None):
+    import os
     import sys
     import types
 
-    fake_jax = types.SimpleNamespace(distributed=fake)
+    # The post-init silent-fallback guard compares jax.process_count()
+    # against the launcher-declared world size; the fake federation
+    # matches the declared size by default so guarded paths pass.
+    if process_count is None:
+        # SAME precedence as early_init.launcher_world_size (step size, then
+        # the MPI launcher's world, allocation-wide SLURM_NTASKS last) so the
+        # fake federation always matches what the guard will declare.
+        for var in ("SLURM_STEP_NUM_TASKS", "OMPI_COMM_WORLD_SIZE",
+                    "PMI_SIZE", "SLURM_NTASKS"):
+            v = os.environ.get(var)
+            if v and v.isdigit():
+                process_count = int(v)
+                break
+        else:
+            process_count = 1
+    fake_jax = types.SimpleNamespace(
+        distributed=fake, process_count=lambda: process_count)
     monkeypatch.setitem(sys.modules, "jax", fake_jax)
 
 
@@ -244,7 +270,10 @@ def test_multicontroller_coordinator_uses_launcher_env(monkeypatch):
     early_init.init_multicontroller_distributed("host:5000")
     assert fake.calls == [
         {"coordinator_address": "host:5000",
-         "num_processes": 4, "process_id": 2},
+         "num_processes": 4, "process_id": 2,
+         # Per-rank device binding applied on the explicit-coordinator
+         # path too (clean env -> default [0]).
+         "local_device_ids": [0]},
     ]
     assert early_init._INITIALIZED is True
 

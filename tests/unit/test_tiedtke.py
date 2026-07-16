@@ -27,7 +27,7 @@ import pytest
 from legoesm.core.field import Field
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.held_suarez import held_suarez_init
+from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
 from legoesm.atmosphere.physics.physics_state import init_physics_state
 from legoesm.atmosphere.physics.radiation.config import RadiationConfig
@@ -465,3 +465,121 @@ def test_tiedtke_lcl_membership_sharpness_wired():
     )
     diff = float(jnp.max(jnp.abs(out_flat.dT_dt - out_default.dT_dt)))
     assert diff > 1e-10, "lcl_membership_sharpness is not wired"
+
+
+# ---------------------------------------------------------------------------
+# Oracle faithfulness to Tiedtke (1989)
+# ---------------------------------------------------------------------------
+# These lock the parts of the scheme that ARE faithful to the original
+# Tiedtke (1989, MWR 117) paper — the turbulent entrainment constants, the
+# downdraft level-of-free-sinking ratio default, and the deep large-scale
+# moisture-convergence closure's RESPONSE to MC.  See the module docstring's
+# "Faithfulness to Tiedtke (1989)" section for the full audit.  The
+# shallow/mid-level closure DEPARTURES are surrogates and are NOT asserted
+# as faithful; the one departure VALUE that would silently drift
+# (``delta_midlevel``) is pinned in the entrainment test, and the
+# ``moisture_convergence=None`` leaf fallback is covered by a separate
+# non-faithfulness test below.
+
+def test_tiedtke_faithful_turbulent_entrainment_rates():
+    """Tiedtke (1989) turbulent entrainment/detrainment defaults.
+
+    FAITHFUL turbulent-mixing coefficients: deep ε = δ = 1e-4 m⁻¹,
+    shallow ε = δ = 3e-4 m⁻¹, mid-level ε = 1e-4 m⁻¹ (the IFS later
+    retuned its own deep detrainment to DETRPEN = 0.75e-4, so these
+    follow the 1989 paper).  The mid-level DETRAINMENT default δ = 2e-4
+    is a legoESM DEPARTURE from the paper's symmetric ε = δ — asserted
+    here at its actual value so a silent drift is caught, NOT because it
+    is faithful.
+    """
+    cfg = TiedtkeConfig()
+    # Faithful to Tiedtke 1989:
+    assert cfg.epsilon_deep == 1.0e-4
+    assert cfg.delta_deep == 1.0e-4
+    assert cfg.epsilon_shallow == 3.0e-4
+    assert cfg.delta_shallow == 3.0e-4
+    assert cfg.epsilon_midlevel == 1.0e-4
+    # Departure (mid-level detrainment exceeds entrainment) — pin the value:
+    assert cfg.delta_midlevel == 2.0e-4
+
+
+def test_tiedtke_faithful_downdraft_ratio_default():
+    """Tiedtke (1989) downdraft LFS-ratio DEFAULT constant.
+
+    Locks the ``downdraft_alpha`` default to 0.3 — the Tiedtke-1989
+    level-of-free-sinking fraction, matching IFS ``RMFDEPS = 0.30``
+    (verified in the cloned source).  This asserts the CONSTANT only; the
+    runtime downdraft mass flux is ``-downdraft_alpha · M_b ·
+    downdraft_trigger``, so the RH gate makes the *effective* ratio ≤ 0.3.
+    """
+    assert TiedtkeConfig().downdraft_alpha == 0.3
+
+
+def test_tiedtke_faithful_deep_closure_responds_to_moisture_convergence():
+    """Deep (Type-1) closure responds to large-scale moisture convergence.
+
+    Feeding a larger real ``moisture_convergence`` into a deep column must
+    increase the column-summed updraft mass flux — the defining behaviour
+    of Tiedtke's penetrative closure.
+
+    The deep MC contribution is normally ATTENUATED because the shallow
+    CAPE-surrogate mass flux clips ``M_b_max`` (see the module docstring's
+    "Attenuation of the deep MC closure" note), so this test renders the
+    shallow surrogate negligible with a large ``tau_shallow_M_b`` to
+    expose the deep closure.  Baseline is a real MC field of ZERO, so the
+    contrast is immune to residual ``M_b_max`` clipping.
+    """
+    T, q, pf, ph, u, v = _column(nlev=30, T_sfc=303.0, q_sfc=18e-3,
+                                 lapse_rate=8.0)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    # Render the shallow CAPE surrogate negligible to expose the deep MC term.
+    cfg = TiedtkeConfig(tau_shallow_M_b=1.0e9)
+    mc_zero = jnp.zeros_like(T)
+    mc_large = jnp.full_like(T, 1.0e-6)  # kg/kg/s large-scale moistening
+    _, M_u_zero = tiedtke_convection(
+        T, q, pf, ph, u, v, cpp, dt=300.0, config=cfg,
+        moisture_convergence=mc_zero,
+    )
+    _, M_u_large = tiedtke_convection(
+        T, q, pf, ph, u, v, cpp, dt=300.0, config=cfg,
+        moisture_convergence=mc_large,
+    )
+    assert float(jnp.sum(M_u_large)) > float(jnp.sum(M_u_zero)) + 1.0e-4, (
+        "column-summed updraft mass flux did not increase with moisture "
+        "convergence — Tiedtke Type-1 closure not consuming MC"
+    )
+
+
+# Leaf behaviour (NOT a Tiedtke-1989 faithfulness assertion): the deep
+# closure's ``moisture_convergence=None`` fallback path.
+def test_tiedtke_proxy_fallback_when_mc_absent():
+    """Leaf fallback: ``moisture_convergence=None`` → saturation-excess proxy.
+
+    When the argument is ``None`` (configs where large-scale MC is
+    unavailable) the deep closure uses the saturation-EXCESS proxy.  In a
+    moist column the proxy supplies a POSITIVE convergence, so ``None``
+    produces MORE deep convection than an explicit real MC field of zero
+    (which turns the deep closure off) — confirming the two code paths are
+    distinct and the proxy branch is live.  This is a surrogate-behaviour
+    check, not a faithfulness assertion.  The shallow surrogate is
+    rendered negligible so the difference is not hidden by ``M_b_max``
+    clipping.
+    """
+    T, q, pf, ph, u, v = _column(nlev=30, T_sfc=303.0, q_sfc=18e-3,
+                                 lapse_rate=8.0)  # moist deep column
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    cfg = TiedtkeConfig(tau_shallow_M_b=1.0e9)
+    _, M_u_proxy = tiedtke_convection(
+        T, q, pf, ph, u, v, cpp, dt=300.0, config=cfg,  # MC=None → proxy
+    )
+    _, M_u_realzero = tiedtke_convection(
+        T, q, pf, ph, u, v, cpp, dt=300.0, config=cfg,
+        moisture_convergence=jnp.zeros_like(T),
+    )
+    assert float(jnp.sum(M_u_proxy)) > 0.0, "proxy branch produced no convection"
+    assert float(jnp.sum(M_u_proxy)) > float(jnp.sum(M_u_realzero)) + 1.0e-4, (
+        "None (proxy) closure indistinguishable from a real zero-MC field — "
+        "proxy fallback not exercised"
+    )

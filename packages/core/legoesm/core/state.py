@@ -422,7 +422,7 @@ class PlaneNonHydrostaticState(NamedTuple):
 # iter-241: cherry-picked from feature/crm-plane-spectral commit
 # edbae138 ("Spectral plane CRM: state pytree + filter wrapper around
 # FD dycore", 2026-05-24). That branch was never merged into main,
-# leaving src/legoesm/atmosphere/dynamics/spectral_plane.py with
+# leaving src/legoesm/atmosphere/dynamics/les/spectral_plane.py with
 # broken ``from legoesm.core.state import SpectralPlanePhysicsState,
 # SpectralPlanePhysicsTendencies`` imports. The two pytree classes
 # below are the minimum required to unblock the spectral_plane

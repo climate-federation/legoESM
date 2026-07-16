@@ -137,14 +137,14 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/dynamics/__init__.py", "create_model"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/__init__.py", "get_solver_class"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/__init__.py", "resolve_solver_name"),
-        ("packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_plane.py", "plane_compressible_euler_slow_tendencies"),
-        ("packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_plane.py", "validate_plane_config"),
-        ("packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_plane_halo.py", "plane_compressible_euler_slow_tendencies_halo"),
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/les/compressible_euler_plane.py", "plane_compressible_euler_slow_tendencies"),
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/les/compressible_euler_plane.py", "validate_plane_config"),
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/les/compressible_euler_plane_halo.py", "plane_compressible_euler_slow_tendencies_halo"),
         # MPAS atm dycore pv_scheme guards (hardened 2026-06-22; previously a
         # bare ``else`` silently fell back to the energy-conserving PV flux).
-        ("packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_mpas.py", "mpas_compressible_euler_slow_tendencies"),
-        ("packages/atmosphere/legoesm/atmosphere/dynamics/primitive_eq_mpas.py", "mpas_hydrostatic_tendencies"),
-        ("packages/atmosphere/legoesm/atmosphere/dynamics/shallow_water_mpas.py", "mpas_shallow_water_tendencies"),
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/compressible_euler_mpas.py", "mpas_compressible_euler_slow_tendencies"),
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py", "mpas_hydrostatic_tendencies"),
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/shallow_water_mpas.py", "mpas_shallow_water_tendencies"),
         ("packages/atmosphere/legoesm/atmosphere/physics/clouds/cloud_fraction.py", "compute_cloud_properties"),
         ("packages/atmosphere/legoesm/atmosphere/physics/combined.py", "make_physics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/dca.py", "dca_convection"),
@@ -174,7 +174,7 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/optics.py", "optics_factory"),
         ("packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py", "get_turbulence_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py", "make_turbulence_physics"),
-        ("packages/atmosphere/legoesm/atmosphere/scm.py", "__init__"),
+        ("packages/atmosphere/legoesm/atmosphere/forcing/scm/scm.py", "__init__"),
         ("packages/core/legoesm/core/bulk_flux.py", "validate_bulk_scheme"),
         # Stable-regime MOST stability-function dispatch (stability_scheme):
         # the validator + the psi_m/psi_h else-raise twins (grow-only lock so
@@ -220,11 +220,21 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/land/legoesm/land/surface_scheme/simple_seb.py",
          "compute_simple_seb_fluxes"),
         ("packages/land/legoesm/land/slab_land.py", "step_land"),
+        # Two-leaf canopy stomatal-model dispatch (ball_berry|medlyn): hardened
+        # 2026-07-08 during the stomata consolidation — a bare ``else`` used to
+        # silently run Ball-Berry on any typo. Guarded at BOTH ends: a fail-early
+        # CanopyConfig.validate() at the non-jitted setup entry, and the leaf
+        # kernel _compute_gs_and_ci as a trace-time backstop.
+        ("packages/land/legoesm/land/canopy/config.py", "validate"),
+        ("packages/land/legoesm/land/canopy/energy_balance.py", "_compute_gs_and_ci"),
         ("packages/ml/legoesm/ml/physics/model.py", "_validate_microphysics_scheme"),
         ("packages/ml/legoesm/ml/training.py", "create_optimizer"),
         ("packages/ml/legoesm/training/aimip_params.py", "make_aimip_classical_spectral_physics"),
         ("packages/ocean/legoesm/ocean/biogeochemistry/config.py", "init_biogeo_state"),
         ("packages/ocean/legoesm/ocean/config.py", "to_ocean_config"),
+        # MED-1 follow-up: under-ice relaxation validates freeze_scheme at fn
+        # entry against eos.VALID_FREEZE_SCHEMES (per-cell liquidus target).
+        ("packages/ocean/legoesm/ocean/coupler/omip2_applicator.py", "under_ice_freeze_relax"),
         ("packages/ocean/legoesm/ocean/dynamics/_flux_limiters.py", "resolve_tvd_limiter"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model.py", "__init__"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_compute_advection_flux_div"),
@@ -237,6 +247,7 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # scanner-shaped; the canonical unknown-scheme guard is the validator.)
         ("packages/ocean/legoesm/ocean/dynamics/ocean_tendency_common.py", "validate_bottom_drag_scheme"),
         ("packages/ocean/legoesm/ocean/eos.py", "make_eos_fn"),
+        ("packages/ocean/legoesm/ocean/eos.py", "freezing_point"),
         ("packages/ocean/legoesm/ocean/experiments/dino.py", "create_forcings"),
         ("packages/ocean/legoesm/ocean/experiments/dino.py", "create_initial_conditions"),
         ("packages/ocean/legoesm/ocean/physics/bottom_drag/integration.py", "make_bottom_drag_physics"),
@@ -244,6 +255,11 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py", "gm_redi_tracer_tendency_latlon"),
         ("packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_mpas.py", "gm_redi_tracer_tendency_mpas"),
         ("packages/ocean/legoesm/ocean/physics/lateral_mixing/integration.py", "make_lateral_mixing_physics"),
+        # MPAS ocean vmix/surface/convection factory: catke rejected, richardson
+        # rejected (K-profile would be silently dropped), tke gated implicit-only
+        # (hardened 2026-07 with the MPAS-TKE bridge). Grow-only lock so these
+        # unknown-scheme raises can't be silently deleted.
+        ("packages/ocean/legoesm/ocean/physics/mpas_physics.py", "make_mpas_ocean_physics"),
         ("packages/ocean/legoesm/ocean/physics/surface_forcing/bulk_formulas.py", "bulk_formula_surface_forcing"),
         ("packages/ocean/legoesm/ocean/physics/surface_forcing/integration.py", "make_surface_forcing_physics"),
         ("packages/ocean/legoesm/ocean/physics/vertical_mixing/integration.py", "make_vertical_mixing_physics"),

@@ -18,7 +18,7 @@ class TestFVCompressibleEuler:
 
     @pytest.fixture(scope="class")
     def model_state_dt(self, grid_ce):
-        from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
             CDGridCompressibleEulerConfig as FVCompressibleEulerConfig,
             CDGridCompressibleEulerModel as FVCompressibleEulerModel,
         )

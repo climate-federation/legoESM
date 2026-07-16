@@ -107,8 +107,9 @@ def _refuse_stateful_physics_unthreaded_wrapper(physics_fn) -> None:
             "This sharded step wrapper does not thread the PhysicsState "
             "carry, so the configured stateful physics would silently "
             "reseed every step (issue #405/#413).  Use a diagnostic "
-            "scheme, or the ModelDriver loops / MPAS step, which thread "
-            "the carry."
+            "scheme, the ModelDriver loops / MPAS step, or "
+            "make_voronoi_sharded_step(return_phys_state=True), which "
+            "thread the carry."
         )
 
 
@@ -1718,12 +1719,117 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
     }
 
 
+# Schema-drift tripwire (mirrors the M3d ocean twin
+# ``voronoi_mpi.exchange_state_mpas_ocean``): a NEW HydrostaticState field
+# would silently ride through the packed SPMD halo exchange UNEXCHANGED
+# (stale halos on every RK stage) — fail loudly so the cell-pack layout,
+# the physics application and this set are extended deliberately.
+_VORONOI_SPMD_STATE_FIELDS = frozenset(
+    {"u", "T", "p_s", "phis", "v", "tracers"})
+
+
+def check_voronoi_spmd_state_schema(state) -> tuple:
+    """Validate the MPAS state schema for the sharded SPMD step.
+
+    Raises on (a) a ``HydrostaticState`` field-set drift (a new field
+    must be threaded through the packed exchange deliberately) and
+    (b) a non-None ``v`` (MPAS carries the wind as edge-normal ``u``
+    only; a ``v`` would be silently dropped by the pack).
+
+    Returns the canonical tracer WIRE order (``sorted(keys)``) — every
+    device packs/unpacks tracers in the same order even if dict insertion
+    order ever diverged, so same-dtype tracers can never swap silently
+    (same guard as ``make_voronoi_mpi_step``'s ``_exchange_mpas_state``).
+    """
+    if set(state._fields) != set(_VORONOI_SPMD_STATE_FIELDS):
+        raise ValueError(
+            "make_voronoi_sharded_step: HydrostaticState schema changed "
+            f"({sorted(set(state._fields) ^ set(_VORONOI_SPMD_STATE_FIELDS))}"
+            "); extend the packed SPMD halo exchange (cell-pack layout), "
+            "the physics application, and _VORONOI_SPMD_STATE_FIELDS "
+            "deliberately."
+        )
+    if state.v is not None:
+        raise ValueError(
+            "make_voronoi_sharded_step: state.v must be None on MPAS "
+            "(the wind is edge-normal u); a non-None v would be silently "
+            "dropped by the packed halo exchange."
+        )
+    return tuple(sorted(state.tracers)) if state.tracers is not None else ()
+
+
+def _pack_cell_state(T, p_s, phis, q_flat):
+    """Production cell-pack WIRE layout: ``T | p_s | phis | tracers``.
+
+    ``q_flat`` is the tracer block ``(n, nlev * n_q)`` concatenated in
+    the canonical SORTED-key order (width 0 for a dry run).  The single
+    source of truth for the packed exchange layout — the shard_map
+    kernel and the sentinel routing test both go through here, so an
+    omitted field or a swapped slot cannot hide in a hand-rolled copy.
+    """
+    return jnp.concatenate(
+        [T, p_s[:, jnp.newaxis], phis[:, jnp.newaxis], q_flat], axis=-1)
+
+
+def _unpack_cell_state(cell_buf, nlev):
+    """Inverse of :func:`_pack_cell_state`: ``(T, p_s, phis, q_flat)``."""
+    return (cell_buf[:, :nlev], cell_buf[:, nlev],
+            cell_buf[:, nlev + 1], cell_buf[:, nlev + 2:])
+
+
+def _ppermute_halo_fill(cell_pack, u_shard, halo_sl, ppermute_perms,
+                        max_lc, max_le):
+    """Fill (owned + halo) local buffers from owned shards via ppermute.
+
+    Runs INSIDE ``shard_map``.  ``cell_pack`` ``(cells_per, W)`` is the
+    packed owned-cell buffer — ALL cell-centred prognostics (T | p_s |
+    phis | tracers) concatenated on the trailing axis; ``u_shard``
+    ``(edges_per, nlev)`` the owned-edge buffer.  Each edge-colored round
+    posts ONE flat ppermute carrying BOTH entity classes for ALL packed
+    fields — the SPMD mirror of route-A's batched union-neighbor exchange
+    (one message per neighbor per dtype group; the compute-precision cast
+    upstream guarantees a single dtype group here).
+
+    ``halo_sl`` is a tuple of per-round ``(send_cell_idx, recv_cell_pos,
+    send_edge_idx, recv_edge_pos)`` tuples whose arrays are ALREADY
+    device-local ``(1, n_round)`` shard_map arguments (``P("device")``
+    specs) — per-rank LOCAL metadata; no device materializes the global
+    schedule.  ``ppermute_perms`` is the static per-round permutation.
+
+    Returns ``(cell_local, u_local)`` of shapes ``(max_lc, W)`` /
+    ``(max_le, nlev)``; ghost tail rows stay zero.
+    """
+    cells_per = cell_pack.shape[0]
+    edges_per = u_shard.shape[0]
+    # +1 garbage slot for padded scatter targets (trimmed at the end):
+    # schedule rows are padded to the round's max halo count, and padding
+    # entries target position max_lc / max_le.
+    cell_local = jnp.pad(cell_pack, ((0, max_lc + 1 - cells_per), (0, 0)))
+    u_local = jnp.pad(u_shard, ((0, max_le + 1 - edges_per), (0, 0)))
+
+    for r, (sc, rc, se, re) in enumerate(halo_sl):
+        send_c = cell_pack[sc[0]]             # (hc_r, W)
+        send_e = u_shard[se[0]]               # (he_r, nlev)
+        send_c_flat = send_c.ravel()
+        send_packed = jnp.concatenate([send_c_flat, send_e.ravel()])
+        recv_packed = jax.lax.ppermute(
+            send_packed, "device", perm=ppermute_perms[r])
+        split_at = send_c_flat.shape[0]       # static
+        recv_c = recv_packed[:split_at].reshape(send_c.shape)
+        recv_e = recv_packed[split_at:].reshape(send_e.shape)
+        cell_local = cell_local.at[rc[0]].set(recv_c)
+        u_local = u_local.at[re[0]].set(recv_e)
+
+    return cell_local[:max_lc], u_local[:max_le]
+
+
 def make_voronoi_sharded_step(
     model,
     dev_config: DeviceConfig,
     *,
     halo_strategy: str = "auto",
     ppermute_cells_per_device_threshold: int = 2_000,
+    return_phys_state: bool = False,
 ):
     """Create a halo-partitioned multi-GPU step for Voronoi (MPAS/TRiSK) grids.
 
@@ -1732,11 +1838,32 @@ def make_voronoi_sharded_step(
 
     1. Pre-computes per-device local meshes (owned cells/edges + halo)
        at setup time via domain decomposition.
-    2. At each SSP-RK3 stage, exchanges only halo data between
-       neighboring devices (not the full state), then computes
-       tendencies on the local mesh.
-    3. After 3 stages, applies temperature floor and mass conservation
-       fix, then returns the sharded result.
+    2. At each RK stage (``config.time_integrator`` via
+       ``dispatch_integrator`` — same integrator code as the serial
+       ``_step_jit``), exchanges only halo data between neighboring
+       devices (not the full state), then computes tendencies on the
+       local mesh.  The packed exchange carries the FULL prognostic
+       state: u (edge) plus T, p_s, phis and every tracer (cell) in one
+       flat ppermute payload per neighbor round.
+    3. Applies operator-split physics ONCE on the post-dynamics state
+       (traced ``forcing`` + prognostic ``phys_state`` carry threaded
+       through), then the temperature/tracer floors and the global mass
+       fix — mirroring the serial ``MPASPrimitiveEquationModel._step_jit``
+       operator ordering exactly.
+
+    Local-only metadata: the per-device local meshes (stacked with a
+    leading device axis), the ppermute schedule index arrays, and the
+    mass-fix ``areaCell`` are ``P("device")``-sharded and passed as
+    ARGUMENTS into the jitted step (multi-controller-safe: sharded jit
+    args are legal where sharded closure constants raise at trace time)
+    — each device holds ONLY its own local mesh + schedule rows, never
+    the global connectivity.  The one remaining NON-local metadata is
+    the global-mesh closure handed to the operator-split physics term:
+    column-local physics runs OUTSIDE shard_map on the GSPMD-sharded
+    global arrays, reading only replicated 1-D cell fields (latCell
+    etc. — O(nCells) scalars, not the 2-D connectivity).  See the
+    physics block below and
+    ``docs/performance/scaling/mpas_atm_native_step_audit.md``.
 
     Parameters
     ----------
@@ -1760,27 +1887,60 @@ def make_voronoi_sharded_step(
         communication savings over allgather.  Default: 2 000.
         (Lowered from 25 000 to avoid the O(N) allgather bottleneck
         on moderate icosahedral grids like I5 with 2–4 GPUs.)
+    return_phys_state : bool
+        ``False`` (default, backward-compatible): the returned step is
+        ``step(state, dt, physics_fn=None, forcing=None, phys_state=None)
+        -> state`` — the physics carry is dropped, so a STATEFUL
+        physics_fn is refused loudly (issue #405/#413).  ``True``: the
+        step returns ``(state, phys_state_out)`` — full operator-split
+        production parity with ``make_voronoi_mpi_step(
+        return_phys_state=True)``; the prognostic physics carry (TKE /
+        convection state) and the traced per-step ``forcing`` (e.g.
+        prescribed ``T_sfc``) are threaded through.
 
     Returns
     -------
     callable
-        ``step(state, dt, physics_fn=None) -> state``.  ``physics_fn``
-        follows the MPAS operator-split convention
+        ``step(state, dt, physics_fn=None, forcing=None, phys_state=None)``
+        returning ``state`` (``return_phys_state=False``) or
+        ``(state, phys_state_out)`` (``return_phys_state=True``).
+        ``physics_fn`` follows the MPAS operator-split convention
         (``physics_fn(state, mesh, sigma_coord, *, phys_state, forcing)``
-        returning bare ``MPASHydrostaticTendencies`` — e.g.
-        ``held_suarez_forcing_mpas``) and is captured in the jitted
-        closure, never traced as an argument (same convention as
+        returning ``MPASHydrostaticTendencies`` or a ``(tendencies,
+        phys_state_out)`` tuple) and is captured in the jitted closure,
+        never traced as an argument (same convention as
         :class:`CompiledShardedStep`).  Each distinct ``physics_fn``
         identity compiles a separate executable; ``physics_fn=None``
-        compiles exactly the dynamics-only graph.  On a single-device
+        compiles exactly the dynamics-only graph.  ``forcing`` /
+        ``phys_state`` are jit arguments (NOT static) so new values each
+        step do not retrace (SegmentForcing doctrine); their pytree
+        STRUCTURE must stay stable across steps.  On a single-device
         config this returns ``model.step``, whose signature is
-        call-compatible.
+        call-compatible (state-only contract).
     """
     if dev_config.n_devices <= 1 or dev_config.mesh is None:
+        if return_phys_state:
+            # model.step returns only the state and stashes the carry on
+            # the model EAGERLY (skipped under an outer trace, gh-417) —
+            # returning it here would silently drop/reseed the carry
+            # inside scan-driven callers.  Refuse loudly; the serial
+            # carry contract is the model/driver's own.
+            raise ValueError(
+                "make_voronoi_sharded_step(return_phys_state=True) needs "
+                "a multi-device config; on a single device use "
+                "model.step (eager, carry stashed on the model) or the "
+                "ModelDriver loop, which threads the carry."
+            )
         return model.step
 
+    from legoesm.core.precision import cast_pytree
     from legoesm.core.state import MPASHydrostaticState
+    from legoesm.parallel.mesh import multiprocess_safe_device_put
     from legoesm.parallel.shard_map_compat import shard_map
+    from legoesm.timestepping.dispatch import dispatch_integrator
+    from legoesm.timestepping.integration import (
+        refuse_unthreaded_stateful_physics,
+    )
 
     n_dev = dev_config.n_devices
     voronoi_dims = dev_config.voronoi_dims
@@ -1855,10 +2015,18 @@ def make_voronoi_sharded_step(
         time.time() - t0, max_lc, max_le, cells_per, edges_per,
     )
 
-    # Replicate the stacked meshes so every device can index its slice.
-    rep_sharding = dev_config.replicated_sharding
+    # LOCAL-ONLY metadata: shard the stacked local meshes on the leading
+    # device axis — device i holds ONLY its own local mesh (leaf slice
+    # [i]), never the other devices' connectivity.  The mesh rides into
+    # the jitted step as an ARGUMENT with P("device") shard_map in_specs
+    # (multi-controller-safe: a sharded jit ARG is legal where a sharded
+    # CLOSURE constant raises at trace time under jax.distributed;
+    # ``multiprocess_safe_device_put`` builds the global array from each
+    # process's local copy).  All leaves are arrays after the jnp.stack
+    # in _build_voronoi_partition_infra (ints become (n_dev,) arrays).
+    dev_sharding = dev_config.face_sharding  # P("device") on axis 0
     stacked_meshes = jax.tree.map(
-        lambda x: jax.device_put(x, rep_sharding) if hasattr(x, "shape") else x,
+        lambda x: multiprocess_safe_device_put(x, dev_sharding),
         stacked_meshes,
     )
 
@@ -1880,19 +2048,26 @@ def make_voronoi_sharded_step(
         n_rounds = pp_sched['n_rounds']
         ppermute_perms = pp_sched['ppermute_perms']
 
-        # Replicate index arrays on all devices
-        send_cell_idx = [
-            jax.device_put(a, rep_sharding) for a in pp_sched['send_cell_idx']]
-        recv_cell_pos = [
-            jax.device_put(a, rep_sharding) for a in pp_sched['recv_cell_pos']]
-        send_edge_idx = [
-            jax.device_put(a, rep_sharding) for a in pp_sched['send_edge_idx']]
-        recv_edge_pos = [
-            jax.device_put(a, rep_sharding) for a in pp_sched['recv_edge_pos']]
+        # LOCAL-ONLY metadata: shard the per-round index arrays on the
+        # leading device axis (each device holds only its own schedule
+        # rows) and thread them as shard_map ARGUMENTS — see the stacked
+        # meshes above for why args, not closures.
+        halo_args = tuple(
+            (
+                multiprocess_safe_device_put(
+                    pp_sched['send_cell_idx'][r], dev_sharding),
+                multiprocess_safe_device_put(
+                    pp_sched['recv_cell_pos'][r], dev_sharding),
+                multiprocess_safe_device_put(
+                    pp_sched['send_edge_idx'][r], dev_sharding),
+                multiprocess_safe_device_put(
+                    pp_sched['recv_edge_pos'][r], dev_sharding),
+            )
+            for r in range(n_rounds)
+        )
 
-        # Log halo exchange statistics
-        sum(pp_sched['halo_cells_per_round'])
-        sum(pp_sched['halo_edges_per_round'])
+        # Log halo exchange statistics (dry-state estimate: tracers add
+        # nlev*n_tracers further cell channels to both strategies).
         total_pp_bytes = sum(
             hc * (nlev + 2) + he * nlev
             for hc, he in zip(pp_sched['halo_cells_per_round'],
@@ -1913,72 +2088,72 @@ def make_voronoi_sharded_step(
         )
         logger.info("  ppermute schedule built in %.3fs", time.time() - t1)
 
-        # ---- ppermute-based shard_map kernel ----
+    else:
+        # ---- Legacy all-gather strategy: local gather indices ----
+        halo_args = (
+            multiprocess_safe_device_put(gather_cells, dev_sharding),
+            multiprocess_safe_device_put(gather_edges, dev_sharding),
+        )
 
-        def _local_tendency(u_shard, T_shard, ps_shard, phis_shard, dt_val):
-            """Inside shard_map: ppermute halo exchange → local tendency."""
-            dev_idx = jax.lax.axis_index("device")
+    # ------------------------------------------------------------------
+    # shard_map kernel: packed full-state halo fill → local tendency
+    # ------------------------------------------------------------------
+    # The kernel is built per canonical tracer-key tuple (the keys are
+    # part of the traced program: cell-pack width and the tracer dict
+    # rebuilt on the local mesh).  Memoized so a stable state structure
+    # reuses one shard_map object → one jit executable (no retrace).
 
-            # Pack cell fields into a single buffer: (cells_per, nlev+2)
-            cell_pack = jnp.concatenate([
-                T_shard,                           # (cells_per, nlev)
-                ps_shard[:, jnp.newaxis],          # (cells_per, 1)
-                phis_shard[:, jnp.newaxis],        # (cells_per, 1)
-            ], axis=-1)
+    mesh_in_specs = jax.tree.map(lambda _: P("device"), stacked_meshes)
+    halo_in_specs = jax.tree.map(lambda _: P("device"), halo_args)
 
-            # Initialize local arrays with +1 garbage slot for safe
-            # padding.  Single Pad HLO op replaces alloc-zeros +
-            # scatter; subsequent halo scatters write into the zeroed
-            # tail slots.
-            cell_local = jnp.pad(
-                cell_pack, ((0, max_lc + 1 - cells_per), (0, 0)),
-            )
-            u_local = jnp.pad(
-                u_shard, ((0, max_le + 1 - edges_per), (0, 0)),
-            )
+    def _make_local_tendency(tkeys: tuple):
 
-            # Exchange halos via ppermute rounds (one per edge-color).
-            # Cell and edge data are packed into a single flat buffer per
-            # round so that each round issues ONE ppermute instead of two,
-            # halving NCCL collective overhead.
-            for r in range(n_rounds):
-                # Gather send buffers
-                sc_idx = send_cell_idx[r][dev_idx]   # (halo_c_r,)
-                se_idx = send_edge_idx[r][dev_idx]   # (halo_e_r,)
-                send_c = cell_pack[sc_idx]            # (hc, nlev+2)
-                send_e = u_shard[se_idx]              # (he, nlev)
+        def _local_tendency(u_shard, T_shard, ps_shard, phis_shard,
+                            q_shard, dt_val, mesh_sl, halo_sl):
+            """Inside shard_map: full-state halo fill → local tendency.
 
-                # Pack into single flat buffer for one ppermute
-                send_c_flat = send_c.ravel()
-                send_e_flat = send_e.ravel()
-                send_packed = jnp.concatenate([send_c_flat, send_e_flat])
+            ``q_shard`` is the tracer block ``(cells_per, nlev * n_q)``
+            — tracers concatenated on the trailing axis in the canonical
+            sorted-key WIRE order (width 0 for a dry run).  ``mesh_sl``
+            / ``halo_sl`` are this device's P("device") slices of the
+            stacked local meshes and the halo schedule (leading axis 1).
+            """
+            # Pack ALL cell-centred prognostics into a single buffer
+            # (cells_per, nlev + 2 + nlev*n_q) via the shared wire-layout
+            # helper (also driven directly by the sentinel routing test).
+            cell_pack = _pack_cell_state(T_shard, ps_shard, phis_shard,
+                                         q_shard)
 
-                recv_packed = jax.lax.ppermute(
-                    send_packed, "device", perm=ppermute_perms[r])
+            if use_ppermute:
+                cell_local, u_local = _ppermute_halo_fill(
+                    cell_pack, u_shard, halo_sl, ppermute_perms,
+                    max_lc, max_le,
+                )
+            else:
+                cell_full = jax.lax.all_gather(
+                    cell_pack, "device", axis=0, tiled=True)
+                u_full = jax.lax.all_gather(
+                    u_shard, "device", axis=0, tiled=True)
+                gc, ge = halo_sl
+                cell_local = cell_full[gc[0]]
+                u_local = u_full[ge[0]]
 
-                # Unpack: split at the cell/edge boundary and reshape
-                split_at = send_c_flat.shape[0]  # hc * (nlev+2), static
-                recv_c = recv_packed[:split_at].reshape(send_c.shape)
-                recv_e = recv_packed[split_at:].reshape(send_e.shape)
+            # Unpack cell fields (inverse of the shared pack helper)
+            T_local, ps_local, phis_local, q_local = _unpack_cell_state(
+                cell_local, nlev)
 
-                # Scatter received data into halo positions
-                # (padding entries target the garbage slot at max_lc/max_le)
-                rc_pos = recv_cell_pos[r][dev_idx]   # (halo_c_r,)
-                re_pos = recv_edge_pos[r][dev_idx]   # (halo_e_r,)
-                cell_local = cell_local.at[rc_pos].set(recv_c)
-                u_local = u_local.at[re_pos].set(recv_e)
+            # This device's local mesh (leading axis is the length-1
+            # device slice of the stacked meshes).
+            my_mesh = jax.tree.map(lambda x: x[0], mesh_sl)
 
-            # Trim garbage slot
-            cell_local = cell_local[:max_lc]
-            u_local = u_local[:max_le]
-
-            # Unpack cell fields
-            T_local = cell_local[:, :nlev]
-            ps_local = cell_local[:, nlev]
-            phis_local = cell_local[:, nlev + 1]
-
-            # Get this device's local mesh
-            my_mesh = jax.tree.map(lambda x: x[dev_idx], stacked_meshes)
+            tracers_local = None
+            if tkeys:
+                tracers_local = {
+                    k: Field(data=q_local[:, i * nlev:(i + 1) * nlev],
+                             name=k, dims=("nCells", "nlev"),
+                             units="kg/kg", staggering="cell")
+                    for i, k in enumerate(tkeys)
+                }
 
             # Build local state and compute tendency
             local_state = MPASHydrostaticState(
@@ -1995,88 +2170,75 @@ def make_voronoi_sharded_step(
                            dims=("nCells",), units="m^2/s^2",
                            long_name="surface geopotential",
                            staggering="cell"),
+                tracers=tracers_local,
             )
             tend = mpas_hydrostatic_tendencies(
                 local_state, my_mesh, sigma, cfg, dt=dt_val,
             )
 
-            # Return only the owned shard of the tendency
+            # Owned shards only.  Tracer ADVECTION tendencies ride back
+            # in the same packed wire order (mpas_hydrostatic_tendencies
+            # always returns tracer_tendencies for a tracered state).
+            if tkeys:
+                dq_owned = jnp.concatenate(
+                    [tend.tracer_tendencies[k].data for k in tkeys],
+                    axis=-1)[:cells_per]
+            else:
+                dq_owned = jnp.zeros((cells_per, 0), dtype=T_shard.dtype)
             return (tend.du_dt.data[:edges_per],
                     tend.dT_dt.data[:cells_per],
-                    tend.dp_s_dt.data[:cells_per])
+                    tend.dp_s_dt.data[:cells_per],
+                    dq_owned)
 
-    else:
-        # ---- Legacy all-gather shard_map kernel ----
-        gather_cells_rep = jax.device_put(gather_cells, rep_sharding)
-        gather_edges_rep = jax.device_put(gather_edges, rep_sharding)
+        return _local_tendency
 
-        def _local_tendency(u_shard, T_shard, ps_shard, phis_shard, dt_val):
-            """Inside shard_map: all-gather → local gather → tendency."""
-            cell_pack = jnp.concatenate([
-                T_shard,
-                ps_shard[:, jnp.newaxis],
-                phis_shard[:, jnp.newaxis],
-            ], axis=-1)
-            cell_full = jax.lax.all_gather(
-                cell_pack, "device", axis=0, tiled=True)
-            u_full = jax.lax.all_gather(
-                u_shard, "device", axis=0, tiled=True)
+    _shard_tendency_cache: dict = {}
 
-            dev_idx = jax.lax.axis_index("device")
-            cell_local = cell_full[gather_cells_rep[dev_idx]]
-            u_local = u_full[gather_edges_rep[dev_idx]]
-
-            T_local = cell_local[:, :nlev]
-            ps_local = cell_local[:, nlev]
-            phis_local = cell_local[:, nlev + 1]
-
-            my_mesh = jax.tree.map(lambda x: x[dev_idx], stacked_meshes)
-
-            local_state = MPASHydrostaticState(
-                u=Field(data=u_local, name="u",
-                        dims=("nEdges", "nlev"), units="m/s",
-                        long_name="normal velocity", staggering="edge"),
-                T=Field(data=T_local, name="T",
-                        dims=("nCells", "nlev"), units="K",
-                        long_name="temperature", staggering="cell"),
-                p_s=Field(data=ps_local, name="p_s",
-                          dims=("nCells",), units="Pa",
-                          long_name="surface pressure", staggering="cell"),
-                phis=Field(data=phis_local, name="phis",
-                           dims=("nCells",), units="m^2/s^2",
-                           long_name="surface geopotential",
-                           staggering="cell"),
+    def _get_shard_tendency(tkeys: tuple):
+        fn = _shard_tendency_cache.get(tkeys)
+        if fn is None:
+            fn = shard_map(
+                _make_local_tendency(tkeys),
+                mesh=jax_mesh,
+                in_specs=(P("device"), P("device"), P("device"),
+                          P("device"), P("device"), P(),
+                          mesh_in_specs, halo_in_specs),
+                out_specs=(P("device"), P("device"), P("device"),
+                           P("device")),
+                check_vma=False,
             )
-            tend = mpas_hydrostatic_tendencies(
-                local_state, my_mesh, sigma, cfg, dt=dt_val,
-            )
-            return (tend.du_dt.data[:edges_per],
-                    tend.dT_dt.data[:cells_per],
-                    tend.dp_s_dt.data[:cells_per])
-
-    _shard_tendency = shard_map(
-        _local_tendency,
-        mesh=jax_mesh,
-        in_specs=(P("device"), P("device"), P("device"), P("device"), P()),
-        out_specs=(P("device"), P("device"), P("device")),
-        check_vma=False,
-    )
+            _shard_tendency_cache[tkeys] = fn
+        return fn
 
     # ------------------------------------------------------------------
     # Pre-compute mass conservation constants (avoid per-step allreduce)
     # ------------------------------------------------------------------
     if cfg.fix_mass:
-        # REPLICATED, not face_sharding: the jitted step CLOSES OVER this
-        # array, and under multi-controller (jax.distributed) closing over a
-        # device-sharded array spans non-addressable devices and raises at
-        # trace time.  A fully-replicated closure constant is legal on both
-        # single- and multi-controller; GSPMD still multiplies each device's
-        # p_s shard by its local slice (no extra comm) before the allreduce.
-        _area_for_mass = jax.device_put(global_mesh.areaCell, rep_sharding)
-        _total_area = float(jnp.sum(global_mesh.areaCell))
+        # areaCell rides as a P("device")-sharded jit ARGUMENT aligned
+        # with the p_s cell shards (elementwise product stays local;
+        # GSPMD emits one allreduce for the sum) — local-only, and
+        # multi-controller-safe because it is an argument, not a closure
+        # constant.  Take a HOST copy first (codex M3c-1 MAJOR): the
+        # caller's mesh may arrive REPLICATED (bench replicate_pytree),
+        # and multiprocess_safe_device_put passes non-fully-addressable
+        # arrays through UNCHANGED — a replicated leaf would silently
+        # stay replicated under multi-controller.  A host array is
+        # always fully addressable, so the P("device") shard is
+        # guaranteed on both controllers.  total_area is a host float.
+        _area_for_mass = multiprocess_safe_device_put(
+            np.asarray(global_mesh.areaCell), dev_sharding)
+        # fp64 area sum to match the fp64 mass-budget accumulator below
+        # (mirrors make_voronoi_mpi_step; identical under x64).
+        _total_area = float(jnp.sum(
+            global_mesh.areaCell.astype(jnp.float64)))
+    else:
+        _area_for_mass = jnp.zeros((0,))  # unused placeholder arg
+        _total_area = 1.0
 
     # ------------------------------------------------------------------
-    # JIT-compiled step: SSP-RK3 with halo refresh between stages
+    # JIT-compiled step: dispatch_integrator dynamics (tracer advection
+    # included) → operator-split physics → floors → global mass fix.
+    # Mirrors the serial MPASPrimitiveEquationModel._step_jit ordering.
     # ------------------------------------------------------------------
 
     def _build_step(physics_fn=None):
@@ -2086,91 +2248,168 @@ def make_voronoi_sharded_step(
         Python callable as an array argument (same convention as
         ``CompiledShardedStep._compile`` / ``_SingleDeviceStep``).
         ``physics_fn=None`` produces exactly the dynamics-only graph.
+        ``forcing`` / ``phys_state`` are traced jit arguments (NOT
+        static) so per-step values do not retrace (SegmentForcing
+        doctrine); the local-mesh / halo-schedule / area constants are
+        threaded as sharded arguments (see the factory docstring).
         """
         _phys = physics_fn
 
         @jax.jit
-        def _step(state, dt):
-            u = state.u.data       # (nEdges, nlev) sharded
-            T = state.T.data       # (nCells, nlev) sharded
-            ps = state.p_s.data    # (nCells,) sharded
-            phis = state.phis.data # (nCells,) sharded
+        def _step(state, dt, forcing, phys_state,
+                  mesh_arg, halo_arg, area_arg):
+            # Canonical tracer wire order — static at trace time (part
+            # of the state's pytree structure).
+            tkeys = (tuple(sorted(state.tracers))
+                     if state.tracers is not None else ())
 
-            # --- Stage 1: k1 = state + dt * F(state) ---
-            du1, dT1, dps1 = _shard_tendency(u, T, ps, phis, dt)
-            u1 = u + dt * du1
-            T1 = T + dt * dT1
-            ps1 = ps + dt * dps1
+            # Precision parity with the serial ``_step_jit``: integrate
+            # in compute precision, store in storage precision.
+            state = cast_pytree(state, None, "compute")
+            shard_tendency = _get_shard_tendency(tkeys)
 
-            # --- Stage 2: k2 = 3/4*state + 1/4*(k1 + dt*F(k1)) ---
-            du2, dT2, dps2 = _shard_tendency(u1, T1, ps1, phis, dt)
-            u2 = 0.75 * u + 0.25 * (u1 + dt * du2)
-            T2 = 0.75 * T + 0.25 * (T1 + dt * dT2)
-            ps2 = 0.75 * ps + 0.25 * (ps1 + dt * dps2)
+            def _pack_tracers(s):
+                if not tkeys:
+                    return jnp.zeros(
+                        s.T.data.shape[:-1] + (0,), dtype=s.T.data.dtype)
+                return jnp.concatenate(
+                    [s.tracers[k].data for k in tkeys], axis=-1)
 
-            # --- Stage 3: k3 = 1/3*state + 2/3*(k2 + dt*F(k2)) ---
-            du3, dT3, dps3 = _shard_tendency(u2, T2, ps2, phis, dt)
-            u_new = (1.0 / 3.0) * u + (2.0 / 3.0) * (u2 + dt * du3)
-            T_new = (1.0 / 3.0) * T + (2.0 / 3.0) * (T2 + dt * dT3)
-            ps_new = (1.0 / 3.0) * ps + (2.0 / 3.0) * (ps2 + dt * dps3)
-
-            # --- Operator-split physics (mirrors
-            #     MPASPrimitiveEquationModel._step_jit): evaluate ONCE on
-            #     the post-dynamics state and apply forward over dt,
-            #     BEFORE the temperature floor and the mass fix.  Column
-            #     physics is cell/edge-local, so it runs on the sharded
-            #     global arrays OUTSIDE the shard_map kernel — GSPMD
-            #     partitions the pointwise work per device with no halo
-            #     traffic. ---
-            if _phys is not None:
-                post_dyn = MPASHydrostaticState(
-                    u=state.u.replace(data=u_new),
-                    T=state.T.replace(data=T_new),
-                    p_s=state.p_s.replace(data=ps_new),
-                    phis=state.phis,
+            def dyn_tendency_fn(s):
+                """Dynamics tendencies as a state-shaped pytree (tracer
+                ADVECTION rides under the same tracer keys) so the pytree
+                RK integrator advances moisture mass-consistently with
+                u/T/p_s — mirroring the serial ``dyn_tendency_fn``."""
+                du, dT, dps, dq = shard_tendency(
+                    s.u.data, s.T.data, s.p_s.data, s.phis.data,
+                    _pack_tracers(s), dt, mesh_arg, halo_arg,
                 )
-                _pt = _phys(post_dyn, global_mesh, sigma,
-                            phys_state=None, forcing=None)
-                if type(_pt) is tuple:
-                    # (tendencies, phys_state_out) is the stateful-physics
-                    # convention; this step has no physics-state carry
-                    # channel and silently dropping the carry would
-                    # corrupt stateful schemes (TKE etc.).  Trace-time
-                    # Python check → loud failure, never a wrong answer.
-                    raise TypeError(
-                        "make_voronoi_sharded_step: physics_fn returned a "
-                        "(tendencies, phys_state) tuple, but the sharded "
-                        "Voronoi step has no physics-state carry channel. "
-                        "Use a stateless physics_fn returning bare "
-                        "tendencies (e.g. held_suarez_forcing_mpas)."
-                    )
-                u_new = u_new + dt * _pt.du_dt.data
-                T_new = T_new + dt * _pt.dT_dt.data
-                ps_new = ps_new + dt * _pt.dp_s_dt.data
+                tr_tend = None
+                if s.tracers is not None:
+                    tr_tend = {
+                        k: s.tracers[k].replace(
+                            data=dq[..., i * nlev:(i + 1) * nlev])
+                        for i, k in enumerate(tkeys)
+                    }
+                return MPASHydrostaticState(
+                    u=s.u.replace(data=du),
+                    T=s.T.replace(data=dT),
+                    p_s=s.p_s.replace(data=dps),
+                    phis=s.phis.replace(
+                        data=jnp.zeros_like(s.phis.data)),
+                    v=s.v,
+                    tracers=tr_tend,
+                )
 
-            # --- Post-processing (mirrors model.step) ---
-            if cfg.T_min > 0:
-                T_new = jnp.maximum(T_new, cfg.T_min)
-
-            if cfg.fix_mass:
-                # Compute both masses inside a single reduction.  Stacking
-                # the two ps fields and reducing once lets XLA fuse the
-                # two cross-device sums into a single allreduce HLO instead
-                # of emitting two sequentially-dependent allreduces (the
-                # second cannot start until the first materialises).
-                ps_pair = jnp.stack([ps, ps_new], axis=0)
-                masses = jnp.sum(ps_pair * _area_for_mass[None], axis=tuple(
-                    range(1, ps_pair.ndim)
-                ))  # shape (2,)
-                correction = (masses[0] - masses[1]) / _total_area
-                ps_new = ps_new + correction
-
-            return MPASHydrostaticState(
-                u=state.u.replace(data=u_new),
-                T=state.T.replace(data=T_new),
-                p_s=state.p_s.replace(data=ps_new),
-                phis=state.phis,
+            # --- 1. Dynamics: RK-integrate (physics OFF; tracer
+            #        advection stays in the dynamics).  Honors
+            #        config.time_integrator via the SAME dispatch the
+            #        serial step uses (the previous hard-coded SSP-RK3
+            #        silently overrode e.g. the ssp_rk54_scan default).
+            state_new = dispatch_integrator(
+                state, dyn_tendency_fn, dt, cfg.time_integrator,
             )
+
+            # --- 2. Operator-split physics (mirrors _step_jit): evaluate
+            #     ONCE on the post-dynamics state and apply forward over
+            #     dt, BEFORE the floors and the mass fix.  Column physics
+            #     is cell/edge-local, so it runs on the sharded global
+            #     arrays OUTSIDE the shard_map kernel — GSPMD partitions
+            #     the pointwise work per device with no halo traffic (the
+            #     global-mesh closure contributes only replicated 1-D
+            #     cell fields such as latCell). ---
+            phys_state_out = phys_state
+            if _phys is not None:
+                _pr = _phys(state_new, global_mesh, sigma,
+                            phys_state=phys_state, forcing=forcing)
+                # NB ``type(...) is tuple`` (not isinstance): tendencies
+                # are themselves a NamedTuple — mirror the serial guard.
+                if type(_pr) is tuple:
+                    if not return_phys_state:
+                        # Stateful-physics convention with no carry
+                        # channel armed: silently dropping the carry
+                        # would corrupt stateful schemes (TKE etc.).
+                        # Trace-time Python check → loud failure.
+                        raise TypeError(
+                            "make_voronoi_sharded_step: physics_fn "
+                            "returned a (tendencies, phys_state) tuple, "
+                            "but the step was built with "
+                            "return_phys_state=False (no carry channel). "
+                            "Rebuild with return_phys_state=True and "
+                            "thread the returned carry, or use a "
+                            "stateless physics_fn returning bare "
+                            "tendencies (e.g. held_suarez_forcing_mpas)."
+                        )
+                    _pt, phys_state_out = _pr[0], _pr[1]
+                else:
+                    _pt = _pr
+                state_new = MPASHydrostaticState(
+                    u=state_new.u.replace(
+                        data=state_new.u.data + dt * _pt.du_dt.data),
+                    T=state_new.T.replace(
+                        data=state_new.T.data + dt * _pt.dT_dt.data),
+                    p_s=state_new.p_s.replace(
+                        data=state_new.p_s.data + dt * _pt.dp_s_dt.data),
+                    phis=state_new.phis,
+                    v=state_new.v,
+                    tracers=state_new.tracers,
+                )
+                if (state_new.tracers is not None
+                        and _pt.tracer_tendencies is not None):
+                    state_new = state_new._replace(tracers={
+                        k: (state_new.tracers[k].replace(
+                                data=state_new.tracers[k].data
+                                + dt * _pt.tracer_tendencies[k].data)
+                            if k in _pt.tracer_tendencies
+                            else state_new.tracers[k])
+                        for k in state_new.tracers
+                    })
+
+            # --- 3. Floors (mirrors _step_jit): temperature and tracer
+            #        non-negativity (advection is not positive-definite;
+            #        clamp before tracers feed saturation). ---
+            if cfg.T_min > 0:
+                state_new = state_new._replace(
+                    T=state_new.T.replace(
+                        data=jnp.maximum(state_new.T.data, cfg.T_min)))
+            if state_new.tracers is not None:
+                state_new = state_new._replace(tracers={
+                    k: f.replace(data=jnp.maximum(f.data, 0.0))
+                    for k, f in state_new.tracers.items()
+                })
+
+            # --- 4. Global mass fixer ---
+            if cfg.fix_mass:
+                # Promote to the fp64 budget accumulator (mirrors the
+                # serial fixer — plain fp32 reductions over 1e4-1e5 cells
+                # leak N·eps noise), and compute both masses inside a
+                # single fused reduction: stacking the two weighted ps
+                # fields lets XLA emit ONE allreduce instead of two
+                # sequentially-dependent ones.
+                acc = jnp.float64
+                area_acc = area_arg.astype(acc)
+                ps_pair = jnp.stack([
+                    state.p_s.data.astype(acc),
+                    state_new.p_s.data.astype(acc),
+                ], axis=0) * area_acc[None]
+                masses = jnp.sum(ps_pair, axis=1)  # shape (2,)
+                correction = (masses[0] - masses[1]) / _total_area
+                # Apply in fp64, then return p_s to its pre-fix carry
+                # dtype (codex M3c-1 MAJOR): under an fp32 compute state
+                # with x64 enabled the fp64 correction would otherwise
+                # promote the carry — the downcast-skipping storage cast
+                # below cannot undo it, breaking the lax.scan carry-dtype
+                # contract and re-tracing host loops.  No-op (bit
+                # identical) whenever the compute state is already fp64.
+                # NB the serial _fix_mass_mpas_hydro deliberately leaves
+                # the promoted add (iter-11); parity in that corner mode
+                # differs only by the rounding of the correction add.
+                _ps = state_new.p_s.data
+                state_new = state_new._replace(
+                    p_s=state_new.p_s.replace(
+                        data=(_ps + correction).astype(_ps.dtype)))
+
+            return cast_pytree(state_new, None, "storage"), phys_state_out
 
         return _step
 
@@ -2181,22 +2420,41 @@ def make_voronoi_sharded_step(
     # cannot be recycled while its cache entry is alive.
     _step_cache: dict = {}
 
-    def _voronoi_step(state, dt, physics_fn=None):
+    def _voronoi_step(state, dt, physics_fn=None, forcing=None,
+                      phys_state=None):
         """Sharded Voronoi step.  ``physics_fn`` is closure-captured into
         the jitted executable (selected by object identity) — it is never
-        passed to ``jax.jit`` as a traced argument."""
-        # Issue #405/#413: this wrapper has no PhysicsState carry channel,
-        # so a stateful physics_fn would silently reseed every step.
-        # Refuse loudly (the predicate also sees a partial/__wrapped__
-        # wrapper that hides the tag).
-        _refuse_stateful_physics_unthreaded_wrapper(physics_fn)
+        passed to ``jax.jit`` as a traced argument.  ``forcing`` /
+        ``phys_state`` ARE traced jit arguments."""
+        check_voronoi_spmd_state_schema(state)
+        # Issue #405/#413: never silently run stateful physics without
+        # its carry.  The predicates also see a partial/__wrapped__
+        # wrapper that hides the tag.
+        if return_phys_state:
+            refuse_unthreaded_stateful_physics(
+                physics_fn, phys_state,
+                where="make_voronoi_sharded_step(return_phys_state=True)")
+        else:
+            _refuse_stateful_physics_unthreaded_wrapper(physics_fn)
         key = None if physics_fn is None else id(physics_fn)
         fn = _step_cache.get(key)
         if fn is None:
             fn = _build_step(physics_fn)
             _step_cache[key] = fn
-        return fn(state, dt)
+        state_new, phys_state_out = fn(
+            state, dt, forcing, phys_state,
+            stacked_meshes, halo_args, _area_for_mass,
+        )
+        if return_phys_state:
+            return state_new, phys_state_out
+        return state_new
 
+    # Effective (post-"auto") strategy, carried on the returned callable
+    # so benches/tests can RECORD what actually ran instead of the
+    # requested flag (codex M3c-2 MINOR; same pattern as kessler's
+    # ``_bound_dt``).  Only multi-device steps carry it — the
+    # single-device early return above hands back ``model.step``.
+    _voronoi_step._halo_strategy_effective = halo_strategy
     return _voronoi_step
 
 

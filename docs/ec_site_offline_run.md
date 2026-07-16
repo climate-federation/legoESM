@@ -78,10 +78,13 @@ vs the DifferBESS oracle; both are fixed in `land/canopy/energy_balance.py`:
    negative LE (dew) passes through unchanged and a zero raw flux stays ~0 (a lower
    bound would manufacture evaporation from bone-dry soil).  Slack settings match
    DifferBESS `CanopyEnergyBalance` soft mode.
-2. **Minimum cuticular conductance** (`_GS_MIN_MOL = 1e-4` mol m⁻² s⁻¹) — at full
-   water stress the stress factor scales the Ball-Berry slope **and** intercept to
-   zero (`gs = 0`), making the leaf gs/Ci/An subsystem degenerate and the Newton
-   Jacobian singular → NaN.  The floor keeps `gs > 0`.  Matches DifferBESS `g0`.
+2. **Minimum cuticular conductance** (`_GS_MIN_MOL = 1e-4` mol m⁻² s⁻¹) — under the
+   legacy/default `CanopyConfig.stress_b0=True`, full water stress scales the
+   Ball-Berry slope **and** intercept to zero (`gs = 0`), making the leaf gs/Ci/An
+   subsystem degenerate and the Newton Jacobian singular → NaN.  The floor keeps
+   `gs > 0`.  With `stress_b0=False` the intercept `b0` stays > 0 (the cuticle keeps
+   leaking under drought), so `gs` is already floored above `_GS_MIN_MOL` and this
+   guard is inactive.  Matches DifferBESS `g0`.
 3. **Production wind floor in the driver** (`_U_MIN = 1 m/s`) — the coupled land
    step always drives the canopy with `sqrt(u²+v²+U_min²)`; the offline driver
    mirrors that (`run_ec_site.py`) so calm-wind steps are not run with raw,
