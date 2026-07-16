@@ -34,7 +34,7 @@ def test_nemo_model_config_selects_canonical_blocks():
 
     assert cfg.constants == NEMO_CONSTANTS_CONFIG
     assert cfg.g == pytest.approx(constants.g_nemo)
-    assert cfg.rho_0 == pytest.approx(constants.rho_ocean)
+    assert cfg.rho_0 == pytest.approx(constants.rho_ocean_nemo)  # NEMO rau0=1026
     assert cfg.constants.c_sw == pytest.approx(constants.c_p_seawater)
 
     assert cfg.eos == "veros_gsw"

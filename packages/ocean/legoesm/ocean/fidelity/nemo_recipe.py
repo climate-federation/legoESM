@@ -38,7 +38,7 @@ from legoesm import constants
 
 NEMO_CONSTANTS_CONFIG = ConstantsConfig(
     g=constants.g_nemo,
-    rho_0=constants.rho_ocean,
+    rho_0=constants.rho_ocean_nemo,
     c_sw=constants.c_p_seawater,
     Omega=constants.Omega,
     R_earth=constants.R_earth,
