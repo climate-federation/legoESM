@@ -548,3 +548,30 @@ def test_additive_mixing_flags_reach_every_scheme(scheme, flag, attr):
     assert getattr(vm, attr).enabled is True, (
         f"{flag} was silently dropped for --vertical-mixing-scheme {scheme}"
     )
+
+
+def test_ddm_forces_implicit_mixing_at_parse_time():
+    """The force must happen in parse_args, not only in the later override hook.
+
+    The bathymetry path builds its config+model from `args` BEFORE
+    _apply_drag_iwm_overrides runs, so a force that lives only in that hook came
+    too late: the LatLonCGridOceanModel constructor guard raised, and the user
+    got an error they could not connect to the flag they passed (codex).
+    """
+    assert parse_args(["--ddm"]).implicit_vertical_mixing is True
+    assert parse_args(["--iwm"]).implicit_vertical_mixing is True
+    # and a run that asked for neither is untouched
+    assert parse_args([]).implicit_vertical_mixing is False
+
+
+@pytest.mark.parametrize("grid", ["cubed_sphere"])
+def test_ddm_rejected_loudly_on_unsupported_grids(grid):
+    """--ddm was silently INERT on cubed_sphere (setup ships physics=None and
+    the non-latlon branch never wired it). A flag that parses and does nothing
+    is the failure this branch removes -- reject it instead, mirroring the
+    existing --iwm grid guard."""
+    from scripts.run.run_omip import _apply_drag_iwm_overrides
+
+    args = parse_args(["--grid", grid, "--ddm"])
+    with pytest.raises(SystemExit, match="--ddm is supported on the lat-lon"):
+        _apply_drag_iwm_overrides(args, grid, None, None, object(), object())

@@ -346,11 +346,16 @@ def parse_gwd_spec(value: str) -> str:
     try:
         ExperimentConfig(gravity_wave_drag=value).validate_strict()
     except ValueError as exc:
-        # Surface only the GWD complaint: validate_strict reports every error
-        # for the config, and the rest are irrelevant to this one flag.
+        # Report ONLY a genuine gravity_wave_drag complaint. validate_strict
+        # reports every error for the whole config, so falling back to the full
+        # message would blame this flag for an unrelated bad default elsewhere
+        # (codex). If nothing here is about GWD, this value is not the problem
+        # -- let it through and let the config's own validation report the real
+        # error, in its own words, at build time.
         msg = "; ".join(m for m in str(exc).splitlines()
-                        if "gravity_wave_drag" in m) or str(exc)
-        raise argparse.ArgumentTypeError(msg) from None
+                        if "gravity_wave_drag" in m)
+        if msg:
+            raise argparse.ArgumentTypeError(msg) from None
     return value
 
 
