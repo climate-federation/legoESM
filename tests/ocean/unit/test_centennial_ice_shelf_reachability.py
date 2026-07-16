@@ -120,3 +120,17 @@ def test_ice_shelf_dispatch_is_guarded_by_grid_mpas():
     assert calls_mpas and mpas_literal, (
         "the mpas ice-shelf apply is not grid-dispatched inside main()"
     )
+
+
+def test_ice_shelf_mask_help_documents_both_grid_shapes():
+    """Once mpas is reachable, the --ice-shelf-mask/--ice-draft help must not
+    prescribe only the lat-lon (n_lat, n_lon) shape -- the mpas apply needs
+    (nCells,) and raises for a 2-D array (codex). Advertising one shape for a
+    two-grid flag is the same overclaim class as the surface-flux help fixes on
+    the scheme-reachability branch."""
+    src = _DRIVER.read_text()
+    assert "nCells" in src, (
+        "--ice-shelf-mask/--ice-draft help does not mention the (nCells,) mpas "
+        "shape, so an mpas user is told to supply a (n_lat, n_lon) array that "
+        "the mpas apply will reject"
+    )

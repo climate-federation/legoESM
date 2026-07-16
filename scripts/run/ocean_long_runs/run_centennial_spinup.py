@@ -114,9 +114,13 @@ def main() -> int:
                    help="Enable Holland-Jenkins ice-shelf basal melt "
                         "(requires --ice-shelf-mask + --ice-draft NPY).")
     p.add_argument("--ice-shelf-mask", type=Path, default=None,
-                   help="NPY file with (n_lat, n_lon) {0,1} cavity mask.")
+                   help="NPY file with the {0,1} cavity mask on the run grid: "
+                        "(n_lat, n_lon) for --grid latlon, (nCells,) for "
+                        "--grid mpas.")
     p.add_argument("--ice-draft", type=Path, default=None,
-                   help="NPY file with (n_lat, n_lon) ice-base depth [m].")
+                   help="NPY file with ice-base depth [m] on the run grid: "
+                        "(n_lat, n_lon) for --grid latlon, (nCells,) for "
+                        "--grid mpas.")
     p.add_argument("--ice-shelf-scheme",
                    choices=["three_equation", "linear"],
                    default="three_equation")
