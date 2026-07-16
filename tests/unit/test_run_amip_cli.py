@@ -2572,3 +2572,29 @@ def test_bechtold_use_ifs_subcloud_evap_round_trips_and_threads():
         assert flat.bechtold_use_ifs_subcloud_evap is flag
         assert ExperimentConfig.from_amip_config(
             flat).bechtold_use_ifs_subcloud_evap is flag
+
+
+def test_bechtold_use_ifs_inplume_precip_round_trips_and_threads():
+    """--bechtold-use-ifs-inplume-precip round-trips into ExperimentConfig,
+    survives the flat-AMIP serialization both ways, threads into the hot-loop
+    BechtoldConfig; default OFF (legacy byte-identical)."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-use-ifs-inplume-precip",
+    ]), parser))
+    assert cfg.bechtold_use_ifs_inplume_precip is True
+    assert _resolve_convection(cfg)[1].use_ifs_inplume_precip is True
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert d.bechtold_use_ifs_inplume_precip is False
+    assert _resolve_convection(d)[1].use_ifs_inplume_precip is False
+    for flag in (True, False):
+        e = ExperimentConfig(convection="bechtold",
+                             bechtold_use_ifs_inplume_precip=flag)
+        flat = e.to_amip_config()
+        assert flat.bechtold_use_ifs_inplume_precip is flag
+        assert ExperimentConfig.from_amip_config(
+            flat).bechtold_use_ifs_inplume_precip is flag
