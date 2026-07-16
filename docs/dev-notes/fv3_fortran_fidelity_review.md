@@ -3045,7 +3045,7 @@ The structural gap is most likely in:
    all into `_d_sw_native`; Fortran has separate per-step
    communications between).
 
-### Iter-977 — Comprehensive audit conclusion: structural code is Fortran-faithful
+### Iter-977 — Comprehensive audit conclusion: structural code is Fortran-faithful at one-step (kernel-level; whole-chain NOT — native angles blow W2 up, see fv3_native_p4c_oracle.md)
 
 **Iter-967 through iter-976 audited 9 routines** against the GFDL
 Fortran source at `../FV3/atmos_cubed_sphere-symmetryclean/`:
@@ -3085,7 +3085,7 @@ Fortran source at `../FV3/atmos_cubed_sphere-symmetryclean/`:
   cross-face halo for uc, vc.  Similar restructuring.
 
 **Conclusion of audits.**  All audited structural code is
-Fortran-faithful for the duogrid path.  The remaining v_ll_Linf=
+Fortran-faithful at one-step (kernel-level) for the duogrid path.  The remaining v_ll_Linf=
 55.6 m/s gap is NOT in the audited structural code.
 
 **Hypotheses for the remaining gap:**
@@ -3214,7 +3214,7 @@ No code change.
    Our Python `_ppm_1d` uses the same pmp/lac formula (verified at
    tp_core.F90:2778-2786 / `fv_tp_2d.py` iord=9 path).  ✓
 
-**Conclusion.**  `fv_tp_2d` xppm/yppm chain is Fortran-faithful for
+**Conclusion.**  `fv_tp_2d` xppm/yppm transport kernel is Fortran-faithful at one-step for
 the duogrid path with hord_vt=9.  Boundary handling, cross-
 correction, and limiter all match Fortran.
 
@@ -3868,7 +3868,7 @@ halo, Part 1's full formula is the preferred path.
    negative-result.
 
 No new sentinel — the iter-951 v_ll_Linf gate already locks the
-Fortran-faithful FB chain numbers.
+Fortran-faithful FB chain one-step numbers (kernel-level; not whole-chain).
 
 **Insight.**  Iter-953/954 reveal a general principle: with iter-947
 giving Part 1 the correct halo, the Fortran Part 2/3/4 boundary
@@ -3909,7 +3909,7 @@ without the strip + corner-solve overrides — separate experiment.
    updated comment block records the iter-953 negative-result.
 
 No new sentinel — iter-947's sentinel + iter-951's v_ll_Linf gate
-already lock the Fortran-faithful FB chain numbers.
+already lock the Fortran-faithful FB chain one-step numbers (kernel-level).
 
 ### Iter-952 — Diagnostic: v_north max localized at cube-face I-boundaries (i=0, i=n-1)
 

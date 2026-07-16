@@ -9,9 +9,13 @@ PR-sized unit with its own codex review.
 
 ## Ground truth (Phase-0 outcomes this program builds on)
 
-- The FB chain (`fv3_fb_sw_step`, duogrid-only) is the algorithmically
-  faithful FV3 SW core: c_sw → p_grad_c → d_sw1..6, covariant winds
-  internally (entry/exit conversion `fb_v_d_to_covariant/orthogonal`).
+- The FB chain (`fv3_fb_sw_step`, duogrid-only) reproduces the FV3 SW core
+  *chain structure*: c_sw → p_grad_c → d_sw1..6, covariant winds internally
+  (entry/exit conversion `fb_v_d_to_covariant/orthogonal`).  NOTE: not yet
+  fully Fortran-faithful — the d_sw5 cross-face halo is the stable zero-ring
+  approximation (the faithful ghost destabilises; `fv3_sw_core.py:3205`),
+  and native seam angles + that zero-ring halo blow W2 up at C36 (see
+  `docs/dycore/fv3_native_p4c_oracle.md`).
 - Validated FB damping preset for vortex cases:
   `nord=1, d4_bg=0.16, dddmp=0.2, damp_v=0.02, nord_v=2` (120-day modon
   clean, mass 1e-15). W2-class steady flows carry a ~1.3 m/s/day linear
@@ -194,7 +198,7 @@ seams ~day 4.5 (both dt=300 and fixed-Courant dt=225), C72 NaNs
        edge special-casing fires (d_sw1 ut/vt overrides, d_sw4 vertex
        KE fix, d2a2c edge branch are all ``.not.bounded_domain``- or
        ``.not.dg``-guarded).  The FB chain was already structurally
-       oracle-faithful; a probe port of the d_sw1 overrides made the
+       oracle-matching at one-step (whole-chain fidelity NOT established; see Ground truth); a probe port of the d_sw1 overrides made the
        imbalance 20x WORSE (uc at duogrid seams is not the ut·sin
        convention those formulas assume).
      - TRUE ROOT: halo METRIC quality.  Fortran-duogrid computes halo
@@ -430,8 +434,9 @@ seams ~day 4.5 (both dt=300 and fixed-Courant dt=225), C72 NaNs
   below Mouallem duo-grid).  The user's pre-authorized fallback trigger
   (2026-07-12) is MET.  Item-1 nord>=2 port + item-2/2c-1 seam-metric
   fixes are FAITHFUL and STAY (they rescued W5/W6/modon and fixed a real
-  38%-wrong rdxa remap); the FB core remains the algorithmically-faithful
-  reference kept opt-in (`--sw-core fb`), but **production stays the
+  38%-wrong rdxa remap); the FB core remains the algorithm-level reference (kernels bit-exact;
+  NOT fully Fortran-faithful — zero-ring d_sw5 halo, native angles blow W2
+  up at C36; see Ground truth) kept opt-in (`--sw-core fb`), but **production stays the
   DEFAULT cube SW path.  Phases 2-3 (PE/NH) build on the production RK3
   core, not FB.**  M2-M5 below are RE-SCOPED accordingly (pending user
   go-ahead on the pivot).
@@ -444,8 +449,8 @@ seams ~day 4.5 (both dt=300 and fixed-Courant dt=225), C72 NaNs
 FB failed the flip (M1b FINAL VERDICT). The "single FV3 implementation"
 goal now centers on the PRODUCTION RK3 cube SW core (`fv3_sw_tendencies`
 in `FV3EdgeShallowWaterModel`), which passes the full Williamson matrix
-and is 2.6-4.3x faster. FB is retained as the algorithmically-faithful
-opt-in reference (`--sw-core fb`), NOT deleted. Milestones below are
+and is 2.6-4.3x faster. FB is retained as the algorithm-level opt-in reference (not fully
+Fortran-faithful; see Ground truth) (`--sw-core fb`), NOT deleted. Milestones below are
 PR-sized units, each with its own codex review.
 
 - [x] **M2 — driver runs the VALIDATED production core. DONE 2026-07-13,
