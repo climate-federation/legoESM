@@ -31,6 +31,36 @@ for parity but unused by the canonical C3 (which uses the PSII quantum yield and
 keeps Ci in mole-fraction units throughout).
 
 All functions are pure JAX, JIT-compatible, and differentiable.
+
+Faithfulness
+------------
+The FvCB biochemistry is a term-for-term transcription of Bonan (2019) ch. 11 /
+CLM5 §2.9, pinned by ``tests/land/unit/test_canopy_photosynthesis_faithful.py``
+against an independent scalar oracle (rel 1e-9):
+
+  * C3 Rubisco-limited (Bonan eq. 11.28, FvCB 1980):
+    Ac = Vcmax (Ci - Gamma*) / (Ci + Kc (1 + O/Ko)).
+  * C3 electron-transport-limited (Bonan eq. 11.29):
+    Aj = (J/4) (Ci - Gamma*) / (Ci + 2 Gamma*), with J the smaller root of the
+    electron-transport quadratic theta_j J^2 - (I_PSII + Jmax) J + I_PSII Jmax = 0
+    (Bonan eq. 11.23-11.24, I_PSII = 0.5 phi_PSII APAR).
+  * C3 product-limited Ap = 0.5 Vcmax (Bonan eq. 11.32); the two-stage smaller-
+    root co-limitation Ai(Ac,Aj; theta_cja) then A(Ai,Ap; theta_ip) (eq. 11.33).
+  * C4 (Collatz 1992 / Bonan §11.7): Ac = Vcmax(T), Aj = alpha APAR, Ap = kp Ci
+    (eq. 11.69-11.71), with the fH/fL high/low-T deactivation of Vcmax.
+
+The kinetic T-responses reuse the SHARED, already-pinned ``leaf_biophysics``
+Arrhenius helper IMPLEMENTATIONS + Bernacchi (2001) Kc/Ko/Gamma* inputs
+(test_leaf_biophysics.py); the Vcmax/Jmax activation/deactivation energies and
+Kattge & Knorr (2007) acclimation coefficients live in THIS module, so the
+oracle supplies them as independent literals and canaries them against the
+module constants.  Together the pin isolates the FvCB algebra proper.
+DEPARTURES / guards (documented, not the pure
+closed form): the max(Ac,0)/max(Aj,0) floors when Ci < Gamma*, the Ci_safe =
+max(Ci, 1e-3) division guard, the smaller-root sqrt eps=1e-12 guard, the net
+An = max(A - Rd, 0) floor, the TgC in [11,35] degC Kattge & Knorr acclimation
+clip, and the Tf in [5,45] degC clip on the dark-RESPIRATION Q10 response only
+(the Kc/Ko/Gamma*/Vcmax/Jmax Arrhenius kinetics are NOT temperature-clipped).
 """
 
 from __future__ import annotations
