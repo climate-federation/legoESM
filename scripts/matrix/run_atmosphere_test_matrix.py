@@ -632,12 +632,34 @@ _SW_CORE = "production"
 # consumer) builds ED in _fb_cube_sw_model.
 _FV3_NATIVE_GRID = False
 # --fv3-native-angles (phase-4c, FB lane only): on top of --fv3-native-grid,
-# select the exact grid_utils_init cross-face seam cosa_u/v, sina_u/v (the
-# faithful FV3 config).  The A-L production solver's operators are TUNED to
-# the legacy single-sided seam angles (cubed_sphere_cdgrid.py:639), so this
-# is a native-forward-backward-core decision — it requires --sw-core fb AND
-# --fv3-native-grid; main() rejects the other combinations.
+# select the exact grid_utils_init cross-face seam cosa_u/v, sina_u/v.  The
+# A-L production solver's operators are TUNED to the legacy single-sided
+# seam angles (cubed_sphere_cdgrid.py:639), so this is a native-forward-
+# backward-core decision — it requires --sw-core fb AND --fv3-native-grid;
+# main() rejects the other combinations.  NOT-YET-FULLY-FAITHFUL (codex
+# p4c FB-review P1): this is the ED grid + native seam angles, but the FB
+# d_sw5 cross-face halo is still the stable zero-ring approximation, not
+# the Fortran-faithful attenuated ghost (which destabilizes the modon run;
+# fv3_sw_core.py:3205).  So it is a 'native ED + native-angles FB
+# experiment', not the fully Fortran-faithful FV3 config.
 _FV3_NATIVE_ANGLES = False
+
+
+def _fv3_native_flag_error(fv3_native_grid, fv3_native_angles, sw_core):
+    """Return the CLI error string for an invalid FV3-native flag combo, or
+    None if the combination is valid.  --fv3-native-angles needs BOTH the ED
+    grid (the seam angles are an ED concept) AND the FB core (the A-L solver
+    is tuned to the legacy seam angles).  Module-level + pure so main()'s
+    validation is unit-testable without running the matrix (codex p4c
+    FB-review P2)."""
+    if fv3_native_angles and not fv3_native_grid:
+        return ("--fv3-native-angles requires --fv3-native-grid: the "
+                "cross-face seam angles are defined on the ED gnomonic grid.")
+    if fv3_native_angles and sw_core != "fb":
+        return ("--fv3-native-angles requires --sw-core fb: the A-L "
+                "production solver's operators are tuned to the legacy seam "
+                "angles (cubed_sphere_cdgrid.py:639).")
+    return None
 
 
 def _fb_cube_sw_model(n: int, test_num: int, *, fv3_native_grid: bool = False,
@@ -652,9 +674,12 @@ def _fb_cube_sw_model(n: int, test_num: int, *, fv3_native_grid: bool = False,
     ``fv3_native_grid`` (phase-4c): build the FV3-native ED gnomonic grid
     (create_fv3_native_cubed_sphere) instead of the legacy equiangular — the
     FB core is the ED grid's intended consumer.  ``fv3_native_angles`` then
-    additionally selects the exact cross-face seam cosa/sina (the faithful
-    FV3 config); it requires ``fv3_native_grid`` (the seam angles are an ED
-    concept).  Both default False → the equiangular+duo FB baseline.
+    additionally selects the exact cross-face seam cosa/sina; it requires
+    ``fv3_native_grid`` (the seam angles are an ED concept).  This is ED +
+    native seam angles, NOT the fully Fortran-faithful FV3 config — the FB
+    d_sw5 cross-face halo stays the stable zero-ring approximation
+    (fv3_sw_core.py:3205).  Both default False → the equiangular+duo FB
+    baseline.
     """
     from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         FV3FBShallowWaterModel, fb_m1_preset_config)
@@ -2659,9 +2684,9 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         if _SW_CORE == "fb":
             # The FB core is the FV3-native grid's intended consumer: it
             # honours --fv3-native-grid (ED gnomonic) and, on top, the
-            # --fv3-native-angles seam-cosa/sina opt-in (the faithful FV3
-            # config).  It builds its own grid, so the production-lane
-            # `grid`/`cdgrid` above are discarded here.
+            # --fv3-native-angles native seam-cosa/sina opt-in.  It builds
+            # its own grid, so the production-lane `grid`/`cdgrid` above are
+            # discarded here.
             model = _fb_cube_sw_model(
                 n, test_num, fv3_native_grid=_FV3_NATIVE_GRID,
                 fv3_native_angles=_FV3_NATIVE_ANGLES)
@@ -7785,10 +7810,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--fv3-native-angles", action="store_true",
         help="Cube SW FB lane (requires --fv3-native-grid AND --sw-core fb): "
              "additionally select the exact FV3 grid_utils_init cross-face "
-             "seam cosa/sina angles (the faithful FV3 config).  The A-L "
-             "production solver's operators are tuned to the legacy "
-             "single-sided seam angles, so this is a native-FB-core "
-             "decision; main() rejects it without both prerequisites.")
+             "seam cosa/sina angles.  The A-L production solver's operators "
+             "are tuned to the legacy single-sided seam angles, so this is a "
+             "native-FB-core decision; main() rejects it without both "
+             "prerequisites.  NOTE: this is ED grid + native seam angles, "
+             "NOT the fully Fortran-faithful FV3 config — the FB d_sw5 "
+             "cross-face halo remains the stable zero-ring approximation "
+             "(the faithful ghost destabilizes; fv3_sw_core.py:3205).")
     p.add_argument(
         "--resolution", type=str, default=None,
         help="Override baseline resolution (e.g. C48, 90x180, ico6)")
@@ -7875,15 +7903,10 @@ def main():
     # --fv3-native-angles is the faithful-FB config: it needs BOTH the ED
     # grid (the seam angles are an ED concept) AND the FB core (the A-L
     # solver is tuned to the legacy seam angles).
-    if args.fv3_native_angles and not args.fv3_native_grid:
-        parser.error(
-            "--fv3-native-angles requires --fv3-native-grid: the cross-face "
-            "seam angles are defined on the ED gnomonic grid.")
-    if args.fv3_native_angles and args.sw_core != "fb":
-        parser.error(
-            "--fv3-native-angles requires --sw-core fb: the A-L production "
-            "solver's operators are tuned to the legacy seam angles "
-            "(cubed_sphere_cdgrid.py:639).")
+    _native_err = _fv3_native_flag_error(
+        args.fv3_native_grid, args.fv3_native_angles, args.sw_core)
+    if _native_err:
+        parser.error(_native_err)
     global _FV3_NATIVE_GRID, _FV3_NATIVE_ANGLES
     _FV3_NATIVE_GRID = args.fv3_native_grid
     _FV3_NATIVE_ANGLES = args.fv3_native_angles

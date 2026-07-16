@@ -105,38 +105,61 @@ def test_fb_lane_native_grid_builds_ed():
     assert base.grid.gnomonic_form == "equiangular"
 
 
-def test_fb_lane_native_angles_build():
-    """fv3_native_angles builds an ED FB model with the native seam-angle
-    cdgrid (the faithful FV3 config); it needs the ED grid."""
-    import pytest
+def test_fb_lane_native_angles_actually_change_cdgrid():
+    """fv3_native_angles must actually install DIFFERENT seam angles, not be
+    silently ignored: on the SAME ED grid, the native-angle cdgrid's cosa_u
+    differs from the legacy-angle one at O(1) seam values (codex p4c
+    FB-review P2 — non-vacuous)."""
+    import numpy as np
     mod = _load_matrix_module()
-    model = mod._fb_cube_sw_model(12, 2, fv3_native_grid=True,
-                                  fv3_native_angles=True)
-    assert model.grid.gnomonic_form == "ed"
-    assert model.cdgrid is not None
-    # native angles without the ED grid is contradictory
+    m_native = mod._fb_cube_sw_model(12, 2, fv3_native_grid=True,
+                                     fv3_native_angles=True)
+    m_legacy = mod._fb_cube_sw_model(12, 2, fv3_native_grid=True,
+                                     fv3_native_angles=False)
+    assert m_native.grid.gnomonic_form == "ed"
+    ca_native = np.asarray(m_native.cdgrid.cosa_u)
+    ca_legacy = np.asarray(m_legacy.cdgrid.cosa_u)
+    assert ca_native.shape == ca_legacy.shape
+    # they must genuinely differ (native cross-face seam averaging)
+    assert not np.allclose(ca_native, ca_legacy)
+
+
+def test_fb_native_angles_require_ed_grid_at_model_level():
+    """FV3FBShallowWaterModel itself (not just the builder) rejects
+    fv3_native_angles on a non-ED grid — no silent fallback to legacy
+    angles (codex p4c FB-review P2)."""
+    import pytest
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
+        FV3FBShallowWaterModel,
+        fb_m1_preset_config,
+    )
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    eq_grid = create_cubed_sphere(12, use_duogrid=True)   # equiangular
+    assert eq_grid.gnomonic_form == "equiangular"
+    with pytest.raises(ValueError, match="requires an ED gnomonic grid"):
+        FV3FBShallowWaterModel(eq_grid, fb_m1_preset_config(),
+                               fv3_native_angles=True)
+    # builder guard (flag-level) still rejects angles without the ED grid
+    mod = _load_matrix_module()
     with pytest.raises(ValueError, match="requires fv3_native_grid"):
         mod._fb_cube_sw_model(12, 2, fv3_native_angles=True)
 
 
-def test_fv3_native_angles_cli_validation():
-    """main()'s parser rejects --fv3-native-angles without its two
-    prerequisites (--fv3-native-grid AND --sw-core fb).  Exercised through
-    the same validation main() runs (codex flag-review P2)."""
-    import pytest
+def test_fv3_native_flag_error_helper():
+    """The pure validation helper main() uses rejects exactly the invalid
+    combinations and accepts the valid ones (codex p4c FB-review P2 — makes
+    the main() cross-flag logic unit-testable without running the matrix)."""
     mod = _load_matrix_module()
-    p = mod.build_parser()
-    # the parser itself accepts the flags (validation is cross-flag, in
-    # main()); assert the parsed combinations main() must reject
-    a1 = p.parse_args(["--fv3-native-angles"])  # missing --fv3-native-grid
-    assert a1.fv3_native_angles and not a1.fv3_native_grid
-    a2 = p.parse_args(["--fv3-native-angles", "--fv3-native-grid"])  # prod core
-    assert a2.fv3_native_angles and a2.sw_core == "production"
-    # both are rejected by _fb_cube_sw_model's guard / main()'s parser.error;
-    # the model-builder guard is the programmatic mirror:
-    with pytest.raises(ValueError):
-        mod._fb_cube_sw_model(12, 2, fv3_native_angles=True,
-                              fv3_native_grid=False)
+    err = mod._fv3_native_flag_error
+    # valid: no angles at all
+    assert err(False, False, "production") is None
+    assert err(True, False, "production") is None
+    # valid: angles + grid + fb
+    assert err(True, True, "fb") is None
+    # invalid: angles without the ED grid
+    assert "requires --fv3-native-grid" in err(False, True, "fb")
+    # invalid: angles with the production core
+    assert "requires --sw-core fb" in err(True, True, "production")
 
 
 def test_run_shallow_water_fv3_native_grid_modon_nonrotating(tmp_path):

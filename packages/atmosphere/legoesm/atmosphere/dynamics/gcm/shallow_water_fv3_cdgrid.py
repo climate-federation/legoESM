@@ -1134,6 +1134,18 @@ class FV3FBShallowWaterModel:
         # opt into fv3_native_angles — the exact grid_utils_init cross-face
         # seam cosa_u/v, sina_u/v (cubed_sphere_cdgrid.py:639).  Default
         # False keeps the legacy seam angles for the equiangular baseline.
+        #
+        # The seam angles are an ED-gnomonic concept: create_cubed_sphere_
+        # cdgrid applies fv3_native_angles ONLY when gnomonic_form=="ed"
+        # (silently ignoring it otherwise).  Reject the silent-fallback
+        # combination loudly here so a caller cannot believe they got
+        # native angles on an equiangular grid (codex p4c FB-review P2).
+        if fv3_native_angles and getattr(grid, "gnomonic_form", None) != "ed":
+            raise ValueError(
+                "fv3_native_angles requires an ED gnomonic grid "
+                f"(gnomonic_form='ed'); got "
+                f"{getattr(grid, 'gnomonic_form', None)!r}. Build the grid "
+                "with create_fv3_native_cubed_sphere(...).")
         self.cdgrid = create_cubed_sphere_cdgrid(
             grid, fv3_native_angles=fv3_native_angles)
         self.config = config or CDGridShallowWaterConfig()
