@@ -223,22 +223,30 @@ def monthly_memory_kernel(
     return np.array(labels), np.stack(rows)
 
 
-def _forward_good_mask(state0, forcing_seq, doy_seq, config, lat, dt, land_params_fn):
-    """No-grad forward pass over the window -> good_mask (ncol,): cells whose GPP and
-    state stay FINITE throughout (this clean harness has NO revert guard, so a NaN
-    cell stays NaN; we exclude it from the summed loss so its NaN cannot poison the
-    map -- columns are independent, but the summed VALUE must also stay finite)."""
+def _forward_window_diag(state0, forcing_seq, doy_seq, config, lat, dt, land_params_fn):
+    """No-grad forward pass over the window -> per-cell diagnostics:
+      good      : GPP + state stay FINITE throughout (no revert guard here, so a NaN
+                  cell stays NaN; exclude it from the summed loss).
+      max_snow  : max snow_depth [kg/m2] over the window.
+      min_tsoil : min top-soil temperature [K] over the window.
+    The latter two flag SNOW / FREEZE-THAW cells, where the two-leaf canopy Newton
+    solve is near-singular (TODO-1) -> the *gradient* is contaminated even when the
+    forward GPP is finite.  Excluding them (``--snowfree-only``) removes that artifact
+    (and those cold, snowmelt-fed cells are not physically water-limited anyway)."""
     ncol = state0.theta_soil.shape[0]
 
     def body(carry, xs):
-        st, ok = carry
+        st, ok, msnow, mtsoil = carry
         Fi, doy_i = xs
         new_st, gpp = _step_and_gpp(st, Fi, doy_i, config, lat, dt, land_params_fn)
         ok = ok & jnp.isfinite(gpp) & jnp.isfinite(new_st.theta_soil).all(axis=-1)
-        return (new_st, ok), None
+        msnow = jnp.maximum(msnow, new_st.snow_depth)
+        mtsoil = jnp.minimum(mtsoil, new_st.T_soil[:, 0])
+        return (new_st, ok, msnow, mtsoil), None
 
-    (_stf, ok), _ = jax.lax.scan(body, (state0, jnp.ones(ncol, bool)), (forcing_seq, doy_seq))
-    return ok
+    init = (state0, jnp.ones(ncol, bool), jnp.zeros(ncol), jnp.full(ncol, 1e3))
+    (_stf, ok, msnow, mtsoil), _ = jax.lax.scan(body, init, (forcing_seq, doy_seq))
+    return ok, msnow, mtsoil
 
 
 def run_real(args) -> int:
@@ -321,13 +329,24 @@ def run_real(args) -> int:
     doy_win = jnp.asarray(win_t / DAY)
     late_flags = jnp.asarray((win_t / DAY) >= args.late_doy)
 
-    good = _forward_good_mask(state_p, F_win, doy_win, config, lat_rad, dt, lp_fn)
-    print(f"good cells (finite over window): {int(np.asarray(good).sum())}/{ncol}")
+    good, max_snow, min_tsoil = _forward_window_diag(
+        state_p, F_win, doy_win, config, lat_rad, dt, lp_fn)
+    max_snow = np.asarray(max_snow); min_tsoil = np.asarray(min_tsoil)
+    from legoesm import constants
+    # snow-free AND never-froze over the window -> away from the spring-thaw canopy
+    # singularity (TODO-1) that contaminates the boreal/arctic gradient.
+    snowfree_warm = (max_snow < 1.0) & (min_tsoil > constants.T_freeze - 0.5)
+    print(f"good cells (finite over window): {int(np.asarray(good).sum())}/{ncol} | "
+          f"snow-free & non-freezing: {int(snowfree_warm.sum())}"
+          + (" (applied: --snowfree-only)" if args.snowfree_only else
+             " (NOT applied; pass --snowfree-only to exclude thaw-contaminated cells)"))
 
     M, late_gpp = water_memory_map(
         state_p, F_win, doy_win, late_flags, config, lat=lat_rad, dt=dt,
         good_mask=good, land_params_fn=lp_fn, use_checkpoint=True)
     good_np = np.asarray(good)
+    if args.snowfree_only:
+        good_np = good_np & snowfree_warm
     M_raw = np.asarray(M)
     # The forward good_mask only guarantees the forward STATE is finite -- but a cell
     # can have finite GPP yet a huge/NaN GRADIENT if the backward pass ran near a
@@ -340,7 +359,9 @@ def run_real(args) -> int:
     n_fwd = int((~good_np).sum())
     n_grad = int((good_np & ~grad_ok).sum())
     M = np.where(keep, M_raw, np.nan)
-    late_gpp = np.where(keep, np.asarray(late_gpp), np.nan)
+    # water_memory_map returns late_gpp as sum of per-step GPP RATES [gC/m2/s];
+    # multiply by dt for the time-integrated late-window GPP [gC/m2].
+    late_gpp = np.where(keep, np.asarray(late_gpp) * dt, np.nan)
     print(f"memory map: kept {int(keep.sum())}/{ncol} | forward-excluded {n_fwd} | "
           f"gradient-blowup excluded {n_grad} (|M|>={args.max_abs_grad:g} or non-finite) "
           f"| range [{np.nanmin(M):.3e}, {np.nanmax(M):.3e}] gC/m2 per (m3/m3)")
@@ -365,12 +386,13 @@ def run_real(args) -> int:
               f"max|resid|={resid:.2e}")
 
     _write_map(args.out, M, late_gpp, keep, lat_rad, lon_rad,
-               args.resolution, year, args, months=months, kernel=kernel)
+               args.resolution, year, args, months=months, kernel=kernel,
+               max_snow=max_snow, min_tsoil=min_tsoil)
     return 0
 
 
 def _write_map(out, M, late_gpp, good, lat_rad, lon_rad, resolution, year, args,
-               *, months=None, kernel=None):
+               *, months=None, kernel=None, max_snow=None, min_tsoil=None):
     import xarray as xr
     nlat, nlon = resolution, 2 * resolution
     lat = np.rad2deg(np.asarray(lat_rad)).reshape(nlat, nlon)[:, 0]
@@ -384,6 +406,13 @@ def _write_map(out, M, late_gpp, good, lat_rad, lon_rad, resolution, year, args,
         "good_cell": (("lat", "lon"), good.reshape(nlat, nlon).astype("i1"),
                       {"long_name": "1 = finite over window (else masked)"}),
     }
+    if max_snow is not None:
+        data["max_snow"] = (("lat", "lon"), max_snow.reshape(nlat, nlon),
+                            {"long_name": "max snow_depth over window (thaw-cell flag)",
+                             "units": "kg m-2"})
+        data["min_tsoil_top"] = (("lat", "lon"), min_tsoil.reshape(nlat, nlon),
+                                 {"long_name": "min top-soil T over window (freeze flag)",
+                                  "units": "K"})
     coords = {"lat": ("lat", lat, {"units": "degrees_north"}),
               "lon": ("lon", lon, {"units": "degrees_east"})}
     if kernel is not None:
@@ -434,6 +463,10 @@ def main(argv=None) -> int:
     ap.add_argument("--max-abs-grad", dest="max_abs_grad", type=float, default=1e5,
                     help="mask cells whose |gradient| exceeds this (unphysical -> a "
                          "near-singularity in the arid/thaw regimes; default 1e5)")
+    ap.add_argument("--snowfree-only", dest="snowfree_only", action="store_true",
+                    help="restrict the map to cells that are snow-free AND never freeze "
+                         "over the window -> excludes the spring-thaw canopy singularity "
+                         "(TODO-1) contaminating the boreal/arctic gradient")
     ap.add_argument("--out", default="results/water_memory/memory_map.nc")
     args = ap.parse_args(argv)
 
