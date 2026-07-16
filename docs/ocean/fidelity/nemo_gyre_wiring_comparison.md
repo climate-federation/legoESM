@@ -22,26 +22,26 @@ rms(u) 0.19–0.38 vs NEMO 8.2) at ~0.58–0.66× NEMO's RMS.
 | f0 / beta | 3.775e-5 / 2.002e-11 (φ0=15°) | same | ✓ |
 | Interior cells | 32×22 (30×20 wet) | same | ✓ |
 | Wet levels / thicknesses | 30, MI96 ladder e3t 10→301 m | same dz_ref | ✓ |
-| **Vertical coordinate** | **pure z, full step, `key_linssh` (FIXED thicknesses)** | **z-star (nonlinear free surface)** | ✗ |
+| Vertical coordinate | pure z, full step, `key_linssh` (FIXED thicknesses) | z-star with `linear_free_surface=True` (frozen J, no σ-redistribution, top-cell flux) | ✓ (fixed 128feaffb) |
 | Bathymetry | flat, H=4300.71 m, no partial cells | same | ✓ |
 | Initial T(z)/S(z) | analytic tanh (usrdef_istate) | identical formula | ✓ |
 
 ## 2. Time stepping
 | Item | NEMO | legoESM | |
 |---|---|---|---|
-| **Momentum RK3** | **Wicker-Skamarock** (stage dt/3, dt/2, dt; RHS asym: LDF stages 1&3 only, ZDF stage 3 only) | **Shu-Osher SSP-RK3** (full tendency every stage) | ✗ |
+| Momentum RK3 | Wicker-Skamarock (stage dt/3, dt/2, dt; RHS asym: LDF stages 1&3, ZDF stage 3) | `momentum_time_integrator="rk3_ws"` (same stages + skip_lateral_viscosity gating) | ✓ (fixed e2b4b03a0) |
 | **Tracer stepping** | **RK3** (FCT stage 3, centred stages 1-2) | **forward Euler** | ✗ |
 | dt | 14400 s | same | ✓ |
-| **Barotropic substeps** | **50** (auto, Δt=288 s) | **120** | ✗ |
-| **Barotropic filter** | **nn_bt_flt=3 Demange** (temporal, rn_bt_alpha=0.07, NO spatial diffusion) | **cosine average + barotropic_diffusion_alpha=0.01** (spatial) | ✗ |
+| Barotropic substeps | 50 (auto, Δt=288 s) | 50 | ✓ |
+| Barotropic filter | nn_bt_flt=3 Demange (temporal, rn_bt_alpha=0.07, no spatial diffusion) | `nemo_ab3am4` (AB3+AM4 α=0.07, final-value output, alpha=0, cross-window `bt_hist`) | ✓ (fixed 483b6477a + b56590a1a) |
 
 ## 3. Momentum
 | Item | NEMO | legoESM | |
 |---|---|---|---|
 | Advection form | vector-invariant | same | ✓ |
-| Vorticity | ENE Sadourny, **f+ζ combined**, vertex-f (ff_f) | ENE, **planetary split** (face-f coriolis_cgrid) + relative pv_flux_ene | ≈ |
+| Vorticity | ENE Sadourny, f+ζ combined, vertex-f (ff_f) | `vorticity_scheme="ene_total"` (combined vertex-f) | ✓ (fixed c189fde38) |
 | KE gradient | C2 mean-of-squares (nn_dynkeg=0) | c2 (same formula) | ✓ |
-| **Vertical mom. advection** | **2nd-order centred** (dynzad) | **upwind_perturbation** (dissipative) | ✗ |
+| Vertical mom. advection | 2nd-order centred (dynzad) | upwind_perturbation | ≈ (retested 2026-07-16 on the fixed config: centred changes baroclinic u' 0.71→0.72 — INERT; flow is in perfect thermal-wind balance either way) |
 | Lateral viscosity | Laplacian div-rot, A_m=1e5 | vector_laplacian, A_h=1e5 (bit-exact) | ✓ |
 | Vertical viscosity | implicit, TKE avm | same | ✓ |
 | Bottom drag | non-linear implicit, Cd0=1e-3, ke0=2.5e-3 | nemo_quadratic (same) | ✓ |
@@ -52,28 +52,29 @@ rms(u) 0.19–0.38 vs NEMO 8.2) at ~0.58–0.66× NEMO's RMS.
 | Item | NEMO | legoESM | |
 |---|---|---|---|
 | Advection | FCT2 (2-substep upstream low-order under RK3) | fct2 (Euler) | ≈ |
-| Iso-neutral diffusion | Laplacian, A_ht=1000, **rn_slpmax=0.01** | kappa_Redi=1000, **S_max=0.005** | ✗ (slope clip 0.005 vs 0.01) |
+| Iso-neutral diffusion | Laplacian, A_ht=1000, rn_slpmax=0.01 | kappa_Redi=1000, S_max=0.01 | ✓ (fixed bc2f5eb1d) |
 | GM eddy | OFF (ln_ldfeiv=F) | kappa_GM=0 | ✓ |
 | Vertical diffusion | implicit, TKE avt | same | ✓ |
-| **Convection (EVD)** | avt=avm=100 where min(rn2,rn2b)≤-1e-12 (overwrite) | enhanced_diffusion K=nu=100, hard N²<0 | ✓ (operator matched) |
+| Convection (EVD) | avt=avm=100 where min(rn2,rn2b)≤-1e-12 on rn2=ADIABATIC N² | enhanced_diffusion K=nu=100, hard threshold, n2_mode="adiabatic" | ✓ (fixed ccbdf2020 — the in-situ trigger fired on spurious compressibility negatives in STABLE spring columns, blocking the thermocline rebuild; min(rn2,rn2b) 2-level + -1e-12 threshold remain minor deltas) |
 
 ## 5. Vertical mixing (TKE)
 | Item | NEMO | legoESM | |
 |---|---|---|---|
 | Scheme | zdftke prognostic | tke prognostic | ✓ |
+| **TKE vertical self-diffusion** | **avm × 1** (zdftke:130, zfact1=-0.5·rn_Dt) | was alpha_tke=30 (Veros/CATKE) — 30× too fast, THE thermocline self-lock driver; now alpha_tke=1 | ✓ (fixed 6f3e4f5d6) |
 | c_k / c_eps | 0.10 / 0.70 | same | ✓ |
 | Background avm/avt | 1.2e-4 / 1.2e-5 (nn_avb=0 const) | kappaM_min/kappaH_min same, no BL profile | ✓ |
 | Prandtl (nn_pdl=1) | Ri-dependent, 1/ri_cri=4.5 | prandtl_ri_coeff=4.5 | ✓ |
-| **Mixing length** | **nn_mxl=3** (bounded up+down) | **tke_mxl_choice=2** | ✗ (deconfounded earlier: not the lever) |
+| Mixing length | nn_mxl=3 + ln_mxl0 anchor | tke_mxl_choice=3 + anchor | ✓ (fixed aeb9b7df4 — choice 2 was 7x high at 10 m in the near-neutral ML; certified 3-4 sig figs vs avt_k) |
 | **Surface BC (wind-driven)** | **Dirichlet en(1)=max(rn_emin0, rn_ebb·\|τ\|/ρ0), rn_ebb=67.83** | same formula in tke.py, ACTIVE once the step-level wind forcing supplies τ (audit 2026-07-16: was inert — the body-force wind bypassed TKE → surface TKE sat at the 1e-4 floor, ~50× low) | ✓ (rewired) |
-| Langmuir (ln_lc=T, rn_lc=0.15) | active with wind (W_lc from taum) | DEFERRED — incompatible with the validated buoyancy_timing=post_mixing_veros step order (fail-loud guard); secondary to the Dirichlet BC | ✗ (deferred) |
-| **N² for TKE** | in-situ (bn2) | **adiabatic** | ✗ |
+| Langmuir (ln_lc=T, rn_lc=0.15) | active with wind (W_lc from taum) | lc=True on the post-mixing path | ✓ (fixed faa4cb20a) |
+| N² for TKE | rn2/bn2 (alpha·dT/dz−beta·dS/dz, locally-referenced = adiabatic-equivalent) | adiabatic | ✓ (equivalent forms) |
 
 ## 6. EOS
 | Item | NEMO | legoESM | |
 |---|---|---|---|
 | Scheme | EOS-80 (Roquet-55 poly) | nemo_eos80 (certified 4.5e-13) | ✓ |
-| **rho_0** | **1026** | **1025** | ✗ (0.1%) |
+| rho_0 | 1026 | constants.rho_ocean_nemo=1026 | ✓ (fixed c874633b6) |
 | g | 9.80665 | same | ✓ |
 
 ## 7. Surface forcing
