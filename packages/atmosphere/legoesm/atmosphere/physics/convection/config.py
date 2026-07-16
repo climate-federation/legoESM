@@ -1463,10 +1463,12 @@ class BechtoldConfig(NamedTuple):
     # non-deep 0.92, deep-weight blended; land values need an absent land
     # mask).  Supersedes the crude ``downdraft_evap_efficiency``-bounded
     # re-evaporation (which fires only below downdraft_RH_min=0.2 — IFS
-    # evaporates routinely up to the break).  Default False pending RCE/AMIP
-    # A/B validation (two-step ship pattern, as for use_ifs_cape_closure);
-    # False is byte-identical legacy.
-    use_ifs_subcloud_evap: bool = False
+    # evaporates routinely up to the break).  Default True since 2026-07-16:
+    # codex CLEAN x3, machine-exact water/enthalpy pair tests, 100-day
+    # gray-RCE A/B (stable, near-neutral) and 15-day C24 AMIP A/B (stable;
+    # precip 1.21->1.19 mm/day, CWV +0.05 — the physically-expected evap
+    # signature).  False restores the legacy re-evaporation byte-identically.
+    use_ifs_subcloud_evap: bool = True
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0

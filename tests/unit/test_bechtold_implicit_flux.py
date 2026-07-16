@@ -189,9 +189,16 @@ def test_bechtold_implicit_mse_conservation_within_tolerance():
             T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
             conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
             dt=1800.0,
+            # Sub-cloud evap pinned OFF: this test's object is the mass-flux
+            # SOLVE conservation.  The H+Q+C metric is not evap-invariant BY
+            # CONSTRUCTION (it books +L_v*rain for never-evaporated rain, so
+            # the exactly-conservative form-then-evaporate pair shifts it by
+            # -L_v*e); the evap's own water/enthalpy closure is machine-exact
+            # tested in test_bechtold.py::test_ifs_subcloud_evap_*.
             config=BechtoldConfig(
                 enable_stochastic=False, enable_cmt=False, subsidence_solve=ss,
                 use_ifs_cape_closure=use_ifs_cape_closure,
+                use_ifs_subcloud_evap=False,
             ),
             moisture_convergence=jnp.zeros_like(T),
         )

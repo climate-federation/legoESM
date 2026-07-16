@@ -1679,7 +1679,7 @@ def bechtold_convection(
                 dq_c_conv_dt > 0.0, dq_c_conv_dt * rain_scale, dq_c_conv_dt,
             )
 
-    # -- IFS Kessler sub-cloud rain evaporation (cuflxn.F90:436-475, opt-in) --
+    # -- IFS Kessler sub-cloud rain evaporation (cuflxn.F90:436-475, default ON) --
     # INDEPENDENT of ``enable_downdraft`` (IFS evaporates the precip flux
     # below cloud base wherever the sub-cloud air is drier than the RH break,
     # downdraft or not).  Vapor deposits AT the evaporating levels (the
