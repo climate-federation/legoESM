@@ -227,6 +227,13 @@ def _nemo_tke_config() -> TKEConfig:
         # 6.6 default). legoESM Pr=max(1,min(10,coeff·Ri)) is bit-identical (clamp
         # to [1,10] is order-independent), so this reproduces NEMO's pdl exactly.
         prandtl_ri_coeff=4.5,
+        # DEFERRED: NEMO ln_lc=.true. rn_lc=0.15 (Langmuir TKE source from taum,
+        # active under the GYRE wind) is INCOMPATIBLE with the validated
+        # buoyancy_timing='post_mixing_veros' step order (fail-loud guard in
+        # tke.py) — enabling it would require the pre_mixing path and re-validating
+        # the TKE tendency match. Secondary to the Dirichlet surface BC (which
+        # nemo_gyre_wind_forcing DOES activate); revisit if the wind-forced ML
+        # depth still undershoots NEMO's.
         # NEMO background Kz: rn_avm0=1.2e-4 (avmb), rn_avt0=1.2e-5 (avtb).
         kappaM_min=1.2e-4,
         kappaH_min=1.2e-5,
@@ -665,6 +672,42 @@ def nemo_gyre_wind(lat_deg, t_seconds: float = 0.0):
     return -ztaun * s, ztaun * s
 
 
+def nemo_gyre_wind_forcing(n_lat: int, n_lon: int, t_seconds: float = 0.0):
+    """NEMO GYRE wind as a step-level :class:`OceanSurfaceForcing`.
+
+    Pass to ``model.step(state, dt, surface_forcing=...)`` — the canonical
+    lat-lon route: stage 10b' applies the stress to the top-layer momentum AND
+    the SAME object reaches ``compute_vertical_K_profiles`` so the TKE closure
+    sees ``taum=|tau|``.  MECHANISM CAVEAT (review 2026-07-16): with the gyre
+    TKE card the wind->TKE coupling is the VEROS surface FLUX BC
+    ``surface_flux=(taum/rho0)^1.5`` (tke.py) — NOT NEMO's Dirichlet
+    ``en(1)=max(rn_emin0, rn_ebb*|tau|/rho0)`` (zdftke.F90:265), which is
+    currently only implemented inside the (inactive, nn_etau=0) sub-ML
+    penetration path.  Surface TKE therefore rises off the floor (~1e-6 ->
+    ~7.7e-5 one-step) but remains ~60x below NEMO's ~4.9e-3 under the gyre
+    wind; a faithful Dirichlet surface-TKE option is the remaining TKE item.
+
+    SIGN CONVENTION (checked): ``nemo_gyre_wind`` returns NEMO's ``utau/vtau``
+    = stress ON THE OCEAN (dynzdf: ``u(1) += rDt*utau/(e3u1*rho0)``); the
+    step-level ``OceanSurfaceForcing.tau_x/tau_y`` carries the ATMOSPHERIC
+    (bulk-solver) convention and stage 10b' applies the ocean REACTION
+    ``-tau`` — so this builder negates: ``tau_x = -utau``.  Net stress the
+    ocean feels == NEMO's.  ``taum=|tau|`` in the TKE BC is sign-independent.
+    Fields are 2D T-point (lat varies, lon uniform).
+    """
+    import jax.numpy as jnp
+
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    lat_t = jnp.asarray(nemo_gyre_latitudes(n_lat))
+    utau, vtau = nemo_gyre_wind(lat_t, t_seconds)
+    shape = (n_lat, n_lon)
+    return OceanSurfaceForcing(
+        tau_x=jnp.broadcast_to(-utau[:, None], shape),
+        tau_y=jnp.broadcast_to(-vtau[:, None], shape),
+    )
+
+
 # The GYRE-configured NEMO card: ENE vorticity + c2 KE (ln_dynvor_ene,
 # nn_dynkeg=0) + EOS-80 + adcroft PGF + traldf_iso pure Redi (ln_ldfeiv=F).
 # n_barotropic_substeps=120 (NOT the card default 30): the deep (H=4300 m)
@@ -700,14 +743,21 @@ def build_nemo_gyre_recipe(
     the analytic tanh T/S initial state, and the GYRE card (ENE/c2/EOS-80/adcroft/
     nemo_iso_lap).  The horizontal/vertical dims are fixed by NEMO (32x22x30), so
     unlike ``build_nemo_rest_recipe``/``build_nemo_eady_recipe`` this takes no
-    grid-size kwargs.  The thermal surface forcing (Haney restoring + 2-band
-    solar, NO wind — GYRE_BARE) is applied POST-step by
-    :func:`apply_nemo_gyre_surface_forcing` — the sanctioned harness route
-    (mirrors DINO), since the in-step physics_fn protocol cannot thread the eq-8
-    ``subtract_qsr`` split, and it carries the seasonal ``t_seconds`` phase.  A
-    runnable step is therefore ``state = model.step(
-    apply_nemo_gyre_surface_forcing(state, z_coord, dt), dt)`` (forcing then
-    dynamics, iterated).
+    grid-size kwargs.  Forcing is split over the two sanctioned routes:
+
+    * THERMAL (Haney restoring + 2-band solar + E-P) is applied POST-step by
+      :func:`apply_nemo_gyre_surface_forcing` — the harness route (mirrors
+      DINO), since the in-step physics_fn protocol cannot thread the eq-8
+      ``subtract_qsr`` split; carries the seasonal ``t_seconds`` phase.
+    * WIND (usrdef_sbc double-gyre stress — GYRE_BARE IS wind-forced) goes
+      through the step-level object from :func:`nemo_gyre_wind_forcing`, so
+      the stress drives BOTH the stage-10b' momentum AND the TKE ``taum``.
+
+    A runnable step is therefore::
+
+        state = model.step(
+            apply_nemo_gyre_surface_forcing(state, z_coord, dt, t_seconds=t),
+            dt, surface_forcing=nemo_gyre_wind_forcing(n_lat, n_lon, t_seconds=t))
     """
     import jax.numpy as jnp
     from legoesm.core.field import Field
@@ -894,34 +944,14 @@ def apply_nemo_gyre_surface_forcing(state, z_coord, dt, *, t_seconds=0.0):
     mask3 = cell_mask[..., None]
     new_T = state.T.data + dt * (out.dT_dt + dT_dt_sw) * mask3
     new_S = state.S.data + dt * dS_dt * mask3
-
-    # NEMO usrdef_sbc double-gyre WIND STRESS as a top-layer momentum forcing:
-    # du/dt = tau / (rho0 * dz_top) (matches NEMO dynzdf surface-stress injection
-    # u(1) += rDt*utau/(e3u1*rho0)). utau at u-point (T) latitudes; vtau at v-face
-    # latitudes (T-lat midpoints, extrapolated at the two poles).
-    rho0 = NEMO_CONSTANTS_CONFIG.rho_0
-    dlat = lat_t[1] - lat_t[0]
-    lat_v = jnp.concatenate([lat_t[:1] - dlat / 2.0,
-                             0.5 * (lat_t[:-1] + lat_t[1:]),
-                             lat_t[-1:] + dlat / 2.0])
-    utau, _ = nemo_gyre_wind(lat_t, t_seconds)
-    _, vtau = nemo_gyre_wind(lat_v, t_seconds)
-    du = (dt * utau / (rho0 * dz_0)).astype(state.u.data.dtype)
-    dv = (dt * vtau / (rho0 * dz_0)).astype(state.v.data.dtype)
-    um2 = state.u_mask.data
-    vm2 = state.v_mask.data
-    if um2.ndim == 3:
-        um2 = um2[..., 0]
-    if vm2.ndim == 3:
-        vm2 = vm2[..., 0]
-    new_u = state.u.data.at[:, :, 0].add(du[:, None] * um2)
-    new_v = state.v.data.at[:, :, 0].add(dv[:, None] * vm2)
-
+    # NB the WIND is NOT applied here: pass nemo_gyre_wind_forcing(...) as the
+    # step-level ``surface_forcing=`` instead (the canonical lat-lon route), so
+    # the SAME stress drives BOTH the momentum (stage 10b') AND the TKE Dirichlet
+    # surface BC en(1)=max(rn_emin0, rn_ebb*|tau|/rho0) + Langmuir — a post-step
+    # body force here would bypass the wind->TKE coupling (no Ekman layer).
     return state._replace(
         T=Field(data=new_T, name=state.T.name, dims=state.T.dims, units=state.T.units),
         S=Field(data=new_S, name=state.S.name, dims=state.S.dims, units=state.S.units),
-        u=state.u.replace(data=new_u),
-        v=state.v.replace(data=new_v),
     )
 
 

@@ -338,14 +338,22 @@ def test_nemo_gyre_coordinate_is_consistent_clean_w_bc():
 
 
 def test_nemo_gyre_forced_trajectory_is_finite_and_stable():
-    """A runnable forced step (model.step + the post-step thermal applicator) is
-    finite and physically bounded — the whole point of the native assembly."""
+    """A runnable forced step (model.step + the post-step thermal applicator +
+    the step-level wind) is finite and physically bounded — the whole point of
+    the native assembly, exercising the documented run loop VERBATIM."""
+    from legoesm.ocean.fidelity.nemo_recipe import nemo_gyre_wind_forcing
+
     recipe = build_nemo_gyre_recipe()
     model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, recipe.model_config)
     st = recipe.initial_state
-    for _ in range(3):
-        st = apply_nemo_gyre_surface_forcing(st, recipe.z_coord, _NEMO_GYRE_DT_S)
-        st = model.step(st, dt=_NEMO_GYRE_DT_S)
+    n_lat, n_lon = st.T.data.shape[0], st.T.data.shape[1]
+    for i in range(3):
+        t = i * _NEMO_GYRE_DT_S
+        st = apply_nemo_gyre_surface_forcing(
+            st, recipe.z_coord, _NEMO_GYRE_DT_S, t_seconds=t)
+        st = model.step(
+            st, dt=_NEMO_GYRE_DT_S,
+            surface_forcing=nemo_gyre_wind_forcing(n_lat, n_lon, t_seconds=t))
     for f in (st.T.data, st.S.data, st.u.data, st.v.data, st.eta.data):
         assert bool(jnp.all(jnp.isfinite(f)))
     # gently-forced GYRE spin-up stays laminar (no barotropic blow-up).
@@ -353,6 +361,53 @@ def test_nemo_gyre_forced_trajectory_is_finite_and_stable():
     assert float(jnp.max(jnp.abs(st.eta.data))) < 1.0
     # the thermal applicator actually forces the surface (non-vacuous).
     assert float(jnp.max(jnp.abs(st.T.data - recipe.initial_state.T.data))) > 1e-3
+    # the WIND actually forces the momentum (non-vacuous vs a windless run).
+    st_nw = recipe.initial_state
+    for i in range(3):
+        t = i * _NEMO_GYRE_DT_S
+        st_nw = apply_nemo_gyre_surface_forcing(
+            st_nw, recipe.z_coord, _NEMO_GYRE_DT_S, t_seconds=t)
+        st_nw = model.step(st_nw, dt=_NEMO_GYRE_DT_S)
+    assert float(jnp.max(jnp.abs(st.u.data - st_nw.u.data))) > 1e-4
+
+
+def test_nemo_gyre_wind_forcing_sign_chain_end_to_end():
+    """The ocean receives EXACTLY NEMO's utau: nemo_gyre_wind returns stress ON
+    THE OCEAN, the step-level object carries the ATMOSPHERIC convention (stage
+    10b' applies -tau), and the builder negates — so one wind-only step must
+    accelerate the top layer with the SIGN of utau (westward south of the
+    sign-change latitude, i.e. du<0 where utau<0)."""
+    import numpy as np
+
+    from legoesm.ocean.fidelity.nemo_recipe import (
+        nemo_gyre_latitudes,
+        nemo_gyre_wind,
+        nemo_gyre_wind_forcing,
+    )
+
+    recipe = build_nemo_gyre_recipe()
+    model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, recipe.model_config)
+    st = recipe.initial_state
+    n_lat, n_lon = st.T.data.shape[0], st.T.data.shape[1]
+    sf = nemo_gyre_wind_forcing(n_lat, n_lon, t_seconds=0.0)
+    new = model.step(st, dt=_NEMO_GYRE_DT_S, surface_forcing=sf)
+    du_top = np.asarray(new.u.data[:, :, 0] - st.u.data[:, :, 0])
+
+    lat_t = np.asarray(nemo_gyre_latitudes(n_lat))
+    utau, _ = nemo_gyre_wind(lat_t, 0.0)
+    utau = np.asarray(utau)
+    # interior WET rows (skip the 1-cell land rim rows 0 / n_lat-1, where the
+    # mask zeroes du) with strongly negative / positive utau: the top-layer du
+    # must carry utau's sign.  (The utau sign change sits at 29N ~ the southern
+    # wall, so the negative branch lives in the NORTHERN interior rows.)
+    interior = np.arange(1, n_lat - 1)
+    j_neg = int(interior[np.argmin(utau[interior])])
+    j_pos = int(interior[np.argmax(utau[interior])])
+    assert utau[j_neg] < -1e-3 and utau[j_pos] > 1e-3
+    row_neg = du_top[j_neg, 2:-2]
+    row_pos = du_top[j_pos, 2:-2]
+    assert float(np.mean(row_neg)) < 0.0, "utau<0 must decelerate u (westward)"
+    assert float(np.mean(row_pos)) > 0.0, "utau>0 must accelerate u (eastward)"
 
     # Non-vacuity of the n_barotropic_substeps=120 override: the card default 30
     # blows up the barotropic external mode on this deep (H~4300 m) grid within a

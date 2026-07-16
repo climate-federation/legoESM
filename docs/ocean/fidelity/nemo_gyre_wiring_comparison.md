@@ -65,7 +65,8 @@ rms(u) 0.19–0.38 vs NEMO 8.2) at ~0.58–0.66× NEMO's RMS.
 | Background avm/avt | 1.2e-4 / 1.2e-5 (nn_avb=0 const) | kappaM_min/kappaH_min same, no BL profile | ✓ |
 | Prandtl (nn_pdl=1) | Ri-dependent, 1/ri_cri=4.5 | prandtl_ri_coeff=4.5 | ✓ |
 | **Mixing length** | **nn_mxl=3** (bounded up+down) | **tke_mxl_choice=2** | ✗ (deconfounded earlier: not the lever) |
-| Surface BC | Dirichlet, rn_ebb=67.83 (→ emin0 with no wind) | tke_surface_min=1e-4 | ✓ (no wind) |
+| **Surface BC (wind-driven)** | **Dirichlet en(1)=max(rn_emin0, rn_ebb·\|τ\|/ρ0), rn_ebb=67.83** | same formula in tke.py, ACTIVE once the step-level wind forcing supplies τ (audit 2026-07-16: was inert — the body-force wind bypassed TKE → surface TKE sat at the 1e-4 floor, ~50× low) | ✓ (rewired) |
+| Langmuir (ln_lc=T, rn_lc=0.15) | active with wind (W_lc from taum) | DEFERRED — incompatible with the validated buoyancy_timing=post_mixing_veros step order (fail-loud guard); secondary to the Dirichlet BC | ✗ (deferred) |
 | **N² for TKE** | in-situ (bn2) | **adiabatic** | ✗ |
 
 ## 6. EOS
@@ -78,7 +79,7 @@ rms(u) 0.19–0.38 vs NEMO 8.2) at ~0.58–0.66× NEMO's RMS.
 ## 7. Surface forcing
 | Item | NEMO | legoESM | |
 |---|---|---|---|
-| **WIND STRESS** | **double-gyre, ~0.074 Pa, seasonal** (usrdef_sbc:167) | **NONE** | ✗ **(primary driver)** |
+| **WIND STRESS** | **double-gyre, ~0.074 Pa, seasonal** (usrdef_sbc:167) | `nemo_gyre_wind_forcing` via the step-level `surface_forcing=` (canonical route: stage-10b' momentum + TKE Dirichlet BC; sign converted atm↔ocean; seasonal) | ✓ (rewired 2026-07-16) |
 | Haney heat restoring | −40 W/m²/K | 40, via tau conversion | ✓ |
 | Solar qsr | 230·cos, 2-band Jerlov type-I | same | ✓ |
 | E-P freshwater | emp sin-split, seasonal, net-zero | same | ✓ |
