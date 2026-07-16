@@ -169,6 +169,10 @@ select = ["E", "F", "I", "N", "W", "UP"]
 "packages/core/legoesm/core/fv3_native_d_sw.py" = ["N803", "N806", "N801"]
 "packages/core/legoesm/core/fv3_native_duo_sw_core.py" = ["N803", "N806", "N801"]
 "packages/core/legoesm/grids/fv3_native_gridstruct.py" = ["N801", "N803", "N806"]
+# FV3-native oracle validators/tests: same verbatim-Fortran UPPER_SNAKE
+# metric locals (SIN/COS/DXC/RC, ...) mirroring the source 1:1.
+"scripts/validate/fv3_native/gen_divduo_oracle.py" = ["N806", "N816"]
+"tests/grids/test_fv3_native_duo_phase4c.py" = ["N806"]
 # Fuller CLUBB port (PORT_CLUBB.md): the closure coefficients, model flags and
 # intermediate variables mirror CLUBB's canonical symbol names 1:1 (c_K1,
 # iiPDF_type, l_use_C7_Richardson, C2rt, Skw, wpthlp, Lscale, ...) as in
