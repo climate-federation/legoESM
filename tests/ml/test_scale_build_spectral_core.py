@@ -202,16 +202,16 @@ def test_era5_forcing_calendar_convention():
     intra-day fraction in seconds_of_day alone.  The original 0-based
     fractional doy sent Jan 1 00Z to day 365 (a year off) and double-counted
     the hours."""
-    from legoesm.training.scale_build import _era5_time_to_forcing_calendar
+    from legoesm.training.scale_build import era5_time_to_forcing_calendar
 
     # Jan 1 00Z -> day 1, 0 s (NOT day 0 -> wrapped to 365).
-    doy, sod = _era5_time_to_forcing_calendar(np.datetime64("2010-01-01T00"), 2010)
+    doy, sod = era5_time_to_forcing_calendar(np.datetime64("2010-01-01T00"), 2010)
     assert doy == 1.0 and sod == 0.0
     # Jan 1 06Z -> day 1 + 21600 s (fraction rides seconds, not doy).
-    doy, sod = _era5_time_to_forcing_calendar(np.datetime64("2010-01-01T06"), 2010)
+    doy, sod = era5_time_to_forcing_calendar(np.datetime64("2010-01-01T06"), 2010)
     assert doy == 1.0 and sod == 21600.0
     # Feb 2 12Z -> day 33 + 43200 s.
-    doy, sod = _era5_time_to_forcing_calendar(np.datetime64("2010-02-02T12"), 2010)
+    doy, sod = era5_time_to_forcing_calendar(np.datetime64("2010-02-02T12"), 2010)
     assert doy == 33.0 and sod == 43200.0
     # Consistency with the rollout's advance: doy + sod/86400 is the fractional
     # 1-based day the declination sees at step 0.

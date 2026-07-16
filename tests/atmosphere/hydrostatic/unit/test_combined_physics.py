@@ -27,7 +27,7 @@ def _make_hydrostatic_setup():
     """Create a minimal hydrostatic state, grid, sigma for testing."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
     grid = create_cubed_sphere(8)
     sigma = create_sigma_coordinate(10)
@@ -450,7 +450,7 @@ class TestCombinedSpectralPE:
         """Create a minimal spectral PE state."""
         from legoesm.grids.gaussian import create_gaussian_grid
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             isothermal_rest_state_spectral,
         )
 

@@ -101,6 +101,16 @@ _CROSSING_SHARPNESS = 0.001
 _PLUME_GATE_SHARPNESS = 20.0
 _PLUME_C_U = 0.55
 _PLUME_C_D = 0.55
+# Physical cap on the Gregory-1997 convective momentum tendency [m/s^2]. The
+# flux-form du/dt = -g d(flux)/dp divides by the pressure-layer thickness, thin
+# near the model top; a scheme whose updraft mass flux stays near its cap
+# through the sheared upper troposphere (Bechtold, whose plume does not
+# self-detrain) can spike du/dt in a thin top layer -> non-finite winds at fine
+# horizontal resolution (C48). 1e-2 m/s^2 is ~36 m/s per hour, far beyond any
+# physical CMT, so the clamp only removes the thin-layer numerical spike and
+# leaves realistic CMT untouched (Tiedtke/ZM mass flux decays aloft, never
+# approaches it).
+_CMT_DUDT_MAX = 1.0e-2
 # Cloud-base gate sharpness [1/level index] for the plume's
 # ``above_base_weight`` sigmoid on the (integer) level-index difference
 # ``k_rev - k_base_rev``.  4.0 puts the gate at ~0.02 one level below the
@@ -992,4 +1002,7 @@ def cmt_gregory_1997(
     du_dt = -constants.g * dflux_u / dp
     dv_dt = -constants.g * dflux_v / dp
 
+    # Cap the thin-top-layer numerical spike (see _CMT_DUDT_MAX); NaN-safe.
+    du_dt = jnp.clip(jnp.nan_to_num(du_dt), -_CMT_DUDT_MAX, _CMT_DUDT_MAX)
+    dv_dt = jnp.clip(jnp.nan_to_num(dv_dt), -_CMT_DUDT_MAX, _CMT_DUDT_MAX)
     return du_dt, dv_dt

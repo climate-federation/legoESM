@@ -57,11 +57,20 @@ srun -N1 -n1 "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
 
 echo "== Stage B: 24-GPU multicontroller timed runs =="
 export JAX_PLATFORMS=cuda
-srun "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
+# #921 (same defect as the Derecho twin): the closed-loop lane adds the
+# dry-mass fixer's GLOBAL all-reduce (_tile_fix_ps_mass_delta psum over
+# ("face","tile_i","tile_j")) on top of the halo ppermute cliques. Under XLA
+# GPU defaults those clique kinds init concurrently and can be ordered
+# differently per rank -> NCCL comm-init deadlock. Force serial comm init (see
+# cube_tiled_step.pbs for the full rationale + bisection).
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_nccl_comm_splitting=false --xla_gpu_enable_latency_hiding_scheduler=false"
+timeout 1800 srun "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
     --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
     --steps 12 --warmup 2 --multicontroller --out "${OUT}"
+echo "== single-shot done"
 # Closed-loop production lane (state resident tile-sharded across steps).
-srun "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
+echo "== closed-loop start"
+timeout 1800 srun "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
     --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
     --steps 12 --warmup 2 --multicontroller --closed-loop --out "${OUT}"
 

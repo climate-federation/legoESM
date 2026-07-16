@@ -112,7 +112,7 @@ def main():
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         compute_spectral_filter, compute_sponge_factor, spectral_pe_to_grid,
     )
     from legoesm.atmosphere.physics.combined import PhysicsConfig
@@ -154,7 +154,7 @@ def main():
         # PhysicsState all read cfg["aimip_convection"].
         cfg["aimip_convection"] = args.convection_scheme
         logger.info(f"convection override: {cfg['aimip_convection']}")
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
     from legoesm.training.losses import LossConfig
     from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
     spec_cfg = NeuralGCMSpectralConfig(

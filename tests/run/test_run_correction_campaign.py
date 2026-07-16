@@ -18,8 +18,8 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig  # noqa: E402
-from legoesm.atmosphere.dynamics.les_regime import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig  # noqa: E402
+from legoesm.atmosphere.dynamics.les.les_regime import (  # noqa: E402
     LESRegimeConfig,
     LESResolutionConfig,
 )
@@ -449,7 +449,7 @@ def test_build_correction_campaign_dry_run_constructs_without_running():
     driver) and returns a CampaignDryRun WITHOUT running the model/LES — every model-
     touching callback would raise if invoked, proving nothing ran. The launch check
     that catches a misconfig in ms instead of after a multi-day run."""
-    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
+    from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig
 
     def boom(*a, **k):
         raise AssertionError("dry_run must NOT run the model / LES")
@@ -490,7 +490,7 @@ def test_dry_run_rejects_per_column_fields_not_matching_grid():
     crash only at the FIRST compare, after a (non-free) model run.  The guard uses the SAME
     ``np.broadcast_shapes`` rules as the runtime ``broadcast_to``, so a genuinely
     broadcastable shape is NEVER rejected (no false positive)."""
-    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
+    from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig
 
     def boom(*a, **k):
         raise AssertionError("dry_run must NOT run the model / LES")
@@ -607,7 +607,7 @@ def test_build_campaign_harness_returns_the_shared_wiring():
     was BYTE-IDENTICAL in the single + multi campaign builders: a callable compare_fn +
     diagnose_fn, and the env_grid_fn (None for 'static', a callable for 'environment') — so
     the harness lives in ONE place, not the copy-paste CLAUDE.md forbids."""
-    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
+    from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig
 
     from scripts.run.run_correction_campaign import _build_campaign_harness
 
@@ -636,7 +636,7 @@ def test_build_correction_campaign_rejects_unknown_diagnosis_method():
     --dry-run construction), so a typo'd ``--diagnosis-method`` is caught at launch, not
     after a multi-day run quietly correcting the wrong coefficient.  The dispatch-
     hardening RATCHET counts the guard exists; this locks that it FIRES."""
-    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
+    from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig
 
     def boom(*a, **k):
         raise AssertionError("the method guard must fire before anything runs")
@@ -1183,7 +1183,7 @@ class _FakeDriver:
 
 def _mock_run_les(setup):
     """Mock plane-LES result: a synthetic state shaped to the setup's grid/hc."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import make_rest_state
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import make_rest_state
 
     grid, hc = setup.grid, setup.height_coord
     state = make_rest_state(grid, hc, dtype=jnp.float64)
@@ -1807,7 +1807,7 @@ def test_make_les_diagnose_fn_threads_phis_to_process_column(monkeypatch):
     topography to process_column (→ the orographic geostrophic term); the default
     forwards None (flat). The forcing extraction inside process_column is stubbed so
     the test pins ONLY the phis threading."""
-    import legoesm.atmosphere.dynamics.column_les as cl
+    import legoesm.atmosphere.dynamics.les.column_les as cl
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate
 
@@ -1851,7 +1851,7 @@ def test_make_les_diagnose_fn_threads_sst_to_process_column(monkeypatch):
     process_column (→ the opt-in surface-flux BC, activated by
     ``ColumnLESConfig.surface_flux``).  process_column is stubbed so the test pins ONLY
     the SST threading."""
-    import legoesm.atmosphere.dynamics.column_les as cl
+    import legoesm.atmosphere.dynamics.les.column_les as cl
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate
 
@@ -2012,7 +2012,7 @@ def test_make_les_diagnose_fn_mpas_surface_flux_works(monkeypatch):
     ``reconstruct_cell_velocity`` (REUSE), so ``--surface-flux`` + MPAS composes end-to-end
     — the surface flux IS computed (``column_surface_kinematic_fluxes`` called once) and the
     diagnosis is finite, no crash on the old ``v=None`` gather."""
-    from legoesm.atmosphere.dynamics import column_les
+    from legoesm.atmosphere.dynamics.les import column_les
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.grids.voronoi import create_voronoi_mesh
 
@@ -2252,7 +2252,7 @@ def test_build_correction_campaign_gaussian_one_round(monkeypatch):
       3. The float64 ``T`` survives the campaign into the extractor's float64 guard
          (a float32 ``T`` would raise; the other fields are widened to T's dtype).
     Mock driver + mock LES; the C_K-changes-model-output mechanism is iter 35/37."""
-    from legoesm.atmosphere.dynamics import column_large_scale_extract as clse
+    from legoesm.atmosphere.forcing import column_large_scale_extract as clse
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
@@ -2908,7 +2908,7 @@ def test_build_multi_correction_campaign_rejects_unknown_and_empty_coefficients(
     tuple — typo included — to this builder, which validates it.)"""
     from types import SimpleNamespace
 
-    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
+    from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig
 
     # The unknown-coefficient guard fires AFTER grid_shape (reference.T.shape) and the
     # lat/lon defaulting, so the fake reference exposes .T.shape and lat_deg/lon_deg are
@@ -3563,12 +3563,15 @@ def test_align_insolation_sets_start_doy_from_offline_date():
         ["--config", "x.json", "--align-insolation"]).align_insolation is True
 
 
-def test_configure_jax_compilation_cache(tmp_path):
+def test_configure_jax_compilation_cache(tmp_path, monkeypatch):
     """The persistent compilation-cache config (iter 453): empty dir => no-op (None, no JAX
-    mutation); a dir => sets jax_compilation_cache_dir + the min-compile-time threshold;
+    mutation); on CPU a real dir is a SAFETY-GATED no-op (the compile-cache key omits the CPU
+    microarch, so a cross-node AOT load risks SIGILL); on a non-CPU backend (device arch IS in
+    the key => safe) a dir => sets jax_compilation_cache_dir + the min-compile-time threshold;
     parser defaults (env-driven dir, 30 s)."""
     import jax
 
+    from legoesm.ml.training import _CPU_COMPILE_CACHE_OPT_IN_ENV
     from scripts.run.run_correction_campaign import (
         _build_arg_parser,
         _configure_jax_compilation_cache,
@@ -3576,11 +3579,19 @@ def test_configure_jax_compilation_cache(tmp_path):
 
     before_dir = jax.config.jax_compilation_cache_dir
     before_secs = jax.config.jax_persistent_cache_min_compile_time_secs
-    # empty => no-op, no mutation
+    monkeypatch.delenv(_CPU_COMPILE_CACHE_OPT_IN_ENV, raising=False)
+    # empty => no-op, no mutation (backend-independent; the probe is not reached)
     assert _configure_jax_compilation_cache("", 30.0) is None
     assert jax.config.jax_compilation_cache_dir == before_dir
+
+    d = str(tmp_path / "jaxcache")
+    # CPU backend => DISABLED no-op even with a real dir (no homogeneous-pool opt-in).
+    monkeypatch.setattr(jax, "default_backend", lambda: "cpu")
+    assert _configure_jax_compilation_cache(d, 45.0) is None
+    assert jax.config.jax_compilation_cache_dir == before_dir  # untouched
     try:
-        d = str(tmp_path / "jaxcache")
+        # non-CPU backend => ENABLED: sets dir + threshold, returns the dir.
+        monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
         assert _configure_jax_compilation_cache(d, 45.0) == d
         assert jax.config.jax_compilation_cache_dir == d
         assert jax.config.jax_persistent_cache_min_compile_time_secs == 45.0
@@ -4069,7 +4080,7 @@ def test_fast_validation_les_regime_is_tiny_valid_and_shared():
     production default — so it is unmistakably a composition pre-flight, not a science
     regime. Centralising it here means the real-ERA5 full-loop check + the OSSE --quick
     smoke share ONE definition (no duplicated LES dimensions)."""
-    from legoesm.atmosphere.dynamics.les_regime import (
+    from legoesm.atmosphere.dynamics.les.les_regime import (
         LESRegimeConfig,
         validate_regime_config,
     )
@@ -4089,7 +4100,7 @@ def test_fast_validation_les_regime_is_tiny_valid_and_shared():
 
 
 def _mk_breakdown(turbulent=True, finite=True, thermo=True, moisture=True, rh=True):
-    from legoesm.atmosphere.dynamics.column_les_diagnosis import LESRealismBreakdown
+    from legoesm.atmosphere.dynamics.les.column_les_diagnosis import LESRealismBreakdown
     flags = (turbulent, finite, thermo, moisture, rh)
     return LESRealismBreakdown(
         turbulent=jnp.asarray(turbulent), finite=jnp.asarray(finite),
@@ -4100,7 +4111,7 @@ def _mk_breakdown(turbulent=True, finite=True, thermo=True, moisture=True, rh=Tr
 def test_realism_capture_records_breakdown_and_passes_state_through(monkeypatch):
     """_RealismCapture (iter 512) wraps run_les_fn: it returns the LES state UNCHANGED (pure
     observation) and stores the per-column realism breakdown for the end-of-run report."""
-    import legoesm.atmosphere.dynamics.column_les_diagnosis as cld
+    import legoesm.atmosphere.dynamics.les.column_les_diagnosis as cld
 
     sentinel_state = object()
     monkeypatch.setattr(cld, "column_les_realism_breakdown",
@@ -4233,7 +4244,7 @@ def test_reduce_realism_summary_mpi():
     into the global one — verified WITHOUT mpirun by injecting the reduce: identity (single
     rank) leaves it unchanged; a doubling reduce (a 2-rank sim) doubles every count; the result
     is a RealismRejectionSummary of plain ints."""
-    from legoesm.atmosphere.dynamics.column_les_diagnosis import RealismRejectionSummary
+    from legoesm.atmosphere.dynamics.les.column_les_diagnosis import RealismRejectionSummary
 
     s = RealismRejectionSummary(
         n_total=4, n_realistic=1, n_rejected=3, n_not_turbulent=2, n_not_finite=1,

@@ -19,13 +19,13 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
     _theta_vert_advection_van_leer_kernel,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     PlaneCompressibleEulerModel,
-    _vertical_advection_van_leer_plane,
+    vertical_advection_van_leer_plane,
     make_flat_plane_terrain_metric,
     make_rest_state,
 )
@@ -56,7 +56,7 @@ def test_kernel_helper_matches_plane_van_leer():
     # rigid lids
     w = w.at[..., 0].set(0.0).at[..., -1].set(0.0)
     J = tm.jacobian
-    ref = _vertical_advection_van_leer_plane(theta, w, hc, J)
+    ref = vertical_advection_van_leer_plane(theta, w, hc, J)
     got = _theta_vert_advection_van_leer_kernel(theta, w, hc, J)
     np.testing.assert_allclose(np.asarray(got), np.asarray(ref),
                                rtol=0.0, atol=0.0)

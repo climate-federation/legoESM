@@ -191,7 +191,9 @@ def test_atm_scalar_map_is_pipeline_threaded():
                 conv_cloud_condensate=getattr(
                     pipe, "_cloud_conv_cloud_condensate", None),
                 p_xr=getattr(pipe, "_cloud_p_xr", None),
-                alpha_xr=getattr(pipe, "_cloud_alpha_xr", None))
+                alpha_xr=getattr(pipe, "_cloud_alpha_xr", None),
+                adiabatic_lwc_rate=getattr(
+                    pipe, "_cloud_adiabatic_lwc_rate", None))
             got = getattr(cc, m.field)
         else:
             got = getattr(getattr(pipe, resolved_attr[m.config_class]), m.field)

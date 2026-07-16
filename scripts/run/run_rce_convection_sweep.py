@@ -353,7 +353,7 @@ def run_one_scheme(scheme: str, args, *, output_root: Path):
     from legoesm.driver.component_factory import (
         create_atmosphere_dycore, compute_diffusion,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
     from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
     from legoesm.atmosphere.physics.radiation.gray import gray_radiation
     from legoesm.atmosphere.physics.radiation.solar import (

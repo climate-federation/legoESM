@@ -26,10 +26,10 @@ from legoesm.core.precision import set_policy, PrecisionPolicy
 set_policy(PrecisionPolicy.fp64())  # spectral transforms require float64
 from legoesm.grids.gaussian import create_gaussian_grid
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralPrimitiveEquationModel, SpectralPEConfig,
     isothermal_rest_state_spectral, spectral_pe_to_grid)
-from legoesm.atmosphere.held_suarez import held_suarez_forcing_spectral
+from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_spectral
 
 
 def main():

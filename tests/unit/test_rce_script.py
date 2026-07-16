@@ -17,7 +17,7 @@ class TestRCESetup:
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.driver.component_factory import create_atmosphere_dycore
         from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
         from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
         from legoesm.atmosphere.physics.convection.config import SBMConfig
         from legoesm.atmosphere.physics.radiation.gray import gray_radiation

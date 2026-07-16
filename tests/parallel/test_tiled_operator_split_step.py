@@ -39,7 +39,7 @@ from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.halo import set_halo_backend
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
     fv3_hydrostatic_tendencies,
 )

@@ -49,7 +49,7 @@ from pathlib import Path
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_FORCING = _REPO_ROOT / "forcing_amip"
+_DEFAULT_FORCING = _REPO_ROOT / "data" / "forcing_amip"
 # Public Analysis-Ready Cloud-Optimized (ARCO) ERA5 on GCS — no
 # credentials required.  Used as the default ERA5 IC source so the
 # realistic --ic era5 path works out of the box (load_era5_ic handles

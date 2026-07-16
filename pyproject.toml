@@ -157,6 +157,22 @@ target-version = "py311"
 select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
+# FV3-native dycore ports (docs/.../fv3_native campaign): these modules are
+# loop-faithful, INDEX-EXACT transcriptions of GFDL_atmos_cubed_sphere Fortran
+# (sw_core/tp_core/a2b_edge/fv_grid_*).  The Fortran-metric locals are held in
+# UPPER_SNAKE fort views (DXA, DEL6_V, SIN_SG, CSG, ...) to mirror the source
+# 1:1 — renaming to snake_case would destroy the line-by-line cross-reference
+# to the oracle (the higher-priority faithfulness goal).  `fort`/`fort1` are
+# deliberately lower-case (they read as array *views*, not classes).  N803/N806
+# = kernel args/vars, N801 = the fort view classes.
+"packages/core/legoesm/core/fv3_native_sw_core.py" = ["N803", "N806", "N801"]
+"packages/core/legoesm/core/fv3_native_d_sw.py" = ["N803", "N806", "N801"]
+"packages/core/legoesm/core/fv3_native_duo_sw_core.py" = ["N803", "N806", "N801"]
+"packages/core/legoesm/grids/fv3_native_gridstruct.py" = ["N801", "N803", "N806"]
+# FV3-native oracle validators/tests: same verbatim-Fortran UPPER_SNAKE
+# metric locals (SIN/COS/DXC/RC, ...) mirroring the source 1:1.
+"scripts/validate/fv3_native/gen_divduo_oracle.py" = ["N806", "N816"]
+"tests/grids/test_fv3_native_duo_phase4c.py" = ["N806"]
 # Fuller CLUBB port (PORT_CLUBB.md): the closure coefficients, model flags and
 # intermediate variables mirror CLUBB's canonical symbol names 1:1 (c_K1,
 # iiPDF_type, l_use_C7_Richardson, C2rt, Skw, wpthlp, Lscale, ...) as in
@@ -199,6 +215,11 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # The canonical SST symbol is ``sst_K`` (used 100s of times); N806/N803 flag the local
 # variable / monkeypatch arg in the cross-grid deploy CLI + its test (not CI-enforced).
 "scripts/experiment/check_cross_grid_deploy.py" = ["N806"]
+# Semi-implicit gravity-wave stability gate (#920): physical symbol names --
+# ``T`` for temperature (argument + local) and ``Gamma`` for the
+# Hoskins-Simmons vertical-coupling matrix (matching semi_implicit.py) read
+# clearer than snake_case. Same rationale as the column-extractor tests above.
+"tests/atmosphere/hydrostatic/unit/test_semi_implicit_gw_stability.py" = ["N803", "N806"]
 "tests/unit/test_check_cross_grid_deploy.py" = ["N803"]
 # Run-as-a-script sys.path bootstrap (iter 321) must precede the ``scripts.*`` import, so the
 # subsequent module-level imports trip E402; the bootstrap makes ``python scripts/...`` work.
@@ -224,6 +245,10 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # dycore (fp64 replicated-vs-scattered bit-equivalence), so imports follow.
 "tests/parallel/test_cube_face_scatter.py" = ["E402"]
 "tests/distributed/test_cube_face_scatter_mpi.py" = ["E402"]
+# MPAS native-SPMD parity gates use the MPAS canonical symbol names (nCells,
+# nEdges, W) plus the mandated T_sfc / dT unit-suffixed physics names; same
+# rationale as the column-extractor tests above.
+"tests/parallel/test_mpas_atm_native_step.py" = ["N806"]
 
 [tool.mypy]
 python_version = "3.11"

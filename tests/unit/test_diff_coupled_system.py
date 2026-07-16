@@ -56,7 +56,7 @@ def _build_cdgrid_pe():
     """Build a small cubed-sphere hydrostatic PE model + isothermal state."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
     from legoesm.core.state import FV3HydrostaticState
@@ -87,7 +87,7 @@ def _hs_temperature_tendency(fv3_state, grid, sigma):
     temperature relaxation, so a zero-wind A-grid HydrostaticState is a
     faithful input for the thermal tendency.
     """
-    from legoesm.atmosphere.held_suarez import held_suarez_forcing
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing
     from legoesm.core.state import HydrostaticState
 
     n, nlev = _N, _NLEV

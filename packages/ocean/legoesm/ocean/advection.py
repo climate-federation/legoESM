@@ -800,6 +800,31 @@ def flux_form_vertical_tracer_advection_ppm(
 # FCT (Flux-Corrected Transport) — PPM accuracy with upwind stability
 # =============================================================================
 
+def centred2_to_u_points(f: jnp.ndarray) -> jnp.ndarray:
+    """2nd-order centred tracer at u-faces: 0.5·(T_west + T_east).
+
+    NEMO ``traadv_fct`` high-order horizontal flux with ``nn_fct_h=2``
+    (``0.5*pU*(pt(ji)+pt(ji+1))``).  Periodic in longitude; returns
+    (n_lat, n_lon+1, nlev) with the wrap column appended.
+    """
+    f_face = 0.5 * (jnp.roll(f, 1, axis=1) + f)          # face j: cells j-1, j
+    return jnp.concatenate([f_face, f_face[:, 0:1, :]], axis=1)
+
+
+def centred2_to_v_points(f: jnp.ndarray) -> jnp.ndarray:
+    """2nd-order centred tracer at v-faces: 0.5·(T_south + T_north).
+
+    Wall faces (j=0, n_lat) copy the adjacent cell — their mass flux is
+    zero so the value only needs to be finite. Returns (n_lat+1, n_lon,
+    nlev).
+    """
+    f_int = 0.5 * (f[:-1, :, :] + f[1:, :, :])           # interior n_lat-1 faces
+    return jnp.concatenate([f[:1, :, :], f_int, f[-1:, :, :]], axis=0)
+
+
+FCT_HIGH_ORDER_SCHEMES = ("ppm", "centred2")
+
+
 def fct_tracer_advection(
     tracer: jnp.ndarray,
     mass_flux_u: jnp.ndarray,
@@ -808,18 +833,19 @@ def fct_tracer_advection(
     h_k: jnp.ndarray,
     grid: "LatLonGrid",
     dt: float,
+    high_order: str = "ppm",
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """FCT tracer advection: PPM accuracy with guaranteed monotonicity.
+    """FCT tracer advection: high-order accuracy with guaranteed monotonicity.
 
-    Combines first-order upwind (inherently stable) with PPM (4th-order
-    accurate) using a Zalesak limiter that adds maximum anti-diffusion
-    without creating new extrema.
+    Combines first-order upwind (inherently stable) with a high-order flux
+    using a Zalesak limiter that adds maximum anti-diffusion without
+    creating new extrema.
 
     The scheme is:
     - Conservative (flux-form)
     - Monotone (Zalesak bounds on total tendency)
     - Stable at any CFL (starts from upwind)
-    - Higher accuracy than TVD at fronts (PPM reconstruction)
+    - Higher accuracy than TVD at fronts
 
     Parameters
     ----------
@@ -830,6 +856,13 @@ def fct_tracer_advection(
     h_k : (n_lat, n_lon, nlev) layer thickness
     grid : LatLonGrid
     dt : float
+    high_order : {"ppm", "centred2"}
+        High-order flux: "ppm" (4th-order PPM reconstruction, the
+        historical ``ppm_fct``) or "centred2" (plain 2nd-order centred
+        mean, NEMO ``traadv_fct`` with ``nn_fct_h = nn_fct_v = 2`` — the
+        DINO / ORCA1 namelist selection). The centred face value is NOT
+        pre-clamped to local bounds (NEMO doesn't); the Zalesak step
+        supplies all the monotonicity.
 
     Returns
     -------
@@ -841,6 +874,11 @@ def fct_tracer_advection(
         upwind_to_u_points, upwind_to_v_points,
     )
 
+    if high_order not in FCT_HIGH_ORDER_SCHEMES:
+        raise ValueError(
+            f"Unknown FCT high_order scheme '{high_order}'; "
+            f"expected one of {FCT_HIGH_ORDER_SCHEMES}")
+
     eps = 1e-30
 
     # --- Step 1: Horizontal face fluxes (low and high order) ---
@@ -850,8 +888,12 @@ def fct_tracer_advection(
     flux_v_low = mass_flux_v * tr_v_low
     div_h_low = divergence_cgrid(flux_u_low, flux_v_low, grid)
 
-    tr_u_hi = ppm_to_u_points(tracer, mass_flux_u)
-    tr_v_hi = ppm_to_v_points(tracer, mass_flux_v)
+    if high_order == "ppm":
+        tr_u_hi = ppm_to_u_points(tracer, mass_flux_u)
+        tr_v_hi = ppm_to_v_points(tracer, mass_flux_v)
+    else:
+        tr_u_hi = centred2_to_u_points(tracer)
+        tr_v_hi = centred2_to_v_points(tracer)
     flux_u_hi = mass_flux_u * tr_u_hi
     flux_v_hi = mass_flux_v * tr_v_hi
 
@@ -865,24 +907,29 @@ def fct_tracer_advection(
     T_face_low = jnp.where(w_int > 0.0, T_below, T_above)
     F_vert_low_int = w_int * T_face_low  # (..., nlev-1)
 
-    # PPM interface flux
-    from legoesm.core.operators_fv import ppm_edge_values, ppm_limit
-    f_pad = jnp.concatenate(
-        [tracer[..., 1::-1], tracer, tracer[..., -1:-3:-1]], axis=-1)
-    f_pad_2d = f_pad[..., jnp.newaxis]
-    q_hat = ppm_edge_values(f_pad_2d)[..., 0]
-    a_L = q_hat[..., :-1]
-    a_R = q_hat[..., 1:]
-    q_c = f_pad[..., 1:-1]
-    a_L_2d, a_R_2d = ppm_limit(
-        q_c[..., jnp.newaxis], a_L[..., jnp.newaxis], a_R[..., jnp.newaxis])
-    a_L, a_R = a_L_2d[..., 0], a_R_2d[..., 0]
-    q_R_above = a_R[..., 1:nlev]
-    q_L_below = a_L[..., 2:nlev + 1]
-    T_face_hi = jnp.where(w_int > 0.0, q_L_below, q_R_above)
-    T_face_hi = jnp.clip(T_face_hi,
-                          jnp.minimum(T_above, T_below),
-                          jnp.maximum(T_above, T_below))
+    if high_order == "ppm":
+        # PPM interface flux
+        from legoesm.core.operators_fv import ppm_edge_values, ppm_limit
+        f_pad = jnp.concatenate(
+            [tracer[..., 1::-1], tracer, tracer[..., -1:-3:-1]], axis=-1)
+        f_pad_2d = f_pad[..., jnp.newaxis]
+        q_hat = ppm_edge_values(f_pad_2d)[..., 0]
+        a_L = q_hat[..., :-1]
+        a_R = q_hat[..., 1:]
+        q_c = f_pad[..., 1:-1]
+        a_L_2d, a_R_2d = ppm_limit(
+            q_c[..., jnp.newaxis], a_L[..., jnp.newaxis],
+            a_R[..., jnp.newaxis])
+        a_L, a_R = a_L_2d[..., 0], a_R_2d[..., 0]
+        q_R_above = a_R[..., 1:nlev]
+        q_L_below = a_L[..., 2:nlev + 1]
+        T_face_hi = jnp.where(w_int > 0.0, q_L_below, q_R_above)
+        T_face_hi = jnp.clip(T_face_hi,
+                             jnp.minimum(T_above, T_below),
+                             jnp.maximum(T_above, T_below))
+    else:
+        # NEMO nn_fct_v=2: plain centred interface mean, no clamp
+        T_face_hi = 0.5 * (T_above + T_below)
     F_vert_hi_int = w_int * T_face_hi
 
     # Vertical divergences for Zalesak bounds computation — pad

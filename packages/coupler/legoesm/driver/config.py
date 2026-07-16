@@ -177,11 +177,11 @@ class DycoreConfig(NamedTuple):
     # speedup — meaningful for the 100-y AMIP submission where the
     # smoke jobs were paying ~2.5 h of compile per rank-count.
     #
-    # Default ``"ssp_rk3"`` preserves bit-equivalent behaviour for
-    # the existing scientific validation suite.  ``"ssp_rk3_scan"``
-    # is the opt-in for production at scale.
+    # On cube / lat-lon, ``"auto"`` resolves to ``ssp_rk3`` — bit-
+    # equivalent behaviour for the existing scientific validation
+    # suite.  ``"ssp_rk3_scan"`` is the opt-in for production at scale.
     #
-    # ``"auto"`` (the run_amip CLI default since 2026-06-10) selects
+    # ``"auto"`` (the default here AND the run_amip CLI default) selects
     # each dycore's own stable default in ``component_factory``:
     # cube / lat-lon keep ``ssp_rk3``; MPAS gets ``ssp_rk54_scan``
     # (its biharmonic hyperdiffusion eigenvalues at production dt fall
@@ -189,7 +189,14 @@ class DycoreConfig(NamedTuple):
     # blow-up); spectral keeps ``ssp_rk54``.  Any explicit scheme name
     # (including ``ssp_rk3`` on MPAS) is forwarded verbatim, so
     # deliberate integrator-sensitivity runs are still possible.
-    time_integrator: str = "ssp_rk3"
+    # Default flipped ``"ssp_rk3"`` → ``"auto"`` (2026-07-12): a direct
+    # ``DycoreConfig()`` on MPAS previously inherited the documented-
+    # unstable ssp_rk3 (diverges within ~3 steps at dt=600 with
+    # hyperdiff ON) — only the run_amip CLI got the safe per-dycore
+    # resolution.  ``"auto"`` never reaches ``dispatch_integrator``
+    # (every factory branch maps it first; dispatch raises loudly on
+    # unknown names as defense in depth).
+    time_integrator: str = "auto"
     # #771: transport the (attached) moisture tracers horizontally with the
     # mass-conserving flux-form post-RK3 substep instead of the in-RK3 advective
     # -(u·∇q).  Fixes the cube column-water non-conservation / day-150 blow-up.
@@ -199,6 +206,16 @@ class DycoreConfig(NamedTuple):
     # face-scatter until the reductions are allreduce-aware).  Appended last to
     # preserve positional ABI.
     moisture_flux_form: bool = False
+    # #930: vertical biharmonic (∂⁴/∂σ⁴) hyperdiffusion coefficient [1/s] for T
+    # on the MPAS hydrostatic dycore — scale-selective damping of the grid-scale
+    # 2Δσ vertical checkerboard that the adiabatic κ·T·ω/p term amplifies (no
+    # other vertical operator in that dycore opposes it) until it rides the
+    # silent T_min=50 K floor (#871/#912/#915).  del4 damps 2Δσ ~47× faster
+    # than an 8Δσ resolved wave, so resolved vertical structure is ~untouched;
+    # explicit-stable to huge dt (16·ν·dt≪1).  Only wired to the MPAS PE dycore
+    # (``component_factory``).  Set 0.0 to reproduce the pre-#930 dycore exactly.
+    # Appended last to preserve positional ABI.
+    mpas_nu_vert4_T: float = 2.0e-6
 
 
 class EvaluationConfig(NamedTuple):
@@ -418,6 +435,16 @@ class ExperimentConfig(NamedTuple):
     # These are the SW/LW knob for the coare3 moisture-driven albedo overshoot.
     cloud_rh_crit: float | None = None
     cloud_q_c_diagnostic: float | None = None
+    # Cahalan (1994) horizontal-inhomogeneity factor chi on the radiative cloud
+    # water path (plane-parallel albedo bias); LOWER => thinner optics => lower
+    # albedo. None => CloudConfig default 1.0 (homogeneous, no change).
+    cloud_inhomogeneity_factor: float | None = None
+    # Sub-grid cloud-optics inhomogeneity scheme: "constant" (Cahalan scalar,
+    # legacy/byte-identical) or "two_region" (tau-dependent Shonk-Hogan optic
+    # that breaks the plane-parallel tau-saturation). cloud_fsd = fractional
+    # std-dev of in-cloud water for two_region (Shonk-Hogan ~0.75).
+    cloud_optics_inhomogeneity: str = "constant"
+    cloud_fsd: float | None = None
     #   cloud_p_xr / cloud_alpha_xr — Xu-Randall cloud-fraction sensitivity
     #   knobs; HIGHER p_xr / LOWER alpha_xr => fraction stays fractional as
     #   moisture rises (flattens the overcast runaway).
@@ -425,6 +452,17 @@ class ExperimentConfig(NamedTuple):
     cloud_alpha_xr: float | None = None
     cloud_conv_cloud_max: float | None = None
     cloud_conv_cloud_condensate: float | None = None
+    # Diagnostic in-cloud condensate vertical structure for the stratiform
+    # radiative floor (CloudConfig.diagnostic_condensate_scheme):
+    #   "constant"  — flat q_c_diagnostic at every cloudy level (validated
+    #                 default; byte-identical to the legacy floor).
+    #   "adiabatic" — depth-scaled adiabatic in-cloud LWC (dims THIN warm
+    #                 marine stratocumulus while deep clouds stay at the cap),
+    #                 the source-side marine-BL albedo fix.  cloud_adiabatic_lwc_rate
+    #                 [kg/kg/m] is the LWC growth per metre of cloudy depth
+    #                 (None => CloudConfig default 1.5e-6 ~ 1.5 g/kg per km).
+    cloud_diagnostic_condensate_scheme: str = "constant"
+    cloud_adiabatic_lwc_rate: float | None = None
     microphysics: str = "none"
     # Number of microphysics sub-steps inside one dynamics step.  Morrison's
     # double-moment product terms (q_c·q_r, q_i·q_c) run away at the
@@ -451,13 +489,25 @@ class ExperimentConfig(NamedTuple):
     # morrison microphysics.  Physics-fidelity correction (no tunable knob).
     subgrid_autoconversion: bool = False
 
-    # Tiedtke convective precipitation efficiency [0,1] (Tiedtke 1989 in-
-    # updraft precipitation).  >0 diverts that fraction of convective
-    # condensate to rain (sediments via microphysics, invisible to radiation)
-    # instead of detraining it all as suspended cloud.  0 = off (legacy).
-    # Observed deep-convective CPE ~0.5-0.9.  Tiedtke-only (guarded in
-    # _resolve_convection).
-    convective_precip_efficiency: float = 0.0
+    # Convective in-updraft precipitation efficiency [0,1] (Tiedtke 1989 in-
+    # updraft precipitation).  A value >0 diverts that fraction of the
+    # convective condensate to rain (sediments via microphysics, invisible to
+    # radiation) instead of detraining it all as suspended cloud.  Observed
+    # deep-convective CPE ~0.5-0.9.  Supported by Tiedtke and Bechtold (threaded
+    # in _resolve_convection).  SENTINEL: ``None`` (default) = use each scheme's
+    # OWN default (Tiedtke 0.0 = legacy no-split; Bechtold 0.7 = ON, the #929
+    # anvil-drain fix); an EXPLICIT value overrides it (0.0 forces the legacy
+    # detrain-all path, dq_r None).  ``None`` distinguishes "unset" from an
+    # explicit 0.0 so Bechtold's ON-by-default is not silently disabled.
+    convective_precip_efficiency: float | None = None
+    # Convective precip-split scheme (Bechtold / Tiedtke): "constant" uses the
+    # fixed convective_precip_efficiency above; "autoconversion" derives the
+    # precip fraction PHYSICALLY from the plume updraft cloud water (Sundqvist
+    # 1978, convective_autoconversion_split), threaded to conv_config in
+    # physics_pipeline; the scheme body raises on an unknown value.
+    convective_precip_split: str = "constant"
+    autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
+    autoconv_pe_max: float = 0.9        # [1] ceiling on the emergent precip fraction
 
     # Tiedtke plume buoyancy-death memory: when True the entraining plume,
     # once it exhausts its cumulative buoyancy budget, stays dead instead of
@@ -763,6 +813,11 @@ class ExperimentConfig(NamedTuple):
     sundqvist_sigmoid_sharpness: float = 20.0   # SundqvistConfig.sigmoid_sharpness
     sbm_T_min_convect: float = 200.0            # SBMConfig.T_min_convect [K]
     louis_l_mix_max: float = 100.0              # LouisConfig.l_mix_max [m]
+    # Marine-Sc cloud-top entrainment (Louis BL): vents trapped BL-top moisture
+    # into the dry free troposphere to thin excess stratocumulus liquid cloud
+    # (the AMIP albedo bias) without a surface-evaporation trade.  SINGLE knob:
+    # 0.0 = off (default => byte-identical), > 0 = on.  Deploy warm-start/ramp.
+    louis_cloudtop_entrainment_efficiency: float = 0.0  # LouisConfig.cloudtop_entrainment_efficiency [0,1]; 0=off
     louis_Ck: float = 0.4                       # LouisConfig.Ck
     louis_Ri_crit: float = 0.25                 # LouisConfig.Ri_crit
     louis_b_louis: float = 5.0                  # LouisConfig.b_louis
@@ -801,6 +856,32 @@ class ExperimentConfig(NamedTuple):
     # the lever for the AMIP convective-precipitation deficit.  Default matches
     # BechtoldConfig.cape_threshold (byte-identical when unset).
     bechtold_cape_threshold: float = 70.0
+    # Bechtold convective-top pressure [Pa]; terminates the (non-detraining)
+    # plume + subsidence gate. 150 hPa stability cap (see BechtoldConfig.
+    # p_conv_top_pa); raise toward 100 hPa if deep tropical tops are clipped.
+    bechtold_conv_top_pa: float = 15000.0
+    # Bechtold convective-downdraft strength (marine-evaporation / precip lever,
+    # #847). The downdraft's sub-cloud effect is rain re-evaporation only — it
+    # COOLS + locally moistens (no dry-air advection; see physics_pipeline note).
+    # Raising downdraft_evap (0.05 -> ~0.3 Tiedtke) increases that cooling, which
+    # drives cold pools that ENHANCE convective triggering -> more precip -> net
+    # column drying -> larger sea-air gradient -> higher surface evaporation.
+    # downdraft_rh_min gates the trigger sigmoid((rh_min - rh_below)·sharpness):
+    # the downdraft fires where the below-LCL RH < rh_min, so RAISING rh_min
+    # activates it in more (moister) columns. Defaults reproduce BechtoldConfig
+    # (byte-identical).
+    bechtold_downdraft_evap: float = 0.05
+    bechtold_downdraft_alpha: float = 0.3
+    bechtold_downdraft_rh_min: float = 0.2
+    # Penetrative-downdraft thermodynamic transport (marine-BL ventilation).
+    # The re-evaporation downdraft above only MOISTENS the sub-cloud layer;
+    # transport ON advects low-MSE (dry) mid-level air DOWN into the BL,
+    # DRYING it -> stronger surface evaporation + less BL liquid cloud (lower
+    # albedo).  Default OFF => byte-identical to the re-evaporation-only
+    # downdraft.  See BechtoldConfig.downdraft_transport.
+    bechtold_downdraft_transport: bool = False
+    bechtold_downdraft_entrain_rate: float = 5.0e-4
+    bechtold_downdraft_detrain_scale_m: float = 700.0
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -899,6 +980,25 @@ class ExperimentConfig(NamedTuple):
     # STATELESS physics (Held-Suarez / per-column); a stateful PhysicsState
     # carry is not yet SPMD-routed.  Default off preserves all existing paths.
     enable_latlon_spmd: bool = False
+    # P4 (cube >6 devices): opt-in sub-face-TILED dynamics — the compiled
+    # segment's dynamics core routes through
+    # ``make_tiled_cc_step`` (tiled D-grid SSP-RK3 on a (6,kt,kt) mesh)
+    # when the device layout is sub-face tiled (n_devices = 6*kt^2 > 6).
+    # Dynamics-only swap: physics/fixers/tracers in the segment are
+    # untouched.  The adapter refuses configs outside the tiled base-cut
+    # envelope (non-ssp_rk3 integrator, any extra damping term, duogrid)
+    # LOUDLY.  Default off preserves every existing path.
+    enable_tiled_dycore: bool = False
+    # M2b (scaling): run each lat-lon SPMD segment as ONE compiled
+    # ``lax.scan`` (``make_sharded_atm_latlon_segment`` — band-sharded
+    # geometry, one host dispatch + one in-graph finite-scalar read per
+    # segment) instead of the historical per-step Python loop.  Applies to
+    # the STATELESS ``run_atm_latlon_spmd`` lane (dynamics-only /
+    # Held-Suarez); the operator-split unified-physics SPMD lane has no
+    # compiled-scan segments yet and REFUSES this flag loudly (never a
+    # silent no-op).  Requires ``enable_latlon_spmd=True`` (validated).
+    # Default off = byte-identical per-step path.
+    latlon_spmd_compiled_segments: bool = False
 
     # Optional explicit turbulence scheme config (a
     # ``atmosphere.physics.turbulence.config.TurbulenceConfig``) overriding the
@@ -987,6 +1087,24 @@ class ExperimentConfig(NamedTuple):
             # to host replicas on every process first.  All flush/save
             # sites are root-gated via ``_mpi_rank = jax.process_index()``.
             pass
+        if self.enable_tiled_dycore:
+            # P4 sub-face-tiled cube dynamics (single-controller multi-device;
+            # (6,kt,kt) mesh).  Cube-only; mpi4jax-distributed runs have no
+            # tiled device mesh (the driver helper also fails loudly there).
+            if g.grid_type != "cubed_sphere":
+                errors.append(
+                    "enable_tiled_dycore=True requires "
+                    f"grid.grid_type='cubed_sphere' (got {g.grid_type!r}): "
+                    "the tiled step is the cube sub-face decomposition"
+                )
+            if self.distributed and self.distributed_mode == "mpi":
+                errors.append(
+                    "enable_tiled_dycore=True is a device-mesh (SPMD) path "
+                    "and cannot run under the mpi4jax replicated-faces mode "
+                    "(distributed_mode='mpi'); use single-process multi-GPU "
+                    "or distributed_mode='spmd'"
+                )
+
         if self.enable_latlon_spmd:
             # Single-process multi-device lat-band path (NOT distributed_mode).
             if g.grid_type != "latlon":
@@ -1005,6 +1123,13 @@ class ExperimentConfig(NamedTuple):
             # runtime in ModelDriver._latlon_spmd_mesh against the BUILT
             # LatLonGrid (GridConfig carries only ``resolution``, not the
             # derived n_lat/n_lon), so a wrong device count fails LOUDLY there.
+        if self.latlon_spmd_compiled_segments and not self.enable_latlon_spmd:
+            errors.append(
+                "latlon_spmd_compiled_segments=True requires "
+                "enable_latlon_spmd=True: the compiled-scan segment lane is a "
+                "mode OF the lat-band SPMD run loop (run_atm_latlon_spmd) and "
+                "is a silent no-op on every other path"
+            )
         if self.days <= 0:
             errors.append(f"days must be > 0, got {self.days}")
         if self.seed < 0:
@@ -1023,6 +1148,41 @@ class ExperimentConfig(NamedTuple):
                 f"bechtold_cape_threshold must be >= 0, got "
                 f"{self.bechtold_cape_threshold}"
             )
+        if (self.convective_precip_efficiency is not None
+                and not (0.0 <= self.convective_precip_efficiency <= 1.0)):
+            errors.append(
+                f"convective_precip_efficiency must be in [0, 1] or None, got "
+                f"{self.convective_precip_efficiency}"
+            )
+        if self.convective_precip_split not in ("constant", "autoconversion"):
+            errors.append(
+                "convective_precip_split must be 'constant' or 'autoconversion', "
+                f"got {self.convective_precip_split!r}"
+            )
+        if not (0.0 < self.autoconv_q_c_crit <= 1.0e-2):
+            errors.append(
+                f"autoconv_q_c_crit must be in (0, 1e-2] kg/kg, got "
+                f"{self.autoconv_q_c_crit}"
+            )
+        if not (0.0 <= self.autoconv_pe_max <= 1.0):
+            errors.append(
+                f"autoconv_pe_max must be in [0, 1], got {self.autoconv_pe_max}"
+            )
+        if self.bechtold_conv_top_pa <= 0.0:
+            errors.append(
+                f"bechtold_conv_top_pa must be > 0 Pa (the convective-top gate "
+                f"cutoff), got {self.bechtold_conv_top_pa}"
+            )
+        for _f, _lo, _hi in (
+            ("bechtold_downdraft_evap", 0.0, 0.5),
+            ("bechtold_downdraft_alpha", 0.0, 0.9),
+            ("bechtold_downdraft_rh_min", 0.0, 1.0),
+            ("bechtold_downdraft_entrain_rate", 1.0e-4, 2.0e-3),
+            ("bechtold_downdraft_detrain_scale_m", 100.0, 3000.0),
+        ):
+            _v = getattr(self, _f)
+            if not (_lo <= _v <= _hi):
+                errors.append(f"{_f}={_v!r} out of range [{_lo}, {_hi}]")
         if self.physics_parameterization not in ("none", "ml"):
             errors.append(
                 "physics_parameterization must be 'none' or 'ml', "
@@ -1053,6 +1213,61 @@ class ExperimentConfig(NamedTuple):
                 f"cloud_scheme must be one of {_valid_cloud_schemes}, "
                 f"got {self.cloud_scheme!r}"
             )
+        _valid_diag_condensate = ("constant", "adiabatic")
+        if self.cloud_diagnostic_condensate_scheme not in _valid_diag_condensate:
+            errors.append(
+                f"cloud_diagnostic_condensate_scheme must be one of "
+                f"{_valid_diag_condensate}, "
+                f"got {self.cloud_diagnostic_condensate_scheme!r}"
+            )
+        _valid_inhom = ("constant", "two_region")
+        if self.cloud_optics_inhomogeneity not in _valid_inhom:
+            errors.append(
+                f"cloud_optics_inhomogeneity must be one of {_valid_inhom}, "
+                f"got {self.cloud_optics_inhomogeneity!r}"
+            )
+        # The adiabatic in-cloud floor reaches radiation through the SHARED
+        # physics pipeline (build_physics_pipeline -> build_cloud_config), which
+        # serves the cd-grid family (cdgrid + aliases 'centered'/'finite_volume'),
+        # latlon_cgrid, and the ML backends — all of which DO thread it.  Only
+        # MPAS and spectral build RadiationConfig directly, bypassing the pipeline,
+        # and would SILENTLY fall back to the constant floor.  Reject the opt-in on
+        # ONLY those genuinely-bypassing backends (dispatch-hardening — a silent
+        # no-op is a hard error), so a cd-grid alias is not falsely blocked
+        # (codex/review).
+        _NO_CLOUD_THREAD_DISCRETIZATIONS = ("mpas", "spectral")
+        if (self.cloud_diagnostic_condensate_scheme != "constant"
+                and self.dycore.discretization
+                in _NO_CLOUD_THREAD_DISCRETIZATIONS):
+            errors.append(
+                "cloud_diagnostic_condensate_scheme="
+                f"{self.cloud_diagnostic_condensate_scheme!r} is not wired into "
+                f"the {self.dycore.discretization!r} radiation path (that backend "
+                "builds RadiationConfig directly, bypassing the shared cloud "
+                "pipeline); it would silently run 'constant'.  Use a "
+                "pipeline backend (cd-grid / latlon) or scheme='constant'."
+            )
+        # Cross-field: the diagnostic-condensate FLOOR exists only for the
+        # sub-grid diagnostic-fraction schemes (sundqvist / xu_randall); 'none'
+        # skips clouds and 'resolved' (CRM) excludes the floor.  It is radiatively
+        # active only when radiation consumes cloud paths (rrtmgp / rrtmg); 'none'
+        # and 'gray' ignore them.  Reject 'adiabatic' in combinations where it
+        # would be a silent no-op (dispatch-hardening).
+        if self.cloud_diagnostic_condensate_scheme != "constant":
+            if self.cloud_scheme not in ("sundqvist", "xu_randall"):
+                errors.append(
+                    "cloud_diagnostic_condensate_scheme="
+                    f"{self.cloud_diagnostic_condensate_scheme!r} only affects the "
+                    f"sundqvist/xu_randall diagnostic floor; cloud_scheme="
+                    f"{self.cloud_scheme!r} would ignore it."
+                )
+            if self.radiation not in ("rrtmgp", "rrtmg"):
+                errors.append(
+                    "cloud_diagnostic_condensate_scheme="
+                    f"{self.cloud_diagnostic_condensate_scheme!r} needs a "
+                    f"cloud-path radiation (rrtmgp/rrtmg); radiation="
+                    f"{self.radiation!r} ignores cloud paths."
+                )
         if self.microphysics not in VALID_MICROPHYSICS:
             errors.append(
                 f"microphysics must be one of {VALID_MICROPHYSICS}, "
@@ -1213,6 +1428,14 @@ class ExperimentConfig(NamedTuple):
                 f"land_gs_max (max stomatal conductance [mol/m2/s]) must be "
                 f"finite and in (0, 2]; got {self.land_gs_max!r}."
             )
+        # Marine-Sc cloud-top entrainment efficiency: finite, in [0, 1] (matches
+        # LouisConfig.__param_spec__; the not(lo<=x<=hi) form also rejects NaN/Inf).
+        if not (0.0 <= self.louis_cloudtop_entrainment_efficiency <= 1.0):
+            errors.append(
+                f"louis_cloudtop_entrainment_efficiency (marine-Sc cloud-top "
+                f"entrainment A) must be finite and in [0, 1]; got "
+                f"{self.louis_cloudtop_entrainment_efficiency!r}."
+            )
         # Soil-moisture init fraction of saturation: finite, in (0, 1].
         if not (0.0 < self.land_soil_moisture_init_frac <= 1.0):
             errors.append(
@@ -1245,8 +1468,11 @@ class ExperimentConfig(NamedTuple):
             ("cloud_q_c_diagnostic", 5.0e-5, 1.0e-3),
             ("cloud_conv_cloud_max", 0.1, 1.0),
             ("cloud_conv_cloud_condensate", 1.0e-5, 1.0e-3),
+            ("cloud_inhomogeneity_factor", 0.3, 1.0),
+            ("cloud_fsd", 0.0, 1.0),
             ("cloud_p_xr", 0.05, 1.0),
             ("cloud_alpha_xr", 10.0, 1000.0),
+            ("cloud_adiabatic_lwc_rate", 5.0e-7, 3.0e-6),
         ):
             _v = getattr(self, _f)
             if _v is not None and not (_lo <= _v <= _hi):
@@ -1292,6 +1518,13 @@ class ExperimentConfig(NamedTuple):
                 errors.append(
                     f"composite gravity_wave_drag parts must each be one of "
                     f"{_composable}, got invalid {bad} in "
+                    f"{self.gravity_wave_drag!r}"
+                )
+            # Mirror get_gwd_fn's runtime rule so a duplicate composite
+            # fails HERE, not later during physics construction.
+            if len(set(_gwd_parts)) != len(_gwd_parts):
+                errors.append(
+                    f"composite gravity_wave_drag has duplicate parts: "
                     f"{self.gravity_wave_drag!r}"
                 )
             _n_stateful = sum(p in _composable_stateful for p in _gwd_parts)
@@ -1655,6 +1888,29 @@ class ExperimentConfig(NamedTuple):
             sbm_cape_threshold=getattr(amip_cfg, 'sbm_cape_threshold', 70.0),
             bechtold_cape_threshold=getattr(
                 amip_cfg, 'bechtold_cape_threshold', 70.0),
+            bechtold_conv_top_pa=getattr(
+                amip_cfg, 'bechtold_conv_top_pa', 15000.0),
+            bechtold_downdraft_evap=getattr(
+                amip_cfg, 'bechtold_downdraft_evap', 0.05),
+            bechtold_downdraft_alpha=getattr(
+                amip_cfg, 'bechtold_downdraft_alpha', 0.3),
+            bechtold_downdraft_rh_min=getattr(
+                amip_cfg, 'bechtold_downdraft_rh_min', 0.2),
+            bechtold_downdraft_transport=getattr(
+                amip_cfg, 'bechtold_downdraft_transport', False),
+            bechtold_downdraft_entrain_rate=getattr(
+                amip_cfg, 'bechtold_downdraft_entrain_rate', 5.0e-4),
+            bechtold_downdraft_detrain_scale_m=getattr(
+                amip_cfg, 'bechtold_downdraft_detrain_scale_m', 700.0),
+            # Convective precip split family — copy through AMIP/checkpoint
+            # restore so the physical autoconversion isn't dropped to defaults
+            # (codex MED; convective_precip_efficiency was a pre-existing gap).
+            convective_precip_efficiency=getattr(
+                amip_cfg, 'convective_precip_efficiency', None),
+            convective_precip_split=getattr(
+                amip_cfg, 'convective_precip_split', 'constant'),
+            autoconv_q_c_crit=getattr(amip_cfg, 'autoconv_q_c_crit', 5.0e-4),
+            autoconv_pe_max=getattr(amip_cfg, 'autoconv_pe_max', 0.9),
             sigma_b=amip_cfg.sigma_b,
             k_BL_max_per_day=amip_cfg.k_BL_max_per_day,
             k_free_per_day=amip_cfg.k_free_per_day,
@@ -1691,7 +1947,7 @@ class ExperimentConfig(NamedTuple):
         export) — not in core runtime paths.
         """
         from legoesm.forcing.amip_config import AMIPExperimentConfig
-        return AMIPExperimentConfig(
+        _amip_kwargs = dict(
             resolution=self.grid.resolution,
             nlev=self.grid.nlev,
             dt=self.dycore.dt,
@@ -1787,6 +2043,17 @@ class ExperimentConfig(NamedTuple):
             sbm_RH_ref=self.sbm_RH_ref,
             sbm_cape_threshold=self.sbm_cape_threshold,
             bechtold_cape_threshold=self.bechtold_cape_threshold,
+            convective_precip_efficiency=self.convective_precip_efficiency,
+            convective_precip_split=self.convective_precip_split,
+            autoconv_q_c_crit=self.autoconv_q_c_crit,
+            autoconv_pe_max=self.autoconv_pe_max,
+            bechtold_conv_top_pa=self.bechtold_conv_top_pa,
+            bechtold_downdraft_evap=self.bechtold_downdraft_evap,
+            bechtold_downdraft_alpha=self.bechtold_downdraft_alpha,
+            bechtold_downdraft_rh_min=self.bechtold_downdraft_rh_min,
+            bechtold_downdraft_transport=self.bechtold_downdraft_transport,
+            bechtold_downdraft_entrain_rate=self.bechtold_downdraft_entrain_rate,
+            bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
             sigma_b=self.sigma_b,
             k_BL_max_per_day=self.k_BL_max_per_day,
             k_free_per_day=self.k_free_per_day,
@@ -1804,6 +2071,12 @@ class ExperimentConfig(NamedTuple):
             ensemble_size=self.ensemble_size,
             output_dir=self.output.output_dir,
         )
+        # Filter to the legacy AMIP schema's fields — ExperimentConfig has
+        # accreted many newer knobs the flat AMIPExperimentConfig never
+        # mirrored; drop those instead of raising (drift-proof round-trip).
+        return AMIPExperimentConfig(**{
+            k: v for k, v in _amip_kwargs.items()
+            if k in AMIPExperimentConfig._fields})
 
 
 # ======================================================================

@@ -1242,7 +1242,7 @@ class TestGridValidation:
             concentration=Field(data=jnp.full(shape, 0.9), name="conc", dims=dims, units="1"),
         )
         config = SeaIceConfig(dynamics="evp")
-        with pytest.raises(ValueError, match="strain-rate and flux-divergence"):
+        with pytest.raises(ValueError, match="strain-rate operators"):
             step_sea_ice(
                 state, self._forcing(shape), jnp.full(shape, 271.35),
                 jnp.zeros(shape), jnp.zeros(shape), config, 1.0, 3600.0, grid=grid,
@@ -1264,7 +1264,7 @@ class TestGridValidation:
             concentration=Field(data=jnp.full(shape, 0.9), name="conc", dims=dims, units="1"),
         )
         config = SeaIceConfig(dynamics="none", transport="advect")
-        with pytest.raises(ValueError, match="strain-rate and flux-divergence"):
+        with pytest.raises(ValueError, match="flux-divergence operators"):
             step_sea_ice(
                 state, self._forcing(shape), jnp.full(shape, 271.35),
                 jnp.zeros(shape), jnp.zeros(shape), config, 1.0, 3600.0, grid=grid,

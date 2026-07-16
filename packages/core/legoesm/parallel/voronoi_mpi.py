@@ -353,6 +353,64 @@ def gather_state_mpas_ocean(local_state, partition: VoronoiPartition):
     )
 
 
+def exchange_state_mpas_ocean(local_state, layout: VoronoiPartitionLayout):
+    """Packed full-state halo refresh for a rank-local ``MPASOceanState``.
+
+    The OCEAN twin of the atmosphere step's ``_exchange_mpas_state``
+    (see :func:`make_voronoi_mpi_step`): ONE batched union-neighbor
+    message per neighbor per dtype group for the whole prognostic state
+    — ``u`` (edge) plus ``T``, ``S``, ``eta``, ``w`` (cell) — via
+    :func:`legoesm.parallel.halo_exchange_voronoi.batched_halo_exchange`
+    (AD-safe ``custom_vjp`` sendrecv; identity when the schedule has no
+    neighbors, i.e. np=1).  ``H_bathy``, ``land_mask`` and ``rho_ref_z``
+    are static after :func:`scatter_state_mpas_ocean` (halo filled at
+    scatter) and pass through unexchanged.
+
+    ``w`` is included even though the step re-diagnoses it: KPP/TKE
+    profile functions and diagnostics may read ``state.w`` at halo
+    cells, and one extra channel in the packed message is cheaper than
+    a stale-field audit on every consumer.
+
+    NOTE (stage correctness): this refreshes the step INPUT.  The ocean
+    step itself still consumes more stencil hops than ``halo_depth``
+    between refreshes — see
+    ``docs/performance/scaling/mpas_ocean_distributed_stage_audit.md``.
+    """
+    # Schema-drift tripwire (mirrors scatter/gather): a NEW MPASOceanState
+    # field would silently pass through UNEXCHANGED — fail loudly so the
+    # scatter/gather/exchange triple is extended deliberately.
+    _expected = {"u", "T", "S", "eta", "w", "H_bathy", "land_mask",
+                 "rho_ref_z"}
+    if set(local_state._fields) != _expected:
+        raise ValueError(
+            "exchange_state_mpas_ocean: MPASOceanState schema changed "
+            f"({sorted(set(local_state._fields) ^ _expected)}); extend "
+            "the scatter/gather/exchange helpers (and this set) "
+            "deliberately."
+        )
+
+    sched = layout.batched_comm
+    if sched is None:
+        # Hand-built layout (mirrors make_voronoi_mpi_step's rebuild).
+        sched = build_batched_halo_schedule(
+            layout.partition.cell_comm, layout.partition.edge_comm,
+        )
+
+    (u_ex,), (T_ex, S_ex, eta_ex, w_ex) = batched_halo_exchange(
+        (local_state.u.data,),
+        (local_state.T.data, local_state.S.data,
+         local_state.eta.data, local_state.w.data),
+        sched, layout.rank,
+    )
+    return local_state._replace(
+        u=local_state.u.replace(data=u_ex),
+        T=local_state.T.replace(data=T_ex),
+        S=local_state.S.replace(data=S_ex),
+        eta=local_state.eta.replace(data=eta_ex),
+        w=local_state.w.replace(data=w_ex),
+    )
+
+
 def gather_voronoi_field(
     local_field: jnp.ndarray,
     partition: VoronoiPartition,

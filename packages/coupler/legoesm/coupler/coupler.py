@@ -109,6 +109,33 @@ def _validate_coupler_config(config: CouplerConfig) -> None:
         raise ValueError(f"Ch_ocean must be >= 0, got {config.Ch_ocean!r}")
 
 
+def _apply_carbon_override(cold_start: CarbonState,
+                           override: CarbonState,
+                           carbon_shape: tuple[int, ...]) -> CarbonState:
+    """Replace a cold-start :class:`CarbonState`'s pools with a seeded IC.
+
+    Validates each of the eight pools' shape against the cold-start reference and
+    casts to its dtype, so the seeded carry pytree is byte-for-byte structurally
+    identical to the cold-start one (same shapes + dtypes) whether or not a carbon
+    IC is supplied -- only the values differ.  Any per-pool shape / type mismatch
+    RAISES (never a silent broadcast).
+    """
+    if type(override) is not type(cold_start):
+        raise ValueError(
+            f"carbon_override must be a {type(cold_start).__name__}; got "
+            f"{type(override).__name__}.")
+    fields = {}
+    for f in cold_start._fields:
+        o = jnp.asarray(getattr(override, f))
+        ref = getattr(cold_start, f)
+        if o.shape != ref.shape:
+            raise ValueError(
+                f"carbon_override.{f} has shape {o.shape}; expected {ref.shape} "
+                f"(the run's carbon column shape {carbon_shape}).")
+        fields[f] = o.astype(ref.dtype)
+    return cold_start._replace(**fields)
+
+
 def init_surface_state(
     shape: tuple[int, ...],
     T_soil_init: float = 280.0,  # coeff-ok: initial condition [K]
@@ -117,6 +144,7 @@ def init_surface_state(
     T_hypo_init: float = 278.0,  # coeff-ok: initial condition [K]
     T_ice_init: float = 260.0,  # coeff-ok: initial condition [K]
     land_config: LandConfig | None = None,
+    carbon_override: CarbonState | None = None,
 ) -> SurfaceState:
     """Initialize all surface tile states.
 
@@ -127,6 +155,16 @@ def init_surface_state(
     land_config : LandConfig, optional
         If provided and ``land_config.carbon.scheme == "differland"``,
         initialises prognostic carbon pools.
+    carbon_override : CarbonState, optional
+        A spun-up per-cell carbon IC (e.g. the finidat ``global_carbon_ic.npz``
+        loaded by
+        :func:`legoesm.land.carbon.global_init.load_finidat_carbon_ic`) that SEEDS
+        the prognostic pools INSTEAD of the cold-start :func:`init_carbon_state`
+        defaults, so a coupled run starts carbon at its mapped equilibrium.  Its
+        per-pool shape is validated against the run's carbon-column shape and cast
+        to the cold-start dtype (a mismatch raises).  ``None`` (default) -> the
+        cold-start is byte-identical.  Only honoured when the carbon cycle is
+        active (``differland``); supplying it with carbon off raises.
     """
     dims_2d = ("face", "x", "y")
     _sd = get_policy().storage
@@ -202,6 +240,17 @@ def init_surface_state(
         else:
             carbon_shape = shape
         carbon = init_carbon_state(carbon_shape, land_config.carbon)
+        if carbon_override is not None:
+            # Seed the prognostic pools from a spun-up carbon IC (the finidat)
+            # instead of the cold-start defaults, so a coupled run starts carbon
+            # at its mapped equilibrium.  Shape-validated + dtype-matched to the
+            # cold-start reference (None => byte-identical cold-start).
+            carbon = _apply_carbon_override(carbon, carbon_override, carbon_shape)
+    elif carbon_override is not None:
+        raise ValueError(
+            "carbon_override was supplied but the land carbon cycle is inactive "
+            "(land_config.carbon.scheme != 'differland'); a seeded carbon IC "
+            "needs the differland scheme on the land config.")
 
     return SurfaceState(land=land, ice=ice, lake=lake, accumulator=acc,
                         carbon=carbon)
@@ -365,6 +414,7 @@ def make_coupler(
     grid=None,
     land_param_provider=None,
     land_features: jnp.ndarray | None = None,
+    land_soil_frozen_fraction: jnp.ndarray | None = None,
 ):
     """Factory that returns step_surface function.
 
@@ -379,6 +429,24 @@ def make_coupler(
     land_param_provider : eqx.Module, optional
         Provider that produces spatially-varying ``LandSurfaceParams``.
         If None, step functions use scalar config values (backward compat).
+    land_soil_frozen_fraction : jnp.ndarray, optional
+        STATIC per-cell annual frozen fraction ``phi`` in ``[0, 1]`` (same
+        spatial shape as ``lat`` / the forcing fields), the perennial-frost
+        index that drives the permafrost/anaerobic SOM protection ``f_perma``
+        in the multilayer land carbon step (see
+        :func:`legoesm.land.carbon.carbon_cycle.perennial_frost_protection`).
+        ``phi`` is CLIMATOLOGICAL (permafrost extent is slowly-varying), so a
+        static field -- built once from the run's climate, or carried in the
+        seeded carbon IC (``global_carbon_ic.npz`` ``soil_frozen_fraction``,
+        the SAME cover-weighted ``phi`` that scaled the seeded equilibrium) --
+        is the correct source and avoids a prognostic annual diagnostic.
+        Captured as a compile-time constant (not a per-step traced arg) since
+        it never changes over the run.  ``None`` (default) -> the carbon step
+        receives ``soil_frozen_fraction=None`` and is BYTE-IDENTICAL to the
+        no-protection path (a static feature gate, not a data-dependent
+        branch): a coupled run without a permafrost IC is unchanged.  Only
+        meaningful for the multilayer (differland-carbon) land tile; supplying
+        it with a slab land config raises (the slab tile has no SOM column).
     land_features : jnp.ndarray, optional
         Static feature matrix ``(ncol, n_input)`` for neural provider.
         Required when ``land_param_provider`` is a ``NeuralParamProvider``.
@@ -397,6 +465,41 @@ def make_coupler(
     _use_multilayer = isinstance(land_config, MultiLayerLandConfig)
     _land_param_provider = land_param_provider
     _land_features = land_features
+    # Static per-cell permafrost index phi (climatological, never changes over
+    # the run) -> closure constant, threaded into the multilayer carbon step so
+    # a coupled run maintains the seeded permafrost SOC.
+    _land_soil_frozen_fraction = land_soil_frozen_fraction
+    if _land_soil_frozen_fraction is not None:
+        # phi only drives the SOM protection in the multilayer (differland) carbon
+        # column -- which itself requires lat -- so a slab config or a missing lat
+        # is a caller error, not a silent no-op.
+        if not _use_multilayer:
+            raise ValueError(
+                "land_soil_frozen_fraction (permafrost phi) is only supported for "
+                "the multilayer land carbon path; got a non-MultiLayerLandConfig "
+                f"land_config ({type(land_config).__name__}). Omit it for slab land.")
+        if _lat is None:
+            raise ValueError(
+                "land_soil_frozen_fraction (phi) requires lat (the per-cell carbon "
+                "grid the land tile flattens phi against, so its size can be "
+                "validated); pass lat.")
+        # Fail fast on a malformed STATIC phi so a bad finidat field cannot silently
+        # alter protection or scalar-broadcast: finite, in [0, 1] (an annual frozen
+        # FRACTION), and EXACTLY the lat/forcing grid size.  phi is a setup-time
+        # constant (concrete array), so these host-side checks add no per-step cost
+        # and never run under trace.
+        _phi0 = jnp.asarray(_land_soil_frozen_fraction)
+        if not bool(jnp.all(jnp.isfinite(_phi0))):
+            raise ValueError("land_soil_frozen_fraction (phi) must be finite.")
+        _phi_lo = float(jnp.min(_phi0)); _phi_hi = float(jnp.max(_phi0))
+        if _phi_lo < 0.0 or _phi_hi > 1.0:
+            raise ValueError(
+                "land_soil_frozen_fraction (phi) must be in [0, 1] (an annual "
+                f"frozen fraction); got [{_phi_lo}, {_phi_hi}].")
+        if _phi0.size != jnp.asarray(_lat).size:
+            raise ValueError(
+                "land_soil_frozen_fraction size must match the lat/forcing grid; "
+                f"got {_phi0.size} vs {jnp.asarray(_lat).size}.")
 
     # --- Surface-tile catalog -------------------------------------------------
     # Each tile is a step closure ``(ctx) -> (TileResponse, state_updates)``.  The
@@ -418,10 +521,19 @@ def make_coupler(
             _flat_lat = (_lat.reshape(-1)
                          if _lat is not None and hasattr(_lat, 'reshape')
                          else _lat)
+            # Flatten the static (6,n,n) permafrost phi to (ncol,) exactly like
+            # lat; None stays None so the carbon step takes its byte-identical
+            # no-protection branch (static gate, not jnp.where).
+            _flat_frozen = (
+                _land_soil_frozen_fraction.reshape(-1)
+                if (_land_soil_frozen_fraction is not None
+                    and hasattr(_land_soil_frozen_fraction, 'reshape'))
+                else _land_soil_frozen_fraction)
             land_new, land_resp_flat, carbon_new = step_multilayer_land(
                 ctx.sfc_state.land, _flat_forcing, land_config, U_min, ctx.dt,
                 lat=_flat_lat, carbon_state=ctx.sfc_state.carbon, doy=ctx.doy,
                 land_params=ctx.land_params,
+                soil_frozen_fraction=_flat_frozen,
             )
             # Unflatten TileResponse fields back to spatial shape
             land_resp = jax.tree.map(

@@ -2,21 +2,16 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
-_SCRIPTS = Path(__file__).resolve().parents[2] / "scripts" / "run"
-if str(_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS))
-
-from run_rcemip_plane import _update_land_slab_temperature  # noqa: E402
 from legoesm import constants  # noqa: E402
+from legoesm.atmosphere.idealized.land_rce import (  # noqa: E402
+    update_land_slab_temperature,
+)
 
 
 def test_land_slab_energy_balance_drives_temperature_and_conserves_energy():
@@ -30,7 +25,7 @@ def test_land_slab_energy_balance_drives_temperature_and_conserves_energy():
     albedo = 0.20
     emissivity = 1.0
 
-    T_new, diag = _update_land_slab_temperature(
+    T_new, diag = update_land_slab_temperature(
         T_s, sw_down, lw_down, shflx, lhflx,
         dt, heat_capacity, albedo, emissivity,
     )
@@ -63,7 +58,7 @@ def test_land_slab_energy_balance_equilibrium_is_fixed_point():
         - sw_down * (1.0 - albedo)
     )
 
-    T_new, diag = _update_land_slab_temperature(
+    T_new, diag = update_land_slab_temperature(
         T_s, sw_down, lw_down, shflx, lhflx,
         dt=120.0, heat_capacity=2.0e5,
         albedo=albedo, emissivity=emissivity,

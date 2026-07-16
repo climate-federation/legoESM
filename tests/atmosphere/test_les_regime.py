@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`legoesm.atmosphere.dynamics.les_regime`.
+"""Unit tests for :mod:`legoesm.atmosphere.dynamics.les.les_regime`.
 
 Stage-5 LES regime selection: CAPE-based shallow/deep dispatch (raise on
 unknown), per-regime resolution, and the stretched-grid validity guard.
@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 
 import pytest
-from legoesm.atmosphere.dynamics.les_regime import (
+from legoesm.atmosphere.dynamics.les.les_regime import (
     LESRegimeConfig,
     LESResolutionConfig,
     les_resolution_for_column,

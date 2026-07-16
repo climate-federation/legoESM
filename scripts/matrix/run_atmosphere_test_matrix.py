@@ -393,8 +393,14 @@ TEST_MATRIX = _build_test_matrix()
 ALL_RESULTS: list[dict[str, Any]] = []
 
 
-def record(tc: TestCase, status: str, wall_time: float, notes: str = ""):
-    icon = {"PASS": "  ", "FAIL": "**", "ERROR": "!!", "SKIP": "--"}[status]
+def record(tc: TestCase, status: str, wall_time: float, notes: str = "",
+           days: float = 0.0):
+    # #1029: waive a known full-run blow-up (FAIL->XFAIL) / flag its fix
+    # (PASS->XPASS); duration- and signature-aware so short runs and
+    # differently-caused failures report their true status.
+    status = _apply_known_failure(tc, status, days, notes)
+    icon = {"PASS": "  ", "FAIL": "**", "ERROR": "!!", "SKIP": "--",
+            "XFAIL": "xf", "XPASS": "XP"}[status]
     ALL_RESULTS.append({
         "test": tc.case, "grid": tc.grid_type,
         "equation_set": tc.equation_set, "resolution": tc.resolution,
@@ -504,6 +510,77 @@ def _apply_mass_drift_tolerance(
     )
 
 
+# --- Held-Suarez jet-strength floor (#1028) ---------------------------------
+# Held-Suarez equilibrates at ~30 m/s zonal-mean midlatitude jets; a fully
+# spun-up run whose max wind stays far below that has a DEAD circulation, which
+# the mass-drift + finiteness gates alone score as PASS. The cd-grid cube ends a
+# 200 d run at max|v|=7.3 m/s (#1028) while spectral/latlon/icosahedral reach
+# 27-66; the 20 m/s floor sits safely between. Only the flat-topography case is
+# gated (topo runs may blow up first — #1029), and only FULL runs (jet needs the
+# climatology spin-up; quick 30 d runs are too short to judge and skip the gate).
+_HELD_SUAREZ_MIN_JET_MS = 20.0
+_HELD_SUAREZ_JET_MIN_DAYS = 100.0
+
+
+def _apply_jet_strength_floor(
+    ok: bool, notes: str, max_wind: float, case: str, days: float,
+) -> tuple[bool, str]:
+    """FAIL a fully spun-up flat-topography Held-Suarez run with no jet (#1028)."""
+    if case != "held_suarez" or days < _HELD_SUAREZ_JET_MIN_DAYS:
+        return ok, notes
+    # ``not (max_wind >= floor)`` also catches NaN (which compares False).
+    if not (max_wind >= _HELD_SUAREZ_MIN_JET_MS):
+        return False, (
+            f"{notes}; DEAD JET max|v|={max_wind:.1f} < "
+            f"{_HELD_SUAREZ_MIN_JET_MS:.0f} m/s (Held-Suarez needs ~30; #1028)")
+    return ok, notes
+
+
+# --- Matrix known-failures (#1029) ------------------------------------------
+# (case, grid, vertical_coord) -> {issue, min_days} for cases whose numerical
+# BLOWUP (status FAIL) is EXPECTED and tracked by an open issue — reported as
+# XFAIL (does not exit-1) instead of a red regression. Two guards keep the
+# waiver from masking unrelated breakage (codex round 1):
+#   * only FAIL is waived — an ERROR (import/setup/infra breakage) is NEVER
+#     masked; it stays ERROR and exit-gates as usual.
+#   * only runs at least ``min_days`` long are waived — the blow-up reproduces
+#     only in the full-length regime, so a legitimately-clean short ``--quick``
+#     run reports its true PASS (not a spurious XPASS).
+#   * a FAIL is waived ONLY when its notes carry the reproduced ``expect_note``
+#     signature (the ``BLOWUP:`` tag from _blowup_info) — a DIFFERENT full-run
+#     FAIL on the same case (mass-drift or another physics-gate regression) has
+#     no blow-up tag, so it stays a red FAIL and exit-gates (codex round 2).
+# A registered case that PASSes a FULL run is reported XPASS (loud, non-exit) so
+# the entry gets removed. Keep this list SHORT and issue-linked; it is a
+# regression-triage aid, never a place to bury a real break.
+KNOWN_FAILURES: dict[tuple[str, str, str], dict[str, Any]] = {
+    # latlon held_suarez_topo: topographic jet runaway 131 m/s -> NaN ~step
+    # 27700 (~day 96), physics-free reproducer of the AMIP latlon topography
+    # instability. Reproduces only in a full-length run (the 2-day --quick lane
+    # never reaches the blow-up step and legitimately passes).
+    ("held_suarez_topo", "latlon", "hybrid"): {
+        "issue": "#1029", "min_days": 100.0, "expect_note": "BLOWUP"},
+}
+
+
+def _apply_known_failure(tc: "TestCase", status: str, days: float,
+                         notes: str = "") -> str:
+    """Remap the reproduced BLOWUP -> XFAIL and a full-run PASS -> XPASS (#1029).
+
+    A ``FAIL`` is waived only when the run is at least ``min_days`` long AND its
+    notes carry the ``expect_note`` blow-up signature; ``ERROR`` (infra
+    breakage), short runs, and any differently-caused FAIL pass through
+    unchanged so the waiver cannot mask an unrelated regression."""
+    entry = KNOWN_FAILURES.get((tc.case, tc.grid_type, tc.vertical_coord))
+    if entry is None or days < entry["min_days"]:
+        return status
+    if status == "FAIL" and entry["expect_note"] in notes:
+        return "XFAIL"
+    if status == "PASS":
+        return "XPASS"
+    return status   # ERROR / SKIP / differently-caused FAIL pass through
+
+
 def _grid_cell_area(grid_or_mesh):
     """Return the cell-area array for any supported grid object.
 
@@ -582,12 +659,12 @@ def _area_weighted_sum(field, area) -> float:
 # ---------------------------------------------------------------------------
 # Hyperdiffusion helpers
 # ---------------------------------------------------------------------------
-# Canonical source: ``legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid``
+# Canonical source: ``legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid``
 # (issue #269 — pulled the iter-1030 cube-resolution scaling formulas into
 # a shared module so the CLI, matrix runner, and tests reference one place).
 # Sentinel tests under ``tests/test_iter9*`` keep their own bit-identical
 # mirrors so that pinning is independent of script imports.
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
     MODON_DAMP_V,
     MODON_DIV_DAMP_FACTOR,
     MODON_HYPERDIFF_FACTOR,
@@ -596,6 +673,111 @@ from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
     cdgrid_hyperdiff_cube as _hyperdiff_cube,
 )
 from legoesm.experiments.matrix.namelist import write_case_namelist
+
+# ---------------------------------------------------------------------------
+# Cube SW core selection (FV3 single-implementation program, Phase-1 M1)
+# ---------------------------------------------------------------------------
+# ``--sw-core fb`` routes the cubed-sphere SW cases through the FV3
+# forward-backward chain (``FV3FBShallowWaterModel`` + the M1 validated
+# preset from ``fb_m1_preset_config``) instead of the production A-L RK3
+# path, enabling a permanent A/B until the Phase-1 M2 default flip.  (The FB
+# d_sw5 cross-face halo is the stable zero-ring approximation, not the fully
+# Fortran-faithful ghost; fv3_sw_core.py:3205.)  Cube only; every other grid
+# ignores the flag.  NOTE: the cube cosine-bell cases
+# never call ``model.step`` (pure ``fv_tp_2d`` transport with streamfunction
+# fluxes shared by both cores), so they are core-independent by construction.
+_SW_CORE_CHOICES = ("production", "fb")
+_SW_CORE = "production"
+# --fv3-native-grid (phase-4c): build the cube SW production-lane grid as
+# the FV3-native PRODUCTION config — ED gnomonic + duo halos (order-4) —
+# instead of the legacy equiangular, no-duo default.  The ED gnomonic
+# family is the one certified bit-exact in the phase-4 one-step oracles
+# (c_sw / d_sw / divergence_corner_duo).  The ED *metric* family
+# (dxc/dyc/area/sin_sg) flows through create_cubed_sphere_cdgrid's
+# gnomonic="auto" provenance read, so the A-L RK3 solver runs on it
+# unchanged.  fv3_native_angles (cross-face seam angles) is deliberately
+# NOT enabled: those O(1) seam values are tuned-incompatible with the
+# shipped A-L operators and are a native-FB-core concern
+# (cubed_sphere_cdgrid.py:639).
+#
+# HONESTY (codex p4c flag-review P1): vs the legacy default this flips TWO
+# coupled things — gnomonic family (equiangular->ED) AND cross-face halo
+# (none->duo for Williamson; order-2->4 for modons).  Duo halos change
+# operator behaviour, not only geometry, so the resulting A/B is "legacy
+# default vs FV3-native production config", NOT an isolated ED-vs-
+# equiangular metric swap.  Solver, config, IC, dt, resolution ARE held
+# fixed.  Applies to BOTH cube SW lanes: the production A-L solver swaps
+# its grid, and the FB core (--sw-core fb, the ED grid's intended
+# consumer) builds ED in _fb_cube_sw_model.
+_FV3_NATIVE_GRID = False
+# --fv3-native-angles (phase-4c, FB lane only): on top of --fv3-native-grid,
+# select the exact grid_utils_init cross-face seam cosa_u/v, sina_u/v.  The
+# A-L production solver's operators are TUNED to the legacy single-sided
+# seam angles (cubed_sphere_cdgrid.py:639), so this is a native-forward-
+# backward-core decision — it requires --sw-core fb AND --fv3-native-grid;
+# main() rejects the other combinations.  NOT-YET-FULLY-FAITHFUL (codex
+# p4c FB-review P1): this is the ED grid + native seam angles, but the FB
+# d_sw5 cross-face halo is still the stable zero-ring approximation, not
+# the Fortran-faithful attenuated ghost (which destabilizes the modon run;
+# fv3_sw_core.py:3205).  So it is a 'native ED + native-angles FB
+# experiment', not the fully Fortran-faithful FV3 config.
+_FV3_NATIVE_ANGLES = False
+
+
+def _fv3_native_flag_error(fv3_native_grid, fv3_native_angles, sw_core):
+    """Return the CLI error string for an invalid FV3-native flag combo, or
+    None if the combination is valid.  --fv3-native-angles needs BOTH the ED
+    grid (the seam angles are an ED concept) AND the FB core (the A-L solver
+    is tuned to the legacy seam angles).  Module-level + pure so main()'s
+    validation is unit-testable without running the matrix (codex p4c
+    FB-review P2)."""
+    if fv3_native_angles and not fv3_native_grid:
+        return ("--fv3-native-angles requires --fv3-native-grid: the "
+                "cross-face seam angles are defined on the ED gnomonic grid.")
+    if fv3_native_angles and sw_core != "fb":
+        return ("--fv3-native-angles requires --sw-core fb: the A-L "
+                "production solver's operators are tuned to the legacy seam "
+                "angles (cubed_sphere_cdgrid.py:639).")
+    return None
+
+
+def _fb_cube_sw_model(n: int, test_num: int, *, fv3_native_grid: bool = False,
+                      fv3_native_angles: bool = False):
+    """Build the FB-lane cube SW model (duogrid-only; M1 preset).
+
+    The FB chain requires the duogrid cross-face halo (``require_duogrid_fb``
+    raises otherwise), so ALL FB-lane cases use ``use_duogrid=True`` — unlike
+    the production lane where only the modons (test 8) do.  Modons stay
+    non-rotating (omega=0), matching the production lane.
+
+    ``fv3_native_grid`` (phase-4c): build the FV3-native ED gnomonic grid
+    (create_fv3_native_cubed_sphere) instead of the legacy equiangular — the
+    FB core is the ED grid's intended consumer.  ``fv3_native_angles`` then
+    additionally selects the exact cross-face seam cosa/sina; it requires
+    ``fv3_native_grid`` (the seam angles are an ED concept).  This is ED +
+    native seam angles, NOT the fully Fortran-faithful FV3 config — the FB
+    d_sw5 cross-face halo stays the stable zero-ring approximation
+    (fv3_sw_core.py:3205).  Both default False → the equiangular+duo FB
+    baseline.
+    """
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
+        FV3FBShallowWaterModel, fb_m1_preset_config)
+    from legoesm.grids.cubed_sphere import (
+        create_cubed_sphere, create_fv3_native_cubed_sphere)
+    if fv3_native_angles and not fv3_native_grid:
+        raise ValueError(
+            "fv3_native_angles requires fv3_native_grid: the cross-face "
+            "seam angles are defined on the ED gnomonic grid.")
+    if fv3_native_grid:
+        from legoesm import constants
+        grid = create_fv3_native_cubed_sphere(
+            n, omega=(0.0 if test_num == 8 else constants.Omega),
+            use_duogrid=True, k2e_nord=4)
+    else:
+        grid = (create_cubed_sphere(n, omega=0.0, use_duogrid=True)
+                if test_num == 8 else create_cubed_sphere(n, use_duogrid=True))
+    return FV3FBShallowWaterModel(grid, fb_m1_preset_config(),
+                                  fv3_native_angles=fv3_native_angles)
 
 
 def _modon_hyperdiff_coeff(n: int) -> float:
@@ -1165,7 +1347,7 @@ def _make_rrtmgp_physics(model_type: str, dt: float, hs_fn=None,
             rrtmgp_tend = rrtmgp_result[0] if isinstance(rrtmgp_result, tuple) else rrtmgp_result
             phys_state_out = rrtmgp_result[1] if isinstance(rrtmgp_result, tuple) else None
             hs_tend = hs_fn(state, grid, sigma_coord)
-            from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+            from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
             summed = SpectralHydrostaticState(
                 vor_hat=rrtmgp_tend.vor_hat.replace(
                     data=rrtmgp_tend.vor_hat.data + hs_tend.vor_hat.data),
@@ -1475,6 +1657,19 @@ def _regrid_latlon_to_181x360(arr: np.ndarray, lon_deg: np.ndarray,
     tgt_lat = _canvas_lat()
     tgt_lon = _canvas_lon() % 360.0
     la, lo = np.meshgrid(tgt_lat, tgt_lon, indexing="ij")
+    # Clamp the target latitude into the source grid's latitude span before
+    # interpolation.  The canvas reaches the poles (+-90) but the source rows
+    # stop short of them (lat-lon cell-centers at ~+-88.75; T21 gaussian lats at
+    # ~+-85), so uncorrected polar target rows fell OUTSIDE the source range and
+    # RegularGridInterpolator LINEAR-EXTRAPOLATED (bounds_error=False,
+    # fill_value=None).  That extrapolation overshot: it drove the nonnegative
+    # wind-speed magnitude negative and inflated |u|,|v|,T extrema in the polar
+    # rows on the lat-lon and spectral(gaussian) regrid paths (cube/icosa use
+    # bounded inverse-distance weights and were unaffected -> the cross-grid
+    # inconsistency).  Clamping makes the poles a bounded nearest-edge hold of
+    # the outermost source row instead.  lon is periodic (handled via lon_per)
+    # so it needs no clamp.
+    la = np.clip(la, lat_src.min(), lat_src.max())
     out = rgi(np.stack([la.ravel(), lo.ravel()], axis=-1))
     return out.reshape((tgt_lat.size, tgt_lon.size) + a.shape[2:])
 
@@ -2388,9 +2583,10 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
     test_num = tc.run_kwargs["test_num"]
 
     if tc.grid_type == "cubed_sphere":
-        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere import (
+            create_cubed_sphere, create_fv3_native_cubed_sphere)
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
             CDGridShallowWaterConfig)
         from tests.test_cases.williamson import (
@@ -2413,8 +2609,29 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # (day-10 max|u| 18 m/s vs 111 m/s, peak vorticity 0.7x vs 6.6x
         # initial).  Williamson cases keep the production non-duogrid
         # path (balanced flows; calibrated separately).
-        grid = (create_cubed_sphere(n, omega=0.0, use_duogrid=True)
-                if test_num == 8 else create_cubed_sphere(n))
+        if _FV3_NATIVE_GRID and _SW_CORE == "production":
+            # phase-4c: the FV3-native production grid config = ED gnomonic
+            # + duo halos (order-4) on ALL cube SW cases.  omega=0 for the
+            # non-rotating modons (test 8), rotating otherwise
+            # (constants.Omega).  The model builds its cdgrid internally and
+            # auto-selects ED metrics from the grid provenance.
+            #
+            # NB (codex p4c flag-review P1): vs the legacy default this
+            # changes TWO things together — the gnomonic family
+            # (equiangular->ED) AND the cross-face halo (none->duo order-4
+            # for W2/W5/W6; order-2->order-4 for modons).  Duo halos alter
+            # operator behaviour, not only geometry.  So the A/B is
+            # "legacy default vs FV3-native production config", NOT an
+            # isolated ED-vs-equiangular metric swap — attribute the
+            # imprint change to the native config bundle, not the grid
+            # metrics alone.  See the _FV3_NATIVE_GRID module note.
+            from legoesm import constants
+            grid = create_fv3_native_cubed_sphere(
+                n, omega=(0.0 if test_num == 8 else constants.Omega),
+                use_duogrid=True, k2e_nord=4)
+        else:
+            grid = (create_cubed_sphere(n, omega=0.0, use_duogrid=True)
+                    if test_num == 8 else create_cubed_sphere(n))
         cdgrid = create_cubed_sphere_cdgrid(grid)
         dt = 300.0
         # Iter-760: switch to Fortran-faithful del-n vorticity damping
@@ -2458,7 +2675,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # duplicate; future calibration updates land in the helper +
         # propagate here automatically.  Bit-identical at C36 (helper
         # uses ``div_damp_factor=8.0, damp_v=0.030`` defaults).
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             iter1009_dual_target_config,
         )
         # new_test_dycores iter-31: W6 (Rossby-Haurwitz wave-4) needs
@@ -2552,7 +2769,28 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             )
         else:
             config = iter1009_dual_target_config(n)
-        model = FV3EdgeShallowWaterModel(grid, config)
+        # Phase-1 M1 FB lane (--sw-core fb): swap in the FV3 forward-backward
+        # core (native scheme, but the d_sw5 cross-face halo is the stable
+        # zero-ring approximation, not the fully Fortran-faithful ghost;
+        # fv3_sw_core.py:3205).  Grid is rebuilt duogrid (FB requirement);
+        # everything downstream (IC recipe, metrics, regrid) is shared with
+        # the production lane so the A/B protocol is held fixed.
+        if _SW_CORE == "fb":
+            # The FB core is the FV3-native grid's intended consumer: it
+            # honours --fv3-native-grid (ED gnomonic) and, on top, the
+            # --fv3-native-angles native seam-cosa/sina opt-in.  It builds
+            # its own grid, so the production-lane `grid`/`cdgrid` above are
+            # discarded here.
+            model = _fb_cube_sw_model(
+                n, test_num, fv3_native_grid=_FV3_NATIVE_GRID,
+                fv3_native_angles=_FV3_NATIVE_ANGLES)
+            grid = model.grid
+        elif _SW_CORE == "production":
+            model = FV3EdgeShallowWaterModel(grid, config)
+        else:
+            raise ValueError(
+                f"unknown --sw-core '{_SW_CORE}'; expected one of "
+                f"{_SW_CORE_CHOICES}")
         cdgrid = model.cdgrid
 
         # Initialise edge-midpoint D-grid winds analytically.
@@ -2678,7 +2916,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
             CGridLatLonShallowWaterModel, CGridLatLonShallowWaterConfig,
             CGridLatLonShallowWaterState,
             williamson_test2_cgrid, williamson_test5_cgrid,
@@ -2815,7 +3053,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
             MPASShallowWaterModel, MPASShallowWaterConfig)
         from tests.atmosphere.shallow_water.test_cases.williamson_mpas import (
             williamson_test2_mpas, williamson_test5_mpas,
@@ -2893,7 +3131,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
     elif tc.grid_type == "spectral":
         from legoesm.grids.gaussian import (
             create_gaussian_grid, sh_synthesis, uv_from_vordiv)
-        from legoesm.atmosphere.dynamics.spectral_sw import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
             SpectralShallowWaterModel, SpectralSWConfig,
             williamson_test2_spectral, williamson_test5_spectral,
         )
@@ -3061,7 +3299,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # initial state for W2: ``williamson_test2_spectral``
         # is itself the closed-form geostrophic balance).
         from legoesm.grids.gaussian import sh_synthesis as _sh_syn
-        from legoesm.atmosphere.dynamics.spectral_sw import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
             williamson_test2_spectral as _w2_spec)
         from legoesm import constants as _consts
         _init_state = _w2_spec(grid)
@@ -3175,7 +3413,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
             CDGridShallowWaterConfig)
 
@@ -3194,7 +3432,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         # helper used by the W2/W5 cube paths so the matrix runner
         # has ONE canonical cube SW config source.  Numerical
         # behaviour unchanged (config is unused for CB).
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             iter1009_dual_target_config,
         )
         config = iter1009_dual_target_config(n)
@@ -3272,7 +3510,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
             CGridLatLonShallowWaterState)
         from legoesm.grids.operators_latlon_cgrid import cell_to_cgrid_winds
         from legoesm.core.operators_fv_latlon import cgrid_fv_flux_divergence_latlon
@@ -3378,7 +3616,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
             MPASShallowWaterModel, MPASShallowWaterConfig)
         from legoesm.core.state import MPASShallowWaterState
 
@@ -3478,7 +3716,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
     elif tc.grid_type == "spectral":
         from legoesm.grids.gaussian import (
             create_gaussian_grid, sh_synthesis, sh_analysis)
-        from legoesm.atmosphere.dynamics.spectral_sw import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
             SpectralShallowWaterModel, SpectralSWConfig,
             SpectralSWState, spectral_sw_tendencies)
         from legoesm import constants as C
@@ -3660,10 +3898,10 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
 
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel as PrimitiveEquationModel,
             CDGridPrimitiveEquationConfig as PrimitiveEquationConfig)
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing, held_suarez_init)
         from legoesm.core.operators import global_integral
 
@@ -3818,10 +4056,10 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
             hydrostatic_to_cgrid)
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing_latlon, held_suarez_init_latlon)
 
         n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
@@ -3887,9 +4125,9 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing_mpas, held_suarez_init_mpas)
 
         level = int(tc.resolution.replace("ico", ""))
@@ -3945,11 +4183,11 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             create_gaussian_grid, sh_synthesis_3d,
         )
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPrimitiveEquationModel, SpectralPEConfig,
             isothermal_rest_state_spectral, spectral_pe_to_grid,
         )
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing_spectral,
         )
 
@@ -4058,6 +4296,15 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
     ok, notes = _apply_mass_drift_tolerance(
         ok, notes, mass_drift, HELD_SUAREZ_MASS_DRIFT_TOL,
         n_samples=len(diag.get("mass", [])))
+    # #1028: a full run that never develops a jet is a dead-circulation FAIL,
+    # not a PASS. No-op for quick runs and the topo case (see helper).
+    ok, notes = _apply_jet_strength_floor(ok, notes, max_wind, tc.case, days)
+    # #1029 (codex round 2): tag a numerical blow-up so the known-failure waiver
+    # can key on the reproduced signature, not status alone — a mass-drift or
+    # other regression on the same case has no _blowup_info and stays a red FAIL.
+    _bi = diag.get("_blowup_info")
+    if _bi is not None:
+        notes = f"{notes}; BLOWUP: {_bi.get('reason', 'non-finite')}"
 
     level_values = np.asarray(
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
@@ -4178,7 +4425,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel as PrimitiveEquationModel,
             CDGridPrimitiveEquationConfig as PrimitiveEquationConfig)
         from tests.test_cases.baroclinic_wave import (
@@ -4335,7 +4582,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
             hydrostatic_to_cgrid)
         from tests.test_cases.baroclinic_wave import (
@@ -4417,7 +4664,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
         from tests.test_cases.baroclinic_wave import (
             baroclinic_wave_init_mpas)
@@ -4485,7 +4732,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             create_gaussian_grid, sh_synthesis, sh_synthesis_3d,
         )
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPrimitiveEquationModel, SpectralPEConfig,
             spectral_pe_to_grid,
         )
@@ -4679,7 +4926,7 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import (
             create_cubed_sphere, rotate_winds_geo_to_grid)
-        from legoesm.atmosphere.dynamics.tracer_transport import (
+        from legoesm.atmosphere.dynamics.shared.tracer_transport import (
             TracerTransportModel, TracerTransportConfig)
         from tests.test_cases.dcmip_transport import (
             dcmip11_wind, dcmip11_init, dcmip12_wind, dcmip12_init,
@@ -4699,7 +4946,7 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.tracer_transport_latlon import (
+        from legoesm.atmosphere.dynamics.gcm.tracer_transport_latlon import (
             TracerTransportLatLonModel, TracerTransportLatLonConfig)
         from tests.test_cases.dcmip_transport import (
             dcmip11_init_latlon, dcmip12_init_latlon, dcmip13_init_latlon)
@@ -4729,7 +4976,7 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.atmosphere.dynamics.tracer_transport_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import (
             TracerTransportMPASModel, TracerTransportMPASConfig)
         from tests.test_cases.dcmip_transport import (
             dcmip11_init_mpas, dcmip12_init_mpas, dcmip13_init_mpas)
@@ -4859,13 +5106,13 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import standard_hybrid_levels
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel as PrimitiveEquationModel,
             CDGridPrimitiveEquationConfig as PrimitiveEquationConfig)
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
         from legoesm.core.operators import global_integral
 
-        from legoesm.atmosphere.held_suarez import held_suarez_forcing
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing
 
         n = int(tc.resolution[1:])
         grid = create_cubed_sphere(n)
@@ -4947,10 +5194,10 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.grids.vertical import standard_hybrid_levels
-        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
             hydrostatic_to_cgrid)
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_init_latlon, held_suarez_forcing_latlon)
 
         n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
@@ -5012,9 +5259,9 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.grids.vertical import standard_hybrid_levels
-        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing_mpas, held_suarez_init_mpas)
         from legoesm.ocean.init_mpas import reconstruct_cell_velocity
 
@@ -5068,11 +5315,11 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
             create_gaussian_grid, sh_synthesis_3d,
         )
         from legoesm.grids.vertical import standard_hybrid_levels
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPrimitiveEquationModel, SpectralPEConfig,
             isothermal_rest_state_spectral, spectral_pe_to_grid,
         )
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing_spectral,
         )
 
@@ -5213,7 +5460,7 @@ def _make_kessler_nh_physics_fn(height_coord, dt_phys, tendencies_cls):
     tendencies_cls : type
         NonHydrostaticTendencies or MPASNonHydrostaticTendencies.
     """
-    from legoesm.atmosphere.dynamics.compressible_euler import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
         compute_exner_perturbation,
     )
     from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
@@ -5338,7 +5585,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
 
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
             CDGridCompressibleEulerModel as CompressibleEulerModel,
             CDGridCompressibleEulerConfig as CompressibleEulerConfig)
 
@@ -5647,7 +5894,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas import (
             MPASCompressibleEulerModel, MPASCompressibleEulerConfig)
 
         level = int(tc.resolution.replace("ico", ""))
@@ -5791,7 +6038,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.gaussian import (
             create_gaussian_grid, sh_synthesis_3d,
         )
-        from legoesm.atmosphere.dynamics.spectral_nh import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
             SpectralCompressibleEulerModel, SpectralNHConfig,
             dcmip25_tc1_init_spectral,
             dcmip25_tc2_init_spectral,
@@ -7640,6 +7887,40 @@ def build_parser() -> argparse.ArgumentParser:
              "NOT ppmv — passing ``8`` is an unphysical value and "
              "is rejected.  For 8 ppmv, use ``8e-6``.")
     p.add_argument(
+        "--sw-core", type=str, default="production",
+        choices=list(_SW_CORE_CHOICES),
+        help="Cube SW dynamical core (Phase-1 M1 A/B lane): 'production' "
+             "= FV3EdgeShallowWaterModel (A-L RK3, default); 'fb' = "
+             "FV3FBShallowWaterModel (FV3 forward-backward chain, "
+             "duogrid, M1 preset nord=1 d4_bg=0.16 dddmp=0.2 damp_v=0.02 "
+             "nord_v=2).  Cubed-sphere SW cases only; other grids ignore "
+             "it, and the cube cosine-bell cases are core-independent "
+             "(pure transport, model.step never called).")
+    p.add_argument(
+        "--fv3-native-grid", action="store_true",
+        help="Cube SW: build the grid as the FV3-native ED gnomonic + duo "
+             "halos (create_fv3_native_cubed_sphere) instead of the legacy "
+             "equiangular, no-duo default.  The ED gnomonic family is the "
+             "one certified bit-exact in the phase-4 one-step oracles; its "
+             "metrics flow through create_cubed_sphere_cdgrid's "
+             "gnomonic='auto'.  Applies to BOTH cube lanes (the production "
+             "A-L solver and --sw-core fb).  NOTE: vs the default this flips "
+             "BOTH the gnomonic family AND the cross-face halo (duo), so it "
+             "is a 'legacy default vs FV3-native config' A/B, not an "
+             "isolated ED-vs-equiangular swap (solver+config+IC+dt+"
+             "resolution held fixed).  Non-cube grids ignore it.")
+    p.add_argument(
+        "--fv3-native-angles", action="store_true",
+        help="Cube SW FB lane (requires --fv3-native-grid AND --sw-core fb): "
+             "additionally select the exact FV3 grid_utils_init cross-face "
+             "seam cosa/sina angles.  The A-L production solver's operators "
+             "are tuned to the legacy single-sided seam angles, so this is a "
+             "native-FB-core decision; main() rejects it without both "
+             "prerequisites.  NOTE: this is ED grid + native seam angles, "
+             "NOT the fully Fortran-faithful FV3 config — the FB d_sw5 "
+             "cross-face halo remains the stable zero-ring approximation "
+             "(the faithful ghost destabilizes; fv3_sw_core.py:3205).")
+    p.add_argument(
         "--resolution", type=str, default=None,
         help="Override baseline resolution (e.g. C48, 90x180, ico6)")
     p.add_argument(
@@ -7713,6 +7994,25 @@ def main():
     # Zero or negative values silently produce nonsensical runs.
     if args.days is not None and args.days <= 0:
         parser.error("--days must be positive")
+
+    # Phase-1 M1 FB lane: stash the cube SW core selection for
+    # run_shallow_water (argparse choices= already rejects unknowns;
+    # run_shallow_water raises again defensively for non-CLI callers).
+    global _SW_CORE
+    _SW_CORE = args.sw_core
+
+    # phase-4c: stash the FV3-native ED-grid + seam-angle selections for the
+    # cube SW lanes in run_shallow_water (see the _FV3_NATIVE_GRID note).
+    # --fv3-native-angles is the native-angle FB config: it needs BOTH the
+    # ED grid (the seam angles are an ED concept) AND the FB core (the A-L
+    # solver is tuned to the legacy seam angles).
+    _native_err = _fv3_native_flag_error(
+        args.fv3_native_grid, args.fv3_native_angles, args.sw_core)
+    if _native_err:
+        parser.error(_native_err)
+    global _FV3_NATIVE_GRID, _FV3_NATIVE_ANGLES
+    _FV3_NATIVE_GRID = args.fv3_native_grid
+    _FV3_NATIVE_ANGLES = args.fv3_native_angles
 
     # iter-31: thread per-run GHG overrides through to
     # _make_rrtmgp_physics.  iter-32 codex MEDIUM: zero is a valid
@@ -7992,11 +8292,11 @@ def main():
         try:
             status, wall, notes = runner(
                 tc, out_dir, days, radiation=args.radiation)
-            record(tc, status, wall, notes)
+            record(tc, status, wall, notes, days=days)
         except NotImplementedError as e:
-            record(tc, "SKIP", 0, str(e)[:120])
+            record(tc, "SKIP", 0, str(e)[:120], days=days)
         except Exception as e:
-            record(tc, "ERROR", 0, str(e)[:120])
+            record(tc, "ERROR", 0, str(e)[:120], days=days)
             traceback.print_exc()
         finally:
             _ensure_required_artifacts(out_dir)
@@ -8011,10 +8311,10 @@ def main():
           f"{'Case':<22}  {'Time':>8}  Notes")
     print("-" * 105)
 
-    n_pass = n_fail = n_error = n_skip = 0
+    n_pass = n_fail = n_error = n_skip = n_xfail = n_xpass = 0
     for r in ALL_RESULTS:
-        icon = {"PASS": "  ", "FAIL": "**", "ERROR": "!!",
-                "SKIP": "--"}[r["status"]]
+        icon = {"PASS": "  ", "FAIL": "**", "ERROR": "!!", "SKIP": "--",
+                "XFAIL": "xf", "XPASS": "XP"}[r["status"]]
         print(f"  {icon}{r['status']:5}  {r['grid']:<14}  "
               f"{r['equation_set']:<16}  {r['test']:<22}  "
               f"{r['wall_time']:7.1f}s  {r['notes']}")
@@ -8024,14 +8324,21 @@ def main():
             n_fail += 1
         elif r["status"] == "SKIP":
             n_skip += 1
+        elif r["status"] == "XFAIL":   # #1029 expected failure — not exit-gated
+            n_xfail += 1
+        elif r["status"] == "XPASS":   # #1029 known-failure now passing — alert
+            n_xpass += 1
         else:
             n_error += 1
 
     print("-" * 105)
     print(f"  Total: {len(ALL_RESULTS)} tests | "
           f"PASS: {n_pass} | FAIL: {n_fail} | SKIP: {n_skip} | "
-          f"ERROR: {n_error} | Wall: {total_wall:.1f}s "
-          f"({total_wall / 60:.1f} min)")
+          f"ERROR: {n_error} | XFAIL: {n_xfail} | XPASS: {n_xpass} | "
+          f"Wall: {total_wall:.1f}s ({total_wall / 60:.1f} min)")
+    if n_xpass:
+        print(f"  [ALERT] {n_xpass} KNOWN_FAILURES now PASS — remove them from "
+              f"the registry (#1029).")
     print("=" * 78)
 
     # MPI: each rank writes its own per-rank summary; rank 0 merges
@@ -8047,6 +8354,8 @@ def main():
             n_fail = sum(1 for r in ALL_RESULTS if r["status"] == "FAIL")
             n_skip = sum(1 for r in ALL_RESULTS if r["status"] == "SKIP")
             n_error = sum(1 for r in ALL_RESULTS if r["status"] == "ERROR")
+            n_xfail = sum(1 for r in ALL_RESULTS if r["status"] == "XFAIL")
+            n_xpass = sum(1 for r in ALL_RESULTS if r["status"] == "XPASS")
         if mpi_rank != 0:
             return  # non-root ranks exit before summary/comparison
 
@@ -8056,7 +8365,8 @@ def main():
         json.dump({
             "results": ALL_RESULTS, "total_wall_time": total_wall,
             "n_pass": n_pass, "n_fail": n_fail, "n_skip": n_skip,
-            "n_error": n_error, "quick_mode": args.quick,
+            "n_error": n_error, "n_xfail": n_xfail, "n_xpass": n_xpass,
+            "quick_mode": args.quick,
             "radiation": args.radiation,
         }, f, indent=2)
     with open(output_base / "summary.txt", "w") as f:
@@ -8064,7 +8374,7 @@ def main():
         f.write("=" * 60 + "\n")
         f.write(f"Total: {len(ALL_RESULTS)} tests | "
                 f"PASS: {n_pass} | FAIL: {n_fail} | SKIP: {n_skip} | "
-                f"ERROR: {n_error}\n")
+                f"ERROR: {n_error} | XFAIL: {n_xfail} | XPASS: {n_xpass}\n")
         f.write(f"Wall time: {total_wall:.1f}s ({total_wall / 60:.1f} min)\n")
         f.write(f"Radiation: {args.radiation}\n")
         f.write(f"Quick mode: {args.quick}\n\n")

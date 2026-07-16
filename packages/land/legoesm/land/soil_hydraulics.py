@@ -12,6 +12,48 @@ Six pluggable retention curve models, all JAX-differentiable:
    uses VG inverse for psi(theta) and simplified conductivity
    (see lu_psi, lu_K docstrings)
 
+Faithfulness
+------------
+The Clapp-Hornberger, van Genuchten-Mualem and Brooks-Corey retention/
+conductivity closed forms are pinned by
+``tests/land/unit/test_soil_hydraulics_faithful.py`` against an independent
+NumPy transcription of their canonical papers (relative tol 1e-9):
+
+  * Clapp & Hornberger (1978) CAMPBELL power-law branch:
+    psi = psi_sat*(theta/theta_sat)^(-b), K = K_sat*(theta/theta_sat)^(2b+3),
+    C = dtheta/dpsi.  (CH also specify a short parabolic near-saturation section;
+    legoESM adopts the pure Campbell power law everywhere, as CLM/Noah do — that
+    is the branch pinned.)  Cross-checked against the on-disk gSAM Simple-Land-
+    Model reference code ``SLM/soil_proc.f90``: for an unfrozen interface with
+    UNIFORM soilw/Se (gSAM applies the node-k Bconst(k) to BOTH the soilw(k) and
+    soilw(k+1) terms, so its depth-weighted two-node average reduces to soilw^p)
+    its soil-water DIFFUSIVITY ``ks*B*|psi_sat|*soilw^(B+2)/poro`` equals this
+    K*|dpsi/dtheta| = K/|C|, and its pore VELOCITY ``ks*soilw^(2B+2)/poro``
+    equals K/(poro*Se) — so the exponents (2b+3 for K, b+2 for D) are fixed by
+    both the paper and the on-disk model.
+  * van Genuchten (1980) eqs 8-9: Se = (1 + |alpha psi|^n)^(-m), m = 1 - 1/n,
+    K = K_sat*sqrt(Se)*[1 - (1 - Se^(1/m))^m]^2 (Mualem).
+  * Brooks & Corey (1964): Se = (|psi_b|/|psi|)^lambda,
+    K = K_sat*Se^(3 + 2/lambda) (Brooks-Corey/Burdine, eta = (2+3 lambda)/lambda).
+  * ``retention_curve="campbell"`` dispatches to the Clapp-Hornberger power law
+    (Campbell 1974 is that same psi_sat*Se^(-b) / K_sat*Se^(2b+3) form).
+
+DEPARTURES / NUMERICS (NOT the pure closed form; documented, some canaried):
+  * effective-saturation clips plateau K/psi at extreme dryness instead of the
+    power law's 0/-inf limit.  The bounds are model-specific: CH floors Se at
+    1e-6 (canaried); the vG/BC INVERSES clip Se to [1e-6, 1-1e-6]; vG K uses a
+    sub-physical 1e-12 Se floor; Lu K clips Se to 1e-10 (plus a K_sat*1e-10 film
+    floor); PDI applies its own bounds (see each fn).
+  * the van-Genuchten/Lu K use a where-before-pow AD guard so the forward is
+    EXACT at saturation (Se=1 -> K=K_sat) while the pow's infinite-slope branch
+    is masked (finite reverse-mode gradient); canaried via K(psi=0)==K_sat.
+  * the S_s elastic-storage branch in ``theta_from_psi``/``moisture_capacity``
+    (theta = theta_sat + S_s*theta_sat*psi for psi>=0) is a ParFlow/CliMA
+    change-of-variable near saturation, NOT a retention-curve term.
+  * PDI (Peters-Durner-Iden 2015) and Lu (2016) are APPROXIMATE: faithful SWRC
+    but a VG inverse for psi(theta) and a simplified film conductivity (see the
+    ``pdi_psi``/``pdi_K``/``lu_psi``/``lu_K`` docstrings) — not pinned here.
+
 References
 ----------
 - Clapp & Hornberger (1978): Empirical equations for some soil hydraulic properties.

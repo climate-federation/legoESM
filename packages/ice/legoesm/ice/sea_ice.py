@@ -84,6 +84,24 @@ def grid_supports_ice_dynamics(grid) -> bool:
     return isinstance(grid, (CubedSphereGrid, LatLonGrid, VoronoiMesh))
 
 
+def grid_supports_ice_transport(grid) -> bool:
+    """True when ``grid`` has implemented sea-ice TRACER-TRANSPORT ops.
+
+    Superset of :func:`grid_supports_ice_dynamics`: every dynamics-capable
+    grid can also transport, and the curvilinear lat-lon C-grid
+    (``LatLonCGridGeometry`` — the tripole eORCA geometry) additionally
+    supports transport via the fold-aware donor-cell C-grid advection
+    (``transport.fv_flux_divergence_latlon_cgrid``, built on the core
+    ``upwind_cell_to_uface/vface`` + ``divergence_cgrid`` operators) while
+    remaining dynamics-INcapable (no curvilinear strain-rate/stress-
+    divergence — EVP/mEVP still degrade to ``free_drift`` there).
+    """
+    if grid_supports_ice_dynamics(grid):
+        return True
+    from legoesm.grids.latlon import LatLonCGridGeometry
+    return isinstance(grid, LatLonCGridGeometry)
+
+
 # Backward-compatible private alias (internal call sites below + any importer
 # predating the public promotion).
 _grid_supports_ice_dynamics = grid_supports_ice_dynamics
@@ -92,18 +110,19 @@ _grid_supports_ice_dynamics = grid_supports_ice_dynamics
 def _base_spatial_ndim(grid):
     """Spatial rank of a per-cell ice field for ``grid`` (no category axis).
 
-    MPAS Voronoi → 1 ``(nCells,)``; lat-lon → 2 ``(n_lat, n_lon)``;
-    cubed-sphere → 3 ``(6, n, n)``.  Returns ``None`` for an unknown / None
-    grid so callers fall back to the cubed-sphere convention.  Mirrors the
-    per-grid base rank in ``transport.advect_ice_tracers``; lets the
-    multi-category trailing axis be detected correctly on every grid rather
-    than via the cubed-sphere-only ``h.ndim > 3`` heuristic.
+    MPAS Voronoi → 1 ``(nCells,)``; lat-lon / tripole C-grid → 2
+    ``(n_lat, n_lon)``; cubed-sphere → 3 ``(6, n, n)``.  Returns ``None``
+    for an unknown / None grid so callers fall back to the cubed-sphere
+    convention.  Mirrors the per-grid base rank in
+    ``transport.advect_ice_tracers``; lets the multi-category trailing axis
+    be detected correctly on every grid rather than via the
+    cubed-sphere-only ``h.ndim > 3`` heuristic.
     """
-    from legoesm.grids.latlon import LatLonGrid
+    from legoesm.grids.latlon import LatLonCGridGeometry, LatLonGrid
     from legoesm.grids.voronoi import VoronoiMesh
     if isinstance(grid, VoronoiMesh):
         return 1
-    if isinstance(grid, LatLonGrid):
+    if isinstance(grid, (LatLonGrid, LatLonCGridGeometry)):
         return 2
     return 3 if grid is not None else None
 
@@ -157,6 +176,10 @@ def _uses_new_physics(config: SeaIceConfig) -> bool:
         or config.ridging.enabled
         or config.ponds.enabled
         or config.shortwave_scheme != "constant"
+        # Constant-scheme SW transmittance is a v2-path feature (the legacy
+        # _step_dynamic surface EB has no penetration channel); route to v2 so
+        # a nonzero setting is never a silent no-op.
+        or config.sw_transmittance_const > 0.0
         or config.itd_remap != "simple"
     )
 
@@ -226,25 +249,33 @@ def step_sea_ice(
             "Pass grid=<CubedSphereGrid> to step_sea_ice()."
         )
 
-    # Grid-TYPE guard: dynamics (EVP/mEVP), tracer transport, and ridging
-    # call grid-specific strain-rate / flux-divergence operators that exist
-    # only for cubed-sphere, lat-lon, and MPAS/Voronoi grids.  Reject an
+    # Grid-TYPE guards: dynamics (EVP/mEVP) + ridging call grid-specific
+    # STRAIN-RATE operators (cubed-sphere / lat-lon / MPAS only); tracer
+    # transport calls FLUX-DIVERGENCE operators, which additionally exist on
+    # the tripole/curvilinear C-grid (grid_supports_ice_transport).  Reject an
     # unsupported non-None grid up front with a clear message rather than
     # letting it fall through to the cubed-sphere branch and raise an opaque
     # AttributeError deep in the EVP loop (e.g. Gaussian spectral / Plane).
-    _needs_grid_ops = (
-        config.dynamics in ("evp", "mevp")
-        or config.transport == "advect"
-        or config.ridging.enabled
-    )
-    if grid is not None and _needs_grid_ops and not _grid_supports_ice_dynamics(grid):
-        raise ValueError(
-            "Sea-ice dynamics/transport/ridging require a grid with "
-            "implemented strain-rate and flux-divergence operators "
-            "(CubedSphereGrid, LatLonGrid, or VoronoiMesh); got "
-            f"{type(grid).__name__}.  Use dynamics='none', transport='none', "
-            "and ridging.enabled=False for thermodynamics-only on this grid."
+    if grid is not None:
+        _needs_strain_ops = (
+            config.dynamics in ("evp", "mevp") or config.ridging.enabled
         )
+        if _needs_strain_ops and not _grid_supports_ice_dynamics(grid):
+            raise ValueError(
+                "Sea-ice dynamics/ridging require a grid with implemented "
+                "strain-rate operators (CubedSphereGrid, LatLonGrid, or "
+                f"VoronoiMesh); got {type(grid).__name__}.  Use "
+                "dynamics='none'/'free_drift' and ridging.enabled=False on "
+                "this grid."
+            )
+        if config.transport == "advect" and not grid_supports_ice_transport(grid):
+            raise ValueError(
+                "Sea-ice tracer transport requires a grid with implemented "
+                "flux-divergence operators (CubedSphereGrid, LatLonGrid, "
+                "VoronoiMesh, or the tripole LatLonCGridGeometry); got "
+                f"{type(grid).__name__}.  Use transport='none' for "
+                "thermodynamics-only on this grid."
+            )
     if config.ridging.enabled and grid is None:
         raise ValueError(
             "ridging.enabled=True requires a grid argument: mechanical "
@@ -1688,6 +1719,7 @@ def _thermo_v2(
         pond_area, pond_depth,
         scheme=config.shortwave_scheme,
         albedo_const=config.albedo_ice,
+        sw_transmittance_const=config.sw_transmittance_const,
     )
     alpha = sw_result.albedo_eff
     sw_absorbed = sw_result.sw_absorbed_surface
@@ -2735,6 +2767,7 @@ def _step_dynamic_v2(
             h_snow, pond_area, pond_depth,
             scheme=config.shortwave_scheme,
             albedo_const=config.albedo_ice,
+            sw_transmittance_const=config.sw_transmittance_const,
         )
         alpha_resp = (
             jnp.sum(sw_cat.albedo_eff * conc, axis=-1)
@@ -2746,6 +2779,7 @@ def _step_dynamic_v2(
             h_snow, pond_area, pond_depth,
             scheme=config.shortwave_scheme,
             albedo_const=config.albedo_ice,
+            sw_transmittance_const=config.sw_transmittance_const,
         )
         alpha_resp = sw_agg.albedo_eff
 
@@ -2782,6 +2816,15 @@ def _step_dynamic_v2(
         # matches the state through melt-out (#28, codex).
         surface_mass_flux=sublim_mass_total,
         salt_flux=salt_flux_total,
+        # Aggregate concentration at the THERMO time level (post-transport,
+        # pre-thermo ``conc_old``): the ice area the atmospheric fluxes were
+        # integrated over this step.  Forced-ocean drivers partition the
+        # open-water forcing with (1 - A) at THIS level (codex r5 #1 — the
+        # pre-call concentration is one transport substep stale under
+        # transport='advect').
+        ice_concentration_thermo=jnp.clip(
+            (jnp.sum(conc_old, axis=-1) if is_multicat else conc_old),
+            0.0, 1.0),
     )
 
     new_state = DynamicSeaIceState(

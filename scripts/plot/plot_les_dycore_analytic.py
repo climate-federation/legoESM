@@ -26,7 +26,7 @@ import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from legoesm.atmosphere.dynamics import spectral_les_plane as sl  # noqa: E402
+from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl  # noqa: E402
 
 
 def _cfg(**kw):

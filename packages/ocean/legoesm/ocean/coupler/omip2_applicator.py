@@ -675,6 +675,32 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
     )
 
 
+def dm2dc_sw_factor(grid, dm2dc_window):
+    """Analytic diurnal-cycle shortwave factor field (NEMO ln_dm2dc / sbcdcy,
+    Bernie et al. 2007) for one step window, on the model grid's T points.
+
+    ``dm2dc_window = (day_of_year, year_len_days, t_frac_lo, t_frac_up)``.
+    Mean-preserving over a day by construction.  ONE shared implementation so
+    every consumer of the CORE-II daily-mean SW (the ocean surface forcing AND
+    the prognostic sea-ice AtmToSurface) sees the SAME diurnal modulation —
+    codex r1 #2: the ice tile previously received the raw daily-mean SW while
+    the ocean saw the modulated one.  Lat-lon / tripole C-grid families only
+    (matches the run drivers, which reject --dm2dc elsewhere)."""
+    from legoesm.ocean.forcing.diurnal_cycle import diurnal_sw_factor
+    _day_of_year, _year_len, _t_lo, _t_up = dm2dc_window
+    _lat_T = getattr(grid, "lat_T", None)
+    if _lat_T is not None:            # tripole family (2-D, radians)
+        _lat_deg = np.degrees(np.asarray(_lat_T))
+        _lon_deg = np.degrees(np.asarray(grid.lon_T))
+    else:                             # regular lat-lon (1-D, radians)
+        _lat_deg = np.degrees(np.asarray(grid.lat))[:, None]
+        _lon_deg = np.degrees(np.asarray(grid.lon))[None, :]
+    return np.asarray(diurnal_sw_factor(
+        _lon_deg, _lat_deg,
+        day_of_year=_day_of_year, year_len_days=_year_len,
+        t_frac_lo=_t_lo, t_frac_up=_t_up))
+
+
 def _sw_albedo_factor(sw_down, ice_albedo):
     """Reduce downwelling SW by the effective surface albedo.
 
@@ -873,19 +899,7 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
         # window.  Mean-preserving by construction; applied to the raw
         # sw_down so BOTH q_net and the penetrative channel see it (exactly
         # where NEMO applies sbc_dcy to qsr).
-        from legoesm.ocean.forcing.diurnal_cycle import diurnal_sw_factor
-        _day_of_year, _year_len, _t_lo, _t_up = dm2dc_window
-        _lat_T = getattr(grid, "lat_T", None)
-        if _lat_T is not None:            # tripole family (2-D, radians)
-            _lat_deg = np.degrees(np.asarray(_lat_T))
-            _lon_deg = np.degrees(np.asarray(grid.lon_T))
-        else:                             # regular lat-lon (1-D, radians)
-            _lat_deg = np.degrees(np.asarray(grid.lat))[:, None]
-            _lon_deg = np.degrees(np.asarray(grid.lon))[None, :]
-        _fac = np.asarray(diurnal_sw_factor(
-            _lon_deg, _lat_deg,
-            day_of_year=_day_of_year, year_len_days=_year_len,
-            t_frac_lo=_t_lo, t_frac_up=_t_up))
+        _fac = dm2dc_sw_factor(grid, dm2dc_window)
         forc = dict(forc)
         forc["sw_down"] = np.asarray(forc["sw_down"], dtype=np.float64) * _fac
 

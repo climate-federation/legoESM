@@ -1,7 +1,7 @@
 """Atmospheric turbulence / boundary layer parameterization for legoESM.
 
 Seven backends are available, with increasing complexity:
-1. **Smagorinsky**: constant eddy diffusivity — simplest baseline
+1. **Smagorinsky**: deformation/stability-dependent eddy diffusivity — simplest baseline
 2. **Louis (1979)**: stability-dependent diffusion — standard GCM scheme
 3. **TKE / MY2.5**: prognostic turbulent kinetic energy closure
 4. **CLUBB-lite**: higher-order closure skeleton (delegates to TKE)

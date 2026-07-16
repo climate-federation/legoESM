@@ -23,10 +23,10 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     PlaneCompressibleEulerModel,
     make_flat_plane_terrain_metric,
     make_rest_state,
@@ -239,7 +239,7 @@ def test_validate_plane_config_rejects_negative_hyperdiff(field):
     """Negative coefficients invert the damping sign and produce
     exponential growth — must raise ``ValueError`` rather than
     silently treat the term as off."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         validate_plane_config,
     )
     base = dict(

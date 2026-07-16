@@ -39,7 +39,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics.spectral_les_moist import (
+from legoesm.atmosphere.dynamics.les.spectral_les_moist import (
     make_anelastic_reference,
 )
 from legoesm.atmosphere.physics.microphysics import MicrophysicsConfig

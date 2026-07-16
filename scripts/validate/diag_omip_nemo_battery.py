@@ -43,7 +43,8 @@ import numpy as np
 # Reuse the surface scorer's curvilinear->latlon IDW regrid + NEMO month
 # selection (sibling module in scripts/validate; importing does not run main()).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from compare_omip_nemo import regrid_curv_to_latlon, _load_nemo, _wstats  # noqa: E402
+from compare_omip_nemo import (regrid_curv_to_latlon, _load_nemo, _wstats,  # noqa: E402
+                               _band_breakdown)
 
 _TARGET_DEPTHS_M = (0.0, 100.0, 300.0, 1000.0)
 
@@ -350,6 +351,24 @@ def main() -> int:
         _plot_depth_snapshots(out, fld, units, tgt_lat, tgt_lon, mod_sl, nem_sl,
                               depths, args.grid_label)
         print(f"[snapshots] {fld} at depths {depths} -> {fld}_depth_snapshots.png")
+        # Per-band bias at each depth: does the surface cold/salty bias reach into
+        # the thermocline (advective / large-scale) or stay confined to the mixed
+        # layer above it (surface-flux-driven)?  Same latitude bands as the surface
+        # scorer, reusing _band_breakdown on the already-common-grid level slices.
+        depth_bands = {}
+        for i, d in enumerate(depths):
+            Lm, ocL = mod_sl[i]
+            Nm, ocN = nem_sl[i]
+            area = (np.cos(np.deg2rad(tgt_lat))[:, None] * np.ones_like(tgt_lon)[None, :]
+                    * ((ocL > 0.5) & (ocN > 0.5)))
+            depth_bands[f"{d:.0f}m"] = _band_breakdown(Lm, Nm, area, tgt_lat)
+        report[f"{fld}_depth_bands"] = depth_bands
+        print(f"[{fld} bands by depth]")
+        for dk, bands in depth_bands.items():
+            nh = bands.get("NH_midlat_23N_45N")
+            if nh is not None:
+                print(f"  {dk:>6s}  NH-midlat bias {nh['bias']:+6.2f} {units}  "
+                      f"(lego {nh['lego_mean']:.2f} nemo {nh['nemo_mean']:.2f})")
 
     # --- zonal-mean depth sections (T, S) ---
     for fld, units in (("T", "degC"), ("S", "psu")):

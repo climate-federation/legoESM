@@ -96,7 +96,7 @@ def test_ck_diagnosis_inverts_the_real_clubb_lite_forward():
     systematically biased.  This test fails the moment the real forward and the inverse
     disagree.  (``tke=0.4 ≫ tke_min`` so the forward's ``wp2=max(tke,tke_min)`` is the raw
     ``tke``; the forward's ``Km`` uses the RAW ``l_mix``, not ``l_mix_safe``.)"""
-    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import (
         clubb_coefficient_from_diffusivity,
     )
     from legoesm.atmosphere.physics._shared import mixing_length
@@ -135,7 +135,7 @@ def test_prt_diagnosis_inverts_the_real_clubb_lite_forward():
     recover to ~machine precision — so a DIVERGENCE between the real ``Kh`` forward and the
     inverse (which would bias every Pr_t correction) fails here even though both
     formula-sharing tests stay green."""
-    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import (
         prandtl_number_from_diffusivities,
     )
 

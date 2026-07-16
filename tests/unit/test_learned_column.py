@@ -206,7 +206,7 @@ def test_untrained_moisture_head_rollout_stays_finite():
     net's q_v head must not blow up a 36-step (6 h) forced rollout.  The
     rate head is temperature-calibrated; without _Q_HEAD_TENDENCY_FACTOR
     the moisture tendency is O(1e-3 kg/kg/s) and q_v hits NaN by step 36."""
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.training.neural_gcm_spectral import (
         carry_to_spectral_state, spectral_rollout,

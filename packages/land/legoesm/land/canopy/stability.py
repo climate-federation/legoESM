@@ -10,6 +10,55 @@ All functions are pure JAX, JIT-compatible, and differentiable.
 Sources:
   DifferBESS/process/stability.py (Ryu et al. / CLM5 stability functions)
   DifferBESS/process/CarbonWaterFluxes.py (aerodynamic block)
+
+Faithfulness
+------------
+The above-canopy MOST core is an exact port of the CLM5 ``FrictionVelocityMod``
+4-regime Monin-Obukhov similarity functions (Oleson et al. 2013 CLM5 Tech Note;
+Zeng et al. 1998).  ``tests/land/unit/test_canopy_stability_faithful.py`` pins the
+per-regime resistance FORMS to round-off (rel 1e-9) against an independent scalar
+reimplementation of those functions, at MATCHED ``zeta`` / ``z0`` / ``obu``:
+
+  * momentum ``ustar`` (:func:`_friction_velocity`) and heat/scalar ``ch``
+    (:func:`_temperature_humidity_relation`), in each of the four regimes —
+    very-unstable ``zeta < -zetam`` (mom) / ``< -zetat`` (heat), unstable, stable
+    ``0 <= zeta <= 1``, very-stable ``zeta > 1``;
+  * the Paulson (1970) unstable ``psi_m``/``psi_h``
+    (:func:`_stability_func_momentum`/:func:`_stability_func_heat`), the
+    free-convection matches (momentum ``1.14 * ((-zeta)^1/3 - zetam^1/3)``, heat
+    ``0.8 * (zetat^-1/3 - (-zeta)^-1/3)`` — CLM5's INVERSE cube-root), the stable
+    linear ``psi = -5 zeta`` and very-stable log branch;
+  * the neutral log-law limit ``ustar -> kappa u / ln(z/z0)`` and continuity of
+    the forms across the free-convection transitions (the matches are C0).
+
+The pin is on the FORMS at fixed ``zeta``, NOT the whole solve, because the
+iteration DRIVER is a departure (see below), so a converged ``zeta`` is
+model-specific.
+
+DEPARTURES from the gSAM/CESM-LSM4 sibling MOST ``transfer_coef.f90`` (a related
+Businger-Dyer scheme on disk — cross-checked in the shared regimes, NOT the same
+scheme; each departure is a test canary):
+  * very-unstable HEAT uses CLM5's INVERSE cube-root ``zetat^-1/3 - (-zeta)^-1/3``
+    whereas the LSM4 sibling uses a growing ``(-zeta)^1/3 - zetat^1/3`` — the
+    heat free-convection correction genuinely differs between the two models;
+  * ``kB^-1 = 0`` (``z0h = z0m``, CLM5 vegetation; DifferBESS aa6e8b9) vs the
+    LSM4 ``kB^-1 approx 2`` (``z0h = 0.135 z0``, i.e. ``ln(z0/z0h) = 2.0025``,
+    the LSM4 rounding of the exact ``kB^-1 = 2`` -> ``z0h = z0 e^-2``);
+  * no high-wind roughness reduction ``z0 (1 + U/10)^-0.6`` and no LSM4
+    post-solve flux limiters (50%-slowdown cap; the LSM4 sibling also applies an
+    UNCONDITIONAL ``ustar -> sqrt(ustar^2 + 0.05^2)`` floor, absent here);
+  * the Obukhov solve is a FIXED ``n_iters`` (default 5) buoyancy-flux fixed
+    point (``zeta = zldis kappa g thetav*/(ustar^2 Tv)``, Zeng 1998 bulk-Ri init),
+    NOT the LSM4 bulk-Richardson ``zeta = r fm^2/fh`` iterated to tolerance.
+
+NUMERICS / AD guards (no-ops in their own regime): ``_MOST_ARG_FLOOR`` floors
+the log/cbrt args of the DISCARDED where-branches so ``0*NaN`` cannot poison the
+reverse-mode gradient.  The scalar oracle does NOT reproduce this floor — it
+evaluates only the in-regime branch (if/elif) and so never touches the discarded
+args; the floor is instead exercised by the AD test (eager ``where`` evaluates
+every regime).  ``zeta`` is clamped to ``[0.01, 0.5]`` (stable) / ``[-100,
+-0.01]`` (unstable) each iterate; wind floors (0.1, 1e-3 m/s) and resistance
+floors (1e-9) guard calm/degenerate columns.
 """
 
 from __future__ import annotations

@@ -265,6 +265,86 @@ def test_convective_rain_reaches_surface_precip_832(setup):
     )
 
 
+def _bechtold_step_pe(grid, sigma, f, precip_efficiency):
+    """One Bechtold pipeline step at a given convective rain-split efficiency
+    (microphysics='none', so surface precip == the in-updraft convective rain).
+    ``precip_efficiency=None`` leaves the ExperimentConfig knob unset -> Bechtold
+    keeps its OWN 0.7 default (#929)."""
+    config = ExperimentConfig(
+        grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
+        dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
+        convection="bechtold", radiation="none", microphysics="none",
+        convective_precip_efficiency=precip_efficiency,
+    )
+    config.validate_strict()
+    pipe = build_physics_pipeline(grid, sigma, config)
+    return pipe.physics_step_no_rad(
+        f["T"], f["p_s"], f["q_v"], f["q_c"], f["q_r"], None,
+        f["u"], f["v"], f["sst"], f["sic"], f["lat"], DT,
+        f["z3"], f["z2"], f["z2"], f["z2"], f["z2"], f["z2"])
+
+
+def test_bechtold_precip_efficiency_threads_from_experiment_config_929(setup):
+    """#929: the shared ExperimentConfig.convective_precip_efficiency knob must
+    reach Bechtold's precip_efficiency in _resolve_convection (it was previously
+    threaded to Tiedtke ONLY, so Bechtold ignored the CLI and PE 0/0.2/1 all
+    resolved to 0.7).  ``None`` (the default sentinel) keeps the scheme default
+    0.7 (ON, the #929 anvil-drain fix); an EXPLICIT value overrides it (0.0 =
+    legacy detrain-all)."""
+    from legoesm.driver import physics_pipeline as pp
+
+    def _pe_of(knob):
+        cfg = ExperimentConfig(
+            grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
+            dycore=DycoreConfig(
+                model_type="hydrostatic", discretization="cdgrid"),
+            convection="bechtold", radiation="none",
+            convective_precip_efficiency=knob,
+        )
+        _, conv_cfg = pp._resolve_convection(cfg)
+        return conv_cfg.precip_efficiency
+
+    assert _pe_of(None) == 0.7   # unset -> Bechtold scheme default (ON)
+    assert _pe_of(0.0) == 0.0    # explicit 0 -> legacy detrain-all (dq_r None)
+    assert _pe_of(0.5) == 0.5    # explicit override reaches the scheme
+    assert _pe_of(1.0) == 1.0
+
+
+def test_bechtold_convective_rain_reaches_surface_precip_929(setup):
+    """#929 end-to-end: with the rain split ON (PE=0.7, the default) Bechtold's
+    in-updraft rain (dq_r_conv_dt) reaches surface precip; with it EXPLICITLY
+    OFF (PE=0.0) no separate rain species is produced (dq_r None) so — under
+    microphysics='none' — convective surface precip is zero (the legacy path);
+    and UNSET (None) behaves like the ON default, NOT like 0.0.  Pins all three
+    so the test is non-vacuous and the sentinel is verified end-to-end."""
+    grid, sigma, f, _state = setup
+
+    out_on = _bechtold_step_pe(grid, sigma, f, 0.7)
+    precip_on = np.asarray(out_on.precip)
+    assert np.all(np.isfinite(precip_on)), "convective-rain precip non-finite"
+    assert float(np.sum(np.maximum(precip_on, 0.0))) > 0.0, (
+        "Bechtold in-updraft rain (dq_r_conv_dt) did not reach surface precip "
+        "at precip_efficiency=0.7 -- the #929 rain-split routing regressed"
+    )
+    assert float(np.max(precip_on)) < 1.0e-3, (
+        f"convective-rain precip unphysically large: {float(np.max(precip_on)):.3e}"
+    )
+
+    # PE=0 explicitly threaded -> legacy detrain-all, no rain species -> zero
+    # convective surface precip under microphysics='none'.
+    out_off = _bechtold_step_pe(grid, sigma, f, 0.0)
+    assert float(np.sum(np.maximum(np.asarray(out_off.precip), 0.0))) == 0.0, (
+        "with convective_precip_efficiency=0 Bechtold must emit no rain species "
+        "(dq_r None), so surface precip stays zero under microphysics='none'"
+    )
+
+    # Unset (None) must keep the ON default (0.7), NOT resolve to 0.0.
+    out_default = _bechtold_step_pe(grid, sigma, f, None)
+    assert float(np.sum(np.maximum(np.asarray(out_default.precip), 0.0))) > 0.0, (
+        "unset knob must keep Bechtold's 0.7 default ON (#929), not disable it"
+    )
+
+
 def test_pipeline_stateless_gwd_composite_runs_and_sums(setup):
     """#834 (codex adversarial finding 1): a stateless '+'-composite
     (``hines+mcfarlane``) through the coupler ``PhysicsPipeline`` must set

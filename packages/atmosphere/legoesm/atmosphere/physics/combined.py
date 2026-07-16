@@ -72,7 +72,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
 )
 from legoesm.atmosphere.physics.physics_state import update_physics_state
 from legoesm.atmosphere.physics._shared import zero_like_tracers
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     spectral_pe_to_grid,
 )

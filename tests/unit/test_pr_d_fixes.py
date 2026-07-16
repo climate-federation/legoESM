@@ -27,7 +27,7 @@ def test_held_suarez_init_mpas_threads_storage_dtype():
     (not just the perturbation) — else a mixed-precision policy leaves the
     state's dtypes disagreeing (the float64-config-through-float32-state
     scan-carry mismatch)."""
-    from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
     from legoesm.core.precision import get_policy
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.grids.voronoi import create_voronoi_mesh

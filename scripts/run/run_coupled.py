@@ -442,6 +442,18 @@ def build_parser():
                              "(CloudConfig.q_c_diagnostic). LOWER => optically "
                              "THINNER cloud => lower albedo, still LW-active. "
                              "Range [5e-5, 1e-3]. Default: CloudConfig default.")
+    parser.add_argument("--diagnostic-condensate-scheme",
+                        dest="cloud_diagnostic_condensate_scheme",
+                        choices=["constant", "adiabatic"], default="constant",
+                        help="Vertical structure of the stratiform in-cloud "
+                             "condensate floor: 'constant' (flat q_c_diagnostic, "
+                             "default) or 'adiabatic' (depth-scaled, dims thin "
+                             "warm marine Sc). FV cd-grid radiation path only.")
+    parser.add_argument("--adiabatic-lwc-rate", dest="cloud_adiabatic_lwc_rate",
+                        type=float, default=None,
+                        help="In-cloud LWC growth per metre of cloudy depth "
+                             "[kg/kg/m] for --diagnostic-condensate-scheme="
+                             "adiabatic (None=default 1.5e-6; range 5e-7..3e-6).")
     parser.add_argument("--conv-cloud-max", dest="cloud_conv_cloud_max",
                         type=float, default=None,
                         help="Override convective (Slingo) cloud-cover cap "
@@ -556,6 +568,17 @@ def build_parser():
                              "up — dragging global near-surface air T down. "
                              "Default off (byte-identical); recommended ON for a "
                              "faster, more realistic land spin-up.")
+    parser.add_argument("--carbon-ic", dest="carbon_ic", type=str, default="",
+                        help="Spun-up land carbon IC: path to a "
+                             "global_carbon_ic.npz finidat "
+                             "(scripts/data/build_global_carbon_ic.py).  With "
+                             "multilayer + differland carbon, the coupled run "
+                             "INGESTS the seeded 8-pool per-cell CarbonState + the "
+                             "per-cell permafrost phi INSTEAD of cold-starting "
+                             "carbon (starts at the mapped equilibrium; maintains "
+                             "the seeded permafrost SOC).  Requires a run grid "
+                             "matching the finidat (STRICT grid-match).  Default "
+                             "(unset): cold-start carbon.")
     parser.add_argument("--stomata", dest="stomata",
                         action=argparse.BooleanOptionalAction, default=True,
                         help="STOMATAL CONDUCTANCE control of land "
@@ -881,6 +904,8 @@ def main():
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
         cloud_conv_cloud_max=args.cloud_conv_cloud_max,
         cloud_conv_cloud_condensate=args.cloud_conv_cloud_condensate,
+        cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
+        cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         microphysics=args.microphysics,
         days=args.days,
         experiment=args.experiment,
@@ -994,6 +1019,10 @@ def main():
         overrides["use_pft"] = True
     overrides["land_diurnal_surface"] = args.land_diurnal_surface
     overrides["land_elev_bands"] = args.land_elev_bands
+    # Spun-up land carbon IC (finidat): honoured when land is multilayer +
+    # differland (validated in the driver); unset => cold-start carbon.
+    if getattr(args, "carbon_ic", ""):
+        overrides["carbon_ic_path"] = args.carbon_ic
     overrides["transient_land_cover"] = args.transient_land_cover
     overrides["land_cover_surfdata"] = args.land_cover_surfdata
 

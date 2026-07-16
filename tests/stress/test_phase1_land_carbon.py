@@ -6,7 +6,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import pytest
 
-from legoesm.land.carbon.config import CarbonConfig, CarbonState
+from legoesm.land.carbon.config import CarbonConfig, CarbonState, som_total
 from legoesm.land.carbon.carbon_cycle import (
     compute_gpp,
     step_carbon_differland,
@@ -60,7 +60,8 @@ class TestLandCarbon:
         doy = 180.0
 
         def _total_pools(s):
-            return s.C_lab + s.C_fol + s.C_root + s.C_wood + s.C_lit + s.C_som
+            return (s.C_lab + s.C_fol + s.C_root + s.C_wood + s.C_lit
+                    + som_total(s))
 
         total_C_initial = jnp.sum(_total_pools(state))
 

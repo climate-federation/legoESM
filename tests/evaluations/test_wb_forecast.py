@@ -24,7 +24,7 @@ class _FakeField:
 
 
 def _rest_state(T_init=300.0, p_s_init=constants.p_ref):
-    from legoesm.atmosphere.dynamics.spectral_pe import isothermal_rest_state_spectral
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import isothermal_rest_state_spectral
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
 
@@ -77,7 +77,7 @@ def test_pressure_level_mask_flags_below_surface():
 
 
 def test_qv_tracer_field_or_raw_array_and_shape_check():
-    from legoesm.atmosphere.dynamics.spectral_pe import spectral_pe_to_grid
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import spectral_pe_to_grid
     state, grid, sigma = _rest_state()
     T = spectral_pe_to_grid(state, grid, sigma)["T"]
     q_arr = jnp.full(T.shape, 1e-3)
@@ -174,7 +174,7 @@ def test_score_forecast_all_masked_raises():
 
 def test_headline_10m_wind_not_stronger_than_lowest_level():
     # The neutral reduction must weaken (never amplify) the lowest-level wind.
-    from legoesm.atmosphere.dynamics.spectral_pe import spectral_pe_to_grid
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import spectral_pe_to_grid
     state, grid, sigma = _rest_state()
     diag = diagnose_headline_fields(state, grid, sigma)
     g = spectral_pe_to_grid(state, grid, sigma)

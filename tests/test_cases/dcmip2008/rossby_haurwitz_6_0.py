@@ -176,7 +176,7 @@ def rossby_haurwitz_init_spectral(
     T_0: float = _T0_RH,
 ):
     """DCMIP §6-0 in spectral (Gaussian-grid) space."""
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
     from legoesm.grids.gaussian import (
         sh_analysis,
         sh_analysis_3d,

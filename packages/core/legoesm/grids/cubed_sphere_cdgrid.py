@@ -152,6 +152,16 @@ class CubedSphereCDGrid(NamedTuple):
     def radius(self) -> float:
         return self.base.radius
 
+    @property
+    def gnomonic_form(self) -> str:
+        """Static grid provenance, delegated to the base grid."""
+        return self.base.gnomonic_form
+
+    @property
+    def fv3_grid_type(self) -> int:
+        """Static FV3 grid_type provenance, delegated to the base grid."""
+        return self.base.fv3_grid_type
+
 
 def _compute_sin_cos_sg(n, padded_supergrid_lon, padded_supergrid_lat):
     """Compute Duo-Grid sub-grid metrics at 9 positions per cell.
@@ -553,11 +563,55 @@ def _compute_supergrid_metrics(n, supergrid_lon, supergrid_lat, radius):
     return area_c_all, dxc_all, dyc_all, dxa_all, dya_all
 
 
+def _remap_fv3_metrics_to_create(m: dict) -> tuple:
+    """Remap FV3-numbered metric fields onto create_cubed_sphere's layout.
+
+    Pure index shuffling (face permutation + rot90) via the phase-1
+    ``_GNOMONIC_ED_FACE_PERM/_ROT`` table; rot90 by an odd k maps
+    x-staggered fields onto y-staggered positions, so staggered pairs swap.
+    Numerics live entirely in :mod:`legoesm.grids.fv3_native_metrics`;
+    the oracle test performs the same remap independently on the REFERENCE
+    side, so an error here cannot self-cancel.
+    """
+    import numpy as np
+
+    from legoesm.grids.cubed_sphere import (
+        _GNOMONIC_ED_FACE_PERM,
+        _GNOMONIC_ED_FACE_ROT,
+    )
+
+    def _square(a):
+        return np.stack([
+            np.rot90(a[_GNOMONIC_ED_FACE_PERM[F]], _GNOMONIC_ED_FACE_ROT[F])
+            for F in range(6)
+        ])
+
+    def _pair(ax, ay):
+        out_x, out_y = [], []
+        for F in range(6):
+            g = _GNOMONIC_ED_FACE_PERM[F]
+            k = _GNOMONIC_ED_FACE_ROT[F]
+            if k % 2 == 0:
+                out_x.append(np.rot90(ax[g], k))
+                out_y.append(np.rot90(ay[g], k))
+            else:
+                out_x.append(np.rot90(ay[g], k))
+                out_y.append(np.rot90(ax[g], k))
+        return np.stack(out_x), np.stack(out_y)
+
+    area_c = _square(m["area_c"])
+    dxc, dyc = _pair(m["dxc"], m["dyc"])
+    dxa, dya = _pair(m["dxa"], m["dya"])
+    return (jnp.asarray(area_c), jnp.asarray(dxc), jnp.asarray(dyc),
+            jnp.asarray(dxa), jnp.asarray(dya))
+
+
 def create_cubed_sphere_cdgrid(
     base: CubedSphereGrid,
     omega: float | None = None,
     metric_dtype=None,
     gnomonic: str = "auto",
+    fv3_native_angles: bool = False,
 ) -> CubedSphereCDGrid:
     """Create a C-D grid from an existing cell-centre grid.
 
@@ -575,6 +629,26 @@ def create_cubed_sphere_cdgrid(
     metric_dtype : dtype or None
         Dtype for corner-critical metrics (gradient matrix, rsin, rarea,
         cosa, sin_sg, dxc/dyc).  Defaults to float32.
+    gnomonic : str, default "auto"
+        C/D metric family.  ``"auto"`` follows the base grid's static
+        provenance (``base.gnomonic_form``) — the only self-consistent
+        choice.  An explicit ``"ed"``/``"equiangular"`` is accepted only
+        when it MATCHES that provenance; a contradicting request raises
+        ``ValueError`` (mixing metric families across staggers silently
+        runs different numerics).
+    fv3_native_angles : bool, default False
+        Phase-2B opt-in (ED only): use the exact ``grid_utils_init``
+        staggered angle/tangent fields (``sin_sg``/``cos_sg`` per-position
+        exact; ``cosa_u/v``/``sina_u/v`` averaged ACROSS cube seams with
+        cross-face cells, as upstream mpp does).  Default False keeps the
+        legacy supergrid tangents + single-sided seam values: the shipped
+        stabilized solver's operators (c_sw, d2a2c, KE/vorticity fluxes)
+        are TUNED to that discretization, and the seam values differ at
+        O(1) (single-sided ~±0.49 vs cross-face ~0 at C36) — flipping them
+        under the legacy solver is a phase-4 (native forward-backward
+        core) decision, not a metrics bugfix.  The exact fields are
+        oracle-pinned either way in
+        ``tests/grids/test_fv3_native_metrics_phase2.py``.
 
     Returns
     -------
@@ -589,26 +663,39 @@ def create_cubed_sphere_cdgrid(
     n = base.n
     radius = base.radius
 
-    # iter72 (codex finding): the base CubedSphereGrid is a JAX-pytree NamedTuple
-    # so it cannot carry a string `gnomonic` field (non-traceable leaf would
-    # break JIT/grad).  Instead INFER the grid type from `base` by its cell-
-    # aspect signature so an ed A-grid never silently gets equiangular C/D
-    # metrics (the model constructors call this with no explicit flag): FV3
-    # gnomonic_ed has near-uniform cells (max aspect ≤ ~1.057 across all n)
-    # while equiangular — incl. Schmidt-stretched — has max aspect ≥ ~1.16 for
-    # every n≥4 (the only resolutions used in practice), degenerating to ~1.0
-    # only at n=2 where the two constructions are indistinguishable by aspect
-    # alone.  A single cut at 1.10 sits safely inside the [1.057, 1.16] gap for
-    # all n≥4, so an ed base grid is never silently given equiangular C/D
-    # metrics (the codex-flagged bug) — while a legitimate low-n equiangular
-    # grid (n=4 → 1.163, n=6 → 1.239) is no longer mis-rejected.  The n=2
-    # degenerate case falls to the historical equiangular default; pass
-    # `gnomonic="ed"` explicitly for an n=2 ed grid.  Explicit
-    # `gnomonic="ed"/"equiangular"` always overrides the inference.
+    # Phase-1 FV3-native grid work: the base CubedSphereGrid now carries
+    # STATIC provenance (`gnomonic_form`, pytree aux_data — see the explicit
+    # register_pytree_node in cubed_sphere.py), so the C/D metric family is
+    # READ from the base grid instead of the old iter72 dx/dy aspect-ratio
+    # inference (which was provably blind at n=2 and fragile by construction).
+    # "auto" = follow the base grid's provenance.  An explicit request that
+    # CONTRADICTS the provenance is the silent-metric-mixing bug class the
+    # inference was built to avoid — now a hard error.
     if gnomonic == "auto":
-        _dx = jnp.asarray(base.dx); _dy = jnp.asarray(base.dy)
-        _aspect = float(jnp.max(jnp.maximum(_dx, _dy) / jnp.maximum(jnp.minimum(_dx, _dy), 1e-30)))
-        gnomonic = "ed" if _aspect < 1.10 else "equiangular"
+        gnomonic = base.gnomonic_form
+    elif gnomonic in ("ed", "equiangular") and gnomonic != base.gnomonic_form:
+        raise ValueError(
+            f"create_cubed_sphere_cdgrid: requested gnomonic={gnomonic!r} but "
+            f"the base grid's provenance is gnomonic_form="
+            f"{base.gnomonic_form!r}. Mixing metric families silently ran "
+            "different numerics per stagger; rebuild the base grid with the "
+            "matching create_cubed_sphere(..., gnomonic=...) instead.")
+    # codex p2-r3/r4: AFTER resolution (so explicit gnomonic='ed' requests
+    # are covered too, not just 'auto'), reject any non-6-face ED base —
+    # single-face walled panels and MPI face slices
+    # (parallel/cube_face_scatter) would pair a regional/partial base with
+    # the GLOBAL six-face FV3 metric construction, mislabeling cube-seam
+    # ×2 edge conventions as wall metrics.  Global duogrid/MPI production
+    # paths build C/D metrics from the full 6-face base BEFORE slicing.
+    if gnomonic == "ed" and base.lat.shape[0] != 6:
+        raise NotImplementedError(
+            "create_cubed_sphere_cdgrid: FV3-native (ED) C/D metrics are "
+            "the GLOBAL six-face construction; a "
+            f"{base.lat.shape[0]}-face base (walled panel or MPI face "
+            "slice) would mislabel cube-seam edge conventions as wall "
+            "metrics. Build C/D metrics from the full 6-face grid before "
+            "slicing, or use an equiangular panel. A bounded-domain FV3 "
+            "metric builder is not implemented.")
 
     # ------------------------------------------------------------------
     # The C-D supergrid metrics all derive from 4 node-grids: the 2n+1
@@ -655,10 +742,56 @@ def create_cubed_sphere_cdgrid(
         raise ValueError(
             f"gnomonic must be 'equiangular' or 'ed', got {gnomonic!r}")
 
-    # FV3 supergrid metrics: area_c, dxc, dyc from the 2x-refined supergrid
-    # (same supergrid as sin_sg/cos_sg → mutual consistency).
-    area_c_sg, dxc_sg, dyc_sg, dxa_sg, dya_sg = _compute_supergrid_metrics(
-        n, _sg_lon, _sg_lat, radius)
+    if gnomonic == "ed":
+        # Phase-2 FV3-native metrics: the exact init_grid/grid_area
+        # construction (spherical-excess areas, agrid distances, the ×2
+        # half-dual edge conventions — oracle-pinned against the verbatim
+        # Fortran extraction in tests/grids/test_fv3_native_metrics_phase2.py)
+        # built in FV3 face numbering and remapped to create's layout.  The
+        # legacy chord/supergrid approximation below is NEVER used on this
+        # path (guard test monkeypatches it to raise).
+        #
+        # These are the GLOBAL-cube FV3 metrics (fv_grid_tools non-bounded
+        # branch).  legoESM's `base.bounded_domain` is deliberately NOT
+        # consulted here: that flag is the iter-865b OPERATOR-dispatch shim
+        # (duogrid handles its own edges), whereas upstream bounded_domain
+        # means regional/nested (fv_arrays.F90:1512) — a global cube with
+        # duogrid still takes FV3's global metric branch.  A true regional
+        # FV3 bounded metric builder does not exist; the ONE route that
+        # would have produced a regional ED C/D grid
+        # (create_cubed_sphere_panel(gnomonic='ed', return_cdgrid=True))
+        # fails closed with NotImplementedError rather than mislabeling
+        # global cube-seam ×2 conventions as wall metrics.
+        import numpy as _np
+
+        from legoesm.grids.cubed_sphere import make_fv3_native_grid
+        from legoesm.grids.fv3_native_metrics import (
+            compute_fv3_native_metrics,
+        )
+
+        _lon6, _lat6 = make_fv3_native_grid(n, grid_type=0)
+        if jnp.asarray(_lon6).dtype != jnp.float64:
+            # fp32 grid generation leaves ~4e-8 residue at the cube seams:
+            # the seam nodes are no longer bit-equal across faces, the
+            # geometric halo matching cannot (and should not) succeed, and
+            # "exact FV3 metrics" from fp32 coordinates would be false
+            # advertising.  Fail closed — never fall back to the chord
+            # approximation.  (metric_dtype only controls STORAGE; the
+            # construction itself must be float64.)
+            raise ValueError(
+                "FV3-native (ED) C/D metrics require float64 grid "
+                "construction: enable x64 (JAX_ENABLE_X64=1 or "
+                "jax.config.update('jax_enable_x64', True)) before building "
+                "the grid. Refusing to fall back to approximate metrics.")
+        _m = compute_fv3_native_metrics(
+            _np.asarray(_lon6), _np.asarray(_lat6), radius=radius)
+        area_c_sg, dxc_sg, dyc_sg, dxa_sg, dya_sg = (
+            _remap_fv3_metrics_to_create(_m))
+    else:
+        # Legacy supergrid metrics: area_c, dxc, dyc from the 2x-refined
+        # supergrid (same supergrid as sin_sg/cos_sg → mutual consistency).
+        area_c_sg, dxc_sg, dyc_sg, dxa_sg, dya_sg = _compute_supergrid_metrics(
+            n, _sg_lon, _sg_lat, radius)
 
     all_lon_c, all_lat_c = [], []
     all_angle_c = []
@@ -931,7 +1064,30 @@ def create_cubed_sphere_cdgrid(
     # ------------------------------------------------------------------
     # Padded supergrid (2n+3 per axis) for sin_sg/cos_sg — built above per
     # grid type (`_psg_lon/_psg_lat`).
-    sin_sg, cos_sg = _compute_sin_cos_sg(n, _psg_lon, _psg_lat)
+    if gnomonic == "ed" and fv3_native_angles:
+        # Phase-2B (OPT-IN, see the fv3_native_angles docstring): exact
+        # grid_utils_init angle fields, oracle-pinned in
+        # tests/grids/test_fv3_native_metrics_phase2.py.  Computed directly
+        # on the OWNER-SYNCHRONISED create-layout corner grid (bitwise
+        # seam-identical on both sides) — the construction is face-local
+        # + geometrically matched halos, so no face remap or sub-grid
+        # position permutation is needed.  Supersedes the single-sided
+        # panel-edge shortcut below: FV3 averages sg ACROSS the cube seam
+        # (the two faces' coordinate lines kink there, so their sg values
+        # genuinely differ).  The phase-4 native solver consumes this;
+        # the legacy stabilized solver keeps the legacy tangents.
+        import numpy as _np
+
+        from legoesm.grids.fv3_native_metrics import (
+            compute_fv3_native_angles,
+        )
+
+        _ang = compute_fv3_native_angles(
+            _np.asarray(lon_corner), _np.asarray(lat_corner))
+        cos_sg = jnp.asarray(_ang["cos_sg"])
+        sin_sg = jnp.asarray(_ang["sin_sg"])
+    else:
+        sin_sg, cos_sg = _compute_sin_cos_sg(n, _psg_lon, _psg_lat)
 
     # ------------------------------------------------------------------
     # C-grid face metrics from sin_sg/cos_sg (FV3 fv_grid_utils.F90:505-518)
@@ -956,24 +1112,33 @@ def create_cubed_sphere_cdgrid(
     # Boundary: cos_sg sub-grid positions are face-local, so cross-face halo
     # gives wrong sub-grid values. Use local cell edge value (geometrically
     # exact: both sides of the face boundary measure the same angle).
-    cosa_u_int = 0.5 * (cos_sg_E[:, :-1, :] + cos_sg_W[:, 1:, :])  # (6, n-1, n)
-    sina_u_int = 0.5 * (sin_sg_E[:, :-1, :] + sin_sg_W[:, 1:, :])
-    cosa_u = jnp.concatenate([
-        cos_sg_W[:, :1, :], cosa_u_int, cos_sg_E[:, -1:, :]
-    ], axis=1)  # (6, n+1, n)
-    sina_u = jnp.concatenate([
-        sin_sg_W[:, :1, :], sina_u_int, sin_sg_E[:, -1:, :]
-    ], axis=1)
+    if gnomonic == "ed" and fv3_native_angles:
+        # Phase-2B exact staggered averages incl. the cross-face cells at
+        # panel edges (upstream mpp-halo semantics) — computed alongside
+        # sin_sg/cos_sg above.
+        cosa_u = jnp.asarray(_ang["cosa_u"])
+        sina_u = jnp.asarray(_ang["sina_u"])
+        cosa_v = jnp.asarray(_ang["cosa_v"])
+        sina_v = jnp.asarray(_ang["sina_v"])
+    else:
+        cosa_u_int = 0.5 * (cos_sg_E[:, :-1, :] + cos_sg_W[:, 1:, :])  # (6, n-1, n)
+        sina_u_int = 0.5 * (sin_sg_E[:, :-1, :] + sin_sg_W[:, 1:, :])
+        cosa_u = jnp.concatenate([
+            cos_sg_W[:, :1, :], cosa_u_int, cos_sg_E[:, -1:, :]
+        ], axis=1)  # (6, n+1, n)
+        sina_u = jnp.concatenate([
+            sin_sg_W[:, :1, :], sina_u_int, sin_sg_E[:, -1:, :]
+        ], axis=1)
 
-    # v-faces (6, n, n+1): average N-edge of bottom cell + S-edge of top cell
-    cosa_v_int = 0.5 * (cos_sg_N[:, :, :-1] + cos_sg_S[:, :, 1:])  # (6, n, n-1)
-    sina_v_int = 0.5 * (sin_sg_N[:, :, :-1] + sin_sg_S[:, :, 1:])
-    cosa_v = jnp.concatenate([
-        cos_sg_S[:, :, :1], cosa_v_int, cos_sg_N[:, :, -1:]
-    ], axis=2)  # (6, n, n+1)
-    sina_v = jnp.concatenate([
-        sin_sg_S[:, :, :1], sina_v_int, sin_sg_N[:, :, -1:]
-    ], axis=2)
+        # v-faces (6, n, n+1): average N-edge of bottom cell + S-edge of top
+        cosa_v_int = 0.5 * (cos_sg_N[:, :, :-1] + cos_sg_S[:, :, 1:])  # (6, n, n-1)
+        sina_v_int = 0.5 * (sin_sg_N[:, :, :-1] + sin_sg_S[:, :, 1:])
+        cosa_v = jnp.concatenate([
+            cos_sg_S[:, :, :1], cosa_v_int, cos_sg_N[:, :, -1:]
+        ], axis=2)  # (6, n, n+1)
+        sina_v = jnp.concatenate([
+            sin_sg_S[:, :, :1], sina_v_int, sin_sg_N[:, :, -1:]
+        ], axis=2)
 
     # rsin_u/rsin_v follow FV3 fv_grid_utils.F90:509-561:
     #   - Interior u/v faces: rsin_u = 1/sina_u² (line 509, 517)

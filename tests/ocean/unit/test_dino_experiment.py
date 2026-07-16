@@ -27,6 +27,8 @@ from legoesm.grids.latlon import create_mercator_grid
 from legoesm.ocean.experiments import dino
 from legoesm.ocean.experiments import AVAILABLE_EXPERIMENTS
 from legoesm.ocean.experiments.dino import (
+    DINO_L2_RECIPES,
+    DINO_RECIPES,
     DINOConfig,
     EXPERIMENT_CONFIG,
     create_dino_z_star,
@@ -36,9 +38,11 @@ from legoesm.ocean.experiments.dino import (
     dino_T_profile_1d,
     dino_T_star_annual_mean,
     dino_bathymetry,
+    dino_config_for_recipe,
     dino_initial_T_S,
     dino_lat_lon_grid,
     dino_lat_lon_initial_state_arrays,
+    dino_lat_lon_model_config,
     dino_top_layer_S_tendency,
     dino_top_layer_T_tendency,
     dino_top_layer_u_tendency,
@@ -137,6 +141,17 @@ class TestDINOConfig:
         vm_c = dino._dino_vertical_mixing_config(
             dataclasses.replace(cfg, vmix_scheme="constant"))
         assert vm_c.scheme == "constant"
+        # richardson (≈ Oceananigans RiBasedVerticalDiffusivity) and catke
+        # (Oceananigans CATKEVerticalDiffusivity) are the L2 Oceananigans-card
+        # closures; both wire with the paper background floors.
+        vm_ri = dino._dino_vertical_mixing_config(
+            dataclasses.replace(cfg, vmix_scheme="richardson"))
+        assert vm_ri.scheme == "richardson"
+        assert vm_ri.richardson.K_bg == pytest.approx(cfg.K_v_bg)
+        assert vm_ri.richardson.A_bg == pytest.approx(cfg.A_v_bg_effective)
+        vm_catke = dino._dino_vertical_mixing_config(
+            dataclasses.replace(cfg, vmix_scheme="catke"))
+        assert vm_catke.scheme == "catke"
         with pytest.raises(ValueError):
             dino._dino_vertical_mixing_config(
                 dataclasses.replace(cfg, vmix_scheme="bogus"))
@@ -152,6 +167,122 @@ class TestDINOConfig:
         assert gs["mpas"] is True
         assert gs["cubed_sphere"] is False
         assert gs["spectral"] is False
+
+
+# ---------------------------------------------------------------------
+# L2 model recipes (DINO two-level intercomparison)
+# ---------------------------------------------------------------------
+
+class TestDINORecipes:
+    """The recipe overlay (``DINO_RECIPES`` + ``dino_config_for_recipe``) selects
+    each model's canonical blocks as a PURE CONFIG on ``DINOConfig``, threads
+    them into the lat-lon model config, and raises on an unknown recipe
+    (dispatch hardening — a typo must never silently pick a default)."""
+
+    def test_unknown_recipe_raises(self):
+        with pytest.raises(ValueError):
+            dino_config_for_recipe("bogus_model")
+
+    def test_catalog_membership(self):
+        assert set(DINO_RECIPES) == {
+            "legoesm_default", "nemo_paper", "veros", "mitgcm", "oceananigans"}
+        assert set(DINO_L2_RECIPES) == {"veros", "mitgcm", "oceananigans"}
+        assert set(DINO_L2_RECIPES) <= set(DINO_RECIPES)
+
+    def test_legoesm_default_is_identity(self):
+        # The identity card = a bare DINOConfig (Wright + KPP), so a no-op run
+        # reproduces the production default exactly.
+        assert dino_config_for_recipe("legoesm_default") == DINOConfig()
+
+    def test_recipe_overlay_selects_documented_blocks(self):
+        # EOS + vertical mixing + tracer advection = the per-model DINO choices.
+        nemo = dino_config_for_recipe("nemo_paper")
+        assert (nemo.eos, nemo.vmix_scheme, nemo.tracer_advection) == (
+            "nemo_seos", "tke", "tvd")
+        veros = dino_config_for_recipe("veros")
+        assert (veros.eos, veros.vmix_scheme, veros.tracer_advection,
+                veros.barotropic_solver) == (
+            "veros_nonlin2", "tke", "superbee", "rigid_lid")
+        mit = dino_config_for_recipe("mitgcm")
+        assert (mit.eos, mit.vmix_scheme, mit.tracer_advection,
+                mit.momentum_advection, mit.outer_integrator,
+                mit.barotropic_solver) == (
+            "unesco80", "kpp", "dst3_multidim", "flux_form", "ab2",
+            "implicit_unsplit")
+        ocn = dino_config_for_recipe("oceananigans")
+        assert (ocn.eos, ocn.vmix_scheme, ocn.tracer_advection,
+                ocn.momentum_advection, ocn.outer_integrator) == (
+            "veros_gsw", "catke", "weno7", "weno7", "ab2")
+
+    def test_base_override_preserved(self):
+        # A recipe overlay keeps the non-scheme setup fields of the base config.
+        import dataclasses
+        base = dataclasses.replace(DINOConfig(), dt=1800.0)
+        cfg = dino_config_for_recipe("mitgcm", base=base)
+        assert cfg.dt == pytest.approx(1800.0)     # setup field preserved
+        assert cfg.eos == "unesco80"               # recipe field applied
+
+    def test_default_model_config_scheme_identity_unchanged(self):
+        # Behavior preservation: a bare DINOConfig still yields the legoESM DINO
+        # dycore identity (the newly threaded fields default to the prior values,
+        # so existing runs are byte-identical).
+        cfg = DINOConfig()
+        grid = dino_lat_lon_grid(cfg, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, cfg, physics=False)
+        assert mc.flat_get("momentum_advection") == "vector_invariant"
+        assert mc.flat_get("coriolis_scheme") == "matsuno_split"
+        assert mc.flat_get("outer_integrator") == "forward_euler"
+
+    def test_mitgcm_threads_into_model_config(self):
+        # The MITgcm card's flux-form / AB2 / unsplit-FS blocks reach the model.
+        cfg = dino_config_for_recipe("mitgcm")
+        grid = dino_lat_lon_grid(cfg, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, cfg, physics=False)
+        assert mc.flat_get("momentum_advection") == "flux_form"
+        assert mc.flat_get("momentum_flux_scheme") == "centered"
+        assert mc.flat_get("coriolis_scheme") == "explicit_ab2"
+        assert mc.flat_get("outer_integrator") == "ab2"
+        assert mc.flat_get("ab2_scope") == "total"
+        assert mc.flat_get("barotropic_solver") == "implicit_unsplit"
+        assert mc.flat_get("eos") == "unesco80"
+
+    def test_veros_rigid_lid_forces_ab2_stack(self):
+        # The Veros card selects rigid_lid; the builder ALWAYS overlays the
+        # coordinated Veros-faithful ab2 stack on that path (ab2 + explicit_ab2 +
+        # advective scope), independent of the DINOConfig integrator defaults.
+        cfg = dino_config_for_recipe("veros")
+        grid = dino_lat_lon_grid(cfg, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, cfg, physics=False)
+        assert mc.flat_get("barotropic_solver") == "rigid_lid"
+        assert mc.flat_get("outer_integrator") == "ab2"
+        assert mc.flat_get("coriolis_scheme") == "explicit_ab2"
+        assert mc.flat_get("ab2_scope") == "advective"
+        assert mc.flat_get("eos") == "veros_nonlin2"
+        # rigid_lid force-disables the F_slow AB2 flag (its validation rejects
+        # ab2_scope="advective"; the streamfunction projection has no barotropic
+        # inertial mode to time-center).
+        assert mc.flat_get("barotropic_slow_forcing_ab2") is False
+
+    def test_oceananigans_card_ab2_centers_barotropic_slow_forcing(self):
+        # Root-cause guard for the DINO 'oceananigans'-card barotropic blowup
+        # (dino_l2_bisect o_ctl: |eta| 6 m by day 15, growth rate ∝ dt, basin-
+        # scale off-equatorial quadrupole).  Under coriolis_scheme="explicit_ab2"
+        # + barotropic_solver="implicit_cn" the CN predictor gates its FB
+        # Coriolis off (_cori_fac=0) and the outer AB2 keeps the barotropic
+        # increment un-extrapolated, so WITHOUT barotropic_slow_forcing_ab2 the
+        # barotropic-mode Coriolis integrates forward-Euler — unconditionally
+        # unstable, |G| = sqrt(1 + (f·dt)²) per step.  The card must carry the
+        # Oceananigans-faithful Gᵁ AB2 time-centering (as the validated-stable
+        # Silvestri §5 jet stack does).
+        cfg = dino_config_for_recipe("oceananigans")
+        assert cfg.barotropic_slow_forcing_ab2 is True
+        grid = dino_lat_lon_grid(cfg, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, cfg, physics=False)
+        assert mc.flat_get("coriolis_scheme") == "explicit_ab2"
+        assert mc.flat_get("barotropic_solver") == "implicit_cn"
+        assert mc.flat_get("outer_integrator") == "ab2"
+        assert mc.flat_get("ab2_scope") == "total"
+        assert mc.flat_get("barotropic_slow_forcing_ab2") is True
 
 
 # ---------------------------------------------------------------------
@@ -588,3 +719,722 @@ class TestDINORigidLidFaithfulStack:
         grid = dino_lat_lon_grid(cfg, n_lon=6)
         mcfg, _ = dino.dino_lat_lon_model_config(grid, cfg, physics=True)
         assert mcfg.dt_mom_ratio == 5.0
+# Level-1 exactness: seasonal forcing (usrdef_sbc ln_ann_cyc) + salt flux
+# ---------------------------------------------------------------------
+
+class TestSeasonalForcing:
+    def test_seasonal_cosine_phases(self):
+        from legoesm.ocean.experiments.dino import dino_seasonal_cosines
+        day = 86400.0
+        # c1 peaks at 21 June (day 171 of the 360-day year), c2 at 21 July.
+        c1, c2 = dino_seasonal_cosines(171.0 * 24.0 * 3600.0)
+        assert float(c1) == pytest.approx(1.0, abs=1e-12)
+        c1_w, _ = dino_seasonal_cosines((171.0 + 180.0) * day)
+        assert float(c1_w) == pytest.approx(-1.0, abs=1e-12)
+        _, c2_p = dino_seasonal_cosines(201.0 * day)
+        assert float(c2_p) == pytest.approx(1.0, abs=1e-12)
+        # periodic over the 360-day year
+        c1_a, _ = dino_seasonal_cosines(10.0 * day)
+        c1_b, _ = dino_seasonal_cosines((10.0 + 360.0) * day)
+        assert float(c1_a) == pytest.approx(float(c1_b), abs=1e-12)
+
+    def test_T_star_seasonal_asymmetry_and_mean_consistency(self):
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_T_star_annual_mean, dino_T_star_seasonal,
+            dino_seasonal_cosines,
+        )
+        cfg = DINOConfig()
+        day = 86400.0
+        lat = jnp.array([-70.0, 0.0, 70.0])
+        # boundary swings: north amp 3.0, south amp 0.5 (oracle asymmetry)
+        T_jul = dino_T_star_seasonal(lat, 201.0 * day, cfg)   # c2 = +1
+        T_jan = dino_T_star_seasonal(lat, 21.0 * day, cfg)    # c2 = -1
+        assert float(T_jul[2] - T_jan[2]) == pytest.approx(2 * 3.0, abs=1e-9)
+        assert float(T_jan[0] - T_jul[0]) == pytest.approx(2 * 0.5, abs=1e-9)
+        # equator: profile=1 -> T* = T_eq, season-independent
+        assert float(T_jul[1]) == pytest.approx(float(T_jan[1]), abs=1e-12)
+        # zero-phase (c2=0) equals the annual-mean form
+        # c2 = 0 at day 201 - 90 = 111
+        t0 = 111.0 * day
+        _, c2 = dino_seasonal_cosines(t0)
+        assert abs(float(c2)) < 1e-9
+        np.testing.assert_allclose(
+            np.asarray(dino_T_star_seasonal(lat, t0, cfg)),
+            np.asarray(dino_T_star_annual_mean(lat, cfg)), rtol=1e-9)
+
+    def test_Q_sr_seasonal_mean_matches_annual_quadrature(self):
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_Q_sr_annual_mean, dino_Q_sr_seasonal,
+        )
+        cfg = DINOConfig()
+        lat = jnp.linspace(-70.0, 70.0, 15)
+        # daily samples at t = d days reproduce the annual-mean fn's
+        # quadrature EXACTLY (same discrete phases)
+        days = np.arange(1, 361, dtype=np.float64)
+        acc = np.zeros(15)
+        for d in days:
+            acc += np.asarray(dino_Q_sr_seasonal(lat, d * 86400.0, cfg))
+        np.testing.assert_allclose(
+            acc / 360.0, np.asarray(dino_Q_sr_annual_mean(lat, cfg)),
+            rtol=1e-10)
+        # polar night: high south lat in southern winter (c1=+1) -> 0
+        q = dino_Q_sr_seasonal(jnp.array([-70.0]), 171.0 * 86400.0, cfg)
+        assert float(q[0]) == 0.0
+
+    def test_apply_seasonal_requires_time_and_changes_forcing(self):
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, create_dino_z_star, dino_lat_lon_grid,
+            dino_lat_lon_state, dino_lat_lon_surface_forcing_arrays,
+            apply_dino_lat_lon_surface_forcing,
+        )
+        cfg = dataclasses.replace(DINOConfig(), forcing_annual_cycle=True)
+        z = create_dino_z_star(cfg)
+        g = dino_lat_lon_grid(cfg, n_lon=8)
+        st = dino_lat_lon_state(g, z, cfg)
+        frc = dino_lat_lon_surface_forcing_arrays(g, cfg)
+        with pytest.raises(ValueError, match="t_seconds"):
+            apply_dino_lat_lon_surface_forcing(st, frc, z, cfg, 2700.0)
+        day = 86400.0
+        s_jun = apply_dino_lat_lon_surface_forcing(
+            st, frc, z, cfg, 2700.0, t_seconds=171.0 * day)
+        s_dec = apply_dino_lat_lon_surface_forcing(
+            st, frc, z, cfg, 2700.0, t_seconds=351.0 * day)
+        assert float(jnp.max(jnp.abs(s_jun.T.data - s_dec.T.data))) > 0.0
+        # flag OFF: t_seconds ignored -> bit-identical to the legacy call
+        cfg0 = dataclasses.replace(cfg, forcing_annual_cycle=False)
+        a = apply_dino_lat_lon_surface_forcing(
+            st, frc, z, cfg0, 2700.0, t_seconds=171.0 * day)
+        b = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg0, 2700.0)
+        np.testing.assert_array_equal(np.asarray(a.T.data),
+                                      np.asarray(b.T.data))
+
+    def test_mpas_apply_rejects_seasonal(self):
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, apply_dino_mpas_surface_forcing,
+        )
+        cfg = dataclasses.replace(DINOConfig(), forcing_annual_cycle=True)
+        with pytest.raises(NotImplementedError, match="lat-lon"):
+            apply_dino_mpas_surface_forcing(None, None, None, cfg, 2700.0)
+
+    def test_salt_and_heat_flux_coefficients_match_nemo(self):
+        """A_S == |rn_srp| and A_theta == |rn_trp|; the top-layer salinity
+        tendency equals NEMO's sfx/(rho0*e3t) with sfx = srp*(SSS-S*)."""
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_top_layer_S_tendency,
+        )
+        cfg = DINOConfig()
+        assert cfg.A_S == pytest.approx(3.858e-3)     # -rn_srp
+        assert cfg.A_theta == pytest.approx(40.0)     # -rn_trp
+        S, S_star, dz0 = 35.4, 35.0, 10.0
+        ours = float(dino_top_layer_S_tendency(
+            jnp.asarray(S), jnp.asarray(S_star), dz0, cfg))
+        srp = -3.858e-3
+        nemo = srp * (S - S_star) / (cfg.rho_0 * dz0)
+        assert ours == pytest.approx(nemo, rel=1e-12)
+        assert ours < 0.0    # SSS above target -> freshening flux (sign walk)
+
+
+class TestWindThroughStep:
+    def test_taum_boost_field(self):
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid, dino_lat_lon_surface_forcing_arrays,
+        )
+        cfg = DINOConfig()
+        g = dino_lat_lon_grid(cfg, n_lon=8)
+        frc = dino_lat_lon_surface_forcing_arrays(g, cfg)
+        tau = np.asarray(frc["tau_u_cell_2d"][:, 0])
+        taum = np.asarray(frc["taum_2d"][:, 0])
+        west = tau > 0.0
+        np.testing.assert_allclose(taum[west], 1.3 * np.abs(tau[west]),
+                                   rtol=1e-12)
+        np.testing.assert_allclose(taum[~west], np.abs(tau[~west]),
+                                   rtol=1e-12)
+        assert west.any() and (~west).any()
+
+    def test_tke_taum_override_changes_K(self):
+        from legoesm.ocean.physics.vertical_mixing.tke import (
+            tke_vertical_mixing,
+        )
+        from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+        nlev = 10
+        shape = (4, 3, nlev)
+        rng = np.random.default_rng(0)
+        T = jnp.asarray(20.0 - 15.0 * np.linspace(0, 1, nlev)[None, None, :]
+                        * np.ones(shape))
+        S = jnp.full(shape, 35.0)
+        u = jnp.zeros(shape); v = jnp.zeros(shape)
+        rho = jnp.asarray(1026.0 - 2.0 * np.linspace(0, 1, nlev))[None, None, :] * jnp.ones(shape)
+        dz_half = jnp.full(shape[:-1] + (nlev - 1,), 50.0)
+        tau = jnp.full(shape[:-1], 0.2)
+        out_plain = tke_vertical_mixing(
+            u, v, T, S, rho, dz_half, tke_old=None,
+            tau_x_surface=tau, tau_y_surface=jnp.zeros_like(tau),
+            dt=86400.0, cfg=TKEConfig(), rho_0=1026.0, g=9.80665,
+            n_iterations=2)
+        out_boost = tke_vertical_mixing(
+            u, v, T, S, rho, dz_half, tke_old=None,
+            tau_x_surface=tau, tau_y_surface=jnp.zeros_like(tau),
+            taum_surface=1.3 * tau,
+            dt=86400.0, cfg=TKEConfig(), rho_0=1026.0, g=9.80665,
+            n_iterations=2)
+        dK = float(jnp.max(jnp.abs(out_boost.K_H - out_plain.K_H)))
+        assert dK > 0.0    # boosted taum must strengthen the TKE input
+
+    def test_apply_skips_wind_when_through_step(self):
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, create_dino_z_star, dino_lat_lon_grid,
+            dino_lat_lon_state, dino_lat_lon_surface_forcing_arrays,
+            apply_dino_lat_lon_surface_forcing,
+        )
+        cfg_off = DINOConfig()
+        cfg_on = dataclasses.replace(cfg_off, wind_through_step=True)
+        z = create_dino_z_star(cfg_off)
+        g = dino_lat_lon_grid(cfg_off, n_lon=8)
+        st = dino_lat_lon_state(g, z, cfg_off)
+        frc = dino_lat_lon_surface_forcing_arrays(g, cfg_off)
+        s_off = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg_off, 2700.0)
+        s_on = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg_on, 2700.0)
+        # flag ON: the applicator leaves u untouched (the step owns wind)
+        np.testing.assert_array_equal(np.asarray(s_on.u.data),
+                                      np.asarray(st.u.data))
+        assert float(jnp.max(jnp.abs(s_off.u.data - st.u.data))) > 0.0
+
+    def test_step_forcing_carries_wind_and_taum(self):
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid, dino_lat_lon_surface_forcing_arrays,
+            dino_step_surface_forcing,
+        )
+        cfg = DINOConfig()
+        g = dino_lat_lon_grid(cfg, n_lon=8)
+        frc = dino_lat_lon_surface_forcing_arrays(g, cfg)
+        sf = dino_step_surface_forcing(frc)
+        # atmospheric convention: the core applies -tau (ocean reaction)
+        np.testing.assert_array_equal(np.asarray(sf.tau_x),
+                                      -np.asarray(frc["tau_u_cell_2d"]))
+        np.testing.assert_array_equal(np.asarray(sf.taum),
+                                      np.asarray(frc["taum_2d"]))
+        assert sf.q_net is None and sf.sw_down is None
+
+    def test_model_step_applies_wind_from_rest(self):
+        import dataclasses
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, create_dino_z_star, dino_lat_lon_grid,
+            dino_lat_lon_state, dino_lat_lon_model_config,
+            dino_lat_lon_surface_forcing_arrays, dino_step_surface_forcing,
+        )
+        cfg = dataclasses.replace(DINOConfig(), wind_through_step=True)
+        z = create_dino_z_star(cfg)
+        g = dino_lat_lon_grid(cfg, n_lon=10)
+        st = dino_lat_lon_state(g, z, cfg)
+        model = LatLonCGridOceanModel(
+            g, z, dino_lat_lon_model_config(g, cfg, physics=True)[0])
+        sf = dino_step_surface_forcing(
+            dino_lat_lon_surface_forcing_arrays(g, cfg))
+        s1 = model.step(st, dt=cfg.dt, surface_forcing=sf)
+        u_top = np.asarray(s1.u.data[..., 0])
+        assert np.isfinite(u_top).all()
+        # westerlies (tau>0 around -45 lat) accelerate +u at the top layer,
+        # with the UNBOOSTED momentum stress: pin the magnitude against the
+        # analytic Euler kick tau*dt/(rho0*dz0) (RK3 staging + the implicit
+        # friction shave it somewhat; a x1.3 taum leak into momentum or a
+        # doubled application would leave the [0.5, 1.1] band).
+        lat = np.degrees(np.asarray(g.lat))
+        j = int(np.argmin(np.abs(lat - (-45.0))))
+        got = u_top[j, 1:-1].mean()
+        tau_row = float(np.asarray(
+            dino_lat_lon_surface_forcing_arrays(g, cfg)["tau_u_cell_2d"])[j, 0])
+        expect = tau_row * cfg.dt / (cfg.rho_0 * float(z.dz_ref[0]))
+        assert got > 0.0
+        assert 0.5 * expect < got < 1.1 * expect, (got, expect)
+
+
+def test_S_star_boundary_targets_match_oracle():
+    """codex catch (dino-s12 #1): rn_sstar_s=35.0, rn_sstar_n=35.1 — the
+    DINOConfig defaults had them SWAPPED.  Pin the boundary values (the
+    cos-profile term vanishes at |phi|=70 where cos(2*pi*70/140)=-1 makes
+    the profile factor 0; the Gaussian dip is negligible there)."""
+    from legoesm.ocean.experiments.dino import DINOConfig, dino_S_star
+    cfg = DINOConfig()
+    assert cfg.S_star_s == 35.0 and cfg.S_star_n == 35.1
+    s_s = float(dino_S_star(jnp.asarray(-70.0), cfg))
+    s_n = float(dino_S_star(jnp.asarray(70.0), cfg))
+    assert s_s == pytest.approx(35.0, abs=1e-6)
+    assert s_n == pytest.approx(35.1, abs=1e-6)
+
+
+def test_mpas_builder_rejects_fct_family_tracer_advection():
+    """The r1_exact preset (fct2) must fail LOUDLY at the MPAS config
+    builder with actionable guidance, not deep in model construction."""
+    import pytest as _pytest
+
+    from legoesm.ocean.experiments.dino import (
+        dino_mpas_model_config, dino_r1_exact_config,
+    )
+
+    cfg = dino_r1_exact_config()
+    with _pytest.raises(ValueError, match="lat-lon only"):
+        dino_mpas_model_config(None, cfg, physics=False)
+
+
+class TestMaskedZco:
+    """NEMO ln_zco full-cell masking (zgr_msk_top_bot) for DINO."""
+
+    def _z_and_bowl(self):
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, create_dino_z_star, dino_lat_lon_bowl,
+            dino_lat_lon_grid,
+        )
+        cfg = DINOConfig()
+        z = create_dino_z_star(cfg)
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        return cfg, z, np.asarray(dino_lat_lon_bowl(g, cfg))
+
+    @staticmethod
+    def _mi96_f90(jpk, H, dzmin, kth, acr):
+        """INDEPENDENT numpy transliteration of zgr_lib.F90 mi96_1d
+        (kkconst=0, ph_co=0 — the 1-D reference ladder DINO's ln_zco
+        uses): returns (pdepw_1d[jpk], pdept_1d[jpk]) positive down."""
+        import math
+        jpkm1 = jpk - 1
+        za1 = ((dzmin - H / jpkm1)
+               / (math.tanh((1 - kth) / acr)
+                  - acr / jpkm1 * (math.log(math.cosh((jpk - kth) / acr))
+                                   - math.log(math.cosh((1 - kth) / acr)))))
+        za0 = dzmin - za1 * math.tanh((1 - kth) / acr)
+        zsur = -za0 - za1 * acr * math.log(math.cosh((1 - kth) / acr))
+        w = np.array([zsur + za0 * k
+                      + za1 * acr * math.log(math.cosh((k - kth) / acr))
+                      for k in range(1, jpk + 1)])
+        t = np.array([zsur + za0 * (k + 0.5)
+                      + za1 * acr * math.log(math.cosh((k + 0.5 - kth) / acr))
+                      for k in range(1, jpk + 1)])
+        return w, t
+
+    def test_ladder_matches_f90_and_reference_run(self):
+        """The masked-zco ladder must equal the mi96_1d transliteration
+        AND the reference run's deptht (first/last wet values hardcoded
+        from DINO_1m_grid_T.nc, float32 storage)."""
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid, dino_lat_lon_vertical,
+        )
+        import dataclasses
+        cfg = dataclasses.replace(DINOConfig(),
+                                  vertical_coordinate="masked_zco")
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        coord = dino_lat_lon_vertical(g, cfg)
+        assert coord.n_levels == cfg.n_levels - 1     # NEMO jpk dummy level
+
+        w_f90, t_f90 = self._mi96_f90(
+            cfg.n_levels, cfg.H_deep, cfg.dz_min, float(cfg.k_th),
+            cfg.a_cr)
+        np.testing.assert_allclose(
+            np.abs(np.asarray(coord.z_half_ref))[1:], w_f90[1:], rtol=1e-9)
+        np.testing.assert_allclose(
+            np.abs(np.asarray(coord.z_full_ref)), t_f90[:-1], rtol=1e-9)
+        # reference-run oracle (deptht, f32): first two + last wet centre
+        np.testing.assert_allclose(
+            np.abs(np.asarray(coord.z_full_ref))[[0, 1, -1]],
+            [5.0335817, 15.322634, 3757.309], rtol=1e-6)
+
+    def test_snap_rule_matches_f90_transliteration(self):
+        """k_bot per usrdef_zgr.F90 zgr_msk_top_bot:
+        WHERE( pdept(jk) < H .AND. H <= pdept(jk+1) ) k_bot = jk,
+        with pdept from the INDEPENDENT mi96 transliteration."""
+        import dataclasses
+
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_bowl, dino_lat_lon_grid,
+            dino_lat_lon_vertical,
+        )
+        cfg = dataclasses.replace(DINOConfig(),
+                                  vertical_coordinate="masked_zco")
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        H = np.asarray(dino_lat_lon_bowl(g, cfg))
+        coord = dino_lat_lon_vertical(g, cfg)
+
+        _, pdept = self._mi96_f90(
+            cfg.n_levels, cfg.H_deep, cfg.dz_min, float(cfg.k_th),
+            cfg.a_cr)
+        jpkm1 = cfg.n_levels - 1
+        k_bot = np.zeros(H.shape, dtype=int)   # 0 = land (k_top=0)
+        for jk in range(jpkm1):                # NEMO: 1..jpkm1 wet
+            sel = (pdept[jk] < H) & (H <= pdept[jk + 1])
+            k_bot[sel] = jk + 1                # NEMO 1-based level count
+        np.testing.assert_array_equal(
+            np.asarray(coord.bottom_level) + 1, k_bot)
+
+    def test_full_cells_and_snap_depth(self):
+        import dataclasses
+
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_bowl, dino_lat_lon_grid,
+            dino_lat_lon_vertical, dino_masked_zco_coordinate,
+        )
+        cfg = dataclasses.replace(DINOConfig(),
+                                  vertical_coordinate="masked_zco")
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        H = np.asarray(dino_lat_lon_bowl(g, cfg))
+        coord = dino_lat_lon_vertical(g, cfg)
+        H_snap = np.asarray(coord.h_partial).sum(-1)
+        h = np.asarray(coord.h_partial)
+        dz = np.asarray(coord.dz_ref)
+        # every wet cell is a FULL cell; below-bottom cells are zero
+        is_full = np.isclose(h, dz[None, None, :], rtol=0, atol=1e-9)
+        is_zero = h == 0.0
+        assert bool(np.all(is_full | is_zero))
+        # and the Jacobian is 1 at eta=0 on wet columns
+        from legoesm.ocean.vertical import compute_ocean_jacobian
+        J = np.asarray(compute_ocean_jacobian(
+            jnp.zeros(H.shape), jnp.asarray(H_snap), coord))
+        wet = np.asarray(coord.bottom_level) >= 0
+        np.testing.assert_allclose(J[wet], 1.0, rtol=0, atol=1e-12)
+
+    def test_dispatch(self):
+        import dataclasses
+
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid, dino_lat_lon_vertical,
+        )
+        from legoesm.ocean.vertical import (
+            OceanPartialCellCoordinate, OceanZStarCoordinate,
+        )
+        cfg = DINOConfig()
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        assert isinstance(dino_lat_lon_vertical(g, cfg),
+                          OceanZStarCoordinate)
+        cfg2 = dataclasses.replace(cfg, vertical_coordinate="masked_zco")
+        assert isinstance(dino_lat_lon_vertical(g, cfg2),
+                          OceanPartialCellCoordinate)
+        cfg3 = dataclasses.replace(cfg, vertical_coordinate="sigma")
+        with pytest.raises(ValueError, match="vertical_coordinate"):
+            dino_lat_lon_vertical(g, cfg3)
+
+    def test_state_H_bathy_matches_coordinate(self):
+        import dataclasses
+
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid, dino_lat_lon_state,
+            dino_lat_lon_vertical,
+        )
+        cfg = dataclasses.replace(DINOConfig(),
+                                  vertical_coordinate="masked_zco")
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        z = dino_lat_lon_vertical(g, cfg)
+        st = dino_lat_lon_state(g, z, cfg)
+        # state fields are stored float32 -> f32-appropriate tolerance
+        np.testing.assert_allclose(
+            np.asarray(st.H_bathy.data),
+            np.asarray(z.h_partial).sum(-1), rtol=1e-6)
+
+    def test_mpas_builder_rejects_masked_zco(self):
+        import dataclasses
+
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_mpas_model_config,
+        )
+        cfg = dataclasses.replace(DINOConfig(),
+                                  vertical_coordinate="masked_zco")
+        with pytest.raises(ValueError, match="lat-lon only"):
+            dino_mpas_model_config(None, cfg, physics=False)
+
+
+class TestIsoneutralRediOnly:
+    """lateral_tracer_mixing='isoneutral' — NEMO ln_traldf_iso(+msc)."""
+
+    def _preset_model_cfg(self):
+        import dataclasses
+
+        from legoesm.ocean.experiments.dino import (
+            dino_lat_lon_grid, dino_lat_lon_model_config,
+            dino_r1_exact_config,
+        )
+        cfg = dino_r1_exact_config()
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
+        return cfg, g, mc
+
+    def test_preset_builds_redi_only(self):
+        cfg, g, mc = self._preset_model_cfg()
+        gm = mc.gm_redi
+        assert gm is not None
+        assert gm.kappa_GM == 0.0
+        assert gm.kappa_Redi > 0.0
+        assert gm.kappa_redi_lat_scaling is True
+        assert gm.S_max == 0.01
+        assert gm.slope_density == "neutral"
+        assert gm.implicit_K33 is True
+        assert not gm.visbeck.enabled and not gm.treguier.enabled
+        assert mc.K_h == 0.0                    # no iso-level double-count
+        # kappa_Redi equals the legacy K_h coefficient (½·U_T·R·dλ)
+        import numpy as _np
+
+        from legoesm import constants as _c
+        expect = 0.5 * cfg.U_T * _c.R_earth * float(_np.asarray(g.dlon))
+        assert gm.kappa_Redi == pytest.approx(expect, rel=1e-12)
+
+    def test_legacy_default_unchanged(self):
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid, dino_lat_lon_model_config,
+        )
+        cfg = DINOConfig()          # geopotential + use_gm_redi=True
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
+        assert mc.K_h > 0.0
+        assert mc.gm_redi.visbeck.enabled       # historical adaptive path
+        assert mc.gm_redi.kappa_redi_lat_scaling is False
+
+    def test_unknown_mixing_raises(self):
+        import dataclasses
+
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid, dino_lat_lon_model_config,
+        )
+        cfg = dataclasses.replace(DINOConfig(),
+                                  lateral_tracer_mixing="epineutral")
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        with pytest.raises(ValueError, match="lateral_tracer_mixing"):
+            dino_lat_lon_model_config(g, cfg, physics=True)
+
+    def test_iso_plus_eiv_rejected(self):
+        import dataclasses
+
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid, dino_lat_lon_model_config,
+        )
+        cfg = dataclasses.replace(
+            DINOConfig(), lateral_tracer_mixing="isoneutral",
+            use_gm_redi=True)
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        with pytest.raises(ValueError, match="EIV"):
+            dino_lat_lon_model_config(g, cfg, physics=True)
+
+    def test_static_kappa_override_row_scaling(self):
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            _static_kappa_redi_override,
+        )
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid,
+        )
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        g = dino_lat_lon_grid(DINOConfig(), n_lon=12)
+        gm_on = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
+        arr = _static_kappa_redi_override(gm_on, g)
+        assert arr.shape == (g.n_lat, 12)
+        lat = np.asarray(g.lat)
+        # grid.lat is stored float32 -> f32-appropriate tolerance
+        np.testing.assert_allclose(
+            np.asarray(arr)[:, 0], 100.0 * np.cos(lat), rtol=1e-6)
+        gm_off = GMRediConfig(kappa_Redi=100.0)
+        assert _static_kappa_redi_override(gm_off, g) is None
+
+    def test_mpas_builder_rejects_isoneutral(self):
+        import dataclasses
+
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_mpas_model_config,
+        )
+        cfg = dataclasses.replace(DINOConfig(),
+                                  lateral_tracer_mixing="isoneutral",
+                                  use_gm_redi=False)
+        with _pytest_raises_valueerror("MPAS DINO path"):
+            dino_mpas_model_config(None, cfg, physics=False)
+
+    def test_lat_scaling_rejects_2d_latitudes(self):
+        from types import SimpleNamespace
+
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            _static_kappa_redi_override,
+        )
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        gm = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
+        fake = SimpleNamespace(lat=np.zeros((4, 5)), n_lon=5)
+        with pytest.raises(ValueError, match="1-D latitudes"):
+            _static_kappa_redi_override(gm, fake)
+
+
+def _pytest_raises_valueerror(match):
+    return pytest.raises(ValueError, match=match)
+
+
+class TestSlopeLimitNemoCap:
+    """slope_limit='nemo_cap': slope capped at S_max, taper == 1."""
+
+    def _w_triads(self, slope_limit):
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _w_triad_slopes_tapers,
+        )
+        rng = np.random.default_rng(3)
+        n_lat, n_lon, nlev = 4, 5, 6
+        drho_dx_u = jnp.asarray(rng.normal(size=(n_lat, n_lon + 1, nlev)))
+        drho_dy_v = jnp.asarray(rng.normal(size=(n_lat + 1, n_lon, nlev)))
+        # weak stratification -> raw slopes far beyond S_max
+        drho_dz_w = jnp.full((n_lat, n_lon, nlev - 1), -1e-3)
+        return _w_triad_slopes_tapers(
+            drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon,
+            S_max=0.01, taper_width_frac=0.1, slope_limit=slope_limit)
+
+    def test_cap_bounds_slopes_and_unit_tapers(self):
+        out = self._w_triads("nemo_cap")
+        slopes, tapers = out[:8], out[8:]
+        for sl in slopes:
+            assert float(jnp.abs(sl).max()) <= 0.01 + 1e-15
+        for tp in tapers:
+            np.testing.assert_array_equal(np.asarray(tp), 1.0)
+
+    def test_dm95_tapers_at_steep_slopes(self):
+        """dm95 mode: the taper suppresses the flux at steep slopes
+        (~0.5 at the in-situ clip point) — the behaviour nemo_cap
+        replaces with unit tapers."""
+        out = self._w_triads("dm95_taper")
+        tapers = out[8:]
+        assert float(jnp.stack(tapers).min()) <= 0.55
+        assert float(jnp.stack(tapers).max()) < 1.0
+
+    def test_unknown_slope_limit_raises(self):
+        with pytest.raises(ValueError, match="slope_limit"):
+            self._w_triads("gerdes")
+
+    def test_centered_scheme_rejects_cap(self):
+        from legoesm.ocean.experiments.dino import (
+            dino_lat_lon_grid, dino_lat_lon_state, dino_lat_lon_vertical,
+            dino_r1_exact_config,
+        )
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            gm_redi_tracer_tendency_latlon,
+        )
+        cfg = dino_r1_exact_config()
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        z = dino_lat_lon_vertical(g, cfg)
+        st = dino_lat_lon_state(g, z, cfg)
+        from legoesm.ocean.experiments.dino import dino_lat_lon_model_config
+        mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
+        gm_bad = mc.gm_redi._replace(slope_scheme="centered")
+        with pytest.raises(ValueError, match="nemo_cap"):
+            gm_redi_tracer_tendency_latlon(
+                st.T.data, st.S.data, st.eta.data, st.H_bathy.data,
+                g, z, gm_bad, eos=mc.eos)
+
+    def test_preset_selects_cap(self):
+        from legoesm.ocean.experiments.dino import (
+            dino_lat_lon_grid, dino_lat_lon_model_config,
+            dino_r1_exact_config,
+        )
+        cfg = dino_r1_exact_config()
+        assert cfg.redi_slope_limit == "nemo_cap"
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
+        assert mc.gm_redi.slope_limit == "nemo_cap"
+
+    def test_mpas_gm_redi_rejects_nemo_cap(self):
+        """MPAS centred GM/Redi must raise on slope_limit='nemo_cap'
+        rather than silently keep the DM95 taper (codex r7 P1)."""
+        from types import SimpleNamespace
+
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_mpas import (
+            gm_redi_tracer_tendency_mpas,
+        )
+        cfg = GMRediConfig(slope_limit="nemo_cap")
+        with pytest.raises(NotImplementedError, match="slope_limit"):
+            # entry-guard fires before any mesh access
+            gm_redi_tracer_tendency_mpas(
+                None, None, None, None, None, None, cfg)
+
+
+class TestNemoCentredBarotropic:
+    """dynspg_ts ln_bt_fw=F + nn_bt_flt=1 forward-frame reduction."""
+
+    def test_boxcar_window_centred_at_new_time(self):
+        from legoesm.ocean.dynamics.barotropic_common import (
+            compute_nemo_boxcar_centred_weights,
+        )
+        n = 12
+        w, w_total, w_tr, n_loop = compute_nemo_boxcar_centred_weights(
+            n, jnp.float64)
+        w = np.asarray(w)
+        assert n_loop == w.size
+        np.testing.assert_allclose(w.sum(), 1.0, rtol=1e-14)
+        # F90 transliteration: zwgt1(jn)=1 where |jn - n|/n < 0.5
+        jn = np.arange(1, n_loop + 1, dtype=float)
+        expect = (np.abs(jn - n) / n < 0.5).astype(float)
+        expect = expect / expect.sum()
+        np.testing.assert_allclose(w, expect, rtol=1e-14)
+        # centroid at the baroclinic step (tau = 1)
+        centroid = (w * jn / n).sum()
+        np.testing.assert_allclose(centroid, 1.0, rtol=0, atol=0.05)
+        # window extends past the step but not to 2n
+        assert n < n_loop < 2 * n
+
+    def test_transport_weights_continuity_telescoping(self):
+        """w_transport[j] = sum(w[j:]) / n — the unique choice with
+        div(Hu_avg) == (eta_old - eta_avg)/dt (uniform tracer)."""
+        from legoesm.ocean.dynamics.barotropic_common import (
+            compute_nemo_boxcar_centred_weights,
+        )
+        n = 9
+        w, _, w_tr, n_loop = compute_nemo_boxcar_centred_weights(
+            n, jnp.float64)
+        w, w_tr = np.asarray(w), np.asarray(w_tr)
+        expect = np.array([w[i:].sum() for i in range(n_loop)]) / n
+        np.testing.assert_allclose(w_tr, expect, rtol=1e-14)
+
+    def test_auto_substeps_formula(self):
+        from legoesm.ocean.dynamics.barotropic_common import (
+            nemo_auto_substeps,
+        )
+        import math
+
+        from legoesm import constants as _c
+        dt, H, e1, e2 = 2700.0, 4000.0, 1.1e5, 1.1e5
+        inv = 1.0 / e1 ** 2 + 1.0 / e2 ** 2
+        n = nemo_auto_substeps(dt, H, inv, float(_c.g), cmax=0.8)
+        zcu = math.sqrt(float(_c.g) * H * inv)
+        assert n == math.ceil(dt / 0.8 * zcu)
+        with pytest.raises(ValueError, match="n="):
+            nemo_auto_substeps(1e-6, H, inv, float(_c.g), cmax=0.8)
+
+    def test_mpas_builder_rejects_centred_barotropic(self):
+        import dataclasses
+
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_mpas_model_config,
+        )
+        cfg = dataclasses.replace(
+            DINOConfig(), barotropic_time_filter="nemo_boxcar_centred")
+        with pytest.raises(ValueError, match="barotropic"):
+            dino_mpas_model_config(None, cfg, physics=False)
+        cfg2 = dataclasses.replace(DINOConfig(), barotropic_auto_cmax=0.8)
+        with pytest.raises(ValueError, match="barotropic"):
+            dino_mpas_model_config(None, cfg2, physics=False)
+
+    def test_preset_selects_centred_explicit(self):
+        from legoesm.ocean.experiments.dino import (
+            dino_lat_lon_grid, dino_lat_lon_model_config,
+            dino_r1_exact_config,
+        )
+        import dataclasses
+
+        # The PRESET keeps implicit_cn: the centred window needs the MLF
+        # before-state start (job 8826132 NaN; NEMO's own namelist:
+        # "model crashes if ln_bt_fw=T"). The blocks remain selectable:
+        cfg = dino_r1_exact_config()
+        assert cfg.barotropic_solver == "implicit_cn"
+        cfg = dataclasses.replace(
+            cfg, barotropic_solver="explicit_substep",
+            barotropic_time_filter="nemo_boxcar_centred",
+            barotropic_auto_cmax=0.8)
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
+        assert mc.barotropic.barotropic_solver == "explicit_substep"
+        assert mc.barotropic.barotropic_time_filter == "nemo_boxcar_centred"
+        # auto count: static int equal to the ln_bt_auto helper's value
+        from legoesm.ocean.experiments.dino import _dino_barotropic_substeps
+        assert isinstance(mc.barotropic.n_barotropic_substeps, int)
+        assert (mc.barotropic.n_barotropic_substeps
+                == _dino_barotropic_substeps(g, cfg) >= 2)

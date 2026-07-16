@@ -108,6 +108,38 @@ def test_gaussian_dispatch_shares_canvas():
     assert abs(((got - 20.0 + 180.0) % 360.0) - 180.0) <= 6.0  # ~1 coarse cell
 
 
+def test_latlon_regrid_no_polar_extrapolation_overshoot():
+    """The canvas reaches the poles (+-90) but source grids stop short of them
+    (lat-lon cell-centers ~+-88.75; gaussian lats ~+-85).  Uncorrected, the polar
+    target rows fell outside the source range and RegularGridInterpolator LINEAR-
+    EXTRAPOLATED, which overshot: it drove nonnegative magnitudes (wind_speed)
+    NEGATIVE and inflated extrema in the polar rows on the lat-lon and spectral
+    regrid paths (cube/icosa use bounded weights and stayed clean -> the observed
+    cross-grid inconsistency).  The regrid must instead clamp the target latitude
+    to the source span (bounded nearest-edge hold).  A nonnegative field whose
+    minimum sits AT the source edge is the sharpest probe: any extrapolation past
+    the edge necessarily goes negative."""
+    for name, lat_src in (
+        ("gaussian", np.degrees(np.arcsin(np.linspace(-0.98, 0.98, 32)))),
+        ("latlon", np.linspace(-88.75, 88.75, 72)),
+    ):
+        nlon = 64
+        lon = np.linspace(0.0, 360.0, nlon, endpoint=False)
+        # >= 0 everywhere on the source, == 0 exactly at the southern edge, with a
+        # positive meridional slope -> linear extrapolation toward -90 goes < 0.
+        field = (lat_src[:, None] - lat_src.min()) + 0.0 * lon[None, :]
+        out = _regrid_latlon_to_181x360(field, lon, lat_src)
+        assert np.nanmin(out) >= -1e-9, (
+            f"[{name}] polar extrapolation drove a nonnegative field negative "
+            f"(min={np.nanmin(out):.4g}) — clamp target lat to the source range."
+        )
+        # No overshoot beyond the source extrema on either side.
+        assert np.nanmax(out) <= float(field.max()) + 1e-9, (
+            f"[{name}] regrid overshot the source maximum "
+            f"({np.nanmax(out):.4g} > {field.max():.4g})."
+        )
+
+
 def test_source_no_roll_only_latlon_branch():
     """Source guard: neither regrid dispatcher may send the lat-lon branch to a
     roll-only path — that re-introduces the gross longitude translation."""

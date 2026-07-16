@@ -26,6 +26,46 @@ Corresponding output slots:
         from other schemes; integration code applies it correctly as a
         generic tendency regardless of physical units)
 
+Faithfulness
+------------
+This is a P3-STRUCTURED scheme (single free ice category with predicted rime
+mass + volume), but most of its process RATES are simplified surrogates, NOT the
+gSAM P3 oracle (``MICRO_P3/module_mp_p3.f90``):
+
+- Cooper (1986) ice NUCLEATION (:248-263) — ORACLE-DERIVED base curve with
+  DOCUMENTED gate/cap departures (NOT bit-faithful). The base-curve FORM
+  ``N_i0·exp(cooper_a·(T_freeze−T))/rho`` (N_i0=5.0=0.005·1000, cooper_a=0.304),
+  the per-kg rho-divide, the (target−N_i)/dt relaxation, and the seed-mass source
+  ``dq=dN·m_i0`` are DERIVED from gSAM P3's below-cap Cooper base expression
+  (module_mp_p3.f90:3084-3095; the SAME in both P3 nucleation schemes) and match
+  it wherever gSAM's Cooper is selected, SCF=1, vapour is non-limiting, and the
+  value is below the cap; oracle-pinned (the base-curve form) by
+  ``tests/.../test_p3_cooper_faithful.py``. The departures below are stated
+  against scheme 1 (the test's comparison point):
+  (1) CAP — legoESM uses an unconditional 500/L; gSAM caps at 100/L·SCF (scheme
+  1) / 150/L·SCF (scheme 2) with the SCF cloud-fraction factor legoESM omits;
+  (2) GATE — a smooth sigmoid at cooper_T_act=−8 °C with NO ice-supersaturation
+  requirement, vs gSAM's HARD ``T<−15 °C AND supi≥0.05``, so legoESM nucleates
+  warmer AND in ice-subsaturated air (a REALISM gap: unlike deposition here, and
+  unlike Morrison's ``nuc_rh_sharpness`` supersaturation gate — adding a
+  supersaturation gate is an identified follow-up); (3) SEED — density 917
+  (canonical ``constants.rho_ice``) vs gSAM's hardcoded 900 kg/m³ at its default
+  1-µm nucleus radius (~1.9% heavier seed). legoESM also adds a rho floor, a
+  ``clip(dt,1)`` floor, and an exponent cap absent from the raw Fortran.
+- Ice deposition, cloud/rain RIMING, aggregation, MELTING, and ice/rain FALL
+  SPEED (:264-384) — SURROGATES, NOT amenable to a closed-form coefficient-level
+  pin. gSAM P3 computes each of these by interpolating a LOOKUP TABLE
+  (``f1pr02``..``f1pr14`` / γ-distribution integrals, module_mp_p3.f90:2440-2666);
+  legoESM uses invented algebraic forms (``dep_coeff·q_i·N_i^⅓``,
+  ``rime_coeff·q_i·q_c``, ``agg_coeff·N_i``, ``melt_rate·q_i·sigmoid``,
+  ``a_v_i·(q_i·rho)^b``) with no coefficient-level counterpart (they could only be
+  pinned against compiled gSAM output or frozen lookup-table fixtures).
+- WARM RAIN reuses the SIMPLIFIED ``_warm_rain`` helpers (``autoconversion_sb``
+  q_c²·sigmoid proxy, bilinear ``accretion``, legacy ``self_collection_breakup``,
+  simplified ``rain_evaporation``) — NOT the published SB2001 universal functions
+  (``autoconversion_sb2001``/``accretion_sb2001``, reachable via Morrison's
+  ``warm_rain_scheme="seifert_beheng_sb2001"``).
+
 References
 ----------
 - Morrison, H. & Milbrandt, J. A. (2015). Parameterization of cloud
@@ -78,10 +118,15 @@ _M_I0 = 4.0 / 3.0 * math.pi * constants.rho_ice * _ICE_NUC_RADIUS_M ** 3  # [kg]
 
 __physics_contract__ = {
     "summary": (
-        "P3 (Predicted Particle Properties; Morrison & Milbrandt 2015) ice "
-        "microphysics: a single free ice category with prognostic rime mass and "
-        "rime volume (evolving density/fall speed) plus Seifert-Beheng warm "
-        "rain; sedimentation to surface precipitation."
+        "P3-STRUCTURED (Predicted Particle Properties; Morrison & Milbrandt 2015) "
+        "ice microphysics: a single free ice category with prognostic rime mass "
+        "and rime volume (evolving density/fall speed) plus simplified "
+        "SB-style warm rain. The ice process RATES (deposition, riming, "
+        "aggregation, melting, fall speed) are algebraic SURROGATES for P3's "
+        "lookup-table physics, not the P3 oracle; only Cooper ice nucleation is "
+        "oracle-DERIVED, and only its base-curve form (with documented gate/cap "
+        "departures — see the module 'Faithfulness' docstring). Sedimentation "
+        "to surface precipitation."
     ),
     "inputs": {
         "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",
@@ -221,10 +266,12 @@ def p3_microphysics(
     # the gating already applied to deposition, riming, rain-riming,
     # and aggregation — mirrors the same fix landed in
     # morrison.py / thompson.py.
-    # Cap at ``N_i_nuc_max`` (SAM 500 L⁻¹) BEFORE the ρ-divide: the bare
-    # Cooper exponential overflows fp32 at the very cold tropopause /
-    # sponge temperatures of an RCEMIP column (→ N_i = inf → NaN in
-    # tracer slot 8). ``jnp.minimum`` clamps even an inf exponential to
+    # Cap at ``N_i_nuc_max`` (M2005's 500 L⁻¹; NOTE gSAM P3 instead caps at
+    # 100 L⁻¹·SCF in scheme 1 / 150 L⁻¹·SCF in scheme 2, module_mp_p3.f90:3090,
+    # :3136 — legoESM's cap is higher and has no SCF cloud-fraction factor)
+    # BEFORE the ρ-divide: the bare Cooper exponential overflows fp32 at the very
+    # cold tropopause / sponge temperatures of an RCEMIP column (→ N_i = inf →
+    # NaN in tracer slot 8). ``jnp.minimum`` clamps even an inf exponential to
     # the finite cap. Mirrors morrison.py / thompson.py.
     N_i_target = jnp.minimum(
         config.N_i0

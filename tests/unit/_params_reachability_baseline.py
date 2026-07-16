@@ -16,7 +16,7 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.AhmedNeelinDCAConfig.tau_adjust_s',
     'atm.conv.AhmedNeelinDCAConfig.w_b',
     'atm.conv.AhmedNeelinDCAConfig.w_l',
-    # atm: BechtoldConfig (13)
+    # atm: BechtoldConfig (14)
     'atm.conv.BechtoldConfig.M_b_max',
     'atm.conv.BechtoldConfig.cape_pbl_depth',
     'atm.conv.BechtoldConfig.cloud_depth_deep',
@@ -25,6 +25,11 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.BechtoldConfig.delta_midlevel',
     'atm.conv.BechtoldConfig.delta_shallow',
     'atm.conv.BechtoldConfig.downdraft_alpha',
+    # CLI-only (--bechtold-downdraft-entrain-rate), like its siblings
+    # downdraft_alpha / downdraft_evap_efficiency: the whole penetrative-
+    # downdraft family is exposed as ExperimentConfig scalars + CLI flags, not
+    # via the --params qualified-name loader.  Conscious exclusion.
+    'atm.conv.BechtoldConfig.downdraft_entrain_rate',
     'atm.conv.BechtoldConfig.downdraft_evap_efficiency',
     'atm.conv.BechtoldConfig.stochastic_amplitude',
     'atm.conv.BechtoldConfig.stochastic_decorrelation',
@@ -433,4 +438,31 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.aerosol.PrognosticAerosolConfig.emission_number_flux_m2_s',
     'atm.aerosol.PrognosticAerosolConfig.so2_oxidation_timescale_s',
     'atm.aerosol.PrognosticAerosolConfig.wet_scavenging_coeff_m2_kg',
+    # land: SIF (8) + elevation snow bands (8) — CONSCIOUS entry (#933).
+    # Both configs landed with the 2026-07 land campaign (FvCB/SIF
+    # consolidation #897, high-elevation snow/ice bands) fully spec'd but
+    # off run_lmip's --params surface: SIFConfig is a fluorescence
+    # DIAGNOSTIC of the big-leaf photosynthesis path (its params calibrate
+    # against satellite SIF, not the water/energy budget); the elevation
+    # snow bands are opt-in (--elev-bands) and run_lmip builds
+    # ElevationSnowBandConfig with defaults + the per-cell band_dz only.
+    # Wiring both onto run_lmip's curated --params surface when their
+    # calibration campaigns need it is the follow-up that shrinks these
+    # sixteen away.
+    'land.canopy.sif.escape_probability',
+    'land.canopy.sif.kd',
+    'land.canopy.sif.kf',
+    'land.canopy.sif.kn0',
+    'land.canopy.sif.kn_beta',
+    'land.canopy.sif.kn_gamma',
+    'land.canopy.sif.kp',
+    'land.canopy.sif.max_electron_yield',
+    'land.snow_bands.alpha_glacier_ice',
+    'land.snow_bands.blow_snow_subl_rate',
+    'land.snow_bands.blow_snow_wind_thresh_ms',
+    'land.snow_bands.lapse_rate_K_m',
+    'land.snow_bands.lw_elev_lapse_W_m2_per_m',
+    'land.snow_bands.refreeze_frac',
+    'land.snow_bands.sky_view_min',
+    'land.snow_bands.sw_elev_grad_per_m',
 })

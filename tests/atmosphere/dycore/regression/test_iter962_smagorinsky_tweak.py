@@ -27,7 +27,7 @@ import warnings
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterConfig,
     FV3EdgeShallowWaterState,
     FV3FBShallowWaterModel,

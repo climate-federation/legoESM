@@ -125,7 +125,7 @@ def test_ppmv_file_passes_through(tmp_path):
 def test_real_synthetic_deck_file():
     # The committed synthetic deck file must yield physical CO2.
     import os
-    f = "forcing_amip/ghg_amip_1979-1981.nc"
+    f = "data/forcing_amip/ghg_amip_1979-1981.nc"
     if not os.path.exists(f):
         pytest.skip("synthetic deck not generated")
     cfg = GHGConfig(source="annual_file", path=f, start_year=1979)

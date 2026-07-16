@@ -159,6 +159,11 @@ LATLON_RECIPES = {
         "tracer_time_integrator": "euler",
         "implicit_vertical_mixing": True,
         "n_barotropic_substeps": 30,
+        # OMIP global freshwater correction — part of the proven configuration
+        # (run_omip _create_setup + nemo_match_tripole_model_config both set it);
+        # carried here so catalog-based assembly does not silently fall back to
+        # the config default False (codex).
+        "normalize_freshwater": True,
     },
     # Oracle dycores — the canonical numerics of the runnable oracle models. SINGLE
     # SOURCE for the *_canonical_ocean_config factory defaults (the factories splat
@@ -171,6 +176,18 @@ LATLON_RECIPES = {
         "coriolis_scheme": "explicit_ab2",           # spherical Coriolis [APPROX]
         "barotropic_solver": "implicit_cn",          # ImplicitFreeSurface
         "outer_integrator": "ab2",
+        # STABILITY HAZARD (diagnosed via the DINO 'oceananigans'-card barotropic
+        # blowup): explicit_ab2 × implicit_cn WITHOUT barotropic_slow_forcing_ab2
+        # integrates the barotropic-mode Coriolis FORWARD EULER (the CN predictor
+        # gates its FB Coriolis off and the outer AB2 excludes the barotropic
+        # increment) — unconditionally unstable, |G|=sqrt(1+(f·dt)²)/step.  Long
+        # basin runs MUST add barotropic_slow_forcing_ab2=True (Oceananigans
+        # AB2-extrapolates Gᵁ INCLUDING Coriolis) — the DINO 'oceananigans' card
+        # and the Silvestri §5 jet do.  NOT pinned here because the fidelity
+        # compare decks (oceananigans_canonical_ocean_config consumers) override
+        # coriolis_scheme per-deck (matsuno decks would trip the flag's
+        # explicit_ab2 validation) and one passes the flag via **overrides
+        # (duplicate-kwarg).  Short compare decks tolerate the weak growth.
         "lateral_viscosity_operator": "flux_divergence",
         "A_h_lat_scaling": False,
         "C_smag": 0.0,
@@ -236,6 +253,8 @@ MPAS_RECIPES = {
         "barotropic_solver": "implicit_cn",
         "pv_scheme": "enstrophy",
         "implicit_vertical_mixing": True,
+        # Part of the proven configuration (see the tripole entry note).
+        "normalize_freshwater": True,
     },
 }
 

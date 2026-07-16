@@ -38,33 +38,33 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics.cfl_diagnostic import (
+from legoesm.atmosphere.dynamics.shared.cfl_diagnostic import (
     compute_courant_numbers_plane,
 )
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     PlaneCompressibleEulerModel, make_flat_plane_terrain_metric,
     make_rest_state,
 )
-from legoesm.atmosphere.dynamics.mean_wind_filter import (
+from legoesm.atmosphere.dynamics.shared.mean_wind_filter import (
     remove_horizontal_mean_wind,
 )
-from legoesm.atmosphere.dynamics.moist_mass_fixer import (
+from legoesm.atmosphere.dynamics.crm.moist_mass_fixer import (
     compute_total_water_mass_plane, fix_moist_mass_plane,
 )
-from legoesm.atmosphere.dynamics.rce_diagnostics import (
+from legoesm.atmosphere.dynamics.crm.rce_diagnostics import (
     cloud_fraction_profile_plane,
     column_moist_static_energy_plane,
     column_water_vapor_plane,
     precipitation_rate_proxy_plane,
 )
-from legoesm.atmosphere.dynamics.rce_surface_flux import (
+from legoesm.atmosphere.dynamics.crm.rce_surface_flux import (
     apply_rce_surface_fluxes,
     wind_speed_at_lowest_level_plane,
 )
-from legoesm.atmosphere.dynamics.tracer_positivity import (
+from legoesm.atmosphere.dynamics.shared.tracer_positivity import (
     apply_positive_filter_state,
 )
 from legoesm.atmosphere.idealized.rcemip_initial_conditions import (

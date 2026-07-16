@@ -9,10 +9,39 @@ Implements two cloud fraction schemes:
    AD-safe double-``where`` implementation.
 
 2. **Xu-Randall (1996)**: RH + condensate-based, more physical.
-   ``cf = RH^p * [1 - exp(-alpha * q_c / ((1 - RH) * q_s))]``
+   ``cf = RH^p * [1 - exp(-alpha * q_c / ((1 - RH) * q_s)^gamma)]``
 
 Both schemes compute cloud fraction per column per layer and derive
 cloud liquid/ice water paths for RRTMGP cloud optics.
+
+Faithfulness to Xu-Randall (1996) / Sundqvist-Berge-Kristjansson (1989)
+----------------------------------------------------------------------
+FAITHFUL (forms + published constants):
+  * **Xu-Randall (1996)** cloud fraction is the paper's semiempirical Eq. (6)
+    ``cf = RH^p · [1 − exp(−α·q_c / ((1−RH)·q_sat)^γ)]`` with the PAPER-RECOMMENDED
+    constants ``α = 100``, ``p = 0.25``, ``γ = 0.49`` (``alpha_xr``/``p_xr``/
+    ``gamma_xr`` config defaults). ``q_c`` is the total cloud condensate.
+  * **Sundqvist-Berge-Kristjansson (1989)** cloud fraction is the √-form
+    ``cf = 1 − √((1−RH)/(1−RH_crit))`` for RH ≥ RH_crit (else 0), as used by ECHAM
+    — NOT a linear RH ramp (an earlier mislabeled linear form was replaced).
+DEPARTURES / SURROGATES:
+  * **AD guards** (Xu-Randall): the denominator base ``(1−RH)·q_sat`` is floored at
+    1e-10 BEFORE the fractional power γ<1, and the ``RH`` base of ``RH^p`` (p<1) is
+    clipped to [1e-6, 1], so the otherwise-infinite fractional-power DERIVATIVES at
+    0 cannot leak an inf/NaN reverse-mode cotangent. For physical inputs (q_c ≥ 0,
+    q_sat > 0) the forward value equals the bare Eq. (6) wherever NEITHER guard
+    alters its argument (RH ≥ 1e-6 AND (1−RH)·q_sat ≥ 1e-10); in a guarded cell it
+    CAN differ from bare Eq. (6), and the diagnosed cf → 0 as q_c → 0 (or, at fixed
+    RH < 1, as q_sat → ∞).
+  * **Boundary enforcement**: both cloud fractions are clipped to [0, 1]. For
+    Sundqvist this clip IS the ``RH < RH_crit → 0`` branch; for Xu-Randall the clip
+    is redundant for physical inputs (q_c ≥ 0, q_sat > 0 ⇒ both factors in [0, 1] ⇒
+    cf ∈ [0, 1]; the upper end is reached when exp underflows to 0 at saturation).
+  * **Model choices** (not Xu-Randall/Sundqvist forms): ``rh_crit = 0.77`` is a
+    TUNED critical RH (the cloud-fraction diagnostic value, distinct from the
+    microphysics ``SundqvistConfig.rh_crit``), and the temperature ice-fraction
+    split is a linear ramp (T_freeze → T_ice_only).
+Non-behavioral pins: ``tests/atmosphere/hydrostatic/unit/test_xu_randall_faithful.py``.
 
 References
 ----------
@@ -30,6 +59,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import jax.numpy as jnp
+from jax import lax, nn
 
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
 from legoesm.thermo import saturation_mixing_ratio
@@ -81,6 +111,10 @@ __physics_contract__ = {
 _CLOUD_R_EFF_MAX_M = 60.0e-6     # max liquid effective radius for lamc clip [m]
 _R_EFF_ICE_PSD_COEFF = 1.5       # ice effective-radius PSD coefficient
 _R_EFF_ICE_DEFAULT_M = 25.0e-6   # fallback ice effective radius [m]
+# --- two_region sub-grid cloud-optics inhomogeneity ---
+_INHOM_CF_FLOOR = 1.0e-3         # min cloud fraction for the in-cloud water path
+_INHOM_R_EFF_FLOOR_M = 1.0e-6    # min effective radius in the tau estimate [m]
+_TAU_GEOMETRIC_COEFF = 1.5       # 3 Q_ext/4 with Q_ext≈2 (geometric-optics extinction)
 
 
 
@@ -166,8 +200,10 @@ def sundqvist_cloud_fraction(
 
     This √-form (used by ECHAM and most Sundqvist implementations) is the
     faithful scheme; the earlier code here used a *linear* ramp
-    ``(RH−RH_crit)/(1−RH_crit)`` mislabeled as Sundqvist — the √-form
-    rises faster just above RH_crit (e.g. 0.29 vs 0.5 at the midpoint).
+    ``(RH−RH_crit)/(1−RH_crit)`` mislabeled as Sundqvist.  The √-form stays
+    BELOW the linear ramp on the whole interior (e.g. 1−√½ ≈ 0.29 vs 0.5 at
+    the midpoint): its slope at RH_crit is ``0.5/(1−RH_crit)`` — HALF the
+    linear ramp's ``1/(1−RH_crit)`` — and diverges only as RH → 1⁻.
 
     Parameters
     ----------
@@ -222,9 +258,10 @@ def xu_randall_cloud_fraction(
     # Floor the RH base of the fractional power at 1e-6 (not 0): p_xr < 1, so
     # ``RH**p_xr`` has an infinite derivative at RH=0 (0**-0.75), giving an inf
     # reverse-mode gradient d(cf)/d(q_v) for any dry layer (RH=0 ⇒ q_v=0, e.g.
-    # upper stratosphere / dry init).  The forward is unaffected — cf -> 0 there
-    # anyway via the (1 - exp) factor — and the clip zeroes the gradient chain
-    # below the floor.
+    # upper stratosphere / dry init).  The forward value CAN change below the floor
+    # (RH**p_xr evaluated at 1e-6, not RH; identical only where q_c = 0, as both
+    # forms are then 0); the clip's role is to zero the reverse-mode gradient chain
+    # there.  (A dry layer physically carries q_c ~ 0, so cf ~ 0 regardless.)
     cf = jnp.power(jnp.clip(RH, 1.0e-6, 1.0), config.p_xr) * (
         1.0 - jnp.exp(exponent)
     )
@@ -290,6 +327,125 @@ def convective_cloud_fraction(
         & (sigma <= config.conv_cloud_sigma_base)
     ).astype(p_full.dtype)
     return cf_col[:, None] * deck
+
+
+# Smooth cloudy-DECK membership gate for the geometric-depth integral in
+# ``_adiabatic_incloud_condensate``.  A sigmoid in cf (centred at
+# ``_ADIAB_DECK_CF0``, width ~1/``_ADIAB_DECK_SHARPNESS``) turns cf into a smooth
+# 0->1 STEP that is NOT proportional to cf, so the accumulated depth ``D`` is the
+# GEOMETRIC cloudy depth and cloud COVERAGE enters exactly ONCE (the outer
+# ``cf_strat``) rather than as cf^2.  Deck-MEMBERSHIP numerics, not a tunable.
+_ADIAB_DECK_CF0 = 0.05          # cf at which a layer is a HALF deck member
+_ADIAB_DECK_SHARPNESS = 200.0   # inverse membership-transition width [1/cf]
+
+
+def _adiabatic_incloud_condensate(cf, dp, T, p_full, config):
+    """Capped adiabatic IN-CLOUD LIQUID water content [kg/kg] for the stratiform
+    radiative floor.
+
+    Real in-cloud LWC grows ~linearly with height above cloud base (adiabatic
+    ascent), so a THIN low cloud holds far less water than a deep one.  The flat
+    ``q_c_diagnostic`` floor ignores this and over-brightens shallow marine
+    stratocumulus (measured: the floor is the radiative q_c there, ~11x the
+    prognostic).  Returns ``q_ad = min(adiabatic_lwc_rate * D, q_c_diagnostic)``,
+    ``D`` the LAYER-MEAN cloudy geometric depth above cloud base.
+
+    This is the LIQUID in-cloud value ONLY.  PHASE and COVERAGE are applied by the
+    caller (``compute_cloud_properties``): it weights this by cloud fraction and by
+    the LIQUID fraction ``(1 - f_ice)`` and floors the ICE part SEPARATELY with
+    ``q_c_diagnostic`` — so the liquid adiabatic gradient never leaks into IWP,
+    ``adiabatic_lwc_rate`` stays the physical gradient (coverage is not squared),
+    and phase is applied EXACTLY once.
+
+    Depth integral (surface-last: index 0 = model top, -1 = surface; height
+    increases toward index 0 — reverse to surface->up, cumulative-sum, reverse
+    back = a within-column suffix sum that grows base->top):
+
+    * a SMOOTH deck-membership gate ``sigmoid(_ADIAB_DECK_SHARPNESS*(cf -
+      _ADIAB_DECK_CF0))`` (a step in cf, not proportional to cf) weights each
+      layer's geometric thickness ``dz = dp/(rho g)``;
+    * the value is taken at the layer MIDPOINT (``- 0.5*dz``): a linear base->top
+      profile averages to the midpoint, so the layer top over-counts a 1-layer
+      cloud by 2x;
+    * ``q_ad`` is capped at ``q_c_diagnostic`` so it can only DIM, never exceed the
+      validated floor — deep clouds are ~unchanged above the cap depth
+      (``q_c_diagnostic/rate`` ~ 667 m); only near-base layers dim.
+
+    STACKED decks are ISOLATED by a hard reset at clear gaps (``gate < 0.5``): an
+    upper deck gets its OWN base->top depth, not the lower deck's.  The caller also
+    floors ICE separately at ``q_c_diagnostic``, so no liquid gradient reaches
+    IWP/OLR even for a stacked cold deck.
+
+    Mostly subdifferentiable (sigmoid, cumsum, cummax, minimum, maximum); the only
+    kink is the gap boolean at cf~0.05 (a subgradient there, forward-exact, and
+    negligible for genuinely cloudy cells).  No Python control flow on traced
+    values.
+    """
+    # Layer geometric thickness dz = dp / (rho g), with rho = p / (R_d T) [m].
+    rho = p_full / (constants.R_d * T)
+    dz = dp / jnp.maximum(rho * constants.g, 1.0e-12)
+    # Smooth deck-membership gate (sigmoid step in cf): coverage stays single.
+    gate = nn.sigmoid(_ADIAB_DECK_SHARPNESS * (cf - _ADIAB_DECK_CF0))
+    cloudy_dz = gate * dz
+    # Cloudy geometric depth from cloud base to the layer MIDPOINT, RESET at clear
+    # gaps so a stacked upper deck does NOT inherit a lower deck's depth.  Work on
+    # the reversed (surface->up) axis: ``cr`` is the running cloudy depth (non-
+    # decreasing), and ``cr`` minus the running-MAX of ``cr`` sampled at gap
+    # layers (``gate < 0.5``) is the depth SINCE the last gap — a valid segmented
+    # sum.  Then subtract half the current layer (midpoint).  The gap boolean is a
+    # subgradient KINK at the deck threshold cf~0.05 (negligible for cloudy cells,
+    # forward-exact); everything else is smooth.
+    xr = cloudy_dz[..., ::-1]
+    _vax = xr.ndim - 1
+    cr = jnp.cumsum(xr, axis=_vax)
+    is_gap = gate[..., ::-1] < 0.5
+    last_gap = lax.cummax(jnp.where(is_gap, cr, 0.0), axis=_vax)
+    depth_top = jnp.maximum(cr - last_gap, 0.0)
+    depth_mid = jnp.maximum(depth_top - 0.5 * xr, 0.0)[..., ::-1]  # surface-last
+    return jnp.minimum(config.adiabatic_lwc_rate * depth_mid,
+                       config.q_c_diagnostic)
+
+
+def _two_region_inhomogeneity_factor(
+    tau: jnp.ndarray, fsd, g,
+) -> jnp.ndarray:
+    r"""Tau-dependent sub-grid cloud-optics inhomogeneity factor (chi_eff).
+
+    Two-region (Shonk & Hogan 2008 "Tripleclouds") split of the in-cloud
+    optical depth ``tau`` into equal-area optically-THIN ``tau(1-fsd)`` and
+    optically-THICK ``tau(1+fsd)`` sub-columns.  Inverting the domain-mean
+    conservative two-stream reflectance
+    ``R_bar = 1/2[R(tau(1-fsd)) + R(tau(1+fsd))]``, ``R(t) = t/(t+gamma0)``,
+    ``gamma0 = 2/(1-g)``, to an effective optical depth ``tau_eff`` and taking
+    ``chi_eff = tau_eff/tau`` has the exact CLOSED FORM
+
+        chi_eff = 1 - fsd^2 * tau / (gamma0 + tau).
+
+    Written closed-form (not via ``gamma0 R_bar/(1-R_bar)``) so there is NO
+    ``1/(1-R_bar)`` division (fp32-unsafe as ``R_bar -> 1`` for a thick cloud),
+    NO overflow, and NO clip/zero-guard: the value is analytically bounded in
+    ``[1 - fsd^2, 1]``, monotone-decreasing in ``tau``, and smooth =>
+    ``jax.grad``-safe everywhere.
+
+    Behaviour: ``chi_eff = 1`` for a thin cloud (``tau -> 0``) or a homogeneous
+    one (``fsd -> 0``), and DECREASES with ``tau`` toward the asymptote
+    ``1 - fsd^2`` -- so a THICK cloud is reduced MORE than a thin one (unlike a
+    constant scalar).  Note the reduction is BOUNDED by ``1 - fsd^2``: for
+    ``fsd < 1`` the effective ``tau`` still grows without limit, so this
+    corrects the plane-parallel albedo bias by the physically-correct
+    inhomogeneity amount but does NOT drive a very thick cloud optically thin.
+    A genuine "clear sub-column" that caps a thick cloud's albedo (breaking the
+    saturation outright) is the ``fsd -> 1`` limit, where ``tau_eff -> gamma0``.
+    """
+    gamma0 = 2.0 / jnp.maximum(1.0 - g, 1.0e-6)   # g is a fixed numerics const
+    fsd2 = fsd * fsd
+    # Formed as (1 - fsd^2) + fsd^2 gamma0/(gamma0 + tau), NOT the equal
+    # 1 - fsd^2 tau/(gamma0 + tau): this builds the small residual DIRECTLY,
+    # avoiding the 1-minus-almost-1 fp32 cancellation for a thick cloud.
+    # 0 < gamma0/(gamma0 + tau) <= 1 (gamma0 > 0, tau >= 0) => chi_eff in
+    # [1 - fsd^2, 1], smooth and finite (no clip/where; caller validates
+    # fsd in [0, 1] via ExperimentConfig.validate_strict).
+    return (1.0 - fsd2) + fsd2 * gamma0 / (gamma0 + tau)
 
 
 def compute_cloud_properties(
@@ -403,10 +559,39 @@ def compute_cloud_properties(
     # (value-identical legacy behaviour — same numbers; the extra max/add ops
     # constant-fold but are not byte-identical HLO).
     _conv_excess = jnp.maximum(cf - cf_strat, 0.0)
-    q_total_diag = (
-        cf_strat * config.q_c_diagnostic
-        + _conv_excess * config.conv_cloud_condensate
-    )
+    # In-cloud condensate for the STRATIFORM floor: a flat calibrated value
+    # ("constant", the validated default) or a depth-scaled adiabatic LWC
+    # ("adiabatic") that dims thin low clouds while leaving deep clouds at the
+    # cap (see ``_adiabatic_incloud_condensate`` / CloudConfig docstring).  The
+    # convective EXCESS keeps the thin anvil condensate regardless.
+    if config.diagnostic_condensate_scheme == "constant":
+        q_liq_incloud = config.q_c_diagnostic
+    elif config.diagnostic_condensate_scheme == "adiabatic":
+        # LIQUID in-cloud value only; the ICE floor stays q_c_diagnostic below.
+        q_liq_incloud = _adiabatic_incloud_condensate(
+            cf_strat, dp, T, p_full, config
+        )
+    else:
+        # Dispatch-hardening: a typo must never silently fall back to the flat
+        # floor and run different cloud physics (validated at fn entry on the
+        # static config value).
+        raise ValueError(
+            f"Unknown diagnostic_condensate_scheme: "
+            f"{config.diagnostic_condensate_scheme!r}; choose 'constant' "
+            f"(flat q_c_diagnostic floor) or 'adiabatic' (depth-scaled "
+            f"adiabatic in-cloud LWC)."
+        )
+    # PHASE-AWARE stratiform + convective-anvil floor (grid-mean), with ice
+    # fraction applied EXACTLY ONCE: the LIQUID part carries the (adiabatic or
+    # constant) in-cloud value, the ICE part ALWAYS the calibrated q_c_diagnostic
+    # — so the liquid adiabatic gradient never contaminates IWP.  For
+    # scheme='constant' both use q_c_diagnostic, so these reduce EXACTLY to the
+    # legacy ``q_total_diag`` split by ice fraction (byte-identical).
+    f_ice_diag = _ice_fraction(T, config)
+    _conv_floor = _conv_excess * config.conv_cloud_condensate
+    q_floor_liq = (cf_strat * q_liq_incloud + _conv_floor) * (1.0 - f_ice_diag)
+    q_floor_ice = (cf_strat * config.q_c_diagnostic + _conv_floor) * f_ice_diag
+    q_floor_total = q_floor_liq + q_floor_ice
 
     # --- Cloud condensate ---
     has_explicit_condensate = q_cloud is not None or q_ice is not None
@@ -433,28 +618,42 @@ def compute_cloud_properties(
         # NOT applied to 'resolved' (CRM: q_c IS the truth; a floor would inject
         # spurious cloud water).
         if config.scheme in ("sundqvist", "xu_randall"):
-            # Floor on TOTAL condensate, then add only the DEFICIT, partitioned
-            # by temperature.  Per-phase maxima would over-floor a layer whose
-            # explicit condensate already meets the floor but sits in one phase
-            # (e.g. all-ice: the liquid max would still inject liquid),
-            # inflating total condensate (codex review).  The deficit form adds
-            # nothing when the prognostic TOTAL already meets the floor, so the
-            # explicit phase split is preserved EXACTLY there.
-            deficit = jnp.maximum(q_total_diag - (q_c + q_i), 0.0)
-            f_ice_diag = _ice_fraction(T, config)
-            q_c = q_c + deficit * (1.0 - f_ice_diag)
-            q_i = q_i + deficit * f_ice_diag
+            if config.diagnostic_condensate_scheme == "constant":
+                # EXACT legacy: ONE total floor F = cf*q_c_diagnostic + conv split
+                # by ice fraction — no reconstruction, no division, so BYTE-
+                # IDENTICAL (incl fp32) to the pre-feature path.  (Static branch on
+                # the compile-time scheme string, not a traced value.)
+                _F = cf_strat * config.q_c_diagnostic + _conv_floor
+                deficit = jnp.maximum(_F - (q_c + q_i), 0.0)
+                q_c = q_c + deficit * (1.0 - f_ice_diag)
+                q_i = q_i + deficit * f_ice_diag
+            else:
+                # Adiabatic: deficit on the TOTAL (adds nothing when the prognostic
+                # TOTAL already meets the floor — preserves the explicit phase
+                # split there), apportioned by the floor's OWN phase ratio so ICE
+                # gets the constant-floor share and LIQUID the dimmed share.  NB
+                # for MIXED-PHASE explicit-condensate cells the ice deficit weakly
+                # depends on the dimmed liquid TOTAL (a bounded coupling inherent
+                # to the total-deficit form); the marine-BL target is warm-liquid,
+                # where it is exact.
+                deficit = jnp.maximum(q_floor_total - (q_c + q_i), 0.0)
+                _liq_frac = q_floor_liq / jnp.maximum(q_floor_total, 1.0e-30)
+                q_c = q_c + deficit * _liq_frac
+                q_i = q_i + deficit * (1.0 - _liq_frac)
     else:
-        # Diagnose condensate from cloud fraction and a typical in-cloud value
-        # (stratiform thick + convective-excess thin), partitioned by temperature.
-        f_ice = _ice_fraction(T, config)
-        q_c = q_total_diag * (1.0 - f_ice)
-        q_i = q_total_diag * f_ice
+        # Diagnose condensate directly from the phase-aware floor (liquid part
+        # carries the adiabatic/constant value, ice part the constant floor).
+        q_c = q_floor_liq
+        q_i = q_floor_ice
 
     # --- Cloud water/ice paths [kg/m^2] ---
     # Grid-mean water/ice paths: q * dp / g
     # These are grid-mean (not in-cloud) values, which is what RRTMGP expects
     # when treating each layer independently (no overlap assumption).
+    # Grid-mean water/ice paths [kg/m^2].  The sub-grid inhomogeneity
+    # correction (Cahalan scalar OR the tau-dependent two_region optic) is
+    # applied AFTER the effective radii below, because the two_region scheme
+    # needs the in-cloud optical depth = f(water path, r_eff).
     lwp = q_c * dp / constants.g
     iwp = q_i * dp / constants.g
 
@@ -525,6 +724,38 @@ def compute_cloud_properties(
     else:
         r_eff_ice = jnp.broadcast_to(
             jnp.asarray(config.r_eff_ice, dtype=_scalar_dtype), T.shape,
+        )
+
+    # --- Sub-grid cloud-optics inhomogeneity (applied to the radiative paths) -
+    # Real clouds are horizontally PATCHY, so a plane-parallel HOMOGENEOUS layer
+    # carrying the same mean water is too reflective (the plane-parallel albedo
+    # bias).  This THINS the radiative lwp/iwp; SIGN: chi <= 1 (never brightens).
+    # Dispatch raises on an unknown scheme (fn-entry, static config value).
+    _inhom_scheme = getattr(config, "cloud_optics_inhomogeneity", "constant")
+    if _inhom_scheme == "constant":
+        # Cahalan et al. (1994) fixed scalar (legacy; chi=1 => byte-identical).
+        _chi = getattr(config, "cloud_inhomogeneity_factor", 1.0)
+        lwp = lwp * _chi
+        iwp = iwp * _chi
+    elif _inhom_scheme == "two_region":
+        # In-cloud optical depth tau = (3 Q_ext / 4) * WP_incloud / (rho_p r_eff)
+        # with Q_ext≈2 => coeff 1.5; WP_incloud = grid-mean WP / cf.  Apply the
+        # inhomogeneity factor PER PHASE, each from its OWN optical depth (a
+        # patchy LIQUID cloud must not thin a horizontally-uniform ICE layer).
+        # tau -> 0 => chi_eff -> 1 (no change).
+        cf_safe = jnp.clip(cf, _INHOM_CF_FLOOR, 1.0)
+        r_liq = jnp.maximum(r_eff_liq, _INHOM_R_EFF_FLOOR_M)
+        r_ice = jnp.maximum(r_eff_ice, _INHOM_R_EFF_FLOOR_M)
+        tau_liq = _TAU_GEOMETRIC_COEFF * (lwp / cf_safe) / (constants.rho_water * r_liq)
+        tau_ice = _TAU_GEOMETRIC_COEFF * (iwp / cf_safe) / (config.rho_cloud_ice * r_ice)
+        _fsd = config.cloud_fsd
+        _g = config.cloud_optics_asymmetry_g
+        lwp = lwp * _two_region_inhomogeneity_factor(tau_liq, _fsd, _g)
+        iwp = iwp * _two_region_inhomogeneity_factor(tau_ice, _fsd, _g)
+    else:
+        raise ValueError(
+            f"unknown cloud_optics_inhomogeneity {_inhom_scheme!r}; "
+            "expected 'constant' or 'two_region'"
         )
 
     return CloudProperties(

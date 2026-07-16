@@ -29,7 +29,7 @@ from legoesm.grids.cubed_sphere import create_cubed_sphere  # noqa: E402
 from legoesm.grids.regridding import (  # noqa: E402
     get_cubedsphere_to_latlon_weights, apply_cubedsphere_to_latlon,
 )
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (  # noqa: E402
+from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (  # noqa: E402
     CDGridShallowWaterModel, CDGridShallowWaterState, iter1009_dual_target_config,
 )
 

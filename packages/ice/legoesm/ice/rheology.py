@@ -25,6 +25,35 @@ Key functions:
 
 All functions are JAX-compatible (differentiable, JIT-friendly).
 
+Faithfulness
+------------
+The constitutive closed forms are pinned by
+``tests/ice/unit/test_ice_rheology_faithful.py`` against an independent scalar
+oracle (rel 1e-9):
+
+  * ``ice_strength`` (Hibler 1979): P = P* h exp(-C (1 - A)).
+  * ``delta_deformation`` (Hibler 1979): Delta =
+    sqrt(max((e11+e22)^2 + ((e11-e22)^2 + 4 e12^2)/e^2, Delta_min^2)).
+  * ``vp_stress`` (Hibler 1979 / Hunke-Dukowicz 1997): zeta = P/(2 Delta),
+    eta = zeta/e^2; sigma_11 = 2 eta e11 + (zeta-eta)(e11+e22) - P/2, etc.  The
+    pin includes the DEFINING yield-curve identity — the stress lies exactly on
+    the ellipse ((sigma_I+P/2)/(P/2))^2 + (sigma_II e/(P/2))^2 = 1 when Delta is
+    un-regularized — and the sigma = -P/2 I rest state at zero strain.
+  * ``evp_stress_update`` (Hunke-Dukowicz 1997): sigma_new =
+    (sigma + E sigma_VP)/(1 + E), E = 1/(2 T_evp N_evp); iterating to the
+    sigma_VP fixed point.
+  * ``mevp_stress_update`` (Bouillon 2013 / Kimmritz 2015): sigma^(p+1) =
+    (1 - 1/alpha) sigma^p + (1/alpha) sigma_VP; the alpha < 1 anti-relaxation
+    guard raises.
+
+The P*, C, e, Delta_min, T_evp, N_evp, alpha coefficients are transcribed as
+independent oracle literals and canaried against the ``SeaIceConfig`` defaults
+(config == literal == value).  DEPARTURE / guard: ``delta_deformation`` floors
+the sqrt ARGUMENT at Delta_min^2 (not the result at Delta_min) — forward-
+identical but AD-safe, so the VP/EVP/mEVP stress gradients stay finite at the
+zero-strain rest state (where sqrt'(0) would otherwise poison the VJP); this is
+pinned by a dedicated zero-strain gradient test.
+
 References
 ----------
 - Hibler, W. D. III (1979): A dynamic thermodynamic sea ice model.

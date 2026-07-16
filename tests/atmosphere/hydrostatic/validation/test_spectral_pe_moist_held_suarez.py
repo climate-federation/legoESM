@@ -20,13 +20,13 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.core.field import Field
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralPEConfig,
     SpectralPrimitiveEquationModel,
     isothermal_rest_state_spectral,
     spectral_pe_to_grid,
 )
-from legoesm.atmosphere.held_suarez import held_suarez_forcing_spectral
+from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_spectral
 from legoesm.atmosphere.physics.microphysics.config import (
     MicrophysicsConfig,
     KesslerConfig,

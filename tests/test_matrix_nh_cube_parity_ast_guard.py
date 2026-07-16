@@ -592,7 +592,7 @@ def test_sw_cube_propagating_tests_have_hyperdiff_override():
         "LEGOESM_SW_MODON_DAMP_V default must be str(MODON_DAMP_V) (the shared "
         "#800 source of truth), not a re-hardcoded literal."
     )
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         MODON_DAMP_V,
         MODON_DIV_DAMP_FACTOR,
         MODON_HYPERDIFF_FACTOR,
@@ -855,6 +855,7 @@ def test_w2_calibration_baseline_independent_from_matrix_hyperdiff():
         / "legoesm"
         / "atmosphere"
         / "dynamics"
+        / "gcm"
         / "shallow_water_fv3_cdgrid.py"
     )
     pkg_mod = _parse_module(pkg_path)

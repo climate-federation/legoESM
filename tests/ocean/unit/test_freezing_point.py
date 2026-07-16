@@ -52,6 +52,29 @@ from legoesm.ocean.eos import (
 _T0_K = constants.T_freeze  # pure-water freezing point (0 degC reference) [K]
 
 
+@pytest.fixture(autouse=True)
+def _fp64_policy():
+    """Run the whole module in fp64.  The liquidus asserts here are at the
+    1e-12 (f64) level, but the global default ``PrecisionPolicy`` is fp32 and
+    the EOS / ``rest_state_latlon_cgrid_ocean`` builders honour it — so under
+    fp32 the true-zero S=0 liquidus reads as ~-6e-6 noise and the seawater
+    depressions lose ~6 digits.  ``tests/ocean/unit`` is in no CI tier, so main
+    never exercised this and the drift went unseen (issue #955)."""
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    prev = get_policy()
+    prev_x64 = jax.config.jax_enable_x64
+    set_policy(PrecisionPolicy.fp64())
+    try:
+        yield
+    finally:
+        set_policy(prev)
+        # set_policy restores the PrecisionPolicy object but NOT the global
+        # jax_enable_x64 flag it flipped on — that would leak x64 into
+        # later-imported test modules in a shared session (codex #956).
+        jax.config.update("jax_enable_x64", prev_x64)
+
+
 # ---------------------------------------------------------------------------
 # constant scheme — byte-identical to the historical fixed value
 # ---------------------------------------------------------------------------
@@ -297,15 +320,20 @@ def test_latlon_slab_clamp_and_q_freeze_track_scheme(mode):
     C_mix = cfg_c.rho_ocean * cfg_c.c_ocean * cfg_c.h_mix
     assert np.array_equal(np.asarray(s_c.T_sfc.data),
                           np.maximum(T_trial, cfg_c.T_freeze))
-    assert np.array_equal(np.asarray(s_c.Q_freeze.data),
-                          C_mix * np.maximum(cfg_c.T_freeze - T_trial, 0.0) / dt)
+    # fp64 exposes the C_mix*max(..)/dt reassociation fp32 rounding masked; the
+    # single-max T_sfc clamp above stays byte-identical.  Match the file's own
+    # Q_freeze tolerance (the dq allclose rtol=1e-12 below).  Issue #955.
+    assert np.allclose(np.asarray(s_c.Q_freeze.data),
+                       C_mix * np.maximum(cfg_c.T_freeze - T_trial, 0.0) / dt,
+                       rtol=1e-12)
     # (i) the scheme shifts the floor actually applied ...
     assert np.array_equal(np.asarray(s_u.T_sfc.data),
                           np.maximum(T_trial, tf_u))
     assert np.all(np.asarray(s_u.T_sfc.data) < np.asarray(s_c.T_sfc.data))
     # (ii) ... and Q_freeze responds consistently (same floor in clamp + energy).
-    assert np.array_equal(np.asarray(s_u.Q_freeze.data),
-                          C_mix * np.maximum(tf_u - T_trial, 0.0) / dt)
+    assert np.allclose(np.asarray(s_u.Q_freeze.data),
+                       C_mix * np.maximum(tf_u - T_trial, 0.0) / dt,
+                       rtol=1e-12)
     dq = np.asarray(s_c.Q_freeze.data) - np.asarray(s_u.Q_freeze.data)
     assert np.allclose(dq, C_mix * (cfg_c.T_freeze - tf_u) / dt, rtol=1e-12)
 
@@ -338,13 +366,18 @@ def test_mpas_slab_clamp_and_q_freeze_track_scheme(mode):
     # (iii) byte-identical constant default (pre-MED-1 behaviour).
     assert np.array_equal(np.asarray(s_c.T_sfc.data),
                           np.maximum(T_trial, cfg_c.T_freeze))
-    assert np.array_equal(np.asarray(s_c.Q_freeze.data),
-                          C_mix * np.maximum(cfg_c.T_freeze - T_trial, 0.0) / dt)
+    # fp64 exposes the C_mix*max(..)/dt reassociation fp32 rounding masked; the
+    # single-max T_sfc clamp above stays byte-identical.  Match the file's own
+    # Q_freeze tolerance (the dq allclose rtol=1e-12 below).  Issue #955.
+    assert np.allclose(np.asarray(s_c.Q_freeze.data),
+                       C_mix * np.maximum(cfg_c.T_freeze - T_trial, 0.0) / dt,
+                       rtol=1e-12)
     # (i)+(ii) scheme shifts the clamp AND the Q_freeze energy booking together.
     assert np.array_equal(np.asarray(s_u.T_sfc.data),
                           np.maximum(T_trial, tf_u))
-    assert np.array_equal(np.asarray(s_u.Q_freeze.data),
-                          C_mix * np.maximum(tf_u - T_trial, 0.0) / dt)
+    assert np.allclose(np.asarray(s_u.Q_freeze.data),
+                       C_mix * np.maximum(tf_u - T_trial, 0.0) / dt,
+                       rtol=1e-12)
 
 
 def _latlon_freeze_model(**cfg_kw):
@@ -522,7 +555,11 @@ def test_run_omip_core2_freeze_scheme_wiring():
     import inspect
     from scripts.run import run_omip_core2 as R
 
-    src = inspect.getsource(R.main)
+    # #939 refactored the argparse setup out of main() into _build_arg_parser();
+    # the freeze-scheme wiring (choices + fail-loud guards live in the parser,
+    # the model-config threading lives in main()) now spans BOTH, so the
+    # drift-check inspects both sources.
+    src = inspect.getsource(R.main) + "\n" + inspect.getsource(R._build_arg_parser)
     # Choices come from the single eos source of truth (no copied literal set).
     assert "sorted(VALID_FREEZE_SCHEMES)" in src
     # Fail-loud guards: no consumer / the unwired cube builder.

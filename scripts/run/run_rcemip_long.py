@@ -434,10 +434,10 @@ def _compose_nh_moist_physics(model_type: str, dt: float,
 
 def _run_plane_fd(days: float, dt: float, print_every: int, output: Path,
                   *, moist: bool = False):
-    from legoesm.atmosphere.dynamics.compressible_euler import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
         CompressibleEulerConfig,
     )
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         PlaneCompressibleEulerModel, compute_dry_mass_plane,
         make_flat_plane_terrain_metric, make_rest_state,
     )
@@ -527,14 +527,14 @@ def _run_plane_fd(days: float, dt: float, print_every: int, output: Path,
 
 def _run_plane_spectral(days: float, dt: float, print_every: int, output: Path,
                         *, moist: bool = False):
-    from legoesm.atmosphere.dynamics.compressible_euler import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
         CompressibleEulerConfig,
     )
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         compute_dry_mass_plane, make_flat_plane_terrain_metric,
         make_rest_state,
     )
-    from legoesm.atmosphere.dynamics.spectral_plane import (
+    from legoesm.atmosphere.dynamics.les.spectral_plane import (
         SpectralPlaneCompressibleEulerModel, SpectralPlaneConfig,
         spec_state_from_physical,
     )
@@ -617,7 +617,7 @@ def _run_cubed_sphere(days: float, dt: float, print_every: int, output: Path,
                       coriolis: str | None = None,
                       fix_mass: str | None = None,
                       convection_scheme: str = "none"):
-    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
         CDGridCompressibleEulerConfig, CDGridCompressibleEulerModel,
     )
     from legoesm.atmosphere.physics.microphysics.config import (
@@ -758,7 +758,7 @@ def _run_mpas(days: float, dt: float, print_every: int, output: Path,
               *, moist: bool = False,
               sfc_Cd: float = 1.0e-3, sfc_Ch: float = 1.0e-3,
               sfc_T: float = 300.0, sfc_q: float = 0.018):
-    from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas import (
         MPASCompressibleEulerConfig, MPASCompressibleEulerModel,
     )
     from legoesm.atmosphere.physics.microphysics.config import (

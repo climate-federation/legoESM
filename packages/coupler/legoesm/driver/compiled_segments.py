@@ -1400,6 +1400,7 @@ def build_segment_fn(
     energy_consistent_moisture_clip: bool = False,
     pipeline=None,
     advect_moisture: bool = False,
+    tiled_step_fn=None,
 ):
     """Build a compiled segment function.
 
@@ -1698,11 +1699,24 @@ def build_segment_fn(
             step_idx = carry.step_index
 
             # --- Dynamics ---
-            dyn_state = _dynamics_model.step(
-                _rebuild_state(carry, _dynamics_model,
-                               advect_moisture=advect_moisture),
-                _dt,
-            )
+            # P4 increment 1b: ``tiled_step_fn`` (built by the driver via
+            # ``make_tiled_cc_step`` when enable_tiled_dycore + sub-face
+            # tiling) replaces ONLY the dynamics core — same cc
+            # HydrostaticState contract as ``_dynamics_model.step`` (dt is
+            # baked into the tiled stage at build; the driver passes the
+            # SAME dt to both).  Physics / fixers / tracers in this scan
+            # body are untouched (they already run outside the dynamics
+            # call).
+            if tiled_step_fn is not None:
+                dyn_state = tiled_step_fn(
+                    _rebuild_state(carry, _dynamics_model,
+                                   advect_moisture=advect_moisture))
+            else:
+                dyn_state = _dynamics_model.step(
+                    _rebuild_state(carry, _dynamics_model,
+                                   advect_moisture=advect_moisture),
+                    _dt,
+                )
 
             T_new = dyn_state.T.data
             u_new = dyn_state.u.data

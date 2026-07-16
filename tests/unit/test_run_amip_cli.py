@@ -37,6 +37,55 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.multilayer_soil_depth == 4.5
 
 
+def test_convective_precip_efficiency_cli_wiring_929():
+    """#929: the shared --convective-precip-efficiency knob reaches the config
+    for BOTH Tiedtke and Bechtold; UNSET is the ``None`` sentinel (each scheme
+    keeps its own default) — never a silent 0.0 that would disable Bechtold's
+    ON-by-default rain split."""
+    parser = build_arg_parser()
+
+    # Unset -> None sentinel (NOT 0.0): Bechtold keeps its own 0.7 default.
+    cfg_unset = build_config_from_args(_postprocess_args(
+        parser.parse_args(
+            ["--dataset", "analytical", "--convection", "bechtold"]),
+        parser))
+    assert cfg_unset.convective_precip_efficiency is None
+
+    # Bechtold + explicit PE now ALLOWED (the guard was Tiedtke-only) and
+    # reaches the config.
+    cfg_bech = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--convective-precip-efficiency", "0.7",
+    ]), parser))
+    assert cfg_bech.convective_precip_efficiency == 0.7
+
+    # Explicit 0.0 for Bechtold (legacy no-split) is accepted and threaded.
+    cfg_bech0 = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--convective-precip-efficiency", "0.0",
+    ]), parser))
+    assert cfg_bech0.convective_precip_efficiency == 0.0
+
+    # Tiedtke still reaches the config.
+    cfg_tied = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "tiedtke",
+        "--convective-precip-efficiency", "0.5",
+    ]), parser))
+    assert cfg_tied.convective_precip_efficiency == 0.5
+
+
+def test_convective_precip_efficiency_rejected_for_non_massflux_929():
+    """#929: --convective-precip-efficiency>0 requires a mass-flux scheme
+    (tiedtke or bechtold); other schemes ignore the knob, so the run-guard
+    rejects it rather than silently no-op.  (0.0 / unset are fine everywhere.)"""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--convection", "sbm",
+            "--convective-precip-efficiency", "0.7",
+        ]), parser)
+
+
 def test_no_use_multilayer_land_overrides_yaml_default():
     """--no-use-multilayer-land flips a set_defaults(True) (i.e. a --config YAML
     that enables the multilayer land) back off — needed to run a production
@@ -386,6 +435,34 @@ def test_enable_latlon_spmd_flag_flows_to_config():
     assert cfg_on.enable_latlon_spmd is True
 
 
+def test_latlon_spmd_compiled_segments_flag_flows_to_config():
+    """--latlon-spmd-compiled-segments (M2b) round-trips into
+    ExperimentConfig (default off), and validate_strict rejects it without
+    --enable-latlon-spmd (silent-no-op hardening) while accepting the pair."""
+    import pytest
+
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--time-var", "month",
+            "--lat-var", "ylat", "--lon-var", "xlon"]
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(base), parser))
+    assert cfg_off.latlon_spmd_compiled_segments is False
+
+    cfg_on = build_config_from_args(_postprocess_args(
+        parser.parse_args(base + ["--enable-latlon-spmd", "--grid-type",
+                                  "latlon", "--latlon-spmd-compiled-segments"]),
+        parser))
+    assert cfg_on.latlon_spmd_compiled_segments is True
+    assert cfg_on.enable_latlon_spmd is True
+    cfg_on.validate_strict()                       # valid pair passes
+
+    cfg_orphan = build_config_from_args(_postprocess_args(
+        parser.parse_args(base + ["--latlon-spmd-compiled-segments"]), parser))
+    assert cfg_orphan.latlon_spmd_compiled_segments is True
+    with pytest.raises(ValueError, match="requires\\s+enable_latlon_spmd"):
+        cfg_orphan.validate_strict()
+
+
 def test_convection_cli_choices_match_config_single_source():
     """--convection CLI choices MUST equal the driver config's authoritative
     VALID_CONVECTION_SCHEMES.  Regression guard: a stale hardcoded CLI choices
@@ -530,6 +607,7 @@ _AEROSOL_CCN_BASE = [
     "--dataset", "analytical",
     "--aerosol-ccn",
     "--aerosol-forcing", "external",
+    "--aerosol-file", "/tmp/aer.nc",   # external forcing requires a file
     "--microphysics", "morrison",
 ]
 
@@ -814,6 +892,7 @@ def test_issue484_new_amip_flags_flow_to_config():
         "--k-bl-max-per-day", "1.5",
         "--k-free-per-day", "0.2",
         "--aerosol-forcing", "external",
+        "--aerosol-file", "/dummy/aero.nc",   # external forcing requires a file
         "--microphysics", "morrison",
         "--nc-from-aerosol",
     ])
@@ -1455,10 +1534,10 @@ def test_config_yaml_round_trips_authoritative_values():
     args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
     # grid geometry (resolution/nlev/discretization are CLI dests baked into
     # cfg.grid, so assert them at the args level the YAML controls).  The
-    # production YAML is C12/L20 (drive-by fix: these asserts were stale at
-    # 48/40 from a pre-#746 C48->C12 downsizing of amip_production.yaml).
-    assert args.resolution == 12
-    assert args.nlev == 20
+    # production YAML is the C48/L40 publication lane (#899 restored it from
+    # the C12/L20 land-switch screen; dt=150, fp64 — see the YAML header).
+    assert args.resolution == 48
+    assert args.nlev == 40
     assert args.discretization == "cdgrid"
     assert args.grid_type == "cubed_sphere"
     cfg = build_config_from_args(args)
@@ -1477,7 +1556,12 @@ def test_config_yaml_round_trips_authoritative_values():
     assert cfg.convective_cloud is True
     # the run_coupled-mirrored (#647) tuned knobs round-trip from the YAML
     assert cfg.surface_gustiness_zi == 300.0
-    assert cfg.cloud_q_c_diagnostic == pytest.approx(3e-4)
+    # PROVISIONAL cloud tuning (#899): rh_crit 0.85 / q_c 1e-4 (was 0.77/3e-4)
+    assert cfg.cloud_rh_crit == pytest.approx(0.85)
+    assert cfg.cloud_q_c_diagnostic == pytest.approx(1e-4)
+    # 0.0 until the bechtold rain-split lands (#932/#929): 0.5 with a
+    # non-tiedtke scheme trips run_amip's hard guard at argparse.
+    assert cfg.convective_precip_efficiency == 0.0
 
 
 def test_config_yaml_explicit_cli_flag_overrides_file():
@@ -1841,6 +1925,26 @@ def test_moisture_flux_form_flag_flows_to_dycore_config():
     assert cfg_off.dycore.moisture_flux_form is False
 
 
+def test_mpas_nu_vert4_t_flag_flows_to_dycore_config():
+    """#930: --mpas-nu-vert4-t must reach the DycoreConfig (which the component
+    factory threads into MPASPrimitiveEquationConfig.nu_vert4_T — the vertical
+    2Δσ-checkerboard cure).  Production default is ON (nonzero); 0 disables."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.dycore.mpas_nu_vert4_T > 0.0   # cure on by default
+
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-nu-vert4-t", "0",
+    ]), parser))
+    assert cfg_off.dycore.mpas_nu_vert4_T == 0.0
+
+    cfg_set = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-nu-vert4-t", "5e-6",
+    ]), parser))
+    assert cfg_set.dycore.mpas_nu_vert4_T == pytest.approx(5e-6)
+
+
 def test_multicontroller_coordinator_flags_parse():
     """Route-B flags round-trip through the parser (they are RUN args consumed
     in main() for the jax.distributed bootstrap, not ExperimentConfig fields)."""
@@ -1886,6 +1990,365 @@ def test_top_sponge_flags_flow_to_dycore_config():
     assert cfg_on.dycore.sponge_scale_height_m == 8000.0
 
 
+def test_convective_precip_efficiency_allows_bechtold():
+    """--convective-precip-efficiency now round-trips for bechtold (shared
+    split_convective_rain), not just tiedtke; a non-supporting scheme still
+    errors."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--convection", "bechtold",
+        "--convective-precip-efficiency", "0.6",
+    ]), parser))
+    assert cfg.convection == "bechtold"
+    assert cfg.convective_precip_efficiency == 0.6
+
+    # a scheme without the rain split is rejected at parse time
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical",
+            "--convection", "kuo",
+            "--convective-precip-efficiency", "0.6",
+        ]), parser)
+
+
+def test_bechtold_conv_top_pa_flows_to_config():
+    """--bechtold-conv-top-pa round-trips into ExperimentConfig (the Bechtold
+    plume-termination stability cap); default 15000 Pa (150 hPa)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.bechtold_conv_top_pa == 15000.0
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--bechtold-conv-top-pa", "12000",
+    ]), parser))
+    assert cfg.bechtold_conv_top_pa == 12000.0
+
+
+def test_new_convection_knobs_validate_bounds():
+    """validate_strict rejects out-of-range convective_precip_efficiency and
+    a non-positive bechtold_conv_top_pa (codex audit MEDIUM)."""
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match="convective_precip_efficiency"):
+        ExperimentConfig(convective_precip_efficiency=1.5).validate_strict()
+    with pytest.raises(ValueError, match="bechtold_conv_top_pa"):
+        ExperimentConfig(bechtold_conv_top_pa=0.0).validate_strict()
+    # in-range passes
+    ExperimentConfig(convective_precip_efficiency=0.6,
+                     bechtold_conv_top_pa=15000.0).validate_strict()
+
+
+def test_convective_precip_split_round_trips():
+    """--convective-precip-split + autoconv params round-trip into
+    ExperimentConfig (the physical Sundqvist autoconversion selector)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.convective_precip_split == "constant"
+    assert cfg_default.autoconv_q_c_crit == 5.0e-4
+    assert cfg_default.autoconv_pe_max == 0.9
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--convection", "bechtold",
+        "--convective-precip-split", "autoconversion",
+        "--autoconv-q-c-crit", "8e-4",
+        "--autoconv-pe-max", "0.8",
+    ]), parser))
+    assert cfg.convective_precip_split == "autoconversion"
+    assert cfg.autoconv_q_c_crit == 8e-4
+    assert cfg.autoconv_pe_max == 0.8
+
+    # an unknown selector is rejected at parse time (argparse choices)
+    with pytest.raises(SystemExit):
+        parser.parse_args([
+            "--dataset", "analytical",
+            "--convective-precip-split", "garbage",
+        ])
+
+
+def test_convective_precip_split_validate_bounds():
+    """validate_strict rejects an unknown split scheme + out-of-range autoconv
+    params; the in-range physical config passes."""
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match="convective_precip_split"):
+        ExperimentConfig(convective_precip_split="garbage").validate_strict()
+    with pytest.raises(ValueError, match="autoconv_q_c_crit"):
+        ExperimentConfig(autoconv_q_c_crit=0.0).validate_strict()
+    with pytest.raises(ValueError, match="autoconv_pe_max"):
+        ExperimentConfig(autoconv_pe_max=1.5).validate_strict()
+    ExperimentConfig(convective_precip_split="autoconversion",
+                     autoconv_q_c_crit=5.0e-4, autoconv_pe_max=0.9).validate_strict()
+
+
+def test_bechtold_downdraft_round_trips_and_threads():
+    """--bechtold-downdraft-evap/-alpha/-rh-min round-trip into ExperimentConfig
+    and thread into the hot-loop BechtoldConfig (the marine humid-BL evaporation
+    lever, #847)."""
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-downdraft-evap", "0.3",
+        "--bechtold-downdraft-alpha", "0.5",
+        "--bechtold-downdraft-rh-min", "0.6",
+    ]), parser))
+    assert (cfg.bechtold_downdraft_evap, cfg.bechtold_downdraft_alpha,
+            cfg.bechtold_downdraft_rh_min) == (0.3, 0.5, 0.6)
+    _fn, cc = _resolve_convection(cfg)
+    assert (cc.downdraft_evap_efficiency, cc.downdraft_alpha,
+            cc.downdraft_RH_min) == (0.3, 0.5, 0.6)
+    # default keeps the weak BechtoldConfig defaults (byte-identical)
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    dcc = _resolve_convection(d)[1]
+    assert (dcc.downdraft_evap_efficiency, dcc.downdraft_alpha,
+            dcc.downdraft_RH_min) == (0.05, 0.3, 0.2)
+
+
+def test_bechtold_downdraft_validate_bounds():
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match="bechtold_downdraft_evap"):
+        ExperimentConfig(bechtold_downdraft_evap=0.9).validate_strict()   # > 0.5
+    with pytest.raises(ValueError, match="bechtold_downdraft_alpha"):
+        ExperimentConfig(bechtold_downdraft_alpha=1.5).validate_strict()  # > 0.9
+    with pytest.raises(ValueError, match="bechtold_downdraft_rh_min"):
+        ExperimentConfig(bechtold_downdraft_rh_min=1.5).validate_strict()  # > 1.0
+    ExperimentConfig(bechtold_downdraft_evap=0.3, bechtold_downdraft_alpha=0.5,
+                     bechtold_downdraft_rh_min=0.6).validate_strict()
+
+
+def test_bechtold_downdraft_transport_round_trips_and_threads():
+    """--bechtold-downdraft-transport/-entrain-rate/-detrain-scale round-trip
+    into ExperimentConfig and thread into the hot-loop BechtoldConfig (the
+    marine-BL ventilation lever); default OFF is byte-identical."""
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-downdraft-transport",
+        "--bechtold-downdraft-entrain-rate", "3e-4",
+        "--bechtold-downdraft-detrain-scale", "500",
+    ]), parser))
+    assert cfg.bechtold_downdraft_transport is True
+    assert cfg.bechtold_downdraft_entrain_rate == 3e-4
+    assert cfg.bechtold_downdraft_detrain_scale_m == 500.0
+    cc = _resolve_convection(cfg)[1]
+    assert cc.downdraft_transport is True
+    assert cc.downdraft_entrain_rate == 3e-4
+    assert cc.downdraft_detrain_scale_m == 500.0
+    # default OFF => byte-identical BechtoldConfig downdraft defaults
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    dcc = _resolve_convection(d)[1]
+    assert dcc.downdraft_transport is False
+    assert (dcc.downdraft_entrain_rate,
+            dcc.downdraft_detrain_scale_m) == (5.0e-4, 700.0)
+    # --no- turns OFF a config-file default
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--no-bechtold-downdraft-transport"]), parser))
+    assert off.bechtold_downdraft_transport is False
+
+
+def test_bechtold_downdraft_transport_validate_bounds():
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match="bechtold_downdraft_entrain_rate"):
+        ExperimentConfig(
+            bechtold_downdraft_entrain_rate=1e-2).validate_strict()   # > 2e-3
+    with pytest.raises(ValueError, match="bechtold_downdraft_detrain_scale_m"):
+        ExperimentConfig(
+            bechtold_downdraft_detrain_scale_m=5000.0).validate_strict()  # > 3000
+    ExperimentConfig(bechtold_downdraft_transport=True,
+                     bechtold_downdraft_entrain_rate=3e-4,
+                     bechtold_downdraft_detrain_scale_m=500.0).validate_strict()
+
+
+def test_cloud_inhomogeneity_factor_round_trips():
+    """--cloud-inhomogeneity-factor (Cahalan 1994 plane-parallel correction)
+    round-trips into ExperimentConfig; default None => CloudConfig default."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--cloud-inhomogeneity-factor", "0.7",
+    ]), parser))
+    assert cfg.cloud_inhomogeneity_factor == 0.7
+    d = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert d.cloud_inhomogeneity_factor is None
+
+
+def test_cloud_inhomogeneity_validate_bounds():
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match="cloud_inhomogeneity_factor"):
+        ExperimentConfig(cloud_inhomogeneity_factor=0.1).validate_strict()  # < 0.3
+    with pytest.raises(ValueError, match="cloud_inhomogeneity_factor"):
+        ExperimentConfig(cloud_inhomogeneity_factor=1.5).validate_strict()  # > 1.0
+    ExperimentConfig(cloud_inhomogeneity_factor=0.7).validate_strict()
+
+
+def test_cloud_optics_inhomogeneity_round_trips_and_threads():
+    """--cloud-optics-inhomogeneity / --cloud-fsd round-trip into
+    ExperimentConfig and thread into the hot-loop CloudConfig (the two_region
+    sub-grid optic); default is 'constant' + None (byte-identical)."""
+    from legoesm.atmosphere.physics.clouds.config import build_cloud_config
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--cloud-optics-inhomogeneity", "two_region", "--cloud-fsd", "0.8",
+    ]), parser))
+    assert cfg.cloud_optics_inhomogeneity == "two_region"
+    assert cfg.cloud_fsd == 0.8
+    cc = build_cloud_config(
+        cfg.cloud_scheme,
+        cloud_optics_inhomogeneity=cfg.cloud_optics_inhomogeneity,
+        cloud_fsd=cfg.cloud_fsd)
+    assert cc.cloud_optics_inhomogeneity == "two_region"
+    assert cc.cloud_fsd == 0.8
+    # default: 'constant' scheme + None fsd => CloudConfig defaults
+    d = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert d.cloud_optics_inhomogeneity == "constant"
+    assert d.cloud_fsd is None
+    dcc = build_cloud_config(d.cloud_scheme,
+                             cloud_optics_inhomogeneity=d.cloud_optics_inhomogeneity)
+    assert dcc.cloud_optics_inhomogeneity == "constant"
+    assert dcc.cloud_fsd == 0.75
+
+
+def test_cloud_optics_inhomogeneity_validate():
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match="cloud_optics_inhomogeneity"):
+        ExperimentConfig(cloud_optics_inhomogeneity="bogus").validate_strict()
+    with pytest.raises(ValueError, match="cloud_fsd"):
+        ExperimentConfig(cloud_fsd=1.5).validate_strict()   # > 1.0
+    ExperimentConfig(cloud_optics_inhomogeneity="two_region",
+                     cloud_fsd=0.75).validate_strict()
+
+
+def test_louis_cloudtop_entrainment_efficiency_flows_to_config():
+    """--cloudtop-entrainment-efficiency round-trips (marine-Sc BL-top
+    ventilation: thins excess Sc liquid cloud without an evap trade; the
+    structural AMIP albedo fix). Single knob: default 0.0 = off."""
+    parser = build_arg_parser()
+    cfg0 = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg0.louis_cloudtop_entrainment_efficiency == 0.0
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--cloudtop-entrainment-efficiency", "0.35",
+    ]), parser))
+    assert cfg.louis_cloudtop_entrainment_efficiency == 0.35
+
+
+def test_louis_cloudtop_entrainment_threads_into_louis_config():
+    """The efficiency MUST reach LouisConfig via turbulence_config_for (the
+    single source of truth for all dycores) — else it is an inert dead field
+    (l_mix lesson). Default 0.0 stays byte-identical (no _replace)."""
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "louis",
+        "--cloudtop-entrainment-efficiency", "0.4",
+    ]), parser))
+    assert turbulence_config_for(cfg).louis.cloudtop_entrainment_efficiency == 0.4
+
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "louis",
+    ]), parser))
+    assert turbulence_config_for(cfg0).louis.cloudtop_entrainment_efficiency == 0.0
+
+
+def test_louis_cloudtop_entrainment_efficiency_validate_strict():
+    """validate_strict rejects an efficiency outside [0, 1] (and NaN/Inf)."""
+    from legoesm.driver.config import ExperimentConfig
+    for bad in (-0.1, 1.5, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="louis_cloudtop_entrainment_efficiency"):
+            ExperimentConfig(
+                louis_cloudtop_entrainment_efficiency=bad).validate_strict()
+    for ok in (0.0, 0.2, 1.0):
+        ExperimentConfig(louis_cloudtop_entrainment_efficiency=ok).validate_strict()
+
+
+def test_diagnostic_condensate_scheme_flows_to_config():
+    """--diagnostic-condensate-scheme + --adiabatic-lwc-rate round-trip into
+    ExperimentConfig (default 'constant' == byte-identical legacy floor)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.cloud_diagnostic_condensate_scheme == "constant"
+    assert cfg_default.cloud_adiabatic_lwc_rate is None
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--clouds", "sundqvist",
+        "--diagnostic-condensate-scheme", "adiabatic",
+        "--adiabatic-lwc-rate", "2.0e-6",
+    ]), parser))
+    assert cfg.cloud_diagnostic_condensate_scheme == "adiabatic"
+    assert cfg.cloud_adiabatic_lwc_rate == 2.0e-6
+
+
+def test_diagnostic_condensate_scheme_threads_into_cloud_config():
+    """The ExperimentConfig fields thread through the shared build_cloud_config
+    into the hot-loop CloudConfig (guards against a dead field)."""
+    from legoesm.atmosphere.physics.clouds.config import build_cloud_config
+    cc = build_cloud_config("sundqvist",
+                            diagnostic_condensate_scheme="adiabatic",
+                            adiabatic_lwc_rate=2.0e-6)
+    assert cc.diagnostic_condensate_scheme == "adiabatic"
+    assert cc.adiabatic_lwc_rate == 2.0e-6
+    # All-None companion call stays byte-identical to the CloudConfig default.
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
+    assert build_cloud_config("sundqvist") == CloudConfig(scheme="sundqvist")
+
+
+def test_diagnostic_condensate_scheme_validate_strict():
+    """validate_strict rejects an unknown diagnostic-condensate scheme, and
+    rejects the adiabatic opt-in on a backend that would silently ignore it."""
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig
+    for ok in ("constant", "adiabatic"):
+        # default dycore is cd-grid + rrtmgp cloud-path radiation => OK
+        ExperimentConfig(cloud_scheme="sundqvist", radiation="rrtmgp",
+                         cloud_diagnostic_condensate_scheme=ok).validate_strict()
+    with pytest.raises(ValueError, match="cloud_diagnostic_condensate_scheme"):
+        ExperimentConfig(
+            cloud_scheme="sundqvist",
+            cloud_diagnostic_condensate_scheme="linear").validate_strict()
+    # adiabatic on a genuinely-bypassing backend (spectral / MPAS build
+    # RadiationConfig directly) is a HARD error — it would silently run the
+    # constant floor there (codex dispatch-hardening).  (validate_strict joins
+    # all errors, so the match just needs our substring.)
+    for bad_disc in ("spectral", "mpas"):
+        with pytest.raises(ValueError, match="bypassing the shared cloud pipeline"):
+            ExperimentConfig(
+                cloud_scheme="sundqvist", radiation="rrtmgp",
+                cloud_diagnostic_condensate_scheme="adiabatic",
+                dycore=DycoreConfig(discretization=bad_disc)).validate_strict()
+    # A cd-grid ALIAS ('centered' / 'finite_volume') DOES thread the floor via
+    # the FV pipeline, so the guard must NOT false-positive block it (the review
+    # caught this — run_amip defaults --discretization to 'centered').
+    for ok_disc in ("centered", "finite_volume"):
+        try:
+            ExperimentConfig(
+                cloud_scheme="sundqvist", radiation="rrtmgp",
+                cloud_diagnostic_condensate_scheme="adiabatic",
+                dycore=DycoreConfig(discretization=ok_disc)).validate_strict()
+        except ValueError as exc:  # unrelated dycore validation may still raise
+            assert "bypassing the shared cloud pipeline" not in str(exc), (
+                f"adiabatic must not be guard-blocked on cd-grid alias {ok_disc!r}")
+    # Cross-field: adiabatic is a silent no-op without a diagnostic-fraction
+    # cloud scheme (sundqvist/xu_randall) AND cloud-path radiation (rrtmgp/rrtmg),
+    # so those combinations are HARD errors (codex dispatch-hardening).
+    with pytest.raises(ValueError, match="would ignore it"):
+        ExperimentConfig(
+            cloud_scheme="none",
+            cloud_diagnostic_condensate_scheme="adiabatic").validate_strict()
+    with pytest.raises(ValueError, match="cloud-path radiation"):
+        ExperimentConfig(
+            cloud_scheme="sundqvist", radiation="gray",
+            cloud_diagnostic_condensate_scheme="adiabatic").validate_strict()
 def test_yaml_settable_bools_have_no_switches():
     """#872 sweep: every store_true flag a shipped YAML can set true is now
     BooleanOptionalAction, so a --config that enables it stays CLI-overridable
@@ -1937,4 +2400,81 @@ def test_latlon24_production_variant_pins_polar_filter():
     # and lifts hfls 40->70 (#847).  The cube lane keeps bechtold.
     cfg = build_config_from_args(args)
     assert cfg.convection == "sbm" and cfg.gravity_wave_drag == "mcfarlane"
-    assert cfg.convective_precip_efficiency == 0.0  # sbm rejects the bechtold knob
+    # UNSET (#929 None sentinel; an explicit 0.0 now means "force legacy
+    # no-split", not "unset"): the latlon24 YAML clears the inherited bechtold
+    # knob to null, and sbm ignores it (sbm_precip_efficiency is its own knob)
+    # — see the convective_precip_efficiency note in amip_production_latlon24.yaml.
+    assert cfg.convective_precip_efficiency is None
+
+
+def test_enable_tiled_dycore_flag_flows_to_config():
+    """--enable-tiled-dycore round-trips into ExperimentConfig (P4 cube
+    sub-face tiling) and validate_strict enforces cube-only."""
+    import pytest
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.enable_tiled_dycore is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--enable-tiled-dycore",
+    ]), parser))
+    assert cfg_on.enable_tiled_dycore is True
+    cfg_on.validate_strict()   # default grid = cubed_sphere -> legal
+
+    cfg_bad = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--grid-type", "latlon",
+        "--enable-tiled-dycore",
+    ]), parser))
+    with pytest.raises(ValueError, match="cubed_sphere"):
+        cfg_bad.validate_strict()
+
+
+def test_explicit_zero_sic_scale_and_sst_offset_preserved():
+    """An explicit ``--sic-scale 0.0`` / ``--sst-offset 0.0`` must reach the
+    config as 0.0 — the builder uses ``is not None``, not ``or``, so a
+    legitimate no-sea-ice / no-conversion sensitivity value is not silently
+    replaced by the fallback default (1.0 / 0.0)."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--sic-scale", "0.0", "--sst-offset", "0.0",
+    ]), parser))
+    assert cfg.sic_scale == 0.0
+    assert cfg.sst_offset == 0.0
+    # The default path still yields the fallbacks.
+    cfg_def = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_def.sic_scale == 1.0 and cfg_def.sst_offset == 0.0
+
+
+def test_preset_dataset_defaults_and_override():
+    """A preset dataset defaults sic_scale/sst_offset to the preset's own unit
+    conversions (cobe SIC is percent -> 0.01), so a bare ``--dataset cobe`` keeps
+    correct units without needing --sic-scale. An explicit ``--sic-scale 0`` (a
+    no-sea-ice run) still overrides — the value model_driver forwards into the
+    preset config, which used to be dropped by ``_replace(path, T_ice)``."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "cobe", "--forcing-path", "/tmp/cobe.nc",
+    ]), parser))
+    assert cfg.sic_scale == 0.01          # cobe percent -> fraction (preset default)
+    assert cfg.sst_offset == 0.0          # cobe already Kelvin
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "cobe", "--forcing-path", "/tmp/cobe.nc", "--sic-scale", "0",
+    ]), parser))
+    assert cfg0.sic_scale == 0.0          # explicit no-ice override honored
+
+
+def test_external_ozone_aerosol_require_a_file():
+    """``--ozone-forcing external`` / ``--aerosol-forcing external`` without a
+    file must fail loudly rather than silently substitute the built-in reference
+    climatology (parity with the solar/ghg guards)."""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--ozone-forcing", "external",
+        ]), parser)
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--aerosol-forcing", "external",
+        ]), parser)

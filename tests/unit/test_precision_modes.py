@@ -149,7 +149,7 @@ class TestSWCubedSpherePrecision:
         apply_precision(mode)
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterConfig, CDGridShallowWaterModel,
             CDGridShallowWaterState,
         )
@@ -192,7 +192,7 @@ class TestSWMPASPrecision:
     def _run_one_step(mode):
         apply_precision(mode)
         from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
             MPASShallowWaterModel, MPASShallowWaterConfig,
         )
         from tests.atmosphere.shallow_water.test_cases.williamson_mpas import (
@@ -220,7 +220,7 @@ class TestSWMPASPrecision:
             from legoesm.runtime.precision import apply_precision
             apply_precision("fp32")
             from legoesm.grids.voronoi import create_voronoi_mesh
-            from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+            from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
                 MPASShallowWaterModel, MPASShallowWaterConfig)
             from tests.atmosphere.shallow_water.test_cases.williamson_mpas import (
                 williamson_test2_mpas)

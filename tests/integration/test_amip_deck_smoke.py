@@ -19,7 +19,7 @@ slowing the per-PR loop.
 The test is self-contained: it generates the forcing deck under
 ``tmp_path / "forcing"`` and points the driver at it via
 ``--forcing-dir`` and ``--auto-generate``.  This makes the test work
-on a clean checkout where ``forcing_amip/`` (gitignored) does not
+on a clean checkout where ``data/forcing_amip/`` (gitignored) does not
 exist, and avoids contaminating any pre-existing forcing dataset on
 the developer's machine.
 

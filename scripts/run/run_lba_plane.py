@@ -36,20 +36,20 @@ jax.config.update("jax_enable_x64",
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_rcemip_plane as rcp  # noqa: E402
 
-from legoesm.atmosphere.dynamics.compressible_euler import (  # noqa: E402
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (  # noqa: E402
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (  # noqa: E402
     PlaneCompressibleEulerModel,
     compute_dry_mass_plane,
     make_flat_plane_terrain_metric,
 )
-from legoesm.atmosphere.dynamics.sam_case_setup import (  # noqa: E402
+from legoesm.atmosphere.dynamics.crm.sam_case_setup import (  # noqa: E402
     build_lba_setup,
     apply_prescribed_surface_fluxes_plane,
     apply_prescribed_radiative_cooling_plane,
 )
-from legoesm.atmosphere.sam_case_forcing import (  # noqa: E402
+from legoesm.atmosphere.forcing.sam_case_forcing import (  # noqa: E402
     surface_at_day, interp_rad_to_levels,
 )
 from legoesm.grids.plane import create_plane_grid  # noqa: E402
@@ -58,7 +58,7 @@ from legoesm.grids.plane import create_plane_grid  # noqa: E402
 # Default case dir: external LEGOESM_GSAM_ROOT if set, else the repo-local
 # cache (scripts/data/fetch_les_forcing.py); --case-dir overrides. See
 # resolve_sam_case_dir.
-from legoesm.atmosphere.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
+from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
 _GSAM_LBA = resolve_sam_case_dir("LBA")
 
 
@@ -114,7 +114,7 @@ def run_lba(case_dir, *, nx=8, ny=8, nlev=64, H=20000.0, dx=1000.0, dt=2.0,
     if hyperdiff is None:
         hyperdiff = rcp.dx_aware_hyperdiff(dx)
     if use_sam_grd:
-        from legoesm.atmosphere.sam_case_forcing import read_sam_grd
+        from legoesm.atmosphere.forcing.sam_case_forcing import read_sam_grd
         nlev = int(read_sam_grd(_os.path.join(case_dir, "grd")).z_full_bottom_up.shape[0])
     grid = create_plane_grid(nx=nx, ny=ny, nlev=nlev, dx=dx, dy=dx,
                              coriolis_mode="none", dtype=dtype)

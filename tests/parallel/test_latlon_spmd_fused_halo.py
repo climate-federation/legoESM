@@ -11,6 +11,16 @@ the ``LEGOESM_LATLON_SPMD_FUSED_HALO`` opt-in:
 3. The point, mechanically: compiled ``collective-permute`` count drops
    (one pair per direction per dtype group instead of one per field).
 
+Also gates the two M2-leftover message-aggregation levers (M4 quick wins):
+
+4. ``reconstruct_vface_lower_multi`` — the fused v-carrier boundary-row
+   reconstruction (v + v_mask in ONE ppermute per dtype group inside the
+   sharded ocean step): bit-identity vs the per-field
+   ``reconstruct_vface_lower`` + the compiled collective-permute drop.
+5. ``eta_floor._global_sum_pair`` — the batched SPMD psum pair (ONE packed
+   ``psum`` via ``batch_psum_spmd`` instead of two): bit-identity vs the
+   separate psums + exactly one compiled all-reduce.
+
 Run: ``XLA_FLAGS=--xla_force_host_platform_device_count=4 \
       pytest tests/parallel/test_latlon_spmd_fused_halo.py``
 """
@@ -150,6 +160,149 @@ def test_fused_cuts_collective_count():
         per_fn.lower(*fields).compile().as_text())
     assert n_per >= 10, n_per
     assert n_fused <= 2, n_fused
+
+
+def _count_allreduces(hlo_text: str) -> int:
+    return sum(1 for line in hlo_text.splitlines()
+               if ("all-reduce(" in line or "all-reduce-start(" in line))
+
+
+# ---------------------------------------------------------------------------
+# M2 leftover (M4 quick win): fused v-carrier boundary-row reconstruction —
+# the sharded ocean step's v + v_mask staggered carriers ride ONE ppermute
+# per dtype group instead of one each (reconstruct_vface_lower_multi).
+# ---------------------------------------------------------------------------
+
+def _vcarrier_fields():
+    """v-like carriers: 3-D f64 (v), 2-D f64 (v_mask), 3-D f32 (dtype group)."""
+    rng = np.random.default_rng(7)
+    v = jnp.asarray(rng.standard_normal((N_LAT, N_LON, NLEV)))
+    vm = jnp.asarray((rng.random((N_LAT, N_LON)) > 0.3).astype(np.float64))
+    v32 = jnp.asarray(
+        rng.standard_normal((N_LAT, N_LON, NLEV)).astype(np.float32))
+    return v, vm, v32
+
+
+def test_vface_multi_reconstruct_bit_identical():
+    """Fused v-carrier reconstruction == per-field reconstruct_vface_lower,
+    bit-for-bit (mixed trailing shapes + a second dtype group), including the
+    north band's ppermute non-target zero row."""
+    from legoesm.parallel.latlon_spmd import (
+        latlon_band_perms,
+        reconstruct_vface_lower,
+        reconstruct_vface_lower_multi,
+    )
+
+    mesh = _mesh()
+    fields = _vcarrier_fields()
+    axis = "lat"
+    n_dev = mesh.devices.size
+    perm_north, _ = latlon_band_perms(n_dev)
+    specs = tuple(P("lat", *((None,) * (f.ndim - 1))) for f in fields)
+    # Shard the (nl+1)-row per-band outputs back on "lat" (the tiled
+    # methodology): the global result stacks EVERY band's block — band b's
+    # window is [b*(nl+1) : (b+1)*(nl+1)] — so the parity covers all bands
+    # including the north band's ppermute non-target zero row.
+    out_specs = specs
+
+    def _fused(*fs):
+        return reconstruct_vface_lower_multi(fs, axis, perm_north)
+
+    def _per_field(*fs):
+        return tuple(reconstruct_vface_lower(f, axis, perm_north) for f in fs)
+
+    fused = shard_map(_fused, mesh=mesh, in_specs=specs,
+                      out_specs=out_specs, check_vma=False)(*fields)
+    per = shard_map(_per_field, mesh=mesh, in_specs=specs,
+                    out_specs=out_specs, check_vma=False)(*fields)
+
+    for i, (f_out, p_out) in enumerate(zip(fused, per)):
+        assert f_out.shape[0] == N_LAT + n_dev   # n_dev stacked (nl+1) blocks
+        np.testing.assert_array_equal(
+            np.asarray(f_out), np.asarray(p_out),
+            err_msg=f"fused v-carrier reconstruction diverged on field {i}")
+        assert f_out.dtype == fields[i].dtype
+        # north band's boundary row is the ppermute non-target zero
+        assert not np.asarray(f_out)[-1].any()
+
+
+def test_vface_multi_reconstruct_cuts_collective_count():
+    """2 same-dtype carriers (the production v + v_mask pair): per-field = 2
+    collective-permutes, fused = 1."""
+    from legoesm.parallel.latlon_spmd import (
+        latlon_band_perms,
+        reconstruct_vface_lower,
+        reconstruct_vface_lower_multi,
+    )
+
+    mesh = _mesh()
+    v, vm, _ = _vcarrier_fields()
+    axis = "lat"
+    perm_north, _ = latlon_band_perms(mesh.devices.size)
+    specs = (P("lat", None, None), P("lat", None))
+    out_specs = specs                       # stacked per-band (nl+1) blocks
+
+    fused_fn = jax.jit(shard_map(
+        lambda a, b: reconstruct_vface_lower_multi((a, b), axis, perm_north),
+        mesh=mesh, in_specs=specs, out_specs=out_specs, check_vma=False))
+    per_fn = jax.jit(shard_map(
+        lambda a, b: (reconstruct_vface_lower(a, axis, perm_north),
+                      reconstruct_vface_lower(b, axis, perm_north)),
+        mesh=mesh, in_specs=specs, out_specs=out_specs, check_vma=False))
+
+    n_fused = _count_ppermutes(fused_fn.lower(v, vm).compile().as_text())
+    n_per = _count_ppermutes(per_fn.lower(v, vm).compile().as_text())
+    assert n_per >= 2, n_per
+    assert n_fused <= 1, n_fused
+
+
+# ---------------------------------------------------------------------------
+# M2 leftover (M4 quick win): eta_floor._global_sum_pair batches its two
+# scalars through batch_psum_spmd — ONE packed psum, bit-identical values.
+# ---------------------------------------------------------------------------
+
+def test_global_sum_pair_spmd_batched_bit_identical_single_collective():
+    from legoesm.ocean.dynamics.eta_floor import _global_sum_pair
+    from legoesm.parallel.latlon_spmd import (
+        activate_latlon_spmd_halo,
+        deactivate_latlon_spmd_halo,
+    )
+
+    mesh = _mesh()
+    rng = np.random.default_rng(5)
+    x = jnp.asarray(rng.standard_normal((N_LAT, N_LON)))
+    y = jnp.asarray(rng.standard_normal((N_LAT, N_LON)))
+    specs = (P("lat", None), P("lat", None))
+
+    def _pair_body(xl, yl):
+        # the clamp_and_redistribute pattern: band-local partial sums
+        return _global_sum_pair(jnp.sum(xl), jnp.sum(yl))
+
+    def _ref_body(xl, yl):
+        # the pre-batching semantics: two separate psums
+        return (jax.lax.psum(jnp.sum(xl), "lat"),
+                jax.lax.psum(jnp.sum(yl), "lat"))
+
+    # _global_sum_pair dispatches on the ARMED spmd backend at trace time.
+    activate_latlon_spmd_halo(mesh)
+    try:
+        pair_fn = jax.jit(shard_map(
+            _pair_body, mesh=mesh, in_specs=specs, out_specs=(P(), P()),
+            check_vma=False))
+        ref_fn = jax.jit(shard_map(
+            _ref_body, mesh=mesh, in_specs=specs, out_specs=(P(), P()),
+            check_vma=False))
+        a_b, b_b = pair_fn(x, y)
+        a_r, b_r = ref_fn(x, y)
+        hlo_pair = pair_fn.lower(x, y).compile().as_text()
+    finally:
+        deactivate_latlon_spmd_halo()
+
+    # BIT-identical to the separate psums (packing only, no arithmetic).
+    np.testing.assert_array_equal(np.asarray(a_b), np.asarray(a_r))
+    np.testing.assert_array_equal(np.asarray(b_b), np.asarray(b_r))
+    # ...and the pair rides exactly ONE compiled all-reduce.
+    assert _count_allreduces(hlo_pair) == 1, hlo_pair.count("all-reduce")
 
 
 def _env_flag(monkeypatch, value):

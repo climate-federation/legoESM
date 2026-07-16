@@ -86,7 +86,9 @@ class AMIPForcing(NamedTuple):
     Fields
     ------
     times : jax.Array
-        Time coordinate as days since first record, shape (ntime,).
+        Time coordinate, shape (ntime,). Absolute days since
+        ``start_year-01-01`` when loaded with ``start_year`` (AMIP-II date
+        anchoring), else days since the first record.
     sst : jax.Array
         Sea surface temperature [K], shape (ntime, ...) where ``...``
         is ``(6, n, n)`` for cubed-sphere or ``(n_lat, n_lon)`` for Gaussian.
@@ -146,11 +148,25 @@ def _is_icon_unstructured(ds) -> bool:
     return "cell" in ds.dims and "clon" in ds.coords and "clat" in ds.coords
 
 
-def _time_coord_to_days(time_coord) -> np.ndarray:
-    """Convert numeric, NumPy datetime, or cftime coordinates to relative days."""
+def _time_coord_to_days(time_coord, epoch_year: int | None = None) -> np.ndarray:
+    """Convert numeric, NumPy datetime, or cftime coordinates to days.
+
+    When ``epoch_year`` is given and the axis is calendar-aware (datetime64 or
+    cftime), returns **absolute** days since ``epoch_year-01-01`` so a model day
+    (also days since ``start_year-01-01``) indexes the file by real calendar
+    date — the AMIP-II requirement that a run use the SST/SIC of its *simulated*
+    dates, and preserving the mid-month bcs anchor (Jan value at day ~15.5, not
+    day 0).  With ``epoch_year=None`` it falls back to days since the first
+    record (legacy relative indexing).  A bare-numeric axis carries no reference
+    date, so it is returned as-is when an epoch is requested (the synthetic AMIP
+    deck already writes it as days since ``start_year-01-01``).
+    """
     time_arr = np.asarray(time_coord)
 
     if np.issubdtype(time_arr.dtype, np.datetime64):
+        if epoch_year is not None:
+            epoch = np.datetime64(f"{epoch_year:04d}-01-01")
+            return ((time_arr - epoch) / np.timedelta64(1, "D")).astype(np.float64)
         t0 = time_arr[0]
         return ((time_arr - t0) / np.timedelta64(1, "D")).astype(np.float64)
 
@@ -158,11 +174,14 @@ def _time_coord_to_days(time_coord) -> np.ndarray:
     if hasattr(first, "calendar"):
         import cftime
 
-        units = (
-            "days since "
-            f"{first.year:04d}-{first.month:02d}-{first.day:02d} "
-            f"{first.hour:02d}:{first.minute:02d}:{first.second:02d}"
-        )
+        if epoch_year is not None:
+            units = f"days since {epoch_year:04d}-01-01 00:00:00"
+        else:
+            units = (
+                "days since "
+                f"{first.year:04d}-{first.month:02d}-{first.day:02d} "
+                f"{first.hour:02d}:{first.minute:02d}:{first.second:02d}"
+            )
         return np.asarray(
             cftime.date2num(list(time_arr), units=units, calendar=first.calendar),
             dtype=np.float64,
@@ -176,15 +195,33 @@ def _time_coord_to_days(time_coord) -> np.ndarray:
             "numpy.datetime64, or cftime datetimes."
         ) from exc
 
+    if epoch_year is not None:
+        # A bare-numeric axis carries no reference date, so it cannot be
+        # calendar-anchored: its records could reference any year, and trusting
+        # them as days-since-start_year would silently serve the wrong era (the
+        # exact bug this fix removes). Real input4MIPs / the synthetic deck ship
+        # CF ``units`` and decode to datetime64/cftime, so this only rejects a
+        # metadata-less transient file — fail loud instead of guessing.
+        raise ValueError(
+            "Cannot calendar-anchor a bare-numeric AMIP time axis (no CF "
+            "reference date). Add `units`/`calendar` metadata (e.g. 'days "
+            "since 1979-01-01') so the axis decodes to a datetime/cftime type."
+        )
     return values - values[0]
 
 
-def _load_icon_unstructured(config: AMIPForcingConfig, grid) -> AMIPForcing:
+def _load_icon_unstructured(
+    config: AMIPForcingConfig, grid, start_year: int | None = None
+) -> AMIPForcing:
     """Load AMIP forcing from ICON unstructured NetCDF files.
 
     Handles separate SST/SIC files (``config.sic_path``), unit
     conversions, and KD-tree nearest-neighbour regridding from the
-    ICON cell centroids to the target grid.
+    ICON cell centroids to the target grid.  ``start_year`` anchors a
+    multi-year (transient) file to the run calendar exactly like the
+    lat-lon path (AMIP-II date anchoring + coverage guard); a short
+    climatology stays first-record-relative so its seasonal phase is
+    independent of ``start_year``.
     """
     import xarray as xr
     from scipy.spatial import cKDTree
@@ -243,21 +280,48 @@ def _load_icon_unstructured(config: AMIPForcingConfig, grid) -> AMIPForcing:
     sic_regridded = sic_data[:, idx].reshape(ntime, *target_shape)
 
     # --- Time axis ---
+    # Mirror the lat-lon path: build RELATIVE first (span is invariant to
+    # anchoring) to classify the file, then anchor ONLY a multi-year
+    # (transient) file to the run calendar so a model day indexes it by real
+    # date.  A <=12-record single-year climatology stays first-record-relative
+    # (anchoring would randomise its seasonal phase against start_year).
     times_days = _time_coord_to_days(time_coord)
+    ntime_axis = len(times_days)
+    span_days = float(times_days[-1] - times_days[0]) if ntime_axis > 1 else 0.0
+    is_transient = ntime_axis > 12 or (ntime_axis > 1 and span_days >= 366.0)
+    if start_year is not None and is_transient:
+        times_days = _time_coord_to_days(time_coord, epoch_year=start_year)
+        # Coverage guard: model day 0 (== start_year-01-01) must fall inside
+        # the record window (allow the first record up to ~1 month in, the
+        # mid-month bcs anchor), else interpolation would silently clamp to
+        # the wrong-era endpoint.  Start-of-run check only; a run extending
+        # past the last record holds it (no wrap for transient files).
+        if times_days[0] > 31.0 or times_days[-1] < 0.0:
+            raise ValueError(
+                f"AMIP forcing file does not cover start_year={start_year}: "
+                f"records span days [{times_days[0]:.0f}, {times_days[-1]:.0f}]"
+                f" relative to {start_year}-01-01. Stage a file that includes"
+                " the run period, or set start_year to a year in the file."
+            )
 
     sic_regridded = np.clip(sic_regridded, 0.0, 1.0)
 
     from legoesm.core.precision import get_policy
     _dtype = get_policy().storage
+    # times pinned to float64: an anchored transient axis carries large
+    # absolute day counts (~1e4-1e5) whose sub-day resolution (mid-month .5)
+    # would be lost at float32 (ULP ~5e-3 day).
     return AMIPForcing(
-        times=jnp.array(times_days),
+        times=jnp.asarray(times_days, dtype=jnp.float64),
         sst=jnp.array(sst_regridded, dtype=_dtype),
         sic=jnp.array(sic_regridded, dtype=_dtype),
         config=config,
     )
 
 
-def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
+def load_amip_forcing(
+    config: AMIPForcingConfig, grid, start_year: int | None = None
+) -> AMIPForcing:
     """Load AMIP forcing from NetCDF and regrid to the target grid.
 
     Supports regular lat-lon grids (COBE-SST2, HadISST, custom) and
@@ -270,6 +334,13 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
         Forcing configuration with file path and variable names.
     grid : CubedSphereGrid or GaussianGrid
         Target grid.  Detected via ``hasattr(grid, 'n_lat')``.
+    start_year : int, optional
+        Simulation start year.  When given, the time axis is anchored to
+        ``start_year-01-01`` so a model day indexes the file by real calendar
+        date (AMIP-II protocol) — e.g. a 1979 run reads the 1979 records of a
+        1870-2022 file instead of the 1870 records.  A multi-year file is then
+        checked to cover the run start.  ``None`` keeps the legacy
+        first-record-relative indexing (single-year / unit-test use).
 
     Returns
     -------
@@ -317,7 +388,7 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
         if ds_sic is not ds_sst:
             ds_sic.close()
         ds_sst.close()
-        return _load_icon_unstructured(config, grid)
+        return _load_icon_unstructured(config, grid, start_year=start_year)
 
     try:
         # --- Validate required variables ---
@@ -428,29 +499,38 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
         # sic_scale=0.01 on a real ERA5 file would slip past, all-zeros*0.01 masking it in
         # the value-sanity floor) (codex-review iter 420).
         _sic_is_fraction = _sic_units in ("1", "fraction", "dimensionless", "(0 1)")
-        if _sic_is_percent and abs(config.sic_scale - 0.01) > 1e-6:
+        # sic_scale == 0 is an explicit no-sea-ice sensitivity run (zeroes SIC);
+        # exempt it from the units/scale checks — it is unambiguously intentional
+        # (nobody misconfigures a scale of exactly 0) and yields a valid [0,1] field.
+        _no_ice = config.sic_scale == 0.0
+        if _sic_is_percent and not _no_ice and abs(config.sic_scale - 0.01) > 1e-6:
             raise ValueError(
                 f"SIC file {config.sic_var!r} has units={_sic_units!r} "
                 f"(percent) but sic_scale={config.sic_scale}. Pass "
                 "--sic-scale 0.01 for a percent SIC file."
             )
-        if _sic_is_fraction and abs(config.sic_scale - 1.0) > 1e-6:
+        if _sic_is_fraction and not _no_ice and abs(config.sic_scale - 1.0) > 1e-6:
             raise ValueError(
                 f"SIC file {config.sic_var!r} has units={_sic_units!r} "
                 f"(fraction) but sic_scale={config.sic_scale}. Pass "
                 "--sic-scale 1.0 for a fraction SIC file."
             )
         # Units-independent SIC sanity on the CONVERTED value: a percent
-        # file (0-100) scaled by 1.0 lands at ~50-100 (then silently
-        # clipped to 1.0, masking it).  Flag the pre-clip magnitude.
+        # file (0-100) scaled by 1.0 lands at ~50-100 — a wrong-scale error.
+        # The threshold allows the PCMDI mid-month "bcs" convention (Taylor
+        # et al. 2000), whose reconstructed anchors legitimately overshoot
+        # [0,1] to ~+/-25 after correct 0.01 scaling (raw ~+/-2500%); those
+        # overshoots are clipped only AFTER time interpolation, per protocol,
+        # so they must not be rejected here. A genuine 100x scale error still
+        # trips it.
         _sic_max = float(np.nanmax(np.abs(sic_data.astype(np.float64)
                                           * config.sic_scale)))
-        if _sic_max > 1.5:
+        if _sic_max > 50.0:
             raise ValueError(
                 f"SIC file {config.sic_var!r} reaches {_sic_max:.1f} "
                 f"after sic_scale={config.sic_scale} (units={_sic_units!r}) "
-                "— a fraction must be <=1. Likely a percent file needing "
-                "--sic-scale 0.01."
+                "— far beyond the +/-25 of the mid-month bcs convention. "
+                "Likely a percent file needing --sic-scale 0.01."
             )
 
         if sst_data.ndim == 2:
@@ -480,13 +560,12 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
         sst_data = _fill_nan_nearest(sst_data, lat_src, lon_src)
         sic_data = _fill_nan_nearest(sic_data, lat_src, lon_src)
 
-        # Clamp SIC to [0, 1]
-        sic_data = np.clip(sic_data, 0.0, 1.0)
-
-        # Ensure SST is at least the seawater freezing point.  Was
-        # 200 K — 71 K below physical freezing — which silently
-        # allowed unphysical SST values to flow into bulk formulas.
-        sst_data = np.maximum(sst_data, constants.T_freeze_ocean)
+        # NOTE: SIC clamp to [0,1] and the SST freezing floor are applied only
+        # AFTER time interpolation (get_forcing_at_time), NOT to these mid-month
+        # anchors. The PCMDI "bcs" values (Taylor et al. 2000) deliberately
+        # overshoot the physical range so that clip(linear-interp(anchors))
+        # reproduces the observed monthly means; clamping the anchors here would
+        # damp the SIC/SST seasonal cycle near the pack ice and cold tongue.
 
         # Wrap longitude for interpolation continuity
         # Pad one column at each end
@@ -529,20 +608,48 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
             sst_regridded[t] = interp_sst(target_points).reshape(target_shape)
             sic_regridded[t] = interp_sic(target_points).reshape(target_shape)
 
-        # Time axis: days since first record
+        # Time axis. Build RELATIVE first (the span is invariant to anchoring)
+        # to classify the file, then anchor ONLY a multi-year (transient) file
+        # to the run calendar so a model day indexes it by real date. A short
+        # climatology stays first-record-relative: anchoring a 12-month file
+        # dated some nominal year to a different start_year, then wrapping by its
+        # ~334-day span, would randomise its seasonal phase against that
+        # arbitrary year. Left relative, its annual wrap keeps the phase.
         times_days = _time_coord_to_days(time_coord)
+        span_days = float(times_days[-1] - times_days[0]) if ntime > 1 else 0.0
+        # Transient (multi-year) vs a <=12-record single-year climatology. Key
+        # on BOTH: a 13-month noleap series spans exactly 365 days (< 366) yet
+        # touches two calendar years, so >12 records also counts as transient.
+        is_transient = ntime > 12 or (ntime > 1 and span_days >= 366.0)
+        if start_year is not None and is_transient:
+            times_days = _time_coord_to_days(time_coord, epoch_year=start_year)
+            # Coverage guard: model day 0 (== start_year-01-01) must fall inside
+            # the record window (allow the first record up to ~1 month in, the
+            # mid-month bcs anchor), else the interpolation would silently clamp
+            # to the wrong-era endpoint. Note this checks the run START only; a
+            # run extending past the last record holds it (no wrap for transient
+            # files — see get_forcing_at_time), not a jump back to the file era.
+            if times_days[0] > 31.0 or times_days[-1] < 0.0:
+                raise ValueError(
+                    f"AMIP forcing file does not cover start_year={start_year}: "
+                    f"records span days [{times_days[0]:.0f}, {times_days[-1]:.0f}]"
+                    f" relative to {start_year}-01-01. Stage a file that includes"
+                    " the run period, or set start_year to a year in the file."
+                )
     finally:
         if ds_sic is not ds_sst:
             ds_sic.close()
         ds_sst.close()
 
-    # Clamp SIC again after interpolation
-    sic_regridded = np.clip(sic_regridded, 0.0, 1.0)
-
+    # Anchor values are kept un-clamped (mid-month bcs convention); the physical
+    # SIC [0,1] clip and SST freezing floor are applied after time interpolation
+    # in get_forcing_at_time. ``times`` is pinned to float64 because an anchored
+    # transient axis carries large absolute day counts (~1e4-1e5) whose sub-day
+    # resolution (mid-month .5) would be lost at float32 (ULP ~5e-3 day).
     from legoesm.core.precision import get_policy
     _dtype = get_policy().storage
     return AMIPForcing(
-        times=jnp.array(times_days),
+        times=jnp.asarray(times_days, dtype=jnp.float64),
         sst=jnp.array(sst_regridded, dtype=_dtype),
         sic=jnp.array(sic_regridded, dtype=_dtype),
         config=config,
@@ -560,7 +667,9 @@ def get_forcing_at_time(
     forcing : AMIPForcing
         Loaded forcing data.
     day : float
-        Day since start of forcing record.
+        Day on the same axis as ``forcing.times`` — absolute days since
+        ``start_year-01-01`` when the forcing was loaded with ``start_year``
+        (AMIP-II protocol), else days since the first record.
 
     Returns
     -------
@@ -571,6 +680,9 @@ def get_forcing_at_time(
     """
     times = forcing.times
     ntime = times.shape[0]
+    # Physical bounds are applied to the instantaneous INTERPOLATED value only,
+    # not to the mid-month bcs anchors (Taylor et al. 2000; see load_amip_forcing).
+    t_freeze = forcing.config.T_ice
 
     # Single-record forcing (e.g. a climatological mean, or a 2D file promoted
     # to shape (1, ...) by load_amip_forcing): no interpolation is possible, so
@@ -580,29 +692,60 @@ def get_forcing_at_time(
     # blowing up the weight (~5e10) and producing ~0 K SST via FP cancellation
     # for any requested day != times[0].
     if ntime == 1:
-        return forcing.sst[0], jnp.clip(forcing.sic[0], 0.0, 1.0)
+        return (jnp.maximum(forcing.sst[0], t_freeze),
+                jnp.clip(forcing.sic[0], 0.0, 1.0))
 
-    # Wrap day cyclically so multi-year runs repeat the annual cycle
-    # instead of clamping at the last record.
-    period = times[-1] - times[0]
-    day = jnp.where(period > 0, times[0] + (day - times[0]) % period, day)
+    # Repeat the annual cycle ONLY for a monthly climatology: <=12 records that
+    # don't already span a full year. Wrap on a 365-day noleap (model-clock)
+    # period, NOT the ~334-day record span (which would drift the season
+    # ~31 d/yr). A >12-record OR >=1-yr file is TRANSIENT (mirror
+    # load_amip_forcing's ``is_transient = ntime > 12 or span >= 366``): period 0
+    # => never wrap, so a run past the file holds its last record instead of
+    # jumping back to the first era. ``ntime`` is a static shape => JIT-safe
+    # Python branch; ``span``/``period`` are traced.
+    span = times[-1] - times[0]
+    if ntime > 12:
+        period = jnp.zeros((), dtype=times.dtype)
+    else:
+        period = jnp.where(span < 366.0, 365.0, 0.0)
+    wrap = period > 0
+    # Safe divisor: the transient path (period == 0) still TRACES the modulo in
+    # the non-selected jnp.where branch, and ``x % 0`` emits a NaN that trips
+    # JAX_DEBUG_NANS and poisons any reverse-mode VJP (grad flows through both
+    # where-branches). Divide by 1.0 there — the result is discarded by
+    # ``where(wrap, ..., day)``.
+    period_safe = jnp.where(wrap, period, 1.0)
+    day = jnp.where(wrap, times[0] + (day - times[0]) % period_safe, day)
 
-    # Find bracketing indices
+    # Bracketing indices. The climatology path closes the Dec->Jan seam: the
+    # anchor after the last mid-month record (idx == ntime-1) is field[0] one
+    # period ahead, so days past mid-December interpolate December->January
+    # (Taylor et al. 2000 cyclic bcs) rather than holding December then jumping
+    # at the year boundary. The transient path clamps to the interior and lets
+    # the [0,1] weight clamp HOLD the endpoints (no extrapolation off a clamped
+    # bracket, which is physically unbounded: SST would run to hundreds of K).
+    # Index arithmetic only (no per-step array growth — ntime is ~1836 for a
+    # transient input4MIPs file).
     idx = jnp.searchsorted(times, day, side="right") - 1
-    idx = jnp.clip(idx, 0, ntime - 2)
-    idx_next = idx + 1
-
-    # Interpolation weight
-    dt = times[idx_next] - times[idx]
-    dt = jnp.maximum(dt, 1e-10)  # avoid division by zero
-    weight = (day - times[idx]) / dt
+    idx = jnp.where(wrap, jnp.clip(idx, 0, ntime - 1),
+                    jnp.clip(idx, 0, ntime - 2))
+    idx_next = jnp.where(wrap, jnp.mod(idx + 1, ntime), idx + 1)
+    t_i = times[idx]
+    t_next = times[idx_next] + jnp.where(wrap & (idx == ntime - 1), period, 0.0)
+    dt = jnp.maximum(t_next - t_i, 1e-10)  # avoid division by zero
+    weight = jnp.clip((day - t_i) / dt, 0.0, 1.0)
 
     # Linear interpolation
     sst = (1.0 - weight) * forcing.sst[idx] + weight * forcing.sst[idx_next]
     sic = (1.0 - weight) * forcing.sic[idx] + weight * forcing.sic[idx_next]
 
-    # Clamp SIC
-    sic = jnp.clip(sic, 0.0, 1.0)
+    # Clamp to physical bounds (SIC in [0,1], SST at/above the seawater freezing
+    # point) — on the interpolated value only. Cast back to the STORED forcing
+    # dtype: the float64 time axis (required for multi-decade days-since-epoch
+    # arithmetic) otherwise promotes a float32-policy SST/SIC field to float64
+    # through the interpolation weight.
+    sst = jnp.maximum(sst, t_freeze).astype(forcing.sst.dtype)
+    sic = jnp.clip(sic, 0.0, 1.0).astype(forcing.sic.dtype)
 
     return sst, sic
 

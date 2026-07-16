@@ -56,10 +56,10 @@ from legoesm.grids.vertical import (
     create_height_coordinate,
     compute_terrain_metric,
 )
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler_latlon_cgrid import (
     CGridLatLonCompressibleEulerConfig,
     CGridLatLonNonHydrostaticState,
     cgrid_latlon_nh_step,

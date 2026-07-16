@@ -14,7 +14,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.atmosphere.dynamics import spectral_les_plane as sl
+from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl
 
 jax.config.update("jax_enable_x64", True)
 
