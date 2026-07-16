@@ -114,7 +114,13 @@ anomaly); legoESM `adcroft` (≈0.966 at t=0, 3.4% amplitude deficit). A small
 persistent deep-PGF error seeds a deep flow. Verify the deep hpg vs NEMO;
 consider a zco-faithful option. Effort: medium.
 
-**D. Barotropic filter: cosine average + spatial diffusion → Demange nn_bt_flt=3.**
+**D. Barotropic filter — DONE 2026-07-16 (483b6477a).** nemo_ab3am4
+implemented (AB3 extrapolation + AM4 backward ssh interpolation alpha=0.07 +
+final-value output + uniform transports; review: numerics EXACT, direct tests
+added). The cosine window-averaging was retarding the gyre by ~dt/2 per step.
+RMS ratio 0.50 → **0.71** (yr-1 0.93), surface rms +55%, surf/deep 11.6
+(brackets NEMO 8.2). Remaining minors: per-window ramp difference (documented),
+substeps 120 vs NEMO 50. Original description:
 NEMO uses temporal dissipation (AB3-AM4, rn_bt_alpha=0.07), NO spatial diffusion;
 legoESM uses cosine time-averaging + `barotropic_diffusion_alpha=0.01` (spatial,
 ×120 substeps) which damps the WBC η-gradient. Also substeps 120 vs NEMO's 50.
