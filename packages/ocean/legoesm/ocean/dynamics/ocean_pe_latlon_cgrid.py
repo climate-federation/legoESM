@@ -3417,6 +3417,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     vertex_mask=None,
     momentum_only: bool = False,
     precomputed_geom_density=None,
+    skip_lateral_viscosity: bool = False,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -3690,13 +3691,25 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dS_diss_lat = None
 
     # --- Stages 10 + 10b: horizontal + meridional viscosity. ---
-    (du_dt, dv_dt, diag_Ah_lap_u, diag_Ah_lap_v, diag_Bh_bilap_u,
-     diag_Bh_bilap_v, diag_Cs_smag_u, diag_Cs_smag_v, diag_Cl_leith_u,
-     diag_Cl_leith_v, kdiss_h_cell) = _bc_horizontal_viscosity(
-        du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy, dt,
-        rho_prime=rho_prime, h_k=h_k,
-        vertex_mask=vertex_mask,
-    )
+    if skip_lateral_viscosity:
+        # NEMO WS-RK3 stage 2 (stprk3_stg:318-334): eos+hpg+vor+adv ONLY —
+        # dyn_ldf is applied at stages 1 and 3, not 2. Static bool; the zero
+        # diagnostics keep the per-step closure identity.
+        _zu = jnp.zeros_like(du_dt)
+        _zv = jnp.zeros_like(dv_dt)
+        (diag_Ah_lap_u, diag_Ah_lap_v, diag_Bh_bilap_u, diag_Bh_bilap_v,
+         diag_Cs_smag_u, diag_Cs_smag_v, diag_Cl_leith_u, diag_Cl_leith_v) = (
+            _zu, _zv, _zu, _zv, _zu, _zv, _zu, _zv)
+        kdiss_h_cell = None
+    else:
+        (du_dt, dv_dt, diag_Ah_lap_u, diag_Ah_lap_v, diag_Bh_bilap_u,
+         diag_Bh_bilap_v, diag_Cs_smag_u, diag_Cs_smag_v, diag_Cl_leith_u,
+         diag_Cl_leith_v, kdiss_h_cell) = _bc_horizontal_viscosity(
+            du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord,
+            H_bathy, dt,
+            rho_prime=rho_prime, h_k=h_k,
+            vertex_mask=vertex_mask,
+        )
 
     # --- Energy backscatter (post-viscosity; lateral-friction family). ---
     # Jansen-Held (2014) energy backscatter (diagnostic-E, no

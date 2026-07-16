@@ -1603,7 +1603,7 @@ class LatLonCGridOceanModel:
         if config.ab2_epsilon < 0.0:
             raise ValueError(
                 f"ab2_epsilon must be >= 0, got {config.ab2_epsilon!r}")
-        _valid_mom_int = {"euler", "rk3"}
+        _valid_mom_int = {"euler", "rk3", "rk3_ws"}
         _mom_ti = getattr(config, "momentum_time_integrator", "euler")
         if _mom_ti not in _valid_mom_int:
             raise ValueError(
@@ -1702,7 +1702,8 @@ class LatLonCGridOceanModel:
             # holding geostrophic balance (the fix for the O(dt^2) split-growth of
             # the GYRE forced current). Forward-Euler alone is unstable (|G|>1).
             if config.outer_integrator != "ab2" and getattr(
-                    config, "momentum_time_integrator", "euler") != "rk3":
+                    config, "momentum_time_integrator",
+                    "euler") not in ("rk3", "rk3_ws"):
                 raise ValueError(
                     'coriolis_scheme="explicit_ab2" requires '
                     'outer_integrator="ab2" OR momentum_time_integrator="rk3": '
@@ -1977,7 +1978,7 @@ class LatLonCGridOceanModel:
     def tendencies(self, state: LatLonCGridOceanState, surface_forcing=None,
                    sponge=None, dt=300.0, momentum_only=False,
                    precomputed_geom_density=None, *, grid=None,
-                   vertex_mask=None):
+                   vertex_mask=None, skip_lateral_viscosity=False):
         """Compute baroclinic tendencies.
 
         ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
@@ -2008,6 +2009,7 @@ class LatLonCGridOceanModel:
             surface_tracer_forcing_fn=self._surface_tracer_forcing_fn,
             vertex_mask=_vmask,
             momentum_only=momentum_only,
+            skip_lateral_viscosity=skip_lateral_viscosity,
             precomputed_geom_density=precomputed_geom_density,
         )
 
@@ -2331,6 +2333,49 @@ class LatLonCGridOceanModel:
             p2u, p2v = _mom_pert(u2, v2)
             u_star = (1.0 / 3.0) * u0 + (2.0 / 3.0) * (u2 + dt_mom * p2u)
             v_star = (1.0 / 3.0) * v0 + (2.0 / 3.0) * (v2 + dt_mom * p2v)
+        elif getattr(self.config, "momentum_time_integrator",
+                     "euler") == "rk3_ws":
+            # NEMO stprk3_stg Wicker-Skamarock RK3: every stage restarts from
+            # u0 with the PREVIOUS stage's RHS and the stage dt (dt/3, dt/2,
+            # dt) — NOT Shu-Osher convex combinations. Per-stage RHS content
+            # mirrors NEMO exactly: stage 1 = the precomputed full tendency
+            # (stp2d's Ue_rhs INCLUDES dyn_ldf); stage 2 = hpg+vor+adv ONLY
+            # (NO lateral viscosity, stprk3_stg:318-334); stage 3 = full again
+            # (dyn_ldf re-applied). ZDF (the implicit vertical solve) runs once
+            # after the momentum stages == NEMO's stage-3-only dyn_zdf. The
+            # linear stability polynomial R(z)=1+z+z^2/2+z^3/6 is identical to
+            # SSP-RK3, so the explicit_ab2 Coriolis coupling bound (f*dt<=
+            # sqrt(3)) carries over.
+            u0 = state.u.data
+            v0 = state.v.data
+
+            def _mom_pert_ws(u_in, v_in, skip_ldf):
+                st = state._replace(
+                    u=state.u.replace(data=u_in * u_mask_3d),
+                    v=state.v.replace(data=v_in * v_mask_3d),
+                )
+                td = self.tendencies(st, surface_forcing, sponge=sponge, dt=dt,
+                                     momentum_only=True,
+                                     precomputed_geom_density=_geom_density,
+                                     grid=_grid, vertex_mask=_vmask,
+                                     skip_lateral_viscosity=skip_ldf)
+                _du = td.du_dt.data
+                _dv = td.dv_dt.data
+                _Fu = jnp.sum(_du * h_u_pre, axis=-1) / H_u_pre * state.u_mask.data
+                _Fv = jnp.sum(_dv * h_v_pre, axis=-1) / H_v_pre * state.v_mask.data
+                return _du - _Fu[..., jnp.newaxis], _dv - _Fv[..., jnp.newaxis]
+
+            # stage 1 (dt/3), RHS = the stage-1 full tendency (incl. LDF)
+            u1 = u0 + (dt_mom / 3.0) * du_dt_pert
+            v1 = v0 + (dt_mom / 3.0) * dv_dt_pert
+            # stage 2 (dt/2), RHS(u1) WITHOUT lateral viscosity
+            p1u, p1v = _mom_pert_ws(u1, v1, True)
+            u2 = u0 + (dt_mom / 2.0) * p1u
+            v2 = v0 + (dt_mom / 2.0) * p1v
+            # stage 3 (dt), RHS(u2) with lateral viscosity
+            p2u, p2v = _mom_pert_ws(u2, v2, False)
+            u_star = u0 + dt_mom * p2u
+            v_star = v0 + dt_mom * p2v
         else:
             u_star = state.u.data + dt_mom * du_dt_pert
             v_star = state.v.data + dt_mom * dv_dt_pert

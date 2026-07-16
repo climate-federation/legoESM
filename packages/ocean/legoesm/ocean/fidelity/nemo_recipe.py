@@ -75,6 +75,8 @@ class NEMOModelRecipeConfig:
     barotropic_solver: str = "explicit_substep"
     n_barotropic_substeps: int = 30
     barotropic_time_filter: str = "cosine"
+    # "rk3" = Shu-Osher SSP; "rk3_ws" = NEMO stprk3 Wicker-Skamarock (stage
+    # dt/3, dt/2, dt from u0; LDF stages 1&3 only) — the GYRE card selects ws.
     momentum_time_integrator: str = "rk3"
     adaptive_implicit_vertadv: bool = True
     implicit_vertical_mixing: bool = True
@@ -884,6 +886,9 @@ def build_nemo_gyre_recipe(
         # split (the "live" subtraction stencil is the face-f velocity form).
         vorticity_scheme="ene_total",
         barotropic_coriolis_split="frozen",
+        # NEMO's actual RK3 (Wicker-Skamarock stage structure + the per-stage
+        # RHS asymmetry) — sweep item #6.
+        momentum_time_integrator="rk3_ws",
         # NEMO has NO spatial barotropic eta-diffusion (nn_bt_flt=3 dissipation
         # is purely temporal); with the nemo_ab3am4 filter the smoother is off.
         barotropic=model_config.barotropic._replace(
@@ -1002,9 +1007,18 @@ def apply_nemo_gyre_surface_forcing(state, z_coord, dt, *, t_seconds=0.0):
     # the SAME stress drives BOTH the momentum (stage 10b') AND the TKE Dirichlet
     # surface BC en(1)=max(rn_emin0, rn_ebb*|tau|/rho0) + Langmuir — a post-step
     # body force here would bypass the wind->TKE coupling (no Ekman layer).
+    # NEMO puts emp in the ssh equation (sshwzv: deta/dt += -emp/rho0) —
+    # sweep item #7. Sign: evaporation (emp>0) removes volume => eta falls.
+    # emp is net-zero over wet cells (above) => no net volume drift. The
+    # step-level freshwater= channel is NOT used (it would also add a
+    # CONSTANT-S_ref virtual salt, double-counting the LOCAL-S trasbc-faithful
+    # salt+heat content terms applied here).
+    new_eta = state.eta.data - dt * emp_2d.astype(state.eta.data.dtype) / (
+        NEMO_CONSTANTS_CONFIG.rho_0) * cell_mask
     return state._replace(
         T=Field(data=new_T, name=state.T.name, dims=state.T.dims, units=state.T.units),
         S=Field(data=new_S, name=state.S.name, dims=state.S.dims, units=state.S.units),
+        eta=state.eta.replace(data=new_eta),
     )
 
 
