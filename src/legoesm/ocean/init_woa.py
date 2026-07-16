@@ -158,13 +158,16 @@ def load_woa18(
     lon_woa : array, shape (n_lon,)  — degrees [0, 360)
     """
     ds_T = _open_woa_dataset(T_path)
-    T_woa = np.array(ds_T["t_an"].values[0, :, :, :])  # (depth, lat, lon)
+    # Support both raw WOA ("t_an") and ESMValTool-formatted ("thetao") files
+    _t_var = "t_an" if "t_an" in ds_T else "thetao"
+    T_woa = np.array(ds_T[_t_var].values[0, :, :, :])  # (depth, lat, lon)
     lat_woa = np.array(ds_T["lat"].values)
     lon_woa = np.array(ds_T["lon"].values)
     ds_T.close()
 
     ds_S = _open_woa_dataset(S_path)
-    S_woa = np.array(ds_S["s_an"].values[0, :, :, :])
+    _s_var = "s_an" if "s_an" in ds_S else "so"
+    S_woa = np.array(ds_S[_s_var].values[0, :, :, :])
     ds_S.close()
 
     # Transpose to (lat, lon, depth) for easier interpolation
@@ -285,9 +288,153 @@ def init_ocean_from_woa(
         # Fill remaining NaNs with nearest valid value
         T_out = np.nan_to_num(T_out, nan=1.5)
         S_out = np.nan_to_num(S_out, nan=34.7)
+        # Replace spurious zeros (land cells missed by nan_to_num)
+        T_out = np.where(T_out == 0.0, 1.5,  T_out)
+        S_out = np.where(S_out == 0.0, 34.7, S_out)
 
     else:
         # Analytical fallback
         T_out, S_out = _analytical_woa_profiles(lat_deg, z_coord)
 
     return jnp.array(T_out), jnp.array(S_out)
+
+
+# ==============================================================================
+# WOA18 BGC nutrient initialization
+# ==============================================================================
+
+def init_bgc_from_woa(
+    grid,
+    z_coord: OceanZStarCoordinate,
+    no3_path: str | Path | None = None,
+    po4_path: str | Path | None = None,
+    si_path:  str | Path | None = None,
+) -> dict[str, jnp.ndarray]:
+    """Initialize BGC nutrient tracers from WOA18 climatology.
+
+    Loads WOA18 NO3, PO4, and Si annual climatology files and
+    interpolates to the model grid using the same nearest-neighbour +
+    vertical interpolation scheme as ``init_ocean_from_woa``.
+
+    Parameters
+    ----------
+    grid : any legoESM grid
+    z_coord : OceanZStarCoordinate
+    no3_path, po4_path, si_path : path or None
+        Paths to WOA18 NetCDF files.  If None, analytical fallback
+        is used (linear depth profile from surface to deep values).
+
+    Returns
+    -------
+    dict with keys "NO3", "PO4", "Si" — each shape (..., nlev)
+    Units: mol/m^3 (WOA data are in umol/kg; converted by /1022*1e-3).
+    """
+    import xarray as xr
+
+    # Extract lat/lon from grid (same dispatch as init_ocean_from_woa)
+    if hasattr(grid, "lat2d"):
+        lat_deg = np.asarray(grid.lat2d) * (180.0 / np.pi)
+        lon_2d  = np.asarray(grid.lon)   * (180.0 / np.pi)
+        lon_deg = np.broadcast_to(lon_2d[np.newaxis, :], lat_deg.shape)
+    elif hasattr(grid, "latCell"):
+        lat_deg = np.asarray(grid.latCell) * (180.0 / np.pi)
+        lon_deg = np.asarray(grid.lonCell) * (180.0 / np.pi)
+    elif hasattr(grid, "lat") and hasattr(grid, "lon"):
+        lat_deg = np.asarray(grid.lat) * (180.0 / np.pi)
+        lon_deg = np.asarray(grid.lon) * (180.0 / np.pi)
+    else:
+        raise TypeError(f"Unsupported grid type: {type(grid)}")
+
+    # ESMValTool-formatted WOA files are already in mol/m^3
+    _umol_kg_to_mol_m3 = 1.0
+
+    def _load_woa_tracer(path, varname):
+        """Load a single WOA NetCDF tracer and return (field, lat, lon)."""
+        ds  = xr.open_dataset(path, decode_times=False)
+        # Find the variable — WOA files use short names (no3, po4, si, o_an)
+        var = ds[varname] if varname in ds else ds[list(ds.data_vars)[0]]
+        # Remove time dimension if present (annual climatology)
+        if "time" in var.dims:
+            var = var.isel(time=0)
+        # Depth coordinate — try common names
+        # After squeezing time, remaining dims are (lev/depth, lat, lon)
+        # Find each axis by name
+        depth_coord = None
+        for name in ("lev", "depth", "depth_std", "zlev"):
+            if name in var.dims:
+                depth_coord = name
+                break
+        if depth_coord is None:
+            # fall back: first dim that is not lat/lon
+            for d in var.dims:
+                if d not in ("lat", "lon", "latitude", "longitude"):
+                    depth_coord = d
+                    break
+        lat_name = None
+        for name in ("lat", "latitude"):
+            if name in var.dims:
+                lat_name = name
+                break
+        lon_name = None
+        for name in ("lon", "longitude"):
+            if name in var.dims:
+                lon_name = name
+                break
+        # Reorder to (lat, lon, depth)
+        var = var.transpose(lat_name, lon_name, depth_coord)
+        field  = np.asarray(var.values, dtype=np.float64)
+        lat_1d = np.asarray(ds[lat_name].values, dtype=np.float64)
+        lon_1d = np.asarray(ds[lon_name].values, dtype=np.float64)
+        # Standardise lon to [0, 360)
+        lon_1d = lon_1d % 360.0
+        return field, lat_1d, lon_1d
+
+    def _interp_tracer(path, varname, fallback_surf, fallback_deep):
+        """Interpolate one tracer to model grid, or use analytical fallback."""
+        if path is None:
+            # Analytical: linear increase from surface to deep
+            z_norm = np.clip(
+                np.abs(np.asarray(z_coord.z_full_ref)) / 1000.0, 0.0, 1.0)
+            profile = fallback_surf + (fallback_deep - fallback_surf) * z_norm
+            field = np.broadcast_to(
+                profile.reshape((1,) * lat_deg.ndim + (z_coord.n_levels,)),
+                lat_deg.shape + (z_coord.n_levels,),
+            ).copy()
+            return jnp.array(field * _umol_kg_to_mol_m3)
+
+        raw, lat_woa, lon_woa = _load_woa_tracer(path, varname)
+        woa_d = WOA_DEPTHS[:raw.shape[-1]]
+
+        # Horizontal nearest-neighbour
+        horiz = _nearest_neighbor_2d(lat_deg, lon_deg, lat_woa, lon_woa, raw)
+
+        # Vertical interpolation
+        flat = horiz.reshape(-1, horiz.shape[-1])
+        out_flat = np.stack([
+            _interp_profile_to_z_coord(flat[i], woa_d, z_coord)
+            for i in range(flat.shape[0])
+        ])
+        out = out_flat.reshape(lat_deg.shape + (z_coord.n_levels,))
+        out = np.nan_to_num(out, nan=fallback_surf)
+
+        # Convert umol/kg -> mol/m^3
+        return jnp.array(out * _umol_kg_to_mol_m3)
+
+    # Fallback values in mol/m³ (same units as ESMValTool WOA files)
+    # NO3/PO4/Si: umol/kg * 1e-3 * 1025 ~ mol/m3; Fe: nmol/kg * 1e-6 * 1025
+    NO3 = _interp_tracer(no3_path, "no3",  fallback_surf=1.0e-3,  fallback_deep=30.0e-3)
+    PO4 = _interp_tracer(po4_path, "po4",  fallback_surf=0.1e-3,  fallback_deep=2.0e-3)
+    Si  = _interp_tracer(si_path,  "si",   fallback_surf=2.0e-3,  fallback_deep=100.0e-3)
+
+    # Fe: no WOA file — start from very low value so scavenging
+    # equilibrates quickly (within ~1 year at k_scav=5/day)
+    _Fe_surf = 50.0e-12   # mol/m³  (50 pM — config default)
+    _Fe_deep = 200.0e-12  # mol/m³  (200 pM deep)
+    _Fe_p = _Fe_surf + (_Fe_deep - _Fe_surf) * np.clip(
+        np.abs(np.asarray(z_coord.z_full_ref)) / 1000.0, 0.0, 1.0)
+    _Fe_arr = np.broadcast_to(
+        _Fe_p.reshape((1,) * lat_deg.ndim + (z_coord.n_levels,)),
+        lat_deg.shape + (z_coord.n_levels,),
+    ).copy()
+    Fe = jnp.array(_Fe_arr.astype(np.float64))
+    return {"NO3": NO3, "PO4": PO4, "Si": Si, "Fe": Fe}

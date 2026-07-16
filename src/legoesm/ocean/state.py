@@ -11,6 +11,7 @@ from typing import NamedTuple
 
 from legoesm import constants
 from legoesm.core.field import Field
+from legoesm.ocean.biogeochemistry.config import OceanBiogeoState
 
 
 # ==============================================================================
@@ -343,6 +344,7 @@ class LatLonCGridOceanState(NamedTuple):
     w: Field
     T_som: object = None
     S_som: object = None
+    biogeo: "OceanBiogeoState | None" = None
     T_flux_div_prev: object = None  # Previous advection flux divergence for T (AB2 only)
     S_flux_div_prev: object = None  # Previous advection flux divergence for S (AB2 only)
 

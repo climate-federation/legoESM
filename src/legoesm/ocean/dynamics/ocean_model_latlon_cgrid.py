@@ -423,6 +423,7 @@ class LatLonCGridOceanModel:
         grid: LatLonGrid,
         z_coord: OceanZStarCoordinate,
         config: LatLonCGridOceanConfig | None = None,
+        bgc_cfg=None,
     ):
         # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
         # All downstream operators see the enriched geometry with per-cell
@@ -431,7 +432,8 @@ class LatLonCGridOceanModel:
         # geometry carries fold descriptor and rotation angles.
         self.grid = ensure_geometry(grid)
         self.z_coord = z_coord
-        self.config = config or LatLonCGridOceanConfig()
+        self.config   = config
+        self._bgc_cfg = bgc_cfg or LatLonCGridOceanConfig()
         self._validate_config(self.config)
         self._cfl_checked = False
 
@@ -1116,6 +1118,18 @@ class LatLonCGridOceanModel:
             state_new = ocean_conservation_fixer(
                 state_new, state, self.grid, self.z_coord, self.config,
             )
+
+        # ── BGC source/sink step ─────────────────────────────────────────
+        if state_new.biogeo is not None and self._bgc_cfg is not None:
+            from legoesm.ocean.biogeochemistry import step_ocean_biogeochemistry
+            biogeo_new, _ = step_ocean_biogeochemistry(
+                state_new.biogeo,
+                state_new.T.data, state_new.S.data,
+                self.z_coord.dz_ref, self.z_coord.z_full_ref,
+                state_new.land_mask.data,
+                dt, self._bgc_cfg,
+            )
+            state_new = state_new._replace(biogeo=biogeo_new)
 
         return cast_pytree(state_new, None, "storage", allow_downcast=True)
 

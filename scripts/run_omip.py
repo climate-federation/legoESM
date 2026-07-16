@@ -56,6 +56,7 @@ GRID_DEFAULTS: dict[str, dict] = {
 }
 
 ALL_RESULTS: list[dict] = []
+_WOA_BGC_PATHS: dict = {}  # WOA nutrient paths for BGC init
 
 
 # ===========================================================================
@@ -80,10 +81,21 @@ def parse_args():
                    help="Short 30-day run for CI")
     p.add_argument("--output", type=str, default="results/omip")
     p.add_argument("--checkpoint-days", type=float, default=30.0)
+    p.add_argument("--biogeo", type=str, default="none",
+                   choices=["none", "abiotic", "npzd", "npzd_v2"],
+                   help="BGC scheme (default: none)")
+    p.add_argument("--pco2-atm", type=float, default=400.0,
+                   help="Atmospheric pCO2 [uatm] (default: 400)")
     p.add_argument("--woa-t", type=str, default=None,
                    help="WOA18 temperature NetCDF path")
     p.add_argument("--woa-s", type=str, default=None,
                    help="WOA18 salinity NetCDF path")
+    p.add_argument("--woa-no3", type=str, default=None,
+                   help="WOA18 nitrate NetCDF path for BGC init")
+    p.add_argument("--woa-po4", type=str, default=None,
+                   help="WOA18 phosphate NetCDF path for BGC init")
+    p.add_argument("--woa-si", type=str, default=None,
+                   help="WOA18 silicate NetCDF path for BGC init")
     p.add_argument("--woa-init", action="store_true",
                    help="Initialize T/S from WOA18 instead of rest state. "
                         "Requires --woa-t and --woa-s.")
@@ -337,7 +349,12 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   slope_foot_alpha: float = 0.0,
                   no_lat_scaling: bool = False,
                   no_gm_redi: bool = False,
-                  implicit_vertical_mixing: bool = False):
+                  implicit_vertical_mixing: bool = False,
+                  biogeo: str = "none",
+                  pco2_atm: float = 400.0,
+                  woa_no3: str | None = None,
+                  woa_po4: str | None = None,
+                  woa_si:  str | None = None):
     """Create grid, z_coord, config, model for any grid type.
 
     All grids use the SAME config-based diffusion (A_h, K_h, A_v, K_v)
@@ -506,7 +523,24 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 physics=None,
                 implicit_vertical_mixing=implicit_vertical_mixing,
             )
-        model = LatLonCGridOceanModel(grid, z_coord, config)
+        # ── BGC setup (latlon) ───────────────────────────────────────────
+        _bgc_cfg = None
+        if biogeo != "none":
+            from legoesm.ocean.biogeochemistry import BiogeoConfig
+            _no3_tgt = _WOA_BGC_PATHS.get('NO3_target')
+            _bgc_cfg = BiogeoConfig(
+                scheme=biogeo, pCO2_atm=pco2_atm, wind_speed=7.0,
+                nudge_nutrients=(_no3_tgt is not None),
+                tau_nudge_days=365.0,
+                NO3_target=_WOA_BGC_PATHS.get('NO3_target'),
+                PO4_target=_WOA_BGC_PATHS.get('PO4_target'),
+                Si_target =_WOA_BGC_PATHS.get('Si_target'),
+            )
+            # Store WOA nutrient paths in module-level dict for BGC init
+            _WOA_BGC_PATHS["no3"] = woa_no3
+            _WOA_BGC_PATHS["po4"] = woa_po4
+            _WOA_BGC_PATHS["si"]  = woa_si
+        model = LatLonCGridOceanModel(grid, z_coord, config, bgc_cfg=_bgc_cfg)
         return grid, z_coord, config, model, "latlon"
 
     elif grid_type == "mpas":
@@ -1539,6 +1573,26 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
 # Diagnostics
 # ===========================================================================
 
+def _extract_bgc_scalars(state, mask):
+    """Extract surface BGC diagnostics from biogeo state (if present)."""
+    result = {}
+    b = getattr(state, "biogeo", None)
+    if b is None:
+        return result
+    import numpy as np
+    wet = np.asarray(mask) > 0.5
+    def _surf_mean(arr):
+        a = np.asarray(arr)[..., 0]
+        return float(np.nanmean(np.where(wet, a, np.nan))) if wet.any() else 0.0
+    result["DIC_surf"]   = _surf_mean(b.DIC)
+    result["ALK_surf"]   = _surf_mean(b.ALK)
+    if b.NO3   is not None: result["NO3_surf"]   = _surf_mean(b.NO3)
+    if b.Phyto is not None: result["Phyto_surf"] = _surf_mean(b.Phyto)
+    if b.Zoo   is not None: result["Zoo_surf"]   = _surf_mean(b.Zoo)
+    if b.Det   is not None: result["Det_surf"]   = _surf_mean(b.Det)
+    return result
+
+
 def _extract_scalars(state, grid_type, grid, z_coord):
     """Compute scalar diagnostics from ocean state."""
     if grid_type == "spectral":
@@ -1613,13 +1667,18 @@ def _extract_scalars(state, grid_type, grid, z_coord):
         idx = np.unravel_index(np.argmax(speed_masked), speed_3d.shape)
         j_max, i_max = int(idx[0]), int(idx[1])
 
-    return {
+    scalars = {
         "SST": sst, "SSS": sss, "SSH": ssh,
         "max_speed": max_u if grid_type != "spectral" else 0.0,
         "P_bt": float(pbt),
         "j_maxu": j_max,
         "i_maxu": i_max,
     }
+    # Add BGC surface diagnostics if biogeo state is present
+    if grid_type not in ("spectral",):
+        mask_2d = np.asarray(state.land_mask.data) if grid_type != "mpas" else np.asarray(state.land_mask.data)
+        scalars.update(_extract_bgc_scalars(state, mask_2d))
+    return scalars
 
 
 def _check_finite(state, grid_type):
@@ -1709,6 +1768,13 @@ def _save_restart(state, day, step, output_dir):
         if obj is None or not hasattr(obj, "data"):
             continue
         payload[f] = np.asarray(obj.data)
+    # Save BGC tracer state if present
+    biogeo = getattr(state, "biogeo", None)
+    if biogeo is not None:
+        for bf in biogeo._fields:
+            arr = getattr(biogeo, bf)
+            if arr is not None:
+                payload[f"biogeo_{bf}"] = np.asarray(arr)
     fname = output_dir / f"restart_day{int(round(day)):06d}.npz"
     np.savez_compressed(fname, **payload)
     return fname
@@ -1824,6 +1890,56 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     blowup_info: dict | None = None
 
     # Initial diagnostics
+    # Attach BGC state to ocean state if BGC is enabled
+    _bgc_cfg_active = getattr(model, "_bgc_cfg", None)
+    if _bgc_cfg_active is not None and hasattr(_bgc_cfg_active, "scheme") and _bgc_cfg_active.scheme != "none":
+        from legoesm.ocean.biogeochemistry import BiogeoConfig, init_biogeo_state
+        shape_3d = state.T.data.shape
+        biogeo = init_biogeo_state(shape_3d, z_coord.z_full_ref, _bgc_cfg_active)
+
+        # Override nutrient ICs from WOA18 if paths provided
+        _woa_no3 = _WOA_BGC_PATHS.get("no3")
+        _woa_po4 = _WOA_BGC_PATHS.get("po4")
+        _woa_si  = _WOA_BGC_PATHS.get("si")
+        if _bgc_cfg_active.scheme == "npzd_v2" and (
+            _woa_no3 or _woa_po4 or _woa_si
+        ):
+            from legoesm.ocean.init_woa import init_bgc_from_woa
+            print("  Loading WOA18 BGC nutrients...")
+            woa_bgc = init_bgc_from_woa(
+                grid, z_coord,
+                no3_path=_woa_no3,
+                po4_path=_woa_po4,
+                si_path =_woa_si,
+            )
+            biogeo = biogeo._replace(
+                NO3=woa_bgc["NO3"].astype(biogeo.DIC.dtype),
+                PO4=woa_bgc["PO4"].astype(biogeo.DIC.dtype),
+                Si =woa_bgc["Si" ].astype(biogeo.DIC.dtype),
+                Fe =woa_bgc["Fe" ].astype(biogeo.DIC.dtype),
+            )
+            # Store WOA nutrient targets for nudging
+            _WOA_BGC_PATHS["NO3_target"] = woa_bgc["NO3"]
+            _WOA_BGC_PATHS["PO4_target"] = woa_bgc["PO4"]
+            _WOA_BGC_PATHS["Si_target"]  = woa_bgc["Si"]
+            # Update bgc_cfg with nutrient targets for nudging
+            _bgc_cfg_active = _bgc_cfg_active._replace(
+                nudge_nutrients=True,
+                tau_nudge_days=30.0,
+                NO3_target=woa_bgc["NO3"],
+                PO4_target=woa_bgc["PO4"],
+                Si_target =woa_bgc["Si"],
+            )
+            model._bgc_cfg = _bgc_cfg_active
+            print(f"    NO3 surface mean: {float(woa_bgc['NO3'][...,0].mean()):.4f} mol/m3")
+            print(f"    PO4 surface mean: {float(woa_bgc['PO4'][...,0].mean()):.4f} mol/m3")
+            print(f"    Si  surface mean: {float(woa_bgc['Si' ][...,0].mean()):.4f} mol/m3")
+            print(f"    Fe  surface mean: {float(woa_bgc['Fe' ][...,0].mean()):.2e} mol/m3")
+
+        state = state._replace(biogeo=biogeo)
+        print(f"  BGC state initialised: scheme={_bgc_cfg_active.scheme} "
+              f"tracers={len([f for f in biogeo._fields if getattr(biogeo,f) is not None])}")
+
     scalars = _extract_scalars(state, grid_type, grid, z_coord)
     for k, v in scalars.items():
         diag.setdefault(k, []).append(v)
@@ -2355,6 +2471,11 @@ def run_omip_single(grid_type: str, args) -> dict:
         no_gm_redi=getattr(args, "no_gm_redi", False),
         implicit_vertical_mixing=getattr(
             args, "implicit_vertical_mixing", False),
+        biogeo=getattr(args, "biogeo", "none"),
+        pco2_atm=getattr(args, "pco2_atm", 400.0),
+        woa_no3=getattr(args, "woa_no3", None),
+        woa_po4=getattr(args, "woa_po4", None),
+        woa_si=getattr(args, "woa_si", None),
     )
 
     # --- Initialization strategy ---
@@ -2793,11 +2914,11 @@ def run_omip_single(grid_type: str, args) -> dict:
     # cheaper than maintaining restarts; revisit if needed).
     checkpoint_dir = None
     checkpoint_days = None
-    if jra55_state is not None and args.checkpoint_days > 0.0:
+    if args.checkpoint_days > 0.0:
         checkpoint_dir = Path(args.output) / grid_type / resolution
         checkpoint_days = float(args.checkpoint_days)
         print(
-            f"  Restart cadence: every {checkpoint_days:g} simulated days "
+            f"  Checkpoint cadence: every {checkpoint_days:g} simulated days "
             f"→ {checkpoint_dir}"
         )
 
