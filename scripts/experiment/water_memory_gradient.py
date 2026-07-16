@@ -109,25 +109,28 @@ def water_memory_map(
 
 def water_memory_map_percell(
     state0, forcing_seq, doy_seq, config, *,
-    lat, dt, onset_step, late_lag_steps, good_mask, land_params_fn=None,
-    use_checkpoint=True,
+    lat, dt, onset_step, late_lo_steps, late_hi_steps=None, good_mask,
+    land_params_fn=None, use_checkpoint=True,
 ):
     """Per-cell GROWING-SEASON memory: inject the perturbation dtheta_i into cell i's
     soil water at ITS growing-season onset step s_i (snow-free + thawed), and sum GPP
-    over its late window [s_i + late_lag, end].
+    over the per-cell window [s_i + late_lo, s_i + late_hi) (late_hi=None -> to end).
 
-        M_i = d( sum_{t >= s_i+lag} GPP_i(t) ) / d( dtheta_i injected at s_i )
+        M_i = d( sum_{s_i+lo <= t < s_i+hi} GPP_i(t) ) / d( dtheta_i injected at s_i )
 
     Because dtheta_i enters the state only AT/AFTER thaw, the reverse-mode gradient
     never flows back through the near-singular spring-thaw canopy steps (TODO-1) -- so
     boreal/temperate cells are INCLUDED over their real growing season without the
-    poleward contamination, structurally rather than by masking.  Diagonal (columns
-    independent).  onset_step / late window are per-cell; state0 is the spun
-    perturbation-point (window-start) state.  Returns ``(M (ncol,), late_gpp (ncol,))``."""
+    poleward contamination, structurally rather than by masking.  A BOUNDED window
+    (late_hi finite) is a since-onset time bin -> the building block of the per-cell
+    growing-season kernel.  Diagonal (columns independent).  state0 is the spun
+    perturbation-point state.  Returns ``(M (ncol,), late_gpp (ncol,))``."""
     ncol = state0.theta_soil.shape[0]
     nsteps = int(np.asarray(forcing_seq.T_lowest).shape[0])
     onset = jnp.asarray(onset_step)
-    late_start = onset + int(late_lag_steps)
+    lo = onset + int(late_lo_steps)
+    hi = (onset + int(late_hi_steps)) if late_hi_steps is not None \
+        else jnp.full_like(onset, nsteps + 1)
     steps = jnp.arange(nsteps)
 
     def loss(dtheta):
@@ -142,7 +145,8 @@ def water_memory_map_percell(
                               psi_from_theta(theta_i, config.hydraulics), st.psi_soil)
             st = st._replace(theta_soil=theta_i, psi_soil=psi_i)
             new_st, gpp = _step_and_gpp(st, Fi, doy_i, config, lat, dt, land_params_fn)
-            acc = acc + jnp.where(step_i >= late_start, gpp, 0.0)       # per-cell late window
+            in_win = (step_i >= lo) & (step_i < hi)                     # per-cell window
+            acc = acc + jnp.where(in_win, gpp, 0.0)
             return (new_st, acc), None
 
         body_fn = jax.checkpoint(body) if use_checkpoint else body
@@ -152,6 +156,29 @@ def water_memory_map_percell(
 
     (_val, late_gpp), M = jax.value_and_grad(loss, has_aux=True)(jnp.zeros(ncol))
     return M, late_gpp
+
+
+def growing_season_kernel(
+    state0, forcing_seq, doy_seq, config, *,
+    lat, dt, onset_step, bin_steps, n_bins, good_mask, land_params_fn=None,
+    use_checkpoint=True,
+):
+    """Per-cell growing-season memory KERNEL, phenology-aligned:
+      K[b, i] = d( GPP_i in [onset_i + b*bin, onset_i + (b+1)*bin) ) / d( dtheta_i @ onset )
+    i.e. the memory decay binned by TIME-SINCE-ONSET (bin b = the b-th interval after
+    green-up), so bin b is comparable across cells regardless of calendar onset.  One
+    reverse pass per bin (each a bounded-window ``water_memory_map_percell``); by
+    construction the bins sum to the full since-onset map (late_lo=0).  Late bins are
+    empty (0) for cells whose window ends first.  Returns ``K (n_bins, ncol)``."""
+    rows = []
+    for b in range(n_bins):
+        Kb, _ = water_memory_map_percell(
+            state0, forcing_seq, doy_seq, config, lat=lat, dt=dt,
+            onset_step=onset_step, late_lo_steps=b * bin_steps,
+            late_hi_steps=(b + 1) * bin_steps, good_mask=good_mask,
+            land_params_fn=land_params_fn, use_checkpoint=use_checkpoint)
+        rows.append(np.asarray(Kb))
+    return np.stack(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +449,7 @@ def run_real(args) -> int:
               f"{args.late_lag_days:.0f}d..end ({int(good_np.sum())} cells)")
         M, late_gpp = water_memory_map_percell(
             state_p, F_win, doy_win, config, lat=lat_rad, dt=dt,
-            onset_step=onset_step, late_lag_steps=late_lag,
+            onset_step=onset_step, late_lo_steps=late_lag,
             good_mask=jnp.asarray(good_np), land_params_fn=lp_fn, use_checkpoint=True)
     else:
         M, late_gpp = water_memory_map(
@@ -449,11 +476,28 @@ def run_real(args) -> int:
           f"gradient-blowup excluded {n_grad} (|M|>={args.max_abs_grad:g} or non-finite) "
           f"| range [{np.nanmin(M):.3e}, {np.nanmax(M):.3e}] gC/m2 per (m3/m3)")
 
-    # --- temporal memory kernel (optional): month-resolved d GPP/d theta_May ---
+    # --- temporal memory kernel (optional) ---
     months = kernel = None
+    kernel_since_onset = False
     if args.kernel and args.growing_season:
-        print("(--kernel skipped: the monthly kernel is fixed-window; a per-cell "
-              "growing-season kernel is a future extension)")
+        # per-cell growing-season kernel: bins by TIME-SINCE-ONSET (phenology-aligned,
+        # thaw-clean).  One reverse pass per bin.
+        bin_days = args.kernel_bin_days
+        bin_steps = int(bin_days * DAY / dt)
+        n_bins = int(np.ceil((args.window_end_doy - min_onset) / bin_days))
+        print(f"computing growing-season kernel: {n_bins} bins of {bin_days:.0f}d "
+              f"since onset (one reverse pass per bin) ...")
+        kernel = growing_season_kernel(
+            state_p, F_win, doy_win, config, lat=lat_rad, dt=dt,
+            onset_step=onset_step, bin_steps=bin_steps, n_bins=n_bins,
+            good_mask=jnp.asarray(good_np), land_params_fn=lp_fn, use_checkpoint=True)
+        kernel = np.where(keep[None, :] & (np.abs(kernel) < args.max_abs_grad)
+                          & np.isfinite(kernel), kernel, np.nan)
+        months = np.arange(n_bins)                                  # bin index since onset
+        kernel_since_onset = True
+        for b, row in enumerate(kernel):
+            print(f"  bin {b} (onset+{b*bin_days:.0f}..{(b+1)*bin_days:.0f}d): "
+                  f"mean|K| over kept = {np.nanmean(np.abs(row)):.3e}")
     elif args.kernel:
         print("computing monthly memory kernel (one reverse pass per month) ...")
         months, kernel = monthly_memory_kernel(
@@ -473,13 +517,14 @@ def run_real(args) -> int:
 
     _write_map(args.out, M, late_gpp, keep, lat_rad, lon_rad,
                args.resolution, year, args, months=months, kernel=kernel,
-               max_snow=max_snow, min_tsoil=min_tsoil, onset_doy=onset_doy)
+               max_snow=max_snow, min_tsoil=min_tsoil, onset_doy=onset_doy,
+               kernel_since_onset=kernel_since_onset)
     return 0
 
 
 def _write_map(out, M, late_gpp, good, lat_rad, lon_rad, resolution, year, args,
                *, months=None, kernel=None, max_snow=None, min_tsoil=None,
-               onset_doy=None):
+               onset_doy=None, kernel_since_onset=False):
     import xarray as xr
     nlat, nlon = resolution, 2 * resolution
     lat = np.rad2deg(np.asarray(lat_rad)).reshape(nlat, nlon)[:, 0]
@@ -507,7 +552,18 @@ def _write_map(out, M, late_gpp, good, lat_rad, lon_rad, resolution, year, args,
                               "units": "day"})
     coords = {"lat": ("lat", lat, {"units": "degrees_north"}),
               "lon": ("lon", lon, {"units": "degrees_east"})}
-    if kernel is not None:
+    if kernel is not None and kernel_since_onset:
+        # phenology-aligned kernel: bins are time-since-onset (comparable across cells)
+        data["dGPP_dtheta_since_onset"] = (
+            ("bin", "lat", "lon"),
+            kernel.reshape(kernel.shape[0], nlat, nlon),
+            {"long_name": "d(GPP in bin since onset) / d(onset soil water) "
+                          "[per-cell growing-season memory kernel]",
+             "units": "gC m-2 per (m3 m-3)"})
+        coords["bin"] = ("bin", np.asarray(months),
+                         {"long_name": f"bins of {args.kernel_bin_days:.0f} days since "
+                          "growing-season onset (0 = onset)"})
+    elif kernel is not None:
         data["dGPP_dtheta_monthly"] = (
             ("month", "lat", "lon"),
             kernel.reshape(kernel.shape[0], nlat, nlon),
@@ -571,6 +627,9 @@ def main(argv=None) -> int:
                          "--perturb-doy, the window start)")
     ap.add_argument("--onset-snow-thresh", dest="onset_snow_thresh", type=float,
                     default=1.0, help="snow_depth [kg/m2] below which a cell is 'snow-free'")
+    ap.add_argument("--kernel-bin-days", dest="kernel_bin_days", type=float, default=30.0,
+                    help="growing-season kernel (--kernel --growing-season): bin width in "
+                         "days since onset (default 30 = ~monthly)")
     ap.add_argument("--out", default="results/water_memory/memory_map.nc")
     args = ap.parse_args(argv)
 

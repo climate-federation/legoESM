@@ -133,10 +133,30 @@ def test_percell_injection_at_step0_equals_initial_perturbation():
                                     lat=lat, dt=_DT, good_mask=good, use_checkpoint=True)
     M_pc, _ = wm.water_memory_map_percell(
         st0, F, doy_seq, cfg, lat=lat, dt=_DT,
-        onset_step=jnp.zeros(_NCOL, jnp.int32), late_lag_steps=0,
+        onset_step=jnp.zeros(_NCOL, jnp.int32), late_lo_steps=0,
         good_mask=good, use_checkpoint=True)
     assert np.allclose(np.asarray(M_pc), np.asarray(M_init), atol=1e-6, rtol=1e-5), (
         f"per-cell(onset=0,lag=0) {np.asarray(M_pc)} != initial-pert {np.asarray(M_init)}")
+
+
+def test_growing_season_kernel_bins_sum_to_map():
+    """The growing-season kernel bins (time-since-onset, non-overlapping, covering the
+    window) must SUM to the per-cell map with late_lo=0 (all post-onset GPP): the bins
+    partition [onset, end). Validates the since-onset bin construction."""
+    cfg, F, doy_seq, late_flags, lat, st0 = _case()
+    good = jnp.ones(_NCOL, bool)
+    onset = jnp.zeros(_NCOL, jnp.int32)                    # onset at step 0 (simplest)
+    nsteps = int(np.asarray(F.sw_down).shape[0])
+    bin_steps = nsteps // 2 + 1                            # 2 bins covering the window
+    K = wm.growing_season_kernel(st0, F, doy_seq, cfg, lat=lat, dt=_DT, onset_step=onset,
+                                 bin_steps=bin_steps, n_bins=2, good_mask=good,
+                                 use_checkpoint=True)
+    K_sum = np.nansum(np.asarray(K), axis=0)
+    M_all, _ = wm.water_memory_map_percell(st0, F, doy_seq, cfg, lat=lat, dt=_DT,
+                                           onset_step=onset, late_lo_steps=0,
+                                           good_mask=good, use_checkpoint=True)
+    assert np.allclose(K_sum, np.asarray(M_all), atol=1e-6, rtol=1e-5), (
+        f"bin-sum {K_sum} != full post-onset map {np.asarray(M_all)}")
 
 
 def test_spin_forward_is_nograd_and_finite():

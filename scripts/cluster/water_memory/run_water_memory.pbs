@@ -39,6 +39,8 @@
 #                                     window. Structurally avoids the thaw singularity and
 #                                     KEEPS boreal cells over their real season (supersedes
 #                                     SNOWFREE). LATE_LAG_DAYS=45 sets the memory lag.
+#                                     KERNEL=1 + GROWING=1 => the phenology-aligned
+#                                     growing-season kernel (bins since onset).
 #   OUT=results/water_memory/memory_${YEAR}_R${RESOLUTION}.nc
 #
 #PBS -N water_memory
