@@ -1742,9 +1742,10 @@ def _bc_pv_flux(
     accumulators; returns ``(du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v)``."""
     # Fail-early on an unknown vorticity scheme (static config value) so a typo
     # raises even on the WENO path where the al81/ene branch is not reached.
-    if vorticity_scheme not in ("al81", "ene"):
+    if vorticity_scheme not in ("al81", "ene", "ene_total"):
         raise ValueError(
-            f"unknown vorticity_scheme {vorticity_scheme!r}; expected 'al81' or 'ene'"
+            f"unknown vorticity_scheme {vorticity_scheme!r}; expected "
+            f"'al81', 'ene', or 'ene_total'"
         )
     # --- 7b. Potential vorticity flux (#160, Sadourny EC) ---
     # Vector-invariant advection: (u·∇)u = ∇(KE) + (f+ζ) × u.
@@ -1972,10 +1973,22 @@ def _bc_pv_flux(
             # (rvo trend); the planetary Coriolis stays in its own path
             # (matsuno_split / explicit_ab2), matching the NEMO utrd_rvo /
             # utrd_pvo diagnostic split.
-            from legoesm.ocean.dynamics.latlon_cgrid_operators import pv_flux_ene
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                pv_flux_ene,
+                vertex_coriolis,
+            )
+            # "ene_total" = NEMO np_CRV (dynvor.F90 vor_ene, kvor=total):
+            # q = (f + zeta)/e3f at the F-point with VERTEX f (ff_f) — the
+            # planetary Coriolis rides the SAME 4-pt Sadourny transport flux
+            # as the relative vorticity (one operator, NEMO's actual GYRE
+            # form). The separate face-f planetary add (stage 7b') is gated
+            # off for this scheme. "ene" stays relative-only.
+            _f_vtx = (vertex_coriolis(grid)
+                      if vorticity_scheme == "ene_total" else None)
             diag_vortcor_u, diag_vortcor_v = pv_flux_ene(
                 zeta, h_vtx, h_v, v, h_u, u,
                 u_mask_3d, v_mask_3d, vtx_mask_va,
+                f_vtx=_f_vtx,
             )
 
     # Capture PV-flux advection contribution as the `vortcor` diagnostic
@@ -3593,7 +3606,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # with no MomentumTendencyDiagnostics field change. Static Python branch on
     # the config string ⇒ default ("matsuno_split") is bit-identical: this block
     # is not traced at all.
-    if getattr(config, "coriolis_scheme", "matsuno_split") == "explicit_ab2":
+    if (getattr(config, "coriolis_scheme", "matsuno_split") == "explicit_ab2"
+            and getattr(config, "vorticity_scheme", "al81") != "ene_total"):
+        # (ene_total carries the planetary term inside the vorticity flux —
+        # NEMO np_CRV — so the separate face-f add would double-count.)
         from legoesm.ocean.dynamics.latlon_cgrid_operators import coriolis_cgrid
         # Pass u_mask=None so the operator does not apply its 2-D mask; we apply
         # the 3-D face mask here (= the partial-cell-aware u_mask_3d/v_mask_3d

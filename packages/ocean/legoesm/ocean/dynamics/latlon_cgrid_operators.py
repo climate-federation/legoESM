@@ -466,7 +466,7 @@ def coriolis_cgrid(
     return cor_u, cor_v
 
 
-def _vertex_coriolis(grid: LatLonGrid) -> jnp.ndarray:
+def vertex_coriolis(grid: LatLonGrid) -> jnp.ndarray:
     """Planetary Coriolis ``f`` at C-grid VERTICES (corners), shape
     ``(n_lat+1, n_lon+1)``.
 
@@ -483,6 +483,11 @@ def _vertex_coriolis(grid: LatLonGrid) -> jnp.ndarray:
         f_v_int = 0.5 * (f_cell[:-1] + f_cell[1:])
         f_v = jnp.concatenate([f_cell[0:1], f_v_int, f_cell[-1:]], axis=0)
     return jnp.concatenate([f_v, f_v[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1)
+
+
+# Back-compat internal alias (promoted to public for the ene_total consumer;
+# no private cross-module imports).
+_vertex_coriolis = vertex_coriolis
 
 
 def coriolis_cgrid_energy_conserving(

@@ -158,7 +158,10 @@ def test_barotropic_coriolis_split_validation_and_nonvacuity():
     )
 
     r = build_nemo_gyre_recipe()
-    assert r.model_config.barotropic_coriolis_split == "live"
+    # the card moved to ene_total (planetary INSIDE the vorticity flux), which
+    # requires the "frozen" split (the live subtraction is the face-f form).
+    assert r.model_config.barotropic_coriolis_split == "frozen"
+    assert r.model_config.vorticity_scheme == "ene_total"
 
     with pytest.raises(ValueError, match="barotropic_coriolis_split"):
         LatLonCGridOceanModel(
@@ -168,14 +171,24 @@ def test_barotropic_coriolis_split_validation_and_nonvacuity():
         LatLonCGridOceanModel(
             r.grid, r.z_coord,
             r.model_config._replace(coriolis_scheme="matsuno_split"))
+    # ene_total + live is stencil-inconsistent -> rejected
+    with pytest.raises(ValueError, match="ene_total"):
+        LatLonCGridOceanModel(
+            r.grid, r.z_coord,
+            r.model_config._replace(barotropic_coriolis_split="live"))
+    # live remains valid on the face-f split form ("ene" relative-only card)
+    LatLonCGridOceanModel(
+        r.grid, r.z_coord,
+        r.model_config._replace(vorticity_scheme="ene",
+                                barotropic_coriolis_split="live"))
 
     st = r.initial_state
     n_lat, n_lon = st.T.data.shape[0], st.T.data.shape[1]
     sf = nemo_gyre_wind_forcing(n_lat, n_lon, 0.0)
-    m_live = LatLonCGridOceanModel(r.grid, r.z_coord, r.model_config)
-    m_frozen = LatLonCGridOceanModel(
-        r.grid, r.z_coord,
-        r.model_config._replace(barotropic_coriolis_split="frozen"))
+    cfg_ene = r.model_config._replace(vorticity_scheme="ene")
+    m_live = LatLonCGridOceanModel(
+        r.grid, r.z_coord, cfg_ene._replace(barotropic_coriolis_split="live"))
+    m_frozen = LatLonCGridOceanModel(r.grid, r.z_coord, cfg_ene)
     a = m_live.step(st, dt=_NEMO_GYRE_DT_S, surface_forcing=sf)
     b = m_frozen.step(st, dt=_NEMO_GYRE_DT_S, surface_forcing=sf)
     for f in (a.u.data, a.v.data, a.eta.data):

@@ -878,7 +878,12 @@ def build_nemo_gyre_recipe(
     # geostrophic value vs NEMO's 60%).
     model_config = model_config._replace(
         physics=physics_config, coriolis_scheme="explicit_ab2",
-        barotropic_coriolis_split="live",
+        # NEMO np_CRV: planetary + relative vorticity COMBINED in one ENE
+        # vertex-f transport-form flux (dynvor.F90 vor_ene kvor=total) — the
+        # last "≈" momentum term unified. Requires the "frozen" barotropic
+        # split (the "live" subtraction stencil is the face-f velocity form).
+        vorticity_scheme="ene_total",
+        barotropic_coriolis_split="frozen",
         # NEMO has NO spatial barotropic eta-diffusion (nn_bt_flt=3 dissipation
         # is purely temporal); with the nemo_ab3am4 filter the smoother is off.
         barotropic=model_config.barotropic._replace(

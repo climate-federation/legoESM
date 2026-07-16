@@ -446,7 +446,7 @@ def test_nemo_gyre_recipe_selects_gyre_schemes():
     """The recipe's model_config carries NEMO GYRE's actual dynamical-core schemes
     (ENE vorticity, c2 KE, EOS-80, adcroft PGF, nemo_iso_lap pure Redi)."""
     mc = build_nemo_gyre_recipe().model_config
-    assert mc.vorticity_scheme == "ene"
+    assert mc.vorticity_scheme == "ene_total"  # NEMO np_CRV combined f+zeta
     assert mc.ke_gradient_scheme == "c2"
     assert mc.eos == "nemo_eos80"
     assert mc.pgf_scheme == "adcroft"

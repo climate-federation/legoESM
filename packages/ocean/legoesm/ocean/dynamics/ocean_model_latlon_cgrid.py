@@ -1555,6 +1555,21 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"pgf_quadrature must be one of {_valid_pgf_quad}, "
                 f"got {_pgf_quad!r}")
+        if getattr(config, "vorticity_scheme", "al81") == "ene_total":
+            if getattr(config, "coriolis_scheme", "matsuno_split") != "explicit_ab2":
+                raise ValueError(
+                    'vorticity_scheme="ene_total" (NEMO np_CRV: planetary '
+                    "Coriolis inside the ENE vorticity flux) requires "
+                    'coriolis_scheme="explicit_ab2" — under matsuno_split the '
+                    "separate Matsuno rotation would double-apply f. Got "
+                    f'{getattr(config, "coriolis_scheme", "matsuno_split")!r}.')
+            if getattr(config, "barotropic_coriolis_split", "frozen") == "live":
+                raise ValueError(
+                    'vorticity_scheme="ene_total" is incompatible with '
+                    'barotropic_coriolis_split="live": the live subtraction '
+                    "removes the face-f velocity-form depth-mean, but "
+                    "ene_total's planetary term is the vertex-f TRANSPORT-form "
+                    "flux — the stencils would not cancel. Use \"frozen\".")
         _bt_split = getattr(config, "barotropic_coriolis_split", "frozen")
         if _bt_split not in ("frozen", "live"):
             raise ValueError(
