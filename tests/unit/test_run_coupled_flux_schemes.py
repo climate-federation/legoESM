@@ -151,3 +151,44 @@ def test_slab_ocean_unknown_scheme_raises():
         _ocean_turbulent_fluxes(
             jnp.full(shape, 295.0), jnp.full(shape, 1e-2), fc,
             SimpleOceanConfig(bulk_scheme="garbage"))
+
+
+# ===========================================================================
+# Land runoff scheme reachability
+# ===========================================================================
+
+def test_land_runoff_scheme_reaches_the_slab_land_config():
+    """--land-runoff-scheme topmodel must reach LandConfig.runoff_scheme.
+
+    TOPMODEL is implemented in slab_land, param-spec'd as ``land.topmodel``, and
+    its dispatch already raises on an unknown name -- but land_scheme_overrides
+    built ``LandConfig()`` with NO arguments, pinning runoff_scheme at its
+    "bucket" default. The scheme was unselectable from any driver.
+    """
+    assert mod.build_parser().parse_args([]).land_runoff_scheme == "bucket"
+    ov = mod.land_scheme_overrides("slab", "topmodel")
+    assert ov["land_config"].runoff_scheme == "topmodel"
+
+
+def test_land_runoff_default_is_unchanged():
+    """A default run must stay byte-identical."""
+    assert mod.land_scheme_overrides("slab", "bucket")["land_config"].runoff_scheme == "bucket"
+
+
+def test_land_runoff_scheme_rejects_multilayer_loudly():
+    """MultiLayerLandConfig has NO runoff_scheme field (it resolves runoff
+    through its Richards column), so the flag cannot be honoured there. Reject
+    rather than silently ignore -- the same failure as `--iwm` being dropped
+    under `--vertical-mixing-scheme catke`."""
+    with pytest.raises(SystemExit, match="SLAB"):
+        mod.land_scheme_overrides("multilayer", "topmodel")
+
+
+def test_land_runoff_multilayer_ok_at_default():
+    """multilayer + the default bucket must NOT raise (nothing was requested)."""
+    assert mod.land_scheme_overrides("multilayer", "bucket")["land_mode"] == "multilayer"
+
+
+def test_land_runoff_cli_rejects_unknown():
+    with pytest.raises(SystemExit):
+        mod.build_parser().parse_args(["--land-runoff-scheme", "garbage"])

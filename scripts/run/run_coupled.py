@@ -42,6 +42,9 @@ logging.basicConfig(
 logger = logging.getLogger("run_coupled")
 
 _LAND_SCHEMES = ("slab", "multilayer")
+#: LandConfig.runoff_scheme literals (slab land only); the dispatch in
+#: land/slab_land.py raises on anything else.
+_LAND_RUNOFF_SCHEMES = ("bucket", "topmodel")
 
 def _check_params_clobber(params: dict, land_params: str) -> None:
     """Refuse --params overrides that ``CoupledESMDriver.setup()`` would clobber.
@@ -236,18 +239,39 @@ def apply_coupled_params(params_path, land_params, atm_config, coupled_cfg,
     return atm_config, coupled_cfg, coupler_config, ice_config, lake_config
 
 
-def land_scheme_overrides(land_scheme: str) -> dict:
+def land_scheme_overrides(land_scheme: str, runoff_scheme: str = "bucket") -> dict:
     """CoupledConfig overrides selecting the land surface model.
 
     The coupler dispatches on the land-config TYPE, so the (land_mode,
     land_config) pair must agree: ``MultiLayerLandConfig`` -> 8-layer soil
     thermal + Richards soil-moisture column tile; ``LandConfig`` -> 1-layer slab.
-    Raises on an unknown scheme (dispatch hardening)."""
+    Raises on an unknown scheme (dispatch hardening).
+
+    ``runoff_scheme`` is SLAB-ONLY: ``runoff_scheme``/``topmodel`` are fields of
+    ``LandConfig``, and ``MultiLayerLandConfig`` has neither (it resolves runoff
+    through its Richards column instead).  ``LandConfig()`` was built with NO
+    arguments here, so ``runoff_scheme`` was pinned at its "bucket" default and
+    TOPMODEL -- implemented in slab_land, param-spec'd as ``land.topmodel``, and
+    guarded by a real dispatch raise -- could not be selected from any driver.
+    """
     from legoesm.land.config import LandConfig, MultiLayerLandConfig
     if land_scheme == "multilayer":
+        if runoff_scheme != "bucket":
+            # Reject rather than silently ignore: MultiLayerLandConfig has no
+            # runoff_scheme field, so honouring the flag here is impossible and
+            # dropping it quietly is the exact failure this branch exists to
+            # remove (cf. `--iwm --vertical-mixing-scheme catke`).
+            raise SystemExit(
+                f"--land-runoff-scheme {runoff_scheme!r} applies to the SLAB "
+                "land model only (it selects LandConfig.runoff_scheme); "
+                "--land-scheme multilayer resolves runoff through its Richards "
+                "soil column and has no such field. Use --land-scheme slab, or "
+                "drop --land-runoff-scheme."
+            )
         return {"land_mode": "multilayer", "land_config": MultiLayerLandConfig()}
     if land_scheme == "slab":
-        return {"land_mode": "slab", "land_config": LandConfig()}
+        return {"land_mode": "slab",
+                "land_config": LandConfig(runoff_scheme=runoff_scheme)}
     raise ValueError(
         f"land_scheme must be one of {_LAND_SCHEMES}, got {land_scheme!r}.")
 
@@ -610,6 +634,16 @@ def build_parser():
                              "woa). Default on; the slab-land skin feedback is "
                              "stiff — turn off (--no-couple-surface-radiation) "
                              "to trade land-radiation realism for stability.")
+    # SLAB-only (LandConfig.runoff_scheme). topmodel = SIMTOP sub-grid saturated
+    # fraction + topographic baseflow (Niu 2005 / CLM4.5); it is implemented and
+    # param-spec'd but was unreachable -- land_scheme_overrides built
+    # LandConfig() with no arguments, pinning the default.
+    parser.add_argument("--land-runoff-scheme", choices=_LAND_RUNOFF_SCHEMES,
+                        default="bucket",
+                        help="Slab-land runoff partitioning: 'bucket' (default, "
+                             "Green-Ampt Hortonian + Dunne saturation-excess) or "
+                             "'topmodel' (SIMTOP saturated fraction + "
+                             "topographic baseflow). Requires --land-scheme slab.")
     parser.add_argument("--land-scheme", choices=_LAND_SCHEMES,
                         default=None,
                         help="Override the preset's land surface model. 'slab' = "
@@ -1082,7 +1116,8 @@ def main():
             # Select the land surface model (coupler dispatches on the config
             # type: MultiLayerLandConfig -> Richards column tile, else slab).
             # woa defaults to slab when --land-scheme is unset.
-            overrides.update(land_scheme_overrides(args.land_scheme or "slab"))
+            overrides.update(land_scheme_overrides(
+                args.land_scheme or "slab", args.land_runoff_scheme))
             # With real continents the atmospheric radiative surface boundary
             # SHOULD be the tile-blended (land+ocean) skin T / albedo, not the
             # ocean SST everywhere (else land cells radiate at the dynamic-ocean
@@ -1132,7 +1167,8 @@ def main():
     # (the woa branch already applied its own default above; re-applying the same
     # explicit value is idempotent). Unset -> keep the preset's land choice.
     if args.land_scheme is not None:
-        overrides.update(land_scheme_overrides(args.land_scheme))
+        overrides.update(land_scheme_overrides(
+            args.land_scheme, args.land_runoff_scheme))
 
     coupled_cfg = PRESETS[args.preset](**overrides)
 
