@@ -205,11 +205,17 @@ def pert_ppm(im: int, a0, al, ar, iv: int) -> None:
 def copy_corners(q: fort, npx: int, npy: int, dir_: int,
                  bounded_domain: bool, bd: Bounds,
                  sw_corner: bool, se_corner: bool,
-                 nw_corner: bool, ne_corner: bool) -> None:
-    """tp_core.F90 copy_corners (verbatim; rotates data through corners)."""
+                 nw_corner: bool, ne_corner: bool,
+                 duogrid: bool = False) -> None:
+    """tp_core.F90 copy_corners (verbatim; rotates data through corners).
+
+    DUO (symmetryclean tp_core:239): ``if (bounded_domain .or. duogrid)
+    return`` — the duo halos carry real cross-face corner data, so the
+    corner rotation is skipped entirely.
+    """
     ng = bd.ng
 
-    if bounded_domain:
+    if bounded_domain or duogrid:
         return
 
     if dir_ == 1:
@@ -255,14 +261,15 @@ def xppm(flux: fort, q: fort, c: fort, iord: int,
          is_: int, ie: int, isd: int, ied: int,
          jfirst: int, jlast: int, jsd: int, jed: int,
          npx: int, npy: int, dxa: fort,
-         bounded_domain: bool, grid_type: int, lim_fac: float) -> None:
+         bounded_domain: bool, grid_type: int, lim_fac: float,
+         duogrid: bool = False) -> None:
     """tp_core.F90 xppm (verbatim, all iord branches).
 
     flux(is:ie+1, jfirst:jlast) OUT; q(isd:ied, jfirst:jlast) IN;
     c(is:ie+1, jfirst:jlast) Courant.  All fort views carry origins that
     line up with the Fortran sequence association at every call site.
     """
-    if (not bounded_domain) and grid_type < 3:
+    if (not (bounded_domain or duogrid)) and grid_type < 3:
         is1 = max(3, is_ - 1)
         ie3 = min(npx - 2, ie + 2)
         ie1 = min(npx - 3, ie + 1)
@@ -288,7 +295,7 @@ def xppm(flux: fort, q: fort, c: fort, iord: int,
                 al[i] = TP_P1 * (q1[i - 1] + q1[i]) \
                     + TP_P2 * (q1[i - 2] + q1[i + 1])
 
-            if (not bounded_domain) and grid_type < 3:
+            if (not (bounded_domain or duogrid)) and grid_type < 3:
                 if is_ == 1:
                     al[0] = TP_C1 * q1[-2] + TP_C2 * q1[-1] + TP_C3 * q1[0]
                     al[1] = 0.5 * (
@@ -459,7 +466,7 @@ def xppm(flux: fort, q: fort, c: fort, iord: int,
                             smt5[i] = 3.0 * abs(b0[i]) < abs(bl[i] - br[i])
 
                     # WMP: fix edge issues
-                    if (not bounded_domain) and grid_type < 3:
+                    if (not (bounded_domain or duogrid)) and grid_type < 3:
                         if is_ == 1:
                             smt5[0] = bl[0] * br[0] < 0.0
                             smt5[1] = bl[1] * br[1] < 0.0
@@ -571,7 +578,7 @@ def xppm(flux: fort, q: fort, c: fort, iord: int,
                          bl.view(is1, ie1 - is1 + 1),
                          br.view(is1, ie1 - is1 + 1), 0)
 
-            if (not bounded_domain) and grid_type < 3:
+            if (not (bounded_domain or duogrid)) and grid_type < 3:
                 if is_ == 1:
                     bl[0] = TP_S14 * dm[-1] + TP_S11 * (q1[-1] - q1[0])
 
@@ -650,13 +657,14 @@ def yppm(flux: fort, q: fort, c: fort, jord: int,
          ifirst: int, ilast: int, isd: int, ied: int,
          js: int, je: int, jsd: int, jed: int,
          npx: int, npy: int, dya: fort,
-         bounded_domain: bool, grid_type: int, lim_fac: float) -> None:
+         bounded_domain: bool, grid_type: int, lim_fac: float,
+         duogrid: bool = False) -> None:
     """tp_core.F90 yppm (verbatim, all jord branches).
 
     flux(ifirst:ilast, js:je+1) OUT; q(ifirst:ilast, jsd:jed) IN;
     c(isd:ied, js:je+1) Courant.
     """
-    if (not bounded_domain) and grid_type < 3:
+    if (not (bounded_domain or duogrid)) and grid_type < 3:
         # Cubed-sphere:
         js1 = max(3, js - 1)
         je3 = min(npy - 2, je + 2)
@@ -688,7 +696,7 @@ def yppm(flux: fort, q: fort, c: fort, jord: int,
                 al[i, j] = TP_P1 * (q[i, j - 1] + q[i, j]) \
                     + TP_P2 * (q[i, j - 2] + q[i, j + 1])
 
-        if (not bounded_domain) and grid_type < 3:
+        if (not (bounded_domain or duogrid)) and grid_type < 3:
             if js == 1:
                 for i in range(ifirst, ilast + 1):
                     al[i, 0] = TP_C1 * q[i, -2] + TP_C2 * q[i, -1] \
@@ -856,7 +864,7 @@ def yppm(flux: fort, q: fort, c: fort, jord: int,
                                 < abs(bl[i, j] - br[i, j])
 
                 # WMP: fix edge issues
-                if (not bounded_domain) and grid_type < 3:
+                if (not (bounded_domain or duogrid)) and grid_type < 3:
                     if js == 1:
                         for i in range(ifirst, ilast + 1):
                             smt5[i, 0] = bl[i, 0] * br[i, 0] < 0.0
@@ -987,7 +995,7 @@ def yppm(flux: fort, q: fort, c: fort, jord: int,
                          _col(bl, ifirst, ilast - ifirst + 1, j),
                          _col(br, ifirst, ilast - ifirst + 1, j), 0)
 
-        if (not bounded_domain) and grid_type < 3:
+        if (not (bounded_domain or duogrid)) and grid_type < 3:
             if js == 1:
                 for i in range(ifirst, ilast + 1):
                     bl[i, 0] = TP_S14 * dm[i, -1] \
@@ -1084,7 +1092,7 @@ def deln_flux(nord: int, is_: int, ie: int, js: int, je: int,
               npx: int, npy: int, damp: float, q: fort,
               fx: fort, fy: fort, gridstruct: dict, bd: Bounds,
               mass: fort | None = None,
-              damp_km: fort | None = None) -> None:
+              damp_km: fort | None = None, duogrid=False) -> None:
     """tp_core.F90 deln_flux (verbatim; non-USE_SG branch).
 
     Del-n damping for the cell-mean values (A grid):
@@ -1119,7 +1127,7 @@ def deln_flux(nord: int, is_: int, ie: int, js: int, je: int,
     if nord > 0:
         copy_corners(d2, npx, npy, 1, gridstruct["bounded_domain"], bd,
                      gridstruct["sw_corner"], gridstruct["se_corner"],
-                     gridstruct["nw_corner"], gridstruct["ne_corner"])
+                     gridstruct["nw_corner"], gridstruct["ne_corner"], duogrid=duogrid)
 
     for j in range(js - nord, je + nord + 1):
         for i in range(is_ - nord, ie + nord + 1 + 1):
@@ -1128,7 +1136,7 @@ def deln_flux(nord: int, is_: int, ie: int, js: int, je: int,
     if nord > 0:
         copy_corners(d2, npx, npy, 2, gridstruct["bounded_domain"], bd,
                      gridstruct["sw_corner"], gridstruct["se_corner"],
-                     gridstruct["nw_corner"], gridstruct["ne_corner"])
+                     gridstruct["nw_corner"], gridstruct["ne_corner"], duogrid=duogrid)
     for j in range(js - nord, je + nord + 1 + 1):
         for i in range(is_ - nord, ie + nord + 1):
             fy2[i, j] = DEL6_U[i, j] * (d2[i, j - 1] - d2[i, j])
@@ -1150,14 +1158,14 @@ def deln_flux(nord: int, is_: int, ie: int, js: int, je: int,
 
             copy_corners(d2, npx, npy, 1, gridstruct["bounded_domain"], bd,
                          gridstruct["sw_corner"], gridstruct["se_corner"],
-                         gridstruct["nw_corner"], gridstruct["ne_corner"])
+                         gridstruct["nw_corner"], gridstruct["ne_corner"], duogrid=duogrid)
             for j in range(js - nt, je + nt + 1):
                 for i in range(is_ - nt, ie + nt + 1 + 1):
                     fx2[i, j] = DEL6_V[i, j] * (d2[i, j] - d2[i - 1, j])
 
             copy_corners(d2, npx, npy, 2, gridstruct["bounded_domain"], bd,
                          gridstruct["sw_corner"], gridstruct["se_corner"],
-                         gridstruct["nw_corner"], gridstruct["ne_corner"])
+                         gridstruct["nw_corner"], gridstruct["ne_corner"], duogrid=duogrid)
             for j in range(js - nt, je + nt + 1 + 1):
                 for i in range(is_ - nt, ie + nt + 1):
                     fy2[i, j] = DEL6_U[i, j] * (d2[i, j] - d2[i, j - 1])
@@ -1220,7 +1228,7 @@ def fv_tp_2d(q: fort, crx: fort, cry: fort, npx: int, npy: int, hord: int,
              mass: fort | None = None, nord: int | None = None,
              damp_c: float | None = None,
              damp_smag: float | None = None,
-             damp_km: fort | None = None) -> None:
+             damp_km: fort | None = None, duogrid=False) -> None:
     """tp_core.F90 fv_tp_2d (verbatim).
 
     q(isd:ied, jsd:jed) INOUT (corner ghosts mutated via copy_corners!);
@@ -1252,10 +1260,10 @@ def fv_tp_2d(q: fort, crx: fort, cry: fort, npx: int, npy: int, hord: int,
     if not bounded_domain:
         copy_corners(q, npx, npy, 2, bounded_domain, bd,
                      gridstruct["sw_corner"], gridstruct["se_corner"],
-                     gridstruct["nw_corner"], gridstruct["ne_corner"])
+                     gridstruct["nw_corner"], gridstruct["ne_corner"], duogrid=duogrid)
 
     yppm(fy2, q, cry, ord_in, isd, ied, isd, ied, js, je, jsd, jed,
-         npx, npy, DYA, bounded_domain, grid_type, lim_fac)
+         npx, npy, DYA, bounded_domain, grid_type, lim_fac, duogrid=duogrid)
 
     for j in range(js, je + 1 + 1):
         for i in range(isd, ied + 1):
@@ -1268,15 +1276,15 @@ def fv_tp_2d(q: fort, crx: fort, cry: fort, npx: int, npy: int, hord: int,
     # Fortran passes crx(is,js): leading extents match, so the callee's
     # c(i,j) is crx(i,j) — the view passes through unchanged.
     xppm(fx, q_i, crx, ord_ou, is_, ie, isd, ied, js, je, jsd, jed,
-         npx, npy, DXA, bounded_domain, grid_type, lim_fac)
+         npx, npy, DXA, bounded_domain, grid_type, lim_fac, duogrid=duogrid)
 
     if not bounded_domain:
         copy_corners(q, npx, npy, 1, bounded_domain, bd,
                      gridstruct["sw_corner"], gridstruct["se_corner"],
-                     gridstruct["nw_corner"], gridstruct["ne_corner"])
+                     gridstruct["nw_corner"], gridstruct["ne_corner"], duogrid=duogrid)
 
     xppm(fx2, q, crx, ord_in, is_, ie, isd, ied, jsd, jed, jsd, jed,
-         npx, npy, DXA, bounded_domain, grid_type, lim_fac)
+         npx, npy, DXA, bounded_domain, grid_type, lim_fac, duogrid=duogrid)
 
     for j in range(jsd, jed + 1):
         for i in range(is_, ie + 1 + 1):
@@ -1286,7 +1294,7 @@ def fv_tp_2d(q: fort, crx: fort, cry: fort, npx: int, npy: int, hord: int,
                          - fx1[i + 1]) / ra_x[i, j]
 
     yppm(fy, q_j, cry, ord_ou, is_, ie, isd, ied, js, je, jsd, jed,
-         npx, npy, DYA, bounded_domain, grid_type, lim_fac)
+         npx, npy, DYA, bounded_domain, grid_type, lim_fac, duogrid=duogrid)
 
     # ----------------
     # Flux averaging:
@@ -1693,7 +1701,7 @@ def smag_corner(dt: float, u: fort, v: fort, ua: fort, va: fort,
 def del6_vt_flux(nord: int, npx: int, npy: int, damp: float,
                  q: fort, d2: fort, fx2: fort, fy2: fort,
                  gridstruct: dict, bd: Bounds,
-                 damp_km: fort | None = None) -> None:
+                 damp_km: fort | None = None, duogrid=False) -> None:
     """sw_core.F90 del6_vt_flux (verbatim; non-USE_SG branch).
 
     Del-nord damping for the relative vorticity (nord <= 2); like
@@ -1722,7 +1730,7 @@ def del6_vt_flux(nord: int, npx: int, npy: int, damp: float,
     if nord > 0 and (not bounded_domain):
         copy_corners(d2, npx, npy, 1, bounded_domain, bd,
                      gridstruct["sw_corner"], gridstruct["se_corner"],
-                     gridstruct["nw_corner"], gridstruct["ne_corner"])
+                     gridstruct["nw_corner"], gridstruct["ne_corner"], duogrid=duogrid)
     for j in range(js - nord, je + nord + 1):
         for i in range(is_ - nord, ie + nord + 1 + 1):
             fx2[i, j] = DEL6_V[i, j] * (d2[i - 1, j] - d2[i, j])
@@ -1730,7 +1738,7 @@ def del6_vt_flux(nord: int, npx: int, npy: int, damp: float,
     if nord > 0 and (not bounded_domain):
         copy_corners(d2, npx, npy, 2, bounded_domain, bd,
                      gridstruct["sw_corner"], gridstruct["se_corner"],
-                     gridstruct["nw_corner"], gridstruct["ne_corner"])
+                     gridstruct["nw_corner"], gridstruct["ne_corner"], duogrid=duogrid)
     for j in range(js - nord, je + nord + 1 + 1):
         for i in range(is_ - nord, ie + nord + 1):
             fy2[i, j] = DEL6_U[i, j] * (d2[i, j - 1] - d2[i, j])
@@ -1748,7 +1756,7 @@ def del6_vt_flux(nord: int, npx: int, npy: int, damp: float,
                              gridstruct["sw_corner"],
                              gridstruct["se_corner"],
                              gridstruct["nw_corner"],
-                             gridstruct["ne_corner"])
+                             gridstruct["ne_corner"], duogrid=duogrid)
 
             for j in range(js - nt, je + nt + 1):
                 for i in range(is_ - nt, ie + nt + 1 + 1):
@@ -1759,7 +1767,7 @@ def del6_vt_flux(nord: int, npx: int, npy: int, damp: float,
                              gridstruct["sw_corner"],
                              gridstruct["se_corner"],
                              gridstruct["nw_corner"],
-                             gridstruct["ne_corner"])
+                             gridstruct["ne_corner"], duogrid=duogrid)
 
             for j in range(js - nt, je + nt + 1 + 1):
                 for i in range(is_ - nt, ie + nt + 1):
@@ -3159,7 +3167,7 @@ def d_sw(delp, pt, w, u, v, uc, vc, ua, va, divg_d, xflux, yflux, cx, cy,
     # ---- delp transport (Fortran 426-427) ----
     fv_tp_2d(delp, crx_adv, cry_adv, npx, npy, hord_dp, fx, fy,
              xfx_adv, yfx_adv, gsf, bd, ra_x, ra_y, lim_fac,
-             nord=nord_v, damp_c=damp_v)
+             nord=nord_v, damp_c=damp_v, duogrid=duogrid)
 
     # ---- flux capacitor accumulation (Fortran 430-447) ----
     for j in range(jsd, jed + 1):
@@ -3185,7 +3193,7 @@ def d_sw(delp, pt, w, u, v, uc, vc, ua, va, divg_d, xflux, yflux, cx, cy,
         if damp_w > 1.0e-5:
             dd8 = kgb * abs(dt)
             damp4 = (damp_w * da_min_c) ** (nord_w + 1)
-            del6_vt_flux(nord_w, npx, npy, damp4, w, wk, fx2, fy2, gsf, bd)
+            del6_vt_flux(nord_w, npx, npy, damp4, w, wk, fx2, fy2, gsf, bd, duogrid=duogrid)
             if prevent_diss_cooling:
                 for j in range(js, je + 1):
                     for i in range(is_, ie + 1):
@@ -3206,7 +3214,7 @@ def d_sw(delp, pt, w, u, v, uc, vc, ua, va, divg_d, xflux, yflux, cx, cy,
                             diss_est[i, j] = heat_source[i, j]
         fv_tp_2d(w, crx_adv, cry_adv, npx, npy, hord_vt, gx, gy,
                  xfx_adv, yfx_adv, gsf, bd, ra_x, ra_y, lim_fac,
-                 mfx=fx, mfy=fy)
+                 mfx=fx, mfy=fy, duogrid=duogrid)
         for j in range(js, je + 1):
             for i in range(is_, ie + 1):
                 w[i, j] = delp[i, j] * w[i, j] + (
@@ -3216,7 +3224,7 @@ def d_sw(delp, pt, w, u, v, uc, vc, ua, va, divg_d, xflux, yflux, cx, cy,
     if use_cond:
         fv_tp_2d(q_con, crx_adv, cry_adv, npx, npy, hord_dp, gx, gy,
                  xfx_adv, yfx_adv, gsf, bd, ra_x, ra_y, lim_fac,
-                 mfx=fx, mfy=fy, mass=delp, nord=nord_t, damp_c=damp_t)
+                 mfx=fx, mfy=fy, mass=delp, nord=nord_t, damp_c=damp_t, duogrid=duogrid)
         for j in range(js, je + 1):
             for i in range(is_, ie + 1):
                 q_con[i, j] = delp[i, j] * q_con[i, j] + (
@@ -3225,7 +3233,7 @@ def d_sw(delp, pt, w, u, v, uc, vc, ua, va, divg_d, xflux, yflux, cx, cy,
     # ---- pt transport (Fortran 520-523; #else AM4 arm) ----
     fv_tp_2d(pt, crx_adv, cry_adv, npx, npy, hord_tm, gx, gy,
              xfx_adv, yfx_adv, gsf, bd, ra_x, ra_y, lim_fac,
-             mfx=fx, mfy=fy, mass=delp, nord=nord_t, damp_c=damp_t)
+             mfx=fx, mfy=fy, mass=delp, nord=nord_t, damp_c=damp_t, duogrid=duogrid)
 
     # ---- delp / pt update (Fortran 527-574) ----
     if inline_q:
@@ -3239,7 +3247,7 @@ def d_sw(delp, pt, w, u, v, uc, vc, ua, va, divg_d, xflux, yflux, cx, cy,
         for iq in range(1, nq + 1):
             fv_tp_2d(q, crx_adv, cry_adv, npx, npy, hord_tr, gx, gy,
                      xfx_adv, yfx_adv, gsf, bd, ra_x, ra_y, lim_fac,
-                     mfx=fx, mfy=fy, mass=delp, nord=nord_t, damp_c=damp_t)
+                     mfx=fx, mfy=fy, mass=delp, nord=nord_t, damp_c=damp_t, duogrid=duogrid)
             for j in range(js, je + 1):
                 for i in range(is_, ie + 1):
                     q[i, j] = (q[i, j] * wk[i, j] + (
@@ -3552,7 +3560,7 @@ def d_sw(delp, pt, w, u, v, uc, vc, ua, va, divg_d, xflux, yflux, cx, cy,
                     vort[i, j] = wk[i, j] + f0[i, j]
 
     fv_tp_2d(vort, crx_adv, cry_adv, npx, npy, hord_vt, fx, fy,
-             xfx_adv, yfx_adv, gsf, bd, ra_x, ra_y, lim_fac)
+             xfx_adv, yfx_adv, gsf, bd, ra_x, ra_y, lim_fac, duogrid=duogrid)
     for j in range(js, je + 1 + 1):
         for i in range(is_, ie + 1):
             u[i, j] = vt[i, j] + ke[i, j] - ke[i + 1, j] + fy[i, j]
@@ -3563,7 +3571,7 @@ def d_sw(delp, pt, w, u, v, uc, vc, ua, va, divg_d, xflux, yflux, cx, cy,
     # ---- vorticity (wk) damping (Fortran 1020-1026) ----
     if damp_v > 1.0e-5:
         damp4 = (damp_v * da_min_c) ** (nord_v + 1)
-        del6_vt_flux(nord_v, npx, npy, damp4, wk, vort, ut, vt, gsf, bd)
+        del6_vt_flux(nord_v, npx, npy, damp4, wk, vort, ut, vt, gsf, bd, duogrid=duogrid)
     elif do_diss_est:
         for j in range(jsd, jed + 1):
             for i in range(isd, ied + 1 + 1):
