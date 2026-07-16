@@ -18,6 +18,7 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
+from legoesm.driver.air_sea_consistency import validate_air_sea_consistency
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.coupled_config import CoupledConfig
 from legoesm.diagnostics.energy_budget import area_weighted_mean
@@ -53,56 +54,6 @@ def enable_diurnal_surface_land(land_cfg):
     if cfg.carbon.scheme != "differland":   # Farquhar needs the differland LAI
         cfg = cfg._replace(carbon=CarbonConfig(scheme="differland"))
     return cfg
-
-
-def _validate_air_sea_scheme_consistency(atm_config, coupler_config) -> None:
-    """The atmosphere surface layer and the coupler OCEAN tile must agree.
-
-    ``ExperimentConfig.surface_bulk_scheme`` drives the ATMOSPHERE surface layer
-    and ``CouplerConfig.bulk_scheme`` drives the coupler OCEAN tile (the
-    3D-ocean air-sea flux).  They describe the SAME interface, so a mismatch
-    means the latent heat the ocean loses is not the moisture flux the
-    atmosphere gains -- and nothing failed, it just quietly stopped conserving.
-
-    This is a real bug this guard is the fix for: ``run_coupled`` built
-    ``CouplerConfig`` without ``bulk_scheme``, so ``--surface-bulk-scheme
-    coare3`` gave the atmosphere COARE3 while the ocean tile stayed on the
-    "constant" default, and ``--gustiness-zi`` (a COARE3 term, absent from the
-    constant scheme) was inert on the tile.  The flag's help and the driver's
-    own log line both claimed the tile used the requested scheme.
-
-    Validated on STATIC Python config values at construction, never in a traced
-    body.  The LAND and SLAB tiles legitimately run their own scheme
-    (``--land-bulk-scheme`` / ``--slab-bulk-scheme``) and are deliberately out of
-    scope -- this guards the air-sea interface only.
-
-    ``coupler_config=None`` is NOT skipped.  An earlier version of this guard
-    returned early there, on the assumption that the driver's own defaults are
-    "self-consistent by construction" -- they are not: ``setup()`` materializes a
-    bare ``CouplerConfig()``, whose ``bulk_scheme`` is "constant" REGARDLESS of
-    the atmosphere, so ``CoupledESMDriver(ExperimentConfig(
-    surface_bulk_scheme="coare3"))`` produced exactly the split this guard
-    exists to catch, and the guard waved it through.  So validate against the
-    config the driver will ACTUALLY materialize.
-    """
-    from legoesm.coupler.config import CouplerConfig
-
-    effective = coupler_config if coupler_config is not None else CouplerConfig()
-    atm_scheme = getattr(atm_config, "surface_bulk_scheme", None)
-    ocean_scheme = getattr(effective, "bulk_scheme", None)
-    if atm_scheme is None or ocean_scheme is None:
-        return
-    if atm_scheme != ocean_scheme:
-        raise ValueError(
-            "air-sea bulk-flux scheme mismatch: the atmosphere surface layer "
-            f"runs ExperimentConfig.surface_bulk_scheme={atm_scheme!r} while "
-            f"the coupler ocean tile runs CouplerConfig.bulk_scheme="
-            f"{ocean_scheme!r}. These parameterize the SAME air-sea interface; "
-            "a split means the ocean's latent-heat loss is not the "
-            "atmosphere's moisture gain. Set CouplerConfig.bulk_scheme to "
-            f"{atm_scheme!r} (run_coupled threads --surface-bulk-scheme into "
-            "both)."
-        )
 
 
 def _flatten_pytree_to_npz(state, prefix: str) -> dict:
@@ -209,7 +160,7 @@ class CoupledESMDriver:
     ):
         self.atm_config = atm_config
         self.coupled_cfg = coupled_config or CoupledConfig()
-        _validate_air_sea_scheme_consistency(atm_config, coupler_config)
+        validate_air_sea_consistency(atm_config, coupler_config)
         self._atm = ModelDriver(atm_config, output_dir=output_dir)
         self._coupler_config = coupler_config
         self._ice_config = ice_config

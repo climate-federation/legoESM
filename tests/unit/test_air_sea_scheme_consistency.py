@@ -32,8 +32,11 @@ import sys
 
 import pytest
 from legoesm.coupler.config import CouplerConfig
+from legoesm.driver.air_sea_consistency import (
+    resolve_effective_atm_surface,
+    validate_air_sea_consistency,
+)
 from legoesm.driver.config import ExperimentConfig
-from legoesm.driver.coupled_esm_driver import _validate_air_sea_scheme_consistency
 
 _MOST_SCHEMES = ("coare3", "large_yeager")
 
@@ -72,7 +75,7 @@ def test_cli_threads_the_scheme_into_the_coupler_ocean_tile(scheme):
     # and the pair the driver guard compares must be consistent
     atm = ExperimentConfig(surface_bulk_scheme=args.surface_bulk_scheme,
                            turbulence="louis")
-    _validate_air_sea_scheme_consistency(atm, cpl)
+    validate_air_sea_consistency(atm, cpl)
 
 
 def test_default_run_still_takes_the_driver_defaults():
@@ -85,14 +88,14 @@ def test_default_run_still_takes_the_driver_defaults():
 @pytest.mark.parametrize("scheme", _MOST_SCHEMES + ("constant",))
 def test_matched_schemes_pass_the_guard(scheme):
     atm = ExperimentConfig(surface_bulk_scheme=scheme, turbulence="louis")
-    _validate_air_sea_scheme_consistency(atm, CouplerConfig(bulk_scheme=scheme))
+    validate_air_sea_consistency(atm, CouplerConfig(bulk_scheme=scheme))
 
 
 def test_split_interface_is_rejected():
     """The exact historical bug: atmosphere coare3, ocean tile constant."""
     atm = ExperimentConfig(surface_bulk_scheme="coare3", turbulence="louis")
     with pytest.raises(ValueError, match="air-sea bulk-flux scheme mismatch"):
-        _validate_air_sea_scheme_consistency(atm, CouplerConfig())
+        validate_air_sea_consistency(atm, CouplerConfig())
 
 
 @pytest.mark.parametrize(
@@ -103,7 +106,7 @@ def test_split_interface_is_rejected():
 def test_any_mismatch_is_rejected(atm_scheme, ocean_scheme):
     atm = ExperimentConfig(surface_bulk_scheme=atm_scheme, turbulence="louis")
     with pytest.raises(ValueError, match="air-sea bulk-flux scheme mismatch"):
-        _validate_air_sea_scheme_consistency(
+        validate_air_sea_consistency(
             atm, CouplerConfig(bulk_scheme=ocean_scheme)
         )
 
@@ -119,13 +122,159 @@ def test_none_coupler_config_is_validated_against_the_driver_default():
     """
     atm = ExperimentConfig(surface_bulk_scheme="coare3", turbulence="louis")
     with pytest.raises(ValueError, match="air-sea bulk-flux scheme mismatch"):
-        _validate_air_sea_scheme_consistency(atm, None)
+        validate_air_sea_consistency(atm, None)
 
 
 def test_none_coupler_config_ok_when_atmosphere_matches_the_default():
     """The default atmosphere ('constant') matches the driver's default tile, so
     an untouched run is unaffected."""
-    _validate_air_sea_scheme_consistency(ExperimentConfig(), None)
+    validate_air_sea_consistency(ExperimentConfig(), None)
+
+
+# --- the guard must be REACHED, not merely correct -------------------------
+#
+# Every test above calls the helper directly, so deleting the call from a
+# driver's __init__ left them all green (codex). These pin the wiring itself:
+# they construct the PUBLIC driver and fail if the guard is not invoked.
+
+@pytest.mark.parametrize("driver_name", ["CoupledESMDriver", "EarthSystemDriver"])
+def test_public_driver_ctor_rejects_the_split(driver_name):
+    """Both drivers do `self._coupler_config or CouplerConfig()` in setup() and
+    feed it to make_coupler's ocean tile, so BOTH need the guard.
+    EarthSystemDriver did not have it (codex)."""
+    import importlib
+    mod = importlib.import_module(
+        "legoesm.driver.coupled_esm_driver" if driver_name == "CoupledESMDriver"
+        else "legoesm.driver.earth_system_driver"
+    )
+    driver_cls = getattr(mod, driver_name)
+    atm = ExperimentConfig(surface_bulk_scheme="coare3", turbulence="louis")
+    with pytest.raises(ValueError, match="air-sea bulk-flux scheme mismatch"):
+        driver_cls(atm)
+
+
+# --- effective config, not declared config ---------------------------------
+
+def test_override_that_declares_constant_but_runs_coare3_is_rejected():
+    """The declared field is NOT what the atmosphere runs.
+
+    ``apply_surface_flux_config`` returns a ``turbulence_override`` UNCHANGED
+    when every experiment-level surface field is default, and validate_strict
+    only requires the override to share the active turbulence *scheme* -- never
+    its nested surface settings. So this config declares 'constant', runs
+    COARE3, and a guard reading the declared field waves the split through
+    (codex). Verified: validate_strict accepts it.
+    """
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+
+    base = TurbulenceConfig(scheme="louis")
+    ovr = base._replace(
+        louis=base.louis._replace(
+            surface=base.louis.surface._replace(bulk_scheme="coare3")))
+    cfg = ExperimentConfig(turbulence="louis", surface_bulk_scheme="constant",
+                           turbulence_override=ovr)
+    cfg.validate_strict()  # the override is legal ...
+    assert resolve_effective_atm_surface(cfg).bulk_scheme == "coare3"  # ... and runs COARE3
+    with pytest.raises(ValueError, match="air-sea bulk-flux scheme mismatch"):
+        validate_air_sea_consistency(cfg, CouplerConfig())
+
+
+def test_effective_resolver_matches_the_declared_field_when_no_override():
+    """Without an override the effective scheme IS the declared one, so the
+    resolver cannot have loosened the common case."""
+    for scheme in _MOST_SCHEMES + ("constant",):
+        cfg = ExperimentConfig(surface_bulk_scheme=scheme, turbulence="louis")
+        assert resolve_effective_atm_surface(cfg).bulk_scheme == scheme
+
+
+def test_no_surface_sub_config_is_skipped():
+    """turbulence='none' carries no surface layer -> nothing to compare.
+    (coare3 + turbulence='none' is already rejected by validate_strict.)"""
+    assert resolve_effective_atm_surface(ExperimentConfig(turbulence="none")) is None
+    validate_air_sea_consistency(ExperimentConfig(turbulence="none"),
+                                 CouplerConfig(bulk_scheme="coare3"))
+
+
+# --- the interface splits on more than the scheme name ---------------------
+
+@pytest.mark.parametrize("axis,atm_kw,cpl_kw", [
+    ("thermo_convention", {"surface_thermo_convention": "aerobulk"},
+     {"thermo_convention": "legoesm"}),
+    ("stability_scheme", {"surface_stability_scheme": "sheba"},
+     {"stability_scheme": "dyer1974"}),
+])
+def test_non_scheme_axes_also_split_the_interface(axis, atm_kw, cpl_kw):
+    """bulk_scheme was one of SEVERAL same-named fields on both sides; a split
+    in any of them means the two sides run different physics on one interface."""
+    atm = ExperimentConfig(surface_bulk_scheme="coare3", turbulence="louis",
+                           **atm_kw)
+    with pytest.raises(ValueError, match=axis):
+        validate_air_sea_consistency(
+            atm, CouplerConfig(bulk_scheme="coare3", **cpl_kw))
+
+
+@pytest.mark.parametrize("atm_kw", [
+    {"surface_thermo_convention": "aerobulk"},
+    {"surface_stability_scheme": "sheba"},
+])
+def test_most_only_axes_are_not_compared_under_the_constant_closure(atm_kw):
+    """MUST NOT reject: under 'constant' BOTH sides ignore these fields.
+
+    surface_layer.py passes thermo_convention/stability_scheme/z_ref/
+    bulk_n_iter exclusively inside its ("coare3","large_yeager") branch (the
+    constant branch reads only Cd_neutral/Ch_neutral), and coupler.py gates them
+    behind `_is_most` while ocean_surface_q_sat deliberately keeps the constant
+    closure on Tetens. So the two sides run IDENTICALLY here.
+
+    An earlier draft of the guard compared these unconditionally and rejected
+    `run_coupled --bulk-thermo-convention aerobulk` -- a real config, since
+    build_coupler_config returns None under the default constant scheme. That
+    would have been a regression introduced BY the guard.
+    """
+    cfg = ExperimentConfig(turbulence="louis", **atm_kw)   # default: constant
+    validate_air_sea_consistency(cfg, None)
+
+
+def test_matching_most_is_still_a_split_because_the_atmosphere_lacks_it():
+    """Equal strings are not equal physics.
+
+    The atmosphere dispatches MOST on ("coare3","large_yeager") ONLY, so
+    bulk_scheme='most' silently degrades it to the constant branch -- while the
+    coupler tile's `_is_most` DOES include 'most' and runs the MOST solver. The
+    names match; the physics does not.
+    """
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+
+    base = TurbulenceConfig(scheme="louis")
+    ovr = base._replace(louis=base.louis._replace(
+        surface=base.louis.surface._replace(bulk_scheme="most")))
+    cfg = ExperimentConfig(turbulence="louis", turbulence_override=ovr)
+    with pytest.raises(ValueError, match="does NOT implement"):
+        validate_air_sea_consistency(cfg, CouplerConfig(bulk_scheme="most"))
+
+
+def test_most_geometry_split_is_rejected():
+    """z_ref/bulk_n_iter feed the same MOST solver on both sides."""
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+
+    base = TurbulenceConfig(scheme="louis")
+    ovr = base._replace(louis=base.louis._replace(
+        surface=base.louis.surface._replace(bulk_scheme="coare3", z_ref=2.0)))
+    cfg = ExperimentConfig(turbulence="louis", turbulence_override=ovr)
+    with pytest.raises(ValueError, match="z_ref"):
+        validate_air_sea_consistency(cfg, CouplerConfig(bulk_scheme="coare3"))
+
+
+def test_most_geometry_is_not_compared_under_the_constant_closure():
+    """The constant closure reads neither z_ref nor bulk_n_iter, so a
+    difference there is not a split and must NOT be rejected."""
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+
+    base = TurbulenceConfig(scheme="louis")
+    ovr = base._replace(louis=base.louis._replace(
+        surface=base.louis.surface._replace(z_ref=2.0)))
+    cfg = ExperimentConfig(turbulence="louis", turbulence_override=ovr)
+    validate_air_sea_consistency(cfg, CouplerConfig())  # must not raise
 
 
 @pytest.mark.xfail(

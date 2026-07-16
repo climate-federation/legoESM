@@ -142,9 +142,19 @@ def build_coupler_config(args):
 
     Keeps the coupler ocean-tile bulk-flux scheme consistent with the atmosphere
     surface layer (interface energy balance: the flux leaving the ocean must
-    match the flux entering the atmosphere).  Returns ``None`` while the user
-    stays on the defaults so a default run is byte-identical -- the driver
-    builds the identical CouplerConfig when it gets ``None``.
+    match the flux entering the atmosphere).
+
+    Returns ``None`` -- letting the driver build the identical default
+    CouplerConfig, so the run stays byte-identical -- whenever the requested
+    settings cannot reach the tile's physics: the ocean tile consults
+    thermo_convention/stability_scheme/gustiness ONLY on a MOST scheme, so under
+    the default "constant" closure those flags are inert on BOTH sides and the
+    default CouplerConfig is already consistent.  NOTE this is a weaker claim
+    than "the user stays on the defaults" (the earlier wording, which was
+    literally false: --gustiness-zi 300 or --bulk-thermo-convention aerobulk
+    still return None here) -- the guard in
+    driver/air_sea_consistency.validate_air_sea_consistency is what actually
+    enforces consistency, and it applies the same MOST gating.
     """
     if (args.surface_bulk_scheme == "constant"
             and args.surface_stability_scheme == "dyer1974"):
@@ -160,11 +170,21 @@ def build_coupler_config(args):
     # has no gustiness at all, so the energy-consistency this block exists to
     # enforce could not hold.  The flag's help and main()'s log line both
     # already claimed the tile used this scheme.
-    # ``gustiness_w_zi`` threads the SAME convective-gustiness BL depth the
-    # atmosphere surface layer uses (--gustiness-zi) onto the ocean tile: the
-    # latent heat the ocean loses == the moisture flux the atmosphere gains.
-    # Without it the 3D-ocean q_net used the non-gusty tile flux -> weak
-    # evaporation -> dry atmosphere -> cold collapse (cmip_air_sea_decoupling).
+    # ``gustiness_w_zi`` threads the --gustiness-zi BL depth onto the ocean tile
+    # so an EXPLICIT setting reaches both sides: the latent heat the ocean loses
+    # == the moisture flux the atmosphere gains.  Without it the 3D-ocean q_net
+    # used the non-gusty tile flux -> weak evaporation -> dry atmosphere -> cold
+    # collapse (cmip_air_sea_decoupling).
+    #
+    # CAVEAT, verified (do NOT read this as "the same depth on both sides"): when
+    # --gustiness-zi is OMITTED this passes 0.0 = OFF, while the atmosphere's
+    # SurfaceLayerConfig.gustiness_w_zi stays None = scheme-native = 600 m for
+    # coare3 (bulk_flux._COARE_GUSTINESS_ZI).  So the DEFAULT `coare3` run is
+    # still split on gustiness.  CouplerConfig.gustiness_w_zi is `float = 0.0`
+    # and cannot express "scheme-native"; making it nullable flips the tile
+    # default off->on (coupled answers change), so it is pinned as a strict
+    # xfail in tests/unit/test_air_sea_scheme_consistency.py rather than
+    # silently absorbed here.
     return CouplerConfig(
         bulk_scheme=args.surface_bulk_scheme,
         gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
