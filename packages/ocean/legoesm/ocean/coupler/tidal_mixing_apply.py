@@ -126,19 +126,23 @@ def apply_tidal_mixing_step(
 ) -> object:
     """Apply one timestep of tidal vertical mixing to T + S.
 
-    Acts on the lat-lon C-grid ocean state (``state.T`` and
-    ``state.S`` have shape ``(n_lat, n_lon, nlev)``).  Land cells
-    (``state.land_mask=0``) are untouched: per-column the implicit
-    system is still solved but the result is masked back to the
-    pre-step value where ``land_mask=0``.
+    GRID-AGNOSTIC. The implicit vertical diffusion is a per-column Thomas solve
+    over the trailing (vertical) axis, and every operation here uses ``...`` /
+    ``axis=-1`` / ``[..., None]`` broadcasting -- so it runs unchanged on a
+    lat-lon C-grid state (``state.T``/``state.S`` shape ``(n_lat, n_lon, nlev)``,
+    ``state.land_mask`` ``(n_lat, n_lon)``) AND on an MPAS state (``(nCells,
+    nlev)`` / ``(nCells,)``). The only requirement is that ``K_tidal``,
+    ``h_partial`` and the state arrays share the same ``(*spatial, nlev)`` shape.
+    Land cells (``land_mask=0``) are masked back to their pre-step values.
 
     Parameters
     ----------
-    state : LatLonCGridOceanState
-    K_tidal : array ``(n_lat, n_lon, nlev)``
+    state : LatLonCGridOceanState or an MPAS ocean state
+    K_tidal : array ``(*spatial, nlev)``
         Cell-centred tidal diffusivity [m²/s] from
-        :func:`legoesm.ocean.physics.vertical_mixing.tidal.compute_tidal_diffusivity`.
-    h_partial : array ``(n_lat, n_lon, nlev)``
+        :func:`legoesm.ocean.physics.vertical_mixing.tidal.compute_tidal_diffusivity`
+        (itself grid-agnostic).
+    h_partial : array ``(*spatial, nlev)``
         Layer thickness [m] from
         :func:`legoesm.ocean.vertical.compute_layer_thickness`.
     dt : float

@@ -323,12 +323,21 @@ def main() -> int:
     tidal_config = None
     tidal_static = None
     if args.tidal_mixing:
-        if args.grid != "latlon":
+        if args.grid not in ("latlon", "mpas"):
             print(
-                f"==> WARNING: --tidal-mixing not yet supported on "
+                f"==> WARNING: --tidal-mixing not supported on "
                 f"grid={args.grid!r}; ignoring."
             )
         else:
+            # Grid-agnostic: the whole tidal-mixing chain
+            # (synthetic_baroclinic_tide_energy_from_bathy ->
+            # compute_layer_thickness -> the N²/F(z)/K_tidal per-step block ->
+            # apply_tidal_mixing_step) operates purely over the trailing
+            # vertical axis (`...`, `axis=-1`, `[..., None]`), so it runs on
+            # lat-lon (n_lat, n_lon, nlev) AND MPAS (nCells, nlev) unchanged.
+            # The ONLY shape-specific piece is the layer-depth broadcast below,
+            # which now derives its spatial shape from E_BT_arr rather than
+            # assuming 2-D.
             tidal_config = TidalMixingConfig(enabled=True)
             H_bathy_arr = np.asarray(state.H_bathy.data, dtype=np.float64)
             E_BT_arr = np.asarray(
@@ -340,13 +349,15 @@ def main() -> int:
             dz_ref_arr = np.asarray(z_coord.dz_ref, dtype=np.float64)[:nlev_static]
             z_edges = np.concatenate([[0.0], np.cumsum(dz_ref_arr)])
             layer_depths_1d = 0.5 * (z_edges[:-1] + z_edges[1:])
-            lat_n, lon_n = E_BT_arr.shape
-            layer_depths_3d = np.broadcast_to(
-                layer_depths_1d, (lat_n, lon_n, nlev_static),
+            # Broadcast to (*spatial, nlev): (n_lat, n_lon, nlev) on lat-lon,
+            # (nCells, nlev) on MPAS -- spatial shape comes from E_BT_arr, which
+            # is elementwise in H_bathy and so already carries the grid shape.
+            layer_depths_nd = np.broadcast_to(
+                layer_depths_1d, E_BT_arr.shape + (nlev_static,),
             ).copy()
             tidal_static = {
                 "E_BT": E_BT_arr,
-                "layer_depths": layer_depths_3d,
+                "layer_depths": layer_depths_nd,
                 "H_bathy": H_bathy_arr,
             }
             print(
