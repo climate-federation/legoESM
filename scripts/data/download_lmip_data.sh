@@ -36,9 +36,9 @@ CRUJRA_DIR="$DATA_DIR/crujra"
 PREFIX="clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5"   # glade three_stream naming
 SUFFIX=""                                                        # after-year suffix (none)
 SURFDATA_NAME="legoesm_surfdata_c260716.nc"                      # current dated build
-# Point at the matching Zenodo version (new version of concept-record 21087964);
-# override with --surfdata-url or $LEGOESM_SURFDATA_URL.
-SURFDATA_URL="${LEGOESM_SURFDATA_URL:-https://zenodo.org/records/21087964/files/legoesm_surfdata_c260716.nc}"
+# Zenodo concept DOI 10.5281/zenodo.21087963 (latest = record 21401647); bump the
+# record + name for a new dated build.  Override with --surfdata-url or $LEGOESM_SURFDATA_URL.
+SURFDATA_URL="${LEGOESM_SURFDATA_URL:-https://zenodo.org/records/21401647/files/legoesm_surfdata_c260716.nc}"
 CRUJRA_SRC="${LEGOESM_CRUJRA_SRC:-/glade/campaign/cesm/cesmdata/inputdata/atm/datm7/atm_forcing.datm7.CRUJRA.0.5d.c20260129/three_stream}"
 
 FORCE=0
