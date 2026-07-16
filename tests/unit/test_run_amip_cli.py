@@ -2559,8 +2559,12 @@ def test_bechtold_use_ifs_subcloud_evap_round_trips_and_threads():
     assert _resolve_convection(cfg)[1].use_ifs_subcloud_evap is True
     d = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--convection", "bechtold"]), parser))
-    assert d.bechtold_use_ifs_subcloud_evap is False
-    assert _resolve_convection(d)[1].use_ifs_subcloud_evap is False
+    assert d.bechtold_use_ifs_subcloud_evap is True   # default ON 2026-07-16
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--no-bechtold-use-ifs-subcloud-evap"]), parser))
+    assert off.bechtold_use_ifs_subcloud_evap is False
+    assert _resolve_convection(off)[1].use_ifs_subcloud_evap is False
     for flag in (True, False):
         e = ExperimentConfig(convection="bechtold",
                              bechtold_use_ifs_subcloud_evap=flag)

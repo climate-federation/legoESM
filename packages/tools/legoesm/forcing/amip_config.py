@@ -90,9 +90,9 @@ class AMIPExperimentConfig(NamedTuple):
     # the flat schema so the to_amip_config/from_amip_config round-trip cannot
     # silently drop an explicit selection across a checkpoint/restart boundary.
     bechtold_use_ifs_cape_closure: bool = True
-    # IFS Kessler sub-cloud rain evaporation (cuflxn.F90; default OFF pending
-    # validation) — in the flat schema so round-trips cannot drop it.
-    bechtold_use_ifs_subcloud_evap: bool = False
+    # IFS Kessler sub-cloud rain evaporation (cuflxn.F90; default ON
+    # 2026-07-16) — in the flat schema so round-trips cannot drop it.
+    bechtold_use_ifs_subcloud_evap: bool = True
     # Convective in-updraft rain-split efficiency [0,1] (shared across the
     # mass-flux schemes); 0 = disabled (legacy no split).
     convective_precip_efficiency: float = 0.0

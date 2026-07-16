@@ -160,14 +160,19 @@ def test_bechtold_downdraft_evap_conserves_water_locally():
         T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
         conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
         dt=300.0,
-        config=BechtoldConfig(enable_downdraft=False, enable_stochastic=False),
+        # evap pinned OFF: this test pins the LEGACY downdraft
+        # re-evaporation machinery; the default-on IFS Kessler evap replaces
+        # it (own conservation tests in the subcloud_evap section).
+        config=BechtoldConfig(enable_downdraft=False, enable_stochastic=False,
+                              use_ifs_subcloud_evap=False),
         moisture_convergence=jnp.zeros_like(T),
     )
     out_on, _, _ = bechtold_convection(
         T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
         conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
         dt=300.0,
-        config=BechtoldConfig(enable_downdraft=True, enable_stochastic=False),
+        config=BechtoldConfig(enable_downdraft=True, enable_stochastic=False,
+                              use_ifs_subcloud_evap=False),
         moisture_convergence=jnp.zeros_like(T),
     )
     dT_diff = out_on.dT_dt - out_off.dT_dt
@@ -617,9 +622,16 @@ def test_bechtold_mse_conservation_within_tolerance():
         T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
         conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
         dt=1800.0,
+        # Sub-cloud evap pinned OFF: this test's object is the mass-flux
+        # SOLVE conservation.  The H+Q+C metric is not evap-invariant BY
+        # CONSTRUCTION (it books +L_v*rain for never-evaporated rain, so the
+        # exactly-conservative form-then-evaporate pair shifts it by -L_v*e);
+        # the evap's own water/enthalpy closure is machine-exact tested in
+        # the subcloud_evap section.
         config=BechtoldConfig(
             enable_stochastic=False, enable_cmt=False,
             subsidence_solve="implicit_flux",
+            use_ifs_subcloud_evap=False,
         ),
         moisture_convergence=jnp.zeros_like(T),
     )
@@ -655,14 +667,17 @@ def test_bechtold_precip_efficiency_splits_rain_conserving_mass():
 
     base, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
-        config=BechtoldConfig(precip_efficiency=0.0),   # explicit no-split ref
+        # evap pinned OFF: this test pins the bit-exact pe-fraction split.
+        config=BechtoldConfig(precip_efficiency=0.0,
+                              use_ifs_subcloud_evap=False),
     )
     assert base.dq_r_conv_dt is None                 # pe=0 => no split
 
     pe = 0.6
     split, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
-        config=BechtoldConfig(precip_efficiency=pe),
+        config=BechtoldConfig(precip_efficiency=pe,
+                              use_ifs_subcloud_evap=False),
     )
     assert split.dq_r_conv_dt is not None
     # cloud + rain == the ORIGINAL positive condensate (base cloud), so the
@@ -694,19 +709,25 @@ def test_bechtold_downdraft_sharpness_fields_wired():
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
     stoch = jnp.zeros((ncol,))
+    # evap pinned OFF: the RH-trigger sharpness reaches dT_dt only through
+    # the LEGACY evap branch (under IFS evap the trigger feeds CMT momentum
+    # only, and lcl sharpness feeds the evap gate separately).
     out_default, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
-        config=BechtoldConfig(enable_downdraft=True),
+        config=BechtoldConfig(enable_downdraft=True,
+                              use_ifs_subcloud_evap=False),
     )
     out_rh_flat, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
         config=BechtoldConfig(enable_downdraft=True,
-                              downdraft_rh_sharpness=1e-6),
+                              downdraft_rh_sharpness=1e-6,
+                              use_ifs_subcloud_evap=False),
     )
     out_lcl_flat, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
         config=BechtoldConfig(enable_downdraft=True,
-                              lcl_membership_sharpness=1e-6),
+                              lcl_membership_sharpness=1e-6,
+                              use_ifs_subcloud_evap=False),
     )
     assert float(jnp.max(jnp.abs(out_rh_flat.dT_dt - out_default.dT_dt))) > 1e-10, (
         "downdraft_rh_sharpness is not wired"
@@ -849,7 +870,12 @@ def _run_pe(pe):
     stoch = jnp.zeros((ncol,))
     out, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
-        config=BechtoldConfig(precip_efficiency=pe),
+        # evap pinned OFF: this fixture pins the bit-exact (1-PE)/PE split
+        # partition; the default-on IFS sub-cloud evap rescales dq_r
+        # downstream of the split (its own conservation is tested in the
+        # subcloud_evap section).
+        config=BechtoldConfig(precip_efficiency=pe,
+                              use_ifs_subcloud_evap=False),
     )
     return out
 
@@ -1794,10 +1820,10 @@ def test_ifs_subcloud_evap_rh_break_and_conservation():
 
 
 def test_ifs_subcloud_evap_toggle_and_leaf_integration():
-    """Default OFF; ON re-evaporates sub-cloud rain on a convecting column
+    """Default ON (2026-07-16 flip); ON re-evaporates sub-cloud rain on a convecting column
     with a dry boundary layer (vapor added below the LCL, surface-reaching
     rain reduced, column vapor gain == rain debit) and stays finite."""
-    assert BechtoldConfig().use_ifs_subcloud_evap is False
+    assert BechtoldConfig().use_ifs_subcloud_evap is True
     # Proven convecting fixture (same as the closure toggle tests); the
     # analytic sub-cloud RH ~0.4 sits far below the 0.85/0.92 break, so the
     # Kessler evap fires whenever rain exists.  Legacy downdraft evap is
