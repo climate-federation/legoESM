@@ -313,6 +313,34 @@ VALID_GWD = (
     "prognostic_spectral", "e3sm_cam", "ml_emulator", "none",
 )
 
+def parse_gwd_spec(value: str) -> str:
+    """argparse ``type=`` for ``--gravity-wave-drag``.
+
+    GWD is the one axis a plain ``choices=`` CANNOT express: it accepts a
+    ``+``-joined COMPOSITION whose source tendencies are summed (issue #834,
+    e.g. "hines+mcfarlane"), because orographic and non-orographic drag
+    parameterize distinct wave populations and are run together in CMIP-class
+    GCMs.  run_amip therefore dropped ``choices`` entirely -- which left the
+    flag with NO cli-level typo rejection -- while run_coupled kept ``choices``
+    and so REJECTED every composite, making #834 unreachable from the coupled
+    driver.  Both drivers now share this validator: composites work everywhere,
+    and a typo is still caught at the CLI.
+
+    Membership only; ``ExperimentConfig.validate_strict`` remains the authority
+    on the semantics of a combination.
+    """
+    import argparse
+
+    for part in value.split("+"):
+        if part not in VALID_GWD:
+            raise argparse.ArgumentTypeError(
+                f"invalid gravity-wave-drag source {part!r} in {value!r}; "
+                f"expected one of {VALID_GWD}, or a '+'-joined composite of "
+                f"them (e.g. 'hines+mcfarlane')"
+            )
+    return value
+
+
 # The ATMOSPHERE surface layer's bulk-flux algorithm.  "most" is deliberately
 # ABSENT: turbulence/surface_layer.py dispatches MOST on ("coare3",
 # "large_yeager") only, so an accepted "most" would silently degrade to the

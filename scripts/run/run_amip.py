@@ -43,6 +43,7 @@ from legoesm.driver.config import (
     ExperimentConfig,
     GridConfig,
     OutputConfig,
+    parse_gwd_spec,
 )
 from legoesm.driver.run_status import status_to_exit_code
 
@@ -550,7 +551,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "liquid cloud (the AMIP albedo bias) WITHOUT a "
                              "surface-evaporation trade.  0 = off (default); "
                              "warm-start/ramp only (cold-start caveat).")
-    parser.add_argument("--gravity-wave-drag", type=str, default="mcfarlane",
+    # Shared validator: composites keep working and a typo is now rejected at
+    # the CLI (this flag previously had `type=str` with no validation at all).
+    parser.add_argument("--gravity-wave-drag", type=parse_gwd_spec,
+                        default="mcfarlane",
                         help="GWD scheme: none, rayleigh, lindzen, mcfarlane, "
                              "hines, prognostic_spectral, ml_emulator, or a "
                              "'+'-joined composite whose source tendencies are "

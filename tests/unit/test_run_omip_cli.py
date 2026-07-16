@@ -441,12 +441,78 @@ def test_ddm_flag_flows_to_config():
     ``DoubleDiffusionConfig.enabled`` -- is a BOOL. Only ``:float`` fields are
     ``__param_spec__``-eligible, so ``--params`` can set ddm's rn_avts/rn_hsbfr
     but can NEVER set the switch that makes them do anything.
+
+    NOTE this asserts the HELPER only. That is not sufficient on its own --
+    see test_ddm_reaches_the_model_on_the_flat_latlon_path, which is the load-
+    bearing one.
     """
     off = build_config_from_args(parse_args(["--grid", "latlon"]))
     assert off.vertical_mixing.ddm.enabled is False, "default must stay OFF"
 
     on = build_config_from_args(parse_args(["--grid", "latlon", "--ddm"]))
     assert on.vertical_mixing.ddm.enabled is True
+
+
+def test_ddm_reaches_the_model_on_the_flat_latlon_path():
+    """THE load-bearing pin: --ddm must reach config.physics in PRODUCTION.
+
+    The first version of the --ddm tests asserted only that
+    build_vertical_mixing_config_from_args returned ddm.enabled=True -- helper
+    wiring, not reachability. The flag was still INERT on the default flat
+    lat-lon path, because run_omip ships config.physics=None there and
+    _apply_drag_iwm_overrides returned early unless drag or --iwm was set. So
+    the tests were green and the scheme was still unselectable: the exact bug
+    this branch exists to remove, re-created by its own fix (codex).
+
+    The identical trap is already recorded in that function for --iwm ("codex
+    r2 #1"). It was fixed for --iwm only; --ddm was added later and fell in.
+    """
+    import jax
+    jax.config.update("jax_enable_x64", True)
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from scripts.run.run_omip import _apply_drag_iwm_overrides
+
+    args = parse_args(["--grid", "latlon", "--ddm"])
+    grid = create_latlon_grid(n_lat=6, n_lon=8)
+    z = create_ocean_z_star(n_levels=4, H_max=2000.0)
+    config = LatLonCGridOceanConfig.from_flat()   # physics=None (flat path)
+    model = LatLonCGridOceanModel(grid, z, config)
+    config2, _ = _apply_drag_iwm_overrides(args, "latlon", grid, z, config, model)
+
+    assert config2.physics is not None, "--ddm never reached config.physics"
+    assert config2.physics.vertical_mixing.ddm.enabled is True
+    # DDM contributes only through the implicit solve and RAISES on an explicit
+    # path, so the flag must force it rather than die on an invisible guard.
+    assert config2.implicit_vertical_mixing is True
+
+
+def test_bare_ddm_does_not_steal_the_zdfiwm_molecular_backgrounds():
+    """The molecular-background override is a zdfiwm_init convention (the wave
+    field IS the interior background), not a property of additive mixing. A
+    bare --ddm must NOT silently strip the user's A_v/K_v."""
+    import jax
+    jax.config.update("jax_enable_x64", True)
+    from legoesm import constants
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from scripts.run.run_omip import _apply_drag_iwm_overrides
+
+    args = parse_args(["--grid", "latlon", "--ddm"])
+    grid = create_latlon_grid(n_lat=6, n_lon=8)
+    z = create_ocean_z_star(n_levels=4, H_max=2000.0)
+    config = LatLonCGridOceanConfig.from_flat()
+    model = LatLonCGridOceanModel(grid, z, config)
+    config2, _ = _apply_drag_iwm_overrides(args, "latlon", grid, z, config, model)
+    assert config2.A_v != constants.nu_ocean_molecular or config.A_v == constants.nu_ocean_molecular
 
 
 def test_ddm_float_knobs_stay_on_params_not_flags():

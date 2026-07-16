@@ -258,7 +258,13 @@ def _apply_drag_iwm_overrides(args, grid_type, grid, z_coord, config, model):
             barotropic_local_subcycle_clamp=True,
         )
     want_iwm = bool(getattr(args, "iwm", False))
-    if not drag_flat and not want_iwm:
+    # --ddm must be in this guard too.  The block below is the ONLY thing that
+    # puts an additive mixing rider onto config.physics, and the flat-bottom
+    # lat-lon path ships physics=None -- so an early return here makes the flag
+    # a silent no-op.  That is exactly what the codex r2 #1 comment below
+    # records for --iwm; --ddm was added later and walked into the same trap.
+    want_ddm = bool(getattr(args, "ddm", False))
+    if not drag_flat and not want_iwm and not want_ddm:
         return config, model
 
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -268,12 +274,18 @@ def _apply_drag_iwm_overrides(args, grid_type, grid, z_coord, config, model):
         if drag_flat:
             config = config.replace_flat(**drag_flat)
         iwm_forcing = None
-        if want_iwm:
-            # Make sure the IWM config ACTUALLY reaches the implicit
-            # K-profile solve (codex r2 #1: the flat-bottom lat-lon path
+        if want_iwm or want_ddm:
+            # Make sure the IWM/DDM config ACTUALLY reaches the implicit
+            # solve (codex r2 #1: the flat-bottom lat-lon path
             # ships config.physics=None, so without this --iwm would be a
             # silent no-op — k_profiles never sees vertical_mixing.iwm).
+            # DDM rides here for the same reason, though it lands in a
+            # different place: IWM is added onto the tracer AND momentum
+            # profiles in k_profiles, whereas DDM contributes heat/salt-only
+            # diffusivities (avm untouched) applied later in
+            # ocean_model_latlon_cgrid's implicit salinity solve.
             _iwm_cfg = build_iwm_config_from_args(args)
+            _ddm_cfg = build_ddm_config_from_args(args)
             _phys = config.physics
             if _phys is None:
                 from legoesm.ocean.physics.combined import OceanPhysicsConfig
@@ -289,11 +301,11 @@ def _apply_drag_iwm_overrides(args, grid_type, grid, z_coord, config, model):
                 from legoesm.ocean.physics.convection.config import (
                     OceanConvectionConfig,
                 )
-                # Minimal pipeline: every module inert except the IWM rider
-                # (the flat path's diffusion stays config-based).
+                # Minimal pipeline: every module inert except the IWM/DDM
+                # riders (the flat path's diffusion stays config-based).
                 _phys = OceanPhysicsConfig(
                     vertical_mixing=VerticalMixingConfig(
-                        scheme="none", iwm=_iwm_cfg),
+                        scheme="none", iwm=_iwm_cfg, ddm=_ddm_cfg),
                     lateral_mixing=LateralMixingConfig(scheme="none"),
                     surface_forcing=SurfaceForcingConfig(scheme="none"),
                     convection=OceanConvectionConfig(scheme="none"),
@@ -302,23 +314,32 @@ def _apply_drag_iwm_overrides(args, grid_type, grid, z_coord, config, model):
             else:
                 _phys = _phys._replace(
                     vertical_mixing=_phys.vertical_mixing._replace(
-                        iwm=_iwm_cfg))
+                        iwm=_iwm_cfg, ddm=_ddm_cfg))
             config = config._replace(physics=_phys)
-            # zdfiwm contributes through the implicit avt/avm profiles.
+            # Both riders contribute only through the IMPLICIT solve, and both
+            # RAISE if enabled on an explicit path -- so force it rather than
+            # let the run die on a guard the user cannot see from the flag.
             if not getattr(config, "implicit_vertical_mixing", False):
                 config = config.replace_flat(implicit_vertical_mixing=True)
-                print("[setup] zdfiwm: implicit_vertical_mixing forced ON "
-                      "(the wave avm/avt enter the backward-Euler solve)")
+                _who = "zdfiwm" if want_iwm else "zdfddm"
+                print(f"[setup] {_who}: implicit_vertical_mixing forced ON "
+                      "(the additive avt/avs/avm enter the backward-Euler "
+                      "solve)")
             # NEMO zdfiwm_init FORCES the model backgrounds to molecular
             # values (avmb = rnu = 1.4e-6 m²/s, avtb = 1e-10 m²/s): the
             # wave field IS the interior background.  Mirror that so the
             # OMIP A_v/K_v floors don't double-count (codex r1 #2).
-            from legoesm import constants as _const
-            config = config.replace_flat(
-                A_v=_const.nu_ocean_molecular, K_v=1.0e-10)
-            print("[setup] zdfiwm: model backgrounds forced to molecular "
-                  f"(A_v={_const.nu_ocean_molecular:g}, K_v=1e-10) per "
-                  "zdfiwm_init")
+            # zdfiwm ONLY: this is a zdfiwm_init convention (the wave field IS
+            # the interior background), not a property of additive mixing in
+            # general.  Applying it for a bare --ddm would silently strip the
+            # user's A_v/K_v backgrounds.
+            if want_iwm:
+                from legoesm import constants as _const
+                config = config.replace_flat(
+                    A_v=_const.nu_ocean_molecular, K_v=1.0e-10)
+                print("[setup] zdfiwm: model backgrounds forced to molecular "
+                      f"(A_v={_const.nu_ocean_molecular:g}, K_v=1e-10) per "
+                      "zdfiwm_init")
         if want_iwm and args.iwm_forcing_file:
             import numpy as _np
             from legoesm.ocean.iwm_forcing import load_iwm_forcing
@@ -579,8 +600,12 @@ def parse_args(argv: list[str] | None = None):
                         "it so chunk x stencil-reach <= min band height.")
     # --- internal wave-driven mixing (NEMO zdfiwm, de Lavergne 2020) ---
     _IWM_DEF = _DEFAULT_IWM_CONFIG
-    # Double-diffusive mixing (NEMO zdfddm / Large-CVMix). ADDITIVE like --iwm
-    # and applied after the primary closure, so it is scheme-independent.
+    # Double-diffusive mixing (NEMO zdfddm / Large-CVMix). Additive after the
+    # primary closure, hence scheme-independent -- but NOT in the same place as
+    # --iwm: IWM adds onto the tracer AND momentum profiles inside
+    # compute_vertical_K_profiles, while DDM contributes heat/salt-only
+    # diffusivities (avm untouched) applied later in the lat-lon model's
+    # implicit salinity solve (codex corrected an earlier claim here).
     # ``DoubleDiffusionConfig.enabled`` is a BOOL, and only ``:float`` fields are
     # __param_spec__-eligible -- so --params can reach ddm's rn_avts/rn_hsbfr but
     # can NEVER reach this gate. Without this flag the whole scheme was

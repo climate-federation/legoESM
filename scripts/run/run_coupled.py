@@ -334,6 +334,7 @@ def build_parser():
         VALID_MICROPHYSICS,
         VALID_SURFACE_BULK,
         VALID_TURBULENCE,
+        parse_gwd_spec,
     )
 
     parser = argparse.ArgumentParser(
@@ -536,10 +537,12 @@ def build_parser():
                              "Arctic/strong-stable forms; "
                              "'beljaars_holtslag1991' avoids the stable flux "
                              "collapse. Unstable branch stays Businger-Dyer.")
+    # `choices=` cannot express the '+'-joined composites validate_strict
+    # accepts (#834), so this list silently made them unreachable here while
+    # run_amip allowed them. The shared validator restores composites AND keeps
+    # cli-level typo rejection.
     parser.add_argument("--gravity-wave-drag", default="hines",
-                        choices=["rayleigh", "lindzen", "mcfarlane", "hines",
-                                 "prognostic_spectral", "e3sm_cam", "ml_emulator",
-                                 "none"],
+                        type=parse_gwd_spec,
                         help="Gravity-wave-drag scheme (default: hines)")
     parser.add_argument("--clouds", default="sundqvist",
                         choices=["none", "sundqvist", "xu_randall", "resolved"],

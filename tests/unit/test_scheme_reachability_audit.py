@@ -165,6 +165,48 @@ def test_the_audit_would_catch_a_regression(parsers):
     )
 
 
+# --- GWD: the one axis `choices=` cannot express -------------------------
+
+@pytest.mark.parametrize("spec", ["hines", "none", "hines+mcfarlane",
+                                  "mcfarlane+prognostic_spectral"])
+@pytest.mark.parametrize("driver", sorted(_DRIVERS))
+def test_gwd_composites_are_selectable_from_every_driver(parsers, driver, spec):
+    """GWD accepts a '+'-joined COMPOSITION whose source tendencies are summed
+    (#834) -- orographic and non-orographic drag parameterize distinct wave
+    populations and run together in CMIP-class GCMs.
+
+    argparse `choices=` cannot express that, which split the drivers in OPPOSITE
+    ways: run_coupled kept choices= and so REJECTED every composite (making #834
+    unreachable there), while run_amip dropped choices= and so had NO cli typo
+    rejection at all. Both now share driver.config.parse_gwd_spec.
+
+    This axis is invisible to the choices=-based audit above (an action with no
+    choices is skipped), so it needs its own pin.
+    """
+    _, builder = _DRIVERS[driver]
+    _reparse(driver, builder, ["--gravity-wave-drag", spec])
+    ExperimentConfig(gravity_wave_drag=spec).validate_strict()
+
+
+@pytest.mark.parametrize("bad", ["garbage", "hines+garbage"])
+@pytest.mark.parametrize("driver", sorted(_DRIVERS))
+def test_gwd_typos_are_rejected_at_the_cli(parsers, driver, bad):
+    """The other half: dropping choices= must not cost typo rejection."""
+    _, builder = _DRIVERS[driver]
+    with pytest.raises(SystemExit):
+        _reparse(driver, builder, ["--gravity-wave-drag", bad])
+
+
+def _reparse(driver: str, builder: str, argv: list):
+    path = _DRIVERS[driver][0]
+    name = f"_gwd_{driver}"
+    sys.argv = [name]
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return getattr(mod, builder)().parse_args(argv)
+
+
 # --- no phantoms: everything offered must actually be accepted --------------
 
 @pytest.mark.parametrize("driver", sorted(_DRIVERS))
