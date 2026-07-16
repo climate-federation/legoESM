@@ -515,13 +515,11 @@ aimip_rollout_curriculum:
   - 1
 aimip_chunk_windows: 18
 # --- #985 throughput (both inert without their runtime precondition) ---
-# Prefetch OFF at T106 pending the device-placement fix: _prefetch_iter's
-# producer thread materialises the NEXT chunk as jnp arrays on the GPU
-# (era5_to_spectral_carry has no host pinning), so chunk k+1 rides the GPU
-# during chunk k's training peak -> OOM'd 3/4 DP ranks at the first
-# dp_grad_step (job 2026-07-15, 180 MiB terminal alloc). Re-enable once the
-# prefetched chunk is pinned to host RAM and transferred on consume.
-aimip_chunk_prefetch: false
+# Prefetch back ON (2026-07-16): 7fcd02ec5 host-builds the buffered chunk on
+# the CPU backend (launcher exports JAX_PLATFORMS=cuda,cpu) and stages one
+# sample at a time to the GPU, fixing the 2026-07-15 OOM (the prefetched
+# chunk no longer rides GPU memory during the training peak).
+aimip_chunk_prefetch: true
 # Data-parallel: shards each chunk's samples across MPI ranks (gradients
 # averaged via mpi4jax). ACTIVE ONLY under an mpiexec launch with nproc>1
 # (train_aimip_derecho.pbs auto-detects from the select line); single-process

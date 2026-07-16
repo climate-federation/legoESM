@@ -37,7 +37,9 @@ CHAIN_MAX="${CHAIN_MAX:-24}"  # v2 curriculum (72h/120h phases) needs more links
 source scripts/cluster/scaling_levante/_env.sh    # REPO, PY, conda, JAX env
 cd "$REPO"
 
-export JAX_PLATFORMS=cuda JAX_ENABLE_X64=1
+# cuda,cpu: expose the CPU backend so chunk_prefetch can host-stage the buffered
+# chunk off the GPU (#985); cuda stays the default device, harmless if unused.
+export JAX_PLATFORMS=cuda,cpu JAX_ENABLE_X64=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 

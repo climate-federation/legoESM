@@ -65,6 +65,10 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 # memory that a ~1000-step rollout genuinely needs.  Override to disable:
 # XLA_PYTHON_CLIENT_ALLOCATOR= (empty) restores the BFC allocator.
 export XLA_PYTHON_CLIENT_ALLOCATOR="${XLA_PYTHON_CLIENT_ALLOCATOR:-platform}"
+# Expose the CPU backend alongside CUDA so chunk_prefetch can host-stage the
+# buffered chunk off the GPU (#985: prefetch OOM'd because the next chunk rode
+# GPU memory). Harmless when prefetch is off; cuda stays the default device.
+export JAX_PLATFORMS=cuda,cpu
 
 SUITE="config/aimip/scale/suite_${VARIANT}.yaml"
 OUT="results/aimip_scale_t106/${VARIANT}"
@@ -98,22 +102,52 @@ PPN=$((NRANKS / NNODES))
 # walltime kill terminates script + python together, so the old layout NEVER
 # chained on a walltime-bound link (#942 zero-progress loops were restarted by
 # hand). Budget = walltime minus a 45 min margin (resubmit + I/O + the SIGKILL
-# grace). timeout rc: 124 = budget hit (TERM), 137 = needed the -k SIGKILL —
-# both mean "out of time, checkpoint is on disk (per-chunk), CHAIN".
+# grace). Keep in sync with `#PBS -l walltime`.
 LINK_BUDGET_S="${LINK_BUDGET_S:-40500}"   # 11h15m for the 12h queue cap
 echo "[aimip-scale] $(date) variant=$VARIANT link=$CHAIN suite=$SUITE resume=${RESUME_FLAG:-no} nranks=$NRANKS ppn=$PPN budget=${LINK_BUDGET_S}s"
+
+# Resume-artifact signature (name:mtime of the newest FORWARD-PROGRESS checkpoint)
+# BEFORE this link -- a budget-stopped link is chained ONLY if it actually
+# advanced a resumable checkpoint. The chunked variants (column_nn / sfno_physics
+# with chunk_windows>0) write chunk_latest.eqx every chunk; `classical` loads the
+# full dataset with NO per-chunk checkpoint, so if ITS epoch exceeds the budget
+# the link produces nothing new and blindly chaining would restart epoch 0 every
+# link (#985 re-review). Restrict to epoch_*.eqx + chunk_latest.eqx (the only
+# resume artifacts) -- NOT every *.eqx -- so an unrelated/eval .eqx mtime can't
+# be mistaken for training progress; params.eqx (the DONE marker) is handled by
+# the FINAL check below, not here.
+_ckpt_sig() {
+  ls -t "$OUT"/*/epoch_*.eqx "$OUT"/*/chunk_latest.eqx 2>/dev/null \
+    | head -1 | xargs -r stat -c '%n:%Y' 2>/dev/null
+}
+SIG_BEFORE="$(_ckpt_sig)"
 if [ "$NRANKS" -gt 1 ]; then
   export MPICH_GPU_SUPPORT_ENABLED=1
   export MPI4JAX_USE_CUDA_MPI=0
-  timeout -k 120 "$LINK_BUDGET_S" \
+  timeout -k 120 "${LINK_BUDGET_S}s" \
   mpiexec -n "$NRANKS" --ppn "$PPN" bash -c '
     export CUDA_VISIBLE_DEVICES=${PALS_LOCAL_RANKID:-0}
     exec "$@"' _ "$PY" -u scripts/run/run_aimip.py --suite "$SUITE" $RESUME_FLAG
   RC=$?
 else
-  timeout -k 120 "$LINK_BUDGET_S" \
+  timeout -k 120 "${LINK_BUDGET_S}s" \
   "$PY" -u scripts/run/run_aimip.py --suite "$SUITE" $RESUME_FLAG
   RC=$?
+fi
+# timeout returns 124 (SIGTERM) / 137 (SIGKILL after the -k grace) when it hits
+# the link budget: NOT a training failure. Chain it ONLY if a checkpoint advanced
+# (resumable progress); otherwise stop rather than restart epoch 0 forever.
+if [ "$RC" -eq 124 ] || [ "$RC" -eq 137 ]; then
+  if [ "$(_ckpt_sig)" != "$SIG_BEFORE" ]; then
+    echo "[aimip-scale] hit link budget ${LINK_BUDGET_S}s (rc=$RC), checkpoint advanced -> chaining"
+    RC=0
+  else
+    echo "[aimip-scale] hit link budget ${LINK_BUDGET_S}s (rc=$RC) but NO new checkpoint" \
+         "-> this variant is not mid-epoch resumable (classical has no chunk_latest.eqx" \
+         "and its epoch did not finish); NOT chaining to avoid an epoch-0 restart loop." \
+         "Use chunk_windows>0 or a longer walltime for this variant."
+    RC=1
+  fi
 fi
 echo "[aimip-scale] run_aimip rc=$RC $(date)"
 
@@ -121,13 +155,9 @@ echo "[aimip-scale] run_aimip rc=$RC $(date)"
 # results/aimip_scale_t106/<variant>/<variant>/params.eqx only after the last
 # epoch; while it is absent and the last run exited cleanly, resubmit.
 FINAL="$OUT/${VARIANT}/params.eqx"
-# Chain on: clean-but-unfinished exit (rc=0, no FINAL) OR a link-budget stop
-# (rc 124/137 from timeout — the NORMAL way a mid-curriculum link ends).
-CHAINABLE=0
-if [ ! -f "$FINAL" ] && [ "$CHAIN" -lt "$CHAIN_MAX" ]; then
-  case "$RC" in 0|124|137) CHAINABLE=1 ;; esac
-fi
-if [ "$CHAINABLE" = "1" ]; then
+# RC has been remapped above: a budget stop WITH checkpoint progress is rc=0
+# (chain); without progress it is rc=1 (stop). So chain simply on rc=0.
+if [ "$RC" -eq 0 ] && [ ! -f "$FINAL" ] && [ "$CHAIN" -lt "$CHAIN_MAX" ]; then
   echo "[aimip-scale] not complete -> chaining link $((CHAIN+1))/$CHAIN_MAX"
   # SELECT (set on the first DP submit) re-applies the multi-GPU resource
   # request on every chained link; without it the chained qsub falls back to

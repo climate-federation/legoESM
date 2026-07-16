@@ -26,9 +26,24 @@ E3SM ``gw_oro``/``gw_common``:
 * **Critical level** (c = 0): the gated residual stress is RADIATED (removed),
   not deposited in the crossing layer as E3SM does — because the rigid
   single-wave drag is directed along the source and depositing it on the
-  reversed flow would accelerate it (``du/dt·u > 0``).  This UNDER-deposits at a
+  reversed flow would accelerate it (``u·du_dt + v·dv_dt > 0``).  This UNDER-deposits at a
   sharp reversal (in one discontinuous-reversal experiment ≈17 % of the launched
   stress; the exact fraction depends on grid, profile, and gate parameters).
+
+**Conservation** (``conserves = ["energy"]``): a STATIONARY orographic wave
+(``c = 0``) carries ZERO vertical wave-energy flux (``F_E = c·F_momentum = 0``,
+Eliassen–Palm), so it transports momentum without transporting energy.  All
+mean-flow KE removed where the wave breaks is therefore returned LOCALLY as heat
+— ``dT_dt = −(u·du_dt + v·dv_dt)/c_pd`` from the FINAL applied tendency gives the
+EXACT closure ``c_pd·∫ρ (dT/dt) dz == eps_gwd``, conserving resolved KE +
+internal energy pointwise.  This is conservation BY CONSTRUCTION, which for
+``c = 0`` (no wave-energy flux) is the COMPLETE energy budget, not mere
+bookkeeping.  MOMENTUM is NOT conserved (absorbed by the subgrid mountain / at a
+critical level); the critical-level radiation and the post-flux tendency limiter
+break MOMENTUM closure, not energy (both rescale ``dT_dt`` with the same limited
+``du_dt``).  Contrast the ``c ≠ 0`` launched-spectrum schemes ``hines.py`` /
+``prognostic_spectral.py`` (``["none"]``: their waves carry energy the limiter
+discards).
 
 The drag is a physically-signed momentum sink bounded by the launched stress.
 It is **AD-traceable (finite ``jax.grad`` in tested regimes) but NOT
@@ -78,17 +93,36 @@ __physics_contract__ = {
     },
     "sign_convention": (
         "z up; orographic phase speed c=0. Drag is a deceleration directed "
-        "along the source (surface-wind) direction, so du_dt opposes the "
-        "source-projected wind (du_dt*u <= 0, made strict by a hard U_proj>0 "
-        "mask); carried stress is monotone non-increasing upward and bounded "
-        "by the launched stress. eps_gwd>=0 is the column KE loss returned as "
-        "frictional heating dT_dt = -(u*du_dt + v*dv_dt)/c_pd."
+        "along the source (surface-wind) direction (accel<=0 along the fixed "
+        "unit vector (cos_a,sin_a)); the guaranteed KE-sink invariant is the "
+        "VECTOR projection u*du_dt + v*dv_dt = accel*U_proj <= 0 (NOT the "
+        "componentwise du_dt*u, which can be >0 for a wind that VEERS with "
+        "height), made strict by a hard U_proj>0 mask. Carried stress is "
+        "monotone non-increasing upward and bounded by the launched stress. "
+        "eps_gwd = -sum(rho*(u*du_dt+v*dv_dt)*dz) >= 0 (a pure sink here). The "
+        "frictional heating dT_dt = -(u*du_dt + v*dv_dt)/c_pd returns that KE "
+        "loss locally as heat, so c_pd*sum(rho*dT*dz) == eps_gwd by construction "
+        "-- exact energy conservation for a c=0 wave (zero wave-energy flux, so "
+        "nothing is radiated; conserves=energy)."
     ),
-    # KE removed from the mean flow is returned exactly as frictional heating
-    # (the dT_dt tie-back), so total ENERGY is conserved. Momentum is NOT
-    # conserved (a sink to the surface / absorbed at a critical level). The
-    # post-flux tendency limiter can break the exact stress-divergence balance
-    # where it binds, but never adds momentum (drag stays a sink).
+    # conserves=["energy"]: a STATIONARY orographic wave (phase speed c=0)
+    # carries ZERO vertical wave-energy flux (F_E = c * F_momentum = 0, Eliassen-
+    # Palm), so it transports momentum WITHOUT transporting energy. Hence ALL
+    # mean-flow KE removed where the wave breaks is returned LOCALLY as heat with
+    # nothing radiated: dT_dt = -(u*du+v*dv)/c_pd computed from the FINAL applied
+    # tendency gives c_pd*sum(rho*dT*dz) == eps_gwd EXACTLY, so resolved KE +
+    # internal energy is conserved pointwise. The identity is "definitional"
+    # (dT_dt is SET from the tendency) but that makes it conservation BY
+    # CONSTRUCTION, which for c=0 (zero wave-energy flux) is the COMPLETE energy
+    # story -- not merely bookkeeping. (Contrast the c!=0 launched-spectrum
+    # schemes hines.py / prognostic_spectral.py, whose waves carry energy that
+    # the saturation/limiter discard -> ["none"]; and e3sm_cam.py, whose OWN
+    # docstring calls its c=0 orographic subpath energy-conserving in-atmosphere,
+    # taking ["none"] only via the multi-source union.) MOMENTUM is NOT conserved
+    # (a sink to the subgrid mountain / absorbed at a critical level); the
+    # critical-level radiation + post-flux tendency limiter break MOMENTUM
+    # closure, not energy (both scale dT_dt with the same limited du_dt). The
+    # drag stays a sink (never adds momentum).
     "conserves": ["energy"],
     "differentiable": True,
     "reference": (
@@ -97,8 +131,9 @@ __physics_contract__ = {
     ),
     "idealized_test": (
         "tests/atmosphere/hydrostatic/unit/test_gravity_wave_drag.py: rest / "
-        "zero-orography column -> zero tendency; du_dt*u <= 0 at every level; "
-        "c_pd*sum(rho*dT_dt*dz) == eps_gwd >= 0 (KE->heat closure)"
+        "zero-orography column -> zero tendency; u*du_dt + v*dv_dt <= 0 at "
+        "every level (vector KE sink); c_pd*sum(rho*dT_dt*dz) == eps_gwd >= 0 "
+        "(exact KE->heat energy closure for the c=0 wave)"
     ),
 }
 
@@ -247,7 +282,7 @@ def mcfarlane_gwd(
     # ``U_proj`` falls to zero / reverses sign.  The earlier ``|U_proj|^3``
     # saturation stress was symmetric in ``U_proj`` and therefore stayed large
     # through a wind reversal, letting the wave TRANSMIT past the critical
-    # level and ACCELERATE the reversed flow (du/dt*u > 0).
+    # level and ACCELERATE the reversed flow (u·du_dt + v·dv_dt > 0).
     #
     # The gate is applied to the CARRIED-FORWARD stress inside the scan (not to
     # ``tau_sat``).  Gating ``tau_sat`` was unsafe: ``crit_gate`` can push
@@ -271,7 +306,7 @@ def mcfarlane_gwd(
     # to ~0, the softmin then returns a small NEGATIVE value, and
     # ``drag = tau_carry - tau_k`` came out positive at every level — a
     # persistent spurious drag (≈ log(2)/α) that ACCELERATED the reversed flow
-    # above the critical level (du/dt·u > 0).  We replace it with the same
+    # above the critical level (u·du_dt + v·dv_dt > 0).  We replace it with the same
     # bias-free smooth saturation cap that ``lindzen.py`` uses: a sigmoid blend
     # toward ``tau_sat`` once the carried stress exceeds it, hard-floored by
     # ``jnp.minimum(·, tau_carry)`` so the stress is monotone non-increasing
@@ -284,13 +319,16 @@ def mcfarlane_gwd(
         tau_sat_k = tau_sat[:, k]
         # Smooth breaking on the DIMENSIONLESS excess ratio (as in lindzen.py):
         # ``tau_carry / tau_sat - 1``.  ``tau_sat`` is upstream pre-clipped to
-        # ``>= 1e-10`` (so its VJP is already zero in the floor-active cells)
-        # and the critical-level gate has already driven it to ~1e-10 above a
-        # critical level, so once ``tau_carry`` overtakes that tiny floor the
-        # blend snaps fully to ``tau_sat`` ≈ 0 — i.e. the carried stress is
-        # absorbed AT the critical level and stays zero above.  ``safe_divide``
-        # uses ``eps`` below the ``1e-10`` pre-clip floor so the forward path
-        # is bit-identical to ``tau_carry / tau_sat`` for any physical input.
+        # ``>= 1e-10`` (so its VJP is already zero in the floor-active cells).
+        # Near a critical level ``tau_sat ∝ |U_proj|^3`` (with ``|U_proj|``
+        # floored at 1e-2) is itself tiny, so once ``tau_carry`` overtakes it the
+        # blend caps ``tau_new`` down to ``tau_sat`` ≈ 0.  (The critical-level
+        # gate does NOT touch ``tau_sat``; it multiplies the CARRIED stress
+        # ``tau_new`` at the end of this scan step, which is what forces the
+        # propagated stress to ~0 AT the critical level unconditionally — the
+        # upward ``jnp.minimum`` then keeps it zero above.)  ``safe_divide`` uses
+        # ``eps`` below the ``1e-10`` pre-clip floor so the forward path is
+        # bit-identical to ``tau_carry / tau_sat`` for any physical input.
         excess = safe_divide(tau_carry, tau_sat_k, eps=1e-12) - 1.0
         f_break = jax.nn.sigmoid(sat_sharpness * excess)
         tau_new = tau_carry * (1.0 - f_break) + tau_sat_k * f_break
@@ -311,7 +349,7 @@ def mcfarlane_gwd(
         #       reversed flow.  The single-wave orographic drag is always a
         #       deceleration along the source direction (``accel = -|...|·cos_a``);
         #       applying it at a level whose local wind has already reversed
-        #       would ACCELERATE that reversed flow (du/dt·u > 0).  The absorbed
+        #       would ACCELERATE that reversed flow (u·du_dt + v·dv_dt > 0).  The absorbed
         #       momentum is treated as radiated rather than dumped onto the
         #       opposing flow — the standard single-wave critical-level
         #       treatment.
@@ -322,7 +360,7 @@ def mcfarlane_gwd(
         # in any reversed layer — the smooth sigmoid alone is never identically
         # zero, leaving a tiny accelerating leak at weakly-negative ``U_proj``
         # (codex round-3: ~2 m/s/day worst case).  The hard mask makes
-        # ``du/dt·u <= 0`` STRICT.  Its gradient is zero on the reversed side,
+        # ``u·du_dt + v·dv_dt <= 0`` STRICT.  Its gradient is zero on the reversed side,
         # which is correct: there is no source-direction physics there.
         gate_k = crit_gate[:, k]
         pos_mask = (U_proj[:, k] > 0.0).astype(tau_carry.dtype)

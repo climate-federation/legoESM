@@ -14,14 +14,59 @@ Two remapping schemes are provided:
   represent the sub-category thickness distribution.
 - ``lipscomb_2001_remap`` — true piecewise-linear remapping
   (Lipscomb 2001).  Fits a linear sub-distribution ``g(h)`` within
-  each category, displaces the inter-category boundaries by the
+  each category — anchored at the BIN CENTRE, so in the central third
+  (``|η| ≤ H/6``) both the area and volume moments are exact and
+  ``g ≥ 0`` — displaces the inter-category boundaries by the
   interpolated growth rate, and re-integrates ``g`` over the FIXED
-  category bins.  Conserves ice area, ice volume, snow volume,
-  enthalpy, and salt mass to machine precision (modulo a one-shot
-  global rescale at the end that corrects for the η-clip needed to
-  keep ``g(h) ≥ 0``).
+  category bins.  Conserves ice area, ice volume, snow volume, and salt
+  mass to machine precision (a per-source-category renormalisation
+  restores the moments where the ±H/6 η-clip, needed to keep
+  ``g(h) ≥ 0``, engages — a robust approximation of Lipscomb's exact
+  cutoff-support outer-third form; see the Faithfulness note).
+  Temperature and salinity are carried as volume-weighted intensive
+  tracers (not an explicit enthalpy variable).
 
 All functions are JAX-compatible (differentiable, JIT-friendly).
+
+Faithfulness
+------------
+``tests/ice/unit/test_ice_itd_lipscomb_faithful.py`` pins ``lipscomb_2001_remap``
+(previously untested).  In order of authority: (1) the TRUTH-TIER conservation of
+ice area, ice volume, salt mass, snow volume, and pond volume to rel 1e-11..1e-12
+across grow/melt/mixed/clip-saturating growth (Lipscomb's central claim; outranks
+form-matching); (2) the zero-growth identity; (3) a separate NumPy reference
+re-derivation of the column kernel pinning all six per-FIXED-bin outputs (the
+per-bin SPLIT, which global conservation alone cannot verify — a degenerate
+single-bin dump also conserves), plus a directional pin that growth/melt move
+areal mass up/down the thickness axis; (4) the published slope coefficient
+``_LIPSCOMB_G1_COEFF == 12`` and the exact-Lipscomb two-moment property.
+
+Reconstruction: the linear ``g(h) = a/H + g1·(h − centre)`` is anchored at the
+BIN CENTRE with ``g1 = 12·a·η/H³`` (Lipscomb 2001).  In the CENTRAL third
+(``|η| ≤ H/6``) this is exact Lipscomb — both the zeroth (area) and first (volume)
+moments are preserved analytically and ``g ≥ 0`` (it touches zero at ``η = ±H/6``,
+never negative), pinned by
+``test_lipscomb_reconstruction_moments_and_positivity``.
+
+DEPARTURE (documented): outside the central third the implementation CLIPS ``η`` to
+``±H/6`` and restores the moments with a per-source-category renormalisation
+(``A_k_scale`` / ``V_k_scale``), rather than Lipscomb's exact cutoff-support
+triangle (eqs. 14-15) that shrinks the support to keep a single non-negative
+``g(h)`` matching both moments.  The RETAINED clip+renormalisation conserves total
+area and volume to machine precision (truth tier) on every state, but in
+saturation the area and volume transfers are not moments of one distribution.  The
+clip is retained deliberately for robustness: the interpolated boundary
+displacement can collapse a displaced bin (``H → 0``) or leave ``h_new`` outside
+it — exactly where the ideal cutoff triangle's ``g1 ~ 1/H³`` blows up and LOSES
+mass (the cutoff form conserves only when its support assumptions hold), whereas
+the eta clip keeps ``g1 ~ 1/H²`` finite and conserving.  Exact cutoff-support with
+robust degenerate-bin handling (e.g. a delta/two-point conservative deposition
+fallback for collapsed/out-of-support bins) is a documented follow-up.  (A still
+earlier mean-anchored ``G0 = a/H`` at ``h̄`` left the zeroth moment
+``a·(1 − 12η²/H²) ≠ a`` and let ``g`` go negative near ``η = H/6``; fixed to exact
+center anchoring during codex review of this suite.)  ``_lipscomb_ref`` in the
+test is a cross-implementation (NumPy) regression oracle for this kernel — exact
+Lipscomb in the central third — not a full published-spec oracle in saturation.
 
 References
 ----------
@@ -465,9 +510,25 @@ def _lipscomb_column_kernel(
     H = h_R_disp - h_L_disp
     centers_disp = 0.5 * (h_L_disp + h_R_disp)
     eta_raw = h_new - centers_disp
-    # Positivity of the linear g(h) constrains |eta| <= H/6.
+    # Positivity of the BIN-CENTRE-anchored linear g(h) = a/H + g1*(h - centre)
+    # constrains |eta| <= H/6 (Lipscomb 2001, g1 = 12*a*eta/H^3).  In the CENTRAL
+    # third the reconstruction below is exact Lipscomb (both moments preserved, g
+    # >= 0).  Outside it (saturation) eta is CLIPPED to +-H/6 and the per-source
+    # renormalisation restores the moments — a robust APPROXIMATION of Lipscomb's
+    # cutoff-support triangle (eqs. 14-15), NOT the paper's exact outer-third form.
+    # The eta clip (rather than the cutoff triangle) is retained deliberately: it
+    # keeps g1 ~ 1/H^2 finite even when the interpolated boundary displacement
+    # collapses a bin (H -> 0) or leaves h_new outside [h_L_disp, h_R_disp] — a
+    # cutoff triangle there has g1 ~ 1/H^3 and loses mass.  Exact cutoff-support
+    # (with robust degenerate-bin handling) is a documented follow-up.
     eta = jnp.clip(eta_raw, -H / 6.0, H / 6.0)
-    h_bar_eff = centers_disp + eta
+    # Anchor the reconstruction at the BIN CENTRE (exact Lipscomb): the density at
+    # the centre is a/H and the slope g1 carries the mean displacement, so BOTH
+    # the zeroth (area) and first (volume) moments are preserved exactly for
+    # unclipped eta.  (Anchoring at the mean h_bar instead would leave the zeroth
+    # moment a*(1 - 12*eta^2/H^2) != a — forcing the rescale to do real work and
+    # letting g(h) go negative near |eta| = H/6.)
+    anchor_h = centers_disp
     G0 = jnp.where(has_ice, a_new / H, 0.0)
     G1 = jnp.where(has_ice, _LIPSCOMB_G1_COEFF * eta * a_new / (H ** 3), 0.0)
 
@@ -482,22 +543,22 @@ def _lipscomb_column_kernel(
 
     G0_k = G0[None, :]
     G1_k = G1[None, :]
-    h_bar_k = h_bar_eff[None, :]
+    anchor_k = anchor_h[None, :]
 
     int_area = (
         G0_k * overlap_w
-        + G1_k * ((b_over - h_bar_k) ** 2 - (a_over - h_bar_k) ** 2) / 2.0
+        + G1_k * ((b_over - anchor_k) ** 2 - (a_over - anchor_k) ** 2) / 2.0
     )
     int_area = jnp.where(overlap_w > 0.0, jnp.maximum(int_area, 0.0), 0.0)
     int_vol = (
-        (G0_k - G1_k * h_bar_k) * (b_over ** 2 - a_over ** 2) / 2.0
+        (G0_k - G1_k * anchor_k) * (b_over ** 2 - a_over ** 2) / 2.0
         + G1_k * (b_over ** 3 - a_over ** 3) / 3.0
     )
     int_vol = jnp.where(overlap_w > 0.0, jnp.maximum(int_vol, 0.0), 0.0)
 
-    # Per-source-cat rescale to recover the exact a_new[k], V_new_cat[k]
-    # in the presence of η-clip.  ``int_vol[:, k].sum() == V_new_cat[k]``
-    # by construction is what we enforce.
+    # Per-source-cat rescale to recover the exact a_new[k], V_new_cat[k] under the
+    # eta clip.  In the central third both scales are 1 (moments already exact);
+    # in saturation they restore total area and volume conservation.
     V_k_disp_sum = jnp.sum(int_vol, axis=0)
     A_k_disp_sum = jnp.sum(int_area, axis=0)
     V_k_scale = jnp.where(
@@ -571,9 +632,14 @@ def lipscomb_2001_remap(
     3. Displace each interior boundary by ``dt · dh/dt(boundary)``.
        The displaced (h_L_disp_k, h_R_disp_k) range is where the ice
        that was in cat k actually lives after the step.
-    4. Fit a linear thickness distribution ``g_k(h)`` on
-       [h_L_disp_k, h_R_disp_k] consistent with ``a_new[k]`` and
-       ``h_new[k]`` (η clipped to ±H/6 to keep ``g ≥ 0``).
+    4. Fit a bin-centre-anchored linear thickness distribution
+       ``g_k(h)`` on [h_L_disp_k, h_R_disp_k].  In the central third
+       (``|η| ≤ H/6``) it matches BOTH ``a_new[k]`` and ``h_new[k]``
+       (exact Lipscomb).  Outside it, ``η`` is clipped to ±H/6 (to keep
+       ``g ≥ 0``) and a per-source renormalisation restores the total
+       moments — a robust approximation of Lipscomb's cutoff-support
+       (see the module Faithfulness note); the area/volume transfers are
+       then not moments of a single ``g``.
     5. Integrate ``g_k`` over each FIXED bin ``j`` to obtain the
        remapped per-bin area, volume, and intensive tracers.
 

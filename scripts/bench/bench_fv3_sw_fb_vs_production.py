@@ -6,8 +6,10 @@ Times the jitted steady-state per-step wall time of
   non-duogrid grid + ``iter1009_dual_target_config``),
 * ``production_duo``  — same model on a DUOGRID grid (isolates the duogrid
   halo cost from the core cost, since the FB chain is duogrid-only),
-* ``fb``              — ``FV3FBShallowWaterModel.step`` (faithful FV3
-  forward-backward chain, duogrid, ``fb_m1_preset_config``),
+* ``fb``              — ``FV3FBShallowWaterModel.step`` (FV3
+  forward-backward chain, duogrid, ``fb_m1_preset_config``; the d_sw5
+  cross-face halo is the stable zero-ring approximation, not fully
+  Fortran-faithful — fv3_sw_core.py:3205),
 
 on the Williamson-2 IC at the requested resolutions.  AOT pattern (memory
 'AOT-vs-jit-cache timing'): ``jit(...).lower(state).compile()`` FIRST, then

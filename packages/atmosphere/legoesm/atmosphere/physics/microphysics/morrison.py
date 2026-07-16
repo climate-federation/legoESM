@@ -26,8 +26,10 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     saturation_adjustment,
     effective_Nc,
     autoconversion_sb,
+    autoconversion_sb2001,
     autoconversion_kk2000,
     accretion,
+    accretion_sb2001,
     accretion_kk2000,
     self_collection_breakup,
     self_collection_breakup_sb2001,
@@ -239,10 +241,32 @@ def morrison_microphysics(
         dq_c_au = dq_c_au * cf_eff
         dN_r_au = dN_r_au * cf_eff
         dq_c_ac = accretion(q_c_ic, q_r_ic, rho, config.k_ac) * cf_eff
+    elif config.warm_rain_scheme == "seifert_beheng_sb2001":
+        # PUBLISHED SB2001 universal functions (phi_au, phi_ac) — the faithful
+        # gSAM IRAIN=1 MASS rates (module_mp_graupel.f90:1835-1844, :1960-1962),
+        # as opposed to the simplified "seifert_beheng" proxy above. tau is a
+        # scale-invariant ratio so the in-cloud (q/cf) rescaling leaves it
+        # unchanged. NOTE the subgrid enhancement is NOT the same across the
+        # laws: with N_c_eff held at the grid-mean (not rescaled by cf), the
+        # q_c^4 autoconversion gets a cf^-3 enhancement vs cf^-1 for accretion —
+        # STRONGER than the kk2000 path. This (and the un-rescaled in-cloud N_c)
+        # is a known subgrid-closure limitation, moot at the default
+        # ``subgrid_autoconversion=False`` (cf_eff=1). The SB2001-specific
+        # cloud-NUMBER autoconv factor (2·PRC·rho/x_*) is not applied — the
+        # generic ``-dq_c_au·rho/x_c`` sink below (predict_Nc=True) is used
+        # instead; see ``autoconversion_sb2001``.
+        dq_c_au, dN_r_au, x_c = autoconversion_sb2001(
+            q_c_ic, q_r_ic, N_c_eff, rho,
+        )
+        dq_c_au = dq_c_au * cf_eff
+        dN_r_au = dN_r_au * cf_eff
+        dq_c_ac = accretion_sb2001(q_c_ic, q_r_ic, rho) * cf_eff
     else:
         raise ValueError(
-            f"Unknown warm_rain_scheme: {config.warm_rain_scheme!r}; "
-            f"choose 'kk2000' (SAM M2005 default) or 'seifert_beheng'."
+            f"Unknown warm_rain_scheme: {config.warm_rain_scheme!r}; choose "
+            f"'kk2000' (SAM M2005 default), 'seifert_beheng' (simplified "
+            f"proxy) or 'seifert_beheng_sb2001' (published SB2001 universal "
+            f"functions)."
         )
     # Rain self-collection + breakup. "sb2001" (SAM NRAGG) self-collects
     # ~5580× faster than the legacy k_sc=1e-3 sigmoid form, so rain coalesces
@@ -392,7 +416,10 @@ def morrison_microphysics(
         jnp.clip(N_i, 0.0) / jnp.maximum(q_i_eff, 1.0e-20), 1.0 / 3.0)
     n0i_ac = jnp.clip(N_i, 0.0) * lami_ac
     if config.ice_deposition_scheme == "m2005":
-        # Faithful bulk diffusional growth:
+        # M2005-FORM bulk diffusional growth (gSAM EPSI/ABI/CONS12 structure;
+        # legoESM applies its OWN q_sat_i, the ice_deposition_efficiency
+        # multiplier, and the q_i floors/non-negative clips in place of gSAM's
+        # pre-EPSI LAMI bounds / N0I-NI3D update — see test_m_prd_ice_deposition):
         #   PRD = EPSI·(q_v − q_sat_i)/ABI
         #   EPSI = 2π·N_i·ρ·DV/LAMI, LAMI = (CONS12·N_i/q_i)^(1/3)
         #        = (2π/CONS12^⅓)·ρ·DV·N_i^⅔·q_i^⅓   (the q_i^⅓·N_i^⅔ scaling)
@@ -916,6 +943,15 @@ def morrison_microphysics(
     dN_i_nuc = dN_i_nuc * qv_scale
 
     # === SEDIMENTATION ===
+    # Faithfulness: the m2005_psd mass-/number-weighted fall speeds are pinned to
+    # the gSAM MICRO_M2005 Fortran oracle to round-off (rel 1e-12) in
+    # tests/unit/test_m2005_fall_speed_faithful.py — rain/ice mass (UMR/UMI) via
+    # the sedimentation surface flux precip = V_t*q*rho, and every species' mass
+    # AND number speed (UNR/UNI/UMS/UNS/UMG/UNG, snow+graupel in double-moment
+    # mode) via a sedimentation_tendency intercept.  NOTE `config` is already
+    # flavor-resolved here (line ~178): `config.fall_b_i` is 0.865 (gSAM MK tune)
+    # for morrison_flavor="sam" but 1.0 (M2005-original) for the DEFAULT "mg" —
+    # the runtime default ice fall exponent is NOT the raw-default 0.865.
     rho_sfc = rho[:, -1:]
     rho_ratio = rho / jnp.clip(rho_sfc, _RHO_FLOOR)
     if config.fall_speed_scheme == "m2005_psd":
@@ -925,9 +961,11 @@ def morrison_microphysics(
         #   LAMR = (π·ρ_w·N_r/q_r)^⅓,  LAMI = (ρ_ci·π·N_i/q_i)^⅓   (per-mass
         #     N[/kg], q[kg/kg]; NO ρ factor — matches the EFFI/deposition slope)
         #   UM   = a·Γ(4+b)/6 · LAM^−b · (ρ_su/ρ)^0.54
-        # clamped to SAM's slope + "realistic fallspeed" limits. Snow has NO
-        # prognostic N_s (single-moment), so it keeps the legacy bulk q-power
-        # V_t — the same double-moment-snow gap that defers faithful PRDS/riming.
+        # clamped to SAM's slope + "realistic fallspeed" limits. Snow/graupel use
+        # this SAM PSD fall speed only when a prognostic N_s/N_g is supplied (the
+        # snow_double_moment / graupel_double_moment branches below); the DEFAULT
+        # single-moment path keeps the legacy bulk q-power V_t (snow) / fixed-N0G
+        # closure (graupel).
         dum = safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXP)
         # Cloud ICE uses the Ikawa-Saito 1991 density exponent 0.35 (gSAM
         # AIN=(RHOSU/RHO)^0.35·AI, module_mp_graupel.f90:1542/4230), NOT the
@@ -1021,9 +1059,11 @@ def morrison_microphysics(
             f"'bulk_qpower' (legacy)."
         )
 
-    # Graupel fall speed (single-moment PSD with the fixed N0G intercept):
-    # UMG = AG·Γ(4+BG)/6·LAMG^(−BG)·(ρ_su/ρ)^0.54, capped at a realistic
-    # graupel terminal velocity (graupel falls FAST — denser than snow).
+    # Graupel fall speed. Default is the single-moment fixed-N0G intercept
+    # closure (graupel_lamg with N_g=None); a prognostic N_g selects the SAM
+    # double-moment PSD slope (LAMG=(π·ρ_g·N_g/q_g)^⅓). UMG = AG·Γ(4+BG)/6·
+    # LAMG^(−BG)·(ρ_su/ρ)^0.54, capped at a realistic graupel terminal
+    # velocity (graupel falls FAST — denser than snow).
     if config.do_graupel:
         dum_g = safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXP)
         lamg = graupel_lamg(q_g, rho, config, N_g=N_g_arg)

@@ -157,6 +157,22 @@ target-version = "py311"
 select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
+# FV3-native dycore ports (docs/.../fv3_native campaign): these modules are
+# loop-faithful, INDEX-EXACT transcriptions of GFDL_atmos_cubed_sphere Fortran
+# (sw_core/tp_core/a2b_edge/fv_grid_*).  The Fortran-metric locals are held in
+# UPPER_SNAKE fort views (DXA, DEL6_V, SIN_SG, CSG, ...) to mirror the source
+# 1:1 — renaming to snake_case would destroy the line-by-line cross-reference
+# to the oracle (the higher-priority faithfulness goal).  `fort`/`fort1` are
+# deliberately lower-case (they read as array *views*, not classes).  N803/N806
+# = kernel args/vars, N801 = the fort view classes.
+"packages/core/legoesm/core/fv3_native_sw_core.py" = ["N803", "N806", "N801"]
+"packages/core/legoesm/core/fv3_native_d_sw.py" = ["N803", "N806", "N801"]
+"packages/core/legoesm/core/fv3_native_duo_sw_core.py" = ["N803", "N806", "N801"]
+"packages/core/legoesm/grids/fv3_native_gridstruct.py" = ["N801", "N803", "N806"]
+# FV3-native oracle validators/tests: same verbatim-Fortran UPPER_SNAKE
+# metric locals (SIN/COS/DXC/RC, ...) mirroring the source 1:1.
+"scripts/validate/fv3_native/gen_divduo_oracle.py" = ["N806", "N816"]
+"tests/grids/test_fv3_native_duo_phase4c.py" = ["N806"]
 # Fuller CLUBB port (PORT_CLUBB.md): the closure coefficients, model flags and
 # intermediate variables mirror CLUBB's canonical symbol names 1:1 (c_K1,
 # iiPDF_type, l_use_C7_Richardson, C2rt, Skw, wpthlp, Lscale, ...) as in

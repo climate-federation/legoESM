@@ -2888,7 +2888,7 @@ def monotone_halo_clip_context(slack: float = 0.5):
     the duogrid-induced cube-edge θ′ variance ratio by ~65%
     when combined with iter-466's ``make_legoesm_nh_min_edge_
     config`` factory.  At smooth atmospheric ICs, the iter-553
-    ``make_fv3_faithful_nh_config`` factory alone gives 89.5%
+    ``make_fv3_component_fidelity_nh_config`` factory alone gives 89.5%
     reduction without needing this context.  Use this context
     when iters>2 boost is enabled (iter-562) for additional
     edge suppression.

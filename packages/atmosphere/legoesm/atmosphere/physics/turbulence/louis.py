@@ -34,6 +34,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics._shared import (
     buoyancy_coefficient,
     exner_function,
@@ -60,7 +61,11 @@ __physics_contract__ = {
     "summary": (
         "Louis (1979) stability-dependent PBL turbulence: mixing-length eddy "
         "diffusivities Km, Kh scaled by Richardson-number stability functions "
-        "f_m, f_h; mixes momentum, heat (theta-space) and moisture implicitly."
+        "f_m, f_h; mixes momentum, heat (theta-space) and moisture implicitly. "
+        "Optional (default-off) marine-Sc cloud-top entrainment adds a "
+        "flux-matched interior diffusivity K_ent at the inversion that vents "
+        "BL-top moisture into the free troposphere (column-conserving; surface "
+        "layer untouched)."
     ),
     "inputs": {
         "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg",
@@ -91,6 +96,75 @@ __physics_contract__ = {
         "stable stratification reduces Km relative to neutral."
     ),
 }
+
+
+# --- Cloud-top entrainment (marine-Sc BL-top ventilation) constants ---
+# Louis is a LOCAL K scheme with no non-local entrainment flux: at a
+# stratocumulus inversion Ri>>0 => f_h->0 => Kh~0, so the sub-inversion BL is
+# capped and moisture accumulates (the supply-limited marine-Sc liquid cloud).
+# The optional K_ent adds a flux-matched entrainment diffusivity localized at
+# the inversion that vents BL-top moisture into the dry free troposphere WITHOUT
+# touching the surface layer (no evaporation trade) and conserving the column
+# integral (interior diffusivity; the implicit solver keeps total q, theta).
+_ENTRAIN_RH_CRIT = 0.90          # near-saturation threshold marking a cloudy BL [RH]
+_ENTRAIN_RH_SHARP = 20.0         # sigmoid sharpness for the cloudy (RH) gate [1/RH]
+# Inversion threshold ABOVE a typical free-tropospheric lapse (~4-7 K/km) so the
+# stable FT does NOT fire; a real Sc inversion is far sharper (~0.1-0.2 K/m).
+_ENTRAIN_INV_THRESHOLD = 1.0e-2  # inversion strength d(theta_v)/dz threshold (~10 K/km) [K/m]
+_ENTRAIN_INV_SHARP = 500.0       # sigmoid sharpness for the inversion gate [m/K]
+# Upward moisture DROP (dq_v/dz < 0) marking the cloud-top / free-troposphere
+# interface: the BL is wetter than the FT above.  This gate BOTH localizes the
+# term at the cloud top AND fixes the sign/direction (the down-gradient flux is
+# then upward => dries the BL); where the BL is well-mixed (dq/dz~0) or moisture
+# increases upward it is ~0, so the BL interior + surface layer stay untouched.
+_ENTRAIN_DQ_THRESHOLD = 3.0e-5   # min upward moisture drop -dq_v/dz [ (kg/kg)/m ]
+_ENTRAIN_DQ_SHARP = 1.0e5        # sigmoid sharpness for the drying/direction gate [ m/(kg/kg) ]
+_ENTRAIN_W_REF = 0.02            # reference Sc entrainment velocity [m/s] (high end; A scales it)
+_ENTRAIN_PRANDTL = 0.5           # momentum/heat entrainment ratio (Kent_m = frac*Kent_h)
+
+
+def _cloudtop_entrainment_diffusivity(
+    dz_half: jax.Array,
+    dq_v_dz: jax.Array,
+    dtheta_v_dz: jax.Array,
+    rh_below: jax.Array,
+    config: LouisConfig,
+) -> jax.Array:
+    """Flux-matched marine-Sc cloud-top entrainment diffusivity ``K_ent`` [m^2/s].
+
+    Localized INTRINSICALLY at the stratocumulus cloud top by the product of
+    three smooth gates (NO PBL-height diagnosis — the bulk-Ri height floors
+    unreliably; codex review):
+
+    * ``drying`` — moisture DROPS upward (``dq_v/dz < 0``: the BL is wetter than
+      the free troposphere above).  This BOTH selects the cloud-top/FT interface
+      AND guarantees the sign: with z increasing upward the down-gradient flux
+      ``-K_ent*dq/dz > 0`` is UPWARD, drying the BL.  Where the BL is well-mixed
+      (``dq/dz~0``) or moisture increases upward the gate is ~0, so the BL
+      interior and the SURFACE layer are untouched (no evaporation trade) and the
+      term can NEVER moisten the BL.
+    * ``inverted`` — a strong static inversion caps the BL (``dtheta_v/dz`` above
+      a threshold set above the FT lapse).
+    * ``cloudy_below`` — the layer BELOW the interface is near-saturated (a Sc
+      cloud); uses the LOWER neighbour's RH (``rh_below``), NOT the arithmetic
+      midpoint, which is suppressed across the saturated-BL/dry-FT discontinuity.
+
+    ``K_ent = A*W_REF * dz * drying * inverted * cloudy_below`` so ``K/dz ~
+    A*W_REF`` is the entrainment velocity (flux-matched).  Deliberately NOT gated
+    to the surface buoyancy flux (unlike YSU) so it fires for radiatively-driven
+    Sc in calm subtropical highs.  All-``jnp`` + smooth => differentiable; the
+    on/off is a static feature gate in the caller.  Returns >= 0, ``(ncol,
+    nlev-1)``.
+    """
+    drying = jax.nn.sigmoid(
+        _ENTRAIN_DQ_SHARP * (-dq_v_dz - _ENTRAIN_DQ_THRESHOLD)
+    )
+    inverted = jax.nn.sigmoid(
+        _ENTRAIN_INV_SHARP * (dtheta_v_dz - _ENTRAIN_INV_THRESHOLD)
+    )
+    cloudy = jax.nn.sigmoid(_ENTRAIN_RH_SHARP * (rh_below - _ENTRAIN_RH_CRIT))
+    w_ent = config.cloudtop_entrainment_efficiency * _ENTRAIN_W_REF
+    return w_ent * dz_half * drying * inverted * cloudy
 
 
 def louis_turbulence(
@@ -208,6 +282,45 @@ def louis_turbulence(
     Km_half = l_mix ** 2 * S * f_m  # (ncol, nlev-1)
     Kh_half = l_mix ** 2 * S * f_h
 
+    # PBL top (inversion height) — returned as a diagnostic ONLY (the cloud-top
+    # entrainment below localizes intrinsically via its gates, with NO h_pbl
+    # dependence).  Computed here (byte-identical to the original position: same
+    # inputs, nothing mutated before the diffusion).  Threads the scheme's own
+    # critical Richardson number (LouisConfig.Ri_crit) into the diagnosis.
+    h_pbl = diagnose_pbl_height(
+        T, q_v, u, v, p_full, z_full,
+        PBLHeightConfig(Ri_crit=config.Ri_crit),
+    )
+
+    # --- Cloud-top entrainment (saturated inversion-capped cloud top) ---
+    # Added UNCONDITIONALLY (NOT under a Python `if` on the efficiency): the
+    # efficiency is a tier-2 TRAINABLE param, so the training loop injects it as a
+    # TRACED leaf and `if <tracer> > 0` would both raise and zero d(loss)/dA at
+    # A=0.  At the default A=0 (off), ``w_ent = 0.0 * W_REF = 0.0`` => K_ent is
+    # identically 0.0 (all gates finite: sigmoids in (0,1), dz clipped >=1, sat
+    # floored) => ``Kh_half + 0.0 == Kh_half`` BITWISE (byte-identical off), while
+    # d(K_ent)/dA = W_REF*dz*gates != 0 lets training bootstrap the knob from off.
+    # When on, a saturated, inversion-capped cloud top vents moisture UP into the
+    # dry free troposphere (thins the cloud) instead of trapping it (Louis' local
+    # f_h->0 at Ri>>0).  Interior K + UNCHANGED surface flux => the implicit solver
+    # conserves the column q/theta integral (redistributes BL<->FT), and the
+    # surface EVAPORATION flux (bottom BC) is structurally untouched => NO evap
+    # trade.  Momentum gets a Prandtl fraction.  REGIME: the 3-gate product fires
+    # at ANY saturated (rh_below>~0.9), inversion-capped (dtheta_v/dz>~1e-2),
+    # upward-drying (dq_v/dz<0) interface — dominantly marine stratocumulus, but
+    # also e.g. continental radiation fog / mid-level altostratus tops (the
+    # direction stays physical there: down-gradient => dries the cloud).  W_REF is
+    # a marine-Sc value; retune if applied to other regimes.
+    dq_v_dz = (q_v[:, :-1] - q_v[:, 1:]) / dz_half
+    rh_below = q_v[:, 1:] / jnp.maximum(
+        saturation_mixing_ratio(T[:, 1:], p_full[:, 1:]), 1.0e-12
+    )
+    K_ent = _cloudtop_entrainment_diffusivity(
+        dz_half, dq_v_dz, dtheta_v_dz, rh_below, config,
+    )
+    Kh_half = Kh_half + K_ent
+    Km_half = Km_half + _ENTRAIN_PRANDTL * K_ent
+
     # Interpolate to full levels for diagnostics — single concat per
     # field instead of the previous ``zeros + 3 .at[].set`` triple
     # scatter (lowers to one HLO op).  Same pattern as TKE,
@@ -248,14 +361,6 @@ def louis_turbulence(
         T, Kh_half, rho, dz_layer, dz_half, p_full, dt, sflx_T,
     )
     q_new = implicit_vertical_diffusion(q_v, Kh_half, rho, dz_layer, dz_half, dt, sflx_q)
-
-    # Thread the scheme's critical Richardson number into the PBL-height
-    # diagnosis (LouisConfig.Ri_crit was previously declared but never
-    # read — the call silently used PBLHeightConfig's default).
-    h_pbl = diagnose_pbl_height(
-        T, q_v, u, v, p_full, z_full,
-        PBLHeightConfig(Ri_crit=config.Ri_crit),
-    )
 
     return TurbulenceOutput(
         du_dt=(u_new - u) / dt,
