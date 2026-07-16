@@ -727,6 +727,14 @@ _NEMO_GYRE_CARD_CONFIG = NEMOModelRecipeConfig(
     n_barotropic_substeps=120,
     # --- GYRE_BARE namelist knobs (were inheriting ORCA-ish class defaults) ---
     tracer_advection="fct2",          # ln_traadv_fct, nn_fct_h=2 nn_fct_v=2
+    # nn_bt_flt=3: Demange dissipative FB (AB3 velocity extrapolation + AM4
+    # backward ssh interpolation, rn_bt_alpha=0.07), FINAL-value state output —
+    # NEMO GYRE's actual barotropic filter (dynspg_ts). The spatial eta
+    # diffusion is OFF (NEMO has none; dissipation is temporal). One documented
+    # difference: the ll_init ramp + substep-history reset are applied PER
+    # WINDOW (NEMO carries them across windows in SAVE arrays) — 2/120 substeps
+    # lower-order each step, slightly more dissipative.
+    barotropic_time_filter="nemo_ab3am4",
     A_h=1.0e5,                         # nn_ahm_ijk_t=0: CONSTANT 1/2*rn_Uv*rn_Lv = 1e5
     A_h_lat_scaling=False,             # NO cos-lat scaling (nn_ahm_ijk_t=0)
     C_smag_lap=0.0,                    # NO Smagorinsky
@@ -857,7 +865,11 @@ def build_nemo_gyre_recipe(
     # geostrophic value vs NEMO's 60%).
     model_config = model_config._replace(
         physics=physics_config, coriolis_scheme="explicit_ab2",
-        barotropic_coriolis_split="live")
+        barotropic_coriolis_split="live",
+        # NEMO has NO spatial barotropic eta-diffusion (nn_bt_flt=3 dissipation
+        # is purely temporal); with the nemo_ab3am4 filter the smoother is off.
+        barotropic=model_config.barotropic._replace(
+            barotropic_diffusion_alpha=0.0))
 
     return NEMORecipe(
         model_config=model_config,

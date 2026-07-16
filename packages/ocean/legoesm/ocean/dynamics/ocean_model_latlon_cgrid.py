@@ -1444,7 +1444,15 @@ class LatLonCGridOceanModel:
                     "tendencies + implicit FS + implicit vertical mixing; these "
                     "features are threaded by the split implicit_cn path only. Use "
                     'barotropic_solver="implicit_cn", or extend _unsplit_ab2_step.')
-        _valid_time_filters = {"box", "cosine", "power_law", "nemo_boxcar_centred"}
+        _valid_time_filters = {"box", "cosine", "power_law",
+                               "nemo_boxcar_centred", "nemo_ab3am4"}
+        if (config.barotropic.barotropic_time_filter == "nemo_ab3am4"
+                and config.barotropic.barotropic_wide_halo):
+            raise ValueError(
+                'barotropic_time_filter="nemo_ab3am4" is not yet supported '
+                "with barotropic_wide_halo=True (the AB3/AM4 substep "
+                "histories widen the per-substep stencil reach; the wide-halo "
+                "budget has not been re-derived).")
         if config.barotropic.barotropic_time_filter not in _valid_time_filters:
             raise ValueError(
                 f"barotropic_time_filter must be one of {_valid_time_filters}, "
