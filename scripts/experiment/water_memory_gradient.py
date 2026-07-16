@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import argparse
 import time
-from functools import partial
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
