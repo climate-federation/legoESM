@@ -241,9 +241,12 @@ def _find_latest_checkpoint(output_dir):
 
 def build_parser():
     """Build the run_coupled argument parser (exposed for CLI round-trip tests)."""
-    # Central microphysics literal set — keep the CLI allowlist in sync with
+    # Central scheme literal sets — keep the CLI allowlists in sync with
     # ExperimentConfig.validate_strict (no drift / no dropped advertised scheme).
-    from legoesm.driver.config import VALID_MICROPHYSICS
+    from legoesm.driver.config import (
+        VALID_CONVECTION_SCHEMES,
+        VALID_MICROPHYSICS,
+    )
 
     parser = argparse.ArgumentParser(
         description="Run a fully coupled ESM simulation",
@@ -331,12 +334,26 @@ def build_parser():
     # suite is empirically stable coupled at coarse res (C18/L20, dt<=450s).
     # Pass --minimal-physics (or the individual --<scheme> none flags) for a
     # cheap idealized run.
+    # The coupled atmosphere IS the AMIP atmosphere: CoupledESMDriver builds
+    # `self._atm = ModelDriver(atm_config)`, the same driver + physics pipeline
+    # run_amip uses.  So this list had drifted, not narrowed on purpose: it was
+    # missing zhang_mcfarlane / kain_fritsch / emanuel / tiedtke / bechtold --
+    # every one of which resolves through the shared convection factory, and
+    # bechtold is run_amip's own DEFAULT and the scheme in
+    # config/amip/amip_production.yaml.  Derived from the canonical set so it
+    # cannot drift again.  (The default stays sbm: the comment above documents
+    # the empirically coupled-stable suite, which is a statement about the
+    # DEFAULT, not a reason to block the others.)
     parser.add_argument("--convection", default="sbm",
-                        choices=["sbm", "dca", "kuo", "mass_flux", "edmf", "none"],
+                        choices=list(VALID_CONVECTION_SCHEMES),
                         help="Convection scheme (default: sbm)")
+    # clubb_lite and ysu were missing here while run_amip offers both, and both
+    # resolve through the shared turbulence factory -- drift, not a deliberate
+    # exclusion (contrast --surface-bulk-scheme below, which documents its own).
     parser.add_argument("--turbulence", default="holtslag_boville",
                         choices=["smagorinsky", "louis", "tke", "holtslag_boville",
-                                 "mynn25", "clubb", "edmf", "none"],
+                                 "mynn25", "clubb", "clubb_lite", "ysu", "edmf",
+                                 "none"],
                         help="Boundary-layer turbulence scheme "
                              "(default: holtslag_boville)")
     # NOTE: "most" is deliberately NOT offered here although the coupler
@@ -345,8 +362,16 @@ def build_parser():
     # scheme), so offering it would silently split the interface (ocean tile
     # MOST vs atmosphere constant) — the exact inconsistency validate() below
     # rejects for turbulence="none".
+    # "most" is absent from choices BECAUSE of the NOTE above -- the list used
+    # to offer it, contradicting its own rationale, and ExperimentConfig.
+    # validate_strict rejects it (_valid_surface_bulk = constant/coare3/
+    # large_yeager), so `--surface-bulk-scheme most` parsed fine and then died
+    # at driver construction. It must NOT be fixed by widening validate_strict:
+    # turbulence/surface_layer.py gates the MOST path on ("coare3",
+    # "large_yeager") only, so an accepted "most" would SILENTLY fall through to
+    # the constant-coefficient branch -- trading a loud crash for wrong physics.
     parser.add_argument("--surface-bulk-scheme", default="constant",
-                        choices=["constant", "most", "coare3", "large_yeager"],
+                        choices=["constant", "coare3", "large_yeager"],
                         help="AIR-SEA surface bulk-flux algorithm for the "
                              "atmosphere surface layer + the coupler OCEAN tile "
                              "(the 3D-ocean air-sea flux). 'coare3' is the "

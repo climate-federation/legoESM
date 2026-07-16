@@ -40,10 +40,33 @@ def test_flux_scheme_flags_roundtrip():
     assert args.surface_bulk_scheme == "coare3"
 
 
-def test_surface_bulk_scheme_accepts_most():
-    """'most' is now a valid choice for the air-sea/atm scheme too."""
-    args = mod.build_parser().parse_args(["--surface-bulk-scheme", "most"])
-    assert args.surface_bulk_scheme == "most"
+def test_surface_bulk_scheme_rejects_most():
+    """'most' is NOT a valid air-sea scheme -- it must not parse.
+
+    This test previously asserted the opposite ("'most' is now a valid choice
+    for the air-sea/atm scheme too") and pinned a phantom. The history:
+      2026-06-22 b5c423119  validate_strict starts REJECTING most
+                            (_valid_surface_bulk = constant/coare3/large_yeager)
+      2026-06-24 57979cdbf  most ADDED to these choices (this test came with it)
+                            -> `--surface-bulk-scheme most` parsed, then died at
+                            ModelDriver construction
+      2026-07-03 e8bb82c53  review adds the flag's NOTE: "'most' is deliberately
+                            NOT offered here ... the atmosphere surface layer's
+                            compute_surface_fluxes treats 'most' as constant
+                            (fixed-roughness LAND scheme), so offering it would
+                            silently split the interface" -- but only wrote the
+                            comment; the choices list stayed stale.
+    The NOTE is the latest word and the code now matches it. Fixing this by
+    WIDENING _valid_surface_bulk instead would be worse than the crash:
+    turbulence/surface_layer.py gates the MOST path on ("coare3",
+    "large_yeager") only, so an accepted "most" silently degrades to the
+    constant-coefficient branch -- a loud crash traded for wrong physics.
+
+    The LAND and SLAB tiles legitimately use MOST; that is covered by
+    test_flux_scheme_flags_roundtrip via --land-bulk-scheme/--slab-bulk-scheme.
+    """
+    with pytest.raises(SystemExit):
+        mod.build_parser().parse_args(["--surface-bulk-scheme", "most"])
 
 
 @pytest.mark.parametrize("bad_flag", [

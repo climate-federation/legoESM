@@ -520,9 +520,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # disabled only for an idealized / dry-dynamics run, which must opt in via
     # --allow-disabled-physics (or --held-suarez-forcing / --enable-latlon-spmd).
     # Enforced by _require_full_physics_for_amip; see the directive in CLAUDE.
+    # mynn25 was missing while run_coupled offers it, and it resolves through
+    # the shared turbulence factory (integration.get_turbulence_fn) -- drift.
     parser.add_argument("--turbulence", type=str, default="louis",
                         choices=[
-                            "none", "smagorinsky", "louis", "tke",
+                            "none", "smagorinsky", "louis", "tke", "mynn25",
                             "clubb_lite", "clubb", "holtslag_boville", "ysu", "edmf",
                         ])
     parser.add_argument("--cloudtop-entrainment-efficiency",
