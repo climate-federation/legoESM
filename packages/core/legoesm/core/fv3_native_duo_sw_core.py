@@ -12,10 +12,21 @@ these duo branches, so full duo-grid FV3 fidelity certifies THESE, not the
 plain ones.
 
 This module ports the duo-specific routines loop-faithfully (index-exact,
-plain numpy, Fortran statement order), certified field-by-field against
-the verbatim authoritative Fortran (``divergence_corner_duo`` oracle in
-``scripts/validate/fv3_native/``).  Conventions match
-``fv3_native_sw_core`` / ``fv3_native_d_sw`` (``fort`` views, ``Bounds``).
+plain numpy, Fortran statement order).  ``divergence_corner_duo`` is a
+verified-faithful TRANSLATION of the authoritative Fortran — bit-exact on
+identical inputs (``test_fv3_native_duo_phase4c``), and its extraction is
+byte-identical to sw_core.F90:2345-2447 (SHA-256).
+
+SCOPE CAVEAT: this is not yet a full-DUO-PIPELINE certification.  The duo
+c_sw feeds ``divergence_corner_duo`` (and the KE/vorticity path) with
+ua/va from ``d2a2c_vect``'s dg-initialized cross-face branch, which
+differs from the plain ``c_sw`` ua/va the current oracle uses at panel
+edges/corners.  Porting the duo ``d2a2c_vect`` (and the no-corner-fill /
+no-``sin_sg``-edge duo c_sw body) is the remaining phase-4c work before
+the production duo path can claim end-to-end FV3 fidelity.
+
+Conventions match ``fv3_native_sw_core`` / ``fv3_native_d_sw`` (``fort``
+views, ``Bounds``).
 """
 
 from __future__ import annotations
