@@ -107,6 +107,18 @@ def test_absent_physics_block_preserves_defaults():
     )
 
 
+def test_held_suarez_template_starts_dry():
+    """Disabling the moist schemes is not enough: the driver initializes q_v
+    UNCONDITIONALLY from rh_init (model_driver: q_v = rh_init * q_sat * sigma^2,
+    default 0.7), and that moisture still perturbs the dynamics via virtual
+    temperature -> density even with every parameterization off."""
+    ec = Config.from_yaml(_HS_TEMPLATE).to_experiment_config()
+    assert ec.rh_init == 0.0, (
+        f"Held-Suarez template initializes moisture (rh_init={ec.rh_init}); a "
+        "dry dynamical-core benchmark must start with zero q_v"
+    )
+
+
 def test_unknown_physics_forcing_raises():
     """An unrecognized forcing must fail LOUDLY, not run something else — the
     dispatch-hardening rule that this whole module regressed against."""
@@ -114,5 +126,40 @@ def test_unknown_physics_forcing_raises():
         _ec({"physics": {"forcing": "newtonian_typo"}})
 
 
+@pytest.mark.parametrize("bad_key", ["convectoin", "cloud_scheme", "sbm"])
+def test_unknown_physics_key_raises(bad_key):
+    """A typo'd or wrong-spelling physics key must be rejected.
+
+    Mapping only the recognized keys would preserve the exact defect this
+    module fixes: ``convectoin: bechtold`` silently running ``sbm``.
+    ``cloud_scheme`` is the ExperimentConfig field name and a plausible wrong
+    guess for the YAML key (which is ``clouds``).
+    """
+    with pytest.raises(ValueError, match="unknown physics key"):
+        _ec({"physics": {bad_key: "bechtold"}})
+
+
+def test_null_physics_block_raises_clearly():
+    """``physics:`` with no children parses to None; that must produce a clear
+    error, not an AttributeError from the first ``.get``."""
+    with pytest.raises(ValueError, match="physics: must be a mapping"):
+        _ec({"physics": None})
+
+
 def test_physics_forcing_none_leaves_held_suarez_off():
     assert _ec({"physics": {"forcing": "none"}}).held_suarez_forcing is False
+
+
+def test_time_integrator_reaches_dycore_config():
+    """``atmosphere.time_integrator`` is declared in DEFAULT_CONFIG and written
+    by the experiment wizard (wizard_core: "atmosphere.time_integrator"), but
+    was never mapped — so the wizard asked the user to pick an integrator and
+    silently discarded the answer."""
+    ec = _ec({"atmosphere": {"time_integrator": "ssp_rk54"}})
+    assert ec.dycore.time_integrator == "ssp_rk54"
+
+
+def test_absent_time_integrator_stays_auto():
+    """Unset must remain the grid-aware "auto" resolution — the nested default
+    was a stale "ssp_rk3" that, once mapped, would have pinned every config."""
+    assert _ec({}).dycore.time_integrator == "auto"

@@ -42,6 +42,21 @@ _LEGACY_DYNAMICS: dict[str, str] = {
     # No legacy aliases at this time; table is here for future use.
 }
 
+# Recognized children of the nested ``physics:`` block.  This is an ALLOWLIST,
+# not documentation: anything outside it is rejected in
+# ``to_experiment_config``.  The YAML spellings mirror run_amip's flags (so
+# ``clouds`` -> ExperimentConfig.cloud_scheme), keeping the two dialects
+# consistent for a user moving between them.
+_PHYSICS_KEYS: frozenset[str] = frozenset({
+    "forcing",
+    "convection",
+    "microphysics",
+    "turbulence",
+    "clouds",
+    "gravity_wave_drag",
+    "radiation",
+})
+
 
 def _normalize_discretization(raw: str) -> str:
     """Map a legacy discretization name to its canonical form."""
@@ -104,8 +119,11 @@ DEFAULT_CONFIG = {
         "dynamics": "shallow_water",
         "discretization": "cdgrid",
         "equations": "shallow_water",   # legacy; use dynamics+discretization
-        "advection": "cdgrid",
-        "time_integrator": "ssp_rk3",   # "ssp_rk3" | "ssp_rk54"
+        # Mirrors DycoreConfig.time_integrator's default so an unset config
+        # keeps resolving the integrator grid-aware.  It was "ssp_rk3" while the
+        # key was never mapped -- i.e. inert; mapping it with that stale default
+        # would have silently pinned EVERY nested config to ssp_rk3.
+        "time_integrator": "auto",
         "dt_seconds": 600,          # 10 minutes
         "hyperdiffusion_coeff": 0.0,
         "spectral": {
@@ -252,6 +270,26 @@ class Config:
         # flag and ``fix_mass`` on the canonical dycore config.
         fix_mass = d.get("conservation", {}).get("fix_mass", True)
 
+        # An UNKNOWN ``physics:`` child must fail loudly.  Mapping only the
+        # recognized keys would leave the very defect this block fixes: a typo
+        # (``convectoin: bechtold``) or the canonical-but-wrong spelling
+        # (``cloud_scheme:`` instead of ``clouds:``) would be dropped in silence
+        # and the run would proceed on defaults.
+        if not isinstance(physics, dict):
+            raise ValueError(
+                f"physics: must be a mapping of scheme selectors, got "
+                f"{type(physics).__name__} ({physics!r}); use 'physics: {{}}' "
+                "or omit the block entirely"
+            )
+        _unknown = set(physics) - _PHYSICS_KEYS
+        if _unknown:
+            raise ValueError(
+                f"unknown physics key(s) {sorted(_unknown)}; valid keys are "
+                f"{sorted(_PHYSICS_KEYS)}. (The ExperimentConfig field is named "
+                "'cloud_scheme', but the YAML key is 'clouds' -- matching "
+                "run_amip's --clouds.)"
+            )
+
         # ``physics.forcing`` selects an idealized forcing.  Held-Suarez (1994)
         # Newtonian relaxation + Rayleigh drag is the only one with a canonical
         # ExperimentConfig field today, so reject any other value LOUDLY rather
@@ -282,6 +320,12 @@ class Config:
                 "hyperdiff_scale": float(atm.get("hyperdiffusion_coeff", 1.0)),
                 "conservation_fixer": fix_mass,
                 "fix_mass": fix_mass,
+                # Declared in DEFAULT_CONFIG and written by the experiment
+                # wizard (wizard_core: "atmosphere.time_integrator") but never
+                # mapped -- so the wizard asked the user to pick an integrator
+                # and then silently discarded the answer.  "auto" resolves
+                # grid-aware in the driver factory.
+                "time_integrator": atm.get("time_integrator", "auto"),
             },
             "output": {
                 "output_dir": output_cfg.get("path", ""),

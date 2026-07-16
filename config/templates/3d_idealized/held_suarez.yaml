@@ -20,7 +20,6 @@ grid:
   vertical_coord: hybrid
 atmosphere:
   dynamics: hydrostatic        # canonical key -> ExperimentConfig.dycore.model_type
-  advection: ppm
   time_integrator: ssp_rk3
   dt_seconds: 600
   hyperdiffusion_coeff: 0.0
@@ -40,6 +39,13 @@ physics:
   clouds: none
   gravity_wave_drag: none
   radiation: none           # HS Newtonian relaxation REPLACES radiative heating
+surface:
+  # Held-Suarez is a DRY core, but the driver initializes moisture
+  # UNCONDITIONALLY from rh_init (model_driver: q_v = rh_init * q_sat * sigma^2,
+  # canonical default 0.7).  Disabling the moist parameterizations above leaves
+  # that q_v in place as a passive tracer that still perturbs the dynamics
+  # through virtual temperature -> density.  Start genuinely dry.
+  rh_init: 0.0
 conservation:
   fix_mass: true
   fix_energy: false
