@@ -26,6 +26,20 @@ atmosphere:
   hyperdiffusion_coeff: 0.0
 physics:
   forcing: held_suarez
+  # Held-Suarez is a DRY benchmark, and HS forcing is ADDITIVE to the physics
+  # pipeline (model_driver: "HS is ADDITIVE ... a held_suarez_forcing + louis
+  # config would apply BOTH the Louis surface stress AND this Rayleigh drag").
+  # So the whole moist stack must be declared off, matching run_amip's rule that
+  # HS is exempt from full-physics only when the ENTIRE stack is dry
+  # (_AMIP_REQUIRED_PHYSICS). These were previously omitted and the block was
+  # silently discarded, so this template ran moist sbm convection + gray
+  # radiation with NO Held-Suarez forcing at all.
+  convection: none
+  microphysics: none
+  turbulence: none          # also gates the defining HS Rayleigh surface drag
+  clouds: none
+  gravity_wave_drag: none
+  radiation: none           # HS Newtonian relaxation REPLACES radiative heating
 conservation:
   fix_mass: true
   fix_energy: false

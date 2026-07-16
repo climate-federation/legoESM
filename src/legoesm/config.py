@@ -246,10 +246,23 @@ class Config:
         radiation = d.get("radiation", {})
         surface = d.get("surface", {})
         hardware = d.get("hardware", {})
+        physics = d.get("physics", {})
 
         # conservation.fix_mass drives both the legacy ``conservation_fixer``
         # flag and ``fix_mass`` on the canonical dycore config.
         fix_mass = d.get("conservation", {}).get("fix_mass", True)
+
+        # ``physics.forcing`` selects an idealized forcing.  Held-Suarez (1994)
+        # Newtonian relaxation + Rayleigh drag is the only one with a canonical
+        # ExperimentConfig field today, so reject any other value LOUDLY rather
+        # than accepting it and running something else (the failure mode this
+        # whole block exists to fix -- see the note in ``canonical`` below).
+        _forcing = physics.get("forcing", "none")
+        if _forcing not in ("none", "held_suarez"):
+            raise ValueError(
+                "physics.forcing must be one of ('none', 'held_suarez'), got "
+                f"{_forcing!r}"
+            )
 
         canonical = {
             "grid": {
@@ -284,7 +297,25 @@ class Config:
             "seed": int(d.get("seed", 0)),  # master RNG seed (reproducibility)
             "dataset": forcing.get("dataset", "analytical"),
             "forcing_path": forcing.get("path", ""),
-            "radiation": radiation.get("scheme", atm.get("radiation", "gray")),
+            "radiation": radiation.get(
+                "scheme", physics.get("radiation", atm.get("radiation", "gray"))
+            ),
+            # --- Column physics (the ``physics:`` block) ---
+            # These axes were PARSED BUT NEVER MAPPED: every ``physics:`` key
+            # was silently discarded and the run fell back to the
+            # ExperimentConfig defaults.  The shipped, ``run_tested``
+            # Held-Suarez template (``physics.forcing: held_suarez``) therefore
+            # ran WITHOUT its Newtonian relaxation, under moist ``sbm``
+            # convection and gray radiation -- not the dry dynamical-core
+            # benchmark it advertises.  Every default below mirrors the
+            # corresponding ExperimentConfig field default, so a config that
+            # sets no ``physics:`` key resolves exactly as it did before.
+            "convection": physics.get("convection", "sbm"),
+            "microphysics": physics.get("microphysics", "none"),
+            "turbulence": physics.get("turbulence", "none"),
+            "cloud_scheme": physics.get("clouds", "none"),
+            "gravity_wave_drag": physics.get("gravity_wave_drag", "none"),
+            "held_suarez_forcing": _forcing == "held_suarez",
             "T_init": float(surface.get("T_init", 300.0)),
             "rh_init": float(surface.get("rh_init", surface.get("RH_init", 0.7))),
             "distributed": bool(
