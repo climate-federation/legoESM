@@ -1,25 +1,28 @@
-"""Reachability pin: run_centennial_spinup must dispatch ice-shelf basal melt
-to the MPAS apply on ``--grid mpas``.
+"""Reachability pins: run_centennial_spinup must dispatch its caller-applied
+forcings -- ice-shelf basal melt, river runoff, tidal mixing -- to the right
+step on ``--grid mpas``, not warn-and-ignore.
 
-``apply_ice_shelf_basal_step_mpas`` was implemented and unit-tested (see
-``tests/unit/test_runoff_iceshelf_apply.py``) but UNREACHABLE from any driver:
-run_centennial_spinup -- the one driver that offers ``--ice-shelf`` -- warned
-"not yet supported on grid='mpas'; ignoring" and only ever called the lat-lon
-variant, even though the MPAS apply and its three-equation/linear schemes were
-sitting right there, exactly as the SSS-restoring / runoff steps in the same
-loop already grid-dispatch.
+Each was implemented but unreachable on MPAS from this driver:
+  * ``apply_ice_shelf_basal_step_mpas`` -- implemented + unit-tested, but the
+    setup warned "not yet supported on grid='mpas'" and only the lat-lon variant
+    was ever called;
+  * ``apply_runoff_step_mpas`` -- implemented but UNTESTED, and no river->cell
+    projector existed for an unstructured mesh, so the setup warned too;
+  * tidal mixing -- the whole chain (E_BT -> layer thickness -> K_tidal ->
+    apply_tidal_mixing_step) is trailing-axis and grid-agnostic, yet the setup
+    still gated it on lat-lon and its layer-depth broadcast hardcoded a 2-D
+    shape.
 
-This is the same class the scheme-reachability work removed elsewhere: physics
-that is implemented, tested, and impossible to select. The test asserts the
-driver now (a) accepts ``mpas`` for ``--ice-shelf`` instead of warning-and-
-ignoring, and (b) actually routes to the ``_mpas`` apply when the grid is mpas.
+Same class the scheme-reachability work removed elsewhere: physics that is
+implemented and impossible to select. These assert the driver now admits mpas
+for each forcing AND routes to the mpas step.
 
 AST-level rather than a full ``main()`` run: main() builds a real MPAS mesh and
 integrates, which a unit test cannot afford, but the dispatch wiring is a static
-fact. The physics itself running on the production centennial state (both
-schemes, non-trivial melt) was verified by direct smoke against
-``run_omip2._build_state("mpas", ...)``; it is not re-run here to keep the test
-off the heavy matrix-setup import path.
+fact. The physics running on the production centennial state was verified by
+direct smoke against ``run_omip2._build_state("mpas", ...)`` for every forcing
+(non-trivial melt / eta rise / K_tidal); not re-run here to keep the test off
+the heavy matrix-setup import path.
 """
 from __future__ import annotations
 
@@ -80,11 +83,9 @@ def test_ice_shelf_setup_no_longer_warns_and_ignores_mpas():
     latlon-only gate that made the mpas apply unreachable. It must now accept
     both grids (``args.grid not in ("latlon", "mpas")``).
 
-    Scoped to the ice-shelf message specifically: the TIDAL-MIXING block in the
-    same driver legitimately keeps a latlon-only warning, because
-    apply_tidal_mixing_step is lat-lon-only by design (no MPAS variant exists) --
-    that narrower gate is protective, not drift, so a whole-file string search
-    would wrongly flag it.
+    Scoped to the ice-shelf message specifically so it pins the ice-shelf gate
+    independently of the runoff / tidal-mixing gates checked below (all three
+    forcings now admit mpas, but each is asserted on its own message).
     """
     src = _DRIVER.read_text()
     assert 'ice-shelf not yet supported on grid=' not in src, (
@@ -133,4 +134,51 @@ def test_ice_shelf_mask_help_documents_both_grid_shapes():
         "--ice-shelf-mask/--ice-draft help does not mention the (nCells,) mpas "
         "shape, so an mpas user is told to supply a (n_lat, n_lon) array that "
         "the mpas apply will reject"
+    )
+
+
+# ==============================================================================
+# Runoff + tidal-mixing: the same all-grid reachability, same driver
+# ==============================================================================
+def test_driver_imports_and_calls_the_mpas_runoff_pieces():
+    """apply_runoff_step_mpas + project_runoff_to_mpas_cells must be imported
+    AND called. apply_runoff_step_mpas existed but was unreachable (untested,
+    and the setup warned '--runoff not yet supported on grid=mpas') because no
+    river->cell projector existed for an unstructured mesh."""
+    tree = _driver_ast()
+    imported = {
+        alias.name for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) for alias in node.names
+    }
+    called = {
+        n.func.id for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    for sym in ("apply_runoff_step_mpas", "project_runoff_to_mpas_cells"):
+        assert sym in imported, f"{sym} not imported -> --runoff inert on mpas"
+        assert sym in called, f"{sym} imported but never called"
+    # lat-lon path stays reachable too
+    assert "apply_runoff_step" in called
+    assert "project_runoff_to_grid" in called
+
+
+def test_runoff_setup_no_longer_warns_and_ignores_mpas():
+    src = _DRIVER.read_text()
+    assert 'runoff not yet supported on grid=' not in src, (
+        "runoff setup still carries the latlon-only "
+        "'runoff not yet supported on grid=' warning that ignored --grid mpas"
+    )
+
+
+def test_tidal_mixing_setup_no_longer_warns_and_ignores_mpas():
+    """Unlike apply_tidal_mixing_step's PREVIOUS latlon-only reputation, the
+    whole tidal-mixing chain is trailing-axis and grid-agnostic; the driver
+    just had to stop gating it on latlon."""
+    src = _DRIVER.read_text()
+    assert 'tidal-mixing not yet supported on' not in src, (
+        "tidal-mixing setup still carries the latlon-only warning"
+    )
+    # both forcings now admit mpas via the two-grid gate
+    assert src.count('not in ("latlon", "mpas")') >= 3, (
+        "expected ice-shelf, runoff AND tidal-mixing to use the two-grid gate"
     )
