@@ -308,6 +308,8 @@ def build_parser():
     from legoesm.driver.config import (
         VALID_CONVECTION_SCHEMES,
         VALID_MICROPHYSICS,
+        VALID_SURFACE_BULK,
+        VALID_TURBULENCE,
     )
 
     parser = argparse.ArgumentParser(
@@ -422,10 +424,10 @@ def build_parser():
     # clubb_lite and ysu were missing here while run_amip offers both, and both
     # resolve through the shared turbulence factory -- drift, not a deliberate
     # exclusion (contrast --surface-bulk-scheme below, which documents its own).
+    # Derived from the canonical tuple (see run_amip's --turbulence note): the
+    # two drivers' hand-copied lists disagreed in BOTH directions.
     parser.add_argument("--turbulence", default="holtslag_boville",
-                        choices=["smagorinsky", "louis", "tke", "holtslag_boville",
-                                 "mynn25", "clubb", "clubb_lite", "ysu", "edmf",
-                                 "none"],
+                        choices=list(VALID_TURBULENCE),
                         help="Boundary-layer turbulence scheme "
                              "(default: holtslag_boville)")
     # NOTE: "most" is deliberately NOT offered here although the coupler
@@ -443,7 +445,7 @@ def build_parser():
     # "large_yeager") only, so an accepted "most" would SILENTLY fall through to
     # the constant-coefficient branch -- trading a loud crash for wrong physics.
     parser.add_argument("--surface-bulk-scheme", default="constant",
-                        choices=["constant", "coare3", "large_yeager"],
+                        choices=list(VALID_SURFACE_BULK),
                         help="AIR-SEA surface bulk-flux algorithm for the "
                              "atmosphere surface layer + the coupler OCEAN tile "
                              "(the 3D-ocean air-sea flux). 'coare3' is the "
@@ -944,7 +946,10 @@ def main():
 
     # Build configs
     from legoesm.driver.config import (
-        ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
+        DycoreConfig,
+        ExperimentConfig,
+        GridConfig,
+        OutputConfig,
     )
     from legoesm.driver.coupled_config import PRESETS
     from legoesm.ocean.simple_ocean import SimpleOceanConfig
