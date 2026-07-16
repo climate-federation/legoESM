@@ -196,10 +196,13 @@ def _canopy_residual(
     # ---- Photosynthesis ----
     T_phot_sun = b.Ta if use_ta_for_photosynthesis else Tf_Sun
     T_phot_sh  = b.Ta if use_ta_for_photosynthesis else Tf_Sh
-    An_Sun = photosynthesis(
+    # Only NET An enters the residual (stomatal conductance + leaf CO2/energy
+    # flux); the GROSS assimilation (carbon-model GPP) is consumed downstream
+    # in ``canopy_forward``, so discard it here.
+    An_Sun, _ = photosynthesis(
         T_phot_sun, Ci_Sun, b.APAR_Sun,
         b.Vcmax25_Sun, b.Vcmax25_C4Sun, b.fC4, b.Ps, b.alf, b.TgC)
-    An_Sh = photosynthesis(
+    An_Sh, _ = photosynthesis(
         T_phot_sh,  Ci_Sh,  b.APAR_Sh,
         b.Vcmax25_Sh, b.Vcmax25_C4Sh, b.fC4, b.Ps, b.alf, b.TgC)
 
@@ -337,10 +340,15 @@ def canopy_forward(
 
     T_phot_sun = b.Ta if use_ta_for_photosynthesis else Tf_Sun
     T_phot_sh  = b.Ta if use_ta_for_photosynthesis else Tf_Sh
-    An_Sun = photosynthesis(
+    # NET An (An_Sun/An_Sh) drives the leaf energy/CO2 flux + SIF; GROSS A
+    # (Agross_Sun/Agross_Sh) is the carbon-model GPP (uptake BEFORE dark
+    # respiration).  Both are returned so ``two_leaf_canopy`` can report GROSS
+    # GPP while the leaf coupling stays NET (avoids double-counting foliar
+    # respiration against the carbon model's r_maint_fol*C_fol).
+    An_Sun, Agross_Sun = photosynthesis(
         T_phot_sun, Ci_Sun, b.APAR_Sun,
         b.Vcmax25_Sun, b.Vcmax25_C4Sun, b.fC4, b.Ps, b.alf, b.TgC)
-    An_Sh = photosynthesis(
+    An_Sh, Agross_Sh = photosynthesis(
         T_phot_sh,  Ci_Sh,  b.APAR_Sh,
         b.Vcmax25_Sh, b.Vcmax25_C4Sh, b.fC4, b.Ps, b.alf, b.TgC)
 
@@ -389,6 +397,7 @@ def canopy_forward(
 
     return dict(
         An_Sun=An_Sun, An_Sh=An_Sh,
+        Agross_Sun=Agross_Sun, Agross_Sh=Agross_Sh,
         LE_Sun=LE_Sun, LE_Sh=LE_Sh, LE_Soil=LE_Soil,
         H_Sun=H_Sun,   H_Sh=H_Sh,   H_Soil=H_Soil,
         Rn_Sun=Rn_Sun, Rn_Sh=Rn_Sh, Rn_Soil=Rn_Soil,

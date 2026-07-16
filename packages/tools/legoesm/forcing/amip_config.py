@@ -77,6 +77,29 @@ class AMIPExperimentConfig(NamedTuple):
     sbm_tau_c: float = 7200.0
     sbm_RH_ref: float = 0.7
     sbm_cape_threshold: float = 70.0
+    # Bechtold convection knobs (to_amip_config round-trip; bechtold_cape_threshold
+    # predates this and was never mirrored here — #821 — so the round-trip
+    # crashed; add both).
+    bechtold_cape_threshold: float = 70.0
+    bechtold_conv_top_pa: float = 15000.0
+    # Bechtold convective-downdraft strength (marine humid-BL evaporation lever).
+    bechtold_downdraft_evap: float = 0.05
+    bechtold_downdraft_alpha: float = 0.3
+    bechtold_downdraft_rh_min: float = 0.2
+    # Full IFS deep CAPE closure (PR #1095; default ON 2026-07-16).  Present in
+    # the flat schema so the to_amip_config/from_amip_config round-trip cannot
+    # silently drop an explicit selection across a checkpoint/restart boundary.
+    bechtold_use_ifs_cape_closure: bool = True
+    # Convective in-updraft rain-split efficiency [0,1] (shared across the
+    # mass-flux schemes); 0 = disabled (legacy no split).
+    convective_precip_efficiency: float = 0.0
+    # Convective precip-split scheme (Bechtold / Tiedtke): "constant" uses the
+    # fixed convective_precip_efficiency above; "autoconversion" derives the
+    # precip fraction PHYSICALLY from the plume updraft cloud water via the
+    # Sundqvist-1978 split (autoconv_q_c_crit / autoconv_pe_max).
+    convective_precip_split: str = "constant"
+    autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
+    autoconv_pe_max: float = 0.9        # [1] ceiling on the emergent precip fraction
     C_H: float = 1.5e-3
     C_E: float = 1.5e-3
     k_free_per_day: float = 0.1

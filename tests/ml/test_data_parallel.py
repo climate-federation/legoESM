@@ -9,6 +9,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import optax
+import pytest
 
 from legoesm.training.data_parallel import (
     shard_samples,
@@ -16,7 +17,24 @@ from legoesm.training.data_parallel import (
     mpi_data_parallel_training_loop,
     data_parallel_value_and_grad,
     data_parallel_training_loop,
+    mpi_abort_on_uncaught,
+    _abort_multirank_job,
 )
+
+
+class _FakeComm:
+    """Stand-in MPI comm recording Abort() calls, so the fail-fast rank-gate is
+    testable without a real MPI runtime (#985)."""
+
+    def __init__(self, size):
+        self._size = size
+        self.aborts = []
+
+    def Get_size(self):
+        return self._size
+
+    def Abort(self, code):
+        self.aborts.append(code)
 
 
 def _quad_loss(w, x):
@@ -125,3 +143,52 @@ def test_data_parallel_loop_reduces_loss():
     assert len(history) == 5
     assert history[-1] < history[0]                       # loss decreased
     assert bool(jnp.all(jnp.isfinite(params)))
+
+
+# ---- fail-fast: MPI_Abort on a rank death (#985) ----
+
+def test_abort_multirank_job_single_rank_noop():
+    comm = _FakeComm(size=1)
+    _abort_multirank_job(comm)
+    assert comm.aborts == []          # single rank -> nothing to abort
+
+
+def test_abort_multirank_job_multirank_aborts():
+    comm = _FakeComm(size=4)
+    _abort_multirank_job(comm, code=7)
+    assert comm.aborts == [7]         # >1 rank -> abort the whole job
+
+
+def test_mpi_abort_on_uncaught_multirank_aborts_then_reraises():
+    comm = _FakeComm(size=4)
+
+    @mpi_abort_on_uncaught(comm=comm)
+    def boom():
+        raise ValueError("rank died")
+
+    with pytest.raises(ValueError, match="rank died"):
+        boom()
+    assert comm.aborts == [1]         # aborted BEFORE the exception propagated
+
+
+def test_mpi_abort_on_uncaught_single_rank_passthrough():
+    comm = _FakeComm(size=1)
+
+    @mpi_abort_on_uncaught(comm=comm)
+    def boom():
+        raise ValueError("rank died")
+
+    with pytest.raises(ValueError, match="rank died"):
+        boom()
+    assert comm.aborts == []          # single rank -> just propagate, no Abort
+
+
+def test_mpi_abort_on_uncaught_success_no_abort():
+    comm = _FakeComm(size=4)
+
+    @mpi_abort_on_uncaught(comm=comm)
+    def ok():
+        return 42
+
+    assert ok() == 42
+    assert comm.aborts == []          # clean return -> never aborts

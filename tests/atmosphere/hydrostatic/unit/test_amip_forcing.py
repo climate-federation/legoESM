@@ -527,29 +527,69 @@ class TestStartYearAnchoring:
         # Day 0 is the January record (tag 301), not a shifted month.
         assert abs(float(jnp.mean(get_forcing_at_time(f_79, 0.0)[0])) - 301.0) < 1.0
 
-    def test_icon_with_start_year_raises(self, grid, tmp_path):
-        # The ICON path has no calendar anchoring; passing start_year must fail
-        # loudly (wrong-era risk) rather than silently index relative.
+    @staticmethod
+    def _write_icon_multiyear(path, start=2000, nyears=3, midmonth=True):
+        """ICON-unstructured (cell/clon/clat) analogue of
+        ``_write_multiyear_forcing``: SST tags each record with
+        300 + (year-start)*10 + month [K] so the served era is identifiable."""
         import xarray as xr
-        n_cell, n_time = 12, 3
-        ds = xr.Dataset(
+        n_cell = 12
+        day = 16 if midmonth else 1
+        dates, tags = [], []
+        for y in range(start, start + nyears):
+            for m in range(1, 13):
+                dates.append(np.datetime64(f"{y:04d}-{m:02d}-{day:02d}"))
+                tags.append(300.0 + (y - start) * 10.0 + m)
+        n_time = len(dates)
+        sst = np.zeros((n_time, n_cell), np.float32)
+        for t, v in enumerate(tags):
+            sst[t] = v
+        xr.Dataset(
             {
-                "sst": (("time", "cell"), np.full((n_time, n_cell), 290.0, np.float32)),
+                "sst": (("time", "cell"), sst),
                 "sic": (("time", "cell"), np.full((n_time, n_cell), 0.2, np.float32)),
             },
             coords={
-                "time": np.array([np.datetime64("2001-01-16"),
-                                  np.datetime64("2001-02-16"),
-                                  np.datetime64("2001-03-16")]),
+                "time": np.array(dates),
                 "clon": ("cell", np.linspace(0.0, 6.0, n_cell)),
                 "clat": ("cell", np.linspace(-1.0, 1.0, n_cell)),
             },
-        )
-        p = tmp_path / "icon.nc"
-        ds.to_netcdf(str(p))
+        ).to_netcdf(str(path))
+
+    def test_icon_transient_anchors_to_run_year(self, grid, tmp_path):
+        # The ICON path anchors a multi-year file exactly like lat-lon
+        # (pre-fix it indexed relative to the first record — a 1979 run on
+        # the pool bc_sst_1979_2016.nc, which STARTS 1978, read 1978 ocean).
+        p = tmp_path / "icon_my.nc"
+        self._write_icon_multiyear(str(p), start=2000, nyears=3)
         cfg = AMIPForcingConfig(path=str(p), sst_var="sst", sic_var="sic")
-        with pytest.raises(NotImplementedError, match="ICON"):
-            load_amip_forcing(cfg, grid, start_year=2001)
+        f_anchored = load_amip_forcing(cfg, grid, start_year=2001)
+        f_legacy = load_amip_forcing(cfg, grid)   # relative (pre-fix) indexing
+        sst0_anchored = float(jnp.mean(get_forcing_at_time(f_anchored, 15.5)[0]))
+        sst0_legacy = float(jnp.mean(get_forcing_at_time(f_legacy, 0.0)[0]))
+        assert abs(sst0_anchored - 311.0) < 1.0   # 2001-Jan tag (300+10+1)
+        assert abs(sst0_legacy - 301.0) < 1.0     # 2000-Jan tag — documents old bug
+        assert float(f_anchored.times[0]) < 0.0   # 2000 precedes the 2001 epoch
+
+    def test_icon_coverage_guard_raises_when_year_outside_file(self, grid, tmp_path):
+        p = tmp_path / "icon_my.nc"
+        self._write_icon_multiyear(str(p), start=2000, nyears=3)
+        cfg = AMIPForcingConfig(path=str(p), sst_var="sst", sic_var="sic")
+        with pytest.raises(ValueError, match="does not cover start_year"):
+            load_amip_forcing(cfg, grid, start_year=1990)
+
+    def test_icon_climatology_phase_independent_of_start_year(self, grid, tmp_path):
+        # A 12-month ICON climatology stays first-record-relative (day-of-year
+        # phase), independent of start_year — same contract as lat-lon.
+        p = tmp_path / "icon_clim.nc"
+        self._write_icon_multiyear(str(p), start=2000, nyears=1)
+        cfg = AMIPForcingConfig(path=str(p), sst_var="sst", sic_var="sic")
+        f_79 = load_amip_forcing(cfg, grid, start_year=1979)
+        f_05 = load_amip_forcing(cfg, grid, start_year=2005)
+        for day in (0.0, 100.0, 300.0):
+            s79 = float(jnp.mean(get_forcing_at_time(f_79, day)[0]))
+            s05 = float(jnp.mean(get_forcing_at_time(f_05, day)[0]))
+            assert abs(s79 - s05) < 1e-6
 
 
 class TestBcsClipAfterInterp:

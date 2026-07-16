@@ -19,13 +19,103 @@ gradient must match a serial batch-mean gradient bit-closely.
 from __future__ import annotations
 
 __all__ = [
+    "mpi_rank_size",
     "shard_samples",
     "all_reduce_grad_mean",
     "mpi_data_parallel_train_step",
     "mpi_data_parallel_training_loop",
     "data_parallel_value_and_grad",
     "data_parallel_training_loop",
+    "mpi_abort_on_uncaught",
 ]
+
+
+def _abort_multirank_job(comm, *, code=1):
+    """``MPI_Abort`` the whole job iff ``comm`` has more than one rank.
+
+    ``comm=None`` resolves ``MPI.COMM_WORLD`` when ``mpi4py`` is importable, else
+    no-ops (single process / laptop). Any failure to abort is swallowed so the
+    caller's original exception is the one that propagates. Kept separate from the
+    decorator so a fake comm (``.Get_size()``/``.Abort()``) can unit-test the
+    rank-gate without a real MPI runtime.
+    """
+    if comm is None:
+        try:
+            from mpi4py import MPI
+
+            comm = MPI.COMM_WORLD
+        except Exception:
+            return
+    try:
+        if comm.Get_size() > 1:
+            import sys
+
+            sys.stderr.flush()  # don't lose the traceback when Abort SIGKILLs us
+            comm.Abort(code)
+    except Exception:
+        pass
+
+
+def mpi_abort_on_uncaught(fn=None, *, comm=None, code=1):
+    """Decorator: if the wrapped call raises under a MULTI-rank MPI job,
+    ``MPI_Abort`` the whole job BEFORE propagating.
+
+    Prevents a dead rank (OOM, NaN, a failed chunk load) from leaving its peers
+    hung forever in the next gradient allreduce — the failure mode reported on the
+    first 4xA100 T106 data-parallel run (#985), where an OOM on 3 of 4 ranks left
+    rank 0 blocked in the allreduce until walltime (~11 h). Aborting on any rank
+    converts that hang into an immediate, clean job death.
+
+    Single-rank / no ``mpi4py`` -> transparent passthrough (the exception just
+    propagates), so serial training and unit tests are unaffected. Usable bare
+    (``@mpi_abort_on_uncaught``) or parameterised (``@mpi_abort_on_uncaught(comm=c)``).
+    """
+    import functools
+
+    def _deco(f):
+        @functools.wraps(f)
+        def _wrapped(*args, **kwargs):
+            try:
+                return f(*args, **kwargs)
+            except BaseException:
+                _abort_multirank_job(comm, code=code)
+                raise
+
+        return _wrapped
+
+    return _deco if fn is None else _deco(fn)
+
+
+def mpi_rank_size():
+    """``(rank, num_processes)`` from MPI.
+
+    RAISES if a multi-rank launcher IS present (SLURM/PMI/OMPI/MPICH env) but
+    ``mpi4py`` init fails — otherwise every rank would silently train
+    independently with NO cross-rank gradient average (16 diverging replicas,
+    not one data-parallel model). Returns ``(0, 1)`` only when no multi-rank
+    launcher is detected (single process / laptop), so ``num_processes <= 1``
+    callers take their identity/serial path unchanged.
+    """
+    import os
+
+    launcher = 1
+    for v in ("SLURM_NTASKS", "PMI_SIZE", "OMPI_COMM_WORLD_SIZE", "MPI_LOCALNRANKS"):
+        val = os.environ.get(v, "")
+        if val.isdigit():
+            launcher = max(launcher, int(val))
+    try:
+        from mpi4py import MPI
+
+        comm = MPI.COMM_WORLD
+        return comm.Get_rank(), comm.Get_size()
+    except Exception as exc:
+        if launcher > 1:
+            raise RuntimeError(
+                f"multi-rank launcher detected (size={launcher}) but mpi4py init "
+                f"failed ({exc}); gradients would NOT be averaged across ranks -- "
+                f"aborting"
+            ) from exc
+        return 0, 1
 
 
 def shard_samples(items, process_id, num_processes, *, drop_remainder=True):
@@ -92,6 +182,7 @@ def mpi_data_parallel_train_step(loss_fn, params, opt_state, optimizer, sample,
     return params, opt_state, loss
 
 
+@mpi_abort_on_uncaught
 def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
                                     local_samples, n_epochs, num_processes, *,
                                     comm=None, on_epoch=None):

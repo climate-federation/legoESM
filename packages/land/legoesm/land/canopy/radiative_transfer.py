@@ -10,6 +10,49 @@ Longwave: Ryu et al. (2011) extinction-based scheme.
 SW decomposition: Liu-Jordan clearness-index direct/diffuse split.
 
 All functions are pure JAX, JIT-compatible, and differentiable.
+
+Faithfulness
+------------
+The shortwave path is pinned term-for-term by
+``tests/land/unit/test_canopy_rt_faithful.py`` against an independent scalar
+oracle (rel 1e-9) that reimplements the published closed forms:
+
+  * Direct/diffuse split (``split_sw_components``): the Erbs et al. (1982)
+    piecewise diffuse-fraction correlation f_d(k_t) — linear ``1 - 0.09 k_t``
+    for k_t <= 0.22, the quartic mid branch for 0.22 < k_t <= 0.80, constant
+    0.165 above — on the clearness index k_t = sw_down / (S_0 cos Z).  The
+    downstream PAR/NIR/UV = 0.48/0.50/0.02 spectral fractions are FIXED MODEL
+    assumptions (broadly after Weiss & Norman 1985 for the visible/NIR split;
+    the 2% UV band is a model choice, NOT a Weiss-Norman published form).
+  * Two-stream absorption (``canopy_shortwave_rt``, Ryu et al. 2011): the beam
+    kb = G / cos Z (spherical leaf-angle G = 0.5), the scattered-beam
+    kk_Pb = 0.46 / cos Z and diffuse kk_Pd = 0.72 PAR extinctions (Ryu 2011
+    Table A1, attributed there to de Pury & Farquhar 1997), the integrated-Beer
+    sunlit fraction fSun = (1 - e^{-kb L_CI}) / (kb LAI) with the foliar-clumping
+    L_CI = LAI CI, the beam+diffuse+scattered sunlit/shaded/soil partition with
+    the k/(k + kb) two-stream weights, and the exponential-nitrogen-profile
+    canopy Vcmax25 integral (sunlit = LAI Vc (1 - e^{-CI(kn + kb LAI)})/(kn +
+    kb LAI)) — all Ryu (2011) forms, with Sellers (1985) the two-stream lineage.
+    MODEL-SPECIFIC choices layered on top: the fixed 2% UV band, the
+    (1 - FNonVeg) soil-reflectance scaling, and the tanh dusk ramp.
+
+The Erbs / spectral-fraction / Sellers-Ryu scheme coefficients are transcribed
+as independent oracle literals and canaried against the module constants
+(module == literal == value), so no scheme coefficient is sourced from the SUT;
+S_0 is the shared ``legoesm.constants`` value.  DEPARTURES / numeric guards
+(documented, not the pure closed form; reproduced by the oracle so the pin
+stays exact): the cos Z > 0.01 and SZA > 89 deg night guards with the
+kb = kk_Pb = 50 night sentinel, the fSun clip to [0, 1] and LAI > 0 zeroing,
+the max(., 0) floors on the scattered-sunlit and shaded down-fluxes, the
+max(kn CI, 1e-6) / max(kn + kb LAI, 1e-6) profile-integral guards, and the
+tanh day-weight ramp (centre 30, half-width 20 W m-2 in beam SW) that fades
+fSun TOWARD zero at dusk (weight ~0.047 at zero beam SW — never exactly zero).
+The SZA > 89 deg sentinel only swaps in the sentinel extinction; it does NOT
+zero fSun (a nonzero-beam night still leaves fSun ~ 0.007).  fSun is exactly
+zero on the LAI <= 0 (bare-soil) where()-branch, or whenever L_CI = LAI CI = 0
+(e.g. CI = 0).  The longwave path
+is covered separately by test_canopy_rt.py (conservation, isothermal-zero,
+clumping, kb == kd smoothness / AD).
 """
 
 from __future__ import annotations

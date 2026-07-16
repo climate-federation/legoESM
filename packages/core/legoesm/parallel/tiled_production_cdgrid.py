@@ -2477,7 +2477,7 @@ def warmup_tiled_cube_comms(mesh, kt: int, *, force: bool = False) -> bool:
 
     from jax.sharding import NamedSharding
     from legoesm.parallel.cubesphere_exchange import (
-        _get_tiled_tables, _tiled_diag_perms, _tiled_guard_perms,
+        get_tiled_tables, tiled_diag_perms, tiled_guard_perms,
     )
 
     AXES = ("face", "tile_i", "tile_j")
@@ -2494,10 +2494,10 @@ def warmup_tiled_cube_comms(mesh, kt: int, *, force: bool = False) -> bool:
     # — the cubesphere_exchange table builders): the edge-strip rounds, the
     # guard-sliver rounds, and the diagonal-corner rounds.  Same perms + same
     # AXES ⇒ the SAME NCCL cliques the step will reuse.
-    tables = _get_tiled_tables(kt)
+    tables = get_tiled_tables(kt)
     perms = list(tables.perms)
-    perms += list(_tiled_guard_perms(kt))
-    perms += list(_tiled_diag_perms(kt))
+    perms += list(tiled_guard_perms(kt))
+    perms += list(tiled_diag_perms(kt))
 
     sh = NamedSharding(mesh, P(*AXES))
     dummy = jax.device_put(jnp.zeros((6, kt, kt), dtype=jnp.float32), sh)

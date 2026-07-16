@@ -1,8 +1,9 @@
 """ML gravity wave drag emulator using Equinox MLP.
 
-Provides a neural network surrogate for GWD that is fully
-differentiable with jax.grad. The MLP maps per-level inputs
-(u, v, T, p, z, lat) to per-level GWD tendencies.
+Provides a neural network surrogate for GWD that is AD-safe
+(differentiable with jax.grad; the only kinks are the input
+clip/abs). The MLP maps per-level inputs (u, v, T, p, z, lat)
+to per-level GWD tendencies.
 
 Same architecture pattern as microphysics/ml_emulator.py.
 """
@@ -34,14 +35,15 @@ __physics_contract__ = {
     },
     "sign_convention": (
         "Signs are LEARNED, not enforced: du_dt/dv_dt/dT_dt are direct network "
-        "outputs (residual-scaled by _GWD_OUTPUT_SCALE when use_residual). "
-        "eps_gwd = -sum(rho*(u*du_dt+v*dv_dt)*dz) is a diagnostic of the mean-"
-        "flow KE change and is NOT constrained to match dT_dt, so an untrained "
-        "or mis-trained model can add momentum/energy (eps_gwd<0)."
+        "output channels (residual-scaled by _GWD_OUTPUT_SCALE when "
+        "use_residual). eps_gwd = -sum(rho*(u*du_dt+v*dv_dt)*dz) is a diagnostic "
+        "of the mean-flow KE removal and is NOT constrained to match dT_dt, so "
+        "an untrained or mis-trained model can ADD mean-flow KE (eps_gwd<0)."
     ),
-    # Learned emulator: no hard conservation guarantee. dT_dt is an independent
-    # network output (not the KE->heat tie-back), so energy is not conserved by
-    # construction; over-claiming any conserved quantity would be wrong.
+    # Learned emulator: no hard conservation guarantee. dT_dt is a SEPARATE
+    # unconstrained network output channel (not the KE->heat tie-back), so
+    # energy is not conserved by construction; over-claiming any conserved
+    # quantity would be wrong.
     "conserves": ["none"],
     "differentiable": True,
     "reference": (
@@ -50,8 +52,8 @@ __physics_contract__ = {
     ),
     "idealized_test": (
         "tests/atmosphere/hydrostatic/unit/test_gravity_wave_drag.py: untrained "
-        "residual-scaled model -> O(1e-2) tendencies with correct shapes; "
-        "fully differentiable (jax.grad through the eqx MLP)"
+        "residual-scaled model -> bounded tendencies (|du_dt|, |dv_dt| < 1) with "
+        "correct shapes; AD-safe (finite jax.grad through the eqx MLP)"
     ),
 }
 # Raw-NN-output scaling to physical tendency magnitude (emulator default).
@@ -132,13 +134,16 @@ def ml_gwd(
         dv_dt = dv_dt * _GWD_OUTPUT_SCALE
         dT_dt = dT_dt * _GWD_OUTPUT_SCALE
 
-    # Column dissipation: KE → heat conversion rate.  Use the same
-    # ``-(u·du + v·dv)`` form as Lindzen / McFarlane / Hines so the
-    # conservation tie-back ``c_pd · ∫ρ·dT_dt·dz = eps_gwd`` holds.
-    # The earlier ``jnp.abs(u·du + v·dv)`` lost the sign of the
-    # untrained tendency: a model that accidentally adds energy
-    # would still report eps_gwd as positive, hiding the violation.
-    # Audit cycle iter-26 finding P1.
+    # Column mean-flow KE removal rate = -sum(rho*(u·du + v·dv)*dz).  This is a
+    # DIAGNOSTIC of the KE the (learned) wind tendency removes from the mean
+    # flow -- it is NOT tied to dT_dt, which is a SEPARATE unconstrained network
+    # output channel (sharing the MLP hidden representation, not statistically
+    # independent).  So the physical KE->heat tie-back ``c_pd·∫ρ·dT_dt·dz =
+    # eps_gwd`` is NOT ENFORCED by this implementation (a training loss could
+    # impose it; the architecture does not) -- consistent with the contract
+    # sign_convention.  The SIGNED form (not ``jnp.abs``) is deliberate: a model
+    # that ADDS mean-flow KE reports eps_gwd < 0, exposing the violation instead
+    # of hiding it behind an absolute value (iter-26 P1).
     dz = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
     eps_gwd = -jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
 

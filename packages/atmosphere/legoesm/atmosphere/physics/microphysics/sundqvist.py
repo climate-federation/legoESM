@@ -6,13 +6,53 @@ precipitation through autoconversion — enhanced per SBK89 by coalescence
 with precipitation falling from above (F1) and the Bergeron-Findeisen
 process in mixed phase (F2) — and sub-cloud evaporation.
 
-All operations use smooth (differentiable) approximations.
+All operations are AD-safe (differentiable ALMOST everywhere; the ``max``/``min``/
+``clip`` guards and the donor cap introduce measure-zero kinks, not smoothness).
+
+Faithfulness to Sundqvist (1978) / SBK89 (oracle = the published equations;
+pinned in ``tests/atmosphere/hydrostatic/unit/test_sundqvist_faithful.py``)
+--------------------------------------------------------------------------
+FAITHFUL (forms reproduce the published autoconversion algebra):
+  * The UNCAPPED, no-new-condensate release kernel
+    ``P_auto = c_0·q_c·(1 - exp(-(q_c/q_c,crit)²))`` has the Sundqvist (1978) /
+    SBK89 algebra (``c_0``=``auto_rate``, ``q_c,crit``=``qc_crit``). The
+    IMPLEMENTED rate additionally uses ``qc_avail = max(q_c + condensation·dt, 0)``
+    and a donor cap ``min(rate, qc_avail/dt)``, so the published algebra holds
+    only where no new condensate enters and the cap does not bind.
+  * The SBK89 (Sec. 5) enhancement STRUCTURE: the coalescence F1 and
+    Bergeron-Findeisen F2 factors BOTH multiply the rate (``c_0 → c_0·F1·F2``)
+    AND lower the onset threshold (``q_c,crit → q_c,crit/(F1·F2)``), i.e. the
+    ``enh`` factor appears in the numerator of ``(q_c·enh/q_c,crit)`` and as the
+    rate prefactor. F1 = ``1 + c1·√P_above`` is the SBK89 collection form.
+DEPARTURES / SURROGATES (documented; NOT the SBK89 closed forms):
+  * F2 uses a smooth GAUSSIAN-in-T window ``1 + c2·exp(-((T-T_peak)/T_width)²)``
+    peaking near -15 °C as a proxy for SBK89's Bergeron driver, which is tied to
+    the actual liquid-ice saturation difference ``e_sw - e_si`` (a ``1 + c2·√Δ``
+    form), NOT a Gaussian. Same qualitative mixed-phase peak, different algebra.
+  * Condensation is a SIMPLIFIED sigmoid-gated removal of SUPERSATURATION
+    (``sigmoid(k·(RH-RH_crit))·max(q_v-q_sat,0)/dt``), driving q_v toward q_sat
+    — not SBK89's full condensation-rate closure. The SBK89 partial cloud
+    fraction ``b`` is diagnosed SEPARATELY in
+    ``clouds.cloud_fraction.sundqvist_cloud_fraction`` and is not this
+    microphysics tendency's concern.
+  * Sub-cloud evaporation is a simplified ``evap_coeff·(RH<RH_crit gate)·P``
+    proxy, not SBK89's full evaporation-rate expression.
+  * F1's argument is the RAW precip flux ``√P_above`` (no SBK89 reference-flux
+    normalisation); ``c1``/``c2`` are re-tunable closure coefficients, not the
+    SBK89 paper values.
+  * Precipitation is treated as DIAGNOSTIC: the autoconversion source is
+    accumulated into a one-step downward flux (with the evaporation proxy and a
+    one-step ``q_r`` drain). This transport treatment is an IMPLEMENTATION choice,
+    not one of the supplied SBK89 forms — no paper faithfulness is claimed for it.
 
 References
 ----------
+- Sundqvist, H. (1978): A parameterization scheme for non-convective
+  condensation including prediction of cloud water content. Quart. J. Roy.
+  Meteor. Soc., 104, 677-690. (Base autoconversion release form.)
 - Sundqvist, Berge & Kristjansson (1989): Condensation and cloud
   parameterization studies with a mesoscale numerical weather prediction
-  model. Mon. Wea. Rev., 117, 1641-1657.
+  model. Mon. Wea. Rev., 117, 1641-1657. (F1/F2 enhancements, Sec. 5.)
 """
 
 from __future__ import annotations
@@ -176,11 +216,14 @@ def diagnose_sundqvist_process_rates(
 
 __physics_contract__ = {
     "summary": (
-        "Sundqvist, Berge & Kristjansson (1989) large-scale diagnostic "
-        "condensation: fractional-cloud RH-based condensation/evaporation of "
-        "cloud water and the SBK89 precipitation release — base autoconversion "
-        "enhanced by coalescence with precipitation falling from above (F1) "
-        "and the Bergeron-Findeisen process in mixed phase (F2)."
+        "Sundqvist (1978)/SBK89 large-scale diagnostic condensation: simplified "
+        "RH-gated vapor condensation and sub-cloud evaporation of diagnostic "
+        "precipitation, plus the Sundqvist (1978) "
+        "autoconversion release P_auto=c_0*q_c*(1-exp(-(q_c/q_c,crit)^2)), enhanced "
+        "per SBK89 by coalescence with precipitation from above (F1=1+c1*sqrt(P)) "
+        "and a Bergeron-Findeisen mixed-phase factor (F2, a smooth Gaussian-in-T "
+        "proxy for SBK89's e_sw-e_si driver). See the module docstring's "
+        "Faithfulness section for the faithful-form vs surrogate split."
     ),
     "inputs": {
         "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",

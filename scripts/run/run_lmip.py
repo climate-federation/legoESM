@@ -58,7 +58,7 @@ from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
 from legoesm.land.richards import RichardsConfig
-from legoesm.land.carbon.config import CarbonConfig
+from legoesm.land.carbon.config import CarbonConfig, som_total
 from legoesm.land.carbon.carbon_cycle import init_carbon_state
 from legoesm.land.lmip_forcing import make_synthetic_lmip_forcing
 from legoesm.land.multilayer_land import (
@@ -208,6 +208,12 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
             woody=args.carbon_woody,
             cwd_humification_eff=args.cwd_humification_eff,
             Q10_het_exp=args.carbon_q10_het,
+            nsc_gated_respiration=args.nsc_gated_respiration,
+            nsc_reserve_days=args.nsc_reserve_days,
+            r_maint_floor_frac=args.r_maint_floor_frac,
+            cold_deciduous_dormancy=args.cold_deciduous_dormancy,
+            cold_deciduous=args.cold_deciduous,
+            freeze_dormancy_threshold_K=args.freeze_dormancy_threshold_k,
         ),
     )
     # Sub-grid elevation-band snow (opt-in): for an offline column, the sub-grid
@@ -442,7 +448,8 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
     carbon_state = None
     if config.carbon.scheme == "differland":
         carbon_fields = [
-            "C_lab", "C_fol", "C_root", "C_wood", "C_lit", "C_som",
+            "C_lab", "C_fol", "C_root", "C_wood", "C_lit",
+            "C_som_active", "C_som_slow", "C_som_passive",
         ]
         if all(f"carbon_{field}" in data for field in carbon_fields):
             from legoesm.land.carbon.config import CarbonState
@@ -500,9 +507,13 @@ def semi_analytic_carbon_spinup(state, carbon_state, config, lat_rad, lon_rad,
             config.theta_fc, config.beta_min, lat_jnp, doy, dt, spatial=False)
         return new_state, carbon_new, diag
 
-    # Accumulate per-column (works for any ncol) annual fluxes [gC/m2/yr].
+    # Accumulate per-column (works for any ncol) annual fluxes [gC/m2/yr].  The
+    # three ``som_*_loss`` fields are each SOM pool's total decomposition D_X,
+    # the denominators of the forward-substitution cascade equilibrium.
     zeros = jnp.zeros_like(carbon_state.C_wood)
-    acc = {k: zeros for k in ("a_wood", "wood_litter", "lit_to_som", "r_het_som")}
+    acc = {k: zeros for k in ("a_wood", "wood_litter", "lit_to_som",
+                              "som_active_loss", "som_slow_loss",
+                              "som_passive_loss")}
     for s in range(steps_per_year):
         doy = jnp.asarray((start_doy + s * dt_days) % 365.0)
         hour = jnp.asarray((s * dt / 3600.0) % 24.0)
@@ -512,9 +523,12 @@ def semi_analytic_carbon_spinup(state, carbon_state, config, lat_rad, lon_rad,
 
     fluxes = SlowPoolFluxes(
         a_wood=acc["a_wood"], wood_litter=acc["wood_litter"],
-        lit_to_som=acc["lit_to_som"], r_het_som=acc["r_het_som"])
+        lit_to_som=acc["lit_to_som"], som_active_loss=acc["som_active_loss"],
+        som_slow_loss=acc["som_slow_loss"],
+        som_passive_loss=acc["som_passive_loss"])
     carbon_eq = analytic_slow_pool_equilibrium(
-        carbon_state, fluxes, config.carbon.cwd_humification_eff)
+        carbon_state, fluxes, config.carbon.cwd_humification_eff,
+        config.carbon.f_active_to_slow, config.carbon.f_slow_to_passive)
     return state, carbon_eq
 
 
@@ -618,6 +632,38 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Soil heterotrophic-decomposition temperature "
                         "sensitivity exp(Q10_het_exp*(T-T_ref)); higher = "
                         "faster warm-soil SOM turnover (Q10~2.5 at 0.09).")
+    # --- High-latitude productivity rescue (opt-in; carbon_cycle gates) ---
+    p.add_argument("--nsc-gated-respiration",
+                   action=argparse.BooleanOptionalAction,
+                   default=CarbonConfig().nsc_gated_respiration,
+                   help="Throttle maintenance respiration as the labile reserve "
+                        "depletes (Atkin & Tjoelker 2003), breaking the boreal/"
+                        "tundra death spiral. Default off (byte-identical).")
+    p.add_argument("--nsc-reserve-days", type=float,
+                   default=CarbonConfig().nsc_reserve_days,
+                   help="NSC gate: days of maintenance-respiration demand the "
+                        "labile reserve must cover before R_maint throttles "
+                        "(selective; a healthy tree's inert wood does not trigger it).")
+    p.add_argument("--r-maint-floor-frac", type=float,
+                   default=CarbonConfig().r_maint_floor_frac,
+                   help="Basal fraction of R_maint retained at full NSC "
+                        "depletion (the f_nsc floor).")
+    p.add_argument("--cold-deciduous-dormancy",
+                   action=argparse.BooleanOptionalAction,
+                   default=CarbonConfig().cold_deciduous_dormancy,
+                   help="Enable cold-deciduous freeze dormancy: zero foliar GPP "
+                        "and foliar R_maint below the freeze threshold for "
+                        "cold-deciduous PFTs (larch leaf-drop). Default off.")
+    p.add_argument("--cold-deciduous",
+                   action=argparse.BooleanOptionalAction,
+                   default=CarbonConfig().cold_deciduous,
+                   help="Mark this column's PFT as cold-deciduous (the per-PFT "
+                        "trait the dormancy gate scopes on; set automatically "
+                        "from is_cold_deciduous in the global-IC build).")
+    p.add_argument("--freeze-dormancy-threshold-k", type=float,
+                   default=CarbonConfig().freeze_dormancy_threshold_K,
+                   help="Air temperature [K] below which a cold-deciduous PFT "
+                        "enters winter dormancy (~0 degC).")
     p.add_argument("--carbon-spinup", default="none",
                    choices=("none", "semi_analytic"),
                    help="Soil-carbon spin-up mode after the transient run. "
@@ -907,7 +953,7 @@ def main() -> None:
     if (status == "PASS" and args.carbon_spinup == "semi_analytic"
             and config.carbon.scheme == "differland" and carbon_state is not None):
         c_wood0 = float(np.asarray(carbon_state.C_wood).reshape(-1)[0])
-        c_som0 = float(np.asarray(carbon_state.C_som).reshape(-1)[0])
+        c_som0 = float(np.asarray(som_total(carbon_state)).reshape(-1)[0])
         # Diagnostic year must be in seasonal phase with the state, i.e. start
         # on the day-of-year the transient ended (state advances through the
         # diagnostic year, so the returned state is saved with the reset carbon).
@@ -916,7 +962,7 @@ def main() -> None:
             state, carbon_state, config, lat_rad, lon_rad, lat_jnp, dt,
             _final_doy, args.precip_rate)
         c_wood1 = float(np.asarray(carbon_state.C_wood).reshape(-1)[0])
-        c_som1 = float(np.asarray(carbon_state.C_som).reshape(-1)[0])
+        c_som1 = float(np.asarray(som_total(carbon_state)).reshape(-1)[0])
         print(f"[semi-analytic spin-up] C_wood {c_wood0:.0f}->{c_wood1:.0f}, "
               f"C_som {c_som0:.0f}->{c_som1:.0f} gC/m2 (analytic slow-pool "
               f"equilibrium; Xia et al. 2012)", flush=True)

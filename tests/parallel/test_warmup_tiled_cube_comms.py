@@ -32,7 +32,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from legoesm.parallel.shard_map_compat import shard_map
 from legoesm.parallel.tiled_production_cdgrid import warmup_tiled_cube_comms
 from legoesm.parallel.cubesphere_exchange import (
-    _get_tiled_tables, _tiled_diag_perms, _tiled_guard_perms,
+    get_tiled_tables, tiled_diag_perms, tiled_guard_perms,
 )
 
 KT = 2
@@ -72,8 +72,8 @@ def test_warmup_executables_split_the_two_clique_kinds():
     isolation (the whole point) — replicated here with the SAME perms/axes the
     warmup uses."""
     mesh = _mesh()
-    perms = (list(_get_tiled_tables(KT).perms)
-             + list(_tiled_guard_perms(KT)) + list(_tiled_diag_perms(KT)))
+    perms = (list(get_tiled_tables(KT).perms)
+             + list(tiled_guard_perms(KT)) + list(tiled_diag_perms(KT)))
     dummy = jax.device_put(np.zeros((6, KT, KT), np.float32),
                            NamedSharding(mesh, P(*AXES)))
 

@@ -99,6 +99,7 @@ def compute_vertical_K_profiles(
     return_tke: bool = False,
     lat_deg=None,
     iwm_fields=None,
+    n2_tracers=None,
 ) -> (
     tuple[jnp.ndarray, jnp.ndarray]
     | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
@@ -178,6 +179,15 @@ def compute_vertical_K_profiles(
         _S_f = extrapolate_below_seafloor(state.S.data, z_coord)
         state = state._replace(T=state.T.replace(data=_T_f),
                                S=state.S.replace(data=_S_f))
+        # The before-advection N² tracers (TKEConfig.n2_before_advection)
+        # get the SAME sub-seafloor extrapolation so the deep interface sees
+        # a neutral fill, not the T=S=0 rock IC (partial cells). Python-static
+        # (n2_tracers is None ⇒ untouched ⇒ BIT-IDENTICAL flat-bottom no-op).
+        if n2_tracers is not None:
+            n2_tracers = (
+                extrapolate_below_seafloor(n2_tracers[0], z_coord),
+                extrapolate_below_seafloor(n2_tracers[1], z_coord),
+            )
         # u/v only when already cell-centred (the lat-lon model passes the
         # centred cc_state; staggered shapes have no cell is_active match).
         if state.u.data.shape[:-1] == state.T.data.shape[:-1]:
@@ -219,7 +229,7 @@ def compute_vertical_K_profiles(
             state, z_coord, surface_forcing, vmix, physics_config.constants,
             eos_fn=eos_fn,
             tke_old=tke_old, dt_tke=dt_tke, tke_source=tke_source,
-            lat_deg=lat_deg)
+            lat_deg=lat_deg, n2_tracers=n2_tracers)
         K_v_total = K_v_total + K_vmix
         A_v_total = A_v_total + A_vmix
 
@@ -351,7 +361,7 @@ def _surface_buoyancy_flux(surface_forcing, state, constants_config,
 def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                      constants_config=ConstantsConfig(), eos_fn=None,
                      *, tke_old=None, dt_tke=None, tke_source=None,
-                     lat_deg=None):
+                     lat_deg=None, n2_tracers=None):
     """Re-compute K_v, A_v at interfaces for the chosen vmix scheme.
 
     For ``constant`` / ``richardson`` this duplicates only the K
@@ -446,6 +456,10 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         if u_data.shape[1] != T_data.shape[1]:
             u_data = 0.5 * (u_data[:, :-1, :] + u_data[:, 1:, :])
             v_data = 0.5 * (v_data[:-1, :, :] + v_data[1:, :, :])
+        # Before-advection (Nnow) T/S for the diffusivity-stage N²
+        # (TKEConfig.n2_before_advection). None ⇒ the closure uses the
+        # post-advection T_data/S_data ⇒ BIT-IDENTICAL.
+        T_n2, S_n2 = (n2_tracers if n2_tracers is not None else (None, None))
         dz_half = jnp.broadcast_to(
             z_coord.dz_half_ref * J[..., jnp.newaxis],
             T_data.shape[:-1] + (z_coord.n_levels - 1,),
@@ -548,6 +562,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     p_cell=p_cell, dz_ref=z_coord.dz_ref, jacobian=J,
                     eos_fn=eos_fn, z_interface=z_coord.z_half_ref[1:-1],
                     dz_surface=dz_surface, boundary_cap=_mxl1_cap,
+                    T_n2=T_n2, S_n2=S_n2,
                 )
                 return K_H_old, K_M_old, _tke_ctx
             tke_out = tke_vertical_mixing(
@@ -563,6 +578,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 external_source=tke_source,
                 dz_surface=dz_surface, boundary_cap=_mxl1_cap,
                 lat_deg=lat_deg,
+                T_n2=T_n2, S_n2=S_n2,
             )
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at
@@ -585,6 +601,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             z_interface=z_coord.z_half_ref[1:-1],
             dz_surface=dz_surface, boundary_cap=_mxl1_cap,
             lat_deg=lat_deg,
+            T_n2=T_n2, S_n2=S_n2,
         )
         return tke_out.K_H, tke_out.K_M, None
 

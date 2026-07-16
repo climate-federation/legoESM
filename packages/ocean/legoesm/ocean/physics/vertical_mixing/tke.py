@@ -161,8 +161,30 @@ _NEMO_TKE_CDRAG = 1.5e-3       # zcdrag [-] surface drag coeff      (zdftke.F90:
 # ½·0.016² / (ρ_air·C_d): surface stress → ½W_lc² (Axell 2002 Eq. 44, via
 # |τ| = ρ_air·C_d·U₁₀² and the Stokes drift u_s = 0.016·U₁₀) (zdftke.F90:243)
 _NEMO_TKE_LC_CSD = 0.5 * 0.016 * 0.016 / (_NEMO_TKE_RHO_AIR * _NEMO_TKE_CDRAG)
+_NEMO_MXL0_VKARMN = 0.4        # vkarmn (phycst) — the ln_mxl0 anchor prefactor
 _NEMO_TKE_EBB = 67.83          # rn_ebb  namelist_ref default — surface TKE input coef
 _NEMO_TKE_EMIN0 = 1.0e-4       # rn_emin0 [m²/s²] surface TKE minimum
+
+
+def _surface_tke_dirichlet(cfg: "TKEConfig", taum, rho_0: float):
+    """NEMO nn_bc_surf=1 Dirichlet surface-TKE value, or None for the Veros
+    flux BC — the single owner of the ``TKEConfig.surface_bc`` dispatch shared
+    by BOTH TKE entry points (``tke_vertical_mixing`` and the post-mixing
+    ``tke_set_diffusivities`` path).  Raises on an unknown value.
+
+    NEMO zdftke.F90:264-269: ``en(1) = MAX(rn_emin0, rn_ebb*|tau|/rho0)`` held
+    as the top boundary value of the implicit solve.
+    """
+    _sbc = getattr(cfg, "surface_bc", "veros_flux")
+    if _sbc == "nemo_dirichlet":
+        return jnp.maximum(
+            jnp.asarray(_NEMO_TKE_EMIN0, dtype=taum.dtype),
+            _NEMO_TKE_EBB / rho_0 * taum)
+    if _sbc == "veros_flux":
+        return None
+    raise ValueError(
+        "Unknown surface-TKE boundary scheme TKEConfig.surface_bc: must be "
+        f'one of ("veros_flux", "nemo_dirichlet"), got {_sbc!r}')
 # nn_htau=1 latitude profile: h_tau = max(0.5, min(30, 45·|sin φ|)) m
 _NEMO_TKE_HTAU_CONST_M = 10.0  # nn_htau=0 constant penetration depth [m]
 _NEMO_TKE_HTAU_MIN_M = 0.5
@@ -217,6 +239,10 @@ class TKEPostMixingContext(NamedTuple):
     eos_fn: object            # EOS callable (T, S, p) -> rho (static)
     rho_0: float
     g: float
+    # NEMO nn_bc_surf=1 Dirichlet surface-TKE value (None => Veros flux BC).
+    surface_dirichlet: jnp.ndarray | None = None
+    # NEMO ln_lc Langmuir TKE source on the interior interfaces (None => off).
+    langmuir_source: jnp.ndarray | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -491,8 +517,15 @@ def compute_mixing_lengths(
     signed_n2: bool = False,
     dz_cell: jnp.ndarray | None = None,
     boundary_cap: jnp.ndarray | None = None,
+    l_surface_anchor: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute (l_k, l_eps) for the chosen ``tke_mxl_choice``.
+
+    ``tke_mxl_choice=3`` is NEMO ``nn_mxl=3`` (zdftke.F90:658-672): the
+    buoyancy length ``sqrt(2e)/N`` with the ``ln_mxl0`` wind-stress surface
+    anchor (``l_surface_anchor``, computed by the caller from taum/rho_0/g),
+    bounded by the lup/ldown |dl/dz|<=e3t sweeps;
+    ``l_k = min(lup, ldown)``, ``l_eps = sqrt(lup*ldown)``.
 
     When ``signed_n2`` is True (the ``n2_mode="adiabatic"`` convective
     path), ``N2`` may be negative and the **Veros buoyancy length**
@@ -524,6 +557,47 @@ def compute_mixing_lengths(
         )
         l_k = jnp.sqrt(jnp.maximum(l_up * l_dn, cfg.mxl_min ** 2))
         l_eps = jnp.maximum(l_up, l_dn)
+    elif cfg.tke_mxl_choice == 3:
+        # --- NEMO nn_mxl=3 + ln_mxl0 (zdftke.F90:575, 588-614, 658-672) ---
+        if dz_cell is None:
+            raise ValueError(
+                "tke_mxl_choice=3 (NEMO nn_mxl=3) requires dz_cell (the e3t "
+                "cell thicknesses) for the |dl/dz|<=e3t bounding sweeps.")
+        # buoyancy length sqrt(2e)/N at interior interfaces, AD-safe at the
+        # negative-TKE debt (same double-where idiom as choice 1/2).
+        sqrt2e = jnp.sqrt(2.0) * jnp.where(
+            e > 0.0, jnp.sqrt(jnp.where(e > 0.0, e, 1.0)), 0.0)
+        N_safe = jnp.sqrt(jnp.maximum(N2, 1.0e-12))
+        l_int = jnp.maximum(sqrt2e / N_safe, cfg.mxl_min)     # (..., nlev-1)
+        # ln_mxl0 surface anchor l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
+        # (zdftke:575+602), computed by the CALLER (which owns taum/rho_0/g)
+        # and passed via l_surface_anchor; None => the rn_mxl0 floor (windless).
+        if l_surface_anchor is not None:
+            l_sfc = jnp.asarray(l_surface_anchor, dtype=l_int.dtype)
+        else:
+            l_sfc = jnp.full(l_int.shape[:-1], cfg.mxl0_min_m,
+                             dtype=l_int.dtype)
+        # W-row stack: surface anchor + interior interfaces
+        l_w = jnp.concatenate([l_sfc[..., None], l_int], axis=-1)  # (..., nlev)
+        e3t = dz_cell                                              # (..., nlev)
+        # lup: downward scan  l(k) = min(l(k-1) + e3t(k-1), l(k))
+        def _down(carry, xs):
+            l_km1 = carry
+            l_k_, e3_km1 = xs
+            out = jnp.minimum(l_km1 + e3_km1, l_k_)
+            return out, out
+        lT = jnp.moveaxis(l_w, -1, 0)                              # (nlev, ...)
+        e3T = jnp.moveaxis(e3t, -1, 0)
+        _, lup_rest = jax.lax.scan(_down, lT[0], (lT[1:], e3T[:-1]))
+        lup = jnp.concatenate([lT[:1], lup_rest], axis=0)
+        # ldown: upward scan  l(k) = min(l(k+1) + e3t(k+1), l(k))
+        _, ldn_rest = jax.lax.scan(
+            _down, lT[-1], (lT[:-1][::-1], e3T[1:][::-1]))
+        ldn = jnp.concatenate([lT[-1:], ldn_rest], axis=0)[::-1]
+        lup = jnp.moveaxis(lup, 0, -1)[..., 1:]                    # interior
+        ldn = jnp.moveaxis(ldn, 0, -1)[..., 1:]
+        l_k = jnp.maximum(jnp.minimum(lup, ldn), cfg.mxl_min)
+        l_eps = jnp.maximum(jnp.sqrt(lup * ldn), cfg.mxl_min)
     elif cfg.tke_mxl_choice == 1:
         # Veros buoyancy length, ``tke_mxl_choice=1`` (veros/core/tke.py:30-47):
         #   sqrttke = sqrt(max(0, e));  mxl = sqrt(2)·sqrttke / sqrt(max(1e-12, N²))
@@ -597,6 +671,7 @@ def _solve_tke_backward_euler(
     external_source: jnp.ndarray | None = None,
     dz_cell: jnp.ndarray | None = None,
     dz_surface: jnp.ndarray | None = None,
+    surface_dirichlet: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Backward-Euler tridiagonal solve for one TKE time step.
 
@@ -802,7 +877,18 @@ def _solve_tke_backward_euler(
         inj_vol = jnp.maximum(jnp.asarray(dz_surface, dtype=e_old.dtype), _EPS)
     else:
         inj_vol = jnp.maximum(dz_half[..., 0], _EPS)
-    rhs = rhs.at[..., 0].add(dt * surface_flux / inj_vol)
+    if surface_dirichlet is not None:
+        # NEMO nn_bc_surf=1 Dirichlet surface TKE (zdftke.F90:264-269): hold
+        # e_new[...,0] = e_sfc exactly by making row 0 an identity row (the
+        # k=1 row's sub-diagonal still couples to the held value — the
+        # standard Dirichlet-boundary tridiagonal). NO Neumann flux injection
+        # in this mode (it would double-count the surface input).
+        diag = diag.at[..., 0].set(1.0)
+        c_diff = c_diff.at[..., 0].set(0.0)
+        rhs = rhs.at[..., 0].set(
+            jnp.asarray(surface_dirichlet, dtype=e_old.dtype))
+    else:
+        rhs = rhs.at[..., 0].add(dt * surface_flux / inj_vol)
 
     # Solve tridiagonal system.
     e_new = _tridiag_thomas(a_diff, diag, c_diff, rhs)
@@ -920,8 +1006,11 @@ def compute_K_from_tke(
       ``K_H = max(K_M, kappaH_min)`` — the MOMENTUM floor ``kappaM_min``
       leaks into the tracer floor.
     - ``prandtl_mode in {"constant", "richardson"}``: Veros's
-      ``K_H = max(kappaH_min, K_M / Pr)`` (see :func:`_prandtl_number`);
-      requires ``N2`` and ``shear_sq`` for the ``"richardson"`` Pr.
+      ``K_H = max(kappaH_min, K_M / Pr)`` where ``K_M`` here is the
+      ceilinged-but-UN-``kappaM_min``-floored viscosity, so the momentum floor
+      does NOT leak into the tracer floor (NEMO floors ``avt`` at ``avtb``
+      INDEPENDENTLY of ``avm`` at ``avmb``); requires ``N2`` and ``shear_sq``
+      for the ``"richardson"`` Pr.
 
     Amplitude convention (``cfg.kappa_convention``):
 
@@ -963,13 +1052,23 @@ def compute_K_from_tke(
         # c_k*mxl*sqrttke) then max(kappaM_min, kappaM)). Only on the
         # opt-in Prandtl path so the default stays bit-identical.
         K_M = jnp.minimum(cfg.kappaM_max, K_M)
-        K_M = jnp.maximum(K_M, cfg.kappaM_min)
         if N2 is None or shear_sq is None:
             raise ValueError(
                 f"prandtl_mode={cfg.prandtl_mode!r} requires N2 and "
                 f"shear_sq for the Prandtl-number computation."
             )
         Pr = _prandtl_number(N2, shear_sq, K_M, cfg)
+        # Tracer floor is INDEPENDENT of the momentum floor (NEMO zdftke:
+        # avt = max(avtb, pdlr*zav), avm = max(avmb, zav), both from the raw K).
+        # Divide the ceilinged-but-UN-kappaM_min-floored K_M by Pr, then floor at
+        # kappaH_min — else the momentum floor kappaM_min leaks into the tracer
+        # floor (K_H -> kappaM_min/Pr > kappaH_min) in quiescent cells where the
+        # raw K < kappaM_min (the abyss). Only those cells change; active/interior
+        # cells (raw K >= kappaM_min) are unaffected, so the verified avt match
+        # (corr 0.9998) holds. NB: the quiescent deep K_H settles to kappaH_min
+        # ONLY when the Bryan-Lewis profile below is off (enable_kappaH_profile=
+        # False, as the NEMO recipe sets for NEMO's constant avtb); with BL on the
+        # BL depth floor becomes the binding deep floor instead.
         K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr)
         # Bryan-Lewis (1979) arctan depth floor on K_H (Veros
         # enable_kappaH_profile). Previously recorded-but-ignored; now wired
@@ -978,6 +1077,9 @@ def compute_K_from_tke(
         # depths.
         if cfg.enable_kappaH_profile and z_interface is not None:
             K_H = jnp.maximum(K_H, _bryan_lewis_kappaH_floor(z_interface, cfg))
+        # Momentum floor, applied AFTER K_H so kappaM_min stays out of the tracer
+        # floor (NEMO avm = max(avmb, zav)).
+        K_M = jnp.maximum(K_M, cfg.kappaM_min)
     return K_M, K_H
 
 
@@ -1137,6 +1239,8 @@ def tke_vertical_mixing(
     dz_surface: jnp.ndarray | None = None,
     boundary_cap: jnp.ndarray | None = None,
     lat_deg: jnp.ndarray | None = None,
+    T_n2: jnp.ndarray | None = None,
+    S_n2: jnp.ndarray | None = None,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
 
@@ -1267,9 +1371,14 @@ def tke_vertical_mixing(
     # form (BIT-IDENTICAL); ``"adiabatic"`` is the SIGNED Veros parcel-
     # displacement form that lets the TKE convect (N^2 < 0).
     signed_n2 = cfg.n2_mode == "adiabatic"
+    # Diffusivity-stage N² time level (TKEConfig.n2_before_advection): the
+    # before-advection (Nnow) T/S override, when supplied by the caller (see
+    # tke_set_diffusivities). Python-static; None ⇒ BIT-IDENTICAL.
+    _Tn2 = T_cell if T_n2 is None else T_n2
+    _Sn2 = S_cell if S_n2 is None else S_n2
     N2 = _compute_N2(
         rho_cell, dz_half, rho_0, g,
-        T_cell=T_cell, S_cell=S_cell, p_cell=p_cell,
+        T_cell=_Tn2, S_cell=_Sn2, p_cell=p_cell,
         dz_ref=dz_ref, jacobian=jacobian, eos_fn=eos_fn,
         n2_mode=cfg.n2_mode,
         adiabatic_over_dz_half=veros_slots,
@@ -1289,6 +1398,9 @@ def tke_vertical_mixing(
         ty = tau_y_surface if tau_y_surface is not None else jnp.zeros_like(rho_cell[..., 0])
         taum = _safe_stress_modulus(tx, ty)
         surface_flux = (taum / rho_0) ** 1.5
+
+    # Surface TKE BC dispatch (single owner; raises on unknown).
+    surface_dirichlet = _surface_tke_dirichlet(cfg, taum, rho_0)
 
     # --- NEMO zdftke surface terms (static feature gates; see TKEConfig) ---
     _lc_on = bool(getattr(cfg, "lc", False))
@@ -1312,10 +1424,16 @@ def tke_vertical_mixing(
 
     # Sub-iteration loop (Mode B convergence; Mode A uses n_iterations=1).
     tke_curr = tke_old
+    # NEMO ln_mxl0 anchor for nn_mxl=3: l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
+    _l_anchor = (jnp.maximum(
+        jnp.asarray(cfg.mxl0_min_m), _NEMO_MXL0_VKARMN * 2.0e5
+        / (rho_0 * g) * jnp.maximum(taum, 0.0))
+        if cfg.tke_mxl_choice == 3 else None)
     for _ in range(max(1, int(n_iterations))):
         l_k, l_eps = compute_mixing_lengths(
             tke_curr, N2, dz_half, cfg, signed_n2=signed_n2,
-            dz_cell=dz_cell, boundary_cap=boundary_cap)
+            dz_cell=dz_cell, boundary_cap=boundary_cap,
+            l_surface_anchor=_l_anchor)
         K_M_curr, K_H_curr = compute_K_from_tke(
             tke_curr, l_k, cfg, N2=N2, shear_sq=shear_sq,
             z_interface=z_interface)
@@ -1330,6 +1448,7 @@ def tke_vertical_mixing(
             external_source=external_source,
             dz_cell=dz_cell,
             dz_surface=dz_surface if veros_slots else None,
+            surface_dirichlet=surface_dirichlet,
         )
 
     if _etau_on:
@@ -1345,7 +1464,8 @@ def tke_vertical_mixing(
     # Final K from converged TKE.
     l_k_final, l_eps_final = compute_mixing_lengths(
         tke_curr, N2, dz_half, cfg, signed_n2=signed_n2,
-        dz_cell=dz_cell, boundary_cap=boundary_cap)
+        dz_cell=dz_cell, boundary_cap=boundary_cap,
+        l_surface_anchor=_l_anchor)
     K_M, K_H = compute_K_from_tke(
         tke_curr, l_k_final, cfg, N2=N2, shear_sq=shear_sq,
         z_interface=z_interface)
@@ -1395,14 +1515,17 @@ def _validate_post_mixing_cfg(cfg: TKEConfig) -> None:
         # the orchestrator). Both match Veros (only global_1deg selects
         # choice=1). compute_mixing_lengths raises on any other value.
         #
-        # Mixed-oracle guard: the NEMO zdftke surface terms (lc / etau) are
+        # Mixed-oracle guard (RELAXED for lc 2026-07-16: the Langmuir source is
+        # now computed in tke_set_diffusivities and applied pre-solve inside
+        # tke_integrate_post_mixing — NEMO zdftke:367 en += rDt*source — so it
+        # no longer silently no-ops). etau stays blocked: the NEMO zdftke etau term is
         # implemented on the standard orchestrator path only — the Veros
         # post-mixing step order has no such terms (Veros has no ln_lc /
         # nn_etau). Combining them would silently no-op (this path never
         # calls the injections) or mix oracle semantics — raise instead.
-        if getattr(cfg, "lc", False) or getattr(cfg, "etau_mode", "none") != "none":
+        if getattr(cfg, "etau_mode", "none") != "none":
             raise ValueError(
-                "TKEConfig.lc / etau_mode (NEMO zdftke surface terms) are "
+                "TKEConfig.etau_mode (the NEMO zdftke sub-ML TKE penetration) is "
                 "not supported with buoyancy_timing='post_mixing_veros' "
                 "(the Veros-faithful step order has no Langmuir/etau terms; "
                 "they would silently not be applied). Disable lc/etau or "
@@ -1438,6 +1561,8 @@ def tke_set_diffusivities(
     z_interface: jnp.ndarray,
     dz_surface: jnp.ndarray,
     boundary_cap: jnp.ndarray | None = None,
+    T_n2: jnp.ndarray | None = None,
+    S_n2: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, TKEPostMixingContext]:
     """Veros ``set_tke_diffusivities`` (tke.py:20-113) from the CARRIED TKE.
 
@@ -1461,28 +1586,55 @@ def tke_set_diffusivities(
         )
     dz_cell = dz_ref * jacobian[..., jnp.newaxis]
     shear_sq = _vertical_shear_squared(u_cell, v_cell, dz_half)
+    # Diffusivity-stage N² time level (TKEConfig.n2_before_advection, NEMO
+    # eosbn2 Nnow sequencing): when the caller supplies the BEFORE-advection
+    # T/S (``T_n2``/``S_n2``), the static-stability contrast is evaluated on
+    # them instead of the post-advection ``T_cell``/``S_cell``. Only the T/S
+    # parcel pair changes; ``p_cell`` (the reference pressure) stays as-is —
+    # sign-neutral by construction (BOTTOM_N2_DIAGNOSIS_FINDINGS.md: the deep
+    # marginal interface flips on the T/S contrast, not the reference
+    # pressure). Python-static (None ⇒ BIT-IDENTICAL), not a traced branch.
+    _Tn2 = T_cell if T_n2 is None else T_n2
+    _Sn2 = S_cell if S_n2 is None else S_n2
     N2 = _compute_N2(
         rho_cell, dz_half, rho_0, g,
-        T_cell=T_cell, S_cell=S_cell, p_cell=p_cell,
+        T_cell=_Tn2, S_cell=_Sn2, p_cell=p_cell,
         dz_ref=dz_ref, jacobian=jacobian, eos_fn=eos_fn,
         n2_mode=cfg.n2_mode, adiabatic_over_dz_half=True,
     )
     if taum_surface is not None:
         # NEMO taum channel (see tke_vertical_mixing).
-        surface_flux = (jnp.maximum(jnp.asarray(taum_surface), 0.0)
-                        / rho_0) ** 1.5
+        taum = jnp.maximum(jnp.asarray(taum_surface), 0.0)
     elif tau_x_surface is None and tau_y_surface is None:
-        surface_flux = jnp.zeros(rho_cell.shape[:-1], dtype=rho_cell.dtype)
+        taum = jnp.zeros(rho_cell.shape[:-1], dtype=rho_cell.dtype)
     else:
         tx = (tau_x_surface if tau_x_surface is not None
               else jnp.zeros_like(rho_cell[..., 0]))
         ty = (tau_y_surface if tau_y_surface is not None
               else jnp.zeros_like(rho_cell[..., 0]))
-        surface_flux = (_safe_stress_modulus(tx, ty) / rho_0) ** 1.5
+        taum = _safe_stress_modulus(tx, ty)
+    surface_flux = (taum / rho_0) ** 1.5
+    # NEMO nn_bc_surf=1 option (TKEConfig.surface_bc; single-owner dispatch).
+    surface_dirichlet = _surface_tke_dirichlet(cfg, taum, rho_0)
+    # NEMO ln_lc Langmuir source (zdftke:332-370), applied pre-solve in
+    # tke_integrate_post_mixing (en += rDt*source).
+    if getattr(cfg, "lc", False):
+        if z_interface is None:
+            raise ValueError(
+                "TKEConfig.lc requires z_interface (interface reference "
+                "heights) so the Langmuir source knows the depths.")
+        langmuir_source = nemo_langmuir_tke_source(
+            taum, N2, -z_interface, dz_half, cfg)
+    else:
+        langmuir_source = None
 
+    _l_anchor = (jnp.maximum(
+        jnp.asarray(cfg.mxl0_min_m), _NEMO_MXL0_VKARMN * 2.0e5
+        / (rho_0 * g) * jnp.maximum(taum, 0.0))
+        if cfg.tke_mxl_choice == 3 else None)
     l_k, _l_eps = compute_mixing_lengths(
         tke_old, N2, dz_half, cfg, signed_n2=True, dz_cell=dz_cell,
-        boundary_cap=boundary_cap)
+        boundary_cap=boundary_cap, l_surface_anchor=_l_anchor)
     K_M, K_H = compute_K_from_tke(
         tke_old, l_k, cfg, N2=N2, shear_sq=shear_sq, z_interface=z_interface)
     ctx = TKEPostMixingContext(
@@ -1498,6 +1650,8 @@ def tke_set_diffusivities(
         dz_half=dz_half, dz_cell=dz_cell,
         dz_surface=jnp.asarray(dz_surface, dtype=rho_cell.dtype),
         p_cell=p_cell, eos_fn=eos_fn, rho_0=rho_0, g=g,
+        surface_dirichlet=surface_dirichlet,
+        langmuir_source=langmuir_source,
     )
     return K_M, K_H, ctx
 
@@ -1694,9 +1848,26 @@ def tke_integrate_post_mixing(
     b = 1.0 - (a + c) + dt * cfg.c_eps * sqrttke_w / jnp.maximum(
         mxl_w, cfg.mxl_min)
 
+    if getattr(ctx, "langmuir_source", None) is not None:
+        # NEMO ln_lc: en += rDt * source BEFORE the implicit solve
+        # (zdftke.F90:367). The source lives on the interior interfaces;
+        # pad the (discarded) surface W row with zero.
+        _lc_w = jnp.concatenate(
+            [jnp.zeros_like(ctx.langmuir_source[..., :1]),
+             ctx.langmuir_source], axis=-1).astype(dtype)
+        forc_w = forc_w + _lc_w
     d = e_w + dt * forc_w
-    # Wind-work surface injection over the surface half-volume (tke.py:225).
-    d = d.at[..., 0].add(dt * ctx.surface_flux.astype(dtype) / vol[..., 0])
+    if getattr(ctx, "surface_dirichlet", None) is not None:
+        # NEMO nn_bc_surf=1: hold the surface W row at
+        # en(1)=max(rn_emin0, rn_ebb*|tau|/rho0) (identity row; the interior
+        # row 1 couples to the held value through a[...,1] — the standard
+        # Dirichlet tridiagonal). No wind-work flux injection in this mode.
+        b = b.at[..., 0].set(1.0)
+        c = c.at[..., 0].set(0.0)
+        d = d.at[..., 0].set(ctx.surface_dirichlet.astype(dtype))
+    else:
+        # Wind-work surface injection over the surface half-volume (tke.py:225).
+        d = d.at[..., 0].add(dt * ctx.surface_flux.astype(dtype) / vol[..., 0])
 
     e_new_w = _tridiag_thomas(a, b, c, d)
     # Veros surface clamp (tke.py:238-244) acts on the (discarded) surface

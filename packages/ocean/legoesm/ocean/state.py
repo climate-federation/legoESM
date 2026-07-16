@@ -1250,6 +1250,21 @@ class LatLonCGridOceanConfig(NamedTuple):
     # cases): the q-form is retained by default because it conserves potential enstrophy
     # on partial-cell topography (AL81 triad; real ETOPO). False (default) = q-form.
     vortcor_reconstruct_zeta: bool = False
+    # Vector-invariant vorticity flux scheme (relative + optionally planetary).
+    #   "al81" (default) — Arakawa-Lamb 1981 / EEN 12-point triad
+    #     (``pv_flux_al81_partial_cell``): energy + potential-enstrophy
+    #     conserving, robust on partial-cell ETOPO.  Planetary Coriolis handled
+    #     separately (matsuno_split / explicit_ab2).
+    #   "ene" — NEMO ``vor_ene`` Sadourny-1975 2-point ENERGY-conserving form
+    #     (``pv_flux_ene``, NEMO ``ln_dynvor_ene``, the GYRE default). Selects
+    #     ENE for the RELATIVE-vorticity flux stencil ONLY (wired with
+    #     ``f_vtx=None``); the planetary Coriolis is NOT routed here — it stays in
+    #     the separate path (``coriolis_cgrid`` / matsuno_split / explicit_ab2),
+    #     which is byte-identical to ENE-planetary on a uniform-metric grid.
+    #     ``pv_flux_ene`` CAN fold planetary f into the same ``q=(f+ζ)/h`` operator
+    #     (pass ``f_vtx``), but that is not the wired default. NEMO oracle fidelity.
+    #     Dispatched in ``_bc_pv_flux``; an unknown value raises ValueError there.
+    vorticity_scheme: str = "al81"
     # WENO vertical momentum advection of the FULL velocity (matches Oceananigans, which
     # advects the full horizontal momentum vertically) instead of legoESM's default
     # baroclinic PERTURBATION u'=u−U_bar. The two differ by the flux-form redistribution
@@ -1295,6 +1310,14 @@ class LatLonCGridOceanConfig(NamedTuple):
     # (DINO L1 exactness; the two agree on uniform grids and differ by
     # (g/4)·Δdz·Δρ' per interface on stretched levels).
     pgf_quadrature: str = "cell_integral"
+    # Depth the EOS pressure term sees.  "insitu" (default, bit-identical):
+    # the in-situ hydrostatic pressure integral p=g·Σρ·dz — recovers depth
+    # ~(ρ̄/ρ0)·gdept (a ~0.5% stretch).  "geometric": feed p=ρ0·g·gdept from
+    # the coordinate's geometric T-depth ladder (z_coord.t_depth_ref, NEMO
+    # gdept_1d) so the EOS reconstructs gdept exactly — matches NEMO
+    # eos_insitu.  Only the NEMO-fidelity path selects "geometric"; requires
+    # z_coord to carry t_depth_ref and eos rho0 == config.rho_0 (auto-wired).
+    eos_depth: str = "insitu"
     # Tracer time integration for the flux-form advection step.
     # "euler" (default): forward Euler (1st-order).
     # "ab2": Adams-Bashforth 2 with stabilization (MITgcm convention).
@@ -1576,6 +1599,27 @@ class LatLonCGridOceanConfig(NamedTuple):
     # docs/ocean/fidelity/mitgcm_gyre_energy_conservation.md).  On an f-plane the
     # two forms agree.  Applies to matsuno_split + implicit_cn/rigid_lid.
     coriolis_energy_conserving: bool = False
+    # Barotropic-mode Coriolis treatment under coriolis_scheme="explicit_ab2"
+    # with the explicit_substep solver:
+    #   "frozen" (default) — f×U_bar enters the subcycle only through the
+    #       frozen F_slow depth-mean (pre-step value, lagged by dt). No
+    #       in-substep f×U (avoids the C-grid 4-pt rotational null mode).
+    #   "live" — NEMO dynspg_ts structure (:296-300 + :689): the PRE-step 2D
+    #       barotropic Coriolis is SUBTRACTED from F_slow (leaving the
+    #       baroclinic-only forcing) and a LIVE f×U is integrated every
+    #       substep, so the barotropic mode holds geostrophic balance with
+    #       the evolving eta INSIDE the window. Same face stencils on both
+    #       sides => the cancellation is EXACT on a BETA-PLANE (linear f)
+    #       with FLAT full-cell bathymetry (the lateral 4-pt average and the
+    #       depth-mean commute only then); spherical f or partial cells leave
+    #       an O(dx^2)/topographic residual. CAUTION: re-enables the
+    #       in-substep C-grid 4-pt Coriolis rotational null mode — validated
+    #       only for the laminar beta-plane gyre, NOT for eddying/turbulent
+    #       regimes. Requires coriolis_scheme="explicit_ab2" +
+    #       explicit_substep, and is incompatible with
+    #       barotropic_slow_forcing_ab2 (the AB2-blended F_slow Coriolis
+    #       would leave a transient residual).
+    barotropic_coriolis_split: str = "frozen"
 
     # --- AB2 extrapolation scope (Veros-faithful dissipative placement) ---
     # Selects WHICH explicit tendencies the AB2 outer integrator extrapolates:

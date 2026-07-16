@@ -9,19 +9,24 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import jax.numpy as jnp
 import pytest
-
-from legoesm import constants
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.fidelity.nemo_recipe import (
+    _NEMO_GYRE_DT_S,
     NEMO_BLOCK_MAPPING,
     NEMO_CONSTANTS_CONFIG,
     NEMO_DEFERRED_BLOCKS,
     NEMOModelRecipeConfig,
+    _nemo_gyre_vertical_ladder,
+    apply_nemo_gyre_surface_forcing,
     build_nemo_eady_recipe,
+    build_nemo_gyre_recipe,
     build_nemo_recipe,
     build_nemo_rest_recipe,
+    nemo_gyre_initial_T_S,
     nemo_lat_lon_model_config,
 )
+
+from legoesm import constants
 
 
 def test_nemo_model_config_selects_canonical_blocks():
@@ -29,7 +34,7 @@ def test_nemo_model_config_selects_canonical_blocks():
 
     assert cfg.constants == NEMO_CONSTANTS_CONFIG
     assert cfg.g == pytest.approx(constants.g_nemo)
-    assert cfg.rho_0 == pytest.approx(constants.rho_ocean)
+    assert cfg.rho_0 == pytest.approx(constants.rho_ocean_nemo)  # NEMO rau0=1026
     assert cfg.constants.c_sw == pytest.approx(constants.c_p_seawater)
 
     assert cfg.eos == "veros_gsw"
@@ -75,6 +80,11 @@ def test_nemo_model_config_selects_canonical_blocks():
     assert tke.buoyancy_timing == "post_mixing_veros"
     assert tke.shear_production == "realized_veros"
     assert tke.prandtl_mode == "richardson"
+    # NEMO zdftke coefficient parity (TKE_FIDELITY_FINDINGS.md, dump-verified):
+    # Ri-Prandtl slope 1/ri_cri = 4.5 (nn_pdl=1), background Kz rn_avm0/rn_avt0.
+    assert tke.prandtl_ri_coeff == 4.5
+    assert tke.kappaM_min == 1.2e-4
+    assert tke.kappaH_min == 1.2e-5
 
     assert cfg.gm_redi is not None
     assert cfg.gm_redi.slope_scheme == "triads"
@@ -121,6 +131,20 @@ def test_nemo_card_one_step_rest_sanity_is_finite():
     assert bool(jnp.all(jnp.isfinite(new_state.eta.data)))
 
 
+def test_nemo_iso_lap_card_one_step_is_finite():
+    """The nemo_iso_lap card steps finite through the full model — proves the
+    card wiring reaches the build-7 operator (kappa_GM=0 guard, active_3d, the
+    ramp+shapiro slopes) without error, not just that the config is built."""
+    recipe = build_nemo_rest_recipe(
+        n_lat=8, n_lon=12, nlev=4,
+        cfg=NEMOModelRecipeConfig(lateral_operator="nemo_iso_lap"))
+    model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, recipe.model_config)
+    new_state = model.step(recipe.initial_state, dt=60.0)
+    assert bool(jnp.all(jnp.isfinite(new_state.T.data)))
+    assert bool(jnp.all(jnp.isfinite(new_state.S.data)))
+    assert bool(jnp.all(jnp.isfinite(new_state.u.data)))
+
+
 def test_named_recipe_wrapper_dispatches_and_rejects_unknown_setup():
     rest = build_nemo_rest_recipe(n_lat=6, n_lon=8, nlev=3)
     eady = build_nemo_recipe(setup="eady", n_lat=12, n_lon=12, nlev=4)
@@ -149,6 +173,297 @@ def test_nemo_mapping_and_deferred_blocks_are_explicit():
         for name, _, selected in NEMO_BLOCK_MAPPING
     )
     assert any("leapfrog" in item for item in NEMO_DEFERRED_BLOCKS)
+
+
+def test_nemo_gyre_momentum_core_selects_ene_c2():
+    """A GYRE_BARE-faithful card config selects NEMO's actual GYRE schemes.
+
+    GYRE_BARE runs ln_dynvor_ene (ENE vorticity) + nn_dynkeg=0 (c2 KE) + EOS-80 +
+    adcroft PGF — NOT the ORCA-style een/hollingsworth/veros_gsw/smc03 the card
+    defaults to. The assembled-single-step audit had to override these by hand;
+    this pins that the card CAN express GYRE (momentum_core='vector_invariant_ene'
+    + eos/pgf knobs) so the whole GYRE dynamical core is reachable via the card.
+    """
+    gyre = nemo_lat_lon_model_config(NEMOModelRecipeConfig(
+        momentum_core="vector_invariant_ene",
+        eos="nemo_eos80",
+        pgf_scheme="adcroft",
+        lateral_operator="nemo_iso_lap",
+    ))
+    assert gyre.vorticity_scheme == "ene"
+    assert gyre.ke_gradient_scheme == "c2"
+    assert gyre.eos == "nemo_eos80"
+    assert gyre.pgf_scheme == "adcroft"
+    assert gyre.gm_redi.slope_scheme == "nemo_iso_lap"
+    # default card stays ORCA-style (een/hollingsworth), unchanged
+    d = nemo_lat_lon_model_config()
+    assert d.ke_gradient_scheme == "hollingsworth"
+
+
+def test_nemo_lateral_operator_selects_iso_lap_pure_redi():
+    """lateral_operator='nemo_iso_lap' selects NEMO traldf_iso, pure Redi.
+
+    GYRE runs ln_traldf_triad=F (standard rotated-Laplacian) + ln_ldfeiv=F (no
+    GM), so the card option must select slope_scheme='nemo_iso_lap', force
+    kappa_GM=0 (the operator raises otherwise), and turn on the NEMO ldfslp slope
+    fidelity (ML ramp + Shapiro). Default stays the GM-on triad scheme.
+    """
+    # default: GM-on triads, unchanged
+    d = nemo_lat_lon_model_config()
+    assert d.gm_redi.slope_scheme == "triads"
+    assert d.gm_redi.kappa_GM == 600.0
+    # nemo_iso_lap: standard operator, pure Redi, NEMO slope fidelity on
+    n = nemo_lat_lon_model_config(
+        NEMOModelRecipeConfig(lateral_operator="nemo_iso_lap"))
+    assert n.gm_redi.slope_scheme == "nemo_iso_lap"
+    assert n.gm_redi.kappa_GM == 0.0
+    assert n.gm_redi.nemo_mld_slope_ramp is True
+    assert n.gm_redi.nemo_slope_shapiro is True
+    # unknown selector raises (dispatch hardening)
+    with pytest.raises(ValueError, match="lateral_operator"):
+        nemo_lat_lon_model_config(
+            NEMOModelRecipeConfig(lateral_operator="bogus"))
+
+
+def test_nemo_tke_prandtl_bit_reproduces_nemo_pdl():
+    """The card's richardson-Prandtl (coeff 4.5) is NEMO nn_pdl=1 exactly.
+
+    NEMO zdftke: pdlr = MAX(0.1, ri_cri/MAX(ri_cri, Ri)) with
+    ri_cri = 2/(2 + rn_ediss/rn_ediff) = 2/(2 + 0.7/0.1) = 2/9, so the Prandtl
+    number Pr = 1/pdlr = MIN(10, MAX(1, Ri/ri_cri)) = MIN(10, MAX(1, 4.5·Ri)).
+    legoESM `_prandtl_number` (richardson) returns MAX(1, MIN(10, coeff·Ri));
+    clamp-to-[1,10] is order-independent, so coeff = 1/ri_cri = 4.5 must match
+    NEMO's Pr to machine precision across the whole Ri range (incl. the Ri<0
+    convective branch where both give Pr=1).
+    """
+    import numpy as np
+    from legoesm.ocean.fidelity.nemo_recipe import _nemo_tke_config
+    from legoesm.ocean.physics.vertical_mixing.tke import _prandtl_number
+
+    cfg = _nemo_tke_config()
+    assert cfg.prandtl_ri_coeff == 4.5
+    ri_cri = 2.0 / (2.0 + 0.7 / 0.1)          # NEMO 2/9
+    # _prandtl_number forms Ri = N2 / max(shear_sq, 1e-12); drive Ri via N2 with
+    # unit shear (kappaM is unused in the richardson branch).
+    Ri = np.linspace(-2.0, 20.0, 2001)
+    N2 = jnp.asarray(Ri)
+    shear_sq = jnp.ones_like(N2)
+    pr_lego = np.asarray(_prandtl_number(N2, shear_sq, jnp.ones_like(N2), cfg))
+    pdlr_nemo = np.maximum(0.1, ri_cri / np.maximum(ri_cri, Ri))
+    pr_nemo = 1.0 / pdlr_nemo                  # NEMO Pr = 1/pdlr
+    np.testing.assert_allclose(pr_lego, pr_nemo, rtol=0, atol=1e-12)
+
+
+def test_nemo_tke_deep_floor_is_constant_avtb_not_bryan_lewis():
+    """The NEMO recipe TKE floors the quiescent deep at the constant avtb
+    (kappaH_min=1.2e-5), NOT the Veros Bryan-Lewis abyssal depth profile.
+
+    NEMO GYRE runs ln_zdfcst=F with a CONSTANT background avtb; the legoESM
+    default enable_kappaH_profile=True would floor the deep K_H at the Bryan-Lewis
+    profile (~1e-4 at 3000 m, ~8x avtb), masking the independent-kappaH_min
+    flooring fix. This guards the abyssal fix at the SHIPPED config (Prandtl + BL
+    off), which the isolated tke test can't (it sets BL off by hand).
+    """
+    import numpy as np
+    from legoesm.ocean.fidelity.nemo_recipe import _nemo_tke_config
+    from legoesm.ocean.physics.vertical_mixing.tke import compute_K_from_tke
+
+    cfg = _nemo_tke_config()
+    assert cfg.enable_kappaH_profile is False
+    # Quiescent deep cell (raw K = c_k*l*sqrt(e) = 1e-5 << kappaM_min) at 3000 m,
+    # where Bryan-Lewis (if on) would floor K_H ~1e-4. Ri=0.86 -> Pr=3.87.
+    e = jnp.array([1.0e-6]); l_k = jnp.array([0.1])
+    N2 = jnp.array([0.86]); shear_sq = jnp.array([1.0])
+    z_int = jnp.array([-3000.0])
+    _K_M, K_H = compute_K_from_tke(
+        e, l_k, cfg, N2=N2, shear_sq=shear_sq, z_interface=z_int)
+    np.testing.assert_allclose(float(K_H[0]), 1.2e-5, rtol=1e-6)  # = avtb, not BL
+    # non-vacuity: the same cell WITH Bryan-Lewis on floors far higher (~1e-4),
+    # so BL-off is what makes the deep match NEMO's constant avtb.
+    _KM_bl, K_H_bl = compute_K_from_tke(
+        e, l_k, cfg._replace(enable_kappaH_profile=True),
+        N2=N2, shear_sq=shear_sq, z_interface=z_int)
+    assert float(K_H_bl[0]) > 5.0 * 1.2e-5
+
+
+def test_nemo_gyre_native_builds_valid_model_and_dispatch():
+    """The native GYRE_BARE setup builds a valid LatLonCGridOceanModel and is
+    reachable through build_nemo_recipe(setup='gyre') (unknown setup still raises)."""
+    recipe = build_nemo_gyre_recipe()
+    # grid: 32 x 22 T-cells (kpi=30+2, kpj=20+2), 30 wet z-levels.
+    assert (recipe.grid.n_lat, recipe.grid.n_lon) == (22, 32)
+    assert recipe.z_coord.n_levels == 30
+    assert recipe.initial_state.T.data.shape == (22, 32, 30)
+    LatLonCGridOceanModel(recipe.grid, recipe.z_coord, recipe.model_config)
+
+    # dispatch parity + unknown setup still hard-errors.
+    assert build_nemo_recipe(setup="gyre").model_config == recipe.model_config
+    with pytest.raises(ValueError, match="setup"):
+        build_nemo_recipe(setup="bogus")
+
+
+def test_nemo_gyre_coordinate_is_consistent_clean_w_bc():
+    """H_max == H_bathy (30 wet levels only) → sigma[nlev] ≈ 0 → w = 0 at the sea
+    floor by construction — the clean-w-BC the bridge lacks (FCT2_BOTTOM_DRIFT).
+
+    The bridge builds z_coord.H_max from the FULL 31-level ladder (4601.81 m) but
+    H_bathy from 30 wet levels (4300.71 m), leaving sigma_seafloor ≈ 0.065 and a
+    spurious w. The native setup has H_max == sum(30 wet e3t) == H_bathy.
+    """
+    import numpy as np
+
+    recipe = build_nemo_gyre_recipe()
+    z = recipe.z_coord
+    H_bathy = float(jnp.max(recipe.initial_state.H_bathy.data))
+    # consistent coordinate: H_max == wet H_bathy (float32-storage tol on H_bathy).
+    assert z.H_max == pytest.approx(4300.710017, abs=1e-3)
+    assert z.H_max == pytest.approx(H_bathy, rel=1e-6)
+
+    # sea-floor sigma of diagnose_w's full-cell z* branch:
+    # sigma = (z_half_ref[-1] + H_max)/H_max — ~0 for the native (consistent)
+    # coordinate, but ~0.065 for the bridge-style inconsistent one.
+    sigma_native = (float(z.z_half_ref[-1]) + z.H_max) / z.H_max
+    H_max_full = 4601.808643654613          # bridge: 31-level ladder sum
+    sigma_bridge = (-4300.710017215397 + H_max_full) / H_max_full
+    assert abs(sigma_native) < 1e-6         # clean w-BC by construction
+    assert sigma_bridge > 0.06              # non-vacuity: the bug it avoids
+    assert abs(sigma_native) < 1e-4 * sigma_bridge
+
+    # And the diagnosed w is exactly 0 at the deepest interface after a step
+    # (at rest deta=0; the structural sigma above is the load-bearing guarantee).
+    model = LatLonCGridOceanModel(recipe.grid, z, recipe.model_config)
+    new = model.step(recipe.initial_state, dt=_NEMO_GYRE_DT_S)
+    w = np.asarray(new.w.data)
+    assert np.max(np.abs(w[:, :, -1])) == 0.0
+
+
+def test_nemo_gyre_forced_trajectory_is_finite_and_stable():
+    """A runnable forced step (model.step + the post-step thermal applicator +
+    the step-level wind) is finite and physically bounded — the whole point of
+    the native assembly, exercising the documented run loop VERBATIM."""
+    from legoesm.ocean.fidelity.nemo_recipe import nemo_gyre_wind_forcing
+
+    recipe = build_nemo_gyre_recipe()
+    model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, recipe.model_config)
+    st = recipe.initial_state
+    n_lat, n_lon = st.T.data.shape[0], st.T.data.shape[1]
+    for i in range(3):
+        t = i * _NEMO_GYRE_DT_S
+        st = apply_nemo_gyre_surface_forcing(
+            st, recipe.z_coord, _NEMO_GYRE_DT_S, t_seconds=t)
+        st = model.step(
+            st, dt=_NEMO_GYRE_DT_S,
+            surface_forcing=nemo_gyre_wind_forcing(n_lat, n_lon, t_seconds=t))
+    for f in (st.T.data, st.S.data, st.u.data, st.v.data, st.eta.data):
+        assert bool(jnp.all(jnp.isfinite(f)))
+    # gently-forced GYRE spin-up stays laminar (no barotropic blow-up).
+    assert float(jnp.max(jnp.abs(st.u.data))) < 1.0
+    assert float(jnp.max(jnp.abs(st.eta.data))) < 1.0
+    # the thermal applicator actually forces the surface (non-vacuous).
+    assert float(jnp.max(jnp.abs(st.T.data - recipe.initial_state.T.data))) > 1e-3
+    # the WIND actually forces the momentum (non-vacuous vs a windless run).
+    st_nw = recipe.initial_state
+    for i in range(3):
+        t = i * _NEMO_GYRE_DT_S
+        st_nw = apply_nemo_gyre_surface_forcing(
+            st_nw, recipe.z_coord, _NEMO_GYRE_DT_S, t_seconds=t)
+        st_nw = model.step(st_nw, dt=_NEMO_GYRE_DT_S)
+    assert float(jnp.max(jnp.abs(st.u.data - st_nw.u.data))) > 1e-4
+
+
+def test_nemo_gyre_wind_forcing_sign_chain_end_to_end():
+    """The ocean receives EXACTLY NEMO's utau: nemo_gyre_wind returns stress ON
+    THE OCEAN, the step-level object carries the ATMOSPHERIC convention (stage
+    10b' applies -tau), and the builder negates — so one wind-only step must
+    accelerate the top layer with the SIGN of utau (westward south of the
+    sign-change latitude, i.e. du<0 where utau<0)."""
+    import numpy as np
+
+    from legoesm.ocean.fidelity.nemo_recipe import (
+        nemo_gyre_latitudes,
+        nemo_gyre_wind,
+        nemo_gyre_wind_forcing,
+    )
+
+    recipe = build_nemo_gyre_recipe()
+    model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, recipe.model_config)
+    st = recipe.initial_state
+    n_lat, n_lon = st.T.data.shape[0], st.T.data.shape[1]
+    sf = nemo_gyre_wind_forcing(n_lat, n_lon, t_seconds=0.0)
+    new = model.step(st, dt=_NEMO_GYRE_DT_S, surface_forcing=sf)
+    du_top = np.asarray(new.u.data[:, :, 0] - st.u.data[:, :, 0])
+
+    lat_t = np.asarray(nemo_gyre_latitudes(n_lat))
+    utau, _ = nemo_gyre_wind(lat_t, 0.0)
+    utau = np.asarray(utau)
+    # interior WET rows (skip the 1-cell land rim rows 0 / n_lat-1, where the
+    # mask zeroes du) with strongly negative / positive utau: the top-layer du
+    # must carry utau's sign.  (The utau sign change sits at 29N ~ the southern
+    # wall, so the negative branch lives in the NORTHERN interior rows.)
+    interior = np.arange(1, n_lat - 1)
+    j_neg = int(interior[np.argmin(utau[interior])])
+    j_pos = int(interior[np.argmax(utau[interior])])
+    assert utau[j_neg] < -1e-3 and utau[j_pos] > 1e-3
+    row_neg = du_top[j_neg, 2:-2]
+    row_pos = du_top[j_pos, 2:-2]
+    assert float(np.mean(row_neg)) < 0.0, "utau<0 must decelerate u (westward)"
+    assert float(np.mean(row_pos)) > 0.0, "utau>0 must accelerate u (eastward)"
+
+    # Non-vacuity of the n_barotropic_substeps=120 override: the card default 30
+    # blows up the barotropic external mode on this deep (H~4300 m) grid within a
+    # few forced steps — so the =120 choice is provably load-bearing, not cosmetic.
+    import dataclasses
+
+    from legoesm.ocean.fidelity.nemo_recipe import _NEMO_GYRE_CARD_CONFIG
+
+    r30 = build_nemo_gyre_recipe(
+        cfg=dataclasses.replace(_NEMO_GYRE_CARD_CONFIG, n_barotropic_substeps=30))
+    m30 = LatLonCGridOceanModel(r30.grid, r30.z_coord, r30.model_config)
+    s30 = r30.initial_state
+    for _ in range(3):
+        s30 = apply_nemo_gyre_surface_forcing(s30, r30.z_coord, _NEMO_GYRE_DT_S)
+        s30 = m30.step(s30, dt=_NEMO_GYRE_DT_S)
+    assert not bool(jnp.all(jnp.isfinite(s30.u.data)))   # 30 substeps diverges
+
+
+def test_nemo_gyre_initial_state_matches_nemo_tanh_profile():
+    """The analytic IC equals NEMO usrdef_istate at NEMO's own T-point depths."""
+    recipe = build_nemo_gyre_recipe()
+    _e3t, gdept = _nemo_gyre_vertical_ladder()
+    T = recipe.initial_state.T.data
+    S = recipe.initial_state.S.data
+    # interior wet column (10, 15); profile is horizontally uniform over ocean.
+    for k in (0, 15, 29):
+        T_k, S_k = nemo_gyre_initial_T_S(jnp.asarray(gdept[k]))
+        assert float(T[10, 15, k]) == pytest.approx(float(T_k), abs=1e-6)
+        assert float(S[10, 15, k]) == pytest.approx(float(S_k), abs=1e-6)
+    # sanity vs NEMO GYRE profile: warm ~23°C surface, cold ~4°C abyss.
+    assert 20.0 < float(T[10, 15, 0]) < 26.0
+    assert 3.0 < float(T[10, 15, 29]) < 5.0
+
+
+def test_nemo_gyre_recipe_selects_gyre_schemes():
+    """The recipe's model_config carries NEMO GYRE's actual dynamical-core schemes
+    (ENE vorticity, c2 KE, EOS-80, adcroft PGF, nemo_iso_lap pure Redi)."""
+    mc = build_nemo_gyre_recipe().model_config
+    assert mc.vorticity_scheme == "ene_total"  # NEMO np_CRV combined f+zeta
+    assert mc.ke_gradient_scheme == "c2"
+    assert mc.eos == "nemo_eos80"
+    assert mc.pgf_scheme == "adcroft"
+    assert mc.gm_redi.slope_scheme == "nemo_iso_lap"
+    assert mc.gm_redi.kappa_GM == 0.0        # ln_ldfeiv=F (no GM bolus)
+    assert mc.barotropic.n_barotropic_substeps == 50  # NEMO auto nn_e=50
+
+
+def test_nemo_gyre_vertical_ladder_matches_nemo_mesh():
+    """The analytic MI96 ladder reproduces NEMO's 30 wet e3t summing to H_bathy."""
+    import numpy as np
+
+    e3t, gdept = _nemo_gyre_vertical_ladder()
+    assert e3t.shape == (30,) and gdept.shape == (30,)
+    assert float(np.sum(e3t)) == pytest.approx(4300.710017, abs=1e-4)
+    assert np.all(np.diff(gdept) > 0.0)      # strictly increasing T-depths
+    assert float(gdept[0]) == pytest.approx(4.975265, abs=1e-4)   # NEMO gdept_1d[0]
 
 
 def test_nemo_recipe_is_lazy_registered():

@@ -44,7 +44,10 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 
 from legoesm.atmosphere.physics.convection.config import KainFritschConfig
-from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.atmosphere.physics.convection.output import (
+    ConvectionOutput,
+    split_convective_rain,
+)
 from legoesm.atmosphere.physics.convection.mass_flux import (
     apply_mass_flux_kernel,
     compute_column_geometry,
@@ -1317,6 +1320,11 @@ def kain_fritsch_convection(
     # cloud is shallow, i.e. ``branch_weight≈0``).
     convective_mask = overall_weight * branch_weight
 
+    # In-updraft precipitation: shared rain-split (same knob + mass proof as
+    # Tiedtke/Bechtold). precip_efficiency=0 (default) => no split, byte-identical.
+    dq_c_conv_dt, dq_r_conv_dt = split_convective_rain(
+        dq_c_conv_dt, config.precip_efficiency)
+
     out = ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
@@ -1326,6 +1334,7 @@ def kain_fritsch_convection(
         # KF has no convective momentum transport.
         du_dt_conv=None,
         dv_dt_conv=None,
+        dq_r_conv_dt=dq_r_conv_dt,
     )
 
     # Diagnostic carry: pack the (uncapped) closure cloud-base mass flux at

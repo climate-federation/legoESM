@@ -50,6 +50,7 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
     {
         "radiation",
         "cloud_scheme",
+        "cloud_diagnostic_condensate_scheme",
         "microphysics",
         "convection",
         "turbulence",

@@ -5,6 +5,26 @@ velocity and computes the net air-sea CO2 flux from the pCO2 difference.
 
 All functions are JAX-compatible.
 
+Faithfulness
+------------
+``tests/ocean/unit/test_bgc_carbonate_faithful.py`` pins these forms to
+round-off (rel 1e-12) against an INDEPENDENT reimplementation with the
+published Wanninkhof (2014) coefficients.
+
+FAITHFUL:
+- ``schmidt_number_co2`` — Wanninkhof (2014) Table 1 quartic fit for CO2 in
+  seawater (2116.8, -136.25, 4.7353, -0.092307, 0.0007555).
+- ``gas_transfer_velocity`` — Wanninkhof (2014) k_w = 0.251*U10^2*(Sc/660)^-0.5
+  [cm/hr], with the conventional 660 Schmidt normalization (the fit itself
+  evaluates to Sc ~= 668 at 20 degC, S=35 — 660 is the reference, not that value).
+
+DEPARTURES:
+- The Schmidt fit is valid 0-40 degC; ``schmidt_number_co2`` CLIPS T to that
+  range (a silent clamp — Sc is held flat and its dT gradient is zero outside).
+- ``air_sea_co2_flux`` sign convention: F = k_w*K0*rho_sw*(pCO2_atm - pCO2_ocean),
+  POSITIVE = into the ocean (ocean uptake).  The cm/hr -> m/s conversion is exact
+  (divide by 3600 s/hr and 100 cm/m).
+
 References
 ----------
 - Wanninkhof, R. (2014). Relationship between wind speed and gas exchange
@@ -14,13 +34,13 @@ References
 from __future__ import annotations
 
 import jax.numpy as jnp
-
-from legoesm import constants
 from legoesm.ocean.biogeochemistry.carbonate import (
     co2_solubility,
     solve_carbonate_system,
 )
 from legoesm.ocean.biogeochemistry.config import AirSeaCO2Diagnostics
+
+from legoesm import constants
 
 
 def schmidt_number_co2(T_degC: jnp.ndarray) -> jnp.ndarray:
@@ -63,9 +83,9 @@ def gas_transfer_velocity(
         Piston velocity [m/s].
     """
     Sc = schmidt_number_co2(T_degC)
-    # cm/hr to m/s: 1 cm/hr = 1/3600/100 m/s = 2.778e-6 m/s
     k_w_cm_hr = 0.251 * U10 ** 2 * (Sc / 660.0) ** (-0.5)
-    return k_w_cm_hr * 2.778e-6
+    # cm/hr -> m/s: exact, divide by 3600 s/hr and 100 cm/m (1 cm/hr = 2.7778e-6 m/s)
+    return k_w_cm_hr / 3600.0 / 100.0
 
 
 def air_sea_co2_flux(

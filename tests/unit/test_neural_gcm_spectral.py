@@ -1101,3 +1101,133 @@ class TestMidEpochResume:
             "uninterrupted run — the bit-identical test is therefore "
             "genuinely exercising optimizer-state restore, not luck"
         )
+
+
+# --- #985 item 2: chunk prefetch (host-thread double-buffering) ---
+# The prefetch wrapper must be a drop-in that preserves order + resume
+# semantics exactly and never swallows a producer failure. Pure Python — no
+# GCS/ERA5/JAX needed.
+
+def test_prefetch_iter_preserves_order_and_completes():
+    from legoesm.training.neural_gcm_spectral import _prefetch_iter
+
+    src = list(range(20))
+    out = list(_prefetch_iter(iter(src), buffer=1))
+    assert out == src
+
+
+def test_prefetch_iter_propagates_producer_exception():
+    from legoesm.training.neural_gcm_spectral import _prefetch_iter
+
+    def _boom():
+        yield 0
+        yield 1
+        raise RuntimeError("chunk load failed")
+
+    got = []
+    with pytest.raises(RuntimeError, match="chunk load failed"):
+        for x in _prefetch_iter(_boom(), buffer=1):
+            got.append(x)
+    assert got == [0, 1]  # items before the failure are still delivered
+
+
+def test_prefetch_iter_is_lazy_bounded():
+    # With buffer=1 the producer runs at most `buffer+1` items ahead of a
+    # consumer that never advances — it must NOT drain the whole source.
+    from legoesm.training.neural_gcm_spectral import _prefetch_iter
+
+    produced = []
+
+    def _counting():
+        for i in range(1000):
+            produced.append(i)
+            yield i
+
+    it = _prefetch_iter(_counting(), buffer=1)
+    first = next(it)
+    assert first == 0
+    # The load-gating semaphore caps the producer at buffer+1 loads ahead of a
+    # stalled consumer: chunk 0 (taken) + chunk 1 (one permit released on take).
+    import time
+    time.sleep(0.05)
+    assert len(produced) <= 2, f"prefetch over-ran: produced {len(produced)}"
+
+
+def test_prefetch_iter_early_break_stops_producer():
+    # Consumer breaks after one item: the producer must stop (stop flag +
+    # drained slot) instead of streaming the whole source or hanging a thread.
+    import time
+    from legoesm.training.neural_gcm_spectral import _prefetch_iter
+
+    produced = []
+
+    def _counting():
+        for i in range(1000):
+            produced.append(i)
+            yield i
+
+    for x in _prefetch_iter(_counting(), buffer=1):
+        break  # take exactly one, then abandon the iterator
+    time.sleep(0.05)
+    # bounded ahead-of-consumer load; must NOT have drained all 1000
+    assert len(produced) <= 3, f"producer did not stop on break: {len(produced)}"
+
+
+def test_chunk_loader_prefetch_matches_serial(monkeypatch):
+    """_chunks with prefetch on/off yields identical chunks and honours
+    start_chunk (the mid-epoch resume skip)."""
+    import legoesm.training.neural_gcm_spectral as mod
+
+    windows = [(2015, d, 1) for d in range(1, 7)]  # 6 windows
+
+    def _fake_load(config, grid, sigma, cache_dir, windows):
+        # Return a marker keyed by the group so we can assert ordering; times
+        # is a 1-elem list so _maybe_build_sample_forcings (off) returns None.
+        return (f"ics{windows}", f"tgt{windows}", [0])
+
+    monkeypatch.setattr(mod, "load_training_data", _fake_load)
+
+    class _Cfg:
+        def __init__(self, prefetch):
+            self.windows = windows
+            self.chunk_windows = 2
+            self.chunk_prefetch = prefetch
+
+    def _collect(prefetch, start_chunk=0):
+        loader, n_total = mod._make_chunk_loader(
+            _Cfg(prefetch), grid=None, sigma=None, cache_dir=None,
+            surface_forcing_path=None, forcing_cache_path=None,
+        )
+        return list(loader(start_chunk=start_chunk)), n_total, loader.n_chunks
+
+    serial, n_s, nc_s = _collect(False)
+    pref, n_p, nc_p = _collect(True)
+    assert serial == pref                 # identical chunk sequence + order
+    # 6 windows x 1 day x 4 snapshots/day = 24 samples; 3 chunks of 2 windows.
+    assert (n_s, nc_s) == (n_p, nc_p) == (24, 3)
+
+    # Resume skip: start_chunk=1 drops the first chunk, same for both paths.
+    serial1, _, _ = _collect(False, start_chunk=1)
+    pref1, _, _ = _collect(True, start_chunk=1)
+    assert serial1 == pref1 == serial[1:]
+
+
+def test_stage_tree_moves_arrays_skips_non_arrays():
+    """``_stage_tree`` device_puts array leaves and leaves None / non-array leaves
+    untouched, so a (ics, tgts, forcings=None) chunk stages without choking."""
+    from legoesm.training.neural_gcm_spectral import _stage_tree
+
+    cpu = jax.devices("cpu")[0]
+    tree = {"arr": jnp.arange(3.0), "none": None, "meta": "label", "n": 2}
+    out = _stage_tree(tree, cpu)
+    assert list(out["arr"].devices()) == [cpu]   # array moved
+    assert out["none"] is None                    # None passthrough
+    assert out["meta"] == "label" and out["n"] == 2  # non-array leaves untouched
+
+
+if __name__ == "__main__":
+    test_prefetch_iter_preserves_order_and_completes()
+    test_prefetch_iter_propagates_producer_exception()
+    test_prefetch_iter_is_lazy_bounded()
+    test_stage_tree_moves_arrays_skips_non_arrays()
+    print("ok (run test_chunk_loader_prefetch_matches_serial under pytest)")

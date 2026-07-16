@@ -10,13 +10,21 @@ viscosity
     α_ij = ∂u_j/∂x_i = a_ji
     β_ij = Σ_m Δ_m² α_mi α_mj = Σ_m Δ_m² a_im a_jm          (Δ_m = Δx,Δy,Δz)
     Bβ   = β11β22 − β12² + β11β33 − β13² + β22β33 − β23²
-    ν_t  = c · √( max(Bβ, 0) / (a_ij a_ij) )
+    ν_t  = c · √( max(Bβ, 0) / (a_ij a_ij) )  +  ν_floor
 
-with ``c ≈ 2.5 C_s²`` (≈0.07 for C_s=0.17). Key properties: ν_t ≥ 0 by
-construction, ν_t → 0 wherever the flow is laminar / two-dimensional (only one
-non-zero gradient direction, e.g. a well-resolved 1-D shear ∂u/∂z), and the
+(the c·√(…) term is the raw Vreman closed form; ``ν_floor`` is an optional
+legoESM additive background viscosity, default 0.)
+
+with ``c ≈ 2.5 C_s²`` (≈0.07 for C_s=0.17). ν_t ≥ ν_floor ≥ 0 by construction
+(for c ≥ 0). Key properties FOR c>0 AND filter widths Δ_m>0: ν_t = ν_floor
+(→ 0 only when ν_floor=0) exactly when the resolved velocity-gradient tensor has
+rank ≤ 1 (Bβ=0 ⟺ rank a ≤ 1) — i.e. rest (rank 0) or all gradients aligned with
+a single spatial direction (rank 1), e.g. a laminar 1-D shear ∂u/∂z; a genuine
+3-D strain OR a merely rank-2 "two-dimensional" flow such as diag(∂u/∂x,∂v/∂y,0)
+gives ν_t > ν_floor, so this is a rank ≤ 1 property, NOT a generic 2-D one. The
 PER-DIRECTION filter widths Δx,Δy,Δz make it well-behaved on ANISOTROPIC grids
-(Δx≠Δz). This makes it a robust drop-in alternative to |S|-Smagorinsky for both
+(Δx≠Δz).
+This makes it a robust drop-in alternative to |S|-Smagorinsky for both
 the incompressible spectral LES core and the compressible plane CRM (where it is
 an OPTIONAL, non-default closure — the SAM-faithful default stays Smagorinsky).
 
@@ -31,8 +39,8 @@ import jax.numpy as jnp
 __physics_contract__ = {
     "summary": (
         "Vreman (2004) algebraic sub-grid eddy viscosity from the nine "
-        "resolved velocity gradients: nu_t = c sqrt(max(Bbeta,0)/(a_ij a_ij)), "
-        "with per-direction filter widths for anisotropic grids."
+        "resolved velocity gradients: nu_t = c sqrt(max(Bbeta,0)/(a_ij a_ij)) "
+        "+ nu_floor, with per-direction filter widths for anisotropic grids."
     ),
     "inputs": {
         "a11": "1/s", "a12": "1/s", "a13": "1/s",
@@ -44,11 +52,17 @@ __physics_contract__ = {
     "outputs": {"nu_t": "m^2/s"},
     "sign_convention": (
         "Diagnostic eddy viscosity only (no tendency). nu_t >= nu_floor >= 0 "
-        "by construction and -> nu_floor wherever the flow is laminar or "
-        "two-dimensional (only one non-zero gradient direction, e.g. a "
-        "well-resolved 1-D shear)."
+        "by construction (for c_vreman >= 0). For c_vreman > 0 and positive "
+        "filter widths: nu_t = nu_floor (0 only if nu_floor=0) exactly when the "
+        "resolved velocity-gradient tensor has rank <= 1 (Bbeta=0: rest, or all "
+        "gradients aligned with one spatial direction, e.g. a laminar 1-D "
+        "shear), and a rank-2 (e.g. diag(du/dx,dv/dy,0)) or 3-D strain gives "
+        "nu_t > nu_floor."
     ),
     "conserves": ["none"],
+    # AD-safe (finite grad, no NaN) everywhere; at the measure-zero rank-1 kink
+    # (Bbeta=0) the double-where returns a valid SUBGRADIENT (0), not the
+    # classical two-sided derivative (which does not exist there).
     "differentiable": True,
     "reference": "Vreman (2004), Phys. Fluids 16, 3670, doi:10.1063/1.1785131",
     "idealized_test": (
@@ -94,9 +108,11 @@ def vreman_nu_t(a11, a12, a13, a21, a22, a23, a31, a32, a33,
     aa = (a11 ** 2 + a12 ** 2 + a13 ** 2 + a21 ** 2 + a22 ** 2 + a23 ** 2
           + a31 ** 2 + a32 ** 2 + a33 ** 2)
     arg = jnp.maximum(Bbeta, 0.0) / (aa + _EPS)
-    # AD-safe sqrt: d/dx √x = ∞ at x=0, so √(arg) NaNs the gradient at rest /
-    # 1-D shear (arg=0). The double-where keeps both value AND derivative finite
-    # (0) there — the same guard as `safe_sqrt_strain` in the Smagorinsky path.
+    # AD-safe sqrt: d/dx √x = ∞ at x=0, so √(arg) NaNs the gradient wherever
+    # rank a ≤ 1 (arg=0: rest or a 1-D shear). The double-where keeps value AND gradient finite
+    # there; the returned grad at the arg=0 KINK is a valid SUBGRADIENT (0), not
+    # the classical two-sided derivative (√(Bβ/aa) has ±c-type one-sided slopes
+    # at Bβ=0). Same guard as `safe_sqrt_strain` in the Smagorinsky path.
     safe = jnp.where(arg > 0.0, arg, 1.0)
     root = jnp.where(arg > 0.0, jnp.sqrt(safe), 0.0)
     return c_vreman * root + nu_floor
