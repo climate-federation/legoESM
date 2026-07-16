@@ -1,0 +1,79 @@
+#!/bin/bash
+# Derecho GPU batch: differentiable water-memory gradient map
+# (scripts/experiment/water_memory_gradient.py --run).
+#
+# Reverse-mode AD through a May->Sep land scan -> per-cell
+#   d( late-season GPP ) / d( spring soil water )   [gC/m2 per (m3/m3)].
+# MUST run on a GPU node (the reverse-mode-through-scan graph is far too slow on a
+# login-node CPU) with a CUDA jaxlib env (default 'legoesm-gpu').
+#
+# Usage (qsub from the repo root; PBS_O_WORKDIR = repo root):
+#   # 4 deg COLD-START first look (no restart needed):
+#   qsub -A <ACCOUNT> scripts/cluster/water_memory/run_water_memory.pbs
+#
+#   # 2 deg with the equilibrated spin-up restart (restart resolution MUST match!):
+#   qsub -A <ACCOUNT> -v RESOLUTION=90,\
+#RESTART=$SCRATCH/lmip/spinup_1975/restart_1985_d000h00.npz,YEAR=1985 \
+#        scripts/cluster/water_memory/run_water_memory.pbs
+#
+# Override knobs via `qsub -v` (all optional):
+#   LEGOESM_CONDA_ENV=legoesm-gpu   — CUDA jaxlib env
+#   RESOLUTION=45                   — latlon N (45=4deg/4050 cols; 90=2deg/16200 cols)
+#   RESTART=""                      — spin-up restart .npz; empty => COLD START.
+#                                     Its resolution MUST equal RESOLUTION.
+#   YEAR=1984                       — CRU-JRA forcing year (must be staged)
+#   SURFDATA=data/legoesm_surfdata_c250617.nc
+#   FORCING_DIR=data/crujra
+#   PERTURB_DOY=120                 — perturb theta at this doy (May 1)
+#   WINDOW_END_DOY=273              — integrate to (Sep 30)
+#   LATE_DOY=181                    — late-GPP target starts here (Jul 1)
+#   OUT=results/water_memory/memory_${YEAR}_R${RESOLUTION}.nc
+#
+#PBS -N water_memory
+#PBS -q main
+#PBS -j oe
+#PBS -l select=1:ncpus=32:mem=64GB:ngpus=1
+#PBS -l walltime=02:00:00
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+
+LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
+module purge
+module load conda
+set +u
+conda activate "$LEGOESM_CONDA_ENV"
+set -u
+
+# JAX GPU knobs (mirror the spin-up run.sh): don't pre-grab all HBM; force GPU so a
+# missing CUDA jaxlib is a clean error instead of a silent CPU fallback.
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+export JAX_PLATFORM_NAME=gpu
+export JAX_ENABLE_X64=1
+export PYTHONPATH="${PYTHONPATH:-}:$PWD"
+
+RESOLUTION="${RESOLUTION:-45}"
+YEAR="${YEAR:-1984}"
+RESTART="${RESTART:-}"
+SURFDATA="${SURFDATA:-data/legoesm_surfdata_c250617.nc}"
+FORCING_DIR="${FORCING_DIR:-data/crujra}"
+PERTURB_DOY="${PERTURB_DOY:-120}"
+WINDOW_END_DOY="${WINDOW_END_DOY:-273}"
+LATE_DOY="${LATE_DOY:-181}"
+OUT="${OUT:-results/water_memory/memory_${YEAR}_R${RESOLUTION}.nc}"
+
+RESTART_ARG=()
+if [[ -n "$RESTART" ]]; then RESTART_ARG=(--restart "$RESTART"); fi
+
+echo "env=$LEGOESM_CONDA_ENV | R$RESOLUTION | year=$YEAR | restart=${RESTART:-<cold start>} | out=$OUT"
+python scripts/experiment/water_memory_gradient.py --run \
+    "${RESTART_ARG[@]}" \
+    --surfdata "$SURFDATA" \
+    --forcing-dir "$FORCING_DIR" \
+    --year "$YEAR" \
+    --resolution "$RESOLUTION" \
+    --perturb-doy "$PERTURB_DOY" \
+    --window-end-doy "$WINDOW_END_DOY" \
+    --late-doy "$LATE_DOY" \
+    --out "$OUT"

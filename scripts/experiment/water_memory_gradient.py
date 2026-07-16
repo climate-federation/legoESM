@@ -247,13 +247,6 @@ def run_real(args) -> int:
     base_cfg = resolve_land_config("multilayer", base_cfg)
     config, _p, gsd = init_land_surface_data(args.surfdata, grid, base_cfg, 0.0)
 
-    loaded, meta = load_land_restart(
-        args.restart, expected_land_mode="multilayer", expected_ncol=ncol,
-        expected_n_layers=config.soil_grid.n_layers)
-    template = init_multilayer_land_state(ncol, config, T_init=288.0)
-    state_jan1 = merge_land_restart_into_template(loaded, template)
-    print(f"restart: {args.restart} (t_end_s={meta['t_end_s']:.0f})")
-
     update_lp = make_step_land_params_updater(gsd, config.surface_scheme)
     lp_fn = lambda theta_top, doy: update_lp(theta_top, doy, float(year))[0]
 
@@ -271,6 +264,25 @@ def run_real(args) -> int:
 
     F_spin = stage_forcing(lat_rad, lon_rad, spin_t, **fk)
     doy_spin = jnp.asarray(spin_t / DAY)
+
+    # Jan-1 state: a spin-up restart (its resolution MUST match --resolution), or a
+    # cold start seeded from the Jan-1 air temperature (Jan->May spin then partly
+    # equilibrates the spring soil moisture).  Cold start decouples the demo
+    # resolution from the (2 deg) spin-up restart -> a cheap 4 deg first look.
+    template = init_multilayer_land_state(ncol, config, T_init=288.0)
+    if args.restart:
+        loaded, meta = load_land_restart(
+            args.restart, expected_land_mode="multilayer", expected_ncol=ncol,
+            expected_n_layers=config.soil_grid.n_layers)
+        state_jan1 = merge_land_restart_into_template(loaded, template)
+        print(f"restart: {args.restart} (t_end_s={meta['t_end_s']:.0f})")
+    else:
+        T0 = F_spin.T_lowest[0]                                 # first-step air temp
+        state_jan1 = template._replace(
+            T_soil=jnp.broadcast_to(T0[:, None], template.T_soil.shape))
+        print("cold start (no restart): T_soil seeded from Jan-1 air temp; the "
+              "Jan->May spin partly equilibrates spring soil moisture")
+
     state_p = spin_forward(state_jan1, F_spin, doy_spin, config,
                            lat=lat_rad, dt=dt, land_params_fn=lp_fn)
     del F_spin
@@ -327,7 +339,8 @@ def main(argv=None) -> int:
     ap.add_argument("--nsteps", type=int, default=240)
     # --- real-data run (Derecho) ---
     ap.add_argument("--run", action="store_true", help="real-data global memory map")
-    ap.add_argument("--restart", help="spin-up restart (.npz, Jan-1 state)")
+    ap.add_argument("--restart", help="spin-up restart (.npz, Jan-1 state); its "
+                    "resolution MUST match --resolution. Omit for a cold start.")
     ap.add_argument("--surfdata", help="surfdata NetCDF")
     ap.add_argument("--forcing-dir", dest="forcing_dir", help="CRU-JRA data dir")
     ap.add_argument("--prefix",
@@ -349,7 +362,8 @@ def main(argv=None) -> int:
         _selftest(args.ncol, args.nsteps)
         return 0
     if args.run:
-        missing = [f"--{k}" for k in ("restart", "surfdata", "forcing_dir")
+        # --restart is OPTIONAL (cold start if omitted); surfdata + forcing required.
+        missing = [f"--{k}" for k in ("surfdata", "forcing_dir")
                    if not getattr(args, k.replace("-", "_"), None)]
         if missing:
             ap.error(f"--run needs {', '.join(missing)}")
