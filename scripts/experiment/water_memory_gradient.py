@@ -37,6 +37,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.soil_hydraulics import psi_from_theta
@@ -102,6 +103,53 @@ def water_memory_map(
         return jnp.sum(jnp.where(good_mask, late_gpp, 0.0)) * dt, late_gpp
 
     # value_and_grad with has_aux -> ((value, aux), grad)
+    (_val, late_gpp), M = jax.value_and_grad(loss, has_aux=True)(jnp.zeros(ncol))
+    return M, late_gpp
+
+
+def water_memory_map_percell(
+    state0, forcing_seq, doy_seq, config, *,
+    lat, dt, onset_step, late_lag_steps, good_mask, land_params_fn=None,
+    use_checkpoint=True,
+):
+    """Per-cell GROWING-SEASON memory: inject the perturbation dtheta_i into cell i's
+    soil water at ITS growing-season onset step s_i (snow-free + thawed), and sum GPP
+    over its late window [s_i + late_lag, end].
+
+        M_i = d( sum_{t >= s_i+lag} GPP_i(t) ) / d( dtheta_i injected at s_i )
+
+    Because dtheta_i enters the state only AT/AFTER thaw, the reverse-mode gradient
+    never flows back through the near-singular spring-thaw canopy steps (TODO-1) -- so
+    boreal/temperate cells are INCLUDED over their real growing season without the
+    poleward contamination, structurally rather than by masking.  Diagonal (columns
+    independent).  onset_step / late window are per-cell; state0 is the spun
+    perturbation-point (window-start) state.  Returns ``(M (ncol,), late_gpp (ncol,))``."""
+    ncol = state0.theta_soil.shape[0]
+    nsteps = int(np.asarray(forcing_seq.T_lowest).shape[0])
+    onset = jnp.asarray(onset_step)
+    late_start = onset + int(late_lag_steps)
+    steps = jnp.arange(nsteps)
+
+    def loss(dtheta):
+        def body(carry, xs):
+            st, acc = carry
+            Fi, doy_i, step_i = xs
+            # inject dtheta into all soil layers at this cell's onset step; keep psi
+            # consistent there (mixed-form Richards reads both psi and theta).
+            is_on = (step_i == onset)                                  # (ncol,)
+            theta_i = st.theta_soil + jnp.where(is_on[:, None], dtheta[:, None], 0.0)
+            psi_i = jnp.where(is_on[:, None],
+                              psi_from_theta(theta_i, config.hydraulics), st.psi_soil)
+            st = st._replace(theta_soil=theta_i, psi_soil=psi_i)
+            new_st, gpp = _step_and_gpp(st, Fi, doy_i, config, lat, dt, land_params_fn)
+            acc = acc + jnp.where(step_i >= late_start, gpp, 0.0)       # per-cell late window
+            return (new_st, acc), None
+
+        body_fn = jax.checkpoint(body) if use_checkpoint else body
+        (_stf, late_gpp), _ = jax.lax.scan(
+            body_fn, (state0, jnp.zeros(ncol)), (forcing_seq, doy_seq, steps))
+        return jnp.sum(jnp.where(good_mask, late_gpp, 0.0)) * dt, late_gpp
+
     (_val, late_gpp), M = jax.value_and_grad(loss, has_aux=True)(jnp.zeros(ncol))
     return M, late_gpp
 
@@ -223,30 +271,46 @@ def monthly_memory_kernel(
     return np.array(labels), np.stack(rows)
 
 
-def _forward_window_diag(state0, forcing_seq, doy_seq, config, lat, dt, land_params_fn):
+def _forward_window_diag(state0, forcing_seq, doy_seq, config, lat, dt, land_params_fn,
+                         *, snow_thresh=1.0, freeze_margin=0.5, min_onset_doy=0.0):
     """No-grad forward pass over the window -> per-cell diagnostics:
-      good      : GPP + state stay FINITE throughout (no revert guard here, so a NaN
-                  cell stays NaN; exclude it from the summed loss).
-      max_snow  : max snow_depth [kg/m2] over the window.
-      min_tsoil : min top-soil temperature [K] over the window.
-    The latter two flag SNOW / FREEZE-THAW cells, where the two-leaf canopy Newton
-    solve is near-singular (TODO-1) -> the *gradient* is contaminated even when the
-    forward GPP is finite.  Excluding them (``--snowfree-only``) removes that artifact
-    (and those cold, snowmelt-fed cells are not physically water-limited anyway)."""
+      good       : GPP + state stay FINITE throughout (no revert guard here, so a NaN
+                   cell stays NaN; exclude it from the summed loss).
+      max_snow   : max snow_depth [kg/m2] over the window.
+      min_tsoil  : min top-soil temperature [K] over the window.
+      onset_step : FIRST window step at which the cell is snow-free (< snow_thresh) AND
+                   thawed (T_soil_top > T_freeze + freeze_margin) AND doy >= min_onset_doy
+                   -- the growing-season onset.  ``nsteps`` (sentinel) if never reached.
+    max_snow/min_tsoil flag SNOW / FREEZE-THAW cells where the canopy Newton solve is
+    near-singular (TODO-1) -> a contaminated *gradient* even with finite forward GPP.
+    onset_step drives the per-cell growing-season mode, which injects the perturbation
+    only AFTER thaw so the gradient never flows back through the singularity."""
     ncol = state0.theta_soil.shape[0]
+    nsteps = int(np.asarray(forcing_seq.T_lowest).shape[0])
+    steps = jnp.arange(nsteps)
 
     def body(carry, xs):
-        st, ok, msnow, mtsoil = carry
-        Fi, doy_i = xs
+        st, ok, msnow, mtsoil, onset, found = carry
+        Fi, doy_i, step_i = xs
+        # onset criterion on the INCOMING state (so injecting at onset_step lands on a
+        # snow-free, thawed cell) -- first step meeting it, at/after min_onset_doy.
+        is_free = ((st.snow_depth < snow_thresh)
+                   & (st.T_soil[:, 0] > constants.T_freeze + freeze_margin)
+                   & (doy_i >= min_onset_doy))
+        newly = is_free & (~found)
+        onset = jnp.where(newly, step_i, onset)
+        found = found | is_free
         new_st, gpp = _step_and_gpp(st, Fi, doy_i, config, lat, dt, land_params_fn)
         ok = ok & jnp.isfinite(gpp) & jnp.isfinite(new_st.theta_soil).all(axis=-1)
         msnow = jnp.maximum(msnow, new_st.snow_depth)
         mtsoil = jnp.minimum(mtsoil, new_st.T_soil[:, 0])
-        return (new_st, ok, msnow, mtsoil), None
+        return (new_st, ok, msnow, mtsoil, onset, found), None
 
-    init = (state0, jnp.ones(ncol, bool), jnp.zeros(ncol), jnp.full(ncol, 1e3))
-    (_stf, ok, msnow, mtsoil), _ = jax.lax.scan(body, init, (forcing_seq, doy_seq))
-    return ok, msnow, mtsoil
+    init = (state0, jnp.ones(ncol, bool), jnp.zeros(ncol), jnp.full(ncol, 1e3),
+            jnp.full(ncol, nsteps, dtype=jnp.int32), jnp.zeros(ncol, bool))
+    (_stf, ok, msnow, mtsoil, onset, _f), _ = jax.lax.scan(
+        body, init, (forcing_seq, doy_seq, steps))
+    return ok, msnow, mtsoil, onset
 
 
 def run_real(args) -> int:
@@ -329,24 +393,43 @@ def run_real(args) -> int:
     doy_win = jnp.asarray(win_t / DAY)
     late_flags = jnp.asarray((win_t / DAY) >= args.late_doy)
 
-    good, max_snow, min_tsoil = _forward_window_diag(
-        state_p, F_win, doy_win, config, lat_rad, dt, lp_fn)
+    # per-cell onset: first snow-free/thawed window step at/after --onset-min-doy
+    # (default = window start).  Drives the growing-season mode.
+    min_onset = args.onset_min_doy if args.onset_min_doy is not None else args.perturb_doy
+    good, max_snow, min_tsoil, onset_step = _forward_window_diag(
+        state_p, F_win, doy_win, config, lat_rad, dt, lp_fn,
+        snow_thresh=args.onset_snow_thresh, min_onset_doy=min_onset)
     max_snow = np.asarray(max_snow); min_tsoil = np.asarray(min_tsoil)
-    from legoesm import constants
+    onset_np = np.asarray(onset_step)
+    nwin = int(win_t.shape[0])
+    onset_found = onset_np < nwin                                  # reached onset in window
+    onset_doy = np.where(onset_found, min_onset + onset_np * dt / DAY, np.nan)
     # snow-free AND never-froze over the window -> away from the spring-thaw canopy
     # singularity (TODO-1) that contaminates the boreal/arctic gradient.
     snowfree_warm = (max_snow < 1.0) & (min_tsoil > constants.T_freeze - 0.5)
     print(f"good cells (finite over window): {int(np.asarray(good).sum())}/{ncol} | "
-          f"snow-free & non-freezing: {int(snowfree_warm.sum())}"
-          + (" (applied: --snowfree-only)" if args.snowfree_only else
-             " (NOT applied; pass --snowfree-only to exclude thaw-contaminated cells)"))
+          f"snow-free & non-freezing: {int(snowfree_warm.sum())} | "
+          f"reached growing-season onset: {int(onset_found.sum())}")
 
-    M, late_gpp = water_memory_map(
-        state_p, F_win, doy_win, late_flags, config, lat=lat_rad, dt=dt,
-        good_mask=good, land_params_fn=lp_fn, use_checkpoint=True)
     good_np = np.asarray(good)
-    if args.snowfree_only:
-        good_np = good_np & snowfree_warm
+    if args.growing_season:
+        # per-cell mode: inject at each cell's onset, sum GPP over its late window.
+        # Excludes cells that never reach onset (permanent snow/ice); no thaw in the
+        # differentiated gradient path -> no snowfree mask needed.
+        late_lag = int(args.late_lag_days * DAY / dt)
+        good_np = good_np & onset_found
+        print(f"growing-season mode: inject at per-cell onset, late window = onset+"
+              f"{args.late_lag_days:.0f}d..end ({int(good_np.sum())} cells)")
+        M, late_gpp = water_memory_map_percell(
+            state_p, F_win, doy_win, config, lat=lat_rad, dt=dt,
+            onset_step=onset_step, late_lag_steps=late_lag,
+            good_mask=jnp.asarray(good_np), land_params_fn=lp_fn, use_checkpoint=True)
+    else:
+        M, late_gpp = water_memory_map(
+            state_p, F_win, doy_win, late_flags, config, lat=lat_rad, dt=dt,
+            good_mask=good, land_params_fn=lp_fn, use_checkpoint=True)
+        if args.snowfree_only:
+            good_np = good_np & snowfree_warm
     M_raw = np.asarray(M)
     # The forward good_mask only guarantees the forward STATE is finite -- but a cell
     # can have finite GPP yet a huge/NaN GRADIENT if the backward pass ran near a
@@ -368,7 +451,10 @@ def run_real(args) -> int:
 
     # --- temporal memory kernel (optional): month-resolved d GPP/d theta_May ---
     months = kernel = None
-    if args.kernel:
+    if args.kernel and args.growing_season:
+        print("(--kernel skipped: the monthly kernel is fixed-window; a per-cell "
+              "growing-season kernel is a future extension)")
+    elif args.kernel:
         print("computing monthly memory kernel (one reverse pass per month) ...")
         months, kernel = monthly_memory_kernel(
             state_p, F_win, doy_win, config, lat=lat_rad, dt=dt,
@@ -387,20 +473,22 @@ def run_real(args) -> int:
 
     _write_map(args.out, M, late_gpp, keep, lat_rad, lon_rad,
                args.resolution, year, args, months=months, kernel=kernel,
-               max_snow=max_snow, min_tsoil=min_tsoil)
+               max_snow=max_snow, min_tsoil=min_tsoil, onset_doy=onset_doy)
     return 0
 
 
 def _write_map(out, M, late_gpp, good, lat_rad, lon_rad, resolution, year, args,
-               *, months=None, kernel=None, max_snow=None, min_tsoil=None):
+               *, months=None, kernel=None, max_snow=None, min_tsoil=None,
+               onset_doy=None):
     import xarray as xr
     nlat, nlon = resolution, 2 * resolution
     lat = np.rad2deg(np.asarray(lat_rad)).reshape(nlat, nlon)[:, 0]
     lon = np.rad2deg(np.asarray(lon_rad)).reshape(nlat, nlon)[0, :]
+    _ln = ("d(late-growing-season GPP) / d(growing-season-onset soil water) [per-cell]"
+           if args.growing_season else "d(late-season GPP) / d(spring soil water)")
     data = {
         "dGPP_dtheta": (("lat", "lon"), M.reshape(nlat, nlon),
-                        {"long_name": "d(late-season GPP) / d(spring soil water)",
-                         "units": "gC m-2 per (m3 m-3)"}),
+                        {"long_name": _ln, "units": "gC m-2 per (m3 m-3)"}),
         "late_gpp": (("lat", "lon"), late_gpp.reshape(nlat, nlon),
                      {"long_name": "late-window GPP (unperturbed)", "units": "gC m-2"}),
         "good_cell": (("lat", "lon"), good.reshape(nlat, nlon).astype("i1"),
@@ -413,6 +501,10 @@ def _write_map(out, M, late_gpp, good, lat_rad, lon_rad, resolution, year, args,
         data["min_tsoil_top"] = (("lat", "lon"), min_tsoil.reshape(nlat, nlon),
                                  {"long_name": "min top-soil T over window (freeze flag)",
                                   "units": "K"})
+    if onset_doy is not None:
+        data["onset_doy"] = (("lat", "lon"), onset_doy.reshape(nlat, nlon),
+                             {"long_name": "growing-season onset day-of-year (per cell)",
+                              "units": "day"})
     coords = {"lat": ("lat", lat, {"units": "degrees_north"}),
               "lon": ("lon", lon, {"units": "degrees_east"})}
     if kernel is not None:
@@ -467,6 +559,18 @@ def main(argv=None) -> int:
                     help="restrict the map to cells that are snow-free AND never freeze "
                          "over the window -> excludes the spring-thaw canopy singularity "
                          "(TODO-1) contaminating the boreal/arctic gradient")
+    ap.add_argument("--growing-season", dest="growing_season", action="store_true",
+                    help="PER-CELL growing-season mode: inject the perturbation at each "
+                         "cell's snow-free/thawed onset and sum GPP over its late window "
+                         "-> structurally avoids the thaw singularity (supersedes "
+                         "--snowfree-only; includes boreal cells over their real season)")
+    ap.add_argument("--late-lag-days", dest="late_lag_days", type=float, default=45.0,
+                    help="growing-season mode: late window starts onset + this many days")
+    ap.add_argument("--onset-min-doy", dest="onset_min_doy", type=float, default=None,
+                    help="growing-season mode: earliest allowed onset doy (default = "
+                         "--perturb-doy, the window start)")
+    ap.add_argument("--onset-snow-thresh", dest="onset_snow_thresh", type=float,
+                    default=1.0, help="snow_depth [kg/m2] below which a cell is 'snow-free'")
     ap.add_argument("--out", default="results/water_memory/memory_map.nc")
     args = ap.parse_args(argv)
 

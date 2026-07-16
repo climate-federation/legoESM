@@ -34,6 +34,11 @@
 #                                     (excludes the spring-thaw canopy singularity that
 #                                     contaminates the boreal/arctic gradient). RECOMMENDED
 #                                     for a clean map.
+#   GROWING=0                       — 1 => PER-CELL growing-season mode: inject at each
+#                                     cell's snow-free/thawed onset, sum GPP over its late
+#                                     window. Structurally avoids the thaw singularity and
+#                                     KEEPS boreal cells over their real season (supersedes
+#                                     SNOWFREE). LATE_LAG_DAYS=45 sets the memory lag.
 #   OUT=results/water_memory/memory_${YEAR}_R${RESOLUTION}.nc
 #
 #PBS -N water_memory
@@ -70,14 +75,17 @@ WINDOW_END_DOY="${WINDOW_END_DOY:-273}"
 LATE_DOY="${LATE_DOY:-181}"
 KERNEL="${KERNEL:-0}"
 SNOWFREE="${SNOWFREE:-0}"
+GROWING="${GROWING:-0}"
+LATE_LAG_DAYS="${LATE_LAG_DAYS:-45}"
 OUT="${OUT:-results/water_memory/memory_${YEAR}_R${RESOLUTION}.nc}"
 
 EXTRA=()
 if [[ -n "$RESTART" ]]; then EXTRA+=(--restart "$RESTART"); fi
 if [[ "$KERNEL" == "1" ]]; then EXTRA+=(--kernel); fi
 if [[ "$SNOWFREE" == "1" ]]; then EXTRA+=(--snowfree-only); fi
+if [[ "$GROWING" == "1" ]]; then EXTRA+=(--growing-season --late-lag-days "$LATE_LAG_DAYS"); fi
 
-echo "env=$LEGOESM_CONDA_ENV | R$RESOLUTION | year=$YEAR | restart=${RESTART:-<cold start>} | kernel=$KERNEL | snowfree=$SNOWFREE | out=$OUT"
+echo "env=$LEGOESM_CONDA_ENV | R$RESOLUTION | year=$YEAR | restart=${RESTART:-<cold start>} | kernel=$KERNEL | snowfree=$SNOWFREE | growing=$GROWING | out=$OUT"
 python scripts/experiment/water_memory_gradient.py --run \
     "${EXTRA[@]}" \
     --surfdata "$SURFDATA" \

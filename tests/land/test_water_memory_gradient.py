@@ -121,6 +121,24 @@ def test_monthly_kernel_sums_to_full_window():
         f"kernel sum {K_sum} != full-window map {np.asarray(M_full)}")
 
 
+def test_percell_injection_at_step0_equals_initial_perturbation():
+    """water_memory_map_percell with onset=0 and late_lag=0 (inject dtheta at step 0,
+    count all GPP) must equal the initial-state-perturbation map (water_memory_map with
+    all-True late_flags): injecting at step 0 IS perturbing the initial state. Validates
+    the per-cell injection + psi-recompute + per-cell late-window machinery."""
+    cfg, F, doy_seq, late_flags, lat, st0 = _case()
+    good = jnp.ones(_NCOL, bool)
+    nsteps = int(np.asarray(F.sw_down).shape[0])
+    M_init, _ = wm.water_memory_map(st0, F, doy_seq, jnp.ones(nsteps, bool), cfg,
+                                    lat=lat, dt=_DT, good_mask=good, use_checkpoint=True)
+    M_pc, _ = wm.water_memory_map_percell(
+        st0, F, doy_seq, cfg, lat=lat, dt=_DT,
+        onset_step=jnp.zeros(_NCOL, jnp.int32), late_lag_steps=0,
+        good_mask=good, use_checkpoint=True)
+    assert np.allclose(np.asarray(M_pc), np.asarray(M_init), atol=1e-6, rtol=1e-5), (
+        f"per-cell(onset=0,lag=0) {np.asarray(M_pc)} != initial-pert {np.asarray(M_init)}")
+
+
 def test_spin_forward_is_nograd_and_finite():
     """The no-grad spin-to-perturb-point runs and returns a finite state."""
     cfg, F, doy_seq, late_flags, lat, st0 = _case()
