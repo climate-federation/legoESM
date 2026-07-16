@@ -202,11 +202,16 @@ def test_sea_ice_default_is_none_so_a_default_run_is_unchanged():
     assert mod.build_sea_ice_config(mod.build_parser().parse_args([])) is None
 
 
-@pytest.mark.parametrize("flag,sub", [
-    ("--ice-snow", "snow"), ("--ice-brine", "brine"),
-    ("--ice-ridging", "ridging"), ("--ice-ponds", "ponds"),
+@pytest.mark.parametrize("flag,sub,extra", [
+    ("--ice-snow", "snow", []),
+    ("--ice-brine", "brine", []),
+    # ridging is inert without multi-category ice + a dynamics mode, and the
+    # builder now REFUSES that combination -- so ask for a runnable one.
+    ("--ice-ridging", "ridging", ["--ice-categories", "5",
+                                  "--ice-dynamics", "evp"]),
+    ("--ice-ponds", "ponds", []),
 ])
-def test_sea_ice_sub_models_are_selectable(flag, sub):
+def test_sea_ice_sub_models_are_selectable(flag, sub, extra):
     """Each sub-model is gated by a ``bool = False``.
 
     Bools are NOT ``:float``-spec-eligible, so ``--params`` can never reach
@@ -214,7 +219,7 @@ def test_sea_ice_sub_models_are_selectable(flag, sub):
     ``--ice*`` flag at all -- so snow, brine, RIDGING (oracle-pinned) and melt
     ponds were every one of them impossible to switch on from any driver.
     """
-    cfg = mod.build_sea_ice_config(mod.build_parser().parse_args([flag]))
+    cfg = mod.build_sea_ice_config(mod.build_parser().parse_args([flag] + extra))
     assert getattr(cfg, sub).enabled is True
 
 
@@ -222,19 +227,24 @@ def test_enabling_a_sub_model_preserves_its_other_tuned_fields():
     """`_replace(enabled=True)` must not clobber the calibrated defaults."""
     from legoesm.ice.config import SeaIceConfig
 
-    cfg = mod.build_sea_ice_config(mod.build_parser().parse_args(["--ice-ridging"]))
+    cfg = mod.build_sea_ice_config(mod.build_parser().parse_args(
+        ["--ice-ridging", "--ice-categories", "5", "--ice-dynamics", "evp"]))
     assert cfg.ridging._replace(enabled=False) == SeaIceConfig().ridging
 
 
-@pytest.mark.parametrize("flag,field,value", [
-    ("--ice-shortwave-scheme", "shortwave_scheme", "delta_eddington"),
-    ("--ice-itd-remap", "itd_remap", "lipscomb2001"),
-    ("--ice-bulk-scheme", "bulk_scheme", "most"),
-    ("--ice-stability-scheme", "stability_scheme", "grachev2007_sheba"),
+@pytest.mark.parametrize("flag,field,value,extra", [
+    ("--ice-shortwave-scheme", "shortwave_scheme", "delta_eddington", []),
+    # each of these is INERT without its companion, and the builder refuses the
+    # inert form -- so pass the combination that actually runs.
+    ("--ice-itd-remap", "itd_remap", "lipscomb2001", ["--ice-categories", "5"]),
+    ("--ice-bulk-scheme", "bulk_scheme", "most", []),
+    ("--ice-stability-scheme", "stability_scheme", "grachev2007_sheba",
+     ["--ice-bulk-scheme", "most"]),
 ])
-def test_sea_ice_scheme_fields_are_selectable(flag, field, value):
+def test_sea_ice_scheme_fields_are_selectable(flag, field, value, extra):
     """`str` fields -- also unreachable via --params (:float-only)."""
-    cfg = mod.build_sea_ice_config(mod.build_parser().parse_args([flag, value]))
+    cfg = mod.build_sea_ice_config(
+        mod.build_parser().parse_args([flag, value] + extra))
     assert getattr(cfg, field) == value
 
 
@@ -266,7 +276,8 @@ def test_cli_sea_ice_config_survives_the_params_layer():
     from legoesm.driver.config import ExperimentConfig
     from legoesm.driver.coupled_config import CoupledConfig
 
-    ice = mod.build_sea_ice_config(mod.build_parser().parse_args(["--ice-ridging"]))
+    ice = mod.build_sea_ice_config(mod.build_parser().parse_args(
+        ["--ice-ridging", "--ice-categories", "5", "--ice-dynamics", "evp"]))
     p = Path(tempfile.mkdtemp()) / "params.json"
     p.write_text(json.dumps({"ice.ridging.e_star": 0.5}))
     out = mod.apply_coupled_params(str(p), "analytical", ExperimentConfig(),
@@ -311,3 +322,70 @@ def test_main_actually_threads_the_cli_sea_ice_config():
     )
     kw = {k.arg for k in driver_call.keywords}
     assert "ice_config" in kw, "CoupledESMDriver is not given ice_config"
+
+
+# --- no --ice-* flag may be silently INERT ---------------------------------
+#
+# Enabling a sub-model is not the same as reaching it. Codex found --ice-ridging
+# and --ice-itd-remap still did NOTHING at the defaults -- i.e. the sea-ice fix
+# had reproduced the --ddm mistake it was written to fix. These pin the guards.
+
+def test_ridging_rejects_the_defaults_that_make_it_inert():
+    """apply_ridging is gated on `is_multicat`, and its closing rate comes from
+    the ICE VELOCITY -- zero when dynamics='none'. So --ice-ridging at the
+    defaults (n_categories=1, dynamics='none') never runs at all."""
+    with pytest.raises(SystemExit, match="multi-category ice AND a dynamics"):
+        mod.build_sea_ice_config(mod.build_parser().parse_args(["--ice-ridging"]))
+
+
+def test_ridging_rejects_multicat_without_dynamics():
+    """Multi-category alone is not enough: the closing rate still needs a
+    velocity."""
+    with pytest.raises(SystemExit, match="multi-category ice AND a dynamics"):
+        mod.build_sea_ice_config(mod.build_parser().parse_args(
+            ["--ice-ridging", "--ice-categories", "5"]))
+
+
+def test_ridging_is_accepted_once_it_can_actually_run():
+    cfg = mod.build_sea_ice_config(mod.build_parser().parse_args(
+        ["--ice-ridging", "--ice-categories", "5", "--ice-dynamics", "evp"]))
+    assert cfg.ridging.enabled is True
+    assert cfg.n_categories == 5 and cfg.dynamics == "evp"
+
+
+def test_lipscomb_itd_remap_rejects_single_category():
+    """The ITD remap dispatch lives inside the is_multicat branch."""
+    with pytest.raises(SystemExit, match="needs multi-category ice"):
+        mod.build_sea_ice_config(mod.build_parser().parse_args(
+            ["--ice-itd-remap", "lipscomb2001"]))
+    cfg = mod.build_sea_ice_config(mod.build_parser().parse_args(
+        ["--ice-itd-remap", "lipscomb2001", "--ice-categories", "5"]))
+    assert cfg.itd_remap == "lipscomb2001"
+
+
+def test_ice_stability_scheme_rejects_the_constant_bulk_branch():
+    """The constant branch uses simple_bulk_fluxes and never reads stability."""
+    with pytest.raises(SystemExit, match="only read by the MOST bulk branch"):
+        mod.build_sea_ice_config(mod.build_parser().parse_args(
+            ["--ice-stability-scheme", "grachev2007_sheba"]))
+    cfg = mod.build_sea_ice_config(mod.build_parser().parse_args(
+        ["--ice-stability-scheme", "grachev2007_sheba",
+         "--ice-bulk-scheme", "most"]))
+    assert cfg.stability_scheme == "grachev2007_sheba"
+
+
+@pytest.mark.parametrize("scheme", ["constant", "most", "coare3", "large_yeager"])
+def test_ice_bulk_offers_every_scheme_the_dispatch_accepts(scheme):
+    """sea_ice._bulk_flux_dispatch accepts all four; the CLI offered only two
+    (codex). Note 'most' is GENUINE MOST here (ice roughness), unlike the
+    atmosphere where it silently degrades to constant -- which is why
+    VALID_SURFACE_BULK omits it but this list keeps it.
+    """
+    args = ["--ice-bulk-scheme", scheme]
+    if scheme != "constant":
+        pass  # no cross-field contract on the ice tile
+    cfg = mod.build_sea_ice_config(mod.build_parser().parse_args(args))
+    if scheme == "constant":
+        assert cfg is None      # == the default, nothing requested
+    else:
+        assert cfg.bulk_scheme == scheme

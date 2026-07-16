@@ -138,7 +138,12 @@ def build_params_bundle(coupled_cfg, coupler_config=None,
 #: SeaIceConfig scheme literals; each dispatch raises on anything else.
 _ICE_SHORTWAVE_SCHEMES = ("constant", "maykut_untersteiner", "delta_eddington")
 _ICE_ITD_REMAP = ("simple", "lipscomb2001")
-_ICE_BULK_SCHEMES = ("constant", "most")
+#: sea_ice._bulk_flux_dispatch accepts all four (the ICE tile runs genuine
+#: MOST with ice roughness -- unlike the ATMOSPHERE, where "most" silently
+#: degrades to constant, which is why VALID_SURFACE_BULK omits it).
+_ICE_BULK_SCHEMES = ("constant", "most", "coare3", "large_yeager")
+_ICE_MOST_SCHEMES = ("most", "coare3", "large_yeager")
+_ICE_DYNAMICS = ("none", "free_drift", "evp", "mevp")
 
 
 def build_sea_ice_config(args):
@@ -173,9 +178,58 @@ def build_sea_ice_config(args):
         v = getattr(args, flag, None)
         if v is not None and v != getattr(base, field):
             changed[field] = v
+    n_cat = getattr(args, "ice_categories", None)
+    if n_cat is not None and n_cat != base.n_categories:
+        changed["n_categories"] = n_cat
+    dyn = getattr(args, "ice_dynamics", None)
+    if dyn is not None and dyn != base.dynamics:
+        changed["dynamics"] = dyn
+
+    _reject_inert_sea_ice_combinations(args, changed, base)
     if not changed:
         return None
     return base._replace(**changed)
+
+
+def _reject_inert_sea_ice_combinations(args, changed, base) -> None:
+    """Refuse a flag that would parse and then do NOTHING.
+
+    Enabling a sub-model is not the same as reaching it. Each of these was
+    verified inert in its bad combination (codex), and a silently-inert flag is
+    the exact failure this branch exists to remove -- shipping one while fixing
+    the class would be indefensible.
+    """
+    n_cat = changed.get("n_categories", base.n_categories)
+    dyn = changed.get("dynamics", base.dynamics)
+    bulk = changed.get("bulk_scheme", base.bulk_scheme)
+
+    if getattr(args, "ice_ridging", False):
+        # apply_ridging runs only under `config.ridging.enabled and is_multicat
+        # and grid is not None`, and its closing rate derives from the ICE
+        # VELOCITY, which stays zero without a dynamics mode. So ridging with
+        # the defaults (n_categories=1, dynamics="none") never runs at all.
+        if n_cat <= 1 or dyn == "none":
+            raise SystemExit(
+                "--ice-ridging needs multi-category ice AND a dynamics mode: "
+                "apply_ridging is gated on is_multicat, and its closing rate "
+                "comes from the ice velocity, which is zero when "
+                f"dynamics='none'. Got --ice-categories {n_cat} "
+                f"--ice-dynamics {dyn!r}. Add e.g. `--ice-categories 5 "
+                "--ice-dynamics evp`."
+            )
+    if changed.get("itd_remap") == "lipscomb2001" and n_cat <= 1:
+        raise SystemExit(
+            "--ice-itd-remap lipscomb2001 needs multi-category ice: the ITD "
+            "remap dispatch lives inside the is_multicat branch, so with "
+            f"--ice-categories {n_cat} no remapping runs. Add "
+            "`--ice-categories 5`."
+        )
+    if getattr(args, "ice_stability_scheme", None) and bulk not in _ICE_MOST_SCHEMES:
+        raise SystemExit(
+            f"--ice-stability-scheme is only read by the MOST bulk branch; "
+            f"--ice-bulk-scheme {bulk!r} uses simple_bulk_fluxes and never "
+            f"consults stability functions. Add e.g. `--ice-bulk-scheme most`."
+        )
 
 
 def build_coupler_config(args):
@@ -701,6 +755,16 @@ def build_parser():
                              "(SeaIceConfig.ridging).")
     parser.add_argument("--ice-ponds", action="store_true",
                         help="CESM-style melt ponds (SeaIceConfig.ponds).")
+    parser.add_argument("--ice-categories", type=int, default=None,
+                        help="Number of ice-thickness categories (default 1 = "
+                             "single-category slab). Multi-category is REQUIRED "
+                             "by --ice-ridging and --ice-itd-remap lipscomb2001.")
+    parser.add_argument("--ice-dynamics", choices=list(_ICE_DYNAMICS),
+                        default=None,
+                        help="Sea-ice dynamics (default: none = thermodynamic "
+                             "slab with diagnostic free drift). Ridging needs a "
+                             "real mode: its closing rate comes from the ice "
+                             "velocity.")
     parser.add_argument("--ice-shortwave-scheme",
                         choices=list(_ICE_SHORTWAVE_SCHEMES), default=None,
                         help="Sea-ice shortwave scheme (default: constant).")
