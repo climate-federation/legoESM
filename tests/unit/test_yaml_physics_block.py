@@ -158,6 +158,45 @@ def test_physics_forcing_none_is_accepted_and_leaves_held_suarez_off():
     assert ec.held_suarez_forcing is False
 
 
+@pytest.mark.parametrize("bad_key", ["dynmaics", "dt", "resolution"])
+def test_unknown_atmosphere_key_raises(bad_key):
+    """Same contract as the physics block: an unrecognized ``atmosphere:`` key
+    is rejected, not silently dropped."""
+    with pytest.raises(ValueError, match="unknown atmosphere key"):
+        _ec({"atmosphere": {bad_key: "x"}})
+
+
+@pytest.mark.parametrize(
+    "retired_key",
+    ["equations", "advection", "spectral", "tracer_transport", "nonhydrostatic"],
+)
+def test_retired_atmosphere_keys_raise_with_guidance(retired_key):
+    """These keys were DECLARED in DEFAULT_CONFIG (and some shipped in
+    templates) while reaching no ExperimentConfig field — the silent-drop class.
+
+    They must now fail with migration guidance rather than a bare 'unknown key',
+    because a user who wrote one had every reason to believe it worked.
+    """
+    with pytest.raises(ValueError, match="no longer accepted"):
+        _ec({"atmosphere": {retired_key: "shallow_water"}})
+
+
+def test_no_default_config_key_is_self_rejecting():
+    """Every key DEFAULT_CONFIG declares must be in the allowlist.
+
+    The allowlist runs on the DEEP-MERGED data, so a key left in DEFAULT_CONFIG
+    but absent from _ATMOSPHERE_KEYS would be injected into every config and
+    then rejected — breaking every single run. This pins the two in sync.
+    """
+    from legoesm.config import DEFAULT_CONFIG, _ATMOSPHERE_KEYS
+    declared = set(DEFAULT_CONFIG["atmosphere"])
+    assert declared <= set(_ATMOSPHERE_KEYS), (
+        f"DEFAULT_CONFIG['atmosphere'] declares {sorted(declared - set(_ATMOSPHERE_KEYS))} "
+        "which the allowlist would reject on every config"
+    )
+    _ec({})  # the merged default config must still translate
+
+
 def test_time_integrator_reaches_dycore_config():
     """``atmosphere.time_integrator`` is declared in DEFAULT_CONFIG and written
     by the experiment wizard (wizard_core: "atmosphere.time_integrator"), but

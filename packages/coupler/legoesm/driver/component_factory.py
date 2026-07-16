@@ -301,6 +301,30 @@ def create_atmosphere_dycore(
         model_type, discretization, grid_type, solver_name,
     )
 
+    def _reject_unselectable_time_integrator(path: str) -> None:
+        """Raise unless ``dc.time_integrator`` is left at the grid-aware default.
+
+        These solver branches build their config with the scheme's OWN outer
+        integrator and never read ``dc.time_integrator``, so an explicit choice
+        was SILENTLY IGNORED and the run used a different integrator than the
+        user asked for.  That is reachable from ``run_amip --time-integrator``
+        and (since the nested-YAML boundary began mapping the key) from
+        ``atmosphere.time_integrator`` too.
+
+        Mirrors the spectral-hydrostatic guard below: reject an unsupported
+        EXPLICIT selection with a clear message rather than overriding it in
+        silence.  ``auto`` and the DycoreConfig default mean "no deliberate
+        choice" and are tolerated.
+        """
+        _default = type(dc)().time_integrator
+        if dc.time_integrator not in ("auto", _default):
+            raise ValueError(
+                f"{path} does not implement a selectable time_integrator (its "
+                f"outer integrator is fixed by the scheme); got "
+                f"dycore.time_integrator={dc.time_integrator!r}. Use 'auto' "
+                f"(the default), or select a solver that supports it."
+            )
+
     # ----- Cubed-sphere C-D grid solvers -----
     if solver_name == "cdgrid_shallow_water":
         # FV3 single-implementation program M2 (2026-07-13, codex-reviewed):
@@ -380,6 +404,7 @@ def create_atmosphere_dycore(
         return CDGridPrimitiveEquationModel(grid, sigma, cfg)
 
     if solver_name == "cdgrid_compressible_euler":
+        _reject_unselectable_time_integrator("cubed-sphere non-hydrostatic (compressible Euler)")
         from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
             CDGridCompressibleEulerModel, CDGridCompressibleEulerConfig,
         )
@@ -415,6 +440,7 @@ def create_atmosphere_dycore(
 
     # ----- Spectral solvers (Gaussian grid) -----
     if solver_name == "spectral_shallow_water":
+        _reject_unselectable_time_integrator("spectral shallow water")
         from legoesm.atmosphere.dynamics.gcm.spectral_sw import SpectralShallowWaterModel
         return SpectralShallowWaterModel(grid=grid)
 
@@ -458,6 +484,7 @@ def create_atmosphere_dycore(
         )
 
     if solver_name == "spectral_compressible_euler":
+        _reject_unselectable_time_integrator("spectral non-hydrostatic (compressible Euler)")
         from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
             SpectralCompressibleEulerModel, SpectralNHConfig,
         )
@@ -521,6 +548,7 @@ def create_atmosphere_dycore(
         return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma, config=cfg)
 
     if solver_name == "mpas_compressible_euler":
+        _reject_unselectable_time_integrator("MPAS non-hydrostatic (compressible Euler)")
         from legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas import (
             MPASCompressibleEulerModel, MPASCompressibleEulerConfig,
         )
@@ -551,6 +579,7 @@ def create_atmosphere_dycore(
 
     # ----- Doubly-periodic plane -----
     if solver_name == "plane_compressible_euler":
+        _reject_unselectable_time_integrator("plane non-hydrostatic (compressible Euler)")
         from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
             CompressibleEulerConfig,
         )
@@ -684,6 +713,7 @@ def create_atmosphere_dycore(
             )
 
     if solver_name == "latlon_cgrid_shallow_water":
+        _reject_unselectable_time_integrator("lat-lon C-grid shallow water")
         from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
             CGridLatLonShallowWaterModel, CGridLatLonShallowWaterConfig,
         )
@@ -741,15 +771,18 @@ def create_atmosphere_dycore(
 
     # ----- SFNO data-driven -----
     if solver_name == "sfno_shallow_water":
+        _reject_unselectable_time_integrator("SFNO shallow water")
         from legoesm.atmosphere.dynamics.neural.sfno_sw import SFNOShallowWaterModel
         return SFNOShallowWaterModel(grid=grid)
 
     if solver_name == "sfno_primitive_equations":
+        _reject_unselectable_time_integrator("SFNO primitive equations")
         from legoesm.atmosphere.dynamics.neural.sfno_pe import SFNOPrimitiveEquationModel
         return SFNOPrimitiveEquationModel(grid=grid, sigma_coord=sigma)
 
     # ----- U-Cast data-driven (convolutional U-Net emulator) -----
     if solver_name == "ucast_primitive_equations":
+        _reject_unselectable_time_integrator("u_cast primitive equations")
         from legoesm.atmosphere.dynamics.neural.ucast_pe import (
             UCastPrimitiveEquationConfig,
             UCastPrimitiveEquationModel,

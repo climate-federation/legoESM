@@ -57,6 +57,54 @@ _PHYSICS_KEYS: frozenset[str] = frozenset({
     "radiation",
 })
 
+# Recognized children of the nested ``atmosphere:`` block — every one is mapped
+# in ``to_experiment_config``.  Same contract as ``_PHYSICS_KEYS``: an
+# unrecognized key is REJECTED rather than dropped in silence.
+_ATMOSPHERE_KEYS: frozenset[str] = frozenset({
+    "dynamics",
+    "discretization",
+    "time_integrator",
+    "dt_seconds",
+    "hyperdiffusion_coeff",
+})
+
+# Keys this dialect used to DECLARE while wiring them to nothing.  They are
+# rejected with migration guidance rather than a bare "unknown key", because a
+# user who wrote one had every reason to think it worked: they were documented
+# in DEFAULT_CONFIG and (for advection/equations) shipped in the templates.
+_ATMOSPHERE_RETIRED: dict[str, str] = {
+    "equations": (
+        "the legacy 'equations' key never reached ExperimentConfig on this "
+        "path (DEFAULT_CONFIG always supplied 'dynamics', so the axis-based "
+        "branch of resolve_solver_name always won and 'equations' was "
+        "ignored) -- a legacy 'equations: hydrostatic' silently ran "
+        "shallow_water. Use the canonical axes: dynamics + discretization"
+    ),
+    "advection": (
+        "'advection' mapped to no ExperimentConfig field and had no reader "
+        "anywhere in the tree; the atmosphere has no tracer-advection "
+        "selector. Remove it (the dycore's advection follows from "
+        "'discretization')"
+    ),
+    "spectral": (
+        "'atmosphere.spectral.allow_unsupported' is only honored when a raw "
+        "Config is handed to the spectral constructors; ModelDriver builds "
+        "grids from ExperimentConfig, which has no such field, so this block "
+        "is dropped on the 'legoesm run' path. Remove it until a canonical "
+        "field exists"
+    ),
+    "tracer_transport": (
+        "'atmosphere.tracer_transport' has no runtime reader and reaches no "
+        "ExperimentConfig field. Remove it"
+    ),
+    "nonhydrostatic": (
+        "'atmosphere.nonhydrostatic' (n_acoustic_substeps / sponge_* / "
+        "small_earth_factor / model_top_m) reaches no ExperimentConfig field: "
+        "the NH factories use their own defaults and hard-code the model top. "
+        "Remove it until these are wired"
+    ),
+}
+
 
 def _normalize_discretization(raw: str) -> str:
     """Map a legacy discretization name to its canonical form."""
@@ -84,6 +132,40 @@ def _normalize_dynamics(raw: str) -> str:
         )
         return canonical
     return raw
+
+
+def _require_known_keys(
+    block: Any,
+    name: str,
+    allowed: frozenset[str],
+    retired: dict[str, str] | None = None,
+) -> dict:
+    """Reject unrecognized children of a nested YAML block.
+
+    This boundary's defining bug was that it *accepted* a key, ignored it, and
+    ran something else -- so an unmapped key must fail LOUDLY here rather than
+    reaching ``experiment_config_from_dict``, which drops unknown keys in
+    silence.  ``retired`` carries per-key migration guidance for keys this
+    dialect used to declare while wiring them to nothing.
+    """
+    if block is None:
+        raise ValueError(
+            f"{name}: must be a mapping, got None -- write '{name}: {{}}' or "
+            "omit the block entirely"
+        )
+    if not isinstance(block, dict):
+        raise ValueError(
+            f"{name}: must be a mapping, got {type(block).__name__} "
+            f"({block!r})"
+        )
+    retired = retired or {}
+    for key in sorted(set(block) - allowed):
+        if key in retired:
+            raise ValueError(f"{name}.{key} is no longer accepted: {retired[key]}")
+        raise ValueError(
+            f"unknown {name} key {key!r}; valid keys are {sorted(allowed)}"
+        )
+    return block
 
 
 # Default configuration
@@ -114,11 +196,16 @@ DEFAULT_CONFIG = {
         #
         # Legacy aliases "centered", "finite_volume", "cgrid" are accepted
         # and normalized to "cdgrid" at the boundary.
-        # The legacy "equations" key is still supported for backward
-        # compatibility and takes precedence when set explicitly.
+        #
+        # NOTE: every key declared here MUST be mapped in
+        # ``to_experiment_config`` and listed in ``_ATMOSPHERE_KEYS``.  A key
+        # declared but not mapped is silently discarded at the boundary -- the
+        # defect class this schema is now gated against.  The removed
+        # ``equations`` / ``advection`` / ``spectral`` / ``tracer_transport`` /
+        # ``nonhydrostatic`` entries were exactly that: declared, documented,
+        # and wired to nothing.
         "dynamics": "shallow_water",
         "discretization": "cdgrid",
-        "equations": "shallow_water",   # legacy; use dynamics+discretization
         # Mirrors DycoreConfig.time_integrator's default so an unset config
         # keeps resolving the integrator grid-aware.  It was "ssp_rk3" while the
         # key was never mapped -- i.e. inert; mapping it with that stale default
@@ -126,20 +213,6 @@ DEFAULT_CONFIG = {
         "time_integrator": "auto",
         "dt_seconds": 600,          # 10 minutes
         "hyperdiffusion_coeff": 0.0,
-        "spectral": {
-            "allow_unsupported": False,  # bypass Metal backend guard
-        },
-        "tracer_transport": {
-            "n_tracers": 4,
-            "hyperdiffusion_coeff": 0.0,
-        },
-        "nonhydrostatic": {
-            "n_acoustic_substeps": 6,
-            "sponge_width_m": 10000.0,
-            "sponge_coeff": 0.05,
-            "small_earth_factor": 1.0,
-            "model_top_m": 40000.0,
-        },
     },
     "conservation": {
         "fix_mass": True,
@@ -270,25 +343,15 @@ class Config:
         # flag and ``fix_mass`` on the canonical dycore config.
         fix_mass = d.get("conservation", {}).get("fix_mass", True)
 
-        # An UNKNOWN ``physics:`` child must fail loudly.  Mapping only the
-        # recognized keys would leave the very defect this block fixes: a typo
+        # An UNKNOWN child of either block must fail loudly.  Mapping only the
+        # recognized keys would leave the very defect these blocks fix: a typo
         # (``convectoin: bechtold``) or the canonical-but-wrong spelling
         # (``cloud_scheme:`` instead of ``clouds:``) would be dropped in silence
         # and the run would proceed on defaults.
-        if not isinstance(physics, dict):
-            raise ValueError(
-                f"physics: must be a mapping of scheme selectors, got "
-                f"{type(physics).__name__} ({physics!r}); use 'physics: {{}}' "
-                "or omit the block entirely"
-            )
-        _unknown = set(physics) - _PHYSICS_KEYS
-        if _unknown:
-            raise ValueError(
-                f"unknown physics key(s) {sorted(_unknown)}; valid keys are "
-                f"{sorted(_PHYSICS_KEYS)}. (The ExperimentConfig field is named "
-                "'cloud_scheme', but the YAML key is 'clouds' -- matching "
-                "run_amip's --clouds.)"
-            )
+        physics = _require_known_keys(physics, "physics", _PHYSICS_KEYS)
+        atm = _require_known_keys(
+            atm, "atmosphere", _ATMOSPHERE_KEYS, _ATMOSPHERE_RETIRED
+        )
 
         # ``physics.forcing`` selects an idealized forcing.  Held-Suarez (1994)
         # Newtonian relaxation + Rayleigh drag is the only one with a canonical
