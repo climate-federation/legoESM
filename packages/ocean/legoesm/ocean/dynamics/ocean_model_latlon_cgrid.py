@@ -1547,6 +1547,31 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"pgf_quadrature must be one of {_valid_pgf_quad}, "
                 f"got {_pgf_quad!r}")
+        _bt_split = getattr(config, "barotropic_coriolis_split", "frozen")
+        if _bt_split not in ("frozen", "live"):
+            raise ValueError(
+                "Unknown barotropic_coriolis_split scheme: must be one of "
+                f'("frozen", "live"), got {_bt_split!r}')
+        if _bt_split == "live":
+            if getattr(config, "coriolis_scheme", "matsuno_split") != "explicit_ab2":
+                raise ValueError(
+                    'barotropic_coriolis_split="live" requires '
+                    'coriolis_scheme="explicit_ab2" (the frozen F_slow must '
+                    "contain the planetary Coriolis depth-mean for the "
+                    "pre-step subtraction to be exact). Got coriolis_scheme="
+                    f'{getattr(config, "coriolis_scheme", "matsuno_split")!r}.')
+            if config.barotropic.barotropic_solver != "explicit_substep":
+                raise ValueError(
+                    'barotropic_coriolis_split="live" is implemented for the '
+                    'explicit_substep barotropic solver only; got '
+                    f"{config.barotropic.barotropic_solver!r}.")
+            if getattr(config.barotropic, "barotropic_slow_forcing_ab2", False):
+                raise ValueError(
+                    'barotropic_coriolis_split="live" is incompatible with '
+                    "barotropic_slow_forcing_ab2=True: the AB2-blended F_slow "
+                    "Coriolis (1.5*cor^n - 0.5*cor^(n-1)) would not cancel the "
+                    "single-time pre-step subtraction, leaving a transient "
+                    "residual planetary Coriolis in the forcing.")
         _valid_time_int = {"euler", "ab2", "rk3"}
         if config.tracer_time_integrator not in _valid_time_int:
             raise ValueError(
@@ -2398,6 +2423,42 @@ class LatLonCGridOceanModel:
             _add_bt_cor = (
                 getattr(self.config, "coriolis_scheme", "matsuno_split")
                 != "explicit_ab2")
+            if (not _add_bt_cor) and getattr(
+                    self.config, "barotropic_coriolis_split",
+                    "frozen") == "live":
+                # NEMO dynspg_ts structure (dynspg_ts.F90:296-300 + :689):
+                # remove the PRE-step 2D barotropic Coriolis from the frozen
+                # forcing (leaving baroclinic-only F_slow, NEMO's zu_frc), then
+                # integrate a LIVE f x U every substep so the barotropic mode
+                # holds geostrophic balance with the evolving eta inside the
+                # window (the frozen form lags Coriolis by dt and cripples the
+                # gyre's U_bar response to grad-eta). SAME face stencils as the
+                # substep loop (4-pt V-to-u; interp_u_to_vface_4pt), so the
+                # subtraction cancels the live term exactly at the pre-step
+                # state (EXACT on a beta-plane with flat full-cell bathymetry,
+                # where the 4-pt average and the depth-mean commute; else an
+                # O(dx^2)/topographic residual remains). Signs mirror the 3D
+                # coriolis_cgrid (+f*v_at_u on u; -f*u_at_v on v).
+                from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                    interp_u_to_vface_4pt,
+                )
+                from legoesm.ocean.dynamics.barotropic_common import (
+                    coriolis_at_faces,
+                )
+                _f_u2, _f_v2 = coriolis_at_faces(_grid, F_slow_u.dtype)
+                _u_pre3, _v_pre3 = state.u.data, state.v.data
+                _U_pre = (jnp.sum(_u_pre3 * h_u_pre, axis=-1)
+                          / jnp.maximum(H_u_pre, 1e-10))
+                _V_pre = (jnp.sum(_v_pre3 * h_v_pre, axis=-1)
+                          / jnp.maximum(H_v_pre, 1e-10))
+                _V_w = jnp.roll(_V_pre, 1, axis=1)
+                _V_at_u = 0.25 * (_V_pre[:-1] + _V_pre[1:]
+                                  + _V_w[:-1] + _V_w[1:])
+                _V_at_u = jnp.concatenate([_V_at_u, _V_at_u[:, 0:1]], axis=1)
+                _U_at_v = interp_u_to_vface_4pt(_U_pre, _grid)
+                F_slow_u = (F_slow_u - _f_u2 * _V_at_u) * state.u_mask.data
+                F_slow_v = (F_slow_v + _f_v2 * _U_at_v) * state.v_mask.data
+                _add_bt_cor = True
             if self.config.barotropic.barotropic_wide_halo:
                 # Opt-in wide-halo subcycle: one fused wide exchange per
                 # chunk of substeps instead of ~4 pads/substep (scaling-

@@ -1599,6 +1599,27 @@ class LatLonCGridOceanConfig(NamedTuple):
     # docs/ocean/fidelity/mitgcm_gyre_energy_conservation.md).  On an f-plane the
     # two forms agree.  Applies to matsuno_split + implicit_cn/rigid_lid.
     coriolis_energy_conserving: bool = False
+    # Barotropic-mode Coriolis treatment under coriolis_scheme="explicit_ab2"
+    # with the explicit_substep solver:
+    #   "frozen" (default) — f×U_bar enters the subcycle only through the
+    #       frozen F_slow depth-mean (pre-step value, lagged by dt). No
+    #       in-substep f×U (avoids the C-grid 4-pt rotational null mode).
+    #   "live" — NEMO dynspg_ts structure (:296-300 + :689): the PRE-step 2D
+    #       barotropic Coriolis is SUBTRACTED from F_slow (leaving the
+    #       baroclinic-only forcing) and a LIVE f×U is integrated every
+    #       substep, so the barotropic mode holds geostrophic balance with
+    #       the evolving eta INSIDE the window. Same face stencils on both
+    #       sides => the cancellation is EXACT on a BETA-PLANE (linear f)
+    #       with FLAT full-cell bathymetry (the lateral 4-pt average and the
+    #       depth-mean commute only then); spherical f or partial cells leave
+    #       an O(dx^2)/topographic residual. CAUTION: re-enables the
+    #       in-substep C-grid 4-pt Coriolis rotational null mode — validated
+    #       only for the laminar beta-plane gyre, NOT for eddying/turbulent
+    #       regimes. Requires coriolis_scheme="explicit_ab2" +
+    #       explicit_substep, and is incompatible with
+    #       barotropic_slow_forcing_ab2 (the AB2-blended F_slow Coriolis
+    #       would leave a transient residual).
+    barotropic_coriolis_split: str = "frozen"
 
     # --- AB2 extrapolation scope (Veros-faithful dissipative placement) ---
     # Selects WHICH explicit tendencies the AB2 outer integrator extrapolates:

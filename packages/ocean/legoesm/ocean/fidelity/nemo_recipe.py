@@ -850,8 +850,14 @@ def build_nemo_gyre_recipe(
     # barotropic/baroclinic split and frozen stage-1 F_slow are legoESM-specific.
     # The barotropic mode gets Coriolis via the F_slow depth-mean (explicit_substep
     # gates its in-substep f×U off).
+    # barotropic_coriolis_split="live" = NEMO dynspg_ts: pre-step 2D Coriolis
+    # subtracted from the frozen forcing + LIVE f×U every substep, so U_bar
+    # holds geostrophic balance with the evolving eta (the frozen form lags by
+    # dt; measured: eta matched NEMO but the velocity sat at ~25% of its own
+    # geostrophic value vs NEMO's 60%).
     model_config = model_config._replace(
-        physics=physics_config, coriolis_scheme="explicit_ab2")
+        physics=physics_config, coriolis_scheme="explicit_ab2",
+        barotropic_coriolis_split="live")
 
     return NEMORecipe(
         model_config=model_config,

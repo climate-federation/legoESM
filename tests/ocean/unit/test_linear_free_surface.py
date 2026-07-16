@@ -140,3 +140,49 @@ def test_linssh_surface_dilution_sign():
             np.asarray(vfd)[..., 0], expect, rtol=0, atol=1e-15,
             err_msg=f"linssh_top_flux={flag}: F[0] must be {expect} "
                     "(dilution sign; a flip would ANTI-dilute)")
+
+
+def test_barotropic_coriolis_split_validation_and_nonvacuity():
+    """barotropic_coriolis_split: typo raises; "live" requires explicit_ab2 +
+    explicit_substep; and the live split actually changes the step (non-vacuous)
+    while staying finite."""
+    import pytest
+
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.fidelity.nemo_recipe import (
+        _NEMO_GYRE_DT_S,
+        build_nemo_gyre_recipe,
+        nemo_gyre_wind_forcing,
+    )
+
+    r = build_nemo_gyre_recipe()
+    assert r.model_config.barotropic_coriolis_split == "live"
+
+    with pytest.raises(ValueError, match="barotropic_coriolis_split"):
+        LatLonCGridOceanModel(
+            r.grid, r.z_coord,
+            r.model_config._replace(barotropic_coriolis_split="typo"))
+    with pytest.raises(ValueError, match="explicit_ab2"):
+        LatLonCGridOceanModel(
+            r.grid, r.z_coord,
+            r.model_config._replace(coriolis_scheme="matsuno_split"))
+
+    st = r.initial_state
+    n_lat, n_lon = st.T.data.shape[0], st.T.data.shape[1]
+    sf = nemo_gyre_wind_forcing(n_lat, n_lon, 0.0)
+    m_live = LatLonCGridOceanModel(r.grid, r.z_coord, r.model_config)
+    m_frozen = LatLonCGridOceanModel(
+        r.grid, r.z_coord,
+        r.model_config._replace(barotropic_coriolis_split="frozen"))
+    a = m_live.step(st, dt=_NEMO_GYRE_DT_S, surface_forcing=sf)
+    b = m_frozen.step(st, dt=_NEMO_GYRE_DT_S, surface_forcing=sf)
+    for f in (a.u.data, a.v.data, a.eta.data):
+        assert bool(jnp.all(jnp.isfinite(f)))
+    # non-vacuous: live vs frozen differ once the flow is nonzero (after the
+    # first step u=0 -> the pre-step subtraction is 0 and live f x U acts on
+    # the in-window transport; one more step from the evolved state).
+    a2 = m_live.step(a, dt=_NEMO_GYRE_DT_S, surface_forcing=sf)
+    b2 = m_frozen.step(b, dt=_NEMO_GYRE_DT_S, surface_forcing=sf)
+    assert float(jnp.max(jnp.abs(a2.u.data - b2.u.data))) > 0.0
