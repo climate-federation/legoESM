@@ -9,9 +9,13 @@ PR-sized unit with its own codex review.
 
 ## Ground truth (Phase-0 outcomes this program builds on)
 
-- The FB chain (`fv3_fb_sw_step`, duogrid-only) is the algorithmically
-  faithful FV3 SW core: c_sw → p_grad_c → d_sw1..6, covariant winds
-  internally (entry/exit conversion `fb_v_d_to_covariant/orthogonal`).
+- The FB chain (`fv3_fb_sw_step`, duogrid-only) reproduces the FV3 SW core
+  *chain structure*: c_sw → p_grad_c → d_sw1..6, covariant winds internally
+  (entry/exit conversion `fb_v_d_to_covariant/orthogonal`).  NOTE: not yet
+  fully Fortran-faithful — the d_sw5 cross-face halo is the stable zero-ring
+  approximation (the faithful ghost destabilises; `fv3_sw_core.py:3205`),
+  and native seam angles + that zero-ring halo blow W2 up at C36 (see
+  `docs/dycore/fv3_native_p4c_oracle.md`).
 - Validated FB damping preset for vortex cases:
   `nord=1, d4_bg=0.16, dddmp=0.2, damp_v=0.02, nord_v=2` (120-day modon
   clean, mass 1e-15). W2-class steady flows carry a ~1.3 m/s/day linear

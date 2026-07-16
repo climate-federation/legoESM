@@ -100,27 +100,34 @@ metrics (imprint 43.8→58.9, WORSE); D→E = native seam angles (→ blow-up).
    is already the best cube and is close to lat-lon / MPAS** (L2 4.68e-4 vs
    lat-lon 1.41e-3, MPAS 1.25e-4).  The science goal — cube W2 close to
    other grids — is met on the *production* configuration.
-2. The FV3-native **ED grid does NOT reduce imprint under either solver**
-   at C36 with these configs: A-L 0.54→22.5, FB 43.8→58.9.  The A-L config
-   is tuned for the equiangular discretisation and does not transfer
+2. The FV3-native **ED grid does NOT reduce imprint** in the one clean
+   single-factor test available: **C→D (FB core, ED metrics only, duo +
+   config held) goes 43.8→58.9 — WORSE.**  A→B (A-L 0.54→22.5) is
+   *bundled* (it also flips no-duo→duo), so it is not an ED-only datum; it
+   only shows the equiangular-tuned A-L config does not transfer to ED+duo
    (`cubed_sphere_cdgrid.py:639`).
-3. The **FB core is ~80× worse than the tuned A-L solver** on W2 imprint
-   even on the equiangular grid (43.8 vs 0.54) — the M1 preset is a
-   coarse, un-tuned damping, not a calibrated production config.
-4. **Native seam angles blow the FB core up (row E → NaN).**  This is the
-   matched-pair problem: FV3 uses the native cross-face seam angles
-   *together with* the faithful d_sw5 cross-face halo.  legoESM has the
-   native angles but the FB `d_sw5` still runs the *stable zero-ring*
-   approximation (the faithful attenuated ghost itself destabilises the
-   modon run; `fv3_sw_core.py:3205`).  Native angles without the matching
-   faithful halo is inconsistent → instability.
+3. Row A (0.54) vs row C (43.8) is a **~80× gap between the tuned
+   production A-L config and the FB M1 config** — but this is a *bundled*
+   difference (solver A-L↔FB, no-duo↔duo halo, AND damping/calibration),
+   so the observation is valid but is NOT attributable to the FB core
+   alone.  The M1 preset is a coarse, un-tuned damping, not a calibrated
+   production config.
+4. **Native seam angles + the current FB halo blow the FB core up (row
+   E → NaN).**  What D→E cleanly establishes: native cross-face seam angles
+   *with the FB `d_sw5` zero-ring halo* are inconsistent → instability.
+   HYPOTHESIS (untested here): FV3 pairs the native seam angles *with* the
+   faithful d_sw5 cross-face halo, and legoESM currently runs the stable
+   zero-ring approximation instead (the faithful attenuated ghost itself
+   destabilises the modon run; `fv3_sw_core.py:3205`) — so the matched
+   faithful halo may be the missing piece.  D→E does NOT itself test the
+   faithful halo.
 
 **Consequence for "full FV3 faithful portability":** the *kernels* are
 certified bit-exact (c_sw / d_sw / divergence_corner_duo), and the
 *production* cube already meets the science goal on the equiangular grid.
-But the *assembled native-grid FB path* (ED + native angles + faithful
-cross-face halo) is NOT yet consistent — row E blow-up localises the gap
-to the native-angle ⇄ faithful-d_sw5-halo pairing.  The next brick is to
-port that matched pair together and stabilise it, rather than swapping the
-grid under the A-L solver (which is not FV3's scheme and is tuned for
-equiangular).
+But the *assembled native-grid FB path* (ED + native angles, currently with
+the FB zero-ring `d_sw5` halo) is NOT yet consistent — row E blows up.  The
+proposed next brick (a hypothesis, not established by this battery) is to
+port and stabilise the native-angle ⇄ faithful-d_sw5-halo pair *together*,
+rather than swapping the grid under the A-L solver (which is not FV3's
+scheme and is tuned for equiangular).

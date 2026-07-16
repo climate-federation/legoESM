@@ -600,11 +600,13 @@ from legoesm.experiments.matrix.namelist import write_case_namelist
 # ---------------------------------------------------------------------------
 # Cube SW core selection (FV3 single-implementation program, Phase-1 M1)
 # ---------------------------------------------------------------------------
-# ``--sw-core fb`` routes the cubed-sphere SW cases through the faithful FV3
+# ``--sw-core fb`` routes the cubed-sphere SW cases through the FV3
 # forward-backward chain (``FV3FBShallowWaterModel`` + the M1 validated
 # preset from ``fb_m1_preset_config``) instead of the production A-L RK3
-# path, enabling a permanent A/B until the Phase-1 M2 default flip.  Cube
-# only; every other grid ignores the flag.  NOTE: the cube cosine-bell cases
+# path, enabling a permanent A/B until the Phase-1 M2 default flip.  (The FB
+# d_sw5 cross-face halo is the stable zero-ring approximation, not the fully
+# Fortran-faithful ghost; fv3_sw_core.py:3205.)  Cube only; every other grid
+# ignores the flag.  NOTE: the cube cosine-bell cases
 # never call ``model.step`` (pure ``fv_tp_2d`` transport with streamfunction
 # fluxes shared by both cores), so they are core-independent by construction.
 _SW_CORE_CHOICES = ("production", "fb")
