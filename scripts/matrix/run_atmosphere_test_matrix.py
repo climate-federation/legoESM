@@ -627,25 +627,53 @@ _SW_CORE = "production"
 # operator behaviour, not only geometry, so the resulting A/B is "legacy
 # default vs FV3-native production config", NOT an isolated ED-vs-
 # equiangular metric swap.  Solver, config, IC, dt, resolution ARE held
-# fixed.  Incompatible with --sw-core fb (which rebuilds its own grid);
-# that combination raises.
+# fixed.  Applies to BOTH cube SW lanes: the production A-L solver swaps
+# its grid, and the FB core (--sw-core fb, the ED grid's intended
+# consumer) builds ED in _fb_cube_sw_model.
 _FV3_NATIVE_GRID = False
+# --fv3-native-angles (phase-4c, FB lane only): on top of --fv3-native-grid,
+# select the exact grid_utils_init cross-face seam cosa_u/v, sina_u/v (the
+# faithful FV3 config).  The A-L production solver's operators are TUNED to
+# the legacy single-sided seam angles (cubed_sphere_cdgrid.py:639), so this
+# is a native-forward-backward-core decision — it requires --sw-core fb AND
+# --fv3-native-grid; main() rejects the other combinations.
+_FV3_NATIVE_ANGLES = False
 
 
-def _fb_cube_sw_model(n: int, test_num: int):
+def _fb_cube_sw_model(n: int, test_num: int, *, fv3_native_grid: bool = False,
+                      fv3_native_angles: bool = False):
     """Build the FB-lane cube SW model (duogrid-only; M1 preset).
 
     The FB chain requires the duogrid cross-face halo (``require_duogrid_fb``
     raises otherwise), so ALL FB-lane cases use ``use_duogrid=True`` — unlike
     the production lane where only the modons (test 8) do.  Modons stay
     non-rotating (omega=0), matching the production lane.
+
+    ``fv3_native_grid`` (phase-4c): build the FV3-native ED gnomonic grid
+    (create_fv3_native_cubed_sphere) instead of the legacy equiangular — the
+    FB core is the ED grid's intended consumer.  ``fv3_native_angles`` then
+    additionally selects the exact cross-face seam cosa/sina (the faithful
+    FV3 config); it requires ``fv3_native_grid`` (the seam angles are an ED
+    concept).  Both default False → the equiangular+duo FB baseline.
     """
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         FV3FBShallowWaterModel, fb_m1_preset_config)
-    grid = (create_cubed_sphere(n, omega=0.0, use_duogrid=True)
-            if test_num == 8 else create_cubed_sphere(n, use_duogrid=True))
-    return FV3FBShallowWaterModel(grid, fb_m1_preset_config())
+    from legoesm.grids.cubed_sphere import (
+        create_cubed_sphere, create_fv3_native_cubed_sphere)
+    if fv3_native_angles and not fv3_native_grid:
+        raise ValueError(
+            "fv3_native_angles requires fv3_native_grid: the cross-face "
+            "seam angles are defined on the ED gnomonic grid.")
+    if fv3_native_grid:
+        from legoesm import constants
+        grid = create_fv3_native_cubed_sphere(
+            n, omega=(0.0 if test_num == 8 else constants.Omega),
+            use_duogrid=True, k2e_nord=4)
+    else:
+        grid = (create_cubed_sphere(n, omega=0.0, use_duogrid=True)
+                if test_num == 8 else create_cubed_sphere(n, use_duogrid=True))
+    return FV3FBShallowWaterModel(grid, fb_m1_preset_config(),
+                                  fv3_native_angles=fv3_native_angles)
 
 
 def _modon_hyperdiff_coeff(n: int) -> float:
@@ -2464,18 +2492,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # (day-10 max|u| 18 m/s vs 111 m/s, peak vorticity 0.7x vs 6.6x
         # initial).  Williamson cases keep the production non-duogrid
         # path (balanced flows; calibrated separately).
-        if _FV3_NATIVE_GRID and _SW_CORE == "fb":
-            # The FB core rebuilds its OWN grid (_fb_cube_sw_model below),
-            # so --fv3-native-grid would be silently discarded — a
-            # contradictory request.  Fail loudly rather than mislabel an
-            # FB run as native (codex p4c flag-review P1; main() rejects it
-            # too, this is the defense-in-depth for non-CLI callers).
-            raise ValueError(
-                "--fv3-native-grid is incompatible with --sw-core fb: the "
-                "FB core rebuilds its own grid, so the native-grid "
-                "selection would be silently discarded. Use --sw-core "
-                "production (the default).")
-        if _FV3_NATIVE_GRID:
+        if _FV3_NATIVE_GRID and _SW_CORE == "production":
             # phase-4c: the FV3-native production grid config = ED gnomonic
             # + duo halos (order-4) on ALL cube SW cases.  omega=0 for the
             # non-rotating modons (test 8), rotating otherwise
@@ -2640,7 +2657,14 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # everything downstream (IC recipe, metrics, regrid) is shared with
         # the production lane so the A/B protocol is held fixed.
         if _SW_CORE == "fb":
-            model = _fb_cube_sw_model(n, test_num)
+            # The FB core is the FV3-native grid's intended consumer: it
+            # honours --fv3-native-grid (ED gnomonic) and, on top, the
+            # --fv3-native-angles seam-cosa/sina opt-in (the faithful FV3
+            # config).  It builds its own grid, so the production-lane
+            # `grid`/`cdgrid` above are discarded here.
+            model = _fb_cube_sw_model(
+                n, test_num, fv3_native_grid=_FV3_NATIVE_GRID,
+                fv3_native_angles=_FV3_NATIVE_ANGLES)
             grid = model.grid
         elif _SW_CORE == "production":
             model = FV3EdgeShallowWaterModel(grid, config)
@@ -7746,18 +7770,25 @@ def build_parser() -> argparse.ArgumentParser:
              "(pure transport, model.step never called).")
     p.add_argument(
         "--fv3-native-grid", action="store_true",
-        help="Cube SW production lane: build the grid as the FV3-native "
-             "PRODUCTION config — ED gnomonic + duo halos "
-             "(create_fv3_native_cubed_sphere) — instead of the legacy "
+        help="Cube SW: build the grid as the FV3-native ED gnomonic + duo "
+             "halos (create_fv3_native_cubed_sphere) instead of the legacy "
              "equiangular, no-duo default.  The ED gnomonic family is the "
              "one certified bit-exact in the phase-4 one-step oracles; its "
              "metrics flow through create_cubed_sphere_cdgrid's "
-             "gnomonic='auto'.  NOTE: vs the default this flips BOTH the "
-             "gnomonic family AND the cross-face halo (duo), so it is a "
-             "'legacy default vs FV3-native config' A/B, not an isolated "
-             "ED-vs-equiangular swap (solver+config+IC+dt+resolution held "
-             "fixed).  Production core only — incompatible with --sw-core "
-             "fb (which rebuilds its own grid); non-cube grids ignore it.")
+             "gnomonic='auto'.  Applies to BOTH cube lanes (the production "
+             "A-L solver and --sw-core fb).  NOTE: vs the default this flips "
+             "BOTH the gnomonic family AND the cross-face halo (duo), so it "
+             "is a 'legacy default vs FV3-native config' A/B, not an "
+             "isolated ED-vs-equiangular swap (solver+config+IC+dt+"
+             "resolution held fixed).  Non-cube grids ignore it.")
+    p.add_argument(
+        "--fv3-native-angles", action="store_true",
+        help="Cube SW FB lane (requires --fv3-native-grid AND --sw-core fb): "
+             "additionally select the exact FV3 grid_utils_init cross-face "
+             "seam cosa/sina angles (the faithful FV3 config).  The A-L "
+             "production solver's operators are tuned to the legacy "
+             "single-sided seam angles, so this is a native-FB-core "
+             "decision; main() rejects it without both prerequisites.")
     p.add_argument(
         "--resolution", type=str, default=None,
         help="Override baseline resolution (e.g. C48, 90x180, ico6)")
@@ -7839,17 +7870,23 @@ def main():
     global _SW_CORE
     _SW_CORE = args.sw_core
 
-    # phase-4c: stash the FV3-native ED-grid selection for the cube SW
-    # production lane in run_shallow_water (see the _FV3_NATIVE_GRID note).
-    # Reject the contradictory --fv3-native-grid + --sw-core fb up front
-    # (the FB core rebuilds its own grid; codex flag-review P1).
-    if args.fv3_native_grid and args.sw_core == "fb":
+    # phase-4c: stash the FV3-native ED-grid + seam-angle selections for the
+    # cube SW lanes in run_shallow_water (see the _FV3_NATIVE_GRID note).
+    # --fv3-native-angles is the faithful-FB config: it needs BOTH the ED
+    # grid (the seam angles are an ED concept) AND the FB core (the A-L
+    # solver is tuned to the legacy seam angles).
+    if args.fv3_native_angles and not args.fv3_native_grid:
         parser.error(
-            "--fv3-native-grid is incompatible with --sw-core fb: the FB "
-            "core rebuilds its own grid, so the native-grid selection would "
-            "be silently discarded. Drop one of the two flags.")
-    global _FV3_NATIVE_GRID
+            "--fv3-native-angles requires --fv3-native-grid: the cross-face "
+            "seam angles are defined on the ED gnomonic grid.")
+    if args.fv3_native_angles and args.sw_core != "fb":
+        parser.error(
+            "--fv3-native-angles requires --sw-core fb: the A-L production "
+            "solver's operators are tuned to the legacy seam angles "
+            "(cubed_sphere_cdgrid.py:639).")
+    global _FV3_NATIVE_GRID, _FV3_NATIVE_ANGLES
     _FV3_NATIVE_GRID = args.fv3_native_grid
+    _FV3_NATIVE_ANGLES = args.fv3_native_angles
 
     # iter-31: thread per-run GHG overrides through to
     # _make_rrtmgp_physics.  iter-32 codex MEDIUM: zero is a valid

@@ -1125,10 +1125,17 @@ class FV3FBShallowWaterModel:
     config : CDGridShallowWaterConfig, optional
     """
 
-    def __init__(self, grid, config=None):
+    def __init__(self, grid, config=None, *, fv3_native_angles=False):
         _warn_if_not_fv3_native_grid("FV3FBShallowWaterModel", grid)
         self.grid = grid
-        self.cdgrid = create_cubed_sphere_cdgrid(grid)
+        # The forward-backward core is the FV3-native grid's intended
+        # consumer: unlike the A-L production solver (whose operators are
+        # tuned to the legacy single-sided seam angles), the FB chain can
+        # opt into fv3_native_angles — the exact grid_utils_init cross-face
+        # seam cosa_u/v, sina_u/v (cubed_sphere_cdgrid.py:639).  Default
+        # False keeps the legacy seam angles for the equiangular baseline.
+        self.cdgrid = create_cubed_sphere_cdgrid(
+            grid, fv3_native_angles=fv3_native_angles)
         self.config = config or CDGridShallowWaterConfig()
         self._target_mass = None
 
