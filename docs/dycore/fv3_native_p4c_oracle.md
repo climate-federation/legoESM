@@ -71,3 +71,56 @@ Established this phase (`reconcile_production_csw.py`, sbatch on `glab`):
   `atmos_daily.nc`; check the cube imprint is absent (the whole point of
   the duo grid) and that it stays close to lat-lon / MPAS.  Then W5/modon
   and Held-Suarez.
+
+## P4c battery results — C36 Williamson-2 imprint ladder (2026-07-15)
+
+Run by `scripts/cluster/fv3_native/sw_imprint_battery.sbatch` (job
+9035783).  Williamson-2 has analytic `v == 0` everywhere, so the
+lat-lon-regridded `v_ll_Linf` is a pure grid-imprint metric.  Wiring
+landed via `--fv3-native-grid` / `--fv3-native-angles` (matrix runner) +
+the FB-lane ED build (`_fb_cube_sw_model`) + `FV3FBShallowWaterModel(...,
+fv3_native_angles=)`.
+
+| row | solver | grid            | v_ll_Linf | L2       |
+|-----|--------|-----------------|-----------|----------|
+| A   | A-L    | equiangular,noduo | **0.54**  | 4.68e-04 |
+| B   | A-L    | ED + duo        | 22.5      | 4.25e-02 |
+| C   | FB     | equiangular,duo | 43.8      | 1.54e-02 |
+| D   | FB     | ED + duo        | 58.9      | 1.48e-02 |
+| E   | FB     | ED + duo + native angles | **NaN (blew up)** | nan |
+| —   | ref    | lat-lon         | —         | 1.41e-03 |
+| —   | ref    | MPAS (ico5)     | —         | 1.25e-04 |
+
+Single-factor transitions (only these isolate one variable): C→D = ED
+metrics (imprint 43.8→58.9, WORSE); D→E = native seam angles (→ blow-up).
+
+**Findings (largely negative for the native-grid FB path as assembled):**
+
+1. legoESM's **tuned production A-L solver on the equiangular grid (row A)
+   is already the best cube and is close to lat-lon / MPAS** (L2 4.68e-4 vs
+   lat-lon 1.41e-3, MPAS 1.25e-4).  The science goal — cube W2 close to
+   other grids — is met on the *production* configuration.
+2. The FV3-native **ED grid does NOT reduce imprint under either solver**
+   at C36 with these configs: A-L 0.54→22.5, FB 43.8→58.9.  The A-L config
+   is tuned for the equiangular discretisation and does not transfer
+   (`cubed_sphere_cdgrid.py:639`).
+3. The **FB core is ~80× worse than the tuned A-L solver** on W2 imprint
+   even on the equiangular grid (43.8 vs 0.54) — the M1 preset is a
+   coarse, un-tuned damping, not a calibrated production config.
+4. **Native seam angles blow the FB core up (row E → NaN).**  This is the
+   matched-pair problem: FV3 uses the native cross-face seam angles
+   *together with* the faithful d_sw5 cross-face halo.  legoESM has the
+   native angles but the FB `d_sw5` still runs the *stable zero-ring*
+   approximation (the faithful attenuated ghost itself destabilises the
+   modon run; `fv3_sw_core.py:3205`).  Native angles without the matching
+   faithful halo is inconsistent → instability.
+
+**Consequence for "full FV3 faithful portability":** the *kernels* are
+certified bit-exact (c_sw / d_sw / divergence_corner_duo), and the
+*production* cube already meets the science goal on the equiangular grid.
+But the *assembled native-grid FB path* (ED + native angles + faithful
+cross-face halo) is NOT yet consistent — row E blow-up localises the gap
+to the native-angle ⇄ faithful-d_sw5-halo pairing.  The next brick is to
+port that matched pair together and stabilise it, rather than swapping the
+grid under the A-L solver (which is not FV3's scheme and is tuned for
+equiangular).

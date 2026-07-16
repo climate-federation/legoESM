@@ -2677,8 +2677,10 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             )
         else:
             config = iter1009_dual_target_config(n)
-        # Phase-1 M1 FB lane (--sw-core fb): swap in the faithful FV3
-        # forward-backward core.  Grid is rebuilt duogrid (FB requirement);
+        # Phase-1 M1 FB lane (--sw-core fb): swap in the FV3 forward-backward
+        # core (native scheme, but the d_sw5 cross-face halo is the stable
+        # zero-ring approximation, not the fully Fortran-faithful ghost;
+        # fv3_sw_core.py:3205).  Grid is rebuilt duogrid (FB requirement);
         # everything downstream (IC recipe, metrics, regrid) is shared with
         # the production lane so the A/B protocol is held fixed.
         if _SW_CORE == "fb":
@@ -7788,7 +7790,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(_SW_CORE_CHOICES),
         help="Cube SW dynamical core (Phase-1 M1 A/B lane): 'production' "
              "= FV3EdgeShallowWaterModel (A-L RK3, default); 'fb' = "
-             "FV3FBShallowWaterModel (faithful FV3 forward-backward chain, "
+             "FV3FBShallowWaterModel (FV3 forward-backward chain, "
              "duogrid, M1 preset nord=1 d4_bg=0.16 dddmp=0.2 damp_v=0.02 "
              "nord_v=2).  Cubed-sphere SW cases only; other grids ignore "
              "it, and the cube cosine-bell cases are core-independent "
@@ -7900,8 +7902,8 @@ def main():
 
     # phase-4c: stash the FV3-native ED-grid + seam-angle selections for the
     # cube SW lanes in run_shallow_water (see the _FV3_NATIVE_GRID note).
-    # --fv3-native-angles is the faithful-FB config: it needs BOTH the ED
-    # grid (the seam angles are an ED concept) AND the FB core (the A-L
+    # --fv3-native-angles is the native-angle FB config: it needs BOTH the
+    # ED grid (the seam angles are an ED concept) AND the FB core (the A-L
     # solver is tuned to the legacy seam angles).
     _native_err = _fv3_native_flag_error(
         args.fv3_native_grid, args.fv3_native_angles, args.sw_core)

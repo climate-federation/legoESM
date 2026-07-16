@@ -151,14 +151,17 @@ def test_fv3_native_flag_error_helper():
     the main() cross-flag logic unit-testable without running the matrix)."""
     mod = _load_matrix_module()
     err = mod._fv3_native_flag_error
-    # valid: no angles at all
+    # ALL 8 (grid, angles, core) combinations (codex p4c FB-review-r2 P2):
+    # valid — angles off (any grid/core), or angles + grid + fb
     assert err(False, False, "production") is None
     assert err(True, False, "production") is None
-    # valid: angles + grid + fb
+    assert err(False, False, "fb") is None
+    assert err(True, False, "fb") is None
     assert err(True, True, "fb") is None
-    # invalid: angles without the ED grid
+    # invalid — angles need the ED grid (checked first)
     assert "requires --fv3-native-grid" in err(False, True, "fb")
-    # invalid: angles with the production core
+    assert "requires --fv3-native-grid" in err(False, True, "production")
+    # invalid — angles + grid but the production core
     assert "requires --sw-core fb" in err(True, True, "production")
 
 
