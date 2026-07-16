@@ -136,6 +136,35 @@ native seam angles (→ blow-up).
    faithful halo may be the missing piece.  D→E does NOT itself test the
    faithful halo.
 
+## Duo D-grid finding (2026-07-16): not single-tile certifiable
+
+Attempting the duo d_sw analog of the (certified) duo c_sw exposed a hard
+scope boundary in the authoritative symmetryclean pipeline:
+
+1. **Inter-panel flux averaging mid-sequence.**  The duo dyn_core averages
+   the delp/temperature fluxes across panel edges BETWEEN its d_sw1 and
+   d_sw2 stages (`mpp_get_boundary` + `0.5*(own+neighbor)`;
+   dyn_core.F90:853-900 — "averaging ... is fundamental").  This is a
+   6-face communication in the middle of the D-grid step — impossible in
+   a single-tile oracle.
+2. **Undefined panel-edge workspace reads.**  With the reference-run flags
+   (duogrid=T, bounded_domain=F — verified from the Zenodo rundir
+   `input.nml`), the `.not.bounded .or. .not.duogrid` guards are
+   always-true, so d_sw1's edge blocks execute and read ut/vt panel-edge
+   cells the duo interior loop never writes; dyn_core's utt/vtt are
+   uninitialised stack arrays (research-grade code — there is a literal
+   `!!!!! CODE CRASHES HERE !!!!!` comment at dyn_core.F90:879).  The
+   Fortran values there are compiler-dependent.  Empirically, running the
+   verbatim duo gates single-tile NaN'd the interior transport through
+   exactly that ut(0,*)/vt(*,0) → yfx/ra_y chain.
+
+Consequence: `d_sw(duogrid=True)` in the port RAISES (fail-loud); the
+verbatim duo gates remain in the code as the base for **per-stage** duo
+certification (d_sw1/d_sw3/d_sw5 driven with fully-specified inputs) and
+a legoESM-side inter-panel flux-averaging analog (6-face exchange
+infrastructure, like the P4b corner-B-halo precedent).  The duo c_sw cert
+is unaffected (its duo branches fully define every read cell).
+
 **Consequence for "full FV3 faithful portability":** the *kernels* are
 certified bit-exact (c_sw / d_sw / divergence_corner_duo), and the
 *production* cube already meets the science goal on the equiangular grid.
