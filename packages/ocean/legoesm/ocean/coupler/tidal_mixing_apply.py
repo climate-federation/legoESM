@@ -162,6 +162,12 @@ def apply_tidal_mixing_step(
 
     a, b, c = _build_tridiag(h, K, dt)
 
+    # Preserve the state's storage dtype: the host solve runs in float64 for
+    # accuracy, but returning float64 under JAX_ENABLE_X64=1 would silently
+    # promote the fp32 state arrays and force a retrace of the jitted
+    # ``model.step`` that consumes ``state.T``/``state.S`` downstream.
+    T_dtype = state.T.data.dtype
+    S_dtype = state.S.data.dtype
     T_arr = np.asarray(state.T.data, dtype=np.float64)
     S_arr = np.asarray(state.S.data, dtype=np.float64)
     T_new = _thomas_solve_columns(a, b, c, T_arr)
@@ -175,13 +181,13 @@ def apply_tidal_mixing_step(
 
     return state._replace(
         T=Field(
-            jnp.asarray(T_new),
+            jnp.asarray(T_new, dtype=T_dtype),
             name=state.T.name,
             dims=state.T.dims,
             units=state.T.units,
         ),
         S=Field(
-            jnp.asarray(S_new),
+            jnp.asarray(S_new, dtype=S_dtype),
             name=state.S.name,
             dims=state.S.dims,
             units=state.S.units,
