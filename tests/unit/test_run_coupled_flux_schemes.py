@@ -172,17 +172,21 @@ def test_land_runoff_scheme_reaches_the_effective_slab_land_config():
     """
     from legoesm.driver.coupled_config import PRESETS
 
-    assert mod.build_parser().parse_args([]).land_runoff_scheme == "bucket"
+    assert mod.build_parser().parse_args([]).land_runoff_scheme is None
     out = mod.apply_land_runoff_scheme(PRESETS["slab_simple"](), "topmodel")
     assert out.land_config.runoff_scheme == "topmodel"
 
 
-def test_land_runoff_default_is_a_no_op():
-    """A default run must stay byte-identical -- same object, not a rebuild."""
+def test_land_runoff_unset_is_a_no_op():
+    """A default run must stay byte-identical -- same object, not a rebuild.
+
+    None (never asked) is the ONLY no-op. An EXPLICIT --land-runoff-scheme
+    bucket is a request and must be honoured or refused, not ignored (codex).
+    """
     from legoesm.driver.coupled_config import PRESETS
 
     cfg = PRESETS["slab_simple"]()
-    assert mod.apply_land_runoff_scheme(cfg, "bucket") is cfg
+    assert mod.apply_land_runoff_scheme(cfg, None) is cfg
 
 
 def test_land_runoff_scheme_rejects_multilayer_loudly():
@@ -201,21 +205,52 @@ def test_land_runoff_scheme_rejects_multilayer_loudly():
         mod.apply_land_runoff_scheme(PRESETS["full_coupled"](), "topmodel")
 
 
-def test_land_runoff_scheme_rejects_a_landless_preset():
-    """aquaplanet runs NO land tile (land_mode='none'), so runoff is
-    meaningless there -- say so instead of accepting it."""
+def test_land_runoff_scheme_rejects_a_landless_config():
+    """aquaplanet has f_land_mode='zero' -> the driver builds f_land = 0
+    everywhere, so no land runs and runoff is inert."""
     from legoesm.driver.coupled_config import PRESETS
 
-    with pytest.raises(SystemExit, match="NO land tile"):
+    with pytest.raises(SystemExit, match="NO land area"):
         mod.apply_land_runoff_scheme(PRESETS["aquaplanet"](), "topmodel")
 
 
-def test_land_runoff_multilayer_ok_at_default():
-    """multilayer + the default bucket must NOT raise (nothing was requested)."""
+def test_land_runoff_rejects_zero_land_fraction_even_with_a_slab_land_model():
+    """THE case a land_mode check misses (codex HIGH).
+
+    `--preset aquaplanet --land-scheme slab` sets land_mode='slab' and a real
+    LandConfig, but f_land_mode stays 'zero', so the driver gives the land tile
+    ZERO area and runoff is silently inert. The LAND FRACTION decides, not the
+    land model.
+    """
+    from legoesm.driver.coupled_config import PRESETS
+
+    cfg = PRESETS["aquaplanet"](**mod.land_scheme_overrides("slab"))
+    assert cfg.land_mode == "slab"          # a land MODEL is configured...
+    assert cfg.f_land_mode == "zero"        # ...with no land AREA
+    with pytest.raises(SystemExit, match="NO land area"):
+        mod.apply_land_runoff_scheme(cfg, "topmodel")
+
+
+def test_explicit_bucket_is_refused_where_runoff_cannot_apply():
+    """An explicit request must be honoured or refused, never ignored (codex).
+
+    Comparing against LandConfig's default would silently accept
+    `--land-runoff-scheme bucket` on a config that cannot honour runoff at all.
+    """
+    from legoesm.driver.coupled_config import PRESETS
+
+    with pytest.raises(SystemExit, match="NO land area"):
+        mod.apply_land_runoff_scheme(PRESETS["aquaplanet"](), "bucket")
+    with pytest.raises(SystemExit, match="SLAB"):
+        mod.apply_land_runoff_scheme(PRESETS["full_coupled"](), "bucket")
+
+
+def test_land_runoff_multilayer_ok_when_unset():
+    """multilayer with the flag UNSET must NOT raise (nothing was requested)."""
     from legoesm.driver.coupled_config import PRESETS
 
     cfg = PRESETS["full_coupled"]()
-    assert mod.apply_land_runoff_scheme(cfg, "bucket") is cfg
+    assert mod.apply_land_runoff_scheme(cfg, None) is cfg
 
 
 def test_main_really_applies_land_runoff_to_the_driver_config(monkeypatch):
@@ -409,23 +444,23 @@ def test_main_actually_threads_the_cli_sea_ice_config():
 # and --ice-itd-remap still did NOTHING at the defaults -- i.e. the sea-ice fix
 # had reproduced the --ddm mistake it was written to fix. These pin the guards.
 
-def test_ridging_is_rejected_because_no_driver_can_run_it():
+def test_there_is_no_ridging_flag():
     """Ridging needs multi-category ice AND an ice velocity.
 
     run_coupled builds a scalar-slab SeaIceState (init_surface_state), and NO
     driver anywhere builds a multi-category state -- run_omip_core2 hardcodes
     n_categories=1 too, and step_sea_ice RAISES for n_categories>1 without a
-    DynamicSeaIceState. So ridging is oracle-pinned physics that is unreachable
-    from every driver: a real unwired-physics gap, tracked separately.
+    DynamicSeaIceState. So ridging is oracle-pinned physics unreachable from
+    every driver: a real unwired-physics gap, tracked separately.
 
-    An earlier draft added --ice-categories/--ice-dynamics here to "reach" it.
-    Those were PHANTOMS -- every accepted value crashed on the first step
-    (_step_dynamic reads a u_ice the slab state lacks) -- the same shape as
-    --surface-bulk-scheme most, which this branch removed. Reject honestly
-    instead of offering a flag that cannot run.
+    An earlier draft added --ice-categories/--ice-dynamics to "reach" it; those
+    were PHANTOMS that crashed on the first step. A later draft kept
+    --ice-ridging as an always-exiting flag, then hid it with argparse.SUPPRESS
+    -- but a flag that can only ever exit is still a phantom, and since it never
+    shipped there is no compatibility to preserve (codex). It is simply gone.
     """
-    with pytest.raises(SystemExit, match="cannot run"):
-        mod.build_sea_ice_config(mod.build_parser().parse_args(["--ice-ridging"]))
+    with pytest.raises(SystemExit):
+        mod.build_parser().parse_args(["--ice-ridging"])
 
 
 def test_the_phantom_flags_are_gone():

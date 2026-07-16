@@ -166,7 +166,7 @@ def build_sea_ice_config(args):
     base = SeaIceConfig()
     changed = {}
     for flag, sub in (("ice_snow", "snow"), ("ice_brine", "brine"),
-                      ("ice_ridging", "ridging"), ("ice_ponds", "ponds")):
+                      ("ice_ponds", "ponds")):
         if getattr(args, flag, False):
             changed[sub] = getattr(base, sub)._replace(enabled=True)
     for flag, field in (("ice_shortwave_scheme", "shortwave_scheme"),
@@ -209,17 +209,6 @@ def _reject_unreachable_sea_ice_options(args, changed, base) -> None:
     construction and which this branch exists to remove (codex). Offer nothing
     that cannot run.
     """
-    if getattr(args, "ice_ridging", False):
-        raise SystemExit(
-            "--ice-ridging cannot run: ridging needs multi-category ice plus "
-            "an ice velocity. run_coupled builds a scalar-slab SeaIceState "
-            "(init_surface_state), and NO driver builds a multi-category state "
-            "(run_omip_core2 hardcodes n_categories=1). The ridging physics is "
-            "implemented and oracle-pinned but is not reachable from any "
-            "driver -- that is a real unwired-physics gap, not a flag. For "
-            "prognostic ice DYNAMICS today, use run_omip_core2 "
-            "--prognostic-sea-ice --prognostic-ice-dynamics {free_drift,evp,mevp}."
-        )
     bulk = changed.get("bulk_scheme", base.bulk_scheme)
     if getattr(args, "ice_stability_scheme", None) and bulk not in _ICE_MOST_SCHEMES:
         raise SystemExit(
@@ -313,7 +302,7 @@ def apply_coupled_params(params_path, land_params, atm_config, coupled_cfg,
     )
 
     # Seed from the CLI-built config (build_sea_ice_config) rather than None:
-    # returning None here would DISCARD --ice-ridging & friends whenever
+    # returning None here would DISCARD --ice-snow & friends whenever
     # --params was also passed, and silently drop them when it was not.
     lake_config = None
     params = load_params_config(params_path)
@@ -359,34 +348,46 @@ def land_scheme_overrides(land_scheme: str) -> dict:
         f"land_scheme must be one of {_LAND_SCHEMES}, got {land_scheme!r}.")
 
 
-def apply_land_runoff_scheme(coupled_cfg, runoff_scheme: str):
-    """Select LandConfig.runoff_scheme on the EFFECTIVE land config.
+def apply_land_runoff_scheme(coupled_cfg, runoff_scheme):
+    """Select LandConfig.runoff_scheme on the EFFECTIVE land configuration.
 
     Runs AFTER the preset resolves, so it sees what the run will ACTUALLY use --
-    whether that came from a preset or from --land-scheme. The previous version
-    applied runoff only inside `if args.land_scheme is not None`, so
-    `--land-runoff-scheme topmodel` on its own (or with --preset slab_simple)
-    was silently dropped (codex). Same doctrine as air_sea_consistency: resolve
+    whether that came from a preset, --land-scheme, or the woa branch's implicit
+    slab. Gating it on `if args.land_scheme is not None` meant
+    `--land-runoff-scheme topmodel` alone, or with --preset slab_simple, was
+    silently dropped (codex). Same doctrine as air_sea_consistency: resolve
     through the production path, never re-read the declared field.
 
     TOPMODEL is implemented in slab_land, param-spec'd as ``land.topmodel``, and
     dispatch-guarded -- it was simply unselectable.
 
-    Refuses rather than ignores where it cannot apply:
-      * land_mode='none' (aquaplanet): no land tile runs at all;
-      * MultiLayerLandConfig (slab_richards/slab_carbon/full_coupled): resolves
-        runoff through its Richards column and has no runoff_scheme field.
+    ``runoff_scheme is None`` means the user never asked, which is the ONLY
+    no-op. Comparing against LandConfig's default instead would let an EXPLICIT
+    `--land-runoff-scheme bucket` pass silently on a configuration that cannot
+    honour runoff at all (codex) -- an explicit request must be honoured or
+    refused, never ignored.
+
+    Refuses where the flag cannot take effect:
+
+    * ``f_land_mode == "zero"`` -- the LAND FRACTION, not land_mode, is what
+      decides whether any land runs. `--preset aquaplanet --land-scheme slab`
+      yields land_mode='slab' while f_land_mode stays 'zero', so the driver
+      builds f_land = 0 everywhere (coupled_esm_driver.py) and the tile has no
+      area: runoff would be physically inert. Checking land_mode alone missed
+      exactly this (codex).
+    * a non-slab land config -- MultiLayerLandConfig resolves runoff through its
+      Richards column and has no runoff_scheme field.
     """
     from legoesm.land.config import LandConfig
 
-    if runoff_scheme == LandConfig().runoff_scheme:
-        return coupled_cfg          # the default: nothing requested
-    mode = getattr(coupled_cfg, "land_mode", None)
-    if mode == "none":
+    if runoff_scheme is None:
+        return coupled_cfg                     # never requested
+    if getattr(coupled_cfg, "f_land_mode", None) == "zero":
         raise SystemExit(
-            f"--land-runoff-scheme {runoff_scheme!r} has no effect: the "
-            f"resolved configuration runs NO land tile (land_mode='none'). "
-            f"Use a preset with land (e.g. --preset slab_simple)."
+            f"--land-runoff-scheme {runoff_scheme!r} cannot take effect: the "
+            f"resolved configuration has NO land area (f_land_mode='zero', so "
+            f"the driver builds f_land = 0 everywhere), whatever the land "
+            f"model. Use a preset with land (e.g. --preset slab_simple)."
         )
     land_cfg = getattr(coupled_cfg, "land_config", None)
     if not isinstance(land_cfg, LandConfig):
@@ -780,13 +781,11 @@ def build_parser():
                              "have no prognostic salinity and deliberately "
                              "discard it (CoupledESMDriver._step_ocean). The "
                              "ice-side salinity still evolves either way.")
-    # NOT advertised: ridging needs multi-category ice that NO driver builds,
-    # so --help must not offer it (codex: a flag that always exits is still a
-    # phantom). Kept parseable-but-SUPPRESSed so that anyone who tries it gets
-    # _reject_unreachable_sea_ice_options' explanation of the real gap rather
-    # than argparse's uninformative "unrecognized arguments: --ice-ridging".
-    parser.add_argument("--ice-ridging", action="store_true",
-                        help=argparse.SUPPRESS)
+    # NO --ice-ridging: it needs multi-category ice that NO driver builds, so a
+    # flag could only ever exit. SUPPRESS would keep a hidden always-failing CLI
+    # contract for no benefit -- the flag never shipped, so there is nothing to
+    # stay compatible with (codex). The gap is recorded in
+    # _reject_unreachable_sea_ice_options' docstring instead.
     parser.add_argument("--ice-ponds", action="store_true",
                         help="CESM-style melt ponds (SeaIceConfig.ponds).")
     parser.add_argument("--ice-shortwave-scheme",
@@ -806,7 +805,7 @@ def build_parser():
                              "reference). Requires a MOST --ice-bulk-scheme "
                              "(most/coare3/large_yeager).")
     parser.add_argument("--land-runoff-scheme", choices=_LAND_RUNOFF_SCHEMES,
-                        default="bucket",
+                        default=None,
                         help="Slab-land runoff partitioning: 'bucket' (default, "
                              "Green-Ampt Hortonian + Dunne saturation-excess) or "
                              "'topmodel' (SIMTOP saturated fraction + "
