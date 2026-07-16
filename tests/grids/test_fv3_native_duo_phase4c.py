@@ -137,6 +137,10 @@ def test_divergence_corner_duo_bit_exact_on_stored_inputs(oracle):
     from legoesm.core.fv3_native_duo_sw_core import divergence_corner_duo
     from legoesm.core.fv3_native_sw_core import Bounds
 
+    # the port is called with hard-coded C12 bounds, so the stored fixture
+    # metadata MUST match — else a future res/ng split would silently
+    # compare the wrong geometry (codex p4c r4 P2)
+    assert (int(oracle["res"]), int(oracle["ng"])) == (RES, NG)
     bd = Bounds.single_tile(RES, NG)
     gs = _gs_from(oracle)
     got = np.asarray(
