@@ -509,10 +509,25 @@ def test_bare_ddm_does_not_steal_the_zdfiwm_molecular_backgrounds():
     args = parse_args(["--grid", "latlon", "--ddm"])
     grid = create_latlon_grid(n_lat=6, n_lon=8)
     z = create_ocean_z_star(n_levels=4, H_max=2000.0)
-    config = LatLonCGridOceanConfig.from_flat()
+    # Pin explicit, non-molecular backgrounds so "unchanged" is observable --
+    # an earlier version of this test compared against whatever the default
+    # happened to be and was tautological (codex).
+    config = LatLonCGridOceanConfig.from_flat(A_v=3.0e-4, K_v=7.0e-5)
     model = LatLonCGridOceanModel(grid, z, config)
     config2, _ = _apply_drag_iwm_overrides(args, "latlon", grid, z, config, model)
-    assert config2.A_v != constants.nu_ocean_molecular or config.A_v == constants.nu_ocean_molecular
+    assert config2.physics.vertical_mixing.ddm.enabled is True   # ddm DID apply
+    assert config2.A_v == 3.0e-4, "bare --ddm stole the user's A_v"
+    assert config2.K_v == 7.0e-5, "bare --ddm stole the user's K_v"
+    assert config2.A_v != constants.nu_ocean_molecular
+
+    # ... and --iwm DOES take them (the zdfiwm_init convention), so the gating
+    # is real rather than vacuous.
+    cfg_i = LatLonCGridOceanConfig.from_flat(A_v=3.0e-4, K_v=7.0e-5)
+    cfg_i2, _ = _apply_drag_iwm_overrides(
+        parse_args(["--grid", "latlon", "--iwm"]), "latlon", grid, z, cfg_i,
+        LatLonCGridOceanModel(grid, z, cfg_i))
+    assert cfg_i2.A_v == constants.nu_ocean_molecular
+    assert cfg_i2.K_v == 1.0e-10
 
 
 def test_ddm_float_knobs_stay_on_params_not_flags():
@@ -532,9 +547,14 @@ def test_ddm_float_knobs_stay_on_params_not_flags():
 @pytest.mark.parametrize("scheme", [None, "catke", "kpp"])
 @pytest.mark.parametrize("flag,attr", [("--iwm", "iwm"), ("--ddm", "ddm")])
 def test_additive_mixing_flags_reach_every_scheme(scheme, flag, attr):
-    """iwm/ddm are ADDITIVE onto avt/avs/avm inside compute_vertical_K_profiles,
-    AFTER the primary closure (NEMO zdfphy ordering) -- so they are independent
-    of which closure ran and must survive every --vertical-mixing-scheme.
+    """iwm/ddm are both ADDITIVE riders applied AFTER the primary closure (NEMO
+    zdfphy ordering), so they are independent of which closure ran and must
+    survive every --vertical-mixing-scheme.
+
+    They land in different places: IWM adds onto the tracer AND momentum
+    profiles inside compute_vertical_K_profiles, while DDM contributes
+    heat/salt-only diffusivities (avm untouched) applied later in the lat-lon
+    model's implicit salinity solve (codex corrected an earlier claim here).
 
     REGRESSION: the catke branch of build_vertical_mixing_config_from_args
     returned early WITHOUT passing iwm=, so `--iwm --vertical-mixing-scheme
