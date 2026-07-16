@@ -630,3 +630,49 @@ def test_orchestrator_consumes_post_mixing_n2():
         "carried TKE does not match the post-mixing-N2 reference"
     assert np.max(np.abs((carried - ref_pre)[wet])) > 1e-3, \
         "pre/post references coincide - test construction is vacuous"
+
+
+def test_nemo_dirichlet_surface_bc_production_path():
+    """surface_bc='nemo_dirichlet' through the PRODUCTION route
+    (tke_set_diffusivities -> ctx.surface_dirichlet -> tke_integrate_post_mixing).
+
+    Geometric note (review 2026-07-16): this path holds the DISCARDED z=0
+    surface W row at e_sfc (the more NEMO-faithful location); the CARRIED top
+    interface couples to it through the surface half-volume and lands slightly
+    BELOW e_sfc — unlike tke_vertical_mixing, which pins the carried top
+    interface exactly. Assert: (a) ctx carries the exact NEMO value, (b) the
+    carried surface TKE is pulled to the e_sfc scale, far above the Veros
+    flux-BC response.
+    """
+    zc, J, eos_fn, T, S, p, dz_half, dz_surface = _column_setup()
+    u = jnp.zeros_like(T)
+    tke_old = jnp.full((1, 1, 3), 2.0e-4)
+    tau = jnp.full((1, 1), 0.1)          # |tau| = 0.1 Pa wind
+    tau0 = jnp.zeros((1, 1))
+    e_sfc = max(1.0e-4, 67.83 / RHO_0 * 0.1)
+
+    def run(cfg):
+        _, _, ctx = tke_set_diffusivities(
+            u, u, T, S, eos_fn(T, S, p), dz_half, tke_old, tau, tau0,
+            cfg, RHO_0, G, p_cell=p, dz_ref=zc.dz_ref, jacobian=J,
+            eos_fn=eos_fn, z_interface=zc.z_half_ref[1:-1],
+            dz_surface=dz_surface)
+        n2 = jnp.zeros_like(dz_half)
+        tke_new = tke_integrate_post_mixing(
+            ctx, n2, jnp.zeros_like(dz_half), jnp.zeros((1, 1)),
+            dt=43200.0, cfg=cfg)
+        return ctx, tke_new
+
+    ctx_d, tke_d = run(PM_CFG._replace(surface_bc="nemo_dirichlet"))
+    assert ctx_d.surface_dirichlet is not None
+    np.testing.assert_allclose(
+        np.asarray(ctx_d.surface_dirichlet), e_sfc, rtol=1e-12)
+
+    ctx_f, tke_f = run(PM_CFG)
+    assert ctx_f.surface_dirichlet is None
+
+    top_d = float(tke_d[0, 0, 0])
+    top_f = float(tke_f[0, 0, 0])
+    # pulled to the e_sfc scale (coupled, not exact) and >> the flux response
+    assert 0.3 * e_sfc < top_d <= 1.01 * e_sfc
+    assert top_d > 5.0 * top_f

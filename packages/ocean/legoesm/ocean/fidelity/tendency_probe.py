@@ -157,13 +157,21 @@ def probe_latlon_cgrid(
     # Wright 1997 if no ``eos_fn`` is supplied; that's the wrong answer
     # when the recipe pins ``eos="veros_nonlin2"`` for ACC etc. Build
     # the EOS function from the config and pass it explicitly.
+    _eos_depth = getattr(config, "eos_depth", "insitu")
+    _eos_rho0 = getattr(config, "rho_0", None)
+    # Geometric-depth NEMO path: EOS rho0 must match the p=rho0·g·gdept fed to
+    # it (value cancels -> exact gdept).  "insitu" default -> no rho0 kwarg ->
+    # byte-identical.
+    _eos_mk_kw = {"rho0": _eos_rho0} if _eos_depth == "geometric" else {}
     eos_fn = make_eos_fn(
         eos=getattr(config, "eos", "wright"),
         eos_linear=getattr(config, "eos_linear", None),
         eos_veros_nonlin2=getattr(config, "eos_veros_nonlin2", None),
         eos_veros_nonlin3=getattr(config, "eos_veros_nonlin3", None),
+        **_eos_mk_kw,
     )
-    rho = compute_ocean_rho(state, z_coord, J, eos_fn=eos_fn)
+    rho = compute_ocean_rho(state, z_coord, J, eos_fn=eos_fn,
+                            eos_depth=_eos_depth, rho0=_eos_rho0)
 
     # GM/Redi isopycnal mixing — the lat-lon model applies this in its tracer
     # step (from the TOP-LEVEL config.gm_redi), not inside baroclinic_tendencies.

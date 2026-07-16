@@ -93,6 +93,36 @@ def test_HW_differs_from_centered_for_meridional_shear():
     assert bool(jnp.all(K_h >= 0))
 
 
+def _ke_c2(u, v):
+    """Inline mirror of the NEMO nkeg_C2 mean-of-squares implementation."""
+    return 0.25 * (
+        u[:, :-1, :] ** 2 + u[:, 1:, :] ** 2
+        + v[:-1, :, :] ** 2 + v[1:, :, :] ** 2
+    )
+
+
+def test_C2_reduces_to_centered_for_uniform_flow():
+    """Mean-of-squares == square-of-mean when the faces are equal."""
+    n_lat, n_lon, nlev = 8, 10, 1
+    u = jnp.full((n_lat, n_lon + 1, nlev), 2.0)
+    v = jnp.full((n_lat + 1, n_lon, nlev), -1.0)
+    assert bool(jnp.allclose(_ke_c2(u, v), _ke_centered(u, v), atol=1e-12))
+
+
+def test_C2_is_mean_of_squares_not_square_of_mean():
+    """With zonally-varying u, C2 (mean of squares) must exceed the
+    centered (square of the mean) value and match a hand computation."""
+    nlev = 1
+    # Single T-cell: west face u=1, east face u=3, no v.
+    u = jnp.array([1.0, 3.0]).reshape(1, 2, nlev)   # (n_lat=1, n_lon+1=2)
+    v = jnp.zeros((2, 1, nlev))                       # (n_lat+1=2, n_lon=1)
+    # Mean-of-squares: 0.25*(1 + 9) = 2.5 ; square-of-mean: 0.5*((1+3)/2)² = 2.0
+    assert bool(jnp.allclose(_ke_c2(u, v), 2.5, atol=1e-12))
+    assert bool(jnp.allclose(_ke_centered(u, v), 2.0, atol=1e-12))
+    # They MUST differ — this is the whole point of the C2 option.
+    assert not bool(jnp.allclose(_ke_c2(u, v), _ke_centered(u, v)))
+
+
 # ---------- config integration ----------
 
 def test_config_default_is_centered():
@@ -105,6 +135,12 @@ def test_config_can_select_hollingsworth():
     from legoesm.ocean.state import LatLonCGridOceanConfig
     cfg = LatLonCGridOceanConfig.from_flat()._replace(ke_gradient_scheme="hollingsworth")
     assert cfg.ke_gradient_scheme == "hollingsworth"
+
+
+def test_config_can_select_c2():
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    cfg = LatLonCGridOceanConfig.from_flat(ke_gradient_scheme="c2")
+    assert cfg.ke_gradient_scheme == "c2"
 
 
 # ---------- end-to-end via model.step ----------
@@ -142,6 +178,16 @@ def test_one_step_hollingsworth_KE(small_setup):
     from legoesm.ocean.state import LatLonCGridOceanConfig
     grid, z, state = small_setup
     cfg = LatLonCGridOceanConfig.from_flat(ke_gradient_scheme="hollingsworth")
+    model = LatLonCGridOceanModel(grid, z, cfg)
+    new = model.step(state, dt=600.0)
+    assert bool(jnp.all(jnp.isfinite(new.eta.data)))
+
+
+def test_one_step_c2_KE(small_setup):
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    grid, z, state = small_setup
+    cfg = LatLonCGridOceanConfig.from_flat(ke_gradient_scheme="c2")
     model = LatLonCGridOceanModel(grid, z, cfg)
     new = model.step(state, dt=600.0)
     assert bool(jnp.all(jnp.isfinite(new.eta.data)))
