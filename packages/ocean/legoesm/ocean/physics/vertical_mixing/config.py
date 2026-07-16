@@ -240,7 +240,9 @@ class TKEConfig(NamedTuple):
     c_eps: float = 0.7
     alpha_tke: float = 30.0
     mxl_min: float = 1.0e-8
-    tke_mxl_choice: int = 2
+    tke_mxl_choice: int = 2          # 1/2 = Veros; 3 = NEMO nn_mxl=3 (lup/ldown
+                                     # sweeps + the ln_mxl0 stress anchor)
+    mxl0_min_m: float = 0.04         # NEMO rn_mxl0 [m] (kappa*z0 = 0.4*0.1)
     kappaM_min: float = 2.0e-4
     kappaM_max: float = 100.0            # convective ceiling on K_M [m^2/s] (Veros default)
     kappaH_min: float = 2.0e-5

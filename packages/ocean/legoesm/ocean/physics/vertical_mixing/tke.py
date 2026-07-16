@@ -161,6 +161,7 @@ _NEMO_TKE_CDRAG = 1.5e-3       # zcdrag [-] surface drag coeff      (zdftke.F90:
 # ½·0.016² / (ρ_air·C_d): surface stress → ½W_lc² (Axell 2002 Eq. 44, via
 # |τ| = ρ_air·C_d·U₁₀² and the Stokes drift u_s = 0.016·U₁₀) (zdftke.F90:243)
 _NEMO_TKE_LC_CSD = 0.5 * 0.016 * 0.016 / (_NEMO_TKE_RHO_AIR * _NEMO_TKE_CDRAG)
+_NEMO_MXL0_VKARMN = 0.4        # vkarmn (phycst) — the ln_mxl0 anchor prefactor
 _NEMO_TKE_EBB = 67.83          # rn_ebb  namelist_ref default — surface TKE input coef
 _NEMO_TKE_EMIN0 = 1.0e-4       # rn_emin0 [m²/s²] surface TKE minimum
 
@@ -514,8 +515,15 @@ def compute_mixing_lengths(
     signed_n2: bool = False,
     dz_cell: jnp.ndarray | None = None,
     boundary_cap: jnp.ndarray | None = None,
+    l_surface_anchor: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute (l_k, l_eps) for the chosen ``tke_mxl_choice``.
+
+    ``tke_mxl_choice=3`` is NEMO ``nn_mxl=3`` (zdftke.F90:658-672): the
+    buoyancy length ``sqrt(2e)/N`` with the ``ln_mxl0`` wind-stress surface
+    anchor (``l_surface_anchor``, computed by the caller from taum/rho_0/g),
+    bounded by the lup/ldown |dl/dz|<=e3t sweeps;
+    ``l_k = min(lup, ldown)``, ``l_eps = sqrt(lup*ldown)``.
 
     When ``signed_n2`` is True (the ``n2_mode="adiabatic"`` convective
     path), ``N2`` may be negative and the **Veros buoyancy length**
@@ -547,6 +555,47 @@ def compute_mixing_lengths(
         )
         l_k = jnp.sqrt(jnp.maximum(l_up * l_dn, cfg.mxl_min ** 2))
         l_eps = jnp.maximum(l_up, l_dn)
+    elif cfg.tke_mxl_choice == 3:
+        # --- NEMO nn_mxl=3 + ln_mxl0 (zdftke.F90:575, 588-614, 658-672) ---
+        if dz_cell is None:
+            raise ValueError(
+                "tke_mxl_choice=3 (NEMO nn_mxl=3) requires dz_cell (the e3t "
+                "cell thicknesses) for the |dl/dz|<=e3t bounding sweeps.")
+        # buoyancy length sqrt(2e)/N at interior interfaces, AD-safe at the
+        # negative-TKE debt (same double-where idiom as choice 1/2).
+        sqrt2e = jnp.sqrt(2.0) * jnp.where(
+            e > 0.0, jnp.sqrt(jnp.where(e > 0.0, e, 1.0)), 0.0)
+        N_safe = jnp.sqrt(jnp.maximum(N2, 1.0e-12))
+        l_int = jnp.maximum(sqrt2e / N_safe, cfg.mxl_min)     # (..., nlev-1)
+        # ln_mxl0 surface anchor l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
+        # (zdftke:575+602), computed by the CALLER (which owns taum/rho_0/g)
+        # and passed via l_surface_anchor; None => the rn_mxl0 floor (windless).
+        if l_surface_anchor is not None:
+            l_sfc = jnp.asarray(l_surface_anchor, dtype=l_int.dtype)
+        else:
+            l_sfc = jnp.full(l_int.shape[:-1], cfg.mxl0_min_m,
+                             dtype=l_int.dtype)
+        # W-row stack: surface anchor + interior interfaces
+        l_w = jnp.concatenate([l_sfc[..., None], l_int], axis=-1)  # (..., nlev)
+        e3t = dz_cell                                              # (..., nlev)
+        # lup: downward scan  l(k) = min(l(k-1) + e3t(k-1), l(k))
+        def _down(carry, xs):
+            l_km1 = carry
+            l_k_, e3_km1 = xs
+            out = jnp.minimum(l_km1 + e3_km1, l_k_)
+            return out, out
+        lT = jnp.moveaxis(l_w, -1, 0)                              # (nlev, ...)
+        e3T = jnp.moveaxis(e3t, -1, 0)
+        _, lup_rest = jax.lax.scan(_down, lT[0], (lT[1:], e3T[:-1]))
+        lup = jnp.concatenate([lT[:1], lup_rest], axis=0)
+        # ldown: upward scan  l(k) = min(l(k+1) + e3t(k+1), l(k))
+        _, ldn_rest = jax.lax.scan(
+            _down, lT[-1], (lT[:-1][::-1], e3T[1:][::-1]))
+        ldn = jnp.concatenate([lT[-1:], ldn_rest], axis=0)[::-1]
+        lup = jnp.moveaxis(lup, 0, -1)[..., 1:]                    # interior
+        ldn = jnp.moveaxis(ldn, 0, -1)[..., 1:]
+        l_k = jnp.maximum(jnp.minimum(lup, ldn), cfg.mxl_min)
+        l_eps = jnp.maximum(jnp.sqrt(lup * ldn), cfg.mxl_min)
     elif cfg.tke_mxl_choice == 1:
         # Veros buoyancy length, ``tke_mxl_choice=1`` (veros/core/tke.py:30-47):
         #   sqrttke = sqrt(max(0, e));  mxl = sqrt(2)·sqrttke / sqrt(max(1e-12, N²))
@@ -1373,10 +1422,16 @@ def tke_vertical_mixing(
 
     # Sub-iteration loop (Mode B convergence; Mode A uses n_iterations=1).
     tke_curr = tke_old
+    # NEMO ln_mxl0 anchor for nn_mxl=3: l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
+    _l_anchor = (jnp.maximum(
+        jnp.asarray(cfg.mxl0_min_m), _NEMO_MXL0_VKARMN * 2.0e5
+        / (rho_0 * g) * jnp.maximum(taum, 0.0))
+        if cfg.tke_mxl_choice == 3 else None)
     for _ in range(max(1, int(n_iterations))):
         l_k, l_eps = compute_mixing_lengths(
             tke_curr, N2, dz_half, cfg, signed_n2=signed_n2,
-            dz_cell=dz_cell, boundary_cap=boundary_cap)
+            dz_cell=dz_cell, boundary_cap=boundary_cap,
+            l_surface_anchor=_l_anchor)
         K_M_curr, K_H_curr = compute_K_from_tke(
             tke_curr, l_k, cfg, N2=N2, shear_sq=shear_sq,
             z_interface=z_interface)
@@ -1407,7 +1462,8 @@ def tke_vertical_mixing(
     # Final K from converged TKE.
     l_k_final, l_eps_final = compute_mixing_lengths(
         tke_curr, N2, dz_half, cfg, signed_n2=signed_n2,
-        dz_cell=dz_cell, boundary_cap=boundary_cap)
+        dz_cell=dz_cell, boundary_cap=boundary_cap,
+        l_surface_anchor=_l_anchor)
     K_M, K_H = compute_K_from_tke(
         tke_curr, l_k_final, cfg, N2=N2, shear_sq=shear_sq,
         z_interface=z_interface)
@@ -1556,9 +1612,13 @@ def tke_set_diffusivities(
     # NEMO nn_bc_surf=1 option (TKEConfig.surface_bc; single-owner dispatch).
     surface_dirichlet = _surface_tke_dirichlet(cfg, taum, rho_0)
 
+    _l_anchor = (jnp.maximum(
+        jnp.asarray(cfg.mxl0_min_m), _NEMO_MXL0_VKARMN * 2.0e5
+        / (rho_0 * g) * jnp.maximum(taum, 0.0))
+        if cfg.tke_mxl_choice == 3 else None)
     l_k, _l_eps = compute_mixing_lengths(
         tke_old, N2, dz_half, cfg, signed_n2=True, dz_cell=dz_cell,
-        boundary_cap=boundary_cap)
+        boundary_cap=boundary_cap, l_surface_anchor=_l_anchor)
     K_M, K_H = compute_K_from_tke(
         tke_old, l_k, cfg, N2=N2, shear_sq=shear_sq, z_interface=z_interface)
     ctx = TKEPostMixingContext(
