@@ -443,7 +443,7 @@ def test_main_really_passes_the_cli_ice_config_to_the_driver(monkeypatch):
         raise _StopError
 
     monkeypatch.setattr(ced, "CoupledESMDriver", _recorder)
-    monkeypatch.setattr(sys, "argv", ["run_coupled", "--ice-snow", "--days", "0"])
+    monkeypatch.setattr(sys, "argv", ["run_coupled", "--ice-snow", "--days", "1"])
 
     with pytest.raises(_StopError):
         mod.main()
@@ -456,14 +456,12 @@ def test_main_really_passes_the_cli_ice_config_to_the_driver(monkeypatch):
     assert ice.snow.enabled is True, "--ice-snow did not survive to the driver"
 
 
-def test_main_ice_config_survives_the_params_rebinding(monkeypatch):
+def test_main_ice_config_survives_the_params_rebinding(monkeypatch, tmp_path):
     """The specific hole the AST test cannot see (codex): --params REBINDS
     ice_config via apply_coupled_params. A rebinding that dropped the CLI
     config would keep the same variable name and pass the AST check.
     """
     import json
-    import tempfile
-    from pathlib import Path
 
     import legoesm.driver.coupled_esm_driver as ced
 
@@ -477,10 +475,10 @@ def test_main_ice_config_survives_the_params_rebinding(monkeypatch):
         raise _StopError
 
     monkeypatch.setattr(ced, "CoupledESMDriver", _recorder)
-    pf = Path(tempfile.mkdtemp()) / "params.json"
+    pf = tmp_path / "params.json"
     pf.write_text(json.dumps({"ice.ridging.e_star": 0.5}))
     monkeypatch.setattr(sys, "argv", ["run_coupled", "--ice-snow",
-                                      "--params", str(pf), "--days", "0"])
+                                      "--params", str(pf), "--days", "1"])
 
     with pytest.raises(_StopError):
         mod.main()
