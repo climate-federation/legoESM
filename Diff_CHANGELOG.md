@@ -8,6 +8,38 @@ Convention: newest entries on top. Each entry = what changed, why, how verified.
 
 ---
 
+## 2026-07-16 — Upstream dependency moved to a clean branch off `main`
+
+**Problem found during cleanup review.** The load-bearing upstream commit
+(`517e044`, "run `_CanopyFluxesDiagnostics` in differentiable mode") had been
+committed onto `clm-ml-jax` branch `profiling/nsight-nvtx-tutorial` — an
+unrelated GPU-profiling branch — and was **never pushed**. `origin/main` did not
+contain it. So `differentiable=True` depended on a commit that existed only in a
+local working tree, behind an unrelated profiling tutorial.
+
+**Fix.** Cherry-picked onto a clean branch off `origin/main`:
+`feat/diff-mode-diagnostics` (= `origin/main` + 1 commit, one file,
+`MLCanopyFluxesMod.py`, +68/−41). Verified:
+- `git diff 517e044 <cherry-pick>` on the canopy file is **empty** (byte-identical
+  to the validated code);
+- `main`'s only delta from the old base is `profiling_tutorial/` additions, which
+  the canopy path never imports;
+- re-ran the slow diff-mode gradient suite against the **main-based** working tree
+  (clm-ml-jax is an editable install, so the checked-out tree is what legoESM
+  imports) — see result below.
+
+**Still open:** the branch must be merged to `clm-ml-jax` `main` before legoESM's
+`[canopy]` extra can pin a SHA. Until then the runtime capability probe is the
+only guard (it raises a clear error rather than emitting stale fluxes).
+
+**Doc correction.** `docs/land/clm_ml_differentiable_integration_scope.md` still
+asserted two things the implementation disproved: that `DIFFERENTIABLE_MODE` must
+be set `True` (it is **vestigial** — imported, never read), and that diff mode
+worked as shipped (it did not — the diagnostics early-return). Both corrected
+inline; a STATUS banner now points here.
+
+---
+
 ## 2026-07-13 — DONE: integration correct, differentiable, bug-free ✅
 
 Final validation:

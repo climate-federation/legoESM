@@ -6,11 +6,19 @@ legoESM** — i.e. make `compute_clm_ml_canopy_fluxes(forcing, ...) -> SurfaceFl
 differentiable w.r.t. the atmospheric forcing and (optionally) trainable canopy
 parameters, so gradients flow through the land column in the ESM's autodiff graph.
 
+> **STATUS (2026-07-16): implemented.** See `Diff_CHANGELOG.md` for the as-built record.
+> Two claims in the plan below turned out to be WRONG and are corrected inline:
+> (1) `DIFFERENTIABLE_MODE` is **vestigial**, not a required toggle — only `grid` matters;
+> (2) diff mode did **not** work end-to-end as shipped — `MLCanopyFluxes` returned before
+> `_CanopyFluxesDiagnostics`, so the flux fields legoESM reads were silently stale. That
+> required an upstream fix (`clm-ml-jax`, branch `feat/diff-mode-diagnostics`), which
+> legoESM's interface enforces at runtime via a capability probe.
+
 ## Key discovery (corrects the earlier "not differentiable" claim)
-The `clm-ml-jax` repo (AyaLahlou/clm-ml-jax, local clone == GitHub main) **already
-supports a differentiable mode.** It is *not* a dead Fortran/NumPy port. The forward-only
-vs differentiable behaviour is selected by **two toggles**, both currently OFF in the
-legoESM interface:
+The `clm-ml-jax` repo (`AyaLahlou/clm-ml-jax`) **already supports a differentiable mode.**
+It is *not* a dead Fortran/NumPy port. The forward-only vs differentiable behaviour is
+selected by the **per-call `grid` argument**, which is currently not passed by the legoESM
+interface:
 
 1. **Per-call `grid` argument** → `MLCanopyFluxesMod.py:300`:
    `_diff_mode = grid is not None`. When a `GridInfo` is passed, the model:
@@ -18,9 +26,10 @@ legoESM interface:
    - reads structural ints (`ncan/ntop/nbot/p`) from `grid` instead of `int(tracer)`,
    - gates out host-syncing Python checks behind `if not _diff_mode:`.
    Same switch in `MLLeafPhotosynthesisMod.py:2324`, `MLRungeKuttaMod.py:98`.
-2. **Module global `MLclm_varctl.DIFFERENTIABLE_MODE`** (default `False`, `MLclm_varctl.py:38`)
-   — imported by `MLCanopyTurbulenceMod.py:75` to skip `endrun`, diagnostic file I/O, and
-   other tape-breaking ops. Must be set `True`.
+2. ~~**Module global `MLclm_varctl.DIFFERENTIABLE_MODE`** — must be set `True`.~~
+   **WRONG (verified during M1):** this global is **vestigial**. `MLCanopyTurbulenceMod.py`
+   imports it but never reads it; no behaviour depends on its value. Setting it is a no-op.
+   `grid` is the only switch.
 
 Reference calling convention: **`make_clm_ml_forward(...)`** (`MLCanopyFluxesMod.py:2063`)
 builds a closure `forward(mlcanopy_inst) -> scalar` that is `jax.grad`-able; exercised by
