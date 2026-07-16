@@ -469,7 +469,7 @@ def c_sw(delp: np.ndarray, pt: np.ndarray, w: np.ndarray,
          u: np.ndarray, v: np.ndarray, gs: dict, bd: Bounds,
          npx: int, npy: int, dt2: float, nord: int = 1,
          hydrostatic: bool = True, dord4: bool = True,
-         grid_type: int = 0) -> dict:
+         grid_type: int = 0, duogrid: bool = False) -> dict:
     """sw_core.F90 c_sw (production branch) — one C-grid forward step.
 
     Mutates nothing; returns a dict with delpc, ptc, wc, uc, vc, ua, va,
@@ -477,6 +477,14 @@ def c_sw(delp: np.ndarray, pt: np.ndarray, w: np.ndarray,
     ``delp``/``pt``/``w`` corner ghosts are filled internally
     (fill2_4corners / fill_4corners) exactly as upstream — pass arrays
     with any deterministic corner-region content.
+
+    ``duogrid`` (static bool, feature-gate) selects the symmetryclean DUO
+    branch the production solver runs: d2a2c_vect's + divergence_corner's
+    duo variants (both certified bit-exact), the simple upwind KE/vorticity
+    (no ``sin_sg`` panel-edge special-case), and the interior-everywhere
+    vorticity transport — SKIPPING the corner fills / corner-removal (the
+    duo halos carry real cross-face data).  ``duogrid=False`` is the
+    byte-identical plain branch certified in phase-4a.
     """
     is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
     isd, jsd = bd.isd, bd.jsd
@@ -509,9 +517,19 @@ def c_sw(delp: np.ndarray, pt: np.ndarray, w: np.ndarray,
     UF = fort(u, isd, jsd)   # D winds (read-only here)
     VF = fort(v, isd, jsd)
 
-    ua_a, va_a, uc_a, vc_a, ut_a, vt_a = d2a2c_vect(
-        u, v, gs, bd, npx, npy, dord4=dord4, grid_type=grid_type,
-        bounded_domain=bounded_domain)
+    if duogrid:
+        # DUO branch: dg-initialized d2a2c_vect (function-scope import
+        # avoids the fv3_native_duo_sw_core <-> fv3_native_sw_core cycle).
+        from legoesm.core.fv3_native_duo_sw_core import d2a2c_vect_duo
+        _d2a = d2a2c_vect_duo(u, v, gs, bd, npx, npy, dord4=dord4,
+                              grid_type=grid_type)
+        ua_a, va_a = _d2a["ua"], _d2a["va"]
+        uc_a, vc_a = _d2a["uc"], _d2a["vc"]
+        ut_a, vt_a = _d2a["ut"], _d2a["vt"]
+    else:
+        ua_a, va_a, uc_a, vc_a, ut_a, vt_a = d2a2c_vect(
+            u, v, gs, bd, npx, npy, dord4=dord4, grid_type=grid_type,
+            bounded_domain=bounded_domain)
     UA = fort(ua_a, isd, jsd)
     VA = fort(va_a, isd, jsd)
     UC = fort(uc_a, isd, jsd)
@@ -520,8 +538,15 @@ def c_sw(delp: np.ndarray, pt: np.ndarray, w: np.ndarray,
     VT = fort(vt_a, isd, jsd)
 
     if nord > 0:
-        divg_a = divergence_corner(u, v, ua_a, va_a, gs, bd, npx, npy,
-                                   grid_type=grid_type)
+        if duogrid:
+            from legoesm.core.fv3_native_duo_sw_core import (
+                divergence_corner_duo,
+            )
+            divg_a = divergence_corner_duo(u, v, ua_a, va_a, gs, bd, npx,
+                                           npy, grid_type=grid_type)
+        else:
+            divg_a = divergence_corner(u, v, ua_a, va_a, gs, bd, npx, npy,
+                                       grid_type=grid_type)
     else:  # pragma: no cover - production uses nord > 0
         divg_a = _fa(bd, 1, 1).a
 
@@ -552,7 +577,7 @@ def c_sw(delp: np.ndarray, pt: np.ndarray, w: np.ndarray,
     WC = _fa(bd, 0, 0)
 
     # Xdir
-    if grid_type < 3 and not bounded_domain:
+    if grid_type < 3 and not bounded_domain and not duogrid:
         fill2_4corners(DELP, PT, 1, npx, npy)
     if hydrostatic:
         for j in range(js - 1, jep1 + 1):
@@ -566,7 +591,7 @@ def c_sw(delp: np.ndarray, pt: np.ndarray, w: np.ndarray,
                 fx1[i, j] = UT[i, j] * fx1[i, j]
                 fx[i, j] = fx1[i, j] * fx[i, j]
     else:
-        if grid_type < 3:
+        if grid_type < 3 and not duogrid:
             fill_4corners(W, 1, npx, npy)
         for j in range(js - 1, je + 1 + 1):
             for i in range(is_ - 1, ie + 2 + 1):
@@ -583,7 +608,7 @@ def c_sw(delp: np.ndarray, pt: np.ndarray, w: np.ndarray,
                 fx2[i, j] = fx1[i, j] * fx2[i, j]
 
     # Ydir
-    if grid_type < 3 and not bounded_domain:
+    if grid_type < 3 and not bounded_domain and not duogrid:
         fill2_4corners(DELP, PT, 2, npx, npy)
     if hydrostatic:
         for j in range(js - 1, jep1 + 1 + 1):
@@ -606,7 +631,7 @@ def c_sw(delp: np.ndarray, pt: np.ndarray, w: np.ndarray,
                                 + fy[i, j] - fy[i, j + 1])
                              * RAREA[i, j]) / DELPC[i, j]
     else:
-        if grid_type < 3:
+        if grid_type < 3 and not duogrid:
             fill_4corners(W, 2, npx, npy)
         for j in range(js - 1, je + 2 + 1):
             for i in range(is_ - 1, ie + 1 + 1):
@@ -640,46 +665,54 @@ def c_sw(delp: np.ndarray, pt: np.ndarray, w: np.ndarray,
     vort = _fl(is_ - 1, ie + 1, js - 1, je + 1)
     if bounded_domain or grid_type >= 3:  # pragma: no cover
         raise NotImplementedError
-    for j in range(js - 1, jep1 + 1):
-        for i in range(is_ - 1, iep1 + 1):
-            if UA[i, j] > 0.0:
-                if i == 1:
-                    ke[1, j] = UC[1, j] * SIN_SG[1, j, 1 - 1] \
-                        + VF[1, j] * COS_SG[1, j, 1 - 1]
-                elif i == npx:
-                    ke[i, j] = UC[npx, j] * SIN_SG[npx, j, 1 - 1] \
-                        + VF[npx, j] * COS_SG[npx, j, 1 - 1]
+    if duogrid:
+        # DUO KE/vorticity — simple upwind, NO sin_sg panel-edge special-
+        # case (sw_core.F90:303-321, the bounded/grid_type>=3/duogrid branch)
+        for j in range(js - 1, jep1 + 1):
+            for i in range(is_ - 1, iep1 + 1):
+                ke[i, j] = UC[i, j] if UA[i, j] > 0.0 else UC[i + 1, j]
+                vort[i, j] = VC[i, j] if VA[i, j] > 0.0 else VC[i, j + 1]
+    else:
+        for j in range(js - 1, jep1 + 1):
+            for i in range(is_ - 1, iep1 + 1):
+                if UA[i, j] > 0.0:
+                    if i == 1:
+                        ke[1, j] = UC[1, j] * SIN_SG[1, j, 1 - 1] \
+                            + VF[1, j] * COS_SG[1, j, 1 - 1]
+                    elif i == npx:
+                        ke[i, j] = UC[npx, j] * SIN_SG[npx, j, 1 - 1] \
+                            + VF[npx, j] * COS_SG[npx, j, 1 - 1]
+                    else:
+                        ke[i, j] = UC[i, j]
                 else:
-                    ke[i, j] = UC[i, j]
-            else:
-                if i == 0:
-                    ke[0, j] = UC[1, j] * SIN_SG[0, j, 3 - 1] \
-                        + VF[1, j] * COS_SG[0, j, 3 - 1]
-                elif i == (npx - 1):
-                    ke[i, j] = UC[npx, j] * SIN_SG[npx - 1, j, 3 - 1] \
-                        + VF[npx, j] * COS_SG[npx - 1, j, 3 - 1]
+                    if i == 0:
+                        ke[0, j] = UC[1, j] * SIN_SG[0, j, 3 - 1] \
+                            + VF[1, j] * COS_SG[0, j, 3 - 1]
+                    elif i == (npx - 1):
+                        ke[i, j] = UC[npx, j] * SIN_SG[npx - 1, j, 3 - 1] \
+                            + VF[npx, j] * COS_SG[npx - 1, j, 3 - 1]
+                    else:
+                        ke[i, j] = UC[i + 1, j]
+        for j in range(js - 1, jep1 + 1):
+            for i in range(is_ - 1, iep1 + 1):
+                if VA[i, j] > 0.0:
+                    if j == 1:
+                        vort[i, 1] = VC[i, 1] * SIN_SG[i, 1, 2 - 1] \
+                            + UF[i, 1] * COS_SG[i, 1, 2 - 1]
+                    elif j == npy:
+                        vort[i, j] = VC[i, npy] * SIN_SG[i, npy, 2 - 1] \
+                            + UF[i, npy] * COS_SG[i, npy, 2 - 1]
+                    else:
+                        vort[i, j] = VC[i, j]
                 else:
-                    ke[i, j] = UC[i + 1, j]
-    for j in range(js - 1, jep1 + 1):
-        for i in range(is_ - 1, iep1 + 1):
-            if VA[i, j] > 0.0:
-                if j == 1:
-                    vort[i, 1] = VC[i, 1] * SIN_SG[i, 1, 2 - 1] \
-                        + UF[i, 1] * COS_SG[i, 1, 2 - 1]
-                elif j == npy:
-                    vort[i, j] = VC[i, npy] * SIN_SG[i, npy, 2 - 1] \
-                        + UF[i, npy] * COS_SG[i, npy, 2 - 1]
-                else:
-                    vort[i, j] = VC[i, j]
-            else:
-                if j == 0:
-                    vort[i, 0] = VC[i, 1] * SIN_SG[i, 0, 4 - 1] \
-                        + UF[i, 1] * COS_SG[i, 0, 4 - 1]
-                elif j == (npy - 1):
-                    vort[i, j] = VC[i, npy] * SIN_SG[i, npy - 1, 4 - 1] \
-                        + UF[i, npy] * COS_SG[i, npy - 1, 4 - 1]
-                else:
-                    vort[i, j] = VC[i, j + 1]
+                    if j == 0:
+                        vort[i, 0] = VC[i, 1] * SIN_SG[i, 0, 4 - 1] \
+                            + UF[i, 1] * COS_SG[i, 0, 4 - 1]
+                    elif j == (npy - 1):
+                        vort[i, j] = VC[i, npy] * SIN_SG[i, npy - 1, 4 - 1] \
+                            + UF[i, npy] * COS_SG[i, npy - 1, 4 - 1]
+                    else:
+                        vort[i, j] = VC[i, j + 1]
 
     dt4 = 0.5 * dt2
     for j in range(js - 1, jep1 + 1):
@@ -702,11 +735,13 @@ def c_sw(delp: np.ndarray, pt: np.ndarray, w: np.ndarray,
             vortc[i, j] = fxc[i, j - 1] - fxc[i, j] \
                 - fyc[i - 1, j] + fyc[i, j]
 
-    # remove the extra term at the corners
-    vortc[1, 1] = vortc[1, 1] + fyc[0, 1]
-    vortc[npx, 1] = vortc[npx, 1] - fyc[npx, 1]
-    vortc[npx, npy] = vortc[npx, npy] - fyc[npx, npy]
-    vortc[1, npy] = vortc[1, npy] + fyc[0, npy]
+    # remove the extra term at the corners (sw_core.F90:395-401,
+    # .not.duogrid — the duo halos carry real cross-face circulation)
+    if not duogrid:
+        vortc[1, 1] = vortc[1, 1] + fyc[0, 1]
+        vortc[npx, 1] = vortc[npx, 1] - fyc[npx, 1]
+        vortc[npx, npy] = vortc[npx, npy] - fyc[npx, npy]
+        vortc[1, npy] = vortc[1, npy] + fyc[0, npy]
 
     # absolute vorticity
     for j in range(js, je + 1 + 1):
@@ -714,33 +749,49 @@ def c_sw(delp: np.ndarray, pt: np.ndarray, w: np.ndarray,
             vortc[i, j] = FC[i, j] + RAREA_C[i, j] * vortc[i, j]
 
     # ---- transport absolute vorticity (cubed-sphere branch) ----
-    for j in range(js, je + 1):
-        for i in range(is_, iep1 + 1):
-            if i == 1 or i == npx:
-                fy1[i, j] = dt2 * VF[i, j]
-            else:
+    if duogrid:
+        # DUO: interior contravariant formula for ALL i/j — no i==1/npx or
+        # j==1/npy panel-edge special-case (sw_core.F90:420-434 duo branch)
+        for j in range(js, je + 1):
+            for i in range(is_, iep1 + 1):
                 fy1[i, j] = dt2 * (VF[i, j] - UC[i, j] * COSA_U[i, j]) \
                     / SINA_U[i, j]
-            if fy1[i, j] > 0.0:
-                fy[i, j] = vortc[i, j]
-            else:
-                fy[i, j] = vortc[i, j + 1]
-    for j in range(js, jep1 + 1):
-        if j == 1 or j == npy:
-            for i in range(is_, ie + 1):
-                fx1[i, j] = dt2 * UF[i, j]
-                if fx1[i, j] > 0.0:
-                    fx[i, j] = vortc[i, j]
-                else:
-                    fx[i, j] = vortc[i + 1, j]
-        else:
+                fy[i, j] = vortc[i, j] if fy1[i, j] > 0.0 \
+                    else vortc[i, j + 1]
+        for j in range(js, jep1 + 1):
             for i in range(is_, ie + 1):
                 fx1[i, j] = dt2 * (UF[i, j] - VC[i, j] * COSA_V[i, j]) \
                     / SINA_V[i, j]
-                if fx1[i, j] > 0.0:
-                    fx[i, j] = vortc[i, j]
+                fx[i, j] = vortc[i, j] if fx1[i, j] > 0.0 \
+                    else vortc[i + 1, j]
+    else:
+        for j in range(js, je + 1):
+            for i in range(is_, iep1 + 1):
+                if i == 1 or i == npx:
+                    fy1[i, j] = dt2 * VF[i, j]
                 else:
-                    fx[i, j] = vortc[i + 1, j]
+                    fy1[i, j] = dt2 * (VF[i, j] - UC[i, j] * COSA_U[i, j]) \
+                        / SINA_U[i, j]
+                if fy1[i, j] > 0.0:
+                    fy[i, j] = vortc[i, j]
+                else:
+                    fy[i, j] = vortc[i, j + 1]
+        for j in range(js, jep1 + 1):
+            if j == 1 or j == npy:
+                for i in range(is_, ie + 1):
+                    fx1[i, j] = dt2 * UF[i, j]
+                    if fx1[i, j] > 0.0:
+                        fx[i, j] = vortc[i, j]
+                    else:
+                        fx[i, j] = vortc[i + 1, j]
+            else:
+                for i in range(is_, ie + 1):
+                    fx1[i, j] = dt2 * (UF[i, j] - VC[i, j] * COSA_V[i, j]) \
+                        / SINA_V[i, j]
+                    if fx1[i, j] > 0.0:
+                        fx[i, j] = vortc[i, j]
+                    else:
+                        fx[i, j] = vortc[i + 1, j]
 
     # ---- update the time-centred C-grid winds ----
     for j in range(js, je + 1):
