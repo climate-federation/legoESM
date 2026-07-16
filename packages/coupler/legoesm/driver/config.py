@@ -289,6 +289,12 @@ VALID_MICROPHYSICS = (
     "morrison", "thompson", "p3", "sdm", "fast_sbm", "ml_emulator",
 )
 
+# Single source of truth for the Super-Droplet collision-coalescence kernels --
+# consumed by ExperimentConfig.validate_strict AND by the run-driver CLI
+# ``choices=`` (same anti-drift contract as VALID_MICROPHYSICS).  Mirrors the
+# dispatch set in ``microphysics.sdm.kernels.collision_kernel``.
+VALID_SDM_COLLISION_KERNELS = ("hall", "long", "sedimentation", "golovin")
+
 
 class ExperimentConfig(NamedTuple):
     """Top-level experiment configuration.
@@ -463,6 +469,14 @@ class ExperimentConfig(NamedTuple):
     cloud_diagnostic_condensate_scheme: str = "constant"
     cloud_adiabatic_lwc_rate: float | None = None
     microphysics: str = "none"
+    # Super-Droplet (scheme="sdm") collision-coalescence kernel.  "hall"
+    # (Hall 1980, the physical default, matching fast_sbm) | "long" (Long 1974)
+    # | "sedimentation" (geometric sweep-out) | "golovin" (the ANALYTIC TEST
+    # kernel -- verification only, NOT physical).  Threaded into SDMConfig at
+    # every MicrophysicsConfig build site; the sub-config was previously
+    # unreachable (`MicrophysicsConfig(scheme=...)` only), so an sdm run always
+    # got the bare SDMConfig() default.  Inert for every non-sdm scheme.
+    sdm_collision_kernel: str = "hall"
     # Number of microphysics sub-steps inside one dynamics step.  Morrison's
     # double-moment product terms (q_c·q_r, q_i·q_c) run away at the
     # ~600s dynamics step; 10 sub-steps (60s each) keep it bounded.
@@ -1271,6 +1285,12 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"microphysics must be one of {VALID_MICROPHYSICS}, "
                 f"got {self.microphysics!r}"
+            )
+        if self.sdm_collision_kernel not in VALID_SDM_COLLISION_KERNELS:
+            errors.append(
+                f"sdm_collision_kernel must be one of "
+                f"{VALID_SDM_COLLISION_KERNELS}, got "
+                f"{self.sdm_collision_kernel!r}"
             )
         # Physics-scheme membership (mirror the integration.py factory sets so
         # a typo fails here, not only at JIT-compile inside integration.py).

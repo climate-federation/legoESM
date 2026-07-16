@@ -34,6 +34,7 @@ from legoesm.core.tracers import (
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.physics_pipeline import (
     build_physics_pipeline,
+    microphysics_config_for,
     required_microphysics_tracer_slots,
     turbulence_config_for,
     validate_microphysics_tracer_slots,
@@ -4962,7 +4963,7 @@ class ModelDriver:
         # that lacks a requested switch (only Morrison implements them).  The
         # external-aerosol-forcing requirement is enforced upstream by run_amip
         # and by the factories' fail-fast (no aerosol_od => raise).
-        _micro_cfg = MicrophysicsConfig(scheme=cfg.microphysics)
+        _micro_cfg = microphysics_config_for(cfg)
         _msub = getattr(_micro_cfg, cfg.microphysics, None)
         if _msub is not None:
             _micro_cfg = _micro_cfg._replace(**{
@@ -6007,7 +6008,7 @@ class ModelDriver:
                 ),
                 convection=ConvectionConfig(scheme=cfg.convection),
                 turbulence=turbulence_config_for(cfg),
-                microphysics=MicrophysicsConfig(scheme=cfg.microphysics),
+                microphysics=microphysics_config_for(cfg),
                 gravity_wave_drag=GravityWaveDragConfig(
                     scheme=cfg.gravity_wave_drag),
             )
