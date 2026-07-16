@@ -692,6 +692,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "BL-ventilation lever. --no-bechtold-downdraft-transport "
                              "disables a config-file default. Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_downdraft_transport}.")
+    parser.add_argument("--bechtold-use-ifs-cape-closure",
+                        dest="bechtold_use_ifs_cape_closure",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_cape_closure,
+                        help="Enable the full IFS deep CAPE closure "
+                             "ZMFUB1=ZCAPE*ZMFUB/(ZHEAT*ZXTAU) (openifs "
+                             "cumastrn.F90:704-833) instead of the legacy "
+                             "surrogate deep closure. "
+                             "--no-bechtold-use-ifs-cape-closure disables a "
+                             "config-file default. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_cape_closure}.")
     parser.add_argument("--bechtold-downdraft-entrain-rate", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_downdraft_entrain_rate,
                         dest="bechtold_downdraft_entrain_rate",
@@ -1461,6 +1472,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_downdraft_transport=args.bechtold_downdraft_transport,
         bechtold_downdraft_entrain_rate=args.bechtold_downdraft_entrain_rate,
         bechtold_downdraft_detrain_scale_m=args.bechtold_downdraft_detrain_scale_m,
+        bechtold_use_ifs_cape_closure=args.bechtold_use_ifs_cape_closure,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
         latlon_spmd_compiled_segments=args.latlon_spmd_compiled_segments,

@@ -882,6 +882,12 @@ class ExperimentConfig(NamedTuple):
     bechtold_downdraft_transport: bool = False
     bechtold_downdraft_entrain_rate: float = 5.0e-4
     bechtold_downdraft_detrain_scale_m: float = 700.0
+    # Full IFS deep CAPE closure ZMFUB1=ZCAPE*ZMFUB/(ZHEAT*ZXTAU)
+    # (openifs cumastrn.F90:704-833; PR #1095).  Default ON (2026-07-16,
+    # validated: codex x11 + gray-RCE A/B + C24 AMIP smoke A/B, both stable /
+    # neutral); --no-bechtold-use-ifs-cape-closure restores the legacy
+    # surrogate byte-identically.  Mirrors BechtoldConfig.use_ifs_cape_closure.
+    bechtold_use_ifs_cape_closure: bool = True
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -1902,6 +1908,11 @@ class ExperimentConfig(NamedTuple):
                 amip_cfg, 'bechtold_downdraft_entrain_rate', 5.0e-4),
             bechtold_downdraft_detrain_scale_m=getattr(
                 amip_cfg, 'bechtold_downdraft_detrain_scale_m', 700.0),
+            # Missing-field fallback = True (the scheme default): a legacy
+            # flat config predating the field must get the SAME closure a
+            # fresh default run gets, not silently pin the old one.
+            bechtold_use_ifs_cape_closure=getattr(
+                amip_cfg, 'bechtold_use_ifs_cape_closure', True),
             # Convective precip split family — copy through AMIP/checkpoint
             # restore so the physical autoconversion isn't dropped to defaults
             # (codex MED; convective_precip_efficiency was a pre-existing gap).
@@ -2054,6 +2065,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_downdraft_transport=self.bechtold_downdraft_transport,
             bechtold_downdraft_entrain_rate=self.bechtold_downdraft_entrain_rate,
             bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
+            bechtold_use_ifs_cape_closure=self.bechtold_use_ifs_cape_closure,
             sigma_b=self.sigma_b,
             k_BL_max_per_day=self.k_BL_max_per_day,
             k_free_per_day=self.k_free_per_day,
