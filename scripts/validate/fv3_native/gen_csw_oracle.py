@@ -32,7 +32,7 @@ INPUT_FIELDS = (
     ("SIN_SG", "sin_sg"), ("COS_SG", "cos_sg"),
 )
 FIXTURE_INPUTS = tuple(key for _name, key in INPUT_FIELDS)
-OUTPUT_FIELDS = ("delpc", "ptc", "uc", "vc")
+OUTPUT_FIELDS = ("delpc", "ptc", "uc", "vc", "divg_d")
 
 
 def _dump_field(name: str, a: np.ndarray, lo: int) -> str:
@@ -112,11 +112,12 @@ def _pack(work: str) -> None:
     m_a = RES + 2 * NG
     m_b = m_a + 1
     shapes = {"delpc": (m_a, m_a), "ptc": (m_a, m_a),
-              "uc": (m_b, m_a), "vc": (m_a, m_b)}
+              "uc": (m_b, m_a), "vc": (m_a, m_b), "divgd": (m_b, m_b)}
     outs = {k: np.full(v, np.nan) for k, v in shapes.items()}
     for line in open(f"{work}/csw_output.txt"):
         pp = line.split()
         outs[pp[0].lower()][int(pp[1]) - lo, int(pp[2]) - lo] = float(pp[3])
+    outs["divg_d"] = outs.pop("divgd")   # driver token DIVGD -> npz key divg_d
 
     np.savez_compressed(
         _fix_dir(),

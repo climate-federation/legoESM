@@ -164,6 +164,11 @@ program fv3_csw_driver
       write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'VC', i, j, vc(i, j)
     end do
   end do
+  do j = bd%jsd, bd%jed + 1
+    do i = bd%isd, bd%ied + 1
+      write(u_out, '(A,1X,I5,1X,I5,1X,ES26.17E3)') 'DIVGD', i, j, divg_d(i, j)
+    end do
+  end do
   close(u_out)
   write(*, *) 'fv3_csw_oracle: duo c_sw dumped'
 end program fv3_csw_driver

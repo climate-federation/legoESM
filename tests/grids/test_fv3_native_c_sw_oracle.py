@@ -76,12 +76,34 @@ def test_extract_block_sha_pinned():
     assert hashlib.sha256(block).hexdigest() == _EXTRACT_BLOCK_SHA256
 
 
+def _region(bd, key):
+    """Geometry-derived (i_fort, j_fort) inclusive written region of each
+    c_sw output on the duo branch (from the loop bounds), so the compare
+    mask is BOUNDS-derived, not sentinel-preservation-dependent (codex p4c
+    c_sw-oracle P2)."""
+    if key in ("delpc", "ptc"):                        # transport update
+        return bd.is_ - 1, bd.ie + 1, bd.js - 1, bd.je + 1
+    if key == "uc":                                    # d2a2c uc region
+        return bd.is_ - 1, bd.ie + 2, bd.js - 1, bd.je + 1
+    if key == "vc":                                    # d2a2c vc region
+        return bd.is_ - 1, bd.ie + 1, bd.js - 1, bd.je + 2
+    return bd.isd + 1, bd.ied, bd.jsd + 1, bd.jed       # divg_d 289 B-nodes
+
+
+def _mask(shape, i0, i1, j0, j1):
+    lo = 1 - NG
+    m = np.zeros(shape, dtype=bool)
+    m[i0 - lo:i1 - lo + 1, j0 - lo:j1 - lo + 1] = True
+    return m
+
+
 def test_duo_c_sw_bit_exact(oracle):
     """Run the port c_sw(duogrid=True) on the STORED inputs; delpc/ptc/uc/vc
+    AND divg_d (the divergence_corner_duo result — codex p4c c_sw-oracle P1)
     must equal the authoritative Fortran DUO c_sw BIT-for-BIT (uint64) over
-    each output's computed region.  The mask is the finite non-sentinel
-    region of BOTH sides asserted EQUAL, so an omitted or extra write fails
-    (codex-sound)."""
+    each output's BOUNDS-derived written region.  The port's finite
+    non-sentinel region is asserted EQUAL to that bounds mask, so an omitted
+    or extra write fails."""
     assert (int(oracle["res"]), int(oracle["ng"])) == (RES, NG)
     from legoesm.core.fv3_native_sw_core import Bounds, c_sw
     bd = Bounds.single_tile(RES, NG)
@@ -91,16 +113,19 @@ def test_duo_c_sw_bit_exact(oracle):
                v=np.asarray(oracle["v"]), gs=gs, bd=bd, npx=RES + 1,
                npy=RES + 1, dt2=112.5, nord=1, hydrostatic=True, dord4=True,
                grid_type=0, duogrid=True)
-    for key in ("delpc", "ptc", "uc", "vc"):
+    for key in ("delpc", "ptc", "uc", "vc", "divg_d"):
         g = np.asarray(out[key], dtype=np.float64)
         w = np.asarray(oracle[key], dtype=np.float64)
         assert g.shape == w.shape, key
-        mg = (np.abs(g) < 1e24) & np.isfinite(g)
-        mw = (np.abs(w) < 1e24) & np.isfinite(w)
-        assert np.array_equal(mg, mw), f"{key}: computed region differs"
-        assert int(mw.sum()) >= 100, f"{key}: too few computed cells"
-        nd = int((g[mw].view(np.uint64) != w[mw].view(np.uint64)).sum())
-        assert nd == 0, f"{key}: {nd}/{int(mw.sum())} cells differ bitwise"
+        exp = _mask(g.shape, *_region(bd, key))
+        assert int(exp.sum()) >= 100, key
+        port_region = (np.abs(g) < 1e24) & np.isfinite(g)
+        assert np.array_equal(port_region, exp), (
+            f"{key}: port wrote {int(port_region.sum())} != expected "
+            f"{int(exp.sum())} (omitted/extra cell)")
+        assert np.isfinite(w[exp]).all() and (np.abs(w[exp]) < 1e24).all(), key
+        nd = int((g[exp].view(np.uint64) != w[exp].view(np.uint64)).sum())
+        assert nd == 0, f"{key}: {nd}/{int(exp.sum())} cells differ bitwise"
 
 
 def test_fixture_input_provenance(oracle):
