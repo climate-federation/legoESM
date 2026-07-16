@@ -70,8 +70,16 @@ vs Demange nn_bt_flt=3), RK3 variant (Shu-Osher vs Wicker-Skamarock), plus minor
 ## 6. Remaining worklist (ranked; pick up here)
 Each item: what NEMO does, what legoESM does, the fix, expected effect, effort.
 
-**A. z-star → linear free surface (`key_linssh`)** — NOW THE PRIME DRIFT
-CANDIDATE (2026-07-16: Redi ruled out — with Redi OFF the abyssal contrast grows
+**A. z-star → linear free surface (`key_linssh`) — DONE 2026-07-16
+(128feaffb mechanism + recipe flip). THE ABYSSAL-DRIFT ROOT CAUSE, confirmed by
+construction: the z-star sigma redistribution of deta/dt manufactured the deep
+circulation. Acceptance: surf/deep rms(u) 0.20 → 5.91 (NEMO 8.2), bottom rms(u)
+4.98e-2 → 2.7e-3 (18×, NEMO 1.4e-3), abyssal density contrast collapsed to
+NEMO's. Scalar RMS now reads 0.502 — HONEST (the old 0.805 was inflated by the
+spurious deep flow); the residual is a ~0.4-0.5 fairly-uniform amplitude factor
+with the structure now NEMO-like. Remaining amplitude candidates: barotropic
+Demange filter (item D), PGF 3.4% (C), minors.** Original description (was the
+prime candidate): (2026-07-16: Redi ruled out — with Redi OFF the abyssal contrast grows
 5-50× WORSE, i.e. Redi DAMPS the deep gradient; tracer integrator ruled out;
 the drift is ADVECTIVE, pointing at the deep w / thickness-breathing difference).
 NEMO holds layer thicknesses FIXED (ssh evolves but doesn't stretch the column);

@@ -777,7 +777,14 @@ def build_nemo_gyre_recipe(
 
     # Consistent 30-wet-level z* (H_max == sum(e3t) == H_bathy == 4300.71 m).
     e3t_wet, gdept_wet = _nemo_gyre_vertical_ladder()
-    z_coord = create_z_star_from_thicknesses(e3t_wet, gdept_wet)
+    # NEMO GYRE_BARE is built with key_linssh: LINEAR free surface, layer
+    # thicknesses FIXED at the eta=0 reference. Under z-star the sigma
+    # redistribution of deta/dt manufactured a spurious bottom-intensified
+    # abyssal circulation (surf/deep rms(u) 0.20 vs NEMO 8.2); linssh flips it
+    # to NEMO's surface-intensified structure (5.91) and collapses the abyssal
+    # density drift to NEMO's level. See nemo_gyre_fidelity_plan.md item A.
+    z_coord = create_z_star_from_thicknesses(e3t_wet, gdept_wet)._replace(
+        linear_free_surface=True)
     n_lev = int(e3t_wet.size)
 
     # Beta-plane geometry (uniform 106 km metric, NEMO f = f0 + beta*y).
