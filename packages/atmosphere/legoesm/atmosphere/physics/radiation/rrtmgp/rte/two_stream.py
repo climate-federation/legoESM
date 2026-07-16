@@ -329,7 +329,14 @@ def _accumulate_over_gpoints(step_fn, n_gpt, init_val, gpoint_batch_size,
     # while the compile stays a single reused kernel (no prevent_cse Ng-fold
     # blow-up — that pathology is specific to the per-g-point scan path).
     block_step_ckpt = (
-        jax.checkpoint(block_step, policy=jax.checkpoint_policies.nothing_saveable)
+        jax.checkpoint(
+            block_step,
+            # prevent_cse=False (jax.checkpoint defaults it True): inside a scan
+            # CSE-disabling is unnecessary and would emit a distinct body per
+            # block; keep ONE reused compiled body. JAX recommends False here.
+            prevent_cse=False,
+            policy=jax.checkpoint_policies.nothing_saveable,
+        )
         if checkpoint else block_step
     )
     fluxes, _ = jax.lax.scan(block_step_ckpt, init_val, jnp.arange(n_blocks))
