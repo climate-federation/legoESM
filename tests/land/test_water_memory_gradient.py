@@ -103,6 +103,24 @@ def test_nan_cell_is_confined():
     assert np.all(np.isfinite(M[1:])), "good cells must stay finite when cell 0 is NaN"
 
 
+def test_monthly_kernel_sums_to_full_window():
+    """The temporal memory kernel summed over ALL months equals the full-window
+    integrated map: Σ_m ∂(month-m GPP_i)/∂θ_i = ∂(∫_window GPP_i)/∂θ_i. Validates the
+    month-binning + stacking + sign of monthly_memory_kernel (the synthetic window's
+    doy straddles Jun/Jul, so >=2 months are spanned -> a non-trivial check)."""
+    cfg, F, doy_seq, late_flags, lat, st0 = _case()
+    good = jnp.ones(_NCOL, bool)
+    months, K = wm.monthly_memory_kernel(st0, F, doy_seq, cfg, lat=lat, dt=_DT,
+                                         good_mask=good, use_checkpoint=True)
+    assert len(months) >= 2, f"window should span >=2 months, got {months}"
+    K_sum = np.nansum(np.asarray(K), axis=0)
+    nsteps = int(np.asarray(F.sw_down).shape[0])
+    M_full, _ = wm.water_memory_map(st0, F, doy_seq, jnp.ones(nsteps, bool), cfg,
+                                    lat=lat, dt=_DT, good_mask=good, use_checkpoint=True)
+    assert np.allclose(K_sum, np.asarray(M_full), atol=1e-6, rtol=1e-5), (
+        f"kernel sum {K_sum} != full-window map {np.asarray(M_full)}")
+
+
 def test_spin_forward_is_nograd_and_finite():
     """The no-grad spin-to-perturb-point runs and returns a finite state."""
     cfg, F, doy_seq, late_flags, lat, st0 = _case()

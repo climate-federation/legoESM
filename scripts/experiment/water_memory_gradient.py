@@ -194,6 +194,35 @@ def _selftest(ncol=128, nsteps=240):
 # ---------------------------------------------------------------------------
 # Real-data run (Derecho): spin-up restart + CRU-JRA forcing -> global memory map
 # ---------------------------------------------------------------------------
+# noleap calendar month-start day-of-year edges (Jan=1 ... Dec=12 via searchsorted)
+_MONTH_STARTS = np.array([0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365])
+
+
+def monthly_memory_kernel(
+    state0, forcing_seq, doy_seq, config, *,
+    lat, dt, good_mask, land_params_fn=None, use_checkpoint=True,
+):
+    """Temporal memory kernel: K[m, i] = d( month-m integrated GPP_i ) / d(theta_i May)
+    [gC/m^2 per (m^3/m^3)], for every calendar month spanned by the window.  One
+    reverse pass PER MONTH (late_flags = that month's steps), reusing the exact tested
+    ``water_memory_map`` path -- forward-mode jvp is unavailable because the canopy
+    Newton solver is custom_vjp (reverse only).  By construction, summing K over the
+    late-window months reproduces the integrated map (a consistency check).  Returns
+    ``(month_labels (n_months,), K (n_months, ncol))``."""
+    doy = np.asarray(doy_seq)
+    month = np.searchsorted(_MONTH_STARTS, doy, side="right")   # 1..12 per step
+    labels = sorted(set(int(m) for m in month))
+    rows = []
+    for m in labels:
+        flags = jnp.asarray(month == m)
+        Km, _ = water_memory_map(
+            state0, forcing_seq, doy_seq, flags, config, lat=lat, dt=dt,
+            good_mask=good_mask, land_params_fn=land_params_fn,
+            use_checkpoint=use_checkpoint)
+        rows.append(np.asarray(Km))
+    return np.array(labels), np.stack(rows)
+
+
 def _forward_good_mask(state0, forcing_seq, doy_seq, config, lat, dt, land_params_fn):
     """No-grad forward pass over the window -> good_mask (ncol,): cells whose GPP and
     state stay FINITE throughout (this clean harness has NO revert guard, so a NaN
@@ -298,32 +327,63 @@ def run_real(args) -> int:
     M, late_gpp = water_memory_map(
         state_p, F_win, doy_win, late_flags, config, lat=lat_rad, dt=dt,
         good_mask=good, land_params_fn=lp_fn, use_checkpoint=True)
-    M = np.where(np.asarray(good), np.asarray(M), np.nan)          # mask bad cells
-    late_gpp = np.where(np.asarray(good), np.asarray(late_gpp), np.nan)
+    good_np = np.asarray(good)
+    M = np.where(good_np, np.asarray(M), np.nan)                   # mask bad cells
+    late_gpp = np.where(good_np, np.asarray(late_gpp), np.nan)
     print(f"memory map: finite cells={int(np.isfinite(M).sum())} | "
           f"range [{np.nanmin(M):.3e}, {np.nanmax(M):.3e}] gC/m2 per (m3/m3)")
-    _write_map(args.out, M, late_gpp, np.asarray(good), lat_rad, lon_rad,
-               args.resolution, year, args)
+
+    # --- temporal memory kernel (optional): month-resolved d GPP/d theta_May ---
+    months = kernel = None
+    if args.kernel:
+        print("computing monthly memory kernel (one reverse pass per month) ...")
+        months, kernel = monthly_memory_kernel(
+            state_p, F_win, doy_win, config, lat=lat_rad, dt=dt,
+            good_mask=good, land_params_fn=lp_fn, use_checkpoint=True)
+        kernel = np.where(good_np[None, :], kernel, np.nan)
+        # consistency: kernel summed over the LATE months == the integrated map
+        late_m = months >= int(np.searchsorted(_MONTH_STARTS, args.late_doy, side="right"))
+        resid = np.nanmax(np.abs(np.nansum(kernel[late_m], axis=0) - M))
+        for m, row in zip(months, kernel):
+            print(f"  month {int(m):2d}: mean|dGPP/dtheta| over good = "
+                  f"{np.nanmean(np.abs(row)):.3e}")
+        print(f"  consistency (sum_late-months kernel vs integrated map): "
+              f"max|resid|={resid:.2e}")
+
+    _write_map(args.out, M, late_gpp, good_np, lat_rad, lon_rad,
+               args.resolution, year, args, months=months, kernel=kernel)
     return 0
 
 
-def _write_map(out, M, late_gpp, good, lat_rad, lon_rad, resolution, year, args):
+def _write_map(out, M, late_gpp, good, lat_rad, lon_rad, resolution, year, args,
+               *, months=None, kernel=None):
     import xarray as xr
     nlat, nlon = resolution, 2 * resolution
     lat = np.rad2deg(np.asarray(lat_rad)).reshape(nlat, nlon)[:, 0]
     lon = np.rad2deg(np.asarray(lon_rad)).reshape(nlat, nlon)[0, :]
+    data = {
+        "dGPP_dtheta": (("lat", "lon"), M.reshape(nlat, nlon),
+                        {"long_name": "d(late-season GPP) / d(spring soil water)",
+                         "units": "gC m-2 per (m3 m-3)"}),
+        "late_gpp": (("lat", "lon"), late_gpp.reshape(nlat, nlon),
+                     {"long_name": "late-window GPP (unperturbed)", "units": "gC m-2"}),
+        "good_cell": (("lat", "lon"), good.reshape(nlat, nlon).astype("i1"),
+                      {"long_name": "1 = finite over window (else masked)"}),
+    }
+    coords = {"lat": ("lat", lat, {"units": "degrees_north"}),
+              "lon": ("lon", lon, {"units": "degrees_east"})}
+    if kernel is not None:
+        data["dGPP_dtheta_monthly"] = (
+            ("month", "lat", "lon"),
+            kernel.reshape(kernel.shape[0], nlat, nlon),
+            {"long_name": "d(month GPP) / d(spring soil water) [temporal memory kernel]",
+             "units": "gC m-2 per (m3 m-3)"})
+        coords["month"] = ("month", np.asarray(months),
+                           {"long_name": "calendar month (noleap)"})
     ds = xr.Dataset(
-        {"dGPP_dtheta": (("lat", "lon"), M.reshape(nlat, nlon),
-                         {"long_name": "d(late-season GPP) / d(spring soil water)",
-                          "units": "gC m-2 per (m3 m-3)"}),
-         "late_gpp": (("lat", "lon"), late_gpp.reshape(nlat, nlon),
-                      {"long_name": "late-window GPP (unperturbed)", "units": "gC m-2"}),
-         "good_cell": (("lat", "lon"), good.reshape(nlat, nlon).astype("i1"),
-                       {"long_name": "1 = finite over window (else masked)"})},
-        coords={"lat": ("lat", lat, {"units": "degrees_north"}),
-                "lon": ("lon", lon, {"units": "degrees_east"})},
+        data, coords=coords,
         attrs={"title": "water-memory gradient (differentiable land demo)",
-               "Conventions": "CF-1.8", "year": year, "restart": args.restart,
+               "Conventions": "CF-1.8", "year": year, "restart": args.restart or "",
                "perturb_doy": args.perturb_doy, "window_end_doy": args.window_end_doy,
                "late_doy": args.late_doy, "note": "uncalibrated; pattern is the demo"})
     Path(out).parent.mkdir(parents=True, exist_ok=True)
@@ -354,6 +414,9 @@ def main(argv=None) -> int:
     ap.add_argument("--perturb-doy", dest="perturb_doy", type=float, default=120.0)   # May 1
     ap.add_argument("--window-end-doy", dest="window_end_doy", type=float, default=273.0)  # Sep 30
     ap.add_argument("--late-doy", dest="late_doy", type=float, default=181.0)          # Jul 1
+    ap.add_argument("--kernel", action="store_true",
+                    help="also emit the monthly temporal memory kernel dGPP(month)/dtheta_May "
+                         "(one reverse pass per month; shows the memory decay/timescale)")
     ap.add_argument("--out", default="results/water_memory/memory_map.nc")
     args = ap.parse_args(argv)
 

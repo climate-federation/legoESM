@@ -27,6 +27,9 @@
 #   PERTURB_DOY=120                 — perturb theta at this doy (May 1)
 #   WINDOW_END_DOY=273              — integrate to (Sep 30)
 #   LATE_DOY=181                    — late-GPP target starts here (Jul 1)
+#   KERNEL=0                        — 1 => also emit the monthly memory kernel
+#                                     dGPP(month)/dtheta_May (one reverse pass/month;
+#                                     the memory-decay/timescale product). ~5x cost.
 #   OUT=results/water_memory/memory_${YEAR}_R${RESOLUTION}.nc
 #
 #PBS -N water_memory
@@ -61,14 +64,16 @@ FORCING_DIR="${FORCING_DIR:-data/crujra}"
 PERTURB_DOY="${PERTURB_DOY:-120}"
 WINDOW_END_DOY="${WINDOW_END_DOY:-273}"
 LATE_DOY="${LATE_DOY:-181}"
+KERNEL="${KERNEL:-0}"
 OUT="${OUT:-results/water_memory/memory_${YEAR}_R${RESOLUTION}.nc}"
 
-RESTART_ARG=()
-if [[ -n "$RESTART" ]]; then RESTART_ARG=(--restart "$RESTART"); fi
+EXTRA=()
+if [[ -n "$RESTART" ]]; then EXTRA+=(--restart "$RESTART"); fi
+if [[ "$KERNEL" == "1" ]]; then EXTRA+=(--kernel); fi
 
-echo "env=$LEGOESM_CONDA_ENV | R$RESOLUTION | year=$YEAR | restart=${RESTART:-<cold start>} | out=$OUT"
+echo "env=$LEGOESM_CONDA_ENV | R$RESOLUTION | year=$YEAR | restart=${RESTART:-<cold start>} | kernel=$KERNEL | out=$OUT"
 python scripts/experiment/water_memory_gradient.py --run \
-    "${RESTART_ARG[@]}" \
+    "${EXTRA[@]}" \
     --surfdata "$SURFDATA" \
     --forcing-dir "$FORCING_DIR" \
     --year "$YEAR" \
