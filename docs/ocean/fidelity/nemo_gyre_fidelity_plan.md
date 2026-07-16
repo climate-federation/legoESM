@@ -292,15 +292,30 @@ ISOLATION EXPERIMENTS (2026-07-16, 5-yr runs + single-column avt certificate):
   floor; the seasonal thermocline REBUILD unlocks (phased-from-NEMO: winter
   0.19 not 0.04, next summer rebuilds 0.5-1.0 vs stuck 0.02); baroclinicity
   surf/deep 3.87->4.93 (NEMO 8.23).
-- **RESIDUAL (still open):** from a true COLD START (rest, winter phase) the
-  thermocline still does not establish (all summers ~0) even with alpha_tke=1,
-  and deep e is still 5-50x NEMO's floor — so at least ONE more unmatched term
-  remains. The phased-from-stratified test rebuilds, the cold-start does not =>
-  the residual is in the first-winter erosion depth OR the cold-start dynamical
-  spin-up (weak gyre -> weak Ekman downwelling can't seed the thermocline).
-  NEXT: (b) does the deep e drop to NEMO's 1e-6 floor if the remaining factor
-  is found (term-by-term TKE budget vs the NEMO summer en/avt now in hand from
-  EXP_LONG 30-day restarts); (c) first-winter convection-depth vs NEMO.
+- **SECOND UNMATCHED NUMERIC FOUND + FIXED — EVD triggered on IN-SITU N²,
+  NEMO uses ADIABATIC (rn2).** alpha_tke=1 alone did NOT fix the cold start
+  (all summers ~0); a second factor: the card's enhanced_diffusion (EVD) used
+  n2_mode="insitu", but NEMO's ln_zdfevd triggers on rn2 = the ADIABATIC
+  Brunt-Vaisala frequency. In-situ N² carries the compressibility term and goes
+  spuriously NEGATIVE in a statically-STABLE column, so legoESM's EVD fired in
+  the subtropical SPRING where NEMO's (rn2>0) does not — re-mixing the shoaling
+  ML every step and blocking the rebuild. (Isolation: MLD stays 263-334m all
+  year in legoESM vs NEMO shoaling 263->61m in spring; EVD-off unlocks the
+  rebuild; the -1e-12 threshold does NOT (marginal N² is more negative), but
+  n2_mode="adiabatic" DOES — identical to EVD-off but NEMO-faithful, EVD stays
+  on.) Fix: EnhancedDiffusionConfig.n2_mode="adiabatic" on the card (+ a new
+  n2_threshold field, default 0.0, for NEMO's -1e-12; inert here, kept for
+  fidelity).
+- **RESOLVED (both fixes on the card): the subtropical thermocline now BUILDS
+  to NEMO's level.** 5-yr, card native (alpha_tke=1 + EVD adiabatic): summer
+  contrast 0.54 -> 1.79 -> 2.41 -> 2.96 -> **3.46 (NEMO summer ~3.17)**; winter
+  matches NEMO (~0 to 0.4). Baroclinicity surf/deep **3.87 -> 6.21** (NEMO
+  8.23). Self-lock broken; legoESM is on NEMO's stratified branch. The two
+  unmatched numerics were: (1) TKE diffused 30x too fast (alpha_tke 30->1);
+  (2) EVD on in-situ vs adiabatic N². Both NEMO-faithful. Remaining gap to full
+  NEMO (surf/deep 6.21 vs 8.23) is now a smaller residual, no longer the
+  thermocline lock. NOT a resolution floor — the user's "identical numerics ->
+  same branch" logic located two real unmatched terms.
 
 **Minors (low priority):** TKE buoyancy N² adiabatic → in-situ; residual
 winter-ML depth (111 vs 91 m at day 15) — candidates: EVD reach interplay,

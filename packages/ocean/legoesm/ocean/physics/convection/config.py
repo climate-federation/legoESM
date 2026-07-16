@@ -98,6 +98,15 @@ class EnhancedDiffusionConfig(NamedTuple):
     #   ``enhanced_diffusion_convection``; both integration factory and the
     #   implicit k_profiles path supply them when this is selected.
     n2_mode: str = "insitu"
+    # Static-instability trigger threshold on N² [1/s²]: EVD fires where
+    # N² < n2_threshold. Default 0.0 (fire on any negative N²). NEMO zdfevd
+    # (ln_zdfevd) fires where MIN(rn2, rn2b) <= -1e-12 — a small NEGATIVE
+    # threshold that IGNORES marginally-neutral interfaces (N² in [-1e-12, 0)).
+    # Matters during spring restratification: firing on near-zero-negative N²
+    # noise re-mixes the shoaling ML every step and blocks the seasonal
+    # thermocline rebuild (NEMO GYRE fidelity, plan §G). Only consulted on the
+    # hard-threshold path (smooth_transition=False).
+    n2_threshold: float = 0.0
 
 
 class PlumeConfig(NamedTuple):

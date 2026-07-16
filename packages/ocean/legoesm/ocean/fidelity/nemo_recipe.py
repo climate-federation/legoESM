@@ -878,19 +878,26 @@ def build_nemo_gyre_recipe(
     # NEMO ln_zdfevd (rn_evd=100, nn_evdm=1): SET avt=avm=100 at interfaces where
     # MIN(rn2,rn2b)<=-1e-12 (HARD N^2<0 threshold; zdfevd.F90:52-80), then the
     # implicit solve mixes locally. smooth_transition=False selects legoESM's hard
-    # jnp.where(N2<0, K_conv, K_bg) path == NEMO's operator exactly. (The DEFAULT
+    # jnp.where(N2<thr, K_conv, K_bg) path == NEMO's operator exactly. (The DEFAULT
     # sigmoid path applies large K to near-neutral STABLE interfaces (K~27 at
     # N2=1e-6) -> over-mixes -> SST 20->14C collapse; that was the earlier
     # "K_conv=100 collapses" artifact, NOT NEMO's behaviour.) Reproduces NEMO's
     # warm well-mixed ~83m surface layer (warmest column [18.68]x8 vs NEMO
     # [18.98]x7). GYRE-specific (kept off the shared card).
+    # n2_mode="adiabatic": NEMO's EVD triggers on rn2 = the ADIABATIC
+    # Brunt-Vaisala frequency (true static stability), NOT the in-situ N².
+    # In-situ N² carries the compressibility term and goes spuriously negative
+    # in a statically-STABLE column, firing EVD where NEMO's rn2>0 does not —
+    # in the subtropical SPRING this re-mixes the shoaling ML every step and
+    # blocks the seasonal thermocline rebuild (plan §G). With the adiabatic
+    # trigger (+ the alpha_tke=1 TKE-diffusion fix) the thermocline rebuilds.
     physics_config = model_config.physics._replace(
         shortwave_penetration=None, mle=None,
         convection=OceanConvectionConfig(
             scheme="enhanced_diffusion",
             enhanced_diffusion=EnhancedDiffusionConfig(
                 K_conv=100.0, nu_conv=100.0, K_bg=0.0, nu_bg=0.0,
-                smooth_transition=False)))
+                smooth_transition=False, n2_mode="adiabatic")))
     # Coriolis COUPLED with the pressure gradient inside the RK3 momentum stages
     # (coriolis_scheme="explicit_ab2" → f×u enters du_dt, integrated by SSP-RK3),
     # NOT operator-split as a separate Matsuno step after RK3. The split incurs an
