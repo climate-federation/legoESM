@@ -24,8 +24,9 @@ path) with ua/va from ``d2a2c_vect``'s dg-initialized cross-face branch,
 which differs from the plain ``c_sw`` ua/va at panel edges/corners.  That
 duo ``d2a2c_vect`` is now ported + certified here as ``d2a2c_vect_duo``
 (bit-exact vs the authoritative Fortran DUO branch,
-``test_fv3_native_d2a2c_duo``) — closing the ua/va scope caveat.  The
-remaining phase-4c work is threading these certified duo leaves
+``test_fv3_native_d2a2c_duo``) — certifying the duo ua/va SOURCE as a leaf
+(NOT yet chained into the divergence oracle).  The remaining phase-4c work
+is threading these certified duo leaves
 (``d2a2c_vect_duo`` + ``divergence_corner_duo``) into a full no-corner-fill
 / no-``sin_sg``-edge duo c_sw body for end-to-end pipeline certification.
 

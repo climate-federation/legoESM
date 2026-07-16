@@ -22,8 +22,9 @@ RES, NG = 12, 3
 # canonical field order (UPPER driver token, fixture npz key).  cosa/rsin +
 # u/v are consumed by BOTH the port and the Fortran duo branch; sin_sg /
 # dxa / dya are read by the Fortran (allocation + skipped edge cases) but do
-# NOT affect the duo outputs, so the fixture stores only the port-relevant
-# inputs.
+# NOT affect the duo outputs.  ALL are serialised into input.txt and hashed;
+# ALL are stored in the fixture (see FIXTURE_INPUTS) so the test can
+# reconstruct the exact byte stream and enforce input_sha256.
 INPUT_FIELDS = (
     ("COSA_S", "cosa_s"), ("RSIN2", "rsin2"),
     ("COSA_U", "cosa_u"), ("RSIN_U", "rsin_u"),
