@@ -361,6 +361,25 @@ class TestProjectRunoffToMPASCells:
         )
         assert float((out * area).sum()) == pytest.approx(1.0e6, rel=1e-6)
 
+    def test_river_just_inside_radius_kept_at_high_latitude(self):
+        """Same exact-cutoff property away from the equator (codex: broaden
+        beyond the single equatorial case). River 4.9deg south of a 60N ocean
+        cell is inside 5deg and must be kept; the meridional arc is exact."""
+        lat = np.array([60.0])
+        lon = np.array([30.0])
+        area = np.full(1, 1.0e10)
+        rivers = RiverRunoffData(
+            latitudes=np.array([55.1]),      # 4.9deg due south -> inside 5deg
+            longitudes=np.array([30.0]),
+            monthly_flux_kg_s=np.full((12, 1), 2.0e6),
+            names=("r",),
+        )
+        out = project_runoff_to_mpas_cells(
+            rivers, lat_cell_deg=lat, lon_cell_deg=lon, area_cell_m2=area,
+            ocean_mask=np.array([1]), max_search_deg=5.0,
+        )
+        assert float((out * area).sum()) == pytest.approx(2.0e6, rel=1e-6)
+
     def test_no_ocean_cells_returns_zero_field(self):
         lat, lon, area = self._mesh(n=8)
         rivers = synthetic_dai_trenberth()

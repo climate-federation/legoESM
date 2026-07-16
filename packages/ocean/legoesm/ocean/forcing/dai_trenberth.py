@@ -389,8 +389,9 @@ def project_runoff_to_mpas_cells(
         1 = ocean. Rivers are assigned only to ocean cells; with no mask every
         cell is a candidate.
     max_search_deg : float
-        Radial cutoff [deg] converted to km at ~111 km/deg; a river with no
-        ocean cell within this radius is dropped.
+        Radial cutoff [deg], converted to km with the SAME Earth radius
+        ``haversine_km`` uses (``R_earth·π/180`` km per degree of arc); a river
+        with no ocean cell within this radius is dropped.
 
     Returns
     -------
