@@ -235,6 +235,7 @@ def _run_substep_loop(
     F_slow_eta, F_slow_u, F_slow_v,
     f_u, f_v, add_barotropic_coriolis,
     coeffs, local_subcycle_clamp,
+    linear_free_surface=False,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -289,7 +290,13 @@ def _run_substep_loop(
         (eta_c, U_bar_c, V_bar_c,
          Hu_sum_c, Hv_sum_c, eta_sum_c, U_sum_c, V_sum_c) = carry
 
-        H_total_c = jnp.maximum(eta_c + H_bathy, min_water_col) * mask
+        if linear_free_surface:
+            # NEMO key_linssh barotropic continuity: FIXED column depth H
+            # (deta/dt = -div(H*U), traadv.F90 r1_hu_0 convention) — eta does
+            # not feed back into the transport depth.
+            H_total_c = H_bathy * mask
+        else:
+            H_total_c = jnp.maximum(eta_c + H_bathy, min_water_col) * mask
 
         # Forward: update eta from continuity (C-grid divergence)
         # Min-rule face depth (consistent with implicit solver and PE
@@ -611,6 +618,7 @@ def barotropic_substeps_latlon_cgrid(
         f_u=f_u, f_v=f_v, add_barotropic_coriolis=add_barotropic_coriolis,
         coeffs=coeffs,
         local_subcycle_clamp=config.barotropic.barotropic_local_subcycle_clamp,
+        linear_free_surface=getattr(z_coord, 'linear_free_surface', False),
     )
 
     # Time-averaged barotropic transport: w_transport already carries the full
@@ -908,6 +916,8 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
                 # NEVER a per-substep global redistribute on the extended
                 # band (halo overlap would double-count in the allreduce).
                 local_subcycle_clamp=True,
+                linear_free_surface=getattr(
+                    z_coord, "linear_free_surface", False),
             )
         (eta_ext_f, U_ext_f, V_ext_f,
          Hu_k, Hv_k, eta_sum_k, U_sum_k, V_sum_k) = finals

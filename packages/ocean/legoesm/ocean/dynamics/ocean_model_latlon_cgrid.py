@@ -123,6 +123,7 @@ def _compute_advection_flux_div(
     grid,
     dt: float,
     recon_fill_mask: jnp.ndarray | None = None,
+    linssh_top_flux: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute advection flux divergence for a single tracer field.
 
@@ -276,6 +277,16 @@ def _compute_advection_flux_div(
             f"ppm_fct, dst3, dst3_multidim, weno5, weno7."
         )
 
+    if linssh_top_flux:
+        # NEMO key_linssh top-cell concentration/dilution: the surface
+        # vertical advective flux is F[0] = w0*T0 (first-order, OUTSIDE any
+        # limiter — traadv_fct.F90:413-423 with a zero antidiffusive top
+        # flux), instead of the rigid F[0]=0 of the stretching-column z*.
+        # vert_flux_div[k] = F[k] - F[k+1], so add w0*T0 to level 0.
+        # w_baro[...,0] = deta/dt (fixed-thickness continuity); zero on land.
+        vert_flux_div = vert_flux_div.at[..., 0].add(
+            w_baro[..., 0] * tr[..., 0])
+
     return div_hut, vert_flux_div
 
 
@@ -300,6 +311,7 @@ def _compute_advection_flux_div_pair(
     grid,
     dt: float,
     recon_fill_mask: jnp.ndarray | None = None,
+    linssh_top_flux: bool = False,
 ):
     """Advection flux divergence for TWO tracers (T, S) in one pass.
 
@@ -338,11 +350,13 @@ def _compute_advection_flux_div_pair(
                 tr_a, tracer_advection, mass_flux_u, mass_flux_v,
                 w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
                 recon_fill_mask=recon_fill_mask,
+                linssh_top_flux=linssh_top_flux,
             ),
             _compute_advection_flux_div(
                 tr_b, tracer_advection, mass_flux_u, mass_flux_v,
                 w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
                 recon_fill_mask=recon_fill_mask,
+                linssh_top_flux=linssh_top_flux,
             ),
         )
 
@@ -394,6 +408,11 @@ def _compute_advection_flux_div_pair(
         vert_a = flux_form_vertical_tracer_advection_centered(tr_a, w_baro)
         vert_b = flux_form_vertical_tracer_advection_centered(tr_b, w_baro)
 
+    if linssh_top_flux:
+        # NEMO key_linssh top-cell flux F[0]=w0*T0 (see the single-tracer
+        # gate) — apply to BOTH tracers of the fused fast path.
+        vert_a = vert_a.at[..., 0].add(w_baro[..., 0] * tr_a[..., 0])
+        vert_b = vert_b.at[..., 0].add(w_baro[..., 0] * tr_b[..., 0])
     return (div_a, vert_a), (div_b, vert_b)
 
 
@@ -410,6 +429,7 @@ def _ssp_rk3_tracer_step(
     grid,
     dt: float,
     active_3d: jnp.ndarray,
+    linssh_top_flux: bool = False,
 ) -> jnp.ndarray:
     """RK3 flux-form tracer advection step (Butcher-tableau form).
 
@@ -441,6 +461,7 @@ def _ssp_rk3_tracer_step(
         dh, dv = _compute_advection_flux_div(
             tr_val, tracer_advection, mass_flux_u, mass_flux_v, w_baro,
             h_k_old, h_u_old, h_v_old, grid, dt,
+            linssh_top_flux=linssh_top_flux,
         )
         return dh + dv
 
@@ -482,6 +503,7 @@ def _ssp_rk3_tracer_pair_step(
     dt: float,
     active_3d: jnp.ndarray,
     recon_fill_mask: jnp.ndarray | None = None,
+    linssh_top_flux: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """RK3 tracer step for the (T, S) pair — one fused flux-div per stage.
 
@@ -501,6 +523,7 @@ def _ssp_rk3_tracer_pair_step(
             a_val, b_val, tracer_advection, mass_flux_u, mass_flux_v,
             w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
             recon_fill_mask=recon_fill_mask,
+            linssh_top_flux=linssh_top_flux,
         )
         return dh_a + dv_a, dh_b + dv_b
 
@@ -2990,12 +3013,16 @@ class LatLonCGridOceanModel:
             # _compute_advection_flux_div_pair).  Bit-identical to the
             # historical per-tracer calls; non-separable schemes fall
             # back to two single-tracer calls inside the pair helpers.
+            # NEMO key_linssh: top-cell concentration/dilution flux (static
+            # coordinate flag; see _compute_advection_flux_div).
+            _linssh = getattr(self.z_coord, "linear_free_surface", False)
             if _tti == "rk3":
                 T_corrected, S_corrected = _ssp_rk3_tracer_pair_step(
                     T_mid, S_mid, _adv,
                     mass_flux_u, mass_flux_v, w_baro,
                     h_k_old, h_k_new, h_u_old, h_v_old,
                     _grid, dt, active_3d, recon_fill_mask=_wall_fill_mask,
+                    linssh_top_flux=_linssh,
                 )
                 _pair_divs = (None, None)
             else:
@@ -3004,6 +3031,7 @@ class LatLonCGridOceanModel:
                     mass_flux_u, mass_flux_v, w_baro,
                     h_k_old, h_u_old, h_v_old, _grid, dt,
                     recon_fill_mask=_wall_fill_mask,
+                    linssh_top_flux=_linssh,
                 )
 
             for tr_name in ['T', 'S']:

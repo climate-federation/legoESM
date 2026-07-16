@@ -60,6 +60,10 @@ class OceanZStarCoordinate(NamedTuple):
         Reference layer thickness [m], shape (nlev,). Positive.
     dz_half_ref : array
         Distance between adjacent full levels [m], shape (nlev-1,).
+    linear_free_surface : bool
+        NEMO ``key_linssh``: thicknesses frozen at the eta=0 reference
+        (J eta-independent), diagnosed w without the z-star sigma
+        correction. Default False (full z*).
     t_depth_ref : array or None
         Optional EXACT positive T-point reference depths [m], shape
         (nlev,).  ``None`` (default) means ``|z_full_ref|`` (the
@@ -80,6 +84,14 @@ class OceanZStarCoordinate(NamedTuple):
     dz_ref: jnp.ndarray
     dz_half_ref: jnp.ndarray
     t_depth_ref: jnp.ndarray | None = None
+    # NEMO key_linssh (LINEAR free surface): freeze the geometry at eta=0 —
+    # layer thicknesses NEVER stretch (J = H_bathy/H_max, eta-independent) and
+    # the diagnosed w skips the z-star sigma redistribution of deta/dt (NEMO
+    # sshwzv.F90:190-193 fixed-e3t continuity; w[0]=deta/dt, w[bottom]=0).
+    # eta still evolves via the barotropic solver and drives g*grad(eta).
+    # STATIC Python bool — gates are `if` branches (never jnp.where); the
+    # coordinate is constructor-captured, not traced.
+    linear_free_surface: bool = False
 
 
 def create_ocean_z_star(
@@ -721,10 +733,17 @@ def compute_ocean_jacobian(
     -------
     array : Jacobian, shape (...).
     """
-    water_col = eta + H_bathy
-    if min_water_column_m is not None:
-        min_col = jnp.asarray(min_water_column_m, dtype=water_col.dtype)
-        water_col = jnp.maximum(water_col, min_col)
+    if getattr(z_coord, "linear_free_surface", False):
+        # NEMO key_linssh: the column NEVER stretches — J is the eta=0
+        # reference (H_bathy/H_max; ==1 on a flat bottom where H_bathy==H_max).
+        # No min-column clip: the fixed column is positive by construction.
+        water_col = jnp.broadcast_to(
+            jnp.asarray(H_bathy, dtype=jnp.asarray(eta).dtype), jnp.shape(eta))
+    else:
+        water_col = eta + H_bathy
+        if min_water_column_m is not None:
+            min_col = jnp.asarray(min_water_column_m, dtype=water_col.dtype)
+            water_col = jnp.maximum(water_col, min_col)
     if isinstance(z_coord, OceanPartialCellCoordinate):
         H_safe = jnp.maximum(H_bathy, 1.0e-10)
         return water_col / H_safe
@@ -830,6 +849,12 @@ def diagnose_w_from_flux_div(flux_div_k, z_coord=None,
     w_euler = jnp.pad(w_inner, (*pad_axes_w, (0, 1)))
 
     if z_coord is None:
+        return w_euler
+    if getattr(z_coord, "linear_free_surface", False):
+        # NEMO key_linssh w (sshwzv.F90:190-193): fixed-e3t continuity —
+        # w[..., 0] = deta/dt at the fixed z=0 surface, w[..., -1] = 0, NO
+        # sigma redistribution of deta/dt through the column (that z-star
+        # term is what pumps the surface tendency into the abyss).
         return w_euler
 
     deta_dt = w_euler[..., 0:1]
