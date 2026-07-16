@@ -1570,6 +1570,15 @@ class LatLonCGridOceanModel:
                     "removes the face-f velocity-form depth-mean, but "
                     "ene_total's planetary term is the vertex-f TRANSPORT-form "
                     "flux — the stencils would not cancel. Use \"frozen\".")
+            if getattr(config, "momentum_advection",
+                       "vector_invariant") != "vector_invariant":
+                raise ValueError(
+                    'vorticity_scheme="ene_total" carries the planetary '
+                    "Coriolis inside the VECTOR-INVARIANT vorticity flux; the "
+                    "flux-form/WENO momentum branches never receive f_vtx, so "
+                    "combining them would silently DROP f x u entirely "
+                    "(review finding 2026-07-16). Got momentum_advection="
+                    f'{getattr(config, "momentum_advection", "?")!r}.')
         _bt_split = getattr(config, "barotropic_coriolis_split", "frozen")
         if _bt_split not in ("frozen", "live"):
             raise ValueError(
@@ -1706,7 +1715,8 @@ class LatLonCGridOceanModel:
                     "euler") not in ("rk3", "rk3_ws"):
                 raise ValueError(
                     'coriolis_scheme="explicit_ab2" requires '
-                    'outer_integrator="ab2" OR momentum_time_integrator="rk3": '
+                    'outer_integrator="ab2" OR momentum_time_integrator in '
+                    '("rk3", "rk3_ws"): '
                     "an explicit forward-Euler Coriolis at weight 1.0 is "
                     "unconditionally UNSTABLE for pure rotation "
                     "(|G|=sqrt(1+(f·dt)²)>1); AB2(-eps) or SSP-RK3 have a stable "

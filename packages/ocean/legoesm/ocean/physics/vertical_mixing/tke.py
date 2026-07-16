@@ -162,6 +162,18 @@ _NEMO_TKE_CDRAG = 1.5e-3       # zcdrag [-] surface drag coeff      (zdftke.F90:
 # |τ| = ρ_air·C_d·U₁₀² and the Stokes drift u_s = 0.016·U₁₀) (zdftke.F90:243)
 _NEMO_TKE_LC_CSD = 0.5 * 0.016 * 0.016 / (_NEMO_TKE_RHO_AIR * _NEMO_TKE_CDRAG)
 _NEMO_MXL0_VKARMN = 0.4        # vkarmn (phycst) — the ln_mxl0 anchor prefactor
+_NEMO_MXL0_LENGTH_SCALE = 2.0e5  # zraug numerator [m*kg/(m*s^2)^-1... NEMO zdftke:575]
+
+
+def _mxl0_surface_anchor(cfg: "TKEConfig", taum, rho_0: float, g: float):
+    """ln_mxl0 surface mixing-length anchor (single owner; zdftke:575+602):
+    l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum). None when choice != 3."""
+    if cfg.tke_mxl_choice != 3:
+        return None
+    return jnp.maximum(
+        jnp.asarray(cfg.mxl0_min_m),
+        _NEMO_MXL0_VKARMN * _NEMO_MXL0_LENGTH_SCALE / (rho_0 * g)
+        * jnp.maximum(taum, 0.0))
 _NEMO_TKE_EBB = 67.83          # rn_ebb  namelist_ref default — surface TKE input coef
 _NEMO_TKE_EMIN0 = 1.0e-4       # rn_emin0 [m²/s²] surface TKE minimum
 
@@ -1425,10 +1437,7 @@ def tke_vertical_mixing(
     # Sub-iteration loop (Mode B convergence; Mode A uses n_iterations=1).
     tke_curr = tke_old
     # NEMO ln_mxl0 anchor for nn_mxl=3: l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
-    _l_anchor = (jnp.maximum(
-        jnp.asarray(cfg.mxl0_min_m), _NEMO_MXL0_VKARMN * 2.0e5
-        / (rho_0 * g) * jnp.maximum(taum, 0.0))
-        if cfg.tke_mxl_choice == 3 else None)
+    _l_anchor = _mxl0_surface_anchor(cfg, taum, rho_0, g)
     for _ in range(max(1, int(n_iterations))):
         l_k, l_eps = compute_mixing_lengths(
             tke_curr, N2, dz_half, cfg, signed_n2=signed_n2,
@@ -1623,15 +1632,15 @@ def tke_set_diffusivities(
             raise ValueError(
                 "TKEConfig.lc requires z_interface (interface reference "
                 "heights) so the Langmuir source knows the depths.")
+        # NB computed from the PRE-mixing N2 and applied in the POST-mixing
+        # solve — the same timing offset the post_mixing_veros path accepts
+        # for the diffusivities themselves (review note 2026-07-16).
         langmuir_source = nemo_langmuir_tke_source(
             taum, N2, -z_interface, dz_half, cfg)
     else:
         langmuir_source = None
 
-    _l_anchor = (jnp.maximum(
-        jnp.asarray(cfg.mxl0_min_m), _NEMO_MXL0_VKARMN * 2.0e5
-        / (rho_0 * g) * jnp.maximum(taum, 0.0))
-        if cfg.tke_mxl_choice == 3 else None)
+    _l_anchor = _mxl0_surface_anchor(cfg, taum, rho_0, g)
     l_k, _l_eps = compute_mixing_lengths(
         tke_old, N2, dz_half, cfg, signed_n2=True, dz_cell=dz_cell,
         boundary_cap=boundary_cap, l_surface_anchor=_l_anchor)

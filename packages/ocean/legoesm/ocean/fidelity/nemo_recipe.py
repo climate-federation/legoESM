@@ -987,6 +987,7 @@ def apply_nemo_gyre_surface_forcing(state, z_coord, dt, *, t_seconds=0.0):
     # dS/dt|surf = +emp * S_surf / (rho0 * dz_top).  Domain-mean removed over wet
     # cells first (net-zero E-P, matching NEMO's zsumemp subtraction).
     emp_2d = jnp.broadcast_to(nemo_gyre_emp(lat_t, t_seconds)[:, None], shape_2d)
+    # (single-domain global mean — would need a global_sum under MPI sharding)
     emp_2d = emp_2d - jnp.sum(emp_2d * cell_mask) / jnp.sum(cell_mask)
     dS_dt_emp_top = (emp_2d * state.S.data[..., 0] / (
         NEMO_CONSTANTS_CONFIG.rho_0 * dz_0)).astype(out.dS_dt.dtype)
