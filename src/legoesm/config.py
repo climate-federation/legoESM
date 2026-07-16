@@ -66,6 +66,11 @@ _ATMOSPHERE_KEYS: frozenset[str] = frozenset({
     "time_integrator",
     "dt_seconds",
     "hyperdiffusion_coeff",
+    # Live LOWEST-precedence fallback for the radiation scheme, behind the
+    # top-level ``radiation.scheme`` block and ``physics.radiation``.  It is
+    # mapped (unlike the retired keys), so it must be allowed -- omitting it
+    # would reject a config this boundary still honours.
+    "radiation",
 })
 
 # Keys this dialect used to DECLARE while wiring them to nothing.  They are

@@ -181,6 +181,67 @@ def test_retired_atmosphere_keys_raise_with_guidance(retired_key):
         _ec({"atmosphere": {retired_key: "shallow_water"}})
 
 
+def test_atmosphere_radiation_fallback_still_accepted():
+    """``atmosphere.radiation`` is the LOWEST-precedence radiation fallback and
+    is still mapped, so the allowlist must accept it.
+
+    Regression: the allowlist initially omitted it, which turned a config this
+    boundary still honours into a hard error — the mirror-image of the
+    silent-drop defect (rejecting something that works).
+    """
+    assert _ec({"atmosphere": {"radiation": "rrtmgp"}}).radiation == "rrtmgp"
+
+
+def test_radiation_precedence_chain():
+    """radiation.scheme > physics.radiation > atmosphere.radiation > 'gray'."""
+    assert _ec({}).radiation == "gray"
+    assert _ec({"atmosphere": {"radiation": "rrtmg"}}).radiation == "rrtmg"
+    # physics.radiation outranks the atmosphere fallback
+    assert _ec({
+        "atmosphere": {"radiation": "rrtmg"},
+        "physics": {"radiation": "rrtmgp"},
+    }).radiation == "rrtmgp"
+    # the top-level radiation block outranks both
+    assert _ec({
+        "atmosphere": {"radiation": "rrtmg"},
+        "physics": {"radiation": "rrtmgp"},
+        "radiation": {"scheme": "gray"},
+    }).radiation == "gray"
+
+
+def test_every_mapped_atmosphere_key_is_allowed():
+    """Any key ``to_experiment_config`` READS from ``atm`` must be allowlisted.
+
+    Pins the exact regression above: a key that is mapped but not allowed is
+    rejected despite working, and a key that is allowed but not mapped is
+    silently dropped. Both directions are defects.
+    """
+    import ast
+    import inspect
+
+    from legoesm.config import Config, _ATMOSPHERE_KEYS
+
+    tree = ast.parse(inspect.getsource(Config.to_experiment_config).strip())
+    read: set[str] = set()
+    for node in ast.walk(tree):
+        # atm.get("<key>", ...)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "atm"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+        ):
+            read.add(node.args[0].value)
+    assert read, "AST scan found no atm.get(...) calls — the scan itself broke"
+    assert read <= set(_ATMOSPHERE_KEYS), (
+        f"keys mapped from `atm` but not allowlisted (would be rejected despite "
+        f"working): {sorted(read - set(_ATMOSPHERE_KEYS))}"
+    )
+
+
 def test_no_default_config_key_is_self_rejecting():
     """Every key DEFAULT_CONFIG declares must be in the allowlist.
 
