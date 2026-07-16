@@ -132,8 +132,13 @@ def update_snow_age(
     swe_old = jnp.maximum(snow_new - fresh_swe, 0.0)         # kg/m2 old snow surviving melt
     denom = swe_old + fresh_swe                              # kg/m2 (== snow_new where >=0)
     aged = snow_age + dt                                     # existing snow ages by dt
-    # Guard the divide (denom>0 whenever snow_new>0; the snow_new==0 rows are masked
-    # out below, so the where only prevents a 0/0 NaN gradient on those dead rows).
-    mixed = aged * swe_old / jnp.where(denom > 0.0, denom, 1.0)
-    # If all snow has melted, reset age to zero
-    return jnp.where(snow_new > 0.0, mixed, 0.0)
+    # Gate on a REAL pack (same 1e-6 kg/m2 floor as the SEB's has_existing_snow;
+    # a sub-threshold pack is invisible to the albedo, so its age is inert).  A
+    # ``denom > 0`` guard is NOT enough for AD: a trace flurry on bare ground
+    # makes denom denormal-positive, and the division's backward y^-2 overflows
+    # to inf (denom < ~1e-154) -> 0*inf = NaN in the rollout adjoint.  Gating at
+    # the mass floor bounds the backward by (age+dt)/1e-6 (denom >= snow_new).
+    snow_ok = snow_new > 1e-6
+    mixed = aged * swe_old / jnp.where(snow_ok, denom, 1.0)
+    # Trace/absent pack (incl. fully melted): age resets to zero
+    return jnp.where(snow_ok, mixed, 0.0)

@@ -449,8 +449,15 @@ def morrison_microphysics(
     # mg_ferrier with — but does not force — m2005 deposition).
     cons12_cbrt = (config.rho_cloud_ice * jnp.pi) ** (1.0 / 3.0)
     dcs = config.ice_snow_d_auto
-    lami_ac = cons12_cbrt * safe_pow(
-        jnp.clip(N_i, 0.0) / jnp.maximum(q_i_eff, 1.0e-20), 1.0 / 3.0)
+    # SAM clamps LAMI to [LAMMINI, LAMMAXI] before every use (and rebuilds
+    # N0I from the clamped slope). The clamp is also what keeps the adjoint
+    # bounded: unclamped, d(LAMI)/dN_i ~ N_i^(-2/3) is near-singular in
+    # no-ice columns (denormal N_i left by the smooth nucleation gates) and
+    # overflows the rollout adjoint within a few steps.
+    lami_ac = jnp.clip(
+        cons12_cbrt * safe_pow(
+            jnp.clip(N_i, 0.0) / jnp.maximum(q_i_eff, 1.0e-20), 1.0 / 3.0),
+        config.lami_min, config.lami_max)
     n0i_ac = jnp.clip(N_i, 0.0) * lami_ac
     if config.ice_deposition_scheme == "m2005":
         # M2005-FORM bulk diffusional growth (gSAM EPSI/ABI/CONS12 structure;
@@ -469,12 +476,16 @@ def morrison_microphysics(
         dv_vap = _DV_PREFACTOR * safe_pow(T, _DV_T_EXPONENT) / jnp.clip(p_full, 1.0)
         dqsidt = constants.L_s * q_sat_i / (constants.R_v * T ** 2)
         abi = 1.0 + dqsidt * constants.L_s / constants.c_pd
-        epsi = (
-            2.0 * jnp.pi / cons12_cbrt
-            * rho * dv_vap
-            * safe_pow(N_i_dep, 2.0 / 3.0)
-            * safe_pow(q_i_dep_eff, 1.0 / 3.0)
-        )
+        # EPSI = 2π·N_i·ρ·DV/LAMI with LAMI clamped, as in SAM — NOT the
+        # analytically expanded N_i^⅔·q_i^⅓ form. The expansion drops the
+        # LAMI clamp, and its d/dN_i ~ N_i^(-1/3) is near-singular at the
+        # denormal N_i of no-ice columns; clamped, |dEPSI/dN_i| is bounded
+        # by 2π·ρ·DV/lami_min everywhere.
+        lami_dep = jnp.clip(
+            cons12_cbrt * safe_pow(
+                N_i_dep / jnp.maximum(q_i_dep_eff, 1.0e-20), 1.0 / 3.0),
+            config.lami_min, config.lami_max)
+        epsi = 2.0 * jnp.pi * N_i_dep * rho * dv_vap / lami_dep
         dep_raw = (
             config.ice_deposition_efficiency * epsi
             * (q_v - q_sat_i) / abi
