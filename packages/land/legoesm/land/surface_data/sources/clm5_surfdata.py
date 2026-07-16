@@ -48,6 +48,7 @@ class CLM5SurfdataConfig(NamedTuple):
     cft_var: str = "PCT_CFT"             # (cft, lat, lon) % within crop
     lake_var: str = "PCT_LAKE"
     glacier_var: str = "PCT_GLACIER"
+    landfrac_var: str = "LANDFRAC_PFT"   # (lat, lon) gridcell land fraction [0,1]
     color_var: str = "SOIL_COLOR"
     lai_var: str = "MONTHLY_LAI"         # (time, lsmpft, lat, lon)
     sai_var: str = "MONTHLY_SAI"
@@ -56,6 +57,32 @@ class CLM5SurfdataConfig(NamedTuple):
     lat2d_var: str = "LATIXY"            # 2-D; reduced to 1-D centres
     lon2d_var: str = "LONGXY"
     year: int = 2015                     # stamp for the (stationary, single) slice
+
+
+def assert_cover_within_landfrac(f_land, f_lake, f_glacier, landfrac, *, tol=1e-6):
+    """Tripwire: the soil/veg + lake + glacier cover [percent-of-gridcell] must not
+    exceed the gridcell land fraction ``landfrac`` [0,1] times 100.
+
+    CLM landunit percentages (PCT_NATVEG/CROP/LAKE/GLACIER) sum to 100 *of the land
+    part of the cell* and are populated EVEN OVER OCEAN (mksurfdata fills a land
+    template everywhere; ``LANDFRAC_PFT`` gates which cells are active).  Using them
+    un-gated as percent-of-gridcell smears land into coastal/ocean cells (the c250617
+    +27% land over-count).  After gating by ``landfrac`` the cover is bounded by
+    100*landfrac; this asserts that, so a regression that drops the gating fails loudly.
+    Raises ``ValueError`` on the worst offending cell."""
+    total = np.asarray(f_land) + np.asarray(f_lake) + np.asarray(f_glacier)
+    bound = 100.0 * np.asarray(landfrac) + tol
+    over = total - bound
+    if np.any(over > 0):
+        k = int(np.nanargmax(over))
+        tot_flat = total.ravel()[k]
+        lf_flat = np.asarray(landfrac).ravel()[k]
+        raise ValueError(
+            f"cover exceeds land fraction at cell {k}: f_land+f_lake+f_glacier="
+            f"{tot_flat:.2f}% > 100*LANDFRAC={100 * lf_flat:.2f}% (excess "
+            f"{tot_flat - 100 * lf_flat:.2f}%). CLM landunit percentages are "
+            f"percent-of-LAND; they must be gated by LANDFRAC_PFT before use as "
+            f"percent-of-gridcell (else land smears into ocean).")
 
 
 def reconstruct_clm5_pft_frac(natveg, crop, nat_pft, cft):
@@ -136,16 +163,31 @@ def read_clm5_cover_veg(
         def arr(name):
             return np.asarray(ds[name].values, dtype=np.float64)
 
-        natveg = arr(config.natveg_var)          # (lat, lon) %
-        crop = arr(config.crop_var)              # (lat, lon) %
+        natveg = arr(config.natveg_var)          # (lat, lon) % of LAND
+        crop = arr(config.crop_var)              # (lat, lon) % of LAND
         nat_pft = arr(config.nat_pft_var)        # (natpft, lat, lon) % within natveg
         cft = arr(config.cft_var)                # (cft, lat, lon) % within crop
+        # LANDFRAC_PFT [0,1] gates the landunit percentages to percent-of-GRIDCELL.
+        # PCT_NATVEG/CROP/LAKE/GLACIER sum to 100 of the LAND part and are populated
+        # even over ocean (mksurfdata fills a land template everywhere); without this
+        # gate coastal/ocean cells acquire spurious land (the c250617 +27% over-count).
+        landfrac = np.clip(arr(config.landfrac_var), 0.0, 1.0)   # (lat, lon)
 
-        # 17-PFT weight as percent of gridcell, aligned to CLM5_PFT_NAMES order
-        # (single canonical reconstruction — shared with the coupled-AMIP LAI loader).
-        pft_frac = reconstruct_clm5_pft_frac(natveg, crop, nat_pft, cft)  # (17, lat, lon) %
+        # 17-PFT weight as percent of gridcell, aligned to CLM5_PFT_NAMES order (single
+        # canonical reconstruction — shared with the coupled-AMIP LAI loader). Gated by
+        # landfrac so pft_frac.sum(0) == f_land (both percent-of-gridcell).
+        pft_frac = (reconstruct_clm5_pft_frac(natveg, crop, nat_pft, cft)
+                    * landfrac[None, :, :])       # (17, lat, lon) % of gridcell
 
-        # Monthly veg already on lsmpft=17 (time, lsmpft, lat, lon).
+        # Cover fractions as percent-of-gridcell (landunit % * landfrac).
+        f_land = (natveg + crop) * landfrac       # soil/veg land (wetland/urban: v2)
+        f_lake = arr(config.lake_var) * landfrac
+        f_glacier = arr(config.glacier_var) * landfrac
+        # Tripwire: gated cover must be bounded by 100*landfrac (fires if gating regresses).
+        assert_cover_within_landfrac(f_land, f_lake, f_glacier, landfrac)
+
+        # Monthly veg already on lsmpft=17 (time, lsmpft, lat, lon). Physical per-PFT
+        # values (LAI/SAI/height) -- NOT fractions, so NOT gated by landfrac.
         veg = {k: arr(v) for k, v in (
             ("monthly_lai", config.lai_var), ("monthly_sai", config.sai_var),
             ("monthly_height_top", config.htop_var), ("monthly_height_bot", config.hbot_var),
@@ -153,9 +195,9 @@ def read_clm5_cover_veg(
 
         return {
             "lat": lat, "lon": lon,
-            "f_land": natveg + crop,                  # soil/veg land (wetland/urban: v2)
-            "f_lake": arr(config.lake_var),
-            "f_glacier": arr(config.glacier_var),
+            "f_land": f_land,                         # soil/veg land (wetland/urban: v2)
+            "f_lake": f_lake,
+            "f_glacier": f_glacier,
             "pft_frac": pft_frac,                     # (17, lat, lon) % of gridcell
             "soil_color": arr(config.color_var),
             "pft_names": np.array(CLM5_PFT_NAMES),
