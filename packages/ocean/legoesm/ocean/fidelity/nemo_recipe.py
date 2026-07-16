@@ -235,13 +235,13 @@ def _nemo_tke_config() -> TKEConfig:
         # surface-TKE response (the Veros flux BC undershoots NEMO's surface
         # value ~60x under the ~0.07 Pa gyre wind; audit 2026-07-16).
         surface_bc="nemo_dirichlet",
-        # DEFERRED: NEMO ln_lc=.true. rn_lc=0.15 (Langmuir TKE source from taum,
-        # active under the GYRE wind) is INCOMPATIBLE with the validated
-        # buoyancy_timing='post_mixing_veros' step order (fail-loud guard in
-        # tke.py) — enabling it would require the pre_mixing path and re-validating
-        # the TKE tendency match. Secondary to the Dirichlet surface BC (which
-        # nemo_gyre_wind_forcing DOES activate); revisit if the wind-forced ML
-        # depth still undershoots NEMO's.
+        # NEMO ln_lc=.true., rn_lc=0.15: the Langmuir TKE source (W_lc from
+        # taum, zdftke:332-370) — now supported on the post-mixing path (the
+        # source is computed in tke_set_diffusivities and applied pre-solve in
+        # tke_integrate_post_mixing, en += rDt*source; the old fail-loud guard
+        # covered a silent no-op that no longer exists). lc_coeff default 0.15
+        # == rn_lc.
+        lc=True,
         # NEMO background Kz: rn_avm0=1.2e-4 (avmb), rn_avt0=1.2e-5 (avtb).
         kappaM_min=1.2e-4,
         kappaH_min=1.2e-5,

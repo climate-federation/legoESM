@@ -217,16 +217,69 @@ class TestOrchestratorWiring:
                                 dt=3600.0, cfg=TKEConfig(lc=True),
                                 rho_0=_RHO0)
 
-    def test_post_mixing_guard_rejects_nemo_terms(self):
+    def test_post_mixing_guard_rejects_etau_but_allows_lc(self):
+        """lc is now APPLIED on the post-mixing path (the source is computed in
+        tke_set_diffusivities and added pre-solve in tke_integrate_post_mixing)
+        so the guard no longer rejects it; etau remains blocked (still a
+        silent no-op there)."""
         from legoesm.ocean.physics.vertical_mixing.tke import (
             _validate_post_mixing_cfg,
         )
-        cfg = TKEConfig(
-            lc=True, buoyancy_timing="post_mixing_veros", prognostic=True,
-            veros_dz_slots=True, n2_mode="adiabatic",
-            positivity="veros_surface_correction")
-        with pytest.raises(ValueError, match="post_mixing_veros"):
-            _validate_post_mixing_cfg(cfg)
+        base = dict(buoyancy_timing="post_mixing_veros", prognostic=True,
+                    veros_dz_slots=True, n2_mode="adiabatic",
+                    positivity="veros_surface_correction")
+        _validate_post_mixing_cfg(TKEConfig(lc=True, **base))  # no raise
+        with pytest.raises(ValueError, match="etau"):
+            _validate_post_mixing_cfg(TKEConfig(etau_mode="below_ml", **base))
+
+    def test_post_mixing_langmuir_source_is_applied(self):
+        """Non-vacuity: under wind, lc=True raises the post-mixing TKE vs
+        lc=False (the source ADDS energy), exercising the ctx.langmuir_source
+        channel end-to-end."""
+        import jax.numpy as jnp
+
+        from legoesm.ocean.fidelity.nemo_recipe import _nemo_tke_config
+        from legoesm.ocean.physics.vertical_mixing.tke import (
+            tke_integrate_post_mixing,
+            tke_set_diffusivities,
+        )
+        from legoesm.ocean.vertical import create_ocean_z_star
+
+        # 10 m interfaces (GYRE-like near-surface spacing) + weak upper
+        # stratification so h_lc sits BELOW several interfaces (the source is
+        # correctly zero when the first interface's cumulative PE already
+        # exceeds W_lc^2 — a coarse column hides the term).
+        nlev = 6
+        z = create_ocean_z_star(n_levels=nlev, H_max=60.0)
+        shape = (2, 2, nlev)
+        T = jnp.asarray(20.0 - 0.001 * np.arange(nlev))[None, None, :] * jnp.ones(shape)
+        S = jnp.full(shape, 35.0)
+        rho = 1026.0 * (1.0 - 2e-4 * (T - 10.0))
+        dz_half = jnp.broadcast_to(z.dz_half_ref, shape[:-1] + (nlev - 1,))
+        tke_old = jnp.full(shape[:-1] + (nlev - 1,), 1.0e-4)
+        tau = jnp.full(shape[:-1], 0.1)
+        tau0 = jnp.zeros(shape[:-1])
+        J = jnp.ones(shape[:-1])
+        p = jnp.broadcast_to(1026.0 * 9.81 * jnp.abs(z.z_full_ref), shape)
+
+        def eos_fn(T_, S_, p_):
+            return 1026.0 * (1.0 - 2e-4 * (T_ - 10.0))
+
+        outs = {}
+        for lc in (False, True):
+            cfg = _nemo_tke_config()._replace(lc=lc)
+            _, _, ctx = tke_set_diffusivities(
+                T * 0, T * 0, T, S, rho, dz_half, tke_old, tau, tau0,
+                cfg, 1026.0, 9.81, p_cell=p, dz_ref=z.dz_ref, jacobian=J,
+                eos_fn=eos_fn, z_interface=z.z_half_ref[1:-1],
+                dz_surface=0.5 * z.dz_half_ref[0] * J)
+            assert (ctx.langmuir_source is not None) == lc
+            n2 = jnp.full(shape[:-1] + (nlev - 1,), 1e-6)
+            outs[lc] = tke_integrate_post_mixing(
+                ctx, n2, jnp.zeros_like(n2), jnp.zeros(shape[:-1]),
+                dt=3600.0, cfg=cfg)
+        assert float(jnp.max(outs[True] - outs[False])) > 0.0
+        assert (np.asarray(outs[True]) >= np.asarray(outs[False]) - 1e-15).all()
 
 
 # ---------------------------------------------------------------------------

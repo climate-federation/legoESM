@@ -241,6 +241,8 @@ class TKEPostMixingContext(NamedTuple):
     g: float
     # NEMO nn_bc_surf=1 Dirichlet surface-TKE value (None => Veros flux BC).
     surface_dirichlet: jnp.ndarray | None = None
+    # NEMO ln_lc Langmuir TKE source on the interior interfaces (None => off).
+    langmuir_source: jnp.ndarray | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1513,14 +1515,17 @@ def _validate_post_mixing_cfg(cfg: TKEConfig) -> None:
         # the orchestrator). Both match Veros (only global_1deg selects
         # choice=1). compute_mixing_lengths raises on any other value.
         #
-        # Mixed-oracle guard: the NEMO zdftke surface terms (lc / etau) are
+        # Mixed-oracle guard (RELAXED for lc 2026-07-16: the Langmuir source is
+        # now computed in tke_set_diffusivities and applied pre-solve inside
+        # tke_integrate_post_mixing — NEMO zdftke:367 en += rDt*source — so it
+        # no longer silently no-ops). etau stays blocked: the NEMO zdftke etau term is
         # implemented on the standard orchestrator path only — the Veros
         # post-mixing step order has no such terms (Veros has no ln_lc /
         # nn_etau). Combining them would silently no-op (this path never
         # calls the injections) or mix oracle semantics — raise instead.
-        if getattr(cfg, "lc", False) or getattr(cfg, "etau_mode", "none") != "none":
+        if getattr(cfg, "etau_mode", "none") != "none":
             raise ValueError(
-                "TKEConfig.lc / etau_mode (NEMO zdftke surface terms) are "
+                "TKEConfig.etau_mode (the NEMO zdftke sub-ML TKE penetration) is "
                 "not supported with buoyancy_timing='post_mixing_veros' "
                 "(the Veros-faithful step order has no Langmuir/etau terms; "
                 "they would silently not be applied). Disable lc/etau or "
@@ -1611,6 +1616,17 @@ def tke_set_diffusivities(
     surface_flux = (taum / rho_0) ** 1.5
     # NEMO nn_bc_surf=1 option (TKEConfig.surface_bc; single-owner dispatch).
     surface_dirichlet = _surface_tke_dirichlet(cfg, taum, rho_0)
+    # NEMO ln_lc Langmuir source (zdftke:332-370), applied pre-solve in
+    # tke_integrate_post_mixing (en += rDt*source).
+    if getattr(cfg, "lc", False):
+        if z_interface is None:
+            raise ValueError(
+                "TKEConfig.lc requires z_interface (interface reference "
+                "heights) so the Langmuir source knows the depths.")
+        langmuir_source = nemo_langmuir_tke_source(
+            taum, N2, -z_interface, dz_half, cfg)
+    else:
+        langmuir_source = None
 
     _l_anchor = (jnp.maximum(
         jnp.asarray(cfg.mxl0_min_m), _NEMO_MXL0_VKARMN * 2.0e5
@@ -1635,6 +1651,7 @@ def tke_set_diffusivities(
         dz_surface=jnp.asarray(dz_surface, dtype=rho_cell.dtype),
         p_cell=p_cell, eos_fn=eos_fn, rho_0=rho_0, g=g,
         surface_dirichlet=surface_dirichlet,
+        langmuir_source=langmuir_source,
     )
     return K_M, K_H, ctx
 
@@ -1831,6 +1848,14 @@ def tke_integrate_post_mixing(
     b = 1.0 - (a + c) + dt * cfg.c_eps * sqrttke_w / jnp.maximum(
         mxl_w, cfg.mxl_min)
 
+    if getattr(ctx, "langmuir_source", None) is not None:
+        # NEMO ln_lc: en += rDt * source BEFORE the implicit solve
+        # (zdftke.F90:367). The source lives on the interior interfaces;
+        # pad the (discarded) surface W row with zero.
+        _lc_w = jnp.concatenate(
+            [jnp.zeros_like(ctx.langmuir_source[..., :1]),
+             ctx.langmuir_source], axis=-1).astype(dtype)
+        forc_w = forc_w + _lc_w
     d = e_w + dt * forc_w
     if getattr(ctx, "surface_dirichlet", None) is not None:
         # NEMO nn_bc_surf=1: hold the surface W row at
