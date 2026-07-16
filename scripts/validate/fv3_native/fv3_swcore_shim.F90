@@ -34,8 +34,17 @@ module swcore_shim_mod
     integer :: ng
   end type fv_grid_bounds_type
 
+  ! Minimal duo-grid handle: the authoritative symmetryclean d2a2c_vect
+  ! branches on ``gridstruct%dg%is_initialized`` to select the duo path
+  ! (interior formulas everywhere, no panel-edge special-cases).  The
+  ! oracle only needs the flag; the real dg carries cross-face halo tables.
+  type duogrid_type
+    logical :: is_initialized = .false.
+  end type duogrid_type
+
   type fv_grid_type
     logical :: bounded_domain = .false.
+    type(duogrid_type) :: dg
     logical :: sw_corner = .true., se_corner = .true.
     logical :: ne_corner = .true., nw_corner = .true.
     logical :: stretched_grid = .false.
