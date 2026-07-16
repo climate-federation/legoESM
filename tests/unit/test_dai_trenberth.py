@@ -341,6 +341,26 @@ class TestProjectRunoffToMPASCells:
         )
         assert float(out.sum()) == 0.0       # dropped, not misassigned
 
+    def test_river_exactly_at_the_radius_is_not_false_dropped(self):
+        """The cutoff uses the SAME Earth radius as haversine_km, so a river
+        exactly max_search_deg from an ocean cell is kept. A 111 km/deg
+        approximation is ~0.18% short and would open a false-drop band right at
+        the boundary (codex)."""
+        lat = np.array([0.0])
+        lon = np.array([5.0])           # ocean cell 5deg east of the river
+        area = np.full(1, 1.0e10)
+        rivers = RiverRunoffData(
+            latitudes=np.array([0.0]),
+            longitudes=np.array([0.0]),
+            monthly_flux_kg_s=np.full((12, 1), 1.0e6),
+            names=("r",),
+        )
+        out = project_runoff_to_mpas_cells(
+            rivers, lat_cell_deg=lat, lon_cell_deg=lon, area_cell_m2=area,
+            ocean_mask=np.array([1]), max_search_deg=5.0,
+        )
+        assert float((out * area).sum()) == pytest.approx(1.0e6, rel=1e-6)
+
     def test_no_ocean_cells_returns_zero_field(self):
         lat, lon, area = self._mesh(n=8)
         rivers = synthetic_dai_trenberth()

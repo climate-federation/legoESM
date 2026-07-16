@@ -362,14 +362,16 @@ def project_runoff_to_mpas_cells(
     """Bin river mouths onto an MPAS (unstructured) mesh as a [kg/m²/s] field.
 
     Unstructured counterpart of :func:`project_runoff_to_grid`. Where the
-    lat-lon version bins onto a tensor-product ``(n_lat, n_lon)`` mesh and
-    relocates land-cell rivers within a lat/lon box, this bins onto a flat
-    ``(nCells,)`` cell list and assigns each river to its nearest OCEAN cell by
-    great-circle distance (:func:`legoesm.ocean.bathymetry.haversine_km`) --
-    which reduces to the same result (a river whose nearest cell is already
-    ocean lands there) while handling land mouths without a structured search
-    box. Rivers whose nearest ocean cell is farther than ``max_search_deg`` are
-    dropped, matching the lat-lon API's radial cutoff.
+    lat-lon version bins onto a tensor-product ``(n_lat, n_lon)`` mesh (nearest
+    lat/lon cell, then relocate within a planar box if that cell is land), this
+    bins onto a flat ``(nCells,)`` cell list and assigns each river to the
+    globally nearest OCEAN cell by great-circle distance
+    (:func:`legoesm.ocean.bathymetry.haversine_km`). The two are ANALOGOUS, not
+    identical: on a coastline the structured "nearest-then-relocate" and the
+    unstructured "nearest ocean" can pick different cells, and the cutoff is
+    measured from the river (here) vs from the selected land cell (lat-lon).
+    Both conserve the flux they accept and drop a river with no ocean cell
+    within ``max_search_deg``.
 
     Conservation: total mass flux is preserved except for rivers dropped for
     lack of a nearby ocean cell. ``sum(out * area_cell_m2)`` over ocean cells
@@ -395,6 +397,7 @@ def project_runoff_to_mpas_cells(
     runoff_kg_m2_s : ndarray ``(nCells,)``
         Freshwater flux into the ocean [kg/m²/s], non-negative.
     """
+    from legoesm import constants
     from legoesm.ocean.bathymetry import haversine_km
 
     lat_c = np.asarray(lat_cell_deg, dtype=np.float64)
@@ -419,7 +422,11 @@ def project_runoff_to_mpas_cells(
     else:
         flux_per_river = rivers.monthly_flux_kg_s[(month - 1) % 12]
 
-    max_km = float(max_search_deg) * 111.0
+    # Cutoff in km via the SAME Earth radius haversine_km uses, so the radial
+    # test is exact rather than a ~0.18%-short 111 km/deg approximation that
+    # would open a narrow false-drop band at the boundary (codex).
+    km_per_deg = float(constants.R_earth) * 1.0e-3 * (np.pi / 180.0)
+    max_km = float(max_search_deg) * km_per_deg
     r_lat = np.asarray(rivers.latitudes, dtype=np.float64)
     r_lon = np.asarray(rivers.longitudes, dtype=np.float64) % 360.0
     for k in range(r_lat.shape[0]):

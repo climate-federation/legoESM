@@ -296,9 +296,19 @@ def main() -> int:
                     month=None,
                     ocean_mask=ocean_mask,
                 )
+            # Report the freshwater actually landed vs the river source, so any
+            # runoff DROPPED for lack of a nearby ocean cell is visible rather
+            # than a silent mass sink (both projectors drop; codex).
+            source_kg_s = float(rivers.monthly_flux_kg_s.mean(axis=0).sum())
+            landed_kg_s = float((runoff_on_grid * runoff_area).sum())
+            dropped_kg_s = max(source_kg_s - landed_kg_s, 0.0)
             print(
-                f"   Runoff grid total: "
-                f"{float((runoff_on_grid * runoff_area).sum()):.3e} kg/s"
+                f"   Runoff landed: {landed_kg_s:.3e} kg/s of "
+                f"{source_kg_s:.3e} kg/s source"
+                + (f"  (DROPPED {dropped_kg_s:.3e} kg/s = "
+                   f"{100.0 * dropped_kg_s / max(source_kg_s, 1.0):.2f}% "
+                   f"with no ocean cell in range)"
+                   if dropped_kg_s > 1.0e-3 * max(source_kg_s, 1.0) else "")
             )
 
     # --- Ice-shelf setup ---------------------------------------------
