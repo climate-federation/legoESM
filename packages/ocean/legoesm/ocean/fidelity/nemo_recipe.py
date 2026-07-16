@@ -227,6 +227,11 @@ def _nemo_tke_config() -> TKEConfig:
         # 6.6 default). legoESM Pr=max(1,min(10,coeff·Ri)) is bit-identical (clamp
         # to [1,10] is order-independent), so this reproduces NEMO's pdl exactly.
         prandtl_ri_coeff=4.5,
+        # NEMO nn_bc_surf=1 Dirichlet surface TKE: en(1)=max(rn_emin0,
+        # rn_ebb*|tau|/rho0) held in the implicit solve — the wind-driven
+        # surface-TKE response (the Veros flux BC undershoots NEMO's surface
+        # value ~60x under the ~0.07 Pa gyre wind; audit 2026-07-16).
+        surface_bc="nemo_dirichlet",
         # DEFERRED: NEMO ln_lc=.true. rn_lc=0.15 (Langmuir TKE source from taum,
         # active under the GYRE wind) is INCOMPATIBLE with the validated
         # buoyancy_timing='post_mixing_veros' step order (fail-loud guard in

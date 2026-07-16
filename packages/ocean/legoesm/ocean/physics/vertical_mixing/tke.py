@@ -163,6 +163,27 @@ _NEMO_TKE_CDRAG = 1.5e-3       # zcdrag [-] surface drag coeff      (zdftke.F90:
 _NEMO_TKE_LC_CSD = 0.5 * 0.016 * 0.016 / (_NEMO_TKE_RHO_AIR * _NEMO_TKE_CDRAG)
 _NEMO_TKE_EBB = 67.83          # rn_ebb  namelist_ref default — surface TKE input coef
 _NEMO_TKE_EMIN0 = 1.0e-4       # rn_emin0 [m²/s²] surface TKE minimum
+
+
+def _surface_tke_dirichlet(cfg: "TKEConfig", taum, rho_0: float):
+    """NEMO nn_bc_surf=1 Dirichlet surface-TKE value, or None for the Veros
+    flux BC — the single owner of the ``TKEConfig.surface_bc`` dispatch shared
+    by BOTH TKE entry points (``tke_vertical_mixing`` and the post-mixing
+    ``tke_set_diffusivities`` path).  Raises on an unknown value.
+
+    NEMO zdftke.F90:264-269: ``en(1) = MAX(rn_emin0, rn_ebb*|tau|/rho0)`` held
+    as the top boundary value of the implicit solve.
+    """
+    _sbc = getattr(cfg, "surface_bc", "veros_flux")
+    if _sbc == "nemo_dirichlet":
+        return jnp.maximum(
+            jnp.asarray(_NEMO_TKE_EMIN0, dtype=taum.dtype),
+            _NEMO_TKE_EBB / rho_0 * taum)
+    if _sbc == "veros_flux":
+        return None
+    raise ValueError(
+        "Unknown surface-TKE boundary scheme TKEConfig.surface_bc: must be "
+        f'one of ("veros_flux", "nemo_dirichlet"), got {_sbc!r}')
 # nn_htau=1 latitude profile: h_tau = max(0.5, min(30, 45·|sin φ|)) m
 _NEMO_TKE_HTAU_CONST_M = 10.0  # nn_htau=0 constant penetration depth [m]
 _NEMO_TKE_HTAU_MIN_M = 0.5
@@ -217,6 +238,8 @@ class TKEPostMixingContext(NamedTuple):
     eos_fn: object            # EOS callable (T, S, p) -> rho (static)
     rho_0: float
     g: float
+    # NEMO nn_bc_surf=1 Dirichlet surface-TKE value (None => Veros flux BC).
+    surface_dirichlet: jnp.ndarray | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -597,6 +620,7 @@ def _solve_tke_backward_euler(
     external_source: jnp.ndarray | None = None,
     dz_cell: jnp.ndarray | None = None,
     dz_surface: jnp.ndarray | None = None,
+    surface_dirichlet: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Backward-Euler tridiagonal solve for one TKE time step.
 
@@ -802,7 +826,18 @@ def _solve_tke_backward_euler(
         inj_vol = jnp.maximum(jnp.asarray(dz_surface, dtype=e_old.dtype), _EPS)
     else:
         inj_vol = jnp.maximum(dz_half[..., 0], _EPS)
-    rhs = rhs.at[..., 0].add(dt * surface_flux / inj_vol)
+    if surface_dirichlet is not None:
+        # NEMO nn_bc_surf=1 Dirichlet surface TKE (zdftke.F90:264-269): hold
+        # e_new[...,0] = e_sfc exactly by making row 0 an identity row (the
+        # k=1 row's sub-diagonal still couples to the held value — the
+        # standard Dirichlet-boundary tridiagonal). NO Neumann flux injection
+        # in this mode (it would double-count the surface input).
+        diag = diag.at[..., 0].set(1.0)
+        c_diff = c_diff.at[..., 0].set(0.0)
+        rhs = rhs.at[..., 0].set(
+            jnp.asarray(surface_dirichlet, dtype=e_old.dtype))
+    else:
+        rhs = rhs.at[..., 0].add(dt * surface_flux / inj_vol)
 
     # Solve tridiagonal system.
     e_new = _tridiag_thomas(a_diff, diag, c_diff, rhs)
@@ -1313,6 +1348,9 @@ def tke_vertical_mixing(
         taum = _safe_stress_modulus(tx, ty)
         surface_flux = (taum / rho_0) ** 1.5
 
+    # Surface TKE BC dispatch (single owner; raises on unknown).
+    surface_dirichlet = _surface_tke_dirichlet(cfg, taum, rho_0)
+
     # --- NEMO zdftke surface terms (static feature gates; see TKEConfig) ---
     _lc_on = bool(getattr(cfg, "lc", False))
     _etau_on = getattr(cfg, "etau_mode", "none") != "none"
@@ -1353,6 +1391,7 @@ def tke_vertical_mixing(
             external_source=external_source,
             dz_cell=dz_cell,
             dz_surface=dz_surface if veros_slots else None,
+            surface_dirichlet=surface_dirichlet,
         )
 
     if _etau_on:
@@ -1504,16 +1543,18 @@ def tke_set_diffusivities(
     )
     if taum_surface is not None:
         # NEMO taum channel (see tke_vertical_mixing).
-        surface_flux = (jnp.maximum(jnp.asarray(taum_surface), 0.0)
-                        / rho_0) ** 1.5
+        taum = jnp.maximum(jnp.asarray(taum_surface), 0.0)
     elif tau_x_surface is None and tau_y_surface is None:
-        surface_flux = jnp.zeros(rho_cell.shape[:-1], dtype=rho_cell.dtype)
+        taum = jnp.zeros(rho_cell.shape[:-1], dtype=rho_cell.dtype)
     else:
         tx = (tau_x_surface if tau_x_surface is not None
               else jnp.zeros_like(rho_cell[..., 0]))
         ty = (tau_y_surface if tau_y_surface is not None
               else jnp.zeros_like(rho_cell[..., 0]))
-        surface_flux = (_safe_stress_modulus(tx, ty) / rho_0) ** 1.5
+        taum = _safe_stress_modulus(tx, ty)
+    surface_flux = (taum / rho_0) ** 1.5
+    # NEMO nn_bc_surf=1 option (TKEConfig.surface_bc; single-owner dispatch).
+    surface_dirichlet = _surface_tke_dirichlet(cfg, taum, rho_0)
 
     l_k, _l_eps = compute_mixing_lengths(
         tke_old, N2, dz_half, cfg, signed_n2=True, dz_cell=dz_cell,
@@ -1533,6 +1574,7 @@ def tke_set_diffusivities(
         dz_half=dz_half, dz_cell=dz_cell,
         dz_surface=jnp.asarray(dz_surface, dtype=rho_cell.dtype),
         p_cell=p_cell, eos_fn=eos_fn, rho_0=rho_0, g=g,
+        surface_dirichlet=surface_dirichlet,
     )
     return K_M, K_H, ctx
 
@@ -1730,8 +1772,17 @@ def tke_integrate_post_mixing(
         mxl_w, cfg.mxl_min)
 
     d = e_w + dt * forc_w
-    # Wind-work surface injection over the surface half-volume (tke.py:225).
-    d = d.at[..., 0].add(dt * ctx.surface_flux.astype(dtype) / vol[..., 0])
+    if getattr(ctx, "surface_dirichlet", None) is not None:
+        # NEMO nn_bc_surf=1: hold the surface W row at
+        # en(1)=max(rn_emin0, rn_ebb*|tau|/rho0) (identity row; the interior
+        # row 1 couples to the held value through a[...,1] — the standard
+        # Dirichlet tridiagonal). No wind-work flux injection in this mode.
+        b = b.at[..., 0].set(1.0)
+        c = c.at[..., 0].set(0.0)
+        d = d.at[..., 0].set(ctx.surface_dirichlet.astype(dtype))
+    else:
+        # Wind-work surface injection over the surface half-volume (tke.py:225).
+        d = d.at[..., 0].add(dt * ctx.surface_flux.astype(dtype) / vol[..., 0])
 
     e_new_w = _tridiag_thomas(a, b, c, d)
     # Veros surface clamp (tke.py:238-244) acts on the (discarded) surface

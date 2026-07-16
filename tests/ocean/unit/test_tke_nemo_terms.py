@@ -341,3 +341,50 @@ class TestDinoFaithfulWiring:
                                       evd_on_momentum=False)
         _, pc3 = dino_lat_lon_model_config(g, cfg_off, physics=True)
         assert pc3.convection.enhanced_diffusion.nu_conv == 0.0
+
+
+# ---------------------------------------------------------------------------
+# NEMO nn_bc_surf=1 Dirichlet surface TKE (TKEConfig.surface_bc)
+# ---------------------------------------------------------------------------
+
+
+class TestNemoDirichletSurfaceBC:
+    def test_dirichlet_holds_en1_exactly(self):
+        """surface_bc='nemo_dirichlet' HOLDS the top interface at
+        en(1)=max(rn_emin0, rn_ebb*|tau|/rho0) — the identity row makes it
+        exact, and it is ~60x the default Veros flux-BC response."""
+        u, v, T, S, rho, dz_half, z_int, tx, ty = _orchestrator_inputs()
+        taum = float(np.hypot(np.asarray(tx)[0, 0], np.asarray(ty)[0, 0]))
+        e_sfc = max(_NEMO_TKE_EMIN0, _NEMO_TKE_EBB / _RHO0 * taum)
+
+        nemo = tke_vertical_mixing(
+            u, v, T, S, rho, dz_half, None, tx, ty, dt=3600.0,
+            cfg=TKEConfig(surface_bc="nemo_dirichlet"), rho_0=_RHO0,
+            n_iterations=3, z_interface=z_int)
+        np.testing.assert_allclose(
+            np.asarray(nemo.tke_new)[..., 0], e_sfc, rtol=0, atol=1e-12)
+
+        base = tke_vertical_mixing(
+            u, v, T, S, rho, dz_half, None, tx, ty, dt=3600.0,
+            cfg=TKEConfig(), rho_0=_RHO0, n_iterations=3, z_interface=z_int)
+        # the Dirichlet surface value dominates the flux-BC response
+        assert float(np.max(np.asarray(base.tke_new)[..., 0])) < 0.5 * e_sfc
+
+    def test_dirichlet_zero_wind_floor(self):
+        """Windless: en(1) sits at the rn_emin0 floor (not the flux-BC zero)."""
+        u, v, T, S, rho, dz_half, z_int, _, _ = _orchestrator_inputs()
+        zeros = jnp.zeros(u.shape[:-1])
+        out = tke_vertical_mixing(
+            u, v, T, S, rho, dz_half, None, zeros, zeros, dt=3600.0,
+            cfg=TKEConfig(surface_bc="nemo_dirichlet"), rho_0=_RHO0,
+            n_iterations=1, z_interface=z_int)
+        np.testing.assert_allclose(
+            np.asarray(out.tke_new)[..., 0], _NEMO_TKE_EMIN0, rtol=0, atol=1e-12)
+
+    def test_surface_bc_typo_raises(self):
+        u, v, T, S, rho, dz_half, z_int, tx, ty = _orchestrator_inputs()
+        with pytest.raises(ValueError, match="surface_bc"):
+            tke_vertical_mixing(
+                u, v, T, S, rho, dz_half, None, tx, ty, dt=3600.0,
+                cfg=TKEConfig(surface_bc="bogus"), rho_0=_RHO0,
+                n_iterations=1, z_interface=z_int)

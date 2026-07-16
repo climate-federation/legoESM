@@ -253,6 +253,15 @@ class TKEConfig(NamedTuple):
     bg_diff_width_m: float = 222.2       # Bryan-Lewis transition width [m] (published fit)
     bg_diff_scale: float = 1.0e-4        # abyssal tracer-diffusivity floor amplitude [m^2/s]
     tke_surface_min: float = 1.0e-4      # surface TKE floor [m^2/s^2]
+    # Surface TKE boundary condition:
+    #   "veros_flux" (default)  — Neumann wind-work flux injection
+    #                             surface_flux=(|tau|/rho0)^1.5 (Veros tke.py).
+    #   "nemo_dirichlet"        — NEMO nn_bc_surf=1: HOLD the top interface at
+    #                             en(1)=max(rn_emin0, rn_ebb*|tau|/rho0)
+    #                             (zdftke.F90:264-269) as a Dirichlet value in
+    #                             the implicit solve. ~60x larger surface TKE
+    #                             than the flux BC under an ~0.07 Pa wind.
+    surface_bc: str = "veros_flux"
     tke_background: float = 1.0e-6       # interior TKE floor [m^2/s^2]
     # ----- Static-stability N^2 mode (deep-ocean ventilation / convection) -----
     # ``"insitu"`` (default, BIT-IDENTICAL legacy): N^2 from the in-situ
