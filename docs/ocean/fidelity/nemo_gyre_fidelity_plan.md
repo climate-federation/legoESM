@@ -169,8 +169,34 @@ THE FIRST NON-NEUTRAL sweep item: 0.722 → 0.758 (yr-1 0.962). Review SHIP; the
 consolidated sweep review's findings (WENO+ene_total latent Coriolis-drop
 guard, direct tests, constant promotion) are in 05027902e.
 
-**Minors (low priority):** rho_0 1025 → 1026; TKE buoyancy N² adiabatic → in-situ;
-nn_mxl 2 → 3 (previously deconfounded — likely inert).
+**F. SST cold bias / winter ML over-deepening — ROOT CAUSE FOUND + FIXED
+2026-07-16: the card ran `tke_mxl_choice=2` (Veros buoyancy length), not
+NEMO's `nn_mxl=3`.** Diagnosis chain: yr-5 column heat +0.54 C (heat BURIED,
+not missing) + winter ML uniform to 209 m vs NEMO 75 m + failed spring
+restratification + damped/lagged SST seasonal cycle; 15-day daily comparison
+(new EXP_15D, nn_stock=6) shows the over-deepening from DAY 1; forcing
+generators (t_star/qsr) verified machine-exact vs the Fortran; column
+closure probe (`gap_audit/_probe_tke_column.py` — NB NEMO restarts dump
+instantaneous `en`/`avt_k`/`avm_k`; the 122-day-mean `votkeavt` is
+EVD-saturated and useless for closure comparison) seeded with NEMO's OWN
+en/T/S: choice-2 K_H(10 m) = 0.21 vs NEMO avt 0.0297 (7x — the uncapped
+buoyancy length gives l≈73 m in the near-neutral ML) while **choice-3
+reproduces NEMO's avt to 3-4 significant figures at every level** (the
+ln_mxl0 wind anchor seeds the |dl/dz|<=e3t lup ladder, zdftke.F90:645-712).
+The old "nn_mxl=3 is NOT the lever" deconfounding (corr 0.9998 for levels
+>=2) held only in the stratified interior. RESULTS: 15-day SST deficit
+0.31 → 0.11, MLD 136 → 111 m (NEMO 91); 5-yr SST max 17.33 → **18.36**
+(NEMO 18.98, same-file), surf/deep 2.69 → **4.38** (NEMO 8.23), mid-depth
+(1551 m) rms(u) 1.89x → **1.08x** NEMO. The scalar wet-RMS ratio reads
+0.758 → 0.674 — an HONEST drop: the baseline number was inflated by
+spurious mid-depth flow (same lesson as the 0.805 pre-linssh episode);
+surface rms changed only 0.617 → 0.576. The depth-resolved profile is the
+metric of record.
+
+**Minors (low priority):** rho_0 1025 → 1026 (done); TKE buoyancy N²
+adiabatic → in-situ; residual surface rms 0.58x + residual winter-ML depth
+(111 vs 91 m at day 15) — next candidates: EVD reach interplay, tra_sbc
+per-stage placement.
 
 ## 7. Ruled out — do NOT re-test
 - Vertical momentum advection (upwind_perturbation vs centred): no effect on the gap.

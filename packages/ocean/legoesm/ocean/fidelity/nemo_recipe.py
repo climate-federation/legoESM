@@ -191,14 +191,16 @@ NEMO_DEFERRED_BLOCKS: tuple[str, ...] = (
     "not a separate selector; explicit_substep + cosine is the closest existing "
     "canonical barotropic block.",
     "NEMO TKE amplitude (√e), Ri-Prandtl (nn_pdl=1, slope 1/ri_cri=4.5), c_k/c_eps "
-    "(rn_ediff/rn_ediss), background Kz (rn_avm0/rn_avt0) AND the interior "
-    "mixing-length response are now dump-verified NEMO-exact: fed NEMO's own N² "
-    "(rn2), legoESM's diffusivity matches avm_k to corr 0.9998 for levels >=2 (the "
-    "Veros nn_mxl=2 length is scalar-identical to NEMO nn_mxl=3 in the interior, so "
-    "nn_mxl=3 is NOT the lever — TKE_DECONFOUNDED_FINDINGS.md). The one remaining "
-    "TKE item is the ln_mxl0 surface mixing-length anchor + NEMO Dirichlet "
-    "surface-TKE BC (top ~2 interfaces only), which matters solely for a full "
-    "PROGNOSTIC spinup match, not the diagnostic/tendency oracle.",
+    "(rn_ediff/rn_ediss), background Kz (rn_avm0/rn_avt0) AND the full nn_mxl=3 "
+    "mixing-length response are now dump-verified NEMO-exact (2026-07-16 column "
+    "certificate: fed NEMO's own en/T/S from the EXP_15D day-5 restart, K_H "
+    "matches avt_k to 3-4 significant figures at every level). RESOLVED: the "
+    "earlier 'nn_mxl=3 is NOT the lever' deconfounding (corr 0.9998 for levels "
+    ">=2, TKE_DECONFOUNDED_FINDINGS.md) held only in the stratified interior — "
+    "in the near-neutral winter ML the uncapped nn_mxl=2 buoyancy length gave "
+    "7x NEMO's surface avt (l~70 m vs the anchor-capped ~10 m at 10 m depth), "
+    "the driver of the winter ML over-deepening / cold-SST bias; the card now "
+    "runs tke_mxl_choice=3 + ln_mxl0 + Dirichlet surface TKE.",
     "Implicit quadratic NEMO bottom drag is approximated by the existing "
     "quadratic-with-floor model-level drag knobs.",
 )
@@ -210,11 +212,23 @@ def _nemo_tke_config() -> TKEConfig:
     # (kappa_convention="veros_sqrte" ⇒ K=c_k·l·√e, not √(2e) — removes an exact
     # √2 overshoot), the Ri-Prandtl (prandtl_ri_coeff=1/ri_cri), and the
     # background floors below are now NEMO-exact; c_k=0.1/c_eps=0.7 already match
-    # rn_ediff/rn_ediss by default.  The remaining deferred item is the nn_mxl=3
-    # length form (see NEMO_DEFERRED_BLOCKS).
+    # rn_ediff/rn_ediss by default.
     return TKEConfig(
         prognostic=True,
         n2_mode="adiabatic",
+        # NEMO nn_mxl=3 + ln_mxl0: buoyancy length with the wind surface
+        # anchor, capped by the |dl/dz|<=e3t lup/ldown sweeps. The old
+        # "scalar-identical to Veros nn_mxl=2 in the interior" deconfounding
+        # note was TRUE in the stratified interior and FALSE in the
+        # near-neutral winter mixed layer, where the uncapped Veros buoyancy
+        # length gives l~70 m at 10 m depth vs NEMO's anchor-capped ~10 m —
+        # a 7x surface avt excess that over-deepened every winter ML,
+        # buried the seasonal heat, and held the 5-yr SST ~1.7 C cold.
+        # Column certificate (2026-07-16, _probe_tke_column.py on the
+        # EXP_15D day-5 restart, NEMO's own en/T/S as input): choice 3
+        # reproduces NEMO's dumped avt_k to 3-4 significant figures at
+        # every level; choice 2 is 7x high at 10 m.
+        tke_mxl_choice=3,
         # NEMO stp ordering: eosbn2 runs at step start (bn2(Nnow)), BEFORE
         # tra_adv. Sampling the diffusivity-stage N² on the before-advection
         # T/S stops the single-step fct2 bottom-cell drift from flipping the

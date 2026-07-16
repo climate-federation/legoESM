@@ -255,6 +255,12 @@ class TKEPostMixingContext(NamedTuple):
     surface_dirichlet: jnp.ndarray | None = None
     # NEMO ln_lc Langmuir TKE source on the interior interfaces (None => off).
     langmuir_source: jnp.ndarray | None = None
+    # DISSIPATION mixing length l_eps (nn_mxl=3: sqrt(lup*ldown), zdftke:672
+    # zmxld feeding dissl=sqrt(en)/zmxld :735). Distinct from ``mxl`` (=l_k=
+    # min(lup,ldown), the eddy-coefficient length :730) only for choice 3;
+    # None => fall back to ``mxl`` (choices 1/2, where the two coincide, and
+    # older ctx constructions).
+    l_eps: jnp.ndarray | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1344,10 +1350,11 @@ def tke_vertical_mixing(
     if positivity == "veros_surface_correction" and cfg.n2_mode != "adiabatic":
         # The Veros surface correction lets the interior TKE carry a negative
         # energy debt; only the signed-N² adiabatic buoyancy length handles
-        # it (sqrt(max(0,e)) clamp). Both tke_mxl_choice ∈ {1, 2} are
+        # it (sqrt(max(0,e)) clamp). tke_mxl_choice ∈ {1, 2, 3} are all
         # debt-safe on the adiabatic path: choice=2 via _veros_buoyancy_length's
         # recursion, choice=1 via the distance-to-boundary cap
-        # (veros_mxl_choice1_boundary_cap, supplied by the orchestrator). The
+        # (veros_mxl_choice1_boundary_cap, supplied by the orchestrator),
+        # choice=3 via its own double-where sqrt(2e) + the lup/ldown caps. The
         # in-situ N² branch (n2_mode != 'adiabatic') is NOT debt-safe (raw e
         # inside the closed-form sqrt) — fail loudly at config time.
         raise ValueError(
@@ -1641,13 +1648,13 @@ def tke_set_diffusivities(
         langmuir_source = None
 
     _l_anchor = _mxl0_surface_anchor(cfg, taum, rho_0, g)
-    l_k, _l_eps = compute_mixing_lengths(
+    l_k, l_eps = compute_mixing_lengths(
         tke_old, N2, dz_half, cfg, signed_n2=True, dz_cell=dz_cell,
         boundary_cap=boundary_cap, l_surface_anchor=_l_anchor)
     K_M, K_H = compute_K_from_tke(
         tke_old, l_k, cfg, N2=N2, shear_sq=shear_sq, z_interface=z_interface)
     ctx = TKEPostMixingContext(
-        K_M_old=K_M, K_H_old=K_H, mxl=l_k,
+        K_M_old=K_M, K_H_old=K_H, mxl=l_k, l_eps=l_eps,
         # Double-``where`` for an AD-safe sqrt at the negative-TKE energy
         # debt (primal BIT-IDENTICAL to sqrt(max(0,e)); the plain form has a
         # NaN derivative at e <= 0 — see the note in
@@ -1838,7 +1845,13 @@ def tke_integrate_post_mixing(
     e_w = _w(e_old)
     kM_w = _w(ctx.K_M_old)
     sqrttke_w = _w(ctx.sqrttke)
-    mxl_w = _w(ctx.mxl)
+    # Dissipation length: l_eps = sqrt(lup*ldown) (NEMO zmxld -> dissl,
+    # zdftke:672/735), NOT the eddy-coefficient l_k = min(lup,ldown). The two
+    # coincide for tke_mxl_choice 1/2; for choice 3 using l_k here would
+    # OVER-dissipate exactly in the winter ML (anchored lup small, bottom-
+    # grown ldown large). None => older ctx / equal-length fallback.
+    _l_diss = ctx.l_eps if getattr(ctx, "l_eps", None) is not None else ctx.mxl
+    mxl_w = _w(_l_diss)
 
     # --- Veros tridiagonal assembly (tke.py:185-227), top-down ---
     # delta[w] couples W rows w and w+1 through cell w (thickness dzt[w]·J):
