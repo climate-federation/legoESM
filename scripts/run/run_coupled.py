@@ -338,12 +338,22 @@ def build_parser():
     # `self._atm = ModelDriver(atm_config)`, the same driver + physics pipeline
     # run_amip uses.  So this list had drifted, not narrowed on purpose: it was
     # missing zhang_mcfarlane / kain_fritsch / emanuel / tiedtke / bechtold --
-    # every one of which resolves through the shared convection factory, and
-    # bechtold is run_amip's own DEFAULT and the scheme in
-    # config/amip/amip_production.yaml.  Derived from the canonical set so it
-    # cannot drift again.  (The default stays sbm: the comment above documents
-    # the empirically coupled-stable suite, which is a statement about the
-    # DEFAULT, not a reason to block the others.)
+    # every one of which resolves through the shared convection factory.
+    # tiedtke is run_amip's default and bechtold is the scheme pinned by
+    # config/amip/amip_production.yaml, so a coupled run could select NEITHER of
+    # the two the atmosphere is actually run with.  Derived from the canonical
+    # set so it cannot drift again.  (The default stays sbm: the comment above
+    # documents the empirically coupled-stable suite, which is a statement about
+    # the DEFAULT, not a reason to block the others.)
+    # CAVEAT: run_coupled does not expose the per-scheme convection tunables
+    # run_amip has (--bechtold-*, --sbm-*, convective_precip_efficiency, ...),
+    # so a coupled bechtold/tiedtke run uses each scheme's OWN config defaults
+    # rather than AMIP's tuned values (e.g. amip_production pins bechtold
+    # precip-efficiency 0.0; coupled leaves it at the scheme default). The
+    # schemes run correctly; they are simply untuned here. Threading those flags
+    # is tracked separately -- it is the "new tunable -> CLI flag in every
+    # affected run script" rule, which run_coupled already owes for the AMIP
+    # convection knobs generally, not a defect introduced by offering them.
     parser.add_argument("--convection", default="sbm",
                         choices=list(VALID_CONVECTION_SCHEMES),
                         help="Convection scheme (default: sbm)")

@@ -84,8 +84,9 @@ def test_coupled_convection_offers_every_valid_scheme(coupled):
 @pytest.mark.parametrize("scheme", ["bechtold", "tiedtke", "emanuel",
                                     "kain_fritsch", "zhang_mcfarlane"])
 def test_coupled_can_select_the_schemes_it_used_to_block(coupled, scheme):
-    """bechtold is run_amip's default and amip_production.yaml's scheme, yet a
-    coupled run could not select it."""
+    """tiedtke is run_amip's --convection default and bechtold is the scheme
+    pinned by config/amip/amip_production.yaml -- so a coupled run could select
+    NEITHER of the two the atmosphere is actually run with."""
     assert scheme in coupled["convection"].choices
 
 
