@@ -1303,3 +1303,346 @@ def test_bechtold_f4_qsat_base_helper_differentiable():
         return jnp.sum(_ifs_cloud_base_qsat(q_sat_env, jnp.array([kb]), lev[0]))
 
     assert jnp.isfinite(jax.grad(base_qsat)(9.0))
+
+
+# ---------------------------------------------------------------------------
+# IFS deep CAPE closure ZMFUB1 = ZCAPE*ZMFUB/(ZHEAT*ZXTAU) (cumastrn.F90:704-833)
+# ---------------------------------------------------------------------------
+
+from legoesm.atmosphere.physics.convection.bechtold import (  # noqa: E402
+    _ifs_cape_closure_target,
+    _ifs_deep_target_scale,
+    _IFS_RETV,
+    _IFS_ZCAPE_MAX_PA,
+    _IFS_ZHEAT_FLOOR,
+    _IFS_MB_DEEP_FLOOR,
+)
+
+
+def test_ifs_cape_closure_constants_match_oracle():
+    """The closure constants are the oracle's: RETV = R_v/R_d - 1
+    (yomcst.F90:342), ZCAPE cap 5000 Pa (cumastrn.F90:825), ZHEAT floor 1e-4
+    (cumastrn.F90:826), deep M_b floor 0.001 (cumastrn.F90:829)."""
+    assert abs(_IFS_RETV - (constants.R_v / constants.R_d - 1.0)) < 1e-12
+    assert _IFS_ZCAPE_MAX_PA == 5000.0
+    assert _IFS_ZHEAT_FLOOR == 1.0e-4
+    assert _IFS_MB_DEEP_FLOOR == 1.0e-3
+
+
+def test_ifs_cape_closure_target_analytic():
+    """Hand-computed ZCAPE/ZHEAT on a 4-level column reproduce the helper.
+
+    The expected values are built with explicit Fortran-shaped loops mirroring
+    cumastrn.F90:722-733 (k-1 = the level above k; both index downward), so an
+    orientation or off-by-one bug in the vectorized helper goes red."""
+    import numpy as np
+    T = np.array([[250.0, 270.0, 285.0, 295.0]])       # surface-last
+    q = np.array([[1e-4, 1e-3, 5e-3, 1e-2]])
+    z = np.array([[9000.0, 6000.0, 3000.0, 500.0]])
+    # Deliberately STRETCHED full-level pressures: the ZCAPE measure is the
+    # oracle's PAP(k)-PAP(k-1) full-level spacing (cumastrn.F90:728), which on
+    # this grid differs from any half-level layer thickness — a measure bug
+    # goes red here.
+    p = np.array([[300e2, 500e2, 800e2, 1000e2]])
+    T_u = T + np.array([[0.0, 1.5, 2.0, 0.0]])         # buoyant in-cloud plume
+    q_u = q + np.array([[0.0, 5e-4, 1e-3, 0.0]])
+    q_c_u = np.array([[0.0, 1e-3, 1.5e-3, 0.0]])
+    M_u = np.array([[0.0, 0.08, 0.10, 0.10]])
+    M_d = np.array([[0.0, -0.02, -0.03, -0.03]])
+    in_cloud = np.array([[0.0, 1.0, 1.0, 0.0]])
+    tau = np.array([1500.0])
+    M_b_fg = np.array([0.10])
+    cape_w = np.array([1.0])
+
+    retv = constants.R_v / constants.R_d - 1.0
+    g, cpd = constants.g, constants.c_pd
+    zcape = 0.0
+    zheat = 0.0
+    for k in range(1, 4):                               # k-1 exists
+        if in_cloud[0, k] == 1.0:
+            zcape += (
+                (T_u[0, k] - T[0, k]) / T[0, k]
+                + retv * (q_u[0, k] - q[0, k])
+                - q_c_u[0, k]
+            ) * (p[0, k] - p[0, k - 1])                 # ZDZ = PAP(k)-PAP(k-1)
+            stab = (
+                (T[0, k - 1] - T[0, k] + g * (z[0, k - 1] - z[0, k]) / cpd)
+                / T[0, k]
+                + retv * (q[0, k - 1] - q[0, k])
+            )
+            zheat += max(0.0, stab) * g * (M_u[0, k] + M_d[0, k])
+    # cape_weight multiplies the target as the smooth LDCUM membership
+    # (IFS runs the closure only where the trigger fired).
+    expected = (
+        cape_w[0] * min(zcape, 5000.0) * M_b_fg[0]
+        / (max(zheat, 1e-4) * tau[0])
+    )
+    expected = max(expected, 1e-3 * cape_w[0] ** 2)
+
+    got = _ifs_cape_closure_target(
+        jnp.asarray(T), jnp.asarray(q), jnp.asarray(z), jnp.asarray(p),
+        jnp.asarray(T_u), jnp.asarray(q_u), jnp.asarray(q_c_u),
+        jnp.asarray(M_u), jnp.asarray(M_d), jnp.asarray(in_cloud),
+        jnp.asarray(tau), jnp.asarray(M_b_fg), jnp.asarray(cape_w),
+    )
+    assert got.shape == (1,)
+    tol = 1e-9 if got.dtype == jnp.float64 else 1e-6
+    assert abs(float(got[0]) - expected) < tol * max(abs(expected), 1.0), (
+        f"helper {float(got[0]):.6e} != hand-computed {expected:.6e}"
+    )
+    # The floor is live and quiescence-gated: zero plume buoyancy + zero
+    # trigger must NOT be handed the 0.001 deep floor.
+    got_quiet = _ifs_cape_closure_target(
+        jnp.asarray(T), jnp.asarray(q), jnp.asarray(z), jnp.asarray(p),
+        jnp.asarray(T), jnp.asarray(q), jnp.asarray(0.0 * q_c_u),
+        jnp.asarray(0.0 * M_u), jnp.asarray(0.0 * M_d), jnp.asarray(in_cloud),
+        jnp.asarray(tau), jnp.asarray(0.0 * M_b_fg), jnp.asarray(0.0 * cape_w),
+    )
+    assert float(got_quiet[0]) == 0.0
+    # Model-top exclusion symmetry: perturbing ONLY the top level's plume
+    # buoyancy must not move the target (both ZCAPE and ZHEAT start at k=1).
+    got_top = _ifs_cape_closure_target(
+        jnp.asarray(T), jnp.asarray(q), jnp.asarray(z), jnp.asarray(p),
+        jnp.asarray(T_u).at[:, 0].add(5.0), jnp.asarray(q_u),
+        jnp.asarray(q_c_u), jnp.asarray(M_u), jnp.asarray(M_d),
+        jnp.asarray(in_cloud).at[:, 0].set(0.5), jnp.asarray(tau),
+        jnp.asarray(M_b_fg), jnp.asarray(cape_w),
+    )
+    assert float(jnp.abs(got_top[0] - got[0])) == 0.0
+    # Oracle restart semantics (codex R6): a ZERO first guess with a NONZERO
+    # launched plume (the floored-launch split) zeroes the numerator, so the
+    # target is EXACTLY the 0.001*cape_weight**2 floor — not the shape-only
+    # closure value the cancellation would give.
+    got_restart = _ifs_cape_closure_target(
+        jnp.asarray(T), jnp.asarray(q), jnp.asarray(z), jnp.asarray(p),
+        jnp.asarray(T_u), jnp.asarray(q_u), jnp.asarray(q_c_u),
+        jnp.asarray(M_u), jnp.asarray(M_d), jnp.asarray(in_cloud),
+        jnp.asarray(tau), jnp.asarray(0.0 * M_b_fg), jnp.asarray(cape_w),
+    )
+    assert float(got_restart[0]) == 1e-3 * float(cape_w[0]) ** 2
+    # Trigger membership: a half-triggered column gets half the target
+    # (above the floor) — the smooth LDCUM analog (codex R3 #1).
+    got_half = _ifs_cape_closure_target(
+        jnp.asarray(T), jnp.asarray(q), jnp.asarray(z), jnp.asarray(p),
+        jnp.asarray(T_u), jnp.asarray(q_u), jnp.asarray(q_c_u),
+        jnp.asarray(M_u), jnp.asarray(M_d), jnp.asarray(in_cloud),
+        jnp.asarray(tau), jnp.asarray(M_b_fg), jnp.asarray(0.5 * cape_w),
+    )
+    assert abs(float(got_half[0]) - 0.5 * float(got[0])) < tol * max(
+        abs(0.5 * float(got[0])), 1.0
+    )
+
+
+def test_ifs_cape_closure_first_guess_cancels_above_floor():
+    """Above the ZHEAT floor the closure is independent of the first-guess
+    magnitude (ZHEAT scales linearly with M_b_fg via M_u, so ZMFUB cancels —
+    the closure depends only on the plume SHAPE)."""
+    T = jnp.array([[250.0, 270.0, 285.0, 295.0]])
+    q = jnp.array([[1e-4, 1e-3, 5e-3, 1e-2]])
+    z = jnp.array([[9000.0, 6000.0, 3000.0, 500.0]])
+    p = jnp.array([[300e2, 500e2, 800e2, 1000e2]])
+    T_u = T + jnp.array([[0.0, 1.5, 2.0, 0.0]])
+    q_u = q
+    q_c_u = jnp.zeros_like(q)
+    in_cloud = jnp.array([[0.0, 1.0, 1.0, 0.0]])
+    tau = jnp.array([1500.0])
+    cape_w = jnp.array([1.0])
+    shape = jnp.array([[0.0, 0.8, 1.0, 1.0]])
+
+    def target(mb_fg):
+        return _ifs_cape_closure_target(
+            T, q, z, p, T_u, q_u, q_c_u,
+            mb_fg * shape, jnp.zeros_like(shape), in_cloud,
+            tau, jnp.array([mb_fg]), cape_w,
+        )[0]
+
+    t1 = float(target(0.05))
+    t2 = float(target(0.5))
+    tol = 1e-9 if jnp.asarray(0.0).dtype == jnp.float64 else 1e-5
+    assert abs(t1 - t2) < tol * max(t1, 1e-30), (
+        "first guess did not cancel above the ZHEAT floor"
+    )
+
+
+def test_ifs_deep_target_scale_caps_after_rescale_and_shallow_noop():
+    """The generalized target-scale kernel caps AFTER the rescale
+    (min(target, M_b_max), not min-then-scale) and is an exact no-op for the
+    non-deep classes (deep_weight -> 0)."""
+    M_b_capped = jnp.array([0.05])
+    target = jnp.array([0.20])                       # above the 0.05 cap
+    tol = 1e-12 if M_b_capped.dtype == jnp.float64 else 1e-8
+    s = _ifs_deep_target_scale(target, M_b_capped, jnp.array([1.0]), 0.05)
+    assert abs(float(M_b_capped[0] * s[0]) - 0.05) < tol
+    s0 = _ifs_deep_target_scale(target, M_b_capped, jnp.array([0.0]), 0.05)
+    assert abs(float(s0[0]) - 1.0) < tol
+    # quiescent edge: M_b_capped == 0 takes the constant-0 branch.
+    sq = _ifs_deep_target_scale(target, jnp.array([0.0]), jnp.array([1.0]), 0.05)
+    assert jnp.isfinite(sq[0])
+    # tiny-POSITIVE edge (codex R1 #4): the target is not proportional to
+    # M_b_capped (trigger-gated floor), so without the divisor floor the ratio
+    # overflows in fp32 and deep_weight=0 turns 0*inf into NaN.  Both weights
+    # must stay finite, the realized flux bounded by the cap, and the non-deep
+    # blend an exact no-op.
+    tiny_mb = jnp.array([1e-30])
+    st1 = _ifs_deep_target_scale(jnp.array([1e-3]), tiny_mb, jnp.array([1.0]), 0.05,
+                                 divisor_floor=1e-20)
+    st0 = _ifs_deep_target_scale(jnp.array([1e-3]), tiny_mb, jnp.array([0.0]), 0.05,
+                                 divisor_floor=1e-20)
+    assert jnp.isfinite(st1[0]) and jnp.isfinite(st0[0])
+    assert float(tiny_mb[0] * st1[0]) <= 0.05 * (1.0 + 1e-6)
+    assert abs(float(st0[0]) - 1.0) < 1e-6
+    # The TURNOVER wrapper must NOT be floored (codex R2 #2): its target is
+    # proportional to M_b, so for a tiny-but-positive flux the legacy scale is
+    # exactly tau_correction — flooring would collapse it by orders of
+    # magnitude vs main on the default-on turnover path.
+    r = jnp.array([0.7])
+    s_turn = _ifs_deep_turnover_scale(tiny_mb, tiny_mb, r, jnp.array([1.0]), 0.05)
+    assert abs(float(s_turn[0]) - 0.7) < 1e-6
+
+
+def test_ifs_cape_closure_default_off_and_toggle_live():
+    """Default False (pending the SCM-RCE realism gate); enabling it changes
+    the mass-flux profile on a deep convecting column (the closure is live)."""
+    assert BechtoldConfig().use_ifs_cape_closure is False
+    T, q, pf, ph, u, v = _column(ncol=2, nlev=40, T_sfc=299.0, q_sfc=13e-3,
+                                 lapse_rate=6.5)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    st = jnp.zeros((ncol,))
+    on, mu_on, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_cape_closure=True, M_b_max=1.0))
+    off, mu_off, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_cape_closure=False, M_b_max=1.0))
+    assert jnp.all(jnp.isfinite(mu_on)) and jnp.all(jnp.isfinite(mu_off))
+    assert float(jnp.max(jnp.abs(mu_on - mu_off))) > 0.0, "toggle must be live"
+    for o in (on, off):
+        assert jnp.all(jnp.isfinite(o.dT_dt))
+        assert jnp.all(jnp.isfinite(o.dq_v_dt))
+
+
+def test_ifs_cape_closure_without_turnover_flag_runs():
+    """The closure builds the tau_conv machinery itself even when the F1
+    turnover flag is off (the or-gate), and stays finite."""
+    T, q, pf, ph, u, v = _column(ncol=2, nlev=30, T_sfc=300.0, q_sfc=14e-3)
+    ncol, nlev = T.shape
+    out, mu, _ = bechtold_convection(
+        T, q, pf, ph, u, v, jnp.zeros((ncol, nlev)), jnp.zeros((ncol,)),
+        None, dt=600.0,
+        config=BechtoldConfig(use_ifs_cape_closure=True,
+                              use_convective_turnover_tau=False))
+    assert jnp.all(jnp.isfinite(mu))
+    assert jnp.all(jnp.isfinite(out.dT_dt))
+
+
+def test_ifs_cape_closure_stable_column_quiesces():
+    """A stable, zero-CAPE column stays quiescent under the full closure —
+    the quiescence-gated deep floor must not inject the IFS 0.001 kg/m^2/s
+    minimum into an untriggered column (<1 W/m^2 bar, same as F1)."""
+    T, q, pf, ph, u, v = _column(ncol=2, nlev=40, T_sfc=280.0, q_sfc=2e-3,
+                                 lapse_rate=3.0)
+    ncol, nlev = T.shape
+    out, mu, _ = bechtold_convection(
+        T, q, pf, ph, u, v, jnp.zeros((ncol, nlev)), jnp.zeros((ncol,)),
+        None, dt=600.0, config=BechtoldConfig(use_ifs_cape_closure=True))
+    w_m2 = float(jnp.max(jnp.abs(out.dT_dt)) * constants.c_pd * 1e5 / constants.g)
+    assert w_m2 < 1.0, f"stable column not quiescent: {w_m2:.3f} W/m^2"
+
+
+def test_ifs_cape_closure_grad_finite_convecting_and_quiescent():
+    """jax.grad flows through ZCAPE/ZHEAT/tau and the target rescale on both a
+    convecting and a stable column (floored divisions only)."""
+    for kwargs in (dict(T_sfc=300.0, q_sfc=14e-3),
+                   dict(T_sfc=280.0, q_sfc=2e-3, lapse_rate=3.0)):
+        T, q, pf, ph, u, v = _column(ncol=2, nlev=30, **kwargs)
+        ncol, nlev = T.shape
+        cpp = jnp.zeros((ncol, nlev))
+        st = jnp.zeros((ncol,))
+
+        def loss(eps_deep):
+            cfg = BechtoldConfig(epsilon_deep=eps_deep,
+                                 use_ifs_cape_closure=True)
+            o, _, _ = bechtold_convection(T, q, pf, ph, u, v, cpp, st, None,
+                                          dt=600.0, config=cfg)
+            return jnp.sum(o.dT_dt ** 2)
+
+        g = jax.grad(loss)(1.75e-3)
+        assert jnp.isfinite(g), f"non-finite grad on column {kwargs}"
+
+
+def test_ifs_cape_closure_restarts_stochastic_zeroed_deep_column():
+    """IFS floors the triggered deep flux at 0.001 kg/m^2/s (cumastrn.F90:829).
+    A convecting deep column whose AR1 stochastic factor clips M_b to hard
+    zero must still launch a plume under the closure — the floor acts on the
+    first guess BEFORE plume integration, because a pure rescale of a zero
+    plume stays zero (codex R5).  The legacy path documents the divergence
+    (it stays shut down)."""
+    T, q, pf, ph, u, v = _column(ncol=1, nlev=40, T_sfc=299.0, q_sfc=13e-3,
+                                 lapse_rate=6.5)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    st = jnp.full((ncol,), -50.0)      # AR1 state so 1 + 0.5*state' <= 0
+    key = jax.random.PRNGKey(0)
+    mu_on = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, key, dt=600.0,
+        config=BechtoldConfig(use_ifs_cape_closure=True,
+                              enable_stochastic=True))[1]
+    mu_off = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, key, dt=600.0,
+        config=BechtoldConfig(use_ifs_cape_closure=False,
+                              enable_stochastic=True))[1]
+    assert float(jnp.max(mu_on)) > 0.0, (
+        "closure floor failed to restart the stochastically-zeroed deep column"
+    )
+    assert float(jnp.max(mu_off)) == 0.0, (
+        "legacy path unexpectedly restarted (fixture no longer isolates the floor)"
+    )
+
+
+def test_ifs_cape_closure_scale_transition_band_convex():
+    """The blend realizes d*min(target,max) + (1-d)*M_b_true (codex R7): with a
+    hard-zero true M_b and a floored launch, the transition band (d=0.5) must
+    give the CONVEX floor*d, not floor*d*(2-d); with the floor inactive it
+    reduces exactly to the legacy scale blend."""
+    from legoesm.atmosphere.physics.convection.bechtold import (
+        _ifs_cape_closure_scale,
+    )
+    d = jnp.array([0.5])
+    floor_f = jnp.array([1e-3])                      # target == restart floor
+    launch = floor_f * d                             # floored launch, M_b_true=0
+    s = _ifs_cape_closure_scale(floor_f, jnp.array([0.0]), launch, d, 0.05)
+    realized = float(launch[0] * s[0])
+    assert abs(realized - float(floor_f[0] * d[0])) < 1e-12 * 1e-3 + 1e-15, (
+        f"transition restart {realized:.3e} != convex {float(floor_f[0]*d[0]):.3e}"
+    )
+    # Floor inactive (M_b_true == launch): exact reduction to the legacy blend.
+    mb = jnp.array([0.02])
+    tgt = jnp.array([0.04])
+    s_new = _ifs_cape_closure_scale(tgt, mb, mb, d, 0.05)
+    s_old = _ifs_deep_target_scale(tgt, mb, d, 0.05, divisor_floor=1e-20)
+    assert abs(float(s_new[0]) - float(s_old[0])) < 1e-12
+
+
+def test_ifs_profile_scale_limit_matches_oracle_semantics():
+    """ZMFS limiter (cumastrn.F90:913-932): one column-uniform scale, reduced
+    so no level of the scaled profile exceeds the cap — an s>1 request on a
+    cap-touching profile realizes exactly M_b_max at the peak (codex R10);
+    s<1 and dead-profile columns pass through untouched."""
+    from legoesm.atmosphere.physics.convection.bechtold import (
+        _ifs_profile_scale_limit,
+    )
+    cap = 0.05
+    prof = jnp.array([[0.0, 0.02, cap, 0.01],       # touches the cap
+                      [0.0, 0.01, 0.02, 0.005],     # headroom 2.5x
+                      [0.0, 0.0, 0.0, 0.0]])        # dead plume
+    s = jnp.array([2.0, 2.0, 2.0])
+    out = _ifs_profile_scale_limit(s, prof, cap)
+    assert abs(float(out[0]) - 1.0) < 1e-12          # limited: peak at cap
+    assert abs(float(out[1]) - 2.0) < 1e-12          # 2 < 2.5 headroom: kept
+    assert abs(float(out[2]) - 2.0) < 1e-12          # dead profile: no-op
+    peak_realized = float(jnp.max(prof[0] * out[0]))
+    assert abs(peak_realized - cap) < 1e-12
+    s_small = jnp.array([0.5, 0.5, 0.5])
+    out_small = _ifs_profile_scale_limit(s_small, prof, cap)
+    assert jnp.allclose(out_small, s_small)          # s<1 never touched

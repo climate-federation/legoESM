@@ -339,6 +339,12 @@ _IFS_WMEAN_MAX = 15.0                           # min(15, PWMEAN) (cumastrn.F90:
 _IFS_TAU_MIN = 3600.0 / 5.0                     # 720 s  (cumastrn.F90:827)
 _IFS_TAU_MAX = 3.0 * 3600.0                     # 10800 s (cumastrn.F90:827)
 
+# --- IFS deep CAPE closure ZMFUB1 = ZCAPE*ZMFUB/(ZHEAT*ZXTAU) (cumastrn.F90:704-833)
+_IFS_RETV = 1.0 / constants.epsilon - 1.0       # RETV = R_v/R_d - 1 (yomcst.F90:342)
+_IFS_ZCAPE_MAX_PA = 5000.0                      # ZCAPE = MIN(ZCAPE, 5000) (cumastrn.F90:825)
+_IFS_ZHEAT_FLOOR = 1.0e-4                       # ZHEAT = MAX(1e-4, ZHEAT) (cumastrn.F90:826)
+_IFS_MB_DEEP_FLOOR = 1.0e-3                     # ZMFUB1 = MAX(ZMFUB1, 0.001) (cumastrn.F90:829)
+
 
 def _ifs_updraft_mean_velocity(
     B_u: jax.Array,
@@ -481,6 +487,236 @@ def _ifs_updraft_mean_velocity(
     return jnp.minimum(w_mean, _IFS_WMEAN_MAX)
 
 
+def _ifs_cape_closure_target(
+    T: jax.Array,
+    q_v: jax.Array,
+    z: jax.Array,
+    p_full: jax.Array,
+    T_u: jax.Array,
+    q_u: jax.Array,
+    q_c_u: jax.Array,
+    M_u_fg: jax.Array,
+    M_d_fg: jax.Array,
+    in_cloud: jax.Array,
+    tau_conv: jax.Array,
+    M_b_fg: jax.Array,
+    cape_weight: jax.Array,
+) -> jax.Array:
+    r"""IFS deep-convection CAPE-closure cloud-base mass flux (cumastrn.F90:704-833).
+
+    Oracle formula (cumastrn.F90:828)::
+
+        ZMFUB1 = ZCAPE * ZMFUB / (ZHEAT * ZXTAU)
+
+    with, summed over the cloud layer ``KCTOP < JK <= KCBOT`` (both the IFS
+    ``JK`` and our level index increase DOWNWARD, surface last, so "``k-1``" is
+    the level ABOVE ``k`` in both):
+
+    * ``ZCAPE`` (cumastrn.F90:728-733): pressure-integrated FIRST-GUESS-plume
+      buoyancy INCLUDING condensate loading,
+      ``sum [ (T_u - T)/T + RETV*(q_u - q) - q_c_u ] * (p(k) - p(k-1))``  [Pa],
+      with the oracle's FULL-LEVEL pressure spacing ``ZDZ = PAP(k)-PAP(k-1)``
+      — NOT the half-level layer thickness, a different measure on a
+      stretched vertical grid (codex R1 #1).  Both ``ZCAPE`` and ``ZHEAT``
+      need the ``k-1`` neighbor, so BOTH sums run over levels ``1..nlev-1``
+      and the model-top level is excluded symmetrically (codex R1 #2: gating
+      only ``ZHEAT`` at the top mismatched numerator and denominator).  IFS
+      evaluates the environment at HALF levels ``ZTENH/ZQENH``; this smooth
+      scheme has no half-level state, so the full-level environment stands in
+      — a documented approximation.  Capped at 5000 Pa (cumastrn.F90:825) and
+      floored at 0 (the IFS branch runs only where the trigger already found
+      deep convection, ``LDCUM & KTYPE==1``; a negative plume integral must
+      not drive a negative mass flux here).
+    * ``ZHEAT`` (cumastrn.F90:722-727): the stabilization response per layer,
+      ``sum max(0, (T_{k-1} - T_k + (phi_{k-1} - phi_k)/c_p)/T_k
+      + RETV*(q_{k-1} - q_k)) * g*(M_u(k) + M_d(k))``  [Pa/s],
+      evaluated on the FIRST-GUESS mass-flux profiles (``PMFU + PMFD``), i.e.
+      the rate at which one unit of convective overturning consumes the
+      environment's convective instability.  Floored at 1e-4
+      (cumastrn.F90:826); because ``ZHEAT`` scales linearly with the
+      first-guess ``M_b_fg`` (``M_u ∝ M_b``), the first guess CANCELS from
+      ``ZMFUB1`` whenever the floor is inactive — the closure then depends
+      only on the plume SHAPE, not the surrogate first-guess magnitude.
+    * ``ZXTAU``: the clamped convective-turnover time ``tau_conv`` already
+      diagnosed by the F1 machinery (cumastrn.F90:773,827).
+
+    The deep floor ``MAX(ZMFUB1, 0.001)`` (cumastrn.F90:829) applies in IFS
+    only inside the ``LDCUM & KTYPE==1`` (trigger-fired) branch; the smooth
+    analog multiplies it by ``cape_weight**2`` (the scheme's quiescence gate,
+    same power as the downstream ``M_u`` cap) so a sub-threshold column is not
+    handed a 1e-3 kg/m^2/s mass flux by the floor.  The ``MIN(ZMFUB1, ZMFMAX)``
+    cap is applied by the caller via ``_ifs_deep_target_scale`` (cap AFTER
+    rescale, cumastrn.F90:830-831) against the scheme's ``M_b_max``; IFS's
+    ``ZMFMAX = dp_base * RMFCFL/(g*dt)`` CFL form is a documented departure
+    (a constant literature cap instead of a timestep-dependent one).
+
+    NOT reproduced (documented gaps — each needs an input this column scheme
+    does not have plumbed): the ``RCAPQADV=0.8`` moisture/temperature
+    advection correction ``ZCAPE2/ZDQCV/ZSATFR`` (cumastrn.F90:734-760,819-823;
+    needs the DYNAMICS T and q advective tendencies and vertical velocity),
+    the ``RCAPDCYCL=2`` diurnal-cycle PBL-CAPE subtraction ``ZCAPDCYCL``
+    (cumastrn.F90:783-796; needs surface buoyancy flux and a land mask), and
+    the ``RMINCAPE=0.05`` floor ``MAX(RMINCAPE*ZCAPE, ZCAPE - ZCAPDCYCL)``
+    (cumastrn.F90:820-823) which is inert when ``ZCAPDCYCL = ZDQCV = 0``.
+
+    AD-safe: floors/caps are ``jnp.maximum``/``jnp.clip`` (piecewise-smooth);
+    the only division is by the FLOORED ``ZHEAT`` and the clamped ``tau_conv``,
+    both bounded away from zero.
+
+    Parameters
+    ----------
+    T, q_v, z : (ncol, nlev)  environment T [K], vapor [kg/kg], height [m].
+    p_full : (ncol, nlev)  full-level pressure [Pa] (the ZCAPE spacing measure).
+    T_u, q_u, q_c_u : (ncol, nlev)  first-guess plume T / vapor / condensate.
+    M_u_fg, M_d_fg : (ncol, nlev)  first-guess updraft (>=0) and downdraft
+        (<=0) mass-flux profiles [kg/m^2/s] (``PMFU``, ``PMFD``).
+    in_cloud : (ncol, nlev)  smooth cloud-layer membership in [0, 1].
+    tau_conv : (ncol,)  clamped turnover time [s] (``ZXTAU``).
+    M_b_fg : (ncol,)  first-guess cloud-base mass flux [kg/m^2/s] (``ZMFUB``).
+    cape_weight : (ncol,)  CAPE trigger in [0, 1] (the ``LDCUM`` analog).
+
+    Returns
+    -------
+    M_b_target : (ncol,)  deep-closure cloud-base mass flux [kg/m^2/s],
+        BEFORE the ``M_b_max`` cap (the caller caps after the rescale).
+    """
+    # ZCAPE: plume buoyancy + condensate loading, weighted by the oracle's
+    # FULL-LEVEL pressure spacing ZDZ = PAP(k)-PAP(k-1) (cumastrn.F90:728) and
+    # restricted to levels 1..nlev-1 exactly like ZHEAT (both need k-1; the
+    # model-top level is excluded from BOTH sums, matching the oracle loop).
+    dp_lev = p_full[:, 1:] - p_full[:, :-1]
+    buoy = (
+        (T_u[:, 1:] - T[:, 1:]) / jnp.maximum(T[:, 1:], 1.0)
+        + _IFS_RETV * (q_u[:, 1:] - q_v[:, 1:])
+        - q_c_u[:, 1:]
+    )
+    zcape = jnp.sum(in_cloud[:, 1:] * buoy * dp_lev, axis=-1)
+    zcape = jnp.clip(zcape, 0.0, _IFS_ZCAPE_MAX_PA)
+
+    # ZHEAT: environment stability consumption per unit overturning.
+    # Neighbor differences k-1 (above) minus k, aligned to levels 1..nlev-1.
+    dT_up = T[:, :-1] - T[:, 1:]
+    dphi_up = constants.g * (z[:, :-1] - z[:, 1:])
+    dq_up = q_v[:, :-1] - q_v[:, 1:]
+    stab = jnp.maximum(
+        0.0,
+        (dT_up + dphi_up / constants.c_pd) / jnp.maximum(T[:, 1:], 1.0)
+        + _IFS_RETV * dq_up,
+    )
+    m_net = constants.g * (M_u_fg[:, 1:] + M_d_fg[:, 1:])
+    zheat = jnp.sum(in_cloud[:, 1:] * stab * m_net, axis=-1)
+    zheat = jnp.maximum(zheat, _IFS_ZHEAT_FLOOR)
+
+    # ``cape_weight`` multiplies the target as the smooth ``LDCUM`` membership
+    # (IFS runs this closure ONLY where the trigger fired; our trigger is a
+    # sigmoid, not a bool).  Above the ZHEAT floor the (M_b_fg, M_u_fg) pair
+    # cancels, so without this factor a HALF-triggered column would receive
+    # the full shape-only target while its realized updraft is capped at
+    # cape_weight**2 * M_b_max downstream — the closure M_b (which also
+    # drives the downdraft branches) would then disagree with the applied
+    # transport across the whole trigger-transition band (codex R3 #1).  A
+    # fully-triggered column (cape_weight = 1) is untouched.
+    M_b_target = cape_weight * zcape * M_b_fg / (zheat * tau_conv)
+    # Deep floor, quiescence-gated (see docstring).
+    return jnp.maximum(M_b_target, _IFS_MB_DEEP_FLOOR * cape_weight**2)
+
+
+def _ifs_deep_target_scale(
+    M_b_target: jax.Array,
+    M_b_capped: jax.Array,
+    deep_weight: jax.Array,
+    M_b_max: float,
+    divisor_floor: float = 0.0,
+) -> jax.Array:
+    """Deep-only rescale factor sending ``M_b_capped`` to ``min(M_b_target, M_b_max)``.
+
+    Shared cap-after-rescale + deep-weighted-blend kernel (cumastrn.F90:828-831
+    applies ``MIN(ZMFUB1, ZMFMAX)`` AFTER diagnosing the closure target, and
+    only for the deep ``KTYPE == 1`` class): for the deep class the returned
+    factor turns ``M_b_capped`` into the capped target; for shallow/mid
+    (``deep_weight -> 0``) it is exactly 1.  The quiescent ``M_b_capped -> 0``
+    edge takes a constant-0 branch with divisor 1, so reverse-mode AD never
+    forms ``1 / M_b_capped**2``.
+    """
+    M_b_target_capped = jnp.minimum(M_b_target, M_b_max)
+    # ``divisor_floor`` (safety floor, not a tunable): the CAPE-closure target
+    # is NOT proportional to M_b_capped (its deep floor is trigger-gated, not
+    # flux-gated), so a subnormal-but-positive M_b_capped would otherwise
+    # overflow the ratio to inf in fp32 — and ``deep_weight * inf`` is NaN for
+    # the non-deep classes (codex R1 #4).  With the floor the factor is
+    # bounded by M_b_max/divisor_floor (finite in fp32) and a sub-floor flux
+    # column under-realizes the target toward 0 — physically quiescent anyway.
+    # The TURNOVER wrapper passes the 0.0 default (no-op floor): its target IS
+    # proportional to M_b (ratio bounded by tau_correction), and flooring
+    # there would perturb the legacy default-on path vs main (codex R2 #2).
+    divisor = jnp.where(
+        M_b_capped > 0.0,
+        jnp.maximum(M_b_capped, divisor_floor),
+        jnp.ones_like(M_b_capped),
+    )
+    scale_deep = jnp.where(
+        M_b_capped > 0.0, M_b_target_capped / divisor, jnp.zeros_like(M_b_capped),
+    )
+    return deep_weight * scale_deep + (1.0 - deep_weight)
+
+
+def _ifs_cape_closure_scale(
+    M_b_target: jax.Array,
+    M_b_true: jax.Array,
+    M_b_launch: jax.Array,
+    deep_weight: jax.Array,
+    M_b_max: float,
+) -> jax.Array:
+    """Blend factor sending ``M_b_launch`` to ``d*min(target, max) + (1-d)*M_b_true``.
+
+    The deep share realizes the capped closure target; the non-deep share must
+    ride on the TRUE first-guess ``M_b_true``, NOT the floored ``M_b_launch``
+    (codex R7): with a hard-zero ``M_b_true`` and partial ``deep_weight = d``,
+    blending SCALES around the launch flux lets the restart floor bleed into
+    the ``(1-d)`` share — the realized flux came out ``floor*d*(2-d)`` instead
+    of the convex ``floor*d`` (a 50% excess at ``d = 0.5``).  Blending the
+    FLUXES keeps the restart convex; whenever the launch floor is inactive
+    (``M_b_true == M_b_launch``, the generic case) this reduces EXACTLY to the
+    ``_ifs_deep_target_scale`` blend.  Same guarded-division AD safety.
+    """
+    s_deep = _ifs_deep_target_scale(
+        M_b_target, M_b_launch, jnp.ones_like(deep_weight), M_b_max,
+        divisor_floor=1e-20,
+    )
+    launch_div = jnp.where(
+        M_b_launch > 0.0, jnp.maximum(M_b_launch, 1e-20),
+        jnp.ones_like(M_b_launch),
+    )
+    s_base = jnp.where(
+        M_b_launch > 0.0, M_b_true / launch_div, jnp.zeros_like(M_b_launch),
+    )
+    return deep_weight * s_deep + (1.0 - deep_weight) * s_base
+
+
+def _ifs_profile_scale_limit(
+    mb_scale: jax.Array,
+    M_u_profile: jax.Array,
+    M_b_max: float,
+) -> jax.Array:
+    """Column-uniform ZMFS cap limiter (cumastrn.F90:913-932).
+
+    IFS applies ONE closure scale ``ZMFS = ZMFUB1/ZMFUB`` to the whole column
+    and then REDUCES it — ``ZMFS = MIN(ZMFS, ZMFMAX/PMFU)`` per level — until
+    no level of the scaled profile exceeds its mass-flux cap, keeping a single
+    profile-shape-preserving factor.  Without this, an ``mb_scale > 1`` on a
+    profile already touching ``M_b_max`` is silently truncated by the
+    downstream per-level clips, so ZHEAT anticipates ``s * M_b_max`` transport
+    while the kernel realizes only ``M_b_max`` — under-removing CAPE exactly
+    in the common saturated-profile case (codex R10).  Levels here share one
+    constant cap, so the per-level MIN collapses to the profile peak.  The
+    ``1e-20`` guard keeps a dead (all-zero) profile a no-op (limit -> huge,
+    MIN inert); AD-safe (min/max are piecewise-smooth, guarded division).
+    """
+    peak = jnp.max(M_u_profile, axis=-1)
+    s_limit = M_b_max / jnp.maximum(peak, 1e-20)
+    return jnp.minimum(mb_scale, s_limit)
+
+
 def _ifs_deep_turnover_scale(
     M_b_uncapped: jax.Array,
     M_b_capped: jax.Array,
@@ -519,12 +755,9 @@ def _ifs_deep_turnover_scale(
     implicit-Euler relaxation (the returned ``M_u_new`` is therefore NOT ∝ M_b when
     a nonzero prior carry is present; the rescale is applied upstream of that).
     """
-    M_b_target = jnp.minimum(M_b_uncapped * tau_correction, M_b_max)
-    divisor = jnp.where(M_b_capped > 0.0, M_b_capped, jnp.ones_like(M_b_capped))
-    scale_deep = jnp.where(
-        M_b_capped > 0.0, M_b_target / divisor, jnp.zeros_like(M_b_capped),
+    return _ifs_deep_target_scale(
+        M_b_uncapped * tau_correction, M_b_capped, deep_weight, M_b_max,
     )
-    return deep_weight * scale_deep + (1.0 - deep_weight)
 
 
 def _ifs_cloud_base_qsat(
@@ -828,6 +1061,35 @@ def bechtold_convection(
     M_b_uncapped = M_b_deterministic * jnp.maximum(stoch_factor, 0.0)
     # See ZhangMcFarlaneConfig.M_b_max.
     M_b = jnp.clip(M_b_uncapped, 0.0, config.M_b_max)
+    if config.use_ifs_cape_closure:
+        # IFS floors the triggered deep cloud-base flux at 0.001 kg/m^2/s
+        # (ZMFUB1 = MAX(..., 0.001), cumastrn.F90:829).  The closure below is a
+        # RESCALE of the first-guess plume, so a hard-zero M_b (e.g. the AR1
+        # stochastic factor clipping to 0) could never be resurrected by the
+        # target floor alone — a scale of zero is zero (codex R5).  Launch the
+        # plume from a FLOORED flux (gated by the same smooth memberships the
+        # closure floor uses) so a shape exists to rescale — but keep the TRUE
+        # (possibly zero) M_b as the closure's ZMFUB: in the oracle a zero
+        # first guess zeroes the formula NUMERATOR while the ZHEAT floor holds
+        # the denominator, so ZMFUB1 = MAX(0, 0.001) restarts at EXACTLY the
+        # floor, not at the full shape-only closure target (codex R6 — feeding
+        # the floored flux to both sides resurrected the numerator and let the
+        # cancellation promote the restart to the target/cap).  The launch
+        # substitution applies ONLY at exact zero (codex R8): a small-but-
+        # POSITIVE first guess must launch with M_b itself so (ZMFUB, PMFU)
+        # stay the same first guess and the cancellation yields the full
+        # shape-only target, as in the oracle — maximum-flooring all small
+        # values halved the target at M_b = floor/2.  (An exact-zero flux is
+        # what the AR1 clip produces; a sub-1e-20 positive flux instead
+        # under-realizes toward 0 via the guarded divisor — physically
+        # quiescent either way.)  Feature-gated so the legacy paths stay
+        # byte-identical.
+        M_b_launch = jnp.where(
+            M_b > 0.0, M_b,
+            _IFS_MB_DEEP_FLOOR * cape_weight**2 * deep_weight,
+        )
+    else:
+        M_b_launch = M_b
 
     # -- Per-class entrainment / detrainment profiles (IFS Cy49r1) ---------
     # Uses the nominal IFS bulk-plume RH/height factors (Part IV, Ch. 6;
@@ -934,7 +1196,7 @@ def bechtold_convection(
     plume = entraining_detraining_plume(
         T, q_v, p_full, p_half, z,
         T_parcel, q_parcel, k_lcl_smooth,
-        eps_profile, dlt_profile, M_b,
+        eps_profile, dlt_profile, M_b_launch,
         buoyancy_death_memory=config.buoyancy_death_memory,
     )
 
@@ -971,7 +1233,7 @@ def bechtold_convection(
     # flux exceeds the cap when ``r < 1``.  We therefore build the deep target from
     # ``M_b_uncapped`` and cap once, then express the change as a scale on the
     # plume's pre-cap ``M_u`` (``M_u ∝ M_b`` exactly).
-    if config.use_convective_turnover_tau:
+    if config.use_ifs_cape_closure or config.use_convective_turnover_tau:
         # SHARP (4/level) cloud-base and cloud-top gates so the KE mean is taken
         # over an essentially exclusive [LNB, LCL] cloud window; a broad
         # unit-sharpness sigmoid leaked sub-cloud / above-top KE into w_mean
@@ -987,6 +1249,85 @@ def bechtold_convection(
         tau_conv = jnp.clip(
             cloud_depth / (2.0 + w_mean), _IFS_TAU_MIN, _IFS_TAU_MAX,
         )
+    if config.use_ifs_cape_closure:
+        # -- Full IFS deep CAPE closure ZMFUB1 = ZCAPE*ZMFUB/(ZHEAT*ZXTAU)
+        # (cumastrn.F90:704-833; see _ifs_cape_closure_target).  Supersedes the
+        # tau-only turnover rescale below (the turnover time is one FACTOR of
+        # this closure); deep-weighted + cap-after-rescale exactly like it.
+        # ZHEAT downdraft first guess: IFS includes PMFD from the LFS-initiated
+        # cuddrafn descent (cudlfsn.F90/cuddrafn.F90).  This scheme's downdraft
+        # branch applies NO mass-flux transport of environment air (it drives
+        # rain re-evaporation only), so the self-consistent PMFD analog here is
+        # ZERO — an invented -alpha*M_u*trigger profile would put stabilization
+        # into ZHEAT that the scheme never applies (codex R1 #3).  Omitting the
+        # (negative) PMFD makes ZHEAT at most ~RMFDEPS = 30% larger, i.e. the
+        # closure at most ~30% WEAKER than IFS on downdraft-active columns — a
+        # documented gap until a faithful cuddrafn-shaped descent exists (the
+        # opt-in penetrative transport's m_d profile is the natural donor).
+        M_d_fg = jnp.zeros_like(plume.M_u)
+        # ZMFUB and PMFU describe the SAME first guess (codex R2 #1): the
+        # plume was integrated from the CAPPED M_b_launch, and IFS itself
+        # builds the deep first-guess ZMFUB at/below ZMFMAX before the closure
+        # (cumastrn.F90:544-563: 0.1*ZMFMAX or MIN(ZDHPBL/ZDH, ZMFMAX)).
+        # Passing the uncapped flux would inflate the target by
+        # M_b_uncapped/M_b whenever the cap is active (ZHEAT ∝ the capped
+        # plume).  Above the ZHEAT floor the pair cancels, so the target is
+        # shape-only either way — the pairing matters exactly when the cap or
+        # floor is active.  Cap-after-rescale is preserved by the final
+        # min(target, M_b_max) inside _ifs_deep_target_scale.
+        # ONE deliberate asymmetry (codex R6): the numerator ZMFUB is the TRUE
+        # M_b, not the floored M_b_launch the plume integrated — so a
+        # hard-zero first guess zeroes the numerator and the target lands
+        # exactly on the MAX(., 0.001) restart floor, as in the oracle (where
+        # ZHEAT's own floor holds the denominator).  Whenever M_b >= the
+        # launch floor the two are identical and the pair is exactly
+        # consistent.
+        # ZHEAT must measure the flux the kernel ACTUALLY applies (codex R3 #2,
+        # R4 #1/#2): the realized transport is (a) gated TWICE at p_conv_top_pa
+        # — once on the carry, once inside apply_mass_flux_kernel — so the
+        # first-guess profile carries the SQUARED gate, and (b) clipped per
+        # level at M_b_max by the kernel (M_u_max), mirrored here with the same
+        # min.  IFS's own first-guess ascent is per-level ZMFMAX-limited
+        # (cuascn.F90 ZMFMAX redistribution), so the mirror is also
+        # oracle-shaped.  Residual: the carry's cape_weight**2 * M_b_max clip
+        # is NOT mirrored (a trigger-transition-band effect already faded by
+        # the cape_weight factor on the target).  ZCAPE keeps the ungated
+        # in_cloud window: it measures the instability that EXISTS (the oracle
+        # integrates the real cloud extent), not the transport.
+        _top_gate = stratosphere_mass_flux_gate(p_full, config.p_conv_top_pa)
+        M_u_capped_fg = jnp.minimum(plume.M_u, config.M_b_max)
+        M_u_closure_fg = M_u_capped_fg * _top_gate**2
+        M_b_target = _ifs_cape_closure_target(
+            T, q_v, z, p_full,
+            plume.T_u, plume.q_u, plume.q_c_u, M_u_closure_fg, M_d_fg,
+            in_cloud, tau_conv, M_b, cape_weight,
+        )
+        # The rescale divides by the flux the plume was ACTUALLY launched with
+        # (M_b_launch), so M_u * mb_scale realizes the target profile; the
+        # downstream M_b (driving the downdraft branches) is the same product.
+        # The non-deep blend share rides on the TRUE M_b (see
+        # _ifs_cape_closure_scale — codex R7).
+        mb_scale = _ifs_cape_closure_scale(
+            M_b_target, M_b, M_b_launch, deep_weight, config.M_b_max,
+        )
+        # Column-uniform ZMFS limiter (cumastrn.F90:913-932; codex R10): shrink
+        # the ONE closure scale until no level of the capped profile exceeds
+        # M_b_max, so an s > 1 request is realized exactly (never silently
+        # truncated by the downstream per-level clips ZHEAT knows nothing of).
+        mb_scale = _ifs_profile_scale_limit(
+            mb_scale, M_u_capped_fg, config.M_b_max,
+        )
+        M_b = M_b_launch * mb_scale
+        # Rescale the SAME per-level-capped profile ZHEAT diagnosed (codex R9:
+        # cap and rescale do not commute — rescaling the RAW plume lets a
+        # level pinned at M_b_max ignore a requested reduction s < 1, because
+        # min(s*A, M_b_max) stays at the cap for A >> M_b_max while ZHEAT
+        # assumed s*M_b_max).  The downstream carry/kernel top gates then act
+        # on this exactly as ZHEAT's gate**2 assumed.  The raw-profile rescale
+        # remains the legacy turnover path's behavior below (pre-existing,
+        # feature-gated apart).
+        plume = plume._replace(M_u=M_u_capped_fg * mb_scale[:, None])
+    elif config.use_convective_turnover_tau:
         tau_correction = config.tau_bl / tau_conv          # M_b is proportional to 1/tau
         # Deep-only, cap-after-rescale scale on the pre-cap M_b (and M_u ∝ M_b).
         mb_scale = _ifs_deep_turnover_scale(

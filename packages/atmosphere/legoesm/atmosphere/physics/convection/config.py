@@ -1439,6 +1439,20 @@ class BechtoldConfig(NamedTuple):
     # timescale (used when False and as the numerator of the tau_bl/tau_conv
     # rescale).  Static Python bool feature-gate in bechtold.py (not a traced leaf).
     use_convective_turnover_tau: bool = True
+    # Full IFS deep CAPE closure ``ZMFUB1 = ZCAPE*ZMFUB/(ZHEAT*ZXTAU)``
+    # (cumastrn.F90:704-833; see bechtold._ifs_cape_closure_target): the deep
+    # cloud-base mass flux is the one that consumes the plume-diagnosed CAPE
+    # (ZCAPE, incl. condensate loading) over the convective-turnover time
+    # (ZXTAU, the same F1 machinery above) at the column's per-unit-mass-flux
+    # stabilization rate (ZHEAT).  Supersedes the tau-only turnover rescale
+    # when True (the turnover time is one factor of this closure); False keeps
+    # the F1 behavior.  Deep-weighted, cap-after-rescale, quiescence-gated
+    # floor — same smoothing doctrine as F1.  The RCAPQADV advection
+    # correction, RCAPDCYCL diurnal subtraction and CFL-form ZMFMAX are
+    # documented gaps (unplumbed inputs).  Default False pending the
+    # equilibrium-SCM-RCE realism gate (CLAUDE.md: atmospheric
+    # parameterization edits are high-risk); flip after validation.
+    use_ifs_cape_closure: bool = False
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0
