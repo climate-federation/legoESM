@@ -7,9 +7,8 @@ ocean "most" dispatch added to SimpleOcean._ocean_turbulent_fluxes."""
 from __future__ import annotations
 
 import importlib.util
-from pathlib import Path
-
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -436,17 +435,17 @@ def test_main_really_passes_the_cli_ice_config_to_the_driver(monkeypatch):
 
     captured = {}
 
-    class _Stop(Exception):
+    class _StopError(Exception):
         pass
 
     def _recorder(*a, **kw):
         captured.update(kw)
-        raise _Stop
+        raise _StopError
 
     monkeypatch.setattr(ced, "CoupledESMDriver", _recorder)
     monkeypatch.setattr(sys, "argv", ["run_coupled", "--ice-snow", "--days", "0"])
 
-    with pytest.raises(_Stop):
+    with pytest.raises(_StopError):
         mod.main()
 
     ice = captured.get("ice_config")
@@ -470,12 +469,12 @@ def test_main_ice_config_survives_the_params_rebinding(monkeypatch):
 
     captured = {}
 
-    class _Stop(Exception):
+    class _StopError(Exception):
         pass
 
     def _recorder(*a, **kw):
         captured.update(kw)
-        raise _Stop
+        raise _StopError
 
     monkeypatch.setattr(ced, "CoupledESMDriver", _recorder)
     pf = Path(tempfile.mkdtemp()) / "params.json"
@@ -483,7 +482,7 @@ def test_main_ice_config_survives_the_params_rebinding(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run_coupled", "--ice-snow",
                                       "--params", str(pf), "--days", "0"])
 
-    with pytest.raises(_Stop):
+    with pytest.raises(_StopError):
         mod.main()
 
     ice = captured["ice_config"]
