@@ -199,6 +199,7 @@ def test_bechtold_implicit_mse_conservation_within_tolerance():
                 enable_stochastic=False, enable_cmt=False, subsidence_solve=ss,
                 use_ifs_cape_closure=use_ifs_cape_closure,
                 use_ifs_subcloud_evap=False,
+                use_ifs_inplume_precip=False,
             ),
             moisture_convergence=jnp.zeros_like(T),
         )

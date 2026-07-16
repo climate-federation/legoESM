@@ -2608,10 +2608,10 @@ def _resolve_convection(config):
             # the scheme default since the 2026-07-16 flip).
             use_ifs_subcloud_evap=getattr(
                 config, 'bechtold_use_ifs_subcloud_evap', True),
-            # IFS in-updraft precipitation formation (default False = legacy,
-            # matching the scheme default).
+            # IFS in-updraft precipitation formation (fallback True = the
+            # scheme default since the 2026-07-16 flip).
             use_ifs_inplume_precip=getattr(
-                config, 'bechtold_use_ifs_inplume_precip', False),
+                config, 'bechtold_use_ifs_inplume_precip', True),
         )
         if _pe is not None:
             _bechtold_kwargs["precip_efficiency"] = _pe
