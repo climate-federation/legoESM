@@ -78,6 +78,9 @@ Every row reached Codex `APPROVE`. Oracle clones (IFS `ifs-source/`, gSAM
 | FvCB C3/C4 photosynthesis (`land/canopy/photosynthesis.py`) | Farquhar-von Caemmerer-Berry (1980) + Collatz C4 / Bernacchi | Audit | #1057 |
 | Canopy shortwave two-stream RT (`land/canopy/radiative_transfer.py`) | Sellers (1985) + de Pury & Farquhar sunlit/shaded + Erbs beam split | Audit | #1058 |
 | Ball-Berry / Medlyn stomata (`land/stomata.py`) | Ball et al. (1987) + Medlyn et al. (2011) | Audit | #1059 |
+| Canopy MOST surface layer (`land/canopy/stability.py`) | CLM5 `FrictionVelocityMod.F90` (Businger-Dyer 4-regime ψ) | Audit — exact CLM5 ψ_m/ψ_h forms pinned; kB⁻¹=0 + bulk-Ri driver documented as departures | #1063 |
+| Cosby pedotransfer (`land/pedotransfer.py`) | Cosby et al. (1984) / gSAM SLM `slm_vars.f90` | Audit — 4 Clapp-Hornberger regressions pinned; ψ_sat uncap + K_sat prefactor departures | #1065 |
+| SIMTOP TOPMODEL runoff (`land/topmodel_runoff.py`) | Niu et al. (2005) SIMTOP / CLM4.5 §7 | Audit — forms + water-budget conservation pinned; factor-2 f_over decay + frozen-soil omission documented as CLM departures | #1066 |
 
 ## Sea ice
 
@@ -85,13 +88,17 @@ Every row reached Codex `APPROVE`. Oracle clones (IFS `ifs-source/`, gSAM
 |---|---|---|---|
 | VP/EVP/mEVP rheology (`ice/rheology.py`) | Hibler (1979) + Hunke & Dukowicz (1997) EVP + Bouillon (2013) mEVP | Audit | #1060 |
 | Snow conduction + flooding (`ice/snow.py`) | Semtner (1976) / Maykut-Untersteiner (1971) + Leppäranta (1983) / Notz (2002) | Audit | #1061 |
+| Lipscomb ridging (`ice/ridging.py`) | Lipscomb et al. (2007) eq. 22 | Audit — participation form + ITD-redistribution conservation invariants pinned | #1064 |
+| Lipscomb ITD remap (`ice/itd.py`) | Lipscomb (2001) eqs. 14-15 | Behavioral — mean→bin-centre g(h) anchor fix (removes negative g in the central third); cutoff-support outer-third deferred (would lose mass on degenerate displaced bins) | #1067 |
 
 ## In progress / next
 
 | Target (module) | Most-trustful oracle | Notes |
 |---|---|---|
-| MOST surface layer (`land/canopy/stability.py`) | gSAM SLM `transfer_coef.f90` (on-disk, Businger-Dyer 4-regime) | CLM5 4-regime MOST; ψ forms match the Fortran oracle, iteration driver differs (CLM5 buoyancy-flux fixed-point vs bulk-Ri). Next in queue. |
-| Ice ridging participation (`ice/ridging.py`) | Lipscomb (2007) eq. 22 | Pin the clean public participation form only; the stateful ITD redistribution is out of scope. |
+| Canopy SIF (`land/canopy/sif.py`) | van der Tol et al. (2014) SCOPE fluorescence | Check prior SIF work (PRs #845/#851) before re-pinning. |
+| RRTMGP gas/cloud optics (`radiation/rrtmgp/…`) | RTE-RRTMGP reference optics | Correlated-k lookup; the two-stream solver is already pinned (#1048). |
+| CLM5 snow compaction (`land/…snow…`) | Anderson (1976) / CLM4.5-5 destructive + overburden metamorphism | Published compaction/aging rates. |
+| Exact Lipscomb cutoff-support (`ice/itd.py`) | Lipscomb (2001) eqs. 14-15 | Follow-up from #1067: outer-third triangle + robust delta/two-point fallback for degenerate displaced bins. |
 
 ## Notes
 
