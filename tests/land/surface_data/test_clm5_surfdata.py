@@ -18,6 +18,7 @@ def _synthetic_clm(nlat=3, nlon=4):
     pct_cft = np.zeros((cft, nlat, nlon)); pct_cft[0, 0, 0] = 100.0
     natveg = np.zeros((nlat, nlon)); natveg[0, 0] = 80.0
     crop = np.zeros((nlat, nlon)); crop[0, 0] = 20.0
+    landfrac = np.zeros((nlat, nlon)); landfrac[0, 0] = 1.0    # cell (0,0) fully land
     lai = np.zeros((12, 17, nlat, nlon)); lai[:, be_trop, 0, 0] = 5.0
     latixy = np.broadcast_to(np.linspace(-60, 60, nlat)[:, None], (nlat, nlon)).copy()
     longxy = np.broadcast_to(np.linspace(0, 270, nlon)[None, :], (nlat, nlon)).copy()
@@ -30,6 +31,7 @@ def _synthetic_clm(nlat=3, nlon=4):
             "PCT_CROP": (("lsmlat", "lsmlon"), crop),
             "PCT_LAKE": (("lsmlat", "lsmlon"), np.zeros((nlat, nlon))),
             "PCT_GLACIER": (("lsmlat", "lsmlon"), np.zeros((nlat, nlon))),
+            "LANDFRAC_PFT": (("lsmlat", "lsmlon"), landfrac),
             "SOIL_COLOR": (("lsmlat", "lsmlon"), np.ones((nlat, nlon))),
             "MONTHLY_LAI": (("time", "lsmpft", "lsmlat", "lsmlon"), lai),
             "MONTHLY_SAI": (("time", "lsmpft", "lsmlat", "lsmlon"), z()),
@@ -56,6 +58,65 @@ def test_clm5_reader_landunit_reconstruction():
     # sum of 17-PFT % equals f_land (= natveg + crop)
     np.testing.assert_allclose(d["pft_frac"].sum(axis=0), d["f_land"])
     np.testing.assert_allclose(d["f_land"][0, 0], 100.0)
+
+
+def _clm_with_ocean_coast(nlat=1, nlon=3):
+    """CLM cells (all 100% natveg, sum-to-100 landunits) differing only in LANDFRAC:
+    [0]=land (LF 1.0), [1]=coastal (LF 0.2), [2]=ocean (LF 0.0). Exercises the gate:
+    the raw landunit % (natveg=100) is identical, so only LANDFRAC distinguishes them."""
+    xr = pytest.importorskip("xarray")
+    be = CLM5_PFT_NAMES.index("broadleaf_evergreen_tropical")
+    pct_nat_pft = np.zeros((15, nlat, nlon)); pct_nat_pft[be] = 100.0   # 100% BE-trop everywhere
+    pct_cft = np.zeros((2, nlat, nlon))
+    natveg = np.full((nlat, nlon), 100.0)                              # 100% of LAND is natveg
+    crop = np.zeros((nlat, nlon))
+    landfrac = np.array([[1.0, 0.2, 0.0]])                             # land / coast / ocean
+    z = lambda: np.zeros((12, 17, nlat, nlon))
+    latixy = np.zeros((nlat, nlon))
+    longxy = np.broadcast_to(np.linspace(0, 240, nlon)[None, :], (nlat, nlon)).copy()
+    return xr.Dataset({
+        "PCT_NAT_PFT": (("natpft", "lsmlat", "lsmlon"), pct_nat_pft),
+        "PCT_CFT": (("cft", "lsmlat", "lsmlon"), pct_cft),
+        "PCT_NATVEG": (("lsmlat", "lsmlon"), natveg),
+        "PCT_CROP": (("lsmlat", "lsmlon"), crop),
+        "PCT_LAKE": (("lsmlat", "lsmlon"), np.zeros((nlat, nlon))),
+        "PCT_GLACIER": (("lsmlat", "lsmlon"), np.zeros((nlat, nlon))),
+        "LANDFRAC_PFT": (("lsmlat", "lsmlon"), landfrac),
+        "SOIL_COLOR": (("lsmlat", "lsmlon"), np.ones((nlat, nlon))),
+        "MONTHLY_LAI": (("time", "lsmpft", "lsmlat", "lsmlon"), z()),
+        "MONTHLY_SAI": (("time", "lsmpft", "lsmlat", "lsmlon"), z()),
+        "MONTHLY_HEIGHT_TOP": (("time", "lsmpft", "lsmlat", "lsmlon"), z()),
+        "MONTHLY_HEIGHT_BOT": (("time", "lsmpft", "lsmlat", "lsmlon"), z()),
+        "LATIXY": (("lsmlat", "lsmlon"), latixy),
+        "LONGXY": (("lsmlat", "lsmlon"), longxy),
+    })
+
+
+def test_clm5_reader_gates_cover_on_landfrac():
+    """f_land / f_lake / f_glacier and pft_frac must be gated by LANDFRAC_PFT so the
+    percent-of-LAND landunit values become percent-of-GRIDCELL. Ocean/coastal cells
+    carry the SAME raw natveg=100 as land; without the gate they'd all read 100% land."""
+    d = read_clm5_cover_veg(dataset=_clm_with_ocean_coast())
+    # land: 100*1.0=100 | coast: 100*0.2=20 | ocean: 100*0.0=0  (NOT 100/100/100)
+    np.testing.assert_allclose(d["f_land"][0], [100.0, 20.0, 0.0])
+    # invariant preserved: pft_frac (also gated) still sums to f_land
+    np.testing.assert_allclose(d["pft_frac"].sum(axis=0)[0], [100.0, 20.0, 0.0])
+    # ocean cell has zero land -> zero PFT cover
+    np.testing.assert_allclose(d["pft_frac"][:, 0, 2], 0.0)
+
+
+def test_assert_cover_within_landfrac_tripwire():
+    """The tripwire fires on UN-gated (percent-of-land) cover -- proves it is not
+    vacuous: a coastal cell with f_land=100 but LANDFRAC=0.2 must raise."""
+    from legoesm.land.surface_data.sources.clm5_surfdata import (
+        assert_cover_within_landfrac)
+    z = np.zeros((1, 3))
+    landfrac = np.array([[1.0, 0.2, 0.0]])
+    gated = np.array([[100.0, 20.0, 0.0]])       # correctly gated -> passes
+    assert_cover_within_landfrac(gated, z, z, landfrac)
+    ungated = np.array([[100.0, 100.0, 100.0]])  # un-gated: land in coast/ocean cells
+    with pytest.raises(ValueError, match="exceeds land fraction"):
+        assert_cover_within_landfrac(ungated, z, z, landfrac)
 
 
 def test_clm5_reader_pft_axis_matches_surface_params():
