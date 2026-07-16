@@ -33,6 +33,35 @@ future enhancement.
 
 All functions are JAX-compatible (differentiable, JIT-friendly).
 
+Faithfulness
+------------
+The stomatal-conductance kernels and the coupled A-gs-Ci closure are pinned by
+``tests/land/unit/test_stomata_faithful.py`` against an independent scalar
+oracle (rel 1e-9):
+
+  * Ball-Berry (Ball, Woodrow & Berry 1987):
+    gs = max(g0 + m A_h RH / Cs, g0), the empirical humidity-and-assimilation
+    form with A_h = max(A, 0) and Cs floored to 1.
+  * Medlyn USO (Medlyn et al. 2011):
+    gs = max(g0 + 1.6 (1 + g1 / sqrt(D)) A_h / Cs, g0), the optimization-derived
+    form; the 1.6 is the H2O:CO2 leaf-diffusion ratio (single-source
+    ``DIFFUSIVITY_RATIO_H2O_CO2``), g1 [kPa^0.5], D the VPD floored to guard
+    1/sqrt(D).  Distinct MODEL from Ball-Berry (1/sqrt(D) vs RH; A/Cs vs A/Cs).
+  * Coupled closure (``solve_coupled_farquhar_ci``): the returned (Ci, A, gs) is
+    verified to be a fixed point of the A-gs-Ci map — gs is exactly the kernel of
+    the returned A, and Fick's stomatal-diffusion law Ci = Ca - 1.6 A_h / gs
+    holds to the iteration residual (driven to 0 in float64).  The FvCB rate
+    A(Ci) itself is TAKEN AS GIVEN (pinned by
+    test_canopy_photosynthesis_faithful.py), not re-verified by this suite.
+
+The Ball-Berry / Medlyn scheme coefficients and the 1.6 diffusivity ratio are
+transcribed as independent oracle literals and canaried against the module
+constants (module == literal == value); the FvCB biochemistry is NOT re-pinned
+here (it is covered by test_canopy_photosynthesis_faithful.py).  DEPARTURES /
+guards (documented, reproduced by the oracle): the max(A, 0) floor, the
+max(Cs, 1) / max(VPD, 0.05) denominators, the gs floor at g0, and the
+Ci clip to [1, Ca].
+
 References
 ----------
 - Farquhar, G. D., von Caemmerer, S. & Berry, J. A. (1980): A biochemical
