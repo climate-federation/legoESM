@@ -14,6 +14,11 @@ aimip_weight_decay: 1.0e-05
 aimip_grad_clip: 1.0
 aimip_optimizer: adamw
 aimip_radiation: rrtmgp
+# G-point vmap block size (pre-adopted from PR #1098 pending its merge): 8
+# bounds RRTMGP's backward pass to 8 g-points/block at T106's ~4x-T63 column
+# count (the global default 16 risks A100-80 OOM; the per-g-point
+# prevent_cse path was the ~9 h classical compile). Drop to 4 on <80 GB.
+aimip_rrtmgp_gpoint_batch_size: 8
 aimip_rad_update_interval: 6
 aimip_convection: edmf
 aimip_turbulence: louis

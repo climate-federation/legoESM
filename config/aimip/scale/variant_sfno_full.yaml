@@ -1,0 +1,47 @@
+# AIMIP variant: SFNO as the FULL atmospheric emulator (no dycore, no
+# physics tendency) — `train_sfno_full_spectral` steps
+# `SFNOPrimitiveEquationModel.step(state, dt_sfno)` at every macro step.
+# Scale-tier port of config/aimip/t106_headtohead/variant_sfno_full.yaml
+# onto the all-years base (train_windows / curriculum / forcing inherited).
+#
+# Operational envelope (differs from the chunked variants):
+#   * NO data-parallel (train_sfno_full_spectral rejects DP, #985 codex r4)
+#     -> submit SINGLE-GPU: plain `qsub -v VARIANT=sfno_full,...` with the
+#     default 1-GPU #PBS select — do NOT reuse the 4-GPU DP select line.
+#   * NO chunking / mid-epoch checkpoint: all 1152 pairs load once up front
+#     (~one 30-min GCS read per LINK, not per epoch) and the chain advances
+#     on epoch_*.eqx only. Epochs are cheap (6 h macro steps: a 72 h lead is
+#     12 SFNO steps, not 648 dycore steps), so links hold many epochs.
+#   * aimip_radiation is N/A here (nothing runs radiation in a pure
+#     emulator); the base rrtmgp setting is inert for this variant.
+
+aimip_variant: "sfno_full"
+
+# Scheme literals irrelevant (no physics runs); kept explicit per the
+# variant-overlay diffability rule.
+convection: "none"
+turbulence: "none"
+gravity_wave_drag: "none"
+cloud_scheme: "none"
+microphysics: "none"
+radiation: "none"
+physics_parameterization: "none"
+
+# SFNO architecture: MATCHED to this campaign's sfno_physics sizing
+# (embed 64 / 4 blocks) so the full-emulator-vs-hybrid comparison is
+# capacity-controlled. (The t106_headtohead tier used 32/2; sfno_full has
+# no dycore rollout in the backward pass, so 64/4 is memory-safe here.)
+sfno_embed_dim: 64
+sfno_n_blocks: 4
+sfno_mlp_expansion: 4
+sfno_seed: 0
+
+# MUON partitioned optimizer — the headtohead-proven choice for sfno_full's
+# large SpectralConv weight matrices.
+aimip_optimizer: muon_partitioned
+
+# 6 h macro step (standard SFNO/FourCastNet cadence): base multi-step leads
+# (12/24/72 h) = segments of 2/4/12 SFNO steps. The base 120 h curriculum
+# phase (20 steps) carries none of the dycore-variant memory hazard, so no
+# 72 h cap here (unlike variant_sfno_physics).
+dt_sfno: 21600.0
