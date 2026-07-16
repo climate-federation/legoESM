@@ -192,3 +192,122 @@ def test_land_runoff_multilayer_ok_at_default():
 def test_land_runoff_cli_rejects_unknown():
     with pytest.raises(SystemExit):
         mod.build_parser().parse_args(["--land-runoff-scheme", "garbage"])
+
+
+# ===========================================================================
+# Sea ice: the whole component had NO cli surface
+# ===========================================================================
+
+def test_sea_ice_default_is_none_so_a_default_run_is_unchanged():
+    assert mod.build_sea_ice_config(mod.build_parser().parse_args([])) is None
+
+
+@pytest.mark.parametrize("flag,sub", [
+    ("--ice-snow", "snow"), ("--ice-brine", "brine"),
+    ("--ice-ridging", "ridging"), ("--ice-ponds", "ponds"),
+])
+def test_sea_ice_sub_models_are_selectable(flag, sub):
+    """Each sub-model is gated by a ``bool = False``.
+
+    Bools are NOT ``:float``-spec-eligible, so ``--params`` can never reach
+    them, and run_coupled built ``SeaIceConfig()`` with no arguments and had no
+    ``--ice*`` flag at all -- so snow, brine, RIDGING (oracle-pinned) and melt
+    ponds were every one of them impossible to switch on from any driver.
+    """
+    cfg = mod.build_sea_ice_config(mod.build_parser().parse_args([flag]))
+    assert getattr(cfg, sub).enabled is True
+
+
+def test_enabling_a_sub_model_preserves_its_other_tuned_fields():
+    """`_replace(enabled=True)` must not clobber the calibrated defaults."""
+    from legoesm.ice.config import SeaIceConfig
+
+    cfg = mod.build_sea_ice_config(mod.build_parser().parse_args(["--ice-ridging"]))
+    assert cfg.ridging._replace(enabled=False) == SeaIceConfig().ridging
+
+
+@pytest.mark.parametrize("flag,field,value", [
+    ("--ice-shortwave-scheme", "shortwave_scheme", "delta_eddington"),
+    ("--ice-itd-remap", "itd_remap", "lipscomb2001"),
+    ("--ice-bulk-scheme", "bulk_scheme", "most"),
+    ("--ice-stability-scheme", "stability_scheme", "grachev2007_sheba"),
+])
+def test_sea_ice_scheme_fields_are_selectable(flag, field, value):
+    """`str` fields -- also unreachable via --params (:float-only)."""
+    cfg = mod.build_sea_ice_config(mod.build_parser().parse_args([flag, value]))
+    assert getattr(cfg, field) == value
+
+
+@pytest.mark.parametrize("flag", [
+    "--ice-shortwave-scheme", "--ice-itd-remap", "--ice-bulk-scheme",
+    "--ice-stability-scheme",
+])
+def test_sea_ice_scheme_flags_reject_unknown(flag):
+    with pytest.raises(SystemExit):
+        mod.build_parser().parse_args([flag, "garbage_scheme"])
+
+
+def test_cli_sea_ice_config_survives_the_params_layer():
+    """THE load-bearing pin: assert what main() actually threads.
+
+    apply_coupled_params REBUILDS the bundle and returns its ice config, so a
+    CLI-built one had to be seeded INTO it -- otherwise --ice-ridging was
+    silently discarded the moment --params was also passed.
+
+    This also shows the gap precisely: ``ice.ridging.e_star`` was ALWAYS
+    tunable via --params, while ``ridging.enabled`` is a bool that --params can
+    never reach. You could tune ridging's coefficients but never turn ridging
+    on.
+    """
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.coupled_config import CoupledConfig
+
+    ice = mod.build_sea_ice_config(mod.build_parser().parse_args(["--ice-ridging"]))
+    p = Path(tempfile.mkdtemp()) / "params.json"
+    p.write_text(json.dumps({"ice.ridging.e_star": 0.5}))
+    out = mod.apply_coupled_params(str(p), "analytical", ExperimentConfig(),
+                                   CoupledConfig(), None, ice)
+    ice_out = out[3]
+    assert ice_out.ridging.enabled is True, "--ice-ridging lost to --params"
+    assert ice_out.ridging.e_star == 0.5, "--params did not apply"
+
+
+def test_main_actually_threads_the_cli_sea_ice_config():
+    """main() must BUILD the ice config from args, not pass None.
+
+    Every test above exercises build_sea_ice_config / apply_coupled_params.
+    Reverting main()'s `ice_config = build_sea_ice_config(args)` back to
+    `ice_config = None` leaves them ALL green -- the flags would parse, the
+    helpers would work, and the driver would still get None. That is exactly
+    how `--ddm` shipped inert (codex), so pin the call site itself.
+
+    AST rather than a full main() run: main() builds grids and a driver, which
+    a unit test cannot afford, but the wiring is a static fact.
+    """
+    import ast
+    from pathlib import Path
+
+    src = Path("scripts/run/run_coupled.py").read_text()
+    tree = ast.parse(src)
+    main_fn = next(n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef) and n.name == "main")
+    calls = {
+        n.func.id for n in ast.walk(main_fn)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    assert "build_sea_ice_config" in calls, (
+        "main() never calls build_sea_ice_config -- every --ice-* flag would "
+        "parse and be silently dropped before reaching CoupledESMDriver"
+    )
+    # and the driver must receive it
+    driver_call = next(
+        n for n in ast.walk(main_fn)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        and n.func.id == "CoupledESMDriver"
+    )
+    kw = {k.arg for k in driver_call.keywords}
+    assert "ice_config" in kw, "CoupledESMDriver is not given ice_config"

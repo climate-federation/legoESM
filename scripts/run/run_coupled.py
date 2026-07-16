@@ -115,7 +115,8 @@ class _CoupledParamsBundle(NamedTuple):
     lake: object
 
 
-def build_params_bundle(coupled_cfg, coupler_config=None) -> _CoupledParamsBundle:
+def build_params_bundle(coupled_cfg, coupler_config=None,
+                        ice_config=None) -> _CoupledParamsBundle:
     """The exact --params bundle ``apply_coupled_params`` routes into: the
     coupled config plus the coupler / sea-ice / lake configs (defaults when
     None — ``CoupledESMDriver`` builds the identical defaults, so a no-params
@@ -129,9 +130,52 @@ def build_params_bundle(coupled_cfg, coupler_config=None) -> _CoupledParamsBundl
     return _CoupledParamsBundle(
         coupled=coupled_cfg,
         coupler=coupler_config or CouplerConfig(),
-        ice=SeaIceConfig(),
+        ice=ice_config or SeaIceConfig(),
         lake=LakeConfig(),
     )
+
+
+#: SeaIceConfig scheme literals; each dispatch raises on anything else.
+_ICE_SHORTWAVE_SCHEMES = ("constant", "maykut_untersteiner", "delta_eddington")
+_ICE_ITD_REMAP = ("simple", "lipscomb2001")
+_ICE_BULK_SCHEMES = ("constant", "most")
+
+
+def build_sea_ice_config(args):
+    """The ``SeaIceConfig`` for this run.
+
+    Every sea-ice sub-model was UNREACHABLE before this. ``SeaIceConfig()`` was
+    built with NO arguments here and run_coupled had no ``--ice*`` flag at all,
+    so:
+
+      * snow-on-ice, bulk salinity/brine, Lipscomb-2007 mechanical RIDGING and
+        CESM melt PONDS are each gated by a ``bool = False``, and bools are not
+        ``:float``-spec-eligible -- so ``--params`` can never reach them either.
+        Ridging is oracle-pinned; nothing could switch it on.
+      * shortwave_scheme / itd_remap / bulk_scheme / stability_scheme are `str`,
+        which ``--params`` also cannot carry.
+
+    Returns ``None`` when nothing was requested, so the driver builds its own
+    identical default and an untouched run stays byte-identical.
+    """
+    from legoesm.ice.config import SeaIceConfig
+
+    base = SeaIceConfig()
+    changed = {}
+    for flag, sub in (("ice_snow", "snow"), ("ice_brine", "brine"),
+                      ("ice_ridging", "ridging"), ("ice_ponds", "ponds")):
+        if getattr(args, flag, False):
+            changed[sub] = getattr(base, sub)._replace(enabled=True)
+    for flag, field in (("ice_shortwave_scheme", "shortwave_scheme"),
+                        ("ice_itd_remap", "itd_remap"),
+                        ("ice_bulk_scheme", "bulk_scheme"),
+                        ("ice_stability_scheme", "stability_scheme")):
+        v = getattr(args, flag, None)
+        if v is not None and v != getattr(base, field):
+            changed[field] = v
+    if not changed:
+        return None
+    return base._replace(**changed)
 
 
 def build_coupler_config(args):
@@ -197,7 +241,7 @@ def build_coupler_config(args):
 
 
 def apply_coupled_params(params_path, land_params, atm_config, coupled_cfg,
-                         coupler_config):
+                         coupler_config, ice_config=None):
     """Apply the --params calibration layer (issue #691) across EVERY component
     config this driver builds: atmosphere params route to the flattened
     ExperimentConfig scalars (scalar map); land params route into the
@@ -217,7 +261,9 @@ def apply_coupled_params(params_path, land_params, atm_config, coupled_cfg,
         load_params_config,
     )
 
-    ice_config = None
+    # Seed from the CLI-built config (build_sea_ice_config) rather than None:
+    # returning None here would DISCARD --ice-ridging & friends whenever
+    # --params was also passed, and silently drop them when it was not.
     lake_config = None
     params = load_params_config(params_path)
     _check_params_clobber(params, land_params)
@@ -230,7 +276,7 @@ def apply_coupled_params(params_path, land_params, atm_config, coupled_cfg,
             scalar_param_map=amap)
     if rest_params:
         bundle = apply_params_to_config(
-            build_params_bundle(coupled_cfg, coupler_config),
+            build_params_bundle(coupled_cfg, coupler_config, ice_config),
             rest_params, driver="run_coupled")
         coupled_cfg = bundle.coupled
         coupler_config = bundle.coupler
@@ -641,6 +687,40 @@ def build_parser():
     # fraction + topographic baseflow (Niu 2005 / CLM4.5); it is implemented and
     # param-spec'd but was unreachable -- land_scheme_overrides built
     # LandConfig() with no arguments, pinning the default.
+    # --- sea ice -------------------------------------------------------
+    # SeaIceConfig had NO cli surface: every sub-model is gated by a bool
+    # (unreachable via --params, which is :float-only) and the driver built
+    # SeaIceConfig() with no arguments.
+    parser.add_argument("--ice-snow", action="store_true",
+                        help="Track snow on sea ice (SeaIceConfig.snow).")
+    parser.add_argument("--ice-brine", action="store_true",
+                        help="Track bulk ice salinity + route the salt flux "
+                             "(SeaIceConfig.brine).")
+    parser.add_argument("--ice-ridging", action="store_true",
+                        help="Lipscomb 2007 mechanical ridging "
+                             "(SeaIceConfig.ridging).")
+    parser.add_argument("--ice-ponds", action="store_true",
+                        help="CESM-style melt ponds (SeaIceConfig.ponds).")
+    parser.add_argument("--ice-shortwave-scheme",
+                        choices=list(_ICE_SHORTWAVE_SCHEMES), default=None,
+                        help="Sea-ice shortwave scheme (default: constant).")
+    parser.add_argument("--ice-itd-remap", choices=list(_ICE_ITD_REMAP),
+                        default=None,
+                        help="Ice-thickness-distribution remapping: 'simple' "
+                             "(legacy volume-conserving rescale) or "
+                             "'lipscomb2001' (piecewise-linear g(h)).")
+    parser.add_argument("--ice-bulk-scheme", choices=list(_ICE_BULK_SCHEMES),
+                        default=None,
+                        help="Sea-ice surface bulk-flux algorithm "
+                             "(default: constant). The ice tile runs its own "
+                             "scheme, like the land and slab tiles.")
+    parser.add_argument("--ice-stability-scheme",
+                        choices=["dyer1974", "beljaars_holtslag1991",
+                                 "grachev2007_sheba", "gryanik2020"],
+                        default=None,
+                        help="Stable-regime MOST functions for the ice tile "
+                             "(grachev2007_sheba is the Arctic sea-ice "
+                             "reference). Only used with --ice-bulk-scheme most.")
     parser.add_argument("--land-runoff-scheme", choices=_LAND_RUNOFF_SCHEMES,
                         default="bucket",
                         help="Slab-land runoff partitioning: 'bucket' (default, "
@@ -1254,13 +1334,15 @@ def main():
     # config this driver builds — see apply_coupled_params (the single source
     # of truth for the atm-scalar-map / coupled-bundle split, exercised
     # directly by the unit tests and the reachability audit).
-    ice_config = None
+    # Sea-ice: None unless a flag asked for something, so an untouched run is
+    # byte-identical (the driver builds the same default).
+    ice_config = build_sea_ice_config(args)
     lake_config = None
     if getattr(args, "params", None):
         (atm_config, coupled_cfg, coupler_config, ice_config,
          lake_config) = apply_coupled_params(
             args.params, args.land_params, atm_config, coupled_cfg,
-            coupler_config)
+            coupler_config, ice_config)
 
     driver = CoupledESMDriver(
         atm_config, coupled_cfg, coupler_config=coupler_config,
