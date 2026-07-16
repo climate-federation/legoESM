@@ -328,10 +328,22 @@ def run_real(args) -> int:
         state_p, F_win, doy_win, late_flags, config, lat=lat_rad, dt=dt,
         good_mask=good, land_params_fn=lp_fn, use_checkpoint=True)
     good_np = np.asarray(good)
-    M = np.where(good_np, np.asarray(M), np.nan)                   # mask bad cells
-    late_gpp = np.where(good_np, np.asarray(late_gpp), np.nan)
-    print(f"memory map: finite cells={int(np.isfinite(M).sum())} | "
-          f"range [{np.nanmin(M):.3e}, {np.nanmax(M):.3e}] gC/m2 per (m3/m3)")
+    M_raw = np.asarray(M)
+    # The forward good_mask only guarantees the forward STATE is finite -- but a cell
+    # can have finite GPP yet a huge/NaN GRADIENT if the backward pass ran near a
+    # singularity (arid-Richards near-zero moisture capacity; spring-thaw canopy Newton
+    # -- the documented TODO-1/TODO-2 regimes). Exclude cells whose |gradient| is
+    # non-finite or unphysically large (a clear singularity signature). Disclosed +
+    # counted, not silently clipped.
+    grad_ok = np.isfinite(M_raw) & (np.abs(M_raw) < args.max_abs_grad)
+    keep = good_np & grad_ok
+    n_fwd = int((~good_np).sum())
+    n_grad = int((good_np & ~grad_ok).sum())
+    M = np.where(keep, M_raw, np.nan)
+    late_gpp = np.where(keep, np.asarray(late_gpp), np.nan)
+    print(f"memory map: kept {int(keep.sum())}/{ncol} | forward-excluded {n_fwd} | "
+          f"gradient-blowup excluded {n_grad} (|M|>={args.max_abs_grad:g} or non-finite) "
+          f"| range [{np.nanmin(M):.3e}, {np.nanmax(M):.3e}] gC/m2 per (m3/m3)")
 
     # --- temporal memory kernel (optional): month-resolved d GPP/d theta_May ---
     months = kernel = None
@@ -340,17 +352,19 @@ def run_real(args) -> int:
         months, kernel = monthly_memory_kernel(
             state_p, F_win, doy_win, config, lat=lat_rad, dt=dt,
             good_mask=good, land_params_fn=lp_fn, use_checkpoint=True)
-        kernel = np.where(good_np[None, :], kernel, np.nan)
+        # same keep + per-element gradient-plausibility on each month
+        kernel = np.where(keep[None, :] & (np.abs(kernel) < args.max_abs_grad)
+                          & np.isfinite(kernel), kernel, np.nan)
         # consistency: kernel summed over the LATE months == the integrated map
         late_m = months >= int(np.searchsorted(_MONTH_STARTS, args.late_doy, side="right"))
         resid = np.nanmax(np.abs(np.nansum(kernel[late_m], axis=0) - M))
         for m, row in zip(months, kernel):
-            print(f"  month {int(m):2d}: mean|dGPP/dtheta| over good = "
+            print(f"  month {int(m):2d}: mean|dGPP/dtheta| over kept = "
                   f"{np.nanmean(np.abs(row)):.3e}")
         print(f"  consistency (sum_late-months kernel vs integrated map): "
               f"max|resid|={resid:.2e}")
 
-    _write_map(args.out, M, late_gpp, good_np, lat_rad, lon_rad,
+    _write_map(args.out, M, late_gpp, keep, lat_rad, lon_rad,
                args.resolution, year, args, months=months, kernel=kernel)
     return 0
 
@@ -417,6 +431,9 @@ def main(argv=None) -> int:
     ap.add_argument("--kernel", action="store_true",
                     help="also emit the monthly temporal memory kernel dGPP(month)/dtheta_May "
                          "(one reverse pass per month; shows the memory decay/timescale)")
+    ap.add_argument("--max-abs-grad", dest="max_abs_grad", type=float, default=1e5,
+                    help="mask cells whose |gradient| exceeds this (unphysical -> a "
+                         "near-singularity in the arid/thaw regimes; default 1e5)")
     ap.add_argument("--out", default="results/water_memory/memory_map.nc")
     args = ap.parse_args(argv)
 
