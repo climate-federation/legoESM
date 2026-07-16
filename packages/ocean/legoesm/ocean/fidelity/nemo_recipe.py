@@ -246,6 +246,16 @@ def _nemo_tke_config() -> TKEConfig:
         # 6.6 default). legoESM Pr=max(1,min(10,coeff·Ri)) is bit-identical (clamp
         # to [1,10] is order-independent), so this reproduces NEMO's pdl exactly.
         prandtl_ri_coeff=4.5,
+        # TKE vertical-diffusion coefficient: NEMO diffuses en with avm x1
+        # (zdftke.F90:130 "d(avm d(en)/dz)/dz"; the tridiagonal coefficient is
+        # the face-averaged avm, zfact1=-0.5*rn_Dt). The Veros/CATKE default
+        # (30) — which the ported scheme inherited — diffuses TKE 30x too fast,
+        # flooding the surface Dirichlet TKE source down the near-neutral
+        # column, sustaining deep e ~1000x NEMO's rn_emin floor and blocking
+        # the shallow summer mixed layer -> the subtropical thermocline never
+        # rebuilds (self-locked mixed branch; plan §G). alpha_tke=1 drops deep
+        # summer e by 1-2 orders and unlocks the seasonal thermocline rebuild.
+        alpha_tke=1.0,
         # NEMO nn_bc_surf=1 Dirichlet surface TKE: en(1)=max(rn_emin0,
         # rn_ebb*|tau|/rho0) held in the implicit solve — the wind-driven
         # surface-TKE response (the Veros flux BC undershoots NEMO's surface
