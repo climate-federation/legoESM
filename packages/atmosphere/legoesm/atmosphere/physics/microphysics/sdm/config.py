@@ -90,14 +90,10 @@ class SDMConfig(NamedTuple):
     solute_molar_mass : float
         Molar mass of the dissolved aerosol [kg/mol] (NaCl -> 0.05844).
     collision_kernel : str
-        Collision-coalescence kernel: ``"hall"`` (Hall 1980 tabulated
-        efficiency, bilinear interpolation; DEFAULT — the physical kernel, and
-        the same default the sibling bin scheme ``fast_sbm`` uses),
-        ``"long"`` (Long 1974 polynomial efficiency), ``"sedimentation"``
-        (geometric sweep-out), or ``"golovin"`` (the ANALYTIC TEST kernel:
-        K = b(x+y) has a closed-form solution and exists to verify the
-        coalescence solver against PySDM — it is NOT physical, so do not use it
-        for a science run). Unknown values raise.
+        Collision-coalescence kernel: ``"golovin"`` (analytic test kernel,
+        default), ``"sedimentation"`` (geometric sweep-out), ``"long"``
+        (Long 1974 polynomial efficiency), or ``"hall"`` (Hall 1980 tabulated
+        efficiency, bilinear interpolation). Unknown values raise.
     terminal_velocity : str
         Droplet terminal-velocity law: ``"rogers_yau"`` (Stokes R²,
         default), ``"atlas_ulbrich"`` (rain power law), or
@@ -184,14 +180,7 @@ class SDMConfig(NamedTuple):
     include_solute: bool = True
     solute_ionization: float = 2.0        # van't Hoff i for NaCl
     solute_molar_mass: float = 0.05844    # [kg/mol] NaCl
-    # Hall 1980 = the PHYSICAL kernel, matching the sibling bin scheme
-    # (FastSBMConfig.collision_kernel = "hall").  This defaulted to "golovin"
-    # -- the analytic TEST kernel -- so every production `--microphysics sdm`
-    # run silently used a verification kernel, with no config able to change it
-    # (MicrophysicsConfig is built as `MicrophysicsConfig(scheme=...)`, so the
-    # whole SDMConfig sub-config was unreachable).  The PySDM validation
-    # scripts set collision_kernel="golovin" EXPLICITLY and are unaffected.
-    collision_kernel: str = "hall"
+    collision_kernel: str = "golovin"
     terminal_velocity: str = "rogers_yau"
     golovin_b: float = 1.5e3              # [1/s] Golovin kernel coefficient
     include_brownian: bool = False        # add Brownian coagulation to the kernel

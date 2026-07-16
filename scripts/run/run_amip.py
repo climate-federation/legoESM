@@ -94,17 +94,6 @@ def _print_forcing_activity(args) -> None:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    # Central scheme literal sets — DERIVE the CLI allowlists from the same
-    # constants ExperimentConfig.validate_strict checks, so the two cannot
-    # drift.  A hardcoded copy is exactly how ``--microphysics ml_emulator``
-    # came to be rejected by this CLI while validate_strict accepted it.
-    # (run_coupled uses the identical deferred-import pattern.)
-    from legoesm.driver.config import (
-        VALID_CONVECTION_SCHEMES,
-        VALID_MICROPHYSICS,
-        VALID_SDM_COLLISION_KERNELS,
-    )
-
     parser = argparse.ArgumentParser(
         description="AMIP simulation with prescribed SST/SIC",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -521,7 +510,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Subgrid physics
     parser.add_argument("--convection", type=str, default="tiedtke",
-                        choices=list(VALID_CONVECTION_SCHEMES))
+                        choices=[
+                            "none", "sbm", "dca", "kuo", "mass_flux", "edmf",
+                            "zhang_mcfarlane", "kain_fritsch", "emanuel",
+                            "tiedtke", "bechtold",
+                        ])
     # Full-physics policy: an AMIP run is a real atmosphere, so every
     # parameterization defaults to an ACTIVE scheme — never "none".  A slot is
     # disabled only for an idealized / dry-dynamics run, which must opt in via
@@ -734,18 +727,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Sigma level (p/p_s) above which rh_crit_bl applies. "
                              "Use 0.85 to cover the lowest ~1.5 km. Default 1.0 (disabled).")
     parser.add_argument("--microphysics", type=str, default="sundqvist",
-                        choices=list(VALID_MICROPHYSICS))
-    parser.add_argument("--sdm-collision-kernel", type=str, default="hall",
-                        dest="sdm_collision_kernel",
-                        choices=list(VALID_SDM_COLLISION_KERNELS),
-                        help="Super-Droplet (--microphysics sdm) collision-"
-                             "coalescence kernel. 'hall' (Hall 1980, default, "
-                             "physical) | 'long' (Long 1974) | 'sedimentation' "
-                             "(geometric sweep-out) | 'golovin' (the ANALYTIC "
-                             "TEST kernel: closed-form solution used to verify "
-                             "the coalescence solver against PySDM -- NOT "
-                             "physical, do not use for a science run). Inert "
-                             "for every non-sdm scheme.")
+                        choices=["none", "kessler", "sundqvist",
+                                 "seifert_beheng", "morrison", "thompson",
+                                 "p3", "sdm", "fast_sbm"])
     # Sundqvist large-scale-condensation tunables (override the SundqvistConfig
     # defaults / AIMIP-trained leaves).  These are the precipitation-efficiency
     # knobs: qc_crit is the autoconversion cloud-water threshold (rain forms only
@@ -1387,7 +1371,6 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_rh_crit_bl=args.cloud_rh_crit_bl,
         cloud_sigma_bl=args.cloud_sigma_bl,
         microphysics=args.microphysics,
-        sdm_collision_kernel=args.sdm_collision_kernel,
         nc_from_aerosol=args.aerosol_ccn,
         subgrid_autoconversion=args.subgrid_autoconversion,
         convective_precip_efficiency=args.convective_precip_efficiency,

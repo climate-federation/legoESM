@@ -2745,7 +2745,7 @@ def _resolve_microphysics(config):
 
     scheme = config.microphysics
     micro_fn = resolve_kernel(MICROPHYSICS_REGISTRY, scheme)
-    mc = microphysics_config_for(config)
+    mc = MicrophysicsConfig(scheme=scheme)
     micro_config = getattr(mc, scheme)
     required_microphysics_tracer_slots(scheme, micro_config)
 
@@ -2847,35 +2847,6 @@ def apply_surface_flux_config(tc, config):
         # interface cannot split Dyer-vs-SHEBA across its two sides.
         surf = surf._replace(stability_scheme=sss)
     return tc._replace(**{tc.scheme: sub._replace(surface=surf)})
-
-
-def microphysics_config_for(config):
-    """The ``MicrophysicsConfig`` to build the microphysics kernel from.
-
-    Single source of truth (the ``turbulence_config_for`` twin) so every dycore
-    backend threads the experiment-level microphysics selectors into the ACTIVE
-    scheme's nested config, instead of each build site constructing a bare
-    ``MicrophysicsConfig(scheme=...)`` and silently getting the sub-config
-    defaults.
-
-    Concretely: ``sdm_collision_kernel`` was unreachable this way, so every
-    production ``--microphysics sdm`` run used ``SDMConfig``'s collision kernel
-    default -- which was ``golovin``, the ANALYTIC TEST kernel (its docstring
-    says so), not a physical one. Threading it here keeps the selector honest on
-    every backend rather than only the one that happened to be wired.
-
-    Only touches the nested config of the scheme that carries the field, so
-    every non-sdm scheme is byte-identical (no ``_replace``).
-    """
-    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
-
-    scheme = getattr(config, "microphysics", "none")
-    mc = MicrophysicsConfig(scheme=scheme)
-    if scheme == "sdm":
-        kernel = getattr(config, "sdm_collision_kernel", None)
-        if kernel is not None and kernel != mc.sdm.collision_kernel:
-            mc = mc._replace(sdm=mc.sdm._replace(collision_kernel=kernel))
-    return mc
 
 
 def turbulence_config_for(config):
