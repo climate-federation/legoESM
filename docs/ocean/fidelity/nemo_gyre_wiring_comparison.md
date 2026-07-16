@@ -45,7 +45,7 @@ rms(u) 0.19–0.38 vs NEMO 8.2) at ~0.58–0.66× NEMO's RMS.
 | Lateral viscosity | Laplacian div-rot, A_m=1e5 | vector_laplacian, A_h=1e5 (bit-exact) | ✓ |
 | Vertical viscosity | implicit, TKE avm | same | ✓ |
 | Bottom drag | non-linear implicit, Cd0=1e-3, ke0=2.5e-3 | nemo_quadratic (same) | ✓ |
-| PGF | z-coord (ln_hpg_zco), e3w-weighted integral | adcroft (≈0.966, 3.4% amplitude deficit) | ≈ |
+| PGF | z-coord (ln_hpg_zco), e3w-weighted integral | nemo_trapezoid quadrature; ladder certified bit-exact vs `rhd_stg` (5.3e-23 full-field); the old "3.4% deficit" was a stage-3 time-level comparison artifact (see plan §C) | ✅ |
 | Lateral BC | free-slip (rn_shlat=0) | free_slip | ✓ |
 
 ## 4. Tracer

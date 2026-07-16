@@ -108,11 +108,26 @@ Dirichlet in both solves, review SOUND (NEMO's en(1) confirmed hard-Dirichlet in
 the Fortran). RMS ratio 0.61 → **0.805**; WBC peak **104%** of NEMO; mid-depth
 rms(u) ratio 1.02. Remaining deficit = the deep abyssal-drift flow (item A).
 
-**C. PGF / hydrostatic pressure at depth.**
-NEMO `ln_hpg_zco` (z-coord, e3w-weighted integral of the 2-level-averaged density
-anomaly); legoESM `adcroft` (≈0.966 at t=0, 3.4% amplitude deficit). A small
-persistent deep-PGF error seeds a deep flow. Verify the deep hpg vs NEMO;
-consider a zco-faithful option. Effort: medium.
+**C. PGF / hydrostatic pressure at depth — CLOSED 2026-07-16 (comparison
+artifact, machine-precision certificate).** The "~3% hpg deficit" was a
+TIME-LEVEL artifact, not a PGF defect. NEMO RK3 recomputes `eos(ts, Kmm)` at
+stages 2&3 (stprk3_stg.F90:322) and `tra_sbc_RK3` runs at EVERY stage, so the
+dumped stage-3 `utrd_hpg` uses tracers advanced dt/2 from the step-start state;
+our per-term probe compared at the unadvanced state. Certificate (single-column
+probe `gap_audit/_probe_hpg_column.py` + the `rhd_stg`/`tn_stg`/`sn_stg`
+stage-snapshot already captured by MY_SRC/trddump.F90):
+(1) hand `zhpi(rhd_stg)` vs dumped `utrd_hpg`, full wet field: max diff
+**5.3e-23** (field rms 5.8e-8) — the e3w ladder is bit-exact;
+(2) legoESM `nemo_roquet_eos(tn_stg, sn_stg)` vs NEMO `rhd_stg`: 5.8e-9 on
+rhd~2e-3 = **3e-6 relative**;
+(3) legoESM `pgf_quadrature="nemo_trapezoid"` == hand-zhpi to ~1e-4 at the
+initial state (a ~0.7% residual at abyssal levels where |hpg|~3e-9, ~0.2% of
+field rms — negligible; likely bottom e3w detail).
+Cross-check: zero-forcing rerun (MY_SRC/usrdef_sbc.F90 env switch
+`NEMO_ZERO_FORCING=1`, EXP_NOFORCE) gives utrd_hpg ≡ 0 from the horizontally
+uniform IC — all step-1 hpg structure is stage-generated, confirming the
+artifact mechanism. Fair per-term hpg comparisons MUST use the stage snapshot
+(`rhd_stg`), never the step-start state.
 
 **D. Barotropic filter — DONE 2026-07-16 (483b6477a).** nemo_ab3am4
 implemented (AB3 extrapolation + AM4 backward ssh interpolation alpha=0.07 +
