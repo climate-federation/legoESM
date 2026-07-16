@@ -81,6 +81,7 @@ def _write_clm(path, *, nlat=4, nlon=8):
         "PCT_CROP": (("lsmlat", "lsmlon"), zz()),
         "PCT_LAKE": (("lsmlat", "lsmlon"), zz()),
         "PCT_GLACIER": (("lsmlat", "lsmlon"), zz()),
+        "LANDFRAC_PFT": (("lsmlat", "lsmlon"), np.ones((nlat, nlon))),  # all land
         "SOIL_COLOR": (("lsmlat", "lsmlon"), np.ones((nlat, nlon))),
         "MONTHLY_LAI": (("time", "lsmpft", "lsmlat", "lsmlon"), lai),
         "MONTHLY_SAI": (("time", "lsmpft", "lsmlat", "lsmlon"), z()),

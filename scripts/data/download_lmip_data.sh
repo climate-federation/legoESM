@@ -13,9 +13,14 @@
 #                     glade three_stream archive (year 1920 available).
 #                     Source dir: --crujra-src / $LEGOESM_CRUJRA_SRC.
 #
-#   data/legoesm_surfdata_c250617.nc — full harmonized surfdata (soil + CLM5
-#                     PFT/LAI/cover), DOWNLOADED from Zenodo (record 21087964).
-#                     Regridded to the model grid at run time by the driver.
+#   data/legoesm_surfdata_c260716.nc — full harmonized surfdata (soil + CLM5
+#                     PFT/LAI/cover), DOWNLOADED from Zenodo.  Regridded to the
+#                     model grid at run time by the driver.  c260716 supersedes
+#                     c250617: it gates cover on LANDFRAC_PFT, fixing the ~27%
+#                     land-area over-count (the file's `source` attr must read
+#                     "LANDFRAC_PFT-gated").  Override the URL/record with
+#                     --surfdata-url or $LEGOESM_SURFDATA_URL until the new
+#                     Zenodo version is published.
 #
 # Usage:
 #   ./scripts/data/download_lmip_data.sh                       # both, year 1920
@@ -33,8 +38,11 @@ CRUJRA_DIR="$DATA_DIR/crujra"
 # --- defaults / config ---
 PREFIX="clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5"   # glade three_stream naming
 SUFFIX=""                                                        # after-year suffix (none)
-SURFDATA_NAME="legoesm_surfdata_c250617.nc"                      # full harmonized surfdata
-SURFDATA_URL="${LEGOESM_SURFDATA_URL:-https://zenodo.org/records/21087964/files/legoesm_surfdata_c250617.nc}"
+SURFDATA_NAME="legoesm_surfdata_c260716.nc"                      # LANDFRAC-gated (supersedes c250617)
+# TODO: point at the new Zenodo version once c260716 is published (upload it as a new
+# version of concept-record 21087964, then paste the versioned file URL here). Until
+# then, pass --surfdata-url <url> or set $LEGOESM_SURFDATA_URL.
+SURFDATA_URL="${LEGOESM_SURFDATA_URL:-https://zenodo.org/records/21087964/files/legoesm_surfdata_c260716.nc}"
 CRUJRA_SRC="${LEGOESM_CRUJRA_SRC:-/glade/campaign/cesm/cesmdata/inputdata/atm/datm7/atm_forcing.datm7.CRUJRA.0.5d.c20260129/three_stream}"
 
 FORCE=0

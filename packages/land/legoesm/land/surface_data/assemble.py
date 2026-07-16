@@ -46,11 +46,12 @@ def build_v1_surfdata(
     writes the combined ``legoesm_surfdata`` NetCDF to ``out_path``.  Cover is a
     single (stationary) year.
     """
+    import os
+
     import xarray as xr
 
     clm = read_clm5_cover_veg(clm_path, clm_config)
     tgt_lat, tgt_lon = clm["lat"], clm["lon"]
-    ny, nx = tgt_lat.size, tgt_lon.size
 
     hs = xr.open_dataset(hwsd_soil_nc)
     try:
@@ -81,7 +82,12 @@ def build_v1_surfdata(
         monthly_lai=clm["monthly_lai"], monthly_sai=clm["monthly_sai"],
         monthly_height_top=clm["monthly_height_top"],
         monthly_height_bot=clm["monthly_height_bot"],
-        source="legoESM v1 surfdata: CLM5 cover/PFT/LAI + HWSD v2.0 soil",
+        # Self-documenting provenance: name the CLM source and record that cover was
+        # gated by LANDFRAC_PFT (percent-of-land -> percent-of-gridcell). A file whose
+        # source string lacks "LANDFRAC_PFT-gated" predates the land-mask fix and
+        # over-counts land ~27% (the c250617 bug).
+        source=("legoESM v1 surfdata: CLM5 cover/PFT/LAI (LANDFRAC_PFT-gated) + "
+                f"HWSD v2.0 soil; CLM source={os.path.basename(clm_path)}"),
     )
     return out_path
 
