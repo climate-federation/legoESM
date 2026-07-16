@@ -7,13 +7,16 @@ GYRE exactly, differentiability being the only intended difference.
 
 Status: ✓ matched · ✗ mismatch · ≈ equivalent-but-different-form.
 
-## 0. Headline
-The dominant mismatch is a **missing primary forcing**: NEMO GYRE_BARE is a
-**wind-driven** gyre (`usrdef_sbc.F90:167-176`, double-gyre stress ~0.074 Pa);
-legoESM's recipe is thermal-only. Without wind legoESM has only a weak thermal
-circulation, which — combined with excessive downward momentum spreading and an
-abyssal density drift — produces a bottom-intensified, weak-surface flow (surf/deep
-rms(u) 0.19–0.38 vs NEMO 8.2) at ~0.58–0.66× NEMO's RMS.
+## 0. Headline (re-audited 2026-07-16, post-fix state)
+Every row below is now ✓/≈ except tracer stepping (Euler vs RK3 — retested
+inert on the OLD config only). Balance decomposition at yr 5: barotropic mode
+**1.03×** NEMO; lego's flow is in **perfect thermal-wind balance with its own
+density** (actual/geo = 0.98 vs NEMO's 1.13 ageostrophic WBC enhancement) — the
+momentum side is exonerated. The ONE remaining gap: winter erosion of the
+PERMANENT thermocline doming (lego winter retention ~0.1 vs NEMO ~0.4) caps
+lego's geostrophic shear at 0.81× → actual baroclinic flow 0.71×. Connects to
+the known residual: deep TKE in near-neutral winter columns still 5–50×
+NEMO's rn_emin floor even after the alpha_tke fix.
 
 ## 1. Grid & coordinate
 | Item | NEMO | legoESM | |
@@ -91,25 +94,26 @@ rms(u) 0.19–0.38 vs NEMO 8.2) at ~0.58–0.66× NEMO's RMS.
 |---|---|---|---|
 | GM / MLE / geothermal / tidal / sponge / BBL | all OFF | off | ✓ |
 
-## Mismatch summary (ranked by likely impact on the strength gap)
-1. **Missing wind stress** — the primary gyre driver. legoESM thermal-only. (biggest)
-2. **Momentum spreads down** — coupled with the deep-convection momentum-EVD + the abyssal density drift; the injected wind doesn't form a surface Ekman layer (surf/deep 0.19–0.38 vs 8.2).
-3. **Abyssal density drift** — deep horizontal density gradient (uniform-with-depth) that NEMO lacks → deep geostrophic flow + deep convection. Deeper root; candidates below.
-4. Vertical momentum advection: upwind_perturbation vs 2nd-order centred (dissipative).
-5. Redi slope clip: S_max=0.005 vs rn_slpmax=0.01.
-6. Barotropic: 120 substeps/cosine+spatial-diffusion vs 50/Demange nn_bt_flt=3 (no spatial diffusion).
-7. RK3 variant (Shu-Osher vs Wicker-Skamarock) + tracer stepping (Euler vs RK3).
-8. z-star vs key_linssh; rho_0 1025 vs 1026; TKE N² adiabatic vs in-situ; nn_mxl 2 vs 3 (deconfounded).
+## Remaining-gap summary (re-audited 2026-07-16; the historical ranked list is superseded)
+1. **Winter erosion of the permanent thermocline** (retention 0.1 vs 0.4) — the
+   single driver of the baroclinic 0.71×; suspects: residual deep TKE in
+   near-neutral winter columns (5–50× floor), EVD min(rn2,rn2b) 2-level +
+   −1e-12 threshold minor deltas.
+2. NEMO's ageostrophic WBC enhancement (actual/geo 1.13 vs lego 0.98) — likely
+   follows #1 (inertial recirculation strengthens with the gyre).
+3. Tracer stepping Euler vs NEMO RK3 (only row not retested post-fix).
+4. SST max −0.8 °C (follows #1: winter convection slightly deeper).
 
-## Verified progress (5-yr wet-masked RMS ratio vs NEMO)
-| config | ratio | surf/deep rms(u) |
-|---|---|---|
-| matched knobs, no convection | 0.61 | — |
-| + faithful EVD (well-mixed ML) | 0.58 | 0.31 |
-| + wind | 0.58 | 0.19 (wind mixed down) |
-| + wind, no momentum-EVD | **0.66** | **0.38** |
-| NEMO target | 1.00 | 8.2 |
+## Verified progress (yr-5 metrics vs NEMO)
+| config | surf rms(u) | baroclinic u′ | surf/deep | summer thermocline |
+|---|---|---|---|---|
+| pre-campaign | 0.58× | — | 0.19–0.38 | eroded (0) |
+| all fixes 2026-07-16 (bothfix card) | 0.72× | 0.71× (balance 0.98) | 6.2 (full-metric) | **3.46 vs NEMO 3.17 ✓** |
+| NEMO target | 1.00 | 1.00 | 8.2 | 3.17 |
 
-Committed fidelity fixes this line of work: Coriolis-RK3 blow-up (`70ab903c9`),
-faithful namelist knobs (`ffc98144d`), A_v/K_v double-count (`bfc3126a4`), EVD
-operator (`456922278`). Wind + the deep-structure mismatches remain to wire.
+Fix ledger (this campaign): Coriolis-RK3 (`70ab903c9`), namelist knobs
+(`ffc98144d`), A_v/K_v (`bfc3126a4`), EVD operator (`456922278`), wind rewire
+(`673d56ee1`), Dirichlet TKE (`76b239532`), linssh (`128feaffb`), ab3am4
+(`483b6477a`), rho_0 (`c874633b6`), WS-RK3 (`e2b4b03a0`), pgf trapezoid, mxl3
+(`aeb9b7df4`), l_eps, bt_hist (`b56590a1a`), S_max (`bc2f5eb1d`),
+**alpha_tke 30→1 (`6f3e4f5d6`)**, **EVD adiabatic N² (`ccbdf2020`)**.
