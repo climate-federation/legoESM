@@ -235,11 +235,19 @@ class RRTMGPConfig(NamedTuple):
     #   >0 -> process g-points in parallel blocks of this size via ``vmap``
     #         (the g-point axis is embarrassingly parallel; the sequential
     #         scan launches one tiny kernel per g-point and starves the GPU,
-    #         ~26x slower in a microbench).  FORWARD/inference only — it holds
-    #         this many g-points' activations for the backward pass.  A block
-    #         of ~16-32 recovers most of the parallelism while bounding peak
-    #         memory at high resolution.  Default 0 = byte-for-byte legacy.
-    gpoint_batch_size: int = 0
+    #         ~26x slower in a microbench).  It holds this many g-points'
+    #         activations for the backward pass.  A block of ~16-32 recovers
+    #         most of the parallelism while bounding peak memory at high
+    #         resolution.
+    #
+    # DEFAULT 16 (was 0): the scan path (0) with gpoint_checkpoint=True emits a
+    # distinct prevent_cse body per g-point (~Ng-fold code) => multi-HOUR GPU
+    # compile for reverse-mode AD training (rrtmgp+rollout adjoint took ~9 h,
+    # never reaching epoch-0). The 16-wide vmap block compiles ONE reused body
+    # (minutes) and is ~26x faster at runtime, with peak memory bounded to 16
+    # g-points. This is the right default everywhere RRTMGP is used; set 0 only
+    # to reproduce the exact legacy g-point accumulation order.
+    gpoint_batch_size: int = 16
     # Wrap the per-g-point scan step in jax.checkpoint(prevent_cse=True) for
     # reverse-mode AD memory (recompute one g-point per backward step).  True =
     # byte-for-byte legacy (required for high-res rrtmgp training).  Set False

@@ -594,7 +594,7 @@ def make_aimip_classical_spectral_physics(
     land_mask: "jax.Array | None" = None,
     split_rad: bool = False,
     rrtmgp_gpoint_checkpoint: bool = True,
-    rrtmgp_gpoint_batch_size: int = 0,
+    rrtmgp_gpoint_batch_size: int = 16,
 ):
     """Build a SpectralPE physics function for the AIMIP classical variant.
 
