@@ -339,6 +339,23 @@ _IFS_WMEAN_MAX = 15.0                           # min(15, PWMEAN) (cumastrn.F90:
 _IFS_TAU_MIN = 3600.0 / 5.0                     # 720 s  (cumastrn.F90:827)
 _IFS_TAU_MAX = 3.0 * 3600.0                     # 10800 s (cumastrn.F90:827)
 
+# --- IFS convective sub-cloud rain evaporation (cuflxn.F90:436-475, sucumf.F90) ---
+# Kessler-type evaporation of the convective rain flux below cloud base,
+# limited so a layer never evaporates past the RH break ZRHEBC.  Published IFS
+# constants (fixed, not tunables):
+_IFS_RCPECONS = 5.44e-4 / constants.g   # RCPECONS=5.44E-4/RG (sucumf.F90:176) [Kessler coeff]
+_IFS_EVAP_EXPONENT = 0.5777             # (..flux/area)**0.5777 (cuflxn.F90:453)
+_IFS_RCVRFACTOR = 5.09e-3               # RCVRFACTOR (sucumf.F90:177) [flux normaliser]
+_IFS_RCUCOV = 0.05                      # RCUCOV assumed conv. cloud cover (sucumf.F90:175)
+_IFS_RCUCOV_DEEP_FACTOR = 0.6           # deep (KTYPE=1) area = RCUCOV*0.6 (cuflxn.F90:442)
+_IFS_RCUCOV_RH_BASE = 0.8               # non-deep area RH enhancement threshold (cuflxn.F90:440)
+_IFS_RCUCOV_RH_SLOPE = 1.0 / 0.025      # ...(max(0.8,RHm)-0.8)/0.025 (cuflxn.F90:440)
+_IFS_RHEBC_OCEAN = 0.92                 # RHEBC over water (sucumf.F90:179)
+_IFS_RHEBC_OCEAN_DEEP = 0.85            # deep KTYPE=1 over water (cuflxn.F90:226)
+# Land values (0.75 / 0.70 deep, cuflxn.F90:222-223) need a land mask the leaf
+# does not receive — documented gap; the ocean values are used everywhere.
+_IFS_EVAP_FLUX_TINY = 1.0e-12           # IF(ZRFL > 1.E-12) evap gate (cuflxn.F90:450)
+
 # --- IFS deep CAPE closure ZMFUB1 = ZCAPE*ZMFUB/(ZHEAT*ZXTAU) (cumastrn.F90:704-833)
 _IFS_RETV = 1.0 / constants.epsilon - 1.0       # RETV = R_v/R_d - 1 (yomcst.F90:342)
 _IFS_ZCAPE_MAX_PA = 5000.0                      # ZCAPE = MIN(ZCAPE, 5000) (cumastrn.F90:825)
@@ -485,6 +502,160 @@ def _ifs_updraft_mean_velocity(
     mean_ke = jnp.sum(w * pkineu, axis=-1) / jnp.clip(jnp.sum(w, axis=-1), 1e-6, None)
     w_mean = jnp.sqrt(2.0 * jnp.maximum(mean_ke, _IFS_KE_FLOOR))
     return jnp.minimum(w_mean, _IFS_WMEAN_MAX)
+
+
+def _ifs_subcloud_rain_evaporation(
+    q_v: jax.Array,
+    q_sat_env: jax.Array,
+    p_half: jax.Array,
+    dp_full: jax.Array,
+    dq_r_conv_dt: jax.Array,
+    below_lcl: jax.Array,
+    rh_cloud_base: jax.Array,
+    rh_cloud_top: jax.Array,
+    deep_weight: jax.Array,
+    dt: float,
+) -> tuple[jax.Array, jax.Array]:
+    r"""IFS Kessler sub-cloud evaporation of convective rain (cuflxn.F90:436-475).
+
+    Oracle recurrence, marched DOWNWARD (both the IFS ``JK`` and our level
+    index increase toward the surface) on the accumulated rain flux ``ZRFL``
+    [kg/m^2/s], applied below cloud base (``JK >= KCBOT``)::
+
+        ZDRFL1 = RCPECONS * max(0, qsat - q) * A *
+                 ( sqrt(p_top(k)/p_sfc) / RCVRFACTOR * ZRFL / A )**0.5777 * dp
+        ZRNEW  = ZRFL - ZDRFL1
+        ZRMIN  = ZRFL - A * max(0, RHEBC*qsat - q) / (g*dt) * dp
+        ZRFLN  = max(max(ZRNEW, ZRMIN), 0)
+        evap_k = ZRFL - ZRFLN
+
+    * ``A`` is the convective-rain AREA fraction (cuflxn.F90:436-443): deep
+      columns get ``RCUCOV*0.6``; non-deep get the RH-enhanced
+      ``RCUCOV*(1 + (max(0.8, RHm) - 0.8)/0.025)`` with ``RHm`` the mean of
+      the cloud-base and cloud-top environment RH.  The discrete KTYPE switch
+      is blended with the scheme's smooth ``deep_weight`` (same doctrine as
+      the CAPE closure's LDCUM/KTYPE analogs).
+    * ``ZRMIN`` is the RH-BREAK limiter: evaporation stops once one timestep
+      of it would moisten the layer past ``RHEBC*qsat`` (deep-ocean 0.85,
+      non-deep-ocean 0.92, deep-weight blended; land values need an absent
+      land mask — documented gap).  ``ZCONS2 = 1/(g*dt)`` here is an
+      INTENTIONAL departure from the oracle default ``RMFCFL/(g*dt)`` with
+      ``RMFCFL = 3`` (sucumf.F90:229-232, active because IFS defaults
+      ``RMFSOLTQ = 1``, the implicit mass-flux T/q solver): the factor-3
+      headroom lets one evaporation step moisten a layer up to 3x past the
+      RH break, which the IFS implicit solve then damps — this scheme
+      applies the evap tendency EXPLICITLY (``subsidence_solve`` affects
+      only the mass-flux kernel, not this coupling), so ``RMFCFL = 1`` is
+      the value that cannot overshoot the break within a step (codex R1 #3).
+    * The rain SOURCE profile feeding the flux is the scheme's post-split
+      ``dq_r_conv_dt`` (rain forms in the cloud layer and accumulates
+      downward; a layer's own source joins the flux BELOW it —
+      ``ZRFL(k) = sum_{k'<k} [dq_r(k')*dp(k')/g - evap(k')]``, the
+      PMFLXR/PDMFUP bookkeeping).  Evaporation is gated to below the
+      (smooth) cloud base by ``below_lcl``; the flux carries through
+      un-evaporated above it.
+    * IFS applies this to the TOTAL precip flux including snow, with melting
+      (RTAUMEL) and the rain/snow phase split — this scheme's convective
+      precip has no ice phase, so melt/glaciation are out of scope
+      (documented gap).
+
+    Column-water exact by construction: ``evap_k <= ZRFL`` per level (fluxes
+    stay >= 0), so the caller can debit ``sum(evap)`` from the rain source
+    with a scale in [0, 1].
+
+    AD-safe: the ``**0.5777`` power has an infinite derivative at zero flux,
+    so the sub-``1e-12`` flux branch is a guarded double-``where`` (safe
+    operand inside, branch select outside — the JAX double-where NaN-grad
+    trap); all other ops are max/min/clip.
+
+    Parameters
+    ----------
+    q_v, q_sat_env : (ncol, nlev)  environment vapor / saturation [kg/kg].
+    p_half : (ncol, nlev+1)  half-level pressures [Pa] (surface last).
+    dp_full : (ncol, nlev)  layer thickness [Pa].
+    dq_r_conv_dt : (ncol, nlev)  post-split convective rain source [kg/kg/s].
+    below_lcl : (ncol, nlev)  smooth below-cloud-base membership in [0, 1].
+    rh_cloud_base, rh_cloud_top : (ncol,)  environment RH at cloud base/top.
+    deep_weight : (ncol,)  deep-class membership in [0, 1].
+    dt : float  time step [s].
+
+    Returns
+    -------
+    (evap_rate, rain_scale) : per-level vapor source [kg/kg/s] and the
+        column-uniform factor in [0, 1] that debits the evaporated water
+        from ``dq_r_conv_dt``.
+    """
+    _dtype = jnp.result_type(q_v, q_sat_env, dq_r_conv_dt, below_lcl)
+    g = constants.g
+
+    zrhm = 0.5 * (rh_cloud_base + rh_cloud_top)                # (ncol,)
+    area_nondeep = _IFS_RCUCOV * (
+        1.0
+        + (jnp.maximum(_IFS_RCUCOV_RH_BASE, zrhm) - _IFS_RCUCOV_RH_BASE)
+        * _IFS_RCUCOV_RH_SLOPE
+    )
+    area = (
+        deep_weight * (_IFS_RCUCOV * _IFS_RCUCOV_DEEP_FACTOR)
+        + (1.0 - deep_weight) * area_nondeep
+    ).astype(_dtype)                                           # (ncol,)
+    rhebc = (
+        deep_weight * _IFS_RHEBC_OCEAN_DEEP
+        + (1.0 - deep_weight) * _IFS_RHEBC_OCEAN
+    ).astype(_dtype)                                           # (ncol,)
+    zcons2 = 1.0 / (g * dt)                                    # RMFCFL=1 branch
+
+    src_flux = jnp.maximum(dq_r_conv_dt, 0.0) * dp_full / g    # (ncol, nlev)
+    sqrt_p = jnp.sqrt(p_half[:, :-1] / p_half[:, -1:])         # layer-top / sfc
+
+    inputs = tuple(
+        jnp.moveaxis(a.astype(_dtype), 1, 0)
+        for a in (src_flux, q_sat_env, q_v, sqrt_p, dp_full, below_lcl)
+    )
+
+    def _step(flux_top, layer):
+        src_k, qsat_k, q_k, sqrtp_k, dp_k, gate_k = layer
+        # Oracle ordering (codex R1 #1): evaporation acts on the flux entering
+        # the layer TOP (``ZRFL = PMFLXR(JK)``, cuflxn.F90:449); the layer's
+        # OWN source joins the flux only downstream (``PMFLXR(JK+1) = ... +
+        # ZPDR``, cuflxn.F90:470-472) — rain never re-evaporates in its
+        # production layer.
+        zrfl = flux_top
+        zrfl_safe = jnp.where(zrfl > _IFS_EVAP_FLUX_TINY, zrfl, 1.0)
+        zdrfl1 = (
+            _IFS_RCPECONS
+            * jnp.maximum(qsat_k - q_k, 0.0)
+            * area
+            * (sqrtp_k / _IFS_RCVRFACTOR * zrfl_safe / area) ** _IFS_EVAP_EXPONENT
+            * dp_k
+        )
+        zrmin = zrfl - area * jnp.maximum(rhebc * qsat_k - q_k, 0.0) * zcons2 * dp_k
+        zrfln = jnp.maximum(jnp.maximum(zrfl - zdrfl1, zrmin), 0.0)
+        # Smooth below-cloud-base membership: the realized layer outflow is
+        # the CONVEX BLEND of the two oracle branches — ``zrfl`` (inactive,
+        # above base) and ``zrfln`` (active, below base):
+        #   flux_out = (1-g)*zrfl + g*zrfln = zrfl - g*(zrfl - zrfln)
+        # with the deposited vapor ``g*(zrfl - zrfln)`` matching it exactly
+        # (conservation per level).  At g in {0,1} this IS the oracle
+        # recurrence; the fractional band (~2 levels around the smooth LCL)
+        # is the scheme's standard AD-compatible membership analog (same
+        # doctrine as the deep_weight/LDCUM blends) — codex R1 #2.
+        evap_k = jnp.where(
+            zrfl > _IFS_EVAP_FLUX_TINY, (zrfl - zrfln) * gate_k, 0.0,
+        )
+        return (zrfl - evap_k + src_k).astype(_dtype), evap_k
+
+    ncol = q_v.shape[0]
+    init = jnp.zeros((ncol,), dtype=_dtype)
+    _, evap_sf = jax.lax.scan(_step, init, inputs)             # (nlev, ncol)
+    evap = jnp.moveaxis(evap_sf, 0, 1)                         # (ncol, nlev)
+
+    evap_rate = evap * g / dp_full                             # [kg/kg/s]
+    evap_total = jnp.sum(evap, axis=-1)
+    rain_total = jnp.sum(src_flux, axis=-1)
+    rain_scale = jnp.clip(
+        1.0 - evap_total / jnp.maximum(rain_total, 1e-30), 0.0, 1.0,
+    )
+    return evap_rate, rain_scale[:, None]
 
 
 def _ifs_cape_closure_target(
@@ -1424,6 +1595,29 @@ def bechtold_convection(
         dlt_profile * M_u_new * p_gate_qc * plume.q_c_u / rho_safe
     )
 
+    # -- Early precip split (IFS sub-cloud evap path only) -------------------
+    # The Kessler evaporation needs the POST-SPLIT rain-source profile (only
+    # the rain fraction is an evaporable falling flux; the anvil fraction
+    # stays aloft as cloud), so the split dispatch runs EARLY here and the
+    # legacy late-split block below is skipped.  The OFF path keeps its
+    # original op order — byte-identical.  Same dispatch (incl. the
+    # unknown-scheme raise) as the late block.
+    _split_done = False
+    if config.use_ifs_subcloud_evap:
+        dq_c_conv_dt = jnp.nan_to_num(jnp.maximum(dq_c_conv_dt, 0.0))
+        if config.precip_split_scheme == "constant":
+            dq_c_conv_dt, dq_r_conv_dt = split_convective_rain(
+                dq_c_conv_dt, config.precip_efficiency)
+        elif config.precip_split_scheme == "autoconversion":
+            dq_c_conv_dt, dq_r_conv_dt = convective_autoconversion_split(
+                dq_c_conv_dt, plume.q_c_u,
+                config.autoconv_q_c_crit, config.autoconv_pe_max)
+        else:
+            raise ValueError(
+                f"unknown precip_split_scheme {config.precip_split_scheme!r}; "
+                "expected 'constant' or 'autoconversion'")
+        _split_done = True
+
     # -- Optional downdraft (RH-dependent) ---------------------------------
     if config.enable_downdraft:
         # ``lcl_membership_sharpness`` is a LEVEL-INDEX sharpness
@@ -1463,23 +1657,55 @@ def bechtold_convection(
         # (Codex stop-time review: "downdraft fix still creates column
         # water" — earlier form added vapor without removing the
         # corresponding cloud-water source).
-        below_lcl_mass = _below_lcl_dp[:, None].clip(1e-6, None)
-        rain_source_total = _col_triple[..., 2] / constants.g
-        evap_total = jnp.minimum(
-            jnp.abs(M_d_base) * config.downdraft_evap_efficiency,
-            rain_source_total,
+        # SUPERSEDED by the oracle Kessler evaporation when
+        # ``use_ifs_subcloud_evap`` is on (two evap paths would
+        # double-count); the trigger/M_d above still feed CMT.
+        if not config.use_ifs_subcloud_evap:
+            below_lcl_mass = _below_lcl_dp[:, None].clip(1e-6, None)
+            rain_source_total = _col_triple[..., 2] / constants.g
+            evap_total = jnp.minimum(
+                jnp.abs(M_d_base) * config.downdraft_evap_efficiency,
+                rain_source_total,
+            )
+            evap_rate = (
+                evap_total[:, None] * below_lcl * constants.g / below_lcl_mass
+            )
+            dT_dt_dd = -(constants.L_v / constants.c_pd) * evap_rate
+            dT_dt = dT_dt + dT_dt_dd
+            dq_v_dt = dq_v_dt + evap_rate
+            rain_source_safe = jnp.clip(rain_source_total[:, None], 1e-30, None)
+            rain_scale = 1.0 - evap_total[:, None] / rain_source_safe
+            dq_c_conv_dt = jnp.where(
+                dq_c_conv_dt > 0.0, dq_c_conv_dt * rain_scale, dq_c_conv_dt,
+            )
+
+    # -- IFS Kessler sub-cloud rain evaporation (cuflxn.F90:436-475, opt-in) --
+    # INDEPENDENT of ``enable_downdraft`` (IFS evaporates the precip flux
+    # below cloud base wherever the sub-cloud air is drier than the RH break,
+    # downdraft or not).  Vapor deposits AT the evaporating levels (the
+    # oracle's per-layer recurrence — better spatial structure than the
+    # legacy uniform mass-weighted deposit); the evaporated water is debited
+    # from the rain source by a column-uniform scale so ``dq_r_conv_dt`` stays
+    # a non-negative source (contract) and column water closes exactly.
+    if config.use_ifs_subcloud_evap and dq_r_conv_dt is not None:
+        _below_lcl_evap = jax.nn.sigmoid(
+            config.lcl_membership_sharpness
+            * (levels_arr[None, :] - k_lcl_smooth[:, None])
         )
-        evap_rate = (
-            evap_total[:, None] * below_lcl * constants.g / below_lcl_mass
+        _q_sat_evap = saturation_mixing_ratio(T, p_full)
+        _rh_evap = jnp.clip(q_v / jnp.maximum(_q_sat_evap, 1e-12), 0.0, None)
+        # Soft-gather the environment RH at the smooth cloud base / top for
+        # the RCUCOV area RH-enhancement (the shared Gaussian-softmax gather;
+        # the helper is q_sat-named but is a generic level-index gather).
+        _rh_base = _ifs_cloud_base_qsat(_rh_evap, k_lcl_smooth, levels_arr)[:, 0]
+        _rh_top = _ifs_cloud_base_qsat(_rh_evap, k_lnb_smooth, levels_arr)[:, 0]
+        evap_rate_ifs, rain_scale_ifs = _ifs_subcloud_rain_evaporation(
+            q_v, _q_sat_evap, p_half, dp_full, dq_r_conv_dt,
+            _below_lcl_evap, _rh_base, _rh_top, deep_weight, dt,
         )
-        dT_dt_dd = -(constants.L_v / constants.c_pd) * evap_rate
-        dT_dt = dT_dt + dT_dt_dd
-        dq_v_dt = dq_v_dt + evap_rate
-        rain_source_safe = jnp.clip(rain_source_total[:, None], 1e-30, None)
-        rain_scale = 1.0 - evap_total[:, None] / rain_source_safe
-        dq_c_conv_dt = jnp.where(
-            dq_c_conv_dt > 0.0, dq_c_conv_dt * rain_scale, dq_c_conv_dt,
-        )
+        dT_dt = dT_dt - (constants.L_v / constants.c_pd) * evap_rate_ifs
+        dq_v_dt = dq_v_dt + evap_rate_ifs
+        dq_r_conv_dt = dq_r_conv_dt * rain_scale_ifs
 
     # -- Penetrative-downdraft thermodynamic transport (opt-in) --------------
     # INDEPENDENT of the re-evaporation downdraft above (hence OUTSIDE the
@@ -1555,7 +1781,12 @@ def bechtold_convection(
     # raise rather than silently defaulting). "autoconversion" derives the
     # precip fraction from the plume updraft cloud water q_c_u (the same field
     # dq_c_conv_dt is built from at L571), so the two are per-level aligned.
-    if config.precip_split_scheme == "constant":
+    # Skipped when the IFS sub-cloud-evap path already split early (the
+    # evaporation needed the rain profile); ``dq_r_conv_dt`` then already
+    # carries the evap debit.
+    if _split_done:
+        pass
+    elif config.precip_split_scheme == "constant":
         dq_c_conv_dt, dq_r_conv_dt = split_convective_rain(
             dq_c_conv_dt, config.precip_efficiency)
     elif config.precip_split_scheme == "autoconversion":

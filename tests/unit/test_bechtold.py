@@ -1655,3 +1655,244 @@ def test_ifs_profile_scale_limit_matches_oracle_semantics():
     s_small = jnp.array([0.5, 0.5, 0.5])
     out_small = _ifs_profile_scale_limit(s_small, prof, cap)
     assert jnp.allclose(out_small, s_small)          # s<1 never touched
+
+
+# ---------------------------------------------------------------------------
+# IFS Kessler sub-cloud rain evaporation (cuflxn.F90:436-475)
+# ---------------------------------------------------------------------------
+
+from legoesm.atmosphere.physics.convection.bechtold import (  # noqa: E402
+    _ifs_subcloud_rain_evaporation,
+    _IFS_RCPECONS,
+    _IFS_EVAP_EXPONENT,
+    _IFS_RCVRFACTOR,
+    _IFS_RCUCOV,
+    _IFS_RCUCOV_DEEP_FACTOR,
+    _IFS_RHEBC_OCEAN,
+    _IFS_RHEBC_OCEAN_DEEP,
+)
+
+
+def test_ifs_subcloud_evap_constants_match_oracle():
+    """Constants are the oracle's: RCPECONS=5.44e-4/g (sucumf.F90:176),
+    exponent 0.5777 (cuflxn.F90:453), RCVRFACTOR=5.09e-3 (sucumf.F90:177),
+    RCUCOV=0.05 (sucumf.F90:175) with the 0.6 deep area factor
+    (cuflxn.F90:442), RHEBC ocean 0.92 / deep-ocean 0.85
+    (sucumf.F90:179, cuflxn.F90:226)."""
+    assert abs(_IFS_RCPECONS - 5.44e-4 / constants.g) < 1e-18
+    assert _IFS_EVAP_EXPONENT == 0.5777
+    assert _IFS_RCVRFACTOR == 5.09e-3
+    assert _IFS_RCUCOV == 0.05
+    assert _IFS_RCUCOV_DEEP_FACTOR == 0.6
+    assert _IFS_RHEBC_OCEAN == 0.92
+    assert _IFS_RHEBC_OCEAN_DEEP == 0.85
+
+
+def test_ifs_subcloud_evap_analytic_fortran_mirror():
+    """Hand-computed Fortran-shaped downward recurrence (cuflxn.F90:449-460)
+    on a 4-level column reproduces the helper: rain forms in the upper two
+    (cloud) layers, evaporates in the dry sub-cloud layers below; a sign,
+    orientation, area-blend or RH-break bug goes red."""
+    import numpy as np
+    g = constants.g
+    dt = 600.0
+    q = np.array([[1e-4, 2e-3, 4e-3, 6e-3]])          # surface-last, dry BL
+    qsat = np.array([[5e-4, 4e-3, 1.2e-2, 1.6e-2]])   # sub-cloud RH = 1/3, 3/8
+    p_half = np.array([[200e2, 400e2, 620e2, 830e2, 1000e2]])
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    dq_r = np.array([[2e-7, 3e-7, 0.0, 0.0]])          # rain source aloft
+    below = np.array([[0.0, 0.0, 1.0, 1.0]])           # crisp sub-cloud gate
+    # ZRHM = 0.85 > 0.8 so the non-deep case exercises a NONZERO RCUCOV RH
+    # enhancement, factor 1 + 0.05/0.025 = 3 (codex R2: 0.8 exactly zeroed it).
+    rh_b, rh_t = np.array([0.95]), np.array([0.75])
+    dw = np.array([1.0])                                # fully deep
+
+    def mirror(q_np, qsat_np, dq_r_np, below_np, deep: bool):
+        # Oracle ordering: evap acts on the flux entering the layer TOP; the
+        # layer's own source joins the flux downstream (cuflxn.F90:449,470).
+        if deep:
+            area = _IFS_RCUCOV * _IFS_RCUCOV_DEEP_FACTOR
+            rhebc = _IFS_RHEBC_OCEAN_DEEP
+        else:
+            zrhm = 0.5 * (rh_b[0] + rh_t[0])
+            area = _IFS_RCUCOV * (1.0 + (max(0.8, zrhm) - 0.8) / 0.025)
+            rhebc = _IFS_RHEBC_OCEAN
+        zcons2 = 1.0 / (g * dt)
+        flux = 0.0
+        evap_exp = np.zeros(4)
+        for k in range(4):                              # downward (surface-last)
+            zrfl = flux
+            if zrfl > 1e-12:
+                zdrfl1 = (
+                    _IFS_RCPECONS * max(0.0, qsat_np[0, k] - q_np[0, k]) * area
+                    * (np.sqrt(p_half[0, k] / p_half[0, -1]) / _IFS_RCVRFACTOR
+                       * zrfl / area) ** _IFS_EVAP_EXPONENT
+                    * dp[0, k]
+                )
+                zrmin = zrfl - area * max(0.0, rhebc * qsat_np[0, k] - q_np[0, k]) \
+                    * zcons2 * dp[0, k]
+                zrfln = max(max(zrfl - zdrfl1, zrmin), 0.0)
+                evap_exp[k] = (zrfl - zrfln) * below_np[0, k]
+            flux = zrfl - evap_exp[k] + max(dq_r_np[0, k], 0.0) * dp[0, k] / g
+        return evap_exp
+
+    for deep in (True, False):                          # both area branches
+        dw_case = np.array([1.0 if deep else 0.0])
+        evap_exp = mirror(q, qsat, dq_r, below, deep)
+        evap_rate, rain_scale = _ifs_subcloud_rain_evaporation(
+            jnp.asarray(q), jnp.asarray(qsat), jnp.asarray(p_half),
+            jnp.asarray(dp), jnp.asarray(dq_r), jnp.asarray(below),
+            jnp.asarray(rh_b), jnp.asarray(rh_t), jnp.asarray(dw_case), dt,
+        )
+        got_evap = np.asarray(evap_rate) * dp / g       # back to kg/m2/s
+        # tol keyed on the JAX compute dtype (np promotion above would
+        # always report float64 even when the scan ran in fp32).
+        tol = 1e-9 if evap_rate.dtype == jnp.float64 else 1e-5
+        assert np.allclose(got_evap[0], evap_exp, rtol=tol, atol=1e-18), (
+            f"deep={deep}: evap {got_evap[0]} != hand-computed {evap_exp}"
+        )
+        assert float(evap_exp.sum()) > 0.0, "fixture must actually evaporate"
+        rain_total = float((np.maximum(dq_r, 0.0) * dp / g).sum())
+        scale_exp = 1.0 - evap_exp.sum() / rain_total
+        assert abs(float(rain_scale[0, 0]) - scale_exp) < tol
+
+
+def test_ifs_subcloud_evap_rh_break_and_conservation():
+    """A sub-cloud layer already wetter than the RH break evaporates ~nothing;
+    a dry layer evaporates; per-level evap never exceeds the through-flux
+    (fluxes stay >= 0) and the debit scale lands in [0, 1] with column water
+    closing exactly: sum(evap) == (1 - scale) * rain_total."""
+    dt = 600.0
+    ncol, nlev = 1, 5
+    p_half = jnp.linspace(150e2, 1000e2, nlev + 1)[None, :]
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    qsat = jnp.full((ncol, nlev), 1e-2)
+    dq_r = jnp.zeros((ncol, nlev)).at[:, 1].set(5e-7)
+    below = jnp.zeros((ncol, nlev)).at[:, 3:].set(1.0)
+    rh_b, rh_t = jnp.array([0.9]), jnp.array([0.7])
+    dw = jnp.array([0.0])                                # non-deep branch
+
+    def run(q):
+        return _ifs_subcloud_rain_evaporation(
+            q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt)
+
+    # wetter than the 0.92 break everywhere below cloud: ~no evaporation.
+    e_wet, s_wet = run(qsat * 0.95)
+    assert float(jnp.sum(e_wet)) == 0.0
+    assert abs(float(s_wet[0, 0]) - 1.0) < 1e-12
+    # dry sub-cloud: evaporates, scale in [0,1), exact closure.
+    q_dry = qsat * 0.3
+    e_dry, s_dry = run(q_dry)
+    evap_total = float(jnp.sum(e_dry * dp / constants.g))
+    rain_total = float(jnp.sum(jnp.maximum(dq_r, 0.0) * dp / constants.g))
+    assert evap_total > 0.0
+    assert 0.0 <= float(s_dry[0, 0]) < 1.0
+    assert abs(evap_total - (1.0 - float(s_dry[0, 0])) * rain_total) <= (
+        1e-12 * rain_total + 1e-30
+    )
+    assert evap_total <= rain_total * (1.0 + 1e-9)
+
+
+def test_ifs_subcloud_evap_toggle_and_leaf_integration():
+    """Default OFF; ON re-evaporates sub-cloud rain on a convecting column
+    with a dry boundary layer (vapor added below the LCL, surface-reaching
+    rain reduced, column vapor gain == rain debit) and stays finite."""
+    assert BechtoldConfig().use_ifs_subcloud_evap is False
+    # Proven convecting fixture (same as the closure toggle tests); the
+    # analytic sub-cloud RH ~0.4 sits far below the 0.85/0.92 break, so the
+    # Kessler evap fires whenever rain exists.  Legacy downdraft evap is
+    # disabled in BOTH runs (downdraft_evap_efficiency=0) so the toggle
+    # isolates the IFS path alone.
+    T, q, pf, ph, u, v = _column(ncol=2, nlev=40, T_sfc=299.0, q_sfc=13e-3,
+                                 lapse_rate=6.5)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    st = jnp.zeros((ncol,))
+    dp = ph[:, 1:] - ph[:, :-1]
+    common = dict(downdraft_evap_efficiency=0.0)
+    out_on, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_subcloud_evap=True, **common))
+    out_off, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_subcloud_evap=False, **common))
+    for o in (out_on, out_off):
+        assert jnp.all(jnp.isfinite(o.dT_dt))
+        assert jnp.all(jnp.isfinite(o.dq_v_dt))
+        assert o.dq_r_conv_dt is not None
+        assert float(jnp.min(o.dq_r_conv_dt)) >= 0.0
+    rain_on = float(jnp.sum(out_on.dq_r_conv_dt * dp / constants.g))
+    rain_off = float(jnp.sum(out_off.dq_r_conv_dt * dp / constants.g))
+    assert rain_off > 0.0, "fixture must rain (else the test is vacuous)"
+    assert rain_on < rain_off, "IFS evap must reduce surface-reaching rain"
+    # Column water closure: the vapor the evap adds equals the rain debit.
+    # Relative tolerance keyed on the compute dtype (fp32 accumulates ~1e-7
+    # relative over the two 40-level column sums — codex R3).
+    rtol = 1e-9 if out_on.dq_v_dt.dtype == jnp.float64 else 3e-5
+    dv_on = float(jnp.sum((out_on.dq_v_dt - out_off.dq_v_dt) * dp / constants.g))
+    assert abs(dv_on - (rain_off - rain_on)) < 1e-12 + rtol * abs(rain_off), (
+        "column vapor gain != rain debit (water leak in the evap block)"
+    )
+    # Evaporative cooling accompanies the moistening (L_v/c_p ratio).
+    dh_on = float(jnp.sum((out_on.dT_dt - out_off.dT_dt) * dp / constants.g))
+    assert dh_on < 0.0
+    assert abs(dh_on * constants.c_pd + dv_on * constants.L_v) < (
+        rtol * abs(dv_on * constants.L_v) + 1e-12
+    )
+
+
+def test_ifs_subcloud_evap_no_rain_noop_and_grad():
+    """precip_efficiency=0 + constant split => no rain to evaporate: the flag
+    is a no-op (no crash on dq_r=None); jax.grad stays finite through the
+    evap scan on a raining column (the **0.5777 zero-flux guard)."""
+    T, q, pf, ph, u, v = _column(ncol=1, nlev=24, T_sfc=300.0, q_sfc=10e-3)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    st = jnp.zeros((ncol,))
+    out, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_subcloud_evap=True,
+                              precip_efficiency=0.0))
+    assert out.dq_r_conv_dt is None
+    assert jnp.all(jnp.isfinite(out.dT_dt))
+
+    if jnp.asarray(0.0).dtype != jnp.float64:
+        import pytest
+        pytest.skip("full-scheme grad NaNs under fp32 on main irrespective of "
+                    "this flag (pre-existing); grad coverage runs under x64 "
+                    "like the file's other grad tests")
+
+    def loss(eps_deep):
+        cfg = BechtoldConfig(epsilon_deep=eps_deep, use_ifs_subcloud_evap=True)
+        o, _, _ = bechtold_convection(T, q, pf, ph, u, v, cpp, st, None,
+                                      dt=600.0, config=cfg)
+        return jnp.sum(o.dq_v_dt ** 2)
+
+    assert jnp.isfinite(jax.grad(loss)(1.75e-3))
+
+
+def test_ifs_subcloud_evap_fractional_gate_is_convex_blend():
+    """A fractional below-LCL membership g realizes the CONVEX BLEND of the
+    two oracle branches per level — flux_out = (1-g)*zrfl + g*zrfln, vapor
+    deposit g*(zrfl - zrfln) — so g=0.5 evaporation is exactly half the
+    hard-gate evaporation of the same single active layer (codex R1 #2)."""
+    dt = 600.0
+    ncol, nlev = 1, 3
+    p_half = jnp.linspace(400e2, 1000e2, nlev + 1)[None, :]
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    qsat = jnp.full((ncol, nlev), 1e-2)
+    q = qsat * 0.3
+    dq_r = jnp.zeros((ncol, nlev)).at[:, 0].set(4e-7)   # source in the top layer
+    rh_b, rh_t = jnp.array([0.9]), jnp.array([0.7])
+    dw = jnp.array([1.0])
+
+    def evap_with_gate(g_mid):
+        below = jnp.asarray([[0.0, g_mid, 0.0]])        # only the middle layer
+        e, _ = _ifs_subcloud_rain_evaporation(
+            q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt)
+        return float(e[0, 1] * dp[0, 1] / constants.g)
+
+    e_full = evap_with_gate(1.0)
+    e_half = evap_with_gate(0.5)
+    assert e_full > 0.0
+    assert abs(e_half - 0.5 * e_full) < 1e-12 + 1e-9 * e_full

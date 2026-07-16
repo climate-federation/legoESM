@@ -2604,6 +2604,10 @@ def _resolve_convection(config):
             # field gets the scheme default, not the legacy closure).
             use_ifs_cape_closure=getattr(
                 config, 'bechtold_use_ifs_cape_closure', True),
+            # IFS Kessler sub-cloud rain evaporation (default False = legacy,
+            # matching the scheme default).
+            use_ifs_subcloud_evap=getattr(
+                config, 'bechtold_use_ifs_subcloud_evap', False),
         )
         if _pe is not None:
             _bechtold_kwargs["precip_efficiency"] = _pe
