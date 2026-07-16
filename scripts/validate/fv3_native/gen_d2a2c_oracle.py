@@ -132,8 +132,9 @@ def _pack(work: str) -> None:
         **{k: stag[k] for k in FIXTURE_INPUTS},
         res=RES, ng=NG, input_sha256=inp_hash,
         input_lineage="analytic-swcore-state D-winds; duo d2a2c_vect "
-        "(dg%is_initialized) D->A->C — closes the divergence_corner_duo "
-        "plain-c_sw ua/va scope caveat")
+        "(dg%is_initialized) D->A->C LEAF certification (the "
+        "divergence_corner_duo gate uses plain-c_sw ua/va; chaining these "
+        "duo ua/va into it is remaining end-to-end work, NOT closed here)")
     print("fixture packed; input_sha256", inp_hash)
 
 

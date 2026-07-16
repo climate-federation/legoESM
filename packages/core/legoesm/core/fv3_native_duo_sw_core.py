@@ -138,7 +138,9 @@ def d2a2c_vect_duo(u: np.ndarray, v: np.ndarray, gs: dict, bd: Bounds,
     This is the ua/va source the duo c_sw actually feeds
     ``divergence_corner_duo`` (the plain ``c_sw`` used by the phase-4a
     reference takes d2a2c_vect's NON-duo branch, so its ua/va differ at
-    panel edges/corners — the scope caveat this routine closes).
+    panel edges/corners).  Certifying this LEAF bit-exact is a step toward
+    the full duo pipeline; it does NOT itself chain these ua/va into the
+    divergence oracle (that end-to-end run remains).
 
     Returns ``{ua, va, uc, vc, ut, vt}`` (numpy).  u (isd:ied, jsd:jed+1);
     v (isd:ied+1, jsd:jed).  ``dord4``/``id`` is UNUSED on the duo branch
