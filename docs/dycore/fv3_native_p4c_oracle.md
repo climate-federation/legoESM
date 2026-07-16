@@ -196,6 +196,29 @@ Summary: no destructive edge artifacts anywhere; the residual cube
 signatures are the two documented smooth imprints (W2 v ~0.5 m/s;
 HS equatorial u wave-4 0.19 m/s ~ 5%), both at the calibrated C36 level.
 
+### W2 wave-pattern benchmark vs the authoritative FV3 references
+
+The W2 v "wave-like" error field was benchmarked directly against
+Mouallem's Zenodo `atmos_daily.nc` references (day 5, same 181x360 grid,
+hord6; `fv3_recon/w2_wave/w2_v_vs_fv3_refs.png`):
+
+| day-5 W2 v-error       | max\|v\| (m/s) | rms (m/s) |
+|------------------------|---------------|-----------|
+| legoESM production C36 | 0.54          | 0.098     |
+| FV3 PLAIN C48 hord6    | 1.38          | 0.097     |
+| FV3 DUO   C48 hord6    | 0.024         | 0.010     |
+
+- The pattern is the quasi-stationary cube-harmonic error (midlat wave-4
+  amplitude 0.10 m/s, phase drift ~5 deg per half-day).  Authentic PLAIN
+  FV3 shows the SAME grid-locked wave-4 class at IDENTICAL rms and a
+  2.6x LARGER corner peak — despite running at the finer C48 (the
+  resolution asymmetry favours FV3, so the conclusion is conservative).
+- legoESM's one distinctive component: smooth polar wave-2 arcs
+  (0.107 m/s) where FV3-plain is polar-clean but corner-spiky.
+- The DUO grid eliminates the whole pattern (10-40x cleaner) — the
+  quantified payoff of the native-duo path this campaign certifies
+  kernel-by-kernel (remaining assembly blockers documented above).
+
 ## Duo D-grid finding (2026-07-16): not single-tile certifiable
 
 Attempting the duo d_sw analog of the (certified) duo c_sw exposed a hard
