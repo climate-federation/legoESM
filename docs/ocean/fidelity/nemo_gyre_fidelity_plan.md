@@ -126,8 +126,12 @@ legoESM uses cosine time-averaging + `barotropic_diffusion_alpha=0.01` (spatial,
 ×120 substeps) which damps the WBC η-gradient. Also substeps 120 vs NEMO's 50.
 Effort: medium (implement Demange in the barotropic solver).
 
-**E. RK3 variant: Shu-Osher SSP → Wicker-Skamarock** (+ asymmetric per-stage RHS:
-NEMO applies LDF at stages 1&3 only, ZDF at stage 3 only). Effort: medium.
+**E. RK3 variant — DONE 2026-07-16 (e2b4b03a0, hardened 05027902e).**
+momentum_time_integrator="rk3_ws" = NEMO stprk3_stg exactly (stages from u0,
+dt/3-dt/2-dt, LDF stages 1&3 via skip_lateral_viscosity, ZDF stage-3-equiv).
+THE FIRST NON-NEUTRAL sweep item: 0.722 → 0.758 (yr-1 0.962). Review SHIP; the
+consolidated sweep review's findings (WENO+ene_total latent Coriolis-drop
+guard, direct tests, constant promotion) are in 05027902e.
 
 **Minors (low priority):** rho_0 1025 → 1026; TKE buoyancy N² adiabatic → in-situ;
 nn_mxl 2 → 3 (previously deconfounded — likely inert).
