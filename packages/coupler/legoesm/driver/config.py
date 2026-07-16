@@ -326,8 +326,13 @@ def parse_gwd_spec(value: str) -> str:
     driver.  Both drivers now share this validator: composites work everywhere,
     and a typo is still caught at the CLI.
 
-    Membership only; ``ExperimentConfig.validate_strict`` remains the authority
-    on the semantics of a combination.
+    Delegates the SEMANTICS to ``ExperimentConfig.validate_strict`` rather than
+    re-implementing them: a membership-only check accepted composites strict
+    rejects -- "none+hines", "e3sm_cam+hines", "ml_emulator+hines", duplicates
+    like "hines+hines" (codex) -- so the CLI would advertise a spec the config
+    then refuses. Asking the real validator keeps the two from diverging by
+    construction, which is the same lesson as resolving the effective surface
+    config through the production path in driver/air_sea_consistency.py.
     """
     import argparse
 
@@ -338,6 +343,14 @@ def parse_gwd_spec(value: str) -> str:
                 f"expected one of {VALID_GWD}, or a '+'-joined composite of "
                 f"them (e.g. 'hines+mcfarlane')"
             )
+    try:
+        ExperimentConfig(gravity_wave_drag=value).validate_strict()
+    except ValueError as exc:
+        # Surface only the GWD complaint: validate_strict reports every error
+        # for the config, and the rest are irrelevant to this one flag.
+        msg = "; ".join(m for m in str(exc).splitlines()
+                        if "gravity_wave_drag" in m) or str(exc)
+        raise argparse.ArgumentTypeError(msg) from None
     return value
 
 

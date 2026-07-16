@@ -188,13 +188,52 @@ def test_gwd_composites_are_selectable_from_every_driver(parsers, driver, spec):
     ExperimentConfig(gravity_wave_drag=spec).validate_strict()
 
 
-@pytest.mark.parametrize("bad", ["garbage", "hines+garbage"])
+@pytest.mark.parametrize("bad", [
+    "garbage", "hines+garbage",
+    # composites that are membership-valid but SEMANTICALLY invalid; a
+    # membership-only CLI check accepted these while validate_strict rejected
+    # them, so the flag advertised a spec the config then refused (codex).
+    "none+hines", "e3sm_cam+hines", "ml_emulator+hines", "hines+hines",
+])
 @pytest.mark.parametrize("driver", sorted(_DRIVERS))
 def test_gwd_typos_are_rejected_at_the_cli(parsers, driver, bad):
     """The other half: dropping choices= must not cost typo rejection."""
     _, builder = _DRIVERS[driver]
     with pytest.raises(SystemExit):
         _reparse(driver, builder, ["--gravity-wave-drag", bad])
+
+
+@pytest.mark.parametrize("spec", [
+    "hines", "none", "hines+mcfarlane", "mcfarlane+prognostic_spectral",
+    "garbage", "hines+garbage", "none+hines", "e3sm_cam+hines",
+    "ml_emulator+hines", "hines+hines",
+])
+def test_gwd_cli_and_validate_strict_never_disagree(spec):
+    """The CLI validator must be the config validator, not a copy of it.
+
+    parse_gwd_spec delegates to ExperimentConfig.validate_strict for the
+    SEMANTICS (it only pre-checks membership to give a better message), so the
+    two cannot drift -- the same reasoning as resolving the effective surface
+    config through the production path in driver/air_sea_consistency.py.
+    """
+    import argparse
+
+    from legoesm.driver.config import parse_gwd_spec
+
+    try:
+        parse_gwd_spec(spec)
+        cli_ok = True
+    except argparse.ArgumentTypeError:
+        cli_ok = False
+    try:
+        ExperimentConfig(gravity_wave_drag=spec).validate_strict()
+        cfg_ok = True
+    except ValueError:
+        cfg_ok = False
+    assert cli_ok == cfg_ok, (
+        f"--gravity-wave-drag {spec!r}: CLI {'accepts' if cli_ok else 'rejects'} "
+        f"but validate_strict {'accepts' if cfg_ok else 'rejects'}"
+    )
 
 
 def _reparse(driver: str, builder: str, argv: list):

@@ -364,6 +364,16 @@ def _apply_drag_iwm_overrides(args, grid_type, grid, z_coord, config, model):
             f"--iwm is supported on the lat-lon / tripole grids only "
             f"(the {grid_type} vertical-mixing bridge does not consume "
             f"IWM yet)")
+    if want_ddm:
+        # Same rule, same reason: only the lat-lon C-grid path routes the
+        # salinity solve through the DDM avs.  Without this, --ddm was silently
+        # INERT on cubed_sphere (setup ships physics=None and this branch never
+        # wired it) -- a flag that parses and does nothing is the failure this
+        # branch exists to remove, so reject it loudly instead (codex).
+        raise SystemExit(
+            f"--ddm is supported on the lat-lon / tripole grids only "
+            f"(the {grid_type} vertical-mixing bridge does not consume "
+            f"double-diffusive avs yet)")
     if want_wide_halo:
         raise SystemExit(
             f"--barotropic-wide-halo is supported on the lat-lon / tripole "
@@ -827,6 +837,24 @@ def parse_args(argv: list[str] | None = None):
     if getattr(args, "require_config", False):
         from legoesm.driver.run_config_yaml import require_config
         require_config(args.config, driver="run_omip")
+    # Resolve the additive-mixing riders' implicit-solve requirement HERE, at
+    # parse time, so every downstream path sees it.
+    #
+    # Both riders contribute ONLY through the implicit solve and the
+    # LatLonCGridOceanModel constructor RAISES if they are enabled without it.
+    # _apply_drag_iwm_overrides forces it too, but that hook runs AFTER the
+    # bathymetry path has already built its config+model from `args`, so
+    # `--ddm --bathymetry ...` died in the constructor with an error the user
+    # could not connect to the flag they passed (codex). Forcing it at the
+    # source fixes the flat, bathymetry and tripole paths in one place; the
+    # later force becomes a harmless backstop.
+    if getattr(args, "ddm", False) or getattr(args, "iwm", False):
+        if not getattr(args, "implicit_vertical_mixing", False):
+            args.implicit_vertical_mixing = True
+            _who = "zdfddm" if getattr(args, "ddm", False) else "zdfiwm"
+            print(f"[setup] {_who}: --implicit-vertical-mixing forced ON "
+                  "(the additive avt/avs/avm only enter the backward-Euler "
+                  "solve; the model refuses the explicit path)")
     return args
 
 
