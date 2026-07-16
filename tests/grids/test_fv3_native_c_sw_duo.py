@@ -43,30 +43,49 @@ def _run(gs, st, bd, duogrid):
                 duogrid=duogrid)
 
 
-def test_duo_c_sw_runs_finite(state):
-    """Every duo c_sw output is finite over its written region (no NaN/Inf
-    from the swapped duo leaves + upwind KE/vort)."""
+def _interior_mask(bd, shape):
+    """Strict compute interior (is..ie, js..je) — a BOUNDS-derived region
+    every c_sw output writes, so a NaN/Inf there is a real defect (not
+    excluded by a value-derived mask; codex p4c c_sw P2)."""
+    lo = 1 - bd.ng
+    m = np.zeros(shape, dtype=bool)
+    m[bd.is_ - lo:bd.ie - lo + 1, bd.js - lo:bd.je - lo + 1] = True
+    return m
+
+
+@pytest.mark.parametrize("hydrostatic", [True, False])
+def test_duo_c_sw_runs_finite(state, hydrostatic):
+    """Every duo c_sw output is FINITE over the strict compute interior
+    (bounds-derived, so NaN/Inf is genuinely detected).  Runs both
+    hydrostatic AND non-hydrostatic (the latter exercises the two
+    fill_4corners(W) skip gates)."""
     gs, st, bd = state
-    out = _run(gs, st, bd, duogrid=True)
-    for k in ("delpc", "ptc", "uc", "vc", "ua", "va", "divg_d"):
+    from legoesm.core.fv3_native_sw_core import c_sw
+    w = np.zeros_like(st["delp"]) if hydrostatic else \
+        (0.1 * np.asarray(st["pt"], float))
+    out = c_sw(delp=st["delp"], pt=st["pt"], w=w, u=st["u"], v=st["v"],
+               gs=gs, bd=bd, npx=RES + 1, npy=RES + 1, dt2=112.5, nord=1,
+               hydrostatic=hydrostatic, dord4=True, grid_type=0, duogrid=True)
+    keys = ("delpc", "ptc", "uc", "vc", "ua", "va", "divg_d")
+    if not hydrostatic:
+        keys = keys + ("wc",)
+    for k in keys:
         a = np.asarray(out[k], dtype=np.float64)
-        m = np.abs(a) < 1e29                 # written (non-sentinel) region
-        assert m.any(), k
-        assert np.isfinite(a[m]).all(), f"{k}: non-finite in duo c_sw"
+        mask = _interior_mask(bd, a.shape)
+        assert np.isfinite(a[mask]).all(), f"{k}: non-finite in duo c_sw"
 
 
 def test_duo_branch_engages(state):
-    """The duo branch genuinely changes the result vs plain — d2a2c_duo +
-    divergence_duo + simple-upwind KE + interior vorticity transport +
-    skipped corner fills each perturb the C-grid outputs."""
+    """The duo branch genuinely changes the result vs plain — count only
+    GENUINE differences (both sides non-sentinel; codex p4c c_sw P2 — the
+    1e25 divg_d init must not inflate the count)."""
     gs, st, bd = state
     plain = _run(gs, st, bd, duogrid=False)
     duo = _run(gs, st, bd, duogrid=True)
-    # each output must differ at a non-trivial number of cells
     for k, floor in (("delpc", 50), ("uc", 50), ("vc", 50), ("divg_d", 50)):
-        a = np.nan_to_num(np.asarray(plain[k], float), nan=0.0,
-                          posinf=0.0, neginf=0.0)
-        b = np.nan_to_num(np.asarray(duo[k], float), nan=0.0,
-                          posinf=0.0, neginf=0.0)
-        m = np.abs(b) < 1e29
+        a = np.asarray(plain[k], float)
+        b = np.asarray(duo[k], float)
+        # both finite AND non-sentinel (|.|<1e24 rejects the 1e25 divg init)
+        m = (np.abs(a) < 1e24) & (np.abs(b) < 1e24) \
+            & np.isfinite(a) & np.isfinite(b)
         assert int((np.abs(a - b)[m] > 1e-9).sum()) >= floor, k
