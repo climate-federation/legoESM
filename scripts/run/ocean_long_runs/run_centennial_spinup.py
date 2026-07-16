@@ -114,9 +114,13 @@ def main() -> int:
                    help="Enable Holland-Jenkins ice-shelf basal melt "
                         "(requires --ice-shelf-mask + --ice-draft NPY).")
     p.add_argument("--ice-shelf-mask", type=Path, default=None,
-                   help="NPY file with (n_lat, n_lon) {0,1} cavity mask.")
+                   help="NPY file with the {0,1} cavity mask on the run grid: "
+                        "(n_lat, n_lon) for --grid latlon, (nCells,) for "
+                        "--grid mpas.")
     p.add_argument("--ice-draft", type=Path, default=None,
-                   help="NPY file with (n_lat, n_lon) ice-base depth [m].")
+                   help="NPY file with ice-base depth [m] on the run grid: "
+                        "(n_lat, n_lon) for --grid latlon, (nCells,) for "
+                        "--grid mpas.")
     p.add_argument("--ice-shelf-scheme",
                    choices=["three_equation", "linear"],
                    default="three_equation")
@@ -157,6 +161,7 @@ def main() -> int:
         apply_runoff_step,
         apply_runoff_step_mpas,
         apply_ice_shelf_basal_step,
+        apply_ice_shelf_basal_step_mpas,
         apply_tidal_mixing_step,
     )
     from legoesm.ocean.forcing.dai_trenberth import (
@@ -281,9 +286,11 @@ def main() -> int:
     ice_shelf_mask_arr = None
     ice_draft_arr = None
     if args.ice_shelf:
-        if args.grid != "latlon":
+        if args.grid not in ("latlon", "mpas"):
+            # Both grids have a tested basal-melt apply
+            # (apply_ice_shelf_basal_step / _mpas); anything else is unsupported.
             print(
-                f"==> WARNING: --ice-shelf not yet supported on grid="
+                f"==> WARNING: --ice-shelf not supported on grid="
                 f"{args.grid!r}; ignoring."
             )
         elif args.ice_shelf_mask is None or args.ice_draft is None:
@@ -483,18 +490,33 @@ def main() -> int:
                     dt=dt,
                 )
 
-            # Ice-shelf basal melt (when enabled + lat-lon).
+            # Ice-shelf basal melt (when enabled). Grid-dispatched exactly like
+            # the SSS-restoring / runoff steps above: the lat-lon and MPAS apply
+            # functions share the same three-equation basal-melt convention and
+            # both are unit-tested. The MPAS variant was implemented and tested
+            # but previously unreachable -- the driver warned "not supported on
+            # grid=mpas" for a step it already had.
             if (ice_shelf_config is not None
                     and ice_shelf_mask_arr is not None
                     and ice_draft_arr is not None):
-                state, _ = apply_ice_shelf_basal_step(
-                    state,
-                    ice_shelf_mask=ice_shelf_mask_arr,
-                    ice_draft_m=ice_draft_arr,
-                    z_coord=z_coord,
-                    dt=dt,
-                    config=ice_shelf_config,
-                )
+                if args.grid == "mpas":
+                    state, _ = apply_ice_shelf_basal_step_mpas(
+                        state,
+                        ice_shelf_mask=ice_shelf_mask_arr,
+                        ice_draft_m=ice_draft_arr,
+                        z_coord=z_coord,
+                        dt=dt,
+                        config=ice_shelf_config,
+                    )
+                else:
+                    state, _ = apply_ice_shelf_basal_step(
+                        state,
+                        ice_shelf_mask=ice_shelf_mask_arr,
+                        ice_draft_m=ice_draft_arr,
+                        z_coord=z_coord,
+                        dt=dt,
+                        config=ice_shelf_config,
+                    )
 
             # OMIP-2 SSS restoring (when enabled).  Ocean-only driver
             # passes explicit zero ice-fraction; coupled-ice driver
