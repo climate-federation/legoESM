@@ -804,8 +804,14 @@ def main():
     )
     args = parser.parse_args()
 
+    # Resolve the MPI rank BEFORE configuring logging so that under a
+    # data-parallel launch only rank 0 logs at INFO; the other ranks log at
+    # WARNING, otherwise every INFO line is duplicated x nranks (#985 papercut).
+    from legoesm.training.data_parallel import mpi_rank_size
+    _rank, _nproc = mpi_rank_size()
+
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.INFO if _rank == 0 else logging.WARNING,
         format="%(asctime)s %(name)s %(levelname)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
@@ -855,8 +861,7 @@ def main():
     # persists (params.eqx / the scorecard) so the ranks don't clobber those
     # files or multiply the eval work; a barrier after each variant resyncs the
     # ranks before the next variant's collective (DP) training phase.
-    from legoesm.training.data_parallel import mpi_rank_size
-    _rank, _nproc = mpi_rank_size()
+    # (_rank/_nproc resolved above, before logging setup.)
 
     for variant in variants:
         overlay = _load_yaml(

@@ -28,6 +28,7 @@ Relationship to other modules
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import time
@@ -68,6 +69,7 @@ from legoesm.training.era5_to_state import (
     era5_to_spectral_carry,
 )
 from legoesm.training.losses import LossConfig, level_weights
+from legoesm.training.data_parallel import mpi_abort_on_uncaught
 
 logger = logging.getLogger(__name__)
 
@@ -2032,6 +2034,8 @@ def _dp_chunk_sizes(chunk_loader, n_samples_epoch: int) -> list[int]:
     return [int(s) for s in cs]
 
 
+@mpi_abort_on_uncaught  # a rank dying (OOM/NaN) MPI_Aborts the job instead of
+# leaving its peers hung in the next gradient allreduce (#985)
 def _train_spectral_loop(
     model: eqx.Module,
     make_physics_fn,
@@ -2568,6 +2572,13 @@ def _train_spectral_loop(
         if chunk_loader is not None else 1
     )
 
+    # When the chunk loader host-stages chunks (prefetch, #985), each chunk
+    # arrives on the CPU and must be moved onto the compute device at the point
+    # of use in the loop below -- see the loop body for why this is not done in
+    # the prefetch consumer.
+    _host_staged = bool(getattr(chunk_loader, "host_staged", False))
+    _compute_dev = jax.devices()[0] if _host_staged else None
+
     best_loss = float("inf")
     patience_counter = 0
     early_stop_patience = int(getattr(config, "early_stop_patience", 0) or 0)
@@ -2617,6 +2628,17 @@ def _train_spectral_loop(
             for chunk_i, (ic, target) in enumerate(zip(_ics, _tgts)):
                 sample_idx += 1
                 _fb = _forc[chunk_i] if _forc is not None else None
+                if _host_staged:
+                    # Host-staged chunks are built on the CPU (see
+                    # _make_chunk_loader); move only THIS sample onto the compute
+                    # device, right before its step. Peak device footprint is one
+                    # sample (the prior sample's device arrays are freed when
+                    # ic/target/_fb rebind), so a prefetched chunk never rides GPU
+                    # memory -- the #985 OOM. Rebinding ic/target keeps this local.
+                    ic = _stage_tree(ic, _compute_dev)
+                    target = _stage_tree(target, _compute_dev)
+                    if _fb is not None:
+                        _fb = _stage_tree(_fb, _compute_dev)
                 if dp_on:
                     # Local grad on this rank's sample -> average across ranks
                     # BEFORE the update, so every replica applies the identical
@@ -2638,10 +2660,10 @@ def _train_spectral_loop(
                     )
 
                 # --- NaN / Inf detection (outside JIT, values materialized) ---
-                # ponytail: a rank hitting NaN raises and exits; its peers then
-                # abort at the next allreduce (mpirun kills the job on any rank's
-                # non-zero exit). A NaN-consensus allreduce would only make the
-                # message tidier, not the outcome — skipped.
+                # A rank hitting NaN raises; the @mpi_abort_on_uncaught decorator
+                # on this loop then MPI_Aborts the whole job, so its peers can't
+                # hang in the next gradient allreduce (#985). A NaN-consensus
+                # allreduce would only make the message tidier — skipped.
                 loss_val = float(loss)
                 if jnp.isnan(loss) or jnp.isinf(loss):
                     raise RuntimeError(
@@ -2860,6 +2882,20 @@ def _prefetch_iter(gen, buffer=1):
             pass
 
 
+def _stage_tree(tree, device):
+    """``device_put`` only the ARRAY leaves of ``tree`` onto ``device``, leaving
+    None / metadata leaves untouched.
+
+    A chunk is ``(ic_states, targets, forcings)`` of pytrees whose leaves are
+    mostly arrays but not exclusively (``forcings`` may be ``None``); a bare
+    ``jax.device_put(tree, device)`` chokes on a non-array leaf, so filter to
+    arrays via ``eqx.is_array``. Used to host-stage prefetched chunks (#985).
+    """
+    return jax.tree_util.tree_map(
+        lambda x: jax.device_put(x, device) if eqx.is_array(x) else x, tree
+    )
+
+
 def _make_chunk_loader(config, grid, sigma, cache_dir,
                        surface_forcing_path, forcing_cache_path):
     """Streaming/chunked data source for DENSE all-years training.
@@ -2891,14 +2927,42 @@ def _make_chunk_loader(config, grid, sigma, cache_dir,
     )
 
     prefetch = bool(getattr(config, "chunk_prefetch", False))
+    # Prefetch host-staging (#985): the background producer BUILDS the buffered
+    # (next) chunk directly on the CPU -- via ``jax.default_device`` in _load_group
+    # below -- instead of building it on the GPU and copying it down. That
+    # distinction is the fix: a T106 4xA100 run OOM'd because the prefetched chunk
+    # rode GPU memory during the current chunk's training peak, and a post-hoc
+    # device_put(cpu) does NOT help (the arrays are constructed on the GPU first).
+    # ``jax.default_device`` is thread-local, so the producer thread builds on the
+    # CPU while the main thread trains on the GPU. Each SAMPLE is then moved onto
+    # the compute device just before its step (the training loop), so a prefetched
+    # chunk never rides GPU memory. Needs the JAX CPU backend -- add 'cpu' to
+    # JAX_PLATFORMS under a CUDA-only launch; if it is unavailable we warn and
+    # fall back to building on the compute device (a roomy config is unchanged).
+    _host_dev = None
+    if prefetch:
+        try:
+            _host_dev = jax.devices("cpu")[0]
+        except RuntimeError:
+            logger.warning(
+                "chunk_prefetch is on but the JAX CPU backend is unavailable "
+                "(JAX_PLATFORMS?), so prefetched chunks cannot be built on the "
+                "host and will ride compute-device memory (GPU-OOM risk at large "
+                "resolution). Add 'cpu' to JAX_PLATFORMS to enable host staging."
+            )
 
     def _load_group(group):
-        ics, tgts, times = load_training_data(
-            config, grid, sigma, cache_dir, windows=group,
-        )
-        forcings = _maybe_build_sample_forcings(
-            surface_forcing_path, times, grid, forcing_cache_path,
-        )
+        # Build on the CPU when host-staging (thread-local default device), so the
+        # buffered chunk is never constructed on the GPU (#985).
+        _ctx = (jax.default_device(_host_dev) if _host_dev is not None
+                else contextlib.nullcontext())
+        with _ctx:
+            ics, tgts, times = load_training_data(
+                config, grid, sigma, cache_dir, windows=group,
+            )
+            forcings = _maybe_build_sample_forcings(
+                surface_forcing_path, times, grid, forcing_cache_path,
+            )
         return ics, tgts, forcings
 
     def _chunks(start_chunk=0):
@@ -2918,6 +2982,10 @@ def _make_chunk_loader(config, grid, sigma, cache_dir,
         # the same _serial generator), so the resume contract is unchanged.
         yield from (_prefetch_iter(_serial()) if prefetch else _serial())
 
+    # True when chunks are built host-staged (prefetch + CPU backend): the
+    # training loop must then device_put each SAMPLE onto the compute device at
+    # the point of use (#985).
+    _chunks.host_staged = _host_dev is not None
     # Number of chunks per epoch (constant): the mid-epoch checkpoint reads
     # this to normalise the last chunk of an epoch to the next epoch's start.
     _chunks.n_chunks = len(groups)
