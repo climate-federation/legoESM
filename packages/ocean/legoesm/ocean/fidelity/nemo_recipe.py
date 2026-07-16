@@ -69,6 +69,9 @@ class NEMOModelRecipeConfig:
     eos: str = "veros_gsw"
     tracer_advection: str = "ppm_fct"
     pgf_scheme: str = "smc03"
+    # NEMO dynhpg vertical quadrature ("cell_integral" legacy default;
+    # "nemo_trapezoid" = hpg_zco e3w-weighted 2-level-mean integral).
+    pgf_quadrature: str = "cell_integral"
     barotropic_solver: str = "explicit_substep"
     n_barotropic_substeps: int = 30
     barotropic_time_filter: str = "cosine"
@@ -341,6 +344,7 @@ def nemo_lat_lon_model_config(
         eos=cfg.eos,
         tracer_advection=cfg.tracer_advection,
         pgf_scheme=cfg.pgf_scheme,
+        pgf_quadrature=cfg.pgf_quadrature,
         barotropic_solver=cfg.barotropic_solver,
         n_barotropic_substeps=cfg.n_barotropic_substeps,
         barotropic_time_filter=cfg.barotropic_time_filter,
@@ -738,6 +742,12 @@ _NEMO_GYRE_CARD_CONFIG = NEMOModelRecipeConfig(
     # WINDOW (NEMO carries them across windows in SAVE arrays) — 2/120 substeps
     # lower-order each step, slightly more dissipative.
     barotropic_time_filter="nemo_ab3am4",
+    # NEMO dynhpg hpg_zco e3w-weighted trapezoid (t_depth_ref = exact gdept is
+    # carried by the GYRE coordinate). Closes part of the hpg amplitude gap
+    # (single-step ratio vs utrd_hpg: 0.9656 -> 0.9702); the remaining ~3%
+    # flat multiplier is NOT the vertical quadrature (open item, needs a
+    # single-column zhpi hand-check).
+    pgf_quadrature="nemo_trapezoid",
     A_h=1.0e5,                         # nn_ahm_ijk_t=0: CONSTANT 1/2*rn_Uv*rn_Lv = 1e5
     A_h_lat_scaling=False,             # NO cos-lat scaling (nn_ahm_ijk_t=0)
     C_smag_lap=0.0,                    # NO Smagorinsky
