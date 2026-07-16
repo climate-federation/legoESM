@@ -77,6 +77,7 @@ module swcore_shim_mod
   type fv_flags_type
     integer :: grid_type = 0
     integer :: npx, npy
+    logical :: duogrid = .false.
     logical :: do_diss_est = .false.
     logical :: do_f3d = .false.
     logical :: prevent_diss_cooling = .false.
