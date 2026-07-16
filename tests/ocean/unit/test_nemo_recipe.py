@@ -452,7 +452,7 @@ def test_nemo_gyre_recipe_selects_gyre_schemes():
     assert mc.pgf_scheme == "adcroft"
     assert mc.gm_redi.slope_scheme == "nemo_iso_lap"
     assert mc.gm_redi.kappa_GM == 0.0        # ln_ldfeiv=F (no GM bolus)
-    assert mc.barotropic.n_barotropic_substeps == 120
+    assert mc.barotropic.n_barotropic_substeps == 50  # NEMO auto nn_e=50
 
 
 def test_nemo_gyre_vertical_ladder_matches_nemo_mesh():

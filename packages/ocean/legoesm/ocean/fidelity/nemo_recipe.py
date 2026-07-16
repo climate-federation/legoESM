@@ -724,7 +724,10 @@ _NEMO_GYRE_CARD_CONFIG = NEMOModelRecipeConfig(
     eos="nemo_eos80",
     pgf_scheme="adcroft",
     lateral_operator="nemo_iso_lap",
-    n_barotropic_substeps=120,
+    # NEMO's auto-computed nn_e=50 (rn_bt_cmax=0.8 -> Courant 0.79; ours 0.56).
+    # The historical 120 was the FB+cosine stability requirement; the AB3-AM4
+    # scheme is stable at NEMO's count (5-yr verified, results neutral vs 120).
+    n_barotropic_substeps=50,
     # --- GYRE_BARE namelist knobs (were inheriting ORCA-ish class defaults) ---
     tracer_advection="fct2",          # ln_traadv_fct, nn_fct_h=2 nn_fct_v=2
     # nn_bt_flt=3: Demange dissipative FB (AB3 velocity extrapolation + AM4
@@ -963,16 +966,21 @@ def apply_nemo_gyre_surface_forcing(state, z_coord, dt, *, t_seconds=0.0):
     # Sign: emp>0 (net evaporation) removes freshwater => salinity INCREASES, so
     # dS/dt|surf = +emp * S_surf / (rho0 * dz_top).  Domain-mean removed over wet
     # cells first (net-zero E-P, matching NEMO's zsumemp subtraction).
-    # NB: NEMO also adds the E-P heat content to qns (qns -= emp*sst*rcp,
-    # usrdef_sbc:144, ~1-2 W/m^2); omitted here — this is the salt-flux term only.
     emp_2d = jnp.broadcast_to(nemo_gyre_emp(lat_t, t_seconds)[:, None], shape_2d)
     emp_2d = emp_2d - jnp.sum(emp_2d * cell_mask) / jnp.sum(cell_mask)
     dS_dt_emp_top = (emp_2d * state.S.data[..., 0] / (
         NEMO_CONSTANTS_CONFIG.rho_0 * dz_0)).astype(out.dS_dt.dtype)
     dS_dt = out.dS_dt.at[..., 0].add(dS_dt_emp_top)
+    # NEMO E-P HEAT content (usrdef_sbc:144: qns -= emp*sst*rcp, "evap and
+    # precip are at SST"): as a top-cell tendency the c_p cancels —
+    # dT/dt|top = -emp*SST/(rho0*dz0). Sign: evaporation (emp>0) removes heat
+    # at SST (T-concentration/dilution twin of the virtual salt flux above).
+    dT_dt_emp_top = (-emp_2d * state.T.data[..., 0] / (
+        NEMO_CONSTANTS_CONFIG.rho_0 * dz_0)).astype(out.dT_dt.dtype)
+    dT_dt_total = out.dT_dt.at[..., 0].add(dT_dt_emp_top)
 
     mask3 = cell_mask[..., None]
-    new_T = state.T.data + dt * (out.dT_dt + dT_dt_sw) * mask3
+    new_T = state.T.data + dt * (dT_dt_total + dT_dt_sw) * mask3
     new_S = state.S.data + dt * dS_dt * mask3
     # NB the WIND is NOT applied here: pass nemo_gyre_wind_forcing(...) as the
     # step-level ``surface_forcing=`` instead (the canonical lat-lon route), so
