@@ -207,8 +207,6 @@ def test_sea_ice_default_is_none_so_a_default_run_is_unchanged():
     ("--ice-brine", "brine", []),
     # ridging is inert without multi-category ice + a dynamics mode, and the
     # builder now REFUSES that combination -- so ask for a runnable one.
-    ("--ice-ridging", "ridging", ["--ice-categories", "5",
-                                  "--ice-dynamics", "evp"]),
     ("--ice-ponds", "ponds", []),
 ])
 def test_sea_ice_sub_models_are_selectable(flag, sub, extra):
@@ -216,8 +214,11 @@ def test_sea_ice_sub_models_are_selectable(flag, sub, extra):
 
     Bools are NOT ``:float``-spec-eligible, so ``--params`` can never reach
     them, and run_coupled built ``SeaIceConfig()`` with no arguments and had no
-    ``--ice*`` flag at all -- so snow, brine, RIDGING (oracle-pinned) and melt
-    ponds were every one of them impossible to switch on from any driver.
+    ``--ice*`` flag at all -- so snow, brine and melt ponds were every one of
+    them impossible to switch on from any driver.
+
+    RIDGING is deliberately absent: it needs multi-category ice, which NO
+    driver builds, so it gets a rejection test below instead of an offer.
     """
     cfg = mod.build_sea_ice_config(mod.build_parser().parse_args([flag] + extra))
     assert getattr(cfg, sub).enabled is True
@@ -227,16 +228,14 @@ def test_enabling_a_sub_model_preserves_its_other_tuned_fields():
     """`_replace(enabled=True)` must not clobber the calibrated defaults."""
     from legoesm.ice.config import SeaIceConfig
 
-    cfg = mod.build_sea_ice_config(mod.build_parser().parse_args(
-        ["--ice-ridging", "--ice-categories", "5", "--ice-dynamics", "evp"]))
-    assert cfg.ridging._replace(enabled=False) == SeaIceConfig().ridging
+    cfg = mod.build_sea_ice_config(mod.build_parser().parse_args(["--ice-snow"]))
+    assert cfg.snow._replace(enabled=False) == SeaIceConfig().snow
 
 
 @pytest.mark.parametrize("flag,field,value,extra", [
     ("--ice-shortwave-scheme", "shortwave_scheme", "delta_eddington", []),
     # each of these is INERT without its companion, and the builder refuses the
     # inert form -- so pass the combination that actually runs.
-    ("--ice-itd-remap", "itd_remap", "lipscomb2001", ["--ice-categories", "5"]),
     ("--ice-bulk-scheme", "bulk_scheme", "most", []),
     ("--ice-stability-scheme", "stability_scheme", "grachev2007_sheba",
      ["--ice-bulk-scheme", "most"]),
@@ -249,7 +248,7 @@ def test_sea_ice_scheme_fields_are_selectable(flag, field, value, extra):
 
 
 @pytest.mark.parametrize("flag", [
-    "--ice-shortwave-scheme", "--ice-itd-remap", "--ice-bulk-scheme",
+    "--ice-shortwave-scheme", "--ice-bulk-scheme",
     "--ice-stability-scheme",
 ])
 def test_sea_ice_scheme_flags_reject_unknown(flag):
@@ -276,14 +275,13 @@ def test_cli_sea_ice_config_survives_the_params_layer():
     from legoesm.driver.config import ExperimentConfig
     from legoesm.driver.coupled_config import CoupledConfig
 
-    ice = mod.build_sea_ice_config(mod.build_parser().parse_args(
-        ["--ice-ridging", "--ice-categories", "5", "--ice-dynamics", "evp"]))
+    ice = mod.build_sea_ice_config(mod.build_parser().parse_args(["--ice-snow"]))
     p = Path(tempfile.mkdtemp()) / "params.json"
     p.write_text(json.dumps({"ice.ridging.e_star": 0.5}))
     out = mod.apply_coupled_params(str(p), "analytical", ExperimentConfig(),
                                    CoupledConfig(), None, ice)
     ice_out = out[3]
-    assert ice_out.ridging.enabled is True, "--ice-ridging lost to --params"
+    assert ice_out.snow.enabled is True, "--ice-snow lost to --params"
     assert ice_out.ridging.e_star == 0.5, "--params did not apply"
 
 
@@ -330,37 +328,45 @@ def test_main_actually_threads_the_cli_sea_ice_config():
 # and --ice-itd-remap still did NOTHING at the defaults -- i.e. the sea-ice fix
 # had reproduced the --ddm mistake it was written to fix. These pin the guards.
 
-def test_ridging_rejects_the_defaults_that_make_it_inert():
-    """apply_ridging is gated on `is_multicat`, and its closing rate comes from
-    the ICE VELOCITY -- zero when dynamics='none'. So --ice-ridging at the
-    defaults (n_categories=1, dynamics='none') never runs at all."""
-    with pytest.raises(SystemExit, match="multi-category ice AND a dynamics"):
+def test_ridging_is_rejected_because_no_driver_can_run_it():
+    """Ridging needs multi-category ice AND an ice velocity.
+
+    run_coupled builds a scalar-slab SeaIceState (init_surface_state), and NO
+    driver anywhere builds a multi-category state -- run_omip_core2 hardcodes
+    n_categories=1 too, and step_sea_ice RAISES for n_categories>1 without a
+    DynamicSeaIceState. So ridging is oracle-pinned physics that is unreachable
+    from every driver: a real unwired-physics gap, tracked separately.
+
+    An earlier draft added --ice-categories/--ice-dynamics here to "reach" it.
+    Those were PHANTOMS -- every accepted value crashed on the first step
+    (_step_dynamic reads a u_ice the slab state lacks) -- the same shape as
+    --surface-bulk-scheme most, which this branch removed. Reject honestly
+    instead of offering a flag that cannot run.
+    """
+    with pytest.raises(SystemExit, match="cannot run"):
         mod.build_sea_ice_config(mod.build_parser().parse_args(["--ice-ridging"]))
 
 
-def test_ridging_rejects_multicat_without_dynamics():
-    """Multi-category alone is not enough: the closing rate still needs a
-    velocity."""
-    with pytest.raises(SystemExit, match="multi-category ice AND a dynamics"):
-        mod.build_sea_ice_config(mod.build_parser().parse_args(
-            ["--ice-ridging", "--ice-categories", "5"]))
+def test_the_phantom_flags_are_gone():
+    """Regression pin: --ice-categories/--ice-dynamics must not come back.
+
+    They parse cleanly and then die at runtime, which is strictly worse than
+    the gap they were meant to close.
+    """
+    for phantom in ("--ice-categories", "--ice-dynamics"):
+        with pytest.raises(SystemExit):
+            mod.build_parser().parse_args([phantom, "5"])
 
 
-def test_ridging_is_accepted_once_it_can_actually_run():
-    cfg = mod.build_sea_ice_config(mod.build_parser().parse_args(
-        ["--ice-ridging", "--ice-categories", "5", "--ice-dynamics", "evp"]))
-    assert cfg.ridging.enabled is True
-    assert cfg.n_categories == 5 and cfg.dynamics == "evp"
-
-
-def test_lipscomb_itd_remap_rejects_single_category():
-    """The ITD remap dispatch lives inside the is_multicat branch."""
-    with pytest.raises(SystemExit, match="needs multi-category ice"):
-        mod.build_sea_ice_config(mod.build_parser().parse_args(
-            ["--ice-itd-remap", "lipscomb2001"]))
-    cfg = mod.build_sea_ice_config(mod.build_parser().parse_args(
-        ["--ice-itd-remap", "lipscomb2001", "--ice-categories", "5"]))
-    assert cfg.itd_remap == "lipscomb2001"
+def test_there_is_no_itd_remap_flag():
+    """itd_remap has exactly two values: 'simple' (the default) and
+    'lipscomb2001' (unreachable -- it dispatches only inside the multi-category
+    branch no driver builds). A flag whose sole accepted value is the default
+    is decoration, so it is deliberately absent rather than offered.
+    """
+    for phantom in ("--ice-itd-remap",):
+        with pytest.raises(SystemExit):
+            mod.build_parser().parse_args([phantom, "simple"])
 
 
 def test_ice_stability_scheme_rejects_the_constant_bulk_branch():

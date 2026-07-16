@@ -137,13 +137,11 @@ def build_params_bundle(coupled_cfg, coupler_config=None,
 
 #: SeaIceConfig scheme literals; each dispatch raises on anything else.
 _ICE_SHORTWAVE_SCHEMES = ("constant", "maykut_untersteiner", "delta_eddington")
-_ICE_ITD_REMAP = ("simple", "lipscomb2001")
 #: sea_ice._bulk_flux_dispatch accepts all four (the ICE tile runs genuine
 #: MOST with ice roughness -- unlike the ATMOSPHERE, where "most" silently
 #: degrades to constant, which is why VALID_SURFACE_BULK omits it).
 _ICE_BULK_SCHEMES = ("constant", "most", "coare3", "large_yeager")
 _ICE_MOST_SCHEMES = ("most", "coare3", "large_yeager")
-_ICE_DYNAMICS = ("none", "free_drift", "evp", "mevp")
 
 
 def build_sea_ice_config(args):
@@ -178,57 +176,57 @@ def build_sea_ice_config(args):
         v = getattr(args, flag, None)
         if v is not None and v != getattr(base, field):
             changed[field] = v
-    n_cat = getattr(args, "ice_categories", None)
-    if n_cat is not None and n_cat != base.n_categories:
-        changed["n_categories"] = n_cat
-    dyn = getattr(args, "ice_dynamics", None)
-    if dyn is not None and dyn != base.dynamics:
-        changed["dynamics"] = dyn
-
-    _reject_inert_sea_ice_combinations(args, changed, base)
+    _reject_unreachable_sea_ice_options(args, changed, base)
     if not changed:
         return None
     return base._replace(**changed)
 
 
-def _reject_inert_sea_ice_combinations(args, changed, base) -> None:
-    """Refuse a flag that would parse and then do NOTHING.
+def _reject_unreachable_sea_ice_options(args, changed, base) -> None:
+    """Refuse an option this driver cannot actually run, and say why.
 
-    Enabling a sub-model is not the same as reaching it. Each of these was
-    verified inert in its bad combination (codex), and a silently-inert flag is
-    the exact failure this branch exists to remove -- shipping one while fixing
-    the class would be indefensible.
+    Two DIFFERENT gaps, deliberately not conflated:
+
+    * MULTI-CATEGORY (ridging, lipscomb2001 ITD remap) is unreachable from
+      EVERY driver, not just this one: nothing anywhere builds a
+      multi-category state (run_omip_core2 hardcodes n_categories=1 too), and
+      ``step_sea_ice`` RAISES for n_categories>1 without a DynamicSeaIceState.
+      Ridging is additionally driven by an ice velocity. So this is a genuine
+      unwired-physics gap -> tracked, not flagged.
+    * DYNAMICS is reachable, just not HERE: run_omip_core2 offers
+      --prognostic-ice-dynamics {free_drift,evp,mevp} and builds the
+      DynamicSeaIceState via init_dynamic_ice_state. run_coupled's
+      init_surface_state builds a scalar-slab SeaIceState instead.
+
+    There is deliberately NO --ice-itd-remap flag either: its only non-default
+    value is lipscomb2001, which the multi-category gap puts out of reach, so
+    the flag could only ever accept the default you already get.
+
+    An earlier draft "fixed" both by adding --ice-categories/--ice-dynamics
+    here. That was WORSE than the gap: every accepted value crashed on the
+    first step (``_step_dynamic`` reads a ``u_ice`` the slab state lacks;
+    multi-category explicitly rejects the slab state) -- a PHANTOM, the exact
+    shape of ``--surface-bulk-scheme most``, which parsed fine and then died at
+    construction and which this branch exists to remove (codex). Offer nothing
+    that cannot run.
     """
-    n_cat = changed.get("n_categories", base.n_categories)
-    dyn = changed.get("dynamics", base.dynamics)
-    bulk = changed.get("bulk_scheme", base.bulk_scheme)
-
     if getattr(args, "ice_ridging", False):
-        # apply_ridging runs only under `config.ridging.enabled and is_multicat
-        # and grid is not None`, and its closing rate derives from the ICE
-        # VELOCITY, which stays zero without a dynamics mode. So ridging with
-        # the defaults (n_categories=1, dynamics="none") never runs at all.
-        if n_cat <= 1 or dyn == "none":
-            raise SystemExit(
-                "--ice-ridging needs multi-category ice AND a dynamics mode: "
-                "apply_ridging is gated on is_multicat, and its closing rate "
-                "comes from the ice velocity, which is zero when "
-                f"dynamics='none'. Got --ice-categories {n_cat} "
-                f"--ice-dynamics {dyn!r}. Add e.g. `--ice-categories 5 "
-                "--ice-dynamics evp`."
-            )
-    if changed.get("itd_remap") == "lipscomb2001" and n_cat <= 1:
         raise SystemExit(
-            "--ice-itd-remap lipscomb2001 needs multi-category ice: the ITD "
-            "remap dispatch lives inside the is_multicat branch, so with "
-            f"--ice-categories {n_cat} no remapping runs. Add "
-            "`--ice-categories 5`."
+            "--ice-ridging cannot run: ridging needs multi-category ice plus "
+            "an ice velocity. run_coupled builds a scalar-slab SeaIceState "
+            "(init_surface_state), and NO driver builds a multi-category state "
+            "(run_omip_core2 hardcodes n_categories=1). The ridging physics is "
+            "implemented and oracle-pinned but is not reachable from any "
+            "driver -- that is a real unwired-physics gap, not a flag. For "
+            "prognostic ice DYNAMICS today, use run_omip_core2 "
+            "--prognostic-sea-ice --prognostic-ice-dynamics {free_drift,evp,mevp}."
         )
+    bulk = changed.get("bulk_scheme", base.bulk_scheme)
     if getattr(args, "ice_stability_scheme", None) and bulk not in _ICE_MOST_SCHEMES:
         raise SystemExit(
             f"--ice-stability-scheme is only read by the MOST bulk branch; "
             f"--ice-bulk-scheme {bulk!r} uses simple_bulk_fluxes and never "
-            f"consults stability functions. Add e.g. `--ice-bulk-scheme most`."
+            f"consults stability functions. Use one of {_ICE_MOST_SCHEMES}."
         )
 
 
@@ -755,24 +753,9 @@ def build_parser():
                              "(SeaIceConfig.ridging).")
     parser.add_argument("--ice-ponds", action="store_true",
                         help="CESM-style melt ponds (SeaIceConfig.ponds).")
-    parser.add_argument("--ice-categories", type=int, default=None,
-                        help="Number of ice-thickness categories (default 1 = "
-                             "single-category slab). Multi-category is REQUIRED "
-                             "by --ice-ridging and --ice-itd-remap lipscomb2001.")
-    parser.add_argument("--ice-dynamics", choices=list(_ICE_DYNAMICS),
-                        default=None,
-                        help="Sea-ice dynamics (default: none = thermodynamic "
-                             "slab with diagnostic free drift). Ridging needs a "
-                             "real mode: its closing rate comes from the ice "
-                             "velocity.")
     parser.add_argument("--ice-shortwave-scheme",
                         choices=list(_ICE_SHORTWAVE_SCHEMES), default=None,
                         help="Sea-ice shortwave scheme (default: constant).")
-    parser.add_argument("--ice-itd-remap", choices=list(_ICE_ITD_REMAP),
-                        default=None,
-                        help="Ice-thickness-distribution remapping: 'simple' "
-                             "(legacy volume-conserving rescale) or "
-                             "'lipscomb2001' (piecewise-linear g(h)).")
     parser.add_argument("--ice-bulk-scheme", choices=list(_ICE_BULK_SCHEMES),
                         default=None,
                         help="Sea-ice surface bulk-flux algorithm "
@@ -784,7 +767,8 @@ def build_parser():
                         default=None,
                         help="Stable-regime MOST functions for the ice tile "
                              "(grachev2007_sheba is the Arctic sea-ice "
-                             "reference). Only used with --ice-bulk-scheme most.")
+                             "reference). Requires a MOST --ice-bulk-scheme "
+                             "(most/coare3/large_yeager).")
     parser.add_argument("--land-runoff-scheme", choices=_LAND_RUNOFF_SCHEMES,
                         default="bucket",
                         help="Slab-land runoff partitioning: 'bucket' (default, "
