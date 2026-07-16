@@ -803,6 +803,16 @@ def step_carbon_differland(
     lab_release = state.C_lab * _effective_rate(lrf, dt_days)   # gC/m2/day
     leaf_litter = state.C_fol * _effective_rate(lff, dt_days)
 
+    # Leaf-carbon resorption at abscission: a fraction of the shed foliage C is
+    # resorbed into the labile reserve (C_fol -> C_lab) rather than lost to
+    # litter, as deciduous plants recover leaf C/N before leaf-fall (Aerts 1996;
+    # Vergutz 2012).  Carbon-conserving: C_fol still loses the FULL leaf_litter;
+    # the shed flux is partitioned between C_lab (resorbed) and C_lit (litter).
+    # f == 0 (default) => leaf_resorb == 0, leaf_to_lit == leaf_litter => every
+    # downstream term is byte-identical to the pre-resorption code.
+    leaf_resorb = config.leaf_c_resorption_frac * leaf_litter  # gC/m2/day -> C_lab
+    leaf_to_lit = leaf_litter - leaf_resorb                    # gC/m2/day -> C_lit
+
     # --- Cold-deciduous leaf bootstrap (Mechanism 2, opt-in) ----------------
     # A cold-deciduous plant that lost its canopy (C_fol -> 0) but kept a labile
     # reserve (the NSC gate preserved it) must REGROW a minimum leaf area from
@@ -933,7 +943,7 @@ def step_carbon_differland(
     )
     lit_total_demand = R_het_lit_demand + lit_to_som_demand  # gC/m2/day
     lit_net_avail = jnp.maximum(
-        state.C_lit + (leaf_litter + root_litter) * dt_days, 0.0,
+        state.C_lit + (leaf_to_lit + root_litter) * dt_days, 0.0,
     ) * _inv_dt_days  # gC/m2/day available to drain over the step
     # scale in [0, 1]; == 1 (no-op) whenever demand <= availability.
     lit_scale = jnp.where(
@@ -1018,7 +1028,8 @@ def step_carbon_differland(
 
     new_state = CarbonState(
         C_lab=_soft_pos(
-            state.C_lab + (A_lab - lab_release - lab_deficit_draw) * dt_days),
+            state.C_lab + (A_lab - lab_release - lab_deficit_draw
+                           + leaf_resorb) * dt_days),
         C_fol=_soft_pos(
             state.C_fol + (A_fol + lab_release - leaf_litter
                            - fol_deficit_draw) * dt_days),
@@ -1029,7 +1040,7 @@ def step_carbon_differland(
             state.C_wood + (A_wood - wood_litter
                             - wood_deficit_draw) * dt_days),
         C_lit=_soft_pos(
-            state.C_lit + (leaf_litter + root_litter
+            state.C_lit + (leaf_to_lit + root_litter
                            - R_het_lit - lit_to_som) * dt_days),
         # SOM cascade (phase A2, live).  Each pool gains its input and loses its
         # own total decomposition D_X; the slow/passive pools gain the humified

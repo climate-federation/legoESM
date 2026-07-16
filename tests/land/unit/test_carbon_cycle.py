@@ -642,6 +642,57 @@ class TestSomCascade(unittest.TestCase):
                                 err_msg=f"evergreen column not closed (sw={sw})")
 
 
+class TestLeafResorption(unittest.TestCase):
+    """Leaf-carbon resorption at abscission (C_fol->C_lab), opt-in / default-off.
+
+    At autumn leaf-fall (doy near Fday=280) a fraction of the shed foliage carbon
+    is resorbed to the labile reserve instead of lost to litter, refilling the
+    reserve the cold-climate leaf-out lock otherwise depletes.  Conserving, and
+    byte-identical when the fraction is 0.  Default config => the dormancy/NSC
+    gates are OFF, so these tests isolate the resorption term.
+    """
+
+    def _step(self, frac, config_frac_set=True):
+        over = dict(leaf_c_resorption_frac=frac) if config_frac_set else {}
+        cfg = _default_config(scheme="differland", **over)
+        st = _make_carbon_state(shape=(3,))
+        new, flux, _d = step_carbon_differland(
+            st, jnp.full(3, 200.0), jnp.full(3, 283.0), jnp.full(3, 400.0),
+            jnp.full(3, 1.0), jnp.zeros(3), 280.0, jnp.full(3, 2e-5),
+            cfg, 86400.0, return_diagnostics=True)
+        return st, new, flux
+
+    def test_off_is_byte_identical(self):
+        # frac explicitly 0.0 must reproduce the field-unset (default 0.0) result.
+        _s0, s_explicit, _f0 = self._step(0.0)
+        _sb, s_default, _fb = self._step(0.0, config_frac_set=False)
+        for p in s_explicit._fields:
+            npt.assert_array_equal(getattr(s_explicit, p), getattr(s_default, p))
+
+    def test_moves_fol_carbon_to_labile_not_litter(self):
+        _s0, s_off, _fo = self._step(0.0)
+        _s1, s_on, _fn = self._step(0.3)
+        # C_fol sink unchanged (resorption does not alter the C_fol loss)
+        npt.assert_allclose(s_on.C_fol, s_off.C_fol, atol=1e-9)
+        # reserve gains, litter loses, by the SAME amount (conserving transfer)
+        self.assertTrue(bool(jnp.all(s_on.C_lab > s_off.C_lab)))
+        self.assertTrue(bool(jnp.all(s_on.C_lit < s_off.C_lit)))
+        npt.assert_allclose(s_on.C_lab - s_off.C_lab,
+                            s_off.C_lit - s_on.C_lit, rtol=1e-6)
+
+    def test_monotonic_in_fraction(self):
+        labs = [self._step(f)[1].C_lab for f in (0.0, 0.1, 0.3)]
+        self.assertTrue(bool(jnp.all(labs[1] >= labs[0])))
+        self.assertTrue(bool(jnp.all(labs[2] >= labs[1])))
+
+    def test_conserves_with_resorption(self):
+        st, new, flux = self._step(0.3)
+        dC = sum(getattr(new, p) - getattr(st, p) for p in st._fields)
+        expected = -(flux / _GC_TO_KG_CO2) * 86400.0
+        npt.assert_allclose(dC, expected, rtol=1e-9, atol=1e-9,
+                            err_msg="column not closed with resorption")
+
+
 # ===================================================================
 # High-latitude productivity rescue (opt-in NSC gate + cold-deciduous dormancy)
 # ===================================================================
