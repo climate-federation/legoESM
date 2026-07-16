@@ -323,18 +323,39 @@ def autoconversion_sb(q_c, N_c_eff, rho, k_au, x_star, sharpness=_DEFAULT_SAT_SH
 
 
 def accretion(q_c, q_r, rho, k_ac, gamma_norm=1.0):
-    """Rain collecting cloud water (accretion).
+    """Rain collecting cloud water (accretion) — SIMPLIFIED BILINEAR SURROGATE.
+
+    Rate = ``k_ac · q_c · q_r · rho · gamma_norm``.  This is the accretion
+    form wired into Morrison (non-KK2000 path), Seifert-Beheng, Thompson and
+    THIS repository's P3; it is a tunable-coefficient SURROGATE, NOT faithful
+    to the published Khairoutdinov-Kogan (2000) accretion that gSAM P3 and
+    SAM-M2005 use (``module_mp_p3.f90:3615``, iparam=3 /
+    ``module_mp_graupel.f90:1952``) — this repo's P3 instead calls THIS
+    surrogate.  The gSAM form, in a single column with the sub-grid
+    cloud/precip-fraction scheme off (``iSCF=iSPF=1``, ``dum2=1``), reduces to
+    the mass rate::
+
+        PRA = 67 · (q_c · q_r)^1.15          [kg/kg/s]   (the faithful form)
+
+    available as :func:`accretion_kk2000`.  DEPARTURES of this surrogate from
+    that oracle: (1) coefficient ``k_ac`` (default 5.25) vs the published 67;
+    (2) BILINEAR ``q_c·q_r`` (product exponent 1) vs KK2000's ``(q_c·q_r)^1.15``;
+    (3) a spurious ``rho`` factor — KK2000 is a pure mixing-ratio rate with NO
+    density dependence; (4) an optional ``gamma_norm`` PSD-shape modifier absent
+    from KK2000 (P3 passes the default ``1.0``, so P3 does not incur (4)).
+    Pinned + canaried in
+    ``tests/atmosphere/microphysics/unit/test_p3_accretion_faithful.py``.
 
     Parameters
     ----------
     q_c, q_r : array
-        Cloud water and rain mixing ratios [kg/kg].
+        Cloud water and rain mixing ratios [kg/kg] (negatives clipped to 0).
     rho : array
         Air density [kg/m3].
     k_ac : float
-        Accretion rate constant.
+        Accretion rate constant [m^3/(kg*s)].
     gamma_norm : float
-        Gamma distribution correction.
+        Gamma distribution correction (1.0 = none).
 
     Returns
     -------
@@ -468,11 +489,24 @@ def autoconversion_kk2000(q_c, N_c_eff, rho, dt):
 
 def accretion_kk2000(q_c, q_r):
     """Khairoutdinov–Kogan (2000) warm-rain accretion — SAM M2005
-    (``module_mp_graupel.f90:1952``):
+    (``module_mp_graupel.f90:1952``; identical to gSAM P3
+    ``module_mp_p3.f90:3615``, iparam=3):
 
         PRA = 67 · (q_c · q_r)^1.15      [kg/kg/s]
 
     A mixing-ratio rate (no ``rho`` factor, unlike :func:`accretion`).
+
+    SCOPE: this is the single-column, fractions-OFF MASS-rate reduction of the
+    Fortran (``iSCF=iSPF=1``, ``dum2=SPF-SPF_clr=1``) — the algebraic iparam=3
+    branch ABOVE its enclosing ``qc>=qsmall`` AND ``qr>=qsmall`` gate
+    (``qsmall=1e-14``).  DEPARTURES vs the full Fortran: (a) this helper omits
+    the ``qsmall`` gate, so for tiny-but-positive inputs below 1e-14 it returns a
+    positive rate where the Fortran returns exactly 0; (b) the number tie
+    ``ncacc = qcacc·nc/qc`` is handled separately by the caller, not here.
+    ``safe_pow`` clips the base to nonnegative and gives a finite AD result for
+    the fractional power (its role is the negative-input extension — at
+    ``q_c·q_r = 0`` the ``^1.15`` branch already has a finite ZERO slope, since
+    ``d/dx x^1.15 = 1.15·x^0.15 -> 0``, so this is NOT replacing a singular slope).
     """
     dum = jnp.clip(q_c, 0.0) * jnp.clip(q_r, 0.0)
     return _KK2000_ACCRETION_PREFACTOR * safe_pow(dum, _KK2000_ACCRETION_EXPONENT)
