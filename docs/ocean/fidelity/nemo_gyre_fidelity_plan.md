@@ -185,10 +185,12 @@ reproduces NEMO's avt to 3-4 significant figures at every level** (the
 ln_mxl0 wind anchor seeds the |dl/dz|<=e3t lup ladder, zdftke.F90:645-712).
 The old "nn_mxl=3 is NOT the lever" deconfounding (corr 0.9998 for levels
 >=2) held only in the stratified interior. RESULTS: 15-day SST deficit
-0.31 → 0.11, MLD 136 → 111 m (NEMO 91); 5-yr SST max 17.33 → **18.36**
-(NEMO 18.98, same-file), surf/deep 2.69 → **4.38** (NEMO 8.23), mid-depth
-(1551 m) rms(u) 1.89x → **1.08x** NEMO. The scalar wet-RMS ratio reads
-0.758 → 0.674 — an HONEST drop: the baseline number was inflated by
+0.31 → 0.11, MLD 136 → 111 m (NEMO 91); 5-yr SST max 17.33 → **18.36**/18.16
+(NEMO 18.98, same-file) for the l_k variant; the COMMITTED config (with the
+l_eps dissipation-length review fix) reads SST 18.16, surf/deep 2.69 →
+**3.87** (NEMO 8.23), mid-depth (1551 m) rms(u) 1.89x → **1.25x** NEMO,
+ratio 0.710 (yr-1 0.935). The scalar wet-RMS ratio drop from 0.758 is an
+HONEST change: the baseline number was inflated by
 spurious mid-depth flow (same lesson as the 0.805 pre-linssh episode);
 surface rms changed only 0.617 → 0.576. The depth-resolved profile is the
 metric of record.
