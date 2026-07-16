@@ -162,6 +162,40 @@ campaign exit criterion are MET on the production configuration.
 Held-Suarez cross-grid (part 2) is running (job 9044126 + supplementary
 9044520/9044521).
 
+### Visual edge-artifact inspection (2026-07-16, all SW + completed HS)
+
+Every cross-grid comparison PNG inspected (per the visual-verify rule —
+norms alone never certify edges):
+
+- **W2 v-wind** (canonical: exact v==0): cube shows the KNOWN smooth
+  4-fold imprint + polar-seam maxima at the calibrated ~0.5 m/s — smooth,
+  large-scale, no sawtooth, no face-line discontinuities; matches the
+  committed visual-regression reference exactly (SSIM=1.0000, hamming=0).
+  MPAS shows its own 12-pentagon dipole signature; latlon/spectral ~0.
+- **W5 wind_speed / W6 height**: identical synoptic structure on all four
+  grids; cube panels smooth, no face lines (cube slightly more diffuse —
+  the calibrated damping).
+- **Colliding modons, day 100 vorticity**: NO face-seam eruptions (the
+  historical #521 eruption stays fixed through the full collision +
+  return).  Cross-grid dissipation spread (ico keeps the tightest
+  dipoles, cube dispersed-but-smooth, spectral dissipated) is scheme
+  diffusivity, not an artifact.
+- **Cosine bells**: the bell crosses four cube faces and returns compact;
+  no seam tearing (spectral shows the expected T21 Gibbs ripples).
+- **Held-Suarez cube C36 (sigma, 200 d)**: classic HS climate; v-field
+  longitudinal structure is TRANSIENT eddies (moves between snapshots, no
+  stationary lock).  ONE quantified grid signature: a stationary
+  **wave-4 modulation of the lowest-level equatorial easterlies, amplitude
+  0.19 m/s** (crests within ~10 deg of the cube corners; wave-8 harmonic
+  0.035 m/s; waves 1/3/5 = 0) against ~3.5 m/s background — a ~5% smooth
+  corner imprint, no discontinuities.  The high-latitude dotted moire in
+  the *native* scatter PNGs is plotting sparsity, not model signal
+  (absent in the regridded fields).
+
+Summary: no destructive edge artifacts anywhere; the residual cube
+signatures are the two documented smooth imprints (W2 v ~0.5 m/s;
+HS equatorial u wave-4 0.19 m/s ~ 5%), both at the calibrated C36 level.
+
 ## Duo D-grid finding (2026-07-16): not single-tile certifiable
 
 Attempting the duo d_sw analog of the (certified) duo c_sw exposed a hard
