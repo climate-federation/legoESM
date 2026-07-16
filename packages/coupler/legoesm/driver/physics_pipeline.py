@@ -2596,7 +2596,7 @@ def _resolve_convection(config):
             downdraft_alpha=getattr(config, 'bechtold_downdraft_alpha', 0.3),
             downdraft_RH_min=getattr(config, 'bechtold_downdraft_rh_min', 0.2),
             downdraft_transport=getattr(config, 'bechtold_downdraft_transport', False),
-            downdraft_entrain_rate=getattr(config, 'bechtold_downdraft_entrain_rate', 5.0e-4),
+            downdraft_entrain_rate=getattr(config, 'bechtold_downdraft_entrain_rate', 3.0e-4),
             downdraft_detrain_scale_m=getattr(config, 'bechtold_downdraft_detrain_scale_m', 700.0),
             # Full IFS deep CAPE closure (PR #1095) — threaded so the flag is
             # REACHABLE from the AMIP driver.  Missing-field fallback = True,

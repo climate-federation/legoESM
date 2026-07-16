@@ -2201,3 +2201,9 @@ def test_ifs_inplume_rain_water_budget_coupled():
         f"budget shift {shift:.3e} vs rain {rain_total:.3e} — "
         "vapor-sink pairing broken"
     )
+
+
+def test_bechtold_downdraft_entrain_rate_default_is_ifs_entrdd():
+    """The penetrative-downdraft entrainment default is the oracle ENTRDD =
+    3.0e-4 1/m (sucumf.F90:144), not the earlier unsourced 5.0e-4."""
+    assert BechtoldConfig().downdraft_entrain_rate == 3.0e-4
