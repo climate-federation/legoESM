@@ -187,8 +187,11 @@ __physics_contract__ = {
         "closure -(u*du+v*dv)/c_pd by default, or the E3SM discrete-step "
         "closure -(du*(u+0.5*dt*du)+dv*(v+0.5*dt*dv))/c_pd when "
         "use_discrete_ke_heating=True). "
-        "For the spectral path dT_dt is the ground-relative dttke term, which "
-        "is SIGNED (can cool where U>c>0). eps_gwd = -integral rho*(u*du+v*dv)*dz "
+        "For the spectral path dT_dt defaults to the ground-relative dttke "
+        "term, which is SIGNED (can cool where U>c>0); with "
+        "use_e3sm_spectral_heating or do_eddy_diffusion it is dttke + the "
+        "dse-diffusion dttdf (and the E3SM flag band-limits dttke to "
+        "midpoints above ~500 hPa). eps_gwd = -integral rho*(u*du+v*dv)*dz "
         "is the mean-flow KE removal rate (positive for the orographic path; "
         "SIGNED for spectra, negative where the flow is accelerated toward c)."
     ),
@@ -1630,10 +1633,11 @@ def e3sm_cam_gwd(
     # heating -- it is signed (cools where U>c>0) and is not the mean-flow KE
     # removal rate eps_gwd. The E3SM-3.0.1 oracle (gw_common.F90:727,
     #   dttke(:,k) = dttke(:,k) + c(:,l) * gwut(:,k,l))
-    # uses ``sum_l c_l * gwut_l`` — faithfully reproduced below.  When
-    # ``config.do_eddy_diffusion`` is on, E3SM ALSO adds the dse-diffusion
-    # heating ``dttdf`` (ttgw = dttke + dttdf, gw_common.F90:731); the GW eddy
-    # diffusion of u, v, dse runs through the implicit tridiagonal solver.
+    # uses ``sum_l c_l * gwut_l`` — faithfully reproduced below.  E3SM adds
+    # the dse-diffusion heating ``dttdf`` UNCONDITIONALLY on the spectral
+    # path (ttgw = dttke + dttdf, gw_common.F90:731) and band-limits dttke —
+    # here both are opt-in via ``use_e3sm_spectral_heating`` (or the
+    # ``do_eddy_diffusion`` standalone addition supplies dttdf too).
     #
     # NOTE (cross-version): newer CAM/EAM trunk uses the intrinsic-frequency
     # form ``sum_l (c_l - ubm) * gwut_l`` instead (codex iter-2 #2).  We match

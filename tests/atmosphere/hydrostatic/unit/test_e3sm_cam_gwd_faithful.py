@@ -450,8 +450,11 @@ def test_spectral_heating_adds_dttdf_not_momentum():
 
 
 def test_spectral_heating_composes_dttdf_once():
-    """Both flags ON: dT identical to e3sm-only (dttdf added exactly once;
-    u/v diffusion does not feed dT), du gains the standalone diffusion."""
+    """Both flags ON (fixer OFF, as here): dT identical to e3sm-only —
+    dttdf added exactly once and the u/v diffusion does not feed dT; du
+    gains the standalone diffusion.  With do_energy_conservation=True the
+    changed du/dv WOULD feed the fixer's dse redistribution, so the
+    equality below holds only on the fixer-off path (codex wave-7 P3)."""
     u, v, T, pf, ph, zf, zh, rho, lat = _driver_column()
     ncol, nlev = u.shape
     frontgf = jnp.full((ncol, nlev), 1e-9)
