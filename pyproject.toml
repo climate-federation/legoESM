@@ -229,6 +229,9 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # Plume convection faithfulness: T/S ocean temperature/salinity + Tp/Sp plume
 # parcel symbols (entraining mass-flux plume).
 "tests/ocean/unit/test_plume_convection_faithful.py" = ["N803", "N806"]
+# PBL-height faithfulness: T/Q/U/V atmospheric column symbols + dV2 shear-square
+# (bulk-Richardson PBL diagnosis).
+"tests/atmosphere/hydrostatic/unit/test_pbl_height_faithful.py" = ["N803", "N806"]
 "scripts/validate/compare_amip_era5.py" = ["N803", "N806", "N815"]
 # The canonical SST symbol is ``sst_K`` (used 100s of times); N806/N803 flag the local
 # variable / monkeypatch arg in the cross-grid deploy CLI + its test (not CI-enforced).
