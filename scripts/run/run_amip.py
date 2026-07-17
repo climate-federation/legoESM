@@ -753,6 +753,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "--no-bechtold-use-ifs-downdraft disables a "
                              "config-file default. Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_downdraft}.")
+    parser.add_argument("--bechtold-use-ifs-shallow-closure",
+                        dest="bechtold_use_ifs_shallow_closure",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_shallow_closure,
+                        help="Enable the IFS shallow PBL-equilibrium closure "
+                             "(openifs cumastrn.F90 ZDHPBL/ZDH; flux-form "
+                             "supply from same-step bulk SHF+LHF + sub-cloud "
+                             "radiative convergence). "
+                             "--no-bechtold-use-ifs-shallow-closure disables "
+                             "a config-file default. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_shallow_closure}.")
     parser.add_argument("--bechtold-dx-m", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_dx_m,
                         dest="bechtold_dx_m",
@@ -1535,6 +1546,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_use_ifs_inplume_precip=args.bechtold_use_ifs_inplume_precip,
         bechtold_dx_m=args.bechtold_dx_m,
         bechtold_use_ifs_downdraft=args.bechtold_use_ifs_downdraft,
+        bechtold_use_ifs_shallow_closure=args.bechtold_use_ifs_shallow_closure,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
         latlon_spmd_compiled_segments=args.latlon_spmd_compiled_segments,

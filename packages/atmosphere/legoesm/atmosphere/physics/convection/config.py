@@ -1504,6 +1504,15 @@ class BechtoldConfig(NamedTuple):
     # the CAPE closure's ZHEAT and into CMT.  Default False pending RCE/AMIP
     # A/B (two-step pattern); False is byte-identical legacy.
     use_ifs_downdraft: bool = False
+    # IFS shallow PBL-equilibrium closure (cumastrn.F90:468-484, 551-567; see
+    # bechtold._ifs_shallow_pbl_target): the shallow class realizes
+    # ZMFUB = ZDHPBL/ZDH capped by the true CFL ZMFMAX, with the sub-cloud
+    # moist-energy supply in flux form (same-step bulk SHF+LHF + sub-cloud
+    # radiative convergence — cloud-base turbulent flux and dynamics
+    # advection are documented departures).  Needs the pipeline-supplied
+    # shf/lhf/dT_dt_rad kwargs (None => inert).  Default False pending
+    # RCE/AMIP A/B; False is byte-identical legacy.
+    use_ifs_shallow_closure: bool = False
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0

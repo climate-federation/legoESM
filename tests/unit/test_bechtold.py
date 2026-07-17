@@ -2537,3 +2537,90 @@ def test_ifs_downdraft_organized_entrainment_sign():
     assert peak > 0.3 * _IFS_RMFDEPS * 0.05, (
         f"organized entrainment inactive (peak |m_d| {peak:.3e})"
     )
+
+
+# ---------------------------------------------------------------------------
+# IFS shallow PBL-equilibrium closure (cumastrn.F90:468-484, 551-567)
+# ---------------------------------------------------------------------------
+
+from legoesm.atmosphere.physics.convection.bechtold import (  # noqa: E402
+    _ifs_shallow_pbl_target,
+    _IFS_SHALLOW_ZDQMIN_FRAC,
+    _IFS_SHALLOW_DH_FLOOR,
+)
+
+
+def test_ifs_shallow_pbl_target_oracle_pin():
+    """Hand-computed ZDH/ZMFMAX/target on a 1-column base gather: supply/dh
+    below the CFL cap, dh floored per cumastrn:552-554, supply<=0 killed,
+    cap binds for huge supply."""
+    ncol, nlev = 1, 4
+    T = jnp.array([[260.0, 275.0, 288.0, 297.0]])
+    q = jnp.array([[1e-3, 4e-3, 8e-3, 12e-3]])
+    T_u = T + jnp.array([[0.0, 0.0, 1.2, 0.8]])
+    q_u = q + jnp.array([[0.0, 0.0, 1.5e-3, 1.0e-3]])
+    q_c_u = jnp.array([[0.0, 0.0, 4e-4, 0.0]])
+    dp = jnp.array([[150e2, 250e2, 300e2, 300e2]])
+    base_w = jnp.array([[0.0, 0.0, 1.0, 0.0]])       # crisp base at k=2
+    dt = 600.0
+    h_exc = (constants.c_pd * 1.2
+             + constants.L_v * (1.5e-3 + 4e-4))
+    zdqmin = max(_IFS_SHALLOW_ZDQMIN_FRAC * 8e-3, 1e-10)
+    dh = max(h_exc, _IFS_SHALLOW_DH_FLOOR * zdqmin)
+    zmfmax = 300e2 / (constants.g * dt)
+    supply = jnp.array([150.0])                      # W/m^2, typical trades
+    expected = min(150.0 / dh, zmfmax)
+    got = _ifs_shallow_pbl_target(supply, T, q, T_u, q_u, q_c_u,
+                                  base_w, dp, dt)
+    tol = 1e-9 if got.dtype == jnp.float64 else 1e-5
+    assert abs(float(got[0]) - expected) < tol * expected
+    # supply <= 0: smooth kill (sigmoid(<=-5 widths) ~ 0).
+    dead = _ifs_shallow_pbl_target(jnp.array([-25.0]), T, q, T_u, q_u,
+                                   q_c_u, base_w, dp, dt)
+    assert float(dead[0]) < 1e-10
+    # huge supply: the CFL cap binds.
+    capped = _ifs_shallow_pbl_target(jnp.array([1.0e6]), T, q, T_u, q_u,
+                                     q_c_u, base_w, dp, dt)
+    assert abs(float(capped[0]) - zmfmax) < tol * zmfmax
+
+
+def test_ifs_shallow_closure_toggle_and_byte_identity():
+    """Flag + kwargs change the mass flux on a SHALLOW-weighted column; flag
+    on with kwargs None is inert; default False."""
+    assert BechtoldConfig().use_ifs_shallow_closure is False
+    # shallow-ish fixture: raise cloud_depth_shallow_max so the depth blend
+    # gives a real shallow share on the standard convecting column.
+    T, q, pf, ph, u, v = _column(ncol=2, nlev=40, T_sfc=299.0, q_sfc=13e-3,
+                                 lapse_rate=6.5)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev)); st = jnp.zeros((ncol,))
+    # M_b_max=0.5: with the default 0.05 the column-uniform profile limiter
+    # pins mb_scale at the cap in BOTH runs and masks the toggle (same
+    # masking as the ZTAURES probe).
+    kw = dict(cloud_depth_shallow_max=9000.0, cloud_depth_deep=12000.0,
+              M_b_max=0.5)
+    shf = jnp.full((ncol,), 120.0)
+    lhf = jnp.full((ncol,), 90.0)
+    on, mu_on, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_shallow_closure=True, **kw),
+        shf_w_m2=shf, lhf_w_m2=lhf)
+    off, mu_off, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_shallow_closure=False, **kw),
+        shf_w_m2=shf, lhf_w_m2=lhf)
+    inert, mu_inert, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_shallow_closure=True, **kw))
+    assert jnp.all(jnp.isfinite(mu_on))
+    assert float(jnp.max(jnp.abs(mu_on - mu_off))) > 0.0, "toggle dead"
+    assert jnp.array_equal(mu_inert, mu_off), "kwargs-None must be inert"
+    # grad finite through supply -> target -> blend (x64 only).
+    if jnp.asarray(0.0).dtype == jnp.float64:
+        def loss(sh):
+            o, m, _ = bechtold_convection(
+                T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+                config=BechtoldConfig(use_ifs_shallow_closure=True, **kw),
+                shf_w_m2=jnp.full((ncol,), sh), lhf_w_m2=lhf)
+            return jnp.sum(m ** 2)
+        assert jnp.isfinite(jax.grad(loss)(120.0))
