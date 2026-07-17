@@ -143,7 +143,7 @@ __param_spec__ = {
             # --- orographic launch amplitude ---
             "h_topo": {"units": "m", "bounds": (50.0, 2000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "orographic", "reference": "Lindzen (1981) subgrid topographic height", "shape": None},
             # --- saturation / wave breaking ---
-            "critical_Fr": {"units": "1", "bounds": (0.5, 2.0), "tunable_tier": 1, "transform": "sigmoid", "category": "saturation", "reference": "Lindzen (1981) saturation stress-ratio threshold (plays the role of Fr_c^2, not a Froude number)", "shape": None},
+            "fcrit2": {"units": "1", "bounds": (0.5, 2.0), "tunable_tier": 1, "transform": "sigmoid", "category": "saturation", "reference": "Lindzen (1981) / E3SM fcrit2: critical Froude number squared scaling the saturation CAP VALUE (effkwv semantics, gw_common.F90:153)", "shape": None, "legacy_name": "critical_Fr"},
             # --- tendency limiters ---
             "tndmax_per_day": {"units": "m/s/day", "bounds": (100.0, 1000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "E3SM gw_common tendency ceiling (orographic)", "shape": None},
             "umcfac": {"units": "1", "bounds": (0.1, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "E3SM gw_common umcfac no-reversal limiter", "shape": None},
@@ -238,17 +238,20 @@ class LindzenConfig(NamedTuple):
         local stratification (theta gradient via ``brunt_vaisala_n_full``), not
         from this field, so setting it does NOT change the launch/saturation
         stress.
-    critical_Fr : float
-        Saturation STRESS-RATIO threshold (default 1.0): the wave breaks where
-        the carried stress exceeds ``critical_Fr·tau_sat``. NOTE this is a LINEAR
-        stress-ratio multiplier, NOT a Froude number — Lindzen's saturation limit
-        scales with ``Fr_c²`` (E3SM ``fcrit2``), so this field plays the role of
-        ``Fr_c²``. Default 1.0 sets the breaking THRESHOLD at the exact Lindzen
-        ``tau_sat`` (``Fr_c = 1``), but the saturation is SOFT (finite-sharpness
-        sigmoid relaxing toward ``tau_sat``), NOT an exact hard cap.
+    fcrit2 : float
+        Critical Froude number squared scaling the saturation CAP VALUE
+        (``tau_sat_eff = fcrit2*tau_sat`` — the oracle ``effkwv = kwv*fcrit2``
+        semantics, E3SM gw_common.F90:153; Lindzen's limit scales with
+        ``Fr_c²``). The breaking sigmoid activates at the fixed threshold
+        ``tau_carry > tau_sat_eff`` and relaxes toward ``tau_sat_eff``; the
+        saturation is SOFT (finite-sharpness sigmoid), NOT an exact hard cap.
+        Default 1.0 (``Fr_c = 1``) caps at the exact Lindzen ``tau_sat``.
+        Formerly named ``critical_Fr`` and wired only as the sigmoid
+        ACTIVATION center with an unscaled relaxation target, which left the
+        knob inert wherever ``tau_carry <= tau_sat``.
     Fr_sharpness : float
         Sigmoid sharpness for the saturation stress-ratio breaking transition
-        (default 20.0). NOT a Froude-number transition (see ``critical_Fr``).
+        (default 20.0). NOT a Froude-number transition (see ``fcrit2``).
     crit_level_sharpness : float
         Sigmoid sharpness [s/m] for the smooth critical-level filter
         (default 10.0).  The orographic wave (c = 0) is absorbed where the
@@ -280,7 +283,7 @@ class LindzenConfig(NamedTuple):
     h_topo: float = 500.0
     k_wave: float = 2.0 * math.pi / 100e3
     N_ref: float = 0.01
-    critical_Fr: float = 1.0
+    fcrit2: float = 1.0
     Fr_sharpness: float = 20.0
     crit_level_sharpness: float = 10.0
     crit_level_floor: float = 0.5

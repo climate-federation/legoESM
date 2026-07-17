@@ -163,7 +163,7 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.KuoConfig.anthes_rh_offset',
     'atm.conv.KuoConfig.entrainment',
     # atm: LindzenConfig (2)
-    'atm.gwd.LindzenConfig.critical_Fr',
+    'atm.gwd.LindzenConfig.fcrit2',
     'atm.gwd.LindzenConfig.h_topo',
     # atm: LouisConfig (6)
     'atm.turb.LouisConfig.Ri_crit',
