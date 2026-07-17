@@ -510,3 +510,49 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
 
     return [{"delp": delp6[t], "pt": pt6[t], "u": u6[t], "v": v6[t]}
             for t in range(6)]
+
+
+def w2_six_face_state(ctx: dict, alpha: float = 0.0,
+                      u0: float = 38.61068276698372,
+                      gh0: float = 2.94e4) -> list:
+    """Williamson case-2 BALANCED six-face state on the SW-via-
+    production convention (pt≡1, delp = g·h):
+
+        h = (gh0 - (a·Omega·u0 + u0^2/2) · S^2) / g,
+        S = -cos(lon)·cos(lat)·sin(alpha) + sin(lat)·cos(alpha)
+
+    Winds are the analytic solid-body projection (reuses
+    analytic_swcore_state's certified D/C construction with ddelp=0),
+    then delp/pt are overwritten with the balanced fields at the
+    kinked-lattice cell centres (halos included; corner-diagonals are
+    handled by the step-entry exchanges).
+    """
+    from legoesm import constants
+
+    a_r = 6371.0e3                      # FV3_RADIUS_M convention
+    omega = constants.Omega
+    g = constants.g
+    coef = (a_r * omega * u0 + 0.5 * u0 * u0)
+
+    states = []
+    for gs in ctx["gs6"]:
+        st = analytic_swcore_state(gs, u0=u0, alpha=alpha)
+        lon = gs["agrid_lon"]
+        lat = gs["agrid_lat"]
+        s = (-np.cos(lon) * np.cos(lat) * np.sin(alpha)
+             + np.sin(lat) * np.cos(alpha))
+        h = (gh0 - coef * s * s) / g
+        st = dict(st)
+        st["delp"] = g * h
+        st["pt"] = np.ones_like(st["delp"])
+        st["w"] = np.zeros_like(st["delp"])
+        states.append(st)
+    return states
+
+
+def run_duo_sw(ctx: dict, states: list, dt: float, nsteps: int,
+               d_ext: float = 0.02) -> list:
+    """SB5 time loop: nsteps full acoustic steps."""
+    for _ in range(nsteps):
+        states = full_acoustic_step_sixface(ctx, states, dt, d_ext=d_ext)
+    return states

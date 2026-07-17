@@ -177,3 +177,43 @@ def test_sb4_two_full_steps_stable(ctx):
         assert np.isfinite(u).all() and np.isfinite(v).all(), t
         assert np.abs(u).max() < 8 * 40.0, (t, float(np.abs(u).max()))
         assert np.abs(v).max() < 8 * 40.0, (t, float(np.abs(v).max()))
+
+
+def test_sb5_w2_steadiness(ctx):
+    """SB5a characterization gate: balanced Williamson-2 at C12,
+    dt=600 s.  Measured behavior this gate pins (2026-07-17 baseline):
+    interior wind departure stays SMALL (0.6 m/s at 2 h), the edge
+    departure saturates (decelerating growth — adjustment + the
+    documented interim-exchange edge inconsistency, NOT an
+    instability), and mass is exact.  The duo-target cleanliness at
+    the edges requires the k2e ext-machinery swap (SB5b) — this gate
+    guards the assembled pipeline's stability + conservation and the
+    interior solution quality until then."""
+    from legoesm.core.fv3_native_duo_stepper import (
+        run_duo_sw,
+        w2_six_face_state,
+    )
+
+    states0 = w2_six_face_state(ctx)
+    slu = (slice(NG, NG + N), slice(NG, NG + N + 1))
+    sld = (slice(NG, NG + N), slice(NG, NG + N))
+    s12 = run_duo_sw(ctx, states0, dt=600.0, nsteps=12)
+    m0 = sum(float((states0[t]["delp"][sld]
+                    * ctx["gs6"][t]["area"][sld]).sum()) for t in range(6))
+    m1 = sum(float((s12[t]["delp"][sld]
+                    * ctx["gs6"][t]["area"][sld]).sum()) for t in range(6))
+    assert abs(m1 - m0) / abs(m0) < 1e-12
+    du12 = max(float(np.abs(s12[t]["u"][slu]
+                            - states0[t]["u"][slu]).max())
+               for t in range(6))
+    dui12 = max(float(np.abs((s12[t]["u"] - states0[t]["u"])
+                             [NG + 2:NG + N - 2, NG + 2:NG + N - 1]).max())
+                for t in range(6))
+    assert du12 < 10.0, du12          # measured 7.8
+    assert dui12 < 1.0, dui12         # measured 0.62
+    s48 = run_duo_sw(ctx, s12, dt=600.0, nsteps=36)
+    du48 = max(float(np.abs(s48[t]["u"][slu]
+                            - states0[t]["u"][slu]).max())
+               for t in range(6))
+    assert np.isfinite(du48)
+    assert du48 < 2.0 * du12, (du12, du48)   # saturating, not secular
