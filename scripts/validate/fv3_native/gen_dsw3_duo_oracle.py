@@ -61,9 +61,19 @@ def _pack(work: str) -> None:
     for k, a in outs.items():
         if np.isnan(a).any():
             raise SystemExit(f"dump under-writes token {k}")
+    # sha256 of the authoritative sw_core.F90 line ranges, computed at
+    # extraction time (the authoritative tree is not needed at test time)
+    auth_shas = (
+        "params:36-63:"
+        "3e102b7433b88664d8b31d159251e26aa2a4651085a1ab1c606643c1913ab7cf;"
+        "d_sw3:1201-1388:"
+        "3a5c44e839d60935a6188986dd0093f73437d14b674c2a0cc0075158e03afe55;"
+        "xtp_u+ytp_v:2540-3353:"
+        "c9917065b2de3591078cf752f9c3d03498ac1e1c1038109e7ee59af5f7ccb551")
     np.savez_compressed(
         OUT_NPZ, **outs, res=res, ng=ng, input_sha256=inp_hash,
         dsw3_extract_sha256=ext_hash,
+        auth_block_sha256=auth_shas,
         input_lineage="COMMITTED dswcore_input.npz serialised (no "
         "regeneration); symmetryclean d_sw1 -> d_sw3 chain, DUO branch, "
         "fl%duogrid + dg%is_initialized; d_sw3 duo lane reads no ut/vt "

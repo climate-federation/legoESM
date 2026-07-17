@@ -112,17 +112,25 @@ def test_dsw3_duo_bit_exact(inputs, oracle):
 
 def test_outputs_discriminated(oracle):
     """Non-vacuity: all four outputs finite, nonzero, and pairwise
-    distinct (ubbtemp==ubb would mean xtp_u's vb overwrite or the ub
-    rebuild was skipped; vbbtemp==vbb likewise)."""
+    distinct — ALL six pairs (ubbtemp==ubb would mean the ub rebuild
+    was skipped; vbbtemp==vbb that xtp_u never overwrote vb; the cross
+    pairs guard token-swap packing errors)."""
+    import itertools
+
     a = {k: np.asarray(oracle[k], dtype=np.float64)
          for k in ("ubbtemp", "vbbtemp", "ubb", "vbb")}
     for k, arr in a.items():
         assert np.isfinite(arr).all(), k
         assert np.abs(arr).max() > 0.0, k
-    assert not np.array_equal(a["ubbtemp"], a["ubb"])
-    assert not np.array_equal(a["vbbtemp"], a["vbb"])
+    for k1, k2 in itertools.combinations(a, 2):
+        assert not np.array_equal(a[k1], a[k2]), (k1, k2)
 
 
 def test_fixture_provenance(oracle):
     lin = str(oracle["input_lineage"])
     assert "COMMITTED" in lin and "d_sw3" in lin
+    # authoritative-block provenance persisted (codex dsw3-r1 P2)
+    auth = str(oracle["auth_block_sha256"])
+    for tag in ("params:36-63:", "d_sw3:1201-1388:",
+                "xtp_u+ytp_v:2540-3353:"):
+        assert tag in auth, tag

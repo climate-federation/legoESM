@@ -1379,11 +1379,17 @@ def extrap_corner(p0, p1, p2, q1: float, q2: float) -> float:
 
 def a2b_ord4(qin: fort, qout: fort, gridstruct: dict, npx: int, npy: int,
              is_: int, ie: int, js: int, je: int, ng: int,
-             replace: bool | None = None) -> None:
+             replace: bool | None = None, duogrid: bool = False) -> None:
     """a2b_edge.F90 a2b_ord4 (verbatim, all branches).
 
     qin(is-ng:ie+ng, js-ng:je+ng) A-grid INOUT;
     qout same bounds, B-grid OUT (only edge/interior B nodes written).
+
+    DUO (symmetryclean a2b_edge.F90:98/185/241): the three
+    ``bounded_domain`` gates widen to ``bounded .or. dg%is_initialized``
+    — duo takes the interior 4th-order branch everywhere (no edge_w/e/
+    s/n one-sided reconstruction).  duogrid=False is byte-identical to
+    the plain-certified path.
     """
     # local: compact 4-pt cubic (FUNCTION-LOCAL c1/c2 — these SHADOW the
     # sw_core module c1/c2/c3; a classic transcription trap)
@@ -1430,7 +1436,7 @@ def a2b_ord4(qin: fort, qout: fort, gridstruct: dict, npx: int, npy: int,
 
         # Corners:
         # 3-way extrapolation
-        if gridstruct["bounded_domain"]:
+        if gridstruct["bounded_domain"] or duogrid:
 
             for j in range(js - 2, je + 2 + 1):
                 for i in range(is_, ie + 1 + 1):
@@ -1544,7 +1550,7 @@ def a2b_ord4(qin: fort, qout: fort, gridstruct: dict, npx: int, npy: int,
         # Y-Interior:
         # ------------
 
-        if gridstruct["bounded_domain"]:
+        if gridstruct["bounded_domain"] or duogrid:
 
             for j in range(js, je + 1 + 1):
                 for i in range(is_ - 2, ie + 2 + 1):
@@ -1604,7 +1610,7 @@ def a2b_ord4(qin: fort, qout: fort, gridstruct: dict, npx: int, npy: int,
 
         # --------------------------------------
 
-        if gridstruct["bounded_domain"]:
+        if gridstruct["bounded_domain"] or duogrid:
 
             for j in range(js, je + 1 + 1):
                 for i in range(is_, ie + 1 + 1):
@@ -3520,7 +3526,7 @@ def d_sw(delp, pt, w, u, v, uc, vc, ua, va, divg_d, xflux, yflux, cx, cy,
         else:
             if grid_type < 3:
                 a2b_ord4(wk, vort, gsf, npx, npy, is_, ie, js, je, ng,
-                         replace=False)
+                         replace=False, duogrid=duogrid)
                 for j in range(js, je + 1 + 1):
                     for i in range(is_, ie + 1 + 1):
                         vort[i, j] = abs(dt) * math.sqrt(
