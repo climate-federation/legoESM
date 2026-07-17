@@ -37,12 +37,12 @@ FAITHFUL, DEFAULT ON (oracle-derived, fortran-mirror pinned in
   an SCM can pass its prescribed large-scale forcing) — the one owed
   wiring step, so the flag defaults OFF.
 
-FAITHFUL, DEFAULT OFF pending A/B validation (all inputs plumbed via the
-production physics pipeline; each is oracle-pinned and byte-identical-legacy
-when off): ``use_ifs_downdraft`` (RCE/AMIP A/B owed), ``use_ifs_shallow_closure``
-+ ``use_ifs_capdcycl`` (pipeline supplies bulk SHF/LHF + land_frac),
-``use_ifs_land_rhebc`` (land_frac), ``use_ifs_snow_melt`` (FOEALFCU partition +
-RTAUMEL melt inside the sub-cloud march).
+FAITHFUL, DEFAULT ON since 2026-07-17 after A/B validation (PR #1167 —
+inputs plumbed via the production physics pipeline, each oracle-pinned):
+``use_ifs_downdraft``, ``use_ifs_capdcycl`` (AMIP-with-diurnal A/B stable),
+``use_ifs_land_rhebc`` (oracle land/ocean RH-break split), ``use_ifs_snow_melt``
+(RCE A/B: T-drift halved).  Still DEFAULT OFF: ``use_ifs_shallow_closure``
+(pending its own A/B).
 
 KNOWN DEPARTURES (documented, deliberate): full-level environment stands in
 for IFS half-level ``ZTENH/ZQENH``; smooth sigmoid gates replace hard IFs
