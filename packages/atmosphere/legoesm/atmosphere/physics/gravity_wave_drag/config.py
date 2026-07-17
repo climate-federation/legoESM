@@ -350,6 +350,22 @@ class McFarlaneConfig(NamedTuple):
         would silently quadruple drag over OCEAN (no landfrac factor in this
         scheme).  Retune ``G_0``/``directional_spread``/``tau_max`` before
         flipping in production (RCE/AMIP-gated).
+    use_depth_averaged_source : bool
+        When ``True`` the source ``rho``/``N``/``U`` and the wave direction
+        come from E3SM's dp-weighted low-level averages over the levels the
+        mountain penetrates (``hdsp > sqrt(zm[k]*zm[k+1])``, the shared
+        ``oro_source.depth_averaged_oro_source``; gw_oro.F90:119-145), the
+        launch wind is the depth-averaged magnitude, and — as in E3SM, where
+        tau is held CONSTANT from the surface up to ``src_level``
+        (gw_oro.F90:178-186) — NO drag deposits inside the source region.
+        Default ``False`` keeps the legacy bottom-midpoint source (surface
+        ``rho``/``N``/``U``, deposition allowed from the bottom level).  The
+        displacement entering the penetration test follows ``use_e3sm_hdsp``
+        (``2*h`` when set, ``h`` otherwise); the oracle-faithful combination
+        is both flags ON.  Closes the declared surface-only-source departure
+        (PBL-contaminated N/U; nocturnal weak surface wind killing a launch
+        a real 700-1400 m average would sustain; spurious low-level
+        deposition).  Behavioral -> RCE/AMIP-gated flip.
     crit_level_sharpness : float
         Sigmoid sharpness [s/m] for the smooth critical-level filter
         (default 10.0).  The orographic wave (phase speed ``c = 0``) has its
@@ -391,6 +407,7 @@ class McFarlaneConfig(NamedTuple):
     tau_max: float = 10.0
     fcrit2: float = 1.0
     use_e3sm_hdsp: bool = False
+    use_depth_averaged_source: bool = False
     crit_level_sharpness: float = 10.0
     crit_level_floor: float = 0.5
     tndmax_per_day: float = 500.0

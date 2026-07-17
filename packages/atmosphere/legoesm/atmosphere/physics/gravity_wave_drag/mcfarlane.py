@@ -29,8 +29,16 @@ E3SM ``gw_oro``/``gw_common``:
   pseudo-mountain would silently drag over every ocean column.  Flip is
   behavioral → retune ``G_0``/``directional_spread``/``tau_max``,
   RCE/AMIP-gated.
-* **Surface-only source** — the source ``ρ``, ``N``, ``U`` are taken at the
-  bottom level, not E3SM's depth-averaged low-level source.
+* **Surface-only source** (flag-selectable, ``config.use_depth_averaged_source``):
+  by DEFAULT the source ``ρ``, ``N``, ``U`` are taken at the bottom level, not
+  E3SM's depth-averaged low-level source, and drag may deposit from the bottom
+  level up.  ``use_depth_averaged_source=True`` switches to the E3SM
+  dp-weighted averages over the penetrated levels (the shared
+  ``oro_source.depth_averaged_oro_source``, gw_oro.F90:119-145), launches on
+  the depth-averaged wind, and deposits NO drag at or below ``src_level``
+  (E3SM holds τ constant there, gw_oro.F90:178-186).  The penetration
+  displacement follows ``use_e3sm_hdsp``; the oracle-faithful combination is
+  both flags ON.  Behavioral → RCE/AMIP-gated flip.
 * **Saturation** is a Lindzen-style ``τ_sat ∝ ρ·U³·k/N`` smooth cap, not the
   E3SM ``gw_common`` spectral ``gw_drag_prof`` solver.
 * **Critical level** (c = 0): the gated residual stress is RADIATED (removed),
@@ -93,6 +101,9 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full, safe_divide
 from legoesm.atmosphere.physics.gravity_wave_drag.config import McFarlaneConfig
+from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
+    depth_averaged_oro_source,
+)
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py).
@@ -254,9 +265,45 @@ def mcfarlane_gwd(
     # Brunt-Väisälä frequency at full levels
     N_full = brunt_vaisala_n_full(T, p_full, z_full)
 
-    # Low-level wind
-    u_sfc = u[:, -1]
-    v_sfc = v[:, -1]
+    if h_topo_col is None:
+        h_topo_sq = config.h_topo ** 2
+    else:
+        h_topo_sq = jnp.clip(h_topo_col, 0.0, None) ** 2
+
+    # Source region (config.use_depth_averaged_source):
+    #   False (default): legacy bottom-midpoint source — surface rho/N/U and
+    #     wave direction from the bottom level; deposition allowed everywhere.
+    #   True: E3SM gw_oro_src dp-weighted low-level averages over the levels
+    #     the mountain penetrates (shared oro_source helper, gw_oro.F90:
+    #     119-145); the launch wind is the depth-averaged magnitude, and NO
+    #     drag deposits at or below src_level (E3SM holds tau constant there,
+    #     gw_oro.F90:178-186).  The penetration displacement follows
+    #     use_e3sm_hdsp (2*h when set, h otherwise).
+    if config.use_depth_averaged_source:
+        # Build the displacement DIRECTLY from the nonnegative height at
+        # u.dtype (never sqrt(h**2): the square-then-root round-trip can be
+        # one fp32 ULP off a per-column value, and the strict penetration
+        # inequality ``hdsp > gm`` could then flip src_level at a boundary
+        # — codex wave-5 LOW).
+        if h_topo_col is None:
+            h_base = jnp.full((ncol,), config.h_topo, dtype=u.dtype)
+        else:
+            h_base = jnp.clip(
+                jnp.asarray(h_topo_col), 0.0, None
+            ).astype(u.dtype)
+        h_disp_col = h_base * (2.0 if config.use_e3sm_hdsp else 1.0)
+        dpm = jnp.abs(p_half[:, 1:] - p_half[:, :-1])
+        rsrc, usrc, vsrc, nsrc, src_level = depth_averaged_oro_source(
+            u, v, rho, h_disp_col, p_half, dpm, z_full, N_full,
+        )
+        u_sfc = usrc
+        v_sfc = vsrc
+    else:
+        # Legacy: bottom midpoint; deposition mask inert (src_level = nlev
+        # ⇒ every level is "above source").
+        src_level = jnp.full((ncol,), nlev, dtype=jnp.int32)
+        u_sfc = u[:, -1]
+        v_sfc = v[:, -1]
     U_ll = jnp.sqrt(u_sfc ** 2 + v_sfc ** 2 + 1e-10)
     cos_a = u_sfc / U_ll
     sin_a = v_sfc / U_ll
@@ -281,12 +328,13 @@ def mcfarlane_gwd(
     # the formula units of ``kg²/(m²·s⁴)`` and a magnitude of order
     # ``10⁴`` (numerically) → clip truncated to 10 → drag ~1e-21 m/s²
     # (audit's "McFarlane stress dimensionally suspect").
-    rho_sfc = rho[:, -1]
-    N_sfc = N_full[:, -1]
-    if h_topo_col is None:
-        h_topo_sq = config.h_topo ** 2
+    if config.use_depth_averaged_source:
+        # dp-weighted source density / stability (E3SM rsrc/nsrc).
+        rho_sfc = rsrc
+        N_sfc = jnp.clip(nsrc, 1e-6, None)  # coeff-ok: N floor as elsewhere
     else:
-        h_topo_sq = jnp.clip(h_topo_col, 0.0, None) ** 2
+        rho_sfc = rho[:, -1]
+        N_sfc = N_full[:, -1]
     # McFarlane (1987) / E3SM ``gw_oro_src`` (gw_oro.F90:166-168) cap the
     # displacement height by the Froude-number limit before forming the
     # launch stress:
@@ -425,6 +473,14 @@ def mcfarlane_gwd(
         pos_mask = (U_proj[:, k] > 0.0).astype(tau_carry.dtype)
         tau_new = tau_new * gate_k
         drag = drag_sat * gate_k * pos_mask
+        if config.use_depth_averaged_source:
+            # E3SM source-region hold (gw_oro.F90:178-186): tau is CONSTANT
+            # from the surface up to src_level — no saturation, no gating,
+            # no deposition inside the source region.  ``k < src_level``
+            # marks levels strictly ABOVE the source interface (k=0 top).
+            above_src = (k < src_level).astype(tau_carry.dtype)
+            tau_new = tau_new * above_src + tau_carry * (1.0 - above_src)
+            drag = drag * above_src
         return tau_new, drag
 
     _, drag_stack = jax.lax.scan(scan_fn, tau_0, jnp.arange(nlev))
