@@ -351,6 +351,33 @@ ISOLATION EXPERIMENTS (2026-07-16, 5-yr runs + single-column avt certificate):
   MAPS of hi-pass w lego-vs-NEMO (needs a NEMO w snapshot — add w to the
   trend-dump or use a 1-day mean), + NOWIND ablation to split (b)/(c) from
   (a). Harness now dumps state.w (snaps['w']).
+- **THE RETENTION INVARIANT: ROOT CAUSE FOUND — nemo_iso_lap SLOPE SIGN FLIP
+  (fixed, certified; a wall hot spot remains the open blocker).** Winter
+  ttrd budget (new EXP_WINTER, 12-step restart from NEMO's Jan-yr5 state with
+  trends): NEMO's ttrd_ldf WARMS the 200-430 m band at +5.2e-8 K/s all winter
+  (x90 d = +0.4 K = exactly NEMO's retention) — the ISO DIFFUSION is the
+  permanent-thermocline builder. legoESM's iso on the SAME state: -1.0e-7
+  (OPPOSITE SIGN). Slope-vs-slope: corr(S_lego, wslpi_stg) = -0.995..-0.997,
+  same magnitude — a pure convention flip (producer S = +dx(rho)/|drho_dz|;
+  NEMO ldfslp slp = zau/(zbu<0) = -dx(rho)/|drho_dz|); the operator was
+  certified consuming NEMO's convention, so the subduction ran BACKWARD in
+  every nemo_iso_lap run of the campaign. FIX: negate at the dispatch
+  (committed, sign-gate test); verified on the winter state (+6.8e-8, mode-b
+  amplitude).
+- **5-yr WITH the sign fix: the invariant BREAKS — winter retention appears
+  (1.4-5.9 vs the 10-yr-constant 0.00) and baroclinic u' UNPINS (0.71 ->
+  1.52) — but the run develops a SOUTHERN-WALL HOT SPOT** (j=1-3, i=17-23,
+  column-mixed patch heating to 39-45 C, quasi-steady against the Haney
+  restoring; T-max climbs from year 1). A local upgradient pump at the wall:
+  the negated slopes are certified in the interior (corr -0.995 => ~0.5%
+  mismatch concentrated at boundaries/ML edges), and the wall traps the
+  wrong-signed residual flux with no advective escape. OPEN BLOCKER for the
+  card. NEXT (code-first): trace NEMO ldfslp's WALL-ROW handling vs ours —
+  which rows get slopes at all (NEMO computes DO_2D(1,1,1,1) and Shapiro
+  writes rows 2..jpjm1 only; boundary uslp may remain 0 where lego's ring
+  rows carry active slopes), the coastal zcofw factor detail, and
+  traldf_iso's wall-face flux masking. The retention physics is now PROVEN
+  reachable — the remaining work is the boundary detail.
 - **IMPLICIT WIND-STRESS DEPOSITION SHIPPED (surface_stress_implicit; review
   SHIP)** — the wind-path w-noise source fixed: stage-10b's explicit ~0.1 m/s
   per-step top-cell kick replaced by NEMO's dynzdf arrangement (stress in the
