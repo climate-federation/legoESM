@@ -172,9 +172,11 @@ def _mcfarlane_launch_stress(
     The E3SM ``gw_oro_src`` source FORM (the one piece this scheme is faithful
     to)::
 
-        tau_0 = G_0 * rho * N * k * min(h^2, fcrit2 * (U / N)^2) * U
+        tau_0 = G_0 * rho * N * k * min(h_disp^2, fcrit2 * (U / N)^2) * U
 
-    ``min(h^2, fcrit2*(U/N)^2)`` is the Froude cap: the streamline-displacement
+    with the displacement ``h_disp = h`` by default and E3SM's ``2*sgh``
+    under ``use_e3sm_hdsp`` (see below).  ``min(h_disp^2, fcrit2*(U/N)^2)``
+    is the Froude cap: the streamline-displacement
     amplitude saturates at the value that makes the low-level flow marginally
     unstable (Fr = 1), so above the cap ``tau_0`` is INDEPENDENT of ``h`` and
     scales as ``U^3 / N``.  Returned BEFORE the optional ``directional_spread``
