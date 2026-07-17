@@ -2623,3 +2623,24 @@ def test_bechtold_dx_m_round_trips_and_threads():
                             bechtold_dx_m=123456.0).to_amip_config()
     assert flat.bechtold_dx_m == 123456.0
     assert ExperimentConfig.from_amip_config(flat).bechtold_dx_m == 123456.0
+
+
+def test_bechtold_use_ifs_downdraft_round_trips_and_threads():
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-use-ifs-downdraft"]), parser))
+    assert cfg.bechtold_use_ifs_downdraft is True
+    assert _resolve_convection(cfg)[1].use_ifs_downdraft is True
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert d.bechtold_use_ifs_downdraft is False
+    for flag in (True, False):
+        e = ExperimentConfig(convection="bechtold",
+                             bechtold_use_ifs_downdraft=flag)
+        flat = e.to_amip_config()
+        assert flat.bechtold_use_ifs_downdraft is flag
+        assert ExperimentConfig.from_amip_config(
+            flat).bechtold_use_ifs_downdraft is flag

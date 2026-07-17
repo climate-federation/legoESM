@@ -900,6 +900,9 @@ class ExperimentConfig(NamedTuple):
     # (cumastrn.F90:762-768).  0 = legacy factor 1.0.  Mirrors
     # BechtoldConfig.dx_m.
     bechtold_dx_m: float = 0.0
+    # IFS convective downdraft (cudlfsn+cuddrafn).  Default OFF pending
+    # validation; mirrors BechtoldConfig.use_ifs_downdraft.
+    bechtold_use_ifs_downdraft: bool = False
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -1930,6 +1933,8 @@ class ExperimentConfig(NamedTuple):
             bechtold_use_ifs_inplume_precip=getattr(
                 amip_cfg, 'bechtold_use_ifs_inplume_precip', True),
             bechtold_dx_m=getattr(amip_cfg, 'bechtold_dx_m', 0.0),
+            bechtold_use_ifs_downdraft=getattr(
+                amip_cfg, 'bechtold_use_ifs_downdraft', False),
             # Convective precip split family — copy through AMIP/checkpoint
             # restore so the physical autoconversion isn't dropped to defaults
             # (codex MED; convective_precip_efficiency was a pre-existing gap).
@@ -2086,6 +2091,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_use_ifs_subcloud_evap=self.bechtold_use_ifs_subcloud_evap,
             bechtold_use_ifs_inplume_precip=self.bechtold_use_ifs_inplume_precip,
             bechtold_dx_m=self.bechtold_dx_m,
+            bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,
             sigma_b=self.sigma_b,
             k_BL_max_per_day=self.k_BL_max_per_day,
             k_free_per_day=self.k_free_per_day,

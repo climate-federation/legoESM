@@ -2613,6 +2613,8 @@ def _resolve_convection(config):
             use_ifs_inplume_precip=getattr(
                 config, 'bechtold_use_ifs_inplume_precip', True),
             dx_m=getattr(config, 'bechtold_dx_m', 0.0),
+            use_ifs_downdraft=getattr(
+                config, 'bechtold_use_ifs_downdraft', False),
         )
         if _pe is not None:
             _bechtold_kwargs["precip_efficiency"] = _pe

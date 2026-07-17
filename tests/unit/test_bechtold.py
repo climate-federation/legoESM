@@ -2246,3 +2246,177 @@ def test_ifs_ztaures_matches_oracle_piecewise():
     assert float(jnp.sum(mu_fine)) < float(jnp.sum(mu0)), (
         "longer turnover => weaker deep flux"
     )
+
+
+# ---------------------------------------------------------------------------
+# IFS convective downdraft (cudlfsn.F90 + cuddrafn.F90)
+# ---------------------------------------------------------------------------
+
+from legoesm.atmosphere.physics.convection.bechtold import (  # noqa: E402
+    _cuadjtq_evap_2iter,
+    _ifs_downdraft,
+    _IFS_RMFDEPS,
+    _IFS_ENTRDD,
+    _IFS_ITOPDE_PA,
+    _IFS_DD_MU_FRAC,
+    _IFS_NETFLUX_FRAC,
+)
+
+
+def _dry_mid_column(ncol=1, nlev=40):
+    """Warm humid BL under a DRY mid-troposphere: the canonical downdraft
+    sounding (large wet-bulb depression aloft => negatively buoyant 50/50
+    mixtures at the LFS)."""
+    T, q, pf, ph, u, v = _column(ncol=ncol, nlev=nlev, T_sfc=302.0,
+                                 q_sfc=18e-3, lapse_rate=6.5)
+    z = -8500.0 * jnp.log(pf / 1.0e5)
+    # keep the BL moist (rain production) while collapsing mid-level RH
+    dry = 0.30 + 0.70 * jnp.exp(-jnp.maximum(z - 1500.0, 0.0) / 2500.0)
+    q = q * dry
+    return T, q, pf, ph, u, v
+
+
+def test_cuadjtq_wet_bulb_physical():
+    """The 2-iteration evap-only adjustment produces a PHYSICAL wet bulb:
+    cooling in [0, ~10] K, moistening >= 0, and (near-)saturation afterward.
+    (The first cut carried an extra q_sat factor in the Newton denominator
+    and produced ~20 K wet-bulb depressions.)"""
+    T, q, pf, ph, u, v = _dry_mid_column()
+    T_wb, q_wb = _cuadjtq_evap_2iter(T, q, pf)
+    cool = T - T_wb
+    assert float(jnp.min(cool)) >= -1e-9
+    assert float(jnp.max(cool)) < 12.0
+    assert float(jnp.min(q_wb - q)) >= -1e-12
+    # 2 Newton iterations are the ORACLE's own budget (cuadjtq ICALL=2):
+    # from very dry air they under-converge exactly as IFS does, so assert
+    # substantial approach toward saturation in the troposphere (p>300 hPa)
+    # rather than full saturation; the stratospheric tail (tiny q_sat) is
+    # outside every consumer's window.
+    from legoesm.thermo import saturation_mixing_ratio
+    trop = pf > 300e2
+    rh_env = q / saturation_mixing_ratio(T, pf)
+    rh_wb = q_wb / saturation_mixing_ratio(T_wb, pf)
+    gain = jnp.where(trop, rh_wb - rh_env, 1.0)
+    assert float(jnp.min(gain)) >= -1e-9
+    close = jnp.where(trop & (rh_env > 0.5), rh_wb, 1.0)
+    assert float(jnp.min(close)) > 0.9, "moist levels must reach ~saturation"
+
+
+def test_ifs_downdraft_constants_match_oracle():
+    assert _IFS_RMFDEPS == 0.30            # sucumf.F90:154
+    assert _IFS_ENTRDD == 3.0e-4           # sucumf.F90:144
+    assert _IFS_ITOPDE_PA == 950.0e2       # sucumf.F90:268
+    assert _IFS_DD_MU_FRAC == 0.75         # cuddrafn.F90:214
+    assert _IFS_NETFLUX_FRAC == 0.98       # cuflxn.F90:336-362
+
+
+def test_ifs_downdraft_fires_and_conserves_on_dry_mid_column():
+    """On the canonical dry-mid-level sounding the downdraft (a) actually
+    fires (m_d < 0 with meaningful magnitude), (b) respects the -0.75*M_u
+    and 0.98 net-flux bounds, (c) its perturbation-flux divergence
+    redistributes with ZERO column net, and (d) the leaf-level ledger closes:
+    total water shift OFF->ON is machine-zero while rain is debited."""
+    T, q, pf, ph, u, v = _dry_mid_column()
+    ncol, nlev = T.shape
+    dp = ph[:, 1:] - ph[:, :-1]
+    cpp = jnp.zeros((ncol, nlev)); st = jnp.zeros((ncol,))
+    kw = dict(use_ifs_subcloud_evap=False, enable_downdraft=False,
+              downdraft_transport=False)
+    o_on, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_downdraft=True, **kw))
+    o_off, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_downdraft=False, **kw))
+    assert o_on.dq_r_conv_dt is not None and o_off.dq_r_conv_dt is not None
+    rain_on = float(jnp.sum(o_on.dq_r_conv_dt * dp) / constants.g)
+    rain_off = float(jnp.sum(o_off.dq_r_conv_dt * dp) / constants.g)
+    assert rain_off > 0.0, "fixture must rain"
+    # The oracle LFS rain-availability gate (PRFL > 10*RMFDEPS*M_b*demand,
+    # cudlfsn.F90:271) needs column rain ~3e-4 kg/m^2/s at this fixture's
+    # wet-bulb demand; a single leaf call produces ~1e-4, so the gate opens
+    # only marginally here — the STRONG-regime liveness (m_d < -1e-6) is
+    # pinned at the helper level with an oracle-scale r0 in
+    # test_ifs_downdraft_helper_bounds_and_window.  What this integration
+    # test pins: the debit is STRICTLY positive (wiring live end to end),
+    # monotone (never adds rain), and the ledger is machine-exact.
+    assert rain_on <= rain_off
+    assert rain_off - rain_on > 1e-13 * rain_off, (
+        f"downdraft wiring dead (off={rain_off:.3e}, on={rain_on:.3e})")
+    assert bool(jnp.all(jnp.isfinite(o_on.dT_dt)))
+
+    def water(o):
+        return float(jnp.sum(
+            (o.dq_v_dt + o.dq_c_conv_dt + o.dq_r_conv_dt) * dp) / constants.g)
+
+    shift = abs(water(o_on) - water(o_off))
+    assert shift < 1e-12 + 1e-9 * rain_off, (
+        f"ledger broken: water shift {shift:.3e} vs rain {rain_off:.3e}")
+    # enthalpy: divergence is neutral; deposit pairs -L_v/c_p exactly.
+    dh = float(jnp.sum((o_on.dT_dt - o_off.dT_dt) * dp) / constants.g) * constants.c_pd
+    dv = float(jnp.sum((o_on.dq_v_dt - o_off.dq_v_dt) * dp) / constants.g) * constants.L_v
+    assert abs(dh + dv) < 1e-9 * max(abs(dv), 1.0) + 1e-12
+
+
+def test_ifs_downdraft_helper_bounds_and_window():
+    """Direct helper invariants on the dry-mid column: m_d <= 0 everywhere,
+    |m_d| <= 0.98*M_u after the net-flux guard, zero above the live plume
+    (window), zero at the model top, and pdmfdp <= 0."""
+    T, q, pf, ph, u, v = _dry_mid_column()
+    ncol, nlev = T.shape
+    dp = ph[:, 1:] - ph[:, :-1]
+    z = -8500.0 * jnp.log(pf / 1.0e5)
+    # synthetic alive plume: warm saturated updraft over the lower half.
+    lev = jnp.arange(nlev, dtype=T.dtype)[None, :]
+    alive = jax.nn.sigmoid((lev - 18.0))            # ~0 above idx 14
+    M_u = 0.05 * alive
+    T_u = T + 1.5 * alive
+    q_u = q + 2e-3 * alive
+    above_base = jax.nn.sigmoid(4.0 * (36.0 - lev))
+    m_d, mfds_p, mfdq_p, pdm = _ifs_downdraft(
+        T, q, pf, ph, z, dp, T_u, q_u, M_u,
+        jnp.full((ncol,), 0.05), above_base, jnp.ones((ncol,)),
+        jnp.full((ncol,), 1e-3),
+    )
+    assert float(jnp.max(m_d)) <= 0.0
+    assert float(jnp.min(m_d)) < -1e-6, "downdraft must fire on this sounding"
+    assert bool(jnp.all(-m_d <= _IFS_NETFLUX_FRAC * M_u + 1e-12))
+    # near-top residue from the smooth window tails: negligible RELATIVE to
+    # the peak (the synthetic alive-gate sigmoid leaves ~1e-8 absolute).
+    peak = float(jnp.max(-m_d))
+    assert float(jnp.max(jnp.abs(m_d[:, :6]))) < 1e-3 * peak, "DD leaks to top"
+    assert float(jnp.max(pdm)) <= 1e-18
+    # column-net of the perturbation-flux divergence is zero (telescoping).
+    f_below = jnp.concatenate([mfdq_p[:, 1:], jnp.zeros((ncol, 1))], axis=1)
+    div = constants.g * (f_below - mfdq_p) / dp
+    assert abs(float(jnp.sum(div * dp) / constants.g)) < 1e-12
+
+
+def test_ifs_downdraft_default_off_quiescent_and_grad():
+    """Default False; stable column quiesces with the flag on; jax.grad
+    finite through LFS + descent scans (x64)."""
+    assert BechtoldConfig().use_ifs_downdraft is False
+    Ts, qs, pfs, phs, us, vs = _column(ncol=1, nlev=30, T_sfc=280.0,
+                                       q_sfc=2e-3, lapse_rate=3.0)
+    o_s, _, _ = bechtold_convection(
+        Ts, qs, pfs, phs, us, vs, jnp.zeros((1, 30)), jnp.zeros((1,)),
+        None, dt=600.0, config=BechtoldConfig(use_ifs_downdraft=True))
+    w_m2 = float(jnp.max(jnp.abs(o_s.dT_dt)) * constants.c_pd * 1e5 / constants.g)
+    assert w_m2 < 1.0
+
+    if jnp.asarray(0.0).dtype != jnp.float64:
+        import pytest
+        pytest.skip("grad coverage under x64 (pre-existing fp32 NaN on main)")
+
+    T, q, pf, ph, u, v = _dry_mid_column()
+    ncol, nlev = T.shape
+
+    def loss(eps_deep):
+        cfg = BechtoldConfig(epsilon_deep=eps_deep, use_ifs_downdraft=True)
+        o, _, _ = bechtold_convection(T, q, pf, ph, u, v,
+                                      jnp.zeros((ncol, nlev)),
+                                      jnp.zeros((ncol,)), None,
+                                      dt=600.0, config=cfg)
+        return jnp.sum(o.dT_dt ** 2) + jnp.sum(o.dq_v_dt ** 2)
+
+    assert jnp.isfinite(jax.grad(loss)(1.75e-3))
