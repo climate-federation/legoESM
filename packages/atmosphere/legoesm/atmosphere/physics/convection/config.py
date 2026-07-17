@@ -1501,36 +1501,43 @@ class BechtoldConfig(NamedTuple):
     # entraining descent; see bechtold._ifs_downdraft): downdraft mass-flux
     # transport of heat/moisture (perturbation-flux divergence), rain-flux
     # debit with a conserving env vapor/enthalpy ledger, faithful M_d into
-    # the CAPE closure's ZHEAT and into CMT.  Default False pending RCE/AMIP
-    # A/B (two-step pattern); False is byte-identical legacy.
-    use_ifs_downdraft: bool = False
+    # the CAPE closure's ZHEAT and into CMT.  Default True since 2026-07-17
+    # (RCE A/B: equilibrium T-drift 0.052 -> 0.018 K/day; AMIP stable);
+    # False is byte-identical legacy.
+    use_ifs_downdraft: bool = True
     # IFS shallow PBL-equilibrium closure (cumastrn.F90:468-484, 551-567; see
     # bechtold._ifs_shallow_pbl_target): the shallow class realizes
     # ZMFUB = ZDHPBL/ZDH capped by the true CFL ZMFMAX, with the sub-cloud
     # moist-energy supply in flux form (same-step bulk SHF+LHF + sub-cloud
     # radiative convergence — cloud-base turbulent flux and dynamics
     # advection are documented departures).  Needs the pipeline-supplied
-    # shf/lhf/dT_dt_rad kwargs (None => inert).  Default False pending
-    # RCE/AMIP A/B; False is byte-identical legacy.
+    # shf/lhf/dT_dt_rad kwargs (None => inert).  Default STILL False — the
+    # 2026-07-17 flip campaign HELD this one: AMIP A/B stable but the
+    # largest mean-state reshape of the family (rms dT 0.66 K / max 13 K at
+    # 10 days, r16); RCE-inert (no trigger data).  Flip needs a skill-gated
+    # longer run.  False is byte-identical legacy.
     use_ifs_shallow_closure: bool = False
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
     # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production
     # over a BL timescale so land deep convection peaks late afternoon.
     # Requires use_ifs_cape_closure + pipeline shf/lhf/land_frac kwargs
-    # (None => inert).  Default False pending validation.
-    use_ifs_capdcycl: bool = False
+    # (None => inert).  Default True since 2026-07-17 (AMIP-with-diurnal A/B
+    # stable, modest deltas; RCE-inert as expected — fixed zenith).
+    use_ifs_capdcycl: bool = True
     # IFS land RH break for the sub-cloud rain evaporation (cuflxn.F90:
     # 222-223: 0.70 deep / 0.75 non-deep over land vs 0.85/0.92 ocean).
     # Needs the pipeline land_frac kwarg (None => ocean values, legacy).
-    # Default False pending validation.
-    use_ifs_land_rhebc: bool = False
+    # Default True since 2026-07-17 (AMIP A/B stable, modest deltas; oracle
+    # land/ocean split).
+    use_ifs_land_rhebc: bool = True
     # IFS convective snow: FOEALFCU wet-bulb rain/snow partition + RTAUMEL
     # melt inside the sub-cloud precip march, FOLD variant (surface snow
     # forcibly melted into the lowest layer; formation-side freezing heat
     # paired so column enthalpy closes exactly — see
     # _ifs_subcloud_rain_evaporation).  Requires use_ifs_subcloud_evap.
-    # Default False pending validation.
-    use_ifs_snow_melt: bool = False
+    # Default True since 2026-07-17 (RCE A/B: T-drift 0.052 -> 0.026 K/day;
+    # AMIP stable).
+    use_ifs_snow_melt: bool = True
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0

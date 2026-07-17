@@ -985,15 +985,15 @@ class ExperimentConfig(NamedTuple):
     bechtold_dx_m: float = 0.0
     # IFS convective downdraft (cudlfsn+cuddrafn).  Default OFF pending
     # validation; mirrors BechtoldConfig.use_ifs_downdraft.
-    bechtold_use_ifs_downdraft: bool = False
+    bechtold_use_ifs_downdraft: bool = True
     # IFS shallow PBL-equilibrium closure (cumastrn.F90).  Default OFF
     # pending validation; mirrors BechtoldConfig.use_ifs_shallow_closure.
     bechtold_use_ifs_shallow_closure: bool = False
     # IFS diurnal CAPE correction + land RH break (default OFF pending
     # validation); mirror BechtoldConfig.use_ifs_capdcycl / use_ifs_land_rhebc.
-    bechtold_use_ifs_capdcycl: bool = False
-    bechtold_use_ifs_land_rhebc: bool = False
-    bechtold_use_ifs_snow_melt: bool = False
+    bechtold_use_ifs_capdcycl: bool = True
+    bechtold_use_ifs_land_rhebc: bool = True
+    bechtold_use_ifs_snow_melt: bool = True
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -2047,15 +2047,15 @@ class ExperimentConfig(NamedTuple):
                 amip_cfg, 'bechtold_use_ifs_inplume_precip', True),
             bechtold_dx_m=getattr(amip_cfg, 'bechtold_dx_m', 0.0),
             bechtold_use_ifs_downdraft=getattr(
-                amip_cfg, 'bechtold_use_ifs_downdraft', False),
+                amip_cfg, 'bechtold_use_ifs_downdraft', True),
             bechtold_use_ifs_shallow_closure=getattr(
                 amip_cfg, 'bechtold_use_ifs_shallow_closure', False),
             bechtold_use_ifs_capdcycl=getattr(
-                amip_cfg, 'bechtold_use_ifs_capdcycl', False),
+                amip_cfg, 'bechtold_use_ifs_capdcycl', True),
             bechtold_use_ifs_land_rhebc=getattr(
-                amip_cfg, 'bechtold_use_ifs_land_rhebc', False),
+                amip_cfg, 'bechtold_use_ifs_land_rhebc', True),
             bechtold_use_ifs_snow_melt=getattr(
-                amip_cfg, 'bechtold_use_ifs_snow_melt', False),
+                amip_cfg, 'bechtold_use_ifs_snow_melt', True),
             # Convective precip split family — copy through AMIP/checkpoint
             # restore so the physical autoconversion isn't dropped to defaults
             # (codex MED; convective_precip_efficiency was a pre-existing gap).

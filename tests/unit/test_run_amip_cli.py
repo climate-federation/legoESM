@@ -2659,7 +2659,7 @@ def test_bechtold_use_ifs_downdraft_round_trips_and_threads():
     assert _resolve_convection(cfg)[1].use_ifs_downdraft is True
     d = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--convection", "bechtold"]), parser))
-    assert d.bechtold_use_ifs_downdraft is False
+    assert d.bechtold_use_ifs_downdraft is True  # flipped 2026-07-17
     for flag in (True, False):
         e = ExperimentConfig(convection="bechtold",
                              bechtold_use_ifs_downdraft=flag)
@@ -2703,7 +2703,7 @@ def test_bechtold_capdcycl_and_land_rhebc_round_trip():
     d = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--convection", "bechtold"]), parser))
     dcc = _resolve_convection(d)[1]
-    assert dcc.use_ifs_capdcycl is False and dcc.use_ifs_land_rhebc is False
+    assert dcc.use_ifs_capdcycl is True and dcc.use_ifs_land_rhebc is True  # flipped 2026-07-17
     for flag in (True, False):
         e = ExperimentConfig(convection="bechtold",
                              bechtold_use_ifs_capdcycl=flag,
@@ -2724,7 +2724,7 @@ def test_bechtold_use_ifs_snow_melt_round_trip():
     assert _resolve_convection(cfg)[1].use_ifs_snow_melt is True
     d = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--convection", "bechtold"]), parser))
-    assert _resolve_convection(d)[1].use_ifs_snow_melt is False
+    assert _resolve_convection(d)[1].use_ifs_snow_melt is True  # flipped 2026-07-17
     for flag in (True, False):
         e = ExperimentConfig(convection="bechtold",
                              bechtold_use_ifs_snow_melt=flag)
