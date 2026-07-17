@@ -1,0 +1,11 @@
+# Per-combo CLASSICAL overlay -- combo: tiedtke.
+# Merged LAST (base <- cfg_overrides <- THIS) so these schemes WIN. Resolved by
+# run_aimip / the WB2 eval bridge from the suite's parent dir. See ../README.md.
+aimip_variant: "classical"
+aimip_convection: "tiedtke"
+aimip_turbulence: "louis"
+aimip_gwd: "mcfarlane"
+aimip_microphysics: "sundqvist"
+aimip_cloud: "xu_randall"
+aimip_radiation: "rrtmgp"
+physics_parameterization: "none"
