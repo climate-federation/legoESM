@@ -58,7 +58,10 @@ deliberate departures / version choices (canaries in
   spectrum"); our per-source calls close each source independently.  (The
   alternative ``use_gw_energy_fix`` branch, :916-937, deposits a
   column-UNIFORM dE — code default ``.false.``, phys_control.F90:174 — and is
-  not implemented.)
+  not implemented.  E3SM divides the closure by the spatially-varying
+  ``cpairv(:,k,lchnk)`` (gw_drag.F90:914); we use the scalar
+  ``constants.c_pd`` — the declared required-inputs departure, legoESM has
+  no spatially-varying heat capacity.)
 * **Newtonian alpha profile (default OFF).** ``config.use_newtonian_profile``
   defaults to ``False``; E3SM uses a Newtonian-cooling vertical ``alpha(z)``
   profile in the spectral saturation / WKB damping (with an orographic floor).
@@ -76,7 +79,11 @@ Conservation (see ``__physics_contract__`` energy note): ``conserves=["none"]``
 as the static INTERSECTION over all selectable sources (a contract must hold
 for every config a user can select). The orographic (c=0, DEFAULT) path IS
 energy-conserving in-atmosphere — the resolved mean-flow KE it removes is
-returned as heat by construction. But the frontal / convective sources launch
+returned as heat by construction (as a continuous RATE at the default
+``use_discrete_ke_heating=False``; ``eps_gwd`` is always that continuous
+mean-flow KE-removal-rate diagnostic, so with the discrete closure ON the
+column heat equals ``eps_gwd`` minus the ``0.5*dt*int(rho*(du²+dv²))dz``
+finite-step term — by design, not a leak). But the frontal / convective sources launch
 NONSTATIONARY spectral components from an EXTERNAL, unbudgeted reservoir
 (momentum not conserved), and their default ground-relative thermal term is not
 the irreversible ``(c-ubm)*gwut`` conversion — so no single conserved quantity
