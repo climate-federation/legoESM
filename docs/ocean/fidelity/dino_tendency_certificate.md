@@ -123,15 +123,25 @@ suspected iso ML-surface term:
 
 ## Characterized follow-ups (not yet certified)
 
-- **`zdfevd` trigger refinement** — the `nemo_paper` convective switch fires at
-  `N² < 0` on a single time level. NEMO's `zdfevd` fires where
-  `MIN(rn2, rn2b) <= −1e-12` (two-time-level, with a small *negative* threshold
-  to ignore marginally-neutral interfaces). The kernel already supports both
-  (`EnhancedDiffusionConfig.n2_threshold`, `two_level_trigger`); `DINOConfig`
-  does not yet expose them, so a hard 100 m²/s coefficient can flicker per step
-  in marginal columns. Second-order (62-day match is 9.55 vs 9.50); add the two
-  DINOConfig fields + threading when sub-0.05 °C oracle fidelity is needed and
-  the forcing is byte-verified. (Physics-validator, PR #1137.)
+- **`zdfevd` trigger refinement** — NEMO's `zdfevd` fires where
+  `MIN(rn2, rn2b) <= −1e-12` (`zdfevd.F90`). Two parts:
+  - **Threshold −1e-12 — SHIPPED.** `nemo_paper` now sets
+    `convection_n2_threshold=−1e-12` (`DINOConfig`, threaded to
+    `EnhancedDiffusionConfig`), matching NEMO's small negative threshold that
+    ignores marginally-neutral interfaces. Measured solution effect at the
+    62-day state: **nil** (T@262m 9.5479 with either 0.0 or −1e-12) — no cell
+    sits in the `[−1e-12, 0)` sliver — but it is the exact NEMO value at zero
+    risk.
+  - **Two-time-level `MIN(rn2, rn2b)` — characterised, NOT shipped.** The kernel
+    supports it (`two_level_trigger`, `k_profiles.py` `max(K_now, K_before)`),
+    but the before-level N² (`rn2b`) is threaded only via the TKE
+    `n2_before_advection` machinery, which in turn **requires**
+    `tke.n2_mode='adiabatic'` (it raises otherwise). So NEMO's `rn2b` hysteresis
+    is entangled with the **TKE-closure N²-sequencing axis**, not the convective
+    trigger alone. Measured effect (with the coupling enabled) is also **nil**
+    at this state, so it is deferred to the TKE-closure fidelity work rather
+    than shipped as a `DINOConfig` passthrough that would silently degrade to
+    single-level without the coupled TKE flags. (PR #1137.)
 - **`ttrd_ldf` surface (k1/k2)** — the S²-sensitive K33 diagonal exposes a
   pre-existing **ML-ramp / MLD** slope mismatch: legoESM's native slopes match
   NEMO's dumped `wslpi_stg` at corr 0.99 *below* the mixed layer but ~0.33

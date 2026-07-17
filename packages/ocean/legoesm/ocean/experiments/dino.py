@@ -265,6 +265,15 @@ class DINOConfig:
     # See docs/ocean/fidelity/dino_tendency_certificate.md.
     convection_smooth_transition: bool = True   # False = NEMO hard rn2<0 switch
     convection_n2_mode: str = "insitu"          # "adiabatic" = NEMO eosbn2
+    # NEMO zdfevd threshold (zdfevd.F90): EVD fires where the N² <= -1e-12 —
+    # a small NEGATIVE threshold that ignores marginally-neutral interfaces
+    # (vs the legoESM default 0.0). Default 0.0 keeps other recipes unchanged;
+    # nemo_paper sets NEMO's -1e-12. (NEMO's full switch is the two-time-level
+    # MIN(rn2, rn2b) <= -1e-12; the rn2b hysteresis is entangled with the TKE
+    # n2_before_advection + adiabatic-N² sequencing — a TKE-closure axis, and
+    # measurably nil at the 62-day state — so it is characterised, not shipped
+    # here. See docs/ocean/fidelity/dino_tendency_certificate.md.)
+    convection_n2_threshold: float = 0.0        # -1e-12 = NEMO rn_evd threshold
 
     # ------------------------------------------------------------------
     # GM/Redi mesoscale eddy parameterization. Adaptive κ via Visbeck 1997
@@ -598,6 +607,7 @@ DINO_RECIPES: dict[str, dict] = {
         # the thermocline by ~0.7 C (see DINOConfig.convection_smooth_transition).
         "convection_smooth_transition": False,
         "convection_n2_mode": "adiabatic",
+        "convection_n2_threshold": -1e-12,   # NEMO zdfevd rn_evd threshold
     },
     # --- L2 — Veros (Vallis nonlinear EOS, TKE, superbee, streamfunction/AB2). ---
     # Dycore identity: recipes.py::veros_faithful_v1 (rigid_lid → the builder
@@ -1900,6 +1910,7 @@ def dino_lat_lon_model_config(
                     # nemo_paper recipe selects it (smooth default over-cools).
                     smooth_transition=cfg.convection_smooth_transition,
                     n2_mode=cfg.convection_n2_mode,
+                    n2_threshold=cfg.convection_n2_threshold,
                 ),
             ),
             shortwave_penetration=ShortwavePenetrationConfig(
@@ -2186,6 +2197,7 @@ def dino_mpas_model_config(
                 # Same NEMO zdfevd hard-switch fidelity as the lat-lon path.
                 smooth_transition=cfg.convection_smooth_transition,
                 n2_mode=cfg.convection_n2_mode,
+                n2_threshold=cfg.convection_n2_threshold,
             ),
         ),
         shortwave_penetration=ShortwavePenetrationConfig(

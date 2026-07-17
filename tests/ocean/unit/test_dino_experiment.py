@@ -230,9 +230,11 @@ class TestDINORecipes:
         nemo = dino_config_for_recipe("nemo_paper")
         assert nemo.convection_smooth_transition is False
         assert nemo.convection_n2_mode == "adiabatic"
+        assert nemo.convection_n2_threshold == -1e-12   # NEMO zdfevd threshold
         default = dino_config_for_recipe("legoesm_default")
         assert default.convection_smooth_transition is True
         assert default.convection_n2_mode == "insitu"
+        assert default.convection_n2_threshold == 0.0
         # The faithful pair must actually THREAD into the built EnhancedDiffusion
         # config (both the lat-lon and MPAS convection builders read the cfg).
         grid = dino_lat_lon_grid(nemo, n_lon=10)
@@ -240,6 +242,7 @@ class TestDINORecipes:
         ed = mc.physics.convection.enhanced_diffusion
         assert ed.smooth_transition is False
         assert ed.n2_mode == "adiabatic"
+        assert ed.n2_threshold == -1e-12
 
     def test_base_override_preserved(self):
         # A recipe overlay keeps the non-scheme setup fields of the base config.
