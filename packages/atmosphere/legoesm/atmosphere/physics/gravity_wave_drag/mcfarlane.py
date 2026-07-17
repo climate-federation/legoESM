@@ -267,8 +267,19 @@ def mcfarlane_gwd(
     # (``lindzen.py:85``) implements the correct form; McFarlane is
     # now aligned with it.
     envelope = config.envelope_scale
+    # fcrit2 couples the SAME marginal-instability Froude criterion into the
+    # saturation stress AND the launch cap, exactly as the oracle: E3SM forms
+    # effkwv = kwv*fcrit2 (gw_common.F90:153) entering tausat =
+    # effkwv*rhoi*ubmc^3/(2*ni) (gw_common.F90:493-494), the sibling of the
+    # sghmax = fcrit2*(U/N)^2 launch cap (gw_oro.F90:166) this scheme already
+    # applies; McFarlane (1987) couples them likewise (tau_sat ~ E*k*Fc^2/2 *
+    # rho*U^3/N).  Attached only to the launch, a tuned fcrit2 moved the
+    # source-strength limit while leaving the breaking limit untouched — a
+    # coefficient faithful in isolation but wired to a DIFFERENT structural
+    # object (the F6 lesson).  Identity at the default fcrit2 = 1.
     tau_sat = (
         config.efficiency
+        * config.fcrit2
         * rho
         * U_proj_abs ** 3
         * config.k_wave
