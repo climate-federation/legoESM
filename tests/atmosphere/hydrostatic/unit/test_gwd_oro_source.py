@@ -10,7 +10,6 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
     depth_averaged_oro_source,
 )

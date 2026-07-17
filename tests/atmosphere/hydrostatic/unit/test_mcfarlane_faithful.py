@@ -16,14 +16,14 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import pytest
-
-from legoesm import constants
 from legoesm.atmosphere.physics.gravity_wave_drag.config import McFarlaneConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.mcfarlane import (
     __physics_contract__,
-    mcfarlane_gwd,
     _mcfarlane_launch_stress,
+    mcfarlane_gwd,
 )
+
+from legoesm import constants
 
 
 def _column(ncol=1, nlev=24, u_sfc=15.0, u_top=15.0):
@@ -378,10 +378,10 @@ def test_depth_avg_no_deposition_in_source_region():
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
                         300.0, cfg, h_topo_col=h_col)
 
+    from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full
     from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
         depth_averaged_oro_source,
     )
-    from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full
     N_full = brunt_vaisala_n_full(T, p_full, z_full)
     dpm = jnp.abs(p_half[:, 1:] - p_half[:, :-1])
     *_, src = depth_averaged_oro_source(
@@ -432,10 +432,10 @@ def test_depth_avg_composes_with_e3sm_hdsp():
     u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column(
         ncol=1, u_sfc=15.0, u_top=25.0)
     h_col = jnp.full((1,), 500.0)
+    from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full
     from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
         depth_averaged_oro_source,
     )
-    from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full
     N_full = brunt_vaisala_n_full(T, p_full, z_full)
     dpm = jnp.abs(p_half[:, 1:] - p_half[:, :-1])
     *_, src_h = depth_averaged_oro_source(
@@ -473,10 +473,10 @@ def test_depth_avg_launch_uses_averaged_values():
     dz = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
     deposited = float(jnp.sum(rho * jnp.abs(out.du_dt) * dz))
 
+    from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full
     from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
         depth_averaged_oro_source,
     )
-    from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full
     N_full = brunt_vaisala_n_full(T, p_full, z_full)
     dpm = jnp.abs(p_half[:, 1:] - p_half[:, :-1])
     rsrc, usrc, vsrc, nsrc, _ = depth_averaged_oro_source(
