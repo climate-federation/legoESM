@@ -471,3 +471,58 @@ def test_nemo_recipe_is_lazy_registered():
 
     assert "nemo_recipe" in fidelity.__all__
     assert fidelity.nemo_recipe.nemo_lat_lon_model_config is nemo_lat_lon_model_config
+
+
+def test_surface_stress_implicit_wiring():
+    """NEMO dynzdf implicit wind-stress deposition (surface_stress_implicit):
+    (a) requires nemo_stage_mean_imposition (init raises without it);
+    (b) column-integrated momentum input identical to the explicit kick
+    (no double-count through F_slow + the solve deposition);
+    (c) non-vacuous (vertical distribution differs);
+    (d) card has both flags on."""
+    import jax.numpy as jnp
+    import numpy as np
+    import pytest
+
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.fidelity.nemo_recipe import (
+        _NEMO_GYRE_DT_S,
+        build_nemo_gyre_recipe,
+        nemo_gyre_wind_forcing,
+    )
+
+    r = build_nemo_gyre_recipe()
+    assert r.model_config.surface_stress_implicit is True
+    assert r.model_config.barotropic.nemo_stage_mean_imposition is True
+
+    with pytest.raises(ValueError, match="nemo_stage_mean_imposition"):
+        LatLonCGridOceanModel(
+            r.grid, r.z_coord,
+            r.model_config._replace(barotropic=r.model_config.barotropic
+                                    ._replace(nemo_stage_mean_imposition=False)))
+
+    st = r.initial_state
+    n_lat, n_lon = st.T.data.shape[0], st.T.data.shape[1]
+    sf = nemo_gyre_wind_forcing(n_lat, n_lon, 0.0)
+    m_impl = LatLonCGridOceanModel(r.grid, r.z_coord, r.model_config)
+    mc_expl = r.model_config._replace(
+        surface_stress_implicit=False,
+        barotropic=r.model_config.barotropic._replace(
+            nemo_stage_mean_imposition=False))
+    m_expl = LatLonCGridOceanModel(r.grid, r.z_coord, mc_expl)
+    s_i = m_impl.step(st, dt=_NEMO_GYRE_DT_S, surface_forcing=sf)
+    s_e = m_expl.step(st, dt=_NEMO_GYRE_DT_S, surface_forcing=sf)
+    dz = np.asarray(r.z_coord.dz_ref)
+    wet = np.asarray(st.u_mask.data) > 0
+    Iu_i = np.sum(np.asarray(s_i.u.data) * dz, -1)
+    Iu_e = np.sum(np.asarray(s_e.u.data) * dz, -1)
+    # same column-integrated momentum input (f32 state => 1e-6 relative)
+    ref = float(np.sqrt(np.mean(Iu_e[wet] ** 2)))
+    np.testing.assert_allclose(Iu_i[wet], Iu_e[wet], atol=2e-6 * max(ref, 1.0))
+    # different vertical distribution (the point of the change)
+    assert float(np.max(np.abs(
+        np.asarray(s_i.u.data)[..., 0] - np.asarray(s_e.u.data)[..., 0]))) > 1e-4
+    for f in (s_i.u.data, s_i.v.data, s_i.T.data):
+        assert bool(jnp.all(jnp.isfinite(f)))

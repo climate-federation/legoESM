@@ -1497,6 +1497,17 @@ class LatLonCGridOceanConfig(NamedTuple):
     # is placed); rejected otherwise at config validation. Default False ⇒
     # current EXPLICIT surface-forcing placement ⇒ BIT-IDENTICAL.
     surface_forcing_implicit: bool = False
+    # NEMO dynzdf-style IMPLICIT wind-stress deposition: withhold the explicit
+    # top-cell kick (stage-10b') and instead (a) add tau/(rho0 dz0)*dt_mom to
+    # the top cell of the implicit vertical momentum solve's RHS (the stress
+    # deposits smoothly over the Ekman layer WITHIN the solve, no impulsive
+    # ~0.1 m/s per-step surface kick at dt=14400 — a grid-scale w-noise
+    # source, plan §G), and (b) add the depth-mean tau/(rho0 H) to the
+    # barotropic F_slow (NEMO stp2d's explicit wind term). The depth mean the
+    # solve deposits is then re-imposed to the barotropic solution by
+    # barotropic.nemo_stage_mean_imposition (stprk3_stg:440) — REQUIRED with
+    # this flag (validated at model init). Default False: bit-identical.
+    surface_stress_implicit: bool = False
 
     # --- Adaptive-implicit vertical momentum advection ---
     # (Shchepetkin 2015 / NEMO ``ln_zad_Aimp``).  Appended at the end of

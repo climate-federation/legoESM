@@ -924,6 +924,10 @@ def build_nemo_gyre_recipe(
     # geostrophic value vs NEMO's 60%).
     model_config = model_config._replace(
         physics=physics_config, coriolis_scheme="explicit_ab2",
+        # NEMO dynzdf implicit wind-stress deposition + the stprk3_stg:440
+        # barotropic-mean imposition it requires (plan §G: the explicit
+        # ~0.1 m/s-per-step top-cell kick is a grid-scale w-noise source).
+        surface_stress_implicit=True,
         # NEMO np_CRV: planetary + relative vorticity COMBINED in one ENE
         # vertex-f transport-form flux (dynvor.F90 vor_ene kvor=total) — the
         # last "≈" momentum term unified. Requires the "frozen" barotropic
@@ -936,7 +940,12 @@ def build_nemo_gyre_recipe(
         # NEMO has NO spatial barotropic eta-diffusion (nn_bt_flt=3 dissipation
         # is purely temporal); with the nemo_ab3am4 filter the smoother is off.
         barotropic=model_config.barotropic._replace(
-            barotropic_diffusion_alpha=0.0))
+            barotropic_diffusion_alpha=0.0,
+            # Required by surface_stress_implicit (init-validated): the
+            # implicit stress deposition shifts the depth mean after the
+            # barotropic solve; NEMO re-imposes it every stage
+            # (stprk3_stg:440 zub).
+            nemo_stage_mean_imposition=True))
 
     return NEMORecipe(
         model_config=model_config,
