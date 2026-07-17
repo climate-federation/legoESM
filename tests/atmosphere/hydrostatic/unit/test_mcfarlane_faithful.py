@@ -349,13 +349,14 @@ def test_e3sm_hdsp_requires_per_column_topo():
 # ---------------------------------------------------------------------------
 
 def test_depth_avg_source_default_off_bit_identical():
-    """Canary + regression: flag defaults False and the default output is
-    unchanged by the wave-5 restructure (surface source, deposition from the
-    bottom level allowed)."""
-    assert McFarlaneConfig().use_depth_averaged_source is False
+    """Canary + legacy regression: the flag defaults True since 2026-07-17
+    (oracle depth-averaged source); the EXPLICIT False arm still reproduces
+    the legacy surface-source behavior (deposition from the bottom level
+    allowed) unchanged by the wave-5 restructure."""
+    assert McFarlaneConfig().use_depth_averaged_source is True  # oracle default (flipped 2026-07-17)
     u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column(
         u_sfc=15.0, u_top=25.0)
-    cfg = McFarlaneConfig()
+    cfg = McFarlaneConfig(use_depth_averaged_source=False)  # legacy explicit
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
                         300.0, cfg)
     # Independent recomputation of the legacy launch from surface values:
@@ -413,7 +414,9 @@ def test_depth_avg_nocturnal_decoupling_discriminant():
     u = jnp.full_like(u, 12.0).at[:, -1].set(0.2)
     h_col = jnp.full((1,), 900.0)
     off = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
-                        300.0, McFarlaneConfig(), h_topo_col=h_col)
+                        300.0,
+                        McFarlaneConfig(use_depth_averaged_source=False),
+                        h_topo_col=h_col)
     on = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
                        300.0,
                        McFarlaneConfig(use_depth_averaged_source=True),

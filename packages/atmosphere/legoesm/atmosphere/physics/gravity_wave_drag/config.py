@@ -365,7 +365,8 @@ class McFarlaneConfig(NamedTuple):
         is both flags ON.  Closes the declared surface-only-source departure
         (PBL-contaminated N/U; nocturnal weak surface wind killing a launch
         a real 700-1400 m average would sustain; spurious low-level
-        deposition).  Behavioral -> RCE/AMIP-gated flip.
+        deposition).  ``True`` DEFAULT since 2026-07-17 (AMIP A/B: stable,
+        small deltas; oracle behavior).
     crit_level_sharpness : float
         Sigmoid sharpness [s/m] for the smooth critical-level filter
         (default 10.0).  The orographic wave (phase speed ``c = 0``) has its
@@ -407,7 +408,7 @@ class McFarlaneConfig(NamedTuple):
     tau_max: float = 10.0
     fcrit2: float = 1.0
     use_e3sm_hdsp: bool = False
-    use_depth_averaged_source: bool = False
+    use_depth_averaged_source: bool = True
     crit_level_sharpness: float = 10.0
     crit_level_floor: float = 0.5
     tndmax_per_day: float = 500.0
@@ -713,14 +714,16 @@ class E3SMCAMConfig(NamedTuple):
         (gw_common.F90:727).  ``True`` uses the newer CAM/EAM-trunk
         intrinsic-frequency form ``sum_l (c_l - ubm)*gwut_l``.
     use_discrete_ke_heating : bool
-        Orographic heating closure.  ``False`` (default) keeps the
-        continuous-rate identity ``dT/dt = -(u*du + v*dv)/c_pd``.  ``True``
-        uses the E3SM driver-level DISCRETE-step closure
+        Orographic heating closure.  ``True`` (DEFAULT since 2026-07-17,
+        flipped after the AMIP A/B campaign — oracle behavior) uses the
+        E3SM driver-level DISCRETE-step closure
         ``dT/dt = -(du*(u + 0.5*dt*du) + dv*(v + 0.5*dt*dv))/c_pd``
         (gw_drag.F90:908-913, default no-energy-fix branch), which returns
         exactly the discrete resolved-KE change as heat so the discrete
-        column energy budget closes; the continuous form over-heats by
-        ``0.5*dt*(du^2+dv^2)/c_pd`` per step.  Orographic source only.
+        column energy budget closes; ``False`` keeps the legacy
+        continuous-rate identity ``dT/dt = -(u*du + v*dv)/c_pd``, which
+        over-heats by ``0.5*dt*(du^2+dv^2)/c_pd`` per step.  Orographic
+        source only.
     use_newtonian_profile : bool
         When ``True`` use the E3SM height-dependent Newtonian-cooling
         profile (``alpha0``/``palph`` from gw_drag.F90, interpolated to the
@@ -730,7 +733,9 @@ class E3SMCAMConfig(NamedTuple):
         unchanged.  E3SM uses the profile for spectral sources and a tiny
         floor (1e-6 1/s) for orographic-only.
     use_e3sm_spectral_heating : bool
-        E3SM-faithful spectral thermal term (default ``False`` = legacy).
+        E3SM-faithful spectral thermal term (``True`` DEFAULT since
+        2026-07-17 — the oracle applies it unconditionally; ``False`` =
+        legacy).
         E3SM's spectral (``ngwv > 0``) ``gw_drag_prof`` UNCONDITIONALLY
         (a) band-limits ``dttke`` to midpoints ``ktop+1..kbotbg``
         (gw_common.F90:726-728; ``ktop = 0``, ``kbotbg`` = the interface
@@ -755,11 +760,10 @@ class E3SMCAMConfig(NamedTuple):
         When ``True`` (spectral path only) apply the C.-C. Chen column
         momentum & energy fixer (``momentum_energy_conservation``,
         gw_common.F90) so the column total-energy budget self-closes to
-        machine precision.  ``False`` (default) leaves the raw tendencies —
-        NOTE this is a DEPARTURE from the oracle's shipped behavior: E3SM
-        v3.0.1 calls the fixer UNCONDITIONALLY after each spectral
-        ``gw_drag_prof`` (Beres gw_drag.F90:800, CM :863); flip owed after
-        AMIP validation.
+        machine precision.  ``True`` (DEFAULT since 2026-07-17, matching
+        the oracle: E3SM v3.0.1 calls the fixer UNCONDITIONALLY after each
+        spectral ``gw_drag_prof`` — Beres gw_drag.F90:800, CM :863).
+        ``False`` leaves the raw tendencies (legacy departure).
     prndl : float
         Inverse Prandtl number for the GW eddy diffusivity (E3SM
         ``prndl = 0.25``, gw_diffusion.F90).
@@ -790,11 +794,11 @@ class E3SMCAMConfig(NamedTuple):
     tndmax_per_day: float = 400.0
     n2min: float = 1.0e-8
     dttke_use_intrinsic: bool = False
-    use_discrete_ke_heating: bool = False
-    use_e3sm_spectral_heating: bool = False
+    use_discrete_ke_heating: bool = True
+    use_e3sm_spectral_heating: bool = True
     use_newtonian_profile: bool = False
     do_eddy_diffusion: bool = False
-    do_energy_conservation: bool = False
+    do_energy_conservation: bool = True
     prndl: float = 0.25
     egwd_max: float = 150.0
     ediff_kbot_p: float = 5.0e4
