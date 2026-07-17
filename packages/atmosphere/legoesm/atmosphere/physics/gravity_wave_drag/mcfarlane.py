@@ -280,13 +280,18 @@ def mcfarlane_gwd(
     #     gw_oro.F90:178-186).  The penetration displacement follows
     #     use_e3sm_hdsp (2*h when set, h otherwise).
     if config.use_depth_averaged_source:
-        h_disp_col = jnp.broadcast_to(
-            jnp.asarray(
-                jnp.sqrt(jnp.asarray(h_topo_sq, dtype=u.dtype))
-                * (2.0 if config.use_e3sm_hdsp else 1.0)
-            ),
-            (ncol,),
-        )
+        # Build the displacement DIRECTLY from the nonnegative height at
+        # u.dtype (never sqrt(h**2): the square-then-root round-trip can be
+        # one fp32 ULP off a per-column value, and the strict penetration
+        # inequality ``hdsp > gm`` could then flip src_level at a boundary
+        # — codex wave-5 LOW).
+        if h_topo_col is None:
+            h_base = jnp.full((ncol,), config.h_topo, dtype=u.dtype)
+        else:
+            h_base = jnp.clip(
+                jnp.asarray(h_topo_col), 0.0, None
+            ).astype(u.dtype)
+        h_disp_col = h_base * (2.0 if config.use_e3sm_hdsp else 1.0)
         dpm = jnp.abs(p_half[:, 1:] - p_half[:, :-1])
         rsrc, usrc, vsrc, nsrc, src_level = depth_averaged_oro_source(
             u, v, rho, h_disp_col, p_half, dpm, z_full, N_full,

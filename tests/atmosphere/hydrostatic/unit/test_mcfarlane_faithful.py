@@ -13,6 +13,7 @@ E3SM-faithfulness — and the documented 4× ``hdsp`` source-amplitude departure
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -368,8 +369,11 @@ def test_depth_avg_no_deposition_in_source_region():
     """Flag ON with a penetrating mountain: dp/N/U/rho come from the shared
     helper and NO drag deposits at or below src_level (E3SM tau hold)."""
     u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column(
-        ncol=1, u_sfc=15.0, u_top=25.0)
-    h_col = jnp.full((1,), 800.0)
+        ncol=1, u_sfc=15.0, u_top=2.0)
+    # h large enough that (a) the mountain penetrates several levels and
+    # (b) tau_0 rides the Froude cap/tau_max, exceeding tau_sat at the FIRST
+    # above-source midpoint — so the s-1 boundary pin below is meaningful.
+    h_col = jnp.full((1,), 1500.0)
     cfg = McFarlaneConfig(use_depth_averaged_source=True)
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
                         300.0, cfg, h_topo_col=h_col)
@@ -387,6 +391,12 @@ def test_depth_avg_no_deposition_in_source_region():
     # Zero tendency at and below the source interface, activity above it.
     assert float(jnp.max(jnp.abs(out.du_dt[0, s:]))) == 0.0
     assert float(jnp.max(jnp.abs(out.du_dt[0, :s]))) > 0.0
+    # Boundary pin (codex wave-5 LOW): the FIRST midpoint above the source
+    # interface (index s-1) must itself be allowed to deposit — a mask
+    # over-restricted to ``k < s-1`` passes the two asserts above but fails
+    # here (E3SM's first nonconstant stress interface is s-1, so Fortran
+    # midpoint s == Python index s-1 deposits).
+    assert float(jnp.abs(out.du_dt[0, s - 1])) > 0.0
 
 
 def test_depth_avg_nocturnal_decoupling_discriminant():
@@ -439,3 +449,57 @@ def test_depth_avg_composes_with_e3sm_hdsp():
         h_topo_col=h_col)
     assert bool(jnp.all(jnp.isfinite(out.du_dt)))
     assert float(jnp.max(jnp.abs(out.du_dt))) > 0.0
+
+
+def test_depth_avg_launch_uses_averaged_values():
+    """Value-level pin (codex wave-5 LOW): the launch entering the scan must
+    be built from the DEPTH-AVERAGED rho/N/U — verified by full absorption:
+    on a column whose winds collapse aloft (everything breaks by the top),
+    the column-integrated deposited momentum equals the launched stress, and
+    that total must match the hand-computed depth-averaged tau_0, NOT the
+    surface-value tau_0 (which differs through rho_src, N_src, U_avg)."""
+    u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column(
+        ncol=1, u_sfc=14.0, u_top=0.5)
+    # h must PENETRATE past the bottom midpoint (gm ~ 316 m here) so the
+    # depth averages genuinely differ from the surface values, while staying
+    # below the Froude cap and tau_max so the hand formula is exact.  A
+    # sharp near-surface shear (6 m/s at the bottom midpoint vs 14 m/s in
+    # the layer above) makes the surface-vs-averaged discriminant strong.
+    u = u.at[:, -1].set(6.0)
+    h_col = jnp.full((1,), 600.0)
+    cfg = McFarlaneConfig(use_depth_averaged_source=True)
+    out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
+                        300.0, cfg, h_topo_col=h_col)
+    dz = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
+    deposited = float(jnp.sum(rho * jnp.abs(out.du_dt) * dz))
+
+    from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
+        depth_averaged_oro_source,
+    )
+    from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full
+    N_full = brunt_vaisala_n_full(T, p_full, z_full)
+    dpm = jnp.abs(p_half[:, 1:] - p_half[:, :-1])
+    rsrc, usrc, vsrc, nsrc, _ = depth_averaged_oro_source(
+        u, v, rho, h_col, p_half, dpm, z_full, N_full)
+
+    def tau0_from(rho_s, n_s, u_mag):
+        u_act = float(
+            jax.nn.sigmoid(cfg.min_wind_sharpness * (u_mag - cfg.min_wind))
+            * u_mag)
+        h_eff = min(float(h_col[0]) ** 2,
+                    cfg.fcrit2 * (u_act / n_s) ** 2)
+        return (cfg.G_0 * rho_s * n_s * cfg.k_wave * h_eff * u_act
+                * cfg.directional_spread)
+
+    tau_avg = tau0_from(float(rsrc[0]), max(float(nsrc[0]), 1e-6),
+                        float(jnp.sqrt(usrc[0] ** 2 + vsrc[0] ** 2 + 1e-10)))
+    tau_sfc = tau0_from(float(rho[0, -1]), float(N_full[0, -1]),
+                        float(jnp.sqrt(u[0, -1] ** 2 + 1e-10)))
+    assert abs(tau_avg - tau_sfc) > 0.05 * tau_avg, (
+        "fixture degenerate: surface and averaged launches must differ")
+    # Full absorption: deposited total tracks the AVERAGED launch.
+    assert abs(deposited - tau_avg) < 0.15 * tau_avg, (
+        f"deposited {deposited:.4e} vs averaged tau_0 {tau_avg:.4e}")
+    assert abs(deposited - tau_avg) < abs(deposited - tau_sfc), (
+        "deposited total sits closer to the SURFACE launch — averaged "
+        "values not reaching tau_0")
