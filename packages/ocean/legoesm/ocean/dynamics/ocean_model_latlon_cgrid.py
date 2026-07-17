@@ -123,6 +123,7 @@ def _compute_advection_flux_div(
     grid,
     dt: float,
     recon_fill_mask: jnp.ndarray | None = None,
+    linssh_top_flux: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute advection flux divergence for a single tracer field.
 
@@ -276,6 +277,16 @@ def _compute_advection_flux_div(
             f"ppm_fct, dst3, dst3_multidim, weno5, weno7."
         )
 
+    if linssh_top_flux:
+        # NEMO key_linssh top-cell concentration/dilution: the surface
+        # vertical advective flux is F[0] = w0*T0 (first-order, OUTSIDE any
+        # limiter — traadv_fct.F90:413-423 with a zero antidiffusive top
+        # flux), instead of the rigid F[0]=0 of the stretching-column z*.
+        # vert_flux_div[k] = F[k] - F[k+1], so add w0*T0 to level 0.
+        # w_baro[...,0] = deta/dt (fixed-thickness continuity); zero on land.
+        vert_flux_div = vert_flux_div.at[..., 0].add(
+            w_baro[..., 0] * tr[..., 0])
+
     return div_hut, vert_flux_div
 
 
@@ -300,6 +311,7 @@ def _compute_advection_flux_div_pair(
     grid,
     dt: float,
     recon_fill_mask: jnp.ndarray | None = None,
+    linssh_top_flux: bool = False,
 ):
     """Advection flux divergence for TWO tracers (T, S) in one pass.
 
@@ -338,11 +350,13 @@ def _compute_advection_flux_div_pair(
                 tr_a, tracer_advection, mass_flux_u, mass_flux_v,
                 w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
                 recon_fill_mask=recon_fill_mask,
+                linssh_top_flux=linssh_top_flux,
             ),
             _compute_advection_flux_div(
                 tr_b, tracer_advection, mass_flux_u, mass_flux_v,
                 w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
                 recon_fill_mask=recon_fill_mask,
+                linssh_top_flux=linssh_top_flux,
             ),
         )
 
@@ -394,6 +408,11 @@ def _compute_advection_flux_div_pair(
         vert_a = flux_form_vertical_tracer_advection_centered(tr_a, w_baro)
         vert_b = flux_form_vertical_tracer_advection_centered(tr_b, w_baro)
 
+    if linssh_top_flux:
+        # NEMO key_linssh top-cell flux F[0]=w0*T0 (see the single-tracer
+        # gate) — apply to BOTH tracers of the fused fast path.
+        vert_a = vert_a.at[..., 0].add(w_baro[..., 0] * tr_a[..., 0])
+        vert_b = vert_b.at[..., 0].add(w_baro[..., 0] * tr_b[..., 0])
     return (div_a, vert_a), (div_b, vert_b)
 
 
@@ -410,6 +429,7 @@ def _ssp_rk3_tracer_step(
     grid,
     dt: float,
     active_3d: jnp.ndarray,
+    linssh_top_flux: bool = False,
 ) -> jnp.ndarray:
     """RK3 flux-form tracer advection step (Butcher-tableau form).
 
@@ -441,6 +461,7 @@ def _ssp_rk3_tracer_step(
         dh, dv = _compute_advection_flux_div(
             tr_val, tracer_advection, mass_flux_u, mass_flux_v, w_baro,
             h_k_old, h_u_old, h_v_old, grid, dt,
+            linssh_top_flux=linssh_top_flux,
         )
         return dh + dv
 
@@ -482,6 +503,7 @@ def _ssp_rk3_tracer_pair_step(
     dt: float,
     active_3d: jnp.ndarray,
     recon_fill_mask: jnp.ndarray | None = None,
+    linssh_top_flux: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """RK3 tracer step for the (T, S) pair — one fused flux-div per stage.
 
@@ -501,6 +523,7 @@ def _ssp_rk3_tracer_pair_step(
             a_val, b_val, tracer_advection, mass_flux_u, mass_flux_v,
             w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
             recon_fill_mask=recon_fill_mask,
+            linssh_top_flux=linssh_top_flux,
         )
         return dh_a + dv_a, dh_b + dv_b
 
@@ -1421,7 +1444,15 @@ class LatLonCGridOceanModel:
                     "tendencies + implicit FS + implicit vertical mixing; these "
                     "features are threaded by the split implicit_cn path only. Use "
                     'barotropic_solver="implicit_cn", or extend _unsplit_ab2_step.')
-        _valid_time_filters = {"box", "cosine", "power_law", "nemo_boxcar_centred"}
+        _valid_time_filters = {"box", "cosine", "power_law",
+                               "nemo_boxcar_centred", "nemo_ab3am4"}
+        if (config.barotropic.barotropic_time_filter == "nemo_ab3am4"
+                and config.barotropic.barotropic_wide_halo):
+            raise ValueError(
+                'barotropic_time_filter="nemo_ab3am4" is not yet supported '
+                "with barotropic_wide_halo=True (the AB3/AM4 substep "
+                "histories widen the per-substep stencil reach; the wide-halo "
+                "budget has not been re-derived).")
         if config.barotropic.barotropic_time_filter not in _valid_time_filters:
             raise ValueError(
                 f"barotropic_time_filter must be one of {_valid_time_filters}, "
@@ -1524,6 +1555,46 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"pgf_quadrature must be one of {_valid_pgf_quad}, "
                 f"got {_pgf_quad!r}")
+        if getattr(config, "vorticity_scheme", "al81") == "ene_total":
+            if getattr(config, "coriolis_scheme", "matsuno_split") != "explicit_ab2":
+                raise ValueError(
+                    'vorticity_scheme="ene_total" (NEMO np_CRV: planetary '
+                    "Coriolis inside the ENE vorticity flux) requires "
+                    'coriolis_scheme="explicit_ab2" — under matsuno_split the '
+                    "separate Matsuno rotation would double-apply f. Got "
+                    f'{getattr(config, "coriolis_scheme", "matsuno_split")!r}.')
+            if getattr(config, "barotropic_coriolis_split", "frozen") == "live":
+                raise ValueError(
+                    'vorticity_scheme="ene_total" is incompatible with '
+                    'barotropic_coriolis_split="live": the live subtraction '
+                    "removes the face-f velocity-form depth-mean, but "
+                    "ene_total's planetary term is the vertex-f TRANSPORT-form "
+                    "flux — the stencils would not cancel. Use \"frozen\".")
+        _bt_split = getattr(config, "barotropic_coriolis_split", "frozen")
+        if _bt_split not in ("frozen", "live"):
+            raise ValueError(
+                "Unknown barotropic_coriolis_split scheme: must be one of "
+                f'("frozen", "live"), got {_bt_split!r}')
+        if _bt_split == "live":
+            if getattr(config, "coriolis_scheme", "matsuno_split") != "explicit_ab2":
+                raise ValueError(
+                    'barotropic_coriolis_split="live" requires '
+                    'coriolis_scheme="explicit_ab2" (the frozen F_slow must '
+                    "contain the planetary Coriolis depth-mean for the "
+                    "pre-step subtraction to be exact). Got coriolis_scheme="
+                    f'{getattr(config, "coriolis_scheme", "matsuno_split")!r}.')
+            if config.barotropic.barotropic_solver != "explicit_substep":
+                raise ValueError(
+                    'barotropic_coriolis_split="live" is implemented for the '
+                    'explicit_substep barotropic solver only; got '
+                    f"{config.barotropic.barotropic_solver!r}.")
+            if getattr(config.barotropic, "barotropic_slow_forcing_ab2", False):
+                raise ValueError(
+                    'barotropic_coriolis_split="live" is incompatible with '
+                    "barotropic_slow_forcing_ab2=True: the AB2-blended F_slow "
+                    "Coriolis (1.5*cor^n - 0.5*cor^(n-1)) would not cancel the "
+                    "single-time pre-step subtraction, leaving a transient "
+                    "residual planetary Coriolis in the forcing.")
         _valid_time_int = {"euler", "ab2", "rk3"}
         if config.tracer_time_integrator not in _valid_time_int:
             raise ValueError(
@@ -1532,7 +1603,7 @@ class LatLonCGridOceanModel:
         if config.ab2_epsilon < 0.0:
             raise ValueError(
                 f"ab2_epsilon must be >= 0, got {config.ab2_epsilon!r}")
-        _valid_mom_int = {"euler", "rk3"}
+        _valid_mom_int = {"euler", "rk3", "rk3_ws"}
         _mom_ti = getattr(config, "momentum_time_integrator", "euler")
         if _mom_ti not in _valid_mom_int:
             raise ValueError(
@@ -1624,14 +1695,24 @@ class LatLonCGridOceanModel:
                 f"coriolis_scheme must be one of "
                 f"{sorted(VALID_CORIOLIS_SCHEME)}, got {_cor_scheme!r}")
         if _cor_scheme == "explicit_ab2":
-            if config.outer_integrator != "ab2":
+            # The explicit f×u tendency needs a stably-rotating outer integrator.
+            # AB2(-eps) has a stable rotation region; SSP-RK3 does too (|G|<=1 up to
+            # f·dt~sqrt(3)), and — unlike operator-splitting the Coriolis AFTER the
+            # RK3 PGF stages — it keeps PGF and Coriolis COUPLED inside the stages,
+            # holding geostrophic balance (the fix for the O(dt^2) split-growth of
+            # the GYRE forced current). Forward-Euler alone is unstable (|G|>1).
+            if config.outer_integrator != "ab2" and getattr(
+                    config, "momentum_time_integrator",
+                    "euler") not in ("rk3", "rk3_ws"):
                 raise ValueError(
                     'coriolis_scheme="explicit_ab2" requires '
-                    'outer_integrator="ab2": an explicit forward-Euler Coriolis '
-                    "at weight 1.0 is unconditionally UNSTABLE for pure rotation "
-                    "(|G|=sqrt(1+(f·dt)²)>1 every step); only the AB2(-eps) outer "
-                    "integrator has a stable region covering the ACC's f·dt_mom. "
-                    f"Got outer_integrator={config.outer_integrator!r}.")
+                    'outer_integrator="ab2" OR momentum_time_integrator="rk3": '
+                    "an explicit forward-Euler Coriolis at weight 1.0 is "
+                    "unconditionally UNSTABLE for pure rotation "
+                    "(|G|=sqrt(1+(f·dt)²)>1); AB2(-eps) or SSP-RK3 have a stable "
+                    "rotation region. Got outer_integrator="
+                    f"{config.outer_integrator!r}, momentum_time_integrator="
+                    f"{getattr(config, 'momentum_time_integrator', 'euler')!r}.")
             if config.barotropic.barotropic_solver not in (
                     "rigid_lid", "implicit_cn", "implicit_unsplit",
                     "explicit_substep"):
@@ -1897,7 +1978,7 @@ class LatLonCGridOceanModel:
     def tendencies(self, state: LatLonCGridOceanState, surface_forcing=None,
                    sponge=None, dt=300.0, momentum_only=False,
                    precomputed_geom_density=None, *, grid=None,
-                   vertex_mask=None):
+                   vertex_mask=None, skip_lateral_viscosity=False):
         """Compute baroclinic tendencies.
 
         ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
@@ -1928,6 +2009,7 @@ class LatLonCGridOceanModel:
             surface_tracer_forcing_fn=self._surface_tracer_forcing_fn,
             vertex_mask=_vmask,
             momentum_only=momentum_only,
+            skip_lateral_viscosity=skip_lateral_viscosity,
             precomputed_geom_density=precomputed_geom_density,
         )
 
@@ -2251,6 +2333,49 @@ class LatLonCGridOceanModel:
             p2u, p2v = _mom_pert(u2, v2)
             u_star = (1.0 / 3.0) * u0 + (2.0 / 3.0) * (u2 + dt_mom * p2u)
             v_star = (1.0 / 3.0) * v0 + (2.0 / 3.0) * (v2 + dt_mom * p2v)
+        elif getattr(self.config, "momentum_time_integrator",
+                     "euler") == "rk3_ws":
+            # NEMO stprk3_stg Wicker-Skamarock RK3: every stage restarts from
+            # u0 with the PREVIOUS stage's RHS and the stage dt (dt/3, dt/2,
+            # dt) — NOT Shu-Osher convex combinations. Per-stage RHS content
+            # mirrors NEMO exactly: stage 1 = the precomputed full tendency
+            # (stp2d's Ue_rhs INCLUDES dyn_ldf); stage 2 = hpg+vor+adv ONLY
+            # (NO lateral viscosity, stprk3_stg:318-334); stage 3 = full again
+            # (dyn_ldf re-applied). ZDF (the implicit vertical solve) runs once
+            # after the momentum stages == NEMO's stage-3-only dyn_zdf. The
+            # linear stability polynomial R(z)=1+z+z^2/2+z^3/6 is identical to
+            # SSP-RK3, so the explicit_ab2 Coriolis coupling bound (f*dt<=
+            # sqrt(3)) carries over.
+            u0 = state.u.data
+            v0 = state.v.data
+
+            def _mom_pert_ws(u_in, v_in, skip_ldf):
+                st = state._replace(
+                    u=state.u.replace(data=u_in * u_mask_3d),
+                    v=state.v.replace(data=v_in * v_mask_3d),
+                )
+                td = self.tendencies(st, surface_forcing, sponge=sponge, dt=dt,
+                                     momentum_only=True,
+                                     precomputed_geom_density=_geom_density,
+                                     grid=_grid, vertex_mask=_vmask,
+                                     skip_lateral_viscosity=skip_ldf)
+                _du = td.du_dt.data
+                _dv = td.dv_dt.data
+                _Fu = jnp.sum(_du * h_u_pre, axis=-1) / H_u_pre * state.u_mask.data
+                _Fv = jnp.sum(_dv * h_v_pre, axis=-1) / H_v_pre * state.v_mask.data
+                return _du - _Fu[..., jnp.newaxis], _dv - _Fv[..., jnp.newaxis]
+
+            # stage 1 (dt/3), RHS = the stage-1 full tendency (incl. LDF)
+            u1 = u0 + (dt_mom / 3.0) * du_dt_pert
+            v1 = v0 + (dt_mom / 3.0) * dv_dt_pert
+            # stage 2 (dt/2), RHS(u1) WITHOUT lateral viscosity
+            p1u, p1v = _mom_pert_ws(u1, v1, True)
+            u2 = u0 + (dt_mom / 2.0) * p1u
+            v2 = v0 + (dt_mom / 2.0) * p1v
+            # stage 3 (dt), RHS(u2) with lateral viscosity
+            p2u, p2v = _mom_pert_ws(u2, v2, False)
+            u_star = u0 + dt_mom * p2u
+            v_star = v0 + dt_mom * p2v
         else:
             u_star = state.u.data + dt_mom * du_dt_pert
             v_star = state.v.data + dt_mom * dv_dt_pert
@@ -2366,6 +2491,42 @@ class LatLonCGridOceanModel:
             _add_bt_cor = (
                 getattr(self.config, "coriolis_scheme", "matsuno_split")
                 != "explicit_ab2")
+            if (not _add_bt_cor) and getattr(
+                    self.config, "barotropic_coriolis_split",
+                    "frozen") == "live":
+                # NEMO dynspg_ts structure (dynspg_ts.F90:296-300 + :689):
+                # remove the PRE-step 2D barotropic Coriolis from the frozen
+                # forcing (leaving baroclinic-only F_slow, NEMO's zu_frc), then
+                # integrate a LIVE f x U every substep so the barotropic mode
+                # holds geostrophic balance with the evolving eta inside the
+                # window (the frozen form lags Coriolis by dt and cripples the
+                # gyre's U_bar response to grad-eta). SAME face stencils as the
+                # substep loop (4-pt V-to-u; interp_u_to_vface_4pt), so the
+                # subtraction cancels the live term exactly at the pre-step
+                # state (EXACT on a beta-plane with flat full-cell bathymetry,
+                # where the 4-pt average and the depth-mean commute; else an
+                # O(dx^2)/topographic residual remains). Signs mirror the 3D
+                # coriolis_cgrid (+f*v_at_u on u; -f*u_at_v on v).
+                from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                    interp_u_to_vface_4pt,
+                )
+                from legoesm.ocean.dynamics.barotropic_common import (
+                    coriolis_at_faces,
+                )
+                _f_u2, _f_v2 = coriolis_at_faces(_grid, F_slow_u.dtype)
+                _u_pre3, _v_pre3 = state.u.data, state.v.data
+                _U_pre = (jnp.sum(_u_pre3 * h_u_pre, axis=-1)
+                          / jnp.maximum(H_u_pre, 1e-10))
+                _V_pre = (jnp.sum(_v_pre3 * h_v_pre, axis=-1)
+                          / jnp.maximum(H_v_pre, 1e-10))
+                _V_w = jnp.roll(_V_pre, 1, axis=1)
+                _V_at_u = 0.25 * (_V_pre[:-1] + _V_pre[1:]
+                                  + _V_w[:-1] + _V_w[1:])
+                _V_at_u = jnp.concatenate([_V_at_u, _V_at_u[:, 0:1]], axis=1)
+                _U_at_v = interp_u_to_vface_4pt(_U_pre, _grid)
+                F_slow_u = (F_slow_u - _f_u2 * _V_at_u) * state.u_mask.data
+                F_slow_v = (F_slow_v + _f_v2 * _U_at_v) * state.v_mask.data
+                _add_bt_cor = True
             if self.config.barotropic.barotropic_wide_halo:
                 # Opt-in wide-halo subcycle: one fused wide exchange per
                 # chunk of substeps instead of ~4 pads/substep (scaling-
@@ -2981,12 +3142,16 @@ class LatLonCGridOceanModel:
             # _compute_advection_flux_div_pair).  Bit-identical to the
             # historical per-tracer calls; non-separable schemes fall
             # back to two single-tracer calls inside the pair helpers.
+            # NEMO key_linssh: top-cell concentration/dilution flux (static
+            # coordinate flag; see _compute_advection_flux_div).
+            _linssh = getattr(self.z_coord, "linear_free_surface", False)
             if _tti == "rk3":
                 T_corrected, S_corrected = _ssp_rk3_tracer_pair_step(
                     T_mid, S_mid, _adv,
                     mass_flux_u, mass_flux_v, w_baro,
                     h_k_old, h_k_new, h_u_old, h_v_old,
                     _grid, dt, active_3d, recon_fill_mask=_wall_fill_mask,
+                    linssh_top_flux=_linssh,
                 )
                 _pair_divs = (None, None)
             else:
@@ -2995,6 +3160,7 @@ class LatLonCGridOceanModel:
                     mass_flux_u, mass_flux_v, w_baro,
                     h_k_old, h_u_old, h_v_old, _grid, dt,
                     recon_fill_mask=_wall_fill_mask,
+                    linssh_top_flux=_linssh,
                 )
 
             for tr_name in ['T', 'S']:
@@ -3249,6 +3415,11 @@ class LatLonCGridOceanModel:
                 # so there is NO lag in the synchronous (non-AB2) path. Falls back
                 # to the carried state.eke_diss when state_new has none yet.
                 _tke_source = self._assemble_tke_source(state, state_new, tend)
+                # NEMO eosbn2 Nnow sequencing: sample the diffusivity-stage
+                # N² on the STEP-ENTRY (before-advection) T/S when the flag is
+                # set. ``state`` here is the step-entry state (never rebound;
+                # ``state_new`` is the working copy). None ⇒ BIT-IDENTICAL.
+                _n2_tracers = self._n2_before_advection_tracers(state)
                 state_new, tke_new = self._apply_implicit_vertical_mixing(
                     state_new, dt, surface_forcing,
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
@@ -3256,16 +3427,17 @@ class LatLonCGridOceanModel:
                     surface_tracer_forcing=tend.surface_tracer_forcing,
                     tracer_source=tend.tracer_source,
                     tke_old=_tke_old, tke_source=_tke_source, return_tke=True,
-                    grid=_grid,
+                    grid=_grid, n2_tracers=_n2_tracers,
                 )
             else:
+                _n2_tracers = self._n2_before_advection_tracers(state)
                 state_new = self._apply_implicit_vertical_mixing(
                     state_new, dt, surface_forcing,
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
                     K33_iso=k33_implicit, dt_mom=dt_mom,
                     surface_tracer_forcing=tend.surface_tracer_forcing,
                     tracer_source=tend.tracer_source,
-                    grid=_grid,
+                    grid=_grid, n2_tracers=_n2_tracers,
                 )
         if tke_new is not None:
             # Veros order (integrate_tke): the implicit solve writes
@@ -3377,6 +3549,33 @@ class LatLonCGridOceanModel:
         tke_cfg = self.config.physics.vertical_mixing.tke
         return (getattr(tke_cfg, "buoyancy_timing", "pre_mixing")
                 == "post_mixing_veros")
+
+    def _n2_before_advection_tracers(self, entry_state):
+        """Before-advection (Nnow) T/S for the vmix diffusivity-stage N².
+
+        Static Python predicate (config-only): returns ``(T, S)`` from the
+        STEP-ENTRY state when ``vertical_mixing.scheme=="tke"`` and
+        ``tke.n2_before_advection`` is set — the NEMO ``eosbn2`` sequencing
+        (``bn2(Nnow)`` at step start, before ``fct2`` tracer advection drifts
+        the deepest wet cell). ``None`` (default) ⇒ the closure keeps sampling
+        N² on the post-advection state ⇒ BIT-IDENTICAL.
+
+        Only the ``adiabatic`` N² path reads the T/S contrast; ``n2_mode !=
+        "adiabatic"`` with the flag set would be a SILENT no-op, so raise
+        (dispatch hardening — a mis-wired flag must fail loudly).
+        """
+        vmix = getattr(getattr(self.config, "physics", None),
+                       "vertical_mixing", None)
+        if vmix is None or vmix.scheme != "tke":
+            return None
+        if not getattr(vmix.tke, "n2_before_advection", False):
+            return None
+        if getattr(vmix.tke, "n2_mode", "insitu") != "adiabatic":
+            raise ValueError(
+                "vertical_mixing.tke.n2_before_advection=True requires "
+                "n2_mode='adiabatic' (the only N² path that reads the T/S "
+                f"contrast); got n2_mode={vmix.tke.n2_mode!r}.")
+        return (entry_state.T.data, entry_state.S.data)
 
     def _tke_realized_kdiss_active(self) -> bool:
         """True iff the post-mixing TKE charges the REALIZED implicit-friction
@@ -3878,6 +4077,7 @@ class LatLonCGridOceanModel:
         K_diss_v_w=None,
         return_K_diss_v: bool = False,
         grid=None,
+        n2_tracers=None,
     ) -> LatLonCGridOceanState:
         """Backward-Euler vertical diffusion for ``u, v, T, S``.
 
@@ -4091,6 +4291,7 @@ class LatLonCGridOceanModel:
                     # nlev-1) columns inside nemo_etau_injection.
                     lat_deg=jnp.degrees(self.grid.lat_T),
                     iwm_fields=self._iwm_forcing,
+                    n2_tracers=n2_tracers,
                 )
                 if _post_mixing:
                     # Phase 1 only (Veros set_tke_diffusivities from the
@@ -4106,6 +4307,7 @@ class LatLonCGridOceanModel:
                     eos_fn=_vmix_eos_fn,
                     lat_deg=jnp.degrees(self.grid.lat_T),
                     iwm_fields=self._iwm_forcing,
+                    n2_tracers=n2_tracers,
                 )
 
         # dz at cell centers (jacobian-corrected so the eta-stretched
@@ -5119,6 +5321,11 @@ class LatLonCGridOceanModel:
                 # integrate_tke (veros.py:266→285). Off ⇒ no extra return ⇒
                 # bit-identical.
                 _want_kdv = self._tke_realized_kdiss_active()
+                # Momentum-only: this call already acts on the step-entry
+                # ``state`` (before advection), so its N² is ALREADY Nnow —
+                # no n2_tracers override needed (and it must stay that way so
+                # friction + tracer N² sources remain consistent under the
+                # n2_before_advection flag).
                 _fric = self._apply_implicit_vertical_mixing(
                     state, dt, surface_forcing,
                     K_v_phys=K_v_phys, A_v_phys=A_v_phys,
@@ -5144,6 +5351,8 @@ class LatLonCGridOceanModel:
                     return_tke=_tke_prog,
                     K_diss_v_w=_kdiss_v_w,
                     grid=_grid,
+                    # NEMO eosbn2 Nnow N²: step-entry (before-advection) T/S.
+                    n2_tracers=self._n2_before_advection_tracers(state),
                 )
                 if _tke_prog:
                     state_ab2, tke_new_ab2 = _trac
@@ -5166,6 +5375,8 @@ class LatLonCGridOceanModel:
                     tke_old=_tke_old, tke_source=tke_source,
                     return_tke=_tke_prog,
                     grid=_grid,
+                    # NEMO eosbn2 Nnow N²: step-entry (before-advection) T/S.
+                    n2_tracers=self._n2_before_advection_tracers(state),
                 )
                 if _tke_prog:
                     state_ab2, tke_new_ab2 = _seq
@@ -5351,7 +5562,9 @@ class LatLonCGridOceanModel:
         # 4. Implicit vertical mixing once (recomputes K_v/A_v from state_corr;
         #    applies the surface wind/tracer BC + restoring internally).
         state_new = self._apply_implicit_vertical_mixing(
-            state_corr, dt, surface_forcing, K33_iso=k33_iso, grid=_grid)
+            state_corr, dt, surface_forcing, K33_iso=k33_iso, grid=_grid,
+            # NEMO eosbn2 Nnow N²: step-entry (before-advection) T/S.
+            n2_tracers=self._n2_before_advection_tracers(state))
 
         # 5. Carry the explicit increments for the next AB2 step.
         return state_new._replace(

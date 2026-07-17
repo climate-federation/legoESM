@@ -86,6 +86,20 @@ class AMIPExperimentConfig(NamedTuple):
     bechtold_downdraft_evap: float = 0.05
     bechtold_downdraft_alpha: float = 0.3
     bechtold_downdraft_rh_min: float = 0.2
+    # Full IFS deep CAPE closure (PR #1095; default ON 2026-07-16).  Present in
+    # the flat schema so the to_amip_config/from_amip_config round-trip cannot
+    # silently drop an explicit selection across a checkpoint/restart boundary.
+    bechtold_use_ifs_cape_closure: bool = True
+    # IFS Kessler sub-cloud rain evaporation (cuflxn.F90; default ON
+    # 2026-07-16) — in the flat schema so round-trips cannot drop it.
+    bechtold_use_ifs_subcloud_evap: bool = True
+    # IFS in-updraft precipitation formation (cuascn.F90; default ON
+    # 2026-07-16) — in the flat schema so round-trips cannot drop it.
+    bechtold_use_ifs_inplume_precip: bool = True
+    # Grid spacing [m] for the IFS ZTAURES factor (0 = legacy).
+    bechtold_dx_m: float = 0.0
+    # IFS convective downdraft (default OFF pending validation).
+    bechtold_use_ifs_downdraft: bool = False
     # Convective in-updraft rain-split efficiency [0,1] (shared across the
     # mass-flux schemes); 0 = disabled (legacy no split).
     convective_precip_efficiency: float = 0.0

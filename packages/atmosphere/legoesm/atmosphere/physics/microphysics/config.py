@@ -618,13 +618,22 @@ class MorrisonConfig(NamedTuple):
     # "m2005_psd" (default, faithful): rain + cloud ice fall speeds are the
     #   SAM mass-weighted moments of the PSD using the PROGNOSTIC N_r, N_i
     #   (module_mp_graupel.f90:1854-1865, 4230-4248):
-    #     LAMR = (π·ρ_w·N_r/(ρ·q_r))^¼   (clamped lamr_min..lamr_max)
+    #     LAMR = (π·ρ_w·N_r/(ρ·q_r))^⅓   (clamped lamr_min..lamr_max)
     #     UMR  = AR·Γ(4+BR)/6 · LAMR^−BR · (ρ_su/ρ)^0.54   (cap 9.1·dum)
     #     LAMI = (ρ_ci·π·N_i/q_i)^⅓       (clamped lami_min..lami_max)
-    #     UMI  = AI·Γ(4+BI)/6 · LAMI^−BI · (ρ_su/ρ)^0.54   (cap 1.2·(ρ_su/ρ)^0.35)
-    #   Snow stays single-moment bulk (no prognostic N_s — see the double-
-    #   moment-snow gap, M2/M4), so snow uses the legacy q-power V_t below.
-    # "bulk_qpower" = the legacy V_t = a_v·(q·ρ/ρ_sfc)^b_v for ALL species.
+    #     UMI  = AI·Γ(4+BI)/6 · LAMI^−BI · (ρ_su/ρ)^0.35   (cap 1.2·(ρ_su/ρ)^0.35)
+    #   Snow FALL SPEED: default is single-moment bulk q-power (V_t below); a
+    #   prognostic N_s selects the SAM double-moment PSD speed (LAMS, UMS/UNS).
+    #   Graupel FALL SPEED: default is a single-moment fixed-N0G PSD closure (a
+    #   legoESM Marshall-Palmer closure, NOT SAM); a prognostic N_g selects the
+    #   SAM double-moment PSD speed (LAMG, UMG/UNG). test_m2005_fall_speed_faithful
+    #   pins the SAM double-moment speeds (the fixed-N0G graupel closure is out of
+    #   the SAM-oracle scope). (Number-budget/nucleation double-moment handling is
+    #   documented at its own sites, not here.)
+    # "bulk_qpower" = the legacy V_t = a_v·(q·ρ/ρ_sfc)^b_v for RAIN/ICE/SNOW.
+    #   fall_speed_scheme selects only the rain/ice/snow speed; GRAUPEL is
+    #   computed separately (always its PSD closure: fixed-N0G, or double-moment
+    #   from a prognostic N_g) regardless of fall_speed_scheme.
     fall_speed_scheme: str = "m2005_psd"
     fall_a_r: float = 841.99667      # SAM AR rain fall-speed coeff [m^(1-BR)/s]
     fall_b_r: float = 0.8            # SAM BR rain fall-speed exponent
@@ -673,9 +682,11 @@ class MorrisonConfig(NamedTuple):
     do_snow_aggregation: bool = True
     snow_aggregation_eii: float = 0.1   # SAM EII snow-snow collection eff.
     # Graupel (M4, iter-34): SAM freezes supercooled rain to GRAUPEL (dense
-    # frozen drops), not snow. Single-moment graupel in slot [5] with a fixed
-    # intercept N0G; SAM module_mp_graupel.f90: AG=19.3, BG=0.37, RHOG=400,
-    # LAMMING/LAMMAXG slope limits. do_graupel=False ⇒ legacy frozen-rain→snow.
+    # frozen drops), not snow. Graupel in slot [5] is single-moment (fixed
+    # intercept N0G, a legoESM Marshall-Palmer closure — SAM graupel is itself
+    # two-moment) by default, or double-moment (PSD slope LAMG from prognostic
+    # N_g) when N_g is supplied; SAM module_mp_graupel.f90: AG=19.3, BG=0.37,
+    # RHOG=400, LAMMING/LAMMAXG slope limits. do_graupel=False ⇒ frozen-rain→snow.
     do_graupel: bool = True
     rho_graupel: float = 400.0          # SAM RHOG graupel bulk density [kg/m³]
     fall_a_g: float = 19.3              # SAM AG graupel fall-speed coeff

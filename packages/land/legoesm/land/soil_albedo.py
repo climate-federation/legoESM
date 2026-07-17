@@ -15,6 +15,19 @@ near-infrared bands, and the actual albedo darkens with soil wetness::
 so a fully dry soil reaches ``alpha_dry`` and a wet soil approaches
 ``alpha_sat``.  Functions are pure JAX and differentiable in ``theta_top``.
 
+Faithfulness
+------------
+FAITHFUL to CLM/CTSM: the closed form above and the 20-class ``SOIL_COLOR_ALBEDO``
+table reproduce CTSM ``src/biogeophys/SurfaceAlbedoMod.F90``
+(``SurfaceAlbedoInitTimeConst``: ``inc = max(0.11 - 0.40*h2osoi_vol, 0)``,
+``alb = min(albsat + inc, albdry)`` per band; the module's dry/sat VIS/NIR values
+equal the CTSM ``albsat``/``albdry`` arrays exactly).  DEPARTURE / SURROGATE:
+``soil_albedo_broadband`` collapses (vis, nir) with ``vis_fraction=0.5`` — a
+legoESM convenience, NOT a CLM quantity (CLM keeps the two bands separate for the
+two-stream canopy solver and has no single broadband soil albedo).  Round-off
+pins (rel 1e-12) of the closed form + the CTSM table + coefficient/structure
+canaries: ``tests/land/test_soil_albedo_faithful.py``.
+
 References
 ----------
 - Bonan, G. B. (1996): A land surface model (LSM v1.0). NCAR/TN-417+STR.

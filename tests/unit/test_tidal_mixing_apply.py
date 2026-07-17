@@ -226,3 +226,69 @@ class TestApplyTidalMixingStep:
         h = np.zeros((4, 4, 5))
         with pytest.raises(ValueError):
             apply_tidal_mixing_step(st, K_tidal=K, h_partial=h, dt=3600.0)
+
+
+# ==============================================================================
+# Grid-agnosticism: the same apply must run on an MPAS (nCells, nlev) state
+# ==============================================================================
+class _FakeMPASState:
+    """Stub matching the MPAS ocean-state surface: (nCells, nlev) tracers,
+    (nCells,) 1-D fields -- the shapes apply_tidal_mixing_step must accept."""
+
+    def __init__(self, n_cells=6, nlev=5, T_init=5.0, S_init=34.7,
+                 mask_init=1.0):
+        self.T = Field(
+            jnp.full((n_cells, nlev), T_init, dtype=jnp.float64),
+            name="T", dims=("nCells", "lev"), units="degC",
+        )
+        self.S = Field(
+            jnp.full((n_cells, nlev), S_init, dtype=jnp.float64),
+            name="S", dims=("nCells", "lev"), units="PSU",
+        )
+        self.land_mask = Field(
+            jnp.full((n_cells,), mask_init, dtype=jnp.float64),
+            name="land_mask", dims=("nCells",), units="1",
+        )
+
+    def _replace(self, **kw):
+        new = _FakeMPASState.__new__(_FakeMPASState)
+        for attr in ("T", "S", "land_mask"):
+            setattr(new, attr, getattr(self, attr))
+        for k, v in kw.items():
+            setattr(new, k, v)
+        return new
+
+
+def test_apply_runs_unchanged_on_an_mpas_shaped_state():
+    """apply_tidal_mixing_step is a per-column Thomas solve over the trailing
+    axis, so it must run on (nCells, nlev) exactly as on (n_lat, n_lon, nlev).
+    The driver previously warned '--tidal-mixing not supported on grid=mpas'
+    although the apply, compute_tidal_diffusivity and compute_layer_thickness
+    are all trailing-axis / broadcast operations with no grid assumption."""
+    st = _FakeMPASState(n_cells=6, nlev=5)
+    K = np.full((6, 5), 1.0e-3)
+    h = np.full((6, 5), 100.0)
+    new = apply_tidal_mixing_step(st, K_tidal=K, h_partial=h, dt=3600.0)
+    assert new.T.data.shape == (6, 5) and new.S.data.shape == (6, 5)
+
+
+def test_mpas_land_cells_are_untouched():
+    """The land-mask contract holds on the 1-D (nCells,) mask too: masked cells
+    keep their pre-step values."""
+    st = _FakeMPASState(n_cells=4, nlev=5)
+    mask = np.array([1.0, 0.0, 1.0, 0.0])
+    st = st._replace(land_mask=Field(
+        jnp.asarray(mask), name="land_mask", dims=("nCells",), units="1"))
+    # non-uniform T so mixing would change interior columns
+    T = np.tile(np.linspace(2.0, 10.0, 5), (4, 1))
+    st = st._replace(T=Field(
+        jnp.asarray(T), name="T", dims=("nCells", "lev"), units="degC"))
+    K = np.full((4, 5), 5.0e-3)
+    h = np.full((4, 5), 50.0)
+    new = np.asarray(apply_tidal_mixing_step(
+        st, K_tidal=K, h_partial=h, dt=3600.0).T.data)
+    # land cells (1, 3) unchanged; ocean cells (0, 2) mixed
+    np.testing.assert_allclose(new[1], T[1])
+    np.testing.assert_allclose(new[3], T[3])
+    assert not np.allclose(new[0], T[0])
+    assert not np.allclose(new[2], T[2])

@@ -119,10 +119,14 @@ def mle_coefficient(ce: float, lat_ref_deg: float) -> float | jnp.ndarray:
     against ``lat_ref_deg`` ~ 0.
     """
     lat = float(lat_ref_deg)
-    if abs(lat) < 1.0:
+    # Guard the f0 = 2*Omega*sin(lat) blow-up at ANY zero-Coriolis reference
+    # latitude (0, +/-180, ...), not just |lat|<1 deg: test |sin(lat)| directly
+    # so an out-of-range lat_ref like 180 deg (sin -> 0) also raises instead of
+    # producing a huge finite rc_f artefact from floating-point sin(pi).
+    if abs(math.sin(math.radians(lat))) < math.sin(math.radians(1.0)):
         raise ValueError(
-            f"MLE lat_ref_deg={lat} too close to the equator: f0 -> 0 makes rc_f "
-            "blow up. Use the NEMO default 20 deg.")
+            f"MLE lat_ref_deg={lat} has |sin(lat)| too small: f0 -> 0 makes rc_f "
+            "blow up. Use a mid-latitude reference (NEMO default 20 deg).")
     # ``lat_ref_deg`` is a FIXED reference latitude (excluded-tier convention,
     # never traced), so f0 is built with pure-Python ``math`` and stays a plain
     # Python float — ``jnp.sin`` of a traced angle would be unnecessary here.

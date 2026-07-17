@@ -943,6 +943,15 @@ def morrison_microphysics(
     dN_i_nuc = dN_i_nuc * qv_scale
 
     # === SEDIMENTATION ===
+    # Faithfulness: the m2005_psd mass-/number-weighted fall speeds are pinned to
+    # the gSAM MICRO_M2005 Fortran oracle to round-off (rel 1e-12) in
+    # tests/unit/test_m2005_fall_speed_faithful.py — rain/ice mass (UMR/UMI) via
+    # the sedimentation surface flux precip = V_t*q*rho, and every species' mass
+    # AND number speed (UNR/UNI/UMS/UNS/UMG/UNG, snow+graupel in double-moment
+    # mode) via a sedimentation_tendency intercept.  NOTE `config` is already
+    # flavor-resolved here (line ~178): `config.fall_b_i` is 0.865 (gSAM MK tune)
+    # for morrison_flavor="sam" but 1.0 (M2005-original) for the DEFAULT "mg" —
+    # the runtime default ice fall exponent is NOT the raw-default 0.865.
     rho_sfc = rho[:, -1:]
     rho_ratio = rho / jnp.clip(rho_sfc, _RHO_FLOOR)
     if config.fall_speed_scheme == "m2005_psd":
@@ -952,9 +961,11 @@ def morrison_microphysics(
         #   LAMR = (π·ρ_w·N_r/q_r)^⅓,  LAMI = (ρ_ci·π·N_i/q_i)^⅓   (per-mass
         #     N[/kg], q[kg/kg]; NO ρ factor — matches the EFFI/deposition slope)
         #   UM   = a·Γ(4+b)/6 · LAM^−b · (ρ_su/ρ)^0.54
-        # clamped to SAM's slope + "realistic fallspeed" limits. Snow has NO
-        # prognostic N_s (single-moment), so it keeps the legacy bulk q-power
-        # V_t — the same double-moment-snow gap that defers faithful PRDS/riming.
+        # clamped to SAM's slope + "realistic fallspeed" limits. Snow/graupel use
+        # this SAM PSD fall speed only when a prognostic N_s/N_g is supplied (the
+        # snow_double_moment / graupel_double_moment branches below); the DEFAULT
+        # single-moment path keeps the legacy bulk q-power V_t (snow) / fixed-N0G
+        # closure (graupel).
         dum = safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXP)
         # Cloud ICE uses the Ikawa-Saito 1991 density exponent 0.35 (gSAM
         # AIN=(RHOSU/RHO)^0.35·AI, module_mp_graupel.f90:1542/4230), NOT the
@@ -1048,9 +1059,11 @@ def morrison_microphysics(
             f"'bulk_qpower' (legacy)."
         )
 
-    # Graupel fall speed (single-moment PSD with the fixed N0G intercept):
-    # UMG = AG·Γ(4+BG)/6·LAMG^(−BG)·(ρ_su/ρ)^0.54, capped at a realistic
-    # graupel terminal velocity (graupel falls FAST — denser than snow).
+    # Graupel fall speed. Default is the single-moment fixed-N0G intercept
+    # closure (graupel_lamg with N_g=None); a prognostic N_g selects the SAM
+    # double-moment PSD slope (LAMG=(π·ρ_g·N_g/q_g)^⅓). UMG = AG·Γ(4+BG)/6·
+    # LAMG^(−BG)·(ρ_su/ρ)^0.54, capped at a realistic graupel terminal
+    # velocity (graupel falls FAST — denser than snow).
     if config.do_graupel:
         dum_g = safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXP)
         lamg = graupel_lamg(q_g, rho, config, N_g=N_g_arg)

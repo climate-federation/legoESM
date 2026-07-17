@@ -711,6 +711,56 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "BL-ventilation lever. --no-bechtold-downdraft-transport "
                              "disables a config-file default. Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_downdraft_transport}.")
+    parser.add_argument("--bechtold-use-ifs-cape-closure",
+                        dest="bechtold_use_ifs_cape_closure",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_cape_closure,
+                        help="Enable the full IFS deep CAPE closure "
+                             "ZMFUB1=ZCAPE*ZMFUB/(ZHEAT*ZXTAU) (openifs "
+                             "cumastrn.F90:704-833) instead of the legacy "
+                             "surrogate deep closure. "
+                             "--no-bechtold-use-ifs-cape-closure disables a "
+                             "config-file default. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_cape_closure}.")
+    parser.add_argument("--bechtold-use-ifs-subcloud-evap",
+                        dest="bechtold_use_ifs_subcloud_evap",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_subcloud_evap,
+                        help="Enable the IFS Kessler sub-cloud evaporation of "
+                             "convective rain (openifs cuflxn.F90:436-475: "
+                             "RCPECONS rate, ZRHEBC RH break) instead of the "
+                             "crude downdraft-efficiency re-evaporation. "
+                             "--no-bechtold-use-ifs-subcloud-evap disables a "
+                             "config-file default. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_subcloud_evap}.")
+    parser.add_argument("--bechtold-use-ifs-inplume-precip",
+                        dest="bechtold_use_ifs_inplume_precip",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_inplume_precip,
+                        help="Enable the IFS in-updraft precipitation formation "
+                             "(openifs cuascn.F90:718-773 analytic Sundqvist "
+                             "conversion; bypasses the post-hoc precip split). "
+                             "--no-bechtold-use-ifs-inplume-precip disables a "
+                             "config-file default. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_inplume_precip}.")
+    parser.add_argument("--bechtold-use-ifs-downdraft",
+                        dest="bechtold_use_ifs_downdraft",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_downdraft,
+                        help="Enable the IFS convective downdraft (openifs "
+                             "cudlfsn+cuddrafn: LFS, saturated entraining "
+                             "descent, rain debit, closure/CMT coupling). "
+                             "--no-bechtold-use-ifs-downdraft disables a "
+                             "config-file default. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_downdraft}.")
+    parser.add_argument("--bechtold-dx-m", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_dx_m,
+                        dest="bechtold_dx_m",
+                        help="Grid spacing [m] for the IFS ZTAURES convective-"
+                             "turnover resolution factor (cumastrn.F90:762-768;"
+                             " ZDX=sqrt(cell area)). 0 disables (legacy "
+                             "factor 1.0). Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_dx_m}.")
     parser.add_argument("--bechtold-downdraft-entrain-rate", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_downdraft_entrain_rate,
                         dest="bechtold_downdraft_entrain_rate",
@@ -1480,6 +1530,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_downdraft_transport=args.bechtold_downdraft_transport,
         bechtold_downdraft_entrain_rate=args.bechtold_downdraft_entrain_rate,
         bechtold_downdraft_detrain_scale_m=args.bechtold_downdraft_detrain_scale_m,
+        bechtold_use_ifs_cape_closure=args.bechtold_use_ifs_cape_closure,
+        bechtold_use_ifs_subcloud_evap=args.bechtold_use_ifs_subcloud_evap,
+        bechtold_use_ifs_inplume_precip=args.bechtold_use_ifs_inplume_precip,
+        bechtold_dx_m=args.bechtold_dx_m,
+        bechtold_use_ifs_downdraft=args.bechtold_use_ifs_downdraft,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
         latlon_spmd_compiled_segments=args.latlon_spmd_compiled_segments,

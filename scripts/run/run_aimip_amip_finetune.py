@@ -255,7 +255,7 @@ def main():
 
     # --- what gets fine-tuned: classical scheme knobs OR the NN weights ---
     if args.variant == "column_nn":
-        from legoesm.atmosphere.physics.learned_column import (
+        from legoesm.atmosphere.physics.neural_physics import (
             build_column_physics,
         )
         from legoesm.training.neural_gcm_spectral import (

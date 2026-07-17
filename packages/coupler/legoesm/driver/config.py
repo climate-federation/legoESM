@@ -435,11 +435,12 @@ class ExperimentConfig(NamedTuple):
     # and ``False`` on CPU.  Explicit ``True``/``False`` overrides.
     rrtmgp_use_scan: bool | None = None
     # G-point parallelism in the RRTMGP two-stream solve (see
-    # ``RRTMGPConfig.gpoint_batch_size``).  0 = memory-frugal checkpointed scan
-    # (REQUIRED for reverse-mode AD / training).  >0 = process g-points in
-    # parallel blocks of this size via vmap — FORWARD/inference only, ~6x faster
-    # radiation on GPU; ~16-32 recovers most parallelism while bounding memory.
-    rrtmgp_gpoint_batch_size: int = 0
+    # ``RRTMGPConfig.gpoint_batch_size``).  DEFAULT 16 (was 0): the vmap-block
+    # path compiles ONE reused body (the scan path's per-g-point prevent_cse
+    # body inflated the reverse-mode-AD compile to ~9 h) and runs ~26x faster,
+    # with peak memory bounded to this many g-points.  Set 0 only to reproduce
+    # the exact legacy g-point accumulation order.
+    rrtmgp_gpoint_batch_size: int = 16
     # G-point checkpointing in the RRTMGP two-stream scan (see
     # ``RRTMGPConfig.gpoint_checkpoint``).  True (default) = ``jax.checkpoint``
     # with ``prevent_cse=True`` per g-point — memory-frugal, REQUIRED for
@@ -956,8 +957,29 @@ class ExperimentConfig(NamedTuple):
     # albedo).  Default OFF => byte-identical to the re-evaporation-only
     # downdraft.  See BechtoldConfig.downdraft_transport.
     bechtold_downdraft_transport: bool = False
-    bechtold_downdraft_entrain_rate: float = 5.0e-4
+    bechtold_downdraft_entrain_rate: float = 3.0e-4  # IFS ENTRDD (sucumf.F90:144)
     bechtold_downdraft_detrain_scale_m: float = 700.0
+    # Full IFS deep CAPE closure ZMFUB1=ZCAPE*ZMFUB/(ZHEAT*ZXTAU)
+    # (openifs cumastrn.F90:704-833; PR #1095).  Default ON (2026-07-16,
+    # validated: codex x11 + gray-RCE A/B + C24 AMIP smoke A/B, both stable /
+    # neutral); --no-bechtold-use-ifs-cape-closure restores the legacy
+    # surrogate byte-identically.  Mirrors BechtoldConfig.use_ifs_cape_closure.
+    bechtold_use_ifs_cape_closure: bool = True
+    # IFS Kessler sub-cloud rain evaporation (cuflxn.F90:436-475).  Default
+    # ON (2026-07-16, validated: codex x3 + gray-RCE A/B + C24 AMIP A/B);
+    # mirrors BechtoldConfig.use_ifs_subcloud_evap (fallbacks match).
+    bechtold_use_ifs_subcloud_evap: bool = True
+    # IFS in-updraft precipitation formation (cuascn.F90:718-773).  Default
+    # ON (2026-07-16, validated: codex x3 + gray-RCE A/B + C24 AMIP A/B);
+    # mirrors BechtoldConfig.use_ifs_inplume_precip (fallbacks match).
+    bechtold_use_ifs_inplume_precip: bool = True
+    # Grid spacing [m] for the IFS ZTAURES turnover resolution factor
+    # (cumastrn.F90:762-768).  0 = legacy factor 1.0.  Mirrors
+    # BechtoldConfig.dx_m.
+    bechtold_dx_m: float = 0.0
+    # IFS convective downdraft (cudlfsn+cuddrafn).  Default OFF pending
+    # validation; mirrors BechtoldConfig.use_ifs_downdraft.
+    bechtold_use_ifs_downdraft: bool = False
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -1969,9 +1991,21 @@ class ExperimentConfig(NamedTuple):
             bechtold_downdraft_transport=getattr(
                 amip_cfg, 'bechtold_downdraft_transport', False),
             bechtold_downdraft_entrain_rate=getattr(
-                amip_cfg, 'bechtold_downdraft_entrain_rate', 5.0e-4),
+                amip_cfg, 'bechtold_downdraft_entrain_rate', 3.0e-4),
             bechtold_downdraft_detrain_scale_m=getattr(
                 amip_cfg, 'bechtold_downdraft_detrain_scale_m', 700.0),
+            # Missing-field fallback = True (the scheme default): a legacy
+            # flat config predating the field must get the SAME closure a
+            # fresh default run gets, not silently pin the old one.
+            bechtold_use_ifs_cape_closure=getattr(
+                amip_cfg, 'bechtold_use_ifs_cape_closure', True),
+            bechtold_use_ifs_subcloud_evap=getattr(
+                amip_cfg, 'bechtold_use_ifs_subcloud_evap', True),
+            bechtold_use_ifs_inplume_precip=getattr(
+                amip_cfg, 'bechtold_use_ifs_inplume_precip', True),
+            bechtold_dx_m=getattr(amip_cfg, 'bechtold_dx_m', 0.0),
+            bechtold_use_ifs_downdraft=getattr(
+                amip_cfg, 'bechtold_use_ifs_downdraft', False),
             # Convective precip split family — copy through AMIP/checkpoint
             # restore so the physical autoconversion isn't dropped to defaults
             # (codex MED; convective_precip_efficiency was a pre-existing gap).
@@ -2124,6 +2158,11 @@ class ExperimentConfig(NamedTuple):
             bechtold_downdraft_transport=self.bechtold_downdraft_transport,
             bechtold_downdraft_entrain_rate=self.bechtold_downdraft_entrain_rate,
             bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
+            bechtold_use_ifs_cape_closure=self.bechtold_use_ifs_cape_closure,
+            bechtold_use_ifs_subcloud_evap=self.bechtold_use_ifs_subcloud_evap,
+            bechtold_use_ifs_inplume_precip=self.bechtold_use_ifs_inplume_precip,
+            bechtold_dx_m=self.bechtold_dx_m,
+            bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,
             sigma_b=self.sigma_b,
             k_BL_max_per_day=self.k_BL_max_per_day,
             k_free_per_day=self.k_free_per_day,

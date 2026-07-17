@@ -558,6 +558,17 @@ KNOWN_FAILURES: dict[tuple[str, str, str], dict[str, Any]] = {
     # 27700 (~day 96), physics-free reproducer of the AMIP latlon topography
     # instability. Reproduces only in a full-length run (the 2-day --quick lane
     # never reaches the blow-up step and legitimately passes).
+    # MITIGATION WIRED (#1029): the topo run now enables the #836 top sponge,
+    # calibrated to the sibling cube PE rest-sponge's on-grid top-level rate so it
+    # is never stronger than the accepted sibling (avoids an over-damped false
+    # PASS). Entry KEPT until a 200-day A100 run confirms the sponge arrests the
+    # blow-up WITHOUT over-damping the resolved jet (controlled comparison vs the
+    # flat-topo HS climate): if it passes, this reports XPASS (loud) -> remove the
+    # entry; if it only delays the blow-up it stays XFAIL and the GENERATOR fix is
+    # owed -- making the hybrid PGF hybrid_factor correction discretely consistent
+    # with the Simmons-Burridge geopotential Phi(p_s) (implicates A_half; localized
+    # in #1078). NOT a reference-T split: T is uniform at rest, so a ref-T split is
+    # a no-op here (ruled out). Do NOT pre-remove on the local-unit-test pass alone.
     ("held_suarez_topo", "latlon", "hybrid"): {
         "issue": "#1029", "min_days": 100.0, "expect_note": "BLOWUP"},
 }
@@ -4073,9 +4084,87 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         dt = _latlon_dt(_dx_pole, 200.0, tc.case)
         _A_h_max = 0.4 * _dx_pole**2 / dt
         ah = min(ah, _A_h_max)
+        # #1029: enable the dormant #836 top sponge for the topo case ONLY, as a
+        # symptom-bounding MITIGATION (NOT the generator fix). Generator (localized
+        # + codex-vetted in PR #1078): the lat-lon HYBRID PGF multiplies the
+        # R_d*T*grad(ln p_s) correction by a face-interpolated hybrid_factor =
+        # B*p_s/p that is NOT the finite-difference derivative of the nonlinear
+        # Simmons-Burridge geopotential Phi(p_s) that the -grad(Phi) term
+        # differences, so the two large terms do not cancel over a slope EVEN at
+        # uniform-T rest (T is uniform there -> NOT a temperature/reference-T
+        # issue; a ref-T split is a no-op). The rest state spuriously accelerates
+        # (max|v|~4.3 latlon-hybrid vs ~0 ico) and HS forcing amplifies that seed
+        # into the level-1 jet runaway -> NaN. The real fix is making the hybrid
+        # PGF correction discretely consistent with Phi(p_s) (implicates A_half;
+        # #1078), owed with W2 visual validation -- NOT this sponge.
+        #
+        # CALIBRATE the sponge to the sibling cube PE rest-sponge so it is never
+        # STRONGER than the accepted sibling on the resolved grid (an over-strong
+        # sponge could turn a 200-day PASS into an over-damped FALSE success --
+        # codex R1). The cube damps u/v with rate ((s0-sigma)/s0)^2 / tau per level
+        # (primitive_eq_cdgrid.py: sponge_sigma s0=0.15, sponge_tau_sec tau=3600),
+        # whose top FULL level only samples a FRACTION of the 1/tau lid peak. The
+        # lat-lon #836 sponge peaks at its own top full level, so pin its coeff to
+        # the cube's on-grid rate AT that level. At THIS case's FIXED resolution
+        # (nlev=DEFAULT_NLEV=40) the lat-lon profile is then <= the cube at every
+        # resolved level -- but that is NOT grid-general (sin2-in-log-p vs cube
+        # quadratic-in-sigma shapes differ). The tripwire below VERIFIES the actual
+        # <=-cube property AND that the sponge is active, on whatever grid is in
+        # use, and fails LOUDLY otherwise (a future DEFAULT_NLEV change could
+        # silently disable it or over-damp at a mid level). Under-damping is the
+        # SAFE failure (stays XFAIL, honest); over-damping is the false-pass we
+        # design out. Flat-topo HS is untouched (sponge_coeff=0 -> byte-identical).
+        _CUBE_SPONGE_SIGMA, _CUBE_SPONGE_TAU_S = 0.15, 3600.0  # primitive_eq_cdgrid.py
+        # #836 lat-lon sponge geometry -- set EXPLICITLY (not left to the config
+        # defaults) so the tripwire below verifies the SAME profile the model runs.
+        _SPONGE_WIDTH_M, _SPONGE_SCALE_H_M, _SPONGE_SHAPE = 10000.0, 7500.0, "sin2"
+        _sig = np.asarray(sigma.sigma_full, dtype=np.float64)  # fp64 view: cube ref + reporting
+        _cube_top_frac = max(
+            (_CUBE_SPONGE_SIGMA - float(_sig[0])) / _CUBE_SPONGE_SIGMA, 0.0)
+        _sponge_coeff = _cube_top_frac**2 / _CUBE_SPONGE_TAU_S if _topo else 0.0
+        if _topo:
+            # Tripwire (dispatch-hardening / mechanical invariant): the calibrated
+            # lat-lon sponge must be (a) ACTIVE and (b) <= the accepted cube
+            # sibling at EVERY resolved level. Verify the real profiles; raise on
+            # violation rather than ship a silently-disabled or over-damping run.
+            from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
+                sponge_profile as _sponge_profile)
+            # Evaluate the lat-lon profile EXACTLY as the tendency does (codex R4):
+            # from the NATIVE (policy-dtype, often fp32) sigma_full via jnp, so the
+            # tripwire checks the same numbers the model runs -- not a fp64 re-eval.
+            _z = -_SPONGE_SCALE_H_M * jnp.log(jnp.clip(sigma.sigma_full, 1e-30, None))
+            _ll = np.asarray(_sponge_profile(
+                _z, _z[0], _SPONGE_WIDTH_M, _sponge_coeff, shape=_SPONGE_SHAPE),
+                dtype=np.float64)   # to numpy fp64 ONLY for the comparison
+            _cube = (np.clip((_CUBE_SPONGE_SIGMA - _sig) / _CUBE_SPONGE_SIGMA,
+                             0.0, 1.0) ** 2) / _CUBE_SPONGE_TAU_S
+            if _cube_top_frac <= 0.0 or float(_ll.max()) <= 0.0:
+                raise SystemExit(
+                    f"#1029 held_suarez_topo top-sponge is DISABLED at "
+                    f"nlev={nlev} (sigma_full[0]={float(_sig[0]):.4f} vs cube "
+                    f"sponge_sigma {_CUBE_SPONGE_SIGMA}); re-calibrate before "
+                    f"running -- never ship the topo case with no mitigation.")
+            # RELATIVE tolerance: the calibrated top level EQUALS the cube rate by
+            # construction, and _ll comes from the jnp sponge_profile (policy dtype
+            # -- often fp32), so an absolute tol would false-fire on ~1e-5 fp32
+            # round-off at the equal top level. 0.1% cleanly separates round-off
+            # from a real crossover (the L20 case is ~271% over).
+            _viol = np.where(_ll > _cube * 1.001 + 1e-15)[0]
+            if _viol.size:
+                _k = int(_viol[int(np.argmax((_ll - _cube)[_viol]))])
+                raise SystemExit(
+                    f"#1029 held_suarez_topo top-sponge OVER-DAMPS vs the cube "
+                    f"sibling at level {_k} (sigma={float(_sig[_k]):.4f}, "
+                    f"nlev={nlev}): latlon {float(_ll[_k]):.3e} > cube "
+                    f"{float(_cube[_k]):.3e} 1/s. The sin2/cube shapes only align "
+                    f"at L40; re-calibrate the sponge width/shape for this grid.")
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
+            sponge_coeff=_sponge_coeff,
+            sponge_width_m=_SPONGE_WIDTH_M,
+            sponge_scale_height_m=_SPONGE_SCALE_H_M,
+            sponge_shape=_SPONGE_SHAPE,
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         if _topo:

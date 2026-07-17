@@ -78,11 +78,26 @@ def embed_orca_interior(src: np.ndarray, n_lat: int,
 
 def _to_model_grid_2d(field_i, src_lat, src_lon, lat_T_deg, lon_T_deg,
                       wet_mask, regridder=None):
-    """One 2-D interior field -> model grid (embed or nearest-wet)."""
-    n_lat, n_lon = np.asarray(lat_T_deg).shape
+    """One 2-D interior field -> model grid (embed or nearest-wet).
+
+    Structured targets (regular lat-lon / tripole) pass a 2-D ``lat_T_deg``:
+    the tripole native mesh embeds directly (ORCA halo fill), other structured
+    grids regrid nearest-wet.  Unstructured targets (MPAS Voronoi) pass 1-D
+    PAIRED cell centres ``(nCells,)`` -> always nearest-wet, no embed (the
+    ORCA-halo embed is meaningless off a structured mesh).
+    """
+    lat_arr = np.asarray(lat_T_deg)
+    if lat_arr.ndim == 1:                      # unstructured (MPAS) paired pts
+        if regridder is None:
+            src_wet = np.isfinite(field_i)
+            regridder = NearestWetRegridder(src_lon, src_lat, src_wet,
+                                            lon_T_deg, lat_T_deg,
+                                            structured=False)
+        return regridder(field_i), regridder
+    n_lat, n_lon = lat_arr.shape
     if (field_i.shape == (n_lat - 1, n_lon - 2)
             and coords_match(src_lat, src_lon,
-                             np.asarray(lat_T_deg)[:-1, 1:-1],
+                             lat_arr[:-1, 1:-1],
                              np.asarray(lon_T_deg)[:-1, 1:-1])):
         return embed_orca_interior(field_i, n_lat, n_lon), regridder
     if regridder is None:

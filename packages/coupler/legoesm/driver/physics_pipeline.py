@@ -2596,8 +2596,25 @@ def _resolve_convection(config):
             downdraft_alpha=getattr(config, 'bechtold_downdraft_alpha', 0.3),
             downdraft_RH_min=getattr(config, 'bechtold_downdraft_rh_min', 0.2),
             downdraft_transport=getattr(config, 'bechtold_downdraft_transport', False),
-            downdraft_entrain_rate=getattr(config, 'bechtold_downdraft_entrain_rate', 5.0e-4),
+            downdraft_entrain_rate=getattr(config, 'bechtold_downdraft_entrain_rate', 3.0e-4),
             downdraft_detrain_scale_m=getattr(config, 'bechtold_downdraft_detrain_scale_m', 700.0),
+            # Full IFS deep CAPE closure (PR #1095) — threaded so the flag is
+            # REACHABLE from the AMIP driver.  Missing-field fallback = True,
+            # matching both config defaults (a config-like caller without the
+            # field gets the scheme default, not the legacy closure).
+            use_ifs_cape_closure=getattr(
+                config, 'bechtold_use_ifs_cape_closure', True),
+            # IFS Kessler sub-cloud rain evaporation (fallback True =
+            # the scheme default since the 2026-07-16 flip).
+            use_ifs_subcloud_evap=getattr(
+                config, 'bechtold_use_ifs_subcloud_evap', True),
+            # IFS in-updraft precipitation formation (fallback True = the
+            # scheme default since the 2026-07-16 flip).
+            use_ifs_inplume_precip=getattr(
+                config, 'bechtold_use_ifs_inplume_precip', True),
+            dx_m=getattr(config, 'bechtold_dx_m', 0.0),
+            use_ifs_downdraft=getattr(
+                config, 'bechtold_use_ifs_downdraft', False),
         )
         if _pe is not None:
             _bechtold_kwargs["precip_efficiency"] = _pe

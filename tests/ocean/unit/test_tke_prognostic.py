@@ -471,3 +471,36 @@ class TestPrognosticTKEUnderAB2:
         state = _perturbed_state(grid, z_coord)
         s = model.step(state, 3600.0)
         assert s.tke is None
+
+
+def test_prandtl_tracer_floor_independent_of_momentum_floor():
+    """Quiescent-cell K_H floors at kappaH_min, NOT kappaM_min/Pr.
+
+    The abyssal over-diffusion fix: on the Prandtl path the tracer floor must be
+    INDEPENDENT of the momentum floor (NEMO zdftke floors avt at avtb and avm at
+    avmb separately). Previously K_M was floored to kappaM_min BEFORE the Prandtl
+    divide, so a quiescent deep cell (raw K << kappaM_min) got K_H = kappaM_min/Pr
+    ~= 3.1e-5 instead of kappaH_min = 1.2e-5 — a uniform ~2.6x over-diffusion of
+    the abyss vs NEMO (FREE_TKE_DIAGNOSIS_FINDINGS.md).
+    """
+    from legoesm.ocean.physics.vertical_mixing.tke import compute_K_from_tke
+    from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+
+    cfg = TKEConfig(prandtl_mode="richardson", prandtl_ri_coeff=4.5,
+                    kappa_convention="veros_sqrte",
+                    kappaM_min=1.2e-4, kappaH_min=1.2e-5)
+    # Quiescent stratified cell: tiny TKE + short length -> raw K = c_k*l*sqrt(e)
+    # = 0.1*0.1*1e-3 = 1e-5 << kappaM_min. Ri = N2/shear = 0.86 -> Pr = 4.5*0.86
+    # = 3.87, so the buggy leak kappaM_min/Pr = 3.1e-5 > kappaH_min.
+    e = jnp.array([1.0e-6]); l_k = jnp.array([0.1])
+    N2 = jnp.array([0.86]); shear_sq = jnp.array([1.0])
+    K_M, K_H = compute_K_from_tke(e, l_k, cfg, N2=N2, shear_sq=shear_sq)
+    # K_M floors at kappaM_min (unchanged); K_H floors INDEPENDENTLY at kappaH_min.
+    np.testing.assert_allclose(float(K_M[0]), 1.2e-4, rtol=1e-6)
+    np.testing.assert_allclose(float(K_H[0]), 1.2e-5, rtol=1e-6)
+    # non-vacuity: the old floored-first path would have leaked kappaM_min/Pr.
+    assert float(K_H[0]) < 0.5 * (1.2e-4 / 3.87)
+    # active/interior cell (raw K > kappaM_min) is UNAFFECTED by the fix:
+    e2 = jnp.array([1.0e-2]); l2 = jnp.array([50.0])  # raw K = 0.1*50*0.1 = 0.5
+    KM2, KH2 = compute_K_from_tke(e2, l2, cfg, N2=N2, shear_sq=shear_sq)
+    np.testing.assert_allclose(float(KH2[0]), 0.5 / 3.87, rtol=1e-6)  # K_M/Pr, no floor

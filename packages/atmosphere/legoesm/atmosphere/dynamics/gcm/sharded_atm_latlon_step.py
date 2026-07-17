@@ -55,8 +55,15 @@ def shard_state_atm_latlon(
     is reconstructed inside the body. Mirrors ``ocean.shard_state_latlon`` but
     walks the 6-field atm pytree (bare arrays + a tracers dict, no masks).
     """
+    from legoesm.parallel.latlon_spmd import shard_leaf
+
+    _mp = jax.process_count() > 1
+
     def _put(arr):
-        return jax.device_put(arr, NamedSharding(mesh, lat_spec(arr)))
+        # shard_leaf: single-process -> device_put (byte-unchanged); multi-
+        # controller -> per-process local band via make_array_from_process_local_data
+        # (no all-gather, no transient global replica — issue #1100).
+        return shard_leaf(arr, NamedSharding(mesh, lat_spec(arr)), multiprocess=_mp)
 
     n_lat = state.T.shape[0]
     v_lower = state.v[:n_lat]

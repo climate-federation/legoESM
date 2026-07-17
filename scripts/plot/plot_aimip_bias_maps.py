@@ -120,7 +120,7 @@ def _load_classical(ckpt_path: Path):
 
 
 def _load_column_nn(ckpt_path: Path, spec_cfg):
-    from legoesm.atmosphere.physics.learned_column import build_column_physics
+    from legoesm.atmosphere.physics.neural_physics import build_column_physics
     from legoesm.ml.training import load_checkpoint
 
     template = build_column_physics(

@@ -36,7 +36,7 @@ from legoesm.ocean.bathymetry import (
     _regrid_bathymetry,
     _fill_isolated_basins,
     _fill_isolated_basins_2d,
-    _haversine_km,
+    haversine_km,
 )
 
 
@@ -122,18 +122,18 @@ class TestBathymetryConfig:
 
 class TestHaversine:
     def test_same_point_zero_distance(self):
-        d = _haversine_km(40.0, -74.0, 40.0, -74.0)
+        d = haversine_km(40.0, -74.0, 40.0, -74.0)
         assert abs(d) < 1e-10
 
     def test_antipodal_half_circumference(self):
         # North pole to south pole ~ 20015 km
-        d = _haversine_km(90.0, 0.0, -90.0, 0.0)
+        d = haversine_km(90.0, 0.0, -90.0, 0.0)
         assert abs(d - 20015.0) < 100.0  # within 100 km
 
     def test_vectorized(self):
         lats = np.array([0.0, 0.0, 0.0])
         lons = np.array([0.0, 0.0, 0.0])
-        d = _haversine_km(lats, lons, 0.0, 1.0)
+        d = haversine_km(lats, lons, 0.0, 1.0)
         assert d.shape == (3,)
         assert np.all(d > 100.0)  # ~111 km per degree at equator
 
