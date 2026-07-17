@@ -360,6 +360,15 @@ def nemo_lat_lon_model_config(
             kappa_GM=_kappa_gm,
             kappa_Redi=cfg.kappa_Redi,
             S_max=cfg.redi_S_max,
+            # Native ldfslp four-position slopes (uslp/vslp at tracer
+            # levels, wslpi/wslpj at w-points): the exact traldf_iso stencil,
+            # NEMO sign + NEMO's own limiters (double cap rn_slpmax + e3/7e3,
+            # ML ramp, Shapiro) built in. Winter certificate: slopes corr
+            # +0.99 amplitude 1.00-1.03 vs the *_stg dump; tendency corr
+            # +0.956 amplitude 1.02 vs ttrd_ldf (mode-b was 1.35). With
+            # amplitude 1.0 NEMO's stability margin applies (no wall hot
+            # spot). slope_limit below only governs the mode-b path now.
+            slope_positions="nemo_native",
             # Steep-slope limiter: dm95_taper (NOT yet NEMO's hard cap).
             # NEMO keeps full-kappa flux at the capped slope (ldfslp:212-213,
             # rn_slpmax + e3/7e3) — but with the SLOPE SIGN FIX active, the

@@ -600,7 +600,9 @@ def test_nemo_iso_lap_slope_sign_convention():
 
     r = build_nemo_gyre_recipe()
     st = r.initial_state
-    cfg = r.model_config.gm_redi
+    # the negation gate is the MODE-B path (the card now runs nemo_native,
+    # which emits NEMO-signed slopes and does not negate) — pin mode_b here.
+    cfg = r.model_config.gm_redi._replace(slope_positions="mode_b")
     # meridional front on top of the stable IC stratification
     T = st.T.data + 2.0 * jnp.linspace(0, 1, st.T.data.shape[0])[:, None, None]
     S = st.S.data
@@ -633,3 +635,75 @@ def test_nemo_iso_lap_slope_sign_convention():
     dT_pos = op(S_x, S_y)
     np.testing.assert_allclose(np.asarray(dT_disp), np.asarray(dT_neg), atol=1e-11)  # dispatcher builds rho internally; op-order roundoff
     assert float(jnp.max(jnp.abs(dT_neg - dT_pos))) > 0.0
+
+
+def test_nemo_native_four_position_slopes():
+    """Native ldfslp four-position slopes (card default): bounded by the NEMO
+    double cap, surface w-slopes zero, NEMO sign convention (no dispatch
+    negation), K33 = kappa*(wslpi^2+wslpj^2), dispatch typo raises, and the
+    native path genuinely differs from mode-b (non-vacuity)."""
+    import jax.numpy as jnp
+    import numpy as np
+    import pytest
+
+    from legoesm.ocean.eos import nemo_roquet_eos
+    from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        compute_isoneutral_K33_latlon,
+        compute_nemo_native_slopes,
+        gm_redi_tracer_tendency_latlon,
+    )
+
+    r = build_nemo_gyre_recipe()
+    cfg = r.model_config.gm_redi
+    assert cfg.slope_positions == "nemo_native"
+    st = r.initial_state
+    T = st.T.data + 2.0 * jnp.linspace(0, 1, st.T.data.shape[0])[:, None, None]
+    S = st.S.data
+    import numpy as _np
+    gdept = _np.cumsum(_np.asarray(r.z_coord.dz_ref)) - 0.5 * _np.asarray(
+        r.z_coord.dz_ref)
+    p3 = jnp.asarray(1026.0 * 9.80665 * gdept)[None, None, :]
+    eos_fn = lambda TT, SS, pp: nemo_roquet_eos(TT, SS, pp, rho0=1026.0)
+    rho = eos_fn(T, S, p3)
+    u4, v4, wi4, wj4 = compute_nemo_native_slopes(
+        rho, T, S, st.land_mask.data, st.u_mask.data, st.v_mask.data,
+        r.z_coord, r.grid, cfg, eos_fn, rho_0=1026.0)
+    # surface w-slope is zero; all four bounded by rn_slpmax (ramp included)
+    np.testing.assert_array_equal(np.asarray(wi4)[:, :, 0], 0.0)
+    np.testing.assert_array_equal(np.asarray(wj4)[:, :, 0], 0.0)
+    for f in (u4, v4, wi4, wj4):
+        assert float(jnp.max(jnp.abs(f))) <= cfg.S_max + 1e-8
+    # near-surface e3/7e3 cap binds tighter than S_max on the INTERIOR values
+    dz = _np.asarray(r.z_coord.dz_ref)
+    assert dz[0] / 7.0e3 < cfg.S_max
+
+    # K33 native = kappa*(wi^2+wj^2) mapped to interfaces
+    k33 = compute_isoneutral_K33_latlon(
+        T, S, jnp.zeros_like(st.eta.data), st.H_bathy.data, r.grid,
+        r.z_coord, cfg, eos=r.model_config.eos, mask=st.land_mask.data,
+        rho_0=1026.0)
+    ref = cfg.kappa_Redi * (np.asarray(wi4) ** 2 + np.asarray(wj4) ** 2)[:, :, 1:]
+    # rtol covers the internal gm_redi_density_and_jacobian rho path vs the
+    # hand-built nemo_roquet_eos reference (different pressure convention,
+    # ~1e-3 in slope**2)
+    np.testing.assert_allclose(np.asarray(k33), ref, rtol=5e-3, atol=1e-8)
+
+    # dispatch: typo raises; native vs mode-b non-vacuous
+    with pytest.raises(ValueError, match="slope_positions"):
+        gm_redi_tracer_tendency_latlon(
+            T, S, jnp.zeros_like(st.eta.data), st.H_bathy.data, r.grid,
+            r.z_coord, cfg._replace(slope_positions="typo"),
+            eos=r.model_config.eos, mask=st.land_mask.data,
+            u_mask=st.u_mask.data, v_mask=st.v_mask.data, rho_0=1026.0)
+    dT_nat, _ = gm_redi_tracer_tendency_latlon(
+        T, S, jnp.zeros_like(st.eta.data), st.H_bathy.data, r.grid,
+        r.z_coord, cfg, eos=r.model_config.eos, mask=st.land_mask.data,
+        u_mask=st.u_mask.data, v_mask=st.v_mask.data, rho_0=1026.0)
+    dT_mb, _ = gm_redi_tracer_tendency_latlon(
+        T, S, jnp.zeros_like(st.eta.data), st.H_bathy.data, r.grid,
+        r.z_coord, cfg._replace(slope_positions="mode_b"),
+        eos=r.model_config.eos, mask=st.land_mask.data,
+        u_mask=st.u_mask.data, v_mask=st.v_mask.data, rho_0=1026.0)
+    assert float(jnp.max(jnp.abs(dT_nat - dT_mb))) > 0.0
+    assert bool(jnp.all(jnp.isfinite(dT_nat)))

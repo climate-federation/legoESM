@@ -282,6 +282,17 @@ class GMRediConfig(NamedTuple):
     # REMAINING NEMO deviation (documented): the ldfslp mixed-layer
     # linear slope ramp toward the surface is not implemented yet.
     slope_limit: str = "dm95_taper"
+    # Slope POSITIONS for slope_scheme="nemo_iso_lap": "mode_b" (default,
+    # bit-identical v1) places the single interface slope field at all four
+    # NEMO positions (corr 0.96, amplitude ~1.35); "nemo_native" computes the
+    # ldfslp four-position slopes (uslp/vslp at tracer levels, wslpi/wslpj at
+    # w-points; NEMO sign convention, caps + ML ramp + Shapiro built in —
+    # certified corr +0.99, amplitude 1.00-1.03 vs the winter *_stg dump) and
+    # feeds the exact traldf_iso stencil. With nemo_native the producer-side
+    # slope_limit / nemo_mld_slope_ramp / nemo_slope_shapiro flags are
+    # irrelevant to the iso operator (native has NEMO's own limiters), and
+    # the dispatch applies NO sign negation (native is already NEMO-signed).
+    slope_positions: str = "mode_b"
     # NEMO ldfslp mixed-layer slope ramp (default False = BYTE-IDENTICAL).
     # When True, isoneutral slopes are linearly ramped to 0 through the surface
     # mixed layer (ldfslp.F90:284-297 w-point branch: wslp(k) = gdepw(k)/max(hml,10)

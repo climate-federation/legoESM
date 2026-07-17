@@ -124,6 +124,7 @@ _NEMO_MLD_REF_DEPTH_M = 10.0
 # Floor [m] on the mixed-layer depth used in the w-point slope ramp normaliser
 # (ldfslp.F90:161 ``r1_hmlw = 1/MAX(hmlp - gdepw_top, 10.)``).
 # --- NEMO ldfslp slope stability bound (ldfslp.F90:212-213) ---
+_NEMO_HML_UV_FLOOR_M = 5.0   # [m] ldfslp:155-158 MAX(zhmlpt,...,5.) u/v ML floor
 _NEMO_SLOPE_STAB_7E3 = 7.0e3  # [m] |S| <= e3/7e3 ("kxz max =< e1 e3/(pi^2 2 dt)")
 _NEMO_HMLW_FLOOR_M = 10.0
 
@@ -500,6 +501,211 @@ def _shapiro_smooth_slopes(S_x, S_y, mask):
 # Isopycnal slope computation
 # =====================================================================
 
+def compute_nemo_native_slopes(
+    rho: jnp.ndarray,
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    mask: jnp.ndarray,
+    u_mask: jnp.ndarray,
+    v_mask: jnp.ndarray,
+    z_coord: OceanZStarCoordinate,
+    grid: LatLonGrid,
+    cfg: GMRediConfig,
+    eos_fn,
+    rho_0: float = _RHO_0,
+    g: float = constants.g,
+    active_3d: jnp.ndarray | None = None,
+):
+    """NEMO ldfslp native four-position isopycnal slopes (uslp, vslp, wslpi,
+    wslpj) — a direct transcription of ``ldfslp.F90`` (ldf_slp, NEMO 5.0.2)
+    for the z-coordinate flat-bottom oracle configs.
+
+    Conventions (NEMO, 0-based here):
+      * ``uslp[j,i,k]``: slope at the EAST u-face of cell i, tracer level k;
+        ``vslp`` the north v-face analogue.
+      * ``wslpi/wslpj[j,i,k]``: slope at the w-point at the TOP of cell k
+        (``wslp[...,0] = 0`` — the sea surface); this is exactly the indexing
+        ``nemo_iso_lap_tracer_tendency_latlon_cgrid`` consumes natively
+        (its below-cell-k flux uses ``roll(wslpi,-1)``).
+      * SIGN: NEMO's — ``slp = zau/(zbu-eps)`` with the DENOMINATOR bounded
+        NEGATIVE, i.e. ``slp = -dx(rho)/|drho_dz|``. No dispatch negation.
+
+    Faithful pieces (line refs are ldfslp.F90):
+      * zgru/zgrv masked horizontal rhd-gradients (:167-171, :180-184);
+      * zdzr = -(1/g)(prd+1)(pn2(k)+pn2(k+1))(1-0.5 tmask(k+1)) (:188-195);
+      * the DOUBLE slope bound via the denominator (:212-213, :281-282):
+        |S| <= rn_slpmax AND |S| <= e3/7e3 (_NEMO_SLOPE_STAB_7E3);
+      * mixed-layer linear ramp: uslp anchors to the interior slope AT the
+        ML-base level iku=MAX(nmln_i, nmln_{i+1}) scaled by depth/hml_u
+        (:216-238); wslp anchors at nmln+1 scaled by gdepw/hml_w (:285-297);
+      * the w-point gradient uses WET-FACE-COUNT normalisation
+        zci = MAX(sum of 4 umask, eps) (:271-278);
+      * horizontal Shapiro 1/16 + coastal decrease, native mask factors
+        (:242-257 u/v; :301-315 w).
+
+    Scope (v1, matches the operator's documented assumptions): reference
+    geometry (dz_ref ladder; z-star eta/J stretching ignored — linssh/flat
+    oracle configs), no ice shelves (risfdep=0, mikt=1), no partial cells.
+    """
+    zeps = 1.0e-20
+    dtype = rho.dtype
+    nlat, nlon, nlev = rho.shape
+    dz = jnp.asarray(z_coord.dz_ref, dtype=dtype)                # (nlev,)
+    gdept = jnp.cumsum(dz) - 0.5 * dz                            # cell centres
+    gdepw_top = jnp.cumsum(dz) - dz                              # top-of-cell depth
+    e3w = jnp.concatenate([dz[:1], gdept[1:] - gdept[:-1]])      # NEMO e3w(k)
+
+    from legoesm.grids.latlon import ensure_geometry
+    geom = ensure_geometry(grid)
+    e1u = jnp.asarray(geom.dx_u[:, 1:], dtype=dtype)             # east face of cell i
+    e2v = jnp.asarray(geom.dy_v[1:, :], dtype=dtype)
+    e1t = jnp.asarray(geom.dx_T, dtype=dtype)
+    e2t = jnp.asarray(geom.dy_T, dtype=dtype)
+
+    ones_z = jnp.ones((1, 1, nlev), dtype=dtype)
+    act = (mask[:, :, None] * ones_z if active_3d is None
+           else active_3d.astype(dtype))
+    umask3 = u_mask[:, 1:, None] * act * jnp.roll(act, -1, axis=1)
+    vmask3 = v_mask[1:, :, None] * act * jnp.roll(act, -1, axis=0)
+    wmask3 = act * jnp.roll(act, +1, axis=2)
+    wmask3 = wmask3.at[:, :, 0].set(act[:, :, 0])
+
+    prd = rho / jnp.asarray(rho_0, dtype=dtype) - 1.0            # NEMO rhd
+
+    # pn2: locally-referenced (adiabatic) N^2 at w-points, NEMO indexing
+    # (pn2[k] at the TOP of cell k; pn2[0]=0). eos.compute_buoyancy_frequency_
+    # adiabatic returns the nlev-1 interior interfaces (lego interface m =
+    # NEMO w-level m+1).
+    from legoesm.ocean.eos import compute_buoyancy_frequency_adiabatic
+    p_cell = (jnp.asarray(rho_0, dtype) * jnp.asarray(g, dtype)
+              * gdept)[None, None, :] * jnp.ones_like(rho)
+    J1 = jnp.ones((nlat, nlon), dtype=dtype)
+    n2_int = compute_buoyancy_frequency_adiabatic(
+        T, S, p_cell, z_coord.dz_ref, J1, eos_fn=eos_fn)          # (...,nlev-1)
+    pn2 = jnp.concatenate([jnp.zeros((nlat, nlon, 1), dtype=dtype),
+                           n2_int.astype(dtype)], axis=-1)        # (...,nlev)
+    pn2_kp1 = jnp.concatenate([pn2[:, :, 1:],
+                               jnp.zeros((nlat, nlon, 1), dtype=dtype)], axis=-1)
+
+    # masked horizontal rhd gradients (east/north faces of cell i/j)
+    zgru = umask3 * (jnp.roll(prd, -1, axis=1) - prd)
+    zgrv = vmask3 * (jnp.roll(prd, -1, axis=0) - prd)
+
+    # zdzr at T-points (:188-195); the (1 - 0.5*tmask(k+1)) factor averages
+    # over the wet w-levels bracketing level k.
+    act_kp1 = jnp.concatenate([act[:, :, 1:],
+                               jnp.zeros((nlat, nlon, 1), dtype=dtype)], axis=-1)
+    zdzr = (-1.0 / jnp.asarray(g, dtype)) * (prd + 1.0) \
+        * (pn2 + pn2_kp1) * (1.0 - 0.5 * act_kp1)
+
+    slpmax = jnp.asarray(cfg.S_max, dtype=dtype)
+    z1_slpmax = 1.0 / slpmax
+
+    # ML indices per column (NEMO nmln, via the shared zdfmxl-criterion
+    # helper: ``first`` = first stratified cell = 0-based nmln).
+    hml, m_base = _nemo_mld_from_potential_density(
+        T, S, mask, z_coord, eos_fn, cfg.mld_rho_c)
+    first = jnp.clip(m_base + 1, 1, nlev - 1)                    # (nlat,nlon) int
+    # zhmlpt = gdept(nmln-1) = depth of the last T-point inside the ML
+    zhmlpt = jnp.take(gdept, jnp.clip(first - 1, 0, nlev - 1)) * mask
+
+    kidx = jnp.arange(nlev)[None, None, :]
+
+    def _uv_slp(zg, zb_pair, e1_face, e3_face, iku, r1_hml, zdep_face, msk3):
+        """Shared u/v-slope assembly (:206-238 without the Shapiro)."""
+        zau = zg / e1_face[:, :, None]
+        zbu = jnp.minimum(
+            zb_pair,
+            jnp.minimum(-z1_slpmax * jnp.abs(zau),
+                        (-_NEMO_SLOPE_STAB_7E3 / e3_face) * jnp.abs(zau)))
+        s_int = zau / (zbu - zeps)
+        anchor = jnp.take_along_axis(s_int, iku[:, :, None], axis=-1)[:, :, 0]
+        anchor = anchor * r1_hml
+        in_ml = kidx < iku[:, :, None]
+        return jnp.where(in_ml, zdep_face * anchor[:, :, None], s_int) * msk3
+
+    # --- uslp ---
+    zb_u = 0.5 * (zdzr + jnp.roll(zdzr, -1, axis=1))
+    iku = jnp.maximum(first, jnp.roll(first, -1, axis=1))
+    r1_hmlu = 1.0 / jnp.maximum(
+        jnp.maximum(zhmlpt, jnp.roll(zhmlpt, -1, axis=1)),
+        jnp.asarray(_NEMO_HML_UV_FLOOR_M, dtype))
+    zdepu = (gdept - 0.5 * dz[0])[None, None, :] * jnp.ones_like(zgru)
+    e3u_k = dz[None, None, :]                                     # flat: e3u=e3t
+    uslp = _uv_slp(zgru, zb_u, e1u, e3u_k, iku, r1_hmlu, zdepu, umask3)
+
+    # --- vslp ---
+    zb_v = 0.5 * (zdzr + jnp.roll(zdzr, -1, axis=0))
+    ikv = jnp.maximum(first, jnp.roll(first, -1, axis=0))
+    r1_hmlv = 1.0 / jnp.maximum(
+        jnp.maximum(zhmlpt, jnp.roll(zhmlpt, -1, axis=0)),
+        jnp.asarray(_NEMO_HML_UV_FLOOR_M, dtype))
+    vslp = _uv_slp(zgrv, zb_v, e2v, e3u_k, ikv, r1_hmlv, zdepu, vmask3)
+
+    # --- wslpi / wslpj (:265-297) ---
+    zgru_im1 = jnp.roll(zgru, +1, axis=1)
+    zgrv_jm1 = jnp.roll(zgrv, +1, axis=0)
+    um_im1 = jnp.roll(umask3, +1, axis=1)
+    vm_jm1 = jnp.roll(vmask3, +1, axis=0)
+
+    def _km1(a):   # value at level k-1, zero-padded at the surface row
+        return jnp.concatenate(
+            [jnp.zeros((nlat, nlon, 1), dtype=dtype), a[:, :, :-1]], axis=-1)
+
+    zci = jnp.maximum(um_im1 + umask3 + _km1(um_im1) + _km1(umask3), zeps) \
+        * e1t[:, :, None]
+    zcj = jnp.maximum(vm_jm1 + vmask3 + _km1(vm_jm1) + _km1(vmask3), zeps) \
+        * e2t[:, :, None]
+    zai = (zgru_im1 + zgru + _km1(zgru_im1) + _km1(zgru)) / zci * wmask3
+    zaj = (zgrv_jm1 + zgrv + _km1(zgrv_jm1) + _km1(zgrv)) / zcj * wmask3
+    zbw = (-0.5 / jnp.asarray(g, dtype)) * pn2 * (prd + _km1(prd) + 2.0)
+    e3w_k = e3w[None, None, :]
+    zbi = jnp.minimum(zbw, jnp.minimum(-z1_slpmax * jnp.abs(zai),
+                                       (-_NEMO_SLOPE_STAB_7E3 / e3w_k) * jnp.abs(zai)))
+    zbj = jnp.minimum(zbw, jnp.minimum(-z1_slpmax * jnp.abs(zaj),
+                                       (-_NEMO_SLOPE_STAB_7E3 / e3w_k) * jnp.abs(zaj)))
+    swi_int = zai / (zbi - zeps)
+    swj_int = zaj / (zbj - zeps)
+    # ML ramp (:284-297): in-ML for w-level jk <= nmln (1-based) — in the
+    # 0-based top-of-cell-k indexing (jk = k+1): k <= first; anchor at
+    # jk = nmln+1 => k = first+1 (the first w-level BELOW the ML base).
+    kanc = jnp.clip(first + 1, 1, nlev - 1)
+    r1_hmlw = 1.0 / jnp.maximum(hml, jnp.asarray(_NEMO_HMLW_FLOOR_M, dtype))
+    anc_i = jnp.take_along_axis(swi_int, kanc[:, :, None], axis=-1)[:, :, 0] * r1_hmlw
+    anc_j = jnp.take_along_axis(swj_int, kanc[:, :, None], axis=-1)[:, :, 0] * r1_hmlw
+    zck = gdepw_top[None, None, :]
+    in_ml_w = kidx < kanc[:, :, None]
+    wslpi = jnp.where(in_ml_w, zck * anc_i[:, :, None], swi_int) * wmask3
+    wslpj = jnp.where(in_ml_w, zck * anc_j[:, :, None], swj_int) * wmask3
+    wslpi = wslpi.at[:, :, 0].set(0.0)
+    wslpj = wslpj.at[:, :, 0].set(0.0)
+
+    # --- Shapiro 1/16 + coastal decrease, native mask factors ---
+    def _shap(f, cof):
+        fp = jnp.pad(f, ((1, 1), (1, 1), (0, 0)))
+        w = (1.0, 2.0, 1.0)
+        acc = jnp.zeros_like(f)
+        for a in range(3):
+            for b in range(3):
+                acc = acc + w[a] * w[b] * fp[a:a + nlat, b:b + nlon, :]
+        return acc * cof / 16.0
+
+    def _kp1m(a):  # mask at level k+1, zero at the bottom
+        return jnp.concatenate(
+            [a[:, :, 1:], jnp.zeros((nlat, nlon, 1), dtype=dtype)], axis=-1)
+
+    cof_u = 0.25 * (jnp.roll(umask3, -1, axis=0) + jnp.roll(umask3, +1, axis=0)) \
+        * (umask3 + _kp1m(umask3))
+    cof_v = 0.25 * (jnp.roll(vmask3, -1, axis=1) + jnp.roll(vmask3, +1, axis=1)) \
+        * (vmask3 + _kp1m(vmask3))
+    cof_w = 0.25 * wmask3 * (umask3 + um_im1) * (vmask3 + vm_jm1)
+    uslp = _shap(uslp, cof_u)
+    vslp = _shap(vslp, cof_v)
+    wslpi = _shap(wslpi, cof_w)
+    wslpj = _shap(wslpj, cof_w)
+    return uslp, vslp, wslpi, wslpj
+
+
 def compute_isopycnal_slopes_latlon_cgrid(
     rho: jnp.ndarray,
     mask: jnp.ndarray,
@@ -815,6 +1021,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     grid: LatLonGrid,
     kappa_Redi,
     active_3d: jnp.ndarray | None = None,
+    native_slopes: tuple | None = None,
 ) -> jnp.ndarray:
     """NEMO ``traldf_iso`` (``#define iso_lap``) iso-neutral Laplacian Redi
     tracer tendency on the lat-lon C-grid.
@@ -831,7 +1038,9 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     Pure Redi (``κ_GM`` is NOT part of ``traldf_iso``); the dispatcher raises
     if ``kappa_GM != 0`` is requested with this scheme.
 
-    Convention (matches NEMO's native stencil, remapped to legoESM axes):
+    Convention (matches NEMO's native stencil, remapped to legoESM axes,
+    native_slopes=None,
+):
     ``axis0 = lat = NEMO jj``, ``axis1 = lon = NEMO ji``, ``axis2 = lev = jk``
     (k increases downward, k=0 surface — same index ordering as NEMO).  Fluxes
     are assembled as ``zfu`` (east face of cell i), ``zfv`` (north face of
@@ -926,13 +1135,20 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     else:
         aht = jnp.broadcast_to(jnp.asarray(kappa_Redi, dtype=dtype), q.shape)
 
-    # --- Map the single interface slope field to NEMO's slope positions.
-    # Interface k (between cells k,k+1) -> native tracer level k; deepest
-    # native level = 0 (no interface below the bottom cell). ---
-    zpad = jnp.zeros((*S_x.shape[:2], 1), dtype=dtype)
-    uslp = jnp.concatenate([S_x, zpad], axis=2)      # (n_lat, n_lon, nlev)
-    vslp = jnp.concatenate([S_y, zpad], axis=2)
-    wslpi, wslpj = uslp, vslp
+    # --- Slope positions.  native_slopes = the ldfslp four-position fields
+    # (uslp/vslp at tracer levels, wslpi/wslpj at top-of-cell w-points, NEMO
+    # sign convention, from compute_nemo_native_slopes) — the exact traldf_iso
+    # stencil.  None => mode-(b): the single interface field at all four
+    # positions (corr 0.96, amplitude ~1.35 — the documented v1). ---
+    if native_slopes is not None:
+        uslp, vslp, wslpi, wslpj = native_slopes
+    else:
+        # Interface k (between cells k,k+1) -> native tracer level k; deepest
+        # native level = 0 (no interface below the bottom cell).
+        zpad = jnp.zeros((*S_x.shape[:2], 1), dtype=dtype)
+        uslp = jnp.concatenate([S_x, zpad], axis=2)  # (n_lat, n_lon, nlev)
+        vslp = jnp.concatenate([S_y, zpad], axis=2)
+        wslpi, wslpj = uslp, vslp
 
     ax_y, ax_x, ax_z = 0, 1, 2
 
@@ -2262,6 +2478,27 @@ def gm_redi_tracer_tendency_latlon(
             & (_z_top[jnp.newaxis, jnp.newaxis, :]
                < H_bathy[:, :, jnp.newaxis])
         ).astype(T.dtype)
+        _positions = getattr(cfg, "slope_positions", "mode_b")
+        if _positions not in ("mode_b", "nemo_native"):
+            raise ValueError(
+                "GMRediConfig.slope_positions must be one of "
+                f"('mode_b', 'nemo_native'), got {_positions!r}")
+        if _positions == "nemo_native":
+            # ldfslp native four-position slopes: NEMO sign convention and
+            # NEMO's own limiters (double cap, ML ramp, Shapiro) built in —
+            # NO dispatch negation, exact traldf_iso stencil (amplitude 1.0).
+            _nat = compute_nemo_native_slopes(
+                rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg,
+                eos_fn, rho_0=rho_0, g=g, active_3d=_active_3d)
+            dT_dt = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask,
+                z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
+                native_slopes=_nat)
+            dS_dt = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                S, S_x, S_y, mask, u_mask, v_mask,
+                z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
+                native_slopes=_nat)
+            return dT_dt, dS_dt
         # SLOPE SIGN CONVENTION (2026-07-17 winter ttrd_ldf certificate):
         # the producer computes S = -grad_h(rho)/drho_dz with drho_dz floored
         # NEGATIVE => S = +d(rho)/dx / |drho_dz|. NEMO ldfslp computes
@@ -2338,6 +2575,32 @@ def compute_isoneutral_K33_latlon(
         )
     else:
         rho, jacobian = density_jacobian
+    if getattr(cfg, "slope_positions", "mode_b") == "nemo_native":
+        # Native ldfslp slopes: K33 = kappa*(wslpi^2 + wslpj^2) at the w-points
+        # (NEMO akz form, traldf_iso ah_wslp2), mapped to the nlev-1 legoESM
+        # interior interfaces (interface m = w-point at the top of cell m+1).
+        from legoesm.ocean.eos import make_eos_fn as _mk
+        _eosfn = _mk(eos, eos_linear)
+        if density_jacobian is not None:
+            _rho, _J = density_jacobian
+        else:
+            _rho, _J = gm_redi_density_and_jacobian(
+                T, S, eta, H_bathy, grid, z_coord,
+                eos=eos, eos_linear=eos_linear, mask=mask, rho_0=rho_0, g=g)
+        _m = mask if mask is not None else jnp.ones(T.shape[:2], T.dtype)
+        # face masks from the cell mask (flat-bottom convention: wet iff both
+        # bracketing cells wet) — K33 is S^2 at w-points; wall faces are
+        # already zeroed inside the native producer via these masks.
+        _um = jnp.zeros((T.shape[0], T.shape[1] + 1), T.dtype)
+        _um = _um.at[:, 1:-1].set(_m[:, :-1] * _m[:, 1:])
+        _vm = jnp.zeros((T.shape[0] + 1, T.shape[1]), T.dtype)
+        _vm = _vm.at[1:-1, :].set(_m[:-1, :] * _m[1:, :])
+        _, _, _wi, _wj = compute_nemo_native_slopes(
+            _rho, T, S, _m, _um, _vm, z_coord, grid, cfg, _eosfn,
+            rho_0=rho_0, g=g)
+        _kap = cfg.kappa_Redi if kappa_redi_override is None else kappa_redi_override
+        _k33_w = jnp.asarray(_kap) * (_wi ** 2 + _wj ** 2)   # (..., nlev) at w-tops
+        return _k33_w[:, :, 1:]                              # interfaces 0..nlev-2
     kappa_Redi = cfg.kappa_Redi if kappa_redi_override is None else kappa_redi_override
     nlev = T.shape[-1]
     # K_33 is evaluated at the nlev-1 w-faces, so kappa_Redi is needed there.
