@@ -35,7 +35,7 @@ set -euo pipefail
 cd "${PBS_O_WORKDIR}"
 source scripts/cluster/scaling_derecho/_env.sh
 module load conda cuda
-export JAX_PLATFORMS=cuda
+export JAX_PLATFORMS=cuda,cpu
 export JAX_ENABLE_X64=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 
