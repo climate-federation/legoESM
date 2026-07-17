@@ -214,3 +214,49 @@ def test_model_step_populates_and_carries_bt_hist():
     assert float(jnp.max(jnp.abs(s2.bt_hist[0] - s1.bt_hist[0]))) > 0.0
     for h in s2.bt_hist:
         assert bool(jnp.all(jnp.isfinite(h)))
+
+
+def test_nemo_stage_mean_imposition_noop_and_helper():
+    """NEMO stprk3_stg:440 zub correction (nemo_stage_mean_imposition):
+    (a) default OFF is the legacy path; (b) ON is bit-identical for the GYRE
+    card — legoESM's implicit vertical solve has zero-flux BCs and stress/drag
+    are applied pre-barotropic, so the depth mean is already conserved (the
+    imposition is structurally inert here; it activates only for configs whose
+    implicit solve shifts the mean); (c) the depth-mean helper is exact on a
+    synthetic column-uniform shift."""
+    import jax.numpy as jnp
+    import numpy as np
+
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.fidelity.nemo_recipe import (
+        _NEMO_GYRE_DT_S,
+        build_nemo_gyre_recipe,
+        nemo_gyre_wind_forcing,
+    )
+
+    r = build_nemo_gyre_recipe()
+    st = r.initial_state
+    n_lat, n_lon = st.T.data.shape[0], st.T.data.shape[1]
+    sf = nemo_gyre_wind_forcing(n_lat, n_lon, 0.0)
+    m_off = LatLonCGridOceanModel(r.grid, r.z_coord, r.model_config)
+    mc_on = r.model_config._replace(
+        barotropic=r.model_config.barotropic._replace(
+            nemo_stage_mean_imposition=True))
+    m_on = LatLonCGridOceanModel(r.grid, r.z_coord, mc_on)
+    s_off = m_off.step(st, dt=_NEMO_GYRE_DT_S, surface_forcing=sf)
+    s_on = m_on.step(st, dt=_NEMO_GYRE_DT_S, surface_forcing=sf)
+    np.testing.assert_array_equal(np.asarray(s_on.u.data),
+                                  np.asarray(s_off.u.data))
+    np.testing.assert_array_equal(np.asarray(s_on.v.data),
+                                  np.asarray(s_off.v.data))
+
+    # helper exactness: a column-uniform shift is recovered exactly
+    du = 0.01
+    st_shift = st._replace(u=st.u.replace(
+        data=(st.u.data + du) * st.u_mask.data[..., None]))
+    um0, _ = m_on._fixed_depth_means(st)
+    um1, _ = m_on._fixed_depth_means(st_shift)
+    wet = np.asarray(st.u_mask.data) > 0
+    np.testing.assert_allclose(np.asarray(um1 - um0)[wet], du, rtol=1e-6)  # f32 state

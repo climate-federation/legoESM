@@ -785,6 +785,16 @@ class BarotropicConfig(NamedTuple):
     # per-substep) global mass correction is the SOTA-standard approximation
     # (loses per-substep far-field sea-level compensation).  Default False.
     barotropic_local_subcycle_clamp: bool = False
+    # NEMO RK3 per-stage barotropic-mean IMPOSITION (stprk3_stg.F90:440 zub
+    # correction): after the implicit vertical solve, replace the 3D
+    # velocity's depth mean with the barotropic (split-explicit) solution —
+    # u += (U_bar_solve − depth_mean(u))·mask, uniformly over the column.
+    # NEMO does this after EVERY stage, so its barotropic mode is always the
+    # heavily-filtered stp2d solution; without it, implicit vmix + bottom
+    # drag shift the depth mean after the barotropic solve and that shifted
+    # mean carries unfiltered divergence noise (depth-uniform w noise).
+    # Default False: bit-identical legacy behaviour.
+    nemo_stage_mean_imposition: bool = False
     # AB2 time-centering of the barotropic slow forcing F_slow (matches the
     # Oceananigans split-explicit Gᵁ = AB2-extrapolated depth-integral of the 3D
     # tendency, vs legoESM's default current-time depth-mean).  Investigated for

@@ -3410,6 +3410,15 @@ class LatLonCGridOceanModel:
         # and bottom and is split-stepped (Lie splitting, 1st-order)
         # after tracer advection, GM/Redi, and the freshwater virtual
         # salt flux — matching MOM6's diabatic-process ordering.
+        # NEMO stprk3_stg:440 zub correction (nemo_stage_mean_imposition):
+        # capture the post-barotropic-solve depth mean so it can be re-imposed
+        # after the implicit vertical solve (which otherwise shifts it).
+        _impose_mean = (
+            getattr(self.config.barotropic, "nemo_stage_mean_imposition", False)
+            and _apply_implicit_vmix)
+        if _impose_mean:
+            _u_mean_baro, _v_mean_baro = self._fixed_depth_means(state_new)
+
         tke_new = None
         if self.config.implicit_vertical_mixing and _apply_implicit_vmix:
             if self._tke_prognostic_active():
@@ -3464,6 +3473,23 @@ class LatLonCGridOceanModel:
                           dims=("lat", "lon", "level"), units="m^2/s^2"),
             )
 
+        if _impose_mean:
+            # NEMO stprk3_stg.F90:440: uu += (uu_b(Kaa) − Σ e3u_0·uu·r1_hu_0)
+            # ·umask — the 3D velocity's depth mean is REPLACED by the
+            # barotropic solution after the implicit solve, uniformly over
+            # the column. Sign convention: an ADDITIVE column-uniform shift,
+            # so the baroclinic deviation u′ is untouched (budget: the
+            # depth-integral becomes exactly the barotropic transport).
+            _u_mean_now, _v_mean_now = self._fixed_depth_means(state_new)
+            _du = (_u_mean_baro - _u_mean_now)[..., jnp.newaxis]
+            _dv = (_v_mean_baro - _v_mean_now)[..., jnp.newaxis]
+            _um = state.u_mask.data[..., jnp.newaxis]
+            _vm = state.v_mask.data[..., jnp.newaxis]
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=state_new.u.data + _du * _um),
+                v=state_new.v.replace(data=state_new.v.data + _dv * _vm),
+            )
+
         # 9. Conservation fixers
         if self.config.use_conservation_fixer and _apply_implicit_vmix:
             state_new = ocean_conservation_fixer(
@@ -3516,6 +3542,26 @@ class LatLonCGridOceanModel:
                                tend.surface_tracer_forcing, _tke_src,
                                _diss_incr, tend.tracer_source)
         return state_new
+
+    def _fixed_depth_means(self, st):
+        """Thickness-weighted depth means of u, v on FIXED reference
+        thicknesses (NEMO ``e3u_0``/``r1_hu_0``, the linssh convention used by
+        the stprk3_stg:440 zub correction). Face thicknesses by the min-rule,
+        matching the barotropic solver's depth average
+        (``_depth_average_to_faces``) so imposition restores exactly the mean
+        the barotropic solve set."""
+        from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+            _depth_average_to_faces,
+        )
+        from legoesm.ocean.vertical import compute_layer_thickness
+        h_k = compute_layer_thickness(
+            jnp.zeros_like(st.eta.data), st.H_bathy.data, self.z_coord,
+            min_water_column_m=self.config.min_water_column_m,
+        ).astype(st.u.data.dtype)
+        return _depth_average_to_faces(
+            st.u.data, st.v.data, h_k,
+            jnp.asarray(self.config.min_water_column_m, dtype=st.u.data.dtype),
+            st.land_mask.data, st.u_mask.data, st.v_mask.data, self.grid)
 
     def _tke_prognostic_active(self) -> bool:
         """True iff a prognostic-TKE-carrying vertical-mixing closure is active.
