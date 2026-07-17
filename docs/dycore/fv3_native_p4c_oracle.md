@@ -277,3 +277,64 @@ proposed next brick (a hypothesis, not established by this battery) is to
 port and stabilise the native-angle ⇄ faithful-d_sw5-halo pair *together*,
 rather than swapping the grid under the A-L solver (which is not FV3's
 scheme and is tuned for equiangular).
+
+## Duo per-stage certification + integrated stepper (2026-07-17)
+
+**Per-stage TRANSLATION certificates** (bit-exact uint64 vs verbatim
+symmetryclean Fortran extracts on the committed C12 inputs; every
+oracle input-hash + extract-SHA enforced; all codex-reviewed to SHIP):
+
+| construct | scope | test |
+|---|---|---|
+| c_sw duo | full duo branch, 5 outputs | test_fv3_native_c_sw_duo |
+| d_sw1 duo | transport stage, 16 tokens, defined-workspace shim | test_fv3_native_dsw1_duo |
+| d_sw2 duo | delp/pt update, chained | test_fv3_native_dsw2_duo |
+| d_sw3 duo | KE fluxes, WMP-delta threaded | test_fv3_native_dsw3_duo |
+| d_sw4 duo | 4-corner KE fix | test_fv3_native_dsw4_duo |
+| d_sw5 duo | damping/KE/vort transport, 13 tokens, single-face raw-KEE chain | test_fv3_native_dsw5_duo |
+| d_sw6 duo | final circulation winds | test_fv3_native_dsw6_duo |
+
+**Integrated six-face duo stepper** (`fv3_native_duo_stepper.py`,
+codex SHIP): certified stages + both inter-panel averaging analogs
+(dyn_core 853-900 C-ring, 968-1020 BGRID — truth-tiered vs a
+geometry-derived 24-edge contact table) + geopk(SW)/p_grad_c/
+one_grad_p ports.  Balanced W2 at C12: mass exact, interior departure
+0.6 m/s @2 h, edge saturating ~14 m/s (interim index-copy exchanges).
+
+**Duo-target quantification** (job 9075107): C24 5-day W2 stable,
+v_ll ~17 m/s steady; gate score 179x/101x the C24-scaled duo envelope
+(0.1416/0.0579).  The duo edge-cleanliness target requires the full
+extended-halo consistency bundle.
+
+**Ext-bundle measurements** (all flag-gated OFF): extended-lattice
+gridstruct (interior bitwise, halos real) + per-stagger k2e remaps
+(halo accuracy 0.42 -> 0.0025 on analytic fields) SHIPPED; but every
+lightweight in-stepper swap measured WORSE than the coherent interim
+(position-only 22/21.6; basis-corrected D 17.4/27.9 vs interim
+8.3/14.0) — piecewise approximation of the duo ext machinery injects
+errors comparable to those it fixes.  Evidence-driven roadmap: adapt
+the stepper (reference numbering) to the certified production
+ext machinery (create layout: ext_vector_dgrid basis='covariant',
+pad_halo(duogrid)) via the _GNOMONIC_ED_FACE_PERM/_ROT adapter, all
+fields + metrics switching together.
+
+**FAITHFUL EXT PORT (4e3fe4a7e + 3474ecf24)**: `fv3_native_ext_vector`
+ports the authoritative machinery outright in the stepper's reference
+numbering (no create-layout adapter): ext_scalar A/B (own-stagger k2e
+rings + 9-slot corner Lagrange) and ext_vector D/C via the upstream
+lat-lon intermediary — c2l_ord2(_cgrid) with exact a11..a22 on kinked
+mpp-state metrics, geographic exchange on the ng=4 lattice
+(set_bd_ext_duo), A-table cube_rmp rings 1..4, corner Lagrange, then
+cubed_a2d/a2c projection onto the a2stag ext bases and the S/N-then-W/E
+strip writes (fv_duogrid.F90:626-975).  Upstream itself rejects
+per-stagger vector remapping as noisier (:678-681) — consistent with
+the earlier lightweight-swap measurements.  Halo strips vs
+analytic-through-identical-projection truth: 0.152 m/s at C12.
+**C12 ablation (SB5a protocol, one variable)**: edge du48 13.99 → 8.25
+(−41%), du12 8.28 → 5.01, interior du12 0.54 → 0.35, ddelp12
+1.42% → 0.97%, mass exact; interior du48 1.33 → 1.86 (small
+degradation, C24 arbitration pending).  Bugs the analytic gate caught:
+create-vs-reference face layout in the ext bases (ext_parity_lonlat_ref
+fixes), staggered corner abscissae needing the ng=4 A lattice, and the
+c_sw sin_sg(5) tiny-floor patch poisoning the a-matrix (recomputed from
+inner(ec1,ec2)).
