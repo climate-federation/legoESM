@@ -1,6 +1,11 @@
 #!/usr/bin/env python
 """Gen the duo d_sw5 single-face raw-KEE chain oracle, or pack the fixture.
 
+SCOPE: TRANSLATION CERTIFICATE on ONE face — the kee assembly uses the
+UNEXCHANGED ubb/vbbtemp; the authoritative dyn_core.F90:968-1020
+BGRID_NE exchange+averaging needs neighbor faces and is EXCLUDED
+six-face work.
+
 INPUT PROVENANCE: identical to the d_sw1..4 oracles — the ONE canonical
 serializer ``gen_dsw1_duo_oracle.serialize_inputs`` (imported, not
 copied).  The fixture records the d_sw5 extract-file sha256 plus the
