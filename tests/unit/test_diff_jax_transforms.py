@@ -84,7 +84,7 @@ def assert_gradient_ok(grad_array, name="", min_nonzero_frac=0.1):
 
 def _make_cdgrid_sw():
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterModel,
         CDGridShallowWaterConfig,
         CDGridShallowWaterState,
@@ -117,7 +117,7 @@ def _make_cdgrid_sw():
 
 def _make_latlon_cgrid_sw():
     from legoesm.grids.latlon import create_latlon_grid
-    from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
         CGridLatLonShallowWaterModel,
         CGridLatLonShallowWaterConfig,
         CGridLatLonShallowWaterState,
@@ -150,7 +150,7 @@ def _make_latlon_cgrid_sw():
 
 def _make_spectral_sw():
     from legoesm.grids.gaussian import create_gaussian_grid
-    from legoesm.atmosphere.dynamics.spectral_sw import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
         SpectralShallowWaterModel,
         SpectralSWConfig,
         SpectralSWState,
@@ -193,7 +193,7 @@ def _make_spectral_sw():
 
 def _make_mpas_sw():
     from legoesm.grids.voronoi import create_voronoi_mesh
-    from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
         MPASShallowWaterModel,
         MPASShallowWaterConfig,
     )

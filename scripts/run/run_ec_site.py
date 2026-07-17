@@ -175,12 +175,14 @@ def _texture_lookup(site: str, csv_path: str) -> tuple[float, float] | None:
 
 
 # gC per umol CO2 (carbon molar mass conversion); matches the canopy's own
-# ``GPP = (An_Sun + An_Sh) * 12.0e-6`` so model<->obs GPP units round-trip.
+# ``GPP = (Agross_Sun + Agross_Sh) * 12.0e-6`` (GROSS) so model<->obs GPP
+# units round-trip.
 _GC_PER_UMOL_CO2 = 12.0e-6
 _DEFAULT_CHUNK = 8760            # timesteps per vmap chunk (bounds memory)
 
 # gC per umol CO2 (carbon molar mass conversion); matches the canopy's own
-# ``GPP = (An_Sun + An_Sh) * 12.0e-6`` so model<->obs GPP units round-trip.
+# ``GPP = (Agross_Sun + Agross_Sh) * 12.0e-6`` (GROSS) so model<->obs GPP
+# units round-trip.
 _GC_PER_UMOL_CO2 = 12.0e-6
 _DEFAULT_CHUNK = 8760            # timesteps per vmap chunk (bounds memory)
 # Production wind-speed floor [m/s].  The coupler / land step ALWAYS drive the

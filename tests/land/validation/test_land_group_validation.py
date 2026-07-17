@@ -193,7 +193,8 @@ def test_carbon_conservation_under_extreme_starvation() -> None:
     state = CarbonState(
         C_lab=jnp.array([0.01]), C_fol=jnp.array([0.01]),
         C_root=jnp.array([0.01]), C_wood=jnp.array([0.01]),
-        C_lit=jnp.array([0.01]), C_som=jnp.array([0.01]),
+        C_lit=jnp.array([0.01]), C_som_active=jnp.array([0.01]),
+        C_som_slow=jnp.array([0.0]), C_som_passive=jnp.array([0.0]),
     )
     new, flux = step_carbon_differland(
         state, jnp.zeros(1), jnp.full(1, 310.0), jnp.full(1, 400.0),
@@ -427,7 +428,8 @@ def test_carbon_litter_pool_overdraw_conservation() -> None:
     state = CarbonState(
         C_lab=jnp.array([0.0]), C_fol=jnp.array([0.0]),
         C_root=jnp.array([0.0]), C_wood=jnp.array([0.0]),
-        C_lit=jnp.array([10.0]), C_som=jnp.array([0.0]),
+        C_lit=jnp.array([10.0]), C_som_active=jnp.array([0.0]),
+        C_som_slow=jnp.array([0.0]), C_som_passive=jnp.array([0.0]),
     )
     new, flux = step_carbon_differland(
         state, jnp.zeros(1), jnp.full(1, 330.0), jnp.full(1, 400.0),
@@ -450,7 +452,8 @@ def test_carbon_biomass_exhaustion_conservation() -> None:
     state = CarbonState(
         C_lab=jnp.array([1.0]), C_fol=jnp.array([5.0]),
         C_root=jnp.array([1.0]), C_wood=jnp.array([5.0]),
-        C_lit=jnp.array([0.0]), C_som=jnp.array([0.0]),
+        C_lit=jnp.array([0.0]), C_som_active=jnp.array([0.0]),
+        C_som_slow=jnp.array([0.0]), C_som_passive=jnp.array([0.0]),
     )
     new, flux = step_carbon_differland(
         state, jnp.zeros(1), jnp.full(1, 320.0), jnp.full(1, 400.0),
@@ -484,7 +487,8 @@ def test_carbon_nee_closure_realistic_dt() -> None:
     state = CarbonState(
         C_lab=jnp.array([20.0]), C_fol=jnp.array([120.0]),
         C_root=jnp.array([80.0]), C_wood=jnp.array([8000.0]),
-        C_lit=jnp.array([300.0]), C_som=jnp.array([12000.0]),
+        C_lit=jnp.array([300.0]), C_som_active=jnp.array([12000.0]),
+        C_som_slow=jnp.array([0.0]), C_som_passive=jnp.array([0.0]),
     )
     # Two cases: daytime growth (high SW) and night-time deficit (zero SW).
     for sw in (jnp.full(1, 400.0), jnp.zeros(1)):

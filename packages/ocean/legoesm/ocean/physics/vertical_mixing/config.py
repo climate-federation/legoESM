@@ -9,6 +9,9 @@ from legoesm.ocean.physics.vertical_mixing.tidal import TidalMixingConfig
 from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
     IWMConfig,
 )
+from legoesm.ocean.physics.vertical_mixing.double_diffusion import (
+    DoubleDiffusionConfig,
+)
 
 
 __param_spec__ = {
@@ -48,6 +51,7 @@ __param_spec__ = {
             "kappaM_max": "numerics: floor/cap",
             "kappaM_min": "numerics: floor/cap",
             "mxl_min": "numerics: floor/cap",
+            "mxl0_min_m": "numerics: floor/cap (NEMO rn_mxl0 ln_mxl0 surface length floor)",
             "prandtl_ri_coeff": "Galperin/Veros fixed Pr-Ri slope (6.6)",
             "tke_background": "numerics: floor/cap",
             "tke_surface_min": "numerics: floor/cap",
@@ -56,7 +60,7 @@ __param_spec__ = {
             "Prandtl_tke0": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
             "lc_coeff": {"units": "1", "bounds": (0.05, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "NEMO zdftke rn_lc / Axell 2002 Langmuir cells", "shape": None},
             "etau_frac": {"units": "1", "bounds": (0.01, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "NEMO zdftke rn_efr sub-ML TKE penetration", "shape": None},
-            "alpha_tke": {"units": "1", "bounds": (9.9, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
+            "alpha_tke": {"units": "1", "bounds": (1.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "TKE vertical-diffusion coeff: NEMO avm x1 (zdftke); Veros/Gaspar 30", "shape": None},
             "bg_diff_scale": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Bryan-Lewis (1979) background-diffusivity amplitude", "shape": None},
             "c_eps": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
             "c_k": {"units": "1", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
@@ -237,7 +241,9 @@ class TKEConfig(NamedTuple):
     c_eps: float = 0.7
     alpha_tke: float = 30.0
     mxl_min: float = 1.0e-8
-    tke_mxl_choice: int = 2
+    tke_mxl_choice: int = 2          # 1/2 = Veros; 3 = NEMO nn_mxl=3 (lup/ldown
+                                     # sweeps + the ln_mxl0 stress anchor)
+    mxl0_min_m: float = 0.04         # NEMO rn_mxl0 [m] (kappa*z0 = 0.4*0.1)
     kappaM_min: float = 2.0e-4
     kappaM_max: float = 100.0            # convective ceiling on K_M [m^2/s] (Veros default)
     kappaH_min: float = 2.0e-5
@@ -250,6 +256,15 @@ class TKEConfig(NamedTuple):
     bg_diff_width_m: float = 222.2       # Bryan-Lewis transition width [m] (published fit)
     bg_diff_scale: float = 1.0e-4        # abyssal tracer-diffusivity floor amplitude [m^2/s]
     tke_surface_min: float = 1.0e-4      # surface TKE floor [m^2/s^2]
+    # Surface TKE boundary condition:
+    #   "veros_flux" (default)  — Neumann wind-work flux injection
+    #                             surface_flux=(|tau|/rho0)^1.5 (Veros tke.py).
+    #   "nemo_dirichlet"        — NEMO nn_bc_surf=1: HOLD the top interface at
+    #                             en(1)=max(rn_emin0, rn_ebb*|tau|/rho0)
+    #                             (zdftke.F90:264-269) as a Dirichlet value in
+    #                             the implicit solve. ~60x larger surface TKE
+    #                             than the flux BC under an ~0.07 Pa wind.
+    surface_bc: str = "veros_flux"
     tke_background: float = 1.0e-6       # interior TKE floor [m^2/s^2]
     # ----- Static-stability N^2 mode (deep-ocean ventilation / convection) -----
     # ``"insitu"`` (default, BIT-IDENTICAL legacy): N^2 from the in-situ
@@ -264,6 +279,19 @@ class TKEConfig(NamedTuple):
     #   ``enable_tke`` path does. Requires the caller to pass T/S/pressure
     #   + an EOS to :func:`tke_vertical_mixing`.
     n2_mode: str = "insitu"
+    # ----- Diffusivity-stage N² time level (NEMO eosbn2 Nnow sequencing) -----
+    # ``False`` (default, BIT-IDENTICAL legacy): the vertical-mixing
+    #   diffusivity-stage N² is sampled on the POST-advection mid-step T/S
+    #   (the state the implicit-mixing call acts on).
+    # ``True``: sample it on the BEFORE-advection (start-of-step, Nnow) T/S,
+    #   matching NEMO ``stp``: ``eos → bn2(Nnow)`` at step start, THEN
+    #   ``tra_adv/tra_ldf/tra_zdf`` consume that ``avt``. The single-step
+    #   ``fct2`` tracer drift at the deepest wet cell was flipping the
+    #   marginal bottom interface to N²<0 (spurious deep convection, 2400×
+    #   avt spike; BOTTOM_N2_DIAGNOSIS_FINDINGS.md). Only the diffusivity-
+    #   stage N² source changes (the post-mixing ``taup1`` N² recompute is
+    #   untouched); consulted only for ``n2_mode="adiabatic"``.
+    n2_before_advection: bool = False
     # ----- Veros vertical-metric slots (the TKE metric-consistency fix) -----
     # legoESM's historical TKE chain mixes vertical-metric conventions: it
     # uses the centre spacing ``dz_half`` (Veros dzw) in slots where Veros
@@ -308,6 +336,14 @@ class TKEConfig(NamedTuple):
     #   point is the topmost interior interface). No ``tke_background`` /
     #   ``tke_surface_min`` floors.
     positivity: str = "floor"
+    # ----- Dissipation time-discretization in the TKE solve -----
+    # "backward_euler" (default, BIT-IDENTICAL legacy): fully-implicit
+    #   linearized dissipation, diagonal += dt*c_eps*sqrt(e)/l_eps.
+    # "nemo_1p5_split": NEMO zdftke's semi-implicit split (zfact2/zfact3,
+    #   zdftke.F90:241-242,414,419): 1.5x on the diagonal + 0.5x explicit on
+    #   the RHS, linearized at the carried sqrt(e)/l_eps. Same first-order
+    #   dissipation; different discrete decay factor at large dt.
+    dissipation_discretization: str = "backward_euler"
     # ----- K-from-TKE amplitude convention -----
     # ``"gaspar_sqrt2e"`` (default, BIT-IDENTICAL legacy):
     #   K_M = c_k·l_k·sqrt(2·max(e, tke_background)) — the Gaspar form.
@@ -629,9 +665,20 @@ class CATKEConfig(NamedTuple):
     maximum_tke_diffusivity: float = float("inf")     # K_e cap [m^2/s]
 
 
+#: Canonical set of vertical-mixing closures ``compute_vertical_K_profiles``
+#: dispatches. SINGLE SOURCE OF TRUTH -- the k_profiles.py fail-loud raise reads
+#: this instead of a hand-copied literal list, exactly as ``VALID_EOS_SCHEMES``
+#: backs ``make_eos_fn`` (so the dispatch and the "valid schemes" message can
+#: never drift). Every member is reachable through the public YAML key
+#: ``ocean.physics.vertical_mixing.scheme`` (pinned by test_config_footguns).
+VALID_VERTICAL_MIXING_SCHEMES = frozenset(
+    {"none", "constant", "richardson", "tke", "catke", "kpp"}
+)
+
+
 class VerticalMixingConfig(NamedTuple):
     """Top-level vertical mixing configuration."""
-    scheme: str = "constant"  # "constant", "richardson", "kpp", "tke", "catke", "none"
+    scheme: str = "constant"  # one of VALID_VERTICAL_MIXING_SCHEMES
     constant: ConstantVerticalMixingConfig = ConstantVerticalMixingConfig()
     richardson: RichardsonVerticalMixingConfig = RichardsonVerticalMixingConfig()
     kpp: KPPConfig = KPPConfig()
@@ -658,3 +705,11 @@ class VerticalMixingConfig(NamedTuple):
     # ``iwm.enabled=True`` (the explicit-tendency path cannot honour it),
     # mirroring the tidal guard above.  Default off ⇒ bit-exact legacy.
     iwm: IWMConfig = IWMConfig()
+    # Double-diffusive mixing (NEMO zdfddm; Merryfield 1999) is ADDITIVE like
+    # iwm, but contributes a SEPARATE salt (avs) vs heat (avt) diffusivity, so
+    # it is applied in the implicit vertical-mixing path AFTER the primary
+    # closure and routes the salinity solve through its own diffusivity
+    # (``K_v + (avs - avt)``); momentum (avm) is untouched, matching zdfddm.
+    # Requires ``implicit_vertical_mixing=True`` (the shared-K explicit/pair
+    # path cannot carry avs != avt).  Default off ⇒ bit-exact legacy.
+    ddm: DoubleDiffusionConfig = DoubleDiffusionConfig()

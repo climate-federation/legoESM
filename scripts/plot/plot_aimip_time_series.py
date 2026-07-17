@@ -61,7 +61,7 @@ def _load_yaml(path: Path) -> dict:
 
 
 def _build_spectral_config(base_cfg: dict):
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
     from legoesm.training.losses import LossConfig
     from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
 
@@ -113,7 +113,7 @@ def _load_classical(ckpt_path: Path):
 
 
 def _load_column_nn(ckpt_path: Path, spec_cfg):
-    from legoesm.atmosphere.physics.learned_column import build_column_physics
+    from legoesm.atmosphere.physics.neural_physics import build_column_physics
     from legoesm.ml.training import load_checkpoint
     template = build_column_physics(
         nlev=spec_cfg.n_levels,
@@ -205,7 +205,7 @@ def _run_variant_series(
     lat_weights: np.ndarray,
 ) -> tuple[list[float], list[float]]:
     """Return (mid_T series, mass-weighted column-mean T series) over n_days+1 days."""
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         compute_spectral_filter,
         compute_sponge_factor,
         spectral_pe_to_grid,

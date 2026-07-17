@@ -182,6 +182,9 @@ class Test6g_PoolsPositive:
 
         for name in CarbonState._fields:
             arr = getattr(state, name)
+            # A2: all eight pools (incl. the live active/slow/passive SOM
+            # cascade, seeded by the CENTURY init partition) stay above the
+            # 1 gC/m2 floor and finite.
             assert jnp.all(arr >= 1.0), f"{name} dropped below 1 gC/m2"
             assert jnp.all(jnp.isfinite(arr)), f"{name} has NaN"
 

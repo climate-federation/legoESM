@@ -29,7 +29,7 @@ from legoesm.grids.cubed_sphere import create_cubed_sphere
 
 @pytest.fixture(scope="module")
 def hyd_model_state():
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationConfig,
         CDGridPrimitiveEquationModel,
     )
@@ -157,7 +157,7 @@ def test_iter1043_hydrostatic_cube_vertex_finite(hyd_model_state):
 
 def test_iter1045_nonhydrostatic_cube_vertex_finite():
     """3D non-hydrostatic 30-step run: cube-vertex cells finite-bounded."""
-    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
         CDGridCompressibleEulerConfig,
         CDGridCompressibleEulerModel,
     )
@@ -227,7 +227,7 @@ def test_iter1045_nonhydrostatic_cube_vertex_finite():
 
 def test_iter1042_nonhydrostatic_long_integration_finite():
     """3D non-hydrostatic 100-step integration: no NaN with zonal IC."""
-    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
         CDGridCompressibleEulerConfig,
         CDGridCompressibleEulerModel,
     )
@@ -288,7 +288,7 @@ def test_iter1042_nonhydrostatic_long_integration_finite():
 
 def test_iter1040_nonhydrostatic_no_edge_artifacts():
     """3D non-hydrostatic on uniform u=5 m/s zonal wind: no edge artifacts."""
-    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
         CDGridCompressibleEulerConfig,
         CDGridCompressibleEulerModel,
     )

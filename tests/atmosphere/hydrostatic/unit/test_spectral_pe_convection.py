@@ -24,7 +24,7 @@ from legoesm.grids.gaussian import (
     vordiv_from_uv_3d,
 )
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     isothermal_rest_state_spectral,
     spectral_pe_to_grid,
@@ -509,7 +509,7 @@ class TestSpectralPECMT:
         the SSP-RK3 ``jax.tree.map`` because the tendency state's
         ``tracers`` field was None while the input state's was a dict.
         """
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPEConfig, SpectralPrimitiveEquationModel,
         )
         nlev = sigma_coord.n_levels

@@ -183,6 +183,12 @@ class OceanSurfaceForcing(NamedTuple):
     S_restore_target: object = None    # jnp.ndarray | None  [PSU]
     q_solar: object = None             # jnp.ndarray | None  [W/m²] (penetrative)
     S_restore_piston: object = None    # jnp.ndarray | None  [m/s] (per-cell SSS piston)
+    taum: object = None                # jnp.ndarray | None  [Pa] surface stress
+                                       # MODULUS override for the TKE surface
+                                       # input (NEMO taum channel — e.g. the
+                                       # DINO usrdef x1.3 westerly boost that
+                                       # feeds TKE but NOT the momentum
+                                       # stress).  None -> |(tau_x, tau_y)|.
 
 
 class OceanConfig(NamedTuple):
@@ -462,6 +468,25 @@ class LatLonCGridOceanState(NamedTuple):
     dpsi_prev: object = None
     dpsin: object = None
     dpsin_prev: object = None
+    # Cross-window barotropic AB3/AM4 substep histories for
+    # barotropic_time_filter == "nemo_ab3am4" (NEMO dynspg_ts nn_bt_flt=3):
+    # 6-tuple of 2-D arrays in DEVIATION form — (U_f-U_b, U_f-U_bb, V_f-V_b,
+    # V_f-V_bb, eta_f-eta_b, eta_f-eta_bb), the last two substep values of
+    # the previous window relative to its final value (NEMO's persistent
+    # ubb_e/ub_e/vbb_e/vb_e/sshbb_e/sshb_e, written to NEMO's restart).
+    # Deviation form because NEMO re-imposes the stp2d barotropic mean on the
+    # 3D velocity after every stage (stprk3_stg.F90:440) so its raw histories
+    # never see a window-boundary jump; legoESM's post-solve implicit vmix
+    # shifts the depth mean, and raw carried values would feed that jump into
+    # the AB3 extrapolation each window (see _run_substep_loop).
+    # None (default) ⇒ cold start: the barotropic solver applies NEMO's
+    # ll_init ramp and POPULATES this field; afterwards each window continues
+    # the AB3 series across the window boundary (dynspg_ts.F90:200-226).
+    # Same None-seeding pattern as the prognostic ``tke`` field. NB: cannot
+    # be pre-seeded with zeros for lax.scan (zeros read as "continuation with
+    # equal histories", silently skipping the cold-start ramp) — nemo_ab3am4
+    # runs are step-1-eager, then scan.
+    bt_hist: object = None
 
 
 class SurfaceTracerForcing(NamedTuple):
@@ -742,7 +767,7 @@ class BarotropicConfig(NamedTuple):
     barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
     bebt: float = 0.2               # Semi-implicit barotropic PGF [0,1]. 0=forward-backward, 0.2=MOM6 default.
     maxvel_barotropic: float = 0.0  # Velocity clipping [m/s]. 0=disabled. MOM6 uses 6.0.
-    barotropic_time_filter: str = "cosine"  # "box", "cosine", or "power_law" (SM2005 ROMS/MOM6/Oceananigans extended-window filter; damps the 2dx barotropic Coriolis null mode)
+    barotropic_time_filter: str = "cosine"  # "box", "cosine", "power_law" (SM2005 ROMS/MOM6/Oceananigans extended-window filter; damps the 2dx barotropic Coriolis null mode), or "nemo_boxcar_centred" (dynspg_ts ln_bt_fw=F + nn_bt_flt=1: boxcar width n centred at t+dt, ~1.5n substeps)
     differentiable_barotropic: bool = False
     # SOTA-local split-explicit barotropic (MOM6/MPAS-Ocean style): when True the
     # per-substep eta-floor clamp is LOCAL (jnp.maximum, NO allreduce) and the
@@ -760,6 +785,16 @@ class BarotropicConfig(NamedTuple):
     # per-substep) global mass correction is the SOTA-standard approximation
     # (loses per-substep far-field sea-level compensation).  Default False.
     barotropic_local_subcycle_clamp: bool = False
+    # NEMO RK3 per-stage barotropic-mean IMPOSITION (stprk3_stg.F90:440 zub
+    # correction): after the implicit vertical solve, replace the 3D
+    # velocity's depth mean with the barotropic (split-explicit) solution —
+    # u += (U_bar_solve − depth_mean(u))·mask, uniformly over the column.
+    # NEMO does this after EVERY stage, so its barotropic mode is always the
+    # heavily-filtered stp2d solution; without it, implicit vmix + bottom
+    # drag shift the depth mean after the barotropic solve and that shifted
+    # mean carries unfiltered divergence noise (depth-uniform w noise).
+    # Default False: bit-identical legacy behaviour.
+    nemo_stage_mean_imposition: bool = False
     # AB2 time-centering of the barotropic slow forcing F_slow (matches the
     # Oceananigans split-explicit Gᵁ = AB2-extrapolated depth-integral of the 3D
     # tendency, vs legoESM's default current-time depth-mean).  Investigated for
@@ -1168,7 +1203,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     # False keeps the legacy raw-flux behaviour bit-exact. Volume is already
     # conserved separately via ``fix_eta_drift``.
     normalize_freshwater: bool = False
-    tracer_advection: str = "tvd"  # "upwind", "centered" (unlimited 2nd-order, Veros adv_flux_2nd), "tvd" (Van Leer), "superbee" (Sweby/Veros), "ppm_fct", "ppm", "dst3", "dst3_multidim", "som", "weno5", "weno7"
+    tracer_advection: str = "tvd"  # "upwind", "centered" (unlimited 2nd-order, Veros adv_flux_2nd), "tvd" (Van Leer), "superbee" (Sweby/Veros), "ppm_fct", "fct2" (NEMO traadv_fct 2nd/2nd), "ppm", "dst3", "dst3_multidim", "som", "weno5", "weno7"
     gm_redi: object = None         # GMRediConfig or None; enables GM/Redi lateral mixing
     physics: object = None
     eos: str = "wright"
@@ -1244,6 +1279,21 @@ class LatLonCGridOceanConfig(NamedTuple):
     # cases): the q-form is retained by default because it conserves potential enstrophy
     # on partial-cell topography (AL81 triad; real ETOPO). False (default) = q-form.
     vortcor_reconstruct_zeta: bool = False
+    # Vector-invariant vorticity flux scheme (relative + optionally planetary).
+    #   "al81" (default) — Arakawa-Lamb 1981 / EEN 12-point triad
+    #     (``pv_flux_al81_partial_cell``): energy + potential-enstrophy
+    #     conserving, robust on partial-cell ETOPO.  Planetary Coriolis handled
+    #     separately (matsuno_split / explicit_ab2).
+    #   "ene" — NEMO ``vor_ene`` Sadourny-1975 2-point ENERGY-conserving form
+    #     (``pv_flux_ene``, NEMO ``ln_dynvor_ene``, the GYRE default). Selects
+    #     ENE for the RELATIVE-vorticity flux stencil ONLY (wired with
+    #     ``f_vtx=None``); the planetary Coriolis is NOT routed here — it stays in
+    #     the separate path (``coriolis_cgrid`` / matsuno_split / explicit_ab2),
+    #     which is byte-identical to ENE-planetary on a uniform-metric grid.
+    #     ``pv_flux_ene`` CAN fold planetary f into the same ``q=(f+ζ)/h`` operator
+    #     (pass ``f_vtx``), but that is not the wired default. NEMO oracle fidelity.
+    #     Dispatched in ``_bc_pv_flux``; an unknown value raises ValueError there.
+    vorticity_scheme: str = "al81"
     # WENO vertical momentum advection of the FULL velocity (matches Oceananigans, which
     # advects the full horizontal momentum vertically) instead of legoESM's default
     # baroclinic PERTURBATION u'=u−U_bar. The two differ by the flux-form redistribution
@@ -1281,6 +1331,22 @@ class LatLonCGridOceanConfig(NamedTuple):
     # docs/ocean/experiments/density_jacobian_pgf_plan.md.  Pure-z*
     # runs ignore this field (the existing path is identical).
     pgf_scheme: str = "adcroft"
+    # Vertical quadrature of the baroclinic pressure anomaly p'.
+    # "cell_integral" (default, bit-identical legacy): half-cell cumsum
+    # using the cell-centre ρ' over each cell.  "nemo_trapezoid": the
+    # NEMO dynhpg recurrence — trapezoid between cell centres on the
+    # w-spacing e3w(k) = (dz(k)+dz(k-1))/2 with surface e3w(1)=dz(1)
+    # (DINO L1 exactness; the two agree on uniform grids and differ by
+    # (g/4)·Δdz·Δρ' per interface on stretched levels).
+    pgf_quadrature: str = "cell_integral"
+    # Depth the EOS pressure term sees.  "insitu" (default, bit-identical):
+    # the in-situ hydrostatic pressure integral p=g·Σρ·dz — recovers depth
+    # ~(ρ̄/ρ0)·gdept (a ~0.5% stretch).  "geometric": feed p=ρ0·g·gdept from
+    # the coordinate's geometric T-depth ladder (z_coord.t_depth_ref, NEMO
+    # gdept_1d) so the EOS reconstructs gdept exactly — matches NEMO
+    # eos_insitu.  Only the NEMO-fidelity path selects "geometric"; requires
+    # z_coord to carry t_depth_ref and eos rho0 == config.rho_0 (auto-wired).
+    eos_depth: str = "insitu"
     # Tracer time integration for the flux-form advection step.
     # "euler" (default): forward Euler (1st-order).
     # "ab2": Adams-Bashforth 2 with stabilization (MITgcm convention).
@@ -1431,6 +1497,17 @@ class LatLonCGridOceanConfig(NamedTuple):
     # is placed); rejected otherwise at config validation. Default False ⇒
     # current EXPLICIT surface-forcing placement ⇒ BIT-IDENTICAL.
     surface_forcing_implicit: bool = False
+    # NEMO dynzdf-style IMPLICIT wind-stress deposition: withhold the explicit
+    # top-cell kick (stage-10b') and instead (a) add tau/(rho0 dz0)*dt_mom to
+    # the top cell of the implicit vertical momentum solve's RHS (the stress
+    # deposits smoothly over the Ekman layer WITHIN the solve, no impulsive
+    # ~0.1 m/s per-step surface kick at dt=14400 — a grid-scale w-noise
+    # source, plan §G), and (b) add the depth-mean tau/(rho0 H) to the
+    # barotropic F_slow (NEMO stp2d's explicit wind term). The depth mean the
+    # solve deposits is then re-imposed to the barotropic solution by
+    # barotropic.nemo_stage_mean_imposition (stprk3_stg:440) — REQUIRED with
+    # this flag (validated at model init). Default False: bit-identical.
+    surface_stress_implicit: bool = False
 
     # --- Adaptive-implicit vertical momentum advection ---
     # (Shchepetkin 2015 / NEMO ``ln_zad_Aimp``).  Appended at the end of
@@ -1562,6 +1639,27 @@ class LatLonCGridOceanConfig(NamedTuple):
     # docs/ocean/fidelity/mitgcm_gyre_energy_conservation.md).  On an f-plane the
     # two forms agree.  Applies to matsuno_split + implicit_cn/rigid_lid.
     coriolis_energy_conserving: bool = False
+    # Barotropic-mode Coriolis treatment under coriolis_scheme="explicit_ab2"
+    # with the explicit_substep solver:
+    #   "frozen" (default) — f×U_bar enters the subcycle only through the
+    #       frozen F_slow depth-mean (pre-step value, lagged by dt). No
+    #       in-substep f×U (avoids the C-grid 4-pt rotational null mode).
+    #   "live" — NEMO dynspg_ts structure (:296-300 + :689): the PRE-step 2D
+    #       barotropic Coriolis is SUBTRACTED from F_slow (leaving the
+    #       baroclinic-only forcing) and a LIVE f×U is integrated every
+    #       substep, so the barotropic mode holds geostrophic balance with
+    #       the evolving eta INSIDE the window. Same face stencils on both
+    #       sides => the cancellation is EXACT on a BETA-PLANE (linear f)
+    #       with FLAT full-cell bathymetry (the lateral 4-pt average and the
+    #       depth-mean commute only then); spherical f or partial cells leave
+    #       an O(dx^2)/topographic residual. CAUTION: re-enables the
+    #       in-substep C-grid 4-pt Coriolis rotational null mode — validated
+    #       only for the laminar beta-plane gyre, NOT for eddying/turbulent
+    #       regimes. Requires coriolis_scheme="explicit_ab2" +
+    #       explicit_substep, and is incompatible with
+    #       barotropic_slow_forcing_ab2 (the AB2-blended F_slow Coriolis
+    #       would leave a transient residual).
+    barotropic_coriolis_split: str = "frozen"
 
     # --- AB2 extrapolation scope (Veros-faithful dissipative placement) ---
     # Selects WHICH explicit tendencies the AB2 outer integrator extrapolates:
@@ -1622,6 +1720,14 @@ class LatLonCGridOceanConfig(NamedTuple):
     # column-integral salt tendency is unchanged (conservation identical);
     # only the vertical distribution moves.  0 = legacy top-cell (bit-exact).
     runoff_depth_spread_m: float = 0.0
+    # NEMO ln_rnf_depth_ini per-cell spread-depth MAP [m] (array or None):
+    # depth proportional to the local climatological runoff maximum
+    # (h = rn_dep_max·rnf_max/rn_rnf_max, floor 1 m) so small Arctic rivers
+    # stay near-surface while the Amazon spreads to 150 m — a flat
+    # runoff_depth_spread_m leaves shelf river plumes several PSU too
+    # salty.  Build with forcing.runoff_depth.nemo_runoff_depth_map;
+    # mutually exclusive with a nonzero runoff_depth_spread_m (validated).
+    runoff_depth_spread_map: object = None
     # --- Implicit (weight-1.0 pre-vmix) sponge placement (EXT-N2) -----------
     # Apply the SPONGE tracer relaxation (``SpongeForcing`` gamma·(ref − q))
     # at weight 1.0 inside the backward-Euler vertical-mixing solve instead of
@@ -1705,6 +1811,42 @@ class LatLonCGridOceanConfig(NamedTuple):
     # resolved biharmonic/Leith dissipation. Appended at the NamedTuple tail so
     # positional construction for legacy callers is preserved.
     backscatter: object = None   # BackscatterConfig or None
+    # --- Prescribed-flow science lever (vertical-physics isolation) ---------
+    # Pin the CIRCULATION (u, v, eta) each step so T/S evolve WITHOUT
+    # circulation feedback — isolating where vertical-structure differences
+    # (vs e.g. NEMO) originate.  Values (validated at model construction;
+    # unknown -> ValueError):
+    #   None      (default) — normal prognostic flow; the lever is a STATIC
+    #             Python gate, so the traced graph is byte-identical.
+    #   "zero"    — advecting velocities for the tracer step are ZERO (the
+    #             tracer mass fluxes and the continuity-diagnosed w vanish; no
+    #             advection at all) and the returned u/v/eta are zeros: pure
+    #             column physics (vertical mixing, convection, penetrating SW,
+    #             surface fluxes, virtual salt, restoring) on the full grid.
+    #   "frozen"  — tracers are advected by the step-ENTRY u/v (the held
+    #             flow); the returned u/v/eta are the entry values exactly, so
+    #             the flow never evolves (no external reference state needed).
+    # In both modes the momentum/barotropic solves still RUN (their T/S/TKE
+    # couplings — e.g. TKE shear production — see the prescribed flow, which
+    # is the intended physics) but their momentum result is DISCARDED by the
+    # pin, and the outer-AB2 momentum carries u_incr_prev/v_incr_prev (plus
+    # F_slow_{u,v}_prev when barotropic_slow_forcing_ab2) are stored as ZEROS
+    # so discarded-momentum history is never re-injected.  Under the inner
+    # tracer AB2 (tracer_time_integrator="ab2") the ADVECTIVE flux-div
+    # extrapolation is disabled (the current pinned flux-div is used
+    # directly and stored as the carry — zeros for "zero"), so a pre-lever
+    # T/S_flux_div_prev never leaks stale advection.  Implemented for
+    # the forward_euler and ab2 outer integrators; REJECTED at construction
+    # with barotropic_solver="implicit_unsplit" (that path advects tracers
+    # inside the tendency, not via the shared mass-flux block) and with any
+    # parameterized ADVECTIVE tracer transport that bypasses the pinned
+    # mass-flux block: GM/Redi — model-level ``gm_redi`` (incl. the
+    # prognostic-EKE closure riding on it) or the physics pipeline's
+    # ``lateral_mixing.scheme="gm_redi"`` — and Fox-Kemper MLE
+    # (``physics.mle``).  ``ew_cyclic_overlap`` slaves TRACERS only under
+    # the lever (it runs after the final re-pin).  T/S column budgets are
+    # unchanged except through the (zeroed/held) advection.
+    prescribed_flow: str | None = None
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

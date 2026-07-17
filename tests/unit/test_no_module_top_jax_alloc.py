@@ -307,8 +307,8 @@ _LAZY_PROTECTED_MODULES = [
     # jax.Array pattern at module top will fire this test.
     "legoesm.parallel.voronoi_partition",
     "legoesm.parallel.mesh",
-    "legoesm.atmosphere.dynamics.primitive_eq_cdgrid",
-    "legoesm.atmosphere.dynamics.compressible_euler",
+    "legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid",
+    "legoesm.atmosphere.dynamics.gcm.compressible_euler",
     "legoesm.ml.sfno",
 ]
 

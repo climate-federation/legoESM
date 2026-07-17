@@ -28,6 +28,42 @@ from pathlib import Path
 sys.stdout.reconfigure(line_buffering=True)
 
 import jax
+
+
+def _spectral_selected(argv):
+    """True when the CLI selects a spectral/Gaussian grid (``--grid-type
+    gaussian``, ``--discretization spectral``, or any ``--truncation``).
+
+    The spherical-harmonic transforms REQUIRE float64 — ``create_gaussian_grid``
+    raises otherwise — so the driver must enable x64 for these before JAX
+    initializes. Scans argv by exact option/value (not substring) so an output
+    path containing "spectral" cannot trip it."""
+    for i, a in enumerate(argv):
+        if a == "--truncation" or a.startswith("--truncation="):
+            return True
+        if a in ("--grid-type=gaussian", "--discretization=spectral"):
+            return True
+        if a in ("--grid-type", "--discretization") and i + 1 < len(argv) \
+                and argv[i + 1] in ("gaussian", "spectral"):
+            return True
+    return False
+
+
+# Auto-enable float64 for spectral grids so a naive ``--grid-type gaussian``
+# does not hard-crash (the transforms reject x32); other grids keep the caller's
+# precision (float32 default). Must run before any array op — jnp is imported
+# below, after this. A one-line notice keeps the coercion non-silent.
+# Gated on ``__name__ == "__main__"`` (true from the top when run as a script,
+# ``python run_rce.py …``) so a bare ``import run_rce`` NEVER flips the global
+# x64 flag off the importer's argv (parser is ``allow_abbrev=False``, so only the
+# full option spellings the sniff checks are valid). The argparse layer still
+# validates the actual flags; this is only the precisely-needed early bootstrap.
+if __name__ == "__main__" and _spectral_selected(sys.argv[1:]) \
+        and not jax.config.jax_enable_x64:
+    jax.config.update("jax_enable_x64", True)
+    print("[run_rce] spectral grid selected -> auto-enabled JAX_ENABLE_X64 "
+          "(spherical-harmonic transforms require float64)", flush=True)
+
 import jax.numpy as jnp
 import numpy as np
 
@@ -323,20 +359,20 @@ def main():
     # Initial atmospheric state (isothermal 280 K, at rest)
     # ---------------------------------------------------------------
     if grid_type == "cubed_sphere":
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
         state = held_suarez_init(grid, sigma, T_init=280.0)
     elif grid_type == "voronoi":
-        from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
         state = held_suarez_init_mpas(grid, sigma, T_init=280.0)
     elif grid_type == "gaussian":
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             isothermal_rest_state_spectral,
         )
         state = isothermal_rest_state_spectral(
             grid, sigma, T_init=280.0, perturbation_amplitude=0.5,
         )
     else:
-        from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
         state = held_suarez_init_latlon(grid, sigma, T_init=280.0)
 
     # Grid-specific adapters that bridge the differing state layouts
@@ -347,7 +383,7 @@ def main():
     # applies the per-level Rayleigh decay; ``is_finite`` powers the
     # blowup detector.
     if grid_type == "gaussian":
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             spectral_pe_to_grid,
         )
         from legoesm.grids.gaussian import sh_analysis_3d

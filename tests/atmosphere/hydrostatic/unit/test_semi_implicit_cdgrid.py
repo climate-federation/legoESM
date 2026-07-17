@@ -1,7 +1,7 @@
 """Phase 3 tests for the Hoskins–Simmons FV3 D-grid implicit solver.
 
 Pins down four invariants of the Phase-3 implementation in
-``src/legoesm/atmosphere/dynamics/semi_implicit_cdgrid.py``:
+``src/legoesm/atmosphere/dynamics/gcm/semi_implicit_cdgrid.py``:
 
 1. The cubed-sphere ``cdgrid_scalar_laplacian`` is FV-adjoint-
    symmetric and negative semi-definite under the area-weighted
@@ -30,7 +30,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.dynamics.semi_implicit_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.semi_implicit_cdgrid import (
     adjoint_residual_norm,
     cdgrid_scalar_laplacian,
     cg_helmholtz_solve,
@@ -335,13 +335,13 @@ class TestStepFV3PCGFallback:
         un-converged branch deterministically without relying on
         a pathological coefficient."""
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationConfig,
             CDGridPrimitiveEquationModel,
             FV3HydrostaticState,
         )
         from legoesm.core.field import Field
-        from legoesm.atmosphere.dynamics import semi_implicit_cdgrid as _scd
+        from legoesm.atmosphere.dynamics.gcm import semi_implicit_cdgrid as _scd
 
         grid = create_cubed_sphere(8)
         nlev = 6
@@ -413,7 +413,7 @@ class TestStepFV3PCGFallback:
         and ``p_s`` is non-trivially modified (i.e. the implicit
         Helmholtz update actually ran)."""
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationConfig,
             CDGridPrimitiveEquationModel,
             FV3HydrostaticState,
@@ -488,7 +488,7 @@ class TestImplicitStabilityHeadroom:
     that the Phase-3 solver buys for the production AMIP path."""
 
     def _build_state(self, grid, sigma, n, nlev):
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             FV3HydrostaticState,
         )
         from legoesm.core.field import Field
@@ -515,7 +515,7 @@ class TestImplicitStabilityHeadroom:
         (CFL bound is 0.5).  ``p_s`` should diverge to non-finite
         values within a handful of steps."""
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationConfig,
             CDGridPrimitiveEquationModel,
         )
@@ -553,7 +553,7 @@ class TestImplicitStabilityHeadroom:
         the implicit CG path remains stable — ``p_s`` finite and
         within physical bounds for at least 20 steps."""
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationConfig,
             CDGridPrimitiveEquationModel,
         )

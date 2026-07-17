@@ -933,22 +933,22 @@ def _build_physics_fn(physics_level: str, grid_type: str):
         return None
 
     if grid_type == "spectral":
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing_spectral,
         )
         return held_suarez_forcing_spectral
     elif grid_type == "latlon":
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing_latlon,
         )
         return held_suarez_forcing_latlon
     elif grid_type == "icosahedral":
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing_mpas,
         )
         return held_suarez_forcing_mpas
     else:  # cubed-sphere
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing,
         )
         return held_suarez_forcing
@@ -967,7 +967,7 @@ def _build_moist_physics_fn(grid_type: str, dt: float):
     Raises ValueError on an unknown grid (dispatch hardening — a silent
     ``None`` would benchmark dycore-only under a 'moist' label).
     """
-    from legoesm.atmosphere.kessler_forcing import (
+    from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
         make_kessler_forcing_cube,
         make_kessler_forcing_latlon,
         make_kessler_forcing_mpas,
@@ -1485,7 +1485,7 @@ def run_benchmark(
 
     if grid_type == "spectral":
         from legoesm.grids.gaussian import create_gaussian_grid
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPrimitiveEquationModel,
             SpectralPEConfig,
         )
@@ -1509,7 +1509,7 @@ def run_benchmark(
         dev_config = create_level_mesh(n_devices=n_gpus)
     elif grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel,
             MPASPrimitiveEquationConfig,
         )
@@ -1577,7 +1577,7 @@ def run_benchmark(
         # grid=latlon/discretization=finite_volume.)
         from legoesm import constants  # lazy: see top-of-file note on JAX init order
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationModel,
             CGridLatLonPrimitiveEquationConfig,
         )
@@ -1643,7 +1643,7 @@ def run_benchmark(
     else:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel,
             CDGridPrimitiveEquationConfig,
             hydrostatic_to_fv3,
@@ -1737,7 +1737,7 @@ def run_benchmark(
         # raw-array C-grid CGridLatLonHydrostaticState.  Convert on the GLOBAL
         # grid first — the cell->face v-wind interpolation needs the full
         # latitude column — then slice to the band.
-        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             hydrostatic_to_cgrid,
         )
         from legoesm.parallel.latlon_mpi import scatter_state_latlon

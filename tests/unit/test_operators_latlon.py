@@ -2,6 +2,7 @@
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from legoesm.core.field import Field
@@ -22,7 +23,10 @@ from legoesm.core.operators_latlon_3d import (
     divergence_3d,
     hyperdiffusion_3d,
 )
-from legoesm.core.operators_fv_latlon import fv_scalar_advection_latlon
+from legoesm.core.operators_fv_latlon import (
+    cgrid_fv_flux_divergence_latlon,
+    fv_scalar_advection_latlon,
+)
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.grids.halo_latlon import pad_halo_latlon
 from legoesm.grids.polar_filter import (
@@ -285,6 +289,83 @@ class TestOperators3D:
         assert jnp.all(jnp.isfinite(divergence_3d(u, v, grid)))
         assert jnp.all(jnp.isfinite(gradient_x_3d(u, grid)))
         assert jnp.all(jnp.isfinite(gradient_y_3d(u, grid)))
+
+
+class TestFVVFaceMetricBandCorrect:
+    """The FV operators consume ``grid.cos_lat_v`` — the band-correct
+    v-face metric — instead of recomputing v-face latitudes with
+    hard-coded ±π/2 endpoints (which mislabelled interior MPI band cuts
+    as poles and collapsed their face length to ~1e-10)."""
+
+    def test_cos_lat_v_matches_legacy_pole_padded_formula(self):
+        """Serial bit-identity of the metric switch on the GLOBAL grid.
+
+        The legacy operator-internal formula (cell-centre midpoints
+        padded with exact ±π/2, cos, 1e-10 floor) and the grid-carried
+        ``cos_lat_v`` (midpoints + half-cell endpoint extrapolation,
+        abs-cos, same floor) are BIT-EQUAL in float64: interior faces
+        are the same midpoints, and both endpoint variants land on the
+        1e-10 clamp at the true poles.
+        """
+        if not jax.config.jax_enable_x64:
+            pytest.skip("bit-identity is pinned for the float64 pipeline")
+        for n_lat, n_lon in ((16, 32), (48, 96)):
+            g = create_latlon_grid(n_lat, n_lon, dtype=jnp.float64)
+            lat = g.lat
+            legacy = jnp.maximum(
+                jnp.cos(jnp.pad(
+                    0.5 * (lat[:-1] + lat[1:]), (1, 1),
+                    constant_values=(-jnp.pi / 2, jnp.pi / 2),
+                )),
+                1e-10,
+            )
+            np.testing.assert_array_equal(
+                np.asarray(legacy), np.asarray(g.cos_lat_v),
+                err_msg=f"cos_lat_v mismatch on global {n_lat}x{n_lon}",
+            )
+
+    def test_band_subgrid_cut_rows_match_global(self):
+        """Interior MPI band reproduces the full-grid rows BIT-EXACTLY.
+
+        Constant q makes the PPM face values independent of the
+        (band-local) halo content, so the only term that can differ
+        between the band and the corresponding global rows is the
+        v-face metric.  With the legacy hard-coded ±π/2 endpoints the
+        interior cut faces collapsed to cos≈1e-10 and this comparison
+        failed at max|Δ|≈5e-3; with ``grid.cos_lat_v`` (pre-sliced by
+        ``slice_latlon_grid_to_band``) it is exact.
+        """
+        from legoesm.parallel.latlon_mpi import (
+            make_latlon_band_layout,
+            slice_latlon_grid_to_band,
+        )
+        n_lat, n_lon = 16, 32
+        g = create_latlon_grid(n_lat, n_lon)
+        layout = make_latlon_band_layout(1, 4, n_lat, n_lon)  # interior band
+        band = slice_latlon_grid_to_band(
+            g, layout, skip_total_area_reduce=True)
+        s, e = layout.lat_start, layout.lat_end
+        # Sanity: both band endpoints are interior cuts, not poles —
+        # their faces must carry real (uncollapsed) cos(lat_v).
+        assert float(band.cos_lat_v[0]) > 0.5
+        assert float(band.cos_lat_v[-1]) > 0.5
+
+        rng = np.random.default_rng(7)
+        dt = g.lat.dtype
+        q = jnp.full((n_lat, n_lon), 300.0, dtype=dt)
+        u_face = jnp.asarray(
+            rng.normal(0.0, 10.0, (n_lat, n_lon + 1)), dtype=dt)
+        v_face = jnp.asarray(
+            rng.normal(0.0, 10.0, (n_lat + 1, n_lon)), dtype=dt)
+
+        out_global = cgrid_fv_flux_divergence_latlon(q, u_face, v_face, g)
+        out_band = cgrid_fv_flux_divergence_latlon(
+            q[s:e], u_face[s:e], v_face[s:e + 1], band)
+        np.testing.assert_array_equal(
+            np.asarray(out_band), np.asarray(out_global[s:e]),
+            err_msg="band rows diverged from global — v-face metric "
+                    "collapsed at an interior cut",
+        )
 
 
 class TestFVScalarAdvectionLatLon:

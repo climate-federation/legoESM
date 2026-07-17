@@ -23,8 +23,8 @@ import pytest
 
 pytest.importorskip("mpi4py")
 pytest.importorskip("mpi4jax")
-from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig  # noqa: E402
-from legoesm.atmosphere.dynamics.les_regime import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig  # noqa: E402
+from legoesm.atmosphere.dynamics.les.les_regime import (  # noqa: E402
     LESRegimeConfig,
     LESResolutionConfig,
 )
@@ -56,7 +56,7 @@ _REGIME = LESRegimeConfig(shallow=_RES, deep=_RES)
 def _mock_run_les_sheared(setup):
     """A mock plane-LES with synthetic w/θ'/tracers + a mean-wind shear → a VALID
     clubb_coefficient diagnosis (mirrors the single-process MPAS capstone mock)."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import make_rest_state
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import make_rest_state
     grid, hc = setup.grid, setup.height_coord
     state = make_rest_state(grid, hc, dtype=jnp.float64)
     ny, nx, nlev = grid.ny, grid.nx, hc.n_levels

@@ -13,14 +13,14 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     make_flat_plane_terrain_metric, make_rest_state,
     plane_compressible_euler_slow_tendencies,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane_halo import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane_halo import (
     plane_compressible_euler_slow_tendencies_halo,
 )
 from legoesm.grids.plane import create_plane_grid
@@ -361,7 +361,7 @@ def test_halo_equiv_smag_plus_vertical_theta_diff_plus_hyperdiff():
 def test_halo_uses_cached_f_pad():
     """Codex iter-3 perf: caller can pre-compute f_pad to skip per-step
     MPI exchange of static f_y. Bit-identical to non-cached path."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane_halo import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane_halo import (
         precompute_coriolis_halo,
     )
     grid, hc, tm, cfg, state, layout = _setup(use_coriolis=True)

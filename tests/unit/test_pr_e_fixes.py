@@ -25,7 +25,7 @@ def test_rce_surface_flux_defaults_reference_named_constants():
     signature literals); the composer defaults bind to them."""
     import inspect
 
-    from legoesm.atmosphere.dynamics import rce_surface_flux as m
+    from legoesm.atmosphere.dynamics.crm import rce_surface_flux as m
 
     assert m._RCEMIP1_C_H == 1.5e-3
     assert m._RCEMIP1_GUSTINESS_FLOOR_MS == 5.0

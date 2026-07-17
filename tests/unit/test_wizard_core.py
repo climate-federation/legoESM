@@ -103,8 +103,9 @@ def test_aimip_launchable_variants_subset(wc):
     # launchable ⊆ non-empty AIMIP_VARIANTS, each with a shipped overlay file.
     assert set(launch) <= {v for v in AIMIP_VARIANTS if v}
     assert "classical" in launch and "column_nn" in launch
-    # sfno_full's overlay ships only in the t106_headtohead suite, not the base.
-    assert "sfno_full" not in launch
+    # sfno_full's overlay now ships beside the base suite (full-atmosphere
+    # emulator rung of the ladder), so it is launchable from the wizard.
+    assert "sfno_full" in launch
 
 
 def test_amip_menus_subset_of_run_amip_parser(wc):
@@ -466,7 +467,12 @@ def test_build_aimip_no_smoke(wc):
     assert "--smoke" not in wc.build_plan(ans).run_cmd
 
 
-def test_build_aimip_rejects_unlaunchable_variant(wc):
+def test_build_aimip_rejects_unlaunchable_variant(wc, monkeypatch):
+    # All shipped variants now have base-suite overlays, so simulate a variant
+    # whose overlay is missing (renamed/removed file) via the launchable list.
+    monkeypatch.setattr(
+        wc, "aimip_launchable_variants", lambda *a, **k: ["classical"],
+    )
     ans = {"objective": "train", "train_mode": "aimip", "aimip_variant": "sfno_full",
            "smoke": False, "backend": "cpu", "precision_bits": 64}
     with pytest.raises(ValueError):

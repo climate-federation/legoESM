@@ -36,13 +36,13 @@ from legoesm.atmosphere.physics import (
     RadiationConfig,
     TurbulenceConfig,
 )
-from legoesm.atmosphere.scm import (
+from legoesm.atmosphere.forcing.scm.scm import (
     SingleColumnModel,
     TIME_INTEGRATORS,
     _apply_tendencies,
     register_time_integrator,
 )
-from legoesm.atmosphere.scm_forcing import (
+from legoesm.atmosphere.forcing.scm.scm_forcing import (
     SCMForcing,
     add_tendencies,
     compute_forcing_tendencies,
@@ -399,7 +399,7 @@ def test_register_time_integrator_rejects_varargs():
 def test_register_time_integrator_accepts_pos_only():
     """Positional-only parameters (PEP 570) satisfy the contract."""
     def pos_only(state, phys, f, dt, t, /):
-        from legoesm.atmosphere.scm import _apply_tendencies
+        from legoesm.atmosphere.forcing.scm.scm import _apply_tendencies
         tend, phys_out = f(state, phys, t)
         return _apply_tendencies(state, tend, dt), phys_out
 
@@ -472,7 +472,7 @@ def test_coriolis_requires_v_field():
     state_no_v = state._replace(v=None)
 
     forcing = SCMForcing(f_c=1e-4, u_geo=lambda t: jnp.zeros(NLEV))
-    from legoesm.atmosphere.scm_forcing import validate_forcing_against_state
+    from legoesm.atmosphere.forcing.scm.scm_forcing import validate_forcing_against_state
     with pytest.raises(ValueError, match="f_c != 0"):
         validate_forcing_against_state(forcing, state_no_v)
 
@@ -829,7 +829,7 @@ def test_shared_physics_fn_radiation_hook_isolated_between_scms():
     """
     from legoesm.atmosphere.physics.combined import make_physics
     from legoesm.atmosphere.physics.physics_state import init_physics_state
-    from legoesm.atmosphere.scm import (
+    from legoesm.atmosphere.forcing.scm.scm import (
         make_column_state, make_scm_grid,
     )
     from legoesm.grids.vertical import create_sigma_coordinate
@@ -1064,7 +1064,7 @@ def test_direct_constructor_requires_physics_config_for_prescribed_fluxes():
     check can fire (or refuse construction)."""
     from legoesm.atmosphere.physics.combined import make_physics
     from legoesm.atmosphere.physics.physics_state import init_physics_state
-    from legoesm.atmosphere.scm import make_column_state, make_scm_grid
+    from legoesm.atmosphere.forcing.scm.scm import make_column_state, make_scm_grid
     from legoesm.grids.vertical import create_sigma_coordinate
     cfg = _no_physics_cfg()
     fn = make_physics(cfg, model_type="hydrostatic", dt=10.0)

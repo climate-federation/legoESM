@@ -2888,7 +2888,7 @@ def monotone_halo_clip_context(slack: float = 0.5):
     the duogrid-induced cube-edge θ′ variance ratio by ~65%
     when combined with iter-466's ``make_legoesm_nh_min_edge_
     config`` factory.  At smooth atmospheric ICs, the iter-553
-    ``make_fv3_faithful_nh_config`` factory alone gives 89.5%
+    ``make_fv3_component_fidelity_nh_config`` factory alone gives 89.5%
     reduction without needing this context.  Use this context
     when iters>2 boost is enabled (iter-562) for additional
     edge suppression.
@@ -2934,21 +2934,21 @@ def monotone_halo_clip_context(slack: float = 0.5):
     import functools
 
     scalar_targets = [
-        "legoesm.atmosphere.dynamics.compressible_euler_cdgrid."
+        "legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid."
         "_pad_halo_4d_module",
         "legoesm.core.operators_3d.pad_halo_4d",
         "legoesm.core.operators_cdgrid.pad_halo_4d",
         # FV3_3D iter 527: PE-side import aliases.
-        "legoesm.atmosphere.dynamics.primitive_eq_cdgrid."
+        "legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid."
         "_pad_halo_4d",
-        "legoesm.atmosphere.dynamics.primitive_eq_cdgrid."
+        "legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid."
         "_pad_halo_4d_module",
     ]
     vector_targets = [
         "legoesm.core.operators_cdgrid.pad_halo_vector_4d",
         "legoesm.core.operators_3d.pad_halo_vector_4d",
         # FV3_3D iter 527: PE-side import alias.
-        "legoesm.atmosphere.dynamics.primitive_eq_cdgrid."
+        "legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid."
         "pad_halo_vector_4d",
     ]
     pad_halo_3d_targets = [
@@ -2967,7 +2967,7 @@ def monotone_halo_clip_context(slack: float = 0.5):
         # via C-D coupling. NH residual leaks through this path.
         "legoesm.core.fv3_sw_core.pad_halo_vector",
         # FV3_3D iter 527: PE-side import alias.
-        "legoesm.atmosphere.dynamics.primitive_eq_cdgrid."
+        "legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid."
         "pad_halo_vector",
     ]
 

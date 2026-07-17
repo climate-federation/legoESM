@@ -42,6 +42,11 @@ class ScaleConfig(NamedTuple):
     # grid has no pole-cell CFL clamp).  Appended AFTER the original fields
     # so positional construction in existing tests stays valid.
     training_core: str = "latlon"
+    # #1047 ask a: training-window length [days] per train year. None = fall
+    # back to YAML ``n_training_days`` then 3 (the historical hardcoded value
+    # that data-starved the column MLP). --smoke still forces 1. Appended last
+    # so positional construction in existing tests stays valid.
+    n_days: int | None = None
 
 
 def _parse_hours(s):
@@ -106,6 +111,11 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
                         "Gaussian semi-implicit training core (#817 blocker 1: "
                         "bounded adjoint, no pole-cell dt clamp).")
     p.add_argument("--epochs", type=int, default=40, dest="n_epochs")
+    p.add_argument("--n-days", type=int, default=None, dest="n_days",
+                   help="Training-window length [days] per train year (#1047). "
+                        "Default None = YAML n_training_days, else 3. More days = "
+                        "more samples (the WB arm was data-starved at 3). --smoke "
+                        "forces 1.")
     p.add_argument("--multi-step-hours", default="6,12", dest="multi_step_hours")
     p.add_argument("--lr", type=float, default=3.0e-4)
     p.add_argument("--optimizer", default="adamw")
@@ -122,12 +132,14 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
         # decay_steps, which must be positive; a zero/negative epoch count
         # would make it non-positive.
         raise SystemExit(f"--epochs must be >= 1, got {a.n_epochs}")
+    if a.n_days is not None and a.n_days < 1:
+        raise SystemExit(f"--n-days must be >= 1, got {a.n_days}")
     return ScaleConfig(
         mode=a.mode, config_path=a.config, resolution_deg=a.resolution_deg,
         n_epochs=a.n_epochs, multi_step_hours=_parse_hours(a.multi_step_hours),
         lr=a.lr, optimizer=a.optimizer, grad_accum=a.grad_accum,
         out_dir=a.out_dir, resume=a.resume, eval_wb2=a.eval_wb2, smoke=a.smoke,
-        training_core=a.training_core,
+        training_core=a.training_core, n_days=a.n_days,
     )
 
 
@@ -154,26 +166,10 @@ def _check_resolution_matches_yaml(cfg: ScaleConfig, yml: dict) -> float:
 
 
 def _mpi_rank_size():
-    """(rank, num_processes) from MPI. RAISES if a multi-rank launcher is present
-    but mpi4py init fails -- otherwise every rank would silently train
-    independently (no cross-rank gradient average). Returns (0, 1) only when no
-    multi-rank launcher is detected."""
-    import os
-    launcher = 1
-    for v in ("SLURM_NTASKS", "PMI_SIZE", "OMPI_COMM_WORLD_SIZE", "MPI_LOCALNRANKS"):
-        val = os.environ.get(v, "")
-        if val.isdigit():
-            launcher = max(launcher, int(val))
-    try:
-        from mpi4py import MPI
-        comm = MPI.COMM_WORLD
-        return comm.Get_rank(), comm.Get_size()
-    except Exception as exc:
-        if launcher > 1:
-            raise RuntimeError(
-                f"multi-rank launcher detected (size={launcher}) but mpi4py init failed "
-                f"({exc}); gradients would NOT be averaged across ranks -- aborting") from exc
-        return 0, 1
+    """(rank, num_processes) — shared impl in legoesm.training.data_parallel
+    (one copy for both this driver and the AIMIP chunked DP loop)."""
+    from legoesm.training.data_parallel import mpi_rank_size
+    return mpi_rank_size()
 
 
 def main(argv=None):

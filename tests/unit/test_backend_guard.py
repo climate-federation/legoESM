@@ -184,7 +184,7 @@ class TestSpectralSWModelGuard:
         # bound reference pointing at the real CPU backend).
         with patch(_RT_GET_BACKEND, return_value="mps"), \
                 patch("legoesm.parallel.metal.get_backend", return_value="mps"):
-            from legoesm.atmosphere.dynamics.spectral_sw import (
+            from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
                 SpectralShallowWaterModel,
             )
             model = SpectralShallowWaterModel(dummy_grid)
@@ -193,7 +193,7 @@ class TestSpectralSWModelGuard:
     def test_cpu_allows_model_creation(self):
         _require_x64()
         with patch(_RT_GET_BACKEND, return_value="cpu"):
-            from legoesm.atmosphere.dynamics.spectral_sw import (
+            from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
                 SpectralShallowWaterModel,
             )
             mock_grid = MagicMock()

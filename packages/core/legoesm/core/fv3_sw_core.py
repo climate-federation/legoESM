@@ -1,7 +1,7 @@
 """FV3-inspired SW forward-backward core (EXPERIMENTAL).
 
 GFDL sw_core.F90 port (c_sw 79-488, d2a2c_vect 3006-3345). Covariant velocity + sin_sg flux scaling.
-Use fv3_sw_tendencies (operators_cdgrid.py) or fv3_csw_tendencies for production.
+Use fv3_sw_tendencies (operators_cdgrid.py) for production.
 Lin 2004; Mouallem, Harris & Chen 2023.
 
 Wind conventions (2026-07-10 audit): the MODEL's prognostic D winds are an
@@ -31,10 +31,6 @@ from legoesm.core.fv_tp_2d import (
     transport_step,
 )
 from legoesm.core.operators_cdgrid import (
-    cgrid_divergence,
-    cgrid_mass_flux_divergence,
-    fv3_cc2c,
-    fv3_d2cc,
     interp_center_to_corner_a2b_ord4,
     pad_halo_auto,
 )
@@ -1710,7 +1706,7 @@ def d2a2c_vect_4d(u_d, v_d, cdgrid):
 
 
 # ==============================================================================
-# Shared FV3 c_sw helpers (used by both _c_sw and fv3_csw_tendencies)
+# Shared FV3 c_sw helpers (used by _c_sw)
 # ==============================================================================
 
 
@@ -2057,9 +2053,8 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
     the same case 120 days clean with healthy vortex decay — hence the
     default stays False (truth tier over oracle tier).  The in-loop
     fill_corners is gated `.not. duogrid`, so no corner rotation is
-    involved.  Only the EXPERIMENTAL FB chain (fv3_fb_sw_step) and the
-    default-OFF `use_fv3_dsw5_corner_damping` post-RK3 hook call this;
-    production (fv3_sw_tendencies) does not.  Update the
+    involved.  Only the EXPERIMENTAL FB chain (fv3_fb_sw_step)
+    calls this; production (fv3_sw_tendencies) does not.  Update the
     test_d_sw5_iterated_laplacian_halo_gap_documentation_marker test
     together with this note.
     """
@@ -2248,7 +2243,6 @@ def _corner_vorticity(uc, vc, cdgrid, use_duogrid, u_d=None, v_d=None):
     reconstruction — 2026-07-10 audit: on W2/C36 this cuts the corner
     vort_abs seam error 15.7e-5 -> 0.7e-5 s^-1 (the reconstruction was the
     dominant remaining seam term after the covariant-entry conversion).
-    ``fv3_csw_tendencies`` (non-FB) does not pass them — path unchanged.
     """
     n = cdgrid.n
     fx_circ = uc * cdgrid.dxc    # (6, n+1, n)
@@ -2469,74 +2463,6 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     vc_new = vc - fx1 * vort_y + dke_y
 
     return h_star, uc_new, vc_new, ua, va
-
-
-# ==============================================================================
-# C-grid tendency for RK3 integration
-# ==============================================================================
-
-def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=constants.g,
-                       div_damp=0.0, hyperdiff_coeff=0.0):
-    """FV3 c_sw-style SW tendencies for RK3.
-
-    Bernoulli + vort flux at C-faces (same stagger → balance preserved); project SUM to D-edges.
-    """
-
-    # 1. d2a2c_vect (covariant)
-    ua, va, uc, vc, ut, vt = d2a2c_vect(u_d, v_d, cdgrid)
-
-    # 2. Mass transport via fv3_cc2c (physical face-normal)
-    u_cc, v_cc = fv3_d2cc(u_d, v_d, cdgrid)
-    uc_mass, vc_mass = fv3_cc2c(u_cc, v_cc, cdgrid)
-    dh_dt = cgrid_mass_flux_divergence(h, uc_mass, vc_mass, cdgrid)
-
-    # 3. KE from physical D-grid (avoids 1/sin² at face boundaries from contravariant)
-    dg = cdgrid.base.duogrid
-    use_duogrid = dg is not None and dg.ng >= 2
-    utmp_ke = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])
-    vtmp_ke = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])
-    ke = 0.5 * (utmp_ke**2 + vtmp_ke**2)
-    B = ke + g * (h + h_s)
-
-    # 4. Bernoulli gradient at C-faces
-    B_pad = pad_halo_auto(B, cdgrid)
-    dB_x = cdgrid.rdxc * (B_pad[:, :-1, 1:-1] - B_pad[:, 1:, 1:-1])
-    dB_y = cdgrid.rdyc * (B_pad[:, 1:-1, :-1] - B_pad[:, 1:-1, 1:])
-
-    # 5/6. Corner vorticity + vorticity flux at C-faces (FV3:378-480)
-    vort_abs = _corner_vorticity(uc, vc, cdgrid, use_duogrid)
-    fy1, vort_x, fx1, vort_y = _vorticity_flux(
-        v_d, u_d, uc, vc, vort_abs, cdgrid, use_duogrid)
-
-    # 7. TOTAL C-grid tendency
-    duc = fy1 * vort_x + dB_x
-    dvc = -fx1 * vort_y + dB_y
-
-    # 8. Div damping: SUBTRACT div_damp*ddiv_x (negated-gradient stencil; iter-57 audit found +sign anti-damps)
-    if div_damp > 0:
-        div_field = cgrid_divergence(uc, vc, cdgrid)
-        div_pad = pad_halo_auto(div_field, cdgrid)
-        ddiv_x = cdgrid.rdxc * (div_pad[:, :-1, 1:-1] - div_pad[:, 1:, 1:-1])
-        ddiv_y = cdgrid.rdyc * (div_pad[:, 1:-1, :-1] - div_pad[:, 1:-1, 1:])
-        duc = duc - div_damp * ddiv_x
-        dvc = dvc - div_damp * ddiv_y
-
-    # 9. Project total C-tendency → D-edges via cc-avg + vector halo (avoids edge-copy instability at ~2h)
-    grid = cdgrid.base
-    dg = grid.duogrid
-    offsets = None if dg is not None else grid.halo_interp_offsets
-    duc_cc = 0.5 * (duc[:, :-1, :] + duc[:, 1:, :])
-    dvc_cc = 0.5 * (dvc[:, :, :-1] + dvc[:, :, 1:])
-    duc_pad, dvc_pad = pad_halo_vector(
-        duc_cc, dvc_cc,
-        grid.cos_angle, grid.sin_angle,
-        grid.cos_angle_padded, grid.sin_angle_padded,
-        interp_offsets=offsets, duogrid=dg,
-    )
-    du_dt = 0.5 * (duc_pad[:, 1:-1, :-1] + duc_pad[:, 1:-1, 1:])   # (6, n, n+1)
-    dv_dt = 0.5 * (dvc_pad[:, :-1, 1:-1] + dvc_pad[:, 1:, 1:-1])   # (6, n+1, n)
-
-    return dh_dt, du_dt, dv_dt
 
 
 # ==============================================================================

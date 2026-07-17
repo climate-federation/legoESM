@@ -109,7 +109,7 @@ def test_pe_source_uses_vector_lift_not_scalar_stacked_uv():
     stacked ``(u, v)``.  Catches a silent revert of the iter-14 fix.
     """
     src = legoesm_source_path(
-        "atmosphere/dynamics/primitive_eq_cdgrid.py"
+        "atmosphere/dynamics/gcm/primitive_eq_cdgrid.py"
     ).read_text()
     # The three fixed sites must call the vector helper.
     assert src.count("center_to_dgrid_vector(") >= 3, (

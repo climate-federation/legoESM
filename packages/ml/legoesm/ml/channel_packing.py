@@ -6,9 +6,13 @@ unpack SFNO outputs back into state objects.
 
 Three packing schemes:
 - **Shallow Water (SW)**: 4 channels — vor, div, phi, phis
-- **Primitive Equations (PE 3D)**: 4*nlev + surface + forcings on
-  WeatherBench2 pressure levels
+- **Primitive Equations (PE 3D)**: 4*nlev + 2 surface channels on the
+  MODEL SIGMA LEVELS (no sigma→pressure interpolation is performed)
 - **Ocean**: 4*nlev + 2 surface — u, v, T, S at each level + eta, H_bathy
+
+``WB2_PRESSURE_LEVELS`` below is a DATA-side constant (default ERA5
+level selection for ``training/era5_to_state.py`` and
+``ml/data/era5_loader.py``); it plays no role in the packing itself.
 """
 
 from __future__ import annotations
@@ -18,8 +22,8 @@ from typing import NamedTuple, TYPE_CHECKING
 import jax.numpy as jnp
 
 if TYPE_CHECKING:
-    from legoesm.atmosphere.dynamics.spectral_sw import SpectralSWState
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+    from legoesm.atmosphere.dynamics.gcm.spectral_sw import SpectralSWState
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
 
 from legoesm.grids.gaussian import (
     GaussianGrid,
@@ -31,8 +35,8 @@ from legoesm.grids.gaussian import (
     sh_analysis_dmu_3d,
     uv_from_vordiv_3d,
 )
-from legoesm.atmosphere.dynamics.spectral_sw import SpectralSWState
-from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+from legoesm.atmosphere.dynamics.gcm.spectral_sw import SpectralSWState
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
 from legoesm.atmosphere.physics._shared import zero_like_tracers
 
 # WeatherBench2 standard pressure levels [hPa]
@@ -185,7 +189,9 @@ def pack_pe_state(
     grid : GaussianGrid
         Grid for SH transforms.
     sigma_coord : SigmaCoordinate, optional
-        For computing u, v from vor, div.
+        Unused; accepted for call-site compatibility (the PE dycore
+        bridges pass it positionally).  Channels are packed on the
+        model sigma levels directly.
 
     Returns
     -------
@@ -258,6 +264,11 @@ def unpack_pe_output(
     -------
     SpectralHydrostaticState
     """
+    if mode not in ("state_update", "tendencies"):
+        raise ValueError(
+            f"Unknown unpack mode: {mode!r}. "
+            f"Choose 'state_update' or 'tendencies'."
+        )
     nlev = state.T_hat.data.shape[-1]
     spec = PE3DChannelSpec(nlev=nlev)
 
@@ -301,13 +312,19 @@ def unpack_pe_output(
     # state's tracer pytree:
     #   * if input has q_v → emit q_v (the SFNO's predicted dq_v/dt
     #     in tendency mode, or new q_v in state-update mode)
-    #   * if input has additional tracer keys (q_c, q_r, ...) we don't
-    #     receive predictions for them, so we mirror them as zeros to
-    #     keep the pytree structure aligned for jax.tree.map
+    #   * additional tracer keys (q_c, q_i, q_r, ...) get no network
+    #     prediction.  In "tendencies" mode they are mirrored as ZEROS
+    #     (zero tendency = unchanged — correct, and keeps the pytree
+    #     structure aligned for jax.tree.map).  In "state_update" mode
+    #     the output IS the next state, so zeros would ERASE q_c/q_i;
+    #     carry the INPUT state's values through unchanged instead.
     #   * if input.tracers is None → output also None (legacy dry path)
     tracers_out = None
     if state.tracers is not None:
-        tracers_out = zero_like_tracers(state.tracers) or {}
+        if mode == "tendencies":
+            tracers_out = zero_like_tracers(state.tracers) or {}
+        else:  # state_update (mode validated at entry)
+            tracers_out = dict(state.tracers)
         if "q_v" in state.tracers:
             template = state.tracers["q_v"]
             if hasattr(template, "data") and hasattr(template, "replace"):

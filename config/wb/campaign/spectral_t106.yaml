@@ -1,0 +1,71 @@
+# WeatherBench 3-family forecast campaign — spectral T106 (Derecho competitive tier).
+#
+# Same shared AIMIP spectral stack + eval protocol as spectral_t63.yaml (read its
+# header); ONLY the grid resolution + capacity + epoch budget scale up. Use on
+# Derecho via scripts/cluster/derecho/run_wb_campaign.pbs with
+# WB_CAMPAIGN_CONFIG=config/wb/campaign/spectral_t106.yaml. Do NOT compare a T106
+# scorecard number to a T63 one and call the difference an effect — resolution is
+# a confound; each tier is self-consistent (CLAUDE.md controlled-comparison rule).
+
+grid: "gaussian"
+n_lat: 160
+n_lon: 320
+nlev: 32
+spectral:
+  n_max: 106
+  dt: 1200.0              # 86400/1200 = 72 steps/day; leads 24/72/120/240 h stay on-grid
+  semi_implicit: true
+  time_integrator: "ssp_rk3"
+  hyperdiff_coeff: 1.0e15
+  hyperdiff_order: 2
+  spectral_filter_order: 8
+  spectral_filter_strength: 0.01
+
+era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+cache_dir: ".cache/wb_campaign_era5_t106"
+train_years: [2015, 2016, 2017, 2018, 2019]
+eval_years: [2020]
+era5_cadence_hours: 6
+
+n_epochs: 24
+optimizer: "adamw"
+lr: 3.0e-4
+warmup_steps: 1000
+weight_decay: 1.0e-5
+grad_clip_norm: 1.0
+grad_accum: 1
+
+loss:
+  w_T: 1.0
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.3
+  w_ps: 0.3
+  w_bias_T: 100.0
+  w_bias_u: 1.0
+  w_bias_v: 1.0
+  w_bias_ps: 1.0
+  w_crps_T: 0.5
+  w_crps_u: 0.25
+  w_crps_v: 0.25
+  w_crps_q: 0.5
+  w_crps_ps: 0.15
+  w_spec_crps_T: 0.0
+  w_spec_crps_u: 0.0
+  w_spec_crps_v: 0.0
+  w_spec_crps_q: 0.0
+  multi_step_hours: [6, 12]
+  multi_step_weights: [1.0, 1.0]
+  level_weighting: "pressure"
+  normalize_by_scale: true
+  T_scale: 30.0
+  wind_scale: 20.0
+  q_scale: 5.0e-3
+  ps_scale: 1000.0
+
+neural_gcm:
+  nn_hidden: 384
+  nn_layers: 4
+sfno:
+  sfno_embed_dim: 384
+  sfno_n_blocks: 10

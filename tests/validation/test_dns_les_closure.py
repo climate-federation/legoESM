@@ -22,8 +22,8 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import CompressibleEulerConfig
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     PlaneCompressibleEulerModel,
     make_flat_plane_terrain_metric,
     make_rest_state,
@@ -42,7 +42,7 @@ def test_smagorinsky_stability_length_dosmagor():
     layers (N²≤0) it reproduces the default ``(Cs·Δ)²·|S|`` K_m bit-for-bit;
     in STABLE layers (N²>0) it can only REDUCE K_m (smix≤grd ⇒ K_m≤default);
     and the serial + halo kernels agree."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         _compute_smagorinsky_K_m_plane,
     )
     grid, hc, _ = _setup(nx=8, ny=8, nlev=20, dx=2000.0, LZ=20000.0)
@@ -211,7 +211,7 @@ def test_smagorinsky_delta_max_caps_coarse_grid_mixing_length():
     delta_max (SGS_TKE/sgs.f90:90 = 1000 m; tke_full.f90:42). For dx>delta_max
     (RCE dx=4 km) the capped K_m is smaller by (min(δ,dx)·min(δ,dy)/(dx·dy))^(2/3);
     for dx<=delta_max (GATE/LBA dx=1 km) it is UNCHANGED (backward-compatible)."""
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         _compute_smagorinsky_K_m_plane)
     nx, ny, nlev = 8, 8, 6
     rng = np.random.default_rng(0)

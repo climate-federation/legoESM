@@ -23,7 +23,7 @@ jax.config.update("jax_enable_x64", True)
 pytest.importorskip("mpi4py")
 from mpi4py import MPI  # noqa: E402
 
-from legoesm.atmosphere.dynamics.spectral_les_plane import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les.spectral_les_plane import (  # noqa: E402
     SpectralLESConfig, SpectralLESLayout, make_grid, project)
 
 COMM = MPI.COMM_WORLD
@@ -79,7 +79,7 @@ def test_distributed_project_matches_serial():
 @pytest.mark.skipif(NY % NPROC != 0, reason="NY must divide by n_ranks")
 def test_distributed_project_divergence_free():
     """Projected velocity is discretely divergence-free (the projection's job)."""
-    from legoesm.atmosphere.dynamics.spectral_les_plane import ddx, ddy, ddz_f2c
+    from legoesm.atmosphere.dynamics.les.spectral_les_plane import ddx, ddy, ddz_f2c
     u, v, w = _fields()
     layout = SpectralLESLayout(rank=RANK, n_ranks=NPROC, ny_global=NY, nx=NX,
                                comm=COMM)

@@ -147,7 +147,7 @@ def produce_vwind_field(n_res: int = 8, n_steps: int = 5, dt: float = 600.0):
         integrate,
         williamson2_ic,
     )
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig,
         CDGridShallowWaterModel,
     )

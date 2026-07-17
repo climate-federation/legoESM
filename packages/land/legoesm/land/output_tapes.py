@@ -2,7 +2,7 @@
 
 Each *tape* aggregates a chosen set of variables at a chosen frequency and
 writes to its own NetCDF (``<output>.<tape_name>.nc``).  Tapes are declared in
-YAML — see ``configs/output/lmip_biophys_default.yaml`` for the shipped
+YAML — see ``config/output/lmip_biophys_default.yaml`` for the shipped
 default (monthly ``h0`` time-mean fluxes + monthly ``h_state`` instantaneous
 soil snapshot).
 
@@ -59,7 +59,7 @@ def default_config_path() -> Path:
     #   parents[3] = packages/
     #   parents[4] = <repo root>
     return (Path(__file__).resolve().parents[4]
-            / "configs" / "output" / "lmip_biophys_default.yaml")
+            / "config" / "output" / "lmip_biophys_default.yaml")
 
 
 def load_output_config(path: str | Path | None) -> list[TapeSpec]:

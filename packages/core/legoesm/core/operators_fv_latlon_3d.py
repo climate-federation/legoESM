@@ -15,7 +15,6 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.operators_fv import ppm_edge_values, ppm_limit
-from legoesm.core.operators_fv_latlon import lat_v_interfaces
 from legoesm.grids.halo_latlon import (
     pad_halo_latlon_3d,
     pad_halo_vector_latlon_3d,
@@ -147,8 +146,10 @@ def fv_flux_divergence_latlon_3d(
 
     q_face_lat = jnp.where(v_iface >= 0, q_L_lat, q_R_lat)
 
-    lat_v = lat_v_interfaces(grid)
-    hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None, None]
+    # Band-correct v-face metric: ``grid.cos_lat_v`` is pre-sliced under
+    # MPI/SPMD band decomposition (clamped to 1e-10 only at the true global
+    # poles); hard-coded ±π/2 endpoints would collapse interior cut faces.
+    hx_iface = R * dlon * grid.cos_lat_v[:, None, None]
 
     Phi_lat = v_iface * hx_iface * q_face_lat  # (n_lat+1, n_lon, nlev)
 
@@ -233,8 +234,8 @@ def cgrid_fv_flux_divergence_latlon_3d(
     q_L_lat, q_R_lat = _ppm_reconstruct_lat_3d(q_pad, limiter)  # (n_lat+1, n_lon, nlev)
     q_face_lat = jnp.where(v_face_3d >= 0, q_L_lat, q_R_lat)
 
-    lat_v = lat_v_interfaces(grid)
-    hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None, None]
+    # Band-correct v-face metric (see fv_flux_divergence_latlon_3d).
+    hx_iface = R * dlon * grid.cos_lat_v[:, None, None]
     Phi_lat = v_face_3d * hx_iface * q_face_lat  # (n_lat+1, n_lon, nlev)
 
     # --- Net flux divergence ---
@@ -263,8 +264,8 @@ def _cgrid_velocity_divergence_3d(
     R = grid.radius
     dlon = grid.dlon
     hy = (grid.dy * 0.5)[:, None, None]                      # (n_lat,1,1)
-    lat_v = lat_v_interfaces(grid)
-    hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None, None]
+    # Band-correct v-face metric (see fv_flux_divergence_latlon_3d).
+    hx_iface = R * dlon * grid.cos_lat_v[:, None, None]
 
     net_lon = hy * (u_face_3d[:, 1:, :] - u_face_3d[:, :-1, :])
     net_lat = hx_iface[1:, :, :] * v_face_3d[1:, :, :] - hx_iface[:-1, :, :] * v_face_3d[:-1, :, :]

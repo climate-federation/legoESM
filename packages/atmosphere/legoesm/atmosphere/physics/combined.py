@@ -72,7 +72,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
 )
 from legoesm.atmosphere.physics.physics_state import update_physics_state
 from legoesm.atmosphere.physics._shared import zero_like_tracers
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     spectral_pe_to_grid,
 )
@@ -331,12 +331,39 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     # fill.  False (default) keeps both paths byte-identical.
     _nc_from_aerosol = _aerosol_ccn_active(config)
     _activation_cfg = _aerosol_activation_config(config)
+    # CLUBB sub-grid cloud fraction -> radiation routing (marine-Sc albedo lever).
+    # A moist higher-order closure diagnoses a less-overcast cloud fraction than
+    # the RH grid-scale scheme; route it to the cloud optics when the user opts in
+    # AND a cf-producing closure is active.  ONLY diagnostic CLUBB
+    # (turbulence.scheme='clubb', CLUBBConfig.prognostic=False) writes the
+    # ``PhysicsState.cloud_fraction`` carry today (clubb_lite dropped its PDF
+    # moments; prognostic CLUBB carries packed moments, not a diagnosed cf).
+    # Requiring the producer keeps the radiation override off the zero-init carry
+    # (which would spuriously clear clouds).  Misconfiguration is LOUD, never a
+    # silent no-op (dispatch-hardening).
+    _clubb_cfg = config.turbulence.clubb
+    _turb_produces_cf = (
+        config.turbulence.scheme == "clubb"
+        and not (_clubb_cfg is not None and getattr(_clubb_cfg, "prognostic", False))
+    )
+    if config.radiation.use_clubb_cloud_fraction and not _turb_produces_cf:
+        raise ValueError(
+            "RadiationConfig.use_clubb_cloud_fraction=True requires a "
+            "cloud-fraction-producing turbulence closure (turbulence.scheme="
+            "'clubb' with diagnostic CLUBBConfig.prognostic=False); got "
+            f"turbulence.scheme={config.turbulence.scheme!r}"
+            + (" with prognostic=True (packed moments, no diagnosed cloud "
+               "fraction)" if config.turbulence.scheme == "clubb" else "")
+            + ".  Enable diagnostic CLUBB or unset use_clubb_cloud_fraction."
+        )
+    _use_clubb_cf = config.radiation.use_clubb_cloud_fraction
     if config.radiation.scheme != "none":
         tagged_fns.append((
             make_radiation_physics(
                 config.radiation, model_type, column_mesh=column_mesh,
                 nc_from_aerosol=_nc_from_aerosol,
                 activation_config=_activation_cfg,
+                use_clubb_cloud_fraction=_use_clubb_cf,
             ),
             False,
             None,
@@ -419,10 +446,16 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 else:
                     phys_updates[field_name] = field_val
         else:
+            _kw0 = {}
             if getattr(fn0, "_wants_forcing", False):
-                first = fn0(state, grid, sigma_coord, forcing=forcing)
-            else:
-                first = fn0(state, grid, sigma_coord)
+                _kw0["forcing"] = forcing
+            if getattr(fn0, "_wants_phys_state_ro", False):
+                # Read-only phys_state consumer (radiation reading the CLUBB
+                # sub-grid cloud-fraction carry): forward phys_state but keep the
+                # single-return contract — accepts_ps=False, so no carry is
+                # written back.  Byte-identical when unset (empty kwargs).
+                _kw0["phys_state"] = phys_state
+            first = fn0(state, grid, sigma_coord, **_kw0)
         du_dt = first.du_dt.data
         dv_dt = first.dv_dt.data if first.dv_dt is not None else None
         dT_dt = first.dT_dt.data
@@ -453,10 +486,12 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                     else:
                         phys_updates[field_name] = field_val
             else:
+                _kw = {}
                 if getattr(fn, "_wants_forcing", False):
-                    t = fn(state, grid, sigma_coord, forcing=forcing)
-                else:
-                    t = fn(state, grid, sigma_coord)
+                    _kw["forcing"] = forcing
+                if getattr(fn, "_wants_phys_state_ro", False):
+                    _kw["phys_state"] = phys_state
+                t = fn(state, grid, sigma_coord, **_kw)
             du_dt = du_dt + t.du_dt.data
             if dv_dt is not None and t.dv_dt is not None:
                 dv_dt = dv_dt + t.dv_dt.data
@@ -567,7 +602,14 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
 def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
     tagged_fns = []
     if config.radiation.scheme != "none":
-        tagged_fns.append((make_radiation_physics(config.radiation, "nonhydrostatic"), False, None))
+        # CLUBB-cf routing is only wired for hydrostatic today; passing the flag
+        # (rather than dropping it) makes make_radiation_physics raise loudly if a
+        # user set use_clubb_cloud_fraction on the nonhydrostatic path — never a
+        # silent no-op.
+        tagged_fns.append((make_radiation_physics(
+            config.radiation, "nonhydrostatic",
+            use_clubb_cloud_fraction=config.radiation.use_clubb_cloud_fraction,
+        ), False, None))
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(config.convection, "nonhydrostatic", dt), True, "conv_prog_profile"))
     if config.turbulence.scheme != "none":
@@ -680,10 +722,14 @@ def _make_spectral_pe_combined(
 ) -> Callable:
     tagged_fns = []
     if config.radiation.scheme != "none":
+        # CLUBB-cf routing is hydrostatic-only today; pass the flag so a
+        # use_clubb_cloud_fraction request on spectral_pe raises loudly in
+        # make_radiation_physics rather than being silently ignored.
         tagged_fns.append((make_radiation_physics(
             config.radiation, "spectral_pe",
             sfc_albedo_override=sfc_albedo_override,
             sfc_emissivity_override=sfc_emissivity_override,
+            use_clubb_cloud_fraction=config.radiation.use_clubb_cloud_fraction,
         ), False, None))
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(config.convection, "spectral_pe", dt), True, "conv_prog_profile"))

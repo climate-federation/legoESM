@@ -123,6 +123,7 @@ def _compute_advection_flux_div(
     grid,
     dt: float,
     recon_fill_mask: jnp.ndarray | None = None,
+    linssh_top_flux: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute advection flux divergence for a single tracer field.
 
@@ -166,10 +167,11 @@ def _compute_advection_flux_div(
         )
         tr = neumann_fill_cgrid(tr, recon_fill_mask, grid=grid)
 
-    if tracer_advection == "ppm_fct":
+    if tracer_advection in ("ppm_fct", "fct2"):
         from legoesm.ocean.advection import fct_tracer_advection
         div_hut, vert_flux_div = fct_tracer_advection(
             tr, mass_flux_u, mass_flux_v, w_baro, h_k_old, grid, dt,
+            high_order="ppm" if tracer_advection == "ppm_fct" else "centred2",
         )
     elif tracer_advection == "ppm":
         from legoesm.ocean.advection import (
@@ -275,6 +277,16 @@ def _compute_advection_flux_div(
             f"ppm_fct, dst3, dst3_multidim, weno5, weno7."
         )
 
+    if linssh_top_flux:
+        # NEMO key_linssh top-cell concentration/dilution: the surface
+        # vertical advective flux is F[0] = w0*T0 (first-order, OUTSIDE any
+        # limiter — traadv_fct.F90:413-423 with a zero antidiffusive top
+        # flux), instead of the rigid F[0]=0 of the stretching-column z*.
+        # vert_flux_div[k] = F[k] - F[k+1], so add w0*T0 to level 0.
+        # w_baro[...,0] = deta/dt (fixed-thickness continuity); zero on land.
+        vert_flux_div = vert_flux_div.at[..., 0].add(
+            w_baro[..., 0] * tr[..., 0])
+
     return div_hut, vert_flux_div
 
 
@@ -299,6 +311,7 @@ def _compute_advection_flux_div_pair(
     grid,
     dt: float,
     recon_fill_mask: jnp.ndarray | None = None,
+    linssh_top_flux: bool = False,
 ):
     """Advection flux divergence for TWO tracers (T, S) in one pass.
 
@@ -337,11 +350,13 @@ def _compute_advection_flux_div_pair(
                 tr_a, tracer_advection, mass_flux_u, mass_flux_v,
                 w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
                 recon_fill_mask=recon_fill_mask,
+                linssh_top_flux=linssh_top_flux,
             ),
             _compute_advection_flux_div(
                 tr_b, tracer_advection, mass_flux_u, mass_flux_v,
                 w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
                 recon_fill_mask=recon_fill_mask,
+                linssh_top_flux=linssh_top_flux,
             ),
         )
 
@@ -393,6 +408,11 @@ def _compute_advection_flux_div_pair(
         vert_a = flux_form_vertical_tracer_advection_centered(tr_a, w_baro)
         vert_b = flux_form_vertical_tracer_advection_centered(tr_b, w_baro)
 
+    if linssh_top_flux:
+        # NEMO key_linssh top-cell flux F[0]=w0*T0 (see the single-tracer
+        # gate) — apply to BOTH tracers of the fused fast path.
+        vert_a = vert_a.at[..., 0].add(w_baro[..., 0] * tr_a[..., 0])
+        vert_b = vert_b.at[..., 0].add(w_baro[..., 0] * tr_b[..., 0])
     return (div_a, vert_a), (div_b, vert_b)
 
 
@@ -409,6 +429,7 @@ def _ssp_rk3_tracer_step(
     grid,
     dt: float,
     active_3d: jnp.ndarray,
+    linssh_top_flux: bool = False,
 ) -> jnp.ndarray:
     """RK3 flux-form tracer advection step (Butcher-tableau form).
 
@@ -440,6 +461,7 @@ def _ssp_rk3_tracer_step(
         dh, dv = _compute_advection_flux_div(
             tr_val, tracer_advection, mass_flux_u, mass_flux_v, w_baro,
             h_k_old, h_u_old, h_v_old, grid, dt,
+            linssh_top_flux=linssh_top_flux,
         )
         return dh + dv
 
@@ -481,6 +503,7 @@ def _ssp_rk3_tracer_pair_step(
     dt: float,
     active_3d: jnp.ndarray,
     recon_fill_mask: jnp.ndarray | None = None,
+    linssh_top_flux: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """RK3 tracer step for the (T, S) pair — one fused flux-div per stage.
 
@@ -500,6 +523,7 @@ def _ssp_rk3_tracer_pair_step(
             a_val, b_val, tracer_advection, mass_flux_u, mass_flux_v,
             w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
             recon_fill_mask=recon_fill_mask,
+            linssh_top_flux=linssh_top_flux,
         )
         return dh_a + dv_a, dh_b + dv_b
 
@@ -676,6 +700,32 @@ def _eke_av_at_interior_wfaces(A_v_phys, A_v_bg, nlev, prefix_shape):
     )
 
 
+def _static_kappa_redi_override(gm_cfg, grid):
+    """Per-column kappa_Redi override for kappa_redi_lat_scaling.
+
+    NEMO nn_aht_ijk_t=20 on a Mercator grid: aht(φ) = ½·U_d·Δx(φ)
+    ∝ cos φ, with ``gm_cfg.kappa_Redi`` the equator value.  Returns a
+    (n_lat, n_lon) array (the kernels' 2-D per-column kappa form) or
+    ``None`` when the flag is off — the scalar paths stay bit-identical.
+    Runtime closures (EKE / Treguier / Visbeck kappa fields) overwrite
+    this where they apply; the flag is meant for the static
+    Redi-only recipe (DINO R1) where no adaptive κ is active.
+    """
+    if not bool(getattr(gm_cfg, "kappa_redi_lat_scaling", False)):
+        return None
+    lat = jnp.asarray(grid.lat)
+    if lat.ndim != 1:
+        raise ValueError(
+            "GMRediConfig.kappa_redi_lat_scaling requires a regular grid "
+            "with 1-D latitudes (Mercator dx = R·dλ·cos φ); this grid's "
+            f"lat is {lat.ndim}-D (tripole/curvilinear) — supply the "
+            "kappa field via the runtime override instead.")
+    cos_lat = jnp.cos(lat)                                # (n_lat,)
+    n_lon = int(getattr(grid, "n_lon"))
+    return (gm_cfg.kappa_Redi * cos_lat)[:, None] * jnp.ones(
+        (1, n_lon), dtype=cos_lat.dtype)
+
+
 class LatLonCGridOceanModel:
     """Boussinesq hydrostatic ocean model on a C-grid latitude-longitude grid.
 
@@ -788,6 +838,16 @@ class LatLonCGridOceanModel:
                 "implicit_vertical_mixing=True (zdfiwm contributes to the "
                 "implicit avt/avm profiles; the explicit path cannot apply "
                 "its momentum part).")
+        if (_vmix_cfg_init is not None
+                and getattr(_vmix_cfg_init, "ddm", None) is not None
+                and _vmix_cfg_init.ddm.enabled
+                and not getattr(self.config, "implicit_vertical_mixing", False)):
+            raise ValueError(
+                "vertical_mixing.ddm.enabled=True requires "
+                "implicit_vertical_mixing=True (zdfddm routes the SALINITY "
+                "solve through a separate diffusivity K_v + (avs - avt) in the "
+                "implicit path; the explicit / shared-K pair path cannot carry "
+                "avs != avt — codex r2).")
         # Static rigid-lid data (islands, basis, depths), built eagerly from the
         # first concrete state (host-side flood-fill).  None until built.
         self.rigid_lid_data = None
@@ -1384,7 +1444,26 @@ class LatLonCGridOceanModel:
                     "tendencies + implicit FS + implicit vertical mixing; these "
                     "features are threaded by the split implicit_cn path only. Use "
                     'barotropic_solver="implicit_cn", or extend _unsplit_ab2_step.')
-        _valid_time_filters = {"box", "cosine", "power_law"}
+        _valid_time_filters = {"box", "cosine", "power_law",
+                               "nemo_boxcar_centred", "nemo_ab3am4"}
+        if (getattr(config, "surface_stress_implicit", False)
+                and not getattr(config.barotropic,
+                                "nemo_stage_mean_imposition", False)):
+            raise ValueError(
+                "surface_stress_implicit=True deposits the wind stress inside "
+                "the implicit vertical solve, which SHIFTS the depth mean "
+                "after the barotropic solve; it requires "
+                "barotropic.nemo_stage_mean_imposition=True (NEMO "
+                "stprk3_stg:440) to re-impose the barotropic mean — "
+                "otherwise the wind's depth-mean is double-counted "
+                "(F_slow + the solve).")
+        if (config.barotropic.barotropic_time_filter == "nemo_ab3am4"
+                and config.barotropic.barotropic_wide_halo):
+            raise ValueError(
+                'barotropic_time_filter="nemo_ab3am4" is not yet supported '
+                "with barotropic_wide_halo=True (the AB3/AM4 substep "
+                "histories widen the per-substep stencil reach; the wide-halo "
+                "budget has not been re-derived).")
         if config.barotropic.barotropic_time_filter not in _valid_time_filters:
             raise ValueError(
                 f"barotropic_time_filter must be one of {_valid_time_filters}, "
@@ -1406,12 +1485,11 @@ class LatLonCGridOceanModel:
                 'barotropic_solver="explicit_substep" to apply it, or leave the filter '
                 'at its "cosine" default to silence this warning.',
                 stacklevel=3)
-        # Mirrors the flux-form tendency dispatch (its else-raise) plus the
-        # SOM special case handled in step(); keep in sync if a scheme is added.
-        _valid_tracer_adv = {
-            "upwind", "centered", "tvd", "superbee", "ppm", "ppm_fct",
-            "dst3", "dst3_multidim", "weno5", "weno7", "som",
-        }
+        # Single source: VALID_TRACER_ADVECTION mirrors the flux-form tendency
+        # dispatch (its else-raise) plus the SOM special case handled in step().
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            VALID_TRACER_ADVECTION as _valid_tracer_adv,
+        )
         if config.tracer_advection not in _valid_tracer_adv:
             raise ValueError(
                 f"tracer_advection must be one of {sorted(_valid_tracer_adv)}, "
@@ -1472,6 +1550,71 @@ class LatLonCGridOceanModel:
         if pgf_scheme not in _valid_pgf:
             raise ValueError(
                 f"pgf_scheme must be one of {_valid_pgf}, got {pgf_scheme!r}")
+        _rdsm = getattr(config, "runoff_depth_spread_map", None)
+        if _rdsm is not None:
+            import numpy as _np
+            _rdsm_np = _np.asarray(_rdsm)
+            if (not _np.isfinite(_rdsm_np).all()) or (_rdsm_np <= 0).any():
+                raise ValueError(
+                    "runoff_depth_spread_map must be finite and > 0 "
+                    "everywhere (build it with nemo_runoff_depth_map, "
+                    "which floors at 1 m) — zero/negative cells would "
+                    "silently drop the runoff dilution (codex r11 LOW).")
+        _valid_pgf_quad = {"cell_integral", "nemo_trapezoid"}
+        _pgf_quad = getattr(config, "pgf_quadrature", "cell_integral")
+        if _pgf_quad not in _valid_pgf_quad:
+            raise ValueError(
+                f"pgf_quadrature must be one of {_valid_pgf_quad}, "
+                f"got {_pgf_quad!r}")
+        if getattr(config, "vorticity_scheme", "al81") == "ene_total":
+            if getattr(config, "coriolis_scheme", "matsuno_split") != "explicit_ab2":
+                raise ValueError(
+                    'vorticity_scheme="ene_total" (NEMO np_CRV: planetary '
+                    "Coriolis inside the ENE vorticity flux) requires "
+                    'coriolis_scheme="explicit_ab2" — under matsuno_split the '
+                    "separate Matsuno rotation would double-apply f. Got "
+                    f'{getattr(config, "coriolis_scheme", "matsuno_split")!r}.')
+            if getattr(config, "barotropic_coriolis_split", "frozen") == "live":
+                raise ValueError(
+                    'vorticity_scheme="ene_total" is incompatible with '
+                    'barotropic_coriolis_split="live": the live subtraction '
+                    "removes the face-f velocity-form depth-mean, but "
+                    "ene_total's planetary term is the vertex-f TRANSPORT-form "
+                    "flux — the stencils would not cancel. Use \"frozen\".")
+            if getattr(config, "momentum_advection",
+                       "vector_invariant") != "vector_invariant":
+                raise ValueError(
+                    'vorticity_scheme="ene_total" carries the planetary '
+                    "Coriolis inside the VECTOR-INVARIANT vorticity flux; the "
+                    "flux-form/WENO momentum branches never receive f_vtx, so "
+                    "combining them would silently DROP f x u entirely "
+                    "(review finding 2026-07-16). Got momentum_advection="
+                    f'{getattr(config, "momentum_advection", "?")!r}.')
+        _bt_split = getattr(config, "barotropic_coriolis_split", "frozen")
+        if _bt_split not in ("frozen", "live"):
+            raise ValueError(
+                "Unknown barotropic_coriolis_split scheme: must be one of "
+                f'("frozen", "live"), got {_bt_split!r}')
+        if _bt_split == "live":
+            if getattr(config, "coriolis_scheme", "matsuno_split") != "explicit_ab2":
+                raise ValueError(
+                    'barotropic_coriolis_split="live" requires '
+                    'coriolis_scheme="explicit_ab2" (the frozen F_slow must '
+                    "contain the planetary Coriolis depth-mean for the "
+                    "pre-step subtraction to be exact). Got coriolis_scheme="
+                    f'{getattr(config, "coriolis_scheme", "matsuno_split")!r}.')
+            if config.barotropic.barotropic_solver != "explicit_substep":
+                raise ValueError(
+                    'barotropic_coriolis_split="live" is implemented for the '
+                    'explicit_substep barotropic solver only; got '
+                    f"{config.barotropic.barotropic_solver!r}.")
+            if getattr(config.barotropic, "barotropic_slow_forcing_ab2", False):
+                raise ValueError(
+                    'barotropic_coriolis_split="live" is incompatible with '
+                    "barotropic_slow_forcing_ab2=True: the AB2-blended F_slow "
+                    "Coriolis (1.5*cor^n - 0.5*cor^(n-1)) would not cancel the "
+                    "single-time pre-step subtraction, leaving a transient "
+                    "residual planetary Coriolis in the forcing.")
         _valid_time_int = {"euler", "ab2", "rk3"}
         if config.tracer_time_integrator not in _valid_time_int:
             raise ValueError(
@@ -1480,7 +1623,7 @@ class LatLonCGridOceanModel:
         if config.ab2_epsilon < 0.0:
             raise ValueError(
                 f"ab2_epsilon must be >= 0, got {config.ab2_epsilon!r}")
-        _valid_mom_int = {"euler", "rk3"}
+        _valid_mom_int = {"euler", "rk3", "rk3_ws"}
         _mom_ti = getattr(config, "momentum_time_integrator", "euler")
         if _mom_ti not in _valid_mom_int:
             raise ValueError(
@@ -1572,14 +1715,25 @@ class LatLonCGridOceanModel:
                 f"coriolis_scheme must be one of "
                 f"{sorted(VALID_CORIOLIS_SCHEME)}, got {_cor_scheme!r}")
         if _cor_scheme == "explicit_ab2":
-            if config.outer_integrator != "ab2":
+            # The explicit f×u tendency needs a stably-rotating outer integrator.
+            # AB2(-eps) has a stable rotation region; SSP-RK3 does too (|G|<=1 up to
+            # f·dt~sqrt(3)), and — unlike operator-splitting the Coriolis AFTER the
+            # RK3 PGF stages — it keeps PGF and Coriolis COUPLED inside the stages,
+            # holding geostrophic balance (the fix for the O(dt^2) split-growth of
+            # the GYRE forced current). Forward-Euler alone is unstable (|G|>1).
+            if config.outer_integrator != "ab2" and getattr(
+                    config, "momentum_time_integrator",
+                    "euler") not in ("rk3", "rk3_ws"):
                 raise ValueError(
                     'coriolis_scheme="explicit_ab2" requires '
-                    'outer_integrator="ab2": an explicit forward-Euler Coriolis '
-                    "at weight 1.0 is unconditionally UNSTABLE for pure rotation "
-                    "(|G|=sqrt(1+(f·dt)²)>1 every step); only the AB2(-eps) outer "
-                    "integrator has a stable region covering the ACC's f·dt_mom. "
-                    f"Got outer_integrator={config.outer_integrator!r}.")
+                    'outer_integrator="ab2" OR momentum_time_integrator in '
+                    '("rk3", "rk3_ws"): '
+                    "an explicit forward-Euler Coriolis at weight 1.0 is "
+                    "unconditionally UNSTABLE for pure rotation "
+                    "(|G|=sqrt(1+(f·dt)²)>1); AB2(-eps) or SSP-RK3 have a stable "
+                    "rotation region. Got outer_integrator="
+                    f"{config.outer_integrator!r}, momentum_time_integrator="
+                    f"{getattr(config, 'momentum_time_integrator', 'euler')!r}.")
             if config.barotropic.barotropic_solver not in (
                     "rigid_lid", "implicit_cn", "implicit_unsplit",
                     "explicit_substep"):
@@ -1666,6 +1820,65 @@ class LatLonCGridOceanModel:
                 "outer integrator. The forward-Euler path applies every "
                 "tendency at weight 1.0 already (no extrapolation to scope). "
                 f"Got outer_integrator={config.outer_integrator!r}.")
+
+        # Prescribed-flow science lever (vertical-physics isolation).  Fail-fast
+        # value validation (dispatch discipline: static literal at construction)
+        # + rejection of the one outer path whose tracer advection does NOT go
+        # through the shared _step_impl mass-flux block.
+        _pflow = getattr(config, "prescribed_flow", None)
+        _valid_pflow = (None, "zero", "frozen")
+        if _pflow not in _valid_pflow:
+            raise ValueError(
+                f"prescribed_flow must be one of {_valid_pflow}, got "
+                f"{_pflow!r}")
+        if (_pflow is not None
+                and config.barotropic.barotropic_solver == "implicit_unsplit"):
+            raise ValueError(
+                'prescribed_flow is not supported with barotropic_solver='
+                '"implicit_unsplit": that path advects tracers via the '
+                "advective-form tendency inside _unsplit_ab2_step (no shared "
+                "mass-flux block to pin), so the lever would silently NOT "
+                "isolate the circulation. Use the split solvers "
+                '("explicit_substep", "implicit_cn", "rigid_lid").')
+        if _pflow is not None:
+            # Parameterized ADVECTIVE tracer transports bypass the pinned
+            # mass-flux block (codex findings 2+3): GM bolus/skew transport,
+            # the prognostic-EKE closure (which also advects EKE with
+            # state.u/v), and the Fox-Kemper MLE bolus tendency all move
+            # tracers with an eddy-induced velocity that the lever does NOT
+            # pin — they would silently re-inject circulation into the
+            # "isolated" run.  Reject every config expression of them at
+            # construction rather than silently running a leaky isolation.
+            if config.gm_redi is not None:
+                raise ValueError(
+                    "prescribed_flow cannot be combined with GM/Redi "
+                    "(config.gm_redi is set): the GM bolus (skew) transport "
+                    "is parameterized tracer ADVECTION applied outside the "
+                    "pinned mass-flux block, and the prognostic-EKE closure "
+                    "(gm_redi.eke) additionally advects EKE with the model "
+                    "u/v — the lever would not isolate the circulation. "
+                    "Disable GM/Redi (gm_redi=None) for the isolation run.")
+            _phys = config.physics
+            if _phys is not None:
+                _lat_mix = getattr(_phys, "lateral_mixing", None)
+                if (_lat_mix is not None
+                        and getattr(_lat_mix, "scheme", "none") == "gm_redi"):
+                    raise ValueError(
+                        "prescribed_flow cannot be combined with the physics-"
+                        'pipeline GM/Redi (physics.lateral_mixing.scheme='
+                        '"gm_redi"): bolus transport is parameterized tracer '
+                        "ADVECTION injected through physics_fn, bypassing the "
+                        "pinned mass-flux block. Disable GM/Redi "
+                        '(lateral_mixing scheme "none") for the isolation run.')
+                if getattr(_phys, "mle", None) is not None:
+                    raise ValueError(
+                        "prescribed_flow cannot be combined with Fox-Kemper "
+                        "MLE (config.physics.mle is set): the MLE "
+                        "restratification is a bolus tracer transport "
+                        "injected through physics_fn before the circulation "
+                        "pin — parameterized ADVECTION the lever does not "
+                        "isolate. Disable MLE (mle=None) for the isolation "
+                        "run.")
 
     def check_barotropic_cfl(self, dt: float) -> float:
         """Check barotropic CFL and warn if marginal or unstable.
@@ -1786,7 +1999,7 @@ class LatLonCGridOceanModel:
     def tendencies(self, state: LatLonCGridOceanState, surface_forcing=None,
                    sponge=None, dt=300.0, momentum_only=False,
                    precomputed_geom_density=None, *, grid=None,
-                   vertex_mask=None):
+                   vertex_mask=None, skip_lateral_viscosity=False):
         """Compute baroclinic tendencies.
 
         ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
@@ -1817,6 +2030,7 @@ class LatLonCGridOceanModel:
             surface_tracer_forcing_fn=self._surface_tracer_forcing_fn,
             vertex_mask=_vmask,
             momentum_only=momentum_only,
+            skip_lateral_viscosity=skip_lateral_viscosity,
             precomputed_geom_density=precomputed_geom_density,
         )
 
@@ -1899,6 +2113,12 @@ class LatLonCGridOceanModel:
         # (bit-identical single-device path).
         _grid = grid if grid is not None else self.grid
         _vmask = vertex_mask if vertex_mask is not None else self._vertex_mask
+        # Prescribed-flow lever (config.prescribed_flow, validated at
+        # construction).  STATIC Python gate on the config value (CLAUDE.md
+        # feature-gating exception): None (default) leaves every gated block
+        # below untraced — the compiled graph is byte-identical to before the
+        # lever existed.  Never jnp.where/lax.cond here.
+        _pflow = getattr(self.config, "prescribed_flow", None)
 
         # Asynchronous ("distorted-physics") time stepping: the public ``dt`` IS
         # dt_tracer (the clock; Veros advances vs.time by dt_tracer). Momentum + the
@@ -2001,6 +2221,32 @@ class LatLonCGridOceanModel:
         _v_pair = jnp.sum(jnp.stack([h_v_pre, dv_dt * h_v_pre], axis=-1), axis=-2)
         H_v_pre = jnp.maximum(_v_pair[..., 0], 1e-10)
         F_slow_v = _v_pair[..., 1] / H_v_pre * state.v_mask.data
+
+        if getattr(self.config, "surface_stress_implicit", False):
+            # NEMO stp2d explicit barotropic wind term: with the stress
+            # WITHHELD from du_dt (surface_stress_implicit; deposited inside
+            # the implicit vertical solve instead), F_slow no longer carries
+            # its depth mean — add tau/(rho0 H) here so the barotropic mode
+            # keeps the wind forcing (sign: ocean-reaction, same helper as
+            # the deposition; zero when the forcing carries no stress).
+            from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+                surface_stress_faces,
+            )
+            from legoesm.ocean.vertical import compute_ocean_jacobian
+            _J_fs = compute_ocean_jacobian(
+                state.eta.data, state.H_bathy.data, self.z_coord)
+            _sfx = (surface_stress_faces(
+                        surface_forcing, du_dt.dtype, self.z_coord, _J_fs,
+                        _grid)
+                    if surface_forcing is not None else None)
+            if _sfx is not None:
+                _tau_i_u, _tau_j_v, _, _ = _sfx
+                _r0 = jnp.asarray(self.config.constants.rho_0,
+                                  dtype=du_dt.dtype)
+                F_slow_u = F_slow_u + _tau_i_u / (_r0 * H_u_pre) \
+                    * state.u_mask.data
+                F_slow_v = F_slow_v + _tau_j_v / (_r0 * H_v_pre) \
+                    * state.v_mask.data
 
         # Perturbation tendency (depth-mean removed) → applied to 3D.
         # MUST be computed from the *baroclinic-only* F_slow (before A2 is
@@ -2134,6 +2380,49 @@ class LatLonCGridOceanModel:
             p2u, p2v = _mom_pert(u2, v2)
             u_star = (1.0 / 3.0) * u0 + (2.0 / 3.0) * (u2 + dt_mom * p2u)
             v_star = (1.0 / 3.0) * v0 + (2.0 / 3.0) * (v2 + dt_mom * p2v)
+        elif getattr(self.config, "momentum_time_integrator",
+                     "euler") == "rk3_ws":
+            # NEMO stprk3_stg Wicker-Skamarock RK3: every stage restarts from
+            # u0 with the PREVIOUS stage's RHS and the stage dt (dt/3, dt/2,
+            # dt) — NOT Shu-Osher convex combinations. Per-stage RHS content
+            # mirrors NEMO exactly: stage 1 = the precomputed full tendency
+            # (stp2d's Ue_rhs INCLUDES dyn_ldf); stage 2 = hpg+vor+adv ONLY
+            # (NO lateral viscosity, stprk3_stg:318-334); stage 3 = full again
+            # (dyn_ldf re-applied). ZDF (the implicit vertical solve) runs once
+            # after the momentum stages == NEMO's stage-3-only dyn_zdf. The
+            # linear stability polynomial R(z)=1+z+z^2/2+z^3/6 is identical to
+            # SSP-RK3, so the explicit_ab2 Coriolis coupling bound (f*dt<=
+            # sqrt(3)) carries over.
+            u0 = state.u.data
+            v0 = state.v.data
+
+            def _mom_pert_ws(u_in, v_in, skip_ldf):
+                st = state._replace(
+                    u=state.u.replace(data=u_in * u_mask_3d),
+                    v=state.v.replace(data=v_in * v_mask_3d),
+                )
+                td = self.tendencies(st, surface_forcing, sponge=sponge, dt=dt,
+                                     momentum_only=True,
+                                     precomputed_geom_density=_geom_density,
+                                     grid=_grid, vertex_mask=_vmask,
+                                     skip_lateral_viscosity=skip_ldf)
+                _du = td.du_dt.data
+                _dv = td.dv_dt.data
+                _Fu = jnp.sum(_du * h_u_pre, axis=-1) / H_u_pre * state.u_mask.data
+                _Fv = jnp.sum(_dv * h_v_pre, axis=-1) / H_v_pre * state.v_mask.data
+                return _du - _Fu[..., jnp.newaxis], _dv - _Fv[..., jnp.newaxis]
+
+            # stage 1 (dt/3), RHS = the stage-1 full tendency (incl. LDF)
+            u1 = u0 + (dt_mom / 3.0) * du_dt_pert
+            v1 = v0 + (dt_mom / 3.0) * dv_dt_pert
+            # stage 2 (dt/2), RHS(u1) WITHOUT lateral viscosity
+            p1u, p1v = _mom_pert_ws(u1, v1, True)
+            u2 = u0 + (dt_mom / 2.0) * p1u
+            v2 = v0 + (dt_mom / 2.0) * p1v
+            # stage 3 (dt), RHS(u2) with lateral viscosity
+            p2u, p2v = _mom_pert_ws(u2, v2, False)
+            u_star = u0 + dt_mom * p2u
+            v_star = v0 + dt_mom * p2v
         else:
             u_star = state.u.data + dt_mom * du_dt_pert
             v_star = state.v.data + dt_mom * dv_dt_pert
@@ -2249,6 +2538,42 @@ class LatLonCGridOceanModel:
             _add_bt_cor = (
                 getattr(self.config, "coriolis_scheme", "matsuno_split")
                 != "explicit_ab2")
+            if (not _add_bt_cor) and getattr(
+                    self.config, "barotropic_coriolis_split",
+                    "frozen") == "live":
+                # NEMO dynspg_ts structure (dynspg_ts.F90:296-300 + :689):
+                # remove the PRE-step 2D barotropic Coriolis from the frozen
+                # forcing (leaving baroclinic-only F_slow, NEMO's zu_frc), then
+                # integrate a LIVE f x U every substep so the barotropic mode
+                # holds geostrophic balance with the evolving eta inside the
+                # window (the frozen form lags Coriolis by dt and cripples the
+                # gyre's U_bar response to grad-eta). SAME face stencils as the
+                # substep loop (4-pt V-to-u; interp_u_to_vface_4pt), so the
+                # subtraction cancels the live term exactly at the pre-step
+                # state (EXACT on a beta-plane with flat full-cell bathymetry,
+                # where the 4-pt average and the depth-mean commute; else an
+                # O(dx^2)/topographic residual remains). Signs mirror the 3D
+                # coriolis_cgrid (+f*v_at_u on u; -f*u_at_v on v).
+                from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                    interp_u_to_vface_4pt,
+                )
+                from legoesm.ocean.dynamics.barotropic_common import (
+                    coriolis_at_faces,
+                )
+                _f_u2, _f_v2 = coriolis_at_faces(_grid, F_slow_u.dtype)
+                _u_pre3, _v_pre3 = state.u.data, state.v.data
+                _U_pre = (jnp.sum(_u_pre3 * h_u_pre, axis=-1)
+                          / jnp.maximum(H_u_pre, 1e-10))
+                _V_pre = (jnp.sum(_v_pre3 * h_v_pre, axis=-1)
+                          / jnp.maximum(H_v_pre, 1e-10))
+                _V_w = jnp.roll(_V_pre, 1, axis=1)
+                _V_at_u = 0.25 * (_V_pre[:-1] + _V_pre[1:]
+                                  + _V_w[:-1] + _V_w[1:])
+                _V_at_u = jnp.concatenate([_V_at_u, _V_at_u[:, 0:1]], axis=1)
+                _U_at_v = interp_u_to_vface_4pt(_U_pre, _grid)
+                F_slow_u = (F_slow_u - _f_u2 * _V_at_u) * state.u_mask.data
+                F_slow_v = (F_slow_v + _f_v2 * _U_at_v) * state.v_mask.data
+                _add_bt_cor = True
             if self.config.barotropic.barotropic_wide_halo:
                 # Opt-in wide-halo subcycle: one fused wide exchange per
                 # chunk of substeps instead of ~4 pads/substep (scaling-
@@ -2342,6 +2667,47 @@ class LatLonCGridOceanModel:
                 eta=state_new.eta.replace(data=eta_fixed),
             )
 
+        # --- Prescribed-flow lever: PIN THE CIRCULATION here, after the
+        # (discarded) momentum + barotropic solves and BEFORE the flux-form
+        # tracer step (section 7), so the tracer mass fluxes, the
+        # continuity-diagnosed w, and h_k_new are ALL built from the pinned
+        # flow — resetting after the step would not isolate (the intra-step
+        # advection would still use the post-momentum flow; codex finding 1).
+        #
+        # Sign/conservation convention at this splice: the flux-form update
+        # below is  h_new·T_new = h_old·T_mid − dt·[div_h(mf·T) + Δ_k(ẇ·T)]
+        # with mf = h·u positive along +x/+y and ẇ the z-star transport
+        # velocity (zero at surface and bottom).  The lever changes ONLY the
+        # advecting mf (and hence ẇ, diagnosed from div(mf)); every T/S
+        # source/sink — physics tendencies, surface forcing, penetrating SW,
+        # virtual salt, restoring, implicit vertical mixing — is untouched,
+        # so T/S column budgets differ from the free run only through the
+        # (zeroed/held) advection, and the global ∫h·T budget closes by the
+        # divergence theorem exactly as in the free run.
+        #   "zero"   → u = v = eta = 0: mf = 0 ⇒ ẇ = 0 (pure column physics).
+        #              NB: start from an eta≡0 state (rest/WOA cold start) —
+        #              a nonzero entry eta incurs a one-time h_old/h_new
+        #              tracer rescale on the first step (eta jumps to 0).
+        #   "frozen" → u/v/eta pinned to the step-ENTRY values: tracers are
+        #              advected by the held flow; h_new == h_old exactly.  A
+        #              divergent held flow pumps tracer between columns (its
+        #              physical advective convergence) while the global
+        #              budget still closes.
+        if _pflow is not None:
+            if _pflow == "zero":
+                _u_pin = jnp.zeros_like(state_new.u.data)
+                _v_pin = jnp.zeros_like(state_new.v.data)
+                _eta_pin = jnp.zeros_like(state_new.eta.data)
+            else:  # "frozen" — the only other value (validated at construction)
+                _u_pin = state.u.data
+                _v_pin = state.v.data
+                _eta_pin = state.eta.data
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_u_pin),
+                v=state_new.v.replace(data=_v_pin),
+                eta=state_new.eta.replace(data=_eta_pin),
+            )
+
         # 7. Flux-form tracer update using full 3D velocity
         #
         # The barotropic solver returns Hu_avg (time-averaged depth-
@@ -2413,10 +2779,19 @@ class LatLonCGridOceanModel:
         H_u_old, Hu_3d = _u_pair[..., 0], _u_pair[..., 1]  # (n_lat, n_lon+1)
         _v_pair = jnp.sum(jnp.stack([h_v_old, v_3d * h_v_old], axis=-1), axis=-2)
         H_v_old, Hv_3d = _v_pair[..., 0], _v_pair[..., 1]  # (n_lat+1, n_lon)
-        delta_U = (Hu_avg - Hu_3d) / jnp.maximum(H_u_old, 1e-10)
-        delta_V = (Hv_avg - Hv_3d) / jnp.maximum(H_v_old, 1e-10)
-        u_corrected = u_3d + delta_U[..., jnp.newaxis]
-        v_corrected = v_3d + delta_V[..., jnp.newaxis]
+        if _pflow is None:
+            delta_U = (Hu_avg - Hu_3d) / jnp.maximum(H_u_old, 1e-10)
+            delta_V = (Hv_avg - Hv_3d) / jnp.maximum(H_v_old, 1e-10)
+            u_corrected = u_3d + delta_U[..., jnp.newaxis]
+            v_corrected = v_3d + delta_V[..., jnp.newaxis]
+        else:
+            # Prescribed flow: NO barotropic transport correction.  u_3d/v_3d
+            # already carry the pinned flow (splice above); Hu_avg/Hv_avg from
+            # the DISCARDED barotropic solve must not leak into the tracer
+            # mass fluxes.  mass_flux = h·u_pin exactly — for "zero" the
+            # fluxes vanish and the diagnosed w below is identically zero.
+            u_corrected = u_3d
+            v_corrected = v_3d
 
         # Per-layer mass fluxes with full 3D velocity structure.
         # Unlike the previous barotropic-only distribution (which gave
@@ -2467,7 +2842,12 @@ class LatLonCGridOceanModel:
         #     barotropic solver), exactly like the explicit scheme, then
         #     restores ``U_bar``.  Unconditionally stable + conservative.
         #     No-op (and bit-exact) when the flag is off.
-        if getattr(self.config, "adaptive_implicit_vertadv", False):
+        #     SKIPPED under the prescribed-flow lever: this block is
+        #     momentum-ONLY (it rewrites state_new.u/v, which the lever pins),
+        #     so running it would unpin the prescribed flow mid-step for zero
+        #     physical effect on T/S.
+        if (getattr(self.config, "adaptive_implicit_vertadv", False)
+                and _pflow is None):
             from legoesm.ocean.dynamics.latlon_cgrid_operators import (
                 interp_cell_to_vface,
             )
@@ -2510,7 +2890,7 @@ class LatLonCGridOceanModel:
         if self.config.gm_redi is not None:
             gm_cfg = self.config.gm_redi
             kappa_gm_override = None
-            kappa_redi_override = None
+            kappa_redi_override = _static_kappa_redi_override(gm_cfg, _grid)
             eke_new = None
             eke_diss_new = None
             # Prognostic-EKE GM closure (Eden-Greatbatch): kappa_GM = c_k·L·√E
@@ -2809,12 +3189,16 @@ class LatLonCGridOceanModel:
             # _compute_advection_flux_div_pair).  Bit-identical to the
             # historical per-tracer calls; non-separable schemes fall
             # back to two single-tracer calls inside the pair helpers.
+            # NEMO key_linssh: top-cell concentration/dilution flux (static
+            # coordinate flag; see _compute_advection_flux_div).
+            _linssh = getattr(self.z_coord, "linear_free_surface", False)
             if _tti == "rk3":
                 T_corrected, S_corrected = _ssp_rk3_tracer_pair_step(
                     T_mid, S_mid, _adv,
                     mass_flux_u, mass_flux_v, w_baro,
                     h_k_old, h_k_new, h_u_old, h_v_old,
                     _grid, dt, active_3d, recon_fill_mask=_wall_fill_mask,
+                    linssh_top_flux=_linssh,
                 )
                 _pair_divs = (None, None)
             else:
@@ -2823,6 +3207,7 @@ class LatLonCGridOceanModel:
                     mass_flux_u, mass_flux_v, w_baro,
                     h_k_old, h_u_old, h_v_old, _grid, dt,
                     recon_fill_mask=_wall_fill_mask,
+                    linssh_top_flux=_linssh,
                 )
 
             for tr_name in ['T', 'S']:
@@ -2844,7 +3229,25 @@ class LatLonCGridOceanModel:
                         prev_field = (state.T_flux_div_prev
                                       if tr_name == 'T'
                                       else state.S_flux_div_prev)
-                        if prev_field is not None:
+                        if _pflow is not None:
+                            # Prescribed-flow lever (codex finding 1): the
+                            # advective flux-div extrapolation is CIRCULATION
+                            # HISTORY — a carried F^{n-1} from a pre-lever /
+                            # poisoned regime leaks stale advection, because
+                            # ab2_blend(0, fd_prev, eps) is NONZERO even when
+                            # the pinned flux-div is exactly zero.  Consume
+                            # NOTHING from the carry: use the current PINNED
+                            # flux-div directly ("zero" → identically zero, no
+                            # advection at all; "frozen" → the entry-flow
+                            # flux-div, no extrapolation across regimes).  The
+                            # carry STORED below is this same current value
+                            # (zeros for "zero"), so it stays scan-stable
+                            # (Field→Field) while never being read.  The T/S
+                            # PHYSICS AB2 increments (T_incr_prev, outer
+                            # integrator) are untouched — only the ADVECTION
+                            # extrapolation is disabled.
+                            effective_fd = total_flux_div
+                        elif prev_field is not None:
                             fd_prev = prev_field.data
                             # (#517 item 8: shared ab2_blend; eps verbatim
                             # → bit-identical.)
@@ -2873,7 +3276,11 @@ class LatLonCGridOceanModel:
                 else:
                     S_corrected = tr_new
 
-            # Persist AB2 previous flux divergence on state
+            # Persist AB2 previous flux divergence on state.  Under the
+            # prescribed-flow lever this stores the CURRENT pinned flux-div
+            # (exactly zeros for "zero": the mass fluxes and diagnosed w
+            # vanish), keeping the carry pytree scan-stable; the consumption
+            # branch above never reads it while the lever is on.
             if _tti == "ab2":
                 from legoesm.core.field import Field as _Field
                 _dims_fd = ("lat", "lon", "level")
@@ -2896,12 +3303,21 @@ class LatLonCGridOceanModel:
         # nothing extra to fold).
         if getattr(self.config.barotropic, "barotropic_slow_forcing_ab2", False):
             from legoesm.core.field import Field as _Field_fs
+            # Prescribed-flow lever: store ZEROS (pytree structure unchanged —
+            # still Field→Field across scan iterations).  The barotropic solve
+            # is discarded under the lever, so carrying its slow-forcing
+            # history would AB2-extrapolate discarded-momentum state (codex
+            # finding 2 — stale carries must be neutralized consistently).
+            _fs_u_store = (_F_slow_u_cur if _pflow is None
+                           else jnp.zeros_like(_F_slow_u_cur))
+            _fs_v_store = (_F_slow_v_cur if _pflow is None
+                           else jnp.zeros_like(_F_slow_v_cur))
             state_new = state_new._replace(
                 F_slow_u_prev=_Field_fs(
-                    data=_F_slow_u_cur, name="F_slow_u_prev",
+                    data=_fs_u_store, name="F_slow_u_prev",
                     dims=("lat", "lon_u"), units="m/s^2"),
                 F_slow_v_prev=_Field_fs(
-                    data=_F_slow_v_cur, name="F_slow_v_prev",
+                    data=_fs_v_store, name="F_slow_v_prev",
                     dims=("lat_v", "lon"), units="m/s^2"),
             )
 
@@ -2925,19 +3341,25 @@ class LatLonCGridOceanModel:
         if freshwater is not None and self.config.freshwater_closure != "none":
             dz_0 = h_k_new[..., 0]
             _S_dtype = state_new.S.data.dtype
-            _spread_m = float(getattr(self.config, "runoff_depth_spread_m", 0.0))
-            if _spread_m > 0.0:
+            from legoesm.ocean.freshwater import resolve_runoff_spread_arg
+            _spread_arg = resolve_runoff_spread_arg(self.config)
+            if _spread_arg is not None:
                 # NEMO-style runoff depth spreading (rn_dep_max): the runoff
-                # channel dilutes the top `_spread_m` metres; all other
-                # channels stay at the top cell.  Column-integral salt
-                # tendency identical to the legacy closure (conservation
-                # unchanged).  Static config gate -> legacy path untraced.
+                # channel dilutes the top spread depth — a flat scalar
+                # (runoff_depth_spread_m) OR the per-cell ln_rnf_depth_ini map
+                # (runoff_depth_spread_map); all other channels stay at the
+                # top cell.  Column-integral salt tendency identical to the
+                # legacy closure (conservation unchanged).  Static config gate
+                # -> legacy path untraced.  The map/scalar selection +
+                # mutual-exclusion guard is shared with the MPAS Voronoi core
+                # via resolve_runoff_spread_arg (no per-grid copy-paste).
                 from legoesm.ocean.freshwater import (
                     runoff_spread_virtual_salt_tendency_3d,
                 )
                 dS_fw_3d = runoff_spread_virtual_salt_tendency_3d(
                     freshwater, self.config.S_ref, h_k_new, self.config.rho_0,
-                    mask, runoff_spread_m=_spread_m,
+                    mask,
+                    runoff_spread_m=_spread_arg,
                     area=_grid.area,
                     normalize=bool(getattr(self.config,
                                            "normalize_freshwater", False)),
@@ -3025,6 +3447,15 @@ class LatLonCGridOceanModel:
         # and bottom and is split-stepped (Lie splitting, 1st-order)
         # after tracer advection, GM/Redi, and the freshwater virtual
         # salt flux — matching MOM6's diabatic-process ordering.
+        # NEMO stprk3_stg:440 zub correction (nemo_stage_mean_imposition):
+        # capture the post-barotropic-solve depth mean so it can be re-imposed
+        # after the implicit vertical solve (which otherwise shifts it).
+        _impose_mean = (
+            getattr(self.config.barotropic, "nemo_stage_mean_imposition", False)
+            and _apply_implicit_vmix)
+        if _impose_mean:
+            _u_mean_baro, _v_mean_baro = self._fixed_depth_means(state_new)
+
         tke_new = None
         if self.config.implicit_vertical_mixing and _apply_implicit_vmix:
             if self._tke_prognostic_active():
@@ -3040,6 +3471,11 @@ class LatLonCGridOceanModel:
                 # so there is NO lag in the synchronous (non-AB2) path. Falls back
                 # to the carried state.eke_diss when state_new has none yet.
                 _tke_source = self._assemble_tke_source(state, state_new, tend)
+                # NEMO eosbn2 Nnow sequencing: sample the diffusivity-stage
+                # N² on the STEP-ENTRY (before-advection) T/S when the flag is
+                # set. ``state`` here is the step-entry state (never rebound;
+                # ``state_new`` is the working copy). None ⇒ BIT-IDENTICAL.
+                _n2_tracers = self._n2_before_advection_tracers(state)
                 state_new, tke_new = self._apply_implicit_vertical_mixing(
                     state_new, dt, surface_forcing,
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
@@ -3047,16 +3483,17 @@ class LatLonCGridOceanModel:
                     surface_tracer_forcing=tend.surface_tracer_forcing,
                     tracer_source=tend.tracer_source,
                     tke_old=_tke_old, tke_source=_tke_source, return_tke=True,
-                    grid=_grid,
+                    grid=_grid, n2_tracers=_n2_tracers,
                 )
             else:
+                _n2_tracers = self._n2_before_advection_tracers(state)
                 state_new = self._apply_implicit_vertical_mixing(
                     state_new, dt, surface_forcing,
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
                     K33_iso=k33_implicit, dt_mom=dt_mom,
                     surface_tracer_forcing=tend.surface_tracer_forcing,
                     tracer_source=tend.tracer_source,
-                    grid=_grid,
+                    grid=_grid, n2_tracers=_n2_tracers,
                 )
         if tke_new is not None:
             # Veros order (integrate_tke): the implicit solve writes
@@ -3073,10 +3510,42 @@ class LatLonCGridOceanModel:
                           dims=("lat", "lon", "level"), units="m^2/s^2"),
             )
 
+        if _impose_mean:
+            # NEMO stprk3_stg.F90:440: uu += (uu_b(Kaa) − Σ e3u_0·uu·r1_hu_0)
+            # ·umask — the 3D velocity's depth mean is REPLACED by the
+            # barotropic solution after the implicit solve, uniformly over
+            # the column. Sign convention: an ADDITIVE column-uniform shift,
+            # so the baroclinic deviation u′ is untouched (budget: the
+            # depth-integral becomes exactly the barotropic transport).
+            _u_mean_now, _v_mean_now = self._fixed_depth_means(state_new)
+            _du = (_u_mean_baro - _u_mean_now)[..., jnp.newaxis]
+            _dv = (_v_mean_baro - _v_mean_now)[..., jnp.newaxis]
+            _um = state.u_mask.data[..., jnp.newaxis]
+            _vm = state.v_mask.data[..., jnp.newaxis]
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=state_new.u.data + _du * _um),
+                v=state_new.v.replace(data=state_new.v.data + _dv * _vm),
+            )
+
         # 9. Conservation fixers
         if self.config.use_conservation_fixer and _apply_implicit_vmix:
             state_new = ocean_conservation_fixer(
                 state_new, state, _grid, self.z_coord, self.config,
+            )
+
+        # Prescribed-flow lever: FINAL re-pin.  The implicit vertical-mixing
+        # solve above mixes MOMENTUM too (and ab2_scope="advective" adds a
+        # weight-1.0 momentum dissipation increment; the volume fixer can
+        # shift eta): those solves RUN on the pinned flow — their T/S/TKE
+        # couplings (TKE shear production, realized K_diss_v) therefore see
+        # the prescribed circulation, which is the intended physics — but
+        # their momentum/eta result is DISCARDED here (cheapest correct
+        # route: run-and-discard, no surgically skipped sub-solves).
+        if _pflow is not None:
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_u_pin),
+                v=state_new.v.replace(data=_v_pin),
+                eta=state_new.eta.replace(data=_eta_pin),
             )
 
         state_new = cast_pytree(state_new, None, "storage", allow_downcast=True)
@@ -3110,6 +3579,26 @@ class LatLonCGridOceanModel:
                                tend.surface_tracer_forcing, _tke_src,
                                _diss_incr, tend.tracer_source)
         return state_new
+
+    def _fixed_depth_means(self, st):
+        """Thickness-weighted depth means of u, v on FIXED reference
+        thicknesses (NEMO ``e3u_0``/``r1_hu_0``, the linssh convention used by
+        the stprk3_stg:440 zub correction). Face thicknesses by the min-rule,
+        matching the barotropic solver's depth average
+        (``_depth_average_to_faces``) so imposition restores exactly the mean
+        the barotropic solve set."""
+        from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+            _depth_average_to_faces,
+        )
+        from legoesm.ocean.vertical import compute_layer_thickness
+        h_k = compute_layer_thickness(
+            jnp.zeros_like(st.eta.data), st.H_bathy.data, self.z_coord,
+            min_water_column_m=self.config.min_water_column_m,
+        ).astype(st.u.data.dtype)
+        return _depth_average_to_faces(
+            st.u.data, st.v.data, h_k,
+            jnp.asarray(self.config.min_water_column_m, dtype=st.u.data.dtype),
+            st.land_mask.data, st.u_mask.data, st.v_mask.data, self.grid)
 
     def _tke_prognostic_active(self) -> bool:
         """True iff a prognostic-TKE-carrying vertical-mixing closure is active.
@@ -3153,6 +3642,33 @@ class LatLonCGridOceanModel:
         tke_cfg = self.config.physics.vertical_mixing.tke
         return (getattr(tke_cfg, "buoyancy_timing", "pre_mixing")
                 == "post_mixing_veros")
+
+    def _n2_before_advection_tracers(self, entry_state):
+        """Before-advection (Nnow) T/S for the vmix diffusivity-stage N².
+
+        Static Python predicate (config-only): returns ``(T, S)`` from the
+        STEP-ENTRY state when ``vertical_mixing.scheme=="tke"`` and
+        ``tke.n2_before_advection`` is set — the NEMO ``eosbn2`` sequencing
+        (``bn2(Nnow)`` at step start, before ``fct2`` tracer advection drifts
+        the deepest wet cell). ``None`` (default) ⇒ the closure keeps sampling
+        N² on the post-advection state ⇒ BIT-IDENTICAL.
+
+        Only the ``adiabatic`` N² path reads the T/S contrast; ``n2_mode !=
+        "adiabatic"`` with the flag set would be a SILENT no-op, so raise
+        (dispatch hardening — a mis-wired flag must fail loudly).
+        """
+        vmix = getattr(getattr(self.config, "physics", None),
+                       "vertical_mixing", None)
+        if vmix is None or vmix.scheme != "tke":
+            return None
+        if not getattr(vmix.tke, "n2_before_advection", False):
+            return None
+        if getattr(vmix.tke, "n2_mode", "insitu") != "adiabatic":
+            raise ValueError(
+                "vertical_mixing.tke.n2_before_advection=True requires "
+                "n2_mode='adiabatic' (the only N² path that reads the T/S "
+                f"contrast); got n2_mode={vmix.tke.n2_mode!r}.")
+        return (entry_state.T.data, entry_state.S.data)
 
     def _tke_realized_kdiss_active(self) -> bool:
         """True iff the post-mixing TKE charges the REALIZED implicit-friction
@@ -3654,6 +4170,7 @@ class LatLonCGridOceanModel:
         K_diss_v_w=None,
         return_K_diss_v: bool = False,
         grid=None,
+        n2_tracers=None,
     ) -> LatLonCGridOceanState:
         """Backward-Euler vertical diffusion for ``u, v, T, S``.
 
@@ -3859,10 +4376,15 @@ class LatLonCGridOceanModel:
                     eos_fn=_vmix_eos_fn,
                     tke_old=tke_old, dt_tke=dt_mom,
                     tke_source=tke_source, return_tke=True,
-                    # Column latitudes [deg] for the NEMO etau_htau_mode=
+                    # T-point latitudes [deg] for the NEMO etau_htau_mode=
                     # "latitude" penetration profile (unused otherwise).
-                    lat_deg=jnp.degrees(self.grid.lat),
+                    # 2-D lat_T (exact on the tripole, where rows curve and
+                    # the legacy 1-D grid.lat is a row mean) — a 1-D (n_lat,)
+                    # array cannot right-broadcast against the (n_lat, n_lon,
+                    # nlev-1) columns inside nemo_etau_injection.
+                    lat_deg=jnp.degrees(self.grid.lat_T),
                     iwm_fields=self._iwm_forcing,
+                    n2_tracers=n2_tracers,
                 )
                 if _post_mixing:
                     # Phase 1 only (Veros set_tke_diffusivities from the
@@ -3876,8 +4398,9 @@ class LatLonCGridOceanModel:
                     A_v_background=float(self.config.A_v),
                     K_v_background=float(self.config.K_v),
                     eos_fn=_vmix_eos_fn,
-                    lat_deg=jnp.degrees(self.grid.lat),
+                    lat_deg=jnp.degrees(self.grid.lat_T),
                     iwm_fields=self._iwm_forcing,
+                    n2_tracers=n2_tracers,
                 )
 
         # dz at cell centers (jacobian-corrected so the eta-stretched
@@ -3931,6 +4454,11 @@ class LatLonCGridOceanModel:
 
         # ---- Tracers (cell-centered: K aligns with T, S directly) ----
         T_new, S_new = state.T.data, state.S.data
+        # Double-diffusion salt-heat delta — MUST be defined on every path
+        # (the momentum-only friction call has do_tracers=False, yet the
+        # K_s_cell construction below reads dK_ddm_salt unconditionally;
+        # codex r2 UnboundLocalError fix).  None ⇒ salt uses K_v (no ddm).
+        dK_ddm_salt = None
         if do_tracers:
             K_v_cell = K_v_cell.astype(state.T.data.dtype)
             if K33_iso is not None:
@@ -3939,8 +4467,36 @@ class LatLonCGridOceanModel:
                 # interfaces, same (n_lat, n_lon, nlev-1) shape as K_v_cell.  TRACERS
                 # ONLY — momentum uses A_v_cell, which is untouched.
                 K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)
+            # Double diffusion (NEMO zdfddm): salt fingering / diffusive
+            # convection add a SEPARATE heat (avt) and salt (avs) diffusivity.
+            # avt folds into K_v_cell (heat) HERE — before the wet-interface
+            # mask below — so the seafloor guard applies to it too; the
+            # salt-heat delta ``dK_ddm_salt = avs - avt`` is carried to the
+            # tracer solve so S diffuses with ``K_v + (avs - avt)``.  Momentum
+            # (A_v_cell) is untouched, matching zdfddm.  Static Python gate
+            # (feature-gating exception): None ⇒ bit-identical legacy pair solve.
+            _ddm_cfg = getattr(
+                getattr(getattr(self.config, "physics", None),
+                        "vertical_mixing", None), "ddm", None)
+            if _ddm_cfg is not None and _ddm_cfg.enabled:
+                from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+                    ddm_K_profile,
+                )
+                from legoesm.ocean.eos import make_eos_fn as _mk_eos_ddm
+                _avt_ddm, _avs_ddm = ddm_K_profile(
+                    state, self.z_coord, self.config.physics, _ddm_cfg,
+                    eos_fn=_mk_eos_ddm(eos=self.config.eos,
+                                       eos_linear=self.config.eos_linear),
+                )
+                _dt_dtype = state.T.data.dtype
+                _avt_ddm = _avt_ddm.astype(_dt_dtype)
+                _avs_ddm = _avs_ddm.astype(_dt_dtype)
+                K_v_cell = K_v_cell + _avt_ddm
+                dK_ddm_salt = _avs_ddm - _avt_ddm
             if _wet_if_vmix is not None:
                 K_v_cell = K_v_cell * _wet_if_vmix
+                if dK_ddm_salt is not None:
+                    dK_ddm_salt = dK_ddm_salt * _wet_if_vmix
             # IMPLICIT surface TRACER forcing (Veros placement): add dt·S_surf
             # (masked) to the solve INPUT so the backward-Euler tridiagonal solve
             # realises ``(I − dt·L)·X_new = X_old + dt·S_surf`` at weight 1.0.  dt
@@ -3973,6 +4529,29 @@ class LatLonCGridOceanModel:
         # the resulting tridiagonal system is well-posed on any column
         # with at least two wet levels.
         u_new, v_new = state.u.data, state.v.data
+        u_solve_in, v_solve_in = state.u.data, state.v.data
+        if do_momentum and getattr(self.config, "surface_stress_implicit",
+                                   False) and surface_forcing is not None:
+            # NEMO dynzdf surface BC: deposit the wind stress in the TOP cell
+            # of the implicit solve's RHS (dt_mom * tau/(rho0 dz0)) so the
+            # momentum enters TOGETHER with its vertical viscous
+            # redistribution — no explicit per-step surface kick. The
+            # depth-mean this adds is re-imposed to the barotropic solution
+            # by nemo_stage_mean_imposition (validated at init).
+            from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+                surface_stress_faces,
+            )
+            _sfx = surface_stress_faces(
+                surface_forcing, state.u.data.dtype, self.z_coord, J_cell,
+                _grid)
+            if _sfx is not None:
+                _tau_i_u, _tau_j_v, _dz0u, _dz0v = _sfx
+                _r0 = jnp.asarray(self.config.constants.rho_0,
+                                  dtype=state.u.data.dtype)
+                u_solve_in = state.u.data.at[..., 0].add(
+                    dt_mom * _tau_i_u / (_r0 * jnp.maximum(_dz0u, 1e-10)))
+                v_solve_in = state.v.data.at[..., 0].add(
+                    dt_mom * _tau_j_v / (_r0 * jnp.maximum(_dz0v, 1e-10)))
         if do_momentum:
             A_v_cell = A_v_cell.astype(state.u.data.dtype)
             if _wet_if_vmix is not None:
@@ -4027,13 +4606,17 @@ class LatLonCGridOceanModel:
             os.environ.get("LEGOESM_VMIX_BATCHED", "0") == "1"
             and do_tracers and do_momentum
         )
+        # Double-diffusion salinity diffusivity: K_v (heat) + (avs - avt).
+        # ``dK_ddm_salt is None`` (ddm off) ⇒ K_s_cell IS K_v_cell (same
+        # object) ⇒ the shared-K pair fast path stays BYTE-IDENTICAL.
+        K_s_cell = K_v_cell if dK_ddm_salt is None else (K_v_cell + dK_ddm_salt)
         if _vmix_batched:
             T_new, S_new, u_new, v_new = (
                 implicit_vertical_diffusion_ocean_batched([
                     (T_solve_in, K_v_cell, dz_cell, dz_half_cell, dt),
-                    (S_solve_in, K_v_cell, dz_cell, dz_half_cell, dt),
-                    (state.u.data, A_v_u, dz_u, dz_half_u, dt_mom),
-                    (state.v.data, A_v_v, dz_v, dz_half_v, dt_mom),
+                    (S_solve_in, K_s_cell, dz_cell, dz_half_cell, dt),
+                    (u_solve_in, A_v_u, dz_u, dz_half_u, dt_mom),
+                    (v_solve_in, A_v_v, dz_v, dz_half_v, dt_mom),
                 ])
             )
         else:
@@ -4047,24 +4630,28 @@ class LatLonCGridOceanModel:
                 # field-batching ADDED it).  LEGOESM_VMIX_TSPAIR=0
                 # restores the two separate solves (trace-time switch,
                 # same caveat as above).
-                if os.environ.get("LEGOESM_VMIX_TSPAIR", "1") != "0":
+                if (dK_ddm_salt is None
+                        and os.environ.get("LEGOESM_VMIX_TSPAIR", "1") != "0"):
                     T_new, S_new = implicit_vertical_diffusion_ocean_pair(
                         T_solve_in, S_solve_in,
                         K_v_cell, dz_cell, dz_half_cell, dt,
                     )
                 else:
+                    # Separate T (K_v_cell) and S (K_s_cell) solves — required
+                    # when double diffusion is active (avs != avt); byte-identical
+                    # to the pair when dK_ddm_salt is None (K_s_cell is K_v_cell).
                     T_new = implicit_vertical_diffusion_ocean(
                         T_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
                     )
                     S_new = implicit_vertical_diffusion_ocean(
-                        S_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
+                        S_solve_in, K_s_cell, dz_cell, dz_half_cell, dt,
                     )
             if do_momentum:
                 u_new = implicit_vertical_diffusion_ocean(
-                    state.u.data, A_v_u, dz_u, dz_half_u, dt_mom,
+                    u_solve_in, A_v_u, dz_u, dz_half_u, dt_mom,
                 )
                 v_new = implicit_vertical_diffusion_ocean(
-                    state.v.data, A_v_v, dz_v, dz_half_v, dt_mom,
+                    v_solve_in, A_v_v, dz_v, dz_half_v, dt_mom,
                 )
         if do_tracers:
             T_new = jnp.where(mask_3d > 0.5, T_new, state.T.data)
@@ -4463,6 +5050,15 @@ class LatLonCGridOceanModel:
 
         T = _masked_filter_3d(state.T.data, land, mask_c)
         S = _masked_filter_3d(state.S.data, land, mask_c)
+        # Prescribed-flow lever (STATIC config gate): filter TRACERS only.
+        # Filtering the pinned u/v/eta would UNPIN the prescribed circulation
+        # (repeated zonal Fourier truncation walks a "frozen" flow away from
+        # the held values step after step); the pinned flow needs no polar
+        # CFL filter because it never evolves.  T/S keep the stability filter
+        # — their advection under "frozen" still crosses converging meridians.
+        if getattr(self.config, "prescribed_flow", None) is not None:
+            return state._replace(
+                T=state.T.replace(data=T), S=state.S.replace(data=S))
         v = _masked_filter_3d(state.v.data, v_mask, mask_v)
         # u-face is periodic with a duplicated wrap column (u[:, n_lon] == u[:, 0]);
         # filter the n_lon-wide interior with the cell mask, then re-append col 0.
@@ -4548,7 +5144,10 @@ class LatLonCGridOceanModel:
         barotropic solver carries ``U_old``/``u_prime`` forward (velocity is NOT
         recomputed from scratch) and the seam u-face Coriolis term reads the
         ``v`` halo via ``roll(V_bar_c, 1)`` -- so an unslaved velocity halo would
-        re-inject the seam every step, defeating the tracer fix.
+        re-inject the seam every step, defeating the tracer fix.  EXCEPTION:
+        under ``config.prescribed_flow`` only T/S are slaved -- this call runs
+        AFTER the final re-pin and must not mutate the pinned u/v/eta (see the
+        gated return below).
 
         Column rules (``nx = n_lon`` = cell count):
         * cell-centred (T, S, eta) and v-faces (lat interfaces, also ``nx``
@@ -4579,6 +5178,25 @@ class LatLonCGridOceanModel:
             a = a.at[:, 0].set(a[:, nx - 2])
             a = a.at[:, nx - 1].set(a[:, 1])
             return a
+
+        # Prescribed-flow lever (STATIC config gate; codex finding 4): slave
+        # TRACERS only — the same treatment as the polar filter.  This runs
+        # AFTER the final in-step re-pin, so slaving u/v/eta here could MUTATE
+        # the pinned circulation (an entry state whose halo columns don't
+        # satisfy the overlap identity would have its "frozen" flow silently
+        # rewritten at the seam every step, breaking the exact-hold contract;
+        # "zero" is trivially invariant).  The pinned flow needs no seam
+        # reconnection anyway — it never evolves, and the construction-time
+        # overlap-fill (mask/bathy/IC, documented above) already makes the
+        # entry halos consistent.  T/S keep the overlap: their advection under
+        # "frozen" still crosses the seam.  Chosen over re-pinning after the
+        # call because the pin values are locals of _step_impl — recomputing
+        # them at the _step_jitted call site would duplicate the pin logic.
+        if getattr(self.config, "prescribed_flow", None) is not None:
+            return state._replace(
+                T=state.T.replace(data=_ovl_cell(state.T.data)),
+                S=state.S.replace(data=_ovl_cell(state.S.data)),
+            )
 
         return state._replace(
             T=state.T.replace(data=_ovl_cell(state.T.data)),
@@ -4726,39 +5344,55 @@ class LatLonCGridOceanModel:
                             fused=False)
             return field - bt, bt          # (baroclinic deviation, barotropic mean)
 
-        # NB (adversarial-review #4, low severity): the carried du_p was depth-mean-
-        # zero under the PREVIOUS step's h_u; applying it at the current h_u injects a
-        # spurious barotropic component ≈ a_p·<du_p>_z(current h). Negligible for ACC
-        # (O(1 m) eta → O(1e-4 m/s)), and exactly zero under rigid-lid (fixed h);
-        # fix for large free-surface motion by re-splitting du_p under the current h_u.
-        ubc_n, _ = _split(state.u.data, h_u)
-        ubc_e, bt_u_e = _split(state_expl.u.data, h_u)
-        vbc_n, _ = _split(state.v.data, h_v)
-        vbc_e, bt_v_e = _split(state_expl.v.data, h_v)
-        du_n = ubc_e - ubc_n          # baroclinic explicit increment
-        dv_n = vbc_e - vbc_n
-        du_p = (state.u_incr_prev.data if state.u_incr_prev is not None
-                else jnp.zeros_like(du_n))
-        dv_p = (state.v_incr_prev.data if state.v_incr_prev is not None
-                else jnp.zeros_like(dv_n))
-        u_ab2 = ((ubc_n + a_n * du_n - a_p * du_p) + bt_u_e) * u_mask3
-        v_ab2 = ((vbc_n + a_n * dv_n - a_p * dv_p) + bt_v_e) * v_mask3
-        # ab2_scope="advective": add the weight-1.0 DISSIPATIVE momentum
-        # increment (lateral friction + bottom drag, evaluated on u^n) as its
-        # BAROCLINIC DEVIATION only. The increment's DEPTH-MEAN already forced
-        # the barotropic solve (the diss depth-mean is folded into F_slow in
-        # _step_impl — Veros solve_stream.py:80's uloc includes du_mix), so the
-        # final barotropic mode carries it via ψ; adding the raw increment here
-        # would double-count it for one step and then be DISCARDED by the rigid
-        # lid (which replaces the incoming depth-mean each step) — the
-        # review-caught routing bug that ran the transport away to 3865 Sv.
-        # du_diss_incr is 0.0 under "total" ⇒ the _split is a no-op branch.
-        if diss_incr is not None:
-            du_diss_bc, _ = _split(du_diss_incr, h_u)
-            dv_diss_bc, _ = _split(dv_diss_incr, h_v)
-            u_ab2 = u_ab2 + du_diss_bc * u_mask3
-            v_ab2 = v_ab2 + dv_diss_bc * v_mask3
-        u_ab2 = u_ab2.at[:, -1].set(u_ab2[:, 0])   # periodic-lon wrap
+        # Prescribed-flow lever (STATIC config gate; None default keeps the
+        # block below byte-identical).  The momentum AB2 extrapolation is
+        # SKIPPED entirely: state_expl.u/v/eta already carry the pin from
+        # _step_impl, and consuming u_incr_prev/v_incr_prev here would
+        # re-inject discarded-momentum history into the pinned flow (codex
+        # finding 2 — stale AB2 carries).  du_n/dv_n = 0 ⇒ the momentum
+        # carries stored at the bottom of this method are ZEROS, so the stale
+        # carry is never read AND never re-written.  The tracer AB2 (above)
+        # is untouched — the T/S physics increments are real under the lever.
+        _pflow = getattr(self.config, "prescribed_flow", None)
+        if _pflow is not None:
+            du_n = jnp.zeros_like(state.u.data)
+            dv_n = jnp.zeros_like(state.v.data)
+            u_ab2 = state_expl.u.data
+            v_ab2 = state_expl.v.data
+        else:
+            # NB (adversarial-review #4, low severity): the carried du_p was depth-mean-
+            # zero under the PREVIOUS step's h_u; applying it at the current h_u injects a
+            # spurious barotropic component ≈ a_p·<du_p>_z(current h). Negligible for ACC
+            # (O(1 m) eta → O(1e-4 m/s)), and exactly zero under rigid-lid (fixed h);
+            # fix for large free-surface motion by re-splitting du_p under the current h_u.
+            ubc_n, _ = _split(state.u.data, h_u)
+            ubc_e, bt_u_e = _split(state_expl.u.data, h_u)
+            vbc_n, _ = _split(state.v.data, h_v)
+            vbc_e, bt_v_e = _split(state_expl.v.data, h_v)
+            du_n = ubc_e - ubc_n          # baroclinic explicit increment
+            dv_n = vbc_e - vbc_n
+            du_p = (state.u_incr_prev.data if state.u_incr_prev is not None
+                    else jnp.zeros_like(du_n))
+            dv_p = (state.v_incr_prev.data if state.v_incr_prev is not None
+                    else jnp.zeros_like(dv_n))
+            u_ab2 = ((ubc_n + a_n * du_n - a_p * du_p) + bt_u_e) * u_mask3
+            v_ab2 = ((vbc_n + a_n * dv_n - a_p * dv_p) + bt_v_e) * v_mask3
+            # ab2_scope="advective": add the weight-1.0 DISSIPATIVE momentum
+            # increment (lateral friction + bottom drag, evaluated on u^n) as its
+            # BAROCLINIC DEVIATION only. The increment's DEPTH-MEAN already forced
+            # the barotropic solve (the diss depth-mean is folded into F_slow in
+            # _step_impl — Veros solve_stream.py:80's uloc includes du_mix), so the
+            # final barotropic mode carries it via ψ; adding the raw increment here
+            # would double-count it for one step and then be DISCARDED by the rigid
+            # lid (which replaces the incoming depth-mean each step) — the
+            # review-caught routing bug that ran the transport away to 3865 Sv.
+            # du_diss_incr is 0.0 under "total" ⇒ the _split is a no-op branch.
+            if diss_incr is not None:
+                du_diss_bc, _ = _split(du_diss_incr, h_u)
+                dv_diss_bc, _ = _split(dv_diss_incr, h_v)
+                u_ab2 = u_ab2 + du_diss_bc * u_mask3
+                v_ab2 = v_ab2 + dv_diss_bc * v_mask3
+            u_ab2 = u_ab2.at[:, -1].set(u_ab2[:, 0])   # periodic-lon wrap
 
         state_ab2 = state_expl._replace(
             T=state_expl.T.replace(data=T_ab2),
@@ -4803,6 +5437,11 @@ class LatLonCGridOceanModel:
                 # integrate_tke (veros.py:266→285). Off ⇒ no extra return ⇒
                 # bit-identical.
                 _want_kdv = self._tke_realized_kdiss_active()
+                # Momentum-only: this call already acts on the step-entry
+                # ``state`` (before advection), so its N² is ALREADY Nnow —
+                # no n2_tracers override needed (and it must stay that way so
+                # friction + tracer N² sources remain consistent under the
+                # n2_before_advection flag).
                 _fric = self._apply_implicit_vertical_mixing(
                     state, dt, surface_forcing,
                     K_v_phys=K_v_phys, A_v_phys=A_v_phys,
@@ -4828,6 +5467,8 @@ class LatLonCGridOceanModel:
                     return_tke=_tke_prog,
                     K_diss_v_w=_kdiss_v_w,
                     grid=_grid,
+                    # NEMO eosbn2 Nnow N²: step-entry (before-advection) T/S.
+                    n2_tracers=self._n2_before_advection_tracers(state),
                 )
                 if _tke_prog:
                     state_ab2, tke_new_ab2 = _trac
@@ -4850,6 +5491,8 @@ class LatLonCGridOceanModel:
                     tke_old=_tke_old, tke_source=tke_source,
                     return_tke=_tke_prog,
                     grid=_grid,
+                    # NEMO eosbn2 Nnow N²: step-entry (before-advection) T/S.
+                    n2_tracers=self._n2_before_advection_tracers(state),
                 )
                 if _tke_prog:
                     state_ab2, tke_new_ab2 = _seq
@@ -4873,6 +5516,18 @@ class LatLonCGridOceanModel:
         if self.config.use_conservation_fixer:
             state_ab2 = ocean_conservation_fixer(
                 state_ab2, state, _grid, self.z_coord, self.config,
+            )
+
+        # Prescribed-flow lever: FINAL re-pin from state_expl (which carries
+        # the pin from _step_impl).  The implicit vertical-mixing call above
+        # mixes MOMENTUM too (both the additive-friction and sequential
+        # paths), and the volume fixer can shift eta — run-and-discard, same
+        # convention as _step_impl's final re-pin.
+        if _pflow is not None:
+            state_ab2 = state_ab2._replace(
+                u=state_ab2.u.replace(data=state_expl.u.data),
+                v=state_ab2.v.replace(data=state_expl.v.data),
+                eta=state_ab2.eta.replace(data=state_expl.eta.data),
             )
 
         # Carry the EXPLICIT increments for the next AB2 step (NOT the
@@ -4961,6 +5616,7 @@ class LatLonCGridOceanModel:
         k33_iso = None
         if self.config.gm_redi is not None:
             gm_cfg = self.config.gm_redi
+            _kri_static = _static_kappa_redi_override(gm_cfg, _grid)
             _gm_dj = None
             if gm_cfg.implicit_K33:
                 _gm_dj = gm_redi_density_and_jacobian(
@@ -4974,6 +5630,7 @@ class LatLonCGridOceanModel:
                 eos_linear=self.config.eos_linear, mask=cmask,
                 u_mask=u_mask, v_mask=v_mask,
                 rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+                kappa_redi_override=_kri_static,
                 density_jacobian=_gm_dj)
             dT_n = dT_n + dt * dT_gm    # noqa: N806
             dS_n = dS_n + dt * dS_gm    # noqa: N806
@@ -4983,6 +5640,7 @@ class LatLonCGridOceanModel:
                     _grid, self.z_coord, gm_cfg, eos=self.config.eos,
                     eos_linear=self.config.eos_linear, mask=cmask,
                     rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+                    kappa_redi_override=_kri_static,
                     density_jacobian=_gm_dj)
         du_p = (state.u_incr_prev.data if state.u_incr_prev is not None
                 else jnp.zeros_like(du_n))
@@ -5020,7 +5678,9 @@ class LatLonCGridOceanModel:
         # 4. Implicit vertical mixing once (recomputes K_v/A_v from state_corr;
         #    applies the surface wind/tracer BC + restoring internally).
         state_new = self._apply_implicit_vertical_mixing(
-            state_corr, dt, surface_forcing, K33_iso=k33_iso, grid=_grid)
+            state_corr, dt, surface_forcing, K33_iso=k33_iso, grid=_grid,
+            # NEMO eosbn2 Nnow N²: step-entry (before-advection) T/S.
+            n2_tracers=self._n2_before_advection_tracers(state))
 
         # 5. Carry the explicit increments for the next AB2 step.
         return state_new._replace(
@@ -5277,6 +5937,36 @@ class LatLonCGridOceanModel:
                 v_incr_prev=Field(data=_zv, name="v_incr_prev",
                                   dims=state.v.dims, units=state.v.units),
             )
+
+        # Barotropic slow-forcing AB2 carry (Gᵁ time-centering): seed the prev
+        # F_slow Fields to ZERO so the scan carry pytree is stable from step 1
+        # (the step stores a Field every step when barotropic_slow_forcing_ab2
+        # is on; a None -> Field transition mid-scan crashes lax.scan, and
+        # _step_impl raises on an unseeded prev).  First step then applies
+        # (3/2+ε)·F_slow — the same AB2 cold-start convention as the outer
+        # integrator.  Mirrors the in-driver seeding of
+        # build_silvestri_baroclinic_jet_setup; seeding here makes the flag
+        # usable by ANY seed_scan_carry driver (e.g. run_dino).  Field metadata
+        # matches the step's own storage (dims ("lat","lon_u")/("lat_v","lon"),
+        # units m/s^2).  No-op when the flag is off or already seeded.
+        if (getattr(self.config.barotropic, "barotropic_slow_forcing_ab2", False)
+                and (state.F_slow_u_prev is None or state.F_slow_v_prev is None)):
+            # Seed as a PAIR: a partial carry (one Field, one None -- e.g. a
+            # hand-built restart) would skip a u-only guard and then raise in
+            # _step_impl / flip None->Field mid-scan (codex).  Preserve an
+            # already-seeded component; zero-fill only the missing one.
+            from legoesm.core.field import Field
+            _fu = state.F_slow_u_prev
+            _fv = state.F_slow_v_prev
+            if _fu is None:
+                _fu = Field(data=jnp.zeros_like(state.u.data[:, :, 0]),
+                            name="F_slow_u_prev", dims=("lat", "lon_u"),
+                            units="m/s^2")
+            if _fv is None:
+                _fv = Field(data=jnp.zeros_like(state.v.data[:, :, 0]),
+                            name="F_slow_v_prev", dims=("lat_v", "lon"),
+                            units="m/s^2")
+            state = state._replace(F_slow_u_prev=_fu, F_slow_v_prev=_fv)
 
         # Prognostic-EKE carry: when EKE is on but the eddy-energy field has not
         # been seeded (state.eke is None), pre-seed it to the e_min floor so the

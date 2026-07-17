@@ -90,7 +90,7 @@ class TestAMIPStability:
         treatment. The key check is that all fields remain finite and
         temperature stays physical.
         """
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationConfig as FVPrimitiveEquationConfig,
             CDGridPrimitiveEquationModel as FVPrimitiveEquationModel,
         )
@@ -132,7 +132,7 @@ class TestAMIPStability:
         that grows rapidly without strong diffusion. This test verifies
         short-term stability with moderate viscosity.
         """
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationConfig as FVPrimitiveEquationConfig,
             CDGridPrimitiveEquationModel as FVPrimitiveEquationModel,
         )

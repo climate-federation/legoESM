@@ -30,13 +30,13 @@ def test_driver_imports_positivity_filter():
     tree = _driver_ast()
     found = any(
         isinstance(n, ast.ImportFrom)
-        and n.module == "legoesm.atmosphere.dynamics.tracer_positivity"
+        and n.module == "legoesm.atmosphere.dynamics.shared.tracer_positivity"
         and any(a.name == "apply_positive_filter_state" for a in n.names)
         for n in ast.walk(tree)
     )
     assert found, (
         "run_rcemip_plane must import apply_positive_filter_state from "
-        "legoesm.atmosphere.dynamics.tracer_positivity (shared, tested filter)."
+        "legoesm.atmosphere.dynamics.shared.tracer_positivity (shared, tested filter)."
     )
 
 

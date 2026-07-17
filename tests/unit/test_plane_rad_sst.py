@@ -26,7 +26,7 @@ import run_rcemip_plane as rcp  # noqa: E402
 from legoesm.atmosphere.physics.radiation.integration import (  # noqa: E402
     make_radiation_physics,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (  # noqa: E402
     make_flat_plane_terrain_metric, make_rest_state,
 )
 from legoesm.grids.plane import create_plane_grid  # noqa: E402

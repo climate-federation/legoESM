@@ -22,7 +22,7 @@ Tests
    ``d2_bg`` floor, tendencies match the constant-coefficient path.
 
 The 3D path lives in
-``legoesm.atmosphere.dynamics.primitive_eq_cdgrid``; the SW analog is
+``legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid``; the SW analog is
 in ``legoesm.core.operators_cdgrid.cdgrid_momentum_tendencies`` (the
 existing tested SW path).
 """
@@ -35,12 +35,12 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationConfig,
     fv3_hydrostatic_tendencies,
     hydrostatic_to_fv3,
 )
-from legoesm.atmosphere.held_suarez import held_suarez_init
+from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.vertical import standard_hybrid_levels
@@ -176,7 +176,7 @@ def test_adaptive_damping_preserves_stability_short_run(small_3d_state):
     """Default-tuned dddmp (FV3 0.20) preserves stability over 10 steps."""
     grid, cdgrid, coord, _ = small_3d_state
 
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
 
@@ -206,7 +206,7 @@ def test_damp_v_zero_is_bit_for_bit_baseline(small_3d_state):
     """damp_v=0 preserves bit-for-bit existing 3D dycore behaviour."""
     grid, cdgrid, coord, _ = small_3d_state
 
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
 
@@ -240,7 +240,7 @@ def test_damp_v_changes_winds_on_perturbed_state(small_3d_state):
     step on a perturbed state."""
     grid, cdgrid, coord, _ = small_3d_state
 
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
 
@@ -286,7 +286,7 @@ def test_damp_v_stable_short_run(small_3d_state):
     20 steps on the HS init."""
     grid, cdgrid, coord, _ = small_3d_state
 
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
 
@@ -314,7 +314,7 @@ def test_corner_div_damp_zero_is_baseline(small_3d_state):
     """corner_div_damp_d2_bg=0 preserves bit-for-bit baseline."""
     grid, cdgrid, coord, _ = small_3d_state
 
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
 
@@ -344,7 +344,7 @@ def test_corner_div_damp_changes_winds(small_3d_state):
     """corner_div_damp_d2_bg > 0 changes winds on a perturbed state."""
     grid, cdgrid, coord, _ = small_3d_state
 
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
 
@@ -384,7 +384,7 @@ def test_corner_div_damp_stable_short_run(small_3d_state):
     """corner_div_damp_d2_bg=0.001 stable for 20 steps from HS init."""
     grid, cdgrid, coord, _ = small_3d_state
 
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
 
@@ -417,7 +417,7 @@ def test_corner_div_damp_d4_disabled_bit_for_bit_with_d2(small_3d_state):
     """
     grid, cdgrid, coord, _ = small_3d_state
 
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
 
@@ -480,7 +480,7 @@ def test_corner_div_damp_d4_changes_winds(small_3d_state):
     """
     grid, cdgrid, coord, _ = small_3d_state
 
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
 
@@ -530,7 +530,7 @@ def test_corner_div_damp_d4_stable_short_run_nord1(small_3d_state):
     """
     grid, cdgrid, coord, _ = small_3d_state
 
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
 
@@ -576,7 +576,7 @@ def test_corner_div_damp_fv3_vector_fill_bit_for_bit_nord1(small_3d_state):
     """
     grid, cdgrid, coord, _ = small_3d_state
 
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
 
@@ -660,7 +660,7 @@ def test_corner_div_damp_nord2_pe_runs_and_differs_from_nord1(small_3d_state):
     """
     grid, cdgrid, coord, _ = small_3d_state
 
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
 
@@ -747,7 +747,7 @@ def test_corner_div_damp_nord3_pe_loop_scales(small_3d_state):
     """
     grid, cdgrid, coord, _ = small_3d_state
 
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
 
@@ -809,7 +809,7 @@ def test_smagorinsky_cs_zero_is_bit_for_bit_baseline(small_3d_state):
     """
     grid, cdgrid, coord, _ = small_3d_state
 
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
 
@@ -858,7 +858,7 @@ def test_smagorinsky_cs_active_changes_winds(small_3d_state):
     """
     grid, cdgrid, coord, _ = small_3d_state
 
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
 
@@ -911,7 +911,7 @@ def test_corner_div_damp_d4_stable_short_run_nord2(small_3d_state):
     """
     grid, cdgrid, coord, _ = small_3d_state
 
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
 
@@ -956,7 +956,7 @@ def test_smagorinsky_combined_with_ah_stable_multistep(small_3d_state):
     """
     grid, cdgrid, coord, _ = small_3d_state
 
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
 

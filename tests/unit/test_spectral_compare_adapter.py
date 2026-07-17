@@ -20,7 +20,7 @@ from types import SimpleNamespace  # noqa: E402
 
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
-from legoesm.atmosphere.dynamics.spectral_pe import (  # noqa: E402
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (  # noqa: E402
     SpectralHydrostaticState,
     spectral_pe_to_grid,
 )

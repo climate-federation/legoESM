@@ -7,10 +7,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     make_flat_plane_terrain_metric, make_rest_state,
 )
-from legoesm.atmosphere.dynamics.mean_wind_filter import (
+from legoesm.atmosphere.dynamics.shared.mean_wind_filter import (
     compute_horizontal_mean_wind, remove_horizontal_mean_wind,
 )
 from legoesm.grids.plane import create_plane_grid

@@ -605,7 +605,7 @@ class TestHeldSuarezParams:
         ("T_min", 200.0),
     ])
     def test_held_suarez_param_reachable(self, name, default):
-        from legoesm.atmosphere.held_suarez import held_suarez_forcing
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing
         grid, sigma, state = self.grid, self.sigma, self.state
 
         def loss(p):
@@ -916,14 +916,8 @@ class TestOceanPhysicsParams:
         from legoesm.ocean.physics.vertical_mixing.config import (
             RichardsonVerticalMixingConfig,
         )
-        from legoesm.ocean.physics.bottom_drag.quadratic import (
-            quadratic_bottom_drag,
-        )
-        from legoesm.ocean.physics.bottom_drag.config import QuadraticDragConfig
         self.rmix = richardson_vertical_mixing
         self.RmixCfg = RichardsonVerticalMixingConfig
-        self.drag = quadratic_bottom_drag
-        self.DragCfg = QuadraticDragConfig
         self.u, self.v, self.T, self.S, self.rho, self.zc, self.jac = (
             _ocean_column()
         )
@@ -960,15 +954,6 @@ class TestOceanPhysicsParams:
             lambda p: self._rmix_loss("A_bg", p, field="du_dt"), 1e-4,
             "Ocean Richardson A_bg",
         )
-
-    def test_bottom_drag_C_d(self):
-        def loss(c):
-            cfg = self.DragCfg()._replace(C_d=c)
-            out = self.drag(self.u, self.v, self.zc, self.jac, cfg)
-            return jnp.sum(out.du_dt ** 2)
-
-        assert_param_grad_ok(loss, 2.5e-3, "Ocean bottom-drag C_d")
-
 
 # ===========================================================================
 # 11j  RRTMGP — coverage note

@@ -1,0 +1,28 @@
+# WB-compare TRAINING suite — the two NEURAL variants only (no rrtmgp -> fast).
+#
+# classical (winner combo + rrtmgp) is NOT trained here: it comes from the dense
+# classical run (results/aimip_dense_classical/classical). This suite trains just
+# the cheap neural variants so all three checkpoints are ready for the WB2
+# comparison (scripts/validate/run_aimip_wb2_eval.py + plot_wb_scorecard.py).
+#
+# Same base + ACE2 loss as config/aimip/wbcompare/suite.yaml (the 3-variant eval
+# manifest); only the trained-variants list differs.
+base: config/aimip/aimip_era5.yaml
+cfg_overrides:
+  aimip_n_epochs: 12
+  eval_years: [2020]        # WB2 canonical test year (matches the SOTA CSV)
+  loss:
+    residual_normalize: true
+    normalize_by_scale: false
+    multi_step_hours: [6, 12]
+    multi_step_weights: [1.0, 1.0]
+    w_T: 0.5
+    w_u: 0.5
+    w_v: 0.5
+    w_q: 0.5
+    w_ps: 0.3
+    level_weighting: "pressure"
+variants:
+  - column_nn
+  - sfno_full
+output_dir: results/aimip_wbcompare

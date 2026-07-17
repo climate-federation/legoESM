@@ -210,12 +210,18 @@ def _time_coord_to_days(time_coord, epoch_year: int | None = None) -> np.ndarray
     return values - values[0]
 
 
-def _load_icon_unstructured(config: AMIPForcingConfig, grid) -> AMIPForcing:
+def _load_icon_unstructured(
+    config: AMIPForcingConfig, grid, start_year: int | None = None
+) -> AMIPForcing:
     """Load AMIP forcing from ICON unstructured NetCDF files.
 
     Handles separate SST/SIC files (``config.sic_path``), unit
     conversions, and KD-tree nearest-neighbour regridding from the
-    ICON cell centroids to the target grid.
+    ICON cell centroids to the target grid.  ``start_year`` anchors a
+    multi-year (transient) file to the run calendar exactly like the
+    lat-lon path (AMIP-II date anchoring + coverage guard); a short
+    climatology stays first-record-relative so its seasonal phase is
+    independent of ``start_year``.
     """
     import xarray as xr
     from scipy.spatial import cKDTree
@@ -274,14 +280,39 @@ def _load_icon_unstructured(config: AMIPForcingConfig, grid) -> AMIPForcing:
     sic_regridded = sic_data[:, idx].reshape(ntime, *target_shape)
 
     # --- Time axis ---
+    # Mirror the lat-lon path: build RELATIVE first (span is invariant to
+    # anchoring) to classify the file, then anchor ONLY a multi-year
+    # (transient) file to the run calendar so a model day indexes it by real
+    # date.  A <=12-record single-year climatology stays first-record-relative
+    # (anchoring would randomise its seasonal phase against start_year).
     times_days = _time_coord_to_days(time_coord)
+    ntime_axis = len(times_days)
+    span_days = float(times_days[-1] - times_days[0]) if ntime_axis > 1 else 0.0
+    is_transient = ntime_axis > 12 or (ntime_axis > 1 and span_days >= 366.0)
+    if start_year is not None and is_transient:
+        times_days = _time_coord_to_days(time_coord, epoch_year=start_year)
+        # Coverage guard: model day 0 (== start_year-01-01) must fall inside
+        # the record window (allow the first record up to ~1 month in, the
+        # mid-month bcs anchor), else interpolation would silently clamp to
+        # the wrong-era endpoint.  Start-of-run check only; a run extending
+        # past the last record holds it (no wrap for transient files).
+        if times_days[0] > 31.0 or times_days[-1] < 0.0:
+            raise ValueError(
+                f"AMIP forcing file does not cover start_year={start_year}: "
+                f"records span days [{times_days[0]:.0f}, {times_days[-1]:.0f}]"
+                f" relative to {start_year}-01-01. Stage a file that includes"
+                " the run period, or set start_year to a year in the file."
+            )
 
     sic_regridded = np.clip(sic_regridded, 0.0, 1.0)
 
     from legoesm.core.precision import get_policy
     _dtype = get_policy().storage
+    # times pinned to float64: an anchored transient axis carries large
+    # absolute day counts (~1e4-1e5) whose sub-day resolution (mid-month .5)
+    # would be lost at float32 (ULP ~5e-3 day).
     return AMIPForcing(
-        times=jnp.array(times_days),
+        times=jnp.asarray(times_days, dtype=jnp.float64),
         sst=jnp.array(sst_regridded, dtype=_dtype),
         sic=jnp.array(sic_regridded, dtype=_dtype),
         config=config,
@@ -357,18 +388,7 @@ def load_amip_forcing(
         if ds_sic is not ds_sst:
             ds_sic.close()
         ds_sst.close()
-        if start_year is not None:
-            # The ICON path indexes time relative to the file's first record and
-            # has no calendar anchoring — the exact wrong-era bug this fix
-            # removes for lat-lon files. Fail loudly rather than silently serve
-            # the wrong decade.
-            raise NotImplementedError(
-                "ICON unstructured AMIP forcing does not support start_year "
-                "calendar anchoring (its time axis is first-record-relative, a "
-                "wrong-era risk). Regrid the SST/SIC to a lat-lon file, or extend "
-                "_load_icon_unstructured with the same anchoring + coverage guard."
-            )
-        return _load_icon_unstructured(config, grid)
+        return _load_icon_unstructured(config, grid, start_year=start_year)
 
     try:
         # --- Validate required variables ---

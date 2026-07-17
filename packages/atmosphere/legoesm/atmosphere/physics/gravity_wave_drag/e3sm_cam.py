@@ -17,6 +17,99 @@ gravity-wave module, faithful term-by-term to the Fortran oracle:
   tendency with the stability limiters and re-derived stress.
   (``components/eam/src/physics/cam/gw_common.F90``)
 
+Faithfulness scope & departures
+-------------------------------
+"Faithful term-by-term" is pinned to **E3SM-3.0.1** (``gw_common.F90`` /
+``gw_oro.F90`` / ``gw_front.F90`` at the line numbers cited inline), pinned by
+the committed gfortran oracle regression anchors in
+``tests/atmosphere/hydrostatic/unit/test_gwd_e3sm_cam.py`` (anchors truncated
+to 8 significant figures, tested at ``rtol=1e-7``) — NOT by a live diff against
+a vendored source tree (the Fortran is path-referenced, not committed). Known,
+deliberate departures / version choices (canaries in
+``test_e3sm_cam_gwd_faithful.py``):
+
+* **Heating frame (version choice).** The spectral thermal term defaults to the
+  E3SM-3.0.1 *ground-relative* form ``dttke = sum_l c_l*gwut_l``
+  (``gw_common.F90:727``). This is the wave-energy-flux-divergence term, NOT the
+  irreversible heating: for ``U>c>0`` (``gwut<0``) it is negative, so the
+  shipped spectral path can locally cool. Newer CAM/EAM trunk uses the
+  *intrinsic-frequency* form ``sum_l (c_l - ubm)*gwut_l`` (the irreversible
+  dissipative conversion, non-negative for the ``sign(c-ubm)`` tendency); the
+  two differ by ``-ubm*gwut``. Opt in with ``config.dttke_use_intrinsic``
+  (default ``False`` = the pinned 3.0.1 oracle).
+* **Spectral thermal term (flag-selectable, ``use_e3sm_spectral_heating``).**
+  E3SM's spectral (``ngwv > 0``) path UNCONDITIONALLY band-limits ``dttke`` to
+  midpoints ``ktop+1..kbotbg`` (gw_common.F90:726-728) and adds the
+  dse-diffusion heating ``dttdf`` (``ttgw = dttke + dttdf``, :721,731) — with
+  NO u/v diffusion: ``egwdffi`` is exported ONLY as the ``EKGWSPEC``
+  diagnostic, ``vertical_diffusion`` never reads it, and E3SM never diffuses
+  u/v with it (the earlier "defers to the host" wording here was WRONG).  The
+  DEFAULT (flag OFF) sums ``dttke`` over ALL levels (a deep Beres source
+  deposits heating below 500 hPa that E3SM does not) and omits ``dttdf``;
+  constituent ``qtgw`` diffusion is not represented (no ``q`` in the
+  interface).  ``do_eddy_diffusion`` remains a STANDALONE ADDITION (u/v
+  diffusion with no E3SM analog + the same ``dttdf``, added once when both
+  are on).
+* **C.-C. Chen fixer is unconditional in E3SM** (called after each spectral
+  ``gw_drag_prof``: Beres gw_drag.F90:800, CM :863);
+  ``config.do_energy_conservation`` defaults ``False`` here — a DEPARTURE
+  from the oracle's shipped behavior, flip owed after AMIP validation.
+* **Driver-level orographic heating + landfrac (E3SM gw_tend, gw_drag.F90:
+  902-915).** E3SM applies the oro tendencies OUTSIDE gw_drag_prof: it scales
+  ``utgw *= cam_in%landfrac`` (:904-906, zeroing oro drag over ocean) and heats
+  with the DISCRETE-step KE closure ``ptend%s += -(ptend%u*(u+0.5*dt*ptend%u)
+  + ...)`` (:908-913).  Both are available here: pass ``land_frac_col`` for
+  the landfrac scaling (``None`` default = no scaling), and set
+  ``config.use_discrete_ke_heating=True`` for the discrete closure (default
+  ``False`` = the continuous-rate identity, which over-heats by
+  ``0.5*dt*(du²+dv²)/c_pd`` per step).  STRUCTURAL DEPARTURE kept: E3SM's
+  closure runs once over the ACCUMULATED ptend of all GW sources ("includes
+  spectrum"); our per-source calls close each source independently.  (The
+  alternative ``use_gw_energy_fix`` branch, :916-937, deposits a
+  column-UNIFORM dE — code default ``.false.``, phys_control.F90:174 — and is
+  not implemented.  E3SM divides the closure by the spatially-varying
+  ``cpairv(:,k,lchnk)`` (gw_drag.F90:914); we use the scalar
+  ``constants.c_pd`` — the declared required-inputs departure, legoESM has
+  no spatially-varying heat capacity.)
+* **Frontal cos(lat) taper is DYCORE-dependent in E3SM** (gw_drag.F90:829-833:
+  ``do_latitude_taper = .not. dycore_is('UNSTRUCTURED')``) — ON for
+  structured lat-lon, OFF for the unstructured (SE-family) dycore.  (Which
+  dycore a given E3SM production campaign ran is NOT provable from the
+  vendored source tree — same epistemic status as the ``use_gw_energy_fix``
+  XML ambiguity.)  legoESM's cubed-sphere/icosahedral/MPAS grids correspond to
+  the UNSTRUCTURED branch, so the E3SM-equivalent setting there is
+  ``frontal.latitude_taper=False``; the DEFAULT ``True`` (legacy) tapers
+  frontal drag → 0 toward the poles — a first-order high-latitude
+  difference.  Config-selectable, flip per grid family (AMIP-gated).
+* **Newtonian alpha profile (default OFF).** ``config.use_newtonian_profile``
+  defaults to ``False``; E3SM uses a Newtonian-cooling vertical ``alpha(z)``
+  profile in the spectral saturation / WKB damping (with an orographic floor).
+  Enabling it changes the drag.
+* **Beres (2004) convective source: TABLE not bundled.** ``source="convective"``
+  RUNS, but on a clearly-labelled analytic STAND-IN spectrum
+  (``build_stand_in_mfcc``, explicitly NOT bit-faithful to Beres); the real
+  offline ``mfcc`` lookup table (``newmfspectra*.nc``) is not vendored. Pass a
+  real ``mfcc_table`` (``beres.use_stand_in_table=False``) for faithfulness.
+* **Smoothing.** The genuine Fortran kinks (critical level, saturation cap,
+  tendency limiters) are kept as-is — no extra sigmoids — plus a few defensive
+  clamps (e.g. ``mi>=0``) that bind only for pathological inputs (see below).
+
+Conservation (see ``__physics_contract__`` energy note): ``conserves=["none"]``
+as the static INTERSECTION over all selectable sources (a contract must hold
+for every config a user can select). The orographic (c=0, DEFAULT) path IS
+energy-conserving in-atmosphere — the resolved mean-flow KE it removes is
+returned as heat by construction (as a continuous RATE at the default
+``use_discrete_ke_heating=False``; ``eps_gwd`` is always that continuous
+mean-flow KE-removal-rate diagnostic, so with the discrete closure ON the
+column heat equals ``eps_gwd`` minus the ``0.5*dt*int(rho*(du²+dv²))dz``
+finite-step term — by design, not a leak). But the frontal / convective sources launch
+NONSTATIONARY spectral components from an EXTERNAL, unbudgeted reservoir
+(momentum not conserved), and their default ground-relative thermal term is not
+the irreversible ``(c-ubm)*gwut`` conversion — so no single conserved quantity
+holds across every source. ``do_energy_conservation=True`` forces the discrete
+air-column momentum+dse finite-step residual to zero (a corrective
+redistribution below source, not a physical source / boundary-flux accounting).
+
 Index convention (matches the rest of legoESM column physics): array axis
 ``k = 0`` is the **model top**, ``k = nlev-1`` is the **surface**; interface
 arrays have ``nlev+1`` points with index ``0`` the top interface and
@@ -25,18 +118,21 @@ arrays have ``nlev+1`` points with index ``0`` the top interface and
 
 Differentiability notes
 -----------------------
-The E3SM solver is piecewise-smooth.  The only genuine kinks are the same
-ones the Fortran has: the critical-level test ``sign(u-c)`` changing
-between interfaces (a physical discontinuity), the ``min(taudmp, tausat)``
-saturation cap, and the ``min`` tendency limiters.  These are kept exactly
-(via ``jnp.where`` / ``jnp.minimum``); their sub-gradients are correct on
-each side and the kinks are measure-zero, so ``jax.grad`` is well-defined
-almost everywhere and never NaN.  No hard Python control flow on traced
-values is used; both vertical sweeps are ``lax.scan``.
+The E3SM solver is piecewise-smooth.  The kinks are the same ones the Fortran
+has — the critical-level test ``sign(u-c)`` changing between interfaces (a
+physical discontinuity), the ``min(taudmp, tausat)`` saturation cap, and the
+``min`` tendency limiters — plus a few defensive clamps (e.g. ``mi>=0``) that
+bind only for pathological inputs.  All are kept exactly (via ``jnp.where`` /
+``jnp.minimum`` / ``jnp.maximum``); their sub-gradients are correct on each
+side and the kinks are measure-zero, so ``jax.grad`` is well-defined almost
+everywhere and never NaN.  No hard Python control flow on traced values is
+used; both vertical sweeps are ``lax.scan``.
 
-The Beres (2004) convective source (``gw_convect.F90``) is intentionally
-NOT provided: it requires an offline ``mfcc`` source-spectrum lookup table
-that is not bundled with the model.  See module ``REPORT`` for the gap.
+The Beres (2004) convective source (``gw_convect.F90``) source-SPECTRUM table
+(the offline ``mfcc`` lookup, ``newmfspectra*.nc``) is not vendored;
+``source="convective"`` runs on a clearly-labelled analytic stand-in
+(``build_stand_in_mfcc``) unless a real ``mfcc_table`` is supplied.  See module
+``REPORT`` for the gap.
 """
 
 from __future__ import annotations
@@ -50,6 +146,9 @@ from legoesm import constants
 from legoesm.atmosphere.physics.gravity_wave_drag.config import (
     E3SMBeresConfig,
     E3SMCAMConfig,
+)
+from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
+    depth_averaged_oro_source,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
 
@@ -70,25 +169,66 @@ __physics_contract__ = {
         "h_topo_col": "m (optional subgrid orographic stddev, sgh)",
         "frontgf_col": "K^2 m^-2 s^-1 (optional frontogenesis function, frontal source)",
         "netdt_col": "K/s (optional convective heating rate, Beres source)",
+        "land_frac_col": (
+            "1 (optional land fraction in [0,1]; E3SM driver-level oro "
+            "scaling utgw *= landfrac, gw_drag.F90:904-906 — oro source only)"
+        ),
     },
     "outputs": {
         "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "eps_gwd": "W/m^2",
     },
     "sign_convention": (
-        "z up; k=0 model top, k=nlev-1 surface. Drag opposes the wave-relative "
-        "wind: the tendency is signed sign(c - ubm) (= deceleration toward the "
-        "phase speed c), so it decelerates the resolved flow; tendency "
-        "limiters cap the magnitude without changing sign. dT_dt>0 is the "
-        "KE->heat / wave-energy deposition; eps_gwd>=0 is the column KE loss."
+        "z up; k=0 model top, k=nlev-1 surface. EACH wave's tendency is signed "
+        "sign(c - ubm) -- it drives the flow toward that wave's phase speed c "
+        "(deceleration for c<U, acceleration for c>U), and its limiter caps the "
+        "magnitude without changing sign; the SUMMED multi-wave tendency need "
+        "not have a single sign. For the orographic (single c=0 wave) path "
+        "dT_dt >= 0 and eps_gwd >= 0 (resolved KE->heat; the continuous-rate "
+        "closure -(u*du+v*dv)/c_pd by default, or the E3SM discrete-step "
+        "closure -(du*(u+0.5*dt*du)+dv*(v+0.5*dt*dv))/c_pd when "
+        "use_discrete_ke_heating=True). "
+        "For the spectral path dT_dt defaults to the ground-relative dttke "
+        "term, which is SIGNED (can cool where U>c>0); with "
+        "use_e3sm_spectral_heating or do_eddy_diffusion it is dttke + the "
+        "dse-diffusion dttdf (and the E3SM flag band-limits dttke to "
+        "midpoints above ~500 hPa); with do_energy_conservation=True the "
+        "C.-C. Chen fixer additionally redistributes the below-source dse "
+        "so the final dT_dt is the fixer-adjusted total. "
+        "eps_gwd = -integral rho*(u*du+v*dv)*dz "
+        "is the mean-flow KE removal rate (positive for the orographic path; "
+        "SIGNED for spectra, negative where the flow is accelerated toward c)."
     ),
-    # Energy is the robustly-conserved quantity: KE removed from the mean flow
-    # is returned as heating (orographic: exact local dT_dt=-(u*du+v*dv)/c_pd;
-    # spectral: wave-energy deposition dttke), and the optional C.-C. Chen fixer
-    # (config.do_energy_conservation, default OFF) additionally self-closes the
-    # exact column momentum+energy budget below source. Momentum is NOT
-    # conserved by default (stress penetrates to the surface / is limiter-
-    # capped); it is redeposited in-column only when do_energy_conservation=True.
-    "conserves": ["energy"],
+    # Conserved quantity: NONE — the static INTERSECTION over all selectable
+    # sources (a contract must hold for every config a user can select). This is
+    # NOT because the default runtime path fails to conserve; it is because some
+    # selectable source does. Nuance (pinned in test_e3sm_cam_gwd_faithful.py):
+    #  - Orographic (c=0, the DEFAULT source) IS energy-conserving in-atmosphere:
+    #    a stationary mountain exchanges momentum without mechanical work, and the
+    #    code returns the resolved mean-flow KE it removes as heat BY CONSTRUCTION.
+    #    At the default use_discrete_ke_heating=False the closure is the
+    #    continuous rate dT_dt=-(u*du+v*dv)/c_pd, so c_pd*sum(rho*dT*dz)==eps_gwd
+    #    definitionally; with the E3SM discrete closure ON the heat equals the
+    #    DISCRETE resolved-KE change instead, and c_pd*sum(rho*dT*dz) ==
+    #    eps_gwd - 0.5*dt*int(rho*(du^2+dv^2))dz (eps_gwd stays the continuous
+    #    KE-removal-rate diagnostic — by design, not a leak).
+    #    Momentum is a surface sink (mountain drag), never conserved.
+    #  - Frontal / convective sources launch NONSTATIONARY spectral components
+    #    whose momentum AND energy come from an EXTERNAL, unbudgeted reservoir
+    #    (the front / convection) -> a one-way source, so momentum is not
+    #    conserved. Their DEFAULT thermal term is the GROUND-RELATIVE
+    #    dttke=sum_l c_l*gwut_l, which is the wave-energy-flux-divergence term,
+    #    NOT the irreversible conversion sum_l (c_l-ubm)*gwut_l (they differ by
+    #    ubm*gwut, pinned by test_frontal_dttke_intrinsic_switch) and can be
+    #    signed. So neither a resolved-KE->heat closure nor a total-energy law
+    #    holds across these sources -> a static ["energy"] claim is FALSE ->
+    #    conserves=["none"].
+    #  - config.dttke_use_intrinsic=True switches to the irreversible
+    #    (c-ubm)*gwut conversion; config.do_energy_conservation=True (C.-C. Chen
+    #    fixer, default OFF) forces the discrete air-column momentum+dse
+    #    finite-step residual to zero (a corrective below-source redistribution,
+    #    NOT a physical accounting of the wave/frontal source or boundary
+    #    fluxes). Neither is the shipped default.
+    "conserves": ["none"],
     "differentiable": True,
     "reference": (
         "McFarlane (1987) / Lindzen (1981) / Beres (2004); E3SM EAM "
@@ -212,56 +352,16 @@ def gw_oro_src(
     inv_rt = 1.0 / (rair * t)
     rho_mid = pmid * inv_rt                             # pmid/(rair*t)
 
-    # --- E3SM source-region selection (gw_oro.F90) ----------------------
-    # 1-based E3SM: start with k=pver always included, src_level=pver-1.
-    # Loop kk=pver-1..pver/2: include layer kk (and set src_level=kk-1) if
-    # hdsp > sqrt(zm(kk)*zm(kk+1)).  In 0-based top-down indexing the surface
-    # midpoint is index nlev-1; E3SM midpoint kk -> index kk-1; the pair
-    # zm(kk)*zm(kk+1) -> zm[kk-1]*zm[kk].  The bottom-half loop kk=pver-1..pver/2
-    # spans 0-based indices nlev-2 .. nlev//2-1.
-    k_idx = jnp.arange(nlev)
-    # geometric-mean height at the lower interface of midpoint index i:
-    # gm[i] = sqrt(zm[i-1]*zm[i]) for i>=1 (E3SM pair zm(kk)*zm(kk+1) at kk-1).
-    gm = jnp.sqrt(jnp.abs(zm[:, :-1] * zm[:, 1:]))     # (ncol, nlev-1): index i->pair(i,i+1)
-    # For 0-based midpoint index i in [nlev//2-1, nlev-2], E3SM tests
-    # hdsp > sqrt(zm[i]*zm[i+1]) == gm[i].
-    lo = (nlev // 2) - 1
-    in_loop = (k_idx >= lo) & (k_idx <= nlev - 2)      # (nlev,)
-    gm_full = jnp.concatenate([gm, gm[:, -1:]], axis=1)  # pad: index nlev-1 unused
-    penetrates = hdsp[:, None] > gm_full               # (ncol, nlev)
-    # include[i]: surface (nlev-1) always; loop levels if penetrates.
-    include = jnp.where(
-        k_idx[None, :] == (nlev - 1),
-        True,
-        in_loop[None, :] & penetrates,
-    )                                                   # (ncol, nlev) bool
-    w = include.astype(u.dtype) * dpm                   # dp-weights
-
-    # src_level (interface index 0..nlev): smallest included midpoint index
-    # minus... E3SM sets src_level=kk-1 (interface above the topmost included
-    # midpoint).  Topmost included midpoint index = min index where include.
-    big = nlev
-    top_inc = jnp.min(
-        jnp.where(include, k_idx[None, :], big), axis=1
-    )                                                   # (ncol,) midpoint idx
-    # interface above that midpoint = same index (top-down: interface i sits
-    # above midpoint i).  E3SM: src_level = (topmost kk) - 1 (1-based) ->
-    # 0-based interface index = top_inc.
-    src_level = top_inc.astype(jnp.int32)               # interface idx
-
-    # E3SM dpsrc = pint(pver) - pint(src_level): the continuous pressure
-    # interval from the surface interface to the source-top interface
-    # (gw_oro.F90:139).  For monotone columns this equals sum(included dpm)
-    # but the pressure-interval form is exactly E3SM (codex iter-1 #9).
-    pint_at_src = jnp.take_along_axis(
-        pint, src_level[:, None], axis=1
-    )[:, 0]                                              # (ncol,)
-    dpsrc = pint[:, nlev] - pint_at_src
-    dpsrc = jnp.where(dpsrc > 0.0, dpsrc, 1.0)
-    rsrc = jnp.sum(w * rho_mid, axis=1) / dpsrc
-    usrc = jnp.sum(w * u, axis=1) / dpsrc
-    vsrc = jnp.sum(w * v, axis=1) / dpsrc
-    nsrc = jnp.sum(w * nm, axis=1) / dpsrc
+    # --- E3SM source-region selection + dp-weighted averages -------------
+    # Factored into the shared ``oro_source.depth_averaged_oro_source``
+    # (gw_oro.F90:119-145; the one canonical implementation, reused by the
+    # lightweight mcfarlane scheme — GWD-recon G3).  See that module for the
+    # index-mapping commentary (E3SM 1-based kk loop -> 0-based masks,
+    # pressure-interval dpsrc, src_level = interface above topmost included
+    # midpoint).
+    rsrc, usrc, vsrc, nsrc, src_level = depth_averaged_oro_source(
+        u, v, rho_mid, hdsp, pint, dpm, zm, nm,
+    )
 
     mag = jnp.sqrt(usrc * usrc + vsrc * vsrc)
     safe = mag > 0.0
@@ -1341,6 +1441,7 @@ def e3sm_cam_gwd(
     frontgf_col: jax.Array | None = None,
     netdt_col: jax.Array | None = None,
     mfcc_table: jax.Array | None = None,
+    land_frac_col: jax.Array | None = None,
 ) -> GWDOutput:
     """Faithful E3SM/CAM gravity-wave drag (gw_drag_prof solver).
 
@@ -1367,6 +1468,15 @@ def e3sm_cam_gwd(
         documented analytic stand-in spectrum is used (NOT bit-faithful to
         Beres-2004); when ``None`` and ``use_stand_in_table`` is ``False`` a
         ``ValueError`` is raised.
+    land_frac_col : (ncol,) or None
+        Per-column land fraction in [0, 1] for the E3SM driver-level
+        orographic scaling ``utgw *= landfrac`` (gw_drag.F90:904-906 — the
+        oro drag is zeroed over ocean BEFORE the heating closure, so ocean
+        columns get neither drag nor heat).  Applied ONLY when
+        ``config.source == "orographic"`` — E3SM scales the oro tendencies
+        only; spectral (frontal/convective) sources ignore this argument,
+        matching the oracle.  ``None`` -> no scaling (legacy behaviour,
+        bit-identical).
 
     Returns
     -------
@@ -1426,8 +1536,13 @@ def e3sm_cam_gwd(
             config.frontal.front_spectrum_dc_resolution,
         )
         orographic_only = False
-        # E3SM tapers the frontal (CM) source by cos(lat) on structured grids.
-        do_taper = True
+        # E3SM sets the frontal cos(lat) polar taper BY DYCORE
+        # (gw_drag.F90:829-833: do_latitude_taper = .not.
+        # dycore_is('UNSTRUCTURED')): ON for structured lat-lon, OFF for the
+        # unstructured (SE-family) dycore.  Config-selectable here; the
+        # default True is the legacy/structured branch — see
+        # E3SMFrontalConfig.latitude_taper.
+        do_taper = config.frontal.latitude_taper
     elif config.source == "convective":
         if netdt_col is None:
             netdt_col = jnp.zeros((ncol, nlev), dtype=u.dtype)
@@ -1482,48 +1597,111 @@ def e3sm_cam_gwd(
     du_dt = utgw
     dv_dt = vtgw
 
-    # Temperature tendency from KE -> heat conversion.
+    # E3SM driver-level orographic land-fraction scaling (gw_drag.F90:904-906):
+    # ``utgw(:,k) = utgw(:,k) * cam_in%landfrac`` — the oro drag is zeroed
+    # over ocean.  ORDER MATTERS: E3SM scales the momentum tendencies BEFORE
+    # the heating closure at :908-913 (the closure reads the scaled ptend%u),
+    # so ocean columns get neither drag nor heat.  Oro source only; E3SM does
+    # NOT landfrac-scale the spectral (frontal/Beres) tendencies.
+    if land_frac_col is not None and config.source == "orographic":
+        lfrac = jnp.clip(
+            jnp.asarray(land_frac_col), 0.0, 1.0
+        ).astype(u.dtype)[:, None]
+        du_dt = du_dt * lfrac
+        dv_dt = dv_dt * lfrac
+
+    # Temperature tendency (thermal deposition).
     #
-    # Orographic (single c=0 wave): the kinetic energy lost by the mean flow
-    # is deposited locally, dT/dt = -(u*du + v*dv)/c_pd.
+    # Orographic (single c=0 wave): a stationary wave does no mechanical work,
+    # so the kinetic energy lost by the mean flow is deposited locally as heat.
+    # Two closures (config.use_discrete_ke_heating):
+    #   False (default): the CONTINUOUS-rate identity
+    #     dT/dt = -(u*du + v*dv)/c_pd (exact as dt -> 0).
+    #   True: the E3SM DISCRETE-step closure (gw_drag.F90:908-913, default
+    #     no-energy-fix branch; ttgw = 0 for the oro ngwv=0 call per
+    #     gw_common.F90:739):
+    #     dT/dt = -(du*(u + 0.5*dt*du) + dv*(v + 0.5*dt*dv))/c_pd,
+    #     which returns EXACTLY the discrete resolved-KE change
+    #     -[KE(u+dt*du) - KE(u)]/dt as heat, closing the discrete column
+    #     energy budget the way E3SM's does.  The continuous form over-heats
+    #     by 0.5*dt*(du^2+dv^2)/c_pd per step (O(10%) of local heating in
+    #     tndmax-limited layers at dt=1800 s).  STRUCTURAL DEPARTURE kept:
+    #     E3SM applies this closure once over the ACCUMULATED ptend of all
+    #     GW sources ("includes spectrum", gw_drag.F90:898-899); our
+    #     per-source calls close each source independently, so the
+    #     spectral-x-oro cross terms of |du_total|^2 are not represented.
     #
-    # Spectral (frontal / convective): the KE->thermal term is dttke.  The
-    # E3SM-3.0.1 oracle (gw_common.F90:727,
+    # Spectral (frontal / convective): dttke is the GROUND-RELATIVE
+    # wave-energy-flux-divergence term, NOT the irreversible (c-ubm)*gwut
+    # heating -- it is signed (cools where U>c>0) and is not the mean-flow KE
+    # removal rate eps_gwd. The E3SM-3.0.1 oracle (gw_common.F90:727,
     #   dttke(:,k) = dttke(:,k) + c(:,l) * gwut(:,k,l))
-    # uses ``sum_l c_l * gwut_l`` — faithfully reproduced below.  When
-    # ``config.do_eddy_diffusion`` is on, E3SM ALSO adds the dse-diffusion
-    # heating ``dttdf`` (ttgw = dttke + dttdf, gw_common.F90:731); the GW eddy
-    # diffusion of u, v, dse runs through the implicit tridiagonal solver.
+    # uses ``sum_l c_l * gwut_l`` — faithfully reproduced below.  E3SM adds
+    # the dse-diffusion heating ``dttdf`` UNCONDITIONALLY on the spectral
+    # path (ttgw = dttke + dttdf, gw_common.F90:731) and band-limits dttke —
+    # here both are opt-in via ``use_e3sm_spectral_heating`` (or the
+    # ``do_eddy_diffusion`` standalone addition supplies dttdf too).
     #
     # NOTE (cross-version): newer CAM/EAM trunk uses the intrinsic-frequency
     # form ``sum_l (c_l - ubm) * gwut_l`` instead (codex iter-2 #2).  We match
     # the pinned E3SM-3.0.1 oracle, not the trunk; the two differ by a
     # ``-ubm*gwut`` term.  Set ``config.dttke_use_intrinsic`` to switch.
     if config.source == "orographic":
-        dT_dt = -(u * du_dt + v * dv_dt) / cpair
+        if config.use_discrete_ke_heating:
+            dT_dt = -(
+                du_dt * (u + 0.5 * dt * du_dt)
+                + dv_dt * (v + 0.5 * dt * dv_dt)
+            ) / cpair
+        else:
+            dT_dt = -(u * du_dt + v * dv_dt) / cpair
     else:
         if config.dttke_use_intrinsic:
             ceff = c[:, None, :] - ubm[:, :, None]      # (ncol, nlev, nwav)
         else:
             ceff = c[:, None, :]
         dttke = jnp.sum(ceff * gwut, axis=2)            # (ncol, nlev)
+
+        # E3SM band-limits dttke to midpoints ktop+1..kbotbg (gw_common.F90:
+        # 726-728; ktop = 0 parameter, gw_drag.F90:72; kbotbg = the interface
+        # above 500 hPa, :346) — identical for the frontal source (whose
+        # tend_level IS kbotbg so gwut = 0 below), but a deep Beres source
+        # (tend_level = maxi below 500 hPa) deposits ground-relative wave
+        # heating below the band that E3SM does not.  Flagged
+        # (use_e3sm_spectral_heating); the band mask uses the SAME 0-based
+        # convention as gw_ediff's egwdffm mask (E3SM 1-based midpoints
+        # ktop+1..kbot -> ours ktop..kbot-1, i.e. ``k < kbot``).
+        if config.use_e3sm_spectral_heating:
+            pmean_b0 = jnp.mean(pmid, axis=0)
+            kbot_bg = jnp.clip(
+                jnp.argmin(jnp.abs(pmean_b0 - config.ediff_kbot_p)),
+                1, nlev - 1,
+            ).astype(jnp.int32)
+            band = (jnp.arange(nlev)[None, :] < kbot_bg).astype(u.dtype)
+            dttke = dttke * band
         dT_dt = dttke / cpair
 
         # ---- GW-induced eddy diffusion (gw_ediff + gw_diff_tend) ----
-        # Spectral path only.  Provenance (codex final-3): in E3SM, inside
-        # gw_drag_prof the effective diffusivity egwdffi is used by gw_diff_tend
-        # ONLY for the dry-static-energy heating term ``dttdf`` (ttgw =
-        # dttke + dttdf, gw_common.F90:721-731) and for constituents (qtgw); the
-        # diffusion of MOMENTUM (u, v) and temperature by egwdffi is applied
-        # DOWNSTREAM by the host vertical_diffusion scheme (egwdffi is exported
-        # as the EKGWSPEC diagnostic and summed into the model's eddy
-        # diffusivity).  For a self-contained GWD module we apply BOTH here: the
-        # E3SM-faithful dse heating ``dttdf`` (added to dT_dt), AND the
-        # u/v eddy diffusion that E3SM defers to vertical_diffusion (so the GW
-        # momentum eddy flux is not silently dropped when this module is used
-        # standalone).  The implicit tridiagonal solve reuses the shared
-        # thomas_solve and is validated against the E3SM LU oracle to ~5e-16.
-        if config.do_eddy_diffusion:
+        # E3SM PROVENANCE (gw_common.F90:708-731, corrected — the earlier
+        # docstring's "E3SM defers u/v/T eddy diffusion to the host
+        # vertical_diffusion" claim was FALSE): inside gw_drag_prof the
+        # spectral (ngwv > 0) path UNCONDITIONALLY runs gw_ediff, diffuses
+        # the constituents (qtgw) and dry static energy (``dttdf``), and
+        # applies ``ttgw = dttke + dttdf`` — there is no flag.  egwdffi is
+        # exported ONLY as the EKGWSPEC history diagnostic;
+        # vertical_diffusion never reads it, and E3SM NEVER diffuses u/v
+        # with it anywhere.  Two selectable behaviors here:
+        #   * use_e3sm_spectral_heating (faithful, default OFF): add the
+        #     unconditional dse-diffusion heating dttdf (no u/v diffusion —
+        #     matching E3SM).  Constituent qtgw is not represented (no q in
+        #     the GWD interface; declared required-inputs departure).
+        #   * do_eddy_diffusion (STANDALONE ADDITION, default OFF): also
+        #     diffuse u/v through egwdffi — physics E3SM does NOT contain,
+        #     kept for standalone use so the GW momentum eddy flux is not
+        #     silently dropped; plus the same dttdf.
+        # Both ON composes (band + dttdf once + u/v diffusion); dttdf is
+        # added exactly once.  The implicit tridiagonal solve reuses the
+        # shared thomas_solve, validated against the E3SM LU oracle ~5e-16.
+        if config.do_eddy_diffusion or config.use_e3sm_spectral_heating:
             ktop = 0
             # E3SM kbotbg = the bottom of the background-wave region (~500 hPa).
             # Keep the index a 0-d TRACED int32 (jnp.argmin, NOT int(...)) so the
@@ -1551,13 +1729,17 @@ def e3sm_cam_gwd(
             a, b, cc = gw_diff_tridiag_coeffs(
                 egwdffi, rhoi_kludge, pmid, rdpm, dt, gravit, ktop, kbot,
             )
-            # Diffuse u, v through the GW eddy diffusivity (constituent path).
-            du_diff = gw_diff_tend(u, a, b, cc, dt)
-            dv_diff = gw_diff_tend(v, a, b, cc, dt)
-            du_dt = du_dt + du_diff
-            dv_dt = dv_dt + dv_diff
+            if config.do_eddy_diffusion:
+                # STANDALONE ADDITION (no E3SM analog): diffuse u, v through
+                # the GW eddy diffusivity.
+                du_diff = gw_diff_tend(u, a, b, cc, dt)
+                dv_diff = gw_diff_tend(v, a, b, cc, dt)
+                du_dt = du_dt + du_diff
+                dv_dt = dv_dt + dv_diff
             # Dry static energy s = cpair*T + g*z; diffuse it and convert the
-            # dse tendency to a temperature tendency (dttdf).
+            # dse tendency to a temperature tendency (dttdf) — E3SM applies
+            # this UNCONDITIONALLY on the spectral path (ttgw = dttke +
+            # dttdf, gw_common.F90:721,731).
             dse = cpair * T + gravit * z_full
             dttdf = gw_diff_tend(dse, a, b, cc, dt)
             dT_dt = dT_dt + dttdf / cpair
@@ -1575,7 +1757,9 @@ def e3sm_cam_gwd(
             )
             dT_dt = dsdt / cpair
 
-    # Column dissipation (positive-definite: KE removed from the mean flow).
+    # Column mean-flow KE removal rate = -integral rho*(u*du+v*dv)*dz. Positive
+    # (dissipative) for the orographic path; for a spectral source it is SIGNED
+    # (negative where the spectrum accelerates the resolved flow toward c).
     dz = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
     eps_gwd = -jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
 

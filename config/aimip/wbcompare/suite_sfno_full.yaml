@@ -1,0 +1,21 @@
+# sfno_full-only training suite (stabilization retrain: lower LR via the
+# variant_sfno_full.yaml overlay). column_nn already trained; classical from the
+# dense run. Same base + ACE2 loss as suite_neural.yaml.
+base: config/aimip/aimip_era5.yaml
+cfg_overrides:
+  aimip_n_epochs: 12
+  eval_years: [2020]
+  loss:
+    residual_normalize: true
+    normalize_by_scale: false
+    multi_step_hours: [6, 12]
+    multi_step_weights: [1.0, 1.0]
+    w_T: 0.5
+    w_u: 0.5
+    w_v: 0.5
+    w_q: 0.5
+    w_ps: 0.3
+    level_weighting: "pressure"
+variants:
+  - sfno_full
+output_dir: results/aimip_wbcompare

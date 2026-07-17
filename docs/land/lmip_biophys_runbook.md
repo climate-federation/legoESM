@@ -87,7 +87,7 @@ Pick the one closest to your target, override individual fields with `-o`.
 
 ## Shipped machine profiles
 
-All under `configs/machines/`:
+All under `config/machines/`:
 
 | Profile | Scheduler | Env default | Resources |
 |---|---|---|---|
@@ -102,7 +102,7 @@ emitted into `run.sh`** — supply it on the qsub line:
 qsub -A UYAL0053 run.sh
 ```
 
-Add a new profile by dropping a YAML file into `configs/machines/`; the flag
+Add a new profile by dropping a YAML file into `config/machines/`; the flag
 picks it up by filename.
 
 ---
@@ -275,7 +275,7 @@ seasonal cycle, LAI 0–6).
 
 ```
 templates/land/biophysics/          — YAML templates (edit these to add experiments)
-configs/machines/                   — YAML machine profiles (mac, derecho, derecho_gpu)
+config/machines/                   — YAML machine profiles (mac, derecho, derecho_gpu)
 scripts/run/
   init_experiment.py                — template → experiment directory
   run_lmip_biophys.py               — the driver (`--config PATH --output-dir DIR`)

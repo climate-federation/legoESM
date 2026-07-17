@@ -386,7 +386,7 @@ class TestMPASFusedTendencies:
         """Run a single tendency eval and check it produces finite output."""
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             mpas_hydrostatic_tendencies,
             MPASPrimitiveEquationConfig,
         )

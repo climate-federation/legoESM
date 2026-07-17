@@ -23,10 +23,15 @@ from legoesm.ice.state import (
     SeaIceState,
     DynamicSeaIceState,
     init_dynamic_ice_state,
+    distribute_dynamic_state_to_categories,
     dynamic_to_slab,
     slab_to_dynamic,
 )
-from legoesm.ice.sea_ice import step_sea_ice, grid_supports_ice_dynamics
+from legoesm.ice.sea_ice import (
+    step_sea_ice,
+    grid_supports_ice_dynamics,
+    grid_supports_ice_transport,
+)
 from legoesm.ice.rheology import (
     ice_strength,
     strain_rates,
@@ -79,11 +84,13 @@ __all__ = [
     "SeaIceState",
     "DynamicSeaIceState",
     "init_dynamic_ice_state",
+    "distribute_dynamic_state_to_categories",
     "dynamic_to_slab",
     "slab_to_dynamic",
     # Main step function
     "step_sea_ice",
     "grid_supports_ice_dynamics",
+    "grid_supports_ice_transport",
     # Rheology
     "ice_strength",
     "strain_rates",

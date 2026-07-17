@@ -20,7 +20,6 @@ grid:
   vertical_coord: hybrid
 atmosphere:
   dynamics: hydrostatic        # canonical key -> ExperimentConfig.dycore.model_type
-  advection: ppm
   time_integrator: ssp_rk3
   dt_seconds: 450
   hyperdiffusion_coeff: 0.0

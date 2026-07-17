@@ -19,12 +19,98 @@ the cluster launch; the data-parallel gradient average is unit-tested separately
 """
 from __future__ import annotations
 
+import calendar
 import importlib.util
 from pathlib import Path
 
 import numpy as np
 
 _REPO = Path(__file__).resolve().parents[4]   # packages/ml/legoesm/training/ -> repo root
+
+
+def _resolve_n_days(cfg, yml):
+    """Training-window length [days] per train year (#1047 ask a).
+
+    Precedence: explicit ``cfg.n_days`` (CLI ``--n-days``) > YAML
+    ``n_training_days`` > 3 (the historical hardcoded default). ``--smoke``
+    always forces 1 (single-window wiring check). This replaced a hardcoded
+    ``n_days = 3`` in both ERA5 loaders that capped every WeatherBench arm at
+    ~60 samples/year and left the column-MLP data-starved (#1047 finding 2).
+    """
+    if getattr(cfg, "smoke", False):
+        return 1
+    n = getattr(cfg, "n_days", None)
+    if n is None:
+        n = yml.get("n_training_days", 3)
+    n = int(n)
+    if n < 1:
+        raise ValueError(f"n_days (training window) must be >= 1, got {n}")
+    return n
+
+
+def _resolve_windows(cfg, yml):
+    """Scattered training windows as ``[(year, day_offset, n_days), ...]`` or None.
+
+    Precedence: ``cfg.windows`` > YAML ``train_windows`` > None. ``None`` selects
+    the consecutive back-compat mode (the first ``n_days`` of each ``train_years``
+    entry). A window list instead scatters MANY SHORT windows across the calendar
+    -- the AIMIP scale config's ``(year, day_offset, n_days)`` house pattern --
+    so a WB arm sees independent synoptic scenes in every season rather than one
+    autocorrelated January block (#1047 finding 2 / design note 1). ``--smoke``
+    is honoured downstream (one window), so it is not special-cased here.
+    """
+    raw = getattr(cfg, "windows", None)
+    if raw is None:
+        raw = yml.get("train_windows")
+    if not raw:
+        return None
+    out = []
+    for w in raw:
+        if len(w) != 3:
+            raise ValueError(
+                f"train window must be (year, day_offset, n_days), got {w!r}")
+        year, off, nd = int(w[0]), int(w[1]), int(w[2])
+        if off < 0 or nd < 1:
+            raise ValueError(
+                f"train window needs day_offset>=0 and n_days>=1, got {w!r}")
+        # The IC days must stay within `year`: otherwise the window silently pulls
+        # samples from the NEXT year while still labelling them `year`, and the
+        # forcing calendar (DOY relative to year-01-01) is then wrong / leap-
+        # phase-shifted. Targets may cross New Year (i_ic + stride is only a few
+        # hours ahead); it is the IC span that is validated.
+        days_in_year = 366 if calendar.isleap(year) else 365
+        if off + nd > days_in_year:
+            raise ValueError(
+                f"train window ICs must stay within {year}: "
+                f"day_offset+n_days={off + nd} > {days_in_year} days, got {w!r}")
+        out.append((year, off, nd))
+    return out
+
+
+def _training_sample_indices(cfg, yml, times, snaps_per_day, stride):
+    """Yield ``(year, i_ic, i_tg)`` ERA5 index pairs for the training samples.
+
+    Shared by both the lat-lon and spectral loaders so the window logic lives in
+    ONE place. Scattered mode (``_resolve_windows`` -> a list) walks each
+    ``(year, day_offset, n_days)`` window; consecutive mode (default) walks the
+    first ``n_days`` days of each ``train_years`` entry. A pair whose target
+    index runs past the ERA5 record is skipped; ``cfg.smoke`` stops after the
+    first window (single-window wiring check, matching the prior behaviour).
+    """
+    windows = _resolve_windows(cfg, yml)
+    if windows is None:
+        n_days = _resolve_n_days(cfg, yml)
+        windows = [(int(y), 0, n_days) for y in yml["train_years"]]
+    for (year, day_offset, n_days) in windows:
+        base = int(np.searchsorted(times, np.datetime64(f"{year}-01-01")))
+        start = base + int(day_offset) * snaps_per_day
+        for d in range(int(n_days) * snaps_per_day):
+            i_ic, i_tg = start + d, start + d + stride
+            if i_tg >= len(times):
+                break
+            yield year, i_ic, i_tg
+        if getattr(cfg, "smoke", False):
+            break
 
 
 def _load_run_amip():
@@ -100,7 +186,7 @@ def _spectral_pe_config(yml):
     ``spectral: {semi_implicit: false}`` to opt back into the explicit
     integrator (then use an explicit-CFL-safe ``spectral.dt``).
     """
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
     spec = dict(yml.get("spectral", {}))
     return SpectralPEConfig(
@@ -143,7 +229,7 @@ def _build_mode_components_spectral(cfg, yml):
 
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         compute_sponge_factor, compute_spectral_filter,
     )
     from legoesm.training.neural_gcm_spectral import (
@@ -428,29 +514,22 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma):
     roll_h = rollout_hours(cfg, yml)
     stride = int(roll_h) // era5_cfg.dt_hours
 
-    n_days = 3 if not cfg.smoke else 1
     samples = []
-    for year in yml["train_years"]:
-        base = int(np.searchsorted(times, np.datetime64(f"{year}-01-01")))
-        for d in range(n_days * snaps_per_day):
-            i_ic, i_tg = base + d, base + d + stride
-            if i_tg >= len(times):
-                break
-            ic = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_ic), grid, sigma)
-            target = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_tg), grid, sigma)
-            sst_src = load_era5_slice(era5_cfg, i_ic)
-            sst = jnp.asarray(regrid_2d_to_gaussian(
-                sst_src.sst, sst_src.lat, sst_src.lon, grid)).reshape(-1)
-            doy_1based, sod = era5_time_to_forcing_calendar(times[i_ic], year)
-            forcing = {
-                "T_sfc": sst,
-                "sic": jnp.zeros_like(sst),
-                "day_of_year": jnp.asarray(doy_1based),
-                "seconds_of_day": jnp.asarray(sod),
-            }
-            samples.append((ic, target, forcing))
-        if cfg.smoke:
-            break
+    for year, i_ic, i_tg in _training_sample_indices(
+            cfg, yml, times, snaps_per_day, stride):
+        ic = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_ic), grid, sigma)
+        target = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_tg), grid, sigma)
+        sst_src = load_era5_slice(era5_cfg, i_ic)
+        sst = jnp.asarray(regrid_2d_to_gaussian(
+            sst_src.sst, sst_src.lat, sst_src.lon, grid)).reshape(-1)
+        doy_1based, sod = era5_time_to_forcing_calendar(times[i_ic], year)
+        forcing = {
+            "T_sfc": sst,
+            "sic": jnp.zeros_like(sst),
+            "day_of_year": jnp.asarray(doy_1based),
+            "seconds_of_day": jnp.asarray(sod),
+        }
+        samples.append((ic, target, forcing))
     return samples
 
 
@@ -479,28 +558,21 @@ def load_era5_samples(cfg, yml, grid, sigma):
     driver = _driver_for_ctx(config)
     ctx = driver._prepare_run_context(0, config.start_day, restore_carry=False)
 
-    n_days = 3 if not cfg.smoke else 1
     samples = []
-    for year in yml["train_years"]:
-        base = int(np.searchsorted(times, np.datetime64(f"{year}-01-01")))
-        for d in range(n_days * snaps_per_day):
-            i_ic, i_tg = base + d, base + d + stride
-            if i_tg >= len(times):
-                break
-            ic = era5_to_latlon_carry(load_era5_slice(era5_cfg, i_ic), grid, sigma)
-            target = era5_to_latlon_carry(load_era5_slice(era5_cfg, i_tg), grid, sigma)
-            sst_src = load_era5_slice(era5_cfg, i_ic)
-            sst = regrid_2d_to_gaussian(sst_src.sst, sst_src.lat, sst_src.lon, grid)
-            doy = float((times[i_ic] - np.datetime64(f"{year}-01-01"))
-                        / np.timedelta64(1, "D"))
-            forcing = pack_forcing(
-                sst=sst, sic=jnp.zeros_like(sst),
-                day_of_year=jnp.asarray(doy), seconds_of_day=jnp.asarray(0.0),
-                solar_weights=ctx["solar_weights"], s_0=ctx["current_s_0"],
-                o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"])
-            samples.append((ic, target, forcing))
-        if cfg.smoke:
-            break
+    for year, i_ic, i_tg in _training_sample_indices(
+            cfg, yml, times, snaps_per_day, stride):
+        ic = era5_to_latlon_carry(load_era5_slice(era5_cfg, i_ic), grid, sigma)
+        target = era5_to_latlon_carry(load_era5_slice(era5_cfg, i_tg), grid, sigma)
+        sst_src = load_era5_slice(era5_cfg, i_ic)
+        sst = regrid_2d_to_gaussian(sst_src.sst, sst_src.lat, sst_src.lon, grid)
+        doy = float((times[i_ic] - np.datetime64(f"{year}-01-01"))
+                    / np.timedelta64(1, "D"))
+        forcing = pack_forcing(
+            sst=sst, sic=jnp.zeros_like(sst),
+            day_of_year=jnp.asarray(doy), seconds_of_day=jnp.asarray(0.0),
+            solar_weights=ctx["solar_weights"], s_0=ctx["current_s_0"],
+            o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"])
+        samples.append((ic, target, forcing))
     return samples
 
 

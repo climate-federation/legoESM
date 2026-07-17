@@ -25,7 +25,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
     CDGridCompressibleEulerConfig,
     CDGridCompressibleEulerModel,
 )
@@ -144,7 +144,7 @@ def test_nh_async_halo_ast_regression():
     Catches a refactor that drops the async-halo dispatch
     silently."""
     src_path = legoesm_source_path(
-        "atmosphere/dynamics/compressible_euler_cdgrid.py"
+        "atmosphere/dynamics/gcm/compressible_euler_cdgrid.py"
     )
     src_text = src_path.read_text()
 

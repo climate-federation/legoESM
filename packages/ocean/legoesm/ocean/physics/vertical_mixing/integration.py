@@ -12,7 +12,10 @@ from legoesm.ocean.eos import (
 from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.state import OceanState, OceanTendencies
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
-from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+from legoesm.ocean.physics.vertical_mixing.config import (
+    VALID_VERTICAL_MIXING_SCHEMES,
+    VerticalMixingConfig,
+)
 from legoesm.ocean.physics.vertical_mixing.constant import constant_vertical_mixing
 from legoesm.ocean.physics.vertical_mixing.richardson import richardson_vertical_mixing
 from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
@@ -77,6 +80,16 @@ def make_vertical_mixing_physics(
             "requires implicit_vertical_mixing=True on the host model "
             "config."
         )
+    if (apply_diffusion
+            and getattr(config, "ddm", None) is not None
+            and config.ddm.enabled):
+        raise NotImplementedError(
+            "VerticalMixingConfig.ddm.enabled=True is not consumed by the "
+            "EXPLICIT vertical-mixing composition.  Double-diffusive mixing "
+            "is applied inside compute_vertical_K_profiles (separate salt "
+            "diffusivity) and requires implicit_vertical_mixing=True on the "
+            "host model config."
+        )
 
     if scheme == "none":
         return make_none_physics_fn()
@@ -92,7 +105,13 @@ def make_vertical_mixing_physics(
     elif scheme == "catke":
         return _make_catke(config, apply_diffusion=apply_diffusion)
     else:
-        raise ValueError(f"Unknown vertical mixing scheme: {scheme!r}")
+        # Same canonical source as the implicit K-profile dispatcher, so the
+        # explicit-composition factory and _vmix_K_profiles never drift apart on
+        # which schemes are selectable.
+        raise ValueError(
+            f"unknown vertical_mixing.scheme={scheme!r}; expected one of "
+            f"{sorted(VALID_VERTICAL_MIXING_SCHEMES)}"
+        )
 
 
 def _make_constant(config: VerticalMixingConfig,

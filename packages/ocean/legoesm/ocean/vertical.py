@@ -60,6 +60,22 @@ class OceanZStarCoordinate(NamedTuple):
         Reference layer thickness [m], shape (nlev,). Positive.
     dz_half_ref : array
         Distance between adjacent full levels [m], shape (nlev-1,).
+    linear_free_surface : bool
+        NEMO ``key_linssh``: thicknesses frozen at the eta=0 reference
+        (J eta-independent), diagnosed w without the z-star sigma
+        correction. Default False (full z*).
+    t_depth_ref : array or None
+        Optional EXACT positive T-point reference depths [m], shape
+        (nlev,).  ``None`` (default) means ``|z_full_ref|`` (the
+        cell-centre midpoint) is the T-point depth ladder — correct for
+        legoESM's own z* grid.  A fidelity bridge that must reproduce an
+        external model whose T-points are NOT the interface midpoints
+        (e.g. NEMO's analytic MI96 ``gdept_1d`` ≠ midpoint of
+        ``gdepw_1d``) supplies that model's exact T-depths here so the
+        ``nemo_trapezoid`` PGF quadrature reconstructs the identical
+        ``e3w`` (W-spacing) recurrence.  Read ONLY by the hydrostatic
+        pressure quadrature; ``dz_half_ref`` and every other operator
+        keep using the midpoint ``z_full_ref``.
     """
     n_levels: int
     H_max: float
@@ -67,6 +83,15 @@ class OceanZStarCoordinate(NamedTuple):
     z_half_ref: jnp.ndarray
     dz_ref: jnp.ndarray
     dz_half_ref: jnp.ndarray
+    t_depth_ref: jnp.ndarray | None = None
+    # NEMO key_linssh (LINEAR free surface): freeze the geometry at eta=0 —
+    # layer thicknesses NEVER stretch (J = H_bathy/H_max, eta-independent) and
+    # the diagnosed w skips the z-star sigma redistribution of deta/dt (NEMO
+    # sshwzv.F90:190-193 fixed-e3t continuity; w[0]=deta/dt, w[bottom]=0).
+    # eta still evolves via the barotropic solver and drives g*grad(eta).
+    # STATIC Python bool — gates are `if` branches (never jnp.where); the
+    # coordinate is constructor-captured, not traced.
+    linear_free_surface: bool = False
 
 
 def create_ocean_z_star(
@@ -152,7 +177,9 @@ def create_ocean_z_star(
     )
 
 
-def create_z_star_from_thicknesses(dz_ref_m) -> OceanZStarCoordinate:
+def create_z_star_from_thicknesses(
+    dz_ref_m, t_depth_ref_m=None,
+) -> OceanZStarCoordinate:
     """Build a z* coordinate from EXPLICIT reference layer thicknesses.
 
     Reproduces an external model's vertical grid EXACTLY -- pass another model's
@@ -171,6 +198,13 @@ def create_z_star_from_thicknesses(dz_ref_m) -> OceanZStarCoordinate:
     ----------
     dz_ref_m : 1-D array-like
         Reference layer thicknesses [m], top -> bottom, all > 0.
+    t_depth_ref_m : 1-D array-like or None
+        Optional EXACT positive T-point depths [m], shape (nlev,), stored
+        on the coordinate's ``t_depth_ref`` field for the fidelity PGF
+        quadrature (see :class:`OceanZStarCoordinate`).  ``None`` (default)
+        leaves ``t_depth_ref=None`` → the midpoint ``z_full_ref`` is used.
+        Pass an external model's true T-depths (e.g. NEMO ``gdept_1d``)
+        when they differ from the interface midpoint.
 
     Returns
     -------
@@ -201,6 +235,22 @@ def create_z_star_from_thicknesses(dz_ref_m) -> OceanZStarCoordinate:
     dz_ref = z_half_ref[:-1] - z_half_ref[1:]
     dz_half_ref = z_full_ref[:-1] - z_full_ref[1:]
 
+    t_depth_ref = None
+    if t_depth_ref_m is not None:
+        t_np = np.asarray(t_depth_ref_m, dtype=np.float64)
+        if t_np.ndim != 1 or t_np.size != n_levels:
+            raise ValueError(
+                f"t_depth_ref_m must be a 1-D array of length n_levels="
+                f"{n_levels}, got shape {t_np.shape}")
+        if not np.all(t_np > 0.0):
+            raise ValueError("t_depth_ref_m depths must all be > 0")
+        # Monotone-increasing: the PGF e3w recurrence uses gdept(k)-gdept(k-1) as
+        # a positive W-spacing; a non-monotone ladder would give a negative e3w
+        # and a silently nonphysical pressure gradient.
+        if not np.all(np.diff(t_np) > 0.0):
+            raise ValueError("t_depth_ref_m depths must be strictly increasing")
+        t_depth_ref = jnp.asarray(t_np, dtype=get_policy().control)
+
     return OceanZStarCoordinate(
         n_levels=n_levels,
         H_max=H_max,
@@ -208,6 +258,7 @@ def create_z_star_from_thicknesses(dz_ref_m) -> OceanZStarCoordinate:
         z_half_ref=z_half_ref,
         dz_ref=dz_ref,
         dz_half_ref=dz_half_ref,
+        t_depth_ref=t_depth_ref,
     )
 
 
@@ -274,6 +325,7 @@ def create_levy_stretched_z_star(
     dz_min: float,
     k_th: float,
     a_cr: float,
+    analytic_t_depths: bool = False,
 ) -> OceanZStarCoordinate:
     """Construct a Lévy (2010) / Madec-Imbard (1996) stretched z* grid.
 
@@ -293,6 +345,15 @@ def create_levy_stretched_z_star(
     NEMO note on indexing: the formula's "K" in the literature is
     the interface count (= n_levels + 1), NOT the cell count.
     See Madec & Imbard 1996 / Lévy et al. 2010.
+
+    ``analytic_t_depths=False`` (default, bit-identical legacy): cell
+    centres are interface midpoints.  ``True``: cell centres are the
+    ANALYTIC stretching formula at k+0.5 — exactly NEMO's ``mi96_1d``
+    ``pdept_1d`` (zgr_lib.F90: ``zt = jk + 0.5``), which on a stretched
+    grid is NOT the interface midpoint (up to ~4.6 m difference on the
+    DINO 36-interface ladder).  NEMO jpk convention: NEMO's ``jpk``
+    counts INTERFACE indices (its level jpk is a permanently-masked
+    dummy), so a NEMO config with jpk=36 maps to ``n_levels=35`` here.
     """
     if n_levels < 2:
         raise ValueError(f"n_levels must be >= 2, got {n_levels!r}")
@@ -324,7 +385,17 @@ def create_levy_stretched_z_star(
     z_half_ref = jnp.asarray(z_half_list)
 
     dz_ref = z_half_ref[:-1] - z_half_ref[1:]
-    z_full_ref = 0.5 * (z_half_ref[:-1] + z_half_ref[1:])
+    if analytic_t_depths:
+        # NEMO mi96_1d pdept_1d: the SAME stretching formula at k+0.5
+        # (one centre per cell, k = 1..n_levels; NEMO's dummy jpk-th
+        # centre below the last interface is not represented).
+        t_pos = [
+            _levy_depth_at_k(k + 0.5, a0, a1, a2, float(k_th), a_cr)
+            for k in range(1, n_levels + 1)
+        ]
+        z_full_ref = jnp.asarray([-t for t in t_pos])
+    else:
+        z_full_ref = 0.5 * (z_half_ref[:-1] + z_half_ref[1:])
     dz_half_ref = z_full_ref[:-1] - z_full_ref[1:]
 
     return OceanZStarCoordinate(
@@ -378,6 +449,12 @@ class OceanPartialCellCoordinate(NamedTuple):
     h_partial: jnp.ndarray
     bottom_level: jnp.ndarray
     is_active: jnp.ndarray
+    # Exact reference T-level depths (NEMO ``gdept_1d``; z*-only fidelity
+    # field) propagated from the wrapped z* coordinate so non-midpoint
+    # reference ladders keep their true centre geometry under partial
+    # cells (MLE nla10 + gate-N2 consumers; codex MLE-rhop r2).  ``None``
+    # on the model's own midpoint grids.
+    t_depth_ref: jnp.ndarray | None = None
 
 
 def create_partial_cell_coordinate(
@@ -478,6 +555,11 @@ def create_partial_cell_coordinate(
         h_partial=h_partial,
         bottom_level=bottom_level,
         is_active=is_active,
+        # Propagate the z*-only exact NEMO gdept so partial-cell wraps of a
+        # NEMO reference ladder keep true centre depths (nla10 tolerance,
+        # gate-N2 pressure geometry, and any future partial-cell PGF
+        # fidelity).  ``getattr``: plain midpoint z* coords carry None.
+        t_depth_ref=getattr(z_coord, "t_depth_ref", None),
     )
 
 
@@ -657,10 +739,17 @@ def compute_ocean_jacobian(
     -------
     array : Jacobian, shape (...).
     """
-    water_col = eta + H_bathy
-    if min_water_column_m is not None:
-        min_col = jnp.asarray(min_water_column_m, dtype=water_col.dtype)
-        water_col = jnp.maximum(water_col, min_col)
+    if getattr(z_coord, "linear_free_surface", False):
+        # NEMO key_linssh: the column NEVER stretches — J is the eta=0
+        # reference (H_bathy/H_max; ==1 on a flat bottom where H_bathy==H_max).
+        # No min-column clip: the fixed column is positive by construction.
+        water_col = jnp.broadcast_to(
+            jnp.asarray(H_bathy, dtype=jnp.asarray(eta).dtype), jnp.shape(eta))
+    else:
+        water_col = eta + H_bathy
+        if min_water_column_m is not None:
+            min_col = jnp.asarray(min_water_column_m, dtype=water_col.dtype)
+            water_col = jnp.maximum(water_col, min_col)
     if isinstance(z_coord, OceanPartialCellCoordinate):
         H_safe = jnp.maximum(H_bathy, 1.0e-10)
         return water_col / H_safe
@@ -766,6 +855,12 @@ def diagnose_w_from_flux_div(flux_div_k, z_coord=None,
     w_euler = jnp.pad(w_inner, (*pad_axes_w, (0, 1)))
 
     if z_coord is None:
+        return w_euler
+    if getattr(z_coord, "linear_free_surface", False):
+        # NEMO key_linssh w (sshwzv.F90:190-193): fixed-e3t continuity —
+        # w[..., 0] = deta/dt at the fixed z=0 surface, w[..., -1] = 0, NO
+        # sigma redistribution of deta/dt through the column (that z-star
+        # term is what pumps the surface tendency into the abyss).
         return w_euler
 
     deta_dt = w_euler[..., 0:1]

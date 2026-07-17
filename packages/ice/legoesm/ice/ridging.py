@@ -16,9 +16,8 @@ Ridge transfer function (Hibler 1980 / Lipscomb 2007 eq. 26):
 ridged ice from participating categories is spread uniformly in
 ``h`` between
 
-    H_min = 2 · h_part            (a minimum thickness multiplier)
-    H_max = μ_rdg · √(h_part)     (Hibler scaling on participating
-                                   thickness)
+    H_min = 2 · h_part                     (minimum thickness multiplier)
+    H_max = min(μ_rdg · √(h_part), H_star) (Hibler scaling, capped at H_star)
 
 Snow on participating ice is partly retained in ridges
 (``snow_fraction_retained``); the rest is dropped to the ocean as
@@ -29,6 +28,35 @@ category pair.  The implementation below operates column-wise via
 ``jax.vmap`` and is conservation-exact for ice area and ice
 volume (snow + salt mass conservation: see ``apply_ridging``
 docstring).
+
+Faithfulness
+------------
+``tests/ice/unit/test_ice_ridging_faithful.py`` pins:
+
+  * :func:`participation_weights` to round-off (rel 1e-9) against an independent
+    reimplementation of Lipscomb 2007 eq. 22 (``b_k = a_k exp(-h_k/e*) / sum``),
+    plus its defining properties (normalised to 1 with ice, thin-preferential
+    ``w/a`` strictly decreasing in ``h``, zero when ice-free, the ``e*`` divide
+    floor);
+  * the Hibler 1980 / Lipscomb eq. 26 ridge-thickness range via a single-donor
+    column with analytic ``h_part``: the per-receiver-bin area and volume match
+    the independent uniform-``g`` overlap integral on ``[H_min, H_max] =
+    [2 h_part, min(mu_rdg sqrt(h_part), H_star)]`` (mean thickness ``H_mean``),
+    including the ``H_star`` cap and the two numerical REGULARIZATIONS: when
+    ``mu sqrt(h_part) < 2 h_part`` (i.e. ``h_part > (mu/2)^2``) ``H_max`` is
+    floored to ``H_min + width``, and for an over-thick donor
+    (``H_min > hi[-1]``) the range collapses into the top category — both remain
+    volume-conserving;
+  * the DEFINING conservation invariants of :func:`apply_ridging` (the truth
+    tier): ice volume and bulk salt mass conserved, total area reduced by exactly
+    ``closing_rate*dt`` (CICE aksum) in the un-capped regime, saturating when the
+    total area is exhausted, donor snow deficit reported to the ocean (retained
+    fraction = ``snow_fraction_retained``), ridging pond water fully drained,
+    divergent columns a no-op; the effective production defaults are exercised by
+    a default-vs-explicit equivalence test.
+
+Closure constants (e_star, mu_rdg, H_star, snow_fraction_retained) are canaried
+against :class:`RidgingConfig` defaults (0.36 m, 4.0, 100 m, 0.5).
 """
 
 from __future__ import annotations
@@ -316,8 +344,11 @@ def apply_ridging(
     Conservation invariants (per column):
         * Total ice area is *reduced* by net convergence: ΔA = −closing_rate·dt
           (the aksum normalization scales the participating draw so the NET
-          closing matches the requested rate), UNLESS limited by the available
-          area ``a_total`` (all ice ridged), where the net closing saturates.
+          closing matches the requested rate) in the un-capped regime, UNLESS
+          limited by available area — either the total ``a_total`` (all ice
+          ridged) or a participating category's per-cat draw cap ``da <= a_cat``
+          (the compression factor is estimated before per-cat clipping) — where
+          the net closing saturates below the requested rate.
         * Total ice volume is conserved (donor volume = ridge volume).
         * Total snow volume is **not** conserved when
           ``snow_fraction_retained < 1`` — the difference is reported

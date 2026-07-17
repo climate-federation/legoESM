@@ -1,0 +1,81 @@
+#!/bin/bash
+# 3-VARIANT WeatherBench-2 comparison on NCAR Derecho (PBS Pro, A100).
+#
+# Trains the three run_aimip variants, scores each on the WB2 forecast scorecard
+# via the eval bridge, and plots all three + the published WB2 leaderboard:
+#   classical  — winner combo edmf/louis/mcfarlane/sundqvist/xu_randall + rrtmgp
+#   column_nn  — per-column MLP physics, aimip_radiation=none (NN is ALL physics)
+#   sfno_full  — full SFNO atmosphere emulator (replaces dycore+physics, dt_sfno)
+#
+# run_aimip is single-GPU spectral (NOT the data-parallel scale trainer), so this
+# runs on ONE GPU, variants sequential. classical (rrtmgp) dominates walltime.
+# For the pure-ML scale campaign (physics/neural_gcm/sfno via data-parallel), see
+# the sibling launcher run_wb_campaign.pbs.
+#
+# Submit:  qsub run_wb_aimip_compare.pbs
+# Env overrides:
+#   WB_SUITE       eval+train suite (default config/aimip/wbcompare/suite.yaml)
+#   WB_VARIANTS    comma list to train+eval (default classical,column_nn,sfno_full)
+#   WB_EVAL_YEAR   WB2 scorecard year (default 2020 — matches the SOTA CSV)
+#   WB_LEADS       forecast leads [h] (default 24,72,120,240)
+#   WB_SOTA_CSV    published-SOTA CSV (default config/wb/sota/wb2_headline_rmse.csv)
+#   WB_OUT_ROOT    output root (default results/aimip_wbcompare)
+#   WB_SKIP_TRAIN  set to 1 to eval+plot existing checkpoints only
+#PBS -A P08010000
+#PBS -N wb_aimip_compare
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=1:ncpus=64:ngpus=1:gpu_type=a100:mem=200GB
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -k eod
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR}"
+source scripts/cluster/scaling_derecho/_env.sh
+module load conda cuda
+export JAX_PLATFORMS=cuda
+export JAX_ENABLE_X64=1
+export XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+
+SUITE="${WB_SUITE:-config/aimip/wbcompare/suite.yaml}"
+VARIANTS="${WB_VARIANTS:-classical,column_nn,sfno_full}"
+EVAL_YEAR="${WB_EVAL_YEAR:-2020}"
+LEADS="${WB_LEADS:-24,72,120,240}"
+SOTA_CSV="${WB_SOTA_CSV:-config/wb/sota/wb2_headline_rmse.csv}"
+OUT_ROOT="${WB_OUT_ROOT:-results/aimip_wbcompare}"
+mkdir -p "${OUT_ROOT}/logs"
+echo "[$(date)] Derecho WB 3-variant compare | suite=${SUITE} variants=${VARIANTS} eval_year=${EVAL_YEAR}"
+
+# --- 1. TRAIN all requested variants (run_aimip suite; classical=rrtmgp slow) ---
+if [ "${WB_SKIP_TRAIN:-0}" != "1" ]; then
+  python -u scripts/run/run_aimip.py --suite "${SUITE}" --variants "${VARIANTS}"
+fi
+
+# --- 2. WB2 scorecard eval per variant (bridge reconstructs the training config
+#        from the suite, so eval matches training byte-for-byte) ---
+SCORECARD_ARGS=""
+IFS=',' read -ra VLIST <<< "${VARIANTS}"
+for V in "${VLIST[@]}"; do
+  CKPT=$(ls -t "${OUT_ROOT}/${V}"/epoch_*.eqx 2>/dev/null | head -1 || true)
+  if [ -z "${CKPT}" ]; then
+    echo "[warn] no checkpoint for ${V} under ${OUT_ROOT}/${V} — skipping its scorecard"
+    continue
+  fi
+  echo "[$(date)] EVAL ${V} (ckpt=${CKPT})"
+  python -u scripts/validate/run_aimip_wb2_eval.py \
+    --variant "${V}" --suite "${SUITE}" --checkpoint "${CKPT}" \
+    --eval-year "${EVAL_YEAR}" --leads "${LEADS}" \
+    --out "${OUT_ROOT}/${V}/scorecard.json"
+  SCORECARD_ARGS="${SCORECARD_ARGS} --scorecard ${V}=${OUT_ROOT}/${V}/scorecard.json"
+done
+
+# --- 3. Comparison plot: the three variants + SOTA leaderboard ---
+if [ -n "${SCORECARD_ARGS}" ]; then
+  SOTA_ARG=""
+  [ -f "${SOTA_CSV}" ] && SOTA_ARG="--sota-csv ${SOTA_CSV}"
+  echo "[$(date)] PLOT -> ${OUT_ROOT}/wb_scorecard.png"
+  python -u scripts/plot/plot_wb_scorecard.py ${SCORECARD_ARGS} ${SOTA_ARG} \
+    --out "${OUT_ROOT}/wb_scorecard.png"
+fi
+echo "[$(date)] done -> ${OUT_ROOT}/wb_scorecard.png"

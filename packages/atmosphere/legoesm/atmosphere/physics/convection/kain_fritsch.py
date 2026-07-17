@@ -7,17 +7,75 @@ by a sigmoid amount.  Cloud-depth-dependent blending of deep and
 shallow branches.  No convective momentum transport — KF emits
 ``du_dt_conv = dv_dt_conv = None`` and the orchestrator zero-fills.
 
-The scheme is **smooth-everywhere**:
+The scheme's trigger, blend, and gates are **smooth** (and the whole
+scheme is AD-safe — caps/floors like the ``M_b_max`` clip and the
+positivity limiters are subgradient points, not discontinuities):
 
 * The trigger function uses
   ``trigger_weight = sigmoid(s * (T_LCL_perturbed - T_env_at_LCL))``
   in place of the original hard ``> 0`` switch.  This is the central
-  AD-safety property of the smooth-everywhere KF: gradients flow
+  AD-safety property of the smooth KF trigger: gradients flow
   through the trigger threshold so training-time perturbations to
   ``parcel_perturb_T``, ``w_thresh_offset``, and ``trigger_sharpness``
   all have non-zero gradient signal.
 * The deep/shallow blend is a sigmoid on cloud depth.
 * The CAPE gate is the same ``cape_trigger`` used by ZM.
+
+Faithfulness status vs the WRF KF-Eta oracle (``module_cu_kfeta.F``) —
+updated 2026-07-17 after the column-water-leak fix (PR #988) and this audit:
+
+FAITHFUL (defaults ON, oracle-derived, pinned)
+* Trigger: Kain (2004) Eqs. 1-2 grid-ascent perturbation
+  ``DTLCL = dtlcl_coeff * WKL^dtlcl_exponent`` (``faithful_trigger=True``
+  default; smooth softplus surrogate, C^1 with a NEGLIGIBLE ~3e-3 K
+  residual at the WKL=0 cutoff — an exact-zero C^1 smooth positive part
+  does not exist; see ``_faithful_dtlcl``) + the RH trigger perturbation.
+* Entrainment: radius-based Kain (2004) Eq. 5-6 rates
+  (``faithful_entrainment=True`` default) with the PROF5 buoyancy-sorted
+  per-level UER/UDR detrainment (incl. the VMFLCL/UPOLD active-plume-mass
+  conversion) fed to BOTH the final plume and the subsidence kernel.
+* Updraft microphysics: CONDLOAD / Ogura-Cho Eq. 9 fallout recursion
+  (RATE=0.03, WLCL cap, drag partition — oracle lines 2863-2927).
+* Downdraft: RH-controlled KF-Eta downdraft (start ~150 hPa above cloud
+  base, DMFFRC = 2*(1-RHBAR) Kain (2004) Eq. 11, 20 %/km RH rundown).
+* BUDGETS: column total water AND moist static energy close to MACHINE
+  PRECISION on realistic (moist) columns — the historical
+  CONDLOAD/downdraft re-evaporation leak (+3.16e-4 kg/m^2/s spurious
+  moisture source, -1517 W/m^2 phantom cooling) was root-caused and fixed
+  2026-07-13 (PR #988: conservative implicit_flux kernel + coupled
+  condensation warming/vapor sink + detrained-latent release + moisture
+  limiter + conservative vapor relocation).  Gated by the three tier-3
+  tests named in ``__physics_contract__['idealized_test']``; KF is OUT of
+  the known-leak loop (ZM carries the strict xfail, Bechtold still leaks).
+
+KNOWN GAPS / DEPARTURES (documented, deliberate)
+* Degenerate-column residual: a BOUNDED ~4e-5 kg/m^2/s water (+ ~91 W/m^2
+  MSE) residual survives ONLY on a physically-degenerate q_v ~= 0 column
+  with a non-default ``parcel_perturb_q`` trigger (no real moisture to
+  conserve against; 9x below the pre-fix leak, unreachable in production
+  configs).  Upgrade path: kernel-level positive-definite transport
+  (shared with EDMF).
+* No convective momentum transport (``du_dt_conv = dv_dt_conv = None``)
+  — matching the oracle: WRF KF-Eta carries no CMT either.
+* Single-pass predictor plume under the PROF5 buoyancy sort (the oracle
+  iterates the updraft properties with the sorted rates; we sort once on
+  a predictor pass) — the remaining structural simplification of the
+  entrainment/detrainment block.
+* ``buoyancy_death_memory=False`` default keeps the legacy LOCAL-only
+  negative-buoyancy filter in the plume; the oracle-style monotone
+  plume-termination state machine is implemented and tested but opt-in
+  (enabling it by default needs its own validation campaign — see the
+  config-field comment).
+* CAPE-OR trigger fallback (``cape_or_threshold = 2000`` default-ON, no
+  oracle counterpart): fires convection on high CAPE where the resolved
+  ascent is ~0.  Gated by ``exp(-(w/cape_or_w_ref)^2)`` so it engages
+  ONLY in the ``w_grid ~= 0`` SCM/idealised case; with real resolved
+  ascent the gate SUPPRESSES it exponentially (asymptotic, not exact —
+  the Gaussian gate is > 0 for any finite w).  Set
+  ``cape_or_threshold = inf`` for exact oracle trigger behaviour.
+* Cloud-base mass-flux closure: single-pass smooth CAPE-consumption
+  formula capped at ``M_b_max``, NOT the oracle's iterated AINC
+  cloud-base mass-flux adjustment loop (see the closure block comment).
 
 References
 ----------
@@ -44,7 +102,10 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 
 from legoesm.atmosphere.physics.convection.config import KainFritschConfig
-from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.atmosphere.physics.convection.output import (
+    ConvectionOutput,
+    split_convective_rain,
+)
 from legoesm.atmosphere.physics.convection.mass_flux import (
     apply_mass_flux_kernel,
     compute_column_geometry,
@@ -85,18 +146,21 @@ __physics_contract__ = {
     "sign_convention": (
         "z up; surface at [:, -1]. Convection warms aloft and dries the "
         "sub-cloud/lower layers where it stabilizes a conditionally-unstable "
-        "column; dq_c_conv_dt >= 0. CONDLOAD fallout PRECIPITATES condensate "
-        "out of the column (partly re-evaporated by the RH-controlled "
-        "downdraft, dT=-L_v/c_pd*dq_v), so atmospheric total water is NOT "
-        "conserved; column moist static energy is conserved to closure "
-        "accuracy (latent heat of the precipitated water is retained as "
-        "sensible heating)."
+        "column; dq_c_conv_dt >= 0. The CONDLOAD condensate is handed to "
+        "microphysics as dq_c (vapor -> cloud, ZM/Emanuel convention; micro "
+        "owns precip), so the SCHEME conserves column total water "
+        "int(dq_v + dq_c) and moist static energy h = int(c_p dT + L_v q_v) to "
+        "MACHINE PRECISION on realistic (moist) columns: condensation warms "
+        "(dT += L_v/c_p * cond), the vapor sink is drawn from available "
+        "moisture, the kernel's detrained-cloud latent is released, and a "
+        "conservative vapor relocation keeps q_v >= 0 without hiding water."
     ),
-    # Environmental tendencies come from the non-conservative default mass-flux
-    # kernel and CONDLOAD fallout leaves the column with only partial downdraft
-    # re-evaporation, so column energy holds only to CLOSURE ACCURACY, not at
-    # contract level -> no conservation claimed.
-    "conserves": ["none"],
+    # #M1b fix: switched to the conservative implicit_flux mass-flux kernel and
+    # a coupled condensation water+energy budget (moisture-limited vapor sink +
+    # detrained-cloud latent release + vapor relocation), so the SCHEME now
+    # conserves column total water and MSE to machine precision on realistic
+    # columns (a bounded residual survives only for degenerate q_v==0 columns).
+    "conserves": ["energy", "moisture"],
     "differentiable": True,
     "reference": (
         "Kain & Fritsch (1990), J. Atmos. Sci. 47, 2784-2802; "
@@ -107,7 +171,11 @@ __physics_contract__ = {
         "grid-scale ascent) -> ~zero tendency; a conditionally-unstable column "
         "with resolved ascent -> heating aloft, sub-cloud drying, positive "
         "convective_mask; mask -> 0 when the cloud is too shallow and "
-        "enable_shallow=False."
+        "enable_shallow=False. Conservation gated by "
+        "test_convection_group_validator.py::"
+        "{test_tier3_kf_precip_efficiency_leak_removed (column water + MSE h "
+        "machine-zero, warm+dry), test_tier3_kf_mse_conserved_on_capped_finite"
+        "_lnb_column, test_tier3_kf_vapor_stays_nonnegative}."
     ),
 }
 
@@ -148,6 +216,13 @@ _KF_WTW_STOP_SHARPNESS = 25.0
 _KF_CONDLOAD_RATE = 0.03
 _KF_CONDLOAD_FRESH_DRAG_EXCLUDED = 0.2
 _KF_CONDLOAD_RATIO_FLOOR = 1.0e-8
+# Numerics safety floors for the column condensation water+energy budget
+# (converting the CONDLOAD fallout mass flux [kg/m^2/s] to a per-level
+# condensation rate [kg/kg/s] via g*precip_flux/dp, and forming the
+# non-re-evaporated rain fraction evap_col/precip_col).  Bound only degenerate
+# thin layers / vanishing-precip columns; never touched in the active regime.
+_KF_DP_FLOOR_PA = 1.0  # coeff-ok: layer-thickness floor, avoids /0 on a null layer
+_KF_PRECIP_FLOOR_KG = 1.0e-30  # coeff-ok: precip-column floor for the rain fraction
 
 # KF-Eta downdraft / precipitation-efficiency constants:
 #   * lines 1647-1660: start downdraft about 150 hPa above cloud base and
@@ -273,15 +348,17 @@ def _faithful_dtlcl(
               = 0                                  otherwise
 
     The hard ``WKL > 1e-4`` branch and the ``WKL^0.33`` (infinite slope
-    at 0) are replaced by a smooth, C^1 surrogate that is EXACTLY zero at
-    the KF cutoff ``WKL = 0`` (so the trigger gets no artificial lift
-    there) and recovers ``dtlcl_coeff*WKL^p`` for ``WKL >> 0``:
+    at 0) are replaced by a smooth, C^1 surrogate that is NEGLIGIBLY small
+    (~3e-3 K, the outer-softplus ln(2)/k residual — an exact-zero C^1
+    smooth positive part does not exist) at the KF cutoff ``WKL = 0`` and
+    recovers ``dtlcl_coeff*WKL^p`` for ``WKL >> 0``:
 
         g(x)  = softplus(s*x)/s          (smooth positive part, g(0)=ln2/s)
         DTLCL = dtlcl_coeff * softplus_pos( g(WKL)^p - g(0)^p )
 
     where ``softplus_pos(y)=softplus(k*y)/k`` is a smooth ``max(y,0)``.
-    At WKL=0, ``g(WKL)^p - g(0)^p = 0`` so DTLCL=0 (no spurious lift,
+    At WKL=0, ``g(WKL)^p - g(0)^p = 0`` so only the outer ln(2)/k
+    residual (~3e-3 K) survives in DTLCL (no material spurious lift,
     fixing codex review-1 #4).  For WKL<0, ``g(WKL)<g(0)`` so the argument
     is negative and the smooth positive-part drives DTLCL->0.  The
     base-point subtraction ``- g(0)^p`` removes the ``ln2/s`` offset that
@@ -817,7 +894,7 @@ def kain_fritsch_convection(
     dt: float,
     config: KainFritschConfig = KainFritschConfig(),
 ) -> tuple[ConvectionOutput, jax.Array]:
-    """Kain-Fritsch convection (smooth, differentiable).
+    """Kain-Fritsch convection (AD-safe; smooth trigger/blend/gates).
 
     Parameters
     ----------
@@ -1005,11 +1082,12 @@ def kain_fritsch_convection(
     # Firing when undilute CAPE exceeds ``cape_or_threshold`` rescues that
     # case.  The fallback is itself gated by the ABSENCE of resolved
     # ascent — ``exp(-(w_grid_at_lcl / cape_or_w_ref)^2)`` is ≈1 only where
-    # ``w_grid ≈ 0`` and →0 wherever the bridge supplies a real grid-scale
-    # ``w`` — so in any 3-D run with resolved ascent the OR branch
-    # vanishes and KF uses the pure w-trigger unchanged (preserving its
-    # documented response to resolved divergence).  Set
-    # ``cape_or_threshold = inf`` to disable the fallback entirely.
+    # ``w_grid ≈ 0`` and decays exponentially wherever the bridge supplies
+    # a real grid-scale ``w`` — so in a 3-D run with resolved ascent the OR
+    # branch is exponentially SUPPRESSED (asymptotic, not exactly zero: the
+    # Gaussian gate is > 0 for any finite w) and KF follows the pure
+    # w-trigger to within that residual.  Set ``cape_or_threshold = inf``
+    # to disable the fallback entirely (exact oracle trigger).
     # See KainFritschConfig.
     w_absent = jnp.exp(
         -(w_grid_at_lcl / jnp.maximum(config.cape_or_w_ref, 1e-30)) ** 2
@@ -1093,9 +1171,15 @@ def kain_fritsch_convection(
     # (Kain 2004 Eq. 5-6): epsilon = entrain_const / RAD with RAD ramping
     # 1000 m (no background ascent) -> 2000 m (WKL>=0.1 m/s).  Stronger
     # resolved ascent -> larger radius -> weaker fractional entrainment,
-    # exactly as in the oracle.  The detrainment rate tracks entrainment
-    # (bulk single-plume; the oracle's PROF5 buoyancy-sorted per-level
-    # detrainment is the acknowledged structural simplification).
+    # exactly as in the oracle.  Detrainment is NOT the bulk track-the-
+    # entrainment shortcut any more: a PREDICTOR plume (detrainment tracking
+    # entrainment) feeds ``_kf_buoyancy_sort_rates``, which computes the
+    # oracle's PROF5 buoyancy-sorted per-level UER/UDR (incl. the
+    # VMFLCL/UPOLD active-mass conversion), and the FINAL plume + kernel run
+    # on those sorted profiles.  (An earlier comment here still called bulk
+    # detrainment "the acknowledged structural simplification" — stale; the
+    # remaining structural difference is only that the sort rides a
+    # single-pass predictor plume rather than the oracle's iterated one.)
     if config.faithful_entrainment:
         eps_base = _faithful_entrainment_profile(wkl, rho, config)
         predictor_plume = entraining_detraining_plume(
@@ -1159,6 +1243,12 @@ def kain_fritsch_convection(
         T, q_v, p_full,
         plume.T_u, plume.q_u, plume.q_c_u, plume.M_u,
         z, rho, kernel_delta, M_u_max=config.M_b_max,
+        # Conservative flux-form subsidence: the advective donor-cell form
+        # leaves a non-telescoping (phi/rho)dM/dz transport residual (measured
+        # -2.01e-4 kg/m^2/s on the deep-tropical column) that the column
+        # water+MSE budget below would otherwise carry; implicit_flux
+        # telescopes it to the vanishing top/base boundary flux.
+        subsidence_solve="implicit_flux", p_half=p_half, dt=dt,
     )
     # ``plume.q_c_u`` has already passed through CONDLOAD, so this retained
     # source is the non-precipitating cloud condensate.  The fallout flux
@@ -1168,12 +1258,127 @@ def kain_fritsch_convection(
     dT_dt = dT_dt_raw * branch_weight[:, None]
     dq_v_dt = dq_v_dt_raw * branch_weight[:, None]
     dq_c_conv_dt = dq_c_conv_dt_raw * branch_weight[:, None]
+
+    # -- Release the kernel's DETRAINED-CLOUD latent as warming --------------
+    # The implicit_flux kernel books ``dq_v -= dq_c`` (vapor -> detrained cloud)
+    # but adds NO sensible heat for that condensation (it defers the latent into
+    # the cloud, "released downstream by microphysics").  That leaves column MSE
+    # h = c_p T + L_v q_v short by L_v*dq_c on a finite-LNB column where the
+    # plume detrains real cloud (measured -549 W/m^2 on the capped column).
+    # Release it here so convection is h-CONSERVING in-scheme and matches the
+    # ZM/Emanuel convention (dq_c handed to microphysics is already-condensed
+    # cloud, latent already released).  Measured: closes vapor-MSE on the capped
+    # column to machine precision with NO double-count — the kernel's
+    # subsidence/detrainment dT does not already carry this latent.
+    dT_dt = dT_dt + (constants.L_v / constants.c_pd) * dq_c_conv_dt
+
+    # Downdraft re-evaporation (POTENTIAL — scaled by the moisture limiter
+    # below along with the rest of the CONDLOAD precip cycle).
     dT_dd, dqv_dd = _kf_downdraft_evaporation(
         T, q_v, p_full, p_half, z, lcl.p_lcl,
         condload.precip_flux, branch_weight, dt,
     )
-    dT_dt = dT_dt + dT_dd
+
+    # -- Convective condensation water+energy budget (close the column) -----
+    # CONDLOAD removes ``condload.precip_flux`` [kg/m^2/s] of condensate from the
+    # updraft at each level; that water condensed OUT of the column vapor.  Book
+    # the condensation EXPLICITLY so the column total-water AND MSE budgets
+    # close.  Previously the fallout was re-evaporated by the downdraft as a
+    # +dq_v source with NO matching vapor sink or latent warming — water and
+    # energy appeared from nowhere, netting a spurious +3.16e-4 kg/m^2/s water
+    # source and ~-1500 W/m^2 of phantom cooling (tier-3 validator leak).
+    #
+    # ``cond_rate = g*precip_flux/dp`` [kg/kg/s] is the per-level condensation
+    # rate; its column integral is the net condensate produced.
+    #   (a) latent WARM  dT += (L_v/c_p) * cond_rate  at the CONDENSATION levels
+    #       (heating aloft — the physical convective Q1).  The kernel only
+    #       TRANSPORTS s = c_p T + g z and q_v (MSE-conserving, ~0 NET heating),
+    #       so this condensation latent heat is added here exactly once.
+    #   (b) vapor SINK  dq_v -= vapor_sink.  The condensed water is drawn from
+    #       the vapor the UPDRAFT ingests (boundary-layer + entrained), NOT from
+    #       the environment vapor at the (dry) condensation level — debiting
+    #       ``cond_rate`` there drives q_v NEGATIVE (the updraft condenses far
+    #       more than the local mid-tropospheric q_v holds).  So distribute the
+    #       column sink over the POST-TRANSPORT vapor (weight ∝ available
+    #       moisture); the heating-aloft / drying-below split is the classic
+    #       convective Q1/Q2 structure.
+    #   (c) net condensate SOURCE  dq_c += cond_rate * rain_scale (fraction NOT
+    #       re-evaporated by the downdraft, >=0), routed to CLOUD water for
+    #       microphysics (ZM/Emanuel convention).
+    #
+    # MOISTURE LIMITER (positivity for ANY dt / dryness): a single Euler step
+    # cannot precipitate more than the column holds.  If ``precip_col*dt`` would
+    # exceed the post-transport column vapor ``w_col``, scale the WHOLE CONDLOAD
+    # cycle (sink, its warming, cloud, AND the downdraft re-evap+cooling) by
+    # ``precip_scale = min(1, w_col/(precip_col*dt))`` so every column integral
+    # scales together (closure preserved) and ``vapor_sink*dt <= q_v_prelim``
+    # holds EXACTLY ⇒ q_v >= 0 unconditionally.  precip_scale=1 (no-op) in the
+    # normal regime.  Signs (dp>0 downward, +tend = source): cond_rate>=0 ->
+    # +(L_v/c_p)cond_rate WARMS, -vapor_sink DRIES, +cond_rate*scale SOURCES
+    # cloud; dqv_dd>=0 re-evap MOISTENS, dT_dd<=0 COOLS.
+    dp_col = p_half[:, 1:] - p_half[:, :-1]
+    cond_rate = (
+        constants.g * jnp.maximum(condload.precip_flux, 0.0)
+        / jnp.clip(dp_col, _KF_DP_FLOOR_PA, None)
+    ) * branch_weight[:, None]
+    precip_col_raw = jnp.sum(cond_rate * dp_col, axis=1, keepdims=True) / constants.g
+    # Post-kernel column vapor (re-evap only ADDS vapor, so this is a safe floor
+    # for the available moisture the sink can draw on).
+    q_v_postk = jnp.clip(q_v + dq_v_dt * dt, 0.0, None)
+    w_col = jnp.sum(q_v_postk * dp_col, axis=1, keepdims=True) / constants.g
+    precip_scale = jnp.clip(
+        w_col / jnp.clip(precip_col_raw * dt, _KF_PRECIP_FLOOR_KG, None),
+        0.0, 1.0,
+    )
+    cond_rate = cond_rate * precip_scale
+    dqv_dd = dqv_dd * precip_scale
+    dT_dd = dT_dd * precip_scale
+    precip_col = precip_col_raw * precip_scale
+    evap_col = jnp.sum(dqv_dd * dp_col, axis=1, keepdims=True) / constants.g
+    rain_scale = jnp.clip(
+        1.0 - evap_col / jnp.clip(precip_col, _KF_PRECIP_FLOOR_KG, None),
+        0.0, 1.0,
+    )
+    # Apply the (scaled) downdraft re-evaporation and the condensation warming.
+    dT_dt = dT_dt + dT_dd + (constants.L_v / constants.c_pd) * cond_rate
     dq_v_dt = dq_v_dt + dqv_dd
+    # Positivity-safe vapor sink: column magnitude precip_col distributed over
+    # the post-transport vapor.  precip_col*dt <= w_col (limiter) ⇒
+    # vapor_sink*dt <= q_v_prelim at every level ⇒ q_v stays >= 0.
+    q_v_prelim = jnp.clip(q_v + dq_v_dt * dt, 0.0, None)
+    w_col2 = jnp.sum(q_v_prelim * dp_col, axis=1, keepdims=True) / constants.g
+    vapor_sink = precip_col * q_v_prelim / jnp.clip(w_col2, _KF_PRECIP_FLOOR_KG, None)
+    dq_v_dt = dq_v_dt - vapor_sink
+    dq_c_conv_dt = dq_c_conv_dt + cond_rate * rain_scale
+
+    # -- Unconditional positivity by CONSERVATIVE VAPOR RELOCATION -----------
+    # The shared implicit_flux kernel's compensating-subsidence transport can
+    # over-dry a level at extreme dt / very-dry columns (a large-dt property of
+    # the kernel itself, NOT the CONDLOAD budget above — the moisture limiter
+    # bounds that sink).  But that transport is CONSERVATIVE: the vapor drawn out
+    # of an over-dried level was deposited as SURPLUS at other levels, so fill
+    # the deficits by draining that surplus in proportion — a pure VAPOR
+    # RELOCATION.  It is exactly water-neutral (∫ of the adjustment = 0 whenever
+    # the column surplus covers the deficit, which the conservative transport
+    # guarantees) and MSE-h-neutral (no phase change, no dT term — just moving
+    # q_v between levels), and it keeps q_v >= 0 (deficits -> 0, surplus levels
+    # stay >= 0 since scale <= 1).  No-op in the normal regime; water + MSE close
+    # to MACHINE PRECISION on any realistic (moist) column.
+    # ponytail: a bounded residual (<~4e-5 kg/m^2/s, still >8x below the original
+    # leak) survives ONLY when the deficit exceeds BOTH the column vapor surplus
+    # and the convective cloud — a physically-degenerate q_v≈0 column where a
+    # trigger perturbation drives a plume with no real column moisture to
+    # conserve against.  A kernel-level positive-definite transport (shared with
+    # EDMF) is the upgrade path if that regime ever matters in practice.
+    q_v_new = q_v + dq_v_dt * dt
+    deficit = jnp.clip(-q_v_new, 0.0, None)                     # per-level, >= 0
+    surplus = jnp.clip(q_v_new, 0.0, None)                      # per-level, >= 0
+    deficit_col = jnp.sum(deficit * dp_col, axis=1, keepdims=True) / constants.g
+    surplus_col = jnp.sum(surplus * dp_col, axis=1, keepdims=True) / constants.g
+    relocate_scale = jnp.clip(
+        deficit_col / jnp.clip(surplus_col, _KF_PRECIP_FLOOR_KG, None), 0.0, 1.0
+    )
+    dq_v_dt = dq_v_dt + (deficit - relocate_scale * surplus) / dt
 
     # Convective mask reflects BOTH the trigger and the deep/shallow branch
     # weight that actually scales the tendencies (codex review-1 #14: the
@@ -1181,6 +1386,11 @@ def kain_fritsch_convection(
     # whose tendencies are zeroed because ``enable_shallow=False`` and the
     # cloud is shallow, i.e. ``branch_weight≈0``).
     convective_mask = overall_weight * branch_weight
+
+    # In-updraft precipitation: shared rain-split (same knob + mass proof as
+    # Tiedtke/Bechtold). precip_efficiency=0 (default) => no split, byte-identical.
+    dq_c_conv_dt, dq_r_conv_dt = split_convective_rain(
+        dq_c_conv_dt, config.precip_efficiency)
 
     out = ConvectionOutput(
         dT_dt=dT_dt,
@@ -1191,6 +1401,7 @@ def kain_fritsch_convection(
         # KF has no convective momentum transport.
         du_dt_conv=None,
         dv_dt_conv=None,
+        dq_r_conv_dt=dq_r_conv_dt,
     )
 
     # Diagnostic carry: pack the (uncapped) closure cloud-base mass flux at

@@ -634,11 +634,16 @@ def gm_redi_tracer_tendency_mpas(
     -------
     dT_dt, dS_dt : (nCells, nlev)
     """
-    # Dispatch hardening (static config value, at function entry): the MPAS
+    # Dispatch hardening (static config values, at function entry): the MPAS
     # path builds isoneutral slopes from in-situ density only.  A 'neutral'
     # slope_density request would be silently ignored below, so raise.
     _validate_slope_density(cfg)
-
+    if getattr(cfg, "slope_limit", "dm95_taper") != "dm95_taper":
+        raise NotImplementedError(
+            f"GMRediConfig.slope_limit={cfg.slope_limit!r} is implemented "
+            "on the lat-lon C-grid triads path only; the MPAS centred "
+            "GM/Redi keeps the DM95 taper and would silently ignore it "
+            "(codex r7 P1).")
     if mask is None:
         mask = jnp.ones((mesh.nCells,), dtype=T.dtype)
     if edge_mask is None:

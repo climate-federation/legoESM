@@ -416,7 +416,7 @@ class TestStage12Guardrails:
         from legoesm.parallel.latlon_mpi import make_latlon_mpi_step
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationModel,
             CGridLatLonPrimitiveEquationConfig,
         )

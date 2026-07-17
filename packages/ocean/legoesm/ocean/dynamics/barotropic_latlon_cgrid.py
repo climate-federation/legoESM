@@ -53,6 +53,7 @@ from legoesm.ocean.dynamics.eta_floor import clamp_and_redistribute as _clamp_re
 from legoesm.ocean.dynamics.barotropic_common import (
     bebt_blend,
     compute_filter_weights,
+    compute_nemo_boxcar_centred_weights,
     compute_power_law_filter_weights,
     coriolis_at_faces,
     maxvel_clip,
@@ -60,6 +61,46 @@ from legoesm.ocean.dynamics.barotropic_common import (
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     depth_average_to_faces,
 )
+
+# --- NEMO dynspg_ts nn_bt_flt=3 (Demange 2019 dissipative FB) coefficients ---
+# (dynspg_ts.F90:536-553 velocity AB3 extrapolation; ts_bck_interp the 4-level
+# backward ssh interpolation; rn_bt_alpha = GYRE namelist_cfg 0.07.)
+_NEMO_BT_ALPHA = 0.07              # rn_bt_alpha [1]
+_NEMO_AB3_ZA = (1.781105, -1.06221, 0.281105)   # 3/2+bet, -(1/2+2bet), bet
+
+
+def nemo_ab3am4_coeff_arrays(n_loop: int, alpha: float = _NEMO_BT_ALPHA,
+                             ramp: bool = True):
+    """Per-substep coefficient arrays for the NEMO nn_bt_flt=3 scheme.
+
+    Returns ``(za, zb)`` with shapes ``(n, 3)`` / ``(n, 4)``: the AB3
+    mid-step velocity-extrapolation weights and the AM4 backward ssh
+    interpolation weights (Demange temporal dissipation, ts_bck_interp).
+
+    ``ramp=True`` applies NEMO's ``ll_init`` startup on the first two
+    substeps (forward, then AB2-AM3) — NEMO does this ONLY at cold start
+    (``nn_bt_flt=3`` sets ``ll_bt_av=F`` so ``ll_init=F`` except at
+    ``nit000`` without barotropic restart fields, dynspg_ts.F90:200-226).
+    Continuation windows (``state.bt_hist`` carried) use ``ramp=False``:
+    full AB3/AM4 rows from substep 0, extrapolating across the window
+    boundary exactly like NEMO's persistent ``ubb_e/ub_e/sshbb_e/sshb_e``.
+    """
+    import numpy as np
+
+    eps = 0.00976186 - 0.13451357 * alpha
+    gam = 0.08344500 - 0.51358400 * alpha
+    zb0 = 0.5 + gam + 2.0 * alpha + 2.0 * eps
+    za = np.tile(np.asarray(_NEMO_AB3_ZA, dtype=np.float64), (n_loop, 1))
+    zb = np.tile(np.asarray(
+        [zb0, 1.0 - zb0 - gam - eps, gam, eps], dtype=np.float64), (n_loop, 1))
+    if ramp:
+        # ll_init ramp (dynspg_ts:536-543 + ts_bck_interp jn==1/jn==2 branches)
+        za[0] = (1.0, 0.0, 0.0)
+        zb[0] = (1.0, 0.0, 0.0, 0.0)
+        if n_loop > 1:
+            za[1] = (1.0, 0.0, 0.0)
+            zb[1] = (1.0833333333333, -0.1666666666666, 0.0833333333333, 0.0)
+    return jnp.asarray(za), jnp.asarray(zb)
 
 
 def _depth_average_to_faces(
@@ -234,6 +275,8 @@ def _run_substep_loop(
     F_slow_eta, F_slow_u, F_slow_v,
     f_u, f_v, add_barotropic_coriolis,
     coeffs, local_subcycle_clamp,
+    linear_free_surface=False,
+    ab3_za=None, ab3_zb=None, ab3_hist=None,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -275,7 +318,6 @@ def _run_substep_loop(
     V_sum = jnp.zeros((n_lat + 1, n_lon), dtype=dtype)
 
     def substep_body(wts_i, carry):
-        w_i, w_tr_i = wts_i
         """Single barotropic substep with BEBT, slow forcing, MAXVEL, and cosine filter.
 
         Parameters
@@ -285,10 +327,24 @@ def _run_substep_loop(
         carry : tuple
             (eta, U_bar, V_bar, Hu_sum, Hv_sum, eta_sum, U_sum, V_sum)
         """
-        (eta_c, U_bar_c, V_bar_c,
-         Hu_sum_c, Hv_sum_c, eta_sum_c, U_sum_c, V_sum_c) = carry
+        if ab3_za is None:
+            w_i, w_tr_i = wts_i
+        if ab3_za is not None:
+            (eta_c, U_bar_c, V_bar_c,
+             Hu_sum_c, Hv_sum_c, eta_sum_c, U_sum_c, V_sum_c,
+             Ub_c, Ubb_c, Vb_c, Vbb_c, etab_c, etabb_c) = carry
+            w_i, w_tr_i, za_i, zb_i = wts_i
+        else:
+            (eta_c, U_bar_c, V_bar_c,
+             Hu_sum_c, Hv_sum_c, eta_sum_c, U_sum_c, V_sum_c) = carry
 
-        H_total_c = jnp.maximum(eta_c + H_bathy, min_water_col) * mask
+        if linear_free_surface:
+            # NEMO key_linssh barotropic continuity: FIXED column depth H
+            # (deta/dt = -div(H*U), traadv.F90 r1_hu_0 convention) — eta does
+            # not feed back into the transport depth.
+            H_total_c = H_bathy * mask
+        else:
+            H_total_c = jnp.maximum(eta_c + H_bathy, min_water_col) * mask
 
         # Forward: update eta from continuity (C-grid divergence)
         # Min-rule face depth (consistent with implicit solver and PE
@@ -314,8 +370,15 @@ def _run_substep_loop(
             )
             H_v = apply_north_fold(H_v, north, grid, north_mask=nmask)
 
-        flux_u = H_u * U_bar_c * u_mask
-        flux_v = H_v * V_bar_c * v_mask
+        if ab3_za is not None:
+            # NEMO nn_bt_flt=3: mid-step AB3 velocity extrapolation
+            # u^{m+1/2} = za1*u^m + za2*u^{m-1} + za3*u^{m-2}
+            U_mid = za_i[0] * U_bar_c + za_i[1] * Ub_c + za_i[2] * Ubb_c
+            V_mid = za_i[0] * V_bar_c + za_i[1] * Vb_c + za_i[2] * Vbb_c
+        else:
+            U_mid, V_mid = U_bar_c, V_bar_c
+        flux_u = H_u * U_mid * u_mask
+        flux_v = H_v * V_mid * v_mask
 
         # Accumulate transport (always box-filtered for volume conservation)
         Hu_sum_new = Hu_sum_c + w_tr_i * flux_u.astype(dtype)
@@ -337,13 +400,24 @@ def _run_substep_loop(
         # Blend new and old eta for the pressure gradient to damp fast
         # barotropic gravity waves.  bebt=0 → forward-backward (current),
         # bebt=0.2 → MOM6 default semi-implicit.
-        eta_pgf = bebt_blend(eta_new, eta_c, bebt)
+        if ab3_za is not None:
+            # NEMO ts_bck_interp: ssh' = zb0*ssh^{m+1} + zb1*ssh^m
+            #                          + zb2*ssh^{m-1} + zb3*ssh^{m-2}
+            # (the Demange temporal dissipation; replaces the bebt blend).
+            eta_pgf = (zb_i[0] * eta_new + zb_i[1] * eta_c
+                       + zb_i[2] * etab_c + zb_i[3] * etabb_c)
+        else:
+            eta_pgf = bebt_blend(eta_new, eta_c, bebt)
         deta_dx = gradient_x_cgrid(eta_pgf, grid).astype(dtype)
         deta_dy = gradient_y_cgrid(eta_pgf, grid).astype(dtype)
 
-        # Average V to u-points for Coriolis
-        V_west = jnp.roll(V_bar_c, 1, axis=1)
-        V_at_u = 0.25 * (V_bar_c[:-1] + V_bar_c[1:] + V_west[:-1] + V_west[1:])
+        # Average V to u-points for Coriolis.  In ab3am4 mode NEMO applies
+        # the 2D Coriolis to the EXTRAPOLATED mid-step velocities (both
+        # components simultaneously, dynspg_ts.F90:689); otherwise the FB pair.
+        _V_cor_src = V_mid if ab3_za is not None else V_bar_c
+        V_west = jnp.roll(_V_cor_src, 1, axis=1)
+        V_at_u = 0.25 * (_V_cor_src[:-1] + _V_cor_src[1:]
+                         + V_west[:-1] + V_west[1:])
         V_at_u = jnp.concatenate([V_at_u, V_at_u[:, 0:1]], axis=1)
 
         # Forward-backward Coriolis (Matsuno) + PGF + slow forcing.  The
@@ -362,7 +436,8 @@ def _run_substep_loop(
         # interior-then-pad_ns_vector_u pattern).  Serial bit-identical;
         # one cell pad per substep replaces one face pad per substep
         # (same collective count on every rank).
-        U_new_at_v = interp_u_to_vface_4pt(U_bar_new, grid)
+        _U_cor_src = U_mid if ab3_za is not None else U_bar_new
+        U_new_at_v = interp_u_to_vface_4pt(_U_cor_src, grid)
         _cor_v = (-f_v * U_new_at_v) if add_barotropic_coriolis else 0.0
         V_bar_new = (V_bar_c + dt_s * (
             _cor_v - g * deta_dy + F_slow_v
@@ -418,10 +493,50 @@ def _run_substep_loop(
         U_sum_new = U_sum_c + w_i * U_bar_new
         V_sum_new = V_sum_c + w_i * V_bar_new
 
+        if ab3_za is not None:
+            # rotate the AB3/AM4 histories (dynspg_ts:805-815)
+            return (eta_new, U_bar_new, V_bar_new,
+                    Hu_sum_new, Hv_sum_new, eta_sum_new, U_sum_new, V_sum_new,
+                    U_bar_c, Ub_c, V_bar_c, Vb_c, eta_c, etab_c)
         return (eta_new, U_bar_new, V_bar_new,
                 Hu_sum_new, Hv_sum_new, eta_sum_new, U_sum_new, V_sum_new)
 
-    init_carry = (eta, U_bar, V_bar, Hu_sum, Hv_sum, eta_sum, U_sum, V_sum)
+    if ab3_za is not None:
+        if ab3_hist is not None:
+            # NEMO continuation (dynspg_ts ll_init=F): now-values reset to the
+            # baroclinic state (ln_bt_fw), b/bb histories carried from the end
+            # of the PREVIOUS window — one continuous AB3 series across windows.
+            # DEVIATION form: ab3_hist holds (X_final - X_b, X_final - X_bb)
+            # of the previous window, reconstructed against THIS window's
+            # now-values. NEMO re-imposes the stp2d barotropic mean on the 3D
+            # velocity after every stage (stprk3_stg.F90:440 zub correction),
+            # so its raw-carried histories never see a window-boundary jump;
+            # legoESM's implicit vmix/bottom drag shift the depth mean after
+            # the solve, and a raw carry would feed that jump into the AB3
+            # extrapolation (x1.78 amplification) every window — pumping a
+            # spurious deep barotropic mode. Deviation form is identical to
+            # NEMO's raw carry when the mean is preserved (NEMO's case) and
+            # jump-transparent when it is not.
+            (dU_b, dU_bb, dV_b, dV_bb, deta_b, deta_bb) = (
+                h.astype(dtype) for h in ab3_hist)
+            Ub0 = U_bar - dU_b
+            Ubb0 = U_bar - dU_bb
+            Vb0 = V_bar - dV_b
+            Vbb0 = V_bar - dV_bb
+            etab0 = eta - deta_b
+            etabb0 = eta - deta_bb
+        else:
+            # cold start: histories = window-start values; with the ll_init
+            # ramp rows 0-1 these never reach a full-AB3 row (NEMO-exact).
+            Ub0 = Ubb0 = U_bar
+            Vb0 = Vbb0 = V_bar
+            etab0 = etabb0 = eta
+        init_carry = (eta, U_bar, V_bar, Hu_sum, Hv_sum, eta_sum, U_sum,
+                      V_sum, Ub0, Ubb0, Vb0, Vbb0, etab0, etabb0)
+        _xs = (w_filter, w_transport, ab3_za, ab3_zb)
+    else:
+        init_carry = (eta, U_bar, V_bar, Hu_sum, Hv_sum, eta_sum, U_sum, V_sum)
+        _xs = (w_filter, w_transport)
 
     if config.barotropic.differentiable_barotropic:
         # scan path: pass (averaging, transport) weights as xs per substep
@@ -430,11 +545,14 @@ def _run_substep_loop(
             return new_carry, None
 
         finals, _ = jax.lax.scan(
-            scan_body, init_carry, xs=(w_filter, w_transport), length=n_loop,
+            scan_body, init_carry, xs=_xs, length=n_loop,
         )
     else:
         # fori_loop path: index into the filter + transport weights
         def fori_body(i, carry):
+            if ab3_za is not None:
+                return substep_body(
+                    (w_filter[i], w_transport[i], ab3_za[i], ab3_zb[i]), carry)
             return substep_body((w_filter[i], w_transport[i]), carry)
 
         finals = jax.lax.fori_loop(0, n_loop, fori_body, init_carry)
@@ -455,14 +573,31 @@ def _compute_weights(config, n_substeps: int, dtype):
     For box/cosine the transport weights are NO LONGER a flat 1/n: they are the
     continuity-consistent SM2005 tail-sum ``tail_j/(n·w_total)`` returned by
     compute_filter_weights, so the discrete continuity invariant
-    ``div(Hu_avg) == (eta_old - eta_avg)/dt`` (which the flux-form tracer step
+    ``div(Hu_avg) == (eta_old - eta_avg)/dt`` — exact when the eta floor does
+    not bind (the clamp breaks local telescoping; global mass is restored by
+    the post-loop redistribute) — (which the flux-form tracer step
     needs to preserve a uniform tracer) holds for EVERY filter — the flat 1/n
     broke it for both box (~95%) and cosine (~99%).
     """
-    if config.barotropic.barotropic_time_filter == "power_law":
+    if config.barotropic.barotropic_time_filter == "nemo_ab3am4":
+        # NEMO nn_bt_flt=3 (ll_bt_av=F): NO time averaging of the state (the
+        # final substep IS the answer; dissipation is temporal, via the AM4
+        # backward ssh interpolation). Tracer transports are the PLAIN mean
+        # (ts_wgt ll_av=F secondary weights are uniform), which telescopes
+        # continuity exactly: div(Hu_avg) == (eta_old - eta_final)/dt.
+        w_filter = jnp.zeros((n_substeps,), dtype=dtype)      # sums unused
+        w_total = jnp.asarray(1.0, dtype=dtype)
+        w_transport = jnp.full((n_substeps,), 1.0 / n_substeps, dtype=dtype)
+        n_loop = n_substeps
+    elif config.barotropic.barotropic_time_filter == "power_law":
         w_filter, w_total, w_transport, n_loop = compute_power_law_filter_weights(
             n_substeps, dtype,
         )
+    elif config.barotropic.barotropic_time_filter == "nemo_boxcar_centred":
+        # NEMO dynspg_ts ln_bt_fw=F + nn_bt_flt=1 (forward-frame
+        # reduction; see compute_nemo_boxcar_centred_weights).
+        w_filter, w_total, w_transport, n_loop = (
+            compute_nemo_boxcar_centred_weights(n_substeps, dtype))
     else:
         use_cosine_filter = config.barotropic.barotropic_time_filter == "cosine"
         w_filter, w_total, w_transport = compute_filter_weights(
@@ -568,18 +703,24 @@ def barotropic_substeps_latlon_cgrid(
     # ``(... + F_slow_u) * u_mask``) — so closed/land faces receive nothing.
     # Feature-gated on the STATIC config bool (CLAUDE.md feature-gating exception)
     # AND a supplied traced model time: disabled / no-time => bit-identical.
-    _tf_cfg = getattr(config, "tidal_forcing", None)
-    if _tf_cfg is not None and _tf_cfg.enabled and t_seconds is not None:
-        from legoesm.ocean.physics.tidal_forcing import tidal_acceleration
-        _a_tide_x, _a_tide_y = tidal_acceleration(grid, t_seconds, _tf_cfg, g=g)
-        F_slow_u = F_slow_u + _a_tide_x.astype(F_slow_u.dtype)
-        F_slow_v = F_slow_v + _a_tide_y.astype(F_slow_v.dtype)
+    from legoesm.ocean.physics.tidal_forcing import apply_tidal_forcing
+    F_slow_u, F_slow_v = apply_tidal_forcing(
+        F_slow_u, F_slow_v, grid, t_seconds,
+        getattr(config, "tidal_forcing", None), g=g)
 
     # Depth-averaged velocity.  Cast h_k to _dt because z_coord.sigma_w
     # may be float64 (jnp.linspace default under x64), which would
     # promote U_bar/V_bar and break the fori_loop carry-type invariant.
+    # NEMO key_linssh: depth-average weights use the FIXED reference
+    # thicknesses (dynspg_ts.F90:471 ``zhup2_e = hu_0``, r1_hu_0 convention).
+    # For z-star this is a defensive no-op (compute_ocean_jacobian already
+    # discards eta under linssh); it is load-bearing for the partial-cell
+    # coordinate, whose compute_layer_thickness branch ignores the flag
+    # (pre-existing inconsistency, vertical.py:685-692).
+    _h_eta = (jnp.zeros_like(eta)
+              if getattr(z_coord, 'linear_free_surface', False) else eta)
     h_k = compute_layer_thickness(
-        eta, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
+        _h_eta, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
     ).astype(_dt)
     U_bar, V_bar = _depth_average_to_faces(
         u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,
@@ -594,8 +735,24 @@ def barotropic_substeps_latlon_cgrid(
     w_filter, w_total, w_transport, n_loop = _compute_weights(
         config, n_substeps, eta.dtype)
 
-    (eta_f, U_bar_f, V_bar_f,
-     Hu_sum_f, Hv_sum_f, eta_sum_f, U_sum_f, V_sum_f) = _run_substep_loop(
+    _ab3 = config.barotropic.barotropic_time_filter == "nemo_ab3am4"
+    if _ab3:
+        # Cross-window AB3/AM4 substep histories (NEMO restart state
+        # ubb_e/ub_e/vbb_e/vb_e/sshbb_e/sshb_e): None on the first step
+        # ⇒ NEMO cold-start ll_init ramp; carried tuple afterwards ⇒ full
+        # AB3/AM4 rows continuing the substep series across the window
+        # boundary (dynspg_ts.F90:200-226, 806-808). Static Python gate on
+        # pytree structure — same pattern as the prognostic state.tke seed.
+        _ab3_hist = getattr(state, "bt_hist", None)
+        _ab3_za, _ab3_zb = nemo_ab3am4_coeff_arrays(
+            n_loop, ramp=_ab3_hist is None)
+        # cast to the state dtype: f64 coefficients would silently promote the
+        # f32 carry and break the scan carry-type invariant.
+        _ab3_za = _ab3_za.astype(eta.dtype)
+        _ab3_zb = _ab3_zb.astype(eta.dtype)
+    else:
+        _ab3_za = _ab3_zb = _ab3_hist = None
+    _finals = _run_substep_loop(
         eta, U_bar, V_bar,
         dt_s=dt_s, n_loop=n_loop, w_filter=w_filter, w_transport=w_transport,
         grid=grid, config=config, g=g, H_bathy=H_bathy, mask=mask,
@@ -605,7 +762,11 @@ def barotropic_substeps_latlon_cgrid(
         f_u=f_u, f_v=f_v, add_barotropic_coriolis=add_barotropic_coriolis,
         coeffs=coeffs,
         local_subcycle_clamp=config.barotropic.barotropic_local_subcycle_clamp,
+        linear_free_surface=getattr(z_coord, 'linear_free_surface', False),
+        ab3_za=_ab3_za, ab3_zb=_ab3_zb, ab3_hist=_ab3_hist,
     )
+    (eta_f, U_bar_f, V_bar_f,
+     Hu_sum_f, Hv_sum_f, eta_sum_f, U_sum_f, V_sum_f) = _finals[:8]
 
     # Time-averaged barotropic transport: w_transport already carries the full
     # continuity-consistent normalisation — the SM2005 tail-sum
@@ -615,10 +776,18 @@ def barotropic_substeps_latlon_cgrid(
     Hu_avg = Hu_sum_f
     Hv_avg = Hv_sum_f
 
-    # Time-averaged eta and velocity (cosine or box filtered)
-    eta_avg = eta_sum_f / w_total
-    U_bar_avg = U_sum_f / w_total
-    V_bar_avg = V_sum_f / w_total
+    if _ab3:
+        # NEMO nn_bt_flt=3: the new state is the FINAL substep value (no time
+        # averaging); Hu_avg above is the plain substep mean (uniform
+        # w_transport), continuity-consistent with eta_f by telescoping.
+        eta_avg = eta_f
+        U_bar_avg = U_bar_f
+        V_bar_avg = V_bar_f
+    else:
+        # Time-averaged eta and velocity (cosine or box filtered)
+        eta_avg = eta_sum_f / w_total
+        U_bar_avg = U_sum_f / w_total
+        V_bar_avg = V_sum_f / w_total
 
     # SOTA-local split-explicit: the per-substep clamp was LOCAL (no allreduce);
     # restore GLOBAL mass conservation with ONE redistribute call on the
@@ -644,6 +813,17 @@ def barotropic_substeps_latlon_cgrid(
         u=state.u.replace(data=u_new),
         v=state.v.replace(data=v_new),
     )
+    if _ab3 and hasattr(state, "bt_hist"):
+        # store the end-of-window (b, bb) histories in DEVIATION form
+        # (X_final - X_b, X_final - X_bb) for the next window (finals
+        # positions 8-13: Ub, Ubb, Vb, Vbb, etab, etabb after the final
+        # dynspg_ts:806-808 rotation; finals 0-2: eta_f, U_bar_f, V_bar_f).
+        # See the reconstruction comment in _run_substep_loop.
+        state_new = state_new._replace(bt_hist=(
+            _finals[1] - _finals[8], _finals[1] - _finals[9],
+            _finals[2] - _finals[10], _finals[2] - _finals[11],
+            _finals[0] - _finals[12], _finals[0] - _finals[13],
+        ))
     return state_new, (Hu_avg, Hv_avg)
 
 
@@ -860,14 +1040,15 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
 
     # Tide on the EXTENDED geometry (analytic in the grid — no exchange
     # needed; owned rows are bit-identical to the standard path's values).
-    _tf_cfg = getattr(config, "tidal_forcing", None)
-    if _tf_cfg is not None and _tf_cfg.enabled and t_seconds is not None:
-        from legoesm.ocean.physics.tidal_forcing import tidal_acceleration
-        with local_halo_pads():
-            _a_tide_x, _a_tide_y = tidal_acceleration(
-                grid_ext, t_seconds, _tf_cfg, g=g)
-        Fsu_ext = Fsu_ext + _a_tide_x.astype(Fsu_ext.dtype)
-        Fsv_ext = Fsv_ext + _a_tide_y.astype(Fsv_ext.dtype)
+    from legoesm.ocean.physics.tidal_forcing import apply_tidal_forcing
+    # Wide-halo path: the equilibrium tide is evaluated on the EXTENDED band
+    # geometry, so the acceleration call must run under local_halo_pads(). The
+    # single-owner wrapper does the enabled/t_seconds gate, masking contract and
+    # the carry-invariant dtype cast; only the halo-pad context is band-specific.
+    with local_halo_pads():
+        Fsu_ext, Fsv_ext = apply_tidal_forcing(
+            Fsu_ext, Fsv_ext, grid_ext, t_seconds,
+            getattr(config, "tidal_forcing", None), g=g)
 
     eta_floor_ext = min_water_col - H_ext
     area_ext = grid_ext.area.astype(_dt)
@@ -902,6 +1083,8 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
                 # NEVER a per-substep global redistribute on the extended
                 # band (halo overlap would double-count in the allreduce).
                 local_subcycle_clamp=True,
+                linear_free_surface=getattr(
+                    z_coord, "linear_free_surface", False),
             )
         (eta_ext_f, U_ext_f, V_ext_f,
          Hu_k, Hv_k, eta_sum_k, U_sum_k, V_sum_k) = finals

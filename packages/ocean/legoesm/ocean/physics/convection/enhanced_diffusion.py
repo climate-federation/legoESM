@@ -149,9 +149,12 @@ def convective_K_A_flag(
         A = cfg.nu_bg + (cfg.nu_conv - cfg.nu_bg) * sig
         flag = sig
     else:
-        K = jnp.where(N2 < 0.0, cfg.K_conv, cfg.K_bg)
-        A = jnp.where(N2 < 0.0, cfg.nu_conv, cfg.nu_bg)
-        flag = jnp.where(N2 < 0.0, 1.0, 0.0)
+        # NEMO zdfevd fires where N² < n2_threshold (default 0.0; NEMO GYRE
+        # uses -1e-12 to ignore marginally-neutral interfaces — see cfg doc).
+        _thr = getattr(cfg, "n2_threshold", 0.0)
+        K = jnp.where(N2 < _thr, cfg.K_conv, cfg.K_bg)
+        A = jnp.where(N2 < _thr, cfg.nu_conv, cfg.nu_bg)
+        flag = jnp.where(N2 < _thr, 1.0, 0.0)
 
     # Zero mixing + flag on dry interfaces (no mixing through land).
     K = jnp.where(dry_iface, 0.0, K)

@@ -1,6 +1,6 @@
 """CLI: spin off a forced column LES per worst column + write the coefficients.
 
-Thin driver around :mod:`legoesm.atmosphere.dynamics.column_les` (the importable
+Thin driver around :mod:`legoesm.atmosphere.dynamics.les.column_les` (the importable
 library): load the worst-column manifest + an AMIP restart, run a forced plane
 LES for each flagged column, and write the diagnosed closure coefficients for the
 feedback field.  The library lives in the package so production code + tests
@@ -70,14 +70,14 @@ def main(argv: list[str] | None = None) -> int:
     library (CLAUDE.md).
     """
     import numpy as np
-    from legoesm.atmosphere.dynamics.column_les import (
+    from legoesm.atmosphere.dynamics.les.column_les import (
         ColumnLESConfig,
         ColumnLESSetup,
         coefficient_value,
         process_column,
         run_forced_les,
     )
-    from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.column_les_diagnosis import (
         column_les_realism_breakdown,
     )
     from legoesm.driver.restart import load_restart

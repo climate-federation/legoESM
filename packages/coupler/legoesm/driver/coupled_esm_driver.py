@@ -18,6 +18,7 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
+from legoesm.driver.air_sea_consistency import validate_air_sea_consistency
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.coupled_config import CoupledConfig
 from legoesm.diagnostics.energy_budget import area_weighted_mean
@@ -53,6 +54,39 @@ def enable_diurnal_surface_land(land_cfg):
     if cfg.carbon.scheme != "differland":   # Farquhar needs the differland LAI
         cfg = cfg._replace(carbon=CarbonConfig(scheme="differland"))
     return cfg
+
+
+def assert_land_tile_reachable(land_mode, f_land_mode, f_land) -> None:
+    """Raise if a land model is configured but its tile has zero area everywhere.
+
+    The driver-level invariant on the MATERIALIZED land fraction, the residue the
+    CONFIG-level CLI guard (``run_coupled.apply_land_runoff_scheme``) documents it
+    cannot see: ``land_mode != "none"`` builds land physics, yet ``f_land`` comes
+    out identically zero, so the entire land tile is silently dead. ``f_land`` is
+    a fraction in ``[0, 1]``, so ``max(f_land) == 0`` iff there is no land in any
+    cell -- the ``from_ocean`` all-wet-ocean-mask path and the ``analytical``
+    degenerate-grid (no latitude) fall-to-zeros path, neither visible to any
+    config predicate.
+
+    ``f_land_mode == "zero"`` is EXCLUDED: that is the explicit
+    aquaplanet-with-slab-land request (``--preset aquaplanet --land-scheme slab``;
+    ``run_coupled.py``), where a zero land area is intended, not an accident.
+
+    Pure -> unit-testable; the driver calls it once at coupler-init after
+    materialising ``f_land``."""
+    if land_mode == "none" or f_land_mode == "zero":
+        return
+    # f_land >= 0 everywhere by construction, so max <= 0 <=> all cells zero.
+    if float(jnp.max(f_land)) <= 0.0:
+        raise ValueError(
+            f"land_mode={land_mode!r} builds a land model but the materialized "
+            f"land fraction is zero everywhere (f_land_mode={f_land_mode!r}): "
+            f"the land tile is silently dead. This is the from_ocean "
+            f"all-wet-ocean-mask or the analytical degenerate-grid (no latitude) "
+            f"residue that no config-level predicate can see. Set "
+            f"f_land_mode='zero' if you intend an aquaplanet, or supply a grid "
+            f"latitude / an ocean mask that actually contains land."
+        )
 
 
 def _flatten_pytree_to_npz(state, prefix: str) -> dict:
@@ -159,6 +193,7 @@ class CoupledESMDriver:
     ):
         self.atm_config = atm_config
         self.coupled_cfg = coupled_config or CoupledConfig()
+        validate_air_sea_consistency(atm_config, coupler_config)
         self._atm = ModelDriver(atm_config, output_dir=output_dir)
         self._coupler_config = coupler_config
         self._ice_config = ice_config
@@ -782,12 +817,56 @@ class CoupledESMDriver:
         if cfg.use_pft and cfg.land_mode != "none":
             land_param_provider = self._build_pft_provider(shape_2d)
 
+        # Optional spun-up land carbon IC (the finidat global_carbon_ic.npz):
+        # INGEST the seeded per-cell 8-pool CarbonState + the per-cell permafrost
+        # phi so the coupled run starts carbon at its mapped equilibrium and
+        # MAINTAINS the seeded permafrost SOC (phi -> make_coupler's f_perma
+        # protection), instead of cold-starting carbon and decomposing the seed.
+        # Only meaningful for the multilayer differland carbon column; a carbon IC
+        # with slab / carbon-off land is a caller error (fail loud, never a silent
+        # no-op).  ""/None (default) => cold-start + no protection (byte-identical).
+        carbon_override = None
+        land_soil_frozen_fraction = None
+        carbon_ic_path = getattr(cfg, "carbon_ic_path", "")
+        if carbon_ic_path:
+            import math
+
+            from legoesm.land.carbon.global_init import load_finidat_carbon_ic
+            from legoesm.land.config import MultiLayerLandConfig as _MLLC
+            if not (isinstance(land_cfg, _MLLC)
+                    and land_cfg.carbon.scheme == "differland"):
+                raise ValueError(
+                    f"carbon_ic_path={carbon_ic_path!r} requires multilayer land "
+                    "with the differland carbon scheme (land_mode='multilayer', "
+                    f"carbon active); got land_config {type(land_cfg).__name__} / "
+                    f"carbon scheme {land_cfg.carbon.scheme!r}.")
+            if self._atm._grid_lat is None or self._atm._grid_lon is None:
+                raise ValueError(
+                    "carbon_ic_path needs the atmosphere grid lat/lon to grid-"
+                    "match the finidat; the atmosphere exposes none.")
+            ncol = int(math.prod(shape_2d))
+            lat_deg = np.rad2deg(np.asarray(self._atm._grid_lat)).reshape(-1)
+            lon_deg = np.rad2deg(np.asarray(self._atm._grid_lon)).reshape(-1)
+            carbon_override, land_soil_frozen_fraction = load_finidat_carbon_ic(
+                carbon_ic_path, expect_ncol=ncol,
+                target_lat_deg=lat_deg, target_lon_deg=lon_deg)
+            if carbon_override is None:
+                raise ValueError(
+                    f"carbon_ic_path={carbon_ic_path!r} is not a carbon finidat "
+                    "(missing the 8 CarbonState pool fields); expected a "
+                    "global_carbon_ic.npz from build_global_carbon_ic.py.")
+            logger.info(
+                "  Land carbon IC: seeded %d-column CarbonState from finidat %s "
+                "(permafrost phi %s)", ncol, carbon_ic_path,
+                "threaded" if land_soil_frozen_fraction is not None else "absent")
+
         # Build coupler step function
         self._step_surface = make_coupler(
             coupler_cfg, land_cfg, ice_cfg, lake_cfg,
             lat=self._atm._grid_lat,
             grid=self._atm.grid,
             land_param_provider=land_param_provider,
+            land_soil_frozen_fraction=land_soil_frozen_fraction,
         )
 
         # Initialize surface state.  Optionally warm-start the soil at the
@@ -799,7 +878,8 @@ class CoupledESMDriver:
             soil_kwargs["T_soil_init"] = self._atm.state.T.data[..., -1]
             logger.info("  Soil warm-start: T_soil init = atm near-surface air T")
         self._sfc_state = init_surface_state(
-            shape_2d, land_config=land_cfg, **soil_kwargs,
+            shape_2d, land_config=land_cfg, carbon_override=carbon_override,
+            **soil_kwargs,
         )
 
         # Tile fractions
@@ -878,6 +958,12 @@ class CoupledESMDriver:
             f_land=f_land,
             f_lake=jnp.zeros(shape_2d, dtype=_sd),
         )
+
+        # Driver-level invariant on the MATERIALIZED land fraction (the residue
+        # the CONFIG-level CLI helper apply_land_runoff_scheme documents it
+        # cannot catch): a land model configured yet f_land identically zero =
+        # a silently dead land tile.
+        assert_land_tile_reachable(cfg.land_mode, cfg.f_land_mode, f_land)
 
         land_frac = float(jnp.mean(f_land))
         pft_str = " (PFT)" if land_param_provider is not None else ""

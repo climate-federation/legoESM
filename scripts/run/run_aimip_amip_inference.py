@@ -76,7 +76,7 @@ def _merged_cfg(suite_path: Path, variant: str = "classical") -> dict:
 
 
 def _build_spec_cfg(cfg: dict):
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
     from legoesm.training.losses import LossConfig
     from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
 
@@ -173,7 +173,7 @@ def main():
     )
 
     from legoesm import constants
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         compute_spectral_filter, compute_sponge_factor, spectral_pe_to_grid,
     )
     from legoesm.atmosphere.physics.combined import PhysicsConfig
@@ -296,7 +296,7 @@ def main():
         from legoesm.training.neural_gcm_spectral import spectral_rollout
 
         if args.variant == "column_nn":
-            from legoesm.atmosphere.physics.learned_column import (
+            from legoesm.atmosphere.physics.neural_physics import (
                 build_column_physics,
             )
             from legoesm.training.neural_gcm_spectral import (

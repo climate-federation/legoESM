@@ -1,6 +1,6 @@
 """Single-column (standalone) driver for the legoESM land surface.
 
-The land counterpart of :class:`legoesm.atmosphere.scm.SingleColumnModel` and
+The land counterpart of :class:`legoesm.atmosphere.forcing.scm.scm.SingleColumnModel` and
 :class:`legoesm.ocean.scm.OceanColumnModel`: a minimal driver that runs the land
 *brick* on its own — init state, prescribed atmospheric forcing, time loop,
 history — so the land model can be exercised **independently of the coupler**

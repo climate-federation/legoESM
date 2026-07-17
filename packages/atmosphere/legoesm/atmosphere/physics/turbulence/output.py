@@ -41,6 +41,15 @@ class TurbulenceOutput(NamedTuple):
         Friction velocity [m/s], shape (ncol,).
     h_pbl : jax.Array
         Diagnosed PBL height [m], shape (ncol,).
+    cloud_fraction : jax.Array or None
+        Optional sub-grid LIQUID cloud fraction [-] diagnosed from the scheme's
+        own PDF (CLUBB ADG1 double-Gaussian; clubb_lite single-Gaussian
+        ``0.5 erfc(-s/(sqrt2 sigma_s))``), shape (ncol, nlev).  ``None`` (the
+        default) for schemes that carry no PDF cloud closure (louis, tke, ...),
+        in which case radiation keeps using the grid-scale cloud scheme
+        (sundqvist / xu_randall).  A moist higher-order closure's cloud fraction
+        is physically less overcast than the RH-diagnosed one over a saturated
+        marine BL; ``cloud_scheme="clubb"`` routes THIS field to RRTMGP.
     """
     du_dt: jax.Array
     dv_dt: jax.Array
@@ -52,3 +61,4 @@ class TurbulenceOutput(NamedTuple):
     lhflx: jax.Array
     ustar: jax.Array
     h_pbl: jax.Array
+    cloud_fraction: jax.Array | None = None

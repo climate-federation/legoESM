@@ -37,7 +37,7 @@ from legoesm.grids.vertical import (
 from legoesm import constants
 
 from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     spectral_pe_to_grid,
 )
@@ -134,6 +134,21 @@ def gwd_carries_spectrum(scheme: str) -> bool:
     predicate is defined in exactly one place.
     """
     return any(p in _GWD_COMPOSABLE_STATEFUL for p in scheme.split("+"))
+
+
+# Orographic members accept the per-column ``h_topo_col`` launch amplitude
+# (subgrid orography stddev). ``e3sm_cam`` shares the orographic launch
+# signature; matches the factories' ``scheme_name in (...)`` orographic test.
+_GWD_OROGRAPHIC_LAUNCH = _GWD_OROGRAPHIC_PARTS + ("e3sm_cam",)
+
+
+def gwd_scheme_is_orographic(scheme: str) -> bool:
+    """True when ``scheme`` (single or ``+``-composite) has an orographic member.
+
+    Shared predicate for the compiled ``physics_pipeline`` h_topo_col path so
+    "does this scheme launch from subgrid orography?" is defined once.
+    """
+    return any(p in _GWD_OROGRAPHIC_LAUNCH for p in str(scheme).split("+"))
 
 
 def _validate_gwd_composite(scheme: str) -> None:
@@ -427,10 +442,17 @@ def _make_hydrostatic_gwd(
             )
         elif is_orographic:
             h_topo_col = _extract_subgrid_topo_stddev(grid, ncol)
+            extra = {}
+            if scheme_name == "e3sm_cam":
+                # E3SM driver-level oro landfrac scaling (gw_drag.F90:904-906);
+                # only e3sm_cam_gwd accepts the kwarg.  Absent grid attribute
+                # -> None -> no scaling (legacy behaviour).
+                extra["land_frac_col"] = _extract_land_frac(grid, ncol)
             gwd_out = gwd_fn(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config,
                 h_topo_col=h_topo_col,
+                **extra,
             )
         else:
             gwd_out = gwd_fn(
@@ -476,6 +498,24 @@ def _extract_subgrid_topo_stddev(grid, ncol):
     their scalar ``config.h_topo`` (legacy behaviour).
     """
     raw = getattr(grid, "subgrid_topo_stddev", None)
+    if raw is None:
+        return None
+    return jnp.asarray(raw).reshape(-1)[:ncol]
+
+
+def _extract_land_frac(grid, ncol):
+    """Return a per-column land fraction in [0, 1], or ``None``.
+
+    The E3SM/CAM GWD driver scales the OROGRAPHIC momentum tendencies by
+    the land fraction (``utgw *= cam_in%landfrac``, gw_drag.F90:904-906)
+    BEFORE the heating closure, zeroing oro drag (and its heat) over
+    ocean.  This helper looks for a per-column land fraction stored on
+    the grid (canonical attribute name ``land_frac``, matching the
+    coupler surface-type field).  When the attribute is absent we return
+    ``None`` so ``e3sm_cam_gwd`` applies no scaling (legacy behaviour,
+    bit-identical) — mirroring ``_extract_subgrid_topo_stddev``.
+    """
+    raw = getattr(grid, "land_frac", None)
     if raw is None:
         return None
     return jnp.asarray(raw).reshape(-1)[:ncol]
@@ -578,10 +618,15 @@ def _make_mpas_gwd(
             )
         elif is_orographic:
             h_topo_col = _extract_subgrid_topo_stddev(mesh, nCells)
+            extra = {}
+            if scheme_name == "e3sm_cam":
+                # E3SM driver-level oro landfrac scaling (gw_drag.F90:904-906).
+                extra["land_frac_col"] = _extract_land_frac(mesh, nCells)
             gwd_out = gwd_fn(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config,
                 h_topo_col=h_topo_col,
+                **extra,
             )
         else:
             gwd_out = gwd_fn(
@@ -806,6 +851,7 @@ def _make_spectral_pe_gwd(
     scheme_name, gwd_fn, scheme_config = get_gwd_fn(gwd_config)
     is_prognostic = scheme_name == "prognostic_spectral"
     is_ml = scheme_name == "ml_emulator"
+    is_orographic = gwd_scheme_is_orographic(scheme_name)
     # Composite (issue #834): sum multiple sources; thread the spectrum when a
     # prognostic_spectral part is present.
     is_combined = "+" in scheme_name
@@ -866,9 +912,10 @@ def _make_spectral_pe_gwd(
 
         if is_combined:
             # Composite GWD (#834): sum orographic + non-orographic; thread the
-            # spectrum when present.  Orographic parts use the scalar
-            # ``config.h_topo`` (h_topo_col=None), matching this factory's
-            # single-scheme orographic path.
+            # spectrum when present.  Forward the per-column subgrid orography
+            # to an orographic member (else it silently falls back to the scalar
+            # config.h_topo though the driver loaded an SSO field for this grid).
+            h_topo_col = _extract_subgrid_topo_stddev(grid, ncol)
             spec_in = (
                 _combined_spec_in(scheme_config, phys_state, ncol)
                 if combined_spectrum else None
@@ -876,6 +923,7 @@ def _make_spectral_pe_gwd(
             gwd_out, spec_new = gwd_fn(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config, spec_in,
+                h_topo_col=h_topo_col,
             )
             if combined_spectrum:
                 gwd_spectrum_out = spec_new
@@ -908,6 +956,20 @@ def _make_spectral_pe_gwd(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config,
                 _ml_model_cache[0],
+            )
+        elif is_orographic:
+            h_topo_col = _extract_subgrid_topo_stddev(grid, ncol)
+            extra = {}
+            if scheme_name == "e3sm_cam":
+                # E3SM driver-level oro landfrac scaling (gw_drag.F90:904-906);
+                # only e3sm_cam_gwd accepts the kwarg.  Absent grid attribute
+                # -> None -> no scaling (legacy behaviour).
+                extra["land_frac_col"] = _extract_land_frac(grid, ncol)
+            gwd_out = gwd_fn(
+                u_col, v_col, T_col, p_full_col, p_half_col,
+                z_full, z_half, rho, lat, dt, scheme_config,
+                h_topo_col=h_topo_col,
+                **extra,
             )
         else:
             gwd_out = gwd_fn(

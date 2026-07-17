@@ -94,6 +94,52 @@ def test_barotropic_solver_rejects_bad_choice(monkeypatch):
         rd._parse_args()
 
 
+def test_momentum_advection_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--momentum-advection", "weno7"])
+    args = rd._parse_args()
+    assert args.momentum_advection == "weno7"
+
+
+def test_momentum_advection_default_none_and_rejects_bad(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().momentum_advection is None
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--momentum-advection", "bogus"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
+def test_coriolis_scheme_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--coriolis-scheme", "matsuno_split"])
+    args = rd._parse_args()
+    assert args.coriolis_scheme == "matsuno_split"
+
+
+def test_coriolis_scheme_default_none_and_rejects_bad(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().coriolis_scheme is None
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--coriolis-scheme", "leapfrog"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
+def test_barotropic_slow_forcing_ab2_flag_parses(monkeypatch):
+    """Tri-state: None (card value) / 'on' / 'off' — the FE-barotropic-Coriolis
+    bisect lever (the 'oceananigans'-card blowup discriminator)."""
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().barotropic_slow_forcing_ab2 is None
+    monkeypatch.setattr(
+        sys, "argv", ["run_dino", "--barotropic-slow-forcing-ab2", "off"])
+    assert rd._parse_args().barotropic_slow_forcing_ab2 == "off"
+    monkeypatch.setattr(
+        sys, "argv", ["run_dino", "--barotropic-slow-forcing-ab2", "1"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
 def test_rigid_lid_dt_mom_ratio_flag_parses(monkeypatch):
     monkeypatch.setattr(sys, "argv",
                         ["run_dino", "--barotropic-solver", "rigid_lid",
@@ -142,6 +188,43 @@ def test_eos_replaces_dino_config(monkeypatch):
     assert cfg.eos == "wright"          # default
     cfg = dataclasses.replace(cfg, eos="nemo_seos")
     assert cfg.eos == "nemo_seos"
+
+
+def test_recipe_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino", "--recipe", "mitgcm"])
+    args = rd._parse_args()
+    assert args.recipe == "mitgcm"
+
+
+def test_recipe_default_none(monkeypatch):
+    """Default None → main() leaves DINOConfig untouched (no recipe overlay)."""
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    args = rd._parse_args()
+    assert args.recipe is None
+
+
+def test_recipe_via_config(tmp_path, monkeypatch):
+    cfg = _write(tmp_path, "recipe: veros\n")
+    monkeypatch.setattr(sys, "argv", ["run_dino", "--config", cfg])
+    args = rd._parse_args()
+    assert args.recipe == "veros"
+
+
+def test_recipe_rejects_bad_choice(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino", "--recipe", "bogus_model"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
+def test_recipe_overlays_dino_config(monkeypatch):
+    """The --recipe value must reach DINOConfig via dino_config_for_recipe
+    (the cfg-overlay round-trip main() performs)."""
+    from legoesm.ocean.experiments.dino import (
+        DINOConfig, dino_config_for_recipe,
+    )
+    assert DINOConfig().eos == "wright"                 # bare default
+    mit = dino_config_for_recipe("mitgcm")
+    assert mit.eos == "unesco80" and mit.momentum_advection == "flux_form"
 
 
 def test_tke_momentum_visc_bg_flag_parses(monkeypatch):
@@ -216,3 +299,79 @@ def test_bottom_drag_scheme_flag_parses(monkeypatch):
         rd._parse_args()
     from legoesm.ocean.experiments.dino import DINOConfig
     assert DINOConfig().bottom_drag_scheme == "legacy"
+
+
+def test_vmix_choices_include_richardson_and_catke(monkeypatch):
+    # codex fix: richardson/catke are wired in _dino_vertical_mixing_config, so
+    # --vmix must accept them (else the recipe fallback override is unusable).
+    for scheme in ("kpp", "tke", "constant", "richardson", "catke"):
+        monkeypatch.setattr(sys, "argv", ["run_dino.py", "--vmix", scheme])
+        assert rd._parse_args().vmix == scheme
+
+
+def test_vmix_rejects_unknown(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino.py", "--vmix", "bogus"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+def test_r1_exact_preset(monkeypatch):
+    """--preset r1_exact loads the DINO_R1 exactness preset; explicit flags
+    still override on top; every already-exact oracle selection asserted."""
+    from legoesm.ocean.experiments.dino import dino_r1_exact_config
+    cfg = dino_r1_exact_config()
+    # oracle selections (DINO_R1/EXP00/namelist_cfg)
+    assert cfg.eos == "nemo_seos"                       # nameos ln_seos
+    assert cfg.vmix_scheme == "tke"                     # ln_zdftke
+    assert cfg.bottom_drag_scheme == "nemo_quadratic"   # namdrg ln_non_lin
+    assert cfg.use_gm_redi is False                     # ln_ldfeiv=.false.
+    assert cfg.A_h_floor == 0.0                         # no legoESM floor
+    assert cfg.A_h_eq_boost == 1.0                      # no legoESM boost
+    assert cfg.tracer_advection == "fct2"
+    assert cfg.vertical_coordinate == "masked_zco"
+    assert cfg.pgf_quadrature == "nemo_trapezoid"
+    assert cfg.forcing_annual_cycle is True          # ln_ann_cyc
+    # stabilizer TKE viscosity floor OFF -> effective A_v == avm0 exactly
+    assert cfg.tke_momentum_visc_bg == cfg.A_v_bg
+    assert cfg.A_v_bg_effective == cfg.A_v_bg == 1.2e-4  # rn_avm0
+    assert cfg.K_v_bg == 1.2e-5                          # rn_avt0
+    assert cfg.K_conv == 100.0                           # rn_evd
+    assert cfg.evd_on_momentum is True                   # nn_evdm=1
+    assert cfg.dt == 2700.0                              # rn_Dt
+    assert cfg.U_M == 0.27 and cfg.U_T == 0.027          # rn_Uv / rn_Ud
+    # overrides still win
+    cfg2 = dino_r1_exact_config(vmix_scheme="kpp")
+    assert cfg2.vmix_scheme == "kpp" and cfg2.eos == "nemo_seos"
+    # CLI wiring
+    monkeypatch.setattr(sys, "argv", ["run_dino.py", "--preset", "r1_exact"])
+    args = rd._parse_args()
+    assert args.preset == "r1_exact"
+
+
+def test_r1_exact_preset_flows_to_model_config():
+    """The preset's selections reach the built LatLonCGridOceanConfig."""
+    from legoesm.ocean.experiments.dino import (
+        dino_r1_exact_config, dino_lat_lon_grid, dino_lat_lon_model_config,
+    )
+    cfg = dino_r1_exact_config()
+    g = dino_lat_lon_grid(cfg, n_lon=12)
+    mc, _phys = dino_lat_lon_model_config(g, cfg, physics=True)
+    assert mc.eos == "nemo_seos"
+    assert mc.bottom_drag.bottom_drag_scheme == "nemo_quadratic"
+    assert mc.bottom_drag.bottom_drag_cd0 == cfg.C_d_bottom
+    assert mc.tracer_advection == "fct2"
+    # EIV off but iso-neutral Redi-only ON (ln_traldf_iso + msc):
+    assert mc.gm_redi is not None
+    assert mc.gm_redi.kappa_GM == 0.0            # no bolus transport
+    assert mc.gm_redi.implicit_K33 is True       # MSC
+    assert mc.K_h == 0.0                         # no iso-level double-count
+    assert mc.lateral_viscosity.A_h_floor == 0.0
+    assert mc.lateral_viscosity.A_h_eq_boost == 1.0
+
+
+def test_allow_multiyear_flag(monkeypatch):
+    """--days > 365 requires --allow-multiyear (GPU/SLURM opt-out)."""
+    monkeypatch.setattr(sys, "argv", ["run_dino.py", "--days", "720"])
+    args = rd._parse_args()
+    assert args.days == 720 and args.allow_multiyear is False
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino.py", "--days", "720", "--allow-multiyear"])
+    assert rd._parse_args().allow_multiyear is True

@@ -24,50 +24,29 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import re
 from pathlib import Path
 
 import numpy as np
 import xarray as xr
 
-# --- Field table: (CMOR var, unit-scale, unit label, Earth observational
-#     reference value, colormap).  The reference values are OBSERVATIONAL
-#     comparison targets for the diagnostics table (annual global means from
-#     ERA5 / CERES / GPCP), NOT model physical constants — they parameterise
-#     the plot annotation only and are deliberately not sourced from
-#     ``legoesm.constants`` (which holds model physics constants). ---
-FIELD_TABLE = (
-    ("tas", 1.0, "K", 288.0, "RdBu_r"),
-    ("pr", 86400.0, "mm/day", 2.9, "YlGnBu"),
-    ("rsut", 1.0, "W/m2", 100.0, "viridis"),
-    ("rlut", 1.0, "W/m2", 239.0, "magma"),
-    ("clt", 1.0, "%", 67.0, "Blues"),
-    ("prw", 1.0, "mm", 24.5, "GnBu"),
-    ("hfls", 1.0, "W/m2", 88.0, "YlOrRd"),
-    ("hfss", 1.0, "W/m2", 20.0, "YlOrRd"),
-)
-_ALBEDO_REF = 0.29   # observational planetary albedo (CERES); annotation only.
-
-# --- Publication-realism acceptance bands: absolute tolerance on the
-#     area-weighted global mean of each field vs its Earth reference above.
-#     These are OBSERVATIONAL ACCEPTANCE CRITERIA (roughly obs uncertainty +
-#     CMIP-class model spread on the annual global mean), used only to turn the
-#     realism judgement into a mechanical pass/fail gate — they are NOT model
-#     physical constants and are deliberately not sourced from
-#     ``legoesm.constants``.  Widen/tighten per campaign via ``--tol-scale``. ---
-_REALISM_ABS_TOL = {
-    "tas": 4.0,     # K
-    "pr": 0.6,      # mm/day  (~20% of 2.9)
-    "rsut": 12.0,   # W/m2
-    "rlut": 10.0,   # W/m2
-    "clt": 12.0,    # %
-    "prw": 4.0,     # mm
-    "hfls": 15.0,   # W/m2
-    "hfss": 8.0,    # W/m2
-}
-_ALBEDO_ABS_TOL = 0.03        # planetary-albedo acceptance band (dimensionless)
-_R_TOA_ABS_TOL = 5.0          # |net TOA imbalance| acceptance band [W/m2]
-# Fields that MUST be present for a run to be scorecard-eligible at all.
-_REQUIRED_FIELDS = ("tas", "pr", "rsut", "rlut")
+# --- Observational targets + realism acceptance bands: the CERES/GPCP/ERA5
+#     global-mean references and mechanical pass/fail tolerances live in the
+#     dependency-light sibling ``_amip_obs_targets`` so BOTH AMIP scorecards
+#     (this CMOR plotter and the timeseries ``plot_convection_scorecard``) grade
+#     against ONE source without the timeseries scorecard having to import
+#     xarray.  Imported here to preserve the module-level names this file uses. ---
+import importlib.util as _ilu  # noqa: E402
+_targets_spec = _ilu.spec_from_file_location(
+    "_amip_obs_targets", str(Path(__file__).resolve().parent / "_amip_obs_targets.py"))
+_targets = _ilu.module_from_spec(_targets_spec)
+_targets_spec.loader.exec_module(_targets)
+FIELD_TABLE = _targets.FIELD_TABLE
+_ALBEDO_REF = _targets._ALBEDO_REF
+_REALISM_ABS_TOL = _targets._REALISM_ABS_TOL
+_ALBEDO_ABS_TOL = _targets._ALBEDO_ABS_TOL
+_R_TOA_ABS_TOL = _targets._R_TOA_ABS_TOL
+_REQUIRED_FIELDS = _targets._REQUIRED_FIELDS
 
 # --- Structural-realism thresholds: first-order checks that the run has the
 #     right large-scale STRUCTURE, not just the right global-mean scalars (a
@@ -105,8 +84,16 @@ def _band_weighted_mean(field: np.ndarray, lat: np.ndarray, w: np.ndarray,
     return float(np.sum(field[mask, :] * wm) / np.sum(wm))
 
 
-def _load_clim(cmor_amon: str, var: str):
-    """Time-mean climatology + lat/lon for a CMOR Amon variable, or Nones."""
+def _load_clim(cmor_amon: str, var: str, spinup_frac: float = 0.0):
+    """Time-mean climatology + lat/lon for a CMOR Amon variable, or Nones.
+
+    ``spinup_frac`` (0..1) discards that leading fraction of the monthly record
+    as spin-up BEFORE the time-mean, so a short (few-month) run is not graded on
+    its initial-condition transient.  At least one time slice is always kept
+    (``spinup_frac`` clamped so ``n0 <= ntime-1``); ``0.0`` (the default) means
+    the full-record mean and is bit-for-bit the previous behaviour."""
+    if not (0.0 <= spinup_frac < 1.0):
+        raise ValueError(f"spinup_frac must be in [0, 1), got {spinup_frac!r}")
     fs = sorted(glob.glob(os.path.join(cmor_amon, f"{var}_Amon_*.nc")))
     if not fs:
         return None, None, None
@@ -117,20 +104,28 @@ def _load_clim(cmor_amon: str, var: str):
     lonn = "lon" if "lon" in ds else ("longitude" if "longitude" in ds else None)
     lat = ds[latn].values if latn else np.arange(da.shape[-2])
     lon = ds[lonn].values if lonn else np.arange(da.shape[-1])
+    ntime = da.sizes[tdim]
+    n0 = min(int(spinup_frac * ntime), ntime - 1)   # keep >= 1 slice
+    if n0 > 0:
+        da = da.isel({tdim: slice(n0, None)})
     clim = da.mean(dim=tdim).values
     return clim, lat, lon
 
 
-def compute_amip_diagnostics(run_dir: str | Path) -> dict:
+def compute_amip_diagnostics(run_dir: str | Path,
+                             spinup_frac: float = 0.0) -> dict:
     """Load a run's CMOR Amon climatology and reduce to diagnostics.
 
     Returns a dict with per-field ``maps`` (2-D climatology × unit-scale),
     ``zonal`` (zonal means), ``lat``/``lon``, area-weighted ``global_means``
     (var -> (value, earth_ref, unit)), and the TOA ``budget``
     (rsdt/rsut/rlut/R_TOA/albedo) when the SW/LW TOA fields are present.
+    ``spinup_frac`` (0..1) drops that leading fraction of each variable's
+    monthly record as spin-up before the time-mean (see ``_load_clim``); ``0.0``
+    (default) is the full-record mean and reproduces the previous behaviour.
     Pure + deterministic — the unit-tested core (no matplotlib)."""
     cmor = os.path.join(str(run_dir), "cmor", "Amon")
-    tas0, lat, lon = _load_clim(cmor, "tas")
+    tas0, lat, lon = _load_clim(cmor, "tas", spinup_frac)
     if tas0 is None:
         raise FileNotFoundError(f"no tas_Amon_*.nc under {cmor}")
     nlat, nlon = tas0.shape
@@ -138,7 +133,7 @@ def compute_amip_diagnostics(run_dir: str | Path) -> dict:
 
     maps, zonal, gmeans = {}, {}, {}
     for var, sc, unit, ref, _cmap in FIELD_TABLE:
-        clim, _la, _lo = _load_clim(cmor, var)
+        clim, _la, _lo = _load_clim(cmor, var, spinup_frac)
         if clim is None:
             continue
         field = clim * sc
@@ -147,9 +142,9 @@ def compute_amip_diagnostics(run_dir: str | Path) -> dict:
         gmeans[var] = (float(np.sum(field * w)), ref, unit)
 
     budget = None
-    rsdt, _, _ = _load_clim(cmor, "rsdt")
-    rsut, _, _ = _load_clim(cmor, "rsut")
-    rlut, _, _ = _load_clim(cmor, "rlut")
+    rsdt, _, _ = _load_clim(cmor, "rsdt", spinup_frac)
+    rsut, _, _ = _load_clim(cmor, "rsut", spinup_frac)
+    rlut, _, _ = _load_clim(cmor, "rlut", spinup_frac)
     if rsdt is not None and rsut is not None and rlut is not None:
         RSDT = float(np.sum(rsdt * w))
         RSUT = float(np.sum(rsut * w))
@@ -419,7 +414,11 @@ def main(argv=None):
     if args.scorecard or args.no_plot or args.gate:
         diag = compute_amip_diagnostics(args.run_dir)
         sc = amip_realism_scorecard(diag, tol_scale=args.tol_scale)
-        sc_path = os.path.join(str(args.run_dir), f"amip_scorecard_{label}.json")
+        # Sanitize the label for the filename — a label like "C48/L40" would
+        # otherwise be read as a path separator (FileNotFoundError).
+        _safe_label = re.sub(r"[^0-9A-Za-z._+-]", "_", str(label))
+        sc_path = os.path.join(str(args.run_dir),
+                               f"amip_scorecard_{_safe_label}.json")
         write_scorecard(sc, sc_path)
         print(f"SCORECARD {sc_path}")
         print(format_scorecard_line(sc))

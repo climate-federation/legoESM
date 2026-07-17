@@ -38,7 +38,7 @@ if not _F32:
 import jax.numpy as jnp  # noqa: E402
 
 from legoesm import constants  # noqa: E402
-from legoesm.atmosphere.dynamics import spectral_les_plane as sl  # noqa: E402
+from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl  # noqa: E402
 from legoesm.timestepping.split_explicit import select_dt  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))

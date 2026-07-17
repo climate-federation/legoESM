@@ -14,7 +14,7 @@ from legoesm.atmosphere.physics import (
     ConvectionConfig,
     GravityWaveDragConfig,
 )
-from legoesm.atmosphere.scm import (
+from legoesm.atmosphere.forcing.scm.scm import (
     SCMGrid,
     SCMHistory,
     SingleColumnModel,
@@ -175,7 +175,7 @@ def test_scm_unknown_integrator_raises():
 def test_register_time_integrator_extends_registry():
     """Custom integrators register and become selectable by name."""
     def double_euler(state, phys, f, dt, t):
-        from legoesm.atmosphere.scm import _apply_tendencies
+        from legoesm.atmosphere.forcing.scm.scm import _apply_tendencies
         tend, phys_out = f(state, phys, t)
         mid = _apply_tendencies(state, tend, 0.5 * dt)
         tend2, phys_out2 = f(mid, phys_out, t + 0.5 * dt)

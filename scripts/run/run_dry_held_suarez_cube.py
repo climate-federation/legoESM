@@ -26,7 +26,7 @@ from legoesm.driver.config import load_experiment_config
 from legoesm.driver.component_factory import create_atmosphere_dycore
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.vertical import standard_hybrid_levels
-from legoesm.atmosphere.held_suarez import held_suarez_init, held_suarez_forcing
+from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init, held_suarez_forcing
 
 
 def main():

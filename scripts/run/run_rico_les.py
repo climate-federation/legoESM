@@ -45,8 +45,8 @@ import jax.numpy as jnp  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 from legoesm.thermo import saturation_mixing_ratio  # noqa: E402
-from legoesm.atmosphere.dynamics import spectral_les_plane as sl  # noqa: E402
-from legoesm.atmosphere.dynamics.spectral_les_moist import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl  # noqa: E402
+from legoesm.atmosphere.dynamics.les.spectral_les_moist import (  # noqa: E402
     make_anelastic_reference,
     make_les_microphysics_fn,
 )
@@ -54,7 +54,7 @@ from legoesm.atmosphere.physics.microphysics.config import (  # noqa: E402
     MicrophysicsConfig,
     MorrisonConfig,
 )
-from legoesm.atmosphere.sam_case_forcing import (  # noqa: E402
+from legoesm.atmosphere.forcing.sam_case_forcing import (  # noqa: E402
     read_sam_lsf,
     read_sam_snd,
     read_sam_sfc,
@@ -66,7 +66,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import les_record  # noqa: E402
 import run_bomex_les as bx  # noqa: E402  (shared forcing/profiles machinery)
 
-from legoesm.atmosphere.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
+from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
 
 # Default case dir: external LEGOESM_GSAM_ROOT if set, else the repo-local
 # cache (scripts/data/fetch_les_forcing.py); --case-dir overrides. See
@@ -111,6 +111,11 @@ def parse_args():
     p.add_argument("--sgs-model", choices=["smagorinsky", "vreman"],
                    default="vreman")
     p.add_argument("--cs", type=float, default=0.18)
+    p.add_argument("--sgs-buoyancy", dest="sgs_buoyancy", action="store_true",
+                   default=True, help="Lilly stable-stratification SGS suppression "
+                   "(damps entrainment above cloud; on by default).")
+    p.add_argument("--no-sgs-buoyancy", dest="sgs_buoyancy", action="store_false",
+                   help="disable Lilly SGS suppression (strain-only ν_t).")
     p.add_argument("--nu-floor", type=float, default=0.0)
     p.add_argument("--time-scheme", choices=["rk3", "ab2"], default="rk3")
     p.add_argument("--micro-every", type=int, default=1)
@@ -219,6 +224,11 @@ def main():
         _save(0.0)
     t = 0.0; i = 0
     created_tot, precip_accum = 0.0, 0.0          # accum [kg/m² = mm]
+    # Trailing time-mean of cloud metrics over the quasi-steady 2nd half
+    # (t > 0.5·T): RICO cumulus pulse, so instantaneous cc/LWP swing frame-to-
+    # frame; GCSS reports time-means. Sampled at the print cadence.
+    cc_sum = lwp_sum = 0.0; n_cavg = 0
+    t_cavg0 = 0.5 * T
     next_rec = T / args.record_frames if rec else np.inf
     t0 = time.time()
     while t < T:
@@ -238,6 +248,9 @@ def main():
                   f"qr_max={float(jnp.max(st.tracers[..., 2])):.2e} "
                   f"P={rate:.3f} mm/d acc={precip_accum:.3f} mm "
                   f"u*={float(us):.3f}", flush=True)
+            if t >= t_cavg0:
+                cc_sum += float(d["cloud_cover"]); lwp_sum += float(d["lwp"])
+                n_cavg += 1
         if rec and t >= next_rec and frame < args.record_frames:
             _save(t / 3600.0); next_rec += T / args.record_frames
     wall = time.time() - t0
@@ -245,13 +258,17 @@ def main():
     if rec and frame < args.record_frames:
         _save(t / 3600.0)
     d = bx.moist_profiles(st, g, ref)
+    cc_avg = cc_sum / n_cavg if n_cavg else float(d["cloud_cover"])
+    lwp_avg = lwp_sum / n_cavg if n_cavg else float(d["lwp"])
     np.savez(args.output / "rico_les_final.npz", z=zc_np,
              **{k: v for k, v in d.items() if isinstance(v, np.ndarray)},
              cloud_cover=d["cloud_cover"], lwp=d["lwp"],
+             cloud_cover_timemean=cc_avg, lwp_timemean=lwp_avg,
              precip_accum_mm=precip_accum)
-    print(f"  FINAL: cloud cover={d['cloud_cover']:.3f} (ref 0.10-0.20), "
-          f"LWP={d['lwp']:.2f} g/m² (ref ~10-20), "
-          f"accum precip={precip_accum:.3f} mm "
+    print(f"  FINAL: cloud cover={d['cloud_cover']:.3f} "
+          f"(2nd-half mean {cc_avg:.3f}) (ref 0.10-0.20), "
+          f"LWP={d['lwp']:.2f} (2nd-half mean {lwp_avg:.2f}) g/m² "
+          f"(ref ~10-20), accum precip={precip_accum:.3f} mm "
           f"(ref ~0.3 mm/day · {args.hours:.0f} h)")
     print(f"  profiles -> {args.output}/rico_les_final.npz")
     return 0

@@ -183,7 +183,7 @@ def williamson_test6_mpas(mesh) -> MPASShallowWaterState:
 
 def williamson_test6_spectral(grid):
     """W6 Rossby-Haurwitz wave-4 in spectral space."""
-    from legoesm.atmosphere.dynamics.spectral_sw import SpectralSWState
+    from legoesm.atmosphere.dynamics.gcm.spectral_sw import SpectralSWState
     from legoesm.grids.gaussian import (
         sh_analysis,
         sh_analysis_dmu,

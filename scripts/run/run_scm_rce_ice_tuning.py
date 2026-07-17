@@ -11,7 +11,7 @@ compiles cheaply, unlike the C18 global run that times out in XLA compile) and
 SWEEPS the morrison ice-budget levers, ranking them by the supercooled-liquid
 fraction (the cold-drift diagnostic).
 
-Reference-free: uses ``SingleColumnModel.create`` (atmosphere/scm.py) with a
+Reference-free: uses ``SingleColumnModel.create`` (atmosphere/forcing/scm/scm.py) with a
 moist tropical sounding directly — NO CRM ``vol_*.npz`` reference files (the
 ``run_scm_rce_campaign`` harness is gated on those; this driver bypasses that
 gate by stepping the column itself and keeping the FINAL state so q_c / q_i can
@@ -61,7 +61,7 @@ from legoesm.atmosphere.physics.microphysics.config import (
     MorrisonConfig,
     __param_spec__ as _MICRO_PARAM_SPEC,
 )
-from legoesm.atmosphere.scm import SingleColumnModel
+from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
 
 # --- Ice-cloud water-budget tuning levers (morrison) ----------------------
 # Each: (default, [sweep values]).  Direction (all INCREASE) converts MORE
@@ -217,7 +217,7 @@ def run_column(overrides: dict, *, nlev: int, dt: float, days: float,
     window (``converged`` if it moved < 0.05) so a transient does not mis-rank a
     lever; the reported fraction is the tail (more-equilibrated) value."""
     import os
-    from legoesm.atmosphere.scm_forcing import SCMForcing
+    from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
     T0, qv0 = build_initial_profiles(nlev, T_sfc)
     cfg = make_cfg(overrides, rad_interval=rad_interval, radiation=radiation)
     _Ts = float(T_sfc)

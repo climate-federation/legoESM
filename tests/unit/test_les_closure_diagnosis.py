@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`legoesm.atmosphere.dynamics.les_closure_diagnosis`.
+"""Unit tests for :mod:`legoesm.atmosphere.dynamics.les.les_closure_diagnosis`.
 
 Stage 6 of ``docs/COMPARE_REANALYSIS.md``: diagnose closure coefficients by
 inverting LES-resolved fluxes.  Analytic checks: K recovered exactly from a
@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import (
     eddy_diffusivity_from_flux,
     entrainment_velocity_from_buoyancy_flux,
     mean_gradient_at_interfaces,
@@ -219,7 +219,7 @@ def test_entrainment_jit_and_grad():
 
 
 # --- momentum diffusivity (shear-projected) + dimensionless C_K -----------
-from legoesm.atmosphere.dynamics.les_closure_diagnosis import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import (  # noqa: E402
     clubb_coefficient_from_diffusivity,
     momentum_diffusivity_from_fluxes,
 )
@@ -414,7 +414,7 @@ def test_clubb_coefficient_zero_mixing_length_invalid_and_ad_safe():
 
 def test_prandtl_number_ratio():
     # Pr_t = Km/Kh = 4/5 = 0.8.
-    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import (
         prandtl_number_from_diffusivities,
     )
     Pr, valid = prandtl_number_from_diffusivities(
@@ -425,7 +425,7 @@ def test_prandtl_number_ratio():
 
 
 def test_prandtl_number_low_kh_invalid_and_ad_safe():
-    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import (
         prandtl_number_from_diffusivities,
     )
     Km = jnp.full((3,), 4.0)
@@ -445,7 +445,7 @@ def test_prandtl_number_low_kh_invalid_and_ad_safe():
 
 
 def test_prandtl_number_requires_both_diffusivities_valid():
-    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import (
         prandtl_number_from_diffusivities,
     )
     _, valid = prandtl_number_from_diffusivities(
@@ -455,7 +455,7 @@ def test_prandtl_number_requires_both_diffusivities_valid():
 
 
 # --- C_eps (wp2-dissipation) from the steady-state budget -------------------
-from legoesm.atmosphere.dynamics.les_closure_diagnosis import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import (  # noqa: E402
     c_eps_from_budget,
 )
 

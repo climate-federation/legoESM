@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`legoesm.atmosphere.dynamics.column_les_diagnosis`.
+"""Unit tests for :mod:`legoesm.atmosphere.dynamics.les.column_les_diagnosis`.
 
 Stage-6 composition: turn a finished column-LES state into a closure
 coefficient.  Verifies the top-down→ascending reversal + flux/gradient
@@ -13,10 +13,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     make_flat_plane_terrain_metric, make_rest_state,
 )
-from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+from legoesm.atmosphere.dynamics.les.column_les_diagnosis import (
     CEpsProfile,
     ClubbCoefficientProfile,
     EddyDiffusivityProfile,
@@ -28,7 +28,7 @@ from legoesm.atmosphere.dynamics.column_les_diagnosis import (
     diagnose_entrainment,
     diagnose_prandtl_number,
 )
-from legoesm.atmosphere.dynamics.les_closure_diagnosis import EntrainmentDiagnosis
+from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import EntrainmentDiagnosis
 from legoesm.grids.plane import create_plane_grid
 from legoesm.grids.vertical import create_height_coordinate
 
@@ -102,10 +102,10 @@ def test_entrainment_matches_manual_reversed_composition():
     """diagnose_entrainment must equal an independent reversed call (validates
     the theta_v build + top-down->ascending reversal wiring)."""
     from legoesm import constants
-    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import (
         entrainment_velocity_from_buoyancy_flux,
     )
-    from legoesm.atmosphere.dynamics.rce_diagnostics import (
+    from legoesm.atmosphere.dynamics.crm.rce_diagnostics import (
         resolved_turbulent_fluxes_plane,
     )
 
@@ -152,11 +152,11 @@ def test_clubb_coefficient_matches_manual_composition():
     """diagnose_clubb_coefficient must equal an independent manual composition of
     the leaf functions — validates the top-down→ascending reversal of ALL arrays,
     the wp2 interior co-location, and the mixing_length wiring."""
-    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import (
         clubb_coefficient_from_diffusivity,
         momentum_diffusivity_from_fluxes,
     )
-    from legoesm.atmosphere.dynamics.rce_diagnostics import (
+    from legoesm.atmosphere.dynamics.crm.rce_diagnostics import (
         resolved_turbulent_fluxes_plane,
         vertical_velocity_variance_plane,
     )
@@ -220,11 +220,11 @@ def test_dispatch_clubb_coefficient_requires_l_mix_max():
 def test_prandtl_number_matches_manual_composition():
     """diagnose_prandtl_number = K_m/K_h from the momentum + heat inversions,
     co-located — validates the wiring (heat K reused, momentum reversed)."""
-    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import (
         momentum_diffusivity_from_fluxes,
         prandtl_number_from_diffusivities,
     )
-    from legoesm.atmosphere.dynamics.rce_diagnostics import (
+    from legoesm.atmosphere.dynamics.crm.rce_diagnostics import (
         resolved_turbulent_fluxes_plane,
     )
 
@@ -255,12 +255,12 @@ def test_c_eps_matches_manual_composition():
     """diagnose_c_eps_coefficient = c_eps_from_budget(K_m, K_h, S2, N2, l, wp2) —
     validates the co-located reversal + the theta_v/N2 wiring."""
     from legoesm import constants
-    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import (
         c_eps_from_budget,
         mean_gradient_at_interfaces,
         momentum_diffusivity_from_fluxes,
     )
-    from legoesm.atmosphere.dynamics.rce_diagnostics import (
+    from legoesm.atmosphere.dynamics.crm.rce_diagnostics import (
         resolved_turbulent_fluxes_plane,
         vertical_velocity_variance_plane,
     )
@@ -327,7 +327,7 @@ def test_entrainment_jit():
 
 
 def test_column_les_realism_turbulent_vs_dead():
-    from legoesm.atmosphere.dynamics.column_les_diagnosis import column_les_realism
+    from legoesm.atmosphere.dynamics.les.column_les_diagnosis import column_les_realism
     # The sheared/turbulent fixture (checkerboard w) → realistic.
     state, hc = _les_state_with_shear()
     assert bool(column_les_realism(state, hc))
@@ -337,7 +337,7 @@ def test_column_les_realism_turbulent_vs_dead():
 
 
 def test_column_les_realism_nonfinite_is_unrealistic():
-    from legoesm.atmosphere.dynamics.column_les_diagnosis import column_les_realism
+    from legoesm.atmosphere.dynamics.les.column_les_diagnosis import column_les_realism
     state, hc = _les_state_with_shear()
     blown = state._replace(
         theta_prime=state.theta_prime.replace(
@@ -348,7 +348,7 @@ def test_column_les_realism_nonfinite_is_unrealistic():
 def test_column_les_realism_rejects_thermo_drift():
     """iter 66: a turbulent + finite LES whose mean θ drifted off the GCM column
     reference is rejected (the §9 temperature/MSE-drift gap)."""
-    from legoesm.atmosphere.dynamics.column_les_diagnosis import column_les_realism
+    from legoesm.atmosphere.dynamics.les.column_les_diagnosis import column_les_realism
     # The shear fixture's θ' is a zero-MEAN checkerboard (pure fluctuation) — the
     # mean state sits on the reference, so it passes (turbulent + finite + consistent).
     state, hc = _les_state_with_shear()
@@ -367,7 +367,7 @@ def test_column_les_realism_rejects_thermo_drift():
 def test_column_les_realism_rejects_moisture_blowup():
     """iter 67: a turbulent + finite + θ-consistent LES whose q_v ran away (a
     finite-but-unphysical moisture blow-up the finite check misses) is rejected."""
-    from legoesm.atmosphere.dynamics.column_les_diagnosis import column_les_realism
+    from legoesm.atmosphere.dynamics.les.column_les_diagnosis import column_les_realism
     state, hc = _les_state_with_shear()
     assert bool(column_les_realism(state, hc))   # q_v ≈ 0.01 kg/kg → physical
     # Drive q_v to 0.1 kg/kg (100 g/kg, ~2.5x any physical value) → rejected, even
@@ -391,8 +391,8 @@ def test_column_les_realism_optin_rh_cap():
     enabled, which is exactly why the cap is off by default. A PHYSICAL q (sub-
     saturated everywhere) passes even with the cap on."""
     from legoesm import constants
-    from legoesm.atmosphere.dynamics.column_les_diagnosis import column_les_realism
-    from legoesm.atmosphere.dynamics.rce_diagnostics import temperature_3d_plane
+    from legoesm.atmosphere.dynamics.les.column_les_diagnosis import column_les_realism
+    from legoesm.atmosphere.dynamics.crm.rce_diagnostics import temperature_3d_plane
     from legoesm.thermo import saturation_mixing_ratio
 
     state, hc = _les_state_with_shear()
@@ -409,7 +409,7 @@ def test_column_les_realism_optin_rh_cap():
 
 
 def test_gate_diagnosis_realism_invalidates():
-    from legoesm.atmosphere.dynamics.column_les_diagnosis import gate_diagnosis_realism
+    from legoesm.atmosphere.dynamics.les.column_les_diagnosis import gate_diagnosis_realism
     prof = ClubbCoefficientProfile(
         z_m=jnp.array([1.0, 2.0, 3.0]), C_K=jnp.array([0.4, 0.5, 0.6]),
         valid=jnp.array([True, True, True]))
@@ -421,8 +421,8 @@ def test_realism_gate_nan_diagnosis_contained_to_finite_field():
     """Codex top-trap: a blown-up LES gives NaN diagnosis values; with the realism
     gate firing (valid all-False) the ASSEMBLED field is FINITE (background), for
     BOTH a profile (masked-sum) and the scalar entrainment (assemble masks invalid)."""
-    from legoesm.atmosphere.dynamics.column_les_diagnosis import gate_diagnosis_realism
-    from legoesm.atmosphere.dynamics.les_closure_diagnosis import EntrainmentDiagnosis
+    from legoesm.atmosphere.dynamics.les.column_les_diagnosis import gate_diagnosis_realism
+    from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import EntrainmentDiagnosis
     from legoesm.training.feedback_assembly import assemble_feedback_field
 
     class _Rec:
@@ -469,7 +469,7 @@ def _roundtrip_setup():
 def test_clubb_forward_inverse_round_trip_scalar():
     """Km = clubb_eddy_diffusivity(C_K, l, sqrt_wp2) then C_K = Km/(l*sqrt_wp2) recovers the
     EXACT scalar C_K — the algebraic guarantee underlying perfect-model recovery (clause 6)."""
-    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import (
         clubb_coefficient_from_diffusivity,
     )
     from legoesm.atmosphere.physics.turbulence.clubb_lite import clubb_eddy_diffusivity
@@ -486,7 +486,7 @@ def test_clubb_forward_inverse_round_trip_scalar():
 def test_clubb_forward_inverse_round_trip_per_column():
     """The per-column C_K field path (the LES-informed correction) round-trips too: a
     (ncol,) C_K broadcast through the forward is recovered at EVERY level by the inverse."""
-    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import (
         clubb_coefficient_from_diffusivity,
     )
     from legoesm.atmosphere.physics.turbulence.clubb_lite import clubb_eddy_diffusivity
@@ -509,7 +509,7 @@ def test_round_trip_self_test_is_non_vacuous():
     """Non-vacuity (Domain-Architect tripwire doctrine): if the forward used a DIFFERENT
     form (l^2 instead of l), the genuine inverse would NOT recover C_K — proving the
     round-trip above genuinely pins the form, not a tautology."""
-    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import (
         clubb_coefficient_from_diffusivity,
     )
 
@@ -525,7 +525,7 @@ def test_prandtl_forward_inverse_round_trip():
     """K_h = clubb_heat_diffusivity(K_m, Pr_t, l) then Pr_t = K_m/K_h recovers the EXACT
     Pr_t — pins the integrator's heat-diffusivity form against the diagnosis inverse (the
     second of the three multi-coefficient closures, after C_K)."""
-    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import (
         prandtl_number_from_diffusivities,
     )
     from legoesm.atmosphere.physics.turbulence.clubb_lite import clubb_heat_diffusivity
@@ -543,7 +543,7 @@ def test_prandtl_forward_inverse_round_trip():
 def test_prandtl_round_trip_non_vacuous():
     """Non-vacuity: a desynced forward (K_h = K_m * Pr_t instead of / Pr_t) would NOT be
     recovered by the genuine inverse — the round-trip genuinely pins the form."""
-    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import (
         prandtl_number_from_diffusivities,
     )
 
@@ -562,7 +562,7 @@ def test_c_eps_forward_inverse_round_trip():
     (exercising BOTH the shear AND buoyancy terms), and recover the EXACT C_eps. This pins
     the most subtle diagnosis (a budget inversion, not a ratio) against the integrator's
     actual production + dissipation forms."""
-    from legoesm.atmosphere.dynamics.les_closure_diagnosis import c_eps_from_budget
+    from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import c_eps_from_budget
     from legoesm.atmosphere.physics.turbulence.clubb_lite import (
         clubb_wp2_dissipation_rate,
         clubb_wp2_production,
@@ -591,7 +591,7 @@ def test_c_eps_forward_inverse_round_trip():
 def test_c_eps_round_trip_non_vacuous():
     """Non-vacuity: a desynced forward dissipation (C_eps·wp2/ℓ — power 1 not 3/2) gives a
     production the genuine wp2^{3/2} inverse does NOT map back to C_eps."""
-    from legoesm.atmosphere.dynamics.les_closure_diagnosis import c_eps_from_budget
+    from legoesm.atmosphere.dynamics.les.les_closure_diagnosis import c_eps_from_budget
 
     l_mix, wp2 = _roundtrip_setup()
     ok = jnp.ones_like(wp2, dtype=bool)
@@ -607,7 +607,7 @@ def test_realism_breakdown_each_flag_is_load_bearing():
     """LESRealismBreakdown surfaces WHICH realism term failed (campaign observability, iter
     508). A single-failure state must set EXACTLY its own flag False (the others True) and
     overall False — so the operator can tell laminar from blown-up from drifted from wet."""
-    from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.column_les_diagnosis import (
         column_les_realism,
         column_les_realism_breakdown,
     )
@@ -654,7 +654,7 @@ def test_summarize_realism_breakdowns_counts_each_mode():
     """summarize_realism_breakdowns aggregates a STACKED breakdown into per-mode rejection
     counts (iter 509) — the campaign-report 'WHY are columns invalid' line. Failure counts
     are per-criterion (a column can fail several), independent of n_rejected."""
-    from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.column_les_diagnosis import (
         LESRealismBreakdown,
         summarize_realism_breakdowns,
     )
@@ -681,7 +681,7 @@ def test_summarize_over_vmapped_breakdowns_end_to_end():
     """The intended operator pattern composes: vmap column_les_realism_breakdown over a STACK
     of worst-column LES states, then summarize. A healthy + a dead (w≡0) column → 1 realistic,
     1 rejected for being laminar."""
-    from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.column_les_diagnosis import (
         column_les_realism_breakdown,
         summarize_realism_breakdowns,
     )
@@ -703,7 +703,7 @@ def test_mask_diagnosis_above_excludes_sponge_levels():
     """mask_diagnosis_above (iter 513, 'keep the diagnosis below the sponge') invalidates
     profile levels at/above z_max; a no-op for z_max=None and for a scalar diagnosis without
     a z_m profile (entrainment)."""
-    from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.column_les_diagnosis import (
         ClubbCoefficientProfile,
         mask_diagnosis_above,
     )

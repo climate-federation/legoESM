@@ -166,7 +166,7 @@ def test_segment_legacy_path_ignores_dycore_tracers():
 # --- seam 3: the real cdgrid dycore advects an attached tracer --------------
 
 def test_cdgrid_step_advects_attached_tracer():
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
     from legoesm.grids.vertical import create_sigma_coordinate

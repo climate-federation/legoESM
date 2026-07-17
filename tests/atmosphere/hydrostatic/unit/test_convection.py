@@ -722,7 +722,7 @@ class TestIntegration:
         """Hydrostatic convection tendencies should have correct shapes."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -742,7 +742,7 @@ class TestIntegration:
         """Hydrostatic convection should produce nonzero T tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -759,7 +759,7 @@ class TestIntegration:
         """Convection should not produce wind or pressure tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -815,7 +815,17 @@ class TestIntegration:
         assert tendencies.dtracers_dt.data.shape == (6, n, n, nlev, 1)
 
     def test_nonhydrostatic_nonzero_heating(self):
-        """NH convection should produce nonzero theta tendencies."""
+        """NH convection should produce nonzero theta tendencies.
+
+        SBM only heats a convectively ACTIVE column: it relaxes T/q toward a
+        moist-adiabatic reference where CAPE exceeds ``cape_threshold``.  A dry
+        (q_v=0), unperturbed state sits at the dry-neutral ``theta_ref=300 K``
+        reference with CAPE well below threshold, so the trigger is exactly zero
+        and zero heating is PHYSICALLY CORRECT — a ``> 0`` assertion on it is
+        vacuous.  Seed a moist column (q_v ~18 g/kg at the surface, level index
+        -1 per SBM's z-up convention, tapering to ~0 aloft) so the moist adiabat
+        clears the reference and the scheme genuinely heats.
+        """
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import (
             create_height_coordinate,
@@ -836,6 +846,13 @@ class TestIntegration:
         dims_2d = ("face", "x", "y")
         dims_tr = ("face", "x", "y", "level", "tracer")
 
+        # Water-vapour tracer: 0 at the model top (level 0) rising to ~18 g/kg at
+        # the surface (level -1).  Against the dry-neutral reference this gives
+        # CAPE > threshold, so the SBM trigger fires.
+        q_surface = 0.018
+        qv_profile = q_surface * jnp.linspace(0.0, 1.0, nlev)
+        qv = jnp.broadcast_to(qv_profile, (6, n, n, nlev))
+
         state = NonHydrostaticState(
             u=Field(data=jnp.zeros((6, n, n, nlev)), name="u", dims=dims_3d, units="m/s"),
             v=Field(data=jnp.zeros((6, n, n, nlev)), name="v", dims=dims_3d, units="m/s"),
@@ -843,7 +860,7 @@ class TestIntegration:
             theta_prime=Field(data=jnp.zeros((6, n, n, nlev)), name="theta_prime", dims=dims_3d, units="K"),
             rho_prime=Field(data=jnp.zeros((6, n, n, nlev)), name="rho_prime", dims=dims_3d, units="kg/m^3"),
             phis=Field(data=jnp.zeros((6, n, n)), name="phis", dims=dims_2d, units="m^2/s^2"),
-            tracers=Field(data=jnp.zeros((6, n, n, nlev, 1)), name="tracers", dims=dims_tr, units="kg/kg"),
+            tracers=Field(data=qv[..., None], name="tracers", dims=dims_tr, units="kg/kg"),
         )
 
         config = ConvectionConfig(scheme="sbm")
@@ -857,7 +874,7 @@ class TestIntegration:
         """jax.grad should work through hydrostatic convection physics."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -884,7 +901,7 @@ class TestIntegration:
 
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -903,7 +920,7 @@ class TestIntegration:
         """scheme='none' should produce zero tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -919,7 +936,7 @@ class TestIntegration:
         """scheme='kuo' should give different results from 'sbm'."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -940,7 +957,7 @@ class TestIntegration:
         """scheme='mass_flux' should produce nonzero tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -957,7 +974,7 @@ class TestIntegration:
         """scheme='edmf' should produce nonzero tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -974,7 +991,7 @@ class TestIntegration:
         """jax.grad should work through mass_flux integration."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -995,7 +1012,7 @@ class TestIntegration:
         """jax.grad should work through edmf integration."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)

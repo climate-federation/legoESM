@@ -9,14 +9,20 @@ All variants share the spectral primitive-equation dynamical core
 comparison reflects the choice of physics representation rather than
 the dycore.  The variants are:
 
-* ``classical`` — Tiedtke convection, Louis turbulence, surface bulk
-  fluxes, McFarlane gravity-wave drag, Xu-Randall cloud fraction.
-  Tunables exposed via :class:`legoesm.training.aimip_params.AIMIPClassicalParams`
+* ``classical`` — the FULL physics suite: Tiedtke convection, Louis
+  turbulence, surface bulk fluxes, McFarlane gravity-wave drag,
+  Xu-Randall cloud fraction, Sundqvist microphysics and RRTMGP
+  correlated-k radiation (``aimip_radiation``; gray is the cheap
+  opt-in / smoke backend).  Tunables exposed via
+  :class:`legoesm.training.aimip_params.AIMIPClassicalParams`
   and trained end-to-end through the differentiable spectral PE
   rollout.
-* ``column_nn`` — column MLP physics (Rasp et al., 2018 style) via
-  :func:`legoesm.training.neural_gcm_spectral.train_column_mlp_spectral`.
-* ``sfno_physics`` — SFNO replaces the gridded physics step via
+* ``column_nn`` — ALL physics, radiation included, learned by a column
+  MLP (Rasp et al., 2018 style) via
+  :func:`legoesm.training.neural_gcm_spectral.train_column_mlp_spectral`;
+  no classical scheme runs alongside it.
+* ``sfno_physics`` — SFNO replaces the entire gridded physics step
+  (radiation included), dycore retained, via
   :func:`legoesm.training.neural_gcm_spectral.train_neural_gcm_spectral`.
 * ``sfno_full`` — SFNO as the full atmospheric emulator (no dycore,
   no physics tendency) via
@@ -101,6 +107,14 @@ def _apply_smoke_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
         aimip_radiation="gray",
         aimip_spatial_surface=False,
         aimip_rollout_days=1,
+        # Drop any window list from the base (the all-years scale base
+        # carries 1152 pairs; even aimip_era5.yaml carries several): the
+        # smoke contract is a minutes-scale end-to-end check, so fall back
+        # to the start_year + n_train_days/n_eval_days loader path.
+        train_windows=None,
+        eval_windows=None,
+        aimip_rollout_curriculum=None,
+        aimip_chunk_windows=0,
     ))
     return cfg
 
@@ -132,7 +146,7 @@ def _surface_forcing_cfg(cfg: dict[str, Any]) -> tuple[str | None, str | None]:
 
 def _build_spectral_config(cfg: dict[str, Any]):
     """Translate AIMIP YAML dict into NeuralGCMSpectralConfig."""
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
     from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
     from legoesm.training.losses import LossConfig
 
@@ -201,6 +215,8 @@ def _build_spectral_config(cfg: dict[str, Any]):
         rollout_hours=int(cfg.get("aimip_rollout_hours", 0)),
         rollout_curriculum=curriculum,
         chunk_windows=int(cfg.get("aimip_chunk_windows", 0)),
+        chunk_prefetch=bool(cfg.get("aimip_chunk_prefetch", False)),
+        data_parallel=bool(cfg.get("aimip_data_parallel", False)),
         spatial_lr_scale=float(cfg.get("aimip_spatial_lr_scale", 1.0)),
         rad_update_interval=int(cfg.get("aimip_rad_update_interval", 1)),
         loss_config=loss_config,
@@ -339,8 +355,21 @@ def _train_aimip_classical(
     )
 
     dt = spec_cfg.dt
-    radiation = str(cfg.get("aimip_radiation", "gray"))
+    # Classical = full physics suite + RRTMGP radiation by default; the
+    # cheap gray backend is opt-in (aimip_radiation: gray, and what the
+    # --smoke overrides select).
+    radiation = str(cfg.get("aimip_radiation", "rrtmgp"))
     rad_update_interval = int(cfg.get("aimip_rad_update_interval", 6))
+    # RRTMGP g-point checkpoint: True (default) = byte-for-byte legacy but the
+    # prevent_cse=True per-g-point body inflates the GPU compile ~Ng-fold
+    # (multi-hour). False = one reused g-point body (answer-identical, minutes
+    # to compile) — safe for the rollout-checkpointed training path. Default
+    # True; set aimip_rrtmgp_gpoint_checkpoint=false for classical training.
+    rrtmgp_gpoint_checkpoint = bool(
+        cfg.get("aimip_rrtmgp_gpoint_checkpoint", True))
+    # G-point vmap block size: >0 -> fast compile (one block body) with bounded
+    # backward memory (holds block_size g-points, not all ~256). 0 = scan path.
+    rrtmgp_gpoint_batch_size = int(cfg.get("aimip_rrtmgp_gpoint_batch_size", 16))
 
     # Derive the land mask from surface geopotential (phis > 0 over
     # land).  Static across samples so we extract it once.  Using a
@@ -417,6 +446,8 @@ def _train_aimip_classical(
             cloud_scheme=cloud_scheme,
             land_mask=land_mask,
             split_rad=split_rad,
+            rrtmgp_gpoint_checkpoint=rrtmgp_gpoint_checkpoint,
+            rrtmgp_gpoint_batch_size=rrtmgp_gpoint_batch_size,
         )
         if _ghg_mid is None:
             return built
@@ -477,7 +508,7 @@ def _evaluate_variant(
     training objective so the scorecard is directly comparable across
     variants.
     """
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         compute_spectral_filter,
         compute_sponge_factor,
     )
@@ -593,7 +624,7 @@ def _evaluate_variant(
         eval_split_rad = eval_rad_interval > 1
         built = make_aimip_classical_spectral_physics(
             trained_model, grid, spec_cfg.dt,
-            radiation=str(cfg.get("aimip_radiation", "gray")),
+            radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
             rad_update_interval_steps=eval_rad_interval,
             convection_scheme=str(cfg.get("aimip_convection", "tiedtke")),
             turbulence_scheme=str(cfg.get("aimip_turbulence", "louis")),
@@ -613,14 +644,30 @@ def _evaluate_variant(
     elif variant == "sfno_physics":
         physics_fn = make_sfno_spectral_physics(trained_model, grid)
     elif variant == "sfno_full":
-        from legoesm.atmosphere.dynamics.sfno_pe import (
+        from legoesm.atmosphere.dynamics.neural.sfno_pe import (
             SFNOPrimitiveEquationConfig,
             SFNOPrimitiveEquationModel,
         )
         from legoesm.ml.channel_packing import PE3DChannelSpec
         from legoesm.ml.sfno import SFNOConfig
+        from legoesm.ml.normalization import load_normalization_stats
         _channels = PE3DChannelSpec(nlev=spec_cfg.n_levels).n_channels
         eval_dt_sfno = float(cfg.get("dt_sfno", 21600.0))
+        # sfno_full trains WITH per-channel Z-score normalization; reload the
+        # SAME norm_stats.npz the training wrote into checkpoint_dir
+        # ({output_dir}/{aimip_variant}) so this in-run eval applies the
+        # identical transform (state_update denormalises the output as a full
+        # state).  The eqx checkpoint carries only SFNO leaves, so the sidecar
+        # (not the checkpoint) is the source of truth for the stats.
+        _stats_path = Path(cfg["output_dir"]) / cfg["aimip_variant"] / "norm_stats.npz"
+        if not _stats_path.exists():
+            raise SystemExit(
+                f"sfno_full eval: normalization sidecar not found at "
+                f"{_stats_path}. train_sfno_full_spectral writes it per run; "
+                f"the model was trained WITH normalization, so eval cannot "
+                f"proceed without the matching stats."
+            )
+        eval_norm_stats = load_normalization_stats(_stats_path)
         eval_pe_cfg = SFNOPrimitiveEquationConfig(
             sfno_config=SFNOConfig(
                 in_channels=_channels,
@@ -637,11 +684,12 @@ def _evaluate_variant(
             # needs synthesis/clip/re-analysis); previously silently ignored.
             correct_moisture_budget=False,
             clip_q=False,
-            use_normalization=False,
+            use_normalization=True,
         )
         eval_full_wrapper = SFNOPrimitiveEquationModel(
             grid=grid, sigma_coord=sigma,
             config=eval_pe_cfg, sfno_model=trained_model,
+            norm_stats=eval_norm_stats,
         )
         n_steps_eval_sfno = max(
             1, int(round(eval_rollout_hours * 3600.0 / eval_dt_sfno))
@@ -663,7 +711,7 @@ def _evaluate_variant(
     else:
         raise ValueError(f"Unknown variant in eval: {variant!r}")
 
-    from legoesm.atmosphere.dynamics.spectral_pe import spectral_pe_to_grid
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import spectral_pe_to_grid
 
     losses: list[float] = []
     # ``T`` reports the mid-level (~500 hPa) cross-section for direct
@@ -802,8 +850,14 @@ def main():
     )
     args = parser.parse_args()
 
+    # Resolve the MPI rank BEFORE configuring logging so that under a
+    # data-parallel launch only rank 0 logs at INFO; the other ranks log at
+    # WARNING, otherwise every INFO line is duplicated x nranks (#985 papercut).
+    from legoesm.training.data_parallel import mpi_rank_size
+    _rank, _nproc = mpi_rank_size()
+
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.INFO if _rank == 0 else logging.WARNING,
         format="%(asctime)s %(name)s %(levelname)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
@@ -848,6 +902,13 @@ def main():
         "variants": {},
     }
 
+    # Under an MPI launch (aimip_data_parallel), _train_variant returns on EVERY
+    # rank holding the identical replicated model. Only rank 0 evaluates +
+    # persists (params.eqx / the scorecard) so the ranks don't clobber those
+    # files or multiply the eval work; a barrier after each variant resyncs the
+    # ranks before the next variant's collective (DP) training phase.
+    # (_rank/_nproc resolved above, before logging setup.)
+
     for variant in variants:
         overlay = _load_yaml(
             args.suite.parent / f"variant_{variant}.yaml"
@@ -868,57 +929,74 @@ def main():
         )
         train_elapsed = time.time() - t0
 
-        # Evaluate on BOTH the training windows (in-sample skill, for
-        # the AIMIP-fleet annual-mean overlay during 2015-2016) and
-        # the held-out test windows (default 2017).  Both reports use
-        # an identical loss / rollout horizon so they are directly
-        # comparable in absolute K.
-        eval_metrics_test = _evaluate_variant(
-            variant, model, cfg, cache_dir, period="test",
-        )
-        eval_metrics_train = _evaluate_variant(
-            variant, model, cfg, cache_dir, period="train",
-        )
-        ckpt_path = output_dir / variant / "params.eqx"
-        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        # Evaluate + persist on rank 0 ONLY (all ranks share the identical
+        # replicated model; concurrent writers would clobber params.eqx / the
+        # scorecard and N x the eval cost).
+        if _rank == 0:
+            # Evaluate on BOTH the training windows (in-sample skill, for
+            # the AIMIP-fleet annual-mean overlay during 2015-2016) and
+            # the held-out test windows (default 2017).  Both reports use
+            # an identical loss / rollout horizon so they are directly
+            # comparable in absolute K.
+            eval_metrics_test = _evaluate_variant(
+                variant, model, cfg, cache_dir, period="test",
+            )
+            eval_metrics_train = _evaluate_variant(
+                variant, model, cfg, cache_dir, period="train",
+            )
+            ckpt_path = output_dir / variant / "params.eqx"
+            ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
-        from legoesm.ml.training import save_checkpoint
-        save_checkpoint(model, ckpt_path)
+            from legoesm.ml.training import save_checkpoint
+            save_checkpoint(model, ckpt_path)
 
-        results["variants"][variant] = {
-            "train_loss_history": [float(x) for x in loss_history],
-            "train_seconds": train_elapsed,
-            "eval_metrics": eval_metrics_test,
-            "eval_metrics_train_period": eval_metrics_train,
-            "checkpoint": str(ckpt_path),
-        }
-        # ``loss_history`` is empty on an eval-only resume (all epochs already
-        # done, start_epoch == n_epochs -> zero training iterations); guard the
-        # [-1] so the scorecard write below still runs (e.g. scorecard regen).
-        last_train_loss = loss_history[-1] if loss_history else float("nan")
-        logger.info(
-            f"{variant}: train_loss[-1]={last_train_loss:.6f}, "
-            f"test_loss={eval_metrics_test['loss']['mean']:.6f}, "
-            f"test RMSE T={eval_metrics_test['rmse']['T']['mean']:.3f}K "
-            f"T_sfc={eval_metrics_test['rmse']['T_sfc']['mean']:.3f}K | "
-            f"train RMSE T={eval_metrics_train['rmse']['T']['mean']:.3f}K "
-            f"T_sfc={eval_metrics_train['rmse']['T_sfc']['mean']:.3f}K, "
-            f"train_time={train_elapsed:.1f}s"
-        )
+            results["variants"][variant] = {
+                "train_loss_history": [float(x) for x in loss_history],
+                "train_seconds": train_elapsed,
+                "eval_metrics": eval_metrics_test,
+                "eval_metrics_train_period": eval_metrics_train,
+                "checkpoint": str(ckpt_path),
+            }
+            # ``loss_history`` is empty on an eval-only resume (all epochs already
+            # done, start_epoch == n_epochs -> zero training iterations); guard the
+            # [-1] so the scorecard write below still runs (e.g. scorecard regen).
+            last_train_loss = loss_history[-1] if loss_history else float("nan")
+            logger.info(
+                f"{variant}: train_loss[-1]={last_train_loss:.6f}, "
+                f"test_loss={eval_metrics_test['loss']['mean']:.6f}, "
+                f"test RMSE T={eval_metrics_test['rmse']['T']['mean']:.3f}K "
+                f"T_sfc={eval_metrics_test['rmse']['T_sfc']['mean']:.3f}K | "
+                f"train RMSE T={eval_metrics_train['rmse']['T']['mean']:.3f}K "
+                f"T_sfc={eval_metrics_train['rmse']['T_sfc']['mean']:.3f}K, "
+                f"train_time={train_elapsed:.1f}s"
+            )
+
+        # Resync ranks before the next variant's collective (DP) training so a
+        # fast rank does not enter the next allreduce while rank 0 is still
+        # evaluating. Safe here: training + its prefetch threads are done, so no
+        # other collective is in flight.
+        if _nproc > 1:
+            from mpi4py import MPI
+            MPI.COMM_WORLD.Barrier()
 
     # Merge with any existing scorecard so multiple --variants invocations
-    # share one results/.../aimip_scorecard.json.
-    scorecard_path = output_dir / "aimip_scorecard.json"
-    if scorecard_path.exists():
-        with scorecard_path.open() as fh:
-            existing = json.load(fh)
-        existing_variants = existing.get("variants", {}) if isinstance(existing, dict) else {}
-        merged = dict(existing_variants)
-        merged.update(results["variants"])
-        results["variants"] = merged
-    with scorecard_path.open("w") as fh:
-        json.dump(results, fh, indent=2)
-    logger.info(f"Wrote AIMIP scorecard: {scorecard_path}")
+    # share one results/.../aimip_scorecard.json.  Rank 0 only (the other ranks
+    # never populated ``results`` and must not race on the file).
+    if _rank == 0:
+        scorecard_path = output_dir / "aimip_scorecard.json"
+        if scorecard_path.exists():
+            with scorecard_path.open() as fh:
+                existing = json.load(fh)
+            existing_variants = existing.get("variants", {}) if isinstance(existing, dict) else {}
+            merged = dict(existing_variants)
+            merged.update(results["variants"])
+            results["variants"] = merged
+        with scorecard_path.open("w") as fh:
+            json.dump(results, fh, indent=2)
+        logger.info(f"Wrote AIMIP scorecard: {scorecard_path}")
+
+    if _rank != 0:
+        return   # non-zero ranks are done; only rank 0 prints the summary
 
     # Final scorecard summary table -- printed to stdout (and the SLURM
     # log) so the per-variant in-sample (training) and held-out (test)

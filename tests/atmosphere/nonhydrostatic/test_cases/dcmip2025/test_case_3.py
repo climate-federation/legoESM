@@ -43,7 +43,7 @@ from legoesm import constants
 # Default parameters + sounding now live in the package (audit item 9: no
 # production->tests import).  Re-export with the historical underscore names so
 # the in-file ``dcmip25_tc3_init`` and any external test imports keep working.
-from legoesm.atmosphere.dynamics.dcmip2025_ic import (  # noqa: E402,F401
+from legoesm.atmosphere.dynamics.gcm.dcmip2025_ic import (  # noqa: E402,F401
     TC3_PARAMS,
     squall_line_sounding as _squall_line_sounding,
     squall_line_theta_fn as _squall_line_theta_fn,

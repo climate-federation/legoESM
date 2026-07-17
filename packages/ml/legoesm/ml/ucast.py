@@ -8,7 +8,7 @@ U-Net in the lineage of Dhariwal & Nichol's ADM / Karras et al.'s EDM
 backbone — *no* spherical-harmonic transforms.  Its identity as a
 *probabilistic* forecaster comes from **MC-Dropout** ensembling plus a
 fair-CRPS fine-tuning stage, both layered on top of this one deterministic
-backbone (see :mod:`legoesm.atmosphere.dynamics.ucast_pe`).
+backbone (see :mod:`legoesm.atmosphere.dynamics.neural.ucast_pe`).
 
 This module ports only the network ``DhariwalUNet`` from the reference
 ``src/models/networks_edm.py``.  The architecture, in order:

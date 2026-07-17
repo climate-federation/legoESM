@@ -22,7 +22,7 @@ _DRIVER_SRC = Path(_driver.__file__).read_text()
 
 
 def _modon_constants():
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         MODON_DAMP_V,
         MODON_DIV_DAMP_FACTOR,
         MODON_HYPERDIFF_FACTOR,
@@ -56,7 +56,7 @@ def test_default_scaling_law_coefficient_ratios_c36_c48_c96():
     the *physical* C96 seam stability rests on the 100-day matrix integration at
     C96 (the default matrix cube resolution is C36, which is stable under both
     laws and so does NOT exercise the fix)."""
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         cdgrid_hyperdiff_cube,
     )
     _, _, _, hd_scaling = _modon_constants()

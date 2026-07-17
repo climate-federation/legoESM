@@ -350,7 +350,7 @@ def test_spectral_rollout_rad_gating_one_step():
     """
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
     from legoesm.training.aimip_params import (
         AIMIPClassicalParams, make_aimip_classical_spectral_physics,
     )
@@ -449,7 +449,7 @@ def test_rrtmgp_spectral_pe_sfc_albedo_override_consumed_and_differentiable():
     import numpy as np
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         isothermal_rest_state_spectral,
     )
     from legoesm.atmosphere.physics.radiation.config import (
@@ -501,7 +501,7 @@ def test_make_physics_threads_sfc_override_combined_path():
     import numpy as np
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         isothermal_rest_state_spectral,
     )
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
@@ -555,7 +555,7 @@ def test_aimip_nonspatial_rrtmgp_sfc_albedo_is_trainable():
     )
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         isothermal_rest_state_spectral,
     )
 

@@ -1,0 +1,65 @@
+&SGS_TKE
+dosmagor = .false.
+/
+
+ &PARAMETERS
+
+ caseid ='144x144x300_35m_3s',
+
+ nrestart = 0,
+
+ OCEAN = .true.,
+
+
+ dosgs		= .true.,
+ dodamping 	= .true.,
+ doupperbound  	= .true.,
+ docloud 	= .true.,
+ doprecip 	= .false.,
+ dolongwave	= .true.,
+ doradsimple    = .true., 
+ doshortwave	= .false.,
+ dosurface 	= .true.,
+ dolargescale 	= .true.,
+ doradforcing   = .false.,
+ dosfcforcing   = .true.,
+ docoriolis 	= .true.,
+ donudging_uv   = .false.,
+ donudging_tq   = .false.,
+
+ SFC_FLX_FXD    = .true.,
+ SFC_TAU_FXD    = .true.,
+
+ fcor = 0.376e-4,
+
+ dx = 	35.,
+ dy = 	35.,
+ dz =   5.
+ doconstdz = .true. 
+
+ dt = 	3.,
+
+ day0=0.,
+ nrad = 45,
+
+ nstop 	= 4800,
+ nprint  = 100,
+ nstat 	= 100,
+ nstatfrq= 10,
+
+doSAMconditionals = .fasle.
+dosatupdnconditionals = .false.
+
+ nsave2D	= 300,
+ nsave2Dstart	= 999991,
+ nsave2Dend	= 14400,
+ save2Dbin      = .true.
+
+ nsave3D	= 300,
+ nsave3Dstart	= 99918000,
+ nsave3Dend	= 999999999,
+ save3Dbin      = .true.
+
+/ 
+
+

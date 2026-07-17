@@ -12,9 +12,12 @@ for p in atmosphere core coupler ice land ml ocean tools; do
 done
 export PYTHONPATH="$PP:${PYTHONPATH:-}"
 export MPI4JAX_NO_WARN_JAX_VERSION=1
-# Disable the persistent JIT cache so compile_time_s is a true cold compile
-# (the runtime reads LEGOESM_JIT_CACHE_DIR; empty string = off).
-export LEGOESM_JIT_CACHE_DIR=""
+# Persistent JIT cache: OFF by default (so scaling benchmarks see a true cold
+# compile), but HONOR a caller-provided value — a submit that pre-exports
+# LEGOESM_JIT_CACHE_DIR=<dir> keeps it, so expensive one-time compiles (e.g. the
+# ~6 h classical rrtmgp+AD training step) cache to disk and reuse across
+# epochs/resumes/reruns. The runtime reads LEGOESM_JIT_CACHE_DIR; ""=off.
+export LEGOESM_JIT_CACHE_DIR="${LEGOESM_JIT_CACHE_DIR:-}"
 # Per-job XLA/ptxas temp dir.  XLA writes PTX to $TMPDIR during subprocess
 # compilation.  TWO failure modes seen on the shared nodes: (a) the default
 # /local races across co-located jobs ("DeleteFile NOT_FOUND /local/tempfile")

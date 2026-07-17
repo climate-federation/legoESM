@@ -17,8 +17,8 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics import spectral_les_plane as sl
-from legoesm.atmosphere.dynamics.spectral_les_moist import (
+from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl
+from legoesm.atmosphere.dynamics.les.spectral_les_moist import (
     SpectralRefState,
     make_anelastic_reference,
     make_les_microphysics_fn,
@@ -187,6 +187,26 @@ def test_adapter_scheme_swappable_kessler():
     assert float(jnp.min(dtr[..., 0])) < 0.0
     assert float(jnp.max(dtr[..., 1])) > 0.0
     assert float(jnp.max(dth)) > 0.0
+
+
+def test_adapter_rejects_inappropriate_schemes():
+    """The LES adapter must REJECT non-resolved-cloud schemes: 'sundqvist' is a
+    large-scale (subgrid RH>RH_crit) GCM diagnostic condensation scheme that
+    condenses in every cell above RH_crit on the LES grid -> spurious
+    near-overcast (measured cc~0.9-1.0, LWP 20-43 g/m^2 across BOMEX/DYCOMS/RICO
+    vs 0.03-0.24 for the resolved-cloud schemes); 'none' builds no adapter;
+    'ml_emulator' needs a trained-model arg the adapter never passes."""
+    nz, dz, dt = 16, 50.0, 5.0
+    ref = _ref_for(nz, dz)
+    with pytest.raises(ValueError, match=r"(?i)large-scale"):
+        make_les_microphysics_fn(MicrophysicsConfig(scheme="sundqvist"), ref, dz, dt)
+    with pytest.raises(ValueError):
+        make_les_microphysics_fn(MicrophysicsConfig(scheme="none"), ref, dz, dt)
+    with pytest.raises(NotImplementedError):
+        make_les_microphysics_fn(MicrophysicsConfig(scheme="ml_emulator"), ref, dz, dt)
+    # A resolved-cloud scheme still builds fine (guard is not over-broad).
+    assert make_les_microphysics_fn(
+        MicrophysicsConfig(scheme="morrison"), ref, dz, dt).scheme_name == "morrison"
 
 
 # --------------------------------------------------------------------------- #
@@ -383,7 +403,7 @@ def test_stabilization_flags_default_off_and_plumbed():
 
 
 def test_moist_diagnostics_bundle():
-    from legoesm.atmosphere.dynamics.spectral_les_moist import moist_diagnostics
+    from legoesm.atmosphere.dynamics.les.spectral_les_moist import moist_diagnostics
     ny = nx = 6; nz = 10
     u = np.zeros((ny, nx, nz)); v = np.zeros((ny, nx, nz))
     wc = np.zeros((ny, nx, nz)); wc[0, 0, 5] = 2.0

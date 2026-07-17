@@ -20,6 +20,8 @@ __param_spec__ = {
             # spectral-width, not a tunable closure coefficient. Paired with
             # the pgam_max cap (Morrison module_mp_mg.F90).
             "pgam_min": "numerics: lower clip/cap on the gamma-PSD shape parameter (regulariser, paired with pgam_max)",
+            "cloud_optics_asymmetry_g": "numerics: scattering asymmetry g of the two-region inhomogeneity two-stream reflectance (shapes the reduction; the real per-band g lives in RRTMGP, not trained here)",
+            "clubb_cf_override_p_min_pa": "structural: BL-top pressure [Pa] above which the diagnostic-CLUBB cloud-fraction override applies (a level/regime gate, not a trained closure coefficient); 0 => full-column override",
         },
         "params": {
             # --- critical_rh: primary cloud-onset RH (Sundqvist + Xu-Randall lower bound) ---
@@ -36,6 +38,8 @@ __param_spec__ = {
             # --- optical_radius: fixed-fallback effective radii [m] for RRTMGP cloud optics ---
             "r_eff_liq": {"units": "m", "bounds": (4.0e-6, 30.0e-6), "tunable_tier": 2, "transform": "sigmoid", "category": "optical_radius", "reference": "cloud-optics fallback default", "shape": None},
             "r_eff_ice": {"units": "m", "bounds": (10.0e-6, 90.0e-6), "tunable_tier": 2, "transform": "sigmoid", "category": "optical_radius", "reference": "cloud-optics fallback default", "shape": None},
+            "cloud_inhomogeneity_factor": {"units": "1", "bounds": (0.3, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "optical_radius", "reference": "Cahalan et al. (1994) plane-parallel albedo bias", "shape": None},
+            "cloud_fsd": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "optical_radius", "reference": "Shonk & Hogan (2008, 2010) fractional standard deviation of in-cloud water", "shape": None},
             # --- droplet_psd: Morrison M2005 liquid effective-radius PSD (gamma-shape from Nc) ---
             "Nc_default": {"units": "1/m^3", "bounds": (1.0e7, 1.0e9), "tunable_tier": 2, "transform": "sigmoid", "category": "droplet_psd", "reference": "Morrison et al. (2005) M2005 (SAM Nc_0)", "shape": None},
             "martin_pgam_slope": {"units": "cm^3", "bounds": (1.0e-4, 2.0e-3), "tunable_tier": 3, "transform": "sigmoid", "category": "droplet_psd", "reference": "Martin et al. (1994)", "shape": None},
@@ -50,6 +54,8 @@ __param_spec__ = {
             "conv_cloud_sigma_top": {"units": "1", "bounds": (0.05, 0.4), "tunable_tier": 0, "transform": "sigmoid", "category": "convective_cloud", "reference": "convective cloud-deck top (sigma); numerics layer-bound", "shape": None},
             "conv_cloud_sigma_base": {"units": "1", "bounds": (0.35, 0.98), "tunable_tier": 0, "transform": "sigmoid", "category": "convective_cloud", "reference": "convective anvil-deck base (sigma); numerics layer-bound", "shape": None},
             "conv_cloud_condensate": {"units": "kg/kg", "bounds": (1.0e-5, 1.0e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "condensate", "reference": "thin anvil-cirrus in-cloud condensate", "shape": None},
+            # --- condensate (adiabatic in-cloud LWC growth rate, opt-in vertical structure) ---
+            "adiabatic_lwc_rate": {"units": "kg/kg/m", "bounds": (5.0e-7, 3.0e-6), "tunable_tier": 2, "transform": "sigmoid", "category": "condensate", "reference": "adiabatic cloud LWC gradient ~1-2 g/kg per km (Brenguier et al. 2000)", "shape": None},
         },
     },
 }
@@ -121,6 +127,13 @@ class CloudConfig(NamedTuple):
     gamma_xr: float = 0.49
     r_eff_liq: float = 10.0e-6
     r_eff_ice: float = 30.0e-6
+    # Cahalan et al. (1994) horizontal-inhomogeneity factor on the radiative
+    # in-cloud water path: real clouds are horizontally PATCHY, so a plane-
+    # parallel HOMOGENEOUS layer carrying the same mean water is systematically
+    # too reflective (the plane-parallel albedo bias).  Operational GCMs scale
+    # LWP/IWP by chi ~ 0.7 to correct it.  1.0 = homogeneous (legacy, no change);
+    # < 1 reduces the effective optical depth (both SW + LW).
+    cloud_inhomogeneity_factor: float = 1.0
     Nc_default: float = 1.0e8        # fallback cloud-droplet number [1/m³] for the
                                      # gamma-PSD liquid effective radius when the
                                      # passed n_cloud is 0/garbage — e.g. SAM
@@ -149,6 +162,16 @@ class CloudConfig(NamedTuple):
     martin_pgam_intercept: float = 0.2714
     pgam_min: float = 2.0
     pgam_max: float = 10.0
+    # CLUBB cloud-fraction override LEVEL GATE (marine-Sc albedo lever): when a
+    # ``cloud_fraction_override`` (diagnostic CLUBB's PDF cf) is supplied, apply it
+    # ONLY where ``p_full >= clubb_cf_override_p_min_pa`` — the boundary layer /
+    # low cloud, the marine-Sc target — keeping the RH grid-scale fraction ALOFT.
+    # The real-SST A/B showed a FULL-COLUMN override over-clouds at altitude (OLR
+    # collapse to ~160 W/m² + albedo RISE 0.53->0.65) because CLUBB's PDF
+    # over-diagnoses high/mid cloud; restricting it to the BL removes that backfire
+    # while keeping the intended low-cloud reduction.  ``0.0`` => apply at ALL
+    # levels (the original full-column override).
+    clubb_cf_override_p_min_pa: float = 70000.0
     # --- Convective cloud fraction (Slingo 1987), OPT-IN (default OFF) ---
     # The RH-based stratiform schemes (sundqvist/xu_randall) give cloud only
     # near saturation, so an adjustment convection scheme (sbm) that holds the
@@ -185,6 +208,44 @@ class CloudConfig(NamedTuple):
     # q_c_diagnostic=1e-3) so the high cloud traps LW without over-reflecting SW
     # (the v3 albedo~42% overshoot; high cold tops keep the LW benefit).
     conv_cloud_condensate: float = 1.5e-4
+    # --- Diagnostic in-cloud condensate vertical structure (opt-in) ---
+    # The stratiform radiative floor ``q_total_diag = cf * q_c_diagnostic`` uses
+    # a CONSTANT in-cloud water (1 g/kg) at every cloudy level.  Measured against
+    # AMIP checkpoints this over-brightens THIN warm marine stratocumulus: the
+    # radiative q_c there is the floor (11.5x the prognostic, dominating 77% of
+    # BL cells), and a shallow Sc's real in-cloud LWC (~0.2-0.5 g/kg) is set by
+    # its DEPTH, not the deep-cloud calibration value.  ``"adiabatic"`` replaces
+    # the constant with a capped adiabatic LWC that grows with cloudy depth above
+    # cloud base (``q_ad = adiabatic_lwc_rate * D``, ``D`` the cloudy GEOMETRIC
+    # depth from cloud base to the level MIDPOINT — reset at clear gaps — capped
+    # at ``q_c_diagnostic``, and only for warm/liquid cells): thin low
+    # clouds dim while a deep cloud is ~unchanged ABOVE the cap depth (~667 m;
+    # its near-base layers still dim, but q_ad can only DIM, never exceed
+    # q_c_diagnostic — preserving the LW_down / anti-too-dark calibration that
+    # raised q_c_diagnostic to 1e-3, and leaving CRM 'resolved' + SBM alone).
+    # Physics of the decoupling: SW cloud albedo is UNSATURATED in optical depth
+    # so it drops with the water path; LW emissivity SATURATES above ~20 g/m^2
+    # LWP so LW_down is ~untouched.  Default ``"constant"`` = byte-identical to
+    # the validated floor.
+    diagnostic_condensate_scheme: str = "constant"
+    adiabatic_lwc_rate: float = 1.5e-6   # in-cloud LWC growth per metre of cloudy
+    # depth [kg/kg/m] ~ 1.5 g/kg per km (adiabatic marine-Sc gradient); only read
+    # when diagnostic_condensate_scheme="adiabatic".
+    # --- Sub-grid cloud-optics inhomogeneity (appended at the END of the
+    # NamedTuple so positional / checkpoint callers keep their field order) ---
+    # Scheme: "constant" (Cahalan scalar cloud_inhomogeneity_factor above;
+    # legacy, byte-identical default) or "two_region" (tau-DEPENDENT
+    # Shonk & Hogan 2008 factor chi_eff = 1 - fsd^2 tau/(gamma0+tau) that reduces
+    # a THICK cloud more than a thin one; asymptote 1-fsd^2).  Unknown => raise.
+    cloud_optics_inhomogeneity: str = "constant"
+    # Fractional standard deviation of in-cloud water for two_region (Shonk &
+    # Hogan 2010 global mean ~0.75; broken marine Sc -> ~1).  fsd -> 0 is
+    # homogeneous (chi_eff -> 1); higher fsd => larger reduction (floor 1-fsd^2).
+    cloud_fsd: float = 0.75
+    # Scattering asymmetry g of the two_region conservative two-stream
+    # reflectance R(t) = t/(t + 2/(1-g)).  ~0.85 for liquid clouds (Mie, SW).
+    # A numerics constant of the optic (the real per-band g lives in RRTMGP).
+    cloud_optics_asymmetry_g: float = 0.85
 
 
 def build_cloud_config(
@@ -195,8 +256,13 @@ def build_cloud_config(
     q_c_diagnostic: float | None = None,
     conv_cloud_max: float | None = None,
     conv_cloud_condensate: float | None = None,
+    cloud_inhomogeneity_factor: float | None = None,
+    cloud_optics_inhomogeneity: str | None = None,
+    cloud_fsd: float | None = None,
     p_xr: float | None = None,
     alpha_xr: float | None = None,
+    diagnostic_condensate_scheme: str | None = None,
+    adiabatic_lwc_rate: float | None = None,
 ) -> "CloudConfig":
     """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
     fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
@@ -208,7 +274,7 @@ def build_cloud_config(
     A ``None`` override falls back to the ``CloudConfig`` default (so an
     all-``None`` call is byte-identical to the defaults).
     """
-    overrides: dict[str, float] = {}
+    overrides: dict[str, float | str] = {}
     if rh_crit is not None:
         overrides["rh_crit"] = rh_crit
     if q_c_diagnostic is not None:
@@ -217,10 +283,20 @@ def build_cloud_config(
         overrides["conv_cloud_max"] = conv_cloud_max
     if conv_cloud_condensate is not None:
         overrides["conv_cloud_condensate"] = conv_cloud_condensate
+    if cloud_inhomogeneity_factor is not None:
+        overrides["cloud_inhomogeneity_factor"] = cloud_inhomogeneity_factor
+    if cloud_optics_inhomogeneity is not None:
+        overrides["cloud_optics_inhomogeneity"] = cloud_optics_inhomogeneity
+    if cloud_fsd is not None:
+        overrides["cloud_fsd"] = cloud_fsd
     if p_xr is not None:
         overrides["p_xr"] = p_xr
     if alpha_xr is not None:
         overrides["alpha_xr"] = alpha_xr
+    if diagnostic_condensate_scheme is not None:
+        overrides["diagnostic_condensate_scheme"] = diagnostic_condensate_scheme
+    if adiabatic_lwc_rate is not None:
+        overrides["adiabatic_lwc_rate"] = adiabatic_lwc_rate
     return CloudConfig(
         scheme=scheme, convective_cloud=convective_cloud, **overrides
     )
