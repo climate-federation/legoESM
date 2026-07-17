@@ -306,6 +306,28 @@ ISOLATION EXPERIMENTS (2026-07-16, 5-yr runs + single-column avt certificate):
   on.) Fix: EnhancedDiffusionConfig.n2_mode="adiabatic" on the card (+ a new
   n2_threshold field, default 0.0, for NEMO's -1e-12; inert here, kept for
   fidelity).
+- **NEXT-TARGET TRACE (2026-07-16 cont.): the residual is the SPRING
+  VERTICAL-ADVECTION (Ekman pumping) chain, not any column-physics numeric.**
+  Evidence chain: (1) day-91 states MATCH everywhere (max 0.09 C) — the first
+  winter is now faithful; (2) the divergence develops days 90-180 in the
+  lat 30-36 band: surface stays ~0.4-0.7 cold with heat parked at 111-209 m;
+  (3) the closure is certified EXACT in this regime too (NEMO day-150
+  fossil-layer column: our K_H == avt_k at every level incl. the floor);
+  (4) twin-from-NEMO-day-90 (GYRE_IC_NEMO, matched phase): NEMO cools 187 m
+  by 0.4 C in 30 days = w*dT/dz with w ~ 1 m/day (spring Ekman upwelling
+  north of the wind max sharpening the seasonal thermocline from below);
+  the rest-started twin does not — the term lives in w, not in mixing.
+  => the loop is DYNAMICAL: 0.71x baroclinic gyre -> 0.71x w pattern ->
+  weaker isotherm doming/sharpening -> 0.81x density structure -> 0.71x gyre.
+  All column physics is certified; the remaining comparison target is the
+  W FIELD (legoESM state.w vs NEMO vovecrtz 2920h means) and the wind-curl
+  -> w_Ek realization. Harness: add "w" to the snapshot dict to enable.
+- **zdftke CODE-TRACE COMPLETE (same session): dissipation_discretization=
+  "nemo_1p5_split" implemented (NEMO zfact2/zfact3, on card, tested);
+  TKE-first order / positivity=floor / pre_solve shear / -1e-12 threshold /
+  tracer RK3 ALL verified trajectory-inert on the fixed config.** Remaining
+  traced minors: bottom TKE Dirichlet (0.001875*rCdU*|u_bot|), EVD
+  min(rn2,rn2b) two-level.
 - **RESOLVED (both fixes on the card): the subtropical thermocline now BUILDS
   to NEMO's level.** 5-yr, card native (alpha_tke=1 + EVD adiabatic): summer
   contrast 0.54 -> 1.79 -> 2.41 -> 2.96 -> **3.46 (NEMO summer ~3.17)**; winter
