@@ -211,5 +211,76 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
                        ctx["gs6"][t - 1], bd)
         outs.append({**s1[t - 1], "allflux_x": afx6[t - 1],
                      "allflux_y": afy6[t - 1],
-                     "delp": s2["delp"], "pt": s2["pt"]})
+                     "delp": s2["delp"], "pt": s2["pt"],
+                     "uc": uc6[t - 1], "vc": vc6[t - 1],
+                     "divg_d": divgd6[t - 1]})
+    return outs
+
+
+def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
+    """SB3: ONE full duo acoustic step on all six faces —
+    c_sw -> geopk/PG-C -> d_sw1 -> C-ring averaging -> d_sw2 -> d_sw3
+    -> BGRID averaging of (ubb, vbbtemp) (dyn_core.F90:968-1020, the
+    second excluded mpp site, now LIVE) -> kee -> d_sw4 -> d_sw5 ->
+    d_sw6 final winds.
+
+    Returns per-face new states {delp, pt, u, v} plus diagnostics
+    (ke, wk, divg_d).  Same interim exchange semantics as SB2
+    (documented there).
+    """
+    from legoesm.core.fv3_native_duo_sw_core import (
+        d_sw3_duo,
+        d_sw4_duo,
+        d_sw5_duo,
+        d_sw6_duo,
+    )
+    from legoesm.grids.fv3_native_gridstruct import (
+        average_shared_edge_bgrid,
+    )
+
+    n, ng = ctx["n"], ctx["ng"]
+    bd = ctx["bd"]
+    npx = n + 1
+    m_a = n + 2 * ng
+
+    csw = csw_step_sixface(ctx, states, dt2=0.5 * dt)
+    s12 = dsw12_step_sixface(ctx, states, csw, dt=dt)
+
+    s3 = [d_sw3_duo(states[t - 1]["u"], states[t - 1]["v"],
+                    s12[t - 1]["uc"], s12[t - 1]["vc"],
+                    ctx["gs6"][t - 1], bd, npx, npx, dt=dt, hord_mt=6)
+          for t in range(1, 7)]
+
+    ubb6 = [np.array(o["ubb"], copy=True) for o in s3]
+    vbbtemp6 = [np.array(o["vbbtemp"], copy=True) for o in s3]
+    average_shared_edge_bgrid(ubb6, vbbtemp6, n, ng)
+
+    outs = []
+    for t in range(1, 7):
+        ke = np.full((m_a + 1, m_a + 1), 0.0)
+        ring = slice(ng, ng + npx)
+        kee = s3[t - 1]["ubbtemp"] * vbbtemp6[t - 1]
+        ke[ring, ring] = 0.5 * (kee + ubb6[t - 1] * s3[t - 1]["vbb"])
+        s4 = d_sw4_duo(states[t - 1]["u"], states[t - 1]["v"],
+                       s12[t - 1]["ut"], s12[t - 1]["vt"], ke,
+                       ctx["gs6"][t - 1], bd, npx, npx, dt=dt)
+        s5 = d_sw5_duo(s12[t - 1]["delp"], states[t - 1]["u"],
+                       states[t - 1]["v"], s12[t - 1]["uc"],
+                       s12[t - 1]["vc"], csw[t - 1]["ua"],
+                       csw[t - 1]["va"], s12[t - 1]["divg_d"],
+                       s12[t - 1]["crx_adv"], s12[t - 1]["cry_adv"],
+                       s12[t - 1]["xfx_adv"], s12[t - 1]["yfx_adv"],
+                       s12[t - 1]["ra_x"], s12[t - 1]["ra_y"],
+                       s4["ke"], ctx["gs6"][t - 1], bd, npx, npx,
+                       dt=dt, hord_vt=6, nord=1, dddmp=0.2,
+                       d2_bg=0.0, d4_bg=0.12, d_con=0.0)
+        s6 = d_sw6_duo(states[t - 1]["u"], states[t - 1]["v"],
+                       s5["ut"], s5["vt"], s5["ke"], s5["wk"],
+                       s5["vortfluxx"], s5["vortfluxy"],
+                       ctx["gs6"][t - 1], bd, npx, npx,
+                       nord_v=1, damp_v=0.2, d_con=0.0)
+        outs.append({"delp": s12[t - 1]["delp"], "pt": s12[t - 1]["pt"],
+                     "u": s6["u"], "v": s6["v"],
+                     "ke": s5["ke"], "wk": s5["wk"],
+                     "divg_d": s5["divg_d"]})
     return outs

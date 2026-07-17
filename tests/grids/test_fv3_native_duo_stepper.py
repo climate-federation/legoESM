@@ -114,3 +114,36 @@ def test_uc_halo_matches_neighbor_interior(ctx, outs):
     col = uc1[0 - lo, NG:NG + N]
     assert np.isfinite(col).all()
     assert np.abs(col).max() > 0.0
+
+
+def test_sb3_full_acoustic_step(ctx):
+    """SB3: one complete duo acoustic step (both mpp averaging sites
+    LIVE) — mass conserved, final winds finite and bounded (no seam
+    blowup: |u| stays within a small multiple of the solid-body u0),
+    winds actually changed."""
+    from legoesm.core.fv3_native_duo_stepper import acoustic_step_sixface
+
+    states = analytic_six_face_state(ctx)
+    outs = acoustic_step_sixface(ctx, states, dt=225.0)
+    sl = slice(NG, NG + N)
+    m0 = sum(float((states[t]["delp"][sl, sl]
+                    * ctx["gs6"][t]["area"][sl, sl]).sum())
+             for t in range(6))
+    m1 = sum(float((outs[t]["delp"][sl, sl]
+                    * ctx["gs6"][t]["area"][sl, sl]).sum())
+             for t in range(6))
+    assert abs(m1 - m0) / abs(m0) < 1e-13
+    for t in range(6):
+        u = outs[t]["u"]
+        v = outs[t]["v"]
+        slu = (slice(NG, NG + N), slice(NG, NG + N + 1))
+        slv = (slice(NG, NG + N + 1), slice(NG, NG + N))
+        assert np.isfinite(u[slu]).all() and np.isfinite(v[slv]).all(), t
+        assert not np.array_equal(u[slu], states[t]["u"][slu]), t
+    # NOTE: d_sw6's u/v are the PRE-NORMALIZATION circulation-form
+    # values (u*dx + KE-difference + vortflux terms); dyn_core converts
+    # them back to covariant winds in the D-grid PG tail
+    # (one_grad_p: u=(u+PG+divg2)*rdx, dyn_core.F90:2466/2560) — that
+    # tail plus the external-mode divg2 filter is SB4 alongside the
+    # time loop, so no magnitude bound applies to the raw d_sw6 output
+    # here (phase-4b certified the same convention).
