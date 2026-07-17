@@ -48,3 +48,9 @@ dt_sfno: 21600.0
 aimip_rollout_curriculum: null
 aimip_chunk_windows: 0
 aimip_chunk_prefetch: false
+
+# sfno_full's trainer rejects data_parallel outright (loud guard, #985 codex
+# r4) — override the branch base's global aimip_data_parallel: true. Single-GPU
+# by design; submit WITHOUT the DP select line. (Re-added after a --theirs merge
+# dropped it, f4d3b535d.)
+aimip_data_parallel: false
