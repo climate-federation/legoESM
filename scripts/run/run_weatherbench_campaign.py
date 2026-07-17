@@ -98,21 +98,26 @@ def _parse_list(s, valid, name):
     return ordered
 
 
-def _load_campaign_yaml(config_path) -> dict:
-    """Load the campaign YAML (import-light, JAX-free). Missing file is a hard
-    error — the config is required for every stage and drives the declared
-    experiment; a silent default would defeat the controlled comparison."""
-    path = config_path
-    if not os.path.exists(path) and not os.path.isabs(path):
-        # Fall back to a repo-root-relative lookup so the default resolves
-        # regardless of the CWD pytest / a login shell runs from.
-        alt = _REPO / path
+def _resolve_config_path(config_path) -> str:
+    """Resolve the campaign YAML path CWD-independently: use it as-is when it
+    exists, else fall back to a repo-root-relative lookup. The resolved path is
+    stored on the config and forwarded to the delegated train/eval scripts, so
+    they open the SAME file regardless of the CWD the campaign is launched from.
+    A truly-missing config is a hard error — it drives the declared experiment
+    and a silent default would defeat the controlled comparison."""
+    if os.path.exists(config_path):
+        return config_path
+    if not os.path.isabs(config_path):
+        alt = _REPO / config_path
         if alt.exists():
-            path = str(alt)
-    if not os.path.exists(path):
-        raise SystemExit(f"--config {config_path!r} not found")
+            return str(alt)
+    raise SystemExit(f"--config {config_path!r} not found")
+
+
+def _load_campaign_yaml(config_path) -> dict:
+    """Load the (already-resolved) campaign YAML. Import-light, JAX-free."""
     import yaml
-    return yaml.safe_load(open(path)) or {}
+    return yaml.safe_load(open(config_path)) or {}
 
 
 def build_campaign_config_from_args(argv=None) -> CampaignConfig:
@@ -168,7 +173,8 @@ def build_campaign_config_from_args(argv=None) -> CampaignConfig:
     # comparison) is what actually runs — otherwise the trainer/eval defaults
     # silently override the YAML and every family runs a different-length job
     # than the config says. CLI flag still wins for a one-off override.
-    yml = _load_campaign_yaml(a.config)
+    config_path = _resolve_config_path(a.config)
+    yml = _load_campaign_yaml(config_path)
     n_epochs = a.n_epochs
     if n_epochs is None and yml.get("n_epochs") is not None:
         n_epochs = int(yml["n_epochs"])
@@ -181,7 +187,7 @@ def build_campaign_config_from_args(argv=None) -> CampaignConfig:
             eval_year = int(_years[0])
 
     return CampaignConfig(
-        config_path=a.config,
+        config_path=config_path,
         modes=_parse_list(a.modes, VALID_MODES, "modes"),
         stages=_parse_list(a.stages, VALID_STAGES, "stages"),
         training_core=a.training_core,
@@ -329,7 +335,12 @@ def run_campaign(cfg: CampaignConfig):
                     continue
                 log.info("=== EVAL %s (ckpt=%s) ===", mode, ckpt)
                 evaler.main(build_eval_argv(cfg, mode, ckpt))
-                family_scorecards[mode] = scorecard_path(cfg.out_root, mode)
+                sc = scorecard_path(cfg.out_root, mode)
+                if os.path.exists(sc):
+                    family_scorecards[mode] = sc
+                else:
+                    log.warning("=== EVAL %s produced no scorecard at %s ===", mode, sc)
+                    missing.append(f"eval:{mode} (no scorecard written)")
         else:
             # plot-only: pick up any scorecards already on disk
             for mode in cfg.modes:
@@ -358,6 +369,9 @@ def run_campaign(cfg: CampaignConfig):
                 log.info("=== PLOT %d families -> %s ===",
                          len(family_scorecards), out_png)
                 plotter.main(build_plot_argv(plot_cfg, family_scorecards, out_png))
+                if not os.path.exists(out_png):
+                    log.warning("=== PLOT produced no figure at %s ===", out_png)
+                    missing.append("plot (no figure written)")
 
         # A requested stage that produced nothing is a FAILURE, not a success:
         # otherwise a diverged/OOM training run (no checkpoint) or a missing
