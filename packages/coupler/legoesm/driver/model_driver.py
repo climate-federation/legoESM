@@ -4696,15 +4696,18 @@ class ModelDriver:
         # SW is not runnable via ModelDriver — reject at the public entry even
         # if a caller reached run() without setup() (codex M2 review).
         self._reject_shallow_water_unrunnable()
-        # CLUBB cloud-fraction -> radiation carry is threaded ONLY through the
-        # per-step rollout (``_run_per_step``): the compiled segment rollout
-        # (SegmentCarry), the MPAS / spectral / lat-lon-SPMD / tiled-cube rollouts
-        # each carry state through a different structure that does not yet include
-        # ``cloud_fraction``, so an enabled feature on any of them would silently
-        # no-op.  The run() selector picks those paths BEFORE the ``compiled``
-        # branch, so guarding on ``compiled`` alone is not enough — mirror the
-        # selector's non-per-step branches and refuse LOUDLY (dispatch-hardening)
-        # rather than run a byte-identical RH cloud path under a flag the user set.
+        # CLUBB cloud-fraction -> radiation carry is threaded through the per-step
+        # rollout (``_run_per_step``) AND the single-device compiled segment
+        # rollout (``_run_compiled`` -> the fused ``_make_single_step`` +
+        # ``SegmentCarry.cloud_fraction``).  The MULTI-DEVICE / distinct-dycore
+        # rollouts (MPAS, spectral, lat-lon-SPMD, tiled-cube — which route to
+        # operator-split / sharded / tiled carry structures) do NOT yet thread it,
+        # so an enabled feature there would silently no-op.  Those are all selected
+        # by their own predicate BEFORE the ``compiled`` branch, so refuse LOUDLY
+        # on them (dispatch-hardening) — but ``compiled`` alone is now fine (the
+        # fused single-device path carries it).  The lat-lon-SPMD operator-split
+        # lane is reached only under enable_latlon_spmd (covered below); the tiled
+        # operator-split lane only under cube multi-device tiling (covered below).
         if getattr(self.config, "use_clubb_cloud_fraction", False):
             _grid = self.config.grid.grid_type
             _disc = self.config.dycore.discretization
@@ -4715,21 +4718,22 @@ class ModelDriver:
                 and getattr(self._device_config, "mesh", None) is not None
                 and tuple(getattr(self._device_config, "tiling", (1, 1))) != (1, 1)
             )
-            if compiled or _grid == "mpas" or _disc == "spectral" \
+            if _grid == "mpas" or _disc == "spectral" \
                     or _latlon_spmd or _tiled_cube:
                 raise NotImplementedError(
-                    "use_clubb_cloud_fraction is currently wired ONLY through the "
-                    "single-device per-step rollout (_run_per_step): it needs "
-                    "compiled=False, grid_type != 'mpas', discretization != "
+                    "use_clubb_cloud_fraction is wired through the single-device "
+                    "per-step AND fused-compiled rollouts, but NOT the "
+                    "multi-device / distinct-dycore ones: it needs "
+                    "grid_type != 'mpas', discretization != "
                     "'spectral', enable_latlon_spmd=False, and no multi-device "
                     "cube tiling.  Got "
                     f"compiled={compiled}, grid={_grid!r}, discretization="
                     f"{_disc!r}, latlon_spmd={_latlon_spmd}, tiled_cube="
                     f"{_tiled_cube}.  Those rollouts do not yet thread the "
                     "cloud-fraction carry and would silently ignore the flag.  "
-                    "Re-run with --per-step-rollout on a single-device latlon / "
-                    "cubed-sphere hydrostatic config, or land the compiled-path "
-                    "SegmentCarry field first."
+                    "Re-run single-device (per-step or compiled) on a latlon / "
+                    "cubed-sphere hydrostatic config, or thread the cloud-fraction "
+                    "carry through the operator-split / sharded / tiled steps first."
                 )
         self._segment_callback = segment_callback
         # Checkpoint hook (a coupled driver passes its own save_checkpoint so
@@ -7705,7 +7709,14 @@ class ModelDriver:
         # it.  None (default / feature-off) => step_unified gets None =>
         # byte-identical RH grid-scale cloud path.
         cloud_fraction = None
-        if _turb_traits.carries_energy or _gwd_prognostic:
+        # Build _seed_ps (and thus seed the cloud-fraction carry below) whenever a
+        # stateful carry is active OR the CLUBB cf feature is on — do NOT rely on
+        # ``carries_energy`` alone: a cf-producing closure that carried no energy
+        # would otherwise skip the seed and the compiled feature would silently
+        # no-op (carry stays None).  Diagnostic CLUBB carries energy today, so this
+        # is defensive; the guard in run() already requires diagnostic CLUBB.
+        if (_turb_traits.carries_energy or _gwd_prognostic
+                or getattr(cfg, "use_clubb_cloud_fraction", False)):
             from legoesm.atmosphere.physics.combined import PhysicsConfig
             from legoesm.atmosphere.physics.turbulence import (
                 TurbulenceConfig,
@@ -8086,6 +8097,7 @@ class ModelDriver:
         phys_tke = ctx["tke"]
         phys_qke = ctx["qke"]
         phys_gwd_spectrum = ctx["gwd_spectrum"]
+        phys_cloud_fraction = ctx.get("cloud_fraction")
         o3_vmr = ctx["o3_vmr"]
         aerosol_od = ctx["aerosol_od"]
         ghg_vmr = ctx["ghg_vmr"]
@@ -8421,6 +8433,7 @@ class ModelDriver:
                 tke=phys_tke,
                 qke=phys_qke,
                 gwd_spectrum=phys_gwd_spectrum,
+                cloud_fraction=phys_cloud_fraction,
                 # Double-moment hydrometeors (None unless the moisture registry +
                 # microphysics carry them) so coupled/training radiation gets
                 # droplet-number-aware r_eff AND a double-moment scheme evolves
@@ -8608,6 +8621,9 @@ class ModelDriver:
             if carry.gwd_spectrum is not None:
                 phys_gwd_spectrum = carry.gwd_spectrum
                 self._carry_aux["gwd_spectrum"] = phys_gwd_spectrum
+            if carry.cloud_fraction is not None:
+                phys_cloud_fraction = carry.cloud_fraction
+                self._carry_aux["cloud_fraction"] = phys_cloud_fraction
 
             current_step = seg_end_step
 
