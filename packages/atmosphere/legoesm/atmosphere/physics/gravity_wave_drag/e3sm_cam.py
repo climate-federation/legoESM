@@ -60,8 +60,9 @@ deliberate departures / version choices (canaries in
   with the DISCRETE-step KE closure ``ptend%s += -(ptend%u*(u+0.5*dt*ptend%u)
   + ...)`` (:908-913).  Both are available here: pass ``land_frac_col`` for
   the landfrac scaling (``None`` default = no scaling), and set
-  ``config.use_discrete_ke_heating=True`` for the discrete closure (default
-  ``False`` = the continuous-rate identity, which over-heats by
+  ``config.use_discrete_ke_heating=True`` for the discrete closure (the
+  DEFAULT since 2026-07-17; ``False`` = the legacy continuous-rate
+  identity, which over-heats by
   ``0.5*dt*(du²+dv²)/c_pd`` per step).  STRUCTURAL DEPARTURE kept: E3SM's
   closure runs once over the ACCUMULATED ptend of all GW sources ("includes
   spectrum"); our per-source calls close each source independently.  (The
@@ -224,7 +225,7 @@ __physics_contract__ = {
     #    conserves=["none"].
     #  - config.dttke_use_intrinsic=True switches to the irreversible
     #    (c-ubm)*gwut conversion; config.do_energy_conservation=True (C.-C. Chen
-    #    fixer, default OFF) forces the discrete air-column momentum+dse
+    #    fixer, default ON since 2026-07-17) forces the discrete air-column momentum+dse
     #    finite-step residual to zero (a corrective below-source redistribution,
     #    NOT a physical accounting of the wave/frontal source or boundary
     #    fluxes). Neither is the shipped default.
@@ -1690,7 +1691,7 @@ def e3sm_cam_gwd(
         # exported ONLY as the EKGWSPEC history diagnostic;
         # vertical_diffusion never reads it, and E3SM NEVER diffuses u/v
         # with it anywhere.  Two selectable behaviors here:
-        #   * use_e3sm_spectral_heating (faithful, default OFF): add the
+        #   * use_e3sm_spectral_heating (faithful, default ON since 2026-07-17): add the
         #     unconditional dse-diffusion heating dttdf (no u/v diffusion —
         #     matching E3SM).  Constituent qtgw is not represented (no q in
         #     the GWD interface; declared required-inputs departure).
