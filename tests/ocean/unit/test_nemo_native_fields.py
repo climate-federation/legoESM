@@ -74,6 +74,29 @@ def test_sss_climatology_regrid_path(tmp_path):
     assert np.isfinite(out).all()
 
 
+def test_sss_climatology_unstructured_target(tmp_path):
+    """MPAS Voronoi target: 1-D PAIRED cell centres -> nearest-wet, (12, nCells).
+
+    The structured embed/meshgrid paths crash on a 1-D target
+    (``n_lat, n_lon = lat.shape`` / nCells^2 outer product); the paired
+    branch must regrid onto the cells directly.
+    """
+    _, _, lat_i, lon_i = _model_coords()
+    p = tmp_path / "sss.nc"
+    _write_sss_nc(p, lat_i, lon_i, 6, 8)
+    # 1-D paired unstructured cell centres (nCells=5), inside the source hull
+    cell_lat = np.array([-60.0, -10.0, 5.0, 40.0, 80.0])
+    cell_lon = np.array([10.0, 120.0, 200.0, 300.0, 45.0])
+    out = load_nemo_sss_restoring_climatology(
+        str(p), cell_lat, cell_lon, np.ones(cell_lat.shape, bool))
+    assert out.shape == (12, 5)              # (months, nCells) — NOT nCells^2
+    assert np.isfinite(out).all()
+    # month indexing survives the regrid: presalt = 30 + m + 0.1*row_i, so the
+    # per-month field mean must step by exactly 1.0 between consecutive months.
+    steps = np.diff(out.mean(axis=1))
+    np.testing.assert_allclose(steps, np.ones(11), atol=1e-9)
+
+
 def test_monthly_init_native(tmp_path):
     lat, lon, lat_i, lon_i = _model_coords()
     nlev = 5

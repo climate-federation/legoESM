@@ -4360,6 +4360,10 @@ def main() -> int:
 
     sss_restore_cfg = None
     sss_restore_target = None
+    # Monthly (sn_sss climatology) vs static (IC-surface) SSS target, detected
+    # grid-agnostically below: monthly carries a leading 12-month axis ON TOP OF
+    # the grid's spatial rank -> structured (12, ny, nx); MPAS (12, nCells).
+    _sss_monthly = False
     if args.sss_restore:
         if app_grid_type == "cubed_sphere":
             raise ValueError("--sss-restore: not wired for the cube (parked grid).")
@@ -4398,13 +4402,19 @@ def main() -> int:
             sss_restore_target = np.asarray(
                 state.S.data, dtype=np.float64)[..., 0].copy()  # surface SSS
         _wet = np.asarray(state.land_mask.data) > 0.5
+        # Monthly iff a leading 12-axis sits on top of the grid's spatial rank
+        # (structured 2-D -> 3-D; MPAS 1-D -> 2-D).  The bare ``ndim == 3`` test
+        # this replaced mis-classed the MPAS monthly (12, nCells) array (ndim 2)
+        # as a static target and applied the (nCells,) wet mask to the 12-axis.
+        _sss_monthly = (sss_restore_target.shape[0] == 12
+                        and sss_restore_target.ndim == _wet.ndim + 1)
         _bnd = (f"{args.sss_restore_bound_mmday:.1f} mm/day (NEMO ln_sssr_bnd)"
                 if args.sss_restore_bound_mmday is not None
                 else "200 mm/day safety cap")
         _tgt_kind = ("NEMO sn_sss monthly clim"
-                     if sss_restore_target.ndim == 3 else "WOA surface SSS")
+                     if _sss_monthly else "WOA surface SSS")
         _tgt_wet = (sss_restore_target[:, _wet]
-                    if sss_restore_target.ndim == 3
+                    if _sss_monthly
                     else sss_restore_target[_wet])
         print(f"[setup] SSS restoring ON: tau_default="
               f"{args.sss_restore_tau_days:.0f} d + OMIP-2 regional masks; "
@@ -5496,9 +5506,11 @@ def main() -> int:
             # the plume toward coarse WOA (Amazon artifact). Gated by flag.
             _R_gate = _R if args.river_mouth_restoring_gate else None
             # Monthly (12, ...) NEMO sn_sss target -> this step's month;
-            # 2-D IC-surface target unchanged.
+            # static IC-surface target unchanged.  _sss_monthly is grid-agnostic
+            # (structured 3-D / MPAS 2-D); indexing the 12-axis yields this
+            # month's field at the target grid's spatial rank (2-D or nCells).
             _sss_tgt_step = (sss_restore_target[_runoff_month_idx(step, dt)]
-                             if sss_restore_target.ndim == 3
+                             if _sss_monthly
                              else sss_restore_target)
             # sss_apply pulls ONE 2-D S-surface slice to host and scatters
             # the updated layer back device-side (slice-before-convert
