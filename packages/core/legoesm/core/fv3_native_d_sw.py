@@ -2148,7 +2148,9 @@ def xtp_u(is_, ie, js, je, isd, ied, jsd, jed, c, u, v, flux, iord,
                 else:
                     for i in range(is_ - 1, ie + 1 + 1):
                         smt5[i] = 3.0 * abs(b0[i]) < abs(bl[i] - br[i])
-                    if (not bounded_domain) and grid_type < 3:
+                    # WMP edge-fix ABSENT from the symmetryclean tree
+                    # (duo lane certifies against it) — plain lane keeps it
+                    if (not (bounded_domain or duogrid)) and grid_type < 3:
                         if is_ == 1:
                             smt5[0] = bl[0] * br[0] < 0.0
                             smt5[1] = bl[1] * br[1] < 0.0
@@ -2531,7 +2533,9 @@ def ytp_v(is_, ie, js, je, isd, ied, jsd, jed, c, u, v, flux, jord,
                     for i in range(is_, ie + 1 + 1):
                         smt6[i, j] = 3.0 * abs(b0[i, j]) \
                             < abs(bl[i, j] - br[i, j])
-                if (not bounded_domain) and grid_type < 3:
+                # WMP edge-fix ABSENT from the symmetryclean tree
+                # (duo lane certifies against it) — plain lane keeps it
+                if (not (bounded_domain or duogrid)) and grid_type < 3:
                     if js == 1:
                         for i in range(is_, ie + 1 + 1):
                             smt6[i, 0] = bl[i, 0] * br[i, 0] < 0.0

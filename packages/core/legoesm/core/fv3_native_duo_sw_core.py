@@ -626,3 +626,99 @@ def d_sw2_duo(delp, pt, allflux_x, allflux_y, gs: dict, bd: Bounds, *,
     dw = np.full((ie - is_ + 1, je - js + 1), workspace_sentinel)
     return {"delp": delp.a, "pt": pt.a, "heat_source": heat_source,
             "ptc": ptc, "dw": dw}
+
+
+def d_sw3_duo(u, v, uc, vc, gs: dict, bd: Bounds, npx: int, npy: int, *,
+              dt: float, hord_mt: int = 6, duogrid: bool = True) -> dict:
+    """sw_core.F90 d_sw3 (symmetryclean 1201-1388), DUO branch — the
+    KE-flux stage: B-grid contravariant vb/ub over the FULL unclamped
+    ranges (auth 1260-1266: ``bounded .or. duogrid`` -> is2=is, ie1=ie+1,
+    js2=js, je1=je+1) with the INTERIOR formula everywhere (auth
+    1271-1275 / 1330-1338; the vt/ut-based edge + corner extrapolations
+    live in the SKIPPED non-duo else, so ut/vt are never read on this
+    lane — no workspace sentinel needed), then the ytp_v/xtp_u advective
+    fluxes and the four outputs dyn_core carries to d_sw5's KE assembly:
+    ubbtemp/vbbtemp (post-ytp_v ub + pre-xtp_u vb, auth 1321-1326) and
+    ubb/vbb (final, auth 1381-1386).
+
+    VERBATIM quirks preserved: d_sw3 passes ``bounded_domain=.false.``
+    to ytp_v/xtp_u as a LITERAL (auth 1318/1378 — the commented-out
+    originals passed the real flag); the duo behaviour inside them comes
+    from the symmetryclean ``gridstruct%dg%is_initialized`` gates, which
+    the port carries as ``duogrid=True`` on the certified plain
+    ytp_v/xtp_u (range gate + the WMP smt5/smt6 edge-fix blocks that the
+    symmetryclean tree REMOVED).
+
+    u/v are read-only here (only ytp_v/xtp_u consume them).  grid_type=0
+    lane only.  Returns dict(ubbtemp, vbbtemp, ubb, vbb) on the B-grid
+    compute ring (is:ie+1, js:je+1).
+    """
+    from legoesm.core.fv3_native_d_sw import _fl, xtp_u, ytp_v
+
+    if not duogrid:
+        raise NotImplementedError(
+            "d_sw3_duo is the DUO-stage port; the plain path is the "
+            "certified monolithic d_sw (phase-4b)")
+
+    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
+    isd, ied, jsd, jed = bd.isd, bd.ied, bd.jsd, bd.jed
+
+    u = fort(np.array(u, dtype=np.float64, copy=True), isd, jsd)
+    v = fort(np.array(v, dtype=np.float64, copy=True), isd, jsd)
+    uc = fort(np.array(uc, dtype=np.float64, copy=True), isd, jsd)
+    vc = fort(np.array(vc, dtype=np.float64, copy=True), isd, jsd)
+
+    COSA = fort(gs["cosa"], isd, jsd)
+    RSINA = fort(gs["rsina"], isd, jsd)
+    DX = fort(gs["dx"], isd, jsd)
+    RDX = fort(gs["rdx"], isd, jsd)
+    DY = fort(gs["dy"], isd, jsd)
+    RDY = fort(gs["rdy"], isd, jsd)
+
+    dt5 = 0.5 * dt
+
+    # duo ranges (auth 1260-1263)
+    is2, ie1 = is_, ie + 1
+    js2, je1 = js, je + 1
+
+    ub = _fl(is_, ie + 1, js, je + 1)
+    vb = _fl(is_, ie + 1, js, je + 1)
+
+    # vb: duo interior formula everywhere (auth 1271-1275)
+    for j in range(js2, je1 + 1):
+        for i in range(is2, ie1 + 1):
+            vb[i, j] = dt5 * (vc[i - 1, j] + vc[i, j]
+                              - (uc[i, j - 1] + uc[i, j]) * COSA[i, j]) \
+                * RSINA[i, j]
+
+    # auth 1318: bounded_domain literal .false.; duo via dg gates
+    ytp_v(is_, ie, js, je, isd, ied, jsd, jed, vb, u, v, ub, hord_mt,
+          DY, RDY, npx, npy, 0, False, 1.0, duogrid=True)
+
+    ubbtemp = _fl(is_, ie + 1, js, je + 1)
+    vbbtemp = _fl(is_, ie + 1, js, je + 1)
+    for j in range(js, je + 1 + 1):
+        for i in range(is_, ie + 1 + 1):
+            ubbtemp[i, j] = ub[i, j]
+            vbbtemp[i, j] = vb[i, j]
+
+    # ub: duo interior formula everywhere (auth 1330-1338)
+    for j in range(js, je + 1 + 1):
+        for i in range(is2, ie1 + 1):
+            ub[i, j] = dt5 * (uc[i, j - 1] + uc[i, j]
+                              - (vc[i - 1, j] + vc[i, j]) * COSA[i, j]) \
+                * RSINA[i, j]
+
+    # auth 1378: bounded_domain literal .false.
+    xtp_u(is_, ie, js, je, isd, ied, jsd, jed, ub, u, v, vb, hord_mt,
+          DX, RDX, npx, npy, 0, False, 1.0, duogrid=True)
+
+    ubb = _fl(is_, ie + 1, js, je + 1)
+    vbb = _fl(is_, ie + 1, js, je + 1)
+    for j in range(js, je + 1 + 1):
+        for i in range(is_, ie + 1 + 1):
+            ubb[i, j] = ub[i, j]
+            vbb[i, j] = vb[i, j]
+
+    return {"ubbtemp": ubbtemp.a, "vbbtemp": vbbtemp.a,
+            "ubb": ubb.a, "vbb": vbb.a}
