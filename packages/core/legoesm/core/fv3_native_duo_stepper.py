@@ -33,7 +33,8 @@ from legoesm.grids.fv3_native_gridstruct import (
 )
 
 
-def build_six_face_duo_context(n: int, ng: int = 3) -> dict:
+def build_six_face_duo_context(n: int, ng: int = 3,
+                               use_ext_bundle: bool = False) -> dict:
     """Gridstructs + Bounds for all six faces (certified builders)."""
     from legoesm.core.fv3_native_sw_core import Bounds
     from legoesm.grids.fv3_native_halos import ed_supergrid_lonlat_ref
@@ -113,7 +114,28 @@ def build_six_face_duo_context(n: int, ng: int = 3) -> dict:
         gs.setdefault("se_corner", True)
         gs.setdefault("ne_corner", True)
         gs.setdefault("nw_corner", True)
+    if use_ext_bundle:
+        # FULL ext consistency bundle: extended-lattice halo metrics
+        # (extend_gridstruct — interior, including the native-angle
+        # override above, restored bitwise) + the per-stagger k2e
+        # position remaps applied after every exchange in the stepper.
+        from legoesm.grids.fv3_native_gridstruct import extend_gridstruct
+
+        gs6 = [extend_gridstruct(gs6[t], n, ng, tile=t + 1)
+               for t in range(6)]
+
+    from legoesm.grids.fv3_native_gridstruct import (
+        build_extended_corner_lonlat,
+        build_kinked_corner_lonlat,
+    )
+
+    kk6 = [build_kinked_corner_lonlat(n, ng, tile=t) for t in range(1, 7)]
+    ee6 = [build_extended_corner_lonlat(n, ng, tile=t)
+           for t in range(1, 7)]
+
     return {"n": n, "ng": ng, "gs6": gs6, "dg": dg,
+            "use_ext_bundle": use_ext_bundle,
+            "kk6": kk6, "ee6": ee6,
             "bd": Bounds.single_tile(n, ng)}
 
 
@@ -276,6 +298,14 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
     for t in range(1, 7):
         exchange_bgrid_scalar_halos(divgd6, t, n, ng)
         exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
+    if ctx.get("use_ext_bundle"):
+        from legoesm.grids.fv3_native_gridstruct import (
+            k2e_remap_halo_rings,
+        )
+
+        k2e_remap_halo_rings(divgd6, "B", n, ng)
+        k2e_remap_halo_rings(uc6, "CX", n, ng)
+        k2e_remap_halo_rings(vc6, "CY", n, ng)
 
     s1 = []
     for t in range(1, 7):
@@ -360,6 +390,15 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
             exchange_agrid_scalar_halos(pt6, t, n, ng)
     for t in range(1, 7):
         exchange_dgrid_vector_halos(u6, v6, t, n, ng)
+    if ctx.get("use_ext_bundle"):
+        from legoesm.grids.fv3_native_gridstruct import (
+            k2e_remap_dvector_rings,
+            k2e_remap_halo_rings,
+        )
+
+        k2e_remap_halo_rings(delp6, "A", n, ng)
+        k2e_remap_halo_rings(pt6, "A", n, ng)
+        k2e_remap_dvector_rings(u6, v6, n, ng, ctx["kk6"], ctx["ee6"])
     states = [{**states[t], "delp": delp6[t], "pt": pt6[t],
                "u": u6[t], "v": v6[t]} for t in range(6)]
 
@@ -539,6 +578,13 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
         for t in range(1, 7):
             exchange_agrid_scalar_halos(delp6, t, n, ng)
             exchange_agrid_scalar_halos(pt6, t, n, ng)
+    if ctx.get("use_ext_bundle"):
+        from legoesm.grids.fv3_native_gridstruct import (
+            k2e_remap_halo_rings,
+        )
+
+        k2e_remap_halo_rings(delp6, "A", n, ng)
+        k2e_remap_halo_rings(pt6, "A", n, ng)
 
     u6 = [np.array(o["u"], copy=True) for o in stage]
     v6 = [np.array(o["v"], copy=True) for o in stage]
@@ -558,6 +604,12 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
                         npx, npx, dt=dt, d_ext=d_ext)
     for t in range(1, 7):
         exchange_dgrid_vector_halos(u6, v6, t, n, ng)
+    if ctx.get("use_ext_bundle"):
+        from legoesm.grids.fv3_native_gridstruct import (
+            k2e_remap_dvector_rings,
+        )
+
+        k2e_remap_dvector_rings(u6, v6, n, ng, ctx["kk6"], ctx["ee6"])
 
     return [{"delp": delp6[t], "pt": pt6[t], "u": u6[t], "v": v6[t]}
             for t in range(6)]
