@@ -56,6 +56,16 @@ class DynamicSeaIceState(NamedTuple):
     pond_depth: Field          # Mean melt pond depth [m]
 
 
+# Per-grid spatial Field dim names, keyed by spatial rank (no category axis) —
+# matches sea_ice._base_spatial_ndim and the codebase Field convention: MPAS
+# Voronoi (nCells,), lat-lon / tripole (lat, lon), cubed-sphere (face, x, y).
+_SPATIAL_DIMS_BY_RANK = {
+    1: ("nCells",),
+    2: ("lat", "lon"),
+    3: ("face", "x", "y"),
+}
+
+
 def init_dynamic_ice_state(
     shape: tuple[int, ...],
     *,
@@ -83,6 +93,11 @@ def init_dynamic_ice_state(
         enabling brine on fresh seed ice releases no stored salt
         until new ice forms.
     """
+    if n_categories < 1:
+        raise ValueError(
+            f"init_dynamic_ice_state: n_categories={n_categories}; must be a "
+            "positive integer (>= 1). Single-category ice is n_categories=1."
+        )
     if n_categories > 1 and (len(shape) < 2 or shape[-1] != n_categories):
         raise ValueError(
             f"init_dynamic_ice_state: shape {shape} inconsistent with "
@@ -93,13 +108,23 @@ def init_dynamic_ice_state(
         )
 
     cat_dim = ("category",) if n_categories > 1 else ()
-    dims = ("face", "x", "y") + cat_dim
     # Velocity / stress are always spatial-only — strip the trailing category
     # axis (which is LAST by contract, whatever the grid's spatial rank; the
     # old ``shape[:3]`` slice was cubed-sphere-only and leaked the category
     # axis into u_ice/v_ice on lat-lon / MPAS shapes).
     spatial_shape = shape[:-1] if n_categories > 1 else shape
-    spatial_dims = ("face", "x", "y")
+    # Dim NAMES follow the spatial rank so a lat-lon (n_lat, n_lon[, n_cat]) or
+    # MPAS (nCells[, n_cat]) state is not mislabelled with the cubed-sphere
+    # ("face", "x", "y") — the earlier hard-coding gave a (nCells, n_cat) field
+    # four dims and corrupted coordinate-aware consumers.
+    spatial_dims = _SPATIAL_DIMS_BY_RANK.get(len(spatial_shape))
+    if spatial_dims is None:
+        raise ValueError(
+            f"init_dynamic_ice_state: unsupported spatial rank "
+            f"{len(spatial_shape)} for shape {shape} (expected MPAS 1-D, "
+            "lat-lon 2-D, or cubed-sphere 3-D)."
+        )
+    dims = spatial_dims + cat_dim
     return DynamicSeaIceState(
         h_ice=Field(data=jnp.zeros(shape), name="h_ice", dims=dims, units="m"),
         T_ice=Field(data=jnp.full(shape, 260.0), name="T_ice", dims=dims, units="K"),  # coeff-ok: initial ice temperature [K]
@@ -233,7 +258,6 @@ def distribute_dynamic_state_to_categories(
         return Field(data=data_mc, name=field.name, dims=cat_dims,
                      units=field.units)
 
-    zeros_mc = jnp.zeros_like(h_mc)
     return state._replace(
         h_ice=_lift(state.h_ice, h_mc),
         T_ice=_lift(state.T_ice, t_mc),

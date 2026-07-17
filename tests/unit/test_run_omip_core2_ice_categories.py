@@ -158,6 +158,53 @@ def test_multicat_config_and_state_survive_a_real_step():
     assert float(jnp.max(agg_conc)) > 0.1
 
 
+def _min_forcing(spatial):
+    """Minimal finite AtmToSurface for a step_sea_ice entry-guard test."""
+    from legoesm.core.coupling_fields import AtmToSurface
+    return AtmToSurface(
+        sw_down=jnp.full(spatial, 50.0), lw_down=jnp.full(spatial, 200.0),
+        T_lowest=jnp.full(spatial, 250.0), q_lowest=jnp.full(spatial, 1e-3),
+        u_lowest=jnp.full(spatial, 5.0), v_lowest=jnp.zeros(spatial),
+        p_lowest=jnp.full(spatial, 1.0e5), p_surface=jnp.full(spatial, 1.0e5),
+        rho_lowest=jnp.full(spatial, 1.3),
+        cos_zenith=jnp.full(spatial, 0.2), co2_ppmv=jnp.full(spatial, 400.0),
+        precip_total=jnp.zeros(spatial), precip_snow=jnp.zeros(spatial),
+        has_radiation=jnp.ones(spatial), has_precipitation=jnp.zeros(spatial),
+    )
+
+
+def test_itd_remap_typo_refused_even_at_one_category():
+    """A typo'd itd_remap must raise even at n_categories==1: the single-cat
+    config still takes the v2 path where the dispatch would silently route any
+    non-'lipscomb2001' string to the legacy linear remap. The guard used to be
+    gated on n_categories>1, so the typo slipped through at n_cat==1 (codex)."""
+    from legoesm.ice import SeaIceConfig, init_dynamic_ice_state, step_sea_ice
+
+    spatial = (4, 6)
+    st = init_dynamic_ice_state(spatial, S_ice_init=0.0)
+    config = SeaIceConfig(dynamics="none", n_categories=1, itd_remap="bogus")
+    with pytest.raises(ValueError, match="Unknown config.itd_remap"):
+        step_sea_ice(st, _min_forcing(spatial), jnp.full(spatial, 271.35),
+                     jnp.zeros(spatial), jnp.zeros(spatial),
+                     config, U_min=0.0, dt=1800.0, grid=None)
+
+
+@pytest.mark.parametrize("n_cat", [0, -1])
+def test_step_sea_ice_rejects_nonpositive_categories(n_cat):
+    """step_sea_ice entry rejects n_categories<1 (valid itd_remap, so the
+    n_categories guard is what must fire) — the config path had no floor."""
+    from legoesm.ice import SeaIceConfig, init_dynamic_ice_state, step_sea_ice
+
+    spatial = (4, 6)
+    st = init_dynamic_ice_state(spatial, S_ice_init=0.0)
+    config = SeaIceConfig(dynamics="none", n_categories=n_cat,
+                          itd_remap="simple")
+    with pytest.raises(ValueError, match=r"n_categories.*>= 1|positive"):
+        step_sea_ice(st, _min_forcing(spatial), jnp.full(spatial, 271.35),
+                     jnp.zeros(spatial), jnp.zeros(spatial),
+                     config, U_min=0.0, dt=1800.0, grid=None)
+
+
 # ---------------------------------------------------------------------------
 # 4. Codex round-1 regressions
 # ---------------------------------------------------------------------------
