@@ -480,14 +480,17 @@ def _geo_lattice_exchange(g6: list, ectx: dict):
     """Steps 3-4 of the vector flow on the _NG_P1 lattice: neighbour
     exchange, k2e ring remap (rings 1..4), Lagrange corner regions.
 
-    Corner-wedge state (codex ext r1 P2-6): rings 1..3 of each wedge
-    end Lagrange-filled; the ring-4 wedge slots keep the AGRID
+    Corner-wedge state (codex ext r1 P2-6 / r2): rings 1..3 of each
+    wedge end Lagrange-filled; the ring-4 wedge slots keep the AGRID
     index-copy values (kinked-position neighbours) — unlike upstream,
     where the mpp corner exchange leaves them undefined at cube
-    vertices.  Verified non-propagating: poisoning them changes no
-    final D/C strip value (the a2d/a2c consumers that touch ring-4
-    wedge rows feed only wedge-column strip slots, which the final
-    per-component corner fill overwrites)."""
+    vertices.  Non-propagating ON THE FAITHFUL (lagrange) PATH ONLY:
+    the a2d/a2c consumers that touch ring-4 wedge rows feed only
+    wedge-column strip slots, which the final per-component corner
+    fill overwrites.  The vector_corner="a2d" variant SKIPS that
+    overwrite and therefore DOES carry the ring-4 contamination into
+    its wedge values (measured ~3.9 m/s at C12) — a2d is a
+    measurement variant, not a production mode."""
     n = ectx["n"]
     ngp = _NG_P1
     for t in range(1, 7):
@@ -585,13 +588,13 @@ def ext_vector_dgrid_sixface(u6: list, v6: list, ectx: dict):
     """ext_vector(u, v, …, 0,1,1,0): D-grid covariant winds.
 
     ``ectx["vector_corner"]`` selects the wedge treatment:
-    "lagrange" (upstream-faithful: fill_corner_region re-extrapolates
-    each covariant component; rough where the covariant basis swings
-    across a cube vertex — measured 3.9 m/s at C12 vs 0.15 strips) or
-    "a2d" (keep the strip-written cubed_a2d values, whose corner
-    content comes from the GEOGRAPHIC corner Lagrange + ext-basis
-    projection — scalar-quality; a documented deviation from the
-    upstream final overwrite).
+    "lagrange" (upstream-faithful DEFAULT: fill_corner_region
+    re-extrapolates each covariant component; wedge accuracy ~0.08 m/s
+    at C12 — codex r2 probe) or "a2d" (MEASUREMENT VARIANT ONLY: keep
+    the strip-written cubed_a2d values; their ring-3 wedge slots
+    consume the ring-4 index-copy geographic values and carry ~3.9 m/s
+    contamination — see _geo_lattice_exchange; kept solely for the
+    vertex-attribution A/B).
     """
     n, ng = ectx["n"], ectx["ng"]
     for t in range(1, 7):

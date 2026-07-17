@@ -582,8 +582,13 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
     """SB4: complete acoustic step INCLUDING the D-grid tail — the
     stage chain (acoustic_step_sixface), delp/pt halo refresh, the
     D geopk, the external-mode divg2 filter (d_ext*da_min_c*saved
-    divergence at km=1), one_grad_p back to covariant winds, and the
-    final D-wind halo exchange for the next step."""
+    divergence at km=1), and one_grad_p back to covariant winds.
+
+    Returned-state D-wind halos: on the interim path they are
+    exchange-refreshed here; on the ext-bundle path they are
+    STALE-BY-ONE exactly like upstream (dyn_core.F90:1332-1338
+    refreshes only delp/pt post-step; ext_vector runs at the NEXT
+    step's entry, :468-472)."""
     from legoesm.grids.fv3_native_gridstruct import (
         exchange_agrid_scalar_halos,
         exchange_dgrid_vector_halos,

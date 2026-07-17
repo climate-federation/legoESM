@@ -371,3 +371,23 @@ def test_flags_mutually_exclusive(ctx):
     states = w2_six_face_state(ctx)
     with pytest.raises(ValueError, match="mutually exclusive"):
         run_duo_sw(bad, states, dt=600.0, nsteps=1)
+
+
+def test_vector_corner_variant_wiring(kinked_gs6):
+    """a2d = measurement variant: unknown mode raises; a2d skips the
+    final covariant corner overwrite (wedges differ from lagrange)."""
+    with pytest.raises(ValueError, match="vector_corner"):
+        build_ext_context(N, NG, kinked_gs6, vector_corner="bogus")
+    e_l = build_ext_context(N, NG, kinked_gs6, vector_corner="lagrange")
+    e_a = build_ext_context(N, NG, kinked_gs6, vector_corner="a2d")
+    ctx = build_six_face_duo_context(N, NG, use_ext_bundle=True)
+    states = w2_six_face_state(ctx)
+    outs = {}
+    for key, ectx_v in (("lagrange", e_l), ("a2d", e_a)):
+        u6 = [np.array(s["u"], copy=True) for s in states]
+        v6 = [np.array(s["v"], copy=True) for s in states]
+        ext_vector_dgrid_sixface(u6, v6, ectx_v)
+        outs[key] = u6
+    wl = outs["lagrange"][0][:NG, -NG:]      # a wedge block
+    wa = outs["a2d"][0][:NG, -NG:]
+    assert np.abs(wl - wa).max() > 0.01

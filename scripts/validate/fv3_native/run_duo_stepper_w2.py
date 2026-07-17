@@ -139,9 +139,13 @@ def main():
         if not np.isfinite(vmax):
             print("NaN — aborting", flush=True)
             sys.exit(2)
-    mode = ("faithful ext bundle (fv3_native_ext_vector, vector_corner="
-            f"{args.vector_corner})" if args.ext_bundle
-            else "interim exchanges")
+    if args.ext_bundle and args.vector_corner == "lagrange":
+        mode = "faithful ext bundle (fv3_native_ext_vector)"
+    elif args.ext_bundle:
+        mode = ("ext bundle, NONFAITHFUL vector_corner="
+                f"{args.vector_corner} variant")
+    else:
+        mode = "interim exchanges"
     np.savez_compressed(
         args.out, times_days=np.array(times),
         v=np.stack(frames), lat=np.linspace(-90, 90, 181),
