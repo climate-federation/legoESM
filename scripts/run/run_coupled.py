@@ -267,18 +267,18 @@ def build_coupler_config(args):
     # used the non-gusty tile flux -> weak evaporation -> dry atmosphere -> cold
     # collapse (cmip_air_sea_decoupling).
     #
-    # CAVEAT, verified (do NOT read this as "the same depth on both sides"): when
-    # --gustiness-zi is OMITTED this passes 0.0 = OFF, while the atmosphere's
-    # SurfaceLayerConfig.gustiness_w_zi stays None = scheme-native = 600 m for
-    # coare3 (bulk_flux._COARE_GUSTINESS_ZI).  So the DEFAULT `coare3` run is
-    # still split on gustiness.  CouplerConfig.gustiness_w_zi is `float = 0.0`
-    # and cannot express "scheme-native"; making it nullable flips the tile
-    # default off->on (coupled answers change), so it is pinned as a strict
-    # xfail in tests/unit/test_air_sea_scheme_consistency.py rather than
-    # silently absorbed here.
+    # None passes THROUGH (no `or 0.0` coercion): CouplerConfig.gustiness_w_zi
+    # is nullable with the same scheme-native semantics as the atmosphere's
+    # SurfaceLayerConfig (None -> 600 m for coare3 via
+    # bulk_flux.resolve_gustiness_w_zi, off otherwise), so the DEFAULT coare3
+    # run carries the SAME gustiness on both sides.  The old `or 0.0` coerced
+    # an omitted --gustiness-zi to tile-OFF while the atmosphere ran 600 m —
+    # the default-path split the strict xfail in
+    # tests/unit/test_air_sea_scheme_consistency.py pinned; that test now
+    # asserts consistency.
     return CouplerConfig(
         bulk_scheme=args.surface_bulk_scheme,
-        gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
+        gustiness_w_zi=args.surface_gustiness_zi,
         thermo_convention=args.bulk_thermo_convention,
         stability_scheme=args.surface_stability_scheme,
     )
@@ -1329,7 +1329,7 @@ def main():
             # thermo_convention keeps the slab heat-budget turbulent fluxes
             # constant-set-consistent with the atmosphere surface layer.
             bulk_scheme=args.slab_bulk_scheme,
-            gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
+            gustiness_w_zi=args.surface_gustiness_zi,   # None = scheme-native
             thermo_convention=args.bulk_thermo_convention,
         )
         overrides["ocean_mode"] = "two_layer"
@@ -1337,7 +1337,7 @@ def main():
         overrides["ocean_config"] = SimpleOceanConfig(
             mode=args.ocean, h_mix=args.ocean_h_mix,
             bulk_scheme=args.slab_bulk_scheme,
-            gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
+            gustiness_w_zi=args.surface_gustiness_zi,   # None = scheme-native
             thermo_convention=args.bulk_thermo_convention,
         )
         # ocean_mode log label (fixed/slab -> "slab").
@@ -1438,10 +1438,11 @@ def main():
     if coupler_config is not None:
         logger.info("  Surface bulk-flux scheme: %s (thermo: %s; stability: %s; "
                     "atmosphere + coupler ocean tile); convective "
-                    "gustiness z_i=%.0f m",
+                    "gustiness z_i=%s",
                     args.surface_bulk_scheme, args.bulk_thermo_convention,
                     args.surface_stability_scheme,
-                    (args.surface_gustiness_zi or 0.0))
+                    ("scheme-native" if args.surface_gustiness_zi is None
+                     else f"{args.surface_gustiness_zi:.0f} m"))
 
     # Apply the --params calibration layer (issue #691) across EVERY component
     # config this driver builds — see apply_coupled_params (the single source
