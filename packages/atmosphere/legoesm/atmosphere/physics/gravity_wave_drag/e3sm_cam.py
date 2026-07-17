@@ -147,6 +147,10 @@ __physics_contract__ = {
         "h_topo_col": "m (optional subgrid orographic stddev, sgh)",
         "frontgf_col": "K^2 m^-2 s^-1 (optional frontogenesis function, frontal source)",
         "netdt_col": "K/s (optional convective heating rate, Beres source)",
+        "land_frac_col": (
+            "1 (optional land fraction in [0,1]; E3SM driver-level oro "
+            "scaling utgw *= landfrac, gw_drag.F90:904-906 — oro source only)"
+        ),
     },
     "outputs": {
         "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "eps_gwd": "W/m^2",
@@ -157,7 +161,10 @@ __physics_contract__ = {
         "(deceleration for c<U, acceleration for c>U), and its limiter caps the "
         "magnitude without changing sign; the SUMMED multi-wave tendency need "
         "not have a single sign. For the orographic (single c=0 wave) path "
-        "dT_dt = -(u*du+v*dv)/c_pd >= 0 and eps_gwd >= 0 (resolved KE->heat). "
+        "dT_dt >= 0 and eps_gwd >= 0 (resolved KE->heat; the continuous-rate "
+        "closure -(u*du+v*dv)/c_pd by default, or the E3SM discrete-step "
+        "closure -(du*(u+0.5*dt*du)+dv*(v+0.5*dt*dv))/c_pd when "
+        "use_discrete_ke_heating=True). "
         "For the spectral path dT_dt is the ground-relative dttke term, which "
         "is SIGNED (can cool where U>c>0). eps_gwd = -integral rho*(u*du+v*dv)*dz "
         "is the mean-flow KE removal rate (positive for the orographic path; "
@@ -169,8 +176,13 @@ __physics_contract__ = {
     # selectable source does. Nuance (pinned in test_e3sm_cam_gwd_faithful.py):
     #  - Orographic (c=0, the DEFAULT source) IS energy-conserving in-atmosphere:
     #    a stationary mountain exchanges momentum without mechanical work, and the
-    #    code returns the resolved mean-flow KE it removes as heat BY CONSTRUCTION
-    #    (dT_dt=-(u*du+v*dv)/c_pd, so c_pd*sum(rho*dT*dz)==eps_gwd definitionally).
+    #    code returns the resolved mean-flow KE it removes as heat BY CONSTRUCTION.
+    #    At the default use_discrete_ke_heating=False the closure is the
+    #    continuous rate dT_dt=-(u*du+v*dv)/c_pd, so c_pd*sum(rho*dT*dz)==eps_gwd
+    #    definitionally; with the E3SM discrete closure ON the heat equals the
+    #    DISCRETE resolved-KE change instead, and c_pd*sum(rho*dT*dz) ==
+    #    eps_gwd - 0.5*dt*int(rho*(du^2+dv^2))dz (eps_gwd stays the continuous
+    #    KE-removal-rate diagnostic — by design, not a leak).
     #    Momentum is a surface sink (mountain drag), never conserved.
     #  - Frontal / convective sources launch NONSTATIONARY spectral components
     #    whose momentum AND energy come from an EXTERNAL, unbudgeted reservoir
