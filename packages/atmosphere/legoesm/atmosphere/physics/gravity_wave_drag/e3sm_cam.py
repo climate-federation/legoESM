@@ -1465,9 +1465,13 @@ def e3sm_cam_gwd(
         Frontogenesis function for the frontal source.  Required when
         ``config.source == "frontal"``.
     netdt_col : (ncol, nlev) or None
-        Convective heating rate [K/s] for the Beres source.  Required when
-        ``config.source == "convective"``; ``None`` -> zero heating (no
-        convective waves).
+        Convective heating rate [K/s] for the Beres source (k=0 model top).
+        Required when ``config.source == "convective"``; ``None`` -> zero
+        heating (no convective waves).  E3SM feeds the DEEP-only pbuf
+        TTEND_DP here; the coupled pipeline threads the convection
+        scheme's TOTAL heating (deep + shallow + downdraft) — a documented
+        departure (Beres's hdepth/q0 scan sees the full convective
+        column).
     mfcc_table : array or None
         The real offline E3SM ``mfcc`` mean-flux lookup table for the Beres
         source, shape ``(maxh, 2*maxuh+1, 2*pgwv+1)`` (see
