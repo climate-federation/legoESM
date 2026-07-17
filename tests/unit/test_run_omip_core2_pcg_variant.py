@@ -48,6 +48,18 @@ def test_guard_rejects_cube_and_allows_pcg_grids():
         _validate_pcg_variant_grid(grid, None)                # no flag -> ok
 
 
+def test_guard_rejects_explicit_solver_combo():
+    """codex r1 #4: an explicit-substep override runs no PCG, so a PCG
+    variant alongside it would silently measure nothing."""
+    for grid in ("tripole", "latlon_bathy", "mpas"):
+        with pytest.raises(SystemExit):
+            _validate_pcg_variant_grid(grid, "single_reduce",
+                                       "explicit_substep")
+        _validate_pcg_variant_grid(grid, "single_reduce", "implicit_cn")
+        _validate_pcg_variant_grid(grid, "single_reduce", None)
+        _validate_pcg_variant_grid(grid, None, "explicit_substep")
+
+
 # ------------------------------------------------- config-field existence
 
 def test_config_fields_exist_with_standard_default():
@@ -126,7 +138,11 @@ def test_build_mpas_ocean_threads_variant(monkeypatch, capsys):
     monkeypatch.setattr(core2, "read_mesh_mask_bathy", _stop_mesh_read)
     with pytest.raises(_Stop):
         core2.build_mpas_ocean(5, 6000.0, "dummy_mesh.nc", level=5,
+                               barotropic_solver="explicit_substep",
                                barotropic_pcg_variant="single_reduce")
     out = capsys.readouterr().out
     assert "barotropic_implicit_pcg_variant" in out
     assert "single_reduce" in out
+    # codex r1 #1: the MAIN call site forwards --barotropic-solver to the
+    # MPAS builder too — lock the builder-side threading for BOTH keys.
+    assert "'barotropic_solver': 'explicit_substep'" in out

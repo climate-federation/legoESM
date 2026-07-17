@@ -1652,20 +1652,31 @@ def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None):
             f"so the override would silently do nothing.")
 
 
-def _validate_pcg_variant_grid(grid, barotropic_pcg_variant=None):
-    """Reject ``--barotropic-pcg-variant`` on grids whose builder does not
-    thread it into a live implicit-CN PCG (a flag that silently does nothing
-    is the dispatch footgun CLAUDE.md forbids).  ``tripole``/``latlon_bathy``
+def _validate_pcg_variant_grid(grid, barotropic_pcg_variant=None,
+                               barotropic_solver=None):
+    """Reject ``--barotropic-pcg-variant`` on configurations where no PCG
+    runs (a flag that silently does nothing is the dispatch footgun
+    CLAUDE.md forbids).  ``tripole``/``latlon_bathy``
     (LatLonCGridOceanConfig.barotropic.barotropic_implicit_pcg_variant) and
     ``mpas`` (MPAS config field) dispatch it at the solver entry;
-    ``cubed_sphere`` runs the FV3 split-explicit subcycle — no PCG at all."""
-    if barotropic_pcg_variant is not None and grid not in (
-            "tripole", "latlon_bathy", "mpas"):
+    ``cubed_sphere`` runs the FV3 split-explicit subcycle — no PCG at all.
+    An EXPLICIT ``--barotropic-solver explicit_substep`` override also
+    bypasses the PCG (codex r1 #4: a single-reduce scaling run with the
+    explicit solver would silently measure nothing)."""
+    if barotropic_pcg_variant is None:
+        return
+    if grid not in ("tripole", "latlon_bathy", "mpas"):
         raise SystemExit(
             f"--barotropic-pcg-variant is wired for --grid tripole/"
             f"latlon_bathy/mpas (implicit-CN PCG grids), not --grid "
             f"{grid!r} (the cube's split-explicit subcycle has no PCG, so "
             f"the flag would silently do nothing).")
+    if barotropic_solver == "explicit_substep":
+        raise SystemExit(
+            "--barotropic-pcg-variant selects the implicit-CN PCG "
+            "reduction strategy, but --barotropic-solver explicit_substep "
+            "runs no PCG — the flag would silently do nothing.  Drop one "
+            "of the two.")
 
 
 def _runoff_component_vars(exclude_isf: bool):
@@ -3814,7 +3825,8 @@ def main() -> int:
 
     # KPP MLD-deepening sensitivity flags are mpas-only (fail loud, never silent).
     _validate_kpp_grid(args.grid, args.kpp_ri_crit, args.kpp_cv)
-    _validate_pcg_variant_grid(args.grid, args.barotropic_pcg_variant)
+    _validate_pcg_variant_grid(args.grid, args.barotropic_pcg_variant,
+                               args.barotropic_solver)
 
     # NEMO ln_crt_dwn relative-wind current feedback (rn_vfac): resolve + range-
     # check the CLI up front (fail before the expensive setup).  0.0 = absolute
@@ -4185,6 +4197,7 @@ def main() -> int:
             freezing=_freezing_ovr,
             runoff_depth_spread_m=args.runoff_depth_spread_m,
             mle=mle_cfg, dz_ref_override=_nemo_dz,
+            barotropic_solver=args.barotropic_solver,
             barotropic_pcg_variant=args.barotropic_pcg_variant,
             bottom_drag_scheme=args.bottom_drag_scheme,
             bottom_drag_cd0=args.bottom_drag_cd0,

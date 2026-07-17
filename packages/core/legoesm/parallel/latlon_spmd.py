@@ -894,33 +894,31 @@ def choose_latlon_2d_topology(
           the full ``(h, n_lon)`` pole edge circle -> ``n_lon`` (codex M3a
           finding 4: a perimeter-only score ignored this and called the
           ``(1, N)`` split "E/W-perimeter only", which is false);
-        - EVEN ``p_lon``: the partner fold
+        - EVEN ``p_lon`` with ``w >= 2*_FOLD_REF_HALO`` (exactly the
+          runtime partner-path condition): the partner fold
           (:func:`partner_pole_fold_window`) receives, per fold, the
           2h-wide E/W extension strips (``2 * h*2h``) plus the antipodal
-          ``(h, w+4h)`` block; both folds / 2h ->
-          ``min(w + 8*_FOLD_REF_HALO, n_lon)`` with the ``h``-quadratic
-          strip terms charged at the widest production halo
-          (``_FOLD_REF_HALO = 2``, the PPM halo-2 exchange — the score is
-          otherwise halo-normalized, so the reference keeps the constant
-          honest without threading ``h`` through the chooser) and the
-          ``min`` capping the model at the gather it replaces (toy
-          circles);
+          ``(h, w+4h)`` block; both folds / 2h -> ``w + 8*_FOLD_REF_HALO``
+          with the ``h``-quadratic strip terms charged at the widest
+          production halo (``_FOLD_REF_HALO = 2``, the PPM halo-2
+          exchange — the score is otherwise halo-normalized).  NO cap at
+          the gather cost: the runtime never falls back to the gather on
+          this branch, so capping would undercharge forced-partner
+          candidates (codex r1 #3);
 
       * an unsplit dimension — or one whose only boundary is the LOCALLY
         folded pole (``p_lon == 1``) — moves nothing.
 
-    Consequence: with the odd-``p_lon`` gather fold any such candidate
-    scores ``>= nl + n_lon > n_lon`` = the band's score, so the band wins
-    whenever feasible.  EVEN ``p_lon`` candidates (the partner fold) can
-    now genuinely beat the band once ``w + 8*h_ref + nl < n_lon`` — i.e.
-    2-D tiling becomes selectable BEFORE the beyond-band regime
-    (``n_lat % N != 0`` or ``n_lat/N < min_tile``) at large device counts,
-    which is the point of the partner-fold optimisation.
-    ``band_preference`` (band wins within that factor of the best 2-D
-    score, default 1.25x) retains the low-rank latency hysteresis.
-    ``p_lon == 1`` also wins all exact ties.  The returned ``(N, 1)``
-    selects the existing 1-D code path (byte-identical, the default
-    production lane).
+    Selection policy: the band ``(N, 1)`` is returned WHENEVER FEASIBLE —
+    the M3a contract every production lane and scaling receipt assumes;
+    the model below ranks only the 2-D candidates that remain when the
+    band is infeasible (``n_lat % N != 0`` or ``n_lat/N < min_tile``).
+    With the partner fold an even-``p_lon`` candidate can now model-beat
+    the band once ``w + 8*h_ref + nl < n_lon``, but flipping the produced
+    topology is MEASUREMENT-GATED (M4): revisit with >=16-rank hardware
+    receipts (``band_preference``, default 1.25x, is retained for that
+    unlock and is currently dormant).  Among 2-D candidates ties break
+    toward smaller ``p_lon`` (fewer collectives).
 
     Raises ``ValueError`` when NO factorization is feasible (so a caller can
     never silently run an invalid tiling).
@@ -944,10 +942,13 @@ def choose_latlon_2d_topology(
         # lon-all_gathers (n_lon) — codex M3a finding 4.
         if p_lon > 1:
             if p_lon % 2 == 0 and w >= 2 * _FOLD_REF_HALO:
-                # min(): at toy circles the constant strip surcharge can
-                # exceed the full gather — the model never charges the
-                # partner fold above the gather it replaces.
-                fold = float(min(w + 8 * _FOLD_REF_HALO, n_lon))
+                # Charge exactly what the runtime does: _fold_rows takes
+                # the partner path whenever (even p_lon, w >= 2h), even
+                # where the gather would move fewer bytes (codex r1 #3 —
+                # a min() cap undercharged forced-partner candidates and
+                # could select a worse topology).  h_ref=2 is the widest
+                # production halo; smaller runtime halos cost less.
+                fold = float(w + 8 * _FOLD_REF_HALO)
             else:
                 fold = float(n_lon)
             lon_term = nl + fold
@@ -962,12 +963,21 @@ def choose_latlon_2d_topology(
             f"p_lat*p_lon == n_devices with n_lat % p_lat == 0, "
             f"n_lon % p_lon == 0, and >= {min_tile} cells per split "
             f"dimension per tile).")
-    # Best modeled volume; ties broken toward smaller p_lon (fewer
-    # collectives).
-    best = min(feasible.items(), key=lambda kv: (kv[1], kv[0][1]))
     band = (n_devices, 1)
-    if band in feasible and feasible[band] <= band_preference * best[1]:
+    if band in feasible:
+        # The band stays the default production lane WHENEVER feasible
+        # (the M3a contract — sharded_atm_latlon_step's lane routing and
+        # every existing scaling receipt assume it).  With the partner
+        # fold, 2-D candidates are now genuinely competitive at large
+        # n_lon by the model below, but flipping the produced topology is
+        # MEASUREMENT-GATED (M4 doctrine): unlock only with >=16-rank
+        # hardware receipts.  ``band_preference`` is retained for that
+        # future unlock.
         return band
+    # Band infeasible: best modeled volume among the 2-D candidates
+    # (honest partner/gather fold costs); ties break toward smaller
+    # p_lon (fewer collectives).
+    best = min(feasible.items(), key=lambda kv: (kv[1], kv[0][1]))
     return best[0]
 
 

@@ -889,29 +889,32 @@ def test_chooser_counts_pole_fold_all_gathers():
     collective on EVERY tile (both ``jnp.where`` fold operands evaluate),
     so a perimeter-only score mis-ranks lon splits.  Wide grid, 4
     devices: perimeter-only scored (1,4) at nl=8 "beating" the band's 32
-    by 4x; the honest volume (partner fold, capped at the gather) is
-    8 + min(8+16, 32) = 32, TYING the band -> the band keeps ties."""
+    by 4x; the honest partner-fold volume is 8 + (8+16) = 32, TYING the
+    band -> the band keeps ties."""
     assert choose_latlon_2d_topology(4, 8, 32) == (4, 1)
     # Tall grid: the band is optimal under both models.
     assert choose_latlon_2d_topology(4, 32, 8) == (4, 1)
-    # Square grid, 8 devices: perimeter-only claimed a crossover to (4,2)
-    # (12 vs 16); honestly (4,2) = 8+4+min(8+16,16) = 28 > 16 -> band.
+    # Square grid, 8 devices: perimeter-only claimed a crossover; honestly
+    # the best 2-D candidate is (2,4) = 4+8+(4+16) = 32 > 16 -> band.
     assert choose_latlon_2d_topology(8, 16, 16) == (8, 1)
-    # At these small circles the fold term (capped at n_lon) keeps every
-    # p_lon > 1 candidate at or above the band -> band whenever feasible.
-    # (The partner fold flips this only at large n_lon — see
-    # test_chooser_partner_fold_unlocks_2d_at_scale.)
+    # Band precedence: feasible band always wins (see
+    # test_chooser_band_precedence_survives_partner_fold).
     for n_dev, n_lat, n_lon in ((4, 16, 16), (8, 32, 32), (16, 64, 32)):
         assert choose_latlon_2d_topology(n_dev, n_lat, n_lon) == (n_dev, 1)
 
 
-def test_chooser_partner_fold_unlocks_2d_at_scale():
-    """With the even-p_lon partner fold the 2-D tiling can WIN while the
-    band is still feasible: 16 devices on 128x512 — band = n_lon = 512;
-    (1,16): ring nl=128 + fold min(w+16, n_lon)=min(48, 512)=48 -> 176,
-    and 512 > 1.25*176 -> the pure-lon split is selected.  (Under the
-    old gather-only model (1,16) scored 128 + 512 = 640 -> band.)"""
-    assert choose_latlon_2d_topology(16, 128, 512) == (1, 16)
+def test_chooser_band_precedence_survives_partner_fold():
+    """With the partner fold a 2-D candidate can MODEL-beat the band
+    (16 devices on 128x512: (1,16) = 128 + 48 = 176 vs band 512), but the
+    produced topology is the M3a contract every production lane and
+    scaling receipt assumes — flipping it is measurement-gated (M4).
+    The band therefore still wins whenever feasible; the honest partner
+    model only ranks the 2-D candidates of the beyond-band regime."""
+    assert choose_latlon_2d_topology(16, 128, 512) == (16, 1)
+    # Beyond-band regime: the partner model IS live for ranking.
+    # n_lat=6 % 16 != 0 -> band infeasible; among survivors the honest
+    # fold costs decide (see test_chooser_2d_when_band_infeasible).
+    assert choose_latlon_2d_topology(4, 6, 32) == (1, 4)
 
 
 def test_chooser_2d_when_band_infeasible():
@@ -922,18 +925,20 @@ def test_chooser_2d_when_band_infeasible():
     # n_lat=6 % 4 != 0 -> band infeasible; (1,4)=6+min(8+16,32)=30 beats
     # (2,2)=16+3+min(16+16,32)=51.
     assert choose_latlon_2d_topology(4, 6, 32) == (1, 4)
-    # min_tile: p_lat=8 leaves 1-row bands -> infeasible; the fold term is
-    # capped at n_lon=8 for both survivors, so the tie
-    # (4,2)=4+2+8=14 vs (2,4)=2+4+8=14 breaks toward smaller p_lon.
-    assert choose_latlon_2d_topology(8, 8, 8) == (4, 2)
+    # min_tile: p_lat=8 leaves 1-row bands -> infeasible.  (4,2) has w=4
+    # >= 2*h_ref so it is charged the forced partner fold (4+2+20=26);
+    # (2,4) has w=2 < 2*h_ref -> runtime gather fold (2+4+8=14) -> (2,4)
+    # wins (model == runtime decision, codex r1 #3).
+    assert choose_latlon_2d_topology(8, 8, 8) == (2, 4)
 
 
 def test_chooser_feasibility_and_errors():
     # Indivisible longitude forces p_lon == 1.
     assert choose_latlon_2d_topology(4, 16, 17) == (4, 1)
     # min_tile: n_lat=8 over p_lat=8 leaves 1-row tiles -> infeasible; the
-    # 2-D factorizations remain.
-    assert choose_latlon_2d_topology(8, 8, 8) == (4, 2)
+    # 2-D factorizations remain ((2,4) — see the infeasibility test above
+    # for the forced-partner-vs-gather scoring).
+    assert choose_latlon_2d_topology(8, 8, 8) == (2, 4)
     # No factorization at all -> loud error, never a silent fallback.
     with pytest.raises(ValueError, match="no feasible"):
         choose_latlon_2d_topology(3, 16, 16)
