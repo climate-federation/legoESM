@@ -98,3 +98,77 @@ def test_halo_clean_inside_outer_ring(pair):
     a = ge["sin_sg"]
     m = halo_mask(a.shape[:2], _CI, _CI)
     assert np.isfinite(a[m]).all(), t
+
+
+def _analytic(lon, lat):
+    return np.sin(lon) * np.cos(2 * lat)
+
+
+def test_k2e_remap_halo_rings_a_stagger():
+    """The generic staggered k2e remap moves the index-copied (kinked)
+    halo rings onto the EXTENDED positions: for a smooth analytic
+    field, |halo - f(ext position)| drops from the kink offset (~0.42
+    at C12 ring 3) to Lagrange accuracy (<5e-3) — >100x. Interior
+    untouched."""
+    from legoesm.grids.fv3_native_gridstruct import (
+        exchange_agrid_scalar_halos,
+        k2e_remap_halo_rings,
+    )
+
+    gs6 = [build_fv3_native_gridstruct(N, NG, tile=t) for t in range(1, 7)]
+    ge6 = [extend_gridstruct(gs6[t], N, NG, tile=t + 1) for t in range(6)]
+    f6 = [_analytic(g["agrid_lon"], g["agrid_lat"]) for g in gs6]
+    for t in range(1, 7):
+        exchange_agrid_scalar_halos(f6, t, N, NG)
+    copied = [x.copy() for x in f6]
+    k2e_remap_halo_rings(f6, "A", N, NG)
+    strips = ((slice(0, NG), slice(NG, NG + N)),
+              (slice(NG + N, None), slice(NG, NG + N)),
+              (slice(NG, NG + N), slice(0, NG)),
+              (slice(NG, NG + N), slice(NG + N, None)))
+    wc = wr = 0.0
+    for t in range(6):
+        truth = _analytic(ge6[t]["agrid_lon"], ge6[t]["agrid_lat"])
+        for sl in strips:
+            wc = max(wc, float(np.abs(copied[t][sl] - truth[sl]).max()))
+            wr = max(wr, float(np.abs(f6[t][sl] - truth[sl]).max()))
+        assert np.array_equal(f6[t][NG:NG + N, NG:NG + N],
+                              copied[t][NG:NG + N, NG:NG + N]), t
+    assert wc > 0.3, wc                 # the kink offset is real
+    assert wr < 5e-3, wr                # remap hits ext positions
+    assert wr < wc / 100.0, (wc, wr)
+
+
+def test_k2e_remap_halo_rings_b_stagger():
+    """Same validation on the B stagger (node extents 1..n+1 — the
+    classification path that differs from A; C/D families share the
+    identical code with mixed extents)."""
+    from legoesm.grids.fv3_native_gridstruct import (
+        exchange_bgrid_scalar_halos,
+        k2e_remap_halo_rings,
+    )
+
+    f6 = []
+    truths = []
+    for t in range(1, 7):
+        lon, lat = build_extended_corner_lonlat(N, NG, tile=t)
+        lonk, latk = build_kinked_corner_lonlat(N, NG, tile=t)
+        fk = _analytic(lonk, latk)
+        fk[~np.isfinite(fk)] = 0.0
+        f6.append(fk)
+        truths.append(_analytic(lon, lat))
+    for t in range(1, 7):
+        exchange_bgrid_scalar_halos(f6, t, N, NG)
+    copied = [x.copy() for x in f6]
+    k2e_remap_halo_rings(f6, "B", N, NG)
+    strips = ((slice(0, NG), slice(NG, NG + N + 1)),
+              (slice(NG + N + 1, None), slice(NG, NG + N + 1)),
+              (slice(NG, NG + N + 1), slice(0, NG)),
+              (slice(NG, NG + N + 1), slice(NG + N + 1, None)))
+    wc = wr = 0.0
+    for t in range(6):
+        for sl in strips:
+            wc = max(wc, float(np.abs(copied[t][sl] - truths[t][sl]).max()))
+            wr = max(wr, float(np.abs(f6[t][sl] - truths[t][sl]).max()))
+    assert wr < wc / 20.0, (wc, wr)
+    assert wr < 2e-2, wr

@@ -1124,6 +1124,78 @@ def exchange_dgrid_vector_halos(u6: list, v6: list, tile: int,
     _fill_corners_dgrid(fort(u, lo, lo), fort(v, lo, lo), npx, ng, -1.0)
 
 
+_K2E_TAB_CACHE: dict = {}
+
+
+def _k2e_tables(n: int):
+    if n not in _K2E_TAB_CACHE:
+        from legoesm.grids.fv3_native_halos import compute_fv3_native_k2e
+
+        _K2E_TAB_CACHE[n] = compute_fv3_native_k2e(n, remap_ng=3,
+                                                   k2e_nord=4)
+    return _K2E_TAB_CACHE[n]
+
+
+def k2e_remap_halo_rings(f6: list, stag: str, n: int, ng: int):
+    """Kinked-to-extended along-edge Lagrange remap of the halo rings
+    (cube_rmp semantics) for one stagger family, applied AFTER the
+    index-copy exchange: each halo-ring value becomes the certified
+    k2e interpolation of the copied (neighbour-line) ring at the
+    EXTENDED-lattice position.
+
+    ``stag``: one of A, B, CX, CY, DX, DY — the oracle-pinned phase-3a
+    table families.  ``f6``: per-face data-domain numpy arrays whose
+    layout matches the stagger.  Record keys are 1-based Fortran; the
+    arrays start at Fortran ``1-ng`` on both axes.  A record with the
+    i-key outside ``[1, n+1]`` is a W/E ring (along-edge coordinate =
+    j); otherwise it is a S/N ring (along-edge = i).  Mutates in
+    place; corner-diagonal cells are untouched (the vector corner
+    fills / AGRID fill own them).
+    """
+    if ng > 3:
+        raise NotImplementedError("k2e tables are pinned for ng<=3")
+    tab = _k2e_tables(n)
+    ij = tab[f"{stag}_ij"]
+    loc = tab[f"{stag}_loc"]
+    coef = tab[f"{stag}_coef"]
+    npd = coef.shape[1] // 2 - 1
+    lo_off = 1 - ng
+    a0 = 1 - lo_off                      # array index of Fortran 1
+    # per-stagger interior extents (cells 1..n, nodes 1..n+1)
+    i_hi = n + 1 if stag in ("B", "CX", "DX") else n
+    j_hi = n + 1 if stag in ("B", "CY", "DY") else n
+
+    for t6 in range(6):
+        f = f6[t6]
+        src = f.copy()
+        for (fi, fj), lv, cw in zip(ij, loc, coef):
+            start = a0 + (int(lv) - npd - 1)
+            i_ring = fi < 1 or fi > i_hi
+            j_ring = fj < 1 or fj > j_hi
+            if i_ring == j_ring:
+                continue                 # corner-diagonal record classes
+            if i_ring:                   # W/E ring: along-edge = j
+                col = fi - lo_off
+                row = fj - lo_off
+                if not (0 <= col < f.shape[0]
+                        and 0 <= row < f.shape[1]):
+                    continue
+                if not (0 <= start and start + len(cw) <= f.shape[1]):
+                    continue
+                f[col, row] = float(
+                    (cw * src[col, start:start + len(cw)]).sum())
+            else:                        # S/N ring: along-edge = i
+                col = fi - lo_off
+                row = fj - lo_off
+                if not (0 <= col < f.shape[0]
+                        and 0 <= row < f.shape[1]):
+                    continue
+                if not (0 <= start and start + len(cw) <= f.shape[0]):
+                    continue
+                f[col, row] = float(
+                    (cw * src[start:start + len(cw), row]).sum())
+
+
 def _cgrid_edge_partner(fx6: list, fy6: list, tile: int, si: int, sj: int,
                         along: str, n: int, ng: int, n_src: int) -> float:
     """Neighbour's COINCIDENT C-edge flux value for a shared-edge slot.
