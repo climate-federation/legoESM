@@ -900,6 +900,63 @@ class PhysicsPipeline:
                 # the stochastic multiplier is exactly 1, so a zero stoch
                 # input is bit-identical and needs no carry slot.
                 _stoch_zero = jnp.zeros((ad.ncol,), dtype=T_col.dtype)
+                # IFS shallow PBL-equilibrium closure inputs (STATIC config
+                # gate): same-step bulk SHF/LHF (tiled mosaic when the land
+                # tile is active, else the ocean bulk scheme) + the held
+                # radiative heating for the sub-cloud convergence term.
+                _extra_conv = {}
+                if getattr(_conv_cfg, "use_ifs_shallow_closure", False):
+                    # Fail loudly at trace time: the closure's bulk fluxes
+                    # need a surface-layer config (codex R1 #1 — a None
+                    # turbulence_config crashed opaque on .surface).
+                    if (not (self.surface_tiled and self.f_land is not None)
+                            and getattr(self.turbulence_config, "surface",
+                                        None) is None):
+                        raise ValueError(
+                            "use_ifs_shallow_closure needs bulk surface "
+                            "fluxes: configure a turbulence scheme (its "
+                            "SurfaceLayerConfig supplies the exchange "
+                            "coefficients) or enable the tiled land surface."
+                        )
+                    _T_low = T_col[:, -1]
+                    _q_low = q_v_col[:, -1]
+                    _u_low = u_conv_col[:, -1]
+                    _v_low = v_conv_col[:, -1]
+                    # SAME density the applied-flux path uses (lowest FULL
+                    # level, not p_s — codex R1 #3).  Derived locally:
+                    # rho_col_phys is only bound later / in other branches
+                    # (codex R2 #1 UnboundLocalError).
+                    _rho_low = p_full_col[:, -1] / (
+                        constants.R_d * jnp.maximum(_T_low, 1.0))
+                    if self.surface_tiled and self.f_land is not None:
+                        # SAME mosaic arguments as the turbulence path
+                        # (beta-limited land evaporation + multilayer q_sfc
+                        # override — codex R1 #2: omitting them treated land
+                        # as saturated and overstated the supply).
+                        _q_sfc_land_ml = (
+                            self._land_qsfc_multilayer(
+                                land_ml, T_land, p_s,
+                                land_ml_params=land_ml_params)
+                            if land_ml is not None else None
+                        )
+                        _, _, _shf_c, _lhf_c, _ = self._tiled_surface_flux(
+                            _u_low, _v_low, _T_low, _q_low, _rho_low,
+                            sst, sic, T_land, p_s,
+                            beta_land=beta_land,
+                            q_sfc_land_override=_q_sfc_land_ml)
+                    else:
+                        from legoesm.atmosphere.physics.turbulence.surface_layer import (  # noqa: E501
+                            compute_surface_fluxes)
+                        _T_sfc_c = ad.flatten_2d(T_sfc)
+                        _q_sfc_c = ad.flatten_2d(
+                            saturation_specific_humidity(T_sfc, p_s))
+                        _, _, _shf_c, _lhf_c, _ = compute_surface_fluxes(
+                            _u_low, _v_low, _T_low, _q_low,
+                            _T_sfc_c, _q_sfc_c, _rho_low,
+                            self.turbulence_config.surface)
+                    _extra_conv = dict(
+                        shf_w_m2=_shf_c, lhf_w_m2=_lhf_c,
+                        dT_dt_rad=ad.flatten_3d(dT_dt_rad))
                 conv_out, conv_prog_out, _ = self.convection_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
@@ -909,6 +966,7 @@ class PhysicsPipeline:
                     prng_key=None,
                     dt=dt, config=_conv_cfg,
                     moisture_convergence=mc_col,
+                    **_extra_conv,
                 )
             elif _ctr.is_cmt_capable:
                 if _ctr.is_mc_consumer:
@@ -2615,6 +2673,8 @@ def _resolve_convection(config):
             dx_m=getattr(config, 'bechtold_dx_m', 0.0),
             use_ifs_downdraft=getattr(
                 config, 'bechtold_use_ifs_downdraft', False),
+            use_ifs_shallow_closure=getattr(
+                config, 'bechtold_use_ifs_shallow_closure', False),
         )
         if _pe is not None:
             _bechtold_kwargs["precip_efficiency"] = _pe

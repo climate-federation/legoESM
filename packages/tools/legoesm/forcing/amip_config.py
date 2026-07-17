@@ -100,6 +100,8 @@ class AMIPExperimentConfig(NamedTuple):
     bechtold_dx_m: float = 0.0
     # IFS convective downdraft (default OFF pending validation).
     bechtold_use_ifs_downdraft: bool = False
+    # IFS shallow PBL-equilibrium closure (default OFF pending validation).
+    bechtold_use_ifs_shallow_closure: bool = False
     # Convective in-updraft rain-split efficiency [0,1] (shared across the
     # mass-flux schemes); 0 = disabled (legacy no split).
     convective_precip_efficiency: float = 0.0

@@ -341,6 +341,12 @@ _IFS_WMEAN_MAX = 15.0                           # min(15, PWMEAN) (cumastrn.F90:
 _IFS_TAU_MIN = 3600.0 / 5.0                     # 720 s  (cumastrn.F90:827)
 _IFS_TAU_MAX = 3.0 * 3600.0                     # 10800 s (cumastrn.F90:827)
 
+# --- IFS shallow PBL-equilibrium closure (cumastrn.F90:468-484, 544-567) ---
+_IFS_SHALLOW_ZDQMIN_FRAC = 0.01   # ZDQMIN = MAX(0.01*ZQENH(IKB), 1e-10) (:552)
+_IFS_SHALLOW_ZDQMIN_MIN = 1.0e-10
+_IFS_SHALLOW_DH_FLOOR = 1.0e5     # ZDH = RG*MAX(ZDH, 1e5*ZDQMIN) (:554)
+_SHALLOW_SUPPLY_GATE_W_M2 = 1.0   # smooth ZDHPBL>0 kill width (numerics)
+
 
 def _ifs_ztaures(dx_m: float) -> float:
     """IFS ZTAURES resolution factor for the turnover time (cumastrn.F90:713,762-768).
@@ -1410,12 +1416,71 @@ def _ifs_deep_target_scale(
     return deep_weight * scale_deep + (1.0 - deep_weight)
 
 
+def _ifs_shallow_pbl_target(
+    supply_w_m2: jax.Array,
+    T: jax.Array,
+    q_v: jax.Array,
+    T_u: jax.Array,
+    q_u: jax.Array,
+    q_c_u: jax.Array,
+    base_w: jax.Array,
+    dp_full: jax.Array,
+    dt: float,
+) -> jax.Array:
+    """Shallow PBL-equilibrium cloud-base flux ZMFUB = ZDHPBL/ZDH
+    (cumastrn.F90:551-567), capped by the TRUE CFL ZMFMAX =
+    dp_base*RMFCFL/(g*dt) with RMFCFL = 1 (explicit T/q coupling here; the
+    oracle's RMFCFL = 3 rides its implicit mass-flux solver, sucumf:229-232).
+
+    ``supply_w_m2`` is the sub-cloud moist-energy supply [W/m^2] =
+    ``ZDHPBL/g``: the oracle integrates (c_p*dT/dt + L_v*dq/dt)*dp of the
+    OTHER processes over the sub-cloud layer (cumastrn.F90:468-484,
+    PTENT/PTENQ = dynamics + radiation + turbulence + GWD); in flux form the
+    turbulence part telescopes to (surface flux - cloud-base flux), so the
+    caller supplies same-step bulk SHF+LHF plus the sub-cloud radiative
+    convergence — neglecting the cloud-base turbulent flux and dynamics
+    advection (documented departures; no turbulence-tendency carry needed).
+
+    ``ZDH`` is the cloud-base updraft moist-energy excess
+    ``c_p*(T_u - T) + L_v*(q_u + q_c_u - q)`` (the oracle's
+    ``RCPD*(PTU-ZTENH) + RLVTT*ZQUMQE`` with ``ZQUMQE = PQU+PLU-ZQENH``,
+    half-level env stood in by the base-gathered full-level state — the
+    shipped closure approximation), floored at ``1e5*max(0.01*q_base,
+    1e-10)`` exactly as cumastrn:552-554.  The oracle's discrete
+    ``ZDHPBL <= 0 => LDCUM=F`` kill is realized by the ``max(target, 0)``
+    (hard zero for non-positive supply, like the oracle); the sigmoid only
+    SOFTENS THE ONSET just above zero supply so the gradient through the
+    kill is finite (numerics, not the kill itself).
+    Downdraft correction (ZEPS, cumastrn:846-852) omitted: the base flux of
+    our downdraft is available only when use_ifs_downdraft is on — deferred.
+
+    Returns the shallow target flux [kg/m^2/s], >= 0.
+    """
+    def gather(f):
+        return jnp.sum(base_w * f, axis=-1)              # (ncol,)
+
+    h_exc = (
+        constants.c_pd * (gather(T_u) - gather(T))
+        + constants.L_v * (gather(q_u) + gather(q_c_u) - gather(q_v))
+    )
+    zdqmin = jnp.maximum(
+        _IFS_SHALLOW_ZDQMIN_FRAC * gather(q_v), _IFS_SHALLOW_ZDQMIN_MIN,
+    )
+    dh = jnp.maximum(h_exc, _IFS_SHALLOW_DH_FLOOR * zdqmin)   # [J/kg]
+    zmfmax = gather(dp_full) / (constants.g * dt)
+    target = jnp.minimum(supply_w_m2 / dh, zmfmax)
+    return jnp.maximum(target, 0.0) * jax.nn.sigmoid(
+        supply_w_m2 / _SHALLOW_SUPPLY_GATE_W_M2)
+
+
 def _ifs_cape_closure_scale(
     M_b_target: jax.Array,
     M_b_true: jax.Array,
     M_b_launch: jax.Array,
     deep_weight: jax.Array,
     M_b_max: float,
+    shallow_weight: jax.Array | None = None,
+    shallow_target: jax.Array | None = None,
 ) -> jax.Array:
     """Blend factor sending ``M_b_launch`` to ``d*min(target, max) + (1-d)*M_b_true``.
 
@@ -1440,7 +1505,26 @@ def _ifs_cape_closure_scale(
     s_base = jnp.where(
         M_b_launch > 0.0, M_b_true / launch_div, jnp.zeros_like(M_b_launch),
     )
-    return deep_weight * s_deep + (1.0 - deep_weight) * s_base
+    if shallow_weight is None or shallow_target is None:
+        # 2-share blend (deep + rest) — byte-identical legacy.
+        return deep_weight * s_deep + (1.0 - deep_weight) * s_base
+    # 3-share blend: the shallow class realizes its own PBL-equilibrium
+    # target (cumastrn KTYPE=2 closure) instead of riding the M_b_true
+    # share; mid keeps s_base.  Same guarded division as the deep share.
+    s_shallow = jnp.where(
+        M_b_launch > 0.0,
+        jnp.minimum(shallow_target, M_b_max) / launch_div,
+        jnp.zeros_like(M_b_launch),
+    )
+    # Convexity guard (codex R1 #4): tuned depth thresholds can make
+    # deep_weight + shallow_weight > 1 on transitional clouds; normalize the
+    # class shares so the blend never double-counts mass flux.
+    _tot = jnp.maximum(deep_weight + shallow_weight, 1.0)
+    deep_n = deep_weight / _tot
+    shallow_n = shallow_weight / _tot
+    mid_weight = jnp.clip(1.0 - deep_n - shallow_n, 0.0, 1.0)
+    return (deep_n * s_deep + shallow_n * s_shallow
+            + mid_weight * s_base)
 
 
 def _ifs_profile_scale_limit(
@@ -1549,6 +1633,9 @@ def bechtold_convection(
     config: BechtoldConfig = BechtoldConfig(),
     moisture_convergence: jax.Array | None = None,
     col_index: jax.Array | None = None,
+    shf_w_m2: jax.Array | None = None,
+    lhf_w_m2: jax.Array | None = None,
+    dT_dt_rad: jax.Array | None = None,
 ) -> tuple[ConvectionOutput, jax.Array, jax.Array]:
     """Bechtold/IFS convection (smooth, differentiable).
 
@@ -1590,6 +1677,16 @@ def bechtold_convection(
         Updated AR1 noise state.
     """
     ncol, nlev = T.shape
+
+    # Static-config coherence (dispatch-hardening: a silently-inert flag is
+    # the phantom-scheme bug class): the shallow ZDHPBL closure realizes its
+    # target through the CAPE-closure blend, so it REQUIRES that path.
+    if config.use_ifs_shallow_closure and not config.use_ifs_cape_closure:
+        raise ValueError(
+            "use_ifs_shallow_closure requires use_ifs_cape_closure=True "
+            "(the shallow target is applied through the IFS closure's "
+            "class blend); enable both or neither."
+        )
 
     # -- Column geometry, moist adiabat, CAPE ------------------------------
     # Pass q_v so dz / rho / z use virtual-temperature moist hydrostatic
@@ -2105,8 +2202,32 @@ def bechtold_convection(
         # downstream M_b (driving the downdraft branches) is the same product.
         # The non-deep blend share rides on the TRUE M_b (see
         # _ifs_cape_closure_scale — codex R7).
+        _sh_w = None
+        _sh_t = None
+        if (config.use_ifs_shallow_closure and shf_w_m2 is not None
+                and lhf_w_m2 is not None):
+            # Shallow ZDHPBL closure (cumastrn.F90:468-484, 551-567): the
+            # sub-cloud moist-energy supply in flux form — same-step bulk
+            # SHF+LHF plus the sub-cloud radiative convergence (see
+            # _ifs_shallow_pbl_target for the departures).
+            _base_w = jax.nn.softmax(
+                -2.0 * (levels_arr[None, :] - k_lcl_smooth[:, None]) ** 2,
+                axis=-1)
+            _subcloud_w = jax.nn.sigmoid(
+                config.lcl_membership_sharpness
+                * (levels_arr[None, :] - k_lcl_smooth[:, None]))
+            _rad = dT_dt_rad if dT_dt_rad is not None else jnp.zeros_like(T)
+            _rad_term = jnp.sum(
+                _subcloud_w * constants.c_pd * _rad * dp_full, axis=-1,
+            ) / constants.g
+            _supply = shf_w_m2 + lhf_w_m2 + _rad_term
+            _sh_t = _ifs_shallow_pbl_target(
+                _supply, T, q_v, plume.T_u, plume.q_u, plume.q_c_u,
+                _base_w, dp_full, dt)
+            _sh_w = shallow_weight
         mb_scale = _ifs_cape_closure_scale(
             M_b_target, M_b, M_b_launch, deep_weight, config.M_b_max,
+            shallow_weight=_sh_w, shallow_target=_sh_t,
         )
         # Column-uniform ZMFS limiter (cumastrn.F90:913-932; codex R10): shrink
         # the ONE closure scale until no level of the capped profile exceeds
