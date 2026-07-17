@@ -157,6 +157,223 @@ def build_kinked_corner_lonlat(n: int, ng: int = 3, *, tile: int = 1,
     return lon, lat
 
 
+def build_extended_corner_lonlat(n: int, ng: int = 3, *, tile: int = 1):
+    """EXTENDED-lattice corner-node lon/lat for one reference tile.
+
+    The duo grid continues each face's own gnomonic coordinate lines
+    beyond the panel edge (fv_duogrid's pt_ext construction): every
+    node — side halos AND corner wedges — is the face's own smooth
+    extension, no neighbour copies, no sentinels.  Shape and index
+    convention match :func:`build_kinked_corner_lonlat`
+    ((n+2ng+1, n+2ng+1) over Fortran nodes 1-ng..n+1+ng); the interior
+    nodes (1..n+1) are BITWISE identical to the kinked builder's (same
+    ED line, same carts).
+    """
+    from legoesm.grids.fv3_native_halos import _ED_CARTS, _ed_line
+
+    line = _ed_line(n, 2 * (ng + 2))
+    idx = np.arange(1 - ng, n + 1 + ng + 1)
+    vals = np.array([line[2 * i - 1] for i in idx])
+    X, Y = np.meshgrid(vals, vals, indexing="ij")
+    cx, cy, cz = _ED_CARTS[tile - 1](X, Y)
+    r = np.sqrt(cx * cx + cy * cy + cz * cz)
+    lon = np.mod(np.arctan2(cy, cx), 2.0 * np.pi)
+    lat = np.arcsin(cz / r)
+    return lon, lat
+
+
+def extend_gridstruct(gs: dict, n: int, ng: int, *, tile: int = 1,
+                      radius: float = FV3_RADIUS_M) -> dict:
+    """EXTENDED-lattice gridstruct for the duo consistency bundle.
+
+    Runs the certified metric + angle engines on the face's own
+    gnomonic EXTENSION treated as one big face (size n+2ng == the data
+    domain, so every engine output maps 1:1 onto the gridstruct
+    layouts), then RESTORES the kinked builder's interior — so the
+    compute domain keeps the certified upstream conventions (including
+    the divg/del6 seam-row specials) BITWISE, while every halo and
+    corner-wedge cell carries real smooth extended-grid metrics (the
+    duo semantics: no neighbour copies, no fill_ghost poison).
+
+    KNOWN JUNK REGION (documented): the OUTERMOST ext ring — the
+    engines apply their face-edge special-casing at the big-face
+    boundary, which is not a real panel edge here.  Consumers must stay
+    >=1 ring inside (the ng-deep stencils of the stepper do).
+    """
+    from legoesm.grids.fv3_native_metrics import (
+        compute_fv3_native_metrics,
+    )
+
+    n_big = n + 2 * ng
+    lon, lat = build_extended_corner_lonlat(n, ng, tile=tile)
+    lon6 = np.stack([lon] * 6)
+    lat6 = np.stack([lat] * 6)
+    mets = compute_fv3_native_metrics(lon6, lat6, radius)
+
+    out = dict(gs)
+
+    def take(key):
+        return np.array(np.asarray(mets[key])[0], dtype=np.float64)
+
+    ext = {
+        "area": take("area"), "dx": take("dx"), "dy": take("dy"),
+        "dxa": take("dxa"), "dya": take("dya"),
+        "dxc": take("dxc"), "dyc": take("dyc"),
+        "area_c": take("area_c"),
+        "agrid_lon": take("agrid_lon"), "agrid_lat": take("agrid_lat"),
+    }
+    ext["rarea"] = 1.0 / ext["area"]
+    ext["rarea_c"] = 1.0 / ext["area_c"]
+    ext["rdx"] = 1.0 / ext["dx"]
+    ext["rdy"] = 1.0 / ext["dy"]
+    ext["rdxa"] = 1.0 / ext["dxa"]
+    ext["rdya"] = 1.0 / ext["dya"]
+    ext["rdxc"] = 1.0 / ext["dxc"]
+    ext["rdyc"] = 1.0 / ext["dyc"]
+
+    # Angle families from LOCAL finite-difference tangents on the
+    # extended lattice (self-contained differential geometry; the
+    # angles engine's cross-face halo reconstruction is only valid
+    # with real cube neighbours, which the big-face treatment does not
+    # provide — its outer rings were NaN/garbage exactly where the
+    # halos live).  2nd-order central tangents; interior is restored
+    # from the certified kinked builder below regardless.
+    def _xyz(lo, la):
+        return np.stack([np.cos(la) * np.cos(lo),
+                         np.cos(la) * np.sin(lo),
+                         np.sin(la)], axis=-1)
+
+    pb = _xyz(lon, lat)                       # corner nodes (m_b, m_b, 3)
+
+    def _unit_tangents(p):
+        e1 = np.empty_like(p)
+        e2 = np.empty_like(p)
+        e1[1:-1] = p[2:] - p[:-2]
+        e1[0] = p[1] - p[0]
+        e1[-1] = p[-1] - p[-2]
+        e2[:, 1:-1] = p[:, 2:] - p[:, :-2]
+        e2[:, 0] = p[:, 1] - p[:, 0]
+        e2[:, -1] = p[:, -1] - p[:, -2]
+        for e in (e1, e2):
+            e -= (e * p).sum(-1, keepdims=True) * p
+            e /= np.linalg.norm(e, axis=-1, keepdims=True)
+        return e1, e2
+
+    def _cos_sin(p):
+        e1, e2 = _unit_tangents(p)
+        c = (e1 * e2).sum(-1)
+        s = np.sqrt(np.maximum(TINY_NUMBER ** 2, 1.0 - c * c))
+        return c, s
+
+    cb, sb = _cos_sin(pb)                     # B nodes
+    ext["cosa"] = cb
+    ext["sina"] = sb
+    ext["rsina"] = 1.0 / np.maximum(TINY_NUMBER, sb * sb)
+
+    # A centres and edge midpoints from the corner lattice
+    pa = _xyz(ext["agrid_lon"], ext["agrid_lat"])
+    ca, sa = _cos_sin(pa)
+    ext["cosa_s"] = ca
+    ext["rsin2"] = 1.0 / np.maximum(TINY_NUMBER, sa * sa)
+
+    mid_u = pb[:, :-1] + pb[:, 1:]            # x-face midpoints (m_b, m_a)
+    mid_u /= np.linalg.norm(mid_u, axis=-1, keepdims=True)
+    cu, su = _cos_sin(mid_u)
+    ext["cosa_u"] = cu
+    ext["sina_u"] = su
+    ext["rsin_u"] = 1.0 / np.maximum(TINY_NUMBER, su * su)
+
+    mid_v = pb[:-1, :] + pb[1:, :]            # y-face midpoints (m_a, m_b)
+    mid_v /= np.linalg.norm(mid_v, axis=-1, keepdims=True)
+    cv, sv = _cos_sin(mid_v)
+    ext["cosa_v"] = cv
+    ext["sina_v"] = sv
+    ext["rsin_v"] = 1.0 / np.maximum(TINY_NUMBER, sv * sv)
+
+    # sin/cos_sg 9-slot family: centre slot from the A tangents; the
+    # W/S/E/N mid-edge slots from the face-midpoint tangents; corner
+    # slots from the B tangents (halo consumers on the duo lane read
+    # the centre + mid-edge slots; interior restored below).
+    m_a_loc = n_big
+    ssg = np.empty((m_a_loc, m_a_loc, 9))
+    csg = np.empty((m_a_loc, m_a_loc, 9))
+    csg[..., 4] = ca
+    ssg[..., 4] = sa
+    csg[..., 0] = cu[:-1, :]
+    ssg[..., 0] = su[:-1, :]
+    csg[..., 2] = cu[1:, :]
+    ssg[..., 2] = su[1:, :]
+    csg[..., 1] = cv[:, :-1]
+    ssg[..., 1] = sv[:, :-1]
+    csg[..., 3] = cv[:, 1:]
+    ssg[..., 3] = sv[:, 1:]
+    csg[..., 5] = cb[:-1, :-1]
+    ssg[..., 5] = sb[:-1, :-1]
+    csg[..., 6] = cb[1:, :-1]
+    ssg[..., 6] = sb[1:, :-1]
+    csg[..., 7] = cb[1:, 1:]
+    ssg[..., 7] = sb[1:, 1:]
+    csg[..., 8] = cb[:-1, 1:]
+    ssg[..., 8] = sb[:-1, 1:]
+    ext["sin_sg"] = ssg
+    ext["cos_sg"] = csg
+
+    # Coriolis at centres/B nodes from the extended geometry
+    ext["f0"] = 2.0 * FV3_OMEGA * np.sin(ext["agrid_lat"])
+    blat = np.array(lat, dtype=np.float64)
+    ext["fC"] = 2.0 * FV3_OMEGA * np.sin(blat)
+
+    # divg/del6: the PLAIN formulas on the extended lattice (the duo
+    # grid has real angles everywhere; the plain-path seam specials are
+    # restored with the interior below)
+    ext["divg_u"] = ext["sina_v"] * ext["dyc"] / ext["dx"]
+    ext["del6_u"] = ext["sina_v"] * ext["dx"] / ext["dyc"]
+    ext["divg_v"] = ext["sina_u"] * ext["dxc"] / ext["dy"]
+    ext["del6_v"] = ext["sina_u"] * ext["dy"] / ext["dxc"]
+
+    ci = slice(ng, ng + n)          # interior cell rows/cols
+    bi = slice(ng, ng + n + 1)      # interior node rows/cols
+    axmap = {"c": ci, "b": bi}
+
+    def restore(key, axes):
+        a = ext[key]
+        k0 = gs[key]
+        slc = tuple(axmap[ax] for ax in axes)
+        a[slc] = k0[slc]
+        out[key] = a
+
+    for key, axes in (
+        ("area", "cc"), ("rarea", "cc"), ("dxa", "cc"), ("dya", "cc"),
+        ("rdxa", "cc"), ("rdya", "cc"), ("agrid_lon", "cc"),
+        ("agrid_lat", "cc"), ("cosa_s", "cc"), ("rsin2", "cc"),
+        ("f0", "cc"),
+        ("dx", "cb"), ("rdx", "cb"), ("dyc", "cb"), ("rdyc", "cb"),
+        ("cosa_v", "cb"), ("sina_v", "cb"), ("rsin_v", "cb"),
+        ("divg_u", "cb"), ("del6_u", "cb"),
+        ("dy", "bc"), ("rdy", "bc"), ("dxc", "bc"), ("rdxc", "bc"),
+        ("cosa_u", "bc"), ("sina_u", "bc"), ("rsin_u", "bc"),
+        ("divg_v", "bc"), ("del6_v", "bc"),
+        ("area_c", "bb"), ("rarea_c", "bb"), ("fC", "bb"),
+        ("cosa", "bb"), ("sina", "bb"), ("rsina", "bb"),
+    ):
+        restore(key, axes)
+    a = ext["sin_sg"]
+    a[ci, ci, :] = gs["sin_sg"][ci, ci, :]
+    out["sin_sg"] = a
+    a = ext["cos_sg"]
+    a[ci, ci, :] = gs["cos_sg"][ci, ci, :]
+    out["cos_sg"] = a
+
+    # grid corner-node lon/lat: the extended lattice itself
+    out["grid_lon"] = np.array(lon, dtype=np.float64)
+    out["grid_lat"] = np.array(lat, dtype=np.float64)
+    gl = out["grid_lon"]
+    gt = out["grid_lat"]
+    gl[bi, bi] = gs["grid_lon"][bi, bi]
+    gt[bi, bi] = gs["grid_lat"][bi, bi]
+    return out
+
+
 # ---------------------------------------------------------------------------
 # fill_corners ports (tools/fv_mp_mod.F90 r8 bodies, verbatim index maps).
 # These fill the four corner-diagonal ng x ng regions from side-strip values
