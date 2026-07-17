@@ -336,6 +336,14 @@ class TKEConfig(NamedTuple):
     #   point is the topmost interior interface). No ``tke_background`` /
     #   ``tke_surface_min`` floors.
     positivity: str = "floor"
+    # ----- Dissipation time-discretization in the TKE solve -----
+    # "backward_euler" (default, BIT-IDENTICAL legacy): fully-implicit
+    #   linearized dissipation, diagonal += dt*c_eps*sqrt(e)/l_eps.
+    # "nemo_1p5_split": NEMO zdftke's semi-implicit split (zfact2/zfact3,
+    #   zdftke.F90:241-242,414,419): 1.5x on the diagonal + 0.5x explicit on
+    #   the RHS, linearized at the carried sqrt(e)/l_eps. Same first-order
+    #   dissipation; different discrete decay factor at large dt.
+    dissipation_discretization: str = "backward_euler"
     # ----- K-from-TKE amplitude convention -----
     # ``"gaspar_sqrt2e"`` (default, BIT-IDENTICAL legacy):
     #   K_M = c_k·l_k·sqrt(2·max(e, tke_background)) — the Gaspar form.

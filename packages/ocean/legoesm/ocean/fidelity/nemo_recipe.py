@@ -256,6 +256,12 @@ def _nemo_tke_config() -> TKEConfig:
         # rebuilds (self-locked mixed branch; plan §G). alpha_tke=1 drops deep
         # summer e by 1-2 orders and unlocks the seasonal thermocline rebuild.
         alpha_tke=1.0,
+        # NEMO zdftke semi-implicit dissipation split (zfact2=1.5*dt*rn_ediss
+        # on the diagonal, zfact3=0.5*rn_ediss explicit on the RHS;
+        # zdftke.F90:241-242,414,419). Trajectory-neutral on the 5-yr GYRE vs
+        # plain backward-Euler (verified 2026-07-16) but it is NEMO's exact
+        # discretization — kept for numerics fidelity.
+        dissipation_discretization="nemo_1p5_split",
         # NEMO nn_bc_surf=1 Dirichlet surface TKE: en(1)=max(rn_emin0,
         # rn_ebb*|tau|/rho0) held in the implicit solve — the wind-driven
         # surface-TKE response (the Veros flux BC undershoots NEMO's surface

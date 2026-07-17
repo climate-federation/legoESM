@@ -149,3 +149,61 @@ def test_nn_mxl3_scans_match_direct_loop():
     ref_e = np.maximum(np.sqrt(lup * ldn), cfg.mxl_min)[..., 1:]
     np.testing.assert_allclose(np.asarray(l_k), ref_k, rtol=0, atol=1e-14)
     np.testing.assert_allclose(np.asarray(l_eps), ref_e, rtol=0, atol=1e-14)
+
+
+def test_dissipation_discretization_dispatch_and_forms():
+    """NEMO 1.5/0.5 dissipation split: unknown value raises (dispatch
+    hardening); split vs backward-Euler agree at small dt*diss (both are
+    first-order consistent) and differ at large dt*diss (non-vacuity)."""
+    import jax.numpy as jnp
+    import numpy as np
+    import pytest
+
+    from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
+    from legoesm.ocean.physics.vertical_mixing.tke import (
+        tke_integrate_post_mixing, tke_set_diffusivities)
+    from legoesm.ocean.eos import nemo_roquet_eos
+
+    r = build_nemo_gyre_recipe()
+    cfg = r.model_config.physics.vertical_mixing.tke
+    assert cfg.dissipation_discretization == "nemo_1p5_split"
+
+    NL = 12
+    z = np.linspace(5, 500, NL)
+    T = jnp.asarray(20.0 - 0.01 * z)[None, None, :]
+    S = jnp.full((1, 1, NL), 35.0)
+    p = jnp.asarray(1026.0 * 9.80665 * z)
+    rho = nemo_roquet_eos(T[0, 0], S[0, 0], p, rho0=1026.0)[None, None, :]
+    dzh = jnp.asarray(np.diff(z))[None, None, :]
+    dz_ref = jnp.asarray(np.gradient(z))
+    tke = jnp.full((1, 1, NL - 1), 1.0e-3)
+    common = dict(
+        taum_surface=jnp.asarray([[0.05]]), p_cell=p[None, None, :],
+        dz_ref=dz_ref, jacobian=jnp.ones((1, 1)),
+        eos_fn=lambda TT, SS, pp: nemo_roquet_eos(TT, SS, pp, rho0=1026.0),
+        z_interface=jnp.asarray(-0.5 * (z[:-1] + z[1:]))[: NL - 1],
+        dz_surface=jnp.asarray([[z[0]]]))
+    zeros = jnp.zeros((1, 1, NL - 1))
+
+    u3 = jnp.zeros((1, 1, NL))
+
+    def solve(disc, dt):
+        c = cfg._replace(dissipation_discretization=disc)
+        _, _, ctx = tke_set_diffusivities(
+            u3, u3,
+            T, S, rho, dzh, tke,
+            jnp.asarray([[0.05]]), jnp.asarray([[0.0]]), c, 1026.0, 9.80665,
+            **common)
+        return np.asarray(tke_integrate_post_mixing(
+            ctx, zeros, zeros, jnp.zeros((1, 1)), dt, c))
+
+    with pytest.raises(ValueError, match="dissipation_discretization"):
+        solve("typo_scheme", 100.0)
+
+    e_be_small = solve("backward_euler", 1.0)
+    e_sp_small = solve("nemo_1p5_split", 1.0)
+    np.testing.assert_allclose(e_be_small, e_sp_small, rtol=1e-3)
+
+    e_be_big = solve("backward_euler", 1.0e5)
+    e_sp_big = solve("nemo_1p5_split", 1.0e5)
+    assert float(np.max(np.abs(e_be_big - e_sp_big))) > 0.0

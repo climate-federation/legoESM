@@ -1867,8 +1867,24 @@ def tke_integrate_post_mixing(
     c = jnp.concatenate(
         [-delta / vol[..., :n_w - 1], jnp.zeros_like(delta[..., :1])],
         axis=-1)
-    b = 1.0 - (a + c) + dt * cfg.c_eps * sqrttke_w / jnp.maximum(
-        mxl_w, cfg.mxl_min)
+    _diss_w = cfg.c_eps * sqrttke_w / jnp.maximum(mxl_w, cfg.mxl_min)
+    _disc = getattr(cfg, "dissipation_discretization", "backward_euler")
+    if _disc == "nemo_1p5_split":
+        # NEMO zdftke semi-implicit dissipation split (zdftke.F90:241-242,
+        # 414, 419): 1.5x the linearized dissipation on the diagonal
+        # (zfact2 = 1.5*rn_Dt*rn_ediss) and +0.5x added back EXPLICITLY to
+        # the RHS (zfact3 = 0.5*rn_ediss), both linearized at the CARRIED
+        # sqrt(e)/l_eps. Net first-order dissipation identical; the discrete
+        # decay factor differs from plain backward-Euler at large dt*diss
+        # (NEMO: (1+0.5a)/(1+1.5a) -> 1/3; backward-Euler: 1/(1+a) -> 0).
+        b = 1.0 - (a + c) + 1.5 * dt * _diss_w
+        forc_w = forc_w + 0.5 * _diss_w * e_w
+    elif _disc == "backward_euler":
+        b = 1.0 - (a + c) + dt * _diss_w
+    else:
+        raise ValueError(
+            "Unknown TKEConfig.dissipation_discretization: must be one of "
+            f"('backward_euler', 'nemo_1p5_split'), got {_disc!r}")
 
     if getattr(ctx, "langmuir_source", None) is not None:
         # NEMO ln_lc: en += rDt * source BEFORE the implicit solve
