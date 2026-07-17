@@ -263,6 +263,43 @@ def test_drying_gate_zeros_moistening_output():
     assert np.max(np.abs(raw_gated["dT_dt"])) == 0.0         # no-shallow+gate == 0 (this column)
 
 
+def test_shallow_branch_is_live_in_the_moderate_moistening_regime():
+    """A/B RESOLUTION of the shallow-redundancy follow-up (2026-07-17): the
+    Frierson shallow branch is LIVE, not superseded by the drying gate.
+
+    On a MODERATELY net-moistening sounding (uniform rh = 0.5 below) the
+    shallow redistribution zeros the column integral and the gate then passes
+    the redistributed LOCAL tendencies — real, conserving convection.  With
+    the branch removed the raw integral > 0 keeps the gate SHUT and the
+    column is silently zeroed.  Pin all three facts; DELETING the shallow
+    branch turns the first assertion red (the production output collapses to
+    the no-shallow oracle's zero)."""
+    nlev = 20
+    p_s = 1.0e5
+    sh = np.linspace(0.0, 1.0, nlev + 1)
+    sf = 0.5 * (sh[:-1] + sh[1:])
+    p_half = np.broadcast_to((sh * p_s)[None, :], (1, nlev + 1)).copy()
+    p_full = np.broadcast_to((sf * p_s)[None, :], (1, nlev)).copy()
+    T = np.maximum(300.0 * np.clip(sf, 0.01, None) ** 0.19, 200.0)[None, :]
+    qsat = _np(saturation_mixing_ratio(jnp.asarray(T), jnp.asarray(p_full)))
+    qv = 0.5 * qsat
+    dp = p_half[:, 1:] - p_half[:, :-1]
+
+    out = _call(T, qv, p_full, p_half, _DT, _CFG)
+    # 1. LIVE: the module convects this column (nonzero local tendencies)...
+    assert np.max(np.abs(_np(out.dT_dt))) > 1e-5
+    # 2. ...while conserving column water (the shallow branch's contract).
+    resid = np.sum((_np(out.dq_v_dt) + _np(out.dq_c_conv_dt)) * dp / _G)
+    assert abs(resid) < 1e-15
+    # 3. DISCRIMINATOR: the no-shallow oracle (gate ON) zeros this column —
+    #    the raw integral > 0 keeps col_net_drying at 0 and the gate shut.
+    no_shallow = _sbm_oracle(T, qv, p_full, p_half, _CFG, shallow=False)
+    assert np.max(np.abs(no_shallow["dT_dt"])) == 0.0
+    # (Strongly-moistening columns stay gate-zeroed with or without shallow —
+    # pinned in test_drying_gate_zeros_moistening_output above — but even
+    # there the A/B found the GRADIENTS differ, so removal is not AD-neutral.)
+
+
 # ---- trigger off ----
 
 def test_trigger_off_stable_column():

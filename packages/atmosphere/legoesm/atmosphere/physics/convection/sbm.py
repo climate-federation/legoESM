@@ -39,16 +39,26 @@ EXACTLY in a net-drying column whose column condensation candidate exceeds 1e-20
 physically active column; a <=1e-20 residual survives only in the degenerate near-zero-
 condensation corner where the ``safe_divide`` AD-guard floors), and the (Newton-limited,
 ~1e-3) enthalpy closure.
-NOTE — ASYMMETRIC net-moistening handling (candidate simplification, follow-up, NOT a
-global claim): the ``drying_gate`` (issue #771) is forward-observable — it zeros the LOCAL
-tendencies of a STRONGLY net-moistening column (pinned).  The older Frierson SHALLOW branch
-only zeros the column INTEGRAL; on a strongly-moistening sounding the downstream gate makes
-that irrelevant (dropping the shallow branch still yields output 0), so THERE the shallow
-branch is not independently forward-observable.  This is NOT global forward-deadness: after
-the shallow redistribution the near-zero column integral sits at the round-off floor, and
-the STRICT ``col_net_drying > 0`` gate can OPEN on that residual in mixed/near-boundary
-columns — the existing behavioral ``test_physics_convection.py`` exercises a shallow regime
-with NONZERO tendencies.  A full A/B across columns is owed before removing it.
+NOTE — net-moistening handling, A/B RESOLVED (2026-07-17; the owed full-module A/B ran:
+shallow branch toggled off, forward output + gradients diffed across a drying /
+moistening / mixed / rh-sweep column battery).  VERDICT: the Frierson SHALLOW branch is
+LIVE — KEEP.  It is NOT superseded by the ``drying_gate`` (issue #771); the two compose:
+
+  * MODERATELY net-moistening columns (uniform rh ~ 0.5-0.6 soundings in the battery):
+    the shallow redistribution zeros the column integral, the gate then passes the
+    REDISTRIBUTED local tendencies (|dT_dt| ~ 1e-3 K/s, column water residual ~ 1e-20).
+    With the branch removed the raw integral > 0 keeps the gate SHUT and the column is
+    silently zeroed — convection off where the scheme should redistribute.  This live
+    regime is pinned in test_sbm_faithful.py (deleting the branch turns it red).
+  * STRONGLY net-moistening columns (rh ~ 0.2): forward output is 0 with or without the
+    branch (the gate dominates) BUT the GRADIENTS differ (the shallow shift shapes the
+    backward path through the zeroed output) — removal is not even AD-neutral there.
+  * Net-drying / mixed columns: byte-identical with the branch removed (the shift is
+    exactly 0), as designed.
+
+The gate's job stays what the pins say: zeroing the residual LOCAL tendencies of columns
+whose integral the shallow branch could not fully cancel.  Neither mechanism subsumes
+the other; do not remove either.
 
 References
 ----------
