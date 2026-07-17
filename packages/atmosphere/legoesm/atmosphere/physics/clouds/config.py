@@ -21,6 +21,7 @@ __param_spec__ = {
             # the pgam_max cap (Morrison module_mp_mg.F90).
             "pgam_min": "numerics: lower clip/cap on the gamma-PSD shape parameter (regulariser, paired with pgam_max)",
             "cloud_optics_asymmetry_g": "numerics: scattering asymmetry g of the two-region inhomogeneity two-stream reflectance (shapes the reduction; the real per-band g lives in RRTMGP, not trained here)",
+            "clubb_cf_override_p_min_pa": "structural: BL-top pressure [Pa] above which the diagnostic-CLUBB cloud-fraction override applies (a level/regime gate, not a trained closure coefficient); 0 => full-column override",
         },
         "params": {
             # --- critical_rh: primary cloud-onset RH (Sundqvist + Xu-Randall lower bound) ---
@@ -161,6 +162,16 @@ class CloudConfig(NamedTuple):
     martin_pgam_intercept: float = 0.2714
     pgam_min: float = 2.0
     pgam_max: float = 10.0
+    # CLUBB cloud-fraction override LEVEL GATE (marine-Sc albedo lever): when a
+    # ``cloud_fraction_override`` (diagnostic CLUBB's PDF cf) is supplied, apply it
+    # ONLY where ``p_full >= clubb_cf_override_p_min_pa`` — the boundary layer /
+    # low cloud, the marine-Sc target — keeping the RH grid-scale fraction ALOFT.
+    # The real-SST A/B showed a FULL-COLUMN override over-clouds at altitude (OLR
+    # collapse to ~160 W/m² + albedo RISE 0.53->0.65) because CLUBB's PDF
+    # over-diagnoses high/mid cloud; restricting it to the BL removes that backfire
+    # while keeping the intended low-cloud reduction.  ``0.0`` => apply at ALL
+    # levels (the original full-column override).
+    clubb_cf_override_p_min_pa: float = 70000.0
     # --- Convective cloud fraction (Slingo 1987), OPT-IN (default OFF) ---
     # The RH-based stratiform schemes (sundqvist/xu_randall) give cloud only
     # near saturation, so an adjustment convection scheme (sbm) that holds the

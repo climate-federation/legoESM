@@ -3020,7 +3020,46 @@ def _bc_physics_tendencies(du_dt, dv_dt, dT_dt, dS_dt, physics_fn, state, grid, 
     return du_dt, dv_dt, dT_dt, dS_dt, phys_K_v, phys_A_v, diag_phys_u, diag_phys_v
 
 
-def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k, z_coord, J, grid, rho_0, mask, mask_3d, *, route_heat_to_implicit=False):
+def surface_stress_faces(surface_forcing, u_dtype, z_coord, J, grid):
+    """Wind stress at u/v faces + the top-cell thicknesses (single owner of
+    the tau sign/interp/rotation chain — used by the explicit stage-10b'
+    deposition, the implicit surface-stress BC, and the F_slow barotropic
+    wind term; CLAUDE.md no-duplicate-numerics).
+
+    Returns ``(tau_i_u, tau_j_v, dz_0_u, dz_0_v)`` (ocean-reaction sign,
+    grid-aligned) or ``None`` when the forcing carries no stress."""
+    _sf_tau_x = getattr(surface_forcing, "tau_x", None)
+    _sf_tau_y = getattr(surface_forcing, "tau_y", None)
+    if surface_forcing is None or _sf_tau_x is None or _sf_tau_y is None:
+        return None
+    tau_e_T = -jnp.asarray(_sf_tau_x, dtype=u_dtype)
+    tau_n_T = -jnp.asarray(_sf_tau_y, dtype=u_dtype)
+    tau_e_u_face = interp_cell_to_uface(tau_e_T)
+    tau_n_u_face = interp_cell_to_uface(tau_n_T)
+    dz_0_T = jnp.asarray(z_coord.dz_ref[0], dtype=u_dtype) * J
+    tau_e_v_face, tau_n_v_face, dz_0_v = interp_to_v_points_multi(
+        (tau_e_T, tau_n_T, dz_0_T), grid=grid)
+    cos_a_u = getattr(grid, "cos_alpha_u", None)
+    sin_a_u = getattr(grid, "sin_alpha_u", None)
+    cos_a_v = getattr(grid, "cos_alpha_v", None)
+    sin_a_v = getattr(grid, "sin_alpha_v", None)
+    if cos_a_u is not None and sin_a_u is not None:
+        ca_u = jnp.asarray(cos_a_u, dtype=u_dtype)
+        sa_u = jnp.asarray(sin_a_u, dtype=u_dtype)
+        tau_i_u = tau_e_u_face * ca_u + tau_n_u_face * sa_u
+    else:
+        tau_i_u = tau_e_u_face
+    if cos_a_v is not None and sin_a_v is not None:
+        ca_v = jnp.asarray(cos_a_v, dtype=u_dtype)
+        sa_v = jnp.asarray(sin_a_v, dtype=u_dtype)
+        tau_j_v = -tau_e_v_face * sa_v + tau_n_v_face * ca_v
+    else:
+        tau_j_v = tau_n_v_face
+    dz_0_u = interp_cell_to_uface(dz_0_T)
+    return tau_i_u, tau_j_v, dz_0_u, dz_0_v
+
+
+def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k, z_coord, J, grid, rho_0, mask, mask_3d, *, route_heat_to_implicit=False, withhold_stress=False):
     """Stage 10b': external surface forcing (wind stress tau_x/tau_y, net heat
     q_net, penetrating shortwave) from a coupled / OMIP OceanSurfaceForcing,
     with tripolar east-north -> grid-aligned rotation. Pure verbatim extraction
@@ -3058,40 +3097,18 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
         _sf_salt = getattr(surface_forcing, "salt_flux", None)
         _sf_chl = getattr(surface_forcing, "chl", None)
 
-        if _sf_tau_x is not None and _sf_tau_y is not None:
-            # Atmosphere convention (opposes wind) -> ocean reaction.
-            tau_e_T = -jnp.asarray(_sf_tau_x, dtype=u.dtype)
-            tau_n_T = -jnp.asarray(_sf_tau_y, dtype=u.dtype)
-            tau_e_u_face = interp_cell_to_uface(tau_e_T)       # (n_lat, n_lon+1)
-            tau_n_u_face = interp_cell_to_uface(tau_n_T)
-            # Coalesce the THREE v-face interps (tau_e, tau_n, dz_0) into ONE
-            # fused lat-halo exchange: -2 sendrecv pairs/step under band MPI
-            # (codex halo-hunt #1, audit lever O4).  dz_0_T is computed here
-            # (was below) so all three ride one pad_with_pole_bc_lat_multi;
-            # interp_to_v_points_multi is value-identical to the per-field
-            # calls.  The u-face interps stay separate (lon-local, no halo).
-            dz_0_T = jnp.asarray(z_coord.dz_ref[0], dtype=u.dtype) * J
-            tau_e_v_face, tau_n_v_face, dz_0_v = interp_to_v_points_multi(
-                (tau_e_T, tau_n_T, dz_0_T), grid=grid)   # each (n_lat+1, n_lon)
-
-            cos_a_u = getattr(grid, "cos_alpha_u", None)
-            sin_a_u = getattr(grid, "sin_alpha_u", None)
-            cos_a_v = getattr(grid, "cos_alpha_v", None)
-            sin_a_v = getattr(grid, "sin_alpha_v", None)
-            if cos_a_u is not None and sin_a_u is not None:
-                ca_u = jnp.asarray(cos_a_u, dtype=u.dtype)
-                sa_u = jnp.asarray(sin_a_u, dtype=u.dtype)
-                tau_i_u = tau_e_u_face * ca_u + tau_n_u_face * sa_u
-            else:
-                tau_i_u = tau_e_u_face
-            if cos_a_v is not None and sin_a_v is not None:
-                ca_v = jnp.asarray(cos_a_v, dtype=u.dtype)
-                sa_v = jnp.asarray(sin_a_v, dtype=u.dtype)
-                tau_j_v = -tau_e_v_face * sa_v + tau_n_v_face * ca_v
-            else:
-                tau_j_v = tau_n_v_face
-
-            dz_0_u = interp_cell_to_uface(dz_0_T)   # dz_0_T + dz_0_v fused above
+        if _sf_tau_x is not None and _sf_tau_y is not None and not withhold_stress:
+            # Atmosphere convention (opposes wind) -> ocean reaction; sign,
+            # interp + rotation and the fused v-face exchange live in the
+            # single-owner helper ``surface_stress_faces``.  When
+            # ``withhold_stress`` (config.surface_stress_implicit) the kick is
+            # NOT applied here: the model step deposits the stress inside the
+            # implicit vertical solve (NEMO dynzdf surface BC) and adds the
+            # depth-mean tau/(rho0 H) to F_slow (NEMO stp2d), with the
+            # barotropic mean re-imposed after the solve
+            # (nemo_stage_mean_imposition = the stprk3_stg:440 zub step).
+            tau_i_u, tau_j_v, dz_0_u, dz_0_v = surface_stress_faces(
+                surface_forcing, u.dtype, z_coord, J, grid)
             rho_0_dt = jnp.asarray(rho_0, dtype=u.dtype)
             inv_rho_dz_u = 1.0 / (rho_0_dt * jnp.maximum(dz_0_u, 1e-10))
             inv_rho_dz_v = 1.0 / (rho_0_dt * jnp.maximum(dz_0_v, 1e-10))
@@ -3847,9 +3864,11 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 "sw_down=None (route the solar component via q_solar)."
             )
     _sf_implicit = bool(getattr(config, "surface_forcing_implicit", False))
+    _stress_implicit = bool(getattr(config, "surface_stress_implicit", False))
     du_dt, dv_dt, dT_dt, dS_dt, dT_surf_heat = _bc_external_surface_forcing(
         du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k, z_coord, J, grid,
         rho_0, mask, mask_3d, route_heat_to_implicit=_sf_implicit,
+        withhold_stress=_stress_implicit,
     )
 
     # --- Stage 10b'': surface TRACER restoring (T*/S*) routed for IMPLICIT

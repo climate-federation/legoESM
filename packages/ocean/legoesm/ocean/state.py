@@ -468,6 +468,25 @@ class LatLonCGridOceanState(NamedTuple):
     dpsi_prev: object = None
     dpsin: object = None
     dpsin_prev: object = None
+    # Cross-window barotropic AB3/AM4 substep histories for
+    # barotropic_time_filter == "nemo_ab3am4" (NEMO dynspg_ts nn_bt_flt=3):
+    # 6-tuple of 2-D arrays in DEVIATION form — (U_f-U_b, U_f-U_bb, V_f-V_b,
+    # V_f-V_bb, eta_f-eta_b, eta_f-eta_bb), the last two substep values of
+    # the previous window relative to its final value (NEMO's persistent
+    # ubb_e/ub_e/vbb_e/vb_e/sshbb_e/sshb_e, written to NEMO's restart).
+    # Deviation form because NEMO re-imposes the stp2d barotropic mean on the
+    # 3D velocity after every stage (stprk3_stg.F90:440) so its raw histories
+    # never see a window-boundary jump; legoESM's post-solve implicit vmix
+    # shifts the depth mean, and raw carried values would feed that jump into
+    # the AB3 extrapolation each window (see _run_substep_loop).
+    # None (default) ⇒ cold start: the barotropic solver applies NEMO's
+    # ll_init ramp and POPULATES this field; afterwards each window continues
+    # the AB3 series across the window boundary (dynspg_ts.F90:200-226).
+    # Same None-seeding pattern as the prognostic ``tke`` field. NB: cannot
+    # be pre-seeded with zeros for lax.scan (zeros read as "continuation with
+    # equal histories", silently skipping the cold-start ramp) — nemo_ab3am4
+    # runs are step-1-eager, then scan.
+    bt_hist: object = None
 
 
 class SurfaceTracerForcing(NamedTuple):
@@ -766,6 +785,16 @@ class BarotropicConfig(NamedTuple):
     # per-substep) global mass correction is the SOTA-standard approximation
     # (loses per-substep far-field sea-level compensation).  Default False.
     barotropic_local_subcycle_clamp: bool = False
+    # NEMO RK3 per-stage barotropic-mean IMPOSITION (stprk3_stg.F90:440 zub
+    # correction): after the implicit vertical solve, replace the 3D
+    # velocity's depth mean with the barotropic (split-explicit) solution —
+    # u += (U_bar_solve − depth_mean(u))·mask, uniformly over the column.
+    # NEMO does this after EVERY stage, so its barotropic mode is always the
+    # heavily-filtered stp2d solution; without it, implicit vmix + bottom
+    # drag shift the depth mean after the barotropic solve and that shifted
+    # mean carries unfiltered divergence noise (depth-uniform w noise).
+    # Default False: bit-identical legacy behaviour.
+    nemo_stage_mean_imposition: bool = False
     # AB2 time-centering of the barotropic slow forcing F_slow (matches the
     # Oceananigans split-explicit Gᵁ = AB2-extrapolated depth-integral of the 3D
     # tendency, vs legoESM's default current-time depth-mean).  Investigated for
@@ -1468,6 +1497,17 @@ class LatLonCGridOceanConfig(NamedTuple):
     # is placed); rejected otherwise at config validation. Default False ⇒
     # current EXPLICIT surface-forcing placement ⇒ BIT-IDENTICAL.
     surface_forcing_implicit: bool = False
+    # NEMO dynzdf-style IMPLICIT wind-stress deposition: withhold the explicit
+    # top-cell kick (stage-10b') and instead (a) add tau/(rho0 dz0)*dt_mom to
+    # the top cell of the implicit vertical momentum solve's RHS (the stress
+    # deposits smoothly over the Ekman layer WITHIN the solve, no impulsive
+    # ~0.1 m/s per-step surface kick at dt=14400 — a grid-scale w-noise
+    # source, plan §G), and (b) add the depth-mean tau/(rho0 H) to the
+    # barotropic F_slow (NEMO stp2d's explicit wind term). The depth mean the
+    # solve deposits is then re-imposed to the barotropic solution by
+    # barotropic.nemo_stage_mean_imposition (stprk3_stg:440) — REQUIRED with
+    # this flag (validated at model init). Default False: bit-identical.
+    surface_stress_implicit: bool = False
 
     # --- Adaptive-implicit vertical momentum advection ---
     # (Shchepetkin 2015 / NEMO ``ln_zad_Aimp``).  Appended at the end of

@@ -200,6 +200,24 @@ def test_merged_cfg_from_suite_matches_run_aimip_merge(tmp_path):
     assert cfg["aimip_variant"] == "classical"
 
 
+# ---------------------------------------------- sfno_full norm-stats sidecar ---
+def test_sfno_full_norm_stats_path_resolves_next_to_checkpoint():
+    """The sidecar resolves to norm_stats.npz in the checkpoint's parent dir
+    (== train's config.checkpoint_dir); pure path logic, no jax/IO."""
+    p = mod.sfno_full_norm_stats_path(
+        "results/aimip_wbcompare/sfno_full/epoch_0007.eqx")
+    assert p.endswith("results/aimip_wbcompare/sfno_full/norm_stats.npz")
+    # A different epoch in the same dir maps to the SAME sidecar.
+    p2 = mod.sfno_full_norm_stats_path(
+        "results/aimip_wbcompare/sfno_full/epoch_0000.eqx")
+    assert p == p2
+
+
+def test_sfno_full_norm_stats_path_rejects_none():
+    with pytest.raises(ValueError):
+        mod.sfno_full_norm_stats_path(None)
+
+
 # ------------------------------------------------------- schema compatibility --
 def test_valid_variants_tuple_matches_config_dir():
     """The driver's VALID_VARIANTS matches the three wbcompare variant configs

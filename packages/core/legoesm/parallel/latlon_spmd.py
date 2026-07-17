@@ -31,6 +31,14 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 from legoesm.parallel.shard_map_compat import shard_map
 
+# Reference halo depth for the topology chooser's pole-fold cost model: the
+# widest production halo (the PPM halo-2 exchange).  The chooser's score is
+# otherwise normalized per unit halo depth; the partner fold's h-quadratic
+# E/W-extension strips are charged at this reference so the constant stays
+# honest without threading the runtime halo through the chooser (see
+# choose_latlon_2d_topology).
+_FOLD_REF_HALO = 2
+
 
 def latlon_band_perms(n_dev: int):
     """Static (src, dst) permutation pairs over the 1-D ``lat`` band axis.
@@ -335,6 +343,63 @@ def _pole_fold(rows, negate: bool):
     return sign * jnp.roll(rows[::-1], half, axis=1)
 
 
+def partner_pole_fold_window(edge, lon_index, mesh, halo: int, negate: bool):
+    """Tile's padded 180-deg pole-fold window via ONE antipodal ``ppermute``
+    (even ``p_lon``) — value-identical to the all_gather construction in
+    :func:`make_latlon_2d_pad_body`.
+
+    The serial fold of the full wrap-padded circle (:func:`_pole_fold`:
+    lat-mirror + roll by ``(W+2h)//2``) maps the window of tile ``c``
+    (padded cols ``[c*w, c*w+w+2h)``) onto the ANTIPODE tile
+    ``c' = c + p_lon/2``'s edge rows extended ``2h`` columns E/W:
+
+    ``window[t] = sign * ext_antipode[::-1][:, r(t)]`` with
+    ``r(t) = t + 2h`` where the global padded column ``j = c*w + t`` lies
+    west of the antimeridian seam (``j < W/2 + h`` — there the serial roll
+    reads through the wrap-pad copies) and ``r(t) = t`` east of it.  Both
+    branches are exact mod-``W`` algebra of the serial padded roll
+    (including its piecewise seam), so the result is BIT-equal to the
+    gather path — gated by ``test_2d_pad_body_matches_serial_window`` and
+    the direct twin test.  Per-tile pole traffic drops from the full
+    ``(halo, n_lon)`` circle (all_gather on EVERY tile) to
+    ``O(w + 4h)`` point-to-point.
+
+    ``w >= 2*halo`` required (the E/W extension strips must fit the
+    neighbour tile); ``min_tile`` in :func:`choose_latlon_2d_topology`
+    already enforces ``w >= 2`` and production halos are ``<= 2``, so the
+    guard only fires on hand-built degenerate meshes.
+
+    AD-safe: ``ppermute`` is self-transposing; the window ``take`` is a
+    gather with a defined transpose (scatter-add).
+    """
+    p_lon = int(mesh.shape["lon"])
+    if p_lon % 2 != 0:
+        raise ValueError(
+            f"partner_pole_fold_window: p_lon must be even, got {p_lon}")
+    w = edge.shape[1]
+    h = halo
+    if w < 2 * h:
+        raise ValueError(
+            f"partner_pole_fold_window: tile width {w} < 2*halo = {2 * h} "
+            f"(the E/W extension strips would exceed the neighbour tile); "
+            f"use the all_gather fold for this degenerate tiling")
+    W = w * p_lon
+    # 1. E/W-extend the edge rows by 2h (one lon ring ppermute pair).
+    ext = lon_ring_ghosts_spmd(edge, mesh, halo=2 * h)  # (halo, w+4h[, lev])
+    # 2. ONE antipodal ppermute over the lon ring (shift by p_lon/2 is a
+    # bijection, and c' != c for every even p_lon >= 2).
+    perm_anti = [(s, (s + p_lon // 2) % p_lon) for s in range(p_lon)]
+    recv = jax.lax.ppermute(ext, "lon", perm_anti)
+    # 3. lat-mirror + sign (the _pole_fold row flip), then the window
+    # column map (derivation above; seam-straddling windows mix branches).
+    sign = -1.0 if negate else 1.0
+    recv = sign * recv[::-1]
+    t = jnp.arange(w + 2 * h)
+    j = lon_index * w + t                       # global padded column
+    r = jnp.where(j < W // 2 + h, t + 2 * h, t)
+    return jnp.take(recv, r, axis=1)
+
+
 def activate_latlon_spmd_halo(mesh) -> None:
     """Arm the lat-lon SPMD halo backend on a 1-D ``("lat",)`` band mesh or a
     2-D ``("lat", "lon")`` tile mesh.
@@ -437,22 +502,26 @@ def make_latlon_2d_pad_body(mesh, halo: int = 1, negate: bool = False):
       pure data movement — no arithmetic, so bit-equal).
     * poles: the PHYSICAL pole tiles (``axis_index("lat") == 0`` / ``p_lat-1``)
       replace their beyond-pole ghost rows with the SERIAL 180-deg pole fold.
-      Under a lon split the fold's half-circle shift needs remote columns, so
-      the tile's pole edge rows are ``all_gather``'d over ``"lon"`` into the
-      full ``(halo, n_lon)`` circle, wrap-padded, folded with the SAME
-      :func:`_pole_fold` the serial/band paths use, and the tile's own padded
-      window ``[c*w, c*w+w+2h)`` dynamic-sliced back out — bit-identical to
-      the serial fold BY CONSTRUCTION (identical ops on identical rows),
-      including the serial fold's piecewise ``W//2``-of-the-PADDED-row roll.
-      NOTE the uniform-program cost: the all_gather runs on EVERY tile (the
-      fold is selected by ``jnp.where`` on the lat index); a 180-deg
-      partner-tile ppermute (even ``p_lon``) is the documented follow-up
-      optimisation.  ``p_lon == 1`` skips the gather statically (the fold is
-      local, exactly the band body's).
+      Under a lon split the fold's half-circle shift needs remote columns.
+      EVEN ``p_lon`` (with ``w >= 2h``): ONE antipodal ``ppermute`` of the
+      2h-E/W-extended pole edge rows + a local window column map —
+      :func:`partner_pole_fold_window`, bit-equal to the gather construction
+      including the serial fold's piecewise ``W//2``-of-the-PADDED-row roll,
+      at ``O(w+4h)`` point-to-point traffic per tile.  ODD ``p_lon > 1``
+      (and degenerate ``w < 2h``): the tile's pole edge rows are
+      ``all_gather``'d over ``"lon"`` into the full ``(halo, n_lon)``
+      circle, wrap-padded, folded with the SAME :func:`_pole_fold` the
+      serial/band paths use, and the tile's own padded window
+      ``[c*w, c*w+w+2h)`` dynamic-sliced back out — bit-identical to the
+      serial fold BY CONSTRUCTION.  Uniform-program cost either way: the
+      fold collective runs on EVERY tile (selection is a ``jnp.where`` on
+      the lat index).  ``p_lon == 1`` skips all fold collectives statically
+      (the fold is local, exactly the band body's).
 
     ``negate=True`` folds with a sign flip for meridional-vector components.
-    AD-safe: ``ppermute`` is self-transposing and ``all_gather`` has a
-    defined transpose (``psum_scatter``).
+    AD-safe: ``ppermute`` is self-transposing, ``all_gather`` has a defined
+    transpose (``psum_scatter``), and the partner fold's window ``take`` is
+    a gather (transpose scatter-add).
     """
     p_lat = int(mesh.shape["lat"])
     p_lon = int(mesh.shape["lon"])
@@ -460,13 +529,21 @@ def make_latlon_2d_pad_body(mesh, halo: int = 1, negate: bool = False):
 
     def _fold_rows(edge, lon_index):
         """Serial pole fold of the tile's ``(halo, w[, nlev])`` edge rows ->
-        the tile's ``(halo, w+2h[, nlev])`` padded fold window."""
+        the tile's ``(halo, w+2h[, nlev])`` padded fold window (local wrap /
+        antipodal ppermute / all_gather — static branch on ``p_lon``)."""
         w = edge.shape[1]
         pad_lon = ((0, 0), (halo, halo)) + ((0, 0),) * (edge.ndim - 2)
         if p_lon == 1:
             # Full circle already local: wrap + fold, exactly the band body
             # (wrap(tile)[:halo] == wrap(tile[:halo]) — per-row lon pad).
             return _pole_fold(jnp.pad(edge, pad_lon, mode="wrap"), negate)
+        if p_lon % 2 == 0 and w >= 2 * halo:
+            # 180-deg partner-tile ppermute (the documented follow-up,
+            # now the even-p_lon default): O(w+4h) point-to-point instead
+            # of the full-circle all_gather on EVERY tile.  Bit-equal to
+            # the gather construction (see partner_pole_fold_window).
+            return partner_pole_fold_window(edge, lon_index, mesh, halo,
+                                            negate)
         rows = jax.lax.all_gather(edge, "lon", axis=1, tiled=True)
         rows = jnp.pad(rows, pad_lon, mode="wrap")     # (halo, n_lon+2h[, lev])
         folded = _pole_fold(rows, negate)
@@ -808,28 +885,40 @@ def choose_latlon_2d_topology(
       * lat cut (``p_lat > 1``): the N/S ppermute pair moves ``2h*w`` cells
         -> ``w``;
       * lon cut (``p_lon > 1``): the E/W ring ppermute pair moves ``~2h*nl``
-        -> ``nl``, PLUS the two pole-fold ``all_gather``s over ``"lon"``
-        (``make_latlon_2d_pad_body._fold_rows``) — each delivers the full
-        ``(h, n_lon)`` pole edge circle to EVERY tile per pad, because both
-        operands of the fold's ``jnp.where`` are evaluated in the uniform
-        program — ``2h*n_lon`` -> ``n_lon`` (codex M3a finding 4: a
-        perimeter-only score ignored this and called the ``(1, N)`` split
-        "E/W-perimeter only", which is false);
+        -> ``nl``, PLUS the pole-fold term, which depends on ``p_lon``
+        parity (``make_latlon_2d_pad_body._fold_rows``, uniform program —
+        the fold collective runs on EVERY tile because both operands of the
+        fold's ``jnp.where`` are evaluated):
+
+        - ODD ``p_lon`` (or ``w < 2h``): two ``all_gather``s each deliver
+          the full ``(h, n_lon)`` pole edge circle -> ``n_lon`` (codex M3a
+          finding 4: a perimeter-only score ignored this and called the
+          ``(1, N)`` split "E/W-perimeter only", which is false);
+        - EVEN ``p_lon`` with ``w >= 2*_FOLD_REF_HALO`` (exactly the
+          runtime partner-path condition): the partner fold
+          (:func:`partner_pole_fold_window`) receives, per fold, the
+          2h-wide E/W extension strips (``2 * h*2h``) plus the antipodal
+          ``(h, w+4h)`` block; both folds / 2h -> ``w + 8*_FOLD_REF_HALO``
+          with the ``h``-quadratic strip terms charged at the widest
+          production halo (``_FOLD_REF_HALO = 2``, the PPM halo-2
+          exchange — the score is otherwise halo-normalized).  NO cap at
+          the gather cost: the runtime never falls back to the gather on
+          this branch, so capping would undercharge forced-partner
+          candidates (codex r1 #3);
+
       * an unsplit dimension — or one whose only boundary is the LOCALLY
         folded pole (``p_lon == 1``) — moves nothing.
 
-    Consequence: under the CURRENT fold implementation any ``p_lon > 1``
-    candidate scores ``>= nl + n_lon > n_lon`` = the band's score, so the
-    1-D band ``(N, 1)`` wins whenever it is FEASIBLE, and the 2-D tiling is
-    selected exactly when the band is not (``n_lat % N != 0`` or
-    ``n_lat/N < min_tile`` — the beyond-band-scaling regime M3a exists for).
-    The documented follow-up (a 180-deg partner-tile ppermute fold for even
-    ``p_lon``) removes the all_gather term; ``band_preference`` (band wins
-    within that factor of the best 2-D score, default 1.25x) is retained so
-    the low-rank latency hysteresis survives that optimisation.
-    ``p_lon == 1`` also wins all exact ties.  The returned ``(N, 1)``
-    selects the existing 1-D code path (byte-identical, the default
-    production lane).
+    Selection policy: the band ``(N, 1)`` is returned WHENEVER FEASIBLE —
+    the M3a contract every production lane and scaling receipt assumes;
+    the model below ranks only the 2-D candidates that remain when the
+    band is infeasible (``n_lat % N != 0`` or ``n_lat/N < min_tile``).
+    With the partner fold an even-``p_lon`` candidate can now model-beat
+    the band once ``w + 8*h_ref + nl < n_lon``, but flipping the produced
+    topology is MEASUREMENT-GATED (M4): revisit with >=16-rank hardware
+    receipts (``band_preference``, default 1.25x, is retained for that
+    unlock and is currently dormant).  Among 2-D candidates ties break
+    toward smaller ``p_lon`` (fewer collectives).
 
     Raises ``ValueError`` when NO factorization is feasible (so a caller can
     never silently run an invalid tiling).
@@ -847,12 +936,26 @@ def choose_latlon_2d_topology(
         if (p_lat > 1 and nl < min_tile) or (p_lon > 1 and w < min_tile):
             continue
         # Received volume per tile per pad, / 2h (see docstring): N/S
-        # ppermute pair (w) + E/W ring pair (nl) + the TWO pole-fold
-        # lon-all_gathers that every p_lon > 1 pad executes on every tile
-        # (2 * h*n_lon -> n_lon) — codex M3a finding 4.
+        # ppermute pair (w) + E/W ring pair (nl) + the pole-fold term —
+        # even p_lon (w >= 2*_FOLD_REF_HALO): partner-ppermute fold
+        # (w + 8*h_ref); odd p_lon (or degenerate w): the TWO full-circle
+        # lon-all_gathers (n_lon) — codex M3a finding 4.
+        if p_lon > 1:
+            if p_lon % 2 == 0 and w >= 2 * _FOLD_REF_HALO:
+                # Charge exactly what the runtime does: _fold_rows takes
+                # the partner path whenever (even p_lon, w >= 2h), even
+                # where the gather would move fewer bytes (codex r1 #3 —
+                # a min() cap undercharged forced-partner candidates and
+                # could select a worse topology).  h_ref=2 is the widest
+                # production halo; smaller runtime halos cost less.
+                fold = float(w + 8 * _FOLD_REF_HALO)
+            else:
+                fold = float(n_lon)
+            lon_term = nl + fold
+        else:
+            lon_term = 0.0
         feasible[(p_lat, p_lon)] = (
-            (w if p_lat > 1 else 0.0)
-            + ((nl + n_lon) if p_lon > 1 else 0.0))
+            (w if p_lat > 1 else 0.0) + lon_term)
     if not feasible:
         raise ValueError(
             f"choose_latlon_2d_topology: no feasible (p_lat, p_lon) for "
@@ -860,12 +963,21 @@ def choose_latlon_2d_topology(
             f"p_lat*p_lon == n_devices with n_lat % p_lat == 0, "
             f"n_lon % p_lon == 0, and >= {min_tile} cells per split "
             f"dimension per tile).")
-    # Best modeled volume; ties broken toward smaller p_lon (fewer
-    # collectives).
-    best = min(feasible.items(), key=lambda kv: (kv[1], kv[0][1]))
     band = (n_devices, 1)
-    if band in feasible and feasible[band] <= band_preference * best[1]:
+    if band in feasible:
+        # The band stays the default production lane WHENEVER feasible
+        # (the M3a contract — sharded_atm_latlon_step's lane routing and
+        # every existing scaling receipt assume it).  With the partner
+        # fold, 2-D candidates are now genuinely competitive at large
+        # n_lon by the model below, but flipping the produced topology is
+        # MEASUREMENT-GATED (M4 doctrine): unlock only with >=16-rank
+        # hardware receipts.  ``band_preference`` is retained for that
+        # future unlock.
         return band
+    # Band infeasible: best modeled volume among the 2-D candidates
+    # (honest partner/gather fold costs); ties break toward smaller
+    # p_lon (fewer collectives).
+    best = min(feasible.items(), key=lambda kv: (kv[1], kv[0][1]))
     return best[0]
 
 

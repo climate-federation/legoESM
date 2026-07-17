@@ -18,17 +18,15 @@ the NEMO fixed constants (``rn_ce`` = MLEConfig.ce is the only tunable knob); bo
 are canaried so a config/constant drift fails.  Complements ``test_mle.py``
 (behavioral: μ endpoints/peak, positivity, one rc_f point, grad).
 
-SCOPE — the ``mle_mld_and_buoyancy`` Δρ mixed-layer detection is DEFERRED to a
-separate audit (see the mle number-budget follow-up memory).  A codex review
-surfaced that its NEMO-faithfulness is NOT yet clean: the reference-level pick
-``searchsorted(z_centers, ref_depth)`` selects the first centre BELOW ref_depth,
-contradicting both the module's own "at/above the ref depth" comment and NEMO's
-``nla10`` (the level ABOVE the interface just below ~10 m) — a SUSPECTED
-off-by-one bug that needs the tramle.F90 source to confirm + ocean validation to
-fix; and ``bm`` uses legoESM ``g``/``rho_ocean``, not NEMO's ``g_nemo``/``rau0``
-(a ~5e-5 relative constant departure).  Pinning it here against a numpy
-restatement of the MODULE would mask that suspected defect, so it is left out
-until resolved against the NEMO source.
+SCOPE — the ``mle_mld_and_buoyancy`` Δρ mixed-layer detection is now RESOLVED
+against the NEMO 5.0.1 source in two steps: the ``nla10`` reference-level fix
+(PR #1123: T-level CONTAINING ~10 m from the W-interfaces, zrefdep tolerance,
+scan window from ``nlb10``) and the ``rhop`` density-field fix here — BOTH the
+Δρ criterion and ``zbm`` use NEMO's SURFACE-REFERENCED POTENTIAL density
+(tramle.F90 ``rhop``; eosbn2 ``prhop``), never in-situ (whose compressibility
+alone trips the 0.01 threshold and collapses the ML — the discriminant + the
+caller-level bridge pins at the bottom of this file).  The ``g``/``rho_ocean``
+constants remain the sanctioned legoESM departure (~5e-5 relative in ``bm``).
 """
 
 from __future__ import annotations
@@ -41,6 +39,7 @@ import numpy as np
 import pytest
 from legoesm.ocean.physics.lateral_mixing import mle
 from legoesm.ocean.physics.lateral_mixing.mle import (
+    MLEConfig,
     face_mld,
     mle_coefficient,
     mle_mld_and_buoyancy,
@@ -341,3 +340,66 @@ def test_exact_gdept_changes_the_tolerance_hence_nla10():
         rho_c_mle=0.01, ref_depth_m=10.0,
         rho0=constants.rho_ocean, grav=constants.g)
     assert float(zmld_mid[0, 0]) == pytest.approx(9.7, rel=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# NEMO rhop: the MLD criterion + zbm use SURFACE-REFERENCED POTENTIAL density
+# (tramle.F90 ``rhop``; eosbn2 prhop "potential density referenced at the
+# surface") — never in-situ.
+# ---------------------------------------------------------------------------
+
+def test_mld_potential_vs_insitu_discriminant():
+    """A uniform-T,S column has CONSTANT rhop -> no level exceeds the 0.01
+    threshold -> the WHOLE wet column is mixed (NEMO).  The same column's
+    IN-SITU density climbs by compressibility alone (~0.14 kg/m^3 per ~30 m
+    with a wright-like ladder), which under the old in-situ feed collapsed
+    the diagnosed ML to the top layer — the regression that zeroed the MPAS
+    MLE transport (mu == 0 on a one-layer ML)."""
+    dz = jnp.asarray([13.95, 48.37, 82.79, 117.21, 151.63, 186.05])
+    z_faces = jnp.concatenate([jnp.zeros((1,)), jnp.cumsum(dz)])
+    nlev = dz.shape[0]
+    dzl = dz[None, :]
+    wet = jnp.ones((1, nlev))
+    # Surface-referenced potential density of a uniform column: constant.
+    rho_pot = jnp.full((1, nlev), 1026.0)
+    zmld_pot, _, in_ml_pot = mle_mld_and_buoyancy(
+        rho_pot, dzl, wet, z_faces=z_faces)
+    assert float(zmld_pot[0]) == float(jnp.sum(dz)), "uniform rhop must mix the full column"
+    assert bool(jnp.all(in_ml_pot[0] == 1.0))
+    # The SAME column's in-situ ladder (compressibility only) collapses the
+    # ML — the documented wrong-feed failure mode this pin guards against.
+    rho_insitu_ladder = 1026.0 + jnp.asarray(
+        [0.0, 0.138, 0.42, 0.89, 1.51, 2.28])[None, :]
+    zmld_bad, _, _ = mle_mld_and_buoyancy(
+        rho_insitu_ladder, dzl, wet, z_faces=z_faces)
+    assert float(zmld_bad[0]) == float(dz[0]), (
+        "in-situ ladder should collapse the ML to the top layer "
+        "(the failure mode; callers must never feed in-situ density)")
+
+
+def test_latlon_caller_feeds_potential_density_bridge():
+    """END-TO-END through the combined-physics bridge (_make_mle): a
+    mixed-layer T front on a real wright-EOS latlon state produces a
+    NONZERO MLE tendency.  With the old in-situ feed the diagnosed ML
+    collapsed to one layer and the tendency was ~0 — this is the
+    caller-level guard for the lat-lon path (the MPAS restratification
+    test is its Voronoi sibling)."""
+    import numpy as np
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.physics.combined import _make_mle
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    zc = create_ocean_z_star(
+        n_levels=6, H_max=600.0, dz_surface=15.0, dz_deep=200.0)
+    st = rest_state_latlon_cgrid_ocean(grid, zc)
+    lon2d = np.asarray(grid.grid_lon)
+    T = np.broadcast_to(
+        (18.0 + 6.0 * np.cos(lon2d))[..., None], (*lon2d.shape, 6)).copy()
+    T[..., 2:] = 4.0                      # sharp base below a 2-level ML
+    st = st._replace(T=st.T.replace(data=jnp.asarray(T)))
+    out = _make_mle(MLEConfig(ce=0.06))(st, grid, zc)
+    assert float(jnp.max(jnp.abs(out.dT_dt.data))) > 1e-9, (
+        "bridge MLE tendency ~0: the ML collapsed — in-situ density is "
+        "being fed where NEMO rhop (potential) is required")

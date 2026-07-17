@@ -54,6 +54,7 @@ def barotropic_substeps_mpas(
     n_substeps,
     F_slow_eta=None,
     F_slow_u=None,
+    halo_refresh=None,
 ):
     """Run barotropic substeps on MPAS Voronoi mesh.
 
@@ -78,6 +79,16 @@ def barotropic_substeps_mpas(
         Number of barotropic substeps.
     F_slow_eta : jax.Array or None, shape (nCells,)
         Slow forcing for eta (e.g., freshwater mass flux) [m/s].
+    halo_refresh : MPASOceanHaloRefresh, optional
+        Distributed in-substep packed halo refresh (stage-correctness
+        lever): each substep consumes 2-6 stencil hops of the
+        ``(eta, u_bar)`` carry — versus a ``halo_depth=2`` partition
+        budget — so the carry is refreshed at substep ENTRY ([B1], one
+        packed cell+edge message), the PGF eta after its
+        continuity update ([B2]), and the optional div-damp /
+        barotropic-viscosity / eta-diffusion chains at their block
+        entries.  The scan-constant ``F_slow_*`` rings are refreshed
+        ONCE before the scan.  ``None`` (serial) is byte-identical.
 
     Returns
     -------
@@ -159,6 +170,14 @@ def barotropic_substeps_mpas(
     # matching the lat-lon C-grid pattern.
     if F_slow_u is None:
         F_slow_u = jnp.zeros_like(u_bar)
+    # [stage-halo B0] Scan-constant rings, refreshed ONCE before the scan
+    # (one packed message): F_slow_u's halo carries the neighbor rank's
+    # (masked-wrong) tendency depth-means, u_bar's ring was depth-averaged
+    # from the 2-hop-consumed post-Coriolis u, and both feed every
+    # substep.  F_slow_eta rides along (zeros stay zeros under exchange).
+    if halo_refresh is not None:
+        (u_bar, F_slow_u), (F_slow_eta,) = halo_refresh.both(
+            (u_bar, F_slow_u), (F_slow_eta,))
 
     # --- Fix 1: Neumann fill for eta before gradient ---
     # Fill land-cell eta with nearest-ocean-neighbor average so that
@@ -239,6 +258,13 @@ def barotropic_substeps_mpas(
     def _substep(carry, wts_i):
         w_i, w_tr_i = wts_i
         eta_c, u_bar_c, Hu_sum_c, eta_sum_c, ubar_sum_c = carry
+        # [stage-halo B1] Substep-entry refresh of the carry pair (ONE
+        # packed cell+edge message): the previous substep consumed 2-6
+        # hops, so the carry ring is stale every iteration.  The AD-safe
+        # custom_vjp sendrecv is scan-safe (the latlon band path's
+        # per-substep pad is the precedent).
+        if halo_refresh is not None:
+            (u_bar_c,), (eta_c,) = halo_refresh.both((u_bar_c,), (eta_c,))
 
         # Total depth at edges (updated with current eta).  On partial
         # cells use min-rule so the per-substep H_e_c matches the
@@ -275,6 +301,10 @@ def barotropic_substeps_mpas(
         # Backward: update u_bar using new eta
         # BEBT: blend new/old eta for semi-implicit PGF (#205)
         eta_pgf = bebt_blend(eta_next, eta_c, bebt)
+        # [stage-halo B2] eta_next consumed 2 hops (H_e + divergence);
+        # the fill+gradient PGF chain below needs a fresh ring.
+        if halo_refresh is not None:
+            (eta_pgf,) = halo_refresh.cells(eta_pgf)
         eta_filled = _fill_land_cells_mpas(eta_pgf, mask)
         grad_eta = gradient_edge(eta_filled, mesh)
 
@@ -309,6 +339,10 @@ def barotropic_substeps_mpas(
 
         # Divergence damping: add nu * grad(div(u_bar)) (#205).
         if use_div_damp:
+            # [stage-halo] div+fill+grad = 3 hops on the just-updated
+            # u_bar_next — refresh its ring at block entry.
+            if halo_refresh is not None:
+                (u_bar_next,) = halo_refresh.edges(u_bar_next)
             div_ubar = divergence_cell(u_bar_next * edge_mask, mesh) * mask
             div_filled = _fill_land_cells_mpas(div_ubar, mask)
             grad_div = gradient_edge(div_filled, mesh)
@@ -319,6 +353,9 @@ def barotropic_substeps_mpas(
         # Barotropic-mode lateral viscosity on u_bar (TRiSK null branch).
         # Forward-Euler Laplacian: stable while A_baro_visc * dt_baro / dx² < 0.5.
         if use_baro_visc:
+            # [stage-halo] del2 = 2 hops on the updated u_bar_next.
+            if halo_refresh is not None:
+                (u_bar_next,) = halo_refresh.edges(u_bar_next)
             lap_u = vector_laplacian_del2(u_bar_next, mesh)
             u_bar_next = (
                 u_bar_next + dt_baro * A_baro_visc * lap_u
@@ -346,6 +383,9 @@ def barotropic_substeps_mpas(
         # Uses div(nu_edge * grad(eta)) instead of nu_cell * div(grad(eta))
         # so that volume is exactly conserved by the divergence theorem.
         if use_baro_diffusion:
+            # [stage-halo] fill+grad+div = 3 hops on the updated eta_next.
+            if halo_refresh is not None:
+                (eta_next,) = halo_refresh.cells(eta_next)
             eta_filled = _fill_land_cells_mpas(eta_next, mask)
             grad_e = gradient_edge(eta_filled, mesh)
             diff_flux = nu_dt_edge * grad_e * edge_mask

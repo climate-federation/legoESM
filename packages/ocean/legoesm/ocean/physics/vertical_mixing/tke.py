@@ -162,6 +162,18 @@ _NEMO_TKE_CDRAG = 1.5e-3       # zcdrag [-] surface drag coeff      (zdftke.F90:
 # |τ| = ρ_air·C_d·U₁₀² and the Stokes drift u_s = 0.016·U₁₀) (zdftke.F90:243)
 _NEMO_TKE_LC_CSD = 0.5 * 0.016 * 0.016 / (_NEMO_TKE_RHO_AIR * _NEMO_TKE_CDRAG)
 _NEMO_MXL0_VKARMN = 0.4        # vkarmn (phycst) — the ln_mxl0 anchor prefactor
+_NEMO_MXL0_LENGTH_SCALE = 2.0e5  # zraug numerator [m*kg/(m*s^2)^-1... NEMO zdftke:575]
+
+
+def _mxl0_surface_anchor(cfg: "TKEConfig", taum, rho_0: float, g: float):
+    """ln_mxl0 surface mixing-length anchor (single owner; zdftke:575+602):
+    l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum). None when choice != 3."""
+    if cfg.tke_mxl_choice != 3:
+        return None
+    return jnp.maximum(
+        jnp.asarray(cfg.mxl0_min_m),
+        _NEMO_MXL0_VKARMN * _NEMO_MXL0_LENGTH_SCALE / (rho_0 * g)
+        * jnp.maximum(taum, 0.0))
 _NEMO_TKE_EBB = 67.83          # rn_ebb  namelist_ref default — surface TKE input coef
 _NEMO_TKE_EMIN0 = 1.0e-4       # rn_emin0 [m²/s²] surface TKE minimum
 
@@ -243,6 +255,12 @@ class TKEPostMixingContext(NamedTuple):
     surface_dirichlet: jnp.ndarray | None = None
     # NEMO ln_lc Langmuir TKE source on the interior interfaces (None => off).
     langmuir_source: jnp.ndarray | None = None
+    # DISSIPATION mixing length l_eps (nn_mxl=3: sqrt(lup*ldown), zdftke:672
+    # zmxld feeding dissl=sqrt(en)/zmxld :735). Distinct from ``mxl`` (=l_k=
+    # min(lup,ldown), the eddy-coefficient length :730) only for choice 3;
+    # None => fall back to ``mxl`` (choices 1/2, where the two coincide, and
+    # older ctx constructions).
+    l_eps: jnp.ndarray | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1332,10 +1350,11 @@ def tke_vertical_mixing(
     if positivity == "veros_surface_correction" and cfg.n2_mode != "adiabatic":
         # The Veros surface correction lets the interior TKE carry a negative
         # energy debt; only the signed-N² adiabatic buoyancy length handles
-        # it (sqrt(max(0,e)) clamp). Both tke_mxl_choice ∈ {1, 2} are
+        # it (sqrt(max(0,e)) clamp). tke_mxl_choice ∈ {1, 2, 3} are all
         # debt-safe on the adiabatic path: choice=2 via _veros_buoyancy_length's
         # recursion, choice=1 via the distance-to-boundary cap
-        # (veros_mxl_choice1_boundary_cap, supplied by the orchestrator). The
+        # (veros_mxl_choice1_boundary_cap, supplied by the orchestrator),
+        # choice=3 via its own double-where sqrt(2e) + the lup/ldown caps. The
         # in-situ N² branch (n2_mode != 'adiabatic') is NOT debt-safe (raw e
         # inside the closed-form sqrt) — fail loudly at config time.
         raise ValueError(
@@ -1425,10 +1444,7 @@ def tke_vertical_mixing(
     # Sub-iteration loop (Mode B convergence; Mode A uses n_iterations=1).
     tke_curr = tke_old
     # NEMO ln_mxl0 anchor for nn_mxl=3: l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
-    _l_anchor = (jnp.maximum(
-        jnp.asarray(cfg.mxl0_min_m), _NEMO_MXL0_VKARMN * 2.0e5
-        / (rho_0 * g) * jnp.maximum(taum, 0.0))
-        if cfg.tke_mxl_choice == 3 else None)
+    _l_anchor = _mxl0_surface_anchor(cfg, taum, rho_0, g)
     for _ in range(max(1, int(n_iterations))):
         l_k, l_eps = compute_mixing_lengths(
             tke_curr, N2, dz_half, cfg, signed_n2=signed_n2,
@@ -1623,22 +1639,22 @@ def tke_set_diffusivities(
             raise ValueError(
                 "TKEConfig.lc requires z_interface (interface reference "
                 "heights) so the Langmuir source knows the depths.")
+        # NB computed from the PRE-mixing N2 and applied in the POST-mixing
+        # solve — the same timing offset the post_mixing_veros path accepts
+        # for the diffusivities themselves (review note 2026-07-16).
         langmuir_source = nemo_langmuir_tke_source(
             taum, N2, -z_interface, dz_half, cfg)
     else:
         langmuir_source = None
 
-    _l_anchor = (jnp.maximum(
-        jnp.asarray(cfg.mxl0_min_m), _NEMO_MXL0_VKARMN * 2.0e5
-        / (rho_0 * g) * jnp.maximum(taum, 0.0))
-        if cfg.tke_mxl_choice == 3 else None)
-    l_k, _l_eps = compute_mixing_lengths(
+    _l_anchor = _mxl0_surface_anchor(cfg, taum, rho_0, g)
+    l_k, l_eps = compute_mixing_lengths(
         tke_old, N2, dz_half, cfg, signed_n2=True, dz_cell=dz_cell,
         boundary_cap=boundary_cap, l_surface_anchor=_l_anchor)
     K_M, K_H = compute_K_from_tke(
         tke_old, l_k, cfg, N2=N2, shear_sq=shear_sq, z_interface=z_interface)
     ctx = TKEPostMixingContext(
-        K_M_old=K_M, K_H_old=K_H, mxl=l_k,
+        K_M_old=K_M, K_H_old=K_H, mxl=l_k, l_eps=l_eps,
         # Double-``where`` for an AD-safe sqrt at the negative-TKE energy
         # debt (primal BIT-IDENTICAL to sqrt(max(0,e)); the plain form has a
         # NaN derivative at e <= 0 — see the note in
@@ -1829,7 +1845,13 @@ def tke_integrate_post_mixing(
     e_w = _w(e_old)
     kM_w = _w(ctx.K_M_old)
     sqrttke_w = _w(ctx.sqrttke)
-    mxl_w = _w(ctx.mxl)
+    # Dissipation length: l_eps = sqrt(lup*ldown) (NEMO zmxld -> dissl,
+    # zdftke:672/735), NOT the eddy-coefficient l_k = min(lup,ldown). The two
+    # coincide for tke_mxl_choice 1/2; for choice 3 using l_k here would
+    # OVER-dissipate exactly in the winter ML (anchored lup small, bottom-
+    # grown ldown large). None => older ctx / equal-length fallback.
+    _l_diss = ctx.l_eps if getattr(ctx, "l_eps", None) is not None else ctx.mxl
+    mxl_w = _w(_l_diss)
 
     # --- Veros tridiagonal assembly (tke.py:185-227), top-down ---
     # delta[w] couples W rows w and w+1 through cell w (thickness dzt[w]·J):
@@ -1845,8 +1867,24 @@ def tke_integrate_post_mixing(
     c = jnp.concatenate(
         [-delta / vol[..., :n_w - 1], jnp.zeros_like(delta[..., :1])],
         axis=-1)
-    b = 1.0 - (a + c) + dt * cfg.c_eps * sqrttke_w / jnp.maximum(
-        mxl_w, cfg.mxl_min)
+    _diss_w = cfg.c_eps * sqrttke_w / jnp.maximum(mxl_w, cfg.mxl_min)
+    _disc = getattr(cfg, "dissipation_discretization", "backward_euler")
+    if _disc == "nemo_1p5_split":
+        # NEMO zdftke semi-implicit dissipation split (zdftke.F90:241-242,
+        # 414, 419): 1.5x the linearized dissipation on the diagonal
+        # (zfact2 = 1.5*rn_Dt*rn_ediss) and +0.5x added back EXPLICITLY to
+        # the RHS (zfact3 = 0.5*rn_ediss), both linearized at the CARRIED
+        # sqrt(e)/l_eps. Net first-order dissipation identical; the discrete
+        # decay factor differs from plain backward-Euler at large dt*diss
+        # (NEMO: (1+0.5a)/(1+1.5a) -> 1/3; backward-Euler: 1/(1+a) -> 0).
+        b = 1.0 - (a + c) + 1.5 * dt * _diss_w
+        forc_w = forc_w + 0.5 * _diss_w * e_w
+    elif _disc == "backward_euler":
+        b = 1.0 - (a + c) + dt * _diss_w
+    else:
+        raise ValueError(
+            "Unknown TKEConfig.dissipation_discretization: must be one of "
+            f"('backward_euler', 'nemo_1p5_split'), got {_disc!r}")
 
     if getattr(ctx, "langmuir_source", None) is not None:
         # NEMO ln_lc: en += rDt * source BEFORE the implicit solve

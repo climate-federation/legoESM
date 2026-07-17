@@ -381,6 +381,7 @@ def barotropic_implicit_mpas(
     dt: float,
     F_slow_eta=None,
     F_slow_u=None,
+    halo_refresh=None,
     *,
     return_residual: bool = False,
 ):
@@ -490,6 +491,14 @@ def barotropic_implicit_mpas(
     ).astype(eta_dtype)
 
     # ----- Step 2: predictor (Heun on Coriolis, OLD η gradient) ---------
+    # [stage-halo I0] u_bar_old was depth-averaged from the post-Coriolis
+    # u (its ring consumed 2 tangential hops) and F_slow_u's ring carries
+    # the neighbor rank's masked-wrong tendency depth-means; the Heun
+    # predictor consumes 1-2 more tangential hops of both.  One packed
+    # edge message re-arms them (solver-internal matvecs already exchange
+    # per iteration — audit table stage 4').
+    if halo_refresh is not None:
+        u_bar_old, F_slow_u = halo_refresh.edges(u_bar_old, F_slow_u)
     eta_filled_old = fill_land_cells_mpas(eta_old, mask, c1, c2)
     grad_eta_old = gradient_edge(eta_filled_old, mesh).astype(eta_dtype)
     f_e = mesh.fEdge.astype(eta_dtype)
@@ -523,7 +532,13 @@ def barotropic_implicit_mpas(
     div_HU_pred = divergence_cell(flux_HU_pred, mesh) * mask
     div_HU_pred = div_HU_pred.astype(eta_dtype)
 
-    flux_eta_old = H_e_old * grad_eta_old * edge_mask
+    # [stage-halo I1] fill+grad already consumed eta's 2-ring budget; the
+    # flux divergence below is a 3rd chained hop, so refresh the gradient
+    # ring first (edge field).
+    grad_eta_for_div = grad_eta_old
+    if halo_refresh is not None:
+        (grad_eta_for_div,) = halo_refresh.edges(grad_eta_for_div)
+    flux_eta_old = H_e_old * grad_eta_for_div * edge_mask
     div_grad_eta_old = divergence_cell(flux_eta_old, mesh) * mask
     div_grad_eta_old = div_grad_eta_old.astype(eta_dtype)
 

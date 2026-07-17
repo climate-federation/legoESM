@@ -12,6 +12,8 @@ from legoesm.ml.normalization import (
     normalize,
     denormalize,
     compute_normalization_stats,
+    save_normalization_stats,
+    load_normalization_stats,
 )
 from legoesm.ml.spectral_conv import SpectralConv
 from legoesm.ml.sfno_block import SFNOBlock
@@ -62,6 +64,59 @@ class TestNormalization:
         data = jnp.ones((10, 2))
         stats = compute_normalization_stats(data, eps=1e-6)
         assert jnp.all(stats.std >= 1e-6)
+
+    def test_compute_stats_per_channel_and_std_floor(self):
+        """Per-channel mean/std correct; a constant channel is std-floored.
+
+        Guards the sfno_full stats path: channel 0 varies (mean/std computable),
+        channel 1 is CONSTANT (var 0 -> std must be floored, not 0).
+        """
+        eps = 1e-6
+        # (n_samples, n_spatial, n_channels): ch0 = [1,3] per sample (mean 2,
+        # population std 1), ch1 constant 5.0.
+        data = jnp.array(
+            [[[1.0, 5.0], [3.0, 5.0]],
+             [[1.0, 5.0], [3.0, 5.0]]]
+        )
+        stats = compute_normalization_stats(data, eps=eps)
+        np.testing.assert_allclose(stats.mean, [2.0, 5.0], atol=1e-6)
+        # ch0 population std = 1.0; ch1 constant -> std floored to eps.
+        np.testing.assert_allclose(stats.std[0], 1.0, atol=1e-6)
+        np.testing.assert_allclose(stats.std[1], eps, atol=1e-12)
+        assert jnp.all(stats.std >= eps)
+
+    def test_sidecar_round_trip(self, tmp_path):
+        """save_normalization_stats -> load_normalization_stats preserves values.
+
+        This is the checkpoint-compat mechanism for sfno_full: the eqx
+        checkpoint serialises only the SFNO leaves, so norm_stats travel in an
+        .npz sidecar. Train + eval must read identical values.
+        """
+        stats = NormalizationStats(
+            mean=jnp.array([1.0, -2.5, 1.0e5, 3.0e-3]),
+            std=jnp.array([0.5, 1.0e-6, 900.0, 4.0e-4]),
+        )
+        path = tmp_path / "norm_stats.npz"
+        save_normalization_stats(stats, path)
+        assert path.exists()
+        loaded = load_normalization_stats(path)
+        np.testing.assert_allclose(loaded.mean, stats.mean, rtol=0, atol=0)
+        np.testing.assert_allclose(loaded.std, stats.std, rtol=0, atol=0)
+        # Round-trips as a working NormalizationStats (normalize/denormalize).
+        x = jnp.array([2.0, -2.5, 1.0e5 + 900.0, 3.0e-3])
+        rec = denormalize(normalize(x, loaded), loaded)
+        np.testing.assert_allclose(rec, x, rtol=1e-6)
+
+    def test_save_rejects_shape_mismatch(self, tmp_path):
+        bad = NormalizationStats(mean=jnp.zeros(3), std=jnp.ones(4))
+        with pytest.raises(ValueError):
+            save_normalization_stats(bad, tmp_path / "bad.npz")
+
+    def test_load_missing_arrays_raises(self, tmp_path):
+        path = tmp_path / "wrong.npz"
+        np.savez(path, foo=np.zeros(3))
+        with pytest.raises(KeyError):
+            load_normalization_stats(path)
 
 
 # =============================================================================
