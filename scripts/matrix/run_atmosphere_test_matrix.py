@@ -2635,6 +2635,18 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                 "LEGOESM_SW_MODON_DIV_DAMP_FACTOR", str(MODON_DIV_DAMP_FACTOR)))
             _m_dv = float(os.environ.get(
                 "LEGOESM_SW_MODON_DAMP_V", str(MODON_DAMP_V)))
+            # LEGOESM_SW_MODON_CORNER_DAMP_V (probe): corner-localized
+            # del-n vorticity damping — full coefficient near the 8
+            # cube vertices, `damp_v` elsewhere (the 2026-07-17 sweep
+            # separated vertex-mode suppression from core erosion).
+            _m_cdv = float(os.environ.get(
+                "LEGOESM_SW_MODON_CORNER_DAMP_V", "0.0"))
+            # Oracle-recipe probes (Zenodo case-8 duo input.nml:
+            # nord=2, d4_bg=0.12, do_vort_damp=F): structured del-6
+            # divergence damping in place of the wind hyperdiff /
+            # vorticity damping families.
+            _m_d4 = float(os.environ.get("LEGOESM_SW_MODON_D4_BG", "0.0"))
+            _m_d4n = int(os.environ.get("LEGOESM_SW_MODON_D4_NORD", "2"))
             # #521/#753: biharmonic backstop from the env knobs (default env ->
             # the (ref/n)^2 law, the #753 item-1 default: C96 erupts at the face
             # seams under ^4 but is stable under ^2, validated 100 days at
@@ -2644,6 +2656,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             config = iter1009_dual_target_config(
                 n, div_damp_factor=_m_dd, damp_v=_m_dv,
                 hyperdiff_coeff=_modon_hyperdiff_coeff(n),
+                corner_damp_v=_m_cdv,
+                d4_bg_prod=_m_d4, d4_nord_prod=_m_d4n,
             )
         elif test_num in (2, 5, 6):
             # iter-31: cube W6 (Rossby-Haurwitz wave-4) 14-day blows up

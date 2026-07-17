@@ -11786,3 +11786,10 @@ def test_fv3_sw_d4_divergence_damping_decays():
     proj_on = float(jnp.vdot(u_d, du_on))
     assert proj_on < proj_base, (proj_base, proj_on)
     assert np.isfinite(proj_on)
+    # nord=2 (del-6, the authoritative duo-case order) must also damp
+    on6 = fv3_sw_tendencies(h, u_d, v_d, h_s, cdgrid,
+                            div_damp=8.0 * 1.0e-3, dddmp=0.2,
+                            d4_bg=0.12, d4_nord=2)
+    proj_on6 = float(jnp.vdot(u_d, on6[1]))
+    assert proj_on6 < proj_base, (proj_base, proj_on6)
+    assert np.isfinite(proj_on6)

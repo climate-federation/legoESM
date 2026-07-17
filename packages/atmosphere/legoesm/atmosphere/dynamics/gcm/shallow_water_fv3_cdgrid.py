@@ -278,6 +278,23 @@ class CDGridShallowWaterConfig(NamedTuple):
     # was calibrated WITHOUT it (iters 755-1030).
     d4_bg_prod: float = 0.0
 
+    # CORNER-LOCALIZED del-n vorticity damping (NON-FV3 stabilizer,
+    # boundary_fix class).  When > damp_v: the post-step del-n damping
+    # near the 8 cube-vertex regions uses THIS coefficient while the
+    # interior keeps damp_v — separating vertex-mode suppression from
+    # global core erosion (2026-07-17 modon sweep evidence).  0.0 = OFF
+    # (bit-identical).  Mask: linear ramp from 1 inside
+    # corner_damp_radius cells of a face corner to 0 beyond
+    # radius+ramp cells (index-space; static, precomputed).
+    corner_damp_v: float = 0.0
+    corner_damp_radius: float = 4.0    # cells: full-strength zone
+    corner_damp_ramp: float = 3.0      # cells: linear taper width
+
+    # Damping order for d4_bg_prod: 1 = del-4, 2 = del-6.  The
+    # authoritative duo case configs (Zenodo 8327578 input.nml) run
+    # nord=2, d4_bg=0.12.
+    d4_nord_prod: int = 1
+
 
 def iter1009_dual_target_config(
     n: int,
@@ -285,6 +302,8 @@ def iter1009_dual_target_config(
     damp_v: float = 0.030,
     hyperdiff_coeff: float = 0.0,
     d4_bg_prod: float = 0.0,
+    corner_damp_v: float = 0.0,
+    d4_nord_prod: int = 1,
 ) -> CDGridShallowWaterConfig:
     """Iter-1009/1021/1030 dual-target preset: W2 ≤ 0.119 m/s + W5 day-5 artifact-free.
 
@@ -369,6 +388,8 @@ def iter1009_dual_target_config(
         damp_v=damp_v, nord_v=2,
         apply_fortran_xppm_boundary=True,
         d4_bg_prod=d4_bg_prod,
+        corner_damp_v=corner_damp_v,
+        d4_nord_prod=d4_nord_prod,
     )
 
 
@@ -1307,6 +1328,43 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
         """Global ``∫ h dA`` (fp64).  iter-21: API parity with PE / NH twins."""
         return global_area_sum(state.h, self.cdgrid.base)
 
+    def _corner_damp_masks(self):
+        """Static corner-proximity masks at the D staggerings.
+
+        Index-space Chebyshev distance to the nearest of the four face
+        corners; 1 within `corner_damp_radius` cells, linear taper to 0
+        over `corner_damp_ramp` more.  Computed once per model (numpy,
+        constant-folded under jit)."""
+        # Cache NUMPY arrays only — caching jnp arrays built inside a
+        # traced step leaks tracers through the instance attribute
+        # (side-effect; the modon C1 arm error).  jnp.asarray of the
+        # cached numpy constants folds at trace time.
+        cached = getattr(self, "_corner_damp_masks_np", None)
+        if cached is None:
+            import numpy as _np
+
+            n = self.cdgrid.base.n
+            r = float(self.config.corner_damp_radius)
+            w = max(float(self.config.corner_damp_ramp), 1.0e-6)
+
+            def mask(shape_ij):
+                ni, nj = shape_ij
+                ii = _np.arange(ni)[:, None]
+                jj = _np.arange(nj)[None, :]
+                d = _np.full((ni, nj), _np.inf)
+                for ci in (0, ni - 1):
+                    for cj in (0, nj - 1):
+                        d = _np.minimum(
+                            d,
+                            _np.maximum(_np.abs(ii - ci), _np.abs(jj - cj)))
+                m = _np.clip((r + w - d) / w, 0.0, 1.0)
+                return _np.broadcast_to(m, (6, ni, nj)).copy()
+
+            n_ = self.cdgrid.base.n
+            cached = (mask((n_, n_ + 1)), mask((n_ + 1, n_)))
+            self._corner_damp_masks_np = cached
+        return jnp.asarray(cached[0]), jnp.asarray(cached[1])
+
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
         """Advance one time step."""
@@ -1330,6 +1388,7 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                 apply_fortran_xppm_boundary=(
                     self.config.apply_fortran_xppm_boundary),
                 d4_bg=self.config.d4_bg_prod,
+                d4_nord=self.config.d4_nord_prod,
             )
             return FV3EdgeShallowWaterState(
                 h=dh, u_d=du, v_d=dv,
@@ -1349,7 +1408,7 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
         # Iter-755 refactored this from a tendency-form (iter-754)
         # to the Fortran-faithful post-step form to avoid RK3-
         # multiplied damping semantics.
-        if self.config.damp_v > 0.0:
+        if self.config.damp_v > 0.0 or self.config.corner_damp_v > 0.0:
             eff_nord_v = (min(2, self.config.nord)
                           if self.config.nord_v < 0
                           else self.config.nord_v)
@@ -1362,11 +1421,34 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
             # (6, n+1, n+1)) is the B-grid dual-cell area.  Iter-
             # 755b fix: use area_corner, not base.area.
             da_min_c = jnp.min(self.cdgrid.area_corner)
-            damp_step = (self.config.damp_v * da_min_c) ** (eff_nord_v + 1)
-            du_step, dv_step = fv3_del6_vorticity_damping(
-                state_new.u_d, state_new.v_d,
-                damp=damp_step, nord=eff_nord_v, cdgrid=self.cdgrid,
-            )
+            du_step = dv_step = 0.0
+            if self.config.damp_v > 0.0:
+                damp_step = (self.config.damp_v * da_min_c) ** (eff_nord_v + 1)
+                du_step, dv_step = fv3_del6_vorticity_damping(
+                    state_new.u_d, state_new.v_d,
+                    damp=damp_step, nord=eff_nord_v, cdgrid=self.cdgrid,
+                )
+            if self.config.corner_damp_v > self.config.damp_v:
+                # CORNER-LOCALIZED del-n vorticity damping — a NON-FV3
+                # stabilizer (same class as boundary_fix): the cube-
+                # vertex vorticity modes need the full damp_v that
+                # erodes vortex cores everywhere else (2026-07-17 modon
+                # sweep: damp_v=0 stays stable 100 d but grows 8-fold
+                # corner-symmetric artifacts; damp_v=0.010 keeps
+                # corners clean but decays the cores 23->5 m/s).  Blend
+                # the certified damping evaluated at the CORNER
+                # coefficient into the update via a static corner-
+                # proximity mask, so the interior keeps the low global
+                # coefficient.
+                damp_hi = (self.config.corner_damp_v * da_min_c
+                           ) ** (eff_nord_v + 1)
+                du_hi, dv_hi = fv3_del6_vorticity_damping(
+                    state_new.u_d, state_new.v_d,
+                    damp=damp_hi, nord=eff_nord_v, cdgrid=self.cdgrid,
+                )
+                m_u, m_v = self._corner_damp_masks()
+                du_step = du_step * (1.0 - m_u) + du_hi * m_u
+                dv_step = dv_step * (1.0 - m_v) + dv_hi * m_v
             state_new = state_new._replace(
                 u_d=state_new.u_d + du_step,
                 v_d=state_new.v_d + dv_step,

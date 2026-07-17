@@ -1500,6 +1500,7 @@ def fv3_sw_tendencies(
     dddmp=0.0,
     apply_fortran_xppm_boundary=False,
     d4_bg=0.0,
+    d4_nord=1,
 ):
     """SW tendencies on FV3 edge-midpoint D-grid. Momentum via A-L + circulation; PPM mass transport.
 
@@ -1594,25 +1595,34 @@ def fv3_sw_tendencies(
         dv_cc = dv_cc + adaptive_coeff * interp_corner_to_center(ddiv_dy_perp_cc)
 
         if d4_bg > 0:
-            # FV3 d_sw5 nord=1 del-4 BACKGROUND divergence damping
+            # FV3 d_sw5 nord>=1 BACKGROUND divergence damping
             # (sw_core.F90:1720-1868; certified translation
             # fv3_native_d_sw.d_sw5 / fv3_native_dsw5): the damp
-            # potential gains dd8*del2(div) with dd8 = (da_min_c*d4_bg)^2,
-            # whose wind-gradient contribution is the biharmonic
-            # divergence damping -dd8*grad(lap(div)).
-            # Sign convention (stated per the sign-check mandate): the
-            # del-2 term ABOVE adds +coeff*grad(div) (damping); the
-            # biharmonic term must carry the OPPOSITE sign on the
-            # Laplacian, -dd8*grad(lap(div)), to damp rather than
-            # anti-damp — pinned by
-            # test_fv3_sw_d4_divergence_damping_decays.
-            dd8 = (da_min_c * d4_bg) ** 2
-            lap_div = laplacian_compact(div_field, cdgrid.base)
+            # potential gains ddn*lap^nord(div) with
+            # ddn = (da_min_c*d4_bg)^(nord+1); its wind-gradient
+            # contribution is the del-(2*nord+2) divergence damping.
+            # The authoritative duo case configs run nord=2, d4_bg=0.12
+            # (Zenodo 8327578 rundir input.nml) with NO vorticity
+            # damping.
+            # Sign convention (stated per the sign-check mandate): on a
+            # Fourier mode grad->div contributes one more Laplacian, so
+            # du += s*ddn*grad(lap^nord(div)) gives d(div)/dt =
+            # s*ddn*lap^(nord+1)(div), eigenvalue
+            # s*(-1)^(nord+1)*k^(2nord+2) — decay requires
+            # s = (-1)^nord: nord=1 -> MINUS (del-4), nord=2 -> PLUS
+            # (del-6).  Pinned by
+            # test_fv3_sw_d4_divergence_damping_decays (nord 1 and 2).
+            ddn = (da_min_c * d4_bg) ** (d4_nord + 1)
+            sgn = -1.0 if (d4_nord % 2) else 1.0
+            lap_div = div_field
+            for _ in range(d4_nord):
+                lap_div = laplacian_compact(lap_div, cdgrid.base)
             dlap_dx, dlap_dy_perp_cc = arakawa_lamb_gradient(
                 lap_div, cdgrid,
                 fortran_dir_aware_corners=fortran_dir_aware_corners)
-            du_cc = du_cc - dd8 * interp_corner_to_center(dlap_dx)
-            dv_cc = dv_cc - dd8 * interp_corner_to_center(dlap_dy_perp_cc)
+            du_cc = du_cc + sgn * ddn * interp_corner_to_center(dlap_dx)
+            dv_cc = dv_cc + sgn * ddn * interp_corner_to_center(
+                dlap_dy_perp_cc)
 
     # (i) Biharmonic hyperdiffusion (cell-centre geographic path)
     if hyperdiff_coeff > 0:
