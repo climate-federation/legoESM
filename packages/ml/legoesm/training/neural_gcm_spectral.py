@@ -3215,12 +3215,17 @@ def compute_sfno_full_norm_stats(ic_states, grid, sigma, std_floor=_SFNO_FULL_ST
     that SAME packed order, so training and eval apply an identical transform.
 
     Each spectral ``SpectralHydrostaticState`` IC is packed to grid space
-    ``(n_lat, n_lon, n_channels)`` and stacked over samples; statistics are then
-    taken over all sample + spatial cells (unweighted — the SFNO operates on the
-    Gaussian grid uniformly).  The shared
-    :func:`legoesm.ml.normalization.compute_normalization_stats` floors the
-    variance so a constant channel yields ``std == std_floor`` with a finite
-    gradient (no div-by-zero, no ``0 * inf`` NaN in the backward pass).
+    ``(n_lat, n_lon, n_channels)``; statistics are taken over all sample +
+    spatial cells (unweighted — the SFNO operates on the Gaussian grid
+    uniformly).  Samples are STREAMED (two passes, one packed sample resident
+    at a time) rather than stacked: a single on-device stack of all ICs is
+    ~16 GiB at T106 all-years and OOMs the load-time stats step (#1155-class
+    invariant: never materialise the full dataset on-device).  The variance is
+    floored exactly as :func:`legoesm.ml.normalization.compute_normalization_stats`
+    does (``var >= std_floor**2``) so a constant channel yields
+    ``std == std_floor`` with a finite gradient (no div-by-zero, no ``0 * inf``
+    NaN in the backward pass).  Numerically equivalent to the stacked
+    two-pass form up to float summation order.
 
     Parameters
     ----------
@@ -3238,20 +3243,48 @@ def compute_sfno_full_norm_stats(ic_states, grid, sigma, std_floor=_SFNO_FULL_ST
     NormalizationStats
         ``mean``/``std`` of shape ``(n_channels,)`` in packed-channel order.
     """
-    from legoesm.ml.normalization import compute_normalization_stats
+    import numpy as np
+    from legoesm.ml.normalization import NormalizationStats
 
     if not ic_states:
         raise ValueError(
             "compute_sfno_full_norm_stats: ic_states is empty; cannot compute "
             "normalization statistics with no training data."
         )
-    # Stack packed grid-space tensors over samples -> (n_samples, n_lat, n_lon,
-    # n_channels); the channel axis is last, exactly what
-    # compute_normalization_stats reduces over (all-but-last).
-    packed = jnp.stack(
-        [pack_pe_state(s, grid, sigma) for s in ic_states], axis=0,
-    )
-    return compute_normalization_stats(packed, eps=float(std_floor))
+
+    def _packed_f64(s):
+        # One packed grid-space sample (n_lat, n_lon, n_ch), f64 to match the
+        # spectral-transform precision and keep the streamed reduction stable.
+        return jnp.asarray(pack_pe_state(s, grid, sigma), dtype=jnp.float64)
+
+    # Pass 1: per-channel mean over sample + spatial cells. Accumulate the
+    # channel-axis-preserving sum one sample at a time (peak device footprint:
+    # one packed sample, ~14 MiB at T106, vs ~16 GiB for the full stack).
+    ch_sum = None
+    cell_count = 0
+    for s in ic_states:
+        p = _packed_f64(s)
+        contrib = jnp.sum(p, axis=tuple(range(p.ndim - 1)))   # (n_ch,)
+        ch_sum = contrib if ch_sum is None else ch_sum + contrib
+        cell_count += int(np.prod(p.shape[:-1]))
+    mean = ch_sum / cell_count
+
+    # Pass 2: variance ABOUT THE MEAN (matches compute_normalization_stats'
+    # mean((data-mean)**2), not the cancellation-prone E[x^2]-E[x]^2 form).
+    ch_sqsum = None
+    for s in ic_states:
+        p = _packed_f64(s)
+        contrib = jnp.sum((p - mean) ** 2, axis=tuple(range(p.ndim - 1)))
+        ch_sqsum = contrib if ch_sqsum is None else ch_sqsum + contrib
+    var = ch_sqsum / cell_count
+
+    # Floor the VARIANCE before sqrt (identical convention to
+    # compute_normalization_stats): var==0 -> d(sqrt)/dvar = inf -> 0*inf NaN
+    # in the backward pass; clamping to std_floor**2 gives std>=std_floor with
+    # a finite gradient.
+    var_floor = float(std_floor) ** 2
+    std = jnp.sqrt(jnp.maximum(var, var_floor))
+    return NormalizationStats(mean=mean, std=std)
 
 
 def train_sfno_full_spectral(
