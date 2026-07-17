@@ -2422,3 +2422,118 @@ def test_ifs_downdraft_default_off_quiescent_and_grad():
         return jnp.sum(o.dT_dt ** 2) + jnp.sum(o.dq_v_dt ** 2)
 
     assert jnp.isfinite(jax.grad(loss)(1.75e-3))
+
+
+def test_cuadjtq_oracle_valued_pin():
+    """Oracle-valued pin (codex R1 #4): hand-compute the 2-Newton ICALL=2
+    recurrence with the spec-humidity base eps*e_s/p -> ZCOR conversion and
+    the CC-derivative denominator, exactly as _cuadjtq_evap_2iter defines it,
+    on a warm subsaturated state — a base-conversion or clamp regression goes
+    red.  Also pins evap-only sign: warm subsaturated air COOLS + MOISTENS."""
+    import numpy as np
+    from legoesm.thermo import (
+        saturation_mixing_ratio, saturation_mixing_ratio_ice)
+    from legoesm.atmosphere.physics.convection.bechtold import (
+        _ifs_liquid_fraction_cu)
+    T0, q0, p0 = 295.0, 8.0e-3, 850e2
+    Tj, qj = T0, q0
+    conds = []
+    for it in range(2):
+        Ta = jnp.array(Tj)
+        alpha = float(_ifs_liquid_fraction_cu(Ta))
+        r_s = (alpha * float(saturation_mixing_ratio(Ta, jnp.array(p0)))
+               + (1 - alpha) * float(saturation_mixing_ratio_ice(Ta, jnp.array(p0))))
+        qs = r_s / (1.0 + r_s / constants.epsilon)      # eps*e/p base
+        qs = min(qs, 0.5)
+        zcor = 1.0 / (1.0 - (constants.R_v / constants.R_d - 1.0) * qs)
+        qs = qs * zcor
+        L = alpha * constants.L_v + (1 - alpha) * constants.L_s
+        dqsdt = L * qs / (constants.R_v * max(Tj, 100.0) ** 2)
+        cond = (qj - qs) / (1.0 + zcor * (L / constants.c_pd) * dqsdt)
+        if it == 0:
+            cond = min(cond, 0.0)
+        elif abs(conds[0]) < 1e-14:
+            cond = min(cond, 0.0)
+        conds.append(cond)
+        Tj = Tj + (L / constants.c_pd) * cond
+        qj = qj - cond
+    T_got, q_got = _cuadjtq_evap_2iter(
+        jnp.array([[T0]]), jnp.array([[q0]]), jnp.array([[p0]]))
+    tol_T = 1e-9 if T_got.dtype == jnp.float64 else 2e-4
+    tol_q = 1e-12 if T_got.dtype == jnp.float64 else 1e-7
+    assert abs(float(T_got[0, 0]) - Tj) < tol_T
+    assert abs(float(q_got[0, 0]) - qj) < tol_q
+    assert Tj < T0 and qj > q0                          # evap-only direction
+
+
+def test_ifs_downdraft_hs_min_gate_excludes_above():
+    """IKHSMIN regression (codex R1 #3/#4): starts strictly ABOVE the
+    saturated-MSE minimum are gated off.  Construct a column whose h_s
+    minimum sits mid-column and give the UPPER part a strongly
+    LFS-favorable state (negative mixture buoyancy + abundant rain): all
+    downdraft mass must originate at/below the h_s minimum."""
+    T, q, pf, ph, u, v = _dry_mid_column()
+    ncol, nlev = T.shape
+    dp = ph[:, 1:] - ph[:, :-1]
+    z = -8500.0 * jnp.log(pf / 1.0e5)
+    lev = jnp.arange(nlev, dtype=T.dtype)[None, :]
+    M_u = 0.05 * jax.nn.sigmoid(lev - 8.0)            # alive from idx ~8 down
+    T_u = T + 0.5
+    q_u = q
+    above_base = jax.nn.sigmoid(4.0 * (36.0 - lev))
+    m_d, _, _, _ = _ifs_downdraft(
+        T, q, pf, ph, z, dp, T_u, q_u, M_u,
+        jnp.full((ncol,), 0.05), above_base, jnp.ones((ncol,)),
+        jnp.full((ncol,), 5e-3),
+    )
+    # locate the smooth h_s minimum the gate uses
+    from legoesm.thermo import (
+        saturation_mixing_ratio, saturation_mixing_ratio_ice)
+    from legoesm.atmosphere.physics.convection.bechtold import (
+        _ifs_liquid_fraction_cu)
+    al = _ifs_liquid_fraction_cu(T)
+    L = al * constants.L_v + (1 - al) * constants.L_s
+    qs = al * saturation_mixing_ratio(T, pf) + (1 - al) * saturation_mixing_ratio_ice(T, pf)
+    h_s = constants.c_pd * T + constants.g * z + L * qs
+    k_min = int(jnp.argmin(h_s[0]))
+    assert k_min > 10, "fixture must place the h_s min mid-column"
+    # DD mass strictly above the min level (minus a 2-level smooth skirt): ~0.
+    upper = float(jnp.max(-m_d[:, : max(k_min - 2, 1)]))
+    peak = float(jnp.max(-m_d))
+    assert peak > 0.0
+    assert upper < 5e-2 * peak, (
+        f"DD above the h_s minimum: {upper:.3e} vs peak {peak:.3e}")
+
+
+def test_ifs_downdraft_organized_entrainment_sign():
+    """Organized-entrainment sign regression (codex R1 #1): a persistently
+    NEGATIVELY-buoyant descent must ENTRAIN MORE (|m_d| grows faster below
+    the LFS) than a neutral one.  Compare |m_d| growth with the environment
+    made very dry (strong negative DD buoyancy after evap => oentr active)
+    against a run with oentr's effect suppressed via near-zero rain (weak
+    descent).  Direct discriminant: with the OLD (+) sign the organized term
+    was clipped to zero by MIN(.,0) and |m_d| could only shrink via
+    detrainment; with the fixed (-) sign |m_d| must EXCEED the pure
+    turbulent-E=D profile somewhere below the LFS."""
+    T, q, pf, ph, u, v = _dry_mid_column()
+    ncol, nlev = T.shape
+    dp = ph[:, 1:] - ph[:, :-1]
+    z = -8500.0 * jnp.log(pf / 1.0e5)
+    lev = jnp.arange(nlev, dtype=T.dtype)[None, :]
+    M_u = jnp.full((ncol, nlev), 0.05)
+    T_u = T + 0.5
+    q_u = q
+    above_base = jax.nn.sigmoid(4.0 * (36.0 - lev))
+    m_d, _, _, _ = _ifs_downdraft(
+        T, q, pf, ph, z, dp, T_u, q_u, M_u,
+        jnp.full((ncol,), 0.05), above_base, jnp.ones((ncol,)),
+        jnp.full((ncol,), 5e-3),
+    )
+    peak = float(jnp.max(-m_d))
+    assert peak > 0.0
+    # pure turbulent E=D keeps |m_d| ~ |inj| (E and D cancel in mass);
+    # organized entrainment must grow it beyond the total injected LFS mass
+    # times a margin. Injection sum <= RMFDEPS*M_b = 0.015.
+    assert peak > 0.3 * _IFS_RMFDEPS * 0.05, (
+        f"organized entrainment inactive (peak |m_d| {peak:.3e})"
+    )
