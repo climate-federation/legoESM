@@ -45,3 +45,8 @@ aimip_optimizer: muon_partitioned
 # phase (20 steps) carries none of the dycore-variant memory hazard, so no
 # 72 h cap here (unlike variant_sfno_physics).
 dt_sfno: 21600.0
+
+# sfno_full's trainer rejects data_parallel outright (loud guard, #985 codex
+# r4) — override the branch base's global aimip_data_parallel: true. This
+# variant is single-GPU by design; submit WITHOUT the DP select line.
+aimip_data_parallel: false
