@@ -276,6 +276,12 @@ def latest_checkpoint(out_dir):
     return str(ckpts[-1]) if ckpts else None
 
 
+def _nonempty(path) -> bool:
+    """A delegate's output counts only if it exists AND is non-empty — a
+    zero-byte file is a failed/interrupted write, not a real artifact."""
+    return os.path.exists(path) and os.path.getsize(path) > 0
+
+
 def _barrier(nproc):
     """Collective barrier when running under MPI; no-op single-process.
 
@@ -336,17 +342,26 @@ def run_campaign(cfg: CampaignConfig):
                 log.info("=== EVAL %s (ckpt=%s) ===", mode, ckpt)
                 evaler.main(build_eval_argv(cfg, mode, ckpt))
                 sc = scorecard_path(cfg.out_root, mode)
-                if os.path.exists(sc):
+                if _nonempty(sc):
                     family_scorecards[mode] = sc
                 else:
                     log.warning("=== EVAL %s produced no scorecard at %s ===", mode, sc)
                     missing.append(f"eval:{mode} (no scorecard written)")
         else:
-            # plot-only: pick up any scorecards already on disk
+            # no eval: pick up any scorecards already on disk (for plot)
             for mode in cfg.modes:
                 sc = scorecard_path(cfg.out_root, mode)
-                if os.path.exists(sc):
+                if _nonempty(sc):
                     family_scorecards[mode] = sc
+
+        # Verify training flushed a checkpoint. When eval also ran, the eval
+        # loop's `ckpt is None` already flags a missing checkpoint, so only
+        # check here for a train-without-eval run (e.g. `--stages train`),
+        # which would otherwise exit 0 after a diverged/OOM run.
+        if "train" in cfg.stages and "eval" not in cfg.stages:
+            for mode in cfg.modes:
+                if latest_checkpoint(mode_out_dir(cfg.out_root, mode)) is None:
+                    missing.append(f"train:{mode} (no checkpoint written)")
 
         if "plot" in cfg.stages:
             if not family_scorecards:
@@ -369,7 +384,7 @@ def run_campaign(cfg: CampaignConfig):
                 log.info("=== PLOT %d families -> %s ===",
                          len(family_scorecards), out_png)
                 plotter.main(build_plot_argv(plot_cfg, family_scorecards, out_png))
-                if not os.path.exists(out_png):
+                if not _nonempty(out_png):
                     log.warning("=== PLOT produced no figure at %s ===", out_png)
                     missing.append("plot (no figure written)")
 
