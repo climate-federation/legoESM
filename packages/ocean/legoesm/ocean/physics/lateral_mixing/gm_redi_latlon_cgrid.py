@@ -1038,9 +1038,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     Pure Redi (``κ_GM`` is NOT part of ``traldf_iso``); the dispatcher raises
     if ``kappa_GM != 0`` is requested with this scheme.
 
-    Convention (matches NEMO's native stencil, remapped to legoESM axes,
-    native_slopes=None,
-):
+    Convention (matches NEMO's native stencil, remapped to legoESM axes):
     ``axis0 = lat = NEMO jj``, ``axis1 = lon = NEMO ji``, ``axis2 = lev = jk``
     (k increases downward, k=0 surface — same index ordering as NEMO).  Fluxes
     are assembled as ``zfu`` (east face of cell i), ``zfv`` (north face of
@@ -2481,7 +2479,7 @@ def gm_redi_tracer_tendency_latlon(
         _positions = getattr(cfg, "slope_positions", "mode_b")
         if _positions not in ("mode_b", "nemo_native"):
             raise ValueError(
-                "GMRediConfig.slope_positions must be one of "
+                "Unknown GMRediConfig.slope_positions scheme: must be one of "
                 f"('mode_b', 'nemo_native'), got {_positions!r}")
         if _positions == "nemo_native":
             # ldfslp native four-position slopes: NEMO sign convention and
@@ -2587,6 +2585,10 @@ def compute_isoneutral_K33_latlon(
             _rho, _J = gm_redi_density_and_jacobian(
                 T, S, eta, H_bathy, grid, z_coord,
                 eos=eos, eos_linear=eos_linear, mask=mask, rho_0=rho_0, g=g)
+        # Flat-bottom scope (matches the producer's documented v1 scope):
+        # active_3d/partial-cell masks are NOT threaded here (the K33
+        # signature has no active_3d); identical to the tendency-path masks
+        # on the flat GYRE/DINO oracle domains — revisit with bathymetry.
         _m = mask if mask is not None else jnp.ones(T.shape[:2], T.dtype)
         # face masks from the cell mask (flat-bottom convention: wet iff both
         # bracketing cells wet) — K33 is S^2 at w-points; wall faces are
