@@ -44,16 +44,18 @@ deliberate departures / version choices (canaries in
   NO u/v diffusion: ``egwdffi`` is exported ONLY as the ``EKGWSPEC``
   diagnostic, ``vertical_diffusion`` never reads it, and E3SM never diffuses
   u/v with it (the earlier "defers to the host" wording here was WRONG).  The
-  DEFAULT (flag OFF) sums ``dttke`` over ALL levels (a deep Beres source
-  deposits heating below 500 hPa that E3SM does not) and omits ``dttdf``;
+  LEGACY opt-out (flag OFF; ON is the default since 2026-07-17) sums
+  ``dttke`` over ALL levels (a deep Beres source deposits heating below
+  500 hPa that E3SM does not) and omits ``dttdf``;
   constituent ``qtgw`` diffusion is not represented (no ``q`` in the
   interface).  ``do_eddy_diffusion`` remains a STANDALONE ADDITION (u/v
   diffusion with no E3SM analog + the same ``dttdf``, added once when both
   are on).
 * **C.-C. Chen fixer is unconditional in E3SM** (called after each spectral
   ``gw_drag_prof``: Beres gw_drag.F90:800, CM :863);
-  ``config.do_energy_conservation`` defaults ``False`` here — a DEPARTURE
-  from the oracle's shipped behavior, flip owed after AMIP validation.
+  ``config.do_energy_conservation`` defaults ``True`` since 2026-07-17,
+  matching the oracle's shipped always-on behavior (``False`` = legacy
+  opt-out departure).
 * **Driver-level orographic heating + landfrac (E3SM gw_tend, gw_drag.F90:
   902-915).** E3SM applies the oro tendencies OUTSIDE gw_drag_prof: it scales
   ``utgw *= cam_in%landfrac`` (:904-906, zeroing oro drag over ocean) and heats
@@ -99,8 +101,9 @@ Conservation (see ``__physics_contract__`` energy note): ``conserves=["none"]``
 as the static INTERSECTION over all selectable sources (a contract must hold
 for every config a user can select). The orographic (c=0, DEFAULT) path IS
 energy-conserving in-atmosphere — the resolved mean-flow KE it removes is
-returned as heat by construction (as a continuous RATE at the default
-``use_discrete_ke_heating=False``; ``eps_gwd`` is always that continuous
+returned as heat by construction (as a continuous RATE under the legacy
+opt-out ``use_discrete_ke_heating=False``; the default is the discrete
+closure since 2026-07-17; ``eps_gwd`` is always that continuous
 mean-flow KE-removal-rate diagnostic, so with the discrete closure ON the
 column heat equals ``eps_gwd`` minus the ``0.5*dt*int(rho*(du²+dv²))dz``
 finite-step term — by design, not a leak). But the frontal / convective sources launch
@@ -1615,8 +1618,9 @@ def e3sm_cam_gwd(
     #
     # Orographic (single c=0 wave): a stationary wave does no mechanical work,
     # so the kinetic energy lost by the mean flow is deposited locally as heat.
-    # Two closures (config.use_discrete_ke_heating):
-    #   False (default): the CONTINUOUS-rate identity
+    # Two closures (config.use_discrete_ke_heating; True is the DEFAULT
+    # since 2026-07-17):
+    #   False (legacy opt-out): the CONTINUOUS-rate identity
     #     dT/dt = -(u*du + v*dv)/c_pd (exact as dt -> 0).
     #   True: the E3SM DISCRETE-step closure (gw_drag.F90:908-913, default
     #     no-energy-fix branch; ttgw = 0 for the oro ngwv=0 call per
@@ -1640,7 +1644,8 @@ def e3sm_cam_gwd(
     # uses ``sum_l c_l * gwut_l`` — faithfully reproduced below.  E3SM adds
     # the dse-diffusion heating ``dttdf`` UNCONDITIONALLY on the spectral
     # path (ttgw = dttke + dttdf, gw_common.F90:731) and band-limits dttke —
-    # here both are opt-in via ``use_e3sm_spectral_heating`` (or the
+    # here both follow ``use_e3sm_spectral_heating`` (default ON since
+    # 2026-07-17; or the
     # ``do_eddy_diffusion`` standalone addition supplies dttdf too).
     #
     # NOTE (cross-version): newer CAM/EAM trunk uses the intrinsic-frequency
