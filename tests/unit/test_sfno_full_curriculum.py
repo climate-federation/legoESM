@@ -83,14 +83,23 @@ def test_ktarget_follows_multi_step_hours_order():
     assert plan[1] == (12, 1, 2)   # 12h -> msh index 1, 2 macro steps
 
 
-def test_rounding_non_divisible_dt():
-    """n_sfno_steps rounds lead*3600/dt_sfno for a non-divisible macro step."""
-    # dt_sfno = 3 h; 12 h -> 4 steps, 6 h -> 2 steps (both exact); 9 h -> 3.
-    plan = build([[9, 1]], [9], 10800.0, n_epochs_fallback=1)
+def test_exact_multiple_leads():
+    """n_sfno_steps = lead*3600/dt_sfno when the lead is an exact multiple."""
+    # dt_sfno = 3 h; 9 h -> 3 steps, 12 h -> 4 steps (both exact multiples).
+    plan = build([[9, 1], [12, 1]], [9, 12], 10800.0, n_epochs_fallback=1)
     assert plan[0] == (9, 0, 3)
-    # dt_sfno = 4 h; 6 h -> round(1.5) = 2 (Python banker's rounding: round(1.5)=2).
-    plan2 = build([[6, 1]], [6], 14400.0, n_epochs_fallback=1)
-    assert plan2[0] == (6, 0, round(6 * 3600.0 / 14400.0))
+    assert plan[1] == (12, 1, 4)
+
+
+def test_lead_not_multiple_of_dt_sfno_raises():
+    """A curriculum lead that is not an exact positive multiple of dt_sfno is a
+    hard ValueError (round() would silently supervise the wrong horizon or give a
+    zero-gradient phase). dt_sfno=4 h, lead=6 h -> 1.5 macro steps -> reject."""
+    with pytest.raises(ValueError, match=r"not a positive exact multiple"):
+        build([[6, 1]], [6], 14400.0, n_epochs_fallback=1)
+    # dt_sfno=12 h, lead=6 h -> 0.5 steps -> reject (would be 0 steps = no rollout).
+    with pytest.raises(ValueError, match=r"not a positive exact multiple"):
+        build([[6, 1]], [6], 43200.0, n_epochs_fallback=1)
 
 
 def test_lead_not_in_multi_step_hours_raises():

@@ -3453,11 +3453,22 @@ def build_sfno_curriculum_epoch_plan(
     # analogue of the dycore plan's round(lead * 3600 / config.dt).
     epoch_plan = []
     for h, ep in curriculum:
-        spec = (
-            h,
-            leads_loaded.index(h),
-            int(round(h * 3600.0 / dt_sfno)),
-        )
+        # A state-update SFNO advances in WHOLE macro steps, so the lead MUST be
+        # a positive exact multiple of dt_sfno.  Reject a misaligned lead LOUDLY:
+        # round() would otherwise silently supervise the wrong horizon (e.g. a
+        # 6 h lead at dt_sfno=12 h -> 0 steps -> the IC scored against the +6 h
+        # target = a zero-gradient phase; a 6 h lead at dt_sfno=4 h -> 2 steps =
+        # an 8 h prediction scored against a +6 h target).
+        steps_f = h * 3600.0 / dt_sfno
+        n_sfno_steps = int(round(steps_f))
+        if n_sfno_steps <= 0 or abs(steps_f - n_sfno_steps) > 1e-6:
+            raise ValueError(
+                f"Curriculum lead {h}h is not a positive exact multiple of "
+                f"dt_sfno={dt_sfno:g}s ({steps_f:.4f} macro steps). Pick leads on "
+                f"the dt_sfno grid (a state-update SFNO cannot take a fractional "
+                f"final step)."
+            )
+        spec = (h, leads_loaded.index(h), n_sfno_steps)
         epoch_plan.extend([spec] * ep)
     return epoch_plan
 
@@ -3807,7 +3818,13 @@ def _train_sfno_full_loop(
         save_checkpoint(sfno, ckpt_path)
         logger.info(f"Saved checkpoint: {ckpt_path}")
 
-        if early_stop_patience > 0:
+        # Early stopping is DISABLED under a rollout curriculum (mirrors
+        # _train_spectral_loop): loss magnitudes are NOT comparable across phases
+        # (a longer lead has a naturally larger loss), so a stop triggered right
+        # after an early short-lead phase would silently skip the remaining — most
+        # stability-critical — long phases (24/48/120 h). The per-phase epoch
+        # counts are the explicit training budget instead.
+        if early_stop_patience > 0 and not config.rollout_curriculum:
             if best_loss - avg_loss > early_stop_min_delta:
                 best_loss = avg_loss
                 patience_counter = 0
