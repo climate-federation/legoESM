@@ -393,9 +393,12 @@ def test_driver_frontal_dissipative():
 
 
 def test_frontal_cos_lat_taper():
-    """Frontal (CM) source applies the E3SM cos(lat) polar taper, so a 60N
-    column gets exactly half the drag of an equatorial column (codex iter-1
-    #3).  This is the discriminating test for the taper fix."""
+    """STRUCTURED-dycore branch (the default ``frontal.latitude_taper=True``):
+    the E3SM cos(lat) polar taper halves a 60N column's drag vs the equator.
+    NOTE this pins the taper MATH, not that tapering is E3SM-production
+    behavior — E3SM sets the taper BY DYCORE (gw_drag.F90:829-833) and its
+    unstructured production dycore runs UNtapered (the companion test below);
+    on legoESM's unstructured grids the E3SM-equivalent setting is False."""
     u, v, T, pf, ph, zf, zh, rho, _ = _driver_column(ncol=2)
     lat = jnp.array([0.0, np.pi / 3])  # equator, 60N
     ncol, nlev = u.shape
@@ -555,3 +558,32 @@ def test_e3sm_unknown_source_raises():
     cfg = E3SMCAMConfig(source="convective_beres")  # unsupported (no mfcc table)
     with pytest.raises(ValueError, match="Unknown E3SM GWD source"):
         e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, 1800.0, cfg)
+
+
+def test_frontal_taper_off_is_e3sm_unstructured_branch():
+    """``frontal.latitude_taper=False`` (the E3SM UNSTRUCTURED-dycore branch,
+    gw_drag.F90:829-833 — what E3SM v3 production runs): no cos(lat) polar
+    suppression, a 60N column drags exactly like the equator; and the
+    equatorial column is bit-identical to the tapered run (cos(0)=1)."""
+    u, v, T, pf, ph, zf, zh, rho, _ = _driver_column(ncol=2)
+    lat = jnp.array([0.0, np.pi / 3])
+    ncol, nlev = u.shape
+    frontgf = jnp.full((ncol, nlev), 1e-9)
+    base = dict(source="frontal", pgwv=8, dc=5.0)
+    fr = dict(taubgnd=1.5e-3, frontgfc=1e-10)
+    cfg_on = E3SMCAMConfig(**base, frontal=E3SMFrontalConfig(**fr))
+    cfg_off = E3SMCAMConfig(
+        **base, frontal=E3SMFrontalConfig(**fr, latitude_taper=False))
+    out_on = e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, 1800.0, cfg_on,
+                          frontgf_col=frontgf)
+    out_off = e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, 1800.0, cfg_off,
+                           frontgf_col=frontgf)
+    du_off = np.array(out_off.du_dt)
+    eq, n60 = np.max(np.abs(du_off[0])), np.max(np.abs(du_off[1]))
+    assert eq > 0.0
+    np.testing.assert_allclose(n60, eq, rtol=1e-12)   # no polar suppression
+    # cos(0) = 1: the equatorial column is identical under both settings.
+    np.testing.assert_allclose(
+        np.array(out_on.du_dt[0]), du_off[0], rtol=0, atol=0)
+    # And the default remains the tapered legacy branch (canary).
+    assert E3SMFrontalConfig().latitude_taper is True

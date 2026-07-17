@@ -543,6 +543,17 @@ class E3SMFrontalConfig(NamedTuple):
         quadrature in ``gw_front_init`` (``dca``); each phase-speed bin
         of width ``dc`` is integrated over ``nint(dc/dca)`` sub-intervals
         (default 0.1, E3SM ``gw_front.F90`` ``dca``).
+    latitude_taper : bool
+        Apply the ``cos(lat)`` polar taper to the frontal tendencies.  E3SM
+        sets this BY DYCORE (gw_drag.F90:829-833: ``do_latitude_taper =
+        .not. dycore_is('UNSTRUCTURED')``): ``True`` on structured lat-lon
+        grids, ``False`` on the unstructured SE/production dycore.  legoESM's
+        cubed-sphere / icosahedral / MPAS grids correspond to the
+        UNSTRUCTURED branch, so the E3SM-equivalent value there is
+        ``False`` — the default ``True`` (legacy, matches E3SM structured)
+        suppresses frontal drag toward the poles (→ 0), a first-order
+        high-latitude difference.  Flip per grid family; behavioral →
+        AMIP-gated.
     """
     taubgnd: float = 1.5e-3
     frontgfc: float = 1.0e-10
@@ -550,6 +561,7 @@ class E3SMFrontalConfig(NamedTuple):
     launch_p: float = 5.0e4
     front_p: float = 6.0e4
     front_spectrum_dc_resolution: float = 0.1
+    latitude_taper: bool = True
 
 
 class E3SMBeresConfig(NamedTuple):

@@ -62,6 +62,14 @@ deliberate departures / version choices (canaries in
   ``cpairv(:,k,lchnk)`` (gw_drag.F90:914); we use the scalar
   ``constants.c_pd`` — the declared required-inputs departure, legoESM has
   no spatially-varying heat capacity.)
+* **Frontal cos(lat) taper is DYCORE-dependent in E3SM** (gw_drag.F90:829-833:
+  ``do_latitude_taper = .not. dycore_is('UNSTRUCTURED')``) — ON for
+  structured lat-lon, OFF for the unstructured SE dycore E3SM v3 runs in
+  production.  legoESM's cubed-sphere/icosahedral/MPAS grids correspond to
+  the UNSTRUCTURED branch, so the E3SM-equivalent setting there is
+  ``frontal.latitude_taper=False``; the DEFAULT ``True`` (legacy) tapers
+  frontal drag → 0 toward the poles — a first-order high-latitude
+  difference.  Config-selectable, flip per grid family (AMIP-gated).
 * **Newtonian alpha profile (default OFF).** ``config.use_newtonian_profile``
   defaults to ``False``; E3SM uses a Newtonian-cooling vertical ``alpha(z)``
   profile in the spectral saturation / WKB damping (with an orographic floor).
@@ -1511,8 +1519,13 @@ def e3sm_cam_gwd(
             config.frontal.front_spectrum_dc_resolution,
         )
         orographic_only = False
-        # E3SM tapers the frontal (CM) source by cos(lat) on structured grids.
-        do_taper = True
+        # E3SM sets the frontal cos(lat) polar taper BY DYCORE
+        # (gw_drag.F90:829-833: do_latitude_taper = .not.
+        # dycore_is('UNSTRUCTURED')): ON for structured lat-lon, OFF for the
+        # unstructured SE/production dycore.  Config-selectable here; the
+        # default True is the legacy/structured branch — see
+        # E3SMFrontalConfig.latitude_taper.
+        do_taper = config.frontal.latitude_taper
     elif config.source == "convective":
         if netdt_col is None:
             netdt_col = jnp.zeros((ncol, nlev), dtype=u.dtype)
