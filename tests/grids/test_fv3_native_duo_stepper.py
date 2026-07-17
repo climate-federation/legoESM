@@ -37,7 +37,7 @@ def ctx():
 @pytest.fixture(scope="module")
 def outs(ctx):
     states = analytic_six_face_state(ctx)
-    return csw_step_sixface(ctx, states, dt2=112.5)
+    return csw_step_sixface(ctx, states, dt2=112.5, exchange=True)
 
 
 def test_compute_domains_finite(outs):
@@ -74,9 +74,9 @@ def test_sb2_mass_conserved_through_averaged_fluxes(ctx):
     cross-face fluxes conserves total mass EXACTLY (flux form + both
     faces of every shared edge carrying the identical blended flux ->
     the global area-weighted delp sum is unchanged to rounding)."""
-    from legoesm.core.fv3_native_duo_stepper import dsw12_step_sixface
+    from legoesm.core.fv3_native_duo_stepper import dsw12_step_sixface, w2_six_face_state
 
-    states = analytic_six_face_state(ctx)
+    states = w2_six_face_state(ctx)
     csw = csw_step_sixface(ctx, states, dt2=112.5)
     outs = dsw12_step_sixface(ctx, states, csw, dt=225.0)
     sl = slice(NG, NG + N)
@@ -91,9 +91,9 @@ def test_sb2_mass_conserved_through_averaged_fluxes(ctx):
 
 
 def test_sb2_outputs_finite(ctx):
-    from legoesm.core.fv3_native_duo_stepper import dsw12_step_sixface
+    from legoesm.core.fv3_native_duo_stepper import dsw12_step_sixface, w2_six_face_state
 
-    states = analytic_six_face_state(ctx)
+    states = w2_six_face_state(ctx)
     csw = csw_step_sixface(ctx, states, dt2=112.5)
     outs = dsw12_step_sixface(ctx, states, csw, dt=225.0)
     sl = slice(NG, NG + N)
@@ -121,9 +121,9 @@ def test_sb3_full_acoustic_step(ctx):
     LIVE) — mass conserved, final winds finite and bounded (no seam
     blowup: |u| stays within a small multiple of the solid-body u0),
     winds actually changed."""
-    from legoesm.core.fv3_native_duo_stepper import acoustic_step_sixface
+    from legoesm.core.fv3_native_duo_stepper import acoustic_step_sixface, w2_six_face_state
 
-    states = analytic_six_face_state(ctx)
+    states = w2_six_face_state(ctx)
     outs = acoustic_step_sixface(ctx, states, dt=225.0)
     sl = slice(NG, NG + N)
     m0 = sum(float((states[t]["delp"][sl, sl]
@@ -217,3 +217,46 @@ def test_sb5_w2_steadiness(ctx):
                for t in range(6))
     assert np.isfinite(du48)
     assert du48 < 2.0 * du12, (du12, du48)   # saturating, not secular
+
+
+def test_duo_rsina_is_inverse_sina_squared(ctx):
+    """codex stepper-r1 P0 pin: the duo B-node override must satisfy
+    rsina*max(tiny, sina**2) == 1 on every finite nonvertex node
+    (fv_grid_utils.F90:540); the four cube vertices stay poisoned."""
+    for t in range(6):
+        gs = ctx["gs6"][t]
+        blk = (slice(NG, NG + N + 1), slice(NG, NG + N + 1))
+        sina = gs["sina"][blk]
+        rsina = gs["rsina"][blk]
+        vertices = np.zeros_like(sina, dtype=bool)
+        for vi in (0, N):
+            for vj in (0, N):
+                vertices[vi, vj] = True
+        nonv = ~vertices
+        prod = rsina[nonv] * np.maximum(1.0e-8, sina[nonv] ** 2)
+        assert np.allclose(prod, 1.0, rtol=0, atol=1e-14), (
+            t, float(np.abs(prod - 1).max()))
+
+
+def test_geopk_threads_pt(ctx):
+    """codex stepper-r1 P0 pin: nonunit pt must change gz through the
+    SW increment gz(1)=hs+pt*(pk2-pk1) on BOTH the CG and D ranges."""
+    from legoesm.core.fv3_native_duo_stepper import (
+        geopk_sw_1lev,
+        geopk_sw_1lev_d,
+    )
+
+    bd = ctx["bd"]
+    m = N + 2 * NG
+    rng = np.random.default_rng(3)
+    delp = np.abs(rng.standard_normal((m, m))) + 2.0
+    hs = np.zeros((m, m))
+    pt = np.full((m, m), 0.7)
+    for fn, hw in ((geopk_sw_1lev, 1), (geopk_sw_1lev_d, 2)):
+        pkc, gz = fn(delp, hs, bd, pt=pt)
+        lo = 1 - NG
+        sl = slice(1 - hw - lo, N + hw - lo + 1)
+        want = hs[sl, sl] + 0.7 * (pkc[sl, sl, 1] - pkc[sl, sl, 0])
+        assert np.allclose(gz[sl, sl, 0], want, rtol=0, atol=0), fn.__name__
+        pkc1, gz1 = fn(delp, hs, bd, pt=np.ones((m, m)))
+        assert not np.array_equal(gz[sl, sl, 0], gz1[sl, sl, 0])

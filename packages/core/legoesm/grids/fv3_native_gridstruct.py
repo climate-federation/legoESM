@@ -718,8 +718,9 @@ def exchange_cgrid_vector_halos(uc6: list, vc6: list, tile: int,
     transform like basis vectors, so halo_x picks the source component
     whose supergrid axis maps onto the local +i direction, with the sign
     of that map derivative (mpp's NE-vector convention).  Corner-diagonal
-    regions are left untouched (dyn_core's exchange does not fill them;
-    d_sw's own fill_corners(VECTOR) handles what it consumes).
+    regions get the FV3 VECTOR corner fill (mySign=-1) afterwards — the
+    plain-mpp treatment (upstream duo Lagrange-fills them via
+    ext_vector; interim).
 
     Returns nothing; mutates the tile's arrays in place.
     """
@@ -803,8 +804,10 @@ def exchange_cgrid_vector_halos(uc6: list, vc6: list, tile: int,
 def exchange_agrid_scalar_halos(f6: list, tile: int, n: int, ng: int):
     """mpp_update_domains A-grid scalar (cell centers, supergrid
     (2i, 2j)) for one tile — side-strip index copy of the neighbour's
-    coincident cells (corner-diagonal regions untouched).  INTERIM
-    stand-in for the duo ext_scalar(…,0,0) k2e machinery."""
+    coincident cells, then the FV3 AGRID corner fill on the
+    corner-diagonal regions.  INTERIM stand-in for the duo
+    ext_scalar(…,0,0) k2e machinery (which K2E-interpolates and fills
+    corners upstream)."""
     sg_npx = 2 * n + 1
     lo = 1 - ng
     fld = f6[tile - 1]

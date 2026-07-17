@@ -65,8 +65,8 @@ def build_six_face_duo_context(n: int, ng: int = 3) -> dict:
         rsina = gs["rsina"][blk]
         cosa[good] = cb[good]
         sina[good] = sb[good]
-        with np.errstate(divide="ignore"):
-            rs = 1.0 / sb
+        # fv_grid_utils.F90:540: rsina = 1/max(tiny_number, sina**2)
+        rs = 1.0 / np.maximum(1.0e-8, sb * sb)
         rsina[good] = rs[good]
         gs["cosa"][blk] = cosa
         gs["sina"][blk] = sina
@@ -114,12 +114,12 @@ def analytic_six_face_state(ctx: dict, **kw) -> list:
 
 
 def csw_step_sixface(ctx: dict, states: list, dt2: float,
-                     duogrid: bool = True) -> list:
-    """SB1: certified duo c_sw on every face + the two post-c_sw
-    exchanges dyn_core performs before d_sw (divgd CORNER-scalar,
-    uc/vc CGRID_NE vector) on the six-face neighbor machinery.
-
-    Returns the per-face c_sw output dicts with exchanged halos.
+                     duogrid: bool = True,
+                     exchange: bool = False) -> list:
+    """Certified duo c_sw on every face.  dyn_core's divgd + uc/vc
+    exchanges happen POST-p_grad_c (dyn_core.F90:629-655) — the
+    stepper does them there (dsw12_step_sixface); ``exchange=True``
+    applies them here instead for standalone halo tests.
     """
     from legoesm.core.fv3_native_sw_core import c_sw
 
@@ -133,16 +133,18 @@ def csw_step_sixface(ctx: dict, states: list, dt2: float,
                          st["u"], st["v"], ctx["gs6"][t - 1], bd,
                          npx, npx, dt2, duogrid=duogrid))
 
-    divgd6 = [o["divg_d"] for o in outs]
-    uc6 = [o["uc"] for o in outs]
-    vc6 = [o["vc"] for o in outs]
-    for t in range(1, 7):
-        exchange_bgrid_scalar_halos(divgd6, t, n, ng)
-        exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
+    if exchange:
+        divgd6 = [o["divg_d"] for o in outs]
+        uc6 = [o["uc"] for o in outs]
+        vc6 = [o["vc"] for o in outs]
+        for t in range(1, 7):
+            exchange_bgrid_scalar_halos(divgd6, t, n, ng)
+            exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
     return outs
 
 
-def geopk_sw_1lev(delpc: np.ndarray, hs: np.ndarray, bd) -> tuple:
+def geopk_sw_1lev(delpc: np.ndarray, hs: np.ndarray, bd,
+                  pt: np.ndarray | None = None) -> tuple:
     """dyn_core.F90 geopk (2660-2790), SW_DYNAMICS branch, km=1, CG=T.
 
     SW convention: akap=1, ptop=0, pt≡1 — pk(1)=ptop**akap=0,
@@ -160,7 +162,9 @@ def geopk_sw_1lev(delpc: np.ndarray, hs: np.ndarray, bd) -> tuple:
     pkc[sl, sl, 0] = 0.0
     pkc[sl, sl, 1] = np.exp(1.0 * np.log(delpc[sl, sl]))
     gz[sl, sl, 1] = hs[sl, sl]
-    gz[sl, sl, 0] = gz[sl, sl, 1] + 1.0 * (pkc[sl, sl, 1] - pkc[sl, sl, 0])
+    ptv = 1.0 if pt is None else pt[sl, sl]
+    gz[sl, sl, 0] = gz[sl, sl, 1] + ptv * (pkc[sl, sl, 1]
+                                           - pkc[sl, sl, 0])
     return pkc, gz
 
 
@@ -238,7 +242,8 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
     for t in range(1, 7):
         gs = ctx["gs6"][t - 1]
         hs = np.zeros_like(states[t - 1]["delp"])
-        pkc, gz = geopk_sw_1lev(csw_outs[t - 1]["delpc"], hs, bd)
+        pkc, gz = geopk_sw_1lev(csw_outs[t - 1]["delpc"], hs, bd,
+                                pt=csw_outs[t - 1]["ptc"])
         p_grad_c_1lev(0.5 * dt, csw_outs[t - 1]["delpc"], pkc, gz,
                       uc6[t - 1], vc6[t - 1], gs, bd)
     divgd6 = [o["divg_d"] for o in csw_outs]
@@ -363,7 +368,8 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
     return outs
 
 
-def geopk_sw_1lev_d(delp: np.ndarray, hs: np.ndarray, bd) -> tuple:
+def geopk_sw_1lev_d(delp: np.ndarray, hs: np.ndarray, bd,
+                    pt: np.ndarray | None = None) -> tuple:
     """geopk D-grid call (CG=.false., a2b_ord=4, duo): ranges widen to
     is-2..ie+2 (dyn_core geopk range guard).  Same SW km=1 formulas as
     the C version; delp halos must be freshly exchanged (dyn_core does
@@ -376,7 +382,9 @@ def geopk_sw_1lev_d(delp: np.ndarray, hs: np.ndarray, bd) -> tuple:
     sl = slice(is_ - 2 - lo, ie + 2 - lo + 1)
     pkc[sl, sl, 1] = np.exp(1.0 * np.log(delp[sl, sl]))
     gz[sl, sl, 1] = hs[sl, sl]
-    gz[sl, sl, 0] = gz[sl, sl, 1] + 1.0 * (pkc[sl, sl, 1] - pkc[sl, sl, 0])
+    ptv = 1.0 if pt is None else pt[sl, sl]
+    gz[sl, sl, 0] = gz[sl, sl, 1] + ptv * (pkc[sl, sl, 1]
+                                           - pkc[sl, sl, 0])
     return pkc, gz
 
 
@@ -495,7 +503,8 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
     for t in range(1, 7):
         gs = ctx["gs6"][t - 1]
         hs = np.zeros_like(delp6[t - 1])
-        pkc, gz = geopk_sw_1lev_d(delp6[t - 1], hs, bd)
+        pkc, gz = geopk_sw_1lev_d(delp6[t - 1], hs, bd,
+                                  pt=pt6[t - 1])
         # divg2 = d_ext*da_min_c*saved divergence (km=1; dyn_core
         # 1310-1325 with the mass weight cancelling at one level)
         divg2 = np.zeros((npx, npx))
