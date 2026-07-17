@@ -71,3 +71,70 @@ fixed sfc fluxes; record frames; plot x-y + profiles each run.
 - [ ] 4. Moist surface fluxes + LSF (subsidence/tls/qls) on the spectral grid.
 - [ ] 5. BOMEX driver + x-y/profile PNGs; validate vs Siebesma'03.
 - [ ] 6. Replicate DYCOMS-II RF01 (+ Stevens LW) + RICO (precip).
+
+## Cross-scheme audit + SGS buoyancy (2026-07-16)
+Re-ran all 3 cases × {static-Smag, static-Vreman, LASD-dynamic} × {kessler,
+sundqvist, seifert_beheng, morrison, thompson, p3, sdm, fast_sbm} (54 combos):
+**zero** stability / dispatch bugs — all finite, water non-negative, schemes
+diverge correctly (kessler==morrison below the autoconversion threshold is
+expected, not a dispatch bug).
+
+Two corrections made:
+1. **`sundqvist` rejected in the LES microphysics adapter** (`make_les_microphysics_fn`).
+   It is a LARGE-SCALE GCM diagnostic condensation scheme (RH>RH_crit partial
+   cloud fraction for coarse grid boxes); on the resolved LES grid it condenses
+   in every cell above RH_crit → spurious ~100 % cloud cover + inflated LWP
+   (measured cc ~0.9–1.0, LWP 20–43 vs 0.03–0.24 / a few g/m² for the
+   resolved-cloud schemes). Use kessler/seifert_beheng/morrison/thompson/p3/
+   sdm/fast_sbm.
+2. **Lilly (1962) SGS stratification suppression** (`sgs_buoyancy` flag,
+   default OFF ⇒ neutral byte-identical; ON in the cloudy drivers). Multiplies
+   the strain-only ν_t by `√(max(0, 1 − Ri/Pr_t))`, `Ri = N²/|S|²` from the
+   resolved θ_v gradient — the SGS previously had NO stratification dependence
+   (documented follow-up) and over-mixed the stable inversion. Reuses the factor
+   already in the single-column `turbulence/smagorinsky.py` (extracted to shared
+   `_shared.lilly_buoyancy_factor`). Codex-reviewed (0 HIGH; 1 MED = build the
+   Ri denominator `2 S_ij S_ij` from the strain components, not `Smag**2`, so the
+   adjoint is self-contained AD-safe at zero strain). 6 unit tests + 104-case LES
+   regression green; column faithful-pin bit-identical.
+
+### DYCOMS low-LWP: the SETTLED cloud is robustly thin in every regime
+DYCOMS-II RF01 SETTLED (2–6 h quasi-steady) cloud sits ~5–10× below the 50–80
+g/m² benchmark (cc ~0.2–0.4 vs ~1.0) while **z_i ≈ 820 m, mixed-layer θ and q_t
+are correct** and the cloud is present (not zero). The saturated IC (LWP ~62)
+COLLAPSES to a thin quasi-steady in EVERY controlled config tried — this is the
+well-known LES difficulty of RF01 (cf. the Stevens 2005 intercomparison spread),
+NOT a single bug. Settled 2nd-half-mean LWP measured here:
+
+| config (64², morrison) | settled LWP | cc | note |
+|---|---|---|---|
+| f32 van_leer nz192, sgs_buoyancy OFF | 4–8 | 0.2–0.3 | baseline, keeps decaying 8→4 over 3→6 h |
+| f32 van_leer nz192, sgs_buoyancy **ON** | **7–10** | 0.33–0.40 | **best durable; +83 % vs OFF at 6 h** |
+| f32 van_leer nz128 / 256 | ~7 | ~0.28 | resolution 11.7→5.9 m: no material change |
+| kessler / thompson nz128 | 6.7 / 6.7 | 0.25–0.29 | scheme: no material change |
+| f64 weno5 + θ-hyperdiff 2e4 nz120 | ~4–6 (2.8 h) | 0.2–0.3 | collapses too; clip_q explodes (see below) |
+
+**Corrected from a 33-day-old note** that claimed `f64 + weno5 + θ-hyperdiff →
+LWP ~48`: that does NOT reproduce as a SETTLED value — a controlled current run
+collapses to ~4–6 by 2.8 h. The "48" was a TRANSIENT early-time reading (the
+cloud passes through ~35 g/m² at 0.3 h on its way down from the LWP-62 IC).
+Lesson: quote the 2nd-half time-mean, not the peak (the drivers now print both).
+
+The Lilly `sgs_buoyancy` fix is the **strongest durable lever found**: on the
+van_leer core it nearly DOUBLES the settled LWP (nz192 6 h: 7.7 vs 4.2; peak LWP
+16.5 vs 8.1, cc 0.67 vs 0.54 at t≈1.25 h) by suppressing cloud-top
+over-entrainment — real, correct missing physics. It does NOT fully cure the
+collapse; the residual to 50–80 g/m² is the open RF01 hard-case problem
+(radiative-turbulent cloud maintenance vs entrainment at LES resolution; protocol
+dz = 5 m needs nz ~300, blocked by the projection's nz≲200 compile cliff). On the
+weno5 f64 core the SGS effect is swamped by a **clip_q explosion** (~7, vs ~0.5
+for van_leer) — weno5 is non-positivity-preserving on the water tracers here (the
+CRM guard `weno5→van_leer` from #966 is NOT ported to this moist-LES core; SEPARATE
+follow-up). van_leer stays the moist-LES default. BOMEX/RICO (thin transient
+cumulus) sit near the low end of their bands, more defensible for those types.
+
+Repro (controlled A/B, change only the flag): `scripts/run/run_dycoms_les.py
+--nx 64 --ny 64 --nz 192 --hours 6 --f32 --microphysics morrison
+[--sgs-buoyancy | --no-sgs-buoyancy]`. All 3 cloudy drivers now report a trailing
+2nd-half time-mean of cc/LWP (GCSS reports time-means; instantaneous values swing
+frame-to-frame). Figure: `results/dycoms_lilly_sgs_ab_2026-07-16.png`.

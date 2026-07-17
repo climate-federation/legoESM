@@ -2,12 +2,12 @@
 
 The surfdata gives soil **texture** (percent sand/clay per layer); the soil
 hydrology needs retention-curve parameters.  This module implements the Cosby et
-al. (1984) regressions as used by CLM (CLM4 Tech Note eqs. 7.82, 7.84, 7.85,
+al. (1984) regressions as used by CLM (CLM4 Tech Note eqs. 7.82, 7.84, 7.87,
 7.90), producing Clapp & Hornberger (1978) parameters:
 
     theta_sat = 0.489 - 0.00126 * %sand                       [m3/m3]   (7.82)
     b         = 2.91  + 0.159   * %clay                        [-]       (7.84)
-    psi_sat   = -10.0 * 10^(1.88 - 0.0131 * %sand)            [mm] ->[m] (7.85)
+    psi_sat   = -10.0 * 10^(1.88 - 0.0131 * %sand)            [mm] ->[m] (7.87)
     K_sat     = 0.0070556 * 10^(-0.884 + 0.0153 * %sand)      [mm/s]->[m/s] (7.90)
 
 Pure JAX and differentiable in (sand, clay) — the regression coefficients live in
@@ -22,6 +22,24 @@ References
 - Clapp, R. B. and Hornberger, G. M. (1978): Empirical equations for some soil
   hydraulic properties. Water Resour. Res., 14(4), 601-604.
 - Oleson et al. (2010): CLM4 Technical Note, section 7.4.
+
+Faithfulness
+------------
+``tests/land/unit/test_pedotransfer_faithful.py`` pins all four Cosby/CLM4 forms
+to round-off (rel 1e-9) against an independent scalar reimplementation and
+canaries the regression coefficients against ``CosbyPedotransferConfig``.  The
+oracle literals are transcribed from the on-disk gSAM SLM reference
+``SLM/slm_vars.f90:1227-1236`` (the identical Cosby fit: ``poro_soil = -0.00126
+SAND + 0.489``, ``Bconst = 0.159 CLAY + 2.91``, ``m_pot_sat = min(-150, -10*10^(
+1.88 - 0.0131 SAND))`` mm, ``ks = 10^(0.0153 SAND - 0.884) * 25.4/3600`` mm/s).
+
+Two documented DEPARTURES from the gSAM reference (both leave legoesm closer to
+the raw published Cosby/CLM4 eqs):
+  * psi_sat is UNCAPPED here (raw eq. 7.87), whereas gSAM floors its MAGNITUDE at
+    150 mm (``min(-150, raw)`` — this binds for HIGH sand / small |psi_sat|, e.g.
+    at 90% sand legoesm gives -50 mm but gSAM -150 mm);
+  * the K_sat prefactor is CLM4's rounded ``0.0070556`` mm/s vs gSAM's exact
+    ``25.4/3600`` (inch/hr -> mm/s), a ~6.3e-6 relative difference.
 """
 
 from __future__ import annotations

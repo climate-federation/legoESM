@@ -250,9 +250,9 @@ AMIP_INTEGRATORS = ("ssp_rk3", "ssp_rk3_scan", "ssp_rk34", "ssp_rk54", "rk4")
 
 # AIMIP (ML-emulated physics) intercomparison.  run_aimip.py TRAINS each variant
 # from a suite manifest + per-variant overlay; the base suite and the
-# classical/column_nn/sfno_physics overlays ship under config/aimip/ (sfno_full
-# overlays live only in the t106_headtohead suite, so it is excluded from the
-# base-suite launchable ladder — see aimip_launchable_variants()).
+# classical/column_nn/sfno_physics/sfno_full overlays all ship under
+# config/aimip/, so every non-empty AIMIP_VARIANTS entry is launchable from
+# the base suite — see aimip_launchable_variants().
 _AIMIP_BASE_SUITE = "config/aimip/aimip_suite.yaml"
 
 
@@ -318,9 +318,11 @@ def legal_amip_integrators(discretization: str) -> list[str]:
 def aimip_launchable_variants(repo_root: Path | str = _REPO_ROOT) -> list[str]:
     """AIMIP variants launchable from the base suite (overlay must exist).
 
-    The ML-emulated-physics ladder: ``classical`` (process-physics control) →
-    ``column_nn`` (per-column NN physics) → ``sfno_physics`` (SFNO physics with
-    spectral-dycore coupling).  A variant is offered only when it is a real
+    The ML-emulated-physics ladder: ``classical`` (full process-physics control
+    incl. RRTMGP radiation) → ``column_nn`` (ALL physics incl. radiation learned
+    by a per-column NN) → ``sfno_physics`` (SFNO physics with spectral-dycore
+    coupling) → ``sfno_full`` (SFNO emulates the entire atmosphere, no dycore).
+    A variant is offered only when it is a real
     ``AIMIP_VARIANTS`` key *and* has a ``variant_<name>.yaml`` overlay beside the
     base suite, so a renamed/removed overlay drops from the menu instead of
     emitting a ``--variants`` flag that ``run_aimip.py`` rejects.
@@ -710,9 +712,11 @@ def _build_amip(answers: dict[str, Any], machine: dict[str, Any]) -> LaunchPlan:
 def _build_aimip(answers: dict[str, Any], machine: dict[str, Any]) -> LaunchPlan:
     """ML-emulated physics (AIMIP) → ``run_aimip.py`` trains a suite variant.
 
-    The *ML-emulation of physics* axis: ``classical`` (process-physics control) →
-    ``column_nn`` (per-column NN physics) → ``sfno_physics`` (SFNO physics with
-    spectral-dycore coupling).  Routes to the shipped base suite + per-variant
+    The *ML-emulation of physics* axis: ``classical`` (full process physics
+    incl. RRTMGP radiation) → ``column_nn`` (all physics incl. radiation
+    learned per-column) → ``sfno_physics`` (SFNO physics, dycore retained) →
+    ``sfno_full`` (SFNO full-atmosphere emulator).
+    Routes to the shipped base suite + per-variant
     overlay under ``config/aimip/``.  This **trains** the variant (it is not a
     forward run) and needs an ERA5 cache; x64 is forced (spectral).
     """

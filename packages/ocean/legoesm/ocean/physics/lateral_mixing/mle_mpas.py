@@ -221,13 +221,17 @@ def mle_tracer_tendency_mpas(
         z_coord.dz_ref, _RHO_0, constants.g, n_iter=2,
     )                                                   # (nCells, nlev)
 
-    # Level-centre reference depths [m, positive] for the 0.01 in-situ criterion.
-    z_centers = jnp.cumsum(z_coord.dz_ref) - 0.5 * z_coord.dz_ref   # (nlev,)
+    # Reference W-INTERFACE depths [m, positive down] for the NEMO nla10
+    # reference-level pick: cumulative reference thicknesses, surface first.
+    z_faces = jnp.concatenate([
+        jnp.zeros((1,), z_coord.dz_ref.dtype),
+        jnp.cumsum(z_coord.dz_ref),
+    ])                                                              # (nlev+1,)
 
     # --- MLE mixed-layer depth + ML-mean buoyancy (shared grid-agnostic core) ---
     zmld, bm, in_ml = mle_mld_and_buoyancy(
         rho_insitu, dz_live, wet3d,
-        z_centers=z_centers,
+        z_faces=z_faces,
         rho_c_mle=cfg.rho_c_mle,
         ref_depth_m=cfg.ref_depth_m,
         rho0=constants.rho_ocean,

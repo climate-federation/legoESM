@@ -7,6 +7,7 @@ no Lagrangian vertical coord.
 
 from __future__ import annotations
 
+import warnings
 from functools import partial
 from typing import NamedTuple
 
@@ -2185,8 +2186,20 @@ def hydrostatic_to_fv3(
     )
 
 
-def make_fv3_faithful_pe_config(**overrides) -> CDGridPrimitiveEquationConfig:
-    """FV3_3D iter 392: factory for FV3-faithful PE config.
+def make_fv3_component_fidelity_pe_config(
+        **overrides) -> CDGridPrimitiveEquationConfig:
+    """Factory for the FV3 COMPONENT-FIDELITY PE config (iter 392 lineage).
+
+    NAMING (phase 5 of the FV3-native roadmap): this configuration enables
+    the individually FV3-validated COMPONENTS (a2b corner interpolation,
+    metric-aware d_con, cross-face du projection, sponge damping) inside
+    legoESM's stabilized solver.  It is NOT a full FV3 implementation: the
+    time integration is RK3 (FV3: forward-backward acoustic splitting),
+    halos are interpolated (exact duo-grid tables land per-path via the
+    FV3-native flags), the state is cell-centred (FV3: D-grid covariant
+    winds + Lagrangian vertical).  A configuration may only claim FULL
+    fidelity once the native forward-backward core exists (phase 4) —
+    enforced by tests/atmosphere/dycore/unit/test_fv3_naming_phase5.py.
 
     Pair with ``use_duogrid=True`` so ``iter-370 use_fv3_cross_face_du_proj``
     has effect (iter-384).  Enables iter-14/338/370/433/436/437/451/459/443.
@@ -2233,6 +2246,23 @@ def make_fv3_faithful_pe_config(**overrides) -> CDGridPrimitiveEquationConfig:
     return CDGridPrimitiveEquationConfig(**defaults)
 
 
+def make_fv3_faithful_pe_config(**overrides) -> CDGridPrimitiveEquationConfig:
+    """Deprecated alias of :func:`make_fv3_component_fidelity_pe_config`.
+
+    The old name overclaimed: the configuration is component-fidelity, not
+    a full FV3 implementation (phase-5 naming correction).
+    """
+    warnings.warn(
+        "make_fv3_faithful_pe_config is a deprecated alias: the "
+        "configuration is FV3 COMPONENT-fidelity (RK3 + interpolated "
+        "halos + cell-centred state), not a full FV3 implementation. Use "
+        "make_fv3_component_fidelity_pe_config.",
+        FutureWarning,
+        stacklevel=2,
+    )
+    return make_fv3_component_fidelity_pe_config(**overrides)
+
+
 def make_legoesm_pe_min_edge_config(**overrides) -> CDGridPrimitiveEquationConfig:
     """FV3_3D iter 468 (PE mirror of NH iter-467): min-edge factory.
 
@@ -2245,7 +2275,7 @@ def make_legoesm_pe_min_edge_config(**overrides) -> CDGridPrimitiveEquationConfi
         d_con_top_zero_levels=0,
     )
     edge_min_overrides.update(overrides)
-    return make_fv3_faithful_pe_config(**edge_min_overrides)
+    return make_fv3_component_fidelity_pe_config(**edge_min_overrides)
 
 
 def make_legoesm_pe_min_edge_aggressive_config(
@@ -2266,4 +2296,4 @@ def make_legoesm_pe_min_edge_aggressive_config(
         corner_div_damp_d2_bg=5e-2,
     )
     aggressive_overrides.update(overrides)
-    return make_fv3_faithful_pe_config(**aggressive_overrides)
+    return make_fv3_component_fidelity_pe_config(**aggressive_overrides)

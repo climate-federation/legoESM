@@ -20,7 +20,6 @@ from typing import Any, NamedTuple
 
 from legoesm import constants
 
-
 # Canonical AIMIP variant set.  Single source of truth — imported by
 # ``scripts/run/run_aimip.py`` and the ``validate_strict`` rule below.
 # Empty string = not an AIMIP run (preserves backward-compat for
@@ -299,14 +298,92 @@ class OutputConfig(NamedTuple):
     evaluation: EvaluationConfig = EvaluationConfig()
 
 
-# Single source of truth for the valid microphysics scheme literals — consumed
+# Single source of truth for the valid column-physics scheme literals — consumed
 # by ExperimentConfig.validate_strict AND by run-driver CLI ``choices=`` so the
 # CLI allowlist cannot drift from the config validation (e.g. omitting an
 # advertised scheme like ``ml_emulator``).
+#
+# These were function-local variables inside validate_strict, so nothing could
+# import them and every driver kept its own hand-copied list — which is exactly
+# why they drifted: each axis happened to be pinned by a point-fix test in ONE
+# driver and silently diverged in the other (run_coupled blocked bechtold/
+# tiedtke/emanuel/kain_fritsch/zhang_mcfarlane; run_amip blocked mynn25).
+# ``tests/unit/test_scheme_reachability_audit.py`` now machine-audits every
+# driver's ``choices=`` against these tuples, against a shrink-only baseline of
+# deliberate exclusions.
 VALID_MICROPHYSICS = (
     "none", "kessler", "sundqvist", "seifert_beheng",
     "morrison", "thompson", "p3", "sdm", "fast_sbm", "ml_emulator",
 )
+
+VALID_TURBULENCE = (
+    "smagorinsky", "louis", "tke", "mynn25", "clubb_lite", "clubb",
+    "holtslag_boville", "ysu", "edmf", "none",
+)
+
+VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg")
+
+VALID_CLOUD_SCHEMES = ("none", "sundqvist", "xu_randall", "resolved")
+
+# ``gravity_wave_drag`` additionally accepts a ``+``-joined COMPOSITION of these
+# (e.g. "hines+mcfarlane"); validate_strict splits on "+" before membership.
+VALID_GWD = (
+    "rayleigh", "lindzen", "mcfarlane", "hines",
+    "prognostic_spectral", "e3sm_cam", "ml_emulator", "none",
+)
+
+def parse_gwd_spec(value: str) -> str:
+    """argparse ``type=`` for ``--gravity-wave-drag``.
+
+    GWD is the one axis a plain ``choices=`` CANNOT express: it accepts a
+    ``+``-joined COMPOSITION whose source tendencies are summed (issue #834,
+    e.g. "hines+mcfarlane"), because orographic and non-orographic drag
+    parameterize distinct wave populations and are run together in CMIP-class
+    GCMs.  run_amip therefore dropped ``choices`` entirely -- which left the
+    flag with NO cli-level typo rejection -- while run_coupled kept ``choices``
+    and so REJECTED every composite, making #834 unreachable from the coupled
+    driver.  Both drivers now share this validator: composites work everywhere,
+    and a typo is still caught at the CLI.
+
+    Delegates the SEMANTICS to ``ExperimentConfig.validate_strict`` rather than
+    re-implementing them: a membership-only check accepted composites strict
+    rejects -- "none+hines", "e3sm_cam+hines", "ml_emulator+hines", duplicates
+    like "hines+hines" (codex) -- so the CLI would advertise a spec the config
+    then refuses. Asking the real validator keeps the two from diverging by
+    construction, which is the same lesson as resolving the effective surface
+    config through the production path in driver/air_sea_consistency.py.
+    """
+    import argparse
+
+    for part in value.split("+"):
+        if part not in VALID_GWD:
+            raise argparse.ArgumentTypeError(
+                f"invalid gravity-wave-drag source {part!r} in {value!r}; "
+                f"expected one of {VALID_GWD}, or a '+'-joined composite of "
+                f"them (e.g. 'hines+mcfarlane')"
+            )
+    try:
+        ExperimentConfig(gravity_wave_drag=value).validate_strict()
+    except ValueError as exc:
+        # Report ONLY a genuine gravity_wave_drag complaint. validate_strict
+        # reports every error for the whole config, so falling back to the full
+        # message would blame this flag for an unrelated bad default elsewhere
+        # (codex). If nothing here is about GWD, this value is not the problem
+        # -- let it through and let the config's own validation report the real
+        # error, in its own words, at build time.
+        msg = "; ".join(m for m in str(exc).splitlines()
+                        if "gravity_wave_drag" in m)
+        if msg:
+            raise argparse.ArgumentTypeError(msg) from None
+    return value
+
+
+# The ATMOSPHERE surface layer's bulk-flux algorithm.  "most" is deliberately
+# ABSENT: turbulence/surface_layer.py dispatches MOST on ("coare3",
+# "large_yeager") only, so an accepted "most" would silently degrade to the
+# constant-coefficient branch — a loud rejection is better than wrong physics.
+# See driver/air_sea_consistency.py.
+VALID_SURFACE_BULK = ("constant", "coare3", "large_yeager")
 
 
 class ExperimentConfig(NamedTuple):
@@ -377,11 +454,12 @@ class ExperimentConfig(NamedTuple):
     # and ``False`` on CPU.  Explicit ``True``/``False`` overrides.
     rrtmgp_use_scan: bool | None = None
     # G-point parallelism in the RRTMGP two-stream solve (see
-    # ``RRTMGPConfig.gpoint_batch_size``).  0 = memory-frugal checkpointed scan
-    # (REQUIRED for reverse-mode AD / training).  >0 = process g-points in
-    # parallel blocks of this size via vmap — FORWARD/inference only, ~6x faster
-    # radiation on GPU; ~16-32 recovers most parallelism while bounding memory.
-    rrtmgp_gpoint_batch_size: int = 0
+    # ``RRTMGPConfig.gpoint_batch_size``).  DEFAULT 16 (was 0): the vmap-block
+    # path compiles ONE reused body (the scan path's per-g-point prevent_cse
+    # body inflated the reverse-mode-AD compile to ~9 h) and runs ~26x faster,
+    # with peak memory bounded to this many g-points.  Set 0 only to reproduce
+    # the exact legacy g-point accumulation order.
+    rrtmgp_gpoint_batch_size: int = 16
     # G-point checkpointing in the RRTMGP two-stream scan (see
     # ``RRTMGPConfig.gpoint_checkpoint``).  True (default) = ``jax.checkpoint``
     # with ``prevent_cse=True`` per g-point — memory-frugal, REQUIRED for
@@ -453,6 +531,16 @@ class ExperimentConfig(NamedTuple):
     # These are the SW/LW knob for the coare3 moisture-driven albedo overshoot.
     cloud_rh_crit: float | None = None
     cloud_q_c_diagnostic: float | None = None
+    # Cahalan (1994) horizontal-inhomogeneity factor chi on the radiative cloud
+    # water path (plane-parallel albedo bias); LOWER => thinner optics => lower
+    # albedo. None => CloudConfig default 1.0 (homogeneous, no change).
+    cloud_inhomogeneity_factor: float | None = None
+    # Sub-grid cloud-optics inhomogeneity scheme: "constant" (Cahalan scalar,
+    # legacy/byte-identical) or "two_region" (tau-dependent Shonk-Hogan optic
+    # that breaks the plane-parallel tau-saturation). cloud_fsd = fractional
+    # std-dev of in-cloud water for two_region (Shonk-Hogan ~0.75).
+    cloud_optics_inhomogeneity: str = "constant"
+    cloud_fsd: float | None = None
     #   cloud_p_xr / cloud_alpha_xr — Xu-Randall cloud-fraction sensitivity
     #   knobs; HIGHER p_xr / LOWER alpha_xr => fraction stays fractional as
     #   moisture rises (flattens the overcast runaway).
@@ -460,6 +548,17 @@ class ExperimentConfig(NamedTuple):
     cloud_alpha_xr: float | None = None
     cloud_conv_cloud_max: float | None = None
     cloud_conv_cloud_condensate: float | None = None
+    # Diagnostic in-cloud condensate vertical structure for the stratiform
+    # radiative floor (CloudConfig.diagnostic_condensate_scheme):
+    #   "constant"  — flat q_c_diagnostic at every cloudy level (validated
+    #                 default; byte-identical to the legacy floor).
+    #   "adiabatic" — depth-scaled adiabatic in-cloud LWC (dims THIN warm
+    #                 marine stratocumulus while deep clouds stay at the cap),
+    #                 the source-side marine-BL albedo fix.  cloud_adiabatic_lwc_rate
+    #                 [kg/kg/m] is the LWC growth per metre of cloudy depth
+    #                 (None => CloudConfig default 1.5e-6 ~ 1.5 g/kg per km).
+    cloud_diagnostic_condensate_scheme: str = "constant"
+    cloud_adiabatic_lwc_rate: float | None = None
     microphysics: str = "none"
     # Number of microphysics sub-steps inside one dynamics step.  Morrison's
     # double-moment product terms (q_c·q_r, q_i·q_c) run away at the
@@ -497,6 +596,14 @@ class ExperimentConfig(NamedTuple):
     # detrain-all path, dq_r None).  ``None`` distinguishes "unset" from an
     # explicit 0.0 so Bechtold's ON-by-default is not silently disabled.
     convective_precip_efficiency: float | None = None
+    # Convective precip-split scheme (Bechtold / Tiedtke): "constant" uses the
+    # fixed convective_precip_efficiency above; "autoconversion" derives the
+    # precip fraction PHYSICALLY from the plume updraft cloud water (Sundqvist
+    # 1978, convective_autoconversion_split), threaded to conv_config in
+    # physics_pipeline; the scheme body raises on an unknown value.
+    convective_precip_split: str = "constant"
+    autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
+    autoconv_pe_max: float = 0.9        # [1] ceiling on the emergent precip fraction
 
     # Tiedtke plume buoyancy-death memory: when True the entraining plume,
     # once it exhausts its cumulative buoyancy budget, stays dead instead of
@@ -810,6 +917,11 @@ class ExperimentConfig(NamedTuple):
     sundqvist_sigmoid_sharpness: float = 20.0   # SundqvistConfig.sigmoid_sharpness
     sbm_T_min_convect: float = 200.0            # SBMConfig.T_min_convect [K]
     louis_l_mix_max: float = 100.0              # LouisConfig.l_mix_max [m]
+    # Marine-Sc cloud-top entrainment (Louis BL): vents trapped BL-top moisture
+    # into the dry free troposphere to thin excess stratocumulus liquid cloud
+    # (the AMIP albedo bias) without a surface-evaporation trade.  SINGLE knob:
+    # 0.0 = off (default => byte-identical), > 0 = on.  Deploy warm-start/ramp.
+    louis_cloudtop_entrainment_efficiency: float = 0.0  # LouisConfig.cloudtop_entrainment_efficiency [0,1]; 0=off
     louis_Ck: float = 0.4                       # LouisConfig.Ck
     louis_Ri_crit: float = 0.25                 # LouisConfig.Ri_crit
     louis_b_louis: float = 5.0                  # LouisConfig.b_louis
@@ -860,6 +972,61 @@ class ExperimentConfig(NamedTuple):
     # Quasi-equilibrium heating-ceiling ratio (BechtoldConfig.
     # cape_sink_heating_ratio; the C12 warm-runaway sink lever).
     bechtold_cape_sink_heating_ratio: float = 5.0
+    # Bechtold convective-top pressure [Pa]; terminates the (non-detraining)
+    # plume + subsidence gate. 150 hPa stability cap (see BechtoldConfig.
+    # p_conv_top_pa); raise toward 100 hPa if deep tropical tops are clipped.
+    bechtold_conv_top_pa: float = 15000.0
+    # Bechtold convective-downdraft strength (marine-evaporation / precip lever,
+    # #847). The downdraft's sub-cloud effect is rain re-evaporation only — it
+    # COOLS + locally moistens (no dry-air advection; see physics_pipeline note).
+    # Raising downdraft_evap (0.05 -> ~0.3 Tiedtke) increases that cooling, which
+    # drives cold pools that ENHANCE convective triggering -> more precip -> net
+    # column drying -> larger sea-air gradient -> higher surface evaporation.
+    # downdraft_rh_min gates the trigger sigmoid((rh_min - rh_below)·sharpness):
+    # the downdraft fires where the below-LCL RH < rh_min, so RAISING rh_min
+    # activates it in more (moister) columns. Defaults reproduce BechtoldConfig
+    # (byte-identical).
+    bechtold_downdraft_evap: float = 0.05
+    bechtold_downdraft_alpha: float = 0.3
+    bechtold_downdraft_rh_min: float = 0.2
+    # Penetrative-downdraft thermodynamic transport (marine-BL ventilation).
+    # The re-evaporation downdraft above only MOISTENS the sub-cloud layer;
+    # transport ON advects low-MSE (dry) mid-level air DOWN into the BL,
+    # DRYING it -> stronger surface evaporation + less BL liquid cloud (lower
+    # albedo).  Default OFF => byte-identical to the re-evaporation-only
+    # downdraft.  See BechtoldConfig.downdraft_transport.
+    bechtold_downdraft_transport: bool = False
+    bechtold_downdraft_entrain_rate: float = 3.0e-4  # IFS ENTRDD (sucumf.F90:144)
+    bechtold_downdraft_detrain_scale_m: float = 700.0
+    # Full IFS deep CAPE closure ZMFUB1=ZCAPE*ZMFUB/(ZHEAT*ZXTAU)
+    # (openifs cumastrn.F90:704-833; PR #1095).  Default ON (2026-07-16,
+    # validated: codex x11 + gray-RCE A/B + C24 AMIP smoke A/B, both stable /
+    # neutral); --no-bechtold-use-ifs-cape-closure restores the legacy
+    # surrogate byte-identically.  Mirrors BechtoldConfig.use_ifs_cape_closure.
+    bechtold_use_ifs_cape_closure: bool = True
+    # IFS Kessler sub-cloud rain evaporation (cuflxn.F90:436-475).  Default
+    # ON (2026-07-16, validated: codex x3 + gray-RCE A/B + C24 AMIP A/B);
+    # mirrors BechtoldConfig.use_ifs_subcloud_evap (fallbacks match).
+    bechtold_use_ifs_subcloud_evap: bool = True
+    # IFS in-updraft precipitation formation (cuascn.F90:718-773).  Default
+    # ON (2026-07-16, validated: codex x3 + gray-RCE A/B + C24 AMIP A/B);
+    # mirrors BechtoldConfig.use_ifs_inplume_precip (fallbacks match).
+    bechtold_use_ifs_inplume_precip: bool = True
+    # Grid spacing [m] for the IFS ZTAURES turnover resolution factor
+    # (cumastrn.F90:762-768).  0 = legacy factor 1.0.  Mirrors
+    # BechtoldConfig.dx_m.
+    bechtold_dx_m: float = 0.0
+    # IFS convective downdraft (cudlfsn+cuddrafn).  Default OFF pending
+    # validation; mirrors BechtoldConfig.use_ifs_downdraft.
+    bechtold_use_ifs_downdraft: bool = False
+    # IFS shallow PBL-equilibrium closure (cumastrn.F90).  Default OFF
+    # pending validation; mirrors BechtoldConfig.use_ifs_shallow_closure.
+    bechtold_use_ifs_shallow_closure: bool = False
+    # IFS diurnal CAPE correction + land RH break (default OFF pending
+    # validation); mirror BechtoldConfig.use_ifs_capdcycl / use_ifs_land_rhebc.
+    bechtold_use_ifs_capdcycl: bool = False
+    bechtold_use_ifs_land_rhebc: bool = False
+    bechtold_use_ifs_snow_melt: bool = False
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -1148,6 +1315,41 @@ class ExperimentConfig(NamedTuple):
                 f"bechtold_cape_sink_heating_ratio must be > 0, got "
                 f"{self.bechtold_cape_sink_heating_ratio}"
             )
+        if (self.convective_precip_efficiency is not None
+                and not (0.0 <= self.convective_precip_efficiency <= 1.0)):
+            errors.append(
+                f"convective_precip_efficiency must be in [0, 1] or None, got "
+                f"{self.convective_precip_efficiency}"
+            )
+        if self.convective_precip_split not in ("constant", "autoconversion"):
+            errors.append(
+                "convective_precip_split must be 'constant' or 'autoconversion', "
+                f"got {self.convective_precip_split!r}"
+            )
+        if not (0.0 < self.autoconv_q_c_crit <= 1.0e-2):
+            errors.append(
+                f"autoconv_q_c_crit must be in (0, 1e-2] kg/kg, got "
+                f"{self.autoconv_q_c_crit}"
+            )
+        if not (0.0 <= self.autoconv_pe_max <= 1.0):
+            errors.append(
+                f"autoconv_pe_max must be in [0, 1], got {self.autoconv_pe_max}"
+            )
+        if self.bechtold_conv_top_pa <= 0.0:
+            errors.append(
+                f"bechtold_conv_top_pa must be > 0 Pa (the convective-top gate "
+                f"cutoff), got {self.bechtold_conv_top_pa}"
+            )
+        for _f, _lo, _hi in (
+            ("bechtold_downdraft_evap", 0.0, 0.5),
+            ("bechtold_downdraft_alpha", 0.0, 0.9),
+            ("bechtold_downdraft_rh_min", 0.0, 1.0),
+            ("bechtold_downdraft_entrain_rate", 1.0e-4, 2.0e-3),
+            ("bechtold_downdraft_detrain_scale_m", 100.0, 3000.0),
+        ):
+            _v = getattr(self, _f)
+            if not (_lo <= _v <= _hi):
+                errors.append(f"{_f}={_v!r} out of range [{_lo}, {_hi}]")
         if self.physics_parameterization not in ("none", "ml"):
             errors.append(
                 "physics_parameterization must be 'none' or 'ml', "
@@ -1166,18 +1368,73 @@ class ExperimentConfig(NamedTuple):
         # Radiation membership (reconciled: physics_pipeline now raises on
         # unknown and builds an explicit zero-radiation fn for "none", matching
         # this accepted set = _RADIATION_BUILDERS keys).
-        _valid_radiation = ("none", "gray", "rrtmgp", "rrtmg")
+        _valid_radiation = VALID_RADIATION
         if self.radiation not in _valid_radiation:
             errors.append(
                 f"radiation must be one of {_valid_radiation}, "
                 f"got {self.radiation!r}"
             )
-        _valid_cloud_schemes = ("none", "sundqvist", "xu_randall", "resolved")
+        _valid_cloud_schemes = VALID_CLOUD_SCHEMES
         if self.cloud_scheme not in _valid_cloud_schemes:
             errors.append(
                 f"cloud_scheme must be one of {_valid_cloud_schemes}, "
                 f"got {self.cloud_scheme!r}"
             )
+        _valid_diag_condensate = ("constant", "adiabatic")
+        if self.cloud_diagnostic_condensate_scheme not in _valid_diag_condensate:
+            errors.append(
+                f"cloud_diagnostic_condensate_scheme must be one of "
+                f"{_valid_diag_condensate}, "
+                f"got {self.cloud_diagnostic_condensate_scheme!r}"
+            )
+        _valid_inhom = ("constant", "two_region")
+        if self.cloud_optics_inhomogeneity not in _valid_inhom:
+            errors.append(
+                f"cloud_optics_inhomogeneity must be one of {_valid_inhom}, "
+                f"got {self.cloud_optics_inhomogeneity!r}"
+            )
+        # The adiabatic in-cloud floor reaches radiation through the SHARED
+        # physics pipeline (build_physics_pipeline -> build_cloud_config), which
+        # serves the cd-grid family (cdgrid + aliases 'centered'/'finite_volume'),
+        # latlon_cgrid, and the ML backends — all of which DO thread it.  Only
+        # MPAS and spectral build RadiationConfig directly, bypassing the pipeline,
+        # and would SILENTLY fall back to the constant floor.  Reject the opt-in on
+        # ONLY those genuinely-bypassing backends (dispatch-hardening — a silent
+        # no-op is a hard error), so a cd-grid alias is not falsely blocked
+        # (codex/review).
+        _NO_CLOUD_THREAD_DISCRETIZATIONS = ("mpas", "spectral")
+        if (self.cloud_diagnostic_condensate_scheme != "constant"
+                and self.dycore.discretization
+                in _NO_CLOUD_THREAD_DISCRETIZATIONS):
+            errors.append(
+                "cloud_diagnostic_condensate_scheme="
+                f"{self.cloud_diagnostic_condensate_scheme!r} is not wired into "
+                f"the {self.dycore.discretization!r} radiation path (that backend "
+                "builds RadiationConfig directly, bypassing the shared cloud "
+                "pipeline); it would silently run 'constant'.  Use a "
+                "pipeline backend (cd-grid / latlon) or scheme='constant'."
+            )
+        # Cross-field: the diagnostic-condensate FLOOR exists only for the
+        # sub-grid diagnostic-fraction schemes (sundqvist / xu_randall); 'none'
+        # skips clouds and 'resolved' (CRM) excludes the floor.  It is radiatively
+        # active only when radiation consumes cloud paths (rrtmgp / rrtmg); 'none'
+        # and 'gray' ignore them.  Reject 'adiabatic' in combinations where it
+        # would be a silent no-op (dispatch-hardening).
+        if self.cloud_diagnostic_condensate_scheme != "constant":
+            if self.cloud_scheme not in ("sundqvist", "xu_randall"):
+                errors.append(
+                    "cloud_diagnostic_condensate_scheme="
+                    f"{self.cloud_diagnostic_condensate_scheme!r} only affects the "
+                    f"sundqvist/xu_randall diagnostic floor; cloud_scheme="
+                    f"{self.cloud_scheme!r} would ignore it."
+                )
+            if self.radiation not in ("rrtmgp", "rrtmg"):
+                errors.append(
+                    "cloud_diagnostic_condensate_scheme="
+                    f"{self.cloud_diagnostic_condensate_scheme!r} needs a "
+                    f"cloud-path radiation (rrtmgp/rrtmg); radiation="
+                    f"{self.radiation!r} ignores cloud paths."
+                )
         if self.microphysics not in VALID_MICROPHYSICS:
             errors.append(
                 f"microphysics must be one of {VALID_MICROPHYSICS}, "
@@ -1191,16 +1448,13 @@ class ExperimentConfig(NamedTuple):
                 f"convection must be one of {_valid_convection}, "
                 f"got {self.convection!r}"
             )
-        _valid_turbulence = (
-            "smagorinsky", "louis", "tke", "mynn25", "clubb_lite", "clubb",
-            "holtslag_boville", "ysu", "edmf", "none",
-        )
+        _valid_turbulence = VALID_TURBULENCE
         if self.turbulence not in _valid_turbulence:
             errors.append(
                 f"turbulence must be one of {_valid_turbulence}, "
                 f"got {self.turbulence!r}"
             )
-        _valid_surface_bulk = ("constant", "coare3", "large_yeager")
+        _valid_surface_bulk = VALID_SURFACE_BULK
         if self.surface_bulk_scheme not in _valid_surface_bulk:
             errors.append(
                 f"surface_bulk_scheme must be one of {_valid_surface_bulk}, "
@@ -1338,6 +1592,14 @@ class ExperimentConfig(NamedTuple):
                 f"land_gs_max (max stomatal conductance [mol/m2/s]) must be "
                 f"finite and in (0, 2]; got {self.land_gs_max!r}."
             )
+        # Marine-Sc cloud-top entrainment efficiency: finite, in [0, 1] (matches
+        # LouisConfig.__param_spec__; the not(lo<=x<=hi) form also rejects NaN/Inf).
+        if not (0.0 <= self.louis_cloudtop_entrainment_efficiency <= 1.0):
+            errors.append(
+                f"louis_cloudtop_entrainment_efficiency (marine-Sc cloud-top "
+                f"entrainment A) must be finite and in [0, 1]; got "
+                f"{self.louis_cloudtop_entrainment_efficiency!r}."
+            )
         # Soil-moisture init fraction of saturation: finite, in (0, 1].
         if not (0.0 < self.land_soil_moisture_init_frac <= 1.0):
             errors.append(
@@ -1370,8 +1632,11 @@ class ExperimentConfig(NamedTuple):
             ("cloud_q_c_diagnostic", 5.0e-5, 1.0e-3),
             ("cloud_conv_cloud_max", 0.1, 1.0),
             ("cloud_conv_cloud_condensate", 1.0e-5, 1.0e-3),
+            ("cloud_inhomogeneity_factor", 0.3, 1.0),
+            ("cloud_fsd", 0.0, 1.0),
             ("cloud_p_xr", 0.05, 1.0),
             ("cloud_alpha_xr", 10.0, 1000.0),
+            ("cloud_adiabatic_lwc_rate", 5.0e-7, 3.0e-6),
         ):
             _v = getattr(self, _f)
             if _v is not None and not (_lo <= _v <= _hi):
@@ -1393,10 +1658,7 @@ class ExperimentConfig(NamedTuple):
                     f"must equal turbulence={self.turbulence!r} (an override refines "
                     f"the same scheme's sub-config, it does not switch schemes)"
                 )
-        _valid_gwd = (
-            "rayleigh", "lindzen", "mcfarlane", "hines",
-            "prognostic_spectral", "e3sm_cam", "ml_emulator", "none",
-        )
+        _valid_gwd = VALID_GWD
         # A ``+``-joined string composes multiple GWD sources whose tendencies
         # are summed — orographic (mcfarlane/lindzen) and non-orographic
         # (hines/rayleigh/prognostic_spectral) parameterize distinct wave
@@ -1417,6 +1679,13 @@ class ExperimentConfig(NamedTuple):
                 errors.append(
                     f"composite gravity_wave_drag parts must each be one of "
                     f"{_composable}, got invalid {bad} in "
+                    f"{self.gravity_wave_drag!r}"
+                )
+            # Mirror get_gwd_fn's runtime rule so a duplicate composite
+            # fails HERE, not later during physics construction.
+            if len(set(_gwd_parts)) != len(_gwd_parts):
+                errors.append(
+                    f"composite gravity_wave_drag has duplicate parts: "
                     f"{self.gravity_wave_drag!r}"
                 )
             _n_stateful = sum(p in _composable_stateful for p in _gwd_parts)
@@ -1787,6 +2056,49 @@ class ExperimentConfig(NamedTuple):
             bechtold_cmt_c_d=getattr(amip_cfg, 'bechtold_cmt_c_d', 0.7),
             bechtold_cape_sink_heating_ratio=getattr(
                 amip_cfg, 'bechtold_cape_sink_heating_ratio', 5.0),
+            bechtold_conv_top_pa=getattr(
+                amip_cfg, 'bechtold_conv_top_pa', 15000.0),
+            bechtold_downdraft_evap=getattr(
+                amip_cfg, 'bechtold_downdraft_evap', 0.05),
+            bechtold_downdraft_alpha=getattr(
+                amip_cfg, 'bechtold_downdraft_alpha', 0.3),
+            bechtold_downdraft_rh_min=getattr(
+                amip_cfg, 'bechtold_downdraft_rh_min', 0.2),
+            bechtold_downdraft_transport=getattr(
+                amip_cfg, 'bechtold_downdraft_transport', False),
+            bechtold_downdraft_entrain_rate=getattr(
+                amip_cfg, 'bechtold_downdraft_entrain_rate', 3.0e-4),
+            bechtold_downdraft_detrain_scale_m=getattr(
+                amip_cfg, 'bechtold_downdraft_detrain_scale_m', 700.0),
+            # Missing-field fallback = True (the scheme default): a legacy
+            # flat config predating the field must get the SAME closure a
+            # fresh default run gets, not silently pin the old one.
+            bechtold_use_ifs_cape_closure=getattr(
+                amip_cfg, 'bechtold_use_ifs_cape_closure', True),
+            bechtold_use_ifs_subcloud_evap=getattr(
+                amip_cfg, 'bechtold_use_ifs_subcloud_evap', True),
+            bechtold_use_ifs_inplume_precip=getattr(
+                amip_cfg, 'bechtold_use_ifs_inplume_precip', True),
+            bechtold_dx_m=getattr(amip_cfg, 'bechtold_dx_m', 0.0),
+            bechtold_use_ifs_downdraft=getattr(
+                amip_cfg, 'bechtold_use_ifs_downdraft', False),
+            bechtold_use_ifs_shallow_closure=getattr(
+                amip_cfg, 'bechtold_use_ifs_shallow_closure', False),
+            bechtold_use_ifs_capdcycl=getattr(
+                amip_cfg, 'bechtold_use_ifs_capdcycl', False),
+            bechtold_use_ifs_land_rhebc=getattr(
+                amip_cfg, 'bechtold_use_ifs_land_rhebc', False),
+            bechtold_use_ifs_snow_melt=getattr(
+                amip_cfg, 'bechtold_use_ifs_snow_melt', False),
+            # Convective precip split family — copy through AMIP/checkpoint
+            # restore so the physical autoconversion isn't dropped to defaults
+            # (codex MED; convective_precip_efficiency was a pre-existing gap).
+            convective_precip_efficiency=getattr(
+                amip_cfg, 'convective_precip_efficiency', None),
+            convective_precip_split=getattr(
+                amip_cfg, 'convective_precip_split', 'constant'),
+            autoconv_q_c_crit=getattr(amip_cfg, 'autoconv_q_c_crit', 5.0e-4),
+            autoconv_pe_max=getattr(amip_cfg, 'autoconv_pe_max', 0.9),
             sigma_b=amip_cfg.sigma_b,
             k_BL_max_per_day=amip_cfg.k_BL_max_per_day,
             k_free_per_day=amip_cfg.k_free_per_day,
@@ -1823,7 +2135,7 @@ class ExperimentConfig(NamedTuple):
         export) — not in core runtime paths.
         """
         from legoesm.forcing.amip_config import AMIPExperimentConfig
-        return AMIPExperimentConfig(
+        _amip_kwargs = dict(
             resolution=self.grid.resolution,
             nlev=self.grid.nlev,
             dt=self.dycore.dt,
@@ -1920,6 +2232,26 @@ class ExperimentConfig(NamedTuple):
             sbm_RH_ref=self.sbm_RH_ref,
             sbm_cape_threshold=self.sbm_cape_threshold,
             bechtold_cape_threshold=self.bechtold_cape_threshold,
+            convective_precip_efficiency=self.convective_precip_efficiency,
+            convective_precip_split=self.convective_precip_split,
+            autoconv_q_c_crit=self.autoconv_q_c_crit,
+            autoconv_pe_max=self.autoconv_pe_max,
+            bechtold_conv_top_pa=self.bechtold_conv_top_pa,
+            bechtold_downdraft_evap=self.bechtold_downdraft_evap,
+            bechtold_downdraft_alpha=self.bechtold_downdraft_alpha,
+            bechtold_downdraft_rh_min=self.bechtold_downdraft_rh_min,
+            bechtold_downdraft_transport=self.bechtold_downdraft_transport,
+            bechtold_downdraft_entrain_rate=self.bechtold_downdraft_entrain_rate,
+            bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
+            bechtold_use_ifs_cape_closure=self.bechtold_use_ifs_cape_closure,
+            bechtold_use_ifs_subcloud_evap=self.bechtold_use_ifs_subcloud_evap,
+            bechtold_use_ifs_inplume_precip=self.bechtold_use_ifs_inplume_precip,
+            bechtold_dx_m=self.bechtold_dx_m,
+            bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,
+            bechtold_use_ifs_shallow_closure=self.bechtold_use_ifs_shallow_closure,
+            bechtold_use_ifs_capdcycl=self.bechtold_use_ifs_capdcycl,
+            bechtold_use_ifs_land_rhebc=self.bechtold_use_ifs_land_rhebc,
+            bechtold_use_ifs_snow_melt=self.bechtold_use_ifs_snow_melt,
             sigma_b=self.sigma_b,
             k_BL_max_per_day=self.k_BL_max_per_day,
             k_free_per_day=self.k_free_per_day,
@@ -1937,6 +2269,12 @@ class ExperimentConfig(NamedTuple):
             ensemble_size=self.ensemble_size,
             output_dir=self.output.output_dir,
         )
+        # Filter to the legacy AMIP schema's fields — ExperimentConfig has
+        # accreted many newer knobs the flat AMIPExperimentConfig never
+        # mirrored; drop those instead of raising (drift-proof round-trip).
+        return AMIPExperimentConfig(**{
+            k: v for k, v in _amip_kwargs.items()
+            if k in AMIPExperimentConfig._fields})
 
 
 # ======================================================================

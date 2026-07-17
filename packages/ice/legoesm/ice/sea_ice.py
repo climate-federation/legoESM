@@ -317,6 +317,22 @@ def step_sea_ice(
                     "backend for polar-cap dynamics.".format(config.dynamics)
                 )
 
+    # Fail-early config validation (unconditional — a bad value must never
+    # silently route to a default). n_categories keys every multi-cat branch;
+    # itd_remap dispatch routes any value other than 'lipscomb2001' to the
+    # legacy linear remap, so an unrecognised string (even at n_categories==1,
+    # which takes the v2 path) must NOT slip through.
+    if config.n_categories < 1:
+        raise ValueError(
+            f"step_sea_ice: config.n_categories={config.n_categories}; must be "
+            "a positive integer (>= 1)."
+        )
+    if config.itd_remap not in ("simple", "lipscomb2001"):
+        raise ValueError(
+            f"Unknown config.itd_remap={config.itd_remap!r}; expected "
+            "'simple' or 'lipscomb2001'."
+        )
+
     # Multi-category tracer conservation: the 'simple' (linear) ITD remap
     # transfers only h / concentration / temperature across category bins, NOT
     # the snow / bulk-salinity / pond tracers, so moving ice volume between
@@ -325,14 +341,6 @@ def step_sea_ice(
     # structure).  Require the tracer-aware Lipscomb (2001) remap whenever a
     # tracer is active in multi-category mode.
     if config.n_categories > 1:
-        # Validate the ITD-remap scheme up front (no silent fallback): the
-        # dispatch routes any value other than 'lipscomb2001' to the legacy
-        # linear remap, so an unrecognised string must NOT slip through.
-        if config.itd_remap not in ("simple", "lipscomb2001"):
-            raise ValueError(
-                f"Unknown config.itd_remap={config.itd_remap!r}; expected "
-                "'simple' or 'lipscomb2001'."
-            )
         # Tracer conservation: only 'lipscomb2001' carries the snow /
         # bulk-salinity / pond tracers across category bins.  Require it (NOT
         # merely reject 'simple') so a typo cannot route to the legacy linear

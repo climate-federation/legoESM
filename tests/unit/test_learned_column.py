@@ -1,16 +1,40 @@
-"""Smoke tests for atmosphere/physics/learned_column.py."""
+"""Smoke tests for the spectral column adapter in neural_physics.py.
+
+(Formerly learned_column.py; folded into neural_physics.py — file kept to
+preserve the physics-contract idealized_test reference.)
+"""
 
 from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import equinox as eqx
 import pytest
 
-from legoesm.atmosphere.physics.learned_column import (
+from legoesm.atmosphere.physics.neural_physics import (
     build_column_physics,
     make_column_physics_fn,
 )
 from legoesm.atmosphere.physics.neural_physics import NeuralPhysics
+
+
+def _perturb_output_head(model: NeuralPhysics, key, scale: float = 0.1):
+    """Give the final layer nonzero weights (simulate a trained network).
+
+    ``NeuralPhysics`` ZERO-inits its final layer so an UNTRAINED net emits
+    exactly zero tendencies (epoch-0 rollout = pure dycore, #797).  Tests that
+    check the head RESPONDS to inputs (SST sensitivity, flux/moisture wiring)
+    would be vacuous on that degenerate net — every output is 0.  Fill the last
+    layer with small random weights so the plumbing carries a real signal.
+    """
+    last = model.layers[-1]
+    wkey, bkey = jax.random.split(key)
+    new_last = eqx.tree_at(
+        lambda l: (l.weight, l.bias), last,
+        (jax.random.normal(wkey, last.weight.shape) * scale,
+         jax.random.normal(bkey, last.bias.shape) * scale),
+    )
+    return eqx.tree_at(lambda m: m.layers[-1], model, new_last)
 
 
 def test_build_column_physics_returns_neural_physics():
@@ -79,9 +103,12 @@ def test_neural_flux_head_writes_predicted_fluxes_into_held():
     nlev = 4
     grid = create_latlon_grid(n_lat=8)   # latlon (float32-OK; the AIMIP grid)
     adapter = make_adapter(grid)
-    # Large flux scale + nonzero random weights -> nonzero predicted fluxes.
+    # Large flux scale + nonzero head weights -> nonzero predicted fluxes.
+    # (NeuralPhysics zero-inits its final layer; perturb it so the flux head
+    # is non-degenerate and the write-into-held_* plumbing is actually tested.)
     nn = NeuralPhysics(nlev=nlev, hidden_dim=8, n_layers=2,
                        key=jax.random.PRNGKey(3), flux_output_scale=100.0)
+    nn = _perturb_output_head(nn, jax.random.PRNGKey(30))
     step = make_neural_step_unified(nn, adapter)
 
     nlat, nlon = int(grid.n_lat), int(grid.n_lon)
@@ -151,6 +178,9 @@ def test_column_physics_responds_to_prescribed_sst():
     model = build_column_physics(nlev=nlev, hidden_dim=8, n_layers=2,
                                  residual_scale=0.1,
                                  key=jax.random.PRNGKey(11))
+    # Non-degenerate head so the T_sfc feature can actually move the output
+    # (zero-init final layer -> identical zero for any forcing).
+    model = _perturb_output_head(model, jax.random.PRNGKey(31))
     fn = make_column_physics_fn(model, grid)
     carry, sigma = _mini_spectral_state(grid, nlev)
     state = carry_to_spectral_state(carry, grid)
@@ -249,6 +279,9 @@ def test_column_physics_moisture_head_is_live():
     model = build_column_physics(nlev=nlev, hidden_dim=8, n_layers=2,
                                  residual_scale=0.1,
                                  key=jax.random.PRNGKey(13))
+    # Non-degenerate head so the moisture output is nonzero (zero-init final
+    # layer would make dq_v identically zero and the assert vacuous).
+    model = _perturb_output_head(model, jax.random.PRNGKey(33))
     fn = make_column_physics_fn(model, grid)
     carry, sigma = _mini_spectral_state(grid, nlev)
     state = carry_to_spectral_state(carry, grid)

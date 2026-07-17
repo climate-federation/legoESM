@@ -1,0 +1,6 @@
+# AIMIP-at-scale T106 all-years suite: sfno_full (full-atmosphere
+# emulator — no dycore, no physics). See base_t106_allyears.yaml.
+base: config/aimip/scale/base_t106_allyears.yaml
+variants:
+- sfno_full
+output_dir: results/aimip_scale_t106/sfno_full

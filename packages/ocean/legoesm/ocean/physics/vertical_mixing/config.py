@@ -240,7 +240,9 @@ class TKEConfig(NamedTuple):
     c_eps: float = 0.7
     alpha_tke: float = 30.0
     mxl_min: float = 1.0e-8
-    tke_mxl_choice: int = 2
+    tke_mxl_choice: int = 2          # 1/2 = Veros; 3 = NEMO nn_mxl=3 (lup/ldown
+                                     # sweeps + the ln_mxl0 stress anchor)
+    mxl0_min_m: float = 0.04         # NEMO rn_mxl0 [m] (kappa*z0 = 0.4*0.1)
     kappaM_min: float = 2.0e-4
     kappaM_max: float = 100.0            # convective ceiling on K_M [m^2/s] (Veros default)
     kappaH_min: float = 2.0e-5
@@ -253,6 +255,15 @@ class TKEConfig(NamedTuple):
     bg_diff_width_m: float = 222.2       # Bryan-Lewis transition width [m] (published fit)
     bg_diff_scale: float = 1.0e-4        # abyssal tracer-diffusivity floor amplitude [m^2/s]
     tke_surface_min: float = 1.0e-4      # surface TKE floor [m^2/s^2]
+    # Surface TKE boundary condition:
+    #   "veros_flux" (default)  — Neumann wind-work flux injection
+    #                             surface_flux=(|tau|/rho0)^1.5 (Veros tke.py).
+    #   "nemo_dirichlet"        — NEMO nn_bc_surf=1: HOLD the top interface at
+    #                             en(1)=max(rn_emin0, rn_ebb*|tau|/rho0)
+    #                             (zdftke.F90:264-269) as a Dirichlet value in
+    #                             the implicit solve. ~60x larger surface TKE
+    #                             than the flux BC under an ~0.07 Pa wind.
+    surface_bc: str = "veros_flux"
     tke_background: float = 1.0e-6       # interior TKE floor [m^2/s^2]
     # ----- Static-stability N^2 mode (deep-ocean ventilation / convection) -----
     # ``"insitu"`` (default, BIT-IDENTICAL legacy): N^2 from the in-situ
@@ -267,6 +278,19 @@ class TKEConfig(NamedTuple):
     #   ``enable_tke`` path does. Requires the caller to pass T/S/pressure
     #   + an EOS to :func:`tke_vertical_mixing`.
     n2_mode: str = "insitu"
+    # ----- Diffusivity-stage N² time level (NEMO eosbn2 Nnow sequencing) -----
+    # ``False`` (default, BIT-IDENTICAL legacy): the vertical-mixing
+    #   diffusivity-stage N² is sampled on the POST-advection mid-step T/S
+    #   (the state the implicit-mixing call acts on).
+    # ``True``: sample it on the BEFORE-advection (start-of-step, Nnow) T/S,
+    #   matching NEMO ``stp``: ``eos → bn2(Nnow)`` at step start, THEN
+    #   ``tra_adv/tra_ldf/tra_zdf`` consume that ``avt``. The single-step
+    #   ``fct2`` tracer drift at the deepest wet cell was flipping the
+    #   marginal bottom interface to N²<0 (spurious deep convection, 2400×
+    #   avt spike; BOTTOM_N2_DIAGNOSIS_FINDINGS.md). Only the diffusivity-
+    #   stage N² source changes (the post-mixing ``taup1`` N² recompute is
+    #   untouched); consulted only for ``n2_mode="adiabatic"``.
+    n2_before_advection: bool = False
     # ----- Veros vertical-metric slots (the TKE metric-consistency fix) -----
     # legoESM's historical TKE chain mixes vertical-metric conventions: it
     # uses the centre spacing ``dz_half`` (Veros dzw) in slots where Veros
@@ -632,9 +656,20 @@ class CATKEConfig(NamedTuple):
     maximum_tke_diffusivity: float = float("inf")     # K_e cap [m^2/s]
 
 
+#: Canonical set of vertical-mixing closures ``compute_vertical_K_profiles``
+#: dispatches. SINGLE SOURCE OF TRUTH -- the k_profiles.py fail-loud raise reads
+#: this instead of a hand-copied literal list, exactly as ``VALID_EOS_SCHEMES``
+#: backs ``make_eos_fn`` (so the dispatch and the "valid schemes" message can
+#: never drift). Every member is reachable through the public YAML key
+#: ``ocean.physics.vertical_mixing.scheme`` (pinned by test_config_footguns).
+VALID_VERTICAL_MIXING_SCHEMES = frozenset(
+    {"none", "constant", "richardson", "tke", "catke", "kpp"}
+)
+
+
 class VerticalMixingConfig(NamedTuple):
     """Top-level vertical mixing configuration."""
-    scheme: str = "constant"  # "constant", "richardson", "kpp", "tke", "catke", "none"
+    scheme: str = "constant"  # one of VALID_VERTICAL_MIXING_SCHEMES
     constant: ConstantVerticalMixingConfig = ConstantVerticalMixingConfig()
     richardson: RichardsonVerticalMixingConfig = RichardsonVerticalMixingConfig()
     kpp: KPPConfig = KPPConfig()

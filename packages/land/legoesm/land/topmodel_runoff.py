@@ -5,7 +5,8 @@ Where the bucket generates saturation-excess (Dunne) runoff only once the WHOLE
 column overfills, TOPMODEL represents SUB-GRID topographic wetness: a fraction
 ``f_sat`` of the grid cell is saturated (and runs off any rain immediately),
 and the column drains a topographically-controlled BASEFLOW ``q_drai`` even
-when unsaturated.  Both decay exponentially with the water-table depth ``z_wt``:
+when unsaturated.  Both decay exponentially with the water-table depth ``z_wt``,
+with ``f_over``/``f_drai`` the EFFECTIVE decay rates:
 
     f_sat  = f_max   * exp(-f_over * z_wt)          [saturated area fraction]
     q_drai = q_drai_max * exp(-f_drai * z_wt)       [baseflow / subsurface runoff]
@@ -15,6 +16,37 @@ For the slab bucket the water-table depth is diagnosed from the storage deficit
 conserved exactly (with ``limit_evaporation=True``):
 ``P_input == dW/dt + evap_actual + runoff`` where
 ``runoff = surface_runoff + baseflow``.
+
+Departures from CLM4.5 (the defaults are legoESM choices, NOT CLM values):
+  * CLM4.5 §7 eq. 7.4 writes ``f_sat = f_max*exp(-0.5*f_over_CLM*z)`` with
+    ``f_over_CLM = 0.5 m^-1`` (effective decay 0.25 m^-1).  Here ``f_over`` IS
+    the effective rate; the default ``0.5`` is thus a factor of two steeper than
+    CLM's effective decay.  ``f_over``/``f_drai``/``q_drai_max`` are tunable
+    (tier-2) knobs.
+  * ``q_drai`` omits CLM's frozen-soil impedance factor ``(1 - f_ice)`` (this is
+    an unfrozen-slab specialization); ``q_drai_max`` default (1e-3) is a legoESM
+    value, not CLM's ~5.5e-3.
+  * ``z_wt = z_wt_max*(1 - W/W_max)`` is a legoESM slab CLOSURE onto the single
+    bucket store (there is no layer-resolved soil column); it is internally
+    consistent but NOT a literature-faithful water table.
+
+Faithfulness
+------------
+``tests/land/unit/test_topmodel_runoff_faithful.py`` establishes, in order of
+authority: (1) the DEFINING water-budget closure ``P_input == dW/dt + evap +
+runoff`` (and ``runoff == runoff_surface + runoff_base``) to a tight pin on every
+``limit_evaporation=True`` path — Hortonian, Dunne-overflow, evap-cap,
+baseflow-cap, and the ``infiltration_excess=False`` branch (truth tier, outranks
+form-matching); (2) a whole-step SEPARATE scalar reference implementation pinning
+all five outputs (both evap settings) so the surface/base SPLIT is checked, not
+just the conserved sum; (3) the
+``f_sat``/``q_drai`` response laws to high precision (rel 1e-13) for both the
+default AND an asymmetric non-default config (so an implementation that ignores
+``config`` fails).  It also proves the baseflow and evaporation caps genuinely
+BIND, and pins the factor-2 f_sat-decay departure from CLM4.5 as an explicit
+canary.  See "Departures from CLM4.5" above; ``z_wt`` is a legoESM slab closure,
+NOT claimed literature-faithful, and the gSAM ``SLM/runoff.f90`` is a different
+scheme (2D flood routing), not the oracle.
 
 References
 ----------
@@ -55,12 +87,13 @@ __param_spec__ = {
 
 
 class TopmodelConfig(NamedTuple):
-    """SIMTOP TOPMODEL runoff parameters (CLM4.5 defaults)."""
+    """SIMTOP-style TOPMODEL runoff parameters (legoESM defaults, tunable — see
+    the module "Departures from CLM4.5" note; these are NOT CLM's exact values)."""
     f_max: float = 0.38          # Max saturated area fraction [-]
-    f_over: float = 0.5          # Saturated-fraction decay with z_wt [1/m]
-    q_drai_max: float = 1.0e-3   # Max baseflow (subsurface runoff) [kg/m^2/s]
+    f_over: float = 0.5          # EFFECTIVE saturated-fraction decay [1/m] (2x CLM's effective 0.25)
+    q_drai_max: float = 1.0e-3   # Max baseflow [kg/m^2/s] (legoESM default, not CLM's ~5.5e-3)
     f_drai: float = 2.5          # Baseflow decay with z_wt [1/m]
-    z_wt_max: float = 5.0        # Water-table depth at zero storage [m]
+    z_wt_max: float = 5.0        # Slab water-table depth at zero storage [m] (legoESM closure)
 
 
 def water_table_depth(W, W_max, config: TopmodelConfig):

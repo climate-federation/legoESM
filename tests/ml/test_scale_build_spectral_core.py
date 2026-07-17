@@ -216,3 +216,81 @@ def test_era5_forcing_calendar_convention():
     # Consistency with the rollout's advance: doy + sod/86400 is the fractional
     # 1-based day the declination sees at step 0.
     assert doy + sod / 86400.0 == 33.5
+
+
+# ---- scattered training windows (#1047 finding 2) ----
+
+_SNAPS_PER_DAY = 4  # 6-hourly ERA5 cadence
+
+def _fake_times():
+    # 6-hourly datetimes across 2015-01-01 .. 2015-07-01 (well past day 90).
+    return np.arange("2015-01-01", "2015-07-01", np.timedelta64(6, "h"),
+                     dtype="datetime64[ns]")
+
+
+def test_resolve_windows_precedence_and_validation():
+    from legoesm.training.scale_build import _resolve_windows
+
+    yml = {"train_windows": [(2015, 0, 1)]}
+    # None everywhere -> consecutive mode
+    assert _resolve_windows(SimpleNamespace(), {}) is None
+    # YAML train_windows honoured
+    assert _resolve_windows(SimpleNamespace(), yml) == [(2015, 0, 1)]
+    # cfg.windows overrides YAML
+    cfg = SimpleNamespace(windows=[(2016, 90, 2), (2016, 270, 2)])
+    assert _resolve_windows(cfg, yml) == [(2016, 90, 2), (2016, 270, 2)]
+    # validation: wrong arity / bad values raise
+    with pytest.raises(ValueError, match="year, day_offset, n_days"):
+        _resolve_windows(SimpleNamespace(windows=[(2015, 0)]), {})
+    with pytest.raises(ValueError, match="day_offset>=0"):
+        _resolve_windows(SimpleNamespace(windows=[(2015, -1, 1)]), {})
+    with pytest.raises(ValueError, match="n_days>=1"):
+        _resolve_windows(SimpleNamespace(windows=[(2015, 0, 0)]), {})
+    # ICs must stay in-year (else the window silently samples the next year with a
+    # wrong calendar label). 2015 is not a leap year -> 365 days.
+    with pytest.raises(ValueError, match="must stay within 2015"):
+        _resolve_windows(SimpleNamespace(windows=[(2015, 364, 2)]), {})
+    # ...but a window ending exactly on Dec 31 is allowed (364 + 1 == 365).
+    assert _resolve_windows(SimpleNamespace(windows=[(2015, 364, 1)]), {}) == [(2015, 364, 1)]
+    # leap year gets the extra day (366): offset 365 + 1 day is valid in 2016.
+    assert _resolve_windows(SimpleNamespace(windows=[(2016, 365, 1)]), {}) == [(2016, 365, 1)]
+
+
+def test_training_sample_indices_consecutive_default():
+    """No windows -> the first n_days of each train year (back-compat)."""
+    from legoesm.training.scale_build import _training_sample_indices
+
+    times = _fake_times()
+    cfg = SimpleNamespace(n_days=2, smoke=False)
+    yml = {"train_years": [2015]}
+    idx = list(_training_sample_indices(cfg, yml, times, _SNAPS_PER_DAY, stride=1))
+    # 2 days x 4 snaps = 8 samples starting at index 0, target = ic + stride.
+    assert len(idx) == 2 * _SNAPS_PER_DAY
+    assert idx[0] == (2015, 0, 1)
+    assert [i_ic for _, i_ic, _ in idx] == list(range(8))
+    assert all(i_tg == i_ic + 1 for _, i_ic, i_tg in idx)
+
+
+def test_training_sample_indices_scattered_windows():
+    """Windows scatter samples across the calendar at the given day offsets."""
+    from legoesm.training.scale_build import _training_sample_indices
+
+    times = _fake_times()
+    cfg = SimpleNamespace(smoke=False, windows=[(2015, 0, 1), (2015, 90, 1)])
+    idx = list(_training_sample_indices(cfg, {}, times, _SNAPS_PER_DAY, stride=2))
+    assert len(idx) == 2 * _SNAPS_PER_DAY               # two 1-day windows
+    first = [i_ic for _, i_ic, _ in idx[:4]]
+    second = [i_ic for _, i_ic, _ in idx[4:]]
+    assert first == [0, 1, 2, 3]                        # window at day 0
+    assert second == [360, 361, 362, 363]              # window at day 90 (90*4)
+    assert all(i_tg == i_ic + 2 for _, i_ic, i_tg in idx)  # stride honoured
+
+
+def test_training_sample_indices_smoke_stops_after_one_window():
+    from legoesm.training.scale_build import _training_sample_indices
+
+    times = _fake_times()
+    cfg = SimpleNamespace(smoke=True, windows=[(2015, 0, 1), (2015, 90, 1)])
+    idx = list(_training_sample_indices(cfg, {}, times, _SNAPS_PER_DAY, stride=1))
+    assert {y for y, _, _ in idx} == {2015}
+    assert len(idx) == _SNAPS_PER_DAY                   # only the first window

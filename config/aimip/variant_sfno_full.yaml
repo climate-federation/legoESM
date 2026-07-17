@@ -1,0 +1,32 @@
+# AIMIP variant: SFNO full-atmosphere emulator (no dycore, no physics).
+#
+# The trained SFNO directly maps ``state_t -> state_{t+dt_sfno}``
+# (:class:`SFNOPrimitiveEquationModel` in ``state_update`` mode), so the
+# ENTIRE atmosphere — dynamics AND all physics including radiation — is
+# learned.  A post-hoc dry-air-mass correction is applied after each
+# macro step.  Dispatched by ``scripts/run/run_aimip.py`` to
+# ``train_sfno_full_spectral`` when ``aimip_variant == "sfno_full"``.
+
+aimip_variant: "sfno_full"
+
+# Nothing classical runs — dycore and every physics scheme (radiation
+# included) are emulated by the SFNO.  The "none" tags are informational
+# (not consumed by run_aimip) and record that no classical scheme is
+# active.
+convection: "none"
+turbulence: "none"
+gravity_wave_drag: "none"
+cloud_scheme: "none"
+microphysics: "none"
+radiation: "none"
+
+# SFNO architecture — same budget as variant_sfno_physics for a fair
+# like-for-like comparison in the scorecard.
+sfno_embed_dim: 64
+sfno_n_blocks: 4
+sfno_mlp_expansion: 4
+sfno_seed: 0
+
+# Macro time step of the emulator [s]: 6 h, the standard
+# SFNO/FourCastNet autoregressive cadence.
+dt_sfno: 21600.0

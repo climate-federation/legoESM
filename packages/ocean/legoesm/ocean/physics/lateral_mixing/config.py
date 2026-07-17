@@ -56,6 +56,7 @@ __param_spec__ = {
         "excluded": {
             "K_iso_steep": "default 0 = disabled/off (enable via config, not training)",
             "taper_width_frac": "numerics: solver/CFL/smoothing parameter",
+            "mld_rho_c": "convention: mixed-layer-depth density criterion (NEMO ldfslp ramp)",
         },
         "params": {
             "S_max": {"units": "1", "bounds": (0.0033, 0.03), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
@@ -214,6 +215,17 @@ class GMRediConfig(NamedTuple):
       small residual that accumulates through dynamical feedback).
       Kept as a regression-coverage option and as a fallback for
       cheap short integrations.
+    - ``"nemo_iso_lap"`` — NEMO 5.0.2's standard rotated-Laplacian
+      iso-neutral operator (``traldf_iso``, ``#define iso_lap``),
+      ported term-by-term and verified against NEMO's dumped
+      ``ttrd_ldf`` (T corr 0.9997 with NEMO's own slopes; 0.96 with
+      legoESM's centered slopes).  This is a **pure Redi** operator
+      (NEMO ``traldf_iso`` has no GM bolus term): the dispatcher raises
+      if ``kappa_GM != 0`` is requested with this scheme.  The explicit
+      operator is the skew / off-diagonal iso-neutral part
+      (``ln_traldf_msc=F`` ⇒ the K33 diagonal goes to the implicit
+      vertical solve).  v1 flat-bottom / single-slope-field (mode-(b))
+      approximation — see the operator docstring.
     """
     kappa_GM: float = 1e3       # GM bolus transport coefficient [m^2/s]
     kappa_Redi: float = 1e3     # Redi isopycnal diffusivity [m^2/s]
@@ -229,7 +241,7 @@ class GMRediConfig(NamedTuple):
     # Treguier-1997 adaptive κ (NEMO nn_aei_ijk_t=21, the oracle scaling) —
     # mutually exclusive with visbeck.enabled (dispatch raises on both).
     treguier: TreguierConfig = TreguierConfig()
-    slope_scheme: str = "triads"     # "triads" (default) or "centered"
+    slope_scheme: str = "triads"     # "triads" (default), "centered", or "nemo_iso_lap"
     slope_density: str = "in_situ"   # "in_situ" (default) or "neutral"
     # ^ Density gradient used to build the isoneutral SLOPES (NOT the tracer
     # gradients, which are always the raw T/S gradients).
@@ -270,6 +282,23 @@ class GMRediConfig(NamedTuple):
     # REMAINING NEMO deviation (documented): the ldfslp mixed-layer
     # linear slope ramp toward the surface is not implemented yet.
     slope_limit: str = "dm95_taper"
+    # NEMO ldfslp mixed-layer slope ramp (default False = BYTE-IDENTICAL).
+    # When True, isoneutral slopes are linearly ramped to 0 through the surface
+    # mixed layer (ldfslp.F90:284-297 w-point branch: wslp(k) = gdepw(k)/max(hml,10)
+    # * wslp_base, wslp_base = slope just below the ML base), matching NEMO's
+    # ldfslp which flattens slopes in the ML where stratification -> 0 makes the
+    # raw slope blow up.  MLD from the zdfmxl density criterion (below).  Applied
+    # to the final tapered slopes; the interior / below-ML numerics (which already
+    # match NEMO) are untouched.  Oracle-matching option; opt-in.
+    nemo_mld_slope_ramp: bool = False
+    # Density criterion [kg/m^3] for the ramp's mixed-layer depth (NEMO zdfmxl
+    # rn_rho_c; potential-density difference from the ~10 m reference level).
+    mld_rho_c: float = 0.01
+    # NEMO ldfslp horizontal (1-2-1)⊗(1-2-1)/16 Shapiro smoother on the final
+    # interface slopes (ldfslp.F90:304-315).  legoESM omitted it, leaving the
+    # interior slope amplitude ~1.27x too large; wet-renormalized so land drops
+    # out.  Applied after the ML ramp (NEMO order).  Oracle-matching; opt-in.
+    nemo_slope_shapiro: bool = False
     # NEMO nn_aht_ijk_t=20 grid-size scaling: the effective kappa_Redi is
     # cfg.kappa_Redi * cos(lat) per row (Mercator dx ∝ cos φ, so
     # aht(φ) = ½·U_d·Δx(φ) with cfg.kappa_Redi = the EQUATOR value

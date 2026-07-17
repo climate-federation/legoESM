@@ -216,6 +216,11 @@ def parse_args():
     p.add_argument("--sgs-model", choices=["smagorinsky", "vreman"],
                    default="vreman")
     p.add_argument("--cs", type=float, default=0.18)
+    p.add_argument("--sgs-buoyancy", dest="sgs_buoyancy", action="store_true",
+                   default=True, help="Lilly stable-stratification SGS suppression "
+                   "(damps entrainment above cloud; on by default).")
+    p.add_argument("--no-sgs-buoyancy", dest="sgs_buoyancy", action="store_false",
+                   help="disable Lilly SGS suppression (strain-only ν_t).")
     p.add_argument("--nu-floor", type=float, default=0.0)
     p.add_argument("--time-scheme", choices=["rk3", "ab2"], default="rk3")
     p.add_argument("--micro-every", type=int, default=1,
@@ -254,6 +259,7 @@ def build(args, dtype):
         smagorinsky_dynamic=args.dynamic, sgs_model=args.sgs_model,
         time_scheme=args.time_scheme, nu_floor=args.nu_floor,
         buoyancy=True, theta_ref0=300.0, pr_sgs=1.0,
+        sgs_buoyancy=args.sgs_buoyancy,
         w_hyperdiff_coeff=args.w_hyperdiff,
         div_damping_coeff=args.div_damping,
         theta_hyperdiff_coeff=args.theta_hyperdiff,
@@ -773,6 +779,14 @@ def main():
         _save(0.0)                       # the INITIAL state (codex (f))
     t = 0.0; i = 0
     created_tot = 0.0
+    # Trailing time-mean of the cloud metrics over the quasi-steady 2nd half.
+    # Instantaneous cloud cover / LWP of intermittent (cumulus) cloud fields
+    # fluctuate strongly — a single end-of-run snapshot can land in a transient
+    # trough and read ~0 even when the mean cloudiness is healthy (RICO spin-up
+    # pulse; verified). GCSS intercomparisons report TIME-MEANS. Sampled at the
+    # print cadence for t > 0.5·T; use a smaller --print-every for a denser mean.
+    cc_sum = lwp_sum = 0.0; n_cavg = 0
+    t_cavg0 = 0.5 * T
     next_rec = T / args.record_frames if rec else np.inf
     t0 = time.time()
     while t < T:
@@ -791,6 +805,8 @@ def main():
                   f"cc={d['cloud_cover']:.3f} LWP={d['lwp']:6.2f} g/m² "
                   f"qc_max={float(jnp.max(st.tracers[..., 1])):.2e} "
                   f"u*={float(us):.3f} clip_q={created_tot:.2e}", flush=True)
+            if t >= t_cavg0:
+                cc_sum += float(d["cloud_cover"]); lwp_sum += float(d["lwp"]); n_cavg += 1
         if rec and t >= next_rec and frame < args.record_frames:
             _save(t / 3600.0); next_rec += T / args.record_frames
     wall = time.time() - t0
@@ -798,11 +814,15 @@ def main():
     if rec and frame < args.record_frames:
         _save(t / 3600.0)
     d = moist_profiles(st, g, ref)
+    cc_avg = cc_sum / n_cavg if n_cavg else float(d["cloud_cover"])
+    lwp_avg = lwp_sum / n_cavg if n_cavg else float(d["lwp"])
     np.savez(args.output / "bomex_les_final.npz", z=zc_np, **{
         k: v for k, v in d.items() if isinstance(v, np.ndarray)},
-        cloud_cover=d["cloud_cover"], lwp=d["lwp"])
-    print(f"  FINAL: cloud cover={d['cloud_cover']:.3f} (ref 0.10-0.15), "
-          f"LWP={d['lwp']:.2f} g/m² (ref ~5-10), "
+        cloud_cover=d["cloud_cover"], lwp=d["lwp"],
+        cloud_cover_timemean=cc_avg, lwp_timemean=lwp_avg)
+    print(f"  FINAL: cloud cover={d['cloud_cover']:.3f} inst / {cc_avg:.3f} "
+          f"2nd-half-mean (ref 0.10-0.15), "
+          f"LWP={d['lwp']:.2f} inst / {lwp_avg:.2f} mean g/m² (ref ~5-10), "
           f"qc_max={d['qc'].max():.2e}")
     print(f"  profiles -> {args.output}/bomex_les_final.npz")
     return 0

@@ -1,9 +1,19 @@
 # AIMIP at scale — Derecho / Levante
 
-Train the AIMIP variants (`classical`, `column_nn`, `sfno_physics`) at
-**~1° resolution (T106, 160×320) on ALL training years 1979–2014** on a single
-80 GB A100. This is the scaled-up version of the Ginsburg T63 (~1.9°, subset of
-years) runs.
+Train the AIMIP variants at **~1° resolution (T106, 160×320) on ALL training
+years 1979–2014** on a single 80 GB A100. This is the scaled-up version of the
+Ginsburg T63 (~1.9°, subset of years) runs.
+
+The variant ladder:
+
+- `classical` — full physics suite (edmf/louis/mcfarlane/sundqvist/xu_randall)
+  + **RRTMGP** correlated-k radiation; scheme knobs trained end-to-end.
+- `column_nn` — **ALL physics, radiation included, learned** by a per-column
+  MLP; no classical scheme runs alongside it.
+- `sfno_full` — SFNO emulates the **ENTIRE atmosphere** (no dycore, no
+  physics; direct `state_t → state_{t+6h}` with post-hoc dry-mass correction).
+- `sfno_physics` (optional intermediate rung) — SFNO learns all physics,
+  spectral dycore retained.
 
 ## Why single-GPU (not multi-node)
 
@@ -18,7 +28,9 @@ Derecho/Levante fits what Ginsburg's 24–40 GB could not:
 - RRTMGP radiation (not the gray fallback),
 - 2-step autoregressive rollout,
 - spatial-surface trainable coefficients,
-- higher NN capacity (SFNO `embed_dim=96`/6 blocks; column MLP 512/6).
+- higher NN capacity (column MLP 512/6; the SFNO variants' overlays pin
+  `embed_dim=64`/4 blocks — matched between `sfno_physics` and `sfno_full` —
+  and can be raised together on the 80 GB card).
 
 If you want to go beyond one card, the levers are ensemble (one variant/seed per
 GPU, already how the three variants run) or the lat-lon C-grid PE training path
@@ -67,12 +79,12 @@ account. Then submit **one job per variant**:
 
 ```bash
 # Derecho (PBS)
-qsub -v VARIANT=sfno_physics scripts/cluster/aimip_scale/train_aimip_derecho.pbs
 qsub -v VARIANT=classical    scripts/cluster/aimip_scale/train_aimip_derecho.pbs
 qsub -v VARIANT=column_nn    scripts/cluster/aimip_scale/train_aimip_derecho.pbs
+qsub -v VARIANT=sfno_full    scripts/cluster/aimip_scale/train_aimip_derecho.pbs
 
 # Levante (SLURM)
-SBATCH_ACCOUNT=<proj> VARIANT=sfno_physics \
+SBATCH_ACCOUNT=<proj> VARIANT=sfno_full \
   sbatch --export=ALL scripts/cluster/aimip_scale/train_aimip_levante.slurm
 ```
 
@@ -90,17 +102,20 @@ more per sample than the 12 h phase. Budget roughly (7 curriculum epochs):
 
 | variant       | ~12h-phase epoch (A100-80) | full curriculum |
 |---------------|----------------------------|-----------------|
+| sfno_full     | ~1–2 h (no dycore)         | ~15–30 h (epochs; no curriculum) |
 | sfno_physics  | ~2–3 h                     | ~40–60 h (4–6 links) |
 | column_nn     | ~2–3 h                     | ~40–60 h |
 | classical     | ~6–8 h (RRTMGP)            | ~120 h+ (chain) |
 
+`sfno_full` ignores the curriculum and chunked streaming (its training loop
+loads the full window set and checkpoints per-epoch only — the variant overlay
+neutralizes those base keys explicitly).
+
 The self-chaining handles the walltime; note the LR schedule restarts at each
 resume (warned in the log — weights are unaffected). Lower the curriculum
-epoch counts in the base, or set `aimip_radiation: gray` for the NN variants
-(they replace physics anyway) to cut wall clock.
-
-Lower `aimip_n_epochs` in the base, or set `aimip_radiation: gray` for the NN
-variants (they replace physics anyway) to cut wall clock.
+epoch counts / `aimip_n_epochs` in the base to cut wall clock.
+(`aimip_radiation` is read only by the `classical` path — the NN variants
+never run classical radiation, so that knob does not affect their cost.)
 
 ## After training
 

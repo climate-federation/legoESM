@@ -182,6 +182,7 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.clouds.CloudConfig.conv_cloud_condensate": "cloud_conv_cloud_condensate",
     "atm.clouds.CloudConfig.p_xr": "cloud_p_xr",
     "atm.clouds.CloudConfig.alpha_xr": "cloud_alpha_xr",
+    "atm.clouds.CloudConfig.adiabatic_lwc_rate": "cloud_adiabatic_lwc_rate",
     # convection -> _resolve_convection (physics_pipeline)
     "atm.conv.SBMConfig.tau_c": "sbm_tau_c",
     "atm.conv.SBMConfig.rh_ref": "sbm_RH_ref",
@@ -191,6 +192,18 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.conv.BechtoldConfig.cmt_c_u": "bechtold_cmt_c_u",
     "atm.conv.BechtoldConfig.cmt_c_d": "bechtold_cmt_c_d",
     "atm.conv.BechtoldConfig.cape_sink_heating_ratio": "bechtold_cape_sink_heating_ratio",
+    # cloud inhomogeneity (Cahalan) + convective autoconversion split (Sundqvist)
+    # -> build_cloud_config / _resolve_convection (physics_pipeline)
+    "atm.clouds.CloudConfig.cloud_inhomogeneity_factor": "cloud_inhomogeneity_factor",
+    "atm.clouds.CloudConfig.cloud_fsd": "cloud_fsd",
+    "atm.conv.BechtoldConfig.autoconv_pe_max": "autoconv_pe_max",
+    "atm.conv.BechtoldConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
+    "atm.conv.TiedtkeConfig.autoconv_pe_max": "autoconv_pe_max",
+    "atm.conv.TiedtkeConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
+    # marine-Sc cloud-top entrainment -> turbulence_config_for (single source of
+    # truth for FV/MPAS/spectral); the flat scalar is the single on/off+strength
+    # knob (0 = off), so --params both sets and activates it.
+    "atm.turb.LouisConfig.cloudtop_entrainment_efficiency": "louis_cloudtop_entrainment_efficiency",
     # NOTE: the idealized GRAY radiation scheme threads a few of its params
     # (tau_equator, tau_pole via same-named scalars; sfc_albedo via the shared
     # `albedo_ocean` scalar) — deliberately NOT in this map.  Gray is not the

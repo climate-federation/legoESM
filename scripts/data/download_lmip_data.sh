@@ -13,9 +13,11 @@
 #                     glade three_stream archive (year 1920 available).
 #                     Source dir: --crujra-src / $LEGOESM_CRUJRA_SRC.
 #
-#   data/legoesm_surfdata_c250617.nc — full harmonized surfdata (soil + CLM5
-#                     PFT/LAI/cover), DOWNLOADED from Zenodo (record 21087964).
-#                     Regridded to the model grid at run time by the driver.
+#   data/legoesm_surfdata_c260716.nc — full harmonized surfdata (soil + CLM5
+#                     PFT/LAI/cover), DOWNLOADED from Zenodo.  Regridded to the
+#                     model grid at run time by the driver.  Bump SURFDATA_NAME/URL
+#                     to the current dated build; override with --surfdata-url or
+#                     $LEGOESM_SURFDATA_URL.
 #
 # Usage:
 #   ./scripts/data/download_lmip_data.sh                       # both, year 1920
@@ -33,8 +35,10 @@ CRUJRA_DIR="$DATA_DIR/crujra"
 # --- defaults / config ---
 PREFIX="clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5"   # glade three_stream naming
 SUFFIX=""                                                        # after-year suffix (none)
-SURFDATA_NAME="legoesm_surfdata_c250617.nc"                      # full harmonized surfdata
-SURFDATA_URL="${LEGOESM_SURFDATA_URL:-https://zenodo.org/records/21087964/files/legoesm_surfdata_c250617.nc}"
+SURFDATA_NAME="legoesm_surfdata_c260716.nc"                      # current dated build
+# Zenodo concept DOI 10.5281/zenodo.21087963 (latest = record 21401647); bump the
+# record + name for a new dated build.  Override with --surfdata-url or $LEGOESM_SURFDATA_URL.
+SURFDATA_URL="${LEGOESM_SURFDATA_URL:-https://zenodo.org/records/21401647/files/legoesm_surfdata_c260716.nc}"
 CRUJRA_SRC="${LEGOESM_CRUJRA_SRC:-/glade/campaign/cesm/cesmdata/inputdata/atm/datm7/atm_forcing.datm7.CRUJRA.0.5d.c20260129/three_stream}"
 
 FORCE=0

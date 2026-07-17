@@ -54,6 +54,20 @@ References
   hydrological cycle. Mon. Wea. Rev., 93, 769-798.
 - Ahmed, F., Adames, A. F., & Neelin, J. D. (2020). Deep convective
   adjustment of temperature and moisture. J. Atmos. Sci., 77, 2163-2186.
+
+Faithfulness
+------------
+The Manabe path (``_manabe_dca_convection`` / ``_adjust_one_iteration``) is
+oracle-faithfulness-pinned in
+``tests/atmosphere/hydrostatic/unit/test_dca_manabe_faithful.py``: the full
+``ConvectionOutput`` matches an independent (original-coord Python-loop) oracle
+to rel 1e-12 on a nonuniform mass grid; column moist static energy
+(``c_pd*dT_dt + L_v*dq_v_dt``) and total water (``dq_v_dt + dq_c_conv_dt``) are
+conserved to round-off; and the per-column CAPE-gate application (output ==
+gate * pre-gate sweep, gated across the (33,300) J/kg tunable range), the
+latent-heat closure, the moist-adiabatic target, and the pair level assignment
+each carry a load-bearing canary.  (Ahmed-Neelin variant: see
+``test_dca_ahmed_neelin.py``.)
 """
 
 from __future__ import annotations
