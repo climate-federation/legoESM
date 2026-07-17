@@ -81,6 +81,16 @@ def test_carbon_woody_flag_flows_to_config():
     assert cfg_herb.land.carbon.woody is False
 
 
+def test_leaf_c_resorption_flag_flows_to_config():
+    """--leaf-c-resorption-frac flows to CarbonConfig.leaf_c_resorption_frac;
+    default 0.0 (off, byte-identical production)."""
+    cfg_default = build_config_from_args(_parse_args(["--lat", "60.0"]))
+    assert cfg_default.land.carbon.leaf_c_resorption_frac == 0.0
+    cfg = build_config_from_args(
+        _parse_args(["--lat", "60.0", "--leaf-c-resorption-frac", "0.3"]))
+    assert cfg.land.carbon.leaf_c_resorption_frac == 0.3
+
+
 def test_cwd_humification_flag_flows_to_config():
     """--cwd-humification-eff flows to CarbonConfig.cwd_humification_eff."""
     cfg = build_config_from_args(
