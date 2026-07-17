@@ -220,6 +220,9 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # CATKE faithfulness: physics symbols N2/S2/Ri/K_u/K_c/K_e/Jb/H match the
 # Wagner-2025 CATKE closure notation.
 "tests/ocean/unit/test_catke_faithful.py" = ["N803", "N806"]
+# Backscatter reservoir faithfulness: E is the subgrid-KE reservoir symbol
+# (Jansen-Held 2014).
+"tests/ocean/unit/test_backscatter_reservoir_faithful.py" = ["N803", "N806"]
 "scripts/validate/compare_amip_era5.py" = ["N803", "N806", "N815"]
 # The canonical SST symbol is ``sst_K`` (used 100s of times); N806/N803 flag the local
 # variable / monkeypatch arg in the cross-grid deploy CLI + its test (not CI-enforced).
