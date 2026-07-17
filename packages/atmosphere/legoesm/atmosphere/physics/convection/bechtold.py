@@ -589,6 +589,11 @@ def _ifs_downdraft(
     # flipped m_d positive at the surface and poisoned the net-flux guard.
     rundown_denom = jnp.maximum(
         jnp.sum(itop_mem * dp_full, axis=1), 1.0)       # (ncol,) [Pa]
+    # Micro-departure (codex R3 #3): inside the smooth 950 hPa transition
+    # band the capture and the im-weighted rundown overlap, so telescoping
+    # is exact only outside the band; the residual is bounded by the in-scan
+    # m_d <= 0 clamp and the net-flux guard.  A hard crossing would restore
+    # exactness at the cost of AD/MPI-invariance.
 
     inputs = tuple(
         jnp.moveaxis(a.astype(_dtype), 1, 0)
@@ -659,15 +664,17 @@ def _ifs_downdraft(
         mfds = mfds * keep
         mfdq = mfdq * keep
         # (a/i) LFS injection at EMIT (oracle KDTOP semantics) + rain debits.
+        # The descent-evaporation debit uses the PRE-injection flux (the
+        # descent has not yet acted on the newly injected mass — codex R3 #1:
+        # post-injection m_d paired with the fallback zcond=-demand tripled
+        # the LFS debit and evaporated at the emit level).
+        pdmfdp_desc = -m_d_new * zcond               # descent evap, <= 0
         inj = om * (-m_top_c)                        # m_top = RMFDEPS*M_b
         pdmfdp_lfs = 0.5 * inj * dem                 # cudlfsn.F90:279, <= 0
         m_d_new = m_d_new + inj
         mfds = mfds + inj * (cpd * Tm + g * z_k)
         mfdq = mfdq + inj * qm
-        # emitted rain debit carries BOTH the descent evaporation and the
-        # LFS saturation demand (codex R2 #2 — prfl-only debit left the
-        # outer ledger inconsistent with the DD's own rain march).
-        pdmfdp = -m_d_new * zcond + pdmfdp_lfs        # <= 0
+        pdmfdp = pdmfdp_desc + pdmfdp_lfs             # <= 0
         prfl = jnp.maximum(prfl + pdmfdp, 0.0)
         # (j) organized-entrainment recurrence for the next level.
         zbuoyz = jnp.minimum(zbuo / jnp.maximum(T_e, 1.0), 0.0)
@@ -703,7 +710,9 @@ def _ifs_downdraft(
     _w_base = _w_base / jnp.maximum(
         jnp.sum(_w_base, axis=1, keepdims=True), 1e-30)
     mu_base = jnp.sum(_w_base * M_u, axis=1, keepdims=True)
-    p_base = jnp.sum(_w_base * p_full, axis=1, keepdims=True)
+    # cloud-base INTERFACE pressure (oracle PAPH(IDBAS)): gather the layer-top
+    # half pressures with the same base weights (codex R3 #4).
+    p_base = jnp.sum(_w_base * p_half[:, :-1], axis=1, keepdims=True)
     # Oracle ZZP is built on HALF levels (PAPH, cuflxn:324): use each
     # layer's TOP half pressure — the bottom FULL level can equal the
     # surface pressure exactly (sigma grids), zeroing zzp and the guard.
@@ -718,7 +727,13 @@ def _ifs_downdraft(
     # levels (|m_d| ~ 1e-60 against near-zero top M_u) and rescaled the
     # whole DD to ~0 (codex R2 #1 follow-through).
     ratio = _IFS_NETFLUX_FRAC * M_u_guard / jnp.maximum(-m_d, _IFS_RMFCMIN)
-    violating = (-m_d) > (_IFS_NETFLUX_FRAC * M_u_guard + 1e-15)
+    # Oracle limits only JK >= KDTOP-1; the smooth analog masks the LFS/window
+    # TAILS (codex R3 #2: a tail level's injected flux shrinks slower than the
+    # tail M_u, so an inactive level could impose a column-wide zmfs).  Active
+    # = carrying at least 0.1% of the column's own peak downdraft.
+    _dd_peak = jnp.max(-m_d, axis=1, keepdims=True)
+    active = (-m_d) > 1e-3 * _dd_peak
+    violating = active & ((-m_d) > (_IFS_NETFLUX_FRAC * M_u_guard + 1e-15))
     zmfs = jnp.minimum(
         jnp.min(jnp.where(violating, jnp.maximum(ratio, 0.0), 1.0),
                 axis=1, keepdims=True), 1.0)
