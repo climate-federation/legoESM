@@ -1587,17 +1587,76 @@ def _training_year_range(windows, config) -> tuple[int, int]:
     return (start, start + max(0, (n_days - 1) // 365) + 1)
 
 
+def host_build_device(warn_label: str = "host-resident load"):
+    """The JAX CPU device for host-side array construction, or ``None``.
+
+    Shared preflight for every host-build site (#985 prefetch, #1155
+    non-chunked loads): returns ``jax.devices("cpu")[0]`` when the CPU
+    backend exists, else warns and returns ``None`` so the caller falls back
+    to building on the compute device (roomy configs are unchanged;
+    memory-tight ones need ``JAX_PLATFORMS=cuda,cpu``).
+    """
+    try:
+        return jax.devices("cpu")[0]
+    except RuntimeError:
+        logger.warning(
+            f"{warn_label}: the JAX CPU backend is unavailable "
+            "(JAX_PLATFORMS?), so arrays will be built on the compute device "
+            "(GPU-OOM risk for dataset-sized loads). Add 'cpu' to "
+            "JAX_PLATFORMS to enable host residency."
+        )
+        return None
+
+
+def stage_sample(tree, device=None):
+    """Public per-sample staging: move a sample pytree's ARRAY leaves onto
+    the compute device (default: this process's first local device).
+
+    Consumer-side half of the host-resident-dataset contract (#1155).
+    Placement semantics (measured, jax 0.10): arrays built under
+    ``jax.default_device(cpu)`` are UNCOMMITTED — a GPU-jitted step would
+    transfer them per call anyway, so staging is not a crash guard. It IS
+    the explicit-placement hygiene: it makes each sample's single H2D copy
+    visible at the call site, keeps behavior identical if the dataset ever
+    arrives COMMITTED (e.g. an explicit ``device_put(cpu)`` producer), and
+    bounds peak device footprint to one sample. Wraps the #985
+    ``_stage_tree``. Uses ``jax.local_devices()`` (not ``jax.devices()``)
+    so a multi-process runtime never targets a non-addressable device.
+    """
+    if device is None:
+        device = jax.local_devices()[0]
+    return _stage_tree(tree, device)
+
+
 def load_training_data(
     config: NeuralGCMSpectralConfig,
     grid: GaussianGrid,
     sigma: SigmaCoordinate,
     cache_dir: str = "data/era5_cache",
     windows: list | None = None,
+    host_resident: bool = False,
 ):
     """Load ERA5 daily IC/target pairs and convert to spectral states.
 
     Opens the ERA5 Zarr store once and batch-loads all needed time slices,
     avoiding per-slice GCS connection overhead.
+
+    ``host_resident=True`` builds every carry under the JAX CPU backend
+    (``jax.default_device``) so a dataset-sized load never materialises on
+    the GPU — the #1155 fix for the non-chunked trainers (they load ALL
+    pairs up front; at T106 all-years that is ~130 GB device-resident, an
+    unconditional OOM). Consumers pair it with per-sample staging
+    (``stage_sample`` / the training loops' ``host_staged=True``) — see
+    ``stage_sample`` for the honest placement semantics (explicit-placement
+    hygiene, not a crash guard: default_device-built arrays are
+    UNCOMMITTED). Trade-offs, accepted and measured against the
+    alternative: the per-snapshot spectral transforms run on CPU during the
+    load (the load is GCS-dominated in practice — job 6758505 measured
+    ~4.4 s/snapshot pure streaming), and staged consumers re-transfer each
+    sample per epoch (~seconds/epoch of H2D vs. hour-scale epochs). A CPU
+    backend is REQUIRED: with no viable success path for a dataset-sized
+    device build, an absent backend raises immediately instead of warning
+    and then OOMing hours into the load (fail-fast).
 
     Parameters
     ----------
@@ -1614,6 +1673,11 @@ def load_training_data(
         the results are concatenated.  This is the AIMIP-style
         multi-year / multi-season sampling protocol.  When ``None``
         the legacy single-window behaviour applies.
+    host_resident : bool
+        Build every array under the JAX CPU backend (see the prose above:
+        the #1155 fix for non-chunked full-dataset loads). Requires the
+        CPU backend (raises otherwise). Consumers pair it with per-sample
+        staging (``stage_sample`` / ``host_staged=True``).
 
     Returns
     -------
@@ -1626,6 +1690,28 @@ def load_training_data(
         coordinate was unreadable) — consumed by the prescribed
         surface-forcing path.
     """
+    if host_resident:
+        _host = host_build_device("load_training_data(host_resident=True)")
+        if _host is None:
+            # No CPU backend = no viable success path for a dataset-sized
+            # load (the device build is the #1155 OOM by construction, hit
+            # only AFTER hours of streaming). Fail fast with the remedy.
+            raise RuntimeError(
+                "load_training_data(host_resident=True) requires the JAX "
+                "CPU backend (add 'cpu' to JAX_PLATFORMS, e.g. "
+                "JAX_PLATFORMS=cuda,cpu): a full-dataset build on the "
+                "compute device OOMs at scale (#1155)."
+            )
+        # NOTE for signature growth: the recursive call forwards EVERY
+        # kwarg explicitly — a new load_training_data parameter must be
+        # added here too, or the host-resident path silently uses its
+        # default (tested: the recursion pins host_resident=False).
+        with jax.default_device(_host):
+            return load_training_data(
+                config, grid, sigma, cache_dir=cache_dir,
+                windows=windows, host_resident=False,
+            )
+
     import numpy as np
     from legoesm.training.era5_to_state import (
         open_era5_zarr, resolve_var, ERA5Slice, ensure_local_cache,
@@ -2050,9 +2136,17 @@ def _train_spectral_loop(
     chunk_loader=None,
     n_samples_total: int | None = None,
     resume_from_dir=None,
+    host_staged: bool = False,
 ):
     """Shared training loop for any learned-physics model coupled to the
     spectral PE dycore.
+
+    ``host_staged=True`` declares that the PROVIDED ``ic_states`` /
+    ``target_carries`` / ``sample_forcings`` were built host-resident
+    (``load_training_data(host_resident=True)``, #1155) — each sample is then
+    moved to the compute device just before its step, exactly like the #985
+    prefetch path (which signals the same thing via the chunk loader's
+    ``host_staged`` attribute).
 
     Parameters
     ----------
@@ -2576,7 +2670,7 @@ def _train_spectral_loop(
     # arrives on the CPU and must be moved onto the compute device at the point
     # of use in the loop below -- see the loop body for why this is not done in
     # the prefetch consumer.
-    _host_staged = bool(getattr(chunk_loader, "host_staged", False))
+    _host_staged = bool(getattr(chunk_loader, "host_staged", False)) or bool(host_staged)
     _compute_dev = jax.devices()[0] if _host_staged else None
 
     best_loss = float("inf")
@@ -2941,15 +3035,11 @@ def _make_chunk_loader(config, grid, sigma, cache_dir,
     # fall back to building on the compute device (a roomy config is unchanged).
     _host_dev = None
     if prefetch:
-        try:
-            _host_dev = jax.devices("cpu")[0]
-        except RuntimeError:
-            logger.warning(
-                "chunk_prefetch is on but the JAX CPU backend is unavailable "
-                "(JAX_PLATFORMS?), so prefetched chunks cannot be built on the "
-                "host and will ride compute-device memory (GPU-OOM risk at large "
-                "resolution). Add 'cpu' to JAX_PLATFORMS to enable host staging."
-            )
+        # Shared preflight (#1155 refactor): one copy of the cpu-backend
+        # resolution + warning for every host-build site. Prefetch keeps the
+        # warn-and-fallback behavior (a chunk is bounded, unlike the
+        # non-chunked full-dataset loads, which fail fast instead).
+        _host_dev = host_build_device("chunk_prefetch host staging")
 
     def _load_group(group):
         # Build on the CPU when host-staging (thread-local default device), so the
@@ -3089,6 +3179,7 @@ def train_neural_gcm_spectral(
 
     ic_states, target_carries, ic_times = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
+        host_resident=True,   # non-chunked full-dataset load (#1155)
     )
     sample_forcings = _maybe_build_sample_forcings(
         surface_forcing_path, ic_times, grid, forcing_cache_path,
@@ -3099,6 +3190,7 @@ def train_neural_gcm_spectral(
         grid, sigma, ic_states, target_carries, config,
         start_epoch=start_epoch,
         sample_forcings=sample_forcings,
+        host_staged=True,   # dataset loaded host-resident above (#1155)
     )
 
 
@@ -3246,8 +3338,13 @@ def train_sfno_full_spectral(
 
     sfno, start_epoch = maybe_resume_model(sfno, resume_from_dir)
 
+    # Host-resident dataset (#1155): sfno_full loads ALL pairs up front (no
+    # chunking) — at T106 all-years that is ~130 GB, an unconditional GPU OOM
+    # if built on the compute device. Build on host; the loop stages each
+    # sample to the GPU just before its step.
     ic_states, target_carries, _ic_times = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
+        host_resident=True,
     )
 
     # Data-driven per-channel stats in packed-emulator order (same channel
@@ -3290,9 +3387,14 @@ def _train_sfno_full_loop(
     dt_sfno: float,
     *,
     start_epoch: int = 0,
+    host_staged: bool = True,
     norm_stats=None,
 ):
     """Training loop for SFNO full-atmosphere emulator (no dycore).
+
+    ``host_staged`` (default True — the caller loads host-resident, #1155):
+    each sample is moved to the compute device just before its step, so the
+    full dataset never rides GPU memory.
 
     Parallel to :func:`_train_spectral_loop` but uses
     ``SFNOPrimitiveEquationModel.step(state, dt_sfno)`` for rollout
@@ -3465,6 +3567,12 @@ def _train_sfno_full_loop(
         grad_norm_val = 0.0
 
         for sample_idx, (ic, target) in enumerate(zip(ic_states, target_carries)):
+            if host_staged:
+                # Host-resident dataset (#1155): stage only THIS sample onto
+                # the compute device; the prior sample's device copies free
+                # when ic/target rebind. Peak device footprint: one sample.
+                ic = stage_sample(ic)
+                target = stage_sample(target)
             sfno, opt_state, loss, grad_norm, components = train_step(
                 sfno, opt_state, ic, target,
             )
@@ -3582,6 +3690,7 @@ def train_column_mlp_spectral(
 
     ic_states, target_carries, ic_times = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
+        host_resident=True,   # non-chunked full-dataset load (#1155)
     )
     sample_forcings = _maybe_build_sample_forcings(
         surface_forcing_path, ic_times, grid, forcing_cache_path,
@@ -3592,6 +3701,7 @@ def train_column_mlp_spectral(
         grid, sigma, ic_states, target_carries, config,
         start_epoch=start_epoch,
         sample_forcings=sample_forcings,
+        host_staged=True,   # dataset loaded host-resident above (#1155)
     )
 
 
@@ -3625,6 +3735,7 @@ def train_physics_params_spectral(
 
     ic_states, target_carries, _ic_times = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
+        host_resident=True,   # non-chunked full-dataset load (#1155)
     )
 
     dt = config.dt
@@ -3635,4 +3746,5 @@ def train_physics_params_spectral(
     return _train_spectral_loop(
         params, _make_physics_fn,
         grid, sigma, ic_states, target_carries, config,
+        host_staged=True,   # dataset loaded host-resident above (#1155)
     )

@@ -349,9 +349,14 @@ def _train_aimip_classical(
 
     params, start_epoch = maybe_resume_model(params, resume_from_dir)
 
+    # Host-resident dataset (#1155): classical loads ALL pairs up front (no
+    # chunking) — at T106 all-years the eager device build is ~130 GB, an
+    # unconditional GPU OOM (job 6758505 died at snapshot ~1200/4032 during
+    # LOADING). Build on host; the shared loop stages each sample per step.
     ic_states, target_carries, _ic_times = load_training_data(
         spec_cfg, grid, sigma, cache_dir,
         windows=spec_cfg.windows,
+        host_resident=True,
     )
 
     dt = spec_cfg.dt
@@ -391,9 +396,16 @@ def _train_aimip_classical(
         if type(ref_carry) is tuple:
             ref_carry = ref_carry[0]
         from legoesm.training.aimip_spatial import land_mask_from_phis
-        land_mask = land_mask_from_phis(
+        from legoesm.training.neural_gcm_spectral import stage_sample
+        # ref_carry lives on host under host_resident loading (#1155,
+        # UNCOMMITTED — see stage_sample's semantics note). The land mask is
+        # a closure constant of the jitted physics; stage it explicitly so
+        # its placement is deliberate rather than an implicit per-trace
+        # transfer, and so this site stays correct if the loader ever
+        # commits its outputs.
+        land_mask = stage_sample(land_mask_from_phis(
             jnp.asarray(ref_carry.phis), smooth=True,
-        )
+        ))
 
     # When rad gating is on (``aimip_rad_update_interval > 1``),
     # ``make_aimip_classical_spectral_physics`` returns a
@@ -478,6 +490,7 @@ def _train_aimip_classical(
         params, _make_physics_fn,
         grid, sigma, ic_states, target_carries, spec_cfg,
         start_epoch=start_epoch,
+        host_staged=True,   # dataset loaded host-resident above (#1155)
     )
 
 
