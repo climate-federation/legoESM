@@ -43,29 +43,58 @@ DINO exercises scheme selections GYRE never tested and legoESM matches them:
 (`ln_traldf_msc`) explicit-K33 iso term (GYRE: msc=F). The MSC `akz` explicit
 vertical diagonal was ported term-for-term from `traldf_iso_a33` (PR #1137).
 
-## Preliminary solution check (62-day forward, grid-robust)
+## Solution check (62-day forward, cell-by-cell on NEMO's own grid)
 
-Tendency-match is necessary but not sufficient — do the *solutions* track? A
-short forward integration from rest (`run_dino.py --recipe nemo_paper
---barotropic-solver explicit_substep --days 62`, 74 s, stable) vs NEMO's
-62-day-from-rest `RUN_M5SPIN`. The two grids are built independently (legoESM
-198×50 vs NEMO interior 195×48), so this is **grid-robust metrics**, not
-cell-by-cell:
+Tendency-match is necessary but not sufficient — do the *solutions* track? We
+run legoESM forward from rest for 62 days **on NEMO's exact grid** (state +
+geometry built cell-for-cell from NEMO's `mesh_mask` via the fidelity bridge, so
+the comparison is cell-by-cell, not grid-robust interpolation) vs NEMO's
+62-day-from-rest `RUN_M5SPIN`:
 
-- **Basin-mean T(z)** tracks within ~0.2–1.0 °C; legoESM is **colder in the
-  upper thermocline** (Δ = −0.96 °C at 262 m). Salinity within ~0.1 PSU. Deep
-  ocean and SST max (25.3 vs 25.4) close. Zonal-mean SST-vs-latitude **corr
-  0.98** (RMS 2.7 °C, partly grid-interpolation).
-- The thermocline cold bias is **grid-robust** (a volume average) → real
-  physics, not a grid artifact. A too-cold/too-mixed upper thermocline is the
-  fingerprint of the deferred **iso-diffusion ML-surface term** below — the one
-  uncertified piece plausibly showing up in the solution.
-- Caveats: 62 days is short (not the M6 climate); the IC/forcing are not
-  byte-verified identical to NEMO's `usrdef`; a clean SST separation would run
-  legoESM forward *from the bridge state on NEMO's grid* (identical mesh).
+- **T corr 0.99** cell-by-cell; salinity within ~0.1 PSU (interior).
+- **Basin-mean T(z)** now tracks within ~0.1 °C through the thermocline:
+  **T@262 m = 9.55 vs NEMO 9.50**, **SST 14.13 vs 14.07** (see the cold-bias
+  resolution below).
+
+### Cold-bias root cause — convective-adjustment trigger (RESOLVED)
+
+The first solution check showed legoESM **−0.72 °C colder at 262 m** (8.78 vs
+9.50). Characterize-before-patch pinned it code-first — and it was **not** the
+suspected iso ML-surface term:
+
+- **Iso / GM / MSC ruled out**: toggling all lateral diffusion fully off moved
+  T@262 m by 0.00 °C over 62 days (too slow from rest).
+- **Initial condition ruled out**: legoESM's `dino_lat_lon_state` IC reproduces
+  NEMO's analytic `usrdef` CASE(4) to **+0.08 °C** (legoESM starts marginally
+  *warmer*). The bias is pure dynamics — NEMO holds T@262 m nearly steady
+  (9.545→9.50) while legoESM eroded 0.85 °C (9.625→8.78).
+- **Culprit = enhanced-diffusion convection**: turning convection off restored
+  T@262 m→9.58 and SST→14.12 (both NEMO). NEMO's `zdfevd` (`ln_zdfevd=.true.`,
+  `rn_evd=100`, `nn_evdm=1`) is a **hard `rn2<0` switch** on the adiabatic
+  (`eosbn2`, local α,β) N². legoESM's default is a differentiable
+  **sigmoid** of N² (`smooth_transition`, sharpness 1e6) that **leaks**
+  ~O(`K_conv`=100 m²/s) mixing into weakly-**stable** water (N²~+1e-6 s⁻²) that
+  NEMO never mixes, over-eroding the thermocline. Variant sweep: hard-step
+  restores 9.55–9.57; `n2_mode` (insitu vs adiabatic) is a 0.02 °C tiebreak.
+- **Fix (config-only)**: the `nemo_paper` recipe now selects
+  `convection_smooth_transition=False` + `convection_n2_mode="adiabatic"`
+  (NEMO-faithful hard step on true static stability). The convection *kernel* is
+  unchanged; both paths already existed. Other recipes keep the smooth legoESM
+  default (byte-identical). PR #1137.
+- Caveats: 62 days is short (not the M6 climate); forcing is analytic
+  `usrdef`-style, not byte-verified identical to NEMO's.
 
 ## Characterized follow-ups (not yet certified)
 
+- **`zdfevd` trigger refinement** — the `nemo_paper` convective switch fires at
+  `N² < 0` on a single time level. NEMO's `zdfevd` fires where
+  `MIN(rn2, rn2b) <= −1e-12` (two-time-level, with a small *negative* threshold
+  to ignore marginally-neutral interfaces). The kernel already supports both
+  (`EnhancedDiffusionConfig.n2_threshold`, `two_level_trigger`); `DINOConfig`
+  does not yet expose them, so a hard 100 m²/s coefficient can flicker per step
+  in marginal columns. Second-order (62-day match is 9.55 vs 9.50); add the two
+  DINOConfig fields + threading when sub-0.05 °C oracle fidelity is needed and
+  the forcing is byte-verified. (Physics-validator, PR #1137.)
 - **`ttrd_ldf` surface (k1/k2)** — the S²-sensitive K33 diagonal exposes a
   pre-existing **ML-ramp / MLD** slope mismatch: legoESM's native slopes match
   NEMO's dumped `wslpi_stg` at corr 0.99 *below* the mixed layer but ~0.33

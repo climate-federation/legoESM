@@ -240,6 +240,20 @@ class DINOConfig:
     # (paper/oracle) recipe sets "geometric"; other recipes keep "insitu".
     eos_depth: str = "insitu"
 
+    # Convective adjustment (enhanced vertical diffusion) trigger fidelity.
+    # NEMO's zdfevd is a HARD switch: it applies rn_evd (=K_conv) wherever the
+    # local Brunt-Vaisala frequency rn2 < 0, and exactly ZERO otherwise. The
+    # legoESM default is a differentiable sigmoid of N^2 (smooth_transition),
+    # which LEAKS ~O(K_conv) mixing into weakly-STABLE water (N^2~+1e-6 s^-2) that
+    # NEMO never mixes — over-eroding the thermocline (62-day matched-grid check:
+    # basin-mean T@262m 8.78 vs NEMO 9.50; the hard step restores 9.55-9.57).
+    # NEMO's rn2 (eosbn2) is the ADIABATIC static stability (local alpha,beta),
+    # so the faithful pair is hard-step + n2_mode="adiabatic". Set on the
+    # nemo_paper (oracle) recipe; other recipes keep the smooth legoESM default.
+    # See docs/ocean/fidelity/dino_tendency_certificate.md.
+    convection_smooth_transition: bool = True   # False = NEMO hard rn2<0 switch
+    convection_n2_mode: str = "insitu"          # "adiabatic" = NEMO eosbn2
+
     # ------------------------------------------------------------------
     # GM/Redi mesoscale eddy parameterization. Adaptive κ via Visbeck 1997
     # (default) or Treguier 1997 (gm_kappa_scheme="treguier", the NEMO
@@ -567,6 +581,11 @@ DINO_RECIPES: dict[str, dict] = {
         "gm_redi_slope_scheme": "triads",   # Griffies iso-neutral triads (NEMO)
         "ke_gradient_scheme": "hollingsworth",  # NEMO nn_dynkeg=1
         "barotropic_solver": "implicit_cn",
+        # NEMO zdfevd: hard rn2<0 switch on the adiabatic (eosbn2) N^2. The
+        # smooth-sigmoid default leaks mixing into stable water and over-cools
+        # the thermocline by ~0.7 C (see DINOConfig.convection_smooth_transition).
+        "convection_smooth_transition": False,
+        "convection_n2_mode": "adiabatic",
     },
     # --- L2 — Veros (Vallis nonlinear EOS, TKE, superbee, streamfunction/AB2). ---
     # Dycore identity: recipes.py::veros_faithful_v1 (rigid_lid → the builder
@@ -1804,6 +1823,10 @@ def dino_lat_lon_model_config(
                     nu_conv=(cfg.K_conv
                              if (cfg.evd_on_momentum
                                  and cfg.vmix_scheme != "kpp") else 0.0),
+                    # NEMO zdfevd is a hard rn2<0 switch on adiabatic N^2; the
+                    # nemo_paper recipe selects it (smooth default over-cools).
+                    smooth_transition=cfg.convection_smooth_transition,
+                    n2_mode=cfg.convection_n2_mode,
                 ),
             ),
             shortwave_penetration=ShortwavePenetrationConfig(
@@ -2085,7 +2108,12 @@ def dino_mpas_model_config(
         ),
         convection=OceanConvectionConfig(
             scheme="enhanced_diffusion",
-            enhanced_diffusion=EnhancedDiffusionConfig(K_conv=cfg.K_conv),
+            enhanced_diffusion=EnhancedDiffusionConfig(
+                K_conv=cfg.K_conv,
+                # Same NEMO zdfevd hard-switch fidelity as the lat-lon path.
+                smooth_transition=cfg.convection_smooth_transition,
+                n2_mode=cfg.convection_n2_mode,
+            ),
         ),
         shortwave_penetration=ShortwavePenetrationConfig(
             water_type=cfg.jerlov_water_type,

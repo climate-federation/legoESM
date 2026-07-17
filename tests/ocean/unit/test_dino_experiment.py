@@ -219,6 +219,27 @@ class TestDINORecipes:
                 ocn.momentum_advection, ocn.outer_integrator) == (
             "veros_gsw", "catke", "weno7", "weno7", "ab2")
 
+    def test_nemo_paper_convection_is_nemo_hard_switch(self):
+        # NEMO zdfevd is a HARD rn2<0 switch on the adiabatic (eosbn2) N^2. The
+        # legoESM sigmoid default leaks enhanced mixing into weakly-stable water
+        # and over-cools the DINO thermocline ~0.7 C (62-day matched-grid check:
+        # T@262m 8.78 vs NEMO 9.50 -> 9.55 with the hard step). The nemo_paper
+        # oracle recipe must select the faithful pair; other recipes keep the
+        # smooth legoESM default (behavior preservation).
+        nemo = dino_config_for_recipe("nemo_paper")
+        assert nemo.convection_smooth_transition is False
+        assert nemo.convection_n2_mode == "adiabatic"
+        default = dino_config_for_recipe("legoesm_default")
+        assert default.convection_smooth_transition is True
+        assert default.convection_n2_mode == "insitu"
+        # The faithful pair must actually THREAD into the built EnhancedDiffusion
+        # config (both the lat-lon and MPAS convection builders read the cfg).
+        grid = dino_lat_lon_grid(nemo, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, nemo, physics=True)
+        ed = mc.physics.convection.enhanced_diffusion
+        assert ed.smooth_transition is False
+        assert ed.n2_mode == "adiabatic"
+
     def test_base_override_preserved(self):
         # A recipe overlay keeps the non-scheme setup fields of the base config.
         import dataclasses
