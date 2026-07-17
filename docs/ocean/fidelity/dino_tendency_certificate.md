@@ -43,6 +43,36 @@ DINO exercises scheme selections GYRE never tested and legoESM matches them:
 (`ln_traldf_msc`) explicit-K33 iso term (GYRE: msc=F). The MSC `akz` explicit
 vertical diagonal was ported term-for-term from `traldf_iso_a33` (PR #1137).
 
+## Surface forcing byte-verification (usrdef_sbc CASE(4))
+
+The analytic DINO forcing is a **byte-exact** transcription of NEMO's
+`usrdef_sbc` CASE(4). Each field, transcribed from NEMO's Fortran and evaluated
+cell-by-cell on the matched grid at the same day-of-year (kt=2000 → day 62.5,
+seasonal phases c1=−0.317 @ 21 Jun, c2=−0.749 @ 21 Jul) against legoESM's
+forcing functions, using NEMO's restart SST/SSS for the restoring terms:
+
+| field | max\|Δ\| | note |
+|-------|--------|------|
+| `utau` wind stress | **5.6e-17** | smoothstep (`(3−2s)s²`) on the same 9 lat-nodes, on `gphiu` |
+| `T*` (heat target) | **1.8e-14** | seasonal: `T*_s=−0.5−0.5·c2`, `T*_n=5+3·c2` |
+| `qns` heat flux | **7.1e-13** | `rn_trp(SST−T*)` ≡ `A_theta(T*−SST)`, `A_theta=40=−rn_trp` |
+| `qsr` solar | **5.7e-14** | `max(230·cos(π(φ−23.5·c1)/180),0)`, seasonal declination |
+| `S*` (salt target) | **7.1e-15** | non-seasonal Munday cosine − 1.25·gaussian dip |
+| `sfx` salt flux | **2.7e-17** | `rn_srp(SSS−S*)` ≡ `A_S(S*−SSS)`, `A_S=3.858e-3=−rn_srp` |
+
+Verified matches: the day-of-year **epoch** (both put kt=0 at Jan 1 — NEMO's
+`ztime` drops the `zday_year0` offset), the seasonal-phase formulas (c1/c2,
+half-year = 180·24 h), `rn_emp_prop=0` (no E–P; salt restoring only), and the
+1.3× westerly `taum` boost for TKE. The only sub-machine difference is the
+K-conversion `c_p=3991.86` vs NEMO `rcp=3991.868` (2e-6 relative, negligible);
+the fluxes themselves are exact. Harness:
+`~/oracle-builds/nemo5/gap_audit/dino_forcing_byteverify.py`.
+
+**Consequence**: forcing is removed as a confound. Any remaining solution
+residual (the +0.05 °C thermocline, SST) is dynamics/EOS/numerics, not forcing —
+so a controlled comparison for the `zdfevd` threshold refinement (§follow-ups)
+is now well-posed.
+
 ## Solution check (62-day forward, cell-by-cell on NEMO's own grid)
 
 Tendency-match is necessary but not sufficient — do the *solutions* track? We
