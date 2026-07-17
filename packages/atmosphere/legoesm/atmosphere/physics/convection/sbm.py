@@ -39,8 +39,8 @@ EXACTLY in a net-drying column whose column condensation candidate exceeds 1e-20
 physically active column; a <=1e-20 residual survives only in the degenerate near-zero-
 condensation corner where the ``safe_divide`` AD-guard floors), and the (Newton-limited,
 ~1e-3) enthalpy closure.
-NOTE — net-moistening handling, A/B RESOLVED (2026-07-17; the owed full-module A/B ran:
-shallow branch toggled off, forward output + gradients diffed across a drying /
+NOTE — net-moistening handling, A/B RESOLVED (2026-07-17, PR #1147; the owed full-module
+A/B ran: shallow branch toggled off, forward output + gradients diffed across a drying /
 moistening / mixed / rh-sweep column battery).  VERDICT: the Frierson SHALLOW branch is
 LIVE — KEEP.  It is NOT superseded by the ``drying_gate`` (issue #771); the two compose:
 
