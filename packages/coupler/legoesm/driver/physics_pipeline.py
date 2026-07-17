@@ -923,8 +923,11 @@ class PhysicsPipeline:
                     _u_low = u_conv_col[:, -1]
                     _v_low = v_conv_col[:, -1]
                     # SAME density the applied-flux path uses (lowest FULL
-                    # level, not p_s — codex R1 #3).
-                    _rho_low = rho_col_phys[:, -1]
+                    # level, not p_s — codex R1 #3).  Derived locally:
+                    # rho_col_phys is only bound later / in other branches
+                    # (codex R2 #1 UnboundLocalError).
+                    _rho_low = p_full_col[:, -1] / (
+                        constants.R_d * jnp.maximum(_T_low, 1.0))
                     if self.surface_tiled and self.f_land is not None:
                         # SAME mosaic arguments as the turbulence path
                         # (beta-limited land evaporation + multilayer q_sfc
