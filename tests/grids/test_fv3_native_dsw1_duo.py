@@ -60,6 +60,30 @@ def test_input_hash_enforced(oracle):
     assert hashlib.sha256(blob).hexdigest() == str(oracle["input_sha256"])
 
 
+# Drift guard: the fixture certifies THESE extract bytes.  The d_sw1
+# extract's single intended deviation from authoritative sw_core.F90
+# 500-998 is the ut/vt intent(out)->intent(inout) shim (see its header);
+# the tp_core extract is verbatim.  Any edit to either file must
+# regenerate the fixture (scripts/cluster/fv3_native/dsw1_duo_oracle
+# .sbatch) and re-pin here.
+_EXTRACT_SHA = {
+    "fv3_dsw1_duo_extract.F90":
+        "b91d91462c24deea842cc2cd9bd7ad5fa90e14d760356824ae27d60a7c6b1d15",
+    "fv3_tpcore_duo_extract.F90":
+        "71f930b3b3b6291955259e46b7dfcd8bcba5c500206c9b0a5377f24c8f8d99c9",
+}
+
+
+def test_extract_sha_pinned():
+    for name, want in _EXTRACT_SHA.items():
+        path = os.path.join(REPO, "scripts", "validate", "fv3_native", name)
+        got = hashlib.sha256(open(path, "rb").read()).hexdigest()
+        assert got == want, (
+            f"{name} drifted from the bytes the fixture certifies "
+            f"(got sha256 {got}) — regenerate dsw1_duo_oracle_c12.npz "
+            f"via the sbatch and re-pin")
+
+
 def _run_port(inputs):
     from legoesm.core.fv3_native_duo_sw_core import d_sw1_duo
     from legoesm.core.fv3_native_sw_core import Bounds

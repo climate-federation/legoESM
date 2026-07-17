@@ -3,7 +3,10 @@
 ! crx/cry/xfx/yfx, ra_x/ra_y, delp/pt/w fv_tp_2d transport, allflux
 ! outputs for the inter-panel averaging).  Calls the SYMMETRYCLEAN
 ! fv_tp_2d (tpcore_duo_extract_mod), NOT the phase-4b plain one.
-! SHA pinned in the oracle test: 4954a058bf23eb0d4165db383cbe3b953286c5417da461c4b3c7e88890a436c7
+! Authoritative-block SHA (sha256 of sw_core.F90 lines 500-998):
+!   4954a058bf23eb0d4165db383cbe3b953286c5417da461c4b3c7e88890a436c7
+! The oracle test pins the sha256 of THIS extract file (drift guard);
+! the single intended deviation is the ut/vt intent shim below.
 module dsw1_duo_extract_mod
   use swcore_shim_mod, only: fv_grid_bounds_type, fv_grid_type, fv_flags_type
   use tpcore_duo_extract_mod, only: fv_tp_2d
@@ -45,8 +48,16 @@ contains
       real,intent(out) ::   allflux_y(bd%is:bd%ie  ,bd%js:bd%je+1,km,4+nq)  ! 1-D Y-direction Fluxes
       real,intent(out) :: ra_x(bd%is:bd%ie,bd%jsd:bd%jed)
       real,intent(out) :: ra_y(bd%isd:bd%ied,bd%js:bd%je)
-      real,intent(out) :: ut(bd%isd:bd%ied+1,bd%jsd:bd%jed)
-      real,intent(out) :: vt(bd%isd:bd%ied,  bd%jsd:bd%jed+1)
+! SHIM DEVIATION (the ONLY edit vs the authoritative block): upstream
+! declares ut/vt intent(out) (sw_core.F90:535-536), which makes any
+! pre-call sentinel value UNDEFINED on entry per the Fortran standard —
+! the real caller (dyn_core.F90:187-188/831-846) passes UNINITIALISED
+! automatic locals that the always-fire edge blocks then read.  For a
+! DEFINED, bit-comparable translation contract the oracle initialises
+! ut/vt to 1e30 on both sides; intent(inout) makes that init defined
+! semantics instead of one compiler's stack behavior.
+      real,intent(inout) :: ut(bd%isd:bd%ied+1,bd%jsd:bd%jed)
+      real,intent(inout) :: vt(bd%isd:bd%ied,  bd%jsd:bd%jed+1)
       type(fv_grid_type), intent(IN), target :: gridstruct
       type(fv_flags_type), intent(IN), target :: flagstruct
 ! Local:

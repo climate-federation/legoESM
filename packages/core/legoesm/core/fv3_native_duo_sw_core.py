@@ -231,12 +231,16 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
     (auth 622-634); the panel-edge + corner 2x2 blocks (656-813) fire
     UNCONDITIONALLY on the global cube (their ``.not.(bounded .and. duo)``
     guard is always true) and READ ut/vt workspace cells the duo interior
-    never writes — in dyn_core those are UNINITIALISED stack memory, so
-    this port initialises ut/vt to ``workspace_sentinel`` and the oracle
-    driver initialises the Fortran arrays IDENTICALLY: the sentinel-
-    dependent cells are then deterministic and bit-comparable on both
-    sides (a TRANSLATION certification; the integrated 6-face pipeline
-    supplies real exchanged halos there).  The transport uses the
+    never writes — in dyn_core those are UNINITIALISED stack memory
+    (upstream declares the dummies intent(out), so even a pre-call init
+    would be undefined on entry).  The oracle therefore certifies a
+    DEFINED workspace contract: the extract carries a documented
+    intent(out)->intent(inout) shim (its ONLY deviation, drift-guarded
+    by the pinned extract SHA) and both sides initialise ut/vt to
+    ``workspace_sentinel`` — the sentinel-dependent cells are then
+    deterministic, standard-defined, and bit-comparable (a TRANSLATION
+    certification; the integrated 6-face pipeline supplies real
+    exchanged halos there).  The transport uses the
     duo-gated tp_core chain (copy_corners early-return, xppm/yppm edge
     reconstructions skipped).  VERBATIM notes: the pt transport uses
     ``nord=nord_v, damp_c=damp_v`` (auth 959-961 — the plain monolithic
@@ -558,3 +562,67 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
             "allflux_x": allflux_x, "allflux_y": allflux_y,
             "delp": delp.a, "pt": pt.a, "w": w.a,
             "cx": cx.a, "cy": cy.a, "xflux": xflux.a, "yflux": yflux.a}
+
+
+def d_sw2_duo(delp, pt, allflux_x, allflux_y, gs: dict, bd: Bounds, *,
+              hydrostatic: bool = True, inline_q: bool = False,
+              workspace_sentinel: float = 1.0e30) -> dict:
+    """sw_core.F90 d_sw2 (symmetryclean 1000-1199) — the post-averaging
+    delp/pt UPDATE stage, on the oracle lane (hydrostatic, inline_q=F,
+    no SW_DYNAMICS/USE_COND): heat_source zeroed over the compute
+    domain, then the else-arm update from allflux slots 1 (delp fx/fy)
+    and 4 (pt gx/gy), auth 1181-1196:
+
+        pt   = pt*delp + (gx(i,j)-gx(i+1,j)+gy(i,j)-gy(i,j+1))*rarea
+        delp = delp    + (fx(i,j)-fx(i+1,j)+fy(i,j)-fy(i,j+1))*rarea
+        pt   = pt / delp
+
+    d_sw2 has NO duo/edge branches — a pure cell update given the
+    fluxes.  ptc and dw (upstream intent(OUT); shimmed to inout in the
+    extract so the sentinel round-trip is standard-defined — see the
+    extract header) are never written on this lane; the port returns
+    them filled with ``workspace_sentinel`` mirroring the oracle
+    driver's 1e30 init (documented scratch semantics, bit-comparable).
+
+    ``allflux_x``/``allflux_y`` are the d_sw1_duo output stacks
+    ((res+1, res, 5) / (res, res+1, 5), slot axis last).  ``delp``/
+    ``pt`` are data-domain arrays (d_sw1 duo leaves them unmutated).
+    Returns dict(delp, pt, heat_source, ptc, dw).
+    """
+    if not hydrostatic or inline_q:
+        raise NotImplementedError(
+            "d_sw2_duo: hydrostatic, inline_q=False lane only (matches "
+            "the oracle driver; w/q_con/tracer updates not exercised)")
+
+    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
+    isd, jsd = bd.isd, bd.jsd
+
+    delp = fort(np.array(delp, dtype=np.float64, copy=True), isd, jsd)
+    pt = fort(np.array(pt, dtype=np.float64, copy=True), isd, jsd)
+    RAREA = fort(gs["rarea"], isd, jsd)
+
+    # allflux compute rings -> fort views at (is, js) like the Fortran
+    # dummy bounds allflux_x(is:ie+1, js:je, k, slot)
+    fx = fort(np.array(allflux_x[:, :, 0], dtype=np.float64), is_, js)
+    gx = fort(np.array(allflux_x[:, :, 3], dtype=np.float64), is_, js)
+    fy = fort(np.array(allflux_y[:, :, 0], dtype=np.float64), is_, js)
+    gy = fort(np.array(allflux_y[:, :, 3], dtype=np.float64), is_, js)
+
+    # heat_source zeroing (auth 1074-1078, #ifndef SW_DYNAMICS)
+    heat_source = np.zeros((ie - is_ + 1, je - js + 1))
+
+    # else-arm update (auth 1181-1196; inline_q=F)
+    for j in range(js, je + 1):
+        for i in range(is_, ie + 1):
+            pt[i, j] = pt[i, j] * delp[i, j] + (
+                gx[i, j] - gx[i + 1, j] + gy[i, j] - gy[i, j + 1]
+            ) * RAREA[i, j]
+            delp[i, j] = delp[i, j] + (
+                fx[i, j] - fx[i + 1, j] + fy[i, j] - fy[i, j + 1]
+            ) * RAREA[i, j]
+            pt[i, j] = pt[i, j] / delp[i, j]
+
+    ptc = np.full_like(delp.a, workspace_sentinel)
+    dw = np.full((ie - is_ + 1, je - js + 1), workspace_sentinel)
+    return {"delp": delp.a, "pt": pt.a, "heat_source": heat_source,
+            "ptc": ptc, "dw": dw}
