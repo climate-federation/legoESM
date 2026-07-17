@@ -188,6 +188,45 @@ def _load_run_aimip():
     return mod
 
 
+def sfno_full_norm_stats_path(checkpoint_path):
+    """Resolve the sfno_full normalization sidecar next to a checkpoint.
+
+    train_sfno_full_spectral writes ``norm_stats.npz`` into
+    ``config.checkpoint_dir`` (== the directory holding ``epoch_NNNN.eqx``), so
+    the sidecar is the checkpoint's parent dir + ``norm_stats.npz``.  Pure path
+    logic (no jax / no I/O) so the login-safe CLI test can exercise it.
+    """
+    if checkpoint_path is None:
+        raise ValueError(
+            "sfno_full eval needs the checkpoint path to locate norm_stats.npz "
+            "(the per-channel Z-score sidecar written at train time); got None."
+        )
+    return str(Path(checkpoint_path).resolve().parent / "norm_stats.npz")
+
+
+def _load_sfno_full_norm_stats(checkpoint_path):
+    """Load the sfno_full per-channel Z-score stats sidecar for eval.
+
+    Fails LOUDLY if the sidecar is missing: sfno_full is trained WITH
+    normalization, so evaluating without the matching stats would feed the
+    network raw ~1e5-magnitude channels (garbage / NaN) — a silent
+    use_normalization=False fallback would be worse than a clear error.
+    """
+    import os
+
+    from legoesm.ml.normalization import load_normalization_stats
+
+    path = sfno_full_norm_stats_path(checkpoint_path)
+    if not os.path.exists(path):
+        raise SystemExit(
+            f"sfno_full normalization sidecar not found: {path}\n"
+            f"train_sfno_full_spectral writes norm_stats.npz next to the "
+            f"checkpoints; re-run training (it is created per run) or point "
+            f"--checkpoint at a run directory that contains it."
+        )
+    return load_normalization_stats(path)
+
+
 def _build_skeleton(variant, cfg, spec_cfg, grid):
     """Reconstruct the UNTRAINED pytree skeleton exactly as run_aimip builds it
     in training, so ``eqx.tree_deserialise_leaves(checkpoint, skeleton)`` matches.
@@ -250,7 +289,7 @@ def _build_skeleton(variant, cfg, spec_cfg, grid):
 
 
 def _build_rollout_fn(variant, trained, cfg, spec_cfg, grid, sigma, pe_config,
-                      sponge_factor, spectral_filter):
+                      sponge_factor, spectral_filter, checkpoint_path=None):
     """Return ``(rollout_fn, dt_for_orchestrator)`` for the variant.
 
     The orchestrator calls ``rollout_fn(state, physics_fn, grid_, sigma_,
@@ -339,7 +378,13 @@ def _build_rollout_fn(variant, trained, cfg, spec_cfg, grid, sigma, pe_config,
         from legoesm.ml.sfno import SFNOConfig
         channels = PE3DChannelSpec(nlev=spec_cfg.n_levels).n_channels
         dt_sfno = float(cfg.get("dt_sfno", 21600.0))
-        # Matches _evaluate_variant's sfno_full eval wrapper config exactly.
+        # train_sfno_full_spectral trains with per-channel Z-score
+        # normalization ON and writes the stats to norm_stats.npz next to the
+        # checkpoints.  Reload that SAME sidecar so eval applies the IDENTICAL
+        # transform (state_update denormalises the network output as a full
+        # state — correct).  The eqx checkpoint carries only the SFNO leaves,
+        # not the wrapper's norm_stats, so the sidecar is the source of truth.
+        norm_stats = _load_sfno_full_norm_stats(checkpoint_path)
         pe_cfg = SFNOPrimitiveEquationConfig(
             sfno_config=SFNOConfig(
                 in_channels=channels,
@@ -354,10 +399,11 @@ def _build_rollout_fn(variant, trained, cfg, spec_cfg, grid, sigma, pe_config,
             correct_mass=True,
             correct_moisture_budget=False,
             clip_q=False,
-            use_normalization=False,
+            use_normalization=True,
         )
         wrapper = SFNOPrimitiveEquationModel(
             grid=grid, sigma_coord=sigma, config=pe_cfg, sfno_model=trained,
+            norm_stats=norm_stats,
         )
 
         def _scan_body(s, _):
@@ -475,7 +521,7 @@ def main(argv=None, ds=None):
 
     rollout_fn, dt_orch = _build_rollout_fn(
         cfg_args.variant, trained, yml, spec_cfg, grid, sigma, pe_config,
-        sponge_factor, spectral_filter,
+        sponge_factor, spectral_filter, checkpoint_path=cfg_args.checkpoint,
     )
     # The orchestrator computes n_steps = lead*3600/dt_orch; leads must land on
     # that grid (classical/column_nn: dt=dycore dt; sfno_full: dt=dt_sfno).

@@ -650,8 +650,24 @@ def _evaluate_variant(
         )
         from legoesm.ml.channel_packing import PE3DChannelSpec
         from legoesm.ml.sfno import SFNOConfig
+        from legoesm.ml.normalization import load_normalization_stats
         _channels = PE3DChannelSpec(nlev=spec_cfg.n_levels).n_channels
         eval_dt_sfno = float(cfg.get("dt_sfno", 21600.0))
+        # sfno_full trains WITH per-channel Z-score normalization; reload the
+        # SAME norm_stats.npz the training wrote into checkpoint_dir
+        # ({output_dir}/{aimip_variant}) so this in-run eval applies the
+        # identical transform (state_update denormalises the output as a full
+        # state).  The eqx checkpoint carries only SFNO leaves, so the sidecar
+        # (not the checkpoint) is the source of truth for the stats.
+        _stats_path = Path(cfg["output_dir"]) / cfg["aimip_variant"] / "norm_stats.npz"
+        if not _stats_path.exists():
+            raise SystemExit(
+                f"sfno_full eval: normalization sidecar not found at "
+                f"{_stats_path}. train_sfno_full_spectral writes it per run; "
+                f"the model was trained WITH normalization, so eval cannot "
+                f"proceed without the matching stats."
+            )
+        eval_norm_stats = load_normalization_stats(_stats_path)
         eval_pe_cfg = SFNOPrimitiveEquationConfig(
             sfno_config=SFNOConfig(
                 in_channels=_channels,
@@ -668,11 +684,12 @@ def _evaluate_variant(
             # needs synthesis/clip/re-analysis); previously silently ignored.
             correct_moisture_budget=False,
             clip_q=False,
-            use_normalization=False,
+            use_normalization=True,
         )
         eval_full_wrapper = SFNOPrimitiveEquationModel(
             grid=grid, sigma_coord=sigma,
             config=eval_pe_cfg, sfno_model=trained_model,
+            norm_stats=eval_norm_stats,
         )
         n_steps_eval_sfno = max(
             1, int(round(eval_rollout_hours * 3600.0 / eval_dt_sfno))
