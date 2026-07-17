@@ -666,6 +666,15 @@ class E3SMCAMConfig(NamedTuple):
         matches the pinned E3SM-3.0.1 oracle ``dttke = sum_l c_l*gwut_l``
         (gw_common.F90:727).  ``True`` uses the newer CAM/EAM-trunk
         intrinsic-frequency form ``sum_l (c_l - ubm)*gwut_l``.
+    use_discrete_ke_heating : bool
+        Orographic heating closure.  ``False`` (default) keeps the
+        continuous-rate identity ``dT/dt = -(u*du + v*dv)/c_pd``.  ``True``
+        uses the E3SM driver-level DISCRETE-step closure
+        ``dT/dt = -(du*(u + 0.5*dt*du) + dv*(v + 0.5*dt*dv))/c_pd``
+        (gw_drag.F90:908-913, default no-energy-fix branch), which returns
+        exactly the discrete resolved-KE change as heat so the discrete
+        column energy budget closes; the continuous form over-heats by
+        ``0.5*dt*(du^2+dv^2)/c_pd`` per step.  Orographic source only.
     use_newtonian_profile : bool
         When ``True`` use the E3SM height-dependent Newtonian-cooling
         profile (``alpha0``/``palph`` from gw_drag.F90, interpolated to the
@@ -715,6 +724,7 @@ class E3SMCAMConfig(NamedTuple):
     tndmax_per_day: float = 400.0
     n2min: float = 1.0e-8
     dttke_use_intrinsic: bool = False
+    use_discrete_ke_heating: bool = False
     use_newtonian_profile: bool = False
     do_eddy_diffusion: bool = False
     do_energy_conservation: bool = False

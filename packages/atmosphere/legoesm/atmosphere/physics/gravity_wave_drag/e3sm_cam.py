@@ -45,6 +45,23 @@ deliberate departures / version choices (canaries in
   momentum eddy flux is not dropped standalone, the u/v eddy diffusion that
   E3SM defers to the host (``dttdf`` and the u/v diffusion are applied only in
   this branch, not otherwise).
+* **Driver-level orographic heating + landfrac (E3SM gw_tend, gw_drag.F90:
+  902-915).** E3SM applies the oro tendencies OUTSIDE gw_drag_prof: it scales
+  ``utgw *= cam_in%landfrac`` (:904-906, zeroing oro drag over ocean) and heats
+  with the DISCRETE-step KE closure ``ptend%s += -(ptend%u*(u+0.5*dt*ptend%u)
+  + ...)`` (:908-913).  Both are available here: pass ``land_frac_col`` for
+  the landfrac scaling (``None`` default = no scaling), and set
+  ``config.use_discrete_ke_heating=True`` for the discrete closure (default
+  ``False`` = the continuous-rate identity, which over-heats by
+  ``0.5*dt*(du²+dv²)/c_pd`` per step).  STRUCTURAL DEPARTURE kept: E3SM's
+  closure runs once over the ACCUMULATED ptend of all GW sources ("includes
+  spectrum"); our per-source calls close each source independently.  (The
+  alternative ``use_gw_energy_fix`` branch, :916-937, deposits a
+  column-UNIFORM dE — code default ``.false.``, phys_control.F90:174 — and is
+  not implemented.  E3SM divides the closure by the spatially-varying
+  ``cpairv(:,k,lchnk)`` (gw_drag.F90:914); we use the scalar
+  ``constants.c_pd`` — the declared required-inputs departure, legoESM has
+  no spatially-varying heat capacity.)
 * **Newtonian alpha profile (default OFF).** ``config.use_newtonian_profile``
   defaults to ``False``; E3SM uses a Newtonian-cooling vertical ``alpha(z)``
   profile in the spectral saturation / WKB damping (with an orographic floor).
@@ -62,7 +79,11 @@ Conservation (see ``__physics_contract__`` energy note): ``conserves=["none"]``
 as the static INTERSECTION over all selectable sources (a contract must hold
 for every config a user can select). The orographic (c=0, DEFAULT) path IS
 energy-conserving in-atmosphere — the resolved mean-flow KE it removes is
-returned as heat by construction. But the frontal / convective sources launch
+returned as heat by construction (as a continuous RATE at the default
+``use_discrete_ke_heating=False``; ``eps_gwd`` is always that continuous
+mean-flow KE-removal-rate diagnostic, so with the discrete closure ON the
+column heat equals ``eps_gwd`` minus the ``0.5*dt*int(rho*(du²+dv²))dz``
+finite-step term — by design, not a leak). But the frontal / convective sources launch
 NONSTATIONARY spectral components from an EXTERNAL, unbudgeted reservoir
 (momentum not conserved), and their default ground-relative thermal term is not
 the irreversible ``(c-ubm)*gwut`` conversion — so no single conserved quantity
@@ -126,6 +147,10 @@ __physics_contract__ = {
         "h_topo_col": "m (optional subgrid orographic stddev, sgh)",
         "frontgf_col": "K^2 m^-2 s^-1 (optional frontogenesis function, frontal source)",
         "netdt_col": "K/s (optional convective heating rate, Beres source)",
+        "land_frac_col": (
+            "1 (optional land fraction in [0,1]; E3SM driver-level oro "
+            "scaling utgw *= landfrac, gw_drag.F90:904-906 — oro source only)"
+        ),
     },
     "outputs": {
         "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "eps_gwd": "W/m^2",
@@ -136,7 +161,10 @@ __physics_contract__ = {
         "(deceleration for c<U, acceleration for c>U), and its limiter caps the "
         "magnitude without changing sign; the SUMMED multi-wave tendency need "
         "not have a single sign. For the orographic (single c=0 wave) path "
-        "dT_dt = -(u*du+v*dv)/c_pd >= 0 and eps_gwd >= 0 (resolved KE->heat). "
+        "dT_dt >= 0 and eps_gwd >= 0 (resolved KE->heat; the continuous-rate "
+        "closure -(u*du+v*dv)/c_pd by default, or the E3SM discrete-step "
+        "closure -(du*(u+0.5*dt*du)+dv*(v+0.5*dt*dv))/c_pd when "
+        "use_discrete_ke_heating=True). "
         "For the spectral path dT_dt is the ground-relative dttke term, which "
         "is SIGNED (can cool where U>c>0). eps_gwd = -integral rho*(u*du+v*dv)*dz "
         "is the mean-flow KE removal rate (positive for the orographic path; "
@@ -148,8 +176,13 @@ __physics_contract__ = {
     # selectable source does. Nuance (pinned in test_e3sm_cam_gwd_faithful.py):
     #  - Orographic (c=0, the DEFAULT source) IS energy-conserving in-atmosphere:
     #    a stationary mountain exchanges momentum without mechanical work, and the
-    #    code returns the resolved mean-flow KE it removes as heat BY CONSTRUCTION
-    #    (dT_dt=-(u*du+v*dv)/c_pd, so c_pd*sum(rho*dT*dz)==eps_gwd definitionally).
+    #    code returns the resolved mean-flow KE it removes as heat BY CONSTRUCTION.
+    #    At the default use_discrete_ke_heating=False the closure is the
+    #    continuous rate dT_dt=-(u*du+v*dv)/c_pd, so c_pd*sum(rho*dT*dz)==eps_gwd
+    #    definitionally; with the E3SM discrete closure ON the heat equals the
+    #    DISCRETE resolved-KE change instead, and c_pd*sum(rho*dT*dz) ==
+    #    eps_gwd - 0.5*dt*int(rho*(du^2+dv^2))dz (eps_gwd stays the continuous
+    #    KE-removal-rate diagnostic — by design, not a leak).
     #    Momentum is a surface sink (mountain drag), never conserved.
     #  - Frontal / convective sources launch NONSTATIONARY spectral components
     #    whose momentum AND energy come from an EXTERNAL, unbudgeted reservoir
@@ -1420,6 +1453,7 @@ def e3sm_cam_gwd(
     frontgf_col: jax.Array | None = None,
     netdt_col: jax.Array | None = None,
     mfcc_table: jax.Array | None = None,
+    land_frac_col: jax.Array | None = None,
 ) -> GWDOutput:
     """Faithful E3SM/CAM gravity-wave drag (gw_drag_prof solver).
 
@@ -1446,6 +1480,15 @@ def e3sm_cam_gwd(
         documented analytic stand-in spectrum is used (NOT bit-faithful to
         Beres-2004); when ``None`` and ``use_stand_in_table`` is ``False`` a
         ``ValueError`` is raised.
+    land_frac_col : (ncol,) or None
+        Per-column land fraction in [0, 1] for the E3SM driver-level
+        orographic scaling ``utgw *= landfrac`` (gw_drag.F90:904-906 — the
+        oro drag is zeroed over ocean BEFORE the heating closure, so ocean
+        columns get neither drag nor heat).  Applied ONLY when
+        ``config.source == "orographic"`` — E3SM scales the oro tendencies
+        only; spectral (frontal/convective) sources ignore this argument,
+        matching the oracle.  ``None`` -> no scaling (legacy behaviour,
+        bit-identical).
 
     Returns
     -------
@@ -1561,11 +1604,39 @@ def e3sm_cam_gwd(
     du_dt = utgw
     dv_dt = vtgw
 
+    # E3SM driver-level orographic land-fraction scaling (gw_drag.F90:904-906):
+    # ``utgw(:,k) = utgw(:,k) * cam_in%landfrac`` — the oro drag is zeroed
+    # over ocean.  ORDER MATTERS: E3SM scales the momentum tendencies BEFORE
+    # the heating closure at :908-913 (the closure reads the scaled ptend%u),
+    # so ocean columns get neither drag nor heat.  Oro source only; E3SM does
+    # NOT landfrac-scale the spectral (frontal/Beres) tendencies.
+    if land_frac_col is not None and config.source == "orographic":
+        lfrac = jnp.clip(
+            jnp.asarray(land_frac_col), 0.0, 1.0
+        ).astype(u.dtype)[:, None]
+        du_dt = du_dt * lfrac
+        dv_dt = dv_dt * lfrac
+
     # Temperature tendency (thermal deposition).
     #
     # Orographic (single c=0 wave): a stationary wave does no mechanical work,
-    # so the kinetic energy lost by the mean flow is deposited locally as heat,
-    # dT/dt = -(u*du + v*dv)/c_pd (an exact resolved-KE -> heat conversion).
+    # so the kinetic energy lost by the mean flow is deposited locally as heat.
+    # Two closures (config.use_discrete_ke_heating):
+    #   False (default): the CONTINUOUS-rate identity
+    #     dT/dt = -(u*du + v*dv)/c_pd (exact as dt -> 0).
+    #   True: the E3SM DISCRETE-step closure (gw_drag.F90:908-913, default
+    #     no-energy-fix branch; ttgw = 0 for the oro ngwv=0 call per
+    #     gw_common.F90:739):
+    #     dT/dt = -(du*(u + 0.5*dt*du) + dv*(v + 0.5*dt*dv))/c_pd,
+    #     which returns EXACTLY the discrete resolved-KE change
+    #     -[KE(u+dt*du) - KE(u)]/dt as heat, closing the discrete column
+    #     energy budget the way E3SM's does.  The continuous form over-heats
+    #     by 0.5*dt*(du^2+dv^2)/c_pd per step (O(10%) of local heating in
+    #     tndmax-limited layers at dt=1800 s).  STRUCTURAL DEPARTURE kept:
+    #     E3SM applies this closure once over the ACCUMULATED ptend of all
+    #     GW sources ("includes spectrum", gw_drag.F90:898-899); our
+    #     per-source calls close each source independently, so the
+    #     spectral-x-oro cross terms of |du_total|^2 are not represented.
     #
     # Spectral (frontal / convective): dttke is the GROUND-RELATIVE
     # wave-energy-flux-divergence term, NOT the irreversible (c-ubm)*gwut
@@ -1582,7 +1653,13 @@ def e3sm_cam_gwd(
     # the pinned E3SM-3.0.1 oracle, not the trunk; the two differ by a
     # ``-ubm*gwut`` term.  Set ``config.dttke_use_intrinsic`` to switch.
     if config.source == "orographic":
-        dT_dt = -(u * du_dt + v * dv_dt) / cpair
+        if config.use_discrete_ke_heating:
+            dT_dt = -(
+                du_dt * (u + 0.5 * dt * du_dt)
+                + dv_dt * (v + 0.5 * dt * dv_dt)
+            ) / cpair
+        else:
+            dT_dt = -(u * du_dt + v * dv_dt) / cpair
     else:
         if config.dttke_use_intrinsic:
             ceff = c[:, None, :] - ubm[:, :, None]      # (ncol, nlev, nwav)
