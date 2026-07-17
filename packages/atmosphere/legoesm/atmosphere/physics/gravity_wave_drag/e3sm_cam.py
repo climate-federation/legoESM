@@ -191,7 +191,10 @@ __physics_contract__ = {
         "term, which is SIGNED (can cool where U>c>0); with "
         "use_e3sm_spectral_heating or do_eddy_diffusion it is dttke + the "
         "dse-diffusion dttdf (and the E3SM flag band-limits dttke to "
-        "midpoints above ~500 hPa). eps_gwd = -integral rho*(u*du+v*dv)*dz "
+        "midpoints above ~500 hPa); with do_energy_conservation=True the "
+        "C.-C. Chen fixer additionally redistributes the below-source dse "
+        "so the final dT_dt is the fixer-adjusted total. "
+        "eps_gwd = -integral rho*(u*du+v*dv)*dz "
         "is the mean-flow KE removal rate (positive for the orographic path; "
         "SIGNED for spectra, negative where the flow is accelerated toward c)."
     ),
