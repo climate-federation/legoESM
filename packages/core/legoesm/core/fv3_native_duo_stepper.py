@@ -34,7 +34,8 @@ from legoesm.grids.fv3_native_gridstruct import (
 
 
 def build_six_face_duo_context(n: int, ng: int = 3,
-                               use_ext_bundle: bool = False) -> dict:
+                               use_ext_bundle: bool = False,
+                               vector_corner: str = "lagrange") -> dict:
     """Gridstructs + Bounds for all six faces (certified builders)."""
     from legoesm.core.fv3_native_sw_core import Bounds
     from legoesm.grids.fv3_native_halos import ed_supergrid_lonlat_ref
@@ -127,7 +128,8 @@ def build_six_face_duo_context(n: int, ng: int = 3,
         from legoesm.grids.fv3_native_ext_vector import build_ext_context
         from legoesm.grids.fv3_native_gridstruct import extend_gridstruct
 
-        ectx = build_ext_context(n, ng, gs6)
+        ectx = build_ext_context(n, ng, gs6,
+                                 vector_corner=vector_corner)
         gs6 = [extend_gridstruct(gs6[t], n, ng, tile=t + 1)
                for t in range(6)]
 
@@ -149,6 +151,16 @@ def build_six_face_duo_context(n: int, ng: int = 3,
 def analytic_six_face_state(ctx: dict, **kw) -> list:
     """Per-face analytic solid-body SW state (Williamson-2-like)."""
     return [analytic_swcore_state(gs, **kw) for gs in ctx["gs6"]]
+
+
+def _check_exchange_flags(ctx: dict):
+    """use_k2e_scalars (legacy jax duo pad measurement flag) and
+    use_ext_bundle are mutually exclusive: the legacy pad would shadow
+    the required ext_scalar refreshes (dyn_core.F90:437-438,
+    1336-1337; codex ext r1 P1-2)."""
+    if ctx.get("use_k2e_scalars") and ctx.get("use_ext_bundle"):
+        raise ValueError(
+            "use_k2e_scalars and use_ext_bundle are mutually exclusive")
 
 
 def csw_step_sixface(ctx: dict, states: list, dt2: float,
@@ -384,6 +396,7 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
     pt6 = [np.array(st["pt"], copy=True) for st in states]
     u6 = [np.array(st["u"], copy=True) for st in states]
     v6 = [np.array(st["v"], copy=True) for st in states]
+    _check_exchange_flags(ctx)
     if ctx.get("use_k2e_scalars"):
         # MEASURED WORSE in isolation (2026-07-17 ablation: du 14->110,
         # ddelp 2%->54% at 8h): k2e scalars live at EXTENDED-grid
@@ -584,6 +597,7 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
 
     delp6 = [np.array(o["delp"], copy=True) for o in stage]
     pt6 = [np.array(o["pt"], copy=True) for o in stage]
+    _check_exchange_flags(ctx)
     if ctx.get("use_k2e_scalars"):
         duo_pad_scalars(delp6, ctx)
         duo_pad_scalars(pt6, ctx)
@@ -614,17 +628,15 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
                        if "delpc" in stage[t - 1] else 0.0)
         one_grad_p_1lev(u6[t - 1], v6[t - 1], pkc, gz, divg2, gs, bd,
                         npx, npx, dt=dt, d_ext=d_ext)
-    if ctx.get("use_ext_bundle"):
-        # post-step D-wind refresh (dyn_core.F90:471 analog at the
-        # next entry; refreshed here so the returned state is ext-clean)
-        from legoesm.grids.fv3_native_ext_vector import (
-            ext_vector_dgrid_sixface,
-        )
-
-        ext_vector_dgrid_sixface(u6, v6, ctx["ectx"])
-    else:
+    if not ctx.get("use_ext_bundle"):
         for t in range(1, 7):
             exchange_dgrid_vector_halos(u6, v6, t, n, ng)
+    # ext path: NO post-step vector refresh — dyn_core.F90:1332-1338
+    # refreshes only delp/pt after the step; the D-vector ext_vector
+    # runs at the NEXT step's entry (:468-472).  The returned state's
+    # D halos are therefore stale-by-one exactly like upstream's
+    # (codex ext r1 P2-5); consumers needing fresh halos re-enter the
+    # step or call ext_vector_dgrid_sixface themselves.
 
     return [{"delp": delp6[t], "pt": pt6[t], "u": u6[t], "v": v6[t]}
             for t in range(6)]

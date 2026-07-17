@@ -88,13 +88,20 @@ def center_a_matrix(gs: dict) -> tuple:
     fv_grid_utils.F90 init_grid_utils:2360-2380: ``z`` = center
     covariant unit basis (``get_center_vect`` ec1/ec2) dotted with the
     geographic unit vectors at agrid; ``a`` = the ±0.5·z / sin_sg(5)
-    pairing.  ``sin_sg(5)`` is recomputed here from its own definition
-    (``cos_sg(5) = inner(ec1, ec2)``, fv_grid_utils) rather than read
-    from ``gs["sin_sg"]`` — the gridstruct's corner-diagonal slots carry
-    the c_sw transport-patch/tiny-floor conventions (1e-8 at the four
-    (ie+1, je+1)-type cells), which would poison the a-matrix exactly
-    where c2l's do_halo ring needs it.  Valid wherever the mpp-state
-    ``grid``/``agrid`` halos are real — the whole data domain.
+    pairing.  ``sin_sg(5)`` is recomputed from ``cos_sg(5) =
+    inner(ec1, ec2)`` rather than read from ``gs["sin_sg"]``, whose
+    corner-diagonal slots carry the c_sw transport-patch/tiny-floor
+    conventions (1e-8) and would poison the a-matrix inside c2l's
+    do_halo ring.  NOT bit-identical to upstream at the four
+    corner-DIAGONAL cells (codex ext r1 P2-4): upstream
+    ``get_center_vect`` zeroes those ec vectors and ``fill_ghost``
+    applies the tiny floor, so upstream's a-matrix there is
+    floor-poisoned garbage of a different flavor (~1e-8-scale sin
+    difference).  Both variants are DEAD: the geographic corner
+    Lagrange overwrites every value derived from them before
+    projection.  Non-corner cells agree with upstream to machine
+    precision.  Valid wherever the mpp-state ``grid``/``agrid`` halos
+    are real — the whole data domain.
     """
     p = _xyz(gs["grid_lon"], gs["grid_lat"])            # corners (m_b, m_b, 3)
     # cell_center3: normalized 4-corner sum
@@ -380,7 +387,8 @@ class _CornerLagrange:
 # context: per-resolution precomputed tables/bases
 # ---------------------------------------------------------------------------
 
-def build_ext_context(n: int, ng: int, gs6: list) -> dict:
+def build_ext_context(n: int, ng: int, gs6: list, *,
+                      vector_corner: str = "lagrange") -> dict:
     """Precompute everything the ext exchanges need at resolution n.
 
     ``gs6`` MUST be the KINKED (pre-``extend_gridstruct``) mpp-state
@@ -425,12 +433,16 @@ def build_ext_context(n: int, ng: int, gs6: list) -> dict:
     corner_dv3 = [_CornerLagrange(a_lon4[t], a_lat4[t], n, ng, 1, 0)
                   for t in range(6)]
 
+    if vector_corner not in ("lagrange", "a2d"):
+        raise ValueError(f"vector_corner={vector_corner!r} "
+                         "(expected 'lagrange' or 'a2d')")
     return {
         "n": n, "ng": ng, "amat6": amat6, "dx6": dx6, "dy6": dy6,
         "vlon4": vlon4, "vlat4": vlat4, "ew4": ew4, "es4": es4,
         "corner_a4": corner_a4, "corner_a3": corner_a3,
         "corner_b3": corner_b3,
         "corner_du3": corner_du3, "corner_dv3": corner_dv3,
+        "vector_corner": vector_corner,
     }
 
 
@@ -466,7 +478,16 @@ def ext_scalar_sixface(f6: list, stag: str, ectx: dict):
 
 def _geo_lattice_exchange(g6: list, ectx: dict):
     """Steps 3-4 of the vector flow on the _NG_P1 lattice: neighbour
-    exchange, k2e ring remap (rings 1..4), Lagrange corner regions."""
+    exchange, k2e ring remap (rings 1..4), Lagrange corner regions.
+
+    Corner-wedge state (codex ext r1 P2-6): rings 1..3 of each wedge
+    end Lagrange-filled; the ring-4 wedge slots keep the AGRID
+    index-copy values (kinked-position neighbours) — unlike upstream,
+    where the mpp corner exchange leaves them undefined at cube
+    vertices.  Verified non-propagating: poisoning them changes no
+    final D/C strip value (the a2d/a2c consumers that touch ring-4
+    wedge rows feed only wedge-column strip slots, which the final
+    per-component corner fill overwrites)."""
     n = ectx["n"]
     ngp = _NG_P1
     for t in range(1, 7):
@@ -561,7 +582,17 @@ def _write_d_strips(u: np.ndarray, v: np.ndarray, ud4: np.ndarray,
 
 
 def ext_vector_dgrid_sixface(u6: list, v6: list, ectx: dict):
-    """ext_vector(u, v, …, 0,1,1,0): D-grid covariant winds."""
+    """ext_vector(u, v, …, 0,1,1,0): D-grid covariant winds.
+
+    ``ectx["vector_corner"]`` selects the wedge treatment:
+    "lagrange" (upstream-faithful: fill_corner_region re-extrapolates
+    each covariant component; rough where the covariant basis swings
+    across a cube vertex — measured 3.9 m/s at C12 vs 0.15 strips) or
+    "a2d" (keep the strip-written cubed_a2d values, whose corner
+    content comes from the GEOGRAPHIC corner Lagrange + ext-basis
+    projection — scalar-quality; a documented deviation from the
+    upstream final overwrite).
+    """
     n, ng = ectx["n"], ectx["ng"]
     for t in range(1, 7):
         exchange_dgrid_vector_halos(u6, v6, t, n, ng)
@@ -577,8 +608,9 @@ def ext_vector_dgrid_sixface(u6: list, v6: list, ectx: dict):
     for t in range(6):
         ud4, vd4 = _a2d_project(ug6[t], vg6[t], t, ectx)
         _write_d_strips(u6[t], v6[t], ud4, vd4, n, ng)
-        ectx["corner_du3"][t].fill(u6[t])
-        ectx["corner_dv3"][t].fill(v6[t])
+        if ectx.get("vector_corner", "lagrange") == "lagrange":
+            ectx["corner_du3"][t].fill(u6[t])
+            ectx["corner_dv3"][t].fill(v6[t])
 
 
 def _write_c_strips(uc: np.ndarray, vc: np.ndarray, uc4: np.ndarray,
@@ -625,5 +657,6 @@ def ext_vector_cgrid_sixface(uc6: list, vc6: list, ectx: dict):
     for t in range(6):
         uc4, vc4 = _a2c_project(ug6[t], vg6[t], t, ectx)
         _write_c_strips(uc6[t], vc6[t], uc4, vc4, n, ng)
-        ectx["corner_dv3"][t].fill(uc6[t])     # C-u stagger = (1,0)
-        ectx["corner_du3"][t].fill(vc6[t])     # C-v stagger = (0,1)
+        if ectx.get("vector_corner", "lagrange") == "lagrange":
+            ectx["corner_dv3"][t].fill(uc6[t])     # C-u stagger = (1,0)
+            ectx["corner_du3"][t].fill(vc6[t])     # C-v stagger = (0,1)

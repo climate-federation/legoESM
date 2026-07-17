@@ -99,6 +99,11 @@ def main():
     ap.add_argument("--ext-bundle", action="store_true",
                     help="faithful ext_scalar/ext_vector duo exchanges "
                          "(fv3_native_ext_vector) + ext halo metrics")
+    ap.add_argument("--vector-corner", default="lagrange",
+                    choices=("lagrange", "a2d"),
+                    help="vector wedge treatment (lagrange = upstream-"
+                         "faithful re-extrapolation; a2d = keep the "
+                         "projected geographic-corner values)")
     args = ap.parse_args()
 
     from legoesm.core.fv3_native_duo_stepper import (
@@ -108,7 +113,8 @@ def main():
     )
 
     ctx = build_six_face_duo_context(args.n, 3,
-                                     use_ext_bundle=args.ext_bundle)
+                                     use_ext_bundle=args.ext_bundle,
+                                     vector_corner=args.vector_corner)
     states = w2_six_face_state(ctx)
     nmap = build_nearest_map(ctx)
 
@@ -133,11 +139,16 @@ def main():
         if not np.isfinite(vmax):
             print("NaN — aborting", flush=True)
             sys.exit(2)
+    mode = ("faithful ext bundle (fv3_native_ext_vector, vector_corner="
+            f"{args.vector_corner})" if args.ext_bundle
+            else "interim exchanges")
     np.savez_compressed(
         args.out, times_days=np.array(times),
         v=np.stack(frames), lat=np.linspace(-90, 90, 181),
         lon=np.arange(360, dtype=float),
-        protocol="duo stepper (interim exchanges); covariant->geographic "
+        ext_bundle=np.array(bool(args.ext_bundle)),
+        vector_corner=np.array(args.vector_corner),
+        protocol=f"duo stepper ({mode}); covariant->geographic "
         "exact tangent inversion; NEAREST-cell 1deg sampling (pattern-"
         "level protocol, envelope-comparable to the fregrid reference)")
     print("saved", args.out, flush=True)

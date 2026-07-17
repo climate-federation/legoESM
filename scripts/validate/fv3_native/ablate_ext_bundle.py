@@ -15,14 +15,16 @@ import argparse
 import numpy as np
 
 
-def run(n: int, ng: int, dt: float, ext_bundle: bool) -> dict:
+def run(n: int, ng: int, dt: float, ext_bundle: bool,
+        vector_corner: str = "lagrange") -> dict:
     from legoesm.core.fv3_native_duo_stepper import (
         build_six_face_duo_context,
         run_duo_sw,
         w2_six_face_state,
     )
 
-    ctx = build_six_face_duo_context(n, ng, use_ext_bundle=ext_bundle)
+    ctx = build_six_face_duo_context(n, ng, use_ext_bundle=ext_bundle,
+                                     vector_corner=vector_corner)
     states0 = w2_six_face_state(ctx)
     slu = (slice(ng, ng + n), slice(ng, ng + n + 1))
     sld = (slice(ng, ng + n), slice(ng, ng + n))
@@ -66,8 +68,10 @@ def main():
     ap.add_argument("--dt", type=float, default=600.0)
     args = ap.parse_args()
 
-    for label, flag in (("interim", False), ("ext-bundle", True)):
-        r = run(args.n, args.ng, args.dt, flag)
+    for label, flag, vcorn in (("interim", False, "lagrange"),
+                               ("ext-bundle", True, "lagrange"),
+                               ("ext-a2d-corners", True, "a2d")):
+        r = run(args.n, args.ng, args.dt, flag, vcorn)
         print(f"[{label}] " + "  ".join(
             f"{k}={v:.4g}" for k, v in r.items()), flush=True)
 

@@ -14,6 +14,8 @@ rides the phase-4 sbatch harness):
   below the interim index-copy plateau (~14 m/s at C12).
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 from legoesm.core.fv3_native_duo_stepper import (
@@ -186,3 +188,186 @@ def test_pack_p1_layout():
     assert p1.shape == (N + 2 * _NG_P1, N + 2 * _NG_P1)
     assert np.isnan(p1[0, :]).all()
     assert (p1[d:d + N + 2 * NG, d:d + N + 2 * NG] == ua).all()
+
+
+# ---------------------------------------------------------------------------
+# independent Fortran projection oracle (codex ext r1 P1-1)
+# ---------------------------------------------------------------------------
+
+_FIXTURE = (Path(__file__).parent / "fixtures"
+            / "fv3_extproj_oracle.npz")
+
+
+def _load_extproj():
+    if not _FIXTURE.exists():
+        pytest.skip("extproj oracle fixture not generated "
+                    "(scripts/cluster/fv3_native/extproj_oracle.sbatch)")
+    return np.load(_FIXTURE, allow_pickle=False)
+
+
+def _bases_for(n, ng, tile):
+    from legoesm.grids.fv3_native_ext_vector import ext_parity_lonlat_ref
+    from legoesm.grids.fv3_native_halos import _compute_ext_vectors_native
+
+    a_lon, a_lat = ext_parity_lonlat_ref(n, ng, "A")
+    b_lon, b_lat = ext_parity_lonlat_ref(n, ng, "B")
+    vlon, vlat, ew, es = _compute_ext_vectors_native(
+        a_lon, a_lat, b_lon, b_lat)
+    return {"vlon4": vlon, "vlat4": vlat, "ew4": ew, "es4": es,
+            "a_lonlat": (a_lon, a_lat), "b_lonlat": (b_lon, b_lat)}
+
+
+def test_extproj_fixture_input_sha_enforced():
+    d = _load_extproj()
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "gen_extproj_oracle",
+        Path(__file__).parents[2] / "scripts/validate/fv3_native"
+        / "gen_extproj_oracle.py")
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    n, ng, tile = int(d["n"]), int(d["ng"]), int(d["tile"])
+    b = _bases_for(n, ng, tile)
+    a_lon, a_lat = b["a_lonlat"]
+    b_lon, b_lat = b["b_lonlat"]
+    import hashlib
+
+    text = gen.serialize_inputs(n, ng, a_lon[tile - 1], a_lat[tile - 1],
+                                b_lon[tile - 1], b_lat[tile - 1],
+                                d["ug"], d["vg"])
+    assert hashlib.sha256(text.encode()).hexdigest() == str(d["input_sha256"])
+
+
+def test_extproj_oracle_bases_match():
+    """vlon/vlat/ew/es vs the INDEPENDENT Fortran a2stag_metrics.
+
+    Tolerance 1e-13 rel: upstream computes the trig in
+    selected_real_kind(20) (unit_vect_latlon_ext) and normalizes in
+    r8; the python bases are float64 throughout.
+    """
+    d = _load_extproj()
+    n, ng, tile = int(d["n"]), int(d["ng"]), int(d["tile"])
+    b = _bases_for(n, ng, tile)
+    t = tile - 1
+    lo = 1 - ng
+    for rec, arr, idx in (
+            ("vlon", b["vlon4"][t], 3), ("vlat", b["vlat4"][t], 3)):
+        r = d[rec]
+        for i_f, j_f, k, val in r:
+            got = arr[int(i_f) - lo, int(j_f) - lo, int(k) - 1]
+            assert abs(got - val) <= 1e-13 * max(1.0, abs(val)), \
+                (rec, i_f, j_f, k, got, val)
+    for rec, arr in (("ew", b["ew4"][t]), ("es", b["es4"][t])):
+        r = d[rec]
+        for k, i_f, j_f, m, val in r:
+            got = arr[int(i_f) - lo, int(j_f) - lo, int(k) - 1, int(m) - 1]
+            assert abs(got - val) <= 1e-13 * max(1.0, abs(val)), \
+                (rec, k, i_f, j_f, m, got, val)
+
+
+def test_extproj_oracle_projections_match_and_discriminate():
+    """UD/VD/UC/VC vs the verbatim Fortran projections — full arrays
+    (all sides, both components, both staggerings), plus the basis-
+    variant mutation ("es[...,0] <-> [...,1]") must now FAIL against
+    the independent Fortran values (the codex r1 shared-oracle hole).
+    """
+    from legoesm.grids.fv3_native_ext_vector import (
+        _a2c_project,
+        _a2d_project,
+    )
+
+    d = _load_extproj()
+    n, ng, tile = int(d["n"]), int(d["ng"]), int(d["tile"])
+    b = _bases_for(n, ng, tile)
+    t = tile - 1
+    ectx = {"vlon4": b["vlon4"], "vlat4": b["vlat4"],
+            "ew4": b["ew4"], "es4": b["es4"]}
+    ud, vd = _a2d_project(d["ug"], d["vg"], t, ectx)
+    uc, vc = _a2c_project(d["ug"], d["vg"], t, ectx)
+    lo = 1 - ng
+
+    def check(rec, arr, col_off=0, row_off=0):
+        worst = 0.0
+        for i_f, j_f, val in d[rec]:
+            got = arr[int(i_f) - lo - row_off, int(j_f) - lo - col_off]
+            worst = max(worst, abs(got - val))
+        return worst
+
+    # index maps: ud rows = centers, cols = nodes j (fort j -> col j-1-lo)
+    assert check("ud", ud, col_off=1) < 1e-12
+    assert check("vd", vd, row_off=1) < 1e-12
+    assert check("uc", uc, row_off=1) < 1e-12
+    assert check("vc", vc, col_off=1) < 1e-12
+
+    # mutation teeth: swap the D es/ew variants -> large mismatch
+    mut = {"vlon4": b["vlon4"], "vlat4": b["vlat4"],
+           "ew4": b["ew4"][..., ::-1], "es4": b["es4"][..., ::-1]}
+    ud_m, vd_m = _a2d_project(d["ug"], d["vg"], t, mut)
+    assert check("ud", ud_m, col_off=1) > 1.0
+    assert check("vd", vd_m, row_off=1) > 1.0
+
+
+# ---------------------------------------------------------------------------
+# nonconstant staggered corner-fill accuracy (codex ext r1 P2-6)
+# ---------------------------------------------------------------------------
+
+def _smooth(lon, lat):
+    return np.sin(lat) * 40.0 + 12.0 * np.cos(lon) * np.cos(lat)
+
+
+def test_corner_lagrange_smooth_scalar_a(ectx, kinked_gs6):
+    from legoesm.grids.fv3_native_ext_vector import ext_parity_lonlat_ref
+
+    a_lon_e, a_lat_e = ext_parity_lonlat_ref(N, NG, "A")
+    f6 = [_smooth(gs["agrid_lon"], gs["agrid_lat"]).copy()
+          for gs in kinked_gs6]
+    ext_scalar_sixface(f6, "A", ectx)
+    worst = 0.0
+    for t in range(6):
+        fe = _smooth(a_lon_e[t], a_lat_e[t])
+        for i_f in range(1 - NG, N + NG + 1):
+            for j_f in range(1 - NG, N + NG + 1):
+                if not ((i_f < 1 or i_f > N) or (j_f < 1 or j_f > N)):
+                    continue
+                worst = max(worst, abs(
+                    f6[t][i_f - 1 + NG, j_f - 1 + NG]
+                    - fe[i_f - 1 + NG, j_f - 1 + NG]))
+    assert worst < 0.15, worst          # measured 0.064 (field ~41)
+
+
+def test_corner_lagrange_smooth_scalar_dstag(ectx):
+    """The (0,1) staggered operator on a smooth scalar sampled at the
+    EXT D-u lattice: wedge extrapolation error stays under 0.8
+    (measured 0.57; the stagger half-shift abscissae are upstream's
+    own approximation, compute_lagrange_coeff)."""
+    from legoesm.grids.fv3_native_halos import _ED_CARTS, _ed_line
+
+    line = _ed_line(N, 2 * (NG + 2))
+    iv = np.array([line[2 * i] for i in range(1 - NG, N + NG + 1)])
+    jv = np.array([line[2 * j - 1] for j in range(1 - NG, N + 1 + NG + 1)])
+    xg, yg = np.meshgrid(iv, jv, indexing="ij")
+    worst = 0.0
+    for t in range(6):
+        cx, cy, cz = _ED_CARTS[t](xg, yg)
+        r = np.sqrt(cx**2 + cy**2 + cz**2)
+        lon = np.mod(np.arctan2(cy, cx), 2 * np.pi)
+        lat = np.arcsin(cz / r)
+        fd = _smooth(lon, lat)
+        g = fd.copy()
+        for i_f in range(1 - NG, N + NG + 1):
+            for j_f in range(1 - NG, N + 1 + NG + 1):
+                if (i_f < 1 or i_f > N) and (j_f < 1 or j_f > N + 1):
+                    g[i_f - 1 + NG, j_f - 1 + NG] = np.nan
+        ectx["corner_du3"][t].fill(g)
+        assert np.isfinite(g).all()
+        worst = max(worst, float(np.nanmax(np.abs(g - fd))))
+    assert worst < 0.8, worst
+
+
+def test_flags_mutually_exclusive(ctx):
+    bad = dict(ctx)
+    bad["use_k2e_scalars"] = True
+    states = w2_six_face_state(ctx)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        run_duo_sw(bad, states, dt=600.0, nsteps=1)

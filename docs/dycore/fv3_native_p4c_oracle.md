@@ -330,10 +330,12 @@ strip writes (fv_duogrid.F90:626-975).  Upstream itself rejects
 per-stagger vector remapping as noisier (:678-681) — consistent with
 the earlier lightweight-swap measurements.  Halo strips vs
 analytic-through-identical-projection truth: 0.152 m/s at C12.
-**C12 ablation (SB5a protocol, one variable)**: edge du48 13.99 → 8.25
-(−41%), du12 8.28 → 5.01, interior du12 0.54 → 0.35, ddelp12
-1.42% → 0.97%, mass exact; interior du48 1.33 → 1.86 (small
-degradation, C24 arbitration pending).  Bugs the analytic gate caught:
+**C12 ablation (SB5a protocol, one FLAG — bundle-level attribution
+only: the flag switches halo metrics, A/B scalar exchanges, D/C vector
+exchanges, bases and corner handling TOGETHER; it does not isolate the
+vector port)**: edge du48 13.99 → 8.25 (−41%), du12 8.28 → 5.01,
+interior du12 0.54 → 0.35, ddelp12 1.42% → 0.97%, mass exact; interior
+du48 1.33 → 1.86 (small degradation, C24 arbitration pending).  Bugs the analytic gate caught:
 create-vs-reference face layout in the ext bases (ext_parity_lonlat_ref
 fixes), staggered corner abscissae needing the ng=4 A lattice, and the
 c_sw sin_sg(5) tiny-floor patch poisoning the a-matrix (recomputed from
