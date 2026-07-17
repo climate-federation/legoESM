@@ -378,6 +378,22 @@ ISOLATION EXPERIMENTS (2026-07-16, 5-yr runs + single-column avt certificate):
   rows carry active slopes), the coastal zcofw factor detail, and
   traldf_iso's wall-face flux masking. The retention physics is now PROVEN
   reachable — the remaining work is the boundary detail.
+- **NATIVE FOUR-POSITION SLOPES SHIPPED + 10-YR EQUILIBRIUM (2026-07-17):
+  the campaign's equilibrated scorecard.** compute_nemo_native_slopes (direct
+  ldfslp transcription; slope certificate corr +0.989..+0.999 amp 0.97-1.03
+  vs *_stg; tendency corr +0.956 amp 1.02 vs ttrd_ldf). 5-yr: SST max 19.07
+  vs 18.98 (0.5%), no hot spot (amplitude-1.0 stability held), u' 0.83.
+  **10-yr EQUILIBRIUM: baroclinic u' converges FLAT at 0.80-0.82** (yrs
+  4-10), SST max ~18.6-18.9 (NEMO 18.98), barotropic 0.98, surf rms 0.81,
+  mid-depth 1.77, surf/deep 10.8 (NEMO 31 full-depth measure). The
+  campaign's circulation ledger: 0.58 (start) -> 0.71 (pinned, pre-sign-fix)
+  -> 0.81 EQUILIBRATED with every operator certified. The remaining ~19% is
+  NOT attributable to any single traced term any more — all certified to a
+  few %: candidates are the ACCUMULATION of small residuals (iso pattern
+  corr 0.956; the buoyancy-path w-noise floor 3.4x; TKE 3-4-sig-fig
+  regime residuals; wall wet-face-count slope normalisation; hmlp/nmln
+  criterion details) and NEMO's 1.13x ageostrophic WBC enhancement.
+  Diminishing returns per item from here — each is a few-% lever at most.
 - **HOT-SPOT BISECT + FIRST CLEAN MEASUREMENT (2026-07-17): the permanent
   thermocline BUILDS.** Bisect: nemo_cap+signfix -> hot (39-45 C);
   dm95+signfix -> HEALTHY (21 C); ML ramp innocent => the mode-b operator's
