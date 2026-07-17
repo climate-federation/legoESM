@@ -107,7 +107,6 @@ def main():
     ctx = build_six_face_duo_context(args.n, 3)
     states = w2_six_face_state(ctx)
     nmap = build_nearest_map(ctx)
-    n = args.n
 
     def sample_v(states):
         v6 = geographic_va(ctx, states)
