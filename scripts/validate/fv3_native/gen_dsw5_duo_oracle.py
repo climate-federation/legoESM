@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Gen the duo d_sw5 full-chain oracle, or pack the fixture.
+"""Gen the duo d_sw5 single-face raw-KEE chain oracle, or pack the fixture.
 
 INPUT PROVENANCE: identical to the d_sw1..4 oracles — the ONE canonical
 serializer ``gen_dsw1_duo_oracle.serialize_inputs`` (imported, not
@@ -92,12 +92,14 @@ def _pack(work: str) -> None:
         OUT_NPZ, **outs, res=res, ng=ng, input_sha256=inp_hash,
         dsw5_extract_sha256=ext_hash, auth_block_sha256=auth_shas,
         input_lineage="COMMITTED dswcore_input.npz serialised (no "
-        "regeneration); symmetryclean SINGLE-FACE chain d_sw1 -> d_sw3 "
-        "-> raw kee (verbatim dyn_core loops, UNEXCHANGED — the "
-        "BGRID_NE averaging is excluded six-face infrastructure) -> "
-        "d_sw4 -> d_sw5, DUO branch; d_sw2 skipped (no d_sw5-lane "
-        "effect at hydrostatic/damp_w=0); delpc/ptc/ub/vb/ke-halo "
-        "1e30 sentinels via the extract intent shims")
+        "regeneration); TRANSLATION CERTIFICATE, single-face: "
+        "symmetryclean d_sw1 -> d_sw3 -> raw kee (verbatim dyn_core "
+        "loops on UNEXCHANGED arrays — the authoritative BGRID_NE "
+        "exchange+0.5-averaging at dyn_core.F90:968-1020 needs "
+        "neighbor faces and is EXCLUDED six-face work) -> d_sw4 -> "
+        "d_sw5, DUO branch; d_sw2 skipped (no d_sw5-lane effect at "
+        "hydrostatic/damp_w=0); delpc/ptc/ub/vb/ke-halo 1e30 "
+        "sentinels via the extract intent shims")
     print("fixture packed; input_sha256", inp_hash)
     print("dsw5 extract sha256", ext_hash)
 

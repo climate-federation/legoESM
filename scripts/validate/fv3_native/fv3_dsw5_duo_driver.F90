@@ -1,8 +1,10 @@
-! Phase-4c duo d_sw5 full-chain oracle driver.
+! Phase-4c duo d_sw5 single-face raw-KEE chain oracle driver.
 !
-! Chain: VERBATIM d_sw1 -> d_sw3 -> kee assembly (the dyn_core inline
-! loops, verbatim minus the single-tile-identity mpp averaging) ->
-! d_sw4 -> d_sw5.  d_sw2 is SKIPPED: on this lane (hydrostatic,
+! Chain: VERBATIM d_sw1 -> d_sw3 -> RAW kee assembly (the dyn_core
+! inline loops on UNEXCHANGED single-face arrays — the authoritative
+! BGRID_NE exchange+0.5-averaging at dyn_core.F90:968-1020 needs
+! neighbor faces and is EXCLUDED six-face work; this is a TRANSLATION
+! certificate, not the integrated pipeline) -> d_sw4 -> d_sw5.  d_sw2 is SKIPPED: on this lane (hydrostatic,
 ! damp_w=0) d_sw5 reads none of its effects (delp/pt updates feed the
 ! non-hydro w branch only; dw is unread at damp_w=0).  ke initialised
 ! 1e30 (halos stay sentinel through the kee compute-ring assembly);
@@ -186,8 +188,9 @@ program fv3_dsw5_duo_driver
   call d_sw3(u, v, uc, vc, dt, 6, gs, fl, bd, ut, vt,                 &
              ubbtemp, vbbtemp, ubb, vbb)
 
-  ! kee assembly — VERBATIM dyn_core loops (single tile: the BGRID_NE
-  ! averaging is the identity on one tile's raw ubb/vbbtemp)
+  ! RAW kee assembly — VERBATIM dyn_core loops on the UNEXCHANGED
+  ! single-face ubb/vbbtemp (dyn_core would BGRID_NE-average first;
+  ! excluded six-face work — see the header)
   ke = 1.e30
   do j = bd%js, bd%je + 1
     do i = bd%is, bd%ie + 1

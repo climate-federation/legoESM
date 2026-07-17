@@ -1,4 +1,4 @@
-"""Phase-4c — duo d_sw5 FULL-CHAIN oracle.
+"""Phase-4c — duo d_sw5 SINGLE-FACE RAW-KEE chain oracle.
 
 Certifies ``d_sw5_duo`` (the symmetryclean sw_core.F90:1474-1869
 divergence-damping + KE + vorticity-transport stage, DUO branch) via
@@ -141,7 +141,7 @@ def _run_chain(inputs):
 
 def test_dsw5_duo_bit_exact(inputs, oracle):
     """Every d_sw5 output token BIT-exact (uint64) vs the verbatim
-    Fortran full chain, sentinel regions included."""
+    Fortran single-face chain, sentinel regions included."""
     out = _run_chain(inputs)
     for key in ("delpc", "ptc", "wk", "divg_d", "ke", "uc", "ut",
                 "vc", "vt", "vortfluxx", "vortfluxy", "ub", "vb"):

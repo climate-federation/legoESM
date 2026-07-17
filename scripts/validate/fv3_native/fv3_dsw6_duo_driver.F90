@@ -1,9 +1,11 @@
-! Phase-4c duo d_sw6 full-chain oracle driver.
+! Phase-4c duo d_sw6 single-face raw-KEE chain oracle driver.
 !
-! Chain: VERBATIM d_sw1 -> d_sw3 -> kee -> d_sw4 -> d_sw5 -> d_sw6 —
-! the COMPLETE single-tile duo d_sw pipeline (d_sw2 skipped: no
-! effect on this lane; the two mpp averaging sites are the identity
-! on one tile).  d_sw6 rewrites u/v in circulation form from d_sw5's
+! Chain: VERBATIM d_sw1 -> d_sw3 -> RAW kee -> d_sw4 -> d_sw5 ->
+! d_sw6 — a single-face TRANSLATION certificate of the duo d_sw stage
+! composition (d_sw2 skipped: no effect on this lane; the two
+! authoritative mpp exchange+averaging sites — post-d_sw1 C-ring and
+! the BGRID_NE at dyn_core.F90:968-1020 — need neighbor faces and are
+! EXCLUDED six-face work).  d_sw6 rewrites u/v in circulation form from d_sw5's
 ! ut/vt/ke/vortflux, applies the damp_v del6 vorticity damping
 ! (clobbering ut/vt as flux outputs), and adds the diffusive fluxes.
 ! d_con=0 skips the heating block: ub/vb/heat_source stay at their
@@ -186,8 +188,9 @@ program fv3_dsw6_duo_driver
   call d_sw3(u, v, uc, vc, dt, 6, gs, fl, bd, ut, vt,                 &
              ubbtemp, vbbtemp, ubb, vbb)
 
-  ! kee assembly — VERBATIM dyn_core loops (single tile: the BGRID_NE
-  ! averaging is the identity on one tile's raw ubb/vbbtemp)
+  ! RAW kee assembly — VERBATIM dyn_core loops on the UNEXCHANGED
+  ! single-face ubb/vbbtemp (dyn_core would BGRID_NE-average first;
+  ! excluded six-face work — see the header)
   ke = 1.e30
   do j = bd%js, bd%je + 1
     do i = bd%is, bd%ie + 1

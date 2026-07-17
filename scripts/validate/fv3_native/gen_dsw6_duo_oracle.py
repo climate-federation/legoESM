@@ -79,10 +79,13 @@ def _pack(work: str) -> None:
         OUT_NPZ, **outs, res=res, ng=ng, input_sha256=inp_hash,
         dsw6_extract_sha256=ext_hash, auth_block_sha256=auth_shas,
         input_lineage="COMMITTED dswcore_input.npz serialised (no "
-        "regeneration); symmetryclean SINGLE-FACE chain d_sw1 -> d_sw3 -> raw kee "
-        "-> d_sw4 -> d_sw5 -> d_sw6, DUO branch; final circulation-form "
-        "winds; ub/vb/heat_source 1e30 sentinels (d_con=0; d_sw2 "
-        "skipped so heat stays sentinel)")
+        "regeneration); TRANSLATION CERTIFICATE, single-face: "
+        "symmetryclean d_sw1 -> d_sw3 -> raw kee (UNEXCHANGED — the "
+        "authoritative BGRID_NE exchange+0.5-averaging at "
+        "dyn_core.F90:968-1020 needs neighbor faces, EXCLUDED "
+        "six-face work) -> d_sw4 -> d_sw5 -> d_sw6, DUO branch; "
+        "final circulation-form winds; ub/vb/heat_source 1e30 "
+        "sentinels (d_con=0; d_sw2 skipped so heat stays sentinel)")
     print("fixture packed; input_sha256", inp_hash)
     print("dsw6 extract sha256", ext_hash)
 
