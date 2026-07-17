@@ -88,6 +88,12 @@ deliberate departures / version choices (canaries in
   defaults to ``False``; E3SM uses a Newtonian-cooling vertical ``alpha(z)``
   profile in the spectral saturation / WKB damping (with an orographic floor).
   Enabling it changes the drag.
+* **Beres source heating: TOTAL convective, not deep-only** (coupled runs):
+  E3SM feeds ``gw_beres_src`` the DEEP-only ``pbuf TTEND_DP``
+  (gw_drag.F90:766-778); the coupled pipeline threads the convection
+  scheme's TOTAL heating (deep + shallow + downdraft) as ``netdt_col``, so
+  Beres's hdepth/q0 scan sees the full convective column — no deep-only
+  decomposition exists in our convection interface.
 * **Beres (2004) convective source: TABLE not bundled.** ``source="convective"``
   RUNS, but on a clearly-labelled analytic STAND-IN spectrum
   (``build_stand_in_mfcc``, explicitly NOT bit-faithful to Beres); the real

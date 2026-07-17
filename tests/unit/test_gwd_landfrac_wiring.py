@@ -161,9 +161,13 @@ def _pipe_over(gwd_over, convection="sbm"):
 
 def test_e3sm_convective_source_receives_netdt():
     """END-TO-END: with the override selecting the Beres source, the kernel
-    receives netdt_col in column layout; the noop-convection run threads
-    zeros (kernel: None/zero heating -> no convective waves), a real
-    convection scheme threads its own heating array."""
+    receives netdt_col in column layout.  The convection kernel is replaced
+    by a stub emitting a LEVEL- and COLUMN-DISTINCT sentinel heating, and
+    the recorder asserts netdt_col equals that exact (ncol, nlev) array —
+    catching a transpose, vertical reversal, or wrong-source array (codex
+    netdt r1)."""
+    from types import SimpleNamespace
+
     from legoesm.atmosphere.physics.gravity_wave_drag.config import (
         E3SMCAMConfig,
         GravityWaveDragConfig,
@@ -172,15 +176,31 @@ def test_e3sm_convective_source_receives_netdt():
         scheme="e3sm_cam", e3sm_cam=E3SMCAMConfig(source="convective", pgwv=8))
     grid, pipe = _pipe_over(over, convection="none")
     assert pipe._gwd_takes_netdt is True
+
+    ncol = NLAT * NLON
+    sentinel = (jnp.arange(ncol)[:, None] * 100.0
+                + jnp.arange(NLEV)[None, :]) * 1e-9   # distinct per (col, lev)
+    zeros3 = jnp.zeros((ncol, NLEV))
+
+    def conv_stub(*a, **k):
+        out = SimpleNamespace(
+            dT_dt=sentinel, dq_v_dt=zeros3, dq_c_conv_dt=zeros3,
+            dq_r_conv_dt=None, du_dt=zeros3, dv_dt=zeros3,
+            precip=jnp.zeros((ncol,)), M_c=zeros3,
+        )
+        return out   # the convection='none' branch takes a bare return
+
+    pipe.convection_fn = conv_stub
     rec = _Recorder()
     pipe.gwd_fn = rec
     _run_step(grid, pipe)
     assert rec.kwargs is not None
     assert "netdt_col" in rec.kwargs, "netdt_col not threaded to the kernel"
     nd = rec.kwargs["netdt_col"]
-    assert nd.shape == (NLAT * NLON, NLEV)
-    # noop convection -> zero heating threads through (documented inert path)
-    assert float(jnp.max(jnp.abs(nd))) == 0.0
+    assert nd.shape == (ncol, NLEV)
+    assert jnp.array_equal(nd, sentinel), (
+        "netdt_col is not the convection heating array (transpose/reversal/"
+        "wrong source)")
 
 
 def test_e3sm_orographic_source_gets_no_netdt():
