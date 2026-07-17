@@ -1,0 +1,20 @@
+# WB2 forecast-scorecard variant: CLASSICAL physics.
+#
+# The sweep-WINNER scheme combination on the shared Gaussian-grid
+# spectral primitive-equation dycore, with RRTMGP radiation:
+#   convection = edmf,  turbulence = louis,  gwd = mcfarlane,
+#   microphysics = sundqvist,  cloud = xu_randall,  radiation = rrtmgp.
+#
+# This overlay is merged (shallow) over the wbcompare base (see
+# suite.yaml, which points at config/aimip/aimip_era5.yaml). The
+# classical variant trains AIMIPClassicalParams end-to-end through the
+# differentiable spectral PE rollout; scored on WB2 by
+# scripts/validate/run_aimip_wb2_eval.py --variant classical.
+aimip_variant: "classical"
+aimip_convection: "edmf"
+aimip_turbulence: "louis"
+aimip_gwd: "mcfarlane"
+aimip_microphysics: "sundqvist"
+aimip_cloud: "xu_randall"
+aimip_radiation: "rrtmgp"
+physics_parameterization: "none"
