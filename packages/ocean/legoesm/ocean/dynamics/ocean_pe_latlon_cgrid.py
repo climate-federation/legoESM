@@ -3020,7 +3020,6 @@ def _bc_physics_tendencies(du_dt, dv_dt, dT_dt, dS_dt, physics_fn, state, grid, 
     return du_dt, dv_dt, dT_dt, dS_dt, phys_K_v, phys_A_v, diag_phys_u, diag_phys_v
 
 
-
 def surface_stress_faces(surface_forcing, u_dtype, z_coord, J, grid):
     """Wind stress at u/v faces + the top-cell thicknesses (single owner of
     the tau sign/interp/rotation chain — used by the explicit stage-10b'
