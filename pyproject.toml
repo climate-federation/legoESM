@@ -211,6 +211,9 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # LES-closure diagnosis tests: physical symbol names (Km, Kh, S2, N2, P, C_K,
 # Pr_t) match the clubb_lite budget + diagnosis kernels they exercise.
 "tests/unit/test_les_closure_diagnosis.py" = ["N803", "N806"]
+# Prognostic-aerosol faithfulness: budget symbols (N number, S source, L sink
+# rate, P precip) match the pinned dN/dt = S - L*N budget.
+"tests/unit/test_prognostic_aerosol_faithful.py" = ["N803", "N806"]
 "scripts/validate/compare_amip_era5.py" = ["N803", "N806", "N815"]
 # The canonical SST symbol is ``sst_K`` (used 100s of times); N806/N803 flag the local
 # variable / monkeypatch arg in the cross-grid deploy CLI + its test (not CI-enforced).
