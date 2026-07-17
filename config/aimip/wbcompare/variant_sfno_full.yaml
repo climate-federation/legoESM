@@ -31,3 +31,10 @@ sfno_seed: 0
 # standard SFNO/FourCastNet cadence. WB2 leads are converted to SFNO
 # steps as round(lead_hours * 3600 / dt_sfno).
 dt_sfno: 21600.0
+
+# Stability: the full 68M-param emulator NaN'd at epoch-0 sample-3 with the
+# shared aimip_lr=3e-4 (samples 0-2 finite -> LR-driven weight blow-up, not a
+# first-forward overflow). Lower the LR for this variant only (overlay wins the
+# base<-cfg_overrides<-overlay merge). aimip_grad_clip stays 1.0. If NaN recurs,
+# next levers: smaller dt_sfno (3 h), then use_normalization (code-level).
+aimip_lr: 5.0e-5
