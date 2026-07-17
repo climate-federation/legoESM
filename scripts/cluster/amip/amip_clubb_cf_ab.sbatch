@@ -38,20 +38,38 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_PLATFORMS=cuda
 export JAX_ENABLE_X64=1
 
-DAYS="${DAYS:-90}"
+DAYS="${DAYS:-10}"   # analytical mechanism A/B; cf-override effect on rsut is
+                     # immediate, 10 d gives a stable cloud field.  Override with
+                     # DAYS=<n>; SMOKE=1 -> 2 d (matches the reachability smoke).
 [ "${SMOKE:-0}" = "1" ] && DAYS=2
 OUT=$WT/results/clubb_cf_ab
 mkdir -p "$OUT"
 cd "$WT"
 
-# Shared, byte-identical base for BOTH arms.  latlon24 = hydrostatic PE (the path
-# the cloud-fraction carry is wired through); override convection->bechtold (the
-# over-bright mass-flux scheme this lever targets) + turbulence->clubb (the cf
-# producer).  --per-step-rollout carries cloud_fraction.
+# Shared, byte-identical base for BOTH arms.  FLAG-ONLY (no --config): the
+# production YAML needs staged file forcing (ic=era5, solar/ghg/aerosol/ozone
+# external, CLM surfdata); flag DEFAULTS are file-free, so ANALYTICAL forcing
+# isolates the cf lever.  latlon C-grid = hydrostatic PE (the wired path);
+# rrtmg so clouds are radiatively active (gray ignores the cloud optics ->
+# the override would be a no-op); bechtold = the over-bright mass-flux scheme
+# this lever targets; diagnostic CLUBB = the cf producer (BOTH arms, so
+# louis->clubb is not a confound); --per-step-rollout carries cloud_fraction.
+# NOTE: this is a MECHANISM A/B (does the override lower rsut/albedo) on
+# analytical SST — NOT a real-SST realism A/B (that needs the production config +
+# staged CMIP6 forcing, a follow-up).  Same base = the ONLY varied knob is the
+# cf flag (controlled comparison).
 COMMON=(
-  --config config/amip/amip_production_latlon24.yaml
+  --grid-type latlon
+  --discretization latlon_cgrid
+  --resolution 24
+  --nlev 40
+  --dataset analytical
+  --radiation rrtmg
+  --clouds sundqvist
   --convection bechtold
   --turbulence clubb
+  --microphysics morrison
+  --precision fp64
   --per-step-rollout
   --days "$DAYS"
 )
