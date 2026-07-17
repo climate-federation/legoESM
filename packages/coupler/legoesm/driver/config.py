@@ -983,14 +983,16 @@ class ExperimentConfig(NamedTuple):
     # (cumastrn.F90:762-768).  0 = legacy factor 1.0.  Mirrors
     # BechtoldConfig.dx_m.
     bechtold_dx_m: float = 0.0
-    # IFS convective downdraft (cudlfsn+cuddrafn).  Default OFF pending
-    # validation; mirrors BechtoldConfig.use_ifs_downdraft.
+    # IFS convective downdraft (cudlfsn+cuddrafn).  Default ON since
+    # 2026-07-17 (RCE/AMIP A/B); mirrors BechtoldConfig.use_ifs_downdraft.
     bechtold_use_ifs_downdraft: bool = True  # flipped 2026-07-17 (RCE/AMIP A/B)
-    # IFS shallow PBL-equilibrium closure (cumastrn.F90).  Default OFF
-    # pending validation; mirrors BechtoldConfig.use_ifs_shallow_closure.
+    # IFS shallow PBL-equilibrium closure (cumastrn.F90).  Default STILL
+    # OFF — HELD by the 2026-07-17 flip campaign (largest mean-state
+    # reshape; needs a skill-gated run); mirrors
+    # BechtoldConfig.use_ifs_shallow_closure.
     bechtold_use_ifs_shallow_closure: bool = False
-    # IFS diurnal CAPE correction + land RH break (default OFF pending
-    # validation); mirror BechtoldConfig.use_ifs_capdcycl / use_ifs_land_rhebc.
+    # IFS diurnal CAPE correction + land RH break (default ON since
+    # 2026-07-17); mirror BechtoldConfig.use_ifs_capdcycl / use_ifs_land_rhebc.
     bechtold_use_ifs_capdcycl: bool = True
     bechtold_use_ifs_land_rhebc: bool = True
     bechtold_use_ifs_snow_melt: bool = True

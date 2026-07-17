@@ -918,19 +918,35 @@ class PhysicsPipeline:
                     or getattr(self.turbulence_config, "surface", None)
                     is not None
                 )
+                # EXPLICIT opt-in shallow closure: hard raise FIRST (before
+                # any capdcycl downgrade) so a shallow/no-surface config
+                # fails cleanly without a misleading downgrade notice.
+                if (getattr(_conv_cfg, "use_ifs_shallow_closure", False)
+                        and not _have_sfc_source):
+                    raise ValueError(
+                        "use_ifs_shallow_closure needs bulk surface "
+                        "fluxes: configure a turbulence scheme (its "
+                        "SurfaceLayerConfig supplies the exchange "
+                        "coefficients) or enable the tiled land surface."
+                    )
                 # capdcycl is a DEFAULT-ON faithfulness flag (flipped
                 # 2026-07-17): on flux-less configs (turbulence 'none', no
                 # tiled land) it must degrade gracefully to the leaf's
                 # documented None=>inert path, not raise — a default may
-                # not break configs that never opted in.  Static
-                # Python-time downgrade, printed once at trace/build.
+                # not break configs that never opted in.  Python-time
+                # downgrade; the notice is LATCHED on the pipeline (once
+                # per build, not per eager step; f_land is a post-setup
+                # mutation, so this cannot be resolved earlier at build).
                 if (getattr(_conv_cfg, "use_ifs_capdcycl", False)
                         and not _have_sfc_source):
-                    print(
-                        "[physics] bechtold use_ifs_capdcycl: no surface-"
-                        "flux source (turbulence 'none', no tiled land) — "
-                        "diurnal CAPE correction inert for this run."
-                    )
+                    if not getattr(self, "_capdcycl_notice_done", False):
+                        print(
+                            "[physics] bechtold use_ifs_capdcycl: no "
+                            "surface-flux source (turbulence 'none', no "
+                            "tiled land) — diurnal CAPE correction inert "
+                            "for this run."
+                        )
+                        self._capdcycl_notice_done = True
                     _conv_cfg = _conv_cfg._replace(use_ifs_capdcycl=False)
                 _need_land = getattr(_conv_cfg, "use_ifs_land_rhebc", False)
                 _need_sfc_inputs = (
@@ -943,18 +959,13 @@ class PhysicsPipeline:
                         if self.f_land is not None
                         else jnp.zeros((ad.ncol,), dtype=T_col.dtype)))
                 if _need_sfc_inputs:
-                    # Fail loudly at trace time: the closure's bulk fluxes
-                    # need a surface-layer config (codex R1 #1 — a None
-                    # turbulence_config crashed opaque on .surface).
-                    # (Post-downgrade this can only be the EXPLICIT
-                    # opt-in shallow closure — name the right flag.)
-                    if not _have_sfc_source:
-                        raise ValueError(
-                            "use_ifs_shallow_closure needs bulk surface "
-                            "fluxes: configure a turbulence scheme (its "
-                            "SurfaceLayerConfig supplies the exchange "
-                            "coefficients) or enable the tiled land surface."
-                        )
+                    # Unreachable-without-source by construction: shallow
+                    # raised above and capdcycl downgraded; keep a hard
+                    # assert as the tripwire (fail loud, not silent).
+                    assert _have_sfc_source, (
+                        "surface-flux path entered without a source — "
+                        "guard ordering regressed"
+                    )
                     _T_low = T_col[:, -1]
                     _q_low = q_v_col[:, -1]
                     _u_low = u_conv_col[:, -1]
