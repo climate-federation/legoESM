@@ -32,30 +32,30 @@ FAITHFUL to Lindzen — the saturation core:
     instability saturation stress (the ½ and the ``k·U³/N`` form are Lindzen's;
     matches E3SM ``effkwv·rhoi·ubmc³/(2·ni)``);
   * the saturation-breaking HYPOTHESIS: the sigmoid ``f_break`` turns ON where
-    the carried stress exceeds ``critical_Fr·tau_sat`` (this ratio enters ONLY
-    the sigmoid activation, NOT a hard cap value); the broken wave sheds stress
+    the carried stress exceeds ``fcrit2·tau_sat`` (= ``tau_sat_eff``, the
+    fcrit2-scaled cap — oracle effkwv semantics); the broken wave sheds stress
     as the momentum-flux divergence ``accel = −(tau_carry − tau_new)/(ρ·dz)``
     (a deceleration; equivalently ``+∂τ/∂z / ρ`` for the code's ``≥ 0`` stress
     ``τ`` that DECREASES upward — a monotone-non-increasing, physically-signed
     sink). The saturation is SOFT:
-    ``tau_new = tau_carry·(1−f_break) + tau_sat·f_break`` then
-    ``min(tau_new, tau_carry)`` — the relaxation TARGET is the UNSCALED
-    ``tau_sat``. So (a) with finite ``Fr_sharpness`` (``f_break < 1``) and
-    ``tau_carry > tau_sat`` the blend stays ABOVE ``tau_sat`` (it approaches
-    ``tau_sat`` only as ``f_break → 1``) — there is NO exact hard cap; (b) the
-    ``min`` guard only prevents stress GROWTH, so for ``critical_Fr < 1`` the
-    sub-``tau_sat`` activation cannot reduce stress until ``tau_carry > tau_sat``.
+    ``tau_new = tau_carry·(1−f_break) + tau_sat_eff·f_break`` then
+    ``min(tau_new, tau_carry)`` with ``tau_sat_eff = fcrit2·tau_sat`` — with
+    finite ``Fr_sharpness`` (``f_break < 1``) and ``tau_carry > tau_sat_eff``
+    the blend stays ABOVE ``tau_sat_eff`` (approaching it only as
+    ``f_break → 1``) — there is NO exact hard cap.
 DEPARTURES / DESIGN:
-  * **``critical_Fr`` is a linear STRESS-RATIO activation threshold, NOT a Froude
-    number.** Lindzen's saturation limit scales with ``Fr_c²``
-    (``F_sat = Fr_c²·ρ·k·U³/2N``; E3SM uses ``fcrit2``), but the code uses
-    ``critical_Fr`` only as the sigmoid activation threshold ``tau_carry/tau_sat
-    > critical_Fr`` (relaxing toward the unscaled ``tau_sat``), not a cap value.
-    Default ``critical_Fr = 1`` sets the breaking THRESHOLD at the exact Lindzen
-    ``tau_sat`` (``Fr_c = 1``), but the saturation itself is SOFT (finite-sharpness
-    sigmoid, carried stress can remain above ``tau_sat``) — NOT an exact hard cap.
-    A non-default value is a stress-ratio multiplier, not ``Fr_c`` (it plays the
-    role of ``Fr_c²``); the config field name over-labels it "Froude number";
+  * **``fcrit2`` scales the saturation CAP VALUE — the oracle semantics**
+    (E3SM ``effkwv = kwv·fcrit2`` feeding ``tausat``, gw_common.F90:153,
+    493-494; Lindzen's ``F_sat = Fr_c²·ρ·k·U³/2N``): ``tau_sat_eff =
+    fcrit2·tau_sat`` with the breaking sigmoid activating at the FIXED
+    threshold ``tau_carry > tau_sat_eff``.  (Formerly named ``critical_Fr``
+    and wired only as the sigmoid ACTIVATION center with an unscaled
+    relaxation target — the ``min(tau_new, tau_carry)`` guard made that knob
+    exactly inert wherever ``tau_carry ≤ tau_sat``, so half its tuning range
+    was dead; the GWD-recon audit quantified 1.4% response vs the oracle's
+    50%.)  The saturation remains SOFT (finite ``Fr_sharpness`` sigmoid, no
+    exact hard cap — measured ~1.4% local-tendency perturbation vs the hard
+    cap at the default sharpness, total deposited stress preserved to 1e-4);
   * **LAUNCH is McFarlane (1987), not Lindzen (1981)**: ``tau_0 =
     ρ_sfc·N_sfc·k·h_topo²·U_ll``. Lindzen (1981) is a saturation/breakdown
     theory (tidal + upward-propagating waves), NOT an orographic source; the
@@ -268,6 +268,17 @@ def lindzen_gwd(
     # Wave breaks where carried stress exceeds local saturation.  See
     # ``_lindzen_saturation_stress`` for the AD-safe divide by ``N`` (#249).
     tau_sat = _lindzen_saturation_stress(rho, U_proj, config.k_wave, N_full)
+    # fcrit2 scales the SATURATION CAP VALUE itself — the oracle semantics
+    # (E3SM effkwv = kwv*fcrit2 feeding tausat, gw_common.F90:153,493-494;
+    # Lindzen-1981 F_sat ~ Fr_c^2*rho*k*U^3/2N).  The former ``critical_Fr``
+    # only shifted the sigmoid ACTIVATION center while the relaxation target
+    # stayed the unscaled tau_sat, and the min(tau_new, tau_carry) guard made
+    # the knob EXACTLY inert wherever tau_carry <= tau_sat — the lower half
+    # of its tuning range was provably dead (blend >= tau_carry whenever
+    # tau_sat >= tau_carry, so the min always returned tau_carry).  With the
+    # cap-scaling form the activation threshold is pinned at 1 (excess =
+    # tau_carry/tau_sat_eff - 1): bit-identical at the default fcrit2 = 1.
+    tau_sat = config.fcrit2 * tau_sat
 
     # Smooth critical-level absorption gate (E3SM gw_common.F90:492
     # ``where ubmc*(ubi_above - c) > 0``).  The orographic wave has phase
@@ -307,7 +318,7 @@ def lindzen_gwd(
         # removed or relaxed.
         excess = safe_divide(
             tau_carry, tau_sat[:, k], eps=1e-12,
-        ) - config.critical_Fr
+        ) - 1.0
         f_break = jax.nn.sigmoid(config.Fr_sharpness * excess)
         tau_new = tau_carry * (1.0 - f_break) + tau_sat[:, k] * f_break
         tau_new = jnp.minimum(tau_new, tau_carry)

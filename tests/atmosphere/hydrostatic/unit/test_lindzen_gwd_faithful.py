@@ -8,13 +8,13 @@ NOT a parameter-restricted subset of ``e3sm_cam.py`` (no ``sghmax`` cap, no WKB 
 FAITHFUL to Lindzen — the saturation core (pinned against an independent NumPy reimpl):
   * ``tau_sat = 0.5·ρ·k·|U_proj|³ / N`` (marginal-convective-instability saturation stress);
   * the saturation-breaking hypothesis: the sigmoid breaks the wave where the carried stress
-    exceeds ``critical_Fr·tau_sat``, softly relaxing toward the UNSCALED ``tau_sat`` (bounded by
+    exceeds ``fcrit2·tau_sat`` (= tau_sat_eff, the oracle cap-scaling), softly relaxing toward ``tau_sat_eff`` (bounded by
     ``min(tau_new, tau_carry)``), the shed stress deposited as
     ``accel = −(tau_carry−tau_new)/(ρ·dz) = +∂τ/∂z/ρ`` (a deceleration; τ ≥ 0 decreases upward).
 DEPARTURE / DESIGN canaries:
-  * ``critical_Fr`` is a LINEAR stress-ratio ACTIVATION threshold, NOT a Froude number (Lindzen
-    scales with ``Fr_c²``); default 1.0 sets the exact-``tau_sat`` threshold but the saturation is
-    SOFT (finite-sharpness sigmoid), not an exact cap, and the field name over-labels it;
+  * ``fcrit2`` scales the saturation CAP VALUE (oracle ``effkwv = kwv·fcrit2``
+    semantics; Lindzen's limit scales with ``Fr_c²``); default 1.0 caps at the exact
+    ``tau_sat`` but the saturation is SOFT (finite-sharpness sigmoid), not an exact cap;
   * the LAUNCH ``tau_0 = ρ_sfc·N_sfc·k·h²·U_ll`` is McFarlane (1987), not Lindzen; it has NO
     ``sghmax`` Froude cap, so it grows without bound as ``h²`` (departure from E3SM);
   * critical-level treatment is DESIGN: at ``c = 0`` (``U_proj`` reversal) the residual carried
@@ -64,7 +64,7 @@ def _enable_x64():
 # Limiters effectively OFF: isolates the Lindzen saturation-divergence / launch forms from the
 # post-flux tndmax/umcfac magnitude caps (which break the exact stress-divergence balance).
 def _no_limiter_config(**kw):
-    base = dict(tndmax_per_day=1.0e12, umcfac=1.0e9, critical_Fr=1.0, Fr_sharpness=200.0)
+    base = dict(tndmax_per_day=1.0e12, umcfac=1.0e9, fcrit2=1.0, Fr_sharpness=200.0)
     base.update(kw)
     return LindzenConfig(**base)
 
@@ -108,9 +108,9 @@ def _run(cfg, dt=300.0, h_topo_col=None, **kw):
 
 
 def test_lindzen_config_defaults():
-    """Canary: the Lindzen closure constants (critical_Fr=1 ⇒ threshold at exact tau_sat)."""
+    """Canary: the Lindzen closure constants (fcrit2=1 ⇒ cap at exact tau_sat)."""
     c = LindzenConfig()
-    assert c.critical_Fr == 1.0
+    assert c.fcrit2 == 1.0
     assert c.h_topo == 500.0
     assert c.k_wave == 2.0 * np.pi / 100e3
     assert c.Fr_sharpness == 20.0
@@ -309,17 +309,17 @@ def test_lindzen_rest_state_zero_orography():
 # ===========================================================================
 # CANARIES: saturation threshold + departures
 # ===========================================================================
-def test_lindzen_critical_Fr_gates_breaking():
-    """CANARY: critical_Fr gates saturation breaking — critical_Fr → ∞ ⇒ the wave never breaks.
+def test_lindzen_fcrit2_gates_breaking():
+    """CANARY: fcrit2 gates saturation breaking — fcrit2 → ∞ ⇒ the wave never breaks.
 
     In a column with NO critical level (u > 0 throughout), the only stress sink is saturation
-    breaking. critical_Fr = 1 deposits real drag; a huge critical_Fr (break only above
-    critical_Fr·tau_sat, never reached) transmits the wave and deposits ≈ 0 — proving the
+    breaking. fcrit2 = 1 deposits real drag; a huge fcrit2 (break only above
+    fcrit2·tau_sat, never reached) transmits the wave and deposits ≈ 0 — proving the
     saturation stress-ratio threshold, not the launch, gates the deposition.
     """
     kw = dict(h_topo_col=jnp.full((3,), 700.0), u_sfc=25.0, u_top=8.0)
-    out_on, inp = _run(_no_limiter_config(critical_Fr=1.0), **kw)
-    out_off, _ = _run(_no_limiter_config(critical_Fr=1.0e6), **kw)
+    out_on, inp = _run(_no_limiter_config(fcrit2=1.0), **kw)
+    out_off, _ = _run(_no_limiter_config(fcrit2=1.0e6), **kw)
     dz = np.clip(np.abs(np.asarray(inp[6])[:, :-1] - np.asarray(inp[6])[:, 1:]), 1.0, None)
     rho = np.asarray(inp[7])
     d_on = np.sum(rho * np.abs(np.asarray(out_on.du_dt)) * dz, axis=1)
@@ -402,3 +402,25 @@ def test_dispatch_unknown_gwd_raises():
     """Dispatch hardening: an unknown GWD scheme raises ValueError."""
     with pytest.raises(ValueError, match="[Uu]nknown GWD scheme"):
         get_gwd_fn(GravityWaveDragConfig(scheme="not_a_scheme"))
+
+
+def test_fcrit2_scales_the_cap_not_the_activation():
+    """Oracle-semantics regression (GWD recon lindzen #1): fcrit2 must scale
+    the saturation CAP VALUE (effkwv semantics) — under the OLD activation
+    wiring fcrit2=0.5 was provably inert wherever tau_carry <= tau_sat (the
+    min-guard proof) and changed max accel by only ~1.4% on the recon's
+    discriminating column vs 50% for the true cap scaling.  Pin: on a
+    supersaturated launch column, halving fcrit2 must halve the transmitted
+    (post-breaking) stress scale => substantially increase the deposited
+    drag, far beyond the old wiring's percent-level response."""
+    col = dict(ncol=1, u_sfc=20.0, u_top=20.0)
+    h_topo = jnp.full((1,), 900.0)
+    out_1, _ = _run(_no_limiter_config(fcrit2=1.0), h_topo_col=h_topo, **col)
+    out_h, _ = _run(_no_limiter_config(fcrit2=0.5), h_topo_col=h_topo, **col)
+    a1 = float(jnp.max(jnp.abs(out_1.du_dt)))
+    ah = float(jnp.max(jnp.abs(out_h.du_dt)))
+    assert ah != a1
+    rel = abs(ah - a1) / a1
+    assert rel > 0.10, (
+        f"fcrit2 response {rel:.1%} — cap-scaling gives O(50%), the old "
+        "activation wiring gave ~1.4% (dead-knob regression)")
