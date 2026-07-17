@@ -2104,6 +2104,69 @@ def _ice_state_spatial_shape(grid, app_grid_type):
         "ice-state spatial shape (supported: mpas, tripole, latlon).")
 
 
+def _require_prognostic_ice_for_itd_flags(ice_categories, ice_ridging,
+                                          prognostic_sea_ice) -> None:
+    """Refuse ``--ice-categories``/``--ice-ridging`` without
+    ``--prognostic-sea-ice``: their only consumer is the prognostic-ice
+    build, so without it the flags would be accepted and silently ignored
+    (the surrogate ice paths have no thickness distribution) — the
+    accept-then-ignore shape the reachability audit forbids (codex)."""
+    if (int(ice_categories) != 1 or ice_ridging) and not prognostic_sea_ice:
+        raise ValueError(
+            "--ice-categories/--ice-ridging configure the PROGNOSTIC ice "
+            "model and require --prognostic-sea-ice; without it the flags "
+            "would be accepted and silently ignored (the surrogate ice "
+            "paths have no thickness distribution).")
+
+
+def _resolve_ice_categories(n_categories, ridging, supports_dynamics,
+                            grid_desc):
+    """Resolve ``--ice-categories`` / ``--ice-ridging`` into the
+    ``(n_categories, itd_remap, ridging_enabled)`` SeaIceConfig fields —
+    refusing, never silently ignoring, a request that cannot take effect.
+
+    * ``n_categories == 1`` (default): the exact pre-flag configuration —
+      ``itd_remap='simple'`` (the SeaIceConfig default; never consulted at one
+      category) and no ridging, byte-identical to runs before the flag
+      existed.  ``--ice-ridging`` here is REFUSED rather than accepted: the
+      step's ridging gate is multi-category-only (``is_multicat``), so the
+      flag would parse and then silently do nothing every step.
+    * ``n_categories > 1``: ``itd_remap`` is FORCED to ``'lipscomb2001'``
+      rather than exposed as a choice — this runner always enables the brine
+      tracer, and ``step_sea_ice`` rejects multi-category tracers under the
+      ``'simple'`` linear remap (it moves only h/concentration/temperature
+      across bins, breaking salt conservation), so a ``'simple'`` option
+      could never legally run here (a phantom choice).
+    * ``--ice-ridging`` needs the grid's strain-rate operators (the closing
+      rate comes from the velocity deformation field): on a grid without
+      them (tripole ORCA) ``step_sea_ice`` would raise at entry, so refuse
+      up front with the actionable message instead.
+    """
+    n_cat = int(n_categories)
+    if n_cat < 1:
+        raise SystemExit(
+            f"--ice-categories {n_cat}: need >= 1 thickness categor"
+            f"{'y' if n_cat == 1 else 'ies'} (1 = single-category, the "
+            "default; >= 2 enables the Lipscomb 2001 ITD).")
+    if n_cat == 1:
+        if ridging:
+            raise SystemExit(
+                "--ice-ridging requires --ice-categories >= 2: mechanical "
+                "ridging redistributes ice BETWEEN thickness categories, and "
+                "the single-category step skips it silently (the gate is "
+                "multi-category-only), so accepting the flag here would be a "
+                "no-op.")
+        return 1, "simple", False
+    if ridging and not supports_dynamics:
+        raise SystemExit(
+            f"--ice-ridging: grid {grid_desc} lacks the strain-rate "
+            "operators the ridging closing rate needs (step_sea_ice would "
+            "reject it at entry).  Use --grid mpas (or a lat-lon grid), or "
+            "drop --ice-ridging (multi-category ITD without ridging still "
+            "runs).")
+    return n_cat, "lipscomb2001", bool(ridging)
+
+
 def _apply_ice_init(ice_state, ic):
     """Overwrite the zero-ice cold-start state with the NEMO SI3 ice IC.
 
@@ -2118,9 +2181,11 @@ def _apply_ice_init(ice_state, ic):
     Dynamics fields (u_ice/v_ice/sigma_*) and melt ponds have no SI3-IC
     counterpart and stay zero (Jan-1 start: ponds are a melt-season
     feature; ice velocity spins up from the ocean/wind stress in a few
-    days).  Single-category states only — the OMIP runner always builds
-    n_categories=1; a trailing category axis raises rather than guessing
-    an ITD split.
+    days).  Single-category states only: the SI3 IC file carries AGGREGATE
+    fields, so with --ice-categories > 1 the runner applies this IC to the
+    single-category state FIRST and then lifts it via
+    distribute_dynamic_state_to_categories (delta ITD seeding); a state that
+    already carries a category axis raises rather than guessing a split.
     """
     h_old = ice_state.h_ice.data
     conc_np = np.asarray(ic.concentration)
@@ -2398,8 +2463,17 @@ def _ice_global_stats(ice_state, grid, ocean_mask):
     logs); the day-90 scoring reads snapshots, never these scalars."""
     conc = np.asarray(ice_state.concentration.data, dtype=np.float64)
     h = np.asarray(ice_state.h_ice.data, dtype=np.float64)
-    if conc.ndim > h.ndim:  # safety (single-category here)
+    m_nd = np.asarray(ocean_mask).ndim
+    if conc.ndim > m_nd:
+        # Multi-category (--ice-categories >= 2): aggregate BEFORE the spatial
+        # masking.  The old ``conc.ndim > h.ndim`` test was never true for a
+        # real multi-category state (both fields carry the trailing category
+        # axis), so the mask broadcast below crashed on the first [ice] diag
+        # line (codex).  Volume-weighted mean thickness matches the snapshot
+        # writer's aggregation.
+        vol = (conc * h).sum(axis=-1)
         conc = conc.sum(axis=-1)
+        h = np.where(conc > 0.0, vol / np.maximum(conc, 1.0e-12), 0.0)
     m = np.asarray(ocean_mask, dtype=np.float64) > 0.5
     conc = np.where(m, conc, 0.0)
     h = np.where(m, h, 0.0)
@@ -3299,6 +3373,25 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "shelf columns injects +1.2..+3.5 PSU brine that NEMO "
                         "(starting WITH that ice) never sees.  Default None = "
                         "byte-identical zero-ice cold start.")
+    p.add_argument("--ice-categories", type=int, default=1,
+                   help="Number of sea-ice thickness categories for "
+                        "--prognostic-sea-ice (default 1 = single-category, "
+                        "byte-identical to prior runs).  >= 2 runs the "
+                        "multi-category ITD with the tracer-aware Lipscomb "
+                        "(2001) incremental remap (itd_remap='lipscomb2001', "
+                        "set automatically: the 'simple' linear remap cannot "
+                        "carry the brine/snow tracers this runner always "
+                        "enables).  CICE-standard is 5.  --ice-init seeds the "
+                        "ITD by placing each cell's aggregate ice in the bin "
+                        "containing its thickness.")
+    p.add_argument("--ice-ridging", action="store_true",
+                   help="Enable mechanical ridging (Lipscomb 2007 "
+                        "participation/redistribution) for --prognostic-sea-ice. "
+                        "Requires --ice-categories >= 2 (ridging moves ice "
+                        "between thickness bins) and a grid with strain-rate "
+                        "operators (mpas, latlon; NOT tripole) — both checked "
+                        "up front, refused with an actionable error rather "
+                        "than silently ignored.")
     p.add_argument("--visc-schedule", type=str, default=None,
                    help="Piecewise viscosity schedule 'day:A_h:C_smag_lap,...'"
                         " e.g. '0:1e5:3.0,90:5e4:1.0,180:2e4:0.33' — start at "
@@ -3807,6 +3900,8 @@ def main() -> int:
             "--ice-init initialises the PROGNOSTIC ice state and requires "
             "--prognostic-sea-ice (the surrogate paths read the prescribed "
             "NEMO siconc climatology, not this file).")
+    _require_prognostic_ice_for_itd_flags(
+        args.ice_categories, args.ice_ridging, args.prognostic_sea_ice)
 
     # --prescribed-flow gates (PRE-BUILD, on the static args): grid support +
     # the --spinup-drag rejection + the --no-gm-redi requirement.  NB: no
@@ -4596,9 +4691,10 @@ def main() -> int:
     if args.prognostic_sea_ice:
         from legoesm.ice import (
             SeaIceConfig, init_dynamic_ice_state, step_sea_ice,
+            distribute_dynamic_state_to_categories,
             grid_supports_ice_dynamics, grid_supports_ice_transport,
         )
-        from legoesm.ice.config import BrineConfig
+        from legoesm.ice.config import BrineConfig, RidgingConfig
         # Free-drift fallback if the grid lacks strain-rate operators
         # (NOT 'none', which yields no drift/export).
         _ice_dyn = args.prognostic_ice_dynamics
@@ -4623,9 +4719,17 @@ def main() -> int:
         _brine = BrineConfig(enabled=True)
         if args.prognostic_ice_salinity is not None:
             _brine = _brine._replace(S_ice_new=float(args.prognostic_ice_salinity))
+        # Multi-category ITD (--ice-categories / --ice-ridging): resolve the
+        # request against THIS grid's capabilities (refuse-not-ignore).
+        _n_cat, _itd_remap, _ridging_on = _resolve_ice_categories(
+            args.ice_categories, args.ice_ridging, _supports_dyn,
+            type(grid).__name__)
         ice_config = SeaIceConfig(
             dynamics=_ice_dyn,
             transport=_transport,
+            n_categories=_n_cat,
+            itd_remap=_itd_remap,     # 'lipscomb2001' whenever _n_cat > 1
+            ridging=RidgingConfig(enabled=_ridging_on),
             brine=_brine,            # brine-rejection salt flux -> ocean salt_flux
             # Under-ice transmitted SW is owned by the ICE model (constant-
             # scheme transmittance): the ice EB is debited and the ocean
@@ -4662,15 +4766,28 @@ def main() -> int:
                   f"{',ht_s' if _ice_ic.h_snow is not None else ''}"
                   f"{',sm_i' if _ice_ic.S_ice is not None else ''}"
                   f"{',tmsu' if _ice_ic.T_su is not None else ''})")
+        if _n_cat > 1:
+            # Lift the (possibly IC-seeded) single-category state onto the
+            # n_cat-bin ITD: delta seeding into the bin containing each
+            # cell's thickness, snow/salinity/ponds riding along in the occupied bin.
+            # AFTER --ice-init (the SI3 file carries aggregate fields only)
+            # and BEFORE the ew-overlap slaving (tree_map, axis-1 safe on
+            # the lifted fields).
+            ice_state = distribute_dynamic_state_to_categories(
+                ice_state, _n_cat)
         if args.ew_cyclic_overlap and app_grid_type == "tripole":
             # Slave the duplicated ORCA halo columns from the start (the
             # transport step re-imposes this every step below).
             ice_state = _ice_apply_ew_overlap(ice_state)
         from legoesm import constants as _ice_const
         _ice_T_freeze = float(_ice_const.T_freeze)   # degC ocean T -> K for ice
+        _cat_str = (f" n_categories={_n_cat} itd={_itd_remap!r}"
+                    f" ridging={'ON' if _ridging_on else 'off'}"
+                    if _n_cat > 1 else "")
         print(f"[setup] PROGNOSTIC SEA ICE: step_sea_ice dynamics={_ice_dyn!r} "
               f"transport={_transport!r} brine=ON (S_ice_new="
-              f"{_brine.S_ice_new:.1f} PSU) on {app_grid_type} shape {ice_shape}; "
+              f"{_brine.S_ice_new:.1f} PSU) on {app_grid_type} shape {ice_shape}"
+              f"{_cat_str}; "
               "salt_flux+ice_fw+heat -> existing surface/freshwater channels.")
 
     dt = float(args.dt)

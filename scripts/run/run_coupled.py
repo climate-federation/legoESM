@@ -187,19 +187,23 @@ def _reject_unreachable_sea_ice_options(args, changed, base) -> None:
     Two DIFFERENT gaps, deliberately not conflated:
 
     * MULTI-CATEGORY (ridging, lipscomb2001 ITD remap) is unreachable from
-      EVERY driver, not just this one: nothing anywhere builds a
-      multi-category state (run_omip_core2 hardcodes n_categories=1 too), and
-      ``step_sea_ice`` RAISES for n_categories>1 without a DynamicSeaIceState.
-      Ridging is additionally driven by an ice velocity. So this is a genuine
-      unwired-physics gap -> tracked, not flagged.
+      THIS driver (its coupler tile is a scalar-slab SeaIceState, and
+      ``step_sea_ice`` RAISES for n_categories>1 without a
+      DynamicSeaIceState).  It IS reachable from run_omip_core2 via
+      --ice-categories / --ice-ridging (which builds the multi-category
+      DynamicSeaIceState via init_dynamic_ice_state +
+      distribute_dynamic_state_to_categories) — use that runner for ITD
+      studies; wiring the coupled tile onto a dynamic state is a separate
+      feature.
     * DYNAMICS is reachable, just not HERE: run_omip_core2 offers
       --prognostic-ice-dynamics {free_drift,evp,mevp} and builds the
       DynamicSeaIceState via init_dynamic_ice_state. run_coupled's
       init_surface_state builds a scalar-slab SeaIceState instead.
 
     There is deliberately NO --ice-itd-remap flag either: its only non-default
-    value is lipscomb2001, which the multi-category gap puts out of reach, so
-    the flag could only ever accept the default you already get.
+    value is lipscomb2001, which dispatches only inside the multi-category
+    branch this driver's slab tile cannot reach, so the flag could only ever
+    accept the default you already get.
 
     An earlier draft "fixed" both by adding --ice-categories/--ice-dynamics
     here. That was WORSE than the gap: every accepted value crashed on the
@@ -263,18 +267,18 @@ def build_coupler_config(args):
     # used the non-gusty tile flux -> weak evaporation -> dry atmosphere -> cold
     # collapse (cmip_air_sea_decoupling).
     #
-    # CAVEAT, verified (do NOT read this as "the same depth on both sides"): when
-    # --gustiness-zi is OMITTED this passes 0.0 = OFF, while the atmosphere's
-    # SurfaceLayerConfig.gustiness_w_zi stays None = scheme-native = 600 m for
-    # coare3 (bulk_flux._COARE_GUSTINESS_ZI).  So the DEFAULT `coare3` run is
-    # still split on gustiness.  CouplerConfig.gustiness_w_zi is `float = 0.0`
-    # and cannot express "scheme-native"; making it nullable flips the tile
-    # default off->on (coupled answers change), so it is pinned as a strict
-    # xfail in tests/unit/test_air_sea_scheme_consistency.py rather than
-    # silently absorbed here.
+    # None passes THROUGH (no `or 0.0` coercion): CouplerConfig.gustiness_w_zi
+    # is nullable with the same scheme-native semantics as the atmosphere's
+    # SurfaceLayerConfig (None -> 600 m for coare3 via
+    # bulk_flux.resolve_gustiness_w_zi, off otherwise), so the DEFAULT coare3
+    # run carries the SAME gustiness on both sides.  The old `or 0.0` coerced
+    # an omitted --gustiness-zi to tile-OFF while the atmosphere ran 600 m —
+    # the default-path split the strict xfail in
+    # tests/unit/test_air_sea_scheme_consistency.py pinned; that test now
+    # asserts consistency.
     return CouplerConfig(
         bulk_scheme=args.surface_bulk_scheme,
-        gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
+        gustiness_w_zi=args.surface_gustiness_zi,
         thermo_convention=args.bulk_thermo_convention,
         stability_scheme=args.surface_stability_scheme,
     )
@@ -801,11 +805,13 @@ def build_parser():
                              "have no prognostic salinity and deliberately "
                              "discard it (CoupledESMDriver._step_ocean). The "
                              "ice-side salinity still evolves either way.")
-    # NO --ice-ridging: it needs multi-category ice that NO driver builds, so a
-    # flag could only ever exit. SUPPRESS would keep a hidden always-failing CLI
-    # contract for no benefit -- the flag never shipped, so there is nothing to
-    # stay compatible with (codex). The gap is recorded in
-    # _reject_unreachable_sea_ice_options' docstring instead.
+    # NO --ice-ridging HERE: it needs multi-category ice, and this driver's
+    # coupler tile is a scalar-slab SeaIceState, so a flag could only ever
+    # exit. SUPPRESS would keep a hidden always-failing CLI contract for no
+    # benefit -- the flag never shipped, so there is nothing to stay
+    # compatible with (codex). Multi-category ITD + ridging ARE reachable
+    # from run_omip_core2 (--ice-categories/--ice-ridging, which builds the
+    # DynamicSeaIceState); see _reject_unreachable_sea_ice_options.
     parser.add_argument("--ice-ponds", action="store_true",
                         help="CESM-style melt ponds (SeaIceConfig.ponds).")
     parser.add_argument("--ice-shortwave-scheme",
@@ -1323,7 +1329,7 @@ def main():
             # thermo_convention keeps the slab heat-budget turbulent fluxes
             # constant-set-consistent with the atmosphere surface layer.
             bulk_scheme=args.slab_bulk_scheme,
-            gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
+            gustiness_w_zi=args.surface_gustiness_zi,   # None = scheme-native
             thermo_convention=args.bulk_thermo_convention,
         )
         overrides["ocean_mode"] = "two_layer"
@@ -1331,7 +1337,7 @@ def main():
         overrides["ocean_config"] = SimpleOceanConfig(
             mode=args.ocean, h_mix=args.ocean_h_mix,
             bulk_scheme=args.slab_bulk_scheme,
-            gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
+            gustiness_w_zi=args.surface_gustiness_zi,   # None = scheme-native
             thermo_convention=args.bulk_thermo_convention,
         )
         # ocean_mode log label (fixed/slab -> "slab").
@@ -1432,10 +1438,11 @@ def main():
     if coupler_config is not None:
         logger.info("  Surface bulk-flux scheme: %s (thermo: %s; stability: %s; "
                     "atmosphere + coupler ocean tile); convective "
-                    "gustiness z_i=%.0f m",
+                    "gustiness z_i=%s",
                     args.surface_bulk_scheme, args.bulk_thermo_convention,
                     args.surface_stability_scheme,
-                    (args.surface_gustiness_zi or 0.0))
+                    ("scheme-native" if args.surface_gustiness_zi is None
+                     else f"{args.surface_gustiness_zi:.0f} m"))
 
     # Apply the --params calibration layer (issue #691) across EVERY component
     # config this driver builds — see apply_coupled_params (the single source

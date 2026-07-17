@@ -72,8 +72,15 @@ def test_cli_threads_the_scheme_into_the_coupler_ocean_tile(scheme):
         "the atmosphere would run MOST against a 'constant' tile"
     )
     assert cpl.gustiness_w_zi == 300.0
-    # and the pair the driver guard compares must be consistent
+    # and the pair the driver guard compares must be consistent — built the
+    # way run_coupled main() builds BOTH sides: --gustiness-zi threads into
+    # the ExperimentConfig too (surface_gustiness_zi=args.surface_gustiness_zi
+    # at the ExperimentConfig construction), so the guard's new effective-z_i
+    # comparison sees 300 m on each side.  Omitting it here would compare
+    # atm scheme-native (600 m for coare3, 0 for large_yeager) vs tile 300 m —
+    # a split run_coupled cannot actually produce.
     atm = ExperimentConfig(surface_bulk_scheme=args.surface_bulk_scheme,
+                           surface_gustiness_zi=args.surface_gustiness_zi,
                            turbulence="louis")
     validate_air_sea_consistency(atm, cpl)
 
@@ -349,24 +356,54 @@ def test_most_geometry_is_not_compared_under_the_constant_closure():
     validate_air_sea_consistency(cfg, CouplerConfig())  # must not raise
 
 
-@pytest.mark.xfail(
-    reason="SEPARATE, VERIFIED pre-existing bug: CouplerConfig.gustiness_w_zi is "
-           "`float = 0.0` and so CANNOT express 'scheme-native', while the "
-           "atmosphere's SurfaceLayerConfig.gustiness_w_zi is `float | None = "
-           "None` (-> 600 m for coare3, bulk_flux._COARE_GUSTINESS_ZI). So "
-           "`--surface-bulk-scheme coare3` WITHOUT --gustiness-zi splits the "
-           "interface again: atmosphere 600 m vs ocean tile 0.0 (off). Fixing it "
-           "means making the coupler field nullable -- a further physics change "
-           "on top of this PR's, so it is pinned here rather than silently "
-           "absorbed.",
-    strict=True,
-)
 def test_gustiness_is_consistent_when_left_scheme_native():
+    """FIXED (was a strict xfail): CouplerConfig.gustiness_w_zi is now
+    ``float | None = None`` with the same scheme-native semantics as the
+    atmosphere's SurfaceLayerConfig, and build_coupler_config passes the flag
+    through without the old ``or 0.0`` coercion — so the default coare3 run
+    carries the SAME effective gustiness (600 m) on both sides."""
     mod = _coupled_parser()
     args = mod.build_parser().parse_args(["--surface-bulk-scheme", "coare3"])
     cpl = mod.build_coupler_config(args)
     # atmosphere: surface_gustiness_zi=None -> SurfaceLayerConfig keeps its own
     # None -> coare3 resolves scheme-native 600 m.
     assert args.surface_gustiness_zi is None
-    # the tile should mean the same thing; today it is coerced to 0.0 == OFF.
+    # the tile means the same thing now.
     assert cpl.gustiness_w_zi is None or cpl.gustiness_w_zi == 600.0
+    # And the EFFECTIVE z_i agrees through the model's own resolver.
+    from legoesm.core.bulk_flux import resolve_gustiness_w_zi
+    assert (resolve_gustiness_w_zi(cpl.gustiness_w_zi, "coare3")
+            == resolve_gustiness_w_zi(None, "coare3") == 600.0)
+
+
+def test_validator_rejects_an_explicit_gustiness_split():
+    """The guard now compares the EFFECTIVE gustiness z_i (None resolved
+    scheme-natively on both sides): atm scheme-native 600 m vs an explicit
+    tile 0.0 is the old default-path split and must be rejected."""
+    cfg = ExperimentConfig(surface_bulk_scheme="coare3", turbulence="louis")
+    with pytest.raises(ValueError, match="gustiness_w_zi"):
+        validate_air_sea_consistency(
+            cfg, CouplerConfig(bulk_scheme="coare3", gustiness_w_zi=0.0))
+
+
+def test_validator_accepts_scheme_native_on_both_sides():
+    """None on both sides = 600 m on both sides for coare3: consistent."""
+    cfg = ExperimentConfig(surface_bulk_scheme="coare3", turbulence="louis")
+    validate_air_sea_consistency(
+        cfg, CouplerConfig(bulk_scheme="coare3"))  # must not raise
+
+
+def test_validator_accepts_matching_explicit_gustiness():
+    """An explicit 300 m threaded to both sides (the cmip_tuned_physics path)
+    stays accepted."""
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+
+    base = TurbulenceConfig(scheme="louis")
+    ovr = base._replace(louis=base.louis._replace(
+        surface=base.louis.surface._replace(
+            bulk_scheme="coare3", gustiness_w_zi=300.0)))
+    cfg = ExperimentConfig(surface_bulk_scheme="coare3",
+                           turbulence_override=ovr)
+    validate_air_sea_consistency(
+        cfg, CouplerConfig(bulk_scheme="coare3",
+                           gustiness_w_zi=300.0))  # must not raise

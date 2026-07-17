@@ -340,8 +340,10 @@ def test_sea_ice_sub_models_are_selectable(flag, sub, extra):
     ``--ice*`` flag at all -- so snow, brine and melt ponds were every one of
     them impossible to switch on from any driver.
 
-    RIDGING is deliberately absent: it needs multi-category ice, which NO
-    driver builds, so it gets a rejection test below instead of an offer.
+    RIDGING is deliberately absent HERE: it needs multi-category ice, which
+    this driver's scalar-slab coupler tile cannot carry (run_omip_core2
+    reaches it via --ice-categories/--ice-ridging), so it gets a rejection
+    test below instead of an offer.
     """
     cfg = mod.build_sea_ice_config(mod.build_parser().parse_args([flag] + extra))
     assert getattr(cfg, sub).enabled is True
@@ -473,11 +475,12 @@ def test_main_actually_threads_the_cli_sea_ice_config():
 def test_there_is_no_ridging_flag():
     """Ridging needs multi-category ice AND an ice velocity.
 
-    run_coupled builds a scalar-slab SeaIceState (init_surface_state), and NO
-    driver anywhere builds a multi-category state -- run_omip_core2 hardcodes
-    n_categories=1 too, and step_sea_ice RAISES for n_categories>1 without a
-    DynamicSeaIceState. So ridging is oracle-pinned physics unreachable from
-    every driver: a real unwired-physics gap, tracked separately.
+    run_coupled builds a scalar-slab SeaIceState (init_surface_state), and
+    step_sea_ice RAISES for n_categories>1 without a DynamicSeaIceState — so
+    ridging stays unreachable from THIS driver and the flag stays absent.
+    (run_omip_core2 now reaches it: --ice-categories/--ice-ridging build the
+    multi-category DynamicSeaIceState there; wiring the COUPLED tile onto a
+    dynamic state is a separate feature.)
 
     An earlier draft added --ice-categories/--ice-dynamics to "reach" it; those
     were PHANTOMS that crashed on the first step. A later draft kept
@@ -502,9 +505,10 @@ def test_the_phantom_flags_are_gone():
 
 def test_there_is_no_itd_remap_flag():
     """itd_remap has exactly two values: 'simple' (the default) and
-    'lipscomb2001' (unreachable -- it dispatches only inside the multi-category
-    branch no driver builds). A flag whose sole accepted value is the default
-    is decoration, so it is deliberately absent rather than offered.
+    'lipscomb2001' (which dispatches only inside the multi-category branch
+    this driver's slab tile cannot reach; run_omip_core2 sets it there
+    automatically with --ice-categories >= 2). A flag whose sole accepted
+    value HERE is the default is decoration, so it is deliberately absent.
     """
     for phantom in ("--ice-itd-remap",):
         with pytest.raises(SystemExit):

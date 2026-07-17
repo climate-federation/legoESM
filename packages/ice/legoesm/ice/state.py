@@ -17,7 +17,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.field import Field
-from legoesm.ice.itd import aggregate_state
+from legoesm.ice.itd import aggregate_state, distribute_to_categories
 
 
 class SeaIceState(NamedTuple):
@@ -67,8 +67,11 @@ def init_dynamic_ice_state(
     Parameters
     ----------
     shape : tuple
-        Spatial shape, typically ``(6, n, n)`` for single-category or
-        ``(6, n, n, n_categories)`` for multi-category.
+        Per-cell field shape INCLUDING the trailing category axis when
+        ``n_categories > 1``: cubed-sphere ``(6, n, n[, n_cat])``, lat-lon /
+        tripole ``(n_lat, n_lon[, n_cat])``, MPAS ``(nCells[, n_cat])`` —
+        the same per-grid spatial base ranks ``step_sea_ice`` validates
+        (``sea_ice._base_spatial_ndim``).
     n_categories : int
         Number of ITD categories.  Used only for default shape
         validation; ``shape`` should already include the trailing
@@ -80,17 +83,22 @@ def init_dynamic_ice_state(
         enabling brine on fresh seed ice releases no stored salt
         until new ice forms.
     """
-    if n_categories > 1 and (len(shape) < 4 or shape[-1] != n_categories):
+    if n_categories > 1 and (len(shape) < 2 or shape[-1] != n_categories):
         raise ValueError(
             f"init_dynamic_ice_state: shape {shape} inconsistent with "
             f"n_categories={n_categories}.  Pass shape that ends with "
-            f"the category axis (e.g. (6, n, n, {n_categories}))."
+            f"the category axis (e.g. (6, n, n, {n_categories}) on the "
+            f"cubed sphere, (n_lat, n_lon, {n_categories}) on lat-lon, "
+            f"(nCells, {n_categories}) on MPAS)."
         )
 
-    cat_dim = ("category",) if (n_categories > 1 and len(shape) >= 4) else ()
+    cat_dim = ("category",) if n_categories > 1 else ()
     dims = ("face", "x", "y") + cat_dim
-    # Velocity / stress are always 2D — strip any trailing category axis.
-    spatial_shape = shape[: len(("face", "x", "y"))]
+    # Velocity / stress are always spatial-only — strip the trailing category
+    # axis (which is LAST by contract, whatever the grid's spatial rank; the
+    # old ``shape[:3]`` slice was cubed-sphere-only and leaked the category
+    # axis into u_ice/v_ice on lat-lon / MPAS shapes).
+    spatial_shape = shape[:-1] if n_categories > 1 else shape
     spatial_dims = ("face", "x", "y")
     return DynamicSeaIceState(
         h_ice=Field(data=jnp.zeros(shape), name="h_ice", dims=dims, units="m"),
@@ -117,8 +125,11 @@ def dynamic_to_slab(state: DynamicSeaIceState) -> SeaIceState:
     T = state.T_ice.data
     a = state.concentration.data
 
-    # Multi-category: aggregate
-    if h.ndim > 3:
+    # Multi-category: aggregate.  Detected by RANK against the spatial-only
+    # u_ice, not the old cubed-sphere-only ``h.ndim > 3`` heuristic — lat-lon
+    # multi-category is rank 3 and MPAS rank 2, and both must aggregate here
+    # rather than smuggle a category axis into a scalar SeaIceState (codex).
+    if h.ndim == state.u_ice.data.ndim + 1:
         h_agg, T_agg, a_agg = aggregate_state(h, T, a)
         return SeaIceState(
             h_ice=state.h_ice.replace(data=h_agg),
@@ -165,4 +176,77 @@ def slab_to_dynamic(
         S_ice=Field(data=jnp.full(s, S_ice_init), name="S_ice", dims=dims, units="g/kg"),
         pond_area=Field(data=jnp.zeros(s), name="pond_area", dims=dims, units="1"),
         pond_depth=Field(data=jnp.zeros(s), name="pond_depth", dims=dims, units="m"),
+    )
+
+
+def distribute_dynamic_state_to_categories(
+    state: DynamicSeaIceState,
+    n_categories: int,
+) -> DynamicSeaIceState:
+    """Lift a SINGLE-category :class:`DynamicSeaIceState` into an
+    ``n_categories``-bin ITD state (trailing category axis, any grid rank).
+
+    The delta-function seeding of :func:`legoesm.ice.itd.
+    distribute_to_categories`: each cell's ice lands entirely in the one
+    thickness bin containing its mean thickness (thickness above the last
+    upper bound goes to the last bin).  The per-cell tracers that ride on the
+    ice — snow depth and bulk salinity — are placed in that SAME occupied bin
+    (zero elsewhere), so the aggregate snow volume ``sum_k a_k h_snow_k`` and
+    salt content are conserved exactly by construction.  Melt-pond fields
+    are distributed into the SAME occupied bin (pond water is prognostic
+    liquid — volume = concentration*area*depth carries mass and enthalpy;
+    zeroing it silently deleted pond water on any ponded lift).  Velocity and internal-stress fields are spatial-
+    only and pass through unchanged.
+
+    This is the missing driver-side step the ``step_sea_ice`` multi-category
+    guard points at ("build one via init_dynamic_ice_state(...) and
+    distribute_to_categories"): apply any single-category IC first, then lift.
+    """
+    if n_categories < 2:
+        raise ValueError(
+            f"distribute_dynamic_state_to_categories: n_categories="
+            f"{n_categories}; a multi-category lift needs >= 2 bins "
+            "(single-category states need no distribution)."
+        )
+    h = state.h_ice.data
+    # u_ice is spatial-only by contract, so a category-carrying state has
+    # h_ice rank == u_ice rank + 1.  Exact (a size test against n_categories
+    # could false-match a spatial axis, e.g. n_lon == n_categories).
+    if h.ndim == state.u_ice.data.ndim + 1:
+        raise ValueError(
+            "distribute_dynamic_state_to_categories: state already carries "
+            f"a trailing category axis (h_ice shape {tuple(h.shape)} vs "
+            f"spatial u_ice shape {tuple(state.u_ice.data.shape)}); "
+            "refusing to double-lift."
+        )
+    t_srf = state.T_ice.data
+    conc = state.concentration.data
+    h_mc, t_mc, conc_mc = distribute_to_categories(h, t_srf, conc,
+                                                   n_categories)
+    # Occupied-bin mask: the delta ITD puts each cell in exactly one bin, so
+    # (h_mc > 0) | (conc_mc > 0) marks it (h-only ice and conc-only ice both
+    # count; ice-free cells have no occupied bin and keep zero tracers).
+    occ = ((h_mc > 0.0) | (conc_mc > 0.0)).astype(h.dtype)
+    cat_dims = state.h_ice.dims + ("category",)
+
+    def _lift(field, data_mc):
+        return Field(data=data_mc, name=field.name, dims=cat_dims,
+                     units=field.units)
+
+    zeros_mc = jnp.zeros_like(h_mc)
+    return state._replace(
+        h_ice=_lift(state.h_ice, h_mc),
+        T_ice=_lift(state.T_ice, t_mc),
+        concentration=_lift(state.concentration, conc_mc),
+        h_snow=_lift(state.h_snow, state.h_snow.data[..., jnp.newaxis] * occ),
+        S_ice=_lift(state.S_ice, state.S_ice.data[..., jnp.newaxis] * occ),
+        # Melt-pond water is PROGNOSTIC liquid (volume = area*depth carrying
+        # mass + enthalpy): distribute into the occupied bin exactly like
+        # snow/salt above — the earlier zeroing silently DELETED pond water
+        # on any lift of a ponded IC / restart / mid-run state (unaccounted
+        # mass+energy sink; conservation is a hard invariant).
+        pond_area=_lift(
+            state.pond_area, state.pond_area.data[..., jnp.newaxis] * occ),
+        pond_depth=_lift(
+            state.pond_depth, state.pond_depth.data[..., jnp.newaxis] * occ),
     )

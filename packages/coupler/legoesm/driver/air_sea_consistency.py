@@ -47,16 +47,6 @@ KNOWN-UNGUARDED (verified, deliberately NOT gated here)
 These split the same interface but cannot be fixed without an answer-changing
 physics decision, so they are documented rather than silently absorbed:
 
-  * ``gustiness_w_zi``: ``CouplerConfig.gustiness_w_zi`` is ``float = 0.0`` and
-    so CANNOT express "scheme-native", while the atmosphere's
-    ``SurfaceLayerConfig.gustiness_w_zi`` is ``float | None = None``, which
-    ``bulk_flux`` resolves to ``_COARE_GUSTINESS_ZI = 600.0`` for coare3. So
-    ``--surface-bulk-scheme coare3`` WITHOUT ``--gustiness-zi`` still splits:
-    atmosphere 600 m vs tile 0.0 (off). This is a DEFAULT-PATH failure, not a
-    hypothetical. Fixing it means making the coupler field nullable, which flips
-    the tile default from off to on (coupled answers change) and drops the field
-    out of the ``:float``-eligible ``__param_spec__`` set. Pinned by a strict
-    xfail in tests/unit/test_air_sea_scheme_consistency.py.
   * the constant-closure coefficients: atmosphere ``Cd_neutral``/``Ch_neutral``
     (both 1.5e-3) vs coupler ``Cd_ocean``/``Ch_ocean`` (both 1.5e-3) match by
     default but are differently NAMED, and the light-wind floors differ by
@@ -209,6 +199,23 @@ def validate_air_sea_consistency(atm_config, coupler_config) -> None:
             if ocn_v != atm_z_ref:
                 split.append((f"{axis} (vs the atmosphere's z_ref, which its "
                               "MOST call defaults z_t/z_q to)", atm_z_ref, ocn_v))
+
+    # Gustiness: both sides are nullable with None = scheme-native, so the
+    # generic loop's skip-on-None would wave through atm None (-> 600 m for
+    # coare3) vs tile 0.0 (off) — the exact default-path split that was
+    # KNOWN-UNGUARDED before CouplerConfig.gustiness_w_zi became nullable.
+    # Compare the EFFECTIVE z_i through the model's own resolver
+    # (bulk_flux.resolve_gustiness_w_zi, the same call compute_most_fluxes
+    # makes), never the raw fields.
+    if atm_scheme in _ATM_MOST_SCHEMES:
+        from legoesm.core.bulk_flux import resolve_gustiness_w_zi
+        atm_zi = resolve_gustiness_w_zi(
+            getattr(surf, "gustiness_w_zi", None), atm_scheme)
+        ocn_zi = resolve_gustiness_w_zi(
+            getattr(effective, "gustiness_w_zi", None), atm_scheme)
+        if atm_zi != ocn_zi:
+            split.append(("gustiness_w_zi (effective z_i [m]; None resolved "
+                          "scheme-natively on both sides)", atm_zi, ocn_zi))
     if not split:
         return
 
