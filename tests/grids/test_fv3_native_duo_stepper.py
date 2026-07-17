@@ -69,6 +69,40 @@ def test_divgd_shared_edges_consistent(ctx, outs):
         assert got == want, (bj, got, want)
 
 
+def test_sb2_mass_conserved_through_averaged_fluxes(ctx):
+    """SB2 killer invariant: the d_sw2 update through the AVERAGED
+    cross-face fluxes conserves total mass EXACTLY (flux form + both
+    faces of every shared edge carrying the identical blended flux ->
+    the global area-weighted delp sum is unchanged to rounding)."""
+    from legoesm.core.fv3_native_duo_stepper import dsw12_step_sixface
+
+    states = analytic_six_face_state(ctx)
+    csw = csw_step_sixface(ctx, states, dt2=112.5)
+    outs = dsw12_step_sixface(ctx, states, csw, dt=225.0)
+    sl = slice(NG, NG + N)
+    m0 = 0.0
+    m1 = 0.0
+    for t in range(6):
+        area = ctx["gs6"][t]["area"][sl, sl]
+        m0 += float((states[t]["delp"][sl, sl] * area).sum())
+        m1 += float((outs[t]["delp"][sl, sl] * area).sum())
+    assert np.isfinite(m1)
+    assert abs(m1 - m0) / abs(m0) < 1e-13, (m0, m1, m1 - m0)
+
+
+def test_sb2_outputs_finite(ctx):
+    from legoesm.core.fv3_native_duo_stepper import dsw12_step_sixface
+
+    states = analytic_six_face_state(ctx)
+    csw = csw_step_sixface(ctx, states, dt2=112.5)
+    outs = dsw12_step_sixface(ctx, states, csw, dt=225.0)
+    sl = slice(NG, NG + N)
+    for t, o in enumerate(outs, start=1):
+        assert np.isfinite(o["delp"][sl, sl]).all(), t
+        assert np.isfinite(o["pt"][sl, sl]).all(), t
+        assert (o["delp"][sl, sl] > 0).all(), t
+
+
 def test_uc_halo_matches_neighbor_interior(ctx, outs):
     """CGRID_NE exchange delivered the neighbor's coincident component
     (sign-mapped): tile 1 west uc halo column fi=0 against tile 5's
