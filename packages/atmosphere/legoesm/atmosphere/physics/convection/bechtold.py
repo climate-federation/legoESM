@@ -1369,15 +1369,18 @@ def _ifs_cape_closure_target(
         - q_c_u[:, 1:]
     )
     zcape = jnp.sum(in_cloud[:, 1:] * buoy * dp_lev, axis=-1)
-    zcape = jnp.clip(zcape, 0.0, _IFS_ZCAPE_MAX_PA)
+    zcape = jnp.maximum(zcape, 0.0)
     if zcapdcycl is not None:
         # RCAPDCYCL diurnal subtraction (cumastrn.F90:818-823): bounded below
         # by -2*ZCAPE (a nocturnal negative supply may at most double the
         # CAPE) and the result floored at RMINCAPE*ZCAPE — a fraction of the
         # instability is always adjusted.  (Our RCAPQADV path is absent, so
-        # ZCAPE2 == ZCAPE.)
+        # ZCAPE2 == ZCAPE.)  ORDER: the oracle subtracts BEFORE the 5000 Pa
+        # cap (:825 comes after) — capping first collapsed a
+        # 10000-8000=2000 Pa case onto the RMINCAPE floor (codex R1 #1).
         zdcy = jnp.maximum(zcapdcycl, -2.0 * zcape)
         zcape = jnp.maximum(_IFS_RMINCAPE * zcape, zcape - zdcy)
+    zcape = jnp.minimum(zcape, _IFS_ZCAPE_MAX_PA)
 
     # ZHEAT: environment stability consumption per unit overturning.
     # Neighbor differences k-1 (above) minus k, aligned to levels 1..nlev-1.
@@ -2306,12 +2309,23 @@ def bechtold_convection(
                 + jnp.sum(_subcloud_w2 * _rad2 * dp_full, axis=-1)
             )                                        # [K*Pa/s]
             _z_base = jnp.sum(_base_w2 * z, axis=-1)
+            # Land branch uses ZTAU/ZTAURES UNCLAMPED (cumastrn:787 divides
+            # the resolution factor back out; the [720,10800] clamp at :827
+            # applies only to the closure's ZXTAU) — passing the clamped,
+            # ZTAURES-scaled tau_conv was wrong at the clamp bounds and
+            # whenever dx_m != 0 (codex R1 #2).
+            _tau_pure = cloud_depth / (2.0 + w_mean)
+            # Departure gate: the oracle tests PAPH(sfc)-PAPH(IDPL) with
+            # IDPL the discrete CUBASEN departure level; our parcel departs
+            # from p_parcel_source (the PBL-mean pressure under
+            # use_pbl_cape) — the faithful analog of OUR launch, a
+            # documented stand-in (codex R1 #3).
             _gate_w = jax.nn.sigmoid(
                 (_IFS_CAPDCYCL_DEPART_DP_PA
                  - (p_half[:, -1] - p_parcel_source))
                 / _CAPDCYCL_GATE_W_PA)
             _zdcy = _ifs_capdcycl(
-                _supply_virt, tau_conv, _z_base, u, v, _base_w2, p_full,
+                _supply_virt, _tau_pure, _z_base, u, v, _base_w2, p_full,
                 land_frac, _gate_w,
             )
         M_b_target = _ifs_cape_closure_target(

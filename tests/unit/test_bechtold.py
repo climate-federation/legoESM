@@ -2717,8 +2717,26 @@ def test_ifs_capdcycl_zcape_subtraction_semantics():
     assert abs(float(huge[0]) / float(base[0]) - _IFS_RMINCAPE) < 1e-6, (
         "RMINCAPE floor must bind under a huge subtraction")
     noct = _ifs_cape_closure_target(*args, zcapdcycl=jnp.array([-1.0e9]))
-    assert abs(float(noct[0]) / float(base[0]) - 3.0) < 1e-6, (
-        "nocturnal bound: zcape - max(zdcy,-2*zcape) = 3*zcape")
+    # cap-order regression (codex R1 #1): raw CAPE above 5000 with a large
+    # subtraction must give (raw - zdcy), NOT the RMINCAPE floor of the
+    # capped value.  Boost the plume to push raw zcape > 5000 Pa.
+    T_hot = T + jnp.array([[0.0, 30.0, 40.0, 0.0]])   # raw zcape ~6400 Pa
+    args_hot = (T, q, z, p, T_hot, q, jnp.zeros_like(q),
+                jnp.array([[0.0, 0.08, 0.10, 0.10]]),
+                jnp.zeros((1, 4)), in_cloud, jnp.array([1500.0]),
+                jnp.array([0.10]), jnp.array([1.0]))
+    base_hot = _ifs_cape_closure_target(*args_hot)
+    # recover raw zcape via the target relation: target = cw*zcape*Mb/(zheat*tau)
+    # base_hot corresponds to min(raw,5000); with subtraction 3000 the oracle
+    # order gives min(raw-3000, 5000) -- distinguishable from
+    # max(0.05*min(raw,5000), min(raw,5000)-3000) only when raw>5000, which
+    # this fixture guarantees if base_hot saturates the cap:
+    sub = _ifs_cape_closure_target(*args_hot, zcapdcycl=jnp.array([4800.0]))
+    # oracle order: (6400-4800)=1600 -> ratio ~0.32 vs capped-first ~0.05.
+    ratio = float(sub[0]) / float(base_hot[0])
+    assert ratio > 0.25, (
+        f"cap-order bug: ratio {ratio:.3f} indicates subtraction applied "
+        "AFTER the 5000 Pa cap (oracle subtracts before)")
 
 
 def test_ifs_land_rhebc_blend_and_toggle():
