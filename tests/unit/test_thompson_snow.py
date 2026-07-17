@@ -96,6 +96,118 @@ def test_snow_deposition_supersaturation_ratio_magnitude():
     assert bool(jnp.allclose(subl, -dep, rtol=1e-6))
 
 
+def test_snow_capacitance_oracle_ramp():
+    """Pin the gSAM/WRF Thompson snow-capacitance temperature ramp
+    (module_mp_thompson.f90:108-109, :2032-2033)::
+
+        C_snow = MAX(C_sqrd, MIN(C_sqrd + (tempc+15)*(C_cube-C_sqrd)/(-30+15),
+                                 C_cube)),   C_sqrd=0.3, C_cube=0.5
+    """
+    import numpy as np
+
+    from legoesm import constants
+
+    # Endpoints, midpoint, and both clamp plateaus.
+    for tc, expect in [(-5.0, 0.3), (-15.0, 0.3), (-22.5, 0.4),
+                       (-30.0, 0.5), (-45.0, 0.5)]:
+        got = float(ts.snow_capacitance(jnp.array([constants.T_freeze + tc]))[0])
+        assert got == pytest.approx(expect, rel=1e-6), (tc, got, expect)
+    # Random sweep vs an independent transcription of the Fortran line.
+    rng = np.random.default_rng(7)
+    tc = rng.uniform(-60.0, 5.0, size=64)
+    oracle = np.clip(0.3 + (tc + 15.0) * (0.5 - 0.3) / (-30.0 + 15.0), 0.3, 0.5)
+    got = np.asarray(ts.snow_capacitance(jnp.asarray(constants.T_freeze + tc)))
+    assert np.allclose(got, oracle, rtol=1e-6, atol=0.0)
+
+
+def test_snow_deposition_prds_coefficient_pin():
+    """Coefficient-level pin of the full PRDS prefactor (uncapped regime)
+    against an independent scalar transcription of the documented closed form
+
+        PRDS = 4*pi*C_snow(T)*(S_i-1)/(A+B)
+               * [t1*I(1) + t2*rhof2*vsc2*I(c_vent)] / rho
+
+    with the Thompson-2008 snow constants (am_s=0.069, av_s=40, bv_s=0.55,
+    fv_s=100, mu_s=0.6357, Kap0=490.6, Kap1=17.46, Lam0=20.78, Lam1=3.29,
+    Sc=0.632, t1=0.86, t2=0.28*Sc^(1/3)*sqrt(av_s)) and the T-ramped
+    capacitance.  This became pinnable once the fixed C=0.15 departure was
+    replaced by the faithful ramp.
+    """
+    import math
+
+    from legoesm import constants
+    from legoesm.thermo import saturation_mixing_ratio_ice
+
+    x64 = jnp.zeros(1).dtype == jnp.float64
+    rtol = 1e-9 if x64 else 3e-4
+
+    def mirror(q_v, q_s, q_sat_i, T, p, rho):
+        # PSD moments via the Field-2005 relation (Thompson 2008 Table 1).
+        sa = (5.065339, -0.062659, -3.032362, 0.029469, -0.000285,
+              0.31255, 0.000204, 0.003199, 0.0, -0.015952)
+        sb = (0.476221, -0.015896, 0.165977, 0.007468, -0.000141,
+              0.060366, 0.000079, 0.000594, 0.0, -0.003577)
+        tc_raw = T - constants.T_freeze
+        tc = min(max(tc_raw, -55.0), -0.1)
+        pm = 3.0
+        loga = (sa[0] + sa[1] * tc + sa[2] * pm + sa[3] * tc * pm
+                + sa[4] * tc * tc + sa[5] * pm * pm + sa[6] * tc * tc * pm
+                + sa[7] * tc * pm * pm + sa[8] * tc ** 3 + sa[9] * pm ** 3)
+        b = (sb[0] + sb[1] * tc + sb[2] * pm + sb[3] * tc * pm
+             + sb[4] * tc * tc + sb[5] * pm * pm + sb[6] * tc * tc * pm
+             + sb[7] * tc * pm * pm + sb[8] * tc ** 3 + sb[9] * pm ** 3)
+        M2 = q_s * rho / 0.069
+        M3 = 10.0 ** loga * M2 ** b
+        ratio = M2 / M3
+        lam0, lam1 = 20.78 * ratio, 3.29 * ratio
+        mu_s, kap0, kap1 = 0.6357, 490.6, 17.46
+        norm = M2 * ratio ** 3
+        I1 = norm * (kap0 * math.gamma(2.0) / lam0 ** 2
+                     + kap1 * ratio ** mu_s * math.gamma(2.0 + mu_s)
+                     / lam1 ** (2.0 + mu_s))
+        c_vent = 1.0 + (1.0 + 0.55) / 2.0
+        fv_half = 0.5 * 100.0
+        I_vent = norm * (
+            kap0 * math.gamma(c_vent + 1.0) / (lam0 + fv_half) ** (c_vent + 1.0)
+            + kap1 * ratio ** mu_s * math.gamma(c_vent + mu_s + 1.0)
+            / (lam1 + fv_half) ** (c_vent + mu_s + 1.0))
+        # Thermodynamic resistances (Pruppacher-Klett / Rogers-Yau ice form).
+        dv = 8.794e-5 * T ** 1.81 / p
+        ka = 2.3971e-2 + 7.078e-5 * tc_raw
+        e_si = q_sat_i * p / constants.epsilon
+        A = constants.L_s ** 2 / (ka * constants.R_v * T ** 2)
+        B = constants.R_v * T / (e_si * dv)
+        # Ventilation factors.
+        sc3 = 0.632 ** (1.0 / 3.0)
+        t1, t2 = 0.86, 0.28 * sc3 * math.sqrt(40.0)
+        rho_not = constants.p_atm_std / (constants.R_d * 298.0)
+        rhof = math.sqrt(rho_not / rho)
+        rhof2 = math.sqrt(rhof)
+        mu_air = 1.458e-6 * T ** 1.5 / (T + 110.4)
+        vsc2 = math.sqrt(rho / mu_air)
+        c_snow = min(max(0.3 + (tc_raw + 15.0) * 0.2 / (-15.0), 0.3), 0.5)
+        s_i = q_v / q_sat_i - 1.0
+        vent = t1 * I1 + t2 * rhof2 * vsc2 * I_vent
+        return 4.0 * math.pi * c_snow * s_i / (A + B) * vent / rho
+
+    # Three states across the ramp: warm plateau, mid-ramp, cold plateau.
+    for tc_case, q_s in [(-10.0, 2e-4), (-22.5, 1e-4), (-35.0, 5e-5)]:
+        T = constants.T_freeze + tc_case
+        p = 4.0e4
+        rho = p / (constants.R_d * T)
+        q_sat_i = float(saturation_mixing_ratio_ice(jnp.array(T), jnp.array(p)))
+        q_v = 1.2 * q_sat_i
+        got = float(ts.snow_deposition(
+            jnp.array([q_v]), jnp.array([q_s]), jnp.array([q_sat_i]),
+            jnp.array([T]), jnp.array([p]), jnp.array([rho]), 1.0)[0])
+        want = mirror(q_v, q_s, q_sat_i, T, p, rho)
+        # Uncapped regime: rate well below the availability cap excess/dt.
+        assert got < (q_v - q_sat_i) / 1.0
+        # abs=0.0: rates are ~1e-8 kg/kg/s, near approx's default abs=1e-12
+        # floor, which would dilute the relative pin.
+        assert got == pytest.approx(want, rel=rtol, abs=0.0), (T, got, want)
+
+
 def test_moments_reproduce_M2_M3():
     # The bimodal-PSD normalization must reproduce the 2nd and 3rd moments.
     q_s = jnp.array([1e-4]); rho = jnp.array([0.4]); T = jnp.array([245.0])

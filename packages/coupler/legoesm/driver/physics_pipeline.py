@@ -908,6 +908,20 @@ class PhysicsPipeline:
                 # the stochastic multiplier is exactly 1, so a zero stoch
                 # input is bit-identical and needs no carry slot.
                 _stoch_zero = jnp.zeros((ad.ncol,), dtype=T_col.dtype)
+                # Fail loudly at trace time on a silently-inert flag
+                # (dispatch-hardening, mirrors the shallow/capdcycl guard
+                # below): this pipeline does not supply the dynamics
+                # tendencies the RCAPQADV correction consumes, so the flag
+                # would be a no-op configuration.
+                if getattr(_conv_cfg, "use_ifs_cape_qadv", False):
+                    raise ValueError(
+                        "use_ifs_cape_qadv=True: the physics pipeline does "
+                        "not supply the dynamics tendencies "
+                        "(dT_dt_dyn/dq_dt_dyn), so the RCAPQADV CAPE "
+                        "correction would be silently inert.  Keep the flag "
+                        "False until the driver wiring lands, or call "
+                        "bechtold_convection directly with the tendencies."
+                    )
                 # IFS shallow PBL-equilibrium closure inputs (STATIC config
                 # gate): same-step bulk SHF/LHF (tiled mosaic when the land
                 # tile is active, else the ocean bulk scheme) + the held
