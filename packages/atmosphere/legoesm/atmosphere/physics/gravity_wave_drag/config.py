@@ -729,17 +729,37 @@ class E3SMCAMConfig(NamedTuple):
         (default) keeps the uniform value so the clean oracle comparison is
         unchanged.  E3SM uses the profile for spectral sources and a tiny
         floor (1e-6 1/s) for orographic-only.
+    use_e3sm_spectral_heating : bool
+        E3SM-faithful spectral thermal term (default ``False`` = legacy).
+        E3SM's spectral (``ngwv > 0``) ``gw_drag_prof`` UNCONDITIONALLY
+        (a) band-limits ``dttke`` to midpoints ``ktop+1..kbotbg``
+        (gw_common.F90:726-728; ``ktop = 0``, ``kbotbg`` = the interface
+        above 500 hPa) and (b) adds the dse-diffusion heating ``dttdf``
+        (``ttgw = dttke + dttdf``, :721,731) — with NO u/v diffusion
+        (``egwdffi`` is exported only as the EKGWSPEC diagnostic; E3SM
+        never diffuses u/v with it).  ``True`` applies both.  The legacy
+        default sums ``dttke`` over ALL levels (a deep Beres source
+        deposits ground-relative heating below 500 hPa that E3SM does not)
+        and omits ``dttdf``.  Composes with ``do_eddy_diffusion`` (dttdf
+        added exactly once).  Behavioral -> AMIP-gated flip.
     do_eddy_diffusion : bool
-        When ``True`` (spectral path only) apply the GW-induced eddy
-        diffusion of dry static energy (``gw_ediff`` + ``gw_diff_tend``,
-        gw_diffusion.F90): the ``dttdf`` heating term is added to ``dT_dt``.
-        ``False`` (default) leaves ``dT_dt`` as the KE->heat ``dttke`` term
-        only (matching the momentum-only oracle).
+        STANDALONE ADDITION (default ``False``; spectral path only; NO
+        E3SM analog for the momentum part): diffuse u/v through the GW
+        eddy diffusivity ``egwdffi`` — E3SM never applies this anywhere —
+        and add the ``dttdf`` dse-diffusion heating.  Kept for standalone
+        use so the GW momentum eddy flux is not silently dropped when no
+        host boundary-layer scheme consumes an exported diffusivity.  For
+        the E3SM-faithful thermal term WITHOUT the momentum addition use
+        ``use_e3sm_spectral_heating``.
     do_energy_conservation : bool
         When ``True`` (spectral path only) apply the C.-C. Chen column
         momentum & energy fixer (``momentum_energy_conservation``,
         gw_common.F90) so the column total-energy budget self-closes to
-        machine precision.  ``False`` (default) leaves the raw tendencies.
+        machine precision.  ``False`` (default) leaves the raw tendencies —
+        NOTE this is a DEPARTURE from the oracle's shipped behavior: E3SM
+        v3.0.1 calls the fixer UNCONDITIONALLY after each spectral
+        ``gw_drag_prof`` (Beres gw_drag.F90:800, CM :863); flip owed after
+        AMIP validation.
     prndl : float
         Inverse Prandtl number for the GW eddy diffusivity (E3SM
         ``prndl = 0.25``, gw_diffusion.F90).
@@ -771,6 +791,7 @@ class E3SMCAMConfig(NamedTuple):
     n2min: float = 1.0e-8
     dttke_use_intrinsic: bool = False
     use_discrete_ke_heating: bool = False
+    use_e3sm_spectral_heating: bool = False
     use_newtonian_profile: bool = False
     do_eddy_diffusion: bool = False
     do_energy_conservation: bool = False

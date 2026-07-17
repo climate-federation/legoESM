@@ -405,3 +405,110 @@ def test_extract_land_frac_grid_attr():
     got = _extract_land_frac(g, 4)
     assert got.shape == (4,)
     np.testing.assert_allclose(np.asarray(got), [0.0, 0.25, 0.5, 1.0])
+
+
+# --------------------------------------------------------------------------
+# 7. E3SM-faithful spectral thermal term (use_e3sm_spectral_heating;
+#    gw_common.F90:708-731 — unconditional dttdf + dttke band ktop+1..kbotbg)
+# --------------------------------------------------------------------------
+
+def _frontal_cfg(**kw):
+    return E3SMCAMConfig(
+        source="frontal", pgwv=8, dc=5.0,
+        frontal=E3SMFrontalConfig(taubgnd=1.5e-3, frontgfc=1e-10),
+        **kw,
+    )
+
+
+def test_spectral_heating_adds_dttdf_not_momentum():
+    """Flag ON (frontal, where the dttke band is inert — tend_level IS
+    kbotbg so gwut = 0 below): dT gains exactly the unconditional dttdf
+    term while du/dv are BIT-IDENTICAL (E3SM never diffuses u/v with
+    egwdffi — the discriminant vs the do_eddy_diffusion standalone
+    addition, which changes du)."""
+    u, v, T, pf, ph, zf, zh, rho, lat = _driver_column()
+    ncol, nlev = u.shape
+    frontgf = jnp.full((ncol, nlev), 1e-9)
+    out_off = e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, 1800.0,
+                           _frontal_cfg(), frontgf_col=frontgf)
+    out_on = e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, 1800.0,
+                          _frontal_cfg(use_e3sm_spectral_heating=True),
+                          frontgf_col=frontgf)
+    assert jnp.array_equal(out_on.du_dt, out_off.du_dt)
+    assert jnp.array_equal(out_on.dv_dt, out_off.dv_dt)
+    d = float(jnp.max(jnp.abs(out_on.dT_dt - out_off.dT_dt)))
+    assert d > 0.0, "dttdf did not engage"
+
+    out_ediff = e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, 1800.0,
+                             _frontal_cfg(do_eddy_diffusion=True),
+                             frontgf_col=frontgf)
+    assert not jnp.array_equal(out_ediff.du_dt, out_off.du_dt), (
+        "do_eddy_diffusion should change du (standalone u/v addition)")
+    # dttdf itself is the SAME machinery: with the band inert the two
+    # flags' dT paths agree exactly.
+    assert jnp.array_equal(out_on.dT_dt, out_ediff.dT_dt)
+
+
+def test_spectral_heating_composes_dttdf_once():
+    """Both flags ON: dT identical to e3sm-only (dttdf added exactly once;
+    u/v diffusion does not feed dT), du gains the standalone diffusion."""
+    u, v, T, pf, ph, zf, zh, rho, lat = _driver_column()
+    ncol, nlev = u.shape
+    frontgf = jnp.full((ncol, nlev), 1e-9)
+    on = e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, 1800.0,
+                      _frontal_cfg(use_e3sm_spectral_heating=True),
+                      frontgf_col=frontgf)
+    both = e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, 1800.0,
+                        _frontal_cfg(use_e3sm_spectral_heating=True,
+                                     do_eddy_diffusion=True),
+                        frontgf_col=frontgf)
+    assert jnp.array_equal(both.dT_dt, on.dT_dt)
+    assert not jnp.array_equal(both.du_dt, on.du_dt)
+
+
+def test_spectral_heating_band_cuts_deep_beres_dttke():
+    """Beres source with deep heating (top well below 500 hPa): the legacy
+    all-level dttke deposits ground-relative wave heating below the E3SM
+    band that the flag removes (gw_common.F90:726-728).  Compare the flag's
+    dT against the OFF run MINUS its below-band dttke: with dttdf disabled
+    by a zero-diffusivity cap, the two must agree — pinning that the flag's
+    ONLY below-band effect is the band cut."""
+    u, v, T, pf, ph, zf, zh, rho, lat = _driver_column()
+    ncol, nlev = u.shape
+    pmid_mean = np.mean(np.array(pf), axis=0)
+    # Shear layer 700->500 hPa (u: +10 -> -10) puts critical levels for the
+    # inner phase-speed bins BETWEEN the Beres launch (~650 hPa) and the
+    # 500 hPa band edge, forcing legacy dttke deposition BELOW the band.
+    u_prof = np.interp(pmid_mean, [1.0e4, 5.0e4, 7.0e4, 1.0e5],
+                       [-12.0, -12.0, 12.0, 12.0])
+    u = jnp.asarray(np.broadcast_to(u_prof, (ncol, nlev)).copy())
+    # Deep convective heating 950-600 hPa (hdepth > the 2.5 km trigger; a
+    # shallower band left hdepth under the minimum and launched nothing).
+    heat = np.zeros((ncol, nlev))
+    mask = (pmid_mean > 6.0e4) & (pmid_mean < 9.5e4)
+    heat[:, mask] = 2e-3                                   # K/s, deep layer
+    netdt = jnp.asarray(heat)
+    base = dict(source="convective", pgwv=8, dc=2.5)
+    cfg_off = E3SMCAMConfig(**base)
+    # prndl=0 zeroes egwdffm AT THE SOURCE -> egwdffi = min(cap, 0) = 0
+    # everywhere -> dttdf == 0 exactly, isolating the band effect.  (NOT
+    # egwd_max=0: the cap is min(egwd_max, x) with NO zero floor, so a
+    # NEGATIVE diffusivity would survive it and dttdf would not null.)
+    cfg_on = E3SMCAMConfig(**base, use_e3sm_spectral_heating=True,
+                           prndl=0.0)
+    out_off = e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, 1800.0,
+                           cfg_off, netdt_col=netdt)
+    out_on = e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, 1800.0,
+                          cfg_on, netdt_col=netdt)
+    kbot = int(np.argmin(np.abs(pmid_mean - cfg_on.ediff_kbot_p)))
+    below = np.array(out_off.dT_dt)[:, kbot:]
+    assert np.max(np.abs(below)) > 0.0, (
+        "fixture must deposit legacy dttke below the 500 hPa band")
+    # Flag ON: below-band dT is exactly zero (band cut, dttdf nulled).
+    np.testing.assert_allclose(np.array(out_on.dT_dt)[:, kbot:], 0.0,
+                               atol=0.0)
+    # Above the band the two agree exactly (the flag touches nothing else).
+    np.testing.assert_allclose(np.array(out_on.dT_dt)[:, :kbot],
+                               np.array(out_off.dT_dt)[:, :kbot],
+                               rtol=0, atol=0)
+    assert E3SMCAMConfig().use_e3sm_spectral_heating is False  # default canary
