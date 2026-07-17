@@ -722,3 +722,57 @@ def d_sw3_duo(u, v, uc, vc, gs: dict, bd: Bounds, npx: int, npy: int, *,
 
     return {"ubbtemp": ubbtemp.a, "vbbtemp": vbbtemp.a,
             "ubb": ubb.a, "vbb": vbb.a}
+
+
+def d_sw4_duo(u, v, ut, vt, ke, gs: dict, bd: Bounds, npx: int, npy: int,
+              *, dt: float) -> dict:
+    """sw_core.F90 d_sw4 (symmetryclean 1390-1472) — the 4-corner KE
+    fix.  Its guard ``.not.bounded .or. .not.duogrid`` (auth 1440) is
+    ALWAYS TRUE on the global cube (bounded=F), so the corner formulas
+    fire on the duo lane too, reading u/v and the d_sw1 ut/vt workspace
+    at cells the duo interior DOES write (ut over is:ie+1 x jsd:jed, vt
+    over isd:ied x js:je+1 cover every corner read) — all inputs fully
+    defined, no sentinel dependence.
+
+    ke is INTENT(INOUT) upstream (in dyn_core it arrives as the inline
+    KE assembly kee = 0.5*(ubbtemp*vbbtemp + ubb*vbb)); the oracle
+    initialises it to 1e30 on both sides and the stage writes ONLY the
+    four corner B-nodes — the full-domain dump proves exactly that.
+    Returns dict(ke) (data-domain B-array, corners updated).
+    """
+    isd, jsd = bd.isd, bd.jsd  # d_sw4 uses only corner indices (1,npx,npy)
+
+    u = fort(np.array(u, dtype=np.float64, copy=True), isd, jsd)
+    v = fort(np.array(v, dtype=np.float64, copy=True), isd, jsd)
+    ut = fort(np.array(ut, dtype=np.float64, copy=True), isd, jsd)
+    vt = fort(np.array(vt, dtype=np.float64, copy=True), isd, jsd)
+    ke = fort(np.array(ke, dtype=np.float64, copy=True), isd, jsd)
+
+    sw_corner = bool(gs.get("sw_corner", True))
+    se_corner = bool(gs.get("se_corner", True))
+    ne_corner = bool(gs.get("ne_corner", True))
+    nw_corner = bool(gs.get("nw_corner", True))
+
+    # auth 1440-1466 (guard always true at bounded=F)
+    dt6 = dt / 6.0
+    if sw_corner:
+        ke[1, 1] = dt6 * ((ut[1, 1] + ut[1, 0]) * u[1, 1]
+                          + (vt[1, 1] + vt[0, 1]) * v[1, 1]
+                          + (ut[1, 1] + vt[1, 1]) * u[0, 1])
+    if se_corner:
+        i = npx
+        ke[i, 1] = dt6 * ((ut[i, 1] + ut[i, 0]) * u[i - 1, 1]
+                          + (vt[i, 1] + vt[i - 1, 1]) * v[i, 1]
+                          + (ut[i, 1] - vt[i - 1, 1]) * u[i, 1])
+    if ne_corner:
+        i, j = npx, npy
+        ke[i, j] = dt6 * ((ut[i, j] + ut[i, j - 1]) * u[i - 1, j]
+                          + (vt[i, j] + vt[i - 1, j]) * v[i, j - 1]
+                          + (ut[i, j - 1] + vt[i - 1, j]) * u[i, j])
+    if nw_corner:
+        j = npy
+        ke[1, j] = dt6 * ((ut[1, j] + ut[1, j - 1]) * u[1, j]
+                          + (vt[1, j] + vt[0, j]) * v[1, j - 1]
+                          + (ut[1, j - 1] - vt[1, j]) * u[0, j])
+
+    return {"ke": ke.a}
