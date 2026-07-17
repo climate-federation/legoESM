@@ -208,15 +208,21 @@ def mle_tracer_tendency_latlon_cgrid(
     else:
         dz_live = z_coord.dz_ref * jacobian[:, :, jnp.newaxis]   # pure z* fallback
     wet3d = _wet_cell_3d(mask, z_coord, nlev)                # (n_lat, n_lon, nlev)
-    # Live level-centre depths [m, positive] for the MLE-MLD criterion.  Use the
-    # reference z-centres; the 0.01 criterion is robust to the small z* stretch.
-    z_centers = jnp.abs(z_coord.z_half_ref[:-1] + z_coord.z_half_ref[1:]) * 0.5
+    # Reference W-INTERFACE depths [m, positive down] for the NEMO nla10
+    # reference-level pick (z_half_ref is 0 at the surface, -H_max at the
+    # bottom); the 0.01 criterion is robust to the small z* stretch.
+    z_faces = jnp.abs(z_coord.z_half_ref)                    # (nlev+1,)
 
     # --- MLE mixed-layer depth + ML-mean buoyancy (shared core) ---
     # SEPARATE 0.01 in-situ criterion (NOT the 0.03 dBM diagnostic), per codex.
+    # Exact NEMO gdept_1d when the coordinate carries it (t_depth_ref, the
+    # same pattern the PGF uses): the nla10 tolerance depends on e3w_1d,
+    # which is NOT the face-midpoint spacing on a partial-cell ladder.
+    _t_ref = getattr(z_coord, "t_depth_ref", None)
     zmld, bm, in_ml = mle_mld_and_buoyancy(
         rho_insitu, dz_live, wet3d,
-        z_centers=z_centers,
+        z_faces=z_faces,
+        z_centers_ref=(None if _t_ref is None else jnp.abs(jnp.asarray(_t_ref))),
         rho_c_mle=cfg.rho_c_mle,
         ref_depth_m=cfg.ref_depth_m,
         rho0=constants.rho_ocean,
