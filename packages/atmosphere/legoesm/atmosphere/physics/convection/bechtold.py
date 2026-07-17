@@ -1278,12 +1278,12 @@ def _ifs_subcloud_rain_evaporation(
         # doctrine as the evaporation below); melted snow joins the RAIN.
         melt_k = jnp.minimum(snow_top, mcap_k)
         snow_top = snow_top - melt_k
-        # Oracle ordering (codex R1 #1): evaporation acts on the flux entering
-        # the layer TOP (``ZRFL = PMFLXR(JK)``, cuflxn.F90:449); the layer's
-        # OWN source joins the flux only downstream (``PMFLXR(JK+1) = ... +
-        # ZPDR``, cuflxn.F90:470-472) — rain never re-evaporates in its
-        # production layer.
-        zrfl = flux_top + melt_k
+        # Oracle ordering (codex R1 #1 + snow R1): evaporation acts on the
+        # flux entering the layer TOP (``ZRFL = PMFLXR(JK)``, cuflxn:449);
+        # the layer's OWN source — and its OWN melt, which the oracle adds to
+        # PMFLXR(JK+1) AFTER the evap of PMFLXR(JK) — join only downstream.
+        # Same-layer melt must not evaporate in its production layer.
+        zrfl = flux_top
         zrfl_safe = jnp.where(zrfl > _IFS_EVAP_FLUX_TINY, zrfl, 1.0)
         zdrfl1 = (
             _IFS_RCPECONS
@@ -1306,7 +1306,7 @@ def _ifs_subcloud_rain_evaporation(
         evap_k = jnp.where(
             zrfl > _IFS_EVAP_FLUX_TINY, (zrfl - zrfln) * gate_k, 0.0,
         )
-        rain_out = (zrfl - evap_k + alpha_k * src_k).astype(_dtype)
+        rain_out = (zrfl - evap_k + melt_k + alpha_k * src_k).astype(_dtype)
         snow_out = (snow_top + (1.0 - alpha_k) * src_k).astype(_dtype)
         return (rain_out, snow_out), (evap_k, melt_k)
 

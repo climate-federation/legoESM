@@ -2897,3 +2897,31 @@ def test_ifs_snow_melt_leaf_enthalpy_and_toggle():
             T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
             config=BechtoldConfig(use_ifs_snow_melt=True,
                                   use_ifs_subcloud_evap=False))
+
+
+def test_ifs_snow_melt_same_layer_no_evap():
+    """Snow-melt ordering regression (codex snow-R1): melt produced IN a
+    layer joins the rain flux only DOWNSTREAM (oracle adds PDPMEL to
+    PMFLXR(JK+1) after evaporating PMFLXR(JK)) — a warm, dry, evap-active
+    layer fed only by snow from above must evaporate ZERO in the melt layer
+    itself and start evaporating one level below."""
+    dt = 600.0
+    tf = constants.T_freeze
+    T = jnp.array([[tf - 10.0, tf + 6.0, tf + 8.0, tf + 10.0]])
+    p_half = jnp.array([[400e2, 600e2, 800e2, 920e2, 1000e2]])
+    pf = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    qsat = jnp.full((1, 4), 8e-3)
+    q = qsat * 0.3                                   # dry: evap wants to fire
+    dq_r = jnp.zeros((1, 4)).at[:, 0].set(4e-7)      # cold source -> all snow
+    below = jnp.ones((1, 4))                         # evap gate OPEN everywhere
+    e, _, melt = _ifs_subcloud_rain_evaporation(
+        q, qsat, p_half, dp, dq_r, below, jnp.array([0.9]), jnp.array([0.8]),
+        jnp.array([1.0]), dt, snow_melt=True, T=T, p_full=pf)
+    # first melt happens at k=1 (first warm layer)
+    assert float(melt[0, 1] * dp[0, 1]) > 0.0
+    # evaporation at k=1 must be ZERO (no rain entered its top; its own melt
+    # is downstream-only)
+    assert float(e[0, 1]) == 0.0, "same-layer melt evaporated"
+    # and the melted rain DOES evaporate below
+    assert float(e[0, 2]) > 0.0
