@@ -12,7 +12,9 @@
 #SBATCH --mem=120G
 #SBATCH --time=48:00:00
 #SBATCH --output=results/aimip_ace2loss/logs/%x_%j.out
-set -uo pipefail
+# NOTE: SLURM opens --output at submit time; the log dir must already exist.
+# Submit via ./submit.sh (creates it) rather than raw `sbatch <file>`.
+set -euo pipefail
 source "$SLURM_SUBMIT_DIR/scripts/cluster/scaling_ginsburg/_env.sh"
 cd "$REPO"
 export JAX_PLATFORMS=cuda JAX_ENABLE_X64=1

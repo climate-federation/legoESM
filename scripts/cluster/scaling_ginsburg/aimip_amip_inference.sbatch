@@ -15,6 +15,9 @@
 #SBATCH --mem=96G
 #SBATCH --time=12:00:00
 #SBATCH --output=results/aimip_fleet_paper/logs/%x_%j.out
+# SLURM opens --output at submit time; submit via ./submit.sh (creates the dir).
+# Keep -e OFF here: the driver's RC is captured for self-chaining and surfaced
+# via `exit "$RC"` at the end, so a failed link fails the SLURM job honestly.
 set -uo pipefail
 source "$SLURM_SUBMIT_DIR/scripts/cluster/scaling_ginsburg/_env.sh"
 cd "$REPO"
@@ -55,3 +58,4 @@ if [ "$RC" -eq 0 ] && [ -f "$MARKER" ]; then
   fi
 fi
 echo "[amip-infer] done $(date) rc=$RC"
+exit "$RC"

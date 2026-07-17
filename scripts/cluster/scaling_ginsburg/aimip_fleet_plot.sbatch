@@ -12,7 +12,8 @@
 #SBATCH --mem=16G
 #SBATCH --time=04:00:00
 #SBATCH --output=results/aimip_fleet_paper/logs/%x_%j.out
-set -uo pipefail
+# SLURM opens --output at submit time; submit via ./submit.sh (creates the dir).
+set -euo pipefail
 source "$SLURM_SUBMIT_DIR/scripts/cluster/scaling_ginsburg/_env.sh"
 cd "$REPO"
 OUT=results/aimip_fleet_paper
@@ -23,4 +24,4 @@ echo "[fleet] $(date) reproducing AIMIP Phase-1 Fig 3 (anomaly) -> $OUT"
   --out "$OUT/aimip_fleet_tas_anomaly.png" \
   --csv "$OUT/aimip_fleet_tas_anomaly.csv"
 echo "[fleet] done $(date)"
-ls -la "$OUT"/*.png "$OUT"/*.csv 2>/dev/null
+ls -la "$OUT"/*.png "$OUT"/*.csv 2>/dev/null || true
