@@ -333,9 +333,39 @@ class McFarlaneConfig(NamedTuple):
     fcrit2 : float
         Critical Froude number squared (default 1.0, CAM ``fcrit2``).  Used in
         the McFarlane (1987) / E3SM ``gw_oro_src`` displacement-height cap
-        ``min(h^2, fcrit2*(U/N)^2)`` (gw_oro.F90:166) so the launched
-        streamline-displacement amplitude saturates at the Fr = 1 marginal-
-        instability value rather than the raw orographic height.
+        ``min(h_disp^2, fcrit2*(U/N)^2)`` (gw_oro.F90:166; ``h_disp = h`` at
+        the default ``use_e3sm_hdsp=False``, E3SM's ``2*sgh`` when set) so the
+        launched streamline-displacement amplitude saturates at the Fr = 1
+        marginal-instability value rather than the raw orographic height.
+    use_e3sm_hdsp : bool
+        When ``True`` form the streamline displacement as E3SM does —
+        ``hdsp = 2*sgh`` (gw_oro.F90:117), i.e. the launch cap becomes
+        ``min((2h)^2, fcrit2*(U/N)^2)`` — closing the declared ~4x
+        launch-amplitude departure (exactly 4x below the Froude cap, equal
+        above it, 1-4x in the band between).  Default ``False`` keeps the
+        legacy direct-``h`` displacement (``h_topo`` effectively a tuned
+        amplitude).  Requires a real per-column ``h_topo_col`` (the wired
+        ``subgrid_topo_stddev``): enabling it on the scalar ``config.h_topo``
+        fallback raises, because quadrupling a uniform 500 m pseudo-mountain
+        would silently quadruple drag over OCEAN (no landfrac factor in this
+        scheme).  Retune ``G_0``/``directional_spread``/``tau_max`` before
+        flipping in production (RCE/AMIP-gated).
+    use_depth_averaged_source : bool
+        When ``True`` the source ``rho``/``N``/``U`` and the wave direction
+        come from E3SM's dp-weighted low-level averages over the levels the
+        mountain penetrates (``hdsp > sqrt(zm[k]*zm[k+1])``, the shared
+        ``oro_source.depth_averaged_oro_source``; gw_oro.F90:119-145), the
+        launch wind is the depth-averaged magnitude, and — as in E3SM, where
+        tau is held CONSTANT from the surface up to ``src_level``
+        (gw_oro.F90:178-186) — NO drag deposits inside the source region.
+        Default ``False`` keeps the legacy bottom-midpoint source (surface
+        ``rho``/``N``/``U``, deposition allowed from the bottom level).  The
+        displacement entering the penetration test follows ``use_e3sm_hdsp``
+        (``2*h`` when set, ``h`` otherwise); the oracle-faithful combination
+        is both flags ON.  Closes the declared surface-only-source departure
+        (PBL-contaminated N/U; nocturnal weak surface wind killing a launch
+        a real 700-1400 m average would sustain; spurious low-level
+        deposition).  Behavioral -> RCE/AMIP-gated flip.
     crit_level_sharpness : float
         Sigmoid sharpness [s/m] for the smooth critical-level filter
         (default 10.0).  The orographic wave (phase speed ``c = 0``) has its
@@ -376,6 +406,8 @@ class McFarlaneConfig(NamedTuple):
     softmin_sharpness: float = 50.0
     tau_max: float = 10.0
     fcrit2: float = 1.0
+    use_e3sm_hdsp: bool = False
+    use_depth_averaged_source: bool = False
     crit_level_sharpness: float = 10.0
     crit_level_floor: float = 0.5
     tndmax_per_day: float = 500.0
@@ -511,6 +543,19 @@ class E3SMFrontalConfig(NamedTuple):
         quadrature in ``gw_front_init`` (``dca``); each phase-speed bin
         of width ``dc`` is integrated over ``nint(dc/dca)`` sub-intervals
         (default 0.1, E3SM ``gw_front.F90`` ``dca``).
+    latitude_taper : bool
+        Apply the ``cos(lat)`` polar taper to the frontal tendencies.  E3SM
+        sets this BY DYCORE (gw_drag.F90:829-833: ``do_latitude_taper =
+        .not. dycore_is('UNSTRUCTURED')``): ``True`` on structured lat-lon
+        grids, ``False`` on the unstructured (SE-family) dycore — which
+        dycore a production campaign ran is not provable from the vendored
+        tree.  legoESM's
+        cubed-sphere / icosahedral / MPAS grids correspond to the
+        UNSTRUCTURED branch, so the E3SM-equivalent value there is
+        ``False`` — the default ``True`` (legacy, matches E3SM structured)
+        suppresses frontal drag toward the poles (→ 0), a first-order
+        high-latitude difference.  Flip per grid family; behavioral →
+        AMIP-gated.
     """
     taubgnd: float = 1.5e-3
     frontgfc: float = 1.0e-10
@@ -518,6 +563,7 @@ class E3SMFrontalConfig(NamedTuple):
     launch_p: float = 5.0e4
     front_p: float = 6.0e4
     front_spectrum_dc_resolution: float = 0.1
+    latitude_taper: bool = True
 
 
 class E3SMBeresConfig(NamedTuple):
@@ -666,6 +712,15 @@ class E3SMCAMConfig(NamedTuple):
         matches the pinned E3SM-3.0.1 oracle ``dttke = sum_l c_l*gwut_l``
         (gw_common.F90:727).  ``True`` uses the newer CAM/EAM-trunk
         intrinsic-frequency form ``sum_l (c_l - ubm)*gwut_l``.
+    use_discrete_ke_heating : bool
+        Orographic heating closure.  ``False`` (default) keeps the
+        continuous-rate identity ``dT/dt = -(u*du + v*dv)/c_pd``.  ``True``
+        uses the E3SM driver-level DISCRETE-step closure
+        ``dT/dt = -(du*(u + 0.5*dt*du) + dv*(v + 0.5*dt*dv))/c_pd``
+        (gw_drag.F90:908-913, default no-energy-fix branch), which returns
+        exactly the discrete resolved-KE change as heat so the discrete
+        column energy budget closes; the continuous form over-heats by
+        ``0.5*dt*(du^2+dv^2)/c_pd`` per step.  Orographic source only.
     use_newtonian_profile : bool
         When ``True`` use the E3SM height-dependent Newtonian-cooling
         profile (``alpha0``/``palph`` from gw_drag.F90, interpolated to the
@@ -674,17 +729,37 @@ class E3SMCAMConfig(NamedTuple):
         (default) keeps the uniform value so the clean oracle comparison is
         unchanged.  E3SM uses the profile for spectral sources and a tiny
         floor (1e-6 1/s) for orographic-only.
+    use_e3sm_spectral_heating : bool
+        E3SM-faithful spectral thermal term (default ``False`` = legacy).
+        E3SM's spectral (``ngwv > 0``) ``gw_drag_prof`` UNCONDITIONALLY
+        (a) band-limits ``dttke`` to midpoints ``ktop+1..kbotbg``
+        (gw_common.F90:726-728; ``ktop = 0``, ``kbotbg`` = the interface
+        above 500 hPa) and (b) adds the dse-diffusion heating ``dttdf``
+        (``ttgw = dttke + dttdf``, :721,731) — with NO u/v diffusion
+        (``egwdffi`` is exported only as the EKGWSPEC diagnostic; E3SM
+        never diffuses u/v with it).  ``True`` applies both.  The legacy
+        default sums ``dttke`` over ALL levels (a deep Beres source
+        deposits ground-relative heating below 500 hPa that E3SM does not)
+        and omits ``dttdf``.  Composes with ``do_eddy_diffusion`` (dttdf
+        added exactly once).  Behavioral -> AMIP-gated flip.
     do_eddy_diffusion : bool
-        When ``True`` (spectral path only) apply the GW-induced eddy
-        diffusion of dry static energy (``gw_ediff`` + ``gw_diff_tend``,
-        gw_diffusion.F90): the ``dttdf`` heating term is added to ``dT_dt``.
-        ``False`` (default) leaves ``dT_dt`` as the KE->heat ``dttke`` term
-        only (matching the momentum-only oracle).
+        STANDALONE ADDITION (default ``False``; spectral path only; NO
+        E3SM analog for the momentum part): diffuse u/v through the GW
+        eddy diffusivity ``egwdffi`` — E3SM never applies this anywhere —
+        and add the ``dttdf`` dse-diffusion heating.  Kept for standalone
+        use so the GW momentum eddy flux is not silently dropped when no
+        host boundary-layer scheme consumes an exported diffusivity.  For
+        the E3SM-faithful thermal term WITHOUT the momentum addition use
+        ``use_e3sm_spectral_heating``.
     do_energy_conservation : bool
         When ``True`` (spectral path only) apply the C.-C. Chen column
         momentum & energy fixer (``momentum_energy_conservation``,
         gw_common.F90) so the column total-energy budget self-closes to
-        machine precision.  ``False`` (default) leaves the raw tendencies.
+        machine precision.  ``False`` (default) leaves the raw tendencies —
+        NOTE this is a DEPARTURE from the oracle's shipped behavior: E3SM
+        v3.0.1 calls the fixer UNCONDITIONALLY after each spectral
+        ``gw_drag_prof`` (Beres gw_drag.F90:800, CM :863); flip owed after
+        AMIP validation.
     prndl : float
         Inverse Prandtl number for the GW eddy diffusivity (E3SM
         ``prndl = 0.25``, gw_diffusion.F90).
@@ -715,6 +790,8 @@ class E3SMCAMConfig(NamedTuple):
     tndmax_per_day: float = 400.0
     n2min: float = 1.0e-8
     dttke_use_intrinsic: bool = False
+    use_discrete_ke_heating: bool = False
+    use_e3sm_spectral_heating: bool = False
     use_newtonian_profile: bool = False
     do_eddy_diffusion: bool = False
     do_energy_conservation: bool = False

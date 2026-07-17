@@ -1,0 +1,11 @@
+# Per-combo CLASSICAL overlay -- combo: bechtold.
+# Merged LAST (base <- cfg_overrides <- THIS) so these schemes WIN. Resolved by
+# run_aimip / the WB2 eval bridge from the suite's parent dir. See ../README.md.
+aimip_variant: "classical"
+aimip_convection: "bechtold"
+aimip_turbulence: "louis"
+aimip_gwd: "mcfarlane"
+aimip_microphysics: "kessler"
+aimip_cloud: "xu_randall"
+aimip_radiation: "rrtmgp"
+physics_parameterization: "none"

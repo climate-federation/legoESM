@@ -1,0 +1,33 @@
+# WB2 forecast-scorecard variant: SFNO_FULL emulator.
+#
+# The FULL SFNO atmospheric emulator (NOT sfno_physics). SFNO replaces
+# BOTH the dynamical core AND the physics: it maps state_t -> state_{t+1}
+# directly at the macro step dt_sfno via
+# SFNOPrimitiveEquationModel.step(state, dt_sfno) in "state_update"
+# mode, with post-hoc dry-air-mass correction. There is no spectral PE
+# dycore step and no physics-tendency assembly, so radiation is "none".
+#
+# Skeleton reconstructed by run_aimip_wb2_eval.py as
+#   SFNO(SFNOConfig(in_channels=out_channels=PE3DChannelSpec(nlev).n_channels,
+#                   embed_dim=sfno_embed_dim, n_blocks=sfno_n_blocks,
+#                   mlp_expansion=sfno_mlp_expansion,
+#                   residual_prediction=False),
+#        grid, key=PRNGKey(sfno_seed))
+# and wrapped in SFNOPrimitiveEquationModel(mode="state_update",
+# dt_sfno=..., correct_mass=True, correct_moisture_budget=False,
+# clip_q=False, use_normalization=False) — matching
+# neural_gcm_spectral.train_sfno_full_spectral exactly.
+aimip_variant: "sfno_full"
+aimip_radiation: "none"
+physics_parameterization: "none"
+
+# SFNO architecture (must match the trained checkpoint).
+sfno_embed_dim: 64
+sfno_n_blocks: 4
+sfno_mlp_expansion: 4
+sfno_seed: 0
+
+# Macro (autoregressive) time step of the SFNO emulator [s]; 6 h is the
+# standard SFNO/FourCastNet cadence. WB2 leads are converted to SFNO
+# steps as round(lead_hours * 3600 / dt_sfno).
+dt_sfno: 21600.0

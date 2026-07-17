@@ -305,6 +305,10 @@ class PhysicsPipeline:
         # attaches from ``subgrid_orography_path`` (and re-scatters under
         # MPI, like ``f_land``). None -> kernels use scalar config.h_topo.
         self._gwd_orographic = False
+        # ``_gwd_takes_land_frac`` marks the single scheme (``e3sm_cam``)
+        # whose kernel accepts ``land_frac_col`` for the E3SM driver-level
+        # orographic landfrac scaling; the builder sets it from the config.
+        self._gwd_takes_land_frac = False
         self.subgrid_topo_stddev = None
         # Set for a stateless '+'-composite GWD (issue #834): the combined
         # executor returns a (GWDOutput, spectrum) tuple even with no stateful
@@ -1509,6 +1513,12 @@ class PhysicsPipeline:
                     _gwd_kwargs["h_topo_col"] = ad.flatten_2d(
                         self.subgrid_topo_stddev
                     )
+                if (self._gwd_takes_land_frac
+                        and self.f_land is not None):
+                    # E3SM gw_drag.F90:904-906: oro drag is landfrac-scaled
+                    # (zeroed over ocean) BEFORE the heating closure; the
+                    # e3sm_cam kernel applies it to its orographic source.
+                    _gwd_kwargs["land_frac_col"] = ad.flatten_2d(self.f_land)
                 gwd_out = self.gwd_fn(**_gwd_kwargs)
             du_dt = du_dt + ad.unflatten_3d(gwd_out.du_dt)
             dv_dt = dv_dt + ad.unflatten_3d(gwd_out.dv_dt)
@@ -3051,6 +3061,14 @@ def _resolve_gwd(config):
     """Resolve gravity wave drag kernel and config from ExperimentConfig.
 
     Returns (kernel_fn, kernel_config) or (None, None) if disabled.
+
+    ``config.gravity_wave_drag_override`` (a full ``GravityWaveDragConfig``
+    whose ``scheme`` must equal ``config.gravity_wave_drag`` — enforced by
+    ``ExperimentConfig.validate_strict``) is honoured verbatim, mirroring
+    ``turbulence_override``: without it the coupled path rebuilt the config
+    from the scheme STRING alone, silently discarding every nested scheme
+    option (``mcfarlane.use_e3sm_hdsp``, ``e3sm_cam.use_discrete_ke_heating``,
+    tuned ``fcrit2``, ...) — the codex-flagged unreachable-flag defect.
     """
     scheme = getattr(config, 'gravity_wave_drag', 'none')
     if scheme == "none":
@@ -3063,7 +3081,8 @@ def _resolve_gwd(config):
         get_gwd_fn,
     )
 
-    gc = GravityWaveDragConfig(scheme=scheme)
+    override = getattr(config, 'gravity_wave_drag_override', None)
+    gc = override if override is not None else GravityWaveDragConfig(scheme=scheme)
     _name, gwd_fn, gwd_config = get_gwd_fn(gc)
     return gwd_fn, gwd_config
 
@@ -3331,4 +3350,9 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline._gwd_orographic = gwd_scheme_is_orographic(
         getattr(config, 'gravity_wave_drag', 'none'),
     )
+    # E3SM driver-level oro landfrac scaling (gw_drag.F90:904-906): only the
+    # ``e3sm_cam`` kernel accepts ``land_frac_col``; the pipeline threads its
+    # own ``f_land`` (set by the model driver next to ``subgrid_topo_stddev``)
+    # into the GWD call for exactly this scheme.
+    pipeline._gwd_takes_land_frac = (_gwd_scheme == "e3sm_cam")
     return pipeline

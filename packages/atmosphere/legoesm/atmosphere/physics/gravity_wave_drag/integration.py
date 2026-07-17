@@ -442,10 +442,17 @@ def _make_hydrostatic_gwd(
             )
         elif is_orographic:
             h_topo_col = _extract_subgrid_topo_stddev(grid, ncol)
+            extra = {}
+            if scheme_name == "e3sm_cam":
+                # E3SM driver-level oro landfrac scaling (gw_drag.F90:904-906);
+                # only e3sm_cam_gwd accepts the kwarg.  Absent grid attribute
+                # -> None -> no scaling (legacy behaviour).
+                extra["land_frac_col"] = _extract_land_frac(grid, ncol)
             gwd_out = gwd_fn(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config,
                 h_topo_col=h_topo_col,
+                **extra,
             )
         else:
             gwd_out = gwd_fn(
@@ -491,6 +498,24 @@ def _extract_subgrid_topo_stddev(grid, ncol):
     their scalar ``config.h_topo`` (legacy behaviour).
     """
     raw = getattr(grid, "subgrid_topo_stddev", None)
+    if raw is None:
+        return None
+    return jnp.asarray(raw).reshape(-1)[:ncol]
+
+
+def _extract_land_frac(grid, ncol):
+    """Return a per-column land fraction in [0, 1], or ``None``.
+
+    The E3SM/CAM GWD driver scales the OROGRAPHIC momentum tendencies by
+    the land fraction (``utgw *= cam_in%landfrac``, gw_drag.F90:904-906)
+    BEFORE the heating closure, zeroing oro drag (and its heat) over
+    ocean.  This helper looks for a per-column land fraction stored on
+    the grid (canonical attribute name ``land_frac``, matching the
+    coupler surface-type field).  When the attribute is absent we return
+    ``None`` so ``e3sm_cam_gwd`` applies no scaling (legacy behaviour,
+    bit-identical) — mirroring ``_extract_subgrid_topo_stddev``.
+    """
+    raw = getattr(grid, "land_frac", None)
     if raw is None:
         return None
     return jnp.asarray(raw).reshape(-1)[:ncol]
@@ -593,10 +618,15 @@ def _make_mpas_gwd(
             )
         elif is_orographic:
             h_topo_col = _extract_subgrid_topo_stddev(mesh, nCells)
+            extra = {}
+            if scheme_name == "e3sm_cam":
+                # E3SM driver-level oro landfrac scaling (gw_drag.F90:904-906).
+                extra["land_frac_col"] = _extract_land_frac(mesh, nCells)
             gwd_out = gwd_fn(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config,
                 h_topo_col=h_topo_col,
+                **extra,
             )
         else:
             gwd_out = gwd_fn(
@@ -929,10 +959,17 @@ def _make_spectral_pe_gwd(
             )
         elif is_orographic:
             h_topo_col = _extract_subgrid_topo_stddev(grid, ncol)
+            extra = {}
+            if scheme_name == "e3sm_cam":
+                # E3SM driver-level oro landfrac scaling (gw_drag.F90:904-906);
+                # only e3sm_cam_gwd accepts the kwarg.  Absent grid attribute
+                # -> None -> no scaling (legacy behaviour).
+                extra["land_frac_col"] = _extract_land_frac(grid, ncol)
             gwd_out = gwd_fn(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config,
                 h_topo_col=h_topo_col,
+                **extra,
             )
         else:
             gwd_out = gwd_fn(
