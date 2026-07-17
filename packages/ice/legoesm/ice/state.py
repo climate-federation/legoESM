@@ -193,8 +193,9 @@ def distribute_dynamic_state_to_categories(
     ice — snow depth and bulk salinity — are placed in that SAME occupied bin
     (zero elsewhere), so the aggregate snow volume ``sum_k a_k h_snow_k`` and
     salt content are conserved exactly by construction.  Melt-pond fields
-    start zero in every bin (ponds are a melt-season feature; a cold-start /
-    Jan-1 IC carries none).  Velocity and internal-stress fields are spatial-
+    are distributed into the SAME occupied bin (pond water is prognostic
+    liquid — volume = concentration*area*depth carries mass and enthalpy;
+    zeroing it silently deleted pond water on any ponded lift).  Velocity and internal-stress fields are spatial-
     only and pass through unchanged.
 
     This is the missing driver-side step the ``step_sea_ice`` multi-category
@@ -239,6 +240,13 @@ def distribute_dynamic_state_to_categories(
         concentration=_lift(state.concentration, conc_mc),
         h_snow=_lift(state.h_snow, state.h_snow.data[..., jnp.newaxis] * occ),
         S_ice=_lift(state.S_ice, state.S_ice.data[..., jnp.newaxis] * occ),
-        pond_area=_lift(state.pond_area, zeros_mc),
-        pond_depth=_lift(state.pond_depth, zeros_mc),
+        # Melt-pond water is PROGNOSTIC liquid (volume = area*depth carrying
+        # mass + enthalpy): distribute into the occupied bin exactly like
+        # snow/salt above — the earlier zeroing silently DELETED pond water
+        # on any lift of a ponded IC / restart / mid-run state (unaccounted
+        # mass+energy sink; conservation is a hard invariant).
+        pond_area=_lift(
+            state.pond_area, state.pond_area.data[..., jnp.newaxis] * occ),
+        pond_depth=_lift(
+            state.pond_depth, state.pond_depth.data[..., jnp.newaxis] * occ),
     )

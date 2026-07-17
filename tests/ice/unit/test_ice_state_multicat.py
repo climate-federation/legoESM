@@ -151,3 +151,30 @@ class TestDistributeDynamicStateToCategories:
         t_out = st.T_ice.data
         assert jnp.allclose(jnp.where(sel, t_out, constants.T_freeze_ocean),
                             constants.T_freeze_ocean)
+
+
+def test_distribute_conserves_pond_water():
+    """Pond area/depth follow the SAME occupied-bin distribution as snow and
+    salinity: pond volume (area*depth) is prognostic liquid water carrying
+    mass and enthalpy — the earlier zeroing silently deleted it on any lift
+    of a ponded state (restart / ponded IC / mid-run)."""
+    state = init_dynamic_ice_state((3,))
+    state = state._replace(
+        h_ice=state.h_ice.replace(data=jnp.array([1.0, 0.5, 0.0])),
+        concentration=state.concentration.replace(
+            data=jnp.array([0.9, 0.4, 0.0])),
+        pond_area=state.pond_area.replace(data=jnp.array([0.3, 0.2, 0.1])),
+        pond_depth=state.pond_depth.replace(data=jnp.array([0.05, 0.02, 0.4])),
+    )
+    mc = distribute_dynamic_state_to_categories(state, n_categories=5)
+    # GRID-CELL pond volume = concentration * pond_area * pond_depth (the
+    # ITD-remap measure); conserved where ice exists.
+    vol_in = (state.concentration.data * state.pond_area.data
+              * state.pond_depth.data)
+    vol_out = jnp.sum(
+        mc.concentration.data * mc.pond_area.data * mc.pond_depth.data,
+        axis=-1)
+    assert jnp.allclose(vol_out[:2], vol_in[:2], rtol=1e-12), (
+        f"pond volume lost in lift: {vol_in[:2]} -> {vol_out[:2]}")
+    # ice-free cell has no occupied bin: ponds zero there (nothing to sit on)
+    assert float(jnp.sum(mc.pond_area.data[2])) == 0.0

@@ -4759,7 +4759,7 @@ def main() -> int:
         if _n_cat > 1:
             # Lift the (possibly IC-seeded) single-category state onto the
             # n_cat-bin ITD: delta seeding into the bin containing each
-            # cell's thickness, snow/salinity riding along, ponds zero.
+            # cell's thickness, snow/salinity/ponds riding along in the occupied bin.
             # AFTER --ice-init (the SI3 file carries aggregate fields only)
             # and BEFORE the ew-overlap slaving (tree_map, axis-1 safe on
             # the lifted fields).
