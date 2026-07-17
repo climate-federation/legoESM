@@ -983,17 +983,19 @@ class ExperimentConfig(NamedTuple):
     # (cumastrn.F90:762-768).  0 = legacy factor 1.0.  Mirrors
     # BechtoldConfig.dx_m.
     bechtold_dx_m: float = 0.0
-    # IFS convective downdraft (cudlfsn+cuddrafn).  Default OFF pending
-    # validation; mirrors BechtoldConfig.use_ifs_downdraft.
-    bechtold_use_ifs_downdraft: bool = False
-    # IFS shallow PBL-equilibrium closure (cumastrn.F90).  Default OFF
-    # pending validation; mirrors BechtoldConfig.use_ifs_shallow_closure.
+    # IFS convective downdraft (cudlfsn+cuddrafn).  Default ON since
+    # 2026-07-17 (RCE/AMIP A/B); mirrors BechtoldConfig.use_ifs_downdraft.
+    bechtold_use_ifs_downdraft: bool = True  # flipped 2026-07-17 (RCE/AMIP A/B)
+    # IFS shallow PBL-equilibrium closure (cumastrn.F90).  Default STILL
+    # OFF — HELD by the 2026-07-17 flip campaign (largest mean-state
+    # reshape; needs a skill-gated run); mirrors
+    # BechtoldConfig.use_ifs_shallow_closure.
     bechtold_use_ifs_shallow_closure: bool = False
-    # IFS diurnal CAPE correction + land RH break (default OFF pending
-    # validation); mirror BechtoldConfig.use_ifs_capdcycl / use_ifs_land_rhebc.
-    bechtold_use_ifs_capdcycl: bool = False
-    bechtold_use_ifs_land_rhebc: bool = False
-    bechtold_use_ifs_snow_melt: bool = False
+    # IFS diurnal CAPE correction + land RH break (default ON since
+    # 2026-07-17); mirror BechtoldConfig.use_ifs_capdcycl / use_ifs_land_rhebc.
+    bechtold_use_ifs_capdcycl: bool = True
+    bechtold_use_ifs_land_rhebc: bool = True
+    bechtold_use_ifs_snow_melt: bool = True
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -2047,15 +2049,15 @@ class ExperimentConfig(NamedTuple):
                 amip_cfg, 'bechtold_use_ifs_inplume_precip', True),
             bechtold_dx_m=getattr(amip_cfg, 'bechtold_dx_m', 0.0),
             bechtold_use_ifs_downdraft=getattr(
-                amip_cfg, 'bechtold_use_ifs_downdraft', False),
+                amip_cfg, 'bechtold_use_ifs_downdraft', True),
             bechtold_use_ifs_shallow_closure=getattr(
                 amip_cfg, 'bechtold_use_ifs_shallow_closure', False),
             bechtold_use_ifs_capdcycl=getattr(
-                amip_cfg, 'bechtold_use_ifs_capdcycl', False),
+                amip_cfg, 'bechtold_use_ifs_capdcycl', True),
             bechtold_use_ifs_land_rhebc=getattr(
-                amip_cfg, 'bechtold_use_ifs_land_rhebc', False),
+                amip_cfg, 'bechtold_use_ifs_land_rhebc', True),
             bechtold_use_ifs_snow_melt=getattr(
-                amip_cfg, 'bechtold_use_ifs_snow_melt', False),
+                amip_cfg, 'bechtold_use_ifs_snow_melt', True),
             # Convective precip split family — copy through AMIP/checkpoint
             # restore so the physical autoconversion isn't dropped to defaults
             # (codex MED; convective_precip_efficiency was a pre-existing gap).
