@@ -983,6 +983,10 @@ class ExperimentConfig(NamedTuple):
     # IFS shallow PBL-equilibrium closure (cumastrn.F90).  Default OFF
     # pending validation; mirrors BechtoldConfig.use_ifs_shallow_closure.
     bechtold_use_ifs_shallow_closure: bool = False
+    # IFS diurnal CAPE correction + land RH break (default OFF pending
+    # validation); mirror BechtoldConfig.use_ifs_capdcycl / use_ifs_land_rhebc.
+    bechtold_use_ifs_capdcycl: bool = False
+    bechtold_use_ifs_land_rhebc: bool = False
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -2011,6 +2015,10 @@ class ExperimentConfig(NamedTuple):
                 amip_cfg, 'bechtold_use_ifs_downdraft', False),
             bechtold_use_ifs_shallow_closure=getattr(
                 amip_cfg, 'bechtold_use_ifs_shallow_closure', False),
+            bechtold_use_ifs_capdcycl=getattr(
+                amip_cfg, 'bechtold_use_ifs_capdcycl', False),
+            bechtold_use_ifs_land_rhebc=getattr(
+                amip_cfg, 'bechtold_use_ifs_land_rhebc', False),
             # Convective precip split family — copy through AMIP/checkpoint
             # restore so the physical autoconversion isn't dropped to defaults
             # (codex MED; convective_precip_efficiency was a pre-existing gap).
@@ -2169,6 +2177,8 @@ class ExperimentConfig(NamedTuple):
             bechtold_dx_m=self.bechtold_dx_m,
             bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,
             bechtold_use_ifs_shallow_closure=self.bechtold_use_ifs_shallow_closure,
+            bechtold_use_ifs_capdcycl=self.bechtold_use_ifs_capdcycl,
+            bechtold_use_ifs_land_rhebc=self.bechtold_use_ifs_land_rhebc,
             sigma_b=self.sigma_b,
             k_BL_max_per_day=self.k_BL_max_per_day,
             k_free_per_day=self.k_free_per_day,

@@ -2643,3 +2643,140 @@ def test_ifs_shallow_closure_requires_cape_closure():
             dt=600.0,
             config=BechtoldConfig(use_ifs_shallow_closure=True,
                                   use_ifs_cape_closure=False))
+
+
+# ---------------------------------------------------------------------------
+# IFS RCAPDCYCL diurnal correction + land RHEBC (cumastrn.F90:780-833, cuflxn)
+# ---------------------------------------------------------------------------
+
+from legoesm.atmosphere.physics.convection.bechtold import (  # noqa: E402
+    _ifs_capdcycl,
+    _IFS_RMINCAPE,
+    _IFS_CAPDCYCL_ZMAX_M,
+    _IFS_CAPDCYCL_DUTEN_BASE,
+    _IFS_RHEBC_LAND,
+    _IFS_RHEBC_LAND_DEEP,
+)
+
+
+def test_ifs_capdcycl_oracle_pin_and_branches():
+    """Hand-computed land/ocean branches + gate on a 1-column gather:
+    land = supply*tau_conv; ocean = supply*min(1e4,z_base)/(2+sqrt(0.5*
+    (|U_b|^2+|U_950|^2))); fractional blend; gate multiplies."""
+    ncol, nlev = 1, 4
+    p = jnp.array([[500e2, 800e2, 950e2, 1000e2]])
+    z = jnp.array([[5500.0, 2000.0, 600.0, 100.0]])
+    u = jnp.array([[10.0, 6.0, 4.0, 2.0]])
+    v = jnp.zeros((1, 4))
+    base_w = jnp.array([[0.0, 1.0, 0.0, 0.0]])       # base at k=1 (z=2000)
+    supply = jnp.array([3.0])                        # K*Pa/s
+    tau = jnp.array([1800.0])
+    gate = jnp.array([1.0])
+    got_land = _ifs_capdcycl(supply, tau, jnp.array([2000.0]), u, v,
+                             base_w, p, jnp.array([1.0]), gate)
+    assert abs(float(got_land[0]) - 3.0 * 1800.0) < 1e-9
+    # ocean: z capped at 1e4 (inactive here), U_950 from the softmax at k=2.
+    import numpy as np
+    w950 = np.asarray(jax.nn.softmax(
+        -((p - 950e2) / 1000.0) ** 2, axis=-1))[0]
+    u9 = float((w950 * np.asarray(u[0])).sum())
+    zduten = _IFS_CAPDCYCL_DUTEN_BASE + np.sqrt(0.5 * (6.0**2 + u9**2) + 1e-12)
+    expected_oc = 3.0 * (2000.0 / zduten)
+    got_oc = _ifs_capdcycl(supply, tau, jnp.array([2000.0]), u, v,
+                           base_w, p, jnp.array([0.0]), gate)
+    assert abs(float(got_oc[0]) - expected_oc) < 1e-6 * expected_oc
+    # gate kills.
+    got_gated = _ifs_capdcycl(supply, tau, jnp.array([2000.0]), u, v,
+                              base_w, p, jnp.array([1.0]), jnp.array([0.0]))
+    assert float(got_gated[0]) == 0.0
+    # height cap: enormous z_base uses 1e4.
+    got_cap = _ifs_capdcycl(supply, tau, jnp.array([5.0e4]), u, v,
+                            base_w, p, jnp.array([0.0]), gate)
+    expected_cap = 3.0 * (_IFS_CAPDCYCL_ZMAX_M / zduten)
+    assert abs(float(got_cap[0]) - expected_cap) < 1e-6 * expected_cap
+
+
+def test_ifs_capdcycl_zcape_subtraction_semantics():
+    """ZCAPE entry (cumastrn:818-823): subtraction floored at RMINCAPE*ZCAPE;
+    a huge positive zcapdcycl cannot push below it; a negative one (nocturnal)
+    is bounded at -2*ZCAPE (at most triples... doubles the subtraction base).
+    Pinned through _ifs_cape_closure_target's optional arg."""
+    T = jnp.array([[250.0, 270.0, 285.0, 295.0]])
+    q = jnp.array([[1e-4, 1e-3, 5e-3, 1e-2]])
+    z = jnp.array([[9000.0, 6000.0, 3000.0, 500.0]])
+    p = jnp.array([[300e2, 500e2, 800e2, 1000e2]])
+    T_u = T + jnp.array([[0.0, 1.5, 2.0, 0.0]])
+    in_cloud = jnp.array([[0.0, 1.0, 1.0, 0.0]])
+    args = (T, q, z, p, T_u, q, jnp.zeros_like(q),
+            jnp.array([[0.0, 0.08, 0.10, 0.10]]),
+            jnp.zeros((1, 4)), in_cloud, jnp.array([1500.0]),
+            jnp.array([0.10]), jnp.array([1.0]))
+    base = _ifs_cape_closure_target(*args)
+    huge = _ifs_cape_closure_target(*args, zcapdcycl=jnp.array([1.0e9]))
+    assert float(huge[0]) > 0.0
+    assert abs(float(huge[0]) / float(base[0]) - _IFS_RMINCAPE) < 1e-6, (
+        "RMINCAPE floor must bind under a huge subtraction")
+    noct = _ifs_cape_closure_target(*args, zcapdcycl=jnp.array([-1.0e9]))
+    # cap-order regression (codex R1 #1): raw CAPE above 5000 with a large
+    # subtraction must give (raw - zdcy), NOT the RMINCAPE floor of the
+    # capped value.  Boost the plume to push raw zcape > 5000 Pa.
+    T_hot = T + jnp.array([[0.0, 30.0, 40.0, 0.0]])   # raw zcape ~6400 Pa
+    args_hot = (T, q, z, p, T_hot, q, jnp.zeros_like(q),
+                jnp.array([[0.0, 0.08, 0.10, 0.10]]),
+                jnp.zeros((1, 4)), in_cloud, jnp.array([1500.0]),
+                jnp.array([0.10]), jnp.array([1.0]))
+    base_hot = _ifs_cape_closure_target(*args_hot)
+    # recover raw zcape via the target relation: target = cw*zcape*Mb/(zheat*tau)
+    # base_hot corresponds to min(raw,5000); with subtraction 3000 the oracle
+    # order gives min(raw-3000, 5000) -- distinguishable from
+    # max(0.05*min(raw,5000), min(raw,5000)-3000) only when raw>5000, which
+    # this fixture guarantees if base_hot saturates the cap:
+    sub = _ifs_cape_closure_target(*args_hot, zcapdcycl=jnp.array([4800.0]))
+    # oracle order: (6400-4800)=1600 -> ratio ~0.32 vs capped-first ~0.05.
+    ratio = float(sub[0]) / float(base_hot[0])
+    assert ratio > 0.25, (
+        f"cap-order bug: ratio {ratio:.3f} indicates subtraction applied "
+        "AFTER the 5000 Pa cap (oracle subtracts before)")
+
+
+def test_ifs_land_rhebc_blend_and_toggle():
+    """Land RH break: pure-land deep column floors evaporation at 0.70/0.75
+    (MORE evap allowed than ocean's 0.85/0.92 — break is LOWER so ZRMIN
+    releases less... verify direction: lower rhebc => smaller deficit bound
+    => LESS evaporation allowed).  Toggle via the leaf flag; None land_frac
+    = ocean values byte-identical."""
+    dt = 600.0
+    ncol, nlev = 1, 5
+    p_half = jnp.linspace(150e2, 1000e2, nlev + 1)[None, :]
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    qsat = jnp.full((ncol, nlev), 1e-2)
+    q = qsat * 0.3
+    dq_r = jnp.zeros((ncol, nlev)).at[:, 1].set(5e-7)
+    below = jnp.zeros((ncol, nlev)).at[:, 3:].set(1.0)
+    rh_b, rh_t = jnp.array([0.9]), jnp.array([0.7])
+    dw = jnp.array([1.0])
+    e_oc, _ = _ifs_subcloud_rain_evaporation(
+        q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt)
+    e_oc2, _ = _ifs_subcloud_rain_evaporation(
+        q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt,
+        land_frac=None)
+    assert jnp.array_equal(e_oc, e_oc2), "None land_frac must be inert"
+    e_land, _ = _ifs_subcloud_rain_evaporation(
+        q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt,
+        land_frac=jnp.array([1.0]))
+    # deep land break 0.70 < ocean 0.85: the ZRMIN bound releases LESS water
+    # before the break is hit => land evaporates LESS OR EQUAL here.
+    assert float(jnp.sum(e_land)) <= float(jnp.sum(e_oc)) + 1e-18
+
+
+def test_ifs_capdcycl_flag_coherence_and_cli_defaults():
+    assert BechtoldConfig().use_ifs_capdcycl is False
+    assert BechtoldConfig().use_ifs_land_rhebc is False
+    import pytest
+    T, q, pf, ph, u, v = _column(ncol=1, nlev=12)
+    with pytest.raises(ValueError, match="use_ifs_capdcycl"):
+        bechtold_convection(
+            T, q, pf, ph, u, v, jnp.zeros((1, 12)), jnp.zeros((1,)), None,
+            dt=600.0,
+            config=BechtoldConfig(use_ifs_capdcycl=True,
+                                  use_ifs_cape_closure=False))

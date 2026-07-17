@@ -1513,6 +1513,17 @@ class BechtoldConfig(NamedTuple):
     # shf/lhf/dT_dt_rad kwargs (None => inert).  Default False pending
     # RCE/AMIP A/B; False is byte-identical legacy.
     use_ifs_shallow_closure: bool = False
+    # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
+    # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production
+    # over a BL timescale so land deep convection peaks late afternoon.
+    # Requires use_ifs_cape_closure + pipeline shf/lhf/land_frac kwargs
+    # (None => inert).  Default False pending validation.
+    use_ifs_capdcycl: bool = False
+    # IFS land RH break for the sub-cloud rain evaporation (cuflxn.F90:
+    # 222-223: 0.70 deep / 0.75 non-deep over land vs 0.85/0.92 ocean).
+    # Needs the pipeline land_frac kwarg (None => ocean values, legacy).
+    # Default False pending validation.
+    use_ifs_land_rhebc: bool = False
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0
