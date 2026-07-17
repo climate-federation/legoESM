@@ -985,7 +985,7 @@ class ExperimentConfig(NamedTuple):
     bechtold_dx_m: float = 0.0
     # IFS convective downdraft (cudlfsn+cuddrafn).  Default OFF pending
     # validation; mirrors BechtoldConfig.use_ifs_downdraft.
-    bechtold_use_ifs_downdraft: bool = True
+    bechtold_use_ifs_downdraft: bool = True  # flipped 2026-07-17 (RCE/AMIP A/B)
     # IFS shallow PBL-equilibrium closure (cumastrn.F90).  Default OFF
     # pending validation; mirrors BechtoldConfig.use_ifs_shallow_closure.
     bechtold_use_ifs_shallow_closure: bool = False

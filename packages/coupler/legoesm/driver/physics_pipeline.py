@@ -913,6 +913,25 @@ class PhysicsPipeline:
                 # path is needed only by the shallow closure / RCAPDCYCL
                 # (codex R2: land-RHEBC-only must not demand a surface
                 # config).
+                _have_sfc_source = (
+                    (self.surface_tiled and self.f_land is not None)
+                    or getattr(self.turbulence_config, "surface", None)
+                    is not None
+                )
+                # capdcycl is a DEFAULT-ON faithfulness flag (flipped
+                # 2026-07-17): on flux-less configs (turbulence 'none', no
+                # tiled land) it must degrade gracefully to the leaf's
+                # documented None=>inert path, not raise — a default may
+                # not break configs that never opted in.  Static
+                # Python-time downgrade, printed once at trace/build.
+                if (getattr(_conv_cfg, "use_ifs_capdcycl", False)
+                        and not _have_sfc_source):
+                    print(
+                        "[physics] bechtold use_ifs_capdcycl: no surface-"
+                        "flux source (turbulence 'none', no tiled land) — "
+                        "diurnal CAPE correction inert for this run."
+                    )
+                    _conv_cfg = _conv_cfg._replace(use_ifs_capdcycl=False)
                 _need_land = getattr(_conv_cfg, "use_ifs_land_rhebc", False)
                 _need_sfc_inputs = (
                     getattr(_conv_cfg, "use_ifs_shallow_closure", False)
@@ -927,9 +946,9 @@ class PhysicsPipeline:
                     # Fail loudly at trace time: the closure's bulk fluxes
                     # need a surface-layer config (codex R1 #1 — a None
                     # turbulence_config crashed opaque on .surface).
-                    if (not (self.surface_tiled and self.f_land is not None)
-                            and getattr(self.turbulence_config, "surface",
-                                        None) is None):
+                    # (Post-downgrade this can only be the EXPLICIT
+                    # opt-in shallow closure — name the right flag.)
+                    if not _have_sfc_source:
                         raise ValueError(
                             "use_ifs_shallow_closure needs bulk surface "
                             "fluxes: configure a turbulence scheme (its "
@@ -2734,15 +2753,15 @@ def _resolve_convection(config):
                 config, 'bechtold_use_ifs_inplume_precip', True),
             dx_m=getattr(config, 'bechtold_dx_m', 0.0),
             use_ifs_downdraft=getattr(
-                config, 'bechtold_use_ifs_downdraft', False),
+                config, 'bechtold_use_ifs_downdraft', True),
             use_ifs_shallow_closure=getattr(
                 config, 'bechtold_use_ifs_shallow_closure', False),
             use_ifs_capdcycl=getattr(
-                config, 'bechtold_use_ifs_capdcycl', False),
+                config, 'bechtold_use_ifs_capdcycl', True),
             use_ifs_land_rhebc=getattr(
-                config, 'bechtold_use_ifs_land_rhebc', False),
+                config, 'bechtold_use_ifs_land_rhebc', True),
             use_ifs_snow_melt=getattr(
-                config, 'bechtold_use_ifs_snow_melt', False),
+                config, 'bechtold_use_ifs_snow_melt', True),
         )
         if _pe is not None:
             _bechtold_kwargs["precip_efficiency"] = _pe
