@@ -55,7 +55,7 @@ def test_neverworld2_lite_grid_resolution_flag():
 # ---------------------------------------------------------------------------
 
 def test_freezing_point_decreases_with_pressure_and_salinity():
-    from legoesm.ocean.physics.ice_shelf_basal_melt import freezing_point_C
+    from legoesm.ocean.physics.ice_shelf import freezing_point_C
     t0 = float(freezing_point_C(34.0, 0.0))
     t_press = float(freezing_point_C(34.0, 1000.0))   # 1000 dbar deeper
     t_salt = float(freezing_point_C(35.0, 0.0))
@@ -63,38 +63,76 @@ def test_freezing_point_decreases_with_pressure_and_salinity():
     assert t_salt < t0     # salt lowers freezing point
 
 
-def test_isomip_ocean0_cold_basal_melt_in_range():
-    """Ocean0 (T_w = -1.9 deg C) target range 0-1 m/yr."""
-    from legoesm.ocean.physics.ice_shelf_basal_melt import (
-        basal_melt_rate_m_per_s,
+def test_isomip_ocean0_cold_basal_melt_plausible():
+    """Ocean0 (T_w = -1.9 degC, S = 34.55, p = 50 dbar): the FAITHFUL
+    three-equation closure gives a small positive cold-cavity melt
+    (~0.26 m/yr ice-equivalent at gamma_T = 1e-4).
+
+    REROUTE NOTE (2026-07-17): the old pin asserted the deleted linearised
+    closure sat in the "ISOMIP+ 0-1 m/yr" band — a claim MANUFACTURED by its
+    hand-tuned gamma_T (2e-5, ~30x below the ISOMIP+ gamma_T*), which also
+    absorbed a rho_sw/rho_fw convention shortcut.  This pin brackets the
+    faithful scheme's own value instead."""
+    from legoesm.ocean.physics.ice_shelf import three_equation_melt
+
+    r = three_equation_melt(-1.9, 34.55, 50.0)
+    mdot = float(r.m_dot_m_s) * 86400.0 * 365.0
+    assert 0.05 < mdot < 2.0
+
+
+def test_isomip_ocean1_warm_exceeds_cold_and_matches_quadratic_oracle():
+    """Ocean1 (T_w = +1.0 degC): the faithful closure at the smoke probe
+    gives ~60 m/yr — ABOVE the 1-10 m/yr circulating-cavity ensemble band,
+    and that is EXPECTED here: this probe feeds the FAR-FIELD T as the
+    boundary-layer ambient, so the meltwater-throttling feedback the
+    ensemble includes is absent (the old in-band claim came from the
+    hand-tuned gamma_T compensating for it).  Pin the value against an
+    independent closed-form solve of the SAME quadratic (non-circular
+    algebra check) + the physical orderings."""
+    from legoesm.ocean.physics.ice_shelf import (
+        IceShelfConfig,
+        freezing_point_C,
+        three_equation_melt,
     )
-    mdot = float(basal_melt_rate_m_per_s(-1.9, 34.55, 50.0)) * 86400.0 * 365.0
-    assert 0.0 < mdot < 1.0
+
+    cfg = IceShelfConfig()
+    r_warm = three_equation_melt(1.0, 34.7, 50.0, config=cfg)
+    r_cold = three_equation_melt(-1.9, 34.55, 50.0, config=cfg)
+    mdot_warm = float(r_warm.m_dot_m_s) * 86400.0 * 365.0
+    # Independent quadratic solve (numpy algebra, coefficients per
+    # Holland-Jenkins 1999 as in the module docstring; module-level np).
+    alpha = cfg.rho_w * cfg.c_w * cfg.gamma_T
+    beta = cfg.rho_w * cfg.gamma_S
+    gamma = cfg.rho_ice * cfg.L_f
+    delta = cfg.rho_ice
+    T_f = float(freezing_point_C(34.7, 50.0, config=cfg))
+    theta = 1.0 - T_f
+    T_minus_bcp = 1.0 - cfg.freeze_b - cfg.freeze_c * 50.0
+    A = gamma * delta
+    B = gamma * beta - alpha * delta * T_minus_bcp
+    C = -alpha * beta * theta
+    m_oracle = (-B + np.sqrt(B * B - 4.0 * A * C)) / (2.0 * A)
+    assert float(r_warm.m_dot_m_s) == pytest.approx(m_oracle, rel=1e-12)
+    # Physical orderings: warm melts (much) faster than cold; the interface
+    # sits between the ambient freezing point and the ambient temperature.
+    assert mdot_warm > 10.0 * float(r_cold.m_dot_m_s) * 86400.0 * 365.0
+    assert T_f < float(r_warm.T_b_C) < 1.0
 
 
-def test_isomip_ocean1_warm_basal_melt_within_intercomp_band():
-    """Ocean1 (T_w = +1.0 deg C) target range 1-30 m/yr.
-
-    The linearised Jenkins form overestimates vs the full quadratic
-    three-equation solve; legoESM's calibrated ``gamma_T = 2e-5``
-    keeps the smoke value within the intercomparison spread.
-    """
-    from legoesm.ocean.physics.ice_shelf_basal_melt import (
-        basal_melt_rate_m_per_s,
+def test_isomip_basal_freshwater_flux_is_ice_equivalent():
+    """freshwater_to_ocean = rho_ice * m_dot (ICE-equivalent convention of
+    the faithful closure) — the deleted module multiplied by rho_fw=1000
+    instead, the convention shortcut its tuned gamma_T absorbed."""
+    from legoesm.ocean.physics.ice_shelf import (
+        IceShelfConfig,
+        three_equation_melt,
     )
-    mdot = float(basal_melt_rate_m_per_s(1.0, 34.7, 50.0)) * 86400.0 * 365.0
-    assert 1.0 < mdot < 30.0
 
-
-def test_isomip_basal_freshwater_flux_proportional_to_rho_fw():
-    from legoesm.ocean.physics.ice_shelf_basal_melt import (
-        IceShelfMeltConfig, basal_melt_rate_m_per_s,
-        basal_freshwater_flux_kg_per_m2_s,
-    )
-    cfg = IceShelfMeltConfig()
-    m = float(basal_melt_rate_m_per_s(1.0, 34.7, 50.0, cfg))
-    F = float(basal_freshwater_flux_kg_per_m2_s(1.0, 34.7, 50.0, cfg))
-    assert F == pytest.approx(cfg.rho_fw * m, rel=1e-12)
+    cfg = IceShelfConfig()
+    r = three_equation_melt(1.0, 34.7, 50.0, config=cfg)
+    assert float(r.freshwater_to_ocean) == pytest.approx(
+        cfg.rho_ice * float(r.m_dot_m_s), rel=1e-12)
+    assert float(r.freshwater_to_ocean) > 0.0
 
 
 def test_isomip_cavity_geometry_consistent():
