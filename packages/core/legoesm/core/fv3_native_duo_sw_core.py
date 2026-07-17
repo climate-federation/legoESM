@@ -776,3 +776,166 @@ def d_sw4_duo(u, v, ut, vt, ke, gs: dict, bd: Bounds, npx: int, npy: int,
                           + (ut[1, j - 1] - vt[1, j]) * u[0, j])
 
     return {"ke": ke.a}
+
+
+def d_sw5_duo(delp, u, v, uc, vc, ua, va, divg_d, crx_adv, cry_adv,
+              xfx_adv, yfx_adv, ra_x, ra_y, ke, gs: dict, bd: Bounds,
+              npx: int, npy: int, *, dt: float, hord_vt: int = 6,
+              nord: int = 1, dddmp: float = 0.2, d2_bg: float = 0.0,
+              d4_bg: float = 0.12, d_con: float = 0.0,
+              hydrostatic: bool = True, lim_fac: float = 1.0,
+              workspace_sentinel: float = 1.0e30) -> dict:
+    """sw_core.F90 d_sw5 (symmetryclean 1474-1869), DUO branch, on the
+    oracle lane (nord=1, hydrostatic, d_con=0, grid_type=0, not
+    stretched): vorticity prep (vt=u*dx, ut=v*dy over the FULL data
+    domain — d_sw5 OVERWRITES the d_sw1 ut/vt workspace, so the port
+    builds fresh arrays and takes no ut/vt inputs), wk = volume-mean
+    relative vorticity, the nord=1 higher-order divergence damping
+    n-loop (delpc = saved divg_d; uc/vc CLOBBERED as gradient
+    workspaces — auth semantics, returned as outputs; duo SKIPS the
+    corner-term removal; fill_c is false at nt=0 and duo-excluded
+    anyway), a2b_ord4(duo)+Smagorinsky vort, ke += damping increment
+    over the B compute ring, and the vorticity-flux transport
+    fv_tp_2d(wk+f0) -> vortfluxx/vortfluxy.
+
+    crx/cry/xfx/yfx/ra_x/ra_y are the d_sw1 outputs (upstream declares
+    the first four intent(OUT) yet only reads them — the extract shims
+    them to inout; see the extract header).  ptc is unwritten on the
+    nord>0 branch and ub/vb are untouched at d_con=0 — all three
+    returned as ``workspace_sentinel`` fills mirroring the driver.
+    Returns dict(delpc, divg_d, wk, ke, vortfluxx, vortfluxy, uc, vc,
+    ptc, ub, vb).
+    """
+    from legoesm.core.fv3_native_d_sw import _fl, a2b_ord4, fv_tp_2d
+
+    if not hydrostatic or d_con > 1.0e-5 or nord != 1:
+        raise NotImplementedError(
+            "d_sw5_duo: oracle lane only (hydrostatic, d_con=0, nord=1)")
+
+    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
+    isd, ied, jsd, jed = bd.isd, bd.ied, bd.jsd, bd.jed
+    ng = bd.ng
+
+    u = fort(np.array(u, dtype=np.float64, copy=True), isd, jsd)
+    v = fort(np.array(v, dtype=np.float64, copy=True), isd, jsd)
+    uc = fort(np.array(uc, dtype=np.float64, copy=True), isd, jsd)
+    vc = fort(np.array(vc, dtype=np.float64, copy=True), isd, jsd)
+    ua = fort(np.array(ua, dtype=np.float64, copy=True), isd, jsd)
+    va = fort(np.array(va, dtype=np.float64, copy=True), isd, jsd)
+    del delp, ua, va  # read only on the nord=0 / non-hydro branches
+    divg_d = fort(np.array(divg_d, dtype=np.float64, copy=True), isd, jsd)
+    ke = fort(np.array(ke, dtype=np.float64, copy=True), isd, jsd)
+    crx = fort(np.array(crx_adv, dtype=np.float64), is_, jsd)
+    xfx = fort(np.array(xfx_adv, dtype=np.float64), is_, jsd)
+    cry = fort(np.array(cry_adv, dtype=np.float64), isd, js)
+    yfx = fort(np.array(yfx_adv, dtype=np.float64), isd, js)
+    ra_x = fort(np.array(ra_x, dtype=np.float64), is_, jsd)
+    ra_y = fort(np.array(ra_y, dtype=np.float64), isd, js)
+
+    RAREA = fort(gs["rarea"], isd, jsd)
+    RAREA_C = fort(gs["rarea_c"], isd, jsd)
+    DIVG_U = fort(gs["divg_u"], isd, jsd)
+    DIVG_V = fort(gs["divg_v"], isd, jsd)
+    DX = fort(gs["dx"], isd, jsd)
+    DY = fort(gs["dy"], isd, jsd)
+    F0 = fort(gs["f0"], isd, jsd)
+    da_min_c = float(gs["da_min_c"])
+
+    # fort-wrapped gridstruct for the a2b_ord4 + fv_tp_2d callees
+    # (raw arrays silently wrap negative indices — d_sw1 lesson)
+    gsf = {
+        "dxa": fort(gs["dxa"], isd, jsd),
+        "dya": fort(gs["dya"], isd, jsd),
+        "area": fort(gs["area"], isd, jsd),
+        "rarea": RAREA,
+        "del6_v": fort(gs["del6_v"], isd, jsd),
+        "del6_u": fort(gs["del6_u"], isd, jsd),
+        "grid_lon": fort(gs["grid_lon"], isd, jsd),
+        "grid_lat": fort(gs["grid_lat"], isd, jsd),
+        "agrid_lon": fort(gs["agrid_lon"], isd, jsd),
+        "agrid_lat": fort(gs["agrid_lat"], isd, jsd),
+        "edge_w": gs["edge_w"], "edge_e": gs["edge_e"],
+        "edge_s": gs["edge_s"], "edge_n": gs["edge_n"],
+        "da_min": float(gs["da_min"]), "da_min_c": da_min_c,
+        "bounded_domain": False, "grid_type": 0,
+        "sw_corner": bool(gs.get("sw_corner", True)),
+        "se_corner": bool(gs.get("se_corner", True)),
+        "nw_corner": bool(gs.get("nw_corner", True)),
+        "ne_corner": bool(gs.get("ne_corner", True)),
+    }
+
+    # ---- vorticity prep (auth 1582-1598): fresh ut/vt workspaces ----
+    ut = _fl(isd, ied + 1, jsd, jed)
+    vt = _fl(isd, ied, jsd, jed + 1)
+    for j in range(jsd, jed + 1 + 1):
+        for i in range(isd, ied + 1):
+            vt[i, j] = u[i, j] * DX[i, j]
+    for j in range(jsd, jed + 1):
+        for i in range(isd, ied + 1 + 1):
+            ut[i, j] = v[i, j] * DY[i, j]
+    wk = _fl(isd, ied, jsd, jed)
+    for j in range(jsd, jed + 1):
+        for i in range(isd, ied + 1):
+            wk[i, j] = RAREA[i, j] * (vt[i, j] - vt[i, j + 1]
+                                      - ut[i, j] + ut[i + 1, j])
+
+    # ---- nord=1 higher-order divergence damping (auth 1731-1824) ----
+    delpc = _fl(isd, ied, jsd, jed)
+    delpc.a.fill(workspace_sentinel)  # only the B compute ring written
+    for j in range(js, je + 1 + 1):
+        for i in range(is_, ie + 1 + 1):
+            delpc[i, j] = divg_d[i, j]
+
+    nt = 0  # n-loop: n=1..nord with nord=1; fill_c false (duo-excluded)
+    for j in range(js - nt, je + 1 + nt + 1):
+        for i in range(is_ - 1 - nt, ie + 1 + nt + 1):
+            vc[i, j] = (divg_d[i + 1, j] - divg_d[i, j]) * DIVG_U[i, j]
+    for j in range(js - 1 - nt, je + 1 + nt + 1):
+        for i in range(is_ - nt, ie + 1 + nt + 1):
+            uc[i, j] = (divg_d[i, j + 1] - divg_d[i, j]) * DIVG_V[i, j]
+    for j in range(js - nt, je + 1 + nt + 1):
+        for i in range(is_ - nt, ie + 1 + nt + 1):
+            divg_d[i, j] = uc[i, j - 1] - uc[i, j] + vc[i - 1, j] - vc[i, j]
+    # duo: corner-term removal SKIPPED (auth 1771 guard .not.duogrid)
+    for j in range(js - nt, je + 1 + nt + 1):
+        for i in range(is_ - nt, ie + 1 + nt + 1):
+            divg_d[i, j] = divg_d[i, j] * RAREA_C[i, j]
+
+    # ---- Smagorinsky vort (auth 1790-1806; dddmp >= 1e-5) ----
+    vort = _fl(isd, ied, jsd, jed)
+    if dddmp < 1.0e-5:
+        vort.a.fill(0.0)
+    else:
+        a2b_ord4(wk, vort, gsf, npx, npy, is_, ie, js, je, ng,
+                 replace=False, duogrid=True)
+        for j in range(js, je + 1 + 1):
+            for i in range(is_, ie + 1 + 1):
+                vort[i, j] = abs(dt) * np.sqrt(delpc[i, j] ** 2
+                                               + vort[i, j] ** 2)
+
+    dd8 = (da_min_c * d4_bg) ** (nord + 1)
+    for j in range(js, je + 1 + 1):
+        for i in range(is_, ie + 1 + 1):
+            damp2 = da_min_c * max(d2_bg, min(0.20, dddmp * vort[i, j]))
+            vort[i, j] = damp2 * delpc[i, j] + dd8 * divg_d[i, j]
+            ke[i, j] = ke[i, j] + vort[i, j]
+
+    # d_con=0: ub/vb dissipation strips untouched (sentinel round-trip)
+
+    # ---- vorticity transport (auth 1838-1862, hydrostatic) ----
+    for j in range(jsd, jed + 1):
+        for i in range(isd, ied + 1):
+            vort[i, j] = wk[i, j] + F0[i, j]
+
+    vortfluxx = _fl(is_, ie + 1, js, je)
+    vortfluxy = _fl(is_, ie, js, je + 1)
+    fv_tp_2d(vort, crx, cry, npx, npy, hord_vt, vortfluxx, vortfluxy,
+             xfx, yfx, gsf, bd, ra_x, ra_y, lim_fac, duogrid=True)
+
+    ptc = np.full((ied - isd + 1, jed - jsd + 1), workspace_sentinel)
+    ub = np.full((ie + 1 - is_ + 1, je + 1 - js + 1), workspace_sentinel)
+    vb = np.full((ie + 1 - is_ + 1, je + 1 - js + 1), workspace_sentinel)
+    return {"delpc": delpc.a, "divg_d": divg_d.a, "wk": wk.a, "ke": ke.a,
+            "vortfluxx": vortfluxx.a, "vortfluxy": vortfluxy.a,
+            "uc": uc.a, "vc": vc.a, "ut": ut.a, "vt": vt.a,
+            "ptc": ptc, "ub": ub, "vb": vb}
