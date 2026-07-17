@@ -43,6 +43,27 @@ DINO exercises scheme selections GYRE never tested and legoESM matches them:
 (`ln_traldf_msc`) explicit-K33 iso term (GYRE: msc=F). The MSC `akz` explicit
 vertical diagonal was ported term-for-term from `traldf_iso_a33` (PR #1137).
 
+## Preliminary solution check (62-day forward, grid-robust)
+
+Tendency-match is necessary but not sufficient — do the *solutions* track? A
+short forward integration from rest (`run_dino.py --recipe nemo_paper
+--barotropic-solver explicit_substep --days 62`, 74 s, stable) vs NEMO's
+62-day-from-rest `RUN_M5SPIN`. The two grids are built independently (legoESM
+198×50 vs NEMO interior 195×48), so this is **grid-robust metrics**, not
+cell-by-cell:
+
+- **Basin-mean T(z)** tracks within ~0.2–1.0 °C; legoESM is **colder in the
+  upper thermocline** (Δ = −0.96 °C at 262 m). Salinity within ~0.1 PSU. Deep
+  ocean and SST max (25.3 vs 25.4) close. Zonal-mean SST-vs-latitude **corr
+  0.98** (RMS 2.7 °C, partly grid-interpolation).
+- The thermocline cold bias is **grid-robust** (a volume average) → real
+  physics, not a grid artifact. A too-cold/too-mixed upper thermocline is the
+  fingerprint of the deferred **iso-diffusion ML-surface term** below — the one
+  uncertified piece plausibly showing up in the solution.
+- Caveats: 62 days is short (not the M6 climate); the IC/forcing are not
+  byte-verified identical to NEMO's `usrdef`; a clean SST separation would run
+  legoESM forward *from the bridge state on NEMO's grid* (identical mesh).
+
 ## Characterized follow-ups (not yet certified)
 
 - **`ttrd_ldf` surface (k1/k2)** — the S²-sensitive K33 diagonal exposes a
