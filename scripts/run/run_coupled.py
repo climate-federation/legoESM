@@ -187,19 +187,23 @@ def _reject_unreachable_sea_ice_options(args, changed, base) -> None:
     Two DIFFERENT gaps, deliberately not conflated:
 
     * MULTI-CATEGORY (ridging, lipscomb2001 ITD remap) is unreachable from
-      EVERY driver, not just this one: nothing anywhere builds a
-      multi-category state (run_omip_core2 hardcodes n_categories=1 too), and
-      ``step_sea_ice`` RAISES for n_categories>1 without a DynamicSeaIceState.
-      Ridging is additionally driven by an ice velocity. So this is a genuine
-      unwired-physics gap -> tracked, not flagged.
+      THIS driver (its coupler tile is a scalar-slab SeaIceState, and
+      ``step_sea_ice`` RAISES for n_categories>1 without a
+      DynamicSeaIceState).  It IS reachable from run_omip_core2 via
+      --ice-categories / --ice-ridging (which builds the multi-category
+      DynamicSeaIceState via init_dynamic_ice_state +
+      distribute_dynamic_state_to_categories) — use that runner for ITD
+      studies; wiring the coupled tile onto a dynamic state is a separate
+      feature.
     * DYNAMICS is reachable, just not HERE: run_omip_core2 offers
       --prognostic-ice-dynamics {free_drift,evp,mevp} and builds the
       DynamicSeaIceState via init_dynamic_ice_state. run_coupled's
       init_surface_state builds a scalar-slab SeaIceState instead.
 
     There is deliberately NO --ice-itd-remap flag either: its only non-default
-    value is lipscomb2001, which the multi-category gap puts out of reach, so
-    the flag could only ever accept the default you already get.
+    value is lipscomb2001, which dispatches only inside the multi-category
+    branch this driver's slab tile cannot reach, so the flag could only ever
+    accept the default you already get.
 
     An earlier draft "fixed" both by adding --ice-categories/--ice-dynamics
     here. That was WORSE than the gap: every accepted value crashed on the
@@ -801,11 +805,13 @@ def build_parser():
                              "have no prognostic salinity and deliberately "
                              "discard it (CoupledESMDriver._step_ocean). The "
                              "ice-side salinity still evolves either way.")
-    # NO --ice-ridging: it needs multi-category ice that NO driver builds, so a
-    # flag could only ever exit. SUPPRESS would keep a hidden always-failing CLI
-    # contract for no benefit -- the flag never shipped, so there is nothing to
-    # stay compatible with (codex). The gap is recorded in
-    # _reject_unreachable_sea_ice_options' docstring instead.
+    # NO --ice-ridging HERE: it needs multi-category ice, and this driver's
+    # coupler tile is a scalar-slab SeaIceState, so a flag could only ever
+    # exit. SUPPRESS would keep a hidden always-failing CLI contract for no
+    # benefit -- the flag never shipped, so there is nothing to stay
+    # compatible with (codex). Multi-category ITD + ridging ARE reachable
+    # from run_omip_core2 (--ice-categories/--ice-ridging, which builds the
+    # DynamicSeaIceState); see _reject_unreachable_sea_ice_options.
     parser.add_argument("--ice-ponds", action="store_true",
                         help="CESM-style melt ponds (SeaIceConfig.ponds).")
     parser.add_argument("--ice-shortwave-scheme",

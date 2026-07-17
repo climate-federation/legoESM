@@ -23,6 +23,7 @@ from legoesm.ice.state import (
     SeaIceState,
     DynamicSeaIceState,
     init_dynamic_ice_state,
+    distribute_dynamic_state_to_categories,
     dynamic_to_slab,
     slab_to_dynamic,
 )
@@ -83,6 +84,7 @@ __all__ = [
     "SeaIceState",
     "DynamicSeaIceState",
     "init_dynamic_ice_state",
+    "distribute_dynamic_state_to_categories",
     "dynamic_to_slab",
     "slab_to_dynamic",
     # Main step function
