@@ -51,10 +51,15 @@ vertical diagonal was ported term-for-term from `traldf_iso_a33` (PR #1137).
   *inside* it. Root = the MLD criterion (NEMO's `MAX(N²,0)` integral from `rn2b`
   vs legoESM's potential-density difference) drives a different ramp anchor.
   A GYRE-shared sub-campaign (the slope code is shared) — deferred.
-- **ldf** momentum viscosity — `nn_ahm_ijk_t=20` mesh-scaled
-  `A_h = ½·rn_Uv·max(e1,e2)` (needs a spatial A_h; untested).
-- **zad** vertical momentum advection — small term; NEMO adds the `key_qco`
-  grid-motion velocity (`ww + wsd`) that legoESm's z* w lacks.
+- **ldf** momentum viscosity — a **near-noise** term at this state
+  (`utrd_ldf` rms 1.7e-8, ~140× below hpg/pvo). `nn_ahm_ijk_t=20` gives a
+  mesh-scaled `A_h = ½·rn_Uv·max(e1,e2)`, but legoESM's momentum-viscosity
+  *tendency* path takes a scalar `A_h` (the spatial-`A_h` operator exists only
+  for the KE-dissipation diagnostic). Gated by a spatial-A_h momentum feature;
+  deferred (low value on a dynamically negligible term).
+- **zad** vertical momentum advection — near-noise here (`utrd_zad` rms
+  1.5e-8); NEMO adds the `key_qco` grid-motion velocity (`ww + wsd`) that
+  legoESM's z* w lacks. Deferred (small).
 - **e3w** in the MSC `akz` — a T-thickness average vs NEMO's analytic `e3w_0`
   (few-percent).
 
