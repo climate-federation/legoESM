@@ -210,3 +210,336 @@ def d2a2c_vect_duo(u: np.ndarray, v: np.ndarray, gs: dict, bd: Bounds,
 
     return {"ua": UA.a, "va": VA.a, "uc": UC.a, "vc": VC.a,
             "ut": UT.a, "vt": VT.a}
+
+
+def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
+              bd: Bounds, npx: int, npy: int, *, dt: float,
+              hord_tr: int = 8, hord_vt: int = 6, hord_tm: int = 6,
+              hord_dp: int = 6, nord_v: int = 1, nord_t: int = 0,
+              damp_v: float = 0.2, damp_t: float = 0.0,
+              hydrostatic: bool = True, inline_q: bool = False,
+              lim_fac: float = 1.0, duogrid: bool = True,
+              workspace_sentinel: float = 1.0e30) -> dict:
+    """sw_core.F90 d_sw1 (symmetryclean 500-998), DUO branch — the D-grid
+    TRANSPORT stage: ut/vt, crx/cry/xfx/yfx, ra_x/ra_y, the delp/pt flux
+    computation (fv_tp_2d), the allflux pack consumed by dyn_core's
+    inter-panel flux averaging, and the cx/cy/xflux/yflux capacitors.
+    d_sw1 computes FLUXES only — the delp/pt UPDATES happen in d_sw2 AFTER
+    the averaging.
+
+    DUO semantics: the interior ut/vt formula runs over the full ranges
+    (auth 622-634); the panel-edge + corner 2x2 blocks (656-813) fire
+    UNCONDITIONALLY on the global cube (their ``.not.(bounded .and. duo)``
+    guard is always true) and READ ut/vt workspace cells the duo interior
+    never writes — in dyn_core those are UNINITIALISED stack memory, so
+    this port initialises ut/vt to ``workspace_sentinel`` and the oracle
+    driver initialises the Fortran arrays IDENTICALLY: the sentinel-
+    dependent cells are then deterministic and bit-comparable on both
+    sides (a TRANSLATION certification; the integrated 6-face pipeline
+    supplies real exchanged halos there).  The transport uses the
+    duo-gated tp_core chain (copy_corners early-return, xppm/yppm edge
+    reconstructions skipped).  VERBATIM notes: the pt transport uses
+    ``nord=nord_v, damp_c=damp_v`` (auth 959-961 — the plain monolithic
+    d_sw used nord_t/damp_t there); hydrostatic skips the w transport;
+    USE_COND / SW_DYNAMICS undefined, matching the phase-4b extraction
+    convention.
+
+    Returns a dict with crx_adv/cry_adv/xfx_adv/yfx_adv, ra_x/ra_y,
+    ut/vt, allflux_x/allflux_y (k=1 slab, 4+nq=5 slots; slots 2/3/5
+    untouched NaN on the hydrostatic no-tracer lane), the (corner-ghost
+    mutated on plain; untouched on duo) delp/pt/w, and the accumulated
+    cx/cy/xflux/yflux.
+    """
+    from legoesm.core.fv3_native_d_sw import _fl, fv_tp_2d
+
+    if not duogrid:
+        raise NotImplementedError(
+            "d_sw1_duo is the DUO-stage port; the plain path is the "
+            "certified monolithic d_sw (phase-4b)")
+    if not hydrostatic or inline_q:
+        raise NotImplementedError(
+            "d_sw1_duo: hydrostatic, inline_q=False lane only (matches "
+            "the oracle driver; w/q_con/tracer transports not exercised)")
+
+    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
+    isd, ied, jsd, jed = bd.isd, bd.ied, bd.jsd, bd.jed
+
+    delp = fort(np.array(delp, dtype=np.float64, copy=True), isd, jsd)
+    pt = fort(np.array(pt, dtype=np.float64, copy=True), isd, jsd)
+    w = fort(np.array(w, dtype=np.float64, copy=True), isd, jsd)
+    uc = fort(np.array(uc, dtype=np.float64, copy=True), isd, jsd)
+    vc = fort(np.array(vc, dtype=np.float64, copy=True), isd, jsd)
+    xflux = fort(np.array(xflux, dtype=np.float64, copy=True), is_, js)
+    yflux = fort(np.array(yflux, dtype=np.float64, copy=True), is_, js)
+    cx = fort(np.array(cx, dtype=np.float64, copy=True), is_, jsd)
+    cy = fort(np.array(cy, dtype=np.float64, copy=True), isd, js)
+
+    AREA = fort(gs["area"], isd, jsd)
+    SIN_SG = fort(gs["sin_sg"], isd, jsd)
+    COSA_U = fort(gs["cosa_u"], isd, jsd)
+    COSA_V = fort(gs["cosa_v"], isd, jsd)
+    SINA_U = fort(gs["sina_u"], isd, jsd)
+    SINA_V = fort(gs["sina_v"], isd, jsd)
+    RSIN_U = fort(gs["rsin_u"], isd, jsd)
+    RSIN_V = fort(gs["rsin_v"], isd, jsd)
+    DX = fort(gs["dx"], isd, jsd)
+    DY = fort(gs["dy"], isd, jsd)
+    RDXA = fort(gs["rdxa"], isd, jsd)
+    RDYA = fort(gs["rdya"], isd, jsd)
+    sw_corner = bool(gs.get("sw_corner", True))
+    se_corner = bool(gs.get("se_corner", True))
+    ne_corner = bool(gs.get("ne_corner", True))
+    nw_corner = bool(gs.get("nw_corner", True))
+
+    # OUT workspaces at the d_sw1 declared bounds, sentinel-initialised
+    # (see docstring): ut (isd:ied+1, jsd:jed), vt (isd:ied, jsd:jed+1)
+    ut = _fl(isd, ied + 1, jsd, jed, workspace_sentinel)
+    vt = _fl(isd, ied, jsd, jed + 1, workspace_sentinel)
+    crx_adv = _fl(is_, ie + 1, jsd, jed)
+    xfx_adv = _fl(is_, ie + 1, jsd, jed)
+    cry_adv = _fl(isd, ied, js, je + 1)
+    yfx_adv = _fl(isd, ied, js, je + 1)
+    ra_x = _fl(is_, ie, jsd, jed)
+    ra_y = _fl(isd, ied, js, je)
+    fx = _fl(is_, ie + 1, js, je)
+    fy = _fl(is_, ie, js, je + 1)
+    gx = _fl(is_, ie + 1, js, je)
+    gy = _fl(is_, ie, js, je + 1)
+    nq = 1
+    allflux_x = np.full((ie + 1 - is_ + 1, je - js + 1, 4 + nq), np.nan)
+    allflux_y = np.full((ie - is_ + 1, je + 1 - js + 1, 4 + nq), np.nan)
+
+    # ---- ut/vt DUO interior (auth 622-634) ----
+    for j in range(jsd, jed + 1):
+        for i in range(is_, ie + 1 + 1):
+            ut[i, j] = (uc[i, j] - 0.25 * COSA_U[i, j] * (
+                vc[i - 1, j] + vc[i, j]
+                + vc[i - 1, j + 1] + vc[i, j + 1])) * RSIN_U[i, j]
+    for j in range(js, je + 1 + 1):
+        for i in range(isd, ied + 1):
+            vt[i, j] = (vc[i, j] - 0.25 * COSA_V[i, j] * (
+                uc[i, j - 1] + uc[i + 1, j - 1]
+                + uc[i, j] + uc[i + 1, j])) * RSIN_V[i, j]
+
+    # ---- panel edges (auth 656-726; fire always on the global cube) ----
+    if is_ == 1:                                     # West edge
+        for j in range(jsd, jed + 1):
+            if uc[1, j] * dt > 0.0:
+                ut[1, j] = uc[1, j] / SIN_SG[0, j, 3 - 1]
+            else:
+                ut[1, j] = uc[1, j] / SIN_SG[1, j, 1 - 1]
+        for j in range(max(3, js), min(npy - 2, je + 1) + 1):
+            vt[0, j] = vc[0, j] - 0.25 * COSA_V[0, j] * (
+                ut[0, j - 1] + ut[1, j - 1] + ut[0, j] + ut[1, j])
+            vt[1, j] = vc[1, j] - 0.25 * COSA_V[1, j] * (
+                ut[1, j - 1] + ut[2, j - 1] + ut[1, j] + ut[2, j])
+    if (ie + 1) == npx:                              # East edge
+        for j in range(jsd, jed + 1):
+            if uc[npx, j] * dt > 0.0:
+                ut[npx, j] = uc[npx, j] / SIN_SG[npx - 1, j, 3 - 1]
+            else:
+                ut[npx, j] = uc[npx, j] / SIN_SG[npx, j, 1 - 1]
+        for j in range(max(3, js), min(npy - 2, je + 1) + 1):
+            vt[npx - 1, j] = vc[npx - 1, j] - 0.25 * COSA_V[npx - 1, j] * (
+                ut[npx - 1, j - 1] + ut[npx, j - 1]
+                + ut[npx - 1, j] + ut[npx, j])
+            vt[npx, j] = vc[npx, j] - 0.25 * COSA_V[npx, j] * (
+                ut[npx, j - 1] + ut[npx + 1, j - 1]
+                + ut[npx, j] + ut[npx + 1, j])
+    if js == 1:                                      # South edge
+        for i in range(isd, ied + 1):
+            if vc[i, 1] * dt > 0.0:
+                vt[i, 1] = vc[i, 1] / SIN_SG[i, 0, 4 - 1]
+            else:
+                vt[i, 1] = vc[i, 1] / SIN_SG[i, 1, 2 - 1]
+        for i in range(max(3, is_), min(npx - 2, ie + 1) + 1):
+            ut[i, 0] = uc[i, 0] - 0.25 * COSA_U[i, 0] * (
+                vt[i - 1, 0] + vt[i, 0] + vt[i - 1, 1] + vt[i, 1])
+            ut[i, 1] = uc[i, 1] - 0.25 * COSA_U[i, 1] * (
+                vt[i - 1, 1] + vt[i, 1] + vt[i - 1, 2] + vt[i, 2])
+    if (je + 1) == npy:                              # North edge
+        for i in range(isd, ied + 1):
+            if vc[i, npy] * dt > 0.0:
+                vt[i, npy] = vc[i, npy] / SIN_SG[i, npy - 1, 4 - 1]
+            else:
+                vt[i, npy] = vc[i, npy] / SIN_SG[i, npy, 2 - 1]
+        for i in range(max(3, is_), min(npx - 2, ie + 1) + 1):
+            ut[i, npy - 1] = uc[i, npy - 1] - 0.25 * COSA_U[i, npy - 1] * (
+                vt[i - 1, npy - 1] + vt[i, npy - 1]
+                + vt[i - 1, npy] + vt[i, npy])
+            ut[i, npy] = uc[i, npy] - 0.25 * COSA_U[i, npy] * (
+                vt[i - 1, npy] + vt[i, npy]
+                + vt[i - 1, npy + 1] + vt[i, npy + 1])
+
+    # ---- corner 2x2 systems (auth 739-811) ----
+    if sw_corner:
+        damp = 1.0 / (1.0 - 0.0625 * COSA_U[2, 0] * COSA_V[1, 0])
+        ut[2, 0] = (uc[2, 0] - 0.25 * COSA_U[2, 0] * (
+            vt[1, 1] + vt[2, 1] + vt[2, 0] + vc[1, 0]
+            - 0.25 * COSA_V[1, 0] * (ut[1, 0] + ut[1, -1] + ut[2, -1]))) \
+            * damp
+        damp = 1.0 / (1.0 - 0.0625 * COSA_U[0, 1] * COSA_V[0, 2])
+        vt[0, 2] = (vc[0, 2] - 0.25 * COSA_V[0, 2] * (
+            ut[1, 1] + ut[1, 2] + ut[0, 2] + uc[0, 1]
+            - 0.25 * COSA_U[0, 1] * (vt[0, 1] + vt[-1, 1] + vt[-1, 2]))) \
+            * damp
+        damp = 1.0 / (1.0 - 0.0625 * COSA_U[2, 1] * COSA_V[1, 2])
+        ut[2, 1] = (uc[2, 1] - 0.25 * COSA_U[2, 1] * (
+            vt[1, 1] + vt[2, 1] + vt[2, 2] + vc[1, 2]
+            - 0.25 * COSA_V[1, 2] * (ut[1, 1] + ut[1, 2] + ut[2, 2]))) \
+            * damp
+        vt[1, 2] = (vc[1, 2] - 0.25 * COSA_V[1, 2] * (
+            ut[1, 1] + ut[1, 2] + ut[2, 2] + uc[2, 1]
+            - 0.25 * COSA_U[2, 1] * (vt[1, 1] + vt[2, 1] + vt[2, 2]))) \
+            * damp
+    if se_corner:
+        damp = 1.0 / (1.0 - 0.0625 * COSA_U[npx - 1, 0] * COSA_V[npx - 1, 0])
+        ut[npx - 1, 0] = (uc[npx - 1, 0] - 0.25 * COSA_U[npx - 1, 0] * (
+            vt[npx - 1, 1] + vt[npx - 2, 1] + vt[npx - 2, 0] + vc[npx - 1, 0]
+            - 0.25 * COSA_V[npx - 1, 0] * (
+                ut[npx, 0] + ut[npx, -1] + ut[npx - 1, -1]))) * damp
+        damp = 1.0 / (1.0 - 0.0625 * COSA_U[npx + 1, 1] * COSA_V[npx, 2])
+        vt[npx, 2] = (vc[npx, 2] - 0.25 * COSA_V[npx, 2] * (
+            ut[npx, 1] + ut[npx, 2] + ut[npx + 1, 2] + uc[npx + 1, 1]
+            - 0.25 * COSA_U[npx + 1, 1] * (
+                vt[npx, 1] + vt[npx + 1, 1] + vt[npx + 1, 2]))) * damp
+        damp = 1.0 / (1.0 - 0.0625 * COSA_U[npx - 1, 1] * COSA_V[npx - 1, 2])
+        ut[npx - 1, 1] = (uc[npx - 1, 1] - 0.25 * COSA_U[npx - 1, 1] * (
+            vt[npx - 1, 1] + vt[npx - 2, 1] + vt[npx - 2, 2] + vc[npx - 1, 2]
+            - 0.25 * COSA_V[npx - 1, 2] * (
+                ut[npx, 1] + ut[npx, 2] + ut[npx - 1, 2]))) * damp
+        vt[npx - 1, 2] = (vc[npx - 1, 2] - 0.25 * COSA_V[npx - 1, 2] * (
+            ut[npx, 1] + ut[npx, 2] + ut[npx - 1, 2] + uc[npx - 1, 1]
+            - 0.25 * COSA_U[npx - 1, 1] * (
+                vt[npx - 1, 1] + vt[npx - 2, 1] + vt[npx - 2, 2]))) * damp
+    if ne_corner:
+        damp = 1.0 / (1.0 - 0.0625 * COSA_U[npx - 1, npy]
+                      * COSA_V[npx - 1, npy + 1])
+        ut[npx - 1, npy] = (uc[npx - 1, npy]
+                            - 0.25 * COSA_U[npx - 1, npy] * (
+            vt[npx - 1, npy] + vt[npx - 2, npy] + vt[npx - 2, npy + 1]
+            + vc[npx - 1, npy + 1]
+            - 0.25 * COSA_V[npx - 1, npy + 1] * (
+                ut[npx, npy] + ut[npx, npy + 1] + ut[npx - 1, npy + 1]))) \
+            * damp
+        damp = 1.0 / (1.0 - 0.0625 * COSA_U[npx + 1, npy - 1]
+                      * COSA_V[npx, npy - 1])
+        vt[npx, npy - 1] = (vc[npx, npy - 1]
+                            - 0.25 * COSA_V[npx, npy - 1] * (
+            ut[npx, npy - 1] + ut[npx, npy - 2] + ut[npx + 1, npy - 2]
+            + uc[npx + 1, npy - 1]
+            - 0.25 * COSA_U[npx + 1, npy - 1] * (
+                vt[npx, npy] + vt[npx + 1, npy] + vt[npx + 1, npy - 1]))) \
+            * damp
+        damp = 1.0 / (1.0 - 0.0625 * COSA_U[npx - 1, npy - 1]
+                      * COSA_V[npx - 1, npy - 1])
+        ut[npx - 1, npy - 1] = (uc[npx - 1, npy - 1]
+                                - 0.25 * COSA_U[npx - 1, npy - 1] * (
+            vt[npx - 1, npy] + vt[npx - 2, npy] + vt[npx - 2, npy - 1]
+            + vc[npx - 1, npy - 1]
+            - 0.25 * COSA_V[npx - 1, npy - 1] * (
+                ut[npx, npy - 1] + ut[npx, npy - 2] + ut[npx - 1, npy - 2]))) \
+            * damp
+        vt[npx - 1, npy - 1] = (vc[npx - 1, npy - 1]
+                                - 0.25 * COSA_V[npx - 1, npy - 1] * (
+            ut[npx, npy - 1] + ut[npx, npy - 2] + ut[npx - 1, npy - 2]
+            + uc[npx - 1, npy - 1]
+            - 0.25 * COSA_U[npx - 1, npy - 1] * (
+                vt[npx - 1, npy] + vt[npx - 2, npy] + vt[npx - 2, npy - 1]))) \
+            * damp
+    if nw_corner:
+        damp = 1.0 / (1.0 - 0.0625 * COSA_U[2, npy] * COSA_V[1, npy + 1])
+        ut[2, npy] = (uc[2, npy] - 0.25 * COSA_U[2, npy] * (
+            vt[1, npy] + vt[2, npy] + vt[2, npy + 1] + vc[1, npy + 1]
+            - 0.25 * COSA_V[1, npy + 1] * (
+                ut[1, npy] + ut[1, npy + 1] + ut[2, npy + 1]))) * damp
+        damp = 1.0 / (1.0 - 0.0625 * COSA_U[0, npy - 1] * COSA_V[0, npy - 1])
+        vt[0, npy - 1] = (vc[0, npy - 1] - 0.25 * COSA_V[0, npy - 1] * (
+            ut[1, npy - 1] + ut[1, npy - 2] + ut[0, npy - 2] + uc[0, npy - 1]
+            - 0.25 * COSA_U[0, npy - 1] * (
+                vt[0, npy] + vt[-1, npy] + vt[-1, npy - 1]))) * damp
+        damp = 1.0 / (1.0 - 0.0625 * COSA_U[2, npy - 1] * COSA_V[1, npy - 1])
+        ut[2, npy - 1] = (uc[2, npy - 1] - 0.25 * COSA_U[2, npy - 1] * (
+            vt[1, npy] + vt[2, npy] + vt[2, npy - 1] + vc[1, npy - 1]
+            - 0.25 * COSA_V[1, npy - 1] * (
+                ut[1, npy - 1] + ut[1, npy - 2] + ut[2, npy - 2]))) * damp
+        vt[1, npy - 1] = (vc[1, npy - 1] - 0.25 * COSA_V[1, npy - 1] * (
+            ut[1, npy - 1] + ut[1, npy - 2] + ut[2, npy - 2] + uc[2, npy - 1]
+            - 0.25 * COSA_U[2, npy - 1] * (
+                vt[1, npy] + vt[2, npy] + vt[2, npy - 1]))) * damp
+
+    # ---- xfx/crx, yfx/cry (auth 830-869) ----
+    for j in range(jsd, jed + 1):
+        for i in range(is_, ie + 1 + 1):
+            xfx_adv[i, j] = dt * ut[i, j]
+    for j in range(js, je + 1 + 1):
+        for i in range(isd, ied + 1):
+            yfx_adv[i, j] = dt * vt[i, j]
+    for j in range(jsd, jed + 1):
+        for i in range(is_, ie + 1 + 1):
+            if xfx_adv[i, j] > 0.0:
+                crx_adv[i, j] = xfx_adv[i, j] * RDXA[i - 1, j]
+                xfx_adv[i, j] = DY[i, j] * xfx_adv[i, j] * SIN_SG[i - 1, j, 3 - 1]
+            else:
+                crx_adv[i, j] = xfx_adv[i, j] * RDXA[i, j]
+                xfx_adv[i, j] = DY[i, j] * xfx_adv[i, j] * SIN_SG[i, j, 1 - 1]
+    for j in range(js, je + 1 + 1):
+        for i in range(isd, ied + 1):
+            if yfx_adv[i, j] > 0.0:
+                cry_adv[i, j] = yfx_adv[i, j] * RDYA[i, j - 1]
+                yfx_adv[i, j] = DX[i, j] * yfx_adv[i, j] * SIN_SG[i, j - 1, 4 - 1]
+            else:
+                cry_adv[i, j] = yfx_adv[i, j] * RDYA[i, j]
+                yfx_adv[i, j] = DX[i, j] * yfx_adv[i, j] * SIN_SG[i, j, 2 - 1]
+
+    # ---- ra_x/ra_y (auth 875-884) ----
+    for j in range(jsd, jed + 1):
+        for i in range(is_, ie + 1):
+            ra_x[i, j] = AREA[i, j] + xfx_adv[i, j] - xfx_adv[i + 1, j]
+    for j in range(js, je + 1):
+        for i in range(isd, ied + 1):
+            ra_y[i, j] = AREA[i, j] + yfx_adv[i, j] - yfx_adv[i, j + 1]
+
+    # ---- delp fluxes (auth 886-887) + allflux slot 1 + capacitors ----
+    gsf = dict(gs)
+    gsf.setdefault("bounded_domain", False)
+    gsf.setdefault("grid_type", 0)
+    fv_tp_2d(delp, crx_adv, cry_adv, npx, npy, hord_dp, fx, fy,
+             xfx_adv, yfx_adv, gsf, bd, ra_x, ra_y, lim_fac,
+             nord=nord_v, damp_c=damp_v, duogrid=duogrid)
+    for j in range(js, je + 1):
+        for i in range(is_, ie + 1 + 1):
+            allflux_x[i - is_, j - js, 1 - 1] = fx[i, j]
+    for j in range(js, je + 1 + 1):
+        for i in range(is_, ie + 1):
+            allflux_y[i - is_, j - js, 1 - 1] = fy[i, j]
+    for j in range(jsd, jed + 1):
+        for i in range(is_, ie + 1 + 1):
+            cx[i, j] = cx[i, j] + crx_adv[i, j]
+    for j in range(js, je + 1):
+        for i in range(is_, ie + 1 + 1):
+            xflux[i, j] = xflux[i, j] + fx[i, j]
+    for j in range(js, je + 1 + 1):
+        for i in range(isd, ied + 1):
+            cy[i, j] = cy[i, j] + cry_adv[i, j]
+        for i in range(is_, ie + 1):
+            yflux[i, j] = yflux[i, j] + fy[i, j]
+
+    # ---- pt fluxes (auth 959-961: nord=nord_v, damp_c=damp_v) ----
+    fv_tp_2d(pt, crx_adv, cry_adv, npx, npy, hord_tm, gx, gy,
+             xfx_adv, yfx_adv, gsf, bd, ra_x, ra_y, lim_fac,
+             mfx=fx, mfy=fy, mass=delp, nord=nord_v, damp_c=damp_v,
+             duogrid=duogrid)
+    for j in range(js, je + 1):
+        for i in range(is_, ie + 1 + 1):
+            allflux_x[i - is_, j - js, 4 - 1] = gx[i, j]
+    for j in range(js, je + 1 + 1):
+        for i in range(is_, ie + 1):
+            allflux_y[i - is_, j - js, 4 - 1] = gy[i, j]
+
+    return {"crx_adv": crx_adv.a, "cry_adv": cry_adv.a,
+            "xfx_adv": xfx_adv.a, "yfx_adv": yfx_adv.a,
+            "ra_x": ra_x.a, "ra_y": ra_y.a, "ut": ut.a, "vt": vt.a,
+            "allflux_x": allflux_x, "allflux_y": allflux_y,
+            "delp": delp.a, "pt": pt.a, "w": w.a,
+            "cx": cx.a, "cy": cy.a, "xflux": xflux.a, "yflux": yflux.a}
