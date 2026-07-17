@@ -97,6 +97,15 @@ def build_six_face_duo_context(n: int, ng: int = 3) -> dict:
         gs["area"] = area
         gs["rarea"] = rarea
 
+    # k2e duo ext machinery (SB5b): the certified phase-3 DuoGridData
+    # drives the A-scalar halo exchanges (delp/pt) — the authoritative
+    # ext_scalar(…,0,0) analog.  Vector/staggered ext = follow-up.
+    from legoesm.grids.fv3_native_halos import (
+        create_fv3_native_duogrid_data,
+    )
+
+    dg = create_fv3_native_duogrid_data(n, ng=min(ng, 3), k2e_nord=4)
+
     for gs in gs6:
         gs.setdefault("bounded_domain", False)
         gs.setdefault("grid_type", 0)
@@ -104,7 +113,7 @@ def build_six_face_duo_context(n: int, ng: int = 3) -> dict:
         gs.setdefault("se_corner", True)
         gs.setdefault("ne_corner", True)
         gs.setdefault("nw_corner", True)
-    return {"n": n, "ng": ng, "gs6": gs6,
+    return {"n": n, "ng": ng, "gs6": gs6, "dg": dg,
             "bd": Bounds.single_tile(n, ng)}
 
 
@@ -141,6 +150,23 @@ def csw_step_sixface(ctx: dict, states: list, dt2: float,
             exchange_bgrid_scalar_halos(divgd6, t, n, ng)
             exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
     return outs
+
+
+def duo_pad_scalars(f6: list, ctx: dict) -> None:
+    """SB5b: A-scalar duo ext — the k2e Lagrange halo remap
+    (legoesm.grids.halo.pad_halo with the certified DuoGridData),
+    replacing the interim index-copy exchange for delp/pt.  The padded
+    (6, n+2ng, n+2ng) result IS the data domain — full in-place
+    replacement (interior bits unchanged by construction)."""
+    import jax.numpy as jnp
+    from legoesm.grids.halo import pad_halo
+
+    n, ng = ctx["n"], ctx["ng"]
+    comp = jnp.stack([jnp.asarray(f[ng:ng + n, ng:ng + n])
+                      for f in f6])
+    padded = np.asarray(pad_halo(comp, halo=ng, duogrid=ctx["dg"]))
+    for t in range(6):
+        f6[t][:, :] = padded[t]
 
 
 def geopk_sw_1lev(delpc: np.ndarray, hs: np.ndarray, bd,
@@ -318,9 +344,21 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
     pt6 = [np.array(st["pt"], copy=True) for st in states]
     u6 = [np.array(st["u"], copy=True) for st in states]
     v6 = [np.array(st["v"], copy=True) for st in states]
+    if ctx.get("use_k2e_scalars"):
+        # MEASURED WORSE in isolation (2026-07-17 ablation: du 14->110,
+        # ddelp 2%->54% at 8h): k2e scalars live at EXTENDED-grid
+        # positions while the vector halos + halo metrics remain
+        # kinked-lattice — mixing the two breaks the discrete geometry.
+        # The ext swap must be the FULL consistency bundle (all fields
+        # + extended halo metrics together); until then the coherent
+        # index-copy interim stays.
+        duo_pad_scalars(delp6, ctx)
+        duo_pad_scalars(pt6, ctx)
+    else:
+        for t in range(1, 7):
+            exchange_agrid_scalar_halos(delp6, t, n, ng)
+            exchange_agrid_scalar_halos(pt6, t, n, ng)
     for t in range(1, 7):
-        exchange_agrid_scalar_halos(delp6, t, n, ng)
-        exchange_agrid_scalar_halos(pt6, t, n, ng)
         exchange_dgrid_vector_halos(u6, v6, t, n, ng)
     states = [{**states[t], "delp": delp6[t], "pt": pt6[t],
                "u": u6[t], "v": v6[t]} for t in range(6)]
@@ -494,9 +532,13 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
 
     delp6 = [np.array(o["delp"], copy=True) for o in stage]
     pt6 = [np.array(o["pt"], copy=True) for o in stage]
-    for t in range(1, 7):
-        exchange_agrid_scalar_halos(delp6, t, n, ng)
-        exchange_agrid_scalar_halos(pt6, t, n, ng)
+    if ctx.get("use_k2e_scalars"):
+        duo_pad_scalars(delp6, ctx)
+        duo_pad_scalars(pt6, ctx)
+    else:
+        for t in range(1, 7):
+            exchange_agrid_scalar_halos(delp6, t, n, ng)
+            exchange_agrid_scalar_halos(pt6, t, n, ng)
 
     u6 = [np.array(o["u"], copy=True) for o in stage]
     v6 = [np.array(o["v"], copy=True) for o in stage]
