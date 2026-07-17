@@ -12,7 +12,7 @@
 set -euo pipefail
 REPO=/burg-archive/glab/users/pg2328/legoESM_fv3grid
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
-export PYTHONPATH=$REPO/packages/core:$REPO/src JAX_PLATFORMS=cpu
+export PYTHONPATH=$REPO/packages/core:$REPO/src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 
 echo "=== ruff ==="
 $PY -m ruff check \

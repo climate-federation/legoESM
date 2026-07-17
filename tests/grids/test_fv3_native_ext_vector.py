@@ -16,7 +16,6 @@ rides the phase-4 sbatch harness):
 
 import numpy as np
 import pytest
-
 from legoesm.core.fv3_native_duo_stepper import (
     build_six_face_duo_context,
     run_duo_sw,
@@ -96,15 +95,14 @@ def test_ext_vector_halo_matches_analytic_projection(ctx, ectx):
     """Halo strips == the analytic wind pushed through the SAME
     ng=4 geographic lattice + a2d ext projection (truth by construction:
     identical bases, no exchange/remap/c2l error)."""
-    from legoesm.grids.fv3_native_halos import _ed_ext_agrid_lonlat
+    from legoesm.grids.fv3_native_ext_vector import ext_parity_lonlat_ref
 
     states = w2_six_face_state(ctx)
     u6 = [np.array(s["u"], copy=True) for s in states]
     v6 = [np.array(s["v"], copy=True) for s in states]
     ext_vector_dgrid_sixface(u6, v6, ectx)
 
-    a_lon4, a_lat4 = _ed_ext_agrid_lonlat(N, _NG_P1)
-    m_a = N + 2 * NG
+    a_lon4, a_lat4 = ext_parity_lonlat_ref(N, _NG_P1, "A")
     worst_u = 0.0
     for t in range(6):
         ug_t, vg_t = _analytic_geo(a_lon4[t], a_lat4[t])
@@ -117,20 +115,21 @@ def test_ext_vector_halo_matches_analytic_projection(ctx, ectx):
                 got = u6[t][i_f - 1 + NG, j_f - 1 + NG]
                 want = ud_t[i_f - 1 + ngp, j_f - 2 + ngp]
                 worst_u = max(worst_u, abs(got - want))
-    # error budget: c2l 2nd-order (~0.5) is the leading term; the
-    # remap + projection add O(1e-2).  The interim index-copy halos sat
-    # at ~14 m/s equivalent inconsistency at this resolution.
-    assert worst_u < 1.5, worst_u
+    # error budget: c2l 2nd-order is the leading term (measured 0.152
+    # at C12); the remap + projection add O(1e-2).  The interim
+    # index-copy halos sat at ~14 m/s equivalent inconsistency, the
+    # rejected position-only remap at ~22.
+    assert worst_u < 0.5, worst_u
 
 
 def test_ext_scalar_b_smooth_field_accuracy(ectx):
     """B-scalar ext halos land near the smooth field at EXT B nodes."""
-    from legoesm.grids.fv3_native_halos import _ed_ext_stagger_lonlat
+    from legoesm.grids.fv3_native_ext_vector import ext_parity_lonlat_ref
     from legoesm.grids.fv3_native_gridstruct import (
         build_kinked_corner_lonlat,
     )
 
-    b_lon_e, b_lat_e = _ed_ext_stagger_lonlat(N, NG, "B")
+    b_lon_e, b_lat_e = ext_parity_lonlat_ref(N, NG, "B")
 
     def f(lon, lat):
         return np.sin(lat) + 0.3 * np.cos(lon) * np.cos(lat)

@@ -46,7 +46,6 @@ The internal geographic lattice uses ``_NG_P1 = 4`` rings exactly like
 from __future__ import annotations
 
 import numpy as np
-
 from legoesm.grids.fv3_native_gridstruct import (
     exchange_agrid_scalar_halos,
     exchange_bgrid_scalar_halos,
@@ -89,9 +88,13 @@ def center_a_matrix(gs: dict) -> tuple:
     fv_grid_utils.F90 init_grid_utils:2360-2380: ``z`` = center
     covariant unit basis (``get_center_vect`` ec1/ec2) dotted with the
     geographic unit vectors at agrid; ``a`` = the ±0.5·z / sin_sg(5)
-    pairing.  Valid wherever the mpp-state ``grid``/``agrid``/``sin_sg``
-    halos are real — the whole data domain including corner regions
-    (grid: BGRID fill; agrid: AGRID fill; sin_sg: transport patches).
+    pairing.  ``sin_sg(5)`` is recomputed here from its own definition
+    (``cos_sg(5) = inner(ec1, ec2)``, fv_grid_utils) rather than read
+    from ``gs["sin_sg"]`` — the gridstruct's corner-diagonal slots carry
+    the c_sw transport-patch/tiny-floor conventions (1e-8 at the four
+    (ie+1, je+1)-type cells), which would poison the a-matrix exactly
+    where c2l's do_halo ring needs it.  Valid wherever the mpp-state
+    ``grid``/``agrid`` halos are real — the whole data domain.
     """
     p = _xyz(gs["grid_lon"], gs["grid_lat"])            # corners (m_b, m_b, 3)
     # cell_center3: normalized 4-corner sum
@@ -110,7 +113,8 @@ def center_a_matrix(gs: dict) -> tuple:
     z12 = (ec1 * vlat).sum(-1)
     z21 = (ec2 * vlon).sum(-1)
     z22 = (ec2 * vlat).sum(-1)
-    sin5 = gs["sin_sg"][..., 4]
+    cos5 = (ec1 * ec2).sum(-1)
+    sin5 = np.sqrt(np.maximum(1.0 - cos5 * cos5, 1.0e-30))
     a11 = 0.5 * z22 / sin5
     a12 = -0.5 * z12 / sin5
     a21 = -0.5 * z21 / sin5
@@ -179,6 +183,42 @@ def c2l_ord2_cgrid_face(uc: np.ndarray, vc: np.ndarray, dx: np.ndarray,
 # corner-region Lagrange fill (fill_corner_region / compute_lagrange_coeff)
 # ---------------------------------------------------------------------------
 
+def ext_parity_lonlat_ref(n: int, ng: int, parity: str):
+    """ED EXTENDED lon/lat at a supergrid parity, REFERENCE (FV3 tile)
+    face numbering — the stepper's convention (build_kinked/
+    build_extended_corner_lonlat use raw ``_ED_CARTS``).
+
+    ``_ed_ext_agrid_lonlat``/``_ed_ext_stagger_lonlat`` in
+    fv3_native_halos return the CREATE face layout (perm/rot applied)
+    for the jax pad_halo stack — using those here puts every basis on
+    the wrong face.  Same lattice values, no remap.
+
+    parity "A": (2i, 2j) nodes, (6, n+2ng, n+2ng);
+    parity "B": (2i-1, 2j-1) nodes, (6, n+2ng+1, n+2ng+1).
+    """
+    from legoesm.grids.fv3_native_halos import _ED_CARTS, _ed_line
+
+    line = _ed_line(n, 2 * (ng + 2))
+    if parity == "A":
+        idx = np.arange(1 - ng, n + ng + 1)
+        vals = np.array([line[2 * i] for i in idx])
+    elif parity == "B":
+        idx = np.arange(1 - ng, n + ng + 2)
+        vals = np.array([line[2 * i - 1] for i in idx])
+    else:  # pragma: no cover - guard
+        raise ValueError(parity)
+    xg, yg = np.meshgrid(vals, vals, indexing="ij")
+    m = len(idx)
+    lon6 = np.zeros((6, m, m))
+    lat6 = np.zeros((6, m, m))
+    for t in range(6):
+        cx, cy, cz = _ED_CARTS[t](xg, yg)
+        r = np.sqrt(cx * cx + cy * cy + cz * cz)
+        lon6[t] = np.mod(np.arctan2(cy, cx), 2.0 * np.pi)
+        lat6[t] = np.arcsin(cz / r)
+    return lon6, lat6
+
+
 def _row_arc_coords(lon_row, lat_row):
     """Signed arc-length coordinate along one lattice line.
 
@@ -215,18 +255,29 @@ class _CornerLagrange:
                  istag: int, jstag: int):
         self.n, self.ng = n, ng
         self.istag, self.jstag = istag, jstag
-        # arc coordinates of the ext A lattice rows/cols (create layout,
-        # numpy index = fortran 1-ng .. n+ng)
-        m = n + 2 * ng
+        # abscissa lattice: upstream reads dg%a_pt, which lives on the
+        # ng=4 duo bounds — staggered corner targets reach A index
+        # n+ng+1, one PAST the field's own ng-ring lattice.  a_lon/a_lat
+        # may therefore be built with MORE rings than the field has;
+        # infer the lattice origin from its shape.
+        m_lat = a_lon.shape[0]
+        lat_ng = (m_lat - n) // 2
+        if lat_ng < max(istag, jstag) + _INTERP_ORDER:
+            raise ValueError(
+                f"corner-Lagrange abscissa lattice too small: {m_lat} "
+                f"rows for n={n}, stagger ({istag},{jstag}) — staggered "
+                f"targets read A abscissae to n+stag+{_INTERP_ORDER}")
+        self.glo = 1 - lat_ng                      # lattice Fortran origin
+        self.flo = 1 - ng                          # field Fortran origin
         self.xrow = np.array([_row_arc_coords(a_lon[i, :], a_lat[i, :])
-                              for i in range(m)])       # along j, per row i
+                              for i in range(m_lat)])   # along j, per row i
         self.xcol = np.array([_row_arc_coords(a_lon[:, j], a_lat[:, j])
-                              for j in range(m)])       # along i, per col j
+                              for j in range(m_lat)])   # along i, per col j
 
     def _w_x(self, i_t: int, j_t: int, plus: bool) -> tuple:
         """Weights + source Fortran i-list for an X± fill at (i_t, j_t)."""
-        n, ng = self.n, self.ng
-        lo = 1 - ng
+        n = self.n
+        glo = self.glo
         order = _INTERP_ORDER
         if plus:
             src = list(range(n - order, n + 1))          # ie-3..ie
@@ -237,15 +288,15 @@ class _CornerLagrange:
         # upstream abscissae: a_pt row j (or j-jstag), target index
         # i - istag (X+) / i (X-)  [fv_duogrid.F90:2181-2220]
         j_row = j_t if j_t > n - 1 else j_t - self.jstag
-        row = self.xcol[j_row - lo]
+        row = self.xcol[j_row - glo]
         it = (i_t - self.istag) if plus else i_t
-        xs = np.array([row[s - lo] for s in src])
-        w = _lagrange_w(row[it - lo], xs)
+        xs = np.array([row[s - glo] for s in src])
+        w = _lagrange_w(row[it - glo], xs)
         return w, src_f
 
     def _w_y(self, i_t: int, j_t: int, plus: bool) -> tuple:
-        n, ng = self.n, self.ng
-        lo = 1 - ng
+        n = self.n
+        glo = self.glo
         order = _INTERP_ORDER
         if plus:
             src = list(range(n - order, n + 1))
@@ -254,14 +305,14 @@ class _CornerLagrange:
             src = list(range(1, 1 + order + 1))
             src_f = src
         i_row = i_t if i_t > n - 1 else i_t - self.istag
-        col = self.xrow[i_row - lo]
+        col = self.xrow[i_row - glo]
         jt = (j_t - self.jstag) if plus else j_t
-        xs = np.array([col[s - lo] for s in src])
-        w = _lagrange_w(col[jt - lo], xs)
+        xs = np.array([col[s - glo] for s in src])
+        w = _lagrange_w(col[jt - glo], xs)
         return w, src_f
 
     def _apply_dir(self, f: np.ndarray, i_t: int, j_t: int, direction: str):
-        lo = 1 - self.ng
+        lo = self.flo
         if direction == "X+":
             w, src = self._w_x(i_t, j_t, True)
             vals = np.array([f[s - lo, j_t - lo] for s in src])
@@ -279,7 +330,7 @@ class _CornerLagrange:
     def fill(self, f: np.ndarray):
         """The nine-slot per-corner sequence [fv_duogrid.F90:1743-1901]."""
         n = self.n
-        lo = 1 - self.ng
+        lo = self.flo
         ie = n + self.istag                       # last compute slot
         je = n + self.jstag
         is_, js_ = 1, 1
@@ -344,8 +395,6 @@ def build_ext_context(n: int, ng: int, gs6: list) -> dict:
     - per-stagger corner Lagrange operators on the stepper lattice.
     """
     from legoesm.grids.fv3_native_halos import (
-        _ed_ext_agrid_lonlat,
-        _ed_ext_stagger_lonlat,
         _compute_ext_vectors_native,
     )
 
@@ -354,25 +403,26 @@ def build_ext_context(n: int, ng: int, gs6: list) -> dict:
     dy6 = [np.array(gs["dy"], copy=True) for gs in gs6]
 
     ngp = _NG_P1
-    a_lon4, a_lat4 = _ed_ext_agrid_lonlat(n, ngp)
-    b_lon4, b_lat4 = _ed_ext_stagger_lonlat(n, ngp, "B")
+    a_lon4, a_lat4 = ext_parity_lonlat_ref(n, ngp, "A")
+    b_lon4, b_lat4 = ext_parity_lonlat_ref(n, ngp, "B")
     vlon4, vlat4, ew4, es4 = _compute_ext_vectors_native(
         a_lon4, a_lat4, b_lon4, b_lat4)
 
     # A tables at the ext lattice positions (per-face identical by ED
     # symmetry; stored tile-1) — rings 1..4 for the geographic lattice,
     # rings 1..ng for the stepper-lattice scalar exchanges.
+    # every operator reads its abscissae from the ng=4 A lattice — the
+    # analog of dg%a_pt living on the duo (ng=4) bounds, which staggered
+    # corner targets index one past the field's own ng-ring lattice
     corner_a4 = [_CornerLagrange(a_lon4[t], a_lat4[t], n, ngp, 0, 0)
                  for t in range(6)]
-    a_lon3, a_lat3 = _ed_ext_agrid_lonlat(n, ng)
-    b_lon3, b_lat3 = _ed_ext_stagger_lonlat(n, ng, "B")
-    corner_a3 = [_CornerLagrange(a_lon3[t], a_lat3[t], n, ng, 0, 0)
+    corner_a3 = [_CornerLagrange(a_lon4[t], a_lat4[t], n, ng, 0, 0)
                  for t in range(6)]
-    corner_b3 = [_CornerLagrange(a_lon3[t], a_lat3[t], n, ng, 1, 1)
+    corner_b3 = [_CornerLagrange(a_lon4[t], a_lat4[t], n, ng, 1, 1)
                  for t in range(6)]
-    corner_du3 = [_CornerLagrange(a_lon3[t], a_lat3[t], n, ng, 0, 1)
+    corner_du3 = [_CornerLagrange(a_lon4[t], a_lat4[t], n, ng, 0, 1)
                   for t in range(6)]
-    corner_dv3 = [_CornerLagrange(a_lon3[t], a_lat3[t], n, ng, 1, 0)
+    corner_dv3 = [_CornerLagrange(a_lon4[t], a_lat4[t], n, ng, 1, 0)
                   for t in range(6)]
 
     return {
