@@ -336,6 +336,19 @@ class McFarlaneConfig(NamedTuple):
         ``min(h^2, fcrit2*(U/N)^2)`` (gw_oro.F90:166) so the launched
         streamline-displacement amplitude saturates at the Fr = 1 marginal-
         instability value rather than the raw orographic height.
+    use_e3sm_hdsp : bool
+        When ``True`` form the streamline displacement as E3SM does —
+        ``hdsp = 2*sgh`` (gw_oro.F90:117), i.e. the launch cap becomes
+        ``min((2h)^2, fcrit2*(U/N)^2)`` — closing the declared ~4x
+        launch-amplitude departure (exactly 4x below the Froude cap, equal
+        above it, 1-4x in the band between).  Default ``False`` keeps the
+        legacy direct-``h`` displacement (``h_topo`` effectively a tuned
+        amplitude).  Requires a real per-column ``h_topo_col`` (the wired
+        ``subgrid_topo_stddev``): enabling it on the scalar ``config.h_topo``
+        fallback raises, because quadrupling a uniform 500 m pseudo-mountain
+        would silently quadruple drag over OCEAN (no landfrac factor in this
+        scheme).  Retune ``G_0``/``directional_spread``/``tau_max`` before
+        flipping in production (RCE/AMIP-gated).
     crit_level_sharpness : float
         Sigmoid sharpness [s/m] for the smooth critical-level filter
         (default 10.0).  The orographic wave (phase speed ``c = 0``) has its
@@ -376,6 +389,7 @@ class McFarlaneConfig(NamedTuple):
     softmin_sharpness: float = 50.0
     tau_max: float = 10.0
     fcrit2: float = 1.0
+    use_e3sm_hdsp: bool = False
     crit_level_sharpness: float = 10.0
     crit_level_floor: float = 0.5
     tndmax_per_day: float = 500.0
