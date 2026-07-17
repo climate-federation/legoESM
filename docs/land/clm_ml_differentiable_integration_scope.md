@@ -14,6 +14,32 @@ parameters, so gradients flow through the land column in the ESM's autodiff grap
 > required an upstream fix (`clm-ml-jax`, branch `feat/diff-mode-diagnostics`), which
 > legoESM's interface enforces at runtime via a capability probe.
 
+## Known limitations (as-built, 2026-07-17)
+These are the deliberate boundaries of the shipped differentiable path. Each is
+guarded by a loud error (never a silent wrong answer):
+
+- **Single-column diff only.** The interface runs host-side setup that mutates CLM
+  module globals (topology singletons `patch`/`col`/`grc`, orbital params,
+  `_last_topology_key`), so it is **not** `jax.vmap`-able. `differentiable=True` with
+  `ncol>1` is a hard `ValueError`. Multi-column training must loop columns *outside*
+  `jax.grad` and accumulate per-column gradients. A batched rewrite is the M3
+  follow-up (not yet done).
+- **Warm-start required.** The first (cold) step builds the vertical structure
+  host-side and cannot be on the tape. Grad-ing a cold step (any traced forcing /
+  soil / LAI / trainable leaf) raises a clear "warm-start first" `ValueError`. The
+  documented pattern: one forward step outside the grad region → `extract_clm_ml_grid_info`
+  → grad subsequent steps with `grid_info=`.
+- **Geometry is non-differentiable by design.** `lat`/`lon`/`doy`/`cos_zenith` feed
+  host-side CLM orbital setup; a traced geometry leaf raises (close over it or
+  `stop_gradient`). Physical forcing leaves (T/q/u/v/sw/lw/p/co2) are fully supported.
+- **Performance is compile-bound, not a legoESM-side fix.** The upstream diff path
+  already applies `jax.jit` + `jax.checkpoint` (remat) on the ~20-layer canopy scan
+  (escape: `CLM_ML_NO_CHECKPOINT=1`), so reverse-mode memory is bounded. The ~7-min
+  first-gradient cost is XLA/LLVM **compile** time for that scan, and two grads in one
+  process can exhaust contiguous JIT memory. Mitigation is operational: run gradients
+  in **separate processes** (M1-sized peak). There is no cheap legoESM-side speedup;
+  a real one needs the batched rewrite above.
+
 ## Key discovery (corrects the earlier "not differentiable" claim)
 The `clm-ml-jax` repo (`AyaLahlou/clm-ml-jax`) **already supports a differentiable mode.**
 It is *not* a dead Fortran/NumPy port. The forward-only vs differentiable behaviour is
