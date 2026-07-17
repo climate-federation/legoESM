@@ -169,6 +169,7 @@ def main():
         params = AIMIPClassicalParams.from_defaults()
         train_ic, train_targ, _ic_times = load_training_data(
             spec_cfg, grid, sigma, cache_dir, windows=spec_cfg.windows,
+            host_resident=True,   # non-chunked full-dataset load (#1155)
         )
         dt = spec_cfg.dt
         radiation = str(base.get("aimip_radiation", "gray"))
@@ -185,6 +186,7 @@ def main():
         params_trained, loss_history = _train_spectral_loop(
             params, _make_physics_fn,
             grid, sigma, train_ic, train_targ, spec_cfg,
+            host_staged=True,   # dataset loaded host-resident above (#1155)
         )
 
         # ---- Eval ----

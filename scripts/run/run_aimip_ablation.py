@@ -165,6 +165,7 @@ def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
 
     train_ic, train_targ, _ic_times = load_training_data(
         spec_cfg, grid, sigma, cache_dir, windows=spec_cfg.windows,
+        host_resident=True,   # non-chunked full-dataset load (#1155)
     )
 
     dt = spec_cfg.dt
@@ -182,6 +183,7 @@ def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
     params_trained, loss_history = _train_spectral_loop(
         params, _make_physics_fn,
         grid, sigma, train_ic, train_targ, spec_cfg,
+        host_staged=True,   # dataset loaded host-resident above (#1155)
     )
 
     # Eval on held-out windows.
