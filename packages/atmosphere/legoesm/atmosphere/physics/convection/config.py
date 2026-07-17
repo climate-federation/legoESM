@@ -1524,6 +1524,13 @@ class BechtoldConfig(NamedTuple):
     # Needs the pipeline land_frac kwarg (None => ocean values, legacy).
     # Default False pending validation.
     use_ifs_land_rhebc: bool = False
+    # IFS convective snow: FOEALFCU wet-bulb rain/snow partition + RTAUMEL
+    # melt inside the sub-cloud precip march, FOLD variant (surface snow
+    # forcibly melted into the lowest layer; formation-side freezing heat
+    # paired so column enthalpy closes exactly — see
+    # _ifs_subcloud_rain_evaporation).  Requires use_ifs_subcloud_evap.
+    # Default False pending validation.
+    use_ifs_snow_melt: bool = False
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0

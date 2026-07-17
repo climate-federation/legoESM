@@ -104,6 +104,7 @@ class AMIPExperimentConfig(NamedTuple):
     bechtold_use_ifs_shallow_closure: bool = False
     bechtold_use_ifs_capdcycl: bool = False
     bechtold_use_ifs_land_rhebc: bool = False
+    bechtold_use_ifs_snow_melt: bool = False
     # Convective in-updraft rain-split efficiency [0,1] (shared across the
     # mass-flux schemes); 0 = disabled (legacy no split).
     convective_precip_efficiency: float = 0.0

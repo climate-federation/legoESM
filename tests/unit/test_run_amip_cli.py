@@ -2689,3 +2689,21 @@ def test_bechtold_capdcycl_and_land_rhebc_round_trip():
         back = ExperimentConfig.from_amip_config(flat)
         assert back.bechtold_use_ifs_capdcycl is flag
         assert back.bechtold_use_ifs_land_rhebc is flag
+
+
+def test_bechtold_use_ifs_snow_melt_round_trip():
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-use-ifs-snow-melt"]), parser))
+    assert _resolve_convection(cfg)[1].use_ifs_snow_melt is True
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert _resolve_convection(d)[1].use_ifs_snow_melt is False
+    for flag in (True, False):
+        e = ExperimentConfig(convection="bechtold",
+                             bechtold_use_ifs_snow_melt=flag)
+        assert ExperimentConfig.from_amip_config(
+            e.to_amip_config()).bechtold_use_ifs_snow_melt is flag
