@@ -903,7 +903,10 @@ def build_nemo_gyre_recipe(
             scheme="enhanced_diffusion",
             enhanced_diffusion=EnhancedDiffusionConfig(
                 K_conv=100.0, nu_conv=100.0, K_bg=0.0, nu_bg=0.0,
-                smooth_transition=False, n2_mode="adiabatic")))
+                smooth_transition=False, n2_mode="adiabatic",
+                # NEMO zdfevd MIN(rn2,rn2b): the two-level hysteresis that
+                # prevents per-step EVD flicker (grid-scale w noise; plan §G).
+                two_level_trigger=True)))
     # Coriolis COUPLED with the pressure gradient inside the RK3 momentum stages
     # (coriolis_scheme="explicit_ab2" → f×u enters du_dt, integrated by SSP-RK3),
     # NOT operator-split as a separate Matsuno step after RK3. The split incurs an

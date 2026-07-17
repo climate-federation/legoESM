@@ -107,6 +107,15 @@ class EnhancedDiffusionConfig(NamedTuple):
     # thermocline rebuild (NEMO GYRE fidelity, plan §G). Only consulted on the
     # hard-threshold path (smooth_transition=False).
     n2_threshold: float = 0.0
+    # NEMO zdfevd two-time-level trigger: fire where MIN(rn2, rn2b) < thr —
+    # i.e. where EITHER the now or the before N² is unstable (zdfevd.F90:
+    # MIN(rn2,rn2b) <= -1e-12). The hysteresis keeps EVD on one extra step in
+    # marginal columns, preventing per-step ON/OFF FLICKER of the 100 m²/s
+    # coefficient (a grid-scale noise generator in winter convecting regions).
+    # Implemented as max(K_now, K_before) — equivalent for a hard threshold.
+    # Requires the before-advection tracers (n2_tracers) to be threaded (the
+    # TKE n2_before_advection machinery); silently single-level when absent.
+    two_level_trigger: bool = False
 
 
 class PlumeConfig(NamedTuple):

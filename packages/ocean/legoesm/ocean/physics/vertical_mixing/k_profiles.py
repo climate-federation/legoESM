@@ -251,7 +251,8 @@ def compute_vertical_K_profiles(
                 "vertical_mixing scheme."
             )
         K_conv, A_conv = _enhanced_diffusion_K(state, z_coord, conv,
-                                               eos_fn=eos_fn)
+                                               eos_fn=eos_fn,
+                                               before_tracers=n2_tracers)
         # Convection enhances tracer diffusivity (convective_κz).
         K_v_total = K_v_total + K_conv
         # Momentum gets the independent convective viscosity (convective_νz
@@ -705,7 +706,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
 
 
 def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
-                          eos_fn=None):
+                          eos_fn=None, before_tracers=None):
     """``(K_v, A_v)`` fields used by the ``enhanced_diffusion`` scheme.
 
     Returns the convective tracer diffusivity (``convective_κz``) and the
@@ -748,6 +749,32 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
         rho, z_coord.dz_ref, J, cfg,
         T=state.T.data, S=state.S.data, p_cell=ed_p_cell, eos_fn=eos_fn,
     )
+    if getattr(cfg, "two_level_trigger", False) and before_tracers is not None:
+        # NEMO zdfevd MIN(rn2, rn2b): evaluate the trigger on the BEFORE
+        # tracers too and take the elementwise max of the coefficients —
+        # equivalent to the min-N² trigger for the hard-threshold path.
+        # Prevents per-step ON/OFF flicker of the convective coefficient in
+        # marginal columns (a grid-scale noise source; plan §G).
+        T_b, S_b = before_tracers
+        state_b = state._replace(T=state.T.replace(data=T_b),
+                                 S=state.S.replace(data=S_b))
+        rho_b = _compute_rho(state_b, z_coord, J, eos_fn=eos_fn)
+        ed_p_cell_b = None
+        if getattr(cfg, "n2_mode", "insitu") == "adiabatic":
+            from legoesm.ocean.eos import (
+                compute_hydrostatic_pressure, maybe_partial_h_actual,
+            )
+            ed_h_b = maybe_partial_h_actual(state_b, z_coord)
+            ed_p_cell_b = compute_hydrostatic_pressure(
+                rho_b, state_b.eta.data, z_coord.dz_ref, J,
+                ConstantsConfig().rho_0, h_actual=ed_h_b,
+            )
+        K_b, A_b, _ = convective_K_A_flag(
+            rho_b, z_coord.dz_ref, J, cfg,
+            T=T_b, S=S_b, p_cell=ed_p_cell_b, eos_fn=eos_fn,
+        )
+        K = jnp.maximum(K, K_b)
+        A = jnp.maximum(A, A_b)
     return K, A
 
 

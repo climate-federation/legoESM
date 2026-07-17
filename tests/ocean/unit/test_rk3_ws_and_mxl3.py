@@ -207,3 +207,41 @@ def test_dissipation_discretization_dispatch_and_forms():
     e_be_big = solve("backward_euler", 1.0e5)
     e_sp_big = solve("nemo_1p5_split", 1.0e5)
     assert float(np.max(np.abs(e_be_big - e_sp_big))) > 0.0
+
+
+def test_evd_two_level_trigger():
+    """NEMO zdfevd MIN(rn2,rn2b): with two_level_trigger, a column unstable at
+    EITHER time level fires EVD (max of the two single-level coefficient
+    fields); flag off or before_tracers=None => single-level (bit-identical
+    legacy)."""
+    import jax.numpy as jnp
+    import numpy as np
+
+    from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
+    from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+        _enhanced_diffusion_K,
+    )
+
+    r = build_nemo_gyre_recipe()
+    conv = r.model_config.physics.convection
+    assert conv.enhanced_diffusion.two_level_trigger is True
+    st = r.initial_state  # stably stratified IC
+    nlat, nlon, nlev = st.T.data.shape
+
+    # "before" tracers with an UNSTABLE inversion at one interior cell
+    T_b = st.T.data.at[5, 5, 3].add(-2.0)   # cold above warm -> unstable below
+    S_b = st.S.data
+    K_now, A_now = _enhanced_diffusion_K(st, r.z_coord, conv)
+    K_2lv, A_2lv = _enhanced_diffusion_K(
+        st, r.z_coord, conv, before_tracers=(T_b, S_b))
+    # the before-level instability must fire in the two-level result
+    assert float(jnp.max(K_2lv - K_now)) > 50.0   # K_conv=100 appears
+    # and two-level == max(now, before-only) pointwise
+    st_b = st._replace(T=st.T.replace(data=T_b))
+    K_bef, A_bef = _enhanced_diffusion_K(st_b, r.z_coord, conv)
+    np.testing.assert_allclose(np.asarray(K_2lv),
+                               np.maximum(np.asarray(K_now), np.asarray(K_bef)),
+                               atol=1e-12)
+    # None before_tracers => single-level (legacy)
+    K_none, _ = _enhanced_diffusion_K(st, r.z_coord, conv, before_tracers=None)
+    np.testing.assert_array_equal(np.asarray(K_none), np.asarray(K_now))
