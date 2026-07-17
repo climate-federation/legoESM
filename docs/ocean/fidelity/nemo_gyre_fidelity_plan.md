@@ -351,6 +351,28 @@ ISOLATION EXPERIMENTS (2026-07-16, 5-yr runs + single-column avt certificate):
   MAPS of hi-pass w lego-vs-NEMO (needs a NEMO w snapshot — add w to the
   trend-dump or use a 1-day mean), + NOWIND ablation to split (b)/(c) from
   (a). Harness now dumps state.w (snaps['w']).
+- **IMPLICIT WIND-STRESS DEPOSITION SHIPPED (surface_stress_implicit; review
+  SHIP)** — the wind-path w-noise source fixed: stage-10b's explicit ~0.1 m/s
+  per-step top-cell kick replaced by NEMO's dynzdf arrangement (stress in the
+  implicit solve's top-cell RHS + tau/(rho0 H) in F_slow = stp2d + the
+  stprk3_stg:440 mean imposition, now LOAD-BEARING). Winter w noise HALVED
+  (rms 2.71e-6 -> 1.03e-6, NEMO 6.0e-7; hi-pass 8.78e-7 -> 4.36e-7, NEMO
+  1.12e-7 — residual == the NOWIND buoyancy floor). Momentum input identical
+  to the explicit path (2e-7; no double count — algebra review-verified).
+- **10-YR VERDICT: noise fixed, CORE INVARIANT SURVIVES.** Seasonal
+  thermocline now OVERSHOOTS and keeps climbing (summers 3.98 -> 4.86 by
+  yr 9.5; NEMO equilibrates at 3.17); mid-depth rms 1.19x, barotropic 0.97x;
+  BUT winter retention still 0.00-0.02 every winter for 10 years (NEMO 0.40)
+  and baroclinic u' still exactly 0.71 at yr 10. THE PARADOX localizes the
+  next target: lego builds MORE summer stratification than NEMO yet retains
+  NONE through winter => its summer heat is trapped TOO SHALLOW (above the
+  ~250 m winter mixing reach); NEMO moves summer heat into the 200-400 m
+  band (permanent thermocline) where winter cannot reach. Resolved-scale w
+  is EXACT (ratio 1.00), so the question is the VERTICAL DISTRIBUTION of
+  the seasonal heat gain: compare lego-vs-NEMO summer heat-content profiles
+  in the 100-400 m band (where does the summer heat END UP), then trace the
+  responsible term (vertical advection realization of the doming vs the
+  100-200 m mixing that in NEMO deepens the seasonal thermocline base).
 - **zdftke CODE-TRACE COMPLETE (same session): dissipation_discretization=
   "nemo_1p5_split" implemented (NEMO zfact2/zfact3, on card, tested);
   TKE-first order / positivity=floor / pre_solve shear / -1e-12 threshold /
