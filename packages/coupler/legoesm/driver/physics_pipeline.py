@@ -905,7 +905,12 @@ class PhysicsPipeline:
                 # tile is active, else the ocean bulk scheme) + the held
                 # radiative heating for the sub-cloud convergence term.
                 _extra_conv = {}
-                if getattr(_conv_cfg, "use_ifs_shallow_closure", False):
+                _need_sfc_inputs = (
+                    getattr(_conv_cfg, "use_ifs_shallow_closure", False)
+                    or getattr(_conv_cfg, "use_ifs_capdcycl", False)
+                    or getattr(_conv_cfg, "use_ifs_land_rhebc", False)
+                )
+                if _need_sfc_inputs:
                     # Fail loudly at trace time: the closure's bulk fluxes
                     # need a surface-layer config (codex R1 #1 — a None
                     # turbulence_config crashed opaque on .surface).
@@ -954,9 +959,14 @@ class PhysicsPipeline:
                             _u_low, _v_low, _T_low, _q_low,
                             _T_sfc_c, _q_sfc_c, _rho_low,
                             self.turbulence_config.surface)
+                    _land_c = (
+                        ad.flatten_2d(self.f_land)
+                        if self.f_land is not None
+                        else jnp.zeros((ad.ncol,), dtype=T_col.dtype))
                     _extra_conv = dict(
                         shf_w_m2=_shf_c, lhf_w_m2=_lhf_c,
-                        dT_dt_rad=ad.flatten_3d(dT_dt_rad))
+                        dT_dt_rad=ad.flatten_3d(dT_dt_rad),
+                        land_frac=_land_c)
                 conv_out, conv_prog_out, _ = self.convection_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
@@ -2675,6 +2685,10 @@ def _resolve_convection(config):
                 config, 'bechtold_use_ifs_downdraft', False),
             use_ifs_shallow_closure=getattr(
                 config, 'bechtold_use_ifs_shallow_closure', False),
+            use_ifs_capdcycl=getattr(
+                config, 'bechtold_use_ifs_capdcycl', False),
+            use_ifs_land_rhebc=getattr(
+                config, 'bechtold_use_ifs_land_rhebc', False),
         )
         if _pe is not None:
             _bechtold_kwargs["precip_efficiency"] = _pe

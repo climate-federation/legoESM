@@ -753,6 +753,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "--no-bechtold-use-ifs-downdraft disables a "
                              "config-file default. Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_downdraft}.")
+    parser.add_argument("--bechtold-use-ifs-capdcycl",
+                        dest="bechtold_use_ifs_capdcycl",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_capdcycl,
+                        help="Enable the IFS RCAPDCYCL=2 diurnal-cycle CAPE "
+                             "correction (openifs cumastrn.F90:780-833; land "
+                             "deep convection peaks late afternoon). Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_capdcycl}.")
+    parser.add_argument("--bechtold-use-ifs-land-rhebc",
+                        dest="bechtold_use_ifs_land_rhebc",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_land_rhebc,
+                        help="Enable the IFS land RH break for sub-cloud rain "
+                             "evaporation (cuflxn.F90 0.70/0.75 land vs "
+                             "0.85/0.92 ocean). Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_land_rhebc}.")
     parser.add_argument("--bechtold-use-ifs-shallow-closure",
                         dest="bechtold_use_ifs_shallow_closure",
                         action=argparse.BooleanOptionalAction,
@@ -1547,6 +1563,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_dx_m=args.bechtold_dx_m,
         bechtold_use_ifs_downdraft=args.bechtold_use_ifs_downdraft,
         bechtold_use_ifs_shallow_closure=args.bechtold_use_ifs_shallow_closure,
+        bechtold_use_ifs_capdcycl=args.bechtold_use_ifs_capdcycl,
+        bechtold_use_ifs_land_rhebc=args.bechtold_use_ifs_land_rhebc,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
         latlon_spmd_compiled_segments=args.latlon_spmd_compiled_segments,

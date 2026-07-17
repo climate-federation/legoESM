@@ -347,6 +347,18 @@ _IFS_SHALLOW_ZDQMIN_MIN = 1.0e-10
 _IFS_SHALLOW_DH_FLOOR = 1.0e5     # ZDH = RG*MAX(ZDH, 1e5*ZDQMIN) (:554)
 _SHALLOW_SUPPLY_GATE_W_M2 = 1.0   # smooth ZDHPBL>0 kill width (numerics)
 
+# --- IFS diurnal-cycle CAPE correction RCAPDCYCL=2 (cumastrn.F90:762-833) ---
+_IFS_RMINCAPE = 0.05              # fraction of CAPE always adjusted (sucumf.F90:221)
+_IFS_CAPDCYCL_DEPART_DP_PA = 50.0e2   # LLO1: departure within 50 hPa of sfc (:780)
+_IFS_CAPDCYCL_ZMAX_M = 1.0e4      # MIN(1e4, z_base) height cap (:782,:791)
+_IFS_CAPDCYCL_DUTEN_BASE = 2.0    # ZDUTEN = 2 + sqrt(...) (:790)
+_IFS_NJKT3_PA = 950.0e2           # ocean-branch upper wind level (sucumf.F90:268)
+_CAPDCYCL_GATE_W_PA = 5.0e2       # smooth width of the 50 hPa departure gate
+
+# --- IFS land RHEBC (sub-cloud evap RH break over land, cuflxn.F90:222-223) ---
+_IFS_RHEBC_LAND = 0.75
+_IFS_RHEBC_LAND_DEEP = 0.70
+
 
 def _ifs_ztaures(dx_m: float) -> float:
     """IFS ZTAURES resolution factor for the turnover time (cumastrn.F90:713,762-768).
@@ -1097,6 +1109,7 @@ def _ifs_subcloud_rain_evaporation(
     rh_cloud_top: jax.Array,
     deep_weight: jax.Array,
     dt: float,
+    land_frac: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     r"""IFS Kessler sub-cloud evaporation of convective rain (cuflxn.F90:436-475).
 
@@ -1180,10 +1193,21 @@ def _ifs_subcloud_rain_evaporation(
         deep_weight * (_IFS_RCUCOV * _IFS_RCUCOV_DEEP_FACTOR)
         + (1.0 - deep_weight) * area_nondeep
     ).astype(_dtype)                                           # (ncol,)
-    rhebc = (
+    rhebc_ocean = (
         deep_weight * _IFS_RHEBC_OCEAN_DEEP
         + (1.0 - deep_weight) * _IFS_RHEBC_OCEAN
-    ).astype(_dtype)                                           # (ncol,)
+    )
+    if land_frac is not None:
+        # Land RH break (cuflxn.F90:222-223): 0.70 deep / 0.75 non-deep —
+        # evaporation stops EARLIER over land; fractional tile blend.
+        rhebc_land = (
+            deep_weight * _IFS_RHEBC_LAND_DEEP
+            + (1.0 - deep_weight) * _IFS_RHEBC_LAND
+        )
+        rhebc = (land_frac * rhebc_land
+                 + (1.0 - land_frac) * rhebc_ocean).astype(_dtype)
+    else:
+        rhebc = rhebc_ocean.astype(_dtype)                     # (ncol,)
     zcons2 = 1.0 / (g * dt)                                    # RMFCFL=1 branch
 
     src_flux = jnp.maximum(dq_r_conv_dt, 0.0) * dp_full / g    # (ncol, nlev)
@@ -1254,6 +1278,7 @@ def _ifs_cape_closure_target(
     tau_conv: jax.Array,
     M_b_fg: jax.Array,
     cape_weight: jax.Array,
+    zcapdcycl: jax.Array | None = None,
 ) -> jax.Array:
     r"""IFS deep-convection CAPE-closure cloud-base mass flux (cumastrn.F90:704-833).
 
@@ -1345,6 +1370,14 @@ def _ifs_cape_closure_target(
     )
     zcape = jnp.sum(in_cloud[:, 1:] * buoy * dp_lev, axis=-1)
     zcape = jnp.clip(zcape, 0.0, _IFS_ZCAPE_MAX_PA)
+    if zcapdcycl is not None:
+        # RCAPDCYCL diurnal subtraction (cumastrn.F90:818-823): bounded below
+        # by -2*ZCAPE (a nocturnal negative supply may at most double the
+        # CAPE) and the result floored at RMINCAPE*ZCAPE — a fraction of the
+        # instability is always adjusted.  (Our RCAPQADV path is absent, so
+        # ZCAPE2 == ZCAPE.)
+        zdcy = jnp.maximum(zcapdcycl, -2.0 * zcape)
+        zcape = jnp.maximum(_IFS_RMINCAPE * zcape, zcape - zdcy)
 
     # ZHEAT: environment stability consumption per unit overturning.
     # Neighbor differences k-1 (above) minus k, aligned to levels 1..nlev-1.
@@ -1471,6 +1504,59 @@ def _ifs_shallow_pbl_target(
     target = jnp.minimum(supply_w_m2 / dh, zmfmax)
     return jnp.maximum(target, 0.0) * jax.nn.sigmoid(
         supply_w_m2 / _SHALLOW_SUPPLY_GATE_W_M2)
+
+
+def _ifs_capdcycl(
+    supply_virt_w_m2: jax.Array,
+    tau_conv: jax.Array,
+    z_base: jax.Array,
+    u: jax.Array,
+    v: jax.Array,
+    base_w: jax.Array,
+    p_full: jax.Array,
+    land_frac: jax.Array,
+    gate_w: jax.Array,
+) -> jax.Array:
+    r"""IFS RCAPDCYCL=2 diurnal-cycle CAPE subtraction (cumastrn.F90:780-793).
+
+    ``ZCAPDCYCL`` removes the sub-cloud CAPE *production* of the other
+    processes over a boundary-layer timescale so surface-rooted deep
+    convection over land peaks in the late afternoon instead of noon
+    (Bechtold et al. 2014):
+
+    * LAND: ``ZCAPPBL * ZTAU/ZTAURES`` — the pure turnover time (our
+      ``tau_conv`` carries ZTAURES=1 unless ``dx_m`` is set; the oracle
+      divides ZTAURES back out, so we pass the UNSCALED turnover time).
+    * OCEAN: ``ZCAPPBL * ZTAUPBL`` with ``ZTAUPBL = min(1e4, z_base) /
+      ZDUTEN`` and ``ZDUTEN = 2 + sqrt(0.5*(|U_base|^2 + |U_950|^2))``.
+
+    ``ZCAPPBL`` (cumastrn:468-484) is the sub-cloud integral of the
+    non-convective VIRTUAL-temperature tendency in dp; in flux form the
+    turbulent part telescopes to the surface kinematic virtual heat flux
+    (``ZKHVFL``, :472), so the caller supplies ``supply_virt_w_m2 =
+    g*(SHF/c_p + RETV*T_low*LHF/L_v) + subcloud radiative part`` [K*Pa/s]
+    — the same flux-form doctrine (and departures) as the shallow ZDHPBL.
+    The discrete ``LLO1`` (departure within 50 hPa of the surface) arrives
+    as the smooth ``gate_w``; land/ocean is the fractional tile blend.
+
+    Returns ``zcapdcycl`` [K*Pa] >= bounded later by ``max(., -2*zcape)``.
+    """
+    z_pbl = jnp.minimum(z_base, _IFS_CAPDCYCL_ZMAX_M)
+    # ocean wind speed: cloud-base + ~950 hPa soft-gathered winds.
+    w950 = jax.nn.softmax(
+        -((p_full - _IFS_NJKT3_PA) / (2.0 * _CAPDCYCL_GATE_W_PA)) ** 2,
+        axis=-1)
+    u_b = jnp.sum(base_w * u, axis=-1)
+    v_b = jnp.sum(base_w * v, axis=-1)
+    u_9 = jnp.sum(w950 * u, axis=-1)
+    v_9 = jnp.sum(w950 * v, axis=-1)
+    zduten = _IFS_CAPDCYCL_DUTEN_BASE + jnp.sqrt(
+        0.5 * (u_b**2 + v_b**2 + u_9**2 + v_9**2) + 1e-12)
+    ztaupbl = z_pbl / zduten
+    zcap_land = supply_virt_w_m2 * tau_conv
+    zcap_ocean = supply_virt_w_m2 * ztaupbl
+    return gate_w * (land_frac * zcap_land
+                     + (1.0 - land_frac) * zcap_ocean)
 
 
 def _ifs_cape_closure_scale(
@@ -1636,6 +1722,7 @@ def bechtold_convection(
     shf_w_m2: jax.Array | None = None,
     lhf_w_m2: jax.Array | None = None,
     dT_dt_rad: jax.Array | None = None,
+    land_frac: jax.Array | None = None,
 ) -> tuple[ConvectionOutput, jax.Array, jax.Array]:
     """Bechtold/IFS convection (smooth, differentiable).
 
@@ -1686,6 +1773,12 @@ def bechtold_convection(
             "use_ifs_shallow_closure requires use_ifs_cape_closure=True "
             "(the shallow target is applied through the IFS closure's "
             "class blend); enable both or neither."
+        )
+    if config.use_ifs_capdcycl and not config.use_ifs_cape_closure:
+        raise ValueError(
+            "use_ifs_capdcycl requires use_ifs_cape_closure=True (the "
+            "diurnal correction subtracts from the closure's ZCAPE); "
+            "enable both or neither."
         )
 
     # -- Column geometry, moist adiabat, CAPE ------------------------------
@@ -2192,10 +2285,40 @@ def bechtold_convection(
         _top_gate = stratosphere_mass_flux_gate(p_full, config.p_conv_top_pa)
         M_u_capped_fg = jnp.minimum(plume.M_u, config.M_b_max)
         M_u_closure_fg = M_u_capped_fg * _top_gate**2
+        _zdcy = None
+        if (config.use_ifs_capdcycl and shf_w_m2 is not None
+                and lhf_w_m2 is not None and land_frac is not None):
+            # RCAPDCYCL=2 diurnal correction: sub-cloud virtual-tendency
+            # supply in flux form (ZKHVFL identity, cumastrn.F90:472) +
+            # sub-cloud radiative part; departure-near-surface gate on the
+            # parcel source pressure (LLO1, :780).
+            _base_w2 = jax.nn.softmax(
+                -2.0 * (levels_arr[None, :] - k_lcl_smooth[:, None]) ** 2,
+                axis=-1)
+            _subcloud_w2 = jax.nn.sigmoid(
+                config.lcl_membership_sharpness
+                * (levels_arr[None, :] - k_lcl_smooth[:, None]))
+            _rad2 = dT_dt_rad if dT_dt_rad is not None else jnp.zeros_like(T)
+            _supply_virt = (
+                constants.g * (shf_w_m2 / constants.c_pd
+                               + _IFS_RETV * T[:, -1]
+                               * lhf_w_m2 / constants.L_v)
+                + jnp.sum(_subcloud_w2 * _rad2 * dp_full, axis=-1)
+            )                                        # [K*Pa/s]
+            _z_base = jnp.sum(_base_w2 * z, axis=-1)
+            _gate_w = jax.nn.sigmoid(
+                (_IFS_CAPDCYCL_DEPART_DP_PA
+                 - (p_half[:, -1] - p_parcel_source))
+                / _CAPDCYCL_GATE_W_PA)
+            _zdcy = _ifs_capdcycl(
+                _supply_virt, tau_conv, _z_base, u, v, _base_w2, p_full,
+                land_frac, _gate_w,
+            )
         M_b_target = _ifs_cape_closure_target(
             T, q_v, z, p_full,
             plume.T_u, plume.q_u, plume.q_c_u, M_u_closure_fg, M_d_fg,
             in_cloud, tau_conv, M_b, cape_weight,
+            zcapdcycl=_zdcy,
         )
         # The rescale divides by the flux the plume was ACTUALLY launched with
         # (M_b_launch), so M_u * mb_scale realizes the target profile; the
@@ -2526,6 +2649,7 @@ def bechtold_convection(
         evap_rate_ifs, rain_scale_ifs = _ifs_subcloud_rain_evaporation(
             q_v, _q_sat_evap, p_half, dp_full, dq_r_conv_dt,
             _below_lcl_evap, _rh_base, _rh_top, deep_weight, dt,
+            land_frac=(land_frac if config.use_ifs_land_rhebc else None),
         )
         dT_dt = dT_dt - (constants.L_v / constants.c_pd) * evap_rate_ifs
         dq_v_dt = dq_v_dt + evap_rate_ifs
