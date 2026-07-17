@@ -64,8 +64,10 @@ deliberate departures / version choices (canaries in
   no spatially-varying heat capacity.)
 * **Frontal cos(lat) taper is DYCORE-dependent in E3SM** (gw_drag.F90:829-833:
   ``do_latitude_taper = .not. dycore_is('UNSTRUCTURED')``) — ON for
-  structured lat-lon, OFF for the unstructured SE dycore E3SM v3 runs in
-  production.  legoESM's cubed-sphere/icosahedral/MPAS grids correspond to
+  structured lat-lon, OFF for the unstructured (SE-family) dycore.  (Which
+  dycore a given E3SM production campaign ran is NOT provable from the
+  vendored source tree — same epistemic status as the ``use_gw_energy_fix``
+  XML ambiguity.)  legoESM's cubed-sphere/icosahedral/MPAS grids correspond to
   the UNSTRUCTURED branch, so the E3SM-equivalent setting there is
   ``frontal.latitude_taper=False``; the DEFAULT ``True`` (legacy) tapers
   frontal drag → 0 toward the poles — a first-order high-latitude

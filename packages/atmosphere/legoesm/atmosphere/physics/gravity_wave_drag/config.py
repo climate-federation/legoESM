@@ -547,7 +547,9 @@ class E3SMFrontalConfig(NamedTuple):
         Apply the ``cos(lat)`` polar taper to the frontal tendencies.  E3SM
         sets this BY DYCORE (gw_drag.F90:829-833: ``do_latitude_taper =
         .not. dycore_is('UNSTRUCTURED')``): ``True`` on structured lat-lon
-        grids, ``False`` on the unstructured SE/production dycore.  legoESM's
+        grids, ``False`` on the unstructured (SE-family) dycore — which
+        dycore a production campaign ran is not provable from the vendored
+        tree.  legoESM's
         cubed-sphere / icosahedral / MPAS grids correspond to the
         UNSTRUCTURED branch, so the E3SM-equivalent value there is
         ``False`` — the default ``True`` (legacy, matches E3SM structured)
