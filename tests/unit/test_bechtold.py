@@ -2578,6 +2578,12 @@ def test_ifs_shallow_pbl_target_oracle_pin():
     dead = _ifs_shallow_pbl_target(jnp.array([-25.0]), T, q, T_u, q_u,
                                    q_c_u, base_w, dp, dt)
     assert float(dead[0]) < 1e-10
+    # sigmoid onset: just-positive supply is suppressed SUPER-linearly
+    # (the smooth analog of the discrete kill boundary).
+    tiny_sup = _ifs_shallow_pbl_target(jnp.array([0.3]), T, q, T_u, q_u,
+                                       q_c_u, base_w, dp, dt)
+    lin = expected * 0.3 / 150.0
+    assert float(tiny_sup[0]) < 0.75 * lin
     # huge supply: the CFL cap binds.
     capped = _ifs_shallow_pbl_target(jnp.array([1.0e6]), T, q, T_u, q_u,
                                      q_c_u, base_w, dp, dt)

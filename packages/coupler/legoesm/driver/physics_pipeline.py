@@ -906,16 +906,41 @@ class PhysicsPipeline:
                 # radiative heating for the sub-cloud convergence term.
                 _extra_conv = {}
                 if getattr(_conv_cfg, "use_ifs_shallow_closure", False):
+                    # Fail loudly at trace time: the closure's bulk fluxes
+                    # need a surface-layer config (codex R1 #1 — a None
+                    # turbulence_config crashed opaque on .surface).
+                    if (not (self.surface_tiled and self.f_land is not None)
+                            and getattr(self.turbulence_config, "surface",
+                                        None) is None):
+                        raise ValueError(
+                            "use_ifs_shallow_closure needs bulk surface "
+                            "fluxes: configure a turbulence scheme (its "
+                            "SurfaceLayerConfig supplies the exchange "
+                            "coefficients) or enable the tiled land surface."
+                        )
                     _T_low = T_col[:, -1]
                     _q_low = q_v_col[:, -1]
                     _u_low = u_conv_col[:, -1]
                     _v_low = v_conv_col[:, -1]
-                    _rho_low = p_s_col / (
-                        constants.R_d * jnp.maximum(_T_low, 1.0))
+                    # SAME density the applied-flux path uses (lowest FULL
+                    # level, not p_s — codex R1 #3).
+                    _rho_low = rho_col_phys[:, -1]
                     if self.surface_tiled and self.f_land is not None:
+                        # SAME mosaic arguments as the turbulence path
+                        # (beta-limited land evaporation + multilayer q_sfc
+                        # override — codex R1 #2: omitting them treated land
+                        # as saturated and overstated the supply).
+                        _q_sfc_land_ml = (
+                            self._land_qsfc_multilayer(
+                                land_ml, T_land, p_s,
+                                land_ml_params=land_ml_params)
+                            if land_ml is not None else None
+                        )
                         _, _, _shf_c, _lhf_c, _ = self._tiled_surface_flux(
                             _u_low, _v_low, _T_low, _q_low, _rho_low,
-                            sst, sic, T_land, p_s)
+                            sst, sic, T_land, p_s,
+                            beta_land=beta_land,
+                            q_sfc_land_override=_q_sfc_land_ml)
                     else:
                         from legoesm.atmosphere.physics.turbulence.surface_layer import (  # noqa: E501
                             compute_surface_fluxes)

@@ -1447,7 +1447,10 @@ def _ifs_shallow_pbl_target(
     half-level env stood in by the base-gathered full-level state — the
     shipped closure approximation), floored at ``1e5*max(0.01*q_base,
     1e-10)`` exactly as cumastrn:552-554.  The oracle's discrete
-    ``ZDHPBL <= 0 => LDCUM=F`` kill becomes a sigmoid on the supply.
+    ``ZDHPBL <= 0 => LDCUM=F`` kill is realized by the ``max(target, 0)``
+    (hard zero for non-positive supply, like the oracle); the sigmoid only
+    SOFTENS THE ONSET just above zero supply so the gradient through the
+    kill is finite (numerics, not the kill itself).
     Downdraft correction (ZEPS, cumastrn:846-852) omitted: the base flux of
     our downdraft is available only when use_ifs_downdraft is on — deferred.
 
@@ -1513,8 +1516,14 @@ def _ifs_cape_closure_scale(
         jnp.minimum(shallow_target, M_b_max) / launch_div,
         jnp.zeros_like(M_b_launch),
     )
-    mid_weight = jnp.clip(1.0 - deep_weight - shallow_weight, 0.0, 1.0)
-    return (deep_weight * s_deep + shallow_weight * s_shallow
+    # Convexity guard (codex R1 #4): tuned depth thresholds can make
+    # deep_weight + shallow_weight > 1 on transitional clouds; normalize the
+    # class shares so the blend never double-counts mass flux.
+    _tot = jnp.maximum(deep_weight + shallow_weight, 1.0)
+    deep_n = deep_weight / _tot
+    shallow_n = shallow_weight / _tot
+    mid_weight = jnp.clip(1.0 - deep_n - shallow_n, 0.0, 1.0)
+    return (deep_n * s_deep + shallow_n * s_shallow
             + mid_weight * s_base)
 
 
