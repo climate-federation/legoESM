@@ -33,6 +33,11 @@ def test_defaults_parse():
     assert cfg.leads_hours == (24, 72, 120, 240)
     assert cfg.config_path.endswith("spectral_t63.yaml")
     assert cfg.sota_csv and cfg.sota_csv.endswith(".csv")
+    # n_epochs / eval_year resolve from the campaign YAML when the CLI omits
+    # them, so the declared experiment is what actually runs.
+    assert cfg.n_epochs == 12           # spectral_t63.yaml n_epochs
+    assert cfg.eval_year == 2020        # spectral_t63.yaml eval_years[0]
+    assert cfg.allow_missing_artifacts is False
 
 
 def test_modes_subset_and_dedup():
@@ -75,16 +80,26 @@ def test_build_train_argv():
     assert argv[:4] == ["--config", cfg.config_path, "--mode", "neural_gcm"]
     assert "--training-core" in argv and "spectral" in argv
     assert "--out" in argv and "/tmp/wb/neural_gcm" in argv
-    assert "--resume" in argv
-    assert argv[argv.index("--epochs") + 1] == "3"
+    # No --resume: the trainer parses but never honors it, so we don't advertise
+    # a restart-chaining contract it doesn't keep.
+    assert "--resume" not in argv
+    assert argv[argv.index("--epochs") + 1] == "3"   # CLI override wins
     assert "--smoke" in argv
 
 
-def test_build_train_argv_no_epochs_no_smoke():
+def test_build_train_argv_epochs_from_yaml():
+    # CLI omits --epochs -> the YAML n_epochs (12) is forwarded so the trainer
+    # runs the declared length, not its own 40-epoch default.
     cfg = C.build_campaign_config_from_args([])
     argv = C.build_train_argv(cfg, "physics")
-    assert "--epochs" not in argv   # default: use the YAML value
+    assert argv[argv.index("--epochs") + 1] == "12"
     assert "--smoke" not in argv
+
+
+def test_allow_missing_artifacts_flag():
+    assert C.build_campaign_config_from_args([]).allow_missing_artifacts is False
+    cfg = C.build_campaign_config_from_args(["--allow-missing-artifacts"])
+    assert cfg.allow_missing_artifacts is True
 
 
 def test_build_eval_argv():
@@ -100,10 +115,11 @@ def test_build_eval_argv():
     assert argv[argv.index("--out") + 1] == "/tmp/wb/sfno/scorecard.json"
 
 
-def test_build_eval_argv_omits_year_when_unset():
+def test_build_eval_argv_year_from_yaml():
+    # CLI omits --eval-year -> YAML eval_years[0] (2020) is forwarded.
     cfg = C.build_campaign_config_from_args([])
     argv = C.build_eval_argv(cfg, "physics", "/tmp/c.eqx")
-    assert "--eval-year" not in argv   # default: YAML eval_years[0]
+    assert argv[argv.index("--eval-year") + 1] == "2020"
 
 
 def test_build_plot_argv():

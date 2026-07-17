@@ -65,6 +65,7 @@ class CampaignConfig(NamedTuple):
     training_core: str
     out_root: str
     n_epochs: int | None
+    allow_missing_artifacts: bool
     leads_hours: tuple
     eval_year: int | None
     n_inits: int
@@ -95,6 +96,23 @@ def _parse_list(s, valid, name):
     seen: set = set()
     ordered = tuple(x for x in items if not (x in seen or seen.add(x)))
     return ordered
+
+
+def _load_campaign_yaml(config_path) -> dict:
+    """Load the campaign YAML (import-light, JAX-free). Missing file is a hard
+    error — the config is required for every stage and drives the declared
+    experiment; a silent default would defeat the controlled comparison."""
+    path = config_path
+    if not os.path.exists(path) and not os.path.isabs(path):
+        # Fall back to a repo-root-relative lookup so the default resolves
+        # regardless of the CWD pytest / a login shell runs from.
+        alt = _REPO / path
+        if alt.exists():
+            path = str(alt)
+    if not os.path.exists(path):
+        raise SystemExit(f"--config {config_path!r} not found")
+    import yaml
+    return yaml.safe_load(open(path)) or {}
 
 
 def build_campaign_config_from_args(argv=None) -> CampaignConfig:
@@ -131,6 +149,11 @@ def build_campaign_config_from_args(argv=None) -> CampaignConfig:
                    help="Scorecard metric to plot.")
     p.add_argument("--smoke", action="store_true",
                    help="Tiny wiring check: forwards --smoke to the trainer.")
+    p.add_argument("--allow-missing-artifacts", action="store_true",
+                   dest="allow_missing_artifacts",
+                   help="Do not fail the campaign when a requested eval finds no "
+                        "checkpoint / plot finds no scorecards (default: hard error "
+                        "so a failed stage is never reported as success).")
     a = p.parse_args(argv)
 
     if a.n_epochs is not None and a.n_epochs < 1:
@@ -140,15 +163,33 @@ def build_campaign_config_from_args(argv=None) -> CampaignConfig:
     if a.init_stride_hours < 1:
         raise SystemExit(f"--init-stride-hours must be >= 1, got {a.init_stride_hours}")
 
+    # Resolve n_epochs / eval_year from the campaign YAML when the CLI omits
+    # them, so the DECLARED experiment (the whole point of the controlled
+    # comparison) is what actually runs — otherwise the trainer/eval defaults
+    # silently override the YAML and every family runs a different-length job
+    # than the config says. CLI flag still wins for a one-off override.
+    yml = _load_campaign_yaml(a.config)
+    n_epochs = a.n_epochs
+    if n_epochs is None and yml.get("n_epochs") is not None:
+        n_epochs = int(yml["n_epochs"])
+        if n_epochs < 1:
+            raise SystemExit(f"{a.config}: n_epochs must be >= 1, got {n_epochs}")
+    eval_year = a.eval_year
+    if eval_year is None:
+        _years = yml.get("eval_years")
+        if _years:
+            eval_year = int(_years[0])
+
     return CampaignConfig(
         config_path=a.config,
         modes=_parse_list(a.modes, VALID_MODES, "modes"),
         stages=_parse_list(a.stages, VALID_STAGES, "stages"),
         training_core=a.training_core,
         out_root=a.out_root,
-        n_epochs=a.n_epochs,
+        n_epochs=n_epochs,
+        allow_missing_artifacts=a.allow_missing_artifacts,
         leads_hours=_parse_csv_ints(a.leads, "leads"),
-        eval_year=a.eval_year,
+        eval_year=eval_year,
         n_inits=a.n_inits,
         init_stride_hours=a.init_stride_hours,
         resolution_deg=a.resolution_deg,
@@ -174,7 +215,10 @@ def build_train_argv(cfg: CampaignConfig, mode: str) -> list:
         "--mode", mode,
         "--training-core", cfg.training_core,
         "--out", mode_out_dir(cfg.out_root, mode),
-        "--resume",                      # idempotent restart-chaining
+        # NOTE: no --resume. train_weatherbench_scale parses the flag but never
+        # acts on it (no checkpoint restore), so passing it advertised a
+        # restart-chaining contract the trainer does not honor. Omit until the
+        # trainer implements resume; a restart currently retrains from scratch.
     ]
     if cfg.n_epochs is not None:
         argv += ["--epochs", str(cfg.n_epochs)]
@@ -234,11 +278,12 @@ def _barrier(nproc):
     """
     if nproc <= 1:
         return
-    try:
-        from mpi4py import MPI
-        MPI.COMM_WORLD.Barrier()
-    except Exception:  # pragma: no cover - MPI absent in the serial path
-        pass
+    # Under multi-rank, the barrier is load-bearing: rank 0 must NOT start eval
+    # until every rank has flushed its checkpoints. Let an import/barrier failure
+    # RAISE — swallowing it would let rank 0 evaluate incomplete checkpoints and
+    # still exit successfully.
+    from mpi4py import MPI
+    MPI.COMM_WORLD.Barrier()
 
 
 def run_campaign(cfg: CampaignConfig):
@@ -271,6 +316,7 @@ def run_campaign(cfg: CampaignConfig):
 
     # --- EVAL + PLOT (rank 0 only; single-process) ---
     family_scorecards: dict = {}
+    missing: list = []
     if rank == 0:
         if "eval" in cfg.stages:
             for mode in cfg.modes:
@@ -279,6 +325,7 @@ def run_campaign(cfg: CampaignConfig):
                     log.warning("=== EVAL %s SKIPPED: no checkpoint in %s "
                                 "(train it first) ===",
                                 mode, mode_out_dir(cfg.out_root, mode))
+                    missing.append(f"eval:{mode} (no checkpoint)")
                     continue
                 log.info("=== EVAL %s (ckpt=%s) ===", mode, ckpt)
                 evaler.main(build_eval_argv(cfg, mode, ckpt))
@@ -294,6 +341,7 @@ def run_campaign(cfg: CampaignConfig):
             if not family_scorecards:
                 log.warning("=== PLOT SKIPPED: no family scorecards found under %s ===",
                             cfg.out_root)
+                missing.append("plot (no family scorecards)")
             else:
                 # Drop a missing SOTA CSV to a families-only plot rather than
                 # letting load_sota_headline raise FileNotFoundError — the CSV is
@@ -310,6 +358,16 @@ def run_campaign(cfg: CampaignConfig):
                 log.info("=== PLOT %d families -> %s ===",
                          len(family_scorecards), out_png)
                 plotter.main(build_plot_argv(plot_cfg, family_scorecards, out_png))
+
+        # A requested stage that produced nothing is a FAILURE, not a success:
+        # otherwise a diverged/OOM training run (no checkpoint) or a missing
+        # scorecard would exit 0 and read as "campaign done".
+        if missing and not cfg.allow_missing_artifacts:
+            raise SystemExit(
+                "WB campaign: requested artifacts missing: "
+                + "; ".join(missing)
+                + " (pass --allow-missing-artifacts to downgrade to a warning)."
+            )
 
     return family_scorecards
 
