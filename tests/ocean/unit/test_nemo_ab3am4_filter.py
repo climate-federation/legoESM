@@ -79,3 +79,184 @@ def test_wide_halo_rejected_and_filter_typo_raises():
             r.model_config._replace(
                 barotropic=r.model_config.barotropic._replace(
                     barotropic_time_filter="typo")))
+
+
+def test_ramp_false_gives_full_rows():
+    """ramp=False (continuation windows): full AB3/AM4 coefficients from
+    substep 0 — no ll_init override."""
+    za_r, zb_r = nemo_ab3am4_coeff_arrays(4, ramp=True)
+    za_f, zb_f = nemo_ab3am4_coeff_arrays(4, ramp=False)
+    np.testing.assert_allclose(np.asarray(za_f)[0], _NEMO_AB3_ZA, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(za_f)[1], _NEMO_AB3_ZA, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(zb_f)[0], np.asarray(zb_f)[2], atol=0)
+    # ramp arrays differ on exactly the first two rows
+    np.testing.assert_allclose(np.asarray(za_r)[2:], np.asarray(za_f)[2:], atol=0)
+    assert not np.allclose(np.asarray(zb_r)[:2], np.asarray(zb_f)[:2])
+
+
+def _gyre_solver_setup():
+    """Recipe grid/config + a nonzero (eta, u, v) rest-perturbed state."""
+    import jax.numpy as jnp
+
+    from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
+
+    r = build_nemo_gyre_recipe()
+    st = r.initial_state
+    n_lat, n_lon = st.T.data.shape[0], st.T.data.shape[1]
+    nlev = st.T.data.shape[2]
+    y, x = np.meshgrid(np.linspace(-1, 1, n_lat), np.linspace(-1, 1, n_lon),
+                       indexing="ij")
+    eta0 = 0.05 * np.exp(-4.0 * (x**2 + y**2)) * np.asarray(st.land_mask.data)
+    rng = np.random.default_rng(7)
+    u0 = 0.01 * rng.standard_normal((n_lat, n_lon + 1, nlev))
+    v0 = 0.01 * rng.standard_normal((n_lat + 1, n_lon, nlev))
+    # float64 state: the continuation gate asserts machine-precision
+    # equality; the recipe's f32 default would put roundoff at ~2e-8.
+    st = st._replace(
+        eta=st.eta.replace(data=jnp.asarray(eta0, dtype=jnp.float64)),
+        u=st.u.replace(data=jnp.asarray(u0, dtype=jnp.float64)
+                       * st.u_mask.data[..., None]),
+        v=st.v.replace(data=jnp.asarray(v0, dtype=jnp.float64)
+                       * st.v_mask.data[..., None]),
+    )
+    # fixed slow forcing so consecutive windows see identical RHS
+    F_eta = jnp.zeros((n_lat, n_lon))
+    F_u = jnp.full((n_lat, n_lon + 1), 1.0e-6) * st.u_mask.data
+    F_v = jnp.full((n_lat + 1, n_lon), -1.0e-6) * st.v_mask.data
+    return r, st, (F_eta, F_u, F_v)
+
+
+def test_cross_window_carry_equals_continuous_run():
+    """THE continuation gate (NEMO dynspg_ts ll_init=F): two n-substep windows
+    with carried bt_hist must reproduce one continuous 2n-substep window
+    (same substep dt, same slow forcing) to machine precision — the AB3/AM4
+    series is one unbroken time integration across the window boundary."""
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        barotropic_substeps_latlon_cgrid,
+    )
+
+    r, st, (F_eta, F_u, F_v) = _gyre_solver_setup()
+    n = 12
+    dt_e = 100.0
+    kw = dict(grid=r.grid, z_coord=r.z_coord, config=r.model_config,
+              F_slow_eta=F_eta, F_slow_u=F_u, F_slow_v=F_v,
+              add_barotropic_coriolis=False)
+
+    assert st.bt_hist is None  # cold start
+    s1, _ = barotropic_substeps_latlon_cgrid(st, dt_e, n, **kw)
+    assert s1.bt_hist is not None and len(s1.bt_hist) == 6
+    s2, _ = barotropic_substeps_latlon_cgrid(s1, dt_e, n, **kw)
+
+    sc, _ = barotropic_substeps_latlon_cgrid(st, dt_e, 2 * n, **kw)
+
+    np.testing.assert_allclose(np.asarray(s2.eta.data), np.asarray(sc.eta.data),
+                               rtol=0, atol=1e-13)
+    np.testing.assert_allclose(np.asarray(s2.u.data), np.asarray(sc.u.data),
+                               rtol=0, atol=1e-13)
+    np.testing.assert_allclose(np.asarray(s2.v.data), np.asarray(sc.v.data),
+                               rtol=0, atol=1e-13)
+    # histories at the end must agree too (the NEXT window's inputs)
+    for a, b in zip(s2.bt_hist, sc.bt_hist):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b),
+                                   rtol=0, atol=1e-13)
+
+
+def test_cross_window_carry_nonvacuous():
+    """The carry changes window 2 (vs re-ramping every window): a genuinely
+    different second window — guards against the carry being silently
+    dropped."""
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        barotropic_substeps_latlon_cgrid,
+    )
+
+    r, st, (F_eta, F_u, F_v) = _gyre_solver_setup()
+    n = 12
+    dt_e = 100.0
+    kw = dict(grid=r.grid, z_coord=r.z_coord, config=r.model_config,
+              F_slow_eta=F_eta, F_slow_u=F_u, F_slow_v=F_v,
+              add_barotropic_coriolis=False)
+
+    s1, _ = barotropic_substeps_latlon_cgrid(st, dt_e, n, **kw)
+    s2_carried, _ = barotropic_substeps_latlon_cgrid(s1, dt_e, n, **kw)
+    s2_ramped, _ = barotropic_substeps_latlon_cgrid(
+        s1._replace(bt_hist=None), dt_e, n, **kw)
+    assert float(np.max(np.abs(
+        np.asarray(s2_carried.eta.data) - np.asarray(s2_ramped.eta.data)))) > 0.0
+
+
+def test_model_step_populates_and_carries_bt_hist():
+    """Production path: LatLonCGridOceanModel.step populates bt_hist on the
+    first step and carries/updates it on the second."""
+    import jax.numpy as jnp
+
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.fidelity.nemo_recipe import (
+        _NEMO_GYRE_DT_S,
+        build_nemo_gyre_recipe,
+        nemo_gyre_wind_forcing,
+    )
+
+    r = build_nemo_gyre_recipe()
+    model = LatLonCGridOceanModel(r.grid, r.z_coord, r.model_config)
+    st = r.initial_state
+    n_lat, n_lon = st.T.data.shape[0], st.T.data.shape[1]
+    assert st.bt_hist is None
+    s1 = model.step(st, dt=_NEMO_GYRE_DT_S,
+                    surface_forcing=nemo_gyre_wind_forcing(n_lat, n_lon, 0.0))
+    assert s1.bt_hist is not None and len(s1.bt_hist) == 6
+    s2 = model.step(s1, dt=_NEMO_GYRE_DT_S,
+                    surface_forcing=nemo_gyre_wind_forcing(
+                        n_lat, n_lon, _NEMO_GYRE_DT_S))
+    assert s2.bt_hist is not None
+    # the histories actually advanced
+    assert float(jnp.max(jnp.abs(s2.bt_hist[0] - s1.bt_hist[0]))) > 0.0
+    for h in s2.bt_hist:
+        assert bool(jnp.all(jnp.isfinite(h)))
+
+
+def test_nemo_stage_mean_imposition_noop_and_helper():
+    """NEMO stprk3_stg:440 zub correction (nemo_stage_mean_imposition):
+    (a) default OFF is the legacy path; (b) ON is bit-identical for the GYRE
+    card — legoESM's implicit vertical solve has zero-flux BCs and stress/drag
+    are applied pre-barotropic, so the depth mean is already conserved (the
+    imposition is structurally inert here; it activates only for configs whose
+    implicit solve shifts the mean); (c) the depth-mean helper is exact on a
+    synthetic column-uniform shift."""
+    import jax.numpy as jnp
+    import numpy as np
+
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.fidelity.nemo_recipe import (
+        _NEMO_GYRE_DT_S,
+        build_nemo_gyre_recipe,
+        nemo_gyre_wind_forcing,
+    )
+
+    r = build_nemo_gyre_recipe()
+    st = r.initial_state
+    n_lat, n_lon = st.T.data.shape[0], st.T.data.shape[1]
+    sf = nemo_gyre_wind_forcing(n_lat, n_lon, 0.0)
+    m_off = LatLonCGridOceanModel(r.grid, r.z_coord, r.model_config)
+    mc_on = r.model_config._replace(
+        barotropic=r.model_config.barotropic._replace(
+            nemo_stage_mean_imposition=True))
+    m_on = LatLonCGridOceanModel(r.grid, r.z_coord, mc_on)
+    s_off = m_off.step(st, dt=_NEMO_GYRE_DT_S, surface_forcing=sf)
+    s_on = m_on.step(st, dt=_NEMO_GYRE_DT_S, surface_forcing=sf)
+    np.testing.assert_array_equal(np.asarray(s_on.u.data),
+                                  np.asarray(s_off.u.data))
+    np.testing.assert_array_equal(np.asarray(s_on.v.data),
+                                  np.asarray(s_off.v.data))
+
+    # helper exactness: a column-uniform shift is recovered exactly
+    du = 0.01
+    st_shift = st._replace(u=st.u.replace(
+        data=(st.u.data + du) * st.u_mask.data[..., None]))
+    um0, _ = m_on._fixed_depth_means(st)
+    um1, _ = m_on._fixed_depth_means(st_shift)
+    wet = np.asarray(st.u_mask.data) > 0
+    np.testing.assert_allclose(np.asarray(um1 - um0)[wet], du, rtol=1e-6)  # f32 state

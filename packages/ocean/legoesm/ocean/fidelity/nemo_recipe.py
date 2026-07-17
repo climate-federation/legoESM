@@ -191,14 +191,16 @@ NEMO_DEFERRED_BLOCKS: tuple[str, ...] = (
     "not a separate selector; explicit_substep + cosine is the closest existing "
     "canonical barotropic block.",
     "NEMO TKE amplitude (√e), Ri-Prandtl (nn_pdl=1, slope 1/ri_cri=4.5), c_k/c_eps "
-    "(rn_ediff/rn_ediss), background Kz (rn_avm0/rn_avt0) AND the interior "
-    "mixing-length response are now dump-verified NEMO-exact: fed NEMO's own N² "
-    "(rn2), legoESM's diffusivity matches avm_k to corr 0.9998 for levels >=2 (the "
-    "Veros nn_mxl=2 length is scalar-identical to NEMO nn_mxl=3 in the interior, so "
-    "nn_mxl=3 is NOT the lever — TKE_DECONFOUNDED_FINDINGS.md). The one remaining "
-    "TKE item is the ln_mxl0 surface mixing-length anchor + NEMO Dirichlet "
-    "surface-TKE BC (top ~2 interfaces only), which matters solely for a full "
-    "PROGNOSTIC spinup match, not the diagnostic/tendency oracle.",
+    "(rn_ediff/rn_ediss), background Kz (rn_avm0/rn_avt0) AND the full nn_mxl=3 "
+    "mixing-length response are now dump-verified NEMO-exact (2026-07-16 column "
+    "certificate: fed NEMO's own en/T/S from the EXP_15D day-5 restart, K_H "
+    "matches avt_k to 3-4 significant figures at every level). RESOLVED: the "
+    "earlier 'nn_mxl=3 is NOT the lever' deconfounding (corr 0.9998 for levels "
+    ">=2, TKE_DECONFOUNDED_FINDINGS.md) held only in the stratified interior — "
+    "in the near-neutral winter ML the uncapped nn_mxl=2 buoyancy length gave "
+    "7x NEMO's surface avt (l~70 m vs the anchor-capped ~10 m at 10 m depth), "
+    "the driver of the winter ML over-deepening / cold-SST bias; the card now "
+    "runs tke_mxl_choice=3 + ln_mxl0 + Dirichlet surface TKE.",
     "Implicit quadratic NEMO bottom drag is approximated by the existing "
     "quadratic-with-floor model-level drag knobs.",
 )
@@ -210,11 +212,23 @@ def _nemo_tke_config() -> TKEConfig:
     # (kappa_convention="veros_sqrte" ⇒ K=c_k·l·√e, not √(2e) — removes an exact
     # √2 overshoot), the Ri-Prandtl (prandtl_ri_coeff=1/ri_cri), and the
     # background floors below are now NEMO-exact; c_k=0.1/c_eps=0.7 already match
-    # rn_ediff/rn_ediss by default.  The remaining deferred item is the nn_mxl=3
-    # length form (see NEMO_DEFERRED_BLOCKS).
+    # rn_ediff/rn_ediss by default.
     return TKEConfig(
         prognostic=True,
         n2_mode="adiabatic",
+        # NEMO nn_mxl=3 + ln_mxl0: buoyancy length with the wind surface
+        # anchor, capped by the |dl/dz|<=e3t lup/ldown sweeps. The old
+        # "scalar-identical to Veros nn_mxl=2 in the interior" deconfounding
+        # note was TRUE in the stratified interior and FALSE in the
+        # near-neutral winter mixed layer, where the uncapped Veros buoyancy
+        # length gives l~70 m at 10 m depth vs NEMO's anchor-capped ~10 m —
+        # a 7x surface avt excess that over-deepened every winter ML,
+        # buried the seasonal heat, and held the 5-yr SST ~1.7 C cold.
+        # Column certificate (2026-07-16, _probe_tke_column.py on the
+        # EXP_15D day-5 restart, NEMO's own en/T/S as input): choice 3
+        # reproduces NEMO's dumped avt_k to 3-4 significant figures at
+        # every level; choice 2 is 7x high at 10 m.
+        tke_mxl_choice=3,
         # NEMO stp ordering: eosbn2 runs at step start (bn2(Nnow)), BEFORE
         # tra_adv. Sampling the diffusivity-stage N² on the before-advection
         # T/S stops the single-step fct2 bottom-cell drift from flipping the
@@ -232,6 +246,22 @@ def _nemo_tke_config() -> TKEConfig:
         # 6.6 default). legoESM Pr=max(1,min(10,coeff·Ri)) is bit-identical (clamp
         # to [1,10] is order-independent), so this reproduces NEMO's pdl exactly.
         prandtl_ri_coeff=4.5,
+        # TKE vertical-diffusion coefficient: NEMO diffuses en with avm x1
+        # (zdftke.F90:130 "d(avm d(en)/dz)/dz"; the tridiagonal coefficient is
+        # the face-averaged avm, zfact1=-0.5*rn_Dt). The Veros/CATKE default
+        # (30) — which the ported scheme inherited — diffuses TKE 30x too fast,
+        # flooding the surface Dirichlet TKE source down the near-neutral
+        # column, sustaining deep e ~1000x NEMO's rn_emin floor and blocking
+        # the shallow summer mixed layer -> the subtropical thermocline never
+        # rebuilds (self-locked mixed branch; plan §G). alpha_tke=1 drops deep
+        # summer e by 1-2 orders and unlocks the seasonal thermocline rebuild.
+        alpha_tke=1.0,
+        # NEMO zdftke semi-implicit dissipation split (zfact2=1.5*dt*rn_ediss
+        # on the diagonal, zfact3=0.5*rn_ediss explicit on the RHS;
+        # zdftke.F90:241-242,414,419). Trajectory-neutral on the 5-yr GYRE vs
+        # plain backward-Euler (verified 2026-07-16) but it is NEMO's exact
+        # discretization — kept for numerics fidelity.
+        dissipation_discretization="nemo_1p5_split",
         # NEMO nn_bc_surf=1 Dirichlet surface TKE: en(1)=max(rn_emin0,
         # rn_ebb*|tau|/rho0) held in the implicit solve — the wind-driven
         # surface-TKE response (the Veros flux BC undershoots NEMO's surface
@@ -330,6 +360,27 @@ def nemo_lat_lon_model_config(
             kappa_GM=_kappa_gm,
             kappa_Redi=cfg.kappa_Redi,
             S_max=cfg.redi_S_max,
+            # Native ldfslp four-position slopes (uslp/vslp at tracer
+            # levels, wslpi/wslpj at w-points): the exact traldf_iso stencil,
+            # NEMO sign + NEMO's own limiters (double cap rn_slpmax + e3/7e3,
+            # ML ramp, Shapiro) built in. Winter certificate: slopes corr
+            # +0.99 amplitude 1.00-1.03 vs the *_stg dump; tendency corr
+            # +0.956 amplitude 1.02 vs ttrd_ldf (mode-b was 1.35). With
+            # amplitude 1.0 NEMO's stability margin applies (no wall hot
+            # spot). slope_limit below only governs the mode-b path now.
+            slope_positions="nemo_native",
+            # Steep-slope limiter: dm95_taper (NOT yet NEMO's hard cap).
+            # NEMO keeps full-kappa flux at the capped slope (ldfslp:212-213,
+            # rn_slpmax + e3/7e3) — but with the SLOPE SIGN FIX active, the
+            # mode-b single-position operator (documented amplitude ~1.35x
+            # NEMO's stencil) EXCEEDS the stability margin NEMO's e3/7e3
+            # bound encodes: a southern-wall column hot spot develops
+            # (39-45 C, 2-yr bisect: cap→hot, dm95→healthy 21 C; ML ramp
+            # innocent). nemo_cap is wired + tested and becomes usable once
+            # the native four-position slopes land (amplitude → 1.0, the
+            # documented follow-up). dm95 under-transports at steep outcrops
+            # (a known fidelity cost) but is sign-correct and stable.
+            slope_limit="dm95_taper",
             visbeck=VisbeckConfig(enabled=False),
             slope_scheme=cfg.lateral_operator,
             slope_density="neutral",
@@ -755,6 +806,10 @@ _NEMO_GYRE_CARD_CONFIG = NEMOModelRecipeConfig(
     C_smag_lap=0.0,                    # NO Smagorinsky
     A_h_floor=1.0e5,                   # inert while A_h_lat_scaling=False; set = A_h defensively
     kappa_Redi=1000.0,                 # ln_traldf_iso: 1/2*rn_Ud*rn_Ld = 1000
+    redi_S_max=0.01,                   # NEMO rn_slpmax=0.01 (was 0.005 default) — real
+                                       # matched-parameter fix; thermocline-neutral
+                                       # (kappa_Redi=0 isolation leaves the erosion
+                                       # unchanged, plan §G) but the correct NEMO value
     bottom_drag_scheme="nemo_quadratic",  # namdrg ln_non_lin, rn_Cd0=1e-3, rn_ke0=2.5e-3
 )
 
@@ -850,19 +905,29 @@ def build_nemo_gyre_recipe(
     # NEMO ln_zdfevd (rn_evd=100, nn_evdm=1): SET avt=avm=100 at interfaces where
     # MIN(rn2,rn2b)<=-1e-12 (HARD N^2<0 threshold; zdfevd.F90:52-80), then the
     # implicit solve mixes locally. smooth_transition=False selects legoESM's hard
-    # jnp.where(N2<0, K_conv, K_bg) path == NEMO's operator exactly. (The DEFAULT
+    # jnp.where(N2<thr, K_conv, K_bg) path == NEMO's operator exactly. (The DEFAULT
     # sigmoid path applies large K to near-neutral STABLE interfaces (K~27 at
     # N2=1e-6) -> over-mixes -> SST 20->14C collapse; that was the earlier
     # "K_conv=100 collapses" artifact, NOT NEMO's behaviour.) Reproduces NEMO's
     # warm well-mixed ~83m surface layer (warmest column [18.68]x8 vs NEMO
     # [18.98]x7). GYRE-specific (kept off the shared card).
+    # n2_mode="adiabatic": NEMO's EVD triggers on rn2 = the ADIABATIC
+    # Brunt-Vaisala frequency (true static stability), NOT the in-situ N².
+    # In-situ N² carries the compressibility term and goes spuriously negative
+    # in a statically-STABLE column, firing EVD where NEMO's rn2>0 does not —
+    # in the subtropical SPRING this re-mixes the shoaling ML every step and
+    # blocks the seasonal thermocline rebuild (plan §G). With the adiabatic
+    # trigger (+ the alpha_tke=1 TKE-diffusion fix) the thermocline rebuilds.
     physics_config = model_config.physics._replace(
         shortwave_penetration=None, mle=None,
         convection=OceanConvectionConfig(
             scheme="enhanced_diffusion",
             enhanced_diffusion=EnhancedDiffusionConfig(
                 K_conv=100.0, nu_conv=100.0, K_bg=0.0, nu_bg=0.0,
-                smooth_transition=False)))
+                smooth_transition=False, n2_mode="adiabatic",
+                # NEMO zdfevd MIN(rn2,rn2b): the two-level hysteresis that
+                # prevents per-step EVD flicker (grid-scale w noise; plan §G).
+                two_level_trigger=True)))
     # Coriolis COUPLED with the pressure gradient inside the RK3 momentum stages
     # (coriolis_scheme="explicit_ab2" → f×u enters du_dt, integrated by SSP-RK3),
     # NOT operator-split as a separate Matsuno step after RK3. The split incurs an
@@ -880,6 +945,10 @@ def build_nemo_gyre_recipe(
     # geostrophic value vs NEMO's 60%).
     model_config = model_config._replace(
         physics=physics_config, coriolis_scheme="explicit_ab2",
+        # NEMO dynzdf implicit wind-stress deposition + the stprk3_stg:440
+        # barotropic-mean imposition it requires (plan §G: the explicit
+        # ~0.1 m/s-per-step top-cell kick is a grid-scale w-noise source).
+        surface_stress_implicit=True,
         # NEMO np_CRV: planetary + relative vorticity COMBINED in one ENE
         # vertex-f transport-form flux (dynvor.F90 vor_ene kvor=total) — the
         # last "≈" momentum term unified. Requires the "frozen" barotropic
@@ -892,7 +961,12 @@ def build_nemo_gyre_recipe(
         # NEMO has NO spatial barotropic eta-diffusion (nn_bt_flt=3 dissipation
         # is purely temporal); with the nemo_ab3am4 filter the smoother is off.
         barotropic=model_config.barotropic._replace(
-            barotropic_diffusion_alpha=0.0))
+            barotropic_diffusion_alpha=0.0,
+            # Required by surface_stress_implicit (init-validated): the
+            # implicit stress deposition shifts the depth mean after the
+            # barotropic solve; NEMO re-imposes it every stage
+            # (stprk3_stg:440 zub).
+            nemo_stage_mean_imposition=True))
 
     return NEMORecipe(
         model_config=model_config,
@@ -987,6 +1061,7 @@ def apply_nemo_gyre_surface_forcing(state, z_coord, dt, *, t_seconds=0.0):
     # dS/dt|surf = +emp * S_surf / (rho0 * dz_top).  Domain-mean removed over wet
     # cells first (net-zero E-P, matching NEMO's zsumemp subtraction).
     emp_2d = jnp.broadcast_to(nemo_gyre_emp(lat_t, t_seconds)[:, None], shape_2d)
+    # (single-domain global mean — would need a global_sum under MPI sharding)
     emp_2d = emp_2d - jnp.sum(emp_2d * cell_mask) / jnp.sum(cell_mask)
     dS_dt_emp_top = (emp_2d * state.S.data[..., 0] / (
         NEMO_CONSTANTS_CONFIG.rho_0 * dz_0)).astype(out.dS_dt.dtype)

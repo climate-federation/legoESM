@@ -51,6 +51,7 @@ __param_spec__ = {
             "kappaM_max": "numerics: floor/cap",
             "kappaM_min": "numerics: floor/cap",
             "mxl_min": "numerics: floor/cap",
+            "mxl0_min_m": "numerics: floor/cap (NEMO rn_mxl0 ln_mxl0 surface length floor)",
             "prandtl_ri_coeff": "Galperin/Veros fixed Pr-Ri slope (6.6)",
             "tke_background": "numerics: floor/cap",
             "tke_surface_min": "numerics: floor/cap",
@@ -59,7 +60,7 @@ __param_spec__ = {
             "Prandtl_tke0": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
             "lc_coeff": {"units": "1", "bounds": (0.05, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "NEMO zdftke rn_lc / Axell 2002 Langmuir cells", "shape": None},
             "etau_frac": {"units": "1", "bounds": (0.01, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "NEMO zdftke rn_efr sub-ML TKE penetration", "shape": None},
-            "alpha_tke": {"units": "1", "bounds": (9.9, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
+            "alpha_tke": {"units": "1", "bounds": (1.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "TKE vertical-diffusion coeff: NEMO avm x1 (zdftke); Veros/Gaspar 30", "shape": None},
             "bg_diff_scale": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Bryan-Lewis (1979) background-diffusivity amplitude", "shape": None},
             "c_eps": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
             "c_k": {"units": "1", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
@@ -335,6 +336,14 @@ class TKEConfig(NamedTuple):
     #   point is the topmost interior interface). No ``tke_background`` /
     #   ``tke_surface_min`` floors.
     positivity: str = "floor"
+    # ----- Dissipation time-discretization in the TKE solve -----
+    # "backward_euler" (default, BIT-IDENTICAL legacy): fully-implicit
+    #   linearized dissipation, diagonal += dt*c_eps*sqrt(e)/l_eps.
+    # "nemo_1p5_split": NEMO zdftke's semi-implicit split (zfact2/zfact3,
+    #   zdftke.F90:241-242,414,419): 1.5x on the diagonal + 0.5x explicit on
+    #   the RHS, linearized at the carried sqrt(e)/l_eps. Same first-order
+    #   dissipation; different discrete decay factor at large dt.
+    dissipation_discretization: str = "backward_euler"
     # ----- K-from-TKE amplitude convention -----
     # ``"gaspar_sqrt2e"`` (default, BIT-IDENTICAL legacy):
     #   K_M = c_k·l_k·sqrt(2·max(e, tke_background)) — the Gaspar form.
