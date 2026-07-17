@@ -175,7 +175,18 @@ for RES in $RES_LIST; do
                 --n-warmup "$N_WARMUP" --n-timing "$N_TIMING"
                 --output-dir "$OUTDIR/${_sub}" ) ;;
     esac
-    mpiexec -n "$_nd" --ppn "$_ppn" bash -c "$SHIM" _ "${BENCH[@]}" < /dev/null \
+    # Binding: PALS core-binds each rank by DEFAULT, which strangled the cube
+    # lane's 1-proc-per-node x 128-thread protocol to ~1 core (first campaign
+    # run: cube "node" points ~10 Mcells/s = single-CORE throughput,
+    # cpus_per_task=1 in the rows, C48 anti-scaling). Threaded ranks
+    # (ppn=1, OMP>1) get the node's full affinity via --depth/--cpu-bind depth
+    # so the XLA CPU pool can actually thread; packed grids (128 procs/node,
+    # 1 thread each) keep the default per-core binding.
+    _BIND=()
+    if [ "$_ppn" -eq 1 ] && [ "${OMP_NUM_THREADS:-1}" -gt 1 ]; then
+        _BIND=(--depth "$OMP_NUM_THREADS" --cpu-bind depth)
+    fi
+    mpiexec -n "$_nd" --ppn "$_ppn" "${_BIND[@]}" bash -c "$SHIM" _ "${BENCH[@]}" < /dev/null \
       || { echo "route-B CPU $GRID res=$RES nodes=$N ($_nd dev) FAILED rc=$?"; rc_all=1; }
   done
 done
