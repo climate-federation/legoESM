@@ -18,6 +18,38 @@ from Tiedtke; the AR1 stochastic factor is treated as a fixed
 multiplier per call so ``jax.grad`` flows through the deterministic
 ``M_b``.
 
+Faithfulness status vs the IFS oracle (arpifs cumastrn/cuascn/cuflxn/
+cuddrafn/sucumf.F90) — updated 2026-07-17
+-----------------------------------------------------------------------------
+FAITHFUL, DEFAULT ON (oracle-derived, fortran-mirror pinned in
+``tests/unit/test_bechtold.py``):
+
+* Convective-turnover tau + full deep CAPE closure ``ZMFUB1 =
+  ZCAPE*ZMFUB/(ZHEAT*ZXTAU)`` incl. ZTAURES resolution factor
+  (``_ifs_cape_closure_target``), in-plume precipitation conversion
+  (cuascn.F90:718-773), sub-cloud rain evaporation march
+  (cuflxn.F90:449-460).
+* RCAPQADV=0.8 advection CAPE correction ``ZCAPE2/ZDQCV/ZSATFR`` +
+  branch gate (cumastrn.F90:734-760, :801, :819-823) — MATH + LEAF
+  INTERFACE complete (``_ifs_cape_qadv_terms``; ``use_ifs_cape_qadv``);
+  the production pipeline does not yet SUPPLY the dynamics tendencies
+  (``dT_dt_dyn``/``dq_dt_dyn`` = process-split PTENTA/PTENQA analogs;
+  an SCM can pass its prescribed large-scale forcing) — the one owed
+  wiring step, so the flag defaults OFF.
+
+FAITHFUL, DEFAULT OFF pending A/B validation (all inputs plumbed via the
+production physics pipeline; each is oracle-pinned and byte-identical-legacy
+when off): ``use_ifs_downdraft`` (RCE/AMIP A/B owed), ``use_ifs_shallow_closure``
++ ``use_ifs_capdcycl`` (pipeline supplies bulk SHF/LHF + land_frac),
+``use_ifs_land_rhebc`` (land_frac), ``use_ifs_snow_melt`` (FOEALFCU partition +
+RTAUMEL melt inside the sub-cloud march).
+
+KNOWN DEPARTURES (documented, deliberate): full-level environment stands in
+for IFS half-level ``ZTENH/ZQENH``; smooth sigmoid gates replace hard IFs
+(differentiability); constant literature ``M_b_max`` cap instead of the
+timestep-CFL ``ZMFMAX``; single-plume (no LFS downdraft memory unless
+``use_ifs_downdraft``).
+
 References
 ----------
 * Bechtold, P., Köhler, M., Jung, T., Doblas-Reyes, F., Leutbecher,
@@ -388,10 +420,10 @@ def _ifs_ztaures(dx_m: float) -> float:
     if dx_m <= 0.0:
         return 1.0
     dx = max(float(dx_m), 100.0)
-    if dx < 8.0e3:
-        return 1.0 + math.log(8.0e3 / dx) ** 2
-    zt = 1.0 + 1.60 * dx / 125.0e3
-    return min(3.0, zt) if dx > 125.0e3 else zt
+    if dx < 8.0e3:  # coeff-ok: IFS ZTAURES 8 km resolution break (cumastrn.F90:766)
+        return 1.0 + math.log(8.0e3 / dx) ** 2  # coeff-ok: IFS sub-8km ZTAURES fit (cumastrn.F90:767)
+    zt = 1.0 + 1.60 * dx / 125.0e3  # coeff-ok: IFS ZTAURES linear fit 1+1.6*dx/125km (cumastrn.F90:764)
+    return min(3.0, zt) if dx > 125.0e3 else zt  # coeff-ok: IFS coarse-cap MIN(3, ZTAURES) (cumastrn.F90:768)
 
 # --- IFS convective sub-cloud rain evaporation (cuflxn.F90:436-475, sucumf.F90) ---
 # Kessler-type evaporation of the convective rain flux below cloud base,
@@ -606,7 +638,7 @@ def _ifs_downdraft(
     # updraft is alive and ~0 above its death, times the above-cloud-base
     # membership for the KCBOT bound.
     window = above_base * jnp.tanh(
-        M_u / (0.005 * jnp.maximum(M_b, _IFS_RMFCMIN))[:, None])
+        M_u / (0.005 * jnp.maximum(M_b, _IFS_RMFCMIN))[:, None])  # coeff-ok: tanh liveness-window width, 0.5% of M_b (numerics gate, not a rate)
     gate = (
         jax.nn.sigmoid(-b_lfs / _DD_BUO_GATE_K)
         * jax.nn.sigmoid(
@@ -776,7 +808,7 @@ def _ifs_downdraft(
     # tail M_u, so an inactive level could impose a column-wide zmfs).  Active
     # = carrying at least 0.1% of the column's own peak downdraft.
     _dd_peak = jnp.max(-m_d, axis=1, keepdims=True)
-    active = (-m_d) > 1e-3 * _dd_peak
+    active = (-m_d) > 1e-3 * _dd_peak  # coeff-ok: 0.1%-of-peak activity mask (numerics threshold)
     violating = active & ((-m_d) > (_IFS_NETFLUX_FRAC * M_u_guard + 1e-15))
     zmfs = jnp.minimum(
         jnp.min(jnp.where(violating, jnp.maximum(ratio, 0.0), 1.0),
@@ -2499,7 +2531,7 @@ def bechtold_convection(
                 _r0_fg = jnp.sum(
                     dlt_profile * _mu_fg
                     * jnp.clip(plume.q_c_u, 0.0, None)
-                    / jnp.clip(rho, 0.01, None) * dp_full, axis=-1,
+                    / jnp.clip(rho, 0.01, None) * dp_full, axis=-1,  # coeff-ok: density safety floor
                 ) / constants.g
             M_d_fg, _, _, _ = _ifs_downdraft(
                 T, q_v, p_full, p_half, z, dp_full,
