@@ -939,3 +939,96 @@ def d_sw5_duo(delp, u, v, uc, vc, ua, va, divg_d, crx_adv, cry_adv,
             "vortfluxx": vortfluxx.a, "vortfluxy": vortfluxy.a,
             "uc": uc.a, "vc": vc.a, "ut": ut.a, "vt": vt.a,
             "ptc": ptc, "ub": ub, "vb": vb}
+
+
+def d_sw6_duo(u, v, ut, vt, ke, wk, vortfluxx, vortfluxy, gs: dict,
+              bd: Bounds, npx: int, npy: int, *, nord_v: int = 1,
+              damp_v: float = 0.2, d_con: float = 0.0,
+              duogrid: bool = True,
+              workspace_sentinel: float = 1.0e30) -> dict:
+    """sw_core.F90 d_sw6 (symmetryclean 1871-2006) — the final
+    circulation-form wind update on the oracle lane (damp_v=0.2,
+    d_con=0):
+
+        u = vt + ke - ke(i+1,j) + fy      (fy = vortfluxy)
+        v = ut + ke - ke(i,j+1) - fx      (fx = vortfluxx)
+
+    then the damp_v del6 vorticity damping (del6_vt_flux CLOBBERS
+    ut/vt as its flux outputs — the certified plain port with the duo
+    copy_corners gating) and the diffusive-flux add u += vt, v -= ut.
+    d_con=0 skips the heating block, so ub/vb/heat_source are
+    untouched (sentinel round-trips; heat_source stays at the driver's
+    1e30 because d_sw2 — which zeroes it in the real pipeline — is
+    not part of this chain).
+
+    Inputs come from the certified d_sw5 stage: ut/vt are its v*dy /
+    u*dx overwrites, ke its damped-KE output, wk its relative
+    vorticity, vortfluxx/vortfluxy its transport fluxes.  u/v are the
+    committed D-grid winds; only the compute ranges are rewritten
+    (halo strips keep the inputs — dumped and compared full-domain).
+    Returns dict(u, v, ut, vt, ub, vb, heat_source).
+    """
+    from legoesm.core.fv3_native_d_sw import _fl, del6_vt_flux
+
+    if d_con > 1.0e-5:
+        raise NotImplementedError("d_sw6_duo: d_con=0 oracle lane only")
+    if not duogrid:
+        raise NotImplementedError(
+            "d_sw6_duo is the DUO-stage port; the plain path is the "
+            "certified monolithic d_sw (phase-4b)")
+
+    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
+    isd, ied, jsd, jed = bd.isd, bd.ied, bd.jsd, bd.jed
+
+    u = fort(np.array(u, dtype=np.float64, copy=True), isd, jsd)
+    v = fort(np.array(v, dtype=np.float64, copy=True), isd, jsd)
+    ut = fort(np.array(ut, dtype=np.float64, copy=True), isd, jsd)
+    vt = fort(np.array(vt, dtype=np.float64, copy=True), isd, jsd)
+    ke = fort(np.array(ke, dtype=np.float64, copy=True), isd, jsd)
+    wk = fort(np.array(wk, dtype=np.float64, copy=True), isd, jsd)
+    fx = fort(np.array(vortfluxx, dtype=np.float64, copy=True), is_, js)
+    fy = fort(np.array(vortfluxy, dtype=np.float64, copy=True), is_, js)
+
+    da_min_c = float(gs["da_min_c"])
+    gsf = {
+        "del6_v": fort(gs["del6_v"], isd, jsd),
+        "del6_u": fort(gs["del6_u"], isd, jsd),
+        "rarea": fort(gs["rarea"], isd, jsd),
+        "bounded_domain": False, "grid_type": 0,
+        "sw_corner": bool(gs.get("sw_corner", True)),
+        "se_corner": bool(gs.get("se_corner", True)),
+        "nw_corner": bool(gs.get("nw_corner", True)),
+        "ne_corner": bool(gs.get("ne_corner", True)),
+    }
+
+    # ---- final circulation-form wind update (auth 1934-1944) ----
+    for j in range(js, je + 1 + 1):
+        for i in range(is_, ie + 1):
+            u[i, j] = vt[i, j] + ke[i, j] - ke[i + 1, j] + fy[i, j]
+    for j in range(js, je + 1):
+        for i in range(is_, ie + 1 + 1):
+            v[i, j] = ut[i, j] + ke[i, j] - ke[i, j + 1] - fx[i, j]
+
+    # ---- damp_v del6 vorticity damping (auth 1948-1951) ----
+    vort = _fl(isd, ied, jsd, jed)
+    if damp_v > 1.0e-5:
+        damp4 = (damp_v * da_min_c) ** (nord_v + 1)
+        del6_vt_flux(nord_v, npx, npy, damp4, wk, vort, ut, vt, gsf, bd,
+                     duogrid=True)
+
+    # d_con=0: heating block skipped (auth 1953-1986)
+
+    # ---- add diffusive fluxes to the momentum equation (auth 1989-2000) --
+    if damp_v > 1.0e-5:
+        for j in range(js, je + 1 + 1):
+            for i in range(is_, ie + 1):
+                u[i, j] = u[i, j] + vt[i, j]
+        for j in range(js, je + 1):
+            for i in range(is_, ie + 1 + 1):
+                v[i, j] = v[i, j] - ut[i, j]
+
+    ub = np.full((ie + 1 - is_ + 1, je + 1 - js + 1), workspace_sentinel)
+    vb = np.full((ie + 1 - is_ + 1, je + 1 - js + 1), workspace_sentinel)
+    heat_source = np.full((ie - is_ + 1, je - js + 1), workspace_sentinel)
+    return {"u": u.a, "v": v.a, "ut": ut.a, "vt": vt.a,
+            "ub": ub, "vb": vb, "heat_source": heat_source}
