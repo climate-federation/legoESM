@@ -186,6 +186,7 @@ def probe_latlon_cgrid(
             mask=state.land_mask.data,
             u_mask=state.u_mask.data, v_mask=state.v_mask.data,
             rho_0=config.constants.rho_0, g=config.constants.g,
+            dt=(dt_tracer if dt_tracer is not None else dt),
         )
         if getattr(config.gm_redi, "implicit_K33", False):
             # When the vertical isoneutral diagonal is applied IMPLICITLY (Veros-

@@ -1562,3 +1562,66 @@ class TestNemoIsoLapOperator:
         # Deepest wet level is index nlev-2; its tendency must not depend on the
         # dry level's value.
         assert jnp.allclose(d1[:, :, nlev - 2], d2[:, :, nlev - 2], rtol=1e-10, atol=1e-20)
+
+
+# =====================================================================
+# MSC (ln_traldf_msc) explicit-K33 stabilizing correction
+# =====================================================================
+
+class TestMSCStabilize:
+    """NEMO ln_traldf_msc: the akz-stabilized EXPLICIT K33 vertical diagonal
+    (traldf_iso_a33). Default (msc_stabilize=False) leaves the operator's full
+    K33 implicit → bit-identical to the prior operator; msc_stabilize=True adds
+    the explicit part the ttrd_ldf dump carries for msc=T configs (e.g. DINO)."""
+
+    def _inputs(self, slope=5e-3):
+        setup = _stratified_with_meridional_tilt(n_lat=8, n_lon=12, nlev=6,
+                                                 slope=slope)
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jac, rho, T, S, cfg = setup
+        nlev = T.shape[2]
+        # Steep interface slopes so the K33 diagonal (aht·wslp²) is nonzero.
+        S_x = jnp.full((*T.shape[:2], nlev - 1), slope, dtype=jnp.float64)
+        S_y = jnp.full((*T.shape[:2], nlev - 1), slope, dtype=jnp.float64)
+        act = jnp.broadcast_to(mask[:, :, jnp.newaxis], T.shape)
+        return dict(T=T, S_x=S_x, S_y=S_y, mask=mask, u_mask=u_mask,
+                    v_mask=v_mask, z_coord=z_coord, jacobian=jac, grid=grid,
+                    kappa=1000.0, act=act)
+
+    def _call(self, a, **kw):
+        return nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            a["T"], a["S_x"], a["S_y"], a["mask"], a["u_mask"], a["v_mask"],
+            a["z_coord"], a["jacobian"], a["grid"], a["kappa"], a["act"], **kw)
+
+    def test_msc_false_bit_identical(self):
+        """msc_stabilize=False (the default) is byte-identical to the prior
+        operator regardless of dt — the explicit-K33 block is fully gated, so
+        GYRE and every existing caller are unaffected."""
+        a = self._inputs()
+        base = self._call(a)                                  # no msc arg (default)
+        off = self._call(a, msc_stabilize=False, dt=3600.0)   # explicit off + dt
+        assert jnp.array_equal(base, off)
+
+    def test_msc_true_requires_dt(self):
+        a = self._inputs()
+        with pytest.raises(ValueError, match="dt"):
+            self._call(a, msc_stabilize=True, dt=None)
+
+    def test_msc_true_adds_explicit_k33_interior(self):
+        """msc_stabilize=True adds a NONZERO explicit K33 at interior steep-slope
+        interfaces (and the surface interface stays untouched — NEMO a33 loops
+        jk=2..jpkm1)."""
+        a = self._inputs(slope=5e-3)
+        base = self._call(a)
+        on = self._call(a, msc_stabilize=True, dt=3600.0)
+        diff = jnp.abs(on - base)
+        assert jnp.all(jnp.isfinite(on))
+        # Non-vacuous: the explicit K33 changes the interior tendency.
+        assert float(jnp.max(diff[:, :, 1:])) > 0.0
+        # Zero slope ⇒ ah_wslp2=0, so the explicit coeff is (0 − akz) = −akz.  On
+        # THIS coarse grid dt·akz_h < 0.5 ⇒ akz=0 ⇒ msc inert.  (On a fine grid the
+        # slope-independent akz_h can push akz>0, giving a nonzero −akz explicit
+        # part even at zero slope — NEMO's own MSC behaviour, not a bug.)
+        a0 = self._inputs(slope=0.0)
+        b0 = self._call(a0)
+        on0 = self._call(a0, msc_stabilize=True, dt=3600.0)
+        assert jnp.allclose(b0, on0, rtol=1e-10, atol=1e-30)
