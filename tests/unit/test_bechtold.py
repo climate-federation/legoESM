@@ -643,6 +643,12 @@ def test_bechtold_mse_conservation_within_tolerance():
             enable_stochastic=False, enable_cmt=False,
             subsidence_solve="implicit_flux",
             use_ifs_subcloud_evap=False,
+            # In-plume precip pinned OFF in THIS block: its rain follows the
+            # RELEASED-latent convention (formation heating booked in dT, see
+            # the in-plume energy-coupling fix), so the deferred-latent
+            # H+Q+L(dq_c+dq_r) metric below does not apply to it — the
+            # in-plume path has its own block with the matching metric.
+            use_ifs_inplume_precip=False,
         ),
         moisture_convergence=jnp.zeros_like(T),
     )
@@ -660,6 +666,37 @@ def test_bechtold_mse_conservation_within_tolerance():
     assert rel < 0.10, (
         f"Bechtold (implicit_flux) MSE residual {H+Q+C:.1f} W/m^2 "
         f"({rel*100:.1f}% of total)"
+    )
+
+    # --- In-plume precip path (default ON): RELEASED-latent convention ----
+    # The in-plume rain's vapor sink is paired with +L_v/c_p warming at the
+    # debited levels (the energy coupling that fixed the tier-2 net-COOLING
+    # regression), so its latent is in H, NOT carried by dq_r: the closure
+    # metric is h = c_p*dT + L_v*(dq_v + dq_c) with dq_r EXCLUDED.  (The
+    # legacy split's rain above is a carve-out of the deferred-latent
+    # detrained condensate, hence the different metric.  Mixed conventions
+    # inside one scheme are a documented debt; each is pinned here so
+    # neither can silently regress.)
+    out_ip, _, _ = bechtold_convection(
+        T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
+        conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
+        dt=1800.0,
+        config=BechtoldConfig(
+            enable_stochastic=False, enable_cmt=False,
+            subsidence_solve="implicit_flux",
+            use_ifs_subcloud_evap=False,
+            use_ifs_inplume_precip=True,
+        ),
+        moisture_convergence=jnp.zeros_like(T),
+    )
+    H2 = float(jnp.sum(out_ip.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
+    Q2 = float(jnp.sum(out_ip.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+    C2 = float(jnp.sum(out_ip.dq_c_conv_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+    rel2 = abs(H2 + Q2 + C2) / (abs(H2) + abs(Q2) + abs(C2) + 1e-10)
+    assert rel2 < 0.10, (
+        f"Bechtold in-plume-precip MSE residual {H2+Q2+C2:.1f} W/m^2 "
+        f"({rel2*100:.1f}% of total) — the rain-formation latent release "
+        f"and the vapor sink have diverged"
     )
 
 
