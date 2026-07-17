@@ -24,8 +24,14 @@ radiation: "none"
 # variant_sfno_physics overlay (64 / 4, which overrides the base's 96 / 6)
 # so the sfno_full vs sfno_physics comparison is architecture-matched.
 # Raise both together if you want more emulator capacity.
-sfno_embed_dim: 64
-sfno_n_blocks: 4
+# 32/2 matches the PROVEN t106_headtohead sfno_full config. 64/4 (to
+# capacity-match sfno_physics) needs ~63 GiB for one T106 forward+
+# backward and OOMs Derecho's 40 GB A100s (job 6765xxx). The full
+# emulator's per-step activation is far heavier than sfno_physics's
+# tendency head, so the families are NOT capacity-matched anyway —
+# each is sized to fit + train. Raise together only on >=80 GB cards.
+sfno_embed_dim: 32
+sfno_n_blocks: 2
 sfno_mlp_expansion: 4
 sfno_seed: 0
 
