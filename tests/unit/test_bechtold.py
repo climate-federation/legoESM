@@ -164,7 +164,7 @@ def test_bechtold_downdraft_evap_conserves_water_locally():
         # re-evaporation machinery; the default-on IFS Kessler evap replaces
         # it (own conservation tests in the subcloud_evap section).
         config=BechtoldConfig(enable_downdraft=False, enable_stochastic=False,
-                              use_ifs_subcloud_evap=False,
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
                               use_ifs_inplume_precip=False),
         moisture_convergence=jnp.zeros_like(T),
     )
@@ -173,7 +173,7 @@ def test_bechtold_downdraft_evap_conserves_water_locally():
         conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
         dt=300.0,
         config=BechtoldConfig(enable_downdraft=True, enable_stochastic=False,
-                              use_ifs_subcloud_evap=False,
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
                               use_ifs_inplume_precip=False),
         moisture_convergence=jnp.zeros_like(T),
     )
@@ -642,7 +642,13 @@ def test_bechtold_mse_conservation_within_tolerance():
         config=BechtoldConfig(
             enable_stochastic=False, enable_cmt=False,
             subsidence_solve="implicit_flux",
-            use_ifs_subcloud_evap=False,
+            use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
+            # In-plume precip pinned OFF in THIS block: its rain follows the
+            # RELEASED-latent convention (formation heating booked in dT, see
+            # the in-plume energy-coupling fix), so the deferred-latent
+            # H+Q+L(dq_c+dq_r) metric below does not apply to it — the
+            # in-plume path has its own block with the matching metric.
+            use_ifs_inplume_precip=False,
         ),
         moisture_convergence=jnp.zeros_like(T),
     )
@@ -660,6 +666,37 @@ def test_bechtold_mse_conservation_within_tolerance():
     assert rel < 0.10, (
         f"Bechtold (implicit_flux) MSE residual {H+Q+C:.1f} W/m^2 "
         f"({rel*100:.1f}% of total)"
+    )
+
+    # --- In-plume precip path (default ON): RELEASED-latent convention ----
+    # The in-plume rain's vapor sink is paired with +L_v/c_p warming at the
+    # debited levels (the energy coupling that fixed the tier-2 net-COOLING
+    # regression), so its latent is in H, NOT carried by dq_r: the closure
+    # metric is h = c_p*dT + L_v*(dq_v + dq_c) with dq_r EXCLUDED.  (The
+    # legacy split's rain above is a carve-out of the deferred-latent
+    # detrained condensate, hence the different metric.  Mixed conventions
+    # inside one scheme are a documented debt; each is pinned here so
+    # neither can silently regress.)
+    out_ip, _, _ = bechtold_convection(
+        T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
+        conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
+        dt=1800.0,
+        config=BechtoldConfig(
+            enable_stochastic=False, enable_cmt=False,
+            subsidence_solve="implicit_flux",
+            use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
+            use_ifs_inplume_precip=True,
+        ),
+        moisture_convergence=jnp.zeros_like(T),
+    )
+    H2 = float(jnp.sum(out_ip.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
+    Q2 = float(jnp.sum(out_ip.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+    C2 = float(jnp.sum(out_ip.dq_c_conv_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+    rel2 = abs(H2 + Q2 + C2) / (abs(H2) + abs(Q2) + abs(C2) + 1e-10)
+    assert rel2 < 0.10, (
+        f"Bechtold in-plume-precip MSE residual {H2+Q2+C2:.1f} W/m^2 "
+        f"({rel2*100:.1f}% of total) — the rain-formation latent release "
+        f"and the vapor sink have diverged"
     )
 
 
@@ -680,7 +717,7 @@ def test_bechtold_precip_efficiency_splits_rain_conserving_mass():
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
         # evap pinned OFF: this test pins the bit-exact pe-fraction split.
         config=BechtoldConfig(precip_efficiency=0.0,
-                              use_ifs_subcloud_evap=False,
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
                               use_ifs_inplume_precip=False),
     )
     assert base.dq_r_conv_dt is None                 # pe=0 => no split
@@ -688,9 +725,17 @@ def test_bechtold_precip_efficiency_splits_rain_conserving_mass():
     pe = 0.6
     split, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        # ALL IFS chain flags pinned OFF: this fixture pins the bit-exact
+        # (1-PE)/PE split in ISOLATION; the 2026-07-17 default flips turned
+        # on downdraft/capdcycl/land-RHEBC, which touch the precip/M_b chain
+        # downstream and break the exact partition identity (their own
+        # conservation is tested in their sections).
         config=BechtoldConfig(precip_efficiency=pe,
-                              use_ifs_subcloud_evap=False,
-                              use_ifs_inplume_precip=False),
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
+                              use_ifs_inplume_precip=False,
+                              use_ifs_downdraft=False,
+                              use_ifs_capdcycl=False,
+                              use_ifs_land_rhebc=False),
     )
     assert split.dq_r_conv_dt is not None
     # cloud + rain == the ORIGINAL positive condensate (base cloud), so the
@@ -728,21 +773,24 @@ def test_bechtold_downdraft_sharpness_fields_wired():
     out_default, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
         config=BechtoldConfig(enable_downdraft=True,
-                              use_ifs_subcloud_evap=False,
+                              use_ifs_downdraft=False,  # LEGACY branch under test
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
                               use_ifs_inplume_precip=False),
     )
     out_rh_flat, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
         config=BechtoldConfig(enable_downdraft=True,
+                              use_ifs_downdraft=False,  # LEGACY branch under test
                               downdraft_rh_sharpness=1e-6,
-                              use_ifs_subcloud_evap=False,
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
                               use_ifs_inplume_precip=False),
     )
     out_lcl_flat, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
         config=BechtoldConfig(enable_downdraft=True,
+                              use_ifs_downdraft=False,  # LEGACY branch under test
                               lcl_membership_sharpness=1e-6,
-                              use_ifs_subcloud_evap=False,
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
                               use_ifs_inplume_precip=False),
     )
     assert float(jnp.max(jnp.abs(out_rh_flat.dT_dt - out_default.dT_dt))) > 1e-10, (
@@ -890,9 +938,17 @@ def _run_pe(pe):
         # partition; the default-on IFS sub-cloud evap rescales dq_r
         # downstream of the split (its own conservation is tested in the
         # subcloud_evap section).
+        # ALL IFS chain flags pinned OFF: this fixture pins the bit-exact
+        # (1-PE)/PE split in ISOLATION; the 2026-07-17 default flips turned
+        # on downdraft/capdcycl/land-RHEBC, which touch the precip/M_b chain
+        # downstream and break the exact partition identity (their own
+        # conservation is tested in their sections).
         config=BechtoldConfig(precip_efficiency=pe,
-                              use_ifs_subcloud_evap=False,
-                              use_ifs_inplume_precip=False),
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
+                              use_ifs_inplume_precip=False,
+                              use_ifs_downdraft=False,
+                              use_ifs_capdcycl=False,
+                              use_ifs_land_rhebc=False),
     )
     return out
 
@@ -1061,11 +1117,11 @@ def test_bechtold_f1_turnover_toggle_changes_result():
     on, mu_on, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
         config=BechtoldConfig(use_convective_turnover_tau=True,
-                              use_ifs_cape_closure=False, M_b_max=1.0))
+                              use_ifs_cape_closure=False, use_ifs_capdcycl=False, M_b_max=1.0))
     off, mu_off, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
         config=BechtoldConfig(use_convective_turnover_tau=False,
-                              use_ifs_cape_closure=False, M_b_max=1.0))
+                              use_ifs_cape_closure=False, use_ifs_capdcycl=False, M_b_max=1.0))
     assert jnp.all(jnp.isfinite(mu_on)) and jnp.all(jnp.isfinite(mu_off))
     assert float(jnp.max(jnp.abs(mu_on - mu_off))) > 0.0, "toggle must be live"
     # a deep, buoyant column has tau_conv < tau_bl (fast turnover) => turnover
@@ -1083,7 +1139,7 @@ def test_bechtold_f1_turnover_stable_column_quiesces():
     out, mu, _ = bechtold_convection(
         T, q, pf, ph, u, v, jnp.zeros((ncol, nlev)), jnp.zeros((ncol,)),
         None, dt=600.0, config=BechtoldConfig(use_convective_turnover_tau=True,
-                                              use_ifs_cape_closure=False))
+                                              use_ifs_cape_closure=False, use_ifs_capdcycl=False))
     # crude column heating rate proxy: max|dT/dt| * c_pd * p_s/g  [W/m^2]
     w_m2 = float(jnp.max(jnp.abs(out.dT_dt)) * constants.c_pd * 1e5 / constants.g)
     assert w_m2 < 1.0, f"stable column not quiescent: {w_m2:.3f} W/m^2"
@@ -1099,7 +1155,7 @@ def test_bechtold_f1_turnover_grad_finite():
     def loss(eps_deep):
         cfg = BechtoldConfig(epsilon_deep=eps_deep,
                              use_convective_turnover_tau=True,
-                             use_ifs_cape_closure=False)
+                             use_ifs_cape_closure=False, use_ifs_capdcycl=False)
         o, _, _ = bechtold_convection(T, q, pf, ph, u, v, cpp, st, None,
                                       dt=600.0, config=cfg)
         return jnp.sum(o.dT_dt ** 2)
@@ -1122,7 +1178,7 @@ def test_bechtold_f1_turnover_grad_finite_on_quiescent_column():
     def loss(eps_deep):
         cfg = BechtoldConfig(epsilon_deep=eps_deep,
                              use_convective_turnover_tau=True,
-                             use_ifs_cape_closure=False)
+                             use_ifs_cape_closure=False, use_ifs_capdcycl=False)
         o, _, _ = bechtold_convection(T, q, pf, ph, u, v, cpp, st, None,
                                       dt=600.0, config=cfg)
         return jnp.sum(o.dT_dt ** 2)
@@ -1291,11 +1347,11 @@ def test_bechtold_f1_turnover_deep_weighted_integration_live_and_bounded():
         _, mu_on, _ = bechtold_convection(
             T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
             config=BechtoldConfig(use_convective_turnover_tau=True,
-                                  use_ifs_cape_closure=False, M_b_max=10.0))
+                                  use_ifs_cape_closure=False, use_ifs_capdcycl=False, M_b_max=10.0))
         _, mu_off, _ = bechtold_convection(
             T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
             config=BechtoldConfig(use_convective_turnover_tau=False,
-                                  use_ifs_cape_closure=False, M_b_max=10.0))
+                                  use_ifs_cape_closure=False, use_ifs_capdcycl=False, M_b_max=10.0))
         assert jnp.all(jnp.isfinite(mu_on)) and jnp.all(jnp.isfinite(mu_off))
         denom = float(jnp.maximum(jnp.max(jnp.abs(mu_off)), 1e-12))
         rel = float(jnp.max(jnp.abs(mu_on - mu_off))) / denom
@@ -1316,7 +1372,7 @@ def test_bechtold_f5_supersaturated_column_finite_and_convecting():
     out, mu, _ = bechtold_convection(
         T, q_super, pf, ph, u, v, jnp.zeros((ncol, nlev)), jnp.zeros((ncol,)),
         None, dt=600.0, config=BechtoldConfig(use_convective_turnover_tau=True,
-                                              use_ifs_cape_closure=False))
+                                              use_ifs_cape_closure=False, use_ifs_capdcycl=False))
     assert jnp.all(jnp.isfinite(out.dT_dt)) and jnp.all(jnp.isfinite(mu))
     assert float(jnp.max(out.convective_mask)) > 0.0, "supersaturated column must convect"
 
@@ -1566,7 +1622,7 @@ def test_ifs_cape_closure_default_on_and_toggle_live():
         config=BechtoldConfig(use_ifs_cape_closure=True, M_b_max=1.0))
     off, mu_off, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
-        config=BechtoldConfig(use_ifs_cape_closure=False, M_b_max=1.0))
+        config=BechtoldConfig(use_ifs_cape_closure=False, use_ifs_capdcycl=False, M_b_max=1.0))
     assert jnp.all(jnp.isfinite(mu_on)) and jnp.all(jnp.isfinite(mu_off))
     assert float(jnp.max(jnp.abs(mu_on - mu_off))) > 0.0, "toggle must be live"
     for o in (on, off):
@@ -1642,7 +1698,7 @@ def test_ifs_cape_closure_restarts_stochastic_zeroed_deep_column():
                               enable_stochastic=True))[1]
     mu_off = bechtold_convection(
         T, q, pf, ph, u, v, cpp, st, key, dt=600.0,
-        config=BechtoldConfig(use_ifs_cape_closure=False,
+        config=BechtoldConfig(use_ifs_cape_closure=False, use_ifs_capdcycl=False,
                               enable_stochastic=True))[1]
     assert float(jnp.max(mu_on)) > 0.0, (
         "closure floor failed to restart the stochastically-zeroed deep column"
@@ -1859,7 +1915,7 @@ def test_ifs_subcloud_evap_toggle_and_leaf_integration():
         config=BechtoldConfig(use_ifs_subcloud_evap=True, **common))
     out_off, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
-        config=BechtoldConfig(use_ifs_subcloud_evap=False, **common))
+        config=BechtoldConfig(use_ifs_subcloud_evap=False, use_ifs_snow_melt=False, **common))
     for o in (out_on, out_off):
         assert jnp.all(jnp.isfinite(o.dT_dt))
         assert jnp.all(jnp.isfinite(o.dq_v_dt))
@@ -2059,12 +2115,12 @@ def test_ifs_inplume_toggle_and_leaf_integration():
     out_on, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
         config=BechtoldConfig(use_ifs_inplume_precip=True,
-                              use_ifs_subcloud_evap=False,
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
                               precip_efficiency=0.0))
     out_off, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
         config=BechtoldConfig(use_ifs_inplume_precip=False,
-                              use_ifs_subcloud_evap=False,
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
                               precip_efficiency=0.0))
     assert out_off.dq_r_conv_dt is None
     assert out_on.dq_r_conv_dt is not None
@@ -2106,7 +2162,7 @@ def test_ifs_inplume_chain_with_subcloud_evap_and_grad():
         config=BechtoldConfig(use_ifs_subcloud_evap=True, **kw))[0]
     r_noev = bechtold_convection(
         T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
-        config=BechtoldConfig(use_ifs_subcloud_evap=False, **kw))[0]
+        config=BechtoldConfig(use_ifs_subcloud_evap=False, use_ifs_snow_melt=False, **kw))[0]
     rain_evap = float(jnp.sum(r_evap.dq_r_conv_dt * dp / constants.g))
     rain_noev = float(jnp.sum(r_noev.dq_r_conv_dt * dp / constants.g))
     # COMPLETE sub-cloud evaporation is permitted by the oracle-style flux
@@ -2187,8 +2243,8 @@ def test_ifs_inplume_rain_water_budget_coupled():
     # vapor-sink pairing (the default advective kernel's documented
     # non-closure would mask the rain pairing under the L-dependent dq_c
     # change).
-    common = dict(use_ifs_subcloud_evap=False, enable_downdraft=False,
-                  precip_efficiency=0.0, use_ifs_cape_closure=False,
+    common = dict(use_ifs_subcloud_evap=False, use_ifs_snow_melt=False, enable_downdraft=False,
+                  precip_efficiency=0.0, use_ifs_cape_closure=False, use_ifs_capdcycl=False,
                   use_convective_turnover_tau=False,
                   subsidence_solve="implicit_flux")
 
@@ -2246,7 +2302,7 @@ def test_ifs_ztaures_matches_oracle_piecewise():
     # lands under the oracle's 720 s clamp floor — faithfully equalized.  The
     # fine-branch dx=500 m gives factor 1+ln(16)^2 ~ 8.7 (tau 1854 s), which
     # clears the floor and must show up in the mass flux.
-    kw = dict(M_b_max=1.0, use_ifs_cape_closure=False,
+    kw = dict(M_b_max=1.0, use_ifs_cape_closure=False, use_ifs_capdcycl=False,
               use_convective_turnover_tau=True)
     mu0 = bechtold_convection(T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
                               config=BechtoldConfig(**kw))[1]
@@ -2330,7 +2386,7 @@ def test_ifs_downdraft_fires_and_conserves_on_dry_mid_column():
     ncol, nlev = T.shape
     dp = ph[:, 1:] - ph[:, :-1]
     cpp = jnp.zeros((ncol, nlev)); st = jnp.zeros((ncol,))
-    kw = dict(use_ifs_subcloud_evap=False, enable_downdraft=False,
+    kw = dict(use_ifs_subcloud_evap=False, use_ifs_snow_melt=False, enable_downdraft=False,
               downdraft_transport=False)
     o_on, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
@@ -2407,7 +2463,7 @@ def test_ifs_downdraft_helper_bounds_and_window():
 def test_ifs_downdraft_default_off_quiescent_and_grad():
     """Default False; stable column quiesces with the flag on; jax.grad
     finite through LFS + descent scans (x64)."""
-    assert BechtoldConfig().use_ifs_downdraft is False
+    assert BechtoldConfig().use_ifs_downdraft is True  # flipped 2026-07-17 (RCE drift -65%)
     Ts, qs, pfs, phs, us, vs = _column(ncol=1, nlev=30, T_sfc=280.0,
                                        q_sfc=2e-3, lapse_rate=3.0)
     o_s, _, _ = bechtold_convection(
@@ -2652,7 +2708,7 @@ def test_ifs_shallow_closure_requires_cape_closure():
             T, q, pf, ph, u, v, jnp.zeros((1, 12)), jnp.zeros((1,)), None,
             dt=600.0,
             config=BechtoldConfig(use_ifs_shallow_closure=True,
-                                  use_ifs_cape_closure=False))
+                                  use_ifs_cape_closure=False, use_ifs_capdcycl=False))
 
 
 # ---------------------------------------------------------------------------
@@ -2780,8 +2836,8 @@ def test_ifs_land_rhebc_blend_and_toggle():
 
 
 def test_ifs_capdcycl_flag_coherence_and_cli_defaults():
-    assert BechtoldConfig().use_ifs_capdcycl is False
-    assert BechtoldConfig().use_ifs_land_rhebc is False
+    assert BechtoldConfig().use_ifs_capdcycl is True  # flipped 2026-07-17
+    assert BechtoldConfig().use_ifs_land_rhebc is True  # flipped 2026-07-17
     import pytest
     T, q, pf, ph, u, v = _column(ncol=1, nlev=12)
     with pytest.raises(ValueError, match="use_ifs_capdcycl"):
@@ -2867,7 +2923,7 @@ def test_ifs_snow_melt_leaf_enthalpy_and_toggle():
     melt heating pattern; column enthalpy shift OFF->ON is EXACTLY zero
     (freeze heat == melt cooling incl. the surface fold); default False;
     coherence guard fires."""
-    assert BechtoldConfig().use_ifs_snow_melt is False
+    assert BechtoldConfig().use_ifs_snow_melt is True  # flipped 2026-07-17 (RCE drift -50%)
     T, q, pf, ph, u, v = _column(ncol=2, nlev=40, T_sfc=278.0, q_sfc=5e-3,
                                  lapse_rate=6.5)
     ncol, nlev = T.shape
