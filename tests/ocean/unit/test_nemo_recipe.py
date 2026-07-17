@@ -541,8 +541,9 @@ def test_nemo_cap_slope_limit_centered_path():
     )
 
     r = build_nemo_gyre_recipe()
-    cfg = r.model_config.gm_redi
-    assert cfg.slope_limit == "nemo_cap"
+    # card runs dm95 until the native four-position slopes land (stability;
+    # see the card comment); nemo_cap is tested as the wired OPTION here.
+    cfg = r.model_config.gm_redi._replace(slope_limit="nemo_cap")
     st = r.initial_state
     # a STEEP horizontal density front (large T gradient) to exceed the cap
     T = st.T.data + 5.0 * jnp.linspace(0, 1, st.T.data.shape[1])[None, :, None]

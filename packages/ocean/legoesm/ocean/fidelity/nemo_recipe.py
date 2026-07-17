@@ -360,11 +360,18 @@ def nemo_lat_lon_model_config(
             kappa_GM=_kappa_gm,
             kappa_Redi=cfg.kappa_Redi,
             S_max=cfg.redi_S_max,
-            # NEMO ldfslp steep-slope convention: HARD slope cap (rn_slpmax +
-            # the e3/7e3 stability bound) with taper=1 — the flux keeps
-            # diffusing along the capped slope at the ML-base outcrops (the
-            # subduction pathway; the DM95 taper killed it there; plan §G).
-            slope_limit="nemo_cap",
+            # Steep-slope limiter: dm95_taper (NOT yet NEMO's hard cap).
+            # NEMO keeps full-kappa flux at the capped slope (ldfslp:212-213,
+            # rn_slpmax + e3/7e3) — but with the SLOPE SIGN FIX active, the
+            # mode-b single-position operator (documented amplitude ~1.35x
+            # NEMO's stencil) EXCEEDS the stability margin NEMO's e3/7e3
+            # bound encodes: a southern-wall column hot spot develops
+            # (39-45 C, 2-yr bisect: cap→hot, dm95→healthy 21 C; ML ramp
+            # innocent). nemo_cap is wired + tested and becomes usable once
+            # the native four-position slopes land (amplitude → 1.0, the
+            # documented follow-up). dm95 under-transports at steep outcrops
+            # (a known fidelity cost) but is sign-correct and stable.
+            slope_limit="dm95_taper",
             visbeck=VisbeckConfig(enabled=False),
             slope_scheme=cfg.lateral_operator,
             slope_density="neutral",
