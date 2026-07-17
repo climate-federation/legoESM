@@ -8,5 +8,7 @@ aimip_turbulence: "louis"
 aimip_gwd: "mcfarlane"
 aimip_microphysics: "sundqvist"
 aimip_cloud: "xu_randall"
-radiation: "gray"          # informational tag; actual radiation = base aimip_radiation (rrtmgp)
-physics_parameterization: "none"
+# Full physics suite + RRTMGP correlated-k radiation.  Pinned here so
+# the classical control cannot silently fall back to gray if the base
+# changes.
+aimip_radiation: "rrtmgp"

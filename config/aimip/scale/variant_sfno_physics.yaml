@@ -6,13 +6,16 @@
 
 aimip_variant: "sfno_physics"
 
+# ALL physics — convection, turbulence, microphysics, clouds, gravity
+# wave drag AND radiation — is LEARNED by the SFNO; no classical scheme
+# runs alongside it.  The "none" tags below are informational (not
+# consumed by run_aimip) and record that no classical scheme is active.
 convection: "none"
 turbulence: "none"
 gravity_wave_drag: "none"
 cloud_scheme: "none"
 microphysics: "none"
-radiation: "gray"
-physics_parameterization: "none"
+radiation: "none"
 
 # SFNO architecture (matches the SFNOConfig defaults used in
 # ``training/sfno_dycore_coupling.py``).
