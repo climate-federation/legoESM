@@ -155,3 +155,145 @@ def test_cgrid_midpoint_tripwire():
                                       nw)
     average_shared_edge_cgrid(fx6, fy6, N, NG)
     assert fx6[tile - 1][0, fj - 1] == 0.5 * (own_before + part_before)
+
+
+# ---------------------------------------------------------------------------
+# INDEPENDENT contact table (codex avg-r1 P1): derived from pure supergrid
+# GEOMETRY — coincident-edge coordinate matching + tangent-vector dot
+# products (scripts recorded in the campaign log), NOT from the
+# neighbor_index machinery under test.  Per directed edge:
+#   (tile, edge) -> (partner tile, partner edge, param order, partner
+#                    component for the local NORMAL, sign)
+# order +1: edge params run the same direction; -1: reversed.  All
+# normal-component signs on this tiling are +1 (the -1s live on
+# tangential components, outside these boundary loops).
+# ---------------------------------------------------------------------------
+CONTACT = {
+    (1, "E"): (2, "W", +1, "i", +1),
+    (1, "N"): (3, "W", -1, "i", +1),
+    (1, "S"): (6, "N", +1, "j", +1),
+    (1, "W"): (5, "N", -1, "j", +1),
+    (2, "E"): (4, "S", -1, "j", +1),
+    (2, "N"): (3, "S", +1, "j", +1),
+    (2, "S"): (6, "E", -1, "i", +1),
+    (2, "W"): (1, "E", +1, "i", +1),
+    (3, "E"): (4, "W", +1, "i", +1),
+    (3, "N"): (5, "W", -1, "i", +1),
+    (3, "S"): (2, "N", +1, "j", +1),
+    (3, "W"): (1, "N", -1, "j", +1),
+    (4, "E"): (6, "S", -1, "j", +1),
+    (4, "N"): (5, "S", +1, "j", +1),
+    (4, "S"): (2, "E", -1, "i", +1),
+    (4, "W"): (3, "E", +1, "i", +1),
+    (5, "E"): (6, "W", +1, "i", +1),
+    (5, "N"): (1, "W", -1, "i", +1),
+    (5, "S"): (4, "N", +1, "j", +1),
+    (5, "W"): (3, "N", -1, "j", +1),
+    (6, "E"): (2, "S", -1, "j", +1),
+    (6, "N"): (1, "S", +1, "j", +1),
+    (6, "S"): (4, "E", -1, "i", +1),
+    (6, "W"): (5, "E", +1, "i", +1),
+}
+
+
+def _cgrid_partner_slot(tile, edge, k):
+    """Expected partner (tile, array, i, j) for own C edge param k
+    (cell index 1..N), from CONTACT alone."""
+    t2, e2, order, comp, sgn = CONTACT[(tile, edge)]
+    kp = k if order == 1 else N + 1 - k
+    if e2 == "W":
+        return t2, "fx", 1, kp, sgn
+    if e2 == "E":
+        return t2, "fx", NPX, kp, sgn
+    if e2 == "S":
+        return t2, "fy", kp, 1, sgn
+    return t2, "fy", kp, NPX, sgn
+
+
+def _own_cgrid_slot(tile, edge, k):
+    if edge == "W":
+        return "fx", 1, k
+    if edge == "E":
+        return "fx", NPX, k
+    if edge == "S":
+        return "fy", k, 1
+    return "fy", k, NPX
+
+
+def test_cgrid_impulse_vs_contact_table():
+    """Independent sign/order pinning (codex avg-r1 P1): put a unit
+    impulse at the partner slot named by the GEOMETRIC contact table;
+    the own slot must blend to exactly +0.5 (sign +1 table-wide) at the
+    table's index mapping — sweeping every directed edge and both an
+    interior and an end param (order-reversal discrimination)."""
+    for (tile, edge), _v in CONTACT.items():
+        for k in (2, N - 1):
+            fx6 = [np.zeros((NPX, N)) for _ in range(6)]
+            fy6 = [np.zeros((N, NPX)) for _ in range(6)]
+            t2, arr, pi, pj, sgn = _cgrid_partner_slot(tile, edge, k)
+            (fx6 if arr == "fx" else fy6)[t2 - 1][pi - 1, pj - 1] = 1.0
+            average_shared_edge_cgrid(fx6, fy6, N, NG)
+            oarr, oi, oj = _own_cgrid_slot(tile, edge, k)
+            own = (fx6 if oarr == "fx" else fy6)[tile - 1][oi - 1, oj - 1]
+            assert own == 0.5 * sgn, (tile, edge, k, own)
+
+
+def _bgrid_partner_slot(tile, edge, k):
+    """Expected partner B slot for own edge param k (B index 1..NPX)."""
+    t2, e2, order, comp, sgn = CONTACT[(tile, edge)]
+    kp = k if order == 1 else NPX + 1 - k
+    if e2 == "W":
+        return t2, 1, kp, comp, sgn
+    if e2 == "E":
+        return t2, NPX, kp, comp, sgn
+    if e2 == "S":
+        return t2, kp, 1, comp, sgn
+    return t2, kp, NPX, comp, sgn
+
+
+def test_bgrid_impulse_vs_contact_table():
+    """Same independent pinning for the B-grid blend, INCLUDING the
+    corner B-nodes (k=1 and k=NPX) the Fortran loops touch."""
+    for (tile, edge), (_t2, _e2, _order, comp, _sgn) in CONTACT.items():
+        for k in (1, 3, NPX):
+            xb6 = [np.zeros((NPX, NPX)) for _ in range(6)]
+            yb6 = [np.zeros((NPX, NPX)) for _ in range(6)]
+            t2, pi, pj, comp, sgn = _bgrid_partner_slot(tile, edge, k)
+            # own normal component: x-like on W/E (xb), y-like on S/N (yb);
+            # partner stores it in comp per the table
+            (xb6 if comp == "i" else yb6)[t2 - 1][pi - 1, pj - 1] = 1.0
+            average_shared_edge_bgrid(xb6, yb6, N, NG)
+            if edge == "W":
+                own = xb6[tile - 1][0, k - 1]
+            elif edge == "E":
+                own = xb6[tile - 1][NPX - 1, k - 1]
+            elif edge == "S":
+                own = yb6[tile - 1][k - 1, 0]
+            else:
+                own = yb6[tile - 1][k - 1, NPX - 1]
+            assert own == 0.5 * sgn, (tile, edge, k, own)
+
+
+def test_allflux_wrapper_slot_selection():
+    """dyn_core iq selection (codex avg-r1 P1): slots 1 and 4 (+tracer
+    slot 5) blend; slots 2 and 3 stay byte-untouched."""
+    from legoesm.grids.fv3_native_gridstruct import (
+        average_allflux_shared_edges,
+    )
+
+    nq = 1
+    rng = np.random.default_rng(21)
+    afx6 = [rng.standard_normal((NPX, N, 4 + nq)) for _ in range(6)]
+    afy6 = [rng.standard_normal((N, NPX, 4 + nq)) for _ in range(6)]
+    keep_x = [a.copy() for a in afx6]
+    keep_y = [a.copy() for a in afy6]
+    average_allflux_shared_edges(afx6, afy6, nq, N, NG)
+    for t in range(6):
+        for iq0 in (1, 2):          # slots 2,3 (0-based 1,2) untouched
+            assert np.array_equal(afx6[t][:, :, iq0], keep_x[t][:, :, iq0])
+            assert np.array_equal(afy6[t][:, :, iq0], keep_y[t][:, :, iq0])
+        for iq0 in (0, 3, 4):       # slots 1,4,5 blended at the edges
+            assert not np.array_equal(afx6[t][:, :, iq0],
+                                      keep_x[t][:, :, iq0])
+            assert not np.array_equal(afy6[t][:, :, iq0],
+                                      keep_y[t][:, :, iq0])

@@ -857,6 +857,23 @@ def average_shared_edge_cgrid(fx6: list, fy6: list, n: int, ng: int):
         arr[i, j] = val
 
 
+def average_allflux_shared_edges(afx6: list, afy6: list, nq: int,
+                                 n: int, ng: int):
+    """dyn_core.F90:853-900 slot selection over the allflux stacks.
+
+    ``afx6``/``afy6``: per-face allflux slabs (n+1, n, 4+nq) /
+    (n, n+1, 4+nq).  Fortran averages ONLY iq=1 (delp), iq=4 (temp)
+    and iq>4 (tracers); slots 2 (w) and 3 (q_con) are NOT averaged —
+    this wrapper applies :func:`average_shared_edge_cgrid` per
+    selected slot and leaves 2/3 byte-untouched.
+    """
+    for iq in range(1, 4 + nq + 1):
+        if iq == 1 or iq >= 4:
+            fx6 = [a[:, :, iq - 1] for a in afx6]
+            fy6 = [a[:, :, iq - 1] for a in afy6]
+            average_shared_edge_cgrid(fx6, fy6, n, ng)
+
+
 def _bgrid_edge_partner(xb6: list, yb6: list, tile: int, si: int, sj: int,
                         along: str, n: int, ng: int, n_src: int) -> float:
     """Neighbour's coincident B-node vector-component value (BGRID_NE)."""
