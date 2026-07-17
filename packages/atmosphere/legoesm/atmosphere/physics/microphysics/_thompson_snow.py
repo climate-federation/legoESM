@@ -26,7 +26,8 @@ process rates is the analytic gamma-function integral
 This module provides the mass-weighted snow FALL SPEED and the vapour
 DEPOSITION/sublimation rate built from those exact moment integrals with the
 Thompson-2008 fall-speed (``av_s/bv_s/fv_s``) and ventilation (``Sc``,
-``t1_qs_sd``, ``t2_qs_sd``, capacitance ``C_sqrd``) constants.  The rates are
+``t1_qs_sd``, ``t2_qs_sd``, T-ramped capacitance ``C_sqrd→C_cube``) constants.
+The rates are
 finite and finite-gradient (AD-safe) everywhere, including at q_s→0; they are
 NOT globally smooth — the activation gate, speed cap, and availability clamps
 are non-differentiable ``where``/``clip`` guards by design.
@@ -52,7 +53,14 @@ _KAP1 = 17.46            # gamma-mode amplitude
 _LAM0 = 20.78            # exponential-mode slope factor
 _LAM1 = 3.29             # gamma-mode slope factor
 _SC = 0.632              # Schmidt number
-_C_SQRD = 0.15           # snow capacitance shape factor (plates/aggregates)
+# Snow capacitance: gSAM/WRF Thompson ramps C from C_sqrd (plates/aggregates)
+# at warm snow T to C_cube (3D crystals) at cold T:
+#   C_snow = clip(C_sqrd + (tc+15)·(C_cube−C_sqrd)/(−30+15), C_sqrd, C_cube)
+# (module_mp_thompson.f90:108-109 ``C_sqrd=0.3, C_cube=0.5`` and :2032-2033).
+_C_SQRD = 0.3            # snow capacitance, warm end tc >= -15 C (oracle C_sqrd)
+_C_CUBE = 0.5            # snow capacitance, cold end tc <= -30 C (oracle C_cube)
+_C_RAMP_TC_HI = -15.0    # ramp warm endpoint [degC] (oracle: tempc+15)
+_C_RAMP_TC_LO = -30.0    # ramp cold endpoint [degC] (oracle: -30+15 denominator)
 # Reference density for the (rho0/rho)^1/2 fall-speed correction.
 # (298 K is the Thompson reference temperature; p and R_d from constants.)
 _RHO_NOT = constants.p_atm_std / (constants.R_d * 298.0)
@@ -191,13 +199,32 @@ def snow_fall_speed(q_s, rho, T):
     return jnp.where(active, jnp.clip(V_s, 0.0, _VT_CLIP_SNOW), 0.0)
 
 
+def snow_capacitance(T):
+    """Temperature-ramped Thompson snow capacitance ``C_snow`` [-].
+
+    FAITHFUL (oracle-pinned): term-for-term the gSAM/WRF Thompson ramp
+    (module_mp_thompson.f90:2032-2033)::
+
+        C_snow = C_sqrd + (tempc+15)·(C_cube−C_sqrd)/(−30+15)
+        C_snow = MAX(C_sqrd, MIN(C_snow, C_cube))
+
+    i.e. C_sqrd = 0.3 for tc ≥ −15 °C ramping linearly to C_cube = 0.5 for
+    tc ≤ −30 °C (colder snow behaves more like 3D crystals).  Piecewise-linear
+    clip — AD-safe everywhere, C¹ except at the two kink temperatures.
+    """
+    tc = T - constants.T_freeze
+    c_snow = _C_SQRD + (tc - _C_RAMP_TC_HI) * (_C_CUBE - _C_SQRD) / (
+        _C_RAMP_TC_LO - _C_RAMP_TC_HI)
+    return jnp.clip(c_snow, _C_SQRD, _C_CUBE)
+
+
 def snow_deposition(q_v, q_s, q_sat_i, T, p_full, rho, dt):
     """Thompson-2008 snow vapour deposition / sublimation rate [kg/kg/s].
 
     Ventilated capacitance growth (Pruppacher-Klett) with Thompson's snow
     ventilation constants:
 
-        PRDS = 4π·C_sqrd·(S_i−1)/(A+B)
+        PRDS = 4π·C_snow(T)·(S_i−1)/(A+B)
                · [ t1_qs_sd·I(1) + t2_qs_sd·ρ_f^¼·I(c_vent) ] / ρ,
 
     driven by the DIMENSIONLESS ice supersaturation ratio ``S_i−1 =
@@ -216,16 +243,12 @@ def snow_deposition(q_v, q_s, q_sat_i, T, p_full, rho, dt):
     (S_i>1) is capped at the available supersaturation EXCESS ``q_v−q_sat_i``
     [kg/kg]; sublimation (S_i<1) is donor-clamped to the snow mass.
 
-    DEPARTURE (documented, not pinned): the snow capacitance ``_C_SQRD = 0.15``
-    is FIXED, whereas gSAM ramps it with temperature
-    ``C_snow = clip(C_sqrd + (tc+15)(C_cube-C_sqrd)/(-15), C_sqrd, C_cube)`` over
-    ``[C_sqrd, C_cube] = [0.3, 0.5]`` (module_mp_thompson.f90:2032-2033). legoESM's
-    0.15 is 50-70% lower than that ramp (gSAM's capacitance is 2-3⅓× larger),
-    so it SCALES DOWN the uncapped C-dependent raw deposition rate by that same
-    factor -- an identified follow-up (adopting the ramped C would change snow
-    growth and needs its own validation), which is why PRDS is not
-    coefficient-pinned like the fall speed above.  (The final PRDS is not
-    categorically smaller: the availability cap and donor clamp can bind first.)
+    The capacitance is the FAITHFUL gSAM temperature ramp ``snow_capacitance``
+    (C_sqrd = 0.3 warm → C_cube = 0.5 cold, module_mp_thompson.f90:108-109 and
+    :2032-2033); the former fixed ``_C_SQRD = 0.15`` departure (2-3⅓× weaker
+    than the oracle ramp) was closed 2026-07-17, and the PRDS prefactor is now
+    coefficient-pinned like the fall speed
+    (``tests/unit/test_thompson_snow.py``).
     """
     # Floor q_s for the PSD moments (see snow_fall_speed): at zero snow lam0->0
     # so _psd_integral's bare lam0^-(p+1) underflows to +inf while norm underflows
@@ -281,7 +304,7 @@ def snow_deposition(q_v, q_s, q_sat_i, T, p_full, rho, dt):
     # Sign convention: prds > 0 = DEPOSITION (q_v sink, snow source, +L_s
     # heating upstream); prds < 0 = SUBLIMATION (q_v source, snow sink).
     # 1/ρ closes the per-volume PSD integral to [kg/kg/s] (see docstring).
-    prds = (4.0 * jnp.pi * _C_SQRD * s_i / abi * vent
+    prds = (4.0 * jnp.pi * snow_capacitance(T) * s_i / abi * vent
             / jnp.clip(rho, _RHO_FLOOR))
     # Cap deposition at the available supersaturation excess [kg/kg];
     # donor-clamp sublimation to q_s.
