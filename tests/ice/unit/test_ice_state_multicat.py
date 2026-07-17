@@ -52,6 +52,37 @@ class TestInitDynamicIceStateGridRanks:
         with pytest.raises(ValueError, match="inconsistent with"):
             init_dynamic_ice_state((8, 12, 4), n_categories=5)
 
+    @pytest.mark.parametrize("spatial,n_cat,expected", [
+        ((30,), 1, ("nCells",)),                       # MPAS single-cat
+        ((30,), 5, ("nCells", "category")),            # MPAS multi-cat
+        ((8, 12), 1, ("lat", "lon")),                  # lat-lon single-cat
+        ((8, 12), 5, ("lat", "lon", "category")),      # lat-lon multi-cat
+        ((6, 4, 4), 1, ("face", "x", "y")),            # cube single-cat
+        ((6, 4, 4), 5, ("face", "x", "y", "category")),  # cube multi-cat
+    ])
+    def test_spatial_dim_names_match_grid_rank(self, spatial, n_cat, expected):
+        # The dim NAMES must follow the spatial rank, not the cubed-sphere
+        # ("face","x","y") for every grid — a (nCells, n_cat) field was
+        # mislabelled with four dims before this. Velocity stays spatial-only.
+        shape = spatial + ((n_cat,) if n_cat > 1 else ())
+        st = init_dynamic_ice_state(shape, n_categories=n_cat)
+        assert st.h_ice.dims == expected
+        assert st.u_ice.dims == expected[:len(spatial)]  # no trailing category
+
+    @pytest.mark.parametrize("n_cat", [0, -1, -3])
+    def test_nonpositive_categories_refused(self, n_cat):
+        with pytest.raises(ValueError, match=r"n_categories.*>= 1|positive"):
+            init_dynamic_ice_state((8, 12), n_categories=n_cat)
+
+    @pytest.mark.parametrize("shape,n_cat", [
+        ((), 1),                 # rank-0 spatial (scalar) — no grid
+        ((2, 3, 4, 5), 1),       # rank-4 spatial — no grid has 4 spatial dims
+        ((2, 3, 4, 5, 6), 6),    # rank-4 spatial after stripping the category
+    ])
+    def test_unsupported_spatial_rank_refused(self, shape, n_cat):
+        with pytest.raises(ValueError, match="unsupported spatial rank"):
+            init_dynamic_ice_state(shape, n_categories=n_cat)
+
 
 class TestDistributeDynamicStateToCategories:
     def _seeded_single_cat(self, shape=(4, 6)):
