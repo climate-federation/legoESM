@@ -23,8 +23,10 @@ sources; it does NOT mean the default runtime path fails to conserve:
   irreversible ``(c-ubm)*gwut`` conversion. So the orographic KE->heat closure
   does not extend to spectra, and a static ["energy"] claim is wrong.
 
-The irreversible intrinsic heating frame and the C.-C. Chen momentum+energy
-fixer both exist but are OFF by default.
+The irreversible intrinsic heating frame remains opt-in
+(``dttke_use_intrinsic``); since 2026-07-17 the C.-C. Chen fixer, the E3SM
+spectral thermal term (dttdf + band), and the discrete-KE orographic closure
+default ON (the flip campaign) — legacy arms are pinned explicitly below.
 """
 
 from __future__ import annotations
@@ -307,10 +309,11 @@ def test_discrete_ke_heating_closes_discrete_budget():
 
 
 def test_discrete_ke_flag_off_is_bit_identical_and_on_differs():
-    """Default (False) must reproduce the continuous-rate identity exactly
-    (bit-identity regression for the new flag); True must differ by the
-    0.5*dt*(du^2+dv^2)/c_pd term — i.e. discrete heating is STRICTLY LESS
-    where drag acts (the continuous form over-heats)."""
+    """The EXPLICIT False arm must reproduce the continuous-rate identity
+    exactly (legacy regression pin; True is the DEFAULT since 2026-07-17);
+    True must differ by the 0.5*dt*(du^2+dv^2)/c_pd term — i.e. discrete
+    heating is STRICTLY LESS where drag acts (the continuous form
+    over-heats)."""
     u, v, T, pf, ph, zf, zh, rho, lat = _driver_column()
     dt = 1800.0
     out_off = e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, dt, _oro_cfg())

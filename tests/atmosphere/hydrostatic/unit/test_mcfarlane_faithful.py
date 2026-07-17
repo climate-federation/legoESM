@@ -349,9 +349,10 @@ def test_e3sm_hdsp_requires_per_column_topo():
 # ---------------------------------------------------------------------------
 
 def test_depth_avg_source_default_off_bit_identical():
-    """Canary + regression: flag defaults False and the default output is
-    unchanged by the wave-5 restructure (surface source, deposition from the
-    bottom level allowed)."""
+    """Canary + legacy regression: the flag defaults True since 2026-07-17
+    (oracle depth-averaged source); the EXPLICIT False arm still reproduces
+    the legacy surface-source behavior (deposition from the bottom level
+    allowed) unchanged by the wave-5 restructure."""
     assert McFarlaneConfig().use_depth_averaged_source is True  # oracle default (flipped 2026-07-17)
     u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column(
         u_sfc=15.0, u_top=25.0)
