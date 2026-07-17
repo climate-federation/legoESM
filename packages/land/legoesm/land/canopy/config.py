@@ -604,6 +604,8 @@ class CLMMLCanopyConfig(NamedTuple):
     # ``MLCanopyFluxes`` runs ``lax.scan`` + ``jax.checkpoint`` and the forcing→
     # flux map is fully on the ``jax.grad`` tape.  Diff mode is single-column
     # (``ncol == 1``) — the diff path reads one concrete ``(ncan, ntop, nbot)``
-    # from the warm-start template; multi-column is vmapped separately.  See
+    # from the warm-start template.  Multi-column diff is NOT vmap-able (the
+    # interface mutates CLM module globals host-side); train multiple columns by
+    # looping OUTSIDE ``jax.grad`` and accumulating per-column gradients.  See
     # ``docs/land/clm_ml_differentiable_integration_scope.md``.
     differentiable: bool = False

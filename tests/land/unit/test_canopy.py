@@ -300,6 +300,65 @@ class TestCLMMLDifferentiability(unittest.TestCase):
                 lat=jnp.zeros(2), doy=180.0,
             )
 
+    def test_cold_start_under_grad_is_clear_error(self):
+        """differentiable=True + COLD state + ANY traced diff input → clear error.
+
+        The first (cold) step builds the canopy vertical structure host-side and
+        cannot sit on the jax.grad tape.  Grad-ing a cold step must raise an
+        actionable ValueError (warm-start-first), not a cryptic
+        TracerArrayConversionError from the forward path.  Covers both a forcing
+        leaf AND a non-forcing differentiable input (soil temperature, forcing
+        held concrete) so the guard is not forcing-only.  Fails fast at the guard
+        (before the flux solve), so it is not ``slow``.
+        """
+        from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
+        from legoesm.land.canopy.config import CLMMLCanopyConfig
+        from legoesm.land.config import MultiLayerLandConfig
+
+        config = CLMMLCanopyConfig(differentiable=True)
+        T_soil, psi_soil, theta_soil = _make_soil_arrays(1)
+
+        def _call(forcing, T_soil_arg):
+            out, _ = compute_clm_ml_canopy_fluxes(
+                T_soil_top=T_soil_arg[:, 0], forcing=forcing, canopy_config=config,
+                land_config=MultiLayerLandConfig(surface_scheme=config),
+                land_params=None, w_frac_rz=jnp.full(1, 0.6),
+                wind_speed=jnp.full(1, 4.5), canopy_state=None, dt=1800.0,
+                T_soil=T_soil_arg, psi_soil=psi_soil, theta_soil=theta_soil,
+                lat=jnp.zeros(1), doy=180.0,
+            )
+            return jnp.sum(out.lhflx)
+
+        forcing0 = _make_forcing(1)
+
+        # (a) grad w.r.t. a forcing leaf (soil state concrete).
+        def _loss_forcing(T_lowest):
+            return _call(forcing0._replace(T_lowest=T_lowest), T_soil)
+
+        with self.assertRaises(ValueError) as ctx_f:
+            jax.grad(_loss_forcing)(jnp.full(1, 290.0))
+        self.assertIn("WARM-started", str(ctx_f.exception))
+
+        # (b) grad w.r.t. a NON-forcing differentiable input (soil temperature),
+        #     forcing held concrete — must ALSO be caught (guard is not
+        #     forcing-only; codex P2 fix).
+        def _loss_soil(T_soil_arg):
+            return _call(forcing0, T_soil_arg)
+
+        with self.assertRaises(ValueError) as ctx_s:
+            jax.grad(_loss_soil)(T_soil)
+        self.assertIn("WARM-started", str(ctx_s.exception))
+
+        # (c) grad w.r.t. a precipitation leaf (consumed by _build_stubs as
+        #     forc_rain/forc_snow) — the generic forcing._fields scan must catch
+        #     it (guards against regressing to a hand-maintained leaf list).
+        def _loss_precip(precip):
+            return _call(forcing0._replace(precip_total=precip), T_soil)
+
+        with self.assertRaises(ValueError) as ctx_p:
+            jax.grad(_loss_precip)(jnp.full(1, 1.0e-5))
+        self.assertIn("WARM-started", str(ctx_p.exception))
+
     @pytest.mark.slow
     def test_grad_lhflx_wrt_T_lowest(self):
         """jax.grad(sum lhflx) w.r.t. T_lowest is finite, non-zero, FD-consistent,
@@ -384,6 +443,57 @@ class TestCLMMLDifferentiability(unittest.TestCase):
             rel, 0.10,
             f"FD gradient mismatch: analytic={g_an:.6e} fd={g_fd:.6e} rel={rel:.3%}",
         )
+
+    @pytest.mark.slow
+    def test_grad_through_step_multilayer_land(self):
+        """jax.grad flows end-to-end through ``step_multilayer_land`` in CLM-ML
+        diff mode (the M3 ``clm_ml_grid_info`` threading), not only the low-level
+        interface.
+
+        The interface-level grad test (``test_grad_lhflx_wrt_T_lowest``) FD-checks
+        the numerics; this one guards the DRIVER wiring: warm-start one forward
+        step, extract a concrete ``GridInfo``, then differentiate a subsequent
+        step's ``lhflx`` w.r.t. the atmospheric forcing with the grid info threaded
+        via ``step_multilayer_land(..., clm_ml_grid_info=)``.  A regression that
+        drops the threading (or breaks the tracer-carry path) makes this grad
+        raise or go all-zero.
+        """
+        from legoesm.land.canopy.config import CLMMLCanopyConfig
+        from legoesm.land.config import MultiLayerLandConfig
+        from legoesm.land.multilayer_land import (
+            init_multilayer_land_state, step_multilayer_land)
+        from legoesm.land.canopy.clm_ml_interface import extract_clm_ml_grid_info
+
+        ncol = self._NCOL1  # diff path is single-column
+        config = MultiLayerLandConfig(
+            surface_scheme=CLMMLCanopyConfig(differentiable=True))
+        state0 = init_multilayer_land_state(ncol, config, T_init=288.0)
+        forcing = _make_forcing(ncol)
+        lat = jnp.full(ncol, 38.47)
+        doy, dt = 120.5, 1800.0
+
+        # 1) Warm-start with a concrete forward (cold) step → builds mlcanopy.
+        state1, _, _ = step_multilayer_land(
+            state0, forcing, config, U_min=1.0, dt=dt, lat=lat, doy=doy)
+        self.assertIsNotNone(state1.canopy_state.mlcanopy)
+        grid_info = extract_clm_ml_grid_info(state1.canopy_state)
+
+        # 2) grad of a subsequent step's lhflx w.r.t. T_lowest, grid_info threaded
+        #    through the driver.  state1 is a captured constant under jax.grad.
+        def _loss(T_lowest):
+            f = forcing._replace(T_lowest=T_lowest)
+            _, response, _ = step_multilayer_land(
+                state1, f, config, U_min=1.0, dt=dt, lat=lat, doy=doy,
+                clm_ml_grid_info=grid_info)
+            return jnp.sum(response.lhflx)
+
+        g = jax.grad(_loss)(forcing.T_lowest)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(g))),
+                        f"step-level grad non-finite: {g}")
+        self.assertGreater(
+            float(jnp.max(jnp.abs(g))), 0.0,
+            "step-level grad all-zero — grid_info threading broken or forcing "
+            "disconnected from lhflx through step_multilayer_land")
 
 
 class TestCLMMLIntegration(unittest.TestCase):

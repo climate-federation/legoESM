@@ -1260,15 +1260,22 @@ def compute_clm_ml_canopy_fluxes(
     # ``mlcanopy`` already carries the vertical structure (ncan/ntop/nbot) — the
     # first cold-start step always runs forward-only to build it — and (b) a
     # single column: the diff path reads one concrete ``(ncan, ntop, nbot)``.
-    # A multi-column diff request is a hard error (vmap over columns instead of
-    # silently degrading to the forward path), matching the dispatch-hardening
-    # rule.
+    # A multi-column diff request is a hard error (rather than silently degrading
+    # to the forward path), matching the dispatch-hardening rule.  NOTE: this is
+    # NOT vmap-able — the interface runs host-side setup that mutates CLM module
+    # globals (topology singletons ``patch``/``col``/``grc``, orbital params,
+    # ``_last_topology_key``), which ``jax.vmap`` cannot batch.  Multi-column
+    # training must loop columns OUTSIDE ``jax.grad`` and accumulate per-column
+    # gradients.
     _want_diff = bool(getattr(canopy_config, "differentiable", False))
     if _want_diff and ncol != 1:
         raise ValueError(
             "CLMMLCanopyConfig.differentiable=True is single-column only "
-            f"(ncol == 1); got ncol={ncol}. vmap the interface over columns for "
-            "multi-column differentiation (M3)."
+            f"(ncol == 1); got ncol={ncol}. The CLM-ML interface runs host-side "
+            "setup that mutates CLM module globals (topology, orbital params), so "
+            "it cannot be jax.vmap-ed over columns. For multi-column training, "
+            "differentiate one column at a time (loop columns outside jax.grad "
+            "and accumulate per-column gradients)."
         )
     _warm_started = canopy_state is not None and canopy_state.mlcanopy is not None
     _diff_mode = _want_diff and _warm_started  # ncol == 1 guaranteed above
@@ -1297,6 +1304,56 @@ def compute_clm_ml_canopy_fluxes(
                     "physical forcing leaves and keep geometry concrete (close over "
                     "it, or jax.lax.stop_gradient it before the grad boundary)."
                 )
+
+    # Cold-start-under-grad guard.  ``differentiable=True`` needs a WARM state:
+    # the first (cold) step builds the canopy vertical structure via host-side
+    # Python/NumPy (``_init_mlcanopy`` + ``np.array(forcing.*)`` marshalling) and
+    # cannot run on the jax.grad tape.  When ``_want_diff`` but the state is cold,
+    # ``_diff_mode`` falls back to the forward path, whose ``np.array(forcing.
+    # T_lowest)`` (t_a10 running mean) would raise a cryptic
+    # TracerArrayConversionError under grad.  Detect a traced PHYSICAL forcing
+    # leaf here and give the actionable warm-start-first guidance instead
+    # (mirrors the multi-column / geometry guards; the "no cryptic degrade" bar).
+    if _want_diff and not _warm_started:
+        # Scan EVERY differentiable input so a cold-start grad w.r.t. ANY of them
+        # fails loudly here rather than slipping into the forward init path and
+        # raising a cryptic tracer/concretization error downstream.  Cover ALL
+        # forcing leaves GENERICALLY (via ``_fields`` — a hand-maintained subset
+        # kept missing leaves that ``_build_stubs`` consumes, e.g. precip_total/
+        # precip_snow → forc_rain/forc_snow), plus the soil state, prognostic LAI
+        # and the trainable Vcmax25/g1 arrays.  Geometry (cos_zenith/lat/lon) is
+        # already handled by the guard above (it fires first if traced).
+        _named_inputs = [
+            (f"forcing.{_field}", getattr(forcing, _field))
+            for _field in forcing._fields
+        ] + [
+            ("T_soil_top", T_soil_top),
+            ("T_soil", T_soil),
+            ("psi_soil", psi_soil),
+            ("theta_soil", theta_soil),
+            ("lai_override", lai_override),
+            ("vcmaxpft_jax", vcmaxpft_jax),
+            ("g1_medlyn_jax", g1_medlyn_jax),
+        ]
+        _traced_leaf = next(
+            (
+                _name
+                for _name, _val in _named_inputs
+                if _val is not None and isinstance(_val, jax.core.Tracer)
+            ),
+            None,
+        )
+        if _traced_leaf is not None:
+            raise ValueError(
+                "CLMMLCanopyConfig.differentiable=True needs a WARM-started "
+                f"canopy_state, but {_traced_leaf} is a jax tracer on a COLD "
+                "start (canopy_state is None / mlcanopy not built). The first "
+                "cold step builds the canopy vertical structure via host-side "
+                "Python/NumPy and cannot run on the jax.grad tape. Run ONE forward "
+                "(cold) step OUTSIDE the grad region to warm-start the state, then "
+                "differentiate subsequent steps — thread the concrete structure "
+                "via grid_info=extract_clm_ml_grid_info(state0)."
+            )
 
     # ---- Build soil grid data ----
     grid = make_soil_grid(land_config.soil_grid)
@@ -1349,8 +1406,21 @@ def compute_clm_ml_canopy_fluxes(
         cos_zen = np.maximum(np.array(forcing.cos_zenith, dtype=np.float64), 0.0)
         lon_deg = _compute_virtual_lon_deg(cos_zen, lat_deg, _caldaym1)
 
-    _topo_key = (ncol, float(lat_deg[0]) if len(lat_deg) > 0 else 0.0,
-                 float(lon_deg[0]) if len(lon_deg) > 0 else 0.0)
+    # Topology cache key: capture EVERY input _setup_clm_topology consumes, over
+    # ALL columns — not just column 0.  Sampling only lat_deg[0]/lon_deg[0] (the
+    # prior key) reused stale per-column topology when two grids shared ncol and
+    # a column-0 coordinate but differed in interior columns (silent wrong lat/
+    # lon → wrong solar zenith for those columns).  ``tobytes()`` gives an exact,
+    # cheap, hashable signature of the full arrays; include the soil grid, z_ref
+    # and pft so a config change also forces a rebuild.  (In the virtual-longitude
+    # path lon_deg is re-derived each step and changes, so this still rebuilds
+    # per step there — same as before; no new cost.)
+    _topo_key = (
+        ncol,
+        lat_deg.tobytes(), lon_deg.tobytes(),
+        dz_soil.tobytes(), z_soil.tobytes(),
+        float(z_ref), int(canopy_config.pft_clm),
+    )
     global _last_topology_key
     if _topo_key != _last_topology_key:
         _setup_clm_topology(ncol, lat_deg, lon_deg, dz_soil, z_soil, z_ref,
