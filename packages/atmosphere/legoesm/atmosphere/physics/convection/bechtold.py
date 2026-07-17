@@ -2598,7 +2598,24 @@ def bechtold_convection(
             dq_r_conv_dt * dp_full, axis=-1, keepdims=True,
         ) / constants.g                                      # [kg/m^2/s]
         # sink_k [kg/kg/s]: sum(sink*dp/g) == rain flux total exactly.
-        dq_v_dt = dq_v_dt - _rain_flux_total * constants.g * _w_sink / dp_full
+        _sink_rate = _rain_flux_total * constants.g * _w_sink / dp_full
+        dq_v_dt = dq_v_dt - _sink_rate
+        # ENERGY coupling for the same sink (sign convention: z up, latent
+        # release warms; budget in - out - storage = 0 on h = c_p*T + L_v*q_v):
+        # the vapor debited above CONDENSES into the rain, so each debited
+        # level gets the matching +L_v/c_p warming — the SAME per-level
+        # distribution, keeping the pairing local and h-exact.  Without this
+        # the rain left the column with its condensation enthalpy UNRELEASED:
+        # column h lost exactly L_v*(rain formed) (~1.4e2 W/m^2 on the tier-2
+        # destabilized column), and once sub-cloud evaporation returned the
+        # vapor (booking its cooling correctly) the column net-COOLED
+        # (-28 W/m^2) on a CAPE-positive sounding — convection running
+        # backwards; the tier-2 net-heats gate caught it.  (The plume's own
+        # kernel never condensed this water — the rain is synthesized at the
+        # environment level, so its latent heat must be synthesized with it;
+        # measured: this restores H + L_v*dq_v to the pre-inplume baseline
+        # exactly, no double-count with the kernel's detrainment heating.)
+        dT_dt = dT_dt + (constants.L_v / constants.c_pd) * _sink_rate
         _split_done = True
     elif config.use_ifs_subcloud_evap or config.use_ifs_downdraft:
         dq_c_conv_dt = jnp.nan_to_num(jnp.maximum(dq_c_conv_dt, 0.0))
