@@ -2257,12 +2257,23 @@ def gm_redi_tracer_tendency_latlon(
             & (_z_top[jnp.newaxis, jnp.newaxis, :]
                < H_bathy[:, :, jnp.newaxis])
         ).astype(T.dtype)
+        # SLOPE SIGN CONVENTION (2026-07-17 winter ttrd_ldf certificate):
+        # the producer computes S = -grad_h(rho)/drho_dz with drho_dz floored
+        # NEGATIVE => S = +d(rho)/dx / |drho_dz|. NEMO ldfslp computes
+        # slp = zau/(zbu-eps) with zbu bounded NEGATIVE => -dx(rho)/|drho_dz|
+        # — the OPPOSITE sign. This operator was certified against NEMO
+        # traldf_iso CONSUMING NEMO-convention slopes (0.9997 fed uslp/wslpi),
+        # so the producer's slopes must be NEGATED here. Un-negated, the
+        # off-diagonal (subduction) fluxes run BACKWARD: on NEMO's Jan-yr5
+        # state the 200-430 m band read -1.0e-7 K/s vs NEMO ttrd_ldf +5.2e-8
+        # (slope corr vs wslpi_stg: -0.995); negated: +6.8e-8 (mode-b amp).
+        # The diagonal K33 term uses S^2 (sign-immune); kappa_GM=0 here.
         dT_dt = nemo_iso_lap_tracer_tendency_latlon_cgrid(
-            T, S_x, S_y, mask, u_mask, v_mask,
+            T, -S_x, -S_y, mask, u_mask, v_mask,
             z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
         )
         dS_dt = nemo_iso_lap_tracer_tendency_latlon_cgrid(
-            S, S_x, S_y, mask, u_mask, v_mask,
+            S, -S_x, -S_y, mask, u_mask, v_mask,
             z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
         )
     else:

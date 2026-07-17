@@ -573,3 +573,62 @@ def test_nemo_cap_slope_limit_centered_path():
     np.testing.assert_array_equal(np.asarray(tap_c), 1.0)
     # non-vacuity: the two limiters genuinely differ on this front
     assert float(jnp.max(jnp.abs(Sx_c - Sx_d))) > 0.0
+
+
+def test_nemo_iso_lap_slope_sign_convention():
+    """SIGN GATE (CLAUDE.md sign mandate + the 2026-07-17 winter ttrd_ldf
+    certificate): the slope PRODUCER emits S = +dx(rho)/|drho_dz| (GM
+    convention, drho_dz floored negative); the nemo_iso_lap OPERATOR was
+    certified consuming NEMO-convention slopes slp = -dx(rho)/|drho_dz|
+    (ldfslp zau/(zbu<0)). The dispatch must NEGATE. Un-negated, the
+    off-diagonal (subduction) fluxes run backward — on NEMO's Jan state the
+    200-430 m band read -1.0e-7 K/s vs NEMO's +5.2e-8.
+
+    Gate: dispatch(dT) == operator(-S_produced) exactly, and differs from
+    operator(+S_produced) on a front state (non-vacuity)."""
+    import jax.numpy as jnp
+    import numpy as np
+
+    from legoesm.ocean.eos import nemo_roquet_eos
+    from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        compute_isopycnal_slopes_latlon_cgrid,
+        gm_redi_tracer_tendency_latlon,
+        nemo_iso_lap_tracer_tendency_latlon_cgrid,
+    )
+
+    r = build_nemo_gyre_recipe()
+    st = r.initial_state
+    cfg = r.model_config.gm_redi
+    # meridional front on top of the stable IC stratification
+    T = st.T.data + 2.0 * jnp.linspace(0, 1, st.T.data.shape[0])[:, None, None]
+    S = st.S.data
+    eta = jnp.zeros_like(st.eta.data)
+    J = jnp.ones_like(st.eta.data)
+    dT_disp, _ = gm_redi_tracer_tendency_latlon(
+        T, S, eta, st.H_bathy.data, r.grid, r.z_coord, cfg,
+        eos=r.model_config.eos, mask=st.land_mask.data,
+        u_mask=st.u_mask.data, v_mask=st.v_mask.data, rho_0=1026.0)
+
+    import numpy as _np
+    gdept = _np.cumsum(_np.asarray(r.z_coord.dz_ref)) - 0.5 * _np.asarray(
+        r.z_coord.dz_ref)
+    p3 = jnp.asarray(1026.0 * 9.80665 * gdept)[None, None, :]
+    eos_fn = lambda TT, SS, pp: nemo_roquet_eos(TT, SS, pp, rho0=1026.0)
+    rho = eos_fn(T, S, p3)
+    S_x, S_y, _ = compute_isopycnal_slopes_latlon_cgrid(
+        rho, st.land_mask.data, r.z_coord, J, r.grid, cfg,
+        T=T, S=S, eos_fn=eos_fn)
+    _ztop = jnp.cumsum(r.z_coord.dz_ref) - r.z_coord.dz_ref
+    act = ((st.land_mask.data[:, :, None] > 0.5)
+           & (_ztop[None, None, :] < st.H_bathy.data[:, :, None])).astype(T.dtype)
+
+    def op(sx, sy):
+        return nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, sx, sy, st.land_mask.data, st.u_mask.data, st.v_mask.data,
+            r.z_coord, J, r.grid, cfg.kappa_Redi, act)
+
+    dT_neg = op(-S_x, -S_y)
+    dT_pos = op(S_x, S_y)
+    np.testing.assert_allclose(np.asarray(dT_disp), np.asarray(dT_neg), atol=1e-11)  # dispatcher builds rho internally; op-order roundoff
+    assert float(jnp.max(jnp.abs(dT_neg - dT_pos))) > 0.0
