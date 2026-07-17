@@ -196,6 +196,17 @@ def make_les_microphysics_fn(micro_config: MicrophysicsConfig,
             "spectral-LES microphysics adapter: 'ml_emulator' takes an extra "
             "model argument (stateful cache) — use the CRM integration path, "
             "or extend this adapter with the model cache if needed.")
+    if scheme_name == "sundqvist":
+        raise ValueError(
+            "spectral-LES microphysics adapter: 'sundqvist' is a LARGE-SCALE "
+            "diagnostic condensation scheme (Sundqvist 1978/SBK89) that gates "
+            "condensation on a subgrid RH>RH_crit partial-cloud-fraction basis "
+            "designed for coarse GCM grid boxes, NOT resolved-cloud LES. On the "
+            "LES grid it condenses in every cell above RH_crit -> spurious "
+            "near-100% cloud cover and inflated LWP (BOMEX/DYCOMS/RICO measured "
+            "cloud_cover ~0.9-1.0, LWP 20-43 g/m^2 vs 0.03-0.24 / 0.4-5 g/m^2 for "
+            "the resolved-cloud schemes). Use a resolved-cloud microphysics: "
+            "kessler, seifert_beheng, morrison, thompson, p3, sdm, or fast_sbm.")
     if micro_fn is None:                                   # scheme "none"
         raise ValueError("microphysics scheme 'none' — build no adapter; run "
                          "the dry driver instead.")

@@ -11,6 +11,20 @@
 # the metric it moved.  Where the knob is a formal scheme parameter, its
 # machine-readable spec (units / bounds / transform / reference) lives in that
 # scheme's `__param_spec__` (cited below) — that is the authoritative metadata.
+#
+# PROVENANCE CAVEAT (2026-07-16, scheme-reachability audit) — RE-TUNE OWED for
+# the 3D-OCEAN twin: these values were converged while run_coupled built the
+# coupler ocean tile WITHOUT threading surface_bulk_scheme, so on the
+# cmip_ocean_3D path the TILE silently ran the 'constant' closure while the
+# atmosphere ran coare3 — the tuning absorbed that split.  Both halves are now
+# fixed (bulk_scheme threaded; CouplerConfig.gustiness_w_zi nullable/scheme-
+# native), so the 3D twin's tile genuinely runs COARE3 + w*: expect its air-sea
+# fluxes (and thus R_TOA / SST drift) to differ from the campaign that
+# converged the knobs below.  The SLAB campaign is unaffected (the slab always
+# ran its own MOST + the explicit 300 m gustiness on both sides).  Before
+# citing cmip_ocean_3D results as "tuned", re-run the 3D campaign (240 d,
+# WOA18 IC, cluster-scale) and re-converge — tracked in the audit notes; do
+# NOT compare a re-run against the old numbers without identical protocol.
 
 # --- radiation: true CMIP6 RRTMGP (gas + cloud radiative transfer) ---
 radiation: rrtmgp

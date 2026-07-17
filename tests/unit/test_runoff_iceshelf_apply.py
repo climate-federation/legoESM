@@ -7,7 +7,10 @@ import numpy as np
 import pytest
 
 from legoesm.core.field import Field
-from legoesm.ocean.coupler.runoff_apply import apply_runoff_step
+from legoesm.ocean.coupler.runoff_apply import (
+    apply_runoff_step,
+    apply_runoff_step_mpas,
+)
 from legoesm.ocean.coupler.ice_shelf_apply import (
     _ice_base_layer_index,
     apply_ice_shelf_basal_step,
@@ -154,6 +157,76 @@ class TestApplyRunoffStep:
         # Ocean cells modified.
         assert np.asarray(new.S.data)[1, 1, 0] < 34.7
         assert np.asarray(new.eta.data)[1, 1] > 0.0
+
+
+class _FakeMPASRunoffState:
+    """MPAS ocean-state stub for runoff: S (nCells, nlev), eta / land_mask
+    (nCells,) -- the 1-D-spatial shapes apply_runoff_step_mpas requires."""
+
+    def __init__(self, n_cells=4, nlev=3, S_init=34.7, mask_init=1.0):
+        self.S = Field(
+            jnp.full((n_cells, nlev), S_init, dtype=jnp.float64),
+            name="S", dims=("nCells", "lev"), units="PSU",
+        )
+        self.eta = Field(
+            jnp.zeros((n_cells,), dtype=jnp.float64),
+            name="eta", dims=("nCells",), units="m",
+        )
+        self.land_mask = Field(
+            jnp.full((n_cells,), mask_init, dtype=jnp.float64),
+            name="land_mask", dims=("nCells",), units="1",
+        )
+
+    def _replace(self, **kw):
+        new = _FakeMPASRunoffState.__new__(_FakeMPASRunoffState)
+        for attr in ("S", "eta", "land_mask"):
+            setattr(new, attr, getattr(self, attr))
+        for k, v in kw.items():
+            setattr(new, k, v)
+        return new
+
+
+class TestApplyRunoffStepMPAS:
+    """apply_runoff_step_mpas was implemented but UNTESTED and unreachable --
+    run_centennial_spinup warned '--runoff not yet supported on grid=mpas'.
+    Same virtual-salt + eta-rise convention as the lat-lon apply, on (nCells,).
+    """
+
+    def test_zero_runoff_no_change(self):
+        st = _FakeMPASRunoffState()
+        new = apply_runoff_step_mpas(
+            st, R_kg_m2_s=np.zeros(4), z_coord=_FakeZCoord(), dt=3600.0)
+        assert np.allclose(np.asarray(new.eta.data), 0.0)
+        assert np.allclose(np.asarray(new.S.data), np.asarray(st.S.data))
+
+    def test_positive_runoff_raises_eta(self):
+        st = _FakeMPASRunoffState()
+        new = apply_runoff_step_mpas(
+            st, R_kg_m2_s=np.full(4, 1.0e-3), z_coord=_FakeZCoord(), dt=3600.0)
+        rho_0 = 1025.0
+        expected = 1.0e-3 / rho_0 * 3600.0
+        assert np.allclose(np.asarray(new.eta.data), expected, rtol=1e-3)
+
+    def test_positive_runoff_dilutes_top_only(self):
+        st = _FakeMPASRunoffState(S_init=34.7, nlev=3)
+        new = apply_runoff_step_mpas(
+            st, R_kg_m2_s=np.full(4, 1.0e-3), z_coord=_FakeZCoord(), dt=3600.0)
+        S_new = np.asarray(new.S.data)
+        assert np.all(S_new[..., 0] < 34.7)      # top diluted
+        assert np.allclose(S_new[..., 1], 34.7)  # deeper untouched
+        assert np.allclose(S_new[..., 2], 34.7)
+
+    def test_land_cells_untouched(self):
+        st = _FakeMPASRunoffState()
+        mask = np.array([0.0, 1.0, 1.0, 1.0])
+        st = st._replace(land_mask=Field(
+            jnp.asarray(mask), name="land_mask", dims=("nCells",), units="1"))
+        new = apply_runoff_step_mpas(
+            st, R_kg_m2_s=np.full(4, 1.0e-3), z_coord=_FakeZCoord(), dt=3600.0)
+        assert np.asarray(new.S.data)[0, 0] == 34.7   # land cell preserved
+        assert np.asarray(new.eta.data)[0] == 0.0
+        assert np.asarray(new.S.data)[1, 0] < 34.7    # ocean cell modified
+        assert np.asarray(new.eta.data)[1] > 0.0
 
 
 # ==============================================================================

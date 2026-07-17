@@ -2168,7 +2168,7 @@ def test_bechtold_downdraft_transport_round_trips_and_threads():
     dcc = _resolve_convection(d)[1]
     assert dcc.downdraft_transport is False
     assert (dcc.downdraft_entrain_rate,
-            dcc.downdraft_detrain_scale_m) == (5.0e-4, 700.0)
+            dcc.downdraft_detrain_scale_m) == (3.0e-4, 700.0)  # IFS ENTRDD
     # --no- turns OFF a config-file default
     off = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--convection", "bechtold",
@@ -2595,3 +2595,138 @@ def test_bechtold_use_ifs_subcloud_evap_round_trips_and_threads():
         assert flat.bechtold_use_ifs_subcloud_evap is flag
         assert ExperimentConfig.from_amip_config(
             flat).bechtold_use_ifs_subcloud_evap is flag
+
+
+def test_bechtold_use_ifs_inplume_precip_round_trips_and_threads():
+    """--bechtold-use-ifs-inplume-precip round-trips into ExperimentConfig,
+    survives the flat-AMIP serialization both ways, threads into the hot-loop
+    BechtoldConfig; default OFF (legacy byte-identical)."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-use-ifs-inplume-precip",
+    ]), parser))
+    assert cfg.bechtold_use_ifs_inplume_precip is True
+    assert _resolve_convection(cfg)[1].use_ifs_inplume_precip is True
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert d.bechtold_use_ifs_inplume_precip is True   # default ON 2026-07-16
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--no-bechtold-use-ifs-inplume-precip"]), parser))
+    assert off.bechtold_use_ifs_inplume_precip is False
+    assert _resolve_convection(off)[1].use_ifs_inplume_precip is False
+    for flag in (True, False):
+        e = ExperimentConfig(convection="bechtold",
+                             bechtold_use_ifs_inplume_precip=flag)
+        flat = e.to_amip_config()
+        assert flat.bechtold_use_ifs_inplume_precip is flag
+        assert ExperimentConfig.from_amip_config(
+            flat).bechtold_use_ifs_inplume_precip is flag
+
+
+def test_bechtold_dx_m_round_trips_and_threads():
+    """--bechtold-dx-m round-trips (CLI -> ExperimentConfig -> flat AMIP ->
+    BechtoldConfig); default 0 = legacy."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-dx-m", "417000",
+    ]), parser))
+    assert cfg.bechtold_dx_m == 417000.0
+    assert _resolve_convection(cfg)[1].dx_m == 417000.0
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert d.bechtold_dx_m == 0.0
+    flat = ExperimentConfig(convection="bechtold",
+                            bechtold_dx_m=123456.0).to_amip_config()
+    assert flat.bechtold_dx_m == 123456.0
+    assert ExperimentConfig.from_amip_config(flat).bechtold_dx_m == 123456.0
+
+
+def test_bechtold_use_ifs_downdraft_round_trips_and_threads():
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-use-ifs-downdraft"]), parser))
+    assert cfg.bechtold_use_ifs_downdraft is True
+    assert _resolve_convection(cfg)[1].use_ifs_downdraft is True
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert d.bechtold_use_ifs_downdraft is True  # flipped 2026-07-17
+    for flag in (True, False):
+        e = ExperimentConfig(convection="bechtold",
+                             bechtold_use_ifs_downdraft=flag)
+        flat = e.to_amip_config()
+        assert flat.bechtold_use_ifs_downdraft is flag
+        assert ExperimentConfig.from_amip_config(
+            flat).bechtold_use_ifs_downdraft is flag
+
+
+def test_bechtold_use_ifs_shallow_closure_round_trips_and_threads():
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-use-ifs-shallow-closure"]), parser))
+    assert cfg.bechtold_use_ifs_shallow_closure is True
+    assert _resolve_convection(cfg)[1].use_ifs_shallow_closure is True
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert d.bechtold_use_ifs_shallow_closure is False
+    for flag in (True, False):
+        e = ExperimentConfig(convection="bechtold",
+                             bechtold_use_ifs_shallow_closure=flag)
+        flat = e.to_amip_config()
+        assert flat.bechtold_use_ifs_shallow_closure is flag
+        assert ExperimentConfig.from_amip_config(
+            flat).bechtold_use_ifs_shallow_closure is flag
+
+
+def test_bechtold_capdcycl_and_land_rhebc_round_trip():
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-use-ifs-capdcycl", "--bechtold-use-ifs-land-rhebc"]),
+        parser))
+    cc = _resolve_convection(cfg)[1]
+    assert cc.use_ifs_capdcycl is True and cc.use_ifs_land_rhebc is True
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    dcc = _resolve_convection(d)[1]
+    assert dcc.use_ifs_capdcycl is True and dcc.use_ifs_land_rhebc is True  # flipped 2026-07-17
+    for flag in (True, False):
+        e = ExperimentConfig(convection="bechtold",
+                             bechtold_use_ifs_capdcycl=flag,
+                             bechtold_use_ifs_land_rhebc=flag)
+        flat = e.to_amip_config()
+        back = ExperimentConfig.from_amip_config(flat)
+        assert back.bechtold_use_ifs_capdcycl is flag
+        assert back.bechtold_use_ifs_land_rhebc is flag
+
+
+def test_bechtold_use_ifs_snow_melt_round_trip():
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-use-ifs-snow-melt"]), parser))
+    assert _resolve_convection(cfg)[1].use_ifs_snow_melt is True
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert _resolve_convection(d)[1].use_ifs_snow_melt is True  # flipped 2026-07-17
+    for flag in (True, False):
+        e = ExperimentConfig(convection="bechtold",
+                             bechtold_use_ifs_snow_melt=flag)
+        assert ExperimentConfig.from_amip_config(
+            e.to_amip_config()).bechtold_use_ifs_snow_melt is flag

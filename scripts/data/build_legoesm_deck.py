@@ -866,7 +866,7 @@ def slide_ocean_physics():
          "Plume + enhanced diffusion (gradient-safe sigmoid active mask)"),
         ("Shortwave penetration","shortwave_penetration.py",
          "Jerlov optical-water types"),
-        ("Ice-shelf basal melt", "ice_shelf_basal_melt.py",
+        ("Ice-shelf basal melt", "ice_shelf.py",
          "Jenkins 1991 / Holland-Jenkins 1999 three-equation (ISOMIP+)"),
         ("Biogeochemistry",      "biogeochemistry/",
          "Abiotic DIC + ALK carbonate · NPZD · air–sea CO₂ Schmidt-number gas exchange"),

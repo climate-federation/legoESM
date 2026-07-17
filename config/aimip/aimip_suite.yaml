@@ -3,15 +3,17 @@
 # Listed variants are trained sequentially, share the ERA5 cache, and
 # write a unified ``aimip_scorecard.json`` under ``output_dir``.
 #
-# Add ``sfno_full`` once the spectral-PE + SFNO end-to-end training
-# is wired into ``run_aimip.py`` (currently variant ``sfno_physics``
-# covers the Gaussian-grid coupling case).
+# The ladder: classical (full physics suite + RRTMGP radiation) →
+# column_nn (ALL physics incl. radiation learned by a column MLP) →
+# sfno_full (SFNO emulates the ENTIRE atmosphere: dycore + physics).
+# The intermediate ``sfno_physics`` rung (SFNO physics, dycore
+# retained) stays selectable via ``--variants sfno_physics``.
 
 base: "config/aimip/aimip_era5.yaml"
 
 variants:
   - classical
   - column_nn
-  - sfno_physics
+  - sfno_full
 
 output_dir: "results/aimip_001"

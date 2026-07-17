@@ -6,7 +6,7 @@ Tests pin:
 * the CMT-off invariant (KF does not produce ``du_dt_conv``);
 * the trigger function's smoothness — gradient through ``w_grid`` is
   finite and non-zero across the threshold (this is the central
-  AD-safety property of the smooth-everywhere KF);
+  AD-safety property of the smooth-trigger (AD-safe) KF);
 * the deep / shallow blend behaves correctly in the limits;
 * differentiability through ``parcel_perturb_T`` and ``trigger_sharpness``;
 * selection through ``make_physics(PhysicsConfig(...))``.
@@ -128,7 +128,8 @@ def test_kf_trigger_off_when_w_grid_strongly_negative():
     out, _ = kain_fritsch_convection(T, q, pf, ph, w_neg, cpp, dt=300.0)
     # Heating is suppressed to ~zero under strong subsidence.
     assert float(jnp.max(jnp.abs(out.dT_dt))) < 1e-4
-    # The faithful Fritsch-Chappell trigger (DTLCL=0 for WKL<=0) leaves a
+    # The faithful Fritsch-Chappell trigger (DTLCL negligible, ~3e-3 K,
+    # for WKL<=0) leaves a
     # tiny residual smooth-trigger weight from the negative-but-finite LCL
     # buoyancy margin (sigmoid never reaches exactly 0); it is still ~1e-4,
     # i.e. strongly off.  The CAPE-OR SCM fallback is killed by the
@@ -414,19 +415,20 @@ def test_kf_orchestrator_one_step_finite():
 # MSE conservation regression guard (currently expected to fail)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    reason=(
-        "Standard mass-flux kernel does not conserve column MSE on a "
-        "closed (no-surface-flux) probe.  Currently ~95% non-conservation "
-        "residual; flagged xfail so any future kernel improvement that "
-        "closes this is detected."
-    ),
-    strict=True,
-)
 def test_kf_mse_conservation_within_tolerance():
-    """Column-integrated ``c_p ∫dT + L_v ∫(dq_v + dq_c_conv) dp/g`` should
-    be small relative to the heating magnitude on a CAPE-positive sounding.
-    """
+    """Column vapor-MSE closure ``c_p ∫dT + L_v ∫dq_v dp/g ~ 0`` on a
+    CAPE-positive sounding — the SAME canonical metric the tier-3 validator
+    gates at 1e-6 W/m^2 (test_convection_group_validator).
+
+    FORMERLY a strict xfail whose metric ADDED ``L_v ∫dq_c_conv``: the scheme
+    books condensation latent into dT and hands the condensate to
+    microphysics (which will re-release L_v only on re-evaporation), so
+    counting the condensate's L_v here double-counts by construction and the
+    old test "failed" at ~95% forever — a stale pre-PR-#988 relic whose
+    reason string still blamed the mass-flux kernel.  With the canonical
+    vapor-MSE metric the post-#988 scheme closes to machine precision
+    (codex 2026-07-17 round 4: the xfail contradicted the header's budget
+    claim; the METRIC was wrong, not the header)."""
     T, q, p_full, p_half, w_grid = _destabilized_column()
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
@@ -435,10 +437,80 @@ def test_kf_mse_conservation_within_tolerance():
         w_grid=w_grid, conv_prog_profile=cpp, dt=1800.0,
     )
     dp = p_half[:, 1:] - p_half[:, :-1]
-    H = float(jnp.sum(out.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
-    Q = float(jnp.sum(out.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
-    C = float(jnp.sum(out.dq_c_conv_dt * dp / constants.g, axis=1).mean()) * constants.L_v
-    rel = abs(H + Q + C) / (abs(H) + abs(Q) + abs(C) + 1e-10)
-    assert rel < 0.30, (
-        f"KF MSE residual {H+Q+C:.1f} W/m^2 ({rel*100:.1f}% of total)"
+    mse = jnp.sum(
+        (constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt)
+        * dp / constants.g, axis=1)
+    assert float(jnp.max(jnp.abs(mse))) < 1.0e-6, (
+        f"KF column vapor-MSE residual {float(jnp.max(jnp.abs(mse))):.3e} "
+        f"W/m^2 — energy leak (canonical metric, validator-matched)"
     )
+
+
+# ---------------------------------------------------------------------------
+# PROF5 buoyancy-sorted entrainment/detrainment rates (Kain 2004 Eq. 4)
+# ---------------------------------------------------------------------------
+# Leaf pins for _kf_buoyancy_sort_rates — previously exercised only through
+# the full scheme, so the two oracle-fidelity properties it owns (the PROF5
+# buoyancy sort and the VMFLCL/UPOLD active-plume-mass conversion) had no
+# direct discriminating test (2026-07-17 faithfulness audit).
+
+class TestBuoyancySortRates:
+    def _setup(self, m_u_mult=2.0):
+        from legoesm.atmosphere.physics.convection._plume import Plume
+        from legoesm.atmosphere.physics.convection.kain_fritsch import (
+            _kf_buoyancy_sort_rates,
+        )
+
+        nlev = 12
+        # Surface-last: index -1 = surface.
+        z = jnp.linspace(11.0e3, 0.0, nlev)[None, :]
+        T_env = jnp.linspace(220.0, 300.0, nlev)[None, :]
+        q_env = jnp.full((1, nlev), 2.0e-3)
+        p_full = jnp.linspace(2.0e4, 1.0e5, nlev)[None, :]
+        M_b = jnp.asarray([0.01])
+        # Very buoyant band at levels 6-8 (the oracle's 0.5*(prev+current)
+        # multiplier averaging pulls in one neighbour, and a NEUTRAL level
+        # classifies as 'colder' via tv_u <= tv_env, so the probe level needs
+        # buoyant neighbours); colder than env at level 4.
+        T_u = T_env
+        T_u = T_u.at[0, 6:9].add(6.0)
+        T_u = T_u.at[0, 4].add(-3.0)
+        M_u = jnp.where(jnp.arange(nlev)[None, :] < 10,
+                        m_u_mult * M_b[:, None], 0.0)
+        plume = Plume(
+            M_u=M_u, T_u=T_u, q_u=q_env,
+            q_c_u=jnp.zeros_like(q_env),
+            B_u=jnp.zeros_like(q_env),
+        )
+        eps_base = jnp.full((1, nlev), 2.0e-4)
+        k_lnb = jnp.asarray([3.0])
+        cfg = KainFritschConfig()
+        eps, dlt = _kf_buoyancy_sort_rates(
+            T_env, q_env, p_full, plume, eps_base, M_b, z, k_lnb, cfg)
+        return eps, dlt
+
+    def test_rates_finite_nonnegative(self):
+        eps, dlt = self._setup()
+        assert bool(jnp.all(jnp.isfinite(eps))) and bool(jnp.all(eps >= 0.0))
+        assert bool(jnp.all(jnp.isfinite(dlt))) and bool(jnp.all(dlt >= 0.0))
+
+    def test_buoyant_level_entrains_cold_level_detrains(self):
+        """PROF5: a very-buoyant updraft level entrains with ~no detrainment
+        (UD2 -> 0); a colder-than-environment level detrains more than it
+        entrains (EE2 -> 0.5 floor, UD2 -> 1.5 boost) — Kain (2004) Eq. 4;
+        the pre-fix shortcut dlt == eps violated both directions."""
+        eps, dlt = self._setup()
+        assert float(eps[0, 7]) > float(dlt[0, 7])       # buoyant: entrain
+        assert float(dlt[0, 4]) > float(eps[0, 4])       # cold: detrain
+
+    def test_upold_conversion_halves_rates_when_plume_mass_doubles(self):
+        """The VMFLCL/UPOLD conversion (oracle UER/UDR -> fractional rates):
+        fractional entrainment scales as M_b / max(M_u, M_b), so doubling the
+        active plume mass halves it EXACTLY.  The pre-fix code omitted the
+        factor entirely (rates independent of M_u), over-entraining grown
+        plumes — the too-shallow-column / cold-point-too-high bug."""
+        eps2, _ = self._setup(m_u_mult=2.0)
+        eps4, _ = self._setup(m_u_mult=4.0)
+        lv = slice(1, 10)   # levels where M_u = mult*M_b > M_b
+        ratio = eps4[0, lv] / jnp.maximum(eps2[0, lv], 1e-30)
+        assert bool(jnp.all(jnp.abs(ratio - 0.5) < 1e-12))

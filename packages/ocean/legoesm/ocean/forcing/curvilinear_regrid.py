@@ -25,7 +25,7 @@ class NearestWetRegridder:
     """Precomputed nearest-WET-source-cell lookup for a fixed target grid."""
 
     def __init__(self, src_lon_deg, src_lat_deg, src_wet, tgt_lon_deg,
-                 tgt_lat_deg):
+                 tgt_lat_deg, structured: bool = True):
         from scipy.spatial import cKDTree
 
         src_wet = np.asarray(src_wet, dtype=bool)
@@ -36,7 +36,10 @@ class NearestWetRegridder:
             np.asarray(src_lon_deg)[src_wet], np.asarray(src_lat_deg)[src_wet]))
         tgt_lat = np.asarray(tgt_lat_deg, dtype=np.float64)
         tgt_lon = np.asarray(tgt_lon_deg, dtype=np.float64)
-        if tgt_lat.ndim == 1 and tgt_lon.ndim == 1:
+        # structured=True: 1-D lat/lon are regular grid AXES -> cross into a
+        # 2-D mesh.  structured=False: 1-D lat/lon are PAIRED unstructured cell
+        # centres (MPAS Voronoi, nCells) -> use as-is (no outer product).
+        if structured and tgt_lat.ndim == 1 and tgt_lon.ndim == 1:
             tgt_lat, tgt_lon = np.meshgrid(tgt_lat, tgt_lon, indexing="ij")
         if tgt_lat.shape != tgt_lon.shape:
             raise ValueError(

@@ -1446,6 +1446,17 @@ class LatLonCGridOceanModel:
                     'barotropic_solver="implicit_cn", or extend _unsplit_ab2_step.')
         _valid_time_filters = {"box", "cosine", "power_law",
                                "nemo_boxcar_centred", "nemo_ab3am4"}
+        if (getattr(config, "surface_stress_implicit", False)
+                and not getattr(config.barotropic,
+                                "nemo_stage_mean_imposition", False)):
+            raise ValueError(
+                "surface_stress_implicit=True deposits the wind stress inside "
+                "the implicit vertical solve, which SHIFTS the depth mean "
+                "after the barotropic solve; it requires "
+                "barotropic.nemo_stage_mean_imposition=True (NEMO "
+                "stprk3_stg:440) to re-impose the barotropic mean — "
+                "otherwise the wind's depth-mean is double-counted "
+                "(F_slow + the solve).")
         if (config.barotropic.barotropic_time_filter == "nemo_ab3am4"
                 and config.barotropic.barotropic_wide_halo):
             raise ValueError(
@@ -1570,6 +1581,15 @@ class LatLonCGridOceanModel:
                     "removes the face-f velocity-form depth-mean, but "
                     "ene_total's planetary term is the vertex-f TRANSPORT-form "
                     "flux — the stencils would not cancel. Use \"frozen\".")
+            if getattr(config, "momentum_advection",
+                       "vector_invariant") != "vector_invariant":
+                raise ValueError(
+                    'vorticity_scheme="ene_total" carries the planetary '
+                    "Coriolis inside the VECTOR-INVARIANT vorticity flux; the "
+                    "flux-form/WENO momentum branches never receive f_vtx, so "
+                    "combining them would silently DROP f x u entirely "
+                    "(review finding 2026-07-16). Got momentum_advection="
+                    f'{getattr(config, "momentum_advection", "?")!r}.')
         _bt_split = getattr(config, "barotropic_coriolis_split", "frozen")
         if _bt_split not in ("frozen", "live"):
             raise ValueError(
@@ -1706,7 +1726,8 @@ class LatLonCGridOceanModel:
                     "euler") not in ("rk3", "rk3_ws"):
                 raise ValueError(
                     'coriolis_scheme="explicit_ab2" requires '
-                    'outer_integrator="ab2" OR momentum_time_integrator="rk3": '
+                    'outer_integrator="ab2" OR momentum_time_integrator in '
+                    '("rk3", "rk3_ws"): '
                     "an explicit forward-Euler Coriolis at weight 1.0 is "
                     "unconditionally UNSTABLE for pure rotation "
                     "(|G|=sqrt(1+(f·dt)²)>1); AB2(-eps) or SSP-RK3 have a stable "
@@ -2200,6 +2221,32 @@ class LatLonCGridOceanModel:
         _v_pair = jnp.sum(jnp.stack([h_v_pre, dv_dt * h_v_pre], axis=-1), axis=-2)
         H_v_pre = jnp.maximum(_v_pair[..., 0], 1e-10)
         F_slow_v = _v_pair[..., 1] / H_v_pre * state.v_mask.data
+
+        if getattr(self.config, "surface_stress_implicit", False):
+            # NEMO stp2d explicit barotropic wind term: with the stress
+            # WITHHELD from du_dt (surface_stress_implicit; deposited inside
+            # the implicit vertical solve instead), F_slow no longer carries
+            # its depth mean — add tau/(rho0 H) here so the barotropic mode
+            # keeps the wind forcing (sign: ocean-reaction, same helper as
+            # the deposition; zero when the forcing carries no stress).
+            from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+                surface_stress_faces,
+            )
+            from legoesm.ocean.vertical import compute_ocean_jacobian
+            _J_fs = compute_ocean_jacobian(
+                state.eta.data, state.H_bathy.data, self.z_coord)
+            _sfx = (surface_stress_faces(
+                        surface_forcing, du_dt.dtype, self.z_coord, _J_fs,
+                        _grid)
+                    if surface_forcing is not None else None)
+            if _sfx is not None:
+                _tau_i_u, _tau_j_v, _, _ = _sfx
+                _r0 = jnp.asarray(self.config.constants.rho_0,
+                                  dtype=du_dt.dtype)
+                F_slow_u = F_slow_u + _tau_i_u / (_r0 * H_u_pre) \
+                    * state.u_mask.data
+                F_slow_v = F_slow_v + _tau_j_v / (_r0 * H_v_pre) \
+                    * state.v_mask.data
 
         # Perturbation tendency (depth-mean removed) → applied to 3D.
         # MUST be computed from the *baroclinic-only* F_slow (before A2 is
@@ -3400,6 +3447,15 @@ class LatLonCGridOceanModel:
         # and bottom and is split-stepped (Lie splitting, 1st-order)
         # after tracer advection, GM/Redi, and the freshwater virtual
         # salt flux — matching MOM6's diabatic-process ordering.
+        # NEMO stprk3_stg:440 zub correction (nemo_stage_mean_imposition):
+        # capture the post-barotropic-solve depth mean so it can be re-imposed
+        # after the implicit vertical solve (which otherwise shifts it).
+        _impose_mean = (
+            getattr(self.config.barotropic, "nemo_stage_mean_imposition", False)
+            and _apply_implicit_vmix)
+        if _impose_mean:
+            _u_mean_baro, _v_mean_baro = self._fixed_depth_means(state_new)
+
         tke_new = None
         if self.config.implicit_vertical_mixing and _apply_implicit_vmix:
             if self._tke_prognostic_active():
@@ -3454,6 +3510,23 @@ class LatLonCGridOceanModel:
                           dims=("lat", "lon", "level"), units="m^2/s^2"),
             )
 
+        if _impose_mean:
+            # NEMO stprk3_stg.F90:440: uu += (uu_b(Kaa) − Σ e3u_0·uu·r1_hu_0)
+            # ·umask — the 3D velocity's depth mean is REPLACED by the
+            # barotropic solution after the implicit solve, uniformly over
+            # the column. Sign convention: an ADDITIVE column-uniform shift,
+            # so the baroclinic deviation u′ is untouched (budget: the
+            # depth-integral becomes exactly the barotropic transport).
+            _u_mean_now, _v_mean_now = self._fixed_depth_means(state_new)
+            _du = (_u_mean_baro - _u_mean_now)[..., jnp.newaxis]
+            _dv = (_v_mean_baro - _v_mean_now)[..., jnp.newaxis]
+            _um = state.u_mask.data[..., jnp.newaxis]
+            _vm = state.v_mask.data[..., jnp.newaxis]
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=state_new.u.data + _du * _um),
+                v=state_new.v.replace(data=state_new.v.data + _dv * _vm),
+            )
+
         # 9. Conservation fixers
         if self.config.use_conservation_fixer and _apply_implicit_vmix:
             state_new = ocean_conservation_fixer(
@@ -3506,6 +3579,26 @@ class LatLonCGridOceanModel:
                                tend.surface_tracer_forcing, _tke_src,
                                _diss_incr, tend.tracer_source)
         return state_new
+
+    def _fixed_depth_means(self, st):
+        """Thickness-weighted depth means of u, v on FIXED reference
+        thicknesses (NEMO ``e3u_0``/``r1_hu_0``, the linssh convention used by
+        the stprk3_stg:440 zub correction). Face thicknesses by the min-rule,
+        matching the barotropic solver's depth average
+        (``_depth_average_to_faces``) so imposition restores exactly the mean
+        the barotropic solve set."""
+        from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+            _depth_average_to_faces,
+        )
+        from legoesm.ocean.vertical import compute_layer_thickness
+        h_k = compute_layer_thickness(
+            jnp.zeros_like(st.eta.data), st.H_bathy.data, self.z_coord,
+            min_water_column_m=self.config.min_water_column_m,
+        ).astype(st.u.data.dtype)
+        return _depth_average_to_faces(
+            st.u.data, st.v.data, h_k,
+            jnp.asarray(self.config.min_water_column_m, dtype=st.u.data.dtype),
+            st.land_mask.data, st.u_mask.data, st.v_mask.data, self.grid)
 
     def _tke_prognostic_active(self) -> bool:
         """True iff a prognostic-TKE-carrying vertical-mixing closure is active.
@@ -4436,6 +4529,29 @@ class LatLonCGridOceanModel:
         # the resulting tridiagonal system is well-posed on any column
         # with at least two wet levels.
         u_new, v_new = state.u.data, state.v.data
+        u_solve_in, v_solve_in = state.u.data, state.v.data
+        if do_momentum and getattr(self.config, "surface_stress_implicit",
+                                   False) and surface_forcing is not None:
+            # NEMO dynzdf surface BC: deposit the wind stress in the TOP cell
+            # of the implicit solve's RHS (dt_mom * tau/(rho0 dz0)) so the
+            # momentum enters TOGETHER with its vertical viscous
+            # redistribution — no explicit per-step surface kick. The
+            # depth-mean this adds is re-imposed to the barotropic solution
+            # by nemo_stage_mean_imposition (validated at init).
+            from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+                surface_stress_faces,
+            )
+            _sfx = surface_stress_faces(
+                surface_forcing, state.u.data.dtype, self.z_coord, J_cell,
+                _grid)
+            if _sfx is not None:
+                _tau_i_u, _tau_j_v, _dz0u, _dz0v = _sfx
+                _r0 = jnp.asarray(self.config.constants.rho_0,
+                                  dtype=state.u.data.dtype)
+                u_solve_in = state.u.data.at[..., 0].add(
+                    dt_mom * _tau_i_u / (_r0 * jnp.maximum(_dz0u, 1e-10)))
+                v_solve_in = state.v.data.at[..., 0].add(
+                    dt_mom * _tau_j_v / (_r0 * jnp.maximum(_dz0v, 1e-10)))
         if do_momentum:
             A_v_cell = A_v_cell.astype(state.u.data.dtype)
             if _wet_if_vmix is not None:
@@ -4499,8 +4615,8 @@ class LatLonCGridOceanModel:
                 implicit_vertical_diffusion_ocean_batched([
                     (T_solve_in, K_v_cell, dz_cell, dz_half_cell, dt),
                     (S_solve_in, K_s_cell, dz_cell, dz_half_cell, dt),
-                    (state.u.data, A_v_u, dz_u, dz_half_u, dt_mom),
-                    (state.v.data, A_v_v, dz_v, dz_half_v, dt_mom),
+                    (u_solve_in, A_v_u, dz_u, dz_half_u, dt_mom),
+                    (v_solve_in, A_v_v, dz_v, dz_half_v, dt_mom),
                 ])
             )
         else:
@@ -4532,10 +4648,10 @@ class LatLonCGridOceanModel:
                     )
             if do_momentum:
                 u_new = implicit_vertical_diffusion_ocean(
-                    state.u.data, A_v_u, dz_u, dz_half_u, dt_mom,
+                    u_solve_in, A_v_u, dz_u, dz_half_u, dt_mom,
                 )
                 v_new = implicit_vertical_diffusion_ocean(
-                    state.v.data, A_v_v, dz_v, dz_half_v, dt_mom,
+                    v_solve_in, A_v_v, dz_v, dz_half_v, dt_mom,
                 )
         if do_tracers:
             T_new = jnp.where(mask_3d > 0.5, T_new, state.T.data)

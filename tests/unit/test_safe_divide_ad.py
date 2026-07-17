@@ -584,7 +584,7 @@ class TestGWDADSafety:
             u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, cfg,
         )
         # If the safe_divide fill kicks in at the floor, ``excess =
-        # -critical_Fr`` and the breaking sigmoid clamps to ≈0, so
+        # - 1`` (the pinned threshold) and the breaking sigmoid clamps to ≈0, so
         # column dissipation collapses to zero.  Production behaviour
         # (and the legacy clip+divide) launches a finite tau_0 that
         # saturates against the tau_sat floor and dissipates.

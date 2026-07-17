@@ -390,6 +390,41 @@ def brunt_vaisala_n_squared_from_gradient(theta, dtheta_dz):
     return constants.g * dtheta_dz / theta
 
 
+def lilly_buoyancy_factor(Ri, Pr_t):
+    """Lilly (1962) buoyancy stability factor ``√(max(0, 1 − Ri/Pr_t))`` that
+    multiplies a strain-based Smagorinsky eddy viscosity to suppress mixing in
+    stably stratified layers.
+
+    ``f = 1`` at neutral (``Ri = 0``), ``> 1`` when unstable (``Ri < 0``,
+    convective enhancement), and shuts mixing OFF at ``Ri ≥ Pr_t`` (Lilly's
+    equilibrium result, with ``Pr_t`` playing the role of the critical
+    Richardson number ``Ri_c``). Canonical home for the factor shared by the
+    single-column Smagorinsky–Lilly PBL closure and the 3-D plane-LES SGS
+    (CLAUDE.md "shared utilities — never re-derive").
+
+    AD-safety: the ``max(0, ·)`` cutoff is written as a double-``jnp.where`` so
+    the forward is exact AND the reverse-mode cotangent is finite at the
+    ``Ri = Pr_t`` kink (a bare ``√(max(·, 0))`` leaks a ``0·∞`` NaN through the
+    √' → ∞ at zero). The forward is continuous but NON-C¹ at the cutoff.
+
+    Parameters
+    ----------
+    Ri : array
+        Gradient Richardson number ``N²/|S|²`` (floor ``|S|²`` at the call site
+        so ``Ri`` stays finite).
+    Pr_t : float
+        Turbulent Prandtl number, also the stable cutoff ``Ri_c``.
+
+    Returns
+    -------
+    array
+        Buoyancy factor in ``[0, ∞)``, same shape as ``Ri``.
+    """
+    buoy_arg = 1.0 - Ri / Pr_t
+    buoy_safe = jnp.where(buoy_arg > 0.0, buoy_arg, 1.0)
+    return jnp.where(buoy_arg > 0.0, jnp.sqrt(buoy_safe), 0.0)
+
+
 def mixing_length(z, l_mix_max, z_floor=1.0):
     """Asymptotic master mixing length ``l = κz / (1 + κz/l_∞)`` (Blackadar 1962).
 

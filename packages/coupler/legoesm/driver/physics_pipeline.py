@@ -305,6 +305,14 @@ class PhysicsPipeline:
         # attaches from ``subgrid_orography_path`` (and re-scatters under
         # MPI, like ``f_land``). None -> kernels use scalar config.h_topo.
         self._gwd_orographic = False
+        # ``_gwd_takes_netdt`` marks the e3sm_cam CONVECTIVE (Beres) source:
+        # the pipeline threads the convection scheme's heating as
+        # ``netdt_col`` (E3SM TTEND_DP analogue); builder-set.
+        self._gwd_takes_netdt = False
+        # ``_gwd_takes_land_frac`` marks the single scheme (``e3sm_cam``)
+        # whose kernel accepts ``land_frac_col`` for the E3SM driver-level
+        # orographic landfrac scaling; the builder sets it from the config.
+        self._gwd_takes_land_frac = False
         self.subgrid_topo_stddev = None
         # Set for a stateless '+'-composite GWD (issue #834): the combined
         # executor returns a (GWDOutput, spectrum) tuple even with no stateful
@@ -900,6 +908,112 @@ class PhysicsPipeline:
                 # the stochastic multiplier is exactly 1, so a zero stoch
                 # input is bit-identical and needs no carry slot.
                 _stoch_zero = jnp.zeros((ad.ncol,), dtype=T_col.dtype)
+                # IFS shallow PBL-equilibrium closure inputs (STATIC config
+                # gate): same-step bulk SHF/LHF (tiled mosaic when the land
+                # tile is active, else the ocean bulk scheme) + the held
+                # radiative heating for the sub-cloud convergence term.
+                _extra_conv = {}
+                # land_frac alone serves the land RHEBC; the surface-flux
+                # path is needed only by the shallow closure / RCAPDCYCL
+                # (codex R2: land-RHEBC-only must not demand a surface
+                # config).
+                _have_sfc_source = (
+                    (self.surface_tiled and self.f_land is not None)
+                    or getattr(self.turbulence_config, "surface", None)
+                    is not None
+                )
+                # EXPLICIT opt-in shallow closure: hard raise FIRST (before
+                # any capdcycl downgrade) so a shallow/no-surface config
+                # fails cleanly without a misleading downgrade notice.
+                if (getattr(_conv_cfg, "use_ifs_shallow_closure", False)
+                        and not _have_sfc_source):
+                    raise ValueError(
+                        "use_ifs_shallow_closure needs bulk surface "
+                        "fluxes: configure a turbulence scheme (its "
+                        "SurfaceLayerConfig supplies the exchange "
+                        "coefficients) or enable the tiled land surface."
+                    )
+                # capdcycl is a DEFAULT-ON faithfulness flag (flipped
+                # 2026-07-17): on flux-less configs (turbulence 'none', no
+                # tiled land) it must degrade gracefully to the leaf's
+                # documented None=>inert path, not raise — a default may
+                # not break configs that never opted in.  Python-time
+                # downgrade; the notice is LATCHED on the pipeline (once
+                # per build, not per eager step; f_land is a post-setup
+                # mutation, so this cannot be resolved earlier at build).
+                if (getattr(_conv_cfg, "use_ifs_capdcycl", False)
+                        and not _have_sfc_source):
+                    if not getattr(self, "_capdcycl_notice_done", False):
+                        print(
+                            "[physics] bechtold use_ifs_capdcycl: no "
+                            "surface-flux source (turbulence 'none', no "
+                            "tiled land) — diurnal CAPE correction inert "
+                            "for this run."
+                        )
+                        self._capdcycl_notice_done = True
+                    _conv_cfg = _conv_cfg._replace(use_ifs_capdcycl=False)
+                _need_land = getattr(_conv_cfg, "use_ifs_land_rhebc", False)
+                _need_sfc_inputs = (
+                    getattr(_conv_cfg, "use_ifs_shallow_closure", False)
+                    or getattr(_conv_cfg, "use_ifs_capdcycl", False)
+                )
+                if _need_land and not _need_sfc_inputs:
+                    _extra_conv = dict(land_frac=(
+                        ad.flatten_2d(self.f_land)
+                        if self.f_land is not None
+                        else jnp.zeros((ad.ncol,), dtype=T_col.dtype)))
+                if _need_sfc_inputs:
+                    # Unreachable-without-source by construction: shallow
+                    # raised above and capdcycl downgraded; keep a hard
+                    # assert as the tripwire (fail loud, not silent).
+                    assert _have_sfc_source, (
+                        "surface-flux path entered without a source — "
+                        "guard ordering regressed"
+                    )
+                    _T_low = T_col[:, -1]
+                    _q_low = q_v_col[:, -1]
+                    _u_low = u_conv_col[:, -1]
+                    _v_low = v_conv_col[:, -1]
+                    # SAME density the applied-flux path uses (lowest FULL
+                    # level, not p_s — codex R1 #3).  Derived locally:
+                    # rho_col_phys is only bound later / in other branches
+                    # (codex R2 #1 UnboundLocalError).
+                    _rho_low = p_full_col[:, -1] / (
+                        constants.R_d * jnp.maximum(_T_low, 1.0))
+                    if self.surface_tiled and self.f_land is not None:
+                        # SAME mosaic arguments as the turbulence path
+                        # (beta-limited land evaporation + multilayer q_sfc
+                        # override — codex R1 #2: omitting them treated land
+                        # as saturated and overstated the supply).
+                        _q_sfc_land_ml = (
+                            self._land_qsfc_multilayer(
+                                land_ml, T_land, p_s,
+                                land_ml_params=land_ml_params)
+                            if land_ml is not None else None
+                        )
+                        _, _, _shf_c, _lhf_c, _ = self._tiled_surface_flux(
+                            _u_low, _v_low, _T_low, _q_low, _rho_low,
+                            sst, sic, T_land, p_s,
+                            beta_land=beta_land,
+                            q_sfc_land_override=_q_sfc_land_ml)
+                    else:
+                        from legoesm.atmosphere.physics.turbulence.surface_layer import (  # noqa: E501
+                            compute_surface_fluxes)
+                        _T_sfc_c = ad.flatten_2d(T_sfc)
+                        _q_sfc_c = ad.flatten_2d(
+                            saturation_specific_humidity(T_sfc, p_s))
+                        _, _, _shf_c, _lhf_c, _ = compute_surface_fluxes(
+                            _u_low, _v_low, _T_low, _q_low,
+                            _T_sfc_c, _q_sfc_c, _rho_low,
+                            self.turbulence_config.surface)
+                    _land_c = (
+                        ad.flatten_2d(self.f_land)
+                        if self.f_land is not None
+                        else jnp.zeros((ad.ncol,), dtype=T_col.dtype))
+                    _extra_conv = dict(
+                        shf_w_m2=_shf_c, lhf_w_m2=_lhf_c,
+                        dT_dt_rad=ad.flatten_3d(dT_dt_rad),
+                        land_frac=_land_c)
                 conv_out, conv_prog_out, _ = self.convection_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
@@ -909,6 +1023,7 @@ class PhysicsPipeline:
                     prng_key=None,
                     dt=dt, config=_conv_cfg,
                     moisture_convergence=mc_col,
+                    **_extra_conv,
                 )
             elif _ctr.is_cmt_capable:
                 if _ctr.is_mc_consumer:
@@ -1432,6 +1547,24 @@ class PhysicsPipeline:
                     _gwd_kwargs["h_topo_col"] = ad.flatten_2d(
                         self.subgrid_topo_stddev
                     )
+                if (self._gwd_takes_land_frac
+                        and self.f_land is not None):
+                    # E3SM gw_drag.F90:904-906: oro drag is landfrac-scaled
+                    # (zeroed over ocean) BEFORE the heating closure; the
+                    # e3sm_cam kernel applies it to its orographic source.
+                    _gwd_kwargs["land_frac_col"] = ad.flatten_2d(self.f_land)
+                if self._gwd_takes_netdt:
+                    # E3SM drives the Beres convective GW source from the
+                    # deep-convective heating (pbuf TTEND_DP,
+                    # gw_drag.F90:766-778: gw_beres_src(..., ttend_dp, ...)).
+                    # We pass THIS STEP's convection-scheme heating in the
+                    # same column layout.  DOCUMENTED DEPARTURE: our
+                    # convection schemes report TOTAL convective heating
+                    # (deep + shallow + downdraft), not E3SM's deep-only
+                    # TTEND_DP — Beres's hdepth/q0 scan then sees the full
+                    # convective column.  The kernel's gw_beres_src takes
+                    # it as netdt_col [K/s].
+                    _gwd_kwargs["netdt_col"] = conv_out.dT_dt
                 gwd_out = self.gwd_fn(**_gwd_kwargs)
             du_dt = du_dt + ad.unflatten_3d(gwd_out.du_dt)
             dv_dt = dv_dt + ad.unflatten_3d(gwd_out.dv_dt)
@@ -2631,7 +2764,7 @@ def _resolve_convection(config):
             downdraft_alpha=getattr(config, 'bechtold_downdraft_alpha', 0.3),
             downdraft_RH_min=getattr(config, 'bechtold_downdraft_rh_min', 0.2),
             downdraft_transport=getattr(config, 'bechtold_downdraft_transport', False),
-            downdraft_entrain_rate=getattr(config, 'bechtold_downdraft_entrain_rate', 5.0e-4),
+            downdraft_entrain_rate=getattr(config, 'bechtold_downdraft_entrain_rate', 3.0e-4),
             downdraft_detrain_scale_m=getattr(config, 'bechtold_downdraft_detrain_scale_m', 700.0),
             # Full IFS deep CAPE closure (PR #1095) — threaded so the flag is
             # REACHABLE from the AMIP driver.  Missing-field fallback = True,
@@ -2643,6 +2776,21 @@ def _resolve_convection(config):
             # the scheme default since the 2026-07-16 flip).
             use_ifs_subcloud_evap=getattr(
                 config, 'bechtold_use_ifs_subcloud_evap', True),
+            # IFS in-updraft precipitation formation (fallback True = the
+            # scheme default since the 2026-07-16 flip).
+            use_ifs_inplume_precip=getattr(
+                config, 'bechtold_use_ifs_inplume_precip', True),
+            dx_m=getattr(config, 'bechtold_dx_m', 0.0),
+            use_ifs_downdraft=getattr(
+                config, 'bechtold_use_ifs_downdraft', True),
+            use_ifs_shallow_closure=getattr(
+                config, 'bechtold_use_ifs_shallow_closure', False),
+            use_ifs_capdcycl=getattr(
+                config, 'bechtold_use_ifs_capdcycl', True),
+            use_ifs_land_rhebc=getattr(
+                config, 'bechtold_use_ifs_land_rhebc', True),
+            use_ifs_snow_melt=getattr(
+                config, 'bechtold_use_ifs_snow_melt', True),
         )
         if _pe is not None:
             _bechtold_kwargs["precip_efficiency"] = _pe
@@ -2871,7 +3019,19 @@ def apply_surface_flux_config(tc, config):
     if (sbs == "constant" and gzi is None and stc == "legoesm"
             and sss == "dyer1974"):
         return tc
-    sub = getattr(tc, tc.scheme, None)  # e.g. tc.louis; "none"/clubb=None safe
+    # `TurbulenceConfig.clubb` defaults to None and dispatch substitutes a fresh
+    # CLUBBConfig(), so bailing on the None sub-config here SILENTLY DROPPED the
+    # injection for turbulence="clubb": the run used CLUBB's own default
+    # constant surface layer while the user asked for e.g. coare3 (codex).
+    # Materialize exactly what dispatch will, through the shared helper.  Note
+    # this is reached only PAST the all-defaults early return above, so a
+    # default config still returns `tc` unchanged (same object) and the identity
+    # contract in test_turbulence_config_for_default_vs_override holds.
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        materialize_sub_config,
+    )
+    tc = materialize_sub_config(tc)
+    sub = getattr(tc, tc.scheme, None)  # e.g. tc.louis; "none" => None, safe
     if sub is None or getattr(sub, "surface", None) is None:
         return tc
     surf = sub.surface
@@ -2974,6 +3134,14 @@ def _resolve_gwd(config):
     """Resolve gravity wave drag kernel and config from ExperimentConfig.
 
     Returns (kernel_fn, kernel_config) or (None, None) if disabled.
+
+    ``config.gravity_wave_drag_override`` (a full ``GravityWaveDragConfig``
+    whose ``scheme`` must equal ``config.gravity_wave_drag`` — enforced by
+    ``ExperimentConfig.validate_strict``) is honoured verbatim, mirroring
+    ``turbulence_override``: without it the coupled path rebuilt the config
+    from the scheme STRING alone, silently discarding every nested scheme
+    option (``mcfarlane.use_e3sm_hdsp``, ``e3sm_cam.use_discrete_ke_heating``,
+    tuned ``fcrit2``, ...) — the codex-flagged unreachable-flag defect.
     """
     scheme = getattr(config, 'gravity_wave_drag', 'none')
     if scheme == "none":
@@ -2986,7 +3154,8 @@ def _resolve_gwd(config):
         get_gwd_fn,
     )
 
-    gc = GravityWaveDragConfig(scheme=scheme)
+    override = getattr(config, 'gravity_wave_drag_override', None)
+    gc = override if override is not None else GravityWaveDragConfig(scheme=scheme)
     _name, gwd_fn, gwd_config = get_gwd_fn(gc)
     return gwd_fn, gwd_config
 
@@ -3280,4 +3449,33 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline._gwd_orographic = gwd_scheme_is_orographic(
         getattr(config, 'gravity_wave_drag', 'none'),
     )
+    # E3SM driver-level oro landfrac scaling (gw_drag.F90:904-906): only the
+    # ``e3sm_cam`` kernel accepts ``land_frac_col``; the pipeline threads its
+    # own ``f_land`` (set by the model driver next to ``subgrid_topo_stddev``)
+    # into the GWD call for exactly this scheme.
+    pipeline._gwd_takes_land_frac = (_gwd_scheme == "e3sm_cam")
+    # Beres netdt threading: only when the resolved e3sm_cam config actually
+    # selects the convective source (the kernel accepts the kwarg for every
+    # source but only Beres consumes it — avoid useless plumbing otherwise).
+    pipeline._gwd_takes_netdt = (
+        _gwd_scheme == "e3sm_cam"
+        and getattr(pipeline.gwd_config, "source", None) == "convective"
+    )
+    # Dispatch hardening: the frontal (CM) source needs the frontogenesis
+    # function FRONTGF, which no legoESM dycore computes yet (E3SM's
+    # producer lives in the SE dynamics, not the vendored physics tree).
+    # The kernel's frontgf_col=None -> zeros path would make a coupled
+    # frontal selection a SILENT no-op — reject loudly at build time
+    # instead (the leaf keeps None->zeros for standalone/unit callers that
+    # pass frontgf explicitly).
+    if (_gwd_scheme == "e3sm_cam"
+            and getattr(pipeline.gwd_config, "source", None) == "frontal"):
+        raise ValueError(
+            "gravity_wave_drag='e3sm_cam' with source='frontal' is not "
+            "wired in the coupled pipeline: no dycore frontogenesis "
+            "(FRONTGF) producer exists, so the frontal source would launch "
+            "nothing (silent no-op). Use source='orographic' or "
+            "'convective', or drive e3sm_cam_gwd directly with an explicit "
+            "frontgf_col."
+        )
     return pipeline

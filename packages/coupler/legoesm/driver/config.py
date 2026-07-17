@@ -20,7 +20,6 @@ from typing import Any, NamedTuple
 
 from legoesm import constants
 
-
 # Canonical AIMIP variant set.  Single source of truth — imported by
 # ``scripts/run/run_aimip.py`` and the ``validate_strict`` rule below.
 # Empty string = not an AIMIP run (preserves backward-compat for
@@ -280,14 +279,92 @@ class OutputConfig(NamedTuple):
     evaluation: EvaluationConfig = EvaluationConfig()
 
 
-# Single source of truth for the valid microphysics scheme literals — consumed
+# Single source of truth for the valid column-physics scheme literals — consumed
 # by ExperimentConfig.validate_strict AND by run-driver CLI ``choices=`` so the
 # CLI allowlist cannot drift from the config validation (e.g. omitting an
 # advertised scheme like ``ml_emulator``).
+#
+# These were function-local variables inside validate_strict, so nothing could
+# import them and every driver kept its own hand-copied list — which is exactly
+# why they drifted: each axis happened to be pinned by a point-fix test in ONE
+# driver and silently diverged in the other (run_coupled blocked bechtold/
+# tiedtke/emanuel/kain_fritsch/zhang_mcfarlane; run_amip blocked mynn25).
+# ``tests/unit/test_scheme_reachability_audit.py`` now machine-audits every
+# driver's ``choices=`` against these tuples, against a shrink-only baseline of
+# deliberate exclusions.
 VALID_MICROPHYSICS = (
     "none", "kessler", "sundqvist", "seifert_beheng",
     "morrison", "thompson", "p3", "sdm", "fast_sbm", "ml_emulator",
 )
+
+VALID_TURBULENCE = (
+    "smagorinsky", "louis", "tke", "mynn25", "clubb_lite", "clubb",
+    "holtslag_boville", "ysu", "edmf", "none",
+)
+
+VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg")
+
+VALID_CLOUD_SCHEMES = ("none", "sundqvist", "xu_randall", "resolved")
+
+# ``gravity_wave_drag`` additionally accepts a ``+``-joined COMPOSITION of these
+# (e.g. "hines+mcfarlane"); validate_strict splits on "+" before membership.
+VALID_GWD = (
+    "rayleigh", "lindzen", "mcfarlane", "hines",
+    "prognostic_spectral", "e3sm_cam", "ml_emulator", "none",
+)
+
+def parse_gwd_spec(value: str) -> str:
+    """argparse ``type=`` for ``--gravity-wave-drag``.
+
+    GWD is the one axis a plain ``choices=`` CANNOT express: it accepts a
+    ``+``-joined COMPOSITION whose source tendencies are summed (issue #834,
+    e.g. "hines+mcfarlane"), because orographic and non-orographic drag
+    parameterize distinct wave populations and are run together in CMIP-class
+    GCMs.  run_amip therefore dropped ``choices`` entirely -- which left the
+    flag with NO cli-level typo rejection -- while run_coupled kept ``choices``
+    and so REJECTED every composite, making #834 unreachable from the coupled
+    driver.  Both drivers now share this validator: composites work everywhere,
+    and a typo is still caught at the CLI.
+
+    Delegates the SEMANTICS to ``ExperimentConfig.validate_strict`` rather than
+    re-implementing them: a membership-only check accepted composites strict
+    rejects -- "none+hines", "e3sm_cam+hines", "ml_emulator+hines", duplicates
+    like "hines+hines" (codex) -- so the CLI would advertise a spec the config
+    then refuses. Asking the real validator keeps the two from diverging by
+    construction, which is the same lesson as resolving the effective surface
+    config through the production path in driver/air_sea_consistency.py.
+    """
+    import argparse
+
+    for part in value.split("+"):
+        if part not in VALID_GWD:
+            raise argparse.ArgumentTypeError(
+                f"invalid gravity-wave-drag source {part!r} in {value!r}; "
+                f"expected one of {VALID_GWD}, or a '+'-joined composite of "
+                f"them (e.g. 'hines+mcfarlane')"
+            )
+    try:
+        ExperimentConfig(gravity_wave_drag=value).validate_strict()
+    except ValueError as exc:
+        # Report ONLY a genuine gravity_wave_drag complaint. validate_strict
+        # reports every error for the whole config, so falling back to the full
+        # message would blame this flag for an unrelated bad default elsewhere
+        # (codex). If nothing here is about GWD, this value is not the problem
+        # -- let it through and let the config's own validation report the real
+        # error, in its own words, at build time.
+        msg = "; ".join(m for m in str(exc).splitlines()
+                        if "gravity_wave_drag" in m)
+        if msg:
+            raise argparse.ArgumentTypeError(msg) from None
+    return value
+
+
+# The ATMOSPHERE surface layer's bulk-flux algorithm.  "most" is deliberately
+# ABSENT: turbulence/surface_layer.py dispatches MOST on ("coare3",
+# "large_yeager") only, so an accepted "most" would silently degrade to the
+# constant-coefficient branch — a loud rejection is better than wrong physics.
+# See driver/air_sea_consistency.py.
+VALID_SURFACE_BULK = ("constant", "coare3", "large_yeager")
 
 
 class ExperimentConfig(NamedTuple):
@@ -891,7 +968,7 @@ class ExperimentConfig(NamedTuple):
     # albedo).  Default OFF => byte-identical to the re-evaporation-only
     # downdraft.  See BechtoldConfig.downdraft_transport.
     bechtold_downdraft_transport: bool = False
-    bechtold_downdraft_entrain_rate: float = 5.0e-4
+    bechtold_downdraft_entrain_rate: float = 3.0e-4  # IFS ENTRDD (sucumf.F90:144)
     bechtold_downdraft_detrain_scale_m: float = 700.0
     # Full IFS deep CAPE closure ZMFUB1=ZCAPE*ZMFUB/(ZHEAT*ZXTAU)
     # (openifs cumastrn.F90:704-833; PR #1095).  Default ON (2026-07-16,
@@ -903,6 +980,27 @@ class ExperimentConfig(NamedTuple):
     # ON (2026-07-16, validated: codex x3 + gray-RCE A/B + C24 AMIP A/B);
     # mirrors BechtoldConfig.use_ifs_subcloud_evap (fallbacks match).
     bechtold_use_ifs_subcloud_evap: bool = True
+    # IFS in-updraft precipitation formation (cuascn.F90:718-773).  Default
+    # ON (2026-07-16, validated: codex x3 + gray-RCE A/B + C24 AMIP A/B);
+    # mirrors BechtoldConfig.use_ifs_inplume_precip (fallbacks match).
+    bechtold_use_ifs_inplume_precip: bool = True
+    # Grid spacing [m] for the IFS ZTAURES turnover resolution factor
+    # (cumastrn.F90:762-768).  0 = legacy factor 1.0.  Mirrors
+    # BechtoldConfig.dx_m.
+    bechtold_dx_m: float = 0.0
+    # IFS convective downdraft (cudlfsn+cuddrafn).  Default ON since
+    # 2026-07-17 (RCE/AMIP A/B); mirrors BechtoldConfig.use_ifs_downdraft.
+    bechtold_use_ifs_downdraft: bool = True  # flipped 2026-07-17 (RCE/AMIP A/B)
+    # IFS shallow PBL-equilibrium closure (cumastrn.F90).  Default STILL
+    # OFF — HELD by the 2026-07-17 flip campaign (largest mean-state
+    # reshape; needs a skill-gated run); mirrors
+    # BechtoldConfig.use_ifs_shallow_closure.
+    bechtold_use_ifs_shallow_closure: bool = False
+    # IFS diurnal CAPE correction + land RH break (default ON since
+    # 2026-07-17); mirror BechtoldConfig.use_ifs_capdcycl / use_ifs_land_rhebc.
+    bechtold_use_ifs_capdcycl: bool = True
+    bechtold_use_ifs_land_rhebc: bool = True
+    bechtold_use_ifs_snow_melt: bool = True
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -1033,6 +1131,14 @@ class ExperimentConfig(NamedTuple):
     # ``Any`` to avoid importing the atmosphere physics config into the driver
     # config module.
     turbulence_override: Any = None
+    # Full ``GravityWaveDragConfig`` override, mirroring ``turbulence_override``:
+    # ``.scheme`` MUST equal ``gravity_wave_drag`` (refines the same scheme —
+    # validated in ``validate_strict``).  ``None`` (default) ⇒ the driver builds
+    # ``GravityWaveDragConfig(scheme=...)``, byte-identical to before.  This is
+    # the ONLY coupled-path route to nested GWD scheme options
+    # (``mcfarlane.use_e3sm_hdsp``, ``e3sm_cam.use_discrete_ke_heating``, tuned
+    # ``fcrit2``, ...); without it they were silently discarded.
+    gravity_wave_drag_override: Any = None
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -1222,13 +1328,13 @@ class ExperimentConfig(NamedTuple):
         # Radiation membership (reconciled: physics_pipeline now raises on
         # unknown and builds an explicit zero-radiation fn for "none", matching
         # this accepted set = _RADIATION_BUILDERS keys).
-        _valid_radiation = ("none", "gray", "rrtmgp", "rrtmg")
+        _valid_radiation = VALID_RADIATION
         if self.radiation not in _valid_radiation:
             errors.append(
                 f"radiation must be one of {_valid_radiation}, "
                 f"got {self.radiation!r}"
             )
-        _valid_cloud_schemes = ("none", "sundqvist", "xu_randall", "resolved")
+        _valid_cloud_schemes = VALID_CLOUD_SCHEMES
         if self.cloud_scheme not in _valid_cloud_schemes:
             errors.append(
                 f"cloud_scheme must be one of {_valid_cloud_schemes}, "
@@ -1302,16 +1408,13 @@ class ExperimentConfig(NamedTuple):
                 f"convection must be one of {_valid_convection}, "
                 f"got {self.convection!r}"
             )
-        _valid_turbulence = (
-            "smagorinsky", "louis", "tke", "mynn25", "clubb_lite", "clubb",
-            "holtslag_boville", "ysu", "edmf", "none",
-        )
+        _valid_turbulence = VALID_TURBULENCE
         if self.turbulence not in _valid_turbulence:
             errors.append(
                 f"turbulence must be one of {_valid_turbulence}, "
                 f"got {self.turbulence!r}"
             )
-        _valid_surface_bulk = ("constant", "coare3", "large_yeager")
+        _valid_surface_bulk = VALID_SURFACE_BULK
         if self.surface_bulk_scheme not in _valid_surface_bulk:
             errors.append(
                 f"surface_bulk_scheme must be one of {_valid_surface_bulk}, "
@@ -1515,10 +1618,27 @@ class ExperimentConfig(NamedTuple):
                     f"must equal turbulence={self.turbulence!r} (an override refines "
                     f"the same scheme's sub-config, it does not switch schemes)"
                 )
-        _valid_gwd = (
-            "rayleigh", "lindzen", "mcfarlane", "hines",
-            "prognostic_spectral", "e3sm_cam", "ml_emulator", "none",
-        )
+        if self.gravity_wave_drag_override is not None:
+            from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+                GravityWaveDragConfig,
+            )
+            if not isinstance(
+                self.gravity_wave_drag_override, GravityWaveDragConfig
+            ):
+                errors.append(
+                    "gravity_wave_drag_override must be a GravityWaveDragConfig, "
+                    f"got {type(self.gravity_wave_drag_override).__name__}"
+                )
+            elif (self.gravity_wave_drag_override.scheme
+                  != self.gravity_wave_drag):
+                errors.append(
+                    "gravity_wave_drag_override.scheme="
+                    f"{self.gravity_wave_drag_override.scheme!r} must equal "
+                    f"gravity_wave_drag={self.gravity_wave_drag!r} (an override "
+                    "refines the same scheme's sub-config, it does not switch "
+                    "schemes)"
+                )
+        _valid_gwd = VALID_GWD
         # A ``+``-joined string composes multiple GWD sources whose tendencies
         # are summed — orographic (mcfarlane/lindzen) and non-orographic
         # (hines/rayleigh/prognostic_spectral) parameterize distinct wave
@@ -1920,7 +2040,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_downdraft_transport=getattr(
                 amip_cfg, 'bechtold_downdraft_transport', False),
             bechtold_downdraft_entrain_rate=getattr(
-                amip_cfg, 'bechtold_downdraft_entrain_rate', 5.0e-4),
+                amip_cfg, 'bechtold_downdraft_entrain_rate', 3.0e-4),
             bechtold_downdraft_detrain_scale_m=getattr(
                 amip_cfg, 'bechtold_downdraft_detrain_scale_m', 700.0),
             # Missing-field fallback = True (the scheme default): a legacy
@@ -1930,6 +2050,19 @@ class ExperimentConfig(NamedTuple):
                 amip_cfg, 'bechtold_use_ifs_cape_closure', True),
             bechtold_use_ifs_subcloud_evap=getattr(
                 amip_cfg, 'bechtold_use_ifs_subcloud_evap', True),
+            bechtold_use_ifs_inplume_precip=getattr(
+                amip_cfg, 'bechtold_use_ifs_inplume_precip', True),
+            bechtold_dx_m=getattr(amip_cfg, 'bechtold_dx_m', 0.0),
+            bechtold_use_ifs_downdraft=getattr(
+                amip_cfg, 'bechtold_use_ifs_downdraft', True),
+            bechtold_use_ifs_shallow_closure=getattr(
+                amip_cfg, 'bechtold_use_ifs_shallow_closure', False),
+            bechtold_use_ifs_capdcycl=getattr(
+                amip_cfg, 'bechtold_use_ifs_capdcycl', True),
+            bechtold_use_ifs_land_rhebc=getattr(
+                amip_cfg, 'bechtold_use_ifs_land_rhebc', True),
+            bechtold_use_ifs_snow_melt=getattr(
+                amip_cfg, 'bechtold_use_ifs_snow_melt', True),
             # Convective precip split family — copy through AMIP/checkpoint
             # restore so the physical autoconversion isn't dropped to defaults
             # (codex MED; convective_precip_efficiency was a pre-existing gap).
@@ -2084,6 +2217,13 @@ class ExperimentConfig(NamedTuple):
             bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
             bechtold_use_ifs_cape_closure=self.bechtold_use_ifs_cape_closure,
             bechtold_use_ifs_subcloud_evap=self.bechtold_use_ifs_subcloud_evap,
+            bechtold_use_ifs_inplume_precip=self.bechtold_use_ifs_inplume_precip,
+            bechtold_dx_m=self.bechtold_dx_m,
+            bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,
+            bechtold_use_ifs_shallow_closure=self.bechtold_use_ifs_shallow_closure,
+            bechtold_use_ifs_capdcycl=self.bechtold_use_ifs_capdcycl,
+            bechtold_use_ifs_land_rhebc=self.bechtold_use_ifs_land_rhebc,
+            bechtold_use_ifs_snow_melt=self.bechtold_use_ifs_snow_melt,
             sigma_b=self.sigma_b,
             k_BL_max_per_day=self.k_BL_max_per_day,
             k_free_per_day=self.k_free_per_day,

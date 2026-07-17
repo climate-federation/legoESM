@@ -7,8 +7,8 @@
 #
 # See ``training/aimip_params.AIMIPClassicalParams`` for the
 # full list of trainable scheme knobs (~26 sigmoid-constrained
-# scalars).  Radiation is intentionally off in the smoke harness
-# so the loss reflects dynamic + tendency error against ERA5.
+# scalars).  ``--smoke`` overrides radiation to gray after the merge
+# so the smoke harness stays cheap.
 
 aimip_variant: "classical"
 
@@ -22,8 +22,9 @@ aimip_cloud: "xu_randall"
 aimip_microphysics: "sundqvist"  # all 5 categories ON (no "none"): micro=off
                                  # wrecks radiation (OLR rmse 34->80). Matches
                                  # the stage1/ace2 sweep baseline.
-radiation: "gray"          # Base scheme tag (informational).  The actual
-                           # radiation backend used by AIMIPClassicalParams
-                           # is controlled by ``aimip_radiation`` in the
-                           # base config (gray | rrtmgp).
-physics_parameterization: "none"
+# The classical variant runs the FULL physics suite with RRTMGP
+# radiation.  Pinned here (overlay wins the merge) so every suite that
+# shares this overlay — aimip_suite, fullperiod, multistep — trains the
+# classical control with correlated-k radiation, regardless of the
+# base's ``aimip_radiation``.  ``--smoke`` still forces gray post-merge.
+aimip_radiation: "rrtmgp"

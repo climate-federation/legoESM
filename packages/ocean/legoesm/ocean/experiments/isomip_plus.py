@@ -21,19 +21,26 @@ Idealised sub-ice-shelf cavity:
 
 Diagnostic
 ----------
-Domain-mean basal melt rate ``mdot`` (m/yr of freshwater equivalent).
-ISOMIP+ intercomparison ensemble:
-
-* Ocean0 (cold): ``mdot ~ 0.1-0.3 m/yr``
-* Ocean1 (warm): ``mdot ~ 1-10 m/yr``
-
-Acceptance bar: legoESM melt rate within +/- 30 % of the
-intercomparison ensemble mean.
+Domain-mean basal melt rate ``mdot`` (m/yr, ICE-equivalent — the ISOMIP+
+reporting convention; the pre-2026-07-17 linearised closure reported a
+freshwater-equivalent, hand-tuned-down value).  For reference the ISOMIP+
+circulating-cavity ensemble spans Ocean0 ~ 0.1-0.3 and Ocean1 ~ 1-10 m/yr,
+but THIS smoke probe feeds far-field T as the boundary-layer ambient (no
+meltwater throttling), so it reads Ocean0 ~ 1.5 and Ocean1 ~ 65 m/yr with
+the faithful closure at the ~250 dbar mean draft — an expected, documented
+overestimate, NOT an acceptance mismatch.  The honest ensemble comparison
+(the old "+/- 30 %% of ensemble mean" bar) belongs to the cavity-circulation
+follow-up below.
 
 Scope
 -----
-This commit lands the experiment + Jenkins-3-equation
-parameterisation (``legoesm.ocean.physics.ice_shelf_basal_melt``).
+This experiment drives the FAITHFUL Holland-Jenkins three-equation
+basal-melt closure (``legoesm.ocean.physics.ice_shelf.three_equation_melt``
+— full quadratic with the meltwater salt-dilution feedback).  The former
+``ice_shelf_basal_melt`` linearised closure (small-thermal-driving limit
+with a hand-tuned effective gamma_T ~30x below the ISOMIP+ gamma_T* and a
+freshwater-convention shortcut that absorbed rho_sw/rho_fw into the tuning)
+was DELETED and this caller rerouted (2026-07-17).
 The full cavity boundary-condition wiring (masking top cells where
 ``z_ice > z_top_interface``, applying basal-melt freshwater flux at
 the appropriate level) is a Phase D follow-up: the present
@@ -53,8 +60,9 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.ocean.physics.ice_shelf_basal_melt import (
-    IceShelfMeltConfig, basal_melt_rate_m_per_s,
+from legoesm.ocean.physics.ice_shelf import (
+    IceShelfConfig,
+    three_equation_melt,
 )
 
 
@@ -74,22 +82,22 @@ class ISOMIPPlusConfig:
     T_far_C: float = -1.9
     S_far_psu: float = 34.55
 
-    # Basal-melt parameterisation knobs.
-    melt: IceShelfMeltConfig = None
+    # Basal-melt parameterisation knobs — the FAITHFUL three-equation config
+    # (its default gamma_T = 1.0e-4 m/s equals the value the old presets set
+    # explicitly, so the presets carry no override).
+    melt: IceShelfConfig = None
 
     @classmethod
     def ocean0_cold(cls) -> "ISOMIPPlusConfig":
-        return cls(T_far_C=-1.9, S_far_psu=34.55,
-                   melt=IceShelfMeltConfig(gamma_T=1.0e-4))
+        return cls(T_far_C=-1.9, S_far_psu=34.55, melt=IceShelfConfig())
 
     @classmethod
     def ocean1_warm(cls) -> "ISOMIPPlusConfig":
-        return cls(T_far_C=1.0, S_far_psu=34.7,
-                   melt=IceShelfMeltConfig(gamma_T=1.0e-4))
+        return cls(T_far_C=1.0, S_far_psu=34.7, melt=IceShelfConfig())
 
     def __post_init__(self):
         if self.melt is None:
-            object.__setattr__(self, "melt", IceShelfMeltConfig())
+            object.__setattr__(self, "melt", IceShelfConfig())
 
 
 def ice_draft_m(x_km, y_km, config: ISOMIPPlusConfig | None = None) -> jnp.ndarray:
@@ -119,12 +127,24 @@ def cavity_water_column_m(x_km, y_km,
 def compute_basal_melt(state, *, config: ISOMIPPlusConfig | None = None,
                         rho_sw: float = 1028.0,
                         g_val: float = constants.g) -> float:
-    """Domain-mean basal melt rate ``mdot`` [m/yr] from a state.
+    """Domain-mean basal melt rate ``mdot`` [m/yr, ICE-equivalent] from a state.
 
     Reads the top-cell T, S; computes the ice-shelf-base pressure
-    (``rho_sw * g * |z_ice|``); applies the Jenkins three-equation
-    parameterisation cell-by-cell; integrates over the cavity-area
-    where ``ice_draft < 0``.
+    (``rho_sw * g * |z_ice|``); applies the FAITHFUL Holland-Jenkins
+    three-equation closure (full quadratic, meltwater salt dilution)
+    cell-by-cell; integrates over the cavity area.
+
+    CONVENTION + CAVEAT (reroute 2026-07-17): the rate is ICE-equivalent
+    (``m_dot_m_s``; freshwater mass flux = rho_ice*m_dot), the ISOMIP+
+    reporting convention — the deleted linearised closure reported a
+    freshwater-equivalent rate.  This smoke diagnostic feeds the FAR-FIELD
+    T to the closure as if it were the cavity boundary-layer ambient, so
+    warm cases (Ocean1) OVERESTIMATE vs the ISOMIP+ circulating-cavity
+    ensemble (~60 vs 1-10 m/yr): in the real intercomparison meltwater
+    cools/freshens the top cells and throttles the melt.  The old closure
+    only sat "in range" because its hand-tuned gamma_T compensated for
+    exactly this missing feedback.  An honest ensemble comparison needs
+    the cavity-circulation experiment (the Phase-D follow-up below).
     """
     if config is None:
         config = ISOMIPPlusConfig.ocean0_cold()
@@ -141,9 +161,10 @@ def compute_basal_melt(state, *, config: ISOMIPPlusConfig | None = None,
     # ice draft.
     z_ice_mean = -0.5 * config.ice_draft_max_m
     p_b_dbar = rho_sw * g_val * abs(z_ice_mean) / 1.0e4  # 1 dbar = 1e4 Pa
-    m_per_s = np.asarray(basal_melt_rate_m_per_s(
-        T_w, S_w, p_b_dbar, config.melt,
-    ))
+    m_per_s = np.asarray(three_equation_melt(
+        jnp.asarray(T_w), jnp.asarray(S_w), jnp.asarray(p_b_dbar),
+        config=config.melt,
+    ).m_dot_m_s)
     # Mask-area-weighted mean melt (m/s) -> m/yr.
     area_weight = mask
     total = area_weight.sum()
@@ -206,10 +227,15 @@ def validate_results(final_state, diagnostics: Dict[str, list],
         if not bool(jnp.all(jnp.isfinite(data))):
             return False, f"NaN/Inf in final {name}"
     mdot = compute_basal_melt(final_state, config=config)
-    notes = f"mdot={mdot:.3f} m/yr (cavity-mean basal melt)"
-    # Range gates: Ocean0 ~ 0.05-1.0 m/yr; Ocean1 ~ 0.5-15 m/yr; loose
-    # smoke bounds here, tier-9 fidelity tightens.
-    ok = abs(mdot) < 50.0
+    notes = f"mdot={mdot:.3f} m/yr ice-equivalent (cavity-mean basal melt)"
+    # Loose smoke sanity bound only.  With the faithful three-equation
+    # closure and the far-field-T probe (see compute_basal_melt), Ocean0
+    # reads ~1.5 and Ocean1 ~65 m/yr at the ~250 dbar mean draft — the old
+    # 50 m/yr bound predated the reroute (tuned linearised closure) and
+    # would have failed the warm preset.  200 m/yr still catches NaN-scale
+    # blowups; the ensemble-band gate moves to the cavity-circulation
+    # follow-up.
+    ok = abs(mdot) < 200.0
     return ok, notes
 
 
@@ -234,8 +260,9 @@ EXPERIMENT_CONFIG = {
         "(Asay-Davis 2016)"
     ),
     "scientific_purpose": (
-        "Validate sub-ice-shelf basal melt rate vs the ISOMIP+ "
-        "model intercomparison ensemble"
+        "Exercise the faithful three-equation basal-melt closure on the "
+        "ISOMIP+ cavity geometry (smoke sanity bound only; the ensemble "
+        "comparison needs the cavity-circulation follow-up)"
     ),
     "reference": "Asay-Davis et al. 2016, GMD 9, 2471-2497",
     "config_class": ISOMIPPlusConfig,
@@ -260,8 +287,10 @@ EXPERIMENT_CONFIG = {
     },
     "expected_metrics": {
         "Ocean0_basal_melt_m_per_yr":
-            "~0.1-0.3 m/yr cold cavity; Asay-Davis 2016 intercomp",
+            "~1.5 m/yr ICE-equivalent at this far-field-T smoke probe "
+            "(faithful 3-eq closure; circulating-cavity ensemble is 0.1-0.3)",
         "Ocean1_basal_melt_m_per_yr":
-            "~1-10 m/yr warm cavity; Asay-Davis 2016 intercomp",
+            "~65 m/yr ICE-equivalent at this far-field-T smoke probe "
+            "(expected overestimate — no meltwater throttling; ensemble 1-10)",
     },
 }

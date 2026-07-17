@@ -98,6 +98,7 @@ def mpas_ocean_baroclinic_tendencies(
     physics_fn=None,
     surface_forcing=None,
     sponge=None,
+    halo_refresh=None,
 ) -> MPASOceanTendencies:
     """Compute baroclinic (slow) tendencies for MPAS ocean.
 
@@ -111,6 +112,13 @@ def mpas_ocean_baroclinic_tendencies(
         Freshwater forcing. If None, no freshwater terms are applied.
     sponge : SpongeForcing, optional
         Sponge layer relaxation fields.
+    halo_refresh : MPASOceanHaloRefresh, optional
+        Distributed in-step halo refresh (stage-correctness lever): the
+        biharmonic two-pass operators (B_h del4 / Smagorinsky / Leith on
+        momentum, K_bih on tracers) consume 4 stencil hops — twice the
+        ``halo_depth=2`` partition budget — so their intermediate
+        Laplacians are refreshed mid-operator.  ``None`` (serial) is
+        byte-identical.
 
     Returns
     -------
@@ -573,20 +581,29 @@ def mpas_ocean_baroclinic_tendencies(
         _lat_factor = (1.0 + _eq_boost * _gauss)[:, jnp.newaxis]  # (nEdges, 1)
     else:
         _lat_factor = 1.0
+    _mid_refresh = None if halo_refresh is None else halo_refresh.edges
     if config.A_h > 0 and config.B_h > 0:
         _del2_u_visc = vector_laplacian_del2_3d(u_3d, mesh)
         visc = visc + config.A_h * _lat_factor * _del2_u_visc
         # vector_laplacian_del4 = -del2(del2); fold the sign into the
         # subtraction so the arithmetic matches ``+ B_h * del4``.
-        visc = visc - config.B_h * _lat_factor * vector_laplacian_del2_3d(_del2_u_visc, mesh)
+        # [stage-halo T1] the shared intermediate feeds a SECOND del2
+        # (4 hops total > halo_depth) — refresh its ring first; the A_h
+        # term above already consumed only 2 hops and stays as-is.
+        _del2_for_del4 = _del2_u_visc
+        if _mid_refresh is not None:
+            (_del2_for_del4,) = _mid_refresh(_del2_for_del4)
+        visc = visc - config.B_h * _lat_factor * vector_laplacian_del2_3d(_del2_for_del4, mesh)
     elif config.A_h > 0:
         visc = visc + config.A_h * _lat_factor * vector_laplacian_del2_3d(u_3d, mesh)
     elif config.B_h > 0:
-        visc = visc + config.B_h * _lat_factor * vector_laplacian_del4_3d(u_3d, mesh)
+        visc = visc + config.B_h * _lat_factor * vector_laplacian_del4_3d(
+            u_3d, mesh, mid_refresh=_mid_refresh)
 
     # Flow-dependent Smagorinsky biharmonic viscosity
     if config.C_smag > 0:
-        visc = visc + smagorinsky_biharmonic_3d(u_3d, mesh, config.C_smag)
+        visc = visc + smagorinsky_biharmonic_3d(
+            u_3d, mesh, config.C_smag, mid_refresh=_mid_refresh)
 
     # Flow-dependent Smagorinsky Laplacian viscosity
     # Unlike the biharmonic variant, this damps ALL scales where strain
@@ -601,7 +618,8 @@ def mpas_ocean_baroclinic_tendencies(
     if getattr(config, "C_leith", 0.0) > 0:
         visc = visc + leith_biharmonic_3d(
             u_3d, mesh, config.C_leith,
-            modified=getattr(config, "C_leith_modified", False))
+            modified=getattr(config, "C_leith_modified", False),
+            mid_refresh=_mid_refresh)
 
     # Biharmonic dissipation on relative vorticity ζ (scale-selective damping
     # of grid-scale vorticity patterns — notably the ζ-checkerboard null
@@ -611,8 +629,14 @@ def mpas_ocean_baroclinic_tendencies(
     # carries the null-mode amplitude.  Invisible to ``B_h·del4(u)`` because
     # the null mode lives in the kernel of the discrete curl-to-velocity map.
     if config.K_zeta_bih > 0:
+        # [stage-halo T3] vertex-channel mid-refresh: the curl -> vertex-
+        # Laplacian -> tangential-gradient chain is 3 hops (codex r1 #2 —
+        # the NEMO-match recipe runs K_zeta_bih=1e14, so without this the
+        # stage-correct claim was false for the production config).
         visc = visc + config.K_zeta_bih * biharmonic_vorticity_del4_3d(
-            u_3d, mesh)
+            u_3d, mesh,
+            mid_refresh=(None if halo_refresh is None
+                         else halo_refresh.vertices))
 
     # Vertical advection of perturbation momentum (#171 Level-1).
     w_e = 0.5 * (w[c1] + w[c2])  # (nEdges, nlev+1)
@@ -849,6 +873,12 @@ def mpas_ocean_baroclinic_tendencies(
         # ``_inner_lap_div``); outer = ``laplacian_cell_3d(inner,
         # mask=mask)``.
         inner_lap_masked = _inner_lap_div * mask[:, jnp.newaxis]
+        # [stage-halo T2] the bilaplacian's inner div(grad) already
+        # consumed 2 hops; the outer grad->div pair needs a fresh ring
+        # (the K_h branch's use of _inner_lap_div is a FINAL tendency —
+        # no further hops — so only this copy is refreshed).
+        if halo_refresh is not None:
+            (inner_lap_masked,) = halo_refresh.cells(inner_lap_masked)
         outer_grad = gradient_edge_3d(inner_lap_masked, mesh) * _tracer_edge_mask
         outer_div = divergence_cell_3d(outer_grad, mesh)
         bilap_flat = outer_div * mask[:, jnp.newaxis]

@@ -18,6 +18,7 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
+from legoesm.driver.air_sea_consistency import validate_air_sea_consistency
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.coupled_config import CoupledConfig
 from legoesm.diagnostics.energy_budget import area_weighted_mean
@@ -53,6 +54,39 @@ def enable_diurnal_surface_land(land_cfg):
     if cfg.carbon.scheme != "differland":   # Farquhar needs the differland LAI
         cfg = cfg._replace(carbon=CarbonConfig(scheme="differland"))
     return cfg
+
+
+def assert_land_tile_reachable(land_mode, f_land_mode, f_land) -> None:
+    """Raise if a land model is configured but its tile has zero area everywhere.
+
+    The driver-level invariant on the MATERIALIZED land fraction, the residue the
+    CONFIG-level CLI guard (``run_coupled.apply_land_runoff_scheme``) documents it
+    cannot see: ``land_mode != "none"`` builds land physics, yet ``f_land`` comes
+    out identically zero, so the entire land tile is silently dead. ``f_land`` is
+    a fraction in ``[0, 1]``, so ``max(f_land) == 0`` iff there is no land in any
+    cell -- the ``from_ocean`` all-wet-ocean-mask path and the ``analytical``
+    degenerate-grid (no latitude) fall-to-zeros path, neither visible to any
+    config predicate.
+
+    ``f_land_mode == "zero"`` is EXCLUDED: that is the explicit
+    aquaplanet-with-slab-land request (``--preset aquaplanet --land-scheme slab``;
+    ``run_coupled.py``), where a zero land area is intended, not an accident.
+
+    Pure -> unit-testable; the driver calls it once at coupler-init after
+    materialising ``f_land``."""
+    if land_mode == "none" or f_land_mode == "zero":
+        return
+    # f_land >= 0 everywhere by construction, so max <= 0 <=> all cells zero.
+    if float(jnp.max(f_land)) <= 0.0:
+        raise ValueError(
+            f"land_mode={land_mode!r} builds a land model but the materialized "
+            f"land fraction is zero everywhere (f_land_mode={f_land_mode!r}): "
+            f"the land tile is silently dead. This is the from_ocean "
+            f"all-wet-ocean-mask or the analytical degenerate-grid (no latitude) "
+            f"residue that no config-level predicate can see. Set "
+            f"f_land_mode='zero' if you intend an aquaplanet, or supply a grid "
+            f"latitude / an ocean mask that actually contains land."
+        )
 
 
 def _flatten_pytree_to_npz(state, prefix: str) -> dict:
@@ -159,6 +193,7 @@ class CoupledESMDriver:
     ):
         self.atm_config = atm_config
         self.coupled_cfg = coupled_config or CoupledConfig()
+        validate_air_sea_consistency(atm_config, coupler_config)
         self._atm = ModelDriver(atm_config, output_dir=output_dir)
         self._coupler_config = coupler_config
         self._ice_config = ice_config
@@ -923,6 +958,12 @@ class CoupledESMDriver:
             f_land=f_land,
             f_lake=jnp.zeros(shape_2d, dtype=_sd),
         )
+
+        # Driver-level invariant on the MATERIALIZED land fraction (the residue
+        # the CONFIG-level CLI helper apply_land_runoff_scheme documents it
+        # cannot catch): a land model configured yet f_land identically zero =
+        # a silently dead land tile.
+        assert_land_tile_reachable(cfg.land_mode, cfg.f_land_mode, f_land)
 
         land_frac = float(jnp.mean(f_land))
         pft_str = " (PFT)" if land_param_provider is not None else ""

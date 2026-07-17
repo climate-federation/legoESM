@@ -115,6 +115,33 @@ def turbulence_scheme_traits(scheme_name: str) -> TurbulenceSchemeTraits:
     )
 
 
+def materialize_sub_config(config: TurbulenceConfig) -> TurbulenceConfig:
+    """Return *config* with the ACTIVE scheme's sub-config materialized.
+
+    ``TurbulenceConfig.clubb`` defaults to ``None`` and dispatch substitutes a
+    fresh ``CLUBBConfig()`` -- so ``None`` does NOT mean "no config", it means
+    "the default one".  Anything reasoning about what the atmosphere will
+    actually run has to make that substitution the same way, or it reasons about
+    a config the model never uses.
+
+    That gap was a real bug: ``apply_surface_flux_config`` bailed out on the
+    ``None`` sub-config, so ``surface_bulk_scheme="coare3"`` was SILENTLY
+    IGNORED under ``turbulence="clubb"`` (the run used CLUBB's own default
+    constant surface layer), and the air-sea guard could not see the resulting
+    split against a COARE3 ocean tile (codex).  Both call sites now route
+    through this one function so they cannot drift.
+
+    ``scheme="none"`` keeps ``None``: it genuinely has no sub-config.  Every
+    other scheme already carries a materialized sub-config by default.
+    """
+    if config.scheme == "clubb" and config.clubb is None:
+        # Deferred: clubb.py imports turbulence/config.py, so a top-level
+        # import here would close a cycle.
+        from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+        return config._replace(clubb=CLUBBConfig())
+    return config
+
+
 def get_turbulence_fn(config: TurbulenceConfig):
     """Select the turbulence backend based on config.scheme."""
     if config.scheme == "smagorinsky":
@@ -128,8 +155,7 @@ def get_turbulence_fn(config: TurbulenceConfig):
     elif config.scheme == "clubb_lite":
         return "clubb_lite", clubb_lite_turbulence, config.clubb_lite
     elif config.scheme == "clubb":
-        from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
-        clubb_cfg = config.clubb if config.clubb is not None else CLUBBConfig()
+        clubb_cfg = materialize_sub_config(config).clubb
         if getattr(clubb_cfg, "prognostic", False):
             from legoesm.atmosphere.physics.turbulence.clubb import (
                 clubb_turbulence_prognostic,

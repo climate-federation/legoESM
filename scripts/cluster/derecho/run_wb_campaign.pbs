@@ -1,0 +1,64 @@
+#!/bin/bash
+# WeatherBench 3-family forecast CAMPAIGN on NCAR Derecho (PBS Pro, 4x A100/node).
+#
+# Runs the full campaign (train physics+neural_gcm+sfno -> WB2 scorecard eval ->
+# comparison plot vs the published WB2 leaderboard) via ONE Python driver,
+# scripts/run/run_weatherbench_campaign.py. The driver is MPI-aware: the TRAIN
+# stage is data-parallel across all ranks (mpi4jax gradient averaging, 1 GPU/rank);
+# the EVAL + PLOT stages run on RANK 0 only after a barrier.
+#
+# Submit (N nodes -> 4N ranks/GPUs):
+#   qsub -l select=<N>:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB run_wb_campaign.pbs
+# Env overrides:
+#   WB_CAMPAIGN_CONFIG  campaign YAML (default config/wb/campaign/spectral_t63.yaml;
+#                       set config/wb/campaign/spectral_t106.yaml for the competitive tier)
+#   WB_MODES            families to run   (default physics,neural_gcm,sfno)
+#   WB_STAGES           stages to run     (default train,eval,plot)
+#   WB_EPOCHS           override epochs    (default: the YAML value)
+#   WB_LEADS            eval leads [h]     (default 24,72,120,240)
+#   WB_OUT_ROOT         output root        (default $SCRATCH/wb_campaign)
+#   WB_SOTA_CSV         published-SOTA CSV (default config/wb/sota/wb2_headline_rmse.csv)
+#PBS -A P08010000
+#PBS -N wb_campaign
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=4:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -k eod
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR}"
+# Derecho env: repo root (/glade/work/$USER/legoESM), modules, CXI fabric tuning.
+source scripts/cluster/scaling_derecho/_env.sh
+module load conda cuda gcc cray-mpich
+export MPICH_GPU_SUPPORT_ENABLED=1
+# Cross-node GPU-direct is broken on Slingshot/CXI -> host-staged (correct, slower).
+export MPI4JAX_USE_CUDA_MPI=0
+export JAX_PLATFORMS=cuda
+export JAX_ENABLE_X64=1
+
+# one rank per GPU; count ranks from the PBS node/gpu selection
+NRANKS=$(wc -l < "${PBS_NODEFILE}")
+CONFIG="${WB_CAMPAIGN_CONFIG:-config/wb/campaign/spectral_t63.yaml}"
+MODES="${WB_MODES:-physics,neural_gcm,sfno}"
+STAGES="${WB_STAGES:-train,eval,plot}"
+OUT_ROOT="${WB_OUT_ROOT:-${SCRATCH:-.}/wb_campaign}"
+SOTA_CSV="${WB_SOTA_CSV:-config/wb/sota/wb2_headline_rmse.csv}"
+LEADS="${WB_LEADS:-24,72,120,240}"
+echo "[$(date)] Derecho WB campaign: ${NRANKS} ranks | config=${CONFIG} modes=${MODES} stages=${STAGES}"
+
+# PALS pins each rank to its local GPU via PALS_LOCAL_RANKID.
+mpiexec -n "${NRANKS}" --ppn 4 bash -c '
+  export CUDA_VISIBLE_DEVICES=${PALS_LOCAL_RANKID:-0}
+  python scripts/run/run_weatherbench_campaign.py \
+    --config "'"${CONFIG}"'" \
+    --modes "'"${MODES}"'" \
+    --stages "'"${STAGES}"'" \
+    --training-core spectral \
+    --out-root "'"${OUT_ROOT}"'" \
+    --leads "'"${LEADS}"'" \
+    --sota-csv "'"${SOTA_CSV}"'" \
+    '"${WB_EPOCHS:+--epochs ${WB_EPOCHS}}"'
+'
+echo "[$(date)] done -> ${OUT_ROOT}/wb_scorecard.png"

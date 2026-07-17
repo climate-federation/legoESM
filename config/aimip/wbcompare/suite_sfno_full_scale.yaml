@@ -1,0 +1,263 @@
+# GraphCast-scale SFNO_FULL training suite (rollout curriculum + many-year data).
+#
+# Goal: make the FULL SFNO emulator (sfno_full — SFNO replaces BOTH the dycore
+# AND the physics, iterating SFNOPrimitiveEquationModel.step at dt_sfno) trainable
+# to competitive LONG-RANGE forecast skill, by giving it the two levers that
+# GraphCast / NeuralGCM rely on and that the AIMIP stack already implements:
+#
+#   (1) a NeuralGCM-STYLE ROLLOUT CURRICULUM (aimip_rollout_curriculum): short
+#       autoregressive leads first, progressively longer, so the emulator learns
+#       one-step accuracy before free-running stability. Each phase supervises
+#       ONE rollout to lead_hours against the ERA5 target at that lead. This is
+#       where fleet emulators get their multi-day stability — as TRAINING, not a
+#       bolt-on fine-tune.  Wired into _train_sfno_full_loop
+#       (build_sfno_curriculum_epoch_plan) mirroring _train_spectral_loop.
+#
+#   (2) GRAPHCAST-SCALE DATA (train_windows): 40 years (1979-2018) x 4 seasonal
+#       windows/yr (day_offsets 0/91/182/273 ~ Jan/Apr/Jul/Oct) x 5 days each.
+#       At the ERA5 6 h cadence a 5-day window = 20 IC/target pairs, so this is
+#       160 windows x 20 = ~3200 IC/target pairs with full seasonal + interannual
+#       coverage — the GraphCast-scale data lever (vs the 3200-fold-smaller
+#       4-window demo in suite_sfno_full.yaml). load_training_data loads
+#       max(lead)/6h extra snapshots per window so EVERY IC has a target at all
+#       curriculum leads (no dropped ICs).
+#
+# Base = the shared AIMIP ERA5 config (T63 / L8 / ERA5 zarr); ACE2-style
+# residual + pure-MSE loss so training matches what the WB2 comparison scores.
+# sfno_full is single-GPU (no data parallel: train_sfno_full_spectral raises
+# under aimip_data_parallel). Run on ONE A100 with the derecho launcher
+# scripts/cluster/derecho/train_sfno_full_scale.pbs.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  aimip_variant: "sfno_full"
+  aimip_radiation: "none"          # SFNO IS the physics; no radiation scheme
+  physics_parameterization: "none"
+
+  # Curriculum overrides aimip_n_epochs (total epochs = sum of phase epochs);
+  # this value is only the non-curriculum fallback.
+  aimip_n_epochs: 28
+
+  # --- NeuralGCM-style rollout curriculum: [[lead_hours, n_epochs], ...],
+  # short leads first. Total epochs = 4+4+6+6+8 = 28. run_aimip forces
+  # loss.multi_step_hours to the sorted unique leads {6,12,24,48,120} so a
+  # target is loaded at every phase lead (target_carry[k_target] indexes it).
+  aimip_rollout_curriculum:
+    - [6,   4]
+    - [12,  4]
+    - [24,  6]
+    - [48,  6]
+    - [120, 8]
+
+  # SFNO macro (autoregressive) time step [s]; 6 h = standard SFNO/FourCastNet
+  # cadence. n_sfno_steps(lead) = round(lead*3600/dt_sfno): 120 h = 20 macro
+  # steps — the long-rollout phase whose reverse-mode memory the checkpointed
+  # scan body (jax.checkpoint nothing_saveable in _rollout_segment) makes fit.
+  dt_sfno: 21600.0
+
+  # GraphCast-scale SFNO: larger than the 64d/4-block demo. ~ the size at which
+  # the epoch-0 NaN appeared under the shared LR, so keep aimip_lr low (below).
+  sfno_embed_dim: 128
+  sfno_n_blocks: 8
+  sfno_mlp_expansion: 4
+  sfno_seed: 0
+
+  # Chunked large-data loading (dycore-mode variants stream windows in chunks of
+  # this many; sfno_full's _train_sfno_full_loop loads the pairs host-resident
+  # and stages each sample to the GPU just before its step, so the full ~3200-pair
+  # set never rides GPU memory). Set for parity with the neural scale configs.
+  aimip_chunk_windows: 8
+
+  # Stability: the full emulator NaN'd at epoch-0 with the shared aimip_lr=3e-4
+  # (LR-driven weight blow-up). Keep the low LR from the stabilization fix;
+  # aimip_grad_clip stays 1.0 (from base). If NaN recurs: smaller dt_sfno (3 h).
+  aimip_lr: 5.0e-5
+
+  # Eval year (held out from the 1979-2018 training span).
+  eval_years: [2020]
+
+  loss:
+    # --- ACE2-style residual, multi-step, pure-MSE loss ---
+    residual_normalize: true       # scale by std of the 6 h field change
+    normalize_by_scale: false      # superseded by residual_normalize
+    # union of the curriculum leads so every phase has a loaded target; run_aimip
+    # re-derives this from aimip_rollout_curriculum, set here for clarity.
+    multi_step_hours: [6, 12, 24, 48, 120]
+    multi_step_weights: [1.0, 1.0, 1.0, 1.0, 1.0]
+    w_T: 0.5
+    w_u: 0.5
+    w_v: 0.5
+    w_q: 0.5
+    w_ps: 0.3
+    level_weighting: "pressure"
+    # bias / CRPS / spectral weights omitted -> default 0.0 => pure MSE
+
+  # --- GraphCast-scale data lever: 40 years x 4 seasonal windows/yr x 5 days.
+  # 160 windows x 20 IC pairs (6 h cadence) = ~3200 pairs, full seasonal +
+  # interannual coverage. This is the many-year data GraphCast/NeuralGCM use.
+  train_windows:
+  - [1979,   0, 5]
+  - [1979,  91, 5]
+  - [1979, 182, 5]
+  - [1979, 273, 5]
+  - [1980,   0, 5]
+  - [1980,  91, 5]
+  - [1980, 182, 5]
+  - [1980, 273, 5]
+  - [1981,   0, 5]
+  - [1981,  91, 5]
+  - [1981, 182, 5]
+  - [1981, 273, 5]
+  - [1982,   0, 5]
+  - [1982,  91, 5]
+  - [1982, 182, 5]
+  - [1982, 273, 5]
+  - [1983,   0, 5]
+  - [1983,  91, 5]
+  - [1983, 182, 5]
+  - [1983, 273, 5]
+  - [1984,   0, 5]
+  - [1984,  91, 5]
+  - [1984, 182, 5]
+  - [1984, 273, 5]
+  - [1985,   0, 5]
+  - [1985,  91, 5]
+  - [1985, 182, 5]
+  - [1985, 273, 5]
+  - [1986,   0, 5]
+  - [1986,  91, 5]
+  - [1986, 182, 5]
+  - [1986, 273, 5]
+  - [1987,   0, 5]
+  - [1987,  91, 5]
+  - [1987, 182, 5]
+  - [1987, 273, 5]
+  - [1988,   0, 5]
+  - [1988,  91, 5]
+  - [1988, 182, 5]
+  - [1988, 273, 5]
+  - [1989,   0, 5]
+  - [1989,  91, 5]
+  - [1989, 182, 5]
+  - [1989, 273, 5]
+  - [1990,   0, 5]
+  - [1990,  91, 5]
+  - [1990, 182, 5]
+  - [1990, 273, 5]
+  - [1991,   0, 5]
+  - [1991,  91, 5]
+  - [1991, 182, 5]
+  - [1991, 273, 5]
+  - [1992,   0, 5]
+  - [1992,  91, 5]
+  - [1992, 182, 5]
+  - [1992, 273, 5]
+  - [1993,   0, 5]
+  - [1993,  91, 5]
+  - [1993, 182, 5]
+  - [1993, 273, 5]
+  - [1994,   0, 5]
+  - [1994,  91, 5]
+  - [1994, 182, 5]
+  - [1994, 273, 5]
+  - [1995,   0, 5]
+  - [1995,  91, 5]
+  - [1995, 182, 5]
+  - [1995, 273, 5]
+  - [1996,   0, 5]
+  - [1996,  91, 5]
+  - [1996, 182, 5]
+  - [1996, 273, 5]
+  - [1997,   0, 5]
+  - [1997,  91, 5]
+  - [1997, 182, 5]
+  - [1997, 273, 5]
+  - [1998,   0, 5]
+  - [1998,  91, 5]
+  - [1998, 182, 5]
+  - [1998, 273, 5]
+  - [1999,   0, 5]
+  - [1999,  91, 5]
+  - [1999, 182, 5]
+  - [1999, 273, 5]
+  - [2000,   0, 5]
+  - [2000,  91, 5]
+  - [2000, 182, 5]
+  - [2000, 273, 5]
+  - [2001,   0, 5]
+  - [2001,  91, 5]
+  - [2001, 182, 5]
+  - [2001, 273, 5]
+  - [2002,   0, 5]
+  - [2002,  91, 5]
+  - [2002, 182, 5]
+  - [2002, 273, 5]
+  - [2003,   0, 5]
+  - [2003,  91, 5]
+  - [2003, 182, 5]
+  - [2003, 273, 5]
+  - [2004,   0, 5]
+  - [2004,  91, 5]
+  - [2004, 182, 5]
+  - [2004, 273, 5]
+  - [2005,   0, 5]
+  - [2005,  91, 5]
+  - [2005, 182, 5]
+  - [2005, 273, 5]
+  - [2006,   0, 5]
+  - [2006,  91, 5]
+  - [2006, 182, 5]
+  - [2006, 273, 5]
+  - [2007,   0, 5]
+  - [2007,  91, 5]
+  - [2007, 182, 5]
+  - [2007, 273, 5]
+  - [2008,   0, 5]
+  - [2008,  91, 5]
+  - [2008, 182, 5]
+  - [2008, 273, 5]
+  - [2009,   0, 5]
+  - [2009,  91, 5]
+  - [2009, 182, 5]
+  - [2009, 273, 5]
+  - [2010,   0, 5]
+  - [2010,  91, 5]
+  - [2010, 182, 5]
+  - [2010, 273, 5]
+  - [2011,   0, 5]
+  - [2011,  91, 5]
+  - [2011, 182, 5]
+  - [2011, 273, 5]
+  - [2012,   0, 5]
+  - [2012,  91, 5]
+  - [2012, 182, 5]
+  - [2012, 273, 5]
+  - [2013,   0, 5]
+  - [2013,  91, 5]
+  - [2013, 182, 5]
+  - [2013, 273, 5]
+  - [2014,   0, 5]
+  - [2014,  91, 5]
+  - [2014, 182, 5]
+  - [2014, 273, 5]
+  - [2015,   0, 5]
+  - [2015,  91, 5]
+  - [2015, 182, 5]
+  - [2015, 273, 5]
+  - [2016,   0, 5]
+  - [2016,  91, 5]
+  - [2016, 182, 5]
+  - [2016, 273, 5]
+  - [2017,   0, 5]
+  - [2017,  91, 5]
+  - [2017, 182, 5]
+  - [2017, 273, 5]
+  - [2018,   0, 5]
+  - [2018,  91, 5]
+  - [2018, 182, 5]
+  - [2018, 273, 5]
+
+variants:
+  - sfno_full
+
+output_dir: results/aimip_wbcompare_scale

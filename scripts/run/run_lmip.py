@@ -211,6 +211,7 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
             nsc_gated_respiration=args.nsc_gated_respiration,
             nsc_reserve_days=args.nsc_reserve_days,
             r_maint_floor_frac=args.r_maint_floor_frac,
+            leaf_c_resorption_frac=args.leaf_c_resorption_frac,
             cold_deciduous_dormancy=args.cold_deciduous_dormancy,
             cold_deciduous=args.cold_deciduous,
             freeze_dormancy_threshold_K=args.freeze_dormancy_threshold_k,
@@ -648,6 +649,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    default=CarbonConfig().r_maint_floor_frac,
                    help="Basal fraction of R_maint retained at full NSC "
                         "depletion (the f_nsc floor).")
+    p.add_argument("--leaf-c-resorption-frac", type=float,
+                   default=CarbonConfig().leaf_c_resorption_frac,
+                   help="Fraction of shed foliage carbon resorbed into the "
+                        "labile reserve (C_fol->C_lab) at leaf-fall instead of "
+                        "lost to litter (deciduous leaf-C recovery; refills the "
+                        "reserve whose depletion drives the cold leaf-out lock). "
+                        "Default 0 (off).")
     p.add_argument("--cold-deciduous-dormancy",
                    action=argparse.BooleanOptionalAction,
                    default=CarbonConfig().cold_deciduous_dormancy,
