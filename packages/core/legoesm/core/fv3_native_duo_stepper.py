@@ -420,9 +420,9 @@ def one_grad_p_1lev(u, v, pkc, gz, divg2, gs: dict, bd, npx: int,
             pk1[i - lo, j - lo] = 0.0
     wkb = np.zeros_like(pk2)
     for arr in (pk2, gz1, gz2):
-        F = fort(arr, isd, jsd)
-        WK = fort(wkb, isd, jsd)
-        a2b_ord4(F, WK, gsf, npx, npy, is_, ie, js, je, ng,
+        fq = fort(arr, isd, jsd)
+        fwk = fort(wkb, isd, jsd)
+        a2b_ord4(fq, fwk, gsf, npx, npy, is_, ie, js, je, ng,
                  replace=True, duogrid=True)
 
     if d_ext > 0.0:
@@ -444,11 +444,11 @@ def one_grad_p_1lev(u, v, pkc, gz, divg2, gs: dict, bd, npx: int,
         return a[i - lo, j - lo]
 
     wk = pk2 - pk1
-    RDX = gs["rdx"]
-    RDY = gs["rdy"]
+    rdx = gs["rdx"]
+    rdy = gs["rdy"]
     for j in range(js, je + 1 + 1):
         for i in range(is_, ie + 1):
-            u[i - lo, j - lo] = RDX[i - lo, j - lo] * (
+            u[i - lo, j - lo] = rdx[i - lo, j - lo] * (
                 wk2[i - 1, j - 1] + u[i - lo, j - lo]
                 + dt / (at(wk, i, j) + at(wk, i + 1, j)) * (
                     (at(gz2, i, j) - at(gz1, i + 1, j))
@@ -457,7 +457,7 @@ def one_grad_p_1lev(u, v, pkc, gz, divg2, gs: dict, bd, npx: int,
                     * (at(pk2, i, j) - at(pk1, i + 1, j))))
     for j in range(js, je + 1):
         for i in range(is_, ie + 1 + 1):
-            v[i - lo, j - lo] = RDY[i - lo, j - lo] * (
+            v[i - lo, j - lo] = rdy[i - lo, j - lo] * (
                 wk1[i - 1, j - 1] + v[i - lo, j - lo]
                 + dt / (at(wk, i, j) + at(wk, i, j + 1)) * (
                     (at(gz2, i, j) - at(gz1, i, j + 1))
