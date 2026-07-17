@@ -51,7 +51,7 @@ class TestCloudFractionOverride:
     def test_none_default_byte_identical(self):
         """Omitting the override (None) reproduces the RH path exactly."""
         T, p_full, q_v, dp = _saturated_marine_column()
-        cfg = CloudConfig(scheme="sundqvist")
+        cfg = CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=0.0)
         base = compute_cloud_properties(T=T, p_full=p_full, q_v=q_v, dp=dp, config=cfg)
         same = compute_cloud_properties(
             T=T, p_full=p_full, q_v=q_v, dp=dp, config=cfg,
@@ -64,7 +64,7 @@ class TestCloudFractionOverride:
     def test_override_supersedes_rh_fraction(self):
         """With no convective cloud, the returned cf IS the override (clipped)."""
         T, p_full, q_v, dp = _saturated_marine_column()
-        cfg = CloudConfig(scheme="sundqvist")
+        cfg = CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=0.0)
         ovr = jnp.full(T.shape, 0.25)
         props = compute_cloud_properties(
             T=T, p_full=p_full, q_v=q_v, dp=dp, config=cfg,
@@ -78,7 +78,7 @@ class TestCloudFractionOverride:
         Uses the diagnostic (no explicit condensate) path so lwp ∝ cf directly.
         """
         T, p_full, q_v, dp = _saturated_marine_column()
-        cfg = CloudConfig(scheme="sundqvist")
+        cfg = CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=0.0)
         rh = compute_cloud_properties(T=T, p_full=p_full, q_v=q_v, dp=dp, config=cfg)
         cf_rh = float(np.asarray(rh.cloud_fraction).max())
         assert cf_rh > 0.3, "column not overcast enough to exercise the lever"
@@ -93,7 +93,7 @@ class TestCloudFractionOverride:
         """Unphysical override values are clamped to [0, 1] (no negative cf, no
         >1 overcast)."""
         T, p_full, q_v, dp = _saturated_marine_column()
-        cfg = CloudConfig(scheme="sundqvist")
+        cfg = CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=0.0)
         hi = compute_cloud_properties(
             T=T, p_full=p_full, q_v=q_v, dp=dp, config=cfg,
             cloud_fraction_override=jnp.full(T.shape, 2.0),
@@ -109,7 +109,7 @@ class TestCloudFractionOverride:
         """LWP is a smooth function of the override fraction (AD-safe: the clip
         has a finite subgradient on [0, 1], no NaN sentinel)."""
         T, p_full, q_v, dp = _saturated_marine_column()
-        cfg = CloudConfig(scheme="sundqvist")
+        cfg = CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=0.0)
 
         def total_lwp(cf_scalar):
             ovr = jnp.full(T.shape, cf_scalar)
@@ -122,3 +122,27 @@ class TestCloudFractionOverride:
         g = jax.grad(total_lwp)(0.4)
         assert np.isfinite(float(g))
         assert float(g) > 0.0  # more cloud fraction => more liquid water path
+
+    def test_level_gate_confines_override_to_boundary_layer(self):
+        """The real-SST fix: with the default p-min gate the override applies ONLY
+        in the BL (p_full >= clubb_cf_override_p_min_pa) — the marine-Sc target —
+        and the RH grid-scale fraction is kept ALOFT (avoids CLUBB's high/mid-cloud
+        over-diagnosis that collapsed OLR + raised albedo in the real-SST A/B)."""
+        T, p_full, q_v, dp = _saturated_marine_column()
+        p_min = 70000.0
+        cfg = CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=p_min)
+        rh = compute_cloud_properties(T=T, p_full=p_full, q_v=q_v, dp=dp, config=cfg)
+        ovr_val = 0.15
+        gated = compute_cloud_properties(
+            T=T, p_full=p_full, q_v=q_v, dp=dp, config=cfg,
+            cloud_fraction_override=jnp.full(T.shape, ovr_val),
+        )
+        pf = np.asarray(p_full)
+        cf_rh = np.asarray(rh.cloud_fraction)
+        cf_gated = np.asarray(gated.cloud_fraction)
+        bl = pf >= p_min       # boundary layer: override applies
+        aloft = pf < p_min     # above BL: RH cf kept
+        assert bl.any() and aloft.any(), "test column must straddle the gate"
+        # BL levels take the override; aloft levels are UNCHANGED from the RH cf.
+        npt.assert_allclose(cf_gated[bl], ovr_val, atol=1e-12)
+        npt.assert_allclose(cf_gated[aloft], cf_rh[aloft], atol=1e-12)

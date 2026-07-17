@@ -543,7 +543,20 @@ def compute_cloud_properties(
     # fraction; on the first step before turbulence has run it is the zero-init
     # carry, which merely drops the floor for that single step.
     if cloud_fraction_override is not None:
-        cf = jnp.clip(cloud_fraction_override, 0.0, 1.0)
+        _cf_clubb = jnp.clip(cloud_fraction_override, 0.0, 1.0)
+        # LEVEL GATE (real-SST A/B fix): apply CLUBB's cf only in the boundary
+        # layer / low cloud (p_full >= clubb_cf_override_p_min_pa, the marine-Sc
+        # target) and keep the RH grid-scale fraction ALOFT.  A full-column
+        # override over-clouds at altitude (CLUBB's PDF over-diagnoses high/mid
+        # cloud -> OLR collapse + albedo RISE, the real-SST backfire).  The gate
+        # is a static Python branch on the config (p_full is traced; the
+        # threshold is a compile-time float): 0.0 restores the full-column
+        # override (the analytical-A/B behaviour).
+        _p_min = config.clubb_cf_override_p_min_pa
+        if _p_min > 0.0:
+            cf = jnp.where(p_full >= _p_min, _cf_clubb, cf)
+        else:
+            cf = _cf_clubb
 
     # --- Opt-in convective (cumulus) cloud, MAXIMUM-overlap combined ---
     # The stratiform RH/condensate fractions above miss convective cloud when an
