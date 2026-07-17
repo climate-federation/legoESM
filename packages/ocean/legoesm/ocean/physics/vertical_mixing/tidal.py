@@ -387,6 +387,85 @@ def compute_tidal_diffusivity(
     return K
 
 
+def brunt_vaisala_cell_from_eos(
+    T_degC: jnp.ndarray,
+    S_psu: jnp.ndarray,
+    layer_thickness_m: jnp.ndarray,
+    eos_fn,
+    *,
+    rho_0: float,
+    n_squared_min: float,
+    g: float = constants.g,
+) -> jnp.ndarray:
+    """Cell-centred buoyancy frequency N² [1/s²] from the model EOS.
+
+    Feeds :func:`compute_tidal_diffusivity` (K ∝ 1/N²). Uses the
+    model-selected EOS (Wright, linear, …) so the tidal diffusivity's
+    stratification is CONSISTENT with the density the dynamical core
+    integrates — replacing a hardcoded linear ρ-anomaly (issue #1111).
+
+    Locally-referenced (MOM/NEMO convention): the two levels bounding an
+    interface are evaluated at the SHARED interface pressure, so the vertical
+    density difference reflects T,S stratification ALONE and does not
+    double-count adiabatic compressibility. All geometry is derived from the
+    SAME (live) thickness field so the interface is self-consistent: the depth
+    of interface ``k+½`` is the running sum of thicknesses down to the bottom
+    of cell ``k`` (``cumsum(thickness)[..., k]``), the exact ``z_{k+½}`` on a
+    stretched grid; interface pressure is the hydrostatic reference
+    ``rho_0 g z_iface`` (positive-down).
+
+    Parameters
+    ----------
+    T_degC, S_psu : array ``(..., nlev)``
+        Potential temperature [degC] and salinity [PSU] at cell centres.
+    layer_thickness_m : array ``(..., nlev)``
+        Cell thickness [m]. Interface depths and the centre-to-centre spacing
+        ``dz`` (half-sum of adjacent thicknesses) are both derived from it, so
+        the pressure reference and ``dz`` use one consistent (live) grid.
+    eos_fn : callable
+        Model EOS ``fn(T, S, p_Pa) -> in-situ density [kg/m³]`` (e.g. from
+        :func:`legoesm.ocean.eos.make_eos_fn`).
+    rho_0 : float
+        Boussinesq reference density [kg/m³].
+    n_squared_min : float
+        Stratification floor [1/s²] (``config.N_squared_min``) — guards
+        ``K → ∞`` in weakly / unstably stratified columns.
+    g : float
+        Gravitational acceleration [m/s²].
+
+    Returns
+    -------
+    array ``(..., nlev)``
+        N² at cell centres, floored at ``n_squared_min``.
+    """
+    nlev = T_degC.shape[-1]
+    if nlev < 2:
+        # Degenerate single layer — N² undefined; return the floor so the
+        # downstream K is finite (the diffusion is a no-op anyway).
+        return jnp.full_like(T_degC, n_squared_min)
+
+    # Interface z_{k+½} = running sum of thicknesses to the bottom of cell k,
+    # from the SAME thickness field as dz (no static/live grid mixing).
+    z_iface = jnp.cumsum(layer_thickness_m, axis=-1)[..., :-1]
+    p_iface = rho_0 * g * z_iface                       # hydrostatic ref [Pa]
+    dz = 0.5 * (layer_thickness_m[..., :-1] + layer_thickness_m[..., 1:])
+    dz = jnp.where(dz > 1.0e-12, dz, 1.0)               # centre spacing floor
+    rho_upper = eos_fn(T_degC[..., :-1], S_psu[..., :-1], p_iface)
+    rho_lower = eos_fn(T_degC[..., 1:], S_psu[..., 1:], p_iface)
+    n2_iface = -(g / rho_0) * (rho_upper - rho_lower) / dz   # (..., nlev-1)
+
+    # Interfaces → cell centres: replicate top/bottom, average the interior.
+    n2_top = n2_iface[..., :1]
+    n2_bot = n2_iface[..., -1:]
+    if n2_iface.shape[-1] >= 2:
+        n2_avg = 0.5 * (n2_iface[..., :-1] + n2_iface[..., 1:])
+        n2_cell = jnp.concatenate([n2_top, n2_avg, n2_bot], axis=-1)
+    else:
+        # nlev == 2 → one interface → broadcast to both cells.
+        n2_cell = jnp.broadcast_to(n2_iface, T_degC.shape)
+    return jnp.maximum(n2_cell, n_squared_min)
+
+
 # ==============================================================================
 # Synthetic E_BT for tests / dev runs
 # ==============================================================================

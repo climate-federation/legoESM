@@ -19,6 +19,10 @@ UNREACHABLE_PARAMS = frozenset({
     # atm: BechtoldConfig (14)
     'atm.conv.BechtoldConfig.M_b_max',
     'atm.conv.BechtoldConfig.cape_pbl_depth',
+    # RCAPQADV blend weight (2026-07-17 ZDQCV closure work): same conscious
+    # exclusion as the rest of the BechtoldConfig family (CLI/ExperimentConfig
+    # scalars, not the --params qualified-name loader).
+    'atm.conv.BechtoldConfig.cape_qadv_weight',
     'atm.conv.BechtoldConfig.cloud_depth_deep',
     'atm.conv.BechtoldConfig.cloud_depth_shallow_max',
     'atm.conv.BechtoldConfig.delta_deep',
@@ -230,7 +234,12 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.micro.P3Config.a_v_r',
     'atm.micro.P3Config.agg_coeff',
     'atm.micro.P3Config.cooper_T_act',
+    # gSAM scheme-1 nucleation-gate params (2026-07-17 Cooper-faithfulness
+    # closure): same conscious exclusion as the rest of the P3Config family —
+    # the whole class is not routed through any driver's --params loader yet.
+    'atm.micro.P3Config.cooper_T_nuc',
     'atm.micro.P3Config.cooper_a',
+    'atm.micro.P3Config.cooper_supi_min',
     'atm.micro.P3Config.dep_coeff',
     'atm.micro.P3Config.evap_coeff',
     'atm.micro.P3Config.k_ac',

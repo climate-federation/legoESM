@@ -98,13 +98,13 @@ class AMIPExperimentConfig(NamedTuple):
     bechtold_use_ifs_inplume_precip: bool = True
     # Grid spacing [m] for the IFS ZTAURES factor (0 = legacy).
     bechtold_dx_m: float = 0.0
-    # IFS convective downdraft (default OFF pending validation).
-    bechtold_use_ifs_downdraft: bool = False
-    # IFS shallow PBL-equilibrium closure (default OFF pending validation).
+    # IFS convective downdraft (default ON since 2026-07-17).
+    bechtold_use_ifs_downdraft: bool = True  # flipped 2026-07-17
+    # IFS shallow PBL-equilibrium closure (HELD OFF by the 2026-07-17 flip campaign).
     bechtold_use_ifs_shallow_closure: bool = False
-    bechtold_use_ifs_capdcycl: bool = False
-    bechtold_use_ifs_land_rhebc: bool = False
-    bechtold_use_ifs_snow_melt: bool = False
+    bechtold_use_ifs_capdcycl: bool = True
+    bechtold_use_ifs_land_rhebc: bool = True
+    bechtold_use_ifs_snow_melt: bool = True
     # Convective in-updraft rain-split efficiency [0,1] (shared across the
     # mass-flux schemes); 0 = disabled (legacy no split).
     convective_precip_efficiency: float = 0.0

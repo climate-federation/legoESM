@@ -6,8 +6,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.ocean.physics.vertical_mixing.tidal import (
     TidalMixingConfig,
+    brunt_vaisala_cell_from_eos,
     compute_tidal_diffusivity,
     _exp_decay_structure,
     normalize_structure,
@@ -223,3 +225,94 @@ class TestSyntheticEBT:
         H = jnp.array(4000.0)
         E = float(synthetic_baroclinic_tide_energy_from_bathy(H))
         assert 1.0e-5 < E < 1.0e-1
+
+
+# ==============================================================================
+# N² from the model EOS (issue #1111)
+# ==============================================================================
+
+_ALPHA_T = 2.0e-4   # test-only linear-EOS coeffs (mirror the old inline block)
+_BETA_S = 7.4e-4
+
+
+def _linear_eos(rho0):
+    """A pressure-independent linear EOS fn(T,S,p)->rho for reference checks."""
+    return lambda T, S, p: rho0 * (1.0 - _ALPHA_T * T + _BETA_S * S)
+
+
+class TestBruntVaisalaFromEos:
+    def _column(self):
+        # Stable: warmer (lighter) on top, cooler below; 5 levels, 100 m each.
+        T = jnp.asarray([[20.0, 15.0, 10.0, 6.0, 4.0]])
+        S = jnp.asarray([[34.0, 34.5, 34.8, 34.9, 35.0]])
+        depth = jnp.asarray([[50.0, 150.0, 250.0, 350.0, 450.0]])
+        thick = jnp.full_like(T, 100.0)
+        return T, S, depth, thick
+
+    def test_linear_eos_reproduces_the_old_inline_formula(self):
+        # With the OLD inline pressure-independent linear EOS the helper reduces
+        # (to fp64 round-off) to the old -(g/rho0)(rho_k - rho_{k+1})/dz
+        # interface formula, padded — a regression pin on the algebra. The
+        # interface-depth choice is irrelevant here (linear EOS ignores p).
+        rho0 = float(np.asarray(constants.rho_ocean))
+        g = float(constants.g)
+        T, S, depth, thick = self._column()
+        n2 = np.asarray(brunt_vaisala_cell_from_eos(
+            T, S, thick, _linear_eos(rho0),
+            rho_0=rho0, n_squared_min=1e-9))
+        # Reference: analytic linear N² at interfaces, padded to centres.
+        rho = rho0 * (1.0 - _ALPHA_T * np.asarray(T) + _BETA_S * np.asarray(S))
+        dz = 0.5 * (np.asarray(thick)[..., :-1] + np.asarray(thick)[..., 1:])
+        n2_if = -(g / rho0) * (rho[..., :-1] - rho[..., 1:]) / dz
+        avg = 0.5 * (n2_if[..., :-1] + n2_if[..., 1:])
+        ref = np.concatenate([n2_if[..., :1], avg, n2_if[..., -1:]], axis=-1)
+        ref = np.maximum(ref, 1e-9)
+        assert np.allclose(n2, ref, rtol=1e-10, atol=1e-14)
+
+    def test_stable_column_is_positive(self):
+        rho0 = float(np.asarray(constants.rho_ocean))
+        T, S, depth, thick = self._column()
+        n2 = np.asarray(brunt_vaisala_cell_from_eos(
+            T, S, thick, _linear_eos(rho0),
+            rho_0=rho0, n_squared_min=1e-12))
+        assert np.all(n2 > 0.0)
+        assert n2.shape == (1, 5)
+
+    def test_model_eos_differs_from_linear(self):
+        # The whole point of #1111: swapping in the nonlinear model EOS changes
+        # N², proving the helper actually consumes the passed eos_fn.
+        from legoesm.ocean.eos import make_eos_fn
+        rho0 = float(np.asarray(constants.rho_ocean))
+        T, S, depth, thick = self._column()
+        n2_lin = np.asarray(brunt_vaisala_cell_from_eos(
+            T, S, thick, _linear_eos(rho0),
+            rho_0=rho0, n_squared_min=1e-12))
+        n2_wright = np.asarray(brunt_vaisala_cell_from_eos(
+            T, S, thick, make_eos_fn("wright"),
+            rho_0=rho0, n_squared_min=1e-12))
+        assert np.all(np.isfinite(n2_wright))
+        assert not np.allclose(n2_lin, n2_wright)
+
+    def test_unstable_column_floored(self):
+        # Dense-on-top (unstable) → N²<0 clamped to the floor everywhere.
+        rho0 = float(np.asarray(constants.rho_ocean))
+        floor = 1e-8
+        T = jnp.asarray([[2.0, 10.0, 20.0]])       # cold/dense on top
+        S = jnp.asarray([[35.0, 34.5, 34.0]])
+        depth = jnp.asarray([[50.0, 150.0, 250.0]])
+        thick = jnp.full_like(T, 100.0)
+        n2 = np.asarray(brunt_vaisala_cell_from_eos(
+            T, S, thick, _linear_eos(rho0),
+            rho_0=rho0, n_squared_min=floor))
+        assert np.allclose(n2, floor)
+
+    def test_single_level_returns_floor(self):
+        rho0 = float(np.asarray(constants.rho_ocean))
+        floor = 1e-7
+        T = jnp.asarray([[10.0]])
+        n2 = np.asarray(brunt_vaisala_cell_from_eos(
+            T, jnp.asarray([[35.0]]), jnp.asarray([[50.0]]),
+            _linear_eos(rho0),
+            rho_0=rho0, n_squared_min=floor))
+        assert np.allclose(n2, floor)
+        assert n2.shape == (1, 1)

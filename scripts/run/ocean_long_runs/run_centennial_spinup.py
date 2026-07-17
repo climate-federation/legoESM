@@ -171,6 +171,7 @@ def main() -> int:
     from legoesm.ocean.physics.ice_shelf import IceShelfConfig
     from legoesm.ocean.physics.vertical_mixing.tidal import (
         TidalMixingConfig,
+        brunt_vaisala_cell_from_eos,
         synthetic_baroclinic_tide_energy_from_bathy,
     )
     import jax.numpy as jnp
@@ -397,6 +398,31 @@ def main() -> int:
                 f"E_BT global mean: {float(np.mean(E_BT_arr)):.3e} W/m²"
             )
 
+    # Build the tidal-N² EOS ONCE from the SAME EOS the model integrates
+    # (default "wright"), so the tidal diffusivity's stratification is
+    # consistent with the dynamical core rather than a hardcoded linear
+    # ρ-anomaly (issue #1111). make_eos_fn returns a light closure; the
+    # per-step N² evaluates it on the host T/S arrays.
+    tidal_eos_fn = None
+    tidal_rho_0 = None
+    tidal_g = None
+    if tidal_static is not None:
+        from legoesm.ocean.eos import make_eos_fn
+        # Source ρ₀ / g from the SAME model config the dynamical core uses (not
+        # module constants). Build the EOS EXACTLY as the core does so tidal
+        # density matches the integrated density: the geometric-depth NEMO path
+        # passes rho0=config.rho_0 (ocean_pe_latlon_cgrid), the default "insitu"
+        # path and MPAS pass none — mirror that conditional here.
+        tidal_rho_0 = float(model.config.rho_0)
+        tidal_g = float(model.config.g)
+        _eos_kw = ({"rho0": tidal_rho_0}
+                   if getattr(model.config, "eos_depth", "insitu") == "geometric"
+                   else {})
+        tidal_eos_fn = make_eos_fn(
+            model.config.eos, getattr(model.config, "eos_linear", None),
+            **_eos_kw,
+        )
+
 
     # Auto-resume: prefer ``--restart-from``, fallback to latest in
     # ``--output``.
@@ -615,48 +641,20 @@ def main() -> int:
                 ), dtype=np.float64)
                 T_arr = np.asarray(state.T.data, dtype=np.float64)
                 S_arr = np.asarray(state.S.data, dtype=np.float64)
-                nlev_loc = h_partial_now.shape[-1]
-                # Linear-EOS density for N² (Boussinesq, ρ-anomaly).
-                # α_T / β_S match the defaults in ``ocean/eos.py``.
-                alpha_T = 2.0e-4
-                beta_S = 7.4e-4
-                rho_0_loc = float(np.asarray(constants.rho_ocean))
-                g_loc = float(constants.g)
+                rho_0_loc = tidal_rho_0
                 N2_min = float(tidal_config.N_squared_min)
-                if nlev_loc < 2:
-                    # Degenerate single-layer column — diffusion is a
-                    # no-op but we still want the diagnostic + a sane
-                    # ``N2`` floor to feed ``K_tidal``.
-                    N2_cell = np.full_like(h_partial_now, N2_min)
-                else:
-                    rho = rho_0_loc * (
-                        1.0 - alpha_T * T_arr + beta_S * S_arr
-                    )
-                    dz_int = 0.5 * (
-                        h_partial_now[..., :-1] + h_partial_now[..., 1:]
-                    )
-                    dz_int = np.where(dz_int > 1.0e-12, dz_int, 1.0)
-                    N2_iface = -(g_loc / rho_0_loc) * (
-                        rho[..., :-1] - rho[..., 1:]
-                    ) / dz_int
-                    # Pad to cell centres: replicate end interfaces at
-                    # top and bottom, average adjacent interfaces
-                    # inside.
-                    N2_top = N2_iface[..., :1]
-                    N2_bot = N2_iface[..., -1:]
-                    if N2_iface.shape[-1] >= 2:
-                        N2_avg = 0.5 * (
-                            N2_iface[..., :-1] + N2_iface[..., 1:]
-                        )
-                        N2_cell = np.concatenate(
-                            [N2_top, N2_avg, N2_bot], axis=-1,
-                        )
-                    else:
-                        # nlev == 2 → one interface → broadcast.
-                        N2_cell = np.broadcast_to(
-                            N2_iface, h_partial_now.shape,
-                        ).copy()
-                    N2_cell = np.maximum(N2_cell, N2_min)
+                # N² from the model-selected EOS (issue #1111): locally-
+                # referenced density difference at the shared interface
+                # pressure, cell-centred + floored. Evaluated on device via
+                # the EOS closure, then pulled back to host for the NumPy
+                # tidal path below.
+                N2_cell = np.asarray(
+                    brunt_vaisala_cell_from_eos(
+                        T_arr, S_arr, h_partial_now, tidal_eos_fn,
+                        rho_0=rho_0_loc, n_squared_min=N2_min, g=tidal_g,
+                    ),
+                    dtype=np.float64,
+                )
 
                 # Numpy mirror of ``compute_tidal_diffusivity``:
                 # K_tidal = Γ q E_BT F(z) / (ρ_0 N²), clipped to K_max,

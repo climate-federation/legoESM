@@ -375,9 +375,11 @@ def three_equation_melt(
     C = -alpha * beta * theta
 
     # Standard quadratic root.  The physical root is ``(-B + √Δ) /
-    # (2A)`` — it reduces to ``+α·β·θ / (γ·β) = α·θ / γ`` (i.e.
-    # γ_T·c_w·ρ_w·θ / (ρ_i·L_f)) in the small-melt limit, matching
-    # the Beckmann-Goosse linearisation.
+    # (2A)``; its small-θ asymptote is ``-C/B = α·β·θ / (α·δ·T_minus_bcp
+    # − γ·β)`` — NOT the Beckmann-Goosse ``α·θ/γ`` form, which requires
+    # ``γ·β ≫ α·δ·(T−b−c·p)`` and is false at the default parameters
+    # (pinned in test_ice_shelf_three_equation_faithful, which certifies
+    # the -C/B limit).
     disc = B * B - 4.0 * A * C
     # AD-safe sqrt of the discriminant: ``d/dx sqrt(x) = 1/(2 sqrt(x))`` is
     # +inf at x=0, so ``sqrt(max(disc, 0))`` produces a NaN GRADIENT whenever

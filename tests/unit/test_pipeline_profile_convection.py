@@ -275,6 +275,14 @@ def _bechtold_step_pe(grid, sigma, f, precip_efficiency):
         dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
         convection="bechtold", radiation="none", microphysics="none",
         convective_precip_efficiency=precip_efficiency,
+        # PE-split ISOLATION (the 2026-07-17 default flips turned on the
+        # snow/melt march + downdraft + capdcycl + land-RHEBC, which emit
+        # surface precip independent of the PE rain species and would
+        # break the PE=0 -> zero-precip premise):
+        bechtold_use_ifs_snow_melt=False,
+        bechtold_use_ifs_downdraft=False,
+        bechtold_use_ifs_capdcycl=False,
+        bechtold_use_ifs_land_rhebc=False,
     )
     config.validate_strict()
     pipe = build_physics_pipeline(grid, sigma, config)

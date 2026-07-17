@@ -173,6 +173,7 @@ __param_spec__ = {
         "excluded": {
             "autoconversion_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "breakup_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "cooper_supi_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "ice_sigmoid_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "melt_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "rho_rim_min": "numerics: solver/smoothing/tolerance/iteration parameter",
@@ -191,9 +192,11 @@ __param_spec__ = {
             "b_v_r": {"units": "1", "bounds": (0.15, 1.5), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Seifert & Beheng (2001)", "shape": None},
             # --- Ice nucleation (Cooper 1986) ---
             "N_i0": {"units": "1/m^3", "bounds": (1.0, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
-            "N_i_nuc_max": {"units": "1/m^3", "bounds": (1e5, 5e6), "tunable_tier": 3, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
+            "N_i_nuc_max": {"units": "1/m^3", "bounds": (2e4, 5e6), "tunable_tier": 3, "transform": "sigmoid", "category": "ice_nucleation", "reference": "gSAM P3 scheme-1 cap 100/L (module_mp_p3.f90:3090)", "shape": None},
             "cooper_a": {"units": "1/K", "bounds": (0.1, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
             "cooper_T_act": {"units": "K", "bounds": (255.0, 273.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
+            "cooper_T_nuc": {"units": "K", "bounds": (248.0, 266.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "gSAM P3 scheme-1 gate T<-15C (module_mp_p3.f90:3084)", "shape": None},
+            "cooper_supi_min": {"units": "1", "bounds": (0.0, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "gSAM P3 scheme-1 gate supi>=0.05 (module_mp_p3.f90:3084)", "shape": None},
             # --- Ice depositional growth ---
             "dep_coeff": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
             "q_i_min_growth": {"units": "kg/kg", "bounds": (3e-10, 3e-09), "tunable_tier": 3, "transform": "sigmoid", "category": "condensation", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
@@ -843,15 +846,22 @@ class P3Config(NamedTuple):
     evap_coeff: float = 1.0
     saturation_sharpness: float = 100.0
     autoconversion_sharpness: float = 10.0
-    # --- Ice nucleation (Cooper 1986) ---
+    # --- Ice nucleation (Cooper 1986, gSAM P3 scheme-1 semantics) ---
     # Was 5e3 — 1000x the canonical Cooper base (0.005/L = 5/m³, = MorrisonConfig).
     N_i0: float = 5.0               # Cooper base ice crystal number [1/m³] (= 0.005/L)
     cooper_a: float = 0.304         # Cooper exponent
-    # SAM "limit to 500 L⁻¹" cap; bounds the Cooper exponential so cold
+    # ORACLE cap: gSAM P3 scheme-1 100 L⁻¹·SCF with SCF=1 (module_mp_p3.f90:3090;
+    # scheme 2 uses 150 L⁻¹). Also bounds the Cooper exponential so cold
     # tropopause temperatures cannot overflow fp32 (mirrors Morrison).
-    N_i_nuc_max: float = 5.0e5      # [1/m³] = 500 /L
-    cooper_T_act: float = 265.0     # Activation temperature [K]
+    # (Was 5e5 = M2005's 500/L — a documented departure, closed 2026-07-17.)
+    N_i_nuc_max: float = 1.0e5      # [1/m³] = 100 /L
+    cooper_T_act: float = 265.0     # Mixed-phase process gate (dep/riming/agg) [K]
+    # Nucleation-specific ORACLE gate (module_mp_p3.f90:3084): T < −15 °C AND
+    # supi >= 0.05, smoothed by ice_sigmoid_sharpness / cooper_supi_sharpness.
+    cooper_T_nuc: float = 258.15    # Nucleation activation temperature [K] (−15 °C)
+    cooper_supi_min: float = 0.05   # Min ice supersaturation for nucleation [-]
     ice_sigmoid_sharpness: float = 5.0
+    cooper_supi_sharpness: float = 200.0  # Sigmoid sharpness on supi gate [-]
     # --- Ice depositional growth ---
     dep_coeff: float = 1e-3
     q_i_min_growth: float = 1e-9    # Minimum effective q_i for deposition [kg/kg]

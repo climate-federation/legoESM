@@ -89,7 +89,7 @@ TUNED_CH = 0.004425              # LandConfig.Ch_land / Cd_land bulk transfer
 # elevation-band params left at v4 defaults (worth only +0.001 K, not baked here).
 _TUNED_PFT_ALBEDO_MULTILAYER = (0.3000, 0.1159, 0.1312, 0.1340, 0.1396, 0.1471, 0.1601, 0.1700, 0.1700, 0.1804, 0.1646, 0.1964, 0.2019, 0.1870, 0.1982, 0.1763, 0.1770)
 _TUNED_PFT_EMISSIVITY_MULTILAYER = (0.9594, 0.9554, 0.9602, 0.9546, 0.9597, 0.9616, 0.9604, 0.9581, 0.9599, 0.9648, 0.9621, 0.9587, 0.9596, 0.9567, 0.9609, 0.9590, 0.9588)
-_TUNED_PFT_ROOT_DEPTH_MULTILAYER = (0.088, 1.706, 1.469, 1.414, 1.631, 1.675, 1.527, 1.408, 1.088, 0.716, 0.622, 0.723, 0.457, 0.507, 0.504, 0.488, 0.477)
+_TUNED_PFT_ROOT_DEPTH_MULTILAYER = (0.088, 1.706, 1.469, 1.414, 1.631, 1.675, 1.527, 1.408, 1.088, 0.716, 0.622, 0.723, 0.457, 0.507, 0.504, 0.488, 0.477)  # const-ok: baked per-PFT root-depth calibration table (v5 multilayer tuning, #892), not a physical constant — same class as the annotated-by-budget _TUNED_PFT_*_MULTILAYER siblings above
 # per-PFT roughness length z0 [m] (drives the MOST surface exchange -> tall forests
 # rough ~1-2 m, grass/crop/bare smooth ~0.02-0.23 m).  Calibrated under MOST (the
 # coupled diurnal-surface default); the constant-bulk fallback ignores it.

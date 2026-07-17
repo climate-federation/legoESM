@@ -305,6 +305,10 @@ class PhysicsPipeline:
         # attaches from ``subgrid_orography_path`` (and re-scatters under
         # MPI, like ``f_land``). None -> kernels use scalar config.h_topo.
         self._gwd_orographic = False
+        # ``_gwd_takes_netdt`` marks the e3sm_cam CONVECTIVE (Beres) source:
+        # the pipeline threads the convection scheme's heating as
+        # ``netdt_col`` (E3SM TTEND_DP analogue); builder-set.
+        self._gwd_takes_netdt = False
         # ``_gwd_takes_land_frac`` marks the single scheme (``e3sm_cam``)
         # whose kernel accepts ``land_frac_col`` for the E3SM driver-level
         # orographic landfrac scaling; the builder sets it from the config.
@@ -904,6 +908,20 @@ class PhysicsPipeline:
                 # the stochastic multiplier is exactly 1, so a zero stoch
                 # input is bit-identical and needs no carry slot.
                 _stoch_zero = jnp.zeros((ad.ncol,), dtype=T_col.dtype)
+                # Fail loudly at trace time on a silently-inert flag
+                # (dispatch-hardening, mirrors the shallow/capdcycl guard
+                # below): this pipeline does not supply the dynamics
+                # tendencies the RCAPQADV correction consumes, so the flag
+                # would be a no-op configuration.
+                if getattr(_conv_cfg, "use_ifs_cape_qadv", False):
+                    raise ValueError(
+                        "use_ifs_cape_qadv=True: the physics pipeline does "
+                        "not supply the dynamics tendencies "
+                        "(dT_dt_dyn/dq_dt_dyn), so the RCAPQADV CAPE "
+                        "correction would be silently inert.  Keep the flag "
+                        "False until the driver wiring lands, or call "
+                        "bechtold_convection directly with the tendencies."
+                    )
                 # IFS shallow PBL-equilibrium closure inputs (STATIC config
                 # gate): same-step bulk SHF/LHF (tiled mosaic when the land
                 # tile is active, else the ocean bulk scheme) + the held
@@ -913,6 +931,41 @@ class PhysicsPipeline:
                 # path is needed only by the shallow closure / RCAPDCYCL
                 # (codex R2: land-RHEBC-only must not demand a surface
                 # config).
+                _have_sfc_source = (
+                    (self.surface_tiled and self.f_land is not None)
+                    or getattr(self.turbulence_config, "surface", None)
+                    is not None
+                )
+                # EXPLICIT opt-in shallow closure: hard raise FIRST (before
+                # any capdcycl downgrade) so a shallow/no-surface config
+                # fails cleanly without a misleading downgrade notice.
+                if (getattr(_conv_cfg, "use_ifs_shallow_closure", False)
+                        and not _have_sfc_source):
+                    raise ValueError(
+                        "use_ifs_shallow_closure needs bulk surface "
+                        "fluxes: configure a turbulence scheme (its "
+                        "SurfaceLayerConfig supplies the exchange "
+                        "coefficients) or enable the tiled land surface."
+                    )
+                # capdcycl is a DEFAULT-ON faithfulness flag (flipped
+                # 2026-07-17): on flux-less configs (turbulence 'none', no
+                # tiled land) it must degrade gracefully to the leaf's
+                # documented None=>inert path, not raise — a default may
+                # not break configs that never opted in.  Python-time
+                # downgrade; the notice is LATCHED on the pipeline (once
+                # per build, not per eager step; f_land is a post-setup
+                # mutation, so this cannot be resolved earlier at build).
+                if (getattr(_conv_cfg, "use_ifs_capdcycl", False)
+                        and not _have_sfc_source):
+                    if not getattr(self, "_capdcycl_notice_done", False):
+                        print(
+                            "[physics] bechtold use_ifs_capdcycl: no "
+                            "surface-flux source (turbulence 'none', no "
+                            "tiled land) — diurnal CAPE correction inert "
+                            "for this run."
+                        )
+                        self._capdcycl_notice_done = True
+                    _conv_cfg = _conv_cfg._replace(use_ifs_capdcycl=False)
                 _need_land = getattr(_conv_cfg, "use_ifs_land_rhebc", False)
                 _need_sfc_inputs = (
                     getattr(_conv_cfg, "use_ifs_shallow_closure", False)
@@ -924,18 +977,13 @@ class PhysicsPipeline:
                         if self.f_land is not None
                         else jnp.zeros((ad.ncol,), dtype=T_col.dtype)))
                 if _need_sfc_inputs:
-                    # Fail loudly at trace time: the closure's bulk fluxes
-                    # need a surface-layer config (codex R1 #1 — a None
-                    # turbulence_config crashed opaque on .surface).
-                    if (not (self.surface_tiled and self.f_land is not None)
-                            and getattr(self.turbulence_config, "surface",
-                                        None) is None):
-                        raise ValueError(
-                            "use_ifs_shallow_closure needs bulk surface "
-                            "fluxes: configure a turbulence scheme (its "
-                            "SurfaceLayerConfig supplies the exchange "
-                            "coefficients) or enable the tiled land surface."
-                        )
+                    # Unreachable-without-source by construction: shallow
+                    # raised above and capdcycl downgraded; keep a hard
+                    # assert as the tripwire (fail loud, not silent).
+                    assert _have_sfc_source, (
+                        "surface-flux path entered without a source — "
+                        "guard ordering regressed"
+                    )
                     _T_low = T_col[:, -1]
                     _q_low = q_v_col[:, -1]
                     _u_low = u_conv_col[:, -1]
@@ -1519,6 +1567,18 @@ class PhysicsPipeline:
                     # (zeroed over ocean) BEFORE the heating closure; the
                     # e3sm_cam kernel applies it to its orographic source.
                     _gwd_kwargs["land_frac_col"] = ad.flatten_2d(self.f_land)
+                if self._gwd_takes_netdt:
+                    # E3SM drives the Beres convective GW source from the
+                    # deep-convective heating (pbuf TTEND_DP,
+                    # gw_drag.F90:766-778: gw_beres_src(..., ttend_dp, ...)).
+                    # We pass THIS STEP's convection-scheme heating in the
+                    # same column layout.  DOCUMENTED DEPARTURE: our
+                    # convection schemes report TOTAL convective heating
+                    # (deep + shallow + downdraft), not E3SM's deep-only
+                    # TTEND_DP — Beres's hdepth/q0 scan then sees the full
+                    # convective column.  The kernel's gw_beres_src takes
+                    # it as netdt_col [K/s].
+                    _gwd_kwargs["netdt_col"] = conv_out.dT_dt
                 gwd_out = self.gwd_fn(**_gwd_kwargs)
             du_dt = du_dt + ad.unflatten_3d(gwd_out.du_dt)
             dv_dt = dv_dt + ad.unflatten_3d(gwd_out.dv_dt)
@@ -2734,15 +2794,15 @@ def _resolve_convection(config):
                 config, 'bechtold_use_ifs_inplume_precip', True),
             dx_m=getattr(config, 'bechtold_dx_m', 0.0),
             use_ifs_downdraft=getattr(
-                config, 'bechtold_use_ifs_downdraft', False),
+                config, 'bechtold_use_ifs_downdraft', True),
             use_ifs_shallow_closure=getattr(
                 config, 'bechtold_use_ifs_shallow_closure', False),
             use_ifs_capdcycl=getattr(
-                config, 'bechtold_use_ifs_capdcycl', False),
+                config, 'bechtold_use_ifs_capdcycl', True),
             use_ifs_land_rhebc=getattr(
-                config, 'bechtold_use_ifs_land_rhebc', False),
+                config, 'bechtold_use_ifs_land_rhebc', True),
             use_ifs_snow_melt=getattr(
-                config, 'bechtold_use_ifs_snow_melt', False),
+                config, 'bechtold_use_ifs_snow_melt', True),
         )
         if _pe is not None:
             _bechtold_kwargs["precip_efficiency"] = _pe
@@ -3401,4 +3461,28 @@ def build_physics_pipeline(grid, sigma, config):
     # own ``f_land`` (set by the model driver next to ``subgrid_topo_stddev``)
     # into the GWD call for exactly this scheme.
     pipeline._gwd_takes_land_frac = (_gwd_scheme == "e3sm_cam")
+    # Beres netdt threading: only when the resolved e3sm_cam config actually
+    # selects the convective source (the kernel accepts the kwarg for every
+    # source but only Beres consumes it — avoid useless plumbing otherwise).
+    pipeline._gwd_takes_netdt = (
+        _gwd_scheme == "e3sm_cam"
+        and getattr(pipeline.gwd_config, "source", None) == "convective"
+    )
+    # Dispatch hardening: the frontal (CM) source needs the frontogenesis
+    # function FRONTGF, which no legoESM dycore computes yet (E3SM's
+    # producer lives in the SE dynamics, not the vendored physics tree).
+    # The kernel's frontgf_col=None -> zeros path would make a coupled
+    # frontal selection a SILENT no-op — reject loudly at build time
+    # instead (the leaf keeps None->zeros for standalone/unit callers that
+    # pass frontgf explicitly).
+    if (_gwd_scheme == "e3sm_cam"
+            and getattr(pipeline.gwd_config, "source", None) == "frontal"):
+        raise ValueError(
+            "gravity_wave_drag='e3sm_cam' with source='frontal' is not "
+            "wired in the coupled pipeline: no dycore frontogenesis "
+            "(FRONTGF) producer exists, so the frontal source would launch "
+            "nothing (silent no-op). Use source='orographic' or "
+            "'convective', or drive e3sm_cam_gwd directly with an explicit "
+            "frontgf_col."
+        )
     return pipeline
