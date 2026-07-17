@@ -8,8 +8,10 @@ Faithfulness (read before using as an oracle)
 ----------------------------------------------
 This is **McFarlane-INSPIRED, not a faithful E3SM ``gw_oro`` port** — use
 ``e3sm_cam`` for the E3SM-faithful orographic GWD.  Faithful ONLY in the
-**Froude-capped source FORM** ``min(h², fcrit2·(U/N)²)`` (E3SM ``gw_oro_src``,
-verified by ``_mcfarlane_launch_stress`` + tests).  Documented DEPARTURES from
+**Froude-capped source FORM** ``min(h_disp², fcrit2·(U/N)²)`` (E3SM
+``gw_oro_src``, verified by ``_mcfarlane_launch_stress`` + tests; the
+displacement ``h_disp`` is ``h`` by default, E3SM's ``2·sgh`` with
+``use_e3sm_hdsp=True``).  Documented DEPARTURES from
 E3SM ``gw_oro``/``gw_common``:
 
 * **Source amplitude** (flag-selectable, ``config.use_e3sm_hdsp``): the

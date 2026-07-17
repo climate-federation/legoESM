@@ -306,8 +306,11 @@ def test_e3sm_hdsp_matches_gw_oro_src_formula():
     expected = float(
         cfg.G_0 * cfg.k_wave * min(hdsp_sq, sghmax) * rho[0] * N[0] * U[0]
     )
-    got = float(_mcfarlane_launch_stress(rho, N, U, jnp.array([sgh * sgh]), cfg)[0])
-    assert abs(got - expected) <= 1e-12 * expected
+    got_arr = _mcfarlane_launch_stress(rho, N, U, jnp.array([sgh * sgh]), cfg)
+    got = float(got_arr[0])
+    # Dtype-aware tolerance: fp32 mode (no JAX_ENABLE_X64) carries ~1e-7 eps.
+    rtol = 1e-12 if got_arr.dtype == jnp.float64 else 1e-6
+    assert abs(got - expected) <= rtol * expected
 
 
 def test_e3sm_hdsp_default_off_bit_identical():

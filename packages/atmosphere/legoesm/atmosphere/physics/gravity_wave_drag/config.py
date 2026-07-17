@@ -333,9 +333,10 @@ class McFarlaneConfig(NamedTuple):
     fcrit2 : float
         Critical Froude number squared (default 1.0, CAM ``fcrit2``).  Used in
         the McFarlane (1987) / E3SM ``gw_oro_src`` displacement-height cap
-        ``min(h^2, fcrit2*(U/N)^2)`` (gw_oro.F90:166) so the launched
-        streamline-displacement amplitude saturates at the Fr = 1 marginal-
-        instability value rather than the raw orographic height.
+        ``min(h_disp^2, fcrit2*(U/N)^2)`` (gw_oro.F90:166; ``h_disp = h`` at
+        the default ``use_e3sm_hdsp=False``, E3SM's ``2*sgh`` when set) so the
+        launched streamline-displacement amplitude saturates at the Fr = 1
+        marginal-instability value rather than the raw orographic height.
     use_e3sm_hdsp : bool
         When ``True`` form the streamline displacement as E3SM does —
         ``hdsp = 2*sgh`` (gw_oro.F90:117), i.e. the launch cap becomes

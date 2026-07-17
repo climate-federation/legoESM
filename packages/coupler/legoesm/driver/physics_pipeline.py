@@ -3053,6 +3053,14 @@ def _resolve_gwd(config):
     """Resolve gravity wave drag kernel and config from ExperimentConfig.
 
     Returns (kernel_fn, kernel_config) or (None, None) if disabled.
+
+    ``config.gravity_wave_drag_override`` (a full ``GravityWaveDragConfig``
+    whose ``scheme`` must equal ``config.gravity_wave_drag`` — enforced by
+    ``ExperimentConfig.validate_strict``) is honoured verbatim, mirroring
+    ``turbulence_override``: without it the coupled path rebuilt the config
+    from the scheme STRING alone, silently discarding every nested scheme
+    option (``mcfarlane.use_e3sm_hdsp``, ``e3sm_cam.use_discrete_ke_heating``,
+    tuned ``fcrit2``, ...) — the codex-flagged unreachable-flag defect.
     """
     scheme = getattr(config, 'gravity_wave_drag', 'none')
     if scheme == "none":
@@ -3065,7 +3073,8 @@ def _resolve_gwd(config):
         get_gwd_fn,
     )
 
-    gc = GravityWaveDragConfig(scheme=scheme)
+    override = getattr(config, 'gravity_wave_drag_override', None)
+    gc = override if override is not None else GravityWaveDragConfig(scheme=scheme)
     _name, gwd_fn, gwd_config = get_gwd_fn(gc)
     return gwd_fn, gwd_config
 
