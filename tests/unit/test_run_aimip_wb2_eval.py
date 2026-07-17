@@ -149,6 +149,57 @@ def test_leads_to_sfno_steps_rejects_nonpositive():
         mod.leads_to_sfno_steps(24, 0.0)
 
 
+# ------------------------------------------------- config-source (--config/--suite) --
+def test_suite_source_accepted():
+    cfg = mod.build_eval_config_from_args(
+        ["--variant", "classical", "--suite", "config/aimip/wbcompare/suite.yaml",
+         "--checkpoint", "e.eqx"])
+    assert cfg.suite_path.endswith("suite.yaml")
+    assert cfg.config_path is None
+
+
+def test_config_and_suite_mutually_exclusive():
+    with pytest.raises(SystemExit):   # both -> argparse error
+        mod.build_eval_config_from_args(
+            ["--variant", "classical", "--config", "c.yaml",
+             "--suite", "s.yaml", "--checkpoint", "e.eqx"])
+
+
+def test_config_or_suite_required():
+    with pytest.raises(SystemExit):   # neither -> argparse error
+        mod.build_eval_config_from_args(
+            ["--variant", "classical", "--checkpoint", "e.eqx"])
+
+
+def test_merged_cfg_from_suite_matches_run_aimip_merge(tmp_path):
+    """merged_cfg_from_suite reproduces base <- cfg_overrides <- variant overlay
+    using a stub run_aimip exposing _load_yaml/_merge (no jax)."""
+    import yaml
+
+    (tmp_path / "base.yaml").write_text("a: 1\nnlev: 8\naimip_convection: sbm\n")
+    (tmp_path / "suite.yaml").write_text(
+        "base: %s\ncfg_overrides: {a: 2, eval_years: [2020]}\n"
+        "variants: [classical]\n" % (tmp_path / "base.yaml"))
+    (tmp_path / "variant_classical.yaml").write_text("aimip_convection: edmf\n")
+
+    class _Stub:
+        @staticmethod
+        def _load_yaml(p):
+            return yaml.safe_load(open(p))
+
+        @staticmethod
+        def _merge(b, o):
+            out = dict(b)
+            out.update(o)   # shallow is enough for this fixture
+            return out
+
+    cfg = mod.merged_cfg_from_suite(_Stub, str(tmp_path / "suite.yaml"), "classical")
+    assert cfg["a"] == 2                       # cfg_overrides won over base
+    assert cfg["aimip_convection"] == "edmf"   # variant overlay won last
+    assert cfg["eval_years"] == [2020]
+    assert cfg["aimip_variant"] == "classical"
+
+
 # ------------------------------------------------------- schema compatibility --
 def test_valid_variants_tuple_matches_config_dir():
     """The driver's VALID_VARIANTS matches the three wbcompare variant configs

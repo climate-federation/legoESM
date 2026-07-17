@@ -66,7 +66,8 @@ _SECONDS_PER_HOUR = 3600.0
 
 class EvalConfig(NamedTuple):
     variant: str
-    config_path: str
+    config_path: str | None       # a pre-merged variant YAML ...
+    suite_path: str | None        # ... OR a suite (base+overlay merged like run_aimip)
     checkpoint: str
     leads_hours: tuple
     eval_year: int | None
@@ -100,8 +101,15 @@ def build_eval_config_from_args(argv=None) -> EvalConfig:
     p.add_argument("--variant", required=True, choices=VALID_VARIANTS,
                    help="AIMIP variant the checkpoint was trained as. Unknown "
                         "-> SystemExit (no silent fallback).")
-    p.add_argument("--config", required=True,
-                   help="Merged variant YAML the checkpoint was trained with.")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--config",
+                     help="A PRE-MERGED variant YAML the checkpoint was trained "
+                          "with (base+overlay already combined).")
+    src.add_argument("--suite",
+                     help="A suite YAML (config/aimip/wbcompare/suite.yaml). The "
+                          "merged config is reconstructed for --variant EXACTLY as "
+                          "run_aimip does (base <- cfg_overrides <- variant_<v>.yaml), "
+                          "so the eval config matches training without a hand-merge.")
     p.add_argument("--checkpoint", required=True,
                    help="Path to an epoch_NNNN.eqx checkpoint.")
     p.add_argument("--leads", default="24,72,120,240", dest="leads",
@@ -132,10 +140,28 @@ def build_eval_config_from_args(argv=None) -> EvalConfig:
 
     out = a.out if a.out is not None else _default_out(a.variant)
     return EvalConfig(
-        variant=a.variant, config_path=a.config, checkpoint=a.checkpoint,
+        variant=a.variant, config_path=a.config, suite_path=a.suite,
+        checkpoint=a.checkpoint,
         leads_hours=_parse_leads(a.leads), eval_year=a.eval_year,
         n_inits=a.n_inits, init_stride_hours=a.init_stride_hours,
         resolution_deg=a.resolution_deg, out=out)
+
+
+def merged_cfg_from_suite(run_aimip, suite_path, variant):
+    """Reconstruct the merged config for ``variant`` from a suite, EXACTLY as
+    run_aimip's suite loader does: base <- cfg_overrides <- variant_<v>.yaml,
+    then stamp ``aimip_variant``. Reuses run_aimip's own ``_load_yaml``/``_merge``
+    (no re-implemented merge) so the eval config is byte-identical to training's.
+    """
+    from pathlib import Path
+    suite = run_aimip._load_yaml(Path(suite_path))
+    cfg = run_aimip._load_yaml(Path(suite["base"]))
+    if suite.get("cfg_overrides"):
+        cfg = run_aimip._merge(cfg, suite["cfg_overrides"])
+    overlay = run_aimip._load_yaml(Path(suite_path).parent / f"variant_{variant}.yaml")
+    cfg = run_aimip._merge(cfg, overlay)
+    cfg["aimip_variant"] = variant
+    return cfg
 
 
 def leads_to_sfno_steps(lead_hours: int, dt_sfno: float) -> int:
@@ -399,7 +425,14 @@ def main(argv=None, ds=None):
 
     run_aimip = _load_run_aimip()
 
-    yml = yaml.safe_load(open(cfg_args.config_path))
+    # Config source: a pre-merged --config, or reconstruct the training merge
+    # from --suite + --variant (base <- cfg_overrides <- variant overlay).
+    if cfg_args.suite_path is not None:
+        yml = merged_cfg_from_suite(run_aimip, cfg_args.suite_path, cfg_args.variant)
+        log.info("merged config for variant=%s from suite=%s",
+                 cfg_args.variant, cfg_args.suite_path)
+    else:
+        yml = yaml.safe_load(open(cfg_args.config_path))
     # Eval year: explicit flag > YAML eval_years[0] > YAML eval_year.
     if cfg_args.eval_year is not None:
         eval_year = cfg_args.eval_year
@@ -480,6 +513,7 @@ def main(argv=None, ds=None):
     meta = {
         "variant": cfg_args.variant,
         "config": cfg_args.config_path,
+        "suite": cfg_args.suite_path,
         "checkpoint": cfg_args.checkpoint,
         "eval_year": eval_year,
         "leads_hours": list(cfg_args.leads_hours),
