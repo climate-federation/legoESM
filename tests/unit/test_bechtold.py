@@ -2207,3 +2207,42 @@ def test_bechtold_downdraft_entrain_rate_default_is_ifs_entrdd():
     """The penetrative-downdraft entrainment default is the oracle ENTRDD =
     3.0e-4 1/m (sucumf.F90:144), not the earlier unsourced 5.0e-4."""
     assert BechtoldConfig().downdraft_entrain_rate == 3.0e-4
+
+
+def test_ifs_ztaures_matches_oracle_piecewise():
+    """ZTAURES (cumastrn.F90:713,762-768): 0 disables; dx floored at 100 m;
+    fine branch 1+ln(8km/dx)^2 below 8 km; coarse 1+1.6*dx/125km above,
+    capped at 3 beyond 125 km — pinned at the oracle's own branch points,
+    and the turnover tau actually consumes it (integration toggle)."""
+    import math
+    from legoesm.atmosphere.physics.convection.bechtold import _ifs_ztaures
+    assert _ifs_ztaures(0.0) == 1.0                          # legacy sentinel
+    assert _ifs_ztaures(-5.0) == 1.0
+    assert _ifs_ztaures(50.0) == _ifs_ztaures(100.0)         # 100 m floor
+    assert abs(_ifs_ztaures(4.0e3) - (1 + math.log(2.0) ** 2)) < 1e-12
+    assert abs(_ifs_ztaures(8.0e3) - (1 + 1.6 * 8e3 / 125e3)) < 1e-12
+    assert abs(_ifs_ztaures(50.0e3) - (1 + 1.6 * 50e3 / 125e3)) < 1e-12
+    assert _ifs_ztaures(200.0e3) == 3.0                      # coarse cap
+    # integration: dx changes the mass flux on a convecting column.  Probed
+    # on the tau-only turnover path — under the full CAPE closure this
+    # fixture's mb_scale is pinned by the column-uniform profile limiter
+    # (peak M_u >> M_b_max) in BOTH runs, masking tau; the turnover rescale
+    # tau_bl/tau_conv consumes tau directly.
+    T, q, pf, ph, u, v = _column(ncol=1, nlev=40, T_sfc=299.0, q_sfc=13e-3,
+                                 lapse_rate=6.5)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev)); st = jnp.zeros((ncol,))
+    # This fixture's raw tau is ~213 s, so the coarse x3 factor (640 s) still
+    # lands under the oracle's 720 s clamp floor — faithfully equalized.  The
+    # fine-branch dx=500 m gives factor 1+ln(16)^2 ~ 8.7 (tau 1854 s), which
+    # clears the floor and must show up in the mass flux.
+    kw = dict(M_b_max=1.0, use_ifs_cape_closure=False,
+              use_convective_turnover_tau=True)
+    mu0 = bechtold_convection(T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+                              config=BechtoldConfig(**kw))[1]
+    mu_fine = bechtold_convection(T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+                                  config=BechtoldConfig(dx_m=500.0, **kw))[1]
+    assert float(jnp.max(jnp.abs(mu0 - mu_fine))) > 0.0, "dx_m must be live"
+    assert float(jnp.sum(mu_fine)) < float(jnp.sum(mu0)), (
+        "longer turnover => weaker deep flux"
+    )

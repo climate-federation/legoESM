@@ -2612,6 +2612,7 @@ def _resolve_convection(config):
             # scheme default since the 2026-07-16 flip).
             use_ifs_inplume_precip=getattr(
                 config, 'bechtold_use_ifs_inplume_precip', True),
+            dx_m=getattr(config, 'bechtold_dx_m', 0.0),
         )
         if _pe is not None:
             _bechtold_kwargs["precip_efficiency"] = _pe

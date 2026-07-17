@@ -32,6 +32,8 @@ References
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 
@@ -338,6 +340,25 @@ _IFS_KE_FLOOR = 1.0e-2                          # mean-KE floor before sqrt (cua
 _IFS_WMEAN_MAX = 15.0                           # min(15, PWMEAN) (cumastrn.F90:773)
 _IFS_TAU_MIN = 3600.0 / 5.0                     # 720 s  (cumastrn.F90:827)
 _IFS_TAU_MAX = 3.0 * 3600.0                     # 10800 s (cumastrn.F90:827)
+
+
+def _ifs_ztaures(dx_m: float) -> float:
+    """IFS ZTAURES resolution factor for the turnover time (cumastrn.F90:713,762-768).
+
+    ``dx_m`` is the grid spacing (the oracle's ``ZDX = 2*RA*sqrt(RPI*PGAW)``
+    = sqrt(cell area)); 0 (the default) keeps the legacy resolution-agnostic
+    factor 1.0.  A STATIC Python float from config, so this runs at trace
+    time — no traced ops.  Piecewise exactly as the oracle: dx floored at
+    100 m; ``1 + ln(8km/dx)^2`` below 8 km; ``1 + 1.6*dx/125km`` above,
+    capped at 3 beyond 125 km (the oracle's own jump at 8 km included).
+    """
+    if dx_m <= 0.0:
+        return 1.0
+    dx = max(float(dx_m), 100.0)
+    if dx < 8.0e3:
+        return 1.0 + math.log(8.0e3 / dx) ** 2
+    zt = 1.0 + 1.60 * dx / 125.0e3
+    return min(3.0, zt) if dx > 125.0e3 else zt
 
 # --- IFS convective sub-cloud rain evaporation (cuflxn.F90:436-475, sucumf.F90) ---
 # Kessler-type evaporation of the convective rain flux below cloud base,
@@ -1649,8 +1670,12 @@ def bechtold_convection(
             plume.B_u, T, q_v, dz, eps_profile, dlt_profile, dp_full,
             above_base, in_cloud,
         )
+        # ZTAURES resolution factor (cumastrn.F90:762-768): static Python
+        # float from config.dx_m (0 = legacy 1.0), multiplied pre-clamp
+        # exactly like the oracle's ZTAU = depth/(2+w)*ZTAURES*RTAUA.
         tau_conv = jnp.clip(
-            cloud_depth / (2.0 + w_mean), _IFS_TAU_MIN, _IFS_TAU_MAX,
+            cloud_depth / (2.0 + w_mean) * _ifs_ztaures(config.dx_m),
+            _IFS_TAU_MIN, _IFS_TAU_MAX,
         )
     if config.use_ifs_cape_closure:
         # -- Full IFS deep CAPE closure ZMFUB1 = ZCAPE*ZMFUB/(ZHEAT*ZXTAU)
