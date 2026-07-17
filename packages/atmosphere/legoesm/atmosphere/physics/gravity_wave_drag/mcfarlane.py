@@ -8,17 +8,27 @@ Faithfulness (read before using as an oracle)
 ----------------------------------------------
 This is **McFarlane-INSPIRED, not a faithful E3SM ``gw_oro`` port** — use
 ``e3sm_cam`` for the E3SM-faithful orographic GWD.  Faithful ONLY in the
-**Froude-capped source FORM** ``min(h², fcrit2·(U/N)²)`` (E3SM ``gw_oro_src``,
-verified by ``_mcfarlane_launch_stress`` + tests).  Documented DEPARTURES from
+**Froude-capped source FORM** ``min(h_disp², fcrit2·(U/N)²)`` (E3SM
+``gw_oro_src``, verified by ``_mcfarlane_launch_stress`` + tests; the
+displacement ``h_disp`` is ``h`` by default, E3SM's ``2·sgh`` with
+``use_e3sm_hdsp=True``).  Documented DEPARTURES from
 E3SM ``gw_oro``/``gw_common``:
 
-* **Source amplitude** uses ``h_topo`` (a subgrid-orography std dev) DIRECTLY as
-  the displacement, i.e. ``0.5·k·h²``; E3SM forms the displacement
-  ``hdsp = 2·sgh`` and launches ``0.5·k·hdsp² = 2·k·sgh²`` — so at equal ``sgh``
-  this scheme launches ~4× LESS **below the Froude cap** (where ``h²`` enters;
-  above the cap both use the same ``fcrit2·(U/N)²`` limit and agree).  (Fixing
-  this is behavioral → RCE-gated; the ``h_topo`` default is effectively a tuned
-  displacement, not a raw std dev.)
+* **Source amplitude** (flag-selectable, ``config.use_e3sm_hdsp``): the
+  DEFAULT uses ``h_topo`` (a subgrid-orography std dev) DIRECTLY as the
+  displacement, i.e. ``0.5·k·h²``; E3SM forms the displacement
+  ``hdsp = 2·sgh`` (gw_oro.F90:117) and launches ``0.5·k·hdsp² = 2·k·sgh²``
+  — so at equal ``sgh`` the default launches ~4× LESS **below the Froude
+  cap** (above the cap both use the same ``fcrit2·(U/N)²`` limit and agree;
+  1–4× in the band between).  ``use_e3sm_hdsp=True`` applies the E3SM
+  doubling inside ``_mcfarlane_launch_stress`` (the ``h_topo_col`` units
+  contract stays "sgh stddev", shared with ``e3sm_cam``) and REQUIRES the
+  per-column ``h_topo_col`` — on the scalar ``config.h_topo`` fallback it
+  raises, because this scheme has NO landfrac factor (E3SM's driver applies
+  ``utgw *= landfrac``, gw_drag.F90:904-906) and a quadrupled uniform 500 m
+  pseudo-mountain would silently drag over every ocean column.  Flip is
+  behavioral → retune ``G_0``/``directional_spread``/``tau_max``,
+  RCE/AMIP-gated.
 * **Surface-only source** — the source ``ρ``, ``N``, ``U`` are taken at the
   bottom level, not E3SM's depth-averaged low-level source.
 * **Saturation** is a Lindzen-style ``τ_sat ∝ ρ·U³·k/N`` smooth cap, not the
@@ -29,6 +39,18 @@ E3SM ``gw_oro``/``gw_common``:
   reversed flow would accelerate it (``u·du_dt + v·dv_dt > 0``).  This UNDER-deposits at a
   sharp reversal (in one discontinuous-reversal experiment ≈17 % of the launched
   stress; the exact fraction depends on grid, profile, and gate parameters).
+* **Numerics margins** (sub-percent, kept): (a) ``tau_sat`` is FLOORED at
+  1e-10 Pa (a dead wave carries the floor; the crit gate does the killing)
+  where E3SM ZEROES ``tausat``/``taudmp`` ≤ ``taumin`` (gw_common.F90:495,541);
+  (b) the ``|U_proj|`` 1e-2 m/s clip in ``tau_sat`` has no oracle analog
+  (E3SM's ``ubmc2mn = 0.01 m²/s²`` guards the damping term, not ``tausat``);
+  (c) ``N`` is the shared midpoint θ-gradient ``brunt_vaisala_n_full`` (E3SM
+  ``gw_prof`` uses an interface T-gradient form; both floor ``N² ≥ 1e-8``).
+* **No displacement gate**: E3SM zeroes the source unless ``hdsp > 10 m``
+  AND ``U > 2 m/s`` (gw_oro.F90:165-172, hard); ours has only the smooth
+  min-wind sigmoid (which MULTIPLIES ``U``, also weakening the Froude cap —
+  a smooth-scheme choice with no oracle analog) and no ``h`` threshold —
+  ``h²`` scaling keeps tiny-``h`` launches tiny.
 
 **Conservation** (``conserves = ["energy"]``): a STATIONARY orographic wave
 (``c = 0``) carries ZERO vertical wave-energy flux (``F_E = c·F_momentum = 0``,
@@ -150,9 +172,11 @@ def _mcfarlane_launch_stress(
     The E3SM ``gw_oro_src`` source FORM (the one piece this scheme is faithful
     to)::
 
-        tau_0 = G_0 * rho * N * k * min(h^2, fcrit2 * (U / N)^2) * U
+        tau_0 = G_0 * rho * N * k * min(h_disp^2, fcrit2 * (U / N)^2) * U
 
-    ``min(h^2, fcrit2*(U/N)^2)`` is the Froude cap: the streamline-displacement
+    with the displacement ``h_disp = h`` by default and E3SM's ``2*sgh``
+    under ``use_e3sm_hdsp`` (see below).  ``min(h_disp^2, fcrit2*(U/N)^2)``
+    is the Froude cap: the streamline-displacement
     amplitude saturates at the value that makes the low-level flow marginally
     unstable (Fr = 1), so above the cap ``tau_0`` is INDEPENDENT of ``h`` and
     scales as ``U^3 / N``.  Returned BEFORE the optional ``directional_spread``
@@ -160,14 +184,22 @@ def _mcfarlane_launch_stress(
     directly (the total deposited drag is downstream of the Lindzen saturation
     ``tau_sat`` and cannot isolate it).
 
-    NOTE (departure): E3SM forms the displacement ``hdsp = 2*sgh`` and launches
-    ``0.5*k*hdsp^2``; here ``h_topo`` is used directly, so at equal ``sgh`` the
-    launched stress is ~4x smaller (see the module docstring).
+    Displacement convention (``config.use_e3sm_hdsp``): E3SM forms the
+    streamline displacement ``hdsp = 2*sgh`` (gw_oro.F90:117) and launches
+    ``oroko2*min(hdsp^2, sghmax) = 0.5*k*min((2*sgh)^2, fcrit2*(U/N)^2)``
+    (gw_oro.F90:166-168, ``oroko2 = 0.5*kwv`` at :33).  With the flag ON the
+    doubling is applied here, INSIDE the cap (the h_topo_col units contract
+    stays "sgh stddev", shared with e3sm_cam) — exactly 4x the legacy launch
+    below the Froude cap, identical above it (both Froude-limited), 1-4x in
+    the band ``h^2 < fcrit2*(U/N)^2 < 4*h^2``.  Default OFF keeps the legacy
+    direct-``h`` displacement (~4x smaller at equal ``sgh``; ``h_topo``
+    effectively a tuned amplitude — see the module docstring).
     """
     froude_h_sq = config.fcrit2 * safe_divide(
         U_activated ** 2, N_sfc ** 2, eps=1e-30,
     )
-    h_eff_sq = jnp.minimum(h_topo_sq, froude_h_sq)
+    h_disp_sq = 4.0 * h_topo_sq if config.use_e3sm_hdsp else h_topo_sq
+    h_eff_sq = jnp.minimum(h_disp_sq, froude_h_sq)
     return config.G_0 * rho_sfc * N_sfc * config.k_wave * h_eff_sq * U_activated
 
 
@@ -195,12 +227,28 @@ def mcfarlane_gwd(
         Optional per-column subgrid orographic standard deviation [m]
         overriding the global ``config.h_topo`` (audit 2026-05-12
         MEDIUM #9).  When ``None`` the scalar config value is used
-        everywhere (legacy behaviour).
+        everywhere (legacy behaviour).  REQUIRED (not None) when
+        ``config.use_e3sm_hdsp`` is set — see the ValueError below.
 
     Returns
     -------
     GWDOutput
     """
+    # Dispatch hardening (static config + static None-ness, jit-safe):
+    # ``use_e3sm_hdsp`` quadruples the below-cap launch; on the scalar
+    # ``config.h_topo = 500 m`` fallback that pseudo-mountain exists over
+    # every OCEAN column too (this scheme has no landfrac factor, unlike
+    # the E3SM driver's ``utgw *= landfrac``), so the flag would silently
+    # quadruple ocean drag planet-wide.  Demand the real per-column sgh.
+    if config.use_e3sm_hdsp and h_topo_col is None:
+        raise ValueError(
+            "McFarlaneConfig.use_e3sm_hdsp=True requires a per-column "
+            "h_topo_col (wire grid.subgrid_topo_stddev or pass h_topo_col "
+            "explicitly): the E3SM hdsp=2*sgh displacement quadruples the "
+            "below-cap launch, and applying it to the uniform scalar "
+            "config.h_topo fallback would quadruple drag over ocean "
+            "columns (no landfrac factor in this scheme)."
+        )
     ncol, nlev = u.shape
 
     # Brunt-Väisälä frequency at full levels

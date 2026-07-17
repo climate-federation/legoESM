@@ -1118,6 +1118,14 @@ class ExperimentConfig(NamedTuple):
     # ``Any`` to avoid importing the atmosphere physics config into the driver
     # config module.
     turbulence_override: Any = None
+    # Full ``GravityWaveDragConfig`` override, mirroring ``turbulence_override``:
+    # ``.scheme`` MUST equal ``gravity_wave_drag`` (refines the same scheme —
+    # validated in ``validate_strict``).  ``None`` (default) ⇒ the driver builds
+    # ``GravityWaveDragConfig(scheme=...)``, byte-identical to before.  This is
+    # the ONLY coupled-path route to nested GWD scheme options
+    # (``mcfarlane.use_e3sm_hdsp``, ``e3sm_cam.use_discrete_ke_heating``, tuned
+    # ``fcrit2``, ...); without it they were silently discarded.
+    gravity_wave_drag_override: Any = None
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -1596,6 +1604,26 @@ class ExperimentConfig(NamedTuple):
                     f"turbulence_override.scheme={self.turbulence_override.scheme!r} "
                     f"must equal turbulence={self.turbulence!r} (an override refines "
                     f"the same scheme's sub-config, it does not switch schemes)"
+                )
+        if self.gravity_wave_drag_override is not None:
+            from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+                GravityWaveDragConfig,
+            )
+            if not isinstance(
+                self.gravity_wave_drag_override, GravityWaveDragConfig
+            ):
+                errors.append(
+                    "gravity_wave_drag_override must be a GravityWaveDragConfig, "
+                    f"got {type(self.gravity_wave_drag_override).__name__}"
+                )
+            elif (self.gravity_wave_drag_override.scheme
+                  != self.gravity_wave_drag):
+                errors.append(
+                    "gravity_wave_drag_override.scheme="
+                    f"{self.gravity_wave_drag_override.scheme!r} must equal "
+                    f"gravity_wave_drag={self.gravity_wave_drag!r} (an override "
+                    "refines the same scheme's sub-config, it does not switch "
+                    "schemes)"
                 )
         _valid_gwd = VALID_GWD
         # A ``+``-joined string composes multiple GWD sources whose tendencies

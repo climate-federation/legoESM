@@ -14,6 +14,7 @@ E3SM-faithfulness — and the documented 4× ``hdsp`` source-amplitude departure
 from __future__ import annotations
 
 import jax.numpy as jnp
+import pytest
 
 from legoesm import constants
 from legoesm.atmosphere.physics.gravity_wave_drag.config import McFarlaneConfig
@@ -255,3 +256,87 @@ def test_mcfarlane_vector_ke_sink_not_componentwise_for_veering_wind():
         "vacuous; strengthen the veer so a deposition level has u anti-parallel "
         "to the surface-wind direction"
     )
+
+
+# ---------------------------------------------------------------------------
+# E3SM hdsp = 2*sgh displacement (config.use_e3sm_hdsp; gw_oro.F90:117,166-168)
+# ---------------------------------------------------------------------------
+
+def test_e3sm_hdsp_three_regime_partition_on_launch_stress():
+    """Oracle displacement (hdsp = 2*sgh) vs legacy, on the launch helper:
+
+    * below BOTH caps (4h² < fcrit2(U/N)²): exactly 4x the legacy stress;
+    * above OUR cap (fcrit2(U/N)² <= h²): both Froude-limited — EQUAL;
+    * in the band h² < fcrit2(U/N)² < 4h²: strictly between 1x and 4x
+      (the flag hits the cap, legacy does not).
+    (Skeptic-corrected three-regime partition of the GWD recon.)"""
+    cfg_off = McFarlaneConfig()
+    cfg_on = McFarlaneConfig(use_e3sm_hdsp=True)
+    rho, N, U = jnp.array([1.2]), jnp.array([1.0e-2]), jnp.array([15.0])
+    cap = float(cfg_off.fcrit2 * (U[0] / N[0]) ** 2)  # 2.25e6 m^2 (h=1500)
+
+    def tau(cfg, h):
+        return float(_mcfarlane_launch_stress(rho, N, U, jnp.array([h * h]), cfg)[0])
+
+    h_small = 300.0                       # 4h^2 = 3.6e5 < cap
+    assert abs(tau(cfg_on, h_small) / tau(cfg_off, h_small) - 4.0) < 1e-9
+
+    h_huge = 5000.0                       # h^2 = 2.5e7 > cap
+    t_on, t_off = tau(cfg_on, h_huge), tau(cfg_off, h_huge)
+    assert abs(t_on - t_off) <= 1e-12 * t_off, "above the cap both must be Froude-limited"
+
+    h_band = 1000.0                       # h^2 = 1e6 < cap = 2.25e6 < 4h^2 = 4e6
+    r = tau(cfg_on, h_band) / tau(cfg_off, h_band)
+    assert 1.0 < r < 4.0, f"band ratio {r} not in (1, 4)"
+    # In the band the flagged stress IS the cap value.
+    expected_cap = float(cfg_on.G_0 * rho[0] * N[0] * cfg_on.k_wave * cap * U[0])
+    assert abs(tau(cfg_on, h_band) - expected_cap) <= 1e-9 * expected_cap
+
+
+def test_e3sm_hdsp_matches_gw_oro_src_formula():
+    """Flag ON, below the cap: tau_0 == oroko2*min(hdsp^2, sghmax)*rho*N*U
+    with hdsp = 2*sgh, oroko2 = 0.5*k (gw_oro.F90:33,117,166-168) — the E3SM
+    gw_oro_src launch, hand-evaluated."""
+    cfg = McFarlaneConfig(use_e3sm_hdsp=True)
+    assert cfg.G_0 == 0.5  # oroko2 = 0.5*kwv folds into G_0
+    rho, N, U = jnp.array([1.1]), jnp.array([1.2e-2]), jnp.array([11.0])
+    sgh = 250.0
+    hdsp_sq = (2.0 * sgh) ** 2
+    sghmax = float(cfg.fcrit2 * (U[0] / N[0]) ** 2)
+    expected = float(
+        cfg.G_0 * cfg.k_wave * min(hdsp_sq, sghmax) * rho[0] * N[0] * U[0]
+    )
+    got_arr = _mcfarlane_launch_stress(rho, N, U, jnp.array([sgh * sgh]), cfg)
+    got = float(got_arr[0])
+    # Dtype-aware tolerance: fp32 mode (no JAX_ENABLE_X64) carries ~1e-7 eps.
+    rtol = 1e-12 if got_arr.dtype == jnp.float64 else 1e-6
+    assert abs(got - expected) <= rtol * expected
+
+
+def test_e3sm_hdsp_default_off_bit_identical():
+    """Canary: the flag defaults False and the helper is bit-identical to the
+    legacy form there (regression pin for the default path)."""
+    assert McFarlaneConfig().use_e3sm_hdsp is False
+    cfg = McFarlaneConfig()
+    rho, N, U = jnp.array([1.2]), jnp.array([1.0e-2]), jnp.array([12.0])
+    h_sq = jnp.array([90000.0])
+    got = _mcfarlane_launch_stress(rho, N, U, h_sq, cfg)
+    expected = cfg.G_0 * rho * N * cfg.k_wave * jnp.minimum(
+        h_sq, cfg.fcrit2 * (U / N) ** 2
+    ) * U
+    assert jnp.array_equal(got, expected)
+
+
+def test_e3sm_hdsp_requires_per_column_topo():
+    """G6 guard: use_e3sm_hdsp on the scalar config.h_topo fallback raises
+    (a quadrupled uniform pseudo-mountain would drag over ocean planet-wide;
+    this scheme has no landfrac factor)."""
+    u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column()
+    cfg = McFarlaneConfig(use_e3sm_hdsp=True)
+    with pytest.raises(ValueError, match="use_e3sm_hdsp.*h_topo_col"):
+        mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
+                      1800.0, cfg, h_topo_col=None)
+    # And with the per-column field it runs.
+    out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
+                        1800.0, cfg, h_topo_col=jnp.full((u.shape[0],), 300.0))
+    assert bool(jnp.all(jnp.isfinite(out.du_dt)))
