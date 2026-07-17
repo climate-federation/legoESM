@@ -217,3 +217,17 @@ def test_e3sm_orographic_source_gets_no_netdt():
     _run_step(grid, pipe)
     assert rec.kwargs is not None
     assert "netdt_col" not in rec.kwargs
+
+
+def test_e3sm_frontal_source_rejected_in_coupled_pipeline():
+    """Dispatch hardening: no dycore FRONTGF producer exists, so a coupled
+    frontal selection would be a silent no-op (kernel None -> zeros).  The
+    builder must reject it loudly."""
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        E3SMCAMConfig,
+        GravityWaveDragConfig,
+    )
+    over = GravityWaveDragConfig(
+        scheme="e3sm_cam", e3sm_cam=E3SMCAMConfig(source="frontal", pgwv=8))
+    with pytest.raises(ValueError, match="frontal.*not.*wired|FRONTGF"):
+        _pipe_over(over, convection="none")

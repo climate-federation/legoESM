@@ -3454,4 +3454,21 @@ def build_physics_pipeline(grid, sigma, config):
         _gwd_scheme == "e3sm_cam"
         and getattr(pipeline.gwd_config, "source", None) == "convective"
     )
+    # Dispatch hardening: the frontal (CM) source needs the frontogenesis
+    # function FRONTGF, which no legoESM dycore computes yet (E3SM's
+    # producer lives in the SE dynamics, not the vendored physics tree).
+    # The kernel's frontgf_col=None -> zeros path would make a coupled
+    # frontal selection a SILENT no-op — reject loudly at build time
+    # instead (the leaf keeps None->zeros for standalone/unit callers that
+    # pass frontgf explicitly).
+    if (_gwd_scheme == "e3sm_cam"
+            and getattr(pipeline.gwd_config, "source", None) == "frontal"):
+        raise ValueError(
+            "gravity_wave_drag='e3sm_cam' with source='frontal' is not "
+            "wired in the coupled pipeline: no dycore frontogenesis "
+            "(FRONTGF) producer exists, so the frontal source would launch "
+            "nothing (silent no-op). Use source='orographic' or "
+            "'convective', or drive e3sm_cam_gwd directly with an explicit "
+            "frontgf_col."
+        )
     return pipeline
