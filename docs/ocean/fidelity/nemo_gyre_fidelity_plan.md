@@ -335,14 +335,22 @@ ISOLATION EXPERIMENTS (2026-07-16, 5-yr runs + single-column avt certificate):
   with depth). MECHANISM: grid-scale w stirs the seasonal thermocline through
   the FCT limiter = spurious diapycnal mixing = the summer build-rate deficit
   (0.5 vs 1.07) -> weaker doming (0.81x) -> weaker gyre (0.71x).
-  SUSPECTS for the surface-cell 2Δx velocity noise (next trace targets):
-  (a) the C-grid 4-point Coriolis averaging null mode at the surface
-  (docs/issues/barotropic_mode_noise.md §A — the KNOWN checkerboard; NEMO's
-  ene_total vertex-f may filter it differently at the stencil level);
-  (b) the wind-stress application stencil (top-cell body force vs NEMO's
-  implicit surface BC in dynzdf);
-  (c) spatially noisy avm (TKE) -> noisy Ekman spiral.
-  Harness now dumps state.w (snaps['w']).
+  ATTRIBUTION (instantaneous high-pass structure, day 180, 101 m): the noise
+  is BROADBAND grid-scale — NOT a pure Coriolis checkerboard (projections on
+  (-1)^i / (-1)^j / (-1)^(i+j) only 0.12/0.14/0.03); geographically strongest
+  in the NORTH (subpolar: rms 3.0e-6 vs 1.7e-6 mid/south); grows through the
+  upper column (15 m 5.9e-7 -> 101 m 2.2e-6) => noisy DIVERGENCE distributed
+  over the upper ~100 m baroclinic velocities, subpolar-concentrated. Revised
+  suspects: (a) upper-ocean inertia-gravity/adjustment noise excited by the
+  winter convection episodes in the north (insufficiently damped vs NEMO —
+  NEMO's leapfrog+Asselin FILTERS what WS-RK3 does not: NEMO GYRE is key_RK3
+  though — check what damps NEMO's upper-ocean noise, e.g. ln_dynvor_ene
+  enstrophy properties or the FCT2 tracer-w coupling); (b) the wind-stress
+  top-cell body force vs NEMO's implicit dynzdf surface BC (deposition
+  roughness); (c) spatially noisy avm -> noisy Ekman spiral. NEXT: snapshot
+  MAPS of hi-pass w lego-vs-NEMO (needs a NEMO w snapshot — add w to the
+  trend-dump or use a 1-day mean), + NOWIND ablation to split (b)/(c) from
+  (a). Harness now dumps state.w (snaps['w']).
 - **zdftke CODE-TRACE COMPLETE (same session): dissipation_discretization=
   "nemo_1p5_split" implemented (NEMO zfact2/zfact3, on card, tested);
   TKE-first order / positivity=floor / pre_solve shear / -1e-12 threshold /
