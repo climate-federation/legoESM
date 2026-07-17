@@ -1022,6 +1022,8 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     kappa_Redi,
     active_3d: jnp.ndarray | None = None,
     native_slopes: tuple | None = None,
+    msc_stabilize: bool = False,
+    dt: float | None = None,
 ) -> jnp.ndarray:
     """NEMO ``traldf_iso`` (``#define iso_lap``) iso-neutral Laplacian Redi
     tracer tendency on the lat-lon C-grid.
@@ -1214,8 +1216,54 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
                + jnp.roll(zdit, +1, ax_x) + zdit_kp1)
     avg4_wj = (zdjt + jnp.roll(zdjt_kp1, +1, ax_y)
                + jnp.roll(zdjt, +1, ax_y) + zdjt_kp1)
-    # A33 explicit part = 0 (ln_traldf_msc=F ⇒ ah_wslp2 − akz = 0).
     zfw_kp1 = zA31 * avg4_wi + zA32 * avg4_wj        # flux at interface BELOW cell k
+    # A33 explicit vertical-diagonal part.  With ln_traldf_msc=F the FULL K33
+    # (ah_wslp2) goes to the implicit vertical solve → explicit coeff (ah_wslp2 −
+    # akz) = 0 (akz≡ah_wslp2), so this block is skipped and the operator is
+    # bit-identical.  With ln_traldf_msc=T (DINO) NEMO's Method of Stabilizing
+    # Correction (traldf_iso_a33 / traldf_iso_scheme.h90:285) puts a stabilized
+    # part explicit:  zfw += e1e2t/e3w · (ah_wslp2 − akz) · (T(k) − T(k+1)) at the
+    # interface below cell k, with (all at that interface k+1):
+    #   ah_wslp2  = zahu_w·wslpi² + zahv_w·wslpj²                  (the K33 diag)
+    #   akz_h     = ¼ Σ4( aht/e1u² + aht/e2v² )                   (horiz stabiliser)
+    #   akz       = MAX( dt·(akz_h + ah_wslp2/e3w²) − ½, 0 )·e3w²/dt   (impl part)
+    # so the explicit coeff is bounded by the ½ vertical-CFL limit at steep slopes.
+    if msc_stabilize:
+        if dt is None:
+            raise ValueError(
+                "nemo_iso_lap_tracer_tendency_latlon_cgrid: msc_stabilize=True "
+                "(ln_traldf_msc) requires dt (rDt) for the akz stability threshold."
+            )
+        ah_wslp2 = zahu_w * wslpi_kp1 ** 2 + zahv_w * wslpj_kp1 ** 2
+        aht_kp1 = jnp.roll(aht, -1, ax_z)
+        inv_e1u2 = (1.0 / (e1u ** 2))[:, :, jnp.newaxis]
+        inv_e2v2 = (1.0 / (e2v ** 2))[:, :, jnp.newaxis]
+        inv_e1u2_im1 = jnp.roll(inv_e1u2, +1, ax_x)
+        inv_e2v2_jm1 = jnp.roll(inv_e2v2, +1, ax_y)
+        akz_h = 0.25 * (
+            (aht + aht_kp1) * inv_e1u2
+            + (jnp.roll(aht, +1, ax_x) + jnp.roll(aht_kp1, +1, ax_x)) * inv_e1u2_im1
+            + (aht + aht_kp1) * inv_e2v2
+            + (jnp.roll(aht, +1, ax_y) + jnp.roll(aht_kp1, +1, ax_y)) * inv_e2v2_jm1
+        )
+        # z*-scaled w-thickness.  APPROX: the T-thickness average, not NEMO's
+        # analytic e3w_0·(1+r3t) (from gdepw) — a few-% difference on the stretched
+        # grid that feeds the flux magnitude + the akz threshold (accepted; exact
+        # fidelity would use the coordinate's e3w_0).
+        e3w_kp1 = 0.5 * (e3t + jnp.roll(e3t, -1, ax_z))
+        ze3w2 = e3w_kp1 ** 2
+        zcoef0 = dt * (akz_h + ah_wslp2 / ze3w2)
+        akz = jnp.maximum(zcoef0 - 0.5, 0.0) * ze3w2 / dt
+        # e1e2t/e3w · (ah_wslp2 − akz) · (T(k)−T(k+1)); zdkt_kp1 already carries
+        # wmask(k+1) and the (T(k)−T(k+1)) difference.  Applied at EVERY interface
+        # below cell k: the flux below the top cell (k=0 → NEMO w-level 2) IS a real
+        # NEMO A33 flux (a33 loops jk=2..jpkm1, and the below-top-cell flux uses
+        # ah_wslp2(jk+1=2)); the true SURFACE (NEMO w-level 1) is zfw_top[0], zeroed
+        # below.  The near-surface ML k1/k2 over-diffusion is a pre-existing ML-ramp
+        # SLOPE mismatch (native wslp match NEMO corr 0.99 below the ML, ~0.3 in it),
+        # not this A33 term — masking it here would drop a legitimate NEMO flux.
+        zfw_kp1 = zfw_kp1 + (e1t * e2t)[:, :, jnp.newaxis] / e3w_kp1 * (
+            ah_wslp2 - akz) * zdkt_kp1
     # Sea-floor / bottom no-flux BC: the interface below cell k carries flux
     # only if cell k+1 is water.  This zeros the flux crossing into the floor
     # (already ~0 there via the padded bottom slope) AND, critically, kills the
@@ -2231,6 +2279,7 @@ def gm_redi_tracer_tendency_latlon(
     kappa_gm_override: jnp.ndarray | None = None,
     kappa_redi_override: jnp.ndarray | None = None,
     density_jacobian: tuple[jnp.ndarray, jnp.ndarray] | None = None,
+    dt: float | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Top-level GM/Redi for lat-lon C-grid.
 
@@ -2488,14 +2537,15 @@ def gm_redi_tracer_tendency_latlon(
             _nat = compute_nemo_native_slopes(
                 rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg,
                 eos_fn, rho_0=rho_0, g=g, active_3d=_active_3d)
+            _msc = getattr(cfg, "msc_stabilize", False)
             dT_dt = nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 T, S_x, S_y, mask, u_mask, v_mask,
                 z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
-                native_slopes=_nat)
+                native_slopes=_nat, msc_stabilize=_msc, dt=dt)
             dS_dt = nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 S, S_x, S_y, mask, u_mask, v_mask,
                 z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
-                native_slopes=_nat)
+                native_slopes=_nat, msc_stabilize=_msc, dt=dt)
             return dT_dt, dS_dt
         # SLOPE SIGN CONVENTION (2026-07-17 winter ttrd_ldf certificate):
         # the producer computes S = -grad_h(rho)/drho_dz with drho_dz floored

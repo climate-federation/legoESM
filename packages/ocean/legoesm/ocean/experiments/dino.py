@@ -232,6 +232,13 @@ class DINOConfig:
     # Set per run via --eos.
     # ------------------------------------------------------------------
     eos: str = "wright"            # "wright" (legoESM default) | "nemo_seos" (paper/oracle)
+    # EOS depth argument: "insitu" (pressure-based, legoESM default) or "geometric"
+    # (NEMO gdept). The DINO tendency certificate (docs/ocean/fidelity/
+    # dino_tendency_certificate.md) showed "geometric" is REQUIRED for the S-EOS
+    # to match NEMO's rhd (the thermobaric μ1·zh term uses the geometric depth;
+    # "insitu" gave a 10× worse depth-proportional error). So the nemo_paper
+    # (paper/oracle) recipe sets "geometric"; other recipes keep "insitu".
+    eos_depth: str = "insitu"
 
     # ------------------------------------------------------------------
     # GM/Redi mesoscale eddy parameterization. Adaptive κ via Visbeck 1997
@@ -554,6 +561,7 @@ DINO_RECIPES: dict[str, dict] = {
     # --- L1 — the paper/NEMO-faithful card (Kamm et al. 2025). ---
     "nemo_paper": {
         "eos": "nemo_seos",            # Roquet 2015 S-EOS, DINO coefficients (paper)
+        "eos_depth": "geometric",      # NEMO gdept (tendency-certificate: Δrhd 1.5e-5 vs 1.4e-4)
         "vmix_scheme": "tke",          # NEMO TKE (Blanke & Delecluse 1993)
         "tracer_advection": "tvd",     # NEMO FCT/TVD family (R1)
         "gm_redi_slope_scheme": "triads",   # Griffies iso-neutral triads (NEMO)
@@ -1873,6 +1881,7 @@ def dino_lat_lon_model_config(
         gm_redi=gm_redi_cfg,           # lat-lon C-grid GM/Redi direct path
         physics=physics_cfg,
         eos=cfg.eos,                   # "wright" (default) | "nemo_seos" (paper)
+        eos_depth=cfg.eos_depth,       # "insitu" (default) | "geometric" (nemo_paper)
     )
     return model_cfg, physics_cfg
 

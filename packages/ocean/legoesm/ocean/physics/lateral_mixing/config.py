@@ -243,6 +243,12 @@ class GMRediConfig(NamedTuple):
     treguier: TreguierConfig = TreguierConfig()
     slope_scheme: str = "triads"     # "triads" (default), "centered", or "nemo_iso_lap"
     slope_density: str = "in_situ"   # "in_situ" (default) or "neutral"
+    # NEMO ln_traldf_msc (Method of Stabilizing Correction): when True the
+    # nemo_iso_lap operator adds the akz-stabilized EXPLICIT K33 vertical
+    # diagonal (traldf_iso_a33) that the ttrd_ldf dump contains for msc=T configs
+    # (e.g. DINO). Default False ⇒ full K33 implicit (GYRE; bit-identical to the
+    # prior operator). Only used by slope_scheme="nemo_iso_lap".
+    msc_stabilize: bool = False
     # ^ Density gradient used to build the isoneutral SLOPES (NOT the tracer
     # gradients, which are always the raw T/S gradients).
     # - "in_situ" (default): slope = -∇_h ρ / ∂_z ρ from the IN-SITU density ρ.

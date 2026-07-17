@@ -199,6 +199,11 @@ class TestDINORecipes:
         nemo = dino_config_for_recipe("nemo_paper")
         assert (nemo.eos, nemo.vmix_scheme, nemo.tracer_advection) == (
             "nemo_seos", "tke", "tvd")
+        # nemo_paper must use the geometric S-EOS depth (NEMO gdept) — the DINO
+        # tendency certificate showed insitu carries a 10x depth-proportional
+        # error in the thermobaric term.  Other recipes keep the insitu default.
+        assert nemo.eos_depth == "geometric"
+        assert dino_config_for_recipe("legoesm_default").eos_depth == "insitu"
         veros = dino_config_for_recipe("veros")
         assert (veros.eos, veros.vmix_scheme, veros.tracer_advection,
                 veros.barotropic_solver) == (

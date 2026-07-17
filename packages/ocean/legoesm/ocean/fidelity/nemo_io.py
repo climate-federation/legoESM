@@ -46,6 +46,10 @@ class NemoGrid(NamedTuple):
     tmask: np.ndarray        # T-point wet mask (n_lat, n_lon, nlev)
     umask: np.ndarray        # U-point wet mask
     vmask: np.ndarray        # V-point wet mask
+    # V-point latitude (north cell faces) [deg] (n_lat, n_lon) — only needed by
+    # the Mercator/topography bridge for exact meridional cell faces; optional so
+    # existing flat-bottom NemoGrid constructors (GYRE) stay valid.
+    gphiv: np.ndarray | None = None
 
 
 class NemoState(NamedTuple):
@@ -109,6 +113,7 @@ def read_nemo_mesh_mask(path: str, *, nn_hls: int = 1) -> NemoGrid:
         ff_t=h2("ff_t"), ff_f=h2("ff_f"),
         e3t_1d=v1("e3t_1d"), gdept_1d=v1("gdept_1d"), gdepw_1d=v1("gdepw_1d"),
         tmask=m3("tmask"), umask=m3("umask"), vmask=m3("vmask"),
+        gphiv=(h2("gphiv") if "gphiv" in m else None),
     )
 
 

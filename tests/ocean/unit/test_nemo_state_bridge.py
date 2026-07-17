@@ -8,7 +8,10 @@ placement.
 import numpy as np
 
 from legoesm.ocean.fidelity.nemo_io import NemoGrid, NemoState
-from legoesm.ocean.fidelity.nemo_state_bridge import bridge_nemo_to_legoesm
+from legoesm.ocean.fidelity.nemo_state_bridge import (
+    bridge_nemo_to_legoesm,
+    bridge_nemo_to_legoesm_topo,
+)
 
 NY, NX, NZ = 4, 5, 3
 DXY = 1.0e5
@@ -95,3 +98,166 @@ def test_bridge_rejects_bad_coriolis():
     grid = grid._replace(ff_t=bad)
     with pytest.raises(ValueError, match="Coriolis mismatch"):
         bridge_nemo_to_legoesm(grid, state)
+
+
+# ---------------------------------------------------------------------------
+# Mercator + topography bridge (bridge_nemo_to_legoesm_topo) — the DINO path.
+# Builds a synthetic uniform lat-lon (Mercator-consistent metrics) grid with
+# column-varying bottom depth and exercises geometry, topography, periodicity.
+# ---------------------------------------------------------------------------
+TNY, TNX, TNZ = 6, 8, 4
+LAT0, DLAT_D = -30.0, 5.0     # degrees, uniform
+LON0, DLON_D = 0.0, 5.0
+
+
+def _synthetic_topo():
+    from legoesm import constants
+    lat_deg = LAT0 + DLAT_D * np.arange(TNY)         # (TNY,)
+    lon_deg = LON0 + DLON_D * np.arange(TNX)
+    gphit = lat_deg[:, None] * np.ones((1, TNX))
+    glamt = lon_deg[None, :] * np.ones((TNY, 1))
+    gphiv = (lat_deg + 0.5 * DLAT_D)[:, None] * np.ones((1, TNX))  # north faces
+    R, Om = constants.R_earth, constants.Omega
+    lat_r = np.deg2rad(lat_deg)
+    # Metrics from the sphere formulas create_latlon_geometry uses -> exact match.
+    e1t = (R * np.deg2rad(DLON_D) * np.cos(lat_r))[:, None] * np.ones((1, TNX))
+    e2t = np.full((TNY, TNX), R * np.deg2rad(DLAT_D))
+    ff_t = (2.0 * Om * np.sin(lat_r))[:, None] * np.ones((1, TNX))
+    e3t_1d = np.array([10.0, 20.0, 30.0, 40.0])
+    depth_cum = np.cumsum(e3t_1d)
+    gdept_1d = depth_cum - e3t_1d / 2.0
+    gdepw_1d = np.concatenate([[0.0], depth_cum[:-1]])
+    # Full-step topography: the southern row is shallow (2 wet levels), the rest
+    # deep (all 4); every column keeps >=2 wet levels (no dry columns).
+    k_bot = np.full((TNY, TNX), TNZ, dtype=int)
+    k_bot[0, :] = 2
+    tmask = (np.arange(TNZ)[None, None, :] < k_bot[:, :, None]).astype(float)
+    grid = NemoGrid(
+        glamt=glamt, gphit=gphit, e1t=e1t, e2t=e2t, e1u=e1t.copy(), e2v=e2t.copy(),
+        ff_t=ff_t, ff_f=ff_t.copy(),
+        e3t_1d=e3t_1d, gdept_1d=gdept_1d, gdepw_1d=gdepw_1d,
+        tmask=tmask, umask=tmask.copy(), vmask=tmask.copy(), gphiv=gphiv,
+    )
+    rng = np.random.default_rng(1)
+    state = NemoState(
+        T=15.0 + rng.random((TNY, TNX, TNZ)), S=35.0 + rng.random((TNY, TNX, TNZ)),
+        u=rng.random((TNY, TNX, TNZ)), v=rng.random((TNY, TNX, TNZ)),
+        ssh=0.01 * rng.random((TNY, TNX)), rhd=None,
+    )
+    return grid, state, k_bot
+
+
+def test_topo_bridge_geometry_matches_nemo_metrics():
+    """Built geometry reproduces NEMO's e1t/e2t/ff_t (Mercator, from mesh arrays)."""
+    grid, state, _ = _synthetic_topo()
+    out = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
+    geom = out.geometry
+    # dx_T = e1t, dy_T = e2t, f_T = ff_t to near-roundoff (x64).
+    assert np.max(np.abs(np.asarray(geom.dx_T) - grid.e1t)) < 1e-4 * grid.e1t.max()
+    assert np.max(np.abs(np.asarray(geom.dy_T) - grid.e2t)) < 1e-4 * grid.e2t.max()
+    assert out.f_match_max_abs < 1e-3 * np.abs(grid.ff_t).max()
+
+
+def test_topo_bridge_topography_and_staggering():
+    grid, state, k_bot = _synthetic_topo()
+    out = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
+    st = out.state
+    # Per-column bottom depth = sum of the top k_bot cell thicknesses.
+    depth_cum = np.cumsum(grid.e3t_1d)
+    H_expect = depth_cum[k_bot - 1]
+    assert np.allclose(np.asarray(st.H_bathy.data), H_expect)
+    # Surface land mask = tmask[:, :, 0] (all wet here).
+    assert np.array_equal(out.land_mask, grid.tmask[:, :, 0] > 0.5)
+    # Periodic u-face: west face of col 0 = NEMO east face of the last col (wrap).
+    u = np.asarray(st.u.data)
+    assert u.shape == (TNY, TNX + 1, TNZ)
+    assert np.allclose(u[:, 0, :], state.u[:, -1, :])   # periodic image, NOT a wall
+    assert np.allclose(u[:, 1:, :], state.u)
+    # v is meridional (real N/S walls): south wall zero.
+    v = np.asarray(st.v.data)
+    assert np.allclose(v[0, :, :], 0.0)
+    assert np.allclose(v[1:, :, :], state.v)
+
+
+def test_topo_bridge_closed_vs_periodic_u():
+    grid, state, _ = _synthetic_topo()
+    closed = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=False)
+    u = np.asarray(closed.state.u.data)
+    assert np.allclose(u[:, 0, :], 0.0)                 # closed -> west wall
+    assert np.allclose(u[:, 1:, :], state.u)
+
+
+def test_topo_bridge_requires_gphiv():
+    import pytest
+    grid, state, _ = _synthetic_topo()
+    grid = grid._replace(gphiv=None)
+    with pytest.raises(ValueError, match="gphiv"):
+        bridge_nemo_to_legoesm_topo(grid, state)
+
+
+def test_topo_bridge_rejects_interior_holes():
+    # NB the guard detects mask TOPOLOGY (interior holes), NOT ln_zps partial
+    # cells (whose mask is identical to full-step) — see the bridge docstring.
+    import pytest
+    grid, state, _ = _synthetic_topo()
+    # Punch an interior hole (masked cell above a wet cell) -> not full-step.
+    bad = grid.tmask.copy()
+    bad[3, 3, 1] = 0.0   # level 1 dry but level 2/3 wet below -> interior hole
+    grid = grid._replace(tmask=bad)
+    with pytest.raises(ValueError, match="full-step"):
+        bridge_nemo_to_legoesm_topo(grid, state)
+
+
+def _synthetic_topo_mercator():
+    """Stretched-latitude (Mercator) grid so create_latlon_geometry takes the
+    VARIABLE-dlat branch and the reconstructed ``lat_face`` (from gphiv) actually
+    drives ``dy_T`` — the whole reason gphiv was added.  Uniform-dlat grids ignore
+    lat_face (latlon.py:1319), so this is the case that catches a face sign-flip /
+    off-by-one / N-S swap in the ``2*lat_1d[0]-gphiv[0]`` reflection."""
+    from legoesm import constants
+    R, Om = constants.R_earth, constants.Omega
+    # Mercator: uniform in the Mercator y-coordinate -> stretched latitude faces.
+    y = -0.6 + 0.18 * np.arange(TNY + 1)              # (TNY+1,) uniform Mercator y
+    lat_face = 2.0 * np.arctan(np.exp(y)) - np.pi / 2.0   # (TNY+1,) rad, stretched
+    lat_1d = 0.5 * (lat_face[:-1] + lat_face[1:])     # centres = face midpoints
+    lon_deg = LON0 + DLON_D * np.arange(TNX)
+    gphit = np.rad2deg(lat_1d)[:, None] * np.ones((1, TNX))
+    glamt = lon_deg[None, :] * np.ones((TNY, 1))
+    gphiv = np.rad2deg(lat_face[1:])[:, None] * np.ones((1, TNX))   # north faces
+    e1t = (R * np.deg2rad(DLON_D) * np.cos(lat_1d))[:, None] * np.ones((1, TNX))
+    e2t = (R * (lat_face[1:] - lat_face[:-1]))[:, None] * np.ones((1, TNX))  # exact faces
+    ff_t = (2.0 * Om * np.sin(lat_1d))[:, None] * np.ones((1, TNX))
+    e3t_1d = np.array([10.0, 20.0, 30.0, 40.0])
+    depth_cum = np.cumsum(e3t_1d)
+    grid = NemoGrid(
+        glamt=glamt, gphit=gphit, e1t=e1t, e2t=e2t, e1u=e1t.copy(), e2v=e2t.copy(),
+        ff_t=ff_t, ff_f=ff_t.copy(),
+        e3t_1d=e3t_1d, gdept_1d=depth_cum - e3t_1d / 2.0,
+        gdepw_1d=np.concatenate([[0.0], depth_cum[:-1]]),
+        tmask=np.ones((TNY, TNX, TNZ)), umask=np.ones((TNY, TNX, TNZ)),
+        vmask=np.ones((TNY, TNX, TNZ)), gphiv=gphiv,
+    )
+    rng = np.random.default_rng(2)
+    state = NemoState(
+        T=15.0 + rng.random((TNY, TNX, TNZ)), S=35.0 + rng.random((TNY, TNX, TNZ)),
+        u=rng.random((TNY, TNX, TNZ)), v=rng.random((TNY, TNX, TNZ)),
+        ssh=0.01 * rng.random((TNY, TNX)), rhd=None,
+    )
+    return grid, state, lat_face
+
+
+def test_topo_bridge_variable_dlat_uses_faces():
+    """On a stretched (Mercator) grid, dy_T is driven by the reconstructed
+    lat_face; it must match NEMO e2t = R·Δ(lat_face) to roundoff.  A flipped /
+    off-by-one south-face reflection makes dy_T[0] wrong and fails here."""
+    from legoesm import constants
+    grid, state, lat_face = _synthetic_topo_mercator()
+    out = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
+    dy_T = np.asarray(out.geometry.dy_T)
+    # Guard against the uniform-dlat branch silently taking over (finding #2):
+    # the true e2t must actually vary across latitude on this grid.
+    assert grid.e2t.max() - grid.e2t.min() > 1e-3 * grid.e2t.max()
+    assert np.max(np.abs(dy_T - grid.e2t)) < 1e-6 * grid.e2t.max()
+    # And the southernmost row (driven by the reflected south face) is correct.
+    e2t_south = constants.R_earth * (lat_face[1] - lat_face[0])
+    assert abs(float(dy_T[0, 0]) - e2t_south) < 1e-6 * e2t_south
