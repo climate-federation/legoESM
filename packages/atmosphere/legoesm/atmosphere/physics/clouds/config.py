@@ -31,6 +31,8 @@ __param_spec__ = {
             "alpha_xr": {"units": "1", "bounds": (10.0, 1000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
             "p_xr": {"units": "1", "bounds": (0.05, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
             "gamma_xr": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
+            # --- CLUBB cf override strength: blend fraction toward the diagnostic-CLUBB PDF cf in the BL (marine-Sc albedo lever) ---
+            "clubb_cf_override_strength": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "marine-Sc albedo lever (this repo)", "shape": None},
             # --- condensate: diagnostic in-cloud water + resolved-cf condensate scale [kg/kg] ---
             "q_c_diagnostic": {"units": "kg/kg", "bounds": (5.0e-5, 1.5e-3), "tunable_tier": 1, "transform": "sigmoid", "category": "condensate", "reference": "diagnostic-cloud scheme default", "shape": None},
             "q_cloud_resolved_ref": {"units": "kg/kg", "bounds": (1.0e-7, 1.0e-5), "tunable_tier": 2, "transform": "sigmoid", "category": "condensate", "reference": "resolved (CRM/SAM) cloud-fraction scheme default", "shape": None},
@@ -180,6 +182,13 @@ class CloudConfig(NamedTuple):
     # late (day-20) numerical blowup in the real-SST A/B; the ramp removes it.
     # ``0.0`` => sharp step (the original level gate).
     clubb_cf_override_ramp_pa: float = 10000.0
+    # Override STRENGTH [0,1]: the effective BL cloud fraction is
+    # ``strength*CLUBB_cf + (1-strength)*RH_cf`` — a partial blend toward CLUBB
+    # rather than a full replacement.  Full replacement (1.0) removed enough low
+    # cloud under real forcing to drive a surface-heating runaway (day-15..20
+    # blowup, NOT fixed by halving dt); a gentler blend still lowers albedo but
+    # keeps the column stable.  1.0 => full replacement (the original override).
+    clubb_cf_override_strength: float = 1.0
     # --- Convective cloud fraction (Slingo 1987), OPT-IN (default OFF) ---
     # The RH-based stratiform schemes (sundqvist/xu_randall) give cloud only
     # near saturation, so an adjustment convection scheme (sbm) that holds the
@@ -271,6 +280,7 @@ def build_cloud_config(
     alpha_xr: float | None = None,
     diagnostic_condensate_scheme: str | None = None,
     adiabatic_lwc_rate: float | None = None,
+    clubb_cf_override_strength: float | None = None,
 ) -> "CloudConfig":
     """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
     fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
@@ -305,6 +315,8 @@ def build_cloud_config(
         overrides["diagnostic_condensate_scheme"] = diagnostic_condensate_scheme
     if adiabatic_lwc_rate is not None:
         overrides["adiabatic_lwc_rate"] = adiabatic_lwc_rate
+    if clubb_cf_override_strength is not None:
+        overrides["clubb_cf_override_strength"] = clubb_cf_override_strength
     return CloudConfig(
         scheme=scheme, convective_cloud=convective_cloud, **overrides
     )

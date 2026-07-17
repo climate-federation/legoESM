@@ -149,6 +149,28 @@ class TestCloudFractionOverride:
         npt.assert_allclose(cf_gated[bl], ovr_val, atol=1e-12)
         npt.assert_allclose(cf_gated[aloft], cf_rh[aloft], atol=1e-12)
 
+    def test_override_strength_partial_blend(self):
+        """strength<1 blends toward CLUBB (strength*CLUBB + (1-strength)*RH) rather
+        than fully replacing — a gentler cloud reduction that avoids the
+        full-replacement surface-heating runaway.  Checked full-column (p_min=0)
+        so the blend is isolated from the level gate."""
+        T, p_full, q_v, dp = _saturated_marine_column()
+        rh = compute_cloud_properties(
+            T=T, p_full=p_full, q_v=q_v, dp=dp,
+            config=CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=0.0))
+        cf_rh = np.asarray(rh.cloud_fraction)
+        ovr_val, a = 0.10, 0.4
+        blended = compute_cloud_properties(
+            T=T, p_full=p_full, q_v=q_v, dp=dp,
+            config=CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=0.0,
+                               clubb_cf_override_strength=a),
+            cloud_fraction_override=jnp.full(T.shape, ovr_val))
+        cf_b = np.asarray(blended.cloud_fraction)
+        # exact blend: a*override + (1-a)*RH
+        npt.assert_allclose(cf_b, a * ovr_val + (1.0 - a) * cf_rh, atol=1e-10)
+        # gentler than full replacement: the cf stays closer to RH than to CLUBB
+        assert np.all(np.abs(cf_b - cf_rh) <= np.abs(ovr_val - cf_rh) + 1e-12)
+
     def test_smooth_ramp_gate_blends_without_discontinuity(self):
         """The default SMOOTH gate (ramp>0) blends the override in over
         [p_min-ramp, p_min] instead of a step — deep BL is the override, high

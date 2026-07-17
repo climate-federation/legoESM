@@ -544,6 +544,15 @@ def compute_cloud_properties(
     # carry, which merely drops the floor for that single step.
     if cloud_fraction_override is not None:
         _cf_clubb = jnp.clip(cloud_fraction_override, 0.0, 1.0)
+        # STRENGTH: partial blend toward CLUBB rather than a full replacement
+        # (``strength*CLUBB + (1-strength)*RH``).  Full replacement removed enough
+        # low cloud under real forcing to drive a surface-heating runaway (day
+        # 15-20 blowup, not fixed by halving dt); a gentler blend still lowers
+        # albedo while keeping the column stable.  Static config branch; the blend
+        # is on traced arrays (AD-safe).
+        _strength = config.clubb_cf_override_strength
+        if _strength < 1.0:
+            _cf_clubb = _strength * _cf_clubb + (1.0 - _strength) * cf
         # LEVEL GATE (real-SST A/B fix): apply CLUBB's cf only in the boundary
         # layer / low cloud (p_full >= clubb_cf_override_p_min_pa, the marine-Sc
         # target) and keep the RH grid-scale fraction ALOFT.  A full-column
