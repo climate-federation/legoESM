@@ -810,6 +810,15 @@ def step_carbon_differland(
     # the shed flux is partitioned between C_lab (resorbed) and C_lit (litter).
     # f == 0 (default) => leaf_resorb == 0, leaf_to_lit == leaf_litter => every
     # downstream term is byte-identical to the pre-resorption code.
+    # Input hardening (codex): the __param_spec__ bounds only constrain training,
+    # so validate the concrete config.  f outside [0, 1] makes leaf_resorb or
+    # leaf_to_lit negative; a subsequent _soft_pos clamp on C_lab / C_lit would
+    # zero that loss while the sibling pool still gained -> CREATED carbon with no
+    # NEE change.  is_concrete so a sigmoid-constrained traced value still flows.
+    _f_resorb = config.leaf_c_resorption_frac
+    if is_concrete(_f_resorb) and not 0.0 <= _f_resorb <= 1.0:
+        raise ValueError(
+            f"leaf_c_resorption_frac must be in [0, 1], got {_f_resorb!r}.")
     leaf_resorb = config.leaf_c_resorption_frac * leaf_litter  # gC/m2/day -> C_lab
     leaf_to_lit = leaf_litter - leaf_resorb                    # gC/m2/day -> C_lit
 

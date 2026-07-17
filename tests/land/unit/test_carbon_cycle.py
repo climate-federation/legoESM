@@ -692,6 +692,13 @@ class TestLeafResorption(unittest.TestCase):
         npt.assert_allclose(dC, expected, rtol=1e-9, atol=1e-9,
                             err_msg="column not closed with resorption")
 
+    def test_invalid_fraction_rejected(self):
+        # A concrete fraction outside [0, 1] would let the _soft_pos clamp create
+        # carbon (leaf_to_lit<0 for f>1, leaf_resorb<0 for f<0); reject fail-early.
+        for bad in (-0.1, 1.5):
+            with self.assertRaises(ValueError):
+                self._step(bad)
+
 
 # ===================================================================
 # High-latitude productivity rescue (opt-in NSC gate + cold-deciduous dormancy)
