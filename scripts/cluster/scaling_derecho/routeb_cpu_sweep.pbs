@@ -90,7 +90,14 @@ PHYSICS="${PHYSICS:-none}"              # cube --cs-spmd only (none|moist)
 PRECISION="${PRECISION:-float32}"       # cube --cs-spmd only
 
 # Thread pool per SPMD process (1 core each when 128 procs pack a node).
-export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$_omp}"
+# _omp is AUTHORITATIVE lane protocol: login profiles commonly export
+# OMP_NUM_THREADS=1 and `bash -l` inherits it, which silently clobbered the
+# cube lane's 128 through the old `${OMP_NUM_THREADS:-$_omp}` default (two
+# campaign runs: header `threads/proc=1`, bench self-single-threaded XLA via
+# eigen=false, "node" points at single-CORE throughput). A deliberate
+# override goes through LEGOESM_OMP — ambient environment must never set a
+# protocol parameter.
+export OMP_NUM_THREADS="${LEGOESM_OMP:-$_omp}"
 export MKL_NUM_THREADS="$OMP_NUM_THREADS"
 export OPENBLAS_NUM_THREADS="$OMP_NUM_THREADS"
 export NUMEXPR_NUM_THREADS="$OMP_NUM_THREADS"
@@ -186,6 +193,7 @@ for RES in $RES_LIST; do
     if [ "$_ppn" -eq 1 ] && [ "${OMP_NUM_THREADS:-1}" -gt 1 ]; then
         _BIND=(--depth "$OMP_NUM_THREADS" --cpu-bind depth)
     fi
+    echo "    launch: mpiexec -n $_nd --ppn $_ppn ${_BIND[*]:-<default binding>} (OMP=$OMP_NUM_THREADS)"
     mpiexec -n "$_nd" --ppn "$_ppn" "${_BIND[@]}" bash -c "$SHIM" _ "${BENCH[@]}" < /dev/null \
       || { echo "route-B CPU $GRID res=$RES nodes=$N ($_nd dev) FAILED rc=$?"; rc_all=1; }
   done
