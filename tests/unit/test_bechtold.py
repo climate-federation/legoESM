@@ -684,7 +684,7 @@ def test_bechtold_mse_conservation_within_tolerance():
         config=BechtoldConfig(
             enable_stochastic=False, enable_cmt=False,
             subsidence_solve="implicit_flux",
-            use_ifs_subcloud_evap=False,
+            use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
             use_ifs_inplume_precip=True,
         ),
         moisture_convergence=jnp.zeros_like(T),
