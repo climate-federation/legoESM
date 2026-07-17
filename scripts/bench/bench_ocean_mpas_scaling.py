@@ -33,7 +33,9 @@ Helmholtz residual probe (implicit_cn only, outside the timed loop; under
 ``--halo-refresh none`` one packed exchange precedes the probe so it
 measures a cleanly-assembled system, not rotten halos), and
 ``--halo-refresh`` (default auto => one PACKED full-state halo exchange per
-step at n_ranks > 1 via ``exchange_state_mpas_ocean``).  STAGE CORRECTNESS:
+step at n_ranks > 1 via ``exchange_state_mpas_ocean``; ``--halo-refresh
+in_step`` — auto's multi-rank choice — additionally arms the IN-STEP
+stage-frontier refreshes, making the row stage-correct).  STAGE CORRECTNESS:
 the ocean step consumes more stencil hops per step than halo_depth between
 refreshes, so multi-rank rows are labeled ``stage_halo_correct=false`` — see
 docs/performance/scaling/mpas_ocean_distributed_stage_audit.md.  The parity
@@ -155,6 +157,10 @@ def stage_halo_note_for(n_ranks: int, halo_refresh: str):
     if n_ranks == 1:
         return None
     doc = "docs/performance/scaling/mpas_ocean_distributed_stage_audit.md"
+    if halo_refresh == "in_step":
+        return ("per-step packed entry refresh + in-step stage-frontier "
+                "refreshes (make_mpas_ocean_halo_refresh) — stage-correct; "
+                "see " + doc)
     if halo_refresh == "per_step":
         return ("per-step packed refresh only; within-step staleness — "
                 "see " + doc)
@@ -319,17 +325,20 @@ def main() -> int:
                    help="implicit_cn at n_ranks>1 runs the DISTRIBUTED "
                         "fixed-M PCG (halo-composed A_op, owned-masked "
                         "dots) and enables the post-run residual probe.")
-    p.add_argument("--halo-refresh", choices=["auto", "per_step", "none"],
+    p.add_argument("--halo-refresh",
+                   choices=["auto", "in_step", "per_step", "none"],
                    default="auto",
-                   help="Packed full-state halo exchange after each step "
-                        "(exchange_state_mpas_ocean). auto => per_step at "
-                        "n_ranks>1, none single-rank.  'none' reproduces "
-                        "the legacy no-refresh rows (halos rot across the "
-                        "window; timing omits exchange cost; the "
-                        "zero-forcing residual probe still refreshes ONCE "
-                        "before probing so it measures a cleanly-assembled "
-                        "system).  Within-step staleness remains either "
-                        "way — see the stage audit doc.")
+                   help="Halo refresh mode. 'in_step' (auto's choice at "
+                        "n_ranks>1) = the per-step packed entry exchange "
+                        "PLUS the in-step stage-frontier refreshes "
+                        "(make_mpas_ocean_halo_refresh threaded through "
+                        "model.step — the STAGE-CORRECT mode; rows earn "
+                        "stage_halo_correct=true). 'per_step' = entry "
+                        "exchange only (legacy: within-step staleness "
+                        "remains). 'none' = no refresh at all (halos rot "
+                        "across the window; timing omits exchange cost; "
+                        "the zero-forcing residual probe still refreshes "
+                        "ONCE before probing).  See the stage audit doc.")
     p.add_argument("--block-steps", type=int, default=8,
                    help="Steps per fused lax.scan timing block (M1 "
                         "contract; runs AFTER the gates). 0 disables the "
@@ -439,11 +448,11 @@ def main() -> int:
     # no-op; auto degrades to none single-rank where there is no
     # partition to exchange over).
     if args.halo_refresh == "auto":
-        halo_refresh = "per_step" if n_ranks > 1 else "none"
-    elif args.halo_refresh == "per_step" and n_ranks == 1:
+        halo_refresh = "in_step" if n_ranks > 1 else "none"
+    elif args.halo_refresh in ("per_step", "in_step") and n_ranks == 1:
         raise SystemExit(
-            "--halo-refresh per_step needs n_ranks > 1 (no partition "
-            "layout exists single-rank); use 'auto' or 'none'.")
+            f"--halo-refresh {args.halo_refresh} needs n_ranks > 1 (no "
+            "partition layout exists single-rank); use 'auto' or 'none'.")
     else:
         halo_refresh = args.halo_refresh
 
@@ -502,8 +511,18 @@ def main() -> int:
     # and the timed number pays representative exchange cost.  On owned
     # cells the exchange is the identity, so the parity gate semantics
     # are unchanged.  Within-step staleness remains (stage audit doc).
-    if halo_refresh == "per_step":
-        from legoesm.parallel.voronoi_mpi import exchange_state_mpas_ocean
+    if halo_refresh in ("per_step", "in_step"):
+        from legoesm.parallel.voronoi_mpi import (
+            exchange_state_mpas_ocean,
+            make_mpas_ocean_halo_refresh,
+        )
+
+        # 'in_step': arm the stage-frontier refreshes inside the step
+        # (the stage-correctness lever) ON TOP of the per-step entry
+        # exchange.  Build ONCE — the refresh callables are traced into
+        # the jitted graph (and the fused scan) like any collective.
+        _in_step_refresh = (make_mpas_ocean_halo_refresh(_layout)
+                            if halo_refresh == "in_step" else None)
 
         # jit the COMPOSED step+exchange (one dispatch per step; the
         # sendrecv wrapper always runs traced, exactly as the atmosphere
@@ -513,7 +532,9 @@ def main() -> int:
         @jax.jit
         def advance(st):
             return exchange_state_mpas_ocean(
-                model._step_impl(st, args.dt), _layout)
+                model._step_impl(st, args.dt,
+                                 halo_refresh=_in_step_refresh),
+                _layout)
     else:
         def advance(st):
             return model.step(st, args.dt)
@@ -736,11 +757,12 @@ def main() -> int:
         # --- M1 lane fields (scaling-M3d increment-1) ---
         barotropic_solver=args.barotropic_solver,
         halo_refresh=halo_refresh,
-        # Multi-rank MPAS-ocean stepping is NOT stage-correct: within-step
-        # stencil chains exceed halo_depth between refreshes.  Single-rank
-        # rows have no partition, hence trivially true.  Never report a
-        # false row as a stage-correct scaling claim.
-        stage_halo_correct=bool(n_ranks == 1),
+        # 'in_step' rows run the stage-frontier refreshes inside the step
+        # (audited insertion points R1-R3/T1-T2/B0-B2/I0-I1) on top of the
+        # per-step entry exchange -> stage-correct.  'per_step'/'none'
+        # multi-rank rows keep within-step staleness and stay FALSE.
+        # Single-rank rows have no partition, hence trivially true.
+        stage_halo_correct=bool(n_ranks == 1 or halo_refresh == "in_step"),
         stage_halo_note=stage_halo_note_for(n_ranks, halo_refresh),
         fused=fused,
         wet_cell=wet_rec,

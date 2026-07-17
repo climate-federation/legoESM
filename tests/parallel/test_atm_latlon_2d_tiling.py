@@ -5,9 +5,10 @@ The 1-D lat-band decomposition's halo perimeter is the CONSTANT n_lon per cut
 (independent of the device count) — the term that caps band scaling.  M3a
 adds a native 2-D tiling: periodic longitude as a cyclic ring ppermute,
 staggered ownership for BOTH staggers (v_lower rows + u_left columns), the
-EXACT serial 180-deg pole fold under a lon split (lon-ring all_gather at the
-pole tiles), and topology-aware (p_lat, p_lon) selection.  The 1-D band path
-stays the default and byte-identical.
+EXACT serial 180-deg pole fold under a lon split (antipodal partner ppermute
+for even p_lon, lon-ring all_gather for odd), and topology-aware
+(p_lat, p_lon) selection.  The 1-D band path stays the default and
+byte-identical.
 
 Merge-bar gates (4 virtual CPU devices, x64):
 
@@ -200,6 +201,91 @@ def test_2d_pad_body_matches_serial_window(p_lat, p_lon, halo, negate):
                     f"2-D pad tile ({r},{c}) [{p_lat}x{p_lon}, halo={halo}, "
                     f"negate={negate}] != serial pad window — lon ring / "
                     f"corner composition / pole fold defect."))
+
+
+# ==============================================================================
+# (1b) partner-permute pole fold (even p_lon): no all_gather + parity intact
+# ==============================================================================
+
+def _lowered_pad(mesh, field, halo, negate=False):
+    from legoesm.parallel.latlon_spmd import make_latlon_2d_pad_body
+    body = make_latlon_2d_pad_body(mesh, halo=halo, negate=negate)
+    fn = jax.jit(shard_map(
+        body, mesh=mesh, in_specs=P("lat", "lon", None),
+        out_specs=P("lat", "lon", None), check_vma=False))
+    sharded = jax.device_put(
+        field, NamedSharding(mesh, P("lat", "lon", None)))
+    hlo = fn.lower(sharded).compile().as_text()
+    return fn, sharded, hlo
+
+
+@pytest.mark.parametrize("p_lat,p_lon", [(1, 4), (2, 2)])
+@pytest.mark.parametrize("halo", [1, 2])
+def test_partner_fold_emits_no_all_gather(p_lat, p_lon, halo):
+    """EVEN p_lon pads must lower with ZERO all-gather (the pole fold is
+    the antipodal partner ppermute — collective-permute in HLO) while
+    still matching the serial pad window BIT-exactly (belt+braces with
+    gate 1: this is the direct exercise of partner_pole_fold_window
+    through its only production call site)."""
+    from legoesm.grids.halo_latlon import pad_halo_latlon_3d_local
+
+    mesh = _mesh2d(p_lat, p_lon)
+    rng = np.random.default_rng(7)
+    field = jnp.asarray(rng.standard_normal((N_LAT, N_LON, NLEV)))
+    fn, sharded, hlo = _lowered_pad(mesh, field, halo)
+    assert "all-gather" not in hlo, (
+        "even-p_lon pole fold must not emit all-gather "
+        "(partner ppermute lever)")
+    assert "collective-permute" in hlo
+    out = np.asarray(jax.device_put(fn(sharded), NamedSharding(mesh, P())))
+    serial = np.asarray(pad_halo_latlon_3d_local(field, halo))
+    nl, w = N_LAT // p_lat, N_LON // p_lon
+    hl, hw = nl + 2 * halo, w + 2 * halo
+    for r in range(p_lat):
+        for c in range(p_lon):
+            np.testing.assert_array_equal(
+                out[r * hl:(r + 1) * hl, c * hw:(c + 1) * hw],
+                serial[r * nl:r * nl + hl, c * w:c * w + hw],
+                err_msg=f"partner-fold pad tile ({r},{c}) halo={halo}")
+
+
+def test_odd_p_lon_fold_keeps_gather_and_parity():
+    """ODD p_lon > 1 keeps the all_gather fold construction — parity on a
+    15-lon circle (no even split possible) with the gather visible in
+    HLO, proving the fallback branch is intact."""
+    from legoesm.grids.halo_latlon import pad_halo_latlon_3d_local
+
+    if len(jax.devices()) < 3:
+        pytest.skip("needs >= 3 devices")
+    p_lon, n_lon, halo = 3, 15, 2
+    mesh = _mesh2d(1, p_lon)
+    rng = np.random.default_rng(11)
+    field = jnp.asarray(rng.standard_normal((N_LAT, n_lon, NLEV)))
+    fn, sharded, hlo = _lowered_pad(mesh, field, halo)
+    assert "all-gather" in hlo
+    out = np.asarray(jax.device_put(fn(sharded), NamedSharding(mesh, P())))
+    serial = np.asarray(pad_halo_latlon_3d_local(field, halo))
+    w = n_lon // p_lon
+    hw = w + 2 * halo
+    for c in range(p_lon):
+        np.testing.assert_array_equal(
+            out[:, c * hw:(c + 1) * hw],
+            serial[:, c * w:c * w + hw],
+            err_msg=f"odd-p_lon gather-fold pad tile c={c}")
+
+
+def test_partner_fold_refusals():
+    """Direct guards of partner_pole_fold_window: odd p_lon and
+    too-narrow tiles (w < 2*halo) refuse loudly (never a wrong window)."""
+    from legoesm.parallel.latlon_spmd import partner_pole_fold_window
+
+    if len(jax.devices()) >= 3:
+        with pytest.raises(ValueError, match="even"):
+            partner_pole_fold_window(
+                jnp.zeros((1, 5)), 0, _mesh2d(1, 3), 1, False)
+    with pytest.raises(ValueError, match="tile width"):
+        partner_pole_fold_window(
+            jnp.zeros((1, 3)), 0, _mesh2d(1, 2), 2, False)
 
 
 # ==============================================================================
@@ -799,44 +885,61 @@ def test_chooser_prefers_band_at_low_counts_and_ties():
 
 
 def test_chooser_counts_pole_fold_all_gathers():
-    """Codex M3a finding 4: every p_lon > 1 pad executes TWO lon
-    all_gathers of the (h, n_lon) pole edge rows on EVERY tile (both
-    ``jnp.where`` fold operands evaluate), so a perimeter-only score
-    mis-ranks lon splits.  Wide grid, 4 devices: perimeter-only scored
-    (1,4) at nl=8 "beating" the band's 32 by 4x; the honest volume is
-    8 + 32 (gathers) = 40 > 32 -> the band wins whenever feasible."""
+    """Codex M3a finding 4: every p_lon > 1 pad executes a pole-fold
+    collective on EVERY tile (both ``jnp.where`` fold operands evaluate),
+    so a perimeter-only score mis-ranks lon splits.  Wide grid, 4
+    devices: perimeter-only scored (1,4) at nl=8 "beating" the band's 32
+    by 4x; the honest partner-fold volume is 8 + (8+16) = 32, TYING the
+    band -> the band keeps ties."""
     assert choose_latlon_2d_topology(4, 8, 32) == (4, 1)
     # Tall grid: the band is optimal under both models.
     assert choose_latlon_2d_topology(4, 32, 8) == (4, 1)
-    # Square grid, 8 devices: perimeter-only claimed a crossover to (4,2)
-    # (12 vs 16); honestly (4,2) = 8+4+16 = 28 > 16 -> band.
+    # Square grid, 8 devices: perimeter-only claimed a crossover; honestly
+    # the best 2-D candidate is (2,4) = 4+8+(4+16) = 32 > 16 -> band.
     assert choose_latlon_2d_topology(8, 16, 16) == (8, 1)
-    # General property: with the gather term, ANY p_lon > 1 candidate
-    # scores >= nl + n_lon > n_lon = the band -> band whenever feasible.
+    # Band precedence: feasible band always wins (see
+    # test_chooser_band_precedence_survives_partner_fold).
     for n_dev, n_lat, n_lon in ((4, 16, 16), (8, 32, 32), (16, 64, 32)):
         assert choose_latlon_2d_topology(n_dev, n_lat, n_lon) == (n_dev, 1)
+
+
+def test_chooser_band_precedence_survives_partner_fold():
+    """With the partner fold a 2-D candidate can MODEL-beat the band
+    (16 devices on 128x512: (1,16) = 128 + 48 = 176 vs band 512), but the
+    produced topology is the M3a contract every production lane and
+    scaling receipt assumes — flipping it is measurement-gated (M4).
+    The band therefore still wins whenever feasible; the honest partner
+    model only ranks the 2-D candidates of the beyond-band regime."""
+    assert choose_latlon_2d_topology(16, 128, 512) == (16, 1)
+    # Beyond-band regime: the partner model IS live for ranking.
+    # n_lat=6 % 16 != 0 -> band infeasible; among survivors the honest
+    # fold costs decide (see test_chooser_2d_when_band_infeasible).
+    assert choose_latlon_2d_topology(4, 6, 32) == (1, 4)
 
 
 def test_chooser_2d_when_band_infeasible():
     """The 2-D lane is selected exactly in its raison-d'etre regime: the
     band infeasible (indivisible n_lat or sub-min_tile bands).  Ranking
-    among p_lon > 1 candidates stays perimeter-based (the gather term is
-    common to all of them)."""
-    # n_lat=6 % 4 != 0 -> band infeasible; (1,4)=6+32=38 beats
-    # (2,2)=16+3+32=51.
+    among the surviving p_lon > 1 candidates uses the honest per-path
+    fold costs (partner w+16 where the runtime takes the partner path,
+    gather n_lon otherwise — codex r2 #2 doc fix)."""
+    # n_lat=6 % 4 != 0 -> band infeasible; (1,4) = 6 + (8+16) = 30 beats
+    # (2,2) = 16 + 3 + (16+16) = 51.
     assert choose_latlon_2d_topology(4, 6, 32) == (1, 4)
-    # min_tile: p_lat=8 leaves 1-row bands -> infeasible; the gather term
-    # is common to the surviving 2-D candidates, so the perimeter tie
-    # (4,2)=4+2+8=14 vs (2,4)=2+4+8=14 breaks toward smaller p_lon.
-    assert choose_latlon_2d_topology(8, 8, 8) == (4, 2)
+    # min_tile: p_lat=8 leaves 1-row bands -> infeasible.  (4,2) has w=4
+    # >= 2*h_ref so it is charged the forced partner fold (4+2+20=26);
+    # (2,4) has w=2 < 2*h_ref -> runtime gather fold (2+4+8=14) -> (2,4)
+    # wins (model == runtime decision, codex r1 #3).
+    assert choose_latlon_2d_topology(8, 8, 8) == (2, 4)
 
 
 def test_chooser_feasibility_and_errors():
     # Indivisible longitude forces p_lon == 1.
     assert choose_latlon_2d_topology(4, 16, 17) == (4, 1)
     # min_tile: n_lat=8 over p_lat=8 leaves 1-row tiles -> infeasible; the
-    # 2-D factorizations remain.
-    assert choose_latlon_2d_topology(8, 8, 8) == (4, 2)
+    # 2-D factorizations remain ((2,4) — see the infeasibility test above
+    # for the forced-partner-vs-gather scoring).
+    assert choose_latlon_2d_topology(8, 8, 8) == (2, 4)
     # No factorization at all -> loud error, never a silent fallback.
     with pytest.raises(ValueError, match="no feasible"):
         choose_latlon_2d_topology(3, 16, 16)

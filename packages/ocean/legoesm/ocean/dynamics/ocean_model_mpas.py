@@ -351,6 +351,7 @@ class MPASOceanModel:
         freshwater: FreshwaterForcing | None = None,
         surface_forcing=None,
         sponge=None,
+        halo_refresh=None,
     ) -> MPASOceanTendencies:
         """Compute baroclinic tendencies."""
         return mpas_ocean_baroclinic_tendencies(
@@ -359,6 +360,7 @@ class MPASOceanModel:
             physics_fn=self._physics_fn,
             surface_forcing=surface_forcing,
             sponge=sponge,
+            halo_refresh=halo_refresh,
         )
 
     def _step_impl(
@@ -368,6 +370,7 @@ class MPASOceanModel:
         freshwater: FreshwaterForcing | None = None,
         surface_forcing=None,
         sponge=None,
+        halo_refresh=None,
     ) -> MPASOceanState:
         """Core step logic — no JIT wrapper.
 
@@ -384,6 +387,20 @@ class MPASOceanModel:
             Freshwater forcing (P, E, runoff, ice). If None, no freshwater.
         surface_forcing : optional
             External surface forcing passed to the physics pipeline.
+        halo_refresh : MPASOceanHaloRefresh, optional
+            Distributed IN-STEP packed halo refresh
+            (``legoesm.parallel.voronoi_mpi.make_mpas_ocean_halo_refresh``
+            — the stage-correctness lever).  The step's stencil chains
+            consume more hops than the partition ``halo_depth=2`` between
+            per-step entry refreshes (biharmonic two-pass operators, the
+            forward-backward Coriolis on UPDATED u, every barotropic
+            substep, the TVD tracer advection on UPDATED tracers),
+            silently corrupting owned cells at partition boundaries.
+            With this armed the halo is re-armed at each audited
+            dependency frontier ([stage-halo R1/R2/R3] here, T1/T2 in
+            the tendencies, B1/B2 in the barotropic substeps).  ``None``
+            (the serial default) is byte-identical — every site is a
+            static Python branch.
 
         Returns
         -------
@@ -414,7 +431,7 @@ class MPASOceanModel:
         # 1. Compute baroclinic tendencies
         tend = self.tendencies(state, freshwater=freshwater,
                                surface_forcing=surface_forcing,
-                               sponge=sponge)
+                               sponge=sponge, halo_refresh=halo_refresh)
 
         # 2. Update tracers (forward Euler)
         T_new = state.T.data + dt * tend.dT_dt.data
@@ -427,6 +444,12 @@ class MPASOceanModel:
         c2_m = mesh.cellsOnEdge[1]
         T_new = fill_land_cells_mpas(T_new, mask, c1_m, c2_m)
         S_new = fill_land_cells_mpas(S_new, mask, c1_m, c2_m)
+        # [stage-halo R1] The updated tracers' halo ring carries the
+        # NEIGHBOR rank's tendencies this rank could not compute
+        # (masked-wrong beyond the outer ring); KPP/TKE column inputs,
+        # GM/Redi (1-2 hops) and the MLE bolus consume it next.
+        if halo_refresh is not None:
+            T_new, S_new = halo_refresh.cells(T_new, S_new)
 
         # 2a. Implicit vertical tracer diffusion (backward-Euler).
         # Applied BEFORE GM/Redi and BEFORE advection.  Uses actual
@@ -654,6 +677,11 @@ class MPASOceanModel:
                 u_star * edge_mask_3d, A_v_edge, dz_edge, dz_half_edge, dt,
             ) * edge_mask_3d
 
+        # [stage-halo R2] u_star's halo ring was updated with the
+        # neighbor rank's (masked-wrong) tendencies; the forward-backward
+        # Coriolis consumes 2 tangential (edgesOnEdge) hops of it.
+        if halo_refresh is not None:
+            (u_star,) = halo_refresh.edges(u_star)
         # 3b. Forward-backward (trapezoidal predictor-corrector) Coriolis
         # on the 3D perturbation velocity. Unconditionally stable for
         # inertial oscillations; mirrors the lat-lon
@@ -755,12 +783,14 @@ class MPASOceanModel:
                 state_for_baro, mesh, z_coord, config, dt,
                 F_slow_eta=F_slow_eta,
                 F_slow_u=F_slow_u_data,
+                halo_refresh=halo_refresh,
             )
         else:
             eta_new, u_bar_new, Hu_avg = barotropic_substeps_mpas(
                 state_for_baro, mesh, z_coord, config, dt_baro, n_sub,
                 F_slow_eta=F_slow_eta,
                 F_slow_u=F_slow_u_data,
+                halo_refresh=halo_refresh,
             )
 
         # 5. Layer thicknesses before and after barotropic
@@ -798,6 +828,16 @@ class MPASOceanModel:
         u_3d_new = reconcile_3d_velocity(
             u_baro, u_bar_old, u_bar_new, mesh, mask,
         )
+        # [stage-halo R3] ONE packed refresh of the post-solve
+        # prognostics before the transport/advection block: the
+        # w-diagnosis divergence (1 hop on mass_flux), the TVD tracer
+        # advection (2 hops on T/S and the transport velocity), and the
+        # delta_u correction's Hu_avg ring all read halos consumed or
+        # updated since the last refresh.  eta_new rides along so the
+        # h_k_new-derived thicknesses agree at the ring.
+        if halo_refresh is not None:
+            (u_3d_new, Hu_avg), (T_new, S_new, eta_new) = halo_refresh.both(
+                (u_3d_new, Hu_avg), (T_new, S_new, eta_new))
 
         # 7. Barotropic correction for transport-consistent tracer advection
         #
@@ -1017,7 +1057,7 @@ class MPASOceanModel:
 
         return cast_pytree(state_new, None, "storage")
 
-    @partial(jax.jit, static_argnums=(0,))
+    @partial(jax.jit, static_argnums=(0,), static_argnames=("halo_refresh",))
     def step(
         self,
         state: MPASOceanState,
@@ -1025,15 +1065,22 @@ class MPASOceanModel:
         freshwater: FreshwaterForcing | None = None,
         surface_forcing=None,
         sponge=None,
+        halo_refresh=None,
     ) -> MPASOceanState:
         """JIT-compiled wrapper around :meth:`_step_impl`.
 
         For use inside an outer JIT context (e.g. ``lax.scan``), call
         ``_step_impl`` directly to avoid nested JIT boundaries.
+
+        ``halo_refresh`` (the distributed in-step stage-correctness
+        refresh — see :meth:`_step_impl`) is a STATIC argument: build it
+        ONCE per layout (``make_mpas_ocean_halo_refresh``) and pass the
+        SAME object every call, or the jit cache re-traces.
         """
         return self._step_impl(
             state, dt, freshwater=freshwater,
             surface_forcing=surface_forcing, sponge=sponge,
+            halo_refresh=halo_refresh,
         )
 
     def step_checked(
@@ -1043,6 +1090,7 @@ class MPASOceanModel:
         freshwater=None,
         surface_forcing=None,
         sponge=None,
+        halo_refresh=None,
     ) -> MPASOceanState:
         """Advance one timestep with host-side runtime validation.
 
@@ -1054,7 +1102,7 @@ class MPASOceanModel:
             self._cfl_checked = True
         state_new = self.step(state, dt, freshwater=freshwater,
                               surface_forcing=surface_forcing,
-                              sponge=sponge)
+                              sponge=sponge, halo_refresh=halo_refresh)
         if self.config.enable_runtime_checks:
             self._assert_runtime_invariants(state_new)
         return state_new
