@@ -211,9 +211,10 @@ __physics_contract__ = {
     #  - Orographic (c=0, the DEFAULT source) IS energy-conserving in-atmosphere:
     #    a stationary mountain exchanges momentum without mechanical work, and the
     #    code returns the resolved mean-flow KE it removes as heat BY CONSTRUCTION.
-    #    At the default use_discrete_ke_heating=False the closure is the
-    #    continuous rate dT_dt=-(u*du+v*dv)/c_pd, so c_pd*sum(rho*dT*dz)==eps_gwd
-    #    definitionally; with the E3SM discrete closure ON the heat equals the
+    #    Under the legacy opt-out use_discrete_ke_heating=False the closure is
+    #    the continuous rate dT_dt=-(u*du+v*dv)/c_pd, so
+    #    c_pd*sum(rho*dT*dz)==eps_gwd definitionally; with the E3SM discrete
+    #    closure ON (the DEFAULT since 2026-07-17) the heat equals the
     #    DISCRETE resolved-KE change instead, and c_pd*sum(rho*dT*dz) ==
     #    eps_gwd - 0.5*dt*int(rho*(du^2+dv^2))dz (eps_gwd stays the continuous
     #    KE-removal-rate diagnostic — by design, not a leak).
