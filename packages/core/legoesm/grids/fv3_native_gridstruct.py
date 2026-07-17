@@ -794,6 +794,128 @@ def exchange_cgrid_vector_halos(uc6: list, vc6: list, tile: int,
                                                      n_src)
 
 
+def _cgrid_edge_partner(fx6: list, fy6: list, tile: int, si: int, sj: int,
+                        along: str, n: int, ng: int, n_src: int) -> float:
+    """Neighbour's COINCIDENT C-edge flux value for a shared-edge slot.
+
+    ``(si, sj)`` is the local supergrid slot of the flux point (x-face
+    (2i-1, 2j); y-face (2i, 2j-1)); ``along`` is the local component
+    axis ('i' for fx, 'j' for fy).  Component selection + orientation
+    sign follow the discrete-rotation map derivative, exactly the
+    certified ``exchange_cgrid_vector_halos`` convention (CGRID_NE).
+    """
+    sg_npx = 2 * n + 1
+    sii, sjj = neighbor_index(si, sj, tile, n_src, sg_npx, sg_npx)
+    if along == "i":
+        sii2, sjj2 = neighbor_index(si + 2, sj, tile, n_src, sg_npx, sg_npx)
+    else:
+        sii2, sjj2 = neighbor_index(si, sj + 2, tile, n_src, sg_npx, sg_npx)
+    dii, djj = sii2 - sii, sjj2 - sjj
+    if (sii % 2 == 1) and (sjj % 2 == 0):        # lands on an x-face slot
+        sgn = 1.0 if (dii if dii != 0 else djj) > 0 else -1.0
+        fi, fj = (sii + 1) // 2, sjj // 2
+        return sgn * fx6[n_src - 1][fi - 1, fj - 1]
+    sgn = 1.0 if (djj if djj != 0 else dii) > 0 else -1.0
+    fi, fj = sii // 2, (sjj + 1) // 2
+    return sgn * fy6[n_src - 1][fi - 1, fj - 1]
+
+
+def average_shared_edge_cgrid(fx6: list, fy6: list, n: int, ng: int):
+    """dyn_core.F90:853-900 analog — mpp_get_boundary(CGRID_NE) + 0.5
+    blend of the C-ring fluxes at the four face edges, all six faces.
+
+    ``fx6``/``fy6``: per-face COMPUTE-ring flux slabs on the allflux
+    layout — fx (n+1, n) x-faces (is:ie+1, js:je) at origin (1, 1),
+    fy (n, n+1) y-faces (is:ie, js:je+1).  Blends exactly the dyn_core
+    slots: fx columns i=1, npx over j=1..n; fy rows j=1, npx over
+    i=1..n.
+
+    Gather-then-apply (two phases) so every partner read sees the
+    PRE-blend state, exactly like mpp_get_boundary buffering.  The
+    0.5*(own + mapped-neighbour) blend leaves both faces' coincident
+    slots equal up to the component sign map.  Mutates in place.
+    """
+    npx = n + 1
+    updates = []
+    for tile in range(1, 7):
+        nw, ne, ns, nn = neighbor_tiles(tile)
+        fx = fx6[tile - 1]
+        fy = fy6[tile - 1]
+        for fj in range(1, n + 1):
+            for fi, n_src in ((1, nw), (npx, ne)):
+                part = _cgrid_edge_partner(fx6, fy6, tile, 2 * fi - 1,
+                                           2 * fj, "i", n, ng, n_src)
+                updates.append((fx, fi - 1, fj - 1,
+                                0.5 * (fx[fi - 1, fj - 1] + part)))
+        for fi in range(1, n + 1):
+            for fj, n_src in ((1, ns), (npx, nn)):
+                part = _cgrid_edge_partner(fx6, fy6, tile, 2 * fi,
+                                           2 * fj - 1, "j", n, ng, n_src)
+                updates.append((fy, fi - 1, fj - 1,
+                                0.5 * (fy[fi - 1, fj - 1] + part)))
+    for arr, i, j, val in updates:
+        arr[i, j] = val
+
+
+def _bgrid_edge_partner(xb6: list, yb6: list, tile: int, si: int, sj: int,
+                        along: str, n: int, ng: int, n_src: int) -> float:
+    """Neighbour's coincident B-node vector-component value (BGRID_NE)."""
+    sg_npx = 2 * n + 1
+    sii, sjj = neighbor_index(si, sj, tile, n_src, sg_npx, sg_npx)
+    if along == "i":
+        sii2, sjj2 = neighbor_index(si + 2, sj, tile, n_src, sg_npx, sg_npx)
+    else:
+        sii2, sjj2 = neighbor_index(si, sj + 2, tile, n_src, sg_npx, sg_npx)
+    dii, djj = sii2 - sii, sjj2 - sjj
+    bi, bj = (sii + 1) // 2, (sjj + 1) // 2       # B node (odd, odd)
+    if along == "i":
+        aligned = dii != 0
+    else:
+        aligned = djj != 0
+    if along == "i":
+        src = xb6[n_src - 1] if aligned else yb6[n_src - 1]
+        d = dii if aligned else djj
+    else:
+        src = yb6[n_src - 1] if aligned else xb6[n_src - 1]
+        d = djj if aligned else dii
+    sgn = 1.0 if d > 0 else -1.0
+    return sgn * src[bi - 1, bj - 1]
+
+
+def average_shared_edge_bgrid(xb6: list, yb6: list, n: int, ng: int):
+    """dyn_core.F90:968-1020 analog — mpp_get_boundary(BGRID_NE) + 0.5
+    blend of the B-grid KE ingredients (ubb = x-like, vbbtemp = y-like)
+    at the four face edges, all six faces.
+
+    ``xb6``/``yb6``: per-face COMPUTE-ring B arrays, shape
+    (n+1, n+1) at origin (is=1, js=1) — the d_sw3 output layout.
+    Blends exactly the dyn_core slots: yb rows j=1, npx over
+    i=1..npx; xb columns i=1, npx over j=1..npx (corner B-nodes
+    touched once per array, matching the Fortran loop split).
+    Gather-then-apply; mutates in place.
+    """
+    npx = n + 1
+    updates = []
+    for tile in range(1, 7):
+        nw, ne, ns, nn = neighbor_tiles(tile)
+        xb = xb6[tile - 1]
+        yb = yb6[tile - 1]
+        for fi in range(1, npx + 1):
+            for fj, n_src in ((1, ns), (npx, nn)):
+                part = _bgrid_edge_partner(xb6, yb6, tile, 2 * fi - 1,
+                                           2 * fj - 1, "j", n, ng, n_src)
+                updates.append((yb, fi - 1, fj - 1,
+                                0.5 * (yb[fi - 1, fj - 1] + part)))
+        for fj in range(1, npx + 1):
+            for fi, n_src in ((1, nw), (npx, ne)):
+                part = _bgrid_edge_partner(xb6, yb6, tile, 2 * fi - 1,
+                                           2 * fj - 1, "i", n, ng, n_src)
+                updates.append((xb, fi - 1, fj - 1,
+                                0.5 * (xb[fi - 1, fj - 1] + part)))
+    for arr, i, j, val in updates:
+        arr[i, j] = val
+
+
 def _get_unit_vect2(ll1: np.ndarray, ll2: np.ndarray) -> np.ndarray:
     """get_unit_vect2: unit tangent at the arc midpoint, oriented p1->p2."""
     e1 = latlon2xyz(ll1)
