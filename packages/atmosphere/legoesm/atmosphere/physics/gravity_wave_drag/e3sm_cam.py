@@ -88,6 +88,12 @@ deliberate departures / version choices (canaries in
   defaults to ``False``; E3SM uses a Newtonian-cooling vertical ``alpha(z)``
   profile in the spectral saturation / WKB damping (with an orographic floor).
   Enabling it changes the drag.
+* **Beres source heating: TOTAL convective, not deep-only** (coupled runs):
+  E3SM feeds ``gw_beres_src`` the DEEP-only ``pbuf TTEND_DP``
+  (gw_drag.F90:766-778); the coupled pipeline threads the convection
+  scheme's TOTAL heating (deep + shallow + downdraft) as ``netdt_col``, so
+  Beres's hdepth/q0 scan sees the full convective column — no deep-only
+  decomposition exists in our convection interface.
 * **Beres (2004) convective source: TABLE not bundled.** ``source="convective"``
   RUNS, but on a clearly-labelled analytic STAND-IN spectrum
   (``build_stand_in_mfcc``, explicitly NOT bit-faithful to Beres); the real
@@ -1465,9 +1471,13 @@ def e3sm_cam_gwd(
         Frontogenesis function for the frontal source.  Required when
         ``config.source == "frontal"``.
     netdt_col : (ncol, nlev) or None
-        Convective heating rate [K/s] for the Beres source.  Required when
-        ``config.source == "convective"``; ``None`` -> zero heating (no
-        convective waves).
+        Convective heating rate [K/s] for the Beres source (k=0 model top).
+        Required when ``config.source == "convective"``; ``None`` -> zero
+        heating (no convective waves).  E3SM feeds the DEEP-only pbuf
+        TTEND_DP here; the coupled pipeline threads the convection
+        scheme's TOTAL heating (deep + shallow + downdraft) — a documented
+        departure (Beres's hdepth/q0 scan sees the full convective
+        column).
     mfcc_table : array or None
         The real offline E3SM ``mfcc`` mean-flux lookup table for the Beres
         source, shape ``(maxh, 2*maxuh+1, 2*pgwv+1)`` (see
