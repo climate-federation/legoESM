@@ -431,7 +431,12 @@ def test_mcfarlane_froude_cap_active():
     rho_sfc = float(rho[0, -1])
     U_sfc = float(jnp.abs(u[0, -1]))
     N = _surface_brunt_vaisala(T, pf, zf)
-    tall = McFarlaneConfig(h_topo=5000.0)
+    # Surface-source arm pinned explicitly: the hand-computed cap below
+    # uses SURFACE rho/N/U, and the shipped default is now the E3SM
+    # depth-averaged source (flipped 2026-07-17), whose launch wind is the
+    # deeper-average (larger here, u_jet aloft).  The Froude-cap property
+    # under test is orthogonal to the source-averaging choice.
+    tall = McFarlaneConfig(h_topo=5000.0, use_depth_averaged_source=False)
     out = mcfarlane_gwd(u, v, T, pf, ph, zf, zh, rho, jnp.zeros(1), 1800.0, tall)
     mom = abs(_column_momentum(out, rho, zh))
     # Uncapped launch (raw h^2) would be enormous; the Froude cap holds the

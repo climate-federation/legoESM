@@ -136,6 +136,10 @@ def test_orographic_in_atmosphere_energy_closure():
     cfg = E3SMCAMConfig(
         source="orographic",
         orographic=E3SMOrographicConfig(sgh_default=200.0),
+        # The continuous-rate identity below holds for the CONTINUOUS
+        # closure; the shipped default is now the E3SM discrete closure
+        # (flipped 2026-07-17 after the AMIP A/B), so pin it explicitly.
+        use_discrete_ke_heating=False,
     )
     out = e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, 1800.0, cfg)
     # Non-vacuous: the drag is actually active.
@@ -172,6 +176,11 @@ def test_frontal_default_frame_differs_from_mean_flow_ke_removal():
     cfg = E3SMCAMConfig(
         source="frontal", pgwv=8, dc=5.0,
         frontal=E3SMFrontalConfig(taubgnd=1.5e-3, frontgfc=1e-10),
+        # Isolate the RAW ground-relative dttke frame: the shipped defaults
+        # now add dttdf and run the C.-C. Chen fixer (which CLOSES the
+        # budget, erasing exactly the gap this canary measures).
+        use_e3sm_spectral_heating=False,
+        do_energy_conservation=False,
     )
     out = e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, 1800.0, cfg,
                        frontgf_col=frontgf)
@@ -224,21 +233,22 @@ def test_default_heating_frame_is_ground_relative():
 # --------------------------------------------------------------------------
 
 def test_energy_fixer_off_by_default_so_budget_does_not_close():
-    """``do_energy_conservation`` (C.-C. Chen fixer) is OFF by default. On a
-    spectral (frontal, effgw=0.5) config -- one where the fixer HAS an effect --
-    the shipped default leaves a non-trivial residual in E3SM's exact column
-    total-energy metric, i.e. it does NOT close the budget. This isolates the
-    fixer FLAG's default (the orographic default SOURCE separately self-closes,
-    tested above; the point here is the spectral paths do not without the fixer).
-    (The machine-zero closure when the fixer is ON is covered by
-    test_gwd_e3sm_ediff.test_driver_energy_closure_machine_zero.)"""
-    assert E3SMCAMConfig().do_energy_conservation is False
+    """``do_energy_conservation`` (C.-C. Chen fixer) now defaults ON (the
+    oracle calls it unconditionally after each spectral gw_drag_prof;
+    flipped 2026-07-17 after the AMIP/RCE A/B).  With the fixer explicitly
+    OFF, a spectral (frontal, effgw=0.5) config leaves a non-trivial
+    residual in E3SM's exact column total-energy metric — the behavior the
+    old default shipped.  (Machine-zero closure with the fixer ON is
+    covered by test_gwd_e3sm_ediff.test_driver_energy_closure_machine_zero.)"""
+    assert E3SMCAMConfig().do_energy_conservation is True  # oracle default
     u, v, T, pf, ph, zf, zh, rho, lat = _driver_column(ncol=1)
     ncol, nlev = u.shape
     frontgf = jnp.full((ncol, nlev), 1e-9)
-    cfg = E3SMCAMConfig(  # default do_energy_conservation=False
+    cfg = E3SMCAMConfig(  # fixer + spectral heating explicitly OFF (legacy)
         source="frontal", pgwv=8, dc=5.0, effgw=0.5,
         frontal=E3SMFrontalConfig(taubgnd=1.5e-3, frontgfc=1e-10),
+        do_energy_conservation=False,
+        use_e3sm_spectral_heating=False,
     )
     out = e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, 1800.0, cfg,
                        frontgf_col=frontgf)
@@ -266,6 +276,7 @@ def test_energy_fixer_off_by_default_so_budget_does_not_close():
 # --------------------------------------------------------------------------
 
 def _oro_cfg(**kw):
+    kw.setdefault("use_discrete_ke_heating", False)   # legacy arm explicit
     return E3SMCAMConfig(
         source="orographic",
         orographic=E3SMOrographicConfig(sgh_default=200.0),
@@ -413,6 +424,8 @@ def test_extract_land_frac_grid_attr():
 # --------------------------------------------------------------------------
 
 def _frontal_cfg(**kw):
+    kw.setdefault("use_e3sm_spectral_heating", False)  # legacy arm explicit
+    kw.setdefault("do_energy_conservation", False)
     return E3SMCAMConfig(
         source="frontal", pgwv=8, dc=5.0,
         frontal=E3SMFrontalConfig(taubgnd=1.5e-3, frontgfc=1e-10),
@@ -491,8 +504,9 @@ def test_spectral_heating_band_cuts_deep_beres_dttke():
     mask = (pmid_mean > 6.0e4) & (pmid_mean < 9.5e4)
     heat[:, mask] = 2e-3                                   # K/s, deep layer
     netdt = jnp.asarray(heat)
-    base = dict(source="convective", pgwv=8, dc=2.5)
-    cfg_off = E3SMCAMConfig(**base)
+    base = dict(source="convective", pgwv=8, dc=2.5,
+                do_energy_conservation=False)
+    cfg_off = E3SMCAMConfig(**base, use_e3sm_spectral_heating=False)
     # prndl=0 zeroes egwdffm AT THE SOURCE -> egwdffi = min(cap, 0) = 0
     # everywhere -> dttdf == 0 exactly, isolating the band effect.  (NOT
     # egwd_max=0: the cap is min(egwd_max, x) with NO zero floor, so a
@@ -514,4 +528,4 @@ def test_spectral_heating_band_cuts_deep_beres_dttke():
     np.testing.assert_allclose(np.array(out_on.dT_dt)[:, :kbot],
                                np.array(out_off.dT_dt)[:, :kbot],
                                rtol=0, atol=0)
-    assert E3SMCAMConfig().use_e3sm_spectral_heating is False  # default canary
+    assert E3SMCAMConfig().use_e3sm_spectral_heating is True  # oracle default (flipped 2026-07-17)
