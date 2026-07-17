@@ -55,7 +55,7 @@ NEMO's rn_emin floor even after the alpha_tke fix.
 | Item | NEMO | legoESM | |
 |---|---|---|---|
 | Advection | FCT2 (2-substep upstream low-order under RK3) | fct2 (Euler) | ≈ |
-| Iso-neutral diffusion | Laplacian, A_ht=1000, rn_slpmax=0.01 | kappa_Redi=1000, S_max=0.01 | ✓ (fixed bc2f5eb1d) |
+| Iso-neutral diffusion | Laplacian A_ht=1000; slp = zau/(zbu<0) = −∂ₓρ/\|∂zρ\| (ldfslp); HARD double cap rn_slpmax=0.01 + e3/7e3; ML ramp; Shapiro | kappa_Redi=1000; **SLOPE SIGN FLIP FOUND+FIXED 2026-07-17** (producer emitted +∂ₓρ/\|∂zρ\|, corr −0.995 vs wslpi_stg → subduction ran BACKWARD all campaign; negated at dispatch, sign-gate test); ML ramp ✓, Shapiro ✓, nemo_cap wired (interim dm95 on card — mode-b amplitude 1.35x unstable at full-kappa capped slopes until native 4-position slopes) | ✓ sign certified (+6.8e-8 vs ttrd_ldf +5.2e-8); ≈ amplitude (mode-b) |
 | GM eddy | OFF (ln_ldfeiv=F) | kappa_GM=0 | ✓ |
 | Vertical diffusion | implicit, TKE avt | same | ✓ |
 | Convection (EVD) | avt=avm=100 where min(rn2,rn2b)≤-1e-12 on rn2=ADIABATIC N² | enhanced_diffusion K=nu=100, hard threshold, n2_mode="adiabatic" | ✓ (fixed ccbdf2020 — the in-situ trigger fired on spurious compressibility negatives in STABLE spring columns, blocking the thermocline rebuild; min(rn2,rn2b) 2-level + -1e-12 threshold remain minor deltas) |

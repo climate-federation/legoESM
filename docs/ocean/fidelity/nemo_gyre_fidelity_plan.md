@@ -378,6 +378,24 @@ ISOLATION EXPERIMENTS (2026-07-16, 5-yr runs + single-column avt certificate):
   rows carry active slopes), the coastal zcofw factor detail, and
   traldf_iso's wall-face flux masking. The retention physics is now PROVEN
   reachable — the remaining work is the boundary detail.
+- **HOT-SPOT BISECT + FIRST CLEAN MEASUREMENT (2026-07-17): the permanent
+  thermocline BUILDS.** Bisect: nemo_cap+signfix -> hot (39-45 C);
+  dm95+signfix -> HEALTHY (21 C); ML ramp innocent => the mode-b operator's
+  ~1.35x amplitude exceeds the stability margin NEMO's e3/7e3 bound encodes
+  for full-kappa flux at capped slopes. Card -> dm95 (nemo_cap stays wired +
+  tested as the option; becomes default when the native four-position slopes
+  land). Wall verified CLEAN at the matched state (slopes corr +0.99/+1.00
+  post-fix; tendencies == ttrd_ldf at j=1-3); NEMO wall delta noted:
+  wet-face-COUNT gradient normalization (zci=MAX(sum umask,eps)) vs lego's
+  always-/2. CLEAN 5-yr (signfix+dm95): winter retention
+  -0.07/0.01/0.31/0.44/**0.69** over 5 winters — the FIRST healthy build ever
+  (NEMO 0.11..1.34; ~half rate = the dm95 under-transport cost, still
+  accelerating at yr 5); barotropic 1.03, mid-depth 1.06, SST max 21.3,
+  baroclinic u' 0.67 (lags the building retention; the contaminated cap run
+  reached u'=1.52 => the circulation responds once subduction runs at full
+  strength). TOP QUEUED FEATURE: native four-position slopes (uslp/vslp at
+  T-levels + wslpi/wslpj at w-levels) — one feature fixing amplitude
+  (1.35->1.0), cap stability, and plausibly the remaining retention factor 2.
 - **IMPLICIT WIND-STRESS DEPOSITION SHIPPED (surface_stress_implicit; review
   SHIP)** — the wind-path w-noise source fixed: stage-10b's explicit ~0.1 m/s
   per-step top-cell kick replaced by NEMO's dynzdf arrangement (stress in the
