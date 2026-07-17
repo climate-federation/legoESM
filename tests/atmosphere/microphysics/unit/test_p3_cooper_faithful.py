@@ -148,15 +148,24 @@ def test_p3_cooper_relaxes_toward_target_minus_existing_Ni():
 
 
 def test_p3_cooper_mass_source_is_independent_seed_mass_times_number():
-    """dq_i_dt = dN_i_dt * m_i0 with m_i0 computed INDEPENDENTLY as
-    4/3*pi*rho_ice*(1e-6)^3 (not read from the module)."""
+    """dq_i_dt = dN_i_dt * m_i0 with the ORACLE m_i0 computed INDEPENDENTLY as
+    4/3*pi*900*(1e-6)^3 (module_mp_p3.f90:233 — not read from the module).
+
+    ``abs=0.0`` is load-bearing: the compared masses are ~1e-13 kg/kg/s, far
+    below ``pytest.approx``'s default ``abs=1e-12`` floor, which silently
+    accepted a 1.9% (917 vs 900) seed-mass error before."""
     dt, rho, T_val = 30.0, 0.9, 252.0
     out = p3_microphysics(*_column(T_val, rho_val=rho), dt, P3Config())
-    m_i0_ref = 4.0 / 3.0 * math.pi * constants.rho_ice * _ICE_NUCLEUS_RADIUS ** 3
+    m_i0_ref = 4.0 / 3.0 * math.pi * _GSAM_SEED_RHO * _ICE_NUCLEUS_RADIUS ** 3
     expected_dN = _gsam_cooper_target_per_kg(T_val, rho) / dt
-    assert float(out.dN_i_dt[0, 0]) == pytest.approx(expected_dN, rel=1e-9)
+    assert float(out.dN_i_dt[0, 0]) == pytest.approx(
+        expected_dN, rel=1e-9, abs=0.0)
     assert float(out.dq_i_dt[0, 0]) == pytest.approx(
-        expected_dN * m_i0_ref, rel=1e-9)
+        expected_dN * m_i0_ref, rel=1e-9, abs=0.0)
+    # Canary against the OLD wrong seed: the 917-based mass must NOT match.
+    m_i0_917 = 4.0 / 3.0 * math.pi * constants.rho_ice * _ICE_NUCLEUS_RADIUS ** 3
+    assert float(out.dq_i_dt[0, 0]) != pytest.approx(
+        expected_dN * m_i0_917, rel=1e-9, abs=0.0)
 
 
 def test_p3_cooper_number_is_per_kg_rho_divide():
@@ -194,7 +203,9 @@ def test_p3_cooper_seed_mass_is_gsam_mi0():
     (module_mp_p3.f90:233 — the oracle hardcodes a 900 kg/m^3 nucleus density,
     NOT constants.rho_ice = 917; the ~1.9% heavier legoESM seed was the old
     departure)."""
-    assert _M_I0 == pytest.approx(_GSAM_MI0, rel=1e-12)
+    # abs=0.0: _M_I0 ~ 3.8e-15 sits far below approx's default abs=1e-12
+    # floor, which would make this pin vacuous.
+    assert _M_I0 == pytest.approx(_GSAM_MI0, rel=1e-12, abs=0.0)
     assert _M_I0 < 4.0 / 3.0 * math.pi * constants.rho_ice * _ICE_NUCLEUS_RADIUS ** 3
 
 

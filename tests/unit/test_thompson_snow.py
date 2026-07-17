@@ -203,7 +203,9 @@ def test_snow_deposition_prds_coefficient_pin():
         want = mirror(q_v, q_s, q_sat_i, T, p, rho)
         # Uncapped regime: rate well below the availability cap excess/dt.
         assert got < (q_v - q_sat_i) / 1.0
-        assert got == pytest.approx(want, rel=rtol), (T, got, want)
+        # abs=0.0: rates are ~1e-8 kg/kg/s, near approx's default abs=1e-12
+        # floor, which would dilute the relative pin.
+        assert got == pytest.approx(want, rel=rtol, abs=0.0), (T, got, want)
 
 
 def test_moments_reproduce_M2_M3():

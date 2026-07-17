@@ -108,6 +108,24 @@ def _get_convection_fn(config: ConvectionConfig):
     elif config.scheme == "tiedtke":
         return "tiedtke", tiedtke_convection, config.tiedtke
     elif config.scheme == "bechtold":
+        # Fail loudly on a silently-inert flag (dispatch-hardening): the
+        # RCAPQADV correction needs the DYNAMICS T/q tendencies
+        # (dT_dt_dyn/dq_dt_dyn = process-split PTENTA/PTENQA analogs), which
+        # neither this bridge nor the coupler physics pipeline supplies yet —
+        # with them absent the leaf is bit-identical legacy and the flag
+        # would be a no-op configuration.  Direct leaf callers (an SCM
+        # passing its prescribed large-scale advective forcing) bypass this
+        # factory and may enable it.
+        if getattr(config.bechtold, "use_ifs_cape_qadv", False):
+            raise ValueError(
+                "use_ifs_cape_qadv=True is not supported through the "
+                "convection bridge / physics pipeline yet: no caller "
+                "supplies the dynamics tendencies (dT_dt_dyn/dq_dt_dyn), so "
+                "the RCAPQADV correction would be silently inert.  Call "
+                "bechtold_convection directly with the tendencies (e.g. an "
+                "SCM's prescribed large-scale forcing), or keep the flag "
+                "False until the driver wiring lands."
+            )
         return "bechtold", bechtold_convection, config.bechtold
     elif config.scheme == "none":
         return "none", None, None

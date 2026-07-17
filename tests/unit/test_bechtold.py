@@ -3203,3 +3203,21 @@ def test_ifs_cape_qadv_requires_cape_closure():
             config=BechtoldConfig(use_ifs_cape_qadv=True,
                                   use_ifs_cape_closure=False),
         )
+
+
+def test_ifs_cape_qadv_rejected_by_bridge_factory_until_wired():
+    """The convection-bridge factory must FAIL LOUDLY on use_ifs_cape_qadv
+    (no bridge/pipeline caller supplies dT_dt_dyn/dq_dt_dyn yet, so the flag
+    would be a silent no-op — the phantom-scheme bug class)."""
+    import pytest as _pytest
+
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.atmosphere.physics.convection.integration import (
+        _get_convection_fn,
+    )
+
+    ok = ConvectionConfig(scheme="bechtold")
+    _get_convection_fn(ok)  # default flag False resolves fine
+    bad = ok._replace(bechtold=ok.bechtold._replace(use_ifs_cape_qadv=True))
+    with _pytest.raises(ValueError, match="use_ifs_cape_qadv"):
+        _get_convection_fn(bad)
