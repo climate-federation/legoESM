@@ -1524,7 +1524,7 @@ def e3sm_cam_gwd(
         # E3SM sets the frontal cos(lat) polar taper BY DYCORE
         # (gw_drag.F90:829-833: do_latitude_taper = .not.
         # dycore_is('UNSTRUCTURED')): ON for structured lat-lon, OFF for the
-        # unstructured SE/production dycore.  Config-selectable here; the
+        # unstructured (SE-family) dycore.  Config-selectable here; the
         # default True is the legacy/structured branch — see
         # E3SMFrontalConfig.latitude_taper.
         do_taper = config.frontal.latitude_taper

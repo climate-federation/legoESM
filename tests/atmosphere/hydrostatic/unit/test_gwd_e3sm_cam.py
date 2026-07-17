@@ -397,7 +397,7 @@ def test_frontal_cos_lat_taper():
     the E3SM cos(lat) polar taper halves a 60N column's drag vs the equator.
     NOTE this pins the taper MATH, not that tapering is E3SM-production
     behavior — E3SM sets the taper BY DYCORE (gw_drag.F90:829-833) and its
-    unstructured production dycore runs UNtapered (the companion test below);
+    unstructured (SE-family) branch runs UNtapered (the companion test below);
     on legoESM's unstructured grids the E3SM-equivalent setting is False."""
     u, v, T, pf, ph, zf, zh, rho, _ = _driver_column(ncol=2)
     lat = jnp.array([0.0, np.pi / 3])  # equator, 60N
@@ -562,7 +562,8 @@ def test_e3sm_unknown_source_raises():
 
 def test_frontal_taper_off_is_e3sm_unstructured_branch():
     """``frontal.latitude_taper=False`` (the E3SM UNSTRUCTURED-dycore branch,
-    gw_drag.F90:829-833 — what E3SM v3 production runs): no cos(lat) polar
+    gw_drag.F90:829-833; which dycore a production campaign ran is not
+    provable from the vendored tree): no cos(lat) polar
     suppression, a 60N column drags exactly like the equator; and the
     equatorial column is bit-identical to the tapered run (cos(0)=1)."""
     u, v, T, pf, ph, zf, zh, rho, _ = _driver_column(ncol=2)
