@@ -11,16 +11,17 @@
 
 aimip_variant: "column_nn"
 
-# Schemes are irrelevant when physics is replaced by the NN, but the
-# AIMIP variant rule keeps the per-variant config explicit so we can
-# diff overlays in one place.
+# ALL physics — convection, turbulence, microphysics, clouds, gravity
+# wave drag AND radiation — is LEARNED by the column MLP; no classical
+# scheme runs alongside it (the NN produces the total physics tendency).
+# The "none" tags below are informational (not consumed by run_aimip)
+# and record that no classical scheme is active.
 convection: "none"
 turbulence: "none"
 gravity_wave_drag: "none"
 cloud_scheme: "none"
 microphysics: "none"
-radiation: "gray"
-physics_parameterization: "none"
+radiation: "none"
 
 # Column MLP hyperparameters.
 nn_hidden_dim: 256
