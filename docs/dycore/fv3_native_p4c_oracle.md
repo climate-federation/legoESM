@@ -196,6 +196,26 @@ Summary: no destructive edge artifacts anywhere; the residual cube
 signatures are the two documented smooth imprints (W2 v ~0.5 m/s;
 HS equatorial u wave-4 0.19 m/s ~ 5%), both at the calibrated C36 level.
 
+### Campaign EXIT battery part 2 — Held-Suarez cross-grid (2026-07-16)
+
+200-day Held-Suarez, matrix defaults (jobs 9044126 + 9044520/21):
+
+| grid | cases | verdict |
+|------|-------|---------|
+| cubed_sphere C36 | sigma + hybrid + topo | **3/3 PASS** (mass 1.6e-16 / 1.6e-16 / 1.0e-14) |
+| latlon 72x144 | sigma + hybrid | **2/2 PASS** (mass 1.6e-16 / 0.0) |
+| spectral T21 | sigma + hybrid + topo | **3/3 PASS** (mass ~5e-16; max\|v\| 40-59 m/s jets) |
+| icosahedral ico5 | — | INCOMPLETE (10 h walltime insufficient for the
+MPAS hydro path; relaunched unbuffered as job 9067601 to diagnose
+JIT-vs-throughput) |
+
+Cube climate verified visually: classic HS structure, transient eddies
+(no stationary lock), the one quantified signature being the 0.19 m/s
+equatorial wave-4 imprint documented above.  With the SW battery
+(24/24), the visual/artifact gate, and HS cube+latlon+spectral all
+passing at machine-zero mass drift, the exit criterion is met on the
+production configuration for every grid whose runs completed.
+
 ### W2 wave-pattern benchmark vs the authoritative FV3 references
 
 The W2 v "wave-like" error field was benchmarked directly against
