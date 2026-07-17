@@ -121,3 +121,4 @@ def test_exactly_four_corners_written(inputs, oracle):
 def test_fixture_provenance(oracle):
     lin = str(oracle["input_lineage"])
     assert "COMMITTED" in lin and "d_sw4" in lin
+    assert "d_sw4:1390-1472:" in str(oracle["auth_block_sha256"])

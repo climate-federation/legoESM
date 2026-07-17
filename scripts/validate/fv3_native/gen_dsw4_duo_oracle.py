@@ -57,9 +57,12 @@ def _pack(work: str) -> None:
         ke[int(pp[1]) - lo, int(pp[2]) - lo] = float(pp[3])
     if np.isnan(ke).any():
         raise SystemExit("dump under-writes KE")
+    auth_shas = (
+        "d_sw4:1390-1472:"
+        "ad36ca162aa788761a9f66f4935c3b79cd8640627f6a932ebeafd7ce6bf45527")
     np.savez_compressed(
         OUT_NPZ, ke=ke, res=res, ng=ng, input_sha256=inp_hash,
-        dsw4_extract_sha256=ext_hash,
+        dsw4_extract_sha256=ext_hash, auth_block_sha256=auth_shas,
         input_lineage="COMMITTED dswcore_input.npz serialised (no "
         "regeneration); symmetryclean d_sw1 -> d_sw4 chain, DUO branch; "
         "ke=1e30 pre-call on both sides, only the 4 corner B-nodes "

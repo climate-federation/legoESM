@@ -92,8 +92,9 @@ def _pack(work: str) -> None:
         OUT_NPZ, **outs, res=res, ng=ng, input_sha256=inp_hash,
         dsw5_extract_sha256=ext_hash, auth_block_sha256=auth_shas,
         input_lineage="COMMITTED dswcore_input.npz serialised (no "
-        "regeneration); symmetryclean FULL CHAIN d_sw1 -> d_sw3 -> kee "
-        "(verbatim dyn_core loops, single-tile identity averaging) -> "
+        "regeneration); symmetryclean SINGLE-FACE chain d_sw1 -> d_sw3 "
+        "-> raw kee (verbatim dyn_core loops, UNEXCHANGED — the "
+        "BGRID_NE averaging is excluded six-face infrastructure) -> "
         "d_sw4 -> d_sw5, DUO branch; d_sw2 skipped (no d_sw5-lane "
         "effect at hydrostatic/damp_w=0); delpc/ptc/ub/vb/ke-halo "
         "1e30 sentinels via the extract intent shims")

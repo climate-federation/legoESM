@@ -3,11 +3,17 @@
 Certifies ``d_sw5_duo`` (the symmetryclean sw_core.F90:1474-1869
 divergence-damping + KE + vorticity-transport stage, DUO branch) via
 the strongest chain yet: the python side runs the CERTIFIED ports
-d_sw1 -> d_sw3 -> kee assembly (the dyn_core inline loops; the BGRID_NE
-averaging is the identity on one tile) -> d_sw4 -> d_sw5 and every
+d_sw1 -> d_sw3 -> raw-KEE assembly (the dyn_core inline loops on the
+UNEXCHANGED single-face arrays) -> d_sw4 -> d_sw5 and every
 d_sw5 output token must be bit-exact (uint64) against the verbatim
 Fortran chain on the COMMITTED inputs.  d_sw2 is skipped on both sides
-(no d_sw5-lane effect at hydrostatic/damp_w=0).
+(no d_sw5-lane effect at hydrostatic/damp_w=0).  SCOPE (codex
+dsw456-r1 P1): the kee here is the RAW single-face assembly — the
+authoritative dyn_core BGRID_NE-exchanges and 0.5-averages
+ubb/vbbtemp edges first (dyn_core.F90:968-1020; needs neighbor faces,
+not an identity on a real cube); that averaging is excluded six-face
+infrastructure, so this is a translation certificate of the stage
+composition, not the integrated pipeline.
 
 Sentinel contracts (extract intent shims, defined semantics): ptc
 unwritten on nord=1; ub/vb untouched at d_con=0; delpc halo + ke halo
@@ -58,12 +64,17 @@ def test_input_hash_enforced(oracle):
     assert hashlib.sha256(blob).hexdigest() == str(oracle["input_sha256"])
 
 
+# every extract the dsw5 sbatch compiles (codex dsw456-r1 P2 manifest)
 _EXTRACT_SHA = {
     "fv3_dsw5_duo_extract.F90": None,  # pinned via the fixture record
     "fv3_dsw1_duo_extract.F90":
         "b91d91462c24deea842cc2cd9bd7ad5fa90e14d760356824ae27d60a7c6b1d15",
     "fv3_tpcore_duo_extract.F90":
         "71f930b3b3b6291955259e46b7dfcd8bcba5c500206c9b0a5377f24c8f8d99c9",
+    "fv3_dsw3_duo_extract.F90":
+        "9cf8df3d65383a8de987b7c92acc8a2637cb4b4013470896beba5e9166e94ac2",
+    "fv3_dsw4_duo_extract.F90":
+        "482d908d1d94a644caf51a2481981254ebacc32c04af6d676d028a90363c8f70",
 }
 
 
@@ -108,7 +119,7 @@ def _run_chain(inputs):
     s3 = d_sw3_duo(inputs["u"], inputs["v"], inputs["uc"], inputs["vc"],
                    gs, bd, res + 1, res + 1, dt=dt, hord_mt=6)
 
-    # kee assembly — dyn_core inline loops (single-tile identity avg)
+    # RAW kee assembly — dyn_core inline loops, unexchanged (see SCOPE)
     ke = np.full((m_a + 1, m_a + 1), SENTINEL)
     ring = slice(ng, ng + res + 1)
     kee = s3["ubbtemp"] * s3["vbbtemp"]
@@ -142,13 +153,34 @@ def test_dsw5_duo_bit_exact(inputs, oracle):
 
 
 def test_outputs_discriminated(inputs, oracle):
-    """Non-vacuity: the damping increment reached ke (ke != raw kee on
-    the B ring beyond the d_sw4 corners); divg_d changed from the
-    input; wk/vortflux finite+nonzero; ptc/ub/vb all-sentinel."""
+    """Non-vacuity: the damping increment reached ke — recompute the
+    raw kee through the certified d_sw3 port and assert the oracle ke
+    DIFFERS on interior B-nodes (beyond the 4 d_sw4 corners); divg_d
+    changed from the input; wk/vortflux finite+nonzero; ptc/ub/vb
+    all-sentinel."""
+    from legoesm.core.fv3_native_duo_sw_core import d_sw3_duo
+    from legoesm.core.fv3_native_sw_core import Bounds
+
     res, ng = int(inputs["res"]), int(inputs["ng"])
     ring = slice(ng, ng + res + 1)
     ke = np.asarray(oracle["ke"], dtype=np.float64)
     assert np.isfinite(ke[ring, ring]).all()
+    bd = Bounds.single_tile(res, ng)
+    gs = {k: np.array(inputs[k]) for k in inputs.files
+          if k not in ("res", "ng", "dt")}
+    gs.update(bounded_domain=False, grid_type=0,
+              sw_corner=True, se_corner=True, ne_corner=True,
+              nw_corner=True, da_min=float(inputs["da_min"]),
+              da_min_c=float(inputs["da_min_c"]))
+    s3 = d_sw3_duo(inputs["u"], inputs["v"], inputs["uc"], inputs["vc"],
+                   gs, bd, res + 1, res + 1,
+                   dt=float(inputs["dt"]), hord_mt=6)
+    raw_kee = 0.5 * (s3["ubbtemp"] * s3["vbbtemp"]
+                     + s3["ubb"] * s3["vbb"])
+    interior = ke[ring, ring][1:-1, 1:-1]      # excludes d_sw4 corners
+    raw_int = raw_kee[1:-1, 1:-1]
+    assert (interior != raw_int).any(), (
+        "d_sw5 ke increment did not move interior B-nodes off raw kee")
     dd = np.asarray(oracle["divg_d"], dtype=np.float64)
     assert not np.array_equal(dd[ring, ring],
                               np.asarray(inputs["divg_d_in"])[ring, ring])

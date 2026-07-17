@@ -1,14 +1,19 @@
-"""Phase-4c — duo d_sw6 FULL-CHAIN oracle (the complete d_sw pipeline).
+"""Phase-4c — duo d_sw6 SINGLE-FACE RAW-KEE chain oracle.
 
 Certifies ``d_sw6_duo`` (the symmetryclean sw_core.F90:1871-2006 final
 circulation-form wind update + damp_v del6 vorticity damping) via the
-complete single-tile duo chain: the python side runs the CERTIFIED
-ports d_sw1 -> d_sw3 -> kee -> d_sw4 -> d_sw5 -> d_sw6 and the final
+single-face duo chain: the python side runs the CERTIFIED ports
+d_sw1 -> d_sw3 -> raw-KEE -> d_sw4 -> d_sw5 -> d_sw6 and the final
 winds must be bit-exact (uint64) against the verbatim Fortran chain on
-the COMMITTED inputs.  With this stage, every d_sw sub-stage of the
-symmetryclean duo pipeline is certified end-to-end on one tile
-(d_sw2's delp/pt update certified separately; the two mpp averaging
-sites are the single-tile identity).
+the COMMITTED inputs.  SCOPE (codex dsw456-r1 P1): this is a
+TRANSLATION certificate of the stage composition on ONE face with RAW
+(unexchanged) ubbtemp/vbbtemp/ubb/vbb — the authoritative dyn_core
+performs a BGRID_NE mpp_get_boundary + 0.5 edge averaging BEFORE the
+kee loop (dyn_core.F90:968-1020), which needs neighbor faces and is
+NOT an identity on a real cube.  That exchange (and the post-d_sw1
+C-ring averaging) is the six-face integration work this certificate
+deliberately excludes.  d_sw2's delp/pt update is certified
+separately.
 
 Sentinels: ub/vb untouched at d_con=0; heat_source stays 1e30 (d_sw2,
 which zeroes it in the real pipeline, is not in this chain).  ut/vt
@@ -57,10 +62,21 @@ def test_input_hash_enforced(oracle):
     assert hashlib.sha256(blob).hexdigest() == str(oracle["input_sha256"])
 
 
+# every extract the dsw6 sbatch compiles (codex dsw456-r1 P2 manifest)
 _EXTRACT_SHA = {
     "fv3_dsw6_duo_extract.F90": None,  # pinned via the fixture record
     "fv3_dsw1_duo_extract.F90":
         "b91d91462c24deea842cc2cd9bd7ad5fa90e14d760356824ae27d60a7c6b1d15",
+    "fv3_tpcore_duo_extract.F90":
+        "71f930b3b3b6291955259e46b7dfcd8bcba5c500206c9b0a5377f24c8f8d99c9",
+    "fv3_dsw2_duo_extract.F90":
+        "c34a3d638f4e6870201540782e13c129d66ea07b4f3ce55201b103e2a7a41ef4",
+    "fv3_dsw3_duo_extract.F90":
+        "9cf8df3d65383a8de987b7c92acc8a2637cb4b4013470896beba5e9166e94ac2",
+    "fv3_dsw4_duo_extract.F90":
+        "482d908d1d94a644caf51a2481981254ebacc32c04af6d676d028a90363c8f70",
+    "fv3_dsw5_duo_extract.F90":
+        "27448ad8dc97cb7b1cfbe80910d680b005850b2c001f69709a7f2af289c01b86",
 }
 
 
@@ -129,7 +145,7 @@ def _run_chain(inputs):
 def test_dsw6_duo_bit_exact(inputs, oracle):
     """Final u/v (full domain: compute update + input halo strips), the
     del6-clobbered ut/vt, and the sentinel ub/vb/heat_source — all
-    BIT-exact (uint64) vs the verbatim Fortran complete chain."""
+    BIT-exact (uint64) vs the verbatim Fortran single-face chain."""
     out = _run_chain(inputs)
     keymap = {"u": "u", "v": "v", "ut": "ut", "vt": "vt",
               "ub": "ub", "vb": "vb", "heat": "heat_source"}
@@ -142,19 +158,27 @@ def test_dsw6_duo_bit_exact(inputs, oracle):
 
 
 def test_outputs_discriminated(inputs, oracle):
-    """Non-vacuity: compute-domain u/v CHANGED from the inputs; the
-    del6 diffusive add is live (u would differ if the final += vt were
-    dropped — vt nonzero on the compute rows); ub/vb/heat sentinel."""
+    """Non-vacuity: compute-domain u/v CHANGED from the inputs, and the
+    final diffusive add (u += vt / v -= ut, the LAST write) is live —
+    which holds iff the del6 fluxes are nonzero on the add regions
+    (u-add: is..ie x js..je+1; v-add: is..ie+1 x js..je), asserted for
+    BOTH vt and ut word-wise (a port that zeroed del6 or dropped the
+    add would leave the uint64 oracle red anyway; this pins the reason).
+    ub/vb/heat stay sentinel."""
     ng = int(inputs["ng"])
     res = int(inputs["res"])
     su = (slice(ng, ng + res), slice(ng, ng + res + 1))
     sv = (slice(ng, ng + res + 1), slice(ng, ng + res))
-    assert not np.array_equal(np.asarray(oracle["u"])[su],
-                              np.asarray(inputs["u"])[su])
-    assert not np.array_equal(np.asarray(oracle["v"])[sv],
-                              np.asarray(inputs["v"])[sv])
+    u = np.asarray(oracle["u"], dtype=np.float64)
+    v = np.asarray(oracle["v"], dtype=np.float64)
+    assert not np.array_equal(u[su], np.asarray(inputs["u"])[su])
+    assert not np.array_equal(v[sv], np.asarray(inputs["v"])[sv])
     vt = np.asarray(oracle["vt"], dtype=np.float64)
-    assert np.abs(vt[su]).max() > 0.0
+    ut = np.asarray(oracle["ut"], dtype=np.float64)
+    u_add = vt[ng:ng + res, ng:ng + res + 2]      # is..ie, js..je+1
+    v_add = ut[ng:ng + res + 2, ng:ng + res]      # is..ie+1, js..je
+    assert np.count_nonzero(u_add) > 0
+    assert np.count_nonzero(v_add) > 0
     for k in ("ub", "vb", "heat"):
         assert (np.asarray(oracle[k], dtype=np.float64) == SENTINEL).all(), k
 
