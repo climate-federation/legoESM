@@ -72,6 +72,7 @@ __param_spec__ = {
             "autoconv_pe_max": {"units": "1", "bounds": (0.5, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "convective precip-efficiency ceiling (Sundqvist 1978 form)", "shape": None},
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Bechtold et al. (2008) stability cap", "shape": None},
             "cape_pbl_depth": {"units": "m", "bounds": (200.0, 1500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Bechtold et al. (2008)", "shape": None},
+            "cape_qadv_weight": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "IFS RCAPQADV=0.8 (sucumf.F90:219)", "shape": None},
             "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Bechtold et al. (2008)", "shape": None},
             "cloud_depth_deep": {"units": "m", "bounds": (1500.0, 5000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
             "cloud_depth_shallow_max": {"units": "m", "bounds": (800.0, 2500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
@@ -1524,6 +1525,22 @@ class BechtoldConfig(NamedTuple):
     # (None => inert).  Default True since 2026-07-17 (AMIP-with-diurnal A/B
     # stable, modest deltas; RCE-inert as expected — fixed zenith).
     use_ifs_capdcycl: bool = True
+    # IFS RCAPQADV=0.8 moisture/temperature-advection CAPE correction
+    # (cumastrn.F90:734-760, :801, :819-823; see bechtold._ifs_cape_qadv_terms):
+    # the closure adjusts ZCAPE with the plume buoyancy against the
+    # dynamics-advected environment (ZCAPE2), the column moisture-advection
+    # supply (ZDQCV), and the near-saturated/resolved-ascent branch gate
+    # (ZSATFR / omega at ~500 hPa).  Requires use_ifs_cape_closure + the leaf
+    # dT_dt_dyn/dq_dt_dyn kwargs — the DYNAMICS tendencies (PTENTA/PTENQA;
+    # process-split (post_dyn - pre_dyn)/dt, or an SCM's prescribed
+    # large-scale advective forcing).  omega optional (gates only the extreme
+    # resolved-ascent branch).  None => inert.  Driver supply of the dynamics
+    # tendencies is NOT yet wired in the production pipeline (owed follow-up:
+    # the bridge/pipeline REJECT the flag until then); default False,
+    # byte-identical legacy.
+    use_ifs_cape_qadv: bool = False
+    # RCAPQADV blend weight (sucumf.F90:219).
+    cape_qadv_weight: float = 0.8
     # IFS land RH break for the sub-cloud rain evaporation (cuflxn.F90:
     # 222-223: 0.70 deep / 0.75 non-deep over land vs 0.85/0.92 ocean).
     # Needs the pipeline land_frac kwarg (None => ocean values, legacy).

@@ -2981,3 +2981,225 @@ def test_ifs_snow_melt_same_layer_no_evap():
     assert float(e[0, 1]) == 0.0, "same-layer melt evaporated"
     # and the melted rain DOES evaporate below
     assert float(e[0, 2]) > 0.0
+
+
+# ---------------------------------------------------------------------------
+# IFS RCAPQADV advection CAPE correction (cumastrn.F90:734-760, :801, :819-823)
+# ---------------------------------------------------------------------------
+
+from legoesm.atmosphere.physics.convection.bechtold import (  # noqa: E402
+    _ifs_cape_qadv_terms,
+    _QadvTerms,
+    _IFS_RCAPQADV,
+    _IFS_QADV_SATFR_MAX,
+    _IFS_QADV_OMEGA_MIN_PA_S,
+    _IFS_NJKT5_P_PA,
+    _IFS_QADV_TAURES_MIN,
+    _QADV_SATFR_GATE_W,
+    _QADV_OMEGA_GATE_W_PA_S,
+    _QADV_TOP_MEMBER_W_M,
+    _QADV_P500_PICK_W_PA,
+    _IFS_RETV,
+    _IFS_RMINCAPE,
+)
+
+
+def test_ifs_cape_qadv_terms_fortran_mirror():
+    """Independent numpy transcription of the RCAPQADV terms:
+
+    ZTENH2/ZQENH2 = env - 0.5*(tend_k + tend_{k-1})*dt        (:735-737)
+    ZDQCV = sum(dq_dyn*dp*(q/qsat)) * L_v/(g*z_top)
+            * (tau*ZTAURES)/max(1.25, ZTAURES) * RCAPQADV     (:748, :801)
+    ZSATFR = <q/qsat>_dp below cloud top                       (:751-753, :802)
+    gate = smooth OR(ZSATFR <= 0.94, omega(500 hPa) < -100)    (:820)
+    """
+    import numpy as np
+
+    nlev = 6
+    T = jnp.array([[220.0, 240.0, 260.0, 275.0, 285.0, 295.0]])
+    q = jnp.array([[1e-5, 1e-4, 1e-3, 4e-3, 8e-3, 1.4e-2]])
+    qsat = q / jnp.array([[0.4, 0.5, 0.6, 0.7, 0.8, 0.9]])   # satfrac 0.4..0.9
+    z = jnp.array([[12000.0, 9000.0, 6000.0, 3500.0, 1500.0, 300.0]])
+    p = jnp.array([[250e2, 400e2, 550e2, 700e2, 850e2, 975e2]])
+    dp = jnp.array([[100e2, 150e2, 150e2, 150e2, 150e2, 100e2]])
+    dTd = jnp.array([[1e-5, -2e-5, 3e-5, -1e-5, 2e-5, 0.0]])
+    dqd = jnp.array([[1e-9, 5e-9, 2e-8, -1e-8, 4e-8, 1e-8]])
+    omega = jnp.array([[-2.0, -5.0, -60.0, -3.0, -1.0, 0.0]])
+    z_top = jnp.array([8000.0])
+    tau = jnp.array([2400.0])
+    ztaures, dt, w = 2.0, 900.0, float(_IFS_RCAPQADV)
+
+    got = _ifs_cape_qadv_terms(T, q, qsat, z, p, dp, dTd, dqd, omega,
+                               z_top, tau, ztaures, dt, w)
+
+    Tn, qn, qs, zn, pn, dpn = (np.asarray(a[0]) for a in (T, q, qsat, z, p, dp))
+    dTn, dqn, omn = (np.asarray(a[0]) for a in (dTd, dqd, omega))
+
+    T2 = Tn.copy()
+    q2 = qn.copy()
+    T2[1:] = Tn[1:] - 0.5 * (dTn[1:] + dTn[:-1]) * dt
+    q2[1:] = qn[1:] - 0.5 * (dqn[1:] + dqn[:-1]) * dt
+    assert np.allclose(np.asarray(got.T_env2[0]), T2, rtol=1e-12)
+    assert np.allclose(np.asarray(got.q_env2[0]), q2, rtol=1e-12)
+
+    satfrac = qn / qs
+    zdqcv_int = float((dqn * dpn * satfrac).sum())
+    zdqcv = (zdqcv_int * constants.L_v / (constants.g * 8000.0)
+             * (2400.0 * ztaures) / max(ztaures, _IFS_QADV_TAURES_MIN) * w)
+    assert abs(float(got.zdqcv[0]) - zdqcv) < 1e-9 * abs(zdqcv)
+
+    below = 1.0 / (1.0 + np.exp(-(8000.0 - zn) / _QADV_TOP_MEMBER_W_M))
+    zsatfr = float((below * satfrac * dpn).sum() / (below * dpn).sum())
+    g_sat = 1.0 / (1.0 + np.exp(-(_IFS_QADV_SATFR_MAX - zsatfr)
+                                / _QADV_SATFR_GATE_W))
+    w_pick = np.exp(-(((pn - _IFS_NJKT5_P_PA) / _QADV_P500_PICK_W_PA) ** 2))
+    w_pick = w_pick / w_pick.sum()
+    om5 = float((w_pick * omn).sum())
+    g_om = 1.0 / (1.0 + np.exp(-(_IFS_QADV_OMEGA_MIN_PA_S - om5)
+                               / _QADV_OMEGA_GATE_W_PA_S))
+    gate = 1.0 - (1.0 - g_sat) * (1.0 - g_om)
+    assert abs(float(got.adv_gate[0]) - gate) < 1e-9
+
+    # omega=None: only the saturation-fraction branch remains.
+    got_no_om = _ifs_cape_qadv_terms(T, q, qsat, z, p, dp, dTd, dqd, None,
+                                     z_top, tau, ztaures, dt, w)
+    assert abs(float(got_no_om.adv_gate[0]) - g_sat) < 1e-9
+
+
+def test_ifs_cape_qadv_gate_branches():
+    """Gate semantics: dry column -> advection branch ON; near-saturated
+    column -> OFF; near-saturated + extreme resolved 500 hPa ascent -> ON."""
+    nlev = 4
+    T = jnp.full((1, nlev), 270.0)
+    z = jnp.array([[9000.0, 6000.0, 3000.0, 500.0]])
+    p = jnp.array([[300e2, 500e2, 800e2, 975e2]])
+    dp = jnp.full((1, nlev), 150e2)
+    zeros = jnp.zeros((1, nlev))
+    z_top = jnp.array([9500.0])
+    tau = jnp.array([1800.0])
+
+    def gate(satfrac, omega):
+        q = jnp.full((1, nlev), 1e-3)
+        qsat = q / satfrac
+        return float(_ifs_cape_qadv_terms(
+            T, q, qsat, z, p, dp, zeros, zeros, omega,
+            z_top, tau, 1.0, 600.0, float(_IFS_RCAPQADV)).adv_gate[0])
+
+    calm = jnp.zeros((1, nlev))
+    assert gate(0.5, calm) > 1.0 - 1e-6            # dry -> ON
+    # near-saturated -> mostly OFF (sigmoid width 0.01 about the 0.94 break;
+    # 0.99 sits 5 widths past it, 1.06 sits 12 widths past it).
+    assert gate(0.99, calm) < 0.01
+    assert gate(1.06, calm) < 1e-4
+    strong = jnp.array([[0.0, -150.0, 0.0, 0.0]])  # ~500 hPa extreme ascent
+    assert gate(0.99, strong) > 0.99               # OR-branch fires
+
+
+def test_ifs_cape_qadv_closure_blend_oracle_semantics():
+    """Closure combine (:819-823) pinned through _ifs_cape_closure_target:
+    with ZERO dynamics tendencies (T2=T, q2=q) ZCAPE2 == ZCAPE, so gate=1
+    gives max(RMINCAPE*ZCAPE, ZCAPE + ZDQCV):
+
+      * zdqcv > 0     -> target ratio (ZCAPE+X)/ZCAPE  (below the 5000 cap)
+      * zdqcv << 0    -> RMINCAPE floor binds (ratio = RMINCAPE)
+      * gate = 0      -> bit-identical to the no-advection baseline
+    """
+    import numpy as np
+
+    T = jnp.array([[250.0, 270.0, 285.0, 295.0]])
+    q = jnp.array([[1e-4, 1e-3, 5e-3, 1e-2]])
+    z = jnp.array([[9000.0, 6000.0, 3000.0, 500.0]])
+    p = jnp.array([[300e2, 500e2, 800e2, 1000e2]])
+    T_u = T + jnp.array([[0.0, 1.5, 2.0, 0.0]])
+    in_cloud = jnp.array([[0.0, 1.0, 1.0, 0.0]])
+    args = (T, q, z, p, T_u, q, jnp.zeros_like(q),
+            jnp.array([[0.0, 0.08, 0.10, 0.10]]),
+            jnp.zeros((1, 4)), in_cloud, jnp.array([1500.0]),
+            jnp.array([0.10]), jnp.array([1.0]))
+    base = _ifs_cape_closure_target(*args)
+
+    # Independent raw-ZCAPE mirror (same integrand as the closure docstring).
+    Tn, qn, pn, Tun = (np.asarray(a[0]) for a in (T, q, p, T_u))
+    dp_lev = pn[1:] - pn[:-1]
+    ic = np.asarray(in_cloud[0])[1:]
+    buoy = (Tun[1:] - Tn[1:]) / np.maximum(Tn[1:], 1.0)
+    zcape = float((ic * buoy * dp_lev).sum())
+    assert zcape > 0.0
+
+    def with_qadv(zdqcv_val, gate_val):
+        qadv = _QadvTerms(T, q, jnp.array([zdqcv_val]), jnp.array([gate_val]))
+        return _ifs_cape_closure_target(
+            *args, qadv=qadv, qadv_weight=float(_IFS_RCAPQADV))
+
+    X = 0.3 * zcape
+    ratio = float(with_qadv(X, 1.0)[0]) / float(base[0])
+    assert abs(ratio - (zcape + X) / zcape) < 1e-6, ratio
+
+    ratio_neg = float(with_qadv(-10.0 * zcape, 1.0)[0]) / float(base[0])
+    assert abs(ratio_neg - _IFS_RMINCAPE) < 1e-6, ratio_neg
+
+    off = with_qadv(X, 0.0)
+    assert float(off[0]) == float(base[0])
+
+
+def test_ifs_cape_qadv_leaf_toggle_and_ad():
+    """Leaf integration: flag-off (or missing inputs) is bit-identical to
+    baseline; flag-on with a convective column changes M_b and the gradient
+    w.r.t. the dynamics moisture tendency is finite and nonzero.
+
+    The column must be WEAKLY unstable AND the moisture-advection supply in
+    the sensitive band: the default ``_column()`` sounding saturates the
+    oracle's 5000 Pa ZCAPE cap (:825), and a very large dq_dyn saturates the
+    downstream realized-flux caps — in both saturated regimes the correction
+    is (correctly) invisible.  dq_dyn=1e-8 kg/kg/s lands ZDQCV at ~3e3 Pa on
+    this sounding, inside the band where the target visibly moves M_u."""
+    T, q, pf, ph, u, v = _column(T_sfc=297.0, q_sfc=10e-3, lapse_rate=6.0)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    stoch = jnp.zeros((ncol,))
+    dTd = jnp.full((ncol, nlev), 2e-5)
+    dqd = jnp.full((ncol, nlev), 1e-8)     # moistening advection
+    base_cfg = BechtoldConfig()
+    on_cfg = BechtoldConfig(use_ifs_cape_qadv=True)
+
+    out_base, Mu_base, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0, config=base_cfg)
+    # inputs supplied but flag off -> bit-identical
+    out_off, Mu_off, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0, config=base_cfg,
+        dT_dt_dyn=dTd, dq_dt_dyn=dqd)
+    assert bool(jnp.all(Mu_off == Mu_base))
+    # flag on but inputs missing -> inert (bit-identical)
+    out_in, Mu_in, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0, config=on_cfg)
+    assert bool(jnp.all(Mu_in == Mu_base))
+    # flag on + inputs -> the closure target moves
+    out_on, Mu_on, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0, config=on_cfg,
+        dT_dt_dyn=dTd, dq_dt_dyn=dqd)
+    assert bool(jnp.all(jnp.isfinite(Mu_on)))
+    assert bool(jnp.any(Mu_on != Mu_base)), "qadv path had no effect"
+
+    def loss(dq_in):
+        out, Mu, _ = bechtold_convection(
+            T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0, config=on_cfg,
+            dT_dt_dyn=dTd, dq_dt_dyn=dq_in)
+        return jnp.sum(Mu ** 2)
+
+    g = jax.grad(loss)(dqd)
+    assert bool(jnp.all(jnp.isfinite(g)))
+    assert bool(jnp.any(g != 0.0)), "no gradient through dq_dt_dyn"
+
+
+def test_ifs_cape_qadv_requires_cape_closure():
+    """Dispatch hardening: the flag without the closure raises loudly."""
+    import pytest as _pytest
+
+    T, q, pf, ph, u, v = _column(ncol=1, nlev=8)
+    with _pytest.raises(ValueError, match="use_ifs_cape_qadv"):
+        bechtold_convection(
+            T, q, pf, ph, u, v, jnp.zeros_like(T), jnp.zeros((1,)), None,
+            dt=300.0,
+            config=BechtoldConfig(use_ifs_cape_qadv=True,
+                                  use_ifs_cape_closure=False),
+        )

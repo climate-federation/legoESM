@@ -23,15 +23,18 @@ equal the nucleation tendencies — provided vapour is NON-LIMITING (both are
 donor-scaled by qv_scale at p3.py:378-381; the tiny seed mass keeps qv_scale≈1
 at the states chosen here).
 
-The base-curve FORM (N_i0=5.0, cooper_a=0.304, per-kg rho-divide,
-(target-N_i)/dt relaxation, seed-mass source) is DERIVED from gSAM's below-cap
-Cooper base expression (shared by both P3 nucleation schemes) and matches it
-wherever Cooper is selected, SCF=1, vapour is non-limiting, and the value is
-below the cap. It is NOT a gated gSAM-OUTPUT match; the three DELTAS below are
-canaried against SCHEME 1 (documented departures, not bit-identity):
-(1) cap unconditional 500/L vs gSAM 100/L·SCF (scheme 1) / 150/L·SCF (scheme 2);
-(2) gate -8 C smooth with NO supersaturation requirement vs gSAM -15 C hard AND
-supi>=0.05; (3) seed density 917 vs 900 kg/m^3.
+legoESM now carries FAITHFUL scheme-1 semantics (departures closed 2026-07-17):
+base curve (N_i0=5.0, cooper_a=0.304, per-kg rho-divide), scheme-1 cap
+100/L·SCF at SCF=1 (this column scheme has no SCPF cloud fraction; gSAM's
+scpf_ON=.false. default also runs SCF=1), the nucleation gate T < -15 C AND
+supi >= 0.05, the (target-N_i)/dt relaxation, and the oracle seed mass
+mi0 = 4/3*pi*900*(1e-6)^3.  The ONLY structural delta left is smoothing: the
+hard Fortran gates become sigmoids (ice_sigmoid_sharpness on T,
+cooper_supi_sharpness on supi) so the scheme stays differentiable, plus the
+JAX guards (rho floor, clip(dt,1) floor, exponent cap) absent from the raw
+Fortran.  Tests pin the faithful pieces at rel 1e-9 in the sharp-gate interior
+(gate factors within 1e-13 of unity) and pin the smooth-gate midpoint
+semantics explicitly.
 """
 
 from __future__ import annotations
@@ -64,13 +67,26 @@ _ICE_NUCLEUS_RADIUS = 1.0e-6   # m (gSAM default IceNucleiRadius)
 _GSAM_MI0 = 4.0 / 3.0 * math.pi * _GSAM_SEED_RHO * _ICE_NUCLEUS_RADIUS ** 3
 
 
-def _column(T_val, rho_val=0.9, q_v_val=1.0e-4, N_i_val=0.0):
-    """Isolated single-column state: no condensate, T in the nucleating band."""
+def _column(T_val, rho_val=0.9, q_v_val=None, N_i_val=0.0, supi=0.2):
+    """Isolated single-column state: no condensate, T in the nucleating band.
+
+    ``q_v_val=None`` (default) sets vapour to ``(1+supi)*q_sat_i`` so the
+    oracle's ``supi >= 0.05`` nucleation gate is satisfied deep in its
+    interior (supi=0.2 puts the smooth gate within 1e-13 of unity) while
+    staying non-limiting for the tiny seed-mass sink.  Pass an explicit
+    ``q_v_val`` to probe the subsaturated (gate-off) branch.
+    """
+    from legoesm.thermo import saturation_mixing_ratio_ice
+
     ncol, nlev = 1, 3
     z = jnp.zeros((ncol, nlev))
     T = jnp.full((ncol, nlev), T_val)
-    q_v = jnp.full((ncol, nlev), q_v_val)
     p_full = jnp.full((ncol, nlev), 7.0e4)
+    if q_v_val is None:
+        q_sat_i = saturation_mixing_ratio_ice(T, p_full)
+        q_v = (1.0 + supi) * q_sat_i
+    else:
+        q_v = jnp.full((ncol, nlev), q_v_val)
     p_half = jnp.full((ncol, nlev + 1), 7.0e4)
     rho = jnp.full((ncol, nlev), rho_val)
     dz = jnp.full((ncol, nlev), 200.0)
@@ -92,15 +108,15 @@ def _gsam_cooper_target_per_kg(T, rho):
 
 
 def test_p3_cooper_base_curve_form_matches_gsam_expression():
-    """legoESM's nucleation-number rate equals the gSAM-DERIVED base-curve form
-    ``5*exp(0.304*(T_f-T))/rho / dt`` at safely-cold T where the smooth gate is
-    unity to machine precision (1-f_ice < 1e-20) and vapour is non-limiting.
-    This pins the FORM/coefficients, NOT a gated gSAM-output match: at these T
-    gSAM's own hard T<-15 C + supersaturation gate differs (see the gate canary).
+    """legoESM's nucleation-number rate equals the gSAM base-curve form
+    ``5*exp(0.304*(T_f-T))/rho / dt`` in the ORACLE gate's interior (T well
+    below -15 C AND supi=0.2 >> 0.05, where both smooth gate factors are
+    within ~1e-13 of unity) with vapour non-limiting.  This is now a genuine
+    gated-oracle match: gSAM's hard gate is also ON at every probed state.
     """
     cfg = P3Config()
     dt, rho = 30.0, 0.9
-    for T_val in (245.0, 248.0, 252.0, 255.0):   # <= 255 K: f_ice = 1 - O(1e-22)
+    for T_val in (242.0, 245.0, 248.0, 252.0):   # <= 252 K: gate = 1 - O(1e-13)
         out = p3_microphysics(*_column(T_val, rho_val=rho), dt, cfg)
         expected = _gsam_cooper_target_per_kg(T_val, rho) / dt
         assert float(out.dN_i_dt[0, 0]) == pytest.approx(expected, rel=1e-9), \
@@ -153,46 +169,71 @@ def test_p3_cooper_number_is_per_kg_rho_divide():
         2.0 * float(out_hi.dN_i_dt[0, 0]), rel=1e-9)
 
 
-# --- CANARY the three documented departures from the gSAM oracle ---------------
+# --- The three former departures, now pinned FAITHFUL --------------------------
 
 
-def test_p3_cooper_cap_is_500_per_litre_unconditional_not_gsam_scf():
-    """DELTA 1: legoESM caps at N_i_nuc_max=5e5 /m^3 (500 /L), UNCONDITIONAL;
-    gSAM caps at 100 /L·SCF (scheme 1) or 150 /L·SCF (scheme 2) — a smaller cap
-    scaled by cloud fraction SCF that legoESM omits."""
+def test_p3_cooper_cap_is_gsam_scheme1_100_per_litre():
+    """FAITHFUL CAP: N_i_nuc_max equals gSAM scheme-1's 100 /L·SCF at SCF=1
+    (module_mp_p3.f90:3090; this column scheme has no SCPF cloud fraction and
+    gSAM's scpf_ON=.false. default also runs SCF=1).  At a very cold T the
+    uncapped base overshoots the cap ⇒ dN_i saturates at N_i_nuc_max/rho/dt
+    (gate factors = 1 - O(1e-13), vapour non-limiting)."""
     cfg = P3Config()
-    assert cfg.N_i_nuc_max == 5.0e5
-    assert cfg.N_i_nuc_max > _GSAM_CAP_S1_PER_M3        # exceeds scheme-1 100/L
-    assert cfg.N_i_nuc_max > _GSAM_CAP_S2_PER_M3        # exceeds scheme-2 150/L
-    # At a very cold T the uncapped base overshoots the cap ⇒ dN_i saturates at
-    # N_i_nuc_max/rho/dt (f_ice≈1, vapour non-limiting).
+    assert cfg.N_i_nuc_max == _GSAM_CAP_S1_PER_M3        # 100 /L, scheme 1
     T_cold, rho = 200.0, 0.5
     out = p3_microphysics(*_column(T_cold, rho_val=rho), 30.0, cfg)
     capped = cfg.N_i_nuc_max / rho / 30.0
     assert float(out.dN_i_dt[0, 0]) == pytest.approx(capped, rel=1e-9)
-    assert capped > _GSAM_CAP_S2_PER_M3 / rho / 30.0   # above even gSAM 150/L·(SCF=1)
+    # Below-cap states must NOT saturate (cap binds only past the crossover).
+    out_warm = p3_microphysics(*_column(252.0, rho_val=rho), 30.0, cfg)
+    assert float(out_warm.dN_i_dt[0, 0]) < capped
 
 
-def test_p3_cooper_seed_density_is_917_not_gsam_900():
-    """DELTA 3: legoESM seed mass uses constants.rho_ice (917); gSAM mi0 uses
-    900 kg/m^3 at its default 1-µm nucleus radius ⇒ ~1.9% heavier seed."""
-    m_i0_ref = 4.0 / 3.0 * math.pi * constants.rho_ice * _ICE_NUCLEUS_RADIUS ** 3
-    assert _M_I0 == pytest.approx(m_i0_ref, rel=1e-12)
-    assert _M_I0 / _GSAM_MI0 == pytest.approx(constants.rho_ice / 900.0, rel=1e-9)
-    assert constants.rho_ice / 900.0 == pytest.approx(1.0189, abs=1e-4)
+def test_p3_cooper_seed_mass_is_gsam_mi0():
+    """FAITHFUL SEED: m_i0 equals gSAM's mi0 = 4/3*pi*900*(1e-6)^3
+    (module_mp_p3.f90:233 — the oracle hardcodes a 900 kg/m^3 nucleus density,
+    NOT constants.rho_ice = 917; the ~1.9% heavier legoESM seed was the old
+    departure)."""
+    assert _M_I0 == pytest.approx(_GSAM_MI0, rel=1e-12)
+    assert _M_I0 < 4.0 / 3.0 * math.pi * constants.rho_ice * _ICE_NUCLEUS_RADIUS ** 3
 
 
-def test_p3_cooper_gate_warmer_and_has_no_supersaturation_requirement():
-    """DELTA 2: legoESM's smooth gate (cooper_T_act=265 K = -8 C, no S_i check)
-    nucleates where gSAM P3's HARD gate (T<258.15 K = -15 C AND supi>=0.05)
-    would not: (a) at a warmer T=262 K (> -15 C), and (b) in ICE-SUBSATURATED
-    air (q_v→0 ⇒ S_i<0)."""
+def test_p3_cooper_gate_matches_gsam_cold_and_supersaturated_only():
+    """FAITHFUL GATE (smoothed): nucleation requires T < 258.15 K (-15 C) AND
+    supi >= 0.05 (module_mp_p3.f90:3084).  (a) warm T=262 K (supersaturated) is
+    OFF; (b) ice-SUBSATURATED air at 252 K is OFF; (c) cold+supersaturated is
+    ON; (d) the smooth-gate midpoints sit at half the interior rate."""
     cfg = P3Config()
-    assert cfg.cooper_T_act == 265.0                       # -8 C, vs gSAM 258.15
-    out_warm = p3_microphysics(*_column(262.0), 30.0, cfg)
-    assert float(out_warm.dN_i_dt[0, 0]) > 0.0             # gSAM would be OFF (>-15 C)
-    out_subsat = p3_microphysics(*_column(252.0, q_v_val=1.0e-8), 30.0, cfg)
-    assert float(out_subsat.dN_i_dt[0, 0]) > 0.0           # gSAM would need supi>=0.05
+    assert cfg.cooper_T_nuc == pytest.approx(constants.T_freeze - 15.0)
+    assert cfg.cooper_supi_min == 0.05
+    dt, rho = 30.0, 0.9
+
+    on = float(p3_microphysics(*_column(252.0, rho_val=rho), dt, cfg).dN_i_dt[0, 0])
+    assert on > 0.0
+
+    # (a) warm, supersaturated: T-sigmoid(5*(258.15-262)) ~ 4e-9 ⇒ suppressed
+    # by >= 1e8 relative to its own ungated base rate.
+    warm = float(p3_microphysics(*_column(262.0, rho_val=rho), dt, cfg).dN_i_dt[0, 0])
+    warm_base = _gsam_cooper_target_per_kg(262.0, rho) / dt
+    assert warm < 1.0e-6 * warm_base
+
+    # (b) cold but ice-subsaturated (q_v -> 0 ⇒ supi ~ -1): supi-sigmoid
+    # (200*(-1.05)) ~ e^-210 ~ 1e-92 — nucleation is dead to all purposes.
+    subsat = float(p3_microphysics(
+        *_column(252.0, rho_val=rho, q_v_val=1.0e-8), dt, cfg).dN_i_dt[0, 0])
+    assert subsat < 1.0e-60
+
+    # (d) midpoint semantics: at supi = supi_min exactly the supi factor is
+    # 1/2; at T = cooper_T_nuc exactly the T factor is 1/2.
+    mid_supi = float(p3_microphysics(
+        *_column(252.0, rho_val=rho, supi=cfg.cooper_supi_min),
+        dt, cfg).dN_i_dt[0, 0])
+    base_252 = _gsam_cooper_target_per_kg(252.0, rho) / dt
+    assert mid_supi == pytest.approx(0.5 * base_252, rel=1e-6)
+    mid_T = float(p3_microphysics(
+        *_column(float(cfg.cooper_T_nuc), rho_val=rho), dt, cfg).dN_i_dt[0, 0])
+    base_midT = _gsam_cooper_target_per_kg(float(cfg.cooper_T_nuc), rho) / dt
+    assert mid_T == pytest.approx(0.5 * base_midT, rel=1e-6)
 
 
 # --- AD-safety across the kink (T_freeze), the cap onset, and the capped tail --
@@ -200,11 +241,11 @@ def test_p3_cooper_gate_warmer_and_has_no_supersaturation_requirement():
 
 def test_p3_cooper_nucleation_ad_safe_across_regimes():
     """jax.grad of the nucleation rate wrt T is finite at the max(T_f-T,0) kink
-    (T_freeze), at the cap onset (~235.3 K for the default curve), deep in the
+    (T_freeze), at the cap onset (~240.6 K for the 100/L cap), deep in the
     capped tail, and at an interior point — not just one interior sample."""
     def dNi(Tval):
         return p3_microphysics(*_column(Tval), 30.0, P3Config()).dN_i_dt[0, 0]
 
-    for T_probe in (constants.T_freeze, 252.0, 235.3, 210.0):
+    for T_probe in (constants.T_freeze, 252.0, 240.6, 210.0):
         g = jax.grad(dNi)(jnp.array(T_probe))
         assert bool(jnp.isfinite(g)), f"T={T_probe}"
