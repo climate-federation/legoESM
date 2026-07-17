@@ -28,19 +28,33 @@ module extproj_shim_mod
     integer :: unused = 0
   end type fv_grid_type
 
-contains
-
   ! fill_corner_region is called by cubed_a2d/a2c_halo on the
   ! geographic inputs; the ORACLE feeds fully-defined analytic fields
-  ! over the whole ng=4 data domain, so the call must be a no-op here.
+  ! over the whole ng=4 data domain, so the call is a no-op here.
   ! (The python side fills corners upstream of projection; this oracle
-  ! certifies the PROJECTION + BASES only.)
-  subroutine fill_corner_region(vel, bd, dg, istag, jstag)
+  ! certifies the PROJECTION + BASES only.)  Generic like upstream's
+  ! interface (2d/3d variants).
+  interface fill_corner_region
+    module procedure fill_corner_region_2d
+    module procedure fill_corner_region_3d
+  end interface fill_corner_region
+
+contains
+
+  subroutine fill_corner_region_2d(vel, bd, dg, istag, jstag)
     type(fv_grid_bounds_type), intent(IN) :: bd
     type(duogrid_type), intent(in) :: dg
     integer, intent(IN) :: istag, jstag
     real, dimension(bd%isd:, bd%jsd:) :: vel
     if (istag == -999999) vel(bd%isd, bd%jsd) = 0.  ! silence unused warnings
-  end subroutine fill_corner_region
+  end subroutine fill_corner_region_2d
+
+  subroutine fill_corner_region_3d(vel, bd, dg, istag, jstag)
+    type(fv_grid_bounds_type), intent(IN) :: bd
+    type(duogrid_type), intent(in) :: dg
+    integer, intent(IN) :: istag, jstag
+    real, dimension(bd%isd:, bd%jsd:, :) :: vel
+    if (istag == -999999) vel(bd%isd, bd%jsd, 1) = 0.
+  end subroutine fill_corner_region_3d
 
 end module extproj_shim_mod

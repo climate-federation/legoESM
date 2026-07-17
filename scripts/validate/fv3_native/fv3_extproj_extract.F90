@@ -4,7 +4,7 @@
 !   tools/fv_duogrid.F90:2846-2992   unit_vect_latlon_ext + a2stag_metrics
 !   model/fv_grid_utils.F90:1639-1665,1781-1791,1880-1893,1996-2036 helpers
 module extproj_extract_mod
-  use extproj_shim_mod, only: R_GRID, f_p, duogrid_type, fv_grid_bounds_type, fv_grid_type
+  use extproj_shim_mod, only: R_GRID, f_p, duogrid_type, fv_grid_bounds_type, fv_grid_type, fill_corner_region
   implicit none
   public
 contains
