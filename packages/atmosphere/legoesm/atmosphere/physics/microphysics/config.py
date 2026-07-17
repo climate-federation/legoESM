@@ -598,8 +598,10 @@ class MorrisonConfig(NamedTuple):
     #     of the cloud-ice PSD across the snow-size threshold DCS converts ice
     #     to snow (module_mp_graupel.f90:3322-3326). Deposition-driven (only
     #     when ice-supersaturated); computed in the m2005 deposition block, so
-    #     it REQUIRES ice_deposition_scheme="m2005" (else it is 0). The snow
-    #     NUMBER source NPRCI is dropped (legoESM single-moment snow).
+    #     it REQUIRES ice_deposition_scheme="m2005" (else it is 0). The number
+    #     transfer NPRCI = PRCI/CONS22 (capped at N_i/dt) IS wired: it debits
+    #     N_i always and credits N_s under double-moment snow (an earlier
+    #     "dropped — single-moment snow" note here was stale).
     #   "heuristic" = the legacy constant-rate agg_coeff·q_i·f_ice.
     ice_to_snow_scheme: str = "m2005_autoconv"
     ice_snow_d_auto: float = 250.0e-6   # SAM DCS [m] (clice_snow_Dauto)
