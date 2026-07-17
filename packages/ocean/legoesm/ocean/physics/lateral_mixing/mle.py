@@ -179,7 +179,7 @@ def mle_vertical_structure(gdepw_over_H: jnp.ndarray) -> jnp.ndarray:
 
 
 def mle_mld_and_buoyancy(
-    rho_insitu: jnp.ndarray,
+    rho_pot: jnp.ndarray,
     dz_live: jnp.ndarray,
     wet_cell: jnp.ndarray,
     *,
@@ -193,11 +193,22 @@ def mle_mld_and_buoyancy(
     """MLE mixed-layer depth + ML-mean buoyancy (NEMO tramle.F90, integer level).
 
     Faithful to NEMO 5.0.1 ``tra_mle_trp``: the mixed layer is the levels
-    SHALLOWER than the first level whose in-situ density exceeds the
-    reference-LEVEL density by ``rho_c_mle`` (Delta-rho criterion on IN-SITU
-    rho); the ML depth ``zmld`` is the sum of their live thicknesses, and the
-    ML-mean buoyancy is
+    SHALLOWER than the first level whose density exceeds the reference-LEVEL
+    density by ``rho_c_mle``; the ML depth ``zmld`` is the sum of their live
+    thicknesses, and the ML-mean buoyancy is
     ``bm = grav * sum_ML[(rho0 - rho)/rho0 * dz] / max(dz_top, zmld)``.
+
+    DENSITY FIELD (NEMO ``rhop``): BOTH the Delta-rho criterion and ``zbm``
+    use NEMO's ``rhop`` — the SURFACE-REFERENCED POTENTIAL density (eosbn2
+    ``prhop``, "potential density referenced at the surface": the EOS
+    evaluated at zero pressure, no depth term), verbatim
+    ``IF( rhop(jk) > rhop(nla10) + rn_rho_c_mle )`` and
+    ``zbm = zbm + zc*(rho0 - rhop)*r1_rho0`` (tramle.F90).  Feeding IN-SITU
+    density here is WRONG and catastrophic at fine surface resolution: pure
+    compressibility between adjacent levels (~0.14 kg/m^3 over ~30 m)
+    exceeds the 0.01 kg/m^3 threshold, collapsing the diagnosed ML to the
+    top layer and zeroing the MLE transport (mu vanishes on a one-layer ML)
+    — the regression the potential-density rename of this argument guards.
 
     Reference level (NEMO ``nla10``, domzgr.F90): the T-level CONTAINING the
     ~``ref_depth_m`` horizon, selected from the W-INTERFACE depths —
@@ -220,7 +231,7 @@ def mle_mld_and_buoyancy(
 
     AD note: only the RETURNED ``zmld``/``in_ml`` are stop_gradient'd below;
     ``bm`` is computed from the un-stopped mask, so ``grad(bm)`` w.r.t.
-    ``dz_live``/``rho_insitu`` flows through the ML *contents* (the hard
+    ``dz_live``/``rho_pot`` flows through the ML *contents* (the hard
     0/1 membership itself has zero gradient everywhere it is defined).
 
     Assumes wet cells are TOP-CONTIGUOUS (real ocean columns: water above
@@ -230,7 +241,9 @@ def mle_mld_and_buoyancy(
 
     Parameters
     ----------
-    rho_insitu : array (..., nlev)  in-situ density [kg/m^3].
+    rho_pot : array (..., nlev)  SURFACE-REFERENCED POTENTIAL density
+                                 [kg/m^3] (NEMO ``rhop``; the EOS at
+                                 zero pressure — never in-situ).
     dz_live    : array (..., nlev)  live layer thickness [m] (dry cells -> 0).
     wet_cell   : array (..., nlev)  ocean mask {0,1}.
     z_faces    : array (nlev+1,)    reference W-INTERFACE depths [m, positive
@@ -251,7 +264,7 @@ def mle_mld_and_buoyancy(
                               ML-integrated convection-gate N^2, NEMO zn2).
     """
     nlev = z_faces.shape[0] - 1
-    wet = wet_cell.astype(rho_insitu.dtype)
+    wet = wet_cell.astype(rho_pot.dtype)
     # NEMO nla10 (domzgr.F90):
     #   zrefdep = ref_depth - 0.1*MINVAL(e3w_1d)
     #   nlb10   = MINLOC(gdepw_1d, mask = gdepw_1d > zrefdep)
@@ -278,13 +291,13 @@ def mle_mld_and_buoyancy(
     # is never > zrefdep, so the -1 cannot underflow for any ref_depth > 0.
     iref = jnp.clip(
         jnp.searchsorted(z_faces, zrefdep, side="right") - 1, 0, nlev - 1)
-    rho_ref = jnp.take(rho_insitu, iref, axis=-1)                    # (...)
-    excess = rho_insitu - (rho_ref[..., jnp.newaxis] + rho_c_mle)    # (..., nlev)
+    rho_ref = jnp.take(rho_pot, iref, axis=-1)                    # (...)
+    excess = rho_pot - (rho_ref[..., jnp.newaxis] + rho_c_mle)    # (..., nlev)
     # First level (from the surface) denser than the threshold, among WET levels
     # STRICTLY BELOW the reference level (NEMO scans jk = jpkm1..nlb10 only);
     # the ML is the levels above it.  Index-based, not depth-based.
     lvl_row = jnp.arange(nlev).reshape(
-        (1,) * (rho_insitu.ndim - 1) + (nlev,))
+        (1,) * (rho_pot.ndim - 1) + (nlev,))
     below_ref = lvl_row > iref
     exceed = (excess > 0.0) & (wet > 0.5) & jnp.broadcast_to(below_ref, excess.shape)
     has = jnp.any(exceed, axis=-1)
@@ -292,10 +305,10 @@ def mle_mld_and_buoyancy(
     # If no level exceeds, the whole wet column is "mixed".
     first = jnp.where(has, first, jnp.sum((wet > 0.5).astype(jnp.int32), axis=-1))
     in_ml = (lvl_row < first[..., jnp.newaxis]) & (wet > 0.5)
-    in_ml = in_ml.astype(rho_insitu.dtype)
+    in_ml = in_ml.astype(rho_pot.dtype)
     zmld = jnp.sum(in_ml * dz_live, axis=-1)                          # (...)
     dz_top = dz_live[..., 0]
-    b_int = grav * jnp.sum(in_ml * ((rho0 - rho_insitu) / rho0) * dz_live, axis=-1)
+    b_int = grav * jnp.sum(in_ml * ((rho0 - rho_pot) / rho0) * dz_live, axis=-1)
     bm = b_int / jnp.maximum(jnp.maximum(dz_top, zmld), 1e-10)        # (...)
     # MLD/buoyancy are diagnostic gates -> stop gradient so AD users do not treat
     # threshold motion as a smooth control path (the bolus magnitude through bm/H

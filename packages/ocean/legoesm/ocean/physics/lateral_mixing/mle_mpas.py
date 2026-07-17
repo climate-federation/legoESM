@@ -37,7 +37,11 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.operators_voronoi import cell_to_edge_avg_3d
-from legoesm.ocean.eos import make_eos_fn, rho_0 as _RHO_0
+from legoesm.ocean.eos import (
+    compute_buoyancy_frequency_adiabatic,
+    make_eos_fn,
+    rho_0 as _RHO_0,
+)
 from legoesm.ocean.physics.lateral_mixing.gm_redi_mpas import voronoi_neumann_fill
 from legoesm.ocean.physics.lateral_mixing.mle import (
     MLEConfig,
@@ -228,9 +232,18 @@ def mle_tracer_tendency_mpas(
         jnp.cumsum(z_coord.dz_ref),
     ])                                                              # (nlev+1,)
 
+    # NEMO rhop: SURFACE-REFERENCED POTENTIAL density (the EOS at zero
+    # pressure) drives BOTH the Delta-rho MLD criterion and zbm (tramle.F90;
+    # eosbn2 prhop).  In-situ rho here collapsed the ML to the top layer by
+    # pure compressibility (~0.14 kg/m^3 per ~30 m >> the 0.01 threshold),
+    # zeroing the MLE transport — the test_mle_mpas restratification
+    # regression.  The N^2 convection gate below keeps in-situ rho (a local
+    # vertical gradient, the standard N^2 approximation).
+    rho_pot = eos_fn(T_fill, S_fill, jnp.zeros_like(T_fill))
+
     # --- MLE mixed-layer depth + ML-mean buoyancy (shared grid-agnostic core) ---
     zmld, bm, in_ml = mle_mld_and_buoyancy(
-        rho_insitu, dz_live, wet3d,
+        rho_pot, dz_live, wet3d,
         z_faces=z_faces,
         rho_c_mle=cfg.rho_c_mle,
         ref_depth_m=cfg.ref_depth_m,
@@ -258,11 +271,24 @@ def mle_tracer_tendency_mpas(
     # --- Convection gate (NEMO nn_conv=1): no MLE where the ML-integrated N^2
     # of either neighbour column is negative (statically unstable). ---
     if cfg.no_mle_in_convection:
-        dz_half = z_coord.dz_half_ref * jacobian[:, jnp.newaxis]   # (nCells, nlev-1)
-        # Stable stratification: rho increases downward -> drho/dz < 0 (z up).
-        drho_dz = (rho_insitu[:, :-1] - rho_insitu[:, 1:]) / jnp.maximum(
-            dz_half, _EPS_DIV)
-        N2 = -(constants.g / constants.rho_ocean) * drho_dz       # (nCells, nlev-1)
+        # NEMO's gate sums rn2 — the PROPER (locally-referenced,
+        # compressibility-free) buoyancy frequency (tramle.F90:
+        # ``zn2 = zn2 + zc*(rn2(jk)+rn2(jk+1))*0.5``).  Differencing
+        # IN-SITU rho here carried the compressibility between reference
+        # pressures (~6x too stable; the shared helper's docstring) and
+        # read deep unstable columns as stable, leaking transport through
+        # the gate.  Shared adiabatic-parcel helper; reference pressure =
+        # hydrostatic estimate at the reference centre depths (the Veros
+        # press = |zt| convention the helper documents).
+        z_centers_ref = jnp.cumsum(z_coord.dz_ref) - 0.5 * z_coord.dz_ref
+        p_cell = jnp.broadcast_to(
+            (_RHO_0 * constants.g) * z_centers_ref[None, :],
+            T_fill.shape,
+        )
+        N2 = compute_buoyancy_frequency_adiabatic(
+            T_fill, S_fill, p_cell, z_coord.dz_ref, jacobian,
+            eos_fn=eos_fn,
+        )                                                          # (nCells, nlev-1)
         iface_in_ml = in_ml[:, :-1]                               # iface k in ML if cell k is
         col_n2 = jnp.sum(iface_in_ml * N2, axis=-1)              # (nCells,) NEMO zn2
         col_n2_f = voronoi_neumann_fill(col_n2, mask, mesh)

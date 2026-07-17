@@ -83,10 +83,6 @@ def _make_mle(cfg: MLEConfig) -> Callable:
         # Deferred imports (avoid a module-load cycle through the C-grid
         # operators, and keep the cube/MPAS import path free of them).
         from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
-        from legoesm.ocean.eos import (
-            compute_buoyancy_frequency,
-            compute_ocean_rho,
-        )
         from legoesm.ocean.physics.lateral_mixing.mle_latlon_cgrid import (
             mle_tracer_tendency_latlon_cgrid,
         )
@@ -97,15 +93,40 @@ def _make_mle(cfg: MLEConfig) -> Callable:
         )
 
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
-        rho = compute_ocean_rho(state, z_coord, J)
-        N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, J)
+        # NEMO rhop for the MLE MLD/buoyancy: SURFACE-REFERENCED POTENTIAL
+        # density — the default EOS evaluated at ZERO pressure (tramle.F90
+        # uses rhop for both the Delta-rho criterion and zbm; in-situ rho
+        # collapses the diagnosed ML by compressibility alone).
+        from legoesm import constants
+        from legoesm.ocean.eos import (
+            compute_buoyancy_frequency_adiabatic,
+            make_eos_fn,
+            rho_0 as _rho_0,
+        )
+        rho_pot = make_eos_fn()(
+            state.T.data, state.S.data, jnp.zeros_like(state.T.data)
+        )
+        # Convection-gate N^2: NEMO's gate sums rn2 — the PROPER
+        # locally-referenced buoyancy frequency.  The in-situ-difference
+        # form (compute_buoyancy_frequency) carries the compressibility
+        # between reference pressures (~6x too stable) and reads deep
+        # unstable columns as stable; use the shared adiabatic-parcel
+        # helper with the hydrostatic reference pressure at centre depths.
+        z_centers_ref = jnp.cumsum(z_coord.dz_ref) - 0.5 * z_coord.dz_ref
+        p_cell = jnp.broadcast_to(
+            (_rho_0 * constants.g) * z_centers_ref,
+            state.T.data.shape,
+        )
+        N2 = compute_buoyancy_frequency_adiabatic(
+            state.T.data, state.S.data, p_cell, z_coord.dz_ref, J,
+        )
         # Actual partial-cell-aware live thickness (IDENTICAL to compute_ocean_rho)
         # so the MLE MLD/buoyancy/volume are consistent over real bathymetry.
         h_k = compute_layer_thickness(state.eta.data, state.H_bathy.data, z_coord)
         mask = state.land_mask.data
         u_mask, v_mask = compute_face_masks(mask, grid)
         dT_dt, dS_dt = mle_tracer_tendency_latlon_cgrid(
-            state.T.data, state.S.data, rho, N2,
+            state.T.data, state.S.data, rho_pot, N2,
             mask, u_mask, v_mask, z_coord, J, grid, cfg, h_k=h_k,
         )
         return wrap_ocean_tendencies(None, None, dT_dt, dS_dt, state)

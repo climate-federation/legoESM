@@ -83,7 +83,7 @@ __physics_contract__ = {
         "unstable (N^2 < 0; nn_conv=1)."
     ),
     "inputs": {
-        "T": "degC", "S": "PSU", "rho_insitu": "kg/m^3", "N2": "1/s^2",
+        "T": "degC", "S": "PSU", "rho_pot": "kg/m^3 (surface-referenced potential density, NEMO rhop)", "N2": "1/s^2",
         "mask": "1", "u_mask": "1", "v_mask": "1", "jacobian": "1",
         "ce": "1", "lat_ref_deg": "deg", "rho_c_mle": "kg/m^3",
         "ref_depth_m": "m",
@@ -149,7 +149,7 @@ def _gdepw_w(dz_live: jnp.ndarray) -> jnp.ndarray:
 def mle_tracer_tendency_latlon_cgrid(
     T: jnp.ndarray,
     S: jnp.ndarray,
-    rho_insitu: jnp.ndarray,
+    rho_pot: jnp.ndarray,
     N2: jnp.ndarray,
     mask: jnp.ndarray,
     u_mask: jnp.ndarray,
@@ -166,11 +166,21 @@ def mle_tracer_tendency_latlon_cgrid(
     ----------
     T, S : (n_lat, n_lon, nlev)
         Potential temperature [degC] / salinity [PSU] at cell centres.
-    rho_insitu : (n_lat, n_lon, nlev)
-        In-situ density [kg/m^3] at cell centres (``compute_ocean_rho``).
+    rho_pot : (n_lat, n_lon, nlev)
+        SURFACE-REFERENCED POTENTIAL density [kg/m^3] at cell centres
+        (NEMO ``rhop``: the EOS evaluated at zero pressure — e.g.
+        ``make_eos_fn()(T, S, 0)``).  NOT in-situ density: compressibility
+        alone exceeds the 0.01 kg/m^3 Delta-rho threshold between adjacent
+        levels and collapses the diagnosed mixed layer (see
+        ``mle_mld_and_buoyancy``).
     N2 : (n_lat, n_lon, nlev-1)
-        Brunt-Vaisala frequency squared [1/s^2] at interior interfaces
-        (``compute_buoyancy_frequency``) — drives the convection gate.
+        Brunt-Vaisala frequency squared [1/s^2] at interior interfaces —
+        drives the convection gate.  Use the LOCALLY-REFERENCED
+        adiabatic-parcel form (``compute_buoyancy_frequency_adiabatic``,
+        NEMO's ``rn2`` analogue): the in-situ-difference form carries the
+        compressibility between reference pressures (~6x too stable) and
+        reads deep unstable columns as stable, leaking transport through
+        the nn_conv gate.
     mask : (n_lat, n_lon)
         2-D ocean mask (1 = ocean, 0 = land).
     u_mask : (n_lat, n_lon+1)
@@ -220,7 +230,7 @@ def mle_tracer_tendency_latlon_cgrid(
     # which is NOT the face-midpoint spacing on a partial-cell ladder.
     _t_ref = getattr(z_coord, "t_depth_ref", None)
     zmld, bm, in_ml = mle_mld_and_buoyancy(
-        rho_insitu, dz_live, wet3d,
+        rho_pot, dz_live, wet3d,
         z_faces=z_faces,
         z_centers_ref=(None if _t_ref is None else jnp.abs(jnp.asarray(_t_ref))),
         rho_c_mle=cfg.rho_c_mle,
