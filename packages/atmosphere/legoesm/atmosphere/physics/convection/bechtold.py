@@ -406,6 +406,349 @@ def _ifs_liquid_fraction_cu(T: jax.Array) -> jax.Array:
     return jnp.minimum(1.0, frac**2)
 
 
+# --- IFS convective downdraft (cudlfsn.F90 + cuddrafn.F90) ------------------
+_IFS_RMFDEPS = 0.30            # LFS mass flux = -RMFDEPS*M_b (sucumf.F90:154)
+_IFS_ENTRDD = 3.0e-4           # downdraft turbulent E=D rate [1/m] (sucumf.F90:144)
+_IFS_RMFCMIN = 1.0e-8          # minimum |mass flux| divisor guard (sucumf.F90:149)
+_IFS_ITOPDE_PA = 950.0e2       # NJKT3: below here the DD detrains linearly to the
+#                                surface (sucumf.F90:268 STPRE>950 hPa)
+_IFS_DD_ENTR_MAX_FRAC = 0.3    # ZDMFEN >= 0.3*PMFD(JK-1) (cuddrafn.F90:212)
+_IFS_DD_MU_FRAC = 0.75         # PMFD >= -0.75*PMFU (cuddrafn.F90:214)
+_IFS_DD_RAIN_AVAIL = 10.0      # PRFL > 10*ZMFTOP*ZCOND LFS acceptance (cudlfsn.F90:271)
+_IFS_DD_TD_MIN = 100.0         # PTD clip (cuddrafn.F90:231-232)
+_IFS_DD_TD_MAX = 400.0
+_IFS_NETFLUX_FRAC = 0.98       # |M_d| <= 0.98*M_u net-flux guard (cuflxn.F90:336-362)
+# Smooth-membership widths (numerics, not tunables): LFS buoyancy gate [K],
+# rain-availability gate [kg/m^2/s], termination gates, 950 hPa crossing [Pa].
+_DD_BUO_GATE_K = 0.2
+_DD_RAIN_GATE = 1.0e-6
+_DD_ITOPDE_W_PA = 2.0e3
+
+
+def _cuadjtq_evap_2iter(
+    T: jax.Array, q: jax.Array, p: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """IFS cuadjtq ICALL=2 (evaporation-only saturation adjustment, 2 Newton
+    iterations; cuadjtq.F90:218-254).
+
+    Mixed-phase saturation via the shared curves — ``q_sat = alpha*liq +
+    (1-alpha)*ice`` with ``alpha = FOEALFCU`` — and the spec-humidity
+    correction ``ZCOR = 1/(1 - RETV*q_sat)`` (q_sat capped at 0.5 as the
+    oracle does).  ``dq_sat/dT`` uses the Clausius-Clapeyron identity
+    ``L_mix*q_sat/(R_v*T^2)`` with ``L_mix = alpha*L_v + (1-alpha)*L_s``
+    (constants only; no re-implemented saturation formula).  Iteration 1's
+    condensation increment is clamped ``min(cond, 0)`` (evaporation only);
+    iteration 2 is unclamped unless iteration 1 landed exactly on 0
+    (cuadjtq.F90:242) — ported as a ``|cond1| < 1e-14`` branch select, a
+    documented micro-departure from the discrete equality test.
+    """
+    from legoesm.thermo import saturation_mixing_ratio_ice
+
+    def _one_iter(T_i, q_i, first):
+        alpha = _ifs_liquid_fraction_cu(T_i)
+        qs_mix = (
+            alpha * saturation_mixing_ratio(T_i, p)
+            + (1.0 - alpha) * saturation_mixing_ratio_ice(T_i, p)
+        )
+        # Oracle base is the SPECIFIC-humidity form eps*e_s/p (FOEEWMCU/PAP)
+        # BEFORE the ZCOR conversion; our helpers return the MIXING RATIO
+        # eps*e_s/(p-e_s).  Convert exactly: eps*e/p = r_s/(1 + r_s/eps)
+        # (codex R1 #2 — feeding the mixing ratio through ZCOR lands on
+        # eps*e/(p-(2-eps)e), a biased saturation).
+        qs = qs_mix / (1.0 + qs_mix / constants.epsilon)
+        qs = jnp.minimum(qs, 0.5)
+        zcor = 1.0 / (1.0 - _IFS_RETV * qs)
+        qs = qs * zcor
+        L_mix = alpha * constants.L_v + (1.0 - alpha) * constants.L_s
+        # Newton denominator 1 + ZCOR*(L/c_p)*dq_sat/dT: the oracle's
+        # ZQSAT*ZCOR*FOEDEMCU with FOEDEMCU = (L/c_p)*(dq_sat/dT)/q_sat —
+        # the q_sat factors cancel (an extra q_sat here collapsed the
+        # denominator to ~1 and produced ~20 K "wet bulbs").
+        dqsdt = L_mix * qs / (constants.R_v * jnp.maximum(T_i, 100.0) ** 2)
+        cond = (q_i - qs) / (1.0 + zcor * (L_mix / constants.c_pd) * dqsdt)
+        return cond, L_mix
+
+    cond1, L1 = _one_iter(T, q, True)
+    cond1 = jnp.minimum(cond1, 0.0)
+    T1 = T + (L1 / constants.c_pd) * cond1
+    q1 = q - cond1
+    cond2, L2 = _one_iter(T1, q1, False)
+    cond2 = jnp.where(jnp.abs(cond1) < 1e-14, jnp.minimum(cond2, 0.0), cond2)
+    return T1 + (L2 / constants.c_pd) * cond2, q1 - cond2
+
+
+def _ifs_downdraft(
+    T: jax.Array,
+    q_v: jax.Array,
+    p_full: jax.Array,
+    p_half: jax.Array,
+    z: jax.Array,
+    dp_full: jax.Array,
+    T_u: jax.Array,
+    q_u: jax.Array,
+    M_u: jax.Array,
+    M_b: jax.Array,
+    above_base: jax.Array,
+    cape_weight: jax.Array,
+    rain_flux_total: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    r"""IFS convective downdraft: LFS + saturated entraining descent
+    (cudlfsn.F90 + cuddrafn.F90), smooth/differentiable.
+
+    LFS (cudlfsn): at each in-cloud candidate level a 50/50 mixture of cloud
+    air (``T_u, q_u``) and the WET-BULB environment (cuadjtq ICALL=2 on the
+    env state) is tested for negative buoyancy, with the rain-availability
+    condition ``R0 > 10*m_top*demand`` (``R0`` = the column-TOTAL updraft
+    rain production — the oracle quirk, cumastrn.F90:628-635 — ``m_top =
+    RMFDEPS*M_b``, ``demand = q_wb - q_env`` the LFS saturation deficit).
+    The oracle's first-accepted-level semantics become an exclusive-cumprod
+    survival: ``omega_k = gate_k * prod_{j above k}(1 - gate_j)``.
+
+    Descent (cuddrafn): one top->surface ``lax.scan`` carrying the EXTENSIVE
+    state ``(m_d<=0, mfds, mfdq)`` — level starts superpose linearly through
+    the flux-weighted carry, the smooth analog of the single discrete LFS —
+    plus ``(prfl, oentr, buoy_int, m_d_itopde, itopde_mem)``.  Per level:
+    turbulent E=D at ENTRDD; organized entrainment from the buoyancy-deficit
+    recurrence ``oentr = g*min(b,0)*0.5/(1+int(min(b,0))dz)`` with the oracle
+    clamps (>= 0.3*m_d per layer; floor at -0.75*M_u); below 950 hPa a linear
+    pressure rundown of the flux captured at the crossing
+    (soft-membership + crossing-weighted carry capture); mixing of env air in
+    and downdraft air out; saturation adjustment (evaporative cooling) via
+    :func:`_cuadjtq_evap_2iter`; buoyancy + rain-loading termination
+    ``(1-term)`` multiplicative kill (permanence emerges since every update
+    is proportional to ``m_d``); rain debit ``pdmfdp = -m_d*cond <= 0``.
+
+    Documented departures (each cited in the W2 brief): half-level env state
+    stood in by full-level values (as in the shipped ZCAPE/ZHEAT); the
+    cuflxn below-base IDBAS linear extension and the PKINED diagnostic are
+    omitted; ``pdmfdp`` is emitted at the evaporation level rather than one
+    index above (the debit joins the same downward rain march either way).
+
+    Returns ``(m_d, mfds_pert, mfdq_pert, pdmfdp)``: the (<=0) downdraft
+    mass flux, the PERTURBATION fluxes ``mfds - m_d*s_env`` / ``mfdq -
+    m_d*q_env`` (cuflxn.F90:245-255 — their vertical divergence is the
+    environment tendency), and the rain-flux debit profile (<=0).
+    """
+    _dtype = jnp.result_type(T, q_v, M_u)
+    g, cpd = constants.g, constants.c_pd
+    ncol, nlev = T.shape
+
+    # ---- LFS (vectorized) --------------------------------------------------
+    T_wb, q_wb = _cuadjtq_evap_2iter(T.astype(_dtype), q_v.astype(_dtype), p_full)
+    T_mix = 0.5 * (T_u + T_wb)
+    q_mix = 0.5 * (q_u + q_wb)
+    b_lfs = virtual_temperature(T_mix, q_mix) - virtual_temperature(T, q_v)
+    demand = jnp.maximum(q_wb - q_v, 0.0)            # -ZCOND >= 0
+    # IKHSMIN gate (cudlfsn.F90:200-227; codex R1 #3): the LFS may start
+    # only AT/BELOW the level of minimum saturated moist static energy
+    # h_s = cp*T + g*z + L_mix*q_sat.  Soft-argmin one-hot + downward
+    # cumulative sum = smooth "k >= IKHSMIN" membership.
+    _alpha_hs = _ifs_liquid_fraction_cu(T)
+    _L_hs = _alpha_hs * constants.L_v + (1.0 - _alpha_hs) * constants.L_s
+    from legoesm.thermo import saturation_mixing_ratio_ice as _smri
+    _r_hs = (_alpha_hs * saturation_mixing_ratio(T, p_full)
+             + (1.0 - _alpha_hs) * _smri(T, p_full))
+    # PQSEN is saturation SPECIFIC humidity: q = r/(1+r) exactly (codex R2 #3).
+    _qs_hs = _r_hs / (1.0 + _r_hs)
+    h_s = cpd * T + g * z + _L_hs * _qs_hs
+    _w_hsmin = jax.nn.softmax(-h_s / 500.0, axis=1)  # coeff-ok: soft-argmin sharpness [J/kg]
+    elig_hs = jnp.clip(jnp.cumsum(_w_hsmin, axis=1), 0.0, 1.0)
+    m_top = _IFS_RMFDEPS * M_b                       # (ncol,)
+    # Candidate window KCTOP < JK < KCBOT (cudlfsn.F90:240-242): the oracle
+    # cloud TOP is where the ASCENT dies (KCTOP from cuascn), not the parcel
+    # LNB — the smooth parcel-LNB index collapses to ~LCL on some soundings
+    # (a pre-existing quirk of compute_lfc_lnb), so the window is built from
+    # the plume mass flux itself: tanh(M_u/(0.05*M_b)) is ~1 wherever the
+    # updraft is alive and ~0 above its death, times the above-cloud-base
+    # membership for the KCBOT bound.
+    window = above_base * jnp.tanh(
+        M_u / (0.005 * jnp.maximum(M_b, _IFS_RMFCMIN))[:, None])
+    gate = (
+        jax.nn.sigmoid(-b_lfs / _DD_BUO_GATE_K)
+        * jax.nn.sigmoid(
+            (rain_flux_total[:, None]
+             - _IFS_DD_RAIN_AVAIL * m_top[:, None] * demand) / _DD_RAIN_GATE)
+        * window
+        * elig_hs
+        * cape_weight[:, None]
+    )
+    surv = jnp.cumprod(1.0 - gate, axis=1)
+    surv_excl = jnp.concatenate(
+        [jnp.ones((ncol, 1), _dtype), surv[:, :-1]], axis=1)
+    omega = gate * surv_excl                          # start weight per level
+
+    # ---- Descent scan (top -> surface = ascending index) -------------------
+    s_env = cpd * T.astype(_dtype) + g * z.astype(_dtype)
+    dz_lay = jnp.abs(jnp.diff(z, axis=1, prepend=z[:, :1])).astype(_dtype)
+    itop_mem = jax.nn.sigmoid((p_full - _IFS_ITOPDE_PA) / _DD_ITOPDE_W_PA)
+    p_sfc = p_half[:, -1]
+    # Smooth-mass normalizer for the below-ITOPDE linear rundown: the oracle
+    # divides by PAPH(KLEV+1)-PAPH(ITOPDE); with a SMOOTH 950 hPa membership
+    # the equivalent exactly-telescoping denominator is sum(im*dp) — a fixed
+    # 50 hPa constant OVER-detrained (membership tails widen the region),
+    # flipped m_d positive at the surface and poisoned the net-flux guard.
+    rundown_denom = jnp.maximum(
+        jnp.sum(itop_mem * dp_full, axis=1), 1.0)       # (ncol,) [Pa]
+    # Micro-departure (codex R3 #3): inside the smooth 950 hPa transition
+    # band the capture and the im-weighted rundown overlap, so telescoping
+    # is exact only outside the band; the residual is bounded by the in-scan
+    # m_d <= 0 clamp and the net-flux guard.  A hard crossing would restore
+    # exactness at the cost of AD/MPI-invariance.
+
+    inputs = tuple(
+        jnp.moveaxis(a.astype(_dtype), 1, 0)
+        for a in (
+            omega, T_mix, q_mix, demand, T, q_v, s_env, q_v, z, dz_lay,
+            dp_full, p_full, M_u, itop_mem,
+        )
+    )
+
+    def _step(carry, xs):
+        (m_d, mfds, mfdq, prfl, oentr, buoy_int, m_itop, im_prev) = carry
+        (om, Tm, qm, dem, T_e, q_e, s_e, qv_e, z_k, dz_k, dp_k, p_k, mu_k,
+         im) = xs
+        # (b) turbulent entrainment = detrainment (the LFS injection joins
+        # at EMIT below — oracle stores PMFD(KDTOP)=ZMFTOP untouched and the
+        # descent operates from the NEXT level, codex R2 #4).
+        zentr = _IFS_ENTRDD * m_d * dz_k             # <= 0
+        # (c) 950 hPa crossing capture + below-ITOPDE rundown.
+        crossing = jnp.maximum(im - im_prev, 0.0)
+        m_itop = m_itop + crossing * m_d
+        zdmfde_below = m_itop * dp_k / rundown_denom_c
+        # (d) organized entrainment above ITOPDE with oracle clamps.
+        # oracle ZZENTR = ZOENTR*ZDZ*PMFD with NEGATIVE ZDZ (cuddrafn:207-208):
+        # with our positive dz_k the equivalent is MINUS oentr*dz*m_d
+        # ((<=0)*(+)*(<=0) needs the sign flip to stay <= 0) — codex R1 #1.
+        zdmfen_above = zentr - oentr * dz_k * m_d
+        zdmfen_above = jnp.maximum(zdmfen_above, _IFS_DD_ENTR_MAX_FRAC * m_d)
+        zdmfen_above = jnp.maximum(
+            zdmfen_above, -_IFS_DD_MU_FRAC * mu_k - (m_d - zentr))
+        zdmfen_above = jnp.minimum(zdmfen_above, 0.0)
+        zdmfen = (1.0 - im) * zdmfen_above           # 0 below ITOPDE
+        # the im factor is INSIDE the exactly-telescoping rundown share
+        zdmfde = (1.0 - im) * zentr + im * zdmfde_below
+        # (e) mass + property mixing (downdraft state from the PREVIOUS carry).
+        act = m_d < -_IFS_RMFCMIN
+        div = jnp.where(act, jnp.minimum(m_d, -_IFS_RMFCMIN), -1.0)
+        T_d_prev = jnp.where(
+            act, ((mfds / div) - g * z_k) / cpd, T_e)
+        T_d_prev = jnp.clip(T_d_prev, _IFS_DD_TD_MIN, _IFS_DD_TD_MAX)
+        q_d_prev = jnp.where(act, mfdq / div, q_e)
+        m_d_new = jnp.minimum(m_d + zdmfen - zdmfde, 0.0)  # physical: never positive
+        mfds = mfds + s_e * zdmfen - (cpd * T_d_prev + g * z_k) * zdmfde
+        mfdq = mfdq + qv_e * zdmfen - q_d_prev * zdmfde
+        # (f/g) diagnose + saturation-adjust the descending air.
+        act2 = m_d_new < -_IFS_RMFCMIN
+        div2 = jnp.where(act2, jnp.minimum(m_d_new, -_IFS_RMFCMIN), -1.0)
+        T_d = jnp.clip(
+            jnp.where(act2, ((mfds / div2) - g * z_k) / cpd, T_e),
+            _IFS_DD_TD_MIN, _IFS_DD_TD_MAX)
+        q_d = jnp.where(act2, mfdq / div2, q_e)
+        T_dn, q_dn = _cuadjtq_evap_2iter(T_d, q_d, p_k)
+        zcond = q_d - q_dn                            # <= 0 (evap into DD)
+        # write the adjusted state back through the extensive carry
+        mfds = jnp.where(act2, m_d_new * (cpd * T_dn + g * z_k), mfds)
+        mfdq = jnp.where(act2, m_d_new * q_dn, mfdq)
+        # (h) buoyancy + rain loading + termination.
+        zbuo = (virtual_temperature(T_dn, q_dn)
+                - virtual_temperature(T_e, qv_e))
+        zrain = (prfl / jnp.maximum(mu_k, _IFS_RMFCMIN)
+                 * jax.nn.sigmoid(prfl / _DD_RAIN_GATE))
+        zbuo = zbuo - T_dn * zrain
+        term = jnp.maximum(
+            jax.nn.sigmoid(zbuo / _DD_BUO_GATE_K),
+            jax.nn.sigmoid((m_d_new * zcond - prfl) / _DD_RAIN_GATE),
+        )
+        keep = 1.0 - term
+        m_d_new = m_d_new * keep
+        mfds = mfds * keep
+        mfdq = mfdq * keep
+        # (a/i) LFS injection at EMIT (oracle KDTOP semantics) + rain debits.
+        # The descent-evaporation debit uses the PRE-injection flux (the
+        # descent has not yet acted on the newly injected mass — codex R3 #1:
+        # post-injection m_d paired with the fallback zcond=-demand tripled
+        # the LFS debit and evaporated at the emit level).
+        pdmfdp_desc = -m_d_new * zcond               # descent evap, <= 0
+        inj = om * (-m_top_c)                        # m_top = RMFDEPS*M_b
+        pdmfdp_lfs = 0.5 * inj * dem                 # cudlfsn.F90:279, <= 0
+        m_d_new = m_d_new + inj
+        mfds = mfds + inj * (cpd * Tm + g * z_k)
+        mfdq = mfdq + inj * qm
+        pdmfdp = pdmfdp_desc + pdmfdp_lfs             # <= 0
+        prfl = jnp.maximum(prfl + pdmfdp, 0.0)
+        # (j) organized-entrainment recurrence for the next level.
+        zbuoyz = jnp.minimum(zbuo / jnp.maximum(T_e, 1.0), 0.0)
+        buoy_int = buoy_int + jnp.maximum(-zbuoyz * dz_k, 0.0)
+        oentr = g * zbuoyz * 0.5 / (1.0 + buoy_int)
+        carry = (m_d_new.astype(_dtype), mfds.astype(_dtype),
+                 mfdq.astype(_dtype), prfl.astype(_dtype),
+                 oentr.astype(_dtype), buoy_int.astype(_dtype),
+                 m_itop.astype(_dtype), im)
+        return carry, (m_d_new, mfds, mfdq, pdmfdp)
+
+    m_top_c = m_top.astype(_dtype)
+    p_sfc_c = p_sfc.astype(_dtype)
+    rundown_denom_c = rundown_denom.astype(_dtype)
+    zeros = jnp.zeros((ncol,), _dtype)
+    init = (zeros, zeros, zeros,
+            rain_flux_total.astype(_dtype), zeros, zeros, zeros,
+            itop_mem[:, 0].astype(_dtype) * 0.0)
+    _, (m_d_sf, mfds_sf, mfdq_sf, pdmfdp_sf) = jax.lax.scan(_step, init, inputs)
+    m_d = jnp.moveaxis(m_d_sf, 0, 1)
+    mfds = jnp.moveaxis(mfds_sf, 0, 1)
+    mfdq = jnp.moveaxis(mfdq_sf, 0, 1)
+    pdmfdp = jnp.moveaxis(pdmfdp_sf, 0, 1)
+
+    # Net-flux guard (cuflxn.F90:336-362): one column-uniform scale so
+    # |m_d| <= 0.98*M_u everywhere.  The oracle applies it against the
+    # BELOW-BASE EXTENDED updraft (PMFU(JK)=PMFU(IKB)*ZZP, cuflxn:321-332);
+    # using the raw above_base-suppressed M_u would take the min over
+    # sub-cloud cells where M_u ~ 0 and rescale the whole DD to zero
+    # (codex R2 #1).  Soft-gather M_u and p at the cloud base with the
+    # above_base weight profile itself (its gradient peaks at the base).
+    _w_base = above_base * (1.0 - above_base)
+    _w_base = _w_base / jnp.maximum(
+        jnp.sum(_w_base, axis=1, keepdims=True), 1e-30)
+    mu_base = jnp.sum(_w_base * M_u, axis=1, keepdims=True)
+    # cloud-base INTERFACE pressure (oracle PAPH(IDBAS)): gather the layer-top
+    # half pressures with the same base weights (codex R3 #4).
+    p_base = jnp.sum(_w_base * p_half[:, :-1], axis=1, keepdims=True)
+    # Oracle ZZP is built on HALF levels (PAPH, cuflxn:324): use each
+    # layer's TOP half pressure — the bottom FULL level can equal the
+    # surface pressure exactly (sigma grids), zeroing zzp and the guard.
+    zzp = jnp.clip(
+        (p_half[:, -1:] - p_half[:, :-1])
+        / jnp.maximum(p_half[:, -1:] - p_base, 1.0),
+        0.0, 1.0)
+    M_u_guard = above_base * M_u + (1.0 - above_base) * mu_base * zzp
+    # Oracle IF-semantics (cuflxn:357-360): the ratio constrains zmfs ONLY at
+    # levels actually VIOLATING |m_d| > 0.98*M_u; elsewhere the level is
+    # inert (ratio -> 1).  A blanket min was poisoned by numerically-noise
+    # levels (|m_d| ~ 1e-60 against near-zero top M_u) and rescaled the
+    # whole DD to ~0 (codex R2 #1 follow-through).
+    ratio = _IFS_NETFLUX_FRAC * M_u_guard / jnp.maximum(-m_d, _IFS_RMFCMIN)
+    # Oracle limits only JK >= KDTOP-1; the smooth analog masks the LFS/window
+    # TAILS (codex R3 #2: a tail level's injected flux shrinks slower than the
+    # tail M_u, so an inactive level could impose a column-wide zmfs).  Active
+    # = carrying at least 0.1% of the column's own peak downdraft.
+    _dd_peak = jnp.max(-m_d, axis=1, keepdims=True)
+    active = (-m_d) > 1e-3 * _dd_peak
+    violating = active & ((-m_d) > (_IFS_NETFLUX_FRAC * M_u_guard + 1e-15))
+    zmfs = jnp.minimum(
+        jnp.min(jnp.where(violating, jnp.maximum(ratio, 0.0), 1.0),
+                axis=1, keepdims=True), 1.0)
+    m_d, mfds, mfdq, pdmfdp = (a * zmfs for a in (m_d, mfds, mfdq, pdmfdp))
+
+    # Physical invariants on the emitted family: m_d <= 0 exactly (the
+    # smooth blends can leave +O(1e-12) residue), pdmfdp <= 0.
+    m_d = jnp.minimum(m_d, 0.0)
+    pdmfdp = jnp.minimum(pdmfdp, 0.0)
+    # Perturbation fluxes (cuflxn.F90:245-255): divergence = env tendency.
+    mfds_pert = mfds - m_d * (cpd * T + g * z)
+    mfdq_pert = mfdq - m_d * q_v
+    return m_d, mfds_pert, mfdq_pert, pdmfdp
+
+
 # --- IFS deep CAPE closure ZMFUB1 = ZCAPE*ZMFUB/(ZHEAT*ZXTAU) (cumastrn.F90:704-833)
 _IFS_RETV = 1.0 / constants.epsilon - 1.0       # RETV = R_v/R_d - 1 (yomcst.F90:342)
 _IFS_ZCAPE_MAX_PA = 5000.0                      # ZCAPE = MIN(ZCAPE, 5000) (cumastrn.F90:825)
@@ -1002,13 +1345,16 @@ def _ifs_cape_closure_target(
     dT_up = T[:, :-1] - T[:, 1:]
     dphi_up = constants.g * (z[:, :-1] - z[:, 1:])
     dq_up = q_v[:, :-1] - q_v[:, 1:]
-    stab = jnp.maximum(
-        0.0,
+    stab = (
         (dT_up + dphi_up / constants.c_pd) / jnp.maximum(T[:, 1:], 1.0)
-        + _IFS_RETV * dq_up,
+        + _IFS_RETV * dq_up
     )
     m_net = constants.g * (M_u_fg[:, 1:] + M_d_fg[:, 1:])
-    zheat = jnp.sum(in_cloud[:, 1:] * stab * m_net, axis=-1)
+    # Oracle clamp wraps the PRODUCT (cumastrn.F90:722-727: MAX(0, stab*(g*
+    # (PMFU+PMFD)))) — with a downdraft M_d<0 the net flux can dip negative
+    # and max(0,stab)*m_net would contribute NEGATIVE ZHEAT exactly where
+    # downdrafts are strongest (codex-recon W2).  Identical when m_net>=0.
+    zheat = jnp.sum(in_cloud[:, 1:] * jnp.maximum(stab * m_net, 0.0), axis=-1)
     zheat = jnp.maximum(zheat, _IFS_ZHEAT_FLOOR)
 
     # ``cape_weight`` multiplies the target as the smooth ``LDCUM`` membership
@@ -1641,6 +1987,7 @@ def bechtold_convection(
         config.use_ifs_inplume_precip
         or config.use_ifs_cape_closure
         or config.use_convective_turnover_tau
+        or config.use_ifs_downdraft
     )
     if _need_ke:
         # SHARP (4/level) cloud-base and cloud-top gates so the KE mean is taken
@@ -1692,7 +2039,30 @@ def bechtold_convection(
         # closure at most ~30% WEAKER than IFS on downdraft-active columns — a
         # documented gap until a faithful cuddrafn-shaped descent exists (the
         # opt-in penetrative transport's m_d profile is the natural donor).
-        M_d_fg = jnp.zeros_like(plume.M_u)
+        if config.use_ifs_downdraft:
+            # Faithful cuddrafn first guess (closes the documented ~RMFDEPS
+            # =30% ZHEAT gap).  First-guess rain total R0 (the oracle's ZRFL
+            # = sum of ZDMFUP, cumastrn.F90:628-635): the in-plume formation
+            # profile when that path is on, else the detrained-condensate
+            # proxy (rain fraction of it is what the split would produce;
+            # the LFS gate only needs the availability magnitude).
+            _mu_fg = jnp.minimum(plume.M_u, config.M_b_max)
+            if config.use_ifs_inplume_precip:
+                _r0_fg = jnp.sum(
+                    jnp.maximum(precip_frac, 0.0) * _mu_fg, axis=-1)
+            else:
+                _r0_fg = jnp.sum(
+                    dlt_profile * _mu_fg
+                    * jnp.clip(plume.q_c_u, 0.0, None)
+                    / jnp.clip(rho, 0.01, None) * dp_full, axis=-1,
+                ) / constants.g
+            M_d_fg, _, _, _ = _ifs_downdraft(
+                T, q_v, p_full, p_half, z, dp_full,
+                plume.T_u, plume.q_u, _mu_fg, M_b, above_base,
+                cape_weight, _r0_fg,
+            )
+        else:
+            M_d_fg = jnp.zeros_like(plume.M_u)
         # ZMFUB and PMFU describe the SAME first guess (codex R2 #1): the
         # plume was integrated from the CAPPED M_b_launch, and IFS itself
         # builds the deep first-guess ZMFUB at/below ZMFMAX before the closure
@@ -1897,7 +2267,7 @@ def bechtold_convection(
         # sink_k [kg/kg/s]: sum(sink*dp/g) == rain flux total exactly.
         dq_v_dt = dq_v_dt - _rain_flux_total * constants.g * _w_sink / dp_full
         _split_done = True
-    elif config.use_ifs_subcloud_evap:
+    elif config.use_ifs_subcloud_evap or config.use_ifs_downdraft:
         dq_c_conv_dt = jnp.nan_to_num(jnp.maximum(dq_c_conv_dt, 0.0))
         if config.precip_split_scheme == "constant":
             dq_c_conv_dt, dq_r_conv_dt = split_convective_rain(
@@ -1973,6 +2343,45 @@ def bechtold_convection(
                 dq_c_conv_dt > 0.0, dq_c_conv_dt * rain_scale, dq_c_conv_dt,
             )
 
+    # -- IFS convective downdraft (cudlfsn + cuddrafn, opt-in) ---------------
+    # Runs on the FINAL (closure-rescaled, relaxed) updraft and the post-split
+    # rain.  Environment tendencies are the vertical divergence of the
+    # PERTURBATION fluxes (cudtdqn.F90:321-352): zero flux at the model top
+    # (no downdraft there) and a forced-zero surface interface, so the
+    # divergence telescopes to ZERO column-net — pure redistribution.  The
+    # rain the downdraft evaporates (pdmfdp <= 0) is therefore matched by an
+    # EXPLICIT env vapor deposit + latent cooling at the evaporation level
+    # and a column-uniform debit of the rain source: column water and
+    # enthalpy close exactly on our side (the oracle's own e_dd ledger is
+    # unresolved in the read source — recon W2 risk 1; conservation outranks
+    # oracle tier-3 matching).  The sub-cloud Kessler evap then acts on the
+    # debited rain (flux-march SHAPE departure vs threading pdmfdp through
+    # the march itself — documented).
+    if config.use_ifs_downdraft and dq_r_conv_dt is not None:
+        _rain_tot_dd = jnp.sum(
+            dq_r_conv_dt * dp_full, axis=-1) / constants.g
+        m_d_dd, _mfds_p, _mfdq_p, dd_pdmfdp = _ifs_downdraft(
+            T, q_v, p_full, p_half, z, dp_full,
+            plume.T_u, plume.q_u, M_u_new, M_b, above_base,
+            cape_weight, _rain_tot_dd,
+        )
+        _zeros_col = jnp.zeros((ncol, 1), _mfds_p.dtype)
+        for _flx, _tgt in ((_mfds_p, "s"), (_mfdq_p, "q")):
+            _f_below = jnp.concatenate([_flx[:, 1:], _zeros_col], axis=1)
+            _div = constants.g * (_f_below - _flx) / dp_full
+            if _tgt == "s":
+                dT_dt = dT_dt + _div / constants.c_pd
+            else:
+                dq_v_dt = dq_v_dt + _div
+        # Conserving ledger for the DD rain evaporation.
+        e_dd = jnp.maximum(-dd_pdmfdp, 0.0) * constants.g / dp_full
+        dq_v_dt = dq_v_dt + e_dd
+        dT_dt = dT_dt - (constants.L_v / constants.c_pd) * e_dd
+        _e_tot = jnp.sum(jnp.maximum(-dd_pdmfdp, 0.0), axis=-1, keepdims=True)
+        _dd_scale = jnp.clip(
+            1.0 - _e_tot / jnp.maximum(_rain_tot_dd[:, None], 1e-30), 0.0, 1.0)
+        dq_r_conv_dt = dq_r_conv_dt * _dd_scale
+
     # -- IFS Kessler sub-cloud rain evaporation (cuflxn.F90:436-475, default ON) --
     # INDEPENDENT of ``enable_downdraft`` (IFS evaporates the precip flux
     # below cloud base wherever the sub-cloud air is drier than the RH break,
@@ -2025,7 +2434,11 @@ def bechtold_convection(
 
     # -- CMT --------------------------------------------------------------
     if config.enable_cmt:
-        if config.enable_downdraft:
+        if config.use_ifs_downdraft and dq_r_conv_dt is not None:
+            # Faithful cuddrafn profile (already <= 0), superseding the
+            # ad-hoc -alpha*M_u*trigger form when the oracle downdraft is on.
+            M_d = m_d_dd
+        elif config.enable_downdraft:
             # CMT downdraft profile = -downdraft_alpha · M_u · trigger,
             # matching ``M_d_base = -downdraft_alpha · M_b · trigger``
             # used by the subcloud rain-evap path above.  An earlier

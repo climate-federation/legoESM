@@ -1497,6 +1497,13 @@ class BechtoldConfig(NamedTuple):
     # at 3, i.e. a 3x LONGER turnover / weaker deep flux than the legacy
     # floor — validate before enabling by default.
     dx_m: float = 0.0
+    # IFS convective downdraft (cudlfsn.F90 LFS + cuddrafn.F90 saturated
+    # entraining descent; see bechtold._ifs_downdraft): downdraft mass-flux
+    # transport of heat/moisture (perturbation-flux divergence), rain-flux
+    # debit with a conserving env vapor/enthalpy ledger, faithful M_d into
+    # the CAPE closure's ZHEAT and into CMT.  Default False pending RCE/AMIP
+    # A/B (two-step pattern); False is byte-identical legacy.
+    use_ifs_downdraft: bool = False
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0
