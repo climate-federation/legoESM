@@ -238,13 +238,24 @@ def test_np2_stage_correct_parity_and_tripwire(solver, tmp_path_factory):
     ref_dir = comm.bcast(str(ref_dir) if ref_dir is not None else None,
                          root=0)
     ref_path = os.path.join(ref_dir, f"stage_halo_ref_{solver}.npz")
+    # Failure discipline (codex r2 #1): a raise/timeout on rank 0 BEFORE
+    # a bare Barrier would leave rank 1 blocked forever — deadlock, not a
+    # test failure.  The success flag rides the (collective) bcast that
+    # replaces the Barrier, so every rank fails loudly together.
+    ok, err = True, ""
     if comm.Get_rank() == 0:
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(("OMPI_", "PMIX_", "PMI_"))}
-        subprocess.run(
-            [sys.executable, os.path.abspath(__file__), solver, ref_path],
-            check=True, env=env, timeout=1200)
-    comm.Barrier()
+        try:
+            subprocess.run(
+                [sys.executable, os.path.abspath(__file__), solver,
+                 ref_path],
+                check=True, env=env, timeout=1200)
+        except Exception as e:  # surfaced on every rank via the bcast
+            ok, err = False, repr(e)
+    ok, err = comm.bcast((ok, err), root=0)
+    if not ok:
+        pytest.fail(f"serial-reference subprocess failed on rank 0: {err}")
     with np.load(ref_path) as f:
         ref = {k: f[k] for k in f.files}
 

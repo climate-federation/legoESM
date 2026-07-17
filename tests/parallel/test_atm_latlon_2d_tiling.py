@@ -920,10 +920,11 @@ def test_chooser_band_precedence_survives_partner_fold():
 def test_chooser_2d_when_band_infeasible():
     """The 2-D lane is selected exactly in its raison-d'etre regime: the
     band infeasible (indivisible n_lat or sub-min_tile bands).  Ranking
-    among p_lon > 1 candidates stays perimeter-based (the gather term is
-    common to all of them)."""
-    # n_lat=6 % 4 != 0 -> band infeasible; (1,4)=6+min(8+16,32)=30 beats
-    # (2,2)=16+3+min(16+16,32)=51.
+    among the surviving p_lon > 1 candidates uses the honest per-path
+    fold costs (partner w+16 where the runtime takes the partner path,
+    gather n_lon otherwise — codex r2 #2 doc fix)."""
+    # n_lat=6 % 4 != 0 -> band infeasible; (1,4) = 6 + (8+16) = 30 beats
+    # (2,2) = 16 + 3 + (16+16) = 51.
     assert choose_latlon_2d_topology(4, 6, 32) == (1, 4)
     # min_tile: p_lat=8 leaves 1-row bands -> infeasible.  (4,2) has w=4
     # >= 2*h_ref so it is charged the forced partner fold (4+2+20=26);
