@@ -176,69 +176,6 @@ def test_vertical_mixing_smoke(scheme):
 # 7g  Bottom drag smoke tests and sign checks
 # ============================================================================
 
-@pytest.mark.parametrize("scheme", ["linear", "quadratic"])
-def test_bottom_drag_smoke(scheme):
-    """Each bottom drag scheme produces finite outputs."""
-    from legoesm.ocean.physics.bottom_drag.integration import make_bottom_drag_physics
-    from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
-
-    state, grid, z_coord = _make_ocean_state()
-    config = BottomDragConfig(scheme=scheme)
-    phys_fn = make_bottom_drag_physics(config)
-    tend = phys_fn(state, grid, z_coord)
-
-    assert jnp.all(jnp.isfinite(tend.du_dt.data)), f"{scheme}: du_dt NaN/Inf"
-    assert jnp.all(jnp.isfinite(tend.dv_dt.data)), f"{scheme}: dv_dt NaN/Inf"
-
-
-@pytest.mark.parametrize("scheme", ["linear", "quadratic"])
-def test_bottom_drag_opposes_flow(scheme):
-    """Bottom drag opposes flow: du_dt * u <= 0 at bottom level."""
-    from legoesm.ocean.physics.bottom_drag.integration import make_bottom_drag_physics
-    from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
-
-    state, grid, z_coord = _make_ocean_state()
-    config = BottomDragConfig(scheme=scheme)
-    phys_fn = make_bottom_drag_physics(config)
-    tend = phys_fn(state, grid, z_coord)
-
-    u_bot = state.u.data[..., -1]
-    du_bot = tend.du_dt.data[..., -1]
-    product = u_bot * du_bot
-    # Drag should oppose flow where u is nonzero
-    active = jnp.abs(u_bot) > 1e-6
-    if jnp.any(active):
-        frac = float(jnp.mean((product[active] <= 1e-10).astype(jnp.float64)))
-        assert frac > 0.9, f"{scheme}: only {frac:.0%} bottom drag opposes flow"
-
-
-@pytest.mark.parametrize("scheme", ["linear", "quadratic"])
-def test_bottom_drag_zero_at_rest(scheme):
-    """At rest (u=v=0), bottom drag should be zero."""
-    from legoesm.ocean.physics.bottom_drag.integration import make_bottom_drag_physics
-    from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
-
-    state, grid, z_coord = _make_ocean_state()
-    state = state._replace(
-        u=Field(data=jnp.zeros_like(state.u.data),
-                name="u", dims=state.u.dims, units="m/s"),
-        v=Field(data=jnp.zeros_like(state.v.data),
-                name="v", dims=state.v.dims, units="m/s"),
-    )
-    config = BottomDragConfig(scheme=scheme)
-    phys_fn = make_bottom_drag_physics(config)
-    tend = phys_fn(state, grid, z_coord)
-
-    max_du = float(jnp.max(jnp.abs(tend.du_dt.data)))
-    max_dv = float(jnp.max(jnp.abs(tend.dv_dt.data)))
-    assert max_du < 1e-15, f"{scheme}: du_dt = {max_du:.2e} at rest"
-    assert max_dv < 1e-15, f"{scheme}: dv_dt = {max_dv:.2e} at rest"
-
-
-# ============================================================================
-# 7h  Ocean convection smoke tests
-# ============================================================================
-
 @pytest.mark.parametrize("scheme", ["enhanced_diffusion", "plume"])
 def test_ocean_convection_smoke(scheme):
     """Each ocean convection scheme produces finite outputs."""

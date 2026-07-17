@@ -2840,7 +2840,19 @@ def apply_surface_flux_config(tc, config):
     if (sbs == "constant" and gzi is None and stc == "legoesm"
             and sss == "dyer1974"):
         return tc
-    sub = getattr(tc, tc.scheme, None)  # e.g. tc.louis; "none"/clubb=None safe
+    # `TurbulenceConfig.clubb` defaults to None and dispatch substitutes a fresh
+    # CLUBBConfig(), so bailing on the None sub-config here SILENTLY DROPPED the
+    # injection for turbulence="clubb": the run used CLUBB's own default
+    # constant surface layer while the user asked for e.g. coare3 (codex).
+    # Materialize exactly what dispatch will, through the shared helper.  Note
+    # this is reached only PAST the all-defaults early return above, so a
+    # default config still returns `tc` unchanged (same object) and the identity
+    # contract in test_turbulence_config_for_default_vs_override holds.
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        materialize_sub_config,
+    )
+    tc = materialize_sub_config(tc)
+    sub = getattr(tc, tc.scheme, None)  # e.g. tc.louis; "none" => None, safe
     if sub is None or getattr(sub, "surface", None) is None:
         return tc
     surf = sub.surface

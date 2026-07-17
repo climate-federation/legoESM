@@ -698,9 +698,12 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
     # masking the error).  ``scheme`` is the static config value, so raising at
     # function entry is jit-safe (this is the same defense used by the sibling
     # factories — see CLAUDE.md "Dispatch").
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        VALID_VERTICAL_MIXING_SCHEMES,
+    )
     raise ValueError(
         f"unknown vertical_mixing.scheme={scheme!r}; expected one of "
-        "{'none', 'constant', 'richardson', 'tke', 'catke', 'kpp'}"
+        f"{sorted(VALID_VERTICAL_MIXING_SCHEMES)}"
     )
 
 

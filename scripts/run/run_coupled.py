@@ -42,6 +42,9 @@ logging.basicConfig(
 logger = logging.getLogger("run_coupled")
 
 _LAND_SCHEMES = ("slab", "multilayer")
+#: LandConfig.runoff_scheme literals (slab land only); the dispatch in
+#: land/slab_land.py raises on anything else.
+_LAND_RUNOFF_SCHEMES = ("bucket", "topmodel")
 
 def _check_params_clobber(params: dict, land_params: str) -> None:
     """Refuse --params overrides that ``CoupledESMDriver.setup()`` would clobber.
@@ -112,7 +115,8 @@ class _CoupledParamsBundle(NamedTuple):
     lake: object
 
 
-def build_params_bundle(coupled_cfg, coupler_config=None) -> _CoupledParamsBundle:
+def build_params_bundle(coupled_cfg, coupler_config=None,
+                        ice_config=None) -> _CoupledParamsBundle:
     """The exact --params bundle ``apply_coupled_params`` routes into: the
     coupled config plus the coupler / sea-ice / lake configs (defaults when
     None — ``CoupledESMDriver`` builds the identical defaults, so a no-params
@@ -126,13 +130,158 @@ def build_params_bundle(coupled_cfg, coupler_config=None) -> _CoupledParamsBundl
     return _CoupledParamsBundle(
         coupled=coupled_cfg,
         coupler=coupler_config or CouplerConfig(),
-        ice=SeaIceConfig(),
+        ice=ice_config or SeaIceConfig(),
         lake=LakeConfig(),
     )
 
 
+#: SeaIceConfig scheme literals; each dispatch raises on anything else.
+_ICE_SHORTWAVE_SCHEMES = ("constant", "maykut_untersteiner", "delta_eddington")
+#: sea_ice._bulk_flux_dispatch accepts all four (the ICE tile runs genuine
+#: MOST with ice roughness -- unlike the ATMOSPHERE, where "most" silently
+#: degrades to constant, which is why VALID_SURFACE_BULK omits it).
+_ICE_BULK_SCHEMES = ("constant", "most", "coare3", "large_yeager")
+_ICE_MOST_SCHEMES = ("most", "coare3", "large_yeager")
+
+
+def build_sea_ice_config(args):
+    """The ``SeaIceConfig`` for this run.
+
+    Every sea-ice sub-model was UNREACHABLE before this. ``SeaIceConfig()`` was
+    built with NO arguments here and run_coupled had no ``--ice*`` flag at all,
+    so:
+
+      * snow-on-ice, bulk salinity/brine, Lipscomb-2007 mechanical RIDGING and
+        CESM melt PONDS are each gated by a ``bool = False``, and bools are not
+        ``:float``-spec-eligible -- so ``--params`` can never reach them either.
+        Ridging is oracle-pinned; nothing could switch it on.
+      * shortwave_scheme / bulk_scheme / stability_scheme are `str`,
+        which ``--params`` also cannot carry.
+
+    Returns ``None`` when nothing was requested, so the driver builds its own
+    identical default and an untouched run stays byte-identical.
+    """
+    from legoesm.ice.config import SeaIceConfig
+
+    base = SeaIceConfig()
+    changed = {}
+    for flag, sub in (("ice_snow", "snow"), ("ice_brine", "brine"),
+                      ("ice_ponds", "ponds")):
+        if getattr(args, flag, False):
+            changed[sub] = getattr(base, sub)._replace(enabled=True)
+    for flag, field in (("ice_shortwave_scheme", "shortwave_scheme"),
+                        ("ice_bulk_scheme", "bulk_scheme"),
+                        ("ice_stability_scheme", "stability_scheme")):
+        v = getattr(args, flag, None)
+        if v is not None and v != getattr(base, field):
+            changed[field] = v
+    _reject_unreachable_sea_ice_options(args, changed, base)
+    if not changed:
+        return None
+    return base._replace(**changed)
+
+
+def _reject_unreachable_sea_ice_options(args, changed, base) -> None:
+    """Refuse an option this driver cannot actually run, and say why.
+
+    Two DIFFERENT gaps, deliberately not conflated:
+
+    * MULTI-CATEGORY (ridging, lipscomb2001 ITD remap) is unreachable from
+      EVERY driver, not just this one: nothing anywhere builds a
+      multi-category state (run_omip_core2 hardcodes n_categories=1 too), and
+      ``step_sea_ice`` RAISES for n_categories>1 without a DynamicSeaIceState.
+      Ridging is additionally driven by an ice velocity. So this is a genuine
+      unwired-physics gap -> tracked, not flagged.
+    * DYNAMICS is reachable, just not HERE: run_omip_core2 offers
+      --prognostic-ice-dynamics {free_drift,evp,mevp} and builds the
+      DynamicSeaIceState via init_dynamic_ice_state. run_coupled's
+      init_surface_state builds a scalar-slab SeaIceState instead.
+
+    There is deliberately NO --ice-itd-remap flag either: its only non-default
+    value is lipscomb2001, which the multi-category gap puts out of reach, so
+    the flag could only ever accept the default you already get.
+
+    An earlier draft "fixed" both by adding --ice-categories/--ice-dynamics
+    here. That was WORSE than the gap: every accepted value crashed on the
+    first step (``_step_dynamic`` reads a ``u_ice`` the slab state lacks;
+    multi-category explicitly rejects the slab state) -- a PHANTOM, the exact
+    shape of ``--surface-bulk-scheme most``, which parsed fine and then died at
+    construction and which this branch exists to remove (codex). Offer nothing
+    that cannot run.
+    """
+    bulk = changed.get("bulk_scheme", base.bulk_scheme)
+    if getattr(args, "ice_stability_scheme", None) and bulk not in _ICE_MOST_SCHEMES:
+        raise SystemExit(
+            f"--ice-stability-scheme is only read by the MOST bulk branch; "
+            f"--ice-bulk-scheme {bulk!r} uses simple_bulk_fluxes and never "
+            f"consults stability functions. Use one of {_ICE_MOST_SCHEMES}."
+        )
+
+
+def build_coupler_config(args):
+    """The ``CouplerConfig`` for this run, or ``None`` to take the driver's
+    defaults.
+
+    Exposed (not inlined in ``main``) so a test can assert the CONSTRUCTED
+    config rather than re-deriving it -- a mirror in the test would pass even if
+    this function were wrong, which is exactly how the ``bulk_scheme`` omission
+    below survived parser-only coverage.
+
+    Keeps the coupler ocean-tile bulk-flux scheme consistent with the atmosphere
+    surface layer (interface energy balance: the flux leaving the ocean must
+    match the flux entering the atmosphere).
+
+    Returns ``None`` -- letting the driver build the identical default
+    CouplerConfig, so the run stays byte-identical -- whenever the requested
+    settings cannot reach the tile's physics: the ocean tile consults
+    thermo_convention/stability_scheme/gustiness ONLY on a MOST scheme, so under
+    the default "constant" closure those flags are inert on BOTH sides and the
+    default CouplerConfig is already consistent.  NOTE this is a weaker claim
+    than "the user stays on the defaults" (the earlier wording, which was
+    literally false: --gustiness-zi 300 or --bulk-thermo-convention aerobulk
+    still return None here) -- the guard in
+    driver/air_sea_consistency.validate_air_sea_consistency is what actually
+    enforces consistency, and it applies the same MOST gating.
+    """
+    if (args.surface_bulk_scheme == "constant"
+            and args.surface_stability_scheme == "dyer1974"):
+        return None
+    from legoesm.coupler.config import CouplerConfig
+
+    # ``bulk_scheme`` was OMITTED here, so it stayed at its "constant" default
+    # while the atmosphere ran the requested MOST scheme: the air-sea interface
+    # silently SPLIT (atmosphere coare3 vs ocean tile constant) -- the very
+    # inconsistency the --surface-bulk-scheme NOTE warns about, created by
+    # omission rather than by offering "most".  The omission also made the
+    # gustiness inert on the tile: w* is a COARE3 term and the "constant" scheme
+    # has no gustiness at all, so the energy-consistency this block exists to
+    # enforce could not hold.  The flag's help and main()'s log line both
+    # already claimed the tile used this scheme.
+    # ``gustiness_w_zi`` threads the --gustiness-zi BL depth onto the ocean tile
+    # so an EXPLICIT setting reaches both sides: the latent heat the ocean loses
+    # == the moisture flux the atmosphere gains.  Without it the 3D-ocean q_net
+    # used the non-gusty tile flux -> weak evaporation -> dry atmosphere -> cold
+    # collapse (cmip_air_sea_decoupling).
+    #
+    # CAVEAT, verified (do NOT read this as "the same depth on both sides"): when
+    # --gustiness-zi is OMITTED this passes 0.0 = OFF, while the atmosphere's
+    # SurfaceLayerConfig.gustiness_w_zi stays None = scheme-native = 600 m for
+    # coare3 (bulk_flux._COARE_GUSTINESS_ZI).  So the DEFAULT `coare3` run is
+    # still split on gustiness.  CouplerConfig.gustiness_w_zi is `float = 0.0`
+    # and cannot express "scheme-native"; making it nullable flips the tile
+    # default off->on (coupled answers change), so it is pinned as a strict
+    # xfail in tests/unit/test_air_sea_scheme_consistency.py rather than
+    # silently absorbed here.
+    return CouplerConfig(
+        bulk_scheme=args.surface_bulk_scheme,
+        gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
+        thermo_convention=args.bulk_thermo_convention,
+        stability_scheme=args.surface_stability_scheme,
+    )
+
+
 def apply_coupled_params(params_path, land_params, atm_config, coupled_cfg,
-                         coupler_config):
+                         coupler_config, ice_config=None):
     """Apply the --params calibration layer (issue #691) across EVERY component
     config this driver builds: atmosphere params route to the flattened
     ExperimentConfig scalars (scalar map); land params route into the
@@ -152,7 +301,9 @@ def apply_coupled_params(params_path, land_params, atm_config, coupled_cfg,
         load_params_config,
     )
 
-    ice_config = None
+    # Seed from the CLI-built config (build_sea_ice_config) rather than None:
+    # returning None here would DISCARD --ice-snow & friends whenever
+    # --params was also passed, and silently drop them when it was not.
     lake_config = None
     params = load_params_config(params_path)
     _check_params_clobber(params, land_params)
@@ -165,7 +316,7 @@ def apply_coupled_params(params_path, land_params, atm_config, coupled_cfg,
             scalar_param_map=amap)
     if rest_params:
         bundle = apply_params_to_config(
-            build_params_bundle(coupled_cfg, coupler_config),
+            build_params_bundle(coupled_cfg, coupler_config, ice_config),
             rest_params, driver="run_coupled")
         coupled_cfg = bundle.coupled
         coupler_config = bundle.coupler
@@ -180,7 +331,14 @@ def land_scheme_overrides(land_scheme: str) -> dict:
     The coupler dispatches on the land-config TYPE, so the (land_mode,
     land_config) pair must agree: ``MultiLayerLandConfig`` -> 8-layer soil
     thermal + Richards soil-moisture column tile; ``LandConfig`` -> 1-layer slab.
-    Raises on an unknown scheme (dispatch hardening)."""
+    Raises on an unknown scheme (dispatch hardening).
+
+    Runoff selection is NOT handled here -- see apply_land_runoff_scheme, which
+    resolves it against the EFFECTIVE land config after the preset is built.
+    Gating it on --land-scheme meant `run_coupled --land-runoff-scheme topmodel`
+    alone was SILENTLY IGNORED (codex), the exact inert-flag failure this branch
+    exists to remove.
+    """
     from legoesm.land.config import LandConfig, MultiLayerLandConfig
     if land_scheme == "multilayer":
         return {"land_mode": "multilayer", "land_config": MultiLayerLandConfig()}
@@ -188,6 +346,80 @@ def land_scheme_overrides(land_scheme: str) -> dict:
         return {"land_mode": "slab", "land_config": LandConfig()}
     raise ValueError(
         f"land_scheme must be one of {_LAND_SCHEMES}, got {land_scheme!r}.")
+
+
+def apply_land_runoff_scheme(coupled_cfg, runoff_scheme):
+    """Select LandConfig.runoff_scheme on the EFFECTIVE land configuration.
+
+    Runs AFTER the preset resolves, so it sees what the run will ACTUALLY use --
+    whether that came from a preset, --land-scheme, or the woa branch's implicit
+    slab. Gating it on `if args.land_scheme is not None` meant
+    `--land-runoff-scheme topmodel` alone, or with --preset slab_simple, was
+    silently dropped (codex). Same doctrine as air_sea_consistency: resolve
+    through the production path, never re-read the declared field.
+
+    TOPMODEL is implemented in slab_land, param-spec'd as ``land.topmodel``, and
+    dispatch-guarded -- it was simply unselectable.
+
+    ``runoff_scheme is None`` means the user never asked, which is the ONLY
+    no-op. Comparing against LandConfig's default instead would let an EXPLICIT
+    `--land-runoff-scheme bucket` pass silently on a configuration that cannot
+    honour runoff at all (codex) -- an explicit request must be honoured or
+    refused, never ignored.
+
+    Refuses where the flag cannot take effect:
+
+    * NO LAND AREA -- the land FRACTION, not the land model, decides whether any
+      land runs, and EITHER field can zero it. Both are needed, and each caught
+      a case the other missed (codex, twice):
+        - ``f_land_mode == "zero"``: `--preset aquaplanet --land-scheme slab`
+          gives land_mode='slab' and a real LandConfig while f_land_mode stays
+          'zero', so the driver builds f_land = 0 everywhere.
+        - ``land_mode == "none"``: with f_land_mode='analytical' the driver
+          only generates its analytical mask when land_mode != "none"
+          (coupled_esm_driver.py), so f_land stays 0 here too. Not reachable
+          from the current CLI, but this helper takes any CoupledConfig and
+          must not accept-then-ignore one.
+    * a non-slab land config -- MultiLayerLandConfig resolves runoff through its
+      Richards column and has no runoff_scheme field.
+
+    LIMIT, stated rather than overclaimed (codex): this guard is CONFIG-level,
+    so it cannot be complete. ``f_land_mode='from_ocean'`` derives f_land from
+    the WOA wet mask at RUNTIME, and the analytical branch falls back to zeros
+    when the grid has no latitude -- either can yield f_land == 0 with
+    land_mode='slab', which no config predicate can see. Every CLI-reachable
+    normal path is covered (codex confirmed, incl. --ocean woa, which forces
+    from_ocean + slab); the residue needs an all-wet ocean mask or a degenerate
+    grid. In those cases the ENTIRE land tile is silently dead, which is a
+    bigger and pre-existing problem than runoff selection, and the right fix is
+    a driver-level invariant on the materialized f_land -- tracked separately,
+    not smuggled into a CLI helper.
+    """
+    from legoesm.land.config import LandConfig
+
+    if runoff_scheme is None:
+        return coupled_cfg                     # never requested
+    if (getattr(coupled_cfg, "f_land_mode", None) == "zero"
+            or getattr(coupled_cfg, "land_mode", None) == "none"):
+        raise SystemExit(
+            f"--land-runoff-scheme {runoff_scheme!r} cannot take effect: the "
+            f"resolved configuration has NO land area (f_land_mode="
+            f"{getattr(coupled_cfg, 'f_land_mode', None)!r}, land_mode="
+            f"{getattr(coupled_cfg, 'land_mode', None)!r} -> the driver builds "
+            f"f_land = 0 everywhere), whatever the land model. Use a preset "
+            f"with land (e.g. --preset slab_simple)."
+        )
+    land_cfg = getattr(coupled_cfg, "land_config", None)
+    if not isinstance(land_cfg, LandConfig):
+        raise SystemExit(
+            f"--land-runoff-scheme {runoff_scheme!r} applies to the SLAB land "
+            f"model only (it selects LandConfig.runoff_scheme); the resolved "
+            f"land model is {type(land_cfg).__name__}, which resolves runoff "
+            f"through its Richards soil column and has no such field. Use "
+            f"--land-scheme slab, or drop --land-runoff-scheme."
+        )
+    return coupled_cfg._replace(
+        land_config=land_cfg._replace(runoff_scheme=runoff_scheme))
 
 
 #: Max atm-ocean coupling interval [days] for the dynamic 3D ocean.  diag_days
@@ -241,9 +473,15 @@ def _find_latest_checkpoint(output_dir):
 
 def build_parser():
     """Build the run_coupled argument parser (exposed for CLI round-trip tests)."""
-    # Central microphysics literal set — keep the CLI allowlist in sync with
+    # Central scheme literal sets — keep the CLI allowlists in sync with
     # ExperimentConfig.validate_strict (no drift / no dropped advertised scheme).
-    from legoesm.driver.config import VALID_MICROPHYSICS
+    from legoesm.driver.config import (
+        VALID_CONVECTION_SCHEMES,
+        VALID_MICROPHYSICS,
+        VALID_SURFACE_BULK,
+        VALID_TURBULENCE,
+        parse_gwd_spec,
+    )
 
     parser = argparse.ArgumentParser(
         description="Run a fully coupled ESM simulation",
@@ -331,12 +569,36 @@ def build_parser():
     # suite is empirically stable coupled at coarse res (C18/L20, dt<=450s).
     # Pass --minimal-physics (or the individual --<scheme> none flags) for a
     # cheap idealized run.
+    # The coupled atmosphere IS the AMIP atmosphere: CoupledESMDriver builds
+    # `self._atm = ModelDriver(atm_config)`, the same driver + physics pipeline
+    # run_amip uses.  So this list had drifted, not narrowed on purpose: it was
+    # missing zhang_mcfarlane / kain_fritsch / emanuel / tiedtke / bechtold --
+    # every one of which resolves through the shared convection factory.
+    # tiedtke is run_amip's default and bechtold is the scheme pinned by
+    # config/amip/amip_production.yaml, so a coupled run could select NEITHER of
+    # the two the atmosphere is actually run with.  Derived from the canonical
+    # set so it cannot drift again.  (The default stays sbm: the comment above
+    # documents the empirically coupled-stable suite, which is a statement about
+    # the DEFAULT, not a reason to block the others.)
+    # CAVEAT: run_coupled does not expose the per-scheme convection tunables
+    # run_amip has (--bechtold-*, --sbm-*, convective_precip_efficiency, ...),
+    # so a coupled bechtold/tiedtke run uses each scheme's OWN config defaults
+    # rather than AMIP's tuned values (e.g. amip_production pins bechtold
+    # precip-efficiency 0.0; coupled leaves it at the scheme default). The
+    # schemes run correctly; they are simply untuned here. Threading those flags
+    # is tracked separately -- it is the "new tunable -> CLI flag in every
+    # affected run script" rule, which run_coupled already owes for the AMIP
+    # convection knobs generally, not a defect introduced by offering them.
     parser.add_argument("--convection", default="sbm",
-                        choices=["sbm", "dca", "kuo", "mass_flux", "edmf", "none"],
+                        choices=list(VALID_CONVECTION_SCHEMES),
                         help="Convection scheme (default: sbm)")
+    # clubb_lite and ysu were missing here while run_amip offers both, and both
+    # resolve through the shared turbulence factory -- drift, not a deliberate
+    # exclusion (contrast --surface-bulk-scheme below, which documents its own).
+    # Derived from the canonical tuple (see run_amip's --turbulence note): the
+    # two drivers' hand-copied lists disagreed in BOTH directions.
     parser.add_argument("--turbulence", default="holtslag_boville",
-                        choices=["smagorinsky", "louis", "tke", "holtslag_boville",
-                                 "mynn25", "clubb", "edmf", "none"],
+                        choices=list(VALID_TURBULENCE),
                         help="Boundary-layer turbulence scheme "
                              "(default: holtslag_boville)")
     # NOTE: "most" is deliberately NOT offered here although the coupler
@@ -345,8 +607,16 @@ def build_parser():
     # scheme), so offering it would silently split the interface (ocean tile
     # MOST vs atmosphere constant) — the exact inconsistency validate() below
     # rejects for turbulence="none".
+    # "most" is absent from choices BECAUSE of the NOTE above -- the list used
+    # to offer it, contradicting its own rationale, and ExperimentConfig.
+    # validate_strict rejects it (_valid_surface_bulk = constant/coare3/
+    # large_yeager), so `--surface-bulk-scheme most` parsed fine and then died
+    # at driver construction. It must NOT be fixed by widening validate_strict:
+    # turbulence/surface_layer.py gates the MOST path on ("coare3",
+    # "large_yeager") only, so an accepted "most" would SILENTLY fall through to
+    # the constant-coefficient branch -- trading a loud crash for wrong physics.
     parser.add_argument("--surface-bulk-scheme", default="constant",
-                        choices=["constant", "most", "coare3", "large_yeager"],
+                        choices=list(VALID_SURFACE_BULK),
                         help="AIR-SEA surface bulk-flux algorithm for the "
                              "atmosphere surface layer + the coupler OCEAN tile "
                              "(the 3D-ocean air-sea flux). 'coare3' is the "
@@ -413,10 +683,12 @@ def build_parser():
                              "Arctic/strong-stable forms; "
                              "'beljaars_holtslag1991' avoids the stable flux "
                              "collapse. Unstable branch stays Businger-Dyer.")
+    # `choices=` cannot express the '+'-joined composites validate_strict
+    # accepts (#834), so this list silently made them unreachable here while
+    # run_amip allowed them. The shared validator restores composites AND keeps
+    # cli-level typo rejection.
     parser.add_argument("--gravity-wave-drag", default="hines",
-                        choices=["rayleigh", "lindzen", "mcfarlane", "hines",
-                                 "prognostic_spectral", "e3sm_cam", "ml_emulator",
-                                 "none"],
+                        type=parse_gwd_spec,
                         help="Gravity-wave-drag scheme (default: hines)")
     parser.add_argument("--clouds", default="sundqvist",
                         choices=["none", "sundqvist", "xu_randall", "resolved"],
@@ -511,6 +783,57 @@ def build_parser():
                              "woa). Default on; the slab-land skin feedback is "
                              "stiff — turn off (--no-couple-surface-radiation) "
                              "to trade land-radiation realism for stability.")
+    # SLAB-only (LandConfig.runoff_scheme). topmodel = SIMTOP sub-grid saturated
+    # fraction + topographic baseflow (Niu 2005 / CLM4.5); it is implemented and
+    # param-spec'd but was unreachable -- land_scheme_overrides built
+    # LandConfig() with no arguments, pinning the default.
+    # --- sea ice -------------------------------------------------------
+    # SeaIceConfig had NO cli surface: every sub-model is gated by a bool
+    # (unreachable via --params, which is :float-only) and the driver built
+    # SeaIceConfig() with no arguments.
+    parser.add_argument("--ice-snow", action="store_true",
+                        help="Track snow on sea ice (SeaIceConfig.snow).")
+    parser.add_argument("--ice-brine", action="store_true",
+                        help="Track bulk ice salinity, evolving S_ice via "
+                             "brine drainage (SeaIceConfig.brine). NOTE: the "
+                             "resulting ocean salt_flux is consumed ONLY by "
+                             "--ocean dynamic; the slab/two_layer/fixed oceans "
+                             "have no prognostic salinity and deliberately "
+                             "discard it (CoupledESMDriver._step_ocean). The "
+                             "ice-side salinity still evolves either way.")
+    # NO --ice-ridging: it needs multi-category ice that NO driver builds, so a
+    # flag could only ever exit. SUPPRESS would keep a hidden always-failing CLI
+    # contract for no benefit -- the flag never shipped, so there is nothing to
+    # stay compatible with (codex). The gap is recorded in
+    # _reject_unreachable_sea_ice_options' docstring instead.
+    parser.add_argument("--ice-ponds", action="store_true",
+                        help="CESM-style melt ponds (SeaIceConfig.ponds).")
+    parser.add_argument("--ice-shortwave-scheme",
+                        choices=list(_ICE_SHORTWAVE_SCHEMES), default=None,
+                        help="Sea-ice shortwave scheme (default: constant).")
+    parser.add_argument("--ice-bulk-scheme", choices=list(_ICE_BULK_SCHEMES),
+                        default=None,
+                        help="Sea-ice surface bulk-flux algorithm "
+                             "(default: constant). The ice tile runs its own "
+                             "scheme, like the land and slab tiles.")
+    parser.add_argument("--ice-stability-scheme",
+                        choices=["dyer1974", "beljaars_holtslag1991",
+                                 "grachev2007_sheba", "gryanik2020"],
+                        default=None,
+                        help="Stable-regime MOST functions for the ice tile "
+                             "(grachev2007_sheba is the Arctic sea-ice "
+                             "reference). Requires a MOST --ice-bulk-scheme "
+                             "(most/coare3/large_yeager).")
+    parser.add_argument("--land-runoff-scheme", choices=_LAND_RUNOFF_SCHEMES,
+                        default=None,
+                        help="Slab-land runoff partitioning: 'bucket' (default, "
+                             "Green-Ampt Hortonian + Dunne saturation-excess) or "
+                             "'topmodel' (SIMTOP saturated fraction + "
+                             "topographic baseflow). Applies to whichever SLAB "
+                             "land model the run resolves -- a slab preset, "
+                             "--land-scheme slab, or --ocean woa's implicit "
+                             "slab. Refused (never ignored) on the multilayer "
+                             "land model or a run with no land area.")
     parser.add_argument("--land-scheme", choices=_LAND_SCHEMES,
                         default=None,
                         help="Override the preset's land surface model. 'slab' = "
@@ -847,7 +1170,10 @@ def main():
 
     # Build configs
     from legoesm.driver.config import (
-        ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
+        DycoreConfig,
+        ExperimentConfig,
+        GridConfig,
+        OutputConfig,
     )
     from legoesm.driver.coupled_config import PRESETS
     from legoesm.ocean.simple_ocean import SimpleOceanConfig
@@ -1033,6 +1359,8 @@ def main():
         overrides.update(land_scheme_overrides(args.land_scheme))
 
     coupled_cfg = PRESETS[args.preset](**overrides)
+    # Runoff resolves against the EFFECTIVE land config (preset OR --land-scheme).
+    coupled_cfg = apply_land_runoff_scheme(coupled_cfg, args.land_runoff_scheme)
 
     # Land snow-albedo feedback + lat-varying vegetation albedo (opt-in): the
     # presets build the land config with snow_albedo_feedback=False, which holds
@@ -1100,26 +1428,8 @@ def main():
     # Create and run driver
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
 
-    # Keep the coupler ocean-tile bulk-flux scheme consistent with the
-    # atmosphere surface layer (interface energy balance: the flux leaving the
-    # slab must match the flux entering the atmosphere).  Only override when the
-    # user opts out of "constant" so the default run stays byte-identical (the
-    # driver builds the default CouplerConfig when coupler_config is None).
-    coupler_config = None
-    if (args.surface_bulk_scheme != "constant"
-            or args.surface_stability_scheme != "dyer1974"):
-        from legoesm.coupler.config import CouplerConfig
-        # Thread the SAME convective-gustiness BL depth onto the coupler ocean
-        # tile that the atmosphere surface layer uses (--gustiness-zi), so the
-        # air-sea interface flux is energy-consistent: the latent heat the
-        # ocean loses == the moisture flux the atmosphere gains.  Without this
-        # the 3D-ocean q_net used the non-gusty tile flux -> weak evaporation
-        # -> dry atmosphere -> cold collapse (cmip_air_sea_decoupling).
-        coupler_config = CouplerConfig(
-            gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
-            thermo_convention=args.bulk_thermo_convention,
-            stability_scheme=args.surface_stability_scheme,
-        )
+    coupler_config = build_coupler_config(args)
+    if coupler_config is not None:
         logger.info("  Surface bulk-flux scheme: %s (thermo: %s; stability: %s; "
                     "atmosphere + coupler ocean tile); convective "
                     "gustiness z_i=%.0f m",
@@ -1131,13 +1441,15 @@ def main():
     # config this driver builds — see apply_coupled_params (the single source
     # of truth for the atm-scalar-map / coupled-bundle split, exercised
     # directly by the unit tests and the reachability audit).
-    ice_config = None
+    # Sea-ice: None unless a flag asked for something, so an untouched run is
+    # byte-identical (the driver builds the same default).
+    ice_config = build_sea_ice_config(args)
     lake_config = None
     if getattr(args, "params", None):
         (atm_config, coupled_cfg, coupler_config, ice_config,
          lake_config) = apply_coupled_params(
             args.params, args.land_params, atm_config, coupled_cfg,
-            coupler_config)
+            coupler_config, ice_config)
 
     driver = CoupledESMDriver(
         atm_config, coupled_cfg, coupler_config=coupler_config,

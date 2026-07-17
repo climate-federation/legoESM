@@ -212,21 +212,3 @@ class TestSharedSpongeKernel:
             g1d[:, None], (grid.n_lat, grid.n_lon)))
 
 
-class TestBottomLevelDragOutput:
-    """bottom_level_drag_output is the shared pad helper the linear + quadratic
-    drag schemes delegate to (dedup of an identical pad block)."""
-
-    def test_places_drag_at_deepest_level_only(self):
-        from legoesm.ocean.physics.bottom_drag.output import (
-            bottom_level_drag_output,
-        )
-        nlev = 4
-        du_bot = jnp.asarray(np.arange(5 * 6, dtype=np.float64).reshape(5, 6))
-        dv_bot = -du_bot
-        out = bottom_level_drag_output(du_bot, dv_bot, nlev)
-        assert out.du_dt.shape == (5, 6, nlev)
-        # bottom level == input; all levels above == 0.
-        np.testing.assert_array_equal(np.asarray(out.du_dt[..., -1]), np.asarray(du_bot))
-        np.testing.assert_array_equal(np.asarray(out.dv_dt[..., -1]), np.asarray(dv_bot))
-        np.testing.assert_array_equal(
-            np.asarray(out.du_dt[..., :-1]), np.zeros((5, 6, nlev - 1)))

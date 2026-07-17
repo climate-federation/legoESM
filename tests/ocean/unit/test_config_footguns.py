@@ -92,6 +92,84 @@ def test_validate_config_accepts_every_valid_eos():
         LatLonCGridOceanModel._validate_config(cfg)  # must not raise
 
 
+def test_eos_reachable_via_the_yaml_ocean_key():
+    """Every VALID_EOS_SCHEMES member must be SELECTABLE through the public YAML
+    ``ocean.eos:`` key, i.e. reach the runtime config's ``eos`` field.
+
+    The tests above construct ``LatLonCGridOceanConfig.from_flat(eos=...)``
+    directly, which BYPASSES the YAML adapter that production actually uses
+    (``OceanExperimentConfig.from_yaml -> to_ocean_config``, run_omip_core2).
+    The two shipped templates set ``ocean.eos: wright``, so a rename of the flat
+    field or a break in the flat->runtime mapping would silently strand every
+    EOS behind the YAML interface while leaving from_flat green. This pins the
+    reachability direction (implemented ⇒ selectable), the ocean-EOS analogue of
+    the scheme-reachability ratchet.
+    """
+    from legoesm.ocean.config import OceanExperimentConfig
+
+    for scheme in VALID_EOS_SCHEMES:
+        d = {"grid": {"type": "latlon_cgrid", "nlev": 15},
+             "ocean": {"eos": scheme}}
+        rt = OceanExperimentConfig.from_dict(d).to_ocean_config()
+        assert rt.eos == scheme, (
+            f"ocean.eos: {scheme!r} did not reach the runtime config "
+            f"(got {rt.eos!r}); the YAML->runtime EOS mapping is broken"
+        )
+
+
+def test_shipped_global_ocean_templates_load_with_their_eos():
+    """The committed OMIP templates set ``ocean.eos: wright`` and must load
+    cleanly through the production YAML path -- a guard against the flat-field
+    contract drifting out from under a shipped config (they would otherwise
+    raise 'unknown ocean config field' at to_ocean_config)."""
+    from pathlib import Path
+
+    from legoesm.ocean.config import OceanExperimentConfig
+
+    for name in ("omip_latlon.yaml", "omip_latlon_kpp.yaml"):
+        p = Path("config/templates/global_ocean") / name
+        if not p.exists():
+            pytest.skip(f"{p} not present")
+        rt = OceanExperimentConfig.from_yaml(str(p)).to_ocean_config()
+        assert rt.eos in VALID_EOS_SCHEMES, (
+            f"{name} resolved eos={rt.eos!r} not in VALID_EOS_SCHEMES"
+        )
+
+
+def test_vertical_mixing_reachable_via_the_yaml_ocean_key():
+    """Every ``VALID_VERTICAL_MIXING_SCHEMES`` member must be SELECTABLE through
+    the public YAML ``ocean.physics.vertical_mixing.scheme:`` key, i.e. reach the
+    runtime config's ``physics.vertical_mixing.scheme`` field.
+
+    The flat lat-lon OMIP driver hands the runtime a fixed KPP override, so the
+    ``--config`` YAML adapter is the only general selection path for the mixing
+    scheme; a rename of the flat field or a break in the flat->runtime mapping
+    would silently strand every non-KPP scheme (e.g. catke) while leaving the
+    dispatch green. Pins the reachability direction (implemented ⇒ selectable),
+    the vertical-mixing analogue of the EOS pin above.
+
+    This is the config-path HALF of reachability (the YAML value survives into
+    the runtime field); the execution half -- that every canonical scheme is
+    actually dispatched, not a phantom that hits the unknown-scheme raise -- is
+    pinned behaviourally against both dispatchers in
+    ``test_vmix_k_profiles_direct.py`` (``TestSchemeReachability``)."""
+    from legoesm.ocean.config import OceanExperimentConfig
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        VALID_VERTICAL_MIXING_SCHEMES,
+    )
+
+    for scheme in VALID_VERTICAL_MIXING_SCHEMES:
+        d = {"grid": {"type": "latlon_cgrid", "nlev": 15},
+             "ocean": {"physics": {"vertical_mixing": {"scheme": scheme}}}}
+        rt = OceanExperimentConfig.from_dict(d).to_ocean_config()
+        got = rt.physics.vertical_mixing.scheme
+        assert got == scheme, (
+            f"ocean.physics.vertical_mixing.scheme: {scheme!r} did not reach "
+            f"the runtime config (got {got!r}); the YAML->runtime mapping is "
+            f"broken"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Footgun 2 — A_h single source of truth (lat-lon C-grid)
 # ---------------------------------------------------------------------------

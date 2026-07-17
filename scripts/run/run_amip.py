@@ -31,18 +31,23 @@ logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 # auto-detect for it — it would try to load libmpi before argv is parsed and
 # hard-crash on a node without a loadable MPI library (verified).
 from legoesm.parallel.early_init import maybe_init_jax_distributed
+
 if "--multicontroller" not in sys.argv:
     maybe_init_jax_distributed()
 
-from legoesm import constants
 from legoesm.driver.config import (
+    VALID_RADIATION,
+    VALID_TURBULENCE,
     DycoreConfig,
     EvaluationConfig,
     ExperimentConfig,
     GridConfig,
     OutputConfig,
+    parse_gwd_spec,
 )
 from legoesm.driver.run_status import status_to_exit_code
+
+from legoesm import constants
 
 _DYCORE_DEFAULTS = DycoreConfig()
 _OUTPUT_DEFAULTS = OutputConfig()
@@ -343,8 +348,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Path to ERA5 Zarr store for --ic era5")
 
     # Radiation
+    # Derived from the canonical tuple so this list cannot drift from
+    # validate_strict.  "none" is REQUIRED here, not decorative: this driver
+    # has a --held-suarez-forcing lane, HS forcing is ADDITIVE to the physics
+    # pipeline rather than a replacement, and a genuine dry HS run therefore
+    # needs radiation OFF.  Omitting it made the dry-core lane unreachable from
+    # this driver (scheme-reachability audit).
     parser.add_argument("--radiation", type=str, default="gray",
-                        choices=["gray", "rrtmg", "rrtmgp"])
+                        choices=list(VALID_RADIATION),
+                        help="Radiation scheme (default: gray). 'none' is for "
+                             "the dry --held-suarez-forcing lane.")
     # Default is ``None`` so ``_postprocess_args`` can tell an explicit
     # ``--rad-update-steps 1`` from "the user did not pass this flag".
     # ``--production-profile`` only auto-sets the production cadence
@@ -520,11 +533,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # disabled only for an idealized / dry-dynamics run, which must opt in via
     # --allow-disabled-physics (or --held-suarez-forcing / --enable-latlon-spmd).
     # Enforced by _require_full_physics_for_amip; see the directive in CLAUDE.
+    # mynn25 was missing while run_coupled offers it, and it resolves through
+    # the shared turbulence factory (integration.get_turbulence_fn) -- drift.
+    # Derived from the canonical tuple: this hand-copied list is exactly what
+    # drifted (it silently omitted mynn25 while run_coupled's copy omitted
+    # clubb_lite/ysu -- same ModelDriver, same factory, two different answers to
+    # "what can I run?").
     parser.add_argument("--turbulence", type=str, default="louis",
-                        choices=[
-                            "none", "smagorinsky", "louis", "tke",
-                            "clubb_lite", "clubb", "holtslag_boville", "ysu", "edmf",
-                        ])
+                        choices=list(VALID_TURBULENCE))
     parser.add_argument("--cloudtop-entrainment-efficiency",
                         dest="louis_cloudtop_entrainment_efficiency", type=float,
                         default=0.0,
@@ -535,7 +551,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "liquid cloud (the AMIP albedo bias) WITHOUT a "
                              "surface-evaporation trade.  0 = off (default); "
                              "warm-start/ramp only (cold-start caveat).")
-    parser.add_argument("--gravity-wave-drag", type=str, default="mcfarlane",
+    # Shared validator: composites keep working and a typo is now rejected at
+    # the CLI (this flag previously had `type=str` with no validation at all).
+    parser.add_argument("--gravity-wave-drag", type=parse_gwd_spec,
+                        default="mcfarlane",
                         help="GWD scheme: none, rayleigh, lindzen, mcfarlane, "
                              "hines, prognostic_spectral, ml_emulator, or a "
                              "'+'-joined composite whose source tendencies are "

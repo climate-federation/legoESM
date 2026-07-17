@@ -20,7 +20,6 @@ from typing import Any, NamedTuple
 
 from legoesm import constants
 
-
 # Canonical AIMIP variant set.  Single source of truth — imported by
 # ``scripts/run/run_aimip.py`` and the ``validate_strict`` rule below.
 # Empty string = not an AIMIP run (preserves backward-compat for
@@ -280,14 +279,92 @@ class OutputConfig(NamedTuple):
     evaluation: EvaluationConfig = EvaluationConfig()
 
 
-# Single source of truth for the valid microphysics scheme literals — consumed
+# Single source of truth for the valid column-physics scheme literals — consumed
 # by ExperimentConfig.validate_strict AND by run-driver CLI ``choices=`` so the
 # CLI allowlist cannot drift from the config validation (e.g. omitting an
 # advertised scheme like ``ml_emulator``).
+#
+# These were function-local variables inside validate_strict, so nothing could
+# import them and every driver kept its own hand-copied list — which is exactly
+# why they drifted: each axis happened to be pinned by a point-fix test in ONE
+# driver and silently diverged in the other (run_coupled blocked bechtold/
+# tiedtke/emanuel/kain_fritsch/zhang_mcfarlane; run_amip blocked mynn25).
+# ``tests/unit/test_scheme_reachability_audit.py`` now machine-audits every
+# driver's ``choices=`` against these tuples, against a shrink-only baseline of
+# deliberate exclusions.
 VALID_MICROPHYSICS = (
     "none", "kessler", "sundqvist", "seifert_beheng",
     "morrison", "thompson", "p3", "sdm", "fast_sbm", "ml_emulator",
 )
+
+VALID_TURBULENCE = (
+    "smagorinsky", "louis", "tke", "mynn25", "clubb_lite", "clubb",
+    "holtslag_boville", "ysu", "edmf", "none",
+)
+
+VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg")
+
+VALID_CLOUD_SCHEMES = ("none", "sundqvist", "xu_randall", "resolved")
+
+# ``gravity_wave_drag`` additionally accepts a ``+``-joined COMPOSITION of these
+# (e.g. "hines+mcfarlane"); validate_strict splits on "+" before membership.
+VALID_GWD = (
+    "rayleigh", "lindzen", "mcfarlane", "hines",
+    "prognostic_spectral", "e3sm_cam", "ml_emulator", "none",
+)
+
+def parse_gwd_spec(value: str) -> str:
+    """argparse ``type=`` for ``--gravity-wave-drag``.
+
+    GWD is the one axis a plain ``choices=`` CANNOT express: it accepts a
+    ``+``-joined COMPOSITION whose source tendencies are summed (issue #834,
+    e.g. "hines+mcfarlane"), because orographic and non-orographic drag
+    parameterize distinct wave populations and are run together in CMIP-class
+    GCMs.  run_amip therefore dropped ``choices`` entirely -- which left the
+    flag with NO cli-level typo rejection -- while run_coupled kept ``choices``
+    and so REJECTED every composite, making #834 unreachable from the coupled
+    driver.  Both drivers now share this validator: composites work everywhere,
+    and a typo is still caught at the CLI.
+
+    Delegates the SEMANTICS to ``ExperimentConfig.validate_strict`` rather than
+    re-implementing them: a membership-only check accepted composites strict
+    rejects -- "none+hines", "e3sm_cam+hines", "ml_emulator+hines", duplicates
+    like "hines+hines" (codex) -- so the CLI would advertise a spec the config
+    then refuses. Asking the real validator keeps the two from diverging by
+    construction, which is the same lesson as resolving the effective surface
+    config through the production path in driver/air_sea_consistency.py.
+    """
+    import argparse
+
+    for part in value.split("+"):
+        if part not in VALID_GWD:
+            raise argparse.ArgumentTypeError(
+                f"invalid gravity-wave-drag source {part!r} in {value!r}; "
+                f"expected one of {VALID_GWD}, or a '+'-joined composite of "
+                f"them (e.g. 'hines+mcfarlane')"
+            )
+    try:
+        ExperimentConfig(gravity_wave_drag=value).validate_strict()
+    except ValueError as exc:
+        # Report ONLY a genuine gravity_wave_drag complaint. validate_strict
+        # reports every error for the whole config, so falling back to the full
+        # message would blame this flag for an unrelated bad default elsewhere
+        # (codex). If nothing here is about GWD, this value is not the problem
+        # -- let it through and let the config's own validation report the real
+        # error, in its own words, at build time.
+        msg = "; ".join(m for m in str(exc).splitlines()
+                        if "gravity_wave_drag" in m)
+        if msg:
+            raise argparse.ArgumentTypeError(msg) from None
+    return value
+
+
+# The ATMOSPHERE surface layer's bulk-flux algorithm.  "most" is deliberately
+# ABSENT: turbulence/surface_layer.py dispatches MOST on ("coare3",
+# "large_yeager") only, so an accepted "most" would silently degrade to the
+# constant-coefficient branch — a loud rejection is better than wrong physics.
+# See driver/air_sea_consistency.py.
+VALID_SURFACE_BULK = ("constant", "coare3", "large_yeager")
 
 
 class ExperimentConfig(NamedTuple):
@@ -1215,13 +1292,13 @@ class ExperimentConfig(NamedTuple):
         # Radiation membership (reconciled: physics_pipeline now raises on
         # unknown and builds an explicit zero-radiation fn for "none", matching
         # this accepted set = _RADIATION_BUILDERS keys).
-        _valid_radiation = ("none", "gray", "rrtmgp", "rrtmg")
+        _valid_radiation = VALID_RADIATION
         if self.radiation not in _valid_radiation:
             errors.append(
                 f"radiation must be one of {_valid_radiation}, "
                 f"got {self.radiation!r}"
             )
-        _valid_cloud_schemes = ("none", "sundqvist", "xu_randall", "resolved")
+        _valid_cloud_schemes = VALID_CLOUD_SCHEMES
         if self.cloud_scheme not in _valid_cloud_schemes:
             errors.append(
                 f"cloud_scheme must be one of {_valid_cloud_schemes}, "
@@ -1295,16 +1372,13 @@ class ExperimentConfig(NamedTuple):
                 f"convection must be one of {_valid_convection}, "
                 f"got {self.convection!r}"
             )
-        _valid_turbulence = (
-            "smagorinsky", "louis", "tke", "mynn25", "clubb_lite", "clubb",
-            "holtslag_boville", "ysu", "edmf", "none",
-        )
+        _valid_turbulence = VALID_TURBULENCE
         if self.turbulence not in _valid_turbulence:
             errors.append(
                 f"turbulence must be one of {_valid_turbulence}, "
                 f"got {self.turbulence!r}"
             )
-        _valid_surface_bulk = ("constant", "coare3", "large_yeager")
+        _valid_surface_bulk = VALID_SURFACE_BULK
         if self.surface_bulk_scheme not in _valid_surface_bulk:
             errors.append(
                 f"surface_bulk_scheme must be one of {_valid_surface_bulk}, "
@@ -1508,10 +1582,7 @@ class ExperimentConfig(NamedTuple):
                     f"must equal turbulence={self.turbulence!r} (an override refines "
                     f"the same scheme's sub-config, it does not switch schemes)"
                 )
-        _valid_gwd = (
-            "rayleigh", "lindzen", "mcfarlane", "hines",
-            "prognostic_spectral", "e3sm_cam", "ml_emulator", "none",
-        )
+        _valid_gwd = VALID_GWD
         # A ``+``-joined string composes multiple GWD sources whose tendencies
         # are summed — orographic (mcfarlane/lindzen) and non-orographic
         # (hines/rayleigh/prognostic_spectral) parameterize distinct wave
