@@ -403,3 +403,15 @@ class RadiationConfig(NamedTuple):
     # eccentricity-driven perihelion/aphelion asymmetry).  ``None`` (default)
     # ⇒ circular orbit, so idealized/aquaplanet experiments are unchanged.
     orbit: "OrbitalParameters | None" = None
+    # Route a moist higher-order turbulence closure's sub-grid PDF cloud fraction
+    # (CLUBB) into the cloud optics instead of the RH-diagnosed grid-scale one.
+    # A moist closure is physically LESS overcast over a saturated marine
+    # boundary layer, so the ``cf * q_c_diagnostic`` condensate floor — which
+    # sets the marine-Sc liquid water path and hence the planetary albedo — drops
+    # toward the observed value (the marine-Sc over-bright bias lever).  Requires
+    # a cf-producing closure (turbulence.scheme='clubb', diagnostic
+    # CLUBBConfig.prognostic=False); combined.py raises if set without one, and
+    # make_radiation_physics raises on non-hydrostatic dycores (READ side wired
+    # for hydrostatic only).  ``False`` (default) keeps the RH grid-scale cloud
+    # fraction (byte-identical).
+    use_clubb_cloud_fraction: bool = False

@@ -459,6 +459,7 @@ def compute_cloud_properties(
     n_ice: jnp.ndarray | None = None,
     n_cloud: jnp.ndarray | None = None,
     conv_precip: jnp.ndarray | None = None,
+    cloud_fraction_override: jnp.ndarray | None = None,
 ) -> CloudProperties:
     """Compute diagnostic cloud fraction and cloud optical properties.
 
@@ -478,6 +479,13 @@ def compute_cloud_properties(
         Explicit cloud liquid water [kg/kg] from microphysics.
     q_ice : jnp.ndarray or None
         Explicit cloud ice [kg/kg] from microphysics.
+    cloud_fraction_override : jnp.ndarray or None
+        Optional sub-grid cloud fraction [-], shape (ncol, nlev), from a moist
+        higher-order turbulence closure (CLUBB's PDF).  When supplied it REPLACES
+        the RH-diagnosed ``cf`` (before the convective overlap), so the sub-grid
+        condensate floor and hence radiation reflect the moist closure's
+        less-overcast marine BL.  ``None`` (default) keeps the RH grid-scale
+        fraction (byte-identical).
 
     Returns
     -------
@@ -518,6 +526,24 @@ def compute_cloud_properties(
             f"Valid schemes: 'sundqvist', 'xu_randall', 'resolved'. "
             f"(Use cloud_scheme='none' upstream to skip clouds entirely.)"
         )
+
+    # --- Moist-closure (CLUBB) cloud-fraction override ---
+    # A moist higher-order closure (CLUBB) diagnoses a sub-grid cloud fraction
+    # from its assumed PDF that is physically LESS overcast than the RH-diagnosed
+    # grid-scale ``cf`` above over a saturated marine boundary layer.  When the
+    # caller routes CLUBB's fraction here (via PhysicsState; gated to the
+    # clubb-active path by ``RadiationConfig.use_clubb_cloud_fraction``), it
+    # SUPERSEDES the RH ``cf`` so the sub-grid condensate floor
+    # (``cf * q_c_diagnostic``, below) — which sets the marine-Sc LWP and hence
+    # the planetary albedo — reflects the moist closure instead.  The override is
+    # CLUBB's LIQUID fraction; the floor splits it by ``f_ice_diag(T)``, exact for
+    # the warm-liquid marine BL target (cold-cloud ice reuse is a minor
+    # approximation).  Convective overlap below still adds cumulus on top.
+    # AD-safe: a plain clip, no NaN sentinel — the caller supplies a real
+    # fraction; on the first step before turbulence has run it is the zero-init
+    # carry, which merely drops the floor for that single step.
+    if cloud_fraction_override is not None:
+        cf = jnp.clip(cloud_fraction_override, 0.0, 1.0)
 
     # --- Opt-in convective (cumulus) cloud, MAXIMUM-overlap combined ---
     # The stratiform RH/condensate fractions above miss convective cloud when an

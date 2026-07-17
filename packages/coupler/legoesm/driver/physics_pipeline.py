@@ -1535,6 +1535,15 @@ class PhysicsPipeline:
             w_land=_pin_carry_dtype(w_land_new, w_land),
             snow=_pin_carry_dtype(snow_new, snow),
             land_runoff=land_runoff,
+            # Diagnostic CLUBB sub-grid cloud fraction (marine-Sc albedo lever):
+            # carried out so the NEXT radiation step can use it in the cloud
+            # optics.  ``turb_out`` is None when turbulence is disabled and
+            # ``turb_out.cloud_fraction`` is None for closures with no PDF cloud
+            # (louis / tke / ...) — both give None here.  With a STATIC turbulence
+            # config this is stable across the lax.scan (always-array for
+            # diagnostic CLUBB, always-None otherwise), so no dtype flip.
+            cloud_fraction=(
+                turb_out.cloud_fraction if turb_out is not None else None),
         )
 
     def _toa_insolation(self, lat, lon, day_of_year, seconds_of_day, s_0):
@@ -1588,7 +1597,8 @@ class PhysicsPipeline:
                                sfc_T_override=None,
                                sfc_emissivity_override=None,
                                conv_precip=None, land_ml=None, w_land=None,
-                               snow=None, land_ml_params=None):
+                               snow=None, land_ml_params=None,
+                               cloud_fraction=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
         Returns ``(dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa,
@@ -1823,11 +1833,30 @@ class PhysicsPipeline:
             # ratio (RH from q_v vs q_sat_mixing_ratio); leave the
             # mixing-ratio q_v here and only feed the converted
             # specific humidity to the radiation solver.
+            # CLUBB sub-grid cloud-fraction override (marine-Sc albedo lever):
+            # the prior physics step wrote diagnostic CLUBB's PDF cloud fraction
+            # to the ``cloud_fraction`` carry; route it into the optics so the
+            # ``cf * q_c_diagnostic`` LWP floor reflects the moist closure instead
+            # of the RH grid-scale fraction.  Gated on the pipeline flag so a
+            # non-clubb run passes None (byte-identical).  The carry is ALWAYS
+            # flattened column form (ncol, nlev) — it is written from
+            # ``turb_out.cloud_fraction`` (column layout) and carried as-is — so
+            # reshape unconditionally to the local column shape ``T_col.shape``
+            # (a no-op when already matching), exactly like the radiation
+            # physics_fn sibling in radiation/integration.py.  (An earlier
+            # ndim-conditional ``ad.flatten_3d`` branch was WRONG: flatten_3d
+            # expects a 3D GRID array, not the 2D column carry, and misfired on
+            # latlon where T is itself already column-shaped.)
+            _cf_ovr = None
+            if getattr(self, "_use_clubb_cloud_fraction", False) \
+                    and cloud_fraction is not None:
+                _cf_ovr = cloud_fraction.reshape(T_col.shape)
             cloud_props = compute_cloud_properties(
                 T=T_col, p_full=p_full_col, q_v=q_v_col, dp=dp_col,
                 config=cloud_config, q_cloud=q_c_col, q_ice=q_i_col,
                 n_cloud=n_cloud_col, n_ice=n_ice_col,
                 conv_precip=conv_precip_col,
+                cloud_fraction_override=_cf_ovr,
             )
             # ``to_rrtmg_kwargs`` builds the kwargs without
             # ``cloud_fraction`` (commit 4c9591bb, lost in AIMIP-#312
@@ -2047,7 +2076,7 @@ class PhysicsPipeline:
                          sfc_lhflx_override=None,
                          tke=None, qke=None, gwd_spectrum=None,
                          conv_precip=None, land_ml=None, w_land=None,
-                         snow=None, land_ml_params=None):
+                         snow=None, land_ml_params=None, cloud_fraction=None):
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -2062,7 +2091,8 @@ class PhysicsPipeline:
                  sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                  sfc_shflx_override, sfc_lhflx_override,
                  tke, qke, gwd_spectrum,
-                 conv_precip, land_ml, w_land, snow, land_ml_params) = args
+                 conv_precip, land_ml, w_land, snow, land_ml_params,
+                 cloud_fraction) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
                  sw_up_toa, lw_up_toa, sw_down_toa, T_land_new, land_ml_new) = \
@@ -2082,6 +2112,7 @@ class PhysicsPipeline:
                         sfc_emissivity_override=sfc_emissivity_override,
                         conv_precip=conv_precip, land_ml=land_ml, w_land=w_land,
                         snow=snow, land_ml_params=land_ml_params,
+                        cloud_fraction=cloud_fraction,
                     )
 
                 # Radiation-as-forcing: cut radiation's reverse-mode so the
@@ -2126,12 +2157,12 @@ class PhysicsPipeline:
                 ))
                 _carries = (physics_out.tke, physics_out.qke,
                             physics_out.gwd_spectrum, physics_out.w_land,
-                            physics_out.snow)
+                            physics_out.snow, physics_out.cloud_fraction)
                 physics_out = jax.tree.map(_cast, physics_out)
                 physics_out = physics_out._replace(
                     tke=_carries[0], qke=_carries[1],
                     gwd_spectrum=_carries[2], w_land=_carries[3],
-                    snow=_carries[4],
+                    snow=_carries[4], cloud_fraction=_carries[5],
                 )
                 return physics_out, new_held, _cast(T_land_new), land_ml_new
 
@@ -2148,7 +2179,8 @@ class PhysicsPipeline:
                  sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                  sfc_shflx_override, sfc_lhflx_override,
                  tke, qke, gwd_spectrum,
-                 conv_precip, land_ml, w_land, snow, land_ml_params) = args
+                 conv_precip, land_ml, w_land, snow, land_ml_params,
+                 cloud_fraction) = args
                 del conv_precip  # radiation-only input; unused on the no-rad path
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -2177,12 +2209,12 @@ class PhysicsPipeline:
                 ))
                 _carries = (physics_out.tke, physics_out.qke,
                             physics_out.gwd_spectrum, physics_out.w_land,
-                            physics_out.snow)
+                            physics_out.snow, physics_out.cloud_fraction)
                 physics_out = jax.tree.map(_cast, physics_out)
                 physics_out = physics_out._replace(
                     tke=_carries[0], qke=_carries[1],
                     gwd_spectrum=_carries[2], w_land=_carries[3],
-                    snow=_carries[4],
+                    snow=_carries[4], cloud_fraction=_carries[5],
                 )
                 # multilayer land state (if any) rides through the no-rad sub-steps
                 # unchanged — it advances only on radiation steps (like the slab).
@@ -2200,7 +2232,8 @@ class PhysicsPipeline:
                     sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                     sfc_shflx_override, sfc_lhflx_override,
                     tke, qke, gwd_spectrum,
-                    conv_precip, land_ml, w_land, snow, land_ml_params)
+                    conv_precip, land_ml, w_land, snow, land_ml_params,
+                    cloud_fraction)
 
             # Issue #316 fix: when the caller knows at build time which
             # branch to take, skip the cond — keeps only the live branch
@@ -3167,6 +3200,27 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline.orbit = (earth_orbit()
                       if getattr(config, 'orbital_insolation', False) else None)
     pipeline._cloud_scheme = getattr(config, 'cloud_scheme', 'none')
+    # CLUBB sub-grid cloud fraction -> radiation (marine-Sc albedo lever).  Route
+    # diagnostic CLUBB's PDF cloud fraction (carried out of physics_step_no_rad on
+    # ``PhysicsOutput.cloud_fraction`` and back in to compute_radiation_core) into
+    # the cloud optics instead of the RH grid-scale one.  Requires the cf
+    # producer (diagnostic CLUBB turbulence); refuse LOUDLY otherwise so the flag
+    # is never a silent no-op.  Default off is byte-identical.
+    pipeline._use_clubb_cloud_fraction = getattr(
+        config, 'use_clubb_cloud_fraction', False)
+    if pipeline._use_clubb_cloud_fraction:
+        _turb_is_diag_clubb = (
+            getattr(config, 'turbulence', 'none') == 'clubb'
+            and not getattr(turb_config, 'prognostic', False)
+        )
+        if not _turb_is_diag_clubb:
+            raise ValueError(
+                "use_clubb_cloud_fraction=True requires diagnostic CLUBB "
+                "turbulence (turbulence='clubb', not prognostic) to produce the "
+                "sub-grid cloud fraction; got turbulence="
+                f"{getattr(config, 'turbulence', 'none')!r}.  Enable diagnostic "
+                "CLUBB or unset use_clubb_cloud_fraction."
+            )
     # Clear-sky diagnostic (#843): enable the 2nd clouds-off radiation pass
     # only when config.output.clear_sky_diag is set (default off).
     pipeline._clear_sky_diag = bool(
