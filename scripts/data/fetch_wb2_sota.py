@@ -82,7 +82,12 @@ from typing import NamedTuple
 SOTA_CSV_COLUMNS = ("model", "variable", "level", "lead_hours", "rmse")
 
 # --- canonical WeatherBench-2 published-results bucket (see module docstring) ---
-WB2_RESULTS_BUCKET = "gs://weatherbench2/results/"
+# Verified against the LIVE bucket 2026-07-17: results live FLAT under
+# benchmark_results/ as {model}_vs_era5_{res}_{year}.nc — the
+# results/{res}/deterministic/{prefix}deterministic.nc layout in
+# official-evaluation.md describes SELF-RUN eval outputs, not the
+# published bucket.
+WB2_RESULTS_BUCKET = "gs://weatherbench2/benchmark_results/"
 # Official website scores are computed at 1.5 deg = 240x121; that subdir holds
 # the per-model deterministic scorecards.
 WB2_RESOLUTION_DIR = "240x121"
@@ -100,14 +105,19 @@ _SECONDS_PER_HOUR = 3600.0
 # --- reference model -> WB2 result-file prefix (from official-evaluation.md) ---
 # Each maps a legoESM/CSV model label to the WB2 ``--output_file_prefix`` used to
 # name ``{prefix}deterministic.nc`` under the resolution/deterministic dir.
-MODEL_PREFIXES = {
-    "IFS-HRES": "hres_vs_era_2020_",
-    "GraphCast": "graphcast_vs_era_2020_",
-    "Pangu-Weather": "pangu_vs_era_2020_",
-    "GenCast": "gencast_vs_era_2020_",
-    "NeuralGCM": "neuralgcm_deterministic_vs_era_2020_",
-    "ERA5-climatology": "climatology_vs_era_2020_",
+# Filenames verified to EXIST in the live bucket (2026-07-17):
+#   {name}_vs_era5_240x121_2020.nc under benchmark_results/. Deterministic
+#   comparators chosen per WB2 convention: GenCast -> ensemble MEAN;
+#   NeuralGCM -> the deterministic 'neuralgcm_hres' run (ens_mean also exists).
+MODEL_FILENAMES = {
+    "IFS-HRES": "hres_vs_era5_{res}_2020.nc",
+    "GraphCast": "graphcast_vs_era5_{res}_2020.nc",
+    "Pangu-Weather": "pangu_vs_era5_{res}_2020.nc",
+    "GenCast": "gencast_mean_vs_era5_{res}_2020.nc",
+    "NeuralGCM": "neuralgcm_hres_vs_era5_{res}_2020.nc",
+    "ERA5-climatology": "climatology_vs_era5_{res}_2020.nc",
 }
+MODEL_PREFIXES = MODEL_FILENAMES  # back-compat alias (dispatch checks + tests)
 
 # Default model set to fetch (order preserved in the CSV).
 DEFAULT_MODELS = tuple(MODEL_PREFIXES)
@@ -279,12 +289,16 @@ def _find_lead_coord(ds):
 
 
 def _lead_hours_of(td):
-    """Convert a numpy timedelta64 lead value to whole hours (int)."""
+    """Lead value -> whole hours. Handles BOTH encodings seen in WB2 files:
+    plain integers (already hours — the live benchmark_results files) and
+    numpy timedelta64 (self-run eval outputs)."""
     import numpy as np
 
-    seconds = float(np.asarray(td, dtype="timedelta64[s]").astype("float64"))
-    hours = seconds / _SECONDS_PER_HOUR
-    return int(round(hours))
+    arr = np.asarray(td)
+    if np.issubdtype(arr.dtype, np.timedelta64):
+        seconds = float(arr.astype("timedelta64[s]").astype("float64"))
+        return int(round(seconds / _SECONDS_PER_HOUR))
+    return int(round(float(arr)))
 
 
 def _open_result(source, resolution_dir, prefix):
@@ -296,7 +310,8 @@ def _open_result(source, resolution_dir, prefix):
     import xarray as xr
 
     root = str(source).rstrip("/")
-    path = f"{root}/{resolution_dir}/deterministic/{prefix}deterministic.nc"
+    # prefix is a MODEL_FILENAMES template: flat bucket, {res} = resolution dir
+    path = f"{root}/{prefix.format(res=resolution_dir)}"
     if path.startswith("gs://"):
         import gcsfs
 
@@ -334,15 +349,28 @@ def fetch_records(cfg):
             ds = ds.sel(region=WB2_REGION)
 
         for hv in HEADLINE_VARS:
-            if hv.wb2_var not in ds:
-                # A requested headline variable absent from THIS model's file is
-                # a real gap (e.g. a model that did not report 10m wind); skip
-                # only this (model, variable) rather than fabricate. Documented,
-                # not silent: every skip is a genuine absence in the source.
+            # Live benchmark_results files carry metric-prefixed FLAT data
+            # vars ("rmse.geopotential"); self-run outputs may carry bare vars
+            # with a metric dim. Prefer the direct-RMSE var; else legacy.
+            _rmse_key = f"rmse.{hv.wb2_var}"
+            _is_rmse_direct = _rmse_key in ds
+            if _is_rmse_direct:
+                da = ds[_rmse_key]
+            elif hv.wb2_var in ds:
+                da = ds[hv.wb2_var].sel(metric=_MSE_METRIC)
+            else:
+                # A requested headline variable absent from THIS model's file
+                # is a real gap (e.g. no 10m wind reported); skip only this
+                # (model, variable) rather than fabricate. Documented, not
+                # silent: every skip is a genuine absence in the source.
                 continue
-            da = ds[hv.wb2_var].sel(metric=_MSE_METRIC)
             if hv.level_hpa is not None:
                 if "level" not in da.coords and "level" not in da.dims:
+                    continue
+                import numpy as _np
+                if hv.level_hpa not in _np.asarray(da["level"].values):
+                    # level not published for this model (live files carry
+                    # only 500/700/850) -> genuine absence, skip not crash.
                     continue
                 da = da.sel(level=hv.level_hpa)
             # iterate over the model's published leads; emit only the wanted ones
@@ -351,12 +379,13 @@ def fetch_records(cfg):
                 lead_h = _lead_hours_of(lead_val)
                 if lead_h not in wanted_leads:
                     continue
-                mse = float(da.isel({lead_coord: i}).values)
-                if not math.isfinite(mse) or mse < 0.0:
+                val = float(da.isel({lead_coord: i}).values)
+                if not math.isfinite(val) or val < 0.0:
                     raise ValueError(
                         f"{model}/{hv.wb2_var}@{hv.level_hpa} lead {lead_h}h: "
-                        f"non-finite/negative MSE {mse!r} in source (aborting).")
-                rmse_val = math.sqrt(mse)     # ECMWF convention: sqrt(mean MSE)
+                        f"non-finite/negative value {val!r} in source (aborting).")
+                # direct-RMSE var: use as-is; legacy MSE: ECMWF sqrt convention
+                rmse_val = val if _is_rmse_direct else math.sqrt(val)
                 records.append({
                     "model": model,
                     "variable": hv.csv_variable,
