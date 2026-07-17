@@ -446,10 +446,16 @@ def _cuadjtq_evap_2iter(
 
     def _one_iter(T_i, q_i, first):
         alpha = _ifs_liquid_fraction_cu(T_i)
-        qs = (
+        qs_mix = (
             alpha * saturation_mixing_ratio(T_i, p)
             + (1.0 - alpha) * saturation_mixing_ratio_ice(T_i, p)
         )
+        # Oracle base is the SPECIFIC-humidity form eps*e_s/p (FOEEWMCU/PAP)
+        # BEFORE the ZCOR conversion; our helpers return the MIXING RATIO
+        # eps*e_s/(p-e_s).  Convert exactly: eps*e/p = r_s/(1 + r_s/eps)
+        # (codex R1 #2 — feeding the mixing ratio through ZCOR lands on
+        # eps*e/(p-(2-eps)e), a biased saturation).
+        qs = qs_mix / (1.0 + qs_mix / constants.epsilon)
         qs = jnp.minimum(qs, 0.5)
         zcor = 1.0 / (1.0 - _IFS_RETV * qs)
         qs = qs * zcor
@@ -533,6 +539,18 @@ def _ifs_downdraft(
     q_mix = 0.5 * (q_u + q_wb)
     b_lfs = virtual_temperature(T_mix, q_mix) - virtual_temperature(T, q_v)
     demand = jnp.maximum(q_wb - q_v, 0.0)            # -ZCOND >= 0
+    # IKHSMIN gate (cudlfsn.F90:200-227; codex R1 #3): the LFS may start
+    # only AT/BELOW the level of minimum saturated moist static energy
+    # h_s = cp*T + g*z + L_mix*q_sat.  Soft-argmin one-hot + downward
+    # cumulative sum = smooth "k >= IKHSMIN" membership.
+    _alpha_hs = _ifs_liquid_fraction_cu(T)
+    _L_hs = _alpha_hs * constants.L_v + (1.0 - _alpha_hs) * constants.L_s
+    from legoesm.thermo import saturation_mixing_ratio_ice as _smri
+    _qs_hs = (_alpha_hs * saturation_mixing_ratio(T, p_full)
+              + (1.0 - _alpha_hs) * _smri(T, p_full))
+    h_s = cpd * T + g * z + _L_hs * _qs_hs
+    _w_hsmin = jax.nn.softmax(-h_s / 500.0, axis=1)  # coeff-ok: soft-argmin sharpness [J/kg]
+    elig_hs = jnp.clip(jnp.cumsum(_w_hsmin, axis=1), 0.0, 1.0)
     m_top = _IFS_RMFDEPS * M_b                       # (ncol,)
     # Candidate window KCTOP < JK < KCBOT (cudlfsn.F90:240-242): the oracle
     # cloud TOP is where the ASCENT dies (KCTOP from cuascn), not the parcel
@@ -549,6 +567,7 @@ def _ifs_downdraft(
             (rain_flux_total[:, None]
              - _IFS_DD_RAIN_AVAIL * m_top[:, None] * demand) / _DD_RAIN_GATE)
         * window
+        * elig_hs
         * cape_weight[:, None]
     )
     surv = jnp.cumprod(1.0 - gate, axis=1)
@@ -588,7 +607,10 @@ def _ifs_downdraft(
         m_itop = m_itop + crossing * m_d
         zdmfde_below = m_itop * dp_k / jnp.maximum(p_sfc_c - _IFS_ITOPDE_PA, 1.0)
         # (d) organized entrainment above ITOPDE with oracle clamps.
-        zdmfen_above = zentr + oentr * dz_k * m_d
+        # oracle ZZENTR = ZOENTR*ZDZ*PMFD with NEGATIVE ZDZ (cuddrafn:207-208):
+        # with our positive dz_k the equivalent is MINUS oentr*dz*m_d
+        # ((<=0)*(+)*(<=0) needs the sign flip to stay <= 0) — codex R1 #1.
+        zdmfen_above = zentr - oentr * dz_k * m_d
         zdmfen_above = jnp.maximum(zdmfen_above, _IFS_DD_ENTR_MAX_FRAC * m_d)
         zdmfen_above = jnp.maximum(
             zdmfen_above, -_IFS_DD_MU_FRAC * mu_k - (m_d - zentr))
