@@ -1,0 +1,51 @@
+#!/bin/bash
+# GraphCast-scale SFNO_FULL training on NCAR Derecho (PBS Pro, single A100).
+#
+# Trains the FULL SFNO atmospheric emulator (sfno_full — SFNO replaces BOTH the
+# dycore AND the physics) with the two GraphCast/NeuralGCM levers now wired into
+# the sfno_full path:
+#   (1) a NeuralGCM-style ROLLOUT CURRICULUM (short autoregressive leads first,
+#       progressively longer -> 120 h), for free-running multi-day stability; and
+#   (2) GRAPHCAST-SCALE DATA: 40 years (1979-2018) x 4 seasonal windows/yr
+#       (~3200 IC/target pairs) with full seasonal + interannual coverage.
+# See config/aimip/wbcompare/suite_sfno_full_scale.yaml.
+#
+# SINGLE A100: sfno_full has NO data-parallel path — train_sfno_full_spectral
+# RAISES NotImplementedError under aimip_data_parallel / nproc>1 (its
+# _train_sfno_full_loop is not DP-aware). So this runs on exactly ONE GPU. The
+# per-epoch checkpoint cadence + run_aimip --resume lets a walltime kill be
+# picked up (start_epoch indexes into the curriculum epoch_plan). Long walltime:
+# the 120 h phase (20 SFNO macro steps/sample, checkpointed-scan backward) over
+# ~3200 samples dominates.
+#
+# Submit:  qsub train_sfno_full_scale.pbs
+# Env overrides:
+#   WB_SUITE       training suite (default config/aimip/wbcompare/suite_sfno_full_scale.yaml)
+#   WB_OUT_ROOT    output root (default results/aimip_wbcompare_scale)
+#PBS -A P08010000
+#PBS -N sfno_full_scale
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=1:ncpus=64:ngpus=1:gpu_type=a100:mem=200GB
+#PBS -l walltime=48:00:00
+#PBS -j oe
+#PBS -k eod
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR}"
+source scripts/cluster/scaling_derecho/_env.sh
+module load conda cuda
+export JAX_PLATFORMS=cuda
+export JAX_ENABLE_X64=1
+export XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+
+SUITE="${WB_SUITE:-config/aimip/wbcompare/suite_sfno_full_scale.yaml}"
+OUT_ROOT="${WB_OUT_ROOT:-results/aimip_wbcompare_scale}"
+mkdir -p "${OUT_ROOT}/logs"
+echo "[$(date)] Derecho sfno_full SCALE train | suite=${SUITE} out=${OUT_ROOT} (single A100, no DP)"
+
+# run_aimip is single-GPU spectral; the suite pins variants:[sfno_full], so this
+# trains ONLY the full SFNO emulator with the rollout curriculum + many-year data.
+python -u scripts/run/run_aimip.py --suite "${SUITE}"
+
+echo "[$(date)] done -> checkpoints under ${OUT_ROOT}/sfno_full"
