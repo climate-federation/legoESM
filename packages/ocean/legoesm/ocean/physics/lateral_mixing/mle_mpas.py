@@ -51,9 +51,6 @@ from legoesm.ocean.physics.lateral_mixing.mle import (
     mle_streamfunction_magnitude,
     mle_vertical_structure,
 )
-from legoesm.ocean.dynamics.ocean_tendency_common import (
-    iterate_eos_and_pressure_anomaly,
-)
 from legoesm.ocean.vertical import compute_layer_thickness, compute_ocean_jacobian
 from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     EPS_DIV as _EPS_DIV,
@@ -219,11 +216,6 @@ def mle_tracer_tendency_mpas(
         S_fill = jnp.where(_active, S, S[_row, _bot][:, None])
 
     eos_fn = make_eos_fn(eos, eos_linear)
-    fill_fn = lambda field: voronoi_neumann_fill(field, mask, mesh)
-    rho_insitu, _rp, _pp = iterate_eos_and_pressure_anomaly(
-        T_fill, S_fill, mask, fill_fn, eos_fn,
-        z_coord.dz_ref, _RHO_0, constants.g, n_iter=2,
-    )                                                   # (nCells, nlev)
 
     # Reference W-INTERFACE depths [m, positive down] for the NEMO nla10
     # reference-level pick: cumulative reference thicknesses, surface first.
@@ -277,10 +269,19 @@ def mle_tracer_tendency_mpas(
         # IN-SITU rho here carried the compressibility between reference
         # pressures (~6x too stable; the shared helper's docstring) and
         # read deep unstable columns as stable, leaking transport through
-        # the gate.  Shared adiabatic-parcel helper; reference pressure =
-        # hydrostatic estimate at the reference centre depths (the Veros
-        # press = |zt| convention the helper documents).
-        z_centers_ref = jnp.cumsum(z_coord.dz_ref) - 0.5 * z_coord.dz_ref
+        # the gate.  APPROXIMATION (documented departure): the shared
+        # adiabatic-parcel helper is the Veros press=|zt| form (both
+        # parcels at the upper cell-centre pressure), not NEMO's
+        # interface-referenced rn2 discretisation — sign-equivalent for
+        # the gate.  True centre depths/spacing are passed so
+        # non-midpoint (partial-cell) ladders keep the correct geometry
+        # (codex r1 P1): p_cell from ``t_depth_ref`` when the coordinate
+        # carries it, and ``dz_half`` = the actual centre spacing.
+        _t_ref = getattr(z_coord, "t_depth_ref", None)
+        z_centers_ref = (
+            jnp.abs(jnp.asarray(_t_ref)) if _t_ref is not None
+            else jnp.cumsum(z_coord.dz_ref) - 0.5 * z_coord.dz_ref
+        )
         p_cell = jnp.broadcast_to(
             (_RHO_0 * constants.g) * z_centers_ref[None, :],
             T_fill.shape,
@@ -288,6 +289,7 @@ def mle_tracer_tendency_mpas(
         N2 = compute_buoyancy_frequency_adiabatic(
             T_fill, S_fill, p_cell, z_coord.dz_ref, jacobian,
             eos_fn=eos_fn,
+            dz_half=z_coord.dz_half_ref[None, :] * jacobian[:, None],
         )                                                          # (nCells, nlev-1)
         iface_in_ml = in_ml[:, :-1]                               # iface k in ML if cell k is
         col_n2 = jnp.sum(iface_in_ml * N2, axis=-1)              # (nCells,) NEMO zn2

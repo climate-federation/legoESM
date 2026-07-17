@@ -110,15 +110,24 @@ def _make_mle(cfg: MLEConfig) -> Callable:
         # locally-referenced buoyancy frequency.  The in-situ-difference
         # form (compute_buoyancy_frequency) carries the compressibility
         # between reference pressures (~6x too stable) and reads deep
-        # unstable columns as stable; use the shared adiabatic-parcel
-        # helper with the hydrostatic reference pressure at centre depths.
-        z_centers_ref = jnp.cumsum(z_coord.dz_ref) - 0.5 * z_coord.dz_ref
+        # unstable columns as stable.  APPROXIMATION (documented
+        # departure): the shared adiabatic-parcel helper is the Veros
+        # press=|zt| form, not NEMO's interface-referenced rn2
+        # discretisation — sign-equivalent for the gate.  True centre
+        # depths/spacing are threaded so non-midpoint (partial-cell)
+        # ladders keep the correct geometry (codex r1 P1).
+        _t_ref = getattr(z_coord, "t_depth_ref", None)
+        z_centers_ref = (
+            jnp.abs(jnp.asarray(_t_ref)) if _t_ref is not None
+            else jnp.cumsum(z_coord.dz_ref) - 0.5 * z_coord.dz_ref
+        )
         p_cell = jnp.broadcast_to(
             (_rho_0 * constants.g) * z_centers_ref,
             state.T.data.shape,
         )
         N2 = compute_buoyancy_frequency_adiabatic(
             state.T.data, state.S.data, p_cell, z_coord.dz_ref, J,
+            dz_half=z_coord.dz_half_ref * J[..., None],
         )
         # Actual partial-cell-aware live thickness (IDENTICAL to compute_ocean_rho)
         # so the MLE MLD/buoyancy/volume are consistent over real bathymetry.
