@@ -905,11 +905,20 @@ class PhysicsPipeline:
                 # tile is active, else the ocean bulk scheme) + the held
                 # radiative heating for the sub-cloud convergence term.
                 _extra_conv = {}
+                # land_frac alone serves the land RHEBC; the surface-flux
+                # path is needed only by the shallow closure / RCAPDCYCL
+                # (codex R2: land-RHEBC-only must not demand a surface
+                # config).
+                _need_land = getattr(_conv_cfg, "use_ifs_land_rhebc", False)
                 _need_sfc_inputs = (
                     getattr(_conv_cfg, "use_ifs_shallow_closure", False)
                     or getattr(_conv_cfg, "use_ifs_capdcycl", False)
-                    or getattr(_conv_cfg, "use_ifs_land_rhebc", False)
                 )
+                if _need_land and not _need_sfc_inputs:
+                    _extra_conv = dict(land_frac=(
+                        ad.flatten_2d(self.f_land)
+                        if self.f_land is not None
+                        else jnp.zeros((ad.ncol,), dtype=T_col.dtype)))
                 if _need_sfc_inputs:
                     # Fail loudly at trace time: the closure's bulk fluxes
                     # need a surface-layer config (codex R1 #1 — a None
