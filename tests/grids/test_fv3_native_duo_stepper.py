@@ -147,3 +147,33 @@ def test_sb3_full_acoustic_step(ctx):
     # tail plus the external-mode divg2 filter is SB4 alongside the
     # time loop, so no magnitude bound applies to the raw d_sw6 output
     # here (phase-4b certified the same convention).
+
+
+def test_sb4_two_full_steps_stable(ctx):
+    """SB4: TWO complete acoustic steps (stage chain + D-grid PG tail
+    back to covariant winds + halo refresh) — mass conserved across
+    both, winds finite and PHYSICALLY bounded after normalization
+    (|u| < 8*u0 on every face), no cross-step blowup."""
+    from legoesm.core.fv3_native_duo_stepper import (
+        full_acoustic_step_sixface,
+    )
+
+    states = analytic_six_face_state(ctx)
+    sl = slice(NG, NG + N)
+    m0 = sum(float((states[t]["delp"][sl, sl]
+                    * ctx["gs6"][t]["area"][sl, sl]).sum())
+             for t in range(6))
+    s1 = full_acoustic_step_sixface(ctx, states, dt=225.0)
+    s2 = full_acoustic_step_sixface(ctx, s1, dt=225.0)
+    m2 = sum(float((s2[t]["delp"][sl, sl]
+                    * ctx["gs6"][t]["area"][sl, sl]).sum())
+             for t in range(6))
+    assert abs(m2 - m0) / abs(m0) < 1e-12, (m0, m2)
+    slu = (slice(NG, NG + N), slice(NG, NG + N + 1))
+    slv = (slice(NG, NG + N + 1), slice(NG, NG + N))
+    for t in range(6):
+        u = s2[t]["u"][slu]
+        v = s2[t]["v"][slv]
+        assert np.isfinite(u).all() and np.isfinite(v).all(), t
+        assert np.abs(u).max() < 8 * 40.0, (t, float(np.abs(u).max()))
+        assert np.abs(v).max() < 8 * 40.0, (t, float(np.abs(v).max()))

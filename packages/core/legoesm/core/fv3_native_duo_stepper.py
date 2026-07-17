@@ -36,8 +36,67 @@ from legoesm.grids.fv3_native_gridstruct import (
 def build_six_face_duo_context(n: int, ng: int = 3) -> dict:
     """Gridstructs + Bounds for all six faces (certified builders)."""
     from legoesm.core.fv3_native_sw_core import Bounds
+    from legoesm.grids.fv3_native_halos import ed_supergrid_lonlat_ref
+    from legoesm.grids.fv3_native_metrics import compute_fv3_native_angles
 
     gs6 = [build_fv3_native_gridstruct(n, ng, tile=t) for t in range(1, 7)]
+
+    # DUO angle override: the plain-mpp gridstruct poisons the panel-edge
+    # B-node sina/rsina (plain FV3 never reads them — its non-duo d_sw3
+    # edge branches extrapolate instead), but the duo interior-everywhere
+    # contravariant formulas DIVIDE by rsina at edge B-nodes.  The duo
+    # grid has REAL cross-face angles there — exactly the certified
+    # phase-2B compute_fv3_native_angles construction.  The four
+    # cube-vertex B-nodes stay poisoned (upstream convention: d_sw4's
+    # corner-KE fix replaces exactly those values).
+    lon6s, lat6s = ed_supergrid_lonlat_ref(n)
+    npx = n + 1
+    lon6c = np.stack([lon6s[t][::2, ::2] for t in range(6)])
+    lat6c = np.stack([lat6s[t][::2, ::2] for t in range(6)])
+    ang = compute_fv3_native_angles(lon6c, lat6c)
+    for t in range(6):
+        gs = gs6[t]
+        blk = (slice(ng, ng + npx), slice(ng, ng + npx))
+        cb = np.array(ang["cosa_b"][t])
+        sb = np.array(ang["sina_b"][t])
+        good = np.isfinite(cb) & np.isfinite(sb)
+        cosa = gs["cosa"][blk]
+        sina = gs["sina"][blk]
+        rsina = gs["rsina"][blk]
+        cosa[good] = cb[good]
+        sina[good] = sb[good]
+        with np.errstate(divide="ignore"):
+            rs = 1.0 / sb
+        rsina[good] = rs[good]
+        gs["cosa"][blk] = cosa
+        gs["sina"][blk] = sina
+        gs["rsina"][blk] = rsina
+
+    # DUO metric corner fill: the plain convention poisons the
+    # corner-diagonal cell areas (area = -big -> rarea = -1e-8); the
+    # duo extended grid has REAL metrics there, and d_sw5's full-domain
+    # relative vorticity divides by area at those cells — the del6
+    # vorticity damping then amplifies the fringe jump by
+    # damp4=(damp_v*da_min_c)^2.  Interim: FV3 AGRID corner index-fill
+    # on area (real side values; the true wedge areas arrive with the
+    # ext-machinery swap) + rarea recomputed there.
+    from legoesm.grids.fv3_native_gridstruct import (
+        _fill_corners_agrid_x,
+    )
+    from legoesm.grids.fv3_native_gridstruct import (
+        fort as _fort,
+    )
+
+    lo = 1 - ng
+    for gs in gs6:
+        area = np.array(gs["area"], copy=True)
+        _fill_corners_agrid_x(_fort(area, lo, lo), npx, ng)
+        rarea = np.array(gs["rarea"], copy=True)
+        corner = gs["area"] != area          # exactly the filled cells
+        rarea[corner] = 1.0 / area[corner]
+        gs["area"] = area
+        gs["rarea"] = rarea
+
     for gs in gs6:
         gs.setdefault("bounded_domain", False)
         gs.setdefault("grid_type", 0)
@@ -236,12 +295,30 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
     )
     from legoesm.grids.fv3_native_gridstruct import (
         average_shared_edge_bgrid,
+        exchange_agrid_scalar_halos,
+        exchange_dgrid_vector_halos,
     )
 
     n, ng = ctx["n"], ctx["ng"]
     bd = ctx["bd"]
     npx = n + 1
     m_a = n + 2 * ng
+
+    # pre-c_sw entry exchanges (dyn_core duo 437-471: ext_scalar(delp),
+    # ext_scalar(pt), ext_vector(u,v)) — interim mpp-analog versions;
+    # ALSO fills the corner-diagonal ghosts (BIG-poisoned in the
+    # analytic state) that d_sw5's full-domain vorticity prep and the
+    # del6 damping otherwise amplify by damp4 ~ 1e21.
+    delp6 = [np.array(st["delp"], copy=True) for st in states]
+    pt6 = [np.array(st["pt"], copy=True) for st in states]
+    u6 = [np.array(st["u"], copy=True) for st in states]
+    v6 = [np.array(st["v"], copy=True) for st in states]
+    for t in range(1, 7):
+        exchange_agrid_scalar_halos(delp6, t, n, ng)
+        exchange_agrid_scalar_halos(pt6, t, n, ng)
+        exchange_dgrid_vector_halos(u6, v6, t, n, ng)
+    states = [{**states[t], "delp": delp6[t], "pt": pt6[t],
+               "u": u6[t], "v": v6[t]} for t in range(6)]
 
     csw = csw_step_sixface(ctx, states, dt2=0.5 * dt)
     s12 = dsw12_step_sixface(ctx, states, csw, dt=dt)
@@ -282,5 +359,154 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
         outs.append({"delp": s12[t - 1]["delp"], "pt": s12[t - 1]["pt"],
                      "u": s6["u"], "v": s6["v"],
                      "ke": s5["ke"], "wk": s5["wk"],
-                     "divg_d": s5["divg_d"]})
+                     "divg_d": s5["divg_d"], "delpc": s5["delpc"]})
     return outs
+
+
+def geopk_sw_1lev_d(delp: np.ndarray, hs: np.ndarray, bd) -> tuple:
+    """geopk D-grid call (CG=.false., a2b_ord=4, duo): ranges widen to
+    is-2..ie+2 (dyn_core geopk range guard).  Same SW km=1 formulas as
+    the C version; delp halos must be freshly exchanged (dyn_core does
+    ext_scalar(delp/pt) right before this call)."""
+    is_, ie = bd.is_, bd.ie
+    m = delp.shape[0]
+    pkc = np.zeros((m, m, 2))
+    gz = np.zeros((m, m, 2))
+    lo = 1 - bd.ng
+    sl = slice(is_ - 2 - lo, ie + 2 - lo + 1)
+    pkc[sl, sl, 1] = np.exp(1.0 * np.log(delp[sl, sl]))
+    gz[sl, sl, 1] = hs[sl, sl]
+    gz[sl, sl, 0] = gz[sl, sl, 1] + 1.0 * (pkc[sl, sl, 1] - pkc[sl, sl, 0])
+    return pkc, gz
+
+
+def one_grad_p_1lev(u, v, pkc, gz, divg2, gs: dict, bd, npx: int,
+                    npy: int, *, dt: float, d_ext: float = 0.02):
+    """dyn_core.F90 one_grad_p (2347-2480), km=1 hydrostatic SW:
+    pk B-node top = ptk = 0; a2b_ord4(replace=True, duo) moves pk(2),
+    gz(1), gz(2) to B-nodes; wk2/wk1 from divg2 differences; the final
+    D-grid PG update converts the circulation-form d_sw6 winds back to
+    covariant: u = rdx*(wk2 + u + dt/(wk+wk(i+1))*(cross-terms)).
+    Mutates u/v in place (data-domain numpy arrays).
+    """
+    from legoesm.core.fv3_native_d_sw import a2b_ord4, fort
+
+    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
+    isd, jsd = bd.isd, bd.jsd
+    ng = bd.ng
+    lo = 1 - ng
+
+    gsf = {
+        "grid_lon": fort(gs["grid_lon"], isd, jsd),
+        "grid_lat": fort(gs["grid_lat"], isd, jsd),
+        "agrid_lon": fort(gs["agrid_lon"], isd, jsd),
+        "agrid_lat": fort(gs["agrid_lat"], isd, jsd),
+        "dxa": fort(gs["dxa"], isd, jsd),
+        "dya": fort(gs["dya"], isd, jsd),
+        "edge_w": gs["edge_w"], "edge_e": gs["edge_e"],
+        "edge_s": gs["edge_s"], "edge_n": gs["edge_n"],
+        "bounded_domain": False, "grid_type": 0,
+        "sw_corner": True, "se_corner": True,
+        "nw_corner": True, "ne_corner": True,
+    }
+
+    pk1 = np.array(pkc[:, :, 0], copy=True)
+    pk2 = np.array(pkc[:, :, 1], copy=True)
+    gz1 = np.array(gz[:, :, 0], copy=True)
+    gz2 = np.array(gz[:, :, 1], copy=True)
+    # pk(:,:,1) = top_value (ptk = ptop**akap = 0) on the B ring
+    for j in range(js, je + 1 + 1):
+        for i in range(is_, ie + 1 + 1):
+            pk1[i - lo, j - lo] = 0.0
+    wkb = np.zeros_like(pk2)
+    for arr in (pk2, gz1, gz2):
+        F = fort(arr, isd, jsd)
+        WK = fort(wkb, isd, jsd)
+        a2b_ord4(F, WK, gsf, npx, npy, is_, ie, js, je, ng,
+                 replace=True, duogrid=True)
+
+    if d_ext > 0.0:
+        wk2 = np.zeros((ie - is_ + 1, je + 1 - js + 1))
+        wk1 = np.zeros((ie + 1 - is_ + 1, je - js + 1))
+        for j in range(js, je + 1 + 1):
+            for i in range(is_, ie + 1):
+                wk2[i - 1, j - 1] = (divg2[i - 1, j - 1]
+                                     - divg2[i + 1 - 1, j - 1])
+        for j in range(js, je + 1):
+            for i in range(is_, ie + 1 + 1):
+                wk1[i - 1, j - 1] = (divg2[i - 1, j - 1]
+                                     - divg2[i - 1, j + 1 - 1])
+    else:
+        wk2 = np.zeros((ie - is_ + 1, je + 1 - js + 1))
+        wk1 = np.zeros((ie + 1 - is_ + 1, je - js + 1))
+
+    def at(a, i, j):
+        return a[i - lo, j - lo]
+
+    wk = pk2 - pk1
+    RDX = gs["rdx"]
+    RDY = gs["rdy"]
+    for j in range(js, je + 1 + 1):
+        for i in range(is_, ie + 1):
+            u[i - lo, j - lo] = RDX[i - lo, j - lo] * (
+                wk2[i - 1, j - 1] + u[i - lo, j - lo]
+                + dt / (at(wk, i, j) + at(wk, i + 1, j)) * (
+                    (at(gz2, i, j) - at(gz1, i + 1, j))
+                    * (at(pk2, i + 1, j) - at(pk1, i, j))
+                    + (at(gz1, i, j) - at(gz2, i + 1, j))
+                    * (at(pk2, i, j) - at(pk1, i + 1, j))))
+    for j in range(js, je + 1):
+        for i in range(is_, ie + 1 + 1):
+            v[i - lo, j - lo] = RDY[i - lo, j - lo] * (
+                wk1[i - 1, j - 1] + v[i - lo, j - lo]
+                + dt / (at(wk, i, j) + at(wk, i, j + 1)) * (
+                    (at(gz2, i, j) - at(gz1, i, j + 1))
+                    * (at(pk2, i, j + 1) - at(pk1, i, j))
+                    + (at(gz1, i, j) - at(gz2, i, j + 1))
+                    * (at(pk2, i, j) - at(pk1, i, j + 1))))
+
+
+def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
+                               d_ext: float = 0.02) -> list:
+    """SB4: complete acoustic step INCLUDING the D-grid tail — the
+    stage chain (acoustic_step_sixface), delp/pt halo refresh, the
+    D geopk, the external-mode divg2 filter (d_ext*da_min_c*saved
+    divergence at km=1), one_grad_p back to covariant winds, and the
+    final D-wind halo exchange for the next step."""
+    from legoesm.grids.fv3_native_gridstruct import (
+        exchange_agrid_scalar_halos,
+        exchange_dgrid_vector_halos,
+    )
+
+    n, ng = ctx["n"], ctx["ng"]
+    bd = ctx["bd"]
+    npx = n + 1
+
+    stage = acoustic_step_sixface(ctx, states, dt)
+
+    delp6 = [np.array(o["delp"], copy=True) for o in stage]
+    pt6 = [np.array(o["pt"], copy=True) for o in stage]
+    for t in range(1, 7):
+        exchange_agrid_scalar_halos(delp6, t, n, ng)
+        exchange_agrid_scalar_halos(pt6, t, n, ng)
+
+    u6 = [np.array(o["u"], copy=True) for o in stage]
+    v6 = [np.array(o["v"], copy=True) for o in stage]
+    for t in range(1, 7):
+        gs = ctx["gs6"][t - 1]
+        hs = np.zeros_like(delp6[t - 1])
+        pkc, gz = geopk_sw_1lev_d(delp6[t - 1], hs, bd)
+        # divg2 = d_ext*da_min_c*saved divergence (km=1; dyn_core
+        # 1310-1325 with the mass weight cancelling at one level)
+        divg2 = np.zeros((npx, npx))
+        sl = slice(ng, ng + npx)
+        divg2[:, :] = (d_ext * float(gs["da_min_c"])
+                       * stage[t - 1]["delpc"][sl, sl]
+                       if "delpc" in stage[t - 1] else 0.0)
+        one_grad_p_1lev(u6[t - 1], v6[t - 1], pkc, gz, divg2, gs, bd,
+                        npx, npx, dt=dt, d_ext=d_ext)
+    for t in range(1, 7):
+        exchange_dgrid_vector_halos(u6, v6, t, n, ng)
+
+    return [{"delp": delp6[t], "pt": pt6[t], "u": u6[t], "v": v6[t]}
+            for t in range(6)]

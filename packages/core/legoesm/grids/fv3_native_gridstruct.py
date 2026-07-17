@@ -792,6 +792,116 @@ def exchange_cgrid_vector_halos(uc6: list, vc6: list, tile: int,
                 for fi in range(1, n + 2):
                     uc[fi - lo, fj - lo] = src_value(2 * fi - 1, 2 * fj,
                                                      n_src)
+    # corner-diagonal regions: FV3 VECTOR corner fill (mySign=-1), the
+    # plain-mpp treatment — upstream duo Lagrange-fills these via
+    # ext_vector; interim so corner-region uc/vc never carry stale
+    # ghosts into downstream consumers (c_sw delpc ring, p_grad_c wk).
+    _fill_corners_cgrid(fort(uc, lo, lo), fort(vc, lo, lo),
+                        npx, ng, -1.0)
+
+
+def exchange_agrid_scalar_halos(f6: list, tile: int, n: int, ng: int):
+    """mpp_update_domains A-grid scalar (cell centers, supergrid
+    (2i, 2j)) for one tile — side-strip index copy of the neighbour's
+    coincident cells (corner-diagonal regions untouched).  INTERIM
+    stand-in for the duo ext_scalar(…,0,0) k2e machinery."""
+    sg_npx = 2 * n + 1
+    lo = 1 - ng
+    fld = f6[tile - 1]
+    nw, ne, ns, nn = neighbor_tiles(tile)
+    strips = (
+        (nw, range(1 - ng, 0 + 1), range(1, n + 1)),
+        (ne, range(n + 1, n + ng + 1), range(1, n + 1)),
+        (ns, range(1, n + 1), range(1 - ng, 0 + 1)),
+        (nn, range(1, n + 1), range(n + 1, n + ng + 1)),
+    )
+    for n_src, fi_range, fj_range in strips:
+        src = f6[n_src - 1]
+        for fi in fi_range:
+            for fj in fj_range:
+                si, sj = 2 * fi, 2 * fj
+                ii, jj = neighbor_index(si, sj, tile, n_src, sg_npx, sg_npx)
+                ci, cj = ii // 2, jj // 2
+                if 1 <= ci <= n and 1 <= cj <= n:
+                    fld[fi - lo, fj - lo] = src[ci - lo, cj - lo]
+    # corner-diagonal regions: the FV3 AGRID corner fill (index map
+    # ported from fv_mp_mod) — the duo ext machinery Lagrange-fills
+    # these upstream; this is the mpp-consistent interim so consumers
+    # reading within +/-ng of a cube corner (duo a2b at corner B-nodes)
+    # never see stale ghost values.
+    _fill_corners_agrid_x(fort(fld, lo, lo), n + 1, ng)
+
+
+def exchange_dgrid_vector_halos(u6: list, v6: list, tile: int,
+                                n: int, ng: int):
+    """mpp_update_domains(u, v, gridtype=DGRID_NE) for one tile.
+
+    D-grid staggering: u is the x-component on y-faces (supergrid
+    (2i, 2j-1); Fortran u(isd:ied, jsd:jed+1)), v the y-component on
+    x-faces ((2i-1, 2j); v(isd:ied+1, jsd:jed)).  Same
+    component/orientation-sign machinery as the certified CGRID
+    exchange, with the slot parities swapped.  INTERIM stand-in for
+    ext_vector(u, v, dg, …, 0,1,1,0).  Mutates in place.
+    """
+    sg_npx = 2 * n + 1
+    npx = n + 1
+    lo = 1 - ng
+    u = u6[tile - 1]
+    v = v6[tile - 1]
+    nw, ne, ns, nn = neighbor_tiles(tile)
+
+    def src_u(si, sj, n_src):
+        sii, sjj = neighbor_index(si, sj, tile, n_src, sg_npx, sg_npx)
+        sii2, sjj2 = neighbor_index(si + 2, sj, tile, n_src, sg_npx,
+                                    sg_npx)
+        dii, djj = sii2 - sii, sjj2 - sjj
+        if dii != 0:                      # aligned: u <- u
+            sgn = 1.0 if dii > 0 else -1.0
+            fi, fj = sii // 2, (sjj + 1) // 2
+            return sgn * u6[n_src - 1][fi - lo, fj - lo]
+        sgn = 1.0 if djj > 0 else -1.0    # swapped: u <- v
+        fi, fj = (sii + 1) // 2, sjj // 2
+        return sgn * v6[n_src - 1][fi - lo, fj - lo]
+
+    def src_v(si, sj, n_src):
+        sii, sjj = neighbor_index(si, sj, tile, n_src, sg_npx, sg_npx)
+        sii2, sjj2 = neighbor_index(si, sj + 2, tile, n_src, sg_npx,
+                                    sg_npx)
+        dii, djj = sii2 - sii, sjj2 - sjj
+        if djj != 0:                      # aligned: v <- v
+            sgn = 1.0 if djj > 0 else -1.0
+            fi, fj = (sii + 1) // 2, sjj // 2
+            return sgn * v6[n_src - 1][fi - lo, fj - lo]
+        sgn = 1.0 if dii > 0 else -1.0    # swapped: v <- u
+        fi, fj = sii // 2, (sjj + 1) // 2
+        return sgn * u6[n_src - 1][fi - lo, fj - lo]
+
+    strips = (
+        (nw, range(1 - ng, 0 + 1), "i"),
+        (ne, range(n + 1, n + ng + 1), "i"),
+        (ns, range(1 - ng, 0 + 1), "j"),
+        (nn, range(npx + 1, npx + ng + 1), "j"),
+    )
+    for n_src, rng, axis in strips:
+        if axis == "i":
+            for fi in rng:
+                for fj in range(1, npx + 1):      # u y-faces 1..npx
+                    u[fi - lo, fj - lo] = src_u(2 * fi, 2 * fj - 1, n_src)
+            v_cols = (range(1 - ng, 0 + 1) if rng.start < 1
+                      else range(npx + 1, npx + ng + 1))
+            for fi in v_cols:
+                for fj in range(1, n + 1):
+                    v[fi - lo, fj - lo] = src_v(2 * fi - 1, 2 * fj, n_src)
+        else:
+            for fj in rng:
+                for fi in range(1, n + 1):
+                    u[fi - lo, fj - lo] = src_u(2 * fi, 2 * fj - 1, n_src)
+            vj = (range(1 - ng, 0 + 1) if rng.start <= 0
+                  else range(n + 1, n + ng + 1))
+            for fj in vj:
+                for fi in range(1, npx + 1):
+                    v[fi - lo, fj - lo] = src_v(2 * fi - 1, 2 * fj, n_src)
+    _fill_corners_dgrid(fort(u, lo, lo), fort(v, lo, lo), npx, ng, -1.0)
 
 
 def _cgrid_edge_partner(fx6: list, fy6: list, tile: int, si: int, sj: int,
