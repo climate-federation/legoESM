@@ -223,6 +223,9 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # Backscatter reservoir faithfulness: E is the subgrid-KE reservoir symbol
 # (Jansen-Held 2014).
 "tests/ocean/unit/test_backscatter_reservoir_faithful.py" = ["N803", "N806"]
+# Enhanced-diffusion faithfulness: K (diffusivity) / A (viscosity) convective-
+# adjustment symbols (Oceananigans ConvectiveAdjustment).
+"tests/ocean/unit/test_enhanced_diffusion_faithful.py" = ["N806"]
 "scripts/validate/compare_amip_era5.py" = ["N803", "N806", "N815"]
 # The canonical SST symbol is ``sst_K`` (used 100s of times); N806/N803 flag the local
 # variable / monkeypatch arg in the cross-grid deploy CLI + its test (not CI-enforced).
