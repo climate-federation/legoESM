@@ -276,6 +276,14 @@ class SegmentCarry(NamedTuple):
     tke: jax.Array = None
     qke: jax.Array = None
     gwd_spectrum: jax.Array = None
+    # Diagnostic CLUBB sub-grid cloud fraction (ncol, nlev) carried one step
+    # (radiation runs before turbulence) so ``compute_radiation_core`` can use it
+    # in the cloud optics instead of the RH grid-scale fraction — the compiled-
+    # rollout twin of the per-step ``_run_per_step`` carry (marine-Sc albedo
+    # lever).  ``None`` (default / feature off, or a non-cf-producing closure) =>
+    # byte-identical legacy carry.  Threaded exactly like ``tke``: fed to
+    # step_unified via ``_dm_in`` and read back from ``phys_out.cloud_fraction``.
+    cloud_fraction: jax.Array = None
     conv_precip_prev: jax.Array = None
     # Lagged (previous-step) total precip [kg/m²/s] driving the opt-in
     # convective cloud-fraction source.  Radiation runs BEFORE convection in
@@ -319,6 +327,7 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                T_land=None, q_i=None, q_s=None, q_g=None,
                N_c=None, N_r=None, N_i=None,
                tke=None, qke=None, gwd_spectrum=None,
+               cloud_fraction=None,
                conv_precip_prev=None,
                land_ml=None, w_land=None, snow=None,
                conv_prog_nlev=None):
@@ -453,6 +462,8 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         qke=None if qke is None else _promote(qke, storage),
         gwd_spectrum=(None if gwd_spectrum is None
                       else _promote(gwd_spectrum, storage)),
+        cloud_fraction=(None if cloud_fraction is None
+                        else _promote(cloud_fraction, storage)),
         conv_precip_prev=_promote(conv_precip_prev, storage),
         land_ml=land_ml,   # pytree (MultiLayerLandState) or None — not a scalar field
         # Soil-water bucket: None unless the bucket is active (identical
@@ -1000,6 +1011,7 @@ class _SplitStepLocals(NamedTuple):
     phys_tke: object
     phys_qke: object
     phys_gwd: object
+    phys_cloud_fraction: object = None
 
 
 _MOIST_FIELDS = ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_c", "N_r", "N_i")
@@ -1063,7 +1075,7 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
     for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
         if moist[_nm] is not None:
             _dm_in[_nm] = moist[_nm]
-    for _nm in ("tke", "qke", "gwd_spectrum"):
+    for _nm in ("tke", "qke", "gwd_spectrum", "cloud_fraction"):
         _fld = getattr(carry, _nm)
         if _fld is not None:
             _dm_in[_nm] = _fld
@@ -1224,6 +1236,7 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         w_land_new=w_land_new, snow_new=snow_new,
         phys_tke=phys_out.tke, phys_qke=phys_out.qke,
         phys_gwd=phys_out.gwd_spectrum,
+        phys_cloud_fraction=phys_out.cloud_fraction,
     )
 
 
@@ -1355,6 +1368,12 @@ def finalize_split_step(carry, lz, statics):
                           lz.phys_gwd if lz.phys_gwd is not None
                           else carry.gwd_spectrum,
                           carry.gwd_spectrum)),
+        cloud_fraction=(None if carry.cloud_fraction is None
+                        else _match_dtype(
+                            lz.phys_cloud_fraction
+                            if lz.phys_cloud_fraction is not None
+                            else carry.cloud_fraction,
+                            carry.cloud_fraction)),
         conv_precip_prev=_match_dtype(
             lz.conv_precip_prev_new, carry.conv_precip_prev),
         land_ml=lz.land_ml_new,
@@ -2029,6 +2048,7 @@ def build_segment_fn(
                     w_land_new=w_land_new, snow_new=snow_new,
                     phys_tke=phys_out.tke, phys_qke=phys_out.qke,
                     phys_gwd=phys_out.gwd_spectrum,
+                    phys_cloud_fraction=phys_out.cloud_fraction,
                 )
             else:
                 # Single-rank (single-controller / lat-band-SPMD) operator-split

@@ -5348,6 +5348,9 @@ def clubb_turbulence(
         lhflx=lhflx,
         ustar=ustar,
         h_pbl=h_pbl,
+        # Expose the CLUBB ADG1-PDF liquid cloud fraction so radiation can use
+        # it (cloud_scheme="clubb") instead of the RH-diagnosed grid-scale one.
+        cloud_fraction=cloud_frac_a,
     )
     return output, wp2_new
 

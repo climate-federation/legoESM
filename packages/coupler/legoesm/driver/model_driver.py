@@ -4696,6 +4696,45 @@ class ModelDriver:
         # SW is not runnable via ModelDriver — reject at the public entry even
         # if a caller reached run() without setup() (codex M2 review).
         self._reject_shallow_water_unrunnable()
+        # CLUBB cloud-fraction -> radiation carry is threaded through the per-step
+        # rollout (``_run_per_step``) AND the single-device compiled segment
+        # rollout (``_run_compiled`` -> the fused ``_make_single_step`` +
+        # ``SegmentCarry.cloud_fraction``).  The MULTI-DEVICE / distinct-dycore
+        # rollouts (MPAS, spectral, lat-lon-SPMD, tiled-cube — which route to
+        # operator-split / sharded / tiled carry structures) do NOT yet thread it,
+        # so an enabled feature there would silently no-op.  Those are all selected
+        # by their own predicate BEFORE the ``compiled`` branch, so refuse LOUDLY
+        # on them (dispatch-hardening) — but ``compiled`` alone is now fine (the
+        # fused single-device path carries it).  The lat-lon-SPMD operator-split
+        # lane is reached only under enable_latlon_spmd (covered below); the tiled
+        # operator-split lane only under cube multi-device tiling (covered below).
+        if getattr(self.config, "use_clubb_cloud_fraction", False):
+            _grid = self.config.grid.grid_type
+            _disc = self.config.dycore.discretization
+            _latlon_spmd = getattr(self.config, "enable_latlon_spmd", False)
+            _tiled_cube = (
+                _grid == "cubed_sphere"
+                and self._device_config is not None
+                and getattr(self._device_config, "mesh", None) is not None
+                and tuple(getattr(self._device_config, "tiling", (1, 1))) != (1, 1)
+            )
+            if _grid == "mpas" or _disc == "spectral" \
+                    or _latlon_spmd or _tiled_cube:
+                raise NotImplementedError(
+                    "use_clubb_cloud_fraction is wired through the single-device "
+                    "per-step AND fused-compiled rollouts, but NOT the "
+                    "multi-device / distinct-dycore ones: it needs "
+                    "grid_type != 'mpas', discretization != "
+                    "'spectral', enable_latlon_spmd=False, and no multi-device "
+                    "cube tiling.  Got "
+                    f"compiled={compiled}, grid={_grid!r}, discretization="
+                    f"{_disc!r}, latlon_spmd={_latlon_spmd}, tiled_cube="
+                    f"{_tiled_cube}.  Those rollouts do not yet thread the "
+                    "cloud-fraction carry and would silently ignore the flag.  "
+                    "Re-run single-device (per-step or compiled) on a latlon / "
+                    "cubed-sphere hydrostatic config, or thread the cloud-fraction "
+                    "carry through the operator-split / sharded / tiled steps first."
+                )
         self._segment_callback = segment_callback
         # Checkpoint hook (a coupled driver passes its own save_checkpoint so
         # the FULL coupled state — not just the atmosphere — is written on a
@@ -4996,6 +5035,12 @@ class ModelDriver:
                 cloud_config=_standalone_cloud_config(cfg, _cloud_scheme),
                 diurnal_cycle=cfg.diurnal_cycle,
                 orbit=_orbit_params,
+                # CLUBB sub-grid cloud fraction -> radiation (marine-Sc albedo
+                # lever).  Wired even on the MPAS path so a request raises loudly
+                # in make_radiation_physics (READ side is hydrostatic-only) rather
+                # than being silently ignored; default False is byte-identical.
+                use_clubb_cloud_fraction=getattr(
+                    cfg, "use_clubb_cloud_fraction", False),
                 # Ozone source (default "standard" matches the bare default; a
                 # non-standard --ozone-source now flows to MPAS rrtmgp).  The
                 # external CMIP6 ozone FILE arrives per-step via the traced
@@ -7659,7 +7704,19 @@ class ModelDriver:
         )
         _gwd_prognostic = gwd_carries_spectrum(cfg.gravity_wave_drag)
         tke = qke = gwd_spectrum = None
-        if _turb_traits.carries_energy or _gwd_prognostic:
+        # CLUBB sub-grid cloud-fraction carry (marine-Sc albedo lever): diagnostic
+        # CLUBB writes it out of the physics step; the NEXT radiation step reads
+        # it.  None (default / feature-off) => step_unified gets None =>
+        # byte-identical RH grid-scale cloud path.
+        cloud_fraction = None
+        # Build _seed_ps (and thus seed the cloud-fraction carry below) whenever a
+        # stateful carry is active OR the CLUBB cf feature is on — do NOT rely on
+        # ``carries_energy`` alone: a cf-producing closure that carried no energy
+        # would otherwise skip the seed and the compiled feature would silently
+        # no-op (carry stays None).  Diagnostic CLUBB carries energy today, so this
+        # is defensive; the guard in run() already requires diagnostic CLUBB.
+        if (_turb_traits.carries_energy or _gwd_prognostic
+                or getattr(cfg, "use_clubb_cloud_fraction", False)):
             from legoesm.atmosphere.physics.combined import PhysicsConfig
             from legoesm.atmosphere.physics.turbulence import (
                 TurbulenceConfig,
@@ -7725,6 +7782,14 @@ class ModelDriver:
                 gwd_spectrum = _seed_carry(
                     "gwd_spectrum", _seed_ps.gwd_spectrum,
                 )
+            # Seed the CLUBB cloud-fraction carry only when the feature is on
+            # (diagnostic CLUBB is guaranteed by the build_physics_pipeline gate,
+            # which raises at construction otherwise, so _seed_ps carries a real
+            # zero-init cloud_fraction here).
+            if getattr(cfg, "use_clubb_cloud_fraction", False):
+                cloud_fraction = _seed_carry(
+                    "cloud_fraction", _seed_ps.cloud_fraction,
+                )
 
         # External forcing (rank-local p_s and lat for MPI)
         _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
@@ -7760,6 +7825,7 @@ class ModelDriver:
             "tke": tke,
             "qke": qke,
             "gwd_spectrum": gwd_spectrum,
+            "cloud_fraction": cloud_fraction,
             "o3_vmr": o3_vmr, "aerosol_od": aerosol_od, "ghg_vmr": ghg_vmr,
             "lat_deg_grid": lat_deg_grid,
             "_sd": _sd,
@@ -8031,6 +8097,7 @@ class ModelDriver:
         phys_tke = ctx["tke"]
         phys_qke = ctx["qke"]
         phys_gwd_spectrum = ctx["gwd_spectrum"]
+        phys_cloud_fraction = ctx.get("cloud_fraction")
         o3_vmr = ctx["o3_vmr"]
         aerosol_od = ctx["aerosol_od"]
         ghg_vmr = ctx["ghg_vmr"]
@@ -8366,6 +8433,7 @@ class ModelDriver:
                 tke=phys_tke,
                 qke=phys_qke,
                 gwd_spectrum=phys_gwd_spectrum,
+                cloud_fraction=phys_cloud_fraction,
                 # Double-moment hydrometeors (None unless the moisture registry +
                 # microphysics carry them) so coupled/training radiation gets
                 # droplet-number-aware r_eff AND a double-moment scheme evolves
@@ -8553,6 +8621,9 @@ class ModelDriver:
             if carry.gwd_spectrum is not None:
                 phys_gwd_spectrum = carry.gwd_spectrum
                 self._carry_aux["gwd_spectrum"] = phys_gwd_spectrum
+            if carry.cloud_fraction is not None:
+                phys_cloud_fraction = carry.cloud_fraction
+                self._carry_aux["cloud_fraction"] = phys_cloud_fraction
 
             current_step = seg_end_step
 
@@ -8853,6 +8924,10 @@ class ModelDriver:
         phys_tke = ctx["tke"]
         phys_qke = ctx["qke"]
         phys_gwd_spectrum = ctx["gwd_spectrum"]
+        # CLUBB sub-grid cloud-fraction carry (marine-Sc albedo lever): diagnostic
+        # CLUBB writes it out; the next radiation step reads it.  None => feature
+        # off => byte-identical (kw omits it => step_unified default None).
+        phys_cloud_fraction = ctx.get("cloud_fraction")
 
         def _phys_carry_step_inputs():
             """Keyword inputs for the active stateful-physics carries."""
@@ -8863,6 +8938,8 @@ class ModelDriver:
                 kw["qke"] = phys_qke
             if phys_gwd_spectrum is not None:
                 kw["gwd_spectrum"] = phys_gwd_spectrum
+            if phys_cloud_fraction is not None:
+                kw["cloud_fraction"] = phys_cloud_fraction
             return kw
         o3_vmr = ctx["o3_vmr"]
         aerosol_od = ctx["aerosol_od"]
@@ -8992,6 +9069,9 @@ class ModelDriver:
         if phys_out.gwd_spectrum is not None:
             phys_gwd_spectrum = phys_out.gwd_spectrum
             self._carry_aux["gwd_spectrum"] = phys_gwd_spectrum
+        if phys_out.cloud_fraction is not None:
+            phys_cloud_fraction = phys_out.cloud_fraction
+            self._carry_aux["cloud_fraction"] = phys_cloud_fraction
 
         # Apply warmup tendencies
         new_T = self.state.T.data + DT * phys_out.dT_dt
@@ -9138,6 +9218,9 @@ class ModelDriver:
             if phys_out.gwd_spectrum is not None:
                 phys_gwd_spectrum = phys_out.gwd_spectrum
                 self._carry_aux["gwd_spectrum"] = phys_gwd_spectrum
+            if phys_out.cloud_fraction is not None:
+                phys_cloud_fraction = phys_out.cloud_fraction
+                self._carry_aux["cloud_fraction"] = phys_cloud_fraction
 
             # (c) Update state
             new_T = self.state.T.data + DT * phys_out.dT_dt
