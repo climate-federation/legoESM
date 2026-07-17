@@ -278,8 +278,8 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
     SIN_SG = fort(gs["sin_sg"], isd, jsd)
     COSA_U = fort(gs["cosa_u"], isd, jsd)
     COSA_V = fort(gs["cosa_v"], isd, jsd)
-    SINA_U = fort(gs["sina_u"], isd, jsd)
-    SINA_V = fort(gs["sina_v"], isd, jsd)
+    # (sina_u/sina_v unused on the duo lane — only the skipped non-duo
+    # edge ut/vt formulas consume them)
     RSIN_U = fort(gs["rsin_u"], isd, jsd)
     RSIN_V = fort(gs["rsin_v"], isd, jsd)
     DX = fort(gs["dx"], isd, jsd)
@@ -501,9 +501,24 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
             ra_y[i, j] = AREA[i, j] + yfx_adv[i, j] - yfx_adv[i, j + 1]
 
     # ---- delp fluxes (auth 886-887) + allflux slot 1 + capacitors ----
-    gsf = dict(gs)
-    gsf.setdefault("bounded_domain", False)
-    gsf.setdefault("grid_type", 0)
+    # fort-wrapped gridstruct dict for the leaf callees (fv_tp_2d -> xppm/
+    # yppm/deln_flux), mirroring the monolithic d_sw's gsf: the callees
+    # dereference these as Fortran-index views — handing them RAW numpy
+    # arrays silently wraps negative indices (isd-origin reads become
+    # from-the-end reads) and corrupts the deln_flux damping increment.
+    gsf = {
+        "dxa": fort(gs["dxa"], isd, jsd),
+        "dya": fort(gs["dya"], isd, jsd),
+        "area": AREA,
+        "rarea": fort(gs["rarea"], isd, jsd),
+        "del6_v": fort(gs["del6_v"], isd, jsd),
+        "del6_u": fort(gs["del6_u"], isd, jsd),
+        "da_min": float(gs["da_min"]),
+        "bounded_domain": bool(gs.get("bounded_domain", False)),
+        "grid_type": int(gs.get("grid_type", 0)),
+        "sw_corner": sw_corner, "se_corner": se_corner,
+        "nw_corner": nw_corner, "ne_corner": ne_corner,
+    }
     fv_tp_2d(delp, crx_adv, cry_adv, npx, npy, hord_dp, fx, fy,
              xfx_adv, yfx_adv, gsf, bd, ra_x, ra_y, lim_fac,
              nord=nord_v, damp_c=damp_v, duogrid=duogrid)
