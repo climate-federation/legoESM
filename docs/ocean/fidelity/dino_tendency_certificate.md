@@ -73,6 +73,36 @@ residual (the +0.05 °C thermocline, SST) is dynamics/EOS/numerics, not forcing 
 so a controlled comparison for the `zdfevd` threshold refinement (§follow-ups)
 is now well-posed.
 
+## Residual characterization (post cold-bias fix, forcing/grid byte-faithful)
+
+With forcing byte-verified, the grid exact, the IC matched (+0.08 °C), and the
+convection fixed, the 62-day matched-grid residual vs NEMO (robust, excluding the
+1.57 % analytic-vs-`tmask` topo-edge outliers) is **small and no longer biased**:
+
+- **T_bias +0.018 °C** full-column (the −0.72 °C cold bias is gone), **T_rms
+  0.41 °C**, **S_rms 0.055 PSU**, cell-by-cell **T corr 0.94** (surface) → 0.76
+  (deep). The residual is a near-zero-mean **spatial pattern**, surface-
+  intensified: T_rms **0.81 at 5 m → 0.30 at 136 m → 0.10 at 2200 m**.
+- By latitude band (surface): **ACC/channel 0.12** (well-matched), S-gyre 0.61,
+  **equator 0.97**, N-gyre 0.68, **N-high 1.25**. Concentrated where the ocean
+  *dynamics* pull SST off the (byte-identical) restoring target `T*`, negligible
+  in the ACC.
+
+**Ruled out code-first (each toggled on the matched run, none moves the surface
+residual):** TKE closure N² (`n2_mode='adiabatic'` + `n2_before_advection`,
+0.810→0.815), enhanced-diffusion convection, **`A_h_eq_boost`** (a legoESM
+equatorial viscosity stabilizer NEMO lacks — `nn_ahm_ijk_t=20` is mesh-scaled
+with no boost; removing it stays stable but 0.970→0.963), iso-neutral diffusion
+(0.837→0.836), and GM (no change). The residual is therefore **not a traceable
+non-faithful parameterization** — it is the integrated difference of the fast
+momentum/current response between two independently-implemented cores whose
+per-operator tendencies are already certified at ≥0.99 (hpg, pvo, rvo, keg). The
+one genuinely non-NEMO term found (`A_h_eq_boost`) is **immaterial to the
+residual** and a documented stability crutch, so left in place. Further reduction
+would require bit-matching the momentum time-stepping sequence — high effort,
+low expected payoff on a 0.4 °C residual. Harness:
+`~/oracle-builds/nemo5/gap_audit/` (`dino_residual_robust.py` + toggles).
+
 ## Solution check (62-day forward, cell-by-cell on NEMO's own grid)
 
 Tendency-match is necessary but not sufficient — do the *solutions* track? We
