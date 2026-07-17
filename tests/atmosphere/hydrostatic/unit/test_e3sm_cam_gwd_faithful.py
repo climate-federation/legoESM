@@ -230,11 +230,11 @@ def test_default_heating_frame_is_ground_relative():
 
 
 # --------------------------------------------------------------------------
-# 5. The energy fixer FLAG is OFF by default, so a spectral config does not
-#    close the column energy budget without it.
+# 5. The energy fixer ships ON since 2026-07-17; the EXPLICIT opt-out arm
+#    shows a spectral config does not close the column budget without it.
 # --------------------------------------------------------------------------
 
-def test_energy_fixer_off_by_default_so_budget_does_not_close():
+def test_energy_fixer_explicit_off_leaves_budget_open():
     """``do_energy_conservation`` (C.-C. Chen fixer) now defaults ON (the
     oracle calls it unconditionally after each spectral gw_drag_prof;
     flipped 2026-07-17 after the AMIP/RCE A/B).  With the fixer explicitly

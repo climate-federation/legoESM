@@ -191,9 +191,11 @@ __physics_contract__ = {
         "closure -(u*du+v*dv)/c_pd by default, or the E3SM discrete-step "
         "closure -(du*(u+0.5*dt*du)+dv*(v+0.5*dt*dv))/c_pd when "
         "use_discrete_ke_heating=True). "
-        "For the spectral path dT_dt defaults to the ground-relative dttke "
-        "term, which is SIGNED (can cool where U>c>0); with "
-        "use_e3sm_spectral_heating or do_eddy_diffusion it is dttke + the "
+        "For the spectral path dT_dt is, since the 2026-07-17 default "
+        "flips, the band-limited dttke + the dse-diffusion dttdf with the "
+        "C.-C. Chen fixer applied; the raw ground-relative dttke term, "
+        "which is SIGNED (can cool where U>c>0), is the explicit legacy "
+        "opt-out.  With use_e3sm_spectral_heating or do_eddy_diffusion dT_dt is dttke + the "
         "dse-diffusion dttdf (and the E3SM flag band-limits dttke to "
         "midpoints above ~500 hPa); with do_energy_conservation=True the "
         "C.-C. Chen fixer additionally redistributes the below-source dse "
@@ -231,7 +233,8 @@ __physics_contract__ = {
     #    fixer, default ON since 2026-07-17) forces the discrete air-column momentum+dse
     #    finite-step residual to zero (a corrective below-source redistribution,
     #    NOT a physical accounting of the wave/frontal source or boundary
-    #    fluxes). Neither is the shipped default.
+    #    fluxes). The fixer ships ON since 2026-07-17; the intrinsic frame
+    #    remains opt-in.
     "conserves": ["none"],
     "differentiable": True,
     "reference": (
