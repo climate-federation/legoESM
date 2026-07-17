@@ -52,6 +52,13 @@ the comparison is cell-by-cell, not grid-robust interpolation) vs NEMO's
 62-day-from-rest `RUN_M5SPIN`:
 
 - **T corr 0.99** cell-by-cell; salinity within ~0.1 PSU (interior).
+- **Native NEMO grid** (opt-in, `DINOConfig.nemo_faithful_grid` /
+  `nemo_faithful_dino_config` / `run_dino.py --nemo-faithful-grid`): a standalone
+  DINO run now builds NEMO's exact DINO R1 mesh — 48×195, equator on a T-point,
+  faces [1°, 49°] — reproducing `glamt`/`gphit` to **3e-6°** with **100%
+  wet/dry-domain agreement** (bathymetry depth corr 0.92; residual is legoESM's
+  analytic bowl vs NEMO's full-step `ln_zps` levels). Default OFF (the 48° vs
+  legoESM's 50° basin is not comparable to prior DINO runs). PR #1137.
 - **Basin-mean T(z)** now tracks within ~0.1 °C through the thermocline:
   **T@262 m = 9.55 vs NEMO 9.50**, **SST 14.13 vs 14.07** (see the cold-bias
   resolution below).

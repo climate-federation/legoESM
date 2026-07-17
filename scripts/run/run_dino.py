@@ -53,6 +53,7 @@ from legoesm.ocean.experiments.dino import (
     dino_lat_lon_model_config,
     dino_lat_lon_state,
     dino_lat_lon_surface_forcing_arrays,
+    nemo_faithful_dino_config,
     dino_mpas_model_config,
     dino_mpas_state,
     dino_mpas_surface_forcing_arrays,
@@ -130,6 +131,15 @@ def _parse_args():
              "Wright 1997 full nonlinear EOS) or 'nemo_seos' (the paper/NEMO "
              "simplified S-EOS, Roquet et al. 2015, with the DINO coefficients "
              "— the oracle EOS for the thermocline comparison). Both grids.",
+    )
+    p.add_argument(
+        "--nemo-faithful-grid", action="store_true",
+        help="Build the lat-lon grid on NEMO's EXACT DINO R1 mesh "
+             "(DINOConfig.nemo_faithful_grid): 48×195 with the equator on a "
+             "T-point and faces [1,49] (matches our NEMO 5.0.2 build cell-for-"
+             "cell to 3e-6°; 100%% wet/dry-domain agreement), instead of the "
+             "legoESM [-50,0]/198×50 default. Co-sets the bathymetry lon frame "
+             "+ sill anchor via nemo_faithful_dino_config. Lat-lon only.",
     )
     p.add_argument(
         "--tke-momentum-visc-bg", type=float, default=None,
@@ -485,6 +495,13 @@ def main():
     if args.rigid_lid_dt_mom_ratio is not None:
         cfg = dataclasses.replace(
             cfg, rigid_lid_dt_mom_ratio=args.rigid_lid_dt_mom_ratio)
+    if args.nemo_faithful_grid:
+        if args.grid != "latlon":
+            p.error("--nemo-faithful-grid is lat-lon only (NEMO's Mercator DINO "
+                    "mesh); rerun with --grid latlon.")
+        # Applied LAST: co-sets the bathymetry lon frame + sill anchor onto
+        # whatever recipe/overrides preceded it (must not be clobbered after).
+        cfg = nemo_faithful_dino_config(base=cfg)
     dt = cfg.dt
     grid_kind = args.grid
 

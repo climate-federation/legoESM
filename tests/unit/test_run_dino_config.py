@@ -80,6 +80,19 @@ def test_barotropic_solver_default_none(monkeypatch):
     assert args.barotropic_solver is None
 
 
+def test_nemo_faithful_grid_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--grid", "latlon", "--nemo-faithful-grid"])
+    args = rd._parse_args()
+    assert args.nemo_faithful_grid is True
+
+
+def test_nemo_faithful_grid_default_false(monkeypatch):
+    # Opt-in: absent flag keeps the legoESM [-50,0]/198×50 grid.
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().nemo_faithful_grid is False
+
+
 def test_barotropic_solver_via_config(tmp_path, monkeypatch):
     cfg = _write(tmp_path, "barotropic_solver: rigid_lid\n")
     monkeypatch.setattr(sys, "argv", ["run_dino", "--config", cfg])

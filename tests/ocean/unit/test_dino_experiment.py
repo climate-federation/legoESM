@@ -43,6 +43,7 @@ from legoesm.ocean.experiments.dino import (
     dino_lat_lon_grid,
     dino_lat_lon_initial_state_arrays,
     dino_lat_lon_model_config,
+    nemo_faithful_dino_config,
     dino_top_layer_S_tendency,
     dino_top_layer_T_tendency,
     dino_top_layer_u_tendency,
@@ -309,6 +310,70 @@ class TestDINORecipes:
         assert mc.flat_get("outer_integrator") == "ab2"
         assert mc.flat_get("ab2_scope") == "total"
         assert mc.flat_get("barotropic_slow_forcing_ab2") is True
+
+
+class TestNemoFaithfulGrid:
+    """Opt-in NEMO-exact DINO grid (nemo_faithful_grid). Mesh-verified against
+    our NEMO 5.0.2 DINO build: 48×195, equator on a T-point, faces [1,49]."""
+
+    def test_default_grid_unchanged(self):
+        # Opt-in: a bare config keeps the legoESM [-50,0]/198×50 grid.
+        import numpy as np
+        assert DINOConfig().nemo_faithful_grid is False
+        grid = dino_lat_lon_grid(DINOConfig())
+        assert np.asarray(grid.lat).shape == (198,)     # equator on a face
+        assert np.asarray(grid.lon).shape == (50,)
+
+    def test_nemo_faithful_matches_nemo_mesh(self):
+        # NEMO DINO R1: 48 zonal cells (T-centres [1.5,48.5]), 195 rows with the
+        # equator ON a T-point (j=97 = 0.0°) at ±69.151°. The projection is
+        # identical; only the half-cell equator staggering + count differ.
+        import numpy as np
+        cfg = nemo_faithful_dino_config()
+        assert cfg.nemo_faithful_grid is True
+        assert (cfg.lon_west_deg, cfg.lon_east_deg) == (1.0, 49.0)
+        assert cfg.sill_lon_m_deg == 1.0        # sill anchor co-set to west wall
+        grid = dino_lat_lon_grid(cfg)
+        lat = np.degrees(np.asarray(grid.lat))
+        lon = np.degrees(np.asarray(grid.lon))
+        assert lat.shape == (195,) and lon.shape == (48,)
+        assert lon[0] == pytest.approx(1.5, abs=1e-4)
+        assert lon[-1] == pytest.approx(48.5, abs=1e-4)
+        assert lat[97] == pytest.approx(0.0, abs=1e-5)     # equator on T-point
+        assert abs(lat[0]) == pytest.approx(69.1514, abs=1e-3)
+
+    def test_nemo_faithful_bathymetry_domain_is_wet(self):
+        # The co-set lon frame keeps the bathymetry valid (not an all-land
+        # domain) — the sill anchor tracks the western wall at 1.0.
+        import numpy as np
+        from legoesm.ocean.experiments.dino import dino_lat_lon_bowl
+        cfg = nemo_faithful_dino_config()
+        H = np.asarray(dino_lat_lon_bowl(dino_lat_lon_grid(cfg), cfg))
+        assert (H > 1.0).any()                              # not all land
+        assert H.max() == pytest.approx(cfg.H_deep, abs=1.0)
+
+    def test_config_helper_preserves_base_recipe(self):
+        # run_dino applies `nemo_faithful_dino_config(base=cfg)` AFTER the recipe
+        # overlay, so it must keep the recipe's scheme choices while co-setting
+        # only the grid/bathymetry lon frame. This covers the flag->config wiring
+        # the CLI relies on (the helper's base= path).
+        base = dino_config_for_recipe("nemo_paper")
+        cfg = nemo_faithful_dino_config(base=base)
+        assert cfg.nemo_faithful_grid is True
+        assert (cfg.lon_west_deg, cfg.lon_east_deg, cfg.sill_lon_m_deg) == (
+            1.0, 49.0, 1.0)
+        # recipe fields survive (eos, convection fidelity, barotropic solver)
+        assert cfg.eos == "nemo_seos"
+        assert cfg.convection_smooth_transition is False
+        assert cfg.convection_n2_mode == "adiabatic"
+
+    def test_flag_without_lon_frame_raises(self):
+        # Flipping the flag alone (legoESM [-50,0] frame) would put every grid
+        # lon outside the basin -> all land; the builder fails loudly instead.
+        import dataclasses
+        with pytest.raises(ValueError, match="NEMO .1,49. longitude frame"):
+            dino_lat_lon_grid(
+                dataclasses.replace(DINOConfig(), nemo_faithful_grid=True))
 
 
 # ---------------------------------------------------------------------
