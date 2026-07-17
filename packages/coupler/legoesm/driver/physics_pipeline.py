@@ -305,6 +305,10 @@ class PhysicsPipeline:
         # attaches from ``subgrid_orography_path`` (and re-scatters under
         # MPI, like ``f_land``). None -> kernels use scalar config.h_topo.
         self._gwd_orographic = False
+        # ``_gwd_takes_netdt`` marks the e3sm_cam CONVECTIVE (Beres) source:
+        # the pipeline threads the convection scheme's heating as
+        # ``netdt_col`` (E3SM TTEND_DP analogue); builder-set.
+        self._gwd_takes_netdt = False
         # ``_gwd_takes_land_frac`` marks the single scheme (``e3sm_cam``)
         # whose kernel accepts ``land_frac_col`` for the E3SM driver-level
         # orographic landfrac scaling; the builder sets it from the config.
@@ -1549,6 +1553,18 @@ class PhysicsPipeline:
                     # (zeroed over ocean) BEFORE the heating closure; the
                     # e3sm_cam kernel applies it to its orographic source.
                     _gwd_kwargs["land_frac_col"] = ad.flatten_2d(self.f_land)
+                if self._gwd_takes_netdt:
+                    # E3SM drives the Beres convective GW source from the
+                    # deep-convective heating (pbuf TTEND_DP,
+                    # gw_drag.F90:766-778: gw_beres_src(..., ttend_dp, ...)).
+                    # We pass THIS STEP's convection-scheme heating in the
+                    # same column layout.  DOCUMENTED DEPARTURE: our
+                    # convection schemes report TOTAL convective heating
+                    # (deep + shallow + downdraft), not E3SM's deep-only
+                    # TTEND_DP — Beres's hdepth/q0 scan then sees the full
+                    # convective column.  The kernel's gw_beres_src takes
+                    # it as netdt_col [K/s].
+                    _gwd_kwargs["netdt_col"] = conv_out.dT_dt
                 gwd_out = self.gwd_fn(**_gwd_kwargs)
             du_dt = du_dt + ad.unflatten_3d(gwd_out.du_dt)
             dv_dt = dv_dt + ad.unflatten_3d(gwd_out.dv_dt)
@@ -3431,4 +3447,11 @@ def build_physics_pipeline(grid, sigma, config):
     # own ``f_land`` (set by the model driver next to ``subgrid_topo_stddev``)
     # into the GWD call for exactly this scheme.
     pipeline._gwd_takes_land_frac = (_gwd_scheme == "e3sm_cam")
+    # Beres netdt threading: only when the resolved e3sm_cam config actually
+    # selects the convective source (the kernel accepts the kwarg for every
+    # source but only Beres consumes it — avoid useless plumbing otherwise).
+    pipeline._gwd_takes_netdt = (
+        _gwd_scheme == "e3sm_cam"
+        and getattr(pipeline.gwd_config, "source", None) == "convective"
+    )
     return pipeline

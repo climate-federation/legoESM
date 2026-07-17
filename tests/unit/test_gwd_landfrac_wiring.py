@@ -132,3 +132,68 @@ def test_none_scheme_flag_false():
     _, pipe = _pipe("none")
     assert pipe._gwd_takes_land_frac is False
     assert pipe.gwd_fn is None
+
+
+# ---------------------------------------------------------------------------
+# Beres convective-source threading (netdt_col; E3SM TTEND_DP analogue,
+# gw_drag.F90:766-778): the pipeline passes THIS STEP's convection heating
+# to the e3sm_cam kernel when its resolved source is "convective".
+# ---------------------------------------------------------------------------
+
+def _pipe_over(gwd_over, convection="sbm"):
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        GravityWaveDragConfig,
+    )
+    grid = create_latlon_grid(NLAT, NLON, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(NLEV)
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=NLAT, nlev=NLEV),
+        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+                            discretization="finite_volume"),
+        radiation="gray",
+        convection=convection,
+        gravity_wave_drag="e3sm_cam",
+        gravity_wave_drag_override=gwd_over,
+    )
+    cfg.validate_strict()
+    return grid, build_physics_pipeline(grid, sigma, cfg)
+
+
+def test_e3sm_convective_source_receives_netdt():
+    """END-TO-END: with the override selecting the Beres source, the kernel
+    receives netdt_col in column layout; the noop-convection run threads
+    zeros (kernel: None/zero heating -> no convective waves), a real
+    convection scheme threads its own heating array."""
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        E3SMCAMConfig,
+        GravityWaveDragConfig,
+    )
+    over = GravityWaveDragConfig(
+        scheme="e3sm_cam", e3sm_cam=E3SMCAMConfig(source="convective", pgwv=8))
+    grid, pipe = _pipe_over(over, convection="none")
+    assert pipe._gwd_takes_netdt is True
+    rec = _Recorder()
+    pipe.gwd_fn = rec
+    _run_step(grid, pipe)
+    assert rec.kwargs is not None
+    assert "netdt_col" in rec.kwargs, "netdt_col not threaded to the kernel"
+    nd = rec.kwargs["netdt_col"]
+    assert nd.shape == (NLAT * NLON, NLEV)
+    # noop convection -> zero heating threads through (documented inert path)
+    assert float(jnp.max(jnp.abs(nd))) == 0.0
+
+
+def test_e3sm_orographic_source_gets_no_netdt():
+    """Default oro source: the flag stays False and no netdt kwarg is sent
+    (the kernel accepts it but only Beres consumes it — no useless
+    plumbing)."""
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        GravityWaveDragConfig,
+    )
+    grid, pipe = _pipe_over(GravityWaveDragConfig(scheme="e3sm_cam"))
+    assert pipe._gwd_takes_netdt is False
+    rec = _Recorder()
+    pipe.gwd_fn = rec
+    _run_step(grid, pipe)
+    assert rec.kwargs is not None
+    assert "netdt_col" not in rec.kwargs
