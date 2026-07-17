@@ -609,7 +609,12 @@ def compute_isopycnal_slopes_latlon_cgrid(
         # (the second is the numerical-stability bound "kxz max = ah slope max
         # =< e1 e3/(pi**2 2 dt)", hardcoded 7.e+3 in NEMO — binding only in
         # thin near-surface cells: e3=10 m => cap 1.4e-3 < rn_slpmax).
-        _dz_iface = 0.5 * (z_coord.dz_ref[:-1] + z_coord.dz_ref[1:])
+        # dz_half_ref IS 0.5*(dz_ref[:-1]+dz_ref[1:]) (review DRY note).
+        # NB NEMO caps per slope position (e3u for uslp, e3w for wslp); the
+        # single w-spacing here is exact only while the cap binds in the
+        # near-surface uniform cells — revisit for a stretched-interior
+        # oracle using nemo_cap.
+        _dz_iface = jnp.asarray(z_coord.dz_half_ref)
         _cap = jnp.minimum(
             jnp.asarray(cfg.S_max, dtype=S_x_raw.dtype),
             (_dz_iface / _NEMO_SLOPE_STAB_7E3).astype(S_x_raw.dtype),
