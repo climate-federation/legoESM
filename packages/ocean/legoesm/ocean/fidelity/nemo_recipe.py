@@ -360,6 +360,11 @@ def nemo_lat_lon_model_config(
             kappa_GM=_kappa_gm,
             kappa_Redi=cfg.kappa_Redi,
             S_max=cfg.redi_S_max,
+            # NEMO ldfslp steep-slope convention: HARD slope cap (rn_slpmax +
+            # the e3/7e3 stability bound) with taper=1 — the flux keeps
+            # diffusing along the capped slope at the ML-base outcrops (the
+            # subduction pathway; the DM95 taper killed it there; plan §G).
+            slope_limit="nemo_cap",
             visbeck=VisbeckConfig(enabled=False),
             slope_scheme=cfg.lateral_operator,
             slope_density="neutral",

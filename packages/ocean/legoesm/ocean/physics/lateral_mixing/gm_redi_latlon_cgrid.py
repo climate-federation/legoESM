@@ -123,6 +123,8 @@ _DEFAULT_TAPER_WIDTH_FRAC = 0.1
 _NEMO_MLD_REF_DEPTH_M = 10.0
 # Floor [m] on the mixed-layer depth used in the w-point slope ramp normaliser
 # (ldfslp.F90:161 ``r1_hmlw = 1/MAX(hmlp - gdepw_top, 10.)``).
+# --- NEMO ldfslp slope stability bound (ldfslp.F90:212-213) ---
+_NEMO_SLOPE_STAB_7E3 = 7.0e3  # [m] |S| <= e3/7e3 ("kxz max =< e1 e3/(pi^2 2 dt)")
 _NEMO_HMLW_FLOOR_M = 10.0
 
 def _kappa_is_interface_3d(kappa, nlev: int) -> bool:
@@ -595,11 +597,32 @@ def compute_isopycnal_slopes_latlon_cgrid(
         S_x_raw = jax.lax.stop_gradient(S_x_raw)
         S_y_raw = jax.lax.stop_gradient(S_y_raw)
 
-    # DM95 tapering via shared helper (identical formula across grids).
-    S_x_t, S_y_t, taper = dm95_taper(
-        S_x_raw, S_y_raw, cfg.S_max, EPS, cfg.taper_width_frac,
-        stop_gradient_taper=(adj_stab == "stop_gradient_taper"),
-    )
+    if getattr(cfg, "slope_limit", "dm95_taper") == "nemo_cap":
+        # NEMO ldfslp convention (ldfslp.F90:212-213): the slope is HARD-CAPPED
+        # and the flux keeps diffusing ALONG the capped direction at steep
+        # fronts — the taper is 1 (the DM95 taper would send the flux to ZERO
+        # exactly at the ML-base outcrops, killing the subduction pathway that
+        # moves surface heat into the permanent thermocline; plan §G). NEMO
+        # applies TWO caps via the denominator bound
+        # zbu = MIN(zbu, -|zau|/rn_slpmax, -7e3/e3u*|zau|):
+        #   |S| <= rn_slpmax  AND  |S| <= e3/7000
+        # (the second is the numerical-stability bound "kxz max = ah slope max
+        # =< e1 e3/(pi**2 2 dt)", hardcoded 7.e+3 in NEMO — binding only in
+        # thin near-surface cells: e3=10 m => cap 1.4e-3 < rn_slpmax).
+        _dz_iface = 0.5 * (z_coord.dz_ref[:-1] + z_coord.dz_ref[1:])
+        _cap = jnp.minimum(
+            jnp.asarray(cfg.S_max, dtype=S_x_raw.dtype),
+            (_dz_iface / _NEMO_SLOPE_STAB_7E3).astype(S_x_raw.dtype),
+        )[None, None, :]
+        S_x_t = jnp.clip(S_x_raw, -_cap, _cap)
+        S_y_t = jnp.clip(S_y_raw, -_cap, _cap)
+        taper = jnp.ones_like(S_x_t)
+    else:
+        # DM95 tapering via shared helper (identical formula across grids).
+        S_x_t, S_y_t, taper = dm95_taper(
+            S_x_raw, S_y_raw, cfg.S_max, EPS, cfg.taper_width_frac,
+            stop_gradient_taper=(adj_stab == "stop_gradient_taper"),
+        )
 
     # NEMO ldfslp mixed-layer slope ramp (default OFF => byte-identical).
     if getattr(cfg, "nemo_mld_slope_ramp", False):
@@ -2127,11 +2150,10 @@ def gm_redi_tracer_tendency_latlon(
     scheme = getattr(cfg, "slope_scheme", "triads")
     _slope_limit = getattr(cfg, "slope_limit", "dm95_taper")
     validate_slope_limit(_slope_limit)
-    if _slope_limit == "nemo_cap" and scheme != "triads":
-        raise ValueError(
-            "GMRediConfig.slope_limit='nemo_cap' is only wired for "
-            "slope_scheme='triads' (the centered path keeps the DM95 "
-            "taper).")
+    # nemo_cap is wired for BOTH the triads and the centered/nemo_iso_lap
+    # slope paths (2026-07-16: the centered path previously kept the DM95
+    # taper, which kills the flux at steep ML-base outcrops where NEMO's
+    # cap keeps pumping — the subduction pathway; plan §G).
     _double_diag = bool(getattr(cfg, "double_redi_diagonal", False))
     _vtw = bool(getattr(cfg, "veros_triad_weights", False))
     _adj_stab = getattr(cfg, "adjoint_stabilization", "none")

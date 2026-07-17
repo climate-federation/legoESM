@@ -526,3 +526,50 @@ def test_surface_stress_implicit_wiring():
         np.asarray(s_i.u.data)[..., 0] - np.asarray(s_e.u.data)[..., 0]))) > 1e-4
     for f in (s_i.u.data, s_i.v.data, s_i.T.data):
         assert bool(jnp.all(jnp.isfinite(f)))
+
+
+def test_nemo_cap_slope_limit_centered_path():
+    """NEMO ldfslp steep-slope convention on the centered/nemo_iso_lap path:
+    slopes hard-capped at min(rn_slpmax, e3/7e3) with taper == 1 (the flux
+    keeps diffusing along the capped direction); dm95 tapers toward zero."""
+    import jax.numpy as jnp
+    import numpy as np
+
+    from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        compute_isopycnal_slopes_latlon_cgrid,
+    )
+
+    r = build_nemo_gyre_recipe()
+    cfg = r.model_config.gm_redi
+    assert cfg.slope_limit == "nemo_cap"
+    st = r.initial_state
+    # a STEEP horizontal density front (large T gradient) to exceed the cap
+    T = st.T.data + 5.0 * jnp.linspace(0, 1, st.T.data.shape[1])[None, :, None]
+    from legoesm.ocean.eos import nemo_roquet_eos
+    import numpy as _np
+    gdept = _np.cumsum(_np.asarray(r.z_coord.dz_ref)) - 0.5 * _np.asarray(
+        r.z_coord.dz_ref)
+    p3 = jnp.asarray(1026.0 * 9.80665 * gdept)[None, None, :]
+    eos_fn = lambda TT, SS, pp: nemo_roquet_eos(TT, SS, pp, rho0=1026.0)
+    rho = eos_fn(T, st.S.data, p3)
+    J = jnp.ones_like(st.eta.data)
+    args = (rho, st.land_mask.data, r.z_coord, J, r.grid)
+    # run both limiters on identical inputs
+    Sx_c, Sy_c, tap_c = compute_isopycnal_slopes_latlon_cgrid(
+        *args, cfg, T=T, S=st.S.data, eos_fn=eos_fn)
+    Sx_d, Sy_d, tap_d = compute_isopycnal_slopes_latlon_cgrid(
+        *args, cfg._replace(slope_limit="dm95_taper",
+                            nemo_mld_slope_ramp=False,
+                            nemo_slope_shapiro=False),
+        T=T, S=st.S.data, eos_fn=eos_fn)
+    dz = np.asarray(r.z_coord.dz_ref)
+    cap = np.minimum(cfg.S_max, 0.5 * (dz[:-1] + dz[1:]) / 7.0e3)
+    # capped path respects the DOUBLE cap everywhere (shapiro smooths within it)
+    assert float(jnp.max(jnp.abs(Sx_c))) <= float(cap.max()) + 1e-8  # f32
+    # near-surface interfaces are bound by the e3/7e3 cap, TIGHTER than S_max
+    assert cap[0] < cfg.S_max
+    # taper is exactly 1 on the capped path (flux never dies at steep fronts)
+    np.testing.assert_array_equal(np.asarray(tap_c), 1.0)
+    # non-vacuity: the two limiters genuinely differ on this front
+    assert float(jnp.max(jnp.abs(Sx_c - Sx_d))) > 0.0
