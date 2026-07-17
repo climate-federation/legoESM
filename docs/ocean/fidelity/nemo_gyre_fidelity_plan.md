@@ -322,6 +322,27 @@ ISOLATION EXPERIMENTS (2026-07-16, 5-yr runs + single-column avt certificate):
   All column physics is certified; the remaining comparison target is the
   W FIELD (legoESM state.w vs NEMO vovecrtz 2920h means) and the wind-curl
   -> w_Ek realization. Harness: add "w" to the snapshot dict to enable.
+- **W-FIELD COMPARISON (the decisive dynamical diagnostic, 2026-07-16 cont.):
+  RESOLVED-SCALE w MATCHES NEMO EXACTLY; the residual is GRID-SCALE w NOISE.**
+  Time-mean w vs NEMO vovecrtz (2920h means; lego snapshots time-averaged over
+  the same windows): raw rms ratio 1.3-4.5x with corr 0.57-0.85 — but after a
+  2x2 box smooth the rms ratio is **1.00** (9.64e-7 vs 9.64e-7 at 101 m,
+  rec1) with corr 0.83. => the Ekman-pumping/wind-curl chain is EXACT; lego
+  carries EXTRA 2Δx w noise (grid-scale variance fraction 0.32-0.35 vs NEMO
+  0.20). The noise floor is DEPTH-UNIFORM (~2.7e-6 at 54/101/187 m), so the
+  spurious divergence is concentrated in the TOP (Ekman) cells — noisy
+  surface-layer velocities, not barotropic-mode divergence (which would grow
+  with depth). MECHANISM: grid-scale w stirs the seasonal thermocline through
+  the FCT limiter = spurious diapycnal mixing = the summer build-rate deficit
+  (0.5 vs 1.07) -> weaker doming (0.81x) -> weaker gyre (0.71x).
+  SUSPECTS for the surface-cell 2Δx velocity noise (next trace targets):
+  (a) the C-grid 4-point Coriolis averaging null mode at the surface
+  (docs/issues/barotropic_mode_noise.md §A — the KNOWN checkerboard; NEMO's
+  ene_total vertex-f may filter it differently at the stencil level);
+  (b) the wind-stress application stencil (top-cell body force vs NEMO's
+  implicit surface BC in dynzdf);
+  (c) spatially noisy avm (TKE) -> noisy Ekman spiral.
+  Harness now dumps state.w (snaps['w']).
 - **zdftke CODE-TRACE COMPLETE (same session): dissipation_discretization=
   "nemo_1p5_split" implemented (NEMO zfact2/zfact3, on card, tested);
   TKE-first order / positivity=floor / pre_solve shear / -1e-12 threshold /
