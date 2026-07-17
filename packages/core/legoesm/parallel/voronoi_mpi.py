@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 import numpy as np
 import jax
@@ -409,6 +409,89 @@ def exchange_state_mpas_ocean(local_state, layout: VoronoiPartitionLayout):
         eta=local_state.eta.replace(data=eta_ex),
         w=local_state.w.replace(data=w_ex),
     )
+
+
+class MPASOceanHaloRefresh(NamedTuple):
+    """Packed IN-STEP halo refresh callables for the distributed MPAS ocean
+    step (the stage-correctness lever — see
+    ``docs/performance/scaling/mpas_ocean_distributed_stage_audit.md``).
+
+    The per-step entry refresh (:func:`exchange_state_mpas_ocean`) restores
+    ``halo_depth`` rings at step ENTRY only; the step's internal stencil
+    chains (del4 = 4 hops, forward-backward Coriolis = 2 hops on UPDATED u,
+    2-6 hops PER barotropic substep, TVD tracer advection = 2 hops on
+    UPDATED T/S) consume more hops than ``halo_depth = 2`` between
+    refreshes, silently corrupting owned cells at partition boundaries.
+    Threading this object through ``MPASOceanModel.step(halo_refresh=...)``
+    re-arms the halo at each dependency frontier.
+
+    Each callable issues ONE batched union-neighbor message per neighbor
+    per dtype group (:func:`batched_halo_exchange` — AD-safe ``custom_vjp``
+    sendrecv, safe inside ``lax.scan``; identity when the schedule has no
+    neighbors).  ``None`` (the serial default everywhere) keeps every
+    consumer byte-identical — the refresh sites are static Python
+    ``if halo_refresh is not None`` branches.
+
+    Fields
+    ------
+    edges : Callable(*fields) -> tuple
+        Refresh edge-indexed fields ``(n_local_edges, ...)``.
+    cells : Callable(*fields) -> tuple
+        Refresh cell-indexed fields ``(n_local_cells, ...)``.
+    both : Callable(edge_fields, cell_fields) -> (tuple, tuple)
+        Refresh a mixed group in the SAME packed message (e.g. the
+        barotropic substep's ``u_bar`` edge + ``eta`` cell pair).
+    vertices : Callable(*fields) -> tuple
+        Refresh vertex-indexed fields ``(n_local_vertices, ...)`` via the
+        per-field :class:`~legoesm.parallel.halo_exchange_voronoi.
+        VoronoiHaloExchange` (``partition.vertex_comm``) — NOT the packed
+        cell/edge message (the batched schedule carries no vertex lane;
+        the ONLY vertex consumer is the K_zeta_bih vorticity-biharmonic
+        intermediate, one field per tendency call, so a per-field
+        exchange is proportionate).  Same AD-safe custom_vjp sendrecv.
+    """
+
+    edges: Callable
+    cells: Callable
+    both: Callable
+    vertices: Callable
+
+
+def make_mpas_ocean_halo_refresh(layout) -> MPASOceanHaloRefresh:
+    """Build the in-step refresh callables for an armed
+    :class:`VoronoiPartitionLayout` (see :class:`MPASOceanHaloRefresh`)."""
+    from legoesm.parallel.halo_exchange_voronoi import VoronoiHaloExchange
+
+    sched = layout.batched_comm
+    if sched is None:
+        # Hand-built layout (mirrors make_voronoi_mpi_step's rebuild).
+        sched = build_batched_halo_schedule(
+            layout.partition.cell_comm, layout.partition.edge_comm,
+        )
+    rank = layout.rank
+    _vx = VoronoiHaloExchange(layout.partition, backend="mpi")
+
+    def _edges(*fields):
+        out_e, _ = batched_halo_exchange(fields, (), sched, rank)
+        return out_e
+
+    def _cells(*fields):
+        _, out_c = batched_halo_exchange((), fields, sched, rank)
+        return out_c
+
+    def _both(edge_fields, cell_fields):
+        return batched_halo_exchange(edge_fields, cell_fields, sched, rank)
+
+    def _vertices(*fields):
+        # np=1 / no-neighbor degeneracy: identity WITHOUT touching the
+        # MPI stack (mirrors batched_halo_exchange's early return —
+        # _exchange_mpi calls require_mpi_stack unconditionally).
+        if not layout.partition.vertex_comm.neighbor_ranks:
+            return tuple(fields)
+        return tuple(_vx.exchange_vertex_field(f) for f in fields)
+
+    return MPASOceanHaloRefresh(edges=_edges, cells=_cells, both=_both,
+                                vertices=_vertices)
 
 
 def gather_voronoi_field(
