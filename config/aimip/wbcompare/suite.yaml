@@ -1,0 +1,43 @@
+# WB2 forecast-scorecard comparison suite: THREE run_aimip variants.
+#
+# Trains and (via scripts/validate/run_aimip_wb2_eval.py) WB2-scores three
+# atmospheric representations on the SAME Gaussian-grid ERA5 window set so the
+# scorecard reflects the choice of physics representation, not the setup:
+#   (1) classical  — sweep-winner schemes (edmf/louis/mcfarlane/sundqvist/
+#                     xu_randall) + RRTMGP radiation
+#   (2) column_nn  — per-column MLP as the WHOLE physics (aimip_radiation=none)
+#   (3) sfno_full  — the FULL SFNO emulator (replaces dycore+physics; NOT
+#                     sfno_physics), iterating SFNOPrimitiveEquationModel.step
+#                     at dt_sfno
+#
+# Base = the shared AIMIP ERA5 config (T63 / L8 / RRTMGP available / ERA5 zarr
+# / eval year held out). The suite mirrors config/aimip/ace2/suite.yaml, but
+# uses the ACE2-style residual, multi-step, pure-MSE loss so the three variants
+# train against the same objective the WB2 comparison scores them on.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  aimip_n_epochs: 12
+  # Eval-year single element -> run_aimip_wb2_eval defaults --eval-year to
+  # eval_years[0]. aimip_era5.yaml's held-out year is 2017.
+  eval_years: [2017]
+  loss:
+    # --- ACE2 loss ---
+    residual_normalize: true       # scale by std of the 6h field change
+    normalize_by_scale: false      # superseded by residual_normalize
+    multi_step_hours: [6, 12]      # 2 autoregressive 6h steps
+    multi_step_weights: [1.0, 1.0]
+    w_T: 0.5
+    w_u: 0.5
+    w_v: 0.5
+    w_q: 0.5
+    w_ps: 0.3
+    level_weighting: "pressure"
+    # bias / CRPS / spectral weights omitted -> default 0.0 => pure MSE
+
+variants:
+  - classical
+  - column_nn
+  - sfno_full
+
+output_dir: results/aimip_wbcompare
