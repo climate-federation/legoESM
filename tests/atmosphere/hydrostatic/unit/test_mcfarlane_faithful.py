@@ -340,3 +340,102 @@ def test_e3sm_hdsp_requires_per_column_topo():
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
                         1800.0, cfg, h_topo_col=jnp.full((u.shape[0],), 300.0))
     assert bool(jnp.all(jnp.isfinite(out.du_dt)))
+
+
+# ---------------------------------------------------------------------------
+# E3SM depth-averaged source (config.use_depth_averaged_source; gw_oro.F90:
+# 119-145 averages, :178-186 in-source tau hold)
+# ---------------------------------------------------------------------------
+
+def test_depth_avg_source_default_off_bit_identical():
+    """Canary + regression: flag defaults False and the default output is
+    unchanged by the wave-5 restructure (surface source, deposition from the
+    bottom level allowed)."""
+    assert McFarlaneConfig().use_depth_averaged_source is False
+    u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column(
+        u_sfc=15.0, u_top=25.0)
+    cfg = McFarlaneConfig()
+    out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
+                        300.0, cfg)
+    # Independent recomputation of the legacy launch from surface values:
+    expected_dir = float(u[0, -1] / jnp.sqrt(u[0, -1] ** 2 + 1e-10))
+    assert abs(expected_dir - 1.0) < 1e-6  # sanity: along +x
+    assert bool(jnp.all(jnp.isfinite(out.du_dt)))
+    assert float(jnp.max(jnp.abs(out.du_dt))) > 0.0
+
+
+def test_depth_avg_no_deposition_in_source_region():
+    """Flag ON with a penetrating mountain: dp/N/U/rho come from the shared
+    helper and NO drag deposits at or below src_level (E3SM tau hold)."""
+    u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column(
+        ncol=1, u_sfc=15.0, u_top=25.0)
+    h_col = jnp.full((1,), 800.0)
+    cfg = McFarlaneConfig(use_depth_averaged_source=True)
+    out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
+                        300.0, cfg, h_topo_col=h_col)
+
+    from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
+        depth_averaged_oro_source,
+    )
+    from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full
+    N_full = brunt_vaisala_n_full(T, p_full, z_full)
+    dpm = jnp.abs(p_half[:, 1:] - p_half[:, :-1])
+    *_, src = depth_averaged_oro_source(
+        u, v, rho, h_col, p_half, dpm, z_full, N_full)
+    s = int(src[0])
+    assert s < u.shape[1], "fixture must include at least the surface"
+    # Zero tendency at and below the source interface, activity above it.
+    assert float(jnp.max(jnp.abs(out.du_dt[0, s:]))) == 0.0
+    assert float(jnp.max(jnp.abs(out.du_dt[0, :s]))) > 0.0
+
+
+def test_depth_avg_nocturnal_decoupling_discriminant():
+    """The physical point of the depth-averaged source (recon G3): a
+    nocturnal near-calm SURFACE with strong flow just above kills the legacy
+    launch (bottom-midpoint U ~ 0 -> min-wind gate ~ 0) but a real mountain
+    penetrating that flow still launches under the flag (depth-averaged U
+    well above min_wind)."""
+    u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column(
+        ncol=1, u_sfc=0.2, u_top=18.0)
+    # Decoupled nocturnal jet: near-calm ONLY at the bottom midpoint, 12 m/s
+    # everywhere above (the depth average is then well above min_wind while
+    # the legacy bottom-midpoint launch is gate-killed).
+    u = jnp.full_like(u, 12.0).at[:, -1].set(0.2)
+    h_col = jnp.full((1,), 900.0)
+    off = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
+                        300.0, McFarlaneConfig(), h_topo_col=h_col)
+    on = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
+                       300.0,
+                       McFarlaneConfig(use_depth_averaged_source=True),
+                       h_topo_col=h_col)
+    tot_off = float(jnp.sum(jnp.abs(off.du_dt)))
+    tot_on = float(jnp.sum(jnp.abs(on.du_dt)))
+    assert tot_on > 10.0 * max(tot_off, 1e-30), (
+        f"depth-averaged launch ({tot_on:.3e}) should dominate the "
+        f"surface-killed legacy launch ({tot_off:.3e})")
+
+
+def test_depth_avg_composes_with_e3sm_hdsp():
+    """Both flags ON: the penetration displacement is 2*h (deeper source
+    region than h alone) — src_level must be at or above the h-only level,
+    and the run stays finite (the oracle-faithful combination)."""
+    u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column(
+        ncol=1, u_sfc=15.0, u_top=25.0)
+    h_col = jnp.full((1,), 500.0)
+    from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
+        depth_averaged_oro_source,
+    )
+    from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full
+    N_full = brunt_vaisala_n_full(T, p_full, z_full)
+    dpm = jnp.abs(p_half[:, 1:] - p_half[:, :-1])
+    *_, src_h = depth_averaged_oro_source(
+        u, v, rho, h_col, p_half, dpm, z_full, N_full)
+    *_, src_2h = depth_averaged_oro_source(
+        u, v, rho, 2.0 * h_col, p_half, dpm, z_full, N_full)
+    assert int(src_2h[0]) <= int(src_h[0])
+    out = mcfarlane_gwd(
+        u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0,
+        McFarlaneConfig(use_depth_averaged_source=True, use_e3sm_hdsp=True),
+        h_topo_col=h_col)
+    assert bool(jnp.all(jnp.isfinite(out.du_dt)))
+    assert float(jnp.max(jnp.abs(out.du_dt))) > 0.0

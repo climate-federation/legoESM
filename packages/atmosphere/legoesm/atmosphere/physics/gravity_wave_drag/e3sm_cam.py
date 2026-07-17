@@ -128,6 +128,9 @@ from legoesm.atmosphere.physics.gravity_wave_drag.config import (
     E3SMBeresConfig,
     E3SMCAMConfig,
 )
+from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
+    depth_averaged_oro_source,
+)
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py). Applies
@@ -324,56 +327,16 @@ def gw_oro_src(
     inv_rt = 1.0 / (rair * t)
     rho_mid = pmid * inv_rt                             # pmid/(rair*t)
 
-    # --- E3SM source-region selection (gw_oro.F90) ----------------------
-    # 1-based E3SM: start with k=pver always included, src_level=pver-1.
-    # Loop kk=pver-1..pver/2: include layer kk (and set src_level=kk-1) if
-    # hdsp > sqrt(zm(kk)*zm(kk+1)).  In 0-based top-down indexing the surface
-    # midpoint is index nlev-1; E3SM midpoint kk -> index kk-1; the pair
-    # zm(kk)*zm(kk+1) -> zm[kk-1]*zm[kk].  The bottom-half loop kk=pver-1..pver/2
-    # spans 0-based indices nlev-2 .. nlev//2-1.
-    k_idx = jnp.arange(nlev)
-    # geometric-mean height at the lower interface of midpoint index i:
-    # gm[i] = sqrt(zm[i-1]*zm[i]) for i>=1 (E3SM pair zm(kk)*zm(kk+1) at kk-1).
-    gm = jnp.sqrt(jnp.abs(zm[:, :-1] * zm[:, 1:]))     # (ncol, nlev-1): index i->pair(i,i+1)
-    # For 0-based midpoint index i in [nlev//2-1, nlev-2], E3SM tests
-    # hdsp > sqrt(zm[i]*zm[i+1]) == gm[i].
-    lo = (nlev // 2) - 1
-    in_loop = (k_idx >= lo) & (k_idx <= nlev - 2)      # (nlev,)
-    gm_full = jnp.concatenate([gm, gm[:, -1:]], axis=1)  # pad: index nlev-1 unused
-    penetrates = hdsp[:, None] > gm_full               # (ncol, nlev)
-    # include[i]: surface (nlev-1) always; loop levels if penetrates.
-    include = jnp.where(
-        k_idx[None, :] == (nlev - 1),
-        True,
-        in_loop[None, :] & penetrates,
-    )                                                   # (ncol, nlev) bool
-    w = include.astype(u.dtype) * dpm                   # dp-weights
-
-    # src_level (interface index 0..nlev): smallest included midpoint index
-    # minus... E3SM sets src_level=kk-1 (interface above the topmost included
-    # midpoint).  Topmost included midpoint index = min index where include.
-    big = nlev
-    top_inc = jnp.min(
-        jnp.where(include, k_idx[None, :], big), axis=1
-    )                                                   # (ncol,) midpoint idx
-    # interface above that midpoint = same index (top-down: interface i sits
-    # above midpoint i).  E3SM: src_level = (topmost kk) - 1 (1-based) ->
-    # 0-based interface index = top_inc.
-    src_level = top_inc.astype(jnp.int32)               # interface idx
-
-    # E3SM dpsrc = pint(pver) - pint(src_level): the continuous pressure
-    # interval from the surface interface to the source-top interface
-    # (gw_oro.F90:139).  For monotone columns this equals sum(included dpm)
-    # but the pressure-interval form is exactly E3SM (codex iter-1 #9).
-    pint_at_src = jnp.take_along_axis(
-        pint, src_level[:, None], axis=1
-    )[:, 0]                                              # (ncol,)
-    dpsrc = pint[:, nlev] - pint_at_src
-    dpsrc = jnp.where(dpsrc > 0.0, dpsrc, 1.0)
-    rsrc = jnp.sum(w * rho_mid, axis=1) / dpsrc
-    usrc = jnp.sum(w * u, axis=1) / dpsrc
-    vsrc = jnp.sum(w * v, axis=1) / dpsrc
-    nsrc = jnp.sum(w * nm, axis=1) / dpsrc
+    # --- E3SM source-region selection + dp-weighted averages -------------
+    # Factored into the shared ``oro_source.depth_averaged_oro_source``
+    # (gw_oro.F90:119-145; the one canonical implementation, reused by the
+    # lightweight mcfarlane scheme — GWD-recon G3).  See that module for the
+    # index-mapping commentary (E3SM 1-based kk loop -> 0-based masks,
+    # pressure-interval dpsrc, src_level = interface above topmost included
+    # midpoint).
+    rsrc, usrc, vsrc, nsrc, src_level = depth_averaged_oro_source(
+        u, v, rho_mid, hdsp, pint, dpm, zm, nm,
+    )
 
     mag = jnp.sqrt(usrc * usrc + vsrc * vsrc)
     safe = mag > 0.0
