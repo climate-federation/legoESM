@@ -550,8 +550,6 @@ def _step_multilayer_land_impl(
             canopy_config=config.surface_scheme,
             land_config=config,
             land_params=lp,
-            w_frac_rz=w_frac_rz,
-            wind_speed=wind_speed,
             canopy_state=state.canopy_state,
             dt=dt,
             T_soil=T_soil,

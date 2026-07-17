@@ -1156,8 +1156,6 @@ def compute_clm_ml_canopy_fluxes(
     canopy_config: CLMMLCanopyConfig,
     land_config: "MultiLayerLandConfig",
     land_params: Any | None,
-    w_frac_rz: jnp.ndarray,
-    wind_speed: jnp.ndarray,
     canopy_state: CanopyState | None,
     dt: float,
     T_soil: jnp.ndarray | None = None,
@@ -1186,18 +1184,11 @@ def compute_clm_ml_canopy_fluxes(
     land_params:
         Per-column ``LandSurfaceParams`` (or ``None`` for config defaults).
         Must supply ``LAI``, ``SAI``, ``htop`` for the canopy scheme.
-    w_frac_rz:
-        Root-zone soil-moisture stress fraction [0–1], shape ``(ncol,)``.
-        **Not forwarded to CLM-ML-JAX.** CLM-ML computes its own hydraulic
-        water-stress (btran) internally from the ``smp_l_col`` derived from
-        ``psi_soil``.  Both scalars represent the same physical state, so no
-        inconsistency arises; the legoESM diagnostic value is simply unused.
-    wind_speed:
-        Scalar wind speed [m/s], shape ``(ncol,)``.
-        **Not forwarded to CLM-ML-JAX.** CLM-ML derives wind speed internally
-        from ``forc_u_grc = forcing.u_lowest`` and ``forc_v_grc = forcing.v_lowest``.
-        Pass this argument only if the caller wants to document the intended
-        wind forcing; the value is ignored.
+
+        Note: CLM-ML derives its own within-canopy wind (from ``forcing.u_lowest``/
+        ``v_lowest``) and hydraulic water-stress (btran, from ``psi_soil`` via
+        ``smp_l_col``), so the driver's ``w_frac_rz`` / ``wind_speed`` diagnostics
+        are NOT inputs here and are intentionally not accepted.
     canopy_state:
         Previous-step canopy state.  ``None`` or ``mlcanopy is None``
         triggers cold-start allocation.
