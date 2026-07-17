@@ -498,6 +498,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   ke_gradient_scheme=None, partial_cell=False,
                   adaptive_implicit_vertadv=None, bathy_smoothing_passes=0,
                   momentum_time_integrator=None, barotropic_solver=None,
+                  barotropic_pcg_variant=None,
                   barotropic_diffusion_alpha=None, n_barotropic_substeps=None,
                   barotropic_time_filter=None, bottom_drag_r=None,
                   C_smag=None, C_leith=None, C_smag_lap=None,
@@ -562,6 +563,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("adaptive_implicit_vertadv", adaptive_implicit_vertadv),
                               ("momentum_time_integrator", momentum_time_integrator),
                               ("barotropic_solver", barotropic_solver),
+                              ("barotropic_implicit_pcg_variant",
+                               barotropic_pcg_variant),
                               ("barotropic_diffusion_alpha", barotropic_diffusion_alpha),
                               ("n_barotropic_substeps", n_barotropic_substeps),
                               ("barotropic_time_filter", barotropic_time_filter),
@@ -833,6 +836,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                        ke_gradient_scheme=None, partial_cell=False,
                        adaptive_implicit_vertadv=None, bathy_smoothing_passes=0,
                   momentum_time_integrator=None, barotropic_solver=None,
+                  barotropic_pcg_variant=None,
                   barotropic_diffusion_alpha=None, n_barotropic_substeps=None,
                   barotropic_time_filter=None, bottom_drag_r=None,
                   C_smag=None, C_leith=None, C_smag_lap=None,
@@ -885,6 +889,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("adaptive_implicit_vertadv", adaptive_implicit_vertadv),
                               ("momentum_time_integrator", momentum_time_integrator),
                               ("barotropic_solver", barotropic_solver),
+                              ("barotropic_implicit_pcg_variant",
+                               barotropic_pcg_variant),
                               ("barotropic_diffusion_alpha", barotropic_diffusion_alpha),
                               ("n_barotropic_substeps", n_barotropic_substeps),
                               ("barotropic_time_filter", barotropic_time_filter),
@@ -1321,7 +1327,8 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      bottom_drag_bbl_thickness=None, bottom_drag_bg_velocity=None,
                      partial_cell=False, dz_ref_override=None,
                      n_barotropic_substeps=None,
-                     barotropic_solver=None, freeze_floor=None, freezing=None,
+                     barotropic_solver=None, barotropic_pcg_variant=None,
+                     freeze_floor=None, freezing=None,
                      runoff_depth_spread_m=None, mle=None,
                      bottom_drag_scheme=None, bottom_drag_cd0=None,
                      bottom_drag_cdmax=None, bottom_drag_z0=None,
@@ -1387,6 +1394,8 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                               ("bottom_drag_ke0", bottom_drag_ke0),
                               ("n_barotropic_substeps", n_barotropic_substeps),
                               ("barotropic_solver", barotropic_solver),
+                              ("barotropic_implicit_pcg_variant",
+                               barotropic_pcg_variant),
                               ("freeze_floor", freeze_floor),
                               ("freezing", freezing),
                               ("runoff_depth_spread_m", runoff_depth_spread_m))
@@ -1641,6 +1650,22 @@ def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None):
             f"(grids that run the KPP boundary layer), not --grid {grid!r}. "
             f"tripole runs the dynamics-core implicit vertical solve (no KPP) "
             f"so the override would silently do nothing.")
+
+
+def _validate_pcg_variant_grid(grid, barotropic_pcg_variant=None):
+    """Reject ``--barotropic-pcg-variant`` on grids whose builder does not
+    thread it into a live implicit-CN PCG (a flag that silently does nothing
+    is the dispatch footgun CLAUDE.md forbids).  ``tripole``/``latlon_bathy``
+    (LatLonCGridOceanConfig.barotropic.barotropic_implicit_pcg_variant) and
+    ``mpas`` (MPAS config field) dispatch it at the solver entry;
+    ``cubed_sphere`` runs the FV3 split-explicit subcycle — no PCG at all."""
+    if barotropic_pcg_variant is not None and grid not in (
+            "tripole", "latlon_bathy", "mpas"):
+        raise SystemExit(
+            f"--barotropic-pcg-variant is wired for --grid tripole/"
+            f"latlon_bathy/mpas (implicit-CN PCG grids), not --grid "
+            f"{grid!r} (the cube's split-explicit subcycle has no PCG, so "
+            f"the flag would silently do nothing).")
 
 
 def _runoff_component_vars(exclude_isf: bool):
@@ -3318,6 +3343,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Number of barotropic substeps (explicit_substep).")
     p.add_argument("--barotropic-time-filter", default=None, choices=[None,"box","cosine"],
                    help="Barotropic time-average filter (cosine = more dissipative for fast modes).")
+    p.add_argument("--barotropic-pcg-variant", default=None,
+                   choices=[None, "standard", "single_reduce"],
+                   help="Implicit-CN barotropic PCG reduction strategy "
+                        "(latlon_bathy / tripole / mpas; implicit_cn solver "
+                        "path only — explicit_substep ignores it upstream by "
+                        "config contract). 'standard' = 2 sequential global "
+                        "reductions/iter; 'single_reduce' = Chronopoulos-Gear, "
+                        "ONE batched reduction/iter — the reduction-latency "
+                        "lever for small per-rank tiles / high rank counts / "
+                        "multi-node (equivalent in exact arithmetic, differs "
+                        "at round-off; solver-tolerance lane, not bit-exact). "
+                        "None keeps the config default ('standard').")
     p.add_argument("--momentum-rk3", action="store_true",
                    help="Use 3-stage SSP-RK3 for the outer baroclinic momentum step "
                         "(mirrors NEMO's RK3 / key_RK3) instead of forward-Euler -- the "
@@ -3777,6 +3814,7 @@ def main() -> int:
 
     # KPP MLD-deepening sensitivity flags are mpas-only (fail loud, never silent).
     _validate_kpp_grid(args.grid, args.kpp_ri_crit, args.kpp_cv)
+    _validate_pcg_variant_grid(args.grid, args.barotropic_pcg_variant)
 
     # NEMO ln_crt_dwn relative-wind current feedback (rn_vfac): resolve + range-
     # check the CLI up front (fail before the expensive setup).  0.0 = absolute
@@ -4083,6 +4121,7 @@ def main() -> int:
             freezing=_freezing_ovr,
             runoff_depth_spread_m=args.runoff_depth_spread_m,
             barotropic_solver=args.barotropic_solver,
+            barotropic_pcg_variant=args.barotropic_pcg_variant,
             barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
             n_barotropic_substeps=args.n_barotropic_substeps,
             barotropic_time_filter=args.barotropic_time_filter,
@@ -4146,6 +4185,7 @@ def main() -> int:
             freezing=_freezing_ovr,
             runoff_depth_spread_m=args.runoff_depth_spread_m,
             mle=mle_cfg, dz_ref_override=_nemo_dz,
+            barotropic_pcg_variant=args.barotropic_pcg_variant,
             bottom_drag_scheme=args.bottom_drag_scheme,
             bottom_drag_cd0=args.bottom_drag_cd0,
             bottom_drag_cdmax=args.bottom_drag_cdmax,
@@ -4184,6 +4224,7 @@ def main() -> int:
             runoff_depth_spread_m=args.runoff_depth_spread_m,
             tracer_advection=args.tracer_advection,
             barotropic_solver=args.barotropic_solver,
+            barotropic_pcg_variant=args.barotropic_pcg_variant,
             barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
             n_barotropic_substeps=args.n_barotropic_substeps,
             barotropic_time_filter=args.barotropic_time_filter,
