@@ -2630,3 +2630,16 @@ def test_ifs_shallow_closure_toggle_and_byte_identity():
                 shf_w_m2=jnp.full((ncol,), sh), lhf_w_m2=lhf)
             return jnp.sum(m ** 2)
         assert jnp.isfinite(jax.grad(loss)(120.0))
+
+
+def test_ifs_shallow_closure_requires_cape_closure():
+    """Flag coherence: shallow-without-cape is a loud error, not a silent
+    no-op (codex R3)."""
+    T, q, pf, ph, u, v = _column(ncol=1, nlev=12)
+    import pytest
+    with pytest.raises(ValueError, match="use_ifs_shallow_closure"):
+        bechtold_convection(
+            T, q, pf, ph, u, v, jnp.zeros((1, 12)), jnp.zeros((1,)), None,
+            dt=600.0,
+            config=BechtoldConfig(use_ifs_shallow_closure=True,
+                                  use_ifs_cape_closure=False))

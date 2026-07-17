@@ -1678,6 +1678,16 @@ def bechtold_convection(
     """
     ncol, nlev = T.shape
 
+    # Static-config coherence (dispatch-hardening: a silently-inert flag is
+    # the phantom-scheme bug class): the shallow ZDHPBL closure realizes its
+    # target through the CAPE-closure blend, so it REQUIRES that path.
+    if config.use_ifs_shallow_closure and not config.use_ifs_cape_closure:
+        raise ValueError(
+            "use_ifs_shallow_closure requires use_ifs_cape_closure=True "
+            "(the shallow target is applied through the IFS closure's "
+            "class blend); enable both or neither."
+        )
+
     # -- Column geometry, moist adiabat, CAPE ------------------------------
     # Pass q_v so dz / rho / z use virtual-temperature moist hydrostatic
     # geometry (~1 % thicker / less dense in tropics) — consistent with
