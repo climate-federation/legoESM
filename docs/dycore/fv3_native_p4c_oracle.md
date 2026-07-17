@@ -340,3 +340,16 @@ create-vs-reference face layout in the ext bases (ext_parity_lonlat_ref
 fixes), staggered corner abscissae needing the ng=4 A lattice, and the
 c_sw sin_sg(5) tiny-floor patch poisoning the a-matrix (recomputed from
 inner(ec1,ec2)).
+
+**EXT-BUNDLE CERTIFIED (codex r4 SHIP, 667ad2b0d)**: independent
+Fortran projection oracle (fv3_extproj_*: verbatim a2stag_metrics +
+cubed_a2d/a2c; bases 1e-13, projections 1e-12, mutation-discriminated,
+sha-enforced fixture) + guards/provenance closures.  Corner-fill wedge
+accuracy (codex probe, C12): lagrange default 0.084 m/s; the a2d
+variant carries ~3.9 (ring-4 index-copy contamination) and is labeled
+a NONFAITHFUL measurement variant.  **C24 W2 gate: ext bundle
+23.70/4.08 = 251x/106x of the duo envelope vs interim 179x/101x — the
+max sits at CUBE VERTICES (interim: edge-midlat), so the ext swap
+cleans edges but excites vertices; wedge VALUES exonerated (0.084),
+open suspects: divgd B-corner feed into the nord damping, C-vector
+wedges, ext halo metrics under d_sw5's full-domain vorticity prep.**
