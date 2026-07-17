@@ -151,3 +151,6 @@ docs/_build/
 # sampling subset), not a runtime artifact; override the broad `data/` ignore.
 !packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/data/
 !packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/data/mie_lut_sampling.npz
+
+# local diff-work virtualenv (never commit)
+.venv_diffwork/
