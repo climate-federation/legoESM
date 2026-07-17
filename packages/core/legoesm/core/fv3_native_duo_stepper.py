@@ -114,13 +114,20 @@ def build_six_face_duo_context(n: int, ng: int = 3,
         gs.setdefault("se_corner", True)
         gs.setdefault("ne_corner", True)
         gs.setdefault("nw_corner", True)
+    ectx = None
     if use_ext_bundle:
-        # FULL ext consistency bundle: extended-lattice halo metrics
-        # (extend_gridstruct — interior, including the native-angle
-        # override above, restored bitwise) + the per-stagger k2e
-        # position remaps applied after every exchange in the stepper.
+        # FULL ext consistency bundle: the faithful ext_scalar /
+        # ext_vector machinery (fv3_native_ext_vector — c2l latlon
+        # intermediary + ng=4 geographic lattice + a2stag ext bases +
+        # Lagrange corner regions) over extended-lattice halo metrics
+        # (extend_gridstruct — interior restored bitwise).  The ext
+        # context snapshots the KINKED mpp-state metrics BEFORE the
+        # gridstructs are extended (upstream c2l reads the model
+        # gridstruct, not the ext lattice).
+        from legoesm.grids.fv3_native_ext_vector import build_ext_context
         from legoesm.grids.fv3_native_gridstruct import extend_gridstruct
 
+        ectx = build_ext_context(n, ng, gs6)
         gs6 = [extend_gridstruct(gs6[t], n, ng, tile=t + 1)
                for t in range(6)]
 
@@ -134,7 +141,7 @@ def build_six_face_duo_context(n: int, ng: int = 3,
            for t in range(1, 7)]
 
     return {"n": n, "ng": ng, "gs6": gs6, "dg": dg,
-            "use_ext_bundle": use_ext_bundle,
+            "use_ext_bundle": use_ext_bundle, "ectx": ectx,
             "kk6": kk6, "ee6": ee6,
             "bd": Bounds.single_tile(n, ng)}
 
@@ -295,17 +302,20 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
         p_grad_c_1lev(0.5 * dt, csw_outs[t - 1]["delpc"], pkc, gz,
                       uc6[t - 1], vc6[t - 1], gs, bd)
     divgd6 = [o["divg_d"] for o in csw_outs]
-    for t in range(1, 7):
-        exchange_bgrid_scalar_halos(divgd6, t, n, ng)
-        exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
     if ctx.get("use_ext_bundle"):
-        from legoesm.grids.fv3_native_gridstruct import (
-            k2e_remap_halo_rings,
+        # authoritative post-p_grad_c duo exchanges (dyn_core.F90:652-655):
+        # ext_scalar(divgd, 1,1) + ext_vector(uc, vc, 1,0,0,1)
+        from legoesm.grids.fv3_native_ext_vector import (
+            ext_scalar_sixface,
+            ext_vector_cgrid_sixface,
         )
 
-        k2e_remap_halo_rings(divgd6, "B", n, ng)
-        k2e_remap_halo_rings(uc6, "CX", n, ng)
-        k2e_remap_halo_rings(vc6, "CY", n, ng)
+        ext_scalar_sixface(divgd6, "B", ctx["ectx"])
+        ext_vector_cgrid_sixface(uc6, vc6, ctx["ectx"])
+    else:
+        for t in range(1, 7):
+            exchange_bgrid_scalar_halos(divgd6, t, n, ng)
+            exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
 
     s1 = []
     for t in range(1, 7):
@@ -384,21 +394,24 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
         # index-copy interim stays.
         duo_pad_scalars(delp6, ctx)
         duo_pad_scalars(pt6, ctx)
-    else:
+    elif not ctx.get("use_ext_bundle"):
         for t in range(1, 7):
             exchange_agrid_scalar_halos(delp6, t, n, ng)
             exchange_agrid_scalar_halos(pt6, t, n, ng)
-    for t in range(1, 7):
-        exchange_dgrid_vector_halos(u6, v6, t, n, ng)
     if ctx.get("use_ext_bundle"):
-        from legoesm.grids.fv3_native_gridstruct import (
-            k2e_remap_dvector_rings,
-            k2e_remap_halo_rings,
+        # authoritative duo entry exchanges (dyn_core.F90:437-471):
+        # ext_scalar(delp/pt, 0,0) + ext_vector(u, v, 0,1,1,0)
+        from legoesm.grids.fv3_native_ext_vector import (
+            ext_scalar_sixface,
+            ext_vector_dgrid_sixface,
         )
 
-        k2e_remap_halo_rings(delp6, "A", n, ng)
-        k2e_remap_halo_rings(pt6, "A", n, ng)
-        k2e_remap_dvector_rings(u6, v6, n, ng, ctx["kk6"], ctx["ee6"])
+        ext_scalar_sixface(delp6, "A", ctx["ectx"])
+        ext_scalar_sixface(pt6, "A", ctx["ectx"])
+        ext_vector_dgrid_sixface(u6, v6, ctx["ectx"])
+    else:
+        for t in range(1, 7):
+            exchange_dgrid_vector_halos(u6, v6, t, n, ng)
     states = [{**states[t], "delp": delp6[t], "pt": pt6[t],
                "u": u6[t], "v": v6[t]} for t in range(6)]
 
@@ -574,17 +587,16 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
     if ctx.get("use_k2e_scalars"):
         duo_pad_scalars(delp6, ctx)
         duo_pad_scalars(pt6, ctx)
+    elif ctx.get("use_ext_bundle"):
+        # post-step delp/pt refresh (dyn_core.F90:1336-1337)
+        from legoesm.grids.fv3_native_ext_vector import ext_scalar_sixface
+
+        ext_scalar_sixface(delp6, "A", ctx["ectx"])
+        ext_scalar_sixface(pt6, "A", ctx["ectx"])
     else:
         for t in range(1, 7):
             exchange_agrid_scalar_halos(delp6, t, n, ng)
             exchange_agrid_scalar_halos(pt6, t, n, ng)
-    if ctx.get("use_ext_bundle"):
-        from legoesm.grids.fv3_native_gridstruct import (
-            k2e_remap_halo_rings,
-        )
-
-        k2e_remap_halo_rings(delp6, "A", n, ng)
-        k2e_remap_halo_rings(pt6, "A", n, ng)
 
     u6 = [np.array(o["u"], copy=True) for o in stage]
     v6 = [np.array(o["v"], copy=True) for o in stage]
@@ -602,14 +614,17 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
                        if "delpc" in stage[t - 1] else 0.0)
         one_grad_p_1lev(u6[t - 1], v6[t - 1], pkc, gz, divg2, gs, bd,
                         npx, npx, dt=dt, d_ext=d_ext)
-    for t in range(1, 7):
-        exchange_dgrid_vector_halos(u6, v6, t, n, ng)
     if ctx.get("use_ext_bundle"):
-        from legoesm.grids.fv3_native_gridstruct import (
-            k2e_remap_dvector_rings,
+        # post-step D-wind refresh (dyn_core.F90:471 analog at the
+        # next entry; refreshed here so the returned state is ext-clean)
+        from legoesm.grids.fv3_native_ext_vector import (
+            ext_vector_dgrid_sixface,
         )
 
-        k2e_remap_dvector_rings(u6, v6, n, ng, ctx["kk6"], ctx["ee6"])
+        ext_vector_dgrid_sixface(u6, v6, ctx["ectx"])
+    else:
+        for t in range(1, 7):
+            exchange_dgrid_vector_halos(u6, v6, t, n, ng)
 
     return [{"delp": delp6[t], "pt": pt6[t], "u": u6[t], "v": v6[t]}
             for t in range(6)]

@@ -1127,13 +1127,14 @@ def exchange_dgrid_vector_halos(u6: list, v6: list, tile: int,
 _K2E_TAB_CACHE: dict = {}
 
 
-def _k2e_tables(n: int):
-    if n not in _K2E_TAB_CACHE:
+def _k2e_tables(n: int, remap_ng: int = 3):
+    key = (n, remap_ng)
+    if key not in _K2E_TAB_CACHE:
         from legoesm.grids.fv3_native_halos import compute_fv3_native_k2e
 
-        _K2E_TAB_CACHE[n] = compute_fv3_native_k2e(n, remap_ng=3,
-                                                   k2e_nord=4)
-    return _K2E_TAB_CACHE[n]
+        _K2E_TAB_CACHE[key] = compute_fv3_native_k2e(n, remap_ng=remap_ng,
+                                                     k2e_nord=4)
+    return _K2E_TAB_CACHE[key]
 
 
 def k2e_remap_halo_rings(f6: list, stag: str, n: int, ng: int):
@@ -1152,9 +1153,11 @@ def k2e_remap_halo_rings(f6: list, stag: str, n: int, ng: int):
     place; corner-diagonal cells are untouched (the vector corner
     fills / AGRID fill own them).
     """
-    if ng > 3:
-        raise NotImplementedError("k2e tables are pinned for ng<=3")
-    tab = _k2e_tables(n)
+    if ng > 4:
+        raise NotImplementedError(
+            "k2e remap rings pinned for ng<=3 (stepper) / ng==4 (the "
+            "ext_vector geographic lattice, upstream dg%bd%ng)")
+    tab = _k2e_tables(n, remap_ng=ng)
     ij = tab[f"{stag}_ij"]
     loc = tab[f"{stag}_loc"]
     coef = tab[f"{stag}_coef"]
@@ -1194,114 +1197,6 @@ def k2e_remap_halo_rings(f6: list, stag: str, n: int, ng: int):
                     continue
                 f[col, row] = float(
                     (cw * src[start:start + len(cw), row]).sum())
-
-
-def _stagger_points_and_tangents(lon_b, lat_b, kind):
-    """Stagger-point xyz + unit tangent PAIR (i-line, j-line) from a
-    corner-node lattice.  kind: "u" = x-component points (2i-1, 2j) —
-    D-u / C-vc row positions (nodes_i x cells_j is the D-u layout);
-    "v" = (2i, 2j-1).  Tangents by central differences of the stagger
-    point field itself (2nd order, both lattices treated identically
-    so the kinked->geo->ext round trip is consistent)."""
-    def xyz(lo, la):
-        return np.stack([np.cos(la) * np.cos(lo),
-                         np.cos(la) * np.sin(lo),
-                         np.sin(la)], axis=-1)
-
-    pb = xyz(lon_b, lat_b)
-    if kind == "u":                      # FV3 D-u: y-edge midpoints,
-        p = pb[:-1, :] + pb[1:, :]       # mids along i -> (m_a, m_b)
-    else:                                # FV3 D-v: x-edge midpoints,
-        p = pb[:, :-1] + pb[:, 1:]       # mids along j -> (m_b, m_a)
-    p = p / np.linalg.norm(p, axis=-1, keepdims=True)
-
-    e1 = np.empty_like(p)
-    e2 = np.empty_like(p)
-    e1[1:-1] = p[2:] - p[:-2]
-    e1[0] = p[1] - p[0]
-    e1[-1] = p[-1] - p[-2]
-    e2[:, 1:-1] = p[:, 2:] - p[:, :-2]
-    e2[:, 0] = p[:, 1] - p[:, 0]
-    e2[:, -1] = p[:, -1] - p[:, -2]
-    for e in (e1, e2):
-        e -= (e * p).sum(-1, keepdims=True) * p
-        e /= np.linalg.norm(e, axis=-1, keepdims=True)
-    return p, e1, e2
-
-
-def k2e_remap_dvector_rings(u6: list, v6: list, n: int, ng: int,
-                            kinked6: list, ext6: list,
-                            tabs=("DX", "DY")):
-    """Basis-correct kinked-to-extended remap of D-grid covariant wind
-    halos (the ext_vector latlon-intermediary flow, ring-local):
-
-    1. at each copied u/v halo point, pair the covariant component
-       with the neighbouring other-component average (co-location to
-       2nd order), solve the KINKED tangent 2x2 for the full vector,
-       take geographic components;
-    2. k2e position-remap each geographic component along the ring
-       (the certified per-stagger tables);
-    3. project onto the EXT tangents at the extended positions.
-
-    ``kinked6``/``ext6``: per-face (lon, lat) corner-node lattices.
-    Mutates u6/v6 in place (halo rings only).
-    """
-    for t in range(6):
-        lonk, latk = kinked6[t]
-        lone, late = ext6[t]
-        lonk = np.where(np.abs(lonk) >= BIG_NUMBER, np.nan, lonk)
-        latk = np.where(np.abs(latk) >= BIG_NUMBER, np.nan, latk)
-        pu_k, u1k, u2k = _stagger_points_and_tangents(lonk, latk, "u")
-        pv_k, v1k, v2k = _stagger_points_and_tangents(lonk, latk, "v")
-        _pu_e, u1e, _ = _stagger_points_and_tangents(lone, late, "u")
-        _pv_e, _, v2e = _stagger_points_and_tangents(lone, late, "v")
-
-        u = u6[t]                      # (m_a, m_b): cells x nodes
-        v = v6[t]                      # (m_b, m_a): nodes x cells
-        # co-located other-component averages on the copied data
-        v_at_u = np.full_like(u, np.nan)
-        v_at_u[:, 1:-1] = 0.25 * (v[:-1, :-1] + v[1:, :-1]
-                                  + v[:-1, 1:] + v[1:, 1:])
-        u_at_v = np.full_like(v, np.nan)
-        u_at_v[1:-1, :] = 0.25 * (u[:-1, :-1] + u[1:, :-1]
-                                  + u[:-1, 1:] + u[1:, 1:])
-
-        def geo_pair(cov1, cov2, e1, e2):
-            g11 = (e1 * e1).sum(-1)
-            g12 = (e1 * e2).sum(-1)
-            g22 = (e2 * e2).sum(-1)
-            det = g11 * g22 - g12 * g12
-            c1 = (g22 * cov1 - g12 * cov2) / det
-            c2 = (g11 * cov2 - g12 * cov1) / det
-            return c1[..., None] * e1 + c2[..., None] * e2
-
-        vec_u = geo_pair(u, v_at_u, u1k, u2k)          # vector at u pts
-        vec_v = geo_pair(u_at_v, v, v1k, v2k)          # vector at v pts
-
-        # remap each cartesian component along the rings, then project
-        comps_u = [vec_u[..., k].copy() for k in range(3)]
-        comps_v = [vec_v[..., k].copy() for k in range(3)]
-        for k in range(3):
-            k2e_remap_halo_rings([comps_u[k]], tabs[0], n, ng)
-            k2e_remap_halo_rings([comps_v[k]], tabs[1], n, ng)
-        vru = np.stack(comps_u, axis=-1)
-        vrv = np.stack(comps_v, axis=-1)
-
-        u_new = (vru * u1e).sum(-1)
-        v_new = (vrv * v2e).sum(-1)
-
-        # write back HALO RINGS only (where the remap changed values
-        # and the geometry is defined)
-        mask_u = np.zeros(u.shape, dtype=bool)
-        mask_u[:ng, :] = mask_u[-ng:, :] = True
-        mask_u[:, :ng] = mask_u[:, -ng:] = True
-        mask_u &= np.isfinite(u_new)
-        u[mask_u] = u_new[mask_u]
-        mask_v = np.zeros(v.shape, dtype=bool)
-        mask_v[:ng, :] = mask_v[-ng:, :] = True
-        mask_v[:, :ng] = mask_v[:, -ng:] = True
-        mask_v &= np.isfinite(v_new)
-        v[mask_v] = v_new[mask_v]
 
 
 def _cgrid_edge_partner(fx6: list, fy6: list, tile: int, si: int, sj: int,

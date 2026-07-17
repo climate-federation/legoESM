@@ -96,6 +96,9 @@ def main():
     ap.add_argument("--dt", type=float, default=450.0)
     ap.add_argument("--days", type=float, default=5.0)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--ext-bundle", action="store_true",
+                    help="faithful ext_scalar/ext_vector duo exchanges "
+                         "(fv3_native_ext_vector) + ext halo metrics")
     args = ap.parse_args()
 
     from legoesm.core.fv3_native_duo_stepper import (
@@ -104,7 +107,8 @@ def main():
         w2_six_face_state,
     )
 
-    ctx = build_six_face_duo_context(args.n, 3)
+    ctx = build_six_face_duo_context(args.n, 3,
+                                     use_ext_bundle=args.ext_bundle)
     states = w2_six_face_state(ctx)
     nmap = build_nearest_map(ctx)
 
