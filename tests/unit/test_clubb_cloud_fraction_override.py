@@ -130,7 +130,9 @@ class TestCloudFractionOverride:
         over-diagnosis that collapsed OLR + raised albedo in the real-SST A/B)."""
         T, p_full, q_v, dp = _saturated_marine_column()
         p_min = 70000.0
-        cfg = CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=p_min)
+        # ramp=0 => sharp step for the clean BL-vs-aloft partition assertion.
+        cfg = CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=p_min,
+                          clubb_cf_override_ramp_pa=0.0)
         rh = compute_cloud_properties(T=T, p_full=p_full, q_v=q_v, dp=dp, config=cfg)
         ovr_val = 0.15
         gated = compute_cloud_properties(
@@ -146,3 +148,30 @@ class TestCloudFractionOverride:
         # BL levels take the override; aloft levels are UNCHANGED from the RH cf.
         npt.assert_allclose(cf_gated[bl], ovr_val, atol=1e-12)
         npt.assert_allclose(cf_gated[aloft], cf_rh[aloft], atol=1e-12)
+
+    def test_smooth_ramp_gate_blends_without_discontinuity(self):
+        """The default SMOOTH gate (ramp>0) blends the override in over
+        [p_min-ramp, p_min] instead of a step — deep BL is the override, high
+        aloft is the RH cf, the transition is a monotone blend (no cloud
+        discontinuity => removes the step-gate blowup)."""
+        T, p_full, q_v, dp = _saturated_marine_column()
+        p_min, ramp = 70000.0, 10000.0
+        cfg = CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=p_min,
+                          clubb_cf_override_ramp_pa=ramp)
+        rh = compute_cloud_properties(T=T, p_full=p_full, q_v=q_v, dp=dp, config=cfg)
+        ovr_val = 0.15
+        sm = compute_cloud_properties(
+            T=T, p_full=p_full, q_v=q_v, dp=dp, config=cfg,
+            cloud_fraction_override=jnp.full(T.shape, ovr_val),
+        )
+        pf = np.asarray(p_full); cf_rh = np.asarray(rh.cloud_fraction)
+        cf_sm = np.asarray(sm.cloud_fraction)
+        deep_bl = pf >= p_min                 # full override
+        high_aloft = pf <= (p_min - ramp)     # pure RH cf
+        band = (pf > (p_min - ramp)) & (pf < p_min)  # blended
+        npt.assert_allclose(cf_sm[deep_bl], ovr_val, atol=1e-12)
+        npt.assert_allclose(cf_sm[high_aloft], cf_rh[high_aloft], atol=1e-12)
+        if band.any():
+            # blended values lie between the override and the local RH cf
+            lo = np.minimum(ovr_val, cf_rh[band]); hi = np.maximum(ovr_val, cf_rh[band])
+            assert np.all(cf_sm[band] >= lo - 1e-9) and np.all(cf_sm[band] <= hi + 1e-9)

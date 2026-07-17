@@ -22,6 +22,7 @@ __param_spec__ = {
             "pgam_min": "numerics: lower clip/cap on the gamma-PSD shape parameter (regulariser, paired with pgam_max)",
             "cloud_optics_asymmetry_g": "numerics: scattering asymmetry g of the two-region inhomogeneity two-stream reflectance (shapes the reduction; the real per-band g lives in RRTMGP, not trained here)",
             "clubb_cf_override_p_min_pa": "structural: BL-top pressure [Pa] above which the diagnostic-CLUBB cloud-fraction override applies (a level/regime gate, not a trained closure coefficient); 0 => full-column override",
+            "clubb_cf_override_ramp_pa": "numerics: smoothing width [Pa] of the override level gate (linear blend over [p_min-ramp, p_min] to avoid a cloud/heating discontinuity); a regulariser, not a trained coefficient; 0 => sharp step",
         },
         "params": {
             # --- critical_rh: primary cloud-onset RH (Sundqvist + Xu-Randall lower bound) ---
@@ -172,6 +173,13 @@ class CloudConfig(NamedTuple):
     # while keeping the intended low-cloud reduction.  ``0.0`` => apply at ALL
     # levels (the original full-column override).
     clubb_cf_override_p_min_pa: float = 70000.0
+    # SMOOTH ramp width [Pa] for the override level gate: the CLUBB fraction is
+    # blended in linearly over ``[p_min - ramp, p_min]`` (full override at
+    # p_full >= p_min; RH cf below p_min - ramp) instead of a sharp step at p_min.
+    # A step gate created a cloud/heating discontinuity at ~700 hPa that seeded a
+    # late (day-20) numerical blowup in the real-SST A/B; the ramp removes it.
+    # ``0.0`` => sharp step (the original level gate).
+    clubb_cf_override_ramp_pa: float = 10000.0
     # --- Convective cloud fraction (Slingo 1987), OPT-IN (default OFF) ---
     # The RH-based stratiform schemes (sundqvist/xu_randall) give cloud only
     # near saturation, so an adjustment convection scheme (sbm) that holds the

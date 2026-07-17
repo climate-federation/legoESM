@@ -553,7 +553,16 @@ def compute_cloud_properties(
         # threshold is a compile-time float): 0.0 restores the full-column
         # override (the analytical-A/B behaviour).
         _p_min = config.clubb_cf_override_p_min_pa
-        if _p_min > 0.0:
+        _ramp = config.clubb_cf_override_ramp_pa
+        if _p_min > 0.0 and _ramp > 0.0:
+            # SMOOTH gate: linear weight w=1 in the BL (p_full >= p_min), 0 aloft
+            # (p_full <= p_min - ramp), ramping between — a blend rather than a
+            # step so the cloud/heating field has no discontinuity at the gate
+            # (the sharp step seeded a late blowup in the real-SST A/B).  p_full is
+            # traced; p_min/ramp are compile-time config floats.
+            _w = jnp.clip((p_full - (_p_min - _ramp)) / _ramp, 0.0, 1.0)
+            cf = _w * _cf_clubb + (1.0 - _w) * cf
+        elif _p_min > 0.0:
             cf = jnp.where(p_full >= _p_min, _cf_clubb, cf)
         else:
             cf = _cf_clubb
