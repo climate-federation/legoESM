@@ -743,6 +743,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "--no-bechtold-use-ifs-inplume-precip disables a "
                              "config-file default. Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_inplume_precip}.")
+    parser.add_argument("--bechtold-dx-m", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_dx_m,
+                        dest="bechtold_dx_m",
+                        help="Grid spacing [m] for the IFS ZTAURES convective-"
+                             "turnover resolution factor (cumastrn.F90:762-768;"
+                             " ZDX=sqrt(cell area)). 0 disables (legacy "
+                             "factor 1.0). Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_dx_m}.")
     parser.add_argument("--bechtold-downdraft-entrain-rate", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_downdraft_entrain_rate,
                         dest="bechtold_downdraft_entrain_rate",
@@ -1515,6 +1523,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_use_ifs_cape_closure=args.bechtold_use_ifs_cape_closure,
         bechtold_use_ifs_subcloud_evap=args.bechtold_use_ifs_subcloud_evap,
         bechtold_use_ifs_inplume_precip=args.bechtold_use_ifs_inplume_precip,
+        bechtold_dx_m=args.bechtold_dx_m,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
         latlon_spmd_compiled_segments=args.latlon_spmd_compiled_segments,

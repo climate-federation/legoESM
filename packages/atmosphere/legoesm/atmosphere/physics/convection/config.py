@@ -57,6 +57,7 @@ __param_spec__ = {
             "downdraft_RH_min": "trigger: column-mean RH threshold below which the downdraft fires (not sigmoid-tunable, fix via config)",
             "downdraft_rh_sharpness": "numerics: sigmoid sharpness on the downdraft RH trigger [1/RH-fraction]",
             "downdraft_detrain_scale_m": "numerics: near-surface height scale [m] over which the penetrative-downdraft mass flux tapers to zero (structural deposit depth, not a trained closure)",
+            "dx_m": "grid property: horizontal grid spacing [m] for the IFS ZTAURES resolution factor (cumastrn.F90:762-768); set by the driver from the grid, never trained; 0 = resolution-agnostic legacy",
             "epsilon_deep": "entrainment: IFS base rate scaled by the height-dependent (1.3-RH) factor in-scheme, not a constant tunable",
             "epsilon_midlevel": "entrainment: TUNED transition-blend base rate (1e-4, intentionally below IFS ENTSHALP*ENTRORG=3.5e-3; see audit F6), scaled in-scheme",
             "epsilon_shallow": "entrainment: IFS shallow base rate scaled in-scheme",
@@ -1488,6 +1489,14 @@ class BechtoldConfig(NamedTuple):
     # 297 baseline with the residual std improved, moisture residual
     # improved).  False restores the legacy split path byte-identically.
     use_ifs_inplume_precip: bool = True
+    # Horizontal grid spacing [m] for the IFS ZTAURES resolution factor on the
+    # convective turnover time (ZDX = sqrt(cell area), cumastrn.F90:713,
+    # 762-768).  0 (default) = legacy resolution-agnostic ZTAURES = 1.0; the
+    # driver sets it from the grid (a static Python float — evaluated at trace
+    # time, no traced ops).  At ESM resolutions (dx > 125 km) the factor caps
+    # at 3, i.e. a 3x LONGER turnover / weaker deep flux than the legacy
+    # floor — validate before enabling by default.
+    dx_m: float = 0.0
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0

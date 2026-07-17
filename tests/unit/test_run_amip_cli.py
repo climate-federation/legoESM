@@ -2602,3 +2602,24 @@ def test_bechtold_use_ifs_inplume_precip_round_trips_and_threads():
         assert flat.bechtold_use_ifs_inplume_precip is flag
         assert ExperimentConfig.from_amip_config(
             flat).bechtold_use_ifs_inplume_precip is flag
+
+
+def test_bechtold_dx_m_round_trips_and_threads():
+    """--bechtold-dx-m round-trips (CLI -> ExperimentConfig -> flat AMIP ->
+    BechtoldConfig); default 0 = legacy."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-dx-m", "417000",
+    ]), parser))
+    assert cfg.bechtold_dx_m == 417000.0
+    assert _resolve_convection(cfg)[1].dx_m == 417000.0
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert d.bechtold_dx_m == 0.0
+    flat = ExperimentConfig(convection="bechtold",
+                            bechtold_dx_m=123456.0).to_amip_config()
+    assert flat.bechtold_dx_m == 123456.0
+    assert ExperimentConfig.from_amip_config(flat).bechtold_dx_m == 123456.0
