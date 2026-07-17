@@ -270,12 +270,21 @@ def test_bechtold_AR1_stationary_variance():
         stochastic_decorrelation=1800.0,
     )
     key = jax.random.PRNGKey(0)
+
+    # JIT once (config closed over as a static): the test's object is the
+    # AR1 STATISTICS — 500 eager full-leaf evaluations grew past the test
+    # timeout as the scheme gained (default-on) oracle features.
+    @jax.jit
+    def _step_stoch(stoch_in, subkey):
+        return bechtold_convection(
+            T, q, pf, ph, u, v, cpp, stoch_in, subkey, dt=300.0,
+            config=config,
+        )[2]
+
     # 500 steps; sample stoch_new at the end.
     for i in range(500):
         key, subkey = jax.random.split(key)
-        _, _, stoch = bechtold_convection(
-            T, q, pf, ph, u, v, cpp, stoch, subkey, dt=300.0, config=config,
-        )
+        stoch = _step_stoch(stoch, subkey)
     var = float(jnp.var(stoch))
     # Stationary variance is theoretically 1; allow generous tolerance.
     assert 0.5 < var < 2.0, f"AR1 stationary variance off-target: {var}"
@@ -1773,7 +1782,7 @@ def test_ifs_subcloud_evap_analytic_fortran_mirror():
     for deep in (True, False):                          # both area branches
         dw_case = np.array([1.0 if deep else 0.0])
         evap_exp = mirror(q, qsat, dq_r, below, deep)
-        evap_rate, rain_scale = _ifs_subcloud_rain_evaporation(
+        evap_rate, rain_scale, _ = _ifs_subcloud_rain_evaporation(
             jnp.asarray(q), jnp.asarray(qsat), jnp.asarray(p_half),
             jnp.asarray(dp), jnp.asarray(dq_r), jnp.asarray(below),
             jnp.asarray(rh_b), jnp.asarray(rh_t), jnp.asarray(dw_case), dt,
@@ -1807,8 +1816,9 @@ def test_ifs_subcloud_evap_rh_break_and_conservation():
     dw = jnp.array([0.0])                                # non-deep branch
 
     def run(q):
-        return _ifs_subcloud_rain_evaporation(
+        e, sc, _ = _ifs_subcloud_rain_evaporation(
             q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt)
+        return e, sc
 
     # wetter than the 0.92 break everywhere below cloud: ~no evaporation.
     e_wet, s_wet = run(qsat * 0.95)
@@ -1923,7 +1933,7 @@ def test_ifs_subcloud_evap_fractional_gate_is_convex_blend():
 
     def evap_with_gate(g_mid):
         below = jnp.asarray([[0.0, g_mid, 0.0]])        # only the middle layer
-        e, _ = _ifs_subcloud_rain_evaporation(
+        e, _, _ = _ifs_subcloud_rain_evaporation(
             q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt)
         return float(e[0, 1] * dp[0, 1] / constants.g)
 
@@ -2755,13 +2765,13 @@ def test_ifs_land_rhebc_blend_and_toggle():
     below = jnp.zeros((ncol, nlev)).at[:, 3:].set(1.0)
     rh_b, rh_t = jnp.array([0.9]), jnp.array([0.7])
     dw = jnp.array([1.0])
-    e_oc, _ = _ifs_subcloud_rain_evaporation(
+    e_oc, _, _ = _ifs_subcloud_rain_evaporation(
         q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt)
-    e_oc2, _ = _ifs_subcloud_rain_evaporation(
+    e_oc2, _, _ = _ifs_subcloud_rain_evaporation(
         q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt,
         land_frac=None)
     assert jnp.array_equal(e_oc, e_oc2), "None land_frac must be inert"
-    e_land, _ = _ifs_subcloud_rain_evaporation(
+    e_land, _, _ = _ifs_subcloud_rain_evaporation(
         q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt,
         land_frac=jnp.array([1.0]))
     # deep land break 0.70 < ocean 0.85: the ZRMIN bound releases LESS water
@@ -2780,3 +2790,138 @@ def test_ifs_capdcycl_flag_coherence_and_cli_defaults():
             dt=600.0,
             config=BechtoldConfig(use_ifs_capdcycl=True,
                                   use_ifs_cape_closure=False))
+
+
+# ---------------------------------------------------------------------------
+# IFS convective snow: partition + melt (cuflxn.F90:374-397, FOLD variant)
+# ---------------------------------------------------------------------------
+
+from legoesm.atmosphere.physics.convection.bechtold import (  # noqa: E402
+    _IFS_RTAUMEL_S, _IFS_ZTW1, _IFS_ZTW2, _IFS_ZTW3, _IFS_ZTW4, _IFS_ZTW5,
+)
+
+
+def test_ifs_snow_constants_and_wetbulb_fit():
+    """RTAUMEL = 5*3600*0.66 = 11880 s (sucumf.F90:178, Forbes-2008 factor);
+    ZTW1-5 wet-bulb fit constants (cuflxn.F90:179-183); the fit cools a
+    subsaturated layer and is inert at saturation."""
+    assert _IFS_RTAUMEL_S == 5.0 * 3.6e3 * 0.66
+    assert (_IFS_ZTW1, _IFS_ZTW2, _IFS_ZTW3, _IFS_ZTW4, _IFS_ZTW5) == (
+        1329.31, 0.0074615, 0.85e5, 40.637, 275.0)
+    T0, p0 = 280.0, 900e2
+    deficit = 2e-3
+    tw = T0 - deficit * (_IFS_ZTW1 + _IFS_ZTW2 * (p0 - _IFS_ZTW3)
+                         - _IFS_ZTW4 * (T0 - _IFS_ZTW5))
+    assert tw < T0 and T0 - tw < 6.0                 # physical wet-bulb dep
+
+
+def test_ifs_snow_melt_march_oracle_pin():
+    """Hand-marched 4-level column: cold aloft (all snow), warm below
+    (melt at min(S, cons1a*(1+0.5*dtw)*dp*dtw)), surface FOLD melts the
+    remainder; helper melt profile matches; snow never re-freezes."""
+    import numpy as np
+    g = constants.g
+    tf = constants.T_freeze
+    dt = 600.0
+    T = jnp.array([[tf - 12.0, tf - 4.0, tf + 3.0, tf + 9.0]])
+    p_half = jnp.array([[400e2, 600e2, 800e2, 920e2, 1000e2]])
+    pf = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    qsat = jnp.full((1, 4), 5e-3)
+    q = qsat * 1.0                                    # SATURATED: no evap,
+    dq_r = jnp.zeros((1, 4)).at[:, 0].set(4e-7)       # wet-bulb = T
+    below = jnp.zeros((1, 4))                         # evap gate closed
+    rh_b, rh_t = jnp.array([0.9]), jnp.array([0.8])
+    dw = jnp.array([1.0])
+    e, sc, melt = _ifs_subcloud_rain_evaporation(
+        q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt,
+        snow_melt=True, T=T, p_full=pf)
+    # hand march (saturated => t_wet = T; alpha=0 at T<=tf, else FOEALFCU(T))
+    from legoesm.atmosphere.physics.convection.bechtold import (
+        _ifs_liquid_fraction_cu)
+    cons1a = constants.c_pd / (constants.L_f * g * _IFS_RTAUMEL_S)
+    src = np.asarray(jnp.maximum(dq_r, 0.0) * dp / g)[0]
+    Tn = np.asarray(T)[0]; dpn = np.asarray(dp)[0]
+    rain, snow = 0.0, 0.0
+    melt_exp = np.zeros(4)
+    for k in range(4):
+        dtw = max(Tn[k] - tf, 0.0)
+        cap = cons1a * (1 + 0.5 * dtw) * dpn[k] * dtw
+        melt_exp[k] = min(snow, cap)
+        snow -= melt_exp[k]
+        rain += melt_exp[k]
+        alpha = (float(_ifs_liquid_fraction_cu(jnp.array(Tn[k])))
+                 if Tn[k] > tf else 0.0)
+        rain += alpha * src[k]
+        snow += (1 - alpha) * src[k]
+    melt_exp[3] += snow                               # surface FOLD
+    got = np.asarray(melt * dp / g)[0]
+    tol = 1e-9 if melt.dtype == jnp.float64 else 1e-5
+    assert np.allclose(got, melt_exp, rtol=tol, atol=1e-20), (
+        f"melt {got} != hand {melt_exp}")
+    assert melt_exp.sum() > 0.0
+
+
+def test_ifs_snow_melt_leaf_enthalpy_and_toggle():
+    """Leaf toggle: cold-column convection with the flag flips the freeze/
+    melt heating pattern; column enthalpy shift OFF->ON is EXACTLY zero
+    (freeze heat == melt cooling incl. the surface fold); default False;
+    coherence guard fires."""
+    assert BechtoldConfig().use_ifs_snow_melt is False
+    T, q, pf, ph, u, v = _column(ncol=2, nlev=40, T_sfc=278.0, q_sfc=5e-3,
+                                 lapse_rate=6.5)
+    ncol, nlev = T.shape
+    dp = ph[:, 1:] - ph[:, :-1]
+    cpp = jnp.zeros((ncol, nlev)); st = jnp.zeros((ncol,))
+    kw = dict(use_ifs_subcloud_evap=True, enable_downdraft=False)
+    o_on, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_snow_melt=True, **kw))
+    o_off, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_snow_melt=False, **kw))
+    assert jnp.all(jnp.isfinite(o_on.dT_dt))
+    d_dT = float(jnp.max(jnp.abs(o_on.dT_dt - o_off.dT_dt)))
+    rain = float(jnp.sum(o_off.dq_r_conv_dt * dp) / constants.g)
+    if rain > 1e-10:
+        assert d_dT > 0.0, "cold-column toggle must be live"
+    # enthalpy ledger: freeze == melt exactly => column cp*dT shift zero.
+    dh = float(jnp.sum((o_on.dT_dt - o_off.dT_dt) * dp) / constants.g)
+    assert abs(dh) < 1e-12 + 1e-9 * abs(rain), (
+        f"snow enthalpy ledger leak: {dh:.3e}")
+    # vapor/rain untouched by the phase machinery (evap identical: melt
+    # feeds rain BELOW freezing levels only in this fixture)
+    import pytest
+    with pytest.raises(ValueError, match="use_ifs_snow_melt"):
+        bechtold_convection(
+            T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+            config=BechtoldConfig(use_ifs_snow_melt=True,
+                                  use_ifs_subcloud_evap=False))
+
+
+def test_ifs_snow_melt_same_layer_no_evap():
+    """Snow-melt ordering regression (codex snow-R1): melt produced IN a
+    layer joins the rain flux only DOWNSTREAM (oracle adds PDPMEL to
+    PMFLXR(JK+1) after evaporating PMFLXR(JK)) — a warm, dry, evap-active
+    layer fed only by snow from above must evaporate ZERO in the melt layer
+    itself and start evaporating one level below."""
+    dt = 600.0
+    tf = constants.T_freeze
+    T = jnp.array([[tf - 10.0, tf + 6.0, tf + 8.0, tf + 10.0]])
+    p_half = jnp.array([[400e2, 600e2, 800e2, 920e2, 1000e2]])
+    pf = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    qsat = jnp.full((1, 4), 8e-3)
+    q = qsat * 0.3                                   # dry: evap wants to fire
+    dq_r = jnp.zeros((1, 4)).at[:, 0].set(4e-7)      # cold source -> all snow
+    below = jnp.ones((1, 4))                         # evap gate OPEN everywhere
+    e, _, melt = _ifs_subcloud_rain_evaporation(
+        q, qsat, p_half, dp, dq_r, below, jnp.array([0.9]), jnp.array([0.8]),
+        jnp.array([1.0]), dt, snow_melt=True, T=T, p_full=pf)
+    # first melt happens at k=1 (first warm layer)
+    assert float(melt[0, 1] * dp[0, 1]) > 0.0
+    # evaporation at k=1 must be ZERO (no rain entered its top; its own melt
+    # is downstream-only)
+    assert float(e[0, 1]) == 0.0, "same-layer melt evaporated"
+    # and the melted rain DOES evaporate below
+    assert float(e[0, 2]) > 0.0

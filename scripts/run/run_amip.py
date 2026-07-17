@@ -753,6 +753,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "--no-bechtold-use-ifs-downdraft disables a "
                              "config-file default. Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_downdraft}.")
+    parser.add_argument("--bechtold-use-ifs-snow-melt",
+                        dest="bechtold_use_ifs_snow_melt",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_snow_melt,
+                        help="Enable the IFS convective snow partition + melt "
+                             "(openifs cuflxn.F90 FOEALFCU wet-bulb split, "
+                             "RTAUMEL melt; FOLD variant). Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_snow_melt}.")
     parser.add_argument("--bechtold-use-ifs-capdcycl",
                         dest="bechtold_use_ifs_capdcycl",
                         action=argparse.BooleanOptionalAction,
@@ -1565,6 +1573,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_use_ifs_shallow_closure=args.bechtold_use_ifs_shallow_closure,
         bechtold_use_ifs_capdcycl=args.bechtold_use_ifs_capdcycl,
         bechtold_use_ifs_land_rhebc=args.bechtold_use_ifs_land_rhebc,
+        bechtold_use_ifs_snow_melt=args.bechtold_use_ifs_snow_melt,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
         latlon_spmd_compiled_segments=args.latlon_spmd_compiled_segments,

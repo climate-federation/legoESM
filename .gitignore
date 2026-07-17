@@ -171,3 +171,4 @@ data/*
 !data/les_cases/
 !data/les_cases/**/
 !data/les_cases/**
+e3sm-source/

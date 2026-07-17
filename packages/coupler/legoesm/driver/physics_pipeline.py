@@ -2698,6 +2698,8 @@ def _resolve_convection(config):
                 config, 'bechtold_use_ifs_capdcycl', False),
             use_ifs_land_rhebc=getattr(
                 config, 'bechtold_use_ifs_land_rhebc', False),
+            use_ifs_snow_melt=getattr(
+                config, 'bechtold_use_ifs_snow_melt', False),
         )
         if _pe is not None:
             _bechtold_kwargs["precip_efficiency"] = _pe
