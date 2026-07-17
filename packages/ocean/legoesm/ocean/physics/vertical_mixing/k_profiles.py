@@ -99,6 +99,7 @@ def compute_vertical_K_profiles(
     return_tke: bool = False,
     lat_deg=None,
     iwm_fields=None,
+    n2_tracers=None,
 ) -> (
     tuple[jnp.ndarray, jnp.ndarray]
     | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
@@ -178,6 +179,15 @@ def compute_vertical_K_profiles(
         _S_f = extrapolate_below_seafloor(state.S.data, z_coord)
         state = state._replace(T=state.T.replace(data=_T_f),
                                S=state.S.replace(data=_S_f))
+        # The before-advection N² tracers (TKEConfig.n2_before_advection)
+        # get the SAME sub-seafloor extrapolation so the deep interface sees
+        # a neutral fill, not the T=S=0 rock IC (partial cells). Python-static
+        # (n2_tracers is None ⇒ untouched ⇒ BIT-IDENTICAL flat-bottom no-op).
+        if n2_tracers is not None:
+            n2_tracers = (
+                extrapolate_below_seafloor(n2_tracers[0], z_coord),
+                extrapolate_below_seafloor(n2_tracers[1], z_coord),
+            )
         # u/v only when already cell-centred (the lat-lon model passes the
         # centred cc_state; staggered shapes have no cell is_active match).
         if state.u.data.shape[:-1] == state.T.data.shape[:-1]:
@@ -219,7 +229,7 @@ def compute_vertical_K_profiles(
             state, z_coord, surface_forcing, vmix, physics_config.constants,
             eos_fn=eos_fn,
             tke_old=tke_old, dt_tke=dt_tke, tke_source=tke_source,
-            lat_deg=lat_deg)
+            lat_deg=lat_deg, n2_tracers=n2_tracers)
         K_v_total = K_v_total + K_vmix
         A_v_total = A_v_total + A_vmix
 
@@ -241,7 +251,8 @@ def compute_vertical_K_profiles(
                 "vertical_mixing scheme."
             )
         K_conv, A_conv = _enhanced_diffusion_K(state, z_coord, conv,
-                                               eos_fn=eos_fn)
+                                               eos_fn=eos_fn,
+                                               before_tracers=n2_tracers)
         # Convection enhances tracer diffusivity (convective_κz).
         K_v_total = K_v_total + K_conv
         # Momentum gets the independent convective viscosity (convective_νz
@@ -351,7 +362,7 @@ def _surface_buoyancy_flux(surface_forcing, state, constants_config,
 def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                      constants_config=ConstantsConfig(), eos_fn=None,
                      *, tke_old=None, dt_tke=None, tke_source=None,
-                     lat_deg=None):
+                     lat_deg=None, n2_tracers=None):
     """Re-compute K_v, A_v at interfaces for the chosen vmix scheme.
 
     For ``constant`` / ``richardson`` this duplicates only the K
@@ -446,6 +457,10 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         if u_data.shape[1] != T_data.shape[1]:
             u_data = 0.5 * (u_data[:, :-1, :] + u_data[:, 1:, :])
             v_data = 0.5 * (v_data[:-1, :, :] + v_data[1:, :, :])
+        # Before-advection (Nnow) T/S for the diffusivity-stage N²
+        # (TKEConfig.n2_before_advection). None ⇒ the closure uses the
+        # post-advection T_data/S_data ⇒ BIT-IDENTICAL.
+        T_n2, S_n2 = (n2_tracers if n2_tracers is not None else (None, None))
         dz_half = jnp.broadcast_to(
             z_coord.dz_half_ref * J[..., jnp.newaxis],
             T_data.shape[:-1] + (z_coord.n_levels - 1,),
@@ -548,6 +563,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     p_cell=p_cell, dz_ref=z_coord.dz_ref, jacobian=J,
                     eos_fn=eos_fn, z_interface=z_coord.z_half_ref[1:-1],
                     dz_surface=dz_surface, boundary_cap=_mxl1_cap,
+                    T_n2=T_n2, S_n2=S_n2,
                 )
                 return K_H_old, K_M_old, _tke_ctx
             tke_out = tke_vertical_mixing(
@@ -563,6 +579,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 external_source=tke_source,
                 dz_surface=dz_surface, boundary_cap=_mxl1_cap,
                 lat_deg=lat_deg,
+                T_n2=T_n2, S_n2=S_n2,
             )
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at
@@ -585,6 +602,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             z_interface=z_coord.z_half_ref[1:-1],
             dz_surface=dz_surface, boundary_cap=_mxl1_cap,
             lat_deg=lat_deg,
+            T_n2=T_n2, S_n2=S_n2,
         )
         return tke_out.K_H, tke_out.K_M, None
 
@@ -681,14 +699,17 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
     # masking the error).  ``scheme`` is the static config value, so raising at
     # function entry is jit-safe (this is the same defense used by the sibling
     # factories — see CLAUDE.md "Dispatch").
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        VALID_VERTICAL_MIXING_SCHEMES,
+    )
     raise ValueError(
         f"unknown vertical_mixing.scheme={scheme!r}; expected one of "
-        "{'none', 'constant', 'richardson', 'tke', 'catke', 'kpp'}"
+        f"{sorted(VALID_VERTICAL_MIXING_SCHEMES)}"
     )
 
 
 def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
-                          eos_fn=None):
+                          eos_fn=None, before_tracers=None):
     """``(K_v, A_v)`` fields used by the ``enhanced_diffusion`` scheme.
 
     Returns the convective tracer diffusivity (``convective_κz``) and the
@@ -731,6 +752,32 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
         rho, z_coord.dz_ref, J, cfg,
         T=state.T.data, S=state.S.data, p_cell=ed_p_cell, eos_fn=eos_fn,
     )
+    if getattr(cfg, "two_level_trigger", False) and before_tracers is not None:
+        # NEMO zdfevd MIN(rn2, rn2b): evaluate the trigger on the BEFORE
+        # tracers too and take the elementwise max of the coefficients —
+        # equivalent to the min-N² trigger for the hard-threshold path.
+        # Prevents per-step ON/OFF flicker of the convective coefficient in
+        # marginal columns (a grid-scale noise source; plan §G).
+        T_b, S_b = before_tracers
+        state_b = state._replace(T=state.T.replace(data=T_b),
+                                 S=state.S.replace(data=S_b))
+        rho_b = _compute_rho(state_b, z_coord, J, eos_fn=eos_fn)
+        ed_p_cell_b = None
+        if getattr(cfg, "n2_mode", "insitu") == "adiabatic":
+            from legoesm.ocean.eos import (
+                compute_hydrostatic_pressure, maybe_partial_h_actual,
+            )
+            ed_h_b = maybe_partial_h_actual(state_b, z_coord)
+            ed_p_cell_b = compute_hydrostatic_pressure(
+                rho_b, state_b.eta.data, z_coord.dz_ref, J,
+                ConstantsConfig().rho_0, h_actual=ed_h_b,
+            )
+        K_b, A_b, _ = convective_K_A_flag(
+            rho_b, z_coord.dz_ref, J, cfg,
+            T=T_b, S=S_b, p_cell=ed_p_cell_b, eos_fn=eos_fn,
+        )
+        K = jnp.maximum(K, K_b)
+        A = jnp.maximum(A, A_b)
     return K, A
 
 

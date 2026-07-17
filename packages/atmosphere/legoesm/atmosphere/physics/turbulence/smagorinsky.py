@@ -71,6 +71,7 @@ from legoesm import constants
 from legoesm.atmosphere.physics._shared import (
     buoyancy_coefficient,
     exner_function,
+    lilly_buoyancy_factor,
     mixing_length,
     virtual_temperature,
 )
@@ -204,15 +205,11 @@ def smagorinsky_turbulence(
     Ri = N2 / S2
 
     # Lilly (1962) buoyancy stability factor √(max(0, 1 − Ri/Pr_t)) — the √
-    # form is Lilly's equilibrium result (K_h/K_m = 1, K_m→0 for Ri>1); only
-    # the max/double-``where`` guard here (and the S²+1e-10 floor above) are
-    # modern numerics (AD-safety):
-    # enhances mixing when unstable (Ri<0), shuts it off at Ri ≥ Pr_t.
-    # Double-``where`` keeps the cutoff exact AND the gradient finite at
-    # Ri = Pr_t (a bare √(max(·,0)) leaks a 0·∞ NaN cotangent).
-    buoy_arg = 1.0 - Ri / config.Pr_t
-    buoy_safe = jnp.where(buoy_arg > 0.0, buoy_arg, 1.0)
-    f_buoy = jnp.where(buoy_arg > 0.0, jnp.sqrt(buoy_safe), 0.0)
+    # form is Lilly's equilibrium result (K_h/K_m = 1, K_m→0 for Ri>1); the
+    # AD-safe double-``where`` cutoff (finite cotangent at Ri = Pr_t) lives in the
+    # shared helper (with the S²+1e-10 floor above keeping Ri finite). Enhances
+    # mixing when unstable (Ri<0), shuts it off at Ri ≥ Pr_t.
+    f_buoy = lilly_buoyancy_factor(Ri, config.Pr_t)
 
     # K_m = (C_s · l)^2 · |S| · f_buoy ;  K_h = K_m / Pr_t.
     Km_half = (config.C_s * l_mix) ** 2 * S * f_buoy        # (ncol, nlev-1)

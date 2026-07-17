@@ -31,18 +31,23 @@ logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 # auto-detect for it — it would try to load libmpi before argv is parsed and
 # hard-crash on a node without a loadable MPI library (verified).
 from legoesm.parallel.early_init import maybe_init_jax_distributed
+
 if "--multicontroller" not in sys.argv:
     maybe_init_jax_distributed()
 
-from legoesm import constants
 from legoesm.driver.config import (
+    VALID_RADIATION,
+    VALID_TURBULENCE,
     DycoreConfig,
     EvaluationConfig,
     ExperimentConfig,
     GridConfig,
     OutputConfig,
+    parse_gwd_spec,
 )
 from legoesm.driver.run_status import status_to_exit_code
+
+from legoesm import constants
 
 _DYCORE_DEFAULTS = DycoreConfig()
 _OUTPUT_DEFAULTS = OutputConfig()
@@ -343,8 +348,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Path to ERA5 Zarr store for --ic era5")
 
     # Radiation
+    # Derived from the canonical tuple so this list cannot drift from
+    # validate_strict.  "none" is REQUIRED here, not decorative: this driver
+    # has a --held-suarez-forcing lane, HS forcing is ADDITIVE to the physics
+    # pipeline rather than a replacement, and a genuine dry HS run therefore
+    # needs radiation OFF.  Omitting it made the dry-core lane unreachable from
+    # this driver (scheme-reachability audit).
     parser.add_argument("--radiation", type=str, default="gray",
-                        choices=["gray", "rrtmg", "rrtmgp"])
+                        choices=list(VALID_RADIATION),
+                        help="Radiation scheme (default: gray). 'none' is for "
+                             "the dry --held-suarez-forcing lane.")
     # Default is ``None`` so ``_postprocess_args`` can tell an explicit
     # ``--rad-update-steps 1`` from "the user did not pass this flag".
     # ``--production-profile`` only auto-sets the production cadence
@@ -353,6 +366,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rad-update-steps", type=int, default=None)
     parser.add_argument("--unfused-radiation", action="store_true", default=False,
                         help="Run radiation outside the compiled segment scan")
+    parser.add_argument("--per-step-rollout", action="store_true", default=False,
+                        help="Use the per-step Python-loop rollout "
+                             "(driver.run(compiled=False)) instead of the "
+                             "compiled lax.scan segments. Slower, but threads the "
+                             "CLUBB cloud-fraction->radiation carry "
+                             "(--use-clubb-cloud-fraction), which the compiled "
+                             "SegmentCarry path does not yet carry.")
     parser.add_argument("--rrtmgp-gpoint-batch-size", type=int,
                         default=_EXPERIMENT_DEFAULTS.rrtmgp_gpoint_batch_size,
                         help="RRTMGP g-point batch size (0 = auto/checkpointed)")
@@ -520,11 +540,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # disabled only for an idealized / dry-dynamics run, which must opt in via
     # --allow-disabled-physics (or --held-suarez-forcing / --enable-latlon-spmd).
     # Enforced by _require_full_physics_for_amip; see the directive in CLAUDE.
+    # mynn25 was missing while run_coupled offers it, and it resolves through
+    # the shared turbulence factory (integration.get_turbulence_fn) -- drift.
+    # Derived from the canonical tuple: this hand-copied list is exactly what
+    # drifted (it silently omitted mynn25 while run_coupled's copy omitted
+    # clubb_lite/ysu -- same ModelDriver, same factory, two different answers to
+    # "what can I run?").
     parser.add_argument("--turbulence", type=str, default="louis",
-                        choices=[
-                            "none", "smagorinsky", "louis", "tke",
-                            "clubb_lite", "clubb", "holtslag_boville", "ysu", "edmf",
-                        ])
+                        choices=list(VALID_TURBULENCE))
     parser.add_argument("--cloudtop-entrainment-efficiency",
                         dest="louis_cloudtop_entrainment_efficiency", type=float,
                         default=0.0,
@@ -535,7 +558,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "liquid cloud (the AMIP albedo bias) WITHOUT a "
                              "surface-evaporation trade.  0 = off (default); "
                              "warm-start/ramp only (cold-start caveat).")
-    parser.add_argument("--gravity-wave-drag", type=str, default="mcfarlane",
+    # Shared validator: composites keep working and a typo is now rejected at
+    # the CLI (this flag previously had `type=str` with no validation at all).
+    parser.add_argument("--gravity-wave-drag", type=parse_gwd_spec,
+                        default="mcfarlane",
                         help="GWD scheme: none, rayleigh, lindzen, mcfarlane, "
                              "hines, prognostic_spectral, ml_emulator, or a "
                              "'+'-joined composite whose source tendencies are "
@@ -597,6 +623,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "two_region optic [0,1] (Shonk-Hogan ~0.75; HIGHER "
                              "=> thinner leaking sub-column => lower albedo). "
                              "None=CloudConfig default 0.75.")
+    parser.add_argument("--use-clubb-cloud-fraction",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Route diagnostic CLUBB's sub-grid PDF cloud "
+                             "fraction into the cloud optics instead of the RH "
+                             "grid-scale one (marine-Sc over-bright albedo lever; "
+                             "a moist closure is less overcast over a saturated "
+                             "marine BL => lower LWP floor => lower albedo). "
+                             "Requires --turbulence clubb (diagnostic). Default "
+                             "off = RH grid-scale cloud fraction (byte-identical).")
     parser.add_argument("--cloud-p-xr", dest="cloud_p_xr", type=float, default=None,
                         help="Xu-Randall cloud-fraction RH exponent p_xr (None="
                              "default 0.25; bounds 0.05..1.0). HIGHER => cloud "
@@ -692,6 +727,91 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "BL-ventilation lever. --no-bechtold-downdraft-transport "
                              "disables a config-file default. Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_downdraft_transport}.")
+    parser.add_argument("--bechtold-use-ifs-cape-closure",
+                        dest="bechtold_use_ifs_cape_closure",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_cape_closure,
+                        help="Enable the full IFS deep CAPE closure "
+                             "ZMFUB1=ZCAPE*ZMFUB/(ZHEAT*ZXTAU) (openifs "
+                             "cumastrn.F90:704-833) instead of the legacy "
+                             "surrogate deep closure. "
+                             "--no-bechtold-use-ifs-cape-closure disables a "
+                             "config-file default. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_cape_closure}.")
+    parser.add_argument("--bechtold-use-ifs-subcloud-evap",
+                        dest="bechtold_use_ifs_subcloud_evap",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_subcloud_evap,
+                        help="Enable the IFS Kessler sub-cloud evaporation of "
+                             "convective rain (openifs cuflxn.F90:436-475: "
+                             "RCPECONS rate, ZRHEBC RH break) instead of the "
+                             "crude downdraft-efficiency re-evaporation. "
+                             "--no-bechtold-use-ifs-subcloud-evap disables a "
+                             "config-file default. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_subcloud_evap}.")
+    parser.add_argument("--bechtold-use-ifs-inplume-precip",
+                        dest="bechtold_use_ifs_inplume_precip",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_inplume_precip,
+                        help="Enable the IFS in-updraft precipitation formation "
+                             "(openifs cuascn.F90:718-773 analytic Sundqvist "
+                             "conversion; bypasses the post-hoc precip split). "
+                             "--no-bechtold-use-ifs-inplume-precip disables a "
+                             "config-file default. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_inplume_precip}.")
+    parser.add_argument("--bechtold-use-ifs-downdraft",
+                        dest="bechtold_use_ifs_downdraft",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_downdraft,
+                        help="Enable the IFS convective downdraft (openifs "
+                             "cudlfsn+cuddrafn: LFS, saturated entraining "
+                             "descent, rain debit, closure/CMT coupling). "
+                             "--no-bechtold-use-ifs-downdraft disables a "
+                             "config-file default. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_downdraft}.")
+    parser.add_argument("--bechtold-use-ifs-snow-melt",
+                        dest="bechtold_use_ifs_snow_melt",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_snow_melt,
+                        help="Enable the IFS convective snow partition + melt "
+                             "(openifs cuflxn.F90 FOEALFCU wet-bulb split, "
+                             "RTAUMEL melt; FOLD variant). Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_snow_melt}.")
+    parser.add_argument("--bechtold-use-ifs-capdcycl",
+                        dest="bechtold_use_ifs_capdcycl",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_capdcycl,
+                        help="Enable the IFS RCAPDCYCL=2 diurnal-cycle CAPE "
+                             "correction (openifs cumastrn.F90:780-833; land "
+                             "deep convection peaks late afternoon). Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_capdcycl}.")
+    parser.add_argument("--bechtold-use-ifs-land-rhebc",
+                        dest="bechtold_use_ifs_land_rhebc",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_land_rhebc,
+                        help="Enable the IFS land RH break for sub-cloud rain "
+                             "evaporation (cuflxn.F90 0.70/0.75 land vs "
+                             "0.85/0.92 ocean). Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_land_rhebc}.")
+    parser.add_argument("--bechtold-use-ifs-shallow-closure",
+                        dest="bechtold_use_ifs_shallow_closure",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_shallow_closure,
+                        help="Enable the IFS shallow PBL-equilibrium closure "
+                             "(openifs cumastrn.F90 ZDHPBL/ZDH; flux-form "
+                             "supply from same-step bulk SHF+LHF + sub-cloud "
+                             "radiative convergence). "
+                             "--no-bechtold-use-ifs-shallow-closure disables "
+                             "a config-file default. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_shallow_closure}.")
+    parser.add_argument("--bechtold-dx-m", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_dx_m,
+                        dest="bechtold_dx_m",
+                        help="Grid spacing [m] for the IFS ZTAURES convective-"
+                             "turnover resolution factor (cumastrn.F90:762-768;"
+                             " ZDX=sqrt(cell area)). 0 disables (legacy "
+                             "factor 1.0). Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_dx_m}.")
     parser.add_argument("--bechtold-downdraft-entrain-rate", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_downdraft_entrain_rate,
                         dest="bechtold_downdraft_entrain_rate",
@@ -1370,6 +1490,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_scheme=args.clouds,
         cloud_rh_crit_bl=args.cloud_rh_crit_bl,
         cloud_sigma_bl=args.cloud_sigma_bl,
+        use_clubb_cloud_fraction=args.use_clubb_cloud_fraction,
         microphysics=args.microphysics,
         nc_from_aerosol=args.aerosol_ccn,
         subgrid_autoconversion=args.subgrid_autoconversion,
@@ -1461,6 +1582,15 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_downdraft_transport=args.bechtold_downdraft_transport,
         bechtold_downdraft_entrain_rate=args.bechtold_downdraft_entrain_rate,
         bechtold_downdraft_detrain_scale_m=args.bechtold_downdraft_detrain_scale_m,
+        bechtold_use_ifs_cape_closure=args.bechtold_use_ifs_cape_closure,
+        bechtold_use_ifs_subcloud_evap=args.bechtold_use_ifs_subcloud_evap,
+        bechtold_use_ifs_inplume_precip=args.bechtold_use_ifs_inplume_precip,
+        bechtold_dx_m=args.bechtold_dx_m,
+        bechtold_use_ifs_downdraft=args.bechtold_use_ifs_downdraft,
+        bechtold_use_ifs_shallow_closure=args.bechtold_use_ifs_shallow_closure,
+        bechtold_use_ifs_capdcycl=args.bechtold_use_ifs_capdcycl,
+        bechtold_use_ifs_land_rhebc=args.bechtold_use_ifs_land_rhebc,
+        bechtold_use_ifs_snow_melt=args.bechtold_use_ifs_snow_melt,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
         latlon_spmd_compiled_segments=args.latlon_spmd_compiled_segments,
@@ -2190,7 +2320,8 @@ def main(argv: list[str] | None = None):
         driver.config = driver.config._replace(days=int(n_profile_days + 1))
         with jax.profiler.trace(profile_dir):
             profile_status = driver.run(start_step=start_step,
-                                        start_day=start_day)
+                                        start_day=start_day,
+                                        compiled=not args.per_step_rollout)
         if _is_root:
             print(f"Profile saved to {profile_dir}")
             print("View with: tensorboard --logdir " + profile_dir)
@@ -2205,7 +2336,8 @@ def main(argv: list[str] | None = None):
 
     if _is_root:
         print("Running...")
-    run_status = driver.run(start_step=start_step, start_day=start_day)
+    run_status = driver.run(start_step=start_step, start_day=start_day,
+                            compiled=not args.per_step_rollout)
 
     # Post-run FAILURE detection needs TWO independent signals — either one
     # non-clean means exit 1 (so a SLURM ``afterok`` chain STOPS instead of

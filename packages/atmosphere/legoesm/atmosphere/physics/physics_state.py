@@ -162,6 +162,14 @@ class PhysicsState(NamedTuple):
     # re-derivable as arange(ncol) — restart loaders may default it.
     col_index: jnp.ndarray
     aerosol_number: jnp.ndarray = None
+    # Sub-grid LIQUID cloud fraction [-], shape (ncol, nlev), written by a
+    # turbulence scheme that carries its own PDF cloud closure (CLUBB) so the
+    # radiation module can consume it (cloud_scheme="clubb") instead of the
+    # RH-diagnosed grid-scale one.  Always materialised as zeros (uniform
+    # pytree, byte-identical for runs that never read it — radiation ignores it
+    # unless cloud_scheme="clubb"); appended LAST with a default so existing
+    # direct constructors are unaffected.
+    cloud_fraction: jnp.ndarray = None
 
 
 def init_physics_state(
@@ -303,6 +311,11 @@ def init_physics_state(
     # are byte-identical; only evolved when the prognostic-aerosol option is on.
     aerosol_number = jnp.zeros((ncol, nlev), dtype=dtype)
 
+    # --- CLUBB sub-grid cloud fraction hand-off (turbulence -> radiation) ---
+    # Zeros before the first turbulence step; a PDF turbulence scheme (CLUBB)
+    # overwrites it each step and radiation reads it when cloud_scheme="clubb".
+    cloud_fraction = jnp.zeros((ncol, nlev), dtype=dtype)
+
     return PhysicsState(
         tke=tke,
         conv_prog_profile=conv_prog_profile,
@@ -315,6 +328,7 @@ def init_physics_state(
         rad_heating=rad_heating,
         col_index=jnp.arange(ncol, dtype=jnp.int32),
         aerosol_number=aerosol_number,
+        cloud_fraction=cloud_fraction,
     )
 
 
@@ -360,5 +374,8 @@ def update_physics_state(phys_state, updates):
         col_index=phys_state.col_index,   # constant identity, never updated
         aerosol_number=updates.get(
             "aerosol_number", phys_state.aerosol_number
+        ),
+        cloud_fraction=updates.get(
+            "cloud_fraction", phys_state.cloud_fraction
         ),
     )

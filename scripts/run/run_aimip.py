@@ -9,14 +9,20 @@ All variants share the spectral primitive-equation dynamical core
 comparison reflects the choice of physics representation rather than
 the dycore.  The variants are:
 
-* ``classical`` — Tiedtke convection, Louis turbulence, surface bulk
-  fluxes, McFarlane gravity-wave drag, Xu-Randall cloud fraction.
-  Tunables exposed via :class:`legoesm.training.aimip_params.AIMIPClassicalParams`
+* ``classical`` — the FULL physics suite: Tiedtke convection, Louis
+  turbulence, surface bulk fluxes, McFarlane gravity-wave drag,
+  Xu-Randall cloud fraction, Sundqvist microphysics and RRTMGP
+  correlated-k radiation (``aimip_radiation``; gray is the cheap
+  opt-in / smoke backend).  Tunables exposed via
+  :class:`legoesm.training.aimip_params.AIMIPClassicalParams`
   and trained end-to-end through the differentiable spectral PE
   rollout.
-* ``column_nn`` — column MLP physics (Rasp et al., 2018 style) via
-  :func:`legoesm.training.neural_gcm_spectral.train_column_mlp_spectral`.
-* ``sfno_physics`` — SFNO replaces the gridded physics step via
+* ``column_nn`` — ALL physics, radiation included, learned by a column
+  MLP (Rasp et al., 2018 style) via
+  :func:`legoesm.training.neural_gcm_spectral.train_column_mlp_spectral`;
+  no classical scheme runs alongside it.
+* ``sfno_physics`` — SFNO replaces the entire gridded physics step
+  (radiation included), dycore retained, via
   :func:`legoesm.training.neural_gcm_spectral.train_neural_gcm_spectral`.
 * ``sfno_full`` — SFNO as the full atmospheric emulator (no dycore,
   no physics tendency) via
@@ -101,6 +107,14 @@ def _apply_smoke_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
         aimip_radiation="gray",
         aimip_spatial_surface=False,
         aimip_rollout_days=1,
+        # Drop any window list from the base (the all-years scale base
+        # carries 1152 pairs; even aimip_era5.yaml carries several): the
+        # smoke contract is a minutes-scale end-to-end check, so fall back
+        # to the start_year + n_train_days/n_eval_days loader path.
+        train_windows=None,
+        eval_windows=None,
+        aimip_rollout_curriculum=None,
+        aimip_chunk_windows=0,
     ))
     return cfg
 
@@ -346,7 +360,10 @@ def _train_aimip_classical(
     )
 
     dt = spec_cfg.dt
-    radiation = str(cfg.get("aimip_radiation", "gray"))
+    # Classical = full physics suite + RRTMGP radiation by default; the
+    # cheap gray backend is opt-in (aimip_radiation: gray, and what the
+    # --smoke overrides select).
+    radiation = str(cfg.get("aimip_radiation", "rrtmgp"))
     rad_update_interval = int(cfg.get("aimip_rad_update_interval", 6))
     # RRTMGP g-point checkpoint: True (default) = byte-for-byte legacy but the
     # prevent_cse=True per-g-point body inflates the GPU compile ~Ng-fold
@@ -620,7 +637,7 @@ def _evaluate_variant(
         eval_split_rad = eval_rad_interval > 1
         built = make_aimip_classical_spectral_physics(
             trained_model, grid, spec_cfg.dt,
-            radiation=str(cfg.get("aimip_radiation", "gray")),
+            radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
             rad_update_interval_steps=eval_rad_interval,
             convection_scheme=str(cfg.get("aimip_convection", "tiedtke")),
             turbulence_scheme=str(cfg.get("aimip_turbulence", "louis")),
@@ -646,8 +663,24 @@ def _evaluate_variant(
         )
         from legoesm.ml.channel_packing import PE3DChannelSpec
         from legoesm.ml.sfno import SFNOConfig
+        from legoesm.ml.normalization import load_normalization_stats
         _channels = PE3DChannelSpec(nlev=spec_cfg.n_levels).n_channels
         eval_dt_sfno = float(cfg.get("dt_sfno", 21600.0))
+        # sfno_full trains WITH per-channel Z-score normalization; reload the
+        # SAME norm_stats.npz the training wrote into checkpoint_dir
+        # ({output_dir}/{aimip_variant}) so this in-run eval applies the
+        # identical transform (state_update denormalises the output as a full
+        # state).  The eqx checkpoint carries only SFNO leaves, so the sidecar
+        # (not the checkpoint) is the source of truth for the stats.
+        _stats_path = Path(cfg["output_dir"]) / cfg["aimip_variant"] / "norm_stats.npz"
+        if not _stats_path.exists():
+            raise SystemExit(
+                f"sfno_full eval: normalization sidecar not found at "
+                f"{_stats_path}. train_sfno_full_spectral writes it per run; "
+                f"the model was trained WITH normalization, so eval cannot "
+                f"proceed without the matching stats."
+            )
+        eval_norm_stats = load_normalization_stats(_stats_path)
         eval_pe_cfg = SFNOPrimitiveEquationConfig(
             sfno_config=SFNOConfig(
                 in_channels=_channels,
@@ -664,11 +697,12 @@ def _evaluate_variant(
             # needs synthesis/clip/re-analysis); previously silently ignored.
             correct_moisture_budget=False,
             clip_q=False,
-            use_normalization=False,
+            use_normalization=True,
         )
         eval_full_wrapper = SFNOPrimitiveEquationModel(
             grid=grid, sigma_coord=sigma,
             config=eval_pe_cfg, sfno_model=trained_model,
+            norm_stats=eval_norm_stats,
         )
         n_steps_eval_sfno = max(
             1, int(round(eval_rollout_hours * 3600.0 / eval_dt_sfno))

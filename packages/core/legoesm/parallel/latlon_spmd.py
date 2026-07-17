@@ -284,6 +284,46 @@ def replicate_leaf(arr, rep, *, multiprocess: bool):
     return jax.device_put(arr, rep)
 
 
+def shard_leaf(arr, sharding, *, multiprocess: bool):
+    """Scatter one full-global leaf onto ``sharding``'s mesh — the SCATTER
+    primitive symmetric to :func:`replicate_leaf`, shared by the atm and ocean
+    lat-band SPMD steps (``shard_state_atm_latlon`` / ``shard_state_latlon``).
+
+    Single-process: plain ``jax.device_put`` (the historical path, unchanged and
+    byte-identical).
+
+    Multi-controller (``jax.process_count() > 1``, route-B ``jax.distributed``,
+    a mesh spanning processes): a top-level ``jax.device_put`` of the FULL global
+    array to a cross-process ``NamedSharding`` cannot place shards on peer
+    processes' devices, so XLA falls back to an all-gather that (a) transiently
+    materialises a second global copy per process and (b) is the collective seen
+    to crash under full-node CPU packing (issue #1100: 128 procs × global-state
+    each, rc=137 OOM). Instead ``jax.make_array_from_callback`` invokes the
+    callback ONCE PER ADDRESSABLE SHARD with that shard's global index, and each
+    process reads only its own shards out of the global array it already holds —
+    no all-gather, no transient global replica. Using the per-shard index
+    callback (not an enclosing [min,max) span) makes it correct for ANY
+    device→process placement, including a non-contiguous/interleaved mesh order.
+
+    NOT differentiable: ``make_array_from_callback`` is a host construction API,
+    so (unlike the historical ``device_put``) a ``jax.grad``/``vjp`` cannot be
+    taken THROUGH the multiprocess scatter. This is fine — the scatter is an
+    init-time boundary (``scatter_to_local`` before the step loop, per the MPI
+    pattern), never inside a differentiated loss; gradients w.r.t. params flow
+    through the already-sharded state, not the scatter itself.
+
+    Parameters
+    ----------
+    arr : the FULL global array, present on every process (host or device).
+    sharding : NamedSharding — the lat-band ``P("lat", None, ...)`` target.
+    multiprocess : pass ``jax.process_count() > 1`` (keyword-only so the branch
+        is explicit at every call site, mirroring :func:`replicate_leaf`).
+    """
+    if not multiprocess:
+        return jax.device_put(arr, sharding)
+    return jax.make_array_from_callback(arr.shape, sharding, lambda idx: arr[idx])
+
+
 def _pole_fold(rows, negate: bool):
     """Serial pole fold of ``rows`` (lat-mirror + 180 deg lon roll [+ sign]).
 

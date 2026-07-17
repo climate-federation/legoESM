@@ -685,8 +685,16 @@ def apply_meo_r_factor_cap(
 # ============================================================================
 
 
-def _haversine_km(lat1_deg, lon1_deg, lat2_deg, lon2_deg):
-    """Great-circle distance in km between two points (degrees)."""
+def haversine_km(lat1_deg, lon1_deg, lat2_deg, lon2_deg):
+    """Great-circle distance in km between two points (degrees).
+
+    Broadcasts NumPy-style, so a scalar point against an array of points
+    returns per-point distances -- used for nearest-cell assignment on both
+    structured (lat-lon) and unstructured (MPAS Voronoi) meshes. Promoted from
+    ``_haversine_km`` so ocean.forcing can share the one implementation rather
+    than re-derive the formula (CLAUDE.md: no re-derivation, no private
+    cross-module imports).
+    """
     R = constants.R_earth * 1e-3  # Earth radius [km]
     lat1, lon1 = np.radians(lat1_deg), np.radians(lon1_deg)
     lat2, lon2 = np.radians(lat2_deg), np.radians(lon2_deg)
@@ -733,7 +741,7 @@ def enforce_straits(
 
     for name, s_lat, s_lon, min_width_km, min_depth_m in CRITICAL_STRAITS:
         radius_km = 0.5 * min_width_km * cfg.strait_width_factor
-        dist_km = _haversine_km(flat_lat, flat_lon, s_lat, s_lon)
+        dist_km = haversine_km(flat_lat, flat_lon, s_lat, s_lon)
         in_corridor = dist_km < radius_km
         if not np.any(in_corridor):
             continue

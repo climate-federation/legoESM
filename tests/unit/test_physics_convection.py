@@ -84,13 +84,23 @@ def _make_saturated_unstable_column(nlev=20, ncol=4):
 
 
 def _make_dry_unstable_column(nlev=20, ncol=4):
-    """Conditionally-unstable but DRY column (RH ~ 0.2 everywhere).
+    """Conditionally-unstable, MODERATELY dry column (RH = 0.5 everywhere).
 
     Relaxing toward ``q_ref = rh_ref * q_sat(T_moist)`` then NET-MOISTENS the
     column (the cloud-layer mass-mean ``q_ref - q_v`` > 0), i.e. the Frierson
     (2007) SHALLOW regime — the case the SBM column-water conservation fix
     addresses.  ``_make_unstable_column`` (RH up to 0.95) net-DRIES, so it
     cannot exercise the shallow branch.
+
+    RH = 0.5, NOT lower: the 2026-07-17 shallow-branch A/B showed the regime
+    splits in two.  STRONGLY moistening soundings (RH ~ 0.2, this fixture's
+    old value) are zeroed OUTRIGHT by the #771 drying gate — output
+    identically 0, so the "scheme fired" assertions below can never hold
+    (the fixture predated the gate and the test sat red).  At RH ~ 0.5 the
+    shallow redistribution cancels the column integral and the gate passes
+    the redistributed LOCAL tendencies — the LIVE conserving shallow regime
+    this test exists to pin (see test_sbm_faithful.py::
+    test_shallow_branch_is_live_in_the_moderate_moistening_regime).
     """
     p_s = 1.0e5
     sigma_half = jnp.linspace(0.0, 1.0, nlev + 1)
@@ -104,7 +114,7 @@ def _make_dry_unstable_column(nlev=20, ncol=4):
     T = jnp.broadcast_to(T[None, :], (ncol, nlev))
 
     q_sat = saturation_mixing_ratio(T, p_full)
-    q_v = 0.2 * q_sat  # uniformly dry -> strong net moistening when relaxed
+    q_v = 0.5 * q_sat  # moderate dryness -> the LIVE shallow regime (see docstring)
     return T, q_v, p_full, p_half
 
 

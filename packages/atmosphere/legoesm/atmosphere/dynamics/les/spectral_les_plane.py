@@ -41,6 +41,10 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.bulk_flux import psi_h, psi_m   # canonical MOST stability functions
+from legoesm.atmosphere.physics._shared import (
+    brunt_vaisala_n_squared_from_gradient,
+    lilly_buoyancy_factor,
+)
 from legoesm.atmosphere.physics.turbulence.lasd_core import lasd_cs2
 from legoesm.atmosphere.physics.turbulence.vreman import vreman_nu_t as _vreman_core
 from legoesm.timestepping.split_explicit import (
@@ -68,6 +72,15 @@ class SpectralLESConfig(NamedTuple):
     buoyancy: bool = False         # Boussinesq buoyancy in w (θ scalar required)
     theta_ref0: float = 290.0      # reference θ for the buoyancy term [K]
     pr_sgs: float = 1.0            # turbulent Prandtl number (K_h = ν_t / Pr)
+    sgs_buoyancy: bool = False     # multiply the strain-based ν_t by the Lilly (1962)
+    #                                buoyancy factor √(max(0, 1 − Ri/Pr_t)), Ri =
+    #                                N²/|S|² from the (virtual) θ gradient — suppresses
+    #                                SGS mixing at a stable inversion. REQUIRED for
+    #                                stratocumulus (DYCOMS): the strain-only ν_t
+    #                                over-entrains the cloud-top jump → thin cloud.
+    #                                Uses pr_sgs as the critical Ri_c. Default off keeps
+    #                                the neutral ABL byte-identical (N²≈0 ⇒ f≈1 but not
+    #                                EXACTLY 1 at fp; gate preserves reproducibility).
     nu_floor: float = 0.0          # background eddy-viscosity floor [m²/s] — keeps
     #                                strongly-stable layers (where the dynamic SGS
     #                                shuts off) from going fully inviscid and
@@ -556,6 +569,43 @@ def eddy_viscosity(u, v, w, g: SpectralLESGrid):
     else:
         l_m = l_smag
     return (l_m ** 2) * Smag + g.cfg.nu_floor               # (ny,nx,nz)
+
+
+def sgs_buoyancy_factor(theta, tracers, u, v, w, g: SpectralLESGrid):
+    """Lilly (1962) stable-stratification suppression factor for the SGS eddy
+    viscosity, at CENTRES: ``f = √(max(0, 1 − Ri/Pr_t))`` with ``Ri = N²/|S|²``.
+
+    ``N² = (g/θ_v)·∂θ_v/∂z`` from the resolved virtual potential temperature
+    (:func:`virtual_theta`; dry ``θ`` when ``tracers`` is None), ``|S|`` the same
+    strain magnitude the Smagorinsky/Vreman/LASD ``ν_t`` uses. Multiplying ``ν_t``
+    by ``f`` shuts SGS mixing off across a stable inversion (``Ri ≥ Pr_t``) — the
+    missing physics that makes the strain-only closure over-entrain the
+    stratocumulus cloud top. Reuses the shared
+    :func:`~legoesm.atmosphere.physics._shared.lilly_buoyancy_factor` /
+    ``brunt_vaisala_n_squared_from_gradient`` (no re-derived Ri form).
+
+    ponytail: recomputes ``_strain`` (also done in :func:`eddy_viscosity`) rather
+    than threading ``Smag`` out — only runs when ``sgs_buoyancy`` is on; make
+    ``eddy_viscosity`` return ``Smag`` if this doubling ever shows up in a profile.
+    """
+    (S11, S22, S33, S12, S13, S23), _Smag = _strain(u, v, w, g)
+    theta_v = virtual_theta(theta, tracers) if tracers is not None else theta
+    theta_v = jnp.clip(theta_v, 1.0, None)                  # keep g/θ_v finite
+    # ∂θ_v/∂z at centres: 2nd-order central interior + one-sided edges (uniform
+    # dz on this plane core), matching the centre layout of ν_t.
+    dtheta_v_dz = jnp.gradient(theta_v, g.dz, axis=-1)
+    n2 = brunt_vaisala_n_squared_from_gradient(theta_v, dtheta_v_dz)
+    # |S|² = 2 S_ij S_ij built DIRECTLY from the strain components, NOT Smag**2.
+    # Same value as Smag² (pre the 1e-30 clamp inside _strain, negligible vs the
+    # 1e-10 floor) but self-contained AD-safe: a differentiable LES must not rely
+    # on _strain's INTERNAL √-clamp (there for a different purpose) to keep THIS
+    # Ri denominator's adjoint finite at an exact zero-strain (rest/uniform)
+    # state, and it skips a wasteful √→square roundtrip. (codex 2026-07-16 flagged
+    # the √→square as a NaN risk; the clamp happens to save the forward, this
+    # removes the fragile coupling.)
+    s2 = 2.0 * (S11 ** 2 + S22 ** 2 + S33 ** 2
+                + 2.0 * (S12 ** 2 + S13 ** 2 + S23 ** 2)) + 1e-10
+    return lilly_buoyancy_factor(n2 / s2, g.cfg.pr_sgs)
 
 
 # --------------------------------------------------------------------------- #
@@ -1057,6 +1107,17 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
     GABLS1-faithful prescribed-cooling boundary condition."""
     Cu, Cv, Cw = advection(u, v, w, g)
     nu_t = eddy_viscosity(u, v, w, g)
+    if g.cfg.sgs_buoyancy and theta is not None:
+        # Suppress the strain-based ν_t across stable stratification (Lilly 1962);
+        # the SAME factor damps momentum (sgs_and_wall) and scalar (K_h=ν_t/Pr)
+        # mixing, so the cloud-top inversion stops over-entraining. Neutral runs
+        # leave this off ⇒ byte-identical.
+        #   f·(strain + nu_floor) + (1−f)·nu_floor = f·strain + nu_floor
+        # keeps the background floor UNsuppressed — a molecular-like minimum that
+        # must survive f→0, else the inviscid inversion grows the 2Δ KH/gravity-
+        # wave mode nu_floor exists to damp. No-op when nu_floor=0 (the default).
+        f_buoy = sgs_buoyancy_factor(theta, tracers, u, v, w, g)
+        nu_t = f_buoy * nu_t + (1.0 - f_buoy) * g.cfg.nu_floor
     cd_surf, sfc_flux = None, sfc_theta_flux
     if t_sfc is not None and theta is not None:
         u1, v1 = u[..., 0], v[..., 0]

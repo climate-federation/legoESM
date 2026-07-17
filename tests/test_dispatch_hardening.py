@@ -242,6 +242,7 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_mpas.py", "__init__"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_cdgrid.py", "ocean_baroclinic_tendencies_cdgrid"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "_bc_ke_and_pressure_gradients"),
+        ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "_bc_pv_flux"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_mpas.py", "mpas_ocean_baroclinic_tendencies"),
         # (nemo_drag_r_from_speed_sq's internal legacy-rejection raise is not
         # scanner-shaped; the canonical unknown-scheme guard is the validator.)
@@ -250,7 +251,6 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/eos.py", "freezing_point"),
         ("packages/ocean/legoesm/ocean/experiments/dino.py", "create_forcings"),
         ("packages/ocean/legoesm/ocean/experiments/dino.py", "create_initial_conditions"),
-        ("packages/ocean/legoesm/ocean/physics/bottom_drag/integration.py", "make_bottom_drag_physics"),
         ("packages/ocean/legoesm/ocean/physics/convection/integration.py", "make_convection_physics"),
         ("packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py", "gm_redi_tracer_tendency_latlon"),
         ("packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_mpas.py", "gm_redi_tracer_tendency_mpas"),
@@ -263,6 +263,11 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/physics/surface_forcing/bulk_formulas.py", "bulk_formula_surface_forcing"),
         ("packages/ocean/legoesm/ocean/physics/surface_forcing/integration.py", "make_surface_forcing_physics"),
         ("packages/ocean/legoesm/ocean/physics/vertical_mixing/integration.py", "make_vertical_mixing_physics"),
+        # TKE surface-BC dispatch (surface_bc: veros_flux | nemo_dirichlet;
+        # hardened 2026-07-16 with the NEMO nn_bc_surf=1 Dirichlet option — a
+        # typo would silently run the Veros flux BC, a ~60x different surface
+        # TKE under wind).
+        ("packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py", "_surface_tke_dirichlet"),
         ("packages/ocean/legoesm/ocean/scm.py", "__init__"),
         ("packages/tools/legoesm/forcing/amip.py", "get_amip_preset"),
         ("packages/tools/legoesm/forcing/experiments.py", "create_experiment_config"),

@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from legoesm import constants
-from legoesm.grids.latlon import create_latlon_grid
+from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
 from legoesm.ocean.vertical import create_ocean_z_star, compute_ocean_jacobian
 from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig, VisbeckConfig
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
@@ -26,6 +27,7 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     gm_redi_tracer_tendency_latlon,
     gm_redi_lateral_mixing_latlon,
     compute_isoneutral_K33_latlon,
+    nemo_iso_lap_tracer_tendency_latlon_cgrid,
 )
 from tests.legoesm_paths import legoesm_source_path
 
@@ -1147,3 +1149,416 @@ class TestKappa3DInterface:
             T, S, eta, H_bathy, grid, z_coord, cfg, mask=mask,
             kappa_redi_override=k0)
         assert jnp.allclose(K33_3d_uniform, K33_scalar, rtol=1e-12, atol=1e-30)
+
+
+# =====================================================================
+# NEMO ldfslp mixed-layer slope ramp (default OFF -> byte-identical)
+# =====================================================================
+
+class TestNemoMixedLayerSlopeRamp:
+    """``GMRediConfig.nemo_mld_slope_ramp`` linearly flattens ML slopes.
+
+    Manufactured density with a well-mixed surface layer (top 3 levels
+    constant in z) over a stratified, meridionally-tilted interior.  In the
+    mixed layer the vertical density gradient -> 0, so the raw isoneutral slope
+    blows up; the NEMO ramp must taper it linearly to ~0 at the surface while
+    leaving the stratified interior untouched (default OFF => byte-identical).
+    """
+
+    @staticmethod
+    def _mixed_layer_setup(n_lat=8, n_lon=12, nlev=10):
+        from legoesm.ocean.eos import make_eos_fn
+        grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+        z_coord = create_ocean_z_star(
+            n_levels=nlev, H_max=2000.0, dz_surface=20.0, dz_deep=400.0)
+        mask = jnp.ones((n_lat, n_lon))
+        eta = jnp.zeros((n_lat, n_lon))
+        H_bathy = jnp.full((n_lat, n_lon), 2000.0)
+        jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
+        # Vertical T: 3-level mixed layer (constant), stratified below.
+        Tz = jnp.concatenate(
+            [jnp.full(3, 15.0), jnp.linspace(15.0, 2.0, nlev - 3)])
+        y_idx = jnp.arange(n_lat, dtype=jnp.float64)
+        # Meridional tilt (warmer south) -> nonzero horizontal density gradient.
+        T = Tz[None, None, :] + 0.3 * y_idx[:, None, None]
+        S = jnp.full((n_lat, n_lon, nlev), 35.0, dtype=jnp.float64)
+        eos_fn = make_eos_fn("linear")
+        rho = eos_fn(T, S, jnp.zeros_like(T))
+        return grid, z_coord, mask, jacobian, rho, T, S, eos_fn
+
+    def test_ramp_off_is_byte_identical(self):
+        grid, z_coord, mask, jac, rho, T, S, eos_fn = self._mixed_layer_setup()
+        base = GMRediConfig(kappa_GM=1000.0, kappa_Redi=1000.0)
+        off = GMRediConfig(kappa_GM=1000.0, kappa_Redi=1000.0,
+                           nemo_mld_slope_ramp=False)
+        Sx_b, Sy_b, _ = compute_isopycnal_slopes_latlon_cgrid(
+            rho, mask, z_coord, jac, grid, base, T=T, S=S, eos_fn=eos_fn)
+        Sx_o, Sy_o, _ = compute_isopycnal_slopes_latlon_cgrid(
+            rho, mask, z_coord, jac, grid, off, T=T, S=S, eos_fn=eos_fn)
+        # Default and explicit-off are bit-identical (ramp changes nothing).
+        assert jnp.array_equal(Sx_b, Sx_o)
+        assert jnp.array_equal(Sy_b, Sy_o)
+
+    def test_ramp_flattens_mixed_layer_only(self):
+        grid, z_coord, mask, jac, rho, T, S, eos_fn = self._mixed_layer_setup()
+        off = GMRediConfig(kappa_GM=1000.0, kappa_Redi=1000.0)
+        on = GMRediConfig(kappa_GM=1000.0, kappa_Redi=1000.0,
+                          nemo_mld_slope_ramp=True)
+        Sy_off, = (compute_isopycnal_slopes_latlon_cgrid(
+            rho, mask, z_coord, jac, grid, off, T=T, S=S, eos_fn=eos_fn)[1],)
+        Sy_on = compute_isopycnal_slopes_latlon_cgrid(
+            rho, mask, z_coord, jac, grid, on, T=T, S=S, eos_fn=eos_fn)[1]
+        # The MLD criterion places the ML base a few levels down for this
+        # synthetic column; the shallowest interface (0) must be flattened
+        # toward zero by the ramp.
+        surf_off = float(jnp.mean(jnp.abs(Sy_off[:, :, 0])))
+        surf_on = float(jnp.mean(jnp.abs(Sy_on[:, :, 0])))
+        assert surf_on < 0.34 * surf_off, (surf_on, surf_off)
+        # Below the mixed layer the ramp is a NO-OP: bit-identical to the
+        # un-ramped slopes. The computed MLD base for this synthetic column sits
+        # around interface ~4 (deeper than the nominal "top 3 levels"), so check
+        # interfaces 5+ are untouched.
+        assert jnp.array_equal(Sy_on[:, :, 5:], Sy_off[:, :, 5:])
+        # grad is AD-safe AND actually FLOWS to T through the below-ML base slope
+        # (the MLD level is quantized -> zero grad through hml, but the base slope
+        # is differentiable), so it must be finite AND non-zero.
+        def _loss(Tf):
+            return jnp.sum(compute_isopycnal_slopes_latlon_cgrid(
+                eos_fn(Tf, S, jnp.zeros_like(Tf)), mask, z_coord, jac, grid,
+                on, T=Tf, S=S, eos_fn=eos_fn)[1] ** 2)
+        g = jax.grad(_loss)(T)
+        assert jnp.all(jnp.isfinite(g))
+        assert float(jnp.max(jnp.abs(g))) > 0.0
+
+
+class TestNemoSlopeShapiro:
+    """``GMRediConfig.nemo_slope_shapiro`` = NEMO ldfslp horizontal Shapiro filter.
+
+    A ``(1-2-1)⊗(1-2-1)/16`` nine-point binomial on the masked interface slopes,
+    times a coastal taper ``zcofw`` that shrinks slopes toward land (NOT a
+    wet-renormalization).  Verified as an isolated operator: interior points
+    equal the hand-computed binomial mean; a coast damps the slope; land stays 0.
+    """
+
+    def test_shapiro_off_byte_identical(self):
+        grid, z_coord, mask, jac, rho, T, S, eos_fn = (
+            TestNemoMixedLayerSlopeRamp._mixed_layer_setup())
+        base = GMRediConfig(kappa_GM=1000.0, kappa_Redi=1000.0)
+        off = GMRediConfig(kappa_GM=1000.0, kappa_Redi=1000.0,
+                           nemo_slope_shapiro=False)
+        Sx_b, Sy_b, _ = compute_isopycnal_slopes_latlon_cgrid(
+            rho, mask, z_coord, jac, grid, base, T=T, S=S, eos_fn=eos_fn)
+        Sx_o, Sy_o, _ = compute_isopycnal_slopes_latlon_cgrid(
+            rho, mask, z_coord, jac, grid, off, T=T, S=S, eos_fn=eos_fn)
+        assert jnp.array_equal(Sx_b, Sx_o)
+        assert jnp.array_equal(Sy_b, Sy_o)
+
+    def test_interior_equals_binomial_mean(self):
+        """Interior wet point == the (1-2-1)²/16 weighted mean of its 3x3 nbhd."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _shapiro_smooth_slopes,
+        )
+        rng = np.random.default_rng(0)
+        Sx = jnp.asarray(rng.standard_normal((5, 6, 2)))
+        Sy = jnp.asarray(rng.standard_normal((5, 6, 2)))
+        mask = jnp.ones((5, 6))                    # all wet -> zcofw = 1/16
+        Sxs, Sys = _shapiro_smooth_slopes(Sx, Sy, mask)
+        # Hand binomial at interior point (2,3): weights [[1,2,1],[2,4,2],[1,2,1]]/16.
+        w = np.array([[1., 2., 1.], [2., 4., 2.], [1., 2., 1.]]) / 16.0
+        for arr, out in ((Sx, Sxs), (Sy, Sys)):
+            patch = np.asarray(arr)[1:4, 2:5, 0]
+            expect = float((w * patch).sum())
+            np.testing.assert_allclose(float(np.asarray(out)[2, 3, 0]), expect,
+                                       rtol=1e-12)
+
+    def test_coast_damps_and_land_zero(self):
+        """A wet point beside land is damped below the interior binomial mean,
+        and land points stay exactly 0."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _shapiro_smooth_slopes,
+        )
+        Sx = jnp.ones((5, 6, 1))
+        mask = jnp.ones((5, 6)).at[2, 5].set(0.0)   # one land cell at east edge
+        Sxs, _ = _shapiro_smooth_slopes(Sx, Sx, mask)
+        # Interior far from land -> 1.0 (binomial mean of all-ones = 1).
+        np.testing.assert_allclose(float(np.asarray(Sxs)[2, 2, 0]), 1.0, rtol=1e-12)
+        # Wet neighbour of the land cell (2,4): east u-face dry -> zcofw < 1/16
+        # AND a zero enters the sum -> strictly damped below 1.
+        assert float(np.asarray(Sxs)[2, 4, 0]) < 0.999
+        # The land cell itself stays exactly 0 (masked input, tmask factor).
+        assert float(np.asarray(Sxs)[2, 5, 0]) == 0.0
+
+    def test_shapiro_grad_flows(self):
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _shapiro_smooth_slopes,
+        )
+        mask = jnp.ones((5, 6))
+        def _loss(Sx):
+            out, _ = _shapiro_smooth_slopes(Sx, Sx, mask)
+            return jnp.sum(out ** 2)
+        g = jax.grad(_loss)(jnp.ones((5, 6, 2)))
+        assert jnp.all(jnp.isfinite(g))
+        assert float(jnp.max(jnp.abs(g))) > 0.0
+
+
+# =====================================================================
+# NEMO iso-neutral Laplacian Redi operator (slope_scheme="nemo_iso_lap")
+# =====================================================================
+#
+# Port of NEMO 5.0.2 traldf_iso (#define iso_lap), verified against NEMO's
+# dumped ttrd_ldf (GYRE oracle, T corr 0.96 fed legoESM slopes) by the scratch
+# gate ~/oracle-builds/nemo5/gap_audit/nemo_iso_lap_repo_gate.py.  These unit
+# tests cover the invariants CLAUDE.md mandates: dispatch selection, off-by-
+# default byte-identity, conservation + variance sign gate, grad flow, and a
+# hand-checked interior tendency.
+
+class TestNemoIsoLapOperator:
+
+    def _closed_box(self, setup):
+        """Force the domain walls closed (zero the boundary face rings) so the
+        flux divergence telescopes to a closed budget."""
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        u = u_mask.at[:, 0].set(0.0).at[:, -1].set(0.0)
+        v = v_mask.at[0, :].set(0.0).at[-1, :].set(0.0)
+        return u, v
+
+    def _slopes(self, setup):
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        S_x, S_y, _ = compute_isopycnal_slopes_latlon_cgrid(
+            rho, mask, z_coord, jacobian, grid, cfg)
+        return S_x, S_y
+
+    def test_dispatch_selects_nemo_iso_lap(self):
+        """slope_scheme='nemo_iso_lap' routes to the ported operator: the
+        dispatcher output is bit-identical to a direct operator call fed the
+        dispatcher's own internally-computed slopes + active_3d mask."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            gm_redi_density_and_jacobian,
+        )
+        from legoesm.ocean.eos import make_eos_fn
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        cfg_n = cfg._replace(slope_scheme="nemo_iso_lap", kappa_GM=0.0)
+        dT, dS = gm_redi_tracer_tendency_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg_n,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask)
+        assert dT.shape == T.shape and dS.shape == S.shape
+        assert jnp.all(jnp.isfinite(dT)) and jnp.all(jnp.isfinite(dS))
+        # Reproduce the dispatcher's slopes + active_3d and call the op directly.
+        eos_fn = make_eos_fn("linear", cfg_n.eos_linear if hasattr(cfg_n, "eos_linear") else None)
+        rho_d, jac_d = gm_redi_density_and_jacobian(
+            T, S, eta, H_bathy, grid, z_coord, eos="linear", mask=mask)
+        S_x, S_y, _ = compute_isopycnal_slopes_latlon_cgrid(
+            rho_d, mask, z_coord, jac_d, grid, cfg_n, T=T, S=S, eos_fn=eos_fn)
+        z_top = jnp.cumsum(z_coord.dz_ref) - z_coord.dz_ref
+        act = ((mask[:, :, jnp.newaxis] > 0.5)
+               & (z_top[jnp.newaxis, jnp.newaxis, :] < H_bathy[:, :, jnp.newaxis])
+               ).astype(T.dtype)
+        dT_direct = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jac_d, grid,
+            cfg_n.kappa_Redi, act)
+        assert jnp.allclose(dT, dT_direct, rtol=1e-12, atol=1e-30)
+
+    def test_default_is_triads_byte_identical(self):
+        """Off by default: the default config selects triads and its output is
+        bit-identical to explicitly selecting slope_scheme='triads' — adding the
+        nemo_iso_lap elif changed neither existing scheme's numerics."""
+        assert GMRediConfig().slope_scheme == "triads"
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        cfg_default = cfg._replace()               # keeps slope_scheme="triads"
+        cfg_triads = cfg._replace(slope_scheme="triads")
+        dT_def, dS_def = gm_redi_tracer_tendency_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg_default,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask)
+        dT_tri, dS_tri = gm_redi_tracer_tendency_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg_triads,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask)
+        assert jnp.array_equal(dT_def, dT_tri) and jnp.array_equal(dS_def, dS_tri)
+        # Centered branch still runs finite/shaped (untouched by the edit).
+        cfg_c = cfg._replace(slope_scheme="centered")
+        dT_c, dS_c = gm_redi_tracer_tendency_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg_c,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask)
+        assert dT_c.shape == T.shape and jnp.all(jnp.isfinite(dT_c))
+        assert not jnp.array_equal(dT_c, dT_tri)   # distinct schemes
+
+    def test_kappa_gm_nonzero_raises(self):
+        """Pure-Redi guard: nemo_iso_lap with kappa_GM != 0 must raise."""
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        cfg_bad = cfg._replace(slope_scheme="nemo_iso_lap", kappa_GM=1000.0)
+        with pytest.raises(ValueError, match="pure iso-neutral"):
+            gm_redi_tracer_tendency_latlon(
+                T, S, eta, H_bathy, grid, z_coord, cfg_bad,
+                eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask)
+
+    def test_invalid_scheme_message_lists_three(self):
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        cfg_bad = cfg._replace(slope_scheme="bogus")
+        with pytest.raises(ValueError, match="nemo_iso_lap"):
+            gm_redi_tracer_tendency_latlon(
+                T, S, eta, H_bathy, grid, z_coord, cfg_bad,
+                eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask)
+
+    def test_tracer_integral_conserved(self):
+        """Diffusion conserves the volume-integrated tracer: on a closed wet
+        box, sum(dT * e1t*e2t*e3t) == 0 to roundoff (the flux divergence
+        telescopes, walls + sea floor carry no flux)."""
+        setup = _stratified_with_meridional_tilt(slope=5e-4)
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        S_x, S_y = self._slopes(setup)
+        u, v = self._closed_box(setup)
+        act = jnp.broadcast_to(mask[:, :, jnp.newaxis], T.shape)
+        dT = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u, v, z_coord, jacobian, grid, 1000.0, act)
+        geom = ensure_geometry(grid)
+        dz = z_coord.dz_ref * jacobian[:, :, jnp.newaxis]
+        vol = (geom.dx_T * geom.dy_T)[:, :, jnp.newaxis] * dz * mask[:, :, jnp.newaxis]
+        integral = float(jnp.sum(dT * vol))
+        rel = abs(integral) / (float(jnp.max(jnp.abs(dT))) * float(jnp.sum(vol)))
+        assert rel < 1e-12, f"conservation violated: rel {rel:.2e}"
+
+    def test_variance_non_increasing(self):
+        """Down-gradient: sum(q * dq/dt * vol) <= 0 (variance non-increasing).
+        Checked with the physical isopycnal slopes AND the pure-horizontal-
+        diffusion (zero-slope) limit, which is unconditionally diffusive."""
+        setup = _stratified_with_meridional_tilt(slope=5e-4)
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        S_x, S_y = self._slopes(setup)
+        u, v = self._closed_box(setup)
+        act = jnp.broadcast_to(mask[:, :, jnp.newaxis], T.shape)
+        geom = ensure_geometry(grid)
+        dz = z_coord.dz_ref * jacobian[:, :, jnp.newaxis]
+        vol = (geom.dx_T * geom.dy_T)[:, :, jnp.newaxis] * dz * mask[:, :, jnp.newaxis]
+        for tag, sx, sy in [("real", S_x, S_y),
+                            ("zero", jnp.zeros_like(S_x), jnp.zeros_like(S_y))]:
+            dT = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, sx, sy, mask, u, v, z_coord, jacobian, grid, 1000.0, act)
+            var_tend = float(jnp.sum(T * dT * vol))
+            assert var_tend <= 0.0, f"{tag}-slope variance increased: {var_tend:.4e}"
+
+    def test_zero_slope_is_horizontal_laplacian(self):
+        """With S=0 the operator reduces to pure horizontal Laplacian diffusion:
+        a hand-checked interior cell equals kappa*(q_E+q_W+q_N+q_S-4 q)/dx^2 on a
+        uniform grid (the A11/A22 diagonal terms; A13/A23/A31/A32 all vanish)."""
+        n_lat, n_lon, nlev = 8, 8, 3
+        grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+        z_coord = create_ocean_z_star(n_levels=nlev, H_max=3000.0,
+                                      dz_surface=100.0, dz_deep=1500.0)
+        mask = jnp.ones((n_lat, n_lon))
+        # Closed walls so interior cell 4,4 is unaffected by wrap.
+        u_mask = jnp.ones((n_lat, n_lon + 1)).at[:, 0].set(0.0).at[:, -1].set(0.0)
+        v_mask = jnp.ones((n_lat + 1, n_lon)).at[0, :].set(0.0).at[-1, :].set(0.0)
+        eta = jnp.zeros((n_lat, n_lon))
+        H_bathy = jnp.full((n_lat, n_lon), 3000.0)
+        jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
+        act = jnp.broadcast_to(mask[:, :, jnp.newaxis], (n_lat, n_lon, nlev))
+        key = jax.random.PRNGKey(0)
+        q = jax.random.normal(key, (n_lat, n_lon, nlev))
+        zero = jnp.zeros((n_lat, n_lon, nlev - 1))
+        kappa = 1000.0
+        dq = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            q, zero, zero, mask, u_mask, v_mask, z_coord, jacobian, grid, kappa, act)
+        geom = ensure_geometry(grid)
+        # Interior cell (i=4,j=4,k=1): 5-point Laplacian with the operator's
+        # own metrics.  zfu(i)=k*(e2u/e1u*e3t)*(q[i+1]-q[i]); tend = div /(e1t e2t e3t).
+        i, j, k = 4, 4, 1
+        e1t = float(geom.dx_T[i, j]); e2t = float(geom.dy_T[i, j])
+        e3t = float(z_coord.dz_ref[k] * jacobian[i, j])
+        e1u = float(geom.dx_u[i, j + 1]); e2u = float(geom.dy_u[i, j + 1])
+        e1u_w = float(geom.dx_u[i, j]); e2u_w = float(geom.dy_u[i, j])
+        e1v = float(geom.dx_v[i + 1, j]); e2v = float(geom.dy_v[i + 1, j])
+        e1v_s = float(geom.dx_v[i, j]); e2v_s = float(geom.dy_v[i, j])
+        qc = float(q[i, j, k])
+        fu_e = kappa * (e2u / e1u * e3t) * (float(q[i, j + 1, k]) - qc)
+        fu_w = kappa * (e2u_w / e1u_w * e3t) * (qc - float(q[i, j - 1, k]))
+        fv_n = kappa * (e1v / e2v * e3t) * (float(q[i + 1, j, k]) - qc)
+        fv_s = kappa * (e1v_s / e2v_s * e3t) * (qc - float(q[i - 1, j, k]))
+        expected = ((fu_e - fu_w) + (fv_n - fv_s)) / (e1t * e2t * e3t)
+        assert np.isclose(float(dq[i, j, k]), expected, rtol=1e-10, atol=1e-16), (
+            f"interior tendency {float(dq[i, j, k]):.6e} != hand-checked {expected:.6e}")
+
+    def test_topographic_step_conserves(self):
+        """A lateral bathymetry step (deep column beside a shallower one) must
+        NOT leak tracer through the u/v-face into the dry cell: the both-cells-
+        wet face mask zeros that face, so the wet-volume integral of the
+        tendency stays ~0.  Without requiring the neighbour's activity, the
+        flux into the discarded dry cell would break conservation."""
+        n_lat, n_lon, nlev = 6, 6, 4
+        grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+        geom = ensure_geometry(grid)
+        z_coord = create_ocean_z_star(n_levels=nlev, H_max=3000.0,
+                                      dz_surface=100.0, dz_deep=1500.0)
+        mask = jnp.ones((n_lat, n_lon))
+        u_mask = jnp.ones((n_lat, n_lon + 1)).at[:, 0].set(0.0).at[:, -1].set(0.0)
+        v_mask = jnp.ones((n_lat + 1, n_lon)).at[0, :].set(0.0).at[-1, :].set(0.0)
+        eta = jnp.zeros((n_lat, n_lon))
+        H_bathy = jnp.full((n_lat, n_lon), 3000.0)
+        jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
+        # Step: level nlev-1 dry everywhere; cols 3.. also dry at level nlev-2.
+        act = jnp.ones((n_lat, n_lon, nlev)).at[:, :, -1].set(0.0)
+        act = act.at[:, 3:, nlev - 2].set(0.0)
+        key = jax.random.PRNGKey(3)
+        q = jax.random.normal(key, (n_lat, n_lon, nlev)) * act  # garbage 0 in dry
+        S_x = jnp.zeros((n_lat, n_lon, nlev - 1))
+        S_y = jnp.zeros((n_lat, n_lon, nlev - 1))
+        dT = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            q, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid, 1000.0, act)
+        dz = z_coord.dz_ref * jacobian[:, :, jnp.newaxis]
+        vol = (geom.dx_T * geom.dy_T)[:, :, jnp.newaxis] * dz * act
+        rel = abs(float(jnp.sum(dT * vol))) / (float(jnp.max(jnp.abs(dT))) * float(jnp.sum(vol)))
+        assert rel < 1e-12, f"topographic-step leak: conservation rel {rel:.2e}"
+
+    def test_grad_flows(self):
+        """jax.grad through the operator (wrt kappa_Redi and q) is finite."""
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        S_x, S_y = self._slopes(setup)
+        u, v = self._closed_box(setup)
+        act = jnp.broadcast_to(mask[:, :, jnp.newaxis], T.shape)
+
+        def loss_k(kappa):
+            return jnp.sum(nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u, v, z_coord, jacobian, grid, kappa, act) ** 2)
+        gk = jax.grad(loss_k)(1000.0)
+        assert np.isfinite(float(gk)) and float(gk) != 0.0
+
+        def loss_q(q):
+            return jnp.sum(nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                q, S_x, S_y, mask, u, v, z_coord, jacobian, grid, 1000.0, act) ** 2)
+        gq = jax.grad(loss_q)(T)
+        assert jnp.all(jnp.isfinite(gq))
+        assert float(jnp.max(jnp.abs(gq))) > 0.0
+
+    def test_bottom_dry_level_no_leak(self):
+        """A sub-seafloor dry level (garbage 0 tracer) must not leak an
+        across-floor vertical gradient into the deepest wet cell: active_3d
+        zeros the below-floor cell, so the deepest-wet-cell tendency is the
+        same whether the dry level holds 0 or a copy of the cell above."""
+        n_lat, n_lon, nlev = 6, 6, 4          # 3 wet levels + 1 dry below floor
+        grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+        z_coord = create_ocean_z_star(n_levels=nlev, H_max=3000.0,
+                                      dz_surface=100.0, dz_deep=1500.0)
+        mask = jnp.ones((n_lat, n_lon))
+        u_mask = jnp.ones((n_lat, n_lon + 1)).at[:, 0].set(0.0).at[:, -1].set(0.0)
+        v_mask = jnp.ones((n_lat + 1, n_lon)).at[0, :].set(0.0).at[-1, :].set(0.0)
+        eta = jnp.zeros((n_lat, n_lon))
+        H_bathy = jnp.full((n_lat, n_lon), 3000.0)
+        jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
+        # active_3d: bottom level dry.
+        act = jnp.ones((n_lat, n_lon, nlev)).at[:, :, -1].set(0.0)
+        key = jax.random.PRNGKey(1)
+        q = jax.random.normal(key, (n_lat, n_lon, nlev))
+        q_garbage = q.at[:, :, -1].set(0.0)       # NEMO stores 0 below floor
+        q_copy = q.at[:, :, -1].set(q[:, :, -2])  # or a copy of the cell above
+        S_x = jnp.zeros((n_lat, n_lon, nlev - 1))
+        S_y = jnp.zeros((n_lat, n_lon, nlev - 1))
+        d1 = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            q_garbage, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid, 1000.0, act)
+        d2 = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            q_copy, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid, 1000.0, act)
+        # Deepest wet level is index nlev-2; its tendency must not depend on the
+        # dry level's value.
+        assert jnp.allclose(d1[:, :, nlev - 2], d2[:, :, nlev - 2], rtol=1e-10, atol=1e-20)

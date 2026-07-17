@@ -82,6 +82,51 @@ def test_seafloor_mask_freezes_column():
     np.testing.assert_allclose(col[6:], col[6], rtol=0, atol=1e-9)
 
 
+def test_uniform_anomaly_equals_g_rho_gdept():
+    """Analytic hand-check (3 levels): a UNIFORM density anomaly ρ' with
+    the NEMO e3w ladder gives p'(k) = g·ρ'·gdept(k) exactly.
+
+    NEMO hpg_zco with e3w(1)=2·gdept(1), e3w(k)=gdept(k)−gdept(k−1) and a
+    constant ρ' telescopes:
+      p'(1) = (g/2)·2·gdept(1)·ρ' = g·ρ'·gdept(1)
+      p'(k) = p'(k−1) + (g/2)·(gdept(k)−gdept(k−1))·(ρ'+ρ') = g·ρ'·gdept(k)
+    """
+    gdept = np.array([5.0, 15.0, 30.0])          # analytic (non-midpoint) T-depths
+    dz = np.array([10.0, 10.0, 20.0])            # any consistent cell thicknesses
+    c = 2.0
+    rho = np.full((1, 1, 3), _RHO0 + c)
+
+    T = jnp.asarray(rho)
+    _, _, p = iterate_eos_and_pressure_anomaly(
+        T, jnp.zeros_like(T), jnp.ones(T.shape[:-1]), lambda f: f,
+        lambda T_, S_, p_: T_, jnp.asarray(dz), _RHO0, _G,
+        quadrature="nemo_trapezoid", trapezoid_t_depth_1d=jnp.asarray(gdept))
+    expected = _G * c * gdept
+    np.testing.assert_allclose(np.asarray(p)[0, 0], expected, rtol=1e-13)
+
+
+def test_z_star_t_depth_ref_plumbing():
+    """create_z_star_from_thicknesses stores exact T-depths on
+    ``t_depth_ref`` (None by default → midpoint z_full_ref unchanged)."""
+    from legoesm.ocean.vertical import create_z_star_from_thicknesses
+
+    dz = np.array([10.0, 10.0, 20.0, 40.0])
+    zc_default = create_z_star_from_thicknesses(dz)
+    assert zc_default.t_depth_ref is None            # default: no override
+
+    gdept = np.array([4.9, 15.1, 30.2, 60.4])        # analytic, != midpoints
+    zc = create_z_star_from_thicknesses(dz, t_depth_ref_m=gdept)
+    # stored at the coordinate's policy-control dtype (like z_full_ref)
+    np.testing.assert_allclose(np.asarray(zc.t_depth_ref), gdept, rtol=1e-6)
+    # midpoint z_full_ref (and everything derived from it) is untouched
+    np.testing.assert_array_equal(
+        np.asarray(zc.z_full_ref), np.asarray(zc_default.z_full_ref))
+
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        create_z_star_from_thicknesses(dz, t_depth_ref_m=gdept[:3])   # wrong length
+
+
 def test_unknown_quadrature_raises():
     rho = _RHO0 + np.zeros((2, 2, 4))
     with pytest.raises(ValueError, match="quadrature"):
@@ -127,3 +172,39 @@ def test_t_depth_ladder_form():
                      + 0.5 * _G * (t_ana[k] - t_ana[k - 1])
                      * (rho_prime[..., k] + rho_prime[..., k - 1]))
     np.testing.assert_allclose(p_lad, P, rtol=1e-12)
+
+
+def test_pgf_caller_selects_t_depth_ref():
+    """Exercise the production PGF caller's getattr-selection (the coverage gap):
+    a z* coord WITH ``t_depth_ref`` uses NEMO's exact gdept ladder for the
+    quadrature; WITHOUT it falls back to interface-midpoint ``|z_full_ref|``
+    (byte-identical to pre-change). On a stretched grid the two must DIFFER —
+    the ~0.5% depth-signed gap this change closes."""
+    from legoesm.ocean.vertical import create_z_star_from_thicknesses
+    rng = np.random.default_rng(7)
+    nlev = 10
+    dz = jnp.asarray(np.geomspace(10.0, 400.0, nlev))
+    gdept = jnp.asarray(np.cumsum(np.asarray(dz)) - 0.5 * np.asarray(dz))
+    rho = jnp.asarray(_RHO0 + rng.normal(size=(2, 3, nlev)))
+    S = jnp.zeros_like(rho)
+    mask = jnp.ones(rho.shape[:-1])
+
+    zc_with = create_z_star_from_thicknesses(dz, t_depth_ref_m=gdept)
+    zc_none = create_z_star_from_thicknesses(dz)
+    assert zc_none.t_depth_ref is None                 # getattr -> fallback
+    assert zc_with.t_depth_ref is not None
+
+    def _pgf(zc):
+        # the exact selection _bc_geometry_and_density performs:
+        depth = (jnp.abs(zc.z_full_ref)
+                 if getattr(zc, "t_depth_ref", None) is None
+                 else jnp.asarray(zc.t_depth_ref))
+        _, _, p = iterate_eos_and_pressure_anomaly(
+            rho, S, mask, lambda f: f, lambda T_, S_, p_: T_,
+            dz, _RHO0, _G, quadrature="nemo_trapezoid", trapezoid_t_depth_1d=depth)
+        return np.asarray(p)
+
+    p_with = _pgf(zc_with)
+    p_none = _pgf(zc_none)
+    # gdept ladder != midpoint ladder on a stretched grid -> pressures differ.
+    assert not np.allclose(p_with, p_none, rtol=1e-6)

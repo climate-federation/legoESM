@@ -20,6 +20,13 @@ aimip_radiation: rrtmgp
 # prevent_cse path was the ~9 h classical compile). Drop to 4 on <80 GB.
 aimip_rrtmgp_gpoint_batch_size: 8
 aimip_rad_update_interval: 6
+# RRTMGP g-point vmap-block accumulation: one compiled block body (fast
+# reverse-AD compile — the per-g-point prevent_cse path was the ~9 h classical
+# compile) holding only 8 g-points' activations. Pinned (not left to the
+# global default 16) because T106 has ~4x T63's columns, so the backward block
+# scales ~4x in memory; 8 keeps the classical adjoint inside an A100-80. Drop
+# to 4 if RESOURCE_EXHAUSTED on a <80 GB card.
+aimip_rrtmgp_gpoint_batch_size: 8
 aimip_convection: edmf
 aimip_turbulence: louis
 aimip_gwd: mcfarlane

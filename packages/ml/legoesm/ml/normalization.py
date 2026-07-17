@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import numpy as np
 import jax.numpy as jnp
 
 
@@ -91,4 +92,48 @@ def compute_normalization_stats(
         # channel yields std == eps with a finite gradient instead of 0 * inf.
         std = jnp.sqrt(jnp.maximum(var, var_floor))
 
+    return NormalizationStats(mean=mean, std=std)
+
+
+def save_normalization_stats(stats: NormalizationStats, path) -> None:
+    """Persist per-channel stats to an ``.npz`` sidecar.
+
+    The SFNO PE checkpoint (``eqx.tree_serialise_leaves``) serialises ONLY the
+    ``SFNO`` network leaves, not the ``SFNOPrimitiveEquationModel`` wrapper that
+    carries ``norm_stats`` — so the stat VALUES are not in the checkpoint.  A
+    normalised emulator therefore needs its stats saved alongside the checkpoint
+    and reloaded at eval time so training and evaluation apply the SAME Z-score
+    transform.  Values are stored as float64 numpy arrays (device-agnostic).
+
+    Parameters
+    ----------
+    stats : NormalizationStats
+        Per-channel mean/std (jax or numpy arrays).
+    path : str | os.PathLike
+        Destination ``.npz`` file.  Parent directories must exist.
+    """
+    mean = np.asarray(stats.mean, dtype=np.float64)
+    std = np.asarray(stats.std, dtype=np.float64)
+    if mean.shape != std.shape:
+        raise ValueError(
+            f"mean/std shape mismatch: mean {mean.shape} vs std {std.shape}."
+        )
+    np.savez(path, mean=mean, std=std)
+
+
+def load_normalization_stats(path) -> NormalizationStats:
+    """Load per-channel stats from an ``.npz`` sidecar written by
+    :func:`save_normalization_stats`.
+
+    Returns arrays as ``jnp`` so the result plugs directly into
+    :func:`normalize` / :func:`denormalize` (and the SFNO PE bridge).
+    """
+    with np.load(path) as data:
+        if "mean" not in data or "std" not in data:
+            raise KeyError(
+                f"normalization sidecar {path!r} missing 'mean'/'std' arrays; "
+                f"found {list(data.keys())!r}."
+            )
+        mean = jnp.asarray(data["mean"])
+        std = jnp.asarray(data["std"])
     return NormalizationStats(mean=mean, std=std)

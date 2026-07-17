@@ -405,9 +405,22 @@ def apply_tidal_forcing(du_dt, dv_dt, grid, t_seconds, config: TidalForcingConfi
     wire adds the tide to ``F_slow_u/v``, which the barotropic substep multiplies
     by ``u_mask``/``v_mask``).
 
-    Disabled -> returns the inputs UNCHANGED (same objects) => byte-identical.
+    ``config is None`` / ``config.enabled=False`` / ``t_seconds is None`` ->
+    returns the inputs UNCHANGED (same objects) => byte-identical. The
+    ``t_seconds`` gate matters: a caller that has no model time cannot evaluate
+    an equilibrium tide, and silently substituting t=0 would apply a WRONG,
+    frozen tide rather than none.
+
+    The result is cast back to the ``du_dt``/``dv_dt`` dtype. This is
+    LOAD-BEARING, not cosmetic: ``tidal_acceleration`` can return float64 under
+    x64 (grid geometry built via ``jnp.linspace`` defaults), and promoting the
+    barotropic slow forcing would break the ``fori_loop`` carry-type invariant
+    in the substep. The wrapper previously omitted the cast while the production
+    call sites did it inline -- so anyone wiring this per its own docstring
+    would have broken the carry invariant. Owning the cast here is what makes
+    the function safe to actually use.
     """
-    if not config.enabled:
+    if config is None or not config.enabled or t_seconds is None:
         # Feature gate on a static Python bool (NOT jnp.where): tide-off traces
         # no tidal ops and returns the caller's exact arrays -> bit-identical.
         return du_dt, dv_dt
@@ -416,4 +429,4 @@ def apply_tidal_forcing(du_dt, dv_dt, grid, t_seconds, config: TidalForcingConfi
         a_x = a_x * u_mask
     if v_mask is not None:
         a_y = a_y * v_mask
-    return du_dt + a_x, dv_dt + a_y
+    return du_dt + a_x.astype(du_dt.dtype), dv_dt + a_y.astype(dv_dt.dtype)

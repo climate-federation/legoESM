@@ -3194,6 +3194,66 @@ def train_neural_gcm_spectral(
     )
 
 
+# Minimum per-channel std for the sfno_full Z-score normalization.  A constant
+# channel (e.g. a spatially/temporally invariant surface field) has std 0, so
+# ``(x - mean)/std`` would divide by zero; the shared
+# ``compute_normalization_stats`` floors the VARIANCE at ``eps**2`` (finite
+# forward AND gradient — see its docstring), so this ``eps`` is the std floor.
+# 1e-6 is a numerics guard, not a tunable physics coefficient.
+_SFNO_FULL_STD_FLOOR = 1.0e-6  # coeff-ok: div-by-zero guard for constant channels
+
+
+def compute_sfno_full_norm_stats(ic_states, grid, sigma, std_floor=_SFNO_FULL_STD_FLOOR):
+    """Per-channel Z-score stats for the sfno_full emulator, in EMULATOR order.
+
+    The emulator normalises the packed PE channel tensor produced by
+    :func:`legoesm.ml.channel_packing.pack_pe_state` (layout
+    ``[u(nlev), v(nlev), T(nlev), q(nlev), lnps, phis]``), whose channels span
+    ~8 orders of magnitude (surface pressure ~1e5 Pa vs specific humidity
+    ~1e-3).  Training on the RAW tensor makes the network output explode
+    (epoch-0 NaN).  This computes per-channel mean/std over the training ICs in
+    that SAME packed order, so training and eval apply an identical transform.
+
+    Each spectral ``SpectralHydrostaticState`` IC is packed to grid space
+    ``(n_lat, n_lon, n_channels)`` and stacked over samples; statistics are then
+    taken over all sample + spatial cells (unweighted — the SFNO operates on the
+    Gaussian grid uniformly).  The shared
+    :func:`legoesm.ml.normalization.compute_normalization_stats` floors the
+    variance so a constant channel yields ``std == std_floor`` with a finite
+    gradient (no div-by-zero, no ``0 * inf`` NaN in the backward pass).
+
+    Parameters
+    ----------
+    ic_states : list[SpectralHydrostaticState]
+        Training initial conditions (spectral space); packed here.
+    grid : GaussianGrid
+    sigma : SigmaCoordinate
+        Passed to ``pack_pe_state`` positionally for call-site symmetry
+        (packing is on the model sigma levels; the arg is otherwise unused).
+    std_floor : float
+        Minimum per-channel std (div-by-zero guard).
+
+    Returns
+    -------
+    NormalizationStats
+        ``mean``/``std`` of shape ``(n_channels,)`` in packed-channel order.
+    """
+    from legoesm.ml.normalization import compute_normalization_stats
+
+    if not ic_states:
+        raise ValueError(
+            "compute_sfno_full_norm_stats: ic_states is empty; cannot compute "
+            "normalization statistics with no training data."
+        )
+    # Stack packed grid-space tensors over samples -> (n_samples, n_lat, n_lon,
+    # n_channels); the channel axis is last, exactly what
+    # compute_normalization_stats reduces over (all-but-last).
+    packed = jnp.stack(
+        [pack_pe_state(s, grid, sigma) for s in ic_states], axis=0,
+    )
+    return compute_normalization_stats(packed, eps=float(std_floor))
+
+
 def train_sfno_full_spectral(
     config: NeuralGCMSpectralConfig = NeuralGCMSpectralConfig(),
     cache_dir: str = "data/era5_cache",
@@ -3267,7 +3327,13 @@ def train_sfno_full_spectral(
         # synthesis/clip/re-analysis); previously silently ignored.
         correct_moisture_budget=False,
         clip_q=False,
-        use_normalization=False,
+        # Per-channel Z-score normalization ON: the raw PE channel tensor spans
+        # ~8 orders of magnitude (p_s ~1e5 Pa vs q ~1e-3), which drove the
+        # epoch-0 NaN.  norm_stats are computed from the training ICs below and
+        # persisted to a sidecar so the WB2 eval bridge applies the SAME
+        # transform (state_update denormalises the network output as a full
+        # state — correct, see sfno_pe.py:129-140,395-396).
+        use_normalization=True,
     )
 
     sfno, start_epoch = maybe_resume_model(sfno, resume_from_dir)
@@ -3281,10 +3347,32 @@ def train_sfno_full_spectral(
         host_resident=True,
     )
 
+    # Data-driven per-channel stats in packed-emulator order (same channel
+    # layout the wrapper sees via pack_pe_state).  A resumed run recomputes
+    # identical stats from the same deterministic windows and overwrites the
+    # sidecar idempotently.
+    norm_stats = compute_sfno_full_norm_stats(ic_states, grid, sigma)
+
+    # Persist the stats next to the checkpoints (config.checkpoint_dir ==
+    # {output_dir}/{aimip_variant}).  The eval bridge reloads norm_stats.npz
+    # from this same directory so train + eval share ONE source of truth (the
+    # eqx checkpoint serialises only the SFNO leaves, NOT the wrapper's
+    # norm_stats — so a sidecar, not the checkpoint, carries the values).
+    from legoesm.ml.normalization import save_normalization_stats
+    ckpt_dir = Path(config.checkpoint_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    stats_path = ckpt_dir / "norm_stats.npz"
+    save_normalization_stats(norm_stats, stats_path)
+    logger.info(
+        f"SFNO full-emulator: saved per-channel norm stats "
+        f"({norm_stats.mean.shape[-1]} channels) to {stats_path}"
+    )
+
     return _train_sfno_full_loop(
         sfno, pe_emulator_cfg, grid, sigma,
         ic_states, target_carries, config, dt_sfno,
         start_epoch=start_epoch,
+        norm_stats=norm_stats,
     )
 
 
@@ -3300,6 +3388,7 @@ def _train_sfno_full_loop(
     *,
     start_epoch: int = 0,
     host_staged: bool = True,
+    norm_stats=None,
 ):
     """Training loop for SFNO full-atmosphere emulator (no dycore).
 
@@ -3317,6 +3406,15 @@ def _train_sfno_full_loop(
         SFNOPrimitiveEquationModel,
     )
     from legoesm.ml.training import TrainingConfig, create_optimizer
+
+    # Fail early (before the JIT trace) if normalization is requested without
+    # stats — the wrapper raises the same contract deep in loss_fn otherwise.
+    if pe_emulator_cfg.use_normalization and norm_stats is None:
+        raise ValueError(
+            "_train_sfno_full_loop: pe_emulator_cfg.use_normalization=True but "
+            "norm_stats is None. Pass norm_stats (see "
+            "compute_sfno_full_norm_stats) or set use_normalization=False."
+        )
 
     sigma_full = jnp.asarray(sigma.sigma_full)
 
@@ -3409,6 +3507,12 @@ def _train_sfno_full_loop(
                 sigma_coord=sigma,
                 config=pe_emulator_cfg,
                 sfno_model=m,
+                # norm_stats is a NamedTuple of jnp arrays; it enters the trace
+                # as a closed-over constant (identical stats every step).  The
+                # (de)normalize transform is differentiable, so gradients flow
+                # to the SFNO weights unchanged (SegmentForcing doctrine: the
+                # stats are static per training, not a per-iter changing arg).
+                norm_stats=norm_stats,
             )
             state = ic_spectral
             total = jnp.float32(0.0)
