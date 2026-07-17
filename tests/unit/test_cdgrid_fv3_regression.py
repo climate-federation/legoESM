@@ -11745,12 +11745,13 @@ if __name__ == "__main__":
 
 
 def test_fv3_sw_d4_divergence_damping_decays():
-    """d4_bg (d_sw5 nord=1 del-4 background, certified reference) SIGN
-    pin: on a pure divergent perturbation the del-4 term must ACCELERATE
-    divergence decay vs the del-2-only baseline, and d4_bg=0 must be
-    bit-identical to the pre-existing path."""
+    """d4_bg contract (codex damping r1 P1-1): the tendency-form del-4/
+    del-6 insertion is KNOWN-INVALID under RK3 (dt-multiplied; every
+    enabled 2026-07-17 probe went NaN) — nonzero d4_bg must RAISE, and
+    d4_bg=0 must be bit-identical to the pre-existing path."""
     import jax.numpy as jnp
     import numpy as np
+    import pytest as _pytest
     from legoesm.core.operators_cdgrid import fv3_sw_tendencies
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
@@ -11760,9 +11761,7 @@ def test_fv3_sw_d4_divergence_damping_decays():
     n = 12
     grid = create_cubed_sphere(n)
     cdgrid = create_cubed_sphere_cdgrid(grid)
-    rng = np.random.default_rng(7)
-    h = jnp.asarray(8000.0 + 0.0 * rng.standard_normal((6, n, n)))
-    # divergent wind: u_d = dphi/dx-like bump on face fields
+    h = jnp.full((6, n, n), 8000.0)
     bump = np.zeros((6, n, n + 1))
     bump[:, n // 2 - 2:n // 2 + 2, n // 2 - 2:n // 2 + 3] = 5.0
     u_d = jnp.asarray(bump)
@@ -11773,23 +11772,80 @@ def test_fv3_sw_d4_divergence_damping_decays():
                              div_damp=8.0 * 1.0e-3, dddmp=0.2)
     off = fv3_sw_tendencies(h, u_d, v_d, h_s, cdgrid,
                             div_damp=8.0 * 1.0e-3, dddmp=0.2, d4_bg=0.0)
-    on = fv3_sw_tendencies(h, u_d, v_d, h_s, cdgrid,
-                           div_damp=8.0 * 1.0e-3, dddmp=0.2, d4_bg=0.16)
-    # d4_bg=0 == omitted (bit-identical off path)
     for a, b in zip(base, off):
         assert jnp.array_equal(a, b)
-    # sign: the added term must push u toward decay of the divergent
-    # bump — the projected tendency opposes the wind perturbation more
-    # strongly (or equal at machine floor) than the del-2 baseline
-    du_base, du_on = base[1], on[1]
-    proj_base = float(jnp.vdot(u_d, du_base))
-    proj_on = float(jnp.vdot(u_d, du_on))
-    assert proj_on < proj_base, (proj_base, proj_on)
-    assert np.isfinite(proj_on)
-    # nord=2 (del-6, the authoritative duo-case order) must also damp
-    on6 = fv3_sw_tendencies(h, u_d, v_d, h_s, cdgrid,
-                            div_damp=8.0 * 1.0e-3, dddmp=0.2,
-                            d4_bg=0.12, d4_nord=2)
-    proj_on6 = float(jnp.vdot(u_d, on6[1]))
-    assert proj_on6 < proj_base, (proj_base, proj_on6)
-    assert np.isfinite(proj_on6)
+    for nord in (1, 2):
+        with _pytest.raises(NotImplementedError, match="post-step"):
+            fv3_sw_tendencies(h, u_d, v_d, h_s, cdgrid,
+                              div_damp=8.0 * 1.0e-3, dddmp=0.2,
+                              d4_bg=0.16, d4_nord=nord)
+
+
+def test_corner_damp_v_contract():
+    """corner_damp_v (NON-FV3 stabilizer) contract (codex damping r1
+    P2-3): default OFF bit-identity, mask geometry, equal-coefficient
+    equivalence with plain global damping, finite two-step evolution,
+    and the coarse-grid overlap warning."""
+    import warnings
+
+    import jax.numpy as jnp
+    import numpy as np
+    import legoesm.constants as constants
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterConfig,
+        FV3EdgeShallowWaterModel,
+        FV3EdgeShallowWaterState,
+        create_cubed_sphere_cdgrid,  # noqa: F401  (import parity)
+    )
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+
+    n = 16
+    grid = create_cubed_sphere(n)
+    rng = np.random.default_rng(3)
+    h = jnp.asarray(8000.0 + rng.standard_normal((6, n, n)))
+    u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+    v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+
+    def run(cfg, nsteps=2):
+        model = FV3EdgeShallowWaterModel(grid, cfg)
+        st = FV3EdgeShallowWaterState(h=h, u_d=u_d, v_d=v_d,
+                                      h_s=jnp.zeros_like(h))
+        for _ in range(nsteps):
+            st = model.step(st, 300.0)
+        return st
+
+    base_cfg = CDGridShallowWaterConfig(damp_v=0.01, nord_v=2,
+                                        use_conservation_fixer=False,
+                                        fix_mass=False)
+    # (a) default OFF == bit-identical
+    off_cfg = base_cfg._replace(corner_damp_v=0.0)
+    s_base, s_off = run(base_cfg), run(off_cfg)
+    assert jnp.array_equal(s_base.u_d, s_off.u_d)
+    # (b) equal coefficients: blend must equal plain global damping
+    eq_cfg = base_cfg._replace(corner_damp_v=0.01)
+    # corner_damp_v > damp_v is required to enter the branch; equal
+    # coefficients keep it inert by the guard — use a hair above and
+    # assert closeness to the plain path at blend-linearity tolerance
+    hi_cfg = base_cfg._replace(corner_damp_v=0.01 + 1e-12)
+    s_eq, s_hi = run(eq_cfg), run(hi_cfg)
+    assert jnp.array_equal(s_eq.u_d, s_base.u_d)
+    assert float(jnp.max(jnp.abs(s_hi.u_d - s_base.u_d))) < 1e-6
+    # (c) enabled path: finite, differs from base away from equality
+    on_cfg = base_cfg._replace(damp_v=0.0025, corner_damp_v=0.01)
+    s_on = run(on_cfg)
+    assert bool(jnp.all(jnp.isfinite(s_on.u_d)))
+    assert not jnp.array_equal(s_on.u_d, s_base.u_d)
+    # (d) mask geometry: 1 at corners, 0 mid-face, ramp between
+    model = FV3EdgeShallowWaterModel(grid, on_cfg)
+    m_u, m_v = model._corner_damp_masks()
+    m_u = np.asarray(m_u)
+    assert m_u[0, 0, 0] == 1.0
+    assert m_u[0, n // 2, n // 2] == 0.0
+    assert 0.0 < m_u[0, 0, int(on_cfg.corner_damp_radius) + 1] < 1.0
+    # (e) coarse-grid overlap warning
+    small = create_cubed_sphere(8)
+    warn_cfg = on_cfg._replace(corner_damp_radius=4.0, corner_damp_ramp=3.0)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        FV3EdgeShallowWaterModel(small, warn_cfg)._corner_damp_masks()
+    assert any("effectively GLOBAL" in str(r_.message) for r_ in rec)

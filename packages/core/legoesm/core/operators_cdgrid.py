@@ -1595,34 +1595,26 @@ def fv3_sw_tendencies(
         dv_cc = dv_cc + adaptive_coeff * interp_corner_to_center(ddiv_dy_perp_cc)
 
         if d4_bg > 0:
-            # FV3 d_sw5 nord>=1 BACKGROUND divergence damping
-            # (sw_core.F90:1720-1868; certified translation
-            # fv3_native_d_sw.d_sw5 / fv3_native_dsw5): the damp
-            # potential gains ddn*lap^nord(div) with
-            # ddn = (da_min_c*d4_bg)^(nord+1); its wind-gradient
-            # contribution is the del-(2*nord+2) divergence damping.
-            # The authoritative duo case configs run nord=2, d4_bg=0.12
-            # (Zenodo 8327578 rundir input.nml) with NO vorticity
-            # damping.
-            # Sign convention (stated per the sign-check mandate): on a
-            # Fourier mode grad->div contributes one more Laplacian, so
-            # du += s*ddn*grad(lap^nord(div)) gives d(div)/dt =
-            # s*ddn*lap^(nord+1)(div), eigenvalue
-            # s*(-1)^(nord+1)*k^(2nord+2) — decay requires
-            # s = (-1)^nord: nord=1 -> MINUS (del-4), nord=2 -> PLUS
-            # (del-6).  Pinned by
-            # test_fv3_sw_d4_divergence_damping_decays (nord 1 and 2).
-            ddn = (da_min_c * d4_bg) ** (d4_nord + 1)
-            sgn = -1.0 if (d4_nord % 2) else 1.0
-            lap_div = div_field
-            for _ in range(d4_nord):
-                lap_div = laplacian_compact(lap_div, cdgrid.base)
-            dlap_dx, dlap_dy_perp_cc = arakawa_lamb_gradient(
-                lap_div, cdgrid,
-                fortran_dir_aware_corners=fortran_dir_aware_corners)
-            du_cc = du_cc + sgn * ddn * interp_corner_to_center(dlap_dx)
-            dv_cc = dv_cc + sgn * ddn * interp_corner_to_center(
-                dlap_dy_perp_cc)
+            # FAIL-LOUD (codex damping r1 P1-1): a tendency-form del-4/
+            # del-6 background divergence damping here is KNOWN-INVALID —
+            # FV3's d_sw5 applies dd8 = (da_min_c*d4_bg)^(nord+1) as a
+            # POST-STEP staged index-space operator (certified
+            # translation fv3_native_d_sw.d_sw5), while this function's
+            # terms enter an RK3 TENDENCY and get multiplied by dt at
+            # every stage (the iter-758c "*dt over-damps" failure mode).
+            # Every enabled probe (nord 1 AND 2, any div_damp/hyperdiff
+            # mix, 2026-07-17) went NaN by step 100.  The valid
+            # implementation is a post-step staged operator port — until
+            # that lands, an enabled d4_bg must not silently mis-damp.
+            # (Damping-sign reference for that port: on a Fourier mode
+            # the wind-gradient form needs s = (-1)^nord — nord=1 MINUS,
+            # nord=2 PLUS.)
+            raise NotImplementedError(
+                "fv3_sw_tendencies(d4_bg>0): the tendency-form del-4/"
+                "del-6 divergence damping is invalid under RK3 (dt-"
+                "multiplied; measured NaN) — implement as the post-step "
+                "staged d_sw5 operator (fv3_native_d_sw.d_sw5 is the "
+                "certified reference) before enabling")
 
     # (i) Biharmonic hyperdiffusion (cell-centre geographic path)
     if hyperdiff_coeff > 0:

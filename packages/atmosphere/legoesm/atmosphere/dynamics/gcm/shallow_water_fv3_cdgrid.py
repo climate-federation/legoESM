@@ -270,12 +270,16 @@ class CDGridShallowWaterConfig(NamedTuple):
     # directly via the separate `dddmp` field above.
     dddmp_prod: float = 0.2
 
-    # d_sw5 nord=1 del-4 BACKGROUND divergence damping on the
-    # PRODUCTION path (fv3_sw_tendencies; certified d_sw5 reference).
-    # 0.0 = OFF (bit-identical pre-existing behaviour).  FV3's
-    # fv_arrays default is 0.16 with nord=1 — enable via sweep, not by
-    # default, because the production del-2 aggregate (div_damp 8x)
-    # was calibrated WITHOUT it (iters 755-1030).
+    # RESERVED (fail-loud): d_sw5-style del-4/del-6 background
+    # divergence damping on the production path.  0.0 = OFF (the only
+    # valid value today; bit-identical).  A nonzero value RAISES in
+    # fv3_sw_tendencies — the tendency-form insertion is invalid under
+    # RK3 (dt-multiplied; every 2026-07-17 probe went NaN by step 100;
+    # codex damping r1 P1-1).  The valid implementation is a POST-STEP
+    # staged operator port of the certified d_sw5 translation
+    # (fv3_native_d_sw.d_sw5) — this field is kept so that port has a
+    # config home.  Authoritative duo case values for it: nord=2,
+    # d4_bg=0.12 (Zenodo 8327578 input.nml).
     d4_bg_prod: float = 0.0
 
     # CORNER-LOCALIZED del-n vorticity damping (NON-FV3 stabilizer,
@@ -1346,6 +1350,15 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
             n = self.cdgrid.base.n
             r = float(self.config.corner_damp_radius)
             w = max(float(self.config.corner_damp_ramp), 1.0e-6)
+            if r + w >= n / 2:
+                import warnings
+
+                warnings.warn(
+                    f"corner_damp_v: radius+ramp = {r + w:g} cells covers "
+                    f"half the face edge at n={n} — the corner zones "
+                    "overlap and the damping is effectively GLOBAL at "
+                    "this resolution (codex damping r1 P2-3)",
+                    stacklevel=2)
 
             def mask(shape_ij):
                 ni, nj = shape_ij

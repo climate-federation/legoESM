@@ -2712,10 +2712,18 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             # reference; FV3 fv_arrays default 0.16).  0.0 = current
             # calibrated production behaviour.
             _sw_d4 = float(os.environ.get("LEGOESM_SW_D4_BG", "0.0"))
+            # LEGOESM_SW_DAMP_V / LEGOESM_SW_CORNER_DAMP_V (probe):
+            # corner-localized vorticity damping on the Williamson lane
+            # (interior coefficient vs full coefficient at the 8 cube
+            # vertices) — the modon-sweep mechanism applied to the W2
+            # imprint question.
+            _sw_dv = float(os.environ.get("LEGOESM_SW_DAMP_V", "0.030"))
+            _sw_cdv = float(os.environ.get("LEGOESM_SW_CORNER_DAMP_V", "0.0"))
             config = iter1009_dual_target_config(
                 n, div_damp_factor=_sw_dd_fac,
                 hyperdiff_coeff=_sw_hd_fac * _hyperdiff_cube(n),
                 d4_bg_prod=_sw_d4,
+                damp_v=_sw_dv, corner_damp_v=_sw_cdv,
             )
         else:
             config = iter1009_dual_target_config(n)
