@@ -410,6 +410,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rad-update-steps", type=int, default=None)
     parser.add_argument("--unfused-radiation", action="store_true", default=False,
                         help="Run radiation outside the compiled segment scan")
+    parser.add_argument("--per-step-rollout", action="store_true", default=False,
+                        help="Use the per-step Python-loop rollout "
+                             "(driver.run(compiled=False)) instead of the "
+                             "compiled lax.scan segments. Slower, but threads the "
+                             "CLUBB cloud-fraction->radiation carry "
+                             "(--use-clubb-cloud-fraction), which the compiled "
+                             "SegmentCarry path does not yet carry.")
     parser.add_argument("--rrtmgp-gpoint-batch-size", type=int,
                         default=_EXPERIMENT_DEFAULTS.rrtmgp_gpoint_batch_size,
                         help="RRTMGP g-point batch size (0 = auto/checkpointed)")
@@ -660,6 +667,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "two_region optic [0,1] (Shonk-Hogan ~0.75; HIGHER "
                              "=> thinner leaking sub-column => lower albedo). "
                              "None=CloudConfig default 0.75.")
+    parser.add_argument("--use-clubb-cloud-fraction",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Route diagnostic CLUBB's sub-grid PDF cloud "
+                             "fraction into the cloud optics instead of the RH "
+                             "grid-scale one (marine-Sc over-bright albedo lever; "
+                             "a moist closure is less overcast over a saturated "
+                             "marine BL => lower LWP floor => lower albedo). "
+                             "Requires --turbulence clubb (diagnostic). Default "
+                             "off = RH grid-scale cloud fraction (byte-identical).")
     parser.add_argument("--cloud-p-xr", dest="cloud_p_xr", type=float, default=None,
                         help="Xu-Randall cloud-fraction RH exponent p_xr (None="
                              "default 0.25; bounds 0.05..1.0). HIGHER => cloud "
@@ -1543,6 +1559,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_scheme=args.clouds,
         cloud_rh_crit_bl=args.cloud_rh_crit_bl,
         cloud_sigma_bl=args.cloud_sigma_bl,
+        use_clubb_cloud_fraction=args.use_clubb_cloud_fraction,
         microphysics=args.microphysics,
         nc_from_aerosol=args.aerosol_ccn,
         subgrid_autoconversion=args.subgrid_autoconversion,
@@ -2375,7 +2392,8 @@ def main(argv: list[str] | None = None):
         driver.config = driver.config._replace(days=int(n_profile_days + 1))
         with jax.profiler.trace(profile_dir):
             profile_status = driver.run(start_step=start_step,
-                                        start_day=start_day)
+                                        start_day=start_day,
+                                        compiled=not args.per_step_rollout)
         if _is_root:
             print(f"Profile saved to {profile_dir}")
             print("View with: tensorboard --logdir " + profile_dir)
@@ -2390,7 +2408,8 @@ def main(argv: list[str] | None = None):
 
     if _is_root:
         print("Running...")
-    run_status = driver.run(start_step=start_step, start_day=start_day)
+    run_status = driver.run(start_step=start_step, start_day=start_day,
+                            compiled=not args.per_step_rollout)
 
     # Post-run FAILURE detection needs TWO independent signals — either one
     # non-clean means exit 1 (so a SLURM ``afterok`` chain STOPS instead of

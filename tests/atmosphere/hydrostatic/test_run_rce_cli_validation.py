@@ -78,3 +78,51 @@ def test_run_rce_rejects_bad_cli_args(tmp_path, flag, value, expected_err):
         f"iter-71 contract: clean SystemExit.\n"
         f"stdout: {result.stdout[-500:]}\nstderr: {result.stderr[-500:]}"
     )
+
+
+def test_gaussian_grid_auto_enables_x64(tmp_path):
+    """A spectral grid must NOT hard-crash when the caller forgot x64: the
+    driver auto-enables float64 (the transforms require it) and runs. Env
+    explicitly sets JAX_ENABLE_X64=0 to prove the driver overrides it."""
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    env["JAX_ENABLE_X64"] = "0"          # caller forgot / disabled x64
+    cmd = [
+        sys.executable, str(DRIVER),
+        "--grid-type", "gaussian", "--truncation", "10",
+        "--days", "1", "--diag-days", "1", "--nlev", "20",
+        "--output", str(tmp_path / "rce_gauss_autox64"),
+    ]
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True,
+                            timeout=180)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, (
+        f"gaussian run_rce.py should auto-enable x64 and succeed, got exit "
+        f"{result.returncode}.\nstdout: {result.stdout[-800:]}\n"
+        f"stderr: {result.stderr[-800:]}")
+    assert "auto-enabled JAX_ENABLE_X64" in combined, \
+        "missing the auto-enable notice (coercion must be non-silent)"
+    assert "Traceback" not in combined and "require JAX_ENABLE_X64" not in combined, (
+        "the 'requires JAX_ENABLE_X64=True' RuntimeError leaked — the "
+        f"auto-enable did not fire in time.\nstderr: {result.stderr[-800:]}")
+
+
+def test_nonspectral_grid_keeps_caller_precision(tmp_path):
+    """A non-spectral grid must NOT trip the auto-enable (stays float32 when the
+    caller runs float32) — the sniff is grid-specific, not a blanket override."""
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    env["JAX_ENABLE_X64"] = "0"
+    cmd = [
+        sys.executable, str(DRIVER),
+        "--grid-type", "cubed_sphere", "--discretization", "cdgrid",
+        "--resolution", "12", "--days", "1", "--diag-days", "1", "--nlev", "20",
+        "--output", str(tmp_path / "rce_cs_f32"),
+    ]
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True,
+                            timeout=180)
+    assert result.returncode == 0, (
+        f"cubed_sphere f32 run failed: exit {result.returncode}\n"
+        f"stdout: {result.stdout[-800:]}\nstderr: {result.stderr[-800:]}")
+    assert "auto-enabled JAX_ENABLE_X64" not in (result.stdout + result.stderr), \
+        "non-spectral grid wrongly triggered the spectral x64 auto-enable"

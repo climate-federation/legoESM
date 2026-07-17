@@ -63,6 +63,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# clm-ml-jax is published on PyPI (https://pypi.org/project/clm-ml-jax/).
+# The 0.1.0 release ships the DIFFERENTIABLE canopy capability: its
+# `_CanopyFluxesDiagnostics` accepts `grid=`, so the canopy-integrated flux
+# diagnostics run on the jax.grad tape (CLMMLCanopyConfig(differentiable=True)).
+# `clm_ml_interface` still PROBES this capability at runtime and raises a clear,
+# actionable error if an older/local build lacks it (so there is never a silent
+# wrong answer); forward-only mode (the default) needs only the base 0.1.0.
+# Editable local checkouts (`pip install -e ./clm-ml-jax`) still shadow the
+# published wheel for development.
 canopy = ["clm-ml-jax>=0.1.0"]
 # gcsfs/fsspec included: the ML training lane's DEFAULT ERA5 path is a gs://
 # zarr store (load_era5_samples / era5_to_state), so the ml extra must open it

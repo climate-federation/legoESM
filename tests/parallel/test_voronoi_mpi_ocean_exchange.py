@@ -166,3 +166,71 @@ def test_mocked_exchange_routes_all_five_fields(single_rank_setup,
     assert out.H_bathy is state.H_bathy
     assert out.land_mask is state.land_mask
     assert out.rho_ref_z is state.rho_ref_z
+
+
+# ------------------------------------------------------------------
+# make_mpas_ocean_halo_refresh — the IN-STEP stage-frontier refresh
+# factory (stage-correctness lever).  Same coverage doctrine as above:
+# np=1 identity alone cannot see a mis-routed entity class, so the
+# packed-call routing is locked with a mocked exchange.
+# ------------------------------------------------------------------
+
+def test_halo_refresh_factory_np1_identity(single_rank_setup):
+    from legoesm.parallel.voronoi_mpi import make_mpas_ocean_halo_refresh
+
+    _mesh, state, layout = single_rank_setup
+    refresh = make_mpas_ocean_halo_refresh(layout)
+    (u_out,) = refresh.edges(state.u.data)
+    np.testing.assert_array_equal(np.asarray(u_out),
+                                  np.asarray(state.u.data))
+    T_out, S_out = refresh.cells(state.T.data, state.S.data)
+    np.testing.assert_array_equal(np.asarray(T_out),
+                                  np.asarray(state.T.data))
+    np.testing.assert_array_equal(np.asarray(S_out),
+                                  np.asarray(state.S.data))
+    (e_out,), (c_out,) = refresh.both((state.u.data,), (state.eta.data,))
+    np.testing.assert_array_equal(np.asarray(e_out),
+                                  np.asarray(state.u.data))
+    np.testing.assert_array_equal(np.asarray(c_out),
+                                  np.asarray(state.eta.data))
+    # Vertex channel (K_zeta_bih T3 site): np=1 identity through the real
+    # per-field VoronoiHaloExchange machinery.
+    v_field = jnp.arange(float(_mesh.nVertices))[:, None] * jnp.ones((1, 3))
+    (v_out,) = refresh.vertices(v_field)
+    np.testing.assert_array_equal(np.asarray(v_out), np.asarray(v_field))
+
+
+def test_halo_refresh_factory_routes_entities(single_rank_setup, monkeypatch):
+    """edges() must pack fields as EDGE fields, cells() as CELL fields, and
+    both() must keep the (edge, cell) split — a swapped entity class would
+    scatter halos with the wrong connectivity and the np=1 identity test
+    would never notice."""
+    import legoesm.parallel.voronoi_mpi as vm
+
+    _mesh, state, layout = single_rank_setup
+    calls = []
+
+    def fake_exchange(edge_fields, cell_fields, sched, rank):
+        calls.append((tuple(edge_fields), tuple(cell_fields)))
+        return (tuple(f + 10.0 for f in edge_fields),
+                tuple(f + 20.0 for f in cell_fields))
+
+    monkeypatch.setattr(vm, "batched_halo_exchange", fake_exchange)
+    refresh = vm.make_mpas_ocean_halo_refresh(layout)
+
+    (u_out,) = refresh.edges(state.u.data)
+    assert len(calls[-1][0]) == 1 and len(calls[-1][1]) == 0
+    np.testing.assert_allclose(np.asarray(u_out),
+                               np.asarray(state.u.data) + 10.0)
+
+    (T_out,) = refresh.cells(state.T.data)
+    assert len(calls[-1][0]) == 0 and len(calls[-1][1]) == 1
+    np.testing.assert_allclose(np.asarray(T_out),
+                               np.asarray(state.T.data) + 20.0)
+
+    (e_out,), (c_out,) = refresh.both((state.u.data,), (state.eta.data,))
+    assert len(calls[-1][0]) == 1 and len(calls[-1][1]) == 1
+    np.testing.assert_allclose(np.asarray(e_out),
+                               np.asarray(state.u.data) + 10.0)
+    np.testing.assert_allclose(np.asarray(c_out),
+                               np.asarray(state.eta.data) + 20.0)

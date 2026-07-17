@@ -449,6 +449,12 @@ class OceanPartialCellCoordinate(NamedTuple):
     h_partial: jnp.ndarray
     bottom_level: jnp.ndarray
     is_active: jnp.ndarray
+    # Exact reference T-level depths (NEMO ``gdept_1d``; z*-only fidelity
+    # field) propagated from the wrapped z* coordinate so non-midpoint
+    # reference ladders keep their true centre geometry under partial
+    # cells (MLE nla10 + gate-N2 consumers; codex MLE-rhop r2).  ``None``
+    # on the model's own midpoint grids.
+    t_depth_ref: jnp.ndarray | None = None
 
 
 def create_partial_cell_coordinate(
@@ -539,11 +545,6 @@ def create_partial_cell_coordinate(
     h_partial = jnp.where(is_bottom, partial_thickness[..., jnp.newaxis], h_full)
     h_partial = jnp.where(is_active, h_partial, 0.0)
 
-    # NOTE: the z*-only ``t_depth_ref`` (exact NEMO gdept for the fidelity PGF
-    # quadrature) is intentionally NOT carried here — OceanPartialCellCoordinate
-    # has no such field, so a partial-cell wrap of a NEMO z* coord reverts the PGF
-    # to midpoint depths. Harmless today (the NEMO bridge builds a plain z* coord);
-    # propagate it here if partial-cell NEMO fidelity is ever added.
     return OceanPartialCellCoordinate(
         n_levels=nlev,
         H_max=z_coord.H_max,
@@ -554,6 +555,11 @@ def create_partial_cell_coordinate(
         h_partial=h_partial,
         bottom_level=bottom_level,
         is_active=is_active,
+        # Propagate the z*-only exact NEMO gdept so partial-cell wraps of a
+        # NEMO reference ladder keep true centre depths (nla10 tolerance,
+        # gate-N2 pressure geometry, and any future partial-cell PGF
+        # fidelity).  ``getattr``: plain midpoint z* coords carry None.
+        t_depth_ref=getattr(z_coord, "t_depth_ref", None),
     )
 
 

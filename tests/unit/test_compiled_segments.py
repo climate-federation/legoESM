@@ -138,7 +138,7 @@ def _mock_step_unified(
 # carries — skipped by the field-by-field equivalence comparisons below.
 _OPTIONAL_CARRY_FIELDS = (
     "q_i", "q_s", "q_g", "N_c", "N_r", "N_i",
-    "tke", "qke", "gwd_spectrum", "land_ml", "w_land", "snow",
+    "tke", "qke", "gwd_spectrum", "cloud_fraction", "land_ml", "w_land", "snow",
 )
 
 
@@ -189,6 +189,13 @@ def _mock_step_unified_stateful(
     if tke is not None:
         phys_out = phys_out._replace(
             tke=(0.9 * tke + 1e-3).astype(tke.dtype),
+        )
+    cloud_fraction = kwargs.get("cloud_fraction")
+    if cloud_fraction is not None:
+        # Diagnostic CLUBB cf carry (one-step lag): advance so its memory across
+        # steps is observable in the compiled-vs-python equivalence check.
+        phys_out = phys_out._replace(
+            cloud_fraction=(0.5 * cloud_fraction + 0.1).astype(cloud_fraction.dtype),
         )
     gwd_spectrum = kwargs.get("gwd_spectrum")
     if gwd_spectrum is not None:

@@ -25,6 +25,7 @@ import sys
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -63,7 +64,14 @@ __physics_contract__ = {
         "lw_up": "positive = upward emission from surface",
     },
     "conserves": "energy (Rnet = shflx + lhflx + G_soil + stflx_air + stflx_veg per timestep)",
-    "differentiable": False,
+    # Differentiable via the JAX-native diff path, GATED on
+    # ``CLMMLCanopyConfig.differentiable=True`` (single column): the interface
+    # passes a GridInfo (``grid=``) so ``MLCanopyFluxes`` runs ``lax.scan`` +
+    # ``jax.checkpoint`` and the forcing→flux map (incl. trainable Vcmax25/g1) is
+    # on the ``jax.grad`` tape.  Production default (``differentiable=False``)
+    # stays forward-only (host-syncing checks, no tape).  Verified: forward/diff
+    # flux parity ~1e-14 and FD grad rel_err <0.01% (TestCLMMLDifferentiability).
+    "differentiable": True,
     "reference": "Bonan et al. (2021), GMD, CLM-ML v2",
     "idealized_test": "tests/land/unit/test_canopy.py::TestCLMMLInterface",
 }
@@ -407,9 +415,9 @@ def _compute_virtual_lon_deg(
 
 
 def _estimate_beam_fraction(
-    sw_down: np.ndarray,
+    sw_down: jnp.ndarray,
     cos_zen: np.ndarray,
-) -> np.ndarray:
+) -> jnp.ndarray:
     """Estimate direct-beam fraction from clearness index (Erbs et al. 1982).
 
     Clearness index  kt = SW_down / (S0 * cos_zen)  where S0 = 1361 W/m².
@@ -422,23 +430,29 @@ def _estimate_beam_fraction(
 
     Direct fraction: f_dir = 1 - Id/I, clamped to [0, 1].
     Returns f_dir per column.
+
+    JAX-native: ``sw_down`` is kept as a traced ``jnp`` array so that
+    ``d(f_dir)/d(sw_down)`` (via the clearness index ``kt``) stays on the
+    ``jax.grad`` tape.  ``cos_zen`` is solar geometry (a non-differentiated
+    constant); passing a NumPy array is fine — ``jnp`` ops upcast it.
     """
     S0 = constants.S_0  # solar constant [W/m²]
-    cos_zen_clamped = np.maximum(cos_zen, 0.01)  # coeff-ok: minimum cos_zen floor to avoid division by zero in clearness index
+    sw = jnp.asarray(sw_down, dtype=jnp.float64)
+    cos_zen_clamped = jnp.maximum(jnp.asarray(cos_zen, dtype=jnp.float64), 0.01)  # coeff-ok: minimum cos_zen floor to avoid division by zero in clearness index
     sw_toa = S0 * cos_zen_clamped
-    kt = np.where(sw_down > 1.0, np.minimum(sw_down / sw_toa, 1.0), 0.0)
+    kt = jnp.where(sw > 1.0, jnp.minimum(sw / sw_toa, 1.0), 0.0)
 
     # Erbs et al. (1982, Solar Energy 28:293-302) diffuse-fraction polynomial
     id_over_i_low = 1.0 - 0.09 * kt  # coeff-ok: Erbs et al. (1982, Solar Energy 28:293) low-kt regime
     id_over_i_mid = (0.9511 - 0.1604 * kt + 4.388 * kt**2  # coeff-ok: Erbs et al. (1982) mid-kt polynomial
                      - 16.638 * kt**3 + 12.336 * kt**4)     # coeff-ok: Erbs et al. (1982) mid-kt polynomial
-    id_over_i_high = np.full_like(kt, 0.165)  # coeff-ok: Erbs et al. (1982) high-kt (clear-sky) limit
-    id_over_i = np.where(kt <= 0.22, id_over_i_low,  # coeff-ok: Erbs et al. (1982) kt regime threshold
-                np.where(kt <= 0.80, id_over_i_mid, id_over_i_high))  # coeff-ok: Erbs et al. (1982) kt regime threshold
-    f_dir = np.clip(1.0 - id_over_i, 0.0, 1.0)
+    id_over_i_high = jnp.full_like(kt, 0.165)  # coeff-ok: Erbs et al. (1982) high-kt (clear-sky) limit
+    id_over_i = jnp.where(kt <= 0.22, id_over_i_low,  # coeff-ok: Erbs et al. (1982) kt regime threshold
+                jnp.where(kt <= 0.80, id_over_i_mid, id_over_i_high))  # coeff-ok: Erbs et al. (1982) kt regime threshold
+    f_dir = jnp.clip(1.0 - id_over_i, 0.0, 1.0)
 
     # At night (sw_down < 1 W/m²) force beam fraction to zero
-    return np.where(sw_down < 1.0, 0.0, f_dir).astype(np.float64)
+    return jnp.where(sw < 1.0, 0.0, f_dir)
 
 
 def _sw_partition(
@@ -476,26 +490,30 @@ def _sw_partition(
         Direct beam SW in VIS and NIR bands [W/m²].
     swskyd_vis, swskyd_nir : jnp.ndarray
         Diffuse SW in VIS and NIR bands [W/m²].
+
+    JAX-native: ``sw_down`` is kept traced end-to-end so ``d(swsky*)/d(sw_down)``
+    flows on the ``jax.grad`` tape (needed for differentiability w.r.t. the SW
+    forcing).  ``f_vis``/``f_dir``/``f_dir_fallback`` are static Python floats, so
+    the ``if f_dir < 0.0`` branch is resolved at trace time (not a traced select).
     """
-    sw_np = np.asarray(sw_down, dtype=np.float64)
+    sw = jnp.asarray(sw_down, dtype=jnp.float64)
 
     if f_dir < 0.0:
         # Physics-based estimate using clearness index
         if cos_zen is None:
             # Fallback: assume overcast (conservative, no zenith info)
-            f_dir_arr = np.full_like(sw_np, f_dir_fallback)
+            f_dir_arr = jnp.full_like(sw, f_dir_fallback)
         else:
-            f_dir_arr = _estimate_beam_fraction(sw_np, np.asarray(cos_zen, dtype=np.float64))
+            f_dir_arr = _estimate_beam_fraction(sw, cos_zen)
     else:
-        f_dir_arr = np.full_like(sw_np, float(f_dir))
+        f_dir_arr = jnp.full_like(sw, float(f_dir))
 
-    vis = jnp.array(f_vis * sw_np)
-    nir = jnp.array((1.0 - f_vis) * sw_np)
-    f_dir_jax = jnp.array(f_dir_arr)
-    swskyb_vis = f_dir_jax * vis
-    swskyb_nir = f_dir_jax * nir
-    swskyd_vis = (1.0 - f_dir_jax) * vis
-    swskyd_nir = (1.0 - f_dir_jax) * nir
+    vis = f_vis * sw
+    nir = (1.0 - f_vis) * sw
+    swskyb_vis = f_dir_arr * vis
+    swskyb_nir = f_dir_arr * nir
+    swskyd_vis = (1.0 - f_dir_arr) * vis
+    swskyd_nir = (1.0 - f_dir_arr) * nir
     return swskyb_vis, swskyb_nir, swskyd_vis, swskyd_nir
 
 
@@ -652,7 +670,9 @@ def _build_stubs(
                 from legoesm.land.soil_hydraulics import hydraulic_conductivity
                 K = hydraulic_conductivity(psi_soil[i, j - 1], theta_soil[i, j - 1],
                                            soil_hydraulics)
-                hk_l_col = hk_l_col.at[p, j].set(float(K) * 1000.0)  # m/s → mm/s
+                # Keep K traced (no float()) so d(hk)/d(psi,theta) stays on the
+                # jax.grad tape; numerically identical to the prior float() cast.
+                hk_l_col = hk_l_col.at[p, j].set(K * 1000.0)  # m/s → mm/s
             else:
                 hk_l_col = hk_l_col.at[p, j].set(float(canopy_config.hk_default_mm_s))
 
@@ -681,18 +701,21 @@ def _build_stubs(
     t_soisno_col = jnp.zeros((np_, nlevgrnd + 1), dtype=jnp.float64)
     for i in range(ncol):
         c = i + 1
+        # No float() casts below: soil temperature is kept traced so
+        # d(flux)/d(T_soil) / d(T_soil_top) flows on the jax.grad tape.  Values
+        # are identical to the prior float() path in the eager (production) mode.
         if T_soil_all is not None and T_soil_all.shape[1] >= 1:
             n_fill = min(T_soil_all.shape[1], nlevsoi)
             for j in range(1, n_fill + 1):
-                t_soisno_col = t_soisno_col.at[c, j].set(float(T_soil_all[i, j - 1]))
+                t_soisno_col = t_soisno_col.at[c, j].set(T_soil_all[i, j - 1])
             # Layers n_fill+1..nlevsoi: repeat deepest legoESM layer
-            deepest_T = float(T_soil_all[i, n_fill - 1])
+            deepest_T = T_soil_all[i, n_fill - 1]
             for j in range(n_fill + 1, nlevgrnd + 1):
                 t_soisno_col = t_soisno_col.at[c, j].set(deepest_T)
         else:
             # Fallback: fill all layers with surface soil temperature
             for j in range(1, nlevgrnd + 1):
-                t_soisno_col = t_soisno_col.at[c, j].set(float(T_soil_top[i]))
+                t_soisno_col = t_soisno_col.at[c, j].set(T_soil_top[i])
 
     # ---- canopystate ----
     htop_patch = jnp.zeros(np_, dtype=jnp.float64)
@@ -1082,14 +1105,57 @@ def _extract_surface_fluxes(
 # ---------------------------------------------------------------------------
 
 
+def extract_clm_ml_grid_info(canopy_state: CanopyState, patch: int = 1) -> Any:
+    """Extract the concrete ``GridInfo(p, ncan, ntop, nbot)`` from a warm state.
+
+    Call this ONCE on a concrete (non-traced) warm-start ``CanopyState`` — e.g.
+    the state returned by the first forward step — and thread the result through
+    every subsequent differentiable step via ``compute_clm_ml_canopy_fluxes(...,
+    grid_info=...)``.  This keeps the single-site structural integers
+    (``ncan``/``ntop``/``nbot``) CONCRETE even when the carried
+    ``canopy_state.mlcanopy`` becomes a ``jax.grad`` tracer in a multi-step
+    rollout (otherwise ``int(tracer)`` raises ``ConcretizationTypeError``).
+
+    Parameters
+    ----------
+    canopy_state:
+        A concrete warm-started state (``canopy_state.mlcanopy`` populated by a
+        prior forward step).  Must NOT be a tracer.
+    patch:
+        1-based patch index (single-site diff mode uses ``1``).
+
+    Returns
+    -------
+    GridInfo
+        ``multilayer_canopy.MLclm_varctl.GridInfo`` with concrete Python ints.
+    """
+    from multilayer_canopy.MLclm_varctl import GridInfo
+    if canopy_state is None or canopy_state.mlcanopy is None:
+        raise ValueError(
+            "extract_clm_ml_grid_info needs a warm-started canopy_state whose "
+            "mlcanopy is populated; got None. Run one forward step first."
+        )
+    m = canopy_state.mlcanopy
+    try:
+        return GridInfo(
+            p=int(patch),
+            ncan=int(m.ncan_canopy[patch]),
+            ntop=int(m.ntop_canopy[patch]),
+            nbot=int(m.nbot_canopy[patch]),
+        )
+    except jax.errors.ConcretizationTypeError as exc:  # pragma: no cover - guard
+        raise RuntimeError(
+            "extract_clm_ml_grid_info must be called on a CONCRETE canopy_state "
+            "(outside jax.grad tracing), not on a traced carry."
+        ) from exc
+
+
 def compute_clm_ml_canopy_fluxes(
     T_soil_top: jnp.ndarray,
     forcing: AtmToSurface,
     canopy_config: CLMMLCanopyConfig,
     land_config: "MultiLayerLandConfig",
     land_params: Any | None,
-    w_frac_rz: jnp.ndarray,
-    wind_speed: jnp.ndarray,
     canopy_state: CanopyState | None,
     dt: float,
     T_soil: jnp.ndarray | None = None,
@@ -1099,6 +1165,9 @@ def compute_clm_ml_canopy_fluxes(
     lon: jnp.ndarray | None = None,
     doy: float = 0.0,
     lai_override: jnp.ndarray | None = None,
+    vcmaxpft_jax: jnp.ndarray | None = None,
+    g1_medlyn_jax: jnp.ndarray | None = None,
+    grid_info: Any | None = None,
 ) -> tuple[SurfaceFluxOutput, CanopyState]:
     """Compute canopy fluxes via the CLM-ML-JAX multilayer canopy model.
 
@@ -1115,18 +1184,11 @@ def compute_clm_ml_canopy_fluxes(
     land_params:
         Per-column ``LandSurfaceParams`` (or ``None`` for config defaults).
         Must supply ``LAI``, ``SAI``, ``htop`` for the canopy scheme.
-    w_frac_rz:
-        Root-zone soil-moisture stress fraction [0–1], shape ``(ncol,)``.
-        **Not forwarded to CLM-ML-JAX.** CLM-ML computes its own hydraulic
-        water-stress (btran) internally from the ``smp_l_col`` derived from
-        ``psi_soil``.  Both scalars represent the same physical state, so no
-        inconsistency arises; the legoESM diagnostic value is simply unused.
-    wind_speed:
-        Scalar wind speed [m/s], shape ``(ncol,)``.
-        **Not forwarded to CLM-ML-JAX.** CLM-ML derives wind speed internally
-        from ``forc_u_grc = forcing.u_lowest`` and ``forc_v_grc = forcing.v_lowest``.
-        Pass this argument only if the caller wants to document the intended
-        wind forcing; the value is ignored.
+
+        Note: CLM-ML derives its own within-canopy wind (from ``forcing.u_lowest``/
+        ``v_lowest``) and hydraulic water-stress (btran, from ``psi_soil`` via
+        ``smp_l_col``), so the driver's ``w_frac_rz`` / ``wind_speed`` diagnostics
+        are NOT inputs here and are intentionally not accepted.
     canopy_state:
         Previous-step canopy state.  ``None`` or ``mlcanopy is None``
         triggers cold-start allocation.
@@ -1146,6 +1208,25 @@ def compute_clm_ml_canopy_fluxes(
         to default to 0° (Greenwich); this is incorrect for most sites.
     doy:
         Day of year (0-based float, e.g. 120.0 = May 1 in a non-leap year).
+    vcmaxpft_jax:
+        Optional trainable per-PFT Vcmax25 override [µmol/m²/s], shape
+        ``(mxpft+1,)`` — replaces the module-global ``MLpftcon.vcmaxpft`` lookup
+        so ``jax.grad`` can flow into Vcmax25.  Injected as a TRACED leaf from
+        the loss (SegmentForcing doctrine); ``None`` keeps the PFT default.
+    g1_medlyn_jax:
+        Optional trainable per-PFT Medlyn ``g1`` override [kPa^0.5], same shape
+        contract as ``vcmaxpft_jax``.  Only active when the canopy stomatal model
+        is Medlyn (``MLclm_varctl.gs_type == 0``); inert under the default WUE
+        conductance (``gs_type == 2``).  ``None`` keeps the PFT default.
+    grid_info:
+        Optional concrete ``GridInfo(p, ncan, ntop, nbot)`` structural constants
+        for the differentiable path.  REQUIRED for a MULTI-STEP differentiated
+        rollout: when a ``jax.grad`` loss unrolls ≥2 canopy steps and carries the
+        returned ``CanopyState`` forward, ``canopy_state.mlcanopy`` is a tracer, so
+        the structural ints cannot be read from it — extract them once from the
+        (concrete) warm-start state via :func:`extract_clm_ml_grid_info` and pass
+        the same object each step.  ``None`` (single warm step whose state is a
+        captured constant) reads the ints off the concrete template.
 
     Returns
     -------
@@ -1163,6 +1244,107 @@ def compute_clm_ml_canopy_fluxes(
     from legoesm.land.soil_grid import make_soil_grid
 
     ncol = T_soil_top.shape[0]
+
+    # ---- Differentiable-mode gate (static, resolved here — never traced) ----
+    # ``differentiable=True`` opts a training run into the JAX-native diff path
+    # (``grid=`` + ``lax.scan``).  It requires (a) a WARM canopy_state whose
+    # ``mlcanopy`` already carries the vertical structure (ncan/ntop/nbot) — the
+    # first cold-start step always runs forward-only to build it — and (b) a
+    # single column: the diff path reads one concrete ``(ncan, ntop, nbot)``.
+    # A multi-column diff request is a hard error (rather than silently degrading
+    # to the forward path), matching the dispatch-hardening rule.  NOTE: this is
+    # NOT vmap-able — the interface runs host-side setup that mutates CLM module
+    # globals (topology singletons ``patch``/``col``/``grc``, orbital params,
+    # ``_last_topology_key``), which ``jax.vmap`` cannot batch.  Multi-column
+    # training must loop columns OUTSIDE ``jax.grad`` and accumulate per-column
+    # gradients.
+    _want_diff = bool(getattr(canopy_config, "differentiable", False))
+    if _want_diff and ncol != 1:
+        raise ValueError(
+            "CLMMLCanopyConfig.differentiable=True is single-column only "
+            f"(ncol == 1); got ncol={ncol}. The CLM-ML interface runs host-side "
+            "setup that mutates CLM module globals (topology, orbital params), so "
+            "it cannot be jax.vmap-ed over columns. For multi-column training, "
+            "differentiate one column at a time (loop columns outside jax.grad "
+            "and accumulate per-column gradients)."
+        )
+    _warm_started = canopy_state is not None and canopy_state.mlcanopy is not None
+    _diff_mode = _want_diff and _warm_started  # ncol == 1 guaranteed above
+
+    # Solar geometry (lat / lon / doy / cos_zenith) is a NON-differentiated
+    # static input BY DESIGN: it is consumed by host-side CLM orbital setup
+    # (_setup_clm_time / _setup_clm_topology / shr_orb_cosz), not by the traced
+    # canopy physics.  You do not train through the Sun's position — it is fixed
+    # by lat/lon/time.  If a caller differentiates the WHOLE AtmToSurface pytree
+    # (so cos_zenith becomes a tracer), the host ``np.array(forcing.cos_zenith)``
+    # below would raise a cryptic TracerArrayConversionError.  Detect it here and
+    # fail with an actionable message instead.  (Differentiating the physical
+    # forcing leaves — T_lowest, sw_down, q, u, v, lw_down, p, co2 — is fully
+    # supported; only geometry must stay concrete.)
+    if _want_diff:
+        for _geo_name, _geo_val in (
+            ("forcing.cos_zenith", forcing.cos_zenith),
+            ("lat", lat),
+            ("lon", lon),
+        ):
+            if _geo_val is not None and isinstance(_geo_val, jax.core.Tracer):
+                raise ValueError(
+                    f"CLM-ML diff mode: {_geo_name} is a jax tracer, but solar "
+                    "geometry (lat/lon/doy/cos_zenith) is a NON-differentiated static "
+                    "input (host-side CLM orbital setup). Differentiate only the "
+                    "physical forcing leaves and keep geometry concrete (close over "
+                    "it, or jax.lax.stop_gradient it before the grad boundary)."
+                )
+
+    # Cold-start-under-grad guard.  ``differentiable=True`` needs a WARM state:
+    # the first (cold) step builds the canopy vertical structure via host-side
+    # Python/NumPy (``_init_mlcanopy`` + ``np.array(forcing.*)`` marshalling) and
+    # cannot run on the jax.grad tape.  When ``_want_diff`` but the state is cold,
+    # ``_diff_mode`` falls back to the forward path, whose ``np.array(forcing.
+    # T_lowest)`` (t_a10 running mean) would raise a cryptic
+    # TracerArrayConversionError under grad.  Detect a traced PHYSICAL forcing
+    # leaf here and give the actionable warm-start-first guidance instead
+    # (mirrors the multi-column / geometry guards; the "no cryptic degrade" bar).
+    if _want_diff and not _warm_started:
+        # Scan EVERY differentiable input so a cold-start grad w.r.t. ANY of them
+        # fails loudly here rather than slipping into the forward init path and
+        # raising a cryptic tracer/concretization error downstream.  Cover ALL
+        # forcing leaves GENERICALLY (via ``_fields`` — a hand-maintained subset
+        # kept missing leaves that ``_build_stubs`` consumes, e.g. precip_total/
+        # precip_snow → forc_rain/forc_snow), plus the soil state, prognostic LAI
+        # and the trainable Vcmax25/g1 arrays.  Geometry (cos_zenith/lat/lon) is
+        # already handled by the guard above (it fires first if traced).
+        _named_inputs = [
+            (f"forcing.{_field}", getattr(forcing, _field))
+            for _field in forcing._fields
+        ] + [
+            ("T_soil_top", T_soil_top),
+            ("T_soil", T_soil),
+            ("psi_soil", psi_soil),
+            ("theta_soil", theta_soil),
+            ("lai_override", lai_override),
+            ("vcmaxpft_jax", vcmaxpft_jax),
+            ("g1_medlyn_jax", g1_medlyn_jax),
+        ]
+        _traced_leaf = next(
+            (
+                _name
+                for _name, _val in _named_inputs
+                if _val is not None and isinstance(_val, jax.core.Tracer)
+            ),
+            None,
+        )
+        if _traced_leaf is not None:
+            raise ValueError(
+                "CLMMLCanopyConfig.differentiable=True needs a WARM-started "
+                f"canopy_state, but {_traced_leaf} is a jax tracer on a COLD "
+                "start (canopy_state is None / mlcanopy not built). The first "
+                "cold step builds the canopy vertical structure via host-side "
+                "Python/NumPy and cannot run on the jax.grad tape. Run ONE forward "
+                "(cold) step OUTSIDE the grad region to warm-start the state, then "
+                "differentiate subsequent steps — thread the concrete structure "
+                "via grid_info=extract_clm_ml_grid_info(state0)."
+            )
 
     # ---- Build soil grid data ----
     grid = make_soil_grid(land_config.soil_grid)
@@ -1215,8 +1397,21 @@ def compute_clm_ml_canopy_fluxes(
         cos_zen = np.maximum(np.array(forcing.cos_zenith, dtype=np.float64), 0.0)
         lon_deg = _compute_virtual_lon_deg(cos_zen, lat_deg, _caldaym1)
 
-    _topo_key = (ncol, float(lat_deg[0]) if len(lat_deg) > 0 else 0.0,
-                 float(lon_deg[0]) if len(lon_deg) > 0 else 0.0)
+    # Topology cache key: capture EVERY input _setup_clm_topology consumes, over
+    # ALL columns — not just column 0.  Sampling only lat_deg[0]/lon_deg[0] (the
+    # prior key) reused stale per-column topology when two grids shared ncol and
+    # a column-0 coordinate but differed in interior columns (silent wrong lat/
+    # lon → wrong solar zenith for those columns).  ``tobytes()`` gives an exact,
+    # cheap, hashable signature of the full arrays; include the soil grid, z_ref
+    # and pft so a config change also forces a rebuild.  (In the virtual-longitude
+    # path lon_deg is re-derived each step and changes, so this still rebuilds
+    # per step there — same as before; no new cost.)
+    _topo_key = (
+        ncol,
+        lat_deg.tobytes(), lon_deg.tobytes(),
+        dz_soil.tobytes(), z_soil.tobytes(),
+        float(z_ref), int(canopy_config.pft_clm),
+    )
     global _last_topology_key
     if _topo_key != _last_topology_key:
         _setup_clm_topology(ncol, lat_deg, lon_deg, dz_soil, z_soil, z_ref,
@@ -1230,15 +1425,27 @@ def compute_clm_ml_canopy_fluxes(
     # update it here:
     #   T_a10_new = (1 - alpha) * T_a10_old + alpha * T_lowest
     #   alpha = dt / (10 * 86400)  (10-day e-folding, CLM default)
-    T_lowest_np = np.array(forcing.T_lowest, dtype=np.float64)
     alpha = min(dt / (10.0 * 86400.0), 1.0)
-    if canopy_state is not None and canopy_state.t_a10_arr is not None:
-        t_a10_prev = np.array(canopy_state.t_a10_arr, dtype=np.float64)
-        t_a10_now = ((1.0 - alpha) * t_a10_prev + alpha * T_lowest_np).astype(np.float64)
+    if _diff_mode:
+        # Traced running mean: t_a10 is the Vcmax temperature-acclimation state,
+        # a real function of T_lowest, so keep it on the jax.grad tape (a host
+        # np.array(forcing.T_lowest) would raise on a tracer — scope item A).
+        T_low = jnp.asarray(forcing.T_lowest, dtype=jnp.float64)
+        if canopy_state is not None and canopy_state.t_a10_arr is not None:
+            t_a10_prev = jnp.asarray(canopy_state.t_a10_arr, dtype=jnp.float64)
+            t_a10_now = (1.0 - alpha) * t_a10_prev + alpha * T_low
+        else:
+            t_a10_now = T_low
+        t_a10_prior = t_a10_now
     else:
-        # Cold start: initialize to instantaneous T (will converge in ~10 days)
-        t_a10_now = T_lowest_np.copy()
-    t_a10_prior = jnp.array(t_a10_now)
+        T_lowest_np = np.array(forcing.T_lowest, dtype=np.float64)
+        if canopy_state is not None and canopy_state.t_a10_arr is not None:
+            t_a10_prev = np.array(canopy_state.t_a10_arr, dtype=np.float64)
+            t_a10_now = ((1.0 - alpha) * t_a10_prev + alpha * T_lowest_np).astype(np.float64)
+        else:
+            # Cold start: initialize to instantaneous T (will converge in ~10 days)
+            t_a10_now = T_lowest_np.copy()
+        t_a10_prior = jnp.array(t_a10_now)
 
     # ---- Build stub CLM instances ----
     soil_hyd = land_config.hydraulics
@@ -1272,8 +1479,89 @@ def compute_clm_ml_canopy_fluxes(
     # dtime_ml: sub-step length. Must divide dt evenly.
     _ml_ctl.dtime_ml = dt / max(1, canopy_config.num_ml_steps)
     _ml_ctl.mlcan_to_clm = 0  # we read output directly from mlcanopy_type
+    # DIFFERENTIABLE_MODE is a static intent flag (currently vestigial upstream —
+    # every physics module switches on the ``grid`` argument, not this global —
+    # but set it to match the mode so any future read is consistent).
+    _ml_ctl.DIFFERENTIABLE_MODE = bool(_diff_mode)
+
+    # ---- Build GridInfo for the differentiable path ----
+    # Structural ints must be concrete Python ints extracted BEFORE jax.grad
+    # tracing (int() on a tracer raises ConcretizationTypeError).  The warm-start
+    # template ``mlcanopy`` is a captured constant under jax.grad, so these reads
+    # are concrete.  Mirrors make_clm_ml_forward (MLCanopyFluxesMod.py:2098).
+    if _diff_mode:
+        from multilayer_canopy.MLclm_varctl import GridInfo
+        # Capability guard: the differentiable path is only CORRECT with a
+        # clm-ml-jax build whose ``_CanopyFluxesDiagnostics`` runs in diff mode
+        # (``grid=`` parameter).  Older builds return from ``MLCanopyFluxes``
+        # BEFORE diagnostics in diff mode, leaving the canopy-integrated outputs
+        # (shflx/lhflx/gpp/rnet/…) stale — a silent wrong-answer.  clm-ml-jax is
+        # not on PyPI (local install), so we cannot pin a version; probe the
+        # capability directly and fail LOUDLY instead.
+        import inspect as _inspect
+        from multilayer_canopy import MLCanopyFluxesMod as _mlmod
+        if "grid" not in _inspect.signature(_mlmod._CanopyFluxesDiagnostics).parameters:
+            raise RuntimeError(
+                "CLMMLCanopyConfig.differentiable=True requires a clm-ml-jax build "
+                "whose _CanopyFluxesDiagnostics accepts grid= (runs canopy-flux "
+                "diagnostics on the jax.grad tape). The installed clm-ml-jax returns "
+                "before diagnostics in differentiable mode, which would leave shflx/"
+                "lhflx/gpp/rnet stale. Update clm-ml-jax to a revision including the "
+                "differentiable-diagnostics fix (adds grid= to _CanopyFluxesDiagnostics)."
+            )
+        _p = int(filter_exposedvegp[0])
+        # Structural ints (ncan/ntop/nbot) must be CONCRETE Python ints — the diff
+        # path reads them at trace time.  Two sources:
+        #  (1) caller-supplied ``grid_info`` (REQUIRED for a multi-step
+        #      differentiated rollout: there the carried ``canopy_state.mlcanopy``
+        #      is itself a tracer, so reading ints off it would raise); or
+        #  (2) the warm template ``mlcanopy`` when it is concrete (single warm
+        #      step whose state is a captured constant under jax.grad).
+        # ``dpai_profile.shape`` is static, so the range check works either way.
+        _ncan_max = int(mlcanopy.dpai_profile.shape[1])
+        if grid_info is not None:
+            _ncan_p = int(grid_info.ncan)
+            _ntop_p = int(grid_info.ntop)
+            _nbot_p = int(grid_info.nbot)
+        else:
+            try:
+                _ncan_p = int(mlcanopy.ncan_canopy[_p])
+                _ntop_p = int(mlcanopy.ntop_canopy[_p])
+                _nbot_p = int(mlcanopy.nbot_canopy[_p])
+            except jax.errors.ConcretizationTypeError as exc:
+                raise RuntimeError(
+                    "CLM-ML diff mode: the canopy_state.mlcanopy structural ints "
+                    "(ncan/ntop/nbot) are TRACED — this happens when a differentiated "
+                    "loss unrolls MULTIPLE canopy steps and carries the returned state "
+                    "as the jax.grad tape's carry. Extract the concrete structural "
+                    "ints once from the warm-start state and thread them through every "
+                    "step via grid_info=extract_clm_ml_grid_info(state0)."
+                ) from exc
+        if not (1 <= _ncan_p <= _ncan_max):
+            raise ValueError(
+                "CLM-ML diff mode needs a warm-started canopy_state whose vertical "
+                f"structure is initialised; got ncan={_ncan_p} (valid 1..{_ncan_max}). "
+                "Run one forward (differentiable=False or cold-start) step first."
+            )
+        grid = GridInfo(p=_p, ncan=_ncan_p, ntop=_ntop_p, nbot=_nbot_p)
+    else:
+        grid = None
 
     # ---- Call MLCanopyFluxes ----
+    # Only forward the diff-mode / trainable-param kwargs when they are actually
+    # used, so the DEFAULT forward-only path keeps the exact call signature the
+    # interface has always used (``_o2ref_py`` only) and does NOT depend on the
+    # newer ``grid=``/``vcmaxpft_jax=``/``g1_MED_jax=`` upstream API surface
+    # (Codex P1: an older clm-ml-jax would otherwise TypeError on every call,
+    # including production forward-only runs).  Diff mode is already gated by the
+    # capability guard above.
+    _opt_kwargs: dict[str, Any] = {}
+    if grid is not None:
+        _opt_kwargs["grid"] = grid
+    if vcmaxpft_jax is not None:
+        _opt_kwargs["vcmaxpft_jax"] = vcmaxpft_jax
+    if g1_medlyn_jax is not None:
+        _opt_kwargs["g1_MED_jax"] = g1_medlyn_jax
     mlcanopy_new = MLCanopyFluxes(
         bounds=bounds,
         num_exposedvegp=num_exposedvegp,
@@ -1292,6 +1580,7 @@ def compute_clm_ml_canopy_fluxes(
         wateratm2lndbulk_inst=stubs["wateratm2lndbulk"],
         waterdiagnosticbulk_inst=stubs["waterdiagnosticbulk"],
         _o2ref_py=float(canopy_config.o2ref),
+        **_opt_kwargs,
     )
 
     # ---- Extract SurfaceFluxOutput ----

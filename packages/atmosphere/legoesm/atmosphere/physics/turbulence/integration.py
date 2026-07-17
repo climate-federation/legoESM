@@ -266,6 +266,34 @@ def _resolve_T_sfc(T_col, phys_state):
     return jnp.where(override > SFC_T_OVERRIDE_VALID_MIN, override, fallback)
 
 
+def _carry_update_with_cloud_fraction(carry_field, carry_val, turb_out):
+    """Package a turbulence scheme's carry for combined.py's ``phys_updates``.
+
+    A moist higher-order closure (CLUBB) diagnoses a sub-grid PDF cloud fraction
+    (``turb_out.cloud_fraction``, shape ``(ncol, nlev)``).  When present we hand
+    back a MULTI-FIELD dict — combined.py's ``isinstance(field_val, dict)``
+    branch merges every key into ``PhysicsState`` — so radiation
+    (``cloud_scheme="clubb"``) can read ``phys_state.cloud_fraction`` instead of
+    the RH-diagnosed grid-scale one.  The scheme's prognostic carry
+    (``carry_field`` -> ``carry_val``: tke / qke / clubb_moments) is co-located
+    under its own key so it still evolves across the step.
+
+    Schemes with no PDF cloud closure leave ``cloud_fraction=None`` -> we return
+    the plain ``carry_val``, byte-identical to the pre-existing (bare value, not
+    dict) contract.  combined.py only merges the dict when ``field_name`` (the
+    registered carry field) is not None, which holds for every cf-producing
+    scheme today (CLUBB carries ``tke``); a diagnostic scheme that ever set cf
+    with ``carry_field=None`` would need combined.py's ``field_name is not None``
+    guard relaxed for the dict branch first.
+    """
+    if turb_out.cloud_fraction is None:
+        return carry_val
+    updates = {"cloud_fraction": turb_out.cloud_fraction}
+    if carry_field is not None and carry_val is not None:
+        updates[carry_field] = carry_val
+    return updates
+
+
 def make_turbulence_physics(
     turbulence_config: TurbulenceConfig,
     model_type: str = "hydrostatic",
@@ -445,7 +473,8 @@ def _make_hydrostatic_turbulence(
             dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
             tracer_tendencies=tracer_tends,
         )
-        return tendencies, tke_out
+        return tendencies, _carry_update_with_cloud_fraction(
+            carry_field, tke_out, turb_out)
 
     def reset_state():
         return None
@@ -599,7 +628,8 @@ def _make_mpas_turbulence(
             dphis_dt=state.phis.replace(data=zero_ps, name="dphis_dt_turb"),
             tracer_tendencies=tracer_tends if tracer_tends else None,
         )
-        return tendencies, tke_out
+        return tendencies, _carry_update_with_cloud_fraction(
+            carry_field, tke_out, turb_out)
 
     def reset_state():
         return None
@@ -764,7 +794,8 @@ def _make_nonhydrostatic_turbulence(
             dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_phis_dtype), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
             dtracers_dt=Field(data=dtracers, name="dtracers_dt_turb", dims=dims_tr, units="1/s"),
         )
-        return tendencies, tke_out
+        return tendencies, _carry_update_with_cloud_fraction(
+            carry_field, tke_out, turb_out)
 
     def reset_state():
         return None
@@ -915,7 +946,8 @@ def _make_spectral_pe_turbulence(
             lnps_hat=state.lnps_hat.replace(data=zero_2d),
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
         )
-        return tendencies, tke_out
+        return tendencies, _carry_update_with_cloud_fraction(
+            carry_field, tke_out, turb_out)
 
     def reset_state():
         return None

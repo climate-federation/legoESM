@@ -37,7 +37,11 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.operators_voronoi import cell_to_edge_avg_3d
-from legoesm.ocean.eos import make_eos_fn, rho_0 as _RHO_0
+from legoesm.ocean.eos import (
+    compute_buoyancy_frequency_adiabatic,
+    make_eos_fn,
+    rho_0 as _RHO_0,
+)
 from legoesm.ocean.physics.lateral_mixing.gm_redi_mpas import voronoi_neumann_fill
 from legoesm.ocean.physics.lateral_mixing.mle import (
     MLEConfig,
@@ -46,9 +50,6 @@ from legoesm.ocean.physics.lateral_mixing.mle import (
     mle_mld_and_buoyancy,
     mle_streamfunction_magnitude,
     mle_vertical_structure,
-)
-from legoesm.ocean.dynamics.ocean_tendency_common import (
-    iterate_eos_and_pressure_anomaly,
 )
 from legoesm.ocean.vertical import compute_layer_thickness, compute_ocean_jacobian
 from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
@@ -215,11 +216,6 @@ def mle_tracer_tendency_mpas(
         S_fill = jnp.where(_active, S, S[_row, _bot][:, None])
 
     eos_fn = make_eos_fn(eos, eos_linear)
-    fill_fn = lambda field: voronoi_neumann_fill(field, mask, mesh)
-    rho_insitu, _rp, _pp = iterate_eos_and_pressure_anomaly(
-        T_fill, S_fill, mask, fill_fn, eos_fn,
-        z_coord.dz_ref, _RHO_0, constants.g, n_iter=2,
-    )                                                   # (nCells, nlev)
 
     # Reference W-INTERFACE depths [m, positive down] for the NEMO nla10
     # reference-level pick: cumulative reference thicknesses, surface first.
@@ -228,9 +224,18 @@ def mle_tracer_tendency_mpas(
         jnp.cumsum(z_coord.dz_ref),
     ])                                                              # (nlev+1,)
 
+    # NEMO rhop: SURFACE-REFERENCED POTENTIAL density (the EOS at zero
+    # pressure) drives BOTH the Delta-rho MLD criterion and zbm (tramle.F90;
+    # eosbn2 prhop).  In-situ rho here collapsed the ML to the top layer by
+    # pure compressibility (~0.14 kg/m^3 per ~30 m >> the 0.01 threshold),
+    # zeroing the MLE transport — the test_mle_mpas restratification
+    # regression.  The N^2 convection gate below keeps in-situ rho (a local
+    # vertical gradient, the standard N^2 approximation).
+    rho_pot = eos_fn(T_fill, S_fill, jnp.zeros_like(T_fill))
+
     # --- MLE mixed-layer depth + ML-mean buoyancy (shared grid-agnostic core) ---
     zmld, bm, in_ml = mle_mld_and_buoyancy(
-        rho_insitu, dz_live, wet3d,
+        rho_pot, dz_live, wet3d,
         z_faces=z_faces,
         rho_c_mle=cfg.rho_c_mle,
         ref_depth_m=cfg.ref_depth_m,
@@ -258,11 +263,34 @@ def mle_tracer_tendency_mpas(
     # --- Convection gate (NEMO nn_conv=1): no MLE where the ML-integrated N^2
     # of either neighbour column is negative (statically unstable). ---
     if cfg.no_mle_in_convection:
-        dz_half = z_coord.dz_half_ref * jacobian[:, jnp.newaxis]   # (nCells, nlev-1)
-        # Stable stratification: rho increases downward -> drho/dz < 0 (z up).
-        drho_dz = (rho_insitu[:, :-1] - rho_insitu[:, 1:]) / jnp.maximum(
-            dz_half, _EPS_DIV)
-        N2 = -(constants.g / constants.rho_ocean) * drho_dz       # (nCells, nlev-1)
+        # NEMO's gate sums rn2 — the PROPER (locally-referenced,
+        # compressibility-free) buoyancy frequency (tramle.F90:
+        # ``zn2 = zn2 + zc*(rn2(jk)+rn2(jk+1))*0.5``).  Differencing
+        # IN-SITU rho here carried the compressibility between reference
+        # pressures (~6x too stable; the shared helper's docstring) and
+        # read deep unstable columns as stable, leaking transport through
+        # the gate.  APPROXIMATION (documented departure): the shared
+        # adiabatic-parcel helper is the Veros press=|zt| form (both
+        # parcels at the upper cell-centre pressure), not NEMO's
+        # interface-referenced rn2 discretisation — sign-equivalent for
+        # the gate.  True centre depths/spacing are passed so
+        # non-midpoint (partial-cell) ladders keep the correct geometry
+        # (codex r1 P1): p_cell from ``t_depth_ref`` when the coordinate
+        # carries it, and ``dz_half`` = the actual centre spacing.
+        _t_ref = getattr(z_coord, "t_depth_ref", None)
+        z_centers_ref = (
+            jnp.abs(jnp.asarray(_t_ref)) if _t_ref is not None
+            else jnp.cumsum(z_coord.dz_ref) - 0.5 * z_coord.dz_ref
+        )
+        p_cell = jnp.broadcast_to(
+            (_RHO_0 * constants.g) * z_centers_ref[None, :],
+            T_fill.shape,
+        )
+        N2 = compute_buoyancy_frequency_adiabatic(
+            T_fill, S_fill, p_cell, z_coord.dz_ref, jacobian,
+            eos_fn=eos_fn,
+            dz_half=z_coord.dz_half_ref[None, :] * jacobian[:, None],
+        )                                                          # (nCells, nlev-1)
         iface_in_ml = in_ml[:, :-1]                               # iface k in ML if cell k is
         col_n2 = jnp.sum(iface_in_ml * N2, axis=-1)              # (nCells,) NEMO zn2
         col_n2_f = voronoi_neumann_fill(col_n2, mask, mesh)

@@ -506,6 +506,12 @@ class ExperimentConfig(NamedTuple):
     cloud_scheme: str = "none"
     cloud_rh_crit_bl: float = 0.7
     cloud_sigma_bl: float = 1.0
+    # Route a moist higher-order turbulence closure's (CLUBB) sub-grid PDF cloud
+    # fraction into the cloud optics instead of the RH grid-scale one — the
+    # marine-Sc over-bright albedo lever.  Maps to
+    # ``RadiationConfig.use_clubb_cloud_fraction``; requires diagnostic CLUBB
+    # turbulence (turbulence='clubb').  False (default) is byte-identical.
+    use_clubb_cloud_fraction: bool = False
     # Opt-in convective (cumulus) cloud-fraction source (Slingo 1987).  The
     # RH-based stratiform cloud schemes give ~0 cloud where an adjustment
     # convection scheme (sbm) holds the column subsaturated, so the convecting

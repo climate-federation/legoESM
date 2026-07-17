@@ -37,6 +37,29 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.multilayer_soil_depth == 4.5
 
 
+def test_use_clubb_cloud_fraction_flag_flows_to_config():
+    """--use-clubb-cloud-fraction round-trips to ExperimentConfig (marine-Sc
+    albedo lever; radiation then reads diagnostic CLUBB's PDF cloud fraction)."""
+    parser = build_arg_parser()
+    # default OFF: RH grid-scale cloud fraction (byte-identical path)
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.use_clubb_cloud_fraction is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--turbulence", "clubb",
+        "--use-clubb-cloud-fraction",
+    ]), parser))
+    assert cfg_on.use_clubb_cloud_fraction is True
+    # explicit negation restores the default (BooleanOptionalAction)
+    cfg_neg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--no-use-clubb-cloud-fraction",
+    ]), parser))
+    assert cfg_neg.use_clubb_cloud_fraction is False
+
+
 def test_convective_precip_efficiency_cli_wiring_929():
     """#929: the shared --convective-precip-efficiency knob reaches the config
     for BOTH Tiedtke and Bechtold; UNSET is the ``None`` sentinel (each scheme

@@ -51,3 +51,9 @@ class PhysicsOutput(NamedTuple):
     w_land: jax.Array | None = None  # updated slab-land soil water [kg/m2]
     snow: jax.Array | None = None    # updated slab-land snow water equiv. [kg/m2]
     land_runoff: jax.Array | None = None  # diagnosed land runoff (Hortonian + Dunne) [kg/m2/s]
+    # Diagnostic sub-grid LIQUID cloud fraction (ncol, nlev) from a moist
+    # higher-order closure's PDF (diagnostic CLUBB).  Carried out of the physics
+    # step and back in to compute_radiation_core so radiation can use it instead
+    # of the RH grid-scale fraction (use_clubb_cloud_fraction).  None for schemes
+    # with no PDF cloud closure => radiation keeps the grid-scale cloud path.
+    cloud_fraction: jax.Array | None = None

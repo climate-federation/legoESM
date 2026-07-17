@@ -471,3 +471,239 @@ def test_nemo_recipe_is_lazy_registered():
 
     assert "nemo_recipe" in fidelity.__all__
     assert fidelity.nemo_recipe.nemo_lat_lon_model_config is nemo_lat_lon_model_config
+
+
+def test_surface_stress_implicit_wiring():
+    """NEMO dynzdf implicit wind-stress deposition (surface_stress_implicit):
+    (a) requires nemo_stage_mean_imposition (init raises without it);
+    (b) column-integrated momentum input identical to the explicit kick
+    (no double-count through F_slow + the solve deposition);
+    (c) non-vacuous (vertical distribution differs);
+    (d) card has both flags on."""
+    import jax.numpy as jnp
+    import numpy as np
+    import pytest
+
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.fidelity.nemo_recipe import (
+        _NEMO_GYRE_DT_S,
+        build_nemo_gyre_recipe,
+        nemo_gyre_wind_forcing,
+    )
+
+    r = build_nemo_gyre_recipe()
+    assert r.model_config.surface_stress_implicit is True
+    assert r.model_config.barotropic.nemo_stage_mean_imposition is True
+
+    with pytest.raises(ValueError, match="nemo_stage_mean_imposition"):
+        LatLonCGridOceanModel(
+            r.grid, r.z_coord,
+            r.model_config._replace(barotropic=r.model_config.barotropic
+                                    ._replace(nemo_stage_mean_imposition=False)))
+
+    st = r.initial_state
+    n_lat, n_lon = st.T.data.shape[0], st.T.data.shape[1]
+    sf = nemo_gyre_wind_forcing(n_lat, n_lon, 0.0)
+    m_impl = LatLonCGridOceanModel(r.grid, r.z_coord, r.model_config)
+    mc_expl = r.model_config._replace(
+        surface_stress_implicit=False,
+        barotropic=r.model_config.barotropic._replace(
+            nemo_stage_mean_imposition=False))
+    m_expl = LatLonCGridOceanModel(r.grid, r.z_coord, mc_expl)
+    s_i = m_impl.step(st, dt=_NEMO_GYRE_DT_S, surface_forcing=sf)
+    s_e = m_expl.step(st, dt=_NEMO_GYRE_DT_S, surface_forcing=sf)
+    dz = np.asarray(r.z_coord.dz_ref)
+    wet = np.asarray(st.u_mask.data) > 0
+    Iu_i = np.sum(np.asarray(s_i.u.data) * dz, -1)
+    Iu_e = np.sum(np.asarray(s_e.u.data) * dz, -1)
+    # same column-integrated momentum input (f32 state => 1e-6 relative)
+    ref = float(np.sqrt(np.mean(Iu_e[wet] ** 2)))
+    np.testing.assert_allclose(Iu_i[wet], Iu_e[wet], atol=2e-6 * max(ref, 1.0))
+    # different vertical distribution (the point of the change)
+    assert float(np.max(np.abs(
+        np.asarray(s_i.u.data)[..., 0] - np.asarray(s_e.u.data)[..., 0]))) > 1e-4
+    for f in (s_i.u.data, s_i.v.data, s_i.T.data):
+        assert bool(jnp.all(jnp.isfinite(f)))
+
+
+def test_nemo_cap_slope_limit_centered_path():
+    """NEMO ldfslp steep-slope convention on the centered/nemo_iso_lap path:
+    slopes hard-capped at min(rn_slpmax, e3/7e3) with taper == 1 (the flux
+    keeps diffusing along the capped direction); dm95 tapers toward zero."""
+    import jax.numpy as jnp
+    import numpy as np
+
+    from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        compute_isopycnal_slopes_latlon_cgrid,
+    )
+
+    r = build_nemo_gyre_recipe()
+    # card runs dm95 until the native four-position slopes land (stability;
+    # see the card comment); nemo_cap is tested as the wired OPTION here.
+    cfg = r.model_config.gm_redi._replace(slope_limit="nemo_cap")
+    st = r.initial_state
+    # a STEEP horizontal density front (large T gradient) to exceed the cap
+    T = st.T.data + 5.0 * jnp.linspace(0, 1, st.T.data.shape[1])[None, :, None]
+    from legoesm.ocean.eos import nemo_roquet_eos
+    import numpy as _np
+    gdept = _np.cumsum(_np.asarray(r.z_coord.dz_ref)) - 0.5 * _np.asarray(
+        r.z_coord.dz_ref)
+    p3 = jnp.asarray(1026.0 * 9.80665 * gdept)[None, None, :]
+    eos_fn = lambda TT, SS, pp: nemo_roquet_eos(TT, SS, pp, rho0=1026.0)
+    rho = eos_fn(T, st.S.data, p3)
+    J = jnp.ones_like(st.eta.data)
+    args = (rho, st.land_mask.data, r.z_coord, J, r.grid)
+    # run both limiters on identical inputs
+    Sx_c, Sy_c, tap_c = compute_isopycnal_slopes_latlon_cgrid(
+        *args, cfg, T=T, S=st.S.data, eos_fn=eos_fn)
+    Sx_d, Sy_d, tap_d = compute_isopycnal_slopes_latlon_cgrid(
+        *args, cfg._replace(slope_limit="dm95_taper",
+                            nemo_mld_slope_ramp=False,
+                            nemo_slope_shapiro=False),
+        T=T, S=st.S.data, eos_fn=eos_fn)
+    dz = np.asarray(r.z_coord.dz_ref)
+    cap = np.minimum(cfg.S_max, 0.5 * (dz[:-1] + dz[1:]) / 7.0e3)
+    # capped path respects the DOUBLE cap everywhere (shapiro smooths within it)
+    assert float(jnp.max(jnp.abs(Sx_c))) <= float(cap.max()) + 1e-8  # f32
+    # near-surface interfaces are bound by the e3/7e3 cap, TIGHTER than S_max
+    assert cap[0] < cfg.S_max
+    # taper is exactly 1 on the capped path (flux never dies at steep fronts)
+    np.testing.assert_array_equal(np.asarray(tap_c), 1.0)
+    # non-vacuity: the two limiters genuinely differ on this front
+    assert float(jnp.max(jnp.abs(Sx_c - Sx_d))) > 0.0
+
+
+def test_nemo_iso_lap_slope_sign_convention():
+    """SIGN GATE (CLAUDE.md sign mandate + the 2026-07-17 winter ttrd_ldf
+    certificate): the slope PRODUCER emits S = +dx(rho)/|drho_dz| (GM
+    convention, drho_dz floored negative); the nemo_iso_lap OPERATOR was
+    certified consuming NEMO-convention slopes slp = -dx(rho)/|drho_dz|
+    (ldfslp zau/(zbu<0)). The dispatch must NEGATE. Un-negated, the
+    off-diagonal (subduction) fluxes run backward — on NEMO's Jan state the
+    200-430 m band read -1.0e-7 K/s vs NEMO's +5.2e-8.
+
+    Gate: dispatch(dT) == operator(-S_produced) exactly, and differs from
+    operator(+S_produced) on a front state (non-vacuity)."""
+    import jax.numpy as jnp
+    import numpy as np
+
+    from legoesm.ocean.eos import nemo_roquet_eos
+    from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        compute_isopycnal_slopes_latlon_cgrid,
+        gm_redi_tracer_tendency_latlon,
+        nemo_iso_lap_tracer_tendency_latlon_cgrid,
+    )
+
+    r = build_nemo_gyre_recipe()
+    st = r.initial_state
+    # the negation gate is the MODE-B path (the card now runs nemo_native,
+    # which emits NEMO-signed slopes and does not negate) — pin mode_b here.
+    cfg = r.model_config.gm_redi._replace(slope_positions="mode_b")
+    # meridional front on top of the stable IC stratification
+    T = st.T.data + 2.0 * jnp.linspace(0, 1, st.T.data.shape[0])[:, None, None]
+    S = st.S.data
+    eta = jnp.zeros_like(st.eta.data)
+    J = jnp.ones_like(st.eta.data)
+    dT_disp, _ = gm_redi_tracer_tendency_latlon(
+        T, S, eta, st.H_bathy.data, r.grid, r.z_coord, cfg,
+        eos=r.model_config.eos, mask=st.land_mask.data,
+        u_mask=st.u_mask.data, v_mask=st.v_mask.data, rho_0=1026.0)
+
+    import numpy as _np
+    gdept = _np.cumsum(_np.asarray(r.z_coord.dz_ref)) - 0.5 * _np.asarray(
+        r.z_coord.dz_ref)
+    p3 = jnp.asarray(1026.0 * 9.80665 * gdept)[None, None, :]
+    eos_fn = lambda TT, SS, pp: nemo_roquet_eos(TT, SS, pp, rho0=1026.0)
+    rho = eos_fn(T, S, p3)
+    S_x, S_y, _ = compute_isopycnal_slopes_latlon_cgrid(
+        rho, st.land_mask.data, r.z_coord, J, r.grid, cfg,
+        T=T, S=S, eos_fn=eos_fn)
+    _ztop = jnp.cumsum(r.z_coord.dz_ref) - r.z_coord.dz_ref
+    act = ((st.land_mask.data[:, :, None] > 0.5)
+           & (_ztop[None, None, :] < st.H_bathy.data[:, :, None])).astype(T.dtype)
+
+    def op(sx, sy):
+        return nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, sx, sy, st.land_mask.data, st.u_mask.data, st.v_mask.data,
+            r.z_coord, J, r.grid, cfg.kappa_Redi, act)
+
+    dT_neg = op(-S_x, -S_y)
+    dT_pos = op(S_x, S_y)
+    np.testing.assert_allclose(np.asarray(dT_disp), np.asarray(dT_neg), atol=1e-11)  # dispatcher builds rho internally; op-order roundoff
+    assert float(jnp.max(jnp.abs(dT_neg - dT_pos))) > 0.0
+
+
+def test_nemo_native_four_position_slopes():
+    """Native ldfslp four-position slopes (card default): bounded by the NEMO
+    double cap, surface w-slopes zero, NEMO sign convention (no dispatch
+    negation), K33 = kappa*(wslpi^2+wslpj^2), dispatch typo raises, and the
+    native path genuinely differs from mode-b (non-vacuity)."""
+    import jax.numpy as jnp
+    import numpy as np
+    import pytest
+
+    from legoesm.ocean.eos import nemo_roquet_eos
+    from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        compute_isoneutral_K33_latlon,
+        compute_nemo_native_slopes,
+        gm_redi_tracer_tendency_latlon,
+    )
+
+    r = build_nemo_gyre_recipe()
+    cfg = r.model_config.gm_redi
+    assert cfg.slope_positions == "nemo_native"
+    st = r.initial_state
+    T = st.T.data + 2.0 * jnp.linspace(0, 1, st.T.data.shape[0])[:, None, None]
+    S = st.S.data
+    import numpy as _np
+    gdept = _np.cumsum(_np.asarray(r.z_coord.dz_ref)) - 0.5 * _np.asarray(
+        r.z_coord.dz_ref)
+    p3 = jnp.asarray(1026.0 * 9.80665 * gdept)[None, None, :]
+    eos_fn = lambda TT, SS, pp: nemo_roquet_eos(TT, SS, pp, rho0=1026.0)
+    rho = eos_fn(T, S, p3)
+    u4, v4, wi4, wj4 = compute_nemo_native_slopes(
+        rho, T, S, st.land_mask.data, st.u_mask.data, st.v_mask.data,
+        r.z_coord, r.grid, cfg, eos_fn, rho_0=1026.0)
+    # surface w-slope is zero; all four bounded by rn_slpmax (ramp included)
+    np.testing.assert_array_equal(np.asarray(wi4)[:, :, 0], 0.0)
+    np.testing.assert_array_equal(np.asarray(wj4)[:, :, 0], 0.0)
+    for f in (u4, v4, wi4, wj4):
+        assert float(jnp.max(jnp.abs(f))) <= cfg.S_max + 1e-8
+    # near-surface e3/7e3 cap binds tighter than S_max on the INTERIOR values
+    dz = _np.asarray(r.z_coord.dz_ref)
+    assert dz[0] / 7.0e3 < cfg.S_max
+
+    # K33 native = kappa*(wi^2+wj^2) mapped to interfaces
+    k33 = compute_isoneutral_K33_latlon(
+        T, S, jnp.zeros_like(st.eta.data), st.H_bathy.data, r.grid,
+        r.z_coord, cfg, eos=r.model_config.eos, mask=st.land_mask.data,
+        rho_0=1026.0)
+    ref = cfg.kappa_Redi * (np.asarray(wi4) ** 2 + np.asarray(wj4) ** 2)[:, :, 1:]
+    # rtol covers the internal gm_redi_density_and_jacobian rho path vs the
+    # hand-built nemo_roquet_eos reference (different pressure convention,
+    # ~1e-3 in slope**2)
+    np.testing.assert_allclose(np.asarray(k33), ref, rtol=5e-3, atol=1e-8)
+
+    # dispatch: typo raises; native vs mode-b non-vacuous
+    with pytest.raises(ValueError, match="slope_positions"):
+        gm_redi_tracer_tendency_latlon(
+            T, S, jnp.zeros_like(st.eta.data), st.H_bathy.data, r.grid,
+            r.z_coord, cfg._replace(slope_positions="typo"),
+            eos=r.model_config.eos, mask=st.land_mask.data,
+            u_mask=st.u_mask.data, v_mask=st.v_mask.data, rho_0=1026.0)
+    dT_nat, _ = gm_redi_tracer_tendency_latlon(
+        T, S, jnp.zeros_like(st.eta.data), st.H_bathy.data, r.grid,
+        r.z_coord, cfg, eos=r.model_config.eos, mask=st.land_mask.data,
+        u_mask=st.u_mask.data, v_mask=st.v_mask.data, rho_0=1026.0)
+    dT_mb, _ = gm_redi_tracer_tendency_latlon(
+        T, S, jnp.zeros_like(st.eta.data), st.H_bathy.data, r.grid,
+        r.z_coord, cfg._replace(slope_positions="mode_b"),
+        eos=r.model_config.eos, mask=st.land_mask.data,
+        u_mask=st.u_mask.data, v_mask=st.v_mask.data, rho_0=1026.0)
+    assert float(jnp.max(jnp.abs(dT_nat - dT_mb))) > 0.0
+    assert bool(jnp.all(jnp.isfinite(dT_nat)))

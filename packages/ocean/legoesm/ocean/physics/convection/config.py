@@ -98,6 +98,24 @@ class EnhancedDiffusionConfig(NamedTuple):
     #   ``enhanced_diffusion_convection``; both integration factory and the
     #   implicit k_profiles path supply them when this is selected.
     n2_mode: str = "insitu"
+    # Static-instability trigger threshold on N² [1/s²]: EVD fires where
+    # N² < n2_threshold. Default 0.0 (fire on any negative N²). NEMO zdfevd
+    # (ln_zdfevd) fires where MIN(rn2, rn2b) <= -1e-12 — a small NEGATIVE
+    # threshold that IGNORES marginally-neutral interfaces (N² in [-1e-12, 0)).
+    # Matters during spring restratification: firing on near-zero-negative N²
+    # noise re-mixes the shoaling ML every step and blocks the seasonal
+    # thermocline rebuild (NEMO GYRE fidelity, plan §G). Only consulted on the
+    # hard-threshold path (smooth_transition=False).
+    n2_threshold: float = 0.0
+    # NEMO zdfevd two-time-level trigger: fire where MIN(rn2, rn2b) < thr —
+    # i.e. where EITHER the now or the before N² is unstable (zdfevd.F90:
+    # MIN(rn2,rn2b) <= -1e-12). The hysteresis keeps EVD on one extra step in
+    # marginal columns, preventing per-step ON/OFF FLICKER of the 100 m²/s
+    # coefficient (a grid-scale noise generator in winter convecting regions).
+    # Implemented as max(K_now, K_before) — equivalent for a hard threshold.
+    # Requires the before-advection tracers (n2_tracers) to be threaded (the
+    # TKE n2_before_advection machinery); silently single-level when absent.
+    two_level_trigger: bool = False
 
 
 class PlumeConfig(NamedTuple):
