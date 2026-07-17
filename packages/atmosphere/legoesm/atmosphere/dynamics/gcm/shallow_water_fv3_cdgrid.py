@@ -270,12 +270,21 @@ class CDGridShallowWaterConfig(NamedTuple):
     # directly via the separate `dddmp` field above.
     dddmp_prod: float = 0.2
 
+    # d_sw5 nord=1 del-4 BACKGROUND divergence damping on the
+    # PRODUCTION path (fv3_sw_tendencies; certified d_sw5 reference).
+    # 0.0 = OFF (bit-identical pre-existing behaviour).  FV3's
+    # fv_arrays default is 0.16 with nord=1 — enable via sweep, not by
+    # default, because the production del-2 aggregate (div_damp 8x)
+    # was calibrated WITHOUT it (iters 755-1030).
+    d4_bg_prod: float = 0.0
+
 
 def iter1009_dual_target_config(
     n: int,
     div_damp_factor: float = 8.0,
     damp_v: float = 0.030,
     hyperdiff_coeff: float = 0.0,
+    d4_bg_prod: float = 0.0,
 ) -> CDGridShallowWaterConfig:
     """Iter-1009/1021/1030 dual-target preset: W2 ≤ 0.119 m/s + W5 day-5 artifact-free.
 
@@ -359,6 +368,7 @@ def iter1009_dual_target_config(
         boundary_fix=True,
         damp_v=damp_v, nord_v=2,
         apply_fortran_xppm_boundary=True,
+        d4_bg_prod=d4_bg_prod,
     )
 
 
@@ -1319,6 +1329,7 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                 # responds to the flag from iter-889 onward.
                 apply_fortran_xppm_boundary=(
                     self.config.apply_fortran_xppm_boundary),
+                d4_bg=self.config.d4_bg_prod,
             )
             return FV3EdgeShallowWaterState(
                 h=dh, u_d=du, v_d=dv,

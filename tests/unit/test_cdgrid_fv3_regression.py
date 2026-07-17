@@ -11742,3 +11742,47 @@ class TestDSw4StructuralLockAstScanner(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_fv3_sw_d4_divergence_damping_decays():
+    """d4_bg (d_sw5 nord=1 del-4 background, certified reference) SIGN
+    pin: on a pure divergent perturbation the del-4 term must ACCELERATE
+    divergence decay vs the del-2-only baseline, and d4_bg=0 must be
+    bit-identical to the pre-existing path."""
+    import jax.numpy as jnp
+    import numpy as np
+    from legoesm.core.operators_cdgrid import fv3_sw_tendencies
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
+        create_cubed_sphere_cdgrid,
+    )
+
+    n = 12
+    grid = create_cubed_sphere(n)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    rng = np.random.default_rng(7)
+    h = jnp.asarray(8000.0 + 0.0 * rng.standard_normal((6, n, n)))
+    # divergent wind: u_d = dphi/dx-like bump on face fields
+    bump = np.zeros((6, n, n + 1))
+    bump[:, n // 2 - 2:n // 2 + 2, n // 2 - 2:n // 2 + 3] = 5.0
+    u_d = jnp.asarray(bump)
+    v_d = jnp.asarray(np.transpose(bump, (0, 2, 1)))
+    h_s = jnp.zeros_like(h)
+
+    base = fv3_sw_tendencies(h, u_d, v_d, h_s, cdgrid,
+                             div_damp=8.0 * 1.0e-3, dddmp=0.2)
+    off = fv3_sw_tendencies(h, u_d, v_d, h_s, cdgrid,
+                            div_damp=8.0 * 1.0e-3, dddmp=0.2, d4_bg=0.0)
+    on = fv3_sw_tendencies(h, u_d, v_d, h_s, cdgrid,
+                           div_damp=8.0 * 1.0e-3, dddmp=0.2, d4_bg=0.16)
+    # d4_bg=0 == omitted (bit-identical off path)
+    for a, b in zip(base, off):
+        assert jnp.array_equal(a, b)
+    # sign: the added term must push u toward decay of the divergent
+    # bump — the projected tendency opposes the wind perturbation more
+    # strongly (or equal at machine floor) than the del-2 baseline
+    du_base, du_on = base[1], on[1]
+    proj_base = float(jnp.vdot(u_d, du_base))
+    proj_on = float(jnp.vdot(u_d, du_on))
+    assert proj_on < proj_base, (proj_base, proj_on)
+    assert np.isfinite(proj_on)

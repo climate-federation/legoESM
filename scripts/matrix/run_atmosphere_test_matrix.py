@@ -2540,8 +2540,28 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                 n, omega=(0.0 if test_num == 8 else constants.Omega),
                 use_duogrid=True, k2e_nord=4)
         else:
-            grid = (create_cubed_sphere(n, omega=0.0, use_duogrid=True)
-                    if test_num == 8 else create_cubed_sphere(n))
+            # LEGOESM_SW_MODON_K2E_NORD (modons only): duo halo Lagrange
+            # order on the LEGACY equiangular grid — isolates halo order
+            # from the tuned geometry (the --fv3-native-grid bundle swaps
+            # both and destabilizes the tuned A-L solver).  Default: the
+            # legacy order 2.
+            _m_nord = os.environ.get("LEGOESM_SW_MODON_K2E_NORD")
+            # LEGOESM_SW_CUBE_DUO_NORD (opt-in probe, Williamson lane):
+            # the production Williamson cases run NON-duogrid (balanced
+            # flows, calibrated separately) — this knob turns the legacy
+            # equiangular duo halos ON for them at the given Lagrange
+            # order (2 or 4), for halo-order sensitivity probes on the
+            # W2 imprint.  Unset = production default (no duo).
+            _w_nord = os.environ.get("LEGOESM_SW_CUBE_DUO_NORD")
+            if test_num == 8:
+                grid = create_cubed_sphere(
+                    n, omega=0.0, use_duogrid=True,
+                    k2e_nord=int(_m_nord) if _m_nord else None)
+            elif _w_nord:
+                grid = create_cubed_sphere(
+                    n, use_duogrid=True, k2e_nord=int(_w_nord))
+            else:
+                grid = create_cubed_sphere(n)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         dt = 300.0
         # Iter-760: switch to Fortran-faithful del-n vorticity damping
@@ -2673,9 +2693,15 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                 os.environ.get("LEGOESM_SW_DIV_DAMP_FACTOR", "8.0"))
             _sw_hd_fac = float(
                 os.environ.get("LEGOESM_SW_HYPERDIFF_FACTOR", "2.0"))
+            # LEGOESM_SW_D4_BG (probe): d_sw5 nord=1 del-4 background
+            # divergence damping on the production path (certified d_sw5
+            # reference; FV3 fv_arrays default 0.16).  0.0 = current
+            # calibrated production behaviour.
+            _sw_d4 = float(os.environ.get("LEGOESM_SW_D4_BG", "0.0"))
             config = iter1009_dual_target_config(
                 n, div_damp_factor=_sw_dd_fac,
                 hyperdiff_coeff=_sw_hd_fac * _hyperdiff_cube(n),
+                d4_bg_prod=_sw_d4,
             )
         else:
             config = iter1009_dual_target_config(n)
