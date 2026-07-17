@@ -37,14 +37,23 @@ deliberate departures / version choices (canaries in
   dissipative conversion, non-negative for the ``sign(c-ubm)`` tendency); the
   two differ by ``-ubm*gwut``. Opt in with ``config.dttke_use_intrinsic``
   (default ``False`` = the pinned 3.0.1 oracle).
-* **Standalone eddy diffusion (default OFF).** ``config.do_eddy_diffusion``
-  defaults to ``False``. E3SM exports the GW eddy diffusivity (the ``EKGWSPEC``
-  diagnostic) and defers the u/v/T eddy diffusion to the host
-  ``vertical_diffusion`` scheme. When enabled here the module applies the
-  E3SM-faithful dry-static-energy diffusion heating ``dttdf`` AND, so the GW
-  momentum eddy flux is not dropped standalone, the u/v eddy diffusion that
-  E3SM defers to the host (``dttdf`` and the u/v diffusion are applied only in
-  this branch, not otherwise).
+* **Spectral thermal term (flag-selectable, ``use_e3sm_spectral_heating``).**
+  E3SM's spectral (``ngwv > 0``) path UNCONDITIONALLY band-limits ``dttke`` to
+  midpoints ``ktop+1..kbotbg`` (gw_common.F90:726-728) and adds the
+  dse-diffusion heating ``dttdf`` (``ttgw = dttke + dttdf``, :721,731) — with
+  NO u/v diffusion: ``egwdffi`` is exported ONLY as the ``EKGWSPEC``
+  diagnostic, ``vertical_diffusion`` never reads it, and E3SM never diffuses
+  u/v with it (the earlier "defers to the host" wording here was WRONG).  The
+  DEFAULT (flag OFF) sums ``dttke`` over ALL levels (a deep Beres source
+  deposits heating below 500 hPa that E3SM does not) and omits ``dttdf``;
+  constituent ``qtgw`` diffusion is not represented (no ``q`` in the
+  interface).  ``do_eddy_diffusion`` remains a STANDALONE ADDITION (u/v
+  diffusion with no E3SM analog + the same ``dttdf``, added once when both
+  are on).
+* **C.-C. Chen fixer is unconditional in E3SM** (called after each spectral
+  ``gw_drag_prof``: Beres gw_drag.F90:800, CM :863);
+  ``config.do_energy_conservation`` defaults ``False`` here — a DEPARTURE
+  from the oracle's shipped behavior, flip owed after AMIP validation.
 * **Driver-level orographic heating + landfrac (E3SM gw_tend, gw_drag.F90:
   902-915).** E3SM applies the oro tendencies OUTSIDE gw_drag_prof: it scales
   ``utgw *= cam_in%landfrac`` (:904-906, zeroing oro drag over ocean) and heats
@@ -178,8 +187,14 @@ __physics_contract__ = {
         "closure -(u*du+v*dv)/c_pd by default, or the E3SM discrete-step "
         "closure -(du*(u+0.5*dt*du)+dv*(v+0.5*dt*dv))/c_pd when "
         "use_discrete_ke_heating=True). "
-        "For the spectral path dT_dt is the ground-relative dttke term, which "
-        "is SIGNED (can cool where U>c>0). eps_gwd = -integral rho*(u*du+v*dv)*dz "
+        "For the spectral path dT_dt defaults to the ground-relative dttke "
+        "term, which is SIGNED (can cool where U>c>0); with "
+        "use_e3sm_spectral_heating or do_eddy_diffusion it is dttke + the "
+        "dse-diffusion dttdf (and the E3SM flag band-limits dttke to "
+        "midpoints above ~500 hPa); with do_energy_conservation=True the "
+        "C.-C. Chen fixer additionally redistributes the below-source dse "
+        "so the final dT_dt is the fixer-adjusted total. "
+        "eps_gwd = -integral rho*(u*du+v*dv)*dz "
         "is the mean-flow KE removal rate (positive for the orographic path; "
         "SIGNED for spectra, negative where the flow is accelerated toward c)."
     ),
@@ -1621,10 +1636,11 @@ def e3sm_cam_gwd(
     # heating -- it is signed (cools where U>c>0) and is not the mean-flow KE
     # removal rate eps_gwd. The E3SM-3.0.1 oracle (gw_common.F90:727,
     #   dttke(:,k) = dttke(:,k) + c(:,l) * gwut(:,k,l))
-    # uses ``sum_l c_l * gwut_l`` — faithfully reproduced below.  When
-    # ``config.do_eddy_diffusion`` is on, E3SM ALSO adds the dse-diffusion
-    # heating ``dttdf`` (ttgw = dttke + dttdf, gw_common.F90:731); the GW eddy
-    # diffusion of u, v, dse runs through the implicit tridiagonal solver.
+    # uses ``sum_l c_l * gwut_l`` — faithfully reproduced below.  E3SM adds
+    # the dse-diffusion heating ``dttdf`` UNCONDITIONALLY on the spectral
+    # path (ttgw = dttke + dttdf, gw_common.F90:731) and band-limits dttke —
+    # here both are opt-in via ``use_e3sm_spectral_heating`` (or the
+    # ``do_eddy_diffusion`` standalone addition supplies dttdf too).
     #
     # NOTE (cross-version): newer CAM/EAM trunk uses the intrinsic-frequency
     # form ``sum_l (c_l - ubm) * gwut_l`` instead (codex iter-2 #2).  We match
@@ -1644,23 +1660,48 @@ def e3sm_cam_gwd(
         else:
             ceff = c[:, None, :]
         dttke = jnp.sum(ceff * gwut, axis=2)            # (ncol, nlev)
+
+        # E3SM band-limits dttke to midpoints ktop+1..kbotbg (gw_common.F90:
+        # 726-728; ktop = 0 parameter, gw_drag.F90:72; kbotbg = the interface
+        # above 500 hPa, :346) — identical for the frontal source (whose
+        # tend_level IS kbotbg so gwut = 0 below), but a deep Beres source
+        # (tend_level = maxi below 500 hPa) deposits ground-relative wave
+        # heating below the band that E3SM does not.  Flagged
+        # (use_e3sm_spectral_heating); the band mask uses the SAME 0-based
+        # convention as gw_ediff's egwdffm mask (E3SM 1-based midpoints
+        # ktop+1..kbot -> ours ktop..kbot-1, i.e. ``k < kbot``).
+        if config.use_e3sm_spectral_heating:
+            pmean_b0 = jnp.mean(pmid, axis=0)
+            kbot_bg = jnp.clip(
+                jnp.argmin(jnp.abs(pmean_b0 - config.ediff_kbot_p)),
+                1, nlev - 1,
+            ).astype(jnp.int32)
+            band = (jnp.arange(nlev)[None, :] < kbot_bg).astype(u.dtype)
+            dttke = dttke * band
         dT_dt = dttke / cpair
 
         # ---- GW-induced eddy diffusion (gw_ediff + gw_diff_tend) ----
-        # Spectral path only.  Provenance (codex final-3): in E3SM, inside
-        # gw_drag_prof the effective diffusivity egwdffi is used by gw_diff_tend
-        # ONLY for the dry-static-energy heating term ``dttdf`` (ttgw =
-        # dttke + dttdf, gw_common.F90:721-731) and for constituents (qtgw); the
-        # diffusion of MOMENTUM (u, v) and temperature by egwdffi is applied
-        # DOWNSTREAM by the host vertical_diffusion scheme (egwdffi is exported
-        # as the EKGWSPEC diagnostic and summed into the model's eddy
-        # diffusivity).  For a self-contained GWD module we apply BOTH here: the
-        # E3SM-faithful dse heating ``dttdf`` (added to dT_dt), AND the
-        # u/v eddy diffusion that E3SM defers to vertical_diffusion (so the GW
-        # momentum eddy flux is not silently dropped when this module is used
-        # standalone).  The implicit tridiagonal solve reuses the shared
-        # thomas_solve and is validated against the E3SM LU oracle to ~5e-16.
-        if config.do_eddy_diffusion:
+        # E3SM PROVENANCE (gw_common.F90:708-731, corrected — the earlier
+        # docstring's "E3SM defers u/v/T eddy diffusion to the host
+        # vertical_diffusion" claim was FALSE): inside gw_drag_prof the
+        # spectral (ngwv > 0) path UNCONDITIONALLY runs gw_ediff, diffuses
+        # the constituents (qtgw) and dry static energy (``dttdf``), and
+        # applies ``ttgw = dttke + dttdf`` — there is no flag.  egwdffi is
+        # exported ONLY as the EKGWSPEC history diagnostic;
+        # vertical_diffusion never reads it, and E3SM NEVER diffuses u/v
+        # with it anywhere.  Two selectable behaviors here:
+        #   * use_e3sm_spectral_heating (faithful, default OFF): add the
+        #     unconditional dse-diffusion heating dttdf (no u/v diffusion —
+        #     matching E3SM).  Constituent qtgw is not represented (no q in
+        #     the GWD interface; declared required-inputs departure).
+        #   * do_eddy_diffusion (STANDALONE ADDITION, default OFF): also
+        #     diffuse u/v through egwdffi — physics E3SM does NOT contain,
+        #     kept for standalone use so the GW momentum eddy flux is not
+        #     silently dropped; plus the same dttdf.
+        # Both ON composes (band + dttdf once + u/v diffusion); dttdf is
+        # added exactly once.  The implicit tridiagonal solve reuses the
+        # shared thomas_solve, validated against the E3SM LU oracle ~5e-16.
+        if config.do_eddy_diffusion or config.use_e3sm_spectral_heating:
             ktop = 0
             # E3SM kbotbg = the bottom of the background-wave region (~500 hPa).
             # Keep the index a 0-d TRACED int32 (jnp.argmin, NOT int(...)) so the
@@ -1688,13 +1729,17 @@ def e3sm_cam_gwd(
             a, b, cc = gw_diff_tridiag_coeffs(
                 egwdffi, rhoi_kludge, pmid, rdpm, dt, gravit, ktop, kbot,
             )
-            # Diffuse u, v through the GW eddy diffusivity (constituent path).
-            du_diff = gw_diff_tend(u, a, b, cc, dt)
-            dv_diff = gw_diff_tend(v, a, b, cc, dt)
-            du_dt = du_dt + du_diff
-            dv_dt = dv_dt + dv_diff
+            if config.do_eddy_diffusion:
+                # STANDALONE ADDITION (no E3SM analog): diffuse u, v through
+                # the GW eddy diffusivity.
+                du_diff = gw_diff_tend(u, a, b, cc, dt)
+                dv_diff = gw_diff_tend(v, a, b, cc, dt)
+                du_dt = du_dt + du_diff
+                dv_dt = dv_dt + dv_diff
             # Dry static energy s = cpair*T + g*z; diffuse it and convert the
-            # dse tendency to a temperature tendency (dttdf).
+            # dse tendency to a temperature tendency (dttdf) — E3SM applies
+            # this UNCONDITIONALLY on the spectral path (ttgw = dttke +
+            # dttdf, gw_common.F90:721,731).
             dse = cpair * T + gravit * z_full
             dttdf = gw_diff_tend(dse, a, b, cc, dt)
             dT_dt = dT_dt + dttdf / cpair
