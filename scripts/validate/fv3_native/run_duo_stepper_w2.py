@@ -112,6 +112,12 @@ def main():
                     help="vector wedge treatment (lagrange = upstream-"
                          "faithful re-extrapolation; a2d = keep the "
                          "projected geographic-corner values)")
+    ap.add_argument("--oracle-conventions", action="store_true",
+                    help="BOUNDED-conventions gridstruct (the lane the "
+                         "Zenodo duo runs execute: extended-lattice "
+                         "metrics, bounded_domain=True guards, corner "
+                         "flags off — d_sw4 corner-KE fix and plain "
+                         "corner specials disabled)")
     args = ap.parse_args()
 
     from legoesm.core.fv3_native_duo_stepper import (
@@ -125,7 +131,9 @@ def main():
                                      use_ext_bundle=args.ext_bundle,
                                      vector_corner=args.vector_corner,
                                      ext_exclude=excl,
-                                     use_ext_metrics=args.ext_metrics)
+                                     use_ext_metrics=args.ext_metrics,
+                                     oracle_conventions=args.
+                                     oracle_conventions)
     states = w2_six_face_state(ctx)
     nmap = build_nearest_map(ctx)
 
@@ -165,6 +173,7 @@ def main():
         vector_corner=np.array(args.vector_corner),
         ext_exclude=np.array(args.ext_exclude),
         ext_metrics=np.array(bool(args.ext_metrics)),
+        oracle_conventions=np.array(bool(args.oracle_conventions)),
         protocol=f"duo stepper ({mode}); covariant->geographic "
         "exact tangent inversion; NEAREST-cell 1deg sampling (pattern-"
         "level protocol, envelope-comparable to the fregrid reference)")

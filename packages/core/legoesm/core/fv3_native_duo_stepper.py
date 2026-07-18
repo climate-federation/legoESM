@@ -41,33 +41,44 @@ def build_six_face_duo_context(n: int, ng: int = 3,
                                oracle_conventions: bool = False) -> dict:
     """Gridstructs + Bounds for all six faces (certified builders).
 
-    ``oracle_conventions=True`` (codex vertex oracle-diff, 2026-07-18)
-    keeps the two upstream conventions our SB4-era context patches
-    overwrote — BOTH TOGETHER, never singly (isolated reversions
-    measured violently unstable):
+    ``oracle_conventions=True`` = the BOUNDED-conventions lane the
+    Zenodo duo runs actually execute (proven by the C48 fms.out
+    da_min_c: duo took the ``bounded_domain`` grid-init arms).  Metrics
+    come from ``build_fv3_native_gridstruct_bounded`` (extended
+    own-face lattice, real geometry everywhere incl the regular
+    120-degree vertex kink cosa=-1/2/sina=sqrt(3)/2/rsina=4/3), and
+    every stage guard sees ``bounded_domain=True`` with the four
+    corner flags FALSE (upstream sets them only at
+    ``.not.bounded``) — so the d_sw4 corner-KE fix and every
+    plain-lane corner/edge special-case switch off exactly as in the
+    duo runs.
 
-    - the border B-ring ``rsina`` stays at the upstream fill poison
-      (fv_grid_utils.F90:537 semantics) instead of the phase-2B real
-      cross-face angles at non-vertex border nodes;
-    - the corner-diagonal A ``area``/``rarea`` stay at the LIVE
-      ``-1e8 / -1e-8`` sentinels (upstream duo init never mutates the
-      gridstruct metrics; the sentinel suppresses wedge vorticity by
-      1e-8 in d_sw5's ``wk``).
+    ``oracle_conventions=False`` keeps the plain-conventions stack
+    (kinked mpp-state metrics + the SB4-era angle/area overrides that
+    approximate the bounded values at edges).
     """
     from legoesm.core.fv3_native_sw_core import Bounds
     from legoesm.grids.fv3_native_halos import ed_supergrid_lonlat_ref
     from legoesm.grids.fv3_native_metrics import compute_fv3_native_angles
-    from legoesm.grids.fv3_native_gridstruct import FV3_OMEGA, FV3_RADIUS_M
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_OMEGA,
+        FV3_RADIUS_M,
+        build_fv3_native_gridstruct_bounded,
+    )
 
     # radius/omega: the W2 balanced state, the duo-target gate and the
     # Zenodo reference all use the FMS constants printed by the duo run
     # log ("Radius is 6371200.0, omega is 7.2921e-5") — the builder's
     # constants.R_earth/Omega defaults put a broad scale error on every
     # metric and Coriolis term (codex vertex-diff P2).
-    gs6 = [build_fv3_native_gridstruct(n, ng, tile=t,
-                                       radius=FV3_RADIUS_M,
-                                       omega=FV3_OMEGA)
-           for t in range(1, 7)]
+    if oracle_conventions:
+        gs6 = [build_fv3_native_gridstruct_bounded(n, ng, tile=t)
+               for t in range(1, 7)]
+    else:
+        gs6 = [build_fv3_native_gridstruct(n, ng, tile=t,
+                                           radius=FV3_RADIUS_M,
+                                           omega=FV3_OMEGA)
+               for t in range(1, 7)]
 
     # DUO angle override: the plain-mpp gridstruct poisons the panel-edge
     # B-node sina/rsina (plain FV3 never reads them — its non-duo d_sw3
@@ -135,12 +146,14 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     dg = create_fv3_native_duogrid_data(n, ng=min(ng, 3), k2e_nord=4)
 
     for gs in gs6:
-        gs.setdefault("bounded_domain", False)
-        gs.setdefault("grid_type", 0)
-        gs.setdefault("sw_corner", True)
-        gs.setdefault("se_corner", True)
-        gs.setdefault("ne_corner", True)
-        gs.setdefault("nw_corner", True)
+        # bounded lane: guards see bounded_domain=True + corner flags
+        # FALSE (upstream sets sw..ne_corner only at .not.bounded) —
+        # d_sw4's corner-KE fix and every plain corner special switch
+        # off exactly as in the duo runs
+        gs["bounded_domain"] = bool(oracle_conventions)
+        gs["grid_type"] = 0
+        for k in ("sw_corner", "se_corner", "ne_corner", "nw_corner"):
+            gs[k] = not oracle_conventions
     ectx = None
     if use_ext_bundle:
         # FULL ext consistency bundle: the faithful ext_scalar /
@@ -572,9 +585,12 @@ def one_grad_p_1lev(u, v, pkc, gz, divg2, gs: dict, bd, npx: int,
         "dya": fort(gs["dya"], isd, jsd),
         "edge_w": gs["edge_w"], "edge_e": gs["edge_e"],
         "edge_s": gs["edge_s"], "edge_n": gs["edge_n"],
-        "bounded_domain": False, "grid_type": 0,
-        "sw_corner": True, "se_corner": True,
-        "nw_corner": True, "ne_corner": True,
+        "bounded_domain": bool(gs.get("bounded_domain", False)),
+        "grid_type": 0,
+        "sw_corner": bool(gs.get("sw_corner", True)),
+        "se_corner": bool(gs.get("se_corner", True)),
+        "nw_corner": bool(gs.get("nw_corner", True)),
+        "ne_corner": bool(gs.get("ne_corner", True)),
     }
 
     pk1 = np.array(pkc[:, :, 0], copy=True)
