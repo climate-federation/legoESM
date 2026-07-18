@@ -325,8 +325,16 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
                 uc[i, j - 1] + uc[i + 1, j - 1]
                 + uc[i, j] + uc[i + 1, j])) * RSIN_V[i, j]
 
-    # ---- panel edges (auth 656-726; fire always on the global cube) ----
-    if is_ == 1:                                     # West edge
+    # ---- panel edges (auth 656-726) ----
+    # Guard `.not.bounded .or. .not.duogrid` (auth 656): fires on the
+    # plain-conventions lane (bounded=F), SKIPPED entirely in the real
+    # duo runs (bounded_domain=T — the interior ut/vt formula stands at
+    # the panel edges, reading the bounded gridstruct's real edge
+    # rsin_u/rsin_v).  The corner 2x2 blocks below sit inside the same
+    # upstream guard and self-gate via the corner flags (FALSE under
+    # bounded).
+    plain_edges = not bool(gs.get("bounded_domain", False))
+    if plain_edges and is_ == 1:                     # West edge
         for j in range(jsd, jed + 1):
             if uc[1, j] * dt > 0.0:
                 ut[1, j] = uc[1, j] / SIN_SG[0, j, 3 - 1]
@@ -337,7 +345,7 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
                 ut[0, j - 1] + ut[1, j - 1] + ut[0, j] + ut[1, j])
             vt[1, j] = vc[1, j] - 0.25 * COSA_V[1, j] * (
                 ut[1, j - 1] + ut[2, j - 1] + ut[1, j] + ut[2, j])
-    if (ie + 1) == npx:                              # East edge
+    if plain_edges and (ie + 1) == npx:              # East edge
         for j in range(jsd, jed + 1):
             if uc[npx, j] * dt > 0.0:
                 ut[npx, j] = uc[npx, j] / SIN_SG[npx - 1, j, 3 - 1]
@@ -350,7 +358,7 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
             vt[npx, j] = vc[npx, j] - 0.25 * COSA_V[npx, j] * (
                 ut[npx, j - 1] + ut[npx + 1, j - 1]
                 + ut[npx, j] + ut[npx + 1, j])
-    if js == 1:                                      # South edge
+    if plain_edges and js == 1:                      # South edge
         for i in range(isd, ied + 1):
             if vc[i, 1] * dt > 0.0:
                 vt[i, 1] = vc[i, 1] / SIN_SG[i, 0, 4 - 1]
@@ -361,7 +369,7 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
                 vt[i - 1, 0] + vt[i, 0] + vt[i - 1, 1] + vt[i, 1])
             ut[i, 1] = uc[i, 1] - 0.25 * COSA_U[i, 1] * (
                 vt[i - 1, 1] + vt[i, 1] + vt[i - 1, 2] + vt[i, 2])
-    if (je + 1) == npy:                              # North edge
+    if plain_edges and (je + 1) == npy:              # North edge
         for i in range(isd, ied + 1):
             if vc[i, npy] * dt > 0.0:
                 vt[i, npy] = vc[i, npy] / SIN_SG[i, npy - 1, 4 - 1]
