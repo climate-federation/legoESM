@@ -4,12 +4,13 @@ daily geographic v-wind on the 1-degree lat-lon grid for the duo-target
 gate (scripts/validate/fv3_native/w2_duo_oracle_gate.py contract:
 times_days strictly increasing ending at --days, v (nt, 181, 360)).
 
-Remap protocol (documented approximation): covariant A-winds from the
-certified d2a2c chain -> geographic (east,north) via the exact local
-tangent-basis inversion at cell centres -> NEAREST-cell sampling onto
-the 1-degree grid (C-cell sizes >= 1.6deg at C24/C48, so nearest is a
-pattern-level protocol; the Zenodo reference uses fregrid — scores are
-comparable at the envelope level only, stated on output).
+Remap protocol (documented approximation): D winds -> geographic
+(east,north) via the CERTIFIED upstream c2l_ord2 a-matrix operator
+(the runs' own ua/va output used the ord4 sibling; ord2 residual is
+O(dx^2)) -> NEAREST-cell sampling onto the 1-degree grid (C-cell sizes
+>= 1.6deg at C24/C48, so nearest is a pattern-level protocol; the
+Zenodo reference uses fregrid — scores are comparable at the envelope
+level only, stated on output).
 
 Usage: run_duo_stepper_w2.py --n 24 --dt 450 --days 5 --out w2_c24.npz
 """
@@ -22,48 +23,36 @@ import numpy as np
 
 
 def geographic_va(ctx, states):
-    """Per-face geographic northward wind at cell centres."""
-    from legoesm.core.fv3_native_duo_stepper import csw_step_sixface
+    """Per-face geographic northward wind at cell centres via the
+    upstream c2l_ord2 construction (fv_grid_utils:2547-2628): D winds
+    -> geographic (u_lon, v_lat) through center_a_matrix, which
+    matches the upstream z->a build to ~1e-16 on compute cells (codex
+    bounded-r3 (a); the four diagonal halo-corner cells differ —
+    upstream zeroes ec there — and are sliced out below).  Same
+    operator family as the Zenodo runs' own ua/va output (their
+    c2l_ord=4 is the higher-order sibling; ord2's extra residual is
+    O(dx^2), stated on output).  A bounded Fortran z/a dump for full
+    independent certification is a follow-up.
+
+    The previous central-difference tangent-basis inversion painted a
+    +/-15 m/s vertex butterfly on the DAY-0 balanced state (bases
+    straddle the corner kink) — the entire 'vertex imprint' at day 5
+    was that diagnostic artifact, not model error."""
+    from legoesm.grids.fv3_native_ext_vector import (
+        c2l_ord2_face,
+        center_a_matrix,
+    )
 
     n, ng = ctx["n"], ctx["ng"]
     sl = slice(ng, ng + n)
-    outs = csw_step_sixface(ctx, states, dt2=1.0)  # ua/va via certified d2a2c
     v_geo6 = []
     for t in range(6):
         gs = ctx["gs6"][t]
-        lon = gs["agrid_lon"][sl, sl]
-        lat = gs["agrid_lat"][sl, sl]
-        ua = np.asarray(outs[t]["ua"])[sl, sl]
-        va = np.asarray(outs[t]["va"])[sl, sl]
-
-        def xyz(lo, la):
-            return np.stack([np.cos(la) * np.cos(lo),
-                             np.cos(la) * np.sin(lo), np.sin(la)], axis=-1)
-
-        # local i/j unit tangents at cell centres (central differences
-        # over the halo-valid agrid)
-        lo_f = gs["agrid_lon"]
-        la_f = gs["agrid_lat"]
-        p = xyz(lo_f, la_f)
-        e1 = p[ng + 1:ng + n + 1, sl] - p[ng - 1:ng + n - 1, sl]
-        e2 = p[sl, ng + 1:ng + n + 1] - p[sl, ng - 1:ng + n - 1]
-        pc = p[sl, sl]
-        for e in (e1, e2):
-            e -= (e * pc).sum(-1, keepdims=True) * pc
-        e1 /= np.linalg.norm(e1, axis=-1, keepdims=True)
-        e2 /= np.linalg.norm(e2, axis=-1, keepdims=True)
-        # covariant components: ua = V.e1, va = V.e2  ->  solve per cell
-        g11 = (e1 * e1).sum(-1)
-        g12 = (e1 * e2).sum(-1)
-        g22 = (e2 * e2).sum(-1)
-        det = g11 * g22 - g12 * g12
-        c1 = (g22 * ua - g12 * va) / det      # contravariant coefficients
-        c2 = (g11 * va - g12 * ua) / det
-        vvec = c1[..., None] * e1 + c2[..., None] * e2
-        north = np.stack([-np.sin(lat) * np.cos(lon),
-                          -np.sin(lat) * np.sin(lon),
-                          np.cos(lat)], axis=-1)
-        v_geo6.append((vvec * north).sum(-1))
+        amat = center_a_matrix(gs)
+        _, va = c2l_ord2_face(np.asarray(states[t]["u"]),
+                              np.asarray(states[t]["v"]),
+                              gs["dx"], gs["dy"], amat, n, ng)
+        v_geo6.append(va[sl, sl])
     return v_geo6
 
 
@@ -99,11 +88,25 @@ def main():
     ap.add_argument("--ext-bundle", action="store_true",
                     help="faithful ext_scalar/ext_vector duo exchanges "
                          "(fv3_native_ext_vector) + ext halo metrics")
+    ap.add_argument("--ext-metrics", action="store_true",
+                    help="NON-FAITHFUL opt-in: extended-lattice halo "
+                         "metrics (upstream duo never consumes ext "
+                         "metrics in the model; measured harmful)")
+    ap.add_argument("--ext-exclude", default="",
+                    help="comma list of ext families to swap back to the "
+                         "interim exchanges (attribution probes): "
+                         "divgd,cvec,metrics")
     ap.add_argument("--vector-corner", default="lagrange",
                     choices=("lagrange", "a2d"),
                     help="vector wedge treatment (lagrange = upstream-"
                          "faithful re-extrapolation; a2d = keep the "
                          "projected geographic-corner values)")
+    ap.add_argument("--oracle-conventions", action="store_true",
+                    help="BOUNDED-conventions gridstruct (the lane the "
+                         "Zenodo duo runs execute: extended-lattice "
+                         "metrics, bounded_domain=True guards, corner "
+                         "flags off — d_sw4 corner-KE fix and plain "
+                         "corner specials disabled)")
     args = ap.parse_args()
 
     from legoesm.core.fv3_native_duo_stepper import (
@@ -112,9 +115,14 @@ def main():
         w2_six_face_state,
     )
 
+    excl = tuple(x for x in args.ext_exclude.split(",") if x)
     ctx = build_six_face_duo_context(args.n, 3,
                                      use_ext_bundle=args.ext_bundle,
-                                     vector_corner=args.vector_corner)
+                                     vector_corner=args.vector_corner,
+                                     ext_exclude=excl,
+                                     use_ext_metrics=args.ext_metrics,
+                                     oracle_conventions=args.
+                                     oracle_conventions)
     states = w2_six_face_state(ctx)
     nmap = build_nearest_map(ctx)
 
@@ -152,8 +160,12 @@ def main():
         lon=np.arange(360, dtype=float),
         ext_bundle=np.array(bool(args.ext_bundle)),
         vector_corner=np.array(args.vector_corner),
-        protocol=f"duo stepper ({mode}); covariant->geographic "
-        "exact tangent inversion; NEAREST-cell 1deg sampling (pattern-"
+        ext_exclude=np.array(args.ext_exclude),
+        ext_metrics=np.array(bool(args.ext_metrics)),
+        oracle_conventions=np.array(bool(args.oracle_conventions)),
+        protocol=f"duo stepper ({mode}); certified c2l_ord2 D->geographic "
+        "(upstream operator family; runs' own output used c2l_ord=4, "
+        "ord2 residual O(dx^2)); NEAREST-cell 1deg sampling (pattern-"
         "level protocol, envelope-comparable to the fregrid reference)")
     print("saved", args.out, flush=True)
 
