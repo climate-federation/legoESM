@@ -1877,7 +1877,7 @@ def tke_integrate_post_mixing(
         # sqrt(e)/l_eps. Net first-order dissipation identical; the discrete
         # decay factor differs from plain backward-Euler at large dt*diss
         # (NEMO: (1+0.5a)/(1+1.5a) -> 1/3; backward-Euler: 1/(1+a) -> 0).
-        b = 1.0 - (a + c) + 1.5 * dt * _diss_w
+        b = 1.0 - (a + c) + 1.5 * dt * _diss_w  # coeff-ok: NEMO zdftke semi-implicit dissipation split weight (zfact2=1.5·rn_ediss)
         forc_w = forc_w + 0.5 * _diss_w * e_w
     elif _disc == "backward_euler":
         b = 1.0 - (a + c) + dt * _diss_w

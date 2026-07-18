@@ -11,6 +11,7 @@ __param_spec__ = {
         "excluded": {
             "cfl_dt_estimate": "numerics: solver/CFL/smoothing parameter",
             "cfl_safety": "numerics: solver/CFL/smoothing parameter",
+            "n2_threshold": "measurement convention: EVD trigger threshold on N² (NEMO zdfevd rn2<threshold), not trainable",
             "nu_bg": "default 0 = disabled/off (enable via config, not training)",
             "nu_conv": "default 0 = disabled/off (enable via config, not training)",
             "sigmoid_sharpness": "numerics: solver/CFL/smoothing parameter",

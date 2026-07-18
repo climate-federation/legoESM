@@ -779,7 +779,7 @@ def compute_nemo_native_slopes(
         for a in range(3):
             for b in range(3):
                 acc = acc + w[a] * w[b] * fp[a:a + nlat, b:b + nlon, :]
-        return acc * cof / 16.0
+        return acc * cof / 16.0  # coeff-ok: (1-2-1)^2 binomial weight sum (NEMO ldfslp Shapiro z1_16)
 
     def _kp1m(a):  # mask at level k+1, zero at the bottom
         return jnp.concatenate(
