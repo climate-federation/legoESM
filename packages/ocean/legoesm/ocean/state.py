@@ -883,6 +883,10 @@ class BarotropicConfig(NamedTuple):
     # compute-bound.  Use it on reduction-latency-bound decks; the
     # default stays "jacobi".
     barotropic_implicit_preconditioner: str = "jacobi"
+    # Degree of the Chebyshev polynomial preconditioner (only used when
+    # ``barotropic_implicit_preconditioner = 'chebyshev'``); higher = stronger
+    # smoothing per solve at more A-op applies. A count, not a trainable float.
+    barotropic_chebyshev_degree: int = 4
     # Rigid-lid streamfunction solver knobs (only used when
     # ``barotropic_solver = 'rigid_lid'``).  The rigid lid removes the free
     # surface entirely: the depth-integrated flow is non-divergent and carried
