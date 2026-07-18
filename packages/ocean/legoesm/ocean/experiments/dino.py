@@ -609,6 +609,55 @@ DINO_RECIPES: dict[str, dict] = {
         "convection_n2_mode": "adiabatic",
         "convection_n2_threshold": -1e-12,   # NEMO zdfevd rn_evd threshold
     },
+    # === COMPLETE NEMO-DINO card (Kamm et al. 2025) — EVERY setting explicit and
+    # === cited to our NEMO 5.0.2 cfgs/DINO namelist_cfg/_ref, so nothing silently
+    # === inherits a legoESM default. Unlike "nemo_paper" (a partial overlay that
+    # === falls back to non-NEMO defaults on ~8 fields), this is the audited full
+    # === match. See docs/ocean/fidelity/dino_setup_audit.md + the setup+namelist
+    # === audit. ONE piece is not yet config-matchable and is flagged TODO below
+    # === (Madec ln_traldf_iso + ln_ldfeiv). Grid: pair with nemo_faithful_dino_config
+    # === for NEMO's exact 48x195 mesh + bathymetry frame.
+    "nemo_dino_kamm": {
+        # -- EOS (nameos: ln_seos=T, rn_lambda1=0.06, rn_mu1=1.497e-4) --
+        "eos": "nemo_seos",
+        "eos_depth": "geometric",                # key_qco z*/gdept depth for S-EOS
+        # -- Vertical coordinate (namusr_def: ln_zco_nam=T, ln_zps_nam=F -> full-step z) --
+        "vertical_coordinate": "masked_zco",
+        # -- Vertical mixing (namzdf: ln_zdftke=T; namzdf_tke rn_ediff=0.1 rn_ediss=0.7) --
+        "vmix_scheme": "tke",
+        "tke_momentum_visc_bg": 1.2e-4,          # rn_avm0 (NO legoESM 5e-4 stabilizer floor)
+        # -- Convection (namzdf: ln_zdfevd=T, rn_evd=100, nn_evdm=1; hard rn2<0 on eosbn2) --
+        "convection_smooth_transition": False,
+        "convection_n2_mode": "adiabatic",
+        "convection_n2_threshold": -1e-12,
+        # -- Bottom drag (namdrg: ln_non_lin=T; namdrg_bot rn_Cd0=1e-3, rn_ke0=2.5e-3) --
+        "bottom_drag_scheme": "nemo_quadratic",  # r = Cd0*sqrt(u^2+v^2+ke0)
+        # -- Tracer advection (namtra_adv: ln_traadv_fct=T, nn_fct_h=nn_fct_v=2) --
+        "tracer_advection": "fct2",
+        # -- Tracer lateral diffusion (namtra_ldf: ln_traldf_iso + ln_traldf_msc,
+        #    nn_aht_ijk_t=20, rn_Ud=0.027, rn_Ld=100e3) + GM (namtra_eiv: ln_ldfeiv=T,
+        #    nn_aei_ijk_t=21 => Treguier aei0 = rn_Ue*rn_Le = 0.03*100e3 = 3000). --
+        #    TODO(iso-operator): NEMO uses the Madec STANDARD ln_traldf_iso operator;
+        #    legoESM's Madec path (nemo_iso_lap) forces kappa_GM=0, so the faithful
+        #    isoneutral-Redi+GM combination is NOT WIRED. Until implemented we use the
+        #    triads Redi+GM path (Griffies, also isoneutral+GM, different discretization)
+        #    as the closest RUNNABLE approximation — the one remaining un-matched piece.
+        "gm_redi_slope_scheme": "triads",
+        "gm_kappa_scheme": "treguier",
+        "redi_S_max": 0.01,                      # rn_slpmax (namtra_ldf ref default)
+        # -- Momentum (namdyn_adv: ln_dynadv_vec + nn_dynkeg=1; namdyn_vor: ln_dynvor_een) --
+        "ke_gradient_scheme": "hollingsworth",
+        # -- Lateral momentum viscosity (namdyn_ldf: nn_ahm_ijk_t=20, rn_Uv=0.27; NO boost/floor) --
+        "A_h_eq_boost": 1.0,
+        "A_h_floor": 0.0,
+        # -- Barotropic / free surface (namdyn_spg: ln_dynspg_ts=T; nn_bt_flt=2; nn_e=30) --
+        "barotropic_solver": "explicit_substep",
+        "barotropic_time_filter": "nemo_boxcar_centred",
+        "n_barotropic_substeps": 30,
+        # -- Surface forcing (namusr_def: ln_ann_cyc=T seasonal cycle) --
+        "forcing_annual_cycle": True,
+        "wind_through_step": True,
+    },
     # --- L2 — Veros (Vallis nonlinear EOS, TKE, superbee, streamfunction/AB2). ---
     # Dycore identity: recipes.py::veros_faithful_v1 (rigid_lid → the builder
     # auto-applies ab2 + explicit_ab2 + ab2_scope="advective").
@@ -668,7 +717,11 @@ def dino_config_for_recipe(recipe: str,
     """Return a ``DINOConfig`` overlaid with the named model recipe's blocks.
 
     ``recipe`` is one of :data:`DINO_RECIPES` (``legoesm_default``,
-    ``nemo_paper``, ``veros``, ``mitgcm``, ``oceananigans``). The recipe is a
+    ``nemo_paper``, ``nemo_dino_kamm``, ``veros``, ``mitgcm``,
+    ``oceananigans``). ``nemo_dino_kamm`` is the COMPLETE NEMO-faithful card
+    (Kamm et al. 2025) — every setting explicit + cited to the NEMO namelist,
+    vs ``nemo_paper``'s partial overlay that inherits legoESM defaults. The
+    recipe is a
     PURE CONFIG overlay (splatted via ``dataclasses.replace``) selecting shared
     canonical legoESM blocks — no bespoke solver.
 

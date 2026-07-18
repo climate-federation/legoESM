@@ -186,7 +186,8 @@ class TestDINORecipes:
 
     def test_catalog_membership(self):
         assert set(DINO_RECIPES) == {
-            "legoesm_default", "nemo_paper", "veros", "mitgcm", "oceananigans"}
+            "legoesm_default", "nemo_paper", "nemo_dino_kamm",
+            "veros", "mitgcm", "oceananigans"}
         assert set(DINO_L2_RECIPES) == {"veros", "mitgcm", "oceananigans"}
         assert set(DINO_L2_RECIPES) <= set(DINO_RECIPES)
 
@@ -219,6 +220,35 @@ class TestDINORecipes:
         assert (ocn.eos, ocn.vmix_scheme, ocn.tracer_advection,
                 ocn.momentum_advection, ocn.outer_integrator) == (
             "veros_gsw", "catke", "weno7", "weno7", "ab2")
+
+    def test_nemo_dino_kamm_card_is_complete(self):
+        # The completed NEMO-DINO card (Kamm 2025) sets EVERY NEMO-relevant field
+        # explicitly (unlike nemo_paper, which inherits legoESM defaults on ~8).
+        # Assert each against its NEMO namelist value so the card can't drift.
+        c = dino_config_for_recipe("nemo_dino_kamm")
+        nemo = {
+            "eos": "nemo_seos", "eos_depth": "geometric",
+            "vertical_coordinate": "masked_zco",          # ln_zco_nam, full-step
+            "vmix_scheme": "tke", "tke_momentum_visc_bg": 1.2e-4,  # rn_avm0
+            "convection_smooth_transition": False, "convection_n2_mode": "adiabatic",
+            "convection_n2_threshold": -1e-12,            # zdfevd
+            "bottom_drag_scheme": "nemo_quadratic",       # ln_non_lin
+            "tracer_advection": "fct2",                   # nn_fct=2
+            "gm_kappa_scheme": "treguier", "redi_S_max": 0.01,  # nn_aei=21, rn_slpmax
+            "ke_gradient_scheme": "hollingsworth",        # nn_dynkeg=1
+            "A_h_eq_boost": 1.0, "A_h_floor": 0.0,        # no legoESM stabilizers
+            "barotropic_solver": "explicit_substep",      # ln_dynspg_ts
+            "barotropic_time_filter": "nemo_boxcar_centred",  # nn_bt_flt=2
+            "forcing_annual_cycle": True, "wind_through_step": True,  # ln_ann_cyc
+            "use_gm_redi": True,                          # ln_ldfeiv
+        }
+        for field, want in nemo.items():
+            assert getattr(c, field) == want, f"{field}: {getattr(c, field)} != {want}"
+        # It must build a model config (the demanding masked_zco + stabilizers-off
+        # + boxcar combination is exercised) — the recipe is runnable, not just a
+        # dict of values.
+        grid = dino_lat_lon_grid(c, n_lon=10)
+        dino_lat_lon_model_config(grid, c, physics=True)
 
     def test_nemo_paper_convection_is_nemo_hard_switch(self):
         # NEMO zdfevd is a HARD rn2<0 switch on the adiabatic (eosbn2) N^2. The
