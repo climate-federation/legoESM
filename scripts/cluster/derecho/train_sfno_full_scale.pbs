@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -l
 # GraphCast-scale SFNO_FULL training on NCAR Derecho (PBS Pro, single A100).
 #
 # Trains the FULL SFNO atmospheric emulator (sfno_full — SFNO replaces BOTH the
@@ -8,49 +8,118 @@
 #       progressively longer -> 120 h), for free-running multi-day stability; and
 #   (2) GRAPHCAST-SCALE DATA: 40 years (1979-2018) x 4 seasonal windows/yr
 #       (~3200 IC/target pairs) with full seasonal + interannual coverage.
-# See config/aimip/wbcompare/suite_sfno_full_scale.yaml.
+# See config/aimip/wbcompare/suite_sfno_full_scale.yaml (T63 / L8).
 #
 # SINGLE A100: sfno_full has NO data-parallel path — train_sfno_full_spectral
-# RAISES NotImplementedError under aimip_data_parallel / nproc>1 (its
-# _train_sfno_full_loop is not DP-aware). So this runs on exactly ONE GPU. The
-# per-epoch checkpoint cadence + run_aimip --resume lets a walltime kill be
-# picked up (start_epoch indexes into the curriculum epoch_plan). Long walltime:
-# the 120 h phase (20 SFNO macro steps/sample, checkpointed-scan backward) over
-# ~3200 samples dominates.
+# RAISES NotImplementedError under aimip_data_parallel / nproc>1. So this runs on
+# exactly ONE GPU.
 #
-# Submit:  qsub train_sfno_full_scale.pbs
+# SELF-CHAINING (Derecho's `main` queue caps walltime at 12 h — a 48 h request is
+# REJECTED). Each link trains until an 11h15m budget, then RESUBMITS itself with
+# --resume until results/<out>/sfno_full/params.eqx appears (up to CHAIN_MAX
+# links). sfno_full checkpoints per-EPOCH only (its _train_sfno_full_loop loads
+# the window set host-resident — there is NO chunk_latest.eqx), so the resume
+# granularity is one epoch: a link that completes >=1 epoch advances + chains; a
+# link where a SINGLE epoch exceeds the 11h15m budget writes no new epoch
+# checkpoint and STOPS rather than restart epoch 0 forever (remedy: shorten the
+# 120 h curriculum phase or shrink net/data so an epoch fits one 12 h link).
+#
+# Submit:  qsub scripts/cluster/derecho/train_sfno_full_scale.pbs
 # Env overrides:
-#   WB_SUITE       training suite (default config/aimip/wbcompare/suite_sfno_full_scale.yaml)
-#   WB_OUT_ROOT    output root (default results/aimip_wbcompare_scale)
+#   WB_SUITE     training suite (default config/aimip/wbcompare/suite_sfno_full_scale.yaml)
+#   WB_OUT_ROOT  output root (default results/aimip_wbcompare_scale; MUST equal
+#                the suite's output_dir — the chain reads epoch_*.eqx/params.eqx there)
+#   CHAIN_MAX    max chained links (default 30; the curriculum is 28 epochs)
 #PBS -A P08010000
 #PBS -N sfno_full_scale
 #PBS -q main
 #PBS -l job_priority=regular
 #PBS -l select=1:ncpus=64:ngpus=1:gpu_type=a100:mem=200GB
-#PBS -l walltime=48:00:00
+#PBS -l walltime=12:00:00
 #PBS -j oe
 #PBS -k eod
-set -euo pipefail
+# NOTE: `set -uo pipefail` WITHOUT -e — the `timeout ... ; RC=$?` capture below
+# needs the non-zero budget-timeout exit NOT to abort the script (else it could
+# never chain). Mirrors scripts/cluster/aimip_scale/train_aimip_derecho.pbs.
+set -uo pipefail
+
+CHAIN="${CHAIN:-0}"
+CHAIN_MAX="${CHAIN_MAX:-30}"
 
 cd "${PBS_O_WORKDIR}"
-source scripts/cluster/scaling_derecho/_env.sh
-module load conda cuda
-export JAX_PLATFORMS=cuda,cpu
+source scripts/cluster/scaling_derecho/_env.sh   # sets REPO, PY, conda, JAX env
+cd "$REPO"
+
 export JAX_ENABLE_X64=1
-export XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+# cudaMallocAsync allocator: defrag the SFNO rollout's growing footprint (the
+# default BFC allocator fragmented + OOM'd on the long curriculum rollout). Under
+# 'platform' the PREALLOCATE/MEM_FRACTION knobs are ignored (grows on demand to
+# the device limit). Override with XLA_PYTHON_CLIENT_ALLOCATOR= to restore BFC.
+export XLA_PYTHON_CLIENT_ALLOCATOR="${XLA_PYTHON_CLIENT_ALLOCATOR:-platform}"
+# Expose the CPU backend alongside CUDA so the norm-stats streaming / any host
+# staging can build off-GPU (#1155-class). cuda stays the default device.
+export JAX_PLATFORMS=cuda,cpu
 
 SUITE="${WB_SUITE:-config/aimip/wbcompare/suite_sfno_full_scale.yaml}"
 OUT_ROOT="${WB_OUT_ROOT:-results/aimip_wbcompare_scale}"
+# run_aimip writes checkpoint_dir = output_dir/<variant> (run_aimip.py:224); the
+# suite pins output_dir=$OUT_ROOT and variant=sfno_full, so epoch_*.eqx AND the
+# final params.eqx both land here. Keep WB_OUT_ROOT == the suite's output_dir.
+CKPT="${OUT_ROOT}/sfno_full"
 mkdir -p "${OUT_ROOT}/logs"
-echo "[$(date)] Derecho sfno_full SCALE train | suite=${SUITE} out=${OUT_ROOT} (single A100, no DP)"
 
-# run_aimip is single-GPU spectral; the suite pins variants:[sfno_full], so this
-# trains ONLY the full SFNO emulator with the rollout curriculum + many-year data.
-# --resume is ALWAYS safe: maybe_resume_model returns (model, epoch 0) when no
-# epoch_*.eqx exists yet (first submit), and resumes from the highest epoch on a
-# resubmit -- WITHOUT it a 48 h walltime kill silently restarts epoch 0 and
-# discards the prior run (the 120 h curriculum phase over ~3200 pairs at 128/8
-# routinely exceeds one 48 h link, so a plain resubmit must resume, not restart).
-python -u scripts/run/run_aimip.py --suite "${SUITE}" --resume
+# Resume if an epoch checkpoint already exists (or a chained link forces it).
+# maybe_resume_model tolerates "no checkpoint yet" (returns epoch 0), so passing
+# --resume on the FIRST submit is safe — it just starts fresh.
+RESUME_FLAG=""
+if ls "$CKPT"/epoch_*.eqx >/dev/null 2>&1 || [ "${RESUME:-0}" = "1" ]; then
+  RESUME_FLAG="--resume"
+fi
 
-echo "[$(date)] done -> checkpoints under ${OUT_ROOT}/sfno_full"
+# LINK BUDGET: stop training OURSELVES before PBS kills the whole script, so the
+# chain qsub below can still fire (a PBS walltime kill terminates script+python
+# together). 11h15m under the 12 h `main` cap. Keep in sync with `#PBS walltime`.
+LINK_BUDGET_S="${LINK_BUDGET_S:-40500}"
+echo "[sfno_full_scale] $(date) link=$CHAIN suite=$SUITE resume=${RESUME_FLAG:-no} budget=${LINK_BUDGET_S}s ckpt=$CKPT"
+
+# Forward-progress signature = newest epoch_*.eqx (name:mtime) BEFORE this link.
+_ckpt_sig() {
+  ls -t "$CKPT"/epoch_*.eqx 2>/dev/null | head -1 | xargs -r stat -c '%n:%Y' 2>/dev/null
+}
+SIG_BEFORE="$(_ckpt_sig)"
+
+timeout -k 120 "${LINK_BUDGET_S}s" \
+  "$PY" -u scripts/run/run_aimip.py --suite "$SUITE" $RESUME_FLAG
+RC=$?
+
+# timeout returns 124 (SIGTERM) / 137 (SIGKILL after the -k grace) at the link
+# budget: NOT a training failure. Chain ONLY if an epoch advanced; sfno_full has
+# no mid-epoch checkpoint, so a budget hit BEFORE the first epoch completes
+# leaves nothing to resume -> stop (don't restart epoch 0 forever).
+if [ "$RC" -eq 124 ] || [ "$RC" -eq 137 ]; then
+  if [ "$(_ckpt_sig)" != "$SIG_BEFORE" ]; then
+    echo "[sfno_full_scale] hit budget ${LINK_BUDGET_S}s (rc=$RC), epoch advanced -> chaining"
+    RC=0
+  else
+    echo "[sfno_full_scale] hit budget ${LINK_BUDGET_S}s (rc=$RC) but NO new epoch" \
+         "checkpoint -> one epoch exceeded the 11h15m link; NOT chaining to avoid an" \
+         "epoch-0 restart loop. Remedy: shorten the 120 h curriculum phase" \
+         "(aimip_rollout_curriculum) or reduce sfno size/data so an epoch fits 12 h."
+    RC=1
+  fi
+fi
+echo "[sfno_full_scale] run_aimip rc=$RC $(date)"
+
+# Chain until params.eqx (the DONE marker) exists or CHAIN_MAX reached.
+FINAL="$CKPT/params.eqx"
+if [ "$RC" -eq 0 ] && [ ! -f "$FINAL" ] && [ "$CHAIN" -lt "$CHAIN_MAX" ]; then
+  echo "[sfno_full_scale] not complete -> chaining link $((CHAIN+1))/$CHAIN_MAX"
+  qsub -v CHAIN="$((CHAIN+1))",CHAIN_MAX="$CHAIN_MAX",RESUME=1,WB_SUITE="$SUITE",WB_OUT_ROOT="$OUT_ROOT",LEGOESM_REPO="${LEGOESM_REPO:-}" \
+    "$PBS_O_WORKDIR/scripts/cluster/derecho/train_sfno_full_scale.pbs"
+elif [ -f "$FINAL" ]; then
+  echo "[sfno_full_scale] DONE: $FINAL"
+else
+  echo "[sfno_full_scale] stop (rc=$RC or chain limit $CHAIN_MAX)"
+fi
