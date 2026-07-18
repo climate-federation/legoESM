@@ -96,9 +96,7 @@ class LMIPRunConfig(NamedTuple):
     seed: int
 
 
-def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> bool:
-    """True when the loop should checkpoint and exit before wallclock expiry."""
-    return max_s > 0.0 and elapsed_s >= (max_s - buffer_s)
+from legoesm.driver.checkpoint import wallclock_exhausted as _wallclock_exhausted
 
 
 # ===========================================================================
