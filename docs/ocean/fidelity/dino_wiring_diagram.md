@@ -384,3 +384,69 @@ seam-face wall → needs partial-periodic C-grid infra).
 REMAINING un-matched (per mandate, build all): full-step-z vertical coordinate (biggest,
 most likely deep-flow lever), partial-periodic seam, node 22 GM-form, node 14 visc-placement,
 IC bit-identical, e1/e2 metric, bottom-drag implicit.
+
+## Round-7 (2026-07-18) — FULL-STEP-Z BUILT + WIRED; it is the DOMINANT BSF lever
+
+**Node "vertical coordinate" (Round-6's biggest gap) is now BUILT faithfully and is the
+single largest mover of the whole campaign: full-step-z collapses the BSF over-strength
+2.62× → 0.81× (into the ±40 Sv band), thermodynamics stay corr ≥0.99.**
+
+FEASIBILITY: the full-step-z infrastructure already EXISTED (`OceanPartialCellCoordinate`
+with `is_active`/`bottom_level`/`h_partial`; `compute_ocean_jacobian` partial branch
+`J=water_col/H_bathy`; every operator dispatches on `isinstance(OceanPartialCellCoordinate)`
+→ 3-D `active_3d`, 3-D mass-flux face masks, vmix wet mask, tracer wall-fill; the analytic
+`masked_zco` DINO path already builds it). The ONLY gap: the BRIDGE path
+(`bridge_nemo_to_legoesm_topo`, used by the 180d comparison) built a PLAIN z* coord, so the
+comparison ran pure z-star regardless of the recipe's `masked_zco`. → a BOUNDED wiring fix,
+not a rebuild.
+
+Transcription (faithful to NEMO `usrdef_zgr.F90`): `zgr_zco_3d` sets `e3t(:,:,jk)=pe3t_1d(jk)`
+(fixed reference thicknesses everywhere = full-step); `zgr_msk_top_bot` sets per-column `k_bot`
+(staircase dry bottom cells). Built `vertical.py::create_full_step_coordinate(z_coord,
+bottom_level)` — full cells (`h_partial=dz_ref`) + dry staircase below `bottom_level`, from an
+explicit deepest-wet index; wired into the bridge via `full_step=True` using NEMO's OWN tmask
+`k_bot=tmask.sum(axis=2)` (bit-faithful staircase, no float rounding at interfaces; default
+`False` = byte-identical legacy z*). Also carried `t_depth_ref` (NEMO gdept_1d) through the
+partial wrap (was dropped → HPG reverted to midpoints). Test `test_full_step_coordinate.py`
+(staircase mask == NEMO k_bot, full cells, column-sum=gdepw(k_bot), Jacobian closure).
+
+Correctness of the staircase (proven on the bridged DINO mesh): `is_active` column-count ==
+NEMO tmask `k_bot` EXACTLY; 100% of wet columns carry ≥1 dry bottom cell (wet-level count
+31–35 of 36); `active_3d` now varies with depth per column (NOT the 2-D broadcast).
+
+CONTROLLED 180d comparison — sole variable = vertical coordinate (both forward-euler
+`nemo_dino_kamm`, dt=2700, from-rest analytic IC on the bridged NEMO mesh, seasonal forcing,
+NEMO RUN_TRAJ ÷vovvle3t; baseline RE-RUN in-session at identical protocol):
+
+| metric | z* (baseline) | **full-step-z** | NEMO |
+|---|---:|---:|---:|
+| SST corr / bias / rms | 0.995 / +0.22 / 0.72 | 0.995 / +0.29 / 0.75 | — |
+| T@300m corr / rms | 0.987 / 0.61 | 0.989 / 0.56 | — |
+| SSH corr / rms(m) | 0.991 / 0.060 | 0.993 / 0.051 | — |
+| **BSF range ratio** | **2.62×** | **0.81×** (lego ±33 vs NEMO ±40 Sv) | 1.0 |
+| deep-eq KE@1057m/surf | 0.597 | 0.685 | 0.0011 |
+
+**ANSWER: YES — full-step-z is the DOMINANT structural lever for the BSF.** Every prior node
+moved BSF ≤1.5%; the vertical coordinate moves it 2.62× → 0.81× — from +160% over-strong to
+within the ±40 Sv target band — while SST/T300/SSH stay corr ≥0.99 (T300/SSH slightly
+IMPROVED). Physical mechanism: the staircase blocks deep flow over topography and restores
+bottom form stress / f/H steering, which pure z-star (all levels stretched, no dry cells)
+lacked — exactly the Drake-sill form-stress control of the DINO gyre. The deep-equatorial jet
+(KE ratio 0.68 vs NEMO 0.0011) does NOT improve → it is a SEPARATE equatorial (f→0)
+core-dynamics residual, as concluded earlier, not the coordinate.
+
+STABILITY (honest): forward-euler `nemo_dino_kamm` + full-step ran 180d STABLE (no NaN). The
+LEAPFROG `nemo_dino_kamm_mlf` + full-step BLOWS UP ~step 25–30 at the HIGH-LATITUDE walls
+(|lat|>60°, largest staircase steps), NOT the equator/seam. Controlled isolation: {z* + mlf}
+STABLE, {full-step + forward-euler} STABLE, {full-step + mlf} unstable ⇒ the coord foundation
+is SOUND (forward-euler proves it); the blow-up is the NEUTRAL leapfrog amplifying a
+staircase-seeded high-latitude mode (same class as the Round-3/4 barotropic-mode issue that
+forward-Euler's numerical damping suppresses). NO non-NEMO stabiliser applied.
+
+REMAINING (precise): (1) faithful leapfrog+full-step stability at the high-lat staircase steps
+(separate residual, a Round-4-style fix — likely the barotropic/thickness leap-frog coupling at
+the staircase, NOT a coord bug); then re-run the mlf full-step 180d. (2) push BSF 0.81× → ~1.0
+(residual gyre tuning, now within band). (3) deep-eq jet (unchanged; f→0 core residual). (4)
+the still-deferred node 22 GM-form, node 14 visc-placement, IC bit-identity.
+Reviews: physics-validator + code-reviewer both SHIP (no confirmed defects; minor bottom_level
+clamp added for sibling parity).

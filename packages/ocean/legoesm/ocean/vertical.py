@@ -449,6 +449,12 @@ class OceanPartialCellCoordinate(NamedTuple):
     h_partial: jnp.ndarray
     bottom_level: jnp.ndarray
     is_active: jnp.ndarray
+    # Optional EXACT positive T-point depths [m], shape (nlev,) — the
+    # coordinate's geometric ladder (NEMO ``gdept_1d``) for the fidelity
+    # PGF quadrature, mirroring ``OceanZStarCoordinate.t_depth_ref``.
+    # ``None`` → HPG reverts to interface-midpoint depths. Trailing +
+    # defaulted so existing constructions stay backward-compatible.
+    t_depth_ref: jnp.ndarray | None = None
 
 
 def create_partial_cell_coordinate(
@@ -539,11 +545,9 @@ def create_partial_cell_coordinate(
     h_partial = jnp.where(is_bottom, partial_thickness[..., jnp.newaxis], h_full)
     h_partial = jnp.where(is_active, h_partial, 0.0)
 
-    # NOTE: the z*-only ``t_depth_ref`` (exact NEMO gdept for the fidelity PGF
-    # quadrature) is intentionally NOT carried here — OceanPartialCellCoordinate
-    # has no such field, so a partial-cell wrap of a NEMO z* coord reverts the PGF
-    # to midpoint depths. Harmless today (the NEMO bridge builds a plain z* coord);
-    # propagate it here if partial-cell NEMO fidelity is ever added.
+    # Carry the exact NEMO ``gdept_1d`` T-depth ladder through the wrap so the
+    # fidelity PGF quadrature keeps using it (full-step-z NEMO fidelity, #dino);
+    # ``None`` on a coord without it → HPG reverts to interface-midpoint depths.
     return OceanPartialCellCoordinate(
         n_levels=nlev,
         H_max=z_coord.H_max,
@@ -554,6 +558,72 @@ def create_partial_cell_coordinate(
         h_partial=h_partial,
         bottom_level=bottom_level,
         is_active=is_active,
+        t_depth_ref=getattr(z_coord, "t_depth_ref", None),
+    )
+
+
+def create_full_step_coordinate(
+    z_coord: OceanZStarCoordinate,
+    bottom_level,
+) -> OceanPartialCellCoordinate:
+    """Build a NEMO ``ln_zco`` FULL-STEP-z coordinate from a z* reference
+    grid + an explicit per-column deepest-wet-level index.
+
+    NEMO full-step z (``usrdef_zgr.F90`` ``zgr_zco_3d`` +
+    ``zgr_msk_top_bot``): every wet cell keeps the FIXED 1-D reference
+    thickness ``pe3t_1d(jk)`` (``e3t(:,:,jk)=pe3t_1d(jk)`` — no partial
+    thinning), and bathymetry is a STAIRCASE — column ``(i,j)`` is wet for
+    levels ``k <= k_bot(i,j)-1`` and DRY below (``mbkt``/tmask). This is
+    exactly an ``OceanPartialCellCoordinate`` whose bottom cell is a FULL
+    cell (``h_partial = dz_ref``, never the ``ln_zps`` partial thickness).
+
+    Unlike :func:`create_partial_cell_coordinate` (which derives the mask +
+    a *partial* bottom thickness from a continuous ``H_bathy``), this takes
+    the wet-level count DIRECTLY (e.g. NEMO's exact 3-D ``tmask`` column
+    sum), so it is bit-faithful to NEMO's staircase with no float rounding
+    at the level interfaces.
+
+    Parameters
+    ----------
+    z_coord : OceanZStarCoordinate
+        Reference vertical grid (fixed ``dz_ref`` = NEMO ``e3t_1d``).
+    bottom_level : int array, shape (...)
+        Index of the deepest WET level per column (NEMO ``k_bot - 1``).
+        ``-1`` marks a dry column (no active cells), matching the
+        :func:`create_partial_cell_coordinate` convention.
+
+    Returns
+    -------
+    OceanPartialCellCoordinate
+        With ``h_partial ∈ {0, dz_ref}`` (full cells + dry cells) and
+        ``Σ_k h_partial = Σ_{k<=bottom_level} dz_ref`` per column (the
+        staircase depth ``gdepw(k_bot)``).
+    """
+    nlev = z_coord.n_levels
+    bl = jnp.asarray(bottom_level).astype(jnp.int32)
+    # Cap at the deepest level (parity with create_partial_cell_coordinate);
+    # a caller passing an over-deep index gets a full column, not OOB.
+    bl = jnp.minimum(bl, nlev - 1)
+    n_lead = bl.ndim
+    k_view = jnp.arange(nlev, dtype=jnp.int32).reshape((1,) * n_lead + (nlev,))
+    bottom_view = bl[..., jnp.newaxis]                       # (..., 1)
+    is_active = (k_view <= bottom_view) & (bottom_view >= 0)
+
+    dz_ref_view = z_coord.dz_ref.reshape((1,) * n_lead + (nlev,))
+    h_full = jnp.broadcast_to(dz_ref_view, bl.shape + (nlev,))
+    h_partial = jnp.where(is_active, h_full, 0.0)
+
+    return OceanPartialCellCoordinate(
+        n_levels=nlev,
+        H_max=z_coord.H_max,
+        z_full_ref=z_coord.z_full_ref,
+        z_half_ref=z_coord.z_half_ref,
+        dz_ref=z_coord.dz_ref,
+        dz_half_ref=z_coord.dz_half_ref,
+        h_partial=h_partial,
+        bottom_level=bl,
+        is_active=is_active,
+        t_depth_ref=getattr(z_coord, "t_depth_ref", None),
     )
 
 

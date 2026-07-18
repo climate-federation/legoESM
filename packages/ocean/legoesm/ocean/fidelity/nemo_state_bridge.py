@@ -47,7 +47,10 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import neumann_fill_cgrid
 from legoesm.ocean.fidelity.nemo_io import NemoGrid, NemoState
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanState
-from legoesm.ocean.vertical import create_z_star_from_thicknesses
+from legoesm.ocean.vertical import (
+    create_full_step_coordinate,
+    create_z_star_from_thicknesses,
+)
 
 
 class NemoBridgeOutput(NamedTuple):
@@ -206,6 +209,7 @@ def bridge_nemo_to_legoesm_topo(
     omega: float = constants.Omega,
     radius: float = constants.R_earth,
     f_rtol: float = 1e-3,
+    full_step: bool = False,
 ) -> NemoBridgeOutput:
     """Bridge a NEMO **Mercator + topography** config (e.g. DINO) to legoESM.
 
@@ -338,6 +342,18 @@ def bridge_nemo_to_legoesm_topo(
     z_coord = create_z_star_from_thicknesses(
         e3t_1d, t_depth_ref_m=np.asarray(grid.gdept_1d).ravel(),
     )
+
+    # NEMO ln_zco FULL-STEP-z: fixed reference levels everywhere + a
+    # STAIRCASE of dry bottom cells below k_bot (usrdef_zgr.F90 zgr_zco_3d
+    # e3t=pe3t_1d + zgr_msk_top_bot k_bot).  Wrap the plain z* coord into a
+    # full-step OceanPartialCellCoordinate built DIRECTLY from NEMO's own
+    # tmask column count (k_bot) — bit-faithful to the staircase, no float
+    # rounding at the level interfaces.  Default off ⇒ the legacy pure-z*
+    # (all levels stretched, no dry cells) path is byte-identical.
+    if full_step:
+        z_coord = create_full_step_coordinate(
+            z_coord, bottom_level=jnp.asarray(k_bot - 1, dtype=jnp.int32),
+        )
 
     base = rest_state_latlon_cgrid_ocean(
         geom, z_coord,
