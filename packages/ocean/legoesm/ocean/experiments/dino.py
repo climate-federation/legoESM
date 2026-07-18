@@ -1710,6 +1710,7 @@ def dino_lat_lon_initial_state_arrays(
     grid,
     z_coord: OceanZStarCoordinate,
     cfg: DINOConfig | None = None,
+    land_mask_override: jnp.ndarray | None = None,
 ):
     """Build (T, S, H_bathy, land_mask) for a DINO Mercator grid.
 
@@ -1719,6 +1720,13 @@ def dino_lat_lon_initial_state_arrays(
     would be re-entrant at every latitude. We mark the westernmost
     longitude column as land outside the channel band, replicating the
     MPAS approach.
+
+    ``land_mask_override`` (opt-in) SUPPLIES the wet mask directly and
+    skips the analytic seam wall — used by the NEMO-bridged comparison
+    to make the domain i-periodic/re-entrant (``ln_Iperio=.true.``) with
+    NEMO's own ``tmask`` surface (column j=0 stays WET where NEMO is
+    wet, no interior land wall).  Default ``None`` = the analytic
+    seam-wall mask (byte-identical for the standalone bowl recipes).
 
     Returns
     -------
@@ -1742,16 +1750,31 @@ def dino_lat_lon_initial_state_arrays(
     S = jnp.broadcast_to(S_lat_z[:, None, :],
                          (grid.n_lat, grid.n_lon, z_coord.n_levels))
 
-    # Land mask: thin wrapper over the general lat-lon partial-
-    # periodic seam-wall helper. Channel is open between
-    # channel_lat_south_deg and channel_lat_north_deg.
-    from legoesm.ocean.init_latlon_cgrid import partial_periodic_seam_wall_latlon
-    land_mask = partial_periodic_seam_wall_latlon(
-        grid,
-        open_lat_south_deg=cfg.channel_lat_south_deg,
-        open_lat_north_deg=cfg.channel_lat_north_deg,
-        seam_column_index=0,
-    ).astype(T.dtype)
+    if land_mask_override is not None:
+        # i-periodic / re-entrant (NEMO ln_Iperio): the caller (the NEMO
+        # bridge) supplies NEMO's own surface tmask, which is wet at the
+        # zonal margins — no interior seam wall.  compute_face_masks
+        # (inside rest_state_latlon_cgrid_ocean) derives periodic-
+        # consistent u_mask via jnp.roll in lon; N/S stay walled.
+        if land_mask_override.shape != (grid.n_lat, grid.n_lon):
+            raise ValueError(
+                f"land_mask_override shape {land_mask_override.shape} != "
+                f"(n_lat, n_lon)=({grid.n_lat}, {grid.n_lon}); a mis-shaped "
+                "mask would silently mis-broadcast against T/S/H_bathy."
+            )
+        land_mask = jnp.asarray(land_mask_override).astype(T.dtype)
+    else:
+        # Land mask: thin wrapper over the general lat-lon partial-
+        # periodic seam-wall helper. Channel is open between
+        # channel_lat_south_deg and channel_lat_north_deg.
+        from legoesm.ocean.init_latlon_cgrid import (
+            partial_periodic_seam_wall_latlon)
+        land_mask = partial_periodic_seam_wall_latlon(
+            grid,
+            open_lat_south_deg=cfg.channel_lat_south_deg,
+            open_lat_north_deg=cfg.channel_lat_north_deg,
+            seam_column_index=0,
+        ).astype(T.dtype)
 
     # Mask T, S on land (keep ocean values)
     mask3d = land_mask[..., None]
@@ -1766,9 +1789,19 @@ def dino_lat_lon_state(
     grid,
     z_coord: OceanZStarCoordinate,
     cfg: DINOConfig | None = None,
+    land_mask_override=None,
 ):
     """Build a full ``LatLonCGridOceanState`` for DINO from rest with
     paper IC stratification + bathymetry + seam-wall land mask.
+
+    ``land_mask_override`` (opt-in) makes the domain i-periodic/
+    re-entrant (NEMO ``ln_Iperio``) by supplying NEMO's own surface
+    ``tmask`` instead of the analytic seam wall — the fix for the
+    spurious equatorial land wall that trapped the deep-equatorial jet.
+    ``rest_state_latlon_cgrid_ocean`` recomputes u_mask/v_mask atomically
+    from it (periodic in lon, walled N/S), avoiding the stale-face-mask
+    leak footgun.  Default ``None`` = the analytic seam-wall mask
+    (byte-identical for the standalone bowl recipes).
 
     Returns
     -------
@@ -1780,7 +1813,7 @@ def dino_lat_lon_state(
         cfg = DINOConfig()
 
     T, S, H_bathy, land_mask = dino_lat_lon_initial_state_arrays(
-        grid, z_coord, cfg,
+        grid, z_coord, cfg, land_mask_override=land_mask_override,
     )
 
     # Masked z-levels (vertical_coordinate="masked_zco"): the state's

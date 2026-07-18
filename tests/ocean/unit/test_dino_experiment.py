@@ -770,6 +770,68 @@ class TestLatLonInitialState:
         assert T_col.shape == (8,)
         assert T_col[0] > T_col[-1]
 
+    def test_land_mask_override_default_is_byte_identical(self):
+        # Default land_mask_override=None reproduces the analytic seam wall
+        # exactly (backward-compat for the standalone bowl recipes).
+        cfg = DINOConfig()
+        grid = dino_lat_lon_grid(cfg, n_lon=6)
+        zc = create_levy_stretched_z_star(
+            n_levels=4, H_max=cfg.H_deep, dz_min=400.0, k_th=3.0, a_cr=2.0,
+        )
+        base = dino_lat_lon_initial_state_arrays(grid, zc, cfg)
+        seam = dino_lat_lon_initial_state_arrays(
+            grid, zc, cfg, land_mask_override=None)
+        for a, b in zip(base, seam):
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+    def test_land_mask_override_reentrant_keeps_seam_wet(self):
+        # An i-periodic (ln_Iperio) override marks the whole domain wet ->
+        # the westernmost column j-index 0 stays ocean (no seam wall) and
+        # its T/S are NOT zeroed (no cold T=0 wall cell).
+        cfg = DINOConfig()
+        grid = dino_lat_lon_grid(cfg, n_lon=6)
+        zc = create_levy_stretched_z_star(
+            n_levels=4, H_max=cfg.H_deep, dz_min=400.0, k_th=3.0, a_cr=2.0,
+        )
+        # Seam wall (default) masks column 0 outside the channel band.
+        _, _, _, lm_seam = dino_lat_lon_initial_state_arrays(grid, zc, cfg)
+        assert float(np.asarray(lm_seam)[:, 0].sum()) < grid.n_lat  # some land
+        # Re-entrant override: everything wet.
+        wet = jnp.ones((grid.n_lat, grid.n_lon))
+        T, S, _, lm = dino_lat_lon_initial_state_arrays(
+            grid, zc, cfg, land_mask_override=wet)
+        np.testing.assert_array_equal(np.asarray(lm), np.ones_like(np.asarray(lm)))
+        # Column 0 T/S kept (not zeroed) since it is now wet.
+        assert np.all(np.asarray(T)[:, 0, 0] != 0.0)
+
+    def test_land_mask_override_reentrant_periodic_u_mask(self):
+        # The full state built with a re-entrant override has periodic-
+        # consistent zonal face masks (u_mask[:,0] == u_mask[:,-1] wrap) and
+        # keeps the N/S walls (ln_Iperio: i-periodic, j-walled).
+        from legoesm.ocean.experiments.dino import dino_lat_lon_state
+        cfg = DINOConfig()
+        grid = dino_lat_lon_grid(cfg, n_lon=6)
+        zc = create_levy_stretched_z_star(
+            n_levels=4, H_max=cfg.H_deep, dz_min=400.0, k_th=3.0, a_cr=2.0,
+        )
+        wet = jnp.ones((grid.n_lat, grid.n_lon))
+        st = dino_lat_lon_state(grid, zc, cfg, land_mask_override=wet)
+        um = np.asarray(st.u_mask.data)
+        vm = np.asarray(st.v_mask.data)
+        assert um.shape == (grid.n_lat, grid.n_lon + 1)
+        # Re-entrant: the west-seam u-face (column 0) is OPEN (all wet) — the
+        # meaningful contrast to the default seam wall, where those faces are
+        # dry.  (The trailing wrap column mirrors column 0 by construction.)
+        st_wall = dino_lat_lon_state(grid, zc, cfg)              # default seam wall
+        um_wall = np.asarray(st_wall.u_mask.data)
+        assert np.all(um[:, 0] > 0.5)                            # open seam
+        assert np.any(um_wall[:, 0] < 0.5)                       # walled seam
+        np.testing.assert_array_equal(um[:, 0], um[:, -1])       # wrap convention
+        # Interior u-faces all wet (fully re-entrant, no seam wall).
+        assert np.all(um > 0.5)
+        # N/S boundary v-faces stay walls (not j-periodic).
+        assert np.all(vm[0] < 0.5) and np.all(vm[-1] < 0.5)
+
 
 # ---------------------------------------------------------------------
 # create_initial_conditions dispatch

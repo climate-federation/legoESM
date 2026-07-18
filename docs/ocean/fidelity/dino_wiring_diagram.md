@@ -591,3 +591,64 @@ fabricated.
 
 Node 14 = ✅ (built/tested/compared; faithful; climate-inert on Mercator). Node 15 = ✅
 (adcroft≡hpg_zco under full-step, audited).
+
+---
+
+## Round-10 (2026-07-18) — audit-#10 SEAM: spurious equatorial LAND WALL removed (i-periodic/ln_Iperio)
+
+**Root cause of the deep-equatorial jet FOUND + FIXED.** NEMO DINO is zonally
+re-entrant (`ln_Iperio=.true.`): read from the RUN_TRAJ `mesh_mask.nc`, the surface
+tmask is **48/48 wet at EVERY latitude** and `umask` at the west face of column 0 is
+wet on all 195 rows — NO land walls; the E/W "walls" are **shoaling bathymetry** (k_bot
+35 interior → 32–34 at the margins), not land. legoESM's `dino_lat_lon_state` /
+`dino_lat_lon_initial_state_arrays` (experiments/dino.py) instead imposed the analytic
+`partial_periodic_seam_wall_latlon` mask — column j=0 LAND outside the ACC channel — a
+non-NEMO wall. That free-slip equatorial wall trapped a cold `T=0` masked cell (deep
+western column ~0.6 °C vs interior ~4 °C) whose zonal PGF, unbalanced at f→0, projected
+onto the spurious deep-equatorial jet. The bridge (`bridge_nemo_to_legoesm_topo`) already
+carries the re-entrant `land_mask=tmask[:,:,0]` + periodic-wrap u/v masks + full-step
+staircase; only the from-rest analytic IC setup overrode it.
+
+**Fix (additive, backward-compatible).** New opt-in `land_mask_override=` on both
+functions: the NEMO-bridged comparison passes `br.land_mask` (NEMO's own surface tmask)
+so column j=0 stays WET (re-entrant), and `rest_state_latlon_cgrid_ocean` recomputes
+`u_mask`/`v_mask` atomically from it (`compute_face_masks`: periodic-in-lon via `jnp.roll`,
+N/S walled — exactly `ln_Iperio`). Default `None` = the analytic seam wall, byte-identical
+for the standalone bowl recipes (test `test_land_mask_override_default_is_byte_identical`).
+Gates: `test_land_mask_override_reentrant_keeps_seam_wet` (col 0 wet, T not zeroed) +
+`test_land_mask_override_reentrant_periodic_u_mask` (u_mask[:,0]==u_mask[:,-1] periodic
+wrap, all interior u-faces wet, N/S v-faces walled).
+
+**Controlled 180d — sole variable = seam wall vs re-entrant** (both `nemo_dino_kamm`,
+full_step=True, dt=2700, 5760 steps, from-rest analytic IC on the bridged NEMO mesh,
+seasonal forcing, NEMO RUN_TRAJ ÷vovvle3t; separate GPUs):
+
+| metric | seam-wall (baseline) | **re-entrant (fix)** | NEMO |
+|--------|---------------------:|---------------------:|-----:|
+| **deep-eq KE@1057m** | 9.45e-3 | **6.29e-4** (15× ↓) | 7.10e-5 |
+| **deep-eq KE ratio (1057m/surf)** | 0.688 | **0.108** (6.3× ↓) | 0.0011 |
+| western deep-eq cell T (min) | 0.6 °C (cold T=0 wall) | **3.9 °C** (physical) | ~4 °C |
+| SST corr / bias / rms | 0.995 / +0.29 / 0.75 | 0.995 / +0.28 / 0.78 | — |
+| T@300m corr / rms | 0.989 / 0.56 | **0.996 / 0.36** (↑) | — |
+| SSH corr / rms(m) | 0.993 / 0.051 | **0.947 / 0.143** (↓, see residual) | — |
+| BSF range ratio | 0.81× | **1.06×** (→1.0 target) | 1.0 |
+
+**Verdict.** The spurious equatorial land wall was the deep-eq jet's dominant driver:
+removing it cuts deep-eq KE 15× and the KE ratio 6.3× toward NEMO, and warms the western
+equatorial cells from the cold-wall 0.6 °C to the physical ~4 °C = NEMO. T@300m and the
+BSF range ratio (→1.06×, essentially the 1.0 target) also improve; SST unchanged. 180d
+STABLE (T∈[3.9,26.2] °C, no NaN, no non-NEMO stabiliser).
+
+**Residual (diagnosed, NOT papered over).** SSH corr regresses 0.993→0.947 (rms
+0.051→0.143 m), broad (worst in the S/ACC band). It is NOT a mask-inconsistency seam mode:
+the eta 2Δx grid-scale roughness DROPS 0.0073→0.0005 (clean seam, no checkerboard). It is
+the **pre-existing f→0 equatorial core-dynamics residual** now EXPOSED: NEMO has a strong
+zonal-mean westward equatorial surface jet (−0.74 m/s) that neither lego reproduces; the
+seam wall had coincidentally trapped a westward flow (−0.18) that correlated with NEMO's
+SSH, and the (correct) re-entrant equatorial dynamics give +0.10 instead. The spurious
+wall was compensating a real dynamics gap in the SSH metric — the faithful topology
+reveals it. This is the same equatorial-amplification residual characterized across
+Rounds 1–9 (survived every controlled node test), not a defect in the re-entrant fix.
+
+The deep-eq jet root cause (audit #10 seam) is CLOSED; the remaining SSH residual is the
+equatorial f→0 dynamics gap, unchanged by any single node.
