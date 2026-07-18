@@ -1306,14 +1306,18 @@ class ModelDriver:
                 carry = era5_to_cubedsphere_carry(
                     era5_slice, self.grid, self.sigma,
                     target_phis=_target_phis,
+                    smoothing_passes=cfg.topo_smoothing,
+                    edge_blend_strength=cfg.topo_edge_blend,
                 )
             elif cfg.dycore.discretization == "spectral":
                 carry = era5_to_spectral_carry(
-                    era5_slice, self.grid, self.sigma
+                    era5_slice, self.grid, self.sigma,
+                    smoothing_passes=cfg.topo_smoothing,
                 )
             elif cfg.grid.grid_type == "latlon":
                 carry = era5_to_latlon_carry(
-                    era5_slice, self.grid, self.sigma
+                    era5_slice, self.grid, self.sigma,
+                    smoothing_passes=cfg.topo_smoothing,
                 )
             elif cfg.grid.grid_type == "mpas":
                 # MPAS carries the wind as the edge-normal component on mesh
@@ -4068,6 +4072,29 @@ class ModelDriver:
                 "round-trip, so a restart would silently reseed the "
                 "prognostic physics state (issue #405/#413). Use "
                 "checkpoint_format='npz' for stateful-physics runs."
+            )
+        # Same zarr carry_aux limitation for the HELD radiation fluxes: with a
+        # radiation cadence (rad_update_steps > 1) the held sfc/TOA fluxes are
+        # only recomputed every Nth step and ride carry_aux between updates, so
+        # a zarr restart would drop them and reset the radiation phase — the
+        # first post-restart segment would run with zero held fluxes until the
+        # next update, branching the trajectory. With rad_update_steps == 1 the
+        # held fields are recomputed every step, so dropping them is harmless
+        # (audit 2026-07-17).
+        if (
+            backend == "zarr"
+            and int(getattr(self.config, "rad_update_steps", 1)) > 1
+            and isinstance(self._carry_aux, dict)
+            and any(k.startswith("held_") for k in self._carry_aux)
+        ):
+            raise ValueError(
+                "checkpoint_format='zarr' cannot persist the held radiation "
+                "fluxes (held_dT_rad/held_*_sfc/held_*_toa) used by a "
+                "radiation cadence (rad_update_steps="
+                f"{int(getattr(self.config, 'rad_update_steps', 1))}) — they "
+                "ride carry_aux, which the zarr backend does not round-trip, "
+                "so a restart would reset the radiation phase (not bit-exact). "
+                "Use checkpoint_format='npz' for rad_update_steps>1 runs."
             )
 
         # Multi-controller SPMD: every process ran the collective gather

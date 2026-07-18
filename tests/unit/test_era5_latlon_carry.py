@@ -350,3 +350,54 @@ def test_prognostic_carry_seeds_helper_double_moment_and_stateful():
     assert "tke" in seeds
     assert np.asarray(seeds["tke"]).shape == (3 * 3, 6)
     assert "qke" not in seeds  # tke scheme uses the tke slot
+
+
+# --- audit 2026-07-17 T5: carry smoothing params are driver-tunable ----------
+
+def test_latlon_carry_smoothing_passes_take_effect():
+    """More Laplacian passes → smoother carry phis (the driver now threads
+    cfg.topo_smoothing; the value was previously hard-coded)."""
+    from legoesm.training.era5_to_state import era5_to_latlon_carry
+    from legoesm.grids.vertical import create_sigma_coordinate
+    era5 = _mountain_era5()
+    grid = create_grid("latlon", 24)
+    sigma = create_sigma_coordinate(20)
+    few = np.asarray(era5_to_latlon_carry(
+        era5, grid, sigma, smoothing_passes=1).phis)
+    many = np.asarray(era5_to_latlon_carry(
+        era5, grid, sigma, smoothing_passes=8).phis)
+    assert _max_abs_grad(many) < _max_abs_grad(few), (
+        "more passes must reduce the phis gradient")
+
+
+def test_spectral_carry_smoothing_passes_take_effect():
+    from legoesm.training.era5_to_state import era5_to_spectral_carry
+    from legoesm.grids.vertical import create_sigma_coordinate
+    era5 = _mountain_era5()
+    grid = create_grid("gaussian", 21)
+    sigma = create_sigma_coordinate(20)
+    few = np.asarray(era5_to_spectral_carry(
+        era5, grid, sigma, smoothing_passes=1).phis)
+    many = np.asarray(era5_to_spectral_carry(
+        era5, grid, sigma, smoothing_passes=8).phis)
+    assert _max_abs_grad(many) < _max_abs_grad(few)
+
+
+def test_cube_smooth_phis_edge_blend_width_defaults_to_two():
+    """smooth_phis_cubed_sphere now blends with width=2 (TopographyConfig's
+    default and the static-topography path), not the old silent width=1 — the
+    docstring's 'same pipeline' promise (audit 2026-07-17)."""
+    from legoesm.grids.topography import (
+        smooth_phis_cubed_sphere, blend_scalar_cube_edges_2d,
+    )
+    from legoesm.grids.topography import _laplacian_smooth_cubed_sphere
+    rng = np.random.default_rng(0)
+    phis = jnp.asarray(rng.normal(size=(6, 8, 8)) * 1.0e4)
+    got = np.asarray(smooth_phis_cubed_sphere(phis, smoothing_passes=2))
+    lap = _laplacian_smooth_cubed_sphere(np.asarray(phis), passes=2)
+    want_w2 = np.asarray(blend_scalar_cube_edges_2d(
+        jnp.asarray(lap), strength=0.3, width=2))
+    want_w1 = np.asarray(blend_scalar_cube_edges_2d(
+        jnp.asarray(lap), strength=0.3, width=1))
+    np.testing.assert_allclose(got, want_w2, atol=1e-9)
+    assert not np.allclose(got, want_w1), "default must be width=2, not width=1"

@@ -1378,6 +1378,22 @@ class ExperimentConfig(NamedTuple):
                 "pipeline); it would silently run 'constant'.  Use a "
                 "pipeline backend (cd-grid / latlon) or scheme='constant'."
             )
+        # use_clubb_cloud_fraction is enforced (turbulence must be clubb) only
+        # inside build_physics_pipeline, which the mpas/spectral standalone
+        # radiation paths never build — so the opt-in would silently no-op
+        # there.  Reject it loudly on those backends (dispatch-hardening,
+        # mirrors the condensate-scheme guard above).
+        if (self.use_clubb_cloud_fraction
+                and self.dycore.discretization
+                in _NO_CLOUD_THREAD_DISCRETIZATIONS):
+            errors.append(
+                "use_clubb_cloud_fraction=True is not wired into the "
+                f"{self.dycore.discretization!r} radiation path (that backend "
+                "builds RadiationConfig directly, bypassing the shared physics "
+                "pipeline that enforces it); it would silently no-op.  Use a "
+                "pipeline backend (cd-grid / latlon) with turbulence='clubb', "
+                "or drop --use-clubb-cloud-fraction."
+            )
         # Cross-field: the diagnostic-condensate FLOOR exists only for the
         # sub-grid diagnostic-fraction schemes (sundqvist / xu_randall); 'none'
         # skips clouds and 'resolved' (CRM) excludes the floor.  It is radiatively
