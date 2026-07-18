@@ -123,12 +123,26 @@ These are each a scoped project, not a quick edit; ranked by value:
   cube-face MPI. Gated bit-identical to serial at np={2,3,6}. Remaining:
   transient LULC under MPI (global param rebuild) and the SPMD/lat-band land
   partition specs (still refused).
-- **Coupled atm+ocean scaling bench lane** — NO coupled scaling benchmark
-  exists; every lane is component-only. `coupled_esm_driver.py` has no MPI
-  step (no scatter/halo/init-distributed), so this needs a coupled MPI
-  step built first (cube-atm replicated × ocean band-decomposed × coupler
-  regrid ownership), then a route-A CPU-MPI parity+conservation-gated lane.
-  Highest-value missing *measurement infra*.
+- **Coupled atm+ocean scaling bench lane** — CONFIRMED build-first (2026-07-18b
+  investigation). The composition itself is band-local-clean on a SHARED
+  lat-lon grid: the slab ocean step (`simple_ocean._slab_step`) is fully
+  column-local (no allreduce/gather/halo), the surface flux exchange is
+  pointwise, and identity same-grid coupling needs no regrid — so each rank
+  couples its own latitude band with NO cross-rank comm. The blocker is that
+  the atm band step `make_latlon_mpi_step` has no COUPLING I/O — two gaps:
+  (1) `step_fn(state, dt, target_mass=)` cannot thread a per-coupling-step
+  ocean SST as a traced forcing (only a STATIC `physics_fn` closure), and
+  (2) it returns ONLY the state, not the surface downwelling SW/LW the ocean
+  forcing (`AtmToSurface.sw_down`/`lw_down`) needs — those radiation
+  diagnostics are computed inside the physics step and discarded. So a
+  correct coupled loop needs that bidirectional coupling I/O BUILT (the real
+  "coupled MPI step"). Minimal viable next step: extend `make_latlon_mpi_step`
+  to accept a traced surface-coupling forcing (SST in) and return the surface
+  flux/radiation bundle (out), then a slab-ocean (column-local) + atm-band
+  coupled loop with a serial-vs-np2 parity gate. Cube-atm × latlon/tripole-ocean production
+  coupling stays BLOCKED (cross-family regrid `NotImplementedError`,
+  incompatible decompositions, gather-needing regrid). Highest-value missing
+  *measurement infra*.
 - **Distributed polar filter under `proc_lon>1`** — SHIPPED: the polar
   rFFT now gathers the full lon circle via the AD-safe lat-pencil transpose
   (`lon_gather_full`/`lon_scatter_full`), rebuilds the mask at the global
@@ -139,9 +153,16 @@ These are each a scoped project, not a quick edit; ranked by value:
   pole-fold + tripole-fold transposes before it is a production win — this
   removes the polar-filter blocker so the path is CORRECT when a better
   fabric or the folds land.
-- **Adjoint-side halo overlap** — blocked on nonblocking mpi4jax
-  primitives (Isend/Irecv absent); not actionable until the comm backend
-  exposes them.
+- **Adjoint-side halo overlap** — DEFINITIVELY resolved (2026-07-18b): NOT
+  actionable on route A and ALREADY handled on route B, so there is nothing
+  to build. Route A (mpi4jax): `dir(mpi4jax)` exposes only blocking
+  `send`/`recv`/`sendrecv` — no `isend`/`irecv`, so no non-blocking overlap
+  is possible, and the `_sendrecv_vjp` backward is a single blocking exchange
+  with no interior compute to overlap (codex-confirmed). Route B (SPMD
+  ppermute): `xla_gpu_enable_latency_hiding_scheduler=true` is ON by default
+  (`runtime/backend.py`), so ppermute collectives are overlapped by XLA in
+  BOTH the forward and backward passes automatically. Revisit only if a
+  non-blocking mpi4jax (or a raw mpi4py Isend/Irecv) backend is added.
 
 ## Superseded / corrected claims (with sources)
 
