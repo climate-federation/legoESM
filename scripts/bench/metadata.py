@@ -100,6 +100,51 @@ def _env_flag_true(name: str) -> bool:
     return os.environ.get(name, "0").strip().lower() in ("1", "true", "yes", "on")
 
 
+# Match the OP-CALL form ``collective-permute(`` / ``collective_permute(`` /
+# ``...-start(`` (a paren directly after the op name), NOT bare substrings: the
+# COMPILED-HLO config header echoes XLA_FLAGS, so a flag name like
+# ``xla_gpu_collective_permute_combine_threshold_bytes=`` (set by #1175's
+# MPAS_CP_COMBINE) would false-match a plain substring scan and over-count.
+_COLLECTIVE_PERMUTE_RE = re.compile(r"collective[_-]permute(?:[_-]start)?\(")
+
+
+def count_collective_permutes(hlo_text: str) -> int:
+    """Count ``collective_permute`` OPS in a lowered/compiled HLO text dump.
+
+    The ppermute halo kernel's signature and a STATIC compile property (the
+    count is fixed by the partition/edge-coloring schedule, not the data), so
+    it is the round-count metric #1113 needs to decompose multi-node overhead.
+    Matches the op-call form only (StableHLO underscore + optimized-XLA hyphen,
+    async ``-start`` counted once, ``-done`` companion excluded), so
+    config-header flag names that merely CONTAIN "collective_permute" never
+    inflate the count.  Canonical for every bench that reports
+    ``hlo_collective_permutes`` (cube tiled, MPAS ico) — no re-implementation."""
+    return sum(
+        1 for line in hlo_text.splitlines()
+        if _COLLECTIVE_PERMUTE_RE.search(line) and "done" not in line
+    )
+
+
+def hlo_collective_permutes(fn, *args) -> int | None:
+    """Best-effort: count the collective-permutes in the COMPILED HLO of
+    ``fn(*args)``.
+
+    Compiles (``.lower(...).compile().as_text()``), NOT bare
+    ``.lower().as_text()``: the census must reflect the EXECUTABLE's round
+    count, because XLA collective-permute combining / pipelined-p2p
+    (#1175, ``MPAS_CP_COMBINE``) fuses rounds during optimization — the whole
+    metric #1113 tracks. Pre-optimization StableHLO would overstate CPs versus
+    the timed executable. Matches the cube tiled bench, which compiles too.
+    Returns ``None`` (never raises) if lowering/compilation is unsupported, so
+    a timing probe can record "unknown" rather than crash."""
+    import jax
+    try:
+        text = jax.jit(fn).lower(*args).compile().as_text()
+    except Exception:
+        return None
+    return count_collective_permutes(text)
+
+
 def _is_empty(v: Any) -> bool:
     """True for a non-informative required value: ``None``, ``""``, or an EMPTY
     container (e.g. ``precision_knobs={}`` — which would hide an f32/TF32

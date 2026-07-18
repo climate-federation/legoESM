@@ -360,3 +360,31 @@ def test_tidy_throughput_fields_none_time_emits_honest_nulls():
     assert out["mcells_per_s"] is None
     assert out["dt_seconds"] == 600.0
     assert out["total_cells"] == 10
+
+
+def test_count_collective_permutes_matches_hyphen_and_underscore():
+    """Canonical CP census (#1113): counts StableHLO underscore + optimized
+    hyphen spellings, and drops the async ``-done`` companion so one logical
+    exchange counts once."""
+    hlo = "\n".join([
+        "  %a = collective-permute(%x)",          # optimized HLO
+        "  %b = collective_permute(%y)",          # StableHLO
+        "  %c = collective-permute-done(%a)",     # async companion -> excluded
+        "  %d = collective_permute_done(%b)",     # async companion -> excluded
+        "  %e = all-gather(%z)",                  # different collective
+    ])
+    assert md.count_collective_permutes(hlo) == 2
+    assert md.count_collective_permutes("no collectives here") == 0
+
+
+def test_hlo_collective_permutes_lowers_counts_and_is_error_safe():
+    """The best-effort probe lowers a fn and counts its collective-permutes: a
+    fn with none -> 0; an unlowerable fn -> None (never raises). Real ppermute
+    counting is exercised by the MPAS/cube bench gates and
+    count_collective_permutes' synthetic HLO test above."""
+    import jax.numpy as jnp
+    assert md.hlo_collective_permutes(lambda x: x + 1, jnp.arange(4.0)) == 0
+
+    def _boom(x):
+        raise RuntimeError("unlowerable")
+    assert md.hlo_collective_permutes(_boom, jnp.arange(4.0)) is None
