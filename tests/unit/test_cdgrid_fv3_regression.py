@@ -11775,10 +11775,19 @@ def test_fv3_sw_d4_divergence_damping_decays():
     for a, b in zip(base, off):
         assert jnp.array_equal(a, b)
     for nord in (1, 2):
+        # with the del-2 aggregate ON ...
         with _pytest.raises(NotImplementedError, match="post-step"):
             fv3_sw_tendencies(h, u_d, v_d, h_s, cdgrid,
                               div_damp=8.0 * 1.0e-3, dddmp=0.2,
                               d4_bg=0.16, d4_nord=nord)
+        # ... AND with div_damp=0 (codex r2: the guard must be an entry
+        # guard, not nested under div_damp>0)
+        with _pytest.raises(NotImplementedError, match="post-step"):
+            fv3_sw_tendencies(h, u_d, v_d, h_s, cdgrid,
+                              d4_bg=0.16, d4_nord=nord)
+    # negative values are equally invalid (only 0.0 passes)
+    with _pytest.raises(NotImplementedError, match="post-step"):
+        fv3_sw_tendencies(h, u_d, v_d, h_s, cdgrid, d4_bg=-0.1)
 
 
 def test_corner_damp_v_contract():

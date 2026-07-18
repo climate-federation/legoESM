@@ -272,7 +272,8 @@ class CDGridShallowWaterConfig(NamedTuple):
 
     # RESERVED (fail-loud): d_sw5-style del-4/del-6 background
     # divergence damping on the production path.  0.0 = OFF (the only
-    # valid value today; bit-identical).  A nonzero value RAISES in
+    # valid value today; bit-identical).  ANY nonzero value RAISES at
+    # fv3_sw_tendencies ENTRY (independent of div_damp) —
     # fv3_sw_tendencies — the tendency-form insertion is invalid under
     # RK3 (dt-multiplied; every 2026-07-17 probe went NaN by step 100;
     # codex damping r1 P1-1).  The valid implementation is a POST-STEP

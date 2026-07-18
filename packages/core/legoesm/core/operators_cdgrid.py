@@ -1502,6 +1502,25 @@ def fv3_sw_tendencies(
     d4_bg=0.0,
     d4_nord=1,
 ):
+    # FAIL-LOUD entry guard, independent of every other gate (codex
+    # damping r1 P1-1 / r2: nesting this under div_damp>0 silently
+    # ignored d4_bg when div_damp=0): a tendency-form del-4/del-6
+    # background divergence damping here is KNOWN-INVALID — FV3's
+    # d_sw5 applies dd8 = (da_min_c*d4_bg)^(nord+1) as a POST-STEP
+    # staged index-space operator (certified translation
+    # fv3_native_d_sw.d_sw5), while terms here enter an RK3 TENDENCY
+    # and get dt-multiplied per stage (iter-758c "*dt over-damps");
+    # every enabled probe (nord 1 AND 2, 2026-07-17) went NaN by step
+    # 100.  Only d4_bg == 0.0 is valid until the staged post-step port
+    # lands.  (Damping-sign reference for that port: s = (-1)^nord —
+    # nord=1 MINUS, nord=2 PLUS.)
+    if d4_bg != 0.0:
+        raise NotImplementedError(
+            "fv3_sw_tendencies(d4_bg!=0): the tendency-form del-4/"
+            "del-6 divergence damping is invalid under RK3 (dt-"
+            "multiplied; measured NaN) — implement as the post-step "
+            "staged d_sw5 operator (fv3_native_d_sw.d_sw5 is the "
+            "certified reference) before enabling")
     """SW tendencies on FV3 edge-midpoint D-grid. Momentum via A-L + circulation; PPM mass transport.
 
     Biharmonic hyperdiffusion (``hyperdiff_coeff``) IS applied at
@@ -1593,28 +1612,6 @@ def fv3_sw_tendencies(
             fortran_dir_aware_corners=fortran_dir_aware_corners)
         du_cc = du_cc + adaptive_coeff * interp_corner_to_center(ddiv_dx)
         dv_cc = dv_cc + adaptive_coeff * interp_corner_to_center(ddiv_dy_perp_cc)
-
-        if d4_bg > 0:
-            # FAIL-LOUD (codex damping r1 P1-1): a tendency-form del-4/
-            # del-6 background divergence damping here is KNOWN-INVALID —
-            # FV3's d_sw5 applies dd8 = (da_min_c*d4_bg)^(nord+1) as a
-            # POST-STEP staged index-space operator (certified
-            # translation fv3_native_d_sw.d_sw5), while this function's
-            # terms enter an RK3 TENDENCY and get multiplied by dt at
-            # every stage (the iter-758c "*dt over-damps" failure mode).
-            # Every enabled probe (nord 1 AND 2, any div_damp/hyperdiff
-            # mix, 2026-07-17) went NaN by step 100.  The valid
-            # implementation is a post-step staged operator port — until
-            # that lands, an enabled d4_bg must not silently mis-damp.
-            # (Damping-sign reference for that port: on a Fourier mode
-            # the wind-gradient form needs s = (-1)^nord — nord=1 MINUS,
-            # nord=2 PLUS.)
-            raise NotImplementedError(
-                "fv3_sw_tendencies(d4_bg>0): the tendency-form del-4/"
-                "del-6 divergence damping is invalid under RK3 (dt-"
-                "multiplied; measured NaN) — implement as the post-step "
-                "staged d_sw5 operator (fv3_native_d_sw.d_sw5 is the "
-                "certified reference) before enabling")
 
     # (i) Biharmonic hyperdiffusion (cell-centre geographic path)
     if hyperdiff_coeff > 0:
