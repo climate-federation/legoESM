@@ -674,13 +674,13 @@ def mpas_ocean_baroclinic_tendencies(
     _drag_scheme = validate_bottom_drag_scheme(
         str(getattr(config, "bottom_drag_scheme", "legacy")))
     if config.bottom_drag_r > 0 or _drag_scheme != "legacy":
-        H_BBL = getattr(config, "bottom_drag_bbl_thickness", 0.0)
+        H_BBL = config.bottom_drag_bbl_thickness
         # Quadratic-with-floor drag (MOM6 DRAG_BG_VEL).  When
         # ``bottom_drag_bg_velocity > 0``, the effective drag coefficient
         # scales with velocity: ``r_eff = (r/u_bg) * sqrt(u² + u_bg²)``.
         # Recovers linear ``r`` at |u|→0, quadratic ``Cd·|u|`` at high
         # speed.  u_bg=0 → bit-exact legacy linear drag.
-        _u_bg = float(getattr(config, "bottom_drag_bg_velocity", 0.0))
+        _u_bg = float(config.bottom_drag_bg_velocity)
         if _drag_scheme != "legacy":
             # NEMO zdfdrg drag law (np_non_lin / np_loglayer) on the Voronoi
             # mesh, with NEMO's exact operator placement: rCdU is evaluated
@@ -702,10 +702,10 @@ def mpas_ocean_baroclinic_tendencies(
             _r_cell = nemo_drag_r_from_speed_sq(
                 2.0 * _ke_bot, _h_bot_c,
                 scheme=_drag_scheme,
-                cd0=float(getattr(config, "bottom_drag_cd0", 1.0e-3)),
-                cd_max=float(getattr(config, "bottom_drag_cdmax", 0.1)),
-                z0=float(getattr(config, "bottom_drag_z0", 3.0e-3)),
-                ke0=float(getattr(config, "bottom_drag_ke0", 2.5e-3)),
+                cd0=float(config.bottom_drag_cd0),
+                cd_max=float(config.bottom_drag_cdmax),
+                z0=float(config.bottom_drag_z0),
+                ke0=float(config.bottom_drag_ke0),
                 von_karman=constants.kappa_von_karman,
             )
             _c1 = mesh.cellsOnEdge[0]

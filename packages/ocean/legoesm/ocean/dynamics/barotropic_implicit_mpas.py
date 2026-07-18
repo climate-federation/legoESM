@@ -769,9 +769,7 @@ def barotropic_implicit_mpas(
     # Scale-selective: damps grid-scale much harder than mesoscale, so
     # safe to use at production strength.  ``vector_laplacian_del4``
     # returns ``-∇²(∇²u)`` so adding ``+dt·K·del4`` gives stable decay.
-    K_baro_bih = jnp.asarray(
-        getattr(config, "barotropic_u_biharmonic", 0.0), dtype=eta_dtype,
-    )
+    K_baro_bih = jnp.asarray(config.barotropic_u_biharmonic, dtype=eta_dtype)
     if config.barotropic_u_biharmonic > 0.0:
         del4_u = vector_laplacian_del4(u_bar_new, mesh).astype(eta_dtype)
         u_bar_new = (u_bar_new + dt_t * K_baro_bih * del4_u) * edge_mask
