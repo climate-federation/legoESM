@@ -450,3 +450,68 @@ the staircase, NOT a coord bug); then re-run the mlf full-step 180d. (2) push BS
 the still-deferred node 22 GM-form, node 14 visc-placement, IC bit-identity.
 Reviews: physics-validator + code-reviewer both SHIP (no confirmed defects; minor bottom_level
 clamp added for sibling parity).
+
+## Round-8 (2026-07-18) — full-step+leapfrog blow-up RE-DIAGNOSED (Round-7 hypothesis DISPROVEN)
+
+Round-7 attributed the {full-step + MLF} blow-up to "the neutral leapfrog amplifying a
+staircase-seeded high-lat mode … likely the barotropic/thickness leap-frog coupling"
+(residual #1 class). **Controlled single-variable tests DISPROVE that.** The driver is NOT the
+leapfrog and NOT the barotropic coupling — it is the **explicit (AB2/leapfrog) planetary
+Coriolis time-stepping interacting with the full-step staircase, which lacks the time-domain
+damping that keeps the forward-Euler recipe stable.**
+
+**Blow-up pinned** (bridged NEMO DINO mesh, dt=2700, from restart): grows from step ~4 at the
+**high-latitude staircase-step edges** (|lat|≈68°, `STEPHILAT`), seeded at the deepest wet
+levels (k32/k33) of the columns, migrating to the surface and exploding ~step 21–26. NOT the
+equator, NOT the periodic seam. The eta 2Δx grid-scale fraction stays flat ~0.17 until the
+momentum explodes ⇒ it is a MOMENTUM instability, not the barotropic 2Δx eta checkerboard
+(residual #1/#1b, already closed).
+
+**Controlled matrix (sole variable in each row):**
+
+| coord | Coriolis time-stepping | vorticity | result |
+|---|---|---|---|
+| full-step | matsuno_split (FE, `nemo_dino_kamm`) | al81 | **STABLE** (max\|v\|~0.2) |
+| z* | explicit_ab2 | een_total | **STABLE** (max\|v\|~0.2) |
+| full-step | explicit_ab2 | **een_total** | BLOWS @ step 26 |
+| full-step | explicit_ab2 | **al81 (f via 4-pt face path)** | BLOWS @ step 26 (identical curve) |
+| full-step | leapfrog (`nemo_dino_kamm_mlf`) | een_total | BLOWS @ step 22 |
+
+**Ruled OUT by controlled toggles (all identical blow-up):** the leapfrog integrator (AB2 blows
+too), the barotropic solver (finer substeps 30→60 identical), bottom drag (r=0 identical),
+the vorticity Neumann-fill of q, planetary-f masking at partial corners, barotropic↔3D depth
+inconsistency (H_bathy == 3D staircase wet-column sum to 0.00 m).
+
+**Mechanism (positively identified):**
+1. The 3D EEN Coriolis operator (`pv_flux_al81_partial_cell` with `f_vtx`) is **energy-
+   conserving to machine precision even on a staircase** (Coriolis work/KE ≈ 1e-7 for both a
+   flat and a staircase test grid). So the vorticity operator is NOT the energy source.
+2. The energy source is the accepted full-step **staircase HPG error** (NEMO `ln_hpg_zco` has
+   NO staircase/partial correction — the well-known z-coordinate error NEMO tolerates,
+   dynhpg.F90 hpg_zco masked only by `rhd=0`/`umask`). It drives a weakly-unstable high-lat
+   inertia-gravity mode (large f, small e1u=R·cosφ·Δλ at |lat|>60°).
+3. `matsuno_split` (forward-backward) is a **damping** Coriolis time integration → it
+   suppresses the mode (why the FE recipe is stable). The **neutral leapfrog / weakly-growing
+   AB2** explicit Coriolis does NOT → the mode grows. z* has NO staircase ⇒ no HPG error ⇒ no
+   source (why z*+explicit is stable). The leapfrog blows EARLIER than AB2 (step 22 vs 26)
+   because rDt=2dt takes larger steps of the same growing physical mode — consistent with a
+   physical (not computational-mode) instability, so the Asselin filter does not arrest it.
+
+**Faithful lever CONFIRMED but insufficient alone: node 14 (lateral viscosity high-lat
+scaling).** `nemo_dino_kamm` runs `A_h_floor=0, A_h_eq_boost=1` (NEMO-faithful, no legoESM
+stabiliser) so A_h·cosφ drops to ~34% at 70°. NEMO's `ahmf = ½·rn_Uv·max(e1,e2)` does NOT
+shrink at high lat (e2=R·Δφ dominates) ⇒ **NEMO's high-lat viscosity is ~3× legoESM's** — a
+genuine node-14 mismatch, not a stabiliser. Removing the cosφ reduction (≈node 14) **delays the
+blow-up step 26→34 and halves the growth rate**, but does NOT close it. So node 14 is a real
+contributing faithful lever; the residual needs the full NEMO damping stack (node 14
+max(e1,e2) viscosity placement + the exact leapfrog+Asselin behaviour of this mode), i.e. it is
+a genuine multi-factor dycore-stability match, larger than one iteration.
+
+**Status:** {full-step + FE} `nemo_dino_kamm` = the closest stable faithful config (BSF 0.81×,
+Round-7). {full-step + MLF} `nemo_dino_kamm_mlf` = STILL BLOCKED, but the blocker is now
+correctly identified as the explicit-Coriolis/staircase-HPG damping deficit (NOT the barotropic
+leapfrog coupling). NO 180d MLF+full-step number produced (not fabricated). NO non-NEMO
+stabiliser added; no production code changed this iteration (diagnosis + this record only).
+Next faithful step: implement node 14 (`ahmf/ahmt = ½·rn_Uv·max(e1,e2)` embedded in the
+div/curl, replacing `A_h·cosφ`) and re-test; if still marginal, audit the leapfrog handling of
+the high-lat inertia-gravity mode vs NEMO stpmlf at the staircase steps.
