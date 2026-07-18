@@ -177,7 +177,8 @@ class MPASOceanConfig(NamedTuple):
                                          # lateral viscosity at low
                                          # latitudes, applied per-edge as
                                          # ``A_eff = A · (1 + boost ·
-                                         # cos²(lat_edge))``.  Affects
+                                         # exp(-½(lat_edge/σ)²))`` with σ =
+                                         # ``equatorial_visc_sigma_deg``.  Affects
                                          # BOTH ``A_h`` (3D momentum) and
                                          # ``barotropic_u_viscosity``
                                          # (depth-mean).  Targets the
