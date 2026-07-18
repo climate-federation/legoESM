@@ -1327,13 +1327,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         # keeps returning the state only (public contract unchanged).
         self._phys_state = None
 
-    def reset_target_mass(self) -> None:
-        """Clear the anchored mass target (iter-20; mirrors iter-18 API)."""
-        self._target_mass = None
 
-    def set_target_mass(self, target_mass) -> None:
-        """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
-        self._target_mass = target_mass
 
     def compute_mass(self, state) -> jax.Array:
         """Compute global ``∫ p_s dA`` in fp64 via ``global_integral``.
