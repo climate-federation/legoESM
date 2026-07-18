@@ -37,13 +37,35 @@ def build_six_face_duo_context(n: int, ng: int = 3,
                                use_ext_bundle: bool = False,
                                vector_corner: str = "lagrange",
                                ext_exclude: tuple = (),
-                               use_ext_metrics: bool = False) -> dict:
-    """Gridstructs + Bounds for all six faces (certified builders)."""
+                               use_ext_metrics: bool = False,
+                               oracle_conventions: bool = False) -> dict:
+    """Gridstructs + Bounds for all six faces (certified builders).
+
+    ``oracle_conventions=True`` (codex vertex oracle-diff, 2026-07-18)
+    keeps the two upstream conventions our SB4-era context patches
+    overwrote — BOTH TOGETHER, never singly (isolated reversions
+    measured violently unstable):
+
+    - the border B-ring ``rsina`` stays at the upstream fill poison
+      (fv_grid_utils.F90:537 semantics) instead of the phase-2B real
+      cross-face angles at non-vertex border nodes;
+    - the corner-diagonal A ``area``/``rarea`` stay at the LIVE
+      ``-1e8 / -1e-8`` sentinels (upstream duo init never mutates the
+      gridstruct metrics; the sentinel suppresses wedge vorticity by
+      1e-8 in d_sw5's ``wk``).
+    """
     from legoesm.core.fv3_native_sw_core import Bounds
     from legoesm.grids.fv3_native_halos import ed_supergrid_lonlat_ref
     from legoesm.grids.fv3_native_metrics import compute_fv3_native_angles
+    from legoesm.grids.fv3_native_gridstruct import FV3_RADIUS_M
 
-    gs6 = [build_fv3_native_gridstruct(n, ng, tile=t) for t in range(1, 7)]
+    # radius: the W2 balanced state, the duo-target gate and the
+    # Zenodo reference all use the FV3 6371 km sphere — the builder's
+    # constants.R_earth default (6371.229 km) put a broad 7.2e-5 scale
+    # error on every metric (codex vertex-diff P2).
+    gs6 = [build_fv3_native_gridstruct(n, ng, tile=t,
+                                       radius=FV3_RADIUS_M)
+           for t in range(1, 7)]
 
     # DUO angle override: the plain-mpp gridstruct poisons the panel-edge
     # B-node sina/rsina (plain FV3 never reads them — its non-duo d_sw3
@@ -58,7 +80,7 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     lon6c = np.stack([lon6s[t][::2, ::2] for t in range(6)])
     lat6c = np.stack([lat6s[t][::2, ::2] for t in range(6)])
     ang = compute_fv3_native_angles(lon6c, lat6c)
-    for t in range(6):
+    for t in range(6) if not oracle_conventions else ():
         gs = gs6[t]
         blk = (slice(ng, ng + npx), slice(ng, ng + npx))
         cb = np.array(ang["cosa_b"][t])
@@ -92,7 +114,7 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     )
 
     lo = 1 - ng
-    for gs in gs6:
+    for gs in (gs6 if not oracle_conventions else ()):
         area = np.array(gs["area"], copy=True)
         _fill_corners_agrid_x(_fort(area, lo, lo), npx, ng)
         rarea = np.array(gs["rarea"], copy=True)
@@ -158,6 +180,7 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     return {"n": n, "ng": ng, "gs6": gs6, "dg": dg,
             "use_ext_bundle": use_ext_bundle, "ectx": ectx,
             "ext_exclude": tuple(ext_exclude),
+            "oracle_conventions": bool(oracle_conventions),
             "kk6": kk6, "ee6": ee6,
             "bd": Bounds.single_tile(n, ng)}
 
