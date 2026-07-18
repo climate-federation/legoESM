@@ -217,7 +217,12 @@ def _column_heating_W_m2(out, p_half):
 # the uniform-rescale contract is exact (the IFS early rain split + subcloud
 # evap re-partition water and would confound the scalar-multiple assertions).
 _SINK_CTX = dict(use_ifs_cape_closure=False, use_ifs_subcloud_evap=False,
-                 use_ifs_inplume_precip=False)
+                 use_ifs_inplume_precip=False,
+                 # #1167 flipped these ON by default; the sink tests exercise the
+                 # LEGACY-closure surrogate, so pin the whole IFS family off
+                 # (snow_melt also hard-requires subcloud_evap=True at fn entry).
+                 use_ifs_downdraft=False, use_ifs_capdcycl=False,
+                 use_ifs_land_rhebc=False, use_ifs_snow_melt=False)
 
 
 def test_bechtold_cape_sink_inert_on_vigorous_convection():
@@ -3374,8 +3379,12 @@ def test_ifs_cape_qadv_leaf_toggle_and_ad():
     stoch = jnp.zeros((ncol,))
     dTd = jnp.full((ncol, nlev), 2e-5)
     dqd = jnp.full((ncol, nlev), 1e-8)     # moistening advection
-    base_cfg = BechtoldConfig()
-    on_cfg = BechtoldConfig(use_ifs_cape_qadv=True)
+    # parcel_theta_cap=False: the cap reshapes this sounding's parcel profile
+    # into the saturated-ZCAPE regime where the qadv correction is (correctly)
+    # invisible — probed 2026-07-18: cap on => delta 0, cap off => delta 4.7e-9.
+    # The knob under test here is qadv; the cap has its own tests.
+    base_cfg = BechtoldConfig(parcel_theta_cap=False)
+    on_cfg = BechtoldConfig(use_ifs_cape_qadv=True, parcel_theta_cap=False)
 
     out_base, Mu_base, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0, config=base_cfg)
