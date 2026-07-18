@@ -260,6 +260,33 @@ def _parse_args():
              "unsupported pairings loudly).",
     )
     p.add_argument(
+        "--outer-integrator",
+        choices=("forward_euler", "ab2", "leapfrog"),
+        default=None,
+        help="Outer (baroclinic) time integrator (DINOConfig.outer_integrator). "
+             "'forward_euler' (default), 'ab2' (Veros/MITgcm), or 'leapfrog' = "
+             "NEMO Modified Leap-Frog (stp_MLF): three time levels + the plain "
+             "Robert-Asselin filter. leapfrog REQUIRES coriolis_scheme="
+             "explicit_ab2 (Coriolis in the RHS) — pair with --vorticity-scheme "
+             "een_total (the nemo_dino_kamm_mlf recipe sets all three).",
+    )
+    p.add_argument(
+        "--vorticity-scheme",
+        choices=("al81", "een_total"),
+        default=None,
+        help="Vector-invariant vorticity flux (DINOConfig.vorticity_scheme). "
+             "'al81' (default): relative-vorticity EEN triad (planetary f in the "
+             "separate face-f path). 'een_total': NEMO ln_dynvor_een — the "
+             "ABSOLUTE vorticity (f+zeta)/e3f rides the EEN triad (Coriolis IN "
+             "the RHS); requires --coriolis-scheme explicit_ab2.",
+    )
+    p.add_argument(
+        "--asselin-gamma", type=float, default=None,
+        help="Robert-Asselin filter coefficient rn_atfp for --outer-integrator "
+             "leapfrog (DINOConfig.asselin_gamma; NEMO default 0.1, plain RA not "
+             "Williams). Ignored for other integrators.",
+    )
+    p.add_argument(
         "--barotropic-slow-forcing-ab2", choices=("on", "off"), default=None,
         help="AB2 time-centering of the barotropic slow forcing F_slow "
              "(DINOConfig.barotropic_slow_forcing_ab2; Oceananigans Gᵁ "
@@ -525,6 +552,12 @@ def main():
             cfg, momentum_advection=args.momentum_advection)
     if args.coriolis_scheme is not None:
         cfg = dataclasses.replace(cfg, coriolis_scheme=args.coriolis_scheme)
+    if args.outer_integrator is not None:
+        cfg = dataclasses.replace(cfg, outer_integrator=args.outer_integrator)
+    if args.vorticity_scheme is not None:
+        cfg = dataclasses.replace(cfg, vorticity_scheme=args.vorticity_scheme)
+    if args.asselin_gamma is not None:
+        cfg = dataclasses.replace(cfg, asselin_gamma=args.asselin_gamma)
     if args.barotropic_slow_forcing_ab2 is not None:
         cfg = dataclasses.replace(
             cfg,

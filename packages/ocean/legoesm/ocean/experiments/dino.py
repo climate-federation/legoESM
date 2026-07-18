@@ -464,7 +464,18 @@ class DINOConfig:
     momentum_advection: str = "vector_invariant"  # "flux_form" (MITgcm) | "weno7" (Oceananigans)
     momentum_flux_scheme: str = "upwind"          # "centered" (MITgcm flux-form advScheme=2)
     coriolis_scheme: str = "matsuno_split"        # "explicit_ab2" (MITgcm/Oceananigans/Veros)
-    outer_integrator: str = "forward_euler"       # "ab2" (MITgcm/Oceananigans/Veros)
+    outer_integrator: str = "forward_euler"       # "ab2" | "leapfrog" (NEMO stp_MLF)
+    # Vector-invariant vorticity flux scheme (relative + optionally planetary).
+    #   "al81" (default) — relative-vorticity EEN triad; planetary Coriolis in the
+    #     separate matsuno_split / explicit_ab2 face-f path.
+    #   "een_total" — NEMO ln_dynvor_een: the ABSOLUTE vorticity (f+zeta)/e3f rides
+    #     the SAME EEN triad (Coriolis IN the RHS), the faithful DINO form. Pairs
+    #     with coriolis_scheme="explicit_ab2" (Matsuno off) — used by the leapfrog
+    #     (nemo_dino_kamm_mlf) card.
+    vorticity_scheme: str = "al81"
+    # Robert-Asselin filter coefficient (rn_atfp) for outer_integrator="leapfrog"
+    # (NEMO plain RA, not Williams). NEMO default 0.1. Ignored otherwise.
+    asselin_gamma: float = 0.1
     ab2_scope: str = "total"                       # "advective" (Veros; forced by rigid_lid)
     # AB2 time-centering of the barotropic slow forcing F_slow (Oceananigans
     # Gᵁ convention).  REQUIRED whenever coriolis_scheme="explicit_ab2" pairs
@@ -733,6 +744,20 @@ DINO_RECIPES: dict[str, dict] = {
         "barotropic_slow_forcing_ab2": True,
         "ke_gradient_scheme": "centered",
     },
+}
+
+# nemo_dino_kamm_mlf: the Kamm-2025 DINO card WITH NEMO's faithful Modified
+# Leap-Frog time integrator (stp_MLF) and the combined-EEN Coriolis-in-RHS
+# (ln_dynvor_een, (f+zeta)/e3f through the EEN triad). Inherits every nemo_dino_kamm
+# block and overrides ONLY the integrator/Coriolis placement, so a controlled A/B
+# vs nemo_dino_kamm isolates the time-integrator change. Node 19 (+ node 13) of the
+# DINO wiring diagram.
+DINO_RECIPES["nemo_dino_kamm_mlf"] = {
+    **DINO_RECIPES["nemo_dino_kamm"],
+    "outer_integrator": "leapfrog",       # NEMO stp_MLF (key_qco, no key_RK3)
+    "vorticity_scheme": "een_total",      # ln_dynvor_een: (f+zeta) in the EEN triad
+    "coriolis_scheme": "explicit_ab2",    # Matsuno rotation OFF; Coriolis in the RHS
+    "asselin_gamma": 0.1,                 # rn_atfp (plain Robert-Asselin, not Williams)
 }
 
 # L2 cards select lat-lon-C-grid-only blocks (flux-form / WENO momentum, AB2
@@ -2035,6 +2060,8 @@ def dino_lat_lon_model_config(
         momentum_flux_scheme=cfg.momentum_flux_scheme,
         coriolis_scheme=cfg.coriolis_scheme,
         outer_integrator=cfg.outer_integrator,
+        vorticity_scheme=cfg.vorticity_scheme,
+        asselin_gamma=cfg.asselin_gamma,
         ab2_scope=cfg.ab2_scope,
         # Routed into config.barotropic by from_flat.  Required by the
         # oceananigans card (explicit_ab2 × implicit_cn): keeps the

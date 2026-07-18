@@ -244,6 +244,7 @@ class TestDINORecipes:
     def test_catalog_membership(self):
         assert set(DINO_RECIPES) == {
             "legoesm_default", "nemo_paper", "nemo_dino_kamm",
+            "nemo_dino_kamm_mlf",
             "veros", "mitgcm", "oceananigans"}
         assert set(DINO_L2_RECIPES) == {"veros", "mitgcm", "oceananigans"}
         assert set(DINO_L2_RECIPES) <= set(DINO_RECIPES)

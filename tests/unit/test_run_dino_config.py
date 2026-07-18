@@ -168,6 +168,38 @@ def test_coriolis_scheme_flag_parses(monkeypatch):
     assert args.coriolis_scheme == "matsuno_split"
 
 
+def test_outer_integrator_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().outer_integrator is None      # None -> recipe card
+    monkeypatch.setattr(
+        sys, "argv", ["run_dino", "--outer-integrator", "leapfrog"])
+    assert rd._parse_args().outer_integrator == "leapfrog"
+    monkeypatch.setattr(
+        sys, "argv", ["run_dino", "--outer-integrator", "bogus"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
+def test_vorticity_scheme_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().vorticity_scheme is None
+    monkeypatch.setattr(
+        sys, "argv", ["run_dino", "--vorticity-scheme", "een_total"])
+    assert rd._parse_args().vorticity_scheme == "een_total"
+    monkeypatch.setattr(
+        sys, "argv", ["run_dino", "--vorticity-scheme", "bogus"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
+def test_asselin_gamma_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().asselin_gamma is None
+    monkeypatch.setattr(
+        sys, "argv", ["run_dino", "--asselin-gamma", "0.05"])
+    assert rd._parse_args().asselin_gamma == 0.05
+
+
 def test_coriolis_scheme_default_none_and_rejects_bad(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run_dino"])
     assert rd._parse_args().coriolis_scheme is None

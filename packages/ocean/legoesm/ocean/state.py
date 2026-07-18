@@ -451,6 +451,19 @@ class LatLonCGridOceanState(NamedTuple):
     S_incr_prev: object = None
     u_incr_prev: object = None
     v_incr_prev: object = None
+    # NEMO Modified-Leap-Frog "before" state Nbb (t-dt) for
+    # outer_integrator="leapfrog": the previous-step (Robert-Asselin-filtered)
+    # now-fields, carried so the leapfrog explicit combine X(Naa)=X(Nbb)+2dt·RHS
+    # and the Asselin filter X(Nnn)+=gamma·(X(Nbb)-2X(Nnn)+X(Naa)) have their
+    # third time level. None on the very first step -> a forward-Euler start
+    # (NEMO l_1st_euler) which then POPULATES these with the pre-step now-state.
+    # Default None -> inert (forward-Euler/AB2 paths never read them): zero
+    # behaviour change for existing configs.
+    u_before: object = None
+    v_before: object = None
+    T_before: object = None
+    S_before: object = None
+    eta_before: object = None
     # Previous-step barotropic slow forcing (depth-mean tendency) for the
     # AB2 time-centering of F_slow (matches Oceananigans' AB2-extrapolated Gᵁ).
     # Only used when barotropic_slow_forcing_ab2=True; None otherwise (default).
@@ -1390,7 +1403,23 @@ class LatLonCGridOceanConfig(NamedTuple):
     # layer thickness — ``barotropic_solver="rigid_lid"`` (the faithful ACC config) or
     # ``use_conservation_fixer=True``. Under a moving free surface it has a small
     # O(Δη) tracer-content drift; "forward_euler" conserves to machine zero.
+    # "leapfrog" = NEMO Modified-Leap-Frog (stpmlf.F90, key_qco): three time
+    # levels Nbb(t-dt)/Nnn(t)/Naa(t+dt) with the explicit combine
+    #   X(Naa) = X(Nbb) + 2dt·RHS(Nnn),   RHS incl. Coriolis (een_total EEN triad),
+    # implicit vertical friction/diffusion (dyn_zdf) applied backward-Euler over
+    # rDt=2dt on the after-state, and the Robert-Asselin time filter on the now
+    # fields   X(Nnn) <- X(Nnn) + asselin_gamma·(X(Nbb) - 2·X(Nnn) + X(Naa)).
+    # First step is a forward Euler start (dt, no filter) — NEMO l_1st_euler.
+    # Requires coriolis_scheme="explicit_ab2" (Matsuno off; Coriolis in the RHS),
+    # implicit_vertical_mixing=True, ab2_scope="total". The before-state Nbb is
+    # carried on the state's {u,v,T,S,eta}_before fields. Default "forward_euler"
+    # keeps every existing config bit-identical.
     outer_integrator: str = "forward_euler"
+    # Robert-Asselin(-only) time-filter coefficient rn_atfp for
+    # outer_integrator="leapfrog" (NEMO DINO uses the plain RA filter, NOT the
+    # Robert-Asselin-Williams variant — dynatf_qco.F90:144 / traatf_qco.F90:209).
+    # NEMO default rn_atfp=0.1. Ignored unless outer_integrator="leapfrog".
+    asselin_gamma: float = 0.1
     # Implicit (backward-Euler) vertical mixing.  When True (default):
     #   1. The PE tendency function skips the explicit ``A_v`` viscous
     #      block (lines tagged ``if config.A_v > 0 ...``).
