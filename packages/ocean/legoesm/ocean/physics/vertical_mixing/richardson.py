@@ -112,7 +112,9 @@ def richardson_vertical_mixing(
     """
     # Validate the static-stability mode at function entry on the STATIC config
     # value (dispatch hardening — a typo must raise, not silently pick a
-    # different N²). Allowed set mirrors ``_shared.compute_N2``.
+    # different N²). Richardson does not thread the NEMO bn2 geometric depth
+    # ladders, so ``"nemo_bn2"`` (convection/TKE only) is intentionally NOT in
+    # this set and raises here.
     if cfg.n2_mode not in ("insitu", "insitu_signed", "adiabatic"):
         raise ValueError(
             "Unknown RichardsonVerticalMixingConfig.n2_mode="

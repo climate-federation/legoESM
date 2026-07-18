@@ -486,6 +486,12 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 rho, state.eta.data, z_coord.dz_ref, J,
                 constants_config.rho_0, h_actual=h_actual,
             )
+        # NEMO bn2 trigger (n2_mode="nemo_bn2"): the geometric depth ladders
+        # (gdept / interior gdepw); ignored by every other n2_mode.
+        _bn2_t_depth = _bn2_w_depth = None
+        if getattr(vmix_cfg.tke, "n2_mode", "insitu") == "nemo_bn2":
+            from legoesm.ocean.eos import nemo_bn2_depth_ladders
+            _bn2_t_depth, _bn2_w_depth = nemo_bn2_depth_ladders(z_coord)
         tke_cfg = vmix_cfg.tke
         prognostic = bool(getattr(tke_cfg, "prognostic", False))
         # Veros metric slots (TKEConfig.veros_dz_slots): the surface-flux
@@ -580,6 +586,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 dz_surface=dz_surface, boundary_cap=_mxl1_cap,
                 lat_deg=lat_deg,
                 T_n2=T_n2, S_n2=S_n2,
+                t_depth=_bn2_t_depth, w_depth=_bn2_w_depth,
             )
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at
@@ -603,6 +610,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             dz_surface=dz_surface, boundary_cap=_mxl1_cap,
             lat_deg=lat_deg,
             T_n2=T_n2, S_n2=S_n2,
+            t_depth=_bn2_t_depth, w_depth=_bn2_w_depth,
         )
         return tke_out.K_H, tke_out.K_M, None
 
@@ -740,6 +748,12 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
             rho, state.eta.data, z_coord.dz_ref, J,
             ConstantsConfig().rho_0, h_actual=ed_h_actual,
         )
+    # NEMO bn2 trigger (n2_mode="nemo_bn2"): geometric depth ladders
+    # (gdept / interior gdepw); ignored by every other n2_mode.
+    ed_t_depth = ed_w_depth = None
+    if getattr(cfg, "n2_mode", "insitu") == "nemo_bn2":
+        from legoesm.ocean.eos import nemo_bn2_depth_ladders
+        ed_t_depth, ed_w_depth = nemo_bn2_depth_ladders(z_coord)
     # Shared, AD-safe helper — bit-for-bit identical to the explicit
     # ``enhanced_diffusion_convection`` path (no duplicated numerics).
     # Returns the full K / A (including the scheme's own backgrounds);
@@ -748,6 +762,7 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
     K, A, _ = convective_K_A_flag(
         rho, z_coord.dz_ref, J, cfg,
         T=state.T.data, S=state.S.data, p_cell=ed_p_cell, eos_fn=eos_fn,
+        t_depth=ed_t_depth, w_depth=ed_w_depth,
     )
     if getattr(cfg, "two_level_trigger", False) and before_tracers is not None:
         # NEMO zdfevd MIN(rn2, rn2b): evaluate the trigger on the BEFORE
@@ -772,6 +787,7 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
         K_b, A_b, _ = convective_K_A_flag(
             rho_b, z_coord.dz_ref, J, cfg,
             T=T_b, S=S_b, p_cell=ed_p_cell_b, eos_fn=eos_fn,
+            t_depth=ed_t_depth, w_depth=ed_w_depth,
         )
         K = jnp.maximum(K, K_b)
         A = jnp.maximum(A, A_b)

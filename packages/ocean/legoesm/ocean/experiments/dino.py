@@ -285,6 +285,12 @@ class DINOConfig:
     # measurably nil at the 62-day state — so it is characterised, not shipped
     # here. See docs/ocean/fidelity/dino_tendency_certificate.md.)
     convection_n2_threshold: float = 0.0        # -1e-12 = NEMO rn_evd threshold
+    # TKE static-stability trigger. Default "insitu" (BIT-IDENTICAL legacy).
+    # NEMO's zdftke consumes the SAME rn2 (eosbn2 bn2) as zdfevd — select
+    # "nemo_bn2" to feed the TKE buoyancy the exact bn2 N². For the DINO S-EOS
+    # bn2 ≡ the "adiabatic" parcel N² to ~9e-7 s^-2 (see the nemo_dino_kamm
+    # convection comment), so no recipe switches by default.
+    tke_n2_mode: str = "insitu"                 # "nemo_bn2" = NEMO eosbn2 rn2
 
     # ------------------------------------------------------------------
     # GM/Redi mesoscale eddy parameterization. Adaptive κ via Visbeck 1997
@@ -680,6 +686,16 @@ DINO_RECIPES: dict[str, dict] = {
         "tke_momentum_visc_bg": 1.2e-4,          # rn_avm0 (NO legoESM 5e-4 stabilizer floor)
         "tke_prandtl_ri": True,                  # nn_pdl=1 Ri-dependent Prandtl (default namzdf_tke)
         # -- Convection (namzdf: ln_zdfevd=T, rn_evd=100, nn_evdm=1; hard rn2<0 on eosbn2) --
+        # NEMO's rn2 is eosbn2 bn2 (S-EOS local alpha,beta at each cell's gdept,
+        # geometric zrw interp) — available as convection_n2_mode="nemo_bn2" /
+        # tke_n2_mode="nemo_bn2". VERIFIED same-state (bridge restart state) to
+        # reproduce NEMO rn2_stg at 99.9% per-depth agreement. Kept at
+        # "adiabatic" here because, for the DINO S-EOS, the parcel-displacement
+        # "adiabatic" N² is numerically EQUIVALENT to the exact bn2 (corr 1.0000,
+        # maxdiff ~9e-7 s^-2 → ~0.1% of marginal interfaces flip) — "adiabatic"
+        # already matches NEMO rn2_stg to 99.9% same-state, so the exact bn2 is a
+        # no-op-equivalent provenance option, not a fidelity fix. See
+        # tests/ocean/unit/test_nemo_bn2.py + docs/ocean/fidelity.
         "convection_smooth_transition": False,
         "convection_n2_mode": "adiabatic",
         "convection_n2_threshold": -1e-12,
@@ -1873,6 +1889,8 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             prandtl_mode="constant",
             kappaM_min=cfg.A_v_bg_effective, kappaH_min=cfg.K_v_bg,
             kappaM_max=cfg.K_conv, bg_diff_scale=0.0,
+            # NEMO zdftke consumes eosbn2's rn2 — "nemo_bn2" (else "insitu").
+            n2_mode=cfg.tke_n2_mode,
             # NEMO zdftke surface terms — BOTH are namelist_ref defaults
             # (DINO's namelist_cfg sets no &namzdf_tke overrides, so the
             # oracle runs with ln_lc=T (rn_lc=0.15) and nn_etau=1

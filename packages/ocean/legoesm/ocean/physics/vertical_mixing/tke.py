@@ -1259,6 +1259,8 @@ def tke_vertical_mixing(
     lat_deg: jnp.ndarray | None = None,
     T_n2: jnp.ndarray | None = None,
     S_n2: jnp.ndarray | None = None,
+    t_depth: jnp.ndarray | None = None,
+    w_depth: jnp.ndarray | None = None,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
 
@@ -1389,7 +1391,7 @@ def tke_vertical_mixing(
     # Static stability N^2. ``"insitu"`` (default) is the clipped in-situ
     # form (BIT-IDENTICAL); ``"adiabatic"`` is the SIGNED Veros parcel-
     # displacement form that lets the TKE convect (N^2 < 0).
-    signed_n2 = cfg.n2_mode == "adiabatic"
+    signed_n2 = cfg.n2_mode in ("adiabatic", "nemo_bn2")
     # Diffusivity-stage N² time level (TKEConfig.n2_before_advection): the
     # before-advection (Nnow) T/S override, when supplied by the caller (see
     # tke_set_diffusivities). Python-static; None ⇒ BIT-IDENTICAL.
@@ -1401,6 +1403,7 @@ def tke_vertical_mixing(
         dz_ref=dz_ref, jacobian=jacobian, eos_fn=eos_fn,
         n2_mode=cfg.n2_mode,
         adiabatic_over_dz_half=veros_slots,
+        t_depth=t_depth, w_depth=w_depth,
     )
 
     if taum_surface is not None:
