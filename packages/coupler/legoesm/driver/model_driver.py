@@ -5747,7 +5747,11 @@ class ModelDriver:
         _forcing_daily: dict = {}
         from legoesm.forcing.time_utils import daily_forcing_bucket
         for step in range(n_steps_total):
-            if _sst_forcing or _ext_forcing:
+            # Enter the daily-boundary block also when a coupler segment_callback
+            # is present, so the ocean/land still steps even on a coupled run with
+            # radiation=none (where _sst_forcing is False) — else coupling would
+            # silently freeze. SST re-sampling below stays gated on _sst_forcing.
+            if _sst_forcing or _ext_forcing or self._segment_callback is not None:
                 _force_day = START_DAY + step * DT / 86400.0
                 # floor, not int() — see daily_forcing_bucket (negative
                 # fractional days land in the wrong bucket under
@@ -5755,6 +5759,16 @@ class ModelDriver:
                 # days via modulo).
                 _fd_int = daily_forcing_bucket(_force_day)
                 if _fd_int != _last_force_day:
+                    # Coupled ocean/land: step the coupler's (grid-agnostic) slab
+                    # ocean + land for the elapsed day BEFORE re-sampling SST, so
+                    # the daily _compute_T_sfc below reads the just-updated ocean
+                    # SST (the coupled driver overrides get_sst_sic -> ocean SST).
+                    # Daily coupling cadence, matching the SST-refresh cadence.
+                    # step 0 has nothing to step yet (_last_force_day is None).
+                    if (self._segment_callback is not None
+                            and _last_force_day is not None):
+                        self._current_day = _force_day
+                        self._segment_callback(self, _force_day, 86400.0)
                     # Sample the daily fields at the CANONICAL day boundary
                     # (``float(_fd_int)``), NOT at the first step that
                     # enters the day: a restart link's first step lands

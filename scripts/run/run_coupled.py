@@ -777,9 +777,12 @@ def build_parser():
     parser.add_argument("--ocean-h-mix", type=float, default=50.0,
                         help="Slab ocean mixed-layer depth [m]")
     parser.add_argument("--grid", default="cubed_sphere",
-                        choices=["cubed_sphere", "latlon"],
-                        help="Atmosphere grid (default cubed_sphere); 'latlon' "
-                             "is required for --ocean dynamic (shared grid)")
+                        choices=["cubed_sphere", "latlon", "voronoi", "gaussian"],
+                        help="Atmosphere grid (default cubed_sphere). "
+                             "cubed_sphere/latlon support fixed/slab/two_layer + "
+                             "dynamic ocean; voronoi(MPAS)/gaussian(spectral) "
+                             "couple to the grid-agnostic slab (fixed/slab/"
+                             "two_layer). --ocean dynamic requires --grid latlon.")
     parser.add_argument("--couple-surface-radiation",
                         action=argparse.BooleanOptionalAction, default=True,
                         help="Feed the coupler's tile-blended (land+ocean) skin "
@@ -1192,11 +1195,14 @@ def main():
         ),
         dycore=DycoreConfig(
             dt=args.dt, model_type="hydrostatic",
-            # On lat-lon, use the Arakawa-C-grid hydrostatic dycore so the atm
-            # co-locates with the C-grid 3D ocean (--ocean dynamic); cdgrid is
-            # cube-only.  Cube keeps the default cdgrid.
-            discretization=("latlon_cgrid" if args.grid == "latlon"
-                            else "cdgrid"),
+            # Grid -> hydrostatic-dycore discretization. lat-lon uses the
+            # Arakawa-C-grid so the atm co-locates with the C-grid 3D ocean
+            # (--ocean dynamic); cube uses cdgrid; voronoi -> MPAS; gaussian ->
+            # spectral. voronoi/gaussian couple to the (grid-agnostic) slab ocean.
+            discretization={
+                "latlon": "latlon_cgrid", "cubed_sphere": "cdgrid",
+                "voronoi": "mpas", "gaussian": "spectral",
+            }[args.grid],
             # Fourier polar filter (lat-lon only): lets the factory/CFL clamp dt
             # by the equatorial CFL instead of the ~60x-smaller pole-cell dx, so
             # a 2deg run uses dt~450s (5760 steps/30d) not dt~5.6s (460k steps).
@@ -1254,6 +1260,19 @@ def main():
     # deep-layer restoring (a cold reservoir that damps SST drift) — the most
     # ocean physics the coupled slab supports.  Every preset holds a
     # SimpleOceanConfig, so replacing it is type-safe.
+    # Coupled slab/ocean on gaussian(spectral) is not wired yet: the spectral
+    # atmosphere state is spectral COEFFICIENTS, so the coupler's atm->ocean
+    # forcing extractor (_build_atm_forcing) would need a full spectral->grid
+    # synthesis of every field, not just a wind reconstruction. cubed_sphere /
+    # latlon / voronoi(MPAS) are supported (grid-space / cell fields). Fixed-SST
+    # gaussian AMIP works via run_amip.py. (Follow-up: spectral coupling.)
+    if args.grid == "gaussian":
+        raise SystemExit(
+            "coupled runs on --grid gaussian are not wired yet: the spectral "
+            "state is spectral coefficients, so the coupler's atm->ocean forcing "
+            "extractor needs a full spectral->grid synthesis (follow-up). Use "
+            "--grid cubed_sphere / latlon / voronoi for coupled ocean, or "
+            "run_amip.py --grid-type gaussian for fixed-SST AMIP.")
     overrides = {}
     ocean_grid_obj = None   # None => ocean co-located on the atm grid (no remap)
     if args.ocean == "dynamic":
