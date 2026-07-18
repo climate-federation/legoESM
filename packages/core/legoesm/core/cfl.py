@@ -316,17 +316,19 @@ def cfl_check_and_adjust(
             dx_min = estimate_min_dx_latlon(n, radius)
     elif grid_type == "gaussian":
         dx_min = estimate_min_dx_gaussian(n, radius)
-    elif grid_type == "mpas":
+    elif grid_type in ("mpas", "voronoi", "icosahedral", "ico", "mpas_voronoi"):
+        # All the SCVT-Voronoi/MPAS mesh aliases (see driver.config.
+        # normalize_grid_type) dispatch to the icosahedral dx estimator;
+        # ModelDriver passes the raw config grid_type, so accept them here.
         dx_min = estimate_min_dx_icosahedral(n, radius)
     elif grid_type == "cubed_sphere":
         dx_min = estimate_min_dx_cubed_sphere(n, radius)
     else:
         # Dispatch hardening: a typo'd grid_type must not silently take the
-        # cubed-sphere dx (a wrong dt clamp on a lat-lon/mpas run). The dycore
-        # grid_type namespace is exactly these four.
+        # cubed-sphere dx (a wrong dt clamp on a lat-lon/mpas run).
         raise ValueError(
             f"cfl_check_and_adjust: unknown grid_type {grid_type!r}; expected "
-            "one of 'latlon', 'gaussian', 'mpas', 'cubed_sphere'."
+            "latlon / gaussian / cubed_sphere / mpas (or a voronoi alias)."
         )
 
     # Total wave speed = max(wind) + gravity_wave_speed

@@ -177,10 +177,13 @@ class MPASOceanConfig(NamedTuple):
                                          # lateral viscosity at low
                                          # latitudes, applied per-edge as
                                          # ``A_eff = A · (1 + boost ·
-                                         # cos²(lat_edge))``.  Affects
-                                         # BOTH ``A_h`` (3D momentum) and
-                                         # ``barotropic_u_viscosity``
-                                         # (depth-mean).  Targets the
+                                         # exp(-½(lat_edge/σ)²))`` with σ =
+                                         # ``equatorial_visc_sigma_deg``.  Applied
+                                         # to ``A_h`` (3D momentum) and to the
+                                         # IMPLICIT-CN ``barotropic_u_viscosity``
+                                         # (depth-mean); the explicit-substep
+                                         # barotropic solver uses uniform
+                                         # viscosity (no boost).  Targets the
                                          # equatorial f→0 mode that the
                                          # implicit-CN solver's Coriolis
                                          # predictor-corrector cannot
@@ -407,6 +410,11 @@ class MPASOceanConfig(NamedTuple):
     # nonzero runoff_depth_spread_m (resolve_runoff_spread_arg validates).
     # Column-integral salt tendency unchanged; None = legacy top-cell.
     runoff_depth_spread_map: object = None
+    # Positional-stability tail: append new fields here (never mid-class).
+    equatorial_visc_sigma_deg: float = 5.0  # Gaussian half-width [deg lat] of
+    # the equatorial viscosity boost (see ``equatorial_visc_boost``); the
+    # instability is confined to |lat| < ~10°, so the default 5° matches the
+    # lat-lon production config. Only used when ``equatorial_visc_boost > 0``.
 
 
 class MPASSimpleOceanConfig(NamedTuple):

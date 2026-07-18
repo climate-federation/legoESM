@@ -567,15 +567,19 @@ def mpas_ocean_baroclinic_tendencies(
     # restoring fails (f→0).  Diagnosed in project_mpas_etopo_
     # instability.md §"equatorial mode": top-100 hot-spot edges
     # cluster at mean |lat|=22°, peaking in equatorial Pacific.
-    _eq_boost = getattr(config, "equatorial_visc_boost", 0.0)
+    _eq_boost = config.equatorial_visc_boost
     if _eq_boost > 0:
-        # Tight Gaussian centered at equator (sigma=5° matches lat-lon
+        # Tight Gaussian centered at equator (default sigma=5° matches lat-lon
         # production config).  Previous cos²(lat) was too wide — it
         # overdamped real mid-latitude dynamics while the instability is
         # confined to |lat| < 10°.
-        _sigma_rad = jnp.radians(
-            getattr(config, "equatorial_visc_sigma_deg", 5.0)
-        )
+        if config.equatorial_visc_sigma_deg <= 0:
+            raise ValueError(
+                "equatorial_visc_sigma_deg must be > 0 when "
+                "equatorial_visc_boost > 0 (Gaussian width divides latEdge; "
+                f"got {config.equatorial_visc_sigma_deg})."
+            )
+        _sigma_rad = jnp.radians(config.equatorial_visc_sigma_deg)
         _lat_e = mesh.latEdge.astype(u_3d.dtype)
         _gauss = jnp.exp(-0.5 * (_lat_e / _sigma_rad) ** 2)
         _lat_factor = (1.0 + _eq_boost * _gauss)[:, jnp.newaxis]  # (nEdges, 1)
