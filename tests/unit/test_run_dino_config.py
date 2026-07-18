@@ -99,6 +99,25 @@ def test_barotropic_coriolis_rejects_bad_choice(monkeypatch):
         rd._parse_args()
 
 
+def test_gm_redi_mld_criterion_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--gm-redi-mld-criterion", "n2_integral"])
+    args = rd._parse_args()
+    assert args.gm_redi_mld_criterion == "n2_integral"
+
+
+def test_gm_redi_mld_criterion_default_none(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().gm_redi_mld_criterion is None
+
+
+def test_gm_redi_mld_criterion_rejects_bad_choice(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--gm-redi-mld-criterion", "bogus"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
 def test_nemo_faithful_grid_flag_parses(monkeypatch):
     monkeypatch.setattr(sys, "argv",
                         ["run_dino", "--grid", "latlon", "--nemo-faithful-grid"])

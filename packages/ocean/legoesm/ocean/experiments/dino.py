@@ -319,6 +319,13 @@ class DINOConfig:
     # steep fronts; the oracle semantic).  Only read when
     # lateral_tracer_mixing="isoneutral".
     redi_slope_limit: str = "dm95_taper"
+    # Mixed-layer-depth criterion for the NEMO ldfslp slope ramp / native
+    # slopes (GMRediConfig.mld_criterion): "rho_c" (default, byte-identical
+    # potential-density difference) or "n2_integral" (NEMO zdfmxl.F90:91-105
+    # exact integral(MAX(N^2,0) dz) >= g*rho_c/rho0). The nemo_dino_kamm card
+    # selects "n2_integral"; only affects runs with the ML ramp / native
+    # slopes active. Dispatch raises on an unknown value.
+    gm_redi_mld_criterion: str = "rho_c"
 
     # ------------------------------------------------------------------
     # Lateral mixing of momentum (geopotential / iso-level Laplacian;
@@ -659,6 +666,10 @@ DINO_RECIPES: dict[str, dict] = {
         #    to machine precision + energetically correct — flattens isopycnals).
         "gm_redi_slope_scheme": "nemo_iso_lap",
         "gm_kappa_scheme": "treguier",
+        # NEMO zdfmxl N^2-integral MLD criterion for the ldfslp slope ramp
+        # (node 6/7); the pot-density default anchors the ML slope ramp at a
+        # different depth (slopes corr 0.99 below ML, 0.33 inside).
+        "gm_redi_mld_criterion": "n2_integral",
         "redi_S_max": 0.01,                      # rn_slpmax (namtra_ldf ref default)
         # -- Momentum (namdyn_adv: ln_dynadv_vec + nn_dynkeg=1; namdyn_vor: ln_dynvor_een) --
         "ke_gradient_scheme": "hollingsworth",
@@ -1886,6 +1897,10 @@ def dino_lat_lon_model_config(
         raise ValueError(
             f"unknown DINOConfig.gm_kappa_scheme {cfg.gm_kappa_scheme!r}; "
             "expected 'visbeck' or 'treguier'")
+    if cfg.gm_redi_mld_criterion not in ("rho_c", "n2_integral"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_mld_criterion "
+            f"{cfg.gm_redi_mld_criterion!r}; expected 'rho_c' or 'n2_integral'")
     from legoesm.ocean.physics.lateral_mixing.config import TreguierConfig
     if cfg.lateral_tracer_mixing not in ("geopotential", "isoneutral"):
         raise ValueError(
@@ -1923,6 +1938,7 @@ def dino_lat_lon_model_config(
             slope_density="neutral",
             slope_limit=cfg.redi_slope_limit,
             implicit_K33=True,
+            mld_criterion=cfg.gm_redi_mld_criterion,
             visbeck=VisbeckConfig(enabled=False),
             treguier=TreguierConfig(enabled=False),
         )
@@ -1935,6 +1951,7 @@ def dino_lat_lon_model_config(
             kappa_Redi=cfg.visbeck_kappa_min,
             S_max=cfg.redi_S_max,
             slope_scheme=cfg.gm_redi_slope_scheme,
+            mld_criterion=cfg.gm_redi_mld_criterion,
             # Exactly ONE adaptive-κ diagnostic on (the GM/Redi dispatch
             # raises if both are enabled): "visbeck" (historical) or
             # "treguier" (the NEMO nn_aei_ijk_t=21 oracle scaling, cap

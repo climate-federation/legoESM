@@ -311,6 +311,14 @@ class GMRediConfig(NamedTuple):
     # Density criterion [kg/m^3] for the ramp's mixed-layer depth (NEMO zdfmxl
     # rn_rho_c; potential-density difference from the ~10 m reference level).
     mld_rho_c: float = 0.01
+    # Mixed-layer-depth criterion for the ldfslp slope ramp / native-slope
+    # anchor.  "rho_c" (default, BYTE-IDENTICAL) = potential-density difference
+    # of mld_rho_c from the ~10 m reference; "n2_integral" = NEMO's EXACT
+    # zdfmxl.F90:91-105 criterion integral(MAX(N^2,0) dz) >= g*mld_rho_c/rho0
+    # (in-situ adiabatic N^2 = rn2b, plus the MAX(N^2,0) clamp).  Set on the
+    # nemo_dino_kamm card; all other recipes keep "rho_c".  Dispatch raises on
+    # an unknown value (gm_redi_latlon_cgrid._nemo_mld).
+    mld_criterion: str = "rho_c"
     # NEMO ldfslp horizontal (1-2-1)⊗(1-2-1)/16 Shapiro smoother on the final
     # interface slopes (ldfslp.F90:304-315).  legoESM omitted it, leaving the
     # interior slope amplitude ~1.27x too large; wet-renormalized so land drops

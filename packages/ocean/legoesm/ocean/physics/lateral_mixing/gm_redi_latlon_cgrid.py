@@ -414,7 +414,97 @@ def _nemo_mld_from_potential_density(T, S, mask, z_coord, eos_fn, rho_c):
     return hml, m_base
 
 
-def _apply_nemo_mld_slope_ramp(S_x, S_y, T, S, mask, z_coord, eos_fn, rho_c):
+def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0):
+    """Mixed-layer depth [m] via NEMO's EXACT zdfmxl N^2-integral criterion.
+
+    NEMO (``zdfmxl.F90:91-105``, 5.0.2) integrates the POSITIVE buoyancy
+    frequency down from the ~10 m reference w-level ``nlb10`` and sets the
+    mixed-layer w-level ``nmln`` at the shallowest level where the running
+    integral first reaches an N^2 threshold::
+
+        zN2_c   = grav * rho_c * r1_rho0                 (:95)
+        hmlp   += MAX( rn2b(jk), 0 ) * e3w(jk)           (:98, jk>=nlb10)
+        nmln    = shallowest jk with hmlp >= zN2_c       (:99)
+        hmlp    = gdepw(nmln)                            (:104, the MLD)
+
+    with ``rho_c = 0.01 kg/m^3`` (NEMO ``rho_c``) and ``r1_rho0 = 1/rho0``.
+    This differs from the potential-density-difference sibling
+    (:func:`_nemo_mld_from_potential_density`) by (a) using the in-situ
+    locally-referenced (adiabatic) N^2 — NEMO ``rn2b`` from ``eosbn2``, i.e.
+    the SAME ``compute_buoyancy_frequency_adiabatic`` the native ldfslp slopes
+    already consume as ``pn2`` — and (b) the ``MAX(N^2, 0)`` clamp, which
+    ignores statically-unstable inversions instead of letting a negative
+    density step cancel the accumulated difference (so a convecting column
+    mixes to its base, not to the first inversion).
+
+    Returns ``(hml, m_base)`` with the SAME convention as
+    :func:`_nemo_mld_from_potential_density` (drop-in interchangeable in the
+    ramps): ``hml`` = ML-base w-interface depth [m, +], ``m_base`` the legoESM
+    *interface* index (0..nlev-2) of that base.  AD-safe; ``m_base`` is
+    index-selected (a quantized step of T/S, zero gradient through the ramp
+    normaliser) exactly like the pot-density sibling.
+    """
+    from legoesm.ocean.eos import compute_buoyancy_frequency_adiabatic
+    T_filled = neumann_fill_cgrid(T, mask)
+    S_filled = neumann_fill_cgrid(S, mask)
+    nlev = T_filled.shape[-1]
+    dtype = T_filled.dtype
+    dz_ref = z_coord.dz_ref
+    z_iface = jnp.cumsum(dz_ref)                      # (nlev,) bottom-of-cell depths
+    z_centers = z_iface - 0.5 * dz_ref               # (nlev,) gdept
+    # rn2b: adiabatic N^2 at the nlev-1 interior w-interfaces, referenced to the
+    # UPPER cell pressure (bit-identical to the native-slope pn2 build, :580).
+    p_cell = (jnp.asarray(rho_0, dtype) * jnp.asarray(g, dtype)
+              * z_centers)[None, None, :] * jnp.ones_like(T_filled)
+    J1 = jnp.ones(T_filled.shape[:-1], dtype=dtype)
+    n2_int = compute_buoyancy_frequency_adiabatic(
+        T_filled, S_filled, p_cell, dz_ref, J1, eos_fn=eos_fn,
+        rho_ref=rho_0, g=g)                           # (...,nlev-1)
+    # e3w(jk) for interface m = spacing between the bracketing T-centres.
+    e3w = z_centers[1:] - z_centers[:-1]             # (nlev-1,)
+    # Reference w-level nlb10 = first interface at/below ~10 m; contributions
+    # above it are excluded (the near-surface is mixed by definition), so the
+    # MLD is floored at ~10 m exactly as NEMO's nmln>=nlb10 initialisation.
+    m_arange = jnp.arange(nlev - 1)
+    iref = jnp.clip(
+        jnp.searchsorted(z_iface, jnp.asarray(_NEMO_MLD_REF_DEPTH_M, z_iface.dtype)),
+        0, nlev - 2)
+    contrib = jnp.where(
+        (m_arange < iref).reshape((1, 1, nlev - 1)),
+        jnp.zeros((), dtype),
+        jnp.maximum(n2_int, jnp.zeros((), dtype)) * e3w[None, None, :])
+    cum = jnp.cumsum(contrib, axis=-1)               # integral(N^2 dz) from nlb10
+    thresh = jnp.asarray(g * rho_c / rho_0, dtype)   # zN2_c = g*rho_c/rho0
+    reached = cum >= thresh                           # (...,nlev-1)
+    has = jnp.any(reached, axis=-1)
+    m_base = jnp.argmax(reached.astype(jnp.int32), axis=-1)   # shallowest crossing
+    m_base = jnp.clip(jnp.where(has, m_base, nlev - 2), 0, nlev - 2)
+    hml = jnp.take(z_iface, m_base)                   # (n_lat, n_lon)
+    return hml, m_base
+
+
+def _nemo_mld(criterion, T, S, mask, z_coord, eos_fn, rho_c, *,
+              g=constants.g, rho_0=_RHO_0):
+    """Dispatch the NEMO zdfmxl mixed-layer depth by criterion (raise on typo).
+
+    ``"rho_c"`` (default, byte-identical) = potential-density difference;
+    ``"n2_integral"`` = NEMO's exact integral(N^2 dz) >= g*rho_c/rho0 criterion.
+    Both return ``(hml, m_base)`` in the same convention, so the ldfslp slope
+    ramps consume either transparently.
+    """
+    if criterion == "rho_c":
+        return _nemo_mld_from_potential_density(T, S, mask, z_coord, eos_fn, rho_c)
+    if criterion == "n2_integral":
+        return _nemo_mld_from_n2_integral(
+            T, S, mask, z_coord, eos_fn, rho_c, g, rho_0)
+    raise ValueError(
+        f"unknown GMRediConfig.mld_criterion {criterion!r}; "
+        "expected 'rho_c' or 'n2_integral'.")
+
+
+def _apply_nemo_mld_slope_ramp(S_x, S_y, T, S, mask, z_coord, eos_fn, rho_c,
+                               mld_criterion="rho_c", *,
+                               g=constants.g, rho_0=_RHO_0):
     """Linearly ramp interface slopes to 0 through the mixed layer (NEMO ldfslp).
 
     NEMO (``ldfslp.F90:284-297``, w-point branch): inside the mixed layer
@@ -442,8 +532,8 @@ def _apply_nemo_mld_slope_ramp(S_x, S_y, T, S, mask, z_coord, eos_fn, rho_c):
     the jacobian when a stretched/topography oracle needs it.
     """
     nlev_m1 = S_x.shape[-1]
-    hml, m_base = _nemo_mld_from_potential_density(
-        T, S, mask, z_coord, eos_fn, rho_c)
+    hml, m_base = _nemo_mld(
+        mld_criterion, T, S, mask, z_coord, eos_fn, rho_c, g=g, rho_0=rho_0)
     z_iface = jnp.cumsum(z_coord.dz_ref)[:-1]         # (nlev-1,) interface depths
     # wslp_base = slope one interface BELOW the ML base (NEMO nmln+1).
     m_ref = jnp.clip(m_base + 1, 0, nlev_m1 - 1)
@@ -603,8 +693,9 @@ def compute_nemo_native_slopes(
 
     # ML indices per column (NEMO nmln, via the shared zdfmxl-criterion
     # helper: ``first`` = first stratified cell = 0-based nmln).
-    hml, m_base = _nemo_mld_from_potential_density(
-        T, S, mask, z_coord, eos_fn, cfg.mld_rho_c)
+    hml, m_base = _nemo_mld(
+        cfg.mld_criterion, T, S, mask, z_coord, eos_fn, cfg.mld_rho_c,
+        g=g, rho_0=rho_0)
     first = jnp.clip(m_base + 1, 1, nlev - 1)                    # (nlat,nlon) int
     # zhmlpt = gdept(nmln-1) = depth of the last T-point inside the ML
     zhmlpt = jnp.take(gdept, jnp.clip(first - 1, 0, nlev - 1)) * mask
@@ -844,6 +935,7 @@ def compute_isopycnal_slopes_latlon_cgrid(
             )
         S_x_t, S_y_t = _apply_nemo_mld_slope_ramp(
             S_x_t, S_y_t, T, S, mask, z_coord, eos_fn, cfg.mld_rho_c,
+            cfg.mld_criterion, g=g, rho_0=rho_0,
         )
 
     # NEMO ldfslp horizontal Shapiro smoother (default OFF => byte-identical).

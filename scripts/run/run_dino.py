@@ -174,6 +174,16 @@ def _parse_args():
              "scaling, cap aei0=rn_Ue*rn_Le=3000 m2/s). Lat-lon only.",
     )
     p.add_argument(
+        "--gm-redi-mld-criterion", choices=("rho_c", "n2_integral"),
+        default=None,
+        help="Mixed-layer-depth criterion for the NEMO ldfslp slope ramp / "
+             "native slopes (DINOConfig.gm_redi_mld_criterion): 'rho_c' "
+             "(default, potential-density difference) or 'n2_integral' (NEMO "
+             "zdfmxl exact integral(MAX(N^2,0) dz) >= g*rho_c/rho0; the "
+             "nemo_dino_kamm card selects it). Only affects runs with the ML "
+             "ramp / native slopes active.",
+    )
+    p.add_argument(
         "--allow-multiyear", action="store_true",
         help="Opt out of the 1-year local-machine cap on --days (use inside "
              "SLURM GPU jobs; the multi-year DINO_R1 comparison runs).",
@@ -497,6 +507,9 @@ def main():
             cfg, barotropic_coriolis=args.barotropic_coriolis)
     if args.gm_kappa_scheme is not None:
         cfg = dataclasses.replace(cfg, gm_kappa_scheme=args.gm_kappa_scheme)
+    if args.gm_redi_mld_criterion is not None:
+        cfg = dataclasses.replace(
+            cfg, gm_redi_mld_criterion=args.gm_redi_mld_criterion)
     if args.bottom_drag_scheme is not None:
         cfg = dataclasses.replace(
             cfg, bottom_drag_scheme=args.bottom_drag_scheme)

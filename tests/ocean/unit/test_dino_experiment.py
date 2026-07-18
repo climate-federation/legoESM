@@ -331,6 +331,24 @@ class TestDINORecipes:
         assert ed.n2_mode == "adiabatic"
         assert ed.n2_threshold == -1e-12
 
+    def test_gm_redi_mld_criterion_threads_and_validates(self):
+        import dataclasses
+        # nemo_dino_kamm selects the NEMO N^2-integral MLD criterion; it must
+        # reach the built GMRediConfig.
+        kamm = dino_config_for_recipe("nemo_dino_kamm")
+        assert kamm.gm_redi_mld_criterion == "n2_integral"
+        grid = dino_lat_lon_grid(kamm, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, kamm, physics=False)
+        assert mc.gm_redi.mld_criterion == "n2_integral"
+        # Default recipe keeps the byte-identical pot-density criterion.
+        default = dino_config_for_recipe("legoesm_default")
+        assert default.gm_redi_mld_criterion == "rho_c"
+        # The config builder raises on an unknown criterion (dispatch hardening).
+        bad = dataclasses.replace(DINOConfig(), gm_redi_mld_criterion="bogus")
+        gridb = dino_lat_lon_grid(bad, n_lon=10)
+        with pytest.raises(ValueError, match="gm_redi_mld_criterion"):
+            dino_lat_lon_model_config(gridb, bad, physics=False)
+
     def test_base_override_preserved(self):
         # A recipe overlay keeps the non-scheme setup fields of the base config.
         import dataclasses

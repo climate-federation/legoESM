@@ -250,6 +250,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/eos.py", "freezing_point"),
         ("packages/ocean/legoesm/ocean/experiments/dino.py", "create_forcings"),
         ("packages/ocean/legoesm/ocean/experiments/dino.py", "create_initial_conditions"),
+        # DINO model-config builder guards its scheme fields (gm_kappa_scheme,
+        # lateral_tracer_mixing, gm_redi_mld_criterion) with fn-entry raises;
+        # lock so the gm_redi_mld_criterion N2-integral guard can't be dropped.
+        ("packages/ocean/legoesm/ocean/experiments/dino.py", "dino_lat_lon_model_config"),
         ("packages/ocean/legoesm/ocean/physics/bottom_drag/integration.py", "make_bottom_drag_physics"),
         ("packages/ocean/legoesm/ocean/physics/convection/integration.py", "make_convection_physics"),
         ("packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py", "gm_redi_tracer_tendency_latlon"),

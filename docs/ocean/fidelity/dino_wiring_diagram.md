@@ -27,7 +27,7 @@ into `uu(:,:,:,Nrhs)` / `ts(:,:,:,Nrhs)`.
 | 3 | `eos_rab(Nbb)`,`(Nnn)` | `ln_seos` | α,β thermal/haline expansion @T-pts | `ocean.eos` S-EOS α,β | ⚠️ config match (S-EOS), coeffs spot-checked |
 | 4 | `bn2(Nbb)`,`(Nnn)` | `ln_seos` | N² (rn2b, rn2) from α,β | N² for TKE/convection | ⚠️ used by 5,6,29; not line-traced |
 | 5 | `zdf_phy(Nbb,Nnn)` | `ln_zdftke`,`ln_zdfevd(nn_evdm=1,rn_evd=100)`, `zdfdrg ln_non_lin`, `rn_avm0=1.2e-4` | avm/avt (TKE): shear prod + buoy + Kolmogoroff diss `rn_ediss/l·e^1.5`, nn_mxl=3 Bougeault-Lacarrere length, **nn_pdl=1 Richardson Prandtl** (ri_cri≈0.222), nn_etau=1; enhanced-mixing unstable cols (T+U); top/bot drag; MLD | `vmix_scheme="tke"` + enhanced_diffusion + `nemo_quadratic` drag | ❌ **MISMATCH**: TKE eq/length/etau ✅ but legoESM Prandtl=**unit(Pr=1)** vs NEMO **Pr(Ri)** ⇒ avt too high in stratified interior; diss fully-implicit vs NEMO 1.5/0.5 split; floors 2e-4/2e-5 vs 1.2e-4/1.2e-5 (verify recipe override). ✅EVD-on-mom; ✅drag Cd0/ke0 |
-| 6 | `ldf_slp`(+`eos` Nbb) | `ln_traldf_iso` | isoneutral slopes wslpi/wslpj (std Madec) + ML ramp + Shapiro | `nemo_iso_lap` slopes / `gm_redi` | ⚠️ slopes corr 0.99 below ML, 0.33 inside ML (known ML-criterion gap) |
+| 6 | `ldf_slp`(+`eos` Nbb) | `ln_traldf_iso` | isoneutral slopes wslpi/wslpj (std Madec) + ML ramp + Shapiro | `nemo_iso_lap` slopes / `gm_redi` | ✅ **N²-integral MLD criterion ported** (`GMRediConfig.mld_criterion="n2_integral"`, `_nemo_mld_from_n2_integral`; zdfmxl.F90:91-105 ∫MAX(N²,0)dz≥g·rho_c/ρ0 exact). `nemo_dino_kamm` selects it; default `"rho_c"` byte-identical for GYRE/Veros. Test `test_nemo_mld_criterion.py` (analytic ∫N²dz crossing). On DINO state N²-MLD differs from pot-density in 90% of cols (shallower: 61 vs 106 m mean). NB: the ldfslp ML ramp itself is OFF in the shipped `nemo_dino_kamm` (slope_positions=mode_b, ramp off) — criterion is live only once the ramp/native slopes are enabled |
 | 7 | `ldf_tra`/`ldf_eiv` | `nn_aht_ijk_t=20`, `nn_aei=21` (Treguier, time-var) | K_iso mesh-scaled + κ_eiv(GM) Treguier | `gm_kappa_scheme="treguier"` | ⚠️ config match; eiv coeff formula not line-verified |
 | 8 | `ssh_nxt`+`div_hor` | free surf | ssh(Naa), horizontal divergence | eta update / continuity | ❓ UNTRACED (part of barotropic) |
 | 9 | `dom_qco_r3c` | `key_qco` | z* thickness ratios r3t/u/v/f | `masked_zco` thickness | ⚠️ z* ratios; not line-traced |
@@ -87,3 +87,65 @@ auditing concealed — the reason we trace the whole chain, not hand-picked oper
 Node 3/11 (S-EOS α,β,ρ coeffs — config match only), 4 (bn2), 8/17 (div_hor/ssh_nxt
 barotropic continuity detail), 9 (dom_qco z* ratios), 24 (tra_zdf implicit solve),
 6/7 (ldf_slp ML-slope criterion + eiv-coeff formula — known ML gap). Each is `⚠️/❓` above.
+
+---
+
+## Round-2 traces (2026-07-18, overnight Ralph loop)
+
+Closed most UNTRACED nodes; two agent "mismatches" were false alarms (library
+default vs recipe override — the recurring trap).
+
+- **Node 24 `tra_zdf`** — ✅ VERIFIED. Implicit backward-Euler Thomas solve; the
+  isoneutral K33/MSC folds into the vertical diffusivity before the solve (NEMO
+  `akz` ≡ legoESM `K33_iso`). `implicit_solver.py:122-185` ≡ `trazdf.F90:118-293`.
+- **Node 3/4/11 S-EOS + bn2** — ✅ VERIFIED. Density anomaly formula byte-matches;
+  legoESM's `nemo_seos` defaults ARE DINO's deployed coeffs (a0=0.165, b0=0.76554,
+  λ1=0.06, μ1=1.497e-4, λ2=μ2=ν=0, ρ0=1026) — confirmed against RUN_TRAJ namelist_cfg.
+  N² equivalent. (The agent's "≠ NEMO source default" is a non-issue: DINO overrides.)
+- **Node 18 `dyn_zdf`** — ✅ VERIFIED. Implicit avm momentum solve matches; background
+  avm = 1.2e-4 (agent's "8.3× too high" was the LIBRARY default; `nemo_dino_kamm`
+  sets A_v_bg=1.2e-4=rn_avm0, K_v_bg=1.2e-5=rn_avt0 — verified on the built config).
+  Only deviation: bottom drag EXPLICIT (legoESM) vs IMPLICIT (NEMO) — O(dt²), negligible.
+- **Node 6/7 `ldf_slp`** — slope clipping (rn_slpmax=0.01 + e3/7e3), the dep/hml ML
+  ramp, and the 9-point Shapiro all ✅ VERIFIED. **MLD CRITERION now ✅ PORTED** —
+  NEMO's N²-integral (`zdfmxl.F90:91-105`: `zN2_c=g·rho_c/ρ0`, accumulate
+  `MAX(rn2b,0)·e3w` from nlb10, `nmln`=shallowest level crossing, MLD=`gdepw(nmln)`)
+  is now a selectable `GMRediConfig.mld_criterion="n2_integral"` option
+  (`_nemo_mld_from_n2_integral` / `_nemo_mld` dispatch in `gm_redi_latlon_cgrid.py`),
+  reusing the same adiabatic N² (`compute_buoyancy_frequency_adiabatic` = the native
+  slopes' `pn2`/rn2b). `nemo_dino_kamm` selects it; the default `"rho_c"` pot-density
+  criterion (`gm_redi_latlon_cgrid.py`) stays byte-identical for GYRE/Veros/others.
+  Gates: `tests/ocean/unit/test_nemo_mld_criterion.py` (analytic ∫N²dz-crossing truth
+  tier + dispatch raise); on the bridged DINO state the two criteria differ in ~90%
+  of wet columns (N²-integral shallower, 61 vs 106 m mean, and avoids the pot-density
+  runaway-to-4000 m in unstable columns); a controlled 30-day A/B (ramp forced ON both
+  arms, vary ONLY the criterion) shifts upper-ocean T by up to ~0.5 °C locally in
+  0-250 m (where the ramp acts), decaying to ~0.05 °C by 500-800 m — deep thermocline
+  needs years. **CAVEAT:** the shipped `nemo_dino_kamm` runs `slope_positions=mode_b`
+  with `nemo_mld_slope_ramp=False`, so NEITHER MLD call site fires there yet — the
+  criterion is inert until the native-slope / ML-ramp path is enabled (separate node).
+- **Node 8/16/17 barotropic-baroclinic coupling** — split-explicit STRUCTURE ✅
+  VERIFIED (forcing `SUM(h·du)/H`, AB3 za=(1.7811,-1.0622,0.2811), SSH-PGF,
+  boxcar time-average, and Phase-3 3D correction `u=u_3d+(Hu_avg-Hu_3d)/H` all match).
+  ⚠️ **CORIOLIS-SPLIT UNTRACED**: NEMO subtracts the 2D Coriolis from `zu_frc` and
+  applies it LIVE each substep; legoESM matsuno_split has NO Coriolis in F_slow and
+  a separate Matsuno rotation — possible double-count if Matsuno rotates the FULL u
+  (not u') and Phase-3 doesn't overwrite it. JET-RELEVANT — deeper trace queued.
+
+**Node 8/16/17 Coriolis-split — VERIFIED (no double-count).** An agent claimed the
+barotropic Coriolis is double-counted under the default `matsuno_split`, but code
+inspection REFUTES it (4th agent over-claim this loop): under `matsuno_split`, `du_dt`
+EXCLUDES the planetary Coriolis (the stage-7b' planetary-Coriolis add,
+`ocean_pe_latlon_cgrid.py:3627`, is gated on `coriolis_scheme=="explicit_ab2"`), so
+`F_slow` carries NO f, and the substep applies `f×U_bt` exactly once (`_add_bt_cor=True`,
+`ocean_model_latlon_cgrid.py:2544-2546`); the Matsuno rotation applies f to the
+perturbation. Under `explicit_ab2`, `du_dt` HAS f → `F_slow` carries it → substep skips
+(`_add_bt_cor=False`). Each mode gets f exactly once in BOTH schemes — matches NEMO's
+zu_frc-subtract-then-live-substep accounting. No jet driver here.
+
+**Jet-driver status after the full-chain trace:** every momentum/Coriolis/PGF/EOS/mixing
+node now VERIFIED-MATCH or fixed. The deep-equatorial jet has survived controlled tests
+against ALL of them (baroclinic vorticity, barotropic Coriolis, PGF, GM, dt, TKE, avm,
+Coriolis-split). Leading hypothesis: the equatorial (f→0) amplification of the small
+integrated residual between two independent cores whose per-operator tendencies match
+≥0.99 — reducible only by matching the entire chain (this loop), not one operator.
