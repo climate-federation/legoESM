@@ -1024,9 +1024,18 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     native_slopes: tuple | None = None,
     msc_stabilize: bool = False,
     dt: float | None = None,
+    kappa_GM=None,
 ) -> jnp.ndarray:
     """NEMO ``traldf_iso`` (``#define iso_lap``) iso-neutral Laplacian Redi
     tracer tendency on the lat-lon C-grid.
+
+    When ``kappa_GM`` is supplied (NEMO ``ln_ldfeiv``), the Gent-McWilliams
+    eddy-induced (bolus) transport is added as an advective flux — a faithful
+    port of NEMO's ``ldf_eiv_trp_MLF`` streamfunction form
+    (``ψ_uw = -¼·e2u·mi(wslpi)·mk(aeiu)·wumask``; eiv transport = curl(ψ); the
+    tracer is centered-advected by it).  The bolus streamfunction is divergence-
+    free by construction, so the GM tendency conserves the column/domain tracer
+    integral (verified by ``test_nemo_iso_lap_gm_conserves``).
 
     This is a *faithful* port of NEMO 5.0.2's standard rotated-Laplacian
     iso-neutral operator (``cfgs/*/WORK/traldf_iso_scheme.h90``), verified
@@ -1272,6 +1281,68 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     act_below = jnp.concatenate(
         [act[:, :, 1:], jnp.zeros_like(act[:, :, :1])], axis=2)  # act[k+1], 0 at bottom
     zfw_kp1 = zfw_kp1 * act_below
+
+    # ================= GM eddy-induced (bolus) transport (NEMO ldf_eiv_trp_MLF) =
+    # NEMO adds the eiv velocity to the advecting velocity; equivalently we add
+    # the eiv ADVECTIVE tracer flux (transport · centred tracer) to the Redi
+    # flux and take one divergence.  The transport is the CURL of the bolus
+    # streamfunction ψ, so its discrete divergence telescopes to zero exactly
+    # (tracer conservation is structural, independent of ψ's masking).
+    #   ψ_uw(iface below cell k) = -e2u · mi(wslpi_kp1) · mk(aeiu) · wumask   [m³/s]
+    # SIGN: this code's tendency = +div(flux); advection dT/dt = -div(u·T), so
+    # the eiv flux enters the flux arrays with a MINUS sign.
+    if kappa_GM is not None:
+        if isinstance(kappa_GM, jnp.ndarray) and kappa_GM.ndim == 3:
+            aeiu = jnp.broadcast_to(kappa_GM, q.shape)
+        elif isinstance(kappa_GM, jnp.ndarray) and kappa_GM.ndim == 2:
+            aeiu = jnp.broadcast_to(kappa_GM[:, :, jnp.newaxis], q.shape)  # spatial adaptive κ_GM
+        else:
+            aeiu = jnp.broadcast_to(jnp.asarray(kappa_GM, dtype=dtype), q.shape)
+        aeiu_if = 0.5 * (aeiu + jnp.roll(aeiu, -1, ax_z))         # mk(aeiu) at iface below k
+        wslpi_u = 0.5 * (wslpi_kp1 + jnp.roll(wslpi_kp1, -1, ax_x))  # mi(wslpi) -> u-face
+        wslpj_v = 0.5 * (wslpj_kp1 + jnp.roll(wslpj_kp1, -1, ax_y))
+        # ψ at the interface BELOW cell k (NEMO wumask/wvmask): the bolus stream
+        # function is nonzero ONLY where the FOUR cells around the u/v-w point are
+        # all wet AND the horizontal wall is open — so no bolus flows into a dry
+        # cell at a topographic step (required for EXACT conservation on varying
+        # bathymetry; a bare act_below mask leaves a spurious Δi(ψ) at the step).
+        # The surface/floor interfaces carry ψ=0 (no bolus through the boundaries).
+        # act_below (the interface-below-cell-k activity, k+1 zeroed at the floor)
+        # NOT roll(act,-1,z): a z-roll WRAPS the deepest level to the surface, so a
+        # full-depth column would place a surface-slope-driven bolus on the sea
+        # floor (conserving but wrong — a spurious abyssal transport).  NEMO forces
+        # wslpi(jpk)=0 and wumask(...,jpk)=0 at the deepest interface.
+        act_kp1 = act_below
+        wumask_uw = (u_mask[:, 1:, jnp.newaxis] * act * jnp.roll(act, -1, ax_x)
+                     * act_kp1 * jnp.roll(act_kp1, -1, ax_x))
+        wvmask_vw = (v_mask[1:, :, jnp.newaxis] * act * jnp.roll(act, -1, ax_y)
+                     * act_kp1 * jnp.roll(act_kp1, -1, ax_y))
+        psi_uw = -(e2u[:, :, jnp.newaxis] * wslpi_u * aeiu_if * wumask_uw)
+        psi_vw = -(e1v[:, :, jnp.newaxis] * wslpj_v * aeiu_if * wvmask_vw)
+        # ψ above cell k = ψ at the interface above (roll down by one; surface=0).
+        psi_uw_top = jnp.roll(psi_uw, +1, ax_z).at[:, :, 0].set(0.0)
+        psi_vw_top = jnp.roll(psi_vw, +1, ax_z).at[:, :, 0].set(0.0)
+        # eiv u/v transport at cell level k = ψ_below − ψ_above  (NEMO puu -= (ψ_a−ψ_b))
+        u_eiv = psi_uw - psi_uw_top
+        v_eiv = psi_vw - psi_vw_top
+        # eiv w transport at the interface below cell k = Δi(ψ_uw)+Δj(ψ_vw) there.
+        w_eiv_kp1 = ((psi_uw - jnp.roll(psi_uw, +1, ax_x))
+                     + (psi_vw - jnp.roll(psi_vw, +1, ax_y)))
+        # centred tracer at the faces.  LIMITATIONS (fidelity, not conservation):
+        # (1) NEMO adds the eiv transport to the advecting velocity and runs it
+        #     through the tracer scheme (FCT for DINO), so the bolus flux is
+        #     flux-corrected/monotone; here it is 2nd-order CENTRED (dispersive at
+        #     sharp fronts, leans on the co-located Redi K to damp 2Δx noise).
+        # (2) aeiu_if is the cell-centred κ_GM averaged in k, reused for both
+        #     psi_uw and psi_vw — no u-/v-point horizontal staggering (exact for
+        #     constant κ_GM; a half-cell offset when a resolution_function makes
+        #     κ_GM spatially 2-D).  Both are conserving; minor amplitude fidelity.
+        t_u = 0.5 * (q + jnp.roll(q, -1, ax_x))
+        t_v = 0.5 * (q + jnp.roll(q, -1, ax_y))
+        t_w_kp1 = 0.5 * (q + jnp.roll(q, -1, ax_z))               # tracer at iface below k
+        zfu = zfu - u_eiv * t_u
+        zfv = zfv - v_eiv * t_v
+        zfw_kp1 = zfw_kp1 - w_eiv_kp1 * t_w_kp1 * act_below
 
     # ================= 3-D DIVERGENCE (added to RHS with + sign) =============
     hdiv = (zfu - jnp.roll(zfu, +1, ax_x)) + (zfv - jnp.roll(zfv, +1, ax_y))
@@ -2500,19 +2571,11 @@ def gm_redi_tracer_tendency_latlon(
                 else:
                     dS_dt = dS_dt + dq_complement
     elif scheme == "nemo_iso_lap":
-        # NEMO traldf_iso (iso_lap) rotated-Laplacian iso-neutral Redi.
-        # Pure Redi — κ_GM is NOT part of NEMO's traldf_iso.  Guard loudly
-        # rather than silently ignore a requested GM transport.
-        _kgm_nonzero = (
-            (isinstance(kappa_GM, jnp.ndarray) and bool(jnp.any(kappa_GM != 0)))
-            or (not isinstance(kappa_GM, jnp.ndarray) and kappa_GM != 0)
-        )
-        if _kgm_nonzero:
-            raise ValueError(
-                "GMRediConfig.slope_scheme='nemo_iso_lap' is a pure iso-neutral "
-                "Redi operator (NEMO traldf_iso); it does not implement GM bolus "
-                "transport. Set kappa_GM=0 (and any GM override) or use "
-                "slope_scheme='triads'/'centered'.")
+        # NEMO traldf_iso (iso_lap) rotated-Laplacian iso-neutral Redi, plus the
+        # ln_ldfeiv GM bolus (ldf_eiv_trp_MLF) when kappa_GM != 0 — the faithful
+        # NEMO isoneutral-Redi + GM combination (the Madec discretization used by
+        # the DINO / nemo_dino_kamm oracle).  kappa_GM flows into the tendency's
+        # streamfunction bolus; kappa_GM=0 recovers pure Redi bit-for-bit.
         # 3-D wet mask (NEMO tmask): a cell is water iff its column is wet
         # (2-D mask) AND its TOP-interface reference depth is above the
         # bathymetry (cell has some water). Supplies the vertical bottom extent
@@ -2541,11 +2604,13 @@ def gm_redi_tracer_tendency_latlon(
             dT_dt = nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 T, S_x, S_y, mask, u_mask, v_mask,
                 z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
-                native_slopes=_nat, msc_stabilize=_msc, dt=dt)
+                native_slopes=_nat, msc_stabilize=_msc, dt=dt,
+                kappa_GM=kappa_GM)
             dS_dt = nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 S, S_x, S_y, mask, u_mask, v_mask,
                 z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
-                native_slopes=_nat, msc_stabilize=_msc, dt=dt)
+                native_slopes=_nat, msc_stabilize=_msc, dt=dt,
+                kappa_GM=kappa_GM)
             return dT_dt, dS_dt
         # SLOPE SIGN CONVENTION (2026-07-17 winter ttrd_ldf certificate):
         # the producer computes S = -grad_h(rho)/drho_dz with drho_dz floored
@@ -2557,14 +2622,18 @@ def gm_redi_tracer_tendency_latlon(
         # off-diagonal (subduction) fluxes run BACKWARD: on NEMO's Jan-yr5
         # state the 200-430 m band read -1.0e-7 K/s vs NEMO ttrd_ldf +5.2e-8
         # (slope corr vs wslpi_stg: -0.995); negated: +6.8e-8 (mode-b amp).
-        # The diagonal K33 term uses S^2 (sign-immune); kappa_GM=0 here.
+        # The diagonal K33 term uses S^2 (sign-immune). GM bolus (kappa_GM) uses
+        # the SAME negated (NEMO-convention) slopes as the Redi, so its
+        # streamfunction sign follows NEMO's ldf_eiv_trp.
         dT_dt = nemo_iso_lap_tracer_tendency_latlon_cgrid(
             T, -S_x, -S_y, mask, u_mask, v_mask,
             z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
+            kappa_GM=kappa_GM,
         )
         dS_dt = nemo_iso_lap_tracer_tendency_latlon_cgrid(
             S, -S_x, -S_y, mask, u_mask, v_mask,
             z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
+            kappa_GM=kappa_GM,
         )
     else:
         raise ValueError(

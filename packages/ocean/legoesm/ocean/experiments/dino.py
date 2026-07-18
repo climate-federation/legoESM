@@ -637,12 +637,10 @@ DINO_RECIPES: dict[str, dict] = {
         # -- Tracer lateral diffusion (namtra_ldf: ln_traldf_iso + ln_traldf_msc,
         #    nn_aht_ijk_t=20, rn_Ud=0.027, rn_Ld=100e3) + GM (namtra_eiv: ln_ldfeiv=T,
         #    nn_aei_ijk_t=21 => Treguier aei0 = rn_Ue*rn_Le = 0.03*100e3 = 3000). --
-        #    TODO(iso-operator): NEMO uses the Madec STANDARD ln_traldf_iso operator;
-        #    legoESM's Madec path (nemo_iso_lap) forces kappa_GM=0, so the faithful
-        #    isoneutral-Redi+GM combination is NOT WIRED. Until implemented we use the
-        #    triads Redi+GM path (Griffies, also isoneutral+GM, different discretization)
-        #    as the closest RUNNABLE approximation — the one remaining un-matched piece.
-        "gm_redi_slope_scheme": "triads",
+        #    NEMO's Madec STANDARD ln_traldf_iso operator + ln_ldfeiv GM bolus
+        #    (ldf_eiv_trp_MLF), now implemented in the nemo_iso_lap path (conserving
+        #    to machine precision + energetically correct — flattens isopycnals).
+        "gm_redi_slope_scheme": "nemo_iso_lap",
         "gm_kappa_scheme": "treguier",
         "redi_S_max": 0.01,                      # rn_slpmax (namtra_ldf ref default)
         # -- Momentum (namdyn_adv: ln_dynadv_vec + nn_dynkeg=1; namdyn_vor: ln_dynvor_een) --
