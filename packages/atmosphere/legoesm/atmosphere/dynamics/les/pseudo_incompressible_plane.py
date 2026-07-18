@@ -254,6 +254,24 @@ def _rho_weighted_divergence(u, v, w, g: PseudoIncompressibleGrid):
     return rt * (du + dv) + dw
 
 
+def precision_floored_poisson_tols(cfg, dtype):
+    """Precision-aware BiCGSTAB tolerances ``(tol, atol)``.
+
+    In float32 an ``atol=1e-10`` target is BELOW the achievable
+    ~O(eps≈1.2e-7) residual, so the solver iterates past convergence and
+    its ρ/ω recurrences underflow → breakdown → NaN (fatal for the
+    non-dissipative ``central`` momentum, which has no numerical
+    dissipation to damp the residual-driven divergence). Floor tol/atol
+    at ~O(eps) so f32 stops before breakdown; the f64 floors (~1e-13)
+    sit below the tight defaults ⇒ f64 is unchanged (bit-identical).
+    Shared by the serial projection and the MPI ``project_mpi`` so both
+    precisions behave identically across the decomposition.
+    """
+    eps = float(jnp.finfo(dtype).eps)
+    return (max(cfg.poisson_tol, 8.0e2 * eps),
+            max(cfg.poisson_atol, 8.0e1 * eps))
+
+
 def project(u, v, w, theta, tracers, pi_prev, dt, g: PseudoIncompressibleGrid):
     """EXACT C-grid projection: ``∇·(ρ0θ0 u)=0`` via ``Cp ∇·(rtt ∇π') = ∇·(ρ0θ0 u*)/dt``
     then the C-grid pressure-gradient correction. Returns (u,v,w,π').
@@ -269,15 +287,7 @@ def project(u, v, w, theta, tracers, pi_prev, dt, g: PseudoIncompressibleGrid):
     cp = constants.c_pd
     c = _rtt(theta, tracers, g)                           # rtt at centres
     rhs = _rho_weighted_divergence(u, v, w, g) / dt
-    # Precision-aware BiCGSTAB tolerances: in float32 an atol=1e-10 target is BELOW
-    # the achievable ~O(eps≈1.2e-7) residual, so the solver iterates past convergence
-    # and its ρ/ω recurrences underflow → breakdown → NaN (fatal for the non-dissipative
-    # `central` momentum, which has no numerical dissipation to damp the residual-driven
-    # divergence). Floor tol/atol at ~O(eps) so f32 stops before breakdown; the f64
-    # floors (~1e-13) sit below the tight defaults ⇒ f64 is unchanged (bit-identical).
-    eps = float(jnp.finfo(rhs.dtype).eps)
-    tol = max(cfg.poisson_tol, 8.0e2 * eps)
-    atol = max(cfg.poisson_atol, 8.0e1 * eps)
+    tol, atol = precision_floored_poisson_tols(cfg, rhs.dtype)
     pi, _info = _poisson.solve_pressure(
         rhs, c, g.dx, g.dy, g.dz, x0=pi_prev,
         tol=tol, atol=atol, maxiter=cfg.poisson_maxiter)

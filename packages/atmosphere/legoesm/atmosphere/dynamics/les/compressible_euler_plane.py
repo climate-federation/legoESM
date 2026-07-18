@@ -3186,8 +3186,9 @@ class PlaneCompressibleEulerModel:
         (:func:`plane_acoustic_substeps_si_horizontal_halo` — two
         packed halo rounds per acoustic substep).
 
-        Eager-mode only on multi-rank (mpi4jax sendrecv branch not
-        jit-safe on macOS shared-mem). Single-rank gets jit speedup
+        Multi-rank runs a cached jit'd split-explicit core (mpi4jax
+        sendrecv traces inside ``jax.jit`` — one token chain per
+        exchange; see the jit-cache block). Single-rank gets jit speedup
         via the existing :meth:`step` path.
 
         Mass fixer is SKIPPED on multi-rank (compute_dry_mass_plane

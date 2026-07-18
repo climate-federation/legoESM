@@ -61,7 +61,7 @@ _TAG_SEND_DOWN = 610_002
 _CHECK_EVERY = 8
 
 
-def _halo_y(field, halo, comm):
+def halo_y(field, halo, comm):
     """Periodic y-ring halo exchange: pad ``field`` (ny_loc, ...) to
     (ny_loc+2·halo, ...) with ``halo`` rows from the up/down rank neighbours.
 
@@ -74,6 +74,16 @@ def _halo_y(field, halo, comm):
     if nranks == 1:
         return jnp.pad(
             field, [(halo, halo)] + [(0, 0)] * (field.ndim - 1), mode="wrap",
+        )
+    if halo > field.shape[0]:
+        # A single message pair carries at most ny_local rows per direction;
+        # a wider request would silently ship truncated strips and corrupt
+        # the ghost rows (e.g. weno9 reach 5 on a 4-row slab). Refuse loudly.
+        raise ValueError(
+            f"halo width {halo} exceeds the local y-slab depth "
+            f"{field.shape[0]}: the ring exchange sends one strip per "
+            f"neighbour. Use fewer ranks (ny_local >= stencil reach) or a "
+            f"narrower advection scheme."
         )
     import mpi4jax
     from legoesm.parallel.halo_exchange import get_sendrecv_vjp
@@ -97,7 +107,7 @@ def _halo_y(field, halo, comm):
     return jnp.concatenate([bot_ghost, field, top_ghost], axis=_AY)
 
 
-def _halo_y_packed(fields, halo, comm):
+def halo_y_packed(fields, halo, comm):
     """ONE periodic y-ring halo exchange for MULTIPLE fields.
 
     Flattens each ``(ny_loc, ...)`` field to ``(ny_loc, -1)``, concatenates
@@ -110,7 +120,7 @@ def _halo_y_packed(fields, halo, comm):
     flat = jnp.concatenate(
         [f.reshape(f.shape[0], -1) for f in fields], axis=1,
     )
-    flat_pad = _halo_y(flat, halo, comm)
+    flat_pad = halo_y(flat, halo, comm)
     out, col = [], 0
     for shp in shapes:
         n = math.prod(shp[1:])
@@ -135,9 +145,9 @@ def laplace_pi_mpi(pi, c, dx, dy, dz, comm, cp=constants.c_pd, c_pad=None):
     lap_x = (fx - jnp.roll(fx, 1, axis=_AX)) / dx
     # y: 1-cell halo, then face stencil on the padded array (interior result)
     if c_pad is None:
-        pih, ch = _halo_y_packed((pi, c), 1, comm)      # one exchange
+        pih, ch = halo_y_packed((pi, c), 1, comm)      # one exchange
     else:
-        pih = _halo_y(pi, 1, comm)      # (ny_loc+2, nx, nz)
+        pih = halo_y(pi, 1, comm)      # (ny_loc+2, nx, nz)
         ch = c_pad
     cyf = 0.5 * (ch[:-1] + ch[1:])      # C at y-faces, length ny_loc+1
     fyf = cyf * (pih[1:] - pih[:-1]) / dy
@@ -154,7 +164,7 @@ def poisson_diag_mpi(c, dx, dy, dz, comm, cp=constants.c_pd):
     """Diagonal of :func:`laplace_pi_mpi` (for Jacobi preconditioning)."""
     cx_p = 0.5 * (c + jnp.roll(c, -1, axis=_AX))
     cx_m = jnp.roll(cx_p, 1, axis=_AX)
-    ch = _halo_y(c, 1, comm)
+    ch = halo_y(c, 1, comm)
     cyf = 0.5 * (ch[:-1] + ch[1:])      # length ny_loc+1
     cy_p, cy_m = cyf[1:], cyf[:-1]      # C_{j+½}, C_{j−½} interior
     cz_int = 0.5 * (c[..., :-1] + c[..., 1:])
@@ -333,12 +343,17 @@ def solve_pressure_mpi(rhs, c, dx, dy, dz, comm, n_global, x0=None,
             f"n_global={n_global} must equal ny_global·nx·nz = n_local·n_ranks = "
             f"{expected}; passing the LOCAL slab count under-normalises the zero-mean "
             f"gauge by a factor of n_ranks.")
+    if int(check_every) < 1:
+        raise ValueError(
+            f"check_every={check_every} must be a positive integer — a "
+            f"non-positive cadence would advance zero iterations per chunk "
+            f"and loop forever.")
     rhs_c = rhs - _gmean(rhs, n_global, comm)
     x0 = jnp.zeros_like(rhs_c) if x0 is None else x0
 
     # C is constant across the solve: exchange its halo ONCE and hoist it
     # out of the per-iteration matvec (1 message pair per matvec, not 2).
-    c_pad = _halo_y(c, 1, comm)
+    c_pad = halo_y(c, 1, comm)
     inv_diag = (
         1.0 / poisson_diag_mpi(c, dx, dy, dz, comm, cp=cp)
         if precondition else None
@@ -377,10 +392,10 @@ def solve_pressure_mpi_fixed_iters(rhs, c, dx, dy, dz, comm, n_global,
             f"gauge by a factor of n_ranks.")
     rhs_c = rhs - _gmean(rhs, n_global, comm)
     x0 = jnp.zeros_like(rhs_c) if x0 is None else x0
-    c_pad = _halo_y(c, 1, comm)
+    c_pad = halo_y(c, 1, comm)
     inv_diag = 1.0 / poisson_diag_mpi(c, dx, dy, dz, comm, cp=cp)
 
-    carry, bb, _rr0 = _bicgstab_carry_init(
+    carry, bb, rr0 = _bicgstab_carry_init(
         rhs_c, x0, c, c_pad, dx, dy, dz, cp, comm,
     )
     # tol_eff from the allreduced ‖b‖ WITHOUT a host sync (‖b‖ is a traced
@@ -388,6 +403,13 @@ def solve_pressure_mpi_fixed_iters(rhs, c, dx, dy, dz, comm, n_global,
     bnorm = jnp.sqrt(jnp.maximum(bb, 0.0))
     tol_eff = jnp.maximum(tol * bnorm, jnp.asarray(atol, rhs_c.dtype))
     brk = (bnorm + 1.0) * 1e-30
+    # Honor an already-converged warm start exactly like the forward
+    # driver's entry check — but as a TRACED mask (no host sync): the
+    # loop still executes its fixed collective schedule, every update
+    # frozen from iteration 0.
+    carry = carry[:-1] + (
+        jnp.sqrt(jnp.maximum(rr0, 0.0)) > tol_eff,
+    )
 
     def body(_, cy):
         return _bicgstab_iteration(

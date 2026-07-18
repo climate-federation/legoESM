@@ -147,7 +147,9 @@ def test_fixed_iters_grad_finite(comm):
 
 def test_x0_already_converged_short_circuit(comm):
     """rhs == L(x0) with x0 zero-mean ⇒ the entry check exits immediately
-    and returns x0 (up to the zero-mean gauge)."""
+    and returns x0 (up to the zero-mean gauge) — on BOTH the chunked
+    forward driver and the fixed-iteration variant (whose active mask
+    must honor the converged warm start from iteration 0)."""
     c, _ = _fields()
     n_global = NY * NX * NZ
     x0 = jax.random.normal(jax.random.PRNGKey(1), (NY, NX, NZ))
@@ -160,3 +162,39 @@ def test_x0_already_converged_short_circuit(comm):
     np.testing.assert_allclose(
         np.asarray(pi), np.asarray(x0), rtol=0.0, atol=1e-7,
     )
+    pi_fixed = mpi.solve_pressure_mpi_fixed_iters(
+        rhs, c, DX, DY, DZ, comm, n_global, n_iters=25, x0=x0,
+        tol=1e-8, atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        np.asarray(pi_fixed), np.asarray(pi), rtol=0.0, atol=1e-9,
+    )
+
+
+def test_check_every_must_be_positive(comm):
+    """check_every <= 0 would advance zero iterations per chunk and loop
+    forever — refused at entry."""
+    c, rhs = _fields()
+    n_global = NY * NX * NZ
+    for bad in (0, -3):
+        with pytest.raises(ValueError, match="check_every"):
+            mpi.solve_pressure_mpi(
+                rhs, c, DX, DY, DZ, comm, n_global, check_every=bad,
+            )
+
+
+def test_halo_wider_than_slab_refused():
+    """A halo request wider than the local slab would silently ship
+    truncated strips on the MPI leg — must raise. (Exercised through a
+    fake 2-rank comm; the n_ranks==1 pad path handles any width.)"""
+
+    class _FakeComm:
+        def Get_size(self):
+            return 2
+
+        def Get_rank(self):
+            return 0
+
+    f = jnp.zeros((4, 3, 2))
+    with pytest.raises(ValueError, match="halo width"):
+        mpi.halo_y(f, 5, _FakeComm())
