@@ -291,6 +291,35 @@ class DINOConfig:
     # bn2 ≡ the "adiabatic" parcel N² to ~9e-7 s^-2 (see the nemo_dino_kamm
     # convection comment), so no recipe switches by default.
     tke_n2_mode: str = "insitu"                 # "nemo_bn2" = NEMO eosbn2 rn2
+    # ------------------------------------------------------------------
+    # NEMO zdftke closure-IDENTITY axes (Kamm 2025 DINO, namzdf_tke ref
+    # defaults). Every default below reproduces the PRIOR DINO TKE behaviour
+    # byte-for-byte (Mode-B diagnostic, Veros mixing length + surface flux BC +
+    # Gaspar amplitude + backward-Euler dissipation); the nemo_dino_kamm(+_mlf)
+    # card flips them to the NEMO-faithful values. Reachable via --recipe and
+    # dict-validated --config (the tke_n2_mode precedent — no per-field flag).
+    # See zdftke.F90 + cfgs/DINO namzdf_tke and docs/ocean/fidelity.
+    # ------------------------------------------------------------------
+    # PROGNOSTIC en stepped at the model dt (NEMO tke_tke), carried on
+    # state.tke, vs the legoESM Mode-B diagnostic equilibrium (dt=86400, 3 it).
+    tke_prognostic: bool = False                # True = NEMO prognostic en
+    # Mixing-length construction: 2 = Veros Bougeault-Lacarrere (legacy);
+    # 3 = NEMO nn_mxl=3 lup/ldown |dl/dz|<=e3t sweeps + ln_mxl0 wind anchor.
+    tke_mxl_choice: int = 2                      # 3 = NEMO nn_mxl=3
+    # Surface TKE BC: "veros_flux" (Neumann wind-work flux) vs "nemo_dirichlet"
+    # (NEMO en(1)=MAX(rn_emin0, rn_ebb·taum/rho0), zdftke.F90:265).
+    tke_surface_bc: str = "veros_flux"          # "nemo_dirichlet" = NEMO
+    # Kolmogoroff dissipation discretization: "backward_euler" (fully implicit)
+    # vs "nemo_1p5_split" (NEMO zdftke zfact2/zfact3 1.5/0.5 semi-implicit).
+    tke_dissipation: str = "backward_euler"     # "nemo_1p5_split" = NEMO
+    # K amplitude convention: "gaspar_sqrt2e" (K=c_k·l·sqrt(2e), legacy) vs
+    # "veros_sqrte" (K=c_k·l·sqrt(e)) — NEMO avm=rn_ediff·zmxlm·SQRT(en)
+    # (zdftke.F90:713) is EXACTLY veros_sqrte (gaspar over-mixes by sqrt(2)).
+    tke_kappa_convention: str = "gaspar_sqrt2e"  # "veros_sqrte" = NEMO
+    # TKE self-diffusion Schmidt coefficient (alpha_tke). Gaspar/Veros use 30;
+    # NEMO zdftke diffuses en with 0.5·(avm[k+1]+avm[k]) (zdftke.F90:406-410),
+    # i.e. alpha_tke=1.0. None = keep the TKEConfig default (30).
+    tke_alpha: float | None = None              # 1.0 = NEMO en self-diffusion
 
     # ------------------------------------------------------------------
     # GM/Redi mesoscale eddy parameterization. Adaptive κ via Visbeck 1997
@@ -685,6 +714,17 @@ DINO_RECIPES: dict[str, dict] = {
         "vmix_scheme": "tke",
         "tke_momentum_visc_bg": 1.2e-4,          # rn_avm0 (NO legoESM 5e-4 stabilizer floor)
         "tke_prandtl_ri": True,                  # nn_pdl=1 Ri-dependent Prandtl (default namzdf_tke)
+        # -- NEMO zdftke closure identity (namzdf_tke ref defaults; DINO sets no
+        #    &namzdf_tke overrides). Flips the legoESM Mode-B/Veros TKE to the
+        #    NEMO-faithful prognostic closure; cures the eq surface avm 32×
+        #    over-mixing (mxl 16.8 m vs NEMO ~0.2 m). --
+        "tke_prognostic": True,                  # NEMO prognostic en at model dt
+        "tke_mxl_choice": 3,                     # nn_mxl=3 lup/ldown + ln_mxl0 (rn_mxl0=0.04)
+        "tke_n2_mode": "nemo_bn2",               # zdftke consumes eosbn2's rn2
+        "tke_surface_bc": "nemo_dirichlet",      # en(1)=MAX(rn_emin0, rn_ebb·taum/rho0)
+        "tke_dissipation": "nemo_1p5_split",     # zdftke zfact2/zfact3 1.5/0.5 split
+        "tke_kappa_convention": "veros_sqrte",   # avm=rn_ediff·zmxlm·SQRT(en) (zdftke:713)
+        "tke_alpha": 1.0,                        # en self-diffusion 0.5·(avm+avm) (zdftke:406)
         # -- Convection (namzdf: ln_zdfevd=T, rn_evd=100, nn_evdm=1; hard rn2<0 on eosbn2) --
         # NEMO's rn2 is eosbn2 bn2 (S-EOS local alpha,beta at each cell's gdept,
         # geometric zrw interp) — available as convection_n2_mode="nemo_bn2" /
@@ -1922,6 +1962,13 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             kappaM_max=cfg.K_conv, bg_diff_scale=0.0,
             # NEMO zdftke consumes eosbn2's rn2 — "nemo_bn2" (else "insitu").
             n2_mode=cfg.tke_n2_mode,
+            # NEMO zdftke closure-identity axes (see DINOConfig; defaults keep
+            # the prior Mode-B/Veros behaviour, nemo_dino_kamm flips to NEMO).
+            prognostic=cfg.tke_prognostic,
+            tke_mxl_choice=cfg.tke_mxl_choice,
+            surface_bc=cfg.tke_surface_bc,
+            dissipation_discretization=cfg.tke_dissipation,
+            kappa_convention=cfg.tke_kappa_convention,
             # NEMO zdftke surface terms — BOTH are namelist_ref defaults
             # (DINO's namelist_cfg sets no &namzdf_tke overrides, so the
             # oracle runs with ln_lc=T (rn_lc=0.15) and nn_etau=1
@@ -1929,6 +1976,10 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             lc=True,
             etau_mode="below_ml",
         )
+        if cfg.tke_alpha is not None:
+            # NEMO en self-diffusion uses 0.5·(avm[k+1]+avm[k]) (alpha_tke=1),
+            # vs the Gaspar/Veros default 30. None ⇒ keep the TKEConfig default.
+            tke = tke._replace(alpha_tke=cfg.tke_alpha)
         if cfg.tke_prandtl_ri:
             # NEMO nn_pdl=1: Ri-dependent inverse Prandtl. richardson mode with
             # coeff=1/ri_cri reproduces NEMO's Pr=1/pdlr=clamp(Ri/ri_cri,1,10)
