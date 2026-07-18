@@ -18,6 +18,34 @@ writer still off). 2-process parity is bit-exact vs single-controller (jobs
 NCCL reaches Slingshot through `aws-ofi-nccl`, not the MPICH OFI inject path —
 so the cubed-sphere driver has two independent working multi-node GPU lanes.
 
+## Transport policy (2026-07 — the standing recommendation)
+
+For **multi-node GPU production**, prioritize the `jax.distributed`/NCCL
+SPMD (route-B) path for halos and reductions; keep **mpi4jax (route A) for
+CPU MPI lanes and serial==MPI parity tests**. Rationale:
+
+- mpi4jax cross-node GPU is host-staged today (this ticket): every halo
+  round-trips through host memory, so multi-node GPU numbers on the
+  mpi4jax lanes are a **lower bound**, not the achievable scaling.
+- NCCL reaches Slingshot through `aws-ofi-nccl` and does not touch the
+  MPICH OFI inject path that aborts here — the cubed-sphere SPMD driver
+  proves this end-to-end (bit-exact 2-process parity, above), and the
+  lat-lon (`bench_atm_latlon_spmd_scaling --multicontroller`), ocean
+  (`bench_ocean_latlon_spmd_scaling --multicontroller`) and MPAS-atm
+  (M3c native-ppermute step, `bench_mpas_spmd_scaling`) route-B lanes
+  federate the same way.
+- The mpi4jax lanes stay valuable where they are strong: CPU clusters
+  (no host-staging penalty), laptop/CI parity gates (`mpirun -np 2`
+  serial==MPI tests), and as the AD-safe reference implementation
+  (`_sendrecv_vjp` via `get_sendrecv_vjp`, `allreduce(SUM)` VJP).
+
+Per component today: cubed-sphere AMIP, lat-lon atm/ocean and MPAS-atm all
+have route-B lanes; the **plane CRM/LES pencil exchange is mpi4jax-only** —
+an SPMD (`shard_map`) halo variant of the plane pencil exchange is the
+highest-leverage follow-up for multi-node GPU CRM scaling, and new
+GPU-scaling work should target it rather than further mpi4jax transport
+tuning.
+
 ## Root cause
 
 cray-mpich **8.1.32** rejected the model's tiny cross-node device send — a

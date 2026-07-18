@@ -422,25 +422,40 @@ def plane_compressible_euler_slow_tendencies_halo(
     )
     pi_p = compute_exner_perturbation(rho_p, theta_p, height_coord)
 
+    # When substep_horizontal_acoustic is set, the horizontal PG and the
+    # mass-continuity divergence move into the acoustic substep loop
+    # (full Skamarock-Klemp split — the halo-aware
+    # plane_acoustic_substeps_si_horizontal_halo). Skip them here so
+    # they are not double-counted, mirroring the serial slow tendency;
+    # π' and rho_total then drop out of the packed exchange (fewer
+    # bytes) and the flux re-pad round below is skipped entirely.
+    substep_horiz = getattr(config, "substep_horizontal_acoustic", False)
+
     # ONE packed halo exchange for every horizontally-coupled field
     # used in slow-tendency computations.
-    fields_to_exchange = [
-        u, v, theta_p, rho_p, pi_p, theta_total, rho_total,
-    ]
-    (
-        u_pad, v_pad, theta_p_pad, rho_p_pad, pi_p_pad,
-        theta_total_pad, rho_total_pad,
-    ) = packed_exchange_halo_plane_yxz(
+    fields_to_exchange = [u, v, theta_p, rho_p, theta_total]
+    if not substep_horiz:
+        fields_to_exchange += [pi_p, rho_total]
+    padded = packed_exchange_halo_plane_yxz(
         *fields_to_exchange, layout=layout,
     )
+    u_pad, v_pad, theta_p_pad, rho_p_pad, theta_total_pad = padded[:5]
 
-    # 2. C-grid pressure gradient.
-    grad_pi_x = oh.grad_x_vlast_halo(pi_p_pad, grid, h)
-    grad_pi_y = oh.grad_y_vlast_halo(pi_p_pad, grid, h)
-    theta_xface = oh.interp_cell_to_xface_vlast_halo(theta_total_pad, grid, h)
-    theta_yface = oh.interp_cell_to_yface_vlast_halo(theta_total_pad, grid, h)
-    du_pg = -c_p * theta_xface * grad_pi_x
-    dv_pg = -c_p * theta_yface * grad_pi_y
+    # 2. C-grid pressure gradient (skipped under the full split — the
+    #    acoustic substep integrates it at dt/n_substeps).
+    if substep_horiz:
+        du_pg = jnp.zeros_like(u)
+        dv_pg = jnp.zeros_like(v)
+    else:
+        pi_p_pad, rho_total_pad = padded[5:]
+        grad_pi_x = oh.grad_x_vlast_halo(pi_p_pad, grid, h)
+        grad_pi_y = oh.grad_y_vlast_halo(pi_p_pad, grid, h)
+        theta_xface = oh.interp_cell_to_xface_vlast_halo(
+            theta_total_pad, grid, h)
+        theta_yface = oh.interp_cell_to_yface_vlast_halo(
+            theta_total_pad, grid, h)
+        du_pg = -c_p * theta_xface * grad_pi_x
+        dv_pg = -c_p * theta_yface * grad_pi_y
 
     # 3. Coriolis (need v interp to x-face, u interp to y-face).
     if config.use_coriolis:
@@ -477,21 +492,29 @@ def plane_compressible_euler_slow_tendencies_halo(
     # 4. Mass continuity: -div(ρ·u). rho_xface + rho_yface live at
     #    interior face positions; combine with u_pad (already padded)
     #    by extracting u's interior, multiplying, then re-padding.
-    rho_xface_int = oh.interp_cell_to_xface_vlast_halo(
-        rho_total_pad, grid, h,
-    )
-    rho_yface_int = oh.interp_cell_to_yface_vlast_halo(
-        rho_total_pad, grid, h,
-    )
-    u_int = u_pad[h:-h, h:-h, :]
-    v_int = v_pad[h:-h, h:-h, :]
-    flux_u_int = rho_xface_int * u_int
-    flux_v_int = rho_yface_int * v_int
-    # Single MPI round to repad both fluxes for divergence.
-    flux_u_pad, flux_v_pad = packed_exchange_halo_plane_yxz(
-        flux_u_int, flux_v_int, layout=layout,
-    )
-    drho_p_dt = -oh.divergence_vlast_halo(flux_u_pad, flux_v_pad, grid, h)
+    #    Under the full split the ENTIRE continuity (horizontal +
+    #    vertical) is integrated in the acoustic substep, so the slow
+    #    tendency contributes no continuity term (only sponge/hyperdiff
+    #    on rho' below) — and the flux re-pad MPI round is skipped.
+    if substep_horiz:
+        drho_p_dt = jnp.zeros_like(rho_p)
+    else:
+        rho_xface_int = oh.interp_cell_to_xface_vlast_halo(
+            rho_total_pad, grid, h,
+        )
+        rho_yface_int = oh.interp_cell_to_yface_vlast_halo(
+            rho_total_pad, grid, h,
+        )
+        u_int = u_pad[h:-h, h:-h, :]
+        v_int = v_pad[h:-h, h:-h, :]
+        flux_u_int = rho_xface_int * u_int
+        flux_v_int = rho_yface_int * v_int
+        # Single MPI round to repad both fluxes for divergence.
+        flux_u_pad, flux_v_pad = packed_exchange_halo_plane_yxz(
+            flux_u_int, flux_v_int, layout=layout,
+        )
+        drho_p_dt = -oh.divergence_vlast_halo(
+            flux_u_pad, flux_v_pad, grid, h)
 
     # 5. Theta advection.
     u_center = oh.interp_xface_to_cell_vlast_halo(u_pad, grid, h)
@@ -1160,6 +1183,9 @@ def slow_tendency_jit_split(
         or config.use_coriolis
         or _advection != "upwind1"
         or _w_hyperdiff > 0.0
+        # Full Skamarock-Klemp split: the PG/continuity gating lives in
+        # the eager path; this fast path would double-count both.
+        or getattr(config, "substep_horizontal_acoustic", False)
     ):
         return plane_compressible_euler_slow_tendencies_halo(
             state, grid, height_coord, terrain_metric, config, layout,

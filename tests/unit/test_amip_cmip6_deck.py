@@ -1765,3 +1765,49 @@ class TestClearSkyDiagToggle:
                        action="store_false")
         assert p.parse_args([]).clear_sky_diag is True
         assert p.parse_args(["--no-clear-sky-diag"]).clear_sky_diag is False
+
+
+class TestDeckPhysicsDefaultsDrift:
+    """The deck driver forwards its physics defaults to run_amip, whose
+    _require_full_physics_for_amip rejects 'none'. A deck default of 'none'
+    therefore kills every deck launch (and the all-grids smoke) at parse time
+    — the exact drift the 2026-07-17 audit smoke run caught for
+    --gravity-wave-drag. AST tripwire: no full-physics scheme flag in the deck
+    script may default to 'none'."""
+
+    _FULL_PHYSICS_FLAGS = {
+        "--microphysics", "--convection", "--turbulence", "--gravity-wave-drag",
+    }
+
+    def test_deck_defaults_pass_full_physics_guard(self):
+        import ast
+
+        deck_path = (
+            Path(__file__).resolve().parents[2]
+            / "scripts" / "run" / "run_amip_cmip6_deck.py"
+        )
+        tree = ast.parse(deck_path.read_text())
+        found = {}
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "add_argument"
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value in self._FULL_PHYSICS_FLAGS):
+                continue
+            default = next(
+                (kw.value.value for kw in node.keywords
+                 if kw.arg == "default"
+                 and isinstance(kw.value, ast.Constant)),
+                None,
+            )
+            found[node.args[0].value] = default
+        assert set(found) == self._FULL_PHYSICS_FLAGS, (
+            f"deck flags moved/renamed; update this tripwire: {found}"
+        )
+        offenders = {f: d for f, d in found.items() if d == "none"}
+        assert not offenders, (
+            f"deck defaults rejected by _require_full_physics_for_amip: "
+            f"{offenders} — every deck launch dies at parse time"
+        )

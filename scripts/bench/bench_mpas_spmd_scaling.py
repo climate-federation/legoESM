@@ -14,6 +14,15 @@ only the partition-boundary halo per stage via ``jax.lax.ppermute``.
   L at 4*n_dev matches L-1 at n_dev per-device load — there is no per-device
   row knob like the lat-lon benches' --nlat-per-dev.)
 
+nlev caveat (#1113): the multi-node ceiling at THIN nlev is the ppermute ROUND
+count (``hlo_collective_permutes``, recorded per row) x the ~0.11 ms launch
+floor, NOT bandwidth — a fixed per-step overhead. At the ``--nlev 8`` default it
+dominates (~1.34 Gcells/s wall from N=4), so the default UNDERSTATES production
+scalability: at ``--nlev 26`` the per-cell compute grows ~3.25x, the flat wall
+dissolves (~2.07+ Gcells/s, ~1.9x higher at 16 GPUs), and a size-dependent term
+enters. Report the production curve at production thickness; nlev=8 is the
+overhead-mechanism receipt, not the campaign number.
+
 Device count is fixed at process start, so each n_devices runs as a SEPARATE
 process; this script benches ONE n_devices and appends a JSON line.
 JAX_PLATFORMS=cpu with --xla_force_host_platform_device_count gives virtual
@@ -63,7 +72,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # under rec["metadata"] so a virtual-CPU-device proxy, a gloo/TCP fabric run,
 # or an f32 ablation is falsifiable from the JSONL row alone.  metadata.py
 # imports JAX lazily, so this is safe before jax.distributed.initialize.
-from metadata import annotate_incomplete, scaling_metadata, tidy_throughput_fields  # noqa: E402
+from metadata import (  # noqa: E402
+    annotate_incomplete, hlo_collective_permutes, scaling_metadata,
+    tidy_throughput_fields)
 
 # SPMD full-step parity tolerances — the FLOATING-POINT RE-ASSOCIATION floor
 # of the sharded step (ppermute halo + mass-fix psum reduction-order change),
@@ -375,6 +386,21 @@ def main() -> int:
         from jax.experimental import multihost_utils
         multihost_utils.sync_global_devices("mpas_spmd_bench_end")
 
+    # HLO collective-permute census (#1113 ask 2): a STATIC compile property of
+    # the sharded step — the ppermute ROUND count that decomposes multi-node
+    # overhead (overhead ~= CPs/step * ~0.11 ms launch floor). The cube benches
+    # record this; the MPAS row did not, forcing an out-of-band census. Counted
+    # AFTER the timed loop so the census compile can't perturb per_step_ms[0]'s
+    # compile timing (the executable is already cached — this re-lower/compile
+    # is a cache hit; the count is data-independent, static in the partition).
+    # Best-effort (None if compilation is unsupported); the serial n=1 leg has
+    # no ppermute halo -> 0.
+    if physics_fn is not None:
+        _census_fn = lambda st: step(st, dt, physics_fn=physics_fn)  # noqa: E731
+    else:
+        _census_fn = lambda st: step(st, dt)  # noqa: E731
+    hlo_cp = hlo_collective_permutes(_census_fn, s)
+
     # --- Correctness gates (before any timing is reported) -----------------
     if args.parity_gate or args.check_conservation:
         final_global = (gather_voronoi_state_spmd(s, dev_config)
@@ -455,6 +481,10 @@ def main() -> int:
         steady_min_ms=round(float(np.min(steady)), 2),
         per_step_ms=[round(x, 1) for x in per_step_ms],
         cells=int(mesh.nCells) * args.nlev,
+        # ppermute round count/step (static compile property; #1113) — the
+        # multi-node ceiling is this count x the ~0.11 ms launch floor, so it
+        # belongs on every row like the cube benches.
+        hlo_collective_permutes=hlo_cp,
     )
     # Flat aggregator-compatible identity + metric fields (see the latlon
     # twin): resolution = subdivision level, matching run_cpu_mpi_scaling's

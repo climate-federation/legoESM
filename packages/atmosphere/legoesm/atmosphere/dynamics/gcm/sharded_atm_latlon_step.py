@@ -1182,8 +1182,10 @@ def _refuse_unsupported_spmd_config_2d(model, p_lon: int) -> None:
         raise NotImplementedError(
             "atm 2-D SPMD tiling: use_polar_filter=True with p_lon > 1 is "
             "not wired — the polar filter FFTs the full longitude circle "
-            "(needs a lon-gather FFT, mirroring the make_latlon_2d_mpi_step "
-            "refusal).  Use p_lon == 1 or disable the filter.")
+            "and needs a lon-gather FFT.  (The route-A MPI path "
+            "make_latlon_2d_mpi_step DOES wire this via the AD-safe "
+            "lat-pencil transpose; the SPMD ppermute equivalent is a "
+            "follow-up.)  Use p_lon == 1 or disable the filter.")
 
 
 def make_sharded_atm_latlon_step_2d(model, mesh, physics_fn=None, *,

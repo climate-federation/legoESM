@@ -38,6 +38,12 @@ program duogrid_oracle_driver
     tlat = 0.0_r8_kind
 
     gg%is_initialized = .false.
+    ! EXPLICIT upstream duo order: the mirror monolith defaults
+    ! k2e_nord=4 but the authoritative modular global_grid_data.F90
+    ! defaults 2 (fv_duogrid's dg side defaults 4 and FATALs on
+    ! mismatch, so real duo runs use 4).  Set it before init so the
+    ! oracle is generator-tree-independent.
+    gg%k2e_nord = 4
     call global_grid_init(gg, res, ng, 0, .false., tlon, tlat)
 
     is = 1;  ie = res

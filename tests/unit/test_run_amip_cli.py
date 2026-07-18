@@ -2372,6 +2372,30 @@ def test_diagnostic_condensate_scheme_validate_strict():
         ExperimentConfig(
             cloud_scheme="sundqvist", radiation="gray",
             cloud_diagnostic_condensate_scheme="adiabatic").validate_strict()
+
+
+def test_use_clubb_cloud_fraction_rejected_on_mpas_spectral():
+    """use_clubb_cloud_fraction is enforced only inside build_physics_pipeline,
+    which mpas/spectral never build — so validate_strict must reject the opt-in
+    there rather than let it silently no-op (audit 2026-07-17 dispatch-hardening)."""
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig
+    for bad_disc in ("spectral", "mpas"):
+        with pytest.raises(ValueError, match="silently no-op"):
+            ExperimentConfig(
+                turbulence="clubb", use_clubb_cloud_fraction=True,
+                dycore=DycoreConfig(discretization=bad_disc)).validate_strict()
+    # cd-grid aliases DO build the pipeline, so the guard must not block them
+    # (the pipeline's own turbulence=='clubb' check still applies).
+    for ok_disc in ("centered", "finite_volume"):
+        try:
+            ExperimentConfig(
+                turbulence="clubb", use_clubb_cloud_fraction=True,
+                dycore=DycoreConfig(discretization=ok_disc)).validate_strict()
+        except ValueError as exc:
+            assert "silently no-op" not in str(exc), (
+                f"clubb-cf must not be guard-blocked on cd-grid alias {ok_disc!r}")
+
+
 def test_yaml_settable_bools_have_no_switches():
     """#872 sweep: every store_true flag a shipped YAML can set true is now
     BooleanOptionalAction, so a --config that enables it stays CLI-overridable
@@ -2730,3 +2754,112 @@ def test_bechtold_use_ifs_snow_melt_round_trip():
                              bechtold_use_ifs_snow_melt=flag)
         assert ExperimentConfig.from_amip_config(
             e.to_amip_config()).bechtold_use_ifs_snow_melt is flag
+
+
+def test_ml_parameterization_requires_checkpoint_and_stats():
+    """``--physics-parameterization ml`` without checkpoint+stats must fail at
+    parse time (the guard used to be dead code inside the --evaluate branch,
+    unreachable after its parser.error — audit 2026-07-17)."""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical",
+            "--physics-parameterization", "ml",
+            "--convection", "mass_flux", "--turbulence", "louis",
+        ]), parser)
+    # With both assets the guard passes.
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--physics-parameterization", "ml",
+        "--convection", "mass_flux", "--turbulence", "louis",
+        "--physics-parameterization-checkpoint", "/tmp/ckpt.eqx",
+        "--physics-parameterization-stats", "/tmp/stats.npz",
+    ]), parser)
+    assert args.physics_parameterization == "ml"
+
+
+def test_truncation_conflicting_grid_or_discretization_errors():
+    """--truncation with an explicitly conflicting --grid-type/--discretization
+    must be a hard error, not a silent switch to gaussian/spectral (the one
+    silent grid fallback in the driver — audit 2026-07-17). The argparse
+    defaults (cubed_sphere/centered) are still coerced."""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--truncation", "42",
+            "--grid-type", "latlon",
+        ]), parser)
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--truncation", "42",
+            "--discretization", "mpas",
+        ]), parser)
+    # An explicit value EQUAL to the production default also conflicts (the
+    # None-sentinel default makes it distinguishable from unset).
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--truncation", "42",
+            "--grid-type", "cubed_sphere",
+        ]), parser)
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--discretization", "spectral",
+            "--grid-type", "latlon",
+        ]), parser)
+    # Bare --truncation still auto-configures the spectral pair.
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--truncation", "42",
+    ]), parser)
+    assert args.grid_type == "gaussian"
+    assert args.discretization == "spectral"
+    assert args.resolution == 42
+    # Explicit-but-agreeing choices also pass.
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--truncation", "42",
+        "--grid-type", "gaussian", "--discretization", "spectral",
+    ]), parser)
+    assert args.grid_type == "gaussian"
+    # Bare defaults resolve to the production pair.
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]),
+                             parser)
+    assert args.grid_type == "cubed_sphere"
+    assert args.discretization == "centered"
+
+
+def test_explicit_zero_p_top_and_stretching_survive():
+    """An explicit ``--p-top 0``/``--stretching 0`` must reach GridConfig
+    instead of being swallowed by an ``or``-default (so validate_strict can
+    reject it loudly); the bare default still yields 200.0/2.0."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--p-top", "0", "--stretching", "0",
+    ]), parser))
+    assert cfg.grid.p_top_Pa == 0.0
+    assert cfg.grid.stretching == 0.0
+    cfg_def = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_def.grid.p_top_Pa == 200.0
+    assert cfg_def.grid.stretching == 2.0
+
+
+def test_restart_still_requires_forcing_path_for_real_data():
+    """--restart-from does NOT exempt --forcing-path for a real dataset: forcing
+    is not in the checkpoint and setup() loads it before the checkpoint, so the
+    old exemption only deferred the failure to a confusing deep error
+    (audit 2026-07-17)."""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "custom", "--restart-from", "/tmp/ckpt.zarr",
+        ]), parser)
+    # analytical needs no forcing file even on restart.
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--restart-from", "/tmp/ckpt.zarr",
+    ]), parser)
+    assert args.restart_from == "/tmp/ckpt.zarr"
+    # real dataset WITH a forcing path is fine.
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "custom", "--restart-from", "/tmp/ckpt.zarr",
+        "--forcing-path", "/tmp/sst.nc",
+    ]), parser)
+    assert args.forcing_path == "/tmp/sst.nc"

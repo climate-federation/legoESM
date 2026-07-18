@@ -63,6 +63,19 @@ def resolve_var(ds, name):
     for cand in candidates:
         if cand in ds:
             return cand
+    # ERA5-style invariant stores often carry the SURFACE geopotential under
+    # the bare short name 'z' (the same ECMWF/GRIB code as the 3-D
+    # geopotential).  Treat 'z' as surface geopotential ONLY when the variable
+    # is 2-D — i.e. carries NO level dimension: a 'z' on a level axis is the
+    # 3-D geopotential, not phis.  Objects without per-variable dims metadata
+    # (e.g. plain sets in unit tests) safely fall through to None.
+    if name in ("geopotential_at_surface", "z_sfc") and "z" in ds:
+        try:
+            dims = ds["z"].dims
+        except (TypeError, KeyError, AttributeError):
+            return None
+        if not any(d in ("level", "pressure_level") for d in dims):
+            return "z"
     return None
 
 
@@ -689,6 +702,26 @@ def load_era5_slice(
             "2m_temperature; sst zero-filled (0 K) — unusable as SST forcing")
         return np.zeros((len(lat), len(lon)), dtype=np.float32)
 
+    def _get_phis():
+        """Surface geopotential phis [m²/s²]; zero-fill is LAST resort + LOUD.
+
+        Resolves ``geopotential_at_surface`` / ``z_sfc`` / a 2-D ``z``
+        (``resolve_var``'s dimension-checked short alias).  A store lacking all
+        of them keeps the legacy zero-fill so idealized ICs still load, but
+        warns loudly (matching ``_get_sst``): real ERA5 surface pressure
+        (~600 hPa over Tibet) combined with phis=0 (flat topography) yields a
+        grossly NON-HYDROSTATIC initial condition that the dycore cannot
+        balance.
+        """
+        if _has("geopotential_at_surface"):
+            return _get_2d("geopotential_at_surface")
+        logger.warning(
+            "ERA5 store has no surface geopotential ('geopotential_at_surface'"
+            " / 'z_sfc' / 2-D 'z'); phis zero-filled (flat topography) — with"
+            " real ERA5 surface pressure (~600 hPa over Tibet) this produces a"
+            " grossly non-hydrostatic initial condition")
+        return np.zeros((len(lat), len(lon)), dtype=np.float32)
+
     # Optional radiation-flux targets (TOA + surface) for AIMIP flux
     # supervision.  Derive the four model-comparable fluxes:
     #   rsut       = top_downward_SW − top_net_SW   (reflected up, +up)
@@ -757,7 +790,7 @@ def load_era5_slice(
         q=_get_3d("specific_humidity"),
         p_s=_get_2d("surface_pressure", required=True),
         sst=_get_sst(),
-        phis=_get_2d("geopotential_at_surface"),  # optional; already in m²/s²
+        phis=_get_phis(),  # optional (loud-warned zero-fill); already in m²/s²
         lat=lat,
         lon=lon,
         plev_Pa=plev_Pa,
@@ -932,6 +965,7 @@ def era5_to_spectral_carry(
     sigma,
     microphysics: str = "none",
     turbulence: str = "none",
+    smoothing_passes: int = 4,
 ):
     """Convert ERA5 slice to SegmentCarry on a spectral (Gaussian) grid.
 
@@ -963,11 +997,30 @@ def era5_to_spectral_carry(
         era5, grid,
     )
 
+    # Smooth the regridded ERA5 orography + hydrostatically reconcile p_s —
+    # the SAME treatment the cube / lat-lon / MPAS carries already apply
+    # (mirrors era5_to_latlon_carry; the spectral Gaussian grid IS a lat-lon
+    # grid in grid space, so smooth_phis_gaussian applies directly).  Raw
+    # regridded ERA5 phis (peaks ~5.6e4 m^2/s^2) with an unreconciled p_s
+    # drives an unbalanced pressure-gradient force at step ~0; the barometric
+    # correction + hybrid p_s floor live in the SHARED
+    # _apply_phis_hydrostatic_adjustment (not re-implemented here).
+    from legoesm.grids.topography import smooth_phis_gaussian
+    phis_ll_raw = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
+    phis_ll_smooth = smooth_phis_gaussian(
+        phis_ll_raw, smoothing_passes=smoothing_passes)
+    # T_sfc proxy = ERA5 T at the highest pressure level (plev_Pa ascending →
+    # last index = nearest to surface), matching the lat-lon carry.
+    _T_sfc_ll = jnp.asarray(T_ll)[..., -1]
+    phis_jax, p_s_jax = _apply_phis_hydrostatic_adjustment(
+        jnp.asarray(phis_ll_raw), jnp.asarray(phis_ll_smooth),
+        jnp.asarray(p_s_ll), _T_sfc_ll, sigma, _is_hybrid,
+    )
+
     # Vertical interpolation: pressure levels → model levels.
     # Use TRUE hybrid pressure p(k) = A(k)*p_ref + B(k)*p_s to avoid
     # the sigma approximation error over steep terrain (see cubed-sphere
-    # path comment for details).
-    p_s_jax = jnp.asarray(p_s_ll)
+    # path comment for details).  Uses the RECONCILED p_s from above.
     plev = jnp.asarray(era5.plev_Pa)
     sigma_f = jnp.asarray(sigma_full)
     # Model TRUE full-level pressures (hybrid-correct; iter 339): interp the
@@ -988,11 +1041,7 @@ def era5_to_spectral_carry(
         interp_pressure_to_sigma(jnp.asarray(q_ll), plev, p_s_jax, sigma_f, p_full=p_full)
     )
 
-    # Surface geopotential (regrid to Gaussian)
-    phis_ll = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
-    phis_jax = jnp.asarray(phis_ll)
-
-    # Build HydrostaticState
+    # Build HydrostaticState (phis_jax / p_s_jax already smoothed + reconciled)
     dims_3d = ("lat", "lon", "level")
     dims_2d = ("lat", "lon")
 
@@ -1035,6 +1084,8 @@ def era5_to_cubedsphere_carry(
     target_phis=None,
     microphysics: str = "none",
     turbulence: str = "none",
+    smoothing_passes: int = 4,
+    edge_blend_strength: float = 0.3,
 ):
     """Convert ERA5 slice to SegmentCarry on a cubed-sphere grid.
 
@@ -1111,8 +1162,12 @@ def era5_to_cubedsphere_carry(
     # to O(dx^-1) magnitude.  With raw ERA5 phis differences of ~50 kJ/kg,
     # this creates spurious ~0.4 m/s² PGF that drives blowup in ~1–5 days
     # even from rest.
+    # edge_blend_width now defaults to TopographyConfig's 2 (was silently 1);
+    # driver wires smoothing_passes/edge_blend_strength from cfg.topo_*.
     from legoesm.grids.topography import smooth_phis_cubed_sphere
-    phis_cs_smooth = smooth_phis_cubed_sphere(phis_cs_raw)
+    phis_cs_smooth = smooth_phis_cubed_sphere(
+        phis_cs_raw, smoothing_passes=smoothing_passes,
+        edge_blend_strength=edge_blend_strength)
 
     # Hydrostatically reconcile p_s with the smoothed phis (barometric p_s
     # correction + hybrid p_s floor).  Shared with the lat-lon carry via
@@ -1234,6 +1289,7 @@ def era5_to_latlon_carry(
     sigma,
     microphysics: str = "none",
     turbulence: str = "none",
+    smoothing_passes: int = 4,
 ):
     """Convert ERA5 slice to a SegmentCarry on the lat-lon C-grid.
 
@@ -1281,7 +1337,8 @@ def era5_to_latlon_carry(
     from legoesm.grids.vertical import HybridSigmaPressureCoordinate
     _is_hybrid = isinstance(sigma, HybridSigmaPressureCoordinate)
     phis_ll_raw = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
-    phis_ll_smooth = smooth_phis_gaussian(phis_ll_raw)
+    phis_ll_smooth = smooth_phis_gaussian(
+        phis_ll_raw, smoothing_passes=smoothing_passes)
 
     # Hydrostatically reconcile p_s with the smoothed phis (+ hybrid p_s floor).
     # T_sfc proxy = ERA5 T at 1000 hPa (plev_Pa ascending → last index = surface).

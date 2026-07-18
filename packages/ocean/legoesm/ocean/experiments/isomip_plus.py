@@ -65,6 +65,12 @@ from legoesm.ocean.physics.ice_shelf import (
     three_equation_melt,
 )
 
+# --- ISOMIP+ protocol constants (Asay-Davis et al. 2016, GMD) ---
+# Reference seawater density for the cavity pressure used in the melt closure.
+# The protocol value (1028 kg/m3) differs from the model's default
+# ``constants.rho_ocean`` (1025) — keep it protocol-specific here.
+_ISOMIP_RHO_SW = 1028.0    # [kg/m3]
+
 
 @dataclass
 class ISOMIPPlusConfig:
@@ -125,7 +131,7 @@ def cavity_water_column_m(x_km, y_km,
 
 
 def compute_basal_melt(state, *, config: ISOMIPPlusConfig | None = None,
-                        rho_sw: float = 1028.0,
+                        rho_sw: float = _ISOMIP_RHO_SW,
                         g_val: float = constants.g) -> float:
     """Domain-mean basal melt rate ``mdot`` [m/yr, ICE-equivalent] from a state.
 

@@ -161,10 +161,6 @@ def ensemble_from_priors(
     through :func:`constrain` per spec before forward runs.
     """
     base = TrainableOceanParams.from_defaults(specs).raw
-    # rel_spread in opt-space units: scale by each param's opt-space span
-    spans = jnp.asarray([
-        (_bounds_in_opt_space(s)[1] - _bounds_in_opt_space(s)[0])
-        for s in specs], dtype=jnp.float64)
     noise = jax.random.normal(key, (n_ensemble, base.shape[0]),
                               dtype=jnp.float64)
     # raw is unconstrained (sigmoid-logit) space; perturb there with a

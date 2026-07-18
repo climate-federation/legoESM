@@ -198,6 +198,61 @@ def test_latlon_carry_analytic_temperature_value():
     assert 285.0 < T_eq_sfc < 305.0
 
 
+# --- T3: spectral carry gets the SAME phis treatment as the lat-lon carry ----
+# (smooth_phis_gaussian + shared _apply_phis_hydrostatic_adjustment; it was the
+#  odd grid out — raw phis, no barometric p_s reconciliation, no hybrid floor)
+
+def test_spectral_carry_smooths_phis_and_reconciles_ps():
+    from legoesm import constants
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.topography import smooth_phis_gaussian
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.training.era5_to_state import (
+        era5_to_spectral_carry,
+        regrid_2d_to_gaussian,
+        regrid_latlon_to_gaussian,
+    )
+    era5 = _mountain_era5()
+    grid = create_gaussian_grid(21)
+    sigma = create_sigma_coordinate(20)
+    carry = era5_to_spectral_carry(era5, grid, sigma)
+    raw = np.asarray(regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid))
+    phis = np.asarray(carry.phis)
+    assert np.all(np.isfinite(phis)) and np.all(np.isfinite(np.asarray(carry.p_s)))
+    # phis is SMOOTHED: it actually changed, gradients reduced, ridge amplitude cut.
+    assert np.abs(phis - raw).max() > 0.0, "spectral carry left phis raw"
+    assert _max_abs_grad(phis) < _max_abs_grad(raw), "carry did not smooth phis"
+    assert phis.max() < raw.max(), "smoothing must reduce the ridge amplitude"
+    # p_s is RECONCILED to the smoothed phis by the exact barometric relation
+    # (non-hybrid): p_s_adj = p_s * exp((phis_raw - phis_smooth)/(R_d T_sfc)).
+    T_ll, _, _, _, p_s_ll = regrid_latlon_to_gaussian(era5, grid)
+    smooth = np.asarray(smooth_phis_gaussian(raw))
+    T_sfc = np.asarray(T_ll)[..., -1]
+    expected_ps = np.asarray(p_s_ll) * np.exp(
+        (raw - smooth) / (constants.R_d * T_sfc))
+    np.testing.assert_allclose(np.asarray(carry.p_s), expected_ps, rtol=1e-4)
+    # Sign: where the peak was cut, lowering terrain must RAISE p_s.
+    cut = (raw - smooth) > 1.0
+    assert cut.any()
+    assert np.all(np.asarray(carry.p_s)[cut] > np.asarray(p_s_ll)[cut])
+
+
+def test_spectral_carry_hybrid_orography_respects_ps_floor():
+    # Mirror of test_latlon_carry_hybrid_orography_respects_ps_floor.
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import make_hybrid_levels
+    from legoesm.training.era5_to_state import (
+        _hybrid_p_s_floor, era5_to_spectral_carry)
+    era5 = _mountain_era5()
+    grid = create_gaussian_grid(21)
+    sigma = make_hybrid_levels(20)
+    carry = era5_to_spectral_carry(era5, grid, sigma)
+    floor = _hybrid_p_s_floor(sigma, dp_floor=100.0)
+    p_s = np.asarray(carry.p_s)
+    assert np.all(np.isfinite(np.asarray(carry.T)))
+    assert np.all(p_s >= floor - 1.0), "hybrid p_s floor not honored on spectral"
+
+
 # ---------------------------------------------------------------------------
 # Conditional prognostic-carry seeding (all-scheme AIMIP training support)
 # ---------------------------------------------------------------------------
@@ -295,3 +350,54 @@ def test_prognostic_carry_seeds_helper_double_moment_and_stateful():
     assert "tke" in seeds
     assert np.asarray(seeds["tke"]).shape == (3 * 3, 6)
     assert "qke" not in seeds  # tke scheme uses the tke slot
+
+
+# --- audit 2026-07-17 T5: carry smoothing params are driver-tunable ----------
+
+def test_latlon_carry_smoothing_passes_take_effect():
+    """More Laplacian passes → smoother carry phis (the driver now threads
+    cfg.topo_smoothing; the value was previously hard-coded)."""
+    from legoesm.training.era5_to_state import era5_to_latlon_carry
+    from legoesm.grids.vertical import create_sigma_coordinate
+    era5 = _mountain_era5()
+    grid = create_grid("latlon", 24)
+    sigma = create_sigma_coordinate(20)
+    few = np.asarray(era5_to_latlon_carry(
+        era5, grid, sigma, smoothing_passes=1).phis)
+    many = np.asarray(era5_to_latlon_carry(
+        era5, grid, sigma, smoothing_passes=8).phis)
+    assert _max_abs_grad(many) < _max_abs_grad(few), (
+        "more passes must reduce the phis gradient")
+
+
+def test_spectral_carry_smoothing_passes_take_effect():
+    from legoesm.training.era5_to_state import era5_to_spectral_carry
+    from legoesm.grids.vertical import create_sigma_coordinate
+    era5 = _mountain_era5()
+    grid = create_grid("gaussian", 21)
+    sigma = create_sigma_coordinate(20)
+    few = np.asarray(era5_to_spectral_carry(
+        era5, grid, sigma, smoothing_passes=1).phis)
+    many = np.asarray(era5_to_spectral_carry(
+        era5, grid, sigma, smoothing_passes=8).phis)
+    assert _max_abs_grad(many) < _max_abs_grad(few)
+
+
+def test_cube_smooth_phis_edge_blend_width_defaults_to_two():
+    """smooth_phis_cubed_sphere now blends with width=2 (TopographyConfig's
+    default and the static-topography path), not the old silent width=1 — the
+    docstring's 'same pipeline' promise (audit 2026-07-17)."""
+    from legoesm.grids.topography import (
+        smooth_phis_cubed_sphere, blend_scalar_cube_edges_2d,
+    )
+    from legoesm.grids.topography import _laplacian_smooth_cubed_sphere
+    rng = np.random.default_rng(0)
+    phis = jnp.asarray(rng.normal(size=(6, 8, 8)) * 1.0e4)
+    got = np.asarray(smooth_phis_cubed_sphere(phis, smoothing_passes=2))
+    lap = _laplacian_smooth_cubed_sphere(np.asarray(phis), passes=2)
+    want_w2 = np.asarray(blend_scalar_cube_edges_2d(
+        jnp.asarray(lap), strength=0.3, width=2))
+    want_w1 = np.asarray(blend_scalar_cube_edges_2d(
+        jnp.asarray(lap), strength=0.3, width=1))
+    np.testing.assert_allclose(got, want_w2, atol=1e-9)
+    assert not np.allclose(got, want_w1), "default must be width=2, not width=1"

@@ -913,6 +913,11 @@ class BarotropicConfig(NamedTuple):
     # ``chunk x reach <= min band height`` across ranks — the halo pulls
     # rows from ONE neighbour only.
     barotropic_wide_halo_chunk: int = 0
+    # Positional-stability tail: append new fields here (never mid-class).
+    # Degree of the Chebyshev polynomial preconditioner (only used when
+    # ``barotropic_implicit_preconditioner = 'chebyshev'``); higher = stronger
+    # smoothing per solve at more A-op applies. A count, not a trainable float.
+    barotropic_chebyshev_degree: int = 4
 
 
 class RuntimeChecksConfig(NamedTuple):

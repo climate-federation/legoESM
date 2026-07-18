@@ -45,11 +45,6 @@ _AY, _AX, _AZ = 0, 1, 2
 _SCHEMES = ("upwind", "van_leer", "weno5", "weno7", "weno9", "central")
 
 
-def _upwind_face(fm1, f0, vel_pos):
-    """1st-order upwind face value given the sign of the advecting face velocity."""
-    return jnp.where(vel_pos, fm1, f0)
-
-
 def _face_values_x(phi, scheme):
     """Left/right reconstructions of ``phi`` at the i+½ x-faces (periodic)."""
     r = lambda s: jnp.roll(phi, s, axis=_AX)        # r(+1)=phi_{i-1}

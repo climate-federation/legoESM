@@ -390,6 +390,113 @@ class TestLoadRealTopography(unittest.TestCase):
         self.assertEqual(phis.shape, (6, 8, 8))
 
 
+class TestDoubleGGuard(unittest.TestCase):
+    """T6: geopotential-vs-meters double-g trap.
+
+    An ERA5-style invariant file where 'z' is GEOPOTENTIAL [m**2 s**-2] used
+    to be treated as elevation [m] and multiplied by g again in
+    load_real_topography — phis silently inflated ~9.8x.  The loader must
+    reject implausible magnitudes (> _MAX_PLAUSIBLE_ELEV_M) and geopotential
+    units attributes.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.grid = create_cubed_sphere(8)
+
+    def _write(self, z, units=None, name="topo.nc"):
+        import xarray as xr
+        n_lat, n_lon = z.shape
+        lat = np.linspace(-89.5, 89.5, n_lat)
+        lon = np.linspace(0.5, 359.5, n_lon)
+        da = xr.DataArray(z, dims=("lat", "lon"),
+                          coords={"lat": lat, "lon": lon})
+        if units is not None:
+            da.attrs["units"] = units
+        path = str(Path(self.tmpdir) / name)
+        xr.Dataset({"z": da}).to_netcdf(path)
+        return path
+
+    def test_geopotential_magnitude_raises(self):
+        z = np.zeros((90, 180))
+        z[45, 90] = 5000.0 * constants.g   # ~49000 "m" — clearly geopotential
+        path = self._write(z)
+        with self.assertRaisesRegex(ValueError, "double-g"):
+            load_real_topography(
+                self.grid, config=TopographyConfig(source="file", path=path))
+
+    def test_geopotential_units_attr_raises(self):
+        # Magnitude alone is plausible, but the units attribute says m²/s².
+        z = np.zeros((90, 180))
+        z[45, 90] = 5000.0
+        path = self._write(z, units="m**2 s**-2")
+        with self.assertRaisesRegex(ValueError, "double-g"):
+            load_real_topography(
+                self.grid, config=TopographyConfig(source="file", path=path))
+
+    def test_normal_etopo_passes(self):
+        # Everest-scale peak + Mariana-scale trench are plausible elevation.
+        z = np.zeros((90, 180))
+        z[45, 90] = 8800.0
+        z[10, 10] = -10900.0
+        path = self._write(z, units="m")
+        phis, f_land = load_real_topography(
+            self.grid, config=TopographyConfig(source="file", path=path))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(phis))))
+        self.assertEqual(phis.shape, (6, 8, 8))
+
+
+class TestPoleRowRegrid(unittest.TestCase):
+    """L2: target cells poleward of the source grid's outermost latitude
+    CENTER used to get fill_value=0 (f_land=0 ocean / z_s=0 sea level) —
+    Antarctica misclassified as ocean at cubed-sphere/Gaussian points near
+    ±90.  The source latitude axis is now edge-replicated to exactly ±90."""
+
+    def test_regrid_pole_rows_edge_replicated(self):
+        lat_src = np.linspace(-89.5, 89.5, 180)   # 1-deg centers, not reaching ±90
+        lon_src = np.linspace(0.5, 359.5, 360)
+        elev = np.zeros((180, 360))
+        elev[0, :] = 2500.0    # Antarctica-like all-land poleward-most row
+        elev[-1, :] = 100.0    # a north-pole row too
+        target_lat = np.array([-90.0, -89.9, 90.0])
+        target_lon = np.array([10.0, 200.0, 350.0])
+        result = _regrid_to_target(lat_src, lon_src, elev,
+                                   target_lat, target_lon)
+        npt.assert_allclose(result[:2], 2500.0, rtol=1e-6)
+        npt.assert_allclose(result[2], 100.0, rtol=1e-6)
+
+    def test_land_fraction_file_pole_row_is_land(self):
+        import xarray as xr
+        from legoesm.grids.topography import _load_land_fraction_file
+        lat = np.linspace(-89.5, 89.5, 180)
+        lon = np.linspace(0.5, 359.5, 360)
+        sftlf = np.zeros((180, 360))
+        sftlf[lat <= -60.0, :] = 100.0     # Antarctica all-land (percent field)
+        tmpdir = tempfile.mkdtemp()
+        path = str(Path(tmpdir) / "sftlf.nc")
+        xr.Dataset({"sftlf": (("lat", "lon"), sftlf)},
+                   coords={"lat": lat, "lon": lon}).to_netcdf(path)
+        target_lat = np.array([-90.0, -89.8, 0.0])
+        target_lon = np.array([120.0, 300.0, 45.0])
+        f_land = _load_land_fraction_file(path, "", target_lat, target_lon)
+        npt.assert_allclose(f_land[:2], 1.0, atol=1e-6)   # NOT ocean
+        npt.assert_allclose(f_land[2], 0.0, atol=1e-6)    # equator still ocean
+
+    def test_derive_land_fraction_pole_row(self):
+        # Sub-grid sampling near the pole: with edge replication the
+        # in-sphere sub-samples poleward of the source edge see land, so
+        # f_land at the poleward-most target well exceeds the pre-fix value
+        # (0.5 here; samples beyond ±90 remain out-of-bounds ocean).
+        lat_src = np.linspace(-89.5, 89.5, 180)
+        lon_src = np.linspace(0.5, 359.5, 360)
+        elev = np.full((180, 360), -3000.0)
+        elev[lat_src <= -60.0, :] = 2500.0
+        f_land = _derive_land_fraction(
+            lat_src, lon_src, elev,
+            np.array([-89.5]), np.array([90.0]), 2.0)
+        self.assertGreater(float(f_land[0]), 0.7)
+
+
 class TestLoadGaussianGrid(unittest.TestCase):
     """Test loading topography onto Gaussian grid."""
 
@@ -764,6 +871,66 @@ class TestLaplacianSmoothCrossFace(unittest.TestCase):
         finally:
             set_halo_backend(prev)
         npt.assert_allclose(out_other, out_local, atol=1e-12)
+
+
+class TestUnstructuredTopographySmoothing(unittest.TestCase):
+    """Audit 2026-07-17 T4: static-file topography on a Voronoi/MPAS mesh must
+    be mesh-Laplacian smoothed (raw point-sampled ETOPO drives the TRiSK-PGF
+    O(dx^-1) blowup over steep terrain), matching the ERA5-IC MPAS path."""
+
+    def _mesh(self):
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        return create_voronoi_mesh(2)   # 162 cells, cheap
+
+    def test_smoothing_reduces_cell_to_cell_roughness(self):
+        from legoesm.grids.topography import (
+            TopographyConfig, load_real_topography,
+        )
+        mesh = self._mesh()
+        with tempfile.TemporaryDirectory() as td:
+            path = str(Path(td) / "topo.nc")
+            _make_synthetic_topo_netcdf(path, mountains=True)
+            raw, _ = load_real_topography(
+                mesh, TopographyConfig(source="file", path=path,
+                                       smoothing_passes=0))
+            smoothed, _ = load_real_topography(
+                mesh, TopographyConfig(source="file", path=path,
+                                       smoothing_passes=4))
+
+        coc = np.asarray(mesh.cellsOnCell)
+        neoc = np.asarray(mesh.nEdgesOnCell)
+
+        def _neighbor_var(field):
+            f = np.asarray(field)
+            tot = 0.0
+            for c in range(mesh.nCells):
+                for e in range(int(neoc[c])):
+                    nb = int(coc[e, c]) - 1     # 1-based -> 0-based
+                    if 0 <= nb < mesh.nCells:
+                        tot += (f[c] - f[nb]) ** 2
+            return tot
+
+        # smoothing must lower the summed squared cell-to-cell difference
+        self.assertLess(_neighbor_var(smoothed), _neighbor_var(raw))
+        # and it must actually have changed the field
+        self.assertGreater(float(np.max(np.abs(np.asarray(smoothed)
+                                               - np.asarray(raw)))), 0.0)
+
+    def test_zero_passes_is_raw(self):
+        from legoesm.grids.topography import (
+            TopographyConfig, load_real_topography,
+        )
+        mesh = self._mesh()
+        with tempfile.TemporaryDirectory() as td:
+            path = str(Path(td) / "topo.nc")
+            _make_synthetic_topo_netcdf(path, mountains=True)
+            a, _ = load_real_topography(
+                mesh, TopographyConfig(source="file", path=path,
+                                       smoothing_passes=0))
+            b, _ = load_real_topography(
+                mesh, TopographyConfig(source="file", path=path,
+                                       smoothing_passes=0))
+        npt.assert_allclose(np.asarray(a), np.asarray(b), atol=1e-12)
 
 
 if __name__ == "__main__":
