@@ -46,6 +46,11 @@ echo "[$(date)] Derecho sfno_full SCALE train | suite=${SUITE} out=${OUT_ROOT} (
 
 # run_aimip is single-GPU spectral; the suite pins variants:[sfno_full], so this
 # trains ONLY the full SFNO emulator with the rollout curriculum + many-year data.
-python -u scripts/run/run_aimip.py --suite "${SUITE}"
+# --resume is ALWAYS safe: maybe_resume_model returns (model, epoch 0) when no
+# epoch_*.eqx exists yet (first submit), and resumes from the highest epoch on a
+# resubmit -- WITHOUT it a 48 h walltime kill silently restarts epoch 0 and
+# discards the prior run (the 120 h curriculum phase over ~3200 pairs at 128/8
+# routinely exceeds one 48 h link, so a plain resubmit must resume, not restart).
+python -u scripts/run/run_aimip.py --suite "${SUITE}" --resume
 
 echo "[$(date)] done -> checkpoints under ${OUT_ROOT}/sfno_full"
