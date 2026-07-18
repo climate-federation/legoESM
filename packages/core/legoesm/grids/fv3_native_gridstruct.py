@@ -66,9 +66,12 @@ TINY_NUMBER = 1.0e-8     # fv_grid_utils tiny_number (rsin floors + sin_sg ghost
 
 # --- FV3/FMS physical constants for oracle pinning (FMS constants_mod,
 #     GFDL flavour); legoESM production paths use legoesm.constants ---
-# const-ok: FMS RADIUS differs from legoESM R_earth; oracle pins upstream's
-FV3_RADIUS_M = 6371.0e3
-FV3_OMEGA = constants.Omega  # FMS OMEGA equals legoESM's rotation rate
+# Pinned to the Zenodo duo run log (fms.out: "Radius is 6371200.0,
+# omega is 7.2921e-5"); both differ from legoESM's R_earth/Omega.
+# const-ok: oracle pins upstream's constants, not legoESM's
+FV3_RADIUS_M = 6371.2e3
+# const-ok: FMS OMEGA (7.2921e-5) != legoESM Omega (7.292e-5)
+FV3_OMEGA = 7.2921e-5
 
 
 class fort:

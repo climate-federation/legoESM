@@ -1572,4 +1572,64 @@ contains
     end do
   end subroutine grid_area_bounded
 
+  ! ---- helpers round 2 (fv_grid_utils 1739-1777, 2728-2745) ----
+ subroutine cart_to_latlon(np, q, xs, ys)
+! vector version of cart_to_latlon1
+  integer, intent(in):: np
+  real(kind=R_GRID), intent(inout):: q(3,np)
+  real(kind=R_GRID), intent(inout):: xs(np), ys(np)
+! local
+  real(kind=R_GRID), parameter:: esl=1.d-10
+  real (f_p):: p(3)
+  real (f_p):: dist, lat, lon
+  integer i,k
+
+  do i=1,np
+     do k=1,3
+        p(k) = q(k,i)
+     enddo
+     dist = sqrt(p(1)**2 + p(2)**2 + p(3)**2)
+     do k=1,3
+        p(k) = p(k) / dist
+     enddo
+
+     if ( (abs(p(1))+abs(p(2)))  < esl ) then
+          lon = real(0.,kind=f_p)
+     else
+          lon = atan2( p(2), p(1) )   ! range [-pi,pi]
+     endif
+
+     if ( lon < 0.) lon = real(2.,kind=f_p)*pi + lon
+! RIGHT_HAND system:
+     lat = asin(p(3))
+
+     xs(i) = lon
+     ys(i) = lat
+! q Normalized:
+     do k=1,3
+        q(k,i) = p(k)
+     enddo
+  enddo
+
+ end  subroutine cart_to_latlon
+
+ subroutine cell_center3(p1, p2, p3, p4, ec)
+! Get center position of a cell
+         real(kind=R_GRID) , intent(IN)  :: p1(3), p2(3), p3(3), p4(3)
+         real(kind=R_GRID) , intent(OUT) :: ec(3)
+! Local
+         real (kind=R_GRID)dd
+         integer k
+
+         do k=1,3
+            ec(k) = p1(k) + p2(k) + p3(k) + p4(k)
+         enddo
+         dd = sqrt( ec(1)**2 + ec(2)**2 + ec(3)**2 )
+
+         do k=1,3
+            ec(k) = ec(k) / dd
+         enddo
+
+ end subroutine cell_center3
+
 end module bounded_gs_extract_mod

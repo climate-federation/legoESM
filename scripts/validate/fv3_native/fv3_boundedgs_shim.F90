@@ -10,7 +10,8 @@ module bounded_gs_shim_mod
   integer, parameter :: f_p = selected_real_kind(20)
   real(kind=R_GRID), parameter :: big_number = 1.d8
   real(kind=R_GRID), parameter :: tiny_number = 1.d-8
-  real(kind=R_GRID), parameter :: radius = 6371.0d3
+  ! Zenodo duo run log: "Radius is 6371200.0" (FMS constants_mod)
+  real(kind=R_GRID), parameter :: radius = 6371.2d3
   real(kind=R_GRID), parameter :: pi = 4.0d0 * atan(1.0d0)
   real(kind=R_GRID), parameter :: todeg = 180.0d0 / pi
   real(kind=R_GRID), parameter :: torad = pi / 180.0d0

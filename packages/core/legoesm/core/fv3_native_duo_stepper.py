@@ -57,14 +57,16 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     from legoesm.core.fv3_native_sw_core import Bounds
     from legoesm.grids.fv3_native_halos import ed_supergrid_lonlat_ref
     from legoesm.grids.fv3_native_metrics import compute_fv3_native_angles
-    from legoesm.grids.fv3_native_gridstruct import FV3_RADIUS_M
+    from legoesm.grids.fv3_native_gridstruct import FV3_OMEGA, FV3_RADIUS_M
 
-    # radius: the W2 balanced state, the duo-target gate and the
-    # Zenodo reference all use the FV3 6371 km sphere — the builder's
-    # constants.R_earth default (6371.229 km) put a broad 7.2e-5 scale
-    # error on every metric (codex vertex-diff P2).
+    # radius/omega: the W2 balanced state, the duo-target gate and the
+    # Zenodo reference all use the FMS constants printed by the duo run
+    # log ("Radius is 6371200.0, omega is 7.2921e-5") — the builder's
+    # constants.R_earth/Omega defaults put a broad scale error on every
+    # metric and Coriolis term (codex vertex-diff P2).
     gs6 = [build_fv3_native_gridstruct(n, ng, tile=t,
-                                       radius=FV3_RADIUS_M)
+                                       radius=FV3_RADIUS_M,
+                                       omega=FV3_OMEGA)
            for t in range(1, 7)]
 
     # DUO angle override: the plain-mpp gridstruct poisons the panel-edge
@@ -707,7 +709,7 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
 
 
 def w2_six_face_state(ctx: dict, alpha: float = 0.0,
-                      u0: float = 38.61068276698372,
+                      u0: float | None = None,
                       gh0: float = 2.94e4) -> list:
     """Williamson case-2 BALANCED six-face state on the SW-via-
     production convention (pt≡1, delp = g·h):
@@ -722,10 +724,14 @@ def w2_six_face_state(ctx: dict, alpha: float = 0.0,
     handled by the step-entry exchanges).
     """
     from legoesm import constants
+    from legoesm.grids.fv3_native_gridstruct import FV3_OMEGA, FV3_RADIUS_M
 
-    a_r = 6371.0e3                      # FV3_RADIUS_M convention
-    omega = constants.Omega
-    g = constants.g
+    a_r = FV3_RADIUS_M
+    omega = FV3_OMEGA
+    g = constants.g                     # cancels: delp = g*h = gh0 - coef*S^2
+    if u0 is None:
+        # upstream test_cases case 2: Ubar = 2*pi*radius / (12 days)
+        u0 = 2.0 * np.pi * a_r / (12.0 * 86400.0)
     coef = (a_r * omega * u0 + 0.5 * u0 * u0)
 
     states = []
