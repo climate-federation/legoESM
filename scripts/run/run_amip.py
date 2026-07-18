@@ -1372,8 +1372,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         resolution=args.resolution,
         nlev=args.nlev,
         vertical_coord=args.vertical_coord,
-        p_top_Pa=args.p_top or 200.0,
-        stretching=args.stretching or 2.0,
+        p_top_Pa=args.p_top if args.p_top is not None else 200.0,
+        stretching=args.stretching if args.stretching is not None else 2.0,
         use_duogrid=getattr(args, "use_duogrid", False),
     )
 
@@ -1721,17 +1721,33 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
                 "--physics-parameterization ml currently requires "
                 "--convection mass_flux and --turbulence louis"
             )
-    if args.evaluate and not args.cmip_output:
-        parser.error("--evaluate requires --cmip-output (ClimateEval reads "
-                     "the CMOR Amon/ output tree)")
         if not args.physics_parameterization_checkpoint or not args.physics_parameterization_stats:
             parser.error(
                 "--physics-parameterization ml requires both "
                 "--physics-parameterization-checkpoint and "
                 "--physics-parameterization-stats"
             )
+    if args.evaluate and not args.cmip_output:
+        parser.error("--evaluate requires --cmip-output (ClimateEval reads "
+                     "the CMOR Amon/ output tree)")
 
-    # Auto-configure spectral runs
+    # Auto-configure spectral runs. --truncation implies the Gaussian/spectral
+    # pair, but an explicitly conflicting grid/discretization choice must be a
+    # hard error, not a silent override (the only silent grid fallback in the
+    # driver, audit 2026-07-17). "cubed_sphere"/"centered" are the argparse
+    # defaults and thus indistinguishable from unset — those are coerced.
+    if args.truncation is not None:
+        if args.grid_type not in ("cubed_sphere", "gaussian"):
+            parser.error(
+                f"--truncation implies --grid-type gaussian but "
+                f"--grid-type {args.grid_type} was given; drop one of them"
+            )
+        if args.discretization not in ("centered", "spectral"):
+            parser.error(
+                f"--truncation implies --discretization spectral but "
+                f"--discretization {args.discretization} was given; "
+                "drop one of them"
+            )
     if args.discretization == "spectral" or args.truncation is not None:
         args.discretization = "spectral"
         args.grid_type = "gaussian"
