@@ -965,19 +965,28 @@ def build_fv3_native_gridstruct_bounded(n: int, ng: int = 3, *, tile: int = 1,
     dyc[:, 0] = dyc[:, 1]
     dyc[:, -1] = dyc[:, -2]
 
-    # areas: plain quads everywhere (grid_area bounded arms); area_c
-    # loop runs isd+1..ied only — the outermost B row/col on BOTH sides
-    # have no agrid quad and upstream leaves them unwritten -> NaN so
-    # accidental consumption is loud
+    # areas: plain quads everywhere (grid_area bounded arms).  area_c:
+    # 1e30 poison-init, quads over the inner frame (nh = ng-1), then the
+    # "Handling outermost ends" bounded replication
+    # (fv_grid_tools.F90:949-973; single tile: all four side conditions
+    # true) in upstream statement order — rarea_c is then real over the
+    # full node domain
     area = get_area_quad(grid_ll[:-1, :-1], grid_ll[1:, :-1],
                          grid_ll[1:, 1:], grid_ll[:-1, 1:]) * radius**2
-    area_c = np.full((m_b, m_b), np.nan)
+    area_c = np.full((m_b, m_b), 1.0e30)
     area_c[1:-1, 1:-1] = get_area_quad(
         agrid_ll[:-1, :-1], agrid_ll[1:, :-1],
         agrid_ll[1:, 1:], agrid_ll[:-1, 1:]) * radius**2
-    with np.errstate(invalid="ignore"):
-        rarea = 1.0 / area
-        rarea_c = 1.0 / area_c
+    area_c[0, :-1] = area_c[1, :-1]          # west column (j = jsd..jed)
+    area_c[0, 0] = area_c[1, 1]
+    area_c[0, -1] = area_c[1, -2]
+    area_c[-1, :-1] = area_c[-2, :-1]        # east column
+    area_c[-1, 0] = area_c[-2, 1]
+    area_c[-1, -1] = area_c[-2, -2]
+    area_c[:-1, 0] = area_c[:-1, 1]          # south row (i = isd..ied)
+    area_c[:-1, -1] = area_c[:-1, -2]        # north row
+    rarea = 1.0 / area
+    rarea_c = 1.0 / area_c
 
     # sg pipeline on the smooth lattice: full domain, no ghost fills,
     # no corner transport patches (corner flags are FALSE under bounded)

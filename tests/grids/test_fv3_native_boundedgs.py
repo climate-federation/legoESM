@@ -108,14 +108,6 @@ def test_field_matches_oracle(oracle, gs, rec, key, axes, rtol):
     isd = 1 - ng
     lo = {"a": isd, "b": isd}
     skip = None
-    if rec == "arc":
-        # outermost B rows/cols (both sides) have no agrid quad:
-        # upstream leaves them unwritten (fixture holds
-        # allocate-zeros), python holds NaN
-        ied1 = n + ng + 1
-
-        def skip(i_f, j_f):
-            return i_f in (isd, ied1) or j_f in (isd, ied1)
     _compare(oracle[rec], gs[key], lo[axes[0]], lo[axes[1]],
              rtol=rtol, skip=skip, name=rec)
 
@@ -158,7 +150,11 @@ def test_no_poison_in_consumed_regions(gs):
     assert np.all(gs["sin_sg"] > 0.5)          # smooth lattice: no
     assert np.all(np.isfinite(gs["dxc"]))       # degenerate angles
     assert np.all(gs["area"] > 0.0)
-    assert np.all(gs["area_c"][1:-1, 1:-1] > 0.0)
+    # frame replicated by the bounded outermost-ends block: real and
+    # finite over the FULL node domain (rarea_c consumers see no poison)
+    assert np.all(gs["area_c"] > 0.0)
+    assert np.all(gs["area_c"] < 1.0e29)
+    assert np.all(np.isfinite(gs["rarea_c"]))
 
 
 @pytest.fixture(scope="module")

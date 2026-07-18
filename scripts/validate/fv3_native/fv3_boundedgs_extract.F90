@@ -1559,6 +1559,9 @@ contains
         area(i, j) = get_area(p_lL, p_uL, p_lR, p_uR, radius)
       end do
     end do
+    ! upstream bounded arm: nh = ng-1, area_c = 1.e30 poison-init, quad
+    ! loop over the inner frame only (fv_grid_tools.F90:2490-2515)
+    area_c = 1.d30
     do j = js - nh + 1, je + nh
       do i = is - nh + 1, ie + nh
         do n = 1, ndims
@@ -1570,7 +1573,37 @@ contains
         area_c(i, j) = get_area(p_lL, p_uL, p_lR, p_uR, radius)
       end do
     end do
+    ! "Handling outermost ends for area_c" (fv_grid_tools.F90:949-973,
+    ! bounded arm verbatim; single tile: is==1, ie==npx-1, js==1,
+    ! je==npy-1 all true) — replicate the frame so rarea_c is real over
+    ! the full node domain
+    call bounded_area_c_ends(Atm)
   end subroutine grid_area_bounded
+
+  subroutine bounded_area_c_ends(Atm)
+    type(shim_atm_type), intent(inout), target :: Atm
+    real(kind=R_GRID), pointer, dimension(:, :) :: area_c
+    integer :: i, j, isd, ied, jsd, jed
+    isd = Atm%bd%isd; ied = Atm%bd%ied
+    jsd = Atm%bd%jsd; jed = Atm%bd%jed
+    area_c => Atm%gridstruct%area_c
+    do j = jsd, jed
+      area_c(isd, j) = area_c(isd + 1, j)
+    end do
+    area_c(isd, jsd) = area_c(isd + 1, jsd + 1)
+    area_c(isd, jed + 1) = area_c(isd + 1, jed)
+    do j = jsd, jed
+      area_c(ied + 1, j) = area_c(ied, j)
+    end do
+    area_c(ied + 1, jsd) = area_c(ied, jsd + 1)
+    area_c(ied + 1, jed + 1) = area_c(ied, jed)
+    do i = isd, ied
+      area_c(i, jsd) = area_c(i, jsd + 1)
+    end do
+    do i = isd, ied
+      area_c(i, jed + 1) = area_c(i, jed)
+    end do
+  end subroutine bounded_area_c_ends
 
   ! ---- helpers round 2 (fv_grid_utils 1739-1777, 2728-2745) ----
  subroutine cart_to_latlon(np, q, xs, ys)
