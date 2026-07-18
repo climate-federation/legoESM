@@ -24,11 +24,15 @@ import numpy as np
 
 def geographic_va(ctx, states):
     """Per-face geographic northward wind at cell centres via the
-    CERTIFIED upstream c2l_ord2 (fv_grid_utils:2547-2628): D winds ->
-    geographic (u_lon, v_lat) through the a-matrix.  This is the same
-    operator family the Zenodo runs' own ua/va output used (their
+    upstream c2l_ord2 construction (fv_grid_utils:2547-2628): D winds
+    -> geographic (u_lon, v_lat) through center_a_matrix, which
+    matches the upstream z->a build to ~1e-16 on compute cells (codex
+    bounded-r3 (a); the four diagonal halo-corner cells differ —
+    upstream zeroes ec there — and are sliced out below).  Same
+    operator family as the Zenodo runs' own ua/va output (their
     c2l_ord=4 is the higher-order sibling; ord2's extra residual is
-    O(dx^2), stated on output).
+    O(dx^2), stated on output).  A bounded Fortran z/a dump for full
+    independent certification is a follow-up.
 
     The previous central-difference tangent-basis inversion painted a
     +/-15 m/s vertex butterfly on the DAY-0 balanced state (bases

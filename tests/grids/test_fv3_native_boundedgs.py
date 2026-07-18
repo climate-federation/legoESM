@@ -228,6 +228,46 @@ def test_d_sw1_edge_block_gated_on_bounded(duo_ctx):
     assert np.array_equal(ut_b[mid, mid], ut_p[mid, mid])
 
 
+def test_csw_step_runs_on_bounded_lane(duo_ctx):
+    """codex bounded-r3 P0: c_sw's fail-loud guard must key on the
+    LANE (bounded/gt>=3 without duo), not the flag — the bounded duo
+    step must run end-to-end and produce finite output."""
+    from legoesm.core.fv3_native_duo_stepper import (
+        csw_step_sixface,
+        w2_six_face_state,
+    )
+
+    states = w2_six_face_state(duo_ctx)
+    outs = csw_step_sixface(duo_ctx, states, dt2=30.0)
+    for o in outs:
+        for k in ("delpc", "uc", "vc", "ua", "va"):
+            assert np.all(np.isfinite(np.asarray(o[k])[3:-3, 3:-3])), k
+
+
+def test_csw_bounded_flag_inert_on_duo_lane(duo_ctx):
+    """The pre-7a71 gate runs executed c_sw with a hardcoded
+    bounded_domain=False; prove that was behaviorally inert on the duo
+    lane (every c_sw guard reading bounded is OR'd/AND'd with duogrid)
+    so those results remain valid: flag True vs False, byte-equal
+    outputs."""
+    from legoesm.core.fv3_native_sw_core import c_sw
+    from legoesm.core.fv3_native_duo_stepper import w2_six_face_state
+
+    gs = duo_ctx["gs6"][0]
+    bd = duo_ctx["bd"]
+    n = duo_ctx["n"]
+    st = w2_six_face_state(duo_ctx)[0]
+    args = (st["delp"], st["pt"], np.zeros_like(st["delp"]),
+            st["u"], st["v"])
+    out_t = c_sw(*args, gs, bd, n + 1, n + 1, 30.0, duogrid=True)
+    gs_f = dict(gs)
+    gs_f["bounded_domain"] = False
+    out_f = c_sw(*args, gs_f, bd, n + 1, n + 1, 30.0, duogrid=True)
+    for k in out_t:
+        assert np.array_equal(np.asarray(out_t[k]), np.asarray(out_f[k]),
+                              equal_nan=True), k
+
+
 def test_c48_matches_zenodo_run_log():
     """Direct python-vs-paper-run gate: the C48 bounded gridstruct
     reproduces the numbers the Zenodo duo run printed in fms.out —

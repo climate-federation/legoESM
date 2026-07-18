@@ -735,12 +735,13 @@ def d_sw3_duo(u, v, uc, vc, gs: dict, bd: Bounds, npx: int, npy: int, *,
 def d_sw4_duo(u, v, ut, vt, ke, gs: dict, bd: Bounds, npx: int, npy: int,
               *, dt: float) -> dict:
     """sw_core.F90 d_sw4 (symmetryclean 1390-1472) — the 4-corner KE
-    fix.  Its guard ``.not.bounded .or. .not.duogrid`` (auth 1440) is
-    ALWAYS TRUE on the global cube (bounded=F), so the corner formulas
-    fire on the duo lane too, reading u/v and the d_sw1 ut/vt workspace
-    at cells the duo interior DOES write (ut over is:ie+1 x jsd:jed, vt
-    over isd:ied x js:je+1 cover every corner read) — all inputs fully
-    defined, no sentinel dependence.
+    fix.  Its guard ``.not.bounded .or. .not.duogrid`` (auth 1440)
+    fires on the PLAIN-conventions lane (bounded=F) and is SKIPPED in
+    the bounded duo runs (bounded_domain=T) — threaded below.  On the
+    plain lane the corner formulas read u/v and the d_sw1 ut/vt
+    workspace at cells the duo interior DOES write (ut over is:ie+1 x
+    jsd:jed, vt over isd:ied x js:je+1 cover every corner read) — all
+    inputs fully defined, no sentinel dependence.
 
     ke is INTENT(INOUT) upstream (in dyn_core it arrives as the inline
     KE assembly kee = 0.5*(ubbtemp*vbbtemp + ubb*vbb)); the oracle

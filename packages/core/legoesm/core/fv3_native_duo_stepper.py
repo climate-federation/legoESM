@@ -172,13 +172,15 @@ def build_six_face_duo_context(n: int, ng: int = 3,
             raise ValueError(f"ext_exclude: unknown families {sorted(bad)}")
         ectx = build_ext_context(n, ng, gs6,
                                  vector_corner=vector_corner)
-        # ORACLE-FAITHFUL DEFAULT (2026-07-18 attribution + Zenodo
-        # grep): upstream duo d_sw consumes the ORDINARY mpp-state
-        # gridstruct metrics — the model tree never reads the dg ext
-        # metrics; extend_gridstruct was OUR coherence intuition and
-        # measured harmful (C24 max 23.70 with vs 19.64 without, rms
-        # 4.08 vs 3.71).  Ext halo METRICS are now a NON-FAITHFUL
-        # measurement opt-in.
+        # ORACLE-FAITHFUL DEFAULT (Zenodo grep): upstream duo d_sw
+        # consumes the model gridstruct metrics — the model tree never
+        # reads the dg ext metrics; extend_gridstruct was OUR coherence
+        # intuition with no upstream counterpart, so ext halo METRICS
+        # are a NON-FAITHFUL measurement opt-in.  (The 2026-07-18
+        # attribution scores once cited here were old-diagnostic-lens
+        # numbers — void, see docs/dycore/fv3_native_p4c_oracle.md
+        # RE-BASELINE — but the grep-based faithfulness argument
+        # stands on its own.)
         if use_ext_metrics and "metrics" not in ext_exclude:
             gs6 = [extend_gridstruct(gs6[t], n, ng, tile=t + 1)
                    for t in range(6)]
