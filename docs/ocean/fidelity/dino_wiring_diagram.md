@@ -715,3 +715,60 @@ westward but 16× weak (−0.011 vs −0.182), eq SSH tilt sign still wrong (−
 deep-eq KE 0.45 vs 0.001 → hypothesis: wind-input westward momentum is mixed TOO DEEP at
 the equator (surface-trapped in NEMO) — vertical momentum mixing/avm suspect. Next: ladder
 step 1, same-state equatorial avm + tendency comparison vs NEMO restart.
+
+---
+
+## FINAL: the first WIND-ON 180d comparison (harness bug fixed)
+
+**Critical harness bug (all prior 180d runs).** `nemo_dino_kamm` sets
+`wind_through_step=True`, so `apply_dino_lat_lon_surface_forcing` deliberately
+SKIPS the wind (dino.py:2809) and expects it via `model.step(surface_forcing=…)`.
+Every earlier harness (`kamm_run180.py` and its variants above) called
+`model.step(st, DT)` with **no** `surface_forcing` → **the ocean ran with ZERO
+wind for 180 days.** All tables above the "SEAM-WALL" verdict are therefore
+no-wind runs. Fix: `kamm_run180_v2.py` builds `sf = dino_step_surface_forcing(forcing)`
+(cell-centred `tau_x=-tau_u` ocean-reaction sign + `taum` TKE modulus) and threads
+it: `model.step(st, DT, surface_forcing=sf)`. No model-code change.
+
+**2-day wind validation.** `tau_x∈[-0.20,+0.10] Pa`. Surface-u zonal-mean by band:
+equator (|lat|≤5) **−0.025 m/s (westward ✓, easterly trades)**, mid-lat westerly bands
++0.019 / +0.025 m/s (eastward ✓). Correct signs, finite, stable.
+
+**180d controlled comparison — WIND ON** (only new variable = wind now enters; all else
+byte-identical: full_step=True, seam wall, dt=2700, 5760 steps, bridged NEMO mesh+IC,
+seasonal forcing via t_seconds, NEMO RUN_TRAJ ÷vovvle3t). Equatorial metrics computed by
+one script (`kamm_eqsig.py`) that derives the NEMO value with the SAME code as legoESM
+(apples-to-apples; note this NEMO column differs from the older tables' eq-u/tilt because
+the metric band/level definition differs — trust the same-script pair):
+
+| metric | no-wind seam-wall | **WIND-ON (this run)** | NEMO (same script) |
+|--------|------------------:|-----------------------:|-------------------:|
+| SST corr | 0.995 | **0.998** (bias −0.21, rms 0.49) | — |
+| T@300m corr | 0.993 | **0.986** (bias −0.03, rms 0.62) | — |
+| SSH corr | 0.994 | **0.995** (rms 0.043 m) | — |
+| eq surf-u zonal-mean [m/s] | −0.011 | **−0.338 (westward ✓)** | −0.379 |
+| eq SSH W-E tilt [m] | −0.015 (wrong sign) | **+0.079 (west-high ✓)** | +0.102 |
+| deep-eq KE(1000m)/KE(surf) | 0.450 | 0.264 | **0.0008** |
+| BSF range ratio | ~0.95× | **4.65×** (lego [−203,+176] vs [−40,+41] Sv) | 1.0× |
+
+180d STABLE (T∈[3.2,25.7] °C, finite throughout, no NaN, no non-NEMO stabiliser).
+PNGs: `kamm_compare_wind.png` (SST/BSF/T-section 3×3), `kamm_bsf_sidebyside.png`.
+
+**Verdict — with wind + the full matched term ledger, how close are the two models?**
+The large-scale hydrography and surface fields now agree very well (SST corr 0.998,
+T300 0.986, SSH 0.995) AND — the headline — the **equatorial surface signature flips
+to the correct sign at ~80–90% amplitude**: surface-u −0.338 vs NEMO −0.379 (was −0.011,
+16× too weak with no wind), SSH W-E tilt +0.079 vs +0.102 (was the WRONG sign −0.015).
+The wind was the missing first-order driver; adding it faithfully closes the sign/pattern
+failures that persisted through the entire term-matching campaign.
+
+**The one remaining structural discrepancy (honest, not papered over): the equatorial jet
+is over-energized in the DEPTH.** Deep-eq KE(1000m)/KE(surf) is 0.264 vs NEMO's 0.0008
+(~330×): NEMO keeps the wind-driven equatorial current surface-trapped, legoESM mixes that
+westward momentum too far down. The over-strong deep jet then inflates the barotropic gyre
+(BSF 4.65× too strong). Both are the SAME symptom — insufficient equatorial surface-trapping
+of wind momentum — i.e. the long-standing vertical-momentum-mixing / barotropic-Coriolis
+node (Node 16), now cleanly EXPOSED under realistic forcing rather than masked by absent
+wind. It is a vertical-mixing/energetics closure gap, not a term-ledger or geometry defect;
+every conservation/geometry tier remains green. Next lever: equatorial `avm` vertical
+momentum mixing (surface-trapping) — a same-state tendency comparison vs the NEMO restart.
