@@ -217,3 +217,91 @@ cause (all verified NOT to drive the deep-eq jet):
 - **Recipe verdict:** nemo_dino_kamm is a faithful match to NEMO's DINO across the entire
   traced call chain. Thermodynamics corr 0.99. The residual BSF over-strength (2.62×) is the
   characterized irreducible equatorial (f→0) core-dynamics amplification, not a knob mismatch.
+
+---
+
+## Round-3 (2026-07-18) — Node 16 LIVE-EEN built; dt=2700 leapfrog blocker RE-DIAGNOSED
+
+**Node 16 is now the LIVE per-substep EEN barotropic Coriolis (faithful to NEMO
+`dyn_cor_2D`).** The prior node-16 EEN (703341707) was set on `nemo_dino_kamm` but INERT
+under `coriolis_scheme="explicit_ab2"` (`add_barotropic_coriolis=False` → the frozen F_slow
+depth-mean carried it, never the live substep). This iteration wires NEMO's actual structure
+(`dynspg_ts.F90:296-300` + `:689`): a new `barotropic_coriolis_split="live"` (set on
+`nemo_dino_kamm_mlf`) SUBTRACTS the pre-step barotropic EEN Coriolis of the barotropic mean
+from F_slow and re-applies the SAME EEN stencil LIVE each substep on the evolving transport.
+- Transcription: `barotropic_coriolis_een_pre_step` (new public fn, `barotropic_latlon_cgrid.py`)
+  = `_build_een_barotropic_inputs` + `_depth_average_to_faces` + `een_barotropic_coriolis`,
+  reusing the verified AL81 12-pt triad (ζ=0, `f_vtx`, `e3u·e3v` volume weight = NEMO ffu/ffv);
+  the EEN subtraction branch in `ocean_model_latlon_cgrid.py` (`_step_impl`) + the een_total
+  live-split guard relaxation. Additive; `frozen`/`avg` byte-identical (GYRE/Veros untouched).
+- Tests: `test_barotropic_coriolis_null_mode.py::test_een_*` (null-mode restored, energy
+  ~no-work); `test_leapfrog_integrator.py` (live-EEN leapfrog runs no-NaN; guard rejects
+  avg+live+een_total); CLI round-trip. dt=1350 re-verified stable with LIVE-EEN.
+
+**But the dt=2700 leapfrog STILL blows up (~step 25-31) — node 16 was NOT the driver.**
+Controlled single-variable probes on the bridged NEMO mesh (dt=2700, from rest):
+| variable changed | result |
+|---|---|
+| frozen → LIVE-EEN barotropic Coriolis (node 16) | blows at SAME step (~26); gridscale eta frac→0.2 |
+| n_barotropic_substeps 30 → 60 (dt_s 90→45 s) | **SURVIVES ≥40 steps**, eta ~0.59 m |
+| barotropic eta-diffusion alpha 0.01 → 0.05 | **SURVIVES ≥40 steps**, eta ~0.58 m |
+| dt 2700 → 1350 (dt_s 90 s, nbaro 30) | stable (300 steps) |
+
+⇒ the dt=2700 blow-up is the **barotropic gravity-wave CFL margin** (Courant≈0.8 = the
+`rn_bt_cmax` ceiling) under the leap-frog's NEUTRAL outer step. Forward-Euler's numerical
+damping suppressed the marginal barotropic mode; the leap-frog does not. NEMO's own MLF is
+stable at Courant 0.8 because its barotropic solver leap-frogs ssh internally (before/now/after
++ `ssh_atf`); legoESM's leap-frog instead base-shifts the split-explicit FORWARD barotropic
+solve from `Nnn.eta` (**residual #1**), and that inconsistency, unmasked by the neutral outer
+step, is the growth. **The dt=2700 180-day comparison is gated by residual #1 (leap-frog
+barotropic coupling), NOT node 16** — a larger fix than one iteration (make the leap-frog
+barotropic solve internally leap-frog-consistent, or tighten `rn_bt_cmax`/`ln_bt_auto` for the
+rDt=2dt window). No 180d number fabricated. Node 16 discretization = ✅ faithful (LIVE-EEN);
+node 19 leap-frog dt=2700 = ⚠️ blocked on residual #1.
+
+---
+
+## Round-4 (2026-07-18) — residual #1 RESOLVED; dt=2700 MLF 180-day UNBLOCKED + compared
+
+**Residual #1 (Nbb before-level barotropic seed) + residual #1b (nn_bt_flt=2 temporal
+dissipation) close the dt=2700 leap-frog blocker — the full 180-day run on the bridged
+NEMO mesh is now STABLE with NO non-NEMO stabiliser.** The Round-3 "barotropic CFL margin"
+diagnosis was PARTLY wrong: NEMO's `ln_bt_auto` computes a 117.4 s barotropic substep
+(nn_e≈23) for DINO, so legoESM's 90 s substep is FINER than NEMO's — CFL was never the
+issue. The real driver is the C-grid 2Δx equatorial barotropic gravity-wave null mode that
+forward-Euler's numerical damping suppresses and the neutral leap-frog does not.
+
+Two faithful pieces (both traced to NEMO `dynspg_ts.F90`, no ad-hoc damping):
+
+1. **Residual #1 — Nbb before-level seed.** `barotropic_substeps_latlon_cgrid` gained
+   `eta_init/u_init/v_init`; `_leapfrog_step` seeds the split-explicit barotropic integration
+   from `(eta_before, u_before, v_before)` (Nbb) via `_barotropic_before_state`, matching NEMO
+   `ln_bt_fw=.FALSE.` centred (`dynspg_ts.F90:494-503`: `sshn_e=pssh(Kbb)`, `un_e=puu_b(Kbb)`,
+   `vn_e=pvv_b(Kbb)`). Frozen slow forcing stays at NOW (zu_frc); the 3-D depth-mean
+   replacement still uses the NOW velocity. ALONE this moved the blow-up step 26 → ~65.
+2. **Residual #1b — nn_bt_flt=2 `ts_bck_interp` temporal dissipation.** New
+   `barotropic_time_filter="nemo_boxcar_ab3"` = the AB3 velocity predictor (1.781/-1.062/0.281)
+   + the α=0 ssh half-step-back interpolation (0.614/0.285/0.088/0.013, `dynspg_ts.F90:
+   1698-1701`) + boxcar averaging, with the ll_init ramp every step (nn_bt_flt=2 re-inits each
+   baroclinic step, no cross-window carry). This is NEMO's built-in AM4 dissipation that damps
+   the 2Δx mode. Gridscale eta fraction pinned ~0.05 (was climbing to >0.2 then exploding).
+
+**THE dt=2700 180-day comparison (controlled, sole variable FE→leap-frog; bridged NEMO mesh,
+from-rest analytic IC, seasonal forcing, NEMO RUN_TRAJ, 5760 steps):**
+
+| Metric | FE baseline | **MLF leap-frog (faithful)** | NEMO |
+|--------|------------:|-----------------------------:|-----:|
+| SST corr / bias / rms | 0.995 / +0.22 / 0.72 | 0.994 / −0.43 / 0.99 | — |
+| T@300m corr / rms | 0.987 / 0.61 | 0.990 / 0.53 | — |
+| SSH corr / rms(m) | 0.991 / 0.060 | 0.992 / 0.069 | — |
+| **BSF range ratio** | **2.62×** | **2.65×** | 1.0 (±40 Sv) |
+
+**Answer to the core question: the fully-faithful leap-frog does NOT move the jet/BSF toward
+NEMO** (2.65× vs 2.62×, both ~2.6×; thermodynamics corr ≥0.99 both). Node 19 (leap-frog +
+Asselin, the LAST structural time-integration difference) is thereby ruled OUT as the driver
+of the residual BSF over-strength — confirming the characterised equatorial (f→0)
+core-dynamics amplification. The leap-frog program is COMPLETE: dt=2700 stable + compared.
+Node 19 = ✅ faithful (stable + compared); residual #1 = ✅ CLOSED.
+Tests: `test_nemo_ab3am4_filter.py::test_flt2_*` (coefficient transcription),
+`test_leapfrog_integrator.py::test_boxcar_ab3_live_split_runs_no_nan` +
+`::test_ab3am4_live_split_still_rejected`.

@@ -189,6 +189,47 @@ def test_live_een_barotropic_coriolis_runs_no_nan():
     assert np.all(np.isfinite(np.asarray(s.eta.data)))
 
 
+def test_boxcar_ab3_live_split_runs_no_nan():
+    # NEMO nn_bt_flt=2 (barotropic_time_filter="nemo_boxcar_ab3") = the AB3
+    # velocity predictor + ts_bck_interp(alpha=0) ssh temporal dissipation +
+    # boxcar averaging, composed WITH the live EEN barotropic Coriolis (the
+    # nemo_dino_kamm_mlf config). The validator must ACCEPT this pairing (only
+    # nemo_ab3am4 is rejected with the live split), and it must step finite.
+    state, model = _leapfrog_channel(
+        barotropic_coriolis="een", barotropic_coriolis_split="live",
+        barotropic_time_filter="nemo_boxcar_ab3")
+    assert model.config.barotropic.barotropic_time_filter == "nemo_boxcar_ab3"
+    s = state
+    for _ in range(6):
+        s = model.step(s, dt=_DT)
+    assert np.all(np.isfinite(np.asarray(s.T.data)))
+    assert np.all(np.isfinite(np.asarray(s.eta.data)))
+
+
+def test_leapfrog_before_seed_wide_halo_not_implemented():
+    # The MLF before-level barotropic seed is not wired into the wide-halo path;
+    # the leap-frog step must raise NotImplementedError rather than silently drop
+    # the Nbb seed (barotropic_wide_halo=True + a non-ab3 filter reaches the
+    # before-state guard). First step is a forward-Euler start (no seed), so
+    # advance one step to populate the before-fields, then the seeded pass fires.
+    state, model = _leapfrog_channel(
+        barotropic_time_filter="nemo_boxcar_centred",
+        barotropic_wide_halo=True, barotropic_local_subcycle_clamp=True)
+    s = model.step(state, dt=_DT)   # forward-Euler start (no before-seed yet)
+    with pytest.raises(NotImplementedError, match="wide-halo"):
+        model.step(s, dt=_DT)       # leapfrog pass → before-seed → guard
+
+
+def test_ab3am4_live_split_still_rejected():
+    # nemo_ab3am4 (nn_bt_flt=3, cross-window carry => substep-0 extrapolates)
+    # stays incompatible with the live split; only the ramp-every-step
+    # nemo_boxcar_ab3 (nn_bt_flt=2) is allowed.
+    with pytest.raises(ValueError, match="nemo_ab3am4"):
+        _leapfrog_channel(barotropic_coriolis="een",
+                          barotropic_coriolis_split="live",
+                          barotropic_time_filter="nemo_ab3am4")
+
+
 def test_unknown_vorticity_scheme_raises():
     # membership fail-early lives in _bc_pv_flux (step time), reached via .step()
     state, model = _channel("forward_euler", vorticity_scheme="bogus")

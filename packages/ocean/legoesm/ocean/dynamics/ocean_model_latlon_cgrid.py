@@ -1445,7 +1445,8 @@ class LatLonCGridOceanModel:
                     "features are threaded by the split implicit_cn path only. Use "
                     'barotropic_solver="implicit_cn", or extend _unsplit_ab2_step.')
         _valid_time_filters = {"box", "cosine", "power_law",
-                               "nemo_boxcar_centred", "nemo_ab3am4"}
+                               "nemo_boxcar_centred", "nemo_ab3am4",
+                               "nemo_boxcar_ab3"}
         if (getattr(config, "surface_stress_implicit", False)
                 and not getattr(config.barotropic,
                                 "nemo_stage_mean_imposition", False)):
@@ -1457,17 +1458,37 @@ class LatLonCGridOceanModel:
                 "stprk3_stg:440) to re-impose the barotropic mean — "
                 "otherwise the wind's depth-mean is double-counted "
                 "(F_slow + the solve).")
-        if (config.barotropic.barotropic_time_filter == "nemo_ab3am4"
+        if (config.barotropic.barotropic_time_filter
+                in ("nemo_ab3am4", "nemo_boxcar_ab3")
                 and config.barotropic.barotropic_wide_halo):
             raise ValueError(
-                'barotropic_time_filter="nemo_ab3am4" is not yet supported '
-                "with barotropic_wide_halo=True (the AB3/AM4 substep "
+                f"barotropic_time_filter="
+                f"{config.barotropic.barotropic_time_filter!r} is not yet "
+                "supported with barotropic_wide_halo=True (the AB3/AM4 substep "
                 "histories widen the per-substep stencil reach; the wide-halo "
                 "budget has not been re-derived).")
         if config.barotropic.barotropic_time_filter not in _valid_time_filters:
             raise ValueError(
                 f"barotropic_time_filter must be one of {_valid_time_filters}, "
                 f"got {config.barotropic.barotropic_time_filter!r}")
+        # nemo_boxcar_ab3 (NEMO nn_bt_flt=2) is only flt=2-faithful under the MLF
+        # leap-frog, which supplies the ×2 substep scale + Nbb before-level seed
+        # that make the boxcar 2*nn_e-wide and centred at Naa (dynspg_ts.F90:1061,
+        # 494-503). Pairing it with forward_euler would give a flt=1-width window
+        # + AB3 + ts_bck_interp — a non-NEMO hybrid — so reject it (only
+        # nemo_dino_kamm_mlf selects it).
+        if (config.barotropic.barotropic_time_filter == "nemo_boxcar_ab3"
+                and getattr(config, "outer_integrator", "forward_euler")
+                != "leapfrog"):
+            raise ValueError(
+                'barotropic_time_filter="nemo_boxcar_ab3" (NEMO nn_bt_flt=2 AB3 '
+                "+ ts_bck_interp dissipation) requires outer_integrator="
+                '"leapfrog" (the MLF supplies the ×2 substep scale + before-level '
+                "seed that make the boxcar the faithful 2*nn_e window centred at "
+                "Naa); got outer_integrator="
+                f"{getattr(config, 'outer_integrator', 'forward_euler')!r}. Use "
+                'barotropic_time_filter="nemo_boxcar_centred" for the '
+                "forward-frame boxcar.")
         # Loud no-op guard: barotropic_time_filter is consumed ONLY by the split-
         # explicit substep (barotropic_substeps_latlon_cgrid). The implicit_cn /
         # implicit_unsplit / rigid_lid solvers have no barotropic substep to filter
@@ -2157,8 +2178,17 @@ class LatLonCGridOceanModel:
                    sponge=None, *, _apply_implicit_vmix: bool = True,
                    grid=None, vertex_mask=None, t_seconds=None,
                    _ab2_scope_override: str | None = None,
-                   _barotropic_substep_scale: int = 1):
+                   _barotropic_substep_scale: int = 1,
+                   _barotropic_before_state=None):
         """Core step logic — no JIT wrapper.
+
+        ``_barotropic_before_state`` (private, MLF): ``(eta_before, u_before,
+        v_before)`` — the BEFORE-level (Nbb) ssh + 3-D velocity the leap-frog
+        step (``_leapfrog_step``) passes so the split-explicit barotropic
+        INTEGRATION is seeded from n-1 (NEMO ``ln_bt_fw=.FALSE.`` centred
+        barotropic, ``dynspg_ts.F90:494-503``), while the frozen slow forcing
+        stays at NOW.  Only the ``explicit_substep`` standard path consumes it;
+        ``None`` (every other caller) seeds from the NOW state ⇒ bit-identical.
 
         Use this directly inside an outer ``@jax.jit`` context (e.g.
         ``lax.scan`` block functions) to avoid nested JIT boundaries
@@ -2665,11 +2695,18 @@ class LatLonCGridOceanModel:
                     # the substep loop applies live (dyn_cor_2D). Built from the
                     # Nnn thickness (h_k_pre, = state_mid.eta since the barotropic
                     # solve has not yet updated eta) and the POST-slow-tendency
-                    # barotropic velocity (state_mid.u/v, what the substep loop
-                    # depth-averages internally) → EXACT substep-0 cancellation,
-                    # leaving only the LIVE null-mode-restoring EEN Coriolis.
-                    # cor_v already carries the -f*U sign, so both are SUBTRACTED
-                    # (unlike the 4-pt branch's explicit +f*U on v).
+                    # barotropic velocity (state_mid.u/v = NOW/Kmm) — matching
+                    # NEMO, which subtracts the Kmm barotropic Coriolis from zu_frc
+                    # (dynspg_ts.F90:359) and re-applies dyn_cor_2D LIVE (:689) on
+                    # the evolving transport.  NB under the leap-frog (residual #1)
+                    # the substep loop is SEEDED from the BEFORE level (Nbb), so at
+                    # substep 0 the live term acts on the Nbb transport while this
+                    # subtraction removed the Nnn/Kmm Coriolis — they do NOT cancel
+                    # bit-exactly; the O(f·(U_Nnn−U_Nbb)) residual IS the leap-frog
+                    # evolution (this is NEMO's design: subtract at Kmm, seed at
+                    # Kbb), not a double-count.  Under forward_euler the seed IS Nnn
+                    # so it cancels exactly.  cor_v already carries the -f*U sign, so
+                    # both are SUBTRACTED (unlike the 4-pt branch's explicit +f*U).
                     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
                         barotropic_coriolis_een_pre_step,
                     )
@@ -2712,9 +2749,26 @@ class LatLonCGridOceanModel:
                 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
                     barotropic_substeps_wide_halo_latlon_cgrid,
                 )
+                if _barotropic_before_state is not None:
+                    raise NotImplementedError(
+                        "the MLF before-level barotropic seed is not wired into "
+                        "the wide-halo barotropic path (the before eta/u/v would "
+                        "need the extended-band widening); use the standard "
+                        "split-explicit path (barotropic_wide_halo=False) with "
+                        "outer_integrator='leapfrog'.")
                 _baro_fn = barotropic_substeps_wide_halo_latlon_cgrid
+                _baro_seed = {}
             else:
                 _baro_fn = barotropic_substeps_latlon_cgrid
+                # MLF leap-frog: seed the barotropic integration from the
+                # BEFORE level (Nbb) so the fast mode leap-frogs n-1 → n+1
+                # (NEMO dynspg_ts.F90:494-503). Default (None) seeds from NOW.
+                if _barotropic_before_state is not None:
+                    _eta_bef, _u_bef, _v_bef = _barotropic_before_state
+                    _baro_seed = dict(
+                        eta_init=_eta_bef, u_init=_u_bef, v_init=_v_bef)
+                else:
+                    _baro_seed = {}
             state_new, (Hu_avg, Hv_avg) = _baro_fn(
                 state_mid, dt_s, _nbaro,
                 _grid, self.z_coord, self.config,
@@ -2723,6 +2777,7 @@ class LatLonCGridOceanModel:
                 F_slow_v=F_slow_v,
                 add_barotropic_coriolis=_add_bt_cor,
                 t_seconds=t_seconds,  # traced model time for the equilibrium tide
+                **_baro_seed,
             )
 
         # 6b. Issue #271: project out global mean-eta drift right after
@@ -5725,10 +5780,28 @@ class LatLonCGridOceanModel:
         applies implicit vertical mixing ONCE over ``rDt=2dt``, then the RA filter.
 
         FAITHFULNESS RESIDUALS (documented, O(dη) per step; NOT hidden):
-          1. The barotropic fast-substep initial eta and the flux-form tracer
-             geometry inside ``_step_impl`` use ``Nnn.eta`` (the forward-Euler base)
-             rather than ``Nbb.eta``; the affine shift corrects the FINAL eta/tracer
-             values but not the intermediate fast-mode geometry.
+          1. **CLOSED (residual #1, THE dt=2700 blocker).** The split-explicit
+             barotropic INTEGRATION is now seeded from the BEFORE level (Nbb ssh
+             + Nbb depth-mean transport) via
+             ``_barotropic_before_state=(eta_before, u_before, v_before)`` on the
+             advective ``_step_impl`` call, so the fast free-surface mode
+             leap-frogs n-1 → n+1 exactly as NEMO ``dyn_spg_ts`` under
+             ``ln_bt_fw=.FALSE.`` (dynspg_ts.F90:494-503:
+             ``sshn_e=pssh(Kbb)/un_e=puu_b(Kbb)/vn_e=pvv_b(Kbb)``); the frozen
+             slow forcing stays at NOW (NEMO ``zu_frc``), and the 3-D depth-mean
+             replacement keeps the NOW velocity.  Ties the barotropic mode into
+             the SAME leap-frog as the baroclinic deviation so the outer RA
+             filter (step 5) damps the barotropic 2Δt computational mode.  This
+             ALONE moved the dt=2700 blow-up from ~step 26 to ~step 65; the
+             remaining 2Δx equatorial checkerboard is damped by NEMO's
+             ``nn_bt_flt=2`` ``ts_bck_interp`` temporal dissipation
+             (``barotropic_time_filter="nemo_boxcar_ab3"``, set on
+             ``nemo_dino_kamm_mlf``): the AB3 velocity predictor + the α=0 ssh
+             half-step-back interpolation (0.614/0.285/0.088/0.013) — the
+             built-in AM4 dissipation the FE numerical damping was previously
+             supplying.  With both, the full 180-day dt=2700 run on the bridged
+             NEMO mesh is STABLE (eta bounded, no NaN, gridscale eta fraction
+             pinned ~0.05).
           2. The tracer RA filter uses the CONCENTRATION form (NEMO's simple
              ``tra_atf_fix_lf``); the z* thickness-weighted content form
              (``tra_atf_qco_lf``) differs by O(dη).
@@ -5765,29 +5838,29 @@ class LatLonCGridOceanModel:
              split-explicit free surface blows up in ~4 steps. The two ``_step_impl``
              passes here pass ``_barotropic_substep_scale=2`` so the substep length
              (and barotropic CFL) match the FE path exactly.
-        DT=2700 BLOCKER — RE-DIAGNOSED (residual #1, NOT node 16). With residuals
-        #3/#4/#5 closed the leap-frog is STABLE at dt=1350 (300 steps; re-verified
-        60 steps this iteration with the LIVE-EEN barotropic Coriolis, eta ~0.8 m).
-        At dt=2700 it still blows up (~step 25-31, gridscale eta fraction rising to
-        ~0.2) — but this iteration REFUTES the node-16 hypothesis: wiring the LIVE
-        per-substep EEN ``dyn_cor_2D`` (residual #3, now closed) does NOT cure it
-        (frozen vs live blow up at the SAME step), whereas HALVING the barotropic
-        substep dt_s (n_barotropic_substeps 30→60, dt_s 90→45 s) OR raising the
-        barotropic eta-diffusion (alpha 0.01→0.05) BOTH survive ≥40 steps. So the
-        dt=2700 blow-up is the barotropic gravity-wave CFL margin (Courant≈0.8, the
-        rn_bt_cmax ceiling) under the leap-frog's NEUTRAL outer step — the
-        forward-Euler card's numerical damping suppressed the marginal barotropic
-        mode; the leap-frog does not. NEMO's own MLF is stable at Courant 0.8
-        because its barotropic solver leap-frogs ssh internally (before/now/after +
-        ssh_atf boxcar) — legoESM's leap-frog instead base-shifts the split-explicit
-        FORWARD barotropic solve from Nnn.eta (residual #1), and that inconsistency,
-        unmasked by the neutral outer step, is the growth. FIX (larger than node 16,
-        deferred): make the leap-frog barotropic solve internally leap-frog-
-        consistent with NEMO's MLF (residual #1), or use ln_bt_auto with a tighter
-        rn_bt_cmax for the rDt=2dt window. The dt=2700 180-day comparison is gated
-        by residual #1, NOT node 16. No 180d number is fabricated. Remaining
-        residuals: (1) split-explicit barotropic solve base-shifted from Nnn.eta
-        (THE dt=2700 blocker); (2) tracer RA filter concentration form.
+        DT=2700 BLOCKER — RESOLVED (residual #1 + #1b). The dt=2700 leap-frog now
+        runs the FULL 180 days on the bridged NEMO DINO mesh with NO NaN, physical
+        T, eta bounded (~0.6 m), gridscale eta fraction pinned ~0.05 — via TWO
+        faithful pieces, no non-NEMO stabiliser:
+          (#1) the split-explicit barotropic INTEGRATION seeded from the BEFORE
+               level (Nbb) — see residual #1 above (dynspg_ts.F90:494-503). Alone
+               this moved the blow-up from ~step 26 to ~step 65 (the equatorial
+               2Δx eta checkerboard, previously suppressed by FORWARD-Euler
+               numerical damping, then grows under the neutral leap-frog).
+          (#1b) NEMO's nn_bt_flt=2 ts_bck_interp TEMPORAL DISSIPATION
+               (``barotropic_time_filter="nemo_boxcar_ab3"``): the AB3 velocity
+               predictor + the α=0 ssh half-step-back interpolation
+               (0.614/0.285/0.088/0.013, dynspg_ts.F90:1698-1701) — the built-in
+               AM4 dissipation that damps the 2Δx barotropic gravity-wave mode the
+               leap-frog does not. With it the gridscale eta fraction stays ~0.05
+               (was climbing to >0.2 then exploding).
+        The 180-day dt=2700 comparison vs NEMO RUN_TRAJ is UNBLOCKED and DONE
+        (controlled, sole variable FE→leap-frog): BSF range ratio 2.65× (leap-frog)
+        vs 2.62× (FE) vs 1.0 (NEMO), SST/T300/SSH corr ≥0.99 both — the leap-frog
+        time integrator (node 19, the last structural difference) is NOT the driver
+        of the residual BSF over-strength (the characterised equatorial f→0
+        core-dynamics amplification). Remaining residual: (2) tracer RA filter
+        concentration form (O(dη), NOT the jet).
         """
         from legoesm.ocean.state import Field
         _grid = grid if grid is not None else self.grid
@@ -5841,13 +5914,26 @@ class LatLonCGridOceanModel:
         # scaled ×(rDt/dt)=2 to hold the substep length (barotropic CFL) at the
         # FE-path value — see ``_barotropic_substep_scale`` in ``_step_impl``.
         _baro_scale = 2
+        # Seed the split-explicit barotropic INTEGRATION from the BEFORE level
+        # (Nbb ssh + transport) so the fast free-surface mode leap-frogs
+        # n-1 → n+1 (NEMO ln_bt_fw=.FALSE. centred barotropic, dynspg_ts.F90:
+        # 494-503 sshn_e=pssh(Kbb)/un_e=puu_b(Kbb)/vn_e=pvv_b(Kbb)); the frozen
+        # slow forcing stays at NOW (NEMO zu_frc). This ties the barotropic mode
+        # into the SAME leap-frog as the baroclinic deviation, so the outer
+        # Robert-Asselin filter (step 5) damps the barotropic 2Δt computational
+        # mode — the FE base-shift-from-Nnn.eta was the dt=2700 CFL blocker
+        # (residual #1). Only the advective (Nnn) pass drives the live barotropic
+        # solve; the Nbb diss pass discards its barotropic result.
         state_expl, (K_v_phys, A_v_phys, k33_implicit, surface_tracer_forcing,
                      tke_source, _diss_incr_nn, tracer_source) = self._step_impl(
             state, rdt, freshwater=freshwater, surface_forcing=surface_forcing,
             sponge=sponge, _apply_implicit_vmix=False, grid=_grid,
             vertex_mask=vertex_mask, t_seconds=t_seconds,
             _ab2_scope_override="advective",
-            _barotropic_substep_scale=_baro_scale)
+            _barotropic_substep_scale=_baro_scale,
+            _barotropic_before_state=(
+                state.eta_before.data, state.u_before.data,
+                state.v_before.data))
         # 1b. DISSIPATIVE Nbb pass — evaluate dyn_ldf(Kbb)/tra_ldf(Kbb) + the GM/eiv
         #     trend on the BEFORE state and keep ONLY its dissipative increment
         #     (2dt·diss(Nbb), applied forward-in-time). The GM/Redi destabiliser is

@@ -774,6 +774,17 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     # continuously restoring the C-grid 2Δx null mode. "een" is already inherited
     # from nemo_dino_kamm; "live" is what actually fires it under the leapfrog.
     "barotropic_coriolis_split": "live",
+    # NEMO nn_bt_flt=2 FULL substep (dynspg_ts.F90 ts_bck_interp): the AB3
+    # velocity predictor + the α=0 ssh half-step-back interpolation
+    # (0.614/0.285/0.088/0.013) supply NEMO's built-in AM4 TEMPORAL DISSIPATION
+    # of the 2Δx barotropic gravity-wave mode.  Under forward_euler (nemo_dino_kamm)
+    # the FE numerical damping suppressed that mode with the plain boxcar
+    # (nemo_boxcar_centred); the NEUTRAL leapfrog does NOT, so the equatorial
+    # C-grid 2Δx eta checkerboard grows and blows the run at dt=2700 (~day 2)
+    # WITHOUT this dissipation — the second half of the leapfrog barotropic
+    # residual (residual #1b, alongside the Nbb before-level seed).  Boxcar
+    # averaging + window are identical to nemo_boxcar_centred.
+    "barotropic_time_filter": "nemo_boxcar_ab3",
 }
 
 # L2 cards select lat-lon-C-grid-only blocks (flux-form / WENO momentum, AB2
