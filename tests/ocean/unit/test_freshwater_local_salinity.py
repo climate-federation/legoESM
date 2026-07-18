@@ -14,6 +14,10 @@ threads the LOCAL top-cell salinity through the SAME closure functions
 """
 from __future__ import annotations
 
+import jax
+
+jax.config.update("jax_enable_x64", True)  # tolerances below are f64-scaled
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -80,6 +84,22 @@ class TestRunoffSpreadArrayS:
         np.testing.assert_allclose(col, expected, rtol=1e-10)
 
 
+class TestSignConvention:
+    def test_freezing_salinifies_runoff_dilutes_local(self):
+        # ABSOLUTE sign pin (a shared sign flip would slip past ratio tests):
+        # net freshwater REMOVAL (evap/freezing, F<0) must SALINIFY (dS/dt>0),
+        # net freshwater INPUT (runoff, F>0) must DILUTE (dS/dt<0) — with the
+        # LOCAL S array exactly as with the scalar.
+        dz0 = jnp.full((2, 2), 2.0)
+        S_local = jnp.full((2, 2), 27.0)
+        d_freeze = virtual_salt_flux_from_net(
+            jnp.full((2, 2), -1.0e-5), S_local, dz0, 1026.0)
+        d_runoff = virtual_salt_flux_from_net(
+            jnp.full((2, 2), +1.0e-5), S_local, dz0, 1026.0)
+        assert float(jnp.min(d_freeze)) > 0.0
+        assert float(jnp.max(d_runoff)) < 0.0
+
+
 class TestDispatchHardening:
     def test_latlon_config_rejects_unknown(self):
         from legoesm.ocean.state import LatLonCGridOceanConfig
@@ -90,15 +110,30 @@ class TestDispatchHardening:
         with pytest.raises(ValueError, match="freshwater_salinity"):
             LatLonCGridOceanModel._validate_config(cfg)
 
-    def test_mpas_gate_rejects_unknown(self):
-        # The MPAS tendency gate raises on an unknown selection (static
-        # config), independent of the latlon constructor validation.
+    def test_latlon_rejects_local_plus_normalize(self):
+        # local-S breaks the zero-global-salt promise of the normalization
+        # (∫S_local·F' dA covariance) — the combination must raise, not
+        # silently drift the salt budget (codex HIGH 2026-07-18).
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        cfg = LatLonCGridOceanConfig(freshwater_salinity="local",
+                                     normalize_freshwater=True)
+        with pytest.raises(ValueError, match="normalize_freshwater"):
+            LatLonCGridOceanModel._validate_config(cfg)
+        # each alone is fine
+        LatLonCGridOceanModel._validate_config(
+            LatLonCGridOceanConfig(freshwater_salinity="local"))
+        LatLonCGridOceanModel._validate_config(
+            LatLonCGridOceanConfig(normalize_freshwater=True))
+
+    def test_mpas_field_exists_default_bit_compat(self):
+        # The MPAS raise lives inside mpas_ocean_baroclinic_tendencies (needs
+        # a full Voronoi mesh — exercised by the integration suite); here pin
+        # the config field + default only.
         from legoesm.ocean.mpas_config import MPASOceanConfig
-        cfg = MPASOceanConfig(freshwater_salinity="bogus")
-        assert cfg.freshwater_salinity == "bogus"  # field exists
-        # The raise itself is exercised inside mpas_ocean_baroclinic_tendencies;
-        # constructing the full Voronoi state here is out of scope for a unit
-        # test — the string-level guard is locked by test_dispatch_hardening.
+        assert MPASOceanConfig().freshwater_salinity == "s_ref"
 
 
 def test_config_default_is_bit_compat():

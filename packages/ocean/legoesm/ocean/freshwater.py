@@ -277,6 +277,17 @@ def normalized_virtual_salt_flux(
 ) -> jnp.ndarray:
     """Top-layer virtual-salt tendency [PSU/s] with GLOBAL-SALT conservation.
 
+    NOTE (local-S interaction): the zero-global-salt property holds EXACTLY
+    only for a SCALAR ``S_ref`` (``S_ref * \u222bF' dA = 0`` for the zero-mean
+    ``F'``).  With the ``freshwater_salinity="local"`` array the covariance
+    ``\u222bS_local F' dA`` is generally nonzero — the same residual NEMO's own
+    ``sfx = emp*sss`` convention carries; the normalization then removes the
+    global VOLUME imbalance while the salt closure is NEMO-faithful rather
+    than exactly conservative.  The model configs REJECT the
+    ``local`` + ``normalize_freshwater=True`` combination outright
+    (lat-lon ``_validate_config`` / MPAS tendency gate) until a joint
+    volume+salt correction exists.
+
     Shared by the MPAS (``apply_freshwater_virtual_salt_top``) and lat-lon cores
     so the OMIP global-freshwater correction is implemented ONCE.  Removes the
     area-mean of the PHYSICAL freshwater (P-E+R+ice -- NOT the ``restoring``

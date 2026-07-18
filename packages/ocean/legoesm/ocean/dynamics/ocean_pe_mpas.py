@@ -1018,6 +1018,15 @@ def mpas_ocean_baroclinic_tendencies(
         # selections raise (dispatch hardening).
         _fw_sal = getattr(config, "freshwater_salinity", "s_ref")
         if _fw_sal == "local":
+            if bool(getattr(config, "normalize_freshwater", False)):
+                # Same incompatibility as the lat-lon _validate_config raise:
+                # the zero-mean correction times a varying S_local leaves a
+                # nonzero ∫S_local·F' dA global salt tendency (codex HIGH).
+                raise ValueError(
+                    "freshwater_salinity='local' is incompatible with "
+                    "normalize_freshwater=True (global-salt covariance "
+                    "residual); use s_ref with normalization, or local "
+                    "without it.")
             _S_fw = S_3d[:, 0].astype(dS_dt_3d.dtype)
         elif _fw_sal == "s_ref":
             _S_fw = config.S_ref

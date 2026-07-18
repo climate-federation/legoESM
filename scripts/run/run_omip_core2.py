@@ -675,6 +675,14 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             print(f"[setup] tripole vertical-mixing closure: {tripole_vmix}"
                   + (" (ORCA1 namzdf_tke namelist mapping)"
                      if tripole_vmix == "tke" else ""))
+            if (tripole_vmix == "tke"
+                    and int(getattr(_vm_cfg.tke, "eice", 0)) != 0):
+                print(f"[setup] TKE under-ice attenuation eice="
+                      f"{int(_vm_cfg.tke.eice)} (NEMO nn_eice): active only "
+                      "when an ice concentration reaches the closure "
+                      "(--prognostic-sea-ice, or a prescribed SIC via "
+                      "--ice-albedo/--ice-thermo/--sss-restore); without one "
+                      "the attenuation is inert (open water, fi=0).")
         if _use_iwm or _use_vmix:
             # zdfiwm rides the vertical-mixing config (attached above by
             # build_tripole_vmix_config); with --tripole-vmix none the
@@ -5555,6 +5563,15 @@ def main() -> int:
         # fixed optical climatology, independent of the dynamical spin-up ramp.
         if chl_clim is not None:
             sf = sf._replace(chl=chl_clim[_runoff_month_idx(step, dt)])
+        # PRESCRIBED-ice runs (--ice-albedo/--ice-thermo/--sss-restore ice
+        # gate, NO --prognostic-sea-ice): thread the SAME climatological
+        # concentration to the vertical-mixing closure so the TKE under-ice
+        # attenuation (TKEConfig.eice, NEMO nn_eice) is not silently skipped.
+        # The prognostic branch overwrites this below with its own
+        # partition-time-level concentration after blend_ice_ocean_forcing.
+        # Inert unless eice != 0 (consumption is config-gated in k_profiles).
+        if _sic is not None and ice_config is None:
+            sf = sf._replace(ice_concentration=_sic)
         # DEBUG: per-term momentum-tendency breakdown at the onset steps (pin the
         # term driving the lat-lon 75-level cold-start blowup). sf is finalised
         # for momentum here EXCEPT under --prognostic-sea-ice, where the

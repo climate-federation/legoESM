@@ -1222,6 +1222,21 @@ class LatLonCGridOceanModel:
                 f"freshwater_salinity must be one of {_valid_fw_sal}, "
                 f"got {getattr(config, 'freshwater_salinity', 's_ref')!r}",
             )
+        if (getattr(config, "freshwater_salinity", "s_ref") == "local"
+                and bool(getattr(config, "normalize_freshwater", False))):
+            # normalize_freshwater promises ZERO global salt tendency, which
+            # holds only for a SCALAR S_ref (S_ref*∫F' dA = 0).  With the
+            # local-S field the covariance ∫S_local·F' dA is generally
+            # nonzero, silently breaking the promise (codex HIGH,
+            # 2026-07-18).  Reject the combination until a joint
+            # volume+salt correction exists.
+            raise ValueError(
+                "freshwater_salinity='local' is incompatible with "
+                "normalize_freshwater=True: the zero-mean freshwater "
+                "correction no longer yields zero global salt once "
+                "multiplied by a spatially varying salinity "
+                "(∫S_local·F' dA covariance).  Use s_ref with "
+                "normalization, or local without it.")
 
         # Fail-fast EOS dispatch validation (dispatch discipline: validate the
         # static literal at construction, not lazily at the first step where

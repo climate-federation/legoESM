@@ -299,12 +299,6 @@ class MPASOceanConfig(NamedTuple):
                                         # forcing; only removes the global
                                         # imbalance.
     S_ref: float = 35.0
-    # Salinity the virtual-salt closure multiplies the freshwater flux by:
-    # "s_ref" (default, bit-identical) = the fixed scalar above; "local" =
-    # the LOCAL top-cell salinity (NEMO tra_sbc: sfx = emp * sss) — removes
-    # the fresh-shelf over-brining of the fixed-35 closure (2026-07-18
-    # Arctic halocline-erosion audit).  Mirrors the lat-lon C-grid field.
-    freshwater_salinity: str = "s_ref"   # "s_ref" | "local"
     physics: object = None  # OceanPhysicsConfig or None
     eos: str = "wright"    # "wright" or "linear"
     eos_linear: object = None  # LinearEOSConfig when eos="linear"
@@ -418,6 +412,12 @@ class MPASOceanConfig(NamedTuple):
     runoff_depth_spread_map: object = None
     # Positional-stability tail: append new fields here (never mid-class).
     equatorial_visc_sigma_deg: float = 5.0  # Gaussian half-width [deg lat] of
+    # Salinity the virtual-salt closure multiplies the freshwater flux by:
+    # "s_ref" (default, bit-identical) = the fixed scalar above; "local" =
+    # the LOCAL top-cell salinity (NEMO tra_sbc: sfx = emp * sss) — removes
+    # the fresh-shelf over-brining of the fixed-35 closure (2026-07-18
+    # Arctic halocline-erosion audit).  Mirrors the lat-lon C-grid field.
+    freshwater_salinity: str = "s_ref"   # "s_ref" | "local"
     # the equatorial viscosity boost (see ``equatorial_visc_boost``); the
     # instability is confined to |lat| < ~10°, so the default 5° matches the
     # lat-lon production config. Only used when ``equatorial_visc_boost > 0``.
