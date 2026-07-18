@@ -1,0 +1,32 @@
+# P1 MEMORY PROBE (NOT a fair-set config).
+#
+# Question: does sfno_full at T106, 32/2, WITH the rollout curriculum enabled
+# (a 120 h checkpointed rollout) fit the 40 GB A100?  The scale variant runs
+# 32/2 with curriculum OFF (proven to fit); this overlay turns the curriculum
+# ON so we learn whether Design-A option (b) — a fair-AND-stronger T106 sfno_full
+# — is viable, or whether we must fall back to option (a) (no curriculum).
+#
+# This overlay WINS the base<-cfg_overrides<-variant merge, so it controls the
+# sfno sizing + curriculum regardless of the base's values.
+
+aimip_variant: "sfno_full"
+aimip_radiation: "none"          # SFNO is the physics; no radiation scheme
+physics_parameterization: "none"
+
+# Same sizing as the PROVEN T106 scale sfno_full (fits 40 GB without curriculum).
+sfno_embed_dim: 32
+sfno_n_blocks: 2
+sfno_mlp_expansion: 4
+sfno_seed: 0
+dt_sfno: 21600.0                 # 6 h macro step
+
+# Curriculum ON, jumped straight to the 120 h phase (20 macro steps) — the
+# WORST-CASE reverse-mode memory — for 1 epoch.  If the first forward+backward
+# survives this, the earlier (shorter-lead) phases are strictly cheaper.
+aimip_rollout_curriculum:
+  - [120, 1]
+
+aimip_chunk_windows: 2           # stream (matches the fair-set intent)
+aimip_chunk_prefetch: false
+aimip_lr: 5.0e-5
+aimip_data_parallel: false       # sfno_full is single-GPU (rejects DP)

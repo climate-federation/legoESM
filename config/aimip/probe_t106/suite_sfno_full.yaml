@@ -1,0 +1,21 @@
+# P1 memory-probe suite — see variant_sfno_full.yaml in this dir.
+#
+# T106 base (n_max=106), but with a TINY dataset so the run reaches the 120 h
+# rollout backward in minutes and either OOMs (=> 32/2 + curriculum does NOT fit
+# the 40 GB A100 -> Design-A option a) or completes a step (=> option b viable).
+# The peak memory of a checkpointed rollout is per-SAMPLE, so 2 windows suffice.
+base: config/aimip/scale/base_t106_allyears.yaml
+
+cfg_overrides:
+  # Two 1-day windows in different years/seasons. load_training_data auto-loads
+  # max(lead)/6h = +5 days per window so each IC has a 120 h target, so each
+  # window yields a full 120 h-rollout sample.
+  train_windows:
+    - [1979, 0, 1]
+    - [2000, 182, 1]
+  aimip_n_epochs: 1
+
+variants:
+  - sfno_full
+
+output_dir: results/aimip_probe_sfno_full_t106
