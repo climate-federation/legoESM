@@ -55,8 +55,21 @@ CHAIN="${CHAIN:-0}"
 CHAIN_MAX="${CHAIN_MAX:-24}"  # v2 curriculum (72h/120h phases) needs more links
 
 cd "$PBS_O_WORKDIR"
-source scripts/cluster/scaling_derecho/_env.sh   # sets REPO, PY, conda, JAX env
+# Worktree-safe: default REPO to the checkout this job was SUBMITTED from, so a
+# `qsub` out of a git worktree (e.g. legoESM-aimip) runs THAT checkout's code +
+# configs, NOT _env.sh's /glade/work/$USER/legoESM default (which silently ran
+# the wrong tree and FileNotFound'd the suite). An explicit `-v LEGOESM_REPO=...`
+# still wins; the chained resubmit below propagates it.
+: "${LEGOESM_REPO:=${PBS_O_WORKDIR}}"
+export LEGOESM_REPO
+source scripts/cluster/scaling_derecho/_env.sh   # sets REPO(=LEGOESM_REPO), PY, conda, JAX env
 cd "$REPO"
+SUITE="config/aimip/scale/suite_${VARIANT}.yaml"
+if [ ! -f "$SUITE" ]; then
+  echo "[aimip-scale] ERROR: suite '$SUITE' not found under REPO=$REPO" \
+       "(variant=$VARIANT). Submit from your checkout or pass -v LEGOESM_REPO=<checkout>." >&2
+  exit 2
+fi
 
 export JAX_ENABLE_X64=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
@@ -76,7 +89,7 @@ export XLA_PYTHON_CLIENT_ALLOCATOR="${XLA_PYTHON_CLIENT_ALLOCATOR:-platform}"
 # GPU memory). Harmless when prefetch is off; cuda stays the default device.
 export JAX_PLATFORMS=cuda,cpu
 
-SUITE="config/aimip/scale/suite_${VARIANT}.yaml"
+# SUITE set + existence-checked above (right after the REPO resolution).
 OUT="results/aimip_scale_t106/${VARIANT}"
 mkdir -p "$OUT/logs"
 
