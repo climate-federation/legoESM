@@ -2328,15 +2328,15 @@ def _bc_horizontal_viscosity(
     # steep slopes. Targets f≈0 + steep-bathymetry instabilities
     # (African shelf, ITF). When alpha=0, factor is identically 1
     # (no-op, bit-exact backward compat).
-    _slope_foot_alpha = getattr(config, "slope_foot_alpha", 0.0)
+    _slope_foot_alpha = config.slope_foot_alpha
     if _slope_foot_alpha > 0.0:
         from legoesm.ocean.dynamics.latlon_cgrid_operators import slope_foot_enhancement_3d
         _is_active = z_coord.is_active if isinstance(z_coord, OceanPartialCellCoordinate) else None
         _slope_E = slope_foot_enhancement_3d(
             H_bathy, mask, grid,
-            n_levels_from_bottom=getattr(config, "slope_foot_n_levels", 5),
+            n_levels_from_bottom=config.slope_foot_n_levels,
             alpha=_slope_foot_alpha,
-            threshold=getattr(config, "slope_foot_threshold", 0.1),
+            threshold=config.slope_foot_threshold,
             is_active=_is_active,
             nlev=u.shape[-1],
         )
@@ -3668,7 +3668,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # §5 W9V no-closure survives 16 d at the Oceananigans-oracle amplitude (~0.06).
     du_dt, dv_dt = _bc_wall_grid_filter(
         du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d,
-        getattr(config, "wall_grid_filter_rate_s", 0.0), _mom_adv,
+        config.wall_grid_filter_rate_s, _mom_adv,
     )
 
     # --- Stage 9: tracer diffusion tendencies (dT_dt, dS_dt). ---
@@ -3757,7 +3757,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # MED-4 r2). Default dt_mom_ratio=1.0 => dt_mom == dt, bit-identical.
         # Both the h- AND q-point ceilings are threaded so the independently
         # interpolated vertex coefficient is capped too.
-        _bs_dt_mom = dt / getattr(config, "dt_mom_ratio", 1.0)
+        _bs_dt_mom = dt / config.dt_mom_ratio
         _bs_nu_max_h, _bs_nu_max_q = laplacian_smag_cfl_cap(
             grid, _bs_dt_mom, _bscfg.nu_bs_cfl_safety)
         _bs_u, _bs_v, _ = diagnostic_backscatter_cgrid(
