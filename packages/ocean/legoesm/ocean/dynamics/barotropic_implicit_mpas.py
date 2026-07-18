@@ -745,6 +745,12 @@ def barotropic_implicit_mpas(
     # project_mpas_etopo_instability.md §"equatorial mode".
     _eq_boost = config.equatorial_visc_boost
     if _eq_boost > 0:
+        if config.equatorial_visc_sigma_deg <= 0:
+            raise ValueError(
+                "equatorial_visc_sigma_deg must be > 0 when "
+                "equatorial_visc_boost > 0 (Gaussian width divides latEdge; "
+                f"got {config.equatorial_visc_sigma_deg})."
+            )
         _sigma_rad = jnp.radians(config.equatorial_visc_sigma_deg)
         _gauss = jnp.exp(
             -0.5 * (mesh.latEdge.astype(eta_dtype) / _sigma_rad) ** 2

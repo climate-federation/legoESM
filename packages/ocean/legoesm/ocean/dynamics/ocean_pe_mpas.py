@@ -573,6 +573,12 @@ def mpas_ocean_baroclinic_tendencies(
         # production config).  Previous cos²(lat) was too wide — it
         # overdamped real mid-latitude dynamics while the instability is
         # confined to |lat| < 10°.
+        if config.equatorial_visc_sigma_deg <= 0:
+            raise ValueError(
+                "equatorial_visc_sigma_deg must be > 0 when "
+                "equatorial_visc_boost > 0 (Gaussian width divides latEdge; "
+                f"got {config.equatorial_visc_sigma_deg})."
+            )
         _sigma_rad = jnp.radians(config.equatorial_visc_sigma_deg)
         _lat_e = mesh.latEdge.astype(u_3d.dtype)
         _gauss = jnp.exp(-0.5 * (_lat_e / _sigma_rad) ** 2)
