@@ -7,7 +7,8 @@ name = "legoesm"
 version = "0.1.0"
 description = "legoESM: A Differentiable Earth System Model in JAX"
 readme = "README.md"
-license = {text = "MIT"}
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [
     {name = "Pierre Gentine"},
@@ -16,7 +17,6 @@ keywords = ["earth-system-model", "jax", "differentiable", "weather", "climate"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
