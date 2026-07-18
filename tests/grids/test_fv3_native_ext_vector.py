@@ -391,3 +391,52 @@ def test_vector_corner_variant_wiring(kinked_gs6):
     wl = outs["lagrange"][0][:NG, -NG:]      # a wedge block
     wa = outs["a2d"][0][:NG, -NG:]
     assert np.abs(wl - wa).max() > 0.01
+
+
+# ---------------------------------------------------------------------------
+# corner-Lagrange oracle (oracle-closeness directive, 2026-07-17)
+# ---------------------------------------------------------------------------
+
+_CL_FIXTURE = (Path(__file__).parent / "fixtures"
+               / "fv3_cornerlag_oracle.npz")
+
+
+def test_cornerlag_oracle_all_staggers():
+    """_CornerLagrange.fill vs the verbatim Fortran
+    compute_lagrange_coeff + fill_corner_region_2d, all four
+    staggerings, full arrays — certifies the signed-arc Lagrange-weight
+    equivalence and the nine-slot sequence against the oracle."""
+    if not _CL_FIXTURE.exists():
+        pytest.skip("cornerlag oracle fixture not generated "
+                    "(scripts/cluster/fv3_native/cornerlag_oracle.sbatch)")
+    from legoesm.grids.fv3_native_ext_vector import (
+        _CornerLagrange,
+        ext_parity_lonlat_ref,
+    )
+
+    d = np.load(_CL_FIXTURE, allow_pickle=False)
+    n, ng, tile = int(d["n"]), int(d["ng"]), int(d["tile"])
+    a_lon4, a_lat4 = ext_parity_lonlat_ref(n, ng + 1, "A")
+    worst = {}
+    for istag, jstag in ((0, 0), (1, 1), (0, 1), (1, 0)):
+        f = np.array(d[f"fld_{istag}{jstag}"], copy=True)
+        op = _CornerLagrange(a_lon4[tile - 1], a_lat4[tile - 1],
+                             n, ng, istag, jstag)
+        op.fill(f)
+        rec = d[f"out_{istag}{jstag}"]
+        w = 0.0
+        for i_f, j_f, val in rec:
+            got = f[int(i_f) - 1 + ng, int(j_f) - 1 + ng]
+            w = max(w, abs(got - val))
+        worst[(istag, jstag)] = w
+        # r8 distance-ratio products vs float64 signed-arc products:
+        # mathematically identical on great circles; float error
+        # amplified by extrapolation weights (|w| up to ~35)
+        assert w < 5e-11, (istag, jstag, w)
+    # the fill must have CHANGED corner slots (non-vacuity)
+    f0 = np.array(d["fld_00"], copy=True)
+    rec0 = {(int(i), int(j)): v for i, j, v in d["out_00"]}
+    changed = sum(
+        1 for (i_f, j_f), v in rec0.items()
+        if abs(v - f0[i_f - 1 + ng, j_f - 1 + ng]) > 1e-9)
+    assert changed >= 4 * 9, changed
