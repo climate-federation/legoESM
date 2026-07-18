@@ -985,40 +985,78 @@ def _model_noleap_date(sim_day: float, start_year: int) -> tuple[int, int, int, 
     return start_year + year_off, month, dom, day_frac
 
 
+def _record_noleap_doy(first_date, elapsed_days: float) -> float | None:
+    """Noleap day-of-year (with intra-day fraction, Feb 29 collapsed onto
+    Feb 28) of the record that sits ``elapsed_days`` after ``first_date`` on
+    the file's native calendar.  ``None`` if the date cannot be reconstructed.
+
+    Reconstructing each record's ACTUAL calendar date (``first_date`` advanced
+    by its elapsed days on the file's own calendar) and taking that date's
+    noleap day-of-year is exact per record — it removes the post-February
+    ~1-day residual that offsetting the whole axis by only the first record's
+    day-of-year leaves for a leap-year-dated climatology (audit FL4).
+    """
+    import datetime as _dt
+    try:
+        if isinstance(first_date, np.datetime64):
+            dt = first_date + np.timedelta64(
+                int(round(float(elapsed_days) * 86400.0)), "s")
+        else:                       # cftime / datetime: accepts timedelta
+            dt = first_date + _dt.timedelta(days=float(elapsed_days))
+        _, month, dom, day_frac = _calendar_date_fields(dt)
+    except Exception:
+        return None
+    dom = min(dom, NOLEAP_DAYS_PER_MONTH[month - 1])   # Feb 29 -> Feb 28
+    return NOLEAP_MONTH_STARTS[month - 1] + (dom - 1) + day_frac
+
+
 def _cyclic_phase_anchor(
     mid_days: np.ndarray, data: np.ndarray, first_date,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Phase-anchor a <=12-record climatology at the first record's noleap
+    """Phase-anchor a <=12-record climatology to its records' noleap
     day-of-year (audit F4), returning ``(mid_days, data)`` co-sorted.
 
     ``_read_time_axis`` returns days since the FIRST RECORD, so a CF-dated
     monthly climatology has ``mid_days[0] == 0`` and cyclic interpolation
     would place a mid-January-stamped record at Jan 1 — a ~15-day forward
-    phase shift.  Offsetting by the first record's noleap day-of-year
-    (Feb 29 collapsed onto Feb 28) restores the stamped phase (a mid-Jan
-    record sits at day ~14.5-15.5).  The anchored axis is wrapped into
-    [0, 365) and co-sorted with ``data`` so that a climatology starting
-    mid-year (e.g. a July-first file) still satisfies the ascending-axis
-    contract of :func:`_interp_monthly_cyclic`'s ``searchsorted`` (codex
-    review).  A units-less axis (``first_date is None``) already carries
-    day-of-year values and is returned unchanged (e.g. the
-    ``15.5 + 30.4375*m`` fallback).
+    phase shift.
 
-    Residual approximation: only the phase ORIGIN is re-anchored; the
-    within-year record spacing keeps the file's native elapsed days, so a
-    leap-year-dated climatology's post-February records sit <=1 day late —
-    negligible next to the ~15-day shift this fixes, and exact for the
-    noleap-dated CMIP6 convention.
+    Each record's ACTUAL calendar date is reconstructed (``first_date``
+    advanced by its own elapsed days on the file's native calendar) and placed
+    at that date's noleap day-of-year (Feb 29 collapsed onto Feb 28).  This is
+    exact per record — no post-February drift for a leap-year-dated
+    climatology (audit FL4) — and needs only ``first_date`` + ``mid_days``,
+    both already available.  The anchored axis is wrapped into [0, 365) and
+    co-sorted with ``data`` so a climatology starting mid-year (e.g. a
+    July-first file) still satisfies the ascending-axis contract of
+    :func:`_interp_monthly_cyclic`'s ``searchsorted``.  A units-less axis
+    (``first_date is None``) already carries day-of-year values and is returned
+    unchanged (e.g. the ``15.5 + 30.4375*m`` fallback); if any record's date
+    cannot be reconstructed it falls back to the first-record offset (keeping
+    the file's elapsed-day spacing).
     """
     if first_date is None:
         return mid_days, data
-    try:
-        _, month, dom, day_frac = _calendar_date_fields(first_date)
-    except Exception:
-        return mid_days, data
-    dom = min(dom, NOLEAP_DAYS_PER_MONTH[month - 1])  # Feb 29 -> Feb 28
-    offset = NOLEAP_MONTH_STARTS[month - 1] + (dom - 1) + day_frac
-    anchored = (np.asarray(mid_days, dtype=np.float64) + offset) % 365.0
+    md = np.asarray(mid_days, dtype=np.float64)
+    doys = np.empty(md.size, dtype=np.float64)
+    for i, elapsed in enumerate(md):
+        doy = _record_noleap_doy(first_date, elapsed)
+        if doy is None:
+            doys = None
+            break
+        doys[i] = doy
+    if doys is not None:
+        anchored = doys % 365.0
+    else:
+        # Fallback: offset the whole axis by the first record's day-of-year
+        # (keeps the native elapsed-day spacing; <=1-day post-Feb residual).
+        try:
+            _, month, dom, day_frac = _calendar_date_fields(first_date)
+        except Exception:
+            return mid_days, data
+        dom = min(dom, NOLEAP_DAYS_PER_MONTH[month - 1])  # Feb 29 -> Feb 28
+        offset = NOLEAP_MONTH_STARTS[month - 1] + (dom - 1) + day_frac
+        anchored = (md + offset) % 365.0
     order = np.argsort(anchored, kind="stable")
     if np.array_equal(order, np.arange(order.size)):
         return anchored, data
