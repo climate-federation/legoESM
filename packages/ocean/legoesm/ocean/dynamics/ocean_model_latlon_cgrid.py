@@ -111,6 +111,63 @@ from legoesm.ocean.conservation import ocean_conservation_fixer
 # Advection flux-divergence helpers (extracted for AB2/RK3 reuse)
 # ---------------------------------------------------------------------------
 
+def _add_bolus_to_advecting_flux(bolus, mass_flux_u, mass_flux_v,
+                                 u_mask_3d, v_mask_3d, grid, z_coord):
+    """Add the GM eddy-induced (bolus) transport to the TRACER advecting flux.
+
+    NEMO ``traadv``: the eiv velocity is added to the advecting velocity before
+    the (monotone FCT) tracer scheme.  ``bolus = (u_eiv, v_eiv, w_eiv)`` is the
+    curl-of-ψ TRANSPORT [m^3/s] on the NEMO east-/north-face-of-cell staggering
+    (``nemo_eiv_bolus_transport``).  Returns
+    ``(mass_flux_u_tr, mass_flux_v_tr, w_baro_tr)`` — the base momentum/continuity
+    fluxes are left untouched (the bolus is tracer-advection only).
+
+    Conservation: the vertical bolus is re-diagnosed from the bolus-augmented
+    HORIZONTAL flux via the SAME continuity operator that built ``w_baro``, so the
+    augmented advecting field is discretely NON-DIVERGENT in the FCT operators —
+    EXACT global tracer conservation AND constancy preservation, independent of
+    the horizontal metric.  This IS NEMO's ``zww`` eiv (the continuity integral of
+    the horizontal bolus divergence).  The bolus is column-non-divergent (ψ=0 at
+    the surface + floor ⇒ column-integrated transport divergence = 0), so the z*
+    sigma correction contributes nothing (deta/dt_bolus = 0).
+    """
+    from legoesm.grids.latlon import ensure_geometry as _ensure_geometry
+    u_eiv, v_eiv, _w_eiv = bolus              # [m^3/s], cell-indexed E/N faces
+    geom = _ensure_geometry(grid)
+    # u/v-face metrics = the SAME e2u/e1v the ψ streamfunction used, so
+    # transport/metric recovers the mass-flux (h·u) convention divergence_cgrid
+    # consumes (mass_flux · face_width = volume transport).  ψ ∝ metric, so the
+    # transport is exactly 0 where the metric is 0 (degenerate pole/boundary
+    # v-face) — guard the division against 0/0 (→0, the correct no-flux value).
+    e2u = geom.dy_u[:, 1:]                     # (n_lat, n_lon) east face of cell i
+    e1v = geom.dx_v[1:, :]                     # (n_lat, n_lon) north face of cell j
+    bmfu_c = jnp.where(e2u[:, :, jnp.newaxis] > 0.0,
+                       u_eiv / jnp.where(e2u[:, :, jnp.newaxis] > 0.0,
+                                         e2u[:, :, jnp.newaxis], 1.0), 0.0)
+    bmfv_c = jnp.where(e1v[:, :, jnp.newaxis] > 0.0,
+                       v_eiv / jnp.where(e1v[:, :, jnp.newaxis] > 0.0,
+                                         e1v[:, :, jnp.newaxis], 1.0), 0.0)
+    # Map cell-indexed EAST/NORTH faces -> staggered (n_lon+1)/(n_lat+1) face
+    # arrays: face f is the WEST/SOUTH face of cell f, so face f>=1 = east/north
+    # face of cell f-1; the boundary face 0 takes the periodic wrap (identically
+    # the masked wall value on a closed boundary, where the bolus is 0).
+    bolus_mfu = jnp.concatenate([bmfu_c[:, -1:, :], bmfu_c], axis=1)  # (n_lat, n_lon+1, nlev)
+    bolus_mfv = jnp.concatenate([bmfv_c[-1:, :, :], bmfv_c], axis=0)  # (n_lat+1, n_lon, nlev)
+    # Mask the bolus by the SAME 3-D tracer face masks the base mass flux uses
+    # (compute_face_masks_3d) so no bolus flows through a partial-cell wall / dry
+    # level.  Without this a below-bathymetry DRY level (garbage near-zero
+    # thickness) carries a huge spurious bolus velocity (transport / ~0 h) into
+    # the FCT → CFL blow-up; the wet-face masking is byte-identical on a flat
+    # bottom (all levels of a wet column active).
+    bolus_mfu = bolus_mfu * u_mask_3d
+    bolus_mfv = bolus_mfv * v_mask_3d
+    mfu_tr = mass_flux_u + bolus_mfu
+    mfv_tr = mass_flux_v + bolus_mfv
+    flux_div_tr = divergence_cgrid(mfu_tr, mfv_tr, grid)
+    w_tr = diagnose_w_from_flux_div(flux_div_tr, z_coord, thickness_weighted=True)
+    return mfu_tr, mfv_tr, w_tr
+
+
 def _compute_advection_flux_div(
     tr: jnp.ndarray,
     tracer_advection: str,
@@ -1477,6 +1534,17 @@ class LatLonCGridOceanModel:
             if (getattr(config, "gm_redi", None) is not None
                     and getattr(config.gm_redi, "eke", None) is not None):
                 _unsupported.append("gm_redi with prognostic EKE (gm_redi.eke)")
+            # gm_bolus_advection="through_fct" needs the bolus-transport export
+            # + _add_bolus_to_advecting_flux wiring, which only the split step
+            # carries; without this gate the unsplit step would silently DROP
+            # the entire GM bolus term (the in-operator centred add is gated
+            # off and nothing re-adds it to the advecting flux).
+            if (getattr(config, "gm_redi", None) is not None
+                    and getattr(config.gm_redi, "gm_bolus_advection",
+                                "centred") == "through_fct"):
+                _unsupported.append(
+                    'gm_redi gm_bolus_advection="through_fct" (bolus-through-'
+                    "FCT flux not threaded by the unsplit step)")
             if getattr(config, "ab2_scope", "total") == "advective":
                 _unsupported.append('ab2_scope="advective" (withheld dissipation)')
             if getattr(config, "surface_forcing_implicit", False):
@@ -3065,6 +3133,15 @@ class LatLonCGridOceanModel:
             flux_div_k, self.z_coord, thickness_weighted=True,
         )
 
+        # Advecting mass fluxes for the TRACER scheme.  Default = the base
+        # (momentum/continuity) mass flux; when GM runs with
+        # gm_bolus_advection="through_fct" the eddy-induced (bolus) transport is
+        # added to THESE (only) below, so the bolus passes through the monotone
+        # FCT limiter (NEMO traadv) without touching the momentum/continuity/eta
+        # mass fluxes (which keep using mass_flux_u/v and w_baro).
+        mass_flux_u_tr, mass_flux_v_tr, w_baro_tr = (
+            mass_flux_u, mass_flux_v, w_baro)
+
         # 7b. Adaptive-implicit vertical momentum advection
         #     (Shchepetkin 2015 / NEMO ``ln_zad_Aimp``).  The explicit
         #     in-tendency vertical momentum advection has no vertical-CFL
@@ -3286,7 +3363,15 @@ class LatLonCGridOceanModel:
                     rho_0=self.config.constants.rho_0,
                     g=self.config.constants.g,
                 )
-            dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(
+            # GM bolus THROUGH the FCT limiter (NEMO traadv): when the config
+            # selects it (nemo_iso_lap + gm_bolus_advection="through_fct"), the
+            # bolus transport is exported and added to the tracer advecting mass
+            # flux instead of being applied as an in-operator centred flux.
+            _want_bolus = (
+                getattr(gm_cfg, "gm_bolus_advection", "centred") == "through_fct"
+                and getattr(gm_cfg, "slope_scheme", "") == "nemo_iso_lap"
+            )
+            _gm_out = gm_redi_tracer_tendency_latlon(
                 T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
                 _grid, self.z_coord, gm_cfg,
                 eos=self.config.eos, eos_linear=self.config.eos_linear,
@@ -3297,7 +3382,20 @@ class LatLonCGridOceanModel:
                 kappa_gm_override=kappa_gm_override,
                 kappa_redi_override=kappa_redi_override,
                 density_jacobian=_gm_dens_jac,
+                return_bolus_transport=_want_bolus,
             )
+            if _want_bolus:
+                dT_gm, dS_gm, _bolus = _gm_out
+                if _bolus is not None:
+                    mass_flux_u_tr, mass_flux_v_tr, w_baro_tr = (
+                        _add_bolus_to_advecting_flux(
+                            _bolus, mass_flux_u, mass_flux_v,
+                            u_mask_3d_tracer, v_mask_3d_tracer, _grid,
+                            self.z_coord,
+                        )
+                    )
+            else:
+                dT_gm, dS_gm = _gm_out
             if gm_cfg.implicit_K33:
                 # Veros-faithful: K_33 (the vertical isoneutral diagonal ∝ S²) was
                 # dropped from the explicit F_z above (implicit_K33=True); recompute
@@ -3365,11 +3463,11 @@ class LatLonCGridOceanModel:
                 )
 
             T_corrected, T_mom_new = som_advect_tracers(
-                T_mid, T_mom, mass_flux_u, mass_flux_v, w_baro,
+                T_mid, T_mom, mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
                 h_k_old, h_k_new, _grid, dt, mask,
             )
             S_corrected, S_mom_new = som_advect_tracers(
-                S_mid, S_mom, mass_flux_u, mass_flux_v, w_baro,
+                S_mid, S_mom, mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
                 h_k_old, h_k_new, _grid, dt, mask,
             )
 
@@ -3432,7 +3530,7 @@ class LatLonCGridOceanModel:
             if _tti == "rk3":
                 T_corrected, S_corrected = _ssp_rk3_tracer_pair_step(
                     T_mid, S_mid, _adv,
-                    mass_flux_u, mass_flux_v, w_baro,
+                    mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
                     h_k_old, h_k_new, h_u_old, h_v_old,
                     _grid, dt, active_3d, recon_fill_mask=_wall_fill_mask,
                     linssh_top_flux=_linssh,
@@ -3441,7 +3539,7 @@ class LatLonCGridOceanModel:
             else:
                 _pair_divs = _compute_advection_flux_div_pair(
                     T_mid, S_mid, _adv,
-                    mass_flux_u, mass_flux_v, w_baro,
+                    mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
                     h_k_old, h_u_old, h_v_old, _grid, dt,
                     recon_fill_mask=_wall_fill_mask,
                     linssh_top_flux=_linssh,

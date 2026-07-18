@@ -257,6 +257,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/physics/bottom_drag/integration.py", "make_bottom_drag_physics"),
         ("packages/ocean/legoesm/ocean/physics/convection/integration.py", "make_convection_physics"),
         ("packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py", "gm_redi_tracer_tendency_latlon"),
+        # gm_bolus_advection dispatch (centred | through_fct; hardened 2026-07-18
+        # with the NEMO ldf_eiv_trp bolus-through-FCT option — a typo would
+        # silently drop the GM bolus from BOTH paths).
+        ("packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py", "nemo_iso_lap_tracer_tendency_latlon_cgrid"),
         ("packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_mpas.py", "gm_redi_tracer_tendency_mpas"),
         ("packages/ocean/legoesm/ocean/physics/lateral_mixing/integration.py", "make_lateral_mixing_physics"),
         # MPAS ocean vmix/surface/convection factory: catke rejected, richardson

@@ -1101,6 +1101,68 @@ def gm_redi_tracer_tendency_latlon_cgrid(
     return tendency
 
 
+def nemo_eiv_bolus_transport(
+    kappa_GM,
+    wslpi_kp1: jnp.ndarray,
+    wslpj_kp1: jnp.ndarray,
+    e2u: jnp.ndarray,
+    e1v: jnp.ndarray,
+    u_mask: jnp.ndarray,
+    v_mask: jnp.ndarray,
+    act: jnp.ndarray,
+    act_below: jnp.ndarray,
+    out_shape: tuple,
+    dtype,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """NEMO ``ldf_eiv_trp_MLF`` eddy-induced (GM bolus) TRANSPORT, curl form.
+
+    Returns the discrete eddy-induced transport ``(u_eiv, v_eiv, w_eiv_kp1)``
+    [m^3/s] as the CURL of the bolus streamfunction
+
+        ψ_uw(iface below cell k) = -e2u · mi(wslpi_{k+1}) · mk(aeiu) · wumask
+        ψ_vw(iface below cell j) = -e1v · mj(wslpj_{k+1}) · mk(aeiu) · wvmask
+
+    with the cell-level horizontal transport ``u_eiv = ψ_below − ψ_above`` and
+    the interface-below-cell vertical transport
+    ``w_eiv_kp1 = Δi(ψ_uw) + Δj(ψ_vw)``.  Being a discrete curl, the field is
+    divergence-free by construction (the 3-D divergence telescopes to zero),
+    so advecting a tracer by it conserves the column/domain integral exactly
+    regardless of the ψ masking.
+
+    This is the SINGLE definition of the bolus transport.  The centred
+    in-operator GM path (below) consumes it as an explicit 2nd-order flux
+    ``zfu -= u_eiv·t_u``; the ``through_fct`` path exports the same
+    ``(u_eiv, v_eiv, w_eiv)`` to the model step, which adds it to the
+    advecting mass flux so the bolus passes through the monotone FCT limiter
+    (NEMO ``traadv``: the eiv velocity is added to the advecting velocity
+    BEFORE the tracer scheme).  Axes: ``(lat=jj, lon=ji, lev=jk)``.
+    """
+    ax_y, ax_x, ax_z = 0, 1, 2
+    if isinstance(kappa_GM, jnp.ndarray) and kappa_GM.ndim == 3:
+        aeiu = jnp.broadcast_to(kappa_GM, out_shape)
+    elif isinstance(kappa_GM, jnp.ndarray) and kappa_GM.ndim == 2:
+        aeiu = jnp.broadcast_to(kappa_GM[:, :, jnp.newaxis], out_shape)
+    else:
+        aeiu = jnp.broadcast_to(jnp.asarray(kappa_GM, dtype=dtype), out_shape)
+    aeiu_if = 0.5 * (aeiu + jnp.roll(aeiu, -1, ax_z))         # mk(aeiu) at iface below k
+    wslpi_u = 0.5 * (wslpi_kp1 + jnp.roll(wslpi_kp1, -1, ax_x))  # mi(wslpi) -> u-face
+    wslpj_v = 0.5 * (wslpj_kp1 + jnp.roll(wslpj_kp1, -1, ax_y))
+    act_kp1 = act_below
+    wumask_uw = (u_mask[:, 1:, jnp.newaxis] * act * jnp.roll(act, -1, ax_x)
+                 * act_kp1 * jnp.roll(act_kp1, -1, ax_x))
+    wvmask_vw = (v_mask[1:, :, jnp.newaxis] * act * jnp.roll(act, -1, ax_y)
+                 * act_kp1 * jnp.roll(act_kp1, -1, ax_y))
+    psi_uw = -(e2u[:, :, jnp.newaxis] * wslpi_u * aeiu_if * wumask_uw)
+    psi_vw = -(e1v[:, :, jnp.newaxis] * wslpj_v * aeiu_if * wvmask_vw)
+    psi_uw_top = jnp.roll(psi_uw, +1, ax_z).at[:, :, 0].set(0.0)
+    psi_vw_top = jnp.roll(psi_vw, +1, ax_z).at[:, :, 0].set(0.0)
+    u_eiv = psi_uw - psi_uw_top
+    v_eiv = psi_vw - psi_vw_top
+    w_eiv_kp1 = ((psi_uw - jnp.roll(psi_uw, +1, ax_x))
+                 + (psi_vw - jnp.roll(psi_vw, +1, ax_y)))
+    return u_eiv, v_eiv, w_eiv_kp1
+
+
 def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     q: jnp.ndarray,
     S_x: jnp.ndarray,
@@ -1117,6 +1179,8 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     msc_stabilize: bool = False,
     dt: float | None = None,
     kappa_GM=None,
+    gm_bolus_advection: str = "centred",
+    return_bolus: bool = False,
 ) -> jnp.ndarray:
     """NEMO ``traldf_iso`` (``#define iso_lap``) iso-neutral Laplacian Redi
     tracer tendency on the lat-lon C-grid.
@@ -1383,58 +1447,44 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     #   ψ_uw(iface below cell k) = -e2u · mi(wslpi_kp1) · mk(aeiu) · wumask   [m³/s]
     # SIGN: this code's tendency = +div(flux); advection dT/dt = -div(u·T), so
     # the eiv flux enters the flux arrays with a MINUS sign.
+    bolus_transport = None
     if kappa_GM is not None:
-        if isinstance(kappa_GM, jnp.ndarray) and kappa_GM.ndim == 3:
-            aeiu = jnp.broadcast_to(kappa_GM, q.shape)
-        elif isinstance(kappa_GM, jnp.ndarray) and kappa_GM.ndim == 2:
-            aeiu = jnp.broadcast_to(kappa_GM[:, :, jnp.newaxis], q.shape)  # spatial adaptive κ_GM
+        # SINGLE bolus-transport definition (curl of ψ): shared by the centred
+        # in-operator path AND the through_fct export.  Masking notes: ψ at the
+        # interface BELOW cell k is nonzero ONLY where the FOUR cells around the
+        # u/v-w point are wet AND the horizontal wall is open (no bolus into a dry
+        # cell at a topographic step — exact conservation on varying bathymetry);
+        # ``act_below`` (k+1 activity, zeroed at the floor) is used NOT roll(act,
+        # -1,z) so a full-depth column does not wrap a surface slope onto the sea
+        # floor (NEMO forces wslpi(jpk)=0, wumask(...,jpk)=0 at the deepest iface).
+        u_eiv, v_eiv, w_eiv_kp1 = nemo_eiv_bolus_transport(
+            kappa_GM, wslpi_kp1, wslpj_kp1, e2u, e1v,
+            u_mask, v_mask, act, act_below, q.shape, dtype,
+        )
+        bolus_transport = (u_eiv, v_eiv, w_eiv_kp1)
+        if gm_bolus_advection == "centred":
+            # In-operator GM: add the eiv ADVECTIVE tracer flux (transport ·
+            # centred tracer) to the Redi flux.  LIMITATIONS (fidelity, not
+            # conservation): the bolus flux is 2nd-order CENTRED (dispersive at
+            # sharp fronts, leans on the co-located Redi K to damp 2Δx noise) and
+            # aeiu_if reuses the cell-centred κ_GM for both faces (exact for
+            # constant κ_GM; a half-cell offset for a spatially-2-D κ_GM).
+            t_u = 0.5 * (q + jnp.roll(q, -1, ax_x))
+            t_v = 0.5 * (q + jnp.roll(q, -1, ax_y))
+            t_w_kp1 = 0.5 * (q + jnp.roll(q, -1, ax_z))           # tracer at iface below k
+            zfu = zfu - u_eiv * t_u
+            zfv = zfv - v_eiv * t_v
+            zfw_kp1 = zfw_kp1 - w_eiv_kp1 * t_w_kp1 * act_below
+        elif gm_bolus_advection == "through_fct":
+            # NEMO traadv: the eiv transport is added to the ADVECTING velocity
+            # (exported via ``return_bolus``) and passed through the monotone FCT
+            # tracer scheme by the model step — NOT added here (no double count).
+            pass
         else:
-            aeiu = jnp.broadcast_to(jnp.asarray(kappa_GM, dtype=dtype), q.shape)
-        aeiu_if = 0.5 * (aeiu + jnp.roll(aeiu, -1, ax_z))         # mk(aeiu) at iface below k
-        wslpi_u = 0.5 * (wslpi_kp1 + jnp.roll(wslpi_kp1, -1, ax_x))  # mi(wslpi) -> u-face
-        wslpj_v = 0.5 * (wslpj_kp1 + jnp.roll(wslpj_kp1, -1, ax_y))
-        # ψ at the interface BELOW cell k (NEMO wumask/wvmask): the bolus stream
-        # function is nonzero ONLY where the FOUR cells around the u/v-w point are
-        # all wet AND the horizontal wall is open — so no bolus flows into a dry
-        # cell at a topographic step (required for EXACT conservation on varying
-        # bathymetry; a bare act_below mask leaves a spurious Δi(ψ) at the step).
-        # The surface/floor interfaces carry ψ=0 (no bolus through the boundaries).
-        # act_below (the interface-below-cell-k activity, k+1 zeroed at the floor)
-        # NOT roll(act,-1,z): a z-roll WRAPS the deepest level to the surface, so a
-        # full-depth column would place a surface-slope-driven bolus on the sea
-        # floor (conserving but wrong — a spurious abyssal transport).  NEMO forces
-        # wslpi(jpk)=0 and wumask(...,jpk)=0 at the deepest interface.
-        act_kp1 = act_below
-        wumask_uw = (u_mask[:, 1:, jnp.newaxis] * act * jnp.roll(act, -1, ax_x)
-                     * act_kp1 * jnp.roll(act_kp1, -1, ax_x))
-        wvmask_vw = (v_mask[1:, :, jnp.newaxis] * act * jnp.roll(act, -1, ax_y)
-                     * act_kp1 * jnp.roll(act_kp1, -1, ax_y))
-        psi_uw = -(e2u[:, :, jnp.newaxis] * wslpi_u * aeiu_if * wumask_uw)
-        psi_vw = -(e1v[:, :, jnp.newaxis] * wslpj_v * aeiu_if * wvmask_vw)
-        # ψ above cell k = ψ at the interface above (roll down by one; surface=0).
-        psi_uw_top = jnp.roll(psi_uw, +1, ax_z).at[:, :, 0].set(0.0)
-        psi_vw_top = jnp.roll(psi_vw, +1, ax_z).at[:, :, 0].set(0.0)
-        # eiv u/v transport at cell level k = ψ_below − ψ_above  (NEMO puu -= (ψ_a−ψ_b))
-        u_eiv = psi_uw - psi_uw_top
-        v_eiv = psi_vw - psi_vw_top
-        # eiv w transport at the interface below cell k = Δi(ψ_uw)+Δj(ψ_vw) there.
-        w_eiv_kp1 = ((psi_uw - jnp.roll(psi_uw, +1, ax_x))
-                     + (psi_vw - jnp.roll(psi_vw, +1, ax_y)))
-        # centred tracer at the faces.  LIMITATIONS (fidelity, not conservation):
-        # (1) NEMO adds the eiv transport to the advecting velocity and runs it
-        #     through the tracer scheme (FCT for DINO), so the bolus flux is
-        #     flux-corrected/monotone; here it is 2nd-order CENTRED (dispersive at
-        #     sharp fronts, leans on the co-located Redi K to damp 2Δx noise).
-        # (2) aeiu_if is the cell-centred κ_GM averaged in k, reused for both
-        #     psi_uw and psi_vw — no u-/v-point horizontal staggering (exact for
-        #     constant κ_GM; a half-cell offset when a resolution_function makes
-        #     κ_GM spatially 2-D).  Both are conserving; minor amplitude fidelity.
-        t_u = 0.5 * (q + jnp.roll(q, -1, ax_x))
-        t_v = 0.5 * (q + jnp.roll(q, -1, ax_y))
-        t_w_kp1 = 0.5 * (q + jnp.roll(q, -1, ax_z))               # tracer at iface below k
-        zfu = zfu - u_eiv * t_u
-        zfv = zfv - v_eiv * t_v
-        zfw_kp1 = zfw_kp1 - w_eiv_kp1 * t_w_kp1 * act_below
+            raise ValueError(
+                "nemo_iso_lap_tracer_tendency_latlon_cgrid: unknown "
+                f"gm_bolus_advection={gm_bolus_advection!r}; expected "
+                "'centred' or 'through_fct'.")
 
     # ================= 3-D DIVERGENCE (added to RHS with + sign) =============
     hdiv = (zfu - jnp.roll(zfu, +1, ax_x)) + (zfv - jnp.roll(zfv, +1, ax_y))
@@ -1447,6 +1497,8 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     # Mask by the 3-D cell wet mask (NEMO tmask), not just the 2-D surface mask,
     # so sub-seafloor dry levels of a wet column are zeroed too (byte-identical
     # on flat bottom, where those levels already carry zero divergence).
+    if return_bolus:
+        return tend * act, bolus_transport
     return tend * act
 
 
@@ -2443,6 +2495,7 @@ def gm_redi_tracer_tendency_latlon(
     kappa_redi_override: jnp.ndarray | None = None,
     density_jacobian: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     dt: float | None = None,
+    return_bolus_transport: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Top-level GM/Redi for lat-lon C-grid.
 
@@ -2579,6 +2632,10 @@ def gm_redi_tracer_tendency_latlon(
     kappa_Redi_eff = cfg.kappa_Redi if kappa_redi_override is None else kappa_redi_override
 
     scheme = getattr(cfg, "slope_scheme", "triads")
+    if return_bolus_transport and scheme != "nemo_iso_lap":
+        raise ValueError(
+            "gm_redi_tracer_tendency_latlon(return_bolus_transport=True) is only "
+            f"supported by slope_scheme='nemo_iso_lap', got {scheme!r}.")
     _slope_limit = getattr(cfg, "slope_limit", "dm95_taper")
     validate_slope_limit(_slope_limit)
     # nemo_cap is wired for BOTH the triads and the centered/nemo_iso_lap
@@ -2663,6 +2720,22 @@ def gm_redi_tracer_tendency_latlon(
                 else:
                     dS_dt = dS_dt + dq_complement
     elif scheme == "nemo_iso_lap":
+        # GM bolus advection form (NEMO ldf_eiv_trp): "centred" (default,
+        # bit-identical) applies the bolus as a 2nd-order centred flux INSIDE the
+        # iso operator; "through_fct" exports the bolus transport so the model
+        # step adds it to the advecting mass flux → the bolus passes through the
+        # monotone FCT limiter (NEMO traadv).  Validated on the static config here
+        # (fn entry) so an unknown value fails loudly even when kappa_GM=0.
+        _gm_bolus = getattr(cfg, "gm_bolus_advection", "centred")
+        if _gm_bolus not in ("centred", "through_fct"):
+            raise ValueError(
+                "GMRediConfig.gm_bolus_advection must be 'centred' or "
+                f"'through_fct', got {_gm_bolus!r}.")
+        if return_bolus_transport and _gm_bolus != "through_fct":
+            raise ValueError(
+                "gm_redi_tracer_tendency_latlon(return_bolus_transport=True) "
+                "requires gm_bolus_advection='through_fct' (else the bolus is "
+                "already applied in-operator — exporting it would double-count).")
         # NEMO traldf_iso (iso_lap) rotated-Laplacian iso-neutral Redi, plus the
         # ln_ldfeiv GM bolus (ldf_eiv_trp_MLF) when kappa_GM != 0 — the faithful
         # NEMO isoneutral-Redi + GM combination (the Madec discretization used by
@@ -2693,16 +2766,24 @@ def gm_redi_tracer_tendency_latlon(
                 rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg,
                 eos_fn, rho_0=rho_0, g=g, active_3d=_active_3d)
             _msc = getattr(cfg, "msc_stabilize", False)
-            dT_dt = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            _bolus = None
+            _dT = nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 T, S_x, S_y, mask, u_mask, v_mask,
                 z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
                 native_slopes=_nat, msc_stabilize=_msc, dt=dt,
-                kappa_GM=kappa_GM)
+                kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus,
+                return_bolus=return_bolus_transport)
+            if return_bolus_transport:
+                dT_dt, _bolus = _dT
+            else:
+                dT_dt = _dT
             dS_dt = nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 S, S_x, S_y, mask, u_mask, v_mask,
                 z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
                 native_slopes=_nat, msc_stabilize=_msc, dt=dt,
-                kappa_GM=kappa_GM)
+                kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus)
+            if return_bolus_transport:
+                return dT_dt, dS_dt, _bolus
             return dT_dt, dS_dt
         # SLOPE SIGN CONVENTION (2026-07-17 winter ttrd_ldf certificate):
         # the producer computes S = -grad_h(rho)/drho_dz with drho_dz floored
@@ -2717,16 +2798,24 @@ def gm_redi_tracer_tendency_latlon(
         # The diagonal K33 term uses S^2 (sign-immune). GM bolus (kappa_GM) uses
         # the SAME negated (NEMO-convention) slopes as the Redi, so its
         # streamfunction sign follows NEMO's ldf_eiv_trp.
-        dT_dt = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+        _bolus = None
+        _dT = nemo_iso_lap_tracer_tendency_latlon_cgrid(
             T, -S_x, -S_y, mask, u_mask, v_mask,
             z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
-            kappa_GM=kappa_GM,
+            kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus,
+            return_bolus=return_bolus_transport,
         )
+        if return_bolus_transport:
+            dT_dt, _bolus = _dT
+        else:
+            dT_dt = _dT
         dS_dt = nemo_iso_lap_tracer_tendency_latlon_cgrid(
             S, -S_x, -S_y, mask, u_mask, v_mask,
             z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
-            kappa_GM=kappa_GM,
+            kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus,
         )
+        if return_bolus_transport:
+            return dT_dt, dS_dt, _bolus
     else:
         raise ValueError(
             f"Unknown GMRediConfig.slope_scheme={scheme!r}; "

@@ -361,6 +361,13 @@ class DINOConfig:
     # selects "n2_integral"; only affects runs with the ML ramp / native
     # slopes active. Dispatch raises on an unknown value.
     gm_redi_mld_criterion: str = "rho_c"
+    # GM eddy-induced (bolus) advection FORM for gm_redi_slope_scheme=
+    # "nemo_iso_lap" (GMRediConfig.gm_bolus_advection): "centred" (default, byte-
+    # identical — 2nd-order centred bolus flux inside the iso operator) or
+    # "through_fct" (NEMO traadv: the bolus transport is added to the advecting
+    # mass flux so it passes through the monotone FCT limiter). The nemo_dino_kamm
+    # card selects "through_fct"; only read with slope_scheme="nemo_iso_lap".
+    gm_bolus_advection: str = "centred"
 
     # ------------------------------------------------------------------
     # Lateral mixing of momentum (geopotential / iso-level Laplacian;
@@ -750,6 +757,10 @@ DINO_RECIPES: dict[str, dict] = {
         #    (ldf_eiv_trp_MLF), now implemented in the nemo_iso_lap path (conserving
         #    to machine precision + energetically correct — flattens isopycnals).
         "gm_redi_slope_scheme": "nemo_iso_lap",
+        # namtra_adv ln_traadv_fct: NEMO adds the ln_ldfeiv GM bolus to the
+        # advecting velocity, so the bolus flux goes THROUGH the monotone FCT
+        # limiter (not a separate centred flux) — node 22 of the wiring diagram.
+        "gm_bolus_advection": "through_fct",
         "gm_kappa_scheme": "treguier",
         # NEMO zdfmxl N^2-integral MLD criterion for the ldfslp slope ramp
         # (node 6/7); the pot-density default anchors the ML slope ramp at a
@@ -2131,6 +2142,7 @@ def dino_lat_lon_model_config(
             kappa_redi_lat_scaling=True,
             S_max=cfg.redi_S_max,
             slope_scheme=cfg.gm_redi_slope_scheme,
+            gm_bolus_advection=cfg.gm_bolus_advection,
             slope_density="neutral",
             slope_limit=cfg.redi_slope_limit,
             implicit_K33=True,
@@ -2147,6 +2159,7 @@ def dino_lat_lon_model_config(
             kappa_Redi=cfg.visbeck_kappa_min,
             S_max=cfg.redi_S_max,
             slope_scheme=cfg.gm_redi_slope_scheme,
+            gm_bolus_advection=cfg.gm_bolus_advection,
             mld_criterion=cfg.gm_redi_mld_criterion,
             # Exactly ONE adaptive-κ diagnostic on (the GM/Redi dispatch
             # raises if both are enabled): "visbeck" (historical) or

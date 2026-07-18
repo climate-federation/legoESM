@@ -242,6 +242,17 @@ class GMRediConfig(NamedTuple):
     # mutually exclusive with visbeck.enabled (dispatch raises on both).
     treguier: TreguierConfig = TreguierConfig()
     slope_scheme: str = "triads"     # "triads" (default), "centered", or "nemo_iso_lap"
+    # GM eddy-induced (bolus) advection FORM for slope_scheme="nemo_iso_lap"
+    # (NEMO ldf_eiv_trp): "centred" (default, BYTE-IDENTICAL) applies the bolus
+    # as a 2nd-order CENTRED advective flux inside the iso operator — dispersive
+    # at sharp fronts (over/undershoots), leans on the co-located Redi K to damp
+    # 2Δx noise.  "through_fct" exports the bolus TRANSPORT (curl of ψ) to the
+    # model step, which adds it to the advecting mass flux BEFORE the tracer
+    # scheme, so the bolus flux passes through the monotone FCT/Zalesak limiter —
+    # the faithful NEMO traadv form (the eiv velocity is added to the advecting
+    # velocity). Tracer advection only (never momentum/continuity/eta). Only read
+    # by slope_scheme="nemo_iso_lap"; the lat-lon C-grid model honors it.
+    gm_bolus_advection: str = "centred"
     slope_density: str = "in_situ"   # "in_situ" (default) or "neutral"
     # NEMO ln_traldf_msc (Method of Stabilizing Correction): when True the
     # nemo_iso_lap operator adds the akz-stabilized EXPLICIT K33 vertical
