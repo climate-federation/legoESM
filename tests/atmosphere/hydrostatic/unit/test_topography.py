@@ -873,5 +873,65 @@ class TestLaplacianSmoothCrossFace(unittest.TestCase):
         npt.assert_allclose(out_other, out_local, atol=1e-12)
 
 
+class TestUnstructuredTopographySmoothing(unittest.TestCase):
+    """Audit 2026-07-17 T4: static-file topography on a Voronoi/MPAS mesh must
+    be mesh-Laplacian smoothed (raw point-sampled ETOPO drives the TRiSK-PGF
+    O(dx^-1) blowup over steep terrain), matching the ERA5-IC MPAS path."""
+
+    def _mesh(self):
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        return create_voronoi_mesh(2)   # 162 cells, cheap
+
+    def test_smoothing_reduces_cell_to_cell_roughness(self):
+        from legoesm.grids.topography import (
+            TopographyConfig, load_real_topography,
+        )
+        mesh = self._mesh()
+        with tempfile.TemporaryDirectory() as td:
+            path = str(Path(td) / "topo.nc")
+            _make_synthetic_topo_netcdf(path, mountains=True)
+            raw, _ = load_real_topography(
+                mesh, TopographyConfig(source="file", path=path,
+                                       smoothing_passes=0))
+            smoothed, _ = load_real_topography(
+                mesh, TopographyConfig(source="file", path=path,
+                                       smoothing_passes=4))
+
+        coc = np.asarray(mesh.cellsOnCell)
+        neoc = np.asarray(mesh.nEdgesOnCell)
+
+        def _neighbor_var(field):
+            f = np.asarray(field)
+            tot = 0.0
+            for c in range(mesh.nCells):
+                for e in range(int(neoc[c])):
+                    nb = int(coc[e, c]) - 1     # 1-based -> 0-based
+                    if 0 <= nb < mesh.nCells:
+                        tot += (f[c] - f[nb]) ** 2
+            return tot
+
+        # smoothing must lower the summed squared cell-to-cell difference
+        self.assertLess(_neighbor_var(smoothed), _neighbor_var(raw))
+        # and it must actually have changed the field
+        self.assertGreater(float(np.max(np.abs(np.asarray(smoothed)
+                                               - np.asarray(raw)))), 0.0)
+
+    def test_zero_passes_is_raw(self):
+        from legoesm.grids.topography import (
+            TopographyConfig, load_real_topography,
+        )
+        mesh = self._mesh()
+        with tempfile.TemporaryDirectory() as td:
+            path = str(Path(td) / "topo.nc")
+            _make_synthetic_topo_netcdf(path, mountains=True)
+            a, _ = load_real_topography(
+                mesh, TopographyConfig(source="file", path=path,
+                                       smoothing_passes=0))
+            b, _ = load_real_topography(
+                mesh, TopographyConfig(source="file", path=path,
+                                       smoothing_passes=0))
+        npt.assert_allclose(np.asarray(a), np.asarray(b), atol=1e-12)
+
+
 if __name__ == "__main__":
     unittest.main()

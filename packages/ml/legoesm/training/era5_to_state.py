@@ -965,6 +965,7 @@ def era5_to_spectral_carry(
     sigma,
     microphysics: str = "none",
     turbulence: str = "none",
+    smoothing_passes: int = 4,
 ):
     """Convert ERA5 slice to SegmentCarry on a spectral (Gaussian) grid.
 
@@ -1006,7 +1007,8 @@ def era5_to_spectral_carry(
     # _apply_phis_hydrostatic_adjustment (not re-implemented here).
     from legoesm.grids.topography import smooth_phis_gaussian
     phis_ll_raw = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
-    phis_ll_smooth = smooth_phis_gaussian(phis_ll_raw)
+    phis_ll_smooth = smooth_phis_gaussian(
+        phis_ll_raw, smoothing_passes=smoothing_passes)
     # T_sfc proxy = ERA5 T at the highest pressure level (plev_Pa ascending →
     # last index = nearest to surface), matching the lat-lon carry.
     _T_sfc_ll = jnp.asarray(T_ll)[..., -1]
@@ -1082,6 +1084,8 @@ def era5_to_cubedsphere_carry(
     target_phis=None,
     microphysics: str = "none",
     turbulence: str = "none",
+    smoothing_passes: int = 4,
+    edge_blend_strength: float = 0.3,
 ):
     """Convert ERA5 slice to SegmentCarry on a cubed-sphere grid.
 
@@ -1158,8 +1162,12 @@ def era5_to_cubedsphere_carry(
     # to O(dx^-1) magnitude.  With raw ERA5 phis differences of ~50 kJ/kg,
     # this creates spurious ~0.4 m/s² PGF that drives blowup in ~1–5 days
     # even from rest.
+    # edge_blend_width now defaults to TopographyConfig's 2 (was silently 1);
+    # driver wires smoothing_passes/edge_blend_strength from cfg.topo_*.
     from legoesm.grids.topography import smooth_phis_cubed_sphere
-    phis_cs_smooth = smooth_phis_cubed_sphere(phis_cs_raw)
+    phis_cs_smooth = smooth_phis_cubed_sphere(
+        phis_cs_raw, smoothing_passes=smoothing_passes,
+        edge_blend_strength=edge_blend_strength)
 
     # Hydrostatically reconcile p_s with the smoothed phis (barometric p_s
     # correction + hybrid p_s floor).  Shared with the lat-lon carry via
@@ -1281,6 +1289,7 @@ def era5_to_latlon_carry(
     sigma,
     microphysics: str = "none",
     turbulence: str = "none",
+    smoothing_passes: int = 4,
 ):
     """Convert ERA5 slice to a SegmentCarry on the lat-lon C-grid.
 
@@ -1328,7 +1337,8 @@ def era5_to_latlon_carry(
     from legoesm.grids.vertical import HybridSigmaPressureCoordinate
     _is_hybrid = isinstance(sigma, HybridSigmaPressureCoordinate)
     phis_ll_raw = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
-    phis_ll_smooth = smooth_phis_gaussian(phis_ll_raw)
+    phis_ll_smooth = smooth_phis_gaussian(
+        phis_ll_raw, smoothing_passes=smoothing_passes)
 
     # Hydrostatically reconcile p_s with the smoothed phis (+ hybrid p_s floor).
     # T_sfc proxy = ERA5 T at 1000 hPa (plev_Pa ascending → last index = surface).
