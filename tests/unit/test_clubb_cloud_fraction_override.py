@@ -171,6 +171,26 @@ class TestCloudFractionOverride:
         # gentler than full replacement: the cf stays closer to RH than to CLUBB
         assert np.all(np.abs(cf_b - cf_rh) <= np.abs(ovr_val - cf_rh) + 1e-12)
 
+    def test_override_floor_prevents_cloud_collapse(self):
+        """clubb_cf_override_floor keeps a minimum BL cloud so the override cannot
+        drive cf to ~0 (which triggered the cloud-temperature runaway).  Checked
+        full-column with a very low override + strength=1.0."""
+        T, p_full, q_v, dp = _saturated_marine_column()
+        floor = 0.2
+        props = compute_cloud_properties(
+            T=T, p_full=p_full, q_v=q_v, dp=dp,
+            config=CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=0.0,
+                               clubb_cf_override_floor=floor),
+            cloud_fraction_override=jnp.full(T.shape, 0.02))  # near-zero cloud
+        cf = np.asarray(props.cloud_fraction)
+        assert np.all(cf >= floor - 1e-12), "override cf fell below the floor"
+        # floor=0 (default) leaves the low override untouched
+        props0 = compute_cloud_properties(
+            T=T, p_full=p_full, q_v=q_v, dp=dp,
+            config=CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=0.0),
+            cloud_fraction_override=jnp.full(T.shape, 0.02))
+        npt.assert_allclose(np.asarray(props0.cloud_fraction), 0.02, atol=1e-12)
+
     def test_smooth_ramp_gate_blends_without_discontinuity(self):
         """The default SMOOTH gate (ramp>0) blends the override in over
         [p_min-ramp, p_min] instead of a step — deep BL is the override, high

@@ -553,6 +553,13 @@ def compute_cloud_properties(
         _strength = config.clubb_cf_override_strength
         if _strength < 1.0:
             _cf_clubb = _strength * _cf_clubb + (1.0 - _strength) * cf
+        # FLOOR: keep a minimum BL cloud fraction so the override cannot collapse
+        # the low cloud to ~0 (which triggered the cloud-temperature runaway).
+        # Breaks the runaway while still allowing a bounded reduction.  Static
+        # config branch (JIT-safe); jnp.maximum is AD-safe.
+        _floor = config.clubb_cf_override_floor
+        if _floor > 0.0:
+            _cf_clubb = jnp.maximum(_cf_clubb, _floor)
         # LEVEL GATE (real-SST A/B fix): apply CLUBB's cf only in the boundary
         # layer / low cloud (p_full >= clubb_cf_override_p_min_pa, the marine-Sc
         # target) and keep the RH grid-scale fraction ALOFT.  A full-column
