@@ -43,6 +43,10 @@ DRIVER = REPO_ROOT / "scripts" / "run" / "run_rce.py"
     ("--sst-init", "-1.0", "must be positive Kelvin"),
     ("--sst-init", "0.0", "must be positive Kelvin"),
     ("--truncation", "0", "must be positive integer"),
+    ("--rce-cos-zenith", "0", "must be in (0, 1]"),
+    ("--rce-cos-zenith", "1.5", "must be in (0, 1]"),
+    ("--convective-detrainment-frac", "1.5", "must be in [0, 1]"),
+    ("--convective-detrainment-frac", "-0.1", "must be in [0, 1]"),
     # iter-75 post-derivation guard: huge dt / tiny days → n_steps=0.
     ("--dt", "1e10", "n_steps=0"),
 ])
@@ -126,3 +130,29 @@ def test_nonspectral_grid_keeps_caller_precision(tmp_path):
         f"stdout: {result.stdout[-800:]}\nstderr: {result.stderr[-800:]}")
     assert "auto-enabled JAX_ENABLE_X64" not in (result.stdout + result.stderr), \
         "non-spectral grid wrongly triggered the spectral x64 auto-enable"
+
+
+def test_rrtmgp_morrison_runs(tmp_path):
+    """RRTMGP radiation + Morrison microphysics wiring runs end-to-end (finite,
+    non-zero exit only on real failure). Small/short — this is a smoke of the
+    branch selection + the physics_step/micro_step signatures, not a science run."""
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    env["JAX_ENABLE_X64"] = "0"
+    cmd = [
+        sys.executable, str(DRIVER),
+        "--grid-type", "cubed_sphere", "--discretization", "cdgrid",
+        "--resolution", "8", "--days", "1", "--diag-days", "1", "--nlev", "20",
+        "--radiation", "rrtmgp", "--microphysics", "morrison",
+        "--output", str(tmp_path / "rce_rrtmgp_morrison"),
+    ]
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True,
+                            timeout=600)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, (
+        f"rrtmgp+morrison run failed: exit {result.returncode}\n"
+        f"stdout: {result.stdout[-1000:]}\nstderr: {result.stderr[-1000:]}")
+    assert "RRTMGP radiation" in combined and "morrison" in combined, \
+        "run header did not report RRTMGP radiation + morrison microphysics"
+    assert "Traceback" not in combined and "nan" not in result.stdout.lower(), \
+        f"rrtmgp+morrison produced a traceback / NaN.\nstdout: {result.stdout[-1000:]}"
