@@ -192,14 +192,6 @@ class MPASOceanConfig(NamedTuple):
                                          # but with controllable strength.
                                          # Typical 3-10 for ico4 ETOPO.
                                          # 0 = uniform viscosity.
-    equatorial_visc_sigma_deg: float = 5.0  # Gaussian half-width [deg lat]
-                                         # of the equatorial viscosity boost
-                                         # (see ``equatorial_visc_boost``);
-                                         # the instability is confined to
-                                         # |lat| < ~10°, so the default 5°
-                                         # matches the lat-lon production
-                                         # config. Only used when
-                                         # ``equatorial_visc_boost > 0``.
     use_h_actual_pgf: bool = True          # Integrate baroclinic pressure
                                             # cumsum against actual partial-
                                             # cell thickness h_k rather
@@ -416,6 +408,11 @@ class MPASOceanConfig(NamedTuple):
     # nonzero runoff_depth_spread_m (resolve_runoff_spread_arg validates).
     # Column-integral salt tendency unchanged; None = legacy top-cell.
     runoff_depth_spread_map: object = None
+    # Positional-stability tail: append new fields here (never mid-class).
+    equatorial_visc_sigma_deg: float = 5.0  # Gaussian half-width [deg lat] of
+    # the equatorial viscosity boost (see ``equatorial_visc_boost``); the
+    # instability is confined to |lat| < ~10°, so the default 5° matches the
+    # lat-lon production config. Only used when ``equatorial_visc_boost > 0``.
 
 
 class MPASSimpleOceanConfig(NamedTuple):
