@@ -305,3 +305,59 @@ Node 19 = ✅ faithful (stable + compared); residual #1 = ✅ CLOSED.
 Tests: `test_nemo_ab3am4_filter.py::test_flt2_*` (coefficient transcription),
 `test_leapfrog_integrator.py::test_boxcar_ab3_live_split_runs_no_nan` +
 `::test_ab3am4_live_split_still_rejected`.
+
+---
+
+## Round-5 (2026-07-18) — residual #2 CLOSED: thickness-weighted tracer Robert-Asselin
+
+**Node 19 residual #2 (tracer RA filter form) is now FAITHFUL.** The leap-frog tracer
+Asselin filter was the CONCENTRATION form `T_f = T_n + γ(T_b−2T_n+T_a)` (NEMO's
+`tra_atf_fix_lf`, valid only for the linear/fixed free surface). Under z* (`key_qco`)
+NEMO uses the THICKNESS-WEIGHTED CONTENT form `tra_atf_qco_lf`
+(`src/OCE/TRA/traatf_qco.F90:295-341`):
+
+    ztc_f = e3t_n·T_n + γ·(e3t_b·T_b − 2·e3t_n·T_n + e3t_a·T_a);   T_f = ztc_f / e3t_f
+
+with `e3t` at the before/now/after ssh and `e3t_f = e3t_0·(1+r3t_f)` from the
+Asselin-filtered ssh. Ported as `_thickness_weighted_asselin`
+(`ocean_model_latlon_cgrid.py`), wired into `_leapfrog_step` for T,S only. Momentum
+(u,v) stays the PLAIN velocity filter — DINO runs `ln_dynadv_vec=.TRUE.`, for which
+NEMO `dynatf_qco.F90:151-155` filters raw velocity (NOT thickness-weighted); ssh stays
+plain (`ssh_atf`). e3t built from the filtered eta (== NEMO `r3t_f`) via
+`compute_layer_thickness`, exact by z*-linearity. Additive; forward_euler/ab2/GYRE/Veros
+byte-identical (`_leapfrog_step` only). OMITTED (documented, not silently dropped):
+NEMO's surface-flux `zfact1·(sbc_tc−sbc_tc_b)` correction (:309) — no analog because
+legoESM restores surface T/S IMPLICITLY (node 20); O(γ·2dt·Δflux), second-order.
+
+- **Conservation gate (truth-tier).** `test_thickness_weighted_asselin_*`
+  (`tests/ocean/unit/test_leapfrog_integrator.py`): (a) equal three-level content →
+  global content preserved to 1e-13 while the concentration form drifts >1e-6; (b)
+  general case → the filter perturbs global content by EXACTLY the discrete content
+  time-Laplacian `γ(C_b−2C_n+C_a)` (1e-12); (c) fixed-volume → reduces to plain RA
+  (backward-compat); (d) dry/partial cells → 0, no NaN. Full 23-test leap-frog suite +
+  no-scheme-duplication + dispatch-hardening + constants/inline-coeff ratchets green.
+- **Reviews:** code-reviewer APPROVE (all SHIP); physics-validator no correctness/sign/
+  conservation defect (two DISCUSS items — surface-flux omission + conservation wording —
+  both addressed in docstrings/test).
+
+**Controlled 180-day comparison (sole variable = filter form; dt=2700, 5760 steps,
+from-rest analytic IC on bridged NEMO mesh, seasonal forcing, NEMO RUN_TRAJ ÷vovvle3t;
+both leap-frog runs in-session on separate GPUs):**
+
+| Metric | conc-form leap-frog | **TW-form leap-frog (faithful)** | NEMO |
+|--------|--------------------:|---------------------------------:|-----:|
+| SST corr / bias / rms | 0.994 / −0.43 / 0.99 | 0.994 / −0.43 / 0.99 | — |
+| T@300m corr / rms | 0.990 / 0.53 | 0.990 / 0.53 | — |
+| SSH corr / rms(m) | 0.992 / 0.069 | 0.992 / 0.069 | — |
+| **BSF range ratio** | **2.65×** | **2.65×** | 1.0 (±40 Sv) |
+
+Both 180d runs STABLE (no NaN, T∈[3.7,25.4]°C). The in-session conc-form run reproduces
+the Round-4 committed MLF baseline exactly (protocol byte-identical). **The
+thickness-weighted filter does NOT recover the SST fidelity toward the FE 0.72 nor move
+the BSF** — the 180-day climate mean is identical to the concentration form to within
+noise (BSF range differs ~1 Sv of 215; SST at the 4th decimal). Expected: the RA filter
+form difference is O(γ·dη/e3t) ≈ 0.1·(0.6 m/50 m) ≈ 0.1%/step, negligible on the mean in
+this modest-eta config. It matters for exact CONTENT CONSERVATION (machine-precision,
+proven), not the DINO climate. The SST 0.72(FE)→0.99(MLF) regression is the leap-frog
+integrator itself (node 19 core), not the tracer RA filter form — residual #2 is faithful
+and CLOSED; it is not the SST driver.

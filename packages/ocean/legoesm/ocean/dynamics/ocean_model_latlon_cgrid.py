@@ -726,6 +726,59 @@ def _static_kappa_redi_override(gm_cfg, grid):
         (1, n_lon), dtype=cos_lat.dtype)
 
 
+def _thickness_weighted_asselin(now, before, after,
+                                e3_now, e3_before, e3_after, e3_f,
+                                gamma, mask):
+    """NEMO thickness-weighted Robert-Asselin tracer filter (``tra_atf_qco_lf``).
+
+    Transcribes NEMO 5.0.2 ``src/OCE/TRA/traatf_qco.F90:295-306`` — the leap-frog
+    Asselin filter for tracers under the z\\* (``key_qco``) moving coordinate.
+    The filter acts on the tracer CONTENT ``(e3t·T)``, NOT the concentration
+    ``T``: the after-filter global content is perturbed only by the exact discrete
+    time-Laplacian of content ``gamma·(C_b − 2·C_n + C_a)`` (zero when the
+    flux-form advection holds the three time-level contents equal), with NO
+    spurious ``e3t``-inconsistency source — unlike the plain concentration form,
+    which adds an extra ``O(gamma·dη)`` content drift under a moving thickness::
+
+        ztc_b = e3t_b·T_b ; ztc_n = e3t_n·T_n ; ztc_a = e3t_a·T_a   (:298-300)
+        ztc_d = ztc_a - 2·ztc_n + ztc_b                            (:302)
+        ztc_f = ztc_n + rn_atfp·ztc_d                              (:304)
+        T_f   = ztc_f / e3t_f                                      (:341)
+
+    ``e3t_f`` (:308 ``ze3t_f = e3t_0·(1 + r3t_f·tmask)``) is the thickness
+    reconstructed from the *Asselin-filtered* ssh ``r3t_f`` — since z\\*
+    thickness is exactly linear in ssh, this equals the thickness-weighted
+    filter of ``e3t`` on wet cells, and here is supplied by
+    ``compute_layer_thickness(eta_f)`` with ``eta_f`` the plain-RA-filtered ssh
+    (the ``ssh_atf`` step), keeping the numerator/denominator consistent.
+
+    Contrast the plain concentration form ``tra_atf_fix_lf`` (:227,
+    ``T_f = T_n + gamma·(T_b - 2·T_n + T_a)``) used only for the linear/fixed
+    free surface (``lk_linssh``), which is O(dη) non-conservative under z\\*.
+
+    OMITTED (documented, not silently dropped): NEMO's surface-flux Asselin
+    correction ``ztc_f -= zfact1·(psbc_tc − psbc_tc_b)`` at the surface level
+    (traatf_qco.F90:309, + the qsr/rnf/isf analogues :313-336) cancels the
+    leap-frog imprint of the EXPLICIT surface tracer flux ``sbc_tsc``.  legoESM
+    applies surface T/S forcing as IMPLICIT restoring (node 20), so there is no
+    explicit ``sbc_tc``/``sbc_tc_b`` content pair to difference — the term has no
+    transcribable analog here and is O(gamma·2dt·Δflux) (second order for a
+    restoring BC).  This routine implements the thickness-weighting (:295-341)
+    only; the surface-flux correction lives with the (different) forcing path.
+
+    ``e3_f`` is floored before the divide (masked / below-seafloor cells have
+    ``e3_f == 0`` for partial-cell coords); ``mask`` re-zeros them so the floor
+    never leaks into a wet result.  Sign convention: symmetric time-Laplacian
+    smoothing, ``gamma = rn_atfp > 0`` (diffusive) — matches the plain-RA sign.
+    """
+    ztc_n = e3_now * now
+    ztc_b = e3_before * before
+    ztc_a = e3_after * after
+    ztc_f = ztc_n + gamma * (ztc_b - 2.0 * ztc_n + ztc_a)
+    e3_f_safe = jnp.maximum(e3_f, 1.0e-30)
+    return (ztc_f / e3_f_safe) * mask
+
+
 class LatLonCGridOceanModel:
     """Boussinesq hydrostatic ocean model on a C-grid latitude-longitude grid.
 
@@ -5802,9 +5855,14 @@ class LatLonCGridOceanModel:
              supplying.  With both, the full 180-day dt=2700 run on the bridged
              NEMO mesh is STABLE (eta bounded, no NaN, gridscale eta fraction
              pinned ~0.05).
-          2. The tracer RA filter uses the CONCENTRATION form (NEMO's simple
-             ``tra_atf_fix_lf``); the z* thickness-weighted content form
-             (``tra_atf_qco_lf``) differs by O(dη).
+          2. **CLOSED.** The tracer RA filter is now the z* THICKNESS-WEIGHTED
+             content form (NEMO ``tra_atf_qco_lf``, traatf_qco.F90:295-341):
+             filter ``(e3t·T)``/``(e3t·S)`` using the layer thickness at the
+             before/now/after ssh, then divide by the thickness from the
+             Asselin-filtered ssh (``_thickness_weighted_asselin``).  Conserves
+             globally-integrated heat/salt content under the moving z*
+             coordinate (the old concentration form drifted by O(dη)).  Momentum
+             (ln_dynadv_vec) + ssh stay the plain RA form, matching NEMO.
           3. **CLOSED (this iteration).** The barotropic Coriolis is now the LIVE
              per-substep enstrophy-conserving EEN form (NEMO ``dyn_cor_2D``):
              ``barotropic_coriolis_split="live"`` + ``barotropic_coriolis="een"``
@@ -5859,8 +5917,8 @@ class LatLonCGridOceanModel:
         vs 2.62× (FE) vs 1.0 (NEMO), SST/T300/SSH corr ≥0.99 both — the leap-frog
         time integrator (node 19, the last structural difference) is NOT the driver
         of the residual BSF over-strength (the characterised equatorial f→0
-        core-dynamics amplification). Remaining residual: (2) tracer RA filter
-        concentration form (O(dη), NOT the jet).
+        core-dynamics amplification). Residual #2 (tracer RA filter) is now
+        CLOSED (thickness-weighted content form, see residual #2 above).
         """
         from legoesm.ocean.state import Field
         _grid = grid if grid is not None else self.grid
@@ -6056,15 +6114,42 @@ class LatLonCGridOceanModel:
 
         # 5. Robert-Asselin filter on the NOW fields (plain RA — DINO, not
         #    Williams); carried as the NEXT step's before-state Nbb.
+        #    MOMENTUM (u,v): PLAIN velocity filter — DINO runs ln_dynadv_vec=.TRUE.
+        #    (vector-form advection), for which NEMO dynatf_qco.F90:151-155 applies
+        #    the Asselin filter to the raw velocity (NOT thickness-weighted; the
+        #    thickness-weighted momentum branch :158-169 is the flux-form
+        #    nn_dynkeg path, unused by DINO).  SSH (eta): PLAIN filter (ssh_atf).
+        #    TRACERS (T,S): THICKNESS-WEIGHTED content filter (tra_atf_qco_lf,
+        #    key_qco z*) — filter (e3t·T) then divide by the filtered thickness so
+        #    heat/salt content is conserved under the moving z* coordinate
+        #    (residual #2 close).
         def _asselin(now, before, after, m):
             return (now + gamma * (before - 2.0 * now + after)) * m
         u_f = _asselin(state.u.data, state.u_before.data, naa.u.data, u_mask3)
         u_f = u_f.at[:, -1].set(u_f[:, 0])
         v_f = _asselin(state.v.data, state.v_before.data, naa.v.data, v_mask3)
-        T_f = _asselin(state.T.data, state.T_before.data, naa.T.data, mask3)
-        S_f = _asselin(state.S.data, state.S_before.data, naa.S.data, mask3)
         eta_f = _asselin(state.eta.data, state.eta_before.data,
                          naa.eta.data, cmask)
+        # Thickness at the three tracer time levels + the Asselin-filtered ssh.
+        # e3t_now == h_k (already computed from state.eta above).  e3t_f is built
+        # from the filtered eta (eta_f == NEMO r3t_f) so numerator & denominator
+        # stay consistent (dynatf/tra_atf use the ssh_atf-filtered scale factor).
+        _mwc = self.config.min_water_column_m
+        e3t_now = h_k
+        e3t_bef = compute_layer_thickness(
+            state.eta_before.data, state.H_bathy.data, self.z_coord,
+            min_water_column_m=_mwc)
+        e3t_aft = compute_layer_thickness(
+            naa.eta.data, state.H_bathy.data, self.z_coord,
+            min_water_column_m=_mwc)
+        e3t_flt = compute_layer_thickness(
+            eta_f, state.H_bathy.data, self.z_coord, min_water_column_m=_mwc)
+        T_f = _thickness_weighted_asselin(
+            state.T.data, state.T_before.data, naa.T.data,
+            e3t_now, e3t_bef, e3t_aft, e3t_flt, gamma, mask3)
+        S_f = _thickness_weighted_asselin(
+            state.S.data, state.S_before.data, naa.S.data,
+            e3t_now, e3t_bef, e3t_aft, e3t_flt, gamma, mask3)
 
         return naa._replace(
             u_before=state.u.replace(data=u_f),

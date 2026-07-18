@@ -430,3 +430,100 @@ def test_een_total_puts_coriolis_in_rhs():
     interior_een = interior_een[np.isfinite(interior_een)]
     assert np.mean(interior_een) > 0.0                 # +f·v signature
     assert np.max(np.abs(du_een)) > 10.0 * np.max(np.abs(du_norot[nh]))
+
+
+# ---------------------------------------------------------------------------
+# Node 19 / residual #2 — thickness-weighted tracer Robert-Asselin filter
+# (NEMO tra_atf_qco_lf, key_qco z*).  Truth-tier: global content conservation.
+# ---------------------------------------------------------------------------
+
+def test_thickness_weighted_asselin_conserves_content():
+    """TW filter conserves globally-integrated tracer content; concentration doesn't.
+
+    Set the per-cell CONTENT ``C0 = e3t*T`` EQUAL at the three time levels
+    (T_level = C0/e3t_level) with *varying* thickness (moving z*).  Then the
+    global content is identical at before/now/after, so NEMO's thickness-weighted
+    filter (a time-Laplacian of content) must leave the global content unchanged
+    to machine precision, while the plain concentration filter drifts by O(gamma*dη).
+    """
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _thickness_weighted_asselin,
+    )
+    rng = np.random.default_rng(0)
+    shape = (6, 8, 4)
+    gamma = 0.1
+    mask = np.ones(shape)
+    # three DISTINCT positive thickness fields (varying z* geometry)
+    e3n = jnp.asarray(50.0 + 10.0 * rng.random(shape))
+    e3b = jnp.asarray(50.0 + 10.0 * rng.random(shape))
+    e3a = jnp.asarray(50.0 + 10.0 * rng.random(shape))
+    # filtered thickness consistent with a plain-RA-filtered ssh: e3t is linear
+    # in ssh, so the filtered thickness == plain filter of the thicknesses.
+    e3f = e3n + gamma * (e3b - 2.0 * e3n + e3a)
+    # EQUAL per-cell content C0 across levels -> equal global content
+    C0 = jnp.asarray(1000.0 + 500.0 * rng.random(shape))
+    Tn = C0 / e3n
+    Tb = C0 / e3b
+    Ta = C0 / e3a
+    content0 = float(jnp.sum(C0))
+
+    # thickness-weighted (NEMO) -> global content preserved to machine precision
+    T_f = _thickness_weighted_asselin(Tn, Tb, Ta, e3n, e3b, e3a, e3f,
+                                      gamma, jnp.asarray(mask))
+    content_tw = float(jnp.sum(e3f * T_f))
+    assert abs(content_tw - content0) / content0 < 1e-13
+
+    # plain concentration form -> finite O(gamma*dη) content drift
+    T_conc = Tn + gamma * (Tb - 2.0 * Tn + Ta)
+    content_conc = float(jnp.sum(e3f * T_conc))
+    assert abs(content_conc - content0) / content0 > 1e-6
+
+    # GENERAL case (unequal contents): the TW filter perturbs global content by
+    # EXACTLY the discrete time-Laplacian of content, gamma*(C_b-2C_n+C_a) --
+    # no spurious e3t-inconsistency source.  Use independent T fields.
+    Tn2 = jnp.asarray(rng.random(shape))
+    Tb2 = jnp.asarray(rng.random(shape))
+    Ta2 = jnp.asarray(rng.random(shape))
+    T_f2 = _thickness_weighted_asselin(Tn2, Tb2, Ta2, e3n, e3b, e3a, e3f,
+                                       gamma, jnp.asarray(mask))
+    lhs = float(jnp.sum(e3f * T_f2 - e3n * Tn2))                  # Δ content
+    rhs = float(gamma * jnp.sum(e3b * Tb2 - 2.0 * e3n * Tn2 + e3a * Ta2))
+    assert abs(lhs - rhs) / (abs(rhs) + 1e-30) < 1e-12
+
+
+def test_thickness_weighted_asselin_reduces_to_plain_at_fixed_volume():
+    """Fixed volume (e3t time-invariant) -> TW filter == plain concentration RA.
+
+    Backward-compat guarantee: a non-moving coordinate makes the thickness cancel
+    exactly, so the content form collapses to ``T_n + gamma*(T_b-2T_n+T_a)``.
+    """
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _thickness_weighted_asselin,
+    )
+    rng = np.random.default_rng(1)
+    shape = (5, 7, 3)
+    gamma = 0.1
+    e3 = jnp.asarray(80.0 + 5.0 * rng.random(shape))   # same at all levels
+    mask = jnp.ones(shape)
+    Tn = jnp.asarray(rng.random(shape))
+    Tb = jnp.asarray(rng.random(shape))
+    Ta = jnp.asarray(rng.random(shape))
+    T_tw = _thickness_weighted_asselin(Tn, Tb, Ta, e3, e3, e3, e3, gamma, mask)
+    T_plain = Tn + gamma * (Tb - 2.0 * Tn + Ta)
+    assert float(jnp.max(jnp.abs(T_tw - T_plain))) < 1e-12
+
+
+def test_thickness_weighted_asselin_masks_dry_cells():
+    """Below-seafloor cells (e3_f == 0) return 0, no NaN from the divide."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _thickness_weighted_asselin,
+    )
+    shape = (3, 3, 2)
+    gamma = 0.1
+    e3 = jnp.ones(shape)
+    e3f = e3.at[..., -1].set(0.0)          # bottom level dry
+    mask = jnp.ones(shape).at[..., -1].set(0.0)
+    T = jnp.asarray(np.random.default_rng(2).random(shape))
+    out = _thickness_weighted_asselin(T, T, T, e3, e3, e3f, e3f, gamma, mask)
+    assert bool(jnp.all(jnp.isfinite(out)))
+    assert float(jnp.max(jnp.abs(out[..., -1]))) == 0.0
