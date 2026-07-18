@@ -560,7 +560,8 @@ def _load_icon_unstructured(
 
 
 def load_amip_forcing(
-    config: AMIPForcingConfig, grid, start_year: int | None = None
+    config: AMIPForcingConfig, grid, start_year: int | None = None,
+    run_days: float | None = None,
 ) -> AMIPForcing:
     """Load AMIP forcing from NetCDF and regrid to the target grid.
 
@@ -792,6 +793,19 @@ def load_amip_forcing(
                     times_days, sst_regridded, sic_regridded
                 )
             )
+            # End-of-record hold is SILENT by design (get_forcing_at_time
+            # clamps a transient file past its last record). Warn loudly when
+            # the run is known to extend past coverage so a user does not
+            # unknowingly hold a stale SST for years (audit FL1).
+            if run_days is not None and times_days[-1] < run_days:
+                logger.warning(
+                    "AMIP forcing ends at day %.0f (relative to start_year=%s) "
+                    "but the run is %.0f days: SST/SIC will HOLD the last "
+                    "record for the final %.0f days. Stage a file covering the "
+                    "full run period for time-varying forcing throughout.",
+                    float(times_days[-1]), start_year, float(run_days),
+                    float(run_days) - float(times_days[-1]),
+                )
     finally:
         if ds_sic is not ds_sst:
             ds_sic.close()
@@ -799,13 +813,26 @@ def load_amip_forcing(
 
     # Anchor values are kept un-clamped (mid-month bcs convention); the physical
     # SIC [0,1] clip and SST freezing floor are applied after time interpolation
-    # in get_forcing_at_time. ``times`` is pinned to float64 because an anchored
-    # transient axis carries large absolute day counts (~1e4-1e5) whose sub-day
-    # resolution (mid-month .5) would be lost at float32 (ULP ~5e-3 day).
+    # in get_forcing_at_time. ``times`` requests float64: under the default fp32
+    # precision policy (x64 disabled) JAX silently downcasts it to float32, at
+    # which an anchored transient axis's large absolute day counts (~1e4-1e5)
+    # lose sub-day resolution (ULP ~ offset*2^-23). Warn when that actually bites
+    # (audit FL3 — the old comment claimed a guarantee the fp32 policy breaks).
     from legoesm.core.precision import get_policy
     _dtype = get_policy().storage
+    _times = jnp.asarray(times_days, dtype=jnp.float64)
+    _max_abs_day = float(np.max(np.abs(times_days))) if times_days.size else 0.0
+    if _times.dtype == jnp.float32 and _max_abs_day * 2.0 ** -23 > 0.01:
+        logger.warning(
+            "AMIP forcing time axis stored at float32 (x64 disabled): "
+            "absolute day offset ~%.0f gives ~%.3f-day (~%.0f-min) "
+            "quantization of the mid-month anchors. Enable JAX_ENABLE_X64=1 "
+            "(fp64 policy) for exact sub-day forcing indexing.",
+            _max_abs_day, _max_abs_day * 2.0 ** -23,
+            _max_abs_day * 2.0 ** -23 * 1440.0,
+        )
     return AMIPForcing(
-        times=jnp.asarray(times_days, dtype=jnp.float64),
+        times=_times,
         sst=jnp.array(sst_regridded, dtype=_dtype),
         sic=jnp.array(sic_regridded, dtype=_dtype),
         config=config,
@@ -975,7 +1002,16 @@ def _fill_nan_nearest_points(data: np.ndarray, coords: np.ndarray) -> np.ndarray
     for t in range(data.shape[0]):
         frame = data[t]
         mask_valid = ~np.isnan(frame)
-        if mask_valid.all() or not mask_valid.any():
+        if not mask_valid.any():
+            # No valid donor for this frame — silently leaving it all-NaN
+            # would leak NaN into the regrid + runtime as a NaN surface
+            # temperature at step N with no message (audit FL2). Fail loud.
+            raise ValueError(
+                f"AMIP forcing frame {t} is entirely NaN/missing; no valid "
+                "point to fill from. Check the source file's time slice "
+                f"(record {t}) for an all-masked field."
+            )
+        if mask_valid.all():
             continue
 
         interp = NearestNDInterpolator(coords[mask_valid], frame[mask_valid])

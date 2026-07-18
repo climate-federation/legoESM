@@ -951,6 +951,60 @@ class TestCyclicClimatologyPhase:
             v = np.asarray(get_ozone_at_time(cfg, day=float(day))["ozone"])
             assert 1.0 - 1e-9 <= float(v.min()) and float(v.max()) <= 12.0 + 1e-9
 
+    def test_leap_year_dated_true_midmonth_matches_noleap(self, tmp_path):
+        # Audit FL4: a GREGORIAN leap-year-dated (2000) climatology whose
+        # records sit on the TRUE 16th of each month must interpolate
+        # identically to the SAME data with noleap-dated records — the
+        # per-record date reconstruction places each record at its noleap
+        # day-of-year, so the intervening Feb-29 introduces no post-February
+        # residual (the old first-record-offset method left ~1 day).
+        import cftime
+        import netCDF4
+        lat = np.linspace(-90, 90, 19)
+        data = np.stack([np.full(19, float(m + 1)) for m in range(12)])
+
+        def _write(path, calendar):
+            ctor = (cftime.DatetimeGregorian if calendar == "gregorian"
+                    else cftime.DatetimeNoLeap)
+            ref = ctor(2000, 1, 1)
+            mids = np.array([
+                (ctor(2000, m + 1, 16) - ref).days for m in range(12)],
+                dtype=np.float64)
+            with netCDF4.Dataset(path, "w") as ds:
+                ds.createDimension("time", 12)
+                ds.createDimension("lat", 19)
+                t = ds.createVariable("time", "f8", ("time",))
+                t[:] = mids
+                t.units = "days since 2000-01-01"
+                t.calendar = calendar
+                ds.createVariable("lat", "f8", ("lat",))[:] = lat
+                ds.createVariable("ozone", "f8", ("time", "lat"))[:] = data
+
+        p_greg = str(tmp_path / "clim_greg_true.nc")
+        p_noleap = str(tmp_path / "clim_noleap_true.nc")
+        _write(p_greg, "gregorian")
+        _write(p_noleap, "noleap")
+        cfg_g = OzoneConfig(enabled=True, path=p_greg)
+        cfg_n = OzoneConfig(enabled=True, path=p_noleap)
+        for day in (0.0, 15.5, 74.0, 100.0, 196.5, 300.0, 364.9):
+            v_g = np.asarray(get_ozone_at_time(cfg_g, day=day)["ozone"])
+            v_n = np.asarray(get_ozone_at_time(cfg_n, day=day)["ozone"])
+            np.testing.assert_allclose(v_g, v_n, atol=1e-9, err_msg=f"day={day}")
+
+    def test_record_noleap_doy_drops_leap_day(self):
+        # Direct unit: a post-Feb record on a leap-year Gregorian axis maps to
+        # its NOLEAP day-of-year (Feb has 28 days on the model clock), so the
+        # intervening Feb-29 is dropped rather than shifting the phase.
+        import cftime
+        from legoesm.forcing.external import _record_noleap_doy
+        from legoesm.forcing.time_utils import NOLEAP_MONTH_STARTS
+        first = cftime.DatetimeGregorian(2000, 1, 16)   # mid-Jan anchor
+        # Jan16 + 59 days on the 2000 Gregorian calendar (includes Feb 29):
+        # day-of-year 16+59 = 75 = Mar 15 (Jan 31 + Feb 29 = 60; 75-60 = Mar 15).
+        doy = _record_noleap_doy(first, 59.0)
+        expected = NOLEAP_MONTH_STARTS[2] + (15 - 1)     # Mar 15, noleap
+        assert abs(doy - expected) < 1e-9
+
 
 class TestSimDayAllLeapByCalendarDate:
     """Codex review: an ``all_leap`` (366-day) file axis drifts +1 d/yr

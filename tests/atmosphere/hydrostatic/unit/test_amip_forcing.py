@@ -329,6 +329,17 @@ class TestFillNanNearest:
         assert not np.any(np.isnan(result))
         assert result[0, 2, 5] == 1.0  # nearest neighbor should be 1.0
 
+    def test_all_nan_frame_raises(self):
+        # Audit FL2: an entirely-NaN frame has no valid donor — filling would
+        # silently leak NaN into the regrid + runtime (NaN surface temperature
+        # with no message). Fail loud instead of the old silent ``continue``.
+        data = np.ones((2, 5, 10))
+        data[1] = np.nan                     # second frame all missing
+        lat = np.linspace(-90, 90, 5)
+        lon = np.linspace(0, 350, 10)
+        with pytest.raises(ValueError, match="entirely NaN"):
+            _fill_nan_nearest(data, lat, lon)
+
 
 def _write_multiyear_forcing(path, start=2000, nyears=3, midmonth=False,
                              use_cftime=False):
@@ -361,6 +372,33 @@ def _write_multiyear_forcing(path, start=2000, nyears=3, midmonth=False,
         {"sst": (("time", "lat", "lon"), sst), "sic": (("time", "lat", "lon"), sic)},
         coords={"time": np.array(dates), "lat": lat, "lon": lon},
     ).to_netcdf(path)
+
+
+class TestEndOfRecordWarning:
+    """Audit FL1: a transient forcing file silently HOLDS its last record past
+    the end of coverage; warn loudly when the run is known to extend past it."""
+
+    def test_warns_when_run_exceeds_coverage(self, grid, tmp_path, caplog):
+        import logging
+        p = str(tmp_path / "short.nc")
+        _write_multiyear_forcing(p, start=1979, nyears=2, midmonth=True,
+                                 use_cftime=True)
+        cfg = AMIPForcingConfig(path=p, sst_var="sst", sic_var="sic")
+        # File covers ~2 years (~730 days); ask for a 5-year run.
+        with caplog.at_level(logging.WARNING):
+            load_amip_forcing(cfg, grid, start_year=1979, run_days=5 * 365.0)
+        assert any("will HOLD the last record" in r.message for r in caplog.records)
+
+    def test_silent_when_file_covers_run(self, grid, tmp_path, caplog):
+        import logging
+        p = str(tmp_path / "long.nc")
+        _write_multiyear_forcing(p, start=1979, nyears=3, midmonth=True,
+                                 use_cftime=True)
+        cfg = AMIPForcingConfig(path=p, sst_var="sst", sic_var="sic")
+        with caplog.at_level(logging.WARNING):
+            load_amip_forcing(cfg, grid, start_year=1979, run_days=2 * 365.0)
+        assert not any("will HOLD the last record" in r.message
+                       for r in caplog.records)
 
 
 class TestStartYearAnchoring:

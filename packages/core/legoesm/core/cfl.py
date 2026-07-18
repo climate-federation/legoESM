@@ -318,8 +318,16 @@ def cfl_check_and_adjust(
         dx_min = estimate_min_dx_gaussian(n, radius)
     elif grid_type == "mpas":
         dx_min = estimate_min_dx_icosahedral(n, radius)
-    else:
+    elif grid_type == "cubed_sphere":
         dx_min = estimate_min_dx_cubed_sphere(n, radius)
+    else:
+        # Dispatch hardening: a typo'd grid_type must not silently take the
+        # cubed-sphere dx (a wrong dt clamp on a lat-lon/mpas run). The dycore
+        # grid_type namespace is exactly these four.
+        raise ValueError(
+            f"cfl_check_and_adjust: unknown grid_type {grid_type!r}; expected "
+            "one of 'latlon', 'gaussian', 'mpas', 'cubed_sphere'."
+        )
 
     # Total wave speed = max(wind) + gravity_wave_speed
     c_total = max_wind + gravity_wave_speed
