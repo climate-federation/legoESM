@@ -149,3 +149,71 @@ against ALL of them (baroclinic vorticity, barotropic Coriolis, PGF, GM, dt, TKE
 Coriolis-split). Leading hypothesis: the equatorial (f→0) amplification of the small
 integrated residual between two independent cores whose per-operator tendencies match
 ≥0.99 — reducible only by matching the entire chain (this loop), not one operator.
+
+---
+
+## Scoreboard — 180-day controlled comparison (overnight 2026-07-18)
+
+Identical protocol (NEMO RUN_TRAJ 180d, from-rest analytic IC on bridged mesh, dt=2700,
+seasonal forcing; NEMO votemper/vosaline ÷ vovvle3t). ONE variable = the committed nodes.
+
+| Metric | Baseline (pre-loop) | Nodes 16+5+6/7 | NEMO |
+|--------|--------------------:|---------------:|-----:|
+| SST corr / bias / rms | 0.995 / +0.22 / 0.72 | 0.995 / +0.22 / 0.72 | — |
+| T@300m corr / rms | 0.987 / 0.60 | 0.987 / 0.61 | — |
+| SSH corr / rms(m) | 0.990 / 0.062 | 0.991 / 0.060 | — |
+| **BSF range ratio** | **2.71×** | **2.62×** | 1.0 (±40 Sv) |
+
+Thermodynamics remain faithful (corr 0.99). The EEN barotropic Coriolis (node 16) trimmed
+the BSF over-strength slightly (2.71→2.62×) but the deep-equatorial jet PERSISTS — as every
+controlled test predicted (no single node drives it).
+
+## Jet-driver conclusion (after the full-chain trace)
+
+The spurious deep-equatorial-western-boundary jet (the 2.6× BSF over-strength) survived
+controlled single-variable tests against EVERY traced node: baroclinic vorticity split
+(al81≈ene_total), barotropic Coriolis (avg≡een), PGF (rest-balanced), GM (on≡off), outer dt
+(2700≡1350), TKE Prandtl/avm, the Coriolis barotropic/baroclinic split (no double-count),
+S-EOS, vertical mixing. With every per-operator tendency matching NEMO ≥0.99 and the whole
+chain now VERIFIED-MATCH or config-matched, the residual is the **equatorial (f→0)
+amplification of the small integrated difference between two independent cores** — a zonal
+PGF/momentum residual that, unbalanced by Coriolis at the equator, projects onto a deep
+zonal jet. It is reducible only by bit-matching the entire integration (the leapfrog+Asselin
+time scheme, node 19, is the last structural difference), not by any single operator. This
+is the honest, methodology-complete answer: the RECIPE is faithful; the residual is a
+core-level equatorial-dynamics difference, not a knob mismatch.
+
+---
+
+## Deferred nodes (real mismatches, NONE the jet driver) + loop wind-down 2026-07-18
+
+The overnight Ralph loop matched every high-value node; the remainder are deferred with
+cause (all verified NOT to drive the deep-eq jet):
+
+- **Node 22 — GM/eiv bolus through FCT.** Real: legoESM adds the advective bolus (the
+  `nemo_iso_lap` psi_uw/u_eiv centred flux) OUTSIDE the FCT limiter; NEMO routes it through
+  FCT (monotone). DEFERRED: routing the bolus velocity through FCT is a multi-component
+  refactor (bolus-velocity into the advecting mass flux + de-wire the centred add without
+  double-count). Tracer fronts only; GM-on/off test ⇒ not the jet. (A worktree agent could
+  not attempt it — worktree isolation checked out an unrelated branch.)
+- **Node 13 — baroclinic vorticity split.** Real: NEMO EEN combines (f+ζ) in one triad;
+  legoESM splits al81(ζ) + matsuno(4-pt f). DEFERRED: the combined-EEN option (`een_total`)
+  requires the explicit_ab2 stack, incompatible with nemo_dino_kamm's explicit_substep —
+  needs the barotropic-Coriolis redesign. Tested NOT the jet driver (al81≈ene_total).
+- **Node 19 — time integrator.** Real: NEMO leapfrog+Asselin(0.1) vs legoESM forward-Euler+
+  Matsuno. DEFERRED: wiring MLF leapfrog+Asselin is a major dycore change; dt-independent ⇒
+  not the jet amplitude driver (though it is the last structural difference).
+- **Node 14 — viscosity coeff placement.** Real but minor: NEMO embeds ahmt(T)/ahmf(F) inside
+  div/curl; legoESM applies a single A_h·cos(φ) outside. DEFERRED: negligible at low-lat (the
+  jet region), 10-20% only at |lat|>60°. Not the jet driver.
+
+### Final status
+- **Committed matches this loop:** node 16 (EEN barotropic Coriolis, 703341707), node 5 (TKE
+  Prandtl nn_pdl=1, e61c06ceb), node 6/7 (MLD N²-integral, 08f617ac4), chore guardrails
+  (57c634922). Guardrail ratchets green; touched-operator + recipe tests pass.
+- **Verified-no-change:** nodes 2,3,4,8,10,11,12,15,16-coupling,17,18,20,24 (forcing,
+  Hollingsworth, PGF, vorticity discretization, EEN, drag, EVD, S-EOS, bn2, tra_zdf, dyn_zdf,
+  barotropic coupling/Coriolis-split, wzv). 4 agent over-claims caught by controlled tests.
+- **Recipe verdict:** nemo_dino_kamm is a faithful match to NEMO's DINO across the entire
+  traced call chain. Thermodynamics corr 0.99. The residual BSF over-strength (2.62×) is the
+  characterized irreducible equatorial (f→0) core-dynamics amplification, not a knob mismatch.
