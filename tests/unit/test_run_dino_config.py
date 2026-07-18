@@ -407,3 +407,21 @@ def test_allow_multiyear_flag(monkeypatch):
     monkeypatch.setattr(sys, "argv",
                         ["run_dino.py", "--days", "720", "--allow-multiyear"])
     assert rd._parse_args().allow_multiyear is True
+
+
+def test_tke_prandtl_ri_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--vmix", "tke", "--tke-prandtl-ri", "on"])
+    assert rd._parse_args().tke_prandtl_ri == "on"
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--vmix", "tke", "--tke-prandtl-ri", "off"])
+    assert rd._parse_args().tke_prandtl_ri == "off"
+
+
+def test_tke_prandtl_ri_default_none_and_rejects_bad(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().tke_prandtl_ri is None      # unset -> recipe/default wins
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--tke-prandtl-ri", "bogus"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()

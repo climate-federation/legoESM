@@ -230,6 +230,17 @@ class DINOConfig:
     # does NOT help instability (B) (2e-3 still NaNs ~d236), so 5e-4 is the
     # chosen floor. kpp/constant are unaffected (they keep the paper A_v_bg).
     tke_momentum_visc_bg: float = 5.0e-4
+    # TKE tracer/momentum Prandtl selection. False (default): constant Pr=10
+    # (Prandtl_tke0), byte-identical to the legacy DINO tke path and all other
+    # recipes. True (nemo_dino_kamm): NEMO zdftke nn_pdl=1 — the Richardson-
+    # dependent inverse Prandtl pdlr=max(0.1, ri_cri/max(ri_cri,Ri)) with
+    # ri_cri=2/(2+rn_ediss/rn_ediff)=2/(2+c_eps/c_k) (zdftke.F90:399,772), so
+    # Pr=1/pdlr=clamp(Ri/ri_cri,1,10). Reproduced EXACTLY by prandtl_mode=
+    # "richardson" with prandtl_ri_coeff=1/ri_cri (see _dino_vertical_mixing_config;
+    # test_nemo_recipe.test_nemo_tke_prandtl_bit_reproduces_nemo_pdl). Interior
+    # (Ri>>ri_cri) drops avt toward 0.1·avm; convecting columns (Ri<0) give
+    # Pr=1 (avt tracks the large convective avm).
+    tke_prandtl_ri: bool = False
 
     # ------------------------------------------------------------------
     # Equation of state. The paper (Kamm et al. 2025) uses NEMO's
@@ -631,6 +642,7 @@ DINO_RECIPES: dict[str, dict] = {
         # -- Vertical mixing (namzdf: ln_zdftke=T; namzdf_tke rn_ediff=0.1 rn_ediss=0.7) --
         "vmix_scheme": "tke",
         "tke_momentum_visc_bg": 1.2e-4,          # rn_avm0 (NO legoESM 5e-4 stabilizer floor)
+        "tke_prandtl_ri": True,                  # nn_pdl=1 Ri-dependent Prandtl (default namzdf_tke)
         # -- Convection (namzdf: ln_zdfevd=T, rn_evd=100, nn_evdm=1; hard rn2<0 on eosbn2) --
         "convection_smooth_transition": False,
         "convection_n2_mode": "adiabatic",
@@ -1750,20 +1762,27 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
         # the paper's 1.2e-4/1.2e-5 ratio) — NOT recomputed from the raised
         # momentum floor — so the thermocline mixing is unchanged. The TKE step
         # is fed N2 + shear_sq by the vertical-mixing integration.
-        return VerticalMixingConfig(
-            scheme="tke",
-            tke=TKEConfig(
-                prandtl_mode="constant",
-                kappaM_min=cfg.A_v_bg_effective, kappaH_min=cfg.K_v_bg,
-                kappaM_max=cfg.K_conv, bg_diff_scale=0.0,
-                # NEMO zdftke surface terms — BOTH are namelist_ref defaults
-                # (DINO's namelist_cfg sets no &namzdf_tke overrides, so the
-                # oracle runs with ln_lc=T (rn_lc=0.15) and nn_etau=1
-                # (rn_efr=0.05, nn_htau=0 → constant 10 m)). Faithful ON.
-                lc=True,
-                etau_mode="below_ml",
-            ),
+        tke = TKEConfig(
+            prandtl_mode="constant",
+            kappaM_min=cfg.A_v_bg_effective, kappaH_min=cfg.K_v_bg,
+            kappaM_max=cfg.K_conv, bg_diff_scale=0.0,
+            # NEMO zdftke surface terms — BOTH are namelist_ref defaults
+            # (DINO's namelist_cfg sets no &namzdf_tke overrides, so the
+            # oracle runs with ln_lc=T (rn_lc=0.15) and nn_etau=1
+            # (rn_efr=0.05, nn_htau=0 → constant 10 m)). Faithful ON.
+            lc=True,
+            etau_mode="below_ml",
         )
+        if cfg.tke_prandtl_ri:
+            # NEMO nn_pdl=1: Ri-dependent inverse Prandtl. richardson mode with
+            # coeff=1/ri_cri reproduces NEMO's Pr=1/pdlr=clamp(Ri/ri_cri,1,10)
+            # to machine precision (clamp-to-[1,10] is order-independent). ri_cri
+            # is derived from the SAME c_eps/c_k the TKE closure uses, so it
+            # auto-tracks a retuned dissipation ratio (NEMO 0.7/0.1 → 2/9 → 4.5).
+            ri_cri = 2.0 / (2.0 + tke.c_eps / tke.c_k)
+            tke = tke._replace(
+                prandtl_mode="richardson", prandtl_ri_coeff=1.0 / ri_cri)
+        return VerticalMixingConfig(scheme="tke", tke=tke)
     if cfg.vmix_scheme == "kpp":
         return VerticalMixingConfig(
             scheme="kpp", kpp=KPPConfig(K_bg=cfg.K_v_bg, A_bg=cfg.A_v_bg),

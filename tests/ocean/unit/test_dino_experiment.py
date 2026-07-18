@@ -157,6 +157,63 @@ class TestDINOConfig:
             dino._dino_vertical_mixing_config(
                 dataclasses.replace(cfg, vmix_scheme="bogus"))
 
+    def test_tke_prandtl_ri_maps_nemo_nn_pdl(self):
+        """DINOConfig.tke_prandtl_ri=True wires the NEMO zdftke nn_pdl=1
+        Richardson Prandtl: prandtl_mode='richardson' with coeff=1/ri_cri,
+        ri_cri=2/(2+c_eps/c_k)=2/9 -> coeff=4.5. Default False keeps Pr=10
+        constant (other recipes byte-identical). Truth-tier: in a strongly
+        stratified column (Ri>>ri_cri) the tracer avt drops to 0.1*avm (NEMO
+        pdlr floor); in a convecting column (Ri<0) avt tracks avm (Pr=1)."""
+        import dataclasses
+        from legoesm.ocean.physics.vertical_mixing.tke import (
+            _prandtl_number, compute_K_from_tke,
+        )
+        cfg = DINOConfig()
+        assert cfg.tke_prandtl_ri is False
+        # Default (off): constant Pr=10.
+        vm_off = dino._dino_vertical_mixing_config(
+            dataclasses.replace(cfg, vmix_scheme="tke"))
+        assert vm_off.tke.prandtl_mode == "constant"
+        # On: NEMO Ri-Prandtl.
+        vm_on = dino._dino_vertical_mixing_config(
+            dataclasses.replace(cfg, vmix_scheme="tke", tke_prandtl_ri=True))
+        tke = vm_on.tke
+        assert tke.prandtl_mode == "richardson"
+        ri_cri = 2.0 / (2.0 + tke.c_eps / tke.c_k)          # NEMO 2/9
+        assert tke.prandtl_ri_coeff == pytest.approx(1.0 / ri_cri)
+        assert tke.prandtl_ri_coeff == pytest.approx(4.5)
+        # pdlr(Ri) curve matches NEMO MAX(0.1, ri_cri/MAX(ri_cri,Ri)) exactly.
+        Ri = np.array([-1.0, 0.0, 0.1, ri_cri, 1.0, 5.0, 50.0])
+        N2 = jnp.asarray(Ri)                                 # unit shear -> Ri=N2
+        Pr = np.asarray(_prandtl_number(N2, jnp.ones_like(N2), jnp.ones_like(N2), tke))
+        pdlr_nemo = np.maximum(0.1, ri_cri / np.maximum(ri_cri, Ri))
+        np.testing.assert_allclose(1.0 / Pr, pdlr_nemo, rtol=0, atol=1e-12)
+        # Strongly stratified interior: avt -> 0.1*avm (pdlr floor). Build K
+        # with a large raw K_M (l_k, e sized so K_M >> floors/ceiling irrelevant).
+        strat = tke._replace(kappaM_max=1e6, kappaM_min=1e-6, kappaH_min=1e-9)
+        e = jnp.full((5,), 1e-2)
+        l_k = jnp.full((5,), 10.0)
+        big_ri = jnp.full((5,), 100.0)                       # Ri=100 >> ri_cri
+        K_M, K_H = compute_K_from_tke(
+            e, l_k, strat, N2=big_ri, shear_sq=jnp.ones((5,)))
+        np.testing.assert_allclose(np.asarray(K_H) / np.asarray(K_M), 0.1,
+                                   rtol=1e-6)
+        # Convecting column: Ri<0 -> Pr=1 -> avt tracks avm (before floors).
+        _, K_H_conv = compute_K_from_tke(
+            e, l_k, strat, N2=jnp.full((5,), -1.0), shear_sq=jnp.ones((5,)))
+        np.testing.assert_allclose(np.asarray(K_H_conv) / np.asarray(K_M), 1.0,
+                                   rtol=1e-6)
+
+    def test_nemo_dino_kamm_recipe_sets_ri_prandtl(self):
+        """The complete NEMO card enables nn_pdl=1; other recipes do not."""
+        cfg = dino_config_for_recipe("nemo_dino_kamm")
+        assert cfg.tke_prandtl_ri is True
+        vm = dino._dino_vertical_mixing_config(cfg)
+        assert vm.tke.prandtl_mode == "richardson"
+        assert vm.tke.prandtl_ri_coeff == pytest.approx(4.5)
+        # Backward-compat: the Veros DINO card keeps constant Pr.
+        assert dino_config_for_recipe("veros").tke_prandtl_ri is False
+
     def test_registry_entry(self):
         assert "dino" in AVAILABLE_EXPERIMENTS
         assert AVAILABLE_EXPERIMENTS["dino"] is EXPERIMENT_CONFIG

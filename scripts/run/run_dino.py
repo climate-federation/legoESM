@@ -151,6 +151,14 @@ def _parse_args():
              "1.2e-4) to run TKE at the unstable paper viscosity.",
     )
     p.add_argument(
+        "--tke-prandtl-ri", choices=("on", "off"), default=None,
+        help="TKE Richardson-dependent Prandtl (DINOConfig.tke_prandtl_ri; "
+             "NEMO zdftke nn_pdl=1). on: interior tracer diffusivity avt drops "
+             "toward 0.1·avm in stratified water (Pr=clamp(Ri/ri_cri,1,10)); "
+             "off (default): constant Pr=10. Effective only for --vmix tke. "
+             "The nemo_dino_kamm recipe sets it on.",
+    )
+    p.add_argument(
         "--evd-momentum", choices=("on", "off"), default=None,
         help="Enhanced vertical diffusion on MOMENTUM (DINOConfig."
              "evd_on_momentum; NEMO nn_evdm=1, the DINO namelist setting). "
@@ -481,6 +489,9 @@ def main():
     if args.evd_momentum is not None:
         cfg = dataclasses.replace(
             cfg, evd_on_momentum=(args.evd_momentum == "on"))
+    if args.tke_prandtl_ri is not None:
+        cfg = dataclasses.replace(
+            cfg, tke_prandtl_ri=(args.tke_prandtl_ri == "on"))
     if args.barotropic_coriolis is not None:
         cfg = dataclasses.replace(
             cfg, barotropic_coriolis=args.barotropic_coriolis)
