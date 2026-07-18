@@ -4504,6 +4504,9 @@ class ModelDriver:
             # (_run_mpas); a save before then is refused (see
             # save_checkpoint) rather than emitting an unvalidated carry.
             self._mpas_phys_state = None
+            from legoesm.atmosphere.physics.physics_state import (
+                PHYSSTATE_INPUT_FIELDS,
+            )
             _ps_keys = [k for k in d.files if k.startswith("physstate_")]
             if _ps_keys:
                 for _k in _ps_keys:
@@ -4512,6 +4515,14 @@ class ModelDriver:
                         # Plain-string metadata (scheme tag) — no jnp,
                         # no scatter.
                         self._carry_aux[_k] = str(d[_k])
+                        continue
+                    # Per-step INPUT fields are never restored (recomputed each
+                    # step).  Drop them at the LOAD boundary — BEFORE any
+                    # ``d[_k]`` access / jnp.asarray / MPI scatter — so a legacy
+                    # checkpoint that wrote one (e.g. a None-derived object
+                    # array, or a wrong-shaped concrete input) cannot fail the
+                    # load; the fresh seed's None is correct (codex r2).
+                    if _name in PHYSSTATE_INPUT_FIELDS:
                         continue
                     _val = jnp.asarray(d[_k])
                     if _mpi and _name != "prng_key":

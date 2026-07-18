@@ -407,12 +407,12 @@ def update_physics_state(phys_state, updates):
         cloud_fraction=updates.get(
             "cloud_fraction", phys_state.cloud_fraction
         ),
-        # Per-step INPUTS (recomputed each step by the driver, not accumulated
-        # carries) — pass through unless the driver overrides them.
-        dyn_tendency_T=updates.get(
-            "dyn_tendency_T", phys_state.dyn_tendency_T
-        ),
-        dyn_tendency_qv=updates.get(
-            "dyn_tendency_qv", phys_state.dyn_tendency_qv
-        ),
+        # Per-step INPUTS: CONSUMED each call, never carried forward.  Default
+        # to None (NOT the prior value) so a driver that forgets to refresh
+        # them on a later step fails CLOSED — the bridge guard raises on a
+        # None carry rather than silently pairing a STALE dynamics tendency
+        # with a new post-dynamics state (RCAPQADV staging contract, codex
+        # r2).  A driver re-populates them before every convection call.
+        dyn_tendency_T=updates.get("dyn_tendency_T", None),
+        dyn_tendency_qv=updates.get("dyn_tendency_qv", None),
     )
