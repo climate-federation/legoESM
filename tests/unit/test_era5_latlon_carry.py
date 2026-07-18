@@ -198,6 +198,61 @@ def test_latlon_carry_analytic_temperature_value():
     assert 285.0 < T_eq_sfc < 305.0
 
 
+# --- T3: spectral carry gets the SAME phis treatment as the lat-lon carry ----
+# (smooth_phis_gaussian + shared _apply_phis_hydrostatic_adjustment; it was the
+#  odd grid out — raw phis, no barometric p_s reconciliation, no hybrid floor)
+
+def test_spectral_carry_smooths_phis_and_reconciles_ps():
+    from legoesm import constants
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.topography import smooth_phis_gaussian
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.training.era5_to_state import (
+        era5_to_spectral_carry,
+        regrid_2d_to_gaussian,
+        regrid_latlon_to_gaussian,
+    )
+    era5 = _mountain_era5()
+    grid = create_gaussian_grid(21)
+    sigma = create_sigma_coordinate(20)
+    carry = era5_to_spectral_carry(era5, grid, sigma)
+    raw = np.asarray(regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid))
+    phis = np.asarray(carry.phis)
+    assert np.all(np.isfinite(phis)) and np.all(np.isfinite(np.asarray(carry.p_s)))
+    # phis is SMOOTHED: it actually changed, gradients reduced, ridge amplitude cut.
+    assert np.abs(phis - raw).max() > 0.0, "spectral carry left phis raw"
+    assert _max_abs_grad(phis) < _max_abs_grad(raw), "carry did not smooth phis"
+    assert phis.max() < raw.max(), "smoothing must reduce the ridge amplitude"
+    # p_s is RECONCILED to the smoothed phis by the exact barometric relation
+    # (non-hybrid): p_s_adj = p_s * exp((phis_raw - phis_smooth)/(R_d T_sfc)).
+    T_ll, _, _, _, p_s_ll = regrid_latlon_to_gaussian(era5, grid)
+    smooth = np.asarray(smooth_phis_gaussian(raw))
+    T_sfc = np.asarray(T_ll)[..., -1]
+    expected_ps = np.asarray(p_s_ll) * np.exp(
+        (raw - smooth) / (constants.R_d * T_sfc))
+    np.testing.assert_allclose(np.asarray(carry.p_s), expected_ps, rtol=1e-4)
+    # Sign: where the peak was cut, lowering terrain must RAISE p_s.
+    cut = (raw - smooth) > 1.0
+    assert cut.any()
+    assert np.all(np.asarray(carry.p_s)[cut] > np.asarray(p_s_ll)[cut])
+
+
+def test_spectral_carry_hybrid_orography_respects_ps_floor():
+    # Mirror of test_latlon_carry_hybrid_orography_respects_ps_floor.
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import make_hybrid_levels
+    from legoesm.training.era5_to_state import (
+        _hybrid_p_s_floor, era5_to_spectral_carry)
+    era5 = _mountain_era5()
+    grid = create_gaussian_grid(21)
+    sigma = make_hybrid_levels(20)
+    carry = era5_to_spectral_carry(era5, grid, sigma)
+    floor = _hybrid_p_s_floor(sigma, dp_floor=100.0)
+    p_s = np.asarray(carry.p_s)
+    assert np.all(np.isfinite(np.asarray(carry.T)))
+    assert np.all(p_s >= floor - 1.0), "hybrid p_s floor not honored on spectral"
+
+
 # ---------------------------------------------------------------------------
 # Conditional prognostic-carry seeding (all-scheme AIMIP training support)
 # ---------------------------------------------------------------------------

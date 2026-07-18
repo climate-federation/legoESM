@@ -972,9 +972,24 @@ class ModelDriver:
                 # keeps sic_scale=0.01), and an explicit --sic-scale/--sst-offset
                 # overrides them — e.g. ``--sic-scale 0`` for a no-sea-ice run,
                 # which the bare ``_replace(path, T_ice)`` used to silently drop.
-                forcing_config = get_amip_preset(cfg.dataset)._replace(
+                # Also forward the split-SIC file and variable-name overrides:
+                # a preset names the dataset's canonical variables, but a user
+                # staging e.g. HadISST SST alongside a separate SIC file (or a
+                # renamed variable) still needs --sic-path/--*-var to reach the
+                # loader — the bare ``_replace`` used to silently drop them and
+                # read SIC from the SST file (audit 2026-07-17). Empty string
+                # means "not set" (run_amip maps absent CLI flags to ""), which
+                # keeps the preset's own value.
+                preset = get_amip_preset(cfg.dataset)
+                forcing_config = preset._replace(
                     path=cfg.forcing_path, T_ice=cfg.T_ice,
                     sst_offset=cfg.sst_offset, sic_scale=cfg.sic_scale,
+                    sic_path=getattr(cfg, "sic_path", "") or preset.sic_path,
+                    sst_var=cfg.sst_var or preset.sst_var,
+                    sic_var=cfg.sic_var or preset.sic_var,
+                    time_var=cfg.time_var or preset.time_var,
+                    lat_var=cfg.lat_var or preset.lat_var,
+                    lon_var=cfg.lon_var or preset.lon_var,
                 )
 
             # Anchor the SST/SIC time axis to the run's start year so a model
@@ -1111,13 +1126,17 @@ class ModelDriver:
         if cfg.grid.grid_type == "mpas":
             from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
             shape_3d = (self.grid.nCells, NLEV)
-            self.state = held_suarez_init_mpas(
-                self.grid, self.sigma, T_init=cfg.T_init,
+            # Pass phis at construction so p_s is hydrostatically reduced over
+            # topography (p_s = p_ref*exp(-phis/(R_d*T_init))) — same fix the
+            # lat-lon branch below documents.  Patching phis in afterwards left
+            # p_s flat over terrain: a startup pressure shock over all
+            # orography (audit 2026-07-17).
+            phis_mpas = (
+                self._phis_data if jnp.any(self._phis_data != 0) else None
             )
-            if jnp.any(self._phis_data != 0):
-                self.state = self.state._replace(
-                    phis=self.state.phis.replace(data=self._phis_data),
-                )
+            self.state = held_suarez_init_mpas(
+                self.grid, self.sigma, T_init=cfg.T_init, phis=phis_mpas,
+            )
         elif cfg.dycore.discretization == "spectral":
             from legoesm.atmosphere.dynamics.gcm.spectral_pe import isothermal_rest_state_spectral
             shape_3d = (self.grid.n_lat, self.grid.n_lon, NLEV)
@@ -1558,6 +1577,23 @@ class ModelDriver:
                 # Prognostic snow + snow-albedo feedback on the slab tile.
                 self.physics.snow_albedo_feedback = bool(
                     getattr(self.config, "snow_albedo_feedback", False))
+                if (_bucket or _stomatal) and not self.physics.surface_tiled:
+                    # Non-tiled surface flux runs ONE bulk/turbulence scheme on
+                    # the blended T_sfc with a WET q_sat (no beta), while the
+                    # slab-land SEB depletes its bucket with the beta-limited
+                    # flux: the moisture the atmosphere gains over land is NOT
+                    # the water the bucket loses, so the land water budget does
+                    # not close (audit 2026-07-17). The tiled path applies beta
+                    # on both sides consistently.
+                    logger.warning(
+                        "  Land beta-limited evaporation "
+                        "(--land-soil-bucket/--land-stomatal-beta) without "
+                        "--surface-tiled: the atmosphere sees the WET blended-"
+                        "surface latent flux, not the beta-limited land flux — "
+                        "land water budget will not close. Pass "
+                        "--surface-tiled (with --turbulence louis/clubb_lite/"
+                        "clubb) for a consistent land-atm moisture budget."
+                    )
                 logger.info(
                     f"  Land tile: ACTIVE (slab land, C_land="
                     f"{self.physics.C_land:.1e} J/m2/K, "
