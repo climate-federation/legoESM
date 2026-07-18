@@ -14,9 +14,6 @@ Arctic.  ``TKEConfig.eice`` + the k_profiles threading close the gap.  Pinned:
 from __future__ import annotations
 
 import jax
-
-jax.config.update("jax_enable_x64", True)  # dtype-stable comparisons
-
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -27,6 +24,8 @@ from legoesm.ocean.physics.vertical_mixing.tke import (
     nemo_langmuir_tke_source,
     tke_vertical_mixing,
 )
+
+jax.config.update("jax_enable_x64", True)  # dtype-stable comparisons
 
 
 def _column(nlev=12, n=4):

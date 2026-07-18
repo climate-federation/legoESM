@@ -15,9 +15,6 @@ threads the LOCAL top-cell salinity through the SAME closure functions
 from __future__ import annotations
 
 import jax
-
-jax.config.update("jax_enable_x64", True)  # tolerances below are f64-scaled
-
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -28,6 +25,8 @@ from legoesm.ocean.freshwater import (
     virtual_salt_flux,
     virtual_salt_flux_from_net,
 )
+
+jax.config.update("jax_enable_x64", True)  # tolerances below are f64-scaled
 
 
 def _fw(shape, precip=2.0e-5, evap=1.0e-5, runoff=3.0e-5):
@@ -128,12 +127,32 @@ class TestDispatchHardening:
         LatLonCGridOceanModel._validate_config(
             LatLonCGridOceanConfig(normalize_freshwater=True))
 
-    def test_mpas_field_exists_default_bit_compat(self):
-        # The MPAS raise lives inside mpas_ocean_baroclinic_tendencies (needs
-        # a full Voronoi mesh — exercised by the integration suite); here pin
-        # the config field + default only.
-        from legoesm.ocean.mpas_config import MPASOceanConfig
-        assert MPASOceanConfig().freshwater_salinity == "s_ref"
+    def test_mpas_gate_source_tripwire(self):
+        # The MPAS raise lives inside mpas_ocean_baroclinic_tendencies (a
+        # full Voronoi mesh is integration-suite territory).  Source-level
+        # tripwire in the dispatch-hardening style: the gate, its
+        # normalize-incompatibility branch, and the local-S selection must
+        # all be present — deleting any of them goes red here even though
+        # the numeric path is not executed.
+        import inspect
+        from legoesm.ocean.dynamics import ocean_pe_mpas
+        src = inspect.getsource(ocean_pe_mpas.mpas_ocean_baroclinic_tendencies)
+        assert 'getattr(config, "freshwater_salinity", "s_ref")' in src
+        assert "incompatible with" in src            # normalize+local raise
+        assert "freshwater_salinity must be" in src  # unknown-selection raise
+        assert "S_3d[:, 0]" in src                   # local top-cell S source
+
+
+def test_runner_prescribed_sic_handoff_tripwire():
+    # The prescribed-ice SIC handoff (codex HIGH round-1) lives in the OMIP
+    # host loop; source tripwire so removing the sf._replace silently cannot
+    # pass (the blend-branch attach alone must NOT satisfy this — match the
+    # prescribed-branch guard condition specifically).
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[3]
+    src = (root / "scripts" / "run" / "run_omip_core2.py").read_text()
+    assert "if _sic is not None and ice_config is None:" in src
+    assert src.count("sf = sf._replace(ice_concentration=") >= 2  # both branches
 
 
 def test_config_default_is_bit_compat():
