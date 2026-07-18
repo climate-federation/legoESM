@@ -998,6 +998,7 @@ class ModelDriver:
             forcing = load_amip_forcing(
                 forcing_config, forcing_grid,
                 start_year=getattr(cfg, "start_year", None),
+                run_days=getattr(cfg, "days", None),
             )
             self._forcing = forcing
 
