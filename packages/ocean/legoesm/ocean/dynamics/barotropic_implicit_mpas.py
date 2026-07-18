@@ -736,17 +736,22 @@ def barotropic_implicit_mpas(
     # recommendation (docs/dev-notes/issues/barotropic_mode_noise.md §"Residual").
     A_baro_visc = jnp.asarray(config.barotropic_u_viscosity, dtype=eta_dtype)
     # Per-edge equatorial-boost factor — SAME Gaussian mechanism as the 3D A_h
-    # path (ocean_pe_mpas): a tight Gaussian in latitude (σ =
-    # equatorial_visc_sigma_deg), NOT the old cos²(lat) which overdamped real
-    # mid-latitude flow.  Damps the equatorial f→0 u_baro mode that the
-    # implicit-CN solver's Coriolis predictor-corrector cannot catch.  See
+    # path (ocean_pe_mpas), guarded identically on the STATIC config float so
+    # boost<=0 keeps _lat_factor==1 (no boost) and never evaluates the Gaussian
+    # (σ=0 would give 0*NaN at an exact-equator edge).  A tight Gaussian in
+    # latitude (σ = equatorial_visc_sigma_deg), NOT the old cos²(lat) which
+    # overdamped real mid-latitude flow.  Damps the equatorial f→0 u_baro mode
+    # the implicit-CN Coriolis predictor-corrector cannot catch.  See
     # project_mpas_etopo_instability.md §"equatorial mode".
-    _eq_boost = jnp.asarray(config.equatorial_visc_boost, dtype=eta_dtype)
-    _sigma_rad = jnp.radians(
-        jnp.asarray(config.equatorial_visc_sigma_deg, dtype=eta_dtype)
-    )
-    _gauss = jnp.exp(-0.5 * (mesh.latEdge.astype(eta_dtype) / _sigma_rad) ** 2)
-    _lat_factor = 1.0 + _eq_boost * _gauss  # (nEdges,)
+    _eq_boost = config.equatorial_visc_boost
+    if _eq_boost > 0:
+        _sigma_rad = jnp.radians(config.equatorial_visc_sigma_deg)
+        _gauss = jnp.exp(
+            -0.5 * (mesh.latEdge.astype(eta_dtype) / _sigma_rad) ** 2
+        )
+        _lat_factor = 1.0 + _eq_boost * _gauss  # (nEdges,)
+    else:
+        _lat_factor = 1.0
     if config.barotropic_u_viscosity > 0.0:
         lap_u = vector_laplacian_del2(u_bar_new, mesh).astype(eta_dtype)
         u_bar_new = (

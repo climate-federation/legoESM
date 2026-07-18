@@ -178,10 +178,12 @@ class MPASOceanConfig(NamedTuple):
                                          # latitudes, applied per-edge as
                                          # ``A_eff = A · (1 + boost ·
                                          # exp(-½(lat_edge/σ)²))`` with σ =
-                                         # ``equatorial_visc_sigma_deg``.  Affects
-                                         # BOTH ``A_h`` (3D momentum) and
-                                         # ``barotropic_u_viscosity``
-                                         # (depth-mean).  Targets the
+                                         # ``equatorial_visc_sigma_deg``.  Applied
+                                         # to ``A_h`` (3D momentum) and to the
+                                         # IMPLICIT-CN ``barotropic_u_viscosity``
+                                         # (depth-mean); the explicit-substep
+                                         # barotropic solver uses uniform
+                                         # viscosity (no boost).  Targets the
                                          # equatorial f→0 mode that the
                                          # implicit-CN solver's Coriolis
                                          # predictor-corrector cannot
