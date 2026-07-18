@@ -434,7 +434,8 @@ def _validate_sst_sic_units(
 
 
 def _load_icon_unstructured(
-    config: AMIPForcingConfig, grid, start_year: int | None = None
+    config: AMIPForcingConfig, grid, start_year: int | None = None,
+    run_days: float | None = None,
 ) -> AMIPForcing:
     """Load AMIP forcing from ICON unstructured NetCDF files.
 
@@ -545,6 +546,17 @@ def _load_icon_unstructured(
         times_days, sst_regridded, sic_regridded = _drop_collapsed_leap_records(
             times_days, sst_regridded, sic_regridded
         )
+        # End-of-record hold is silent by design; warn when the run is known
+        # to extend past coverage (audit FL1, parity with the lat-lon path).
+        if run_days is not None and times_days[-1] < run_days:
+            logger.warning(
+                "AMIP forcing ends at day %.0f (relative to start_year=%s) "
+                "but the run is %.0f days: SST/SIC will HOLD the last record "
+                "for the final %.0f days. Stage a file covering the full run "
+                "period for time-varying forcing throughout.",
+                float(times_days[-1]), start_year, float(run_days),
+                float(run_days) - float(times_days[-1]),
+            )
 
     from legoesm.core.precision import get_policy
     _dtype = get_policy().storage
@@ -629,7 +641,8 @@ def load_amip_forcing(
         if ds_sic is not ds_sst:
             ds_sic.close()
         ds_sst.close()
-        return _load_icon_unstructured(config, grid, start_year=start_year)
+        return _load_icon_unstructured(
+            config, grid, start_year=start_year, run_days=run_days)
 
     try:
         # --- Validate required variables ---
