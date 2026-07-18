@@ -706,3 +706,12 @@ energetic node (open Node 16), now cleanly EXPOSED on faithful geometry rather t
 by a wrong wall — not a defect in the seam-wall fix. Gate: `test_partial_periodic_seam_wall.py`
 (8 tests: byte-identical default, seam-face/vertex/3-D/barotropic masking, flux-form
 conservation, band-slice alignment).
+
+**Orchestrator correction (Fable):** the seam-wall worker's "BSF ~6× over-strong" was a
+mis-metric. Standard controlled protocol on seam180: **BSF [-40.1,+34.1] = 0.95×, pattern
+symmetric like NEMO**; SST 0.995, T300 0.993/0.44, SSH 0.994/0.045 — best config on every
+metric. Remaining equatorial residuals (one coherent symptom cluster): surface eq jet
+westward but 16× weak (−0.011 vs −0.182), eq SSH tilt sign still wrong (−0.015 vs +0.067),
+deep-eq KE 0.45 vs 0.001 → hypothesis: wind-input westward momentum is mixed TOO DEEP at
+the equator (surface-trapped in NEMO) — vertical momentum mixing/avm suspect. Next: ladder
+step 1, same-state equatorial avm + tendency comparison vs NEMO restart.
