@@ -36,7 +36,8 @@ from legoesm.grids.fv3_native_gridstruct import (
 def build_six_face_duo_context(n: int, ng: int = 3,
                                use_ext_bundle: bool = False,
                                vector_corner: str = "lagrange",
-                               ext_exclude: tuple = ()) -> dict:
+                               ext_exclude: tuple = (),
+                               use_ext_metrics: bool = False) -> dict:
     """Gridstructs + Bounds for all six faces (certified builders)."""
     from legoesm.core.fv3_native_sw_core import Bounds
     from legoesm.grids.fv3_native_halos import ed_supergrid_lonlat_ref
@@ -129,12 +130,19 @@ def build_six_face_duo_context(n: int, ng: int = 3,
         from legoesm.grids.fv3_native_ext_vector import build_ext_context
         from legoesm.grids.fv3_native_gridstruct import extend_gridstruct
 
-        bad = set(ext_exclude) - {"divgd", "cvec", "metrics"}
+        bad = set(ext_exclude) - {"divgd", "cvec", "metrics", "dvec", "ascalar"}
         if bad:
             raise ValueError(f"ext_exclude: unknown families {sorted(bad)}")
         ectx = build_ext_context(n, ng, gs6,
                                  vector_corner=vector_corner)
-        if "metrics" not in ext_exclude:
+        # ORACLE-FAITHFUL DEFAULT (2026-07-18 attribution + Zenodo
+        # grep): upstream duo d_sw consumes the ORDINARY mpp-state
+        # gridstruct metrics — the model tree never reads the dg ext
+        # metrics; extend_gridstruct was OUR coherence intuition and
+        # measured harmful (C24 max 23.70 with vs 19.64 without, rms
+        # 4.08 vs 3.71).  Ext halo METRICS are now a NON-FAITHFUL
+        # measurement opt-in.
+        if use_ext_metrics and "metrics" not in ext_exclude:
             gs6 = [extend_gridstruct(gs6[t], n, ng, tile=t + 1)
                    for t in range(6)]
 
@@ -433,9 +441,18 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
             ext_vector_dgrid_sixface,
         )
 
-        ext_scalar_sixface(delp6, "A", ctx["ectx"])
-        ext_scalar_sixface(pt6, "A", ctx["ectx"])
-        ext_vector_dgrid_sixface(u6, v6, ctx["ectx"])
+        if "ascalar" in ctx.get("ext_exclude", ()):
+            for t in range(1, 7):
+                exchange_agrid_scalar_halos(delp6, t, n, ng)
+                exchange_agrid_scalar_halos(pt6, t, n, ng)
+        else:
+            ext_scalar_sixface(delp6, "A", ctx["ectx"])
+            ext_scalar_sixface(pt6, "A", ctx["ectx"])
+        if "dvec" in ctx.get("ext_exclude", ()):
+            for t in range(1, 7):
+                exchange_dgrid_vector_halos(u6, v6, t, n, ng)
+        else:
+            ext_vector_dgrid_sixface(u6, v6, ctx["ectx"])
     else:
         for t in range(1, 7):
             exchange_dgrid_vector_halos(u6, v6, t, n, ng)
@@ -624,8 +641,13 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
         # post-step delp/pt refresh (dyn_core.F90:1336-1337)
         from legoesm.grids.fv3_native_ext_vector import ext_scalar_sixface
 
-        ext_scalar_sixface(delp6, "A", ctx["ectx"])
-        ext_scalar_sixface(pt6, "A", ctx["ectx"])
+        if "ascalar" in ctx.get("ext_exclude", ()):
+            for t in range(1, 7):
+                exchange_agrid_scalar_halos(delp6, t, n, ng)
+                exchange_agrid_scalar_halos(pt6, t, n, ng)
+        else:
+            ext_scalar_sixface(delp6, "A", ctx["ectx"])
+            ext_scalar_sixface(pt6, "A", ctx["ectx"])
     else:
         for t in range(1, 7):
             exchange_agrid_scalar_halos(delp6, t, n, ng)
