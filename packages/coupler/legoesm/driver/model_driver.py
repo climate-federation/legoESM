@@ -123,6 +123,10 @@ def _standalone_cloud_config(cfg, cloud_scheme: str):
         conv_cloud_condensate=getattr(cfg, "cloud_conv_cloud_condensate", None),
         p_xr=getattr(cfg, "cloud_p_xr", None),
         alpha_xr=getattr(cfg, "cloud_alpha_xr", None),
+        clubb_cf_override_strength=getattr(
+            cfg, "cloud_clubb_cf_override_strength", None),
+        clubb_cf_override_floor=getattr(
+            cfg, "cloud_clubb_cf_override_floor", None),
     )
 
 
