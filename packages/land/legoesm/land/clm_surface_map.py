@@ -210,7 +210,12 @@ def _nearest_regrid(src_lat, src_lon, field, tgt_lat_deg, tgt_lon_deg):
     src_lat = np.asarray(src_lat); src_lon = np.asarray(src_lon) % 360.0
     tlat = np.asarray(tgt_lat_deg); tlon = np.asarray(tgt_lon_deg) % 360.0
     jlat = np.abs(src_lat[None, :] - tlat[:, None]).argmin(axis=1)
-    jlon = np.abs(src_lon[None, :] - tlon[:, None]).argmin(axis=1)
+    # Longitude is periodic: use the modular (great-circle-in-lon) distance so a
+    # target near the 0/360 seam picks the true nearest source cell across the
+    # wrap rather than a within-hemisphere cell up to one grid spacing farther.
+    dlon = np.abs(src_lon[None, :] - tlon[:, None])
+    dlon = np.minimum(dlon, 360.0 - dlon)
+    jlon = dlon.argmin(axis=1)
     return np.asarray(field)[..., jlat, jlon]      # (..., ncol)
 
 
