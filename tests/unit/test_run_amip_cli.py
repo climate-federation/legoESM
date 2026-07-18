@@ -2770,6 +2770,18 @@ def test_truncation_conflicting_grid_or_discretization_errors():
             "--dataset", "analytical", "--truncation", "42",
             "--discretization", "mpas",
         ]), parser)
+    # An explicit value EQUAL to the production default also conflicts (the
+    # None-sentinel default makes it distinguishable from unset).
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--truncation", "42",
+            "--grid-type", "cubed_sphere",
+        ]), parser)
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--discretization", "spectral",
+            "--grid-type", "latlon",
+        ]), parser)
     # Bare --truncation still auto-configures the spectral pair.
     args = _postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--truncation", "42",
@@ -2783,6 +2795,11 @@ def test_truncation_conflicting_grid_or_discretization_errors():
         "--grid-type", "gaussian", "--discretization", "spectral",
     ]), parser)
     assert args.grid_type == "gaussian"
+    # Bare defaults resolve to the production pair.
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]),
+                             parser)
+    assert args.grid_type == "cubed_sphere"
+    assert args.discretization == "centered"
 
 
 def test_explicit_zero_p_top_and_stretching_survive():

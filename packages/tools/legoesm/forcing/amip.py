@@ -19,6 +19,7 @@ References
 
 from __future__ import annotations
 
+import logging
 from typing import NamedTuple
 
 import jax.numpy as jnp
@@ -26,6 +27,8 @@ import numpy as np
 from legoesm.forcing.time_utils import NOLEAP_DAYS_PER_MONTH, NOLEAP_MONTH_STARTS
 
 from legoesm import constants
+
+logger = logging.getLogger(__name__)
 
 # Vectorised views of the shared noleap calendar tables (month index 0-based).
 _NOLEAP_MONTH_STARTS_ARR = np.asarray(NOLEAP_MONTH_STARTS[:12], dtype=np.int64)
@@ -208,6 +211,15 @@ def _drop_collapsed_leap_records(
     keep[1:] = np.diff(times_days) > 0.0
     if keep.all():
         return times_days, sst, sic
+    n_dropped = int((~keep).sum())
+    # Loud, not silent: for a daily Gregorian file this is the expected one
+    # Feb-29 per leap year; anything more (e.g. a 360_day daily file whose
+    # Feb 29/30 both collapse) deserves the user's attention.
+    logger.warning(
+        "AMIP forcing: dropped %d record(s) whose calendar date collapses on "
+        "the model's noleap clock (leap-day filtering, OMIP protocol).",
+        n_dropped,
+    )
     return times_days[keep], sst[keep], sic[keep]
 
 

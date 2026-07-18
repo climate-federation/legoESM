@@ -690,6 +690,31 @@ class TestNoleapCalendarDateAnchoring:
         sst_t = float(jnp.mean(get_forcing_at_time(f, 59.0)[0]))
         assert abs(sst_t - (285.0 + 0.1 * 60)) < 1e-3
 
+    def test_360day_monthly_maps_by_date_no_records_dropped(self):
+        # A 360_day-dated MONTHLY axis (UKMO-style) maps by calendar date:
+        # mid-month records land on the noleap month, year boundaries stay
+        # aligned (raw 360-day counts would drift 5 d/yr against the model's
+        # 365-day clock), and no records collapse (day 15 exists in every
+        # noleap month).  Codex review 2026-07-17: the by-date remap is
+        # deliberate for 360_day here; only DAILY 360_day files lose their
+        # Feb 29/30 records (loudly, via the collapse warning).
+        import cftime
+        from legoesm.forcing.amip import (
+            _drop_collapsed_leap_records, _time_coord_to_days,
+        )
+        t = np.array(
+            [cftime.Datetime360Day(y, m, 15)
+             for y in (1979, 1985) for m in range(1, 13)],
+            dtype=object,
+        )
+        days = _time_coord_to_days(t, epoch_year=1979)
+        assert days[0] == 14.0                    # 1979-01-15
+        assert days[12] == 6 * 365 + 14.0         # 1985-01-15: no 5 d/yr drift
+        assert np.all(np.diff(days) > 0)          # strictly increasing
+        sst = np.zeros((len(t), 2, 2))
+        kept, _, _ = _drop_collapsed_leap_records(days, sst, sst)
+        assert kept.shape[0] == len(t)            # monthly: nothing dropped
+
 
 class TestBcsClipAfterInterp:
     """PCMDI mid-month bcs anchors overshoot [0,1]; clip AFTER interpolation."""
