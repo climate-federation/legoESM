@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --account=glab
 #SBATCH --partition=glab1
-#SBATCH --job-name=trp4_probe
+#SBATCH --job-name=trp4a_eice
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --mem=96G
 #SBATCH --time=14:00:00
-#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/trp4_probe_%j.out
+#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/trp4a_eice_%j.out
 # TRP4 30-DAY PROBE: the trp3_tkeice ship config + the two 2026-07-18 Arctic
 # fixes, on the vfs-tke-fix branch:
 #   F1  --freshwater-salinity local   (NEMO tra_sbc sfx = emp*sss — kills the
@@ -61,8 +61,8 @@ IC="--woa-init --woa-t $WTIC --woa-s $WSIC \
 # the real CORE-II +0.65 Sv imbalance drifts the GLOBAL mean ~-0.17 PSU over
 # 30 d (near-uniform) — read the Siberian-vs-other-region CONTRAST, and the
 # companion trp4a probe (eice-only, normalize kept) isolates F2.
-FIXES="--freshwater-salinity local --no-normalize-freshwater"
-LABEL=trp4_vfsfix_probe
+FIXES=""   # trp4a = F2 ONLY (eice=3 card default; s_ref + normalization kept) — pure single-variable A/B vs trp3 apart from the tree delta.
+LABEL=trp4a_eice_probe
 OUT=$ROOT/results/omip_nemo/nemolev_${LABEL}
 echo "=== RUN $LABEL (trp3 config + F1 local-S + F2 eice=3 card default) ==="
 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py \
@@ -72,7 +72,7 @@ SNAP=$OUT/snapshot_day0030.npz
 if [ -f "$SNAP" ]; then
   echo "=== Arctic SSS regions day-30 vs NEMO m1 (A/B vs trp3 d30: Siberian +2.62) ==="
   $PY $ROOT/scripts/tmp/_diag_arctic_sss_regions.py "$SNAP" "$GT" \
-    "trp4_vfsfix_probe d30 (local-S + eice3)" 1
+    "trp4a_eice_probe d30 (eice3 only)" 1
 else
   echo "[run] no day-30 snapshot -> check $OUT for blowup."
 fi

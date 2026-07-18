@@ -3792,6 +3792,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "over-salinifies ice growth by ~1.35x and "
                         "over-dilutes rivers (2026-07-18 Arctic "
                         "halocline-erosion audit). latlon/tripole/mpas.")
+    p.add_argument("--no-normalize-freshwater", action="store_true",
+                   help="EXPLICITLY disable the global surface-freshwater "
+                        "normalization the latlon/tripole/mpas setups enable "
+                        "by default. Re-admits the real CORE-II ~+0.65 Sv "
+                        "P-E+R imbalance (~-0.5 PSU/90d global fresh drift) — "
+                        "for controlled probes only, e.g. combined with "
+                        "--freshwater-salinity local (whose combination WITH "
+                        "the normalization is rejected: nonzero global-salt "
+                        "covariance).")
     p.add_argument("--relative-winds", action="store_true",
                    help="NEMO ln_crt_dwn current feedback: subtract the ocean "
                         "surface current from the 10-m wind before the bulk "
@@ -4738,36 +4747,44 @@ def main() -> int:
               f"{_h_rnf[_wetm].max():.1f}] m; "
               f"{(np.asarray(runoff_monthly).max(0)[_wetm] > 0).sum()} "
               f"runoff cells")
+    _fw_cfg_kw = {}
     if args.freshwater_salinity != "s_ref":
-        # NEMO tra_sbc virtual-salt convention (sfx = emp * sss_local): rebuild
-        # the model with the selection threaded into the dynamics config (the
-        # SAME NamedTuple-replace rebuild the runoff-depth-map block uses).
-        # latlon + tripole share LatLonCGridOceanModel; the cube's 'external'
-        # physics already applies its virtual salt at the LOCAL S_top, and the
-        # spectral path has no freshwater channel — both are rejected upstream
-        # of this OMIP host loop for salinity-faithful runs.
+        _fw_cfg_kw["freshwater_salinity"] = args.freshwater_salinity
+    if args.no_normalize_freshwater:
+        # EXPLICIT opt-out of the global-freshwater normalization.  The
+        # CORE-II P-E+R integral is a real ~+0.65 Sv imbalance, so turning
+        # this off re-admits a ~-0.5 PSU/90d global-mean fresh drift —
+        # accepted ONLY for controlled probes (e.g. --freshwater-salinity
+        # local, whose combination with the normalization is rejected by the
+        # model config until a joint volume+salt correction exists).
+        _fw_cfg_kw["normalize_freshwater"] = False
+    if _fw_cfg_kw:
+        # NEMO tra_sbc virtual-salt convention (sfx = emp * sss_local) and/or
+        # normalization opt-out: rebuild the model with the selections
+        # threaded into the dynamics config (the SAME NamedTuple-replace
+        # rebuild the runoff-depth-map block uses).  latlon + tripole share
+        # LatLonCGridOceanModel; the cube's 'external' physics already
+        # applies its virtual salt at the LOCAL S_top, and the spectral path
+        # has no freshwater channel — both are rejected upstream of this
+        # OMIP host loop for salinity-faithful runs.
         if app_grid_type == "mpas":
             from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
             model = MPASOceanModel(
                 grid, z_coord,
-                model.config._replace(
-                    freshwater_salinity=args.freshwater_salinity))
+                model.config._replace(**_fw_cfg_kw))
         elif app_grid_type in ("latlon", "tripole"):
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
                 LatLonCGridOceanModel,
             )
             model = LatLonCGridOceanModel(
                 grid, z_coord,
-                model.config._replace(
-                    freshwater_salinity=args.freshwater_salinity),
+                model.config._replace(**_fw_cfg_kw),
                 iwm_forcing=getattr(model, "_iwm_forcing", None))
         else:
             raise SystemExit(
-                f"--freshwater-salinity {args.freshwater_salinity} is wired "
+                f"--freshwater-salinity/--no-normalize-freshwater are wired "
                 f"for latlon/tripole/mpas only (got grid {app_grid_type}).")
-        print(f"[setup] virtual-salt closure salinity: "
-              f"{args.freshwater_salinity} (NEMO tra_sbc local-S convention)"
-              if args.freshwater_salinity == "local" else "")
+        print(f"[setup] freshwater config overrides: {_fw_cfg_kw}")
     # Prescribed sea-ice-concentration field for the SW-albedo surrogate
     # (--ice-albedo) AND the NEMO-faithful SSS-restoring ice gate (nn_sssr_ice=0:
     # no restoring under ice).  Loaded ONCE, regridded onto the model grid; passed
