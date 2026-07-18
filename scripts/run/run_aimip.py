@@ -318,6 +318,7 @@ def _train_aimip_classical(
         make_aimip_classical_spectral_physics,
     )
     from legoesm.training.neural_gcm_spectral import (
+        _make_chunk_loader,
         _train_spectral_loop,
         load_training_data,
         maybe_resume_model,
@@ -349,15 +350,28 @@ def _train_aimip_classical(
 
     params, start_epoch = maybe_resume_model(params, resume_from_dir)
 
-    # Host-resident dataset (#1155): classical loads ALL pairs up front (no
-    # chunking) — at T106 all-years the eager device build is ~130 GB, an
-    # unconditional GPU OOM (job 6758505 died at snapshot ~1200/4032 during
-    # LOADING). Build on host; the shared loop stages each sample per step.
-    ic_states, target_carries, _ic_times = load_training_data(
-        spec_cfg, grid, sigma, cache_dir,
-        windows=spec_cfg.windows,
-        host_resident=True,
-    )
+    # Chunked streaming + per-chunk resume (#942 for classical): when
+    # ``aimip_chunk_windows > 0`` the dataset is STREAMED one chunk at a time
+    # and the shared loop writes ``chunk_latest.eqx`` after every chunk, so a
+    # classical epoch that exceeds the walltime cap resumes from the next
+    # un-done chunk instead of restarting epoch 0. The non-chunked path below
+    # can only checkpoint per COMPLETED epoch — a full-physics+RRTMGP epoch
+    # longer than one link produced nothing and the driver refused to chain
+    # (rc=124, "NO new checkpoint"). Same machinery the NN variants use.
+    chunked = int(getattr(spec_cfg, "chunk_windows", 0) or 0) > 0
+
+    # Non-chunked path: load ALL pairs up front, host-resident (#1155) — at
+    # T106 all-years the eager device build is ~130 GB, an unconditional GPU
+    # OOM (job 6758505 died at snapshot ~1200/4032 during LOADING). Build on
+    # host; the shared loop stages each sample per step. The chunked path
+    # holds no full dataset here (its chunk_loader streams it below).
+    ic_states = target_carries = None
+    if not chunked:
+        ic_states, target_carries, _ic_times = load_training_data(
+            spec_cfg, grid, sigma, cache_dir,
+            windows=spec_cfg.windows,
+            host_resident=True,
+        )
 
     dt = spec_cfg.dt
     # Classical = full physics suite + RRTMGP radiation by default; the
@@ -381,31 +395,44 @@ def _train_aimip_classical(
     # soft sigmoid keeps the lat-lon surface-parameter gradients
     # smooth across coastlines (vs. a hard step that would clip them).
     land_mask = None
-    if spatial_surface and target_carries:
-        # ``target_carries[0]`` is a single SegmentCarry on the legacy
-        # path and a tuple of K SegmentCarry on the multi-step
-        # autoregressive path.  Surface geopotential is static across
-        # snapshots so any of them works; unwrap when needed.
-        ref_carry = target_carries[0]
-        # A multi-step target is a PLAIN tuple of carries; a single-step
-        # target is ONE SegmentCarry — itself a NamedTuple (tuple subclass),
-        # so isinstance(.., tuple) is True for BOTH and would unwrap a single
-        # carry to its first FIELD (an array) -> `.phis` AttributeError. This
-        # broke the single-step v10 T63 path when multi-step was added.
-        # ``type(..) is tuple`` matches the plain tuple only.
-        if type(ref_carry) is tuple:
-            ref_carry = ref_carry[0]
-        from legoesm.training.aimip_spatial import land_mask_from_phis
-        from legoesm.training.neural_gcm_spectral import stage_sample
-        # ref_carry lives on host under host_resident loading (#1155,
-        # UNCOMMITTED — see stage_sample's semantics note). The land mask is
-        # a closure constant of the jitted physics; stage it explicitly so
-        # its placement is deliberate rather than an implicit per-trace
-        # transfer, and so this site stays correct if the loader ever
-        # commits its outputs.
-        land_mask = stage_sample(land_mask_from_phis(
-            jnp.asarray(ref_carry.phis), smooth=True,
-        ))
+    if spatial_surface:
+        # Surface geopotential (phis) is STATIC across samples, so the land
+        # mask needs just one loaded target carry. The non-chunked path
+        # reuses the full dataset loaded above; the chunked path loads ONLY
+        # the first window here (cheap — 1 day x 4 snapshots) since its
+        # training data is streamed below, not held resident.
+        _mask_carries = target_carries
+        if chunked and spec_cfg.windows:
+            _, _mask_carries, _ = load_training_data(
+                spec_cfg, grid, sigma, cache_dir,
+                windows=spec_cfg.windows[:1],
+                host_resident=True,
+            )
+        if _mask_carries:
+            # ``_mask_carries[0]`` is a single SegmentCarry on the legacy
+            # path and a tuple of K SegmentCarry on the multi-step
+            # autoregressive path.  Surface geopotential is static across
+            # snapshots so any of them works; unwrap when needed.
+            ref_carry = _mask_carries[0]
+            # A multi-step target is a PLAIN tuple of carries; a single-step
+            # target is ONE SegmentCarry — itself a NamedTuple (tuple subclass),
+            # so isinstance(.., tuple) is True for BOTH and would unwrap a single
+            # carry to its first FIELD (an array) -> `.phis` AttributeError. This
+            # broke the single-step v10 T63 path when multi-step was added.
+            # ``type(..) is tuple`` matches the plain tuple only.
+            if type(ref_carry) is tuple:
+                ref_carry = ref_carry[0]
+            from legoesm.training.aimip_spatial import land_mask_from_phis
+            from legoesm.training.neural_gcm_spectral import stage_sample
+            # ref_carry lives on host under host_resident loading (#1155,
+            # UNCOMMITTED — see stage_sample's semantics note). The land mask is
+            # a closure constant of the jitted physics; stage it explicitly so
+            # its placement is deliberate rather than an implicit per-trace
+            # transfer, and so this site stays correct if the loader ever
+            # commits its outputs.
+            land_mask = stage_sample(land_mask_from_phis(
+                jnp.asarray(ref_carry.phis), smooth=True,
+            ))
 
     # When rad gating is on (``aimip_rad_update_interval > 1``),
     # ``make_aimip_classical_spectral_physics`` returns a
@@ -485,6 +512,24 @@ def _train_aimip_classical(
             "the radiation scheme's default GHG."
         )
         return built
+
+    if chunked:
+        # Stream the dataset and let the shared loop write chunk_latest.eqx
+        # after every chunk for mid-epoch resume (#942). Classical uses NO
+        # prescribed surface forcing (unforced training), so pass no forcing
+        # paths — _maybe_build_sample_forcings then yields None per chunk,
+        # matching the non-chunked call below (which passes no sample_forcings).
+        chunk_loader, n_total = _make_chunk_loader(
+            spec_cfg, grid, sigma, cache_dir,
+            None, None,
+        )
+        return _train_spectral_loop(
+            params, _make_physics_fn,
+            grid, sigma, None, None, spec_cfg,
+            start_epoch=start_epoch,
+            chunk_loader=chunk_loader, n_samples_total=n_total,
+            resume_from_dir=resume_from_dir,
+        )
 
     return _train_spectral_loop(
         params, _make_physics_fn,
