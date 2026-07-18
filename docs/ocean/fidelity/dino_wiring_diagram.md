@@ -772,3 +772,83 @@ node (Node 16), now cleanly EXPOSED under realistic forcing rather than masked b
 wind. It is a vertical-mixing/energetics closure gap, not a term-ledger or geometry defect;
 every conservation/geometry tier remains green. Next lever: equatorial `avm` vertical
 momentum mixing (surface-trapping) — a same-state tendency comparison vs the NEMO restart.
+
+---
+
+## Round-12 (2026-07-18) — {full-step + MLF} blow-up: term-attributed budget + full composition table (no single-term defect; NOT papered over)
+
+**Scope.** The LAST unmatched time-integration piece: `nemo_dino_kamm_mlf`
+(leapfrog + full-step staircase) blows up at dt=2700 while NEMO runs the same
+{MLF + ln_zco full-step + Courant 0.8} stably (RUN_TRAJ 180 d). Phase-A intersect
+= term-attributed growth budget × complete stpMLF-vs-`_leapfrog_step` composition
+table. Harness reproduces the blow-up from the bridged NEMO mesh (`full_step=True`,
+from rest = zeroed velocity + NEMO restart T/S), dt=2700, wind on AND off.
+
+**Reproduction (both wind states).** NaN at step 22 (explodes step 21). Growth is
+at the **deepest wet cells (k32/k33) of the |lat|≈68° staircase columns** — NOT the
+equator, NOT the seam — exactly Round-8's `STEPHILAT`. Wind on vs off blow at the
+same step with the same mode; the surface wind (`phys_u`) is 0 at the deep growing
+cell, so **wind is irrelevant to this mode** (it is HPG-seeded, wind-independent).
+The wind PATH does exist in `_leapfrog_step` (surface_forcing → both `_step_impl`
+passes + `_apply_implicit_vertical_mixing`); wind-on responds at the surface.
+
+**Term-attributed budget (`tendencies_with_diagnostics` at the growing cell).**
+| step | max\|u\| | dominant RHS term at cell | value |
+|---|---|---|---|
+| 8 (seed) | 0.28 | **KE_PGF** | −8.6e-5 (all others ≤7e-6) |
+| 8–15 | 0.28→0.81 | KE_PGF ~const ±1e-4 | vortcor/vertadv/Ahlap 10–100× smaller |
+| 20 | 2.6 | KE_PGF −8e-5, vertadv −2.4e-4 | u already O(1) |
+| 21 (explode) | 64 | vertadv −4.3e-2 ≳ KE_PGF −3.2e-2 | consequence of u→O(1) |
+
+- **The seed is the HYDROSTATIC PGF, not the KE-gradient.** Controlled isolation
+  (`momentum_advection="flux_form"`, KE-grad/Bernoulli removed): blows at the
+  IDENTICAL step 21 with the IDENTICAL KE_PGF seed (−8.63e-5 vs −8.65e-5 at step 8).
+  ⇒ KE_PGF is pure `hpg_zco` here; the vector-invariant Bernoulli term is NOT the
+  source. Coriolis (`vortcor` ~1e-6) and lateral visc (`Ah_lap` ~4e-6) are not
+  either. `vertadv` dominates ONLY the terminal explosive step (nonlinear, once
+  u=O(1)) — a consequence, not the cause (and DINO runs `ln_zad_Aimp=.false.`, so
+  NEMO's vertadv is EXPLICIT leapfrog too — not the difference).
+- **Temporal signature = physical growth, not a pure computational mode.** The
+  pinned deep cell (−68.1°, k32) stays NEGATIVE with a MONOTONICALLY-growing
+  envelope (−0.28→−0.49→−0.73→−1.04→−6.4) carrying only a WEAK 2Δt ripple
+  (−0.490/−0.452, −0.726/−0.687 pairs) — the Asselin filter (γ=0.1) IS damping the
+  2Δt ripple but cannot arrest the growing envelope. Confirms Round-8: physical
+  inertia-gravity mode, not an Asselin-dampable 2Δt mode.
+
+**Complete stpMLF vs `_leapfrog_step` composition table (differences only).**
+Traced NEMO 5.0.2 `src/OCE/` (stpmlf/dyn{adv,vor,hpg,ldf,zdf,spg_ts,atf_qco}/
+tra{adv,ldf,zdf,atf_qco}) against `_leapfrog_step`. **Every stability-relevant term
+MATCHES:** lateral viscosity + tracer lateral diffusion both lagged to **Nbb**
+(forward-over-2dt, `_ab2_scope_override="advective"` Nbb diss pass); advection /
+Coriolis(EEN) / HPG all at **Nnn**; barotropic split-explicit seeded from **Nbb**
+(ln_bt_fw=F); vertical friction + wind stress + bottom drag all **implicit over
+rDt=2dt**; Asselin **plain** on u,v and **thickness-weighted** on T,S; Euler-first
+step (dt, no filter). The only nominal differences are **negligible at the deep
+cell**: (a) NEMO's momentum LF step thickness-weights by (1+r3u) at before/now/after
+(dynzdf.F90:127-139) vs legoESM plain velocity — but r3u≈0 at the deep z* cells;
+(b) NEMO vertadv is 2nd-order-centred on the FULL velocity vs legoESM
+upwind-perturbation — but vertadv is not the seed. Ruled out by prior controlled
+toggles: lateral viscosity (node 14, Mercator-inert), PGF (adcroft≡hpg_zco), bottom
+drag (r=0 identical), barotropic substeps (30→60).
+
+**Intersect verdict (honest).** Growing term = **HPG (staircase `hpg_zco`)**;
+its composition difference vs NEMO = **NONE** (adcroft≡hpg_zco, Round-9; both cores
+compute the same staircase HPG). ⇒ **this is NOT a single-term composition defect**
+to implement. The blow-up is the NEUTRAL leapfrog PRESERVING a physical HPG-seeded
+high-lat staircase inertia-gravity mode that FE's forward-backward/forward-Euler
+numerical damping suppresses (why {full-step + FE} `nemo_dino_kamm` is stable).
+NEMO's leapfrog runs the same config stably with a matching per-term time-level
+ledger — so the reconciling difference is sub-ledger: either (i) legoESM's HPG
+MAGNITUDE at the deepest staircase cell is spuriously larger than NEMO's (a fixable
+discretization difference the interior-cell audits missed), or (ii) NEMO damps this
+specific mode via a mechanism not captured by the per-term table. **No non-NEMO
+stabiliser was added; no MLF+full-step number was fabricated.**
+
+**Precise remainder (the one test that distinguishes (i) from (ii)).** A NEMO
+per-cell HPG **trend dump** (`ln_dyn_trd`/`trddyn`) at the deepest |lat|≈68°
+staircase cell, compared same-state against legoESM's `KE_PGF` diagnostic there. If
+NEMO's HPG at that cell is materially smaller → (i), legoESM's full-step bottom-cell
+HPG is the fixable defect (candidate: the `t_depth_ref`/thickness the deepest wet
+cell receives from `create_full_step_coordinate`). If equal → (ii), a genuine
+leapfrog-dissipation match, larger than one pass. The closest STABLE fully-faithful
+config remains {full-step + FE} `nemo_dino_kamm` (BSF 0.81×, Round-7).
