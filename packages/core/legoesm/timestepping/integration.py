@@ -174,3 +174,16 @@ class IntegrationMixin:
             new_s = self.step(s, dt)
             return new_s, new_s
         return jax.lax.scan(scan_fn, state, xs=None, length=n_steps)
+
+    # Anchored dry-mass target: shared by every integrator model (the
+    # conservation fixer anchors ``fix_mass_*`` to this instead of the
+    # previous step, preventing slow drift).  Subclasses initialise
+    # ``self._target_mass = None`` in ``__init__``; these setters were
+    # copy-pasted identically across ~12 dycore models before this mixin.
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (recompute on the next step)."""
+        self._target_mass = None
+
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target (e.g. the t=0 dry mass)."""
+        self._target_mass = target_mass
