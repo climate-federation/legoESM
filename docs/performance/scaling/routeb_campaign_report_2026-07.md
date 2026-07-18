@@ -1,116 +1,131 @@
-# Route-B scaling campaign — throughput report (SKELETON, 2026-07)
+# Differentiable JAX dycore — throughput & scaling (paper skeleton, 2026-07)
 
-Derecho, A100-40GB nodes (4 GPU/node) + 128-core CPU nodes. Differentiable JAX
+Derecho, A100-40GB nodes (4 GPU/node). Fully-differentiable JAX earth-system
 dycore, route-B transport (`jax.distributed` multi-controller, ppermute/psum
-over NCCL on the aws-ofi-nccl/Libfabric CXI fast path). Data:
+over NCCL / aws-ofi-nccl / Libfabric CXI). Data:
 `$SCRATCH/legoesm_scaling/routeb_campaign_202607/all_tidy.csv`.
 
-> **Skeleton** — tables + framing + caveats are final; prose and plots are TODO.
+> **Skeleton** — tables, framing, and reference numbers are drafted; prose,
+> plots, and the flagged verifications/gaps are TODO.
 
-## Framing — why throughput (SYPD), not strong-scaling efficiency
+## The claim
 
-The competitive question a model developer asks is **"how much simulation per
-wall-clock day, on how much hardware"** — i.e. **SYPD**, the ESM community's
-currency (SCREAM: 1.26 SYPD @ 3.25 km). Strong-scaling *efficiency* answers a
-different, internal question ("does our code parallelize a fixed problem?") and
-is structurally unfair at low device counts: going 1→2 GPUs introduces halo
-comms that did not exist at N=1, so efficiency drops for reasons unrelated to
-the model's capability. **Efficiency is demoted to a supporting figure; SYPD and
-raw throughput (Mcells/s) lead.**
+The value of this approach is **end-to-end differentiability** (gradients for
+ML, data assimilation, calibration). The scaling result must therefore show
+**not** "we beat Fortran" but that *differentiability is compatible with
+HPC-relevant performance* — i.e. we reach **useful, competitive SYPD**, and it
+**scales**, so this is a real modeling tool rather than a prototype. Three
+demonstrations, below.
 
-Metric hierarchy:
-- **SYPD** — headline. Bakes in resolution + timestep + per-step cost; rewards
-  good numerics (bigger stable dt → more SYPD). Compare only at matched
-  resolution.
-- **Mcells/s** — resolution-normalized throughput; the fairest *cross-grid*
-  number (different decompositions, different cell counts).
-- **Strong-scaling efficiency** — supporting; "it parallelizes," not "it's fast."
+Throughput metric = **SYPD** (simulated years per wall-clock day), the ESM
+community's currency. Strong-scaling *efficiency* is demoted to a supporting
+figure (it is an internal metric, and unfair at low device counts where 1→2
+GPUs first introduces halo comms).
 
-## TABLE 1 — Matched-resolution cross-grid throughput (~40–55 km, 1 A100)
+---
 
-The fair cross-grid band (each grid on its own decomposition at ~comparable
-physical resolution — the resolutions with full ladders):
+## Demonstration 1 — we reach useful, ESM-relevant SYPD (dry dynamics, GPU)
 
-| grid | config | res (km) | cells | 1-A100 SYPD | 1-A100 Mcells/s |
+| grid | config | res (km) | 1-A100 SYPD | best SYPD (N A100) |
+|---|---|---|---|---|
+| lat-lon | LL512 | 39 | 12.2 | 52.7 (16) |
+| lat-lon | LL1024 | 19.5 | 2.9 | 29.8 (16) |
+| cubed-sphere | C192 | 52 | 14.7 | 20.3 (6) |
+| icosahedral | L7 | 56 | 5.1 | 19.7 (16)* |
+| icosahedral | L8 | 28 | 1.8 | 10.0 (16) |
+
+Climate work needs > ~1 SYPD; we clear that by 1–2 orders of magnitude at
+~20–55 km on a single-to-modest GPU count. *(ico L7 peak is compute-light per
+device — see Demo 2.)*
+
+## Demonstration 2 — aggregate throughput scales with GPU count
+
+Plotting **aggregate throughput (Mcells/s), not efficiency** — the number that
+answers "can we add hardware to go faster / bigger":
+
+| grid | config | 1 A100 | 16 A100 | speed-up |
+|---|---|---|---|---|
+| lat-lon | LL1024 (19.5 km) | 978 | 9887 | **10.1×** |
+| icosahedral | L8 (28 km) | 380 | 2065 | 5.4× |
+| lat-lon | LL512 (39 km) | 1011 | 4375 | 4.3× (saturates — small problem) |
+| cubed-sphere | C192 (52 km) | 1032 | 1418 (at 6) | 1.4× (latency-bound, see #1113) |
+
+**Lat-lon LL1024 is the hero: ~10× aggregate throughput on 16 GPUs** — add
+hardware, get proportional throughput, up to the largest problem measured
+(9.9 Gcells/s). Grid-dependence is real: cube is latency-bound past 1 GPU
+(~46 collective-permutes/step × ~0.11 ms launch floor, #1113), lat-lon's
+structured 1-D band halo is the most scalable.
+
+## Demonstration 3 — context: competitive throughput on the modern (GPU) substrate
+
+A **published-reference landscape** (NOT a controlled head-to-head — hardware
+differs; see caveats). Ours is dry-dynamics-only; the references are full-model.
+
+| model | class | res | SYPD | hardware | source |
 |---|---|---|---|---|---|
-| lat-lon | LL512 | 39 | 13.6 M | 12.2 | 1011 |
-| cubed-sphere | C192 | 52 | 5.75 M | 14.7 | 1032 |
-| icosahedral | L7 | 56 | 4.26 M | 5.1 | 265 |
+| **this work** | diff. physical dycore (JAX) | 52 km | ~15 (1 A100), ~20 (6) | 1–6 × A100-40GB | dry dyn., this campaign |
+| CAM6 | production Fortran GCM | ~1° (~100 km) | 14 | 1280 CPU cores | Kochkov 2024 (comparison)† |
+| NeuralGCM | ML-hybrid emulator (JAX) | 1.4° (~140 km) | ~180 (1 yr / 8 min) | 1 × TPU v4 | Kochkov 2024, Nature† |
+| SCREAM (E3SM) | Fortran/C++ cloud-resolving | 3.25 km | ~1 | GPU (Frontier) | Donahue 2024† |
 
-Reading: cube and lat-lon deliver ~1000 Mcells/s per A100 at ~50 km; ico L7 is
-compute-light at 1 A100 (4.3 M cells underutilizes the card — ico shows its
-throughput at higher resolution / device count, see Table 2). Mcells/s is the
-fairer cross-grid metric here since the three grids differ ~3× in cell count at
-matched km.
+**The load-bearing distinction — physical dycores vs ML emulators.** NeuralGCM
+is ~1–2 orders of magnitude faster than everything, but because it *learns*
+large-timestep dynamics (an emulator, effective dt ≫ CFL). SCREAM is slow
+despite exascale GPU hardware because it resolves *real* physics at 3 km. Our
+model is in the **physical-dycore category** (CFL-limited real dynamics, same as
+CAM6 / SCREAM / IFS) — so our peers for "did the physics survive at competitive
+speed" are the Fortran physical models, and the honest headline is:
 
-## TABLE 2 — Peak GPU throughput per grid (best point on each curve)
+> A differentiable **physical** dynamical core reaches CAM6-class SYPD (~15 vs
+> 14) at **2× finer resolution on a single GPU vs 1280 CPU cores** — while
+> retaining exact dynamics AND end-to-end differentiability, which no model in
+> the table has. NeuralGCM shows what ML emulation buys (raw speed); this shows
+> differentiability without giving up the physical core.
 
-| grid | best config | N (A100) | peak SYPD | peak Mcells/s |
-|---|---|---|---|---|
-| lat-lon | LL1024 (19.5 km) | 16 | 29.8 | 9887 |
-| cubed-sphere | C192 (52 km) | 6 | 20.3 | 1418 |
-| icosahedral | L8 (28 km) | 16 | 10.0 | 2065 |
+---
 
-Lat-lon scales best (near-10 Gcells/s at 16 GPUs, 63% strong-scaling efficiency);
-cube is latency-bound past 1 GPU (~46 collective-permutes/step × the ~0.11 ms
-launch floor — see #1113) so it barely scales; ico is intermediate.
+## CAVEATS (load-bearing)
 
-## TABLE 3 — HEADLINE: cube, 1 A100 vs 1 CPU node (128 cores), SAME CODE
+1. **Dry-dynamics only** (`physics=none` in every row). Our SYPD is a **dycore
+   ceiling**; full physics (RRTMGP + convection + …) lowers it — plausibly 2–3×.
+   CAM6/NeuralGCM/SCREAM SYPD are **full-model**. So Demo-3 is not apples-to-
+   apples until we add physics; the honest current statement is "dry-dynamics
+   SYPD comparable to CAM6 full-model SYPD," with the physics gap disclosed.
+2. **Not a controlled comparison.** Different hardware (A100 vs CPU vs TPU),
+   codes, resolutions. Demo 3 is a *landscape*, not a benchmark we ran.
+3. **GDR-off lower bound**: NCCL host-staged (aws-ofi-nccl GDR unsupported →
+   `NCCL_PROTO=simple`). Multi-GPU throughput is a **lower bound**.
+4. **40 GB A100**, dry, ~internal numbers — not vs published leaderboards.
 
-The only grid with **both** backends complete (#1100 blocks the lat-lon/ico CPU
-lanes). Same JAX dycore, same problem, GPU vs a full CPU node:
+## GAPS / TODO (ranked)
 
-| config | res (km) | CPU-node SYPD | 1-A100 SYPD | **A100 / CPU-node** |
-|---|---|---|---|---|
-| C48 | 208 | 30.5 | 753.4 | **24.7×** |
-| C96 | 104 | 5.10 | 130.2 | **25.5×** |
-| C192 | 52 | 0.37 | 14.7 | **39.4×** |
+1. **Full-physics SYPD** — add RRTMGP + physics for a real-model number; this is
+   what makes Demo 3 fair. Highest priority for the paper.
+2. **Verify the reference numbers** — CAM6 resolution/config for the 14 SYPD /
+   1280-core figure; the NeuralGCM 1.4° figure (the Nature/blog "1 yr in 8 min"
+   ≈ 180 SYPD; some sources quote higher — pin the exact TPU-v4 config);
+   SCREAM's exact Frontier node count. Cite primary sources, no fabrication.
+3. **IFS / E3SM coarse-res anchor** — a production Fortran ESM at ~25–50 km on
+   *GPU* would be the tightest comparator (same substrate as us).
+4. **Plots**: SYPD-vs-resolution (Demo 1); aggregate-throughput-vs-N per grid
+   (Demo 2, the hero curve); the reference-landscape bar (Demo 3, log-y).
+   `finalize_scaling.sh` on the campaign root for the raw panels.
+5. ico rerun with #1175 CP-combining (merged) for the improved ico curve.
 
-Two findings:
-1. **~1 A100 ≈ 25–40 full CPU nodes** of the same model.
-2. **The advantage GROWS with resolution** (25× → 39×) — the GPU saturates with
-   more work while the CPU node stays compute-bound. This is the direction that
-   matters for high-resolution / cloud-resolving.
-3. **Climate-viability crossover**: at C192 (52 km) 1 A100 = 14.7 SYPD (viable);
-   the CPU node = 0.37 SYPD (not viable — ~months/century). The GPU makes ~50 km
-   climate-viable where the same code on CPU does not.
+## Supporting (not headline)
 
-## CAVEATS (load-bearing — do not drop from the final report)
-
-1. **Dry-dynamics only** (`physics=none` in every row). These are **dycore
-   throughput ceilings**, not full-model SYPD. RRTMGP + convection + etc. lower
-   SYPD substantially. Any ESM comparison must be dynamics-vs-dynamics or add
-   physics to both sides.
-2. **JAX-CPU is NOT Fortran.** Table 3's CPU is XLA-on-CPU, the *same JAX code*
-   — a hand-tuned Fortran ESM on that node is faster than XLA-CPU, so the 25–40×
-   **overstates** the advantage over a real Fortran ESM. The JAX-GPU-vs-JAX-CPU
-   claim is honest; a JAX-vs-Fortran claim needs a Fortran reference (see Gaps).
-3. **Node accounting**: CPU "N=1" = one full 128-core node; GPU "N=1" = one A100
-   = ¼ of a GPU node. Table 3 is per-A100-vs-per-CPU-node. A full GPU node
-   (4×A100) adds ~3× for lat-lon (scales) but only ~1.4× for cube (latency-bound)
-   — so state per-A100, not per-GPU-node, for cube.
-4. **GDR-off lower bound**: NCCL ran host-staged (aws-ofi-nccl GDR unsupported,
-   forced `NCCL_PROTO=simple`). Cross-device/-node throughput is a **lower
-   bound**; GDRCopy/DMA-BUF would lift it.
-5. **Internal numbers**: not vs published leaderboards; matched-resolution,
-   dry-dynamics, this hardware.
-
-## GAPS / TODO
-
-- **The one number that completes the story: a production Fortran ESM SYPD at
-  matched resolution + hardware** (dynamics-only). Turns "our GPU model is fast"
-  into "it competes with Fortran ESMs." Still missing.
-- **lat-lon + ico CPU lanes** (#1100) — needed for their node-vs-A100 rows;
-  currently cube-only.
-- **Full-physics SYPD** — add RRTMGP + physics for a real-model throughput number.
-- Plots: SYPD-vs-N and Mcells/s-vs-N per grid; the Table-3 bar; the matched-band
-  cross-grid bar. `finalize_scaling.sh` on the campaign root for the panels.
-- ico rerun with #1175 CP-combining (merged) would improve the ico curve.
-
-## Supporting: mechanism notes (not headline)
-
-- Strong-scaling efficiency curves: lat-lon 63% @16 GPU (LL1024); cube 12–23% @n6
-  (latency-bound); ico 34% @16 GPU (nlev=26). Fabric-limited (GDR-off) + CP-count,
-  not fundamental — see #1113 (ppermute round-count × launch-floor law).
+- Strong-scaling efficiency: lat-lon 63% @16 (LL1024), cube 12–23% @6, ico 34%
+  @16 (nlev=26) — fabric-limited (GDR-off) + CP-count, not fundamental (#1113).
 - Cube runs cross-node correctly at C96/C192 (#1177 corrected); only the tiled
   np=24 lane (#921) is a confirmed comm-init wedge.
+- CPU lanes: cube complete; lat-lon/ico blocked on #1100 — but the JAX-CPU
+  comparison is **dropped from the paper** (not a meaningful Fortran proxy).
+
+## Sources
+
+- Kochkov et al., *Neural general circulation models for weather and climate*,
+  Nature 632, 1060–1066 (2024): https://www.nature.com/articles/s41586-024-07744-y
+- Google Research blog, *Fast, accurate climate modeling with NeuralGCM*:
+  https://research.google/blog/fast-accurate-climate-modeling-with-neuralgcm/
+- Donahue et al., *To Exascale and Beyond — SCREAM*, JAMES (2024):
+  https://agupubs.onlinelibrary.wiley.com/doi/full/10.1029/2024MS004314
