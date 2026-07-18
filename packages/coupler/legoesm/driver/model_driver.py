@@ -4064,6 +4064,29 @@ class ModelDriver:
                 "prognostic physics state (issue #405/#413). Use "
                 "checkpoint_format='npz' for stateful-physics runs."
             )
+        # Same zarr carry_aux limitation for the HELD radiation fluxes: with a
+        # radiation cadence (rad_update_steps > 1) the held sfc/TOA fluxes are
+        # only recomputed every Nth step and ride carry_aux between updates, so
+        # a zarr restart would drop them and reset the radiation phase — the
+        # first post-restart segment would run with zero held fluxes until the
+        # next update, branching the trajectory. With rad_update_steps == 1 the
+        # held fields are recomputed every step, so dropping them is harmless
+        # (audit 2026-07-17).
+        if (
+            backend == "zarr"
+            and int(getattr(self.config, "rad_update_steps", 1)) > 1
+            and isinstance(self._carry_aux, dict)
+            and any(k.startswith("held_") for k in self._carry_aux)
+        ):
+            raise ValueError(
+                "checkpoint_format='zarr' cannot persist the held radiation "
+                "fluxes (held_dT_rad/held_*_sfc/held_*_toa) used by a "
+                "radiation cadence (rad_update_steps="
+                f"{int(getattr(self.config, 'rad_update_steps', 1))}) — they "
+                "ride carry_aux, which the zarr backend does not round-trip, "
+                "so a restart would reset the radiation phase (not bit-exact). "
+                "Use checkpoint_format='npz' for rad_update_steps>1 runs."
+            )
 
         # Multi-controller SPMD: every process ran the collective gather
         # and the (identical) guards above; only process 0 writes.  The
