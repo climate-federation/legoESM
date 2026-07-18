@@ -4,12 +4,13 @@ daily geographic v-wind on the 1-degree lat-lon grid for the duo-target
 gate (scripts/validate/fv3_native/w2_duo_oracle_gate.py contract:
 times_days strictly increasing ending at --days, v (nt, 181, 360)).
 
-Remap protocol (documented approximation): covariant A-winds from the
-certified d2a2c chain -> geographic (east,north) via the exact local
-tangent-basis inversion at cell centres -> NEAREST-cell sampling onto
-the 1-degree grid (C-cell sizes >= 1.6deg at C24/C48, so nearest is a
-pattern-level protocol; the Zenodo reference uses fregrid — scores are
-comparable at the envelope level only, stated on output).
+Remap protocol (documented approximation): D winds -> geographic
+(east,north) via the CERTIFIED upstream c2l_ord2 a-matrix operator
+(the runs' own ua/va output used the ord4 sibling; ord2 residual is
+O(dx^2)) -> NEAREST-cell sampling onto the 1-degree grid (C-cell sizes
+>= 1.6deg at C24/C48, so nearest is a pattern-level protocol; the
+Zenodo reference uses fregrid — scores are comparable at the envelope
+level only, stated on output).
 
 Usage: run_duo_stepper_w2.py --n 24 --dt 450 --days 5 --out w2_c24.npz
 """
@@ -22,48 +23,32 @@ import numpy as np
 
 
 def geographic_va(ctx, states):
-    """Per-face geographic northward wind at cell centres."""
-    from legoesm.core.fv3_native_duo_stepper import csw_step_sixface
+    """Per-face geographic northward wind at cell centres via the
+    CERTIFIED upstream c2l_ord2 (fv_grid_utils:2547-2628): D winds ->
+    geographic (u_lon, v_lat) through the a-matrix.  This is the same
+    operator family the Zenodo runs' own ua/va output used (their
+    c2l_ord=4 is the higher-order sibling; ord2's extra residual is
+    O(dx^2), stated on output).
+
+    The previous central-difference tangent-basis inversion painted a
+    +/-15 m/s vertex butterfly on the DAY-0 balanced state (bases
+    straddle the corner kink) — the entire 'vertex imprint' at day 5
+    was that diagnostic artifact, not model error."""
+    from legoesm.grids.fv3_native_ext_vector import (
+        c2l_ord2_face,
+        center_a_matrix,
+    )
 
     n, ng = ctx["n"], ctx["ng"]
     sl = slice(ng, ng + n)
-    outs = csw_step_sixface(ctx, states, dt2=1.0)  # ua/va via certified d2a2c
     v_geo6 = []
     for t in range(6):
         gs = ctx["gs6"][t]
-        lon = gs["agrid_lon"][sl, sl]
-        lat = gs["agrid_lat"][sl, sl]
-        ua = np.asarray(outs[t]["ua"])[sl, sl]
-        va = np.asarray(outs[t]["va"])[sl, sl]
-
-        def xyz(lo, la):
-            return np.stack([np.cos(la) * np.cos(lo),
-                             np.cos(la) * np.sin(lo), np.sin(la)], axis=-1)
-
-        # local i/j unit tangents at cell centres (central differences
-        # over the halo-valid agrid)
-        lo_f = gs["agrid_lon"]
-        la_f = gs["agrid_lat"]
-        p = xyz(lo_f, la_f)
-        e1 = p[ng + 1:ng + n + 1, sl] - p[ng - 1:ng + n - 1, sl]
-        e2 = p[sl, ng + 1:ng + n + 1] - p[sl, ng - 1:ng + n - 1]
-        pc = p[sl, sl]
-        for e in (e1, e2):
-            e -= (e * pc).sum(-1, keepdims=True) * pc
-        e1 /= np.linalg.norm(e1, axis=-1, keepdims=True)
-        e2 /= np.linalg.norm(e2, axis=-1, keepdims=True)
-        # covariant components: ua = V.e1, va = V.e2  ->  solve per cell
-        g11 = (e1 * e1).sum(-1)
-        g12 = (e1 * e2).sum(-1)
-        g22 = (e2 * e2).sum(-1)
-        det = g11 * g22 - g12 * g12
-        c1 = (g22 * ua - g12 * va) / det      # contravariant coefficients
-        c2 = (g11 * va - g12 * ua) / det
-        vvec = c1[..., None] * e1 + c2[..., None] * e2
-        north = np.stack([-np.sin(lat) * np.cos(lon),
-                          -np.sin(lat) * np.sin(lon),
-                          np.cos(lat)], axis=-1)
-        v_geo6.append((vvec * north).sum(-1))
+        amat = center_a_matrix(gs)
+        _, va = c2l_ord2_face(np.asarray(states[t]["u"]),
+                              np.asarray(states[t]["v"]),
+                              gs["dx"], gs["dy"], amat, n, ng)
+        v_geo6.append(va[sl, sl])
     return v_geo6
 
 
@@ -174,8 +159,9 @@ def main():
         ext_exclude=np.array(args.ext_exclude),
         ext_metrics=np.array(bool(args.ext_metrics)),
         oracle_conventions=np.array(bool(args.oracle_conventions)),
-        protocol=f"duo stepper ({mode}); covariant->geographic "
-        "exact tangent inversion; NEAREST-cell 1deg sampling (pattern-"
+        protocol=f"duo stepper ({mode}); certified c2l_ord2 D->geographic "
+        "(upstream operator family; runs' own output used c2l_ord=4, "
+        "ord2 residual O(dx^2)); NEAREST-cell 1deg sampling (pattern-"
         "level protocol, envelope-comparable to the fregrid reference)")
     print("saved", args.out, flush=True)
 
