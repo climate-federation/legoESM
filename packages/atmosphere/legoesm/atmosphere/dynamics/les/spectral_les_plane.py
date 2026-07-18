@@ -1170,13 +1170,27 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
         # Each water tracer is advected + SGS-diffused exactly like θ (the same
         # scalar operator ⇒ same numerics, no re-derivation). Surface flux: the
         # prescribed kinematic moisture flux enters slot 0 (q_v); all other
-        # slots have zero surface flux. Static Python loop over the (small,
-        # compile-time-constant) slot count — unrolled at trace time.
-        cols = []
-        for k in range(tracers.shape[-1]):
-            flx = sfc_qv_flux if k == 0 else 0.0
-            cols.append(scalar_fn(tracers[..., k], u, v, w, nu_t, g, flx))
-        Rtracers = jnp.stack(cols, axis=-1)
+        # slots have zero surface flux.
+        nt = tracers.shape[-1]
+        flx = jnp.zeros((nt,), tracers.dtype).at[0].set(sfc_qv_flux)
+        if g.layout is None:
+            # Serial: vmap over the trailing tracer axis — ONE batched
+            # kernel set for all slots (kernel count + compile time
+            # independent of n_tracers).
+            Rtracers = jax.vmap(
+                lambda q, f: scalar_fn(q, u, v, w, nu_t, g, f),
+                in_axes=(-1, 0), out_axes=-1,
+            )(tracers, flx)
+        else:
+            # MPI y-slab: scalar_fn contains mpi4jax collectives
+            # (distributed FFT / 3/2 pad) which have NO vmap batching
+            # rule — keep the static per-slot loop (deterministic
+            # collective order across ranks).
+            Rtracers = jnp.stack(
+                [scalar_fn(tracers[..., k], u, v, w, nu_t, g, flx[k])
+                 for k in range(nt)],
+                axis=-1,
+            )
     Rw = Rw.at[..., 0].set(0.0).at[..., -1].set(0.0)
     return Ru, Rv, Rw, u_star, Rtheta, Rtracers
 
@@ -1214,14 +1228,23 @@ def _filt_state(u, v, w, th, tr, g):
     if tr is not None and tr.shape[-1] > 0 and (
         filter_tracers or (g.cfg.monotone_scalars and g.cfg.filter_monotone_qv)
     ):
-        # _apply_filter contracts over the horizontal axes; map it over the
-        # trailing tracer axis (static unroll, small slot count).
-        cols = []
-        for k in range(tr.shape[-1]):
-            do_filter = filter_tracers or (k == 0 and g.cfg.filter_monotone_qv)
-            col = _apply_filter(tr[..., k], g) if do_filter else tr[..., k]
-            cols.append(col)
-        tr = jnp.stack(cols, axis=-1)
+        # _apply_filter contracts over the horizontal axes. Two static
+        # cases replace the per-slot Python loop: all slots filtered
+        # (vmap — one batched kernel; serial only, the distributed FFT
+        # has no vmap batching rule), or exactly slot 0 (q_v).
+        if filter_tracers:
+            if g.layout is None:
+                tr = jax.vmap(
+                    lambda q: _apply_filter(q, g), in_axes=-1, out_axes=-1,
+                )(tr)
+            else:
+                tr = jnp.stack(
+                    [_apply_filter(tr[..., k], g)
+                     for k in range(tr.shape[-1])],
+                    axis=-1,
+                )
+        else:   # monotone_scalars and filter_monotone_qv: q_v only
+            tr = tr.at[..., 0].set(_apply_filter(tr[..., 0], g))
     return u, v, w, th, tr
 
 

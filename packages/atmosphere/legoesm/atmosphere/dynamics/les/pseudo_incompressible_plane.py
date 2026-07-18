@@ -456,18 +456,22 @@ def _sgs_force(u, v, w, theta, g: PseudoIncompressibleGrid, sfc_flux, cd_surf,
 
 def _tracer_sgs(tracers, nu_t, g: PseudoIncompressibleGrid, sfc_qv_flux):
     """SGS diffusion ``∂_j(K_h ∂_j q)`` (K_h=ν_t/Pr) for each water tracer + the surface
-    moisture flux ``sfc_qv_flux`` into slot 0 (q_v) first layer. Returns (ny,nx,nz,nt)."""
+    moisture flux ``sfc_qv_flux`` into slot 0 (q_v) first layer. Returns (ny,nx,nz,nt).
+
+    Batched over the trailing tracer axis with ``jax.vmap`` (one fused kernel
+    set for ALL slots, compile time independent of n_tracers) instead of a
+    trace-time Python loop."""
     cfg = g.cfg; dz = g.dz
     kh = nu_t / cfg.pr_sgs
-    cols = []
-    for k in range(tracers.shape[-1]):
-        q = tracers[..., k]
-        Fq = (_ddx_c(kh * _ddx_c(q, g.dx), g.dx) + _ddy_c(kh * _ddy_c(q, g.dy), g.dy)
-              + _ddz_c(kh * _ddz_c(q, dz), dz))
-        if k == 0:                                  # q_v gets the surface moisture flux
-            Fq = Fq.at[..., 0].add(sfc_qv_flux / dz)
-        cols.append(Fq)
-    return jnp.stack(cols, axis=-1)
+
+    def _sgs_one(q):
+        return (_ddx_c(kh * _ddx_c(q, g.dx), g.dx)
+                + _ddy_c(kh * _ddy_c(q, g.dy), g.dy)
+                + _ddz_c(kh * _ddz_c(q, dz), dz))
+
+    F = jax.vmap(_sgs_one, in_axes=-1, out_axes=-1)(tracers)
+    # q_v (slot 0) gets the surface moisture flux into the first layer.
+    return F.at[:, :, 0, 0].add(sfc_qv_flux / dz)
 
 
 def _surface_state(u, v, theta, g: PseudoIncompressibleGrid, forcing, sfc_means=None):
@@ -542,10 +546,13 @@ def tendencies(u, v, w, theta, tracers, g: PseudoIncompressibleGrid, forcing=Non
     has_tracers = tracers is not None and tracers.shape[-1] > 0
     atr = None
     if has_tracers:
-        cols = [_adv.advect_scalar(tracers[..., k], u, v, w, g.dx, g.dy, g.dz,
-                                   cfg.scheme, vel_at_faces=True)
-                for k in range(tracers.shape[-1])]
-        atr = jnp.stack(cols, axis=-1)
+        # vmap over the trailing tracer axis: one batched advection kernel
+        # for all slots (kernel count + compile time independent of n_tracers).
+        atr = jax.vmap(
+            lambda q: _adv.advect_scalar(q, u, v, w, g.dx, g.dy, g.dz,
+                                         cfg.scheme, vel_at_faces=True),
+            in_axes=-1, out_axes=-1,
+        )(tracers)
     # eddy viscosity computed ONCE, shared by momentum + tracer SGS
     need_sgs = cfg.sgs != "none" or cfg.surface != "free" or has_tracers
     if need_sgs:
