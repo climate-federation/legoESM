@@ -1216,6 +1216,27 @@ class LatLonCGridOceanModel:
                 f"freshwater_closure must be one of {_valid_fw}, "
                 f"got {config.freshwater_closure!r}",
             )
+        _valid_fw_sal = {"s_ref", "local"}
+        if getattr(config, "freshwater_salinity", "s_ref") not in _valid_fw_sal:
+            raise ValueError(
+                f"freshwater_salinity must be one of {_valid_fw_sal}, "
+                f"got {getattr(config, 'freshwater_salinity', 's_ref')!r}",
+            )
+        if (getattr(config, "freshwater_salinity", "s_ref") == "local"
+                and bool(getattr(config, "normalize_freshwater", False))):
+            # normalize_freshwater promises ZERO global salt tendency, which
+            # holds only for a SCALAR S_ref (S_ref*∫F' dA = 0).  With the
+            # local-S field the covariance ∫S_local·F' dA is generally
+            # nonzero, silently breaking the promise (codex HIGH,
+            # 2026-07-18).  Reject the combination until a joint
+            # volume+salt correction exists.
+            raise ValueError(
+                "freshwater_salinity='local' is incompatible with "
+                "normalize_freshwater=True: the zero-mean freshwater "
+                "correction no longer yields zero global salt once "
+                "multiplied by a spatially varying salinity "
+                "(∫S_local·F' dA covariance).  Use s_ref with "
+                "normalization, or local without it.")
 
         # Fail-fast EOS dispatch validation (dispatch discipline: validate the
         # static literal at construction, not lazily at the first step where
@@ -3341,6 +3362,16 @@ class LatLonCGridOceanModel:
         if freshwater is not None and self.config.freshwater_closure != "none":
             dz_0 = h_k_new[..., 0]
             _S_dtype = state_new.S.data.dtype
+            # Salinity entering the virtual-salt closure: the fixed scalar
+            # S_ref (legacy, bit-identical) or the LOCAL top-cell salinity —
+            # NEMO's tra_sbc convention (sfx = emp * sss).  Static config
+            # gate; unknown values raise at model construction.  The local
+            # field is the post-advection (Now) salinity, column-constant
+            # for the runoff-spread channel.
+            if getattr(self.config, "freshwater_salinity", "s_ref") == "local":
+                _S_fw = state_new.S.data[..., 0].astype(_S_dtype)
+            else:
+                _S_fw = self.config.S_ref
             from legoesm.ocean.freshwater import resolve_runoff_spread_arg
             _spread_arg = resolve_runoff_spread_arg(self.config)
             if _spread_arg is not None:
@@ -3357,7 +3388,7 @@ class LatLonCGridOceanModel:
                     runoff_spread_virtual_salt_tendency_3d,
                 )
                 dS_fw_3d = runoff_spread_virtual_salt_tendency_3d(
-                    freshwater, self.config.S_ref, h_k_new, self.config.rho_0,
+                    freshwater, _S_fw, h_k_new, self.config.rho_0,
                     mask,
                     runoff_spread_m=_spread_arg,
                     area=_grid.area,
@@ -3372,7 +3403,7 @@ class LatLonCGridOceanModel:
                 # does not drift mean salinity.  Shared with the MPAS path.
                 from legoesm.ocean.freshwater import normalized_virtual_salt_flux
                 dS_fw = normalized_virtual_salt_flux(
-                    freshwater, self.config.S_ref, dz_0, self.config.rho_0,
+                    freshwater, _S_fw, dz_0, self.config.rho_0,
                     _grid.area, mask,
                 )
                 S_fw = state_new.S.data.at[..., 0].add(
@@ -3380,7 +3411,7 @@ class LatLonCGridOceanModel:
                 )
             else:
                 dS_fw = virtual_salt_flux(
-                    freshwater, S_ref=self.config.S_ref, dz_0=dz_0, rho_0=self.config.rho_0,
+                    freshwater, S_ref=_S_fw, dz_0=dz_0, rho_0=self.config.rho_0,
                 )
                 # Cast the freshwater contribution to S's dtype so the
                 # scatter add does not silently widen on x64 mode (the
