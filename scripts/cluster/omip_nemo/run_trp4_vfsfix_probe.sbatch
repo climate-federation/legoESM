@@ -36,7 +36,10 @@ SSSCLIM=$INP/sss_climatology_for_restoring.nc
 ICEIC=$ROOT2/cfgs/ORCA1/INPUTS/Ice_initialization.nc
 echo "=== HOST ==="; hostname; nvidia-smi -L 2>/dev/null | head -1; date
 echo "=== worktree (fix branch) ==="; git -C $WT log --oneline -1
-GA="--grid tripole --mesh $ROOT/data/grids/eORCA1.2_mesh_mask.nc --dt 150 \
+# --mesh must be the RELATIVE path (resolved via the worktree's data symlink):
+# build_tripole's mesh-consistency guard compares path STRINGS and the grid
+# side uses the relative default (absolute $ROOT/... form fails the guard).
+GA="--grid tripole --mesh data/grids/eORCA1.2_mesh_mask.nc --dt 150 \
   --min-levels 2 --C-smag-lap 3.0 --smag-cfl-safety 0.125 --ew-cyclic-overlap"
 COMMON="--nemo-vertical --partial-cell --pgf-scheme smc03 \
   --adaptive-implicit-vertadv --momentum-rk3 --geothermal \
