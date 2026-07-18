@@ -3342,8 +3342,10 @@ def compute_face_masks_3d(
         False/0.0 below the seafloor.  Typically
         ``partial_coord.is_active.astype(...)``.
     grid : optional LatLonGrid or LatLonCGridGeometry.
-        Currently unused.  Fold face kept as wall (zero) -- see
-        ``compute_face_masks`` comment.
+        Fold face kept as wall (zero) -- see ``compute_face_masks``
+        comment.  Consulted for an optional ``seam_wall_rows`` attribute
+        (partial-periodic seam wall, NEMO DINO): when present, the seam
+        u-face (cols 0 and n_lon) is closed on walled rows at every level.
 
     Returns
     -------
@@ -3358,6 +3360,9 @@ def compute_face_masks_3d(
     u_mask = jnp.concatenate(
         [u_mask_interior, u_mask_interior[:, 0:1, :]], axis=1,
     )
+    # Partial-periodic seam wall (NEMO DINO): close the seam u-face at
+    # walled latitude rows (all levels).  None → fully periodic.
+    u_mask = _apply_seam_wall_u(u_mask, getattr(grid, "seam_wall_rows", None))
     # v-face i is between cell i-1 (south) and cell i (north).
     # Fold face kept as wall (zero) -- see compute_face_masks comment.
     v_mask_interior = a[:-1] * a[1:]
@@ -4233,9 +4238,29 @@ def pv_flux_al81_partial_cell(
     return diag_vortcor_u, diag_vortcor_v
 
 
+def _apply_seam_wall_u(u_mask: jnp.ndarray, seam_wall_rows) -> jnp.ndarray:
+    """Close the periodic-seam u-faces on walled latitude rows.
+
+    The periodic wrap is stored redundantly at BOTH u-face column 0 and
+    the appended column ``n_lon`` (the same physical seam face), so both
+    are zeroed on a walled row.  ``seam_wall_rows`` is ``(n_lat,)`` with
+    ``1.0`` = walled.  ``None`` returns ``u_mask`` unchanged (byte-
+    identical).  Works for 2-D ``(n_lat, n_lon+1)`` and 3-D
+    ``(n_lat, n_lon+1, nlev)`` masks (broadcast over levels).
+    """
+    if seam_wall_rows is None:
+        return u_mask
+    open_rows = (1.0 - jnp.asarray(seam_wall_rows)).astype(u_mask.dtype)
+    gate = open_rows[:, None] if u_mask.ndim == 3 else open_rows  # (n_lat[,1])
+    u_mask = u_mask.at[:, 0].multiply(gate)
+    u_mask = u_mask.at[:, -1].multiply(gate)
+    return u_mask
+
+
 def compute_face_masks(
     land_mask: jnp.ndarray,
     grid=None,
+    seam_wall_rows=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Derive u-face and v-face masks from cell-center land mask.
 
@@ -4246,8 +4271,14 @@ def compute_face_masks(
     land_mask : array, shape (n_lat, n_lon)
         Cell-center ocean mask (1 = ocean, 0 = land).
     grid : optional LatLonGrid or LatLonCGridGeometry.
-        Currently unused.  Fold face kept as wall (zero) until a
-        proper halo exchange architecture (Option B) is implemented.
+        Fold face kept as wall (zero) until a proper halo exchange
+        architecture (Option B) is implemented.  Consulted for an
+        optional ``seam_wall_rows`` attribute (partial-periodic seam
+        wall) when the explicit ``seam_wall_rows`` argument is ``None``.
+    seam_wall_rows : optional array, shape (n_lat,)
+        ``1.0`` = the periodic-seam u-face is walled at that latitude
+        row, ``0.0`` = open.  ``None`` (default) → fully periodic (byte-
+        identical).  Falls back to ``grid.seam_wall_rows`` when unset.
 
     Returns
     -------
@@ -4256,12 +4287,15 @@ def compute_face_masks(
     v_mask : array, shape (n_lat+1, n_lon)
         Mask at meridional (lat) interfaces.
     """
+    if seam_wall_rows is None and grid is not None:
+        seam_wall_rows = getattr(grid, "seam_wall_rows", None)
     # u-face j is between cell (j-1) mod n_lon and cell j (periodic in lon)
     u_mask_interior = land_mask * jnp.roll(land_mask, 1, axis=1)
     # Append periodic wrap
     u_mask = jnp.concatenate(
         [u_mask_interior, u_mask_interior[:, 0:1]], axis=1,
     )
+    u_mask = _apply_seam_wall_u(u_mask, seam_wall_rows)
 
     # v-face i is between cell i and cell i+1.
     v_mask_interior = land_mask[:-1] * land_mask[1:]

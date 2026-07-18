@@ -6331,7 +6331,9 @@ class LatLonCGridOceanModel:
         wet = mask > 0.5
 
         # Face mask consistency: u_mask/v_mask must match land_mask
-        u_expected, v_expected = compute_face_masks(mask)
+        # (thread the geometry so a walled-but-wet partial-periodic seam
+        # state — all cells wet, seam u-face closed — passes).
+        u_expected, v_expected = compute_face_masks(mask, self.grid)
         if not (bool(jnp.all(state.u_mask.data == u_expected))
                 and bool(jnp.all(state.v_mask.data == v_expected))):
             raise ValueError(

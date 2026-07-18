@@ -233,8 +233,9 @@ def rest_state_latlon_cgrid_ocean(
     v_zeros = jnp.zeros((n_lat + 1, n_lon, nlev), dtype=dtype)
     zeros_2d = jnp.zeros((n_lat, n_lon), dtype=dtype)
 
-    # Face masks
-    u_mask, v_mask = compute_face_masks(land_mask)
+    # Face masks — consult ``grid.seam_wall_rows`` for a partial-periodic
+    # seam wall (NEMO DINO); None on ordinary grids → fully periodic.
+    u_mask, v_mask = compute_face_masks(land_mask, grid)
 
     # Initialize vertical velocity with zeros (will be computed during step)
     w_zeros = jnp.zeros((n_lat, n_lon, nlev), dtype=dtype)
@@ -404,14 +405,18 @@ def regional_rest_state_latlon_cgrid(
 def replace_land_mask(
     state: LatLonCGridOceanState,
     new_land_mask: jnp.ndarray,
+    seam_wall_rows: jnp.ndarray | None = None,
 ) -> LatLonCGridOceanState:
     """Replace land_mask and recompute u_mask/v_mask atomically.
 
     Use this instead of ``state._replace(land_mask=...)`` to ensure
-    face masks stay consistent with the cell mask.
+    face masks stay consistent with the cell mask.  ``seam_wall_rows``
+    (optional, ``(n_lat,)``, 1 = walled) closes the periodic-seam u-face
+    on those rows for a partial-periodic geometry; ``None`` (default) =
+    fully periodic (byte-identical).
     """
     new_land_mask = jnp.asarray(new_land_mask)
-    u_mask, v_mask = compute_face_masks(new_land_mask)
+    u_mask, v_mask = compute_face_masks(new_land_mask, seam_wall_rows=seam_wall_rows)
     return state._replace(
         land_mask=Field(data=new_land_mask, name="land_mask",
                         dims=state.land_mask.dims, units=""),

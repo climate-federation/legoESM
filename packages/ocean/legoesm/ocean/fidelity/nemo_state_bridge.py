@@ -284,6 +284,23 @@ def bridge_nemo_to_legoesm_topo(
         lat_1d=jnp.asarray(lat_1d), lon_1d=jnp.asarray(lon_1d),
         lat_face_1d=jnp.asarray(lat_face),
     )
+    # Partial-periodic seam wall (NEMO DINO): ALL interior cells are wet,
+    # but the zonal seam u-face is closed outside the ACC channel — carried
+    # on the geometry so every mask derivation (2-D/3-D face, vertex,
+    # barotropic diffusion) reads it via ``getattr(grid, "seam_wall_rows")``.
+    # Only meaningful for a re-entrant (periodic_i) grid; a closed basin
+    # already has real west/east walls.  None on grids without a partial
+    # seam → fully periodic (byte-identical).
+    seam_wall_rows = getattr(grid, "seam_wall_rows", None) if periodic_i else None
+    if seam_wall_rows is not None:
+        seam_wall_rows = jnp.asarray(seam_wall_rows)
+        if seam_wall_rows.shape != (n_lat,):
+            raise ValueError(
+                f"NEMO seam_wall_rows shape {seam_wall_rows.shape} != (n_lat,)="
+                f"({n_lat},); the halo-derived seam profile must span the "
+                "interior latitude rows."
+            )
+        geom = geom._replace(seam_wall_rows=seam_wall_rows)
     # Verify the built metrics + Coriolis reproduce NEMO's own arrays (guards a
     # wrong omega/lat/lon/radius/face build).  Relative because Mercator f/e1
     # span the whole latitude range.  dx_T (= R·dλ·cos φ) matches NEMO e1t to
@@ -367,6 +384,14 @@ def bridge_nemo_to_legoesm_topo(
     vmask_s = (np.asarray(grid.vmask)[:, :, 0] > 0.5).astype(np.float64)
     umask_face = umap(umask_s[:, :, None])[:, :, 0]
     vmask_face = _v_north_to_face(vmask_s[:, :, None])[:, :, 0]
+    # Close the seam u-face on walled rows so the bridge's own state is
+    # self-consistent with the geometry seam wall (NEMO's interior umask
+    # is filled wet at the seam by the periodic lbc_lnk — the wall lives
+    # only in the halo tmask, so re-impose it here).
+    if seam_wall_rows is not None:
+        _open = (1.0 - np.asarray(seam_wall_rows)).astype(umask_face.dtype)
+        umask_face[:, 0] *= _open
+        umask_face[:, -1] *= _open
 
     # Neumann-fill T/S over land (NEMO stores 0.0 on masked cells; the wide
     # high-order tracer stencils must not see it — the #480 T=0 bug).

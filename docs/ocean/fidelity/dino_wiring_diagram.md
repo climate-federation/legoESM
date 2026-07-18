@@ -652,3 +652,57 @@ Rounds 1–9 (survived every controlled node test), not a defect in the re-entra
 
 The deep-eq jet root cause (audit #10 seam) is CLOSED; the remaining SSH residual is the
 equatorial f→0 dynamics gap, unchanged by any single node.
+
+## Round-11 (2026-07-18) — PARTIAL-PERIODIC SEAM-FACE WALL: the faithful DINO geometry
+
+**Both prior seam variants were wrong; this builds the NEMO-faithful third one.**
+Round-10 exposed a false dichotomy: the analytic **land-column** wall (dry column 0
+outside the channel) traps a cold `T=0` masked cell → spurious cold front + deep-eq jet,
+while the fully **re-entrant** override (all-wet, no wall) makes a channel-world with the
+WRONG-sign equatorial surface current (+0.10 eastward) and degraded SSH (0.947). NEMO's
+mesh is neither: the raw `mesh_mask.nc` halo `tmask` west-outer-halo column (col 0) is
+LAND at every latitude OUTSIDE the ACC channel `[-64.44, -45.35]` while ALL interior
+cells stay wet — i.e. the zonal periodic-seam **u-face** is walled outside the channel,
+open inside. (Equatorial SSH tilts west-high +0.067 m in NEMO, proving the basin is
+zonally closed there.)
+
+**Implementation (additive, default-`None` byte-identical).** One optional
+`seam_wall_rows` profile (`(n_lat,)`, 1 = walled) threaded on the `LatLonCGridGeometry`
+and read via `getattr(grid, "seam_wall_rows", None)` at the four mask-derivation sites —
+`compute_face_masks` (2-D), `compute_face_masks_3d` (per-level), `compute_vertex_mask`
+(EEN/PV seam corners), and the barotropic diffusion mask — each closing the seam u-face
+(cols 0 AND n_lon, the same wrap face) on walled rows; the runtime invariant threads the
+grid so a walled-but-wet state passes; the MPI/SPMD band slicers slice/widen it. The NEMO
+bridge (`read_nemo_mesh_mask` + `bridge_nemo_to_legoesm_topo`) derives it from the halo
+tmask and attaches it to the bridged geometry. GYRE/Veros/analytic recipes untouched.
+
+**Controlled 180d — sole variable = seam geometry** (all `nemo_dino_kamm`, full_step=True,
+dt=2700, 5760 steps, same bridged NEMO mesh + IC + forcing, NEMO RUN_TRAJ ÷vovvle3t):
+
+| metric | land-column | re-entrant | **SEAM-WALL (faithful)** | NEMO |
+|--------|-----------:|-----------:|-------------------------:|-----:|
+| **eq surf zonal u [m/s]** | −0.025 | **+0.105 (wrong sign)** | **−0.011 (westward ✓)** | −0.182 |
+| **SSH corr** | 0.993 | **0.947 (channel-world)** | **0.994 (recovered)** | — |
+| **eq SSH W-E tilt [m]** | −0.049 | −0.000 | −0.015 | +0.067 |
+| deep-eq KE ratio (1057m/surf) | 0.688 (cold-cell jet) | 0.108 | 0.450 | 0.001 |
+| eta 2Δx checkerboard | 1.83 | 0.03 | **0.26 (clean)** | ~0 |
+| SST corr | 0.995 | 0.995 | 0.995 | — |
+| T@300m corr (mean °C) | 0.989 (9.26) | 0.996 (9.36) | 0.993 (9.29 vs 9.28) | — |
+
+**Verdict.** The faithful seam wall fixes BOTH documented failures at once, WITHOUT the
+spurious land cell: vs re-entrant it flips the equatorial surface current to the correct
+**westward** sign (+0.105→−0.011, NEMO −0.182) and recovers **SSH corr 0.947→0.994**; vs
+the land-column it removes the cold-cell front (checkerboard 1.83→0.26, no `T=0` cell) and
+halves the deep-eq jet (KE ratio 0.688→0.450). 180d STABLE (T∈[3.9,26.5] °C, no NaN, no
+non-NEMO stabiliser). Reviews: physics-validator GREEN (conservation `∑area·div(F)`=3.7e-9,
+geometry-sign + EEN corner + cross-mask consistency all confirmed); code-reviewer clean
+after the MPI band-slice fix.
+
+**Residuals (diagnosed, NOT papered over).** (a) The eq SSH tilt is present but weak and
+still east-high (−0.015 vs NEMO +0.067); (b) deep-eq KE ratio 0.450 is reduced from the
+land-column but well above NEMO's 0.001; (c) BSF is ~6× over-strong (crude diagnostic).
+All three are the SAME pre-existing equatorial-amplification / barotropic-Coriolis
+energetic node (open Node 16), now cleanly EXPOSED on faithful geometry rather than masked
+by a wrong wall — not a defect in the seam-wall fix. Gate: `test_partial_periodic_seam_wall.py`
+(8 tests: byte-identical default, seam-face/vertex/3-D/barotropic masking, flux-form
+conservation, band-slice alignment).

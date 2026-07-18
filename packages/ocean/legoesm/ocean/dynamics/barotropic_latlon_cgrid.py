@@ -250,6 +250,15 @@ def _dissipation_coeffs(config, grid, area, dt_s, dtype, mask):
         diff_u_mask = jnp.concatenate(
             [diff_u_mask, diff_u_mask[:, 0:1]], axis=1,
         )
+        # Partial-periodic seam wall (NEMO DINO): close the barotropic-
+        # diffusion seam u-face (cols 0 and n_lon) on walled rows so
+        # smoothing does not leak η across the closed seam.  None → fully
+        # periodic (byte-identical).
+        _seam = getattr(grid, "seam_wall_rows", None)
+        if _seam is not None:
+            _open = (1.0 - jnp.asarray(_seam)).astype(diff_u_mask.dtype)
+            diff_u_mask = diff_u_mask.at[:, 0].multiply(_open)
+            diff_u_mask = diff_u_mask.at[:, -1].multiply(_open)
         # Cell-pad-first (PR357 Bug-2 pattern): pad the cell mask so the
         # v-face mask at a partition cut is the product of the two adjacent
         # cells across the cut (MPI halo exchange) rather than a halo-padded

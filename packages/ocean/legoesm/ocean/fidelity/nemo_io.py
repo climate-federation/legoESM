@@ -50,6 +50,14 @@ class NemoGrid(NamedTuple):
     # the Mercator/topography bridge for exact meridional cell faces; optional so
     # existing flat-bottom NemoGrid constructors (GYRE) stay valid.
     gphiv: np.ndarray | None = None
+    # Partial-periodic seam-wall profile, shape ``(n_lat,)``, 1.0 = the
+    # zonal periodic-seam u-face is WALLED at that latitude row, 0.0 =
+    # open/re-entrant.  Derived from the RAW (un-stripped) surface
+    # ``tmask`` west-outer-halo column (col 0), which NEMO fills with land
+    # outside a partial channel (DINO: land everywhere except the ACC
+    # band) while the interior stays all-wet.  ``None`` = fully periodic
+    # (no partial seam) or a config whose halo carries no wall.
+    seam_wall_rows: np.ndarray | None = None
 
 
 class NemoState(NamedTuple):
@@ -107,6 +115,18 @@ def read_nemo_mesh_mask(path: str, *, nn_hls: int = 1) -> NemoGrid:
     def v1(name: str) -> np.ndarray:
         return np.asarray(m[name].values).ravel().astype(np.float64)
 
+    # Partial-periodic seam wall from the RAW halo (before the strip): the
+    # surface T-mask west-outer-halo column (col 0) is land at latitudes
+    # where the periodic seam is closed (DINO: outside the ACC channel);
+    # strip it to the interior rows.  Only a GENUINE partial seam (some
+    # walled, some open) sets the field — a fully re-entrant or fully
+    # walled config leaves it ``None`` (byte-identical downstream).
+    _tmask_raw = np.asarray(m["tmask"].values).squeeze()  # (z, y, x) with halo
+    _tsurf_west_halo = _tmask_raw[0, nn_hls:-nn_hls, 0]   # interior rows, col 0
+    _seam_wall = (_tsurf_west_halo < 0.5).astype(np.float64)  # 1 = walled
+    if not (_seam_wall.any() and (_seam_wall < 0.5).any()):
+        _seam_wall = None
+
     return NemoGrid(
         glamt=h2("glamt"), gphit=h2("gphit"),
         e1t=h2("e1t"), e2t=h2("e2t"), e1u=h2("e1u"), e2v=h2("e2v"),
@@ -114,6 +134,7 @@ def read_nemo_mesh_mask(path: str, *, nn_hls: int = 1) -> NemoGrid:
         e3t_1d=v1("e3t_1d"), gdept_1d=v1("gdept_1d"), gdepw_1d=v1("gdepw_1d"),
         tmask=m3("tmask"), umask=m3("umask"), vmask=m3("vmask"),
         gphiv=(h2("gphiv") if "gphiv" in m else None),
+        seam_wall_rows=_seam_wall,
     )
 
 

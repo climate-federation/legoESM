@@ -1208,6 +1208,24 @@ class LatLonCGridGeometry(NamedTuple):
     # and inherit it.
     omega: float = constants.Omega
 
+    # Optional partial-periodic seam-wall profile, shape ``(n_lat,)``,
+    # ``1.0`` = the periodic-seam zonal (u-) face is WALLED at that
+    # latitude row, ``0.0`` = open/periodic.  Default ``None`` = fully
+    # periodic in longitude (byte-identical: ``None`` is an empty pytree
+    # subtree, so it adds no leaf).  Set only by the NEMO DINO bridge to
+    # reproduce the faithful DINO geometry — ALL interior cells wet, but
+    # the zonal seam u-face closed outside the ACC channel (NEMO's halo
+    # ``tmask`` land columns).  Read by ``compute_face_masks``,
+    # ``compute_face_masks_3d``, ``compute_vertex_mask`` and the
+    # barotropic diffusion-mask derivation via ``getattr(grid,
+    # "seam_wall_rows", None)``.  APPENDED at the NamedTuple end with a
+    # default.  As a per-lat-row (n_lat,) array it is a real pytree leaf
+    # only when set, and the MPI/SPMD band slicers (``slice_cgrid_geometry
+    # _to_band``, ``widen_cgrid_geometry_band``) slice/widen it like the
+    # other T-point cell-row fields so it stays aligned with band-local
+    # ``n_lat`` (``None`` passes through unchanged).
+    seam_wall_rows: jax.Array | None = None
+
     # ------------------------------------------------------------------
     # GridProtocol properties
     # ------------------------------------------------------------------

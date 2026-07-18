@@ -2268,6 +2268,11 @@ def slice_cgrid_geometry_to_band(geom, layout: LatLonBandLayout):
         cos_lat=t(geom.cos_lat), sin_lat=t(geom.sin_lat),
         lat=t(geom.lat),
         fold=band_fold,
+        # Partial-periodic seam wall is a per-lat-row (n_lat,) profile —
+        # slice to the band like the other T-point fields so it stays
+        # aligned with the band-local n_lat (None passes through).
+        seam_wall_rows=(t(geom.seam_wall_rows)
+                        if geom.seam_wall_rows is not None else None),
         # lon, dlon, dlat, radius, n_lon pass through unchanged.
     )
 
