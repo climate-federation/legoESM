@@ -317,16 +317,19 @@ def test_omega_pinned_to_zenodo_log():
 
 
 def test_fixture_extract_sha_current():
-    """The fixture's recorded extract SHA must match the CURRENT
-    extract source — a drifted extract invalidates the certification
-    (codex bounded-r2 finding 5)."""
+    """The fixture's recorded harness SHAs (extract + driver + shim)
+    must match the CURRENT sources — any drifted harness file
+    invalidates the certification (codex bounded-r2 finding 5 / r4
+    provenance P1)."""
     import hashlib
 
     z = np.load(FIXTURE)
-    src = (Path(__file__).parents[2] / "scripts" / "validate"
-           / "fv3_native" / "fv3_boundedgs_extract.F90")
-    cur = hashlib.sha256(src.read_bytes()).hexdigest()
-    assert str(z["extract_sha256"]) == cur, (
-        "fv3_boundedgs_extract.F90 changed since the fixture was "
-        "generated — regenerate tests/grids/fixtures/"
-        "fv3_boundedgs_oracle.npz (gen_boundedgs_oracle.py)")
+    src = Path(__file__).parents[2] / "scripts" / "validate" / "fv3_native"
+    for key, fname in (("extract_sha256", "fv3_boundedgs_extract.F90"),
+                       ("driver_sha256", "fv3_boundedgs_driver.F90"),
+                       ("shim_sha256", "fv3_boundedgs_shim.F90")):
+        cur = hashlib.sha256((src / fname).read_bytes()).hexdigest()
+        assert str(z[key]) == cur, (
+            f"{fname} changed since the fixture was generated — "
+            "regenerate tests/grids/fixtures/fv3_boundedgs_oracle.npz "
+            "(gen_boundedgs_oracle.py)")

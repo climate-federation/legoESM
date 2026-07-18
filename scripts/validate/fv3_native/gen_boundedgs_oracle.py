@@ -114,6 +114,10 @@ def main():
         input_sha256=sha,
         extract_sha256=hashlib.sha256(
             (src / "fv3_boundedgs_extract.F90").read_bytes()).hexdigest(),
+        driver_sha256=hashlib.sha256(
+            (src / "fv3_boundedgs_driver.F90").read_bytes()).hexdigest(),
+        shim_sha256=hashlib.sha256(
+            (src / "fv3_boundedgs_shim.F90").read_bytes()).hexdigest(),
         **{k: np.array(v) for k, v in recs.items()},
         lineage=("BOUNDED-conventions gridstruct: verbatim grid_utils_init "
                  "(symmetryclean, bounded_domain=T) + fv_grid_tools metric "
