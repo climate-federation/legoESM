@@ -433,6 +433,30 @@ def _validate_sst_sic_units(
         )
 
 
+def _pin_times_f64_warn_if_fp32(times_days: np.ndarray) -> jnp.ndarray:
+    """Return the forcing time axis as JAX float64, warning if the fp32
+    precision policy (x64 disabled) silently downcasts it.
+
+    An anchored transient axis carries large absolute day counts (~1e4-1e5)
+    whose sub-day resolution (mid-month .5) is lost at float32 (ULP ~
+    offset*2^-23).  The float64 request is a no-op under fp32 — warn when the
+    resulting quantization actually bites (audit FL3, shared by the lat-lon and
+    ICON loaders).
+    """
+    times = jnp.asarray(times_days, dtype=jnp.float64)
+    max_abs_day = float(np.max(np.abs(times_days))) if times_days.size else 0.0
+    if times.dtype == jnp.float32 and max_abs_day * 2.0 ** -23 > 0.01:
+        logger.warning(
+            "AMIP forcing time axis stored at float32 (x64 disabled): "
+            "absolute day offset ~%.0f gives ~%.3f-day (~%.0f-min) "
+            "quantization of the mid-month anchors. Enable JAX_ENABLE_X64=1 "
+            "(fp64 policy) for exact sub-day forcing indexing.",
+            max_abs_day, max_abs_day * 2.0 ** -23,
+            max_abs_day * 2.0 ** -23 * 1440.0,
+        )
+    return times
+
+
 def _load_icon_unstructured(
     config: AMIPForcingConfig, grid, start_year: int | None = None,
     run_days: float | None = None,
@@ -560,11 +584,8 @@ def _load_icon_unstructured(
 
     from legoesm.core.precision import get_policy
     _dtype = get_policy().storage
-    # times pinned to float64: an anchored transient axis carries large
-    # absolute day counts (~1e4-1e5) whose sub-day resolution (mid-month .5)
-    # would be lost at float32 (ULP ~5e-3 day).
     return AMIPForcing(
-        times=jnp.asarray(times_days, dtype=jnp.float64),
+        times=_pin_times_f64_warn_if_fp32(times_days),
         sst=jnp.array(sst_regridded, dtype=_dtype),
         sic=jnp.array(sic_regridded, dtype=_dtype),
         config=config,
@@ -826,24 +847,10 @@ def load_amip_forcing(
 
     # Anchor values are kept un-clamped (mid-month bcs convention); the physical
     # SIC [0,1] clip and SST freezing floor are applied after time interpolation
-    # in get_forcing_at_time. ``times`` requests float64: under the default fp32
-    # precision policy (x64 disabled) JAX silently downcasts it to float32, at
-    # which an anchored transient axis's large absolute day counts (~1e4-1e5)
-    # lose sub-day resolution (ULP ~ offset*2^-23). Warn when that actually bites
-    # (audit FL3 — the old comment claimed a guarantee the fp32 policy breaks).
+    # in get_forcing_at_time.
     from legoesm.core.precision import get_policy
     _dtype = get_policy().storage
-    _times = jnp.asarray(times_days, dtype=jnp.float64)
-    _max_abs_day = float(np.max(np.abs(times_days))) if times_days.size else 0.0
-    if _times.dtype == jnp.float32 and _max_abs_day * 2.0 ** -23 > 0.01:
-        logger.warning(
-            "AMIP forcing time axis stored at float32 (x64 disabled): "
-            "absolute day offset ~%.0f gives ~%.3f-day (~%.0f-min) "
-            "quantization of the mid-month anchors. Enable JAX_ENABLE_X64=1 "
-            "(fp64 policy) for exact sub-day forcing indexing.",
-            _max_abs_day, _max_abs_day * 2.0 ** -23,
-            _max_abs_day * 2.0 ** -23 * 1440.0,
-        )
+    _times = _pin_times_f64_warn_if_fp32(times_days)
     return AMIPForcing(
         times=_times,
         sst=jnp.array(sst_regridded, dtype=_dtype),
