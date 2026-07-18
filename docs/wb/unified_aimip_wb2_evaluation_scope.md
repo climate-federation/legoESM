@@ -97,7 +97,7 @@ size 128/8 → 32/2 · lr 5e-5 → (match base).
 - **D2** sfno_full option (a) weak-now vs (b) curriculum-at-T106. *Pending P1.*
 - **D3** `sfno_physics` in/out (needs a `VALID_VARIANTS` addition to the WB2 bridge if in). *Open.*
 - **D4** running T63 sfno_full → **keep as standalone**, report to Pierre in isolation. *Chosen.*
-- **P1** memory probe: does 32/2 + curriculum + chunked fit T106/40 GB? *Running (see below).*
+- **P1** memory probe: does 32/2 + curriculum + chunked fit T106/40 GB? **PASS (2026-07-18)** — the worst-case 120 h / 20-step checkpointed backward ran a full forward+backward+update within 40 GB (`grad_norm` returned; no `RESOURCE_EXHAUSTED`). Option **(b)** is memory-viable. (The probe's epoch-0 NaN is an expected artifact of jumping a random-init SFNO straight to a 120 h rollout — not memory, not instability; the real short-start curriculum avoids it.)
 - **P2** WB2-eval numbers are internal-only (sample-mean climatology, tiny init
   sampling, t2m/u10 proxies) — confirm acceptable for the deliverable. *Open.*
 
@@ -117,6 +117,16 @@ recompute-in-backward), so a 20-step rollout costs **~1 step**, not ×20 — plu
 - **Read:** if the first training step completes a forward+backward without OOM →
   option (b) viable (proceed with a curriculum T106 sfno_full for the fair set).
   If it OOMs → fall back to option (a) (weak-but-fair 32/2 no-curriculum).
+
+**P1 RESULT (2026-07-18): PASS.** Ran on a 40 GB A100 interactively
+(`JAX_ENABLE_X64=1 JAX_PLATFORMS=cuda,cpu XLA_PYTHON_CLIENT_ALLOCATOR=platform`).
+The 32/2 T106 sfno_full (23.7 M params) completed the full forward + 20-step
+120 h checkpointed backward + optimizer update **without OOM**. So the fair-set
+sfno_full carries the curriculum (option b). The probe's epoch-0 NaN is expected
+(random init → 120 h rollout); the fair set uses the base short-start curriculum
+(12→24→72→120 h, matching column_nn) and will likely need `aimip_lr: 5e-5`
+(per-model, like the T63 run) + norm-stats to keep epoch 0 finite — confirm with a
+short finite-check before the full run.
 
 ## Team alignment (gate before re-running)
 
