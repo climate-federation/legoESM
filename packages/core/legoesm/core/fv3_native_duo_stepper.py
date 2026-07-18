@@ -35,7 +35,8 @@ from legoesm.grids.fv3_native_gridstruct import (
 
 def build_six_face_duo_context(n: int, ng: int = 3,
                                use_ext_bundle: bool = False,
-                               vector_corner: str = "lagrange") -> dict:
+                               vector_corner: str = "lagrange",
+                               ext_exclude: tuple = ()) -> dict:
     """Gridstructs + Bounds for all six faces (certified builders)."""
     from legoesm.core.fv3_native_sw_core import Bounds
     from legoesm.grids.fv3_native_halos import ed_supergrid_lonlat_ref
@@ -128,10 +129,14 @@ def build_six_face_duo_context(n: int, ng: int = 3,
         from legoesm.grids.fv3_native_ext_vector import build_ext_context
         from legoesm.grids.fv3_native_gridstruct import extend_gridstruct
 
+        bad = set(ext_exclude) - {"divgd", "cvec", "metrics"}
+        if bad:
+            raise ValueError(f"ext_exclude: unknown families {sorted(bad)}")
         ectx = build_ext_context(n, ng, gs6,
                                  vector_corner=vector_corner)
-        gs6 = [extend_gridstruct(gs6[t], n, ng, tile=t + 1)
-               for t in range(6)]
+        if "metrics" not in ext_exclude:
+            gs6 = [extend_gridstruct(gs6[t], n, ng, tile=t + 1)
+                   for t in range(6)]
 
     from legoesm.grids.fv3_native_gridstruct import (
         build_extended_corner_lonlat,
@@ -144,6 +149,7 @@ def build_six_face_duo_context(n: int, ng: int = 3,
 
     return {"n": n, "ng": ng, "gs6": gs6, "dg": dg,
             "use_ext_bundle": use_ext_bundle, "ectx": ectx,
+            "ext_exclude": tuple(ext_exclude),
             "kk6": kk6, "ee6": ee6,
             "bd": Bounds.single_tile(n, ng)}
 
@@ -322,8 +328,16 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
             ext_vector_cgrid_sixface,
         )
 
-        ext_scalar_sixface(divgd6, "B", ctx["ectx"])
-        ext_vector_cgrid_sixface(uc6, vc6, ctx["ectx"])
+        if "divgd" in ctx.get("ext_exclude", ()):
+            for t in range(1, 7):
+                exchange_bgrid_scalar_halos(divgd6, t, n, ng)
+        else:
+            ext_scalar_sixface(divgd6, "B", ctx["ectx"])
+        if "cvec" in ctx.get("ext_exclude", ()):
+            for t in range(1, 7):
+                exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
+        else:
+            ext_vector_cgrid_sixface(uc6, vc6, ctx["ectx"])
     else:
         for t in range(1, 7):
             exchange_bgrid_scalar_halos(divgd6, t, n, ng)

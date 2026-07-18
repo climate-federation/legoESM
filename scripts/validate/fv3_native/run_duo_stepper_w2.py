@@ -99,6 +99,10 @@ def main():
     ap.add_argument("--ext-bundle", action="store_true",
                     help="faithful ext_scalar/ext_vector duo exchanges "
                          "(fv3_native_ext_vector) + ext halo metrics")
+    ap.add_argument("--ext-exclude", default="",
+                    help="comma list of ext families to swap back to the "
+                         "interim exchanges (attribution probes): "
+                         "divgd,cvec,metrics")
     ap.add_argument("--vector-corner", default="lagrange",
                     choices=("lagrange", "a2d"),
                     help="vector wedge treatment (lagrange = upstream-"
@@ -112,9 +116,11 @@ def main():
         w2_six_face_state,
     )
 
+    excl = tuple(x for x in args.ext_exclude.split(",") if x)
     ctx = build_six_face_duo_context(args.n, 3,
                                      use_ext_bundle=args.ext_bundle,
-                                     vector_corner=args.vector_corner)
+                                     vector_corner=args.vector_corner,
+                                     ext_exclude=excl)
     states = w2_six_face_state(ctx)
     nmap = build_nearest_map(ctx)
 
@@ -152,6 +158,7 @@ def main():
         lon=np.arange(360, dtype=float),
         ext_bundle=np.array(bool(args.ext_bundle)),
         vector_corner=np.array(args.vector_corner),
+        ext_exclude=np.array(args.ext_exclude),
         protocol=f"duo stepper ({mode}); covariant->geographic "
         "exact tangent inversion; NEAREST-cell 1deg sampling (pattern-"
         "level protocol, envelope-comparable to the fregrid reference)")
