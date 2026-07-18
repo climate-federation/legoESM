@@ -1676,9 +1676,18 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
               "when a land-sea mask is set); land albedo stays the "
               "latitude-only curve.")
 
-    if (args.forcing_path is None and args.restart_from is None
-            and args.dataset != "analytical"):
-        parser.error("--forcing-path required (unless --dataset analytical or --restart-from)")
+    # SST/SIC forcing is NOT stored in the checkpoint, and driver.setup()
+    # (which loads forcing) runs before load_checkpoint — so a restart of a
+    # real-data run still needs --forcing-path.  The old message exempted
+    # --restart-from, which was false: it deferred the failure to a confusing
+    # deep "AMIPForcingConfig.path is empty" inside setup (audit 2026-07-17).
+    if args.forcing_path is None and args.dataset != "analytical":
+        parser.error(
+            "--forcing-path required for --dataset "
+            f"{args.dataset!r} (unless --dataset analytical). Forcing is not "
+            "stored in the checkpoint, so a --restart-from run must re-supply "
+            "the same --forcing-path."
+        )
     if args.solar_source in ("file", "spectral_file") and not args.solar_file:
         parser.error("--solar-file required when --solar-source is file/spectral_file")
     if args.ic == "era5" and not args.ic_path:
