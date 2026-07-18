@@ -361,3 +361,26 @@ this modest-eta config. It matters for exact CONTENT CONSERVATION (machine-preci
 proven), not the DINO climate. The SST 0.72(FE)→0.99(MLF) regression is the leap-frog
 integrator itself (node 19 core), not the tracer RA filter form — residual #2 is faithful
 and CLOSED; it is not the SST driver.
+
+## Round-6: bathymetry ruled out; vertical coordinate is the next structural gap (2026-07-18)
+
+Controlled 180d (faithful leapfrog nemo_dino_kamm_mlf, sole variable = depth field H(x,y)):
+| metric | analytic bowl | NEMO exact depth | NEMO |
+|---|---|---|---|
+| BSF range ratio | 2.65× | **2.61×** | 1.0 |
+| deep-eq KE@1000m/surf | 1.267 | 1.208 | 0.0011 |
+| SST/T300m/SSH corr | 0.994/0.990/0.992 | 0.994/0.990/0.993 | — |
+
+Matching NEMO's exact H(x,y) moves BSF only ~1.5% → **the 2.6× BSF + deep-eq jet are DYNAMICS,
+not bathymetry.** Confound ruled out. The deep-eq jet has now survived EVERY matched piece
+(integrator/EEN-Coriolis/live-EEN-barotropic-Coriolis/tracer-filter/bathymetry).
+
+STRUCTURAL DISCOVERY: legoESM DINO is effectively PURE Z-STAR (all 36 levels stretched to
+column depth, active_3d = 2D surface mask broadcast, NO dry bottom cells) vs NEMO ln_zco
+FULL-STEP (fixed levels, staircase dry bottom cells). Genuine un-matched vertical coordinate.
+Exact-MASK run NaN'd at the periodic seam (audit #10: roll-based ops don't respect a lone
+seam-face wall → needs partial-periodic C-grid infra).
+
+REMAINING un-matched (per mandate, build all): full-step-z vertical coordinate (biggest,
+most likely deep-flow lever), partial-periodic seam, node 22 GM-form, node 14 visc-placement,
+IC bit-identical, e1/e2 metric, bottom-drag implicit.
