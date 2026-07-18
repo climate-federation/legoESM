@@ -1095,13 +1095,7 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             self.cdgrid, self.config, physics_tendency,
         )
 
-    def reset_target_mass(self) -> None:
-        """Clear the anchored mass target (iter-20; mirrors iter-18 API)."""
-        self._target_mass = None
 
-    def set_target_mass(self, target_mass) -> None:
-        """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
-        self._target_mass = target_mass
 
     def compute_dry_mass(self, state: NonHydrostaticState) -> jax.Array:
         """Global dry mass ``∫ J · (rho_ref + rho') · dz · dA`` (fp64).
