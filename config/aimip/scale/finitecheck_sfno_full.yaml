@@ -1,0 +1,26 @@
+# Fair-set sfno_full EPOCH-0 STABILITY CHECK (NOT a production run).
+#
+# Runs the EXACT fair-set config (variant_sfno_full.yaml: 32/2, aimip_lr 5e-5,
+# base curriculum) but TRUNCATED to the curriculum's first short-lead phase
+# (12 h, 1 epoch) on 2 tiny windows, so in ~5 min you learn whether epoch 0
+# stays FINITE at the 12 h-from-random start BEFORE committing GPU-days to the
+# full run.  If the loss goes NaN at epoch 0: lower aimip_lr in the variant, or
+# start the curriculum at 6 h.
+#
+# Merge note: the fair-set variant no longer sets aimip_rollout_curriculum, so
+# this cfg_overrides value wins over the base (base<-cfg_overrides<-variant); the
+# variant still supplies 32/2 + lr 5e-5.
+base: config/aimip/scale/base_t106_allyears.yaml
+
+cfg_overrides:
+  train_windows:
+    - [1979, 0, 1]
+    - [2000, 182, 1]
+  aimip_rollout_curriculum:
+    - [12, 1]
+  aimip_n_epochs: 1
+
+variants:
+  - sfno_full
+
+output_dir: results/aimip_finitecheck_sfno_full_t106

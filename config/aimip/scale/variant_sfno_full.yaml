@@ -39,15 +39,21 @@ sfno_seed: 0
 # SFNO/FourCastNet autoregressive cadence.
 dt_sfno: 21600.0
 
-# ``_train_sfno_full_loop`` supports NEITHER the rollout curriculum NOR
-# chunked streaming (it loads the full window set once and checkpoints
-# per-epoch only — no chunk_latest.eqx).  Neutralize the base keys here
-# so the config states what actually runs instead of being silently
-# ignored; training supervises the base loss multi_step_hours (6/12 h =
-# 1-2 SFNO macro steps), the standard SFNO training setup.
-aimip_rollout_curriculum: null
-aimip_chunk_windows: 0
-aimip_chunk_prefetch: false
+# Rollout curriculum ON (Design-A fair set) — INHERIT the base T106 curriculum
+# (12->24->72->120 h, 7 epochs) so sfno_full trains IDENTICALLY to
+# column_nn/classical (same epochs + leads). That identical protocol is the
+# fairness requirement for the AIMIP + WB2 dual-eval scorecards
+# (docs/wb/unified_aimip_wb2_evaluation_scope.md). _train_sfno_full_loop DOES
+# support the curriculum now (build_sfno_curriculum_epoch_plan); the P1 probe
+# (2026-07-18) confirmed 32/2 + the 120 h phase fits the 40 GB A100. sfno_full
+# loads host-resident, so chunk_windows is moot for it — no override needed
+# (inherits base; the sfno_full loop ignores chunking).
+
+# Per-model LR (NOT a fairness variable — you cannot share one LR across an MLP
+# and an SFNO). The full emulator NaN'd at epoch 0 under the shared 3e-4; 5e-5
+# plus the always-on per-channel norm-stats keeps the 12 h-from-random start
+# finite (confirm with finitecheck_sfno_full.yaml before the full run).
+aimip_lr: 5.0e-5
 
 # sfno_full's trainer rejects data_parallel outright (loud guard, #985 codex
 # r4) — override the branch base's global aimip_data_parallel: true. Single-GPU
