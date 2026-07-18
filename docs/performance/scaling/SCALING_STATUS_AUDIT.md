@@ -129,10 +129,16 @@ These are each a scoped project, not a quick edit; ranked by value:
   step built first (cube-atm replicated × ocean band-decomposed × coupler
   regrid ownership), then a route-A CPU-MPI parity+conservation-gated lane.
   Highest-value missing *measurement infra*.
-- **Distributed polar filter under `proc_lon>1`** — `latlon_mpi.py` refuses
-  the polar rFFT on a longitude-split rank; unlocking 2-D lat-lon MPI at
-  the poles needs a lon-gather FFT or a filter redesign under the
-  no-allgather doctrine (route-consistent). Specialized; low rank.
+- **Distributed polar filter under `proc_lon>1`** — SHIPPED: the polar
+  rFFT now gathers the full lon circle via the AD-safe lat-pencil transpose
+  (`lon_gather_full`/`lon_scatter_full`), rebuilds the mask at the global
+  n_lon, and the u-face closure routes through `pad_lon_cgrid` (east
+  neighbour under a split). Decomposition-invariant to the dynamics floor +
+  AD-safe (`test_latlon_2d_polar_filter_mpi.py`). NOTE: 2-D lat-lon MPI is
+  still measured net-negative on the latency-bound fabric and needs the
+  pole-fold + tripole-fold transposes before it is a production win — this
+  removes the polar-filter blocker so the path is CORRECT when a better
+  fabric or the folds land.
 - **Adjoint-side halo overlap** — blocked on nonblocking mpi4jax
   primitives (Isend/Irecv absent); not actionable until the comm backend
   exposes them.
