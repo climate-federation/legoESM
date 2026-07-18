@@ -115,11 +115,14 @@ These are each a scoped project, not a quick edit; ranked by value:
   but nothing under `packages/coupler/` wires it. Biggest route-A cube
   unlock. Large restart/coupling/physics-scatter surgery; deferred while
   `model_driver.py` carries uncommitted edits.
-- **Multilayer-land column scatter under MPI** — land is single-rank-only
-  on owned-face MPI paths (`compiled_segments.py`), and restart refuses to
-  scatter the columns (`model_driver.py`). Columns are embarrassingly
-  parallel; enables distributed land science (not a demonstrated speedup).
-  Driver-coupled (same deferral).
+- **Multilayer-land column scatter under MPI** — SHIPPED for the whole-face
+  cube MPI path: `_setup_parallel` scatters the per-column soil
+  state/params/carbon to owned faces (`_scatter_flat_columns`), both
+  radiation paths capture the advanced land state (fixing a latent
+  unfused-radiation soil-freeze), and the single-rank guard now permits
+  cube-face MPI. Gated bit-identical to serial at np={2,3,6}. Remaining:
+  transient LULC under MPI (global param rebuild) and the SPMD/lat-band land
+  partition specs (still refused).
 - **Coupled atm+ocean scaling bench lane** — NO coupled scaling benchmark
   exists; every lane is component-only. `coupled_esm_driver.py` has no MPI
   step (no scatter/halo/init-distributed), so this needs a coupled MPI
