@@ -93,9 +93,46 @@ Multi-node CRM/LES is unmeasured (c).
    then), operator-split lane scan, multicontroller route-B.
 8. **Message aggregation/overlap for the latency-bound GPU legs** (f64 ≈ f32
    speedup curves on Derecho ⇒ latency-, not bandwidth-bound; aggregation and
-   native-NCCL overlap, not compression, are the levers).
+   native-NCCL overlap, not compression, are the levers). PARTIAL:
+   route-B MPAS ppermute rounds are now minimized by a multi-start edge
+   coloring (reaches the chromatic-index floor where the legacy sorted
+   greedy overshot, up to 3 fewer rounds at 16 devices;
+   `_multi_ordering_edge_coloring` in `sharded_dynamics.py`,
+   `tests/parallel/test_ppermute_edge_coloring.py`); the data-parallel
+   gradient allreduce is now dtype-bucketed to one collective per dtype
+   instead of one per parameter leaf (`training/data_parallel.py`).
 9. **Spectral atm: keep multi-device N/A** unless a GPU-native transform
    (SHTns/sphericart) effort is explicitly launched.
+
+### Assessment follow-ups still open (2026-07-18 scaling review)
+
+These are each a scoped project, not a quick edit; ranked by value:
+
+- **Cube face-scatter into the production route-A driver** — the driver
+  keeps a full `(6,n,n)` replicated dynamics state on every MPI rank
+  (`model_driver.py`), so route-A cube dynamics has ZERO weak scaling;
+  `parallel/cube_face_scatter.py` provides the true face decomposition
+  but nothing under `packages/coupler/` wires it. Biggest route-A cube
+  unlock. Large restart/coupling/physics-scatter surgery; deferred while
+  `model_driver.py` carries uncommitted edits.
+- **Multilayer-land column scatter under MPI** — land is single-rank-only
+  on owned-face MPI paths (`compiled_segments.py`), and restart refuses to
+  scatter the columns (`model_driver.py`). Columns are embarrassingly
+  parallel; enables distributed land science (not a demonstrated speedup).
+  Driver-coupled (same deferral).
+- **Coupled atm+ocean scaling bench lane** — NO coupled scaling benchmark
+  exists; every lane is component-only. `coupled_esm_driver.py` has no MPI
+  step (no scatter/halo/init-distributed), so this needs a coupled MPI
+  step built first (cube-atm replicated × ocean band-decomposed × coupler
+  regrid ownership), then a route-A CPU-MPI parity+conservation-gated lane.
+  Highest-value missing *measurement infra*.
+- **Distributed polar filter under `proc_lon>1`** — `latlon_mpi.py` refuses
+  the polar rFFT on a longitude-split rank; unlocking 2-D lat-lon MPI at
+  the poles needs a lon-gather FFT or a filter redesign under the
+  no-allgather doctrine (route-consistent). Specialized; low rank.
+- **Adjoint-side halo overlap** — blocked on nonblocking mpi4jax
+  primitives (Isend/Irecv absent); not actionable until the comm backend
+  exposes them.
 
 ## Superseded / corrected claims (with sources)
 
