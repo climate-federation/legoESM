@@ -180,7 +180,8 @@ def build_gyre_config(
     the per-deck knobs: homogeneous linear EOS, single Laplacian ``viscAh=400``,
     no vertical mixing / physics (single layer), ``abEps=0.01``, and the
     ``barotropic_solver`` (the tutorial validates the per-tendency oracle tier on
-    the split ``implicit_cn``; the equilibrium tier uses ``GyreFaithfulModel``).
+    the split ``implicit_cn``; the retired equilibrium-tier GyreFaithfulModel
+    stepper is documented in mitgcm_gyre_energy_conservation.md).
     """
     return mitgcm_canonical_ocean_config(
         g=G_BARO,

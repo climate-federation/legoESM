@@ -254,6 +254,24 @@ def _rho_weighted_divergence(u, v, w, g: PseudoIncompressibleGrid):
     return rt * (du + dv) + dw
 
 
+def precision_floored_poisson_tols(cfg, dtype):
+    """Precision-aware BiCGSTAB tolerances ``(tol, atol)``.
+
+    In float32 an ``atol=1e-10`` target is BELOW the achievable
+    ~O(eps≈1.2e-7) residual, so the solver iterates past convergence and
+    its ρ/ω recurrences underflow → breakdown → NaN (fatal for the
+    non-dissipative ``central`` momentum, which has no numerical
+    dissipation to damp the residual-driven divergence). Floor tol/atol
+    at ~O(eps) so f32 stops before breakdown; the f64 floors (~1e-13)
+    sit below the tight defaults ⇒ f64 is unchanged (bit-identical).
+    Shared by the serial projection and the MPI ``project_mpi`` so both
+    precisions behave identically across the decomposition.
+    """
+    eps = float(jnp.finfo(dtype).eps)
+    return (max(cfg.poisson_tol, 8.0e2 * eps),
+            max(cfg.poisson_atol, 8.0e1 * eps))
+
+
 def project(u, v, w, theta, tracers, pi_prev, dt, g: PseudoIncompressibleGrid):
     """EXACT C-grid projection: ``∇·(ρ0θ0 u)=0`` via ``Cp ∇·(rtt ∇π') = ∇·(ρ0θ0 u*)/dt``
     then the C-grid pressure-gradient correction. Returns (u,v,w,π').
@@ -269,15 +287,7 @@ def project(u, v, w, theta, tracers, pi_prev, dt, g: PseudoIncompressibleGrid):
     cp = constants.c_pd
     c = _rtt(theta, tracers, g)                           # rtt at centres
     rhs = _rho_weighted_divergence(u, v, w, g) / dt
-    # Precision-aware BiCGSTAB tolerances: in float32 an atol=1e-10 target is BELOW
-    # the achievable ~O(eps≈1.2e-7) residual, so the solver iterates past convergence
-    # and its ρ/ω recurrences underflow → breakdown → NaN (fatal for the non-dissipative
-    # `central` momentum, which has no numerical dissipation to damp the residual-driven
-    # divergence). Floor tol/atol at ~O(eps) so f32 stops before breakdown; the f64
-    # floors (~1e-13) sit below the tight defaults ⇒ f64 is unchanged (bit-identical).
-    eps = float(jnp.finfo(rhs.dtype).eps)
-    tol = max(cfg.poisson_tol, 8.0e2 * eps)
-    atol = max(cfg.poisson_atol, 8.0e1 * eps)
+    tol, atol = precision_floored_poisson_tols(cfg, rhs.dtype)
     pi, _info = _poisson.solve_pressure(
         rhs, c, g.dx, g.dy, g.dz, x0=pi_prev,
         tol=tol, atol=atol, maxiter=cfg.poisson_maxiter)
@@ -456,18 +466,22 @@ def _sgs_force(u, v, w, theta, g: PseudoIncompressibleGrid, sfc_flux, cd_surf,
 
 def _tracer_sgs(tracers, nu_t, g: PseudoIncompressibleGrid, sfc_qv_flux):
     """SGS diffusion ``∂_j(K_h ∂_j q)`` (K_h=ν_t/Pr) for each water tracer + the surface
-    moisture flux ``sfc_qv_flux`` into slot 0 (q_v) first layer. Returns (ny,nx,nz,nt)."""
+    moisture flux ``sfc_qv_flux`` into slot 0 (q_v) first layer. Returns (ny,nx,nz,nt).
+
+    Batched over the trailing tracer axis with ``jax.vmap`` (one fused kernel
+    set for ALL slots, compile time independent of n_tracers) instead of a
+    trace-time Python loop."""
     cfg = g.cfg; dz = g.dz
     kh = nu_t / cfg.pr_sgs
-    cols = []
-    for k in range(tracers.shape[-1]):
-        q = tracers[..., k]
-        Fq = (_ddx_c(kh * _ddx_c(q, g.dx), g.dx) + _ddy_c(kh * _ddy_c(q, g.dy), g.dy)
-              + _ddz_c(kh * _ddz_c(q, dz), dz))
-        if k == 0:                                  # q_v gets the surface moisture flux
-            Fq = Fq.at[..., 0].add(sfc_qv_flux / dz)
-        cols.append(Fq)
-    return jnp.stack(cols, axis=-1)
+
+    def _sgs_one(q):
+        return (_ddx_c(kh * _ddx_c(q, g.dx), g.dx)
+                + _ddy_c(kh * _ddy_c(q, g.dy), g.dy)
+                + _ddz_c(kh * _ddz_c(q, dz), dz))
+
+    F = jax.vmap(_sgs_one, in_axes=-1, out_axes=-1)(tracers)
+    # q_v (slot 0) gets the surface moisture flux into the first layer.
+    return F.at[:, :, 0, 0].add(sfc_qv_flux / dz)
 
 
 def _surface_state(u, v, theta, g: PseudoIncompressibleGrid, forcing, sfc_means=None):
@@ -542,10 +556,13 @@ def tendencies(u, v, w, theta, tracers, g: PseudoIncompressibleGrid, forcing=Non
     has_tracers = tracers is not None and tracers.shape[-1] > 0
     atr = None
     if has_tracers:
-        cols = [_adv.advect_scalar(tracers[..., k], u, v, w, g.dx, g.dy, g.dz,
-                                   cfg.scheme, vel_at_faces=True)
-                for k in range(tracers.shape[-1])]
-        atr = jnp.stack(cols, axis=-1)
+        # vmap over the trailing tracer axis: one batched advection kernel
+        # for all slots (kernel count + compile time independent of n_tracers).
+        atr = jax.vmap(
+            lambda q: _adv.advect_scalar(q, u, v, w, g.dx, g.dy, g.dz,
+                                         cfg.scheme, vel_at_faces=True),
+            in_axes=-1, out_axes=-1,
+        )(tracers)
     # eddy viscosity computed ONCE, shared by momentum + tracer SGS
     need_sgs = cfg.sgs != "none" or cfg.surface != "free" or has_tracers
     if need_sgs:

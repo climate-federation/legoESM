@@ -15,8 +15,9 @@ Families (this driver — Phase 1):
     by CLI flags; sweeping combinations = many invocations of this driver.
   * ``column_nn``  — neural column physics (Rasp-style MLP) via
     ``train_neural_gcm``.
-SFNO (``sfno``) is Phase 2 (needs a Gaussian-regrid bridge — its SHT is
-Gaussian-quadrature specific) and is intentionally not wired here.
+SFNO is NOT trained by this single-GPU launcher; that path moved to the
+SPMD-shardable WB scale trainer (``run_amip.py --variants sfno_full`` /
+``training.scale_build``). Passing ``--variants sfno`` here fails fast.
 
 Radiation fluxes (TOA reflected SW, OLR, surface net SW/LW) enter the
 TRAINING LOSS via ``LossConfig.w_flux_*`` so the learned/tuned models
@@ -452,20 +453,9 @@ def train_variant(variant, model, grid, sigma, physics_pipeline, config,
         adapter = make_adapter(grid)
         step_unified = make_neural_step_unified(trained, adapter)
         seg = build_training_segment(model, step_unified, grid, sigma, args.dt)
-    elif variant == "sfno":
-        # The single-GPU lat-lon SFNO trainer (train_sfno_latlon) was retired
-        # when the SFNO path moved to the SPMD-shardable WB scale trainer.  The
-        # live SFNO variant is `sfno_full` in run_aimip.py / training.scale_build
-        # (make_sfno_step_unified_latlon there consumes physical-unit tendencies
-        # directly).  This launcher no longer trains SFNO.
-        raise SystemExit(
-            "variant 'sfno' is retired here; use run_aimip.py "
-            "--variants sfno_full (the WB scale trainer)."
-        )
     else:
         raise ValueError(
-            f"unknown variant {variant!r}; supports "
-            f"'classical', 'column_nn', 'sfno'."
+            f"unknown variant {variant!r}; supports 'classical', 'column_nn'."
         )
 
     train_seconds = time.time() - t0
@@ -567,11 +557,6 @@ def build_parser():
     # forward at init.  Measured: 1e-4 still NaN'd by sample 3, 1e-5 is
     # stable (untrained-NN rollout ≈ pure dynamics) and trains — use 1e-5.
     p.add_argument("--nn-residual-scale", type=float, default=1.0e-5)
-    # SFNO (Gaussian-grid operator bridged to lat-lon via regrid).
-    p.add_argument("--sfno-n-max", type=int, default=0,
-                   help="SFNO Gaussian truncation; 0 -> 2*n_lat//3 (~matched)")
-    p.add_argument("--sfno-embed", type=int, default=128)
-    p.add_argument("--sfno-blocks", type=int, default=4)
     # Radiation-flux loss weights (TOA + surface).
     p.add_argument("--w-flux-olr", type=float, default=1.0)
     p.add_argument("--w-flux-rsut", type=float, default=0.5)
@@ -597,15 +582,29 @@ def main(argv=None):
         args.train_windows = "2015:0:1"
         args.eval_windows = "2017:0:1"
 
+    # Validate variants up front (before model build / ERA5 load) so a bad or
+    # retired token fails fast and cleanly, not mid-loop where a SystemExit
+    # would bypass the per-variant except and skip the scorecard write. The
+    # SFNO path moved to the WB scale trainer (run_amip.py --variants
+    # sfno_full); this launcher no longer trains SFNO.
+    _SUPPORTED_VARIANTS = ("classical", "column_nn")
+    _sel_variants = {v.strip() for v in args.variants.split(",") if v.strip()}
+    _bad = sorted(_sel_variants - set(_SUPPORTED_VARIANTS))
+    if _bad:
+        raise SystemExit(
+            f"unsupported variant(s) {_bad}; supported: "
+            f"{list(_SUPPORTED_VARIANTS)}. The SFNO path moved to the WB scale "
+            "trainer: run_amip.py --variants sfno_full."
+        )
+
     # Microphysics is now threaded through build_training_segment (the carry
     # already carries q_c/q_r/conv_prog/precip_accum), so a real scheme runs
-    # in the CLASSICAL physics variant.  The NN-replacement variants
-    # (column_nn / sfno) keep microphysics='none' inside their segment — the
-    # network subsumes condensation — so the scheme only changes the physics
-    # model.  Warn if a non-none scheme is requested while only NN variants
-    # are selected (it would have no effect there).
-    _sel_variants = {v.strip() for v in args.variants.split(",") if v.strip()}
-    _nn_only = _sel_variants <= {"column_nn", "sfno"}
+    # in the CLASSICAL physics variant.  The NN-replacement variant (column_nn)
+    # keeps microphysics='none' inside its segment — the network subsumes
+    # condensation — so the scheme only changes the physics model.  Warn if a
+    # non-none scheme is requested while only NN variants are selected (it
+    # would have no effect there).
+    _nn_only = _sel_variants <= {"column_nn"}
     if args.microphysics != "none" and _nn_only:
         logger.warning(
             "microphysics=%s requested but only NN-replacement variants are "

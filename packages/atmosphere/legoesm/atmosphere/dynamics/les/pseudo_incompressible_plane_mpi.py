@@ -13,8 +13,9 @@ internally and whose Krylov dots are allreduced.
 A full-step serial==MPI parity test
 (``tests/distributed/test_pseudo_incompressible_step_mpi.py``) gates correctness.
 
-Run under ``mpirun`` with ``.venv-mpi`` (jax 0.9.2 + mpi4jax). FORWARD-only (the eager
-distributed solve is not ``jax.grad``-able; the serial step IS).
+Run under ``mpirun`` with an mpi4jax-capable venv. ``step_mpi`` is FORWARD-only (its
+chunked distributed solve host-checks convergence); a reverse-differentiable distributed
+solve exists as :func:`pseudo_incompressible_poisson_mpi.solve_pressure_mpi_fixed_iters`.
 """
 from __future__ import annotations
 
@@ -54,9 +55,21 @@ def tendencies_mpi(u, v, w, theta, tracers, g, comm, ny_global, forcing=None):
     n_surf = ny_global * g.cfg.nx
     sfc_means = _global_surface_means(u, v, theta, comm, n_surf)
     h = _halo_width(g.cfg)      # 3 for weno5 (default), 4/5 for weno7/weno9
-    uH = _pmpi._halo_y(u, h, comm); vH = _pmpi._halo_y(v, h, comm)
-    wH = _pmpi._halo_y(w, h, comm); thH = _pmpi._halo_y(theta, h, comm)
-    trH = None if tracers is None else _pmpi._halo_y(tracers, h, comm)
+    if comm.Get_size() > 1 and u.shape[0] < h:
+        raise ValueError(
+            f"ny_local={u.shape[0]} is narrower than the advection stencil "
+            f"reach h={h} ({g.cfg.scheme}/{g.cfg.momentum_scheme or g.cfg.scheme}): "
+            f"the single-hop ring exchange cannot fill a {h}-row halo from a "
+            f"{u.shape[0]}-row slab. Use fewer ranks or a narrower scheme."
+        )
+    # All prognostics (u, v, w, θ + the tracer block) share ONE packed halo
+    # round (2 MPI messages instead of 2·n_fields).
+    if tracers is None:
+        uH, vH, wH, thH = _pmpi.halo_y_packed((u, v, w, theta), h, comm)
+        trH = None
+    else:
+        uH, vH, wH, thH, trH = _pmpi.halo_y_packed(
+            (u, v, w, theta, tracers), h, comm)
     au, av, aw, ath, atr = _ser.tendencies(uH, vH, wH, thH, trH, g, forcing,
                                            sfc_means=sfc_means)
     sl = slice(h, -h)
@@ -68,7 +81,7 @@ def _rho_weighted_divergence_mpi(u, v, w, g, comm):
     """``∇·(ρ0θ0 u)`` (C-grid compact), y-decomposed (v needs a 1-cell down halo)."""
     rt = g.rho0_theta0[None, None, :]
     du = (u - jnp.roll(u, 1, axis=_AX)) / g.dx
-    vH = _pmpi._halo_y(v, 1, comm)                     # ghost row below + above
+    vH = _pmpi.halo_y(v, 1, comm)                     # ghost row below + above
     dv = (vH[1:-1] - vH[:-2]) / g.dy                   # (v_j − v_{j−1})/Δy, interior
     rt_f = _ser._adv._centre_to_face_z(g.rho0_theta0[None, None, :])
     flux_w = rt_f * w
@@ -84,8 +97,12 @@ def project_mpi(u, v, w, theta, tracers, pi_prev, dt, g, comm, ny_global):
     c = _ser._rtt(theta, tracers, g)
     n_global = ny_global * cfg.nx * cfg.nz
     rhs = _rho_weighted_divergence_mpi(u, v, w, g, comm) / dt
+    # Same precision-aware tolerance floors as the serial projection —
+    # raw fp32 targets below O(eps) drive the Krylov recurrences into
+    # breakdown/NaN (shared helper, so serial and MPI stay identical).
+    tol, atol = _ser.precision_floored_poisson_tols(cfg, rhs.dtype)
     pi = _pmpi.solve_pressure_mpi(rhs, c, g.dx, g.dy, g.dz, comm, n_global,
-                                  x0=pi_prev, tol=cfg.poisson_tol, atol=cfg.poisson_atol,
+                                  x0=pi_prev, tol=tol, atol=atol,
                                   maxiter=cfg.poisson_maxiter)
     th_rho = _ser._theta_rho(theta, tracers, cfg)
     # x (local): same as serial
@@ -93,8 +110,8 @@ def project_mpi(u, v, w, theta, tracers, pi_prev, dt, g, comm, ny_global):
     dpi_dx_f = (jnp.roll(pi, -1, axis=_AX) - pi) / g.dx
     u_new = u - dt * cp * thr_xf * dpi_dx_f
     # y (decomposed): θ_ρ and π need the +1 (up) neighbour for the j+½ face
-    thrH = _pmpi._halo_y(th_rho, 1, comm)
-    piH = _pmpi._halo_y(pi, 1, comm)
+    # (one packed round for both fields)
+    thrH, piH = _pmpi.halo_y_packed((th_rho, pi), 1, comm)
     thr_yf = 0.5 * (thrH[1:-1] + thrH[2:])             # 0.5(θρ_j + θρ_{j+1})
     dpi_dy_f = (piH[2:] - piH[1:-1]) / g.dy            # (π_{j+1} − π_j)/Δy
     v_new = v - dt * cp * thr_yf * dpi_dy_f

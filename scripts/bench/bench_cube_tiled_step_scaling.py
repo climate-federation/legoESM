@@ -53,7 +53,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from metadata import annotate_incomplete, scaling_metadata, tidy_throughput_fields  # noqa: E402
+from metadata import (  # noqa: E402
+    annotate_incomplete, count_collective_permutes, scaling_metadata,
+    tidy_throughput_fields)
 
 #: Parity tolerances vs the serial untiled step — the adapter gate's
 #: f32-honest bounds (exact f32 ulps of the field scales; a real stage
@@ -64,9 +66,9 @@ from metadata import annotate_incomplete, scaling_metadata, tidy_throughput_fiel
 TILED_PARITY_ATOL = {"u": 2e-5, "v": 2e-5, "T": 1e-4, "p_s": 0.06}
 
 
-def _count_collective_permutes(hlo_text: str) -> int:
-    return sum(1 for line in hlo_text.splitlines()
-               if "collective-permute" in line and "done" not in line)
+# Shared canonical CP census (metadata.count_collective_permutes); kept as a
+# module-level name for the existing test + call site.
+_count_collective_permutes = count_collective_permutes
 
 
 def main() -> int:
