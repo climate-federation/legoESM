@@ -440,3 +440,31 @@ def test_cornerlag_oracle_all_staggers():
         1 for (i_f, j_f), v in rec0.items()
         if abs(v - f0[i_f - 1 + ng, j_f - 1 + ng]) > 1e-9)
     assert changed >= 4 * 9, changed
+
+
+def test_k2e_tables_mirror_vs_authoritative():
+    """Phase-3 provenance closure: the k2e tables pinned against the
+    luanfs MIRROR generator must match the AUTHORITATIVE modular
+    global_grid_gen_k2e.F90 (Zenodo symmetryclean) — all six stagger
+    families, loc + coef, C12 and C24."""
+    mirror = Path(__file__).parent / "fixtures" / "fv3_duogrid_oracle.npz"
+    auth = Path(__file__).parent / "fixtures" / "fv3_duogrid_oracle_auth.npz"
+    if not auth.exists():
+        pytest.skip("auth fixture not generated "
+                    "(scripts/validate/fv3_native/gen_duogrid_oracle_auth.sh)")
+    dm = np.load(mirror, allow_pickle=False)
+    da = np.load(auth, allow_pickle=False)
+    checked = 0
+    for k in dm.files:
+        if not (k.startswith("k2e_") or "coef" in k or "loc" in k):
+            continue
+        assert k in da.files, k
+        a, b = np.asarray(dm[k]), np.asarray(da[k])
+        assert a.shape == b.shape, (k, a.shape, b.shape)
+        if a.dtype.kind in "fc":
+            worst = float(np.max(np.abs(a - b))) if a.size else 0.0
+            assert worst == 0.0, (k, worst)
+        else:
+            assert np.array_equal(a, b), k
+        checked += 1
+    assert checked >= 12, checked      # 6 families x (loc+coef) minimum
