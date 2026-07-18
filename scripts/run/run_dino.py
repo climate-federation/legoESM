@@ -239,6 +239,19 @@ def _parse_args():
              "which restores the null mode (node 16; the DINO card default).",
     )
     p.add_argument(
+        "--barotropic-coriolis-split",
+        choices=("frozen", "live"),
+        default=None,
+        help="Barotropic-Coriolis split (DINOConfig.barotropic_coriolis_split; "
+             "explicit_substep only). 'frozen' (default) holds the planetary "
+             "Coriolis frozen in F_slow across the substep window; 'live' "
+             "removes the pre-step 2D barotropic Coriolis from F_slow and "
+             "re-applies it LIVE each substep on the evolving transport (NEMO "
+             "dyn_spg_ts:296-300 + dyn_cor_2D). Under vorticity_scheme="
+             "'een_total' 'live' requires --barotropic-coriolis een; it is what "
+             "unblocks the nemo_dino_kamm_mlf leapfrog at dt=2700 (node 16).",
+    )
+    p.add_argument(
         "--momentum-advection",
         choices=("vector_invariant", "flux_form", "weno5", "weno7", "weno9"),
         default=None,
@@ -532,6 +545,9 @@ def main():
     if args.barotropic_coriolis is not None:
         cfg = dataclasses.replace(
             cfg, barotropic_coriolis=args.barotropic_coriolis)
+    if args.barotropic_coriolis_split is not None:
+        cfg = dataclasses.replace(
+            cfg, barotropic_coriolis_split=args.barotropic_coriolis_split)
     if args.gm_kappa_scheme is not None:
         cfg = dataclasses.replace(cfg, gm_kappa_scheme=args.gm_kappa_scheme)
     if args.gm_redi_mld_criterion is not None:

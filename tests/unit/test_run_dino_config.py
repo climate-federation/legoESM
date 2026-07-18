@@ -92,6 +92,18 @@ def test_barotropic_coriolis_default_none(monkeypatch):
     assert rd._parse_args().barotropic_coriolis is None
 
 
+def test_barotropic_coriolis_split_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--barotropic-coriolis-split", "live"])
+    args = rd._parse_args()
+    assert args.barotropic_coriolis_split == "live"
+
+
+def test_barotropic_coriolis_split_default_none(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().barotropic_coriolis_split is None
+
+
 def test_barotropic_coriolis_rejects_bad_choice(monkeypatch):
     monkeypatch.setattr(sys, "argv",
                         ["run_dino", "--barotropic-coriolis", "bogus"])

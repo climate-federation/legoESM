@@ -435,6 +435,16 @@ class DINOConfig:
     # | "een" (NEMO dyn_spg_ts::dyn_cor_2D enstrophy-conserving EEN
     # ln_dynvor_een, which restores the null mode).  DINO uses ln_dynvor_een.
     barotropic_coriolis: str = "avg"
+    # Barotropic-Coriolis split (node 16 LIVE application): "frozen" (default)
+    # keeps the planetary Coriolis frozen in F_slow across the substep window;
+    # "live" removes the pre-step 2D barotropic Coriolis from F_slow and applies
+    # it LIVE each substep on the evolving transport (NEMO dyn_spg_ts:296-300 +
+    # dyn_cor_2D). Under vorticity_scheme="een_total" the "live" split REQUIRES
+    # barotropic_coriolis="een" so the subtraction/live stencils cancel — this
+    # is what unblocks the leapfrog (nemo_dino_kamm_mlf) at dt=2700 by
+    # continuously restoring the 2Δx C-grid rotational null mode the frozen form
+    # leaves undamped under the leapfrog's neutral stability.
+    barotropic_coriolis_split: str = "frozen"
     # ln_bt_auto: compute n_barotropic_substeps from the external-wave
     # CFL with this Courant ceiling (rn_bt_cmax); <= 0 disables (use
     # n_barotropic_substeps as-is).
@@ -758,6 +768,12 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     "vorticity_scheme": "een_total",      # ln_dynvor_een: (f+zeta) in the EEN triad
     "coriolis_scheme": "explicit_ab2",    # Matsuno rotation OFF; Coriolis in the RHS
     "asselin_gamma": 0.1,                 # rn_atfp (plain Robert-Asselin, not Williams)
+    # LIVE in-substep EEN barotropic Coriolis (node 16, NEMO dyn_cor_2D applied
+    # each substep on ua_e/va_e): removes the pre-step 2D barotropic Coriolis
+    # from F_slow (dynspg_ts:296-300) and re-applies the SAME EEN stencil live,
+    # continuously restoring the C-grid 2Δx null mode. "een" is already inherited
+    # from nemo_dino_kamm; "live" is what actually fires it under the leapfrog.
+    "barotropic_coriolis_split": "live",
 }
 
 # L2 cards select lat-lon-C-grid-only blocks (flux-form / WENO momentum, AB2
@@ -2099,6 +2115,7 @@ def dino_lat_lon_model_config(
         barotropic_implicit_theta_eta=cfg.barotropic_implicit_theta_eta,
         barotropic_time_filter=cfg.barotropic_time_filter,
         barotropic_coriolis=cfg.barotropic_coriolis,
+        barotropic_coriolis_split=cfg.barotropic_coriolis_split,
         **_scheme,
         tracer_advection=cfg.tracer_advection,
         pgf_scheme=cfg.pgf_scheme,

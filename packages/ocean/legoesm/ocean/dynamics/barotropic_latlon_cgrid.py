@@ -352,6 +352,27 @@ def een_barotropic_coriolis(U_bar, V_bar, pre, eps=1.0e-10):
     return cor_u, cor_v
 
 
+def barotropic_coriolis_een_pre_step(u_3d, v_3d, h_k, grid, mask, u_mask,
+                                     v_mask, min_water_col, dtype):
+    """Pre-step EEN barotropic Coriolis ``(cor_u, cor_v)`` for the live split.
+
+    NEMO ``dynspg_ts.F90:296-300`` subtracts ``dyn_cor_2D(puu_b, pvv_b)`` — the
+    barotropic Coriolis of the BEFORE barotropic transport — from ``zu_frc``
+    before the substep loop applies the SAME operator live on the evolving
+    ``ua_e``/``va_e`` each substep.  This public wrapper builds the identical
+    EEN geometry inputs (:func:`_build_een_barotropic_inputs`) and the identical
+    thickness-weighted barotropic mean (:func:`_depth_average_to_faces`) the
+    substep loop uses internally, then evaluates :func:`een_barotropic_coriolis`
+    — so subtracting the result from the slow forcing cancels the substep-0 live
+    term exactly (up to float round-off) and leaves ONLY the LIVE, evolving,
+    null-mode-restoring EEN barotropic Coriolis inside the window.
+    """
+    pre = _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype)
+    U_bar, V_bar = _depth_average_to_faces(
+        u_3d, v_3d, h_k, min_water_col, mask, u_mask, v_mask, grid)
+    return een_barotropic_coriolis(U_bar, V_bar, pre)
+
+
 def _run_substep_loop(
     eta, U_bar, V_bar,
     *,

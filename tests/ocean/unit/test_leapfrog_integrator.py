@@ -167,6 +167,28 @@ def test_een_total_matsuno_rejected():
                  coriolis_scheme="matsuno_split")
 
 
+def test_live_split_under_een_total_requires_een_stencil():
+    # LIVE barotropic-Coriolis split (node 16) under een_total: the pre-step
+    # subtraction must use the SAME EEN stencil the substep applies live, else
+    # the 4-pt-avg subtraction leaves an O(1) residual Coriolis. avg => reject.
+    with pytest.raises(ValueError, match="barotropic_coriolis"):
+        _leapfrog_channel(barotropic_coriolis="avg",
+                          barotropic_coriolis_split="live")
+
+
+def test_live_een_barotropic_coriolis_runs_no_nan():
+    # The LIVE EEN barotropic Coriolis under the leapfrog builds, validates, and
+    # steps finite (no double-count blow-up from the frozen+live pairing).
+    state, model = _leapfrog_channel(barotropic_coriolis="een",
+                                     barotropic_coriolis_split="live")
+    assert model.config.barotropic_coriolis_split == "live"
+    s = state
+    for _ in range(4):
+        s = model.step(s, dt=_DT)
+    assert np.all(np.isfinite(np.asarray(s.T.data)))
+    assert np.all(np.isfinite(np.asarray(s.eta.data)))
+
+
 def test_unknown_vorticity_scheme_raises():
     # membership fail-early lives in _bc_pv_flux (step time), reached via .step()
     state, model = _channel("forward_euler", vorticity_scheme="bogus")

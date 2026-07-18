@@ -195,6 +195,52 @@ def test_een_barotropic_coriolis_conserves_energy():
         f"EEN Coriolis does spurious work: rel={work / scale:.2e}")
 
 
+def test_een_pre_step_matches_substep_zero_live_term():
+    """``barotropic_coriolis_een_pre_step`` (the live-split F_slow subtraction) IS
+    exactly the substep-0 live EEN Coriolis the loop applies — so subtracting it
+    from F_slow cancels the double-count at substep 0 (the node-16 LIVE cure).
+
+    Pins the argument wiring: the helper must compose the SAME
+    ``_depth_average_to_faces`` + ``_build_een_barotropic_inputs`` +
+    ``een_barotropic_coriolis`` the substep loop calls internally (a swapped u/v
+    or wrong thickness would break this equality)."""
+    from legoesm.grids.latlon import ensure_geometry
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _build_een_barotropic_inputs,
+        _depth_average_to_faces,
+        barotropic_coriolis_een_pre_step,
+        een_barotropic_coriolis,
+    )
+    from legoesm.ocean.vertical import compute_layer_thickness
+    setup = build_silvestri_baroclinic_jet_setup(
+        n_lat=24, n_lon=16, scheme="W9V", nlev=4,
+        config=SilvestriJetConfig(), stabilize=False)
+    grid = ensure_geometry(setup.grid)
+    st = setup.initial_state
+    h_bathy = st.H_bathy.data.astype(jnp.float64)
+    mask = st.land_mask.data.astype(jnp.float64)
+    um = st.u_mask.data.astype(jnp.float64)
+    vm = st.v_mask.data.astype(jnp.float64)
+    h_k = compute_layer_thickness(
+        jnp.zeros_like(h_bathy), h_bathy, setup.z_coord,
+        min_water_column_m=setup.model_config.min_water_column_m)
+    nlat, nlon, nlev = h_k.shape
+    rng = np.random.default_rng(1)
+    u3 = jnp.asarray(rng.standard_normal((nlat, nlon + 1, nlev))) * um[..., None]
+    v3 = jnp.asarray(rng.standard_normal((nlat + 1, nlon, nlev))) * vm[..., None]
+    mwc = jnp.asarray(setup.model_config.min_water_column_m, dtype=jnp.float64)
+    cu, cv = barotropic_coriolis_een_pre_step(
+        u3, v3, h_k, grid, mask, um, vm, mwc, jnp.float64)
+    # independent reconstruction of the substep-0 live term
+    pre = _build_een_barotropic_inputs(h_k, grid, mask, um, vm, jnp.float64)
+    U, V = _depth_average_to_faces(u3, v3, h_k, mwc, mask, um, vm, grid)
+    cu_ref, cv_ref = een_barotropic_coriolis(U, V, pre)
+    np.testing.assert_allclose(np.asarray(cu), np.asarray(cu_ref), rtol=0, atol=0)
+    np.testing.assert_allclose(np.asarray(cv), np.asarray(cv_ref), rtol=0, atol=0)
+    # non-vacuous: the term is actually non-trivial
+    assert float(np.max(np.abs(np.asarray(cu)))) > 0.0
+
+
 def test_explicit_ab2_config_gates_in_substep_coriolis():
     """The §5 faithful stack wires coriolis_scheme=explicit_ab2 (=> term off)."""
     r = build_silvestri_baroclinic_jet_setup(

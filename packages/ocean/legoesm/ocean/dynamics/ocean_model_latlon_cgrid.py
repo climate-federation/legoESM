@@ -1618,12 +1618,25 @@ class LatLonCGridOceanModel:
                     "double-apply f. Got "
                     f'{getattr(config, "coriolis_scheme", "matsuno_split")!r}.')
             if getattr(config, "barotropic_coriolis_split", "frozen") == "live":
-                raise ValueError(
-                    f'vorticity_scheme="{_vs}" is incompatible with '
-                    'barotropic_coriolis_split="live": the live subtraction '
-                    "removes the face-f velocity-form depth-mean, but the "
-                    "_total planetary term is the vertex-f TRANSPORT-form "
-                    "flux — the stencils would not cancel. Use \"frozen\".")
+                # The live pre-step subtraction (NEMO dynspg_ts:296-300) must use
+                # the SAME barotropic-Coriolis stencil as the in-substep dyn_cor_2D
+                # so they cancel at the pre-step state. Under vorticity_scheme=
+                # "{ene,een}_total" the planetary term is the vertex-f TRANSPORT-
+                # form EEN flux, so the subtraction must ALSO be EEN
+                # (barotropic.barotropic_coriolis="een"); the legacy 4-pt-avg
+                # face-f "avg" stencil would leave an O(1) residual Coriolis.
+                if getattr(config.barotropic, "barotropic_coriolis",
+                           "avg") != "een":
+                    raise ValueError(
+                        f'vorticity_scheme="{_vs}" with '
+                        'barotropic_coriolis_split="live" requires '
+                        'barotropic.barotropic_coriolis="een" (NEMO '
+                        "dyn_spg_ts::dyn_cor_2D EEN): the _total planetary "
+                        "term is the vertex-f EEN transport-form flux, so the "
+                        "live pre-step subtraction must use the SAME EEN "
+                        "stencil to cancel — the 4-pt-avg \"avg\" stencil "
+                        "would not. Got barotropic_coriolis="
+                        f'{getattr(config.barotropic, "barotropic_coriolis", "avg")!r}.')
             if getattr(config, "momentum_advection",
                        "vector_invariant") != "vector_invariant":
                 raise ValueError(
@@ -1658,6 +1671,16 @@ class LatLonCGridOceanModel:
                     "Coriolis (1.5*cor^n - 0.5*cor^(n-1)) would not cancel the "
                     "single-time pre-step subtraction, leaving a transient "
                     "residual planetary Coriolis in the forcing.")
+            if getattr(config.barotropic, "barotropic_time_filter",
+                       "cosine") == "nemo_ab3am4":
+                raise ValueError(
+                    'barotropic_coriolis_split="live" is incompatible with '
+                    'barotropic_time_filter="nemo_ab3am4": the AB3 substep '
+                    "applies the live Coriolis to the EXTRAPOLATED mid-step "
+                    "velocity U_mid while the pre-step subtraction uses the "
+                    "plain pre-step U_bar, so substep-0 would not cancel "
+                    "bit-exactly. Use the boxcar filter (nn_bt_flt=2, NEMO's "
+                    "DINO selection) with the live split.")
         _valid_time_int = {"euler", "ab2", "rk3"}
         if config.tracer_time_integrator not in _valid_time_int:
             raise ValueError(
@@ -2626,33 +2649,60 @@ class LatLonCGridOceanModel:
                 # integrate a LIVE f x U every substep so the barotropic mode
                 # holds geostrophic balance with the evolving eta inside the
                 # window (the frozen form lags Coriolis by dt and cripples the
-                # gyre's U_bar response to grad-eta). SAME face stencils as the
-                # substep loop (4-pt V-to-u; interp_u_to_vface_4pt), so the
-                # subtraction cancels the live term exactly at the pre-step
-                # state (EXACT on a beta-plane with flat full-cell bathymetry,
-                # where the 4-pt average and the depth-mean commute; else an
-                # O(dx^2)/topographic residual remains). Signs mirror the 3D
-                # coriolis_cgrid (+f*v_at_u on u; -f*u_at_v on v).
-                from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-                    interp_u_to_vface_4pt,
-                )
-                from legoesm.ocean.dynamics.barotropic_common import (
-                    coriolis_at_faces,
-                )
-                _f_u2, _f_v2 = coriolis_at_faces(_grid, F_slow_u.dtype)
-                _u_pre3, _v_pre3 = state.u.data, state.v.data
-                _U_pre = (jnp.sum(_u_pre3 * h_u_pre, axis=-1)
-                          / jnp.maximum(H_u_pre, 1e-10))
-                _V_pre = (jnp.sum(_v_pre3 * h_v_pre, axis=-1)
-                          / jnp.maximum(H_v_pre, 1e-10))
-                _V_w = jnp.roll(_V_pre, 1, axis=1)
-                _V_at_u = 0.25 * (_V_pre[:-1] + _V_pre[1:]
-                                  + _V_w[:-1] + _V_w[1:])
-                _V_at_u = jnp.concatenate([_V_at_u, _V_at_u[:, 0:1]], axis=1)
-                _U_at_v = interp_u_to_vface_4pt(_U_pre, _grid)
-                F_slow_u = (F_slow_u - _f_u2 * _V_at_u) * state.u_mask.data
-                F_slow_v = (F_slow_v + _f_v2 * _U_at_v) * state.v_mask.data
-                _add_bt_cor = True
+                # gyre's U_bar response to grad-eta). The subtraction uses the
+                # SAME stencil the substep loop applies live so it cancels at the
+                # pre-step state: EEN (barotropic_coriolis="een", the DINO/NEMO
+                # ln_dynvor_een form) or the legacy 4-pt V-to-u average
+                # (interp_u_to_vface_4pt). The 4-pt cancellation is EXACT on a
+                # beta-plane with flat full-cell bathymetry (average and
+                # depth-mean commute), else an O(dx^2)/topographic residual
+                # remains; the EEN path cancels exactly (same helper both sides).
+                if getattr(self.config.barotropic, "barotropic_coriolis",
+                           "avg") == "een":
+                    # NEMO ln_dynvor_een DINO (nemo_dino_kamm_mlf): the _total
+                    # planetary term rides the vertex-f EEN transport-form flux,
+                    # so the pre-step subtraction must use the SAME EEN stencil
+                    # the substep loop applies live (dyn_cor_2D). Built from the
+                    # Nnn thickness (h_k_pre, = state_mid.eta since the barotropic
+                    # solve has not yet updated eta) and the POST-slow-tendency
+                    # barotropic velocity (state_mid.u/v, what the substep loop
+                    # depth-averages internally) → EXACT substep-0 cancellation,
+                    # leaving only the LIVE null-mode-restoring EEN Coriolis.
+                    # cor_v already carries the -f*U sign, so both are SUBTRACTED
+                    # (unlike the 4-pt branch's explicit +f*U on v).
+                    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+                        barotropic_coriolis_een_pre_step,
+                    )
+                    _min_wc = jnp.asarray(
+                        self.config.min_water_column_m, dtype=F_slow_u.dtype)
+                    _cor_u_sub, _cor_v_sub = barotropic_coriolis_een_pre_step(
+                        state_mid.u.data, state_mid.v.data, h_k_pre, _grid,
+                        state.land_mask.data, state.u_mask.data,
+                        state.v_mask.data, _min_wc, F_slow_u.dtype)
+                    F_slow_u = (F_slow_u - _cor_u_sub) * state.u_mask.data
+                    F_slow_v = (F_slow_v - _cor_v_sub) * state.v_mask.data
+                    _add_bt_cor = True
+                else:
+                    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                        interp_u_to_vface_4pt,
+                    )
+                    from legoesm.ocean.dynamics.barotropic_common import (
+                        coriolis_at_faces,
+                    )
+                    _f_u2, _f_v2 = coriolis_at_faces(_grid, F_slow_u.dtype)
+                    _u_pre3, _v_pre3 = state.u.data, state.v.data
+                    _U_pre = (jnp.sum(_u_pre3 * h_u_pre, axis=-1)
+                              / jnp.maximum(H_u_pre, 1e-10))
+                    _V_pre = (jnp.sum(_v_pre3 * h_v_pre, axis=-1)
+                              / jnp.maximum(H_v_pre, 1e-10))
+                    _V_w = jnp.roll(_V_pre, 1, axis=1)
+                    _V_at_u = 0.25 * (_V_pre[:-1] + _V_pre[1:]
+                                      + _V_w[:-1] + _V_w[1:])
+                    _V_at_u = jnp.concatenate([_V_at_u, _V_at_u[:, 0:1]], axis=1)
+                    _U_at_v = interp_u_to_vface_4pt(_U_pre, _grid)
+                    F_slow_u = (F_slow_u - _f_u2 * _V_at_u) * state.u_mask.data
+                    F_slow_v = (F_slow_v + _f_v2 * _U_at_v) * state.v_mask.data
+                    _add_bt_cor = True
             if self.config.barotropic.barotropic_wide_halo:
                 # Opt-in wide-halo subcycle: one fused wide exchange per
                 # chunk of substeps instead of ~4 pads/substep (scaling-
@@ -5682,10 +5732,16 @@ class LatLonCGridOceanModel:
           2. The tracer RA filter uses the CONCENTRATION form (NEMO's simple
              ``tra_atf_fix_lf``); the z* thickness-weighted content form
              (``tra_atf_qco_lf``) differs by O(dη).
-          3. The barotropic Coriolis stays as the frozen depth-mean in ``F_slow``
-             (Oceananigans convention; ``barotropic_coriolis_split="live"`` is
-             incompatible with ``een_total`` — node 16) rather than NEMO's live
-             in-substep ``dyn_cor_2D``.
+          3. **CLOSED (this iteration).** The barotropic Coriolis is now the LIVE
+             per-substep enstrophy-conserving EEN form (NEMO ``dyn_cor_2D``):
+             ``barotropic_coriolis_split="live"`` + ``barotropic_coriolis="een"``
+             (set on ``nemo_dino_kamm_mlf``) removes the pre-step 2D barotropic
+             Coriolis from ``F_slow`` (dynspg_ts.F90:296-300) and re-applies the
+             SAME EEN stencil live each substep on the evolving transport (:689).
+             The een-total guard is relaxed for this specific EEN-stencil pairing
+             (the subtraction cancels the live term). NOTE: this did NOT unblock
+             dt=2700 — see the BLOCKER note; the null mode was not the dt=2700
+             driver.
           4. **CLOSED (this iteration).** NEMO evaluates the EXPLICIT LATERAL
              DIFFUSION on the BEFORE level Nbb — ``dyn_ldf(Kbb)`` (dynldf.F90:69
              ``dyn_ldf_lap(...,puu(:,:,:,Kbb),...)``) and ``tra_ldf(Kbb)``
@@ -5709,19 +5765,29 @@ class LatLonCGridOceanModel:
              split-explicit free surface blows up in ~4 steps. The two ``_step_impl``
              passes here pass ``_barotropic_substep_scale=2`` so the substep length
              (and barotropic CFL) match the FE path exactly.
-        DT=2700 BLOCKER (node 16, NOT node 19).  With residuals #4/#5 closed the
-        leap-frog is STABLE at dt=1350 (300 steps / 4.7 d from rest on the bridged
-        DINO mesh, eta bounded ~1 m). At dt=2700 the leap-frog's NEUTRAL stability
-        exposes the C-grid barotropic-Coriolis 2Δx rotational NULL MODE — a
-        localised high-latitude eta CHECKERBOARD (verified: perfect sign
-        alternation, gridscale-variance fraction ~1.9) that grows ~2.4×/step from
-        step ~26 to NaN. This is residual #3 / diagram node 16 (the frozen
-        barotropic Coriolis vs NEMO's live EEN ``dyn_cor_2D``), a research-level
-        barotropic redesign — the forward-Euler card's numerical damping hides it,
-        the leap-frog does not. The dt=2700 180-day comparison is therefore gated
-        by node 16, not the integrator.  Remaining residuals: (1) diss depth-mean
-        split + h_u/h_v use Nnn.eta (O(dη) vs NEMO's Nbb geometry); (2) tracer RA
-        filter concentration form; (3) the node-16 barotropic Coriolis.
+        DT=2700 BLOCKER — RE-DIAGNOSED (residual #1, NOT node 16). With residuals
+        #3/#4/#5 closed the leap-frog is STABLE at dt=1350 (300 steps; re-verified
+        60 steps this iteration with the LIVE-EEN barotropic Coriolis, eta ~0.8 m).
+        At dt=2700 it still blows up (~step 25-31, gridscale eta fraction rising to
+        ~0.2) — but this iteration REFUTES the node-16 hypothesis: wiring the LIVE
+        per-substep EEN ``dyn_cor_2D`` (residual #3, now closed) does NOT cure it
+        (frozen vs live blow up at the SAME step), whereas HALVING the barotropic
+        substep dt_s (n_barotropic_substeps 30→60, dt_s 90→45 s) OR raising the
+        barotropic eta-diffusion (alpha 0.01→0.05) BOTH survive ≥40 steps. So the
+        dt=2700 blow-up is the barotropic gravity-wave CFL margin (Courant≈0.8, the
+        rn_bt_cmax ceiling) under the leap-frog's NEUTRAL outer step — the
+        forward-Euler card's numerical damping suppressed the marginal barotropic
+        mode; the leap-frog does not. NEMO's own MLF is stable at Courant 0.8
+        because its barotropic solver leap-frogs ssh internally (before/now/after +
+        ssh_atf boxcar) — legoESM's leap-frog instead base-shifts the split-explicit
+        FORWARD barotropic solve from Nnn.eta (residual #1), and that inconsistency,
+        unmasked by the neutral outer step, is the growth. FIX (larger than node 16,
+        deferred): make the leap-frog barotropic solve internally leap-frog-
+        consistent with NEMO's MLF (residual #1), or use ln_bt_auto with a tighter
+        rn_bt_cmax for the rDt=2dt window. The dt=2700 180-day comparison is gated
+        by residual #1, NOT node 16. No 180d number is fabricated. Remaining
+        residuals: (1) split-explicit barotropic solve base-shifted from Nnn.eta
+        (THE dt=2700 blocker); (2) tracer RA filter concentration form.
         """
         from legoesm.ocean.state import Field
         _grid = grid if grid is not None else self.grid
