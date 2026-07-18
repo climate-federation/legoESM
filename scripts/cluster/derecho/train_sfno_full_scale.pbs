@@ -47,7 +47,15 @@ CHAIN="${CHAIN:-0}"
 CHAIN_MAX="${CHAIN_MAX:-30}"
 
 cd "${PBS_O_WORKDIR}"
-source scripts/cluster/scaling_derecho/_env.sh   # sets REPO, PY, conda, JAX env
+# Worktree-safe: default REPO to the checkout this job was SUBMITTED from, so a
+# `qsub` out of a git worktree (e.g. legoESM-aimip) runs THAT checkout's code +
+# configs, NOT _env.sh's /glade/work/$USER/legoESM default (which silently ran
+# the wrong tree and FileNotFound'd the suite). An explicit `-v LEGOESM_REPO=...`
+# still wins; the chained resubmit below propagates it. Mirrors the routeb_*
+# sweep scripts' worktree pinning.
+: "${LEGOESM_REPO:=${PBS_O_WORKDIR}}"
+export LEGOESM_REPO
+source scripts/cluster/scaling_derecho/_env.sh   # sets REPO(=LEGOESM_REPO), PY, conda, JAX env
 cd "$REPO"
 
 export JAX_ENABLE_X64=1
@@ -63,6 +71,14 @@ export XLA_PYTHON_CLIENT_ALLOCATOR="${XLA_PYTHON_CLIENT_ALLOCATOR:-platform}"
 export JAX_PLATFORMS=cuda,cpu
 
 SUITE="${WB_SUITE:-config/aimip/wbcompare/suite_sfno_full_scale.yaml}"
+# Fail LOUDLY (with the resolved REPO) if the suite is missing -- the usual cause
+# is REPO pointing at the wrong checkout (unset LEGOESM_REPO -> _env.sh default),
+# which otherwise surfaces only as a bare FileNotFoundError from run_aimip.
+if [ ! -f "$SUITE" ]; then
+  echo "[sfno_full_scale] ERROR: suite '$SUITE' not found under REPO=$REPO." >&2
+  echo "  Submit from your checkout, or pass -v LEGOESM_REPO=<checkout>." >&2
+  exit 2
+fi
 OUT_ROOT="${WB_OUT_ROOT:-results/aimip_wbcompare_scale}"
 # run_aimip writes checkpoint_dir = output_dir/<variant> (run_aimip.py:224); the
 # suite pins output_dir=$OUT_ROOT and variant=sfno_full, so epoch_*.eqx AND the
