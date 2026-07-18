@@ -2781,6 +2781,10 @@ def make_latlon_mpi_step(
     # pole-fold pads at boundary ranks.  This also flips
     # ``is_distributed()`` so the mass-fixer reductions allreduce.
     set_halo_backend("mpi", layout)
+    from legoesm.grids.polar_filter import (
+        get_polar_filter_lon_gather,
+        set_polar_filter_lon_gather,
+    )
 
     # Build the MPI-aware model: rank-local grid with allreduced
     # ``total_area`` (mass-fixer divisor); pole_v_bc tracks which
@@ -2864,11 +2868,20 @@ def make_latlon_mpi_step(
         # the #413 carry threading; no carry is threaded here (guarded
         # above), so unpack and return the state to preserve this
         # wrapper's documented contract.
-        state_new, _ = mpi_model._step_cgrid(
-            local_state, dt,
-            target_mass=target_mass,
-            physics_fn=physics_fn,
-        )
+        # Full lon per rank: the polar filter runs LOCALLY.  Save/set-None/
+        # restore the lon-gather context around the jitted ``_step_cgrid``
+        # trace so a band step traced after a 2-D step reads None, and this
+        # step does not leak None to a later user (codex C7 P1/(a)).
+        _prev = get_polar_filter_lon_gather()
+        set_polar_filter_lon_gather(None, None)
+        try:
+            state_new, _ = mpi_model._step_cgrid(
+                local_state, dt,
+                target_mass=target_mass,
+                physics_fn=physics_fn,
+            )
+        finally:
+            set_polar_filter_lon_gather(*(_prev if _prev else (None, None)))
         return state_new
 
     return step_fn
@@ -2940,20 +2953,29 @@ def make_latlon_2d_mpi_step(
             "a regular / wall-pole grid for the 2-D throughput benchmark.  "
             f"Got proc_lon={layout.proc_lon}, proc_lat={layout.proc_lat}."
         )
-    # The polar filter is a LONGITUDE FFT (rfft over the rank-local lon block,
-    # mask sized to the local n_lon), so it is wrong under a longitude split
-    # until a lon-gather FFT exists — refuse it loudly (config is grid-global,
-    # so all ranks raise together).  proc_lon==1 keeps full lon per rank and
-    # is fine.
-    if layout.proc_lon > 1 and bool(
-        getattr(model.config, "use_polar_filter", False)
-    ):
+    # The polar filter is a per-latitude-row LONGITUDE rFFT, so under a
+    # longitude split (proc_lon>1) it needs the whole lon circle on one rank.
+    # WIRED via the AD-safe lat-pencil transpose (``lon_gather_full`` /
+    # ``lon_scatter_full``): the filter gathers full lon, rFFT/mask/irFFTs on
+    # it, then scatters this rank's block.  The mask is rebuilt at the GLOBAL
+    # n_lon below (rank-local lat rows, global n_freq), and the gather/scatter
+    # pair is injected into ``polar_filter`` before the step is traced
+    # (proc_lon==1 keeps full lon per rank -> no gather, unchanged).  Tripolar
+    # is still refused above (the cap-fold needs the same transpose on the
+    # curl, a separate follow-up).
+    _polar_lon_split = (layout.proc_lon > 1 and bool(
+        getattr(model.config, "use_polar_filter", False)))
+    # Validate the EQUAL-split precondition of the polar-filter lon-gather
+    # allgather HERE — before any mutation (set_halo_backend / the global
+    # area allreduce / the model build) — so a rejected uneven split leaves
+    # the process UNCONFIGURED (codex C7 P2), not half-set-up.
+    if _polar_lon_split and layout.n_lon_global % layout.proc_lon != 0:
         raise NotImplementedError(
-            "make_latlon_2d_mpi_step: proc_lon>1 with use_polar_filter=True is "
-            "not wired — the polar filter rfft's the rank-local longitude "
-            "block (wrong under a lon split; needs a lon-gather FFT).  Set "
-            "use_polar_filter=False for the 2-D benchmark, or use proc_lon=1.  "
-            f"Got proc_lon={layout.proc_lon}."
+            "make_latlon_2d_mpi_step: use_polar_filter=True under a longitude "
+            f"split needs an EQUAL split (n_lon={layout.n_lon_global} % "
+            f"proc_lon={layout.proc_lon} != 0) — the polar-filter lon-gather "
+            "allgather requires equal blocks.  Use a proc_lon that divides "
+            "n_lon, or use_polar_filter=False."
         )
 
     from legoesm.grids.halo import set_halo_backend
@@ -2994,12 +3016,54 @@ def make_latlon_2d_mpi_step(
             "ModelDriver loops, which thread the carry."
         )
 
-    def step_fn(local_state, dt, *, target_mass=None):
-        state_new, _ = mpi_model._step_cgrid(
-            local_state, dt,
-            target_mass=target_mass,
-            physics_fn=physics_fn,
+    from legoesm.grids.polar_filter import (
+        get_polar_filter_lon_gather,
+        set_polar_filter_lon_gather,
+    )
+    _polar_ctx = (None, None)
+    if _polar_lon_split:
+        # Rebuild the polar-filter masks at the GLOBAL n_lon (the rank-local
+        # ``mpi_grid`` carries the LOCAL n_lon, but the filter rFFTs the
+        # gathered full-lon circle).  Latitude terms stay rank-local (the
+        # owned rows).  Build the AD-safe lon gather/scatter closures so the
+        # dycore's ``fourier_filter`` call sites transparently transpose.
+        from legoesm.grids.polar_filter import compute_polar_filter_mask
+        _pf_kw = dict(
+            dt=_mpi_dt,
+            max_wave_speed=mpi_config.polar_filter_max_wave_speed,
+            cutoff_lat_deg=mpi_config.polar_filter_cutoff_deg,
+            n_lon_override=layout.n_lon_global,
         )
+        mpi_model._polar_mask = compute_polar_filter_mask(mpi_grid, **_pf_kw)
+        mpi_model._polar_mask_v = compute_polar_filter_mask(
+            mpi_grid, is_v_face=True, **_pf_kw)
+        _row_comm = make_lon_row_comm(layout)
+
+        def _gather_full(field, _layout=layout, _rc=_row_comm):
+            return lon_gather_full(field, _layout, _rc)
+
+        def _scatter_block(full, _layout=layout):
+            return lon_scatter_full(full, _layout)
+
+        _polar_ctx = (_gather_full, _scatter_block)
+
+    def step_fn(local_state, dt, *, target_mass=None):
+        # SAVE the caller's lon-gather context, install THIS step's for the
+        # jitted ``_step_cgrid`` trace, and RESTORE it in finally — so the
+        # filter's process-global (read at first-call trace time) is correct
+        # for this step regardless of build/call interleaving AND does not
+        # leak to a later unwrapped ``model.step`` / shallow-water / ocean
+        # filter user (codex C7 P1/(a)).  ``(None, None)`` = local rFFT.
+        _prev = get_polar_filter_lon_gather()
+        set_polar_filter_lon_gather(*_polar_ctx)
+        try:
+            state_new, _ = mpi_model._step_cgrid(
+                local_state, dt,
+                target_mass=target_mass,
+                physics_fn=physics_fn,
+            )
+        finally:
+            set_polar_filter_lon_gather(*(_prev if _prev else (None, None)))
         return state_new
 
     return step_fn
