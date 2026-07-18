@@ -161,6 +161,69 @@ def test_no_poison_in_consumed_regions(gs):
     assert np.all(gs["area_c"][1:-1, 1:-1] > 0.0)
 
 
+@pytest.fixture(scope="module")
+def duo_ctx():
+    from legoesm.core.fv3_native_duo_stepper import (
+        build_six_face_duo_context,
+    )
+
+    return build_six_face_duo_context(12, 3, oracle_conventions=True)
+
+
+def test_ctx_oracle_conventions_flags(duo_ctx):
+    """oracle_conventions ctx: bounded metrics on every face, guards see
+    bounded_domain=True, corner flags off, vertex rsina=4/3."""
+    ctx = duo_ctx
+    ng = 3
+    for gs in ctx["gs6"]:
+        assert gs["bounded_domain"] is True
+        assert not any(gs[k] for k in ("sw_corner", "se_corner",
+                                       "ne_corner", "nw_corner"))
+        assert gs["rsina"][ng, ng] == pytest.approx(4.0 / 3.0, abs=1e-12)
+
+
+def test_d_sw1_edge_block_gated_on_bounded(duo_ctx):
+    """The auth-656 sin_sg edge ut/vt replacement fires on the plain
+    lane and is skipped on the bounded lane; interior slots agree."""
+    from legoesm.core.fv3_native_duo_sw_core import d_sw1_duo
+
+    n, ng = 12, 3
+    gs = duo_ctx["gs6"][0]
+    bd = duo_ctx["bd"]
+    m_a = n + 2 * ng
+    rng = np.random.default_rng(7)
+    shp_uc = (m_a + 1, m_a)
+    shp_vc = (m_a, m_a + 1)
+    uc = 10.0 * rng.standard_normal(shp_uc)
+    vc = 10.0 * rng.standard_normal(shp_vc)
+    delp = np.full((m_a, m_a), 3.0e4)
+    pt = np.ones((m_a, m_a))
+    zeros_x = np.zeros((n + 1, n))
+    zeros_y = np.zeros((n, n + 1))
+
+    def run(gs_in):
+        return d_sw1_duo(delp, pt, None, uc, vc,
+                         zeros_x.copy(), zeros_y.copy(),
+                         np.zeros((n + 1, m_a)), np.zeros((m_a, n + 1)),
+                         gs_in, bd, n + 1, n + 1, dt=450.0)
+
+    out_b = run(gs)
+    gs_plain = dict(gs)
+    gs_plain["bounded_domain"] = False
+    out_p = run(gs_plain)
+
+    ut_b, ut_p = out_b["ut"], out_p["ut"]
+    # Fortran ut row i==1 is the west-edge replacement target
+    edge_row_b = ut_b[ng, :]
+    edge_row_p = ut_p[ng, :]
+    assert not np.allclose(edge_row_b, edge_row_p), (
+        "edge gate is dead: bounded and plain lanes produced identical "
+        "west-edge ut")
+    # interior far from edges/corners must be lane-independent
+    mid = slice(ng + 4, ng + n - 4)
+    assert np.array_equal(ut_b[mid, mid], ut_p[mid, mid])
+
+
 def test_c48_matches_zenodo_run_log():
     """Direct python-vs-paper-run gate: the C48 bounded gridstruct
     reproduces the numbers the Zenodo duo run PRINTED in fms.out."""
