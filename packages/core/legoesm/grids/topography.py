@@ -20,6 +20,15 @@ from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.edge_blending import blend_scalar_cube_edges_2d
 from legoesm.grids.halo import pad_halo_local
 
+# Elevation-magnitude sanity threshold [m] for the geopotential-vs-meters
+# "double-g" trap: no Earth surface elevation exceeds ~8850 m (Everest) and no
+# ocean depth exceeds ~11000 m (Mariana), but the GEOPOTENTIAL of Everest is
+# ~86800 m²/s².  An "elevation" field whose magnitude exceeds this threshold is
+# almost certainly geopotential [m²/s²] mistakenly passed as elevation [m] —
+# multiplying it by g again in load_real_topography would silently inflate
+# phis ~9.8×.
+_MAX_PLAUSIBLE_ELEV_M = 12000.0
+
 
 def _grid_lat_lon_2d(grid):
     """Per-cell (lat, lon) in the grid's native horizontal layout [rad].
@@ -311,6 +320,53 @@ def _detect_variables(ds) -> tuple[str, str, str]:
     return elev_var, lat_var, lon_var
 
 
+def _build_latlon_interpolator(
+    lat_src: np.ndarray,
+    lon_src: np.ndarray,
+    data: np.ndarray,
+):
+    """Bilinear interpolator with longitudinal wrap AND polar edge padding.
+
+    Shared by the elevation (:func:`_regrid_to_target`) and land-fraction
+    (:func:`_derive_land_fraction`, :func:`_load_land_fraction_file` via
+    ``_regrid_to_target``) regrid paths so both get identical boundary
+    handling:
+
+    * Longitude is wrapped by one column on each side for periodicity.
+    * The latitude axis is padded to exactly ±90° by EDGE REPLICATION
+      (prepend/append a copy of the first/last latitude row).  Without this,
+      ``bounds_error=False, fill_value=0.0`` silently assigns 0 (ocean /
+      sea level) to target cells POLEWARD of the source grid's outermost
+      latitude CENTER — e.g. a 1° sftlf spanning ±89.5° left cubed-sphere or
+      Gaussian cells near ±90° misclassified as f_land=0 open ocean over
+      Antarctica.  With the padding, pole-adjacent targets get the nearest
+      real source value instead.
+    """
+    from scipy.interpolate import RegularGridInterpolator
+
+    lat_src = np.asarray(lat_src)
+    # Longitudinal wrap (unchanged behavior).
+    lon_wrapped = np.concatenate([
+        lon_src[-1:] - 360.0, lon_src, lon_src[:1] + 360.0
+    ])
+    data_wrapped = np.concatenate([
+        data[:, -1:], data, data[:, :1]
+    ], axis=1)
+
+    # Polar edge replication (lat_src is ascending by the callers' contract).
+    if lat_src[0] > -90.0:
+        lat_src = np.concatenate([[-90.0], lat_src])
+        data_wrapped = np.concatenate([data_wrapped[:1], data_wrapped], axis=0)
+    if lat_src[-1] < 90.0:
+        lat_src = np.concatenate([lat_src, [90.0]])
+        data_wrapped = np.concatenate([data_wrapped, data_wrapped[-1:]], axis=0)
+
+    return RegularGridInterpolator(
+        (lat_src, lon_wrapped), data_wrapped,
+        method="linear", bounds_error=False, fill_value=0.0,
+    )
+
+
 def _regrid_to_target(
     lat_src: np.ndarray,
     lon_src: np.ndarray,
@@ -320,7 +376,8 @@ def _regrid_to_target(
 ) -> np.ndarray:
     """Regrid elevation data from regular lat-lon to target grid points.
 
-    Uses bilinear interpolation with longitude wrapping for periodicity.
+    Uses bilinear interpolation with longitude wrapping for periodicity
+    and polar edge replication (see ``_build_latlon_interpolator``).
 
     Parameters
     ----------
@@ -340,20 +397,7 @@ def _regrid_to_target(
     np.ndarray
         Regridded elevation, same shape as target_lat_deg.
     """
-    from scipy.interpolate import RegularGridInterpolator
-
-    # Wrap longitude for interpolation continuity
-    lon_wrapped = np.concatenate([
-        lon_src[-1:] - 360.0, lon_src, lon_src[:1] + 360.0
-    ])
-    elev_wrapped = np.concatenate([
-        elev_data[:, -1:], elev_data, elev_data[:, :1]
-    ], axis=1)
-
-    interp = RegularGridInterpolator(
-        (lat_src, lon_wrapped), elev_wrapped,
-        method="linear", bounds_error=False, fill_value=0.0,
-    )
+    interp = _build_latlon_interpolator(lat_src, lon_src, elev_data)
 
     target_shape = target_lat_deg.shape
     points = np.stack([
@@ -394,20 +438,7 @@ def _derive_land_fraction(
     np.ndarray
         Land fraction [0, 1], same shape as target_lat_deg.
     """
-    from scipy.interpolate import RegularGridInterpolator
-
-    # Wrap longitude
-    lon_wrapped = np.concatenate([
-        lon_src[-1:] - 360.0, lon_src, lon_src[:1] + 360.0
-    ])
-    elev_wrapped = np.concatenate([
-        elev_data[:, -1:], elev_data, elev_data[:, :1]
-    ], axis=1)
-
-    interp = RegularGridInterpolator(
-        (lat_src, lon_wrapped), elev_wrapped,
-        method="linear", bounds_error=False, fill_value=0.0,
-    )
+    interp = _build_latlon_interpolator(lat_src, lon_src, elev_data)
 
     # Sample at a sub-grid of points around each target point
     n_sub = max(3, int(np.ceil(grid_spacing_deg / 0.5)))
@@ -1108,6 +1139,7 @@ def load_real_topography(
     lat_src = ds[lat_var].values.astype(np.float64)
     lon_src = ds[lon_var].values.astype(np.float64)
     elev_data = ds[elev_var].values.astype(np.float64)
+    elev_units = str(ds[elev_var].attrs.get("units", ""))
 
     # Handle multi-dimensional data (squeeze extra dims)
     while elev_data.ndim > 2:
@@ -1128,6 +1160,27 @@ def load_real_topography(
     elev_data = np.where(np.isnan(elev_data), 0.0, elev_data)
 
     ds.close()
+
+    # --- geopotential-vs-meters "double-g" guard -----------------------------
+    # This loader multiplies elevation [m] by constants.g below; an ERA5-style
+    # invariant where 'z' is GEOPOTENTIAL [m²/s²] would be silently inflated
+    # ~9.8×.  Detect it by the units attribute (when present) and by magnitude
+    # (see _MAX_PLAUSIBLE_ELEV_M).
+    _double_g_msg = (
+        f"Topography variable {elev_var!r} in {path!r} looks like surface "
+        f"GEOPOTENTIAL [m**2 s**-2], not elevation [m] "
+        f"(units={elev_units!r}, max |value| = "
+        f"{float(np.max(np.abs(elev_data))):.0f}; no Earth elevation exceeds "
+        f"~8850 m, threshold {_MAX_PLAUSIBLE_ELEV_M:.0f} m). Multiplying it "
+        "by g again (the double-g trap) would inflate phis ~9.8x. Divide the "
+        "field by g (legoesm.constants.g) first, or pass the correct "
+        "elevation variable via config.elev_var."
+    )
+    _units_norm = elev_units.replace(" ", "").replace("**", "^").lower()
+    if _units_norm in ("m^2s^-2", "m^2/s^2", "m2s-2", "m2/s2", "m^2s-2"):
+        raise ValueError(_double_g_msg)
+    if float(np.max(np.abs(elev_data))) > _MAX_PLAUSIBLE_ELEV_M:
+        raise ValueError(_double_g_msg)
 
     # Use protocol for grid detection (classification fixed in
     # _target_grid_degrees: by coordinate rank, so the lat-lon grid is no longer
