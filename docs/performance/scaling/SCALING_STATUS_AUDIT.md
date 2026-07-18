@@ -123,26 +123,25 @@ These are each a scoped project, not a quick edit; ranked by value:
   cube-face MPI. Gated bit-identical to serial at np={2,3,6}. Remaining:
   transient LULC under MPI (global param rebuild) and the SPMD/lat-band land
   partition specs (still refused).
-- **Coupled atm+ocean scaling bench lane** — CONFIRMED build-first (2026-07-18b
-  investigation). The composition itself is band-local-clean on a SHARED
-  lat-lon grid: the slab ocean step (`simple_ocean._slab_step`) is fully
-  column-local (no allreduce/gather/halo), the surface flux exchange is
-  pointwise, and identity same-grid coupling needs no regrid — so each rank
-  couples its own latitude band with NO cross-rank comm. The blocker is that
-  the atm band step `make_latlon_mpi_step` has no COUPLING I/O — two gaps:
-  (1) `step_fn(state, dt, target_mass=)` cannot thread a per-coupling-step
-  ocean SST as a traced forcing (only a STATIC `physics_fn` closure), and
-  (2) it returns ONLY the state, not the surface downwelling SW/LW the ocean
-  forcing (`AtmToSurface.sw_down`/`lw_down`) needs — those radiation
-  diagnostics are computed inside the physics step and discarded. So a
-  correct coupled loop needs that bidirectional coupling I/O BUILT (the real
-  "coupled MPI step"). Minimal viable next step: extend `make_latlon_mpi_step`
-  to accept a traced surface-coupling forcing (SST in) and return the surface
-  flux/radiation bundle (out), then a slab-ocean (column-local) + atm-band
-  coupled loop with a serial-vs-np2 parity gate. Cube-atm × latlon/tripole-ocean production
-  coupling stays BLOCKED (cross-family regrid `NotImplementedError`,
-  incompatible decompositions, gather-needing regrid). Highest-value missing
-  *measurement infra*.
+- **Coupled atm+ocean scaling bench lane** — SHIPPED (first coupled MPI step):
+  `coupler/coupled_latlon_band.py` couples the atm C-grid dycore + a
+  co-located slab SST on a SHARED lat-lon grid, SAME latitude-band
+  decomposition, via an EXPLICIT band-local sensible-heat exchange at the
+  interval boundary (the `_segment_hook` pattern — atm step compiles ONCE, no
+  per-interval recompile). The coupling is pointwise per cell => fully
+  band-local (no cross-rank comm, no regrid); the sensible exchange conserves
+  the coupled surface energy EXACTLY per cell, and the one non-conservative
+  term — the freezing clamp — is RETURNED as `clamp_energy` (a source == the
+  latent-fusion debit an unmodelled ice reservoir carries) so the budget stays
+  auditable. Lane: `scripts/bench/bench_coupled_latlon_scaling.py`
+  (`--parity-gate`). Gates: `tests/distributed/test_coupled_latlon_mpi.py`
+  (np2/np4 serial==band-MPI parity + global energy conservation),
+  `tests/unit/test_coupled_latlon_band.py`. This is the CORRECTNESS + capability
+  infra; the production timing envelope (fold real radiation + bulk fluxes into
+  the SAME jitted step via SST-in / flux-out threading on `make_latlon_mpi_step`,
+  no interval recompile) is the follow-up. Cube-atm × latlon/tripole-ocean
+  production coupling stays BLOCKED (cross-family regrid `NotImplementedError`,
+  incompatible decompositions, gather-needing regrid).
 - **Distributed polar filter under `proc_lon>1`** — SHIPPED: the polar
   rFFT now gathers the full lon circle via the AD-safe lat-pencil transpose
   (`lon_gather_full`/`lon_scatter_full`), rebuilds the mask at the global
