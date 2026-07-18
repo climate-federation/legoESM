@@ -307,8 +307,11 @@ def compute_two_leaf_canopy_fluxes(
     # (Schuepp 1993 midrange), matching PFT_LEAF_WIDTH's default leaf class.
     _d_leaf_in = _get(lp, "d_leaf", None)
     d_leaf = jnp.full(ncol, _DEFAULT_D_LEAF) if _d_leaf_in is None else _d_leaf_in
-    emissivity_per_col = _get(
-        lp, "emissivity", jnp.full(ncol, land_config.emissivity_land))
+    # NB: the two-stream ``canopy_longwave_rt`` resolves longwave from the
+    # SEPARATE leaf/soil emissivities (cc.epsf / cc.epss) and exports the
+    # conservative column ``eps_eff`` (see the radiometric block below), so a
+    # single broadband ``land_params["emissivity"]`` is intentionally NOT
+    # consumed here — forcing it in would break the exact LW_out reproduction.
 
     # ``TgC`` priority:
     #   1. Caller-supplied ``TgC_override`` (state-carried 30-day EMA from
