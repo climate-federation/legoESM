@@ -44,6 +44,53 @@ from legoesm.driver.restart import save_restart, load_restart
 logger = logging.getLogger("legoesm.driver")
 
 
+def _scatter_flat_columns(flat_arr, layout, n_tile):
+    """Scatter a FLATTENED-column array ``(6*n*n, ...)`` to this rank's owned
+    faces, returning ``(n_local*n*n, ...)`` in the identical face-major
+    row-major column order the rank-local ``ColumnAdapter`` uses.
+
+    The multilayer-land per-column state/params live in flattened column space
+    (``ncol = 6*n*n``), while the cube face-scatter (:func:`layout.scatter`)
+    operates on a leading FACE axis of size 6.  So reshape ``(6*n*n, ...) ->
+    (6, n, n, ...)``, scatter the owned faces, then flatten back to
+    ``(n_local*n*n, ...)``.  The column ordering matches the scattered
+    ``_physics_lat`` / ``f_land`` exactly (same faces, same within-face raster),
+    so soil columns land on their own faces — the invariant #769 depends on.
+    """
+    from legoesm.parallel.layout import scatter as _scatter
+    trailing = flat_arr.shape[1:]
+    faces = flat_arr.reshape((6, n_tile, n_tile) + trailing)
+    local = _scatter(faces, layout)                       # (n_local, n, n, ...)
+    n_local = local.shape[0]
+    return local.reshape((n_local * n_tile * n_tile,) + trailing)
+
+
+def _gather_flat_columns(local_arr, layout, n_tile, root_only=False):
+    """Inverse of :func:`_scatter_flat_columns` — gather a rank-local
+    flattened-column array ``(n_local*n*n, ...)`` back to the global
+    ``(6*n*n, ...)`` (for a global checkpoint / diagnostic)."""
+    from legoesm.parallel.layout import gather as _gather
+    trailing = local_arr.shape[1:]
+    n_local = local_arr.shape[0] // (n_tile * n_tile)
+    faces = local_arr.reshape((n_local, n_tile, n_tile) + trailing)
+    glob = _gather(faces, layout, root_only=root_only)    # (6, n, n, ...)
+    return glob.reshape((6 * n_tile * n_tile,) + trailing)
+
+
+def _map_flat_column_leaves(tree, n_tile, global_ncol, fn):
+    """Apply ``fn(leaf, n_tile)`` to every array leaf of ``tree`` whose leading
+    axis equals ``global_ncol`` (a per-column field); leave all other leaves
+    (scalars, config, differently-shaped params) untouched.  Used to
+    scatter/gather the multilayer-land params + carbon pytrees, which mix
+    per-column arrays with scalar hyperparameters."""
+    def _leaf(x):
+        if (hasattr(x, "shape") and x.ndim >= 1
+                and int(x.shape[0]) == global_ncol):
+            return fn(x, n_tile)
+        return x
+    return jax.tree_util.tree_map(_leaf, tree)
+
+
 def _meshes_compatible(a, b) -> bool:
     """Return True when JAX device meshes *a* and *b* match enough to
     safely share the SPMD halo backend.
@@ -219,6 +266,12 @@ class ModelDriver:
         # Prognostic multilayer (Richards) land state, carried in SegmentCarry.land_ml
         # and persisted across segments.  None ⇒ slab-land (scalar T_land) path.
         self._land_ml_state = None
+        # Set True once the per-column land state/params/carbon are scattered to
+        # owned faces under cube-face MPI (_setup_parallel); satisfies the
+        # distributed-multilayer guard in run().  Faces are embarrassingly
+        # parallel so the gathered N-rank soil is bit-identical to serial.
+        self._land_ml_scattered = False
+        self._land_ml_n_tile = None
         self._fric_decay = None
         self._qv_smooth_coeff = None
         self._hyperdiffusion_3d_fn = None
@@ -2991,6 +3044,23 @@ class ModelDriver:
 
             from legoesm.parallel.layout import DistributedLayout
             if isinstance(layout, DistributedLayout):
+                # Refuse multilayer land under a SUB-FACE TILED layout (>6
+                # ranks, 6*k^2) BEFORE any scatter: a tiled rank owns a face
+                # TILE while the compiled physics selects WHOLE owned faces
+                # (_owned_face_ids), so the per-column soil scatter (face-axis
+                # reshape) and whole-face physics are incompatible.  Raising
+                # here — before any field is scattered or the adapter rebuilt —
+                # keeps a rejected tiled setup from partially mutating the
+                # driver.
+                if (self._land_ml_state is not None
+                        and getattr(layout, "is_tiled", False)):
+                    raise NotImplementedError(
+                        "use_multilayer_land under sub-face tiled MPI "
+                        "(>6 ranks) is not supported: physics runs on whole "
+                        "owned faces while the tiled layout owns face TILES. "
+                        "Use <=6 ranks (whole-face cube MPI) for multilayer "
+                        "land, or slab land for the tiled lane."
+                    )
                 # Store MPI metadata for later phases
                 self._layout = layout
                 self._mpi_rank = topo.rank
@@ -3043,6 +3113,47 @@ class ModelDriver:
                             is not None:
                         self.physics.subgrid_topo_stddev = scatter(
                             self.physics.subgrid_topo_stddev, layout)
+
+                # Multilayer (Richards) land: scatter every per-column field
+                # (state, lat, params, carbon) to owned faces so the rank-local
+                # physics columns advance THIS rank's soil columns — the same
+                # ownership as _physics_lat / f_land.  The columns are
+                # embarrassingly parallel (no lateral soil coupling), so the
+                # gathered N-rank state is bit-identical to the single-rank run
+                # (gated by test_multilayer_land_scatter_mpi).  After this the
+                # distributed-multilayer guard in ``run`` is satisfied.
+                if self._land_ml_state is not None:
+                    # (Sub-face tiled layouts were already refused above, before
+                    # any scatter.)
+                    n_tile = int(self.state.T.data.shape[1])
+                    global_ncol = 6 * n_tile * n_tile
+                    if self._land_cover_transient is not None:
+                        # Transient LULC rebuilds params from GLOBAL cover each
+                        # segment; scattering that per-segment rebuild is a
+                        # follow-up.  Refuse rather than feed global params to
+                        # rank-local columns (silent geographic mismatch).
+                        raise NotImplementedError(
+                            "transient_land_cover with multilayer land under "
+                            "MPI is not yet supported (the per-segment param "
+                            "rebuild is global); run single-rank, or use "
+                            "static land cover for distributed multilayer runs."
+                        )
+                    self._land_ml_state = _map_flat_column_leaves(
+                        self._land_ml_state, n_tile, global_ncol,
+                        lambda x, n: _scatter_flat_columns(x, layout, n))
+                    if getattr(self.physics, "land_ml_lat", None) is not None:
+                        self.physics.land_ml_lat = _scatter_flat_columns(
+                            self.physics.land_ml_lat, layout, n_tile)
+                    if getattr(self.physics, "land_ml_params", None) is not None:
+                        self.physics.land_ml_params = _map_flat_column_leaves(
+                            self.physics.land_ml_params, n_tile, global_ncol,
+                            lambda x, n: _scatter_flat_columns(x, layout, n))
+                    if getattr(self.physics, "land_ml_carbon", None) is not None:
+                        self.physics.land_ml_carbon = _map_flat_column_leaves(
+                            self.physics.land_ml_carbon, n_tile, global_ncol,
+                            lambda x, n: _scatter_flat_columns(x, layout, n))
+                    self._land_ml_scattered = True
+                    self._land_ml_n_tile = n_tile
 
                 # Wrap SST/SIC forcing to return rank-local arrays
                 _global_get_sst_sic = self.get_sst_sic
@@ -8321,21 +8432,25 @@ class ModelDriver:
         t_jit = 0.0
         t_start = time.time()
 
-        # Multilayer (Richards) land is validated single-device / single-rank only:
-        # the prognostic land state rides the carry with no partition spec, so a
-        # device-mesh shard_pytree (SPMD) or multi-rank MPI scatter would mis-handle
-        # it.  Fail LOUDLY rather than silently degrade to the slab or shard a state
-        # that has no sharding contract (CLAUDE.md: no silent degrade under SPMD/MPI;
-        # mirrors the increment-1 single-rank scope of SegmentCarry.land_ml).
+        # Multilayer (Richards) land under distribution: the cube-face MPI path
+        # scatters the per-column soil state/params/carbon to owned faces in
+        # ``_setup_parallel`` (``_land_ml_scattered``), so each rank advances its
+        # own columns and the gathered soil is bit-identical to serial (faces are
+        # embarrassingly parallel — no lateral coupling).  The SPMD device-mesh
+        # and lat-band MPI paths do NOT scatter it yet (no partition spec), so
+        # they still fail LOUDLY rather than silently degrade to the slab or
+        # shard a state with no sharding contract (CLAUDE.md: no silent degrade).
         if (self._land_ml_state is not None
                 and self._device_config is not None
-                and getattr(self._device_config, "is_distributed", False)):
+                and getattr(self._device_config, "is_distributed", False)
+                and not self._land_ml_scattered):
             raise NotImplementedError(
-                "use_multilayer_land is not yet supported under distributed "
-                "execution (SPMD device mesh or multi-rank MPI): the multilayer "
-                "land state has no partition spec and is validated single-rank "
-                "only.  Run on a single device / single MPI rank, or use slab "
-                "land (use_multilayer_land=False) for distributed runs."
+                "use_multilayer_land is only supported under the cube-face MPI "
+                "path (which scatters the soil columns to owned faces).  This "
+                "run is distributed via an SPMD device mesh or lat-band MPI, "
+                "which have no multilayer-land partition spec yet.  Run on a "
+                "single device / single MPI rank, use cube-face MPI, or use slab "
+                "land (use_multilayer_land=False) for these distributed modes."
             )
 
         # while (not ``range(n_segments)``): the adaptive-dt path halves
