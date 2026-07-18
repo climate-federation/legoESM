@@ -26,8 +26,9 @@ AD. ``mpi4jax.alltoall`` is a permutation (orthogonal data movement); its adjoin
 is the same all-to-all applied to the cotangent. We wrap it in a ``custom_vjp``
 so the spectral LES stays end-to-end differentiable — the project mandates that
 only AD-safe collectives appear in differentiable paths, and a raw ``alltoall``
-is not one. Complex arrays are carried as two real ``alltoall`` calls (real and
-imaginary parts) so the wrapper never relies on complex collective support.
+is not one. Complex arrays are carried as ONE packed real ``alltoall`` (real and
+imaginary parts stacked inside each per-rank block) so the wrapper never relies
+on complex collective support and pays a single collective latency per transpose.
 """
 
 from __future__ import annotations
@@ -85,10 +86,18 @@ ad_alltoall.defvjp(_ad_alltoall_fwd, _ad_alltoall_bwd)
 
 
 def _alltoall_complex(z, comm):
-    """All-to-all on a complex array ``(P, *rest)`` via two real transposes."""
-    re = ad_alltoall(jnp.real(z), comm)
-    im = ad_alltoall(jnp.imag(z), comm)
-    return jax.lax.complex(re, im)
+    """All-to-all on a complex array ``(P, *rest)`` via ONE packed real transpose.
+
+    Real and imaginary parts are stacked on a new axis 1 — INSIDE each
+    per-rank block, so the leading block axis stays ``P`` and each rank's
+    block ``(2, *rest)`` travels intact through the collective. One
+    all-to-all of 2x the bytes replaces two collectives: for a
+    latency-bound transpose (the distributed-FFT scaling regime) halving
+    the collective count is a straight win, and the AD story is unchanged
+    (``ad_alltoall`` wraps any real ``(P, ...)`` array)."""
+    packed = jnp.stack([jnp.real(z), jnp.imag(z)], axis=1)  # (P, 2, *rest)
+    out = ad_alltoall(packed, comm)
+    return jax.lax.complex(out[:, 0], out[:, 1])
 
 
 # --------------------------------------------------------------------------- #

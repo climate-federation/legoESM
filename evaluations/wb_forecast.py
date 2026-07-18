@@ -223,6 +223,8 @@ def score_forecast(pred_fields, verif_fields, clim_fields, wb2_lat_deg, *, valid
     dict[str, dict]
         ``{key: {"rmse": float, "acc": float, "bias": float}}``.
     """
+    import warnings
+
     import numpy as np
 
     from .metrics import acc, bias, rmse
@@ -234,9 +236,20 @@ def score_forecast(pred_fields, verif_fields, clim_fields, wb2_lat_deg, *, valid
         clim = clim_fields[key]
         m = None if valid is None else valid.get(key)
         if m is not None and float(jnp.sum(weights[:, None] * m)) <= 0.0:
-            # an all-masked field has no valid cells -> the score is undefined;
-            # fail loudly rather than return a misleading NaN/0.
-            raise ValueError(f"headline field {key!r} has no valid (above-ground) cells to score")
+            # An all-masked field has no valid (above-ground) cells -> the score
+            # is undefined. Record NaN + warn LOUDLY rather than crashing the
+            # whole scorecard: a physically-degenerate forecast (e.g. an
+            # undertrained full SFNO emulator whose surface pressure is
+            # unphysical, so every pressure level reads as below-ground) is a
+            # legitimate input in a MODEL COMPARISON — one bad field must not
+            # abort the other fields' scores. The warning still surfaces a
+            # genuine below-ground-mask bug during development.
+            warnings.warn(
+                f"headline field {key!r} has no valid (above-ground) cells to "
+                f"score; recording NaN (degenerate forecast or masking bug)",
+                RuntimeWarning, stacklevel=2)
+            scores[key] = {"rmse": float("nan"), "acc": float("nan"), "bias": float("nan")}
+            continue
         scores[key] = {
             "rmse": float(rmse(pred, target, weights, mask=m)),
             "acc": float(acc(pred, target, clim, weights, mask=m)),

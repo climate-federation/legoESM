@@ -18,6 +18,38 @@ from Tiedtke; the AR1 stochastic factor is treated as a fixed
 multiplier per call so ``jax.grad`` flows through the deterministic
 ``M_b``.
 
+Faithfulness status vs the IFS oracle (arpifs cumastrn/cuascn/cuflxn/
+cuddrafn/sucumf.F90) — updated 2026-07-17
+-----------------------------------------------------------------------------
+FAITHFUL, DEFAULT ON (oracle-derived, fortran-mirror pinned in
+``tests/unit/test_bechtold.py``):
+
+* Convective-turnover tau + full deep CAPE closure ``ZMFUB1 =
+  ZCAPE*ZMFUB/(ZHEAT*ZXTAU)`` incl. ZTAURES resolution factor
+  (``_ifs_cape_closure_target``), in-plume precipitation conversion
+  (cuascn.F90:718-773), sub-cloud rain evaporation march
+  (cuflxn.F90:449-460).
+* RCAPQADV=0.8 advection CAPE correction ``ZCAPE2/ZDQCV/ZSATFR`` +
+  branch gate (cumastrn.F90:734-760, :801, :819-823) — MATH + LEAF
+  INTERFACE complete (``_ifs_cape_qadv_terms``; ``use_ifs_cape_qadv``);
+  the production pipeline does not yet SUPPLY the dynamics tendencies
+  (``dT_dt_dyn``/``dq_dt_dyn`` = process-split PTENTA/PTENQA analogs;
+  an SCM can pass its prescribed large-scale forcing) — the one owed
+  wiring step, so the flag defaults OFF.
+
+FAITHFUL, DEFAULT ON since 2026-07-17 after A/B validation (PR #1167 —
+inputs plumbed via the production physics pipeline, each oracle-pinned):
+``use_ifs_downdraft``, ``use_ifs_capdcycl`` (AMIP-with-diurnal A/B stable),
+``use_ifs_land_rhebc`` (oracle land/ocean RH-break split), ``use_ifs_snow_melt``
+(RCE A/B: T-drift halved).  Still DEFAULT OFF: ``use_ifs_shallow_closure``
+(pending its own A/B).
+
+KNOWN DEPARTURES (documented, deliberate): full-level environment stands in
+for IFS half-level ``ZTENH/ZQENH``; smooth sigmoid gates replace hard IFs
+(differentiability); constant literature ``M_b_max`` cap instead of the
+timestep-CFL ``ZMFMAX``; single-plume (no LFS downdraft memory unless
+``use_ifs_downdraft``).
+
 References
 ----------
 * Bechtold, P., Köhler, M., Jung, T., Doblas-Reyes, F., Leutbecher,
@@ -33,6 +65,7 @@ References
 from __future__ import annotations
 
 import math
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -355,6 +388,20 @@ _IFS_CAPDCYCL_DUTEN_BASE = 2.0    # ZDUTEN = 2 + sqrt(...) (:790)
 _IFS_NJKT3_PA = 950.0e2           # ocean-branch upper wind level (sucumf.F90:268)
 _CAPDCYCL_GATE_W_PA = 5.0e2       # smooth width of the 50 hPa departure gate
 
+# --- IFS moisture/temperature advection CAPE correction RCAPQADV=0.8 ---------
+# (cumastrn.F90:734-760 accumulation, :801 ZDQCV scaling, :819-823 combine.)
+_IFS_RCAPQADV = 0.8               # blend weight (sucumf.F90:219)
+_IFS_QADV_SATFR_MAX = 0.94        # gate: column saturation fraction (:820)
+_IFS_QADV_OMEGA_MIN_PA_S = -100.0  # gate: resolved ascent at NJKT5 [Pa/s] (:820)
+_IFS_NJKT5_P_PA = 500.0e2         # NJKT5 = deepest level with p > 500 hPa (sucumf.F90:270)
+_IFS_QADV_TAURES_MIN = 1.25       # ZDQCV divisor floor MAX(1.25, ZTAURES) (:801)
+# Smoothing widths (numerics, not tunables) — the sharp limit recovers the
+# oracle's hard IF at :820 / hard KCTOP window at :751.
+_QADV_SATFR_GATE_W = 0.01         # sat-fraction gate sigmoid width [-]
+_QADV_OMEGA_GATE_W_PA_S = 10.0    # omega gate sigmoid width [Pa/s]
+_QADV_TOP_MEMBER_W_M = 200.0      # below-cloud-top membership width [m]
+_QADV_P500_PICK_W_PA = 5.0e3      # 500 hPa softmax picker width [Pa]
+
 # --- IFS land RHEBC (sub-cloud evap RH break over land, cuflxn.F90:222-223) ---
 _IFS_RHEBC_LAND = 0.75
 _IFS_RHEBC_LAND_DEEP = 0.70
@@ -373,10 +420,10 @@ def _ifs_ztaures(dx_m: float) -> float:
     if dx_m <= 0.0:
         return 1.0
     dx = max(float(dx_m), 100.0)
-    if dx < 8.0e3:
-        return 1.0 + math.log(8.0e3 / dx) ** 2
-    zt = 1.0 + 1.60 * dx / 125.0e3
-    return min(3.0, zt) if dx > 125.0e3 else zt
+    if dx < 8.0e3:  # coeff-ok: IFS ZTAURES 8 km resolution break (cumastrn.F90:766)
+        return 1.0 + math.log(8.0e3 / dx) ** 2  # coeff-ok: IFS sub-8km ZTAURES fit (cumastrn.F90:767)
+    zt = 1.0 + 1.60 * dx / 125.0e3  # coeff-ok: IFS ZTAURES linear fit 1+1.6*dx/125km (cumastrn.F90:764)
+    return min(3.0, zt) if dx > 125.0e3 else zt  # coeff-ok: IFS coarse-cap MIN(3, ZTAURES) (cumastrn.F90:768)
 
 # --- IFS convective sub-cloud rain evaporation (cuflxn.F90:436-475, sucumf.F90) ---
 # Kessler-type evaporation of the convective rain flux below cloud base,
@@ -591,7 +638,7 @@ def _ifs_downdraft(
     # updraft is alive and ~0 above its death, times the above-cloud-base
     # membership for the KCBOT bound.
     window = above_base * jnp.tanh(
-        M_u / (0.005 * jnp.maximum(M_b, _IFS_RMFCMIN))[:, None])
+        M_u / (0.005 * jnp.maximum(M_b, _IFS_RMFCMIN))[:, None])  # coeff-ok: tanh liveness-window width, 0.5% of M_b (numerics gate, not a rate)
     gate = (
         jax.nn.sigmoid(-b_lfs / _DD_BUO_GATE_K)
         * jax.nn.sigmoid(
@@ -761,7 +808,7 @@ def _ifs_downdraft(
     # tail M_u, so an inactive level could impose a column-wide zmfs).  Active
     # = carrying at least 0.1% of the column's own peak downdraft.
     _dd_peak = jnp.max(-m_d, axis=1, keepdims=True)
-    active = (-m_d) > 1e-3 * _dd_peak
+    active = (-m_d) > 1e-3 * _dd_peak  # coeff-ok: 0.1%-of-peak activity mask (numerics threshold)
     violating = active & ((-m_d) > (_IFS_NETFLUX_FRAC * M_u_guard + 1e-15))
     zmfs = jnp.minimum(
         jnp.min(jnp.where(violating, jnp.maximum(ratio, 0.0), 1.0),
@@ -1333,6 +1380,113 @@ def _ifs_subcloud_rain_evaporation(
     return evap_rate, rain_scale[:, None], melt_rate
 
 
+class _QadvTerms(NamedTuple):
+    """Column inputs for the RCAPQADV CAPE-advection correction.
+
+    ``T_env2`` / ``q_env2``: the environment with the DYNAMICS tendency over
+    one physics step removed (oracle ``ZTENH2/ZQENH2``, cumastrn.F90:735-737);
+    ``zdqcv``: the scaled column moisture-advection supply [Pa]
+    (:748, :801); ``adv_gate``: the smooth ``ZSATFR<=0.94 OR
+    omega(NJKT5)<-100`` branch selector in [0, 1] (:820).
+    """
+
+    T_env2: jax.Array
+    q_env2: jax.Array
+    zdqcv: jax.Array
+    adv_gate: jax.Array
+
+
+def _ifs_cape_qadv_terms(
+    T: jax.Array,
+    q_v: jax.Array,
+    q_sat_env: jax.Array,
+    z: jax.Array,
+    p_full: jax.Array,
+    dp_full: jax.Array,
+    dT_dt_dyn: jax.Array,
+    dq_dt_dyn: jax.Array,
+    omega: jax.Array | None,
+    z_top: jax.Array,
+    tau_pure: jax.Array,
+    ztaures: float,
+    dt: float,
+    qadv_weight: float,
+) -> _QadvTerms:
+    r"""RCAPQADV advection-correction terms (cumastrn.F90:734-760, :801, :820).
+
+    Oracle pieces reproduced term-for-term (smoothed where the Fortran is a
+    hard IF):
+
+    * ``ZTENH2/ZQENH2`` (:735-737): the half-level environment minus the
+      DYNAMICS tendency over the step,
+      ``ZTENH2 = ZTENH - 0.5*(PTENTA(k)+PTENTA(k-1))*PTSPHY`` — this smooth
+      full-level scheme averages the ``k``/``k-1`` neighbour tendencies (the
+      same half-level stand-in the closure uses for ``ZTENH`` itself).
+    * ``ZDQCV`` (:748): the column moisture-advection supply
+      ``sum_k PTENQA(k)*(PAPH(k+1)-PAPH(k))*(PQEN/PQSEN)`` over ALL levels,
+      scaled (:801) by ``RLVTT/PGEOH(KCTOP) * ZXTAU/MAX(1.25, ZTAURES) *
+      RCAPQADV`` with the UNCLAMPED ``ZXTAU = tau_pure*ZTAURES`` (RTAUA=1,
+      SPP off; the [720, 10800] s clamp at :827 applies only to the closure
+      denominator's ZXTAU, which comes AFTER :801 in the oracle).
+    * ``ZSATFR`` (:751-753, :802): the pressure-weighted mean saturation
+      fraction from cloud top to the surface; the hard ``JK >= KCTOP`` window
+      becomes a sigmoid on height below ``z_top`` (width
+      ``_QADV_TOP_MEMBER_W_M``).
+    * Branch gate (:820): ``ZSATFR <= 0.94 OR PVERVEL(NJKT5) < -100 Pa/s``
+      as a smooth OR of two sigmoids; NJKT5 is the deepest level with
+      ``p > 500 hPa`` (sucumf.F90:270), picked here with a Gaussian softmax
+      over ``p_full``.  With ``omega=None`` (not plumbed) the resolved
+      strong-ascent branch cannot fire — faithful in the hydrostatic-GCM
+      regime where ``|omega| << 100 Pa/s`` (~10 m/s updraft), documented.
+
+    ``q_sat_env`` is the scheme's environment saturation (liquid
+    ``saturation_mixing_ratio``) — the internal stand-in for the oracle's
+    mixed-phase ``PQSEN``, consistent with every other env-RH use here.
+
+    AD-safe: sigmoids/softmax only; divisions by floored ``PGEOH`` and the
+    pressure-weight sum.
+    """
+    # ZTENH2/ZQENH2: neighbour-averaged dynamics tendency removed over dt.
+    dT_avg = 0.5 * (dT_dt_dyn[:, 1:] + dT_dt_dyn[:, :-1])
+    dq_avg = 0.5 * (dq_dt_dyn[:, 1:] + dq_dt_dyn[:, :-1])
+    T_env2 = jnp.concatenate([T[:, :1], T[:, 1:] - dT_avg * dt], axis=-1)
+    q_env2 = jnp.concatenate([q_v[:, :1], q_v[:, 1:] - dq_avg * dt], axis=-1)
+
+    # ZDQCV accumulation (:748) over ALL levels, ZDZ = PAPH(k+1)-PAPH(k).
+    satfrac_lev = q_v / jnp.maximum(q_sat_env, 1.0e-12)
+    zdqcv_int = jnp.sum(dq_dt_dyn * dp_full * satfrac_lev, axis=-1)
+    # Scaling (:801).  PGEOH(KCTOP) = g*z_top, floored as a JAX guard.
+    geo_top = jnp.maximum(constants.g * z_top, 1.0)
+    zxtau_unclamped = tau_pure * ztaures
+    zdqcv = (
+        zdqcv_int * constants.L_v / geo_top
+        * zxtau_unclamped / max(float(ztaures), _IFS_QADV_TAURES_MIN)
+        * qadv_weight
+    )
+
+    # ZSATFR (:751-753, :802): cloud-top-to-surface mean saturation fraction.
+    below_top = jax.nn.sigmoid((z_top[:, None] - z) / _QADV_TOP_MEMBER_W_M)
+    zsatfr = (
+        jnp.sum(below_top * satfrac_lev * dp_full, axis=-1)
+        / jnp.maximum(jnp.sum(below_top * dp_full, axis=-1), 1.0)
+    )
+
+    # Smooth OR of the two :820 branch conditions.
+    g_sat = jax.nn.sigmoid((_IFS_QADV_SATFR_MAX - zsatfr) / _QADV_SATFR_GATE_W)
+    if omega is not None:
+        pick = jax.nn.softmax(
+            -(((p_full - _IFS_NJKT5_P_PA) / _QADV_P500_PICK_W_PA) ** 2),
+            axis=-1,
+        )
+        omega5 = jnp.sum(pick * omega, axis=-1)
+        g_om = jax.nn.sigmoid(
+            (_IFS_QADV_OMEGA_MIN_PA_S - omega5) / _QADV_OMEGA_GATE_W_PA_S)
+        adv_gate = 1.0 - (1.0 - g_sat) * (1.0 - g_om)
+    else:
+        adv_gate = g_sat
+    return _QadvTerms(T_env2, q_env2, zdqcv, adv_gate)
+
+
 def _ifs_cape_closure_target(
     T: jax.Array,
     q_v: jax.Array,
@@ -1348,6 +1502,8 @@ def _ifs_cape_closure_target(
     M_b_fg: jax.Array,
     cape_weight: jax.Array,
     zcapdcycl: jax.Array | None = None,
+    qadv: _QadvTerms | None = None,
+    qadv_weight: float = _IFS_RCAPQADV,
 ) -> jax.Array:
     r"""IFS deep-convection CAPE-closure cloud-base mass flux (cumastrn.F90:704-833).
 
@@ -1397,14 +1553,19 @@ def _ifs_cape_closure_target(
     ``ZMFMAX = dp_base * RMFCFL/(g*dt)`` CFL form is a documented departure
     (a constant literature cap instead of a timestep-dependent one).
 
-    NOT reproduced (documented gaps — each needs an input this column scheme
-    does not have plumbed): the ``RCAPQADV=0.8`` moisture/temperature
-    advection correction ``ZCAPE2/ZDQCV/ZSATFR`` (cumastrn.F90:734-760,819-823;
-    needs the DYNAMICS T and q advective tendencies and vertical velocity),
-    the ``RCAPDCYCL=2`` diurnal-cycle PBL-CAPE subtraction ``ZCAPDCYCL``
-    (cumastrn.F90:783-796; needs surface buoyancy flux and a land mask), and
-    the ``RMINCAPE=0.05`` floor ``MAX(RMINCAPE*ZCAPE, ZCAPE - ZCAPDCYCL)``
-    (cumastrn.F90:820-823) which is inert when ``ZCAPDCYCL = ZDQCV = 0``.
+    The ``RCAPQADV=0.8`` moisture/temperature advection correction
+    ``ZCAPE2/ZDQCV/ZSATFR`` (cumastrn.F90:734-760, :801, :819-823) is
+    reproduced via ``qadv`` (see ``_ifs_cape_qadv_terms``): ``ZCAPE2`` is the
+    plume buoyancy against the dynamics-advected environment, blended
+    ``RCAPQADV*ZCAPE2 + (1-RCAPQADV)*ZCAPE`` (:819); ``ZCAPDCYCL`` is bounded
+    below by ``-2*ZCAPE2`` (:820); the near-saturated / resolved-ascent gate
+    selects ``MAX(RMINCAPE*ZCAPE, ZCAPE2 - ZCAPDCYCL + ZDQCV)`` vs
+    ``MAX(RMINCAPE*ZCAPE, ZCAPE - ZCAPDCYCL)`` (:821-823).  With
+    ``qadv=None`` (inputs not supplied) the pre-existing no-advection path
+    runs unchanged.  The ``RCAPDCYCL=2`` diurnal-cycle subtraction enters via
+    ``zcapdcycl`` (``_ifs_capdcycl``; needs surface buoyancy flux + land
+    mask), and the ``RMINCAPE=0.05`` floor is applied in both branches — it
+    is inert only when ``ZCAPDCYCL = ZDQCV = 0``.
 
     AD-safe: floors/caps are ``jnp.maximum``/``jnp.clip`` (piecewise-smooth);
     the only division is by the FLOORED ``ZHEAT`` and the clamped ``tau_conv``,
@@ -1439,11 +1600,36 @@ def _ifs_cape_closure_target(
     )
     zcape = jnp.sum(in_cloud[:, 1:] * buoy * dp_lev, axis=-1)
     zcape = jnp.maximum(zcape, 0.0)
-    if zcapdcycl is not None:
+    if qadv is not None:
+        # RCAPQADV advection correction (cumastrn.F90:819-823).  ZCAPE2: the
+        # SAME buoyancy integral against the dynamics-advected environment
+        # ZTENH2/ZQENH2 (:738-742); un-floored — the RMINCAPE*ZCAPE floor
+        # below is the oracle's own guard.
+        buoy2 = (
+            (T_u[:, 1:] - qadv.T_env2[:, 1:])
+            / jnp.maximum(qadv.T_env2[:, 1:], 1.0)
+            + _IFS_RETV * (q_u[:, 1:] - qadv.q_env2[:, 1:])
+            - q_c_u[:, 1:]
+        )
+        zcape2_int = jnp.sum(in_cloud[:, 1:] * buoy2 * dp_lev, axis=-1)
+        zcape2 = qadv_weight * zcape2_int + (1.0 - qadv_weight) * zcape  # :819
+        zdcy_in = (zcapdcycl if zcapdcycl is not None
+                   else jnp.zeros_like(zcape))
+        # :820 bounds ZCAPDCYCL by -2*ZCAPE2 (the BLENDED value), and the
+        # gate selects the advection branch where the column is not
+        # near-saturated OR resolved 500 hPa ascent is extreme.  ORDER: both
+        # branches subtract BEFORE the 5000 Pa cap (:825 comes after).
+        zdcy = jnp.maximum(zdcy_in, -2.0 * zcape2)
+        zcape_adv = jnp.maximum(
+            _IFS_RMINCAPE * zcape, zcape2 - zdcy + qadv.zdqcv)      # :821
+        zcape_noadv = jnp.maximum(
+            _IFS_RMINCAPE * zcape, zcape - zdcy)                    # :823
+        zcape = qadv.adv_gate * zcape_adv + (1.0 - qadv.adv_gate) * zcape_noadv
+    elif zcapdcycl is not None:
         # RCAPDCYCL diurnal subtraction (cumastrn.F90:818-823): bounded below
         # by -2*ZCAPE (a nocturnal negative supply may at most double the
         # CAPE) and the result floored at RMINCAPE*ZCAPE — a fraction of the
-        # instability is always adjusted.  (Our RCAPQADV path is absent, so
+        # instability is always adjusted.  (The RCAPQADV path is off, so
         # ZCAPE2 == ZCAPE.)  ORDER: the oracle subtracts BEFORE the 5000 Pa
         # cap (:825 comes after) — capping first collapsed a
         # 10000-8000=2000 Pa case onto the RMINCAPE floor (codex R1 #1).
@@ -1795,6 +1981,9 @@ def bechtold_convection(
     lhf_w_m2: jax.Array | None = None,
     dT_dt_rad: jax.Array | None = None,
     land_frac: jax.Array | None = None,
+    dT_dt_dyn: jax.Array | None = None,
+    dq_dt_dyn: jax.Array | None = None,
+    omega: jax.Array | None = None,
 ) -> tuple[ConvectionOutput, jax.Array, jax.Array]:
     """Bechtold/IFS convection (smooth, differentiable).
 
@@ -1826,6 +2015,17 @@ def bechtold_convection(
         stochastic draw (``PhysicsState.col_index``; a lat-band SPMD
         shard passes its own chunk).  ``None`` falls back to
         ``arange(ncol)`` — identical for any undecomposed caller.
+    dT_dt_dyn, dq_dt_dyn : jax.Array or None, shape (ncol, nlev)
+        DYNAMICS (advective) tendencies of T [K/s] and q_v [kg/kg/s] over
+        the current step — the oracle's ``PTENTA``/``PTENQA``.  A
+        process-split driver supplies ``(state_after_dyn -
+        state_before_dyn)/dt``; an SCM supplies its prescribed large-scale
+        advective forcing.  Consumed only by the ``use_ifs_cape_qadv``
+        RCAPQADV CAPE correction; ``None`` leaves that path inert.
+    omega : jax.Array or None, shape (ncol, nlev)
+        Pressure vertical velocity [Pa/s] (``PVERVEL``) for the RCAPQADV
+        resolved-ascent gate at ~500 hPa.  ``None`` disables only that
+        OR-branch (faithful where ``|omega| << 100 Pa/s``).
 
     Returns
     -------
@@ -1851,6 +2051,12 @@ def bechtold_convection(
             "use_ifs_snow_melt requires use_ifs_subcloud_evap=True (the "
             "snow partition/melt lives inside the sub-cloud precip march); "
             "enable both or neither."
+        )
+    if config.use_ifs_cape_qadv and not config.use_ifs_cape_closure:
+        raise ValueError(
+            "use_ifs_cape_qadv requires use_ifs_cape_closure=True (the "
+            "RCAPQADV advection correction modifies the IFS CAPE-closure "
+            "target); enable both or neither."
         )
     if config.use_ifs_capdcycl and not config.use_ifs_cape_closure:
         raise ValueError(
@@ -2306,9 +2512,12 @@ def bechtold_convection(
         # ZTAURES resolution factor (cumastrn.F90:762-768): static Python
         # float from config.dx_m (0 = legacy 1.0), multiplied pre-clamp
         # exactly like the oracle's ZTAU = depth/(2+w)*ZTAURES*RTAUA.
+        # _tau_pure (the un-scaled, un-clamped turnover time) is shared by
+        # the RCAPDCYCL land branch and the RCAPQADV ZDQCV scaling below.
+        _tau_pure = cloud_depth / (2.0 + w_mean)
+        _ztaures = _ifs_ztaures(config.dx_m)
         tau_conv = jnp.clip(
-            cloud_depth / (2.0 + w_mean) * _ifs_ztaures(config.dx_m),
-            _IFS_TAU_MIN, _IFS_TAU_MAX,
+            _tau_pure * _ztaures, _IFS_TAU_MIN, _IFS_TAU_MAX,
         )
     if config.use_ifs_cape_closure:
         # -- Full IFS deep CAPE closure ZMFUB1 = ZCAPE*ZMFUB/(ZHEAT*ZXTAU)
@@ -2340,7 +2549,7 @@ def bechtold_convection(
                 _r0_fg = jnp.sum(
                     dlt_profile * _mu_fg
                     * jnp.clip(plume.q_c_u, 0.0, None)
-                    / jnp.clip(rho, 0.01, None) * dp_full, axis=-1,
+                    / jnp.clip(rho, 0.01, None) * dp_full, axis=-1,  # coeff-ok: density safety floor
                 ) / constants.g
             M_d_fg, _, _, _ = _ifs_downdraft(
                 T, q_v, p_full, p_half, z, dp_full,
@@ -2406,8 +2615,7 @@ def bechtold_convection(
             # the resolution factor back out; the [720,10800] clamp at :827
             # applies only to the closure's ZXTAU) — passing the clamped,
             # ZTAURES-scaled tau_conv was wrong at the clamp bounds and
-            # whenever dx_m != 0 (codex R1 #2).
-            _tau_pure = cloud_depth / (2.0 + w_mean)
+            # whenever dx_m != 0 (codex R1 #2).  _tau_pure hoisted above.
             # Departure gate: the oracle tests PAPH(sfc)-PAPH(IDPL) with
             # IDPL the discrete CUBASEN departure level; our parcel departs
             # from p_parcel_source (the PBL-mean pressure under
@@ -2421,11 +2629,26 @@ def bechtold_convection(
                 _supply_virt, _tau_pure, _z_base, u, v, _base_w2, p_full,
                 land_frac, _gate_w,
             )
+        _qadv = None
+        if (config.use_ifs_cape_qadv and dT_dt_dyn is not None
+                and dq_dt_dyn is not None):
+            # RCAPQADV advection correction (cumastrn.F90:734-760, :801,
+            # :819-823): needs the dynamics T/q tendencies; omega feeds only
+            # the resolved-ascent OR-gate and may be None.  PGEOH(KCTOP)
+            # analog: g*z_lnb (the smooth cloud-top height).
+            _qadv = _ifs_cape_qadv_terms(
+                T, q_v, q_sat_env, z, p_full, dp_full,
+                dT_dt_dyn, dq_dt_dyn, omega,
+                z_lnb, _tau_pure, _ztaures, dt,
+                config.cape_qadv_weight,
+            )
         M_b_target = _ifs_cape_closure_target(
             T, q_v, z, p_full,
             plume.T_u, plume.q_u, plume.q_c_u, M_u_closure_fg, M_d_fg,
             in_cloud, tau_conv, M_b, cape_weight,
             zcapdcycl=_zdcy,
+            qadv=_qadv,
+            qadv_weight=config.cape_qadv_weight,
         )
         # The rescale divides by the flux the plume was ACTUALLY launched with
         # (M_b_launch), so M_u * mb_scale realizes the target profile; the
@@ -2616,7 +2839,24 @@ def bechtold_convection(
             dq_r_conv_dt * dp_full, axis=-1, keepdims=True,
         ) / constants.g                                      # [kg/m^2/s]
         # sink_k [kg/kg/s]: sum(sink*dp/g) == rain flux total exactly.
-        dq_v_dt = dq_v_dt - _rain_flux_total * constants.g * _w_sink / dp_full
+        _sink_rate = _rain_flux_total * constants.g * _w_sink / dp_full
+        dq_v_dt = dq_v_dt - _sink_rate
+        # ENERGY coupling for the same sink (sign convention: z up, latent
+        # release warms; budget in - out - storage = 0 on h = c_p*T + L_v*q_v):
+        # the vapor debited above CONDENSES into the rain, so each debited
+        # level gets the matching +L_v/c_p warming — the SAME per-level
+        # distribution, keeping the pairing local and h-exact.  Without this
+        # the rain left the column with its condensation enthalpy UNRELEASED:
+        # column h lost exactly L_v*(rain formed) (~1.4e2 W/m^2 on the tier-2
+        # destabilized column), and once sub-cloud evaporation returned the
+        # vapor (booking its cooling correctly) the column net-COOLED
+        # (-28 W/m^2) on a CAPE-positive sounding — convection running
+        # backwards; the tier-2 net-heats gate caught it.  (The plume's own
+        # kernel never condensed this water — the rain is synthesized at the
+        # environment level, so its latent heat must be synthesized with it;
+        # measured: this restores H + L_v*dq_v to the pre-inplume baseline
+        # exactly, no double-count with the kernel's detrainment heating.)
+        dT_dt = dT_dt + (constants.L_v / constants.c_pd) * _sink_rate
         _split_done = True
     elif config.use_ifs_subcloud_evap or config.use_ifs_downdraft:
         dq_c_conv_dt = jnp.nan_to_num(jnp.maximum(dq_c_conv_dt, 0.0))

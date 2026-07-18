@@ -270,8 +270,9 @@ def mcfarlane_gwd(
     else:
         h_topo_sq = jnp.clip(h_topo_col, 0.0, None) ** 2
 
-    # Source region (config.use_depth_averaged_source):
-    #   False (default): legacy bottom-midpoint source — surface rho/N/U and
+    # Source region (config.use_depth_averaged_source; True is the DEFAULT
+    # since 2026-07-17):
+    #   False (legacy opt-out): bottom-midpoint source — surface rho/N/U and
     #     wave direction from the bottom level; deposition allowed everywhere.
     #   True: E3SM gw_oro_src dp-weighted low-level averages over the levels
     #     the mountain penetrates (shared oro_source helper, gw_oro.F90:

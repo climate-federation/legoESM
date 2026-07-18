@@ -20,7 +20,9 @@ FAITHFUL (forms matched to the Thompson-2008 / M2005-lineage algorithm):
     D_cs³/6`` (removes D_cs-sized crystals, not the mean mass).
   * **Thompson-2008 snow** (``snow_scheme="thompson2008"``, in ``_thompson_snow.py``):
     Field-2005 bimodal-PSD moments → mass-weighted, density-corrected fall speed
-    and ventilated vapour deposition (PRDS). Pinned in ``test_thompson_snow.py``.
+    and ventilated vapour deposition (PRDS) with the oracle's T-ramped
+    capacitance ``C_sqrd=0.3 → C_cube=0.5`` (the former fixed 0.15 departure
+    closed 2026-07-17). Pinned in ``test_thompson_snow.py``.
   * **Cooper (1986) ice nucleation**: target number ``N_i0·exp(a·max(T_freeze−T,
     0))`` (exp-argument capped for fp overflow), min'd to ``N_i_nuc_max`` (SAM
     500 /L) and divided by ρ to per-mass; ``N_i`` relaxes toward it, ``f_ice``-gated.

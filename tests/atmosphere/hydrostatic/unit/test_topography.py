@@ -508,6 +508,113 @@ class TestLoadRealTopography(unittest.TestCase):
         self.assertEqual(phis.shape, (6, 8, 8))
 
 
+class TestDoubleGGuard(unittest.TestCase):
+    """T6: geopotential-vs-meters double-g trap.
+
+    An ERA5-style invariant file where 'z' is GEOPOTENTIAL [m**2 s**-2] used
+    to be treated as elevation [m] and multiplied by g again in
+    load_real_topography — phis silently inflated ~9.8x.  The loader must
+    reject implausible magnitudes (> _MAX_PLAUSIBLE_ELEV_M) and geopotential
+    units attributes.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.grid = create_cubed_sphere(8)
+
+    def _write(self, z, units=None, name="topo.nc"):
+        import xarray as xr
+        n_lat, n_lon = z.shape
+        lat = np.linspace(-89.5, 89.5, n_lat)
+        lon = np.linspace(0.5, 359.5, n_lon)
+        da = xr.DataArray(z, dims=("lat", "lon"),
+                          coords={"lat": lat, "lon": lon})
+        if units is not None:
+            da.attrs["units"] = units
+        path = str(Path(self.tmpdir) / name)
+        xr.Dataset({"z": da}).to_netcdf(path)
+        return path
+
+    def test_geopotential_magnitude_raises(self):
+        z = np.zeros((90, 180))
+        z[45, 90] = 5000.0 * constants.g   # ~49000 "m" — clearly geopotential
+        path = self._write(z)
+        with self.assertRaisesRegex(ValueError, "double-g"):
+            load_real_topography(
+                self.grid, config=TopographyConfig(source="file", path=path))
+
+    def test_geopotential_units_attr_raises(self):
+        # Magnitude alone is plausible, but the units attribute says m²/s².
+        z = np.zeros((90, 180))
+        z[45, 90] = 5000.0
+        path = self._write(z, units="m**2 s**-2")
+        with self.assertRaisesRegex(ValueError, "double-g"):
+            load_real_topography(
+                self.grid, config=TopographyConfig(source="file", path=path))
+
+    def test_normal_etopo_passes(self):
+        # Everest-scale peak + Mariana-scale trench are plausible elevation.
+        z = np.zeros((90, 180))
+        z[45, 90] = 8800.0
+        z[10, 10] = -10900.0
+        path = self._write(z, units="m")
+        phis, f_land = load_real_topography(
+            self.grid, config=TopographyConfig(source="file", path=path))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(phis))))
+        self.assertEqual(phis.shape, (6, 8, 8))
+
+
+class TestPoleRowRegrid(unittest.TestCase):
+    """L2: target cells poleward of the source grid's outermost latitude
+    CENTER used to get fill_value=0 (f_land=0 ocean / z_s=0 sea level) —
+    Antarctica misclassified as ocean at cubed-sphere/Gaussian points near
+    ±90.  The source latitude axis is now edge-replicated to exactly ±90."""
+
+    def test_regrid_pole_rows_edge_replicated(self):
+        lat_src = np.linspace(-89.5, 89.5, 180)   # 1-deg centers, not reaching ±90
+        lon_src = np.linspace(0.5, 359.5, 360)
+        elev = np.zeros((180, 360))
+        elev[0, :] = 2500.0    # Antarctica-like all-land poleward-most row
+        elev[-1, :] = 100.0    # a north-pole row too
+        target_lat = np.array([-90.0, -89.9, 90.0])
+        target_lon = np.array([10.0, 200.0, 350.0])
+        result = _regrid_to_target(lat_src, lon_src, elev,
+                                   target_lat, target_lon)
+        npt.assert_allclose(result[:2], 2500.0, rtol=1e-6)
+        npt.assert_allclose(result[2], 100.0, rtol=1e-6)
+
+    def test_land_fraction_file_pole_row_is_land(self):
+        import xarray as xr
+        from legoesm.grids.topography import _load_land_fraction_file
+        lat = np.linspace(-89.5, 89.5, 180)
+        lon = np.linspace(0.5, 359.5, 360)
+        sftlf = np.zeros((180, 360))
+        sftlf[lat <= -60.0, :] = 100.0     # Antarctica all-land (percent field)
+        tmpdir = tempfile.mkdtemp()
+        path = str(Path(tmpdir) / "sftlf.nc")
+        xr.Dataset({"sftlf": (("lat", "lon"), sftlf)},
+                   coords={"lat": lat, "lon": lon}).to_netcdf(path)
+        target_lat = np.array([-90.0, -89.8, 0.0])
+        target_lon = np.array([120.0, 300.0, 45.0])
+        f_land = _load_land_fraction_file(path, "", target_lat, target_lon)
+        npt.assert_allclose(f_land[:2], 1.0, atol=1e-6)   # NOT ocean
+        npt.assert_allclose(f_land[2], 0.0, atol=1e-6)    # equator still ocean
+
+    def test_derive_land_fraction_pole_row(self):
+        # Sub-grid sampling near the pole: with edge replication the
+        # in-sphere sub-samples poleward of the source edge see land, so
+        # f_land at the poleward-most target well exceeds the pre-fix value
+        # (0.5 here; samples beyond ±90 remain out-of-bounds ocean).
+        lat_src = np.linspace(-89.5, 89.5, 180)
+        lon_src = np.linspace(0.5, 359.5, 360)
+        elev = np.full((180, 360), -3000.0)
+        elev[lat_src <= -60.0, :] = 2500.0
+        f_land = _derive_land_fraction(
+            lat_src, lon_src, elev,
+            np.array([-89.5]), np.array([90.0]), 2.0)
+        self.assertGreater(float(f_land[0]), 0.7)
+
+
 class TestLoadGaussianGrid(unittest.TestCase):
     """Test loading topography onto Gaussian grid."""
 

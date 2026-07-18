@@ -5,7 +5,9 @@ Codex wave-4 P2: ``_resolve_gwd`` rebuilt ``GravityWaveDragConfig`` from the
 scheme STRING alone, silently discarding every nested option
 (``mcfarlane.use_e3sm_hdsp``, ``e3sm_cam.use_discrete_ke_heating``, tuned
 ``fcrit2``) — YAML/CLI users could never enable the faithfulness flags the
-GWD program ships default-OFF.
+GWD program shipped (default-OFF at first; the validated set defaults ON
+since the 2026-07-17 flip campaign — the override remains the route to
+NON-default choices such as use_e3sm_hdsp).
 """
 from __future__ import annotations
 

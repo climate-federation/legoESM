@@ -2796,7 +2796,7 @@ def test_bechtold_use_ifs_downdraft_round_trips_and_threads():
     assert _resolve_convection(cfg)[1].use_ifs_downdraft is True
     d = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--convection", "bechtold"]), parser))
-    assert d.bechtold_use_ifs_downdraft is False
+    assert d.bechtold_use_ifs_downdraft is True  # flipped 2026-07-17
     for flag in (True, False):
         e = ExperimentConfig(convection="bechtold",
                              bechtold_use_ifs_downdraft=flag)
@@ -2840,7 +2840,7 @@ def test_bechtold_capdcycl_and_land_rhebc_round_trip():
     d = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--convection", "bechtold"]), parser))
     dcc = _resolve_convection(d)[1]
-    assert dcc.use_ifs_capdcycl is False and dcc.use_ifs_land_rhebc is False
+    assert dcc.use_ifs_capdcycl is True and dcc.use_ifs_land_rhebc is True  # flipped 2026-07-17
     for flag in (True, False):
         e = ExperimentConfig(convection="bechtold",
                              bechtold_use_ifs_capdcycl=flag,
@@ -2861,9 +2861,78 @@ def test_bechtold_use_ifs_snow_melt_round_trip():
     assert _resolve_convection(cfg)[1].use_ifs_snow_melt is True
     d = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--convection", "bechtold"]), parser))
-    assert _resolve_convection(d)[1].use_ifs_snow_melt is False
+    assert _resolve_convection(d)[1].use_ifs_snow_melt is True  # flipped 2026-07-17
     for flag in (True, False):
         e = ExperimentConfig(convection="bechtold",
                              bechtold_use_ifs_snow_melt=flag)
         assert ExperimentConfig.from_amip_config(
             e.to_amip_config()).bechtold_use_ifs_snow_melt is flag
+
+
+def test_ml_parameterization_requires_checkpoint_and_stats():
+    """``--physics-parameterization ml`` without checkpoint+stats must fail at
+    parse time (the guard used to be dead code inside the --evaluate branch,
+    unreachable after its parser.error — audit 2026-07-17)."""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical",
+            "--physics-parameterization", "ml",
+            "--convection", "mass_flux", "--turbulence", "louis",
+        ]), parser)
+    # With both assets the guard passes.
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--physics-parameterization", "ml",
+        "--convection", "mass_flux", "--turbulence", "louis",
+        "--physics-parameterization-checkpoint", "/tmp/ckpt.eqx",
+        "--physics-parameterization-stats", "/tmp/stats.npz",
+    ]), parser)
+    assert args.physics_parameterization == "ml"
+
+
+def test_truncation_conflicting_grid_or_discretization_errors():
+    """--truncation with an explicitly conflicting --grid-type/--discretization
+    must be a hard error, not a silent switch to gaussian/spectral (the one
+    silent grid fallback in the driver — audit 2026-07-17). The argparse
+    defaults (cubed_sphere/centered) are still coerced."""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--truncation", "42",
+            "--grid-type", "latlon",
+        ]), parser)
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--truncation", "42",
+            "--discretization", "mpas",
+        ]), parser)
+    # Bare --truncation still auto-configures the spectral pair.
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--truncation", "42",
+    ]), parser)
+    assert args.grid_type == "gaussian"
+    assert args.discretization == "spectral"
+    assert args.resolution == 42
+    # Explicit-but-agreeing choices also pass.
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--truncation", "42",
+        "--grid-type", "gaussian", "--discretization", "spectral",
+    ]), parser)
+    assert args.grid_type == "gaussian"
+
+
+def test_explicit_zero_p_top_and_stretching_survive():
+    """An explicit ``--p-top 0``/``--stretching 0`` must reach GridConfig
+    instead of being swallowed by an ``or``-default (so validate_strict can
+    reject it loudly); the bare default still yields 200.0/2.0."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--p-top", "0", "--stretching", "0",
+    ]), parser))
+    assert cfg.grid.p_top_Pa == 0.0
+    assert cfg.grid.stretching == 0.0
+    cfg_def = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_def.grid.p_top_Pa == 200.0
+    assert cfg_def.grid.stretching == 2.0
