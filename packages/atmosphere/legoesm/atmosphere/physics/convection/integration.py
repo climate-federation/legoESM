@@ -108,24 +108,15 @@ def _get_convection_fn(config: ConvectionConfig):
     elif config.scheme == "tiedtke":
         return "tiedtke", tiedtke_convection, config.tiedtke
     elif config.scheme == "bechtold":
-        # Fail loudly on a silently-inert flag (dispatch-hardening): the
-        # RCAPQADV correction needs the DYNAMICS T/q tendencies
-        # (dT_dt_dyn/dq_dt_dyn = process-split PTENTA/PTENQA analogs), which
-        # neither this bridge nor the coupler physics pipeline supplies yet —
-        # with them absent the leaf is bit-identical legacy and the flag
-        # would be a no-op configuration.  Direct leaf callers (an SCM
-        # passing its prescribed large-scale advective forcing) bypass this
-        # factory and may enable it.
-        if getattr(config.bechtold, "use_ifs_cape_qadv", False):
-            raise ValueError(
-                "use_ifs_cape_qadv=True is not supported through the "
-                "convection bridge / physics pipeline yet: no caller "
-                "supplies the dynamics tendencies (dT_dt_dyn/dq_dt_dyn), so "
-                "the RCAPQADV correction would be silently inert.  Call "
-                "bechtold_convection directly with the tendencies (e.g. an "
-                "SCM's prescribed large-scale forcing), or keep the flag "
-                "False until the driver wiring lands."
-            )
+        # NOTE: the RCAPQADV correction (``use_ifs_cape_qadv``) needs the
+        # DYNAMICS T/q tendencies (``PhysicsState.dyn_tendency_T/qv``, the
+        # PTENTA/PTENQA analog).  The hydrostatic bridge threads them from
+        # phys_state and raises at TRACE time if the flag is on while they are
+        # absent (see ``_make_hydrostatic_convection``) — an inert flag can no
+        # longer slip through.  The build-time factory therefore does not
+        # reject the flag here (it cannot see the runtime phys_state).  The
+        # coupler physics pipeline, which still does not populate the
+        # dynamics-tendency carry, keeps its own trace-time reject.
         return "bechtold", bechtold_convection, config.bechtold
     elif config.scheme == "none":
         return "none", None, None
@@ -542,6 +533,40 @@ def _make_hydrostatic_convection(
                 else:
                     bechtold_key = None
                     master_key_new = None
+                # RCAPQADV dynamics-tendency inputs (PTENTA/PTENQA analog):
+                # read the process-split / SCM-forcing tendencies a driver
+                # stashed in PhysicsState before this call.  The leaf builds
+                # the ZCAPE2/ZDQCV correction ONLY when both are present; with
+                # the flag on but the carry absent it would be silently inert,
+                # so guard at TRACE time on the STATIC config value (mirrors
+                # the coupler pipeline's guard; ``use_ifs_cape_qadv`` is a
+                # Python bool on scheme_config, not a traced array).
+                _dyn_T = (getattr(phys_state, "dyn_tendency_T", None)
+                          if phys_state is not None else None)
+                _dyn_qv = (getattr(phys_state, "dyn_tendency_qv", None)
+                           if phys_state is not None else None)
+                if getattr(scheme_config, "use_ifs_cape_qadv", False) and (
+                    _dyn_T is None or _dyn_qv is None
+                ):
+                    raise ValueError(
+                        "use_ifs_cape_qadv=True but PhysicsState carries no "
+                        "dyn_tendency_T/dyn_tendency_qv: the RCAPQADV CAPE "
+                        "correction has no dynamics tendencies to use and "
+                        "would be silently inert.  Populate the dynamics "
+                        "tendencies before the convection call, together with "
+                        "the POST-dynamics state (the leaf forms its reference "
+                        "environment as state - dyn_tendency*dt)"
+                        ", or keep the flag False."
+                    )
+                # Reshape a supplied (ncol, nlev) carry to the leaf's column
+                # layout; None passes through (leaf leaves qadv inert).  omega
+                # is not carried (SCM/process-split have no resolved 500 hPa
+                # vertical velocity) — the leaf's resolved-ascent OR-gate is
+                # then off, faithful where |omega| << 100 Pa/s.
+                _dyn_T_col = (None if _dyn_T is None
+                              else _dyn_T.reshape(ncol, nlev))
+                _dyn_qv_col = (None if _dyn_qv is None
+                               else _dyn_qv.reshape(ncol, nlev))
                 conv_out, prog_new_profile, stoch_new = conv_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
@@ -551,6 +576,8 @@ def _make_hydrostatic_convection(
                     prng_key=bechtold_key,
                     dt=dt, config=scheme_config,
                     moisture_convergence=mc_col,
+                    dT_dt_dyn=_dyn_T_col,
+                    dq_dt_dyn=_dyn_qv_col,
                     # GLOBAL column ids for the decomposition-invariant
                     # per-column draw (a lat-band SPMD shard's carry chunk
                     # holds its own global ids); None => leaf arange.
@@ -948,6 +975,40 @@ def _make_nonhydrostatic_convection(
                 else:
                     bechtold_key = None
                     master_key_new = None
+                # RCAPQADV dynamics-tendency inputs (PTENTA/PTENQA analog):
+                # read the process-split / SCM-forcing tendencies a driver
+                # stashed in PhysicsState before this call.  The leaf builds
+                # the ZCAPE2/ZDQCV correction ONLY when both are present; with
+                # the flag on but the carry absent it would be silently inert,
+                # so guard at TRACE time on the STATIC config value (mirrors
+                # the coupler pipeline's guard; ``use_ifs_cape_qadv`` is a
+                # Python bool on scheme_config, not a traced array).
+                _dyn_T = (getattr(phys_state, "dyn_tendency_T", None)
+                          if phys_state is not None else None)
+                _dyn_qv = (getattr(phys_state, "dyn_tendency_qv", None)
+                           if phys_state is not None else None)
+                if getattr(scheme_config, "use_ifs_cape_qadv", False) and (
+                    _dyn_T is None or _dyn_qv is None
+                ):
+                    raise ValueError(
+                        "use_ifs_cape_qadv=True but PhysicsState carries no "
+                        "dyn_tendency_T/dyn_tendency_qv: the RCAPQADV CAPE "
+                        "correction has no dynamics tendencies to use and "
+                        "would be silently inert.  Populate the dynamics "
+                        "tendencies before the convection call, together with "
+                        "the POST-dynamics state (the leaf forms its reference "
+                        "environment as state - dyn_tendency*dt)"
+                        ", or keep the flag False."
+                    )
+                # Reshape a supplied (ncol, nlev) carry to the leaf's column
+                # layout; None passes through (leaf leaves qadv inert).  omega
+                # is not carried (SCM/process-split have no resolved 500 hPa
+                # vertical velocity) — the leaf's resolved-ascent OR-gate is
+                # then off, faithful where |omega| << 100 Pa/s.
+                _dyn_T_col = (None if _dyn_T is None
+                              else _dyn_T.reshape(ncol, nlev))
+                _dyn_qv_col = (None if _dyn_qv is None
+                               else _dyn_qv.reshape(ncol, nlev))
                 conv_out, prog_new_profile, stoch_new = conv_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
@@ -957,6 +1018,8 @@ def _make_nonhydrostatic_convection(
                     prng_key=bechtold_key,
                     dt=dt, config=scheme_config,
                     moisture_convergence=mc_col,
+                    dT_dt_dyn=_dyn_T_col,
+                    dq_dt_dyn=_dyn_qv_col,
                     # GLOBAL column ids for the decomposition-invariant
                     # per-column draw (a lat-band SPMD shard's carry chunk
                     # holds its own global ids); None => leaf arange.
@@ -1311,6 +1374,40 @@ def _make_spectral_pe_convection(
                 else:
                     bechtold_key = None
                     master_key_new = None
+                # RCAPQADV dynamics-tendency inputs (PTENTA/PTENQA analog):
+                # read the process-split / SCM-forcing tendencies a driver
+                # stashed in PhysicsState before this call.  The leaf builds
+                # the ZCAPE2/ZDQCV correction ONLY when both are present; with
+                # the flag on but the carry absent it would be silently inert,
+                # so guard at TRACE time on the STATIC config value (mirrors
+                # the coupler pipeline's guard; ``use_ifs_cape_qadv`` is a
+                # Python bool on scheme_config, not a traced array).
+                _dyn_T = (getattr(phys_state, "dyn_tendency_T", None)
+                          if phys_state is not None else None)
+                _dyn_qv = (getattr(phys_state, "dyn_tendency_qv", None)
+                           if phys_state is not None else None)
+                if getattr(scheme_config, "use_ifs_cape_qadv", False) and (
+                    _dyn_T is None or _dyn_qv is None
+                ):
+                    raise ValueError(
+                        "use_ifs_cape_qadv=True but PhysicsState carries no "
+                        "dyn_tendency_T/dyn_tendency_qv: the RCAPQADV CAPE "
+                        "correction has no dynamics tendencies to use and "
+                        "would be silently inert.  Populate the dynamics "
+                        "tendencies before the convection call, together with "
+                        "the POST-dynamics state (the leaf forms its reference "
+                        "environment as state - dyn_tendency*dt)"
+                        ", or keep the flag False."
+                    )
+                # Reshape a supplied (ncol, nlev) carry to the leaf's column
+                # layout; None passes through (leaf leaves qadv inert).  omega
+                # is not carried (SCM/process-split have no resolved 500 hPa
+                # vertical velocity) — the leaf's resolved-ascent OR-gate is
+                # then off, faithful where |omega| << 100 Pa/s.
+                _dyn_T_col = (None if _dyn_T is None
+                              else _dyn_T.reshape(ncol, nlev))
+                _dyn_qv_col = (None if _dyn_qv is None
+                               else _dyn_qv.reshape(ncol, nlev))
                 conv_out, prog_new_profile, stoch_new = conv_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
@@ -1320,6 +1417,8 @@ def _make_spectral_pe_convection(
                     prng_key=bechtold_key,
                     dt=dt, config=scheme_config,
                     moisture_convergence=mc_col,
+                    dT_dt_dyn=_dyn_T_col,
+                    dq_dt_dyn=_dyn_qv_col,
                     # GLOBAL column ids for the decomposition-invariant
                     # per-column draw (a lat-band SPMD shard's carry chunk
                     # holds its own global ids); None => leaf arange.

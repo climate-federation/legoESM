@@ -3854,9 +3854,21 @@ class ModelDriver:
                 # spectrum gathers through a (nCells, az*wn) reshape.
                 ps_d_carry = None
                 if _ps_carry is not None:
+                    from legoesm.atmosphere.physics.physics_state import (
+                        PHYSSTATE_INPUT_FIELDS,
+                    )
                     ps_d_carry = {}
                     for _name in _ps_carry._fields:
                         _val = getattr(_ps_carry, _name)
+                        # Per-step INPUT fields (dyn_tendency_*) are never
+                        # persisted: they are recomputed by the driver each
+                        # step, so a checkpointed value would be stale, and a
+                        # None value would emit an unloadable object array
+                        # (allow_pickle=False).  Skip by NAME so BOTH None and
+                        # a concrete-array carry are excluded (load re-seeds
+                        # them None).
+                        if _name in PHYSSTATE_INPUT_FIELDS:
+                            continue
                         if _name == "prng_key":
                             ps_d_carry[_name] = _val
                         elif _val.ndim == 3:
@@ -3891,7 +3903,17 @@ class ModelDriver:
             # the profile-prognostic schemes share the carry shape, so
             # shape checks alone cannot catch a cross-scheme restore).
             if ps_d_carry is not None:
+                from legoesm.atmosphere.physics.physics_state import (
+                    PHYSSTATE_INPUT_FIELDS,
+                )
                 for _name, _val in ps_d_carry.items():
+                    # Never persist per-step INPUT fields (the serial
+                    # ``_asdict`` path includes them; the MPI-gather path
+                    # already dropped them).  Skip by NAME so a concrete-array
+                    # carry is excluded too, not only None (``np.asarray(None)``
+                    # is an unloadable object array under allow_pickle=False).
+                    if _name in PHYSSTATE_INPUT_FIELDS:
+                        continue
                     _save[f"physstate_{_name}"] = np.asarray(_val)
                 _save["physstate_meta_conv_scheme"] = np.asarray(
                     str(getattr(self.config, "convection", "none")))
@@ -5599,15 +5621,22 @@ class ModelDriver:
             # carry and must fail loudly (issue #405/#413).
             _NEW_OPTIONAL_PS_FIELDS = frozenset({"aerosol_number"})
             if _any_physstate:
+                from legoesm.atmosphere.physics.physics_state import (
+                    PHYSSTATE_INPUT_FIELDS,
+                )
                 # ``col_index`` is exempt from the completeness contract:
                 # it is CONSTANT derivable identity data (arange(ncol),
                 # never evolved), added 2026-07 — checkpoints written
                 # before then legitimately lack it, and the fresh seed's
                 # arange is byte-identical to what the save would have
-                # stored.  Every EVOLVING field stays mandatory.
+                # stored.  The ``PHYSSTATE_INPUT_FIELDS`` (dyn_tendency_*) are
+                # likewise exempt: per-step driver INPUTS, never persisted
+                # (the save skips their None), re-seeded fresh.  Every
+                # EVOLVING field stays mandatory.
+                _exempt_ps = {"col_index"} | PHYSSTATE_INPUT_FIELDS
                 _missing = [f for f in _phys_state._fields
                             if f not in _present_fields
-                            and f != "col_index"]
+                            and f not in _exempt_ps]
                 _new_missing = [f for f in _missing
                                 if f in _NEW_OPTIONAL_PS_FIELDS]
                 _missing = [f for f in _missing
@@ -5632,12 +5661,22 @@ class ModelDriver:
                         "physstate_* entries (fields AND meta) to opt into "
                         "a fresh seed."
                     )
+            from legoesm.atmosphere.physics.physics_state import (
+                PHYSSTATE_INPUT_FIELDS,
+            )
             _restored_ps = {}
             for _k, _v in self._carry_aux.items():
                 if not _k.startswith("physstate_"):
                     continue
                 _name = _k[len("physstate_"):]
                 if _name not in _phys_state._fields:
+                    continue
+                # Per-step INPUT fields are never restored: their fresh seed is
+                # None (no ``.shape``/``.dtype``), and a checkpoint that
+                # nonetheless carries one (written by an older build, or hand
+                # edited) must be dropped BEFORE the shape/dtype validation
+                # below — a driver recomputes them each step.
+                if _name in PHYSSTATE_INPUT_FIELDS:
                     continue
                 _seed_field = getattr(_phys_state, _name)
                 _val = jnp.asarray(_v)
