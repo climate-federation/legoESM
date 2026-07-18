@@ -454,6 +454,14 @@ class DINOConfig:
     # Kallberg instability over stratified bathymetry; legoESM #263).
     # Matches NEMO's nn_dynkeg=1 default.
     ke_gradient_scheme: str = "hollingsworth"
+    # Lateral momentum viscosity OPERATOR (node 14). "vector_laplacian" (default)
+    # applies a single A_h·cos(φ) scalar OUTSIDE the vector Laplacian;
+    # "nemo_div_curl" embeds NEMO's ahmt(T)/ahmf(F) = ½·rn_Uv·MAX(e1,e2)
+    # coefficient INSIDE the div/curl (NEMO dyn_ldf_lev_lap). On the DINO
+    # Mercator grid (e1≈e2) the magnitude matches A_h·cos(φ) to O(Δλ²) (~2e-5
+    # worst-case, machine-level only at the equator); the difference is the
+    # coefficient-gradient placement cross-terms.
+    lateral_viscosity_operator: str = "vector_laplacian"
     # hi_precision_pressure is intentionally NOT a DINOConfig field —
     # the lat-lon dycore already pins it True at ocean_pe_latlon_cgrid.py
     # so a field on this config would never be read.
@@ -694,7 +702,10 @@ DINO_RECIPES: dict[str, dict] = {
         "redi_S_max": 0.01,                      # rn_slpmax (namtra_ldf ref default)
         # -- Momentum (namdyn_adv: ln_dynadv_vec + nn_dynkeg=1; namdyn_vor: ln_dynvor_een) --
         "ke_gradient_scheme": "hollingsworth",
-        # -- Lateral momentum viscosity (namdyn_ldf: nn_ahm_ijk_t=20, rn_Uv=0.27; NO boost/floor) --
+        # -- Lateral momentum viscosity (namdyn_ldf: ln_dynldf_lap, nn_ahm_ijk_t=20,
+        #    rn_Uv=0.27; NO boost/floor). Node 14: NEMO dyn_ldf_lev_lap embeds
+        #    ahmt(T)/ahmf(F)=½·rn_Uv·MAX(e1,e2) inside div/curl. --
+        "lateral_viscosity_operator": "nemo_div_curl",
         "A_h_eq_boost": 1.0,
         "A_h_floor": 0.0,
         # -- Barotropic / free surface (namdyn_spg: ln_dynspg_ts=T; nn_bt_flt=2; nn_e=30) --
@@ -2112,6 +2123,11 @@ def dino_lat_lon_model_config(
         rho_0=cfg.rho_0,
         A_h=A_h_base,
         A_h_lat_scaling=True,         # cos(lat) per-row scaling — Phase 1B
+        # Node 14: "nemo_div_curl" embeds ahmt/ahmf=½·rn_Uv·MAX(e1,e2) inside the
+        # div/curl (ignores A_h_lat_scaling / eq-boost / floor, which stay OFF on
+        # the faithful NEMO cards). Default "vector_laplacian" keeps the A_h·cos(φ)
+        # scalar path byte-identical for every other recipe.
+        lateral_viscosity_operator=cfg.lateral_viscosity_operator,
         K_h=(0.0 if cfg.lateral_tracer_mixing == "isoneutral"
              else K_h_base),   # iso-neutral replaces iso-level diffusion
         A_v=cfg.A_v_bg_effective,   # TKE: 4× floor at the SW-corner stabilizer

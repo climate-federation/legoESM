@@ -1234,6 +1234,165 @@ def vector_bilaplacian_cgrid(
     return bilap_u, bilap_v
 
 
+def nemo_lateral_viscosity_coefficients(
+    grid: LatLonGrid, half_UM: float,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    r"""NEMO ``ldf_c2d`` viscosity coefficients ``ahmt``/``ahmf`` (nn_ahm_ijk_t=20).
+
+    Faithful transcription of NEMO 5.0.2 ``ldf_c2d`` (``src/OCE/LDF/ldfc1d_c2d.F90``
+    L138-139) for the laplacian ``nn_ahm_ijk_t=20`` case (``ldf_dyn_init``
+    ``zUfac = ½·rn_Uv``, ``inn=1``)::
+
+        ahmt(T) = ½·rn_Uv · MAX(e1t, e2t)
+        ahmf(F) = ½·rn_Uv · MAX(e1f, e2f)
+
+    with ``rn_Uv`` the lateral viscous velocity [m/s] and ``e1``/``e2`` the zonal /
+    meridional grid scales.  ``half_UM = ½·rn_Uv``.  Unlike a single
+    ``A_h·cos(φ)^p`` scalar applied OUTSIDE the vector Laplacian, this coefficient
+    is defined at the T- and F-points so it can be embedded INSIDE the div/curl
+    (see :func:`nemo_ldf_lap_viscosity_cgrid`), matching NEMO's
+    ``grad(ahmt·div) − curl(ahmf·curl)``.
+
+    On a uniform-Δφ lat-lon grid ``e2 = R·Δφ`` is latitude-independent, so
+    ``MAX(e1,e2) = e2`` at high latitude and ``ahmt`` does NOT shrink with cos(φ)
+    (unlike ``A_h·cos φ``).  On a conformal Mercator grid ``e1 ≈ e2`` at every row
+    (isotropic cells in the continuum), so ``MAX(e1,e2) ≈ e1 = R·Δλ·cos φ`` and the
+    two forms agree in magnitude to ``O(Δλ²)`` — the placement (embedded vs outside)
+    is then the dominant difference.  NB the DISCRETE metrics differ slightly:
+    ``e2t = R·(φ_face[j+1]−φ_face[j])`` (a face difference) vs
+    ``e1t = R·Δλ·cos φ_c`` (a centre cosine), so ``MAX`` picks ``e2`` on a fair
+    fraction of rows and the agreement is ``~2e-5`` worst-case on the DINO grid
+    (machine-level only exactly at the equator), not machine-zero everywhere.
+
+    Parameters
+    ----------
+    grid : LatLonGrid or LatLonCGridGeometry
+        Must expose the C-grid metric fields ``dx_u``/``dy_u`` (e1u/e2u at the
+        u-face = cell-centre latitude → e1t/e2t) and ``dx_v``/``dy_v`` (e1v/e2v at
+        the v-face latitude → e1f/e2f).
+    half_UM : float
+        ``½·rn_Uv`` [m/s].
+
+    Returns
+    -------
+    ahmt : (n_lat,)      viscosity at T-points [m²/s].
+    ahmf : (n_lat+1,)    viscosity at F-points [m²/s].
+    """
+    if not (hasattr(grid, "dx_u") and hasattr(grid, "dy_u")
+            and hasattr(grid, "dx_v") and hasattr(grid, "dy_v")):
+        raise ValueError(
+            "nemo_lateral_viscosity_coefficients requires a LatLonCGridGeometry "
+            "with dx_u/dy_u/dx_v/dy_v metric fields (call ensure_geometry first)."
+        )
+    # e1t/e2t at the u-face (cell-centre) latitude; e1f/e2f at the v-face latitude.
+    # dx_* / dy_* are lon-uniform on a (non-tripolar) lat-lon grid, so column 0
+    # carries the full latitudinal metric.
+    e1t = grid.dx_u[:, 0]
+    e2t = grid.dy_u[:, 0]
+    e1f = grid.dx_v[:, 0]
+    e2f = grid.dy_v[:, 0]
+    ahmt = half_UM * jnp.maximum(e1t, e2t)
+    ahmf = half_UM * jnp.maximum(e1f, e2f)
+    return ahmt, ahmf
+
+
+def nemo_ldf_lap_viscosity_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: LatLonGrid,
+    ahmt: jnp.ndarray,
+    ahmf: jnp.ndarray,
+    *,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+    vertex_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    r"""NEMO ``dyn_ldf_lev_lap`` Laplacian viscosity with the coefficient EMBEDDED
+    inside the div/curl (``grad_h(ahmt·div_h U) − curl_h(ahmf·curl_z U)``).
+
+    Faithful transcription of NEMO 5.0.2 ``dynldf_lev.F90::dynldf_lev_lap`` +
+    ``dynldf_lev_rot_scheme.h90`` (the ``np_typ_rot`` vorticity-divergence
+    operator).  NEMO forms::
+
+        zdiv(T) = ahmt · div_h(U)                      (coeff on the T-point divergence)
+        zcur(F) = ahmf · curl_z(U)                     (coeff on the F-point vorticity)
+        pu += + ∂_x(zdiv) − ∂_y(zcur)/…               (grad of div  −  curl of curl)
+        pv += + ∂_y(zdiv) + ∂_x(zcur)/…
+
+    i.e. ``grad(ahmt·div) − k×grad(ahmf·curl)``.  This DIFFERS from applying a
+    single latitude scalar OUTSIDE the whole vector Laplacian
+    (``A_h(φ)·[grad(div) − k×grad(curl)]``) by the coefficient-gradient cross terms
+    ``∇(ahmt)·div`` and ``∇(ahmf)×curl`` — the node-14 placement fix.
+
+    Reuses the SAME shared C-grid operators (``divergence_cgrid``,
+    ``gradient_x/y_cgrid``, ``curl_vertex_cgrid``, ``gradient_curl_to_u/v``) and the
+    SAME face/vertex masking as :func:`vector_laplacian_cgrid`, so with a CONSTANT
+    ``ahmt = ahmf = A_h`` this returns exactly ``A_h · vector_laplacian_cgrid`` (a
+    truth-tier reduction test).  The coefficient is already embedded, so the caller
+    adds the returned tendency directly (NEMO's ``+`` sign; no outer ``A_h``).
+
+    NOTE (documented deviation, consistent with :func:`vector_laplacian_cgrid`):
+    NEMO weights the div/curl by the layer thickness ``e3`` (``e3t``/``e3f``); the
+    shared 2-D ``divergence_cgrid``/``curl_vertex_cgrid`` used here do not.  This is
+    the SAME thickness treatment the verified legoESM vector Laplacian uses (DINO
+    wiring node 14: div-curl structure + magnitude already certified), so the ONLY
+    change vs the current path is the embedded latitude-varying coefficient.
+
+    Parameters
+    ----------
+    u, v : face velocities (2-D or 3-D).
+    grid : LatLonGrid.
+    ahmt : (n_lat,)    T-point viscosity coefficient [m²/s].
+    ahmf : (n_lat+1,)  F-point viscosity coefficient [m²/s].
+    mask, u_mask, v_mask, vertex_mask : the usual C-grid masks.
+
+    Returns
+    -------
+    visc_u, visc_v : the viscous momentum tendency (coefficient embedded).
+    """
+    is_3d = u.ndim == 3
+
+    def _bm(m):
+        # broadcast a 2-D face/cell/vertex mask over the trailing level axis
+        return m[..., jnp.newaxis] if is_3d else m
+
+    def _bc(c):
+        # broadcast a (n_lat,) or (n_lat+1,) latitude coefficient over lon [, lev]
+        return c[:, None, None] if is_3d else c[:, None]
+
+    u_eff = u if u_mask is None else u * _bm(u_mask)
+    v_eff = v if v_mask is None else v * _bm(v_mask)
+
+    # 1. Divergence at T-points, scale by ahmt (NEMO zdiv = ahmt·div)
+    div = divergence_cgrid(u_eff, v_eff, grid)
+    if mask is not None:
+        div = div * _bm(mask)
+    div_scaled = div * _bc(ahmt)
+    grad_div_u = gradient_x_cgrid(div_scaled, grid)
+    grad_div_v = gradient_y_cgrid(div_scaled, grid)
+
+    # 2. Relative vorticity at F-points (vertices), scale by ahmf (NEMO zcur = ahmf·curl)
+    zeta = curl_vertex_cgrid(u_eff, v_eff, grid)          # (n_lat+1, n_lon+1[, nlev])
+    if mask is not None:
+        vmask = (vertex_mask if vertex_mask is not None
+                 else compute_vertex_mask(mask, grid=grid))
+        zeta = zeta * _bm(vmask)
+    zeta_scaled = zeta * _bc(ahmf)
+    grad_curl_u = gradient_curl_to_u(zeta_scaled, grid)
+    grad_curl_v = gradient_curl_to_v(zeta_scaled, grid)
+
+    # 3. grad(ahmt·div) − k×grad(ahmf·curl); same signs as vector_laplacian_cgrid.
+    visc_u = grad_div_u - grad_curl_u
+    visc_v = grad_div_v + grad_curl_v
+
+    if u_mask is not None:
+        visc_u = visc_u * _bm(u_mask)
+    if v_mask is not None:
+        visc_v = visc_v * _bm(v_mask)
+    return visc_u, visc_v
+
+
 def flux_divergence_bilaplacian_cgrid(
     u: jnp.ndarray,
     v: jnp.ndarray,

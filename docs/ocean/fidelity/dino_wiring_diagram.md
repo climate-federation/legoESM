@@ -35,8 +35,8 @@ into `uu(:,:,:,Nrhs)` / `ts(:,:,:,Nrhs)`.
 | 11 | `eos(Nnn,rhd,rhop)` | `ln_seos` | in-situ density for HPG | `compute_ocean_rho` | ⚠️ S-EOS config match |
 | 12 | **`dyn_adv`** | `ln_dynadv_vec`,`nn_dynkeg=1` | vector-form KE-grad (Hollingsworth) ⇒ RHS | `ke_gradient_scheme="hollingsworth"` | ✅ stencil verified identical `(8·main+cross²)/48` |
 | 13 | **`dyn_vor`** | `ln_dynvor_een`,`nn_e3f_typ=1` | **EEN (f+ζ)/e3f 12-pt triad** ⇒ RHS | `vorticity_scheme="al81"` (ζ only) + `matsuno_split` (f, 4-pt avg) | ❌ **MISMATCH**: NEMO combines f+ζ in one enstrophy-conserving triad; legoESM splits (al81 ζ + separate 4-pt-avg f) |
-| 14 | **`dyn_ldf`** | `ln_dynldf_lap`,`nn_ahm_ijk_t=20`,`rn_Uv=0.27` | Laplacian visc `∂ᵢ(ahmt·χ)−∂ⱼ(ahmf·ζ)`, ahmt(T)/ahmf(F)=½Uv·max(e1,e2) EMBEDDED inside div/curl | `A_h_base·cos(φ)` applied OUTSIDE the `grad(div)−grad(curl)` vector-Laplacian | ⚠️ PARTIAL: div-curl STRUCTURE ✅ + magnitude ✅; coeff placement differs (embedded vs outside) — negligible at low-lat (cos≈1, the jet region), 10-20% at \|lat\|>60°. NOT a jet driver |
-| 15 | **`dyn_hpg`** | `ln_hpg_sco` | s-coord Jacobian HPG (slope term ≡0 for full-step z) | `pgf_scheme="adcroft"` | ✅ balanced at rest (uniform-ρ test = 0.0) |
+| 14 | **`dyn_ldf`** | `ln_dynldf_lap`,`nn_ahm_ijk_t=20`,`rn_Uv=0.27` | Laplacian visc `∂ᵢ(ahmt·χ)−∂ⱼ(ahmf·ζ)`, ahmt(T)/ahmf(F)=½Uv·max(e1,e2) EMBEDDED inside div/curl | `A_h_base·cos(φ)` OUTSIDE the vector-Laplacian (default) OR `nemo_div_curl` embedded (`nemo_dino_kamm`) | ✅ **BUILT faithfully (Round-9)**: `nemo_ldf_lap_viscosity_cgrid` embeds ahmt/ahmf=½·rn_Uv·MAX(e1,e2) inside div/curl (`lateral_viscosity_operator="nemo_div_curl"`; reduces to `A_h·vector_laplacian` for const coeff, `test_nemo_ldf_lap_viscosity.py`). DINO grid is TRUE MERCATOR (e1≈e2) ⇒ MAX(e1,e2)≈e1=R·Δλ·cosφ, magnitude-identical to `A_h·cosφ` to O(Δλ²) (~2e-5 worst-case, machine-level at eq); only PLACEMENT differs. 180d FE-full-step A/B climate-inert (BSF 0.81× both). NOT the {full-step+MLF} stabiliser (Round-8 "3×" was a Mercator misread) |
+| 15 | **`dyn_hpg`** | `ln_hpg_sco` | s-coord Jacobian HPG (slope term ≡0 for full-step z) | `pgf_scheme="adcroft"` | ✅ balanced at rest (uniform-ρ test = 0.0); **Round-9 full-step audit: adcroft ≡ hpg_zco** — DINO `ln_hpg_sco` reduces to `hpg_zco` for flat full-step levels (no partial/staircase correction); legoESM adcroft correction is ~6e-8 (float noise) on WET faces and large only on dry wet/dry step faces, which `u_mask_3d=0` zeroes exactly as NEMO's umask ⇒ NO dynamic staircase HPG force NEMO lacks. Unchanged. |
 | 16 | **`dyn_spg`** | `ln_dynspg_ts`,`ln_bt_fw=F`,`nn_bt_flt=2`,`ln_bt_auto`,`rn_bt_cmax=0.8` | **split-explicit barotropic loop: `dyn_cor_2D` in-substep Coriolis = EEN `zu_trd=+Σ ffu_{nw,ne,sw,se}·V`, coeffs = 1/12-weighted sums of THREE `ff_f/e3f_vor` per quadrant (enstrophy-conserving, NO null mode); gH∇η; nn_bt_flt=2 boxcar; auto nn_e=CEIL(Δt/rn_bt_cmax·zcmax)** | `barotropic_solver="explicit_substep"` + in-substep `0.25(V[i]+V[i+1]+V_west[i]+V_west[i+1])` | ⚠️ **FIXED (discretization matched) but NOT the jet driver**: EEN barotropic Coriolis ported — `barotropic_coriolis="een"` (default `"avg"`=legacy 4-pt avg, bit-identical) reuses the verified lego-convention AL81 12-point triad (`pv_flux_al81_partial_cell`, ζ=0, `f_vtx`) depth-integrated with NEMO's `e3u·e3v` weighting (`een_barotropic_coriolis` in `barotropic_latlon_cgrid.py`). Wired into `nemo_dino_kamm` (`ln_dynvor_een`). VERIFIED in isolation: null-mode RESTORED (checkerboard cor_u 0.036 ≈ smooth 0.037; avg gives 2.6e-7), flat-limit→f·V (0.99995), energy ~no-work (rel ~4e-4, coastal-Neumann-limited). **BUT the controlled 30-day `nemo_dino_kamm` probe (avg vs een, identical protocol) shows the deep-eq KE@900m grows IDENTICALLY: day30 mean 8.20e-3/8.24e-3, max 5.41e-1/5.42e-1 — the barotropic Coriolis null mode is NOT excited in this run, so node 16 is NOT the jet driver.** Redirect: the deep-eq jet must come from the baroclinic vorticity/Coriolis (node 13) or vertical/time integration, NOT the barotropic split. Ref `tests/ocean/unit/test_barotropic_coriolis_null_mode.py::test_een_*`. |
 | 17 | `div_hor`+`dom_qco_r3c` | free surf | post-spg divergence + z* ratios | continuity | ❓ UNTRACED |
 | 18 | **`dyn_zdf`** | implicit | vertical momentum diffusion (avm) + **bottom drag (implicit)** | implicit vertical mixing + `nemo_quadratic` (explicit) | ⚠️ drag coeff ✅; NEMO implicit vs legoESM explicit application |
@@ -515,3 +515,79 @@ stabiliser added; no production code changed this iteration (diagnosis + this re
 Next faithful step: implement node 14 (`ahmf/ahmt = ½·rn_Uv·max(e1,e2)` embedded in the
 div/curl, replacing `A_h·cosφ`) and re-test; if still marginal, audit the leapfrog handling of
 the high-lat inertia-gravity mode vs NEMO stpmlf at the staircase steps.
+
+---
+
+## Round-9 (2026-07-18) — node 14 BUILT faithfully; BOTH Round-8 "levers" are NON-levers (controlled)
+
+Round-8 named two faithful levers to close {full-step + MLF} stability: (A) node 14 —
+NEMO's high-lat viscosity "~3× legoESM's"; (B) the adcroft PGF "over-producing" the
+staircase HPG error. This iteration BUILT node 14 faithfully and AUDITED the PGF, and
+**controlled tests disprove BOTH premises** — neither is the lever, and {full-step+MLF}
+remains blocked by the Round-8 mechanism (neutral-leapfrog/explicit-Coriolis damping deficit).
+
+**Node 14 — BUILT faithfully (embedded div-curl, `nemo_div_curl`).** New operator
+`nemo_ldf_lap_viscosity_cgrid` + coeff `nemo_lateral_viscosity_coefficients`
+(`latlon_cgrid_operators.py`) = faithful NEMO `dynldf_lev.F90::dynldf_lev_lap` +
+`dynldf_lev_rot_scheme.h90`: `grad_h(ahmt·div_h U) − curl_h(ahmf·curl_z U)` with
+`ahmt(T)=½·rn_Uv·MAX(e1t,e2t)`, `ahmf(F)=½·rn_Uv·MAX(e1f,e2f)` (`ldfc1d_c2d.F90::ldf_c2d`
+L138-139, nn_ahm_ijk_t=20) EMBEDDED inside the div/curl. New
+`lateral_viscosity_operator="nemo_div_curl"` (default `"vector_laplacian"` byte-identical);
+`nemo_dino_kamm`/`_mlf` opt in. Reduces EXACTLY to `A_h·vector_laplacian_cgrid` for constant
+coeff (truth-tier test `tests/ocean/unit/test_nemo_ldf_lap_viscosity.py`).
+
+**The Round-8 "NEMO high-lat viscosity ~3×" premise is FALSE — a Mercator-grid confusion.**
+Read the NEMO DINO `mesh_mask.nc`: the grid is TRUE MERCATOR, `e1≈e2` (isotropic) at EVERY
+latitude (e2f/e1f = 1.0000 at 0/40/68°). So `MAX(e1,e2)≈e1=R·Δλ·cosφ` DOES shrink with
+cosφ (111→41.5 km at 68°), and NEMO's `ahmt=½·rn_Uv·MAX(e1,e2)` matches legoESM's `A_h·cosφ`
+to **O(Δλ²)** (machine-level at the equator = 15011.85 m²/s; ~2e-5 worst-case at ±69°, where
+the DISCRETE `e2t=R·Δφ_face` vs `e1t=R·Δλ·cosφ_centre` disagree at O(Δλ²) and MAX picks e2 on
+~46% of rows). The "e2=R·Δφ dominates ⇒ 3×" claim assumed UNIFORM Δφ; Mercator has
+Δφ=cosφ·Δλ, so e2 shrinks too. Node 14 changes ONLY the coefficient PLACEMENT (embedded vs
+outside) plus this O(Δλ²) metric wrinkle, not the magnitude. The Round-8 empirical
+"delayed blow-up 26→34" test had used CONSTANT A_h (cosφ removed) ≈ 2.7× stronger than NEMO at
+68° — a **non-faithful over-viscous stabiliser, NOT node 14**; the mandate forbids it.
+
+**Piece B — adcroft PGF ≡ hpg_zco under full-step (audited, no change).** DINO namelist runs
+`ln_hpg_sco=.true.` (s-Jacobian), which for full-step z (flat interfaces) reduces to `hpg_zco`
+— the plain z-level HPG with NO partial-cell/staircase correction (`dynhpg.F90::hpg_zco`).
+Structural audit of legoESM's adcroft `partial_cell_pgf_correction` on the bridged full-step
+DINO state (`scratchpad/pgf_staircase_audit.py`): the correction is LARGE (~0.17) ONLY on the
+dry wet/dry step faces — which are walls (`u_mask_3d=0`, applied by the final
+`du_dt = du_dt * u_mask_3d`), exactly as NEMO masks them (umask=0). On WET faces the correction
+is ~6e-8 (float rounding of the cumsum centroid; both wet cells sit at the same flat z-level).
+⇒ adcroft adds NO dynamic staircase HPG force NEMO lacks. **Correct for full-step; unchanged.**
+
+**Stability (controlled, bridged NEMO mesh, dt=2700, from restart):**
+| config | result |
+|---|---|
+| {full-step + MLF + node14 + adcroft} `nemo_dino_kamm_mlf` | **BLOWS @ step ~22** at \|lat\|≈68° staircase edges (\|u\|,\|v\|→430 → NaN step 23) — SAME as Round-8; node 14 did NOT delay it |
+| {full-step + FE + node14} `nemo_dino_kamm` | **STABLE** 180d (\|u\|~0.09 at step 22; T∈[1.6,26.2]°C at 180d) |
+
+**Controlled 180d A/B — sole variable = viscosity PLACEMENT (vector_laplacian → nemo_div_curl),
+{full-step + FE}, identical protocol (NEMO RUN_TRAJ, dt=2700, 5760 steps, ÷vovvle3t):**
+| metric | vector_laplacian (Round-7) | **nemo_div_curl (node 14)** | NEMO |
+|--------|---------------------------:|----------------------------:|-----:|
+| SST corr / bias / rms | 0.995 / +0.29 / 0.75 | 0.995 / +0.29 / 0.75 | — |
+| T@300m corr / rms | 0.989 / 0.56 | 0.989 / 0.56 | — |
+| SSH corr / rms(m) | 0.993 / 0.051 | 0.993 / 0.051 | — |
+| **BSF range ratio** | **0.81×** | **0.81×** | 1.0 (±40 Sv) |
+
+Node 14 is FAITHFUL and, on the Mercator DINO grid, **climate-inert** (identical to reported
+precision — as the O(Δλ²) coefficient identity predicts). Node 14 = ✅ faithful (built +
+tested + 180d-compared); it is NOT the {full-step+MLF} stabiliser (Round-8 "3×" was a
+Mercator misread). PGF node 15 = ✅ confirmed faithful under full-step (adcroft≡hpg_zco).
+
+**Blocker unchanged + correctly attributed.** {full-step+MLF} still blows at the |lat|≈68°
+staircase (a MOMENTUM instability), driven by the Round-8 mechanism: the neutral leapfrog /
+weakly-growing explicit-AB2 Coriolis lacks the time-domain damping that `matsuno_split`
+(forward-backward, FE recipe) supplies to the staircase-`hpg_zco`-seeded high-lat
+inertia-gravity mode. NEITHER faithful lever (node 14, PGF) addresses it — both are proven
+non-levers here. The residual is a genuine leapfrog+Asselin vs staircase-HPG dycore-stability
+match at the high-lat steps, larger than one iteration and NOT closable by any NEMO-faithful
+viscosity/PGF knob. **The closest STABLE fully-faithful config remains {full-step + FE}
+`nemo_dino_kamm` at BSF 0.81×.** NO non-NEMO stabiliser added; NO 180d MLF+full-step number
+fabricated.
+
+Node 14 = ✅ (built/tested/compared; faithful; climate-inert on Mercator). Node 15 = ✅
+(adcroft≡hpg_zco under full-step, audited).

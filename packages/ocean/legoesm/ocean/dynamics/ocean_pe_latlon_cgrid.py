@@ -87,6 +87,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     vector_bilaplacian_cgrid,
     vector_laplacian_cgrid,
     vector_laplacian_dissipation_cgrid,
+    nemo_lateral_viscosity_coefficients,
+    nemo_ldf_lap_viscosity_cgrid,
     flux_divergence_viscosity_cgrid,
     no_slip_sidedrag_cgrid,
     interp_cell_to_uface,
@@ -174,7 +176,8 @@ VALID_VERTICAL_MOMENTUM_SCHEME = frozenset(
 # the default VECTOR Laplacian grad(div)−k×grad(curl), or Veros's component-wise
 # FLUX-DIVERGENCE harmonic friction ∇·(A_h∇u). Validated at config construction;
 # unknown -> ValueError (dispatch discipline).
-VALID_LATERAL_VISCOSITY_OPERATOR = frozenset({"vector_laplacian", "flux_divergence"})
+VALID_LATERAL_VISCOSITY_OPERATOR = frozenset(
+    {"vector_laplacian", "flux_divergence", "nemo_div_curl"})
 # Lateral side BC (config.lateral_side_bc): free-slip (default; viscous flux zeroed
 # at walls) or MITgcm no_slip_sides (adds the -(2/Δ)·A_h·u_tangential wall side-drag).
 VALID_LATERAL_SIDE_BC = frozenset({"free_slip", "no_slip"})
@@ -2381,12 +2384,13 @@ def _bc_horizontal_viscosity(
     # ∇·(A_h∇u); "vector_laplacian" (default) = the grad(div)−k×grad(curl) form
     # below (bit-identical to the historical path).
     _visc_op = getattr(config, "lateral_viscosity_operator", "vector_laplacian")
-    if _visc_op not in ("vector_laplacian", "flux_divergence"):
+    if _visc_op not in ("vector_laplacian", "flux_divergence", "nemo_div_curl"):
         raise ValueError(
-            "lateral_viscosity_operator must be 'vector_laplacian' or "
-            f"'flux_divergence', got {_visc_op!r}"
+            "lateral_viscosity_operator must be 'vector_laplacian', "
+            f"'flux_divergence', or 'nemo_div_curl', got {_visc_op!r}"
         )
     _use_flux_div = _visc_op == "flux_divergence"
+    _use_nemo_div_curl = _visc_op == "nemo_div_curl"
     _kdiss_fluxdiv_cell = None  # set by the flux-div A_h branch when _want_kdiss_flux
 
     def _biharmonic_op(uu, vv):
@@ -2404,7 +2408,51 @@ def _bc_horizontal_viscosity(
             uu, vv, grid, mask=mask, u_mask=u_mask, v_mask=v_mask,
             vertex_mask=vertex_mask)
 
-    if _use_flux_div and config.lateral_viscosity.A_h > 0:
+    if _use_nemo_div_curl and config.lateral_viscosity.A_h > 0:
+        # NEMO dyn_ldf_lev_lap: coefficient ahmt(T)/ahmf(F) = ½·rn_Uv·MAX(e1,e2)
+        # EMBEDDED inside div/curl (node 14). ``A_h`` here is NEMO's A_h_base =
+        # ½·rn_Uv·R·Δλ (the DINO builder), so ½·rn_Uv = A_h / (R·Δλ). This branch
+        # does its OWN latitude structure via MAX(e1,e2), so A_h_lat_scaling is
+        # DELIBERATELY IGNORED here (NEMO owns the cos φ shape through MAX(e1,e2));
+        # eq-boost / cap-boost / floor / B_h instead RAISE below (they would silently
+        # double-scale or be silently dropped — vector-Laplacian extensions, not NEMO's).
+        if (config.lateral_viscosity.A_h_eq_boost > 1.0
+                or config.lateral_viscosity.A_h_cap_boost > 1.0
+                or config.lateral_viscosity.A_h_floor > 0.0):
+            raise ValueError(
+                "lateral_viscosity_operator='nemo_div_curl' embeds NEMO's "
+                "ahmt/ahmf = ½·rn_Uv·MAX(e1,e2) coefficient and does not support "
+                "A_h_eq_boost / A_h_cap_boost / A_h_floor (vector-Laplacian "
+                "extensions). Set them to their defaults."
+            )
+        if config.lateral_viscosity.B_h > 0:
+            raise ValueError(
+                "lateral_viscosity_operator='nemo_div_curl' implements only the "
+                "harmonic Laplacian (NEMO ln_dynldf_lap); B_h biharmonic is not "
+                "wired for this operator (DINO uses Laplacian only)."
+            )
+        if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):
+            raise ValueError(
+                "lateral_viscosity_operator='nemo_div_curl' needs a lat-lon grid "
+                "with a scalar dlon (got dlon<=0; tripolar unsupported)."
+            )
+        _half_UM = config.lateral_viscosity.A_h / (grid.radius * grid.dlon)
+        _ahmt, _ahmf = nemo_lateral_viscosity_coefficients(grid, _half_UM)
+        diag_Ah_lap_u, diag_Ah_lap_v = nemo_ldf_lap_viscosity_cgrid(
+            u, v, grid, _ahmt, _ahmf,
+            mask=mask, u_mask=u_mask, v_mask=v_mask, vertex_mask=vertex_mask)
+        diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
+        if _want_kdiss_flux:
+            # cell-centre ahmt for the K_diss_h coefficient field. APPROXIMATION:
+            # ``vector_laplacian_dissipation_cgrid`` credits ahmt·(div²+ζ²) whereas
+            # this operator dissipates ahmt·div² + ahmf·ζ² (distinct T/F coeffs). On
+            # the Mercator grid ahmf≈ahmt (adjacent rows, e1≈e2) so the ζ²-source is
+            # mis-scaled by <~1% at high lat — diagnostic only (never du_dt/dv_dt),
+            # and dormant unless kdiss_h_flux_form is on (NOT the DINO card).
+            _ah_scale_center = _ahmt
+        du_dt = du_dt + diag_Ah_lap_u
+        dv_dt = dv_dt + diag_Ah_lap_v
+    elif _use_flux_div and config.lateral_viscosity.A_h > 0:
         # Veros component-wise harmonic friction (``flux_divergence_viscosity_cgrid``)
         # applies the cos(lat) A_h scaling INSIDE the flux (Veros
         # ``enable_hor_friction_cos_scaling`` / ``hor_friction_cosPower``).  The
