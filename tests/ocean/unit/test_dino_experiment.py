@@ -770,6 +770,66 @@ class TestLatLonInitialState:
         assert T_col.shape == (8,)
         assert T_col[0] > T_col[-1]
 
+    def test_initial_T_S_nemo_case4_bit_exact(self):
+        # NEMO usr_def_istate CASE 4 is bit-reproduced by dino_initial_T_S
+        # once the meridional-blend anchors are supplied from the model grid
+        # (phi_max=MAXVAL(gphit), t_bot/s_bot=MINVAL over the WET field) —
+        # the pure (lat,z) formula cannot see the tmask/gphit.
+        # NEMO wp is float64; the 1e-12 bit-exact gate needs x64 (float32
+        # residual is ~6e-7). Scoped to this test so the rest of the file
+        # keeps the suite-default dtype.
+        import jax
+        prev = jax.config.jax_enable_x64
+        jax.config.update("jax_enable_x64", True)
+        try:
+            self._check_nemo_case4_bit_exact()
+        finally:
+            jax.config.update("jax_enable_x64", prev)
+
+    def _check_nemo_case4_bit_exact(self):
+        cfg = DINOConfig()
+
+        # Reference 1-D depths (positive down) whose DEEPEST level is globally
+        # dry — the full-step (ln_zco) staircase that makes MINVAL-over-wet
+        # differ from T_1d[-1].
+        z_pos = np.array([25.0, 120.0, 500.0, 1500.0, 3000.0, 4200.0])
+        z_full_ref = -z_pos                       # legoESM: negative below surface
+        lat = np.array([-62.0, -30.0, 0.0, 30.0, 62.0])  # max|lat| = 62 != 70
+        # tmask: last level dry everywhere; row |lat|=62 also dry at level 4.
+        tmask = np.ones((len(lat), len(z_pos)))
+        tmask[:, -1] = 0.0
+        tmask[[0, 4], -2] = 0.0
+
+        # --- NEMO case-4 exact transcription (usrdef_istate.F90) ---
+        T1d = np.asarray(dino_T_profile_1d(z_pos))
+        S1d = np.asarray(dino_S_profile_1d(z_pos))
+        T_uni = T1d[None, :] * tmask               # horizontally-uniform, masked
+        S_uni = S1d[None, :] * tmask
+        phi_max = np.abs(lat).max()                # MAXVAL(gphit)
+        t_bot = (T_uni + 100.0 * (1.0 - tmask)).min()   # MINVAL over wet
+        s_bot = (S_uni + 100.0 * (1.0 - tmask)).min()
+        fac = (phi_max - np.abs(lat))[:, None] / phi_max
+        T_nemo = ((T1d[None, :] - t_bot) * fac + t_bot) * tmask
+        S_nemo = ((S1d[None, :] - s_bot) * fac + s_bot) * tmask
+
+        # --- legoESM with the NEMO-matched overrides ---
+        T_l, S_l = dino_initial_T_S(
+            lat, z_full_ref, cfg,
+            phi_max_deg=phi_max, t_bot=float(t_bot), s_bot=float(s_bot),
+        )
+        T_l = np.asarray(T_l) * tmask
+        S_l = np.asarray(S_l) * tmask
+        assert np.max(np.abs(T_l - T_nemo)) < 1e-12
+        assert np.max(np.abs(S_l - S_nemo)) < 1e-12
+
+        # --- default (no overrides) is BYTE-IDENTICAL to the legacy formula ---
+        T_def, S_def = dino_initial_T_S(lat, z_full_ref, cfg)
+        fac_def = (cfg.lat_max_deg - np.abs(lat))[:, None] / cfg.lat_max_deg
+        T_legacy = (T1d[None, :] - T1d[-1]) * fac_def + T1d[-1]
+        S_legacy = (S1d[None, :] - S1d[-1]) * fac_def + S1d[-1]
+        np.testing.assert_array_equal(np.asarray(T_def), T_legacy)
+        np.testing.assert_array_equal(np.asarray(S_def), S_legacy)
+
     def test_land_mask_override_default_is_byte_identical(self):
         # Default land_mask_override=None reproduces the analytic seam wall
         # exactly (backward-compat for the standalone bowl recipes).

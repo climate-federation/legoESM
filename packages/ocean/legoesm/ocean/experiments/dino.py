@@ -1356,7 +1356,15 @@ def dino_S_profile_1d(z_pos):
     return deep * weight_deep + shallow * weight_shallow
 
 
-def dino_initial_T_S(lat_deg, z_full_ref, cfg: DINOConfig | None = None):
+def dino_initial_T_S(
+    lat_deg,
+    z_full_ref,
+    cfg: DINOConfig | None = None,
+    *,
+    phi_max_deg: float | None = None,
+    t_bot: float | None = None,
+    s_bot: float | None = None,
+):
     """Compute T(lat, z) and S(lat, z) initial conditions for DINO.
 
     Applies the meridional gradient (paper eq D4-D5 / Zenodo "case 4"):
@@ -1375,6 +1383,25 @@ def dino_initial_T_S(lat_deg, z_full_ref, cfg: DINOConfig | None = None):
         Cell-center z values (legoESM convention: NEGATIVE below
         surface). Internally converted to positive depths.
     cfg : DINOConfig, optional
+    phi_max_deg, t_bot, s_bot : float, optional
+        NEMO ``usr_def_istate`` (case 4) BIT-EXACT overrides. NEMO computes
+        the meridional-blend anchors from the *actual model grid*, not the
+        1-D reference profile:
+
+        * ``phi_max_deg`` = ``MAXVAL(gphit)`` — the poleward-most T-point
+          latitude (69.85° on DINO R1), NOT the nominal truncation
+          ``cfg.lat_max_deg`` (70°).
+        * ``t_bot`` / ``s_bot`` = ``MINVAL`` of the horizontally-uniform
+          profile over the **wet** 3-D field. On a full-step (``ln_zco``)
+          grid whose deepest reference level is globally DRY, this is the
+          value at the deepest *wet* level, NOT ``T_1d[-1]`` (the deepest
+          *reference* level).
+
+        The pure ``(lat, z)`` formula cannot see the ``tmask``/``gphit``, so
+        the NEMO-fidelity caller passes these three scalars (computed once
+        from the mesh). Defaults (``None``) reproduce the standalone-recipe
+        behaviour BYTE-IDENTICALLY (``cfg.lat_max_deg`` / ``T_1d[-1]`` /
+        ``S_1d[-1]``).
 
     Returns
     -------
@@ -1396,11 +1423,15 @@ def dino_initial_T_S(lat_deg, z_full_ref, cfg: DINOConfig | None = None):
 
     # Bottom values (deepest cell-center). For the default DINO config
     # (H_deep=4000 m, 36 levels), these are T_bot ≈ 3.9°C, S_bot ≈ 35.12.
-    T_bot = T_1d[-1]
-    S_bot = S_1d[-1]
+    # NEMO takes MINVAL over the wet 3-D field instead (see docstring); the
+    # caller supplies t_bot/s_bot when matching NEMO bit-for-bit.
+    T_bot = T_1d[-1] if t_bot is None else jnp.asarray(t_bot, dtype=T_1d.dtype)
+    S_bot = S_1d[-1] if s_bot is None else jnp.asarray(s_bot, dtype=S_1d.dtype)
 
-    # Meridional gradient factor (eq D4-D5; matches Zenodo case 4)
-    phi_max = cfg.lat_max_deg
+    # Meridional gradient factor (eq D4-D5; matches Zenodo case 4).
+    # NEMO uses MAXVAL(gphit) (northernmost T-point); the pure formula
+    # defaults to the nominal truncation cfg.lat_max_deg.
+    phi_max = cfg.lat_max_deg if phi_max_deg is None else phi_max_deg
     factor = (phi_max - jnp.abs(lat_deg)) / phi_max  # 1 at equator, 0 at poles
 
     # Broadcast: factor has shape lat_deg.shape; profiles have shape (n_levels,)
