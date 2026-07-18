@@ -75,7 +75,12 @@ _GRID_RESOLUTIONS = {
     # the MPAS dycore default, so the standard dt=600 holds.
     "voronoi":          dict(grid_type="voronoi",        resolution=4,
                               discretization="mpas",
-                              extra=["--turbulence", "none"]),
+                              # --turbulence none trips the full-physics
+                              # guard, so this smoke case must opt out
+                              # explicitly (it is a dycore+forcing smoke,
+                              # not a realism run).
+                              extra=["--turbulence", "none",
+                                     "--allow-disabled-physics"]),
 }
 
 

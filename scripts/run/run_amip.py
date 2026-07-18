@@ -149,7 +149,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # ``voronoi`` / ``icosahedral`` / ``mpas_voronoi`` are accepted and
     # normalised by ``legoesm.driver.config.normalize_grid_type``
     # before reaching any internal dispatch.
-    parser.add_argument("--grid-type", type=str, default="cubed_sphere",
+    # default=None is a sentinel meaning "not explicitly set" so that
+    # _postprocess_args can distinguish a real user choice from the production
+    # default (cubed_sphere) when checking --truncation/--discretization
+    # conflicts; it resolves the sentinel to "cubed_sphere" afterwards.
+    parser.add_argument("--grid-type", type=str, default=None,
                         choices=["cubed_sphere", "gaussian", "latlon",
                                  "mpas",
                                  "voronoi", "icosahedral", "mpas_voronoi"])
@@ -166,7 +170,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # the postprocessor canonicalises 'cgrid' → 'latlon_cgrid' so the
     # downstream factory finds a matching ``(model_type, discretization,
     # grid_type)`` triple.
-    parser.add_argument("--discretization", type=str, default="centered",
+    # default=None sentinel: see --grid-type; resolves to "centered".
+    parser.add_argument("--discretization", type=str, default=None,
                         choices=["centered", "finite_volume", "cgrid",
                                   "latlon_cgrid", "cdgrid", "mpas", "spectral"])
     parser.add_argument("--truncation", type=int, default=None,
@@ -1383,6 +1388,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
+    # Defensive boundary: --grid-type/--discretization carry a None sentinel
+    # default (explicitness tracking for the --truncation conflict guard in
+    # _postprocess_args). A caller that skips _postprocess_args must still get
+    # the production defaults, not None (codex review 2026-07-17).
+    if args.grid_type is None:
+        args.grid_type = "cubed_sphere"
+    if args.discretization is None:
+        args.discretization = "centered"
     grid_config = GridConfig(
         grid_type=args.grid_type,
         resolution=args.resolution,
@@ -1750,27 +1763,41 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
                      "the CMOR Amon/ output tree)")
 
     # Auto-configure spectral runs. --truncation implies the Gaussian/spectral
-    # pair, but an explicitly conflicting grid/discretization choice must be a
-    # hard error, not a silent override (the only silent grid fallback in the
-    # driver, audit 2026-07-17). "cubed_sphere"/"centered" are the argparse
-    # defaults and thus indistinguishable from unset — those are coerced.
+    # pair, and --discretization spectral implies the Gaussian grid; an
+    # explicitly conflicting choice must be a hard error, not a silent
+    # override (the only silent grid fallback in the driver, audit
+    # 2026-07-17). --grid-type/--discretization use a None sentinel default so
+    # ANY explicit value — including one equal to the production default — is
+    # distinguishable from unset and conflict-checked.
     if args.truncation is not None:
-        if args.grid_type not in ("cubed_sphere", "gaussian"):
+        if args.grid_type not in (None, "gaussian"):
             parser.error(
                 f"--truncation implies --grid-type gaussian but "
                 f"--grid-type {args.grid_type} was given; drop one of them"
             )
-        if args.discretization not in ("centered", "spectral"):
+        if args.discretization not in (None, "spectral"):
             parser.error(
                 f"--truncation implies --discretization spectral but "
                 f"--discretization {args.discretization} was given; "
                 "drop one of them"
             )
+    if args.discretization == "spectral" and args.grid_type not in (
+            None, "gaussian"):
+        parser.error(
+            f"--discretization spectral implies --grid-type gaussian but "
+            f"--grid-type {args.grid_type} was given; drop one of them"
+        )
     if args.discretization == "spectral" or args.truncation is not None:
         args.discretization = "spectral"
         args.grid_type = "gaussian"
         if args.truncation is not None:
             args.resolution = args.truncation
+    # Resolve the sentinels to the production defaults AFTER the conflict
+    # checks above.
+    if args.grid_type is None:
+        args.grid_type = "cubed_sphere"
+    if args.discretization is None:
+        args.discretization = "centered"
 
     # Canonicalise legacy ``cgrid`` → ``latlon_cgrid`` so the dycore
     # factory finds a matching (model_type, discretization, grid_type)
