@@ -1372,6 +1372,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
+    # Defensive boundary: --grid-type/--discretization carry a None sentinel
+    # default (explicitness tracking for the --truncation conflict guard in
+    # _postprocess_args). A caller that skips _postprocess_args must still get
+    # the production defaults, not None (codex review 2026-07-17).
+    if args.grid_type is None:
+        args.grid_type = "cubed_sphere"
+    if args.discretization is None:
+        args.discretization = "centered"
     grid_config = GridConfig(
         grid_type=args.grid_type,
         resolution=args.resolution,
