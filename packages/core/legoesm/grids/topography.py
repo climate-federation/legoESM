@@ -17,11 +17,11 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-
-logger = logging.getLogger(__name__)
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.edge_blending import blend_scalar_cube_edges_2d
 from legoesm.grids.halo import pad_halo_local
+
+logger = logging.getLogger(__name__)
 
 # Elevation-magnitude sanity threshold [m] for the geopotential-vs-meters
 # "double-g" trap: no Earth surface elevation exceeds ~8850 m (Everest) and no
