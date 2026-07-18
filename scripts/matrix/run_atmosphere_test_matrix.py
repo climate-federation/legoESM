@@ -2641,8 +2641,28 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                 n, omega=(0.0 if test_num == 8 else constants.Omega),
                 use_duogrid=True, k2e_nord=4)
         else:
-            grid = (create_cubed_sphere(n, omega=0.0, use_duogrid=True)
-                    if test_num == 8 else create_cubed_sphere(n))
+            # LEGOESM_SW_MODON_K2E_NORD (modons only): duo halo Lagrange
+            # order on the LEGACY equiangular grid — isolates halo order
+            # from the tuned geometry (the --fv3-native-grid bundle swaps
+            # both and destabilizes the tuned A-L solver).  Default: the
+            # legacy order 2.
+            _m_nord = os.environ.get("LEGOESM_SW_MODON_K2E_NORD")
+            # LEGOESM_SW_CUBE_DUO_NORD (opt-in probe, Williamson lane):
+            # the production Williamson cases run NON-duogrid (balanced
+            # flows, calibrated separately) — this knob turns the legacy
+            # equiangular duo halos ON for them at the given Lagrange
+            # order (2 or 4), for halo-order sensitivity probes on the
+            # W2 imprint.  Unset = production default (no duo).
+            _w_nord = os.environ.get("LEGOESM_SW_CUBE_DUO_NORD")
+            if test_num == 8:
+                grid = create_cubed_sphere(
+                    n, omega=0.0, use_duogrid=True,
+                    k2e_nord=int(_m_nord) if _m_nord else None)
+            elif _w_nord:
+                grid = create_cubed_sphere(
+                    n, use_duogrid=True, k2e_nord=int(_w_nord))
+            else:
+                grid = create_cubed_sphere(n)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         dt = 300.0
         # Iter-760: switch to Fortran-faithful del-n vorticity damping
@@ -2716,6 +2736,18 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                 "LEGOESM_SW_MODON_DIV_DAMP_FACTOR", str(MODON_DIV_DAMP_FACTOR)))
             _m_dv = float(os.environ.get(
                 "LEGOESM_SW_MODON_DAMP_V", str(MODON_DAMP_V)))
+            # LEGOESM_SW_MODON_CORNER_DAMP_V (probe): corner-localized
+            # del-n vorticity damping — full coefficient near the 8
+            # cube vertices, `damp_v` elsewhere (the 2026-07-17 sweep
+            # separated vertex-mode suppression from core erosion).
+            _m_cdv = float(os.environ.get(
+                "LEGOESM_SW_MODON_CORNER_DAMP_V", "0.0"))
+            # Oracle-recipe probes (Zenodo case-8 duo input.nml:
+            # nord=2, d4_bg=0.12, do_vort_damp=F): structured del-6
+            # divergence damping in place of the wind hyperdiff /
+            # vorticity damping families.
+            _m_d4 = float(os.environ.get("LEGOESM_SW_MODON_D4_BG", "0.0"))
+            _m_d4n = int(os.environ.get("LEGOESM_SW_MODON_D4_NORD", "2"))
             # #521/#753: biharmonic backstop from the env knobs (default env ->
             # the (ref/n)^2 law, the #753 item-1 default: C96 erupts at the face
             # seams under ^4 but is stable under ^2, validated 100 days at
@@ -2725,6 +2757,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             config = iter1009_dual_target_config(
                 n, div_damp_factor=_m_dd, damp_v=_m_dv,
                 hyperdiff_coeff=_modon_hyperdiff_coeff(n),
+                corner_damp_v=_m_cdv,
+                d4_bg_prod=_m_d4, d4_nord_prod=_m_d4n,
             )
         elif test_num in (2, 5, 6):
             # iter-31: cube W6 (Rossby-Haurwitz wave-4) 14-day blows up
@@ -2774,9 +2808,23 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                 os.environ.get("LEGOESM_SW_DIV_DAMP_FACTOR", "8.0"))
             _sw_hd_fac = float(
                 os.environ.get("LEGOESM_SW_HYPERDIFF_FACTOR", "2.0"))
+            # LEGOESM_SW_D4_BG (probe): d_sw5 nord=1 del-4 background
+            # divergence damping on the production path (certified d_sw5
+            # reference; FV3 fv_arrays default 0.16).  0.0 = current
+            # calibrated production behaviour.
+            _sw_d4 = float(os.environ.get("LEGOESM_SW_D4_BG", "0.0"))
+            # LEGOESM_SW_DAMP_V / LEGOESM_SW_CORNER_DAMP_V (probe):
+            # corner-localized vorticity damping on the Williamson lane
+            # (interior coefficient vs full coefficient at the 8 cube
+            # vertices) — the modon-sweep mechanism applied to the W2
+            # imprint question.
+            _sw_dv = float(os.environ.get("LEGOESM_SW_DAMP_V", "0.030"))
+            _sw_cdv = float(os.environ.get("LEGOESM_SW_CORNER_DAMP_V", "0.0"))
             config = iter1009_dual_target_config(
                 n, div_damp_factor=_sw_dd_fac,
                 hyperdiff_coeff=_sw_hd_fac * _hyperdiff_cube(n),
+                d4_bg_prod=_sw_d4,
+                damp_v=_sw_dv, corner_damp_v=_sw_cdv,
             )
         else:
             config = iter1009_dual_target_config(n)

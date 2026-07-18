@@ -533,6 +533,15 @@ class ExperimentConfig(NamedTuple):
     #   moisture rises (flattens the overcast runaway).
     cloud_p_xr: float | None = None
     cloud_alpha_xr: float | None = None
+    # Marine-Sc albedo lever: blend strength [0,1] toward diagnostic-CLUBB cf in
+    # the BL when --use-clubb-cloud-fraction is on (1.0 = full replacement, which
+    # drove a real-SST surface-heating runaway; ~0.3-0.5 is gentler + stable).
+    # None => CloudConfig default (1.0).
+    cloud_clubb_cf_override_strength: float | None = None
+    # Marine-Sc lever cloud-collapse floor [0,1]: minimum BL cloud the override
+    # may leave (breaks the cloud-temperature runaway that full reduction caused).
+    # None => CloudConfig default (0.0 = no floor).
+    cloud_clubb_cf_override_floor: float | None = None
     cloud_conv_cloud_max: float | None = None
     cloud_conv_cloud_condensate: float | None = None
     # Diagnostic in-cloud condensate vertical structure for the stratiform

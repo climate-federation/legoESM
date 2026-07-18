@@ -1499,7 +1499,28 @@ def fv3_sw_tendencies(
     fortran_dir_aware_corners=False,
     dddmp=0.0,
     apply_fortran_xppm_boundary=False,
+    d4_bg=0.0,
+    d4_nord=1,
 ):
+    # FAIL-LOUD entry guard, independent of every other gate (codex
+    # damping r1 P1-1 / r2: nesting this under div_damp>0 silently
+    # ignored d4_bg when div_damp=0): a tendency-form del-4/del-6
+    # background divergence damping here is KNOWN-INVALID — FV3's
+    # d_sw5 applies dd8 = (da_min_c*d4_bg)^(nord+1) as a POST-STEP
+    # staged index-space operator (certified translation
+    # fv3_native_d_sw.d_sw5), while terms here enter an RK3 TENDENCY
+    # and get dt-multiplied per stage (iter-758c "*dt over-damps");
+    # every enabled probe (nord 1 AND 2, 2026-07-17) went NaN by step
+    # 100.  Only d4_bg == 0.0 is valid until the staged post-step port
+    # lands.  (Damping-sign reference for that port: s = (-1)^nord —
+    # nord=1 MINUS, nord=2 PLUS.)
+    if d4_bg != 0.0:
+        raise NotImplementedError(
+            "fv3_sw_tendencies(d4_bg!=0): the tendency-form del-4/"
+            "del-6 divergence damping is invalid under RK3 (dt-"
+            "multiplied; measured NaN) — implement as the post-step "
+            "staged d_sw5 operator (fv3_native_d_sw.d_sw5 is the "
+            "certified reference) before enabling")
     """SW tendencies on FV3 edge-midpoint D-grid. Momentum via A-L + circulation; PPM mass transport.
 
     Biharmonic hyperdiffusion (``hyperdiff_coeff``) IS applied at

@@ -157,6 +157,223 @@ def build_kinked_corner_lonlat(n: int, ng: int = 3, *, tile: int = 1,
     return lon, lat
 
 
+def build_extended_corner_lonlat(n: int, ng: int = 3, *, tile: int = 1):
+    """EXTENDED-lattice corner-node lon/lat for one reference tile.
+
+    The duo grid continues each face's own gnomonic coordinate lines
+    beyond the panel edge (fv_duogrid's pt_ext construction): every
+    node — side halos AND corner wedges — is the face's own smooth
+    extension, no neighbour copies, no sentinels.  Shape and index
+    convention match :func:`build_kinked_corner_lonlat`
+    ((n+2ng+1, n+2ng+1) over Fortran nodes 1-ng..n+1+ng); the interior
+    nodes (1..n+1) are BITWISE identical to the kinked builder's (same
+    ED line, same carts).
+    """
+    from legoesm.grids.fv3_native_halos import _ED_CARTS, _ed_line
+
+    line = _ed_line(n, 2 * (ng + 2))
+    idx = np.arange(1 - ng, n + 1 + ng + 1)
+    vals = np.array([line[2 * i - 1] for i in idx])
+    X, Y = np.meshgrid(vals, vals, indexing="ij")
+    cx, cy, cz = _ED_CARTS[tile - 1](X, Y)
+    r = np.sqrt(cx * cx + cy * cy + cz * cz)
+    lon = np.mod(np.arctan2(cy, cx), 2.0 * np.pi)
+    lat = np.arcsin(cz / r)
+    return lon, lat
+
+
+def extend_gridstruct(gs: dict, n: int, ng: int, *, tile: int = 1,
+                      radius: float = FV3_RADIUS_M) -> dict:
+    """EXTENDED-lattice gridstruct for the duo consistency bundle.
+
+    Runs the certified metric + angle engines on the face's own
+    gnomonic EXTENSION treated as one big face (size n+2ng == the data
+    domain, so every engine output maps 1:1 onto the gridstruct
+    layouts), then RESTORES the kinked builder's interior — so the
+    compute domain keeps the certified upstream conventions (including
+    the divg/del6 seam-row specials) BITWISE, while every halo and
+    corner-wedge cell carries real smooth extended-grid metrics (the
+    duo semantics: no neighbour copies, no fill_ghost poison).
+
+    KNOWN JUNK REGION (documented): the OUTERMOST ext ring — the
+    engines apply their face-edge special-casing at the big-face
+    boundary, which is not a real panel edge here.  Consumers must stay
+    >=1 ring inside (the ng-deep stencils of the stepper do).
+    """
+    from legoesm.grids.fv3_native_metrics import (
+        compute_fv3_native_metrics,
+    )
+
+    n_big = n + 2 * ng
+    lon, lat = build_extended_corner_lonlat(n, ng, tile=tile)
+    lon6 = np.stack([lon] * 6)
+    lat6 = np.stack([lat] * 6)
+    mets = compute_fv3_native_metrics(lon6, lat6, radius)
+
+    out = dict(gs)
+
+    def take(key):
+        return np.array(np.asarray(mets[key])[0], dtype=np.float64)
+
+    ext = {
+        "area": take("area"), "dx": take("dx"), "dy": take("dy"),
+        "dxa": take("dxa"), "dya": take("dya"),
+        "dxc": take("dxc"), "dyc": take("dyc"),
+        "area_c": take("area_c"),
+        "agrid_lon": take("agrid_lon"), "agrid_lat": take("agrid_lat"),
+    }
+    ext["rarea"] = 1.0 / ext["area"]
+    ext["rarea_c"] = 1.0 / ext["area_c"]
+    ext["rdx"] = 1.0 / ext["dx"]
+    ext["rdy"] = 1.0 / ext["dy"]
+    ext["rdxa"] = 1.0 / ext["dxa"]
+    ext["rdya"] = 1.0 / ext["dya"]
+    ext["rdxc"] = 1.0 / ext["dxc"]
+    ext["rdyc"] = 1.0 / ext["dyc"]
+
+    # Angle families from LOCAL finite-difference tangents on the
+    # extended lattice (self-contained differential geometry; the
+    # angles engine's cross-face halo reconstruction is only valid
+    # with real cube neighbours, which the big-face treatment does not
+    # provide — its outer rings were NaN/garbage exactly where the
+    # halos live).  2nd-order central tangents; interior is restored
+    # from the certified kinked builder below regardless.
+    def _xyz(lo, la):
+        return np.stack([np.cos(la) * np.cos(lo),
+                         np.cos(la) * np.sin(lo),
+                         np.sin(la)], axis=-1)
+
+    pb = _xyz(lon, lat)                       # corner nodes (m_b, m_b, 3)
+
+    def _unit_tangents(p):
+        e1 = np.empty_like(p)
+        e2 = np.empty_like(p)
+        e1[1:-1] = p[2:] - p[:-2]
+        e1[0] = p[1] - p[0]
+        e1[-1] = p[-1] - p[-2]
+        e2[:, 1:-1] = p[:, 2:] - p[:, :-2]
+        e2[:, 0] = p[:, 1] - p[:, 0]
+        e2[:, -1] = p[:, -1] - p[:, -2]
+        for e in (e1, e2):
+            e -= (e * p).sum(-1, keepdims=True) * p
+            e /= np.linalg.norm(e, axis=-1, keepdims=True)
+        return e1, e2
+
+    def _cos_sin(p):
+        e1, e2 = _unit_tangents(p)
+        c = (e1 * e2).sum(-1)
+        s = np.sqrt(np.maximum(TINY_NUMBER ** 2, 1.0 - c * c))
+        return c, s
+
+    cb, sb = _cos_sin(pb)                     # B nodes
+    ext["cosa"] = cb
+    ext["sina"] = sb
+    ext["rsina"] = 1.0 / np.maximum(TINY_NUMBER, sb * sb)
+
+    # A centres and edge midpoints from the corner lattice
+    pa = _xyz(ext["agrid_lon"], ext["agrid_lat"])
+    ca, sa = _cos_sin(pa)
+    ext["cosa_s"] = ca
+    ext["rsin2"] = 1.0 / np.maximum(TINY_NUMBER, sa * sa)
+
+    mid_u = pb[:, :-1] + pb[:, 1:]            # x-face midpoints (m_b, m_a)
+    mid_u /= np.linalg.norm(mid_u, axis=-1, keepdims=True)
+    cu, su = _cos_sin(mid_u)
+    ext["cosa_u"] = cu
+    ext["sina_u"] = su
+    ext["rsin_u"] = 1.0 / np.maximum(TINY_NUMBER, su * su)
+
+    mid_v = pb[:-1, :] + pb[1:, :]            # y-face midpoints (m_a, m_b)
+    mid_v /= np.linalg.norm(mid_v, axis=-1, keepdims=True)
+    cv, sv = _cos_sin(mid_v)
+    ext["cosa_v"] = cv
+    ext["sina_v"] = sv
+    ext["rsin_v"] = 1.0 / np.maximum(TINY_NUMBER, sv * sv)
+
+    # sin/cos_sg 9-slot family: centre slot from the A tangents; the
+    # W/S/E/N mid-edge slots from the face-midpoint tangents; corner
+    # slots from the B tangents (halo consumers on the duo lane read
+    # the centre + mid-edge slots; interior restored below).
+    m_a_loc = n_big
+    ssg = np.empty((m_a_loc, m_a_loc, 9))
+    csg = np.empty((m_a_loc, m_a_loc, 9))
+    csg[..., 4] = ca
+    ssg[..., 4] = sa
+    csg[..., 0] = cu[:-1, :]
+    ssg[..., 0] = su[:-1, :]
+    csg[..., 2] = cu[1:, :]
+    ssg[..., 2] = su[1:, :]
+    csg[..., 1] = cv[:, :-1]
+    ssg[..., 1] = sv[:, :-1]
+    csg[..., 3] = cv[:, 1:]
+    ssg[..., 3] = sv[:, 1:]
+    csg[..., 5] = cb[:-1, :-1]
+    ssg[..., 5] = sb[:-1, :-1]
+    csg[..., 6] = cb[1:, :-1]
+    ssg[..., 6] = sb[1:, :-1]
+    csg[..., 7] = cb[1:, 1:]
+    ssg[..., 7] = sb[1:, 1:]
+    csg[..., 8] = cb[:-1, 1:]
+    ssg[..., 8] = sb[:-1, 1:]
+    ext["sin_sg"] = ssg
+    ext["cos_sg"] = csg
+
+    # Coriolis at centres/B nodes from the extended geometry
+    ext["f0"] = 2.0 * FV3_OMEGA * np.sin(ext["agrid_lat"])
+    blat = np.array(lat, dtype=np.float64)
+    ext["fC"] = 2.0 * FV3_OMEGA * np.sin(blat)
+
+    # divg/del6: the PLAIN formulas on the extended lattice (the duo
+    # grid has real angles everywhere; the plain-path seam specials are
+    # restored with the interior below)
+    ext["divg_u"] = ext["sina_v"] * ext["dyc"] / ext["dx"]
+    ext["del6_u"] = ext["sina_v"] * ext["dx"] / ext["dyc"]
+    ext["divg_v"] = ext["sina_u"] * ext["dxc"] / ext["dy"]
+    ext["del6_v"] = ext["sina_u"] * ext["dy"] / ext["dxc"]
+
+    ci = slice(ng, ng + n)          # interior cell rows/cols
+    bi = slice(ng, ng + n + 1)      # interior node rows/cols
+    axmap = {"c": ci, "b": bi}
+
+    def restore(key, axes):
+        a = ext[key]
+        k0 = gs[key]
+        slc = tuple(axmap[ax] for ax in axes)
+        a[slc] = k0[slc]
+        out[key] = a
+
+    for key, axes in (
+        ("area", "cc"), ("rarea", "cc"), ("dxa", "cc"), ("dya", "cc"),
+        ("rdxa", "cc"), ("rdya", "cc"), ("agrid_lon", "cc"),
+        ("agrid_lat", "cc"), ("cosa_s", "cc"), ("rsin2", "cc"),
+        ("f0", "cc"),
+        ("dx", "cb"), ("rdx", "cb"), ("dyc", "cb"), ("rdyc", "cb"),
+        ("cosa_v", "cb"), ("sina_v", "cb"), ("rsin_v", "cb"),
+        ("divg_u", "cb"), ("del6_u", "cb"),
+        ("dy", "bc"), ("rdy", "bc"), ("dxc", "bc"), ("rdxc", "bc"),
+        ("cosa_u", "bc"), ("sina_u", "bc"), ("rsin_u", "bc"),
+        ("divg_v", "bc"), ("del6_v", "bc"),
+        ("area_c", "bb"), ("rarea_c", "bb"), ("fC", "bb"),
+        ("cosa", "bb"), ("sina", "bb"), ("rsina", "bb"),
+    ):
+        restore(key, axes)
+    a = ext["sin_sg"]
+    a[ci, ci, :] = gs["sin_sg"][ci, ci, :]
+    out["sin_sg"] = a
+    a = ext["cos_sg"]
+    a[ci, ci, :] = gs["cos_sg"][ci, ci, :]
+    out["cos_sg"] = a
+
+    # grid corner-node lon/lat: the extended lattice itself
+    out["grid_lon"] = np.array(lon, dtype=np.float64)
+    out["grid_lat"] = np.array(lat, dtype=np.float64)
+    gl = out["grid_lon"]
+    gt = out["grid_lat"]
+    gl[bi, bi] = gs["grid_lon"][bi, bi]
+    gt[bi, bi] = gs["grid_lat"][bi, bi]
+    return out
+
+
 # ---------------------------------------------------------------------------
 # fill_corners ports (tools/fv_mp_mod.F90 r8 bodies, verbatim index maps).
 # These fill the four corner-diagonal ng x ng regions from side-strip values
@@ -718,8 +935,9 @@ def exchange_cgrid_vector_halos(uc6: list, vc6: list, tile: int,
     transform like basis vectors, so halo_x picks the source component
     whose supergrid axis maps onto the local +i direction, with the sign
     of that map derivative (mpp's NE-vector convention).  Corner-diagonal
-    regions are left untouched (dyn_core's exchange does not fill them;
-    d_sw's own fill_corners(VECTOR) handles what it consumes).
+    regions get the FV3 VECTOR corner fill (mySign=-1) afterwards — the
+    plain-mpp treatment (upstream duo Lagrange-fills them via
+    ext_vector; interim).
 
     Returns nothing; mutates the tile's arrays in place.
     """
@@ -792,6 +1010,332 @@ def exchange_cgrid_vector_halos(uc6: list, vc6: list, tile: int,
                 for fi in range(1, n + 2):
                     uc[fi - lo, fj - lo] = src_value(2 * fi - 1, 2 * fj,
                                                      n_src)
+    # corner-diagonal regions: FV3 VECTOR corner fill (mySign=-1), the
+    # plain-mpp treatment — upstream duo Lagrange-fills these via
+    # ext_vector; interim so corner-region uc/vc never carry stale
+    # ghosts into downstream consumers (c_sw delpc ring, p_grad_c wk).
+    _fill_corners_cgrid(fort(uc, lo, lo), fort(vc, lo, lo),
+                        npx, ng, -1.0)
+
+
+def exchange_agrid_scalar_halos(f6: list, tile: int, n: int, ng: int):
+    """mpp_update_domains A-grid scalar (cell centers, supergrid
+    (2i, 2j)) for one tile — side-strip index copy of the neighbour's
+    coincident cells, then the FV3 AGRID corner fill on the
+    corner-diagonal regions.  INTERIM stand-in for the duo
+    ext_scalar(…,0,0) k2e machinery (which K2E-interpolates and fills
+    corners upstream)."""
+    sg_npx = 2 * n + 1
+    lo = 1 - ng
+    fld = f6[tile - 1]
+    nw, ne, ns, nn = neighbor_tiles(tile)
+    strips = (
+        (nw, range(1 - ng, 0 + 1), range(1, n + 1)),
+        (ne, range(n + 1, n + ng + 1), range(1, n + 1)),
+        (ns, range(1, n + 1), range(1 - ng, 0 + 1)),
+        (nn, range(1, n + 1), range(n + 1, n + ng + 1)),
+    )
+    for n_src, fi_range, fj_range in strips:
+        src = f6[n_src - 1]
+        for fi in fi_range:
+            for fj in fj_range:
+                si, sj = 2 * fi, 2 * fj
+                ii, jj = neighbor_index(si, sj, tile, n_src, sg_npx, sg_npx)
+                ci, cj = ii // 2, jj // 2
+                if 1 <= ci <= n and 1 <= cj <= n:
+                    fld[fi - lo, fj - lo] = src[ci - lo, cj - lo]
+    # corner-diagonal regions: the FV3 AGRID corner fill (index map
+    # ported from fv_mp_mod) — the duo ext machinery Lagrange-fills
+    # these upstream; this is the mpp-consistent interim so consumers
+    # reading within +/-ng of a cube corner (duo a2b at corner B-nodes)
+    # never see stale ghost values.
+    _fill_corners_agrid_x(fort(fld, lo, lo), n + 1, ng)
+
+
+def exchange_dgrid_vector_halos(u6: list, v6: list, tile: int,
+                                n: int, ng: int):
+    """mpp_update_domains(u, v, gridtype=DGRID_NE) for one tile.
+
+    D-grid staggering: u is the x-component on y-faces (supergrid
+    (2i, 2j-1); Fortran u(isd:ied, jsd:jed+1)), v the y-component on
+    x-faces ((2i-1, 2j); v(isd:ied+1, jsd:jed)).  Same
+    component/orientation-sign machinery as the certified CGRID
+    exchange, with the slot parities swapped.  INTERIM stand-in for
+    ext_vector(u, v, dg, …, 0,1,1,0).  Mutates in place.
+    """
+    sg_npx = 2 * n + 1
+    npx = n + 1
+    lo = 1 - ng
+    u = u6[tile - 1]
+    v = v6[tile - 1]
+    nw, ne, ns, nn = neighbor_tiles(tile)
+
+    def src_u(si, sj, n_src):
+        sii, sjj = neighbor_index(si, sj, tile, n_src, sg_npx, sg_npx)
+        sii2, sjj2 = neighbor_index(si + 2, sj, tile, n_src, sg_npx,
+                                    sg_npx)
+        dii, djj = sii2 - sii, sjj2 - sjj
+        if dii != 0:                      # aligned: u <- u
+            sgn = 1.0 if dii > 0 else -1.0
+            fi, fj = sii // 2, (sjj + 1) // 2
+            return sgn * u6[n_src - 1][fi - lo, fj - lo]
+        sgn = 1.0 if djj > 0 else -1.0    # swapped: u <- v
+        fi, fj = (sii + 1) // 2, sjj // 2
+        return sgn * v6[n_src - 1][fi - lo, fj - lo]
+
+    def src_v(si, sj, n_src):
+        sii, sjj = neighbor_index(si, sj, tile, n_src, sg_npx, sg_npx)
+        sii2, sjj2 = neighbor_index(si, sj + 2, tile, n_src, sg_npx,
+                                    sg_npx)
+        dii, djj = sii2 - sii, sjj2 - sjj
+        if djj != 0:                      # aligned: v <- v
+            sgn = 1.0 if djj > 0 else -1.0
+            fi, fj = (sii + 1) // 2, sjj // 2
+            return sgn * v6[n_src - 1][fi - lo, fj - lo]
+        sgn = 1.0 if dii > 0 else -1.0    # swapped: v <- u
+        fi, fj = sii // 2, (sjj + 1) // 2
+        return sgn * u6[n_src - 1][fi - lo, fj - lo]
+
+    strips = (
+        (nw, range(1 - ng, 0 + 1), "i"),
+        (ne, range(n + 1, n + ng + 1), "i"),
+        (ns, range(1 - ng, 0 + 1), "j"),
+        (nn, range(npx + 1, npx + ng + 1), "j"),
+    )
+    for n_src, rng, axis in strips:
+        if axis == "i":
+            for fi in rng:
+                for fj in range(1, npx + 1):      # u y-faces 1..npx
+                    u[fi - lo, fj - lo] = src_u(2 * fi, 2 * fj - 1, n_src)
+            v_cols = (range(1 - ng, 0 + 1) if rng.start < 1
+                      else range(npx + 1, npx + ng + 1))
+            for fi in v_cols:
+                for fj in range(1, n + 1):
+                    v[fi - lo, fj - lo] = src_v(2 * fi - 1, 2 * fj, n_src)
+        else:
+            for fj in rng:
+                for fi in range(1, n + 1):
+                    u[fi - lo, fj - lo] = src_u(2 * fi, 2 * fj - 1, n_src)
+            vj = (range(1 - ng, 0 + 1) if rng.start <= 0
+                  else range(n + 1, n + ng + 1))
+            for fj in vj:
+                for fi in range(1, npx + 1):
+                    v[fi - lo, fj - lo] = src_v(2 * fi - 1, 2 * fj, n_src)
+    _fill_corners_dgrid(fort(u, lo, lo), fort(v, lo, lo), npx, ng, -1.0)
+
+
+_K2E_TAB_CACHE: dict = {}
+
+
+def _k2e_tables(n: int, remap_ng: int = 3):
+    key = (n, remap_ng)
+    if key not in _K2E_TAB_CACHE:
+        from legoesm.grids.fv3_native_halos import compute_fv3_native_k2e
+
+        _K2E_TAB_CACHE[key] = compute_fv3_native_k2e(n, remap_ng=remap_ng,
+                                                     k2e_nord=4)
+    return _K2E_TAB_CACHE[key]
+
+
+def k2e_remap_halo_rings(f6: list, stag: str, n: int, ng: int):
+    """Kinked-to-extended along-edge Lagrange remap of the halo rings
+    (cube_rmp semantics) for one stagger family, applied AFTER the
+    index-copy exchange: each halo-ring value becomes the certified
+    k2e interpolation of the copied (neighbour-line) ring at the
+    EXTENDED-lattice position.
+
+    ``stag``: one of A, B, CX, CY, DX, DY — the oracle-pinned phase-3a
+    table families.  ``f6``: per-face data-domain numpy arrays whose
+    layout matches the stagger.  Record keys are 1-based Fortran; the
+    arrays start at Fortran ``1-ng`` on both axes.  A record with the
+    i-key outside ``[1, n+1]`` is a W/E ring (along-edge coordinate =
+    j); otherwise it is a S/N ring (along-edge = i).  Mutates in
+    place; corner-diagonal cells are untouched (the vector corner
+    fills / AGRID fill own them).
+    """
+    if ng > 4:
+        raise NotImplementedError(
+            "k2e remap rings pinned for ng<=3 (stepper) / ng==4 (the "
+            "ext_vector geographic lattice, upstream dg%bd%ng)")
+    tab = _k2e_tables(n, remap_ng=ng)
+    ij = tab[f"{stag}_ij"]
+    loc = tab[f"{stag}_loc"]
+    coef = tab[f"{stag}_coef"]
+    npd = coef.shape[1] // 2 - 1
+    lo_off = 1 - ng
+    a0 = 1 - lo_off                      # array index of Fortran 1
+    # per-stagger interior extents (cells 1..n, nodes 1..n+1)
+    i_hi = n + 1 if stag in ("B", "CX", "DX") else n
+    j_hi = n + 1 if stag in ("B", "CY", "DY") else n
+
+    for t6 in range(len(f6)):
+        f = f6[t6]
+        src = f.copy()
+        for (fi, fj), lv, cw in zip(ij, loc, coef):
+            start = a0 + (int(lv) - npd - 1)
+            i_ring = fi < 1 or fi > i_hi
+            j_ring = fj < 1 or fj > j_hi
+            if i_ring == j_ring:
+                continue                 # corner-diagonal record classes
+            if i_ring:                   # W/E ring: along-edge = j
+                col = fi - lo_off
+                row = fj - lo_off
+                if not (0 <= col < f.shape[0]
+                        and 0 <= row < f.shape[1]):
+                    continue
+                if not (0 <= start and start + len(cw) <= f.shape[1]):
+                    continue
+                f[col, row] = float(
+                    (cw * src[col, start:start + len(cw)]).sum())
+            else:                        # S/N ring: along-edge = i
+                col = fi - lo_off
+                row = fj - lo_off
+                if not (0 <= col < f.shape[0]
+                        and 0 <= row < f.shape[1]):
+                    continue
+                if not (0 <= start and start + len(cw) <= f.shape[0]):
+                    continue
+                f[col, row] = float(
+                    (cw * src[start:start + len(cw), row]).sum())
+
+
+def _cgrid_edge_partner(fx6: list, fy6: list, tile: int, si: int, sj: int,
+                        along: str, n: int, ng: int, n_src: int) -> float:
+    """Neighbour's COINCIDENT C-edge flux value for a shared-edge slot.
+
+    ``(si, sj)`` is the local supergrid slot of the flux point (x-face
+    (2i-1, 2j); y-face (2i, 2j-1)); ``along`` is the local component
+    axis ('i' for fx, 'j' for fy).  Component selection + orientation
+    sign follow the discrete-rotation map derivative, exactly the
+    certified ``exchange_cgrid_vector_halos`` convention (CGRID_NE).
+    """
+    sg_npx = 2 * n + 1
+    sii, sjj = neighbor_index(si, sj, tile, n_src, sg_npx, sg_npx)
+    if along == "i":
+        sii2, sjj2 = neighbor_index(si + 2, sj, tile, n_src, sg_npx, sg_npx)
+    else:
+        sii2, sjj2 = neighbor_index(si, sj + 2, tile, n_src, sg_npx, sg_npx)
+    dii, djj = sii2 - sii, sjj2 - sjj
+    if (sii % 2 == 1) and (sjj % 2 == 0):        # lands on an x-face slot
+        sgn = 1.0 if (dii if dii != 0 else djj) > 0 else -1.0
+        fi, fj = (sii + 1) // 2, sjj // 2
+        return sgn * fx6[n_src - 1][fi - 1, fj - 1]
+    sgn = 1.0 if (djj if djj != 0 else dii) > 0 else -1.0
+    fi, fj = sii // 2, (sjj + 1) // 2
+    return sgn * fy6[n_src - 1][fi - 1, fj - 1]
+
+
+def average_shared_edge_cgrid(fx6: list, fy6: list, n: int, ng: int):
+    """dyn_core.F90:853-900 analog — mpp_get_boundary(CGRID_NE) + 0.5
+    blend of the C-ring fluxes at the four face edges, all six faces.
+
+    ``fx6``/``fy6``: per-face COMPUTE-ring flux slabs on the allflux
+    layout — fx (n+1, n) x-faces (is:ie+1, js:je) at origin (1, 1),
+    fy (n, n+1) y-faces (is:ie, js:je+1).  Blends exactly the dyn_core
+    slots: fx columns i=1, npx over j=1..n; fy rows j=1, npx over
+    i=1..n.
+
+    Gather-then-apply (two phases) so every partner read sees the
+    PRE-blend state, exactly like mpp_get_boundary buffering.  The
+    0.5*(own + mapped-neighbour) blend leaves both faces' coincident
+    slots equal up to the component sign map.  Mutates in place.
+    """
+    npx = n + 1
+    updates = []
+    for tile in range(1, 7):
+        nw, ne, ns, nn = neighbor_tiles(tile)
+        fx = fx6[tile - 1]
+        fy = fy6[tile - 1]
+        for fj in range(1, n + 1):
+            for fi, n_src in ((1, nw), (npx, ne)):
+                part = _cgrid_edge_partner(fx6, fy6, tile, 2 * fi - 1,
+                                           2 * fj, "i", n, ng, n_src)
+                updates.append((fx, fi - 1, fj - 1,
+                                0.5 * (fx[fi - 1, fj - 1] + part)))
+        for fi in range(1, n + 1):
+            for fj, n_src in ((1, ns), (npx, nn)):
+                part = _cgrid_edge_partner(fx6, fy6, tile, 2 * fi,
+                                           2 * fj - 1, "j", n, ng, n_src)
+                updates.append((fy, fi - 1, fj - 1,
+                                0.5 * (fy[fi - 1, fj - 1] + part)))
+    for arr, i, j, val in updates:
+        arr[i, j] = val
+
+
+def average_allflux_shared_edges(afx6: list, afy6: list, nq: int,
+                                 n: int, ng: int):
+    """dyn_core.F90:853-900 slot selection over the allflux stacks.
+
+    ``afx6``/``afy6``: per-face allflux slabs (n+1, n, 4+nq) /
+    (n, n+1, 4+nq).  Fortran averages ONLY iq=1 (delp), iq=4 (temp)
+    and iq>4 (tracers); slots 2 (w) and 3 (q_con) are NOT averaged —
+    this wrapper applies :func:`average_shared_edge_cgrid` per
+    selected slot and leaves 2/3 byte-untouched.
+    """
+    for iq in range(1, 4 + nq + 1):
+        if iq == 1 or iq >= 4:
+            fx6 = [a[:, :, iq - 1] for a in afx6]
+            fy6 = [a[:, :, iq - 1] for a in afy6]
+            average_shared_edge_cgrid(fx6, fy6, n, ng)
+
+
+def _bgrid_edge_partner(xb6: list, yb6: list, tile: int, si: int, sj: int,
+                        along: str, n: int, ng: int, n_src: int) -> float:
+    """Neighbour's coincident B-node vector-component value (BGRID_NE)."""
+    sg_npx = 2 * n + 1
+    sii, sjj = neighbor_index(si, sj, tile, n_src, sg_npx, sg_npx)
+    if along == "i":
+        sii2, sjj2 = neighbor_index(si + 2, sj, tile, n_src, sg_npx, sg_npx)
+    else:
+        sii2, sjj2 = neighbor_index(si, sj + 2, tile, n_src, sg_npx, sg_npx)
+    dii, djj = sii2 - sii, sjj2 - sjj
+    bi, bj = (sii + 1) // 2, (sjj + 1) // 2       # B node (odd, odd)
+    if along == "i":
+        aligned = dii != 0
+    else:
+        aligned = djj != 0
+    if along == "i":
+        src = xb6[n_src - 1] if aligned else yb6[n_src - 1]
+        d = dii if aligned else djj
+    else:
+        src = yb6[n_src - 1] if aligned else xb6[n_src - 1]
+        d = djj if aligned else dii
+    sgn = 1.0 if d > 0 else -1.0
+    return sgn * src[bi - 1, bj - 1]
+
+
+def average_shared_edge_bgrid(xb6: list, yb6: list, n: int, ng: int):
+    """dyn_core.F90:968-1020 analog — mpp_get_boundary(BGRID_NE) + 0.5
+    blend of the B-grid KE ingredients (ubb = x-like, vbbtemp = y-like)
+    at the four face edges, all six faces.
+
+    ``xb6``/``yb6``: per-face COMPUTE-ring B arrays, shape
+    (n+1, n+1) at origin (is=1, js=1) — the d_sw3 output layout.
+    Blends exactly the dyn_core slots: yb rows j=1, npx over
+    i=1..npx; xb columns i=1, npx over j=1..npx (corner B-nodes
+    touched once per array, matching the Fortran loop split).
+    Gather-then-apply; mutates in place.
+    """
+    npx = n + 1
+    updates = []
+    for tile in range(1, 7):
+        nw, ne, ns, nn = neighbor_tiles(tile)
+        xb = xb6[tile - 1]
+        yb = yb6[tile - 1]
+        for fi in range(1, npx + 1):
+            for fj, n_src in ((1, ns), (npx, nn)):
+                part = _bgrid_edge_partner(xb6, yb6, tile, 2 * fi - 1,
+                                           2 * fj - 1, "j", n, ng, n_src)
+                updates.append((yb, fi - 1, fj - 1,
+                                0.5 * (yb[fi - 1, fj - 1] + part)))
+        for fj in range(1, npx + 1):
+            for fi, n_src in ((1, nw), (npx, ne)):
+                part = _bgrid_edge_partner(xb6, yb6, tile, 2 * fi - 1,
+                                           2 * fj - 1, "i", n, ng, n_src)
+                updates.append((xb, fi - 1, fj - 1,
+                                0.5 * (xb[fi - 1, fj - 1] + part)))
+    for arr, i, j, val in updates:
+        arr[i, j] = val
 
 
 def _get_unit_vect2(ll1: np.ndarray, ll2: np.ndarray) -> np.ndarray:

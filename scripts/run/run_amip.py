@@ -606,6 +606,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[kg/kg] (None=CloudConfig default; tuned slab 3e-4).")
     parser.add_argument("--rh-crit", dest="cloud_rh_crit", type=float, default=None,
                         help="Critical RH for cloud onset (None=scheme default).")
+    parser.add_argument("--clubb-cf-override-strength",
+                        dest="cloud_clubb_cf_override_strength", type=float,
+                        default=None,
+                        help="Blend strength [0,1] toward diagnostic-CLUBB cloud "
+                             "fraction in the BL when --use-clubb-cloud-fraction "
+                             "is on (1.0=full replacement, which drove a real-SST "
+                             "surface-heating runaway; ~0.3-0.5 gentler+stable). "
+                             "None=CloudConfig default (1.0).")
+    parser.add_argument("--clubb-cf-override-floor",
+                        dest="cloud_clubb_cf_override_floor", type=float,
+                        default=None,
+                        help="Minimum BL cloud fraction [0,1] the CLUBB override "
+                             "may leave — breaks the cloud->0 cloud-temperature "
+                             "runaway that full reduction caused, so a LARGER "
+                             "albedo fix can run stably (~0.15-0.25). None="
+                             "CloudConfig default (0.0 = no floor).")
     parser.add_argument("--cloud-inhomogeneity-factor",
                         dest="cloud_inhomogeneity_factor", type=float, default=None,
                         help="Cahalan (1994) horizontal-inhomogeneity factor chi "
@@ -1522,6 +1538,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         surface_thermo_convention=args.bulk_thermo_convention,
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
         cloud_rh_crit=args.cloud_rh_crit,
+        cloud_clubb_cf_override_strength=args.cloud_clubb_cf_override_strength,
+        cloud_clubb_cf_override_floor=args.cloud_clubb_cf_override_floor,
         cloud_inhomogeneity_factor=args.cloud_inhomogeneity_factor,
         cloud_optics_inhomogeneity=args.cloud_optics_inhomogeneity,
         cloud_fsd=args.cloud_fsd,
