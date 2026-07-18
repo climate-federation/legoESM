@@ -592,6 +592,105 @@ class TestStartYearAnchoring:
             assert abs(s79 - s05) < 1e-6
 
 
+class TestNoleapCalendarDateAnchoring:
+    """Audit F1: the model day advances on a strict noleap (365-day) clock,
+    so an anchored file axis must count days BY CALENDAR DATE on that clock.
+    True Gregorian day counts ran ~1 d per 4 yr ahead of the model's nominal
+    date (~9 days over 1979-2014) while insolation stayed 365-periodic."""
+
+    def test_time_coord_to_days_maps_by_calendar_date(self):
+        from legoesm.forcing.amip import _time_coord_to_days
+        t = np.array([
+            np.datetime64("1987-07-16"),
+            np.datetime64("1980-02-29"),
+            np.datetime64("1980-03-01"),
+        ])
+        days = _time_coord_to_days(t, epoch_year=1979)
+        # 1987-07-16 -> (1987-1979)*365 + noleap doy(Jul 16)=197 - 1 = 3116,
+        # NOT the true Gregorian count 3118 (leap days 1980, 1984).
+        greg = float((t[0] - np.datetime64("1979-01-01")) / np.timedelta64(1, "D"))
+        assert greg == 3118.0          # documents the old (drifting) mapping
+        assert days[0] == 8 * 365 + 196.0
+        assert days[1] == 1 * 365 + 58.0    # Feb 29 collapsed onto Feb 28
+        assert days[2] == 1 * 365 + 59.0    # Mar 1
+        # cftime Gregorian axis maps identically (incl. intra-day fraction).
+        import cftime
+        tg = np.array([cftime.DatetimeGregorian(1987, 7, 16, 12)], dtype=object)
+        days_g = _time_coord_to_days(tg, epoch_year=1979)
+        assert days_g[0] == 8 * 365 + 196.5
+        # cftime NoLeap axis: unchanged exact mapping.
+        tn = np.array([cftime.DatetimeNoLeap(1987, 7, 16)], dtype=object)
+        days_n = _time_coord_to_days(tn, epoch_year=1979)
+        assert days_n[0] == 8 * 365 + 196.0
+
+    def test_midjuly_year8_read_at_model_midjuly(self, grid, tmp_path):
+        # End-to-end: a 1979-1988 Gregorian-dated monthly file read at model
+        # day (N+8)*365 + 196 (= model 1987-07-16) must return the 1987-07
+        # record EXACTLY (weight 0), not a leap-drifted mix.  Tags encode
+        # year+month as 280 + (year-1979)*2 + month*0.1 [K] (kept inside the
+        # 240-340 K physical-sanity guard over 10 years).
+        import xarray as xr
+        n_lat, n_lon = 8, 16
+        lat = np.linspace(-80, 80, n_lat)
+        lon = np.linspace(10, 350, n_lon)
+        dates, tags = [], []
+        for y in range(1979, 1989):
+            for m in range(1, 13):
+                dates.append(np.datetime64(f"{y:04d}-{m:02d}-16"))
+                tags.append(280.0 + (y - 1979) * 2.0 + m * 0.1)
+        sst = np.stack([np.full((n_lat, n_lon), v, np.float32) for v in tags])
+        sic = np.full((len(tags), n_lat, n_lon), 0.2, np.float32)
+        p = tmp_path / "greg_decade.nc"
+        xr.Dataset(
+            {"sst": (("time", "lat", "lon"), sst),
+             "sic": (("time", "lat", "lon"), sic)},
+            coords={"time": np.array(dates), "lat": lat, "lon": lon},
+        ).to_netcdf(str(p))
+        cfg = AMIPForcingConfig(path=str(p), sst_var="sst", sic_var="sic")
+        f = load_amip_forcing(cfg, grid, start_year=1979)
+        day = 8 * 365 + 196.0
+        sst_t = float(jnp.mean(get_forcing_at_time(f, day)[0]))
+        assert abs(sst_t - (280.0 + 8 * 2.0 + 0.7)) < 1e-3  # 1987-07 tag = 296.7
+        # The anchored axis itself carries the noleap day count for that
+        # record (times are exact, no ~2-day Gregorian excess by 1987).
+        idx = 8 * 12 + 6                                    # 1987-07 record
+        assert float(f.times[idx]) == day
+
+    def test_daily_axis_feb29_record_dropped(self, grid, tmp_path):
+        # A DAILY Gregorian axis maps Feb 29 onto the same noleap coordinate
+        # as Feb 28; the duplicate record must be DROPPED (OMIP leap-day
+        # filtering) so the anchored axis stays strictly increasing for
+        # searchsorted (codex review).
+        import xarray as xr
+        n_lat, n_lon = 8, 16
+        lat = np.linspace(-80, 80, n_lat)
+        lon = np.linspace(10, 350, n_lon)
+        n_days = 62   # 1980-01-01 .. 1980-03-02 (incl. Feb 29) -> transient
+        dates = np.array([np.datetime64("1980-01-01") + np.timedelta64(t, "D")
+                          for t in range(n_days)])
+        sst = np.stack([np.full((n_lat, n_lon), 285.0 + 0.1 * t, np.float32)
+                        for t in range(n_days)])
+        sic = np.full((n_days, n_lat, n_lon), 0.2, np.float32)
+        p = tmp_path / "daily_leap.nc"
+        xr.Dataset(
+            {"sst": (("time", "lat", "lon"), sst),
+             "sic": (("time", "lat", "lon"), sic)},
+            coords={"time": dates, "lat": lat, "lon": lon},
+        ).to_netcdf(str(p))
+        cfg = AMIPForcingConfig(path=str(p), sst_var="sst", sic_var="sic")
+        f = load_amip_forcing(cfg, grid, start_year=1980)
+        # Feb 29 (record 59) dropped: 61 records remain, axis strictly up.
+        assert f.times.shape[0] == n_days - 1
+        assert bool(jnp.all(jnp.diff(f.times) > 0))
+        # Model day 58 (= 1980-02-28 noleap) returns the FEB 28 record.
+        sst_t = float(jnp.mean(get_forcing_at_time(f, 58.0)[0]))
+        assert abs(sst_t - (285.0 + 0.1 * 58)) < 1e-3
+        # Model day 59 (= 1980-03-01 noleap) returns the MAR 1 record (the
+        # Feb-29 value, 285.0+5.9, is gone).
+        sst_t = float(jnp.mean(get_forcing_at_time(f, 59.0)[0]))
+        assert abs(sst_t - (285.0 + 0.1 * 60)) < 1e-3
+
+
 class TestBcsClipAfterInterp:
     """PCMDI mid-month bcs anchors overshoot [0,1]; clip AFTER interpolation."""
 
@@ -650,6 +749,107 @@ class TestBcsClipAfterInterp:
         f = load_amip_forcing(cfg, grid, start_year=2001)   # must NOT raise
         _, sic_t = get_forcing_at_time(f, 20.0)
         assert float(jnp.max(sic_t)) == 0.0                  # no ice anywhere
+
+
+def _write_icon_file(path, sst_vals, sic_vals, sst_units=None, sic_units=None):
+    """ICON-unstructured (cell/clon/clat) file with explicit per-record cell
+    values.  ``sst_vals``/``sic_vals`` have shape (ntime, ncell); optional
+    ``units`` attrs exercise the shared units guard."""
+    import xarray as xr
+    sst_vals = np.asarray(sst_vals, np.float32)
+    sic_vals = np.asarray(sic_vals, np.float32)
+    n_time, n_cell = sst_vals.shape
+    times = np.array([np.datetime64("2001-01-16") + np.timedelta64(31 * t, "D")
+                      for t in range(n_time)])
+    sst = xr.DataArray(sst_vals, dims=("time", "cell"))
+    sic = xr.DataArray(sic_vals, dims=("time", "cell"))
+    if sst_units is not None:
+        sst.attrs["units"] = sst_units
+    if sic_units is not None:
+        sic.attrs["units"] = sic_units
+    xr.Dataset(
+        {"sst": sst, "sic": sic},
+        coords={
+            "time": times,
+            "clon": ("cell", np.linspace(0.0, 6.0, n_cell)),
+            "clat": ("cell", np.linspace(-1.0, 1.0, n_cell)),
+        },
+    ).to_netcdf(str(path))
+
+
+class TestIconDataQuality:
+    """Audits F2 + F3: the ICON unstructured path must keep bcs anchors
+    unclamped (clip AFTER interpolation, Taylor 2000) and must run the same
+    NaN-fill + units/sanity guards as the lat-lon path."""
+
+    def test_icon_anchors_unclamped_clip_after_interp(self, grid, tmp_path):
+        # F2: SIC anchors overshooting [0,1] and a sub-freezing SST anchor
+        # survive LOAD unclamped; the interpolated value is clipped/floored.
+        p = tmp_path / "icon_bcs.nc"
+        n_cell = 12
+        sst = np.stack([np.full(n_cell, 250.0), np.full(n_cell, 300.0)])
+        sic = np.stack([np.full(n_cell, 1.5), np.full(n_cell, -0.5)])
+        _write_icon_file(p, sst, sic)
+        cfg = AMIPForcingConfig(path=str(p), sst_var="sst", sic_var="sic",
+                                sic_scale=1.0)
+        f = load_amip_forcing(cfg, grid)
+        assert float(jnp.max(f.sic)) > 1.0          # anchors kept raw
+        assert float(jnp.min(f.sic)) < 0.0
+        assert float(jnp.min(f.sst)) < float(constants.T_freeze_ocean)
+        t0 = float(f.times[0])
+        for day in (t0, t0 + 15.5, t0 + 31.0):
+            sst_t, sic_t = get_forcing_at_time(f, day)
+            assert float(jnp.min(sic_t)) >= 0.0
+            assert float(jnp.max(sic_t)) <= 1.0
+            assert float(jnp.min(sst_t)) >= float(cfg.T_ice) - 1e-5
+
+    def test_icon_nan_cells_filled_before_regrid(self, grid, tmp_path):
+        # F3: NaN (land-masked) ICON cells must be nearest-filled BEFORE the
+        # KD-tree regrid — previously they propagated to the target grid.
+        p = tmp_path / "icon_nan.nc"
+        n_cell = 12
+        sst = np.full((2, n_cell), 290.0)
+        sic = np.full((2, n_cell), 0.3)
+        sst[:, 3:6] = np.nan
+        sic[:, 3:6] = np.nan
+        _write_icon_file(p, sst, sic)
+        cfg = AMIPForcingConfig(path=str(p), sst_var="sst", sic_var="sic",
+                                sic_scale=1.0)
+        f = load_amip_forcing(cfg, grid)
+        assert bool(jnp.all(jnp.isfinite(f.sst)))
+        assert bool(jnp.all(jnp.isfinite(f.sic)))
+        # Filled from the nearest VALID cell (all-constant valid field).
+        np.testing.assert_allclose(np.asarray(f.sst), 290.0, rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(f.sic), 0.3, rtol=1e-6)
+
+    def test_icon_percent_sic_wrong_scale_rejected(self, grid, tmp_path):
+        # F3: percent SIC at sic_scale=1.0 must fail loudly (same guard as
+        # the lat-lon path), and load fine at the correct 0.01 scale.
+        p = tmp_path / "icon_pct.nc"
+        n_cell = 12
+        sst = np.full((2, n_cell), 290.0)
+        sic = np.full((2, n_cell), 80.0)          # percent
+        _write_icon_file(p, sst, sic, sic_units="%")
+        cfg_bad = AMIPForcingConfig(path=str(p), sst_var="sst", sic_var="sic",
+                                    sic_scale=1.0)
+        with pytest.raises(ValueError, match="(?i)percent"):
+            load_amip_forcing(cfg_bad, grid)
+        cfg_ok = cfg_bad._replace(sic_scale=0.01)
+        f = load_amip_forcing(cfg_ok, grid)
+        np.testing.assert_allclose(np.asarray(f.sic), 0.8, rtol=1e-6)
+
+    def test_icon_kelvin_sst_spurious_offset_rejected(self, grid, tmp_path):
+        # F3: a Kelvin ICON file with the Celsius offset must be rejected
+        # (would land at ~575 K), same cross-check as the lat-lon path.
+        p = tmp_path / "icon_kelvin.nc"
+        n_cell = 12
+        sst = np.full((2, n_cell), 290.0)
+        sic = np.full((2, n_cell), 0.3)
+        _write_icon_file(p, sst, sic, sst_units="K")
+        cfg = AMIPForcingConfig(path=str(p), sst_var="sst", sic_var="sic",
+                                sst_offset=constants.T_freeze, sic_scale=1.0)
+        with pytest.raises(ValueError, match="(?i)kelvin|spurious"):
+            load_amip_forcing(cfg, grid)
 
 
 def test_sst_floor_applied_after_interp():
