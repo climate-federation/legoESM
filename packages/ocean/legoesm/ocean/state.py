@@ -768,6 +768,16 @@ class BarotropicConfig(NamedTuple):
     bebt: float = 0.2               # Semi-implicit barotropic PGF [0,1]. 0=forward-backward, 0.2=MOM6 default.
     maxvel_barotropic: float = 0.0  # Velocity clipping [m/s]. 0=disabled. MOM6 uses 6.0.
     barotropic_time_filter: str = "cosine"  # "box", "cosine", "power_law" (SM2005 ROMS/MOM6/Oceananigans extended-window filter; damps the 2dx barotropic Coriolis null mode), or "nemo_boxcar_centred" (dynspg_ts ln_bt_fw=F + nn_bt_flt=1: boxcar width n centred at t+dt, ~1.5n substeps)
+    # In-substep barotropic Coriolis discretization (node 16, DINO deep-eq jet).
+    # "avg" (DEFAULT, bit-identical legacy): plain 4-point V->u / U->v average,
+    #   which ANNIHILATES the 2dx zonal checkerboard (the C-grid barotropic
+    #   Coriolis rotational null mode) -> spurious deep-equatorial jet.
+    # "een": NEMO dyn_spg_ts::dyn_cor_2D enstrophy-conserving EEN (ln_dynvor_een)
+    #   -- planetary f rides the depth-integrated Arakawa-Lamb 1981 12-point
+    #   triad (pv_flux_al81_partial_cell with f_vtx), which EXERTS a restoring
+    #   on the checkerboard so the null mode cannot grow.  Requires
+    #   add_barotropic_coriolis=True (in-substep Coriolis on).
+    barotropic_coriolis: str = "avg"
     differentiable_barotropic: bool = False
     # SOTA-local split-explicit barotropic (MOM6/MPAS-Ocean style): when True the
     # per-substep eta-floor clamp is LOCAL (jnp.maximum, NO allreduce) and the

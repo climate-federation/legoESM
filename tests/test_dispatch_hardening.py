@@ -231,6 +231,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # entry against eos.VALID_FREEZE_SCHEMES (per-cell liquidus target).
         ("packages/ocean/legoesm/ocean/coupler/omip2_applicator.py", "under_ice_freeze_relax"),
         ("packages/ocean/legoesm/ocean/dynamics/_flux_limiters.py", "resolve_tvd_limiter"),
+        # In-substep barotropic Coriolis scheme (node 16; "avg" 4-pt avg vs
+        # "een" NEMO enstrophy-conserving). A typo must raise, not silently
+        # run the legacy null-mode 4-pt average.
+        ("packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py", "barotropic_substeps_latlon_cgrid"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model.py", "__init__"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_compute_advection_flux_div"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_validate_config"),

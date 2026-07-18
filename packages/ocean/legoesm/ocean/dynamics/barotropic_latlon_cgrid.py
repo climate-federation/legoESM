@@ -39,6 +39,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     fold_is_local,
     north_fold_mask,
     apply_north_fold,
+    compute_vertex_mask,
     divergence_cgrid,
     fold_vface_row,
     gradient_x_cgrid,
@@ -47,6 +48,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     min_cell_to_uface,
     min_cell_to_vface,
     pad_ns_zero,
+    pv_flux_al81_partial_cell,
+    vertex_coriolis,
 )
 from legoesm.grids.halo_latlon import zero_polar_lat_ends as _zero_polar_lat_ends
 from legoesm.ocean.dynamics.eta_floor import clamp_and_redistribute as _clamp_redistribute
@@ -266,6 +269,89 @@ def _dissipation_coeffs(config, grid, area, dt_s, dtype, mask):
             div_damp_coeff, div_damp_area_u, div_damp_area_v)
 
 
+def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype):
+    """Precompute the geometry inputs for the EEN barotropic Coriolis (node 16).
+
+    NEMO ``dyn_spg_ts::dyn_cor_2D`` applies an ENSTROPHY-conserving EEN
+    (``ln_dynvor_een``) barotropic Coriolis whose ``ffu``/``ffv`` coefficients
+    are the DEPTH-INTEGRAL of the Arakawa-Lamb (1981) 12-point triad
+    (dynspg_ts.F90 ``dyn_cor_2D_init`` np_EEN, ~L1329-1354).  Rather than
+    hand-remap NEMO's staggered ``(i,j)`` indices (offset-by-one from the
+    lego C-grid convention), :func:`een_barotropic_coriolis` REUSES the
+    already-verified lego-convention EEN operator
+    :func:`pv_flux_al81_partial_cell` (``q=(f+ζ)/e3f`` on the 12-point triad,
+    energy+enstrophy conserving, ``ζ=0`` here for the pure planetary
+    barotropic Coriolis) applied to the depth-broadcast barotropic velocity
+    and depth-integrated with the same ``e3u·e3v`` volume weighting NEMO uses.
+
+    Returns a dict of reference (η-independent, like NEMO's frozen arrays)
+    3-D face/vertex thicknesses, the vertex Coriolis ``f_vtx``, the vertex and
+    3-D face masks, and the column depths ``hu``/``hv`` — all static geometry.
+    """
+    e3u = min_cell_to_uface(h_k).astype(dtype)      # (nlat, nlon+1, nlev)
+    e3v = min_cell_to_vface(h_k, grid).astype(dtype)  # (nlat+1, nlon, nlev)
+    hu = jnp.sum(e3u, axis=-1)                       # (nlat, nlon+1)
+    hv = jnp.sum(e3v, axis=-1)                       # (nlat+1, nlon)
+    # F-point (vertex) thickness = min over the 4 surrounding cells with a
+    # BIG_H sentinel at dry cells (MITgcm hFacZ / NEMO e3f_vor; same min-rule
+    # the 3-D EEN caller uses in ocean_pe_latlon_cgrid.py:1817).  Any positive
+    # e3f keeps the EEN energy conservation (a property of the triad pairing,
+    # not the e3f value), so the min-corner choice is a tier-3 detail.
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
+    BIG = 1.0e30
+    ha = jnp.where(h_k > 0.0, h_k, BIG)
+    h_sw = jnp.roll(ha, 1, axis=1)                   # west neighbour
+    hp, hswp = pad_with_pole_bc_lat_multi(
+        (ha, h_sw), halo=1, south_values=(BIG, BIG), north_values=(BIG, BIG))
+    h_vtx = jnp.minimum(jnp.minimum(hp[:-1], hp[1:]),
+                        jnp.minimum(hswp[:-1], hswp[1:]))
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
+        fold = grid.fold
+        ha_p = ha[-1:, fold.perm_T, :]
+        hsw_p = h_sw[-1:, fold.perm_T, :]
+        h_vtx_north = jnp.minimum(
+            jnp.minimum(ha[-1:], h_sw[-1:]), jnp.minimum(ha_p, hsw_p))
+        h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid, north_mask=nmask)
+    h_vtx = jnp.concatenate([h_vtx, h_vtx[:, 0:1, :]], axis=1).astype(dtype)
+    f_vtx = vertex_coriolis(grid).astype(dtype)      # (nlat+1, nlon+1)
+    vtx_mask = compute_vertex_mask(mask, grid=grid)
+    u_mask_3d = (u_mask[..., None] * (e3u > 0)).astype(dtype)
+    v_mask_3d = (v_mask[..., None] * (e3v > 0)).astype(dtype)
+    return dict(e3u=e3u, e3v=e3v, hu=hu, hv=hv, h_vtx=h_vtx, f_vtx=f_vtx,
+                vtx_mask=vtx_mask, u_mask_3d=u_mask_3d, v_mask_3d=v_mask_3d)
+
+
+def een_barotropic_coriolis(U_bar, V_bar, pre, eps=1.0e-10):
+    """EEN barotropic Coriolis tendency (``cor_u``, ``cor_v``) — node 16.
+
+    ``cor_u = (1/hu)·Σ_k e3u_k·diag_u_k``, ``cor_v = (1/hv)·Σ_k e3v_k·diag_v_k``
+    where ``(diag_u, diag_v) = pv_flux_al81_partial_cell(ζ=0, f_vtx=f, …)`` with
+    ``u,v`` = the (depth-independent) barotropic velocities broadcast over the
+    ``nlev`` reference levels.  The ``e3u·e3v`` depth weighting reproduces
+    NEMO's ``ffu``/``ffv`` volume weighting; in the flat-bottom limit this
+    reduces to ``f·V̄`` (verified to 1e-4).  Both components are evaluated at
+    the SAME time level (NEMO ``dyn_cor_2D`` uses ``punb``/``pvnb`` together) —
+    required for the EEN energy conservation.
+
+    NOTE: this reuses the lego-convention AL81 operator, which carries per-unit-
+    width mass fluxes and DROPS the ``e1``/``e2`` horizontal metric factors NEMO
+    keeps in ``ffu``/``ffv``.  So energy+enstrophy conservation is exact only on a
+    uniform-metric grid; on lat-lon it leaves an ``O(Δcos φ)`` work residual
+    (~4e-4), the SAME character as the baseline baroclinic AL81 — not a bug.
+    """
+    nlev = pre["e3u"].shape[-1]
+    u3 = jnp.broadcast_to(U_bar[..., None], U_bar.shape + (nlev,))
+    v3 = jnp.broadcast_to(V_bar[..., None], V_bar.shape + (nlev,))
+    diag_u, diag_v = pv_flux_al81_partial_cell(
+        jnp.zeros_like(pre["h_vtx"]), pre["h_vtx"], pre["e3v"], v3,
+        pre["e3u"], u3, pre["u_mask_3d"], pre["v_mask_3d"], pre["vtx_mask"],
+        f_vtx=pre["f_vtx"])
+    cor_u = jnp.sum(pre["e3u"] * diag_u, axis=-1) / jnp.maximum(pre["hu"], eps)
+    cor_v = jnp.sum(pre["e3v"] * diag_v, axis=-1) / jnp.maximum(pre["hv"], eps)
+    return cor_u, cor_v
+
+
 def _run_substep_loop(
     eta, U_bar, V_bar,
     *,
@@ -277,6 +363,7 @@ def _run_substep_loop(
     coeffs, local_subcycle_clamp,
     linear_free_surface=False,
     ab3_za=None, ab3_zb=None, ab3_hist=None,
+    een_pre=None,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -415,6 +502,15 @@ def _run_substep_loop(
         # the 2D Coriolis to the EXTRAPOLATED mid-step velocities (both
         # components simultaneously, dynspg_ts.F90:689); otherwise the FB pair.
         _V_cor_src = V_mid if ab3_za is not None else V_bar_c
+        _U_cor_src_cur = U_mid if ab3_za is not None else U_bar_c
+        if een_pre is not None:
+            # NEMO dyn_spg_ts::dyn_cor_2D enstrophy-conserving EEN (node 16):
+            # BOTH components from the SAME time-level velocities (required for
+            # energy conservation; NEMO passes punb/pvnb together).  The
+            # planetary f rides the depth-integrated AL81 12-point triad, which
+            # exerts a restoring on the 2Δx checkerboard the 4-pt avg annihilates.
+            _cor_u_een, _cor_v_een = een_barotropic_coriolis(
+                _U_cor_src_cur, _V_cor_src, een_pre)
         V_west = jnp.roll(_V_cor_src, 1, axis=1)
         V_at_u = 0.25 * (_V_cor_src[:-1] + _V_cor_src[1:]
                          + V_west[:-1] + V_west[1:])
@@ -424,7 +520,12 @@ def _run_substep_loop(
         # in-substep Coriolis is gated off when the planetary f×u already
         # reaches the barotropic mode via F_slow (Oceananigans convention) —
         # this removes the C-grid 4-point-average rotational null mode.
-        _cor_u = (f_u * V_at_u) if add_barotropic_coriolis else 0.0
+        if not add_barotropic_coriolis:
+            _cor_u = 0.0
+        elif een_pre is not None:
+            _cor_u = _cor_u_een
+        else:
+            _cor_u = f_u * V_at_u
         U_bar_new = (U_bar_c + dt_s * (
             _cor_u - g * deta_dx + F_slow_u
         )) * u_mask
@@ -438,7 +539,14 @@ def _run_substep_loop(
         # (same collective count on every rank).
         _U_cor_src = U_mid if ab3_za is not None else U_bar_new
         U_new_at_v = interp_u_to_vface_4pt(_U_cor_src, grid)
-        _cor_v = (-f_v * U_new_at_v) if add_barotropic_coriolis else 0.0
+        if not add_barotropic_coriolis:
+            _cor_v = 0.0
+        elif een_pre is not None:
+            # EEN cor_v computed above from the SAME-time-level U (not the
+            # backward U_bar_new) — the energy-conserving pairing.
+            _cor_v = _cor_v_een
+        else:
+            _cor_v = -f_v * U_new_at_v
         V_bar_new = (V_bar_c + dt_s * (
             _cor_v - g * deta_dy + F_slow_v
         )) * v_mask
@@ -732,6 +840,20 @@ def barotropic_substeps_latlon_cgrid(
     # prefers stored grid.f_u/f_v, fold-safe).
     f_u, f_v = coriolis_at_faces(grid, eta.dtype)
 
+    # In-substep barotropic Coriolis discretization (node 16).  "avg" (default)
+    # = 4-pt average (legacy, bit-identical); "een" = NEMO enstrophy-conserving
+    # EEN (kills the 2Δx checkerboard null mode / deep-eq jet).  Validated at
+    # fn entry on the static config value (dispatch hardening).
+    _bt_cor = getattr(config.barotropic, "barotropic_coriolis", "avg")
+    if _bt_cor not in ("avg", "een"):
+        raise ValueError(
+            "unknown barotropic_coriolis scheme "
+            f"{_bt_cor!r}: must be one of ('avg', 'een').")
+    _een_pre = None
+    if _bt_cor == "een" and add_barotropic_coriolis:
+        _een_pre = _build_een_barotropic_inputs(
+            h_k, grid, mask, u_mask, v_mask, eta.dtype)
+
     coeffs = _dissipation_coeffs(config, grid, _area, dt_s, eta.dtype, mask)
 
     w_filter, w_total, w_transport, n_loop = _compute_weights(
@@ -766,6 +888,7 @@ def barotropic_substeps_latlon_cgrid(
         local_subcycle_clamp=config.barotropic.barotropic_local_subcycle_clamp,
         linear_free_surface=getattr(z_coord, 'linear_free_surface', False),
         ab3_za=_ab3_za, ab3_zb=_ab3_zb, ab3_hist=_ab3_hist,
+        een_pre=_een_pre,
     )
     (eta_f, U_bar_f, V_bar_f,
      Hu_sum_f, Hv_sum_f, eta_sum_f, U_sum_f, V_sum_f) = _finals[:8]
@@ -924,6 +1047,11 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
             "LatLonCGridGeometry (the model's ensure_geometry output); got "
             f"{type(grid).__name__}."
         )
+    if getattr(config.barotropic, "barotropic_coriolis", "avg") == "een":
+        raise NotImplementedError(
+            "barotropic_coriolis='een' is not wired into the wide-halo "
+            "barotropic path (the EEN precompute would need the extended "
+            "band); use the standard split-explicit path or 'avg'.")
 
     g = jnp.asarray(config.g)
     H_bathy = state.H_bathy.data

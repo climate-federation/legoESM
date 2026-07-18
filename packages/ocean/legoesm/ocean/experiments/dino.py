@@ -412,6 +412,11 @@ class DINOConfig:
     # (legacy) | "power_law" | "box" | "nemo_boxcar_centred" (dynspg_ts
     # ln_bt_fw=F + nn_bt_flt=1 — the DINO namelist selection).
     barotropic_time_filter: str = "cosine"
+    # In-substep barotropic Coriolis (node 16): "avg" (legacy 4-pt average,
+    # which annihilates the 2Δx checkerboard -> spurious deep-equatorial jet)
+    # | "een" (NEMO dyn_spg_ts::dyn_cor_2D enstrophy-conserving EEN
+    # ln_dynvor_een, which restores the null mode).  DINO uses ln_dynvor_een.
+    barotropic_coriolis: str = "avg"
     # ln_bt_auto: compute n_barotropic_substeps from the external-wave
     # CFL with this Courant ceiling (rn_bt_cmax); <= 0 disables (use
     # n_barotropic_substeps as-is).
@@ -651,6 +656,9 @@ DINO_RECIPES: dict[str, dict] = {
         # -- Barotropic / free surface (namdyn_spg: ln_dynspg_ts=T; nn_bt_flt=2; nn_e=30) --
         "barotropic_solver": "explicit_substep",
         "barotropic_time_filter": "nemo_boxcar_centred",
+        # namdyn_vor: ln_dynvor_een — enstrophy-conserving EEN barotropic
+        # Coriolis (node 16; cures the deep-equatorial jet null mode).
+        "barotropic_coriolis": "een",
         "n_barotropic_substeps": 30,
         # -- Surface forcing (namusr_def: ln_ann_cyc=T seasonal cycle) --
         "forcing_annual_cycle": True,
@@ -2027,6 +2035,7 @@ def dino_lat_lon_model_config(
         barotropic_solver=cfg.barotropic_solver,
         barotropic_implicit_theta_eta=cfg.barotropic_implicit_theta_eta,
         barotropic_time_filter=cfg.barotropic_time_filter,
+        barotropic_coriolis=cfg.barotropic_coriolis,
         **_scheme,
         tracer_advection=cfg.tracer_advection,
         pgf_scheme=cfg.pgf_scheme,

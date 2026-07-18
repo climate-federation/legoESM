@@ -27,14 +27,13 @@ tests pin the *mechanism* that makes that survival hold.
 
 import jax.numpy as jnp
 import numpy as np
-import pytest
-
 from legoesm.core.field import Field
 from legoesm.core.precision import PrecisionPolicy, set_policy
-from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-    barotropic_substeps_latlon_cgrid)
+from legoesm.ocean.dynamics.barotropic_latlon_cgrid import barotropic_substeps_latlon_cgrid
 from legoesm.ocean.experiments.silvestri_baroclinic_jet import (
-    SilvestriJetConfig, build_silvestri_baroclinic_jet_setup)
+    SilvestriJetConfig,
+    build_silvestri_baroclinic_jet_setup,
+)
 
 set_policy(PrecisionPolicy.fp64())
 
@@ -121,6 +120,79 @@ def test_cure_removes_in_substep_coriolis():
     assert float(np.max(np.abs(u_off))) < 1e-12, (
         f"cure: add_barotropic_coriolis=False must remove the in-substep "
         f"Coriolis (no U from a divergence-free V), got {np.max(np.abs(u_off)):.2e}")
+
+
+def _een_cfg(cfg):
+    return cfg._replace(barotropic=cfg.barotropic._replace(
+        barotropic_coriolis="een"))
+
+
+def test_een_restores_the_checkerboard_null_mode():
+    """NEMO EEN (``barotropic_coriolis="een"``) EXERTS a restoring on the 2Δx
+    checkerboard the 4-pt average annihilates — the node-16 fix.
+
+    The 4-pt-avg Coriolis gives ~0 U response to the checkerboard (null mode);
+    the enstrophy-conserving EEN gives a response COMPARABLE to a smooth V
+    (the mode is no longer invisible to the discrete Coriolis).
+    """
+    r, cfg, s = _rest_setup()
+    een = _een_cfg(cfg)
+    ck = _set_v(s, _checkerboard_v(s))
+    sm = _set_v(s, _smooth_v(s))
+    cor_ck_avg = _coriolis_u(r, cfg, ck)
+    cor_ck_een = _coriolis_u(r, een, ck)
+    cor_sm_een = _coriolis_u(r, een, sm)
+    # avg annihilates the checkerboard...
+    assert cor_ck_avg < 1e-3 * cor_sm_een, (
+        f"control: avg should annihilate the checkerboard, got {cor_ck_avg:.2e}")
+    # ...EEN restores it: the checkerboard now drives a Coriolis U of the same
+    # order as a smooth field (no longer a null mode).
+    assert cor_ck_een > 0.1 * cor_sm_een, (
+        f"EEN failed to restore the null mode: cor_ck_een={cor_ck_een:.2e} "
+        f"vs cor_sm_een={cor_sm_een:.2e}")
+    # and EEN is a genuine change vs avg on the checkerboard.
+    assert cor_ck_een > 100.0 * max(cor_ck_avg, 1e-30)
+
+
+def test_een_barotropic_coriolis_conserves_energy():
+    """The EEN barotropic Coriolis does ~no work (Σ hu·A·U·cor_u + hv·A·V·cor_v
+    ≈ 0), the defining property of the enstrophy-conserving triad.  Residual is
+    limited by the coastal Neumann fill / partial cells (same character as the
+    baroclinic AL81 operator), not machine precision on a walled basin."""
+    from legoesm.grids.latlon import ensure_geometry
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _build_een_barotropic_inputs,
+        een_barotropic_coriolis,
+    )
+    from legoesm.ocean.vertical import compute_layer_thickness
+    setup = build_silvestri_baroclinic_jet_setup(
+        n_lat=24, n_lon=16, scheme="W9V", nlev=4,
+        config=SilvestriJetConfig(), stabilize=False)
+    grid = ensure_geometry(setup.grid)
+    st = setup.initial_state
+    h_bathy = st.H_bathy.data.astype(jnp.float64)
+    mask = st.land_mask.data.astype(jnp.float64)
+    um = st.u_mask.data.astype(jnp.float64)
+    vm = st.v_mask.data.astype(jnp.float64)
+    h_k = compute_layer_thickness(
+        jnp.zeros_like(h_bathy), h_bathy, setup.z_coord,
+        min_water_column_m=setup.model_config.min_water_column_m)
+    pre = _build_een_barotropic_inputs(h_k, grid, mask, um, vm, jnp.float64)
+    nlat, nlon = mask.shape
+    rng = np.random.default_rng(0)
+    u_r = jnp.asarray(rng.standard_normal((nlat, nlon + 1))) * um
+    v_r = jnp.asarray(rng.standard_normal((nlat + 1, nlon))) * vm
+    cu, cv = een_barotropic_coriolis(u_r, v_r, pre)
+    area = grid.area
+    a_u = 0.5 * (jnp.roll(area, 1, 1) + area)
+    a_u = jnp.concatenate([a_u, a_u[:, :1]], 1)
+    a_v = jnp.concatenate([area[:1], 0.5 * (area[:-1] + area[1:]), area[-1:]], 0)
+    work = float(jnp.sum(pre["hu"] * a_u * u_r * cu)
+                 + jnp.sum(pre["hv"] * a_v * v_r * cv))
+    scale = float(jnp.sum(jnp.abs(pre["hu"] * a_u * u_r * cu))
+                  + jnp.sum(jnp.abs(pre["hv"] * a_v * v_r * cv)))
+    assert abs(work) / scale < 1e-2, (
+        f"EEN Coriolis does spurious work: rel={work / scale:.2e}")
 
 
 def test_explicit_ab2_config_gates_in_substep_coriolis():

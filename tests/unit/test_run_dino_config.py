@@ -80,6 +80,25 @@ def test_barotropic_solver_default_none(monkeypatch):
     assert args.barotropic_solver is None
 
 
+def test_barotropic_coriolis_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--barotropic-coriolis", "een"])
+    args = rd._parse_args()
+    assert args.barotropic_coriolis == "een"
+
+
+def test_barotropic_coriolis_default_none(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().barotropic_coriolis is None
+
+
+def test_barotropic_coriolis_rejects_bad_choice(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--barotropic-coriolis", "bogus"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
 def test_nemo_faithful_grid_flag_parses(monkeypatch):
     monkeypatch.setattr(sys, "argv",
                         ["run_dino", "--grid", "latlon", "--nemo-faithful-grid"])

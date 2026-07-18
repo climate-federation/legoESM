@@ -3707,6 +3707,7 @@ def pv_flux_al81_partial_cell(
     u_mask_3d: jnp.ndarray,
     v_mask_3d: jnp.ndarray,
     vtx_mask: jnp.ndarray,
+    f_vtx: jnp.ndarray | None = None,
     eps_h: float = 1.0e-10,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Arakawa-Lamb 1981 (AL81) energy-and-enstrophy-conserving PV flux.
@@ -3875,11 +3876,19 @@ def pv_flux_al81_partial_cell(
       partial cells.  Mon. Wea. Rev. 126, 3248-3270.  (min-rule for
       vertex thickness.)
     """
-    # --- 1. PV at vertices, ``q = ζ / h_vtx`` ----------------------
-    # ``h_vtx`` already carries the BIG_H sentinel at fully-dry
-    # vertices (set by the caller) so q ≈ 0 there; eps_h is a guard
-    # against floating-point edge cases.
-    q = zeta / jnp.maximum(h_vtx, eps_h)
+    # --- 1. PV at vertices ----------------------------------------
+    # ``q = (f + ζ)/h_vtx`` (ABSOLUTE vorticity, NEMO ``np_CRV`` EEN) when
+    # ``f_vtx`` is given, else ``q = ζ/h_vtx`` (relative-only, ``np_RVO``).
+    # f is added BEFORE the /h division (matching NEMO ``vor_een``:
+    # ``zwz = ff_f + ζ`` then ``zwz /= e3f``) so the planetary term rides
+    # the SAME enstrophy-conserving 12-point triad as the relative
+    # vorticity — the two are ONE operator, not two.  This is the
+    # difference between the split ``al81`` (ζ-only EEN + a separate
+    # non-enstrophy-conserving 4-pt Coriolis) and the faithful ``een_total``.
+    # ``h_vtx`` already carries the BIG_H sentinel at fully-dry vertices
+    # (set by the caller) so q ≈ 0 there; eps_h guards floating-point edges.
+    zeta_abs = zeta if f_vtx is None else zeta + f_vtx[..., jnp.newaxis]
+    q = zeta_abs / jnp.maximum(h_vtx, eps_h)
 
     # Neumann-fill q at land-adjacent vertices so the triad sees a
     # smooth field across coastlines.  The fill is idempotent at

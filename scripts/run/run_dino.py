@@ -209,6 +209,18 @@ def _parse_args():
              "LAT-LON ONLY (MPAS supports implicit_cn / explicit_substep).",
     )
     p.add_argument(
+        "--barotropic-coriolis",
+        choices=("avg", "een"),
+        default=None,
+        help="In-substep barotropic Coriolis discretization "
+             "(DINOConfig.barotropic_coriolis; explicit_substep only). "
+             "'avg' (legacy 4-pt average) annihilates the 2Δx zonal "
+             "checkerboard — the C-grid barotropic Coriolis null mode that "
+             "drives the spurious deep-equatorial jet. 'een' = NEMO "
+             "dyn_spg_ts::dyn_cor_2D enstrophy-conserving EEN (ln_dynvor_een), "
+             "which restores the null mode (node 16; the DINO card default).",
+    )
+    p.add_argument(
         "--momentum-advection",
         choices=("vector_invariant", "flux_form", "weno5", "weno7", "weno9"),
         default=None,
@@ -469,6 +481,9 @@ def main():
     if args.evd_momentum is not None:
         cfg = dataclasses.replace(
             cfg, evd_on_momentum=(args.evd_momentum == "on"))
+    if args.barotropic_coriolis is not None:
+        cfg = dataclasses.replace(
+            cfg, barotropic_coriolis=args.barotropic_coriolis)
     if args.gm_kappa_scheme is not None:
         cfg = dataclasses.replace(cfg, gm_kappa_scheme=args.gm_kappa_scheme)
     if args.bottom_drag_scheme is not None:
