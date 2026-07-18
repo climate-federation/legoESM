@@ -35,9 +35,10 @@ def test_preset_dataset_forwards_sic_path_and_var_overrides(monkeypatch):
 
     captured = {}
 
-    def _fake_load(config, grid, start_year=None):
+    def _fake_load(config, grid, start_year=None, run_days=None):
         captured["config"] = config
         captured["start_year"] = start_year
+        captured["run_days"] = run_days
         return SimpleNamespace(times=None, sst=None, sic=None, config=config)
 
     monkeypatch.setattr(amip_mod, "load_amip_forcing", _fake_load)
