@@ -134,19 +134,15 @@ mpirun -np 6 .venv/bin/python scripts/bench/run_levante_gpu_scaling.py \
 
 ### 3.3 Atmosphere outputs to inspect
 
-Each run writes:
-- `results.json`
-- `report.md`
-- `logs/*.log`
-
-Key metrics are in `scaling_validation` and `mpi_validation.scaling`:
-- `compile_time_s`
-- `steady_ms_per_step`
-- `throughput_global_mcells_s`
-- `throughput_per_device_mcells_s`
-- `throughput_per_rank_mcells_s`
-- `derived.speedup_vs_baseline`
-- `derived.efficiency_vs_baseline`
+Each run writes a timestamped output dir (`--output-dir`, `--no-timestamp`
+to disable stamping) containing the JSON results payload (per-result rows:
+mode, precision, backend, compile time, timing, cells/rank + cells/device,
+transport + decomposition metadata, `hlo_collective_permute` census) and
+the standard CSV schema consumed by
+`scripts/plot/plot_scaling_efficiency.py`. Compute speedup/efficiency
+across a rank/device ladder from the per-row timings (the cross-machine
+comparison workflow in
+`docs/performance/scaling/derecho_levante_sota_review_2026-07.md` §5).
 
 ## 4. Ocean Scaling and MPI Hardware Tests
 
@@ -285,11 +281,15 @@ Key tests:
 
 ## 6. Pass/Fail Interpretation
 
-Atmosphere (`run_levante_gpu_scaling.py` defaults):
-- compile time threshold: `--scaling-compile-time-max-s` (default 30s)
-- strong efficiency threshold: `--strong-min-efficiency` (default 0.12)
-- weak step growth threshold: `--weak-max-step-growth` (default 2.5)
-- weak throughput threshold: `--weak-min-per-device-throughput-ratio` (default 0.35)
+Atmosphere (`run_levante_gpu_scaling.py`): the script has NO pass/fail
+threshold flags — it measures and records. Interpret the ladder against
+the evidence-tier definitions and per-grid expectations in
+`docs/performance/scaling/SCALING_STATUS_AUDIT.md` (the authoritative
+support matrix; earlier revisions of this file documented
+`--scaling-compile-time-max-s`-style gate flags that no longer exist).
+MPI runs are only comparable when `--cs-mpi-scatter` (cubed-sphere true
+face decomposition) is armed — the default replicated-dynamics mode is
+refused for scaling claims.
 
 Ocean (`run_ocean_test_matrix.py` defaults):
 - heat drift: `<= 1e-3`
@@ -304,8 +304,10 @@ Recommended practice for real hardware reports:
 
 ## 7. Common Issues
 
-- MPI runs marked `skipped` due launcher/socket policy:
-  - use `--mpi-interface`, `--mpi-mca`, and `--mpi-extra-args`
+- MPI runs failing due to launcher/socket policy:
+  - pass interface/MCA options to `mpirun` itself (e.g.
+    `mpirun --mca btl_tcp_if_include lo0 ...`) — the bench script has no
+    MPI-launcher flags of its own
   - verify network interface and container privileges
 - `mpi4jax` compatibility warning:
   - tested range is enforced in `legoesm.parallel.reductions`

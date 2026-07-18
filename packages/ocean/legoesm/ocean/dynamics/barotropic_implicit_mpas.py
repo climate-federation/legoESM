@@ -550,38 +550,16 @@ def barotropic_implicit_mpas(
     ) * mask
 
     # ----- Step 4: PCG solve --------------------------------------------
-    # MPAS stays on the stock-CG primal (single-rank only).  The
-    # distributed fixed-iteration PCG that the lat-lon C-grid solver uses
-    # (``barotropic_common.solve_helmholtz_implicit``) is NOT yet wired up
-    # for MPAS because the Voronoi barotropic path lacks the two pieces a
-    # multi-rank iterated solve needs, and adding them is real
-    # infrastructure rather than a shared-helper reuse:
+    # Two dispatch legs, selected at ENTRY (see the distributed-dispatch
+    # block at the top of this function, which resolved the historical
+    # TODO(distributed-mpas-pcg)):
     #
-    #   1. Halo-in-matvec.  ``A_op`` -> ``gradient_edge(phi_cell)`` only
-    #      indexes ``phi_cell[cellsOnEdge]`` locally; it does NOT exchange
-    #      ghost-cell values.  The explicit substep loop has no halo
-    #      exchange either.  In a fixed-iteration PCG ``p``/``eta`` change
-    #      every iteration, so the ghost cells would go stale after the
-    #      first matvec.  A correct distributed MPAS PCG must call a
-    #      Voronoi cell halo-exchange inside ``A_op`` before
-    #      ``fill_land_cells_mpas``/``gradient_edge``.
-    #   2. Owned-cell reductions.  Voronoi local meshes hold owned + halo
-    #      cells (``voronoi_mpi.make_voronoi_partition_layout`` exposes
-    #      ``owned_mask_cells``).  PCG dot products, the residual, and the
-    #      mass projection would double-count ghost cells unless every
-    #      global SUM is masked to owned cells.
-    #
-    # The lat-lon C-grid band decomposition has neither problem (its
-    # ``A_op`` pre-pads through the backend-dispatched halo, and cell rows
-    # partition without overlap so there are no ghost cells in the
-    # reduction).  Distributing the MPAS PCG is therefore deferred —
-    # TODO(distributed-mpas-pcg): thread a Voronoi cell-halo exchange into
-    # ``A_op`` and an ``owned_cell_mask`` into ``solve_helmholtz_implicit``
-    # /``_global_dot_batch``, then mirror the lat-lon dispatch here.  The
-    # MPAS ocean MPI path is currently forward-only for AD
-    # (``voronoi_mpi.py``), so implicit_cn under MPI is unsupported until
-    # then.  (np>1 refusal is at function ENTRY — see top of this
-    # function.)
+    #   - single-rank / no layout: the stock-CG custom-VJP solver below;
+    #   - Voronoi partition layout armed: the shared distributed fixed-M
+    #     PCG (``_vlayout is not None`` branch) with a cell-halo exchange
+    #     composed into every ``A_op`` application and owned-cell-masked
+    #     area-weighted dots — the two pieces (halo-in-matvec,
+    #     owned-cell reductions) a multi-rank iterated solve needs.
     #
     # MERGE COMPOSITION (PR #394 × MPI-scaling refactor): the single-rank
     # solve routes through :func:`solve_helmholtz_freesurface_mpas` —
