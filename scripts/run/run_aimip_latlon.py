@@ -453,61 +453,15 @@ def train_variant(variant, model, grid, sigma, physics_pipeline, config,
         step_unified = make_neural_step_unified(trained, adapter)
         seg = build_training_segment(model, step_unified, grid, sigma, args.dt)
     elif variant == "sfno":
-        import numpy as _np
-        from legoesm.grids.gaussian import create_gaussian_grid
-        from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
-        from legoesm.ml.sfno import SFNO, SFNOConfig
-        from legoesm.ml.channel_packing import PE3DChannelSpec
-        from legoesm.training.sfno_dycore_coupling import (
-            make_sfno_step_unified_latlon,
+        # The single-GPU lat-lon SFNO trainer (train_sfno_latlon) was retired
+        # when the SFNO path moved to the SPMD-shardable WB scale trainer.  The
+        # live SFNO variant is `sfno_full` in run_aimip.py / training.scale_build
+        # (make_sfno_step_unified_latlon there consumes physical-unit tendencies
+        # directly).  This launcher no longer trains SFNO.
+        raise SystemExit(
+            "variant 'sfno' is retired here; use run_aimip.py "
+            "--variants sfno_full (the WB scale trainer)."
         )
-        from legoesm.training.training_driver import train_sfno_latlon
-        # Gaussian grid for the SFNO (its SHT needs it), ~matched to the
-        # lat-lon resolution; the bridge regrids between the two.
-        n_max = args.sfno_n_max or max(10, 2 * args.n_lat // 3)
-        gauss = create_gaussian_grid(n_max, dealiasing="quadratic")
-        spec = PE3DChannelSpec(nlev=args.n_lev)
-        cfg = SFNOConfig(in_channels=spec.n_channels,
-                         out_channels=spec.n_channels,
-                         embed_dim=args.sfno_embed, n_blocks=args.sfno_blocks,
-                         # output is a TENDENCY, not state+residual: residual
-                         # prediction would feed the input state (~300 K) in as
-                         # dT/dt and blow up the forward.
-                         residual_prediction=False,
-                         gradient_checkpoint=True)
-        sfno = SFNO(cfg, gauss, key=jax.random.PRNGKey(args.nn_seed))
-        # Flux head: per-column MLP (packed state -> 4 radiation fluxes) so
-        # the SFNO (replacement) variant is supervised on TOA/surface fluxes
-        # like the other families.  Separate float module -> trains alongside
-        # the SFNO without dragging the Gaussian grid's int leaves into grad.
-        import equinox as _eqx
-        flux_head = _eqx.nn.MLP(
-            in_size=spec.n_channels, out_size=4,
-            width_size=args.nn_hidden, depth=2, activation=jax.nn.gelu,
-            key=jax.random.PRNGKey(args.nn_seed + 1))
-        ll_lat, ll_lon = _np.asarray(grid.lat), _np.asarray(grid.lon)
-        g_lat, g_lon = _np.asarray(gauss.lat), _np.asarray(gauss.lon)
-        g_lat2d, g_lon2d = _np.meshgrid(g_lat, g_lon, indexing="ij")
-        ll_lat2d, ll_lon2d = _np.meshgrid(ll_lat, ll_lon, indexing="ij")
-        w_ll2g = compute_latlon_to_voronoi_weights(
-            ll_lat, ll_lon, g_lat2d.ravel(), g_lon2d.ravel())
-        w_g2ll = compute_latlon_to_voronoi_weights(
-            g_lat, g_lon, ll_lat2d.ravel(), ll_lon2d.ravel())
-        # train_sfno_latlon differentiates the SFNO + flux_head (float/complex)
-        # as a tuple; the Gaussian grid (int SHT index arrays) stays a closure
-        # const.  It returns the trained SFNOPhysics (sfno + flux_head + grid).
-        trained, hist = train_sfno_latlon(
-            model, grid, sigma, sfno, gauss, args.n_lev, w_ll2g, w_g2ll,
-            int(gauss.n_lat), int(gauss.n_lon), ics, targets, forcings,
-            flux_head=flux_head,
-            n_epochs=args.epochs, lr=args.lr, dt=args.dt,
-            rollout_hours=_ROLLOUT_HOURS, tendency_scale=args.nn_residual_scale,
-            loss_config=loss_config,
-        )
-        step_unified = make_sfno_step_unified_latlon(
-            trained, w_ll2g, w_g2ll, int(gauss.n_lat), int(gauss.n_lon),
-            tendency_scale=args.nn_residual_scale)
-        seg = build_training_segment(model, step_unified, grid, sigma, args.dt)
     else:
         raise ValueError(
             f"unknown variant {variant!r}; supports "

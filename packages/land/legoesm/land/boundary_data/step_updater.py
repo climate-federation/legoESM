@@ -37,7 +37,7 @@ from legoesm.land.boundary_data._internals import (
     GLACIER_ALB_VIS, GLACIER_ALB_NIR, GLACIER_ALBEDO_DEFAULT,
     pft_lookup_arrays,
 )
-from legoesm.land.boundary_data.builders import glacier_mask
+from legoesm.land.boundary_data.builders import dominant_pft_index, glacier_mask
 from legoesm.land.boundary_data.gap_fill import (
     surfdata_covered,
     bare_canopy_params, bare_land_surface_params,
@@ -176,7 +176,6 @@ def make_step_land_params_updater(gsd, surface_scheme):
     # base_lp so the SEB LandSurfaceParams carries fC4 (structure matches bare_fb for
     # the gap_fill_tree tree-map) and the big-leaf FvCB path runs the right pathway.
     fc4_col = jnp.asarray(np.asarray(pft_lookup_arrays()["fc4"])[dominant_pft_index(gsd)])
-    base_lp = base_lp._replace(fC4=fc4_col)
 
     def _update_seb(theta_top: jnp.ndarray, doy: jnp.ndarray, year: jnp.ndarray):
         """Return ``(LandSurfaceParams, lai_col)``: ``lai_col`` is the
@@ -186,6 +185,9 @@ def make_step_land_params_updater(gsd, surface_scheme):
         # PFT-weighted surface parameters at this year (public provider API; the
         # CLM5 default table is data-independent, so XLA hoists it out of the loop).
         base_lp = PFTParamProvider.from_defaults(fracs)()
+        # Fold the dominant-PFT C4 flag onto the SEB params so the big-leaf FvCB
+        # path runs the right pathway (from_defaults does not set fC4).
+        base_lp = base_lp._replace(fC4=fc4_col)
         lai_m = interp_monthly(lai_monthly, doy)                       # (ncol, npft)
         lai_col = jnp.sum(jnp.where(jnp.isfinite(lai_m), lai_m, 0.0) * fracs, axis=-1)
         soil_bg = soil_albedo_broadband(soil_color, theta_top)
