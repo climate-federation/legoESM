@@ -2717,6 +2717,160 @@ def plane_acoustic_substeps_si_horizontal(
     )
 
 
+def plane_acoustic_substeps_si_horizontal_halo(
+    state: PlaneNonHydrostaticState,
+    slow_tend: PlaneNonHydrostaticTendencies,
+    dt_s: float,
+    n_substeps: int,
+    config: SplitExplicitConfig,
+    height_coord: HeightCoordinate,
+    terrain_metric: TerrainMetric,
+    euler_config: CompressibleEulerConfig,
+    grid: PlaneGrid,
+    layout,
+) -> PlaneNonHydrostaticState:
+    """Halo-aware full Skamarock-Klemp split-explicit acoustic substep.
+
+    Multi-rank counterpart of
+    :func:`plane_acoustic_substeps_si_horizontal`: same forward-backward
+    scheme, but every horizontal stencil reads a halo-padded slab
+    instead of a ``jnp.roll`` over the (absent) global array. Per
+    substep it issues exactly TWO packed halo rounds:
+
+    1. ``(theta', rho')`` before the update — the Exner perturbation
+       and the sanitized ``theta_total``/``rho_total`` are pointwise,
+       so they are computed ON the padded slabs; the C-grid pressure
+       gradient and face interpolations then produce interior-shape
+       ``u``/``v`` updates.
+    2. the horizontal mass fluxes ``(rho_xface*u_new, rho_yface*v_new)``
+       — re-padded so the backward C-grid divergence closes on the
+       interior.
+
+    The vertical implicit solve, vertical continuity and vertical theta
+    advection reuse the shared column kernel (column-local, no MPI).
+    At ``layout.n_ranks == 1`` the packed exchange degenerates to
+    ``jnp.pad(mode='wrap')`` and this function reproduces the serial
+    substep (same stencil arithmetic on wrapped halos).
+
+    ``layout`` and ``n_substeps`` are static, so the Python substep
+    loop unrolls at trace time with one sendrecv token chain per
+    exchange.
+    """
+    del slow_tend
+    from legoesm.atmosphere.dynamics.les import plane_operators_halo as oh
+    from legoesm.parallel.plane_mpi import packed_exchange_halo_plane_yxz
+
+    g = euler_config.g
+    J = terrain_metric.jacobian
+    beta = euler_config.acoustic_off_centering
+    implicit_buoyancy = euler_config.implicit_buoyancy
+    c_p = _c_pd_constant()
+    theta_0 = height_coord.theta_ref
+    rho_0 = height_coord.rho_ref
+    si_w_filter_nu = float(getattr(
+        euler_config, "si_w_vertical_filter_nu", 0.0,
+    ))
+    h = layout.halo
+
+    u = state.u.data
+    v = state.v.data
+    w = state.w.data
+    theta_p = state.theta_prime.data
+    rho_p = state.rho_prime.data
+
+    tri_bands = precompute_si_tridiag_bands(
+        height_coord, J, dt_s, g, implicit_buoyancy,
+        nlev=theta_p.shape[-1],
+    )
+
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
+        compute_exner_perturbation,
+    )
+
+    b_moist = _acoustic_moist_buoyancy_w(state, height_coord, euler_config, layout)
+    u_c, v_c, w_c, theta_p_c, rho_p_c = u, v, w, theta_p, rho_p
+    for _ in range(int(n_substeps)):
+        # Exchange 1: θ', ρ'. sanitize + Exner are pointwise, so the
+        # padded totals/π' are exact on the halo ring; the reach-1
+        # C-grid stencils below then close on the interior.
+        theta_p_pad, rho_p_pad = packed_exchange_halo_plane_yxz(
+            theta_p_c, rho_p_c, layout=layout,
+        )
+        theta_total_pad, rho_total_pad = sanitize_theta_rho(
+            theta_0 + theta_p_pad, rho_0 + rho_p_pad,
+        )
+        # 1+2. Horizontal pressure gradient -> forward u, v update
+        #      (interior-shape results from the padded slabs).
+        pi_p_pad = compute_exner_perturbation(
+            rho_p_pad, theta_p_pad, height_coord,
+        )
+        grad_pi_x = oh.grad_x_vlast_halo(pi_p_pad, grid, h)
+        grad_pi_y = oh.grad_y_vlast_halo(pi_p_pad, grid, h)
+        theta_xface = oh.interp_cell_to_xface_vlast_halo(
+            theta_total_pad, grid, h,
+        )
+        theta_yface = oh.interp_cell_to_yface_vlast_halo(
+            theta_total_pad, grid, h,
+        )
+        u_new = u_c + dt_s * (-c_p * theta_xface * grad_pi_x)
+        v_new = v_c + dt_s * (-c_p * theta_yface * grad_pi_y)
+
+        # 3. Vertical acoustic implicit (w) + vertical continuity +
+        #    vertical theta advection (shared column kernel; column-
+        #    local, interior arrays). beta=0.0 here — the Skamarock-
+        #    Klemp off-centering is applied ONCE on the combined
+        #    vertical+horizontal divergence below, exactly like the
+        #    serial si_horizontal substep.
+        w_new, theta_p_new, rho_p_vert = semi_implicit_acoustic_column_kernel(
+            w_c, theta_p_c, rho_p_c,
+            height_coord, J, dt_s, 0.0, g,
+            implicit_buoyancy=implicit_buoyancy,
+            precomputed_tridiag=tri_bands,
+            si_w_vertical_filter_nu=si_w_filter_nu,
+            theta_vert_van_leer=(
+                getattr(euler_config, "acoustic_theta_advection", "centered")
+                == "van_leer"),
+        )
+        # 3b. Frozen SAM moist buoyancy on w, each substep (layout-aware
+        #     global mean inside the helper when configured).
+        if b_moist is not None:
+            w_new = (w_new + dt_s * b_moist).at[..., 0].set(0.0).at[..., -1].set(0.0)
+
+        # 4. Horizontal mass-flux divergence (backward: uses new u, v;
+        #    mass flux uses the start-of-substep rho_total).
+        rho_xface = oh.interp_cell_to_xface_vlast_halo(
+            rho_total_pad, grid, h,
+        )
+        rho_yface = oh.interp_cell_to_yface_vlast_halo(
+            rho_total_pad, grid, h,
+        )
+        # Exchange 2: re-pad the interior fluxes so the C-grid
+        # divergence closes on the interior.
+        flux_u_pad, flux_v_pad = packed_exchange_halo_plane_yxz(
+            rho_xface * u_new, rho_yface * v_new, layout=layout,
+        )
+        horiz_div = oh.divergence_vlast_halo(flux_u_pad, flux_v_pad, grid, h)
+        rho_p_new = rho_p_vert - dt_s * horiz_div
+        # Off-center the FULL divergence update (Skamarock-Klemp 2008),
+        # once, on the combined vertical+horizontal result.
+        if beta != 0.0:
+            rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
+
+        u_c, v_c, w_c, theta_p_c, rho_p_c = (
+            u_new, v_new, w_new, theta_p_new, rho_p_new,
+        )
+
+    return PlaneNonHydrostaticState(
+        u=state.u.replace(data=u_c),
+        v=state.v.replace(data=v_c),
+        w=state.w.replace(data=w_c),
+        theta_prime=state.theta_prime.replace(data=theta_p_c),
+        rho_prime=state.rho_prime.replace(data=rho_p_c),
+        phis=state.phis,
+        tracers=state.tracers,
+    )
+
+
 # --------------------------------------------------------------------- #
 # Config validation                                                     #
 # --------------------------------------------------------------------- #
@@ -2760,6 +2914,21 @@ def validate_plane_config(config: CompressibleEulerConfig) -> None:
     # Negative coefficients would invert the damping sign and produce
     # exponential growth — almost certainly a user error — so reject
     # them up front rather than silently treating them as off.
+    # substep_horizontal_acoustic moves the horizontal PG + continuity
+    # OUT of the slow tendency; only the SI-horizontal acoustic substep
+    # integrates them. With semi_implicit_acoustic=False the explicit
+    # vertical substep would run instead and the horizontal PG would be
+    # integrated NOWHERE — silent physics loss. Refuse the combination.
+    if (getattr(config, "substep_horizontal_acoustic", False)
+            and not config.semi_implicit_acoustic):
+        raise ValueError(
+            "substep_horizontal_acoustic=True requires "
+            "semi_implicit_acoustic=True: the horizontal pressure "
+            "gradient and mass-continuity divergence are removed from "
+            "the slow tendency and integrated only by the SI-horizontal "
+            "acoustic substep. Enable semi_implicit_acoustic, or turn "
+            "substep_horizontal_acoustic off."
+        )
     for name, value in (
         ("hyperdiff_coeff", config.hyperdiff_coeff),
         ("hyperdiff_rho_coeff", config.hyperdiff_rho_coeff),
@@ -3011,7 +3180,11 @@ class PlaneCompressibleEulerModel:
 
         Each rank owns a local slab. Halo exchange via
         :func:`packed_exchange_halo_plane_yxz` per slow-tendency call.
-        Acoustic substeps stay vertical-only (column-local) — no MPI.
+        Acoustic substeps are vertical-only (column-local, no MPI)
+        unless ``substep_horizontal_acoustic=True``, which routes to
+        the halo-aware full Skamarock-Klemp substep
+        (:func:`plane_acoustic_substeps_si_horizontal_halo` — two
+        packed halo rounds per acoustic substep).
 
         Eager-mode only on multi-rank (mpi4jax sendrecv branch not
         jit-safe on macOS shared-mem). Single-rank gets jit speedup
@@ -3045,23 +3218,16 @@ class PlaneCompressibleEulerModel:
             # step() honours substep_horizontal_acoustic.
             return self.step(state_local, dt)
 
-        # Multi-rank gate for the horizontal-acoustic substep (cavecrew
-        # review): the full Skamarock-Klemp split needs a halo exchange
-        # of u, v, rho' on EVERY acoustic substep (the horizontal PG and
-        # mass divergence are now substepped), which the packed-exchange
-        # halo path does not yet provide. Refuse loudly rather than
-        # silently fall back to the vertical-only substep (which is
-        # unstable at fine dx with perturbed IC — the very bug this flag
-        # fixes).
-        if getattr(self.config, "substep_horizontal_acoustic", False):
-            raise NotImplementedError(
-                "substep_horizontal_acoustic is not yet wired into the "
-                "multi-rank step_halo path (it needs per-substep u/v/rho' "
-                "halo exchange). Use single-rank step()/--no domain "
-                "decomposition for fine-dx perturbed-IC runs, or extend "
-                "plane_compressible_euler_slow_tendencies_halo + the halo "
-                "substep loop first."
-            )
+        # Full Skamarock-Klemp split on multi-rank: the halo-aware
+        # SI-horizontal substep (plane_acoustic_substeps_si_horizontal_halo)
+        # exchanges (θ', ρ') + the mass fluxes on EVERY acoustic substep
+        # (two packed rounds/substep) and the halo slow tendency drops
+        # the horizontal PG + continuity so nothing is double-counted.
+        # validate_plane_config guarantees semi_implicit_acoustic=True
+        # whenever this flag is set.
+        substep_horiz = getattr(
+            self.config, "substep_horizontal_acoustic", False,
+        )
 
         # Multi-rank correctness gate (Codex 2026-05 review): silently
         # skipping the mass fixer when fix_mass=True but no owned_mask
@@ -3103,12 +3269,20 @@ class PlaneCompressibleEulerModel:
             )
 
         if self.config.semi_implicit_acoustic:
-            def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
-                return plane_acoustic_substeps_semi_implicit(
-                    s, slow_tend, dt_s, n_sub, cfg,
-                    self.height_coord, self.terrain_metric, self.config,
-                    layout=layout,  # enables exact global moist-mean when configured
-                )
+            if substep_horiz:
+                def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
+                    return plane_acoustic_substeps_si_horizontal_halo(
+                        s, slow_tend, dt_s, n_sub, cfg,
+                        self.height_coord, self.terrain_metric, self.config,
+                        self.grid, layout,
+                    )
+            else:
+                def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
+                    return plane_acoustic_substeps_semi_implicit(
+                        s, slow_tend, dt_s, n_sub, cfg,
+                        self.height_coord, self.terrain_metric, self.config,
+                        layout=layout,  # enables exact global moist-mean when configured
+                    )
         else:
             def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
                 return plane_acoustic_substeps(
@@ -3129,16 +3303,16 @@ class PlaneCompressibleEulerModel:
         # it mutates the ``self._target_mass`` anchor, which a jit can't trace).
         # Cache keyed on the trace-invariant statics so we build the jit once;
         # ``dt`` is closed in (static), so a changed dt rebuilds.
-        # Key includes the full layout DECOMPOSITION (not just n_ranks): the
-        # cached jit bakes in this layout's halo dims/neighbours via the
-        # captured closures, so a different decomposition on the same model
-        # instance MUST rebuild (else it would silently reuse a stale halo
-        # graph and compute wrong results).
+        # The FULL layout NamedTuple (all-int, hashable) is part of the
+        # key: the compiled closure bakes in rank, neighbour ranks, halo
+        # width and start offsets via the captured halo exchanges — a
+        # same-shaped but different layout (repartition, halo 1→3, rank
+        # remap in tests) must NOT reuse the stale compiled graph.
         _jit_key = (
-            layout.n_ranks, layout.n_ranks_y, layout.n_ranks_x,
-            layout.ny_local, layout.nx_local,
+            layout,
             float(dt), self.config.n_acoustic_substeps,
-            bool(self.config.semi_implicit_acoustic), id(f_pad_cached),
+            bool(self.config.semi_implicit_acoustic),
+            bool(substep_horiz), id(f_pad_cached),
         )
         if (getattr(self, "_jit_halo_core", None) is None
                 or getattr(self, "_jit_halo_key", None) != _jit_key):
