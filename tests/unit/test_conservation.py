@@ -301,11 +301,14 @@ class TestFixTotalWater:
         return create_cubed_sphere(8)
 
     def _tracers(self):
+        # SPATIALLY VARYING fields so an erroneous non-uniform scaling (mean
+        # right, elementwise wrong) cannot pass the elementwise checks below.
         shape_3d = (6, 8, 8, 4)
+        base = jnp.linspace(0.001, 0.011, 6 * 8 * 8 * 4).reshape(shape_3d)
         return {
-            "q_v": jnp.full(shape_3d, 0.006),
-            "q_c": jnp.full(shape_3d, 0.001),
-            "q_r": jnp.full(shape_3d, 0.0005),
+            "q_v": base,
+            "q_c": 0.3 * base + 0.0002,
+            "q_r": 0.1 * base + 0.0001,
         }
 
     def test_scales_all_species_to_target(self, grid):
@@ -323,10 +326,10 @@ class TestFixTotalWater:
         new_total = out["q_v"] + out["q_c"] + out["q_r"]
         new_int = compute_global_moisture(new_total, p_s, dsigma, grid)
         assert float(new_int) == pytest.approx(float(target), rel=1e-6)
-        # ALL species scaled by the SAME factor (0.9), preserving their ratios.
+        # ALL species scaled ELEMENTWISE by the SAME single factor (0.9),
+        # preserving spatial structure and inter-species ratios.
         for name in ("q_v", "q_c", "q_r"):
-            ratio = float(jnp.mean(out[name] / tracers[name]))
-            assert ratio == pytest.approx(0.9, rel=1e-5)
+            assert bool(jnp.allclose(out[name], 0.9 * tracers[name], rtol=1e-6))
 
     def test_identity_when_target_equals_current(self, grid):
         from legoesm.core.conservation import (
