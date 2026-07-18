@@ -178,3 +178,52 @@ def _first_of_each_phase(plan, curriculum):
     for _lead, ep in curriculum:
         yield plan[idx]
         idx += int(ep)
+
+
+def test_norm_stats_streamed_matches_stacked_and_bounds_memory():
+    """#1155-class: compute_sfno_full_norm_stats STREAMS samples (no full
+    on-device stack, which is ~16 GiB at T106 all-years and OOMs the load-time
+    stats step) and reproduces the original stacked two-pass result."""
+    import os
+    os.environ.setdefault("JAX_ENABLE_X64", "1")
+    import jax
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+    import numpy as np
+
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+        isothermal_rest_state_spectral,
+    )
+    from legoesm.training.neural_gcm_spectral import compute_sfno_full_norm_stats
+    from legoesm.ml.normalization import compute_normalization_stats
+    from legoesm.ml.channel_packing import pack_pe_state
+
+    grid = create_gaussian_grid(21)
+    sigma = create_sigma_coordinate(8)
+    ics = [isothermal_rest_state_spectral(grid, sigma, T_init=280.0 + 5.0 * i)
+           for i in range(5)]
+
+    packed = jnp.stack([pack_pe_state(s, grid, sigma) for s in ics], axis=0)
+    ref = compute_normalization_stats(packed, eps=1e-6)          # original path
+    got = compute_sfno_full_norm_stats(ics, grid, sigma, std_floor=1e-6)
+
+    assert got.mean.shape == ref.mean.shape
+    assert np.allclose(np.asarray(got.mean), np.asarray(ref.mean),
+                       rtol=1e-10, atol=1e-8)
+    assert np.allclose(np.asarray(got.std), np.asarray(ref.std),
+                       rtol=1e-10, atol=1e-8)
+    # non-vacuous: channels span orders of magnitude -> stds must vary
+    assert float(np.ptp(np.asarray(got.std))) > 1e-3
+
+
+def test_norm_stats_empty_raises():
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.training.neural_gcm_spectral import compute_sfno_full_norm_stats
+    import pytest
+    grid = create_gaussian_grid(21)
+    sigma = create_sigma_coordinate(8)
+    with pytest.raises(ValueError, match="empty"):
+        compute_sfno_full_norm_stats([], grid, sigma)
