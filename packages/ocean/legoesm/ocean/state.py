@@ -189,6 +189,12 @@ class OceanSurfaceForcing(NamedTuple):
                                        # DINO usrdef x1.3 westerly boost that
                                        # feeds TKE but NOT the momentum
                                        # stress).  None -> |(tau_x, tau_y)|.
+    ice_concentration: object = None   # jnp.ndarray | None  [0-1] sea-ice areal
+                                       # fraction from the coupler, consumed by
+                                       # the TKE closure's under-ice (1-fi)
+                                       # attenuation of the lc/etau wave-TKE
+                                       # sources (TKEConfig.eice=1; NEMO
+                                       # nn_eice).  None ⇒ no attenuation.
 
 
 class OceanConfig(NamedTuple):
@@ -1202,6 +1208,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     runtime_checks: RuntimeChecksConfig = RuntimeChecksConfig()
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0          # Reference salinity for virtual salt flux [PSU]
+    # Salinity the virtual-salt closure multiplies the freshwater flux by:
+    #   "s_ref" (default, bit-identical): the fixed scalar ``S_ref`` above.
+    #   "local": the LOCAL top-cell salinity — NEMO's tra_sbc convention
+    #     (sfx = emp * sss).  On fresh shelves (Siberian ~27 PSU) the fixed
+    #     35-PSU closure over-salinifies ice growth by ~(35-4)/(27-4) ≈ 1.35x
+    #     and over-dilutes rivers; "local" removes that bias (2026-07-18
+    #     Arctic halocline-erosion audit).  Column-constant top-cell S is
+    #     used for the runoff-depth-spread channel too.
+    freshwater_salinity: str = "s_ref"   # "s_ref" | "local"
     # When True, remove the area-mean of the net freshwater flux from the
     # virtual-salt closure so the surface freshwater conserves GLOBAL SALT (the
     # OMIP global freshwater correction; matches the MPAS config field). Default

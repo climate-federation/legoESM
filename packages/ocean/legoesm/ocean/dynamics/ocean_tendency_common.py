@@ -694,7 +694,7 @@ def apply_sponge_tracer_relaxation(
 def apply_freshwater_virtual_salt_top(
     dS_dt: jnp.ndarray,
     freshwater,
-    S_ref: float,
+    S_ref: float | jnp.ndarray,
     h_top: jnp.ndarray,
     rho_0: float,
     mask: jnp.ndarray,

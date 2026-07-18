@@ -662,6 +662,14 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
             "is not wired on the MPAS ocean (the adiabatic/signed-N^2 path needs "
             "the cell-centre hydrostatic pressure that this bridge does not "
             "compute). MPAS supports n2_mode='insitu'.")
+    if int(getattr(cfg, "eice", 0)) != 0:
+        raise NotImplementedError(
+            f"vertical_mixing.tke.eice={int(getattr(cfg, 'eice', 0))} (under-ice "
+            "attenuation of the lc/etau TKE sources) is not wired on the MPAS "
+            "vertical-mixing bridge yet: this bridge receives no ice "
+            "concentration (mpas_physics passes tau/q only). Set eice=0 on "
+            "MPAS, or run the tke closure on the lat-lon/tripole C-grid where "
+            "surface_forcing.ice_concentration is threaded.")
     if bool(getattr(cfg, "veros_dz_slots", False)):
         raise NotImplementedError(
             "vertical_mixing.tke.veros_dz_slots=True is not wired on the MPAS "

@@ -122,7 +122,7 @@ def freshwater_eta_tendency(fw: FreshwaterForcing, rho_0: float) -> jnp.ndarray:
 
 def virtual_salt_flux(
     fw: FreshwaterForcing,
-    S_ref: float,
+    S_ref: float | jnp.ndarray,
     dz_0: jnp.ndarray,
     rho_0: float,
 ) -> jnp.ndarray:
@@ -154,7 +154,7 @@ def virtual_salt_flux(
 
 def virtual_salt_flux_from_net(
     F_fw: jnp.ndarray,
-    S_ref: float,
+    S_ref: float | jnp.ndarray,
     dz_0: jnp.ndarray,
     rho_0: float,
 ) -> jnp.ndarray:
@@ -268,7 +268,7 @@ def normalize_freshwater_net(
 
 def normalized_virtual_salt_flux(
     freshwater,
-    S_ref: float,
+    S_ref: float | jnp.ndarray,
     h_top: jnp.ndarray,
     rho_0: float,
     area: jnp.ndarray,
@@ -343,7 +343,7 @@ def resolve_runoff_spread_arg(config):
 
 def runoff_spread_virtual_salt_tendency_3d(
     fw,
-    S_ref: float,
+    S_ref: float | jnp.ndarray,
     h_k: jnp.ndarray,
     rho_0: float,
     mask: jnp.ndarray,

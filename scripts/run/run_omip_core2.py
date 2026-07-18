@@ -413,11 +413,14 @@ def orca1_zdftke_config(iwm_enabled: bool = False):
       nn_avb   = 0     -> bg_diff_scale=0.0 (no Bryan-Lewis depth profile;
                           abyssal mixing comes from zdfiwm as in NEMO)
 
+    nn_eice  = 3     -> eice=3 (under-ice attenuation of lc/etau: the
+                          kernels' (1-ice_frac) factor fed max(0,1-4*fi) via
+                          surface_forcing.ice_concentration — CLOSED
+                          2026-07-18; was a flagged no-ice_frac gap).
+
     NO TKEConfig counterpart (fidelity gaps, flagged not stubbed):
       ln_mxl0=T / rn_mxl0=0.04  surface mixing length = F(wind stress);
       nn_mxlice=2               under-ice mixing-length scaling;
-      nn_eice=3                 under-ice attenuation of lc/etau (no ice_frac
-                                threaded on this path);
       rn_bshear=1e-20           background-shear floor (legoESM uses 1e-12);
       surface TKE BC            NEMO Dirichlet e_sfc=rn_ebb·|τ|/ρ0 vs legoESM
                                 flux (|τ|/ρ0)^{3/2} (Veros/Wallace form);
@@ -452,13 +455,14 @@ def orca1_zdftke_config(iwm_enabled: bool = False):
         etau_mode="below_ml",           # nn_etau=1
         etau_frac=0.08,                 # rn_efr (namelist_cfg override)
         etau_htau_mode="latitude",      # nn_htau=1 (namelist_ref default)
+        eice=3,                         # nn_eice=3 — under-ice lc/etau attenuation
         kappaM_min=avmb,                # NEMO avm = max(closure, avmb)
         kappaH_min=avtb,                # NEMO avt = max(pdl·avt, avtb)
         bg_diff_scale=0.0,              # nn_avb=0 — no depth-profile background
     )
 
 
-def build_tripole_vmix_config(tripole_vmix: str, iwm=None):
+def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None):
     """``VerticalMixingConfig`` for ``--tripole-vmix`` (+ optional zdfiwm).
 
     ``tripole_vmix``: "none" (byte-identical no-closure default), "tke"
@@ -471,6 +475,10 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None):
     then adds onto them), and the same contract the latlon path uses when it
     attaches iwm onto its KPP config.  So ``--tripole-vmix tke --iwm``
     composes; it is NOT an error.
+
+    ``tke_eice`` (``--tke-eice``): None keeps the ORCA1 card default
+    (nn_eice=3); 0/1/3 override the under-ice lc/etau attenuation mode for
+    A/B runs (0 reproduces the pre-2026-07-18 no-attenuation behaviour).
     """
     from legoesm.ocean.physics.vertical_mixing.config import (
         KPPConfig, VerticalMixingConfig,
@@ -479,8 +487,14 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None):
     if tripole_vmix == "none":
         vm = VerticalMixingConfig(scheme="none")
     elif tripole_vmix == "tke":
-        vm = VerticalMixingConfig(
-            scheme="tke", tke=orca1_zdftke_config(iwm_enabled=_iwm_on))
+        _tke = orca1_zdftke_config(iwm_enabled=_iwm_on)
+        if tke_eice is not None:
+            if int(tke_eice) not in (0, 1, 3):
+                raise ValueError(
+                    f"--tke-eice {tke_eice!r} invalid; expected 0, 1 or 3 "
+                    "(NEMO nn_eice modes).")
+            _tke = _tke._replace(eice=int(tke_eice))
+        vm = VerticalMixingConfig(scheme="tke", tke=_tke)
     elif tripole_vmix == "kpp":
         vm = VerticalMixingConfig(scheme="kpp", kpp=KPPConfig())
     else:
@@ -514,7 +528,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   bottom_drag_cdmax=None, bottom_drag_z0=None,
                   bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
                   ddm=None, prescribed_flow=None, no_gm_redi=False,
-                  tripole_vmix="none"):
+                  tripole_vmix="none", tke_eice=None):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -655,7 +669,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         # receives the step-time surface_forcing (CORE-II tau_x/tau_y) — so
         # the surface TKE input sees the real wind stress.
         _vm_cfg = build_tripole_vmix_config(
-            tripole_vmix, iwm=iwm if _use_iwm else None)
+            tripole_vmix, iwm=iwm if _use_iwm else None,
+            tke_eice=tke_eice)
         if _use_vmix:
             print(f"[setup] tripole vertical-mixing closure: {tripole_vmix}"
                   + (" (ORCA1 namzdf_tke namelist mapping)"
@@ -3748,6 +3763,27 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "top). Default 'none' is byte-identical. "
                         "STABILITY: TKE x superbee tracer advection blew up "
                         "on DINO in ~15 days — smoke-gate before long runs.")
+    p.add_argument("--tke-eice", type=int, default=None, choices=[0, 1, 3],
+                   help="Under-ice attenuation of the TKE lc/etau wave "
+                        "sources (NEMO nn_eice) for --tripole-vmix tke. "
+                        "None (default) keeps the ORCA1 card value (3 = "
+                        "max(0,1-4*fi), wave TKE killed at fi>=0.25); 1 = "
+                        "(1-fi); 0 = no attenuation (reproduces the "
+                        "pre-2026-07-18 behaviour for A/B). The ice "
+                        "concentration reaches the closure via "
+                        "surface_forcing.ice_concentration under "
+                        "--prognostic-sea-ice.")
+    p.add_argument("--freshwater-salinity", type=str, default="s_ref",
+                   choices=["s_ref", "local"],
+                   help="Salinity multiplying the freshwater flux in the "
+                        "virtual-salt closure. 's_ref' (default) = the fixed "
+                        "config S_ref=35 (legacy, bit-identical). 'local' = "
+                        "the LOCAL top-cell salinity — NEMO's tra_sbc "
+                        "convention (sfx = emp*sss); on fresh shelves "
+                        "(Siberian ~27 PSU) the fixed-35 closure "
+                        "over-salinifies ice growth by ~1.35x and "
+                        "over-dilutes rivers (2026-07-18 Arctic "
+                        "halocline-erosion audit). latlon/tripole/mpas.")
     p.add_argument("--relative-winds", action="store_true",
                    help="NEMO ln_crt_dwn current feedback: subtract the ocean "
                         "surface current from the 10-m wind before the bulk "
@@ -4162,6 +4198,7 @@ def main() -> int:
             prescribed_flow=args.prescribed_flow,
             no_gm_redi=args.no_gm_redi,
             tripole_vmix=args.tripole_vmix,
+            tke_eice=args.tke_eice,
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":
@@ -4693,6 +4730,36 @@ def main() -> int:
               f"{_h_rnf[_wetm].max():.1f}] m; "
               f"{(np.asarray(runoff_monthly).max(0)[_wetm] > 0).sum()} "
               f"runoff cells")
+    if args.freshwater_salinity != "s_ref":
+        # NEMO tra_sbc virtual-salt convention (sfx = emp * sss_local): rebuild
+        # the model with the selection threaded into the dynamics config (the
+        # SAME NamedTuple-replace rebuild the runoff-depth-map block uses).
+        # latlon + tripole share LatLonCGridOceanModel; the cube's 'external'
+        # physics already applies its virtual salt at the LOCAL S_top, and the
+        # spectral path has no freshwater channel — both are rejected upstream
+        # of this OMIP host loop for salinity-faithful runs.
+        if app_grid_type == "mpas":
+            from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+            model = MPASOceanModel(
+                grid, z_coord,
+                model.config._replace(
+                    freshwater_salinity=args.freshwater_salinity))
+        elif app_grid_type in ("latlon", "tripole"):
+            from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+                LatLonCGridOceanModel,
+            )
+            model = LatLonCGridOceanModel(
+                grid, z_coord,
+                model.config._replace(
+                    freshwater_salinity=args.freshwater_salinity),
+                iwm_forcing=getattr(model, "_iwm_forcing", None))
+        else:
+            raise SystemExit(
+                f"--freshwater-salinity {args.freshwater_salinity} is wired "
+                f"for latlon/tripole/mpas only (got grid {app_grid_type}).")
+        print(f"[setup] virtual-salt closure salinity: "
+              f"{args.freshwater_salinity} (NEMO tra_sbc local-S convention)"
+              if args.freshwater_salinity == "local" else "")
     # Prescribed sea-ice-concentration field for the SW-albedo surrogate
     # (--ice-albedo) AND the NEMO-faithful SSS-restoring ice gate (nn_sssr_ice=0:
     # no restoring under ice).  Loaded ONCE, regridded onto the model grid; passed
@@ -5619,6 +5686,13 @@ def main() -> int:
                     alpha_ocean=float(_ice_const.alpha_ocean_broadband),
                     sw_transmittance_ice=0.0,
                 )
+                # Thread the SAME partition-time-level ice concentration to
+                # the vertical-mixing closure: the TKE lc/etau under-ice
+                # attenuation (TKEConfig.eice, NEMO nn_eice) reads
+                # surface_forcing.ice_concentration.  Attach ALWAYS (inert
+                # unless eice != 0 — consumption is config-gated in
+                # k_profiles, so eice=0 stays bit-identical).
+                sf = sf._replace(ice_concentration=_ice_conc_pre)
             elif fw is not None:
                 # KPP freshwater-buoyancy contract (codex): sf.freshwater is
                 # consumed ONLY by the vertical-mixing surface-buoyancy
