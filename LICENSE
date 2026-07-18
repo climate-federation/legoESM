@@ -37,7 +37,7 @@ with the software.  For example:
 
 > Required Notice: Copyright Pierre Gentine, Celest.Science,
 > and The Trustees of Columbia University in the City of New
-> York (https://github.com/... legoESM)
+> York (https://github.com/climate-federation/legoESM)
 
 ## Changes and New Works License
 
@@ -134,8 +134,12 @@ of your licenses.
 
 ---
 
-Required Notice: Copyright Pierre Gentine, Celest.Science, and
-The Trustees of Columbia University in the City of New York.
+Required Notice: Copyright (c) 2026 Pierre Gentine, Celest.Science,
+and The Trustees of Columbia University in the City of New York.
+
+Effective date: 2026-07-18. This license governs legoESM from this
+date forward. Copies obtained under the prior MIT License remain
+usable under MIT for the versions in which they were released.
 
 ## Commercial use
 

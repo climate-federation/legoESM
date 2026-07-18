@@ -1,5 +1,8 @@
 # Commercial License — legoESM
 
+**Effective 2026-07-18.**
+
+
 legoESM is released under the [PolyForm Noncommercial License
 1.0.0](./LICENSE). That license covers **noncommercial** use only:
 academic research, education, personal projects, and use by charitable,
@@ -41,12 +44,6 @@ Pierre Gentine — pg2328@columbia.edu
 
 Commercial licensing is administered together with **Columbia
 Technology Ventures** (Columbia's technology transfer office), which
-co-holds the IP. A commercial license is not valid until executed by the
-authorized IP holders.
-
----
-
-> **Draft notice.** These terms are a starting draft. IP is shared
-> between Celest.Science and Columbia University; any commercial license
-> must be reviewed and executed through Columbia Technology Ventures and
-> legal counsel before it is binding.
+co-holds the IP. Shared IP (Celest.Science + Columbia) is confirmed by
+the lead author. A specific commercial license takes effect only once
+executed in writing by the authorized IP holders.
