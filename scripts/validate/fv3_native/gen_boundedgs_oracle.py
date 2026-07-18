@@ -89,7 +89,9 @@ def main():
     known = {"DX", "DY", "DXA", "DYA", "DXC", "DYC", "AREA", "ARC",
              "SINA", "COSA", "RSNA", "RSN2", "RSNU", "RSNV", "CSAU",
              "CSAV", "CSAS", "SNAU", "SNAV", "DVGU", "DVGV", "DL6U",
-             "DL6V", "SSG", "CSG", "AGX", "AGY", "DAMN"}
+             "DL6V", "SSG", "CSG", "AGX", "AGY", "DAMN",
+             "RDX", "RDY", "RDXC", "RDYC", "RARA", "RDXA", "RDYA",
+             "RARC"}
     recs: dict = {}
     for line in run.stdout.splitlines():
         p = line.split()
@@ -118,9 +120,10 @@ def main():
                  "loops (plain clone, documented substitution) + bounded "
                  "grid_area arms; B-lattice input per halo_mode (extended "
                  "= own-face ED gnomonic continuation, the duo gen_k2e "
-                 "lattice); sorted_inta/intb = plain-order documented "
-                 "substitution; C48 cross-check targets from the Zenodo "
-                 "duo run fms.out: da_max/da_min=2.26548304435260, "
+                 "lattice); sorted_inta = plain-order documented "
+                 "substitution (LIVE under bounded, ULP-class; C48 log "
+                 "match 1.5e-12 rel); C48 cross-check targets from the "
+                 "Zenodo duo run fms.out: da_max/da_min=2.26548304435260, "
                  "da_max_c=53362939642.3731, da_min_c=23543093086.1030"))
     print("saved", args.out, "input sha", sha[:16])
 

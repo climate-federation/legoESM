@@ -98,6 +98,14 @@ FIELDS = [
     ("dl6v", "del6_v", ("b", "a"), _F32),
     ("agx", "agrid_lon", ("a", "a"), _F64),
     ("agy", "agrid_lat", ("a", "a"), _F64),
+    ("rdx", "rdx", ("a", "b"), _F32),
+    ("rdy", "rdy", ("b", "a"), _F32),
+    ("rdxc", "rdxc", ("b", "a"), _F32),
+    ("rdyc", "rdyc", ("a", "b"), _F32),
+    ("rara", "rarea", ("a", "a"), _F32),
+    ("rdxa", "rdxa", ("a", "a"), _F32),
+    ("rdya", "rdya", ("a", "a"), _F32),
+    ("rarc", "rarea_c", ("b", "b"), _F32),
 ]
 
 
@@ -222,13 +230,63 @@ def test_d_sw1_edge_block_gated_on_bounded(duo_ctx):
 
 def test_c48_matches_zenodo_run_log():
     """Direct python-vs-paper-run gate: the C48 bounded gridstruct
-    reproduces the numbers the Zenodo duo run PRINTED in fms.out."""
+    reproduces the numbers the Zenodo duo run printed in fms.out —
+    da ratio to print precision, absolute area_c extrema to ~1e-12 rel
+    (da_min_c differs ~0.036 m^2 from the printed tail: the log value
+    is a 144-rank reduction; tile symmetry makes the six per-tile
+    extrema equal, asserted below).  Radius is pinned by the absolute
+    targets; omega is pinned by its own log print (separate test)."""
     from legoesm.grids.fv3_native_gridstruct import (
         build_fv3_native_gridstruct_bounded,
     )
 
-    gs = build_fv3_native_gridstruct_bounded(48, 3)
-    assert gs["da_max"] / gs["da_min"] == pytest.approx(
-        ZENODO_C48_DA_RATIO, rel=1e-14)
-    assert gs["da_max_c"] == pytest.approx(ZENODO_C48_DA_MAX_C, rel=1e-12)
-    assert gs["da_min_c"] == pytest.approx(ZENODO_C48_DA_MIN_C, rel=1e-11)
+    gs6 = [build_fv3_native_gridstruct_bounded(48, 3, tile=t)
+           for t in range(1, 7)]
+    # explicit six-face reduction (the log values are global reductions)
+    da_min = min(g["da_min"] for g in gs6)
+    da_max = max(g["da_max"] for g in gs6)
+    da_min_c = min(g["da_min_c"] for g in gs6)
+    da_max_c = max(g["da_max_c"] for g in gs6)
+    assert da_max / da_min == pytest.approx(ZENODO_C48_DA_RATIO, rel=1e-14)
+    assert da_max_c == pytest.approx(ZENODO_C48_DA_MAX_C, rel=1e-12)
+    assert da_min_c == pytest.approx(ZENODO_C48_DA_MIN_C, rel=1e-11)
+    # per-tile extrema agree across the cube (ED symmetry up to
+    # per-face trig roundoff): the global reduction is not hiding a
+    # divergent face
+    for g in gs6[1:]:
+        assert g["da_min_c"] == pytest.approx(gs6[0]["da_min_c"],
+                                              rel=1e-9)
+
+
+def test_omega_pinned_to_zenodo_log():
+    """fms.out prints 'omega is 7.29210000000000E-005' — FV3_OMEGA must
+    be that exact value (it differs from legoESM's constants.Omega),
+    and the Coriolis fields must be built from it (omega=0 would zero
+    fC everywhere)."""
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_OMEGA,
+        build_fv3_native_gridstruct_bounded,
+    )
+
+    assert FV3_OMEGA == 7.2921e-5
+    gs = build_fv3_native_gridstruct_bounded(12, 3)
+    ng = 3
+    lat = gs["grid_lat"][ng, ng]
+    assert gs["fC"][ng, ng] == pytest.approx(
+        2.0 * 7.2921e-5 * np.sin(lat), rel=1e-14)
+
+
+def test_fixture_extract_sha_current():
+    """The fixture's recorded extract SHA must match the CURRENT
+    extract source — a drifted extract invalidates the certification
+    (codex bounded-r2 finding 5)."""
+    import hashlib
+
+    z = np.load(FIXTURE)
+    src = (Path(__file__).parents[2] / "scripts" / "validate"
+           / "fv3_native" / "fv3_boundedgs_extract.F90")
+    cur = hashlib.sha256(src.read_bytes()).hexdigest()
+    assert str(z["extract_sha256"]) == cur, (
+        "fv3_boundedgs_extract.F90 changed since the fixture was "
+        "generated — regenerate tests/grids/fixtures/"
+        "fv3_boundedgs_oracle.npz (gen_boundedgs_oracle.py)")

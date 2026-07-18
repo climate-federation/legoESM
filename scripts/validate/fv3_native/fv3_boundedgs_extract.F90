@@ -1440,8 +1440,12 @@ contains
       ! [EXCISED: .not.bounded-only mosaic/buffer code — dead at bounded=T; see plain fv_grid_tools for the arm]
              endif
 
-      ! [EXCISED BLOCK: .not.bounded-only mpp_get_boundary west/east
-      !  boundary symmetry fixes — dead at bounded=T]
+      ! [EXCISED BLOCK: mpp_get_boundary west/east symmetry fixes.
+      !  The CALL is unconditional upstream (fv_grid_tools.F90:768) but
+      !  the buffer assignments that consume its output are
+      !  bounded-dead, so the live call has no observable effect on the
+      !  bounded lane; the serial harness omits the no-effect call.
+      !  (codex bounded-r2 finding 3 label correction)]
 
              call mpp_update_domains( dy, dx, Atm%domain, flags=SCALAR_PAIR,      &
                   gridtype=CGRID_NE_PARAM, complete=.true.)
@@ -1449,9 +1453,12 @@ contains
                 call fill_corners(dx, dy, npx, npy, DGRID=.true.)
              endif
 
-      ! [SUBSTITUTED: sorted_inta reproducible-summation index tables —
-      !  the phase-2 documented substitution: same 4 corners, plain
-      !  ordering; last-ulp only]
+      ! [SUBSTITUTED — LIVE under bounded (codex bounded-r2 finding 3):
+      !  upstream orders the SAME four agrid corners via the
+      !  sorted_inta reproducible-summation tables
+      !  (fv_grid_tools.F90:785,799-803); this harness uses plain
+      !  ordering.  ULP-class only — the C48 da_min_c reproduces the
+      !  Zenodo log to 1.5e-12 rel with plain ordering.]
 
              agrid(:,:,:) = -1.e25
 
@@ -1459,10 +1466,10 @@ contains
 
              do j=jstart,jend
              do i=istart,iend
-                ! [SUBSTITUTED: the non-stretched arm orders the same
-                !  four corners via sorted_inta for reproducible
-                !  summation (phase-2 documented substitution, last-ulp
-                !  only) — plain ordering used here]
+                ! [SUBSTITUTED — LIVE under bounded: the non-stretched
+                !  arm orders these four corners via sorted_inta
+                !  (fv_grid_tools.F90:799-803); plain ordering here,
+                !  ULP-class only (C48 log match 1.5e-12 rel)]
                 call cell_center2(grid(i,j,  1:2), grid(i+1,j,  1:2),   &
                                   grid(i,j+1,1:2), grid(i+1,j+1,1:2),   &
                                   agrid(i,j,1:2) )
@@ -1579,6 +1586,47 @@ contains
     ! the full node domain
     call bounded_area_c_ends(Atm)
   end subroutine grid_area_bounded
+
+  ! ---- reciprocal metrics (fv_grid_tools.F90:984-1014 verbatim
+  ! ranges; computed once after grid_area, before grid_utils_init) ----
+  subroutine tools_reciprocals(Atm)
+    type(shim_atm_type), intent(inout), target :: Atm
+    integer :: i, j, isd, ied, jsd, jed
+    isd = Atm%bd%isd; ied = Atm%bd%ied
+    jsd = Atm%bd%jsd; jed = Atm%bd%jed
+    do j = jsd, jed + 1
+      do i = isd, ied
+        Atm%gridstruct%rdx(i, j) = 1.0/Atm%gridstruct%dx(i, j)
+      end do
+    end do
+    do j = jsd, jed
+      do i = isd, ied + 1
+        Atm%gridstruct%rdy(i, j) = 1.0/Atm%gridstruct%dy(i, j)
+      end do
+    end do
+    do j = jsd, jed
+      do i = isd, ied + 1
+        Atm%gridstruct%rdxc(i, j) = 1.0/Atm%gridstruct%dxc(i, j)
+      end do
+    end do
+    do j = jsd, jed + 1
+      do i = isd, ied
+        Atm%gridstruct%rdyc(i, j) = 1.0/Atm%gridstruct%dyc(i, j)
+      end do
+    end do
+    do j = jsd, jed
+      do i = isd, ied
+        Atm%gridstruct%rarea(i, j) = 1.0/Atm%gridstruct%area(i, j)
+        Atm%gridstruct%rdxa(i, j) = 1./Atm%gridstruct%dxa(i, j)
+        Atm%gridstruct%rdya(i, j) = 1./Atm%gridstruct%dya(i, j)
+      end do
+    end do
+    do j = jsd, jed + 1
+      do i = isd, ied + 1
+        Atm%gridstruct%rarea_c(i, j) = 1.0/Atm%gridstruct%area_c(i, j)
+      end do
+    end do
+  end subroutine tools_reciprocals
 
   subroutine bounded_area_c_ends(Atm)
     type(shim_atm_type), intent(inout), target :: Atm

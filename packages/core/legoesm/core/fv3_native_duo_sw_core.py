@@ -756,12 +756,19 @@ def d_sw4_duo(u, v, ut, vt, ke, gs: dict, bd: Bounds, npx: int, npy: int,
     vt = fort(np.array(vt, dtype=np.float64, copy=True), isd, jsd)
     ke = fort(np.array(ke, dtype=np.float64, copy=True), isd, jsd)
 
-    sw_corner = bool(gs.get("sw_corner", True))
-    se_corner = bool(gs.get("se_corner", True))
-    ne_corner = bool(gs.get("ne_corner", True))
-    nw_corner = bool(gs.get("nw_corner", True))
+    # auth 1440 outer guard `.not.bounded .or. .not.duogrid`: on this
+    # duo-only port that reduces to `not bounded` — the corner formulas
+    # fire on the plain lane and are skipped in the bounded duo runs.
+    # The corner flags gate each block exactly as upstream (they are
+    # FALSE under bounded anyway; the explicit guard makes a raw
+    # gridstruct with default-true flags behave like source — codex
+    # bounded-r2 finding 4).
+    bounded = bool(gs.get("bounded_domain", False))
+    sw_corner = (not bounded) and bool(gs.get("sw_corner", True))
+    se_corner = (not bounded) and bool(gs.get("se_corner", True))
+    ne_corner = (not bounded) and bool(gs.get("ne_corner", True))
+    nw_corner = (not bounded) and bool(gs.get("nw_corner", True))
 
-    # auth 1440-1466 (guard always true at bounded=F)
     dt6 = dt / 6.0
     if sw_corner:
         ke[1, 1] = dt6 * ((ut[1, 1] + ut[1, 0]) * u[1, 1]

@@ -86,6 +86,14 @@ program fv3_boundedgs_driver
   allocate (Atm%gridstruct%edge_vect_n(isd:ied))
   allocate (Atm%gridstruct%edge_vect_w(jsd:jed))
   allocate (Atm%gridstruct%edge_vect_e(jsd:jed))
+  allocate (Atm%gridstruct%rdx(isd:ied, jsd:jed + 1))
+  allocate (Atm%gridstruct%rdy(isd:ied + 1, jsd:jed))
+  allocate (Atm%gridstruct%rdxc(isd:ied + 1, jsd:jed))
+  allocate (Atm%gridstruct%rdyc(isd:ied, jsd:jed + 1))
+  allocate (Atm%gridstruct%rarea(isd:ied, jsd:jed))
+  allocate (Atm%gridstruct%rdxa(isd:ied, jsd:jed))
+  allocate (Atm%gridstruct%rdya(isd:ied, jsd:jed))
+  allocate (Atm%gridstruct%rarea_c(isd:ied + 1, jsd:jed + 1))
   allocate (Atm%ak(2), Atm%bk(2))
   Atm%gridstruct%grid = -9.9d9
 
@@ -118,6 +126,7 @@ program fv3_boundedgs_driver
   Atm%gridstruct%dya_64 = Atm%gridstruct%dya
   Atm%gridstruct%dxc_64 = Atm%gridstruct%dxc
   Atm%gridstruct%dyc_64 = Atm%gridstruct%dyc
+  call tools_reciprocals(Atm)
   call grid_utils_init(Atm, npx, npy, 1, .true., 0, 4)
 
   call dump2("DX  ", Atm%gridstruct%dx, isd, jsd)
@@ -149,6 +158,14 @@ program fv3_boundedgs_driver
   end do
   call dump2("AGX ", Atm%gridstruct%agrid(:, :, 1), isd, jsd)
   call dump2("AGY ", Atm%gridstruct%agrid(:, :, 2), isd, jsd)
+  call dump2r("RDX ", Atm%gridstruct%rdx, isd, jsd)
+  call dump2r("RDY ", Atm%gridstruct%rdy, isd, jsd)
+  call dump2r("RDXC", Atm%gridstruct%rdxc, isd, jsd)
+  call dump2r("RDYC", Atm%gridstruct%rdyc, isd, jsd)
+  call dump2r("RARA", Atm%gridstruct%rarea, isd, jsd)
+  call dump2r("RDXA", Atm%gridstruct%rdxa, isd, jsd)
+  call dump2r("RDYA", Atm%gridstruct%rdya, isd, jsd)
+  call dump2r("RARC", Atm%gridstruct%rarea_c, isd, jsd)
   write (*, '(A,2ES26.17E3)') "DAMN ", Atm%gridstruct%da_min, &
     Atm%gridstruct%da_min_c
 
