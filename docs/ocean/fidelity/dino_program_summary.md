@@ -97,7 +97,28 @@ tracer filter form, GM/eiv, node-14 viscosity (climate-inert — grid is true Me
 |---|---|---|---|---|---|
 | z-star + forward-Euler (baseline) | 2.62× | 0.995 | 0.987 | 0.991 | ~0.5 |
 | z-star + faithful leapfrog | 2.65× | 0.994 | 0.990 | 0.992 | ~0.68 |
-| **full-step-z + forward-Euler (best)** | **0.81×** | **0.995** | **0.989** | **0.993** | 0.68* |
+| full-step-z + forward-Euler | 0.81× | 0.995 | 0.989 | 0.993 | 0.68 |
+| **full-step + re-entrant (best, `680d4d34b`)** | **1.06×** | **0.995** | **0.996** | 0.947 | **0.108** |
 | NEMO | 1.0 (±40 Sv) | — | — | — | 0.0011 |
 
-*deep-eq jet = the equatorial wall (root cause found; re-entrant fix in flight).
+## Final result of the re-entrant fix (`680d4d34b`, committed, reviewed SHIP)
+Removing the spurious equatorial wall (making the bridged domain i-periodic per `ln_Iperio`,
+byte-identical default) closed the jet's dominant driver: **deep-eq KE ratio 0.688 → 0.108
+(6.3× ↓)**, western equatorial cells warmed 0.6°C → 3.9°C (≈NEMO's 4°C), **BSF ratio → 1.06×
+(on target)**, T@300m corr → 0.996 (best). 180d stable, no non-NEMO stabilizer.
+
+**But it honestly EXPOSED the underlying residual: SSH corr regressed 0.993 → 0.947** — NOT a
+mask bug (eta 2Δx roughness actually dropped). NEMO has a strong zonal-mean **westward
+equatorial surface jet (−0.74 m/s)** that legoESM does not reproduce; the spurious wall had
+*coincidentally* trapped a westward flow that correlated with NEMO's SSH. So the wall was
+compensating a real f→0 equatorial-dynamics gap. That gap — NEMO's equatorial jet — is now the
+cleanly-isolated remaining residual (the same one characterized across Rounds 1–9), no longer
+masked by a setup artifact. Deep-eq KE still 0.108 vs NEMO 0.0011: the wall was the dominant
+but not the only source.
+
+## Bottom line at the pause
+Both headline diffs are resolved or root-caused: **BSF over-strength solved** (full-step-z),
+**deep-eq jet dominant driver removed** (re-entrant). The clean remaining residual is a
+genuine **equatorial (f→0) core-dynamics difference** — NEMO's equatorial surface jet legoESM
+doesn't reproduce — now isolated for a focused fresh look, plus the full-step+leapfrog
+dycore-hardening item.
