@@ -85,8 +85,8 @@
     "use_polar_filter": false
   },
   "dynamic_albedo": false,
-  "emissivity_ice": 0.95,
-  "emissivity_land": 0.96,
+  "emissivity_ice": 0.97,
+  "emissivity_land": 0.95,
   "enable_latlon_spmd": false,
   "enable_tiled_dycore": false,
   "energy_consistent_moisture_clip": false,
