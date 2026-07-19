@@ -854,7 +854,9 @@ def _thickness_weighted_asselin(now, before, after,
     ztc_a = e3_after * after
     ztc_f = ztc_n + gamma * (ztc_b - 2.0 * ztc_n + ztc_a)
     e3_f_safe = jnp.maximum(e3_f, 1.0e-30)
-    return (ztc_f / e3_f_safe) * mask
+    # Dry/below-seafloor cells CARRY the now concentration (not 0): a zeroed
+    # tracer in a dry cell is stencil poison on 3-D staircase coords (#480).
+    return jnp.where(mask > 0, ztc_f / e3_f_safe, now)
 
 
 class LatLonCGridOceanModel:
@@ -6260,10 +6262,20 @@ class LatLonCGridOceanModel:
         u_naa = ((ubc_bef + (ubc_exp - ubc_now)) + du_diss_bc + btu_exp) * u_mask3
         u_naa = u_naa.at[:, -1].set(u_naa[:, 0])          # periodic-lon wrap
         v_naa = ((vbc_bef + (vbc_exp - vbc_now)) + dv_diss_bc + btv_exp) * v_mask3
-        T_naa = (state.T_before.data
-                 + (state_expl.T.data - state.T.data) + dT_diss_bb) * mask3
-        S_naa = (state.S_before.data
-                 + (state_expl.S.data - state.S.data) + dS_diss_bb) * mask3
+        # Tracers: CARRY closed/dry cells (hold the now value) instead of
+        # pinning to 0.  Pinning at 0 is correct for velocities (walls) but
+        # on a 3-D staircase (full_step/partial cells) it writes T=0 into
+        # every below-bottom cell — the #480 masked-cold-cell poison — which
+        # staircase-adjacent stencils then pull into wet bottom cells (rest
+        # state explodes in ~30 steps; homogeneous-T rest test catches it).
+        T_naa = jnp.where(
+            mask3 > 0,
+            state.T_before.data + (state_expl.T.data - state.T.data) + dT_diss_bb,
+            state.T.data)
+        S_naa = jnp.where(
+            mask3 > 0,
+            state.S_before.data + (state_expl.S.data - state.S.data) + dS_diss_bb,
+            state.S.data)
         eta_naa = state_expl.eta.data * cmask   # from the barotropic solve
         naa_expl = state_expl._replace(
             u=state_expl.u.replace(data=u_naa),
