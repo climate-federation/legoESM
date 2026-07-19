@@ -1518,6 +1518,20 @@ def compute_vertex_mask(land_mask: jnp.ndarray, grid=None) -> jnp.ndarray:
 
     # Wall BC at the physical pole vertex rows only (backend-aware).
     full = zero_polar_lat_ends(full)
+    # Partial-periodic seam wall (NEMO DINO): the two seam vertex columns
+    # (0 and n_lon — the same physical wrap corner) are dry at any vertex
+    # row bounded by a walled seam u-face, so the EEN/PV corner triads see
+    # q=0 there (NEMO fmask behaviour) instead of leaking across the wall.
+    # A vertex row is walled if EITHER adjacent cell row's seam face is
+    # walled: vtx_open[i] = (1-sw[i-1])·(1-sw[i]).  None → fully periodic.
+    seam_wall_rows = getattr(grid, "seam_wall_rows", None)
+    if seam_wall_rows is not None:
+        open_face = (1.0 - jnp.asarray(seam_wall_rows)).astype(full.dtype)  # (n_lat,)
+        vtx_open = jnp.ones((full.shape[0],), dtype=full.dtype)  # (n_lat+1,)
+        vtx_open = vtx_open.at[1:].multiply(open_face)   # cell row j -> vtx j+1
+        vtx_open = vtx_open.at[:-1].multiply(open_face)  # cell row j -> vtx j
+        full = full.at[:, 0].multiply(vtx_open)
+        full = full.at[:, -1].multiply(vtx_open)
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         fold = grid.fold

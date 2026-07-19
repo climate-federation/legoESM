@@ -108,6 +108,27 @@ def test_implicit_unsplit_rejects_unsupported_physics():
             LatLonCGridOceanModel(r.geometry, r.z_coord, cfg)
 
 
+def test_implicit_unsplit_rejects_gm_bolus_through_fct():
+    """Dispatch hardening: gm_bolus_advection="through_fct" needs the
+    bolus-transport export + advecting-flux wiring that only the SPLIT step
+    carries; the unsplit step must FAIL LOUD (it would otherwise silently drop
+    the entire GM bolus — the in-operator centred add is gated off and nothing
+    re-adds it)."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.fidelity import mitgcm_reentrant_channel_recipe as rc
+    r = rc.build_reentrant_channel_recipe()
+    assert r.config.gm_redi is not None
+    cfg = r.config._replace(
+        barotropic=r.config.barotropic._replace(
+            barotropic_solver="implicit_unsplit"),
+        gm_redi=r.config.gm_redi._replace(gm_bolus_advection="through_fct"),
+    )
+    with pytest.raises(ValueError, match="through_fct"):
+        LatLonCGridOceanModel(r.geometry, r.z_coord, cfg)
+
+
 def test_implicit_unsplit_threads_gm_redi():
     """The unsplit step threads GM/Redi (isopycnal+skew tracer mixing + K33) so the
     ACC reentrant_channel (which uses GM/Redi) runs unsplit — finite, T bounded.

@@ -242,7 +242,24 @@ class GMRediConfig(NamedTuple):
     # mutually exclusive with visbeck.enabled (dispatch raises on both).
     treguier: TreguierConfig = TreguierConfig()
     slope_scheme: str = "triads"     # "triads" (default), "centered", or "nemo_iso_lap"
+    # GM eddy-induced (bolus) advection FORM for slope_scheme="nemo_iso_lap"
+    # (NEMO ldf_eiv_trp): "centred" (default, BYTE-IDENTICAL) applies the bolus
+    # as a 2nd-order CENTRED advective flux inside the iso operator — dispersive
+    # at sharp fronts (over/undershoots), leans on the co-located Redi K to damp
+    # 2Δx noise.  "through_fct" exports the bolus TRANSPORT (curl of ψ) to the
+    # model step, which adds it to the advecting mass flux BEFORE the tracer
+    # scheme, so the bolus flux passes through the monotone FCT/Zalesak limiter —
+    # the faithful NEMO traadv form (the eiv velocity is added to the advecting
+    # velocity). Tracer advection only (never momentum/continuity/eta). Only read
+    # by slope_scheme="nemo_iso_lap"; the lat-lon C-grid model honors it.
+    gm_bolus_advection: str = "centred"
     slope_density: str = "in_situ"   # "in_situ" (default) or "neutral"
+    # NEMO ln_traldf_msc (Method of Stabilizing Correction): when True the
+    # nemo_iso_lap operator adds the akz-stabilized EXPLICIT K33 vertical
+    # diagonal (traldf_iso_a33) that the ttrd_ldf dump contains for msc=T configs
+    # (e.g. DINO). Default False ⇒ full K33 implicit (GYRE; bit-identical to the
+    # prior operator). Only used by slope_scheme="nemo_iso_lap".
+    msc_stabilize: bool = False
     # ^ Density gradient used to build the isoneutral SLOPES (NOT the tracer
     # gradients, which are always the raw T/S gradients).
     # - "in_situ" (default): slope = -∇_h ρ / ∂_z ρ from the IN-SITU density ρ.
@@ -305,6 +322,14 @@ class GMRediConfig(NamedTuple):
     # Density criterion [kg/m^3] for the ramp's mixed-layer depth (NEMO zdfmxl
     # rn_rho_c; potential-density difference from the ~10 m reference level).
     mld_rho_c: float = 0.01
+    # Mixed-layer-depth criterion for the ldfslp slope ramp / native-slope
+    # anchor.  "rho_c" (default, BYTE-IDENTICAL) = potential-density difference
+    # of mld_rho_c from the ~10 m reference; "n2_integral" = NEMO's EXACT
+    # zdfmxl.F90:91-105 criterion integral(MAX(N^2,0) dz) >= g*mld_rho_c/rho0
+    # (in-situ adiabatic N^2 = rn2b, plus the MAX(N^2,0) clamp).  Set on the
+    # nemo_dino_kamm card; all other recipes keep "rho_c".  Dispatch raises on
+    # an unknown value (gm_redi_latlon_cgrid._nemo_mld).
+    mld_criterion: str = "rho_c"
     # NEMO ldfslp horizontal (1-2-1)⊗(1-2-1)/16 Shapiro smoother on the final
     # interface slopes (ldfslp.F90:304-315).  legoESM omitted it, leaving the
     # interior slope amplitude ~1.27x too large; wet-renormalized so land drops

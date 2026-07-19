@@ -499,6 +499,143 @@ def nemo_seos_eos(
     return cfg.rho0 + zn
 
 
+def nemo_seos_alpha_beta(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    gdept: jnp.ndarray,
+    cfg: NemoSEOSConfig | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    r"""Thermal/haline expansion coefficients ``(alpha, beta)`` — NEMO ``rab``.
+
+    Transcribes NEMO ``eosbn2.F90`` ``rab_3d_t`` (``np_seos`` branch,
+    lines 1161-1173): the analytic ``(T, S)`` derivatives of the S-EOS
+    density anomaly :func:`nemo_seos_eos`, normalised by the constant
+    reference density ``rn_rho0`` (NEMO's ``r1_rho0``, NOT ``1/rho``)::
+
+        alpha = [ a0 (1 + lambda1 zt + mu1 zh) + nu zs ] / rho0     (jp_tem)
+        beta  = [ b0 (1 - lambda2 zs - mu2 zh) - nu zt ] / rho0     (jp_sal)
+
+    with ``zt = T - T0``, ``zs = S - S0`` and ``zh = gdept`` the geometric
+    T-point depth [m, positive down] — each cell's OWN depth (the thermobaric
+    ``mu`` term). Note the ``½ lambda1`` prefactor in the DENSITY polynomial
+    (:func:`nemo_seos_eos`) becomes the FULL ``lambda1`` here because
+    ``d(½ lambda1 zt²)/dzt = lambda1 zt`` — the sign of ``alpha`` follows
+    ``alpha = -(1/rho0) dρ/dT`` so denser-when-warmer never occurs for the
+    DINO set.
+
+    Fully differentiable (arithmetic + the passed ``gdept``); shares the
+    canonical :class:`NemoSEOSConfig` with the density EOS — no re-derivation.
+
+    Parameters
+    ----------
+    T, S : array — Potential temperature [°C] / salinity [PSU] at T-points.
+    gdept : array — Geometric T-point depth [m, positive down], broadcastable
+        against ``T`` on the last (vertical) axis.
+    cfg : NemoSEOSConfig — Coefficients (defaults = the DINO/Kamm set).
+
+    Returns
+    -------
+    (alpha, beta) : arrays [1/°C], [1/PSU], same shape as ``T``.
+    """
+    if cfg is None:
+        cfg = NemoSEOSConfig()
+    zt = T - cfg.T0
+    zs = S - cfg.S0
+    inv_rho0 = 1.0 / cfg.rho0
+    alpha = (cfg.a0 * (1.0 + cfg.lambda1 * zt + cfg.mu1 * gdept)
+             + cfg.nu * zs) * inv_rho0
+    beta = (cfg.b0 * (1.0 - cfg.lambda2 * zs - cfg.mu2 * gdept)
+            - cfg.nu * zt) * inv_rho0
+    return alpha, beta
+
+
+def compute_buoyancy_frequency_nemo_bn2(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    gdept: jnp.ndarray,
+    gdepw_int: jnp.ndarray,
+    cfg: NemoSEOSConfig | None = None,
+    g: float = constants.g,
+) -> jnp.ndarray:
+    r"""Brunt-Väisälä ``N²`` by NEMO's exact ``bn2`` (S-EOS).
+
+    Transcribes NEMO ``eosbn2.F90`` ``bn2_t`` (lines 1453-1462)::
+
+        zrw = (gdepw_k − gdept_k) / (gdept_{k-1} − gdept_k)
+        alpha_w = alpha_k (1 − zrw) + alpha_{k-1} zrw
+        beta_w  = beta_k  (1 − zrw) + beta_{k-1}  zrw
+        N²_k = g ( alpha_w ΔT − beta_w ΔS ) / e3w_k
+
+    where ``alpha``, ``beta`` (:func:`nemo_seos_alpha_beta`) are evaluated at
+    EACH T-cell's OWN geometric depth ``gdept`` and interpolated to the
+    w-interface by the geometric weight ``zrw``; ``ΔT = T_upper − T_lower``.
+    This differs from :func:`compute_buoyancy_frequency_adiabatic`, which
+    displaces both parcels to a single reference pressure and differences the
+    full nonlinear density — near-neutral marginal cells flip between the two.
+
+    Index convention: legoESM interior interface ``i`` sits between the UPPER
+    cell ``i`` (shallower, NEMO ``jk-1``) and the LOWER cell ``i+1`` (NEMO
+    ``jk``); the w-point is NEMO ``jk``. So ``e3w = gdept[i+1] − gdept[i]`` is
+    the (positive) centre-to-centre spacing and ``gdepw_int[i]`` is the
+    interface depth. **Signed** — ``N² < 0`` marks a statically unstable
+    interface (the convection / TKE trigger); NOT clipped.
+
+    Fully ``jax.grad``-safe (arithmetic through the EOS coefficients + T/S).
+
+    Parameters
+    ----------
+    T, S : array — T-point potential temperature [°C] / salinity [PSU],
+        shape ``(..., nlev)``.
+    gdept : array — Geometric T-point depths [m, positive down], shape
+        ``(nlev,)`` or ``(..., nlev)``.
+    gdepw_int : array — Interior w-interface depths [m, positive down], shape
+        ``(nlev-1,)`` or ``(..., nlev-1)`` (== ``|z_half_ref[1:-1]|``).
+    cfg : NemoSEOSConfig — S-EOS coefficients (defaults = the DINO/Kamm set).
+    g : float — Gravitational acceleration [m/s²].
+
+    Returns
+    -------
+    array : signed ``N²`` at interior interfaces [1/s²], shape ``(..., nlev-1)``.
+    """
+    if cfg is None:
+        cfg = NemoSEOSConfig()
+    alpha, beta = nemo_seos_alpha_beta(T, S, gdept, cfg)      # (..., nlev)
+    gd = jnp.asarray(gdept)
+    gd_up = gd[..., :-1]                                       # cell i  (upper)
+    gd_lo = gd[..., 1:]                                        # cell i+1 (lower)
+    # Geometric w-point weight (NEMO zrw); denominator < 0, numerator < 0 -> (0,1).
+    zrw = (gdepw_int - gd_lo) / (gd_up - gd_lo)               # (..., nlev-1)
+    a_w = alpha[..., 1:] * (1.0 - zrw) + alpha[..., :-1] * zrw
+    b_w = beta[..., 1:] * (1.0 - zrw) + beta[..., :-1] * zrw
+    e3w = gd_lo - gd_up                                        # centre spacing (>0)
+    dT = T[..., :-1] - T[..., 1:]                              # T_upper - T_lower
+    dS = S[..., :-1] - S[..., 1:]
+    return g * (a_w * dT - b_w * dS) / jnp.maximum(e3w, 1.0e-12)
+
+
+def nemo_bn2_depth_ladders(z_coord) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """``(gdept, gdepw_int)`` geometric depth ladders for the NEMO ``bn2`` N².
+
+    ``gdept`` = ``z_coord.t_depth_ref`` (the exact NEMO ``gdept_1d``) when a
+    fidelity coordinate supplies it, else the interface-midpoint
+    ``|z_full_ref|``; ``gdepw_int`` = ``|z_half_ref[1:-1]|`` (interior
+    w-interface depths). Both positive-down [m], static ``(nlev,)`` /
+    ``(nlev-1,)`` grid quantities.
+
+    Residual (documented): these are the REFERENCE ladders. NEMO's ``bn2``
+    uses the time-level ``gdept(Kmm)``; for the DINO linear-free-surface
+    (``key_linssh``) case that equals ``gdept_1d`` exactly, and for full z*
+    the ``eta``-perturbation on the thermobaric ``mu1·gdept`` term is
+    ``O(eta/H) ≈ 1e-3`` — negligible vs the dominant ``lambda1·zt`` and
+    ``ΔT`` signal (``mu1 = 1.5e-4`` /m). The zrw weight and e3w are grid-fixed.
+    """
+    z_full = jnp.abs(z_coord.z_full_ref)
+    t_depth = getattr(z_coord, "t_depth_ref", None)
+    gdept = z_full if t_depth is None else jnp.asarray(t_depth)
+    gdepw_int = jnp.abs(z_coord.z_half_ref[1:-1])
+    return gdept, gdepw_int
+
+
 # ==============================================================================
 # NEMO polynomial EOS — Roquet et al. (2015, Ocean Modelling 90:29-43) 55-term
 # seawater polynomial, EOS-80 coefficient set.  This is the FULL polynomial NEMO

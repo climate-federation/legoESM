@@ -133,6 +133,8 @@ def compute_N2(
     eos_fn=None,
     n2_mode: str = "insitu",
     adiabatic_over_dz_half: bool = False,
+    t_depth: jnp.ndarray | None = None,
+    w_depth: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """N^2 at interfaces (shared by the TKE and CATKE closures).
 
@@ -175,9 +177,30 @@ def compute_N2(
             eos_fn=eos_fn, rho_ref=rho_0, g=g,
             dz_half=dz_half if adiabatic_over_dz_half else None,
         )
+    if n2_mode == "nemo_bn2":
+        # NEMO eosbn2 bn2 (S-EOS): local alpha,beta at each cell's own gdept,
+        # interpolated to the w-point by the geometric zrw weight (SIGNED).
+        # NEMO's rn2 feeds BOTH zdfevd and zdftke, so the TKE closure consumes
+        # the same trigger as convection.
+        if (T_cell is None or S_cell is None
+                or t_depth is None or w_depth is None):
+            raise ValueError(
+                "n2_mode='nemo_bn2' requires T_cell, S_cell and the geometric "
+                "depth ladders t_depth (gdept) / w_depth (interior gdepw) — "
+                "the k_profiles TKE caller threads them from "
+                "eos.nemo_bn2_depth_ladders(z_coord)."
+            )
+        # NemoSEOSConfig() defaults (the DINO/Kamm set) — matching the density
+        # path, where make_eos_fn's "nemo_seos" branch also has no custom-
+        # coefficient threading from any recipe. Thread a cfg through here the
+        # day a recipe carries non-default S-EOS coefficients.
+        from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
+        return compute_buoyancy_frequency_nemo_bn2(
+            T_cell, S_cell, t_depth, w_depth, g=g,
+        )
     raise ValueError(
-        f"Unknown n2_mode={n2_mode!r}; expected 'insitu', 'insitu_signed' "
-        f"or 'adiabatic'."
+        f"Unknown n2_mode={n2_mode!r}; expected 'insitu', 'insitu_signed', "
+        f"'adiabatic' or 'nemo_bn2'."
     )
 
 

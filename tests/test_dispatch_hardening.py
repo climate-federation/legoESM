@@ -240,6 +240,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # entry against eos.VALID_FREEZE_SCHEMES (per-cell liquidus target).
         ("packages/ocean/legoesm/ocean/coupler/omip2_applicator.py", "under_ice_freeze_relax"),
         ("packages/ocean/legoesm/ocean/dynamics/_flux_limiters.py", "resolve_tvd_limiter"),
+        # In-substep barotropic Coriolis scheme (node 16; "avg" 4-pt avg vs
+        # "een" NEMO enstrophy-conserving). A typo must raise, not silently
+        # run the legacy null-mode 4-pt average.
+        ("packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py", "barotropic_substeps_latlon_cgrid"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model.py", "__init__"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_compute_advection_flux_div"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_validate_config"),
@@ -255,8 +259,19 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/eos.py", "freezing_point"),
         ("packages/ocean/legoesm/ocean/experiments/dino.py", "create_forcings"),
         ("packages/ocean/legoesm/ocean/experiments/dino.py", "create_initial_conditions"),
+        # DINO model-config builder guards its scheme fields (gm_kappa_scheme,
+        # lateral_tracer_mixing, gm_redi_mld_criterion) with fn-entry raises;
+        # lock so the gm_redi_mld_criterion N2-integral guard can't be dropped.
+        ("packages/ocean/legoesm/ocean/experiments/dino.py", "dino_lat_lon_model_config"),
+        # make_bottom_drag_physics entry removed 2026-07-19: the dead
+        # physics-level bottom-drag factory was deleted on main (c5f88d325);
+        # the canonical guard is validate_bottom_drag_scheme above.
         ("packages/ocean/legoesm/ocean/physics/convection/integration.py", "make_convection_physics"),
         ("packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py", "gm_redi_tracer_tendency_latlon"),
+        # gm_bolus_advection dispatch (centred | through_fct; hardened 2026-07-18
+        # with the NEMO ldf_eiv_trp bolus-through-FCT option — a typo would
+        # silently drop the GM bolus from BOTH paths).
+        ("packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py", "nemo_iso_lap_tracer_tendency_latlon_cgrid"),
         ("packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_mpas.py", "gm_redi_tracer_tendency_mpas"),
         ("packages/ocean/legoesm/ocean/physics/lateral_mixing/integration.py", "make_lateral_mixing_physics"),
         # MPAS ocean vmix/surface/convection factory: catke rejected, richardson
