@@ -770,19 +770,21 @@ def build_parser():
     parser.add_argument("--ocean", default="two_layer",
                         choices=["fixed", "slab", "two_layer", "dynamic"],
                         help="Coupled ocean mode (default: two_layer slab). "
-                             "'dynamic' = the prognostic 3D LatLonCGridOceanModel "
-                             "stepped by the coupler on a SHARED lat-lon grid "
-                             "(requires --grid latlon); slab/two_layer/fixed = "
-                             "thermodynamic slab")
+                             "'dynamic' = a prognostic 3D ocean stepped by the "
+                             "coupler: the LatLonCGridOceanModel on --grid latlon "
+                             "(co-located or --tripole-mesh) or the MPASOceanModel "
+                             "on --grid voronoi (co-located on the atm mesh); "
+                             "slab/two_layer/fixed = thermodynamic slab")
     parser.add_argument("--ocean-h-mix", type=float, default=50.0,
                         help="Slab ocean mixed-layer depth [m]")
     parser.add_argument("--grid", default="cubed_sphere",
                         choices=["cubed_sphere", "latlon", "voronoi", "gaussian"],
                         help="Atmosphere grid (default cubed_sphere). "
-                             "cubed_sphere/latlon support fixed/slab/two_layer + "
-                             "dynamic ocean; voronoi(MPAS)/gaussian(spectral) "
-                             "couple to the grid-agnostic slab (fixed/slab/"
-                             "two_layer). --ocean dynamic requires --grid latlon.")
+                             "latlon + voronoi(MPAS) support --ocean dynamic (3D "
+                             "ocean); cubed_sphere couples to the grid-agnostic "
+                             "slab (fixed/slab/two_layer, its 3D ocean is dycore-"
+                             "blocked); gaussian(spectral) is fixed-SST AMIP only "
+                             "for now (coupled synthesis is a follow-up).")
     parser.add_argument("--couple-surface-radiation",
                         action=argparse.BooleanOptionalAction, default=True,
                         help="Feed the coupler's tile-blended (land+ocean) skin "
@@ -1282,16 +1284,38 @@ def main():
         #   * TRIPOLE (--tripole-mesh): the ocean runs on the eORCA tripole grid
         #     (a DIFFERENT grid from the lat-lon atm), coupled via the Phase-2
         #     cross-grid conservative remap (coupler.grid_remap).
-        from legoesm.ocean.state import LatLonCGridOceanConfig
-        if args.grid != "latlon":
+        if args.grid not in ("latlon", "voronoi"):
             raise SystemExit(
-                "--ocean dynamic requires --grid latlon (the atmosphere is "
-                "lat-lon; the 3D ocean is either co-located lat-lon or, with "
-                "--tripole-mesh, the tripole grid coupled by the cross-grid "
-                "remap).  Cube-atm + tripole-ocean needs the deferred "
-                "cross-family remap.")
+                "--ocean dynamic requires --grid latlon (the 3D lat-lon C-grid "
+                "ocean — co-located, or the tripole grid via --tripole-mesh) or "
+                "--grid voronoi (the 3D MPAS ocean co-located on the atmosphere's "
+                f"Voronoi mesh); got --grid {args.grid}.  The cube 3D ocean is "
+                "blocked by the cube-ocean dycore instability and the gaussian "
+                "ocean is idealized-only (both deferred).")
         overrides["ocean_mode"] = "dynamic"
-        overrides["ocean_config"] = LatLonCGridOceanConfig()
+        if args.tripole_mesh and args.grid != "latlon":
+            # --tripole-mesh is a lat-lon-atm option (the eORCA tripole ocean
+            # couples to a lat-lon atmosphere via the cross-grid remap); reject
+            # it up front with a clear message rather than failing later in the
+            # cross-family remapper (codex LOW).
+            raise SystemExit(
+                "--tripole-mesh requires --grid latlon (the tripole ocean "
+                f"couples to a lat-lon atmosphere); got --grid {args.grid}.  "
+                "Drop --tripole-mesh for the co-located voronoi MPAS ocean.")
+        if args.grid == "voronoi":
+            # The MPAS ocean builds its config from the OMIP NEMO-match recipe
+            # inside _init_mpas_dynamic_ocean; only the idealized stratified rest
+            # cold start is wired (a WOA cold start on the unstructured mesh —
+            # woa_ocean_mask/partial cells — is a follow-up).  ocean_config and
+            # ocean_ic='woa' are lat-lon-only.
+            if args.ocean_ic != "rest":
+                raise SystemExit(
+                    "--ocean dynamic --grid voronoi is wired for the stratified "
+                    "rest cold start only (--ocean-ic rest); the WOA cold start "
+                    "on the MPAS Voronoi mesh is a follow-up.")
+        else:
+            from legoesm.ocean.state import LatLonCGridOceanConfig
+            overrides["ocean_config"] = LatLonCGridOceanConfig()
         overrides["ocean_nlev"] = args.ocean_nlev
         overrides["ocean_dt_s"] = args.ocean_dt
         overrides["ocean_H_max_m"] = args.ocean_H_max
@@ -1553,19 +1577,35 @@ def main():
     if args.ocean == "dynamic" and getattr(driver, "ocean_state", None) is not None:
         try:
             os_ = driver.ocean_state
-            u = _np.asarray(os_.u.data)          # (nlat, nlon+1, nlev) [m/s]
-            v = _np.asarray(os_.v.data)          # (nlat+1, nlon, nlev) [m/s]
-            uc = 0.5 * (u[:, :-1, :] + u[:, 1:, :])   # -> cell centres
-            vc = 0.5 * (v[:-1, :, :] + v[1:, :, :])
-            T = _np.asarray(os_.T.data)          # (nlat, nlon, nlev) [degC]
             z = driver._ocean_z_coord
-            dz = _np.asarray(getattr(z, "dz_ref", _np.ones(u.shape[-1])))
-            dz = dz.reshape(1, 1, -1) if dz.ndim == 1 else dz
+            if getattr(driver, "_ocean_is_mpas", False):
+                # MPAS TRiSK: the prognostic velocity is edge-normal (nEdges,
+                # nlev); reconstruct cell-centred (u_east, v_north) via Perot
+                # (the SAME reconstruction the coupler uses for surface currents)
+                # and read cell lat/lon straight off the mesh.
+                from legoesm.grids.voronoi import reconstruct_cell_velocity
+                mesh = driver._ocean_grid
+                u_east, v_north = reconstruct_cell_velocity(os_.u.data, mesh)
+                uc = _np.asarray(u_east)         # (nCells, nlev)
+                vc = _np.asarray(v_north)
+                T = _np.asarray(os_.T.data)      # (nCells, nlev) [degC]
+                dz = _np.asarray(getattr(z, "dz_ref", _np.ones(uc.shape[-1])))
+                dz = dz.reshape(1, -1) if dz.ndim == 1 else dz
+                lat = _np.degrees(_np.asarray(mesh.latCell))
+                lon = _np.degrees(_np.asarray(mesh.lonCell))
+            else:
+                u = _np.asarray(os_.u.data)      # (nlat, nlon+1, nlev) [m/s]
+                v = _np.asarray(os_.v.data)      # (nlat+1, nlon, nlev) [m/s]
+                uc = 0.5 * (u[:, :-1, :] + u[:, 1:, :])   # -> cell centres
+                vc = 0.5 * (v[:-1, :, :] + v[1:, :, :])
+                T = _np.asarray(os_.T.data)      # (nlat, nlon, nlev) [degC]
+                dz = _np.asarray(getattr(z, "dz_ref", _np.ones(u.shape[-1])))
+                dz = dz.reshape(1, 1, -1) if dz.ndim == 1 else dz
+                g = driver._ocean_grid
+                lat = _np.degrees(_np.asarray(getattr(g, "lat")))
+                lon = _np.degrees(_np.asarray(getattr(g, "lon")))
             Utr = _np.sum(uc * dz, axis=-1)      # depth-integrated zonal transport
             Vtr = _np.sum(vc * dz, axis=-1)
-            g = driver._ocean_grid
-            lat = _np.degrees(_np.asarray(getattr(g, "lat")))
-            lon = _np.degrees(_np.asarray(getattr(g, "lon")))
             _np.savez(
                 Path(args.output) / "ocean_circulation.npz",
                 u_sfc=uc[..., 0], v_sfc=vc[..., 0],
