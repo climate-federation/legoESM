@@ -4061,6 +4061,15 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         grid = create_cubed_sphere(n)
         sigma = _create_vertical(nlev, tc.vertical_coord)
         hd = _hyperdiff_cube(n)
+        # #1028 probe knob: scale the cube HS del-4 hyperdiffusion (mirrors
+        # LEGOESM_AH_SCALE; default 1.0 = unchanged). At C36 the default hd
+        # e-folds 2000-km modes in ~3.8 d — comparable to baroclinic growth —
+        # so the dead-jet factorial needs this axis too.
+        _hs_hd_scale = float(os.environ.get("LEGOESM_HS_HD_SCALE", "1.0"))
+        if _hs_hd_scale <= 0.0:
+            raise SystemExit(
+                f"LEGOESM_HS_HD_SCALE must be > 0, got {_hs_hd_scale}")
+        hd = hd * _hs_hd_scale
         dd = _div_damp_cube(n)
         ah = _laplacian_visc_cube(n)
         # FV3_3D iter 33/34: scale A_h via env var.  matrix default
