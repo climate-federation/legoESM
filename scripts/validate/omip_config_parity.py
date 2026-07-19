@@ -112,6 +112,10 @@ DECLARED = {
         "background diffusivity floor: molecular under iwm (tripole) vs KPP-default (MPAS)",
     "runtime_config.C_smag_lap":
         "per-grid stability-tuned Laplacian Smagorinsky (3.0 curvilinear / 0.33 Voronoi)",
+    "runtime_config.pgf_scheme":
+        "CAPABILITY: smc03 memory-infeasible on MPAS ico7 L75 (>33 GiB per-column "
+        "reconstruction; OOM on 48 GB at 95% pool) — MPAS runs adcroft until a "
+        "chunked smc03 lands (2026-07-19)",
     "runtime_config.physics.lateral_mixing.gm_redi.mld_rho_c":
         "TREE-SKEW: field added after 38483caa8 at inert default — run both grids from ONE pinned tree",
     "runtime_config.physics.lateral_mixing.gm_redi.nemo_mld_slope_ramp":

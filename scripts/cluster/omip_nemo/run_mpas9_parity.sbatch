@@ -12,7 +12,10 @@
 # vfs-tke-fix tree (the wave's ONE pinned tree):
 #   * --tracer-advection superbee NOW HONORED (was silently tvd — call-site
 #     wiring bug fixed in this tree)
-#   * --pgf-scheme smc03 NOW HONORED (was silently adcroft — same fix)
+#   * --pgf-scheme smc03: wiring fixed BUT MEMORY-INFEASIBLE at ico7 L75
+#     (per-column reconstruction builds >33 GiB intermediates; OOM on 48 GB
+#     at 95% pool). MPAS stays on its adcroft default — DECLARED capability
+#     gap until a chunked smc03 lands.
 #   * --bottom-drag-scheme nemo_quadratic (mpas8 sbatch had dropped it)
 # Everything else identical to mpas8_corr (KPP 0.15, ice-init, sn_sss,
 # runoff-depth map, river gate, woa-annual IC — structured-only monthly
@@ -35,14 +38,14 @@ ICEIC=$ROOT2/cfgs/ORCA1/INPUTS/Ice_initialization.nc
 echo "=== HOST ==="; hostname; nvidia-smi -L 2>/dev/null | head -1; date
 echo "=== worktree (fix tree) ==="; git -C $WT log --oneline -1
 GA="--grid mpas --mpas-level 7 --mpas-lloyd 20 --dt 150"
-COMMON="--nemo-vertical --partial-cell --pgf-scheme smc03 --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift --years 0.3 --snapshot-every-days 30 --diag-every-days 5"
+COMMON="--nemo-vertical --partial-cell --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift --years 0.3 --snapshot-every-days 30 --diag-every-days 5"
 LEVERS="--tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restoring-gate"
 PARITY="--bottom-drag-scheme nemo_quadratic"
 IC="--woa-init --woa-t $WTIC --woa-s $WSIC --sss-restore-file $SSSCLIM --ice-init $ICEIC"
 LABEL=mpas9_parity
 OUT=$ROOT/results/omip_nemo/nemolev_${LABEL}
 echo "=== RUN $LABEL (mpas8 + parity: superbee/smc03 honored + nemo_quadratic drag) ==="
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py \
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py \
   $GA $COMMON $LEVERS $PARITY $IC --kpp-ri-crit 0.15 --output $OUT 2>&1 | tail -60
 echo "run_rc=${PIPESTATUS[0]}"; date
 SNAP=$OUT/snapshot_day0090.npz
