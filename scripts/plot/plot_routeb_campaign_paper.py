@@ -95,8 +95,23 @@ def _style(ax, INK="#1a1a1a"):
     ax.tick_params(labelsize=9, color="#999999")
 
 
-def make_figure(data, title, outname, grid, ramp, resolutions, out):
+def make_figure(data, title, outname, grid, ramp, resolutions, out,
+                panel_b="efficiency"):
+    """Two-panel scaling figure.
+
+    ``panel_b`` selects how panel (b) normalises, both baselined at N=2:
+      "efficiency" -- speedup / ideal speedup; ideal is a flat line at 1.0.
+      "speedup"    -- raw speedup S(N)=thr(N)/thr(2); ideal is the diagonal.
+
+    They carry the same information (efficiency = speedup / (N/2)); the choice
+    is about legibility.  Speedup makes ANTI-scaling visceral -- ico L6 reads
+    0.52x, i.e. 16 GPUs runs at HALF the speed of 2, where "7% efficiency"
+    needs a mental step.  Efficiency is more compact for tables.
+    """
     import matplotlib.pyplot as plt
+    if panel_b not in ("efficiency", "speedup"):
+        raise ValueError(
+            f"panel_b must be 'efficiency' or 'speedup', got {panel_b!r}")
     INK = "#1a1a1a"  # MUTED dropped with the in-axes annotations
     fig, (axa, axb) = plt.subplots(1, 2, figsize=(9.4, 4.0))
 
@@ -116,7 +131,11 @@ def make_figure(data, title, outname, grid, ramp, resolutions, out):
         if 2 in s:
             base = s[2][1]
             Ne = [n for n in Ns if n >= 2]
-            axb.plot(Ne, [(s[n][1] / base) / (n / 2.0) for n in Ne], ls,
+            if panel_b == "speedup":
+                yb = [s[n][1] / base for n in Ne]
+            else:
+                yb = [(s[n][1] / base) / (n / 2.0) for n in Ne]
+            axb.plot(Ne, yb, ls,
                      color=col, marker=mk, markersize=6.5, linewidth=2.0,
                      label=label, zorder=5, markeredgecolor="white",
                      markeredgewidth=0.7)
@@ -132,12 +151,31 @@ def make_figure(data, title, outname, grid, ramp, resolutions, out):
     # reference line are kept -- they read as ideal scaling without a label.
     _style(axa); axa.legend(fontsize=8.5, frameon=False, loc="best")
 
-    axb.axhline(1.0, color="#bdbdbd", linewidth=1.2, linestyle=(0, (4, 3)), zorder=2)
     axb.set_xscale("log", base=2)
     axb.set_xticks([2, 4, 8, 16]); axb.set_xticklabels([2, 4, 8, 16])
-    axb.set_ylim(0, 1.15)
+    if panel_b == "speedup":
+        # Ideal = the N/2 diagonal. Curves BELOW y=1 are anti-scaling: more
+        # GPUs than 2, less throughput than 2. That reading is the reason to
+        # prefer this panel over efficiency.
+        ns_all = sorted({n for res, _km, _lab in resolutions
+                         for n in (data.get((grid, res)) or {}) if n >= 2})
+        if ns_all:
+            axb.plot(ns_all, [n / 2.0 for n in ns_all], ":", color="#bdbdbd",
+                     linewidth=1.4, zorder=2)
+        axb.axhline(1.0, color="#dcdcdc", linewidth=1.0, zorder=1)
+        axb.set_yscale("log", base=2)
+        axb.set_yticks([0.5, 1, 2, 4, 8])
+        axb.set_yticklabels(["0.5×", "1×", "2×", "4×", "8×"])
+    else:
+        axb.axhline(1.0, color="#bdbdbd", linewidth=1.2,
+                    linestyle=(0, (4, 3)), zorder=2)
+        axb.set_ylim(0, 1.15)
     axb.set_xlabel("A100 GPUs", fontsize=10, color=INK)
-    axb.set_ylabel("strong-scaling efficiency (ratio to 2 A100)", fontsize=10, color=INK)
+    if panel_b == "speedup":
+        axb.set_ylabel("speed-up (relative to 2 A100)", fontsize=10, color=INK)
+    else:
+        axb.set_ylabel("strong-scaling efficiency (ratio to 2 A100)",
+                       fontsize=10, color=INK)
     axb.set_title("(b) scaling quality vs GPUs", fontsize=11, color=INK, loc="left")
     _style(axb); axb.legend(fontsize=8.5, frameon=False, loc="best")
 
@@ -153,14 +191,25 @@ def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--csv", default=os.environ.get("WB_CAMPAIGN_CSV", ""))
     p.add_argument("--out", default="results/paper_figs")
+    p.add_argument("--panel-b", default="efficiency",
+                   choices=["efficiency", "speedup"],
+                   help="panel (b) normalisation, both baselined at N=2: "
+                        "'efficiency' = speedup/ideal (flat line at 1.0); "
+                        "'speedup' = raw ratio to 2 GPUs (ideal = diagonal, "
+                        "and anti-scaling reads directly as <1x)")
+    p.add_argument("--suffix", default="",
+                   help="appended to output filenames (compare variants)")
     a = p.parse_args(argv)
     import matplotlib
     matplotlib.use("Agg")
     data = load(a.csv)
     os.makedirs(a.out, exist_ok=True)
     for title, outname, grid, ramp, res in FIGS:
-        make_figure(data, title, outname, grid, ramp, res, a.out)
-    print(f"wrote {a.out}/{{{','.join(f[1] for f in FIGS)}}}.{{png,pdf}}")
+        make_figure(data, title, outname + a.suffix, grid, ramp, res, a.out,
+                    panel_b=a.panel_b)
+    names = ",".join(f[1] + a.suffix for f in FIGS)
+    print(f"wrote {a.out}/{{{names}}}.{{png,pdf}} "
+          f"(panel b = {a.panel_b})")
 
 
 if __name__ == "__main__":
