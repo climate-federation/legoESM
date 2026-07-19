@@ -88,16 +88,29 @@ def compute_power_law_filter_weights(
 def compute_nemo_boxcar_centred_weights(
     n_substeps: int,
     dtype: jnp.dtype,
+    substep_scale: int = 1,
 ):
     """NEMO dynspg_ts centred boxcar averaging (ln_bt_fw=F, nn_bt_flt=2).
 
     NEMO's centred split-explicit runs the barotropic past the
     baroclinic step and averages η/U over a boxcar of width ``2·nn_e``
     CENTRED on the new-time point (ts_wgt CASE(2): ``zwgt1(jn)=1`` where
-    ``|jn − jic|/nn_e < 1``; in the forward frame the centre ``jic``
-    is the substep that lands on t+Δt, i.e. ``jn = n_substeps``).  The
-    window therefore spans τ ∈ (0, 2) baroclinic steps: the loop runs to
-    the last in-window substep ``jn = 2·n − 1`` (``n_loop = 2·n − 1``).
+    ``|jn − jic|/nn_e < 1``; the centre ``jic = 2·nn_e`` lands on the
+    new-time point of a 2Δt integration, i.e. ``jn = n_substeps``).
+
+    ``substep_scale`` (default 1) is the ``_barotropic_substep_scale`` the
+    MLF caller applies: it feeds the SCALED substep count ``n_substeps =
+    nn_e · substep_scale`` (DINO: 23·2 = 46) so the substep length stays
+    CFL-safe over the 2Δt leap-frog window.  The boxcar HALF-width must
+    remain the UNSCALED ``nn_e = n_substeps / substep_scale`` (NEMO's
+    ``nn_e``), NOT the scaled count — otherwise the window doubles
+    (±2·nn_e) and ``n_loop`` becomes ``2·n_substeps − 1`` (91 for DINO)
+    instead of NEMO's ``icycle = 2·nn_e = 68``.  With ``substep_scale=1``
+    (every forward-Euler caller) ``half_width == n_substeps`` and the
+    weights are byte-identical to the pre-fix path.  The window therefore
+    spans τ ∈ (0, 2) baroclinic steps of length ``nn_e·dt_s``: the loop
+    runs to the last in-window substep ``jn = n_substeps + nn_e − 1``
+    (``n_loop = 68`` for DINO; ``2·n − 1`` when ``substep_scale=1``).
     This is the DINO namelist value (namdyn_spg nn_bt_flt=2); the older
     nn_bt_flt=1 (width nn_e, ``<0.5``) is not used by any shipped card.
     The secondary (transport) weights are the SM2005/ts_wgt tail sums
@@ -123,12 +136,18 @@ def compute_nemo_boxcar_centred_weights(
     if n_substeps < 2:
         raise ValueError(
             f"nemo_boxcar_centred needs n_substeps >= 2, got {n_substeps!r}")
+    if substep_scale < 1 or n_substeps % substep_scale != 0:
+        raise ValueError(
+            f"substep_scale={substep_scale!r} must be >=1 and divide "
+            f"n_substeps={n_substeps!r} (n_substeps = nn_e * substep_scale).")
+    half_width = n_substeps // substep_scale               # NEMO nn_e
     jn = _np.arange(1, 3 * n_substeps + 1, dtype=_np.float64)
     # nn_bt_flt=2: boxcar HALF-width == nn_e (full width 2*nn_e), the DINO
-    # namelist value (ts_wgt CASE(2): |jn-jic|/nn_e < 1).  In the forward
-    # frame jic=n_substeps, so the window spans jn = 1 .. 2*n_substeps-1,
-    # i.e. tau in (0, 2) baroclinic steps centred at t+dt.
-    w = (_np.abs(jn - n_substeps) / n_substeps < 1.0).astype(_np.float64)
+    # namelist value (ts_wgt CASE(2): |jn-jic|/nn_e < 1).  The centre
+    # jic == n_substeps (== 2*nn_e under the MLF scale); the window spans
+    # jn in (n_substeps - nn_e, n_substeps + nn_e), i.e. tau in (0, 2)
+    # baroclinic steps of length nn_e*dt_s centred at t+dt.
+    w = (_np.abs(jn - n_substeps) / half_width < 1.0).astype(_np.float64)
     m_star = int(_np.max(_np.where(w > 0.0)[0]) + 1)   # last in-window substep
     w = w[:m_star]
     w = w / w.sum()

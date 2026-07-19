@@ -718,7 +718,7 @@ def _run_substep_loop(
     return finals
 
 
-def _compute_weights(config, n_substeps: int, dtype):
+def _compute_weights(config, n_substeps: int, dtype, substep_scale: int = 1):
     """Filter + transport weights for the substep loop (shared verbatim).
 
     Cosine time filter for time-averaging (replaces box-average).
@@ -760,7 +760,8 @@ def _compute_weights(config, n_substeps: int, dtype):
         # the `_ab3` gate in barotropic_substeps_latlon_cgrid); the weights
         # (window + boxcar averaging) are identical.
         w_filter, w_total, w_transport, n_loop = (
-            compute_nemo_boxcar_centred_weights(n_substeps, dtype))
+            compute_nemo_boxcar_centred_weights(
+                n_substeps, dtype, substep_scale=substep_scale))
     else:
         use_cosine_filter = config.barotropic.barotropic_time_filter == "cosine"
         w_filter, w_total, w_transport = compute_filter_weights(
@@ -785,6 +786,7 @@ def barotropic_substeps_latlon_cgrid(
     eta_init=None,
     u_init=None,
     v_init=None,
+    substep_scale: int = 1,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
 
@@ -967,7 +969,7 @@ def barotropic_substeps_latlon_cgrid(
     coeffs = _dissipation_coeffs(config, grid, _area, dt_s, eta.dtype, mask)
 
     w_filter, w_total, w_transport, n_loop = _compute_weights(
-        config, n_substeps, eta.dtype)
+        config, n_substeps, eta.dtype, substep_scale=substep_scale)
 
     _filter = config.barotropic.barotropic_time_filter
     _boxcar_ab3 = _filter == "nemo_boxcar_ab3"   # NEMO nn_bt_flt=2 (DINO)

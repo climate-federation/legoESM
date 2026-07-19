@@ -2890,6 +2890,13 @@ class LatLonCGridOceanModel:
                         eta_init=_eta_bef, u_init=_u_bef, v_init=_v_bef)
                 else:
                     _baro_seed = {}
+            # The MLF scale rescales the substep COUNT but must NOT widen the
+            # NEMO boxcar averaging window: the half-width stays the unscaled
+            # nn_e (= _nbaro / scale).  Only the standard path builds the boxcar
+            # weights; the wide-halo twin refuses the EEN/boxcar MLF config.
+            if _baro_fn is barotropic_substeps_latlon_cgrid:
+                _baro_seed = dict(
+                    _baro_seed, substep_scale=_barotropic_substep_scale)
             state_new, (Hu_avg, Hv_avg) = _baro_fn(
                 state_mid, dt_s, _nbaro,
                 _grid, self.z_coord, self.config,

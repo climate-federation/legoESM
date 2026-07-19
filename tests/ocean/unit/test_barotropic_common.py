@@ -20,9 +20,53 @@ jax.config.update("jax_enable_x64", True)
 from legoesm.ocean.dynamics.barotropic_common import (
     bebt_blend,
     compute_filter_weights,
+    compute_nemo_boxcar_centred_weights,
     maxvel_clip,
     precision_aware_rel_tol,
 )
+
+
+# ---------------------------------------------------------------------------
+# compute_nemo_boxcar_centred_weights — MLF substep-scale window
+# ---------------------------------------------------------------------------
+
+class TestNemoBoxcarSubstepScale:
+    """The MLF _barotropic_substep_scale must NOT widen the boxcar window.
+
+    NEMO dynspg_ts CASE(2) with nn_e=23: jic=2*nn_e=46, boxcar half-width
+    = nn_e = 23, icycle (n_loop) = 68.  legoESM passes the SCALED count
+    (nn_e*scale = 46) so the substep length stays CFL-safe; the half-width
+    must stay the UNSCALED nn_e (n_substeps/scale), not the scaled 46.
+    """
+
+    def test_mlf_window_matches_nemo(self):
+        """scale=2, n=46 -> jic=46, half-width 23, n_loop=68, sum=1."""
+        w, w_tot, w_tr, n_loop = compute_nemo_boxcar_centred_weights(
+            46, jnp.float64, substep_scale=2)
+        assert n_loop == 68                       # NEMO icycle = 2*nn_e
+        assert float(w_tot) == pytest.approx(1.0)
+        assert float(w.sum()) == pytest.approx(1.0)
+        # window: |jn - 46| < 23 -> jn in 24..68 (jn = index+1)
+        nz = jnp.nonzero(w > 0)[0]
+        assert int(nz.min()) == 24 - 1
+        assert int(nz.max()) == 68 - 1
+        assert int((w > 0).sum()) == 45           # 2*nn_e - 1
+
+    def test_scale1_is_prefix_behavior(self):
+        """scale=1 (every FE caller) keeps the wide ±n window, n_loop=2n-1."""
+        w1, t1, tr1, nl1 = compute_nemo_boxcar_centred_weights(46, jnp.float64)
+        w2, t2, tr2, nl2 = compute_nemo_boxcar_centred_weights(
+            46, jnp.float64, substep_scale=1)
+        assert nl1 == nl2 == 2 * 46 - 1           # byte-identical default
+        assert jnp.array_equal(w1, w2)
+        assert jnp.array_equal(tr1, tr2)
+
+    def test_bad_scale_raises(self):
+        """scale must be >=1 and divide n_substeps evenly."""
+        with pytest.raises(ValueError):
+            compute_nemo_boxcar_centred_weights(46, jnp.float64, substep_scale=4)
+        with pytest.raises(ValueError):
+            compute_nemo_boxcar_centred_weights(46, jnp.float64, substep_scale=0)
 
 
 # ---------------------------------------------------------------------------
