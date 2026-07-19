@@ -4,6 +4,7 @@
 #SBATCH --job-name=mpas9_parity
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
+#SBATCH --constraint="rtx8000|a40"
 #SBATCH --mem=96G
 #SBATCH --time=40:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/mpas9_parity_%j.out
