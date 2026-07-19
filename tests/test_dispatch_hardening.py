@@ -227,6 +227,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # kernel _compute_gs_and_ci as a trace-time backstop.
         ("packages/land/legoesm/land/canopy/config.py", "validate"),
         ("packages/land/legoesm/land/canopy/energy_balance.py", "_compute_gs_and_ci"),
+        # LE_module (BT|PM) leaf-energy method dispatch: fail-early raise at the
+        # non-jitted solve_canopy_closure entry, in addition to the config.validate()
+        # check above (#1207 follow-up — this solver-entry guard was left unlocked).
+        ("packages/land/legoesm/land/canopy/solver.py", "solve_canopy_closure"),
         ("packages/ml/legoesm/ml/physics/model.py", "_validate_microphysics_scheme"),
         ("packages/ml/legoesm/ml/training.py", "create_optimizer"),
         ("packages/ml/legoesm/training/aimip_params.py", "make_aimip_classical_spectral_physics"),

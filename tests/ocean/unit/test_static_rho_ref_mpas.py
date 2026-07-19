@@ -205,3 +205,26 @@ def test_state_propagates_through_replace(setup):
     )
     # Field is preserved (not None) and identical.
     assert state_new.rho_ref_z is state_static.rho_ref_z
+
+
+def test_dynamic_ref_none_active_uses_mask(setup):
+    """Regression (#1207): the legacy dynamic-reference branch
+    (``use_depth_dependent_ref=True`` with ``is_active_3d=None``) broadcasts the
+    ``mask`` argument.  A prior ``del mask`` in iterate_eos_and_pressure_anomaly
+    made exactly this path raise UnboundLocalError; the other tests only pass a
+    non-None ``is_active_3d`` and never exercise it."""
+    mesh, _z_coord, pc_coord, state = setup
+    c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
+    mask = state.land_mask.data
+    eos_fn = make_eos_fn("wright", None)
+
+    _rho, rho_prime, _p = iterate_eos_and_pressure_anomaly(
+        state.T.data, state.S.data, mask,
+        lambda f: fill_land_cells_mpas(f, mask, c1, c2),
+        eos_fn, pc_coord.dz_ref, constants.rho_ocean, constants.g, n_iter=2,
+        use_depth_dependent_ref=True,
+        is_active_3d=None,   # forces the mask-broadcast fallback branch
+        h_actual=None,
+    )
+    assert rho_prime.shape == state.T.data.shape
+    assert np.all(np.isfinite(np.asarray(rho_prime)))
