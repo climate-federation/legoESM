@@ -771,9 +771,17 @@ DINO_RECIPES: dict[str, dict] = {
         #    horizontal — a Veronis mixer NEMO does not have) + kappa_Redi=200
         #    flat + dm95_taper: prime suspect for ACC 18-vs-69 Sv @y1 + the
         #    smoothness deficit (SSH small-scale 0.41x @y1). --
-        "lateral_tracer_mixing": "isoneutral",   # ln_traldf_iso; no geopotential K_h
-        "redi_slope_limit": "nemo_cap",          # ldfslp rn_slpmax cap (not DM95)
-        "treguier_aei0": 1500.0,                 # ½·rn_Ue·rn_Le (ldftra.F90:332)
+        # BLOCKED (2026-07-19): "lateral_tracer_mixing": "isoneutral" +
+        # "redi_slope_limit": "nemo_cap" are the FAITHFUL namtra_ldf selections
+        # but UNSTABLE without ln_traldf_msc (Lemarie et al. 2012 Method of
+        # Stabilizing Correction): at aht=1501*cos(phi), S_max=0.01, dz=10 m the
+        # rotated cross-term explicit limit is ~333 s << dt=2700 s (implicit_K33
+        # alone does not cover it; 90-day screens hit T>38 C with taper OR cap,
+        # worse with EIV off). The geopotential card below is the STABLE
+        # UNFAITHFUL interim: NEMO has no such horizontal mixing (Veronis
+        # suspect for ACC 18-vs-69 @y1 + smoothness 0.41x). Implement MSC in
+        # nemo_iso_lap (traldf_iso.F90), then flip these two selections.
+        "treguier_aei0": 1500.0,                 # 1/2*rn_Ue*rn_Le (ldftra.F90:332)
         #    NEMO's Madec STANDARD ln_traldf_iso operator + ln_ldfeiv GM bolus
         #    (ldf_eiv_trp_MLF), now implemented in the nemo_iso_lap path (conserving
         #    to machine precision + energetically correct — flattens isopycnals).
