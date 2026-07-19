@@ -382,17 +382,19 @@ def cgrid_latlon_hydrostatic_tendencies(
     # ``hybrid_factor = B p_s / p`` it replaces is the LOCAL derivative
     # of a DIFFERENT p(p_s) (arithmetic full-level mean), which does not
     # match the finite-difference secant of the nonlinear SB81 Phi(p_s)
-    # and left an O(slope) spurious force (the #1029 seed).  ``ln p_s``
-    # still rides the stack on both lanes: the thermodynamic
-    # ``v . grad(ln p)`` term keeps the analytic form (#1029 follow-up).
+    # and left an O(slope) spurious force (the #1029 seed).  The SB81
+    # gradients feed BOTH the momentum correction and the thermodynamic
+    # ``v . grad_eta(ln p)`` conversion (one shared discrete field — see
+    # section 11), so the hybrid lane no longer takes a ``ln p_s``
+    # gradient at all.
     ln_ps = jnp.log(p_s)
     n_lat_g, n_lon_g, nlev_g = B.shape
     if _hybrid:
         from legoesm.grids.vertical import sb81_full_level_ln_p
         lnp_sb = sb81_full_level_ln_p(sigma_coord, p_s)  # (n_lat, n_lon, nlev)
         _Bln_stack = jnp.concatenate(
-            [B, lnp_sb, ln_ps[..., jnp.newaxis]], axis=-1,
-        )  # (n_lat, n_lon, 2*nlev+1)
+            [B, lnp_sb], axis=-1,
+        )  # (n_lat, n_lon, 2*nlev)
     else:
         _Bln_stack = jnp.concatenate(
             [B, ln_ps[..., jnp.newaxis]], axis=-1,
@@ -402,10 +404,12 @@ def cgrid_latlon_hydrostatic_tendencies(
     dB_dx = _dBln_dx[..., :nlev_g]
     dB_dy = _dBln_dy[..., :nlev_g]
     if _hybrid:
-        dlnpsb_dx = _dBln_dx[..., nlev_g:2 * nlev_g]  # (n_lat, n_lon+1, nlev)
-        dlnpsb_dy = _dBln_dy[..., nlev_g:2 * nlev_g]  # (n_lat+1, n_lon, nlev)
-    dln_dx = _dBln_dx[..., -1]   # squeeze trailing-1 → (n_lat, n_lon+1)
-    dln_dy = _dBln_dy[..., -1]
+        dlnpsb_dx = _dBln_dx[..., nlev_g:]  # (n_lat, n_lon+1, nlev)
+        dlnpsb_dy = _dBln_dy[..., nlev_g:]  # (n_lat+1, n_lon, nlev)
+        dln_dx = dln_dy = None  # hybrid: no ln p_s gradient consumer left
+    else:
+        dln_dx = _dBln_dx[..., -1]   # squeeze trailing-1 → (n_lat, n_lon+1)
+        dln_dy = _dBln_dy[..., -1]
 
     # Cell→face interps: the v-face (latitude) direction uses the
     # halo-aware variant so a band's end faces — which are interior
@@ -584,17 +588,25 @@ def cgrid_latlon_hydrostatic_tendencies(
     # for all levels with p < 100 Pa).
     adiabatic = kappa * T * omega / (p_full + 1e-10)
 
-    # v · grad(ln p_s) at cell centres (average face gradients to centres)
-    dln_dx_cc = _face_to_cell_u(
-        jnp.broadcast_to(dln_dx[:, :, jnp.newaxis], u.shape))
-    dln_dy_cc = _face_to_cell_v(
-        jnp.broadcast_to(dln_dy[:, :, jnp.newaxis], v.shape))
-    v_dot_grad_lnps = u_c * dln_dx_cc + v_c * dln_dy_cc
-    # In sigma coords: grad_eta(ln p) = grad(ln p_s).
-    # In hybrid coords: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
+    # v · grad_eta(ln p) at cell centres (average face gradients to centres).
+    # #1029: the thermodynamic conversion MUST difference the SAME discrete
+    # ln p field as the momentum PGF correction — sigma: grad(ln p_s);
+    # hybrid: grad(ln p_{k+1/2} - alpha_k) (the SB81 full-level field).  A
+    # mixed pairing (SB81 momentum + analytic ``B p_s/p`` thermo) is
+    # rest-neutral but energetically inconsistent under flow over terrain:
+    # the KE<->APE conversion then uses a DIFFERENT effective grad(ln p)
+    # than the momentum work term, and the forced ``held_suarez_topo`` case
+    # blows up by day ~13 (vs day 50+ pre-fix, same environment) — measured
+    # 2026-07-19.  Hence one shared discrete field for both terms.
     if _hybrid:
-        v_dot_grad_lnps = v_dot_grad_lnps * (
-            sigma_coord.B_full * p_s[..., jnp.newaxis] / (p_full + 1e-10))
+        v_dot_grad_lnps = (u_c * _face_to_cell_u(dlnpsb_dx)
+                           + v_c * _face_to_cell_v(dlnpsb_dy))
+    else:
+        dln_dx_cc = _face_to_cell_u(
+            jnp.broadcast_to(dln_dx[:, :, jnp.newaxis], u.shape))
+        dln_dy_cc = _face_to_cell_v(
+            jnp.broadcast_to(dln_dy[:, :, jnp.newaxis], v.shape))
+        v_dot_grad_lnps = u_c * dln_dx_cc + v_c * dln_dy_cc
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
     dT_dt = horiz_adv_T + vert_adv_T + adiabatic
