@@ -49,7 +49,7 @@ import jax.numpy as jnp
 from functools import partial
 from typing import NamedTuple
 
-from legoesm.land.canopy.config import CanopyConfig
+from legoesm.land.canopy.config import CanopyConfig, VALID_LE_MODULES
 from legoesm.land.canopy.radiative_transfer import canopy_longwave_rt
 from legoesm.land.canopy.photosynthesis import photosynthesis
 from legoesm.land.canopy.stability import (
@@ -437,6 +437,15 @@ def solve_canopy_closure(
     x_final : shape (6,)  — converged state
     n_iters : scalar int  — iteration count when convergence was first reached
     """
+    # Fail-early on a typo'd LE_module: the internal leaf-energy dispatch is a
+    # bare ``if LE_module == "BT": ... else: # PM``, so an unknown value would
+    # SILENTLY run Penman-Monteith.  Guards the direct-call path (callers that
+    # skip CanopyConfig.validate).  Shares config.VALID_LE_MODULES (no drift).
+    if config.LE_module not in VALID_LE_MODULES:
+        raise ValueError(
+            f"unknown LE_module {config.LE_module!r}; the leaf-energy method "
+            f"must be one of {VALID_LE_MODULES} ('BT'=bulk transfer, "
+            "'PM'=Penman-Monteith)")
     solver = _make_implicit_newton_solver(
         LE_module=config.LE_module,
         stomatal_model=config.stomatal_model,
