@@ -3429,12 +3429,13 @@ def test_ifs_cape_qadv_requires_cape_closure():
         )
 
 
-def test_ifs_cape_qadv_rejected_by_bridge_factory_until_wired():
-    """The convection-bridge factory must FAIL LOUDLY on use_ifs_cape_qadv
-    (no bridge/pipeline caller supplies dT_dt_dyn/dq_dt_dyn yet, so the flag
-    would be a silent no-op — the phantom-scheme bug class)."""
-    import pytest as _pytest
-
+def test_ifs_cape_qadv_factory_accepts_now_that_bridge_threads_dyn_tendency():
+    """The convection-bridge factory NO LONGER rejects use_ifs_cape_qadv: the
+    hydrostatic bridge now threads the dynamics tendencies from
+    PhysicsState.dyn_tendency_T/qv and guards at TRACE time instead (a driver
+    that populates the carry makes the flag reachable — see
+    tests/atmosphere/hydrostatic/unit/test_bechtold_qadv_bridge.py).  The
+    build-time factory can't see the runtime carry, so it must accept."""
     from legoesm.atmosphere.physics.convection.config import ConvectionConfig
     from legoesm.atmosphere.physics.convection.integration import (
         _get_convection_fn,
@@ -3442,6 +3443,6 @@ def test_ifs_cape_qadv_rejected_by_bridge_factory_until_wired():
 
     ok = ConvectionConfig(scheme="bechtold")
     _get_convection_fn(ok)  # default flag False resolves fine
-    bad = ok._replace(bechtold=ok.bechtold._replace(use_ifs_cape_qadv=True))
-    with _pytest.raises(ValueError, match="use_ifs_cape_qadv"):
-        _get_convection_fn(bad)
+    on = ok._replace(bechtold=ok.bechtold._replace(use_ifs_cape_qadv=True))
+    name, fn, sc = _get_convection_fn(on)  # must NOT raise anymore
+    assert name == "bechtold" and sc.use_ifs_cape_qadv is True

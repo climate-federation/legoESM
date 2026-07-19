@@ -567,15 +567,19 @@ def mpas_ocean_baroclinic_tendencies(
     # restoring fails (f→0).  Diagnosed in project_mpas_etopo_
     # instability.md §"equatorial mode": top-100 hot-spot edges
     # cluster at mean |lat|=22°, peaking in equatorial Pacific.
-    _eq_boost = getattr(config, "equatorial_visc_boost", 0.0)
+    _eq_boost = config.equatorial_visc_boost
     if _eq_boost > 0:
-        # Tight Gaussian centered at equator (sigma=5° matches lat-lon
+        # Tight Gaussian centered at equator (default sigma=5° matches lat-lon
         # production config).  Previous cos²(lat) was too wide — it
         # overdamped real mid-latitude dynamics while the instability is
         # confined to |lat| < 10°.
-        _sigma_rad = jnp.radians(
-            getattr(config, "equatorial_visc_sigma_deg", 5.0)
-        )
+        if config.equatorial_visc_sigma_deg <= 0:
+            raise ValueError(
+                "equatorial_visc_sigma_deg must be > 0 when "
+                "equatorial_visc_boost > 0 (Gaussian width divides latEdge; "
+                f"got {config.equatorial_visc_sigma_deg})."
+            )
+        _sigma_rad = jnp.radians(config.equatorial_visc_sigma_deg)
         _lat_e = mesh.latEdge.astype(u_3d.dtype)
         _gauss = jnp.exp(-0.5 * (_lat_e / _sigma_rad) ** 2)
         _lat_factor = (1.0 + _eq_boost * _gauss)[:, jnp.newaxis]  # (nEdges, 1)
@@ -670,13 +674,13 @@ def mpas_ocean_baroclinic_tendencies(
     _drag_scheme = validate_bottom_drag_scheme(
         str(getattr(config, "bottom_drag_scheme", "legacy")))
     if config.bottom_drag_r > 0 or _drag_scheme != "legacy":
-        H_BBL = getattr(config, "bottom_drag_bbl_thickness", 0.0)
+        H_BBL = config.bottom_drag_bbl_thickness
         # Quadratic-with-floor drag (MOM6 DRAG_BG_VEL).  When
         # ``bottom_drag_bg_velocity > 0``, the effective drag coefficient
         # scales with velocity: ``r_eff = (r/u_bg) * sqrt(u² + u_bg²)``.
         # Recovers linear ``r`` at |u|→0, quadratic ``Cd·|u|`` at high
         # speed.  u_bg=0 → bit-exact legacy linear drag.
-        _u_bg = float(getattr(config, "bottom_drag_bg_velocity", 0.0))
+        _u_bg = float(config.bottom_drag_bg_velocity)
         if _drag_scheme != "legacy":
             # NEMO zdfdrg drag law (np_non_lin / np_loglayer) on the Voronoi
             # mesh, with NEMO's exact operator placement: rCdU is evaluated
@@ -698,10 +702,10 @@ def mpas_ocean_baroclinic_tendencies(
             _r_cell = nemo_drag_r_from_speed_sq(
                 2.0 * _ke_bot, _h_bot_c,
                 scheme=_drag_scheme,
-                cd0=float(getattr(config, "bottom_drag_cd0", 1.0e-3)),
-                cd_max=float(getattr(config, "bottom_drag_cdmax", 0.1)),
-                z0=float(getattr(config, "bottom_drag_z0", 3.0e-3)),
-                ke0=float(getattr(config, "bottom_drag_ke0", 2.5e-3)),
+                cd0=float(config.bottom_drag_cd0),
+                cd_max=float(config.bottom_drag_cdmax),
+                z0=float(config.bottom_drag_z0),
+                ke0=float(config.bottom_drag_ke0),
                 von_karman=constants.kappa_von_karman,
             )
             _c1 = mesh.cellsOnEdge[0]
@@ -1007,12 +1011,35 @@ def mpas_ocean_baroclinic_tendencies(
         # legacy top-cell path stays untraced/bit-exact when neither is set.
         from legoesm.ocean.freshwater import resolve_runoff_spread_arg
         _spread_arg = resolve_runoff_spread_arg(config)
+        # Salinity entering the virtual-salt closure (mirrors the lat-lon
+        # C-grid gate): "s_ref" = fixed scalar (legacy, bit-identical);
+        # "local" = the LOCAL top-cell (Now) salinity, NEMO's tra_sbc
+        # convention (sfx = emp * sss).  Static config value; unknown
+        # selections raise (dispatch hardening).
+        _fw_sal = getattr(config, "freshwater_salinity", "s_ref")
+        if _fw_sal == "local":
+            if bool(getattr(config, "normalize_freshwater", False)):
+                # Same incompatibility as the lat-lon _validate_config raise:
+                # the zero-mean correction times a varying S_local leaves a
+                # nonzero ∫S_local·F' dA global salt tendency (codex HIGH).
+                raise ValueError(
+                    "freshwater_salinity='local' is incompatible with "
+                    "normalize_freshwater=True (global-salt covariance "
+                    "residual); use s_ref with normalization, or local "
+                    "without it.")
+            _S_fw = S_3d[:, 0].astype(dS_dt_3d.dtype)
+        elif _fw_sal == "s_ref":
+            _S_fw = config.S_ref
+        else:
+            raise ValueError(
+                f"freshwater_salinity must be 's_ref' or 'local', "
+                f"got {_fw_sal!r}")
         if _spread_arg is not None:
             from legoesm.ocean.freshwater import (
                 runoff_spread_virtual_salt_tendency_3d,
             )
             dS_fw_3d = runoff_spread_virtual_salt_tendency_3d(
-                freshwater, config.S_ref, h_k, config.rho_0, mask,
+                freshwater, _S_fw, h_k, config.rho_0, mask,
                 runoff_spread_m=_spread_arg, area=mesh.areaCell,
                 normalize=bool(getattr(config, "normalize_freshwater", False)),
             )
@@ -1020,7 +1047,7 @@ def mpas_ocean_baroclinic_tendencies(
                 dS_dt_3d.dtype)
         else:
             dS_dt_3d = apply_freshwater_virtual_salt_top(
-                dS_dt_3d, freshwater, config.S_ref, h_k[:, 0], config.rho_0, mask,
+                dS_dt_3d, freshwater, _S_fw, h_k[:, 0], config.rho_0, mask,
                 area=mesh.areaCell,
                 normalize=bool(getattr(config, "normalize_freshwater", False)),
             )

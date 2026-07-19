@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 jax.config.update("jax_enable_x64", True)
 
@@ -34,9 +35,10 @@ def test_preset_dataset_forwards_sic_path_and_var_overrides(monkeypatch):
 
     captured = {}
 
-    def _fake_load(config, grid, start_year=None):
+    def _fake_load(config, grid, start_year=None, run_days=None):
         captured["config"] = config
         captured["start_year"] = start_year
+        captured["run_days"] = run_days
         return SimpleNamespace(times=None, sst=None, sic=None, config=config)
 
     monkeypatch.setattr(amip_mod, "load_amip_forcing", _fake_load)
@@ -111,3 +113,36 @@ def test_mpas_default_ic_reduces_p_s_over_topography(tmp_path, monkeypatch):
     np.testing.assert_allclose(p_s, expected, rtol=1e-6)
     # The old bug: p_s identically p_ref while phis carries mountains.
     assert p_s[np.argmax(phis)] < constants.p_ref * 0.999
+
+
+def test_zarr_rejects_held_radiation_carry_with_cadence(tmp_path):
+    """A zarr checkpoint with rad_update_steps>1 must fail fast: the held
+    radiation fluxes ride carry_aux, which zarr drops, so a restart would reset
+    the radiation phase (audit 2026-07-17). rad_update_steps==1 recomputes the
+    held fields every step, so the same carry checkpoints cleanly."""
+    from legoesm.driver.config import OutputConfig
+
+    def _cfg(rad_steps, fmt):
+        return ExperimentConfig(
+            grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=3),
+            dycore=DycoreConfig(dt=600.0, model_type="hydrostatic"),
+            topography="flat",           # -> physics.f_land None (isolate held guard)
+            radiation="gray",
+            rad_update_steps=rad_steps,
+            output=OutputConfig(checkpoint_format=fmt, checkpoint_days=1),
+            days=1,
+        )
+
+    held_carry = {"held_dT_rad": jnp.zeros((6, 4, 4, 3))}
+
+    driver = ModelDriver(_cfg(2, "zarr"), output_dir=str(tmp_path / "z2"))
+    driver.setup()
+    driver._carry_aux = dict(held_carry)
+    with pytest.raises(ValueError, match="held radiation fluxes"):
+        driver.save_checkpoint(0, 0.0)
+
+    # rad_update_steps==1: held fields recomputed every step, guard silent.
+    driver1 = ModelDriver(_cfg(1, "zarr"), output_dir=str(tmp_path / "z1"))
+    driver1.setup()
+    driver1._carry_aux = dict(held_carry)
+    driver1.save_checkpoint(0, 0.0)   # must NOT raise on the held guard

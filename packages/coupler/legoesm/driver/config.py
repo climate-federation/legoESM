@@ -552,6 +552,15 @@ class ExperimentConfig(NamedTuple):
     #   moisture rises (flattens the overcast runaway).
     cloud_p_xr: float | None = None
     cloud_alpha_xr: float | None = None
+    # Marine-Sc albedo lever: blend strength [0,1] toward diagnostic-CLUBB cf in
+    # the BL when --use-clubb-cloud-fraction is on (1.0 = full replacement, which
+    # drove a real-SST surface-heating runaway; ~0.3-0.5 is gentler + stable).
+    # None => CloudConfig default (1.0).
+    cloud_clubb_cf_override_strength: float | None = None
+    # Marine-Sc lever cloud-collapse floor [0,1]: minimum BL cloud the override
+    # may leave (breaks the cloud-temperature runaway that full reduction caused).
+    # None => CloudConfig default (0.0 = no floor).
+    cloud_clubb_cf_override_floor: float | None = None
     cloud_conv_cloud_max: float | None = None
     cloud_conv_cloud_condensate: float | None = None
     # Diagnostic in-cloud condensate vertical structure for the stratiform
@@ -782,7 +791,7 @@ class ExperimentConfig(NamedTuple):
     #                      (1 = wet surface; calibration default in
     #                      Phase 1 — left tunable)
     C_land: float = 2.0e5
-    emissivity_land: float = 0.96
+    emissivity_land: float = constants.emissivity_land
     beta_land: float = 1.0
 
     # Multilayer land surface (Phase L1).  When True, replaces the slab
@@ -897,15 +906,18 @@ class ExperimentConfig(NamedTuple):
     T_ice: float = constants.T_freeze_ocean
     albedo_ice: float = 0.65
     albedo_ocean: float = 0.06
-    sfc_emissivity: float = 0.97
-    emissivity_ice: float = 0.95
+    sfc_emissivity: float = constants.emissivity_ocean
+    emissivity_ice: float = constants.emissivity_ice
     tau_equator: float = 7.2
     tau_pole: float = 1.8
     tau_moist_coeff: float = 0.0115        # gray-rad moisture LW optical depth [m²/kg]
     # Additional gray-radiation knobs (GrayRadiationConfig fields), exposed on
     # ExperimentConfig so the calibration can tune them.  They are threaded to
-    # the gray radiation kernel as a `gray_cfg_overrides` dict; sfc_emissivity
-    # (above) is the fifth gray knob and is reused as-is.
+    # the gray radiation kernel as a `gray_cfg_overrides` dict.  NOTE:
+    # sfc_emissivity (above) is NOT honoured by gray radiation — gray keeps its
+    # idealized black-surface convention (eps=1.0, Held-Suarez/Frierson); the
+    # sfc_emissivity value feeds RRTMGP and the dynamic surface-emissivity blend
+    # instead (see the gray builder's `del emis_col` note in physics_pipeline).
     linear_frac: float = 0.2               # linear vs sigma^4 LW weighting
     lw_diff_factor: float = 1.66           # LW diffusivity factor D
     sw_tau_0: float = 0.22                 # SW optical-depth scale
@@ -1429,6 +1441,22 @@ class ExperimentConfig(NamedTuple):
                 "builds RadiationConfig directly, bypassing the shared cloud "
                 "pipeline); it would silently run 'constant'.  Use a "
                 "pipeline backend (cd-grid / latlon) or scheme='constant'."
+            )
+        # use_clubb_cloud_fraction is enforced (turbulence must be clubb) only
+        # inside build_physics_pipeline, which the mpas/spectral standalone
+        # radiation paths never build — so the opt-in would silently no-op
+        # there.  Reject it loudly on those backends (dispatch-hardening,
+        # mirrors the condensate-scheme guard above).
+        if (self.use_clubb_cloud_fraction
+                and self.dycore.discretization
+                in _NO_CLOUD_THREAD_DISCRETIZATIONS):
+            errors.append(
+                "use_clubb_cloud_fraction=True is not wired into the "
+                f"{self.dycore.discretization!r} radiation path (that backend "
+                "builds RadiationConfig directly, bypassing the shared physics "
+                "pipeline that enforces it); it would silently no-op.  Use a "
+                "pipeline backend (cd-grid / latlon) with turbulence='clubb', "
+                "or drop --use-clubb-cloud-fraction."
             )
         # Cross-field: the diagnostic-condensate FLOOR exists only for the
         # sub-grid diagnostic-fraction schemes (sundqvist / xu_randall); 'none'
@@ -2030,7 +2058,7 @@ class ExperimentConfig(NamedTuple):
             albedo_land_path=getattr(amip_cfg, 'albedo_land_path', ''),
             albedo_land_month=getattr(amip_cfg, 'albedo_land_month', 0),
             C_land=getattr(amip_cfg, 'C_land', 2.0e5),
-            emissivity_land=getattr(amip_cfg, 'emissivity_land', 0.96),
+            emissivity_land=getattr(amip_cfg, 'emissivity_land', constants.emissivity_land),
             beta_land=getattr(amip_cfg, 'beta_land', 1.0),
             use_multilayer_land=getattr(amip_cfg, 'use_multilayer_land', False),
             multilayer_n_layers=getattr(amip_cfg, 'multilayer_n_layers', 10),

@@ -71,3 +71,47 @@ def test_rrtmgp_constants_re_export_canonical():
     assert rrtmgp_constants.DRY_AIR_MOL_MASS == constants.M_dry
     assert rrtmgp_constants.WATER_MOL_MASS == constants.M_h2o
     assert rrtmgp_constants.AVOGADRO == constants.N_A
+
+
+def test_surface_emissivity_defaults_reference_constants():
+    """Config emissivity defaults MUST equal ``legoesm.constants`` (single
+    source of truth).  Tripwire for the drift that had ``ExperimentConfig``
+    ice=0.95 (vs 0.97) and land=0.96 (vs 0.95) — and a builder that dropped
+    ``emissivity_land`` entirely — silently diverge from the canonical values.
+    """
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.land.config import LandConfig, MultiLayerLandConfig
+
+    exp = ExperimentConfig()
+    assert exp.emissivity_ice == constants.emissivity_ice
+    assert exp.emissivity_land == constants.emissivity_land
+    assert exp.sfc_emissivity == constants.emissivity_ocean
+    assert LandConfig().emissivity_land == constants.emissivity_land
+    assert MultiLayerLandConfig().emissivity_land == constants.emissivity_land
+
+
+def test_builder_forwards_emissivity_land_to_pipeline():
+    """The pipeline builder MUST forward ``config.emissivity_land`` (regression
+    guard for the dropped-field bug this reconciliation fixed: land emissivity
+    was silently ignored by the builder and fell back to the constructor
+    default).  A default-only check would not catch re-dropping the kwarg.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
+    from legoesm.driver.physics_pipeline import build_physics_pipeline
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    sentinel = 0.42  # non-default, distinct from any emissivity constant
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=5),
+        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+                            discretization="finite_volume"),
+        radiation="gray",
+        emissivity_land=sentinel,
+    )
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    pipe = build_physics_pipeline(grid, sigma, cfg)
+    assert pipe.emissivity_land == sentinel

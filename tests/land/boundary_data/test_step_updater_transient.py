@@ -97,6 +97,18 @@ def test_canopy_dominant_pft_flips_c3_to_c4():
     np.testing.assert_allclose(float(cp1.LAI[0]), _LAI_GRASS, rtol=1e-6)
 
 
+def test_seb_fC4_follows_transient_cover():
+    """SEB fC4 tracks the per-year dominant PFT (forest C3 -> grass C4), not a
+    frozen time-mean flag."""
+    gsd = _forest_then_grass()
+    upd = make_step_land_params_updater(gsd, SimpleSEBConfig())
+    theta, doy = jnp.full(1, 0.2), jnp.asarray(196.0)
+    lp0, _ = upd(theta, doy, jnp.asarray(1850.0))         # forest = C3
+    lp1, _ = upd(theta, doy, jnp.asarray(2000.0))         # grass = C4
+    np.testing.assert_allclose(float(lp0.fC4[0]), 0.0)
+    np.testing.assert_allclose(float(lp1.fC4[0]), 1.0)
+
+
 def test_single_year_surfdata_is_year_invariant():
     """Backward compat: nyear==1 cover gives identical params for any year."""
     pft = np.zeros((1, 1, N_PFT_CLM5)); pft[0, 0, _BE] = 1.0

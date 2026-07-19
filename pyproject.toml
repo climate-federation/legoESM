@@ -7,7 +7,8 @@ name = "legoesm"
 version = "0.1.0"
 description = "legoESM: A Differentiable Earth System Model in JAX"
 readme = "README.md"
-license = {text = "MIT"}
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [
     {name = "Pierre Gentine"},
@@ -16,7 +17,6 @@ keywords = ["earth-system-model", "jax", "differentiable", "weather", "climate"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -283,6 +283,11 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # nEdges, W) plus the mandated T_sfc / dT unit-suffixed physics names; same
 # rationale as the column-extractor tests above.
 "tests/parallel/test_mpas_atm_native_step.py" = ["N806"]
+# Coupled latlon-band slab step (C10): ``T`` for the atm temperature field
+# (T = atm_state.T, N806) and the CLAUDE.md-mandated ``_K`` unit suffix on the
+# freezing-floor config field (t_freeze_ocean_K, N815) read clearer than
+# snake_case — same rationale as the physical-symbol entries above.
+"packages/coupler/legoesm/coupler/coupled_latlon_band.py" = ["N806", "N815"]
 
 [tool.mypy]
 python_version = "3.11"

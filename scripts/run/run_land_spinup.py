@@ -125,7 +125,7 @@ def main(argv=None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--surfdata", default="data/legoesm_surfdata_v1.nc")
     ap.add_argument("--grid-type", default="cubed_sphere",
-                    choices=["latlon", "gaussian", "cubed_sphere"])
+                    choices=["latlon", "gaussian", "cubed_sphere", "voronoi"])
     ap.add_argument("--resolution", type=int, default=12)
     ap.add_argument("--surface-scheme", default="two_leaf_canopy",
                     choices=["two_leaf_canopy", "simple_seb"])

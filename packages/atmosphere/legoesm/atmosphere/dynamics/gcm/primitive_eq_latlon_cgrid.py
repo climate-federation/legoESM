@@ -52,6 +52,7 @@ from legoesm.grids.operators_latlon_cgrid import (
     interp_cell_to_uface,
     interp_cell_to_vface_halo,
     cell_to_cgrid_winds,
+    pad_lon_cgrid,
 )
 from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
     absolute_vorticity_coriolis,
@@ -915,13 +916,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         # instead of the (potentially fp32-rounded) previous-step mass.
         self._target_mass: jax.Array | None = None
 
-    def reset_target_mass(self) -> None:
-        """Clear the anchored mass target (iter-18; see iter-4 SW twin)."""
-        self._target_mass = None
 
-    def set_target_mass(self, target_mass) -> None:
-        """Explicitly set the anchored mass target (iter-19)."""
-        self._target_mass = target_mass
 
     def compute_mass(self, state: CGridLatLonHydrostaticState, grid=None) -> jax.Array:
         """Compute total mass (for conservation fixer target).
@@ -1102,11 +1097,19 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 dT = fourier_filter_3d(dT, grid, polar_mask)
                 dps = fourier_filter(dps, grid, polar_mask)
 
-                # u: lon-interface, shape (n_lat, n_lon+1, nlev).  Drop
-                # the duplicated last lon column, filter, then restore
-                # the periodicity column from the filtered first column.
+                # u: lon-interface, shape (n_lat, n_lon+1, nlev).  Drop the
+                # duplicated last lon column, filter the n_lon interior faces,
+                # then restore the shared east-boundary column.  The closure
+                # is the EASTWARD wrap of the filtered interior faces via the
+                # backend-dispatched ``pad_lon_cgrid``: at proc_lon==1 that is
+                # the periodic wrap (== ``du_int[:, 0]``, byte-identical to the
+                # old code); under a LONGITUDE split it is the east
+                # neighbour's first FILTERED column (an MPI/ppermute ring
+                # exchange), so the shared u-face carries the filtered value
+                # instead of this rank's stale local column.
                 du_int = fourier_filter_3d(du[:, :-1, :], grid, polar_mask)
-                du = jnp.concatenate([du_int, du_int[:, 0:1, :]], axis=1)
+                du_closure = pad_lon_cgrid(du_int, halo=1)[:, -1:, :]
+                du = jnp.concatenate([du_int, du_closure], axis=1)
 
                 # v: lat-interface, shape (n_lat+1, n_lon, nlev).  Use
                 # the v-face mask (precomputed in __init__ against

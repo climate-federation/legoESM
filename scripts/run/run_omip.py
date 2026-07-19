@@ -133,9 +133,7 @@ class OMIPRunConfig(NamedTuple):
     coordinator: str | None = None
 
 
-def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> bool:
-    """True when the loop should checkpoint and exit before wallclock expiry."""
-    return max_s > 0.0 and elapsed_s >= (max_s - buffer_s)
+from legoesm.driver.checkpoint import wallclock_exhausted as _wallclock_exhausted
 
 
 def build_vertical_mixing_config_from_args(
@@ -964,6 +962,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   implicit_vertical_mixing: bool = False,
                   vertical_mixing: VerticalMixingConfig | None = None,
                   forcing_mode: str = "restoring",
+                  use_conservation_fixer: bool = True,
                   dz_ref_override=None):
     """Create grid, z_coord, config, model for any grid type.
 
@@ -1061,7 +1060,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             A_h=A_h_cs, K_h=K_h_cs, A_v=A_v, K_v=K_v,
             n_barotropic_substeps=60,
             barotropic_diffusion_alpha=0.3,
-            use_conservation_fixer=True,
+            use_conservation_fixer=use_conservation_fixer,
             physics=None,
             # FV3-faithful C-D barotropic (vector-invariant absolute-vorticity
             # flux + RK3 + div-damp/hyperdiff); replaces the a_grid solver whose
@@ -1164,7 +1163,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 # |u|→0; scales as Cd·|u| for |u|≫u_bg.
                 bottom_drag_bg_velocity=0.1,
                 n_barotropic_substeps=30,
-                use_conservation_fixer=True,
+                use_conservation_fixer=use_conservation_fixer,
                 physics=bathy_physics,
                 gm_redi=None if no_gm_redi else bathy_gm_redi,
                 barotropic_solver="implicit_cn",
@@ -1207,7 +1206,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             config = LatLonCGridOceanConfig.from_flat(
                 A_h=A_h, K_h=K_h, A_v=A_v, K_v=K_v,
                 n_barotropic_substeps=30,
-                use_conservation_fixer=True,
+                use_conservation_fixer=use_conservation_fixer,
                 physics=None,
                 implicit_vertical_mixing=implicit_vertical_mixing,
             )
@@ -4040,6 +4039,7 @@ def run_omip_single(grid_type: str, args) -> dict:
             args, "implicit_vertical_mixing", False),
         vertical_mixing=run_config.vertical_mixing,
         forcing_mode=getattr(args, "forcing_mode", "restoring"),
+        use_conservation_fixer=not args.no_conservation_fixer,
     )
     # NEMO zdfdrg drag-law + zdfiwm forcing-map overrides (no-op when the
     # flags are at their legacy defaults; rebuilds the model so the jitted

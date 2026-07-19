@@ -149,7 +149,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # ``voronoi`` / ``icosahedral`` / ``mpas_voronoi`` are accepted and
     # normalised by ``legoesm.driver.config.normalize_grid_type``
     # before reaching any internal dispatch.
-    parser.add_argument("--grid-type", type=str, default="cubed_sphere",
+    # default=None is a sentinel meaning "not explicitly set" so that
+    # _postprocess_args can distinguish a real user choice from the production
+    # default (cubed_sphere) when checking --truncation/--discretization
+    # conflicts; it resolves the sentinel to "cubed_sphere" afterwards.
+    parser.add_argument("--grid-type", type=str, default=None,
                         choices=["cubed_sphere", "gaussian", "latlon",
                                  "mpas",
                                  "voronoi", "icosahedral", "mpas_voronoi"])
@@ -166,7 +170,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # the postprocessor canonicalises 'cgrid' → 'latlon_cgrid' so the
     # downstream factory finds a matching ``(model_type, discretization,
     # grid_type)`` triple.
-    parser.add_argument("--discretization", type=str, default="centered",
+    # default=None sentinel: see --grid-type; resolves to "centered".
+    parser.add_argument("--discretization", type=str, default=None,
                         choices=["centered", "finite_volume", "cgrid",
                                   "latlon_cgrid", "cdgrid", "mpas", "spectral"])
     parser.add_argument("--truncation", type=int, default=None,
@@ -263,7 +268,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--time-integrator", type=str, default="auto",
         choices=["auto", "ssp_rk3", "ssp_rk3_scan", "ssp_rk34",
-                 "ssp_rk54", "ssp_rk54_scan", "rk4"],
+                 "ssp_rk54", "ssp_rk54_scan", "rk4",
+                 "leapfrog", "leapfrog_si"],
         help="Time integrator.  'auto' (default) selects each dycore's "
              "own stable default: ssp_rk3 on cube/lat-lon (IEEE-"
              "identical to existing runs) and ssp_rk54_scan on MPAS "
@@ -273,7 +279,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "verbatim to every dycore, including ssp_rk3 on MPAS for "
              "deliberate integrator-sensitivity runs.  ssp_rk3_scan is "
              "the JIT-compile-time optimised variant for production "
-             "lat-lon C-grid AMIP.",
+             "lat-lon C-grid AMIP.  leapfrog / leapfrog_si are the "
+             "SPECTRAL dycore's single-physics-eval path — required to run "
+             "PROGNOSTIC physics (clubb_lite TKE / bechtold / prognostic "
+             "GWD) faithfully on gaussian/spectral (#405); the per-RK-stage "
+             "ssp_rk3 spectral path still diagnostic-swaps prognostic "
+             "schemes.",
     )
     parser.add_argument(
         "--implicit-grav-wave-use-pcg", action="store_true",
@@ -645,6 +656,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[kg/kg] (None=CloudConfig default; tuned slab 3e-4).")
     parser.add_argument("--rh-crit", dest="cloud_rh_crit", type=float, default=None,
                         help="Critical RH for cloud onset (None=scheme default).")
+    parser.add_argument("--clubb-cf-override-strength",
+                        dest="cloud_clubb_cf_override_strength", type=float,
+                        default=None,
+                        help="Blend strength [0,1] toward diagnostic-CLUBB cloud "
+                             "fraction in the BL when --use-clubb-cloud-fraction "
+                             "is on (1.0=full replacement, which drove a real-SST "
+                             "surface-heating runaway; ~0.3-0.5 gentler+stable). "
+                             "None=CloudConfig default (1.0).")
+    parser.add_argument("--clubb-cf-override-floor",
+                        dest="cloud_clubb_cf_override_floor", type=float,
+                        default=None,
+                        help="Minimum BL cloud fraction [0,1] the CLUBB override "
+                             "may leave — breaks the cloud->0 cloud-temperature "
+                             "runaway that full reduction caused, so a LARGER "
+                             "albedo fix can run stably (~0.15-0.25). None="
+                             "CloudConfig default (0.0 = no floor).")
     parser.add_argument("--cloud-inhomogeneity-factor",
                         dest="cloud_inhomogeneity_factor", type=float, default=None,
                         help="Cahalan (1994) horizontal-inhomogeneity factor chi "
@@ -1431,6 +1458,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
+    # Defensive boundary: --grid-type/--discretization carry a None sentinel
+    # default (explicitness tracking for the --truncation conflict guard in
+    # _postprocess_args). A caller that skips _postprocess_args must still get
+    # the production defaults, not None (codex review 2026-07-17).
+    if args.grid_type is None:
+        args.grid_type = "cubed_sphere"
+    if args.discretization is None:
+        args.discretization = "centered"
     grid_config = GridConfig(
         grid_type=args.grid_type,
         resolution=args.resolution,
@@ -1578,6 +1613,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         surface_thermo_convention=args.bulk_thermo_convention,
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
         cloud_rh_crit=args.cloud_rh_crit,
+        cloud_clubb_cf_override_strength=args.cloud_clubb_cf_override_strength,
+        cloud_clubb_cf_override_floor=args.cloud_clubb_cf_override_floor,
         cloud_inhomogeneity_factor=args.cloud_inhomogeneity_factor,
         cloud_optics_inhomogeneity=args.cloud_optics_inhomogeneity,
         cloud_fsd=args.cloud_fsd,
@@ -1687,6 +1724,51 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
     )
 
 
+_SPECTRAL_PROGNOSTIC_CONVECTION = frozenset({
+    "tiedtke", "bechtold", "zhang_mcfarlane", "kain_fritsch", "mass_flux",
+    "edmf", "emanuel"})
+
+
+def _apply_spectral_scheme_fallback(args: argparse.Namespace, argv) -> argparse.Namespace:
+    """Spectral/gaussian AMIP: the spectral run loop cannot thread a prognostic
+    physics carry yet (issue #405), so prognostic convection / gravity-wave-drag
+    are refused deep in setup. When the user did NOT explicitly pick them, fall
+    back to the diagnostic schemes the spectral loop CAN run — convection ->
+    ``sbm``, GWD -> ``rayleigh`` — with a notice, so gaussian AMIP runs out of the
+    box. Explicit ``--convection`` / ``--gravity-wave-drag`` are honoured verbatim
+    (and still correctly refused by the loop if prognostic — the user's call).
+    The faithful prognostic-on-spectral path is threading PhysicsState through the
+    spectral step (the #405 follow-up), NOT this scheme swap. No-op off spectral."""
+    if getattr(args, "discretization", None) != "spectral":
+        return args
+    # #405: the spectral run loop now THREADS the prognostic PhysicsState carry
+    # on the LEAPFROG path (single physics eval per step), so a prognostic
+    # scheme runs FAITHFULLY there — do not downgrade it.  The downgrade below
+    # applies only to the per-RK-stage ssp_rk3 path, where a single-step carry
+    # is ill-defined.  (Auto-selecting leapfrog_si + its semi-implicit matrices
+    # for an `auto` integrator is a further usability step; today the prognostic
+    # spectral path is reached via an explicit `--time-integrator leapfrog_si`.)
+    _integ = str(getattr(args, "time_integrator", "auto")).lower()
+    if _integ in ("leapfrog", "leapfrog_si"):
+        print("[run_amip] spectral leapfrog path: prognostic physics carry is "
+              "threaded (#405) — schemes run faithfully (no diagnostic swap).",
+              flush=True)
+        return args
+    toks = list(argv or [])
+    has = lambda f: any(a == f or a.startswith(f + "=") for a in toks)
+    if not has("--convection") and args.convection in _SPECTRAL_PROGNOSTIC_CONVECTION:
+        print(f"[run_amip] spectral loop cannot thread prognostic convection "
+              f"'{args.convection}' yet (issue #405) -> diagnostic 'sbm'. "
+              f"Pass --convection to override.", flush=True)
+        args.convection = "sbm"
+    if not has("--gravity-wave-drag") and "mcfarlane" in str(args.gravity_wave_drag):
+        print(f"[run_amip] spectral loop cannot thread prognostic GWD "
+              f"'{args.gravity_wave_drag}' yet (issue #405) -> diagnostic "
+              f"'rayleigh'. Pass --gravity-wave-drag to override.", flush=True)
+        args.gravity_wave_drag = "rayleigh"
+    return args
+
+
 def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> argparse.Namespace:
     # Auto-detect MPI environment.
     # SLURM_NTASKS=1 is always set in batch jobs even for single-task GPU runs;
@@ -1717,9 +1799,18 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
               "when a land-sea mask is set); land albedo stays the "
               "latitude-only curve.")
 
-    if (args.forcing_path is None and args.restart_from is None
-            and args.dataset != "analytical"):
-        parser.error("--forcing-path required (unless --dataset analytical or --restart-from)")
+    # SST/SIC forcing is NOT stored in the checkpoint, and driver.setup()
+    # (which loads forcing) runs before load_checkpoint — so a restart of a
+    # real-data run still needs --forcing-path.  The old message exempted
+    # --restart-from, which was false: it deferred the failure to a confusing
+    # deep "AMIPForcingConfig.path is empty" inside setup (audit 2026-07-17).
+    if args.forcing_path is None and args.dataset != "analytical":
+        parser.error(
+            "--forcing-path required for --dataset "
+            f"{args.dataset!r} (unless --dataset analytical). Forcing is not "
+            "stored in the checkpoint, so a --restart-from run must re-supply "
+            "the same --forcing-path."
+        )
     if args.solar_source in ("file", "spectral_file") and not args.solar_file:
         parser.error("--solar-file required when --solar-source is file/spectral_file")
     if args.ic == "era5" and not args.ic_path:
@@ -1804,27 +1895,41 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
                      "the CMOR Amon/ output tree)")
 
     # Auto-configure spectral runs. --truncation implies the Gaussian/spectral
-    # pair, but an explicitly conflicting grid/discretization choice must be a
-    # hard error, not a silent override (the only silent grid fallback in the
-    # driver, audit 2026-07-17). "cubed_sphere"/"centered" are the argparse
-    # defaults and thus indistinguishable from unset — those are coerced.
+    # pair, and --discretization spectral implies the Gaussian grid; an
+    # explicitly conflicting choice must be a hard error, not a silent
+    # override (the only silent grid fallback in the driver, audit
+    # 2026-07-17). --grid-type/--discretization use a None sentinel default so
+    # ANY explicit value — including one equal to the production default — is
+    # distinguishable from unset and conflict-checked.
     if args.truncation is not None:
-        if args.grid_type not in ("cubed_sphere", "gaussian"):
+        if args.grid_type not in (None, "gaussian"):
             parser.error(
                 f"--truncation implies --grid-type gaussian but "
                 f"--grid-type {args.grid_type} was given; drop one of them"
             )
-        if args.discretization not in ("centered", "spectral"):
+        if args.discretization not in (None, "spectral"):
             parser.error(
                 f"--truncation implies --discretization spectral but "
                 f"--discretization {args.discretization} was given; "
                 "drop one of them"
             )
+    if args.discretization == "spectral" and args.grid_type not in (
+            None, "gaussian"):
+        parser.error(
+            f"--discretization spectral implies --grid-type gaussian but "
+            f"--grid-type {args.grid_type} was given; drop one of them"
+        )
     if args.discretization == "spectral" or args.truncation is not None:
         args.discretization = "spectral"
         args.grid_type = "gaussian"
         if args.truncation is not None:
             args.resolution = args.truncation
+    # Resolve the sentinels to the production defaults AFTER the conflict
+    # checks above.
+    if args.grid_type is None:
+        args.grid_type = "cubed_sphere"
+    if args.discretization is None:
+        args.discretization = "centered"
 
     # Canonicalise legacy ``cgrid`` → ``latlon_cgrid`` so the dycore
     # factory finds a matching (model_type, discretization, grid_type)
@@ -2230,6 +2335,7 @@ def main(argv: list[str] | None = None):
                          "'bulk_thermo_convention', 'convective_cloud'"))
 
     args = parser.parse_args(argv)
+    _apply_spectral_scheme_fallback(args, argv if argv is not None else sys.argv[1:])
     args = _postprocess_args(args, parser)
 
     # Route-B multicontroller: initialize jax.distributed BEFORE any device work

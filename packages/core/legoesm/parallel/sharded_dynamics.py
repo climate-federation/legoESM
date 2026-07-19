@@ -937,63 +937,6 @@ def make_face_halo_exchange(grid, config: DeviceConfig):
     return _exchange
 
 
-def make_ppermute_halo_exchange(grid, config: DeviceConfig):
-    """Create a halo exchange using ``jax.lax.ppermute`` (GPU/TPU only).
-
-    Unlike the standard halo exchange (which relies on XLA's implicit
-    all-gather when data is read across shards), this uses explicit
-    device-to-device permutations that bypass MPI entirely.
-
-    Falls back to :func:`make_face_halo_exchange` when the backend
-    is not GPU/TPU or the mesh is not available.
-
-    Parameters
-    ----------
-    grid : CubedSphereGrid
-        The cubed-sphere grid.
-    config : DeviceConfig
-        Device configuration with mesh.
-
-    Returns
-    -------
-    callable
-        ``exchange(state) -> state``
-    """
-    backend = jax.default_backend().lower()
-    if config.mesh is None or backend not in ("gpu", "tpu"):
-        return make_face_halo_exchange(grid, config)
-
-    from legoesm.parallel.async_halo import jax_native_halo_exchange
-
-    def _exchange(state):
-        def _exchange_leaf(leaf):
-            if not isinstance(leaf, (jax.Array, jnp.ndarray)):
-                return leaf
-            if leaf.ndim < 3 or leaf.shape[0] != N_FACES:
-                return leaf
-            if leaf.ndim == 3:
-                return jax_native_halo_exchange(leaf, grid, mesh=config.mesh)
-            elif leaf.ndim == 4:
-                # NOTE: jax_native_halo_exchange / _ppermute_halo_exchange
-                # are documented as a 2D-only legacy path.  When the
-                # SPMD backend in cubesphere_exchange.py is active the
-                # production code does not enter this branch — it goes
-                # through the native 4D ``packed_pad_halo_4d``.  Keep
-                # the per-level vmap here as a documented fallback;
-                # extending the legacy ppermute kernel to 4D is tracked
-                # separately.
-                transposed = jnp.moveaxis(leaf, -1, 0)
-                def _ex_level(lev):
-                    return jax_native_halo_exchange(lev, grid, mesh=config.mesh)
-                exchanged = jax.vmap(_ex_level)(transposed)
-                return jnp.moveaxis(exchanged, 0, -1)
-            return leaf
-
-        return jax.tree.map(_exchange_leaf, state)
-
-    return _exchange
-
-
 # ======================================================================
 # Multi-step integration with sharding
 # ======================================================================
@@ -1535,6 +1478,108 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
     )
 
 
+def _greedy_edge_coloring_ordered(comm_pairs, order):
+    """First-fit edge coloring visiting ``order`` (a list of normalized
+    ``(min,max)`` pairs). Always a PROPER coloring; the color count depends
+    on the visitation order.
+    """
+    from collections import defaultdict
+
+    vertex_colors: dict[int, set[int]] = defaultdict(set)
+    edge_colors: dict[tuple[int, int], int] = {}
+    for u, v in order:
+        used = vertex_colors[u] | vertex_colors[v]
+        color = 0
+        while color in used:
+            color += 1
+        edge_colors[(u, v)] = color
+        vertex_colors[u].add(color)
+        vertex_colors[v].add(color)
+    return edge_colors
+
+
+def _greedy_edge_coloring(comm_pairs):
+    """Legacy first-fit coloring on sorted pairs (the reference/never-regress
+    baseline for :func:`_multi_ordering_edge_coloring`). Worst case
+    ``2*max_degree - 1`` colors — each color is one ppermute ROUND, and the
+    route-B MPAS lane is round-latency-bound (#1113), so excess colors are
+    pure wall-clock.
+    """
+    edges = sorted({(min(u, v), max(u, v)) for u, v in comm_pairs})
+    return _greedy_edge_coloring_ordered(comm_pairs, edges)
+
+
+def _check_proper_edge_coloring(edge_colors, comm_pairs):
+    """Every pair colored, and no vertex sees a color twice."""
+    from collections import defaultdict
+
+    if set(edge_colors) != {tuple(sorted(p)) for p in comm_pairs}:
+        return False
+    seen: dict[int, set[int]] = defaultdict(set)
+    for (u, v), c in edge_colors.items():
+        if c in seen[u] or c in seen[v]:
+            return False
+        seen[u].add(c)
+        seen[v].add(c)
+    return True
+
+
+# Fixed shuffle seeds for the multi-start greedy edge coloring below —
+# a constant so every MPI rank / process builds the byte-identical
+# schedule (the coloring must agree across ranks or the ppermute pattern
+# desynchronises). NOT Math.random / device randomness: this is host-side
+# schedule construction, deterministic by seed.
+_COLORING_SHUFFLE_SEEDS = tuple(range(16))
+
+
+def _multi_ordering_edge_coloring(comm_pairs):
+    """Proper edge coloring via multi-start first-fit; returns the coloring
+    using the FEWEST colors (= ppermute rounds) across several deterministic
+    visitation orders.
+
+    First-fit greedy is order-sensitive: on the reordered MPAS comm graphs
+    the sorted order can overshoot the chromatic index by up to 3 rounds at
+    16 devices, while a degree-descending or shuffled order reaches the
+    ``max_degree`` lower bound (verified optimal on ico subdivisions 3–5 ×
+    {4,8,16} devices, auto/sfc partitions). Every candidate is a proper
+    coloring by construction, so taking the min can NEVER produce an
+    invalid schedule and can never regress below the legacy sorted greedy.
+
+    Deterministic across ranks (sorted + degree orders + fixed-seed
+    shuffles). Returns ``(edge_colors, max_degree)``.
+    """
+    import random
+    from collections import defaultdict
+
+    edges = sorted({(min(u, v), max(u, v)) for u, v in comm_pairs})
+    deg: dict[int, int] = defaultdict(int)
+    for u, v in edges:
+        deg[u] += 1
+        deg[v] += 1
+    max_degree = max(deg.values(), default=0)
+
+    orders = [
+        edges,                                                   # sorted
+        sorted(edges, key=lambda e: -(deg[e[0]] + deg[e[1]])),   # sum-deg desc
+        sorted(edges, key=lambda e: -max(deg[e[0]], deg[e[1]])),  # max-deg desc
+    ]
+    for seed in _COLORING_SHUFFLE_SEEDS:
+        shuffled = edges[:]
+        random.Random(seed).shuffle(shuffled)
+        orders.append(shuffled)
+
+    best_colors: dict[tuple[int, int], int] | None = None
+    best_rounds = None
+    for order in orders:
+        ec = _greedy_edge_coloring_ordered(comm_pairs, order)
+        rounds = max(ec.values(), default=-1) + 1
+        if best_rounds is None or rounds < best_rounds:
+            best_rounds, best_colors = rounds, ec
+            if best_rounds <= max_degree:
+                break            # hit the chromatic-index floor — optimal
+    return best_colors, max_degree
+
+
 def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
                              edges_per, max_lc, max_le):
     """Build a ppermute-based halo exchange schedule.
@@ -1556,7 +1601,8 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
     Returns
     -------
     dict with keys:
-        n_rounds, ppermute_perms, send_cell_idx, recv_cell_pos,
+        n_rounds, n_rounds_greedy, max_degree, coloring_method,
+        ppermute_perms, send_cell_idx, recv_cell_pos,
         send_edge_idx, recv_edge_pos, halo_cells_per_round,
         halo_edges_per_round.
     """
@@ -1599,6 +1645,9 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
     if not comm_pairs:
         return {
             'n_rounds': 0,
+            'n_rounds_greedy': 0,
+            'max_degree': 0,
+            'coloring_method': 'none',
             'ppermute_perms': [],
             'send_cell_idx': [],
             'recv_cell_pos': [],
@@ -1609,20 +1658,33 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
         }
 
     # ------------------------------------------------------------------
-    # 3. Edge-color the graph (greedy)
+    # 3. Edge-color the graph: each color = one bidirectional ppermute
+    #    ROUND, and the route-B lane is round-latency-bound (#1113), so
+    #    fewer colors = directly less wall-clock. First-fit greedy is
+    #    order-sensitive; the multi-start coloring reaches the
+    #    chromatic-index floor (= max_degree) on every probed MPAS config
+    #    where the legacy sorted greedy overshoots (up to 3 rounds at 16
+    #    devices). It can never regress: the legacy sorted order is one of
+    #    its candidates and it takes the min. Both are verified proper.
     # ------------------------------------------------------------------
-    vertex_colors: dict[int, set[int]] = defaultdict(set)
-    edge_colors: dict[tuple[int, int], int] = {}
-    for u, v in sorted(comm_pairs):
-        used = vertex_colors[u] | vertex_colors[v]
-        color = 0
-        while color in used:
-            color += 1
-        edge_colors[(u, v)] = color
-        vertex_colors[u].add(color)
-        vertex_colors[v].add(color)
-
-    n_rounds = max(edge_colors.values()) + 1
+    greedy_colors = _greedy_edge_coloring(comm_pairs)
+    n_rounds_greedy = max(greedy_colors.values()) + 1
+    multi_colors, max_degree = _multi_ordering_edge_coloring(comm_pairs)
+    n_rounds_multi = max(multi_colors.values()) + 1
+    # Adopt the multi-start coloring ONLY when it STRICTLY reduces rounds;
+    # on a tie keep the exact legacy sorted-greedy coloring so the produced
+    # schedule is byte-identical to before wherever there is no round win
+    # (the win only appears at high device counts — >=16 on the probed
+    # MPAS meshes). Both colorings are proper.
+    if n_rounds_multi < n_rounds_greedy:
+        edge_colors, n_rounds, coloring_method = (
+            multi_colors, n_rounds_multi, "multi_greedy")
+    else:
+        edge_colors, n_rounds, coloring_method = (
+            greedy_colors, n_rounds_greedy, "greedy")
+    assert _check_proper_edge_coloring(edge_colors, comm_pairs), (
+        "improper ppermute edge coloring — two same-round exchanges "
+        "would collide at a device")
     rounds: dict[int, list[tuple[int, int]]] = defaultdict(list)
     for (u, v), color in edge_colors.items():
         rounds[color].append((u, v))
@@ -1724,6 +1786,9 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
 
     return {
         'n_rounds': n_rounds,
+        'n_rounds_greedy': n_rounds_greedy,
+        'max_degree': max_degree,
+        'coloring_method': coloring_method,
         'ppermute_perms': ppermute_perms_out,
         'send_cell_idx': send_cell_idx_out,
         'recv_cell_pos': recv_cell_pos_out,

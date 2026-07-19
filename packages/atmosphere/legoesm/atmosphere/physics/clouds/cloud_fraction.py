@@ -544,6 +544,22 @@ def compute_cloud_properties(
     # carry, which merely drops the floor for that single step.
     if cloud_fraction_override is not None:
         _cf_clubb = jnp.clip(cloud_fraction_override, 0.0, 1.0)
+        # STRENGTH: partial blend toward CLUBB rather than a full replacement
+        # (``strength*CLUBB + (1-strength)*RH``).  Full replacement removed enough
+        # low cloud under real forcing to drive a surface-heating runaway (day
+        # 15-20 blowup, not fixed by halving dt); a gentler blend still lowers
+        # albedo while keeping the column stable.  Static config branch; the blend
+        # is on traced arrays (AD-safe).
+        _strength = config.clubb_cf_override_strength
+        if _strength < 1.0:
+            _cf_clubb = _strength * _cf_clubb + (1.0 - _strength) * cf
+        # FLOOR: keep a minimum BL cloud fraction so the override cannot collapse
+        # the low cloud to ~0 (which triggered the cloud-temperature runaway).
+        # Breaks the runaway while still allowing a bounded reduction.  Static
+        # config branch (JIT-safe); jnp.maximum is AD-safe.
+        _floor = config.clubb_cf_override_floor
+        if _floor > 0.0:
+            _cf_clubb = jnp.maximum(_cf_clubb, _floor)
         # LEVEL GATE (real-SST A/B fix): apply CLUBB's cf only in the boundary
         # layer / low cloud (p_full >= clubb_cf_override_p_min_pa, the marine-Sc
         # target) and keep the RH grid-scale fraction ALOFT.  A full-column
@@ -553,7 +569,16 @@ def compute_cloud_properties(
         # threshold is a compile-time float): 0.0 restores the full-column
         # override (the analytical-A/B behaviour).
         _p_min = config.clubb_cf_override_p_min_pa
-        if _p_min > 0.0:
+        _ramp = config.clubb_cf_override_ramp_pa
+        if _p_min > 0.0 and _ramp > 0.0:
+            # SMOOTH gate: linear weight w=1 in the BL (p_full >= p_min), 0 aloft
+            # (p_full <= p_min - ramp), ramping between — a blend rather than a
+            # step so the cloud/heating field has no discontinuity at the gate
+            # (the sharp step seeded a late blowup in the real-SST A/B).  p_full is
+            # traced; p_min/ramp are compile-time config floats.
+            _w = jnp.clip((p_full - (_p_min - _ramp)) / _ramp, 0.0, 1.0)
+            cf = _w * _cf_clubb + (1.0 - _w) * cf
+        elif _p_min > 0.0:
             cf = jnp.where(p_full >= _p_min, _cf_clubb, cf)
         else:
             cf = _cf_clubb

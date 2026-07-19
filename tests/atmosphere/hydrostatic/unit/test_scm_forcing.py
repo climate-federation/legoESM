@@ -1173,3 +1173,4 @@ def test_add_tendencies_is_field_wise_sum():
         np.asarray(f1.dT_dt.data) + np.asarray(f2.dT_dt.data),
         rtol=1e-12,
     )
+

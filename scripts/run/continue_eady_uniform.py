@@ -37,6 +37,10 @@ from legoesm.core.precision import set_policy, PrecisionPolicy
 set_policy(PrecisionPolicy.fp64())
 
 from legoesm.core.field import Field
+from legoesm.grids.operators_latlon_cgrid import (
+    interp_cell_to_uface,
+    interp_cell_to_vface,
+)
 from legoesm.ocean.experiments.eady_uniform import (
     EadyUniformConfig, compute_sponge_mask,
     create_forcings as eu_forcings,

@@ -93,9 +93,75 @@ Multi-node CRM/LES is unmeasured (c).
    then), operator-split lane scan, multicontroller route-B.
 8. **Message aggregation/overlap for the latency-bound GPU legs** (f64 ≈ f32
    speedup curves on Derecho ⇒ latency-, not bandwidth-bound; aggregation and
-   native-NCCL overlap, not compression, are the levers).
+   native-NCCL overlap, not compression, are the levers). PARTIAL:
+   route-B MPAS ppermute rounds are now minimized by a multi-start edge
+   coloring (reaches the chromatic-index floor where the legacy sorted
+   greedy overshot, up to 3 fewer rounds at 16 devices;
+   `_multi_ordering_edge_coloring` in `sharded_dynamics.py`,
+   `tests/parallel/test_ppermute_edge_coloring.py`); the data-parallel
+   gradient allreduce is now dtype-bucketed to one collective per dtype
+   instead of one per parameter leaf (`training/data_parallel.py`).
 9. **Spectral atm: keep multi-device N/A** unless a GPU-native transform
    (SHTns/sphericart) effort is explicitly launched.
+
+### Assessment follow-ups still open (2026-07-18 scaling review)
+
+These are each a scoped project, not a quick edit; ranked by value:
+
+- **Cube face-scatter into the production route-A driver** — the driver
+  keeps a full `(6,n,n)` replicated dynamics state on every MPI rank
+  (`model_driver.py`), so route-A cube dynamics has ZERO weak scaling;
+  `parallel/cube_face_scatter.py` provides the true face decomposition
+  but nothing under `packages/coupler/` wires it. Biggest route-A cube
+  unlock. Large restart/coupling/physics-scatter surgery; deferred while
+  `model_driver.py` carries uncommitted edits.
+- **Multilayer-land column scatter under MPI** — SHIPPED for the whole-face
+  cube MPI path: `_setup_parallel` scatters the per-column soil
+  state/params/carbon to owned faces (`_scatter_flat_columns`), both
+  radiation paths capture the advanced land state (fixing a latent
+  unfused-radiation soil-freeze), and the single-rank guard now permits
+  cube-face MPI. Gated bit-identical to serial at np={2,3,6}. Remaining:
+  transient LULC under MPI (global param rebuild) and the SPMD/lat-band land
+  partition specs (still refused).
+- **Coupled atm+ocean scaling bench lane** — SHIPPED (first coupled MPI step):
+  `coupler/coupled_latlon_band.py` couples the atm C-grid dycore + a
+  co-located slab SST on a SHARED lat-lon grid, SAME latitude-band
+  decomposition, via an EXPLICIT band-local sensible-heat exchange at the
+  interval boundary (the `_segment_hook` pattern — atm step compiles ONCE, no
+  per-interval recompile). The coupling is pointwise per cell => fully
+  band-local (no cross-rank comm, no regrid); the sensible exchange conserves
+  the coupled surface energy EXACTLY per cell, and the one non-conservative
+  term — the freezing clamp — is RETURNED as `clamp_energy` (a source == the
+  latent-fusion debit an unmodelled ice reservoir carries) so the budget stays
+  auditable. Lane: `scripts/bench/bench_coupled_latlon_scaling.py`
+  (`--parity-gate`). Gates: `tests/distributed/test_coupled_latlon_mpi.py`
+  (np2/np4 serial==band-MPI parity + global energy conservation),
+  `tests/unit/test_coupled_latlon_band.py`. This is the CORRECTNESS + capability
+  infra; the production timing envelope (fold real radiation + bulk fluxes into
+  the SAME jitted step via SST-in / flux-out threading on `make_latlon_mpi_step`,
+  no interval recompile) is the follow-up. Cube-atm × latlon/tripole-ocean
+  production coupling stays BLOCKED (cross-family regrid `NotImplementedError`,
+  incompatible decompositions, gather-needing regrid).
+- **Distributed polar filter under `proc_lon>1`** — SHIPPED: the polar
+  rFFT now gathers the full lon circle via the AD-safe lat-pencil transpose
+  (`lon_gather_full`/`lon_scatter_full`), rebuilds the mask at the global
+  n_lon, and the u-face closure routes through `pad_lon_cgrid` (east
+  neighbour under a split). Decomposition-invariant to the dynamics floor +
+  AD-safe (`test_latlon_2d_polar_filter_mpi.py`). NOTE: 2-D lat-lon MPI is
+  still measured net-negative on the latency-bound fabric and needs the
+  pole-fold + tripole-fold transposes before it is a production win — this
+  removes the polar-filter blocker so the path is CORRECT when a better
+  fabric or the folds land.
+- **Adjoint-side halo overlap** — DEFINITIVELY resolved (2026-07-18b): NOT
+  actionable on route A and ALREADY handled on route B, so there is nothing
+  to build. Route A (mpi4jax): `dir(mpi4jax)` exposes only blocking
+  `send`/`recv`/`sendrecv` — no `isend`/`irecv`, so no non-blocking overlap
+  is possible, and the `_sendrecv_vjp` backward is a single blocking exchange
+  with no interior compute to overlap (codex-confirmed). Route B (SPMD
+  ppermute): `xla_gpu_enable_latency_hiding_scheduler=true` is ON by default
+  (`runtime/backend.py`), so ppermute collectives are overlapped by XLA in
+  BOTH the forward and backward passes automatically. Revisit only if a
+  non-blocking mpi4jax (or a raw mpi4py Isend/Irecv) backend is added.
 
 ## Superseded / corrected claims (with sources)
 

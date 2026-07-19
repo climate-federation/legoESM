@@ -189,6 +189,12 @@ class OceanSurfaceForcing(NamedTuple):
                                        # DINO usrdef x1.3 westerly boost that
                                        # feeds TKE but NOT the momentum
                                        # stress).  None -> |(tau_x, tau_y)|.
+    ice_concentration: object = None   # jnp.ndarray | None  [0-1] sea-ice areal
+                                       # fraction from the coupler, consumed by
+                                       # the TKE closure's under-ice (1-fi)
+                                       # attenuation of the lc/etau wave-TKE
+                                       # sources (TKEConfig.eice=1; NEMO
+                                       # nn_eice).  None ⇒ no attenuation.
 
 
 class OceanConfig(NamedTuple):
@@ -913,6 +919,11 @@ class BarotropicConfig(NamedTuple):
     # ``chunk x reach <= min band height`` across ranks — the halo pulls
     # rows from ONE neighbour only.
     barotropic_wide_halo_chunk: int = 0
+    # Positional-stability tail: append new fields here (never mid-class).
+    # Degree of the Chebyshev polynomial preconditioner (only used when
+    # ``barotropic_implicit_preconditioner = 'chebyshev'``); higher = stronger
+    # smoothing per solve at more A-op applies. A count, not a trainable float.
+    barotropic_chebyshev_degree: int = 4
 
 
 class RuntimeChecksConfig(NamedTuple):
@@ -1847,6 +1858,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     # the lever (it runs after the final re-pin).  T/S column budgets are
     # unchanged except through the (zeroed/held) advection.
     prescribed_flow: str | None = None
+    # Salinity the virtual-salt closure multiplies the freshwater flux by:
+    #   "s_ref" (default, bit-identical): the fixed scalar ``S_ref`` above.
+    #   "local": the LOCAL top-cell salinity — NEMO's tra_sbc convention
+    #     (sfx = emp * sss).  On fresh shelves (Siberian ~27 PSU) the fixed
+    #     35-PSU closure over-salinifies ice growth by ~(35-4)/(27-4) ≈ 1.35x
+    #     and over-dilutes rivers; "local" removes that bias (2026-07-18
+    #     Arctic halocline-erosion audit).  Column-constant top-cell S is
+    #     used for the runoff-depth-spread channel too.
+    freshwater_salinity: str = "s_ref"   # "s_ref" | "local"
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

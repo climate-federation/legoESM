@@ -57,6 +57,7 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------------------------------
 # legoESM imports
 # ---------------------------------------------------------------------------
+from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import (
     SigmaCoordinate,
     create_sigma_coordinate,

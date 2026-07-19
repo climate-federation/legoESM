@@ -2003,9 +2003,14 @@ def build_segment_fn(
                     carry.T_land.at[_ofi].set(_T_land_local)
                     if carry.T_land is not None else None
                 )
-                # multilayer land tile is single-rank only (calibration) -> carry the
-                # state through unchanged on the MPI/owned-face path.
-                land_ml_new = carry.land_ml
+                # Multilayer land: capture the advanced state (step_unified's
+                # optional 4th return), identical to the single-rank path
+                # (_step_split_physics_and_finalize).  ``carry.land_ml`` is the
+                # rank-local owned-face columns (scattered in
+                # ModelDriver._setup_parallel), so _step_unified advanced THIS
+                # rank's soil columns; capture them instead of discarding.  When
+                # land_ml is None (slab land) the else-branch carries None.
+                land_ml_new = _ret[3] if len(_ret) > 3 else carry.land_ml
                 # Soil-water bucket: w_land_new rides PhysicsOutput
                 # (advanced in physics_step_no_rad), scattered at owned
                 # indices.  Carried through unchanged for legacy wrappers
@@ -2221,11 +2226,16 @@ def build_segment_fn(
             def _own(fld):
                 return None if fld is None else fld[_ofi]
 
-            # 8th return (multilayer land state) is unused on the MPI owned-face
-            # path: multilayer land is single-rank only, so land_ml_new is carried
-            # separately (= carry.land_ml) above; discard the radiation-core value.
+            # 8th return = the advanced MULTILAYER land state (carry.land_ml is
+            # the rank-local owned columns, scattered in
+            # ModelDriver._setup_parallel).  In the UNFUSED-radiation split the
+            # land tile is advanced ONLY here (radiation/surface core), never in
+            # the norad scan — so capture it; discarding it froze the soil
+            # (serial too).  The clear-sky second pass below discards its 8th
+            # (diagnostic re-run, must not re-advance).
             (dT_dt_rad, sw_net_sfc, lw_net_sfc,
-             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new_local, _) = \
+             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new_local,
+             land_ml_new) = \
                 pipeline.compute_radiation_core(
                     carry.T[_ofi], carry.p_s[_ofi], carry.q_v[_ofi],
                     forcing.sst, forcing.sic, lat, lon,
@@ -2289,10 +2299,12 @@ def build_segment_fn(
                 if carry.T_land is not None else None
             )
         else:
-            # 8th return (multilayer land state) unused on this MPI path — land_ml
-            # is single-rank only and carried separately (see land_ml_new above).
+            # 8th return = the advanced multilayer land state (see the owned-face
+            # branch above): the unfused-radiation split advances the land tile
+            # ONLY in this radiation/surface core, so capture it — discarding it
+            # froze the soil.  land_ml is None for slab-land runs (else-carry).
             (dT_dt_rad, sw_net_sfc, lw_net_sfc,
-             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new, _) = \
+             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new, land_ml_new) = \
                 pipeline.compute_radiation_core(
                     carry.T, carry.p_s, carry.q_v,
                     forcing.sst, forcing.sic, lat, lon,
@@ -2363,6 +2375,11 @@ def build_segment_fn(
                 held_new[7], carry.held_lw_up_toa_clr),
             T_land=(None if carry.T_land is None
                     else _match_dtype(T_land_new, carry.T_land)),
+            # Advanced multilayer land state (rank-local owned columns under
+            # cube-face MPI; None for slab-land runs).  Without this the
+            # unfused-radiation path never wrote the stepped soil back and the
+            # Richards state froze across the whole run.
+            land_ml=land_ml_new,
         )
 
     @partial(jax.jit, static_argnums=(1,), donate_argnums=(0,))

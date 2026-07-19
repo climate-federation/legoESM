@@ -105,9 +105,9 @@ class PhysicsPipeline:
         C_E=None,
         albedo_ice=0.65,
         albedo_ocean=0.06,
-        emissivity_ice=0.95,
-        emissivity_ocean=0.97,
-        emissivity_land=0.96,
+        emissivity_ice=constants.emissivity_ice,
+        emissivity_ocean=constants.emissivity_ocean,
+        emissivity_land=constants.emissivity_land,
         C_land=2.0e5,
         micro_fn=None,
         micro_config=None,
@@ -1928,6 +1928,10 @@ class PhysicsPipeline:
                     self, "_cloud_diagnostic_condensate_scheme", None),
                 adiabatic_lwc_rate=getattr(
                     self, "_cloud_adiabatic_lwc_rate", None),
+                clubb_cf_override_strength=getattr(
+                    self, "_clubb_cf_override_strength", None),
+                clubb_cf_override_floor=getattr(
+                    self, "_clubb_cf_override_floor", None),
             )
             # Column convective precip [kg/m²/s] for the convective cloud cover;
             # flattened to the (ncol,) column layout like the other inputs.
@@ -3376,6 +3380,7 @@ def build_physics_pipeline(grid, sigma, config):
         albedo_ocean=config.albedo_ocean,
         emissivity_ice=config.emissivity_ice,
         emissivity_ocean=config.sfc_emissivity,
+        emissivity_land=config.emissivity_land,
         micro_fn=micro_fn,
         micro_config=micro_config,
         dynamic_albedo=config.dynamic_albedo,
@@ -3433,6 +3438,13 @@ def build_physics_pipeline(grid, sigma, config):
         config, 'cloud_diagnostic_condensate_scheme', None)
     pipeline._cloud_adiabatic_lwc_rate = getattr(
         config, 'cloud_adiabatic_lwc_rate', None)
+    # Marine-Sc albedo lever: blend strength toward diagnostic-CLUBB cf in the BL
+    # (partial replacement — full replacement drove a real-SST surface-heating
+    # runaway).  None => CloudConfig default (1.0 = full replacement).
+    pipeline._clubb_cf_override_strength = getattr(
+        config, 'cloud_clubb_cf_override_strength', None)
+    pipeline._clubb_cf_override_floor = getattr(
+        config, 'cloud_clubb_cf_override_floor', None)
     pipeline._conv_scheme = getattr(config, 'convection', 'none')
     pipeline._grid = grid
     pipeline._sigma_coord = sigma

@@ -194,3 +194,15 @@ class TestAutoDetect:
         # (for random data may not be smaller, so just check it works)
         assert zarr_size > 0
         assert npz_size > 0
+
+
+def test_wallclock_exhausted_boundary():
+    """wallclock_exhausted fires within buffer of the budget; max_s<=0 disables."""
+    from legoesm.driver.checkpoint import wallclock_exhausted
+    # Fires once elapsed >= (max_s - buffer_s).
+    assert wallclock_exhausted(85.0, 90.0, 5.0) is True      # exactly at threshold
+    assert wallclock_exhausted(100.0, 90.0, 5.0) is True     # past it
+    assert wallclock_exhausted(84.999, 90.0, 5.0) is False   # just under
+    # max_s <= 0 disables the check entirely.
+    assert wallclock_exhausted(1e9, 0.0, 5.0) is False
+    assert wallclock_exhausted(1e9, -1.0, 5.0) is False

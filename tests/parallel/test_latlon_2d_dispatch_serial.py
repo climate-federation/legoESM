@@ -14,9 +14,12 @@ single-member lon ring => no mpi4jax), so the routing is checkable without
 ``mpirun``.  The genuine 2×N distributed routing + AD is covered in
 ``tests/distributed/test_latlon_2d_dispatch_mpi.py``.
 
-Also pins the loud guards: ``make_latlon_2d_mpi_step`` refuses a longitude
-split (proc_lon>1) until the operator lon ops route through the dispatched
-lon halo, and ``pad_with_pole_bc_lat`` refuses the tripolar fold seam on a
+Also pins the loud guards: ``make_latlon_2d_mpi_step`` WIRES a longitude
+split (proc_lon>1) for regular / wall-pole grids (operator lon ops route
+through the dispatched lon halo; the polar filter through the lat-pencil
+transpose) but refuses a TRIPOLAR grid and, with ``use_polar_filter=True``,
+an UNEVEN lon split (the allgather needs equal blocks) — before any
+mutation.  ``pad_with_pole_bc_lat`` refuses the tripolar fold seam on a
 2-D layout (wall-pole benchmark only).
 """
 from __future__ import annotations
@@ -178,18 +181,25 @@ def test_step_refuses_tripolar_longitude_split():
         make_latlon_2d_mpi_step(tri, layout_1x2)
 
 
-def test_step_refuses_polar_filter_longitude_split():
-    """``make_latlon_2d_mpi_step`` must refuse proc_lon>1 with
-    ``use_polar_filter=True`` — the polar filter rfft's the rank-local
-    longitude block (wrong under a lon split; needs a lon-gather FFT).
-    Regular grid (no fold), so only the polar-filter guard can fire."""
+def test_step_refuses_polar_filter_uneven_longitude_split():
+    """``make_latlon_2d_mpi_step`` with ``use_polar_filter=True`` now WIRES the
+    lon-split filter (via the lat-pencil transpose), but the AD-safe allgather
+    needs an EQUAL split — so an UNEVEN proc_lon (n_lon % proc_lon != 0) must
+    refuse at the FACTORY, BEFORE any mutation (the halo backend must stay
+    'local').  N_LON=6, proc_lon=4 -> 6%4=2 != 0.  (Even splits are exercised
+    end-to-end in tests/distributed/test_latlon_2d_polar_filter_mpi.py.)"""
     from types import SimpleNamespace
-    layout_1x2 = make_latlon_2d_layout(0, 1, 2, N_LAT, N_LON)
+
+    from legoesm.grids.halo import get_halo_backend, set_halo_backend
+    set_halo_backend("local")
+    layout_1x4 = make_latlon_2d_layout(0, 1, 4, N_LAT, N_LON)
     m = SimpleNamespace(
         grid=SimpleNamespace(fold=None),
         config=SimpleNamespace(use_polar_filter=True))
-    with pytest.raises(NotImplementedError, match="polar filter"):
-        make_latlon_2d_mpi_step(m, layout_1x2)
+    with pytest.raises(NotImplementedError, match="EQUAL split"):
+        make_latlon_2d_mpi_step(m, layout_1x4)
+    # No partial mutation: the guard fired before set_halo_backend.
+    assert get_halo_backend() == "local"
 
 
 def test_pad_with_pole_bc_lat_refuses_fold_seam_on_2d(layout_1x1):

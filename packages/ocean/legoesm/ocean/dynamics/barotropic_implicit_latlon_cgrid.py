@@ -1501,7 +1501,7 @@ def barotropic_implicit_latlon_cgrid(
                     "jacobi")),
         inv_diag, H_u_old, H_v_old, coeff, grid, mask,
         A_op=A_op,
-        cheby_degree=int(getattr(config, "barotropic_chebyshev_degree", 4)),
+        cheby_degree=int(config.barotropic.barotropic_chebyshev_degree),
         H_cell=_H_cell,
         layout=_pc_layout,
     )

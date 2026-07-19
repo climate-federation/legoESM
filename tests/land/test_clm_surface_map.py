@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from legoesm.land.clm_surface_map import (
-    load_clm_surface, CLMSurfaceParamProvider, _N_PFT)
+    load_clm_surface, CLMSurfaceParamProvider, _N_PFT, _nearest_regrid)
 from legoesm.land.surface_params import CLM5_PFT_NAMES, LandSurfaceParams
 
 
@@ -338,6 +338,39 @@ def test_slab_vs_multilayer_albedo_delta_documented_and_bounded():
     assert 0.015 < mean_delta < 0.05, (
         f"slab-vs-multilayer mean albedo delta {mean_delta:.4f} outside the "
         f"documented band — reconcile the two tuned tables (#746 item-3)")
+
+
+def test_nearest_regrid_longitude_wraps_at_seam():
+    """`_nearest_regrid` must use the *modular* longitude distance so a target
+    column near the 0/360 seam picks the true nearest source cell across the
+    wrap, not a within-hemisphere cell up to ~one grid spacing farther.
+
+    Construction where the wrapped and unwrapped choices DIFFER: target lon 0.0,
+    source lons [5.0, 359.0].  Raw-degree distance ranks 5.0 (|0-5|=5) nearer
+    than 359.0 (|0-359|=359) -> old (buggy) argmin picks 5.0.  Modular distance
+    ranks 359.0 (min(359,1)=1) nearer than 5.0 (5) -> correct pick is 359.0.
+    """
+    src_lat = np.array([0.0])
+    src_lon = np.array([5.0, 359.0])
+    field = src_lon[None, :].copy()          # (nlat=1, nlon=2); value == cell lon
+    # Target sits at the seam (lon 0); wrapped nearest is the 359.0 cell.
+    out = _nearest_regrid(src_lat, src_lon, field, np.array([0.0]), np.array([0.0]))
+    assert float(out[0]) == 359.0             # wrap wins (not the unwrapped 5.0)
+
+    # Negative-longitude (-180..180) input must normalize before wrapping:
+    # -0.1 deg == 359.9 deg, whose modular-nearest is again the 359.0 cell.
+    out_neg = _nearest_regrid(src_lat, src_lon, field, np.array([0.0]), np.array([-0.1]))
+    assert float(out_neg[0]) == 359.0
+
+
+def test_nearest_regrid_no_op_away_from_seam():
+    """Away from the seam the modular distance equals the raw distance, so the
+    pick is unchanged: a target at 22 deg among sources [10,20,30] selects 20."""
+    src_lat = np.array([0.0])
+    src_lon = np.array([10.0, 20.0, 30.0])
+    field = src_lon[None, :].copy()
+    out = _nearest_regrid(src_lat, src_lon, field, np.array([0.0]), np.array([22.0]))
+    assert float(out[0]) == 20.0
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ All topography generators return surface elevation z_s in meters.
 
 from __future__ import annotations
 
+import logging
 from typing import NamedTuple
 
 import jax.numpy as jnp
@@ -19,6 +20,8 @@ from legoesm import constants
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.edge_blending import blend_scalar_cube_edges_2d
 from legoesm.grids.halo import pad_halo_local
+
+logger = logging.getLogger(__name__)
 
 # Elevation-magnitude sanity threshold [m] for the geopotential-vs-meters
 # "double-g" trap: no Earth surface elevation exceeds ~8850 m (Everest) and no
@@ -667,6 +670,7 @@ def smooth_phis_cubed_sphere(
     phis: jnp.ndarray,
     smoothing_passes: int = 4,
     edge_blend_strength: float = 0.3,
+    edge_blend_width: int = 2,
 ) -> jnp.ndarray:
     """Apply standard cubed-sphere topography smoothing to a phis field.
 
@@ -684,6 +688,13 @@ def smooth_phis_cubed_sphere(
     edge_blend_strength : float
         Face-edge blend strength.  Default matches
         ``TopographyConfig.edge_blend_strength = 0.3``.
+    edge_blend_width : int
+        Face-edge blend width in cells.  Default matches
+        ``TopographyConfig.edge_blend_width = 2`` (the static-topography
+        path); the earlier hard-coded call omitted this and silently used
+        ``blend_scalar_cube_edges_2d``'s width=1, so an ERA5 cube IC got a
+        one-cell blend despite this function claiming the same pipeline
+        (audit 2026-07-17).
 
     Returns
     -------
@@ -691,7 +702,9 @@ def smooth_phis_cubed_sphere(
     """
     phis_np = np.asarray(phis)
     phis_np = _laplacian_smooth_cubed_sphere(phis_np, passes=smoothing_passes)
-    return blend_scalar_cube_edges_2d(jnp.asarray(phis_np), strength=edge_blend_strength)
+    return blend_scalar_cube_edges_2d(
+        jnp.asarray(phis_np), strength=edge_blend_strength,
+        width=edge_blend_width)
 
 
 def smooth_phis_gaussian(
@@ -1254,11 +1267,29 @@ def load_real_topography(
 
     # Smoothing.  Unstructured Voronoi/MPAS fields are rank-1 ``(nCells,)``
     # with no structured neighbour stencil, so neither the gaussian (2-D)
-    # nor the cubed-sphere (6, n, n) smoother applies — the point-sampled
-    # field is used as-is (a mesh-native Laplacian smoother is a follow-up).
+    # nor the cubed-sphere (6, n, n) smoother applies.  Use the mesh-native
+    # Laplacian (``smooth_phis_voronoi``, the same smoother the ERA5-IC MPAS
+    # path uses): raw point-sampled ETOPO on a coarse Voronoi mesh keeps
+    # cell-to-cell roughness that the TRiSK PGF amplifies to O(dx^-1)
+    # spurious force -> localized wind runaway (audit 2026-07-17). Requires
+    # the grid to expose cellsOnCell/nEdgesOnCell (a VoronoiMesh); a rank-1
+    # field on a grid without them is left as-is with a warning.
     is_unstructured = np.asarray(z_s).ndim == 1
     if is_unstructured:
-        pass
+        coc = getattr(grid, "cellsOnCell", None)
+        neoc = getattr(grid, "nEdgesOnCell", None)
+        if config.smoothing_passes > 0 and coc is not None and neoc is not None:
+            z_s = np.asarray(smooth_phis_voronoi(
+                jnp.asarray(z_s), coc, neoc,
+                smoothing_passes=config.smoothing_passes,
+            ))
+        elif config.smoothing_passes > 0:
+            logger.warning(
+                "load_real_topography: unstructured grid %s lacks "
+                "cellsOnCell/nEdgesOnCell; leaving point-sampled topography "
+                "unsmoothed (TRiSK-PGF blowup risk over steep terrain).",
+                type(grid).__name__,
+            )
     elif is_gaussian:
         z_s = _laplacian_smooth_gaussian(z_s, passes=config.smoothing_passes)
         z_s = _laplacian_smooth_gaussian(

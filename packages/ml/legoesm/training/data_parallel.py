@@ -141,7 +141,7 @@ def shard_samples(items, process_id, num_processes, *, drop_remainder=True):
 # (The pmap helper below is the multi-GPU-PER-PROCESS sub-case.)
 # ======================================================================
 
-def all_reduce_grad_mean(grad, num_processes, *, comm=None):
+def all_reduce_grad_mean(grad, num_processes, *, comm=None, bucket=True):
     """Cross-RANK (process) gradient MEAN via mpi4jax ``allreduce(SUM) / N``.
 
     The primary multi-node data-parallel reduction: each rank (1 GPU) computes a
@@ -149,15 +149,73 @@ def all_reduce_grad_mean(grad, num_processes, *, comm=None):
     all ranks so every rank applies the identical update (replicas stay in sync).
     Reuses ``legoesm.parallel.reductions.global_sum_mpi`` (AD-safe: full VJP via
     ``allreduce(SUM)``). ``num_processes <= 1`` -> identity (single-rank / laptop).
+
+    ``bucket`` (default True): pack all inexact leaves of a given dtype into
+    ONE flat buffer and issue a SINGLE ``allreduce`` per dtype, instead of one
+    collective PER LEAF. A big model (SFNO, neural-GCM) has hundreds of
+    parameter leaves; the per-leaf reduction pays hundreds of full network
+    latencies per step, and the multi-GPU leg is latency-bound (the halo-count
+    analysis and the Derecho f64≈f32 curves), so bucketing collapses that to
+    one (or a few, if dtypes are mixed) message per step. The reduction stays
+    in each leaf's NATIVE dtype (grouping BY dtype — no lossy promotion), so
+    the averaged gradient is NUMERICALLY equivalent to the per-leaf path: it
+    reduces the identical values in the identical dtype. It is not bit-for-bit
+    guaranteed across all rank counts — floating ``SUM`` is non-associative and
+    packing changes each message's size, which can lead MPI to pick a
+    different reduction tree, so at ≥3 ranks the two paths may differ in the
+    last ULP (exactly as two ``allreduce`` calls on different buffer sizes
+    already can). Set ``bucket=False`` to force the legacy per-leaf reduction.
+
+    Only INEXACT (float/complex) leaves are reduced; non-inexact leaves (int
+    counters) and non-array leaves pass through untouched — the same leaves a
+    real ``jax.grad`` pytree never carries as gradients. Python float scalars
+    ARE reduced (normalized to arrays, matching the legacy ``tree_map`` which
+    also arrays them).
     """
     if num_processes <= 1:
         return grad
     import jax
-
+    import jax.numpy as jnp
     from legoesm.parallel.reductions import global_sum_mpi
 
     inv = 1.0 / float(num_processes)
-    return jax.tree_util.tree_map(lambda g: global_sum_mpi(g, comm=comm) * inv, grad)
+    if not bucket:
+        return jax.tree_util.tree_map(
+            lambda g: global_sum_mpi(g, comm=comm) * inv, grad)
+
+    def _as_inexact_array(leaf):
+        """Return ``leaf`` as an array iff it is inexact (float/complex) —
+        including a Python float scalar, which the legacy per-leaf path also
+        reduced (and arrayed). Returns ``None`` for anything not reducible
+        (ints, None, exotic leaves), which then passes through untouched."""
+        try:
+            arr = jnp.asarray(leaf)
+        except (TypeError, ValueError):
+            return None
+        return arr if jnp.issubdtype(arr.dtype, jnp.inexact) else None
+
+    leaves, treedef = jax.tree_util.tree_flatten(grad)
+    normalized = [_as_inexact_array(leaf) for leaf in leaves]
+    # Bucket the reducible leaves by dtype, preserving first-seen order for
+    # determinism across ranks (every rank has the identical pytree, so the
+    # bucket order agrees).
+    buckets: dict[object, list[int]] = {}
+    for i, arr in enumerate(normalized):
+        if arr is not None:
+            buckets.setdefault(arr.dtype, []).append(i)
+
+    out = list(leaves)
+    for dtype, idxs in buckets.items():
+        arrs = [normalized[i] for i in idxs]
+        shapes = [a.shape for a in arrs]
+        sizes = [int(a.size) for a in arrs]
+        packed = jnp.concatenate([a.reshape(-1) for a in arrs], axis=0)
+        reduced = global_sum_mpi(packed, comm=comm) * inv   # ONE allreduce
+        offset = 0
+        for i, shape, size in zip(idxs, shapes, sizes):
+            out[i] = reduced[offset:offset + size].reshape(shape)
+            offset += size
+    return jax.tree_util.tree_unflatten(treedef, out)
 
 
 def mpi_data_parallel_train_step(loss_fn, params, opt_state, optimizer, sample,

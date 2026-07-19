@@ -96,6 +96,66 @@ def test_all_reduce_grad_mean_single_process_identity():
     assert float(out["b"]) == 3.0
 
 
+def test_grad_bucket_reconstructs_pytree(monkeypatch):
+    """The dtype-bucketed reduction must reconstruct the EXACT pytree the
+    per-leaf path produces — same structure, shapes, dtypes, and non-array
+    passthrough — with a single packed reduction per dtype. mpi4jax is
+    stubbed by an identity-sum (allreduce over a 1-rank world = the local
+    value), so num_processes is spoofed >1 to exercise the bucket code
+    while the 'reduction' is deterministic."""
+    import legoesm.training.data_parallel as dp
+
+    calls = {"n": 0}
+
+    def fake_global_sum(x, comm=None):
+        calls["n"] += 1
+        return x * float(NPROC)          # so *(1/NPROC) mean == identity
+
+    global NPROC
+    NPROC = 3
+    monkeypatch.setattr(dp, "all_reduce_grad_mean",
+                        dp.all_reduce_grad_mean)  # keep ref
+    monkeypatch.setattr("legoesm.parallel.reductions.global_sum_mpi",
+                        fake_global_sum)
+
+    grad = {
+        "w32": jnp.ones((3, 4), dtype=jnp.float32),
+        "b32": jnp.array([1.0, 2.0], dtype=jnp.float32),
+        "w64": jnp.arange(6.0, dtype=jnp.float64).reshape(2, 3),
+        "pyf": 5.0,                                        # python float scalar
+        "frozen": None,                                    # non-array leaf
+        "count": 7,                                        # non-inexact int leaf
+    }
+    calls["n"] = 0
+    bucketed = dp.all_reduce_grad_mean(grad, NPROC, bucket=True)
+    bucket_calls = calls["n"]
+    calls["n"] = 0
+    perleaf = dp.all_reduce_grad_mean(grad, NPROC, bucket=False)
+    perleaf_calls = calls["n"]
+
+    # On the INEXACT leaves — including a python float, the only kinds a real
+    # gradient pytree carries — bucketing equals the per-leaf path (mean ==
+    # identity under the stubbed reduction here).
+    for k in ("w32", "b32", "w64"):
+        assert bucketed[k].dtype == grad[k].dtype
+        assert np.allclose(np.asarray(bucketed[k]), np.asarray(perleaf[k]))
+        assert bucketed[k].shape == grad[k].shape
+    # python float 5.0 is REDUCED (arrayed), matching legacy — not skipped.
+    assert np.allclose(float(np.asarray(bucketed["pyf"])), 5.0)
+    assert np.allclose(np.asarray(bucketed["pyf"]), np.asarray(perleaf["pyf"]))
+    assert bucketed["frozen"] is None
+    # Non-inexact int counter passes through unchanged (legacy tree_map would
+    # instead reduce+promote it int->float; bucketing is more correct here).
+    assert bucketed["count"] == 7 and isinstance(bucketed["count"], int)
+    # Bucketing: f32 group (w32,b32) + f64 group (w64, and pyf under x64) = 2
+    # packed reductions. The legacy per-leaf tree_map issues one allreduce per
+    # LEAF it visits — w32,b32,w64,pyf,count = 5 (it even reduces the int).
+    # Bucketing strictly collapses the collective count.
+    assert bucket_calls == 2
+    assert perleaf_calls == 5
+    assert bucket_calls < perleaf_calls
+
+
 def test_mpi_loop_on_epoch_receives_current_params():
     # regression: on_epoch must get the CURRENT params (not the stale initial closure).
     w = jnp.array([2.0, 3.0])

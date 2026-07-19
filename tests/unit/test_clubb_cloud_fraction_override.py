@@ -130,7 +130,9 @@ class TestCloudFractionOverride:
         over-diagnosis that collapsed OLR + raised albedo in the real-SST A/B)."""
         T, p_full, q_v, dp = _saturated_marine_column()
         p_min = 70000.0
-        cfg = CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=p_min)
+        # ramp=0 => sharp step for the clean BL-vs-aloft partition assertion.
+        cfg = CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=p_min,
+                          clubb_cf_override_ramp_pa=0.0)
         rh = compute_cloud_properties(T=T, p_full=p_full, q_v=q_v, dp=dp, config=cfg)
         ovr_val = 0.15
         gated = compute_cloud_properties(
@@ -146,3 +148,72 @@ class TestCloudFractionOverride:
         # BL levels take the override; aloft levels are UNCHANGED from the RH cf.
         npt.assert_allclose(cf_gated[bl], ovr_val, atol=1e-12)
         npt.assert_allclose(cf_gated[aloft], cf_rh[aloft], atol=1e-12)
+
+    def test_override_strength_partial_blend(self):
+        """strength<1 blends toward CLUBB (strength*CLUBB + (1-strength)*RH) rather
+        than fully replacing — a gentler cloud reduction that avoids the
+        full-replacement surface-heating runaway.  Checked full-column (p_min=0)
+        so the blend is isolated from the level gate."""
+        T, p_full, q_v, dp = _saturated_marine_column()
+        rh = compute_cloud_properties(
+            T=T, p_full=p_full, q_v=q_v, dp=dp,
+            config=CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=0.0))
+        cf_rh = np.asarray(rh.cloud_fraction)
+        ovr_val, a = 0.10, 0.4
+        blended = compute_cloud_properties(
+            T=T, p_full=p_full, q_v=q_v, dp=dp,
+            config=CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=0.0,
+                               clubb_cf_override_strength=a),
+            cloud_fraction_override=jnp.full(T.shape, ovr_val))
+        cf_b = np.asarray(blended.cloud_fraction)
+        # exact blend: a*override + (1-a)*RH
+        npt.assert_allclose(cf_b, a * ovr_val + (1.0 - a) * cf_rh, atol=1e-10)
+        # gentler than full replacement: the cf stays closer to RH than to CLUBB
+        assert np.all(np.abs(cf_b - cf_rh) <= np.abs(ovr_val - cf_rh) + 1e-12)
+
+    def test_override_floor_prevents_cloud_collapse(self):
+        """clubb_cf_override_floor keeps a minimum BL cloud so the override cannot
+        drive cf to ~0 (which triggered the cloud-temperature runaway).  Checked
+        full-column with a very low override + strength=1.0."""
+        T, p_full, q_v, dp = _saturated_marine_column()
+        floor = 0.2
+        props = compute_cloud_properties(
+            T=T, p_full=p_full, q_v=q_v, dp=dp,
+            config=CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=0.0,
+                               clubb_cf_override_floor=floor),
+            cloud_fraction_override=jnp.full(T.shape, 0.02))  # near-zero cloud
+        cf = np.asarray(props.cloud_fraction)
+        assert np.all(cf >= floor - 1e-12), "override cf fell below the floor"
+        # floor=0 (default) leaves the low override untouched
+        props0 = compute_cloud_properties(
+            T=T, p_full=p_full, q_v=q_v, dp=dp,
+            config=CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=0.0),
+            cloud_fraction_override=jnp.full(T.shape, 0.02))
+        npt.assert_allclose(np.asarray(props0.cloud_fraction), 0.02, atol=1e-12)
+
+    def test_smooth_ramp_gate_blends_without_discontinuity(self):
+        """The default SMOOTH gate (ramp>0) blends the override in over
+        [p_min-ramp, p_min] instead of a step — deep BL is the override, high
+        aloft is the RH cf, the transition is a monotone blend (no cloud
+        discontinuity => removes the step-gate blowup)."""
+        T, p_full, q_v, dp = _saturated_marine_column()
+        p_min, ramp = 70000.0, 10000.0
+        cfg = CloudConfig(scheme="sundqvist", clubb_cf_override_p_min_pa=p_min,
+                          clubb_cf_override_ramp_pa=ramp)
+        rh = compute_cloud_properties(T=T, p_full=p_full, q_v=q_v, dp=dp, config=cfg)
+        ovr_val = 0.15
+        sm = compute_cloud_properties(
+            T=T, p_full=p_full, q_v=q_v, dp=dp, config=cfg,
+            cloud_fraction_override=jnp.full(T.shape, ovr_val),
+        )
+        pf = np.asarray(p_full); cf_rh = np.asarray(rh.cloud_fraction)
+        cf_sm = np.asarray(sm.cloud_fraction)
+        deep_bl = pf >= p_min                 # full override
+        high_aloft = pf <= (p_min - ramp)     # pure RH cf
+        band = (pf > (p_min - ramp)) & (pf < p_min)  # blended
+        npt.assert_allclose(cf_sm[deep_bl], ovr_val, atol=1e-12)
+        npt.assert_allclose(cf_sm[high_aloft], cf_rh[high_aloft], atol=1e-12)
+        if band.any():
+            # blended values lie between the override and the local RH cf
+            lo = np.minimum(ovr_val, cf_rh[band]); hi = np.maximum(ovr_val, cf_rh[band])
+            assert np.all(cf_sm[band] >= lo - 1e-9) and np.all(cf_sm[band] <= hi + 1e-9)

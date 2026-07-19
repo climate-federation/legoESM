@@ -32,8 +32,10 @@ interior process rows silently treat latitude cuts as poles).
   - `_pad_lat_wall_2d` (shared lat-axis sendrecv+wall core) + thin
     `pad_with_pole_bc_lat_2d` wrapper; `pad_halo_latlon_2d` refactored to call
     the shared core (no N/S duplication).
-  - `make_latlon_2d_mpi_step` — clone of the band step; **refuses proc_lon>1
-    loudly** (see scope correction below), correct + measurable at proc_lon==1.
+  - `make_latlon_2d_mpi_step` — clone of the band step; **proc_lon>1 WIRED
+    for regular / wall-pole grids** (lon ops through the dispatched lon halo;
+    the polar filter through the lat-pencil transpose). Still refuses a
+    tripolar grid and an uneven lon split under `use_polar_filter`.
   - Tests: `tests/parallel/test_latlon_2d_dispatch_serial.py` (serial CI:
     routing at 1×1 + the two guards) and
     `tests/distributed/test_latlon_2d_dispatch_mpi.py` (np={2,3,6}:

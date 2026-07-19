@@ -231,6 +231,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # kernel _compute_gs_and_ci as a trace-time backstop.
         ("packages/land/legoesm/land/canopy/config.py", "validate"),
         ("packages/land/legoesm/land/canopy/energy_balance.py", "_compute_gs_and_ci"),
+        # LE_module leaf-energy dispatch (BT|PM): the internal residual uses a
+        # bare ``else: # PM``, so a typo silently runs Penman-Monteith. Guarded
+        # at the config validator AND at the solver entry (direct-call path).
+        ("packages/land/legoesm/land/canopy/solver.py", "solve_canopy_closure"),
         ("packages/ml/legoesm/ml/physics/model.py", "_validate_microphysics_scheme"),
         ("packages/ml/legoesm/ml/training.py", "create_optimizer"),
         ("packages/ml/legoesm/training/aimip_params.py", "make_aimip_classical_spectral_physics"),

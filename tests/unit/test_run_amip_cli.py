@@ -10,12 +10,36 @@ import pytest
 from legoesm import constants
 from scripts.run.run_amip import (
     _apply_aimip_classical_overrides,
+    _apply_spectral_scheme_fallback,
     _postprocess_args,
     _print_forcing_activity,
     _require_full_physics_for_amip,
     build_arg_parser,
     build_config_from_args,
 )
+
+
+def test_spectral_scheme_fallback():
+    p = build_arg_parser()
+    base = ["--grid-type", "gaussian", "--discretization", "spectral",
+            "--truncation", "21"]
+
+    # Default (prognostic tiedtke/mcfarlane) on spectral -> auto diagnostic.
+    a = _apply_spectral_scheme_fallback(p.parse_args(base), base)
+    assert a.convection == "sbm", "spectral did not fall back to diagnostic convection"
+    assert "mcfarlane" not in str(a.gravity_wave_drag), \
+        "spectral did not fall back off prognostic GWD"
+    assert a.gravity_wave_drag == "rayleigh"
+
+    # Explicit --convection is honoured verbatim (user's call, even if prognostic).
+    argv = base + ["--convection", "tiedtke"]
+    a2 = _apply_spectral_scheme_fallback(p.parse_args(argv), argv)
+    assert a2.convection == "tiedtke", "explicit --convection was overridden"
+
+    # Non-spectral grid: no-op (keeps the prognostic defaults).
+    cs = ["--grid-type", "cubed_sphere", "--discretization", "cdgrid"]
+    a3 = _apply_spectral_scheme_fallback(p.parse_args(cs), cs)
+    assert a3.convection == "tiedtke", "non-spectral grid wrongly swapped schemes"
 
 
 def test_multilayer_land_flags_flow_to_config():
@@ -2499,6 +2523,28 @@ def test_diagnostic_condensate_scheme_validate_strict():
             cloud_diagnostic_condensate_scheme="adiabatic").validate_strict()
 
 
+def test_use_clubb_cloud_fraction_rejected_on_mpas_spectral():
+    """use_clubb_cloud_fraction is enforced only inside build_physics_pipeline,
+    which mpas/spectral never build — so validate_strict must reject the opt-in
+    there rather than let it silently no-op (audit 2026-07-17 dispatch-hardening)."""
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig
+    for bad_disc in ("spectral", "mpas"):
+        with pytest.raises(ValueError, match="silently no-op"):
+            ExperimentConfig(
+                turbulence="clubb", use_clubb_cloud_fraction=True,
+                dycore=DycoreConfig(discretization=bad_disc)).validate_strict()
+    # cd-grid aliases DO build the pipeline, so the guard must not block them
+    # (the pipeline's own turbulence=='clubb' check still applies).
+    for ok_disc in ("centered", "finite_volume"):
+        try:
+            ExperimentConfig(
+                turbulence="clubb", use_clubb_cloud_fraction=True,
+                dycore=DycoreConfig(discretization=ok_disc)).validate_strict()
+        except ValueError as exc:
+            assert "silently no-op" not in str(exc), (
+                f"clubb-cf must not be guard-blocked on cd-grid alias {ok_disc!r}")
+
+
 def test_yaml_settable_bools_have_no_switches():
     """#872 sweep: every store_true flag a shipped YAML can set true is now
     BooleanOptionalAction, so a --config that enables it stays CLI-overridable
@@ -2907,6 +2953,18 @@ def test_truncation_conflicting_grid_or_discretization_errors():
             "--dataset", "analytical", "--truncation", "42",
             "--discretization", "mpas",
         ]), parser)
+    # An explicit value EQUAL to the production default also conflicts (the
+    # None-sentinel default makes it distinguishable from unset).
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--truncation", "42",
+            "--grid-type", "cubed_sphere",
+        ]), parser)
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--discretization", "spectral",
+            "--grid-type", "latlon",
+        ]), parser)
     # Bare --truncation still auto-configures the spectral pair.
     args = _postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--truncation", "42",
@@ -2920,6 +2978,11 @@ def test_truncation_conflicting_grid_or_discretization_errors():
         "--grid-type", "gaussian", "--discretization", "spectral",
     ]), parser)
     assert args.grid_type == "gaussian"
+    # Bare defaults resolve to the production pair.
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]),
+                             parser)
+    assert args.grid_type == "cubed_sphere"
+    assert args.discretization == "centered"
 
 
 def test_explicit_zero_p_top_and_stretching_survive():
@@ -2936,3 +2999,26 @@ def test_explicit_zero_p_top_and_stretching_survive():
         parser.parse_args(["--dataset", "analytical"]), parser))
     assert cfg_def.grid.p_top_Pa == 200.0
     assert cfg_def.grid.stretching == 2.0
+
+
+def test_restart_still_requires_forcing_path_for_real_data():
+    """--restart-from does NOT exempt --forcing-path for a real dataset: forcing
+    is not in the checkpoint and setup() loads it before the checkpoint, so the
+    old exemption only deferred the failure to a confusing deep error
+    (audit 2026-07-17)."""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "custom", "--restart-from", "/tmp/ckpt.zarr",
+        ]), parser)
+    # analytical needs no forcing file even on restart.
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--restart-from", "/tmp/ckpt.zarr",
+    ]), parser)
+    assert args.restart_from == "/tmp/ckpt.zarr"
+    # real dataset WITH a forcing path is fine.
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "custom", "--restart-from", "/tmp/ckpt.zarr",
+        "--forcing-path", "/tmp/sst.nc",
+    ]), parser)
+    assert args.forcing_path == "/tmp/sst.nc"
