@@ -337,11 +337,15 @@ def p_grad_c_1lev(dt2: float, delpc, pkc, gz, uc, vc, gs: dict, bd):
 
 
 def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
-                       dt: float) -> list:
+                       dt: float, sw_cfg: dict | None = None) -> list:
     """SB2: geopk(SW,1-lev) + p_grad_c per face, the post-PG duo
     exchanges, d_sw1 per face, the C-ring inter-panel flux averaging
     (dyn_core.F90:853-900 — the first excluded mpp site, now live),
     then d_sw2 per face on the AVERAGED slots.
+
+    ``sw_cfg`` overrides the W2-tuned damping/reconstruction defaults
+    (``_SW_CFG_DEFAULT``) — e.g. the Zenodo case-8 configuration turns
+    vorticity damping OFF and runs hord=8 everywhere.
 
     Workspace choice: d_sw1's ut/vt workspaces enter as ZEROS
     (workspace_sentinel=0.0) — the defined analog of upstream's
@@ -397,6 +401,8 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
             exchange_bgrid_scalar_halos(divgd6, t, n, ng)
             exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
 
+    cfg = dict(_SW_CFG_DEFAULT)
+    cfg.update(sw_cfg or {})
     s1 = []
     for t in range(1, 7):
         st = states[t - 1]
@@ -406,8 +412,10 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
             np.zeros((npx, n)), np.zeros((n, npx)),
             np.zeros((npx, m_a)), np.zeros((m_a, npx)),
             ctx["gs6"][t - 1], bd, npx, npx, dt=dt,
-            hord_tr=8, hord_vt=6, hord_tm=6, hord_dp=6,
-            nord_v=1, nord_t=0, damp_v=0.2, damp_t=0.0,
+            hord_tr=cfg["hord_tr"], hord_vt=cfg["hord_vt"],
+            hord_tm=cfg["hord_tm"], hord_dp=cfg["hord_dp"],
+            nord_v=cfg["nord_v"], nord_t=0,
+            damp_v=cfg["damp_v"], damp_t=0.0,
             workspace_sentinel=0.0))
 
     afx6 = [o["allflux_x"] for o in s1]
@@ -427,7 +435,28 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
     return outs
 
 
-def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
+# W2-tuned stage configuration (the historical hardcoded values —
+# byte-identical default).  The Zenodo case-8 run uses: hords all 8,
+# damp_v=0 (do_vort_damp=.false.), dddmp=0, d2_bg=0, d4_bg=0.12 with
+# nord=2 (del-6; our d_sw5 port is nord=1/del-4 — the one disclosed
+# deviation until the nord=2 arm is ported).
+_SW_CFG_DEFAULT = {
+    "hord_tr": 8, "hord_vt": 6, "hord_tm": 6, "hord_dp": 6,
+    "hord_mt": 6, "nord_v": 1, "damp_v": 0.2,
+    "dddmp": 0.2, "d2_bg": 0.0, "d4_bg": 0.12,
+}
+
+SW_CFG_CASE8 = {
+    # Zenodo C48.sw.case8 fms.out damping block + fv_core_nml (del-6
+    # nord=2 approximated by the ported nord=1/del-4 at the same 0.12)
+    "hord_tr": 8, "hord_vt": 8, "hord_tm": 8, "hord_dp": 8,
+    "hord_mt": 8, "nord_v": 1, "damp_v": 0.0,
+    "dddmp": 0.0, "d2_bg": 0.0, "d4_bg": 0.12,
+}
+
+
+def acoustic_step_sixface(ctx: dict, states: list, dt: float,
+                          sw_cfg: dict | None = None) -> list:
     """SB3: ONE full duo acoustic step on all six faces —
     c_sw -> geopk/PG-C -> d_sw1 -> C-ring averaging -> d_sw2 -> d_sw3
     -> BGRID averaging of (ubb, vbbtemp) (dyn_core.F90:968-1020, the
@@ -505,12 +534,15 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
     states = [{**states[t], "delp": delp6[t], "pt": pt6[t],
                "u": u6[t], "v": v6[t]} for t in range(6)]
 
+    cfg = dict(_SW_CFG_DEFAULT)
+    cfg.update(sw_cfg or {})
     csw = csw_step_sixface(ctx, states, dt2=0.5 * dt)
-    s12 = dsw12_step_sixface(ctx, states, csw, dt=dt)
+    s12 = dsw12_step_sixface(ctx, states, csw, dt=dt, sw_cfg=sw_cfg)
 
     s3 = [d_sw3_duo(states[t - 1]["u"], states[t - 1]["v"],
                     s12[t - 1]["uc"], s12[t - 1]["vc"],
-                    ctx["gs6"][t - 1], bd, npx, npx, dt=dt, hord_mt=6)
+                    ctx["gs6"][t - 1], bd, npx, npx, dt=dt,
+                    hord_mt=cfg["hord_mt"])
           for t in range(1, 7)]
 
     ubb6 = [np.array(o["ubb"], copy=True) for o in s3]
@@ -534,13 +566,16 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
                        s12[t - 1]["xfx_adv"], s12[t - 1]["yfx_adv"],
                        s12[t - 1]["ra_x"], s12[t - 1]["ra_y"],
                        s4["ke"], ctx["gs6"][t - 1], bd, npx, npx,
-                       dt=dt, hord_vt=6, nord=1, dddmp=0.2,
-                       d2_bg=0.0, d4_bg=0.12, d_con=0.0)
+                       dt=dt, hord_vt=cfg["hord_vt"], nord=1,
+                       dddmp=cfg["dddmp"],
+                       d2_bg=cfg["d2_bg"], d4_bg=cfg["d4_bg"],
+                       d_con=0.0)
         s6 = d_sw6_duo(states[t - 1]["u"], states[t - 1]["v"],
                        s5["ut"], s5["vt"], s5["ke"], s5["wk"],
                        s5["vortfluxx"], s5["vortfluxy"],
                        ctx["gs6"][t - 1], bd, npx, npx,
-                       nord_v=1, damp_v=0.2, d_con=0.0)
+                       nord_v=cfg["nord_v"], damp_v=cfg["damp_v"],
+                       d_con=0.0)
         outs.append({"delp": s12[t - 1]["delp"], "pt": s12[t - 1]["pt"],
                      "u": s6["u"], "v": s6["v"],
                      "ke": s5["ke"], "wk": s5["wk"],
@@ -658,7 +693,8 @@ def one_grad_p_1lev(u, v, pkc, gz, divg2, gs: dict, bd, npx: int,
 
 
 def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
-                               d_ext: float = 0.02) -> list:
+                               d_ext: float = 0.02,
+                               sw_cfg: dict | None = None) -> list:
     """SB4: complete acoustic step INCLUDING the D-grid tail — the
     stage chain (acoustic_step_sixface), delp/pt halo refresh, the
     D geopk, the external-mode divg2 filter (d_ext*da_min_c*saved
@@ -678,7 +714,7 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
     bd = ctx["bd"]
     npx = n + 1
 
-    stage = acoustic_step_sixface(ctx, states, dt)
+    stage = acoustic_step_sixface(ctx, states, dt, sw_cfg=sw_cfg)
 
     delp6 = [np.array(o["delp"], copy=True) for o in stage]
     pt6 = [np.array(o["pt"], copy=True) for o in stage]
