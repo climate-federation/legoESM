@@ -676,6 +676,20 @@ class TestStandardLevels:
 class TestSB81FullLevelLnP:
     """#1029: SB81 full-level log-pressure — the discrete pair of Phi."""
 
+    @pytest.fixture(autouse=True)
+    def _fp64(self):
+        # The machine-precision invariants below (1e-12 relative) require
+        # fp64; make the class self-contained rather than depending on the
+        # runner's JAX_ENABLE_X64 environment.
+        from legoesm.core.precision import (
+            set_policy, get_policy, PrecisionPolicy)
+        prev = get_policy()
+        set_policy(PrecisionPolicy.fp64())
+        try:
+            yield
+        finally:
+            set_policy(prev)
+
     def _coord(self, nlev=20):
         from legoesm.grids.vertical import standard_hybrid_levels
         return standard_hybrid_levels(nlev)
@@ -741,7 +755,12 @@ class TestSB81FullLevelLnP:
             f"vs |ref| {abs(ref):.3e}")
 
     def test_a0_reduces_to_sigma_form(self):
-        """A=0: grad(ln p^SB) == grad(ln p_s) — per-level offset is constant."""
+        """A=0: ln p^SB - ln p_s is column-independent per level (to ~1e-12).
+
+        So grad(ln p^SB) matches grad(ln p_s) — the sigma-path correction —
+        up to the top-layer zero-clip artifact documented below; NOT an exact
+        identity in the clipped top layer.
+        """
         from legoesm.grids.vertical import (
             sb81_full_level_ln_p, create_hybrid_coordinate,
             standard_hybrid_levels)
