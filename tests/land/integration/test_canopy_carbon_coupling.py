@@ -474,22 +474,17 @@ def test_prognostic_lai_responds_to_c_fol_changes():
         "canopy with LAI=2 must differ from canopy with LAI=8")
 
 
-@pytest.mark.xfail(
-    reason="Reverse-mode grad through C_fol → LAI → canopy Newton IFT adjoint "
-           "produces NaN — deep interaction between jacfwd in solve_bwd and "
-           "the LAI_CRIT=2 clip in compute_aerodynamics.  Forward feedback "
-           "works (verified by the divergence tests above); grad through "
-           "OTHER canopy parameters with prognostic LAI enabled also works "
-           "(verified by test_grad_through_canopy_carbon_pipeline in Phase 4). "
-           "Fix requires replacing the hard LAI clip with a smooth saturation "
-           "or adding a custom_jvp to sidestep the jacfwd double-grad issue. "
-           "Tracked for Phase 7 or a separate differentiability pass.",
-    strict=True,
-)
 def test_prognostic_lai_jax_grad_through_feedback():
     """``jax.grad`` through the prognostic LAI loop (C_fol → LAI →
-    canopy Newton → surface fluxes) should be finite for training.
-    Currently known-broken on the C_fol scale path — see xfail reason.
+    canopy Newton → surface fluxes) is finite for training.
+
+    Was xfail(strict) while the two-leaf canopy solve crashed
+    (``photosynthesis`` dropped its gross-GPP return -> the residual's
+    ``An, _ = photosynthesis(...)`` unpack raised "iteration over a 0-d
+    array"); the forward pass never ran, so the grad through it was moot.
+    With the canopy solve restored the reverse-mode grad through the LAI
+    feedback is finite + nonzero, so the marker is removed and this now
+    guards the differentiable-LAI path directly.
     """
     ncol = 2
     cfg = _make_canopy_carbon_cfg()

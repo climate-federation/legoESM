@@ -135,9 +135,9 @@ def compute_prognostic_lai(
       and the canopy closure is much less sensitive to ``hc`` than
       to ``LAI``.
     - The forward pass is fully differentiable wrt ``C_fol`` (``dLAI /
-      dC_fol = 1 / LCMA``); however ``jax.grad`` through the full
-      ``C_fol → LAI → canopy Newton`` loop currently NaNs in the MOST
-      scan (tracked in the Phase 6 xfail).
+      dC_fol = 1 / LCMA``); ``jax.grad`` through the full
+      ``C_fol → LAI → canopy Newton`` loop is finite + nonzero (guarded by
+      ``test_prognostic_lai_jax_grad_through_feedback``).
     """
     if not getattr(canopy_config, "use_prognostic_lai", False):
         return None
