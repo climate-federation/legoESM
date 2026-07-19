@@ -999,33 +999,52 @@ def main():
             ema_ckpt_path = None
             if float(cfg.get("aimip_ema_decay", 0.0)) > 0.0:
                 import equinox as eqx
-                # Score the EMA SIBLING of the newest RAW epoch checkpoint —
-                # NOT the globally newest *_ema.eqx. A kill after epoch_N.eqx
-                # but before epoch_N_ema.eqx would otherwise let an eval-only
-                # resume publish the stale epoch_(N-1) EMA as the current
-                # params_ema.eqx (codex HIGH).
-                _raw = sorted(
-                    (
-                        p for p in (output_dir / variant).glob("epoch_*.eqx")
-                        if not p.stem.endswith("_ema")
-                    ),
-                    key=lambda p: int(p.stem.split("_")[1]),
+                # The returned ``model`` matches the newest RAW checkpoint
+                # (maybe_resume loads the newest epoch_*.eqx; the chunked
+                # path may restore a newer chunk_latest.eqx). Because every
+                # EMA file is written AFTER its paired raw file (EMA-last
+                # ordering, both epoch and chunk saves), the EMA whose mtime
+                # is newest is the pair of that model — INCLUDING the
+                # chunk_latest_ema case, which a pure epoch-sibling lookup
+                # misses. Require the chosen EMA to be at least as new as the
+                # newest raw file; a torn epoch pair (raw written, its EMA
+                # not) leaves the newest EMA older than the newest raw, so we
+                # fall back to raw rather than publish a stale EMA.
+                from legoesm.training.neural_gcm_spectral import (
+                    MIDEPOCH_CHECKPOINT_NAME,
+                    MIDEPOCH_EMA_CHECKPOINT_NAME,
                 )
-                _ema_sib = (
-                    _raw[-1].with_name(f"{_raw[-1].stem}_ema.eqx")
-                    if _raw else None
+                _vdir = output_dir / variant
+                _raws = [
+                    p for p in _vdir.glob("epoch_*.eqx")
+                    if not p.stem.endswith("_ema")
+                ] + list(_vdir.glob(MIDEPOCH_CHECKPOINT_NAME))
+                _emas = list(_vdir.glob("epoch_*_ema.eqx")) + list(
+                    _vdir.glob(MIDEPOCH_EMA_CHECKPOINT_NAME)
                 )
-                if _ema_sib is not None and _ema_sib.exists():
-                    eval_model = eqx.tree_deserialise_leaves(_ema_sib, model)
+                _newest_raw_mt = (
+                    max(p.stat().st_mtime for p in _raws) if _raws else None
+                )
+                _newest_ema = (
+                    max(_emas, key=lambda p: p.stat().st_mtime)
+                    if _emas else None
+                )
+                if (
+                    _newest_ema is not None
+                    and _newest_raw_mt is not None
+                    and _newest_ema.stat().st_mtime >= _newest_raw_mt
+                ):
+                    eval_model = eqx.tree_deserialise_leaves(_newest_ema, model)
                     eval_weights = "ema"
                     logger.info(
-                        f"{variant}: evaluating EMA weights ({_ema_sib.name})"
+                        f"{variant}: evaluating EMA weights "
+                        f"({_newest_ema.name})"
                     )
                 else:
                     logger.warning(
-                        f"{variant}: aimip_ema_decay set but no EMA sibling "
-                        f"for the newest raw checkpoint — evaluating raw "
-                        "weights."
+                        f"{variant}: aimip_ema_decay set but no EMA newer "
+                        "than the latest raw checkpoint (torn/absent) — "
+                        "evaluating raw weights."
                     )
             eval_metrics_test = _evaluate_variant(
                 variant, eval_model, cfg, cache_dir, period="test",

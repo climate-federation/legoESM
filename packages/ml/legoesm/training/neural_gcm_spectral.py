@@ -2405,34 +2405,22 @@ def _train_spectral_loop(
         if resume_from_dir is not None and _resumed_weights:
             # Mid-epoch resume (any epoch, including epoch 0) prefers the
             # chunk-latest EMA sibling; epoch-boundary resume prefers the
-            # last completed epoch's EMA file.
-            _torn = False
+            # last completed epoch's EMA file. The EMA sibling is written
+            # just before the raw+position checkpoint, so a preemption
+            # between the two leaves the EMA at most one chunk ahead of the
+            # resumed raw position; replaying that chunk double-weights it in
+            # the EMA by ~1-decay per sample (negligible at decay 0.9999,
+            # self-heals within ~1/(1-decay) steps) — not worth a torn-pair
+            # rejection that would throw away real EMA history.
             if midepoch_restored:
                 _cand = Path(resume_from_dir) / MIDEPOCH_EMA_CHECKPOINT_NAME
-                # The EMA sibling is written BEFORE the raw+position
-                # checkpoint, so a kill between the two leaves an EMA OLDER
-                # than the raw file (raw position ahead of the EMA). Reject
-                # that torn pair and reseed from the restored raw weights
-                # rather than load a stale EMA (codex MED).
-                _raw = Path(resume_from_dir) / MIDEPOCH_CHECKPOINT_NAME
-                if (
-                    _cand.exists() and _raw.exists()
-                    and _cand.stat().st_mtime < _raw.stat().st_mtime
-                ):
-                    _torn = True
             else:
                 _cand = (
                     Path(resume_from_dir) / f"epoch_{start_epoch - 1:04d}_ema.eqx"
                 )
-            if _cand.exists() and not _torn:
+            if _cand.exists():
                 ema_model = eqx.tree_deserialise_leaves(_cand, ema_model)
                 _ema_src = str(_cand)
-            elif _torn:
-                logger.warning(
-                    "EMA resume: chunk_latest_ema.eqx is older than "
-                    "chunk_latest.eqx (torn write) — reseeding the EMA from "
-                    "the restored raw weights."
-                )
         if _resumed_weights:
             if _ema_src is not None:
                 logger.info(f"EMA resume: restored {_ema_src}")
@@ -2844,12 +2832,20 @@ def _train_spectral_loop(
                     _save_epoch, _save_chunk = epoch + 1, 0
                 else:
                     _save_epoch, _save_chunk = epoch, _next_chunk
-                # EMA sibling FIRST, raw+optimizer checkpoint second: the raw
-                # file carries the resume position, so a preemption between
-                # the two writes leaves an old raw + new EMA (the resume then
-                # replays the chunk and the EMA converges back within
-                # ~1/(1-decay) steps) rather than a new position with a stale
-                # EMA. The pair is not atomic — known, logged on resume.
+                # Raw+position checkpoint FIRST, EMA sibling SECOND (EMA-last,
+                # matching the per-epoch save). Rationale: the EMA file's
+                # mtime is then always >= its paired raw file, so (a) the
+                # newest-mtime EMA on disk is unambiguously the pair of the
+                # newest raw checkpoint (used by the eval selector), and (b) a
+                # preemption between the two writes leaves the EMA one chunk
+                # BEHIND the resumed position — replaying that chunk lets the
+                # EMA catch up (no double-count), the safe tear direction. The
+                # pair is not atomic — this ordering makes the non-atomic case
+                # self-correct.
+                _save_midepoch_checkpoint(
+                    config.checkpoint_dir, model, opt_state,
+                    _save_epoch, _save_chunk,
+                )
                 if ema_model is not None:
                     from legoesm.ml.training import save_checkpoint
                     save_checkpoint(
@@ -2857,10 +2853,6 @@ def _train_spectral_loop(
                         Path(config.checkpoint_dir)
                         / MIDEPOCH_EMA_CHECKPOINT_NAME,
                     )
-                _save_midepoch_checkpoint(
-                    config.checkpoint_dir, model, opt_state,
-                    _save_epoch, _save_chunk,
-                )
                 logger.info(
                     f"Saved mid-epoch checkpoint {MIDEPOCH_CHECKPOINT_NAME} "
                     f"(epoch {epoch}, chunk {chunk_pos} done -> resume at "
