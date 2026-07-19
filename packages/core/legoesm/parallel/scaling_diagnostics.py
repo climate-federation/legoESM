@@ -391,9 +391,6 @@ class DiagnosticHarness:
         """Record a JIT compilation event."""
         self.compilation.record(name, compile_time_s, **kwargs)
 
-    def record_comm(self, name: str, bytes_sent: int, bytes_received: int = 0):
-        """Record a communication volume event."""
-        self.comm.record(name, bytes_sent, bytes_received)
 
     def build_report(self, extra: dict | None = None) -> dict[str, Any]:
         """Build the complete diagnostic report."""

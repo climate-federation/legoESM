@@ -5430,6 +5430,14 @@ class ModelDriver:
                         dphis_dt=rrtmgp_tend.dphis_dt.replace(
                             data=rrtmgp_tend.dphis_dt.data + hs_tend.dphis_dt.data),
                         tracer_tendencies=rrtmgp_tend.tracer_tendencies,
+                        # Forward the radiation surface-flux diagnostics (HS adds
+                        # no surface radiation) so the coupled export survives the
+                        # HS repack — else HS+radiation loses them (codex).
+                        sw_net_sfc=rrtmgp_tend.sw_net_sfc,
+                        lw_net_sfc=rrtmgp_tend.lw_net_sfc,
+                        # ...including surface precip (HS+microphysics), else the
+                        # ocean P-E / land forcing loses it through the repack.
+                        precip=getattr(rrtmgp_tend, "precip", None),
                     )
                     return summed, phys_state_out
 
@@ -5767,6 +5775,41 @@ class ModelDriver:
                     # step 0 has nothing to step yet (_last_force_day is None).
                     if (self._segment_callback is not None
                             and _last_force_day is not None):
+                        # Export the surface net radiative fluxes the MPAS
+                        # physics computed (sw/lw net [W/m^2, +into surface])
+                        # to the coupler's forcing channel: _build_atm_forcing
+                        # reads held_sw_net_sfc/held_lw_net_sfc from _carry_aux.
+                        # Without this the lean MPAS loop stashed nothing, so
+                        # the coupled ocean/land tiles were forced with zero
+                        # shortwave (the #1202 coupled-voronoi gap). The compiled
+                        # cube/latlon path stashes the equivalent from
+                        # PhysicsOutput; this is the lean-path equivalent.
+                        _sfc_diag = getattr(self.model, "_sfc_diag", None)
+                        if _sfc_diag is not None:
+                            if not isinstance(self._carry_aux, dict):
+                                self._carry_aux = {}
+                            # Each element is None on the step where its source
+                            # is inactive (sw/lw on a held-radiation sub-step or
+                            # radiation=none; precip on a dry run) — stash only
+                            # the fresh ones, keeping the last value otherwise.
+                            if _sfc_diag[0] is not None:
+                                self._carry_aux["held_sw_net_sfc"] = _sfc_diag[0].data
+                            if _sfc_diag[1] is not None:
+                                self._carry_aux["held_lw_net_sfc"] = _sfc_diag[1].data
+                            # Surface precip [kg/m^2/s] for the ocean P-E /
+                            # land forcing (None on a dry MPAS run).
+                            if len(_sfc_diag) > 2 and _sfc_diag[2] is not None:
+                                self._carry_aux["seg_precip"] = _sfc_diag[2].data
+                            if (not getattr(self, "_logged_sfc_export", False)
+                                    and "held_sw_net_sfc" in self._carry_aux):
+                                _sw = self._carry_aux["held_sw_net_sfc"]
+                                logger.info(
+                                    "  Coupled surface radiative forcing (MPAS "
+                                    "export): sw_net_sfc mean=%.1f range=[%.1f,"
+                                    "%.1f] W/m^2",
+                                    float(jnp.mean(_sw)), float(jnp.min(_sw)),
+                                    float(jnp.max(_sw)))
+                                self._logged_sfc_export = True
                         self._current_day = _force_day
                         self._segment_callback(self, _force_day, 86400.0)
                     # Sample the daily fields at the CANONICAL day boundary
@@ -6239,6 +6282,10 @@ class ModelDriver:
         )
         _phys_fn_loop = _spectral_physics_fn
         _ext_forcing = False
+        # #405 prognostic-physics carry (leapfrog path only); stays False/None
+        # for the diagnostic dry/gray path and the ssp_rk3 path.
+        _spectral_prognostic = False
+        _spectral_phys_state = None
         if _full_physics:
             from legoesm.atmosphere.physics.combined import (
                 PhysicsConfig, make_physics,
@@ -6262,12 +6309,18 @@ class ModelDriver:
                            else cfg.radiation)
             _cloud_scheme = (cfg.cloud_scheme
                              if _rad_scheme == "rrtmgp" else "none")
-            # phys_state is NOT threaded through the spectral step
-            # (the SI/leapfrog JIT treats physics_fn as static and only
-            # returns the state).  Prognostic-carry schemes would
-            # silently re-initialize their carry every step — refuse
-            # loudly instead of degrading.
-            self._refuse_stateful_physics_unthreaded(cfg)
+            # #405: prognostic-carry physics is now threadable on the spectral
+            # LEAPFROG path, which evaluates physics ONCE per step so the carry
+            # is captured + advanced below (mirrors _run_mpas).  The per-RK-stage
+            # ssp_rk3 path still evaluates physics multiple times per step, where
+            # a single-step carry is ill-defined, so a prognostic scheme there
+            # still refuses loudly rather than silently reseeding every step.
+            _spectral_integrator = str(getattr(
+                self.model.config, "time_integrator", "ssp_rk3")).lower()
+            _spectral_leapfrog = _spectral_integrator in (
+                "leapfrog", "leapfrog_si")
+            if not _spectral_leapfrog:
+                self._refuse_stateful_physics_unthreaded(cfg)
             from legoesm.atmosphere.physics.radiation.solar import earth_orbit
             _orbit_params = earth_orbit() if cfg.orbital_insolation else None
             phys_cfg = PhysicsConfig(
@@ -6311,7 +6364,37 @@ class ModelDriver:
                 return _combined_fn(state, grid, sigma_coord,
                                     phys_state=None, forcing=forcing_data)
 
-            _phys_fn_loop = _amip_physics_fn
+            # #405: thread the prognostic PhysicsState carry on the leapfrog
+            # path — pass the COMBINED fn DIRECTLY (its (state, grid, sigma,
+            # phys_state=, forcing=) signature is exactly what the spectral
+            # step's stateful branch calls) and SEED the carry (mirrors
+            # _run_mpas: init_physics_state(ncol, nlev, cfg)).  The stateless
+            # ``_amip_physics_fn`` wrapper (which drops the carry + maps
+            # forcing_data positionally) stays the default for the ssp_rk3 /
+            # diagnostic path — byte-identical there.
+            _spectral_prognostic = (
+                _spectral_leapfrog
+                and getattr(_combined_fn, "_requires_phys_state", False))
+            if _spectral_prognostic:
+                from legoesm.atmosphere.physics.physics_state import (
+                    init_physics_state,
+                )
+                _ncol_sp = int(self.grid.n_lat) * int(self.grid.n_lon)
+                _nlev_sp = int(self.sigma.n_levels)
+                _spectral_phys_state = init_physics_state(
+                    _ncol_sp, _nlev_sp, phys_cfg)
+                # NOTE (restart, codex): a fresh seed each RUN is correct, but
+                # the spectral checkpoint path does not yet persist/restore the
+                # ``physstate_*`` carry (unlike _run_mpas #413), so a RESTARTED
+                # prognostic-spectral run re-seeds and loses its physics memory.
+                # Fresh runs are correct; carry persistence is a follow-up.
+                _phys_fn_loop = _combined_fn
+                logger.info(
+                    "  #405: prognostic physics threaded on the spectral "
+                    "leapfrog path (PhysicsState carry seeded + advanced "
+                    "each step).")
+            else:
+                _phys_fn_loop = _amip_physics_fn
             _ext_forcing = (
                 _rad_scheme == "rrtmgp"
                 and (self._ozone_ext_active or self._aerosol_active
@@ -6417,7 +6500,13 @@ class ModelDriver:
                 self.state, DT,
                 physics_fn=_phys_fn_loop,
                 forcing_data=forcing_data,
+                phys_state=_spectral_phys_state,
             )
+            # #405: capture the advanced prognostic carry for the next step
+            # (the model publishes it on ``_phys_state``; None on the stateless
+            # / ssp_rk3 path, where this is a byte-identical no-op).
+            if _spectral_prognostic:
+                _spectral_phys_state = self.model._phys_state
 
             if DIAG_INTERVAL > 0 and (step + 1) % DIAG_INTERVAL == 0:
                 elapsed_day = (step + 1) * DT / 86400.0

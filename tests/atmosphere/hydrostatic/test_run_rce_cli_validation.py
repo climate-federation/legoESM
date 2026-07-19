@@ -144,6 +144,7 @@ def test_rrtmgp_morrison_runs(tmp_path):
         "--grid-type", "cubed_sphere", "--discretization", "cdgrid",
         "--resolution", "8", "--days", "1", "--diag-days", "1", "--nlev", "20",
         "--radiation", "rrtmgp", "--microphysics", "morrison",
+        "--cloud-fraction-scheme", "sundqvist",
         "--output", str(tmp_path / "rce_rrtmgp_morrison"),
     ]
     result = subprocess.run(cmd, env=env, capture_output=True, text=True,
@@ -154,5 +155,60 @@ def test_rrtmgp_morrison_runs(tmp_path):
         f"stdout: {result.stdout[-1000:]}\nstderr: {result.stderr[-1000:]}")
     assert "RRTMGP radiation" in combined and "morrison" in combined, \
         "run header did not report RRTMGP radiation + morrison microphysics"
+    # The subgrid cloud-fraction scheme (Sundqvist / Xu-Randall) feeds RRTMGP so
+    # a coarse subsaturated column still carries radiatively-active cloud; the
+    # flag must round-trip and be honored (reported) in the run header.
+    assert "cloud fraction: sundqvist" in combined, \
+        "run header did not report the wired --cloud-fraction-scheme"
     assert "Traceback" not in combined and "nan" not in result.stdout.lower(), \
         f"rrtmgp+morrison produced a traceback / NaN.\nstdout: {result.stdout[-1000:]}"
+
+
+def test_rrtmgp_morrison_clouds_are_radiatively_active():
+    """The subgrid cloud fraction must actually REACH the RRTMGP optics.  The
+    solver gates cloud optics on ``RRTMGPConfig.include_clouds`` (defaults
+    ``False``), so run_rce sets ``include_clouds=USE_MORRISON``.  Without it the
+    cloud path/r_eff kwargs are silently dropped and morrison RCE runs clear-sky
+    regardless of the cloud fraction — a silent no-op the header/smoke test above
+    cannot catch.  This reproduces the run_rce cloud path (Sundqvist cf +
+    condensate floor -> to_rrtmg_kwargs) and asserts a real cloud radiative
+    effect vs clear-sky."""
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
+    import jax.numpy as jnp
+    from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+        rrtmgp_radiation)
+    from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+        compute_cloud_properties, CloudConfig)
+    from legoesm.thermo import saturation_mixing_ratio
+
+    nlev = 20
+    p_half = jnp.linspace(1.0e5, 1.0e3, nlev + 1)[None, :]
+    p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+    T = jnp.linspace(300.0, 220.0, nlev)[None, :]
+    q_v = 0.92 * saturation_mixing_ratio(T, p_full)   # high RH, subsaturated
+    q_c = jnp.full_like(T, 1.0e-9)                     # resolved condensate ~ 0
+    dp = p_half[:, :-1] - p_half[:, 1:]                # positive
+    mu0 = jnp.full((1,), 0.42)
+    cloud_props = compute_cloud_properties(
+        T=T, p_full=p_full, q_v=q_v, dp=dp,
+        config=CloudConfig(scheme="sundqvist"), q_cloud=q_c)
+    # Sundqvist diagnoses cloud from RH even though the grid-mean q_c evaporated.
+    assert float(cloud_props.lwp.sum()) > 0.0, \
+        "sundqvist produced no in-cloud condensate for the optics"
+    kw = dict(T=T, p_full=p_full, p_half=p_half,
+              sfc_temperature=jnp.full((1,), 302.0), q_v=q_v, cos_zenith=mu0)
+    cloud_kw = cloud_props.to_rrtmg_kwargs()
+    # include_clouds=True: clouds active.  include_clouds=False: the SAME cloud
+    # kwargs are gated off -> a true clear-sky call.  The difference is the cloud
+    # radiative effect (a saturated column should trap tens of W/m^2 of LW).
+    rad_cloud = rrtmgp_radiation(
+        config=RRTMGPConfig(sfc_albedo=0.07, S_0=975.0, include_clouds=True),
+        **kw, **cloud_kw)
+    rad_clear = rrtmgp_radiation(
+        config=RRTMGPConfig(sfc_albedo=0.07, S_0=975.0, include_clouds=False),
+        **kw, **cloud_kw)
+    d_lw = float(jnp.abs(rad_cloud.lw_flux_up - rad_clear.lw_flux_up).max())
+    assert d_lw > 1.0, (
+        f"clouds had ~no LW radiative effect ({d_lw:.3f} W/m^2): the "
+        f"include_clouds gate is off or the diagnosed cloud is empty")

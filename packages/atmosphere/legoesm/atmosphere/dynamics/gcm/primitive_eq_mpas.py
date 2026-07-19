@@ -724,11 +724,27 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             # (UnexpectedTracerError; gh-417, same class as the
             # primitive_eq_cdgrid A1-gate bug).  Thread the per-call
             # pre-step mass instead (telescoping fixer semantics).
-        state_new, phys_out = self._step_jit(
+        state_new, phys_out, sfc_diag = self._step_jit(
             state, dt, physics_fn, target_mass, forcing, phys_state)
         if not any(isinstance(leaf, jax.core.Tracer)
                    for leaf in jax.tree_util.tree_leaves(phys_out)):
             self._phys_state = phys_out
+        # Stash the surface net radiative fluxes (sw/lw net [W/m^2, +into
+        # surface]) so the coupled MPAS loop can export them to the coupler.
+        # Eager-only (same tracer guard as _phys_state — a stashed tracer leaks
+        # into the next trace, gh-417); keep the last radiation-step value
+        # across held-radiation sub-steps (sfc_diag is None then).
+        if sfc_diag is not None and not any(
+                isinstance(leaf, jax.core.Tracer)
+                for leaf in jax.tree_util.tree_leaves(sfc_diag)):
+            # Merge ELEMENT-WISE into the persisted bundle: sw/lw refresh only on
+            # a full-radiation step, precip every step, so a wholesale overwrite
+            # on a held-radiation step (sw/lw None) would DROP the last radiation
+            # fluxes. Keep the last non-None value per slot (sw, lw, precip).
+            _prev = getattr(self, "_sfc_diag", None) or (None, None, None)
+            self._sfc_diag = tuple(
+                new if new is not None else old
+                for new, old in zip(sfc_diag, _prev))
         return state_new
 
     @partial(jax.jit, static_argnums=(0, 3))
@@ -813,6 +829,7 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         #        is defined as (post-physics - pre)/dt (the package's
         #        convention). ---
         phys_state_out = phys_state
+        sfc_diag = None
         if physics_fn is not None:
             _pr = physics_fn(state_new, self.mesh, self.sigma_coord,
                              phys_state=phys_state, forcing=forcing)
@@ -820,6 +837,21 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 _pt, phys_state_out = _pr[0], _pr[1]
             else:
                 _pt = _pr
+            # Export the surface net radiative fluxes the physics computed
+            # (sw/lw net [W/m^2, +into surface]); the lean loop has no
+            # PhysicsOutput channel, so without this the coupled-voronoi ocean
+            # and land tiles were forced with zero shortwave. None (static,
+            # radiation inactive / held-radiation sub-step) leaves it unset.
+            _sw_sfc = getattr(_pt, "sw_net_sfc", None)
+            _lw_sfc = getattr(_pt, "lw_net_sfc", None)
+            _pr_sfc = getattr(_pt, "precip", None)   # surface precip [kg/m^2/s]
+            # Publish when ANY surface diagnostic is fresh — precip (microphysics)
+            # advances every step even on a held-radiation sub-step or a
+            # radiation=none run where sw/lw are None, so gating on sw/lw would
+            # stash stale precip. Each element is None-guarded by the consumer.
+            if (_sw_sfc is not None or _lw_sfc is not None
+                    or _pr_sfc is not None):
+                sfc_diag = (_sw_sfc, _lw_sfc, _pr_sfc)
             state_new = MPASHydrostaticState(
                 u=state_new.u.replace(data=state_new.u.data + dt * _pt.du_dt.data),
                 T=state_new.T.replace(data=state_new.T.data + dt * _pt.dT_dt.data),
@@ -866,7 +898,7 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 target_mass=target_mass,
             )
 
-        return cast_pytree(state_new, None, "storage"), phys_state_out
+        return cast_pytree(state_new, None, "storage"), phys_state_out, sfc_diag
 
     # integrate() and integrate_scan() inherited from IntegrationMixin
 
