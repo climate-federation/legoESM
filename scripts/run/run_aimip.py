@@ -105,6 +105,10 @@ def _apply_smoke_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
         # add ~10x compile cost and aren't useful for smoke-level
         # end-to-end verification.
         aimip_radiation="gray",
+        # Mark the merged cfg as a smoke run so downstream gates (the
+        # classical-mode rrtmgp pin in campaign_driver) apply their smoke
+        # exemption — gray here is exactly the debug case the pin allows.
+        smoke=True,
         aimip_spatial_surface=False,
         aimip_rollout_days=1,
         # Drop any window list from the base (the all-years scale base
