@@ -67,7 +67,7 @@ def test_build_one_trims_and_annotates(tmp_path):
     assert ds["PA"].attrs["units"] == "kPa"
     assert ds["SWC"].attrs["units"] == "percent"
     assert ds["ET"].attrs["units"] == "mm day-1"
-    assert ds["CO2"].attrs["units"] in {"umol mol-1", "ppm"}
+    assert ds["CO2"].attrs["units"] == "umol mol-1"
 
     # window actually subset (synthetic starts 2015-06-01; one year -> < full record)
     assert set(np.unique(ds.time.dt.year.values)) == {2015}
