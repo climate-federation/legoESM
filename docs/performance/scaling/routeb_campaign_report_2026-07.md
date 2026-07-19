@@ -30,28 +30,46 @@ Metric = **SYPD** (simulated years per wall-clock day) and aggregate throughput
 | lat-lon | LL512 | 39 | 12.2 | 52.7 (16) |
 | lat-lon | LL1024 | 19.5 | 2.9 | 29.8 (16) |
 | cubed-sphere | C192 | 52 | 14.7 | 20.3 (6) |
-| icosahedral | L7 | 56 | 5.1 | 19.7 (16) |
-| icosahedral | L8 | 28 | 1.8 | 10.0 (16) |
+| icosahedral | L7 | 56 | 5.0 | 23.5 (**4**) |
+| icosahedral | L8 | 28 | 1.8 | 9.2 (**8**) |
 
 Climate work needs > ~1 SYPD; the dycore clears that by 1–2 orders of magnitude
 at ~20–55 km on a single-to-modest GPU count.
+
+Note the peak-N column: only the lat-lon cases peak at the top of the ladder.
+Icosahedral L7 peaks at **4** GPUs and L8 at **8**, then declines — adding
+devices past that point costs throughput, which is the Demo-3 story in absolute
+terms. Quote "best SYPD" with its device count, never as "SYPD on 16 GPUs".
+
+*(Table regenerated from `all_tidy.csv` 2026-07-18, post-ico-rerun. The
+pre-rerun values — L7 19.7 @16, L8 10.0 @16 — were stale AND misattributed the
+peak to N=16.)*
 
 ## Demonstration 2 — aggregate throughput scales with GPU count
 
 **Absolute throughput (Mcells/s) rising with device count** — "add hardware, go
 faster / bigger" (not efficiency; see Demo 3):
 
-| grid | config | 1 A100 | 16 A100 | speed-up |
+| grid | config | 1 A100 | max N | speed-up |
 |---|---|---|---|---|
-| lat-lon | LL1024 (19.5 km) | 978 | 9887 | **10.1×** |
-| icosahedral | L8 (28 km) | 380 | 2065 | 5.4× |
-| lat-lon | LL512 (39 km) | 1011 | 4375 | 4.3× (saturates — small problem) |
-| cubed-sphere | C192 (52 km) | 1032 | 1418 (at 6) | 1.4× (latency-bound, #1113) |
+| lat-lon | LL1024 (19.5 km) | 978 | 9887 (16) | **10.1×** |
+| lat-lon | LL512 (39 km) | 1011 | 4375 (16) | 4.3× (saturates — small problem) |
+| icosahedral | L8 (28 km) | 380 | 1697 (16) | 4.5× |
+| icosahedral | L7 (56 km) | 261 | 793 (16) | 3.0× |
+| cubed-sphere | C192 (52 km) | 1032 | 1418 (6) | 1.4× (latency-bound, #1113) |
+| lat-lon | LL192 (104 km ≈1°) | 950 | 1022 (16) | 1.1× (comm-starved) |
+| cubed-sphere | C96 (104 km) | 759 | 533 (6) | **0.7× — ANTI-scales** |
+| icosahedral | L6 (112 km ≈1°) | 479 | 315 (16) | **0.7× — ANTI-scales** |
 
 Lat-lon LL1024 is the hero: **~10× aggregate throughput on 16 GPUs, to
-9.9 Gcells/s** (the largest problem measured). Grid-dependence is real — cube is
-latency-bound past a few GPUs (~46 collective-permutes/step × ~0.11 ms launch
+9.9 Gcells/s** (the largest problem measured). The bottom three rows are the
+same finding from the other end — at ~1° there is too little work per device to
+hide the halo exchange, and adding GPUs is flat (LL192) or actively **negative**
+(C96, L6 both end BELOW their 1-GPU throughput). Grid-dependence is real: cube
+is latency-bound past a few GPUs (~46 collective-permutes/step × ~0.11 ms launch
 floor, #1113); the lat-lon structured 1-D band halo scales best.
+
+*(Regenerated from `all_tidy.csv` 2026-07-18. Pre-rerun ico L8 read 2065 / 5.4×.)*
 
 ## Demonstration 3 — strong-scaling efficiency, baselined to 2 GPUs
 
@@ -64,18 +82,25 @@ comm onset:
 |---|---|---|---|---|
 | lat-lon | LL1024 (19.5 km) | 102% | 93% | **72%** |
 | lat-lon | LL512 (39 km) | 86% | 53% | 30% |
-| icosahedral | L8 (28 km) | 58% | 58% | 33% |
-| icosahedral | L7 (56 km) | 78% | 32% | 17% |
+| icosahedral | L8 (28 km) | 59% | 60% | 27% |
+| icosahedral | L7 (56 km) | 79% | 32% | 13% |
+| lat-lon | LL192 (104 km ≈1°) | 53% | 24% | 13% |
+| icosahedral | L6 (112 km ≈1°) | 53% | 16% | **7%** |
 | | | eff @3 | eff @6 | |
 | cubed-sphere | C192 (52 km) | 75% | 52% | |
 | cubed-sphere | C96 (104 km) | 76% | 42% | |
 
 Reading: at the largest problem (**LL1024, 72% at 16 GPUs**) the code strong-
 scales well; smaller problems (LL512, L7) saturate at high N as fixed work runs
-out per device (expected). The N=2 baseline is what makes the cube honest —
-C192 holds **52% to 6 GPUs** here, versus an unfair 23% when charged the 1→2
-comm onset against a single-GPU baseline. (LL1024 super-linear at N=4 = cache /
-occupancy; ico L8 flat 58% at N=4–8 then drops — the #1113 n4 note.)
+out per device (expected), and the ~1° cases (LL192, L6) collapse to 13% / 7%
+— the resolution-dependence that is the headline of the figures. The N=2
+baseline is what makes the cube honest — C192 holds **52% to 6 GPUs** here,
+versus an unfair 23% when charged the 1→2 comm onset against a single-GPU
+baseline. (LL1024 super-linear at N=4 = cache / occupancy; ico L8 flat ~60% at
+N=4–8 then drops — the #1113 n4 note.)
+
+*(Regenerated from `all_tidy.csv` 2026-07-18. Pre-rerun ico read L8 58/58/33,
+L7 78/32/17.)*
 
 ---
 
