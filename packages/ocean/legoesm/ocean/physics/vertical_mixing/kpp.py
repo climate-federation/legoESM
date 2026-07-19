@@ -169,6 +169,14 @@ def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, eps, ice_frac=None):
     closure's under-ice wave-TKE suppression.  ``eice=0`` -> factor 1 ->
     bit-identical.
 
+    SHOALING SCOPE (codex): reducing ``w_s`` shoals ``h_bl`` for the intended
+    stable, monotone bulk-Ri column (lower positive ``V_t^2`` -> higher positive
+    ``Ri_b`` -> the ``Ri_b > Ri_crit`` crossing moves up).  It is NOT an
+    unconditional guarantee: where the local density difference is negative or
+    the Ri profile is non-monotone, the soft multi-crossing weighting can move
+    ``h_bl`` the other way.  The Arctic winter halocline (strongly stable,
+    monotone) is the target regime; the sign is validated there.
+
     Parameters
     ----------
     u_star, B_f : (...,) friction velocity [m/s] and surface buoyancy forcing

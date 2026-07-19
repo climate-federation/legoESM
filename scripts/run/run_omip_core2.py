@@ -1664,7 +1664,7 @@ def _kpp_vmix_override(kpp_ri_crit=None, kpp_cv=None, kpp_eice=None):
     return VerticalMixingConfig(scheme="kpp", kpp=kpp)
 
 
-def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None):
+def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None, kpp_eice=None):
     """Reject the KPP override flags on grids whose CORE-II builder does not
     thread ``vertical_mixing`` INTO A LIVE KPP scheme (a flag that silently does
     nothing is the dispatch footgun CLAUDE.md forbids).  ``mpas`` and
@@ -1673,13 +1673,20 @@ def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None):
     (the dynamics-core implicit vertical solve, NO KPP boundary layer) so a KPP
     override would be a silent no-op there -> still rejected; ``cubed_sphere``
     is not wired.  Extend this set only when the builder actually runs KPP."""
-    if (kpp_ri_crit is not None or kpp_cv is not None) and grid not in (
+    if (kpp_ri_crit is not None or kpp_cv is not None
+            or kpp_eice is not None) and grid not in (
             "mpas", "latlon_bathy"):
         raise SystemExit(
-            f"--kpp-ri-crit/--kpp-cv are wired for --grid mpas/latlon_bathy "
+            f"--kpp-ri-crit/--kpp-cv/--kpp-eice are wired for --grid mpas/latlon_bathy "
             f"(grids that run the KPP boundary layer), not --grid {grid!r}. "
             f"tripole runs the dynamics-core implicit vertical solve (no KPP) "
             f"so the override would silently do nothing.")
+    if kpp_eice is not None and grid == "mpas":
+        raise SystemExit(
+            "--kpp-eice is wired for --grid latlon_bathy only: the MPAS KPP "
+            "vertical-mixing bridge receives no ice concentration yet "
+            "(mpas_physics passes tau/q only), so the attenuation would "
+            "silently no-op there. Run the under-ice KPP lever on latlon.")
 
 
 def _validate_pcg_variant_grid(grid, barotropic_pcg_variant=None,
@@ -3895,7 +3902,7 @@ def main() -> int:
     args = p.parse_args()
 
     # KPP MLD-deepening sensitivity flags are mpas-only (fail loud, never silent).
-    _validate_kpp_grid(args.grid, args.kpp_ri_crit, args.kpp_cv)
+    _validate_kpp_grid(args.grid, args.kpp_ri_crit, args.kpp_cv, args.kpp_eice)
     _validate_pcg_variant_grid(args.grid, args.barotropic_pcg_variant,
                                args.barotropic_solver)
 
@@ -4391,11 +4398,12 @@ def main() -> int:
             # build_latlon_bathy already threaded into live KPP (codex). Fail
             # loud on the conflict rather than let YAML win over the explicit CLI.
             if "physics" in _ovr and (args.kpp_ri_crit is not None
-                                      or args.kpp_cv is not None):
+                                      or args.kpp_cv is not None
+                                      or args.kpp_eice is not None):
                 raise ValueError(
-                    "--kpp-ri-crit/--kpp-cv conflict with a --config ocean.physics "
-                    "block: the YAML physics config would overwrite the CLI KPP "
-                    "override. Set Ri_crit/Cv in the YAML "
+                    "--kpp-ri-crit/--kpp-cv/--kpp-eice conflict with a --config "
+                    "ocean.physics block: the YAML physics config would overwrite "
+                    "the CLI KPP override. Set Ri_crit/Cv/eice in the YAML "
                     "(ocean.physics.vertical_mixing.kpp) OR drop the ocean.physics "
                     "section and use the CLI flags -- not both.")
             model = LatLonCGridOceanModel(
