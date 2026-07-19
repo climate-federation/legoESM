@@ -116,7 +116,10 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
     T_min: float = 50.0            # Temperature floor [K]
     p_floor: float = 100.0         # Pressure floor [Pa] for adiabatic 1/p
     sponge_sigma: float = 0.15     # Rayleigh sponge above this sigma
-    sponge_tau_sec: float = 3600.0 # e-folding time at model top [s]
+    sponge_tau_sec: float = 432000.0  # e-folding time at model top [s] (5 d,
+        # FV3 Ray_fast-like; #1028 — the old 3600 s (1 h) default was ~430-860x
+        # stronger than FV3 and was the dominant global KE sink (-1.0/day on a
+        # balanced jet), capping the Held-Suarez jet at ~7 m/s)
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     anchor_mass_to_initial: bool = False
