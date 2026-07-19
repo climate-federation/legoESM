@@ -7,14 +7,15 @@ One-at-a-time (OAT) variation around the baseline
 ``tiedtke + louis + mcfarlane + sundqvist + rrtmgp + xu_randall`` at
 T21.  For each of the four dimensions (convection, turbulence, gwd,
 microphysics) we run every alternative scheme exactly once while
-holding the other three at the baseline.  Total = 28 runs (the
-baseline itself is run once and shared across dimensions).
+holding the other three at the baseline.  The exact run count = baseline
++ sum(len(SWEEP_SPACE[dim])) (currently 25; the script PRINTS the true
+count and the exact ``--array`` range at the end — always use that, never
+a hardcoded range).
 
 Per-run cost at T21 + RRTMGP + 3-day rollout (4 epochs, 48 samples):
 - ~40k dycore steps total per run
 - ~1-3h on a single RTX 8000 (rough estimate from the existing T21
   multistep smoke runs, scaled for the longer 3-day rollout)
-- 28 runs -> ~28-84 GPU-h total
 
 Outputs
 -------
@@ -27,10 +28,11 @@ This script writes (idempotent):
 
 Launching
 ---------
-After this script runs (writes configs only, no jobs submitted):
+After this script runs (writes configs only, no jobs submitted), use the
+exact ``--array=0-<N>`` line the script prints (N = n_combos-1):
 ::
 
-    sbatch --array=0-27 scripts/run/_aimip_sweep_stage1_runner.sbatch
+    sbatch --array=0-<N> scripts/run/_aimip_sweep_stage1_runner.sbatch
 
 The array job index selects one combo from the manifest and runs
 ``scripts/run/run_aimip.py --suite <combo>/suite.yaml --variants classical``
@@ -127,8 +129,8 @@ def _write_runner_sbatch(repo_root: Path, manifest_rel: Path) -> Path:
 #
 # Submit with:
 #     sbatch --array=0-N scripts/run/_aimip_sweep_stage1_runner.sbatch
-# where N+1 = number of combos in the manifest (currently 28; counted
-# at submission time).
+# where N+1 = number of combos in the manifest (the planner prints the
+# exact range; counted at submission time).
 
 set -euo pipefail
 
