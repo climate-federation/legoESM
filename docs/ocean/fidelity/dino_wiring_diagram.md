@@ -852,3 +852,44 @@ HPG is the fixable defect (candidate: the `t_depth_ref`/thickness the deepest we
 cell receives from `create_full_step_coordinate`). If equal → (ii), a genuine
 leapfrog-dissipation match, larger than one pass. The closest STABLE fully-faithful
 config remains {full-step + FE} `nemo_dino_kamm` (BSF 0.81×, Round-7).
+
+---
+
+## Stage-level lockstep trend dump at kt=5761 — HPG-v is the first divergence (2026-07-18)
+
+The "precise remainder" test above (a NEMO per-cell HPG trend dump compared same-state
+against legoESM `KE_PGF`) was executed. NEMO `MY_SRC/{trddyn,trdtra,trddump}` dump every
+per-term trend + the RK3 stage-3 evaluation state (`uu_stg` …) into
+`RUN_STEPDUMP/DINO_00005761_restart.nc` (one step from DINO_00005760). Harness:
+`~/oracle-builds/nemo5/gap_audit/dino_term_compare.py` (env `DINO_RUN`/`DINO_RST`) +
+per-level probe `scratchpad/_loc.py`. Full note:
+`scratchpad/dino_stage_lockstep_instrument.md`.
+
+**Controlled result (identical harness, two restarts).** Seam-excluded interior corr:
+
+| term | u @5761 (eddying) | v @5761 | u @M5SPIN (smooth) | v @M5SPIN |
+|------|------|------|------|------|
+| hpg  | **1.0000** | **0.686** | 1.0000 | 0.9999 |
+| keg  | 0.995 | 0.697 | 1.000 | 0.9995 |
+| pvo+rvo | 1.0000 | 0.61 | 1.0000 | 0.888 |
+
+hpg-v per level @5761: k5 0.96 → k20 0.67 → k30 0.63, amplitude ratio 0.92 → **0.64**
+(deficient, growing with depth). **u-PGF stays 1.0000 / ratio ≈ 1.00 at every depth.**
+Density matches NEMO `rhd` to 1.5e-5; grid dx/f exact.
+
+**Verdict.** The FIRST phase to diverge is `dyn_hpg`, specifically its **meridional (v)
+component** — upstream of `dyn_spg`/wind. Same density, same grid ⇒ the only
+u/v-asymmetric ingredient is the meridional metric and the **terrain-following
+(z-star) PGF** over DINO's meridionally-sloping bowl/ACC bathymetry. The default
+`pgf_scheme="adcroft"` on `OceanZStarCoordinate` applies NO slope correction
+(`ocean_pe_latlon_cgrid.py:1608-1623`): densities are differenced at equal level-index
+but unequal physical depth across the slope. The error is benign on the smooth 62-day
+state (v = 0.9999) and grows with depth AND developed meridional density structure
+(v → 0.63 at 180 d) — confirming hypothesis (i) (legoESM deep-cell HPG magnitude
+spuriously large), NOT hypothesis (ii) (leapfrog dissipation).
+
+**Fix (verify-first).** NOT a flip to `pgf_scheme="smc03"`: tested — smc03 degrades both
+u and v at depth (its η=0 physical-depth reconstruction ≠ NEMO `ln_hpg_sco` Jacobian).
+Real fix = a NEMO-`ln_hpg_sco`-faithful s-coordinate Jacobian PGF option for z*, and/or
+verifying the z* interface-depth (`key_qco`) reconstruction — both current PGF schemes
+inherit the coordinate metric.
