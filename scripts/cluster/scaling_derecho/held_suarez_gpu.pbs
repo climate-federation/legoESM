@@ -1,0 +1,110 @@
+#!/bin/bash -l
+#PBS -N legoesm_hs_gpu
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=1:ncpus=64:mpiprocs=1:ngpus=1:gpu_type=a100:mem=200GB
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# Dry Held-Suarez climatology on ONE A100 -- the GPU twin of the laptop run.
+#
+# PURPOSE: two claims from one job.
+#   1. PORTABILITY  -- identical code and identical command run on a laptop
+#      CPU and on an A100; only the JAX backend differs. The wall-clock ratio
+#      between the two IS the portability story.
+#   2. VALIDATION   -- a time-mean HS94 climatology (zonal-mean u and T) that
+#      can be compared against Held & Suarez (1994) Figs 1-2.
+#
+# SINGLE GPU, no MPI/SPMD: this driver is a single-device integration. It is
+# NOT a scaling job -- do not read anything about parallel efficiency from it.
+#
+# CONTROLLED COMPARISON: to compare against the laptop run, EVERY knob below
+# must match it (grid, levels, dt, days, mean-from-day, precision). The one
+# variable is the device. Changing --n or --dt and then comparing wall-clock
+# to the laptop number is a confound, not a result.
+#
+# PRECISION: the driver defaults to JAX_ENABLE_X64=1 (fp64). fp32 is ~2x
+# faster and is what the laptop reference used, so PRECISION=fp32 is the
+# default here. Set PRECISION=fp64 for the stricter-conservation variant, but
+# then re-run the laptop side at fp64 too before comparing.
+#
+# SUBMIT (from the checkout you want measured -- worktree-safe):
+#   qsub scripts/cluster/scaling_derecho/held_suarez_gpu.pbs
+#   # knobs:
+#   #   -v N=32,NLEV=26,DT=300,DAYS=1200,MEAN_FROM=200
+#   #   -v PRECISION=fp64
+#   #   -v N=96                 (resolution test for a weak jet, #1028)
+#   #   -v AH_SCALE=0           (disable the 2nd-order Laplacian viscosity,
+#   #                            the driver's suspected "eddy-killer")
+# ===========================================================================
+set -uo pipefail
+
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+if   [ -f "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}/scripts/cluster/scaling_derecho"
+elif [ -f "${SUBMIT_DIR}/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}"
+else
+    echo "ERROR: cannot find _env.sh from PBS_O_WORKDIR=${SUBMIT_DIR}" >&2
+    exit 1
+fi
+export JAX_PLATFORMS=cuda
+export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
+# Worktree-safe REPO (the _env.sh default points at the main checkout).
+: "${LEGOESM_REPO:=$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
+export LEGOESM_REPO
+# shellcheck source=_env.sh
+source "${SCRIPT_DIR}/_env.sh"          # provides PY, REPO, SCRATCH
+cd "$REPO"
+
+N="${N:-32}"
+NLEV="${NLEV:-26}"
+DT="${DT:-300}"
+DAYS="${DAYS:-1200}"
+MEAN_FROM="${MEAN_FROM:-200}"
+PRECISION="${PRECISION:-fp32}"
+AH_SCALE="${AH_SCALE:-1.0}"
+OUTDIR="${OUTDIR:-${SCRATCH}/legoesm_hs/gpu_$(date +%Y%m%d_%H%M%S)}"
+mkdir -p "$OUTDIR"
+
+case "$PRECISION" in
+    fp32) export JAX_ENABLE_X64=0 ;;
+    fp64) export JAX_ENABLE_X64=1 ;;
+    *) echo "ERROR: PRECISION must be fp32 or fp64, got '$PRECISION'" >&2
+       exit 1 ;;
+esac
+
+TAG="hs_c${N}_l${NLEV}_dt${DT}_${DAYS}d_${PRECISION}"
+echo "=== Dry Held-Suarez, 1x A100 ==="
+echo "REPO=$REPO"
+echo "C$N / L$NLEV  dt=${DT}s  days=$DAYS  mean-from-day=$MEAN_FROM"
+echo "PRECISION=$PRECISION (JAX_ENABLE_X64=$JAX_ENABLE_X64)  AH_SCALE=$AH_SCALE"
+echo "OUTDIR=$OUTDIR"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+echo
+
+# -u: the integration prints progress every 5 days; without unbuffered stdout
+# a long run shows NOTHING until it exits, which makes a hang and a slow run
+# look identical in the PBS log.
+$PY -u scripts/run/run_dry_held_suarez_cube.py \
+    --n "$N" --nlev "$NLEV" --dt "$DT" --days "$DAYS" \
+    --mean-from-day "$MEAN_FROM" --ah-scale "$AH_SCALE" \
+    --out "${OUTDIR}/${TAG}.npz"
+rc=$?
+if [ $rc -ne 0 ]; then
+    echo "FATAL: integration exited rc=$rc" >&2
+    exit $rc
+fi
+
+echo
+echo "=== climatology + jet metrics ==="
+$PY -u scripts/plot/plot_held_suarez_climatology.py \
+    --npz "${OUTDIR}/${TAG}.npz" \
+    --out "$OUTDIR" --name "fig_${TAG}" \
+    --json "${OUTDIR}/${TAG}_metrics.json"
+
+echo
+echo "=== output ==="
+ls -la "$OUTDIR"

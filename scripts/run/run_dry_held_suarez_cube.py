@@ -31,8 +31,15 @@ from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init, h
 
 def main():
     ap = argparse.ArgumentParser()
+    # Default is a TRACKED in-repo config so the driver runs out of the box on
+    # any checkout. The previous default was an absolute Levante scratch path
+    # that exists on exactly one machine, so every other invocation died with
+    # FileNotFoundError before reaching the model.
     ap.add_argument("--config", type=str,
-                    default="/scratch/b/b309165/amip_c32l45_orogwd_1979_60d_25800992/experiment_config.json")
+                    default=os.path.join(
+                        os.path.dirname(os.path.dirname(os.path.dirname(
+                            os.path.abspath(__file__)))),
+                        "config", "held_suarez", "cube_c32_l26.json"))
     ap.add_argument("--n", type=int, default=32)
     ap.add_argument("--nlev", type=int, default=45)
     ap.add_argument("--days", type=int, default=200)
