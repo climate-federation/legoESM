@@ -940,7 +940,8 @@ def _weno5_hv_flux_div(phi, u, v, w, g: SpectralLESGrid):
     return divx + divy + divz
 
 
-def scalar_rhs_monotone(phi, u, v, w, nu_t, g: SpectralLESGrid, sfc_flux):
+def scalar_rhs_monotone(phi, u, v, w, nu_t, g: SpectralLESGrid, sfc_flux,
+                        scheme=None):
     """Scalar tendency with MONOTONE (van-Leer TVD) advection + the SAME SGS
     diffusion + surface-flux BC as :func:`scalar_rhs`.
 
@@ -950,10 +951,16 @@ def scalar_rhs_monotone(phi, u, v, w, nu_t, g: SpectralLESGrid, sfc_flux):
     uniform θ/q field remains uniform.  Without this free-stream-preserving
     correction, moist runs generate artificial saturation anomalies that the
     microphysics/buoyancy feedback explosively amplifies.
+
+    ``scheme`` overrides ``cfg.scalar_advection`` for this call (defaults to the
+    config).  The moist-tracer path passes ``"van_leer"`` to force the monotone
+    limiter on positive-definite water tracers even when the config selects
+    ``weno5`` — see the positivity guard in :func:`rhs`.
     """
     dz = g.dz
+    scheme = g.cfg.scalar_advection if scheme is None else scheme
     flux_div = {"weno5": _weno5_flux_div, "weno5_hv": _weno5_hv_flux_div,
-                "van_leer": _vanleer_flux_div}[g.cfg.scalar_advection]
+                "van_leer": _vanleer_flux_div}[scheme]
     adv = (flux_div(phi, u, v, w, g)
            - phi * _vanleer_fv_velocity_divergence(u, v, w, g))
     dthdx, dthdy = ddx(phi, g), ddy(phi, g)
@@ -1173,13 +1180,29 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
         # slots have zero surface flux.
         nt = tracers.shape[-1]
         flx = jnp.zeros((nt,), tracers.dtype).at[0].set(sfc_qv_flux)
+        # POSITIVITY GUARD (port of the CRM #966 guard,
+        # compressible_euler_plane.py: `if scheme == "weno5": tadv = van_leer`):
+        # WENO5-Z is 5th-order but NOT positivity-preserving, so it drives the
+        # positive-definite water tracers (q_v, q_c, q_r, N_c, N_r, …) negative;
+        # the negative undershoot then feeds the microphysics as a spurious
+        # source and the water-positivity clip blows up (~7 vs 0.5 kg/kg on
+        # weno5 f64).  Advect the TRACERS with the monotone van_leer limiter
+        # when weno5 is selected; the signed θ′ keeps weno5 for its dispersion
+        # (handled at its own scalar_fn call above).  van_leer's 2-cell halo ⊆
+        # weno5's 3-cell halo ⇒ never under-halos, and van_leer is the MPI-safe
+        # tracer path.  Only bites the monotone path (weno5 lives there).
+        if g.cfg.monotone_scalars and g.cfg.scalar_advection in (
+                "weno5", "weno5_hv"):
+            tracer_fn = lambda q, f: scalar_rhs_monotone(  # noqa: E731
+                q, u, v, w, nu_t, g, f, scheme="van_leer")
+        else:
+            tracer_fn = lambda q, f: scalar_fn(q, u, v, w, nu_t, g, f)  # noqa: E731
         if g.layout is None:
             # Serial: vmap over the trailing tracer axis — ONE batched
             # kernel set for all slots (kernel count + compile time
             # independent of n_tracers).
             Rtracers = jax.vmap(
-                lambda q, f: scalar_fn(q, u, v, w, nu_t, g, f),
-                in_axes=(-1, 0), out_axes=-1,
+                tracer_fn, in_axes=(-1, 0), out_axes=-1,
             )(tracers, flx)
         else:
             # MPI y-slab: scalar_fn contains mpi4jax collectives
@@ -1187,8 +1210,7 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
             # rule — keep the static per-slot loop (deterministic
             # collective order across ranks).
             Rtracers = jnp.stack(
-                [scalar_fn(tracers[..., k], u, v, w, nu_t, g, flx[k])
-                 for k in range(nt)],
+                [tracer_fn(tracers[..., k], flx[k]) for k in range(nt)],
                 axis=-1,
             )
     Rw = Rw.at[..., 0].set(0.0).at[..., -1].set(0.0)
