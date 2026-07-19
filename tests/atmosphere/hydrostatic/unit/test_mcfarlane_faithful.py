@@ -314,29 +314,83 @@ def test_e3sm_hdsp_matches_gw_oro_src_formula():
     assert abs(got - expected) <= rtol * expected
 
 
-def test_e3sm_hdsp_default_off_bit_identical():
-    """Canary: the flag defaults False and the helper is bit-identical to the
-    legacy form there (regression pin for the default path)."""
-    assert McFarlaneConfig().use_e3sm_hdsp is False
-    cfg = McFarlaneConfig()
+def test_e3sm_hdsp_default_is_auto_and_arms_pinned():
+    """The flag defaults to the tri-state "auto" (production-faithfulness
+    2026-07-19).  Arms pinned EXPLICITLY (default-flip lesson):
+
+    * an UNRESOLVED "auto" config reaching the launch helper directly stays
+      on the LEGACY branch ("auto" is truthy — the strict ``is True`` test is
+      the canary against a truthiness regression that would silently double);
+    * the explicit False arm is bit-identical legacy.
+    """
+    assert McFarlaneConfig().use_e3sm_hdsp == "auto"
     rho, N, U = jnp.array([1.2]), jnp.array([1.0e-2]), jnp.array([12.0])
     h_sq = jnp.array([90000.0])
-    got = _mcfarlane_launch_stress(rho, N, U, h_sq, cfg)
-    expected = cfg.G_0 * rho * N * cfg.k_wave * jnp.minimum(
-        h_sq, cfg.fcrit2 * (U / N) ** 2
+    legacy = McFarlaneConfig(use_e3sm_hdsp=False)
+    expected = legacy.G_0 * rho * N * legacy.k_wave * jnp.minimum(
+        h_sq, legacy.fcrit2 * (U / N) ** 2
     ) * U
-    assert jnp.array_equal(got, expected)
+    for cfg in (McFarlaneConfig(), legacy):        # unresolved "auto", False
+        got = _mcfarlane_launch_stress(rho, N, U, h_sq, cfg)
+        assert jnp.array_equal(got, expected)
+
+
+def test_e3sm_hdsp_auto_resolution_full_scheme():
+    """Tri-state resolution through the public entry point:
+
+    * "auto" + scalar fallback  == explicit False (bit-identical, no ocean
+      pseudo-mountain);
+    * "auto" + wired h_topo_col == explicit True (bit-identical E3SM hdsp);
+    * and the two "auto" arms genuinely DIFFER on a below-cap column (the
+      doubling actually activates — also exercises the resolved flag on the
+      depth-averaged penetration path, which is default ON).
+    """
+    u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column()
+    col = jnp.full((u.shape[0],), 300.0)           # below the Froude cap
+    args = (u, v, T, p_full, p_half, z_full, z_half, rho, lat, 1800.0)
+
+    auto_scalar = mcfarlane_gwd(*args, McFarlaneConfig(), h_topo_col=None)
+    false_scalar = mcfarlane_gwd(
+        *args, McFarlaneConfig(use_e3sm_hdsp=False), h_topo_col=None)
+    for a, b in zip(auto_scalar[:3], false_scalar[:3]):
+        assert jnp.array_equal(a, b)
+
+    auto_col = mcfarlane_gwd(*args, McFarlaneConfig(), h_topo_col=col)
+    true_col = mcfarlane_gwd(
+        *args, McFarlaneConfig(use_e3sm_hdsp=True), h_topo_col=col)
+    for a, b in zip(auto_col[:3], true_col[:3]):
+        assert jnp.array_equal(a, b)
+
+    false_col = mcfarlane_gwd(
+        *args, McFarlaneConfig(use_e3sm_hdsp=False), h_topo_col=col)
+    assert float(jnp.max(jnp.abs(auto_col.du_dt - false_col.du_dt))) > 0.0, (
+        "auto + wired h_topo_col produced the legacy drag -> the E3SM "
+        "doubling did not activate (resolution defect)"
+    )
 
 
 def test_e3sm_hdsp_requires_per_column_topo():
-    """G6 guard: use_e3sm_hdsp on the scalar config.h_topo fallback raises
-    (a quadrupled uniform pseudo-mountain would drag over ocean planet-wide;
-    this scheme has no landfrac factor)."""
+    """G6 guard: use_e3sm_hdsp=True on the scalar config.h_topo fallback
+    raises (a quadrupled uniform pseudo-mountain would drag over ocean
+    planet-wide; this scheme has no landfrac factor), and an unknown
+    tri-state value raises at entry (dispatch hardening)."""
     u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column()
     cfg = McFarlaneConfig(use_e3sm_hdsp=True)
     with pytest.raises(ValueError, match="use_e3sm_hdsp.*h_topo_col"):
         mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
                       1800.0, cfg, h_topo_col=None)
+    with pytest.raises(ValueError, match="displacement convention"):
+        mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
+                      1800.0, McFarlaneConfig(use_e3sm_hdsp="bogus"),
+                      h_topo_col=None)
+    # int/float lookalikes must RAISE, not silently downgrade to legacy:
+    # ``1 == True`` slips through a membership test, then fails ``is True``
+    # (codex R1 finding — identity validation).
+    for bad in (1, 0, 1.0, 0.0):
+        with pytest.raises(ValueError, match="displacement convention"):
+            mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
+                          1800.0, McFarlaneConfig(use_e3sm_hdsp=bad),
+                          h_topo_col=None)
     # And with the per-column field it runs.
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
                         1800.0, cfg, h_topo_col=jnp.full((u.shape[0],), 300.0))
@@ -375,7 +429,11 @@ def test_depth_avg_no_deposition_in_source_region():
     # (b) tau_0 rides the Froude cap/tau_max, exceeding tau_sat at the FIRST
     # above-source midpoint — so the s-1 boundary pin below is meaningful.
     h_col = jnp.full((1,), 1500.0)
-    cfg = McFarlaneConfig(use_depth_averaged_source=True)
+    # Arm pinned EXPLICITLY (default-flip lesson): this test hand-mirrors the
+    # depth-average machinery with the LEGACY h displacement (the helper below
+    # is called with the unscaled h_col); the hdsp composition has its own
+    # tests (compose + auto-resolution).
+    cfg = McFarlaneConfig(use_depth_averaged_source=True, use_e3sm_hdsp=False)
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
                         300.0, cfg, h_topo_col=h_col)
 
@@ -470,7 +528,9 @@ def test_depth_avg_launch_uses_averaged_values():
     # the layer above) makes the surface-vs-averaged discriminant strong.
     u = u.at[:, -1].set(6.0)
     h_col = jnp.full((1,), 600.0)
-    cfg = McFarlaneConfig(use_depth_averaged_source=True)
+    # Arm pinned EXPLICITLY (default-flip lesson): the hand tau_0 below uses
+    # the LEGACY h_col^2 displacement; hdsp composition is tested separately.
+    cfg = McFarlaneConfig(use_depth_averaged_source=True, use_e3sm_hdsp=False)
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
                         300.0, cfg, h_topo_col=h_col)
     dz = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
