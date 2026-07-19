@@ -1444,25 +1444,43 @@ class CoupledESMDriver:
         )
 
         state = self._atm.state
-        q_v = self._atm.q_v
-        p_s = state.p_s.data
-        T_low = state.T.data[..., -1]
-        # Low-level winds for the ocean surface stress + bulk turbulent fluxes.
-        # cube/latlon carry cell-centered u/v Fields directly; MPAS (voronoi)
-        # carries edge-normal velocity (state.v is None) -> Perot-reconstruct the
-        # cell-centered (zonal, meridional) winds. (Spectral is gated upstream:
-        # its state is spectral coefficients, so the whole extractor would need a
-        # grid synthesis — a separate follow-up.)
-        if state.v is not None:
-            u_low = state.u.data[..., -1]
-            v_low = state.v.data[..., -1]
+        # Low-level winds/T/q/p_s for the ocean surface stress + bulk turbulent
+        # fluxes.  Three atm-state layouts:
+        #   * cube/latlon  -> cell-centered u/v/T/p_s Fields, read directly.
+        #   * MPAS/voronoi -> edge-normal velocity (state.v is None); Perot-
+        #     reconstruct the cell-centered (zonal, meridional) winds.
+        #   * SPECTRAL     -> the state is spectral COEFFICIENTS, so synthesize
+        #     every field to grid (spectral_pe_to_grid) before extracting the
+        #     lowest level.  Moisture is grid-space in the state's tracers dict
+        #     (NOT in spectral_pe_to_grid); zeros on a dry spectral run.
+        if hasattr(state, "vor_hat"):
+            from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+                spectral_pe_to_grid,
+            )
+            _f = spectral_pe_to_grid(state, self._atm.grid, self._atm.sigma)
+            p_s = _f["p_s"]
+            T_low = _f["T"][..., -1]
+            u_low = _f["u"][..., -1]
+            v_low = _f["v"][..., -1]
+            _tr = getattr(state, "tracers", None)
+            _qg = _tr.get("q_v") if _tr else None
+            _qgd = (_qg.data if hasattr(_qg, "data") else _qg)  # Field -> array
+            q_low = (_qgd[..., -1] if _qgd is not None
+                     else jnp.zeros_like(T_low))
         else:
-            from legoesm.grids.voronoi import reconstruct_cell_velocity
-            _u_cell, _v_cell = reconstruct_cell_velocity(
-                state.u.data, self._atm.grid)
-            u_low = _u_cell[..., -1]
-            v_low = _v_cell[..., -1]
-        q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
+            q_v = self._atm.q_v
+            p_s = state.p_s.data
+            T_low = state.T.data[..., -1]
+            if state.v is not None:
+                u_low = state.u.data[..., -1]
+                v_low = state.v.data[..., -1]
+            else:
+                from legoesm.grids.voronoi import reconstruct_cell_velocity
+                _u_cell, _v_cell = reconstruct_cell_velocity(
+                    state.u.data, self._atm.grid)
+                u_low = _u_cell[..., -1]
+                v_low = _v_cell[..., -1]
+            q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
         sigma_full = jnp.asarray(self._atm.sigma.sigma_full)
         p_low = p_s * sigma_full[-1]
         # Moist-air density: rho = p / (R_d * T_v), T_v = T*(1 + (1/eps - 1)*q).

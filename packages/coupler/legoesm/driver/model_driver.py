@@ -6442,8 +6442,76 @@ class ModelDriver:
         t_start = time.time()
         _ext_daily: dict = {}
         _last_ext_day = None
+        # ---- Coupled ocean/land support (segment_callback + surface flux) ----
+        # A coupled spectral run installs ``_segment_callback`` (the coupler's
+        # daily ocean/land step). ``_build_atm_forcing`` reads the surface net
+        # SW/LW from ``_carry_aux``; the spectral integrator is per-RK-stage so
+        # we do NOT thread per-step fluxes — instead RECOMPUTE the surface net
+        # radiation ONCE per day at the coupling boundary (one gray solve/day is
+        # cheap) and stash it, mirroring how _run_mpas exports its sfc_diag.
+        # Gated on a PRESENT callback → the standalone spectral path is
+        # byte-identical (no callback ⇒ this whole block is dead).
+        _has_segcb = getattr(self, "_segment_callback", None) is not None
+        _last_coupling_day = None
+
+        def _spectral_sfc_net_rad(state, day):
+            """(sw_net_sfc, lw_net_sfc) [W/m^2, +into surface] from the current
+            spectral state via the gray diagnostic radiation (the coupled-
+            idealized path)."""
+            _f = spectral_pe_to_grid(state, self.grid, self.sigma)
+            _Tg, _psg = _f["T"], _f["p_s"]
+            _pf = _psg[..., None] * sigma_full
+            _ph = _psg[..., None] * self.sigma.sigma_half
+            _Tc = _Tg.reshape(-1, cfg.grid.nlev)
+            # Real grid-space moisture (gray LW is moist) so the recompute
+            # matches the atmosphere's own gray radiation; zeros on a dry run.
+            _trq = getattr(state, "tracers", None)
+            _qvf = _trq.get("q_v") if _trq else None
+            _qvd = (_qvf.data if hasattr(_qvf, "data") else _qvf)
+            _qvc = (_qvd.reshape(-1, cfg.grid.nlev)
+                    if _qvd is not None else jnp.zeros_like(_Tc))
+            _sst, _sic = self.get_sst_sic(day)
+            if _sst.ndim == 1 and len(shape_2d) == 2:
+                _sst = jnp.broadcast_to(_sst[:, None], shape_2d)
+                _sic = jnp.broadcast_to(_sic[:, None], shape_2d)
+            _Tsfc = blend_surface_temperature(_sst, _sic, T_ice).reshape(-1)
+            _lat2d = (jnp.broadcast_to(self._grid_lat[:, None], shape_2d)
+                      if self._grid_lat.ndim == 1 else self._grid_lat)
+            _insol = daily_mean_insolation(
+                _lat2d.reshape(-1), self._insolation_day(day), S_0,
+                orbit=_orbit_params)
+            _rad = gray_radiation(
+                T=_Tc, p_full=_pf.reshape(-1, cfg.grid.nlev),
+                p_half=_ph.reshape(-1, cfg.grid.nlev + 1),
+                sfc_temperature=_Tsfc, lat=_lat2d.reshape(-1),
+                q_v=_qvc, insolation=_insol, config=gray_config)
+            # Surface half-level is index -1 (gray module: F_*_sfc = *[:, -1]).
+            _sw = (_rad.sw_flux_down[:, -1] - _rad.sw_flux_up[:, -1])
+            _lw = (_rad.lw_flux_down[:, -1] - _rad.lw_flux_up[:, -1])
+            return _sw.reshape(shape_2d), _lw.reshape(shape_2d)
+
         for step in range(start_step, n_steps_total):
             self._current_day = START_DAY + (step + 1) * DT / 86400.0
+
+            # Coupled daily boundary (explicit coupling, mirrors _run_mpas): at
+            # the first step of a new day, recompute + stash the surface fluxes
+            # from the CURRENT (end-of-elapsed-day) state and step the coupler's
+            # ocean/land for that day BEFORE this step advances the atmosphere.
+            # The fluxes are recomputed from the SAME state the callback's
+            # _build_atm_forcing reads, so forcing + state are self-consistent.
+            # Step 0 has nothing to step yet (_last_coupling_day is None).
+            if _has_segcb:
+                _cd_int = daily_forcing_bucket(self._current_day)
+                if (_last_coupling_day is not None
+                        and _cd_int != _last_coupling_day):
+                    _sw_net, _lw_net = _spectral_sfc_net_rad(
+                        self.state, float(_cd_int))
+                    if not isinstance(self._carry_aux, dict):
+                        self._carry_aux = {}
+                    self._carry_aux["held_sw_net_sfc"] = _sw_net
+                    self._carry_aux["held_lw_net_sfc"] = _lw_net
+                    self._segment_callback(self, self._current_day, 86400.0)
+                _last_coupling_day = _cd_int
 
             if _full_physics:
                 # Traced forcing for the unified pipeline: SST/SIC-blend
