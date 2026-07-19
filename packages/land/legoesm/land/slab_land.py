@@ -85,6 +85,9 @@ def step_land(
             lat=lat, carbon_state=carbon_state, doy=doy,
             land_params=land_params)
 
+    # Fail-early: a surface_scheme that is neither canopy nor SimpleSEB would
+    # otherwise SILENTLY run the bulk SEB path below (matches the
+    # ``multilayer_land.py`` sibling guard).
     if not isinstance(config.surface_scheme, SimpleSEBConfig):
         raise ValueError(
             f"unknown surface_scheme {type(config.surface_scheme).__name__}; "

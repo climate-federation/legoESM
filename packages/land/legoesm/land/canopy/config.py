@@ -142,7 +142,7 @@ PFT_CANOPY_HEIGHT: dict[str, float] = {
 # Valid values for the static leaf-gas-exchange dispatch field.  Kept next to
 # the config so the fail-early validator and the config default cannot drift.
 _VALID_STOMATAL_MODELS = ("ball_berry", "medlyn")
-_VALID_LE_MODULES = ("BT", "PM")
+VALID_LE_MODULES = ("BT", "PM")
 
 
 class CanopyConfig(NamedTuple):
@@ -238,11 +238,12 @@ class CanopyConfig(NamedTuple):
             raise ValueError(
                 f"unknown stomatal_model {self.stomatal_model!r}; the stomatal "
                 f"conductance scheme must be one of {_VALID_STOMATAL_MODELS}")
-        if self.LE_module not in _VALID_LE_MODULES:
+        if self.LE_module not in VALID_LE_MODULES:
             raise ValueError(
                 f"unknown LE_module {self.LE_module!r}; the leaf-energy module "
-                f"must be one of {_VALID_LE_MODULES} ('BT'=bulk transfer, "
-                f"'PM'=Penman-Monteith)")
+                f"must be one of {VALID_LE_MODULES} ('BT'=bulk transfer, "
+                f"'PM'=Penman-Monteith). The internal dispatch is a bare "
+                f"'else: # PM', so a typo would silently run PM.")
         return self
 
 
