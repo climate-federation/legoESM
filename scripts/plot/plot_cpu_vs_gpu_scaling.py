@@ -238,9 +238,11 @@ def make_paper_figure(rows, out_dir: Path, name: str = "fig_cpu_gpu_mcells",
                 ax.set_ylabel(f"{backend}\nthroughput (Mcells / s)",
                               fontsize=9.5, color="#1a1a1a")
             if backend == "CPU" and grid == "cubed-sphere":
-                ax.annotate(_CUBE_CPU_NOTE, xy=(0.04, 0.04),
+                # Upper-left: the curves rise to the right, so the lower-left
+                # corner is where they sit.
+                ax.annotate(_CUBE_CPU_NOTE, xy=(0.04, 0.96),
                             xycoords="axes fraction", fontsize=7,
-                            color="#b5562a", va="bottom")
+                            color="#b5562a", va="top")
             if ax.get_legend_handles_labels()[0]:
                 ax.legend(fontsize=7.5, frameon=False, loc="best")
 
