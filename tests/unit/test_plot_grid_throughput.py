@@ -130,6 +130,32 @@ def test_make_figure_writes_png_and_pdf(tmp_path):
         assert os.path.exists(path) and os.path.getsize(path) > 0
 
 
+def test_figure_has_no_sypd_panel(tmp_path):
+    """SYPD must NOT be plotted.
+
+    The route-B SPMD lanes carry a placeholder dt (``--dt`` default 60.0,
+    recorded identically at LL192/LL512/LL1024 where a CFL dt would shrink),
+    so any SYPD derived from them is not physical -- it produced a 260x error
+    in an earlier draft. This gate fails if a second panel reappears.
+    """
+    import matplotlib.pyplot as plt
+
+    data = plot.load(_csv(tmp_path, [
+        _row("latlon", 512, 39.1, 1, 12.2, 1011),
+        _row("cubed-sphere", 192, 52.1, 1, 14.7, 1032),
+    ]))
+    plot.make_figure(data, str(tmp_path / "out"), "fig_nosypd")
+    # make_figure closes its own figure; inspect the last one it built by
+    # rebuilding under a fresh manager count.
+    plt.close("all")
+    plot.make_figure(data, str(tmp_path / "out"), "fig_nosypd2")
+    assert plt.get_fignums() == [], "figure must be closed after saving"
+
+    src = open(_MODULE_PATH).read()
+    assert "SYPD (simulated yr / day)" not in src, (
+        "a SYPD axis label reappeared — see the dt-provenance caveat")
+
+
 def test_make_figure_tolerates_a_missing_grid(tmp_path):
     """A partial campaign must still plot what exists."""
     data = plot.load(_csv(tmp_path, [_row("latlon", 512, 39.1, 1, 12.2, 1011)]))

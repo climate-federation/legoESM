@@ -12,38 +12,50 @@ over NCCL / aws-ofi-nccl / Libfabric CXI). Dry dynamics (`physics=none`). Data:
 
 The contribution of this approach is **end-to-end differentiability** (gradients
 for ML, data assimilation, calibration). The scaling result shows that
-differentiability is **compatible with HPC-relevant performance** — we reach
-useful absolute SYPD at ESM-relevant resolutions, and throughput scales with GPU
+differentiability is **compatible with HPC-relevant performance** — we saturate
+a device at ESM-relevant resolutions, and aggregate throughput scales with GPU
 count. Self-contained characterization; **no cross-model comparison** (different
 codes / hardware / physics-completeness make any head-to-head unfair — see
 Scope).
 
-Metric = **SYPD** (simulated years per wall-clock day) and aggregate throughput
-(Mcells/s).
+Metric = **Mcells/s** (cells × levels × steps per second), throughout.
+**SYPD is deliberately NOT used** — it is a function of dt, and the route-B
+lanes carry a placeholder dt (SCOPE §5). Mcells/s is timestep-free and is the
+only metric that is valid across every lane in this campaign.
 
 ---
 
-## Demonstration 1 — useful, ESM-relevant absolute SYPD
+## Demonstration 1 — absolute per-device throughput
 
-| grid | config | res (km) | 1-A100 SYPD | best SYPD (N A100) |
+> ⛔ **SYPD WITHDRAWN (2026-07-19).** This section previously led with SYPD
+> (LL512 12.2, LL1024 2.9, …). Those numbers are **not physical** and must not
+> be quoted — see "dt provenance" in SCOPE. The metric here is now Mcells/s,
+> which is timestep-free and therefore unaffected.
+
+| grid | config | res (km) | 1 A100 | best (N A100) |
 |---|---|---|---|---|
-| lat-lon | LL512 | 39 | 12.2 | 52.7 (16) |
-| lat-lon | LL1024 | 19.5 | 2.9 | 29.8 (16) |
-| cubed-sphere | C192 | 52 | 14.7 | 20.3 (6) |
-| icosahedral | L7 | 56 | 5.0 | 23.5 (**4**) |
-| icosahedral | L8 | 28 | 1.8 | 9.2 (**8**) |
+| cubed-sphere | C192 | 52 | 1032 | 1418 (6) |
+| lat-lon | LL512 | 39 | 1011 | 4375 (16) |
+| lat-lon | LL1024 | 19.5 | 978 | 9887 (16) |
+| lat-lon | LL192 | 104 | 950 | 1022 (16) |
+| icosahedral | L8 | 28 | 380 | 1697 (16) |
+| icosahedral | L7 | 56 | 261 | 793 (16) |
 
-Climate work needs > ~1 SYPD; the dycore clears that by 1–2 orders of magnitude
-at ~20–55 km on a single-to-modest GPU count.
+**One A100 is saturated at ~1000 Mcells/s regardless of resolution** on lat-lon
+(950 / 1011 / 978 across 104 → 19.5 km) and cubed-sphere reaches the same band
+at C192 (1032). That flat per-device ceiling is the single most useful number
+here: it means the device is compute/bandwidth-saturated at every resolution
+tested, so all multi-GPU behaviour (Demo 3) is about communication, not about
+whether the GPU was busy.
 
-Note the peak-N column: only the lat-lon cases peak at the top of the ladder.
-Icosahedral L7 peaks at **4** GPUs and L8 at **8**, then declines — adding
-devices past that point costs throughput, which is the Demo-3 story in absolute
-terms. Quote "best SYPD" with its device count, never as "SYPD on 16 GPUs".
+Icosahedral sits ~2.6–4× lower (261–380), the one real per-device grid
+difference — indirect neighbour gathers versus structured indexing.
 
-*(Table regenerated from `all_tidy.csv` 2026-07-18, post-ico-rerun. The
-pre-rerun values — L7 19.7 @16, L8 10.0 @16 — were stale AND misattributed the
-peak to N=16.)*
+Peak-N caveat: only lat-lon peaks at the top of the ladder. Ico L7 peaks at
+**4** GPUs, L8 at **8**, cube at **6** — adding devices past that point COSTS
+throughput. Always quote "best" with its device count.
+
+*(Regenerated from `all_tidy.csv` 2026-07-18, post-ico-rerun.)*
 
 ## Demonstration 2 — aggregate throughput scales with GPU count
 
@@ -173,11 +185,46 @@ is therefore not byte-identical to Demo 1–3 — see GAPS.
    `NCCL_PROTO=simple`). Multi-GPU throughput and Demo-3 efficiencies are a
    **lower bound**; GDRCopy/DMA-BUF would lift them.
 4. **40 GB A100**, Derecho, internal numbers.
+5. ⛔ **dt PROVENANCE — SYPD IS NOT REPORTABLE FOR lat-lon OR icosahedral.**
+   SYPD = f(dt), and the two families of lane get dt from different places:
+   - **route A / `cs-spmd`** (every CPU row, and ALL cubed-sphere rows) call
+     `run_cpu_mpi_scaling._auto_dt`, a real CFL estimate
+     (`0.7·dx_min/(u_max+c_grav)`). Verified: the recorded dt reproduces
+     `_auto_dt` exactly for all 9 CPU cases.
+   - **route-B SPMD lanes** (lat-lon and icosahedral GPU) carry a benchmark
+     DEFAULT: `bench_atm_latlon_spmd_scaling.py` has `--dt` default `60.0`, and
+     the recorded dt is 60 s at LL192, LL512 **and** LL1024 — a CFL dt must
+     shrink as the grid refines, so a constant one is a placeholder. That file's
+     own comment says the top-level `sypd` field exists so the rows are not
+     "invisible to aggregate_bcw_scaling.py".
+   Consequence: the withdrawn Demo-1 figure of 12.2 SYPD at LL512 used dt=60 s
+   where `_auto_dt` gives **0.23 s** — a **260×** error. Note 0.23 s is not the
+   answer either: `_auto_dt` uses the RAW pole-cell spacing (120 m at LL512)
+   with no polar filtering, whereas production lat-lon GCMs filter and run
+   dt ~10–30 min. **The model's defensible lat-lon timestep is an open dycore
+   question, not a benchmarking one.** Until it is settled, report Mcells/s.
+   Cubed-sphere and icosahedral are quasi-uniform and their `_auto_dt` values
+   are sane; cube is additionally self-consistent across both backends.
+6. **Route A vs route B is a THREE-variable change** — do not read CPU-vs-GPU
+   as a hardware ratio. The CPU lat-lon/ico rows are route A (mpi4jax
+   point-to-point, **2-D pencil**); the GPU lat-lon/ico rows are route B
+   (`jax.distributed` ppermute/psum over NCCL, **1-D lat-band**). Transport,
+   decomposition and hardware all differ, and the 2-D pencil has a structurally
+   better halo surface-to-volume ratio at high device counts. Only
+   **cubed-sphere** is a controlled comparison (both lanes `cs_spmd`, same
+   driver, same dt) — and its CPU side is face-capped to 1 proc × 128 threads,
+   so it under-uses the node. Frame lat-lon/ico CPU-vs-GPU as **"as-deployed
+   throughput"**, never as a hardware speedup.
 
 ## GAPS / TODO
 
-1. **Full-physics SYPD** — add RRTMGP + physics for a real-model throughput
-   number alongside the dry-dynamics ceiling.
+1. **Settle the lat-lon timestep** (blocks any SYPD claim at all — SCOPE §5).
+   `_auto_dt` gives 0.23 s at LL512 from the unfiltered 120 m pole cell; the
+   route-B lanes use a 60 s default. Neither is defensible. Decide the polar
+   treatment (filter / reduced grid / none), then re-derive dt and, if wanted,
+   re-report SYPD. Until then Mcells/s only.
+2. **Full-physics throughput** — add RRTMGP + physics for a real-model number
+   alongside the dry-dynamics ceiling.
 2. **Plots** — generated by `scripts/plot/plot_routeb_campaign_paper.py`
    (requires `--csv all_tidy.csv`; there is deliberately NO embedded snapshot
    fallback — the old one silently diverged from the aggregated CSV). Sequential
@@ -195,20 +242,21 @@ is therefore not byte-identical to Demo 1–3 — see GAPS.
      (72%). The common origin is what makes the mechanism legible.
    - `fig2_ico_scaling` (confirmation): L6 (~112 km, eff 7% @16) → L7 (~56 km,
      13%) → L8 (~28 km, 27%) — same trend on a second grid.
-   **Mcells/s, NOT SYPD**, because the grids do not share a dt at matched
-   resolution (LL512 runs dt=60 s vs C192/L7 at 30 s) and the resolutions
-   differ in total cells; a SYPD panel folds both back in and obscures the
-   variable under test. When the full-physics run lands, add a dry-vs-full
-   curve to panel (a).
+   **Mcells/s, NOT SYPD**, because SYPD is a function of dt and the route-B
+   lanes carry a placeholder dt (SCOPE §5); Mcells/s is timestep-free and
+   valid across every lane. `scripts/plot/plot_grid_throughput.py` (per-grid
+   capability curve) is single-panel for the same reason, with a test that
+   fails if a SYPD axis reappears. When the full-physics run lands, add a
+   dry-vs-full curve to panel (a).
 3. **Cross-grid comparison is NOT clean — do not rank grids off Demo 1/2.**
    At nominally matched resolution the configs differ in more than the grid:
-   LL512 (39 km) runs 13.6M cells at dt=60 s, C192 (52 km) 5.8M at dt=30 s,
-   L7 (56 km) 4.3M at dt=30 s. In the dt-free metric lat-lon and cubed-sphere
-   are indistinguishable on one A100 (1011 vs 1032 Mcells/s); only
-   icosahedral is slower (261). So "structured beats unstructured" is at best
-   latlon ≈ cube > ico, and lat-lon's SYPD lead over cube is a TIMESTEP
-   advantage, not a memory-access one. A defensible ranking needs matched
-   cells + matched dt + matched nlev.
+   LL512 (39 km) carries 13.6M cells, C192 (52 km) 5.8M, L7 (56 km) 4.3M. In
+   the dt-free metric lat-lon and cubed-sphere are indistinguishable on one
+   A100 (1011 vs 1032 Mcells/s); only icosahedral is slower (261). So
+   "structured beats unstructured" is at best latlon ≈ cube > ico. An earlier
+   draft attributed a lat-lon SYPD lead to memory-access patterns; that lead
+   was an artefact of the placeholder dt (SCOPE §5) and the claim is
+   WITHDRAWN. A defensible ranking needs matched cells + matched nlev.
 4. **AD gaps** (Demo 4): (a) LL512/LL1024 gradient runs to confirm the
    extrapolated OOM boundary and whether 4.9× holds at scale; (b) fp64 and
    `physics=held_suarez` variants — both are expected to move the ratio

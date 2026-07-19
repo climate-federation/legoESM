@@ -1,23 +1,22 @@
 #!/usr/bin/env python
 """Paper figure: dycore throughput across grids and resolutions (A100).
 
-A CAPABILITY figure, not a scaling figure: "how fast does this model run, on
-which grid, at which resolution" -- the question an ESM reader has before any
-parallel-efficiency question.
+A CAPABILITY figure, not a scaling figure: "how fast does this model process
+cells, on which grid, at which resolution".
 
-Two panels, both vs resolution, because they answer different questions and
-DISAGREE in an informative way:
-  (a) throughput (Mcells/s) -- timestep-free, so it measures how fast the
-      implementation processes cells. lat-lon and cubed-sphere are
-      indistinguishable here (~1010 vs ~1030 Mcells/s on one A100).
-  (b) SYPD -- time to solution, which is what actually limits science. Here
-      lat-lon leads.
+METRIC IS Mcells/s ONLY -- SYPD IS DELIBERATELY NOT PLOTTED.
+SYPD = f(dt), and the route-B SPMD lanes (lat-lon, icosahedral GPU) do not
+carry a physical dt: ``bench_atm_latlon_spmd_scaling.py`` defaults
+``--dt 60.0`` and the recorded dt is 60 s at LL192, LL512 AND LL1024 -- a CFL
+timestep must shrink as the grid refines, so a constant one is a placeholder.
+The route-A lanes (all CPU rows, plus every cubed-sphere row) DO carry the
+CFL dt from ``_auto_dt`` and reproduce it exactly. Mixing the two produced a
+260x error in an earlier draft's headline SYPD, so this figure reports only
+the timestep-free metric. See the campaign report's GAPS entry on dt
+provenance before reinstating any SYPD panel.
 
-THE GAP BETWEEN THE PANELS IS THE POINT. Same hardware, same per-cell
-throughput, different SYPD => the difference is the stable TIMESTEP (lat-lon
-runs dt=60 s at 39 km where cubed-sphere and icosahedral run dt=30 s), NOT
-the memory-access pattern. Reporting only SYPD would invite exactly that
-misattribution.
+Mcells/s is also what makes lat-lon and cubed-sphere comparable at all: they
+are indistinguishable per device (~1010 vs ~1030 Mcells/s on one A100).
 
 CAVEAT the figure cannot remove: "matched resolution" across grids is not
 matched WORK -- at ~40-56 km LL512 carries 13.6M cells, C192 5.8M, L7 4.3M.
@@ -93,14 +92,19 @@ def _style(ax):
     ax.tick_params(labelsize=9, color="#999999")
 
 
+MCELLS, SYPD = 1, 0  # column indices into the (sypd, mcells, km) tuple
+
+
 def make_figure(data, out, name="fig1_grid_throughput", show_best=True):
     import matplotlib.pyplot as plt
 
-    fig, (axa, axb) = plt.subplots(1, 2, figsize=(9.4, 4.0))
+    fig, ax_only = plt.subplots(1, 1, figsize=(5.4, 4.2))
 
+    # Single panel, Mcells/s only. A SYPD panel is intentionally absent --
+    # see the module docstring (route-B dt is a placeholder).
     for metric_idx, ax, ylabel, title in (
-            (1, axa, "throughput (Mcells / s)", "(a) throughput per device"),
-            (0, axb, "SYPD (simulated yr / day)", "(b) time to solution")):
+            (MCELLS, ax_only, "throughput (Mcells / s)",
+             "throughput per device"),):
         for key, label, col, mk, ls in GRID_STYLE:
             gd = data.get(key)
             if not gd:
@@ -125,11 +129,11 @@ def make_figure(data, out, name="fig1_grid_throughput", show_best=True):
         ax.set_title(title, fontsize=11, color=INK, loc="left")
         _style(ax)
 
-    axa.legend(fontsize=8.5, frameon=False, loc="best")
+    ax_only.legend(fontsize=8.5, frameon=False, loc="best")
     if show_best:
-        axb.annotate("solid = 1 A100   ·   dotted = best over the ladder",
-                     xy=(0.5, -0.30), xycoords="axes fraction", fontsize=8,
-                     color=MUTED, ha="center")
+        ax_only.annotate("solid = 1 A100   ·   dotted = best over the ladder",
+                         xy=(0.5, -0.24), xycoords="axes fraction",
+                         fontsize=8, color=MUTED, ha="center")
 
     fig.suptitle("Dycore throughput by grid — dry dynamics, A100 (Derecho)",
                  fontsize=11.5, color=INK, y=1.02)
