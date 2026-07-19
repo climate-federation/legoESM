@@ -986,3 +986,45 @@ goes exponential from ~step 19 (|dT|max 7.4 @s19 → 125 @s21 → 2e6 @s23 → N
   (ix≈43–45, 50–260 m). Dump its T (and u/v) tendency terms at steps 18–20 vs the NEMO
   trend — the mid-depth signature at a topographic step points at the partial-cell
   vertical-mixing / tracer-advection stencil, same tier-3 approach that localized HPG-v.
+
+### CORRECTION (2026-07-18) — the runaway is eta-FIRST barotropic, NOT a tracer/EVD defect
+
+Point (c) above is **superseded** — the "mid-depth ix43–45 tracer" localization was a
+strict-mask artifact, not the source cell. A lead-variable probe from the identical
+bridged restart (FE, dt=2700; `scratchpad/lead_var_probe.py` + `eta_mode_probe.py`)
+tracks the ORDER in which fields diverge in the high-lat window (lat 66–70°):
+
+| field | s14 | s18 | s20 | s22 | s24 | s25 |
+|-------|----:|----:|----:|----:|----:|----:|
+| **eta**  | 1.0 | 2.7 | 7.6 | 37.7 | 818 | 1.6e8 |
+| max\|u\|,\|v\| | 0.26 | 0.26 | 0.28 | 1.4 | 27/43 | 1e9 |
+| T (\|dT\| vs NEMO) | — | 0.33 | 0.35 | 0.36 | 3.0 | 7.3e17 |
+
+**eta goes exponential from ~step 14, ~10 steps BEFORE u/v (step 21) and ~10 before T
+(step 24).** The tracer "+68 staircase runaway" is the TERMINAL symptom — advection of
+the already-blown velocity field — not the driver. The actual explosion is at the
+**surface** (lev 0), \|lat\|+67.7–68.4°, ix≈22–27.
+
+**Mechanism (evidence-backed, named).** eta along a high-lat row is a pure **2Δx
+checkerboard** growing exponentially (`eta_mode_probe.py`, row 191, uniform kbot=34):
+`-0.11 +0.11 -0.16 +0.15 …` → amplitude 0.6 (s16) → 5.2 (s20). This is the **C-grid
+barotropic-Coriolis grid-scale (2Δx) null mode**, least-damped at high latitude (where
+`e1=R·Δλ·cosφ` is smallest and the Coriolis-averaging null mode is most energetic) —
+the same research-level blocker as Round-8 (`dynspg_ts` / barotropic-Coriolis redesign,
+memory `project_recipe_architecture_design`/`silvestri` barotropic-Coriolis note). NEITHER
+the FE forward-backward NOR the MLF centred barotropic frame damps this spatial null
+mode (MLF blows at the same step — Round-8). The `barotropic_time_filter=
+"nemo_boxcar_ab3"` guarded out of the FE frame is a TEMPORAL filter and does not touch
+the spatial 2Δx null mode.
+
+**EVD flip-flop verdict: NEGATIVE.** `scratchpad/evd_flipflop_probe.py` recorded the
+enhanced-diffusion convective flag + adiabatic N² at ix43–45 / levels 4–15 every step to
+s24: N² stays **positive-stable** (~+3.4e-7 s⁻²), flag=0, **zero flips**. The
+`two_level_trigger` MIN(rn2,rn2b) EVD hysteresis (already built, k_profiles.py:767) is
+**not the cause** and wiring it would be a phantom fix.
+
+**Remaining work (larger than one pass, no stabilizer):** the faithful fix is the
+C-grid barotropic-Coriolis 2Δx-null-mode redesign (energy/enstrophy-conserving vorticity
+flux that filters the grid-scale null mode, or the NEMO EEN-consistent barotropic
+Coriolis in the split-explicit substep). This is the standing barotropic redesign task,
+not a tracer/vmix change. No non-NEMO stabiliser was added; no MLF number fabricated.
