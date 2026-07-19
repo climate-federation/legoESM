@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --account=glab
 #SBATCH --partition=glab1
-#SBATCH --constraint="rtx8000|a40"
 #SBATCH --job-name=ll8_kppeice
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
@@ -42,7 +41,7 @@ FIXES="--kpp-eice 3"
 LABEL=ll8_kppeice
 OUT=$ROOT/results/omip_nemo/nemolev_${LABEL}
 echo "=== RUN $LABEL (ll5 config + --kpp-eice 3) ==="
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py \
   $GA $COMMON $P45 $LEVERS $IC $FIXES --kpp-ri-crit 0.15 --sw-rgb-chl --output $OUT 2>&1 | tail -60
 echo "run_rc=${PIPESTATUS[0]}"; date
 SNAP=$OUT/snapshot_day0030.npz
