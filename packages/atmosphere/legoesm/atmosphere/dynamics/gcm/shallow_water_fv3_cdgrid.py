@@ -721,13 +721,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
         # cubed-sphere PE ``batch_global_area_sums`` precision.
         self._target_mass = global_area_sum(state.h, self.cdgrid.base)
 
-    def reset_target_mass(self) -> None:
-        """Clear the anchored mass target (iter-20; mirrors iter-18 API)."""
-        self._target_mass = None
 
-    def set_target_mass(self, target_mass) -> None:
-        """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
-        self._target_mass = target_mass
 
     def compute_mass(self, state) -> jax.Array:
         """Global ``∫ h dA`` (fp64).  iter-21: API parity with PE / NH twins."""
@@ -1317,17 +1311,7 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
         # cubed-sphere PE ``batch_global_area_sums`` precision.
         self._target_mass = global_area_sum(state.h, self.cdgrid.base)
 
-    def reset_target_mass(self) -> None:
-        """Clear the anchored mass target (iter-20; mirrors iter-18 API).
 
-        After this, the next ``step()`` falls back to the pre-state path.
-        Call ``set_initial_mass(state)`` to re-anchor.
-        """
-        self._target_mass = None
-
-    def set_target_mass(self, target_mass) -> None:
-        """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
-        self._target_mass = target_mass
 
     def compute_mass(self, state) -> jax.Array:
         """Global ``∫ h dA`` (fp64).  iter-21: API parity with PE / NH twins."""

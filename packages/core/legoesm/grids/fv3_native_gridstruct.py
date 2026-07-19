@@ -66,9 +66,12 @@ TINY_NUMBER = 1.0e-8     # fv_grid_utils tiny_number (rsin floors + sin_sg ghost
 
 # --- FV3/FMS physical constants for oracle pinning (FMS constants_mod,
 #     GFDL flavour); legoESM production paths use legoesm.constants ---
-# const-ok: FMS RADIUS differs from legoESM R_earth; oracle pins upstream's
-FV3_RADIUS_M = 6371.0e3
-FV3_OMEGA = constants.Omega  # FMS OMEGA equals legoESM's rotation rate
+# Pinned to the Zenodo duo run log (fms.out: "Radius is 6371200.0,
+# omega is 7.2921e-5"); both differ from legoESM's R_earth/Omega.
+# const-ok: oracle pins upstream's constants, not legoESM's
+FV3_RADIUS_M = 6371.2e3
+# const-ok: FMS OMEGA (7.2921e-5) != legoESM Omega (7.292e-5)
+FV3_OMEGA = 7.2921e-5
 
 
 class fort:
@@ -886,6 +889,211 @@ def build_fv3_native_gridstruct(n: int, ng: int = 3, *, tile: int = 1,
         "sin_sg": ssg, "cos_sg": csg,
         "fC": fC,
         "cell_ok": cell_ok, "node_ok": node_ok,
+    }
+
+
+def build_fv3_native_gridstruct_bounded(n: int, ng: int = 3, *, tile: int = 1,
+                                        radius: float | None = None,
+                                        omega: float | None = None,
+                                        rotation_alpha: float = 0.0) -> dict:
+    """BOUNDED-conventions gridstruct on the extended own-face lattice.
+
+    The lane the Zenodo duo runs actually execute (proven by the C48
+    fms.out numbers: duo ``da_min_c=23543093086.1030`` differs from the
+    plain run's ``23335991574.8811`` — duo grid init takes the
+    ``bounded_domain`` arms and consumes real wedge-halo geometry from
+    the gen_k2e extended lattice).  Mirrors the certified
+    ``fv3_boundedgs`` oracle (tests/grids/fixtures/
+    fv3_boundedgs_oracle.npz, itself certified against the Zenodo C48
+    log to all printed digits):
+
+    - input lattice = ``ext_parity_lonlat_ref(n, ng, "B")`` — the ED
+      gnomonic continuation, real everywhere including corner wedges;
+    - every metric = the plain interior formula over the FULL data
+      domain: no ``fill_ghost`` poisons, no ``fill_corners`` mirrors,
+      no border ``x2``-midpoint dxc/dyc specials (bounded replicates
+      the adjacent row instead), no ``rsina`` border big_number, no
+      sin_sg corner transport patches, no divg/del6 edge specials;
+    - vertex B-node geometry is the exact regular kink of the extended
+      lattice: ``cosa=-1/2, sina=sqrt(3)/2, rsina=4/3``;
+    - ``edge_s/n/w/e`` are big_number (upstream bounded branch) — the
+      duo operator lanes never consume the A->B edge factors.
+
+    Returns the same key layout as ``build_fv3_native_gridstruct`` so
+    the duo stepper can swap builders.
+    """
+    from legoesm.grids.fv3_native_ext_vector import ext_parity_lonlat_ref
+
+    if radius is None:
+        radius = FV3_RADIUS_M
+    if omega is None:
+        omega = FV3_OMEGA
+    npx = n + 1
+    m_a = n + 2 * ng
+    m_b = m_a + 1
+
+    lon6, lat6 = ext_parity_lonlat_ref(n, ng, "B")
+    g_lon = lon6[tile - 1].copy()
+    g_lat = lat6[tile - 1].copy()
+    grid_ll = np.stack([g_lon, g_lat], axis=-1)          # (m_b, m_b, 2)
+
+    # agrid: cell_center2 over the full data domain (bounded arm)
+    agrid_ll = cell_center2(grid_ll[:-1, :-1], grid_ll[1:, :-1],
+                            grid_ll[:-1, 1:], grid_ll[1:, 1:])
+
+    def gcd_scaled(p, q):
+        return great_circle_dist(p, q) * radius
+
+    # dx/dy/dxa/dya: full-domain plain formulas
+    dx = gcd_scaled(grid_ll[:-1, :], grid_ll[1:, :])     # (m_a, m_b)
+    dy = gcd_scaled(grid_ll[:, :-1], grid_ll[:, 1:])     # (m_b, m_a)
+    mid_w = mid_pt_sphere(grid_ll[:-1, :-1], grid_ll[:-1, 1:])
+    mid_e = mid_pt_sphere(grid_ll[1:, :-1], grid_ll[1:, 1:])
+    mid_s = mid_pt_sphere(grid_ll[:-1, :-1], grid_ll[1:, :-1])
+    mid_n = mid_pt_sphere(grid_ll[:-1, 1:], grid_ll[1:, 1:])
+    dxa = gcd_scaled(mid_e, mid_w)                       # (m_a, m_a)
+    dya = gcd_scaled(mid_n, mid_s)
+
+    # dxc/dyc: agrid spacings + bounded edge REPLICATION (fv_grid_tools
+    # bounded arm: dxc(isd,j) = dxc(isd+1,j) etc — no x2 specials)
+    dxc = np.empty((m_b, m_a))
+    dxc[1:-1, :] = gcd_scaled(agrid_ll[:-1, :], agrid_ll[1:, :])
+    dxc[0, :] = dxc[1, :]
+    dxc[-1, :] = dxc[-2, :]
+    dyc = np.empty((m_a, m_b))
+    dyc[:, 1:-1] = gcd_scaled(agrid_ll[:, :-1], agrid_ll[:, 1:])
+    dyc[:, 0] = dyc[:, 1]
+    dyc[:, -1] = dyc[:, -2]
+
+    # areas: plain quads everywhere (grid_area bounded arms).  area_c:
+    # 1e30 poison-init, quads over the inner frame (nh = ng-1), then the
+    # "Handling outermost ends" bounded replication
+    # (fv_grid_tools.F90:949-973; single tile: all four side conditions
+    # true) in upstream statement order — rarea_c is then real over the
+    # full node domain
+    area = get_area_quad(grid_ll[:-1, :-1], grid_ll[1:, :-1],
+                         grid_ll[1:, 1:], grid_ll[:-1, 1:]) * radius**2
+    area_c = np.full((m_b, m_b), 1.0e30)
+    area_c[1:-1, 1:-1] = get_area_quad(
+        agrid_ll[:-1, :-1], agrid_ll[1:, :-1],
+        agrid_ll[1:, 1:], agrid_ll[:-1, 1:]) * radius**2
+    area_c[0, :-1] = area_c[1, :-1]          # west column (j = jsd..jed)
+    area_c[0, 0] = area_c[1, 1]
+    area_c[0, -1] = area_c[1, -2]
+    area_c[-1, :-1] = area_c[-2, :-1]        # east column
+    area_c[-1, 0] = area_c[-2, 1]
+    area_c[-1, -1] = area_c[-2, -2]
+    area_c[:-1, 0] = area_c[:-1, 1]          # south row (i = isd..ied)
+    area_c[:-1, -1] = area_c[:-1, -2]        # north row
+    rarea = 1.0 / area
+    rarea_c = 1.0 / area_c
+
+    # sg pipeline on the smooth lattice: full domain, no ghost fills,
+    # no corner transport patches (corner flags are FALSE under bounded)
+    X = latlon2xyz(grid_ll)
+    ctr = latlon2xyz(agrid_ll)
+    csg, ssg = sg_window_fields(X, ctr)                  # (m_a, m_a, 9)
+    # get_center_vect zeroes ec1/ec2 in the four corner-wedge CELL
+    # regions UNCONDITIONALLY (no bounded guard, fv_grid_utils) ->
+    # upstream cos_sg(...,5) = inner(0,0) = 0 and sin_sg(...,5) = 1
+    # there even under duo/bounded.  Slot 5 only; slots 1-4/6-9 are
+    # cos_angle-based and stay real.
+    ii = np.arange(1 - ng, n + ng + 1)
+    lo_w = ii < 1
+    hi_w = ii > n                     # Fortran i > npx-1
+    wedge = ((lo_w[:, None] | hi_w[:, None])
+             & (lo_w[None, :] | hi_w[None, :]))
+    csg[wedge, 4] = 0.0
+    ssg[wedge, 4] = 1.0
+
+    # cosa_u/v etc: computed ranges as upstream (isd+1..ied interior of
+    # the u-axis); the outermost slots keep the big_number init BOTH
+    # under plain and bounded conventions
+    cosa_u = np.full((m_b, m_a), BIG_NUMBER)
+    sina_u = np.full((m_b, m_a), BIG_NUMBER)
+    rsin_u = np.full((m_b, m_a), BIG_NUMBER)
+    cosa_u[1:-1, :] = 0.5 * (csg[:-1, :, 2] + csg[1:, :, 0])
+    sina_u[1:-1, :] = 0.5 * (ssg[:-1, :, 2] + ssg[1:, :, 0])
+    rsin_u[1:-1, :] = 1.0 / np.maximum(TINY_NUMBER, sina_u[1:-1, :] ** 2)
+    cosa_v = np.full((m_a, m_b), BIG_NUMBER)
+    sina_v = np.full((m_a, m_b), BIG_NUMBER)
+    rsin_v = np.full((m_a, m_b), BIG_NUMBER)
+    cosa_v[:, 1:-1] = 0.5 * (csg[:, :-1, 3] + csg[:, 1:, 1])
+    sina_v[:, 1:-1] = 0.5 * (ssg[:, :-1, 3] + ssg[:, 1:, 1])
+    rsin_v[:, 1:-1] = 1.0 / np.maximum(TINY_NUMBER, sina_v[:, 1:-1] ** 2)
+    cosa_s = csg[..., 4].copy()
+    rsin2 = 1.0 / np.maximum(TINY_NUMBER, ssg[..., 4] ** 2)
+
+    # B-node cosa/sina: compute-domain loop only (js..je+1) — the rest
+    # keeps big_number under BOTH conventions; rsina real over the FULL
+    # compute range incl borders and vertices (no bounded overrides)
+    sl_b = slice(ng, ng + n + 1)
+    cosa_b = np.full((m_b, m_b), BIG_NUMBER)
+    sina_b = np.full((m_b, m_b), BIG_NUMBER)
+    rsina = np.full((m_b, m_b), BIG_NUMBER)
+    cosa_b[sl_b, sl_b] = 0.5 * (csg[ng - 1:ng + n, ng - 1:ng + n, 7]
+                                + csg[ng:ng + n + 1, ng:ng + n + 1, 5])
+    sina_b[sl_b, sl_b] = 0.5 * (ssg[ng - 1:ng + n, ng - 1:ng + n, 7]
+                                + ssg[ng:ng + n + 1, ng:ng + n + 1, 5])
+    rsina[sl_b, sl_b] = 1.0 / np.maximum(TINY_NUMBER,
+                                         sina_b[sl_b, sl_b] ** 2)
+
+    # divg/del6: ONE uniform formula over the full domain (no edge
+    # specials under bounded).  The outermost sina_v/sina_u slots are
+    # big_number, making those divg/del6 rows deterministic junk exactly
+    # as upstream computes them; d_sw damping loops never reach them.
+    divg_u = sina_v * dyc / dx
+    del6_u = sina_v * dx / dyc
+    divg_v = sina_u * dxc / dy
+    del6_v = sina_u * dy / dxc
+
+    # A->B edge factors: POISONED under bounded (grid_utils_init else
+    # branch) — duo operator lanes must never consume them
+    edge_s = np.full(n + 1, BIG_NUMBER)
+    edge_n = np.full(n + 1, BIG_NUMBER)
+    edge_w = np.full(n + 1, BIG_NUMBER)
+    edge_e = np.full(n + 1, BIG_NUMBER)
+
+    # da_min/max over compute A-cells; the _c pair over the upstream
+    # global_mx_c call range area_c(is:ie, js:je) — note NOT ie+1
+    sl_a = slice(ng, ng + n)
+    da_min = float(area[sl_a, sl_a].min())
+    da_max = float(area[sl_a, sl_a].max())
+    da_min_c = float(area_c[sl_a, sl_a].min())
+    da_max_c = float(area_c[sl_a, sl_a].max())
+
+    fC = 2.0 * omega * (
+        -np.cos(g_lon) * np.cos(g_lat) * np.sin(rotation_alpha)
+        + np.sin(g_lat) * np.cos(rotation_alpha))
+    f0 = 2.0 * omega * (
+        -np.cos(agrid_ll[..., 0]) * np.cos(agrid_ll[..., 1])
+        * np.sin(rotation_alpha)
+        + np.sin(agrid_ll[..., 1]) * np.cos(rotation_alpha))
+
+    return {
+        "rdx": 1.0 / dx, "rdy": 1.0 / dy,
+        "rdxa": 1.0 / dxa, "rdya": 1.0 / dya,
+        "f0": f0, "cosa": cosa_b, "sina": sina_b, "rsina": rsina,
+        "divg_u": divg_u, "divg_v": divg_v,
+        "del6_u": del6_u, "del6_v": del6_v,
+        "edge_s": edge_s, "edge_n": edge_n,
+        "edge_w": edge_w, "edge_e": edge_e,
+        "area_c": area_c,
+        "da_min": da_min, "da_max": da_max,
+        "da_min_c": da_min_c, "da_max_c": da_max_c,
+        "n": n, "ng": ng, "npx": npx,
+        "grid_lon": g_lon, "grid_lat": g_lat,
+        "agrid_lon": agrid_ll[..., 0], "agrid_lat": agrid_ll[..., 1],
+        "dx": dx, "dy": dy, "dxa": dxa, "dya": dya,
+        "dxc": dxc, "dyc": dyc, "rdxc": 1.0 / dxc, "rdyc": 1.0 / dyc,
+        "area": area, "rarea": rarea, "rarea_c": rarea_c,
+        "cosa_u": cosa_u, "sina_u": sina_u, "rsin_u": rsin_u,
+        "cosa_v": cosa_v, "sina_v": sina_v, "rsin_v": rsin_v,
+        "cosa_s": cosa_s, "rsin2": rsin2,
+        "sin_sg": ssg, "cos_sg": csg,
+        "fC": fC,
+        "cell_ok": np.ones((m_a, m_a), dtype=bool),
+        "node_ok": np.ones((m_b, m_b), dtype=bool),
     }
 
 

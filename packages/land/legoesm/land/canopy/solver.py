@@ -437,6 +437,10 @@ def solve_canopy_closure(
     x_final : shape (6,)  — converged state
     n_iters : scalar int  — iteration count when convergence was first reached
     """
+    if config.LE_module not in ("BT", "PM"):
+        raise ValueError(
+            f"unknown LE_module {config.LE_module!r}; expected 'BT' "
+            "(bulk transfer) or 'PM' (Penman-Monteith)")
     solver = _make_implicit_newton_solver(
         LE_module=config.LE_module,
         stomatal_model=config.stomatal_model,

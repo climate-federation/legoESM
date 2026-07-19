@@ -347,9 +347,62 @@ cubed_a2d/a2c; bases 1e-13, projections 1e-12, mutation-discriminated,
 sha-enforced fixture) + guards/provenance closures.  Corner-fill wedge
 accuracy (codex probe, C12): lagrange default 0.084 m/s; the a2d
 variant carries ~3.9 (ring-4 index-copy contamination) and is labeled
-a NONFAITHFUL measurement variant.  **C24 W2 gate: ext bundle
+a NONFAITHFUL measurement variant.  ~~C24 W2 gate: ext bundle
 23.70/4.08 = 251x/106x of the duo envelope vs interim 179x/101x — the
 max sits at CUBE VERTICES (interim: edge-midlat), so the ext swap
 cleans edges but excites vertices; wedge VALUES exonerated (0.084),
 open suspects: divgd B-corner feed into the nord damping, C-vector
-wedges, ext halo metrics under d_sw5's full-domain vorticity prep.**
+wedges, ext halo metrics under d_sw5's full-domain vorticity prep.~~
+**[VOID — these gate scores and the "vertex physics" reading were
+old-diagnostic-lens artifact; see RE-BASELINE below.  The translation
+certificates and wedge-value probe in this paragraph remain valid.]**
+
+## RE-BASELINE (2026-07-18): the duo-stepper W2 gate numbers above are VOID — diagnostic artifact
+
+Every `run_duo_stepper_w2` gate score quoted above (interim 16.93/3.91,
+ext bundle 23.70/4.08 "251x/106x of the duo envelope", the −metrics
+19.64/3.71 attribution arm, and the day-5 vertex-butterfly maps) was
+dominated by the runner's own covariant→geographic diagnostic: the
+central-difference tangent-basis inversion breaks at vertex-adjacent
+cells (bases straddle the corner kink) and paints a ±15 m/s butterfly
+onto the DAY-0 analytically balanced state.  The decisive test — score
+the initial condition through the same lens — was never run until now.
+The attribution table's *rankings* may retain directional meaning; its
+absolute values and the "vertex physics" interpretation do not.
+
+Honest lens = the certified upstream `c2l_ord2` a-matrix operator
+(the Zenodo runs' own ua/va output used the ord4 sibling; ord2
+residual is O(dx²): day-0 floor 0.0705 at C12, 0.0181 at C24 —
+clean second-order quartering).
+
+**Honest-lens results (bounded-conventions lane, ext bundle):**
+
+| run | day-0 | day-5 (or day-1) | note |
+|---|---|---|---|
+| C12 plain conventions | 0.0705 | **13.48** (d1) | the REAL vertex error: the plain lane |
+| C12 bounded | 0.0705 | 0.1881 (d1) | 72×/29× (max/rms) better than plain |
+| C24 bounded | 0.0181 | **0.0473 / rms 0.0176** (d5) | saturated by day 3, no growth |
+| Zenodo duo C48 target | — | 0.0236 / 0.0096 (d5) | C24 sits ON the 2nd-order curve toward it (2.0×/1.8× at 2× coarser); C48 run in flight |
+
+The C24 day-5 map has NO vertex-concentrated signal (thin ~0.02-0.03
+face-edge bands + smooth c2l-floor pattern remain; discriminating
+model-residual vs ord2-lens-floor: compare against a c2l_ord4 lens —
+follow-up).
+
+**The bounded-conventions discovery** (see `gen_boundedgs_oracle.py`
+lineage + `tests/grids/test_fv3_native_boundedgs.py`): duo runs take
+the `bounded_domain=T` grid-init arms on the extended own-face gen_k2e
+lattice (proven from the Zenodo C48 fms.out: duo da_min_c differs from
+the plain run's; our bounded gridstruct reproduces the log to print
+precision), with FMS radius 6371200 m and omega 7.2921e-5.  The vertex
+B-node geometry under bounded is the exact regular 120° kink
+(cosa=-1/2, sina=√3/2, rsina=4/3) — no poison, no special case.  Model
+consequences certified per-guard: d_sw1's sin_sg edge ut/vt
+replacement and d_sw4's corner-KE fix are SKIPPED on the bounded lane
+(they fire only under plain conventions), and every stage gsf threads
+`bounded_domain` from the gridstruct.
+
+Caveat: the SW-matrix ladder numbers in this doc (A=0.54 … E=NaN) come
+from the `run_atmosphere_test_matrix` pipeline — a DIFFERENT remap
+diagnostic whose day-0 residual has not yet been audited; verify
+before trusting those absolutes either.

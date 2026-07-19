@@ -178,8 +178,9 @@ def iterate_eos_and_pressure_anomaly(
         Baroclinic pressure anomaly (same shape as ``T``).  Returned in
         whatever precision was used for the cumulative sum.
     """
-    del mask  # currently unused (passed to fill_fn by the caller); kept
-              # in signature for clarity at call sites.
+    # ``mask`` is read only by the legacy dynamic depth-dependent reference
+    # branch below (``is_active_3d is None``); do NOT ``del`` it — deleting it
+    # raised UnboundLocalError whenever that branch was selected.
 
     T_filled = fill_fn(T)
     S_filled = fill_fn(S)
@@ -694,7 +695,7 @@ def apply_sponge_tracer_relaxation(
 def apply_freshwater_virtual_salt_top(
     dS_dt: jnp.ndarray,
     freshwater,
-    S_ref: float,
+    S_ref: float | jnp.ndarray,
     h_top: jnp.ndarray,
     rho_0: float,
     mask: jnp.ndarray,
