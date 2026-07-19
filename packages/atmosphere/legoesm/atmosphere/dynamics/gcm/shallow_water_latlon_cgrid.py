@@ -89,6 +89,21 @@ class CGridLatLonShallowWaterConfig(NamedTuple):
     use_polar_filter: bool = False
     polar_filter_cutoff_deg: float = 60.0
     polar_filter_max_wave_speed: float = 300.0
+    # --- New fields APPENDED (codex review: inserting before existing
+    # fields breaks positional NamedTuple construction for callers) ---
+    # Biharmonic (del-4) viscosity [m^4/s].  Scale-selective: damps
+    # grid-scale noise ~ (k*dx)^4 while leaving resolved scales nearly
+    # untouched — unlike A_h, whose k^2 law measurably damps planetary
+    # waves at 2.5 deg (Rossby-Haurwitz wave-4 e-folds in ~6 days at
+    # A_h ~ 8e5 m^2/s).  Requires passing ``dt`` to the tendency
+    # function: the per-latitude-row coefficient is capped at
+    # ``nu_del4_cfl_frac * 1/(dt*lam_row^2)`` (lam_row = max Laplacian
+    # eigenvalue of the row) so the shrinking zonal spacing toward the
+    # poles cannot violate the explicit del-4 stability bound.
+    nu_del4: float = 0.0
+    # Numerics safety cap fraction for the del-4 diffusive CFL (SSP-RK3
+    # real-axis stability ~ 2.5; 0.25 gives 10x margin).  Not a tunable.
+    nu_del4_cfl_frac: float = 0.25
 
 
 # ==============================================================================
@@ -301,10 +316,59 @@ def _kinetic_energy_cgrid(
 # Tendency computation
 # ==============================================================================
 
+def _nu_del4_row_profiles(
+    grid: LatLonGrid,
+    config: CGridLatLonShallowWaterConfig,
+    dt,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Per-latitude-row biharmonic coefficients with pole stability cap.
+
+    The zonal spacing ``dx = R*dlon*cos(lat)`` shrinks toward the poles,
+    so a globally-constant ``nu_del4`` sized for the interior violates
+    the explicit del-4 diffusive CFL near the poles by many orders of
+    magnitude.  Cap the coefficient per row at
+
+        nu_max(row) = cfl_frac / (dt * lam_row^2),
+        lam_row     = 4/dx_row^2 + 4/dy^2
+
+    (``lam_row`` = max eigenvalue of the discrete 5-point Laplacian on
+    that row), which keeps ``nu*dt*lam^2 <= cfl_frac`` everywhere.  The
+    interior rows keep the full ``config.nu_del4``; only rows poleward
+    of the crossover (about 79 deg at 2.5 deg resolution, 48 h grid
+    e-folding) are reduced.
+
+    Returns
+    -------
+    (nu_u, nu_v) : ((n_lat, 1), (n_lat+1, 1)) coefficient columns for
+        the u-face (cell-center-lat) and v-face (lat-interface) rows.
+    """
+    # Per-row cell height: ``grid.dy`` is the 2-cell distance (see
+    # LatLonGrid docstring), so the single-cell height of row j is
+    # dy[j]/2 — scalar ``grid.dlat`` is only a diagnostic minimum on
+    # Mercator/stretched grids and would over-cap interior rows there
+    # (codex review).
+    dy_u = 0.5 * grid.dy                                 # (n_lat,)
+    # v-face (interface) rows: mean of the adjacent cell heights;
+    # boundary interfaces reuse the edge-row height.
+    dy_v = jnp.concatenate([
+        dy_u[0:1], 0.5 * (dy_u[:-1] + dy_u[1:]), dy_u[-1:],
+    ])                                                   # (n_lat+1,)
+    dx_u = grid.radius * grid.dlon * grid.cos_lat        # (n_lat,)
+    dx_v = grid.radius * grid.dlon * grid.cos_lat_v      # (n_lat+1,)
+    lam_u = 4.0 / dx_u ** 2 + 4.0 / dy_u ** 2
+    lam_v = 4.0 / dx_v ** 2 + 4.0 / dy_v ** 2
+    nu_u = jnp.minimum(config.nu_del4,
+                       config.nu_del4_cfl_frac / (dt * lam_u ** 2))
+    nu_v = jnp.minimum(config.nu_del4,
+                       config.nu_del4_cfl_frac / (dt * lam_v ** 2))
+    return nu_u[:, None], nu_v[:, None]
+
+
 def cgrid_latlon_sw_tendencies(
     state: CGridLatLonShallowWaterState,
     grid: LatLonGrid,
     config: CGridLatLonShallowWaterConfig = CGridLatLonShallowWaterConfig(),
+    dt=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Compute C-grid shallow water tendencies on the lat-lon grid.
 
@@ -366,10 +430,29 @@ def cgrid_latlon_sw_tendencies(
     dv_dt = dv_dt + cor_v
 
     # --- 5. Laplacian viscosity (optional) ---
+    # Sign convention: viscosity enters as +A_h*lap(u) (Laplacian of a
+    # local extremum is negative -> damping).
     if config.A_h > 0.0:
         lap_u, lap_v = vector_laplacian_cgrid(u, v, grid)
         du_dt = du_dt + config.A_h * lap_u
         dv_dt = dv_dt + config.A_h * lap_v
+
+    # --- 5b. Biharmonic (del-4) viscosity (optional) ---
+    # Sign convention: biharmonic damping is -nu4*lap(lap(u)) — for a
+    # Fourier mode e^{ikx}, lap^2 -> +k^4, so the term is -nu4*k^4*u
+    # (decay).  A "+" here would be anti-diffusive and blow up at the
+    # grid scale.  Static Python branch on the config float (feature
+    # gating exception — not jnp.where).
+    if config.nu_del4 > 0.0:
+        if dt is None:
+            raise ValueError(
+                "cgrid_latlon_sw_tendencies: nu_del4 > 0 requires the "
+                "dt argument (per-row pole stability cap needs it).")
+        lap_u, lap_v = vector_laplacian_cgrid(u, v, grid)
+        lap2_u, lap2_v = vector_laplacian_cgrid(lap_u, lap_v, grid)
+        nu_u, nu_v = _nu_del4_row_profiles(grid, config, dt)
+        du_dt = du_dt - nu_u * lap2_u
+        dv_dt = dv_dt - nu_v * lap2_v
 
     # Enforce zero tendency at poles (wall BC) so intermediate RK
     # stages never see nonzero v at poles feeding into divergence/Coriolis.
@@ -409,6 +492,9 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
     ):
         self.grid = grid
         self.config = config or CGridLatLonShallowWaterConfig()
+        # Constructor dt, kept as the fallback for the no-argument
+        # ``tendencies(state)`` path (the nu_del4 pole cap needs a dt).
+        self._dt = dt
         # Precompute polar filter masks (cached, not traced): one for
         # cell-centered rows (dh, du after lon-trim) and one for v-face
         # rows (dv).  The v-face mask uses ``grid.cos_lat_v`` / the
@@ -471,9 +557,19 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
 
     def tendencies(
         self, state: CGridLatLonShallowWaterState,
+        dt: float | None = None,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Compute tendencies (pure function wrapper)."""
-        return cgrid_latlon_sw_tendencies(state, self.grid, self.config)
+        """Compute tendencies (pure function wrapper).
+
+        ``dt`` is only consumed when ``config.nu_del4 > 0`` (the del-4
+        pole stability cap is dt-dependent); when omitted it falls back
+        to the constructor ``dt`` so the no-argument
+        ``model.tendencies(state)`` path (e.g. ``DycoreComponent``)
+        keeps working with the biharmonic enabled.
+        """
+        if dt is None:
+            dt = self._dt
+        return cgrid_latlon_sw_tendencies(state, self.grid, self.config, dt)
 
     def step(
         self,
@@ -518,7 +614,7 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
 
         def tendency_fn(s):
             dh, du, dv = cgrid_latlon_sw_tendencies(
-                s, self.grid, self.config,
+                s, self.grid, self.config, dt,
             )
             # Polar filter: damp high-frequency modes near poles
             if self._polar_mask is not None:
