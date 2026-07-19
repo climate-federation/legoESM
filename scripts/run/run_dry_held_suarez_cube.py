@@ -47,6 +47,12 @@ def main():
                     help="Scale the 2nd-order Laplacian viscosity A_h (the suspected "
                          "eddy-killer; default A_h damps a 3000km eddy in ~5h). "
                          "0 = off, rely on scale-selective hyperdiffusion.")
+    ap.add_argument("--mean-from-day", type=float, default=None,
+                    help="Accumulate a TIME-MEAN climatology from this day on "
+                         "(HS94 Figs 1-4 are time means, not snapshots: a "
+                         "single instantaneous zonal mean of a turbulent flow "
+                         "is not comparable to the published benchmark). "
+                         "Typical: 200 for a 1000-1200 day run.")
     ap.add_argument("--out", type=str, required=True)
     args = ap.parse_args()
 
@@ -128,15 +134,44 @@ def main():
     # baroclinic-instability e-folding (~0.5-1 /day if active).
     diag_every = max(1, int(1 * 86400 / dt))
     eke_t = []  # (day, eddy_ke)
+    # Running TIME-MEAN of the zonal-mean fields, sampled daily from
+    # --mean-from-day onward.  HS94 Figs 1-4 are time means; comparing a
+    # snapshot to them would be comparing one turbulent realisation to a
+    # climatology.
+    mean_uz = None
+    mean_tz = None
+    n_mean = 0
+
+    def zonal_mean_temp(s):
+        """Area-weighted zonal (lat-band) mean temperature [K]."""
+        t_field = np.asarray(s.T.data)
+        out = np.full((len(bc), t_field.shape[-1]), np.nan)
+        for b in range(len(bc)):
+            if band_masks[b].any():
+                out[b] = np.average(t_field[band_masks[b]], axis=0,
+                                    weights=area[band_masks[b]])
+        return out
 
     t0 = time.time()
     state = step(state); jax.block_until_ready(state)
-    print(f"  JIT done ({time.time()-t0:.1f}s)")
+    jit_s = time.time() - t0
+    print(f"  JIT done ({jit_s:.1f}s)")
+    t_loop0 = time.time()
 
     for i in range(1, n_steps):
         state = step(state)
         if i % diag_every == 0:
             jax.block_until_ready(state)
+            day_now = (i + 1) * dt / 86400
+            if args.mean_from_day is not None and day_now >= args.mean_from_day:
+                uz_s = jet_diag(state)
+                tz_s = zonal_mean_temp(state)
+                if mean_uz is None:
+                    mean_uz = np.zeros_like(uz_s)
+                    mean_tz = np.zeros_like(tz_s)
+                mean_uz += np.nan_to_num(uz_s)
+                mean_tz += np.nan_to_num(tz_s)
+                n_mean += 1
             mw = float(jnp.max(jnp.sqrt(state.u.data**2 + state.v.data**2)))
             day = (i+1)*dt/86400
             if not np.isfinite(mw) or mw > 1000:
@@ -148,11 +183,33 @@ def main():
 
     uz = jet_diag(state)
     eke_arr = np.array(eke_t) if eke_t else np.zeros((0, 2))
+    wall_loop_s = time.time() - t_loop0
+    sim_years = args.days / 365.25
+    sypd = sim_years / (wall_loop_s / 86400.0) if wall_loop_s > 0 else 0.0
+    extra = {}
+    if n_mean:
+        extra["uz_timemean"] = mean_uz / n_mean
+        extra["Tz_timemean"] = mean_tz / n_mean
+        extra["n_mean_samples"] = np.array(n_mean)
+        extra["mean_from_day"] = np.array(args.mean_from_day)
     np.savez(args.out, uz=uz, lat_bins=bc, eke_t=eke_arr,
              sigma_full=np.asarray(sigma.sigma_full),
              u=np.asarray(state.u.data), v=np.asarray(state.v.data),
              T=np.asarray(state.T.data), p_s=np.asarray(state.p_s.data),
-             lat=latd, cos_angle=cosA, sin_angle=sinA)
+             lat=latd, cos_angle=cosA, sin_angle=sinA,
+             wall_loop_s=np.array(wall_loop_s), jit_s=np.array(jit_s),
+             sypd=np.array(sypd), dt_seconds=np.array(dt),
+             days=np.array(args.days), n_cells=np.array(int(6 * args.n ** 2)),
+             nlev=np.array(args.nlev), **extra)
+    print(f"\nWALL: {wall_loop_s:.1f}s integration (+{jit_s:.1f}s JIT) "
+          f"for {args.days} d  =>  {sypd:.1f} SYPD")
+    if n_mean:
+        jkm = np.unravel_index(np.nanargmax(extra["uz_timemean"]),
+                               extra["uz_timemean"].shape)
+        print(f"TIME-MEAN jet ({n_mean} daily samples from day "
+              f"{args.mean_from_day:.0f}): "
+              f"{extra['uz_timemean'][jkm]:.1f} m/s @lat {bc[jkm[0]]:.0f}, "
+              f"sigma={float(sigma.sigma_full[jkm[1]]):.3f}")
     jk = np.unravel_index(np.nanargmax(uz), uz.shape)
     print(f"\nFINAL dry-HS jet: eastward zonal-mean max = {uz[jk]:.1f} m/s "
           f"at lat {bc[jk[0]]:.0f}, sigma_lev {jk[1]} (sigma={float(sigma.sigma_full[jk[1]]):.3f})")
