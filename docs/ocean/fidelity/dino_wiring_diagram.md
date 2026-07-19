@@ -934,3 +934,55 @@ physics consequence (the wall face carries `v≡0`). The instrument mask was cor
 drop the north wall row (`core_v[:-1, 4:-3, 1:]`). The residual BSF/deep-eq-jet story is
 UNCHANGED: `dyn_hpg` is NOT a first divergence, and the "HPG-v first divergence" line in
 the kt=5761 stage-dump section above should be read as **this correction supersedes it**.
+
+## Corrected step-twin metrics (strict interior mask) — 2026-07-18
+
+The headline "step-1 eta rms 1.65–2.14e-2 m" was measured on the **full wet mask**,
+which for eta == the whole surface field and so folds in the two proven confounds:
+(1) seam col i=0 / periodic-wrap (stale NEMO restart halos) and (2) the north/south
+wall rows carrying un-masked NEMO diagnostics. Re-audit re-runs the same CPU twin
+(`scratchpad/stepdump_twin_strict.py`, from the identical bridged IC at kt=5760) with a
+**strict interior** mask = wet AND ≥2 cells from the i-seam AND ≥2 rows from either
+j-wall AND not land-adjacent (one-ring). Divergence-operator cross-check
+(`diff_seam.py`): interior barotropic divergence is **bit-identical** to NEMO's
+full-halo value (rms 5.482e-9); the recon error lives **entirely** at seam col0 / wall
+rows (1.2e-4 / 6.9e-5). Confounds real, but interior-clean.
+
+**Step-1 rms|Δ|, full-wet "interior" → strict interior:**
+
+| field | FE full | FE strict | MLF-after full | MLF-after strict |
+|-------|--------:|----------:|---------------:|-----------------:|
+| eta   | 1.88e-2 | **1.38e-2** | 2.14e-2 | **2.00e-2** |
+| T     | 3.57e-3 | 3.36e-3 | 5.50e-3 | 4.88e-3 |
+| u     | 3.40e-3 | 2.71e-3 | 3.40e-3 | 3.18e-3 |
+| v     | 2.41e-3 | 1.46e-3 | 2.32e-3 | 1.37e-3 |
+
+**The eta divergence does NOT collapse to ~1e-3** — stripping the confound removes
+only ~25% (FE) / ~7% (MLF) of it. The models genuinely differ at step 1 by ~1.4–2.0e-2 m
+eta / 3–5e-3 °C T; this is a real offset, not roundoff and not a mask artifact. It is
+**surface-layer-dominated** (step-1 surface-level T rms 1.4e-2 (FE) / 2.3e-2 (MLF) ≫
+strict-interior 3–5e-3), i.e. the free surface + top-cell forcing placement, present in
+BOTH integrators — the likely bridge/surface-forcing residual, slowly growing.
+
+**Growth / runaway.** Both FE and MLF blow up ~step 22–24 in the strict interior too
+(FE eta 4.2e-2 @s15 → 0.44 @s20 → overflow @s25; MLF-after strict T 1.7e-2 @s10 → 4.1e-2
+@s15 → 1.35e-1 @s20 → NaN @s24), so the runaway is **genuine interior**, not seam/wall
+(seam/wall T inflate the full number ~1.2–4× at late steps but are not the early signal).
+
+**Runaway localization (strict mask, `stepdump_twin_loc.py`).** The dominant
+strict-interior T-divergence cell sits at the **|lat|≈68° staircase** (lat +67.7…+68.4°,
+ix≈43–45, mid-depth 49–262 m) — the same high-lat topographic-step mode as before,
+surviving the strict mask. It overtakes the equatorial surface signal by ~step 10 and
+goes exponential from ~step 19 (|dT|max 7.4 @s19 → 125 @s21 → 2e6 @s23 → NaN @s24).
+
+**Verdict (freeze/finish).**
+- (a) Genuine differences: step-1 strict-interior eta ~1.4e-2 m (FE) / 2.0e-2 m (MLF),
+  T ~3–5e-3 °C, u/v ~1.5–3e-3 m/s — surface/free-surface dominated, slowly growing.
+- (b) The |lat|≈68° staircase MLF runaway is the **only fatal** item (it also kills FE
+  by ~step 22), but it is NOT the only genuine one: the ~1.4–2e-2 m surface-layer offset
+  is a smaller persistent bias in both integrators. Every named interior term still
+  certifies 1.0000; these two are integrated-state divergences, not per-term defects.
+- (c) Next single action after the reset: pin the +68° staircase-bottom column
+  (ix≈43–45, 50–260 m). Dump its T (and u/v) tendency terms at steps 18–20 vs the NEMO
+  trend — the mid-depth signature at a topographic step points at the partial-cell
+  vertical-mixing / tracer-advection stencil, same tier-3 approach that localized HPG-v.
