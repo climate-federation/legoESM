@@ -3870,9 +3870,9 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         if mass_drift > 0 or n_mass_samples >= 2:
             notes += f", mass_drift={mass_drift:.2e}"
     if mass_drift > 0.01:
-        logger.warning(
-            "Cosine bell %s: mass drift %.2e exceeds 1%% threshold",
-            tc.grid_type, mass_drift)
+        print(
+            f"WARNING: Cosine bell {tc.grid_type}: mass drift "
+            f"{mass_drift:.2e} exceeds 1% threshold")
     # iter-119 (codex iter-118-followup MEDIUM-1): apply
     # the iter-117/118 mass-drift PASS gate.  Pre-iter-119
     # cosine_bell only WARNED.  iter-120: now applies to ALL
