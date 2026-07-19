@@ -1877,6 +1877,13 @@ def _acoustic_moist_buoyancy_w(state, height_coord, euler_config, layout=None):
         state.tracers.data, state.theta_prime.data, height_coord, _hmean)
 
 
+# Valid SGS turbulence closures — single source shared by validate_plane_config()
+# (fail-early, at model __init__) and the slow_tendencies hot-path guard below, so
+# the two allowlists cannot drift.  A direct slow_tendencies caller (tests, the
+# public dynamics registry) bypasses the __init__ validator, so both guards exist.
+_VALID_TURBULENCE_CLOSURES = ("smagorinsky", "molecular", "none", "vreman", "amd")
+
+
 def plane_compressible_euler_slow_tendencies(
     state: PlaneNonHydrostaticState,
     grid: PlaneGrid,
@@ -2225,7 +2232,7 @@ def plane_compressible_euler_slow_tendencies(
     # diffusion operators below are SHARED, so LES and DNS reuse the CRM
     # machinery unchanged — only K_m differs.
     _closure = getattr(config, "turbulence_closure", "smagorinsky")
-    if _closure not in ("smagorinsky", "molecular", "none", "vreman", "amd"):
+    if _closure not in _VALID_TURBULENCE_CLOSURES:
         raise ValueError(
             f"unknown turbulence_closure {_closure!r}; must be one of "
             "'smagorinsky', 'molecular', 'none', 'vreman', 'amd' — a typo "
@@ -2959,7 +2966,7 @@ def validate_plane_config(config: CompressibleEulerConfig) -> None:
             "or NaNs for Pr <= 0."
         )
     closure = getattr(config, "turbulence_closure", "smagorinsky")
-    if closure not in ("smagorinsky", "molecular", "none", "vreman", "amd"):
+    if closure not in _VALID_TURBULENCE_CLOSURES:
         raise ValueError(
             f"turbulence_closure={closure!r} invalid; use 'smagorinsky' "
             "(CRM/LES eddy viscosity, SAM-faithful default), 'vreman' (optional "
