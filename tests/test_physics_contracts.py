@@ -170,8 +170,6 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/ocean/legoesm/ocean/physics/__init__.py",
         "packages/ocean/legoesm/ocean/physics/bottom_drag/__init__.py",
         "packages/ocean/legoesm/ocean/physics/bottom_drag/config.py",
-        "packages/ocean/legoesm/ocean/physics/bottom_drag/integration.py",
-        "packages/ocean/legoesm/ocean/physics/bottom_drag/output.py",
         "packages/ocean/legoesm/ocean/physics/combined.py",
         "packages/ocean/legoesm/ocean/physics/convection/__init__.py",
         "packages/ocean/legoesm/ocean/physics/convection/config.py",

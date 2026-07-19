@@ -501,6 +501,21 @@ _COARE_UB_FLOOR = 0.2         # [m/s] aerobulk coare3p0 bulk-wind floor
 _LY_UB_FLOOR = 0.5            # [m/s] LY09 / NEMO sbcblk_algo_ncar wind floor
 
 
+def resolve_gustiness_w_zi(gustiness_w_zi, scheme) -> float:
+    """The EFFECTIVE convective-gustiness BL depth z_i [m] for ``scheme``.
+
+    ``None`` means scheme-native (AeroBulk/COARE parity): COARE 3.0 includes
+    convective gustiness as part of the algorithm (zi = 600 m), the other
+    schemes do not.  An explicit value (0.0 = off) overrides.  The SINGLE
+    source for this resolution — used by :func:`compute_most_fluxes` itself
+    and by the air-sea consistency guard, so "what does None mean" can never
+    drift between the model and the validator.
+    """
+    if gustiness_w_zi is None:
+        return _COARE_GUSTINESS_ZI if scheme == "coare3" else 0.0
+    return float(gustiness_w_zi)
+
+
 # ============================================================================
 # Main MOST flux computation
 # ============================================================================
@@ -649,11 +664,9 @@ def compute_most_fluxes(
     validate_stability_scheme(stability_scheme)
 
     # Scheme-native gustiness default (AeroBulk/COARE parity, static Python
-    # resolved at trace time): COARE 3.0 includes convective gustiness as
-    # part of the algorithm (zi = 600 m), the other schemes do not.  Pass an
-    # explicit value (0.0 = off) to override.
-    if gustiness_w_zi is None:
-        gustiness_w_zi = _COARE_GUSTINESS_ZI if scheme == "coare3" else 0.0
+    # resolved at trace time) via the single shared resolver — the air-sea
+    # consistency guard uses the same one.
+    gustiness_w_zi = resolve_gustiness_w_zi(gustiness_w_zi, scheme)
 
     # Resolve scalar reference heights. ``z_ref`` is the wind/momentum
     # height (always = z_u in the formulas below); z_t, z_q default to

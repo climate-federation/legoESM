@@ -31,4 +31,23 @@ contains
     write(*,*) 'mpp_error: ', msg
     stop 1
   end subroutine mpp_error
+  subroutine mpp_sync()
+  end subroutine mpp_sync
 end module mpp_mod
+
+! Needed only by the AUTHORITATIVE modular global_grid tree
+! (global_grid_gen_lonlat's Schmidt-stretch import); our oracle runs
+! do_schmidt=.false., so a call is a defect -> loud stop.
+module fv_grid_utils_mod
+  use platform_mod, only: r8_kind
+  implicit none
+contains
+  subroutine direct_transform(c, i1, i2, j1, j2, lon_p, lat_p, n, lon, lat)
+    real(kind=r8_kind), intent(in) :: c, lon_p, lat_p
+    integer, intent(in) :: i1, i2, j1, j2, n
+    real(kind=r8_kind), intent(inout) :: lon(i1:i2, j1:j2), lat(i1:i2, j1:j2)
+    write (*, *) "direct_transform stub reached (do_schmidt path)", c, n, &
+      lon(i1, j1), lat(i1, j1)
+    stop 2
+  end subroutine direct_transform
+end module fv_grid_utils_mod

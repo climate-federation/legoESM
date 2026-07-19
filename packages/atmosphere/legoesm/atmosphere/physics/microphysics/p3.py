@@ -32,26 +32,22 @@ This is a P3-STRUCTURED scheme (single free ice category with predicted rime
 mass + volume), but most of its process RATES are simplified surrogates, NOT the
 gSAM P3 oracle (``MICRO_P3/module_mp_p3.f90``):
 
-- Cooper (1986) ice NUCLEATION (:248-263) — ORACLE-DERIVED base curve with
-  DOCUMENTED gate/cap departures (NOT bit-faithful). The base-curve FORM
-  ``N_i0·exp(cooper_a·(T_freeze−T))/rho`` (N_i0=5.0=0.005·1000, cooper_a=0.304),
-  the per-kg rho-divide, the (target−N_i)/dt relaxation, and the seed-mass source
-  ``dq=dN·m_i0`` are DERIVED from gSAM P3's below-cap Cooper base expression
-  (module_mp_p3.f90:3084-3095; the SAME in both P3 nucleation schemes) and match
-  it wherever gSAM's Cooper is selected, SCF=1, vapour is non-limiting, and the
-  value is below the cap; oracle-pinned (the base-curve form) by
-  ``tests/.../test_p3_cooper_faithful.py``. The departures below are stated
-  against scheme 1 (the test's comparison point):
-  (1) CAP — legoESM uses an unconditional 500/L; gSAM caps at 100/L·SCF (scheme
-  1) / 150/L·SCF (scheme 2) with the SCF cloud-fraction factor legoESM omits;
-  (2) GATE — a smooth sigmoid at cooper_T_act=−8 °C with NO ice-supersaturation
-  requirement, vs gSAM's HARD ``T<−15 °C AND supi≥0.05``, so legoESM nucleates
-  warmer AND in ice-subsaturated air (a REALISM gap: unlike deposition here, and
-  unlike Morrison's ``nuc_rh_sharpness`` supersaturation gate — adding a
-  supersaturation gate is an identified follow-up); (3) SEED — density 917
-  (canonical ``constants.rho_ice``) vs gSAM's hardcoded 900 kg/m³ at its default
-  1-µm nucleus radius (~1.9% heavier seed). legoESM also adds a rho floor, a
-  ``clip(dt,1)`` floor, and an exponent cap absent from the raw Fortran.
+- Cooper (1986) ice NUCLEATION — ORACLE-FAITHFUL gSAM P3 scheme-1 semantics
+  (module_mp_p3.f90:3084-3095), smoothed for differentiability. Faithful
+  pieces (all pinned by ``tests/.../test_p3_cooper_faithful.py``): base curve
+  ``N_i0·exp(cooper_a·(T_freeze−T))/rho`` (N_i0=5.0=0.005·1000,
+  cooper_a=0.304, per-kg rho-divide), scheme-1 CAP 100/L·SCF at SCF=1 (:3090;
+  this column scheme has no SCPF cloud fraction, and gSAM's scpf_ON=.false.
+  default also runs SCF=1 — scheme 2 would use 150/L at :3136), nucleation
+  GATE ``T<−15 °C AND supi≥0.05`` (:3084), the (target−N_i)/dt relaxation,
+  and the SEED mass ``mi0=4/3π·900·(1e-6)³`` (:233 — gSAM hardcodes
+  900 kg/m³, not ``constants.rho_ice``). The former departures (500/L cap,
+  −8 °C gate with no supersaturation requirement, 917 seed density) were
+  closed 2026-07-17. Remaining structural deltas (documented, deliberate):
+  the hard Fortran gates become SIGMOIDS (``ice_sigmoid_sharpness`` on T,
+  ``cooper_supi_sharpness`` on supi) so the scheme stays differentiable, plus
+  a rho floor, a ``clip(dt,1)`` floor, and an exponent cap absent from the
+  raw Fortran.
 - Ice deposition, cloud/rain RIMING, aggregation, MELTING, and ice/rain FALL
   SPEED (:264-384) — SURROGATES, NOT amenable to a closed-form coefficient-level
   pin. gSAM P3 computes each of these by interpolating a LOOKUP TABLE
@@ -107,14 +103,17 @@ _RHO_FLOOR = 0.1
 _COOPER_EXP_CAP = 80.0
 _VT_CLIP_RAIN = 20.0
 
-# --- Initial ice crystal mass at nucleation (Morrison & Milbrandt 2015) ---
-# P3 seeds each freshly-nucleated crystal with the mass of a 1-µm-radius
-# bulk-ice sphere (reference P3 Fortran ``mi0 = 4/3·π·ρ_i·(1e-6)³`` ≈
-# 3.8e-15 kg; same convention as this repo's morrison.py MI0), removed from
-# vapour so N_i and q_i stay consistent right after nucleation instead of
-# collapsing the diagnosed mean crystal mass q_i/N_i to zero.
+# --- Initial ice crystal mass at nucleation (gSAM P3 module_mp_p3.f90:233) ---
+# P3 seeds each freshly-nucleated crystal with the ORACLE seed mass
+# ``mi0 = 4/3·π·900·(IceNucleiRadius)³`` ≈ 3.77e-15 kg: gSAM hardcodes a
+# 900 kg/m³ nucleus density (NOT constants.rho_ice = 917 — the former ~1.9 %
+# heavier legoESM seed was a documented departure, closed 2026-07-17) at the
+# default 1-µm radius (micro_params.f90:214).  Removed from vapour so N_i and
+# q_i stay consistent right after nucleation instead of collapsing the
+# diagnosed mean crystal mass q_i/N_i to zero.
 _ICE_NUC_RADIUS_M = 1.0e-6                                     # [m]
-_M_I0 = 4.0 / 3.0 * math.pi * constants.rho_ice * _ICE_NUC_RADIUS_M ** 3  # [kg]
+_RHO_ICE_NUC = 900.0   # [kg/m³] gSAM P3 hardcoded seed density (mi0, :233)
+_M_I0 = 4.0 / 3.0 * math.pi * _RHO_ICE_NUC * _ICE_NUC_RADIUS_M ** 3  # [kg]
 
 __physics_contract__ = {
     "summary": (
@@ -123,10 +122,11 @@ __physics_contract__ = {
         "and rime volume (evolving density/fall speed) plus simplified "
         "SB-style warm rain. The ice process RATES (deposition, riming, "
         "aggregation, melting, fall speed) are algebraic SURROGATES for P3's "
-        "lookup-table physics, not the P3 oracle; only Cooper ice nucleation is "
-        "oracle-DERIVED, and only its base-curve form (with documented gate/cap "
-        "departures — see the module 'Faithfulness' docstring). Sedimentation "
-        "to surface precipitation."
+        "lookup-table physics, not the P3 oracle; Cooper ice nucleation is "
+        "ORACLE-FAITHFUL gSAM scheme-1 semantics (base curve, 100/L cap, "
+        "T<-15C AND supi>=0.05 gate, 900 kg/m^3 seed), sigmoid-smoothed for "
+        "differentiability — see the module 'Faithfulness' docstring. "
+        "Sedimentation to surface precipitation."
     ),
     "inputs": {
         "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",
@@ -256,29 +256,40 @@ def p3_microphysics(
     # Smooth mask: ice processes active below cooper_T_act.
     f_ice = jax.nn.sigmoid(config.ice_sigmoid_sharpness * (config.cooper_T_act - T))
 
-    # 1. Ice nucleation (Cooper 1986, smoothed).
+    # Ice supersaturation (used by the nucleation gate and deposition below).
+    q_sat_i = _saturation_mixing_ratio_ice(T, p_full)
+    S_i = q_v / jnp.clip(q_sat_i, 1e-10) - 1.0
+
+    # 1. Ice nucleation (Cooper 1986, gSAM P3 scheme-1 semantics, smoothed).
     #
-    # The ``max(T_freeze − T, 0)`` floor inside the exponential leaves
-    # the bare ``N_i0/rho`` target active above freezing; without an
-    # ``f_ice`` gate ``dN_i_nuc`` nucleated ~28 crystals / kg / s at
-    # T = 290 K (probe).  Multiplying by ``f_ice`` (≈ 0 above
-    # cooper_T_act) shuts nucleation off in warm columns and matches
-    # the gating already applied to deposition, riming, rain-riming,
-    # and aggregation — mirrors the same fix landed in
-    # morrison.py / thompson.py.
-    # Cap at ``N_i_nuc_max`` (M2005's 500 L⁻¹; NOTE gSAM P3 instead caps at
-    # 100 L⁻¹·SCF in scheme 1 / 150 L⁻¹·SCF in scheme 2, module_mp_p3.f90:3090,
-    # :3136 — legoESM's cap is higher and has no SCF cloud-fraction factor)
-    # BEFORE the ρ-divide: the bare Cooper exponential overflows fp32 at the very
-    # cold tropopause / sponge temperatures of an RCEMIP column (→ N_i = inf →
-    # NaN in tracer slot 8). ``jnp.minimum`` clamps even an inf exponential to
-    # the finite cap. Mirrors morrison.py / thompson.py.
+    # ORACLE GATE (module_mp_p3.f90:3084): nucleate only where
+    # ``T < 258.15 K (−15 °C) AND supi >= 0.05`` — smoothed to a product of
+    # sigmoids so the scheme stays differentiable (sharpnesses are numerics
+    # params, not tunables).  The supersaturation factor also kills the bare
+    # ``N_i0/rho`` target left active above freezing by the
+    # ``max(T_freeze − T, 0)`` floor inside the exponential (the old
+    # f_ice-only gate at cooper_T_act = −8 °C nucleated warmer AND in
+    # ice-SUBSATURATED air — the documented REALISM gap, closed 2026-07-17).
+    # f_ice (a warmer, general mixed-phase gate) still gates deposition,
+    # riming, rain-riming, aggregation.
+    f_nuc = (
+        jax.nn.sigmoid(config.ice_sigmoid_sharpness * (config.cooper_T_nuc - T))
+        * jax.nn.sigmoid(
+            config.cooper_supi_sharpness * (S_i - config.cooper_supi_min))
+    )
+    # Cap at ``N_i_nuc_max`` — ORACLE scheme-1 value 100 L⁻¹·SCF with SCF = 1
+    # (module_mp_p3.f90:3090; this column scheme has no SCPF cloud fraction, and
+    # gSAM's own scpf_ON=.false. default also runs SCF = 1; scheme 2 uses
+    # 150 L⁻¹·SCF at :3136).  Applied BEFORE the ρ-divide: the bare Cooper
+    # exponential overflows fp32 at the very cold tropopause / sponge
+    # temperatures of an RCEMIP column (→ N_i = inf → NaN in tracer slot 8).
+    # ``jnp.minimum`` clamps even an inf exponential to the finite cap.
     N_i_target = jnp.minimum(
         config.N_i0
         * jnp.exp(jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), _COOPER_EXP_CAP)),
         config.N_i_nuc_max,
     ) / jnp.clip(rho, _RHO_FLOOR)
-    dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0) * f_ice
+    dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0) * f_nuc
     # Nucleation MASS source: each new crystal carries the seed mass m_i0
     # (vapour → ice, +L_s), mirroring morrison.py's MNUCCD = NNUCCD·MI0.
     # Number-only nucleation left q_i/N_i → 0 and skewed the N_i^(1/3)
@@ -289,8 +300,6 @@ def p3_microphysics(
     # by the jnp.maximum(S_i, 0) gate — only deposition grows q_i here;
     # sublimation is a separate pathway not yet included, consistent with
     # Morrison which also omits explicit sublimation).
-    q_sat_i = _saturation_mixing_ratio_ice(T, p_full)
-    S_i = q_v / jnp.clip(q_sat_i, 1e-10) - 1.0
     q_i_eff = jnp.maximum(jnp.clip(q_i, 0.0), config.q_i_min_growth)
     dq_i_dep = (
         config.dep_coeff

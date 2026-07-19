@@ -7,17 +7,75 @@ by a sigmoid amount.  Cloud-depth-dependent blending of deep and
 shallow branches.  No convective momentum transport — KF emits
 ``du_dt_conv = dv_dt_conv = None`` and the orchestrator zero-fills.
 
-The scheme is **smooth-everywhere**:
+The scheme's trigger, blend, and gates are **smooth** (and the whole
+scheme is AD-safe — caps/floors like the ``M_b_max`` clip and the
+positivity limiters are subgradient points, not discontinuities):
 
 * The trigger function uses
   ``trigger_weight = sigmoid(s * (T_LCL_perturbed - T_env_at_LCL))``
   in place of the original hard ``> 0`` switch.  This is the central
-  AD-safety property of the smooth-everywhere KF: gradients flow
+  AD-safety property of the smooth KF trigger: gradients flow
   through the trigger threshold so training-time perturbations to
   ``parcel_perturb_T``, ``w_thresh_offset``, and ``trigger_sharpness``
   all have non-zero gradient signal.
 * The deep/shallow blend is a sigmoid on cloud depth.
 * The CAPE gate is the same ``cape_trigger`` used by ZM.
+
+Faithfulness status vs the WRF KF-Eta oracle (``module_cu_kfeta.F``) —
+updated 2026-07-17 after the column-water-leak fix (PR #988) and this audit:
+
+FAITHFUL (defaults ON, oracle-derived, pinned)
+* Trigger: Kain (2004) Eqs. 1-2 grid-ascent perturbation
+  ``DTLCL = dtlcl_coeff * WKL^dtlcl_exponent`` (``faithful_trigger=True``
+  default; smooth softplus surrogate, C^1 with a NEGLIGIBLE ~3e-3 K
+  residual at the WKL=0 cutoff — an exact-zero C^1 smooth positive part
+  does not exist; see ``_faithful_dtlcl``) + the RH trigger perturbation.
+* Entrainment: radius-based Kain (2004) Eq. 5-6 rates
+  (``faithful_entrainment=True`` default) with the PROF5 buoyancy-sorted
+  per-level UER/UDR detrainment (incl. the VMFLCL/UPOLD active-plume-mass
+  conversion) fed to BOTH the final plume and the subsidence kernel.
+* Updraft microphysics: CONDLOAD / Ogura-Cho Eq. 9 fallout recursion
+  (RATE=0.03, WLCL cap, drag partition — oracle lines 2863-2927).
+* Downdraft: RH-controlled KF-Eta downdraft (start ~150 hPa above cloud
+  base, DMFFRC = 2*(1-RHBAR) Kain (2004) Eq. 11, 20 %/km RH rundown).
+* BUDGETS: column total water AND moist static energy close to MACHINE
+  PRECISION on realistic (moist) columns — the historical
+  CONDLOAD/downdraft re-evaporation leak (+3.16e-4 kg/m^2/s spurious
+  moisture source, -1517 W/m^2 phantom cooling) was root-caused and fixed
+  2026-07-13 (PR #988: conservative implicit_flux kernel + coupled
+  condensation warming/vapor sink + detrained-latent release + moisture
+  limiter + conservative vapor relocation).  Gated by the three tier-3
+  tests named in ``__physics_contract__['idealized_test']``; KF is OUT of
+  the known-leak loop (ZM carries the strict xfail, Bechtold still leaks).
+
+KNOWN GAPS / DEPARTURES (documented, deliberate)
+* Degenerate-column residual: a BOUNDED ~4e-5 kg/m^2/s water (+ ~91 W/m^2
+  MSE) residual survives ONLY on a physically-degenerate q_v ~= 0 column
+  with a non-default ``parcel_perturb_q`` trigger (no real moisture to
+  conserve against; 9x below the pre-fix leak, unreachable in production
+  configs).  Upgrade path: kernel-level positive-definite transport
+  (shared with EDMF).
+* No convective momentum transport (``du_dt_conv = dv_dt_conv = None``)
+  — matching the oracle: WRF KF-Eta carries no CMT either.
+* Single-pass predictor plume under the PROF5 buoyancy sort (the oracle
+  iterates the updraft properties with the sorted rates; we sort once on
+  a predictor pass) — the remaining structural simplification of the
+  entrainment/detrainment block.
+* ``buoyancy_death_memory=False`` default keeps the legacy LOCAL-only
+  negative-buoyancy filter in the plume; the oracle-style monotone
+  plume-termination state machine is implemented and tested but opt-in
+  (enabling it by default needs its own validation campaign — see the
+  config-field comment).
+* CAPE-OR trigger fallback (``cape_or_threshold = 2000`` default-ON, no
+  oracle counterpart): fires convection on high CAPE where the resolved
+  ascent is ~0.  Gated by ``exp(-(w/cape_or_w_ref)^2)`` so it engages
+  ONLY in the ``w_grid ~= 0`` SCM/idealised case; with real resolved
+  ascent the gate SUPPRESSES it exponentially (asymptotic, not exact —
+  the Gaussian gate is > 0 for any finite w).  Set
+  ``cape_or_threshold = inf`` for exact oracle trigger behaviour.
+* Cloud-base mass-flux closure: single-pass smooth CAPE-consumption
+  formula capped at ``M_b_max``, NOT the oracle's iterated AINC
+  cloud-base mass-flux adjustment loop (see the closure block comment).
 
 References
 ----------
@@ -290,15 +348,17 @@ def _faithful_dtlcl(
               = 0                                  otherwise
 
     The hard ``WKL > 1e-4`` branch and the ``WKL^0.33`` (infinite slope
-    at 0) are replaced by a smooth, C^1 surrogate that is EXACTLY zero at
-    the KF cutoff ``WKL = 0`` (so the trigger gets no artificial lift
-    there) and recovers ``dtlcl_coeff*WKL^p`` for ``WKL >> 0``:
+    at 0) are replaced by a smooth, C^1 surrogate that is NEGLIGIBLY small
+    (~3e-3 K, the outer-softplus ln(2)/k residual — an exact-zero C^1
+    smooth positive part does not exist) at the KF cutoff ``WKL = 0`` and
+    recovers ``dtlcl_coeff*WKL^p`` for ``WKL >> 0``:
 
         g(x)  = softplus(s*x)/s          (smooth positive part, g(0)=ln2/s)
         DTLCL = dtlcl_coeff * softplus_pos( g(WKL)^p - g(0)^p )
 
     where ``softplus_pos(y)=softplus(k*y)/k`` is a smooth ``max(y,0)``.
-    At WKL=0, ``g(WKL)^p - g(0)^p = 0`` so DTLCL=0 (no spurious lift,
+    At WKL=0, ``g(WKL)^p - g(0)^p = 0`` so only the outer ln(2)/k
+    residual (~3e-3 K) survives in DTLCL (no material spurious lift,
     fixing codex review-1 #4).  For WKL<0, ``g(WKL)<g(0)`` so the argument
     is negative and the smooth positive-part drives DTLCL->0.  The
     base-point subtraction ``- g(0)^p`` removes the ``ln2/s`` offset that
@@ -834,7 +894,7 @@ def kain_fritsch_convection(
     dt: float,
     config: KainFritschConfig = KainFritschConfig(),
 ) -> tuple[ConvectionOutput, jax.Array]:
-    """Kain-Fritsch convection (smooth, differentiable).
+    """Kain-Fritsch convection (AD-safe; smooth trigger/blend/gates).
 
     Parameters
     ----------
@@ -1022,11 +1082,12 @@ def kain_fritsch_convection(
     # Firing when undilute CAPE exceeds ``cape_or_threshold`` rescues that
     # case.  The fallback is itself gated by the ABSENCE of resolved
     # ascent — ``exp(-(w_grid_at_lcl / cape_or_w_ref)^2)`` is ≈1 only where
-    # ``w_grid ≈ 0`` and →0 wherever the bridge supplies a real grid-scale
-    # ``w`` — so in any 3-D run with resolved ascent the OR branch
-    # vanishes and KF uses the pure w-trigger unchanged (preserving its
-    # documented response to resolved divergence).  Set
-    # ``cape_or_threshold = inf`` to disable the fallback entirely.
+    # ``w_grid ≈ 0`` and decays exponentially wherever the bridge supplies
+    # a real grid-scale ``w`` — so in a 3-D run with resolved ascent the OR
+    # branch is exponentially SUPPRESSED (asymptotic, not exactly zero: the
+    # Gaussian gate is > 0 for any finite w) and KF follows the pure
+    # w-trigger to within that residual.  Set ``cape_or_threshold = inf``
+    # to disable the fallback entirely (exact oracle trigger).
     # See KainFritschConfig.
     w_absent = jnp.exp(
         -(w_grid_at_lcl / jnp.maximum(config.cape_or_w_ref, 1e-30)) ** 2
@@ -1110,9 +1171,15 @@ def kain_fritsch_convection(
     # (Kain 2004 Eq. 5-6): epsilon = entrain_const / RAD with RAD ramping
     # 1000 m (no background ascent) -> 2000 m (WKL>=0.1 m/s).  Stronger
     # resolved ascent -> larger radius -> weaker fractional entrainment,
-    # exactly as in the oracle.  The detrainment rate tracks entrainment
-    # (bulk single-plume; the oracle's PROF5 buoyancy-sorted per-level
-    # detrainment is the acknowledged structural simplification).
+    # exactly as in the oracle.  Detrainment is NOT the bulk track-the-
+    # entrainment shortcut any more: a PREDICTOR plume (detrainment tracking
+    # entrainment) feeds ``_kf_buoyancy_sort_rates``, which computes the
+    # oracle's PROF5 buoyancy-sorted per-level UER/UDR (incl. the
+    # VMFLCL/UPOLD active-mass conversion), and the FINAL plume + kernel run
+    # on those sorted profiles.  (An earlier comment here still called bulk
+    # detrainment "the acknowledged structural simplification" — stale; the
+    # remaining structural difference is only that the sort rides a
+    # single-pass predictor plume rather than the oracle's iterated one.)
     if config.faithful_entrainment:
         eps_base = _faithful_entrainment_profile(wkl, rho, config)
         predictor_plume = entraining_detraining_plume(

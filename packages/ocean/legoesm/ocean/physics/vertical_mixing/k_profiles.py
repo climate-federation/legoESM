@@ -251,7 +251,8 @@ def compute_vertical_K_profiles(
                 "vertical_mixing scheme."
             )
         K_conv, A_conv = _enhanced_diffusion_K(state, z_coord, conv,
-                                               eos_fn=eos_fn)
+                                               eos_fn=eos_fn,
+                                               before_tracers=n2_tracers)
         # Convection enhances tracer diffusivity (convective_κz).
         K_v_total = K_v_total + K_conv
         # Momentum gets the independent convective viscosity (convective_νz
@@ -515,6 +516,26 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 z_coord.z_half_ref[1:-1], z_coord.dz_half_ref,
                 state.H_bathy.data,
             )
+        # Under-ice attenuation of the wave-driven TKE sources (NEMO nn_eice;
+        # ``TKEConfig.eice``).  The lc/etau kernels apply ``(1 - ice_frac)``
+        # internally, so the mode maps onto an EFFECTIVE ice fraction:
+        #   0 (default, bit-identical): no attenuation — ice_frac stays None;
+        #   1: eff = fi              -> kernel factor (1-fi)        (nn_eice=1);
+        #   3: eff = min(4*fi, 1)    -> kernel factor max(0,1-4*fi) (nn_eice=3,
+        #      the ORCA1 namelist choice — wave TKE fully killed at fi>=0.25).
+        # Unknown values raise (dispatch hardening; static config value).
+        _eice = int(getattr(tke_cfg, "eice", 0))
+        if _eice not in (0, 1, 3):
+            raise ValueError(
+                f"Unknown TKEConfig.eice={_eice!r}; expected 0 (no under-ice "
+                "attenuation), 1 ((1-fi)) or 3 (max(0,1-4*fi), NEMO nn_eice=3) "
+                "on the lc/etau TKE sources.")
+        _tke_ice_fr = None
+        if _eice != 0 and surface_forcing is not None:
+            _fi = getattr(surface_forcing, "ice_concentration", None)
+            if _fi is not None:
+                _tke_ice_fr = (_fi if _eice == 1
+                               else jnp.minimum(4.0 * _fi, 1.0))
         if prognostic:
             # PROGNOSTIC mode (Veros enable_tke): ONE backward-Euler step per
             # model step, seeded from the carried ``tke_old``, with dt = the
@@ -563,6 +584,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     eos_fn=eos_fn, z_interface=z_coord.z_half_ref[1:-1],
                     dz_surface=dz_surface, boundary_cap=_mxl1_cap,
                     T_n2=T_n2, S_n2=S_n2,
+                    ice_frac=_tke_ice_fr,
                 )
                 return K_H_old, K_M_old, _tke_ctx
             tke_out = tke_vertical_mixing(
@@ -579,6 +601,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 dz_surface=dz_surface, boundary_cap=_mxl1_cap,
                 lat_deg=lat_deg,
                 T_n2=T_n2, S_n2=S_n2,
+                ice_frac=_tke_ice_fr,
             )
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at
@@ -602,6 +625,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             dz_surface=dz_surface, boundary_cap=_mxl1_cap,
             lat_deg=lat_deg,
             T_n2=T_n2, S_n2=S_n2,
+            ice_frac=_tke_ice_fr,
         )
         return tke_out.K_H, tke_out.K_M, None
 
@@ -698,14 +722,17 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
     # masking the error).  ``scheme`` is the static config value, so raising at
     # function entry is jit-safe (this is the same defense used by the sibling
     # factories — see CLAUDE.md "Dispatch").
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        VALID_VERTICAL_MIXING_SCHEMES,
+    )
     raise ValueError(
         f"unknown vertical_mixing.scheme={scheme!r}; expected one of "
-        "{'none', 'constant', 'richardson', 'tke', 'catke', 'kpp'}"
+        f"{sorted(VALID_VERTICAL_MIXING_SCHEMES)}"
     )
 
 
 def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
-                          eos_fn=None):
+                          eos_fn=None, before_tracers=None):
     """``(K_v, A_v)`` fields used by the ``enhanced_diffusion`` scheme.
 
     Returns the convective tracer diffusivity (``convective_κz``) and the
@@ -748,6 +775,32 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
         rho, z_coord.dz_ref, J, cfg,
         T=state.T.data, S=state.S.data, p_cell=ed_p_cell, eos_fn=eos_fn,
     )
+    if getattr(cfg, "two_level_trigger", False) and before_tracers is not None:
+        # NEMO zdfevd MIN(rn2, rn2b): evaluate the trigger on the BEFORE
+        # tracers too and take the elementwise max of the coefficients —
+        # equivalent to the min-N² trigger for the hard-threshold path.
+        # Prevents per-step ON/OFF flicker of the convective coefficient in
+        # marginal columns (a grid-scale noise source; plan §G).
+        T_b, S_b = before_tracers
+        state_b = state._replace(T=state.T.replace(data=T_b),
+                                 S=state.S.replace(data=S_b))
+        rho_b = _compute_rho(state_b, z_coord, J, eos_fn=eos_fn)
+        ed_p_cell_b = None
+        if getattr(cfg, "n2_mode", "insitu") == "adiabatic":
+            from legoesm.ocean.eos import (
+                compute_hydrostatic_pressure, maybe_partial_h_actual,
+            )
+            ed_h_b = maybe_partial_h_actual(state_b, z_coord)
+            ed_p_cell_b = compute_hydrostatic_pressure(
+                rho_b, state_b.eta.data, z_coord.dz_ref, J,
+                ConstantsConfig().rho_0, h_actual=ed_h_b,
+            )
+        K_b, A_b, _ = convective_K_A_flag(
+            rho_b, z_coord.dz_ref, J, cfg,
+            T=T_b, S=S_b, p_cell=ed_p_cell_b, eos_fn=eos_fn,
+        )
+        K = jnp.maximum(K, K_b)
+        A = jnp.maximum(A, A_b)
     return K, A
 
 

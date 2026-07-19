@@ -142,6 +142,7 @@ PFT_CANOPY_HEIGHT: dict[str, float] = {
 # Valid values for the static leaf-gas-exchange dispatch field.  Kept next to
 # the config so the fail-early validator and the config default cannot drift.
 _VALID_STOMATAL_MODELS = ("ball_berry", "medlyn")
+_VALID_LE_MODULES = ("BT", "PM")
 
 
 class CanopyConfig(NamedTuple):
@@ -237,6 +238,11 @@ class CanopyConfig(NamedTuple):
             raise ValueError(
                 f"unknown stomatal_model {self.stomatal_model!r}; the stomatal "
                 f"conductance scheme must be one of {_VALID_STOMATAL_MODELS}")
+        if self.LE_module not in _VALID_LE_MODULES:
+            raise ValueError(
+                f"unknown LE_module {self.LE_module!r}; the leaf-energy module "
+                f"must be one of {_VALID_LE_MODULES} ('BT'=bulk transfer, "
+                f"'PM'=Penman-Monteith)")
         return self
 
 
@@ -594,3 +600,18 @@ class CLMMLCanopyConfig(NamedTuple):
     # canopy layers × sunlit/shaded leaves, sharing the same fluorescence core
     # as the two-leaf / big-leaf paths.  Static config leaf, never traced.
     sif: SIFConfig | None = None
+
+    # Differentiable-mode gate (static Python bool, resolved at trace time —
+    # never a traced leaf).  ``False`` (default) keeps PRODUCTION forward-only:
+    # the CLM-ML driver runs its Python for-loop / host-syncing checks and NO
+    # ``jax.grad`` tape is built (fast, no reverse-mode memory).  ``True`` opts
+    # a TRAINING run into the JAX-native diff path: the interface passes a
+    # ``GridInfo`` (``grid=``) and sets ``MLclm_varctl.DIFFERENTIABLE_MODE`` so
+    # ``MLCanopyFluxes`` runs ``lax.scan`` + ``jax.checkpoint`` and the forcing→
+    # flux map is fully on the ``jax.grad`` tape.  Diff mode is single-column
+    # (``ncol == 1``) — the diff path reads one concrete ``(ncan, ntop, nbot)``
+    # from the warm-start template.  Multi-column diff is NOT vmap-able (the
+    # interface mutates CLM module globals host-side); train multiple columns by
+    # looping OUTSIDE ``jax.grad`` and accumulating per-column gradients.  See
+    # ``docs/land/clm_ml_differentiable_integration_scope.md``.
+    differentiable: bool = False

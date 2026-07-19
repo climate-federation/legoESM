@@ -59,6 +59,7 @@ __param_spec__ = {
             "r_maint_floor_frac": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "basal maintenance-respiration floor retained under full NSC depletion (Atkin & Tjoelker 2003)", "shape": None},
             "freeze_dormancy_threshold_K": {"units": "K", "bounds": (263.0, 278.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "cold-deciduous winter-dormancy onset temperature (~0 degC); larch/tundra phenology", "shape": None},
             "leaf_bootstrap_lai": {"units": "1", "bounds": (0.1, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "minimum leaf area a cold-deciduous plant regrows from labile in the growing season to escape the 0-leaf GPP lock (larch/tundra leaf-out)", "shape": None},
+            "leaf_c_resorption_frac": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "fraction of shed foliage carbon resorbed into the labile reserve before abscission (deciduous leaf C/N recovery; Aerts 1996; Vergutz et al. 2012)", "shape": None},
             "leaf_bootstrap_frac": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "max fraction of the labile reserve drawn per step to bootstrap the leaf area (rate-limits the C_lab->C_fol regrowth)", "shape": None},
             "tor_litter": {"units": "1", "bounds": (0.00066, 0.006), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "tor_root": {"units": "1", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
@@ -320,6 +321,7 @@ class CarbonConfig(NamedTuple):
     lab_lifespan: float = 1.5     # [years]
     clab_release_period: float = 50.0   # Labile release width [days]
     leaf_fall_period: float = 50.0      # Leaf fall width [days]
+    leaf_c_resorption_frac: float = 0.0  # frac of shed foliage C resorbed C_fol->C_lab at abscission [-]
     hemisphere_aware: bool = True       # Flip phenology for SH
     # Leaf-habit / phenology TYPE. A categorical STRUCTURAL flag (like ``woody``
     # / ``hemisphere_aware``), NOT a tunable float -- only ``: float`` fields are

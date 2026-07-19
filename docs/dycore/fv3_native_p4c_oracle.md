@@ -136,6 +136,138 @@ native seam angles (→ blow-up).
    faithful halo may be the missing piece.  D→E does NOT itself test the
    faithful halo.
 
+## Campaign EXIT battery part 1 — full SW matrix (2026-07-16)
+
+`scripts/cluster/fv3_native/sw_full_battery.sbatch` (job 9043862): every
+SW case × every grid, PRODUCTION configuration.  **24/24 PASS.**
+
+| case | cube C36 | latlon | MPAS (ico5) | spectral (T21) |
+|------|----------|--------|-------------|-----------------|
+| W2 (L2)          | **4.68e-4** | 1.41e-3 | 1.25e-4 | 1.8e-7 |
+| W5 (mass drift)  | 9.7e-16 | 3.2e-16 | 0.0     | 3.2e-16 |
+| W6 (mass drift)  | 1.3e-15 | 1.9e-16 | 0.0     | 9.6e-16 |
+| modons 100d (mass)| 7.3e-16 | 0.0    | 1.8e-16 | 7.3e-16 |
+| cosine bell (L2) | 0.20    | 0.13   | 0.62    | 0.38 |
+
+- Cube W2 error is BETTER than lat-lon and the same order as MPAS; the
+  W2 v-wind imprint is 0.54 m/s (production A-L calibration).
+- Mass is machine-zero on every grid for W5/W6/modons; the colliding
+  modons run the full 100 days on the cube cleanly.
+- The **no-artifacts gate passed**: `visual_regression.py --check` gives
+  SSIM=1.0000 (min 0.985), hamming=0 (max 4), edge_ratio == reference
+  exactly (1.349).
+
+The Williamson + colliding-modons + no-artifacts components of the
+campaign exit criterion are MET on the production configuration.
+Held-Suarez cross-grid (part 2) is running (job 9044126 + supplementary
+9044520/9044521).
+
+### Visual edge-artifact inspection (2026-07-16, all SW + completed HS)
+
+Every cross-grid comparison PNG inspected (per the visual-verify rule —
+norms alone never certify edges):
+
+- **W2 v-wind** (canonical: exact v==0): cube shows the KNOWN smooth
+  4-fold imprint + polar-seam maxima at the calibrated ~0.5 m/s — smooth,
+  large-scale, no sawtooth, no face-line discontinuities; matches the
+  committed visual-regression reference exactly (SSIM=1.0000, hamming=0).
+  MPAS shows its own 12-pentagon dipole signature; latlon/spectral ~0.
+- **W5 wind_speed / W6 height**: identical synoptic structure on all four
+  grids; cube panels smooth, no face lines (cube slightly more diffuse —
+  the calibrated damping).
+- **Colliding modons, day 100 vorticity**: NO face-seam eruptions (the
+  historical #521 eruption stays fixed through the full collision +
+  return).  Cross-grid dissipation spread (ico keeps the tightest
+  dipoles, cube dispersed-but-smooth, spectral dissipated) is scheme
+  diffusivity, not an artifact.
+- **Cosine bells**: the bell crosses four cube faces and returns compact;
+  no seam tearing (spectral shows the expected T21 Gibbs ripples).
+- **Held-Suarez cube C36 (sigma, 200 d)**: classic HS climate; v-field
+  longitudinal structure is TRANSIENT eddies (moves between snapshots, no
+  stationary lock).  ONE quantified grid signature: a stationary
+  **wave-4 modulation of the lowest-level equatorial easterlies, amplitude
+  0.19 m/s** (crests within ~10 deg of the cube corners; wave-8 harmonic
+  0.035 m/s; waves 1/3/5 = 0) against ~3.5 m/s background — a ~5% smooth
+  corner imprint, no discontinuities.  The high-latitude dotted moire in
+  the *native* scatter PNGs is plotting sparsity, not model signal
+  (absent in the regridded fields).
+
+Summary: no destructive edge artifacts anywhere; the residual cube
+signatures are the two documented smooth imprints (W2 v ~0.5 m/s;
+HS equatorial u wave-4 0.19 m/s ~ 5%), both at the calibrated C36 level.
+
+### Campaign EXIT battery part 2 — Held-Suarez cross-grid (2026-07-16)
+
+200-day Held-Suarez, matrix defaults (jobs 9044126 + 9044520/21):
+
+| grid | cases | verdict |
+|------|-------|---------|
+| cubed_sphere C36 | sigma + hybrid + topo | **3/3 PASS** (mass 1.6e-16 / 1.6e-16 / 1.0e-14) |
+| latlon 72x144 | sigma + hybrid | **2/2 PASS** (mass 1.6e-16 / 0.0) |
+| spectral T21 | sigma + hybrid + topo | **3/3 PASS** (mass ~5e-16; max\|v\| 40-59 m/s jets) |
+| icosahedral ico5 | — | INCOMPLETE (10 h walltime insufficient for the
+MPAS hydro path; relaunched unbuffered as job 9067601 to diagnose
+JIT-vs-throughput) |
+
+Cube climate verified visually: classic HS structure, transient eddies
+(no stationary lock), the one quantified signature being the 0.19 m/s
+equatorial wave-4 imprint documented above.  With the SW battery
+(24/24), the visual/artifact gate, and HS cube+latlon+spectral all
+passing at machine-zero mass drift, the exit criterion is met on the
+production configuration for every grid whose runs completed.
+
+### W2 wave-pattern benchmark vs the authoritative FV3 references
+
+The W2 v "wave-like" error field was benchmarked directly against
+Mouallem's Zenodo `atmos_daily.nc` references (day 5, same 181x360 grid,
+hord6; `fv3_recon/w2_wave/w2_v_vs_fv3_refs.png`):
+
+| day-5 W2 v-error       | max\|v\| (m/s) | rms (m/s) |
+|------------------------|---------------|-----------|
+| legoESM production C36 | 0.54          | 0.098     |
+| FV3 PLAIN C48 hord6    | 1.38          | 0.097     |
+| FV3 DUO   C48 hord6    | 0.024         | 0.010     |
+
+- The pattern is the quasi-stationary cube-harmonic error (midlat wave-4
+  amplitude 0.10 m/s, phase drift ~5 deg per half-day).  Authentic PLAIN
+  FV3 shows the SAME grid-locked wave-4 class at IDENTICAL rms and a
+  2.6x LARGER corner peak — despite running at the finer C48 (the
+  resolution asymmetry favours FV3, so the conclusion is conservative).
+- legoESM's one distinctive component: smooth polar wave-2 arcs
+  (0.107 m/s) where FV3-plain is polar-clean but corner-spiky.
+- The DUO grid eliminates the whole pattern (10-40x cleaner) — the
+  quantified payoff of the native-duo path this campaign certifies
+  kernel-by-kernel (remaining assembly blockers documented above).
+
+## Duo D-grid finding (2026-07-16): not single-tile certifiable
+
+Attempting the duo d_sw analog of the (certified) duo c_sw exposed a hard
+scope boundary in the authoritative symmetryclean pipeline:
+
+1. **Inter-panel flux averaging mid-sequence.**  The duo dyn_core averages
+   the delp/temperature fluxes across panel edges BETWEEN its d_sw1 and
+   d_sw2 stages (`mpp_get_boundary` + `0.5*(own+neighbor)`;
+   dyn_core.F90:853-900 — "averaging ... is fundamental").  This is a
+   6-face communication in the middle of the D-grid step — impossible in
+   a single-tile oracle.
+2. **Undefined panel-edge workspace reads.**  With the reference-run flags
+   (duogrid=T, bounded_domain=F — verified from the Zenodo rundir
+   `input.nml`), the `.not.bounded .or. .not.duogrid` guards are
+   always-true, so d_sw1's edge blocks execute and read ut/vt panel-edge
+   cells the duo interior loop never writes; dyn_core's utt/vtt are
+   uninitialised stack arrays (research-grade code — there is a literal
+   `!!!!! CODE CRASHES HERE !!!!!` comment at dyn_core.F90:879).  The
+   Fortran values there are compiler-dependent.  Empirically, running the
+   verbatim duo gates single-tile NaN'd the interior transport through
+   exactly that ut(0,*)/vt(*,0) → yfx/ra_y chain.
+
+Consequence: `d_sw(duogrid=True)` in the port RAISES (fail-loud); the
+verbatim duo gates remain in the code as the base for **per-stage** duo
+certification (d_sw1/d_sw3/d_sw5 driven with fully-specified inputs) and
+a legoESM-side inter-panel flux-averaging analog (6-face exchange
+infrastructure, like the P4b corner-B-halo precedent).  The duo c_sw cert
+is unaffected (its duo branches fully define every read cell).
+
 **Consequence for "full FV3 faithful portability":** the *kernels* are
 certified bit-exact (c_sw / d_sw / divergence_corner_duo), and the
 *production* cube already meets the science goal on the equiangular grid.
@@ -145,3 +277,132 @@ proposed next brick (a hypothesis, not established by this battery) is to
 port and stabilise the native-angle ⇄ faithful-d_sw5-halo pair *together*,
 rather than swapping the grid under the A-L solver (which is not FV3's
 scheme and is tuned for equiangular).
+
+## Duo per-stage certification + integrated stepper (2026-07-17)
+
+**Per-stage TRANSLATION certificates** (bit-exact uint64 vs verbatim
+symmetryclean Fortran extracts on the committed C12 inputs; every
+oracle input-hash + extract-SHA enforced; all codex-reviewed to SHIP):
+
+| construct | scope | test |
+|---|---|---|
+| c_sw duo | full duo branch, 5 outputs | test_fv3_native_c_sw_duo |
+| d_sw1 duo | transport stage, 16 tokens, defined-workspace shim | test_fv3_native_dsw1_duo |
+| d_sw2 duo | delp/pt update, chained | test_fv3_native_dsw2_duo |
+| d_sw3 duo | KE fluxes, WMP-delta threaded | test_fv3_native_dsw3_duo |
+| d_sw4 duo | 4-corner KE fix | test_fv3_native_dsw4_duo |
+| d_sw5 duo | damping/KE/vort transport, 13 tokens, single-face raw-KEE chain | test_fv3_native_dsw5_duo |
+| d_sw6 duo | final circulation winds | test_fv3_native_dsw6_duo |
+
+**Integrated six-face duo stepper** (`fv3_native_duo_stepper.py`,
+codex SHIP): certified stages + both inter-panel averaging analogs
+(dyn_core 853-900 C-ring, 968-1020 BGRID — truth-tiered vs a
+geometry-derived 24-edge contact table) + geopk(SW)/p_grad_c/
+one_grad_p ports.  Balanced W2 at C12: mass exact, interior departure
+0.6 m/s @2 h, edge saturating ~14 m/s (interim index-copy exchanges).
+
+**Duo-target quantification** (job 9075107): C24 5-day W2 stable,
+v_ll ~17 m/s steady; gate score 179x/101x the C24-scaled duo envelope
+(0.1416/0.0579).  The duo edge-cleanliness target requires the full
+extended-halo consistency bundle.
+
+**Ext-bundle measurements** (all flag-gated OFF): extended-lattice
+gridstruct (interior bitwise, halos real) + per-stagger k2e remaps
+(halo accuracy 0.42 -> 0.0025 on analytic fields) SHIPPED; but every
+lightweight in-stepper swap measured WORSE than the coherent interim
+(position-only 22/21.6; basis-corrected D 17.4/27.9 vs interim
+8.3/14.0) — piecewise approximation of the duo ext machinery injects
+errors comparable to those it fixes.  Evidence-driven roadmap: adapt
+the stepper (reference numbering) to the certified production
+ext machinery (create layout: ext_vector_dgrid basis='covariant',
+pad_halo(duogrid)) via the _GNOMONIC_ED_FACE_PERM/_ROT adapter, all
+fields + metrics switching together.
+
+**FAITHFUL EXT PORT (4e3fe4a7e + 3474ecf24)**: `fv3_native_ext_vector`
+ports the authoritative machinery outright in the stepper's reference
+numbering (no create-layout adapter): ext_scalar A/B (own-stagger k2e
+rings + 9-slot corner Lagrange) and ext_vector D/C via the upstream
+lat-lon intermediary — c2l_ord2(_cgrid) with exact a11..a22 on kinked
+mpp-state metrics, geographic exchange on the ng=4 lattice
+(set_bd_ext_duo), A-table cube_rmp rings 1..4, corner Lagrange, then
+cubed_a2d/a2c projection onto the a2stag ext bases and the S/N-then-W/E
+strip writes (fv_duogrid.F90:626-975).  Upstream itself rejects
+per-stagger vector remapping as noisier (:678-681) — consistent with
+the earlier lightweight-swap measurements.  Halo strips vs
+analytic-through-identical-projection truth: 0.152 m/s at C12.
+**C12 ablation (SB5a protocol, one FLAG — bundle-level attribution
+only: the flag switches halo metrics, A/B scalar exchanges, D/C vector
+exchanges, bases and corner handling TOGETHER; it does not isolate the
+vector port)**: edge du48 13.99 → 8.25 (−41%), du12 8.28 → 5.01,
+interior du12 0.54 → 0.35, ddelp12 1.42% → 0.97%, mass exact; interior
+du48 1.33 → 1.86 (small degradation, C24 arbitration pending).  Bugs the analytic gate caught:
+create-vs-reference face layout in the ext bases (ext_parity_lonlat_ref
+fixes), staggered corner abscissae needing the ng=4 A lattice, and the
+c_sw sin_sg(5) tiny-floor patch poisoning the a-matrix (recomputed from
+inner(ec1,ec2)).
+
+**EXT-BUNDLE CERTIFIED (codex r4 SHIP, 667ad2b0d)**: independent
+Fortran projection oracle (fv3_extproj_*: verbatim a2stag_metrics +
+cubed_a2d/a2c; bases 1e-13, projections 1e-12, mutation-discriminated,
+sha-enforced fixture) + guards/provenance closures.  Corner-fill wedge
+accuracy (codex probe, C12): lagrange default 0.084 m/s; the a2d
+variant carries ~3.9 (ring-4 index-copy contamination) and is labeled
+a NONFAITHFUL measurement variant.  ~~C24 W2 gate: ext bundle
+23.70/4.08 = 251x/106x of the duo envelope vs interim 179x/101x — the
+max sits at CUBE VERTICES (interim: edge-midlat), so the ext swap
+cleans edges but excites vertices; wedge VALUES exonerated (0.084),
+open suspects: divgd B-corner feed into the nord damping, C-vector
+wedges, ext halo metrics under d_sw5's full-domain vorticity prep.~~
+**[VOID — these gate scores and the "vertex physics" reading were
+old-diagnostic-lens artifact; see RE-BASELINE below.  The translation
+certificates and wedge-value probe in this paragraph remain valid.]**
+
+## RE-BASELINE (2026-07-18): the duo-stepper W2 gate numbers above are VOID — diagnostic artifact
+
+Every `run_duo_stepper_w2` gate score quoted above (interim 16.93/3.91,
+ext bundle 23.70/4.08 "251x/106x of the duo envelope", the −metrics
+19.64/3.71 attribution arm, and the day-5 vertex-butterfly maps) was
+dominated by the runner's own covariant→geographic diagnostic: the
+central-difference tangent-basis inversion breaks at vertex-adjacent
+cells (bases straddle the corner kink) and paints a ±15 m/s butterfly
+onto the DAY-0 analytically balanced state.  The decisive test — score
+the initial condition through the same lens — was never run until now.
+The attribution table's *rankings* may retain directional meaning; its
+absolute values and the "vertex physics" interpretation do not.
+
+Honest lens = the certified upstream `c2l_ord2` a-matrix operator
+(the Zenodo runs' own ua/va output used the ord4 sibling; ord2
+residual is O(dx²): day-0 floor 0.0705 at C12, 0.0181 at C24 —
+clean second-order quartering).
+
+**Honest-lens results (bounded-conventions lane, ext bundle):**
+
+| run | day-0 | day-5 (or day-1) | note |
+|---|---|---|---|
+| C12 plain conventions | 0.0705 | **13.48** (d1) | the REAL vertex error: the plain lane |
+| C12 bounded | 0.0705 | 0.1881 (d1) | 72×/29× (max/rms) better than plain |
+| C24 bounded | 0.0181 | **0.0473 / rms 0.0176** (d5) | saturated by day 3, no growth |
+| Zenodo duo C48 target | — | 0.0236 / 0.0096 (d5) | C24 sits ON the 2nd-order curve toward it (2.0×/1.8× at 2× coarser); C48 run in flight |
+
+The C24 day-5 map has NO vertex-concentrated signal (thin ~0.02-0.03
+face-edge bands + smooth c2l-floor pattern remain; discriminating
+model-residual vs ord2-lens-floor: compare against a c2l_ord4 lens —
+follow-up).
+
+**The bounded-conventions discovery** (see `gen_boundedgs_oracle.py`
+lineage + `tests/grids/test_fv3_native_boundedgs.py`): duo runs take
+the `bounded_domain=T` grid-init arms on the extended own-face gen_k2e
+lattice (proven from the Zenodo C48 fms.out: duo da_min_c differs from
+the plain run's; our bounded gridstruct reproduces the log to print
+precision), with FMS radius 6371200 m and omega 7.2921e-5.  The vertex
+B-node geometry under bounded is the exact regular 120° kink
+(cosa=-1/2, sina=√3/2, rsina=4/3) — no poison, no special case.  Model
+consequences certified per-guard: d_sw1's sin_sg edge ut/vt
+replacement and d_sw4's corner-KE fix are SKIPPED on the bounded lane
+(they fire only under plain conventions), and every stage gsf threads
+`bounded_domain` from the gridstruct.
+
+Caveat: the SW-matrix ladder numbers in this doc (A=0.54 … E=NaN) come
+from the `run_atmosphere_test_matrix` pipeline — a DIFFERENT remap
+diagnostic whose day-0 residual has not yet been audited; verify
+before trusting those absolutes either.

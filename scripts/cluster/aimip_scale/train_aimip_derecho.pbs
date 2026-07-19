@@ -24,17 +24,23 @@
 # a T106 run whose SINGLE epoch (~13 h) exceeds one 12 h walltime resubmits
 # itself and makes monotonic progress instead of restarting epoch 0 forever.
 #
+# The variant ladder: classical (full physics + RRTMGP radiation),
+# column_nn (ALL physics incl. radiation learned by a column MLP),
+# sfno_full (SFNO emulates the ENTIRE atmosphere — no dycore, no
+# physics).  sfno_physics (SFNO physics, dycore retained) remains
+# available as an optional intermediate rung.
+#
 # SUBMIT (one per variant):
-#   qsub -v VARIANT=sfno_physics scripts/cluster/aimip_scale/train_aimip_derecho.pbs
 #   qsub -v VARIANT=classical    scripts/cluster/aimip_scale/train_aimip_derecho.pbs
 #   qsub -v VARIANT=column_nn    scripts/cluster/aimip_scale/train_aimip_derecho.pbs
+#   qsub -v VARIANT=sfno_full    scripts/cluster/aimip_scale/train_aimip_derecho.pbs
 # First submit auto-detects "no checkpoint yet -> fresh"; chained links pass
 # RESUME=1 themselves. Override the account with `qsub -A <proj>`; paths + conda
 # env live in scripts/cluster/scaling_derecho/_env.sh (EDIT before first run).
 # ===========================================================================
 set -uo pipefail
 
-VARIANT="${VARIANT:-sfno_physics}"     # classical | column_nn | sfno_physics
+VARIANT="${VARIANT:-sfno_full}"     # classical | column_nn | sfno_full | sfno_physics
 CHAIN="${CHAIN:-0}"
 CHAIN_MAX="${CHAIN_MAX:-24}"  # v2 curriculum (72h/120h phases) needs more links
 
@@ -79,10 +85,10 @@ LINK_BUDGET_S=$(( 12*3600 - 45*60 ))   # 40500 s = walltime - 45 min drain
 # Resume-artifact signature (name:mtime of the newest FORWARD-PROGRESS checkpoint)
 # BEFORE this link -- so a walltime-bound link is chained ONLY if it actually
 # advanced a resumable checkpoint. The chunked variants (column_nn / sfno_physics
-# with chunk_windows>0) write chunk_latest.eqx every chunk; `classical` loads the
-# full dataset with NO per-chunk checkpoint, so if ITS epoch exceeds the budget
-# the link produces nothing new and blindly chaining would restart epoch 0 every
-# link (#985 re-review). Restrict to epoch_*.eqx + chunk_latest.eqx (the only
+# with chunk_windows>0) write chunk_latest.eqx every chunk; `classical` AND
+# `sfno_full` load the full dataset with NO per-chunk checkpoint, so if such an
+# epoch exceeds the budget the link produces nothing new and blindly chaining
+# would restart epoch 0 every link (#985 re-review). Restrict to epoch_*.eqx + chunk_latest.eqx (the only
 # resume artifacts) -- NOT every *.eqx -- so an unrelated/eval .eqx mtime can't
 # be mistaken for training progress; params.eqx (the DONE marker) is handled by
 # the FINAL check below, not here.
@@ -102,9 +108,11 @@ if [ "$RC" -eq 124 ] || [ "$RC" -eq 137 ]; then
     RC=0
   else
     echo "[aimip-scale] hit link budget ${LINK_BUDGET_S}s (rc=$RC) but NO new checkpoint" \
-         "-> this variant is not mid-epoch resumable (classical has no chunk_latest.eqx" \
-         "and its epoch did not finish); NOT chaining to avoid an epoch-0 restart loop." \
-         "Use chunk_windows>0 or a longer walltime for this variant."
+         "-> this variant is not mid-epoch resumable (classical/sfno_full have no" \
+         "chunk_latest.eqx and the epoch did not finish); NOT chaining to avoid an" \
+         "epoch-0 restart loop. Remedy: chunked variants (column_nn/sfno_physics)" \
+         "-> chunk_windows>0; classical/sfno_full -> a walltime long enough to" \
+         "finish one epoch (they do not support chunked streaming)."
     RC=1
   fi
 fi

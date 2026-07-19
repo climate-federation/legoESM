@@ -10,12 +10,36 @@ import pytest
 from legoesm import constants
 from scripts.run.run_amip import (
     _apply_aimip_classical_overrides,
+    _apply_spectral_scheme_fallback,
     _postprocess_args,
     _print_forcing_activity,
     _require_full_physics_for_amip,
     build_arg_parser,
     build_config_from_args,
 )
+
+
+def test_spectral_scheme_fallback():
+    p = build_arg_parser()
+    base = ["--grid-type", "gaussian", "--discretization", "spectral",
+            "--truncation", "21"]
+
+    # Default (prognostic tiedtke/mcfarlane) on spectral -> auto diagnostic.
+    a = _apply_spectral_scheme_fallback(p.parse_args(base), base)
+    assert a.convection == "sbm", "spectral did not fall back to diagnostic convection"
+    assert "mcfarlane" not in str(a.gravity_wave_drag), \
+        "spectral did not fall back off prognostic GWD"
+    assert a.gravity_wave_drag == "rayleigh"
+
+    # Explicit --convection is honoured verbatim (user's call, even if prognostic).
+    argv = base + ["--convection", "tiedtke"]
+    a2 = _apply_spectral_scheme_fallback(p.parse_args(argv), argv)
+    assert a2.convection == "tiedtke", "explicit --convection was overridden"
+
+    # Non-spectral grid: no-op (keeps the prognostic defaults).
+    cs = ["--grid-type", "cubed_sphere", "--discretization", "cdgrid"]
+    a3 = _apply_spectral_scheme_fallback(p.parse_args(cs), cs)
+    assert a3.convection == "tiedtke", "non-spectral grid wrongly swapped schemes"
 
 
 def test_multilayer_land_flags_flow_to_config():
@@ -35,6 +59,29 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.use_multilayer_land is True
     assert cfg_on.multilayer_n_layers == 8
     assert cfg_on.multilayer_soil_depth == 4.5
+
+
+def test_use_clubb_cloud_fraction_flag_flows_to_config():
+    """--use-clubb-cloud-fraction round-trips to ExperimentConfig (marine-Sc
+    albedo lever; radiation then reads diagnostic CLUBB's PDF cloud fraction)."""
+    parser = build_arg_parser()
+    # default OFF: RH grid-scale cloud fraction (byte-identical path)
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.use_clubb_cloud_fraction is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--turbulence", "clubb",
+        "--use-clubb-cloud-fraction",
+    ]), parser))
+    assert cfg_on.use_clubb_cloud_fraction is True
+    # explicit negation restores the default (BooleanOptionalAction)
+    cfg_neg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--no-use-clubb-cloud-fraction",
+    ]), parser))
+    assert cfg_neg.use_clubb_cloud_fraction is False
 
 
 def test_convective_precip_efficiency_cli_wiring_929():
@@ -2145,7 +2192,7 @@ def test_bechtold_downdraft_transport_round_trips_and_threads():
     dcc = _resolve_convection(d)[1]
     assert dcc.downdraft_transport is False
     assert (dcc.downdraft_entrain_rate,
-            dcc.downdraft_detrain_scale_m) == (5.0e-4, 700.0)
+            dcc.downdraft_detrain_scale_m) == (3.0e-4, 700.0)  # IFS ENTRDD
     # --no- turns OFF a config-file default
     off = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--convection", "bechtold",
@@ -2349,6 +2396,30 @@ def test_diagnostic_condensate_scheme_validate_strict():
         ExperimentConfig(
             cloud_scheme="sundqvist", radiation="gray",
             cloud_diagnostic_condensate_scheme="adiabatic").validate_strict()
+
+
+def test_use_clubb_cloud_fraction_rejected_on_mpas_spectral():
+    """use_clubb_cloud_fraction is enforced only inside build_physics_pipeline,
+    which mpas/spectral never build — so validate_strict must reject the opt-in
+    there rather than let it silently no-op (audit 2026-07-17 dispatch-hardening)."""
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig
+    for bad_disc in ("spectral", "mpas"):
+        with pytest.raises(ValueError, match="silently no-op"):
+            ExperimentConfig(
+                turbulence="clubb", use_clubb_cloud_fraction=True,
+                dycore=DycoreConfig(discretization=bad_disc)).validate_strict()
+    # cd-grid aliases DO build the pipeline, so the guard must not block them
+    # (the pipeline's own turbulence=='clubb' check still applies).
+    for ok_disc in ("centered", "finite_volume"):
+        try:
+            ExperimentConfig(
+                turbulence="clubb", use_clubb_cloud_fraction=True,
+                dycore=DycoreConfig(discretization=ok_disc)).validate_strict()
+        except ValueError as exc:
+            assert "silently no-op" not in str(exc), (
+                f"clubb-cf must not be guard-blocked on cd-grid alias {ok_disc!r}")
+
+
 def test_yaml_settable_bools_have_no_switches():
     """#872 sweep: every store_true flag a shipped YAML can set true is now
     BooleanOptionalAction, so a --config that enables it stays CLI-overridable
@@ -2542,3 +2613,277 @@ def test_bechtold_use_ifs_cape_closure_legacy_flat_config_gets_default():
 
     cfg = ExperimentConfig.from_amip_config(_LegacyView(flat))
     assert cfg.bechtold_use_ifs_cape_closure is True
+
+
+def test_bechtold_use_ifs_subcloud_evap_round_trips_and_threads():
+    """--bechtold-use-ifs-subcloud-evap round-trips into ExperimentConfig,
+    survives the flat-AMIP serialization both ways, and threads into the
+    hot-loop BechtoldConfig; default OFF (legacy byte-identical)."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-use-ifs-subcloud-evap",
+    ]), parser))
+    assert cfg.bechtold_use_ifs_subcloud_evap is True
+    assert _resolve_convection(cfg)[1].use_ifs_subcloud_evap is True
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert d.bechtold_use_ifs_subcloud_evap is True   # default ON 2026-07-16
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--no-bechtold-use-ifs-subcloud-evap"]), parser))
+    assert off.bechtold_use_ifs_subcloud_evap is False
+    assert _resolve_convection(off)[1].use_ifs_subcloud_evap is False
+    for flag in (True, False):
+        e = ExperimentConfig(convection="bechtold",
+                             bechtold_use_ifs_subcloud_evap=flag)
+        flat = e.to_amip_config()
+        assert flat.bechtold_use_ifs_subcloud_evap is flag
+        assert ExperimentConfig.from_amip_config(
+            flat).bechtold_use_ifs_subcloud_evap is flag
+
+
+def test_bechtold_use_ifs_inplume_precip_round_trips_and_threads():
+    """--bechtold-use-ifs-inplume-precip round-trips into ExperimentConfig,
+    survives the flat-AMIP serialization both ways, threads into the hot-loop
+    BechtoldConfig; default OFF (legacy byte-identical)."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-use-ifs-inplume-precip",
+    ]), parser))
+    assert cfg.bechtold_use_ifs_inplume_precip is True
+    assert _resolve_convection(cfg)[1].use_ifs_inplume_precip is True
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert d.bechtold_use_ifs_inplume_precip is True   # default ON 2026-07-16
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--no-bechtold-use-ifs-inplume-precip"]), parser))
+    assert off.bechtold_use_ifs_inplume_precip is False
+    assert _resolve_convection(off)[1].use_ifs_inplume_precip is False
+    for flag in (True, False):
+        e = ExperimentConfig(convection="bechtold",
+                             bechtold_use_ifs_inplume_precip=flag)
+        flat = e.to_amip_config()
+        assert flat.bechtold_use_ifs_inplume_precip is flag
+        assert ExperimentConfig.from_amip_config(
+            flat).bechtold_use_ifs_inplume_precip is flag
+
+
+def test_bechtold_dx_m_round_trips_and_threads():
+    """--bechtold-dx-m round-trips (CLI -> ExperimentConfig -> flat AMIP ->
+    BechtoldConfig); default 0 = legacy."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-dx-m", "417000",
+    ]), parser))
+    assert cfg.bechtold_dx_m == 417000.0
+    assert _resolve_convection(cfg)[1].dx_m == 417000.0
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert d.bechtold_dx_m == 0.0
+    flat = ExperimentConfig(convection="bechtold",
+                            bechtold_dx_m=123456.0).to_amip_config()
+    assert flat.bechtold_dx_m == 123456.0
+    assert ExperimentConfig.from_amip_config(flat).bechtold_dx_m == 123456.0
+
+
+def test_bechtold_use_ifs_downdraft_round_trips_and_threads():
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-use-ifs-downdraft"]), parser))
+    assert cfg.bechtold_use_ifs_downdraft is True
+    assert _resolve_convection(cfg)[1].use_ifs_downdraft is True
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert d.bechtold_use_ifs_downdraft is True  # flipped 2026-07-17
+    for flag in (True, False):
+        e = ExperimentConfig(convection="bechtold",
+                             bechtold_use_ifs_downdraft=flag)
+        flat = e.to_amip_config()
+        assert flat.bechtold_use_ifs_downdraft is flag
+        assert ExperimentConfig.from_amip_config(
+            flat).bechtold_use_ifs_downdraft is flag
+
+
+def test_bechtold_use_ifs_shallow_closure_round_trips_and_threads():
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-use-ifs-shallow-closure"]), parser))
+    assert cfg.bechtold_use_ifs_shallow_closure is True
+    assert _resolve_convection(cfg)[1].use_ifs_shallow_closure is True
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert d.bechtold_use_ifs_shallow_closure is False
+    for flag in (True, False):
+        e = ExperimentConfig(convection="bechtold",
+                             bechtold_use_ifs_shallow_closure=flag)
+        flat = e.to_amip_config()
+        assert flat.bechtold_use_ifs_shallow_closure is flag
+        assert ExperimentConfig.from_amip_config(
+            flat).bechtold_use_ifs_shallow_closure is flag
+
+
+def test_bechtold_capdcycl_and_land_rhebc_round_trip():
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-use-ifs-capdcycl", "--bechtold-use-ifs-land-rhebc"]),
+        parser))
+    cc = _resolve_convection(cfg)[1]
+    assert cc.use_ifs_capdcycl is True and cc.use_ifs_land_rhebc is True
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    dcc = _resolve_convection(d)[1]
+    assert dcc.use_ifs_capdcycl is True and dcc.use_ifs_land_rhebc is True  # flipped 2026-07-17
+    for flag in (True, False):
+        e = ExperimentConfig(convection="bechtold",
+                             bechtold_use_ifs_capdcycl=flag,
+                             bechtold_use_ifs_land_rhebc=flag)
+        flat = e.to_amip_config()
+        back = ExperimentConfig.from_amip_config(flat)
+        assert back.bechtold_use_ifs_capdcycl is flag
+        assert back.bechtold_use_ifs_land_rhebc is flag
+
+
+def test_bechtold_use_ifs_snow_melt_round_trip():
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-use-ifs-snow-melt"]), parser))
+    assert _resolve_convection(cfg)[1].use_ifs_snow_melt is True
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert _resolve_convection(d)[1].use_ifs_snow_melt is True  # flipped 2026-07-17
+    for flag in (True, False):
+        e = ExperimentConfig(convection="bechtold",
+                             bechtold_use_ifs_snow_melt=flag)
+        assert ExperimentConfig.from_amip_config(
+            e.to_amip_config()).bechtold_use_ifs_snow_melt is flag
+
+
+def test_ml_parameterization_requires_checkpoint_and_stats():
+    """``--physics-parameterization ml`` without checkpoint+stats must fail at
+    parse time (the guard used to be dead code inside the --evaluate branch,
+    unreachable after its parser.error — audit 2026-07-17)."""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical",
+            "--physics-parameterization", "ml",
+            "--convection", "mass_flux", "--turbulence", "louis",
+        ]), parser)
+    # With both assets the guard passes.
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--physics-parameterization", "ml",
+        "--convection", "mass_flux", "--turbulence", "louis",
+        "--physics-parameterization-checkpoint", "/tmp/ckpt.eqx",
+        "--physics-parameterization-stats", "/tmp/stats.npz",
+    ]), parser)
+    assert args.physics_parameterization == "ml"
+
+
+def test_truncation_conflicting_grid_or_discretization_errors():
+    """--truncation with an explicitly conflicting --grid-type/--discretization
+    must be a hard error, not a silent switch to gaussian/spectral (the one
+    silent grid fallback in the driver — audit 2026-07-17). The argparse
+    defaults (cubed_sphere/centered) are still coerced."""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--truncation", "42",
+            "--grid-type", "latlon",
+        ]), parser)
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--truncation", "42",
+            "--discretization", "mpas",
+        ]), parser)
+    # An explicit value EQUAL to the production default also conflicts (the
+    # None-sentinel default makes it distinguishable from unset).
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--truncation", "42",
+            "--grid-type", "cubed_sphere",
+        ]), parser)
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--discretization", "spectral",
+            "--grid-type", "latlon",
+        ]), parser)
+    # Bare --truncation still auto-configures the spectral pair.
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--truncation", "42",
+    ]), parser)
+    assert args.grid_type == "gaussian"
+    assert args.discretization == "spectral"
+    assert args.resolution == 42
+    # Explicit-but-agreeing choices also pass.
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--truncation", "42",
+        "--grid-type", "gaussian", "--discretization", "spectral",
+    ]), parser)
+    assert args.grid_type == "gaussian"
+    # Bare defaults resolve to the production pair.
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]),
+                             parser)
+    assert args.grid_type == "cubed_sphere"
+    assert args.discretization == "centered"
+
+
+def test_explicit_zero_p_top_and_stretching_survive():
+    """An explicit ``--p-top 0``/``--stretching 0`` must reach GridConfig
+    instead of being swallowed by an ``or``-default (so validate_strict can
+    reject it loudly); the bare default still yields 200.0/2.0."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--p-top", "0", "--stretching", "0",
+    ]), parser))
+    assert cfg.grid.p_top_Pa == 0.0
+    assert cfg.grid.stretching == 0.0
+    cfg_def = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_def.grid.p_top_Pa == 200.0
+    assert cfg_def.grid.stretching == 2.0
+
+
+def test_restart_still_requires_forcing_path_for_real_data():
+    """--restart-from does NOT exempt --forcing-path for a real dataset: forcing
+    is not in the checkpoint and setup() loads it before the checkpoint, so the
+    old exemption only deferred the failure to a confusing deep error
+    (audit 2026-07-17)."""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "custom", "--restart-from", "/tmp/ckpt.zarr",
+        ]), parser)
+    # analytical needs no forcing file even on restart.
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--restart-from", "/tmp/ckpt.zarr",
+    ]), parser)
+    assert args.restart_from == "/tmp/ckpt.zarr"
+    # real dataset WITH a forcing path is fine.
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "custom", "--restart-from", "/tmp/ckpt.zarr",
+        "--forcing-path", "/tmp/sst.nc",
+    ]), parser)
+    assert args.forcing_path == "/tmp/sst.nc"

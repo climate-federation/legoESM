@@ -25,6 +25,7 @@ import numpy as np
 import pytest
 
 from legoesm.atmosphere.physics.physics_state import (
+    PHYSSTATE_INPUT_FIELDS,
     PhysicsState,
     init_physics_state,
     update_physics_state,
@@ -1252,3 +1253,68 @@ def test_requires_phys_state_gwd_composite():
     assert _req("hines+mcfarlane") is False
     assert _req("mcfarlane") is False
     assert _req("none") is False
+
+
+def test_dyn_tendency_inputs_are_consumed_not_carried_forward():
+    """RCAPQADV staging (codex r2): the per-step dynamics-tendency INPUTS
+    (``PHYSSTATE_INPUT_FIELDS``) must be CONSUMED each call — ``update_physics_
+    state`` clears them to None unless the driver re-supplies them, so a missed
+    refresh fails CLOSED (the bridge guard raises on None) instead of silently
+    pairing a stale tendency with a new state."""
+    from legoesm.atmosphere.physics.combined import PhysicsConfig
+    from legoesm.atmosphere.physics.convection.config import (
+        BechtoldConfig, ConvectionConfig,
+    )
+
+    cfg = PhysicsConfig(convection=ConvectionConfig(
+        scheme="bechtold", bechtold=BechtoldConfig()))
+    ps = init_physics_state(ncol=2, nlev=4, physics_config=cfg)
+    assert ps.dyn_tendency_T is None and ps.dyn_tendency_qv is None
+    # A driver populates them for one call.
+    populated = ps._replace(
+        dyn_tendency_T=jnp.ones((2, 4)), dyn_tendency_qv=jnp.ones((2, 4)))
+    # A normal post-physics carry update that does NOT re-supply them must
+    # RESET them to None (not carry the stale values forward).
+    nxt = update_physics_state(populated, {"conv_prog_profile": jnp.zeros((2, 4))})
+    for _f in PHYSSTATE_INPUT_FIELDS:
+        assert getattr(nxt, _f) is None, (
+            f"{_f} was carried forward — a missed driver refresh would run "
+            "RCAPQADV on a stale tendency instead of failing closed"
+        )
+    # An explicit re-supply on the same call IS honoured.
+    nxt2 = update_physics_state(
+        populated, {"dyn_tendency_T": jnp.full((2, 4), 3.0)})
+    assert float(nxt2.dyn_tendency_T[0, 0]) == 3.0
+    assert nxt2.dyn_tendency_qv is None  # the un-supplied one still resets
+
+
+def test_mpas_legacy_dyn_tendency_checkpoint_entry_is_dropped_on_load(tmp_path):
+    """Codex r2 finding-2: a legacy / hand-edited MPAS checkpoint that carries
+    a ``physstate_dyn_tendency_*`` entry — including a None-derived OBJECT array
+    that ``np.load(allow_pickle=False)`` cannot even materialise — must be
+    DROPPED at the load boundary (before any value access / scatter), not fail
+    the load.  The fresh seed's None is correct (these are per-step inputs)."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    cfg = _mpas_driver_cfg()
+    driver_a = ModelDriver(cfg, output_dir=tmp_path / "a")
+    driver_a.setup()
+    assert driver_a.run() == "COMPLETED"
+    ckpt = sorted((tmp_path / "a").glob("checkpoint_day_*.npz"))[-1]
+
+    legacy = tmp_path / "legacy.npz"
+    with np.load(ckpt) as d:
+        kept = {k: np.asarray(d[k]) for k in d.files}
+    # Inject a legacy per-step-input entry as an OBJECT array (what the earlier
+    # None-skip draft would have produced from np.asarray(None)).
+    kept["physstate_dyn_tendency_T"] = np.array(None, dtype=object)
+    # ``allow_pickle=True`` only to WRITE the crafted object array; the loader
+    # under test uses the default allow_pickle=False and must not touch it.
+    np.savez(legacy, **kept)
+
+    driver_b = ModelDriver(cfg, output_dir=tmp_path / "b")
+    driver_b.setup()
+    driver_b.load_checkpoint(legacy)  # must NOT raise
+    assert "physstate_dyn_tendency_T" not in driver_b._carry_aux
+    # A real prognostic carry is still restored alongside.
+    assert "physstate_tke" in driver_b._carry_aux

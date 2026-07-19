@@ -294,9 +294,23 @@ def _build_test_matrix() -> list[TestCase]:
         # at 72x144) would make 100 days ~631k host-loop steps (codex
         # round-12 Medium), and the collision/exchange phase this case
         # gates happens well inside 20 days.
+        # Spectral runs the modons at T42, not the T21 canvas default:
+        # T21's 64-point equatorial spacing is ~625 km — 2.3x coarser
+        # than the other three panels (C36 / 72x144 / ico5, all
+        # ~250-280 km) — and the r0=750 km vortex cores disintegrate
+        # into wave debris at the day-~20 collision (the collision
+        # sharpens gradients past the truncation).  T42 (~312 km) is
+        # the resolution-parity choice; the dt law and hyperdiffusion
+        # need no per-resolution retuning here (modon-scale damping
+        # tau ~ 250 d either way).
+        # All four grids run the full ~100-day return-to-IC so the
+        # cross-grid panels compare the SAME time.  The old latlon
+        # 20-day cap predated the measured cost: 1.4 ms/host-step at
+        # 72x144 -> ~15 min for 100 d (dt ~ 13.7 s pole-CFL).
         matrix.append(TestCase(
-            "shallow_water", "colliding_modons", g, res[g], "none",
-            20 if g == "latlon" else 100, 1,
+            "shallow_water", "colliding_modons", g,
+            "T42" if g == "spectral" else res[g], "none",
+            100, 1,
             {"test_num": 8}))
 
     # --- Hydrostatic: all grids, sigma + hybrid ---
@@ -1185,6 +1199,33 @@ def _laplacian_visc_latlon(n_lat: int, frac: float = 0.1) -> float:
     dy = math.pi * constants.R_earth / n_lat
     c_gw = math.sqrt(constants.R_d * 300.0)
     return frac * c_gw * dy
+
+
+def _biharmonic_visc_latlon(n_lat: int, efold_hours: float = 9.0) -> float:
+    """Biharmonic viscosity nu4 = dy^4 / (64 * tau) for the lat-lon grid.
+
+    Sized on the DISCRETE operator (codex review): the 2-D checkerboard
+    (the worst grid-noise mode) has 5-point-Laplacian eigenvalue
+    lam = -(4/dx^2 + 4/dy^2) = -8/dy^2 at the equator (dx = dy there,
+    since n_lon = 2*n_lat), so its del-4 damping rate is
+    nu4*lam^2 = 64*nu4/dy^4 and
+
+        nu4 = dy^4 / (64 * efold_hours * 3600)
+
+    gives the checkerboard an ``efold_hours`` e-folding (the continuum
+    symbol k = pi/dy would overstate lam by pi^2/4 per direction).  The
+    ico-style ``dx^4/(48 h)`` law is 12x stronger at equal spacing
+    (64*9/48) — and more in practice, since ``_hyperdiff_ico`` uses the
+    MINIMUM mesh edge — and lands the strong-damping band on the
+    modon/Rossby-wave scales this coefficient must preserve.  At n_lat=72: nu4 ~ 2.9e15 m^4/s ->
+    tau(checkerboard) = 9 h, tau(1-D 2*dy Nyquist) = 36 h,
+    tau(L=3000 km) ~ 0.6 yr, tau(L=4000 km) ~ 2 yr.  Pole rows are
+    further capped inside the model (see ``_nu_del4_row_profiles``).
+    """
+    import math
+    from legoesm import constants
+    dy = math.pi * constants.R_earth / n_lat
+    return dy ** 4 / (64.0 * efold_hours * 3600.0)
 
 
 def _laplacian_visc_ico(mesh, frac: float = 0.1) -> float:
@@ -2641,8 +2682,28 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                 n, omega=(0.0 if test_num == 8 else constants.Omega),
                 use_duogrid=True, k2e_nord=4)
         else:
-            grid = (create_cubed_sphere(n, omega=0.0, use_duogrid=True)
-                    if test_num == 8 else create_cubed_sphere(n))
+            # LEGOESM_SW_MODON_K2E_NORD (modons only): duo halo Lagrange
+            # order on the LEGACY equiangular grid — isolates halo order
+            # from the tuned geometry (the --fv3-native-grid bundle swaps
+            # both and destabilizes the tuned A-L solver).  Default: the
+            # legacy order 2.
+            _m_nord = os.environ.get("LEGOESM_SW_MODON_K2E_NORD")
+            # LEGOESM_SW_CUBE_DUO_NORD (opt-in probe, Williamson lane):
+            # the production Williamson cases run NON-duogrid (balanced
+            # flows, calibrated separately) — this knob turns the legacy
+            # equiangular duo halos ON for them at the given Lagrange
+            # order (2 or 4), for halo-order sensitivity probes on the
+            # W2 imprint.  Unset = production default (no duo).
+            _w_nord = os.environ.get("LEGOESM_SW_CUBE_DUO_NORD")
+            if test_num == 8:
+                grid = create_cubed_sphere(
+                    n, omega=0.0, use_duogrid=True,
+                    k2e_nord=int(_m_nord) if _m_nord else None)
+            elif _w_nord:
+                grid = create_cubed_sphere(
+                    n, use_duogrid=True, k2e_nord=int(_w_nord))
+            else:
+                grid = create_cubed_sphere(n)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         dt = 300.0
         # Iter-760: switch to Fortran-faithful del-n vorticity damping
@@ -2716,6 +2777,18 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                 "LEGOESM_SW_MODON_DIV_DAMP_FACTOR", str(MODON_DIV_DAMP_FACTOR)))
             _m_dv = float(os.environ.get(
                 "LEGOESM_SW_MODON_DAMP_V", str(MODON_DAMP_V)))
+            # LEGOESM_SW_MODON_CORNER_DAMP_V (probe): corner-localized
+            # del-n vorticity damping — full coefficient near the 8
+            # cube vertices, `damp_v` elsewhere (the 2026-07-17 sweep
+            # separated vertex-mode suppression from core erosion).
+            _m_cdv = float(os.environ.get(
+                "LEGOESM_SW_MODON_CORNER_DAMP_V", "0.0"))
+            # Oracle-recipe probes (Zenodo case-8 duo input.nml:
+            # nord=2, d4_bg=0.12, do_vort_damp=F): structured del-6
+            # divergence damping in place of the wind hyperdiff /
+            # vorticity damping families.
+            _m_d4 = float(os.environ.get("LEGOESM_SW_MODON_D4_BG", "0.0"))
+            _m_d4n = int(os.environ.get("LEGOESM_SW_MODON_D4_NORD", "2"))
             # #521/#753: biharmonic backstop from the env knobs (default env ->
             # the (ref/n)^2 law, the #753 item-1 default: C96 erupts at the face
             # seams under ^4 but is stable under ^2, validated 100 days at
@@ -2725,6 +2798,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             config = iter1009_dual_target_config(
                 n, div_damp_factor=_m_dd, damp_v=_m_dv,
                 hyperdiff_coeff=_modon_hyperdiff_coeff(n),
+                corner_damp_v=_m_cdv,
+                d4_bg_prod=_m_d4, d4_nord_prod=_m_d4n,
             )
         elif test_num in (2, 5, 6):
             # iter-31: cube W6 (Rossby-Haurwitz wave-4) 14-day blows up
@@ -2774,9 +2849,23 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                 os.environ.get("LEGOESM_SW_DIV_DAMP_FACTOR", "8.0"))
             _sw_hd_fac = float(
                 os.environ.get("LEGOESM_SW_HYPERDIFF_FACTOR", "2.0"))
+            # LEGOESM_SW_D4_BG (probe): d_sw5 nord=1 del-4 background
+            # divergence damping on the production path (certified d_sw5
+            # reference; FV3 fv_arrays default 0.16).  0.0 = current
+            # calibrated production behaviour.
+            _sw_d4 = float(os.environ.get("LEGOESM_SW_D4_BG", "0.0"))
+            # LEGOESM_SW_DAMP_V / LEGOESM_SW_CORNER_DAMP_V (probe):
+            # corner-localized vorticity damping on the Williamson lane
+            # (interior coefficient vs full coefficient at the 8 cube
+            # vertices) — the modon-sweep mechanism applied to the W2
+            # imprint question.
+            _sw_dv = float(os.environ.get("LEGOESM_SW_DAMP_V", "0.030"))
+            _sw_cdv = float(os.environ.get("LEGOESM_SW_CORNER_DAMP_V", "0.0"))
             config = iter1009_dual_target_config(
                 n, div_damp_factor=_sw_dd_fac,
                 hyperdiff_coeff=_sw_hd_fac * _hyperdiff_cube(n),
+                d4_bg_prod=_sw_d4,
+                damp_v=_sw_dv, corner_damp_v=_sw_cdv,
             )
         else:
             config = iter1009_dual_target_config(n)
@@ -2950,11 +3039,26 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         _c_grav = _m.sqrt(_consts_grav.g * (5000.0 if test_num == 8
                                             else 3000.0))
         dt = min(300.0, 0.5 * _dx_pole / _c_grav)
-        # A_h must respect diffusion CFL: A_h*dt/dx_pole^2 < 0.5
-        _A_h_max = 0.4 * _dx_pole**2 / dt
-        _A_h = min(_laplacian_visc_latlon(n_lat), _A_h_max)
+        # Biharmonic (del-4) viscosity, NOT Laplacian.  The previous
+        # A_h = min(0.1*c_gw*dy, 0.4*dx_pole^2/dt) ~ 1e6 m^2/s damped
+        # PHYSICAL scales: k^2 law -> tau ~ 6 d for Rossby-Haurwitz
+        # wave-4 (W6 decayed to zonal by day 14) and tau < 1 d at the
+        # modon scale (colliding modons erased).  The del-4 law damps
+        # the discrete 2-D checkerboard with tau = 9 h while leaving
+        # the modon scale (L ~ 3000-4000 km) at tau ~ 0.6-2 yr.  Pole
+        # rows are stability-capped inside the model
+        # (``nu_del4_cfl_frac`` row profile), so no dx_pole clamp is
+        # needed here.
         config = CGridLatLonShallowWaterConfig(
-            A_h=_A_h, anchor_mass_to_initial=True,
+            # Modons run 4x weaker del-4 (36 h checkerboard e-fold vs
+            # the 9 h default): at the pole-CFL dt (~13.7 s) the 100-day
+            # run is ~630k steps, and the accumulated explicit+PPM
+            # dissipation weakens the vortices enough to visibly lag
+            # and smear them vs the ico/spectral panels.  The Williamson
+            # cases (<=15 d, forced/steady) keep the 9 h default.
+            nu_del4=_biharmonic_visc_latlon(
+                n_lat, efold_hours=36.0 if test_num == 8 else 9.0),
+            anchor_mass_to_initial=True,
         )
         model = CGridLatLonShallowWaterModel(grid, config, dt=dt)
         # new_test_dycores iter-25: extend SW latlon to W6
@@ -3158,11 +3262,45 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         import math
         _c_gw = math.sqrt(constants.g * 5960.0)  # shallow-water wave speed
         dt = min(600.0, 0.5 * grid.radius / (n_max * _c_gw))
+        # Laplacian eigenvalue at truncation, n_max(n_max+1)/a^2.
+        _lap_tr = n_max * (n_max + 1) / float(constants.R_earth) ** 2
         config = SpectralSWConfig(
+            # Modons: del-6 (order 3) with the SAME truncation-scale
+            # damping RATE as the validated T21-tuned del-4 coefficient
+            # at this resolution (coeff6 = 2.338e15/lap_tr, since
+            # rate6(n_max) = coeff6*lap_tr^3 == 2.338e15*lap_tr^2) but
+            # ~10x weaker at the modon scale (n~13 e-fold 250 d -> ~7 yr).
+            # A plain (ref/n)^4-weakened del-4 blew up mid-run at T42
+            # (validated FAIL: insufficient truncation damping with the
+            # de-aliasing mask disabled) — raise the ORDER, not lower
+            # the rate.  Other cases keep the T21-tuned del-4 default.
+            hyperdiff_coeff=(2.338e15 / _lap_tr if test_num == 8
+                             else 2.338e15),
+            hyperdiff_order=3 if test_num == 8 else 2,
             # Modons (8) get the same order-8 filter as W5/W6: the
             # r0 = 750 km Gaussian jets are near the T21 grid scale, so
             # unfiltered Gibbs ringing contaminates the vorticity field.
             spectral_filter_order=8 if test_num in (5, 6, 8) else 0,
+            # ... but applied ONCE to the IC, not per-step: the
+            # compounding per-step filter is a hidden dissipation
+            # (e^-16 at n=10 over the 100-day modon run; e^-2.5 at
+            # n=10 over W5's 15 days — enough to visibly damp the
+            # transient lee-wave train the latlon/MPAS panels keep).
+            # W5's conical-mountain Gibbs ringing is handled by the
+            # one-time IC filter (phi + phis) plus hyperdiffusion.
+            # W6 keeps the per-step filter: its wave-4 lives at n<=9
+            # (per-step loss < 0.1% over 14 d, validated visually
+            # consistent across all four grids).
+            spectral_filter_every_step=test_num == 6,
+            # Modons keep the DEFAULT 2/3-rule mask.  At T42 the cut
+            # (n_cut=28) sits above the r0=750 km core band (n~13-21),
+            # so the mask costs nothing — the over-truncation problem
+            # existed only at T21 (n_cut=14 slicing the cores), which
+            # the T42 resolution-parity choice already solves.  Running
+            # WITHOUT the mask is NOT sound for this formulation: the
+            # cos^-2 factors in the tendencies make the products more
+            # than quadratic, and a maskless T85 probe NaN'd at step
+            # 100 (T42 maskless was only marginally stable).
         )
         model = SpectralShallowWaterModel(grid, config)
         if test_num == 6:
@@ -3174,7 +3312,10 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             from tests.test_cases.colliding_modons import (
                 colliding_modons_spectral)
             state = colliding_modons_spectral(grid)
-            state = model.filter_initial_state(state)
+            # One-time IC cleanup INCLUDING the wind fields: the modon
+            # IC is wind-defined, so its truncation ringing lives in
+            # vor_hat (the default phi-only filter would miss it).
+            state = model.filter_initial_state(state, include_winds=True)
         elif test_num == 2:
             state = williamson_test2_spectral(grid)
         else:
@@ -3822,9 +3963,9 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         if mass_drift > 0 or n_mass_samples >= 2:
             notes += f", mass_drift={mass_drift:.2e}"
     if mass_drift > 0.01:
-        logger.warning(
-            "Cosine bell %s: mass drift %.2e exceeds 1%% threshold",
-            tc.grid_type, mass_drift)
+        print(
+            f"WARNING: Cosine bell {tc.grid_type}: mass drift "
+            f"{mass_drift:.2e} exceeds 1% threshold")
     # iter-119 (codex iter-118-followup MEDIUM-1): apply
     # the iter-117/118 mass-drift PASS gate.  Pre-iter-119
     # cosine_bell only WARNED.  iter-120: now applies to ALL

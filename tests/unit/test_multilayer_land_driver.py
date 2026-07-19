@@ -125,6 +125,29 @@ def test_multilayer_land_evolves_over_amip_segment(monkeypatch, tmp_path):
                   & (np.asarray(st.theta_soil) <= 1.0))
 
 
+def test_multilayer_land_evolves_under_unfused_radiation(monkeypatch, tmp_path):
+    """The UNFUSED radiation path (rad_update_steps>1, unfused_radiation=True)
+    must still advance the soil. Before the C4 fix _run_rad discarded
+    compute_radiation_core's advanced land state, so the Richards column FROZE
+    across the whole run (the radiation cadence is the only place the tile is
+    stepped in that mode). Regression: soil must change, not stay at the seed."""
+    _patch_land_loaders(monkeypatch)
+    cfg = _small_cfg()._replace(rad_update_steps=2, unfused_radiation=True)
+    driver = ModelDriver(cfg, output_dir=tmp_path)
+    driver.setup()
+    T_soil_0 = np.asarray(driver._land_ml_state.T_soil).copy()
+
+    status = driver.run()
+
+    assert status == "COMPLETED"
+    st = driver._land_ml_state
+    assert st is not None
+    assert not np.allclose(np.asarray(st.T_soil), T_soil_0), (
+        "unfused-radiation soil column did not advance (frozen — the "
+        "_run_rad land_ml discard regression)")
+    assert np.all(np.isfinite(np.asarray(st.T_soil)))
+
+
 def test_slab_path_leaves_multilayer_inactive(monkeypatch, tmp_path):
     """use_multilayer_land=False -> all land_ml_* stay None (slab path unchanged)."""
     _patch_land_loaders(monkeypatch)

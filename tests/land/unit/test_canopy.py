@@ -90,8 +90,6 @@ def _call_interface(ncol=NCOL):
         canopy_config=config,
         land_config=land_config,
         land_params=None,
-        w_frac_rz=jnp.full(ncol, 0.6),
-        wind_speed=jnp.full(ncol, 4.5),
         canopy_state=None,
         dt=1800.0,
         T_soil=T_soil,
@@ -217,8 +215,6 @@ class TestCLMMLInterface(unittest.TestCase):
             canopy_config=config,
             land_config=land_config,
             land_params=None,
-            w_frac_rz=jnp.full(NCOL, 0.6),
-            wind_speed=jnp.full(NCOL, 4.5),
             canopy_state=state1,
             dt=1800.0,
             T_soil=T_soil,
@@ -241,87 +237,254 @@ class TestCLMMLInterface(unittest.TestCase):
 
 
 class TestCLMMLDifferentiability(unittest.TestCase):
-    """Test that jax.grad can differentiate through the canopy interface."""
+    """jax.grad flows through the CLM-ML canopy interface in differentiable mode.
 
-    @pytest.mark.timeout(120)
-    @pytest.mark.xfail(
-        reason=(
-            "CLM-ML-JAX uses float() on traced arrays and Python control flow "
-            "throughout its Fortran port; these are incompatible with jax.grad "
-            "tracing. Full end-to-end differentiability requires a JAX-native "
-            "rewrite of the inner loops (tracked as future work)."
-        ),
-        strict=True,
-    )
-    def test_grad_lhflx_wrt_T_lowest(self):
-        """Expected to fail: CLM-ML uses Python/NumPy control flow and is not JAX-differentiable.
+    The CLM-ML-JAX repo exposes a JAX-native differentiable path selected by a
+    per-call ``GridInfo`` (``grid=``).  legoESM activates it via
+    ``CLMMLCanopyConfig(differentiable=True)`` (single column).  These tests
+    verify ``jax.grad`` is finite, non-zero, matches finite difference, and that
+    the diff path reproduces the forward-path fluxes exactly.  They are ``slow``
+    (the first grad trace compiles the whole multilayer-canopy scan, ~minutes).
+    """
 
-        This test documents that ``jax.grad`` raises or produces wrong results
-        through the CLM-ML path, because the Fortran port uses ``float()`` on
-        traced arrays and Python control flow throughout its inner loops —
-        incompatible with JAX tracing.
+    # ncol == 1: the diff path reads one concrete (ncan, ntop, nbot).
+    _NCOL1 = 1
 
-        If this test starts passing, CLM-ML-JAX has become JAX-compatible —
-        remove the xfail and add a proper gradient finite-difference check.
+    def _run(self, config, T_lowest, state, T_soil, psi_soil, theta_soil):
+        from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
+        from legoesm.land.config import MultiLayerLandConfig
+        forcing = _make_forcing(self._NCOL1)._replace(T_lowest=T_lowest)
+        return compute_clm_ml_canopy_fluxes(
+            T_soil_top=T_soil[:, 0],
+            forcing=forcing,
+            canopy_config=config,
+            land_config=MultiLayerLandConfig(surface_scheme=config),
+            land_params=None,
+            canopy_state=state,
+            dt=1800.0,
+            T_soil=T_soil,
+            psi_soil=psi_soil,
+            theta_soil=theta_soil,
+            lat=jnp.zeros(self._NCOL1),
+            doy=180.0,
+        )
+
+    def test_extract_grid_info_requires_warm_state(self):
+        """extract_clm_ml_grid_info(None) raises (needs a warm-started state)."""
+        from legoesm.land.canopy.clm_ml_interface import extract_clm_ml_grid_info
+        with self.assertRaises(ValueError):
+            extract_clm_ml_grid_info(None)
+
+    @pytest.mark.slow
+    def test_multicolumn_diff_is_hard_error(self):
+        """differentiable=True with ncol>1 raises (no silent degrade to forward)."""
+        from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
+        from legoesm.land.canopy.config import CLMMLCanopyConfig
+        from legoesm.land.config import MultiLayerLandConfig
+        config = CLMMLCanopyConfig(differentiable=True)
+        T_soil, psi_soil, theta_soil = _make_soil_arrays(2)
+        with self.assertRaises(ValueError):
+            compute_clm_ml_canopy_fluxes(
+                T_soil_top=T_soil[:, 0], forcing=_make_forcing(2),
+                canopy_config=config,
+                land_config=MultiLayerLandConfig(surface_scheme=config),
+                land_params=None, canopy_state=None, dt=1800.0,
+                T_soil=T_soil, psi_soil=psi_soil, theta_soil=theta_soil,
+                lat=jnp.zeros(2), doy=180.0,
+            )
+
+    def test_cold_start_under_grad_is_clear_error(self):
+        """differentiable=True + COLD state + ANY traced diff input → clear error.
+
+        The first (cold) step builds the canopy vertical structure host-side and
+        cannot sit on the jax.grad tape.  Grad-ing a cold step must raise an
+        actionable ValueError (warm-start-first), not a cryptic
+        TracerArrayConversionError from the forward path.  Covers both a forcing
+        leaf AND a non-forcing differentiable input (soil temperature, forcing
+        held concrete) so the guard is not forcing-only.  Fails fast at the guard
+        (before the flux solve), so it is not ``slow``.
         """
         from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
         from legoesm.land.canopy.config import CLMMLCanopyConfig
         from legoesm.land.config import MultiLayerLandConfig
 
-        config = CLMMLCanopyConfig()
-        land_config = MultiLayerLandConfig(surface_scheme=config)
-        forcing = _make_forcing(NCOL)
-        T_soil, psi_soil, theta_soil = _make_soil_arrays(NCOL)
+        config = CLMMLCanopyConfig(differentiable=True)
+        T_soil, psi_soil, theta_soil = _make_soil_arrays(1)
 
-        # First call to warm-start (avoids cold-start in grad path)
-        _, state0 = compute_clm_ml_canopy_fluxes(
-            T_soil_top=T_soil[:, 0],
-            forcing=forcing,
-            canopy_config=config,
-            land_config=land_config,
-            land_params=None,
-            w_frac_rz=jnp.full(NCOL, 0.6),
-            wind_speed=jnp.full(NCOL, 4.5),
-            canopy_state=None,
-            dt=1800.0,
-            T_soil=T_soil,
-            psi_soil=psi_soil,
-            theta_soil=theta_soil,
-            lat=jnp.zeros(NCOL),
-            doy=180.0,
-        )
-
-        def _loss(T_lowest):
-            f2 = forcing._replace(T_lowest=T_lowest)
-            T_surf = jnp.full(NCOL, T_lowest[0])
-            T_s2 = jnp.stack([T_surf] * T_soil.shape[1], axis=-1)
+        def _call(forcing, T_soil_arg):
             out, _ = compute_clm_ml_canopy_fluxes(
-                T_soil_top=T_surf,
-                forcing=f2,
-                canopy_config=config,
-                land_config=land_config,
-                land_params=None,
-                w_frac_rz=jnp.full(NCOL, 0.6),
-                wind_speed=jnp.full(NCOL, 4.5),
-                canopy_state=state0,
-                dt=1800.0,
-                T_soil=T_s2,
-                psi_soil=psi_soil,
-                theta_soil=theta_soil,
-                lat=jnp.zeros(NCOL),
-                doy=180.0,
+                T_soil_top=T_soil_arg[:, 0], forcing=forcing, canopy_config=config,
+                land_config=MultiLayerLandConfig(surface_scheme=config),
+                land_params=None, canopy_state=None, dt=1800.0,
+                T_soil=T_soil_arg, psi_soil=psi_soil, theta_soil=theta_soil,
+                lat=jnp.zeros(1), doy=180.0,
             )
             return jnp.sum(out.lhflx)
 
-        # Should not raise — gradient may be zero through Python side effects
-        try:
-            grad_fn = jax.grad(_loss)
-            g = grad_fn(jnp.full(NCOL, 295.0))
-            # g must be finite
-            self.assertTrue(bool(jnp.all(jnp.isfinite(g))),
-                            f"Gradient contains non-finite values: {g}")
-        except Exception as exc:  # noqa: BLE001
-            self.fail(f"jax.grad raised unexpectedly: {exc}")
+        forcing0 = _make_forcing(1)
+
+        # (a) grad w.r.t. a forcing leaf (soil state concrete).
+        def _loss_forcing(T_lowest):
+            return _call(forcing0._replace(T_lowest=T_lowest), T_soil)
+
+        with self.assertRaises(ValueError) as ctx_f:
+            jax.grad(_loss_forcing)(jnp.full(1, 290.0))
+        self.assertIn("WARM-started", str(ctx_f.exception))
+
+        # (b) grad w.r.t. a NON-forcing differentiable input (soil temperature),
+        #     forcing held concrete — must ALSO be caught (guard is not
+        #     forcing-only; codex P2 fix).
+        def _loss_soil(T_soil_arg):
+            return _call(forcing0, T_soil_arg)
+
+        with self.assertRaises(ValueError) as ctx_s:
+            jax.grad(_loss_soil)(T_soil)
+        self.assertIn("WARM-started", str(ctx_s.exception))
+
+        # (c) grad w.r.t. a precipitation leaf (consumed by _build_stubs as
+        #     forc_rain/forc_snow) — the generic forcing._fields scan must catch
+        #     it (guards against regressing to a hand-maintained leaf list).
+        def _loss_precip(precip):
+            return _call(forcing0._replace(precip_total=precip), T_soil)
+
+        with self.assertRaises(ValueError) as ctx_p:
+            jax.grad(_loss_precip)(jnp.full(1, 1.0e-5))
+        self.assertIn("WARM-started", str(ctx_p.exception))
+
+    @pytest.mark.slow
+    def test_grad_lhflx_wrt_T_lowest(self):
+        """jax.grad(sum lhflx) w.r.t. T_lowest is finite, non-zero, FD-consistent,
+        and the diff path matches the forward path to floating point.
+
+        Replaces the historical strict-xfail: the CLM-ML-JAX diff mode
+        (``grid=`` + ``lax.scan``) is JAX-native, so the old "requires a
+        JAX-native rewrite" claim is obsolete.
+        """
+        from legoesm.land.canopy.config import CLMMLCanopyConfig
+
+        cfg_diff = CLMMLCanopyConfig(differentiable=True)
+        cfg_fwd = CLMMLCanopyConfig(differentiable=False)
+        n = self._NCOL1
+        # Soil state held FIXED (not derived from T_lowest) so T_lowest flows only
+        # through the atmospheric forcing — a clean analytic-vs-FD comparison.
+        T_soil = jnp.full((n, 8), 290.0)
+        psi_soil = jnp.full((n, 8), -0.5)
+        theta_soil = jnp.full((n, 8), 0.25)
+        T0 = jnp.full(n, 295.0)
+
+        # Warm-up cold call builds the vertical structure (forward, single step).
+        _, state0 = self._run(cfg_diff, T0, None, T_soil, psi_soil, theta_soil)
+        self.assertIsNotNone(state0.mlcanopy)
+
+        # grid_info pass-through: extracting the concrete structural ints and
+        # threading them explicitly must reproduce the state-derived diff result
+        # (this is the multi-step-safe path — carried state may be a tracer).
+        from legoesm.land.canopy.clm_ml_interface import (
+            compute_clm_ml_canopy_fluxes,
+            extract_clm_ml_grid_info,
+        )
+        from legoesm.land.config import MultiLayerLandConfig
+        gi = extract_clm_ml_grid_info(state0)
+        self.assertGreaterEqual(int(gi.ncan), 1)
+        out_gi, _ = compute_clm_ml_canopy_fluxes(
+            T_soil_top=T_soil[:, 0],
+            forcing=_make_forcing(self._NCOL1)._replace(T_lowest=T0),
+            canopy_config=cfg_diff,
+            land_config=MultiLayerLandConfig(surface_scheme=cfg_diff),
+            land_params=None, canopy_state=state0, dt=1800.0,
+            T_soil=T_soil, psi_soil=psi_soil, theta_soil=theta_soil,
+            lat=jnp.zeros(self._NCOL1), doy=180.0, grid_info=gi,
+        )
+
+        # Forward/diff parity from the same warm state.
+        out_diff, _ = self._run(cfg_diff, T0, state0, T_soil, psi_soil, theta_soil)
+        out_fwd, _ = self._run(cfg_fwd, T0, state0, T_soil, psi_soil, theta_soil)
+        for name in ("shflx", "lhflx", "G_soil", "sw_net", "gpp", "T_surface"):
+            a = float(getattr(out_diff, name)[0])
+            b = float(getattr(out_fwd, name)[0])
+            self.assertTrue(
+                abs(a - b) <= 1e-6 + 1e-6 * abs(b),
+                f"diff/forward parity failed for {name}: {a} vs {b}",
+            )
+            # grid_info path must reproduce the state-derived diff result.
+            c = float(getattr(out_gi, name)[0])
+            self.assertTrue(
+                abs(a - c) <= 1e-9 + 1e-9 * abs(a),
+                f"grid_info parity failed for {name}: {a} vs {c}",
+            )
+
+        # Gradient: finite, non-zero.
+        def _loss(T_lowest):
+            out, _ = self._run(cfg_diff, T_lowest, state0, T_soil, psi_soil, theta_soil)
+            return jnp.sum(out.lhflx)
+
+        g = jax.grad(_loss)(T0)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(g))), f"grad non-finite: {g}")
+        self.assertGreater(float(jnp.max(jnp.abs(g))), 0.0,
+                           "grad is all-zero — forcing disconnected from lhflx")
+
+        # Central finite-difference check (loose tol for the non-smooth physics).
+        eps = 1e-2
+        fp = float(_loss(T0 + eps))
+        fm = float(_loss(T0 - eps))
+        g_fd = (fp - fm) / (2.0 * eps)
+        g_an = float(g[0])
+        rel = abs(g_an - g_fd) / (abs(g_fd) + 1e-12)
+        self.assertLess(
+            rel, 0.10,
+            f"FD gradient mismatch: analytic={g_an:.6e} fd={g_fd:.6e} rel={rel:.3%}",
+        )
+
+    @pytest.mark.slow
+    def test_grad_through_step_multilayer_land(self):
+        """jax.grad flows end-to-end through ``step_multilayer_land`` in CLM-ML
+        diff mode (the M3 ``clm_ml_grid_info`` threading), not only the low-level
+        interface.
+
+        The interface-level grad test (``test_grad_lhflx_wrt_T_lowest``) FD-checks
+        the numerics; this one guards the DRIVER wiring: warm-start one forward
+        step, extract a concrete ``GridInfo``, then differentiate a subsequent
+        step's ``lhflx`` w.r.t. the atmospheric forcing with the grid info threaded
+        via ``step_multilayer_land(..., clm_ml_grid_info=)``.  A regression that
+        drops the threading (or breaks the tracer-carry path) makes this grad
+        raise or go all-zero.
+        """
+        from legoesm.land.canopy.config import CLMMLCanopyConfig
+        from legoesm.land.config import MultiLayerLandConfig
+        from legoesm.land.multilayer_land import (
+            init_multilayer_land_state, step_multilayer_land)
+        from legoesm.land.canopy.clm_ml_interface import extract_clm_ml_grid_info
+
+        ncol = self._NCOL1  # diff path is single-column
+        config = MultiLayerLandConfig(
+            surface_scheme=CLMMLCanopyConfig(differentiable=True))
+        state0 = init_multilayer_land_state(ncol, config, T_init=288.0)
+        forcing = _make_forcing(ncol)
+        lat = jnp.full(ncol, 38.47)
+        doy, dt = 120.5, 1800.0
+
+        # 1) Warm-start with a concrete forward (cold) step → builds mlcanopy.
+        state1, _, _ = step_multilayer_land(
+            state0, forcing, config, U_min=1.0, dt=dt, lat=lat, doy=doy)
+        self.assertIsNotNone(state1.canopy_state.mlcanopy)
+        grid_info = extract_clm_ml_grid_info(state1.canopy_state)
+
+        # 2) grad of a subsequent step's lhflx w.r.t. T_lowest, grid_info threaded
+        #    through the driver.  state1 is a captured constant under jax.grad.
+        def _loss(T_lowest):
+            f = forcing._replace(T_lowest=T_lowest)
+            _, response, _ = step_multilayer_land(
+                state1, f, config, U_min=1.0, dt=dt, lat=lat, doy=doy,
+                clm_ml_grid_info=grid_info)
+            return jnp.sum(response.lhflx)
+
+        g = jax.grad(_loss)(forcing.T_lowest)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(g))),
+                        f"step-level grad non-finite: {g}")
+        self.assertGreater(
+            float(jnp.max(jnp.abs(g))), 0.0,
+            "step-level grad all-zero — grid_info threading broken or forcing "
+            "disconnected from lhflx through step_multilayer_land")
 
 
 class TestCLMMLIntegration(unittest.TestCase):
@@ -663,8 +826,6 @@ class TestSolarGeometry(unittest.TestCase):
             canopy_config=config,
             land_config=land_config,
             land_params=None,
-            w_frac_rz=jnp.full(ncol, 0.6),
-            wind_speed=jnp.full(ncol, 4.5),
             canopy_state=None,
             dt=1800.0,
             T_soil=T_soil,

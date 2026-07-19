@@ -21,6 +21,8 @@ __param_spec__ = {
             # the pgam_max cap (Morrison module_mp_mg.F90).
             "pgam_min": "numerics: lower clip/cap on the gamma-PSD shape parameter (regulariser, paired with pgam_max)",
             "cloud_optics_asymmetry_g": "numerics: scattering asymmetry g of the two-region inhomogeneity two-stream reflectance (shapes the reduction; the real per-band g lives in RRTMGP, not trained here)",
+            "clubb_cf_override_p_min_pa": "structural: BL-top pressure [Pa] above which the diagnostic-CLUBB cloud-fraction override applies (a level/regime gate, not a trained closure coefficient); 0 => full-column override",
+            "clubb_cf_override_ramp_pa": "numerics: smoothing width [Pa] of the override level gate (linear blend over [p_min-ramp, p_min] to avoid a cloud/heating discontinuity); a regulariser, not a trained coefficient; 0 => sharp step",
         },
         "params": {
             # --- critical_rh: primary cloud-onset RH (Sundqvist + Xu-Randall lower bound) ---
@@ -29,6 +31,9 @@ __param_spec__ = {
             "alpha_xr": {"units": "1", "bounds": (10.0, 1000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
             "p_xr": {"units": "1", "bounds": (0.05, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
             "gamma_xr": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
+            # --- CLUBB cf override strength: blend fraction toward the diagnostic-CLUBB PDF cf in the BL (marine-Sc albedo lever) ---
+            "clubb_cf_override_strength": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "marine-Sc albedo lever (this repo)", "shape": None},
+            "clubb_cf_override_floor": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "marine-Sc albedo lever cloud-collapse floor (this repo)", "shape": None},
             # --- condensate: diagnostic in-cloud water + resolved-cf condensate scale [kg/kg] ---
             "q_c_diagnostic": {"units": "kg/kg", "bounds": (5.0e-5, 1.5e-3), "tunable_tier": 1, "transform": "sigmoid", "category": "condensate", "reference": "diagnostic-cloud scheme default", "shape": None},
             "q_cloud_resolved_ref": {"units": "kg/kg", "bounds": (1.0e-7, 1.0e-5), "tunable_tier": 2, "transform": "sigmoid", "category": "condensate", "reference": "resolved (CRM/SAM) cloud-fraction scheme default", "shape": None},
@@ -161,6 +166,38 @@ class CloudConfig(NamedTuple):
     martin_pgam_intercept: float = 0.2714
     pgam_min: float = 2.0
     pgam_max: float = 10.0
+    # CLUBB cloud-fraction override LEVEL GATE (marine-Sc albedo lever): when a
+    # ``cloud_fraction_override`` (diagnostic CLUBB's PDF cf) is supplied, apply it
+    # ONLY where ``p_full >= clubb_cf_override_p_min_pa`` — the boundary layer /
+    # low cloud, the marine-Sc target — keeping the RH grid-scale fraction ALOFT.
+    # The real-SST A/B showed a FULL-COLUMN override over-clouds at altitude (OLR
+    # collapse to ~160 W/m² + albedo RISE 0.53->0.65) because CLUBB's PDF
+    # over-diagnoses high/mid cloud; restricting it to the BL removes that backfire
+    # while keeping the intended low-cloud reduction.  ``0.0`` => apply at ALL
+    # levels (the original full-column override).
+    clubb_cf_override_p_min_pa: float = 70000.0
+    # SMOOTH ramp width [Pa] for the override level gate: the CLUBB fraction is
+    # blended in linearly over ``[p_min - ramp, p_min]`` (full override at
+    # p_full >= p_min; RH cf below p_min - ramp) instead of a sharp step at p_min.
+    # A step gate created a cloud/heating discontinuity at ~700 hPa that seeded a
+    # late (day-20) numerical blowup in the real-SST A/B; the ramp removes it.
+    # ``0.0`` => sharp step (the original level gate).
+    clubb_cf_override_ramp_pa: float = 10000.0
+    # Override STRENGTH [0,1]: the effective BL cloud fraction is
+    # ``strength*CLUBB_cf + (1-strength)*RH_cf`` — a partial blend toward CLUBB
+    # rather than a full replacement.  Full replacement (1.0) removed enough low
+    # cloud under real forcing to drive a surface-heating runaway (day-15..20
+    # blowup, NOT fixed by halving dt); a gentler blend still lowers albedo but
+    # keeps the column stable.  1.0 => full replacement (the original override).
+    clubb_cf_override_strength: float = 1.0
+    # Minimum BL cloud fraction the override may leave [0,1].  The blowup diagnosis
+    # (blowup_state day 20) showed BL cloud collapsing to ~0 globally under the
+    # lever -> near-clear-sky -> a cloud-temperature positive-feedback RUNAWAY
+    # (less cloud -> warmer/drier -> less RH cloud -> warmer ...; mid-trop hit
+    # 400 K).  Flooring the overridden cf breaks the runaway at its source while
+    # still allowing a (bounded) low-cloud reduction, so a LARGER albedo fix can
+    # run STABLY than the strength knob alone allows.  0.0 => no floor (original).
+    clubb_cf_override_floor: float = 0.0
     # --- Convective cloud fraction (Slingo 1987), OPT-IN (default OFF) ---
     # The RH-based stratiform schemes (sundqvist/xu_randall) give cloud only
     # near saturation, so an adjustment convection scheme (sbm) that holds the
@@ -252,6 +289,8 @@ def build_cloud_config(
     alpha_xr: float | None = None,
     diagnostic_condensate_scheme: str | None = None,
     adiabatic_lwc_rate: float | None = None,
+    clubb_cf_override_strength: float | None = None,
+    clubb_cf_override_floor: float | None = None,
 ) -> "CloudConfig":
     """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
     fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
@@ -286,6 +325,10 @@ def build_cloud_config(
         overrides["diagnostic_condensate_scheme"] = diagnostic_condensate_scheme
     if adiabatic_lwc_rate is not None:
         overrides["adiabatic_lwc_rate"] = adiabatic_lwc_rate
+    if clubb_cf_override_strength is not None:
+        overrides["clubb_cf_override_strength"] = clubb_cf_override_strength
+    if clubb_cf_override_floor is not None:
+        overrides["clubb_cf_override_floor"] = clubb_cf_override_floor
     return CloudConfig(
         scheme=scheme, convective_cloud=convective_cloud, **overrides
     )

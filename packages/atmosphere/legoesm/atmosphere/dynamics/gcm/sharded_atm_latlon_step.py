@@ -55,8 +55,15 @@ def shard_state_atm_latlon(
     is reconstructed inside the body. Mirrors ``ocean.shard_state_latlon`` but
     walks the 6-field atm pytree (bare arrays + a tracers dict, no masks).
     """
+    from legoesm.parallel.latlon_spmd import shard_leaf
+
+    _mp = jax.process_count() > 1
+
     def _put(arr):
-        return jax.device_put(arr, NamedSharding(mesh, lat_spec(arr)))
+        # shard_leaf: single-process -> device_put (byte-unchanged); multi-
+        # controller -> per-process local band via make_array_from_process_local_data
+        # (no all-gather, no transient global replica — issue #1100).
+        return shard_leaf(arr, NamedSharding(mesh, lat_spec(arr)), multiprocess=_mp)
 
     n_lat = state.T.shape[0]
     v_lower = state.v[:n_lat]
@@ -1175,8 +1182,10 @@ def _refuse_unsupported_spmd_config_2d(model, p_lon: int) -> None:
         raise NotImplementedError(
             "atm 2-D SPMD tiling: use_polar_filter=True with p_lon > 1 is "
             "not wired — the polar filter FFTs the full longitude circle "
-            "(needs a lon-gather FFT, mirroring the make_latlon_2d_mpi_step "
-            "refusal).  Use p_lon == 1 or disable the filter.")
+            "and needs a lon-gather FFT.  (The route-A MPI path "
+            "make_latlon_2d_mpi_step DOES wire this via the AD-safe "
+            "lat-pencil transpose; the SPMD ppermute equivalent is a "
+            "follow-up.)  Use p_lon == 1 or disable the filter.")
 
 
 def make_sharded_atm_latlon_step_2d(model, mesh, physics_fn=None, *,
@@ -1274,7 +1283,7 @@ def make_sharded_atm_latlon_segment_2d(model, mesh, n_steps: int,
     :func:`make_sharded_atm_latlon_segment` (same contract: static
     ``n_steps``, replicated in-graph finite scalar psum'd over BOTH mesh
     axes, leading steps unrolled to the scan-carry dtype fixed point via
-    :func:`_unroll_to_dtype_fixed_point`, STATELESS physics only,
+    :func:`unroll_to_dtype_fixed_point`, STATELESS physics only,
     ``mesh=None`` -> the single-device compiled twin)."""
     from legoesm.parallel.latlon_spmd import latlon_band_perms
     from legoesm.parallel.shard_map_compat import shard_map
@@ -1313,7 +1322,10 @@ def make_sharded_atm_latlon_segment_2d(model, mesh, n_steps: int,
             out, _ps = tile_step(s, stacks_local, dt, None)
             return out
         # Unroll to the scan-carry dtype fixed point (helper docstring).
-        out, n_left = _unroll_to_dtype_fixed_point(
+        # Public name (the _-prefixed original was promoted; the 2-D path
+        # kept the stale private reference — NameError on first segment
+        # trace, caught by test_2d_segment_matches_sequential_and_serial).
+        out, n_left = unroll_to_dtype_fixed_point(
             _step1, state_local, n_steps)
         if n_left > 0:
             out, _ = jax.lax.scan(lambda s, _x: (_step1(s), None),

@@ -6,6 +6,31 @@ aggregation, and melting. Tracks cloud water, rain, ice, and snow.
 
 All operations use smooth (differentiable) approximations.
 
+Double-moment NUMBER-budget faithfulness vs the SAM M2005 oracle
+(module_mp_graupel.f90) — status of the gaps from the fall-speed-audit
+follow-up (m2005-double-moment-numberbudget-followup), 2026-07-17:
+
+ADDRESSED
+- Cooper nucleation target counts the TOTAL frozen number: the deficit is
+  ``kc2 − (NI3D + NS3D + NG3D)`` (SAM :3396-3399).  With prognostic
+  N_s/N_g the target subtracts them too; single-moment snow/graupel
+  contribute zero (prior behavior, byte-identical).
+- NPRCI (ice→snow autoconversion number, SAM :3323-3326): verified WIRED
+  as ``dN_i_autoconv`` (= PRCI/CONS22 capped at N_i/dt) — an N_i sink and,
+  under double-moment snow, an N_s source.  The gap was stale comments
+  claiming it was dropped, not the code.
+- NSMLTR/NGMLTR (SAM :2189-2203, :2211): melted snow-flake / graupel-
+  particle number now becomes RAIN number (·rho for the per-volume N_r)
+  instead of vanishing; single owner with the NSMLTS/NGMLTG sinks.
+- Melt/freeze number-routing comments made to agree with the double-moment
+  branches (freeze_N_to_graupel = SAM NNUCCR; dN_g_melt = NGMLTG).
+
+KNOWN, DELIBERATE departures (documented where they occur)
+- Default (no prognostic N_s/N_g): bulk q-power snow fall speed and the
+  fixed-N0G Marshall-Palmer graupel closure — outside the SAM oracle
+  scope, which is inherently two-moment (departure #5 of the fall-speed
+  audit).
+
 References
 ----------
 - Morrison, H., Curry, J. A., & Khvorostyanov, V. I. (2005). A new
@@ -316,11 +341,18 @@ def morrison_microphysics(
         ),
         config.N_i_nuc_max,
     ) / jnp.clip(rho, _RHO_FLOOR)
-    # SAM compares kc2 to NI3D+NS3D+NG3D (ice+snow+graupel number); legoESM
-    # carries single-moment snow/graupel (no N_s, N_g) so the target is
-    # reduced by N_i only. Limitation: where prognostic snow/graupel number
-    # would already satisfy the Cooper target, this can over-produce cloud
-    # ice number. (Codex iter-9; resolved only by going double-moment snow.)
+    # SAM compares kc2 to the TOTAL frozen number NI3D+NS3D+NG3D
+    # (module_mp_graupel.f90:3396-3399): nucleation only tops the column up
+    # to the Cooper target COUNTING crystals already held as snow/graupel.
+    # With prognostic N_s/N_g (double-moment) subtract them too — otherwise
+    # a column whose snow/graupel number already satisfies the target keeps
+    # nucleating cloud ice (and its MI0 mass source), a spurious ice source
+    # (codex iter-9, resolved now that double-moment snow/graupel exist).
+    # Single-moment snow/graupel carry no number and contribute zero — the
+    # prior behavior, byte-identical.  N_i stays UNclipped (exact old AD
+    # path); N_s/N_g are clipped at 0 so a transient negative number can
+    # never INFLATE nucleation.  All three are per-mass [1/kg], matching
+    # the /rho-converted target.
     # SUPERSATURATION GATE (the M6 fix): SAM fires deposition-nucleation
     # only where (RH_liq ≥ 0.999 AND T ≤ 265.15 K) OR RH_ice ≥ 1.08 — NOT
     # in any cold air. The previous code used only the f_ice temperature
@@ -334,8 +366,13 @@ def morrison_microphysics(
     )
     gate_ice = jax.nn.sigmoid(config.nuc_rh_sharpness * (rh_ice - _NUC_RH_ICE_THRESHOLD))
     nuc_gate = jnp.maximum(gate_liq, gate_ice)
+    N_frozen = N_i
+    if snow_double_moment:
+        N_frozen = N_frozen + jnp.clip(N_s, 0.0)
+    if graupel_double_moment:
+        N_frozen = N_frozen + jnp.clip(N_g, 0.0)
     dN_i_nuc = (
-        jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0) * nuc_gate
+        jnp.clip(N_i_target - N_frozen, 0.0) / jnp.clip(dt, 1.0) * nuc_gate
     )
     # Mass source: each new crystal starts at MI0 = 4/3·π·ρ_ci·r³ (SAM
     # MNUCCD = NNUCCD·MI0), so freshly-nucleated ice carries mass rather
@@ -475,8 +512,12 @@ def morrison_microphysics(
         #   PRCI = CONS22·CONS21·(q_v−q_sat_i)₊·ρ·N0I·exp(−LAMI·DCS)·DV/ABI
         #        = (2π·DCS²/3)·ρ·N0I·exp(−LAMI·DCS)·DV·(q_v−q_sat_i)₊/ABI.
         # Only POSITIVE ice supersaturation grows ice across DCS into snow;
-        # self-gates on N_i (N0I∝N_i ⇒ 0 when no ice). NPRCI (snow number) is
-        # dropped — legoESM single-moment snow.
+        # self-gates on N_i (N0I∝N_i ⇒ 0 when no ice). The NUMBER transfer
+        # NPRCI = PRCI/CONS22 (capped at N_i/dt, SAM :3325-3326) IS wired:
+        # it is ``dN_i_autoconv`` below — an N_i sink AND (double-moment
+        # snow) an N_s source, exactly SAM's -NPRCI in NI3DTEN / +NPRCI in
+        # NS3DTEN.  (An earlier comment here claimed it was dropped; that
+        # predated double-moment snow and was stale, not the code.)
         ice_to_snow_m2005 = (
             (2.0 * jnp.pi / 3.0) * dcs ** 2 * rho * n0i_ac
             * jnp.exp(-lami_ac * dcs) * dv_vap
@@ -706,8 +747,11 @@ def morrison_microphysics(
     # Route the Bigg-frozen rain by category: to GRAUPEL (SAM-faithful — dense
     # frozen drops) when do_graupel, else to SNOW (legacy). The L_f release is
     # identical either way (it stays in dT below); only the destination differs.
-    # Single-moment graupel carries no number, so freeze_N_r leaves the rain
-    # number but is added to the snow number ONLY on the legacy path.
+    # NUMBER routing: freeze_N_r always leaves the rain number; it arrives as
+    # snow number on the legacy path (freeze_N_to_snow) and as GRAUPEL number
+    # on the do_graupel path when a prognostic N_g is carried
+    # (freeze_N_to_graupel in the graupel budget below, SAM NNUCCR).  Only
+    # single-moment graupel — no N_g state — drops the frozen-drop number.
     if config.do_graupel:
         freeze_to_graupel = freeze_rain
         freeze_to_snow = jnp.zeros_like(freeze_rain)
@@ -1225,8 +1269,27 @@ def morrison_microphysics(
     # and N_r does not go stale as rain evaporates. evap is already donor-
     # clamped to q_r/dt, so the removed fraction ≤ 1 (SAM's MAX(-1,DUM)).
     dN_r_evap = evaporation * jnp.clip(N_r, 0.0) / jnp.clip(q_r, 1e-15)
+    # NSMLTR / NGMLTR (SAM module_mp_graupel.f90:2189-2203, applied at :2211
+    # NR3DTEN += (NSUBR - NSMLTR - NGMLTR)): every melted snow flake / graupel
+    # particle becomes a RAIN drop — number is conserved across the phase
+    # change, at the same fractional rate as the melted mass.  These are also
+    # the NSMLTS/NGMLTG sinks of the snow/graupel number budgets below (single
+    # owner: defined once here, reused there).  melt_snow / melt_graupel are
+    # FINAL at this point (joint fusion-heat scale + donor clamps applied
+    # above).  N_s/N_g are per-mass [1/kg] while N_r is per-volume [1/m^3],
+    # hence the *rho on the rain-side source.  Without this the melted number
+    # simply vanished: rain in melting layers under-counted drops -> too-large
+    # mean size -> too-fast fallout / too-little evaporation.
+    melt_N_to_rain = jnp.zeros_like(q_r)
+    if snow_double_moment:
+        dN_s_melt = melt_snow * jnp.clip(N_s, 0.0) / jnp.clip(q_s, 1e-15)
+        melt_N_to_rain = melt_N_to_rain + dN_s_melt * rho
+    if graupel_double_moment:
+        dN_g_melt = melt_graupel * jnp.clip(N_g, 0.0) / jnp.clip(q_g, 1e-15)
+        melt_N_to_rain = melt_N_to_rain + dN_g_melt * rho
     # Bigg freezing removes the frozen rain drops from the rain number.
-    dN_r_dt = dN_r_au + dN_r_selfcoll - dN_r_evap - freeze_N_r + sed_N_r
+    dN_r_dt = (dN_r_au + dN_r_selfcoll - dN_r_evap - freeze_N_r + sed_N_r
+               + melt_N_to_rain)
     # Ice-number sink from ice→snow autoconversion. For SAM PRCI the removed
     # crystals are DCS-SIZED, so NPRCI = PRCI / m_DCS (m_DCS = CONS22 =
     # π·ρ_ci·DCS³/6), clamped to N_i/dt (codex iter-20 B) — NOT the mean-mass
@@ -1276,7 +1339,8 @@ def morrison_microphysics(
     # the number-weighted UNS. The PRDS/PSACWS number changes (flakes just grow)
     # are intentionally zero.
     if snow_double_moment:
-        dN_s_melt = melt_snow * jnp.clip(N_s, 0.0) / jnp.clip(q_s, 1e-15)
+        # dN_s_melt (NSMLTS) defined ONCE above with the NSMLTR rain-number
+        # source, so the snow sink and the rain source can never diverge.
         # NSUBS: snow-number sink during SUBLIMATION (SAM), removing number at
         # the same fractional rate as mass (mean-size preserving) — codex
         # iter-27 C. Deposition (PRDS>0) grows existing flakes ⇒ no number
@@ -1314,7 +1378,8 @@ def morrison_microphysics(
     # sediments at the number-weighted UNG. A SAM-style consistency limiter
     # keeps LAMG ∈ [lamg_min, lamg_max].
     if graupel_double_moment:
-        dN_g_melt = melt_graupel * jnp.clip(N_g, 0.0) / jnp.clip(q_g, 1e-15)
+        # dN_g_melt (NGMLTG) defined ONCE above with the NGMLTR rain-number
+        # source, so the graupel sink and the rain source can never diverge.
         dN_g_subl = (jnp.minimum(prdg, 0.0)
                      * jnp.clip(N_g, 0.0) / jnp.clip(q_g, 1e-15))
         # Frozen rain drops → graupel particles (per-volume freeze_N_r ⇒ /ρ for

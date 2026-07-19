@@ -92,7 +92,11 @@ def test_exact_tracer_conservation(mesh, z_coord, cfg):
     dT, dS = mle_tracer_tendency_mpas(T, S, eta, H, mesh, z_coord, cfg, eos="wright")
     vol = _cell_volume(mesh, z_coord, eta, H)
     # Tendency must be non-trivial (a real front), then exactly conservative.
-    assert float(jnp.max(jnp.abs(dT))) > 0.0
+    # PHYSICAL nontriviality floor (codex MLE-rhop r1 P1): the old in-situ
+    # feed left a ~1e-22 roundoff residue that satisfied a bare > 0 —
+    # demand a genuinely active MLE transport so an in-situ revert fails
+    # conservation tests too, not only the restratification test.
+    assert float(jnp.max(jnp.abs(dT))) > 1e-9
     netT = float(jnp.sum(dT * vol))
     netS = float(jnp.sum(dS * vol))
     scaleT = float(jnp.sum(jnp.abs(dT) * vol)) + 1e-30
@@ -133,7 +137,11 @@ def test_partial_cell_conservation(mesh, z_coord, cfg):
     eta = jnp.zeros((mesh.nCells,))
     dT, dS = mle_tracer_tendency_mpas(T, S, eta, H, mesh, z_pc, cfg, eos="wright")
     assert bool(jnp.all(jnp.isfinite(dT))) and bool(jnp.all(jnp.isfinite(dS)))
-    assert float(jnp.max(jnp.abs(dT))) > 0.0
+    # PHYSICAL nontriviality floor (codex MLE-rhop r1 P1): the old in-situ
+    # feed left a ~1e-22 roundoff residue that satisfied a bare > 0 —
+    # demand a genuinely active MLE transport so an in-situ revert fails
+    # conservation tests too, not only the restratification test.
+    assert float(jnp.max(jnp.abs(dT))) > 1e-9
     vol = _cell_volume(mesh, z_pc, eta, H)         # areaCell · true h_k
     for d in (dT, dS):
         net = float(jnp.sum(d * vol))

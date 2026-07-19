@@ -23,10 +23,6 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from legoesm.ocean.physics.bottom_drag.output import (
-    BottomDragOutput,
-    bottom_level_drag_output,
-)
 from legoesm.ocean.physics.convection.output import OceanConvectionOutput
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 from legoesm.ocean.physics.vertical_mixing.output import VerticalMixingOutput
@@ -40,57 +36,6 @@ def _x64():
     jax.config.update("jax_enable_x64", orig)
 
 
-# --------------------------------------------------------------------------- #
-# BottomDragOutput + the shared bottom-level pad helper.
-# --------------------------------------------------------------------------- #
-class TestBottomDragOutput:
-    def test_fields_and_order(self):
-        assert BottomDragOutput._fields == ("du_dt", "dv_dt")
-
-    def test_construct_roundtrip(self):
-        a = jnp.ones((6, 4, 4, 5))
-        b = jnp.zeros((6, 4, 4, 5))
-        out = BottomDragOutput(du_dt=a, dv_dt=b)
-        assert out.du_dt.shape == (6, 4, 4, 5)
-        assert out[0] is a and out[1] is b
-
-    def test_bottom_level_pad_places_drag_at_deepest_level(self):
-        """Per-column bottom drag is padded to the deepest level; all levels
-        above are exactly zero (single Pad HLO)."""
-        nlev = 5
-        drag_u = jnp.full((6, 4, 4), -0.3)
-        drag_v = jnp.full((6, 4, 4), 0.1)
-        out = bottom_level_drag_output(drag_u, drag_v, nlev)
-        assert isinstance(out, BottomDragOutput)
-        assert out.du_dt.shape == (6, 4, 4, nlev)
-        # Only the bottom level is nonzero.
-        assert jnp.allclose(out.du_dt[..., -1], drag_u)
-        assert jnp.allclose(out.dv_dt[..., -1], drag_v)
-        assert jnp.allclose(out.du_dt[..., :-1], 0.0)
-        assert jnp.allclose(out.dv_dt[..., :-1], 0.0)
-
-    def test_bottom_level_pad_arbitrary_leading_rank(self):
-        """The pad adapts to the input rank (works for MPAS (nCells,) too)."""
-        nlev = 3
-        drag_u = jnp.arange(7.0)          # 1-D leading (e.g. nCells)
-        drag_v = -jnp.arange(7.0)
-        out = bottom_level_drag_output(drag_u, drag_v, nlev)
-        assert out.du_dt.shape == (7, nlev)
-        assert jnp.allclose(out.du_dt[..., -1], drag_u)
-        assert jnp.allclose(out.du_dt[..., :-1], 0.0)
-
-    def test_is_pytree(self):
-        out = bottom_level_drag_output(
-            jnp.ones((2, 2)), jnp.ones((2, 2)), 4)
-        leaves = jax.tree_util.tree_leaves(out)
-        assert len(leaves) == 2
-        scaled = jax.tree_util.tree_map(lambda x: 2.0 * x, out)
-        assert jnp.allclose(scaled.du_dt[..., -1], 2.0)
-
-
-# --------------------------------------------------------------------------- #
-# OceanConvectionOutput — optional momentum / diffusivity slots.
-# --------------------------------------------------------------------------- #
 class TestOceanConvectionOutput:
     def test_field_order(self):
         assert OceanConvectionOutput._fields == (

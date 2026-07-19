@@ -296,7 +296,8 @@ class ArchetypeBatch(NamedTuple):
 def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
                            carbon_overrides=None,
                            nsc_gated_respiration=False,
-                           cold_deciduous_dormancy=False):
+                           cold_deciduous_dormancy=False,
+                           leaf_c_resorption_frac=0.0):
     """Build the per-``(is_woody, is_evergreen, soil_class)`` GROUP construction
     shared by the archetype equilibration (:func:`equilibrate_archetypes`) and
     the drift validator (``scripts/validate/global_carbon_ic_map.py``).
@@ -417,6 +418,7 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
             cold_deciduous=group_cold_deciduous,
             nsc_gated_respiration=nsc_gated_respiration,
             cold_deciduous_dormancy=cold_deciduous_dormancy,
+            leaf_c_resorption_frac=leaf_c_resorption_frac,
             C_lab_init=_C_LAB_SEED, C_fol_init=_C_FOL_SEED,
             C_root_init=_C_ROOT_SEED, C_wood_init=_C_WOOD_SEED,
             C_lit_init=_C_LIT_SEED, C_som_init=_C_SOM_SEED)
@@ -596,6 +598,7 @@ def equilibrate_archetypes(
     soil_depth: float = _SOIL_DEPTH_DEFAULT,
     nsc_gated_respiration: bool = False,
     cold_deciduous_dormancy: bool = False,
+    leaf_c_resorption_frac: float = 0.0,
 ):
     """Spin every climate archetype to a verified soil-carbon equilibrium.
 
@@ -657,7 +660,8 @@ def equilibrate_archetypes(
     batches = iter_archetype_batches(
         table, n_layers=n_layers, soil_depth=soil_depth, dt=dt,
         nsc_gated_respiration=nsc_gated_respiration,
-        cold_deciduous_dormancy=cold_deciduous_dormancy)
+        cold_deciduous_dormancy=cold_deciduous_dormancy,
+        leaf_c_resorption_frac=leaf_c_resorption_frac)
 
     # Archetype-ordered output accumulators (scattered per group via g_idx).
     pools_out = {p: np.zeros(n_arch) for p in pool_fields}

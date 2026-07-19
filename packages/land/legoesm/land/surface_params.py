@@ -112,6 +112,8 @@ class LandSurfaceParams(NamedTuple):
 _THETA_WP_DEFAULT = 0.15   # wilting-point water content [m3/m3]
 _THETA_FC_DEFAULT = 0.30   # field-capacity water content [m3/m3]
 _W_MAX_DEFAULT = 150.0     # bucket capacity [kg/m2]
+_ROOT_DEPTH_DEFAULT = 1.0  # root-zone depth [m] (LandConfig lacks the field)
+_D_SOIL_DEFAULT = 1.0      # soil thermal-column depth [m] (LandConfig fallback)
 _C_SOIL_DEFAULT = 2.0e6    # soil volumetric heat capacity [J/m3/K]
 
 def default_land_surface_params(ncol: int, config) -> LandSurfaceParams:
@@ -134,10 +136,10 @@ def default_land_surface_params(ncol: int, config) -> LandSurfaceParams:
     # Map LandSurfaceParams field names to config attributes.
     # MultiLayerLandConfig has root_depth/theta_wp/theta_fc directly;
     # LandConfig does not, so use sensible defaults.
-    root_depth = getattr(config, "root_depth", 1.0)
+    root_depth = getattr(config, "root_depth", _ROOT_DEPTH_DEFAULT)
     theta_wp = getattr(config, "theta_wp", _THETA_WP_DEFAULT)
     theta_fc = getattr(config, "theta_fc", _THETA_FC_DEFAULT)
-    d_soil = getattr(config, "d_soil", 1.0)
+    d_soil = getattr(config, "d_soil", _D_SOIL_DEFAULT)
     W_max = getattr(config, "W_max", _W_MAX_DEFAULT)
     # C_soil is top-level on LandConfig but in thermal sub-config on MultiLayer
     if hasattr(config, "C_soil"):

@@ -7,7 +7,8 @@ name = "legoesm"
 version = "0.1.0"
 description = "legoESM: A Differentiable Earth System Model in JAX"
 readme = "README.md"
-license = {text = "MIT"}
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [
     {name = "Pierre Gentine"},
@@ -16,7 +17,6 @@ keywords = ["earth-system-model", "jax", "differentiable", "weather", "climate"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -63,6 +63,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# clm-ml-jax is published on PyPI (https://pypi.org/project/clm-ml-jax/).
+# The 0.1.0 release ships the DIFFERENTIABLE canopy capability: its
+# `_CanopyFluxesDiagnostics` accepts `grid=`, so the canopy-integrated flux
+# diagnostics run on the jax.grad tape (CLMMLCanopyConfig(differentiable=True)).
+# `clm_ml_interface` still PROBES this capability at runtime and raises a clear,
+# actionable error if an older/local build lacks it (so there is never a silent
+# wrong answer); forward-only mode (the default) needs only the base 0.1.0.
+# Editable local checkouts (`pip install -e ./clm-ml-jax`) still shadow the
+# published wheel for development.
 canopy = ["clm-ml-jax>=0.1.0"]
 # gcsfs/fsspec included: the ML training lane's DEFAULT ERA5 path is a gs://
 # zarr store (load_era5_samples / era5_to_state), so the ml extra must open it
@@ -211,6 +220,27 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # LES-closure diagnosis tests: physical symbol names (Km, Kh, S2, N2, P, C_K,
 # Pr_t) match the clubb_lite budget + diagnosis kernels they exercise.
 "tests/unit/test_les_closure_diagnosis.py" = ["N803", "N806"]
+# Prognostic-aerosol faithfulness: budget symbols (N number, S source, L sink
+# rate, P precip) match the pinned dN/dt = S - L*N budget.
+"tests/unit/test_prognostic_aerosol_faithful.py" = ["N803", "N806"]
+# Ice-shelf three-equation faithfulness: T/S ambient temperature/salinity and
+# A/B/C quadratic coefficients match the Holland-Jenkins governing equations.
+"tests/ocean/unit/test_ice_shelf_three_equation_faithful.py" = ["N803", "N806"]
+# CATKE faithfulness: physics symbols N2/S2/Ri/K_u/K_c/K_e/Jb/H match the
+# Wagner-2025 CATKE closure notation.
+"tests/ocean/unit/test_catke_faithful.py" = ["N803", "N806"]
+# Backscatter reservoir faithfulness: E is the subgrid-KE reservoir symbol
+# (Jansen-Held 2014).
+"tests/ocean/unit/test_backscatter_reservoir_faithful.py" = ["N803", "N806"]
+# Enhanced-diffusion faithfulness: K (diffusivity) / A (viscosity) convective-
+# adjustment symbols (Oceananigans ConvectiveAdjustment).
+"tests/ocean/unit/test_enhanced_diffusion_faithful.py" = ["N806"]
+# Plume convection faithfulness: T/S ocean temperature/salinity + Tp/Sp plume
+# parcel symbols (entraining mass-flux plume).
+"tests/ocean/unit/test_plume_convection_faithful.py" = ["N803", "N806"]
+# PBL-height faithfulness: T/Q/U/V atmospheric column symbols + dV2 shear-square
+# (bulk-Richardson PBL diagnosis).
+"tests/atmosphere/hydrostatic/unit/test_pbl_height_faithful.py" = ["N803", "N806"]
 "scripts/validate/compare_amip_era5.py" = ["N803", "N806", "N815"]
 # The canonical SST symbol is ``sst_K`` (used 100s of times); N806/N803 flag the local
 # variable / monkeypatch arg in the cross-grid deploy CLI + its test (not CI-enforced).
@@ -253,6 +283,11 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # nEdges, W) plus the mandated T_sfc / dT unit-suffixed physics names; same
 # rationale as the column-extractor tests above.
 "tests/parallel/test_mpas_atm_native_step.py" = ["N806"]
+# Coupled latlon-band slab step (C10): ``T`` for the atm temperature field
+# (T = atm_state.T, N806) and the CLAUDE.md-mandated ``_K`` unit suffix on the
+# freezing-floor config field (t_freeze_ocean_K, N815) read clearer than
+# snake_case — same rationale as the physical-symbol entries above.
+"packages/coupler/legoesm/coupler/coupled_latlon_band.py" = ["N806", "N815"]
 
 [tool.mypy]
 python_version = "3.11"

@@ -1587,17 +1587,76 @@ def _training_year_range(windows, config) -> tuple[int, int]:
     return (start, start + max(0, (n_days - 1) // 365) + 1)
 
 
+def host_build_device(warn_label: str = "host-resident load"):
+    """The JAX CPU device for host-side array construction, or ``None``.
+
+    Shared preflight for every host-build site (#985 prefetch, #1155
+    non-chunked loads): returns ``jax.devices("cpu")[0]`` when the CPU
+    backend exists, else warns and returns ``None`` so the caller falls back
+    to building on the compute device (roomy configs are unchanged;
+    memory-tight ones need ``JAX_PLATFORMS=cuda,cpu``).
+    """
+    try:
+        return jax.devices("cpu")[0]
+    except RuntimeError:
+        logger.warning(
+            f"{warn_label}: the JAX CPU backend is unavailable "
+            "(JAX_PLATFORMS?), so arrays will be built on the compute device "
+            "(GPU-OOM risk for dataset-sized loads). Add 'cpu' to "
+            "JAX_PLATFORMS to enable host residency."
+        )
+        return None
+
+
+def stage_sample(tree, device=None):
+    """Public per-sample staging: move a sample pytree's ARRAY leaves onto
+    the compute device (default: this process's first local device).
+
+    Consumer-side half of the host-resident-dataset contract (#1155).
+    Placement semantics (measured, jax 0.10): arrays built under
+    ``jax.default_device(cpu)`` are UNCOMMITTED — a GPU-jitted step would
+    transfer them per call anyway, so staging is not a crash guard. It IS
+    the explicit-placement hygiene: it makes each sample's single H2D copy
+    visible at the call site, keeps behavior identical if the dataset ever
+    arrives COMMITTED (e.g. an explicit ``device_put(cpu)`` producer), and
+    bounds peak device footprint to one sample. Wraps the #985
+    ``_stage_tree``. Uses ``jax.local_devices()`` (not ``jax.devices()``)
+    so a multi-process runtime never targets a non-addressable device.
+    """
+    if device is None:
+        device = jax.local_devices()[0]
+    return _stage_tree(tree, device)
+
+
 def load_training_data(
     config: NeuralGCMSpectralConfig,
     grid: GaussianGrid,
     sigma: SigmaCoordinate,
     cache_dir: str = "data/era5_cache",
     windows: list | None = None,
+    host_resident: bool = False,
 ):
     """Load ERA5 daily IC/target pairs and convert to spectral states.
 
     Opens the ERA5 Zarr store once and batch-loads all needed time slices,
     avoiding per-slice GCS connection overhead.
+
+    ``host_resident=True`` builds every carry under the JAX CPU backend
+    (``jax.default_device``) so a dataset-sized load never materialises on
+    the GPU — the #1155 fix for the non-chunked trainers (they load ALL
+    pairs up front; at T106 all-years that is ~130 GB device-resident, an
+    unconditional OOM). Consumers pair it with per-sample staging
+    (``stage_sample`` / the training loops' ``host_staged=True``) — see
+    ``stage_sample`` for the honest placement semantics (explicit-placement
+    hygiene, not a crash guard: default_device-built arrays are
+    UNCOMMITTED). Trade-offs, accepted and measured against the
+    alternative: the per-snapshot spectral transforms run on CPU during the
+    load (the load is GCS-dominated in practice — job 6758505 measured
+    ~4.4 s/snapshot pure streaming), and staged consumers re-transfer each
+    sample per epoch (~seconds/epoch of H2D vs. hour-scale epochs). A CPU
+    backend is REQUIRED: with no viable success path for a dataset-sized
+    device build, an absent backend raises immediately instead of warning
+    and then OOMing hours into the load (fail-fast).
 
     Parameters
     ----------
@@ -1614,6 +1673,11 @@ def load_training_data(
         the results are concatenated.  This is the AIMIP-style
         multi-year / multi-season sampling protocol.  When ``None``
         the legacy single-window behaviour applies.
+    host_resident : bool
+        Build every array under the JAX CPU backend (see the prose above:
+        the #1155 fix for non-chunked full-dataset loads). Requires the
+        CPU backend (raises otherwise). Consumers pair it with per-sample
+        staging (``stage_sample`` / ``host_staged=True``).
 
     Returns
     -------
@@ -1626,6 +1690,28 @@ def load_training_data(
         coordinate was unreadable) — consumed by the prescribed
         surface-forcing path.
     """
+    if host_resident:
+        _host = host_build_device("load_training_data(host_resident=True)")
+        if _host is None:
+            # No CPU backend = no viable success path for a dataset-sized
+            # load (the device build is the #1155 OOM by construction, hit
+            # only AFTER hours of streaming). Fail fast with the remedy.
+            raise RuntimeError(
+                "load_training_data(host_resident=True) requires the JAX "
+                "CPU backend (add 'cpu' to JAX_PLATFORMS, e.g. "
+                "JAX_PLATFORMS=cuda,cpu): a full-dataset build on the "
+                "compute device OOMs at scale (#1155)."
+            )
+        # NOTE for signature growth: the recursive call forwards EVERY
+        # kwarg explicitly — a new load_training_data parameter must be
+        # added here too, or the host-resident path silently uses its
+        # default (tested: the recursion pins host_resident=False).
+        with jax.default_device(_host):
+            return load_training_data(
+                config, grid, sigma, cache_dir=cache_dir,
+                windows=windows, host_resident=False,
+            )
+
     import numpy as np
     from legoesm.training.era5_to_state import (
         open_era5_zarr, resolve_var, ERA5Slice, ensure_local_cache,
@@ -2050,9 +2136,17 @@ def _train_spectral_loop(
     chunk_loader=None,
     n_samples_total: int | None = None,
     resume_from_dir=None,
+    host_staged: bool = False,
 ):
     """Shared training loop for any learned-physics model coupled to the
     spectral PE dycore.
+
+    ``host_staged=True`` declares that the PROVIDED ``ic_states`` /
+    ``target_carries`` / ``sample_forcings`` were built host-resident
+    (``load_training_data(host_resident=True)``, #1155) — each sample is then
+    moved to the compute device just before its step, exactly like the #985
+    prefetch path (which signals the same thing via the chunk loader's
+    ``host_staged`` attribute).
 
     Parameters
     ----------
@@ -2576,7 +2670,7 @@ def _train_spectral_loop(
     # arrives on the CPU and must be moved onto the compute device at the point
     # of use in the loop below -- see the loop body for why this is not done in
     # the prefetch consumer.
-    _host_staged = bool(getattr(chunk_loader, "host_staged", False))
+    _host_staged = bool(getattr(chunk_loader, "host_staged", False)) or bool(host_staged)
     _compute_dev = jax.devices()[0] if _host_staged else None
 
     best_loss = float("inf")
@@ -2941,15 +3035,11 @@ def _make_chunk_loader(config, grid, sigma, cache_dir,
     # fall back to building on the compute device (a roomy config is unchanged).
     _host_dev = None
     if prefetch:
-        try:
-            _host_dev = jax.devices("cpu")[0]
-        except RuntimeError:
-            logger.warning(
-                "chunk_prefetch is on but the JAX CPU backend is unavailable "
-                "(JAX_PLATFORMS?), so prefetched chunks cannot be built on the "
-                "host and will ride compute-device memory (GPU-OOM risk at large "
-                "resolution). Add 'cpu' to JAX_PLATFORMS to enable host staging."
-            )
+        # Shared preflight (#1155 refactor): one copy of the cpu-backend
+        # resolution + warning for every host-build site. Prefetch keeps the
+        # warn-and-fallback behavior (a chunk is bounded, unlike the
+        # non-chunked full-dataset loads, which fail fast instead).
+        _host_dev = host_build_device("chunk_prefetch host staging")
 
     def _load_group(group):
         # Build on the CPU when host-staging (thread-local default device), so the
@@ -3089,6 +3179,7 @@ def train_neural_gcm_spectral(
 
     ic_states, target_carries, ic_times = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
+        host_resident=True,   # non-chunked full-dataset load (#1155)
     )
     sample_forcings = _maybe_build_sample_forcings(
         surface_forcing_path, ic_times, grid, forcing_cache_path,
@@ -3099,6 +3190,7 @@ def train_neural_gcm_spectral(
         grid, sigma, ic_states, target_carries, config,
         start_epoch=start_epoch,
         sample_forcings=sample_forcings,
+        host_staged=True,   # dataset loaded host-resident above (#1155)
     )
 
 
@@ -3123,12 +3215,17 @@ def compute_sfno_full_norm_stats(ic_states, grid, sigma, std_floor=_SFNO_FULL_ST
     that SAME packed order, so training and eval apply an identical transform.
 
     Each spectral ``SpectralHydrostaticState`` IC is packed to grid space
-    ``(n_lat, n_lon, n_channels)`` and stacked over samples; statistics are then
-    taken over all sample + spatial cells (unweighted — the SFNO operates on the
-    Gaussian grid uniformly).  The shared
-    :func:`legoesm.ml.normalization.compute_normalization_stats` floors the
-    variance so a constant channel yields ``std == std_floor`` with a finite
-    gradient (no div-by-zero, no ``0 * inf`` NaN in the backward pass).
+    ``(n_lat, n_lon, n_channels)``; statistics are taken over all sample +
+    spatial cells (unweighted — the SFNO operates on the Gaussian grid
+    uniformly).  Samples are STREAMED (two passes, one packed sample resident
+    at a time) rather than stacked: a single on-device stack of all ICs is
+    ~16 GiB at T106 all-years and OOMs the load-time stats step (#1155-class
+    invariant: never materialise the full dataset on-device).  The variance is
+    floored exactly as :func:`legoesm.ml.normalization.compute_normalization_stats`
+    does (``var >= std_floor**2``) so a constant channel yields
+    ``std == std_floor`` with a finite gradient (no div-by-zero, no ``0 * inf``
+    NaN in the backward pass).  Numerically equivalent to the stacked
+    two-pass form up to float summation order.
 
     Parameters
     ----------
@@ -3146,20 +3243,48 @@ def compute_sfno_full_norm_stats(ic_states, grid, sigma, std_floor=_SFNO_FULL_ST
     NormalizationStats
         ``mean``/``std`` of shape ``(n_channels,)`` in packed-channel order.
     """
-    from legoesm.ml.normalization import compute_normalization_stats
+    import numpy as np
+    from legoesm.ml.normalization import NormalizationStats
 
     if not ic_states:
         raise ValueError(
             "compute_sfno_full_norm_stats: ic_states is empty; cannot compute "
             "normalization statistics with no training data."
         )
-    # Stack packed grid-space tensors over samples -> (n_samples, n_lat, n_lon,
-    # n_channels); the channel axis is last, exactly what
-    # compute_normalization_stats reduces over (all-but-last).
-    packed = jnp.stack(
-        [pack_pe_state(s, grid, sigma) for s in ic_states], axis=0,
-    )
-    return compute_normalization_stats(packed, eps=float(std_floor))
+
+    def _packed_f64(s):
+        # One packed grid-space sample (n_lat, n_lon, n_ch), f64 to match the
+        # spectral-transform precision and keep the streamed reduction stable.
+        return jnp.asarray(pack_pe_state(s, grid, sigma), dtype=jnp.float64)
+
+    # Pass 1: per-channel mean over sample + spatial cells. Accumulate the
+    # channel-axis-preserving sum one sample at a time (peak device footprint:
+    # one packed sample, ~14 MiB at T106, vs ~16 GiB for the full stack).
+    ch_sum = None
+    cell_count = 0
+    for s in ic_states:
+        p = _packed_f64(s)
+        contrib = jnp.sum(p, axis=tuple(range(p.ndim - 1)))   # (n_ch,)
+        ch_sum = contrib if ch_sum is None else ch_sum + contrib
+        cell_count += int(np.prod(p.shape[:-1]))
+    mean = ch_sum / cell_count
+
+    # Pass 2: variance ABOUT THE MEAN (matches compute_normalization_stats'
+    # mean((data-mean)**2), not the cancellation-prone E[x^2]-E[x]^2 form).
+    ch_sqsum = None
+    for s in ic_states:
+        p = _packed_f64(s)
+        contrib = jnp.sum((p - mean) ** 2, axis=tuple(range(p.ndim - 1)))
+        ch_sqsum = contrib if ch_sqsum is None else ch_sqsum + contrib
+    var = ch_sqsum / cell_count
+
+    # Floor the VARIANCE before sqrt (identical convention to
+    # compute_normalization_stats): var==0 -> d(sqrt)/dvar = inf -> 0*inf NaN
+    # in the backward pass; clamping to std_floor**2 gives std>=std_floor with
+    # a finite gradient.
+    var_floor = float(std_floor) ** 2
+    std = jnp.sqrt(jnp.maximum(var, var_floor))
+    return NormalizationStats(mean=mean, std=std)
 
 
 def train_sfno_full_spectral(
@@ -3246,8 +3371,13 @@ def train_sfno_full_spectral(
 
     sfno, start_epoch = maybe_resume_model(sfno, resume_from_dir)
 
+    # Host-resident dataset (#1155): sfno_full loads ALL pairs up front (no
+    # chunking) — at T106 all-years that is ~130 GB, an unconditional GPU OOM
+    # if built on the compute device. Build on host; the loop stages each
+    # sample to the GPU just before its step.
     ic_states, target_carries, _ic_times = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
+        host_resident=True,
     )
 
     # Data-driven per-channel stats in packed-emulator order (same channel
@@ -3279,6 +3409,103 @@ def train_sfno_full_spectral(
     )
 
 
+def build_sfno_curriculum_epoch_plan(
+    rollout_curriculum,
+    multi_step_hours,
+    dt_sfno: float,
+    n_epochs_fallback: int,
+):
+    """Flat per-epoch plan for the sfno_full rollout curriculum.
+
+    Pure (jax-free) mirror of the epoch-plan build in
+    :func:`_train_spectral_loop` (the dycore-mode curriculum, see
+    neural_gcm_spectral.py `epoch_plan` at the ``if curriculum:`` block), but
+    expressed in SFNO **macro** steps (``dt_sfno``) instead of dycore
+    micro-steps (``config.dt``).
+
+    Each NeuralGCM-style phase ``(lead_hours, n_epochs)`` supervises a single
+    autoregressive rollout to ``lead_hours`` scored against the ERA5 target at
+    that lead.  Targets for every phase lead are loaded up front, one per entry
+    of ``multi_step_hours`` (``load_training_data`` returns a tuple of K carries
+    per sample when ``multi_step_hours`` is set), so a phase's target is indexed
+    by ``k_target = multi_step_hours.index(lead_hours)``.
+
+    Parameters
+    ----------
+    rollout_curriculum : sequence of ``(lead_hours, n_epochs)`` or None
+        Short-lead-first phases.  ``None`` (or empty) -> the caller keeps the
+        fixed chained-multi-step behaviour; this returns a fallback plan of
+        ``n_epochs_fallback`` no-op ``(None, None, None)`` entries so the epoch
+        loop can index it uniformly.
+    multi_step_hours : sequence of int
+        The sorted set of loaded target leads (``loss_config.multi_step_hours``).
+        EVERY curriculum lead must be a member, else its target was never loaded.
+    dt_sfno : float
+        SFNO macro (autoregressive) time step [s].  ``n_sfno_steps`` for a lead
+        is ``round(lead_hours * 3600 / dt_sfno)`` (the same hours->steps
+        conversion the dycore-mode plan uses with ``config.dt``).
+    n_epochs_fallback : int
+        Length of the no-op plan returned when ``rollout_curriculum`` is falsy.
+
+    Returns
+    -------
+    list of ``(lead_hours, k_target, n_sfno_steps)``
+        One entry per GLOBAL epoch (phase ``(h, ep)`` contributes ``ep`` copies
+        of its spec).  Resume (``start_epoch``) indexes into this list.  When
+        ``rollout_curriculum`` is falsy: ``[(None, None, None)] * n_epochs_fallback``.
+
+    Raises
+    ------
+    ValueError
+        If ``multi_step_hours`` is empty while a curriculum is given (no targets
+        loaded), or if any curriculum lead is not in ``multi_step_hours``
+        (its target was never loaded).  Same message style as the dycore-mode
+        curriculum validation in :func:`_train_spectral_loop`.
+    """
+    curriculum = tuple(
+        (int(h), int(ep)) for h, ep in (rollout_curriculum or ())
+    )
+    if not curriculum:
+        return [(None, None, None)] * int(n_epochs_fallback)
+
+    leads_loaded = tuple(int(h) for h in (multi_step_hours or ()))
+    if not leads_loaded:
+        raise ValueError(
+            "rollout_curriculum needs loss_config.multi_step_hours to "
+            "carry the curriculum leads (targets per lead)."
+        )
+    for h, _ in curriculum:
+        if h not in leads_loaded:
+            raise ValueError(
+                f"Curriculum lead {h}h has no loaded target "
+                f"(multi_step_hours={leads_loaded})."
+            )
+
+    # Flat epoch plan: (phase_lead_hours, target_index, n_sfno_steps) per
+    # global epoch.  n_sfno_steps = round(lead * 3600 / dt_sfno) — the macro-step
+    # analogue of the dycore plan's round(lead * 3600 / config.dt).
+    epoch_plan = []
+    for h, ep in curriculum:
+        # A state-update SFNO advances in WHOLE macro steps, so the lead MUST be
+        # a positive exact multiple of dt_sfno.  Reject a misaligned lead LOUDLY:
+        # round() would otherwise silently supervise the wrong horizon (e.g. a
+        # 6 h lead at dt_sfno=12 h -> 0 steps -> the IC scored against the +6 h
+        # target = a zero-gradient phase; a 6 h lead at dt_sfno=4 h -> 2 steps =
+        # an 8 h prediction scored against a +6 h target).
+        steps_f = h * 3600.0 / dt_sfno
+        n_sfno_steps = int(round(steps_f))
+        if n_sfno_steps <= 0 or abs(steps_f - n_sfno_steps) > 1e-6:
+            raise ValueError(
+                f"Curriculum lead {h}h is not a positive exact multiple of "
+                f"dt_sfno={dt_sfno:g}s ({steps_f:.4f} macro steps). Pick leads on "
+                f"the dt_sfno grid (a state-update SFNO cannot take a fractional "
+                f"final step)."
+            )
+        spec = (h, leads_loaded.index(h), n_sfno_steps)
+        epoch_plan.extend([spec] * ep)
+    return epoch_plan
+
+
 def _train_sfno_full_loop(
     sfno: SFNO,
     pe_emulator_cfg,
@@ -3290,9 +3517,14 @@ def _train_sfno_full_loop(
     dt_sfno: float,
     *,
     start_epoch: int = 0,
+    host_staged: bool = True,
     norm_stats=None,
 ):
     """Training loop for SFNO full-atmosphere emulator (no dycore).
+
+    ``host_staged`` (default True — the caller loads host-resident, #1155):
+    each sample is moved to the compute device just before its step, so the
+    full dataset never rides GPU memory.
 
     Parallel to :func:`_train_spectral_loop` but uses
     ``SFNOPrimitiveEquationModel.step(state, dt_sfno)`` for rollout
@@ -3315,17 +3547,6 @@ def _train_sfno_full_loop(
         )
 
     sigma_full = jnp.asarray(sigma.sigma_full)
-
-    total_steps = max(1, config.n_epochs * max(1, len(ic_states)))
-    optimizer = create_optimizer(TrainingConfig(
-        lr=config.lr,
-        warmup_steps=config.warmup_steps,
-        total_steps=total_steps,
-        weight_decay=config.weight_decay,
-        grad_clip_norm=config.grad_clip_norm,
-        optimizer=config.optimizer,
-    ))
-    opt_state = optimizer.init(eqx.filter(sfno, eqx.is_array))
     loss_history = []
 
     # Multi-step segment schedule (same lead set as the dycore-mode
@@ -3382,89 +3603,207 @@ def _train_sfno_full_loop(
             f"(~{n_sfno_single * dt_sfno / 3600:.1f} h)"
         )
 
+    # --- rollout curriculum (NeuralGCM-style stability training) ---
+    # When ``config.rollout_curriculum`` is set, each phase supervises ONE
+    # autoregressive rollout to ``lead_hours`` scored against the ERA5 target at
+    # that lead (single-lead loss), progressively longer.  Mirrors the dycore-
+    # mode curriculum in ``_train_spectral_loop`` (see
+    # ``build_sfno_curriculum_epoch_plan`` for the pure epoch-plan build shared
+    # with the unit test), but in SFNO macro steps.  Targets for every phase
+    # lead were loaded up front: the caller sets ``loss_config.multi_step_hours``
+    # to the sorted set of curriculum leads so ``load_training_data`` builds a
+    # target tuple per sample (``target_carry[k_target]`` picks the phase lead).
+    # ``None`` keeps the fixed chained-multi-step behaviour above byte-identical.
+    epoch_plan = build_sfno_curriculum_epoch_plan(
+        config.rollout_curriculum,
+        multi_step_hours_train,
+        dt_sfno,
+        config.n_epochs,
+    )
+    curriculum_on = bool(config.rollout_curriculum)
+    n_epochs_total = len(epoch_plan)
+    if curriculum_on:
+        logger.info(
+            "SFNO full-emulator rollout curriculum active: "
+            + ", ".join(
+                f"{h}h x{ep}"
+                for h, ep in (
+                    (int(h), int(ep)) for h, ep in config.rollout_curriculum
+                )
+            )
+            + f" ({n_epochs_total} epochs total)"
+        )
+
+    # Optimizer schedule sized by the ACTUAL epoch count (curriculum overrides
+    # config.n_epochs with sum-of-phase-epochs), so the warmup+cosine decay is
+    # correct for a curriculum run (mirrors _train_spectral_loop, which sizes
+    # total_steps by n_epochs_total).  One optax update per sample per epoch.
+    total_steps = max(1, n_epochs_total * max(1, len(ic_states)))
+    optimizer = create_optimizer(TrainingConfig(
+        lr=config.lr,
+        warmup_steps=config.warmup_steps,
+        total_steps=total_steps,
+        weight_decay=config.weight_decay,
+        grad_clip_norm=config.grad_clip_norm,
+        optimizer=config.optimizer,
+    ))
+    opt_state = optimizer.init(eqx.filter(sfno, eqx.is_array))
+
     logger.info(
-        f"SFNO full-emulator training: {config.n_epochs} epochs, "
+        f"SFNO full-emulator training: {n_epochs_total} epochs, "
         f"{len(ic_states)} samples/epoch, dt_sfno={dt_sfno:.0f}s"
     )
 
     def _rollout_segment(state, model_wrapper, n_steps):
-        """Iterate ``model_wrapper.step`` ``n_steps`` times via lax.scan."""
-        def body(s, _):
-            return model_wrapper.step(s, dt_sfno), None
-        final, _ = jax.lax.scan(body, state, jnp.arange(n_steps))
+        """Iterate ``model_wrapper.step`` ``n_steps`` times via lax.scan.
+
+        The scan body is ``jax.checkpoint``-wrapped (``prevent_cse=True``,
+        ``policy=nothing_saveable``) — the SAME gradient-checkpoint pattern the
+        dycore-mode training rollout uses (see ``spectral_rollout``'s
+        ``step_fn_ckpt`` and ``run_amip_rollout``'s ``_step``). Without it a long
+        curriculum rollout (e.g. 120 h = 20 SFNO macro steps at dt_sfno=6 h)
+        stores every step's activations for reverse-mode AD and OOMs on a large
+        SFNO. ``nothing_saveable`` recomputes every intermediate on the backward
+        pass, trading compute for O(1)-per-step activation memory; the transform
+        is a pure function of the differentiable SFNO weights, so gradients are
+        unchanged (AD-exact). Insensitive on short (1-2 step) segments.
+        """
+        step_ckpt = jax.checkpoint(
+            lambda s, _: (model_wrapper.step(s, dt_sfno), None),
+            prevent_cse=True,
+            policy=jax.checkpoint_policies.nothing_saveable,
+        )
+        final, _ = jax.lax.scan(step_ckpt, state, jnp.arange(n_steps))
         return final
 
-    def _train_step(sfno_m, opt_state_in, ic_spectral, target_carry):
-        def loss_fn(m):
-            # Rebuild the wrapper inside the trace; ``grid``,
-            # ``sigma``, and ``pe_emulator_cfg`` are static so the
-            # constructor introduces no new array work, and the inner
-            # SFNO ``m`` is the differentiable target.
-            wrapper = SFNOPrimitiveEquationModel(
-                grid=grid,
-                sigma_coord=sigma,
-                config=pe_emulator_cfg,
-                sfno_model=m,
-                # norm_stats is a NamedTuple of jnp arrays; it enters the trace
-                # as a closed-over constant (identical stats every step).  The
-                # (de)normalize transform is differentiable, so gradients flow
-                # to the SFNO weights unchanged (SegmentForcing doctrine: the
-                # stats are static per training, not a per-iter changing arg).
-                norm_stats=norm_stats,
-            )
-            state = ic_spectral
-            total = jnp.float32(0.0)
-            comp_total = {
-                "mse": jnp.float32(0.0),
-                "bias": jnp.float32(0.0),
-                "crps": jnp.float32(0.0),
-                "spec_crps": jnp.float32(0.0),
-            }
-            for k, n_seg in enumerate(segment_steps):
-                state = _rollout_segment(state, wrapper, n_seg)
-                seg_loss, seg_comp = _spectral_state_loss_components(
-                    state, target_carry[k], grid, sigma,
-                    sigma_full, loss_cfg_train,
-                )
-                total = total + ms_weights[k] * seg_loss
-                for key in comp_total:
-                    comp_total[key] = comp_total[key] + ms_weights[k] * seg_comp[key]
-            inv = 1.0 / ms_weight_sum
-            return total * inv, {k: v * inv for k, v in comp_total.items()}
-
-        (loss, components), grads = eqx.filter_value_and_grad(
-            loss_fn, has_aux=True,
-        )(sfno_m)
-        grad_norm = optax.global_norm(eqx.filter(grads, eqx.is_array))
-        updates, new_opt_state = optimizer.update(
-            eqx.filter(grads, eqx.is_array),
-            opt_state_in,
-            eqx.filter(sfno_m, eqx.is_array),
+    def _build_wrapper(m):
+        # Rebuild the wrapper inside the trace; ``grid``, ``sigma`` and
+        # ``pe_emulator_cfg`` are static so the constructor introduces no new
+        # array work, and the inner SFNO ``m`` is the differentiable target.
+        # ``norm_stats`` is a NamedTuple of jnp arrays; it enters the trace as a
+        # closed-over constant (identical stats every step). The (de)normalize
+        # transform is differentiable, so gradients flow to the SFNO weights
+        # unchanged (SegmentForcing doctrine: the stats are static per training,
+        # not a per-iter changing arg).
+        return SFNOPrimitiveEquationModel(
+            grid=grid,
+            sigma_coord=sigma,
+            config=pe_emulator_cfg,
+            sfno_model=m,
+            norm_stats=norm_stats,
         )
-        new_model = eqx.apply_updates(sfno_m, updates)
-        return new_model, new_opt_state, loss, grad_norm, components
 
-    train_step = eqx.filter_jit(_train_step)
+    def _chained_loss(m, ic_spectral, target_carry):
+        """Default (non-curriculum) chained multi-step loss — UNCHANGED path."""
+        wrapper = _build_wrapper(m)
+        state = ic_spectral
+        total = jnp.float32(0.0)
+        comp_total = {
+            "mse": jnp.float32(0.0),
+            "bias": jnp.float32(0.0),
+            "crps": jnp.float32(0.0),
+            "spec_crps": jnp.float32(0.0),
+        }
+        for k, n_seg in enumerate(segment_steps):
+            state = _rollout_segment(state, wrapper, n_seg)
+            seg_loss, seg_comp = _spectral_state_loss_components(
+                state, target_carry[k], grid, sigma,
+                sigma_full, loss_cfg_train,
+            )
+            total = total + ms_weights[k] * seg_loss
+            for key in comp_total:
+                comp_total[key] = comp_total[key] + ms_weights[k] * seg_comp[key]
+        inv = 1.0 / ms_weight_sum
+        return total * inv, {k: v * inv for k, v in comp_total.items()}
+
+    def _curriculum_loss(m, ic_spectral, target_carry, k_target, n_sfno_steps):
+        """Single-lead curriculum loss: ONE rollout to ``n_sfno_steps`` scored
+        against the ERA5 target at that lead.  ``target_carry`` is the K-tuple of
+        carries built by ``load_training_data`` (one per multi_step_hours lead);
+        ``k_target`` selects the phase lead's target.  A defensive fallback
+        indexes tuple targets only (a non-tuple target with a curriculum would
+        mean the loader disagreed with the plan — but the loader always returns
+        a tuple when multi_step_hours is set, which the curriculum requires)."""
+        wrapper = _build_wrapper(m)
+        tgt = (target_carry[k_target]
+               if type(target_carry) is tuple else target_carry)
+        state = _rollout_segment(ic_spectral, wrapper, n_sfno_steps)
+        return _spectral_state_loss_components(
+            state, tgt, grid, sigma, sigma_full, loss_cfg_train,
+        )
+
+    def _make_train_step(phase_spec):
+        """Jitted fused (grad + optax update) train step for ``phase_spec``.
+
+        ``(None, None, None)`` -> the default chained multi-step loss.  A
+        curriculum spec ``(lead, k_target, n_sfno_steps)`` -> a single rollout
+        to that lead.  One jitted step per DISTINCT ``n_sfno_steps`` (phase
+        compiles once, reused across that phase's epochs) — mirrors
+        ``_train_spectral_loop._train_step_for``.
+        """
+        _, k_target, n_sfno_steps = phase_spec
+
+        def _train_step(sfno_m, opt_state_in, ic_spectral, target_carry):
+            def loss_fn(m):
+                if k_target is not None:
+                    return _curriculum_loss(
+                        m, ic_spectral, target_carry, k_target, n_sfno_steps,
+                    )
+                return _chained_loss(m, ic_spectral, target_carry)
+
+            (loss, components), grads = eqx.filter_value_and_grad(
+                loss_fn, has_aux=True,
+            )(sfno_m)
+            grad_norm = optax.global_norm(eqx.filter(grads, eqx.is_array))
+            updates, new_opt_state = optimizer.update(
+                eqx.filter(grads, eqx.is_array),
+                opt_state_in,
+                eqx.filter(sfno_m, eqx.is_array),
+            )
+            new_model = eqx.apply_updates(sfno_m, updates)
+            return new_model, new_opt_state, loss, grad_norm, components
+
+        return eqx.filter_jit(_train_step)
+
+    # One jitted step per distinct phase spec (compile once, reuse across that
+    # phase's epochs — shapes are constant within a phase).
+    _step_cache: dict = {}
+
+    def _train_step_for(spec):
+        if spec not in _step_cache:
+            _step_cache[spec] = _make_train_step(spec)
+        return _step_cache[spec]
 
     best_loss = float("inf")
     patience_counter = 0
     early_stop_patience = int(getattr(config, "early_stop_patience", 0) or 0)
     early_stop_min_delta = float(getattr(config, "early_stop_min_delta", 1.0e-3))
 
-    if start_epoch >= config.n_epochs:
+    if start_epoch >= n_epochs_total:
         logger.info(
-            f"Resume: start_epoch={start_epoch} >= n_epochs={config.n_epochs}; "
+            f"Resume: start_epoch={start_epoch} >= n_epochs={n_epochs_total}; "
             f"skipping training loop (already complete)."
         )
         return sfno, loss_history
 
-    for epoch in range(start_epoch, config.n_epochs):
+    for epoch in range(start_epoch, n_epochs_total):
+        # Curriculum: this epoch's phase spec (resume indexes into epoch_plan);
+        # the per-phase jitted step compiles once and is reused within a phase.
+        # Non-curriculum: epoch_plan[epoch] == (None, None, None) -> the default
+        # chained-multi-step train_step for every epoch (single compile).
+        train_step = _train_step_for(epoch_plan[epoch])
         epoch_loss = 0.0
         epoch_components = {"mse": 0.0, "bias": 0.0, "crps": 0.0, "spec_crps": 0.0}
         t0 = time.time()
         grad_norm_val = 0.0
 
         for sample_idx, (ic, target) in enumerate(zip(ic_states, target_carries)):
+            if host_staged:
+                # Host-resident dataset (#1155): stage only THIS sample onto
+                # the compute device; the prior sample's device copies free
+                # when ic/target rebind. Peak device footprint: one sample.
+                ic = stage_sample(ic)
+                target = stage_sample(target)
             sfno, opt_state, loss, grad_norm, components = train_step(
                 sfno, opt_state, ic, target,
             )
@@ -3491,7 +3830,7 @@ def _train_sfno_full_loop(
         avg_components = {k: v / n_samples for k, v in epoch_components.items()}
         loss_history.append(avg_loss)
 
-        if epoch % config.log_every == 0 or epoch == config.n_epochs - 1:
+        if epoch % config.log_every == 0 or epoch == n_epochs_total - 1:
             elapsed = time.time() - t0
             logger.info(
                 f"Epoch {epoch:4d}: loss={avg_loss:.6f} "
@@ -3512,7 +3851,13 @@ def _train_sfno_full_loop(
         save_checkpoint(sfno, ckpt_path)
         logger.info(f"Saved checkpoint: {ckpt_path}")
 
-        if early_stop_patience > 0:
+        # Early stopping is DISABLED under a rollout curriculum (mirrors
+        # _train_spectral_loop): loss magnitudes are NOT comparable across phases
+        # (a longer lead has a naturally larger loss), so a stop triggered right
+        # after an early short-lead phase would silently skip the remaining — most
+        # stability-critical — long phases (24/48/120 h). The per-phase epoch
+        # counts are the explicit training budget instead.
+        if early_stop_patience > 0 and not config.rollout_curriculum:
             if best_loss - avg_loss > early_stop_min_delta:
                 best_loss = avg_loss
                 patience_counter = 0
@@ -3582,6 +3927,7 @@ def train_column_mlp_spectral(
 
     ic_states, target_carries, ic_times = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
+        host_resident=True,   # non-chunked full-dataset load (#1155)
     )
     sample_forcings = _maybe_build_sample_forcings(
         surface_forcing_path, ic_times, grid, forcing_cache_path,
@@ -3592,6 +3938,7 @@ def train_column_mlp_spectral(
         grid, sigma, ic_states, target_carries, config,
         start_epoch=start_epoch,
         sample_forcings=sample_forcings,
+        host_staged=True,   # dataset loaded host-resident above (#1155)
     )
 
 
@@ -3625,6 +3972,7 @@ def train_physics_params_spectral(
 
     ic_states, target_carries, _ic_times = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
+        host_resident=True,   # non-chunked full-dataset load (#1155)
     )
 
     dt = config.dt
@@ -3635,4 +3983,5 @@ def train_physics_params_spectral(
     return _train_spectral_loop(
         params, _make_physics_fn,
         grid, sigma, ic_states, target_carries, config,
+        host_staged=True,   # dataset loaded host-resident above (#1155)
     )

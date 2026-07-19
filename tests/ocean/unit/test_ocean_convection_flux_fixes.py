@@ -12,7 +12,9 @@ Covers (one class each):
 3. Ice-shelf three-equation melt has a FINITE ``jax.grad`` when the
    quadratic discriminant is <= 0 (sqrt-floor guard), and the Jenkins /
    ISOMIP+ basal-melt module carries no hardcoded ``3974.0`` / ``1000.0``
-   constants. ``physics/ice_shelf.py`` + ``physics/ice_shelf_basal_melt.py``.
+   constants. ``physics/ice_shelf.py`` (the linearised
+   ``ice_shelf_basal_melt`` closure was deleted 2026-07-17 — callers now use
+   the faithful ``three_equation_melt``).
 4. Backscatter column power is a depth-MEAN per-mass density [m^2/s^3] so it
    shares units with the per-mass EKE reservoir budget (not a depth-integral
    H x too large that would pin E to E_max).
@@ -52,7 +54,6 @@ from legoesm.ocean.physics.ice_shelf import (
     freezing_point_C,
     three_equation_melt,
 )
-from legoesm.ocean.physics import ice_shelf_basal_melt as basal
 from legoesm.grids.latlon import create_regional_latlon_grid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
 from legoesm.ocean.physics.lateral_mixing import (
@@ -212,22 +213,14 @@ class TestIceShelfMeltFix:
         g = jax.grad(melt)(t_f)
         assert bool(jnp.isfinite(g))
 
-    def test_basal_module_uses_constants_not_literals(self):
-        # The module must reference the canonical constants, not literals.
-        assert basal._C_P_SW == constants.c_p_seawater_isomip == 3974.0
-        assert basal._RHO_FW == constants.rho_water == 1000.0
-        # And the source file must not contain the bare literals in code.
-        src = pathlib.Path(basal.__file__).read_text()
-        code_lines = [ln.split("#", 1)[0] for ln in src.splitlines()]
-        code = "\n".join(code_lines)
-        assert "3974.0" not in code
-        assert "1000.0" not in code
-
-    def test_basal_flux_finite(self):
-        fw = basal.basal_freshwater_flux_kg_per_m2_s(
+    def test_three_equation_flux_finite_and_positive_when_warm(self):
+        # (Replaces two tests that targeted the DELETED linearised
+        # ice_shelf_basal_melt module; the constants-not-literals property
+        # for ice_shelf.py itself is enforced by the CI constants ratchet.)
+        r = three_equation_melt(
             jnp.array(1.0), jnp.array(34.5), jnp.array(500.0))
-        assert bool(jnp.isfinite(fw))
-        assert float(fw) > 0.0     # warm cavity -> melt -> freshwater in
+        assert bool(jnp.isfinite(r.freshwater_to_ocean))
+        assert float(r.freshwater_to_ocean) > 0.0   # warm cavity -> melt
 
 
 # ---------------------------------------------------------------------------

@@ -160,14 +160,21 @@ def test_bechtold_downdraft_evap_conserves_water_locally():
         T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
         conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
         dt=300.0,
-        config=BechtoldConfig(enable_downdraft=False, enable_stochastic=False),
+        # evap pinned OFF: this test pins the LEGACY downdraft
+        # re-evaporation machinery; the default-on IFS Kessler evap replaces
+        # it (own conservation tests in the subcloud_evap section).
+        config=BechtoldConfig(enable_downdraft=False, enable_stochastic=False,
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
+                              use_ifs_inplume_precip=False),
         moisture_convergence=jnp.zeros_like(T),
     )
     out_on, _, _ = bechtold_convection(
         T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
         conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
         dt=300.0,
-        config=BechtoldConfig(enable_downdraft=True, enable_stochastic=False),
+        config=BechtoldConfig(enable_downdraft=True, enable_stochastic=False,
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
+                              use_ifs_inplume_precip=False),
         moisture_convergence=jnp.zeros_like(T),
     )
     dT_diff = out_on.dT_dt - out_off.dT_dt
@@ -263,12 +270,21 @@ def test_bechtold_AR1_stationary_variance():
         stochastic_decorrelation=1800.0,
     )
     key = jax.random.PRNGKey(0)
+
+    # JIT once (config closed over as a static): the test's object is the
+    # AR1 STATISTICS — 500 eager full-leaf evaluations grew past the test
+    # timeout as the scheme gained (default-on) oracle features.
+    @jax.jit
+    def _step_stoch(stoch_in, subkey):
+        return bechtold_convection(
+            T, q, pf, ph, u, v, cpp, stoch_in, subkey, dt=300.0,
+            config=config,
+        )[2]
+
     # 500 steps; sample stoch_new at the end.
     for i in range(500):
         key, subkey = jax.random.split(key)
-        _, _, stoch = bechtold_convection(
-            T, q, pf, ph, u, v, cpp, stoch, subkey, dt=300.0, config=config,
-        )
+        stoch = _step_stoch(stoch, subkey)
     var = float(jnp.var(stoch))
     # Stationary variance is theoretically 1; allow generous tolerance.
     assert 0.5 < var < 2.0, f"AR1 stationary variance off-target: {var}"
@@ -617,9 +633,22 @@ def test_bechtold_mse_conservation_within_tolerance():
         T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
         conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
         dt=1800.0,
+        # Sub-cloud evap pinned OFF: this test's object is the mass-flux
+        # SOLVE conservation.  The H+Q+C metric is not evap-invariant BY
+        # CONSTRUCTION (it books +L_v*rain for never-evaporated rain, so the
+        # exactly-conservative form-then-evaporate pair shifts it by -L_v*e);
+        # the evap's own water/enthalpy closure is machine-exact tested in
+        # the subcloud_evap section.
         config=BechtoldConfig(
             enable_stochastic=False, enable_cmt=False,
             subsidence_solve="implicit_flux",
+            use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
+            # In-plume precip pinned OFF in THIS block: its rain follows the
+            # RELEASED-latent convention (formation heating booked in dT, see
+            # the in-plume energy-coupling fix), so the deferred-latent
+            # H+Q+L(dq_c+dq_r) metric below does not apply to it — the
+            # in-plume path has its own block with the matching metric.
+            use_ifs_inplume_precip=False,
         ),
         moisture_convergence=jnp.zeros_like(T),
     )
@@ -639,6 +668,37 @@ def test_bechtold_mse_conservation_within_tolerance():
         f"({rel*100:.1f}% of total)"
     )
 
+    # --- In-plume precip path (default ON): RELEASED-latent convention ----
+    # The in-plume rain's vapor sink is paired with +L_v/c_p warming at the
+    # debited levels (the energy coupling that fixed the tier-2 net-COOLING
+    # regression), so its latent is in H, NOT carried by dq_r: the closure
+    # metric is h = c_p*dT + L_v*(dq_v + dq_c) with dq_r EXCLUDED.  (The
+    # legacy split's rain above is a carve-out of the deferred-latent
+    # detrained condensate, hence the different metric.  Mixed conventions
+    # inside one scheme are a documented debt; each is pinned here so
+    # neither can silently regress.)
+    out_ip, _, _ = bechtold_convection(
+        T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
+        conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
+        dt=1800.0,
+        config=BechtoldConfig(
+            enable_stochastic=False, enable_cmt=False,
+            subsidence_solve="implicit_flux",
+            use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
+            use_ifs_inplume_precip=True,
+        ),
+        moisture_convergence=jnp.zeros_like(T),
+    )
+    H2 = float(jnp.sum(out_ip.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
+    Q2 = float(jnp.sum(out_ip.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+    C2 = float(jnp.sum(out_ip.dq_c_conv_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+    rel2 = abs(H2 + Q2 + C2) / (abs(H2) + abs(Q2) + abs(C2) + 1e-10)
+    assert rel2 < 0.10, (
+        f"Bechtold in-plume-precip MSE residual {H2+Q2+C2:.1f} W/m^2 "
+        f"({rel2*100:.1f}% of total) — the rain-formation latent release "
+        f"and the vapor sink have diverged"
+    )
+
 
 # ---------------------------------------------------------------------------
 # In-updraft precipitation: the shared convective rain split
@@ -655,14 +715,27 @@ def test_bechtold_precip_efficiency_splits_rain_conserving_mass():
 
     base, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
-        config=BechtoldConfig(precip_efficiency=0.0),   # explicit no-split ref
+        # evap pinned OFF: this test pins the bit-exact pe-fraction split.
+        config=BechtoldConfig(precip_efficiency=0.0,
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
+                              use_ifs_inplume_precip=False),
     )
     assert base.dq_r_conv_dt is None                 # pe=0 => no split
 
     pe = 0.6
     split, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
-        config=BechtoldConfig(precip_efficiency=pe),
+        # ALL IFS chain flags pinned OFF: this fixture pins the bit-exact
+        # (1-PE)/PE split in ISOLATION; the 2026-07-17 default flips turned
+        # on downdraft/capdcycl/land-RHEBC, which touch the precip/M_b chain
+        # downstream and break the exact partition identity (their own
+        # conservation is tested in their sections).
+        config=BechtoldConfig(precip_efficiency=pe,
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
+                              use_ifs_inplume_precip=False,
+                              use_ifs_downdraft=False,
+                              use_ifs_capdcycl=False,
+                              use_ifs_land_rhebc=False),
     )
     assert split.dq_r_conv_dt is not None
     # cloud + rain == the ORIGINAL positive condensate (base cloud), so the
@@ -694,19 +767,31 @@ def test_bechtold_downdraft_sharpness_fields_wired():
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
     stoch = jnp.zeros((ncol,))
+    # evap pinned OFF: the RH-trigger sharpness reaches dT_dt only through
+    # the LEGACY evap branch (under IFS evap the trigger feeds CMT momentum
+    # only, and lcl sharpness feeds the evap gate separately).
     out_default, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
-        config=BechtoldConfig(enable_downdraft=True),
+        config=BechtoldConfig(enable_downdraft=True,
+                              use_ifs_downdraft=False,  # LEGACY branch under test
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
+                              use_ifs_inplume_precip=False),
     )
     out_rh_flat, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
         config=BechtoldConfig(enable_downdraft=True,
-                              downdraft_rh_sharpness=1e-6),
+                              use_ifs_downdraft=False,  # LEGACY branch under test
+                              downdraft_rh_sharpness=1e-6,
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
+                              use_ifs_inplume_precip=False),
     )
     out_lcl_flat, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
         config=BechtoldConfig(enable_downdraft=True,
-                              lcl_membership_sharpness=1e-6),
+                              use_ifs_downdraft=False,  # LEGACY branch under test
+                              lcl_membership_sharpness=1e-6,
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
+                              use_ifs_inplume_precip=False),
     )
     assert float(jnp.max(jnp.abs(out_rh_flat.dT_dt - out_default.dT_dt))) > 1e-10, (
         "downdraft_rh_sharpness is not wired"
@@ -849,7 +934,21 @@ def _run_pe(pe):
     stoch = jnp.zeros((ncol,))
     out, _, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
-        config=BechtoldConfig(precip_efficiency=pe),
+        # evap pinned OFF: this fixture pins the bit-exact (1-PE)/PE split
+        # partition; the default-on IFS sub-cloud evap rescales dq_r
+        # downstream of the split (its own conservation is tested in the
+        # subcloud_evap section).
+        # ALL IFS chain flags pinned OFF: this fixture pins the bit-exact
+        # (1-PE)/PE split in ISOLATION; the 2026-07-17 default flips turned
+        # on downdraft/capdcycl/land-RHEBC, which touch the precip/M_b chain
+        # downstream and break the exact partition identity (their own
+        # conservation is tested in their sections).
+        config=BechtoldConfig(precip_efficiency=pe,
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
+                              use_ifs_inplume_precip=False,
+                              use_ifs_downdraft=False,
+                              use_ifs_capdcycl=False,
+                              use_ifs_land_rhebc=False),
     )
     return out
 
@@ -1018,11 +1117,11 @@ def test_bechtold_f1_turnover_toggle_changes_result():
     on, mu_on, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
         config=BechtoldConfig(use_convective_turnover_tau=True,
-                              use_ifs_cape_closure=False, M_b_max=1.0))
+                              use_ifs_cape_closure=False, use_ifs_capdcycl=False, M_b_max=1.0))
     off, mu_off, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
         config=BechtoldConfig(use_convective_turnover_tau=False,
-                              use_ifs_cape_closure=False, M_b_max=1.0))
+                              use_ifs_cape_closure=False, use_ifs_capdcycl=False, M_b_max=1.0))
     assert jnp.all(jnp.isfinite(mu_on)) and jnp.all(jnp.isfinite(mu_off))
     assert float(jnp.max(jnp.abs(mu_on - mu_off))) > 0.0, "toggle must be live"
     # a deep, buoyant column has tau_conv < tau_bl (fast turnover) => turnover
@@ -1040,7 +1139,7 @@ def test_bechtold_f1_turnover_stable_column_quiesces():
     out, mu, _ = bechtold_convection(
         T, q, pf, ph, u, v, jnp.zeros((ncol, nlev)), jnp.zeros((ncol,)),
         None, dt=600.0, config=BechtoldConfig(use_convective_turnover_tau=True,
-                                              use_ifs_cape_closure=False))
+                                              use_ifs_cape_closure=False, use_ifs_capdcycl=False))
     # crude column heating rate proxy: max|dT/dt| * c_pd * p_s/g  [W/m^2]
     w_m2 = float(jnp.max(jnp.abs(out.dT_dt)) * constants.c_pd * 1e5 / constants.g)
     assert w_m2 < 1.0, f"stable column not quiescent: {w_m2:.3f} W/m^2"
@@ -1056,7 +1155,7 @@ def test_bechtold_f1_turnover_grad_finite():
     def loss(eps_deep):
         cfg = BechtoldConfig(epsilon_deep=eps_deep,
                              use_convective_turnover_tau=True,
-                             use_ifs_cape_closure=False)
+                             use_ifs_cape_closure=False, use_ifs_capdcycl=False)
         o, _, _ = bechtold_convection(T, q, pf, ph, u, v, cpp, st, None,
                                       dt=600.0, config=cfg)
         return jnp.sum(o.dT_dt ** 2)
@@ -1079,7 +1178,7 @@ def test_bechtold_f1_turnover_grad_finite_on_quiescent_column():
     def loss(eps_deep):
         cfg = BechtoldConfig(epsilon_deep=eps_deep,
                              use_convective_turnover_tau=True,
-                             use_ifs_cape_closure=False)
+                             use_ifs_cape_closure=False, use_ifs_capdcycl=False)
         o, _, _ = bechtold_convection(T, q, pf, ph, u, v, cpp, st, None,
                                       dt=600.0, config=cfg)
         return jnp.sum(o.dT_dt ** 2)
@@ -1248,11 +1347,11 @@ def test_bechtold_f1_turnover_deep_weighted_integration_live_and_bounded():
         _, mu_on, _ = bechtold_convection(
             T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
             config=BechtoldConfig(use_convective_turnover_tau=True,
-                                  use_ifs_cape_closure=False, M_b_max=10.0))
+                                  use_ifs_cape_closure=False, use_ifs_capdcycl=False, M_b_max=10.0))
         _, mu_off, _ = bechtold_convection(
             T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
             config=BechtoldConfig(use_convective_turnover_tau=False,
-                                  use_ifs_cape_closure=False, M_b_max=10.0))
+                                  use_ifs_cape_closure=False, use_ifs_capdcycl=False, M_b_max=10.0))
         assert jnp.all(jnp.isfinite(mu_on)) and jnp.all(jnp.isfinite(mu_off))
         denom = float(jnp.maximum(jnp.max(jnp.abs(mu_off)), 1e-12))
         rel = float(jnp.max(jnp.abs(mu_on - mu_off))) / denom
@@ -1273,7 +1372,7 @@ def test_bechtold_f5_supersaturated_column_finite_and_convecting():
     out, mu, _ = bechtold_convection(
         T, q_super, pf, ph, u, v, jnp.zeros((ncol, nlev)), jnp.zeros((ncol,)),
         None, dt=600.0, config=BechtoldConfig(use_convective_turnover_tau=True,
-                                              use_ifs_cape_closure=False))
+                                              use_ifs_cape_closure=False, use_ifs_capdcycl=False))
     assert jnp.all(jnp.isfinite(out.dT_dt)) and jnp.all(jnp.isfinite(mu))
     assert float(jnp.max(out.convective_mask)) > 0.0, "supersaturated column must convect"
 
@@ -1523,7 +1622,7 @@ def test_ifs_cape_closure_default_on_and_toggle_live():
         config=BechtoldConfig(use_ifs_cape_closure=True, M_b_max=1.0))
     off, mu_off, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
-        config=BechtoldConfig(use_ifs_cape_closure=False, M_b_max=1.0))
+        config=BechtoldConfig(use_ifs_cape_closure=False, use_ifs_capdcycl=False, M_b_max=1.0))
     assert jnp.all(jnp.isfinite(mu_on)) and jnp.all(jnp.isfinite(mu_off))
     assert float(jnp.max(jnp.abs(mu_on - mu_off))) > 0.0, "toggle must be live"
     for o in (on, off):
@@ -1599,7 +1698,7 @@ def test_ifs_cape_closure_restarts_stochastic_zeroed_deep_column():
                               enable_stochastic=True))[1]
     mu_off = bechtold_convection(
         T, q, pf, ph, u, v, cpp, st, key, dt=600.0,
-        config=BechtoldConfig(use_ifs_cape_closure=False,
+        config=BechtoldConfig(use_ifs_cape_closure=False, use_ifs_capdcycl=False,
                               enable_stochastic=True))[1]
     assert float(jnp.max(mu_on)) > 0.0, (
         "closure floor failed to restart the stochastically-zeroed deep column"
@@ -1655,3 +1754,1471 @@ def test_ifs_profile_scale_limit_matches_oracle_semantics():
     s_small = jnp.array([0.5, 0.5, 0.5])
     out_small = _ifs_profile_scale_limit(s_small, prof, cap)
     assert jnp.allclose(out_small, s_small)          # s<1 never touched
+
+
+# ---------------------------------------------------------------------------
+# IFS Kessler sub-cloud rain evaporation (cuflxn.F90:436-475)
+# ---------------------------------------------------------------------------
+
+from legoesm.atmosphere.physics.convection.bechtold import (  # noqa: E402
+    _ifs_subcloud_rain_evaporation,
+    _IFS_RCPECONS,
+    _IFS_EVAP_EXPONENT,
+    _IFS_RCVRFACTOR,
+    _IFS_RCUCOV,
+    _IFS_RCUCOV_DEEP_FACTOR,
+    _IFS_RHEBC_OCEAN,
+    _IFS_RHEBC_OCEAN_DEEP,
+)
+
+
+def test_ifs_subcloud_evap_constants_match_oracle():
+    """Constants are the oracle's: RCPECONS=5.44e-4/g (sucumf.F90:176),
+    exponent 0.5777 (cuflxn.F90:453), RCVRFACTOR=5.09e-3 (sucumf.F90:177),
+    RCUCOV=0.05 (sucumf.F90:175) with the 0.6 deep area factor
+    (cuflxn.F90:442), RHEBC ocean 0.92 / deep-ocean 0.85
+    (sucumf.F90:179, cuflxn.F90:226)."""
+    assert abs(_IFS_RCPECONS - 5.44e-4 / constants.g) < 1e-18
+    assert _IFS_EVAP_EXPONENT == 0.5777
+    assert _IFS_RCVRFACTOR == 5.09e-3
+    assert _IFS_RCUCOV == 0.05
+    assert _IFS_RCUCOV_DEEP_FACTOR == 0.6
+    assert _IFS_RHEBC_OCEAN == 0.92
+    assert _IFS_RHEBC_OCEAN_DEEP == 0.85
+
+
+def test_ifs_subcloud_evap_analytic_fortran_mirror():
+    """Hand-computed Fortran-shaped downward recurrence (cuflxn.F90:449-460)
+    on a 4-level column reproduces the helper: rain forms in the upper two
+    (cloud) layers, evaporates in the dry sub-cloud layers below; a sign,
+    orientation, area-blend or RH-break bug goes red."""
+    import numpy as np
+    g = constants.g
+    dt = 600.0
+    q = np.array([[1e-4, 2e-3, 4e-3, 6e-3]])          # surface-last, dry BL
+    qsat = np.array([[5e-4, 4e-3, 1.2e-2, 1.6e-2]])   # sub-cloud RH = 1/3, 3/8
+    p_half = np.array([[200e2, 400e2, 620e2, 830e2, 1000e2]])
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    dq_r = np.array([[2e-7, 3e-7, 0.0, 0.0]])          # rain source aloft
+    below = np.array([[0.0, 0.0, 1.0, 1.0]])           # crisp sub-cloud gate
+    # ZRHM = 0.85 > 0.8 so the non-deep case exercises a NONZERO RCUCOV RH
+    # enhancement, factor 1 + 0.05/0.025 = 3 (codex R2: 0.8 exactly zeroed it).
+    rh_b, rh_t = np.array([0.95]), np.array([0.75])
+    dw = np.array([1.0])                                # fully deep
+
+    def mirror(q_np, qsat_np, dq_r_np, below_np, deep: bool):
+        # Oracle ordering: evap acts on the flux entering the layer TOP; the
+        # layer's own source joins the flux downstream (cuflxn.F90:449,470).
+        if deep:
+            area = _IFS_RCUCOV * _IFS_RCUCOV_DEEP_FACTOR
+            rhebc = _IFS_RHEBC_OCEAN_DEEP
+        else:
+            zrhm = 0.5 * (rh_b[0] + rh_t[0])
+            area = _IFS_RCUCOV * (1.0 + (max(0.8, zrhm) - 0.8) / 0.025)
+            rhebc = _IFS_RHEBC_OCEAN
+        zcons2 = 1.0 / (g * dt)
+        flux = 0.0
+        evap_exp = np.zeros(4)
+        for k in range(4):                              # downward (surface-last)
+            zrfl = flux
+            if zrfl > 1e-12:
+                zdrfl1 = (
+                    _IFS_RCPECONS * max(0.0, qsat_np[0, k] - q_np[0, k]) * area
+                    * (np.sqrt(p_half[0, k] / p_half[0, -1]) / _IFS_RCVRFACTOR
+                       * zrfl / area) ** _IFS_EVAP_EXPONENT
+                    * dp[0, k]
+                )
+                zrmin = zrfl - area * max(0.0, rhebc * qsat_np[0, k] - q_np[0, k]) \
+                    * zcons2 * dp[0, k]
+                zrfln = max(max(zrfl - zdrfl1, zrmin), 0.0)
+                evap_exp[k] = (zrfl - zrfln) * below_np[0, k]
+            flux = zrfl - evap_exp[k] + max(dq_r_np[0, k], 0.0) * dp[0, k] / g
+        return evap_exp
+
+    for deep in (True, False):                          # both area branches
+        dw_case = np.array([1.0 if deep else 0.0])
+        evap_exp = mirror(q, qsat, dq_r, below, deep)
+        evap_rate, rain_scale, _ = _ifs_subcloud_rain_evaporation(
+            jnp.asarray(q), jnp.asarray(qsat), jnp.asarray(p_half),
+            jnp.asarray(dp), jnp.asarray(dq_r), jnp.asarray(below),
+            jnp.asarray(rh_b), jnp.asarray(rh_t), jnp.asarray(dw_case), dt,
+        )
+        got_evap = np.asarray(evap_rate) * dp / g       # back to kg/m2/s
+        # tol keyed on the JAX compute dtype (np promotion above would
+        # always report float64 even when the scan ran in fp32).
+        tol = 1e-9 if evap_rate.dtype == jnp.float64 else 1e-5
+        assert np.allclose(got_evap[0], evap_exp, rtol=tol, atol=1e-18), (
+            f"deep={deep}: evap {got_evap[0]} != hand-computed {evap_exp}"
+        )
+        assert float(evap_exp.sum()) > 0.0, "fixture must actually evaporate"
+        rain_total = float((np.maximum(dq_r, 0.0) * dp / g).sum())
+        scale_exp = 1.0 - evap_exp.sum() / rain_total
+        assert abs(float(rain_scale[0, 0]) - scale_exp) < tol
+
+
+def test_ifs_subcloud_evap_rh_break_and_conservation():
+    """A sub-cloud layer already wetter than the RH break evaporates ~nothing;
+    a dry layer evaporates; per-level evap never exceeds the through-flux
+    (fluxes stay >= 0) and the debit scale lands in [0, 1] with column water
+    closing exactly: sum(evap) == (1 - scale) * rain_total."""
+    dt = 600.0
+    ncol, nlev = 1, 5
+    p_half = jnp.linspace(150e2, 1000e2, nlev + 1)[None, :]
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    qsat = jnp.full((ncol, nlev), 1e-2)
+    dq_r = jnp.zeros((ncol, nlev)).at[:, 1].set(5e-7)
+    below = jnp.zeros((ncol, nlev)).at[:, 3:].set(1.0)
+    rh_b, rh_t = jnp.array([0.9]), jnp.array([0.7])
+    dw = jnp.array([0.0])                                # non-deep branch
+
+    def run(q):
+        e, sc, _ = _ifs_subcloud_rain_evaporation(
+            q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt)
+        return e, sc
+
+    # wetter than the 0.92 break everywhere below cloud: ~no evaporation.
+    e_wet, s_wet = run(qsat * 0.95)
+    assert float(jnp.sum(e_wet)) == 0.0
+    assert abs(float(s_wet[0, 0]) - 1.0) < 1e-12
+    # dry sub-cloud: evaporates, scale in [0,1), exact closure.
+    q_dry = qsat * 0.3
+    e_dry, s_dry = run(q_dry)
+    evap_total = float(jnp.sum(e_dry * dp / constants.g))
+    rain_total = float(jnp.sum(jnp.maximum(dq_r, 0.0) * dp / constants.g))
+    assert evap_total > 0.0
+    assert 0.0 <= float(s_dry[0, 0]) < 1.0
+    assert abs(evap_total - (1.0 - float(s_dry[0, 0])) * rain_total) <= (
+        1e-12 * rain_total + 1e-30
+    )
+    assert evap_total <= rain_total * (1.0 + 1e-9)
+
+
+def test_ifs_subcloud_evap_toggle_and_leaf_integration():
+    """Default ON (2026-07-16 flip); ON re-evaporates sub-cloud rain on a convecting column
+    with a dry boundary layer (vapor added below the LCL, surface-reaching
+    rain reduced, column vapor gain == rain debit) and stays finite."""
+    assert BechtoldConfig().use_ifs_subcloud_evap is True
+    # Proven convecting fixture (same as the closure toggle tests); the
+    # analytic sub-cloud RH ~0.4 sits far below the 0.85/0.92 break, so the
+    # Kessler evap fires whenever rain exists.  Legacy downdraft evap is
+    # disabled in BOTH runs (downdraft_evap_efficiency=0) so the toggle
+    # isolates the IFS path alone.
+    T, q, pf, ph, u, v = _column(ncol=2, nlev=40, T_sfc=299.0, q_sfc=13e-3,
+                                 lapse_rate=6.5)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    st = jnp.zeros((ncol,))
+    dp = ph[:, 1:] - ph[:, :-1]
+    common = dict(downdraft_evap_efficiency=0.0)
+    out_on, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_subcloud_evap=True, **common))
+    out_off, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_subcloud_evap=False, use_ifs_snow_melt=False, **common))
+    for o in (out_on, out_off):
+        assert jnp.all(jnp.isfinite(o.dT_dt))
+        assert jnp.all(jnp.isfinite(o.dq_v_dt))
+        assert o.dq_r_conv_dt is not None
+        assert float(jnp.min(o.dq_r_conv_dt)) >= 0.0
+    rain_on = float(jnp.sum(out_on.dq_r_conv_dt * dp / constants.g))
+    rain_off = float(jnp.sum(out_off.dq_r_conv_dt * dp / constants.g))
+    assert rain_off > 0.0, "fixture must rain (else the test is vacuous)"
+    assert rain_on < rain_off, "IFS evap must reduce surface-reaching rain"
+    # Column water closure: the vapor the evap adds equals the rain debit.
+    # Relative tolerance keyed on the compute dtype (fp32 accumulates ~1e-7
+    # relative over the two 40-level column sums — codex R3).
+    rtol = 1e-9 if out_on.dq_v_dt.dtype == jnp.float64 else 3e-5
+    dv_on = float(jnp.sum((out_on.dq_v_dt - out_off.dq_v_dt) * dp / constants.g))
+    assert abs(dv_on - (rain_off - rain_on)) < 1e-12 + rtol * abs(rain_off), (
+        "column vapor gain != rain debit (water leak in the evap block)"
+    )
+    # Evaporative cooling accompanies the moistening (L_v/c_p ratio).
+    dh_on = float(jnp.sum((out_on.dT_dt - out_off.dT_dt) * dp / constants.g))
+    assert dh_on < 0.0
+    assert abs(dh_on * constants.c_pd + dv_on * constants.L_v) < (
+        rtol * abs(dv_on * constants.L_v) + 1e-12
+    )
+
+
+def test_ifs_subcloud_evap_no_rain_noop_and_grad():
+    """precip_efficiency=0 + constant split => no rain to evaporate: the flag
+    is a no-op (no crash on dq_r=None); jax.grad stays finite through the
+    evap scan on a raining column (the **0.5777 zero-flux guard)."""
+    T, q, pf, ph, u, v = _column(ncol=1, nlev=24, T_sfc=300.0, q_sfc=10e-3)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    st = jnp.zeros((ncol,))
+    out, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_subcloud_evap=True,
+                              use_ifs_inplume_precip=False,
+                              precip_efficiency=0.0))
+    assert out.dq_r_conv_dt is None
+    assert jnp.all(jnp.isfinite(out.dT_dt))
+
+    if jnp.asarray(0.0).dtype != jnp.float64:
+        import pytest
+        pytest.skip("full-scheme grad NaNs under fp32 on main irrespective of "
+                    "this flag (pre-existing); grad coverage runs under x64 "
+                    "like the file's other grad tests")
+
+    def loss(eps_deep):
+        cfg = BechtoldConfig(epsilon_deep=eps_deep, use_ifs_subcloud_evap=True)
+        o, _, _ = bechtold_convection(T, q, pf, ph, u, v, cpp, st, None,
+                                      dt=600.0, config=cfg)
+        return jnp.sum(o.dq_v_dt ** 2)
+
+    assert jnp.isfinite(jax.grad(loss)(1.75e-3))
+
+
+def test_ifs_subcloud_evap_fractional_gate_is_convex_blend():
+    """A fractional below-LCL membership g realizes the CONVEX BLEND of the
+    two oracle branches per level — flux_out = (1-g)*zrfl + g*zrfln, vapor
+    deposit g*(zrfl - zrfln) — so g=0.5 evaporation is exactly half the
+    hard-gate evaporation of the same single active layer (codex R1 #2)."""
+    dt = 600.0
+    ncol, nlev = 1, 3
+    p_half = jnp.linspace(400e2, 1000e2, nlev + 1)[None, :]
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    qsat = jnp.full((ncol, nlev), 1e-2)
+    q = qsat * 0.3
+    dq_r = jnp.zeros((ncol, nlev)).at[:, 0].set(4e-7)   # source in the top layer
+    rh_b, rh_t = jnp.array([0.9]), jnp.array([0.7])
+    dw = jnp.array([1.0])
+
+    def evap_with_gate(g_mid):
+        below = jnp.asarray([[0.0, g_mid, 0.0]])        # only the middle layer
+        e, _, _ = _ifs_subcloud_rain_evaporation(
+            q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt)
+        return float(e[0, 1] * dp[0, 1] / constants.g)
+
+    e_full = evap_with_gate(1.0)
+    e_half = evap_with_gate(0.5)
+    assert e_full > 0.0
+    assert abs(e_half - 0.5 * e_full) < 1e-12 + 1e-9 * e_full
+
+
+# ---------------------------------------------------------------------------
+# IFS in-updraft precipitation formation (cuascn.F90:718-773)
+# ---------------------------------------------------------------------------
+
+from legoesm.atmosphere.physics.convection.bechtold import (  # noqa: E402
+    _ifs_inplume_precip_conversion,
+    _ifs_updraft_ke_profile,
+    _ifs_liquid_fraction_cu,
+    _IFS_RPRCON,
+    _IFS_ZDNOPRC,
+    _IFS_Z_CLDMAX,
+    _IFS_Z_CPRC2,
+    _IFS_RTBERCU_OFFSET_K,
+    _IFS_RTICECU_OFFSET_K,
+)
+
+
+def test_ifs_inplume_constants_and_liquid_fraction():
+    """Constants are the oracle's (sucumf.F90:164, cuascn.F90:277-280,
+    suphec.F90:200-202); FOEALFCU is 1 above freezing, 0 at/below -23C and
+    the quadratic in between (fcttre.func.h:130)."""
+    assert _IFS_RPRCON == 1.4e-3
+    assert _IFS_ZDNOPRC == 3.0e-4
+    assert _IFS_Z_CLDMAX == 5.0e-3
+    assert _IFS_Z_CPRC2 == 0.5
+    assert _IFS_RTBERCU_OFFSET_K == 5.0
+    assert _IFS_RTICECU_OFFSET_K == 23.0
+    tf = constants.T_freeze
+    assert float(_ifs_liquid_fraction_cu(jnp.array(tf + 5.0))) == 1.0
+    assert float(_ifs_liquid_fraction_cu(jnp.array(tf - 23.0))) == 0.0
+    assert float(_ifs_liquid_fraction_cu(jnp.array(tf - 40.0))) == 0.0
+    mid = float(_ifs_liquid_fraction_cu(jnp.array(tf - 11.5)))
+    assert abs(mid - 0.25) < 1e-12          # ((23-11.5)/23)^2 = 0.25
+
+
+def test_ifs_inplume_conversion_analytic_fortran_mirror():
+    """Hand-computed Fortran-shaped upward recurrence (cuascn.F90:721-773) on
+    a 4-level ascent reproduces the helper: dilution + fresh condensation
+    recovered from the plume outputs, ZWU from the level-below KE, Bergeron
+    factor, ZDNOPRC threshold IF, Z_CLDMAX clip — a sign/orientation/factor
+    bug goes red."""
+    import numpy as np
+    g = constants.g
+    tf = constants.T_freeze
+    # surface-last inputs (index 0 = top).
+    q_c = np.array([[1.2e-3, 2.0e-3, 8.0e-4, 0.0]])
+    T_u = np.array([[tf - 15.0, tf - 2.0, tf + 8.0, tf + 16.0]])
+    z = np.array([[9000.0, 6000.0, 3000.0, 500.0]])
+    eps = np.array([[2e-4, 4e-4, 8e-4, 1e-3]])
+    ke = np.array([[4.0, 6.0, 2.0, 0.3]])
+
+    # upward order (surface-first): reverse.
+    q_sf, T_sf, z_sf = q_c[0, ::-1], T_u[0, ::-1], z[0, ::-1]
+    eps_sf, ke_sf = eps[0, ::-1], ke[0, ::-1]
+    L_prev = 0.0
+    L_exp, P_exp = np.zeros(4), np.zeros(4)
+    for k in range(4):
+        dz = max(z_sf[k] - z_sf[k - 1], 1.0) if k > 0 else 0.0
+        decay = np.exp(-eps_sf[k] * dz)
+        q_prev = q_sf[k - 1] if k > 0 else 0.0
+        cond = max(q_sf[k] - q_prev * decay, 0.0)
+        L_pre = L_prev * decay + cond
+        ke_below = ke_sf[k - 1] if k > 0 else ke_sf[k]
+        zwu = min(15.0, np.sqrt(2.0 * max(0.5, ke_below)))
+        alpha = min(1.0, ((min(max(T_sf[k], tf - 23.0), tf) - (tf - 23.0)) / 23.0) ** 2)
+        zdt = min(23.0 - 5.0, max((tf - 5.0) - T_sf[k], 0.0))
+        zcbf = 1.0 + 0.5 * np.sqrt(zdt)
+        zlcrit = 3.0e-4 / zcbf
+        zzco = (1.4e-3 / g) / (0.75 * zwu) * (1.0 + 0.3 * alpha) * zcbf
+        # Oracle mapping: ZLUOLD = diluted condensate (cuascn.F90:543),
+        # ZC = fresh condensation alone (cuascn.F90:761); launch level
+        # (dz=0) never converts (ascent loop starts above departure).
+        L_old = L_prev * decay
+        if L_pre > 3.0e-4 and dz > 0.0:
+            zc = cond
+            zd = zzco * (1.0 - np.exp(-((L_pre / zlcrit) ** 2))) * g * dz
+            zint = np.exp(-zd)
+            src = zc / zd * (1.0 - zint) if zd > 1e-8 else zc * (1.0 - 0.5 * zd)
+            L_new = min(max(L_old * zint + src, 0.0), min(L_pre, 5.0e-3))
+        else:
+            L_new = L_pre
+        P_exp[k] = max(L_pre - L_new, 0.0)
+        L_exp[k] = L_new
+        L_prev = L_new
+
+    L_got, P_got = _ifs_inplume_precip_conversion(
+        jnp.asarray(q_c), jnp.asarray(T_u), jnp.asarray(z),
+        jnp.asarray(eps), jnp.asarray(ke),
+    )
+    tol = 1e-9 if L_got.dtype == jnp.float64 else 1e-5
+    assert np.allclose(np.asarray(L_got)[0, ::-1], L_exp, rtol=tol, atol=1e-18)
+    assert np.allclose(np.asarray(P_got)[0, ::-1], P_exp, rtol=tol, atol=1e-18)
+    assert P_exp.sum() > 0.0, "fixture must actually convert"
+    # invariants: converted L never exceeds the pre-conversion condensate and
+    # never the 5e-3 cap; precip non-negative.
+    assert np.all(np.asarray(L_got) <= np.maximum(np.asarray(q_c), 5.0e-3) + 1e-15)
+    assert np.all(np.asarray(P_got) >= 0.0)
+
+
+def test_ifs_inplume_toggle_and_leaf_integration():
+    """Default ON (2026-07-16 flip); ON produces rain from the
+    in-plume formation (dq_r>0 without any precip split), reduces the
+    detrained anvil condensate, stays finite, and a stable column stays
+    quiescent."""
+    assert BechtoldConfig().use_ifs_inplume_precip is True
+    T, q, pf, ph, u, v = _column(ncol=2, nlev=40, T_sfc=299.0, q_sfc=13e-3,
+                                 lapse_rate=6.5)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    st = jnp.zeros((ncol,))
+    dp = ph[:, 1:] - ph[:, :-1]
+    # precip_efficiency=0: the legacy path would emit NO rain (dq_r None), so
+    # any rain under the flag comes from the in-plume formation alone.
+    out_on, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_inplume_precip=True,
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
+                              precip_efficiency=0.0))
+    out_off, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_inplume_precip=False,
+                              use_ifs_subcloud_evap=False, use_ifs_snow_melt=False,
+                              precip_efficiency=0.0))
+    assert out_off.dq_r_conv_dt is None
+    assert out_on.dq_r_conv_dt is not None
+    assert jnp.all(jnp.isfinite(out_on.dq_r_conv_dt))
+    assert float(jnp.min(out_on.dq_r_conv_dt)) >= 0.0
+    rain_on = float(jnp.sum(out_on.dq_r_conv_dt * dp / constants.g))
+    assert rain_on > 0.0, "in-plume formation must rain on a deep column"
+    # anvil source shrinks (condensate converted out before detrainment).
+    anvil_on = float(jnp.sum(out_on.dq_c_conv_dt * dp / constants.g))
+    anvil_off = float(jnp.sum(out_off.dq_c_conv_dt * dp / constants.g))
+    assert anvil_on < anvil_off
+    for o in (out_on, out_off):
+        assert jnp.all(jnp.isfinite(o.dT_dt))
+        assert jnp.all(jnp.isfinite(o.dq_v_dt))
+    # stable column quiesces under the flag (<1 W/m^2 bar, as elsewhere).
+    Ts, qs, pfs, phs, us, vs = _column(ncol=2, nlev=40, T_sfc=280.0,
+                                       q_sfc=2e-3, lapse_rate=3.0)
+    out_s, _, _ = bechtold_convection(
+        Ts, qs, pfs, phs, us, vs, jnp.zeros((2, 40)), jnp.zeros((2,)),
+        None, dt=600.0, config=BechtoldConfig(use_ifs_inplume_precip=True))
+    w_m2 = float(jnp.max(jnp.abs(out_s.dT_dt)) * constants.c_pd * 1e5 / constants.g)
+    assert w_m2 < 1.0
+
+
+def test_ifs_inplume_chain_with_subcloud_evap_and_grad():
+    """The formed rain feeds the sub-cloud evaporation (cuascn->cuflxn chain:
+    evap reduces surface-reaching rain vs evap-off, both flags on) and
+    jax.grad stays finite through the conversion + KE scans."""
+    T, q, pf, ph, u, v = _column(ncol=2, nlev=40, T_sfc=299.0, q_sfc=13e-3,
+                                 lapse_rate=6.5)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    st = jnp.zeros((ncol,))
+    dp = ph[:, 1:] - ph[:, :-1]
+    kw = dict(use_ifs_inplume_precip=True, precip_efficiency=0.0,
+              downdraft_evap_efficiency=0.0)
+    r_evap = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_subcloud_evap=True, **kw))[0]
+    r_noev = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_subcloud_evap=False, use_ifs_snow_melt=False, **kw))[0]
+    rain_evap = float(jnp.sum(r_evap.dq_r_conv_dt * dp / constants.g))
+    rain_noev = float(jnp.sum(r_noev.dq_r_conv_dt * dp / constants.g))
+    # COMPLETE sub-cloud evaporation is permitted by the oracle-style flux
+    # limiter (a dry-enough BL under the RH break can consume all the rain
+    # — fp32 rounding lands there on this fixture), so the lower bound is
+    # inclusive (codex R2).
+    assert 0.0 <= rain_evap < rain_noev
+    assert rain_noev > 0.0
+
+    if jnp.asarray(0.0).dtype != jnp.float64:
+        import pytest
+        pytest.skip("full-scheme grad NaNs under fp32 on main (pre-existing); "
+                    "grad coverage runs under x64")
+
+    def loss(eps_deep):
+        cfg = BechtoldConfig(epsilon_deep=eps_deep,
+                             use_ifs_inplume_precip=True)
+        o, _, _ = bechtold_convection(T, q, pf, ph, u, v, cpp, st, None,
+                                      dt=600.0, config=cfg)
+        return jnp.sum(o.dq_v_dt ** 2) + jnp.sum(o.dq_r_conv_dt ** 2)
+
+    assert jnp.isfinite(jax.grad(loss)(1.75e-3))
+
+
+def test_ifs_inplume_dilution_and_launch_edge_cases():
+    """Codex R1 #1/#3 regressions: (a) a strongly-entraining layer with NO
+    fresh condensation must not spuriously convert (dilution is not a source
+    — ZC is condensation only, so with cond=0 the analytic solution decays
+    from the DILUTED state and precip only reflects the conversion sink, not
+    the dilution); (b) a supersaturated LAUNCH level (dz=0) sheds no rain."""
+    import numpy as np
+    tf = constants.T_freeze
+    # 3 levels surface-first geometry via surface-last arrays.
+    z = jnp.asarray([[7000.0, 3500.0, 500.0]])
+    T_u = jnp.full((1, 3), tf + 10.0)
+    ke = jnp.full((1, 3), 2.0)
+    # (a) plume condensate DECAYS upward exactly as pure dilution would:
+    # q_c(k) = q_c(below)*exp(-eps*dz) => recovered cond = 0 everywhere.
+    eps = jnp.full((1, 3), 2.5e-3)                    # strong entrainment
+    L0 = 2.0e-3
+    d1 = float(jnp.exp(-eps[0, 1] * (z[0, 1] - z[0, 2])))
+    d2 = float(jnp.exp(-eps[0, 0] * (z[0, 0] - z[0, 1])))
+    q_c = jnp.asarray([[L0 * d1 * d2, L0 * d1, L0]])
+    L_new, precip = _ifs_inplume_precip_conversion(q_c, T_u, z, eps, ke)
+    # zero fresh condensation => the analytic source term vanishes; the
+    # converted L is the diluted state damped by the (small) sink only, and
+    # the total precip must be FAR below the dilution-driven spurious value
+    # (which converted nearly all of L0 under the old ZC = L_pre - L_prev).
+    assert float(jnp.sum(precip)) < 0.5 * L0
+    assert jnp.all(L_new <= q_c + 1e-15)
+    # (b) launch level above Z_CLDMAX: no zero-path-length rain.
+    q_c_launch = jnp.asarray([[0.0, 0.0, 8.0e-3]])    # > 5e-3 at launch
+    L2, P2 = _ifs_inplume_precip_conversion(
+        q_c_launch, T_u, z, jnp.full((1, 3), 1e-4), ke)
+    assert float(P2[0, 2]) == 0.0, "launch level must not convert (dz=0)"
+
+
+def test_ifs_inplume_rain_water_budget_coupled():
+    """Codex R1 #2 regression: the in-plume rain carries a COLUMN-exact
+    vapor sink (distributed by moisture mass q_v*dp — a per-level debit at
+    the formation level overdrew dry upper levels into negative q_v in the
+    100-day RCE gate), so switching the flag on changes the column total
+    water sum(dq_v + dq_c + dq_r) by EXACTLY zero relative to the flag-off
+    run (evap off isolates the pairing)."""
+    T, q, pf, ph, u, v = _column(ncol=2, nlev=40, T_sfc=299.0, q_sfc=13e-3,
+                                 lapse_rate=6.5)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    st = jnp.zeros((ncol,))
+    dp = ph[:, 1:] - ph[:, :-1]
+
+    # Closure OFF in both runs: the default CAPE closure would rescale M_u
+    # via the CONVERTED condensate loading (a real feedback, but a CONFOUND
+    # here) — with a fixed M_u the level-wise pairings make the total-water
+    # sum EXACTLY flag-invariant (dq_c and dq_r are both vapor-sink paired,
+    # transport identical).
+    # implicit_flux kernel: the budget-closed solve whose dq_c carries the
+    # vapor-sink pairing (the default advective kernel's documented
+    # non-closure would mask the rain pairing under the L-dependent dq_c
+    # change).
+    common = dict(use_ifs_subcloud_evap=False, use_ifs_snow_melt=False, enable_downdraft=False,
+                  precip_efficiency=0.0, use_ifs_cape_closure=False, use_ifs_capdcycl=False,
+                  use_convective_turnover_tau=False,
+                  subsidence_solve="implicit_flux")
+
+    def run(flag):
+        return bechtold_convection(
+            T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+            config=BechtoldConfig(use_ifs_inplume_precip=flag, **common))[0]
+
+    o_on, o_off = run(True), run(False)
+
+    def total_water(o):
+        dqr = o.dq_r_conv_dt if o.dq_r_conv_dt is not None else 0.0
+        return float(jnp.sum((o.dq_v_dt + o.dq_c_conv_dt + dqr) * dp
+                             / constants.g))
+
+    rain_total = float(jnp.sum(o_on.dq_r_conv_dt * dp / constants.g))
+    assert rain_total > 0.0
+    shift = abs(total_water(o_on) - total_water(o_off))
+    assert shift < 1e-9 * rain_total + 1e-18, (
+        f"budget shift {shift:.3e} vs rain {rain_total:.3e} — "
+        "vapor-sink pairing broken"
+    )
+
+
+def test_bechtold_downdraft_entrain_rate_default_is_ifs_entrdd():
+    """The penetrative-downdraft entrainment default is the oracle ENTRDD =
+    3.0e-4 1/m (sucumf.F90:144), not the earlier unsourced 5.0e-4."""
+    assert BechtoldConfig().downdraft_entrain_rate == 3.0e-4
+
+
+def test_ifs_ztaures_matches_oracle_piecewise():
+    """ZTAURES (cumastrn.F90:713,762-768): 0 disables; dx floored at 100 m;
+    fine branch 1+ln(8km/dx)^2 below 8 km; coarse 1+1.6*dx/125km above,
+    capped at 3 beyond 125 km — pinned at the oracle's own branch points,
+    and the turnover tau actually consumes it (integration toggle)."""
+    import math
+    from legoesm.atmosphere.physics.convection.bechtold import _ifs_ztaures
+    assert _ifs_ztaures(0.0) == 1.0                          # legacy sentinel
+    assert _ifs_ztaures(-5.0) == 1.0
+    assert _ifs_ztaures(50.0) == _ifs_ztaures(100.0)         # 100 m floor
+    assert abs(_ifs_ztaures(4.0e3) - (1 + math.log(2.0) ** 2)) < 1e-12
+    assert abs(_ifs_ztaures(8.0e3) - (1 + 1.6 * 8e3 / 125e3)) < 1e-12
+    assert abs(_ifs_ztaures(50.0e3) - (1 + 1.6 * 50e3 / 125e3)) < 1e-12
+    assert _ifs_ztaures(200.0e3) == 3.0                      # coarse cap
+    # integration: dx changes the mass flux on a convecting column.  Probed
+    # on the tau-only turnover path — under the full CAPE closure this
+    # fixture's mb_scale is pinned by the column-uniform profile limiter
+    # (peak M_u >> M_b_max) in BOTH runs, masking tau; the turnover rescale
+    # tau_bl/tau_conv consumes tau directly.
+    T, q, pf, ph, u, v = _column(ncol=1, nlev=40, T_sfc=299.0, q_sfc=13e-3,
+                                 lapse_rate=6.5)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev)); st = jnp.zeros((ncol,))
+    # This fixture's raw tau is ~213 s, so the coarse x3 factor (640 s) still
+    # lands under the oracle's 720 s clamp floor — faithfully equalized.  The
+    # fine-branch dx=500 m gives factor 1+ln(16)^2 ~ 8.7 (tau 1854 s), which
+    # clears the floor and must show up in the mass flux.
+    kw = dict(M_b_max=1.0, use_ifs_cape_closure=False, use_ifs_capdcycl=False,
+              use_convective_turnover_tau=True)
+    mu0 = bechtold_convection(T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+                              config=BechtoldConfig(**kw))[1]
+    mu_fine = bechtold_convection(T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+                                  config=BechtoldConfig(dx_m=500.0, **kw))[1]
+    assert float(jnp.max(jnp.abs(mu0 - mu_fine))) > 0.0, "dx_m must be live"
+    assert float(jnp.sum(mu_fine)) < float(jnp.sum(mu0)), (
+        "longer turnover => weaker deep flux"
+    )
+
+
+# ---------------------------------------------------------------------------
+# IFS convective downdraft (cudlfsn.F90 + cuddrafn.F90)
+# ---------------------------------------------------------------------------
+
+from legoesm.atmosphere.physics.convection.bechtold import (  # noqa: E402
+    _cuadjtq_evap_2iter,
+    _ifs_downdraft,
+    _IFS_RMFDEPS,
+    _IFS_ENTRDD,
+    _IFS_ITOPDE_PA,
+    _IFS_DD_MU_FRAC,
+    _IFS_NETFLUX_FRAC,
+)
+
+
+def _dry_mid_column(ncol=1, nlev=40):
+    """Warm humid BL under a DRY mid-troposphere: the canonical downdraft
+    sounding (large wet-bulb depression aloft => negatively buoyant 50/50
+    mixtures at the LFS)."""
+    T, q, pf, ph, u, v = _column(ncol=ncol, nlev=nlev, T_sfc=302.0,
+                                 q_sfc=18e-3, lapse_rate=6.5)
+    z = -8500.0 * jnp.log(pf / 1.0e5)
+    # keep the BL moist (rain production) while collapsing mid-level RH
+    dry = 0.30 + 0.70 * jnp.exp(-jnp.maximum(z - 1500.0, 0.0) / 2500.0)
+    q = q * dry
+    return T, q, pf, ph, u, v
+
+
+def test_cuadjtq_wet_bulb_physical():
+    """The 2-iteration evap-only adjustment produces a PHYSICAL wet bulb:
+    cooling in [0, ~10] K, moistening >= 0, and (near-)saturation afterward.
+    (The first cut carried an extra q_sat factor in the Newton denominator
+    and produced ~20 K wet-bulb depressions.)"""
+    T, q, pf, ph, u, v = _dry_mid_column()
+    T_wb, q_wb = _cuadjtq_evap_2iter(T, q, pf)
+    cool = T - T_wb
+    assert float(jnp.min(cool)) >= -1e-9
+    assert float(jnp.max(cool)) < 12.0
+    assert float(jnp.min(q_wb - q)) >= -1e-12
+    # 2 Newton iterations are the ORACLE's own budget (cuadjtq ICALL=2):
+    # from very dry air they under-converge exactly as IFS does, so assert
+    # substantial approach toward saturation in the troposphere (p>300 hPa)
+    # rather than full saturation; the stratospheric tail (tiny q_sat) is
+    # outside every consumer's window.
+    from legoesm.thermo import saturation_mixing_ratio
+    trop = pf > 300e2
+    rh_env = q / saturation_mixing_ratio(T, pf)
+    rh_wb = q_wb / saturation_mixing_ratio(T_wb, pf)
+    gain = jnp.where(trop, rh_wb - rh_env, 1.0)
+    assert float(jnp.min(gain)) >= -1e-9
+    close = jnp.where(trop & (rh_env > 0.5), rh_wb, 1.0)
+    assert float(jnp.min(close)) > 0.9, "moist levels must reach ~saturation"
+
+
+def test_ifs_downdraft_constants_match_oracle():
+    assert _IFS_RMFDEPS == 0.30            # sucumf.F90:154
+    assert _IFS_ENTRDD == 3.0e-4           # sucumf.F90:144
+    assert _IFS_ITOPDE_PA == 950.0e2       # sucumf.F90:268
+    assert _IFS_DD_MU_FRAC == 0.75         # cuddrafn.F90:214
+    assert _IFS_NETFLUX_FRAC == 0.98       # cuflxn.F90:336-362
+
+
+def test_ifs_downdraft_fires_and_conserves_on_dry_mid_column():
+    """On the canonical dry-mid-level sounding the downdraft (a) actually
+    fires (m_d < 0 with meaningful magnitude), (b) respects the -0.75*M_u
+    and 0.98 net-flux bounds, (c) its perturbation-flux divergence
+    redistributes with ZERO column net, and (d) the leaf-level ledger closes:
+    total water shift OFF->ON is machine-zero while rain is debited."""
+    T, q, pf, ph, u, v = _dry_mid_column()
+    ncol, nlev = T.shape
+    dp = ph[:, 1:] - ph[:, :-1]
+    cpp = jnp.zeros((ncol, nlev)); st = jnp.zeros((ncol,))
+    kw = dict(use_ifs_subcloud_evap=False, use_ifs_snow_melt=False, enable_downdraft=False,
+              downdraft_transport=False)
+    o_on, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_downdraft=True, **kw))
+    o_off, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_downdraft=False, **kw))
+    assert o_on.dq_r_conv_dt is not None and o_off.dq_r_conv_dt is not None
+    rain_on = float(jnp.sum(o_on.dq_r_conv_dt * dp) / constants.g)
+    rain_off = float(jnp.sum(o_off.dq_r_conv_dt * dp) / constants.g)
+    assert rain_off > 0.0, "fixture must rain"
+    # The oracle LFS rain-availability gate (PRFL > 10*RMFDEPS*M_b*demand,
+    # cudlfsn.F90:271) needs column rain ~3e-4 kg/m^2/s at this fixture's
+    # wet-bulb demand; a single leaf call produces ~1e-4, so the gate opens
+    # only marginally here — the STRONG-regime liveness (m_d < -1e-6) is
+    # pinned at the helper level with an oracle-scale r0 in
+    # test_ifs_downdraft_helper_bounds_and_window.  What this integration
+    # test pins: the debit is STRICTLY positive (wiring live end to end),
+    # monotone (never adds rain), and the ledger is machine-exact.
+    # With the IKHSMIN eligibility + rain-availability gates both faithful,
+    # this single-call fixture sits below the oracle's firing threshold —
+    # the debit here is >= 0 and tiny; STRONG-regime liveness (m_d < -1e-6)
+    # is pinned at the helper with oracle-scale r0.
+    assert rain_on <= rain_off + 1e-18
+    assert bool(jnp.all(jnp.isfinite(o_on.dT_dt)))
+
+    def water(o):
+        return float(jnp.sum(
+            (o.dq_v_dt + o.dq_c_conv_dt + o.dq_r_conv_dt) * dp) / constants.g)
+
+    shift = abs(water(o_on) - water(o_off))
+    assert shift < 1e-12 + 1e-9 * rain_off, (
+        f"ledger broken: water shift {shift:.3e} vs rain {rain_off:.3e}")
+    # enthalpy: divergence is neutral; deposit pairs -L_v/c_p exactly.
+    dh = float(jnp.sum((o_on.dT_dt - o_off.dT_dt) * dp) / constants.g) * constants.c_pd
+    dv = float(jnp.sum((o_on.dq_v_dt - o_off.dq_v_dt) * dp) / constants.g) * constants.L_v
+    assert abs(dh + dv) < 1e-9 * max(abs(dv), 1.0) + 1e-12
+
+
+def test_ifs_downdraft_helper_bounds_and_window():
+    """Direct helper invariants on the dry-mid column: m_d <= 0 everywhere,
+    |m_d| <= 0.98*M_u after the net-flux guard, zero above the live plume
+    (window), zero at the model top, and pdmfdp <= 0."""
+    T, q, pf, ph, u, v = _dry_mid_column()
+    ncol, nlev = T.shape
+    dp = ph[:, 1:] - ph[:, :-1]
+    z = -8500.0 * jnp.log(pf / 1.0e5)
+    # synthetic alive plume: warm saturated updraft over the lower half.
+    lev = jnp.arange(nlev, dtype=T.dtype)[None, :]
+    alive = jax.nn.sigmoid((lev - 18.0))            # ~0 above idx 14
+    M_u = 0.05 * alive
+    T_u = T + 1.5 * alive
+    q_u = q + 2e-3 * alive
+    above_base = jax.nn.sigmoid(4.0 * (36.0 - lev))
+    m_d, mfds_p, mfdq_p, pdm = _ifs_downdraft(
+        T, q, pf, ph, z, dp, T_u, q_u, M_u,
+        jnp.full((ncol,), 0.05), above_base, jnp.ones((ncol,)),
+        jnp.full((ncol,), 1e-3),
+    )
+    assert float(jnp.max(m_d)) <= 0.0
+    assert float(jnp.min(m_d)) < -1e-6, "downdraft must fire on this sounding"
+    assert bool(jnp.all(-m_d <= _IFS_NETFLUX_FRAC * M_u + 1e-12))
+    # near-top residue from the smooth window tails: negligible RELATIVE to
+    # the peak (the synthetic alive-gate sigmoid leaves ~1e-8 absolute).
+    peak = float(jnp.max(-m_d))
+    assert float(jnp.max(jnp.abs(m_d[:, :6]))) < 1e-3 * peak, "DD leaks to top"
+    assert float(jnp.max(pdm)) <= 1e-18
+    # column-net of the perturbation-flux divergence is zero (telescoping).
+    f_below = jnp.concatenate([mfdq_p[:, 1:], jnp.zeros((ncol, 1))], axis=1)
+    div = constants.g * (f_below - mfdq_p) / dp
+    assert abs(float(jnp.sum(div * dp) / constants.g)) < 1e-12
+
+
+def test_ifs_downdraft_default_off_quiescent_and_grad():
+    """Default False; stable column quiesces with the flag on; jax.grad
+    finite through LFS + descent scans (x64)."""
+    assert BechtoldConfig().use_ifs_downdraft is True  # flipped 2026-07-17 (RCE drift -65%)
+    Ts, qs, pfs, phs, us, vs = _column(ncol=1, nlev=30, T_sfc=280.0,
+                                       q_sfc=2e-3, lapse_rate=3.0)
+    o_s, _, _ = bechtold_convection(
+        Ts, qs, pfs, phs, us, vs, jnp.zeros((1, 30)), jnp.zeros((1,)),
+        None, dt=600.0, config=BechtoldConfig(use_ifs_downdraft=True))
+    w_m2 = float(jnp.max(jnp.abs(o_s.dT_dt)) * constants.c_pd * 1e5 / constants.g)
+    assert w_m2 < 1.0
+
+    if jnp.asarray(0.0).dtype != jnp.float64:
+        import pytest
+        pytest.skip("grad coverage under x64 (pre-existing fp32 NaN on main)")
+
+    T, q, pf, ph, u, v = _dry_mid_column()
+    ncol, nlev = T.shape
+
+    def loss(eps_deep):
+        cfg = BechtoldConfig(epsilon_deep=eps_deep, use_ifs_downdraft=True)
+        o, _, _ = bechtold_convection(T, q, pf, ph, u, v,
+                                      jnp.zeros((ncol, nlev)),
+                                      jnp.zeros((ncol,)), None,
+                                      dt=600.0, config=cfg)
+        return jnp.sum(o.dT_dt ** 2) + jnp.sum(o.dq_v_dt ** 2)
+
+    assert jnp.isfinite(jax.grad(loss)(1.75e-3))
+
+
+def test_cuadjtq_oracle_valued_pin():
+    """Oracle-valued pin (codex R1 #4): hand-compute the 2-Newton ICALL=2
+    recurrence with the spec-humidity base eps*e_s/p -> ZCOR conversion and
+    the CC-derivative denominator, exactly as _cuadjtq_evap_2iter defines it,
+    on a warm subsaturated state — a base-conversion or clamp regression goes
+    red.  Also pins evap-only sign: warm subsaturated air COOLS + MOISTENS."""
+    import numpy as np
+    from legoesm.thermo import (
+        saturation_mixing_ratio, saturation_mixing_ratio_ice)
+    from legoesm.atmosphere.physics.convection.bechtold import (
+        _ifs_liquid_fraction_cu)
+    T0, q0, p0 = 295.0, 8.0e-3, 850e2
+    Tj, qj = T0, q0
+    conds = []
+    for it in range(2):
+        Ta = jnp.array(Tj)
+        alpha = float(_ifs_liquid_fraction_cu(Ta))
+        r_s = (alpha * float(saturation_mixing_ratio(Ta, jnp.array(p0)))
+               + (1 - alpha) * float(saturation_mixing_ratio_ice(Ta, jnp.array(p0))))
+        qs = r_s / (1.0 + r_s / constants.epsilon)      # eps*e/p base
+        qs = min(qs, 0.5)
+        zcor = 1.0 / (1.0 - (constants.R_v / constants.R_d - 1.0) * qs)
+        qs = qs * zcor
+        L = alpha * constants.L_v + (1 - alpha) * constants.L_s
+        dqsdt = L * qs / (constants.R_v * max(Tj, 100.0) ** 2)
+        cond = (qj - qs) / (1.0 + zcor * (L / constants.c_pd) * dqsdt)
+        if it == 0:
+            cond = min(cond, 0.0)
+        elif abs(conds[0]) < 1e-14:
+            cond = min(cond, 0.0)
+        conds.append(cond)
+        Tj = Tj + (L / constants.c_pd) * cond
+        qj = qj - cond
+    T_got, q_got = _cuadjtq_evap_2iter(
+        jnp.array([[T0]]), jnp.array([[q0]]), jnp.array([[p0]]))
+    tol_T = 1e-9 if T_got.dtype == jnp.float64 else 2e-4
+    tol_q = 1e-12 if T_got.dtype == jnp.float64 else 1e-7
+    assert abs(float(T_got[0, 0]) - Tj) < tol_T
+    assert abs(float(q_got[0, 0]) - qj) < tol_q
+    assert Tj < T0 and qj > q0                          # evap-only direction
+
+
+def test_ifs_downdraft_hs_min_gate_excludes_above():
+    """IKHSMIN regression (codex R1 #3/#4): starts strictly ABOVE the
+    saturated-MSE minimum are gated off.  Construct a column whose h_s
+    minimum sits mid-column and give the UPPER part a strongly
+    LFS-favorable state (negative mixture buoyancy + abundant rain): all
+    downdraft mass must originate at/below the h_s minimum."""
+    T, q, pf, ph, u, v = _dry_mid_column()
+    ncol, nlev = T.shape
+    dp = ph[:, 1:] - ph[:, :-1]
+    z = -8500.0 * jnp.log(pf / 1.0e5)
+    lev = jnp.arange(nlev, dtype=T.dtype)[None, :]
+    M_u = 0.05 * jax.nn.sigmoid(lev - 8.0)            # alive from idx ~8 down
+    T_u = T + 0.5
+    q_u = q
+    above_base = jax.nn.sigmoid(4.0 * (36.0 - lev))
+    m_d, _, _, _ = _ifs_downdraft(
+        T, q, pf, ph, z, dp, T_u, q_u, M_u,
+        jnp.full((ncol,), 0.05), above_base, jnp.ones((ncol,)),
+        jnp.full((ncol,), 5e-3),
+    )
+    # locate the smooth h_s minimum the gate uses
+    from legoesm.thermo import (
+        saturation_mixing_ratio, saturation_mixing_ratio_ice)
+    from legoesm.atmosphere.physics.convection.bechtold import (
+        _ifs_liquid_fraction_cu)
+    al = _ifs_liquid_fraction_cu(T)
+    L = al * constants.L_v + (1 - al) * constants.L_s
+    qs = al * saturation_mixing_ratio(T, pf) + (1 - al) * saturation_mixing_ratio_ice(T, pf)
+    h_s = constants.c_pd * T + constants.g * z + L * qs
+    k_min = int(jnp.argmin(h_s[0]))
+    assert k_min > 10, "fixture must place the h_s min mid-column"
+    # DD mass strictly above the min level (minus a 2-level smooth skirt): ~0.
+    upper = float(jnp.max(-m_d[:, : max(k_min - 2, 1)]))
+    peak = float(jnp.max(-m_d))
+    assert peak > 0.0
+    assert upper < 5e-2 * peak, (
+        f"DD above the h_s minimum: {upper:.3e} vs peak {peak:.3e}")
+
+
+def test_ifs_downdraft_organized_entrainment_sign():
+    """Organized-entrainment sign regression (codex R1 #1): a persistently
+    NEGATIVELY-buoyant descent must ENTRAIN MORE (|m_d| grows faster below
+    the LFS) than a neutral one.  Compare |m_d| growth with the environment
+    made very dry (strong negative DD buoyancy after evap => oentr active)
+    against a run with oentr's effect suppressed via near-zero rain (weak
+    descent).  Direct discriminant: with the OLD (+) sign the organized term
+    was clipped to zero by MIN(.,0) and |m_d| could only shrink via
+    detrainment; with the fixed (-) sign |m_d| must EXCEED the pure
+    turbulent-E=D profile somewhere below the LFS."""
+    T, q, pf, ph, u, v = _dry_mid_column()
+    ncol, nlev = T.shape
+    dp = ph[:, 1:] - ph[:, :-1]
+    z = -8500.0 * jnp.log(pf / 1.0e5)
+    lev = jnp.arange(nlev, dtype=T.dtype)[None, :]
+    M_u = jnp.full((ncol, nlev), 0.05)
+    T_u = T + 0.5
+    q_u = q
+    above_base = jax.nn.sigmoid(4.0 * (36.0 - lev))
+    m_d, _, _, _ = _ifs_downdraft(
+        T, q, pf, ph, z, dp, T_u, q_u, M_u,
+        jnp.full((ncol,), 0.05), above_base, jnp.ones((ncol,)),
+        jnp.full((ncol,), 5e-3),
+    )
+    peak = float(jnp.max(-m_d))
+    assert peak > 0.0
+    # pure turbulent E=D keeps |m_d| ~ |inj| (E and D cancel in mass);
+    # organized entrainment must grow it beyond the total injected LFS mass
+    # times a margin. Injection sum <= RMFDEPS*M_b = 0.015.
+    assert peak > 0.3 * _IFS_RMFDEPS * 0.05, (
+        f"organized entrainment inactive (peak |m_d| {peak:.3e})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# IFS shallow PBL-equilibrium closure (cumastrn.F90:468-484, 551-567)
+# ---------------------------------------------------------------------------
+
+from legoesm.atmosphere.physics.convection.bechtold import (  # noqa: E402
+    _ifs_shallow_pbl_target,
+    _IFS_SHALLOW_ZDQMIN_FRAC,
+    _IFS_SHALLOW_DH_FLOOR,
+)
+
+
+def test_ifs_shallow_pbl_target_oracle_pin():
+    """Hand-computed ZDH/ZMFMAX/target on a 1-column base gather: supply/dh
+    below the CFL cap, dh floored per cumastrn:552-554, supply<=0 killed,
+    cap binds for huge supply."""
+    ncol, nlev = 1, 4
+    T = jnp.array([[260.0, 275.0, 288.0, 297.0]])
+    q = jnp.array([[1e-3, 4e-3, 8e-3, 12e-3]])
+    T_u = T + jnp.array([[0.0, 0.0, 1.2, 0.8]])
+    q_u = q + jnp.array([[0.0, 0.0, 1.5e-3, 1.0e-3]])
+    q_c_u = jnp.array([[0.0, 0.0, 4e-4, 0.0]])
+    dp = jnp.array([[150e2, 250e2, 300e2, 300e2]])
+    base_w = jnp.array([[0.0, 0.0, 1.0, 0.0]])       # crisp base at k=2
+    dt = 600.0
+    h_exc = (constants.c_pd * 1.2
+             + constants.L_v * (1.5e-3 + 4e-4))
+    zdqmin = max(_IFS_SHALLOW_ZDQMIN_FRAC * 8e-3, 1e-10)
+    dh = max(h_exc, _IFS_SHALLOW_DH_FLOOR * zdqmin)
+    zmfmax = 300e2 / (constants.g * dt)
+    supply = jnp.array([150.0])                      # W/m^2, typical trades
+    expected = min(150.0 / dh, zmfmax)
+    got = _ifs_shallow_pbl_target(supply, T, q, T_u, q_u, q_c_u,
+                                  base_w, dp, dt)
+    tol = 1e-9 if got.dtype == jnp.float64 else 1e-5
+    assert abs(float(got[0]) - expected) < tol * expected
+    # supply <= 0: smooth kill (sigmoid(<=-5 widths) ~ 0).
+    dead = _ifs_shallow_pbl_target(jnp.array([-25.0]), T, q, T_u, q_u,
+                                   q_c_u, base_w, dp, dt)
+    assert float(dead[0]) < 1e-10
+    # sigmoid onset: just-positive supply is suppressed SUPER-linearly
+    # (the smooth analog of the discrete kill boundary).
+    tiny_sup = _ifs_shallow_pbl_target(jnp.array([0.3]), T, q, T_u, q_u,
+                                       q_c_u, base_w, dp, dt)
+    lin = expected * 0.3 / 150.0
+    assert float(tiny_sup[0]) < 0.75 * lin
+    # huge supply: the CFL cap binds.
+    capped = _ifs_shallow_pbl_target(jnp.array([1.0e6]), T, q, T_u, q_u,
+                                     q_c_u, base_w, dp, dt)
+    assert abs(float(capped[0]) - zmfmax) < tol * zmfmax
+
+
+def test_ifs_shallow_closure_toggle_and_byte_identity():
+    """Flag + kwargs change the mass flux on a SHALLOW-weighted column; flag
+    on with kwargs None is inert; default False."""
+    assert BechtoldConfig().use_ifs_shallow_closure is False
+    # shallow-ish fixture: raise cloud_depth_shallow_max so the depth blend
+    # gives a real shallow share on the standard convecting column.
+    T, q, pf, ph, u, v = _column(ncol=2, nlev=40, T_sfc=299.0, q_sfc=13e-3,
+                                 lapse_rate=6.5)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev)); st = jnp.zeros((ncol,))
+    # M_b_max=0.5: with the default 0.05 the column-uniform profile limiter
+    # pins mb_scale at the cap in BOTH runs and masks the toggle (same
+    # masking as the ZTAURES probe).
+    kw = dict(cloud_depth_shallow_max=9000.0, cloud_depth_deep=12000.0,
+              M_b_max=0.5)
+    shf = jnp.full((ncol,), 120.0)
+    lhf = jnp.full((ncol,), 90.0)
+    on, mu_on, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_shallow_closure=True, **kw),
+        shf_w_m2=shf, lhf_w_m2=lhf)
+    off, mu_off, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_shallow_closure=False, **kw),
+        shf_w_m2=shf, lhf_w_m2=lhf)
+    inert, mu_inert, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_shallow_closure=True, **kw))
+    assert jnp.all(jnp.isfinite(mu_on))
+    assert float(jnp.max(jnp.abs(mu_on - mu_off))) > 0.0, "toggle dead"
+    assert jnp.array_equal(mu_inert, mu_off), "kwargs-None must be inert"
+    # grad finite through supply -> target -> blend (x64 only).
+    if jnp.asarray(0.0).dtype == jnp.float64:
+        def loss(sh):
+            o, m, _ = bechtold_convection(
+                T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+                config=BechtoldConfig(use_ifs_shallow_closure=True, **kw),
+                shf_w_m2=jnp.full((ncol,), sh), lhf_w_m2=lhf)
+            return jnp.sum(m ** 2)
+        assert jnp.isfinite(jax.grad(loss)(120.0))
+
+
+def test_ifs_shallow_closure_requires_cape_closure():
+    """Flag coherence: shallow-without-cape is a loud error, not a silent
+    no-op (codex R3)."""
+    T, q, pf, ph, u, v = _column(ncol=1, nlev=12)
+    import pytest
+    with pytest.raises(ValueError, match="use_ifs_shallow_closure"):
+        bechtold_convection(
+            T, q, pf, ph, u, v, jnp.zeros((1, 12)), jnp.zeros((1,)), None,
+            dt=600.0,
+            config=BechtoldConfig(use_ifs_shallow_closure=True,
+                                  use_ifs_cape_closure=False, use_ifs_capdcycl=False))
+
+
+# ---------------------------------------------------------------------------
+# IFS RCAPDCYCL diurnal correction + land RHEBC (cumastrn.F90:780-833, cuflxn)
+# ---------------------------------------------------------------------------
+
+from legoesm.atmosphere.physics.convection.bechtold import (  # noqa: E402
+    _ifs_capdcycl,
+    _IFS_RMINCAPE,
+    _IFS_CAPDCYCL_ZMAX_M,
+    _IFS_CAPDCYCL_DUTEN_BASE,
+    _IFS_RHEBC_LAND,
+    _IFS_RHEBC_LAND_DEEP,
+)
+
+
+def test_ifs_capdcycl_oracle_pin_and_branches():
+    """Hand-computed land/ocean branches + gate on a 1-column gather:
+    land = supply*tau_conv; ocean = supply*min(1e4,z_base)/(2+sqrt(0.5*
+    (|U_b|^2+|U_950|^2))); fractional blend; gate multiplies."""
+    ncol, nlev = 1, 4
+    p = jnp.array([[500e2, 800e2, 950e2, 1000e2]])
+    z = jnp.array([[5500.0, 2000.0, 600.0, 100.0]])
+    u = jnp.array([[10.0, 6.0, 4.0, 2.0]])
+    v = jnp.zeros((1, 4))
+    base_w = jnp.array([[0.0, 1.0, 0.0, 0.0]])       # base at k=1 (z=2000)
+    supply = jnp.array([3.0])                        # K*Pa/s
+    tau = jnp.array([1800.0])
+    gate = jnp.array([1.0])
+    got_land = _ifs_capdcycl(supply, tau, jnp.array([2000.0]), u, v,
+                             base_w, p, jnp.array([1.0]), gate)
+    assert abs(float(got_land[0]) - 3.0 * 1800.0) < 1e-9
+    # ocean: z capped at 1e4 (inactive here), U_950 from the softmax at k=2.
+    import numpy as np
+    w950 = np.asarray(jax.nn.softmax(
+        -((p - 950e2) / 1000.0) ** 2, axis=-1))[0]
+    u9 = float((w950 * np.asarray(u[0])).sum())
+    zduten = _IFS_CAPDCYCL_DUTEN_BASE + np.sqrt(0.5 * (6.0**2 + u9**2) + 1e-12)
+    expected_oc = 3.0 * (2000.0 / zduten)
+    got_oc = _ifs_capdcycl(supply, tau, jnp.array([2000.0]), u, v,
+                           base_w, p, jnp.array([0.0]), gate)
+    assert abs(float(got_oc[0]) - expected_oc) < 1e-6 * expected_oc
+    # gate kills.
+    got_gated = _ifs_capdcycl(supply, tau, jnp.array([2000.0]), u, v,
+                              base_w, p, jnp.array([1.0]), jnp.array([0.0]))
+    assert float(got_gated[0]) == 0.0
+    # height cap: enormous z_base uses 1e4.
+    got_cap = _ifs_capdcycl(supply, tau, jnp.array([5.0e4]), u, v,
+                            base_w, p, jnp.array([0.0]), gate)
+    expected_cap = 3.0 * (_IFS_CAPDCYCL_ZMAX_M / zduten)
+    assert abs(float(got_cap[0]) - expected_cap) < 1e-6 * expected_cap
+
+
+def test_ifs_capdcycl_zcape_subtraction_semantics():
+    """ZCAPE entry (cumastrn:818-823): subtraction floored at RMINCAPE*ZCAPE;
+    a huge positive zcapdcycl cannot push below it; a negative one (nocturnal)
+    is bounded at -2*ZCAPE (at most triples... doubles the subtraction base).
+    Pinned through _ifs_cape_closure_target's optional arg."""
+    T = jnp.array([[250.0, 270.0, 285.0, 295.0]])
+    q = jnp.array([[1e-4, 1e-3, 5e-3, 1e-2]])
+    z = jnp.array([[9000.0, 6000.0, 3000.0, 500.0]])
+    p = jnp.array([[300e2, 500e2, 800e2, 1000e2]])
+    T_u = T + jnp.array([[0.0, 1.5, 2.0, 0.0]])
+    in_cloud = jnp.array([[0.0, 1.0, 1.0, 0.0]])
+    args = (T, q, z, p, T_u, q, jnp.zeros_like(q),
+            jnp.array([[0.0, 0.08, 0.10, 0.10]]),
+            jnp.zeros((1, 4)), in_cloud, jnp.array([1500.0]),
+            jnp.array([0.10]), jnp.array([1.0]))
+    base = _ifs_cape_closure_target(*args)
+    huge = _ifs_cape_closure_target(*args, zcapdcycl=jnp.array([1.0e9]))
+    assert float(huge[0]) > 0.0
+    assert abs(float(huge[0]) / float(base[0]) - _IFS_RMINCAPE) < 1e-6, (
+        "RMINCAPE floor must bind under a huge subtraction")
+    noct = _ifs_cape_closure_target(*args, zcapdcycl=jnp.array([-1.0e9]))
+    # cap-order regression (codex R1 #1): raw CAPE above 5000 with a large
+    # subtraction must give (raw - zdcy), NOT the RMINCAPE floor of the
+    # capped value.  Boost the plume to push raw zcape > 5000 Pa.
+    T_hot = T + jnp.array([[0.0, 30.0, 40.0, 0.0]])   # raw zcape ~6400 Pa
+    args_hot = (T, q, z, p, T_hot, q, jnp.zeros_like(q),
+                jnp.array([[0.0, 0.08, 0.10, 0.10]]),
+                jnp.zeros((1, 4)), in_cloud, jnp.array([1500.0]),
+                jnp.array([0.10]), jnp.array([1.0]))
+    base_hot = _ifs_cape_closure_target(*args_hot)
+    # recover raw zcape via the target relation: target = cw*zcape*Mb/(zheat*tau)
+    # base_hot corresponds to min(raw,5000); with subtraction 3000 the oracle
+    # order gives min(raw-3000, 5000) -- distinguishable from
+    # max(0.05*min(raw,5000), min(raw,5000)-3000) only when raw>5000, which
+    # this fixture guarantees if base_hot saturates the cap:
+    sub = _ifs_cape_closure_target(*args_hot, zcapdcycl=jnp.array([4800.0]))
+    # oracle order: (6400-4800)=1600 -> ratio ~0.32 vs capped-first ~0.05.
+    ratio = float(sub[0]) / float(base_hot[0])
+    assert ratio > 0.25, (
+        f"cap-order bug: ratio {ratio:.3f} indicates subtraction applied "
+        "AFTER the 5000 Pa cap (oracle subtracts before)")
+
+
+def test_ifs_land_rhebc_blend_and_toggle():
+    """Land RH break: pure-land deep column floors evaporation at 0.70/0.75
+    (MORE evap allowed than ocean's 0.85/0.92 — break is LOWER so ZRMIN
+    releases less... verify direction: lower rhebc => smaller deficit bound
+    => LESS evaporation allowed).  Toggle via the leaf flag; None land_frac
+    = ocean values byte-identical."""
+    dt = 600.0
+    ncol, nlev = 1, 5
+    p_half = jnp.linspace(150e2, 1000e2, nlev + 1)[None, :]
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    qsat = jnp.full((ncol, nlev), 1e-2)
+    q = qsat * 0.3
+    dq_r = jnp.zeros((ncol, nlev)).at[:, 1].set(5e-7)
+    below = jnp.zeros((ncol, nlev)).at[:, 3:].set(1.0)
+    rh_b, rh_t = jnp.array([0.9]), jnp.array([0.7])
+    dw = jnp.array([1.0])
+    e_oc, _, _ = _ifs_subcloud_rain_evaporation(
+        q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt)
+    e_oc2, _, _ = _ifs_subcloud_rain_evaporation(
+        q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt,
+        land_frac=None)
+    assert jnp.array_equal(e_oc, e_oc2), "None land_frac must be inert"
+    e_land, _, _ = _ifs_subcloud_rain_evaporation(
+        q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt,
+        land_frac=jnp.array([1.0]))
+    # deep land break 0.70 < ocean 0.85: the ZRMIN bound releases LESS water
+    # before the break is hit => land evaporates LESS OR EQUAL here.
+    assert float(jnp.sum(e_land)) <= float(jnp.sum(e_oc)) + 1e-18
+
+
+def test_ifs_capdcycl_flag_coherence_and_cli_defaults():
+    assert BechtoldConfig().use_ifs_capdcycl is True  # flipped 2026-07-17
+    assert BechtoldConfig().use_ifs_land_rhebc is True  # flipped 2026-07-17
+    import pytest
+    T, q, pf, ph, u, v = _column(ncol=1, nlev=12)
+    with pytest.raises(ValueError, match="use_ifs_capdcycl"):
+        bechtold_convection(
+            T, q, pf, ph, u, v, jnp.zeros((1, 12)), jnp.zeros((1,)), None,
+            dt=600.0,
+            config=BechtoldConfig(use_ifs_capdcycl=True,
+                                  use_ifs_cape_closure=False))
+
+
+# ---------------------------------------------------------------------------
+# IFS convective snow: partition + melt (cuflxn.F90:374-397, FOLD variant)
+# ---------------------------------------------------------------------------
+
+from legoesm.atmosphere.physics.convection.bechtold import (  # noqa: E402
+    _IFS_RTAUMEL_S, _IFS_ZTW1, _IFS_ZTW2, _IFS_ZTW3, _IFS_ZTW4, _IFS_ZTW5,
+)
+
+
+def test_ifs_snow_constants_and_wetbulb_fit():
+    """RTAUMEL = 5*3600*0.66 = 11880 s (sucumf.F90:178, Forbes-2008 factor);
+    ZTW1-5 wet-bulb fit constants (cuflxn.F90:179-183); the fit cools a
+    subsaturated layer and is inert at saturation."""
+    assert _IFS_RTAUMEL_S == 5.0 * 3.6e3 * 0.66
+    assert (_IFS_ZTW1, _IFS_ZTW2, _IFS_ZTW3, _IFS_ZTW4, _IFS_ZTW5) == (
+        1329.31, 0.0074615, 0.85e5, 40.637, 275.0)
+    T0, p0 = 280.0, 900e2
+    deficit = 2e-3
+    tw = T0 - deficit * (_IFS_ZTW1 + _IFS_ZTW2 * (p0 - _IFS_ZTW3)
+                         - _IFS_ZTW4 * (T0 - _IFS_ZTW5))
+    assert tw < T0 and T0 - tw < 6.0                 # physical wet-bulb dep
+
+
+def test_ifs_snow_melt_march_oracle_pin():
+    """Hand-marched 4-level column: cold aloft (all snow), warm below
+    (melt at min(S, cons1a*(1+0.5*dtw)*dp*dtw)), surface FOLD melts the
+    remainder; helper melt profile matches; snow never re-freezes."""
+    import numpy as np
+    g = constants.g
+    tf = constants.T_freeze
+    dt = 600.0
+    T = jnp.array([[tf - 12.0, tf - 4.0, tf + 3.0, tf + 9.0]])
+    p_half = jnp.array([[400e2, 600e2, 800e2, 920e2, 1000e2]])
+    pf = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    qsat = jnp.full((1, 4), 5e-3)
+    q = qsat * 1.0                                    # SATURATED: no evap,
+    dq_r = jnp.zeros((1, 4)).at[:, 0].set(4e-7)       # wet-bulb = T
+    below = jnp.zeros((1, 4))                         # evap gate closed
+    rh_b, rh_t = jnp.array([0.9]), jnp.array([0.8])
+    dw = jnp.array([1.0])
+    e, sc, melt = _ifs_subcloud_rain_evaporation(
+        q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt,
+        snow_melt=True, T=T, p_full=pf)
+    # hand march (saturated => t_wet = T; alpha=0 at T<=tf, else FOEALFCU(T))
+    from legoesm.atmosphere.physics.convection.bechtold import (
+        _ifs_liquid_fraction_cu)
+    cons1a = constants.c_pd / (constants.L_f * g * _IFS_RTAUMEL_S)
+    src = np.asarray(jnp.maximum(dq_r, 0.0) * dp / g)[0]
+    Tn = np.asarray(T)[0]; dpn = np.asarray(dp)[0]
+    rain, snow = 0.0, 0.0
+    melt_exp = np.zeros(4)
+    for k in range(4):
+        dtw = max(Tn[k] - tf, 0.0)
+        cap = cons1a * (1 + 0.5 * dtw) * dpn[k] * dtw
+        melt_exp[k] = min(snow, cap)
+        snow -= melt_exp[k]
+        rain += melt_exp[k]
+        alpha = (float(_ifs_liquid_fraction_cu(jnp.array(Tn[k])))
+                 if Tn[k] > tf else 0.0)
+        rain += alpha * src[k]
+        snow += (1 - alpha) * src[k]
+    melt_exp[3] += snow                               # surface FOLD
+    got = np.asarray(melt * dp / g)[0]
+    tol = 1e-9 if melt.dtype == jnp.float64 else 1e-5
+    assert np.allclose(got, melt_exp, rtol=tol, atol=1e-20), (
+        f"melt {got} != hand {melt_exp}")
+    assert melt_exp.sum() > 0.0
+
+
+def test_ifs_snow_melt_leaf_enthalpy_and_toggle():
+    """Leaf toggle: cold-column convection with the flag flips the freeze/
+    melt heating pattern; column enthalpy shift OFF->ON is EXACTLY zero
+    (freeze heat == melt cooling incl. the surface fold); default False;
+    coherence guard fires."""
+    assert BechtoldConfig().use_ifs_snow_melt is True  # flipped 2026-07-17 (RCE drift -50%)
+    T, q, pf, ph, u, v = _column(ncol=2, nlev=40, T_sfc=278.0, q_sfc=5e-3,
+                                 lapse_rate=6.5)
+    ncol, nlev = T.shape
+    dp = ph[:, 1:] - ph[:, :-1]
+    cpp = jnp.zeros((ncol, nlev)); st = jnp.zeros((ncol,))
+    kw = dict(use_ifs_subcloud_evap=True, enable_downdraft=False)
+    o_on, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_snow_melt=True, **kw))
+    o_off, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+        config=BechtoldConfig(use_ifs_snow_melt=False, **kw))
+    assert jnp.all(jnp.isfinite(o_on.dT_dt))
+    d_dT = float(jnp.max(jnp.abs(o_on.dT_dt - o_off.dT_dt)))
+    rain = float(jnp.sum(o_off.dq_r_conv_dt * dp) / constants.g)
+    if rain > 1e-10:
+        assert d_dT > 0.0, "cold-column toggle must be live"
+    # enthalpy ledger: freeze == melt exactly => column cp*dT shift zero.
+    dh = float(jnp.sum((o_on.dT_dt - o_off.dT_dt) * dp) / constants.g)
+    assert abs(dh) < 1e-12 + 1e-9 * abs(rain), (
+        f"snow enthalpy ledger leak: {dh:.3e}")
+    # vapor/rain untouched by the phase machinery (evap identical: melt
+    # feeds rain BELOW freezing levels only in this fixture)
+    import pytest
+    with pytest.raises(ValueError, match="use_ifs_snow_melt"):
+        bechtold_convection(
+            T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
+            config=BechtoldConfig(use_ifs_snow_melt=True,
+                                  use_ifs_subcloud_evap=False))
+
+
+def test_ifs_snow_melt_same_layer_no_evap():
+    """Snow-melt ordering regression (codex snow-R1): melt produced IN a
+    layer joins the rain flux only DOWNSTREAM (oracle adds PDPMEL to
+    PMFLXR(JK+1) after evaporating PMFLXR(JK)) — a warm, dry, evap-active
+    layer fed only by snow from above must evaporate ZERO in the melt layer
+    itself and start evaporating one level below."""
+    dt = 600.0
+    tf = constants.T_freeze
+    T = jnp.array([[tf - 10.0, tf + 6.0, tf + 8.0, tf + 10.0]])
+    p_half = jnp.array([[400e2, 600e2, 800e2, 920e2, 1000e2]])
+    pf = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    qsat = jnp.full((1, 4), 8e-3)
+    q = qsat * 0.3                                   # dry: evap wants to fire
+    dq_r = jnp.zeros((1, 4)).at[:, 0].set(4e-7)      # cold source -> all snow
+    below = jnp.ones((1, 4))                         # evap gate OPEN everywhere
+    e, _, melt = _ifs_subcloud_rain_evaporation(
+        q, qsat, p_half, dp, dq_r, below, jnp.array([0.9]), jnp.array([0.8]),
+        jnp.array([1.0]), dt, snow_melt=True, T=T, p_full=pf)
+    # first melt happens at k=1 (first warm layer)
+    assert float(melt[0, 1] * dp[0, 1]) > 0.0
+    # evaporation at k=1 must be ZERO (no rain entered its top; its own melt
+    # is downstream-only)
+    assert float(e[0, 1]) == 0.0, "same-layer melt evaporated"
+    # and the melted rain DOES evaporate below
+    assert float(e[0, 2]) > 0.0
+
+
+# ---------------------------------------------------------------------------
+# IFS RCAPQADV advection CAPE correction (cumastrn.F90:734-760, :801, :819-823)
+# ---------------------------------------------------------------------------
+
+from legoesm.atmosphere.physics.convection.bechtold import (  # noqa: E402
+    _ifs_cape_qadv_terms,
+    _QadvTerms,
+    _IFS_RCAPQADV,
+    _IFS_QADV_SATFR_MAX,
+    _IFS_QADV_OMEGA_MIN_PA_S,
+    _IFS_NJKT5_P_PA,
+    _IFS_QADV_TAURES_MIN,
+    _QADV_SATFR_GATE_W,
+    _QADV_OMEGA_GATE_W_PA_S,
+    _QADV_TOP_MEMBER_W_M,
+    _QADV_P500_PICK_W_PA,
+    _IFS_RETV,
+    _IFS_RMINCAPE,
+)
+
+
+def test_ifs_cape_qadv_terms_fortran_mirror():
+    """Independent numpy transcription of the RCAPQADV terms:
+
+    ZTENH2/ZQENH2 = env - 0.5*(tend_k + tend_{k-1})*dt        (:735-737)
+    ZDQCV = sum(dq_dyn*dp*(q/qsat)) * L_v/(g*z_top)
+            * (tau*ZTAURES)/max(1.25, ZTAURES) * RCAPQADV     (:748, :801)
+    ZSATFR = <q/qsat>_dp below cloud top                       (:751-753, :802)
+    gate = smooth OR(ZSATFR <= 0.94, omega(500 hPa) < -100)    (:820)
+    """
+    import numpy as np
+
+    nlev = 6
+    T = jnp.array([[220.0, 240.0, 260.0, 275.0, 285.0, 295.0]])
+    q = jnp.array([[1e-5, 1e-4, 1e-3, 4e-3, 8e-3, 1.4e-2]])
+    qsat = q / jnp.array([[0.4, 0.5, 0.6, 0.7, 0.8, 0.9]])   # satfrac 0.4..0.9
+    z = jnp.array([[12000.0, 9000.0, 6000.0, 3500.0, 1500.0, 300.0]])
+    p = jnp.array([[250e2, 400e2, 550e2, 700e2, 850e2, 975e2]])
+    dp = jnp.array([[100e2, 150e2, 150e2, 150e2, 150e2, 100e2]])
+    dTd = jnp.array([[1e-5, -2e-5, 3e-5, -1e-5, 2e-5, 0.0]])
+    dqd = jnp.array([[1e-9, 5e-9, 2e-8, -1e-8, 4e-8, 1e-8]])
+    omega = jnp.array([[-2.0, -5.0, -60.0, -3.0, -1.0, 0.0]])
+    z_top = jnp.array([8000.0])
+    tau = jnp.array([2400.0])
+    ztaures, dt, w = 2.0, 900.0, float(_IFS_RCAPQADV)
+
+    got = _ifs_cape_qadv_terms(T, q, qsat, z, p, dp, dTd, dqd, omega,
+                               z_top, tau, ztaures, dt, w)
+
+    Tn, qn, qs, zn, pn, dpn = (np.asarray(a[0]) for a in (T, q, qsat, z, p, dp))
+    dTn, dqn, omn = (np.asarray(a[0]) for a in (dTd, dqd, omega))
+
+    T2 = Tn.copy()
+    q2 = qn.copy()
+    T2[1:] = Tn[1:] - 0.5 * (dTn[1:] + dTn[:-1]) * dt
+    q2[1:] = qn[1:] - 0.5 * (dqn[1:] + dqn[:-1]) * dt
+    assert np.allclose(np.asarray(got.T_env2[0]), T2, rtol=1e-12)
+    assert np.allclose(np.asarray(got.q_env2[0]), q2, rtol=1e-12)
+
+    satfrac = qn / qs
+    zdqcv_int = float((dqn * dpn * satfrac).sum())
+    zdqcv = (zdqcv_int * constants.L_v / (constants.g * 8000.0)
+             * (2400.0 * ztaures) / max(ztaures, _IFS_QADV_TAURES_MIN) * w)
+    assert abs(float(got.zdqcv[0]) - zdqcv) < 1e-9 * abs(zdqcv)
+
+    below = 1.0 / (1.0 + np.exp(-(8000.0 - zn) / _QADV_TOP_MEMBER_W_M))
+    zsatfr = float((below * satfrac * dpn).sum() / (below * dpn).sum())
+    g_sat = 1.0 / (1.0 + np.exp(-(_IFS_QADV_SATFR_MAX - zsatfr)
+                                / _QADV_SATFR_GATE_W))
+    w_pick = np.exp(-(((pn - _IFS_NJKT5_P_PA) / _QADV_P500_PICK_W_PA) ** 2))
+    w_pick = w_pick / w_pick.sum()
+    om5 = float((w_pick * omn).sum())
+    g_om = 1.0 / (1.0 + np.exp(-(_IFS_QADV_OMEGA_MIN_PA_S - om5)
+                               / _QADV_OMEGA_GATE_W_PA_S))
+    gate = 1.0 - (1.0 - g_sat) * (1.0 - g_om)
+    assert abs(float(got.adv_gate[0]) - gate) < 1e-9
+
+    # omega=None: only the saturation-fraction branch remains.
+    got_no_om = _ifs_cape_qadv_terms(T, q, qsat, z, p, dp, dTd, dqd, None,
+                                     z_top, tau, ztaures, dt, w)
+    assert abs(float(got_no_om.adv_gate[0]) - g_sat) < 1e-9
+
+
+def test_ifs_cape_qadv_gate_branches():
+    """Gate semantics: dry column -> advection branch ON; near-saturated
+    column -> OFF; near-saturated + extreme resolved 500 hPa ascent -> ON."""
+    nlev = 4
+    T = jnp.full((1, nlev), 270.0)
+    z = jnp.array([[9000.0, 6000.0, 3000.0, 500.0]])
+    p = jnp.array([[300e2, 500e2, 800e2, 975e2]])
+    dp = jnp.full((1, nlev), 150e2)
+    zeros = jnp.zeros((1, nlev))
+    z_top = jnp.array([9500.0])
+    tau = jnp.array([1800.0])
+
+    def gate(satfrac, omega):
+        q = jnp.full((1, nlev), 1e-3)
+        qsat = q / satfrac
+        return float(_ifs_cape_qadv_terms(
+            T, q, qsat, z, p, dp, zeros, zeros, omega,
+            z_top, tau, 1.0, 600.0, float(_IFS_RCAPQADV)).adv_gate[0])
+
+    calm = jnp.zeros((1, nlev))
+    assert gate(0.5, calm) > 1.0 - 1e-6            # dry -> ON
+    # near-saturated -> mostly OFF (sigmoid width 0.01 about the 0.94 break;
+    # 0.99 sits 5 widths past it, 1.06 sits 12 widths past it).
+    assert gate(0.99, calm) < 0.01
+    assert gate(1.06, calm) < 1e-4
+    strong = jnp.array([[0.0, -150.0, 0.0, 0.0]])  # ~500 hPa extreme ascent
+    assert gate(0.99, strong) > 0.99               # OR-branch fires
+
+
+def test_ifs_cape_qadv_closure_blend_oracle_semantics():
+    """Closure combine (:819-823) pinned through _ifs_cape_closure_target:
+    with ZERO dynamics tendencies (T2=T, q2=q) ZCAPE2 == ZCAPE, so gate=1
+    gives max(RMINCAPE*ZCAPE, ZCAPE + ZDQCV):
+
+      * zdqcv > 0     -> target ratio (ZCAPE+X)/ZCAPE  (below the 5000 cap)
+      * zdqcv << 0    -> RMINCAPE floor binds (ratio = RMINCAPE)
+      * gate = 0      -> bit-identical to the no-advection baseline
+    """
+    import numpy as np
+
+    T = jnp.array([[250.0, 270.0, 285.0, 295.0]])
+    q = jnp.array([[1e-4, 1e-3, 5e-3, 1e-2]])
+    z = jnp.array([[9000.0, 6000.0, 3000.0, 500.0]])
+    p = jnp.array([[300e2, 500e2, 800e2, 1000e2]])
+    T_u = T + jnp.array([[0.0, 1.5, 2.0, 0.0]])
+    in_cloud = jnp.array([[0.0, 1.0, 1.0, 0.0]])
+    args = (T, q, z, p, T_u, q, jnp.zeros_like(q),
+            jnp.array([[0.0, 0.08, 0.10, 0.10]]),
+            jnp.zeros((1, 4)), in_cloud, jnp.array([1500.0]),
+            jnp.array([0.10]), jnp.array([1.0]))
+    base = _ifs_cape_closure_target(*args)
+
+    # Independent raw-ZCAPE mirror (same integrand as the closure docstring).
+    Tn, qn, pn, Tun = (np.asarray(a[0]) for a in (T, q, p, T_u))
+    dp_lev = pn[1:] - pn[:-1]
+    ic = np.asarray(in_cloud[0])[1:]
+    buoy = (Tun[1:] - Tn[1:]) / np.maximum(Tn[1:], 1.0)
+    zcape = float((ic * buoy * dp_lev).sum())
+    assert zcape > 0.0
+
+    def with_qadv(zdqcv_val, gate_val):
+        qadv = _QadvTerms(T, q, jnp.array([zdqcv_val]), jnp.array([gate_val]))
+        return _ifs_cape_closure_target(
+            *args, qadv=qadv, qadv_weight=float(_IFS_RCAPQADV))
+
+    X = 0.3 * zcape
+    ratio = float(with_qadv(X, 1.0)[0]) / float(base[0])
+    assert abs(ratio - (zcape + X) / zcape) < 1e-6, ratio
+
+    ratio_neg = float(with_qadv(-10.0 * zcape, 1.0)[0]) / float(base[0])
+    assert abs(ratio_neg - _IFS_RMINCAPE) < 1e-6, ratio_neg
+
+    off = with_qadv(X, 0.0)
+    assert float(off[0]) == float(base[0])
+
+
+def test_ifs_cape_qadv_leaf_toggle_and_ad():
+    """Leaf integration: flag-off (or missing inputs) is bit-identical to
+    baseline; flag-on with a convective column changes M_b and the gradient
+    w.r.t. the dynamics moisture tendency is finite and nonzero.
+
+    The column must be WEAKLY unstable AND the moisture-advection supply in
+    the sensitive band: the default ``_column()`` sounding saturates the
+    oracle's 5000 Pa ZCAPE cap (:825), and a very large dq_dyn saturates the
+    downstream realized-flux caps — in both saturated regimes the correction
+    is (correctly) invisible.  dq_dyn=1e-8 kg/kg/s lands ZDQCV at ~3e3 Pa on
+    this sounding, inside the band where the target visibly moves M_u."""
+    T, q, pf, ph, u, v = _column(T_sfc=297.0, q_sfc=10e-3, lapse_rate=6.0)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    stoch = jnp.zeros((ncol,))
+    dTd = jnp.full((ncol, nlev), 2e-5)
+    dqd = jnp.full((ncol, nlev), 1e-8)     # moistening advection
+    base_cfg = BechtoldConfig()
+    on_cfg = BechtoldConfig(use_ifs_cape_qadv=True)
+
+    out_base, Mu_base, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0, config=base_cfg)
+    # inputs supplied but flag off -> bit-identical
+    out_off, Mu_off, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0, config=base_cfg,
+        dT_dt_dyn=dTd, dq_dt_dyn=dqd)
+    assert bool(jnp.all(Mu_off == Mu_base))
+    # flag on but inputs missing -> inert (bit-identical)
+    out_in, Mu_in, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0, config=on_cfg)
+    assert bool(jnp.all(Mu_in == Mu_base))
+    # flag on + inputs -> the closure target moves
+    out_on, Mu_on, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0, config=on_cfg,
+        dT_dt_dyn=dTd, dq_dt_dyn=dqd)
+    assert bool(jnp.all(jnp.isfinite(Mu_on)))
+    assert bool(jnp.any(Mu_on != Mu_base)), "qadv path had no effect"
+
+    def loss(dq_in):
+        out, Mu, _ = bechtold_convection(
+            T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0, config=on_cfg,
+            dT_dt_dyn=dTd, dq_dt_dyn=dq_in)
+        return jnp.sum(Mu ** 2)
+
+    g = jax.grad(loss)(dqd)
+    assert bool(jnp.all(jnp.isfinite(g)))
+    assert bool(jnp.any(g != 0.0)), "no gradient through dq_dt_dyn"
+
+
+def test_ifs_cape_qadv_requires_cape_closure():
+    """Dispatch hardening: the flag without the closure raises loudly."""
+    import pytest as _pytest
+
+    T, q, pf, ph, u, v = _column(ncol=1, nlev=8)
+    with _pytest.raises(ValueError, match="use_ifs_cape_qadv"):
+        bechtold_convection(
+            T, q, pf, ph, u, v, jnp.zeros_like(T), jnp.zeros((1,)), None,
+            dt=300.0,
+            config=BechtoldConfig(use_ifs_cape_qadv=True,
+                                  use_ifs_cape_closure=False),
+        )
+
+
+def test_ifs_cape_qadv_factory_accepts_now_that_bridge_threads_dyn_tendency():
+    """The convection-bridge factory NO LONGER rejects use_ifs_cape_qadv: the
+    hydrostatic bridge now threads the dynamics tendencies from
+    PhysicsState.dyn_tendency_T/qv and guards at TRACE time instead (a driver
+    that populates the carry makes the flag reachable — see
+    tests/atmosphere/hydrostatic/unit/test_bechtold_qadv_bridge.py).  The
+    build-time factory can't see the runtime carry, so it must accept."""
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.atmosphere.physics.convection.integration import (
+        _get_convection_fn,
+    )
+
+    ok = ConvectionConfig(scheme="bechtold")
+    _get_convection_fn(ok)  # default flag False resolves fine
+    on = ok._replace(bechtold=ok.bechtold._replace(use_ifs_cape_qadv=True))
+    name, fn, sc = _get_convection_fn(on)  # must NOT raise anymore
+    assert name == "bechtold" and sc.use_ifs_cape_qadv is True

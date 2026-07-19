@@ -143,7 +143,42 @@ refreshes per step; within-step staleness remains).
   until the per-stage refreshes land, and `stage_halo_note` states the
   ACTUAL refresh mode (per-step refresh vs across-step halo rot for `none`).
 
-## Deferred (structural, precisely scoped)
+## IMPLEMENTED 2026-07-17 — in-step stage-frontier refreshes (codex scaling lever 1)
+
+The "Deferred" plan below is now BUILT: `MPASOceanModel.step(halo_refresh=
+make_mpas_ocean_halo_refresh(layout))` threads a packed refresh object
+(`voronoi_mpi.MPASOceanHaloRefresh`: `edges`/`cells`/`both`, each ONE batched
+union-neighbor message per dtype group, AD-safe custom_vjp sendrecv,
+scan-safe) through every audited frontier:
+
+| site | where | fields | why |
+|------|-------|--------|-----|
+| T1 | `ocean_pe_mpas` viscosity (+ `mid_refresh` on `vector_laplacian_del4_3d` / `smagorinsky_biharmonic_3d` / `leith_biharmonic_3d`) | intermediate del2 (edge) | two-pass biharmonics = 4 hops > halo_depth |
+| T2 | `ocean_pe_mpas` K_bih | inner Laplacian (cell) | bilaplacian outer pair needs a fresh ring |
+| T3 | `ocean_pe_mpas` K_zeta_bih (`biharmonic_vorticity_del4_3d` `mid_refresh`) | vertex Laplacian of ζ (VERTEX channel, per-field `VoronoiHaloExchange`) | curl→vertex-Laplacian→tangential-gradient = 3 hops; the NEMO-match recipe runs `K_zeta_bih=1e14` (codex r1 #2) |
+| R1 | `_step_impl` post-tracer-fill | T, S | updated-tracer ring carries neighbor-rank tendencies; KPP/GM/MLE consume 1-2 hops |
+| R2 | `_step_impl` pre-Coriolis | u_star | FB-Coriolis = 2 tangential hops on UPDATED u |
+| B0 | `barotropic_substeps_mpas` pre-scan | u_bar, F_slow_u + F_slow_eta | scan-constant rings refreshed once |
+| B1 | substep entry (in-scan) | u_bar, eta (one packed msg) | each substep consumes 2-6 hops |
+| B2 | substep PGF (in-scan) | eta_pgf | continuity already ate the 2-ring budget before fill+grad |
+| — | substep optional blocks | u_bar_next / eta_next | div-damp (3 hops), baro-visc (2), eta-diffusion (3) |
+| I0 | `barotropic_implicit_mpas` predictor | u_bar_old, F_slow_u | Heun tangential hops on the depth-mean of post-Coriolis u |
+| I1 | implicit RHS | grad_eta_old | fill+grad+div = 3 chained hops from eta |
+| R3 | `_step_impl` post-reconcile | u_3d_new, Hu_avg + T, S, eta_new (one packed msg) | w-diagnosis + TVD advection + delta_u ring |
+
+`None` (the serial default) keeps every consumer byte-identical (static
+Python branches).  Gates (`tests/ocean/distributed/test_mpas_ocean_stage_halo.py`):
+serial identity-refresh bit-parity with every refresh-bearing branch enabled
+(both solvers), `jax.grad` parity, and the np=2 owned-cell parity vs serial
+at near round-off WITH the non-vacuity tripwire (the entry-refresh-only run
+must be measurably worse — a refactor that silently no-ops the refreshes goes
+red).  The bench lane's `--halo-refresh in_step` (auto's multi-rank choice)
+arms it and rows then earn `stage_halo_correct=true`.  Remaining exclusions:
+`normalize_freshwater` stays refused multi-rank (owned-mask plumbing, below)
+and the production OMIP driver still runs MPAS single-rank (`--n-gpus`
+rejects mpas) — the bench lane is the multi-rank driver.
+
+## Deferred (structural, precisely scoped) — original plan, now superseded above
 
 Threading per-stage refreshes into `_step_impl` is the real distributed-step
 milestone, NOT a small fix:

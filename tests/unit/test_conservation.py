@@ -285,3 +285,74 @@ class TestEnergyConsistentMoistureFloor:
         g_q, g_T = jax.grad(loss, argnums=(0, 1))(q_v_raw, T_upd)
         assert bool(jnp.isfinite(g_q).all())
         assert bool(jnp.isfinite(g_T).all())
+
+
+class TestFixTotalWater:
+    """``fix_total_water`` scales all water species (q_v + q_c + q_r) by ONE
+    uniform factor so the column-integrated total water hits a target — the
+    conservation-correct building block for fix-moisture under precipitating
+    microphysics (config.py warns fix_moisture rescales only q_v).  Wiring it
+    into the AMIP step needs a precip-tracking total-water target (a new
+    SegmentCarry field); this covers the pure-function contract meanwhile.
+    """
+
+    @pytest.fixture
+    def grid(self):
+        return create_cubed_sphere(8)
+
+    def _tracers(self):
+        # SPATIALLY VARYING fields so an erroneous non-uniform scaling (mean
+        # right, elementwise wrong) cannot pass the elementwise checks below.
+        shape_3d = (6, 8, 8, 4)
+        base = jnp.linspace(0.001, 0.011, 6 * 8 * 8 * 4).reshape(shape_3d)
+        return {
+            "q_v": base,
+            "q_c": 0.3 * base + 0.0002,
+            "q_r": 0.1 * base + 0.0001,
+        }
+
+    def test_scales_all_species_to_target(self, grid):
+        from legoesm.core.conservation import (
+            fix_total_water, compute_global_moisture,
+        )
+        tracers = self._tracers()
+        p_s = jnp.full((6, 8, 8), 1.013e5)
+        dsigma = jnp.full((4,), 0.25)
+        total = tracers["q_v"] + tracers["q_c"] + tracers["q_r"]
+        current = compute_global_moisture(total, p_s, dsigma, grid)
+        target = current * 0.9                      # 10% drift correction
+        out = fix_total_water(tracers, target, p_s, dsigma, grid)
+        # Column-integrated total water hits the target exactly.
+        new_total = out["q_v"] + out["q_c"] + out["q_r"]
+        new_int = compute_global_moisture(new_total, p_s, dsigma, grid)
+        assert float(new_int) == pytest.approx(float(target), rel=1e-6)
+        # ALL species scaled ELEMENTWISE by the SAME single factor (0.9),
+        # preserving spatial structure and inter-species ratios.
+        for name in ("q_v", "q_c", "q_r"):
+            assert bool(jnp.allclose(out[name], 0.9 * tracers[name], rtol=1e-6))
+
+    def test_identity_when_target_equals_current(self, grid):
+        from legoesm.core.conservation import (
+            fix_total_water, compute_global_moisture,
+        )
+        tracers = self._tracers()
+        p_s = jnp.full((6, 8, 8), 1.013e5)
+        dsigma = jnp.full((4,), 0.25)
+        total = tracers["q_v"] + tracers["q_c"] + tracers["q_r"]
+        current = compute_global_moisture(total, p_s, dsigma, grid)
+        out = fix_total_water(tracers, current, p_s, dsigma, grid)
+        for name in ("q_v", "q_c", "q_r"):
+            assert float(jnp.mean(out[name] / tracers[name])) == pytest.approx(
+                1.0, rel=1e-6)
+
+    def test_only_named_species_scaled(self, grid):
+        """A non-water tracer passed in the dict is left untouched."""
+        from legoesm.core.conservation import fix_total_water, compute_global_moisture
+        tracers = self._tracers()
+        tracers["dust"] = jnp.full((6, 8, 8, 4), 3.0)
+        p_s = jnp.full((6, 8, 8), 1.013e5)
+        dsigma = jnp.full((4,), 0.25)
+        total = tracers["q_v"] + tracers["q_c"] + tracers["q_r"]
+        target = compute_global_moisture(total, p_s, dsigma, grid) * 0.8
+        out = fix_total_water(tracers, target, p_s, dsigma, grid)
+        assert bool(jnp.all(out["dust"] == tracers["dust"]))

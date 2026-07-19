@@ -57,6 +57,7 @@ __param_spec__ = {
             "downdraft_RH_min": "trigger: column-mean RH threshold below which the downdraft fires (not sigmoid-tunable, fix via config)",
             "downdraft_rh_sharpness": "numerics: sigmoid sharpness on the downdraft RH trigger [1/RH-fraction]",
             "downdraft_detrain_scale_m": "numerics: near-surface height scale [m] over which the penetrative-downdraft mass flux tapers to zero (structural deposit depth, not a trained closure)",
+            "dx_m": "grid property: horizontal grid spacing [m] for the IFS ZTAURES resolution factor (cumastrn.F90:762-768); set by the driver from the grid, never trained; 0 = resolution-agnostic legacy",
             "epsilon_deep": "entrainment: IFS base rate scaled by the height-dependent (1.3-RH) factor in-scheme, not a constant tunable",
             "epsilon_midlevel": "entrainment: TUNED transition-blend base rate (1e-4, intentionally below IFS ENTSHALP*ENTRORG=3.5e-3; see audit F6), scaled in-scheme",
             "epsilon_shallow": "entrainment: IFS shallow base rate scaled in-scheme",
@@ -71,6 +72,7 @@ __param_spec__ = {
             "autoconv_pe_max": {"units": "1", "bounds": (0.5, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "convective precip-efficiency ceiling (Sundqvist 1978 form)", "shape": None},
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Bechtold et al. (2008) stability cap", "shape": None},
             "cape_pbl_depth": {"units": "m", "bounds": (200.0, 1500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Bechtold et al. (2008)", "shape": None},
+            "cape_qadv_weight": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "IFS RCAPQADV=0.8 (sucumf.F90:219)", "shape": None},
             "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Bechtold et al. (2008)", "shape": None},
             "cloud_depth_deep": {"units": "m", "bounds": (1500.0, 5000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
             "cloud_depth_shallow_max": {"units": "m", "bounds": (800.0, 2500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
@@ -478,7 +480,7 @@ class DCAConfig(NamedTuple):
         100.0).  Columns with CAPE below this are not adjusted.
     cape_sharpness : float
         (Manabe only) Sigmoid sharpness [1/(J/kg)] for smooth CAPE gating
-        (default 0.02).
+        (default 0.1).
     instability_blend_sharpness : float
         (Manabe only) Dimensionless sigmoid sharpness on the
         superadiabatic-instability metric controlling per-pair adjustment
@@ -1397,10 +1399,13 @@ class BechtoldConfig(NamedTuple):
     # re-evaporation-only downdraft.
     downdraft_transport: bool = False
     # Fractional entrainment rate [1/m] of the descending downdraft plume
-    # (mixes it toward the environment as it sinks; Tiedtke 1989 downdraft
-    # entrainment is O(1e-4 - 1e-3) 1/m).  Larger => the downdraft arrives
-    # less dry => weaker BL drying.
-    downdraft_entrain_rate: float = 5.0e-4
+    # (mixes it toward the environment as it sinks).  Default = the IFS
+    # ENTRDD = 3.0e-4 (sucumf.F90:144, "average entrainment rate for
+    # downdrafts"); the earlier 5.0e-4 was an unsourced mid-range pick from
+    # the Tiedtke O(1e-4 - 1e-3) band.  Larger => the downdraft arrives
+    # less dry => weaker BL drying.  Only active with the opt-in
+    # downdraft_transport (default OFF => no production change).
+    downdraft_entrain_rate: float = 3.0e-4
     # Near-surface height scale [m] over which the downdraft mass flux tapers
     # to zero as it detrains its air into the sub-cloud layer (the depth of
     # the drying deposit ~ a marine sub-cloud-layer depth).
@@ -1456,6 +1461,100 @@ class BechtoldConfig(NamedTuple):
     # A/B (stable, near-neutral deltas).  False restores the legacy surrogate
     # deep closure byte-identically.
     use_ifs_cape_closure: bool = True
+    # IFS Kessler sub-cloud evaporation of convective rain (cuflxn.F90:436-475;
+    # see bechtold._ifs_subcloud_rain_evaporation): the post-split rain flux
+    # accumulates downward and evaporates below cloud base at the oracle
+    # RCPECONS Kessler rate, limited by the ZRHEBC RH break (deep-ocean 0.85 /
+    # non-deep 0.92, deep-weight blended; land values need an absent land
+    # mask).  Supersedes the crude ``downdraft_evap_efficiency``-bounded
+    # re-evaporation (which fires only below downdraft_RH_min=0.2 — IFS
+    # evaporates routinely up to the break).  Default True since 2026-07-16:
+    # codex CLEAN x3, machine-exact water/enthalpy pair tests, 100-day
+    # gray-RCE A/B (stable, near-neutral) and 15-day C24 AMIP A/B (stable;
+    # precip 1.21->1.19 mm/day, CWV +0.05 — the physically-expected evap
+    # signature).  False restores the legacy re-evaporation byte-identically.
+    use_ifs_subcloud_evap: bool = True
+    # IFS in-updraft precipitation formation (cuascn.F90:718-773; see
+    # bechtold._ifs_inplume_precip_conversion): the plume condensate converts
+    # to rain DURING the ascent via the oracle analytic L-integration
+    # (RPRCON=1.4e-3 Kessler-Sundqvist rate / (0.75*w_u), Bergeron-Findeisen
+    # enhancement, ZDNOPRC=3e-4 threshold, 5e-3 condensate cap), replacing
+    # the post-hoc precip split of the DETRAINED condensate (both
+    # precip_split_scheme variants are bypassed when on; the sub-cloud evap
+    # then acts on the formed rain — the full cuascn->cuflxn chain).
+    # One-pass replay: plume buoyancy loading keeps the unconverted (heavier)
+    # condensate — a documented O(0.1-0.3 K) approximation.  Default True
+    # since 2026-07-16: codex CLEAN x3, 100-day gray-RCE A/B (stable; moist-
+    # adiabat realism IMPROVES 10.27 -> 9.82 K) and 15-day C24 AMIP A/B
+    # (stable, near-neutral: energy residual +1.9 W/m^2 on the pre-existing
+    # 297 baseline with the residual std improved, moisture residual
+    # improved).  False restores the legacy split path byte-identically.
+    use_ifs_inplume_precip: bool = True
+    # Horizontal grid spacing [m] for the IFS ZTAURES resolution factor on the
+    # convective turnover time (ZDX = sqrt(cell area), cumastrn.F90:713,
+    # 762-768).  0 (default) = legacy resolution-agnostic ZTAURES = 1.0; the
+    # driver sets it from the grid (a static Python float — evaluated at trace
+    # time, no traced ops).  At ESM resolutions (dx > 125 km) the factor caps
+    # at 3, i.e. a 3x LONGER turnover / weaker deep flux than the legacy
+    # floor — validate before enabling by default.
+    dx_m: float = 0.0
+    # IFS convective downdraft (cudlfsn.F90 LFS + cuddrafn.F90 saturated
+    # entraining descent; see bechtold._ifs_downdraft): downdraft mass-flux
+    # transport of heat/moisture (perturbation-flux divergence), rain-flux
+    # debit with a conserving env vapor/enthalpy ledger, faithful M_d into
+    # the CAPE closure's ZHEAT and into CMT.  Default True since 2026-07-17
+    # (RCE A/B: equilibrium T-drift 0.052 -> 0.018 K/day; AMIP stable);
+    # False is byte-identical legacy.
+    use_ifs_downdraft: bool = True
+    # IFS shallow PBL-equilibrium closure (cumastrn.F90:468-484, 551-567; see
+    # bechtold._ifs_shallow_pbl_target): the shallow class realizes
+    # ZMFUB = ZDHPBL/ZDH capped by the true CFL ZMFMAX, with the sub-cloud
+    # moist-energy supply in flux form (same-step bulk SHF+LHF + sub-cloud
+    # radiative convergence — cloud-base turbulent flux and dynamics
+    # advection are documented departures).  Needs the pipeline-supplied
+    # shf/lhf/dT_dt_rad kwargs (None => inert).  Default STILL False — the
+    # 2026-07-17 flip campaign HELD this one: AMIP A/B stable but the
+    # largest mean-state reshape of the family (rms dT 0.66 K / max 13 K at
+    # 10 days, r16); RCE-inert (no trigger data).  Flip needs a skill-gated
+    # longer run.  False is byte-identical legacy.
+    use_ifs_shallow_closure: bool = False
+    # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
+    # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production
+    # over a BL timescale so land deep convection peaks late afternoon.
+    # Requires use_ifs_cape_closure + pipeline shf/lhf/land_frac kwargs
+    # (None => inert).  Default True since 2026-07-17 (AMIP-with-diurnal A/B
+    # stable, modest deltas; RCE-inert as expected — fixed zenith).
+    use_ifs_capdcycl: bool = True
+    # IFS RCAPQADV=0.8 moisture/temperature-advection CAPE correction
+    # (cumastrn.F90:734-760, :801, :819-823; see bechtold._ifs_cape_qadv_terms):
+    # the closure adjusts ZCAPE with the plume buoyancy against the
+    # dynamics-advected environment (ZCAPE2), the column moisture-advection
+    # supply (ZDQCV), and the near-saturated/resolved-ascent branch gate
+    # (ZSATFR / omega at ~500 hPa).  Requires use_ifs_cape_closure + the leaf
+    # dT_dt_dyn/dq_dt_dyn kwargs — the DYNAMICS tendencies (PTENTA/PTENQA;
+    # process-split (post_dyn - pre_dyn)/dt, or an SCM's prescribed
+    # large-scale advective forcing).  omega optional (gates only the extreme
+    # resolved-ascent branch).  None => inert.  Driver supply of the dynamics
+    # tendencies is NOT yet wired in the production pipeline (owed follow-up:
+    # the bridge/pipeline REJECT the flag until then); default False,
+    # byte-identical legacy.
+    use_ifs_cape_qadv: bool = False
+    # RCAPQADV blend weight (sucumf.F90:219).
+    cape_qadv_weight: float = 0.8
+    # IFS land RH break for the sub-cloud rain evaporation (cuflxn.F90:
+    # 222-223: 0.70 deep / 0.75 non-deep over land vs 0.85/0.92 ocean).
+    # Needs the pipeline land_frac kwarg (None => ocean values, legacy).
+    # Default True since 2026-07-17 (AMIP A/B stable, modest deltas; oracle
+    # land/ocean split).
+    use_ifs_land_rhebc: bool = True
+    # IFS convective snow: FOEALFCU wet-bulb rain/snow partition + RTAUMEL
+    # melt inside the sub-cloud precip march, FOLD variant (surface snow
+    # forcibly melted into the lowest layer; formation-side freezing heat
+    # paired so column enthalpy closes exactly — see
+    # _ifs_subcloud_rain_evaporation).  Requires use_ifs_subcloud_evap.
+    # Default True since 2026-07-17 (RCE A/B: T-drift 0.052 -> 0.026 K/day;
+    # AMIP stable).
+    use_ifs_snow_melt: bool = True
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0
