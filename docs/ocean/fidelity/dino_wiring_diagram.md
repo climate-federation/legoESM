@@ -1028,3 +1028,30 @@ C-grid barotropic-Coriolis 2Δx-null-mode redesign (energy/enstrophy-conserving 
 flux that filters the grid-scale null mode, or the NEMO EEN-consistent barotropic
 Coriolis in the split-explicit substep). This is the standing barotropic redesign task,
 not a tracer/vmix change. No non-NEMO stabiliser was added; no MLF number fabricated.
+
+---
+
+## FINAL RULING — the deciding measurement (2026-07-19)
+
+Growth-window trace (NEMO per-term trends kt 5760-5790 vs legoESM MLF twin, front cells
+66-69°N, pre-committed stopping rule): **η leads the state divergence by ~7 steps**
+(exponential from rel-14, e-fold 1.5-2 steps, |lat|≈68 staircase surface) while **every
+operator's legoESM-vs-NEMO difference is static to 3-4 sig figs across the whole breeding
+window** (hpg/pvo/rvo/EEN/keg/ρ′ all window-invariant; tracer erosion lags η and has zero
+advective source). VERDICT (b): **EMERGENT — a discrete nonlinear stability-margin
+difference in the split-explicit barotropic free-surface null space**, flowing through
+formula-identical operators. No transcribable line exists; every candidate damping
+mechanism (AM4 weights, boxcar window, EEN metrics, α) was already transcribed and
+measured inert. The characterization — growth rate, locus, leading variable, margin —
+is the result.
+
+## Program verdict
+- **Term ledger: fully certified** against NEMO source and executed states (~40 terms,
+  many at machine precision; 5 real defects fixed as cited transcriptions; 14+ false
+  leads refuted by measurement).
+- **Climate comparison (stable configs, wind-on): faithful** — SST 0.998, SSH 0.995,
+  T300 0.986, equatorial jet/tilt correct sign ~85% amplitude.
+- **Trajectory-following through the developed-front regime: bounded by an emergent
+  stability-margin difference**, now fully characterized. Two discretizations can be
+  term-identical and still differ in nonlinear stability margin; this is that case,
+  measured end-to-end.
