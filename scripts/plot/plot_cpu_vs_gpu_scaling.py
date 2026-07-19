@@ -153,6 +153,111 @@ def peak_table(rows):
     return out
 
 
+# Paper layout: rows = backend, cols = grid. Colour = RESOLUTION on the same
+# sequential Blues ramp the scaling figures use (coarse = light, fine = dark),
+# so "colour means resolution" is consistent across the whole figure set.
+_PAPER_GRIDS = ("cubed-sphere", "icosahedral", "latlon")
+_RES_RAMP = ["#9ecae1", "#4292c6", "#084594"]
+_PAPER_MARKERS = ["o", "^", "D"]
+_PAPER_LINES = ["--", "-.", "-"]
+# cubed-sphere is face-capped (1/2/3/6) so it cannot pack processes and runs
+# 1 proc x 128 threads on CPU, leaning on XLA-CPU threading; lat-lon and
+# icosahedral run 128 MPI procs/node. Same hardware, ~15x different per-node
+# throughput -- so the cube CPU panel is NOT comparable to its neighbours.
+_CUBE_CPU_NOTE = "1 proc × 128 threads\n(XLA-CPU, not MPI-packed)"
+
+
+def make_paper_figure(rows, out_dir: Path, name: str = "fig_cpu_gpu_mcells",
+                      metric: str = "mcells_per_s") -> list[Path]:
+    """2x3 paper figure: CPU (top) / GPU (bottom) x cube / ico / lat-lon.
+
+    Mcells/s ONLY -- SYPD is deliberately absent. SYPD = f(dt), and the
+    route-B SPMD lanes (lat-lon + icosahedral GPU) carry a benchmark-default
+    dt rather than a CFL one, so any SYPD from them is not physical. Mcells/s
+    is timestep-free and valid across every lane.
+
+    The y-axis is SHARED across all six panels: the CPU-vs-GPU comparison is
+    read as the VERTICAL OFFSET between rows, which only works on one scale.
+
+    Comparison caveat (see the campaign report SCOPE): for lat-lon and
+    icosahedral the CPU rows are route A (mpi4jax, 2-D pencil) and the GPU
+    rows are route B (jax.distributed/NCCL, 1-D lat-band), so transport,
+    decomposition AND hardware all differ. Read this as AS-DEPLOYED
+    throughput -- what each stack delivers as actually configured -- never as
+    a hardware speed-up. Cubed-sphere alone is a controlled comparison (both
+    lanes cs_spmd, same driver, same dt).
+    """
+    if rows and metric not in rows[0]:
+        raise SystemExit(
+            f"CSV has no {metric!r} column (columns: {sorted(rows[0])})")
+    by_grid = group(rows, metric)
+    km_map = res_km(rows)
+    present = [g for g in _PAPER_GRIDS if g in by_grid]
+    if not present:
+        raise SystemExit(
+            f"no rows for any of {_PAPER_GRIDS} — check the CSV/aggregator")
+
+    fig, axes = plt.subplots(2, len(present), figsize=(3.5 * len(present), 6.4),
+                             sharey=True, squeeze=False)
+
+    for col, grid in enumerate(present):
+        by_res = by_grid[grid]
+        # Coarse -> fine so the ramp reads light -> dark with resolution.
+        resolutions = sorted(by_res, key=lambda r: -km_map.get((grid, r), r))
+        for row, (backend, xlabel, divisor) in enumerate(_BACKENDS):
+            ax = axes[row][col]
+            for i, res in enumerate(resolutions):
+                pts = by_res[res].get(backend) or []
+                if not pts:
+                    continue
+                xs = [n / divisor for n, _v in pts]
+                ys = [v for _n, v in pts]
+                ax.plot(xs, ys, _PAPER_LINES[i % len(_PAPER_LINES)],
+                        color=_RES_RAMP[i % len(_RES_RAMP)],
+                        marker=_PAPER_MARKERS[i % len(_PAPER_MARKERS)],
+                        markersize=5.5, linewidth=1.8, zorder=5,
+                        markeredgecolor="white", markeredgewidth=0.6,
+                        label=_res_label(km_map, grid, res))
+            ax.set_xscale("log", base=2)
+            ax.set_yscale("log")
+            ax.xaxis.set_major_formatter(FuncFormatter(
+                lambda v, _p: _hw_tick_label(v)))
+            for spine in ("top", "right"):
+                ax.spines[spine].set_visible(False)
+            ax.grid(True, which="both", color="#ececec", linewidth=0.6,
+                    zorder=0)
+            ax.set_axisbelow(True)
+            ax.tick_params(labelsize=8.5, color="#999999")
+            if row == 0:
+                ax.set_title(grid, fontsize=11, color="#1a1a1a")
+            if row == len(_BACKENDS) - 1:
+                ax.set_xlabel(xlabel, fontsize=9, color="#1a1a1a")
+            else:
+                ax.set_xlabel(xlabel, fontsize=9, color="#666666")
+            if col == 0:
+                ax.set_ylabel(f"{backend}\nthroughput (Mcells / s)",
+                              fontsize=9.5, color="#1a1a1a")
+            if backend == "CPU" and grid == "cubed-sphere":
+                ax.annotate(_CUBE_CPU_NOTE, xy=(0.04, 0.04),
+                            xycoords="axes fraction", fontsize=7,
+                            color="#b5562a", va="bottom")
+            if ax.get_legend_handles_labels()[0]:
+                ax.legend(fontsize=7.5, frameon=False, loc="best")
+
+    fig.suptitle("Throughput, as deployed — dry dynamics (Derecho)\n"
+                 "CPU = 128-core EPYC nodes · GPU = A100",
+                 fontsize=11.5, color="#1a1a1a", y=1.01)
+    fig.tight_layout()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written = []
+    for ext in ("png", "pdf"):
+        path = out_dir / f"{name}.{ext}"
+        fig.savefig(path, dpi=200, bbox_inches="tight")
+        written.append(path)
+    plt.close(fig)
+    return written
+
+
 def make_figures(rows, out_dir: Path) -> list[Path]:
     """One 2x2 figure per grid (SYPD top, Mcells/s throughput bottom); the PNGs.
 
@@ -254,10 +359,22 @@ def main() -> int:
                         "submit_scaling outdir).")
     p.add_argument("--out", required=True, type=Path,
                    help="Output directory for the per-grid PNGs.")
+    p.add_argument("--layout", default="per-grid",
+                   choices=["per-grid", "paper", "both"],
+                   help="'per-grid' = one 2x2 diagnostic figure per grid "
+                        "(SYPD + Mcells/s); 'paper' = ONE 2x3 figure, "
+                        "CPU/GPU rows x grid columns, Mcells/s only "
+                        "(SYPD omitted — route-B dt is a placeholder)")
+    p.add_argument("--paper-name", default="fig_cpu_gpu_mcells")
     args = p.parse_args()
     rows = _read(args.csv)
-    written = make_figures(rows, args.out)
-    _print_peak(rows)
+    written = []
+    if args.layout in ("per-grid", "both"):
+        written += make_figures(rows, args.out)
+    if args.layout in ("paper", "both"):
+        written += make_paper_figure(rows, args.out, args.paper_name)
+    if args.layout != "paper":
+        _print_peak(rows)
     print(f"\nwrote {len(written)} figure(s):")
     for w in written:
         print(f"  {w}")
