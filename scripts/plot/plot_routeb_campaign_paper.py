@@ -97,7 +97,7 @@ def _style(ax, INK="#1a1a1a"):
 
 def make_figure(data, title, outname, grid, ramp, resolutions, out):
     import matplotlib.pyplot as plt
-    INK, MUTED = "#1a1a1a", "#666666"
+    INK = "#1a1a1a"  # MUTED dropped with the in-axes annotations
     fig, (axa, axb) = plt.subplots(1, 2, figsize=(9.4, 4.0))
 
     for (res, km, label), col, mk, ls in zip(resolutions, ramp, MARKERS, LINES):
@@ -126,24 +126,19 @@ def make_figure(data, title, outname, grid, ramp, resolutions, out):
     axa.set_xlabel("A100 GPUs", fontsize=10, color=INK)
     axa.set_ylabel("throughput (Mcells / s)", fontsize=10, color=INK)
     axa.set_title("(a) throughput vs GPUs", fontsize=11, color=INK, loc="left")
-    axa.annotate("dotted = ideal scaling", xy=(0.02, 0.97), xycoords="axes fraction",
-                 fontsize=7.5, color=MUTED, va="top")
-    axa.axvline(4, color="#dcdcdc", linewidth=1.0, zorder=1)
-    axa.annotate("1 node | multi-node", xy=(4, axa.get_ylim()[0]), xytext=(2, 3),
-                 textcoords="offset points", fontsize=7.5, color=MUTED,
-                 rotation=90, va="bottom")
+    # In-axes annotations deliberately removed (the 1-node/multi-node marker,
+    # the "dotted = ideal scaling" note, and the "ideal (100%)" label): they
+    # belong in the caption, not on the plot.  The dotted rays and the y=1
+    # reference line are kept -- they read as ideal scaling without a label.
     _style(axa); axa.legend(fontsize=8.5, frameon=False, loc="best")
 
     axb.axhline(1.0, color="#bdbdbd", linewidth=1.2, linestyle=(0, (4, 3)), zorder=2)
-    axb.annotate("ideal (100%)", xy=(16, 1.0), xytext=(0, 3),
-                 textcoords="offset points", fontsize=8, color=MUTED, ha="right")
     axb.set_xscale("log", base=2)
     axb.set_xticks([2, 4, 8, 16]); axb.set_xticklabels([2, 4, 8, 16])
     axb.set_ylim(0, 1.15)
     axb.set_xlabel("A100 GPUs", fontsize=10, color=INK)
     axb.set_ylabel("strong-scaling efficiency (ratio to 2 A100)", fontsize=10, color=INK)
     axb.set_title("(b) scaling quality vs GPUs", fontsize=11, color=INK, loc="left")
-    axb.axvline(4, color="#dcdcdc", linewidth=1.0, zorder=1)
     _style(axb); axb.legend(fontsize=8.5, frameon=False, loc="best")
 
     fig.suptitle(title + "  —  dry dynamics, A100 (Derecho)",
