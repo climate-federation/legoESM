@@ -1572,7 +1572,8 @@ def _latlon_vectors(ll: np.ndarray):
 def analytic_swcore_state(gs: dict, *, u0: float = 40.0,
                           alpha: float = np.pi / 4.0,
                           delp0: float = 3.0e4, ddelp: float = 1.0e4,
-                          pt0: float = 300.0, dpt: float = 10.0) -> dict:
+                          pt0: float = 300.0, dpt: float = 10.0,
+                          wind_fn=None, scalars_fn=None) -> dict:
     """Smooth analytic (delp, pt, u, v) on the kinked single-tile lattice.
 
     Solid-body wind rotated by ``alpha`` (nontrivial at every face seam),
@@ -1585,6 +1586,12 @@ def analytic_swcore_state(gs: dict, *, u0: float = 40.0,
     ``BIG_NUMBER`` — FV3 fills scalar corners itself (``fill2_4corners``)
     and the d2a2c corner fixes overwrite the vector ones before any
     consumed read.
+
+    ``wind_fn(ll) -> (u_east, v_north)`` / ``scalars_fn(ll) -> (delp,
+    pt)`` override the default solid-body/Williamson-like fields with
+    any geographic analytic IC (e.g. the colliding-modon Gaussian
+    bursts) while keeping the SAME certified D-grid projection; both
+    default to the historical closures (byte-identical when omitted).
     """
     g_lon, g_lat = gs["grid_lon"], gs["grid_lat"]
     node_ok, cell_ok = gs["node_ok"], gs["cell_ok"]
@@ -1606,6 +1613,11 @@ def analytic_swcore_state(gs: dict, *, u0: float = 40.0,
         delp = delp0 - ddelp * s**2
         pt = pt0 + dpt * np.cos(2.0 * lon) * np.cos(lat) ** 3
         return delp, pt
+
+    if wind_fn is not None:
+        wind = wind_fn
+    if scalars_fn is not None:
+        scalars = scalars_fn
 
     a_ll = np.stack([gs["agrid_lon"], gs["agrid_lat"]], axis=-1)
     delp_all, pt_all = scalars(a_ll)

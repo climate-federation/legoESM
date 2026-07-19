@@ -38,7 +38,8 @@ def build_six_face_duo_context(n: int, ng: int = 3,
                                vector_corner: str = "lagrange",
                                ext_exclude: tuple = (),
                                use_ext_metrics: bool = False,
-                               oracle_conventions: bool = False) -> dict:
+                               oracle_conventions: bool = False,
+                               omega: float | None = None) -> dict:
     """Gridstructs + Bounds for all six faces (certified builders).
 
     ``oracle_conventions=True`` = the BOUNDED-conventions lane the
@@ -71,13 +72,18 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     # log ("Radius is 6371200.0, omega is 7.2921e-5") — the builder's
     # constants.R_earth/Omega defaults put a broad scale error on every
     # metric and Coriolis term (codex vertex-diff P2).
+    # omega override: the colliding-modon case runs a NON-ROTATING
+    # planet (FV3 case 8; omega=0); default = the FMS value
+    if omega is None:
+        omega = FV3_OMEGA
     if oracle_conventions:
-        gs6 = [build_fv3_native_gridstruct_bounded(n, ng, tile=t)
+        gs6 = [build_fv3_native_gridstruct_bounded(n, ng, tile=t,
+                                                   omega=omega)
                for t in range(1, 7)]
     else:
         gs6 = [build_fv3_native_gridstruct(n, ng, tile=t,
                                            radius=FV3_RADIUS_M,
-                                           omega=FV3_OMEGA)
+                                           omega=omega)
                for t in range(1, 7)]
 
     # DUO angle override: the plain-mpp gridstruct poisons the panel-edge
