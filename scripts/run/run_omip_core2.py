@@ -1346,7 +1346,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      lloyd_iterations: int = 20, woa_init: bool = False,
                      woa_t=None, woa_s=None, flat_bottom: bool = False,
                      A_h=None, B_h=None, K_bih=None, C_smag_lap=None,
-                     pgf_scheme=None, bottom_drag_r=None,
+                     pgf_scheme=None, tracer_advection=None, bottom_drag_r=None,
                      bottom_drag_bbl_thickness=None, bottom_drag_bg_velocity=None,
                      partial_cell=False, dz_ref_override=None,
                      n_barotropic_substeps=None,
@@ -1407,6 +1407,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
             "bridge yet (lat-lon / tripole only)")
     _ovr = {k: v for k, v in (("A_h", A_h), ("B_h", B_h), ("K_bih", K_bih),
                               ("C_smag_lap", C_smag_lap), ("pgf_scheme", pgf_scheme),
+                              ("tracer_advection", tracer_advection),
                               ("bottom_drag_r", bottom_drag_r),
                               ("bottom_drag_bbl_thickness", bottom_drag_bbl_thickness),
                               ("bottom_drag_bg_velocity", bottom_drag_bg_velocity),
@@ -4253,6 +4254,14 @@ def main() -> int:
             mle=mle_cfg, dz_ref_override=_nemo_dz,
             barotropic_solver=args.barotropic_solver,
             barotropic_pcg_variant=args.barotropic_pcg_variant,
+            # Cross-grid parity (2026-07-18 manifest audit): these two flags
+            # were silently IGNORED on MPAS — the call site never passed
+            # them, so mpas8_corr ran tvd + adcroft while the tripole ran
+            # superbee + smc03 despite byte-identical sbatch flags.  Both
+            # ARE supported on the Voronoi core (ocean_model_mpas advection
+            # dispatch incl. superbee; ocean_pe_mpas smc03 branch).
+            pgf_scheme=args.pgf_scheme,
+            tracer_advection=args.tracer_advection,
             bottom_drag_scheme=args.bottom_drag_scheme,
             bottom_drag_cd0=args.bottom_drag_cd0,
             bottom_drag_cdmax=args.bottom_drag_cdmax,
