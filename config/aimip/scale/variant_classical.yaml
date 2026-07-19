@@ -12,3 +12,16 @@ aimip_cloud: "xu_randall"
 # the classical control cannot silently fall back to gray if the base
 # changes.
 aimip_radiation: "rrtmgp"
+
+# Cap the curriculum at 12h+24h for classical ONLY — override the base's
+# 12->24->72->120h. The 72h (432-step) / 120h RRTMGP ROLLOUT graphs are too
+# heavy to compile in walltime (dev finding #82ba6429e/#665927108; the working
+# config/aimip/dense/suite_classical.yaml uses exactly [12,3],[24,2] and notes
+# "72h dropped — its 432-step graph is still the heaviest; 12h+24h suffice").
+# Justified asymmetry vs the NN variants: classical is a physical dycore tuning
+# 8 params — it does NOT need long-rollout stability training (an NN technique),
+# so short leads suffice AND are the only compilable option. Resumes cleanly
+# from the current epoch-0 (12h) chunk (new epoch 0 is also 12h).
+aimip_rollout_curriculum:
+  - [12, 3]
+  - [24, 2]
