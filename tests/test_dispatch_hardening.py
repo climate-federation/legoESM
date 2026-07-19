@@ -151,6 +151,11 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/integration.py", "_get_convection_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/integration.py", "make_convection_physics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/kuo.py", "kuo_convection"),
+        # Convective precip-split selector (precip_split_scheme: constant vs the
+        # physical Sundqvist-1978 autoconversion on the plume q_c_u); a typo must
+        # raise, not silently run the wrong precip physics.
+        ("packages/atmosphere/legoesm/atmosphere/physics/convection/bechtold.py", "bechtold_convection"),
+        ("packages/atmosphere/legoesm/atmosphere/physics/convection/tiedtke.py", "tiedtke_convection"),
         # Renamed _get_gwd_fn -> get_gwd_fn (private-import promotion,
         # 2026-06-10); the unknown-scheme raise itself is unchanged.
         ("packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/integration.py", "get_gwd_fn"),
@@ -222,6 +227,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # kernel _compute_gs_and_ci as a trace-time backstop.
         ("packages/land/legoesm/land/canopy/config.py", "validate"),
         ("packages/land/legoesm/land/canopy/energy_balance.py", "_compute_gs_and_ci"),
+        # LE_module leaf-energy dispatch (BT|PM): the internal residual uses a
+        # bare ``else: # PM``, so a typo silently runs Penman-Monteith. Guarded
+        # at the config validator AND at the solver entry (direct-call path).
+        ("packages/land/legoesm/land/canopy/solver.py", "solve_canopy_closure"),
         ("packages/ml/legoesm/ml/physics/model.py", "_validate_microphysics_scheme"),
         ("packages/ml/legoesm/ml/training.py", "create_optimizer"),
         ("packages/ml/legoesm/training/aimip_params.py", "make_aimip_classical_spectral_physics"),
@@ -254,7 +263,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # lateral_tracer_mixing, gm_redi_mld_criterion) with fn-entry raises;
         # lock so the gm_redi_mld_criterion N2-integral guard can't be dropped.
         ("packages/ocean/legoesm/ocean/experiments/dino.py", "dino_lat_lon_model_config"),
-        ("packages/ocean/legoesm/ocean/physics/bottom_drag/integration.py", "make_bottom_drag_physics"),
+        # make_bottom_drag_physics entry removed 2026-07-19: the dead
+        # physics-level bottom-drag factory was deleted on main (c5f88d325);
+        # the canonical guard is validate_bottom_drag_scheme above.
         ("packages/ocean/legoesm/ocean/physics/convection/integration.py", "make_convection_physics"),
         ("packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py", "gm_redi_tracer_tendency_latlon"),
         # gm_bolus_advection dispatch (centred | through_fct; hardened 2026-07-18

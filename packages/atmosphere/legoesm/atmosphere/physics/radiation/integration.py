@@ -452,12 +452,19 @@ def _get_grid_lat_lon(grid_or_mesh, shape_2d):
     return lat, lon
 
 
-def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d):
+def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
+                                 sw_net_sfc=None, lw_net_sfc=None):
     """Pack column heating rate into a HydrostaticTendencies.
 
     Returns a HydrostaticTendencies with only dT_dt non-zero.
     Works for cubed-sphere, lat-lon, and MPAS (v fields are zero or None
     depending on whether state.v is present).
+
+    ``sw_net_sfc`` / ``lw_net_sfc`` (both [W/m^2, +into surface], native 2D
+    layout) are optional surface radiative net fluxes attached as diagnostics
+    so the lean MPAS coupled loop can export them to the coupler; ``None`` (the
+    default, e.g. every non-radiation tendency) leaves the fields unset —
+    behaviourally identical to the pre-export packer.
     """
     dims_3d = state.T.dims
     dims_2d = state.p_s.dims
@@ -478,6 +485,12 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d):
             dims=state.v.dims, units="m/s^2",
         )
 
+    sw_field = None if sw_net_sfc is None else Field(
+        data=sw_net_sfc.reshape(shape_2d).astype(_ps_dtype),
+        name="sw_net_sfc_rad", dims=dims_2d, units="W/m^2")
+    lw_field = None if lw_net_sfc is None else Field(
+        data=lw_net_sfc.reshape(shape_2d).astype(_ps_dtype),
+        name="lw_net_sfc_rad", dims=dims_2d, units="W/m^2")
     return HydrostaticTendencies(
         du_dt=Field(
             data=jnp.zeros(du_shape, dtype=_u_dtype), name="du_dt_rad",
@@ -493,6 +506,8 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d):
             dims=dims_2d, units="m^2/s^3",
         ),
         dv_dt=dv_dt,
+        sw_net_sfc=sw_field,
+        lw_net_sfc=lw_field,
     )
 
 
@@ -522,6 +537,7 @@ def _call_radiation_backend(
     aerosol_lw_od: jnp.ndarray | None = None,
     solar_spectral_fraction: jnp.ndarray | None = None,
     eccf: float | jnp.ndarray = 1.0,
+    cloud_fraction_override: jnp.ndarray | None = None,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -643,6 +659,7 @@ def _call_radiation_backend(
             q_ice=q_ice,
             n_ice=n_ice,
             n_cloud=n_cloud,
+            cloud_fraction_override=cloud_fraction_override,
         )
         # ``to_rrtmg_kwargs`` builds the kwargs without ``cloud_fraction``
         # (commit 4c9591bb, lost in AIMIP-#312 merge, restored iter-15
@@ -761,6 +778,7 @@ def make_radiation_physics(
     sfc_emissivity_override: jnp.ndarray | float | None = None,
     nc_from_aerosol: bool = False,
     activation_config=None,
+    use_clubb_cloud_fraction: bool = False,
 ) -> Callable:
     """Create a physics function for radiation matching a model's signature.
 
@@ -814,6 +832,21 @@ def make_radiation_physics(
             f"model_type='plane' (LES/CRM); got model_type={model_type!r}."
         )
 
+    # CLUBB-cloud-fraction -> radiation routing (moist-closure sub-grid cf feeds
+    # the cloud optics via PhysicsState).  Only the hydrostatic builder threads
+    # ``phys_state`` into the radiation physics_fn today (it covers both AMIP
+    # grids: cubed-sphere and lat-lon hydrostatic).  Refuse LOUDLY on the other
+    # dycores rather than silently ignoring the request (dispatch-hardening) —
+    # the turbulence WRITE side is wired on all grids, so extend the matching
+    # _make_*_radiation READ side before enabling it there.
+    if use_clubb_cloud_fraction and model_type != "hydrostatic":
+        raise NotImplementedError(
+            "RadiationConfig.use_clubb_cloud_fraction is only wired for "
+            f"model_type='hydrostatic', got {model_type!r}.  Extend the "
+            "corresponding _make_*_radiation builder (thread phys_state ->"
+            " cloud_fraction_override) before enabling CLUBB-cf routing there."
+        )
+
     # Load heavy/static RRTMGP optics once outside model JIT traces. mc3d also
     # needs the RRTMGP optics tables (Phase 2b: 3D-MC shortwave uses RRTMGP
     # per-g-point optics; falls back to gray optics if the tables are absent).
@@ -851,7 +884,8 @@ def make_radiation_physics(
                                             ml_ozone_coefs=ml_ozone_coefs,
                                             column_mesh=column_mesh,
                                             nc_from_aerosol=nc_from_aerosol,
-                                            activation_config=activation_config)
+                                            activation_config=activation_config,
+                                            use_clubb_cloud_fraction=use_clubb_cloud_fraction)
     elif model_type == "nonhydrostatic":
         return _make_nonhydrostatic_radiation(radiation_config, rrtmgp_solver,
                                                ml_ozone_coefs=ml_ozone_coefs)
@@ -892,6 +926,7 @@ def _make_hydrostatic_radiation(
     column_mesh=None,
     nc_from_aerosol: bool = False,
     activation_config=None,
+    use_clubb_cloud_fraction: bool = False,
 ) -> Callable:
     """Create radiation physics_fn for any hydrostatic model.
 
@@ -921,7 +956,7 @@ def _make_hydrostatic_radiation(
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
 
     def physics_fn(state, grid_or_mesh, sigma_coord,
-                   forcing=None) -> HydrostaticTendencies:
+                   forcing=None, phys_state=None) -> HydrostaticTendencies:
         T = state.T.data
         p_s = state.p_s.data
 
@@ -1046,6 +1081,21 @@ def _make_hydrostatic_radiation(
 
         f_day_col = f_day.reshape(ncol) if f_day is not None else None
 
+        # CLUBB cloud-fraction READ: a moist higher-order turbulence closure
+        # writes its PDF sub-grid cloud fraction into ``phys_state.cloud_fraction``
+        # (the turbulence physics_fn -> PhysicsState carry); route it to the cloud
+        # optics so radiation reflects the moist closure's less-overcast marine BL
+        # instead of the RH grid-scale fraction.  Gated to the clubb-active path by
+        # the caller (``use_clubb_cloud_fraction`` is only True when turbulence is a
+        # cf-producing scheme), so on non-clubb runs this stays None (byte-
+        # identical).  PhysicsState carries the column form (ncol, nlev); reshape
+        # defensively to the local column layout.
+        _cf_ovr = None
+        if use_clubb_cloud_fraction and phys_state is not None:
+            _cf_ovr = getattr(phys_state, "cloud_fraction", None)
+            if _cf_ovr is not None:
+                _cf_ovr = _cf_ovr.reshape(T_col.shape)
+
         # Issue #273 follow-up: optionally shard the per-column radiation
         # workload across ``column_mesh`` so a 4×A100 (or any device
         # count that fails cubed-sphere face-divisibility) keeps every
@@ -1088,6 +1138,8 @@ def _make_hydrostatic_radiation(
                 _aer_ext = shard_columns(_aer_ext, column_mesh)
             if _aer_lw_ext is not None:
                 _aer_lw_ext = shard_columns(_aer_lw_ext, column_mesh)
+            if _cf_ovr is not None:
+                _cf_ovr = shard_columns(_cf_ovr, column_mesh)
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
@@ -1112,10 +1164,21 @@ def _make_hydrostatic_radiation(
             aerosol_od=_aer_ext,
             aerosol_lw_od=_aer_lw_ext,
             ghg_vmr_override=_ghg_ext,
+            cloud_fraction_override=_cf_ovr,
         )
 
         dT_dt = rad_out.heating_rate.reshape(shape_3d)
-        return _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d)
+        # Surface net radiative fluxes [W/m^2, +into surface], carried so the
+        # lean MPAS coupled loop can export them to the coupler. Surface is the
+        # LAST half-level (T_sfc uses T[..., -1]); at the surface the upward SW
+        # is the albedo-reflected downward, so (down - up) equals the compiled
+        # path's sw_down*(1-albedo) (physics_pipeline.py) with no albedo term.
+        # lw net (down - up) matches that path's lw_net_sfc convention exactly.
+        _swn = rad_out.sw_flux_down[:, -1] - rad_out.sw_flux_up[:, -1]
+        _lwn = rad_out.lw_flux_down[:, -1] - rad_out.lw_flux_up[:, -1]
+        return _pack_hydrostatic_tendencies(
+            dT_dt, state, shape_3d, shape_2d,
+            sw_net_sfc=_swn, lw_net_sfc=_lwn)
 
     physics_fn.set_time = set_time
     physics_fn.set_T_sfc_override = set_T_sfc_override
@@ -1125,6 +1188,14 @@ def _make_hydrostatic_radiation(
     # ``forcing`` only to fns that advertise it — so unmarked sub-physics
     # keep their 3-arg signature unchanged.
     physics_fn._wants_forcing = True
+    # Marker: this physics_fn READS ``phys_state`` (the CLUBB sub-grid cloud
+    # fraction carry) but writes no PhysicsState carry of its own, so it keeps
+    # its single-return contract.  combined.py's accumulator forwards
+    # ``phys_state`` to accepts_ps=False fns that advertise this flag.  Only set
+    # when the feature is active (byte-identical otherwise: unmarked => not
+    # forwarded => the RH grid-scale cloud path is unchanged).
+    if use_clubb_cloud_fraction:
+        physics_fn._wants_phys_state_ro = True
     return physics_fn
 
 # MPAS uses the same unified hydrostatic radiation function.

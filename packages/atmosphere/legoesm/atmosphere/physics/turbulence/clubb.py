@@ -68,6 +68,37 @@ Phasing (the scheme is wired in and runnable now; fidelity deepens per phase):
     15-field :class:`CLUBBMomentState` carried in
     ``PhysicsState.clubb_moments``.
 
+Faithfulness status vs CLUBB (larson-group/clubb_release CLUBB_core Fortran,
+via the CLUBB-JAX port) — updated 2026-07-17
+-----------------------------------------------------------------------------
+FAITHFUL (mechanically pinned):
+
+* Every piece on the CAM-default call tree is golden-locked or round-off
+  parity-tested against CLUBB-JAX (committed ``tests/unit/clubb_fixtures/``
+  golden ``.npz`` + live parity when the sibling checkout is present):
+  Lscale, ADG1 PDF closure + higher-order moments, xp2_xpyp / windm /
+  xm_wpxp / wp2_wp3 advances, band solvers, hole filling, clipping.
+* The CAM-default branches CLUBB-JAX does NOT implement (it carries the
+  ARM/True paths) are pinned DIRECTLY against independent transcriptions of
+  the CLUBB Fortran in ``tests/unit/test_clubb_cam_branch_fortran_pins.py``
+  (rel 1e-12): ``compute_skw_fnc``, ``damp_coefficient``,
+  ``compute_C6_C7_Skw_fnc`` (advance_xm_wpxp_module.F90:640-700, 5990-6048),
+  ``wp2_term_dp1_rhs`` (``l_damp_wp2_using_em=.false.``), and
+  ``wp3_term_pr_turb_rhs`` (``l_use_tke_in_wp3_pr_turb_term=.false.``,
+  advance_wp2_wp3_module.F90:5350-5410).
+
+KNOWN GAPS / DEPARTURES (documented, deliberate):
+
+* No closed-form WHOLE-SCHEME oracle exists: CLUBB is an iterated implicit
+  PDF closure, so scheme-level behaviour is verified via the per-piece pins
+  plus behavioural invariants (even-moment non-negativity, budget checks),
+  not a single end-to-end golden run — a structural property of the scheme,
+  not a defect.
+* Restricted to the CAM-default flag tree (table at file end); non-default
+  CLUBB branches are not ported.
+* ``conserves: none`` — the column moment budgets are open by construction
+  in the diagnostic default (Phase 1); see ``__physics_contract__``.
+
 The ``TurbulenceOutput`` contract carries no ``cloud_fraction`` field (see the
 clubb_lite docstring), so the PDF cloud fraction is computed and exposed only
 through diagnostics for now; the eddy-diffusion tendencies are the live output.
@@ -3442,8 +3473,9 @@ def advance_xp2_xpyp(rtm, thlm, um, vm, rtp2, thlp2, rtpthlp, up2, vp2,
 #   * C7: the same skewness function, no damping (CAM default C7 = C7b reduces
 #     it to the constant C7b).
 # The C1/C11 skewness functions (wp2/wp3) are computed inside advance_wp2_wp3.
-# The CAM branch has no CLUBB-JAX oracle (the reference is ARM) — validated
-# against the Fortran formula + the parity-tested compute_skw_fnc sub-piece.
+# The CAM branch has no CLUBB-JAX oracle (the reference is ARM) — pinned
+# against independent CLUBB-Fortran transcriptions in
+# tests/unit/test_clubb_cam_branch_fortran_pins.py (rel 1e-12).
 
 def damp_coefficient(coefficient, Cx_Skw_fnc, max_coeff_value, altitude_threshold,
                      threshold, Lscale_zm, gr: CLUBBGrid):
@@ -3818,7 +3850,8 @@ def wp2_term_dp1_rhs(C1_Skw_fnc, invrs_tau_C1_zm, threshold):
     at interior zm levels (boundaries zero). Note: in this branch
     ``C1_Skw_fnc`` carries NO ``1/3`` factor (the ``1/3`` is the ARM/True path).
     CLUBB-JAX implements only the True path (``-(C1_Skw_fnc·invrs_tau)·(u'^2 +
-    v'^2)``), so this has no JAX bit-exact oracle.
+    v'^2)``), so the pin is a direct independent Fortran transcription
+    (``tests/unit/test_clubb_cam_branch_fortran_pins.py``, rel 1e-12).
     """
     rhs = jnp.zeros_like(C1_Skw_fnc)
     rhs = rhs.at[:, 1:-1].set(
@@ -3841,8 +3874,9 @@ def wp3_term_pr_turb_rhs(C_wp3_pr_turb, Kh_zt, wpthvp, dum_dz, dvm_dz,
     zt level. ``wpthvp``/``upwp``/``vpwp``/``dum_dz``/``dvm_dz`` are zm-level
     (``dum_dz = ddzt(um)``); ``Kh_zt``/``thv_ds_zt`` are zt-level;
     ``C_wp3_pr_turb`` is ``(ncol,)``; uses ``constants.g``. Boundaries zero.
-    CLUBB-JAX implements only the TKE (True) path, so this has no JAX bit-exact
-    oracle — verified against the Fortran formula + golden-pinned.
+    CLUBB-JAX implements only the TKE (True) path, so the pin is a direct
+    independent Fortran transcription
+    (``tests/unit/test_clubb_cam_branch_fortran_pins.py``, rel 1e-12).
     """
     rhs = jnp.zeros_like(Kh_zt)
     C = C_wp3_pr_turb[:, None]
@@ -5348,6 +5382,9 @@ def clubb_turbulence(
         lhflx=lhflx,
         ustar=ustar,
         h_pbl=h_pbl,
+        # Expose the CLUBB ADG1-PDF liquid cloud fraction so radiation can use
+        # it (cloud_scheme="clubb") instead of the RH-diagnosed grid-scale one.
+        cloud_fraction=cloud_frac_a,
     )
     return output, wp2_new
 

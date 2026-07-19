@@ -11,17 +11,20 @@ Uses jax.lax.scan for the vertical propagation, fully differentiable.
    **Experimental / not validated; opt-in only (the default GWD scheme is
    ``none``).**  This scheme is *bespoke* — it is NOT a faithful
    implementation of a published spectral GWD parameterization (e.g.
-   Alexander-Dunkerton 1999 or Scinocca 2003) and carries no
-   ``__physics_contract__`` yet (tracked in ``CONTRACT_TODO``).
+   Alexander-Dunkerton 1999 or Scinocca 2003).  See the "Faithfulness"
+   section below for the reused ingredients vs departures.
 
    **F-GWD-1 (deposition sign) — FIXED; energetics caveat remains.** The
-   momentum deposition originally omitted the ``sign(c - U_proj)`` factor,
-   so a symmetric launch spectrum produced a force independent of the mean
-   wind.  The deposition now carries ``s0 = sign(c - U_launch)`` fixed at
-   the launch level (see the sign-convention block in
-   ``__physics_contract__``), which relaxes ``U_proj`` toward ``c`` — a
-   true drag whenever the spectrum is slower than the wind.  ``eps_gwd``
-   is the column wave-dissipation (frictional-heating) integral and is
+   momentum deposition originally omitted the directional sign factor, so a
+   symmetric launch spectrum produced a force independent of the mean wind.
+   The deposition now carries ``s0 = sign(c - U_launch)`` fixed at the launch
+   level (see the sign-convention block in ``__physics_contract__``), which
+   drives ``U_proj`` toward ``c`` WHILE the local wind stays on the launch side
+   of ``c`` (a deceleration / true drag for waves slower than the launch wind,
+   an acceleration for faster ones; once the wind crosses ``c`` aloft the fixed
+   launch sign keeps depositing in the launch direction, pushing it past
+   ``c``).  ``eps_gwd`` is the column
+   wave-dissipation (frictional-heating) integral and is
    ``>= 0`` by construction.  NOTE: with a prognostic two-sided spectrum
    the mean flow can still legitimately gain kinetic energy from waves
    faster than the wind, so the mean-flow KE loss
@@ -29,6 +32,63 @@ Uses jax.lax.scan for the vertical propagation, fully differentiable.
    deliberately NOT what ``eps_gwd`` reports; the saturation energetics
    still need a proper spectral-GWD review plus a momentum-flux / QBO
    benchmark (``parameterization_checks.md`` F-GWD-1).
+
+Faithfulness
+------------
+This scheme is BESPOKE (not a faithful port of any published spectral GWD),
+but it reuses a few standard, verifiable ingredients (pinned in
+``tests/atmosphere/hydrostatic/unit/test_prognostic_spectral_gwd_faithful.py``
+and ``test_gwd_physical_realism.py``):
+
+Reused, verifiable INGREDIENTS (structure-level only; the scheme is bespoke):
+
+* **Directional momentum-flux sign** ``s0 = sign(c - U_launch)`` (smoothed
+  ``tanh((c-U_launch)/w)``): the standard spectral-GWD sign convention (Warner
+  & McIntyre 1996; Scinocca 2003 set the pseudomomentum sign at launch). While
+  the local wind stays on the launch side of ``c`` the breaking drives the
+  projected wind toward ``c`` (a deceleration for a slow-launched wave, an
+  acceleration for a fast-launched one); once the wind crosses ``c`` aloft the
+  FIXED launch sign keeps depositing in the launch direction (it can then push
+  the local wind further from ``c`` — the deliberate F-GWD-1 momentum-conserving
+  tradeoff). Only the SIGN convention is borrowed — NOT the conservative
+  spectral propagation + critical-level filtering of those references.
+* **Non-negative intrinsic-magnitude dissipation** ``(g/c_pd)*sum(drag*|c -
+  U_proj|)``: an intrinsic-frequency heating in the SPIRIT of the E3SM /
+  newer-CAM ``dttke`` term, but imposed as a POSITIVE diagnostic from the LOCAL
+  ``|c-U_proj|`` — decoupled from this scheme's launch-signed momentum tendency,
+  so it is NOT the E3SM ``dttke`` energetic identity (and E3SM-3.0.1's default
+  is the ground-relative ``sum(c*gwut)``; intrinsic is the newer option).
+* **Lindzen-LIKE cubic saturation** ``tau_sat ∝ rho*|c-U|^3*k/N`` (a free
+  ``breaking_threshold`` absorbs the coefficient vs Lindzen's ``0.5``): the
+  convective-instability cubic scaling, used here as a SOFT sigmoid relaxation
+  target, not a hard saturated-stress cap.
+
+DEPARTURES (why it is bespoke / experimental):
+
+* The wave spectrum is a **prognostic relaxation toward a fixed launch flux**
+  (``spectrum += dt*(launch_flux - spectrum)/tau_decay``) that does NOT subtract
+  the vertically deposited flux or retain the top flux ``F_top`` — an ad-hoc
+  memory term, NOT a wave-action / momentum-flux budget (cf. Alexander-Dunkerton
+  1999 / Scinocca 2003 launch spectra + conservative propagation).
+* **No conserved ground-based phase-speed spectrum, no dispersion / refractive
+  propagation, no explicit critical-level filtering**: ``c = N/k`` is recomputed
+  per level, but only the saturation clamp limits the flux — no wave-wave
+  interaction and no critical-level absorption band.
+* **Smooth-sigmoid breaking** plus a ``|c-U|`` floor (0.1 m/s) and several
+  safety clips (dz, dp, N, tau_sat) are AD-safety numerics, not physics.
+* ``eps_gwd`` reports the wave-dissipation integral (``>= 0``), deliberately
+  NOT the mean-flow KE loss (which is signed for a two-sided spectrum). It is a
+  PRE-GATE would-be-heating diagnostic: when ``config.thermal_tendency=False``
+  the applied ``dT_dt`` is zeroed but ``eps_gwd`` is unchanged, so ``eps_gwd``
+  then does NOT equal ``c_pd*integral(rho*dT_dt*dz)``.
+
+Conservation: ``conserves=["none"]`` — the spectrum is relaxed toward an
+EXTERNAL launch source and the top wave-energy flux is untracked, so the column
+budget stays open. The constant-``s0`` deposition telescopes to
+``g*s0*(F_surface - F_top)`` (``F_surface`` = the INPUT spectrum at the launch
+level, not ``launch_flux``), a conservative redistribution with no spurious
+interior source (``F_new <= F_carry``) — a NUMERICAL property, not a physical
+conservation law.
 """
 
 from __future__ import annotations
@@ -71,15 +131,26 @@ __physics_contract__ = {
         "c is s0*F with F>=0 the carried spectrum and s0 = sign(c - U_launch) "
         "FIXED at the launch level (a wave's pseudomomentum sign does not "
         "change with height until absorbed), so the deposition du_proj/dt = "
-        "+g*(dF/dp)*s0 relaxes U_proj TOWARD c (a true drag whenever the "
-        "spectrum is slower than the wind; F-GWD-1 fixed). Using the CONSTANT "
-        "s0 (not the local-layer sign) makes the column deposition telescope "
-        "to g*s0*(F_launch - F_top), so momentum is conserved even across a "
-        "critical level where the local sign flips. Frictional heating uses "
-        "the intrinsic form dT_dt = (g/c_pd)*sum(drag*|c - U_proj|) >= 0 "
-        "(gated by config.thermal_tendency) and eps_gwd >= 0 BY CONSTRUCTION "
-        "(|.| >= 0 and the carried flux may not grow above the flux entering "
-        "from below)."
+        "+g*(dF/dp)*s0 drives U_proj toward c WHILE the local wind stays on the "
+        "launch side of c (a deceleration/true drag for waves slower than the "
+        "launch wind, an acceleration for faster ones); once the wind crosses c "
+        "aloft the fixed launch sign keeps depositing in the launch direction, "
+        "pushing it past c (F-GWD-1 tradeoff). "
+        "Using the CONSTANT s0 (not the local-layer sign) makes the column "
+        "deposition telescope to g*s0*(F_surface - F_top) (F_surface = the "
+        "INPUT spectrum at the launch level, not launch_flux): the deposited "
+        "momentum equals the net wave-flux divergence (a conservative "
+        "redistribution, no spurious interior source since F_new<=F_carry), "
+        "even across a critical level where the local sign flips. NB this is a "
+        "NUMERICAL telescoping property; total momentum is NOT conserved (the "
+        "launch flux is an external source and F_top escapes -> "
+        "conserves=['none']). The thermal term dT_dt = (g/c_pd)*sum(drag*|c - "
+        "U_proj|) >= 0 uses the LOCAL intrinsic magnitude (a positive "
+        "dissipation diagnostic, NOT the launch-signed momentum tendency) and "
+        "is gated by config.thermal_tendency. eps_gwd = integral(rho*g*sum(drag*"
+        "|c-U|))dz >= 0 is the PRE-GATE wave-dissipation integral: with "
+        "thermal_tendency=False dT_dt is zeroed but eps_gwd is unchanged, so it "
+        "then does NOT equal c_pd*integral(rho*dT_dt*dz)."
     ),
     # Conserves NOTHING robustly: the spectrum is RELAXED toward a launch source
     # (a source/sink, not conserved wave momentum flux) and the wave-energy flux
@@ -91,8 +162,10 @@ __physics_contract__ = {
     "reference": (
         "Multi-azimuthal spectral non-orographic GWD (prognostic wave "
         "spectrum), legoESM; directional momentum-flux sign per Warner & "
-        "McIntyre (1996) / Scinocca (2003); intrinsic-frequency heating as in "
-        "E3SM gw_common dttke (sum_l (c_l - ubm)*gwut_l)"
+        "McIntyre (1996) / Scinocca (2003); intrinsic-MAGNITUDE heating "
+        "diagnostic (positive |c - U_proj|*drag; in the spirit of an "
+        "intrinsic-frequency deposition but NOT the E3SM gw_common dttke "
+        "energetic identity)"
     ),
     "idealized_test": (
         "rest state -> zero tendency and spectrum relaxes toward launch_flux "
@@ -127,7 +200,10 @@ def prognostic_spectral_gwd(
     u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt, config
         Standard GWD backend signature.
     spectrum_in : jax.Array
-        Input wave spectrum, shape (ncol, n_azimuths, n_wavenumbers).
+        Input wave momentum-flux spectrum, shape (ncol, n_azimuths,
+        n_wavenumbers). Assumed ``>= 0`` (the carried flux magnitude); this is
+        a PRECONDITION, not enforced — a negative input propagates through the
+        no-growth clamp and can flip the deposition sign.
 
     Returns
     -------
@@ -261,8 +337,11 @@ def prognostic_spectral_gwd(
     # no-growth clamp) puts that momentum into the flow:
     #   du_proj/dt = -(1/rho) d(tau_wave)/dz = +g * s0 * drag
     # (hydrostatic dp = -rho*g*dz).  Using the CONSTANT launch sign s0 (not the
-    # local-layer tanh(c - U_proj)) is what conserves momentum: the column sum
-    # telescopes to g*s0*(F_launch - F_top).  The earlier local-layer sign
+    # local-layer tanh(c - U_proj)) makes the deposition a conservative
+    # redistribution: the column sum telescopes to g*s0*(F_surface - F_top),
+    # where F_surface = spectrum_in is the INPUT spectrum at the launch level
+    # (NOT config.launch_flux; a NUMERICAL property, not a conservation law --
+    # the launch flux is external and F_top escapes).  The earlier local-layer sign
     # dropped the momentum deposited within a critical-level band (|c-U_proj| <
     # w), where the local sign -> 0 exactly as the deposition peaks (codex
     # conservation fix).  s0 is smoothed as tanh((c - U_launch)/w) for
@@ -277,15 +356,17 @@ def prognostic_spectral_gwd(
     du_dt = _duv[..., 0]
     dv_dt = _duv[..., 1]
 
-    # Frictional heating from wave dissipation.  The vertical energy flux of a
-    # gravity wave is c_intrinsic * (momentum flux), so the dissipation rate is
-    #   |c - U_proj| * (-d(momentum flux)/dz) = |intrinsic| * g * drag  [W/kg],
+    # Intrinsic-magnitude dissipation DIAGNOSTIC (positive by construction).
+    # Motivated by the gravity-wave energy-flux relation |c - U_proj| *
+    # (-d(momentum flux)/dz) = |intrinsic| * g * drag  [W/kg], but computed from
+    # the LOCAL |c - U_proj| while the MOMENTUM tendency carries the constant
+    # LAUNCH sign s0 -- so this is a decoupled positive diagnostic, NOT a closed
+    # wave-energy budget (do not read it as the exact energy conjugate of du_dt).
     # non-negative BY CONSTRUCTION (drag >= 0 from the no-growth clamp,
-    # |intrinsic| >= 0).  At a critical level |intrinsic| -> 0: momentum still
-    # deposits but ~zero energy dissipates (it goes to the mean-flow KE), which
-    # is physically correct.  Independent of the (constant) sign s0 used for
-    # the momentum tendency, so heating and eps_gwd stay >= 0 even when s0
-    # differs from the local (c - U_proj).
+    # |intrinsic| >= 0).  At a critical level |intrinsic| -> 0 so this diagnostic
+    # -> 0 while momentum still deposits.  Independent of the (constant) sign s0
+    # used for the momentum tendency, so heating and eps_gwd stay >= 0 even when
+    # s0 differs from the local sign(c - U_proj).
     heating = constants.g * jnp.sum(
         drag_4d * jnp.abs(intrinsic), axis=(1, 2)
     )  # (ncol, nlev) [W/kg]
@@ -295,10 +376,18 @@ def prognostic_spectral_gwd(
 
     # Column dissipation [W/m^2] (>= 0 by construction, see heating above).
     # Deliberately the WAVE-DISSIPATION integral, not the mean-flow KE loss
-    # -sum(rho*(u*du_dt + v*dv_dt)*dz): with a prognostic two-sided spectrum
-    # waves faster than the wind legitimately accelerate the mean flow toward
-    # c, so the KE-loss form is NOT guaranteed positive — see the module
-    # docstring note (F-GWD-1 history).
+    # -sum(rho*(u*du_dt + v*dv_dt)*dz): with a prognostic two-sided spectrum a
+    # wave launched faster than the wind (s0 = sign(c - U_launch) > 0) deposits
+    # in the +c direction, which accelerates the mean flow (toward c while the
+    # local wind is still below c; the fixed launch sign keeps accelerating even
+    # past c aloft), so the KE-loss form is NOT guaranteed positive — see the
+    # module docstring note (F-GWD-1 history).
+    #
+    # NOTE: eps_gwd is computed from the PRE-GATE `heating`, so it is unchanged
+    # by config.thermal_tendency.  When thermal_tendency=False the applied dT_dt
+    # is zeroed but eps_gwd still reports the would-be wave-dissipation power, so
+    # eps_gwd then does NOT equal c_pd*sum(rho*dT_dt*dz) (it is the diagnosed
+    # dissipation, not the applied thermal deposition).
     eps_gwd = jnp.sum(rho * heating * dz, axis=1)
 
     # Prognostic spectrum update: relax toward launch source.  Pin the

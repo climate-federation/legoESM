@@ -7,10 +7,50 @@ and sedimentation.
 
 All operations use smooth (differentiable) approximations.
 
+Faithfulness
+------------
+This module's warm-rain rates are SIMPLIFIED smooth proxies, NOT the published
+SB2001 universal functions, and the class of departure of each process is:
+
+- Autoconversion (``autoconversion_sb``): ``k_au·q_c^2·sigmoid(x_c/x_*−1)·rho``
+  — DEPARTURE. The published form is ``PRC ∝ q_c^4·N_c^-2·(1+phi_au/(1−tau)^2)``
+  with the universal function ``phi_au(tau)=600·tau^0.68·(1−tau^0.68)^3``
+  (tau = rain-water fraction). The proxy has neither ``phi_au`` nor the q_c^4
+  scaling — it is a mean-mass-gated ``q_c^2`` law.
+- Accretion (``accretion``): ``k_ac·rho·q_c·q_r`` — DEPARTURE. The published
+  form multiplies by ``phi_ac(tau)=(tau/(tau+5e-4))^4`` and uses the fixed
+  5.78 kernel; the proxy is bilinear with no tau suppression.
+- Self-collection/breakup (``self_collection_breakup``): sigmoid-breakup proxy
+  — DEPARTURE from the SB2001 NRAGG ``2−exp(2300·(1/lambda−300µm))`` form.
+- Rain-number closure ``dN_r_au = au/x_*`` — FAITHFUL (SB2001 newborn-drop
+  separation mass).
+
+The PUBLISHED SB2001 universal functions ARE available in the model:
+``autoconversion_sb2001`` / ``accretion_sb2001`` in ``_warm_rain.py`` transcribe
+the gSAM IRAIN=1 MASS rates (PRC, PRA) plus the SB2001 rain-NUMBER closure
+(au/x_*), oracle-pinned by ``tests/unit/test_seifert_beheng_faithful.py`` and
+reachable through Morrison via
+``MorrisonConfig(warm_rain_scheme="seifert_beheng_sb2001")``;
+``self_collection_breakup_sb2001`` implements the SB2001 NRAGG functional form
+(before its explicit-Euler stability safeguards — a lambda clamp and an
+equilibrium non-overshoot step limiter, not the raw Fortran rate). Two
+faithfulness gaps remain, both documented and both moot at the shipped default
+``predict_Nc=False``: (1) the SB2001-SPECIFIC cloud-NUMBER autoconversion sink
+``2·PRC·rho/x_*`` is not represented (under ``predict_Nc=True`` Morrison applies
+a GENERIC ``-PRC·rho/x_c`` instead; no NPRA accretion sink for any path);
+(2) ``nu`` is a fixed shape, not gSAM's spatially-diagnosed pgam. Wiring a selectable faithful form into THIS
+standalone module (and validating it through the RCE-realism / AMIP gates before
+making it the default) is a documented follow-up — the default here stays the
+simplified proxy so shipped climate behaviour is unchanged.
+
 References
 ----------
-- Seifert, A., & Beheng, K. D. (2001). A two-moment cloud microphysics
-  parameterization for mixed-phase clouds. Meteorol. Atmos. Phys., 77, 127-151.
+- Seifert, A., & Beheng, K. D. (2001). A double-moment parameterization for
+  simulating autoconversion, accretion and selfcollection. Atmos. Res.,
+  59-60, 265-281.  [the warm-rain universal functions phi_au / phi_ac]
+- Seifert, A., & Beheng, K. D. (2006). A two-moment cloud microphysics
+  parameterization for mixed-phase clouds. Part 1: Model description.
+  Meteorol. Atmos. Phys., 92, 45-66.  [the two-moment framework]
 """
 
 from __future__ import annotations
@@ -44,10 +84,13 @@ _VT_CLIP_RAIN = 20.0
 
 __physics_contract__ = {
     "summary": (
-        "Seifert & Beheng (2001) two-moment warm-rain microphysics: prognostic "
-        "cloud + rain mass AND number, with saturation adjustment, "
-        "autoconversion, accretion, self-collection, breakup, rain evaporation "
-        "and size-sorted sedimentation to surface precipitation."
+        "SB-inspired two-moment warm-rain microphysics: prognostic cloud + rain "
+        "mass AND number, with saturation adjustment, autoconversion, accretion, "
+        "self-collection, breakup, rain evaporation and size-sorted sedimentation "
+        "to surface precipitation. The rate CLOSURES are SIMPLIFIED smooth proxies "
+        "(NOT the published SB2001 universal functions phi_au/phi_ac) — see the "
+        "module 'Faithfulness' docstring; the faithful forms are selectable via "
+        "Morrison's warm_rain_scheme='seifert_beheng_sb2001'."
     ),
     "inputs": {
         "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",

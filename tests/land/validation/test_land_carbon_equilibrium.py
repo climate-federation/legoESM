@@ -64,7 +64,10 @@ def _steady_annual(ny=6):
         alloc_resid=const(0.0),
         lai_sum=const(4.0 * 100), lai_max=const(4.0), nsteps=const(100.0),
         C_lab=const(500.0), C_fol=const(400.0), C_root=const(1500.0),
-        C_wood=const(18000.0), C_lit=const(800.0), C_som=const(11000.0),
+        C_wood=const(18000.0), C_lit=const(800.0),
+        # SOM resolved into active/slow/passive (A1: slow/passive inert == 0).
+        C_som_active=const(11000.0), C_som_slow=const(0.0),
+        C_som_passive=const(0.0),
     )
     return d
 
@@ -88,7 +91,7 @@ class TestPixelCatalog(unittest.TestCase):
             self.assertEqual(cfg.thermal.enable_freeze_thaw, ft)
             self.assertGreater(cfg.stomata.Vc_max25, 0.0)
             # Woody stands seed a biome-appropriate wood pool; herbaceous none.
-            if lce._is_woody(pft):
+            if lce.is_woody(pft):
                 self.assertGreater(cfg.carbon.C_wood_init, 0.0)
             else:
                 self.assertEqual(cfg.carbon.C_wood_init, 0.0)
@@ -154,6 +157,15 @@ class TestSmokeIntegration(unittest.TestCase):
         self.assertTrue(np.isfinite(rec["gpp"]) and rec["gpp"] >= 0.0)
         for v in final_carbon:
             self.assertTrue(np.all(np.isfinite(np.asarray(v))))
+        # A2: the three live SOM pools are all positive after the analytic
+        # forward-substitution reset + verify segment, and the total exceeds the
+        # active pool alone (the slow/passive pools carry real stock).
+        for p in ("C_som_active", "C_som_slow", "C_som_passive"):
+            self.assertTrue(np.all(np.asarray(getattr(final_carbon, p)) > 0.0), p)
+        from legoesm.land.carbon.config import som_total
+        self.assertGreater(
+            float(np.asarray(som_total(final_carbon)).reshape(-1)[0]),
+            float(np.asarray(final_carbon.C_som_active).reshape(-1)[0]))
 
 
 if __name__ == "__main__":

@@ -11,7 +11,11 @@ Also provides a local Zarr cache to avoid repeated GCS downloads.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import shutil
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -59,6 +63,19 @@ def resolve_var(ds, name):
     for cand in candidates:
         if cand in ds:
             return cand
+    # ERA5-style invariant stores often carry the SURFACE geopotential under
+    # the bare short name 'z' (the same ECMWF/GRIB code as the 3-D
+    # geopotential).  Treat 'z' as surface geopotential ONLY when the variable
+    # is 2-D — i.e. carries NO level dimension: a 'z' on a level axis is the
+    # 3-D geopotential, not phis.  Objects without per-variable dims metadata
+    # (e.g. plain sets in unit tests) safely fall through to None.
+    if name in ("geopotential_at_surface", "z_sfc") and "z" in ds:
+        try:
+            dims = ds["z"].dims
+        except (TypeError, KeyError, AttributeError):
+            return None
+        if not any(d in ("level", "pressure_level") for d in dims):
+            return "z"
     return None
 
 
@@ -244,60 +261,231 @@ class TrainingERA5Config(NamedTuple):
 # Local Zarr cache
 # ---------------------------------------------------------------------------
 
+_CACHE_STORE_NAME = "era5_training_cache.zarr"
+# The completeness marker is written LAST, INSIDE the store dir, so it exists
+# iff the ``to_zarr`` finished.  Read-side keys on THIS, never on ``.zarr``
+# existence: a walltime-killed build leaves the dir + fill-value (NaN) chunks
+# but no marker, which the old existence-only check silently read as complete
+# (#942/#985 — silent data corruption, not an error).
+_CACHE_MARKER_NAME = ".cache_complete.json"
+
+
+def _read_cache_marker(cache_path: Path) -> dict | None:
+    """Return the completeness-marker dict, or ``None`` when the cache is
+    absent / interrupted (no marker => it must be rebuilt)."""
+    marker = cache_path / _CACHE_MARKER_NAME
+    if not marker.is_file():
+        return None
+    try:
+        return json.loads(marker.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _cache_is_complete(
+    cache_path: Path,
+    expected_n_time: int | None,
+    expected_fingerprint: str | None = None,
+) -> bool:
+    """A cached store is trusted only if it carries the marker AND matches the
+    request: the snapshot count AND (for window-scoped caches) the fingerprint
+    of the exact selected timestamps + source-store + variable config.  The
+    fingerprint guard stops two DIFFERENT window sets with the same snapshot
+    count (e.g. distinct chunks in the same year span) from silently reusing
+    each other's store — a data-integrity failure, not just a stale read."""
+    marker = _read_cache_marker(cache_path)
+    if marker is None:
+        return False
+    if expected_n_time is not None and int(marker.get("n_time", -1)) != int(
+        expected_n_time
+    ):
+        logger.warning(
+            f"ERA5 cache {cache_path} holds n_time={marker.get('n_time')} but "
+            f"{expected_n_time} snapshots were requested; rebuilding."
+        )
+        return False
+    if expected_fingerprint is not None and str(
+        marker.get("fingerprint", "")
+    ) != str(expected_fingerprint):
+        logger.warning(
+            f"ERA5 cache {cache_path} fingerprint {marker.get('fingerprint')!r} "
+            f"!= requested {expected_fingerprint!r}; rebuilding (different "
+            f"window selection or variable set)."
+        )
+        return False
+    return True
+
+
+def wait_for_cache(
+    cache_dir: str | Path,
+    expected_n_time: int | None,
+    expected_fingerprint: str | None = None,
+    *,
+    timeout_s: float = 3600.0,
+    poll_s: float = 5.0,
+) -> Path:
+    """Block until the cache under ``cache_dir`` is complete, then return its path.
+
+    Filesystem-based coordination for the multi-rank case: rank 0 BUILDS the
+    window cache while the other ranks call this to WAIT for the completeness
+    marker to appear (the write is atomic, so the marker flips true exactly when
+    the store is ready).  Crucially this issues NO MPI collective, so it is safe
+    to call from the background prefetch thread while the main thread is running
+    gradient allreduces on ``COMM_WORLD`` — an MPI barrier there would interleave
+    with those allreduces and deadlock (codex #985).  Raises ``TimeoutError`` if
+    the builder never finishes (e.g. rank 0 died).
+    """
+    import time
+
+    cache_path = Path(cache_dir) / _CACHE_STORE_NAME
+    start = time.monotonic()
+    while not _cache_is_complete(cache_path, expected_n_time, expected_fingerprint):
+        if time.monotonic() - start > timeout_s:
+            raise TimeoutError(
+                f"ERA5 cache {cache_path} not complete after {timeout_s}s "
+                f"(the rank-0 builder may have failed)."
+            )
+        time.sleep(poll_s)
+    return cache_path
+
+
+def selection_fingerprint(
+    time_selection: Sequence[int], config: TrainingERA5Config
+) -> str:
+    """Short stable hash of the EXACT window selection + source-store + variable
+    config.  Used as the window-cache identity so two different selections (even
+    with the same snapshot count / year span) never collide on one store."""
+    import hashlib
+
+    src = repr(
+        (
+            tuple(int(i) for i in time_selection),
+            config.zarr_store,
+            tuple(config.pressure_variables),
+            tuple(config.surface_variables),
+            tuple(config.levels),
+        )
+    )
+    return hashlib.blake2b(src.encode(), digest_size=8).hexdigest()
+
+
 def ensure_local_cache(
     config: TrainingERA5Config,
     cache_dir: str | Path,
     years: tuple[int, int] = (2015, 2020),
+    *,
+    time_selection: Sequence[int] | None = None,
+    fingerprint: str | None = None,
 ) -> Path:
-    """Download a subset of ERA5 to a local Zarr store.
+    """Materialise a subset of ERA5 to a local Zarr store, atomically.
 
-    Caches the specified year range with all configured variables
-    and levels.  Subsequent calls skip download if the store exists.
+    Two scoping modes:
 
-    Parameters
-    ----------
-    config : TrainingERA5Config
-    cache_dir : Path
-        Directory for the local cache.
-    years : tuple
-        (start_year, end_year) to cache.
+    * ``time_selection=None`` (default): cache the FULL ``years`` span with all
+      configured variables/levels (the year-span behaviour).
+    * ``time_selection=[abs_idx, ...]``: WINDOW-scoped — cache only the given
+      absolute time indices of the remote store (the snapshots the training
+      windows actually touch, +lead spillover), preserving the real ``time``
+      coordinate so the reader can select them back by timestamp.  ~0.5 TB
+      instead of ~10 TB for the AIMIP T106 workload (#985).
 
-    Returns
-    -------
-    Path to the local Zarr store.
+    Correctness (#942/#985): the build is atomic (write to a ``.building`` tmp
+    dir, then ``os.replace`` into place) and gated by a completeness marker
+    written last, so an interrupted build is rebuilt — never read as
+    fill-value NaNs.  Subsequent calls with a matching, complete store skip the
+    download.
+
+    Returns the path to the local Zarr store.
     """
+    cache_path = Path(cache_dir) / _CACHE_STORE_NAME
+    expected_n_time = (
+        len(time_selection) if time_selection is not None else None
+    )
 
-    cache_path = Path(cache_dir) / "era5_training_cache.zarr"
-    if cache_path.exists():
+    if _cache_is_complete(cache_path, expected_n_time, fingerprint):
         logger.info(f"Using cached ERA5 at {cache_path}")
         return cache_path
 
-    logger.info(f"Downloading ERA5 {years[0]}-{years[1]} to {cache_path}...")
+    if time_selection is not None:
+        # Window-scoped: subset the remote store to exactly the requested
+        # absolute snapshots (keeping the real ``time`` coord + only the
+        # pressure/surface/static vars the reader consumes).
+        logger.info(
+            f"Downloading {len(time_selection)} window-scoped ERA5 snapshots "
+            f"to {cache_path}..."
+        )
+        ds_full = open_era5_zarr(config.zarr_store)
+        ds_sub = ds_full.isel(time=list(int(i) for i in time_selection))
+        keep: list[str] = []
+        for name in (
+            list(config.pressure_variables)
+            + list(config.surface_variables)
+            + ["geopotential_at_surface"]
+        ):
+            r = resolve_var(ds_sub, name)
+            if r is not None and r in ds_sub and r not in keep:
+                keep.append(r)
+        ds = ds_sub[keep]
+        # Keep only the CONFIGURED pressure levels: the reader selects these
+        # anyway, so caching every level of a 37-level source would inflate the
+        # window-cache footprint ~3x for no benefit (codex #985).
+        _ldim = next(
+            (d for d in ("level", "pressure_level") if d in ds.dims), None
+        )
+        if _ldim is not None:
+            _have = set(np.asarray(ds[_ldim].values).tolist())
+            _want = [lv for lv in config.levels if lv in _have]
+            if _want:
+                ds = ds.sel({_ldim: _want})
+    else:
+        logger.info(f"Downloading ERA5 {years[0]}-{years[1]} to {cache_path}...")
+        era5_cfg = ERA5Config(
+            zarr_store=config.zarr_store,
+            variables=config.pressure_variables,
+            levels=config.levels,
+            time_range=(f"{years[0]}-01-01", f"{years[1]}-12-31"),
+            dt_hours=config.dt_hours,
+        )
+        ds = create_era5_dataset(era5_cfg)
 
-    # Open remote
-    era5_cfg = ERA5Config(
-        zarr_store=config.zarr_store,
-        variables=config.pressure_variables,
-        levels=config.levels,
-        time_range=(f"{years[0]}-01-01", f"{years[1]}-12-31"),
-        dt_hours=config.dt_hours,
+        # Also grab surface variables
+        ds_full = open_era5_zarr(config.zarr_store)
+        ds_full = ds_full.sel(
+            time=slice(f"{years[0]}-01-01", f"{years[1]}-12-31")
+        )
+        for svar in config.surface_variables:
+            resolved = [v for v in [resolve_var(ds_full, svar)] if v]
+            for r in resolved:
+                if r in ds_full and r not in ds:
+                    ds[r] = ds_full[r]
+
+    # --- Atomic write: build to a tmp store, mark complete, then swap in. -----
+    # A kill mid-``to_zarr`` leaves only ``tmp_path`` (no marker at the final
+    # path), so the next call rebuilds instead of reading a torn store.
+    tmp_path = Path(cache_dir) / (_CACHE_STORE_NAME + ".building")
+    tmp_path.parent.mkdir(parents=True, exist_ok=True)
+    if tmp_path.exists():
+        shutil.rmtree(tmp_path)
+    ds.to_zarr(str(tmp_path), mode="w")
+    n_time = int(ds.sizes.get("time", 0))
+    # Marker LAST, inside the tmp store, so it is present iff the write finished.
+    (tmp_path / _CACHE_MARKER_NAME).write_text(
+        json.dumps(
+            {
+                "n_time": n_time,
+                "years": list(years),
+                "windowed": time_selection is not None,
+                "fingerprint": fingerprint,
+            }
+        )
     )
-    ds = create_era5_dataset(era5_cfg)
-
-    # Also grab surface variables
-    ds_full = open_era5_zarr(config.zarr_store)
-    ds_full = ds_full.sel(time=slice(f"{years[0]}-01-01", f"{years[1]}-12-31"))
-
-    for svar in config.surface_variables:
-        resolved = [v for v in [resolve_var(ds_full, svar)] if v]
-        for r in resolved:
-            if r in ds_full and r not in ds:
-                ds[r] = ds_full[r]
-
-    # Write to local Zarr
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    ds.to_zarr(str(cache_path), mode="w")
-    logger.info(f"Cached ERA5 to {cache_path}")
+    # Atomic swap: drop any stale (incomplete) final store, then rename.
+    # ponytail: rmtree+os.replace over a 2-phase commit — the tiny gap between
+    # them can only ever cost a rebuild (correct), never a silent-NaN read.
+    if cache_path.exists():
+        shutil.rmtree(cache_path)
+    os.replace(tmp_path, cache_path)
+    logger.info(f"Cached ERA5 to {cache_path} ({n_time} snapshots)")
     return cache_path
 
 
@@ -514,6 +702,26 @@ def load_era5_slice(
             "2m_temperature; sst zero-filled (0 K) — unusable as SST forcing")
         return np.zeros((len(lat), len(lon)), dtype=np.float32)
 
+    def _get_phis():
+        """Surface geopotential phis [m²/s²]; zero-fill is LAST resort + LOUD.
+
+        Resolves ``geopotential_at_surface`` / ``z_sfc`` / a 2-D ``z``
+        (``resolve_var``'s dimension-checked short alias).  A store lacking all
+        of them keeps the legacy zero-fill so idealized ICs still load, but
+        warns loudly (matching ``_get_sst``): real ERA5 surface pressure
+        (~600 hPa over Tibet) combined with phis=0 (flat topography) yields a
+        grossly NON-HYDROSTATIC initial condition that the dycore cannot
+        balance.
+        """
+        if _has("geopotential_at_surface"):
+            return _get_2d("geopotential_at_surface")
+        logger.warning(
+            "ERA5 store has no surface geopotential ('geopotential_at_surface'"
+            " / 'z_sfc' / 2-D 'z'); phis zero-filled (flat topography) — with"
+            " real ERA5 surface pressure (~600 hPa over Tibet) this produces a"
+            " grossly non-hydrostatic initial condition")
+        return np.zeros((len(lat), len(lon)), dtype=np.float32)
+
     # Optional radiation-flux targets (TOA + surface) for AIMIP flux
     # supervision.  Derive the four model-comparable fluxes:
     #   rsut       = top_downward_SW − top_net_SW   (reflected up, +up)
@@ -582,7 +790,7 @@ def load_era5_slice(
         q=_get_3d("specific_humidity"),
         p_s=_get_2d("surface_pressure", required=True),
         sst=_get_sst(),
-        phis=_get_2d("geopotential_at_surface"),  # optional; already in m²/s²
+        phis=_get_phis(),  # optional (loud-warned zero-fill); already in m²/s²
         lat=lat,
         lon=lon,
         plev_Pa=plev_Pa,
@@ -757,6 +965,7 @@ def era5_to_spectral_carry(
     sigma,
     microphysics: str = "none",
     turbulence: str = "none",
+    smoothing_passes: int = 4,
 ):
     """Convert ERA5 slice to SegmentCarry on a spectral (Gaussian) grid.
 
@@ -788,11 +997,30 @@ def era5_to_spectral_carry(
         era5, grid,
     )
 
+    # Smooth the regridded ERA5 orography + hydrostatically reconcile p_s —
+    # the SAME treatment the cube / lat-lon / MPAS carries already apply
+    # (mirrors era5_to_latlon_carry; the spectral Gaussian grid IS a lat-lon
+    # grid in grid space, so smooth_phis_gaussian applies directly).  Raw
+    # regridded ERA5 phis (peaks ~5.6e4 m^2/s^2) with an unreconciled p_s
+    # drives an unbalanced pressure-gradient force at step ~0; the barometric
+    # correction + hybrid p_s floor live in the SHARED
+    # _apply_phis_hydrostatic_adjustment (not re-implemented here).
+    from legoesm.grids.topography import smooth_phis_gaussian
+    phis_ll_raw = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
+    phis_ll_smooth = smooth_phis_gaussian(
+        phis_ll_raw, smoothing_passes=smoothing_passes)
+    # T_sfc proxy = ERA5 T at the highest pressure level (plev_Pa ascending →
+    # last index = nearest to surface), matching the lat-lon carry.
+    _T_sfc_ll = jnp.asarray(T_ll)[..., -1]
+    phis_jax, p_s_jax = _apply_phis_hydrostatic_adjustment(
+        jnp.asarray(phis_ll_raw), jnp.asarray(phis_ll_smooth),
+        jnp.asarray(p_s_ll), _T_sfc_ll, sigma, _is_hybrid,
+    )
+
     # Vertical interpolation: pressure levels → model levels.
     # Use TRUE hybrid pressure p(k) = A(k)*p_ref + B(k)*p_s to avoid
     # the sigma approximation error over steep terrain (see cubed-sphere
-    # path comment for details).
-    p_s_jax = jnp.asarray(p_s_ll)
+    # path comment for details).  Uses the RECONCILED p_s from above.
     plev = jnp.asarray(era5.plev_Pa)
     sigma_f = jnp.asarray(sigma_full)
     # Model TRUE full-level pressures (hybrid-correct; iter 339): interp the
@@ -813,11 +1041,7 @@ def era5_to_spectral_carry(
         interp_pressure_to_sigma(jnp.asarray(q_ll), plev, p_s_jax, sigma_f, p_full=p_full)
     )
 
-    # Surface geopotential (regrid to Gaussian)
-    phis_ll = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
-    phis_jax = jnp.asarray(phis_ll)
-
-    # Build HydrostaticState
+    # Build HydrostaticState (phis_jax / p_s_jax already smoothed + reconciled)
     dims_3d = ("lat", "lon", "level")
     dims_2d = ("lat", "lon")
 
@@ -860,6 +1084,8 @@ def era5_to_cubedsphere_carry(
     target_phis=None,
     microphysics: str = "none",
     turbulence: str = "none",
+    smoothing_passes: int = 4,
+    edge_blend_strength: float = 0.3,
 ):
     """Convert ERA5 slice to SegmentCarry on a cubed-sphere grid.
 
@@ -936,8 +1162,12 @@ def era5_to_cubedsphere_carry(
     # to O(dx^-1) magnitude.  With raw ERA5 phis differences of ~50 kJ/kg,
     # this creates spurious ~0.4 m/s² PGF that drives blowup in ~1–5 days
     # even from rest.
+    # edge_blend_width now defaults to TopographyConfig's 2 (was silently 1);
+    # driver wires smoothing_passes/edge_blend_strength from cfg.topo_*.
     from legoesm.grids.topography import smooth_phis_cubed_sphere
-    phis_cs_smooth = smooth_phis_cubed_sphere(phis_cs_raw)
+    phis_cs_smooth = smooth_phis_cubed_sphere(
+        phis_cs_raw, smoothing_passes=smoothing_passes,
+        edge_blend_strength=edge_blend_strength)
 
     # Hydrostatically reconcile p_s with the smoothed phis (barometric p_s
     # correction + hybrid p_s floor).  Shared with the lat-lon carry via
@@ -1059,6 +1289,7 @@ def era5_to_latlon_carry(
     sigma,
     microphysics: str = "none",
     turbulence: str = "none",
+    smoothing_passes: int = 4,
 ):
     """Convert ERA5 slice to a SegmentCarry on the lat-lon C-grid.
 
@@ -1106,7 +1337,8 @@ def era5_to_latlon_carry(
     from legoesm.grids.vertical import HybridSigmaPressureCoordinate
     _is_hybrid = isinstance(sigma, HybridSigmaPressureCoordinate)
     phis_ll_raw = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
-    phis_ll_smooth = smooth_phis_gaussian(phis_ll_raw)
+    phis_ll_smooth = smooth_phis_gaussian(
+        phis_ll_raw, smoothing_passes=smoothing_passes)
 
     # Hydrostatically reconcile p_s with the smoothed phis (+ hybrid p_s floor).
     # T_sfc proxy = ERA5 T at 1000 hPa (plev_Pa ascending → last index = surface).

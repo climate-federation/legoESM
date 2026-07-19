@@ -755,29 +755,3 @@ def batch_psum_spmd(
         offset += size
 
     return results
-
-
-def broadcast_mpi(value: jax.Array, root: int = 0) -> jax.Array:
-    """Broadcast an array from one rank to all others.
-
-    **Not differentiable**: ``mpi4jax.bcast`` has no JVP or VJP rules.
-    Use only for initialization and I/O — never inside ``jax.grad``.
-
-    Parameters
-    ----------
-    value : jax.Array
-        Array to broadcast (only meaningful on ``root``).
-    root : int
-        Rank that broadcasts.
-
-    Returns
-    -------
-    jax.Array
-        The broadcast value on all ranks.
-    """
-    mpi4jax, MPI = require_mpi_stack()
-
-    result = mpi4jax_array_result(
-        mpi4jax.bcast(value, root=root, comm=MPI.COMM_WORLD),
-    )
-    return result

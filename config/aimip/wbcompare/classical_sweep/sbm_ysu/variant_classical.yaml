@@ -1,0 +1,11 @@
+# Per-combo CLASSICAL overlay -- combo: sbm_ysu.
+# Merged LAST (base <- cfg_overrides <- THIS) so these schemes WIN. Resolved by
+# run_aimip / the WB2 eval bridge from the suite's parent dir. See ../README.md.
+aimip_variant: "classical"
+aimip_convection: "sbm"
+aimip_turbulence: "ysu"
+aimip_gwd: "hines"
+aimip_microphysics: "morrison"
+aimip_cloud: "sundqvist"
+aimip_radiation: "rrtmgp"
+physics_parameterization: "none"

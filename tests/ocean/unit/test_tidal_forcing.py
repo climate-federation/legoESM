@@ -306,9 +306,59 @@ def test_apply_enabled_adds_the_acceleration():
     cfg = TidalForcingConfig(enabled=True)
     du_on, dv_on = apply_tidal_forcing(du, dv, grid, 1234.0, cfg)
     a_x, a_y = tidal_acceleration(grid, 1234.0, cfg)
-    np.testing.assert_allclose(np.asarray(du_on), np.asarray(du + a_x), rtol=1e-12)
-    np.testing.assert_allclose(np.asarray(dv_on), np.asarray(dv + a_y), rtol=1e-12)
+    # The wrapper casts the tide to the tendency dtype BEFORE adding, so it must
+    # be compared against the same cast. This is not a test nicety: production
+    # passes float32 F_slow_u/v accumulators, and the cast is what stops a
+    # float64 tide from promoting them and breaking the barotropic fori_loop
+    # carry-type invariant. Comparing against the un-cast `du + a_x` would pin
+    # the pre-cast behaviour this change deliberately removed.
+    np.testing.assert_allclose(
+        np.asarray(du_on), np.asarray(du + a_x.astype(du.dtype)), rtol=1e-12)
+    np.testing.assert_allclose(
+        np.asarray(dv_on), np.asarray(dv + a_y.astype(dv.dtype)), rtol=1e-12)
+    assert du_on.dtype == du.dtype and dv_on.dtype == dv.dtype
     assert not np.array_equal(np.asarray(du_on), np.asarray(du))
+
+
+def test_apply_preserves_tendency_dtype_carry_invariant():
+    """The load-bearing reason the wrapper exists: it must NOT promote the
+    tendency dtype. tidal_acceleration can return float64 under x64, and the
+    barotropic substep carries float32 F_slow_u/v through a fori_loop whose
+    carry type must not change. Feeding a float32 accumulator must return
+    float32 -- the exact guarantee the inline call sites hand-rolled and that
+    anyone using the wrapper per its docstring now inherits.
+    """
+    grid = create_latlon_grid(16, 32)
+    f_slow_u = jnp.ones((16, 33), dtype=jnp.float32)
+    f_slow_v = jnp.full((17, 32), -2.0, dtype=jnp.float32)
+    cfg = TidalForcingConfig(enabled=True)
+    out_u, out_v = apply_tidal_forcing(f_slow_u, f_slow_v, grid, 1234.0, cfg)
+    assert out_u.dtype == jnp.float32 and out_v.dtype == jnp.float32
+    assert not np.array_equal(np.asarray(out_u), np.asarray(f_slow_u))
+
+
+def test_apply_no_time_is_byte_identical_noop():
+    """t_seconds=None cannot evaluate an equilibrium tide; the wrapper returns
+    the inputs unchanged rather than silently substituting a frozen t=0 tide.
+    This matches the inline call sites' `and t_seconds is not None` guard.
+    """
+    grid = create_latlon_grid(16, 32)
+    du = jnp.ones((16, 33))
+    dv = jnp.full((17, 32), -2.0)
+    du_off, dv_off = apply_tidal_forcing(
+        du, dv, grid, None, TidalForcingConfig(enabled=True))
+    assert du_off is du and dv_off is dv
+
+
+def test_apply_none_config_is_byte_identical_noop():
+    """config=None (no tidal_forcing on the model config) is a no-op -- the
+    call sites pass getattr(config, 'tidal_forcing', None), which is None on
+    any ocean config without the field."""
+    grid = create_latlon_grid(16, 32)
+    du = jnp.ones((16, 33))
+    dv = jnp.full((17, 32), -2.0)
+    du_off, dv_off = apply_tidal_forcing(du, dv, grid, 1234.0, None)
+    assert du_off is du and dv_off is dv
 
 
 # ---------------------------------------------------------------------------

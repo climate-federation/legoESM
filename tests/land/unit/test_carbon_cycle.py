@@ -14,16 +14,19 @@ Covers:
 
 from __future__ import annotations
 
+import math
 import unittest
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import numpy.testing as npt
 
 from legoesm.land.carbon.config import (
     CarbonConfig,
     CarbonDiagnostics,
     CarbonState,
+    som_total,
 )
 from legoesm.land.carbon.carbon_cycle import (
     compute_gpp,
@@ -34,9 +37,17 @@ from legoesm.land.carbon.carbon_cycle import (
     step_carbon_differland,
     _GC_TO_KG_CO2,
     _SPD,
+    _DAYS_PER_YEAR,
     _temperate_modifier,
+    _freeze_modifier,
+    _som_decomp_modifier,
     _effective_rate,
+    _nsc_respiration_factor,
+    _cold_deciduous_dormancy_factor,
+    annual_frozen_fraction,
+    perennial_frost_protection,
 )
+from legoesm import constants
 
 
 # ===================================================================
@@ -48,13 +59,18 @@ def _default_config(**overrides):
 
 
 def _make_carbon_state(shape=(4,), **overrides):
+    # A2: the three SOM pools are live; seed them with a realistic CENTURY-like
+    # partition of a 10000 gC/m2 bulk stock (active small, passive dominant) so
+    # the cascade is exercised.  som_total == 10000 either way.
     defaults = dict(
         C_lab=jnp.full(shape, 100.0),
         C_fol=jnp.full(shape, 200.0),
         C_root=jnp.full(shape, 300.0),
         C_wood=jnp.full(shape, 10000.0),
         C_lit=jnp.full(shape, 100.0),
-        C_som=jnp.full(shape, 10000.0),
+        C_som_active=jnp.full(shape, 300.0),
+        C_som_slow=jnp.full(shape, 3200.0),
+        C_som_passive=jnp.full(shape, 6500.0),
     )
     defaults.update(overrides)
     return CarbonState(**defaults)
@@ -84,8 +100,16 @@ class TestCarbonConfig(unittest.TestCase):
 
     def test_carbon_state_fields(self):
         state = _make_carbon_state()
-        self.assertEqual(len(state), 6)
+        # 8 pools since the SOM split (C_som -> active/slow/passive).
+        self.assertEqual(len(state), 8)
+        self.assertEqual(
+            state._fields[-3:],
+            ("C_som_active", "C_som_slow", "C_som_passive"))
         self.assertEqual(state.C_lab.shape, (4,))
+        # A2: all three SOM pools are live (non-zero) and sum to the bulk stock.
+        self.assertTrue(jnp.all(state.C_som_slow > 0.0))
+        self.assertTrue(jnp.all(state.C_som_passive > 0.0))
+        npt.assert_allclose(som_total(state), 10000.0, rtol=1e-9)
 
 
 # ===================================================================
@@ -215,6 +239,41 @@ class TestPhenology(unittest.TestCase):
         self.assertTrue(jnp.all(jnp.isfinite(lrf)))
         self.assertTrue(jnp.all(jnp.isfinite(lff)))
 
+    def test_evergreen_phenology_is_continuous(self):
+        """Evergreen leaf-fall is a steady, near-constant per-day rate all year
+        (no Gaussian dormant-season drop to ~0), unlike the deciduous pulse; its
+        seasonal amplitude is far smaller than the deciduous branch's."""
+        lat = jnp.array([0.7])  # NH mid-latitude
+        doys = jnp.arange(0, 365, 5.0)
+        ever = _default_config(evergreen=True)
+        deci = _default_config(evergreen=False)
+        lff_ever = jnp.array([compute_phenology(d, lat, ever)[1][0] for d in doys])
+        lff_deci = jnp.array([compute_phenology(d, lat, deci)[1][0] for d in doys])
+        # Evergreen sheds every day (canopy never fully stops) and is flat in doy.
+        self.assertTrue(jnp.all(lff_ever > 0.0), "evergreen leaf-fall hit zero")
+        amp_ever = float(lff_ever.max() - lff_ever.min())
+        amp_deci = float(lff_deci.max() - lff_deci.min())
+        self.assertLess(amp_ever, 1e-9, "evergreen leaf-fall not flat in doy")
+        # Far smaller seasonal amplitude than the deciduous Gaussian pulse.
+        self.assertGreater(amp_deci, 1e-3)          # deciduous pulse is real
+        self.assertLess(amp_ever, 0.01 * amp_deci)  # evergreen << deciduous
+        # The steady rate is 1 / (leaf_lifespan * year): continuous turnover.
+        expected = 1.0 / (ever.leaf_lifespan * _DAYS_PER_YEAR)
+        npt.assert_allclose(lff_ever, expected, rtol=1e-6)
+        # Deciduous dormant season drops BELOW the evergreen steady rate.
+        self.assertLess(float(lff_deci.min()), float(lff_ever.min()))
+
+    def test_evergreen_labile_release_is_steady(self):
+        """Evergreen labile release is also continuous (feeds the steady
+        regrowth) at 1 / (lab_lifespan * year)."""
+        lat = jnp.array([0.7])
+        doys = jnp.arange(0, 365, 5.0)
+        ever = _default_config(evergreen=True)
+        lrf_ever = jnp.array([compute_phenology(d, lat, ever)[0][0] for d in doys])
+        self.assertTrue(jnp.all(lrf_ever > 0.0))
+        expected = 1.0 / (ever.lab_lifespan * _DAYS_PER_YEAR)
+        npt.assert_allclose(lrf_ever, expected, rtol=1e-6)
+
 
 # ===================================================================
 # Decomposition
@@ -259,6 +318,821 @@ class TestDecomposition(unittest.TestCase):
 
 
 # ===================================================================
+# Freeze suppression modifier (the high-latitude SOC control)
+# ===================================================================
+
+class TestFreezeModifier(unittest.TestCase):
+
+    def test_freeze_bounds_and_limits(self):
+        """f_freeze in [som_freeze_floor, 1]; ->1 warm, -> floor deep-frozen,
+        == floor + (1-floor)/2 at T_freeze (the floored-sigmoid midpoint)."""
+        cfg = _default_config()
+        floor = cfg.som_freeze_floor
+        self.assertGreater(floor, 0.0)  # default floor is nonzero (the fix)
+        T = jnp.linspace(240.0, 320.0, 60)
+        ff = _freeze_modifier(T, cfg)
+        self.assertTrue(jnp.all(ff >= floor - 1e-9))
+        self.assertTrue(jnp.all(ff <= 1.0))
+        self.assertGreater(float(_freeze_modifier(jnp.array([300.0]), cfg)[0]), 0.99)
+        # Deep-frozen soil floors at ``som_freeze_floor`` (nonzero), NOT 0.
+        npt.assert_allclose(
+            _freeze_modifier(jnp.array([245.0]), cfg), floor, atol=1e-3)
+        npt.assert_allclose(
+            _freeze_modifier(jnp.array([constants.T_freeze]), cfg),
+            floor + (1.0 - floor) * 0.5, atol=1e-6)
+
+    def test_freeze_floor_recovers_unfloored_sigmoid(self):
+        """som_freeze_floor=0 reduces to the plain sigmoid (backward-compatible),
+        and floor <= floored <= 1 while floored >= the un-floored value."""
+        T = jnp.linspace(250.0, 300.0, 40)
+        ff0 = _freeze_modifier(T, _default_config(som_freeze_floor=0.0))
+        ff = _freeze_modifier(T, _default_config(som_freeze_floor=0.05))
+        npt.assert_allclose(ff0, jax.nn.sigmoid(
+            (T - constants.T_freeze) / _default_config().som_freeze_width_K),
+            atol=1e-12)
+        # The floor raises decomposition everywhere (f_freeze larger => faster
+        # turnover => less runaway) but never above 1.
+        self.assertTrue(jnp.all(ff >= ff0 - 1e-12))
+        self.assertTrue(jnp.all(ff <= 1.0 + 1e-12))
+
+    def test_freeze_floor_out_of_range_required(self):
+        with self.assertRaises(ValueError):
+            _freeze_modifier(jnp.array([275.0]),
+                             _default_config(som_freeze_floor=1.0))
+        with self.assertRaises(ValueError):
+            _freeze_modifier(jnp.array([275.0]),
+                             _default_config(som_freeze_floor=-0.1))
+
+    def test_freeze_monotonic_increasing(self):
+        cfg = _default_config()
+        ff = _freeze_modifier(jnp.linspace(250.0, 300.0, 50), cfg)
+        self.assertTrue(jnp.all(jnp.diff(ff) > 0.0))
+
+    def test_freeze_width_positive_required(self):
+        with self.assertRaises(ValueError):
+            _freeze_modifier(jnp.array([275.0]),
+                             _default_config(som_freeze_width_K=0.0))
+
+    def test_som_modifier_suppressed_relative_to_temperate(self):
+        """m_som == f_temp*f_moist*f_freeze <= the freeze-free _temperate_modifier,
+        strictly smaller when cold, ~equal when warm."""
+        cfg = _default_config()
+        precip = jnp.array([cfg.precip_ref])
+        for T in (jnp.array([263.0]), jnp.array([290.0]), jnp.array([305.0])):
+            m_som = _som_decomp_modifier(T, precip, cfg)
+            m_temp = _temperate_modifier(T, precip, cfg)
+            self.assertTrue(jnp.all(m_som <= m_temp + 1e-12))
+        Tc = jnp.array([263.0])
+        self.assertLess(
+            float(_som_decomp_modifier(Tc, precip, cfg)[0]),
+            0.5 * float(_temperate_modifier(Tc, precip, cfg)[0]))
+        Tw = jnp.array([300.0])
+        npt.assert_allclose(_som_decomp_modifier(Tw, precip, cfg),
+                            _temperate_modifier(Tw, precip, cfg), rtol=1e-3)
+
+    def test_som_modifier_differentiable(self):
+        cfg = _default_config()
+
+        def loss(T):
+            return jnp.sum(_som_decomp_modifier(T, jnp.array([3e-5]), cfg))
+
+        g = jax.grad(loss)(jnp.array([274.0]))
+        self.assertTrue(jnp.all(jnp.isfinite(g)))
+        self.assertFalse(jnp.allclose(g, 0.0))
+
+
+class TestPerennialFrostProtection(unittest.TestCase):
+    """Permafrost / anaerobic SOM protection: f_perma(frozen_fraction) and the
+    annual frozen-fraction index (Koven et al. 2013; Hugelius et al. 2014)."""
+
+    def test_f_perma_bounds_and_direction(self):
+        """f_perma in [permafrost_protection_min, 1]; ->1 for never-frozen
+        (frozen_fraction=0), -> permafrost_protection_min for perennial frost
+        (frozen_fraction=1); monotonically DECREASING in frozen_fraction (more
+        frost -> less decomposition -> more retained SOC)."""
+        cfg = _default_config()
+        p_min = cfg.permafrost_protection_min
+        phi = jnp.linspace(0.0, 1.0, 60)
+        fp = perennial_frost_protection(phi, cfg)
+        self.assertTrue(jnp.all(fp >= p_min - 1e-9))
+        self.assertTrue(jnp.all(fp <= 1.0 + 1e-9))
+        # Never-frozen -> ~1 (temperate/tropical UNCHANGED); the threshold sits
+        # well above 0 so the warm tail is untouched.
+        self.assertGreater(
+            float(perennial_frost_protection(jnp.array([0.0]), cfg)[0]), 0.999)
+        # Perennial frost -> approaches the protection floor.
+        npt.assert_allclose(
+            float(perennial_frost_protection(jnp.array([1.0]), cfg)[0]),
+            p_min, atol=5e-3)
+        # Monotonically decreasing (MORE frost -> SMALLER f_perma).
+        self.assertTrue(jnp.all(jnp.diff(fp) < 0.0))
+
+    def test_f_perma_validation_raises(self):
+        with self.assertRaises(ValueError):
+            perennial_frost_protection(
+                jnp.array([0.5]),
+                _default_config(permafrost_protection_min=0.0))  # must be >0
+        with self.assertRaises(ValueError):
+            perennial_frost_protection(
+                jnp.array([0.5]),
+                _default_config(permafrost_protection_min=1.5))  # <=1
+        with self.assertRaises(ValueError):
+            perennial_frost_protection(
+                jnp.array([0.5]),
+                _default_config(permafrost_frozen_fraction_threshold=1.0))
+        with self.assertRaises(ValueError):
+            perennial_frost_protection(
+                jnp.array([0.5]),
+                _default_config(permafrost_frozen_fraction_width=0.0))
+
+    def test_f_perma_differentiable_in_perma_params(self):
+        """grad of f_perma w.r.t. the two tunable perennial-frost params is
+        finite and non-zero (calibration lever)."""
+        phi = jnp.array([0.6])
+
+        def loss(vec):
+            cfg = _default_config(
+                permafrost_protection_min=vec[0],
+                permafrost_frozen_fraction_threshold=vec[1])
+            return jnp.sum(perennial_frost_protection(phi, cfg))
+
+        g = jax.grad(loss)(jnp.array([0.3, 0.6]))
+        self.assertTrue(jnp.all(jnp.isfinite(g)))
+        self.assertTrue(jnp.all(jnp.abs(g) > 0.0))
+
+    def test_annual_frozen_fraction_warm_cold(self):
+        """phi in [0,1]; ~0 for a warm never-frozen climate, high for a cold
+        climate, and monotonically DECREASING in mean-annual temperature."""
+        cfg = _default_config()
+        warm = float(annual_frozen_fraction(
+            jnp.array(298.0), jnp.array(5.0), cfg))
+        cold = float(annual_frozen_fraction(
+            jnp.array(260.0), jnp.array(15.0), cfg))
+        self.assertLess(warm, 0.02)      # tropical/warm-temperate: ~never frozen
+        self.assertGreater(cold, 0.7)    # boreal/tundra: frozen most of the year
+        # Monotone decreasing in MAT at fixed amplitude.
+        mats = jnp.linspace(255.0, 295.0, 40)
+        phi = annual_frozen_fraction(mats, jnp.full_like(mats, 12.0), cfg)
+        self.assertTrue(jnp.all(phi >= 0.0))
+        self.assertTrue(jnp.all(phi <= 1.0))
+        self.assertTrue(jnp.all(jnp.diff(phi) <= 1e-9))
+        # A freezing-mean climate is roughly half frozen.
+        half = float(annual_frozen_fraction(
+            jnp.array(constants.T_freeze), jnp.array(10.0), cfg))
+        npt.assert_allclose(half, 0.5, atol=0.05)
+
+    def test_som_modifier_frozen_fraction_suppresses(self):
+        """Passing a high frozen_fraction scales the SOM modifier down by
+        f_perma; frozen_fraction=None is byte-identical to the unprotected
+        modifier; frozen_fraction=0 is ~unchanged (warm-soil regression)."""
+        cfg = _default_config()
+        T = jnp.array([268.0])           # cold column
+        precip = jnp.array([cfg.precip_ref])
+        m_none = _som_decomp_modifier(T, precip, cfg)
+        m_zero = _som_decomp_modifier(T, precip, cfg, frozen_fraction=jnp.array([0.0]))
+        m_frozen = _som_decomp_modifier(T, precip, cfg, frozen_fraction=jnp.array([0.8]))
+        # None == unprotected (exactly).
+        npt.assert_allclose(np.asarray(m_none), np.asarray(m_zero), rtol=2e-3)
+        # High frozen fraction suppresses decomposition (< unprotected).
+        self.assertLess(float(m_frozen[0]), float(m_none[0]))
+        expect = float(m_none[0]) * float(
+            perennial_frost_protection(jnp.array([0.8]), cfg)[0])
+        npt.assert_allclose(float(m_frozen[0]), expect, rtol=1e-6)
+
+    def test_step_perennial_frost_retains_som_cold_and_warm_unchanged(self):
+        """IDEALIZED column: a perennially-frozen cold column RETAINS more SOM
+        (less decomposed, LOWER heterotrophic SOM respiration) WITH the
+        protection than without -- carbon RETAINED, not created (the extra pool
+        carbon exactly equals the un-respired flux; mass closes).  A warm column
+        (frozen_fraction=0) is UNCHANGED."""
+        cfg = _default_config(scheme="differland")
+        st = _make_carbon_state(shape=(1,))
+        common = dict(
+            sw_down=jnp.array([200.0]), co2_ppmv=jnp.array([400.0]),
+            beta=jnp.array([0.6]), lat=jnp.array([1.0]), doy=15.0,
+            precip=jnp.array([2e-5]), config=cfg, dt=7200.0)
+
+        # --- cold column: with vs without perennial-frost protection ----------
+        T_cold = jnp.array([266.0])
+        _s_prot, _f_prot, d_prot = step_carbon_differland(
+            st, T=T_cold, return_diagnostics=True,
+            soil_frozen_fraction=jnp.array([0.8]), **common)
+        s_prot, f_prot = step_carbon_differland(
+            st, T=T_cold, soil_frozen_fraction=jnp.array([0.8]), **common)
+        _s_un, _f_un, d_un = step_carbon_differland(
+            st, T=T_cold, return_diagnostics=True, **common)
+        s_un, f_un = step_carbon_differland(st, T=T_cold, **common)
+        som_prot = float((s_prot.C_som_active + s_prot.C_som_slow
+                          + s_prot.C_som_passive)[0])
+        som_un = float((s_un.C_som_active + s_un.C_som_slow
+                        + s_un.C_som_passive)[0])
+        # Protection RETAINS SOM (higher pool) and LOWERS SOM respiration.
+        self.assertGreater(som_prot, som_un)
+        self.assertLess(float(d_prot.r_het_som[0]), float(d_un.r_het_som[0]))
+        # Carbon RETAINED, not created: the extra SOM carbon == the reduction in
+        # SOM heterotrophic respiration over the step (mass closes to ~machine
+        # precision; the SOM input is identical between the two runs).
+        dt_days = 7200.0 / 86400.0
+        retained = som_prot - som_un
+        un_respired = (float(d_un.r_het_som[0])
+                       - float(d_prot.r_het_som[0])) * dt_days
+        npt.assert_allclose(retained, un_respired, rtol=1e-6, atol=1e-9)
+        # ... and the reduced respiration shows up as a LOWER (less-positive) NEE.
+        self.assertLess(float(f_prot[0]), float(f_un[0]))
+
+        # --- warm column: frozen_fraction=0 leaves the step UNCHANGED ----------
+        T_warm = jnp.array([300.0])
+        sw0, fw0 = step_carbon_differland(st, T=T_warm, **common)
+        sw1, fw1 = step_carbon_differland(
+            st, T=T_warm, soil_frozen_fraction=jnp.array([0.0]), **common)
+        # co2_flux is O(1e-8) kgCO2/m2/s and may straddle zero, so use atol.
+        npt.assert_allclose(float(fw0[0]), float(fw1[0]), rtol=1e-3, atol=1e-11)
+        npt.assert_allclose(
+            float((sw0.C_som_active + sw0.C_som_slow + sw0.C_som_passive)[0]),
+            float((sw1.C_som_active + sw1.C_som_slow + sw1.C_som_passive)[0]),
+            rtol=1e-4)
+
+
+# ===================================================================
+# Multi-pool SOM cascade (active -> slow -> passive)
+# ===================================================================
+
+class TestSomCascade(unittest.TestCase):
+
+    def _cascade_step(self, dt=86400.0, T=290.0, sw=0.0, **state_over):
+        cfg = _default_config(scheme="differland")
+        state = _make_carbon_state(shape=(1,), **state_over)
+        new_state, co2_flux, diag = step_carbon_differland(
+            state, jnp.full(1, sw), jnp.full(1, T), jnp.full(1, 400.0),
+            jnp.full(1, 0.8), jnp.full(1, 0.7), 180.0, jnp.full(1, 3e-5),
+            cfg, dt, return_diagnostics=True)
+        return cfg, state, new_state, co2_flux, diag
+
+    def test_losses_nonneg_and_bounded_by_stock(self):
+        """Each pool's decomposition D_X is >= 0 and never exceeds its stock
+        (the _effective_rate loss fraction is <= 1), so no pool goes negative."""
+        cfg, state, new, _flux, diag = self._cascade_step()
+        dt_days = 86400.0 / _SPD
+        for pool, loss in (("C_som_active", diag.som_active_loss),
+                           ("C_som_slow", diag.som_slow_loss),
+                           ("C_som_passive", diag.som_passive_loss)):
+            self.assertTrue(jnp.all(loss >= 0.0), f"{pool} loss < 0")
+            self.assertTrue(
+                jnp.all(loss * dt_days <= getattr(state, pool) + 1e-9),
+                f"{pool} over-drained")
+        for f in new._fields:
+            self.assertTrue(jnp.all(getattr(new, f) >= 0.0), f"{f} negative")
+
+    def test_transfers_flow_downward(self):
+        """With a big active + tiny slow/passive, the humified transfer grows
+        the slow AND passive pools (active->slow->passive direction)."""
+        _c, st, new, _f, _d = self._cascade_step(
+            C_som_active=jnp.full((1,), 10000.0),
+            C_som_slow=jnp.full((1,), 1.0),
+            C_som_passive=jnp.full((1,), 1.0))
+        self.assertGreater(float(new.C_som_slow[0]), float(st.C_som_slow[0]))
+        self.assertGreater(float(new.C_som_passive[0]), float(st.C_som_passive[0]))
+
+    def test_respiration_accounting(self):
+        """r_het_som == (1-f_as)*D_active + (1-f_sp)*D_slow + D_passive >= 0."""
+        cfg, _st, _new, _flux, diag = self._cascade_step()
+        expected = ((1.0 - cfg.f_active_to_slow) * diag.som_active_loss
+                    + (1.0 - cfg.f_slow_to_passive) * diag.som_slow_loss
+                    + diag.som_passive_loss)
+        npt.assert_allclose(diag.r_het_som, expected, rtol=1e-9, atol=1e-12)
+        self.assertTrue(jnp.all(diag.r_het_som >= 0.0))
+
+    def test_som_subcolumn_conserves(self):
+        """SOM sub-budget: humified input - sum(dC_som)/dt - R_het_som == 0
+        (every gram of input stays in a SOM pool or respires)."""
+        cfg, state, new, _flux, diag = self._cascade_step()
+        dt_days = 86400.0 / _SPD
+        dC_som = ((new.C_som_active - state.C_som_active)
+                  + (new.C_som_slow - state.C_som_slow)
+                  + (new.C_som_passive - state.C_som_passive))
+        som_input = diag.lit_to_som + diag.wood_to_som
+        residual = som_input - dC_som / dt_days - diag.r_het_som
+        npt.assert_allclose(residual, 0.0, atol=1e-9)
+
+    def test_full_column_conservation_all_pools_live(self):
+        """Full 8-pool closure sum(dC) == -NEE*dt at machine precision with all
+        three SOM pools live and evolving (day and night)."""
+        for sw in (0.0, 400.0):
+            cfg, state, new, flux, _d = self._cascade_step(sw=sw)
+            dC = sum(getattr(new, f) - getattr(state, f) for f in state._fields)
+            expected = -(flux / _GC_TO_KG_CO2) * 86400.0
+            npt.assert_allclose(dC, expected, rtol=1e-9, atol=1e-9,
+                                err_msg=f"multipool column not closed (sw={sw})")
+
+    def test_evergreen_column_conserves(self):
+        """The EVERGREEN phenology branch conserves carbon exactly: it only
+        changes the (lrf, lff) turnover rates, and the pool update routes
+        lab_release C_lab->C_fol and leaf_litter C_fol->C_lit either way, so the
+        8-pool closure sum(dC) == -NEE*dt still holds to machine precision."""
+        for sw in (0.0, 400.0):
+            cfg = _default_config(scheme="differland", evergreen=True)
+            state = _make_carbon_state(shape=(1,))
+            new, flux, _d = step_carbon_differland(
+                state, jnp.full(1, sw), jnp.full(1, 290.0), jnp.full(1, 400.0),
+                jnp.full(1, 0.8), jnp.full(1, 0.7), 180.0, jnp.full(1, 3e-5),
+                cfg, 86400.0, return_diagnostics=True)
+            dC = sum(getattr(new, f) - getattr(state, f) for f in state._fields)
+            expected = -(flux / _GC_TO_KG_CO2) * 86400.0
+            npt.assert_allclose(dC, expected, rtol=1e-9, atol=1e-9,
+                                err_msg=f"evergreen column not closed (sw={sw})")
+
+
+class TestLeafResorption(unittest.TestCase):
+    """Leaf-carbon resorption at abscission (C_fol->C_lab), opt-in / default-off.
+
+    At autumn leaf-fall (doy near Fday=280) a fraction of the shed foliage carbon
+    is resorbed to the labile reserve instead of lost to litter, refilling the
+    reserve the cold-climate leaf-out lock otherwise depletes.  Conserving, and
+    byte-identical when the fraction is 0.  Default config => the dormancy/NSC
+    gates are OFF, so these tests isolate the resorption term.
+    """
+
+    def _step(self, frac, config_frac_set=True):
+        over = dict(leaf_c_resorption_frac=frac) if config_frac_set else {}
+        cfg = _default_config(scheme="differland", **over)
+        st = _make_carbon_state(shape=(3,))
+        new, flux, _d = step_carbon_differland(
+            st, jnp.full(3, 200.0), jnp.full(3, 283.0), jnp.full(3, 400.0),
+            jnp.full(3, 1.0), jnp.zeros(3), 280.0, jnp.full(3, 2e-5),
+            cfg, 86400.0, return_diagnostics=True)
+        return st, new, flux
+
+    def test_off_is_byte_identical(self):
+        # frac explicitly 0.0 must reproduce the field-unset (default 0.0) result.
+        _s0, s_explicit, _f0 = self._step(0.0)
+        _sb, s_default, _fb = self._step(0.0, config_frac_set=False)
+        for p in s_explicit._fields:
+            npt.assert_array_equal(getattr(s_explicit, p), getattr(s_default, p))
+
+    def test_moves_fol_carbon_to_labile_not_litter(self):
+        _s0, s_off, _fo = self._step(0.0)
+        _s1, s_on, _fn = self._step(0.3)
+        # C_fol sink unchanged (resorption does not alter the C_fol loss)
+        npt.assert_allclose(s_on.C_fol, s_off.C_fol, atol=1e-9)
+        # reserve gains, litter loses, by the SAME amount (conserving transfer)
+        self.assertTrue(bool(jnp.all(s_on.C_lab > s_off.C_lab)))
+        self.assertTrue(bool(jnp.all(s_on.C_lit < s_off.C_lit)))
+        npt.assert_allclose(s_on.C_lab - s_off.C_lab,
+                            s_off.C_lit - s_on.C_lit, rtol=1e-6)
+
+    def test_monotonic_in_fraction(self):
+        labs = [self._step(f)[1].C_lab for f in (0.0, 0.1, 0.3)]
+        self.assertTrue(bool(jnp.all(labs[1] >= labs[0])))
+        self.assertTrue(bool(jnp.all(labs[2] >= labs[1])))
+
+    def test_conserves_with_resorption(self):
+        st, new, flux = self._step(0.3)
+        dC = sum(getattr(new, p) - getattr(st, p) for p in st._fields)
+        expected = -(flux / _GC_TO_KG_CO2) * 86400.0
+        npt.assert_allclose(dC, expected, rtol=1e-9, atol=1e-9,
+                            err_msg="column not closed with resorption")
+
+    def test_invalid_fraction_rejected(self):
+        # A concrete fraction outside [0, 1] would let the _soft_pos clamp create
+        # carbon (leaf_to_lit<0 for f>1, leaf_resorb<0 for f<0); reject fail-early.
+        for bad in (-0.1, 1.5):
+            with self.assertRaises(ValueError):
+                self._step(bad)
+
+
+# ===================================================================
+# High-latitude productivity rescue (opt-in NSC gate + cold-deciduous dormancy)
+# ===================================================================
+
+class TestArcticProductivityRescue(unittest.TestCase):
+    """Opt-in mechanisms fixing the boreal/tundra carbon death spiral.  Both
+    default OFF -> byte-identical; ON they throttle winter maintenance
+    respiration so a starved high-latitude column survives."""
+
+    def test_nsc_respiration_factor_reserve_days_and_selectivity(self):
+        cfg = _default_config(scheme="differland", nsc_gated_respiration=True,
+                              nsc_reserve_days=10.0, r_maint_floor_frac=0.10)
+
+        def f(cl, cf=100.0, cr=100.0, cw=800.0):
+            return float(_nsc_respiration_factor(
+                jnp.asarray(cl), jnp.asarray(cf), jnp.asarray(cr),
+                jnp.asarray(cw), cfg))
+
+        # r_maint_demand = 0.002*100 + 0.0008*100 + 2e-5*800 = 0.296 gC/day;
+        # reserve_days = C_lab/0.296; saturates at reserve_days >= 10 (C_lab>=2.96).
+        demand = 0.002 * 100.0 + 0.0008 * 100.0 + 2e-5 * 800.0   # 0.296
+        c_sat = 10.0 * demand                                    # 2.96 gC (= 10 days)
+        self.assertAlmostEqual(f(0.0), 0.10, places=6)          # empty reserve -> floor
+        self.assertAlmostEqual(f(c_sat), 1.0, places=6)         # 10 days -> saturated
+        self.assertAlmostEqual(f(10 * c_sat), 1.0, places=6)    # stays 1 above
+        self.assertTrue(0.10 < f(c_sat / 2) < 1.0)              # monotone between
+        # SELECTIVITY: a HEALTHY tree (huge inert C_wood, modest reserve) still
+        # reads many reserve days -> f_nsc ~ 1 (NOT throttled).  The raw-biomass
+        # reference wrongly throttled it (this is the temperate/tropical fix).
+        self.assertAlmostEqual(f(50.0, cw=10000.0), 1.0, places=6)
+        # Winter-leafless robustness: C_fol=0 (root+wood still set the demand) and
+        # an empty reserve -> floor (no 0/0).
+        self.assertAlmostEqual(f(0.0, cf=0.0), 0.10, places=6)
+
+    def test_cold_deciduous_dormancy_factor_zeros_when_frozen(self):
+        cfg = _default_config(scheme="differland", cold_deciduous_dormancy=True,
+                              cold_deciduous=True, dormancy_transition_width_K=2.0)
+
+        def d(T):
+            return float(_cold_deciduous_dormancy_factor(jnp.asarray(T), cfg))
+
+        self.assertLess(d(constants.T_freeze - 10.0), 0.01)     # frozen -> dormant
+        self.assertAlmostEqual(d(constants.T_freeze), 0.5, places=6)  # midpoint
+        self.assertGreater(d(constants.T_freeze + 10.0), 0.99)  # warm -> active
+
+    def _step(self, cfg, state, sw=250.0, T=295.0, beta=0.8, doy=180.0):
+        return step_carbon_differland(
+            state, jnp.full(1, sw), jnp.full(1, T), jnp.full(1, 400.0),
+            jnp.full(1, beta), jnp.full(1, 0.7), doy, jnp.full(1, 3e-5),
+            cfg, 86400.0)
+
+    def test_gates_off_are_byte_identical_to_param_changes(self):
+        # Gates OFF: perturbing the new params must not change the step at all
+        # (proves the static gate leaves the pre-change numerics untouched).
+        state = _make_carbon_state(shape=(1,))
+        base = _default_config(scheme="differland")          # gates default off
+        pert = base._replace(nsc_reserve_days=99.0, r_maint_floor_frac=0.9,
+                             freeze_dormancy_threshold_K=250.0,
+                             dormancy_transition_width_K=8.0,
+                             leaf_bootstrap_lai=1.5, leaf_bootstrap_frac=0.3)
+        a, fa = self._step(base, state)
+        b, fb = self._step(pert, state)
+        for field in state._fields:
+            npt.assert_array_equal(getattr(a, field), getattr(b, field))
+        npt.assert_array_equal(fa, fb)
+
+    def test_nsc_gate_reduces_respiration_and_conserves(self):
+        # Depleted labile, cold + dark: the gate ON retains more carbon (less
+        # respired) than OFF, and the 8-pool budget still closes exactly.
+        depleted = _make_carbon_state(shape=(1,), C_lab=jnp.full(1, 1.0))
+        off = _default_config(scheme="differland", nsc_gated_respiration=False)
+        on = _default_config(scheme="differland", nsc_gated_respiration=True,
+                             nsc_reserve_days=10.0, r_maint_floor_frac=0.10)
+        s_off, _ = self._step(off, depleted, sw=0.0, T=280.0, beta=0.1, doy=15.0)
+        s_on, flux_on = self._step(on, depleted, sw=0.0, T=280.0, beta=0.1, doy=15.0)
+        tot = lambda s: sum(float(getattr(s, f).sum()) for f in s._fields)
+        self.assertGreater(tot(s_on), tot(s_off))    # gate retains carbon
+        dC = sum(getattr(s_on, f) - getattr(depleted, f) for f in depleted._fields)
+        expected = -(flux_on / _GC_TO_KG_CO2) * 86400.0
+        npt.assert_allclose(dC, expected, rtol=1e-9, atol=1e-9)
+
+    def test_nsc_gate_preserves_winter_labile_reserve(self):
+        # THE death-spiral mechanism: through a dark, cold winter (GPP == 0,
+        # sw == 0) the maintenance-respiration deficit is paid from the labile
+        # reserve C_lab first.  With the gate OFF the reserve drains toward 0
+        # (spring has nothing to regrow from -> death spiral); with the gate ON,
+        # R_maint throttles as C_lab depletes, so the reserve is PRESERVED.
+        # Deterministic and non-vacuous: fails if the gate does not protect C_lab.
+        def winter(cfg, n=15):
+            # Start DEPLETED: C_lab=3 gC is only ~9 days of the maintenance demand
+            # (< nsc_reserve_days=10), so the reserve-days gate is engaged from the
+            # first step -- a healthy C_lab would read many reserve days and (by
+            # design) NOT throttle.
+            s0 = _make_carbon_state(
+                shape=(1,), C_lab=jnp.full(1, 3.0), C_fol=jnp.full(1, 80.0),
+                C_root=jnp.full(1, 120.0), C_wood=jnp.full(1, 4000.0))
+
+            def body(_i, s):
+                s2, _ = step_carbon_differland(
+                    s, jnp.full(1, 0.0), jnp.full(1, 280.0), jnp.full(1, 400.0),
+                    jnp.full(1, 0.1), jnp.full(1, 1.1), 15.0, jnp.full(1, 1e-6),
+                    cfg, 86400.0)
+                return s2
+
+            sN = jax.lax.fori_loop(0, n, body, s0)
+            return float(sN.C_lab.sum())
+
+        clab_off = winter(_default_config(scheme="differland",
+                                          nsc_gated_respiration=False))
+        clab_on = winter(_default_config(scheme="differland",
+                                         nsc_gated_respiration=True,
+                                         nsc_reserve_days=10.0,
+                                         r_maint_floor_frac=0.10))
+        # ON drains the depleted reserve strictly slower than OFF; OFF drains most
+        # of it over the window (non-vacuous; both start at 3 gC).
+        self.assertGreater(clab_on, clab_off)
+        self.assertLess(clab_off, 2.5)
+
+    def test_cold_dormancy_gates_the_gpp_override(self):
+        # codex P1: the coupled/archetype path passes a nonzero Farquhar
+        # gpp_override, bypassing compute_gpp.  The dormancy gate must still
+        # suppress that override GPP at frozen T (else a dormant larch keeps
+        # photosynthesising in the global build).  Checked via the gpp diagnostic.
+        state = _make_carbon_state(shape=(1,))
+        frozen_T = jnp.full(1, constants.T_freeze - 15.0)
+        override = jnp.full(1, 5e-8)   # nonzero Farquhar GPP [gC/m2/s]
+        common = dict(sw_down=jnp.full(1, 0.0), co2_ppmv=jnp.full(1, 400.0),
+                      beta=jnp.full(1, 0.5), lat=jnp.full(1, 1.1), doy=15.0,
+                      precip=jnp.full(1, 1e-6), dt=86400.0,
+                      gpp_override=override, return_diagnostics=True)
+        cd = _default_config(scheme="differland", cold_deciduous_dormancy=True,
+                             cold_deciduous=True)
+        off = _default_config(scheme="differland", cold_deciduous_dormancy=False)
+        *_, diag_dorm = step_carbon_differland(state, T=frozen_T, config=cd, **common)
+        *_, diag_no = step_carbon_differland(state, T=frozen_T, config=off, **common)
+        # dormancy on -> the override GPP is suppressed ~0; off -> full override.
+        self.assertLess(float(diag_dorm.gpp.sum()),
+                        0.1 * float(diag_no.gpp.sum()))
+
+    def test_nsc_gate_rejects_invalid_params(self):
+        # codex P2: an out-of-[0,1] floor would make f_nsc>1 (INCREASE R_maint) or
+        # negative; a nonpositive reference collapses the gate.  Fail loud.
+        one = jnp.asarray(1.0)
+        with self.assertRaises(ValueError):
+            _nsc_respiration_factor(one, one, one, one, _default_config(
+                scheme="differland", r_maint_floor_frac=1.5))
+        with self.assertRaises(ValueError):
+            _nsc_respiration_factor(one, one, one, one, _default_config(
+                scheme="differland", nsc_reserve_days=0.0))
+
+    def test_cold_deciduous_dormancy_rejects_nonpositive_width(self):
+        # codex P2: zero width -> 0/0 NaN at T==threshold; negative reverses it.
+        with self.assertRaises(ValueError):
+            _cold_deciduous_dormancy_factor(jnp.asarray(270.0), _default_config(
+                scheme="differland", dormancy_transition_width_K=0.0))
+
+    def test_leaf_bootstrap_regrows_leaves_and_conserves(self):
+        # A leafless cold-deciduous plant (C_fol=0) with a labile reserve, in the
+        # growing season (T > threshold), must REGROW C_fol from labile -- escaping
+        # the 0-leaf -> 0-GPP -> dead lock.  Conserving (pure C_lab -> C_fol).
+        leafless = _make_carbon_state(shape=(1,), C_fol=jnp.full(1, 0.0),
+                                      C_lab=jnp.full(1, 100.0))
+        warm_T = jnp.full(1, constants.T_freeze + 10.0)   # growing season, d~1
+        common = dict(sw_down=jnp.full(1, 200.0), co2_ppmv=jnp.full(1, 400.0),
+                      beta=jnp.full(1, 0.5), lat=jnp.full(1, 1.1), doy=180.0,
+                      precip=jnp.full(1, 3e-5), dt=86400.0)
+        cd = _default_config(scheme="differland", cold_deciduous_dormancy=True,
+                             cold_deciduous=True, leaf_bootstrap_lai=0.5,
+                             leaf_bootstrap_frac=0.1)
+        off = _default_config(scheme="differland", cold_deciduous_dormancy=False)
+        s_boot, flux_boot = step_carbon_differland(leafless, T=warm_T, config=cd, **common)
+        s_off, _ = step_carbon_differland(leafless, T=warm_T, config=off, **common)
+        # bootstrap grows leaves from labile; off leaves the canopy at ~0.
+        self.assertGreater(float(s_boot.C_fol.sum()), 1.0)
+        self.assertGreater(float(s_boot.C_fol.sum()), float(s_off.C_fol.sum()))
+        # the drawn labile leaves C_lab (pure internal transfer, no creation).
+        self.assertLess(float(s_boot.C_lab.sum()), float(leafless.C_lab.sum()))
+        # conservation still closes exactly.
+        dC = sum(getattr(s_boot, f) - getattr(leafless, f) for f in leafless._fields)
+        expected = -(flux_boot / _GC_TO_KG_CO2) * 86400.0
+        npt.assert_allclose(dC, expected, rtol=1e-9, atol=1e-9)
+
+    def test_leaf_bootstrap_rejects_negative_params(self):
+        # codex: a negative frac/lai makes the transfer negative -> C_fol clipped
+        # below 0 -> created carbon.  Fail loud on the concrete config.
+        leafless = _make_carbon_state(shape=(1,), C_fol=jnp.full(1, 0.0))
+        common = dict(sw_down=jnp.full(1, 200.0),
+                      T=jnp.full(1, constants.T_freeze + 10.0),
+                      co2_ppmv=jnp.full(1, 400.0), beta=jnp.full(1, 0.5),
+                      lat=jnp.full(1, 1.1), doy=180.0,
+                      precip=jnp.full(1, 3e-5), dt=86400.0)
+        with self.assertRaises(ValueError):
+            step_carbon_differland(leafless, config=_default_config(
+                scheme="differland", cold_deciduous_dormancy=True,
+                cold_deciduous=True, leaf_bootstrap_frac=-1.0), **common)
+
+
+# ===================================================================
+# SOM transfer-fraction validation (fail-early on out-of-[0,1] config)
+# ===================================================================
+
+class TestSomTransferFractionValidation(unittest.TestCase):
+    """FIX #3 (codex A2): step_carbon_differland must fail early (a plain
+    Python ``if ... raise ValueError`` on the STATIC config value, matching
+    the repo's dispatch-hardening pattern, e.g. ``_freeze_modifier``'s
+    ``som_freeze_width_K > 0`` guard) on an out-of-[0, 1]
+    f_active_to_slow/f_slow_to_passive.  The ``__param_spec__`` bounds
+    (0.1-0.5, config.py) only constrain the TRAINING search range and are
+    never enforced at runtime, so a direct
+    ``CarbonConfig(f_active_to_slow=1.5)`` construction bypasses them and
+    would otherwise silently drive active respiration negative (fraction > 1)
+    or a downstream transfer input negative (fraction < 0)."""
+
+    def _call(self, **cfg_over):
+        cfg = _default_config(scheme="differland", **cfg_over)
+        state = _make_carbon_state(shape=(2,))
+        return step_carbon_differland(
+            state, jnp.full(2, 300.0), jnp.full(2, 290.0), jnp.full(2, 400.0),
+            jnp.full(2, 0.8), jnp.full(2, 0.7), 150.0, jnp.full(2, 3e-5),
+            cfg, 600.0)
+
+    def test_f_active_to_slow_above_one_raises(self):
+        with self.assertRaises(ValueError):
+            self._call(f_active_to_slow=1.5)
+
+    def test_f_active_to_slow_negative_raises(self):
+        with self.assertRaises(ValueError):
+            self._call(f_active_to_slow=-0.1)
+
+    def test_f_slow_to_passive_above_one_raises(self):
+        with self.assertRaises(ValueError):
+            self._call(f_slow_to_passive=1.5)
+
+    def test_f_slow_to_passive_negative_raises(self):
+        with self.assertRaises(ValueError):
+            self._call(f_slow_to_passive=-0.1)
+
+    def test_cwd_humification_eff_above_one_raises(self):
+        """cwd_humification_eff > 1 makes R_het_cwd = wood_litter - eff*wood_litter
+        negative (the CWD path would create carbon)."""
+        with self.assertRaises(ValueError):
+            self._call(cwd_humification_eff=1.5)
+
+    def test_cwd_humification_eff_negative_raises(self):
+        """cwd_humification_eff < 0 makes wood_to_som negative (destroys carbon
+        in the wood->SOM transfer)."""
+        with self.assertRaises(ValueError):
+            self._call(cwd_humification_eff=-0.1)
+
+    def test_boundary_fractions_do_not_raise(self):
+        """0.0 and 1.0 are valid (inclusive) bounds for all three fractions."""
+        self._call(f_active_to_slow=0.0, f_slow_to_passive=1.0,
+                   cwd_humification_eff=0.0)
+        self._call(f_active_to_slow=1.0, f_slow_to_passive=0.0,
+                   cwd_humification_eff=1.0)
+
+
+# ===================================================================
+# Cold-vs-warm SOC realism (the scientific point of the change)
+# ===================================================================
+
+class TestColdWarmSocRealism(unittest.TestCase):
+    """A COLD soil equilibrates to MORE total SOC than a WARM soil with the SAME
+    litter input (freeze + temperature suppression -> carbon retained), and more
+    than the former single bulk pool held for a cold case.  The ``som_freeze_floor``
+    keeps the cold accumulation FINITE (no runaway) while preserving cold>warm."""
+
+    @staticmethod
+    def _cascade_soc_eq(cfg, T, precip, som_input_per_day):
+        """Analytic total SOM equilibrium of the live cascade for a constant
+        input and (T, precip), using the model's OWN modifier + config rates:
+        C_active_eq = I/(m*k_a); C_slow_eq = f_as*I/(m*k_s);
+        C_passive_eq = f_as*f_sp*I/(m*k_p) (derived in step_carbon_differland)."""
+        m = float(_som_decomp_modifier(
+            jnp.array([T]), jnp.array([precip]), cfg)[0])
+        i = som_input_per_day
+        f_as, f_sp = cfg.f_active_to_slow, cfg.f_slow_to_passive
+        return (i / (m * cfg.tor_som_active)
+                + f_as * i / (m * cfg.tor_som_slow)
+                + f_as * f_sp * i / (m * cfg.tor_som_passive))
+
+    def test_cold_holds_more_soc_than_warm(self):
+        cfg = _default_config(scheme="differland")
+        i, precip = 0.2, _default_config().precip_ref
+        soc_cold = self._cascade_soc_eq(cfg, 270.0, precip, i)   # -3 C, frozen
+        soc_warm = self._cascade_soc_eq(cfg, 298.0, precip, i)   # +25 C
+        self.assertGreater(soc_cold, soc_warm)
+        self.assertGreater(soc_cold / soc_warm, 10.0)
+
+    def test_cold_multipool_exceeds_old_single_pool(self):
+        """The cold multi-pool SOC exceeds what the former single bulk pool
+        (tor_som=4e-5/day, NO freeze control) held at the same input — the fix
+        direction for high-latitude / grassland SOC underestimation."""
+        cfg = _default_config(scheme="differland")
+        i, precip, T = 0.2, _default_config().precip_ref, 270.0
+        soc_multi = self._cascade_soc_eq(cfg, T, precip, i)
+        # Old single pool: freeze-free _temperate_modifier, bulk 4e-5/day turnover.
+        m_old = float(_temperate_modifier(
+            jnp.array([T]), jnp.array([precip]), cfg)[0])
+        soc_old_single = i / (m_old * 4e-5)   # legacy tor_som default
+        self.assertGreater(soc_multi, soc_old_single)
+
+    def test_extreme_cold_soc_high_but_bounded_by_floor(self):
+        """The ``som_freeze_floor`` caps runaway cold-soil SOC while KEEPING the
+        cold-retains-more direction.
+
+        Two facts, both from the model's OWN cascade equilibrium:
+
+        (1) A genuinely cold column (-5 C) equilibrates to a HIGH but BOUNDED
+            total SOC -- far above the warm case, yet below a sane physical cap
+            (not the runaway the un-floored curve produced in a real ERA5 build,
+            global max ~175 kgC/m2).
+        (2) As the soil goes DEEP-frozen the un-floored modifier -> 0 so the
+            millennial slow/passive equilibrium ``I/(m*k)`` runs away without
+            bound; the floor keeps decomposition >= ``som_freeze_floor`` of the
+            unfrozen rate, so the SAME column stays finite and dramatically
+            smaller -- the floor MEANINGFULLY reduces the deep-cold equilibrium.
+        """
+        precip, i = _default_config().precip_ref, 0.2
+        cfg = _default_config(scheme="differland")                 # floor 0.05
+        cfg_nofloor = _default_config(scheme="differland", som_freeze_floor=0.0)
+
+        # (1) extreme (but not permafrost) cold: high, bounded, well above warm.
+        soc_cold = self._cascade_soc_eq(cfg, 268.0, precip, i)     # -5 C
+        soc_warm = self._cascade_soc_eq(cfg, 298.0, precip, i)     # +25 C
+        self.assertTrue(math.isfinite(soc_cold))
+        self.assertGreater(soc_cold, soc_warm)          # cold retains more
+        self.assertGreater(soc_cold / soc_warm, 10.0)   # well above warm
+        # Bounded: below a sane physical cap (200 kgC/m2); the un-floored value
+        # at this same column is NOT below the cap -> the floor is what bounds it.
+        self.assertLess(soc_cold, 200_000.0)            # gC/m2 == 200 kgC/m2
+        self.assertGreater(
+            self._cascade_soc_eq(cfg_nofloor, 268.0, precip, i), soc_cold)
+
+        # (2) DEEP freeze: floor turns an unbounded runaway into a finite value.
+        soc_deep_floor = self._cascade_soc_eq(cfg, 255.0, precip, i)
+        soc_deep_nofloor = self._cascade_soc_eq(cfg_nofloor, 255.0, precip, i)
+        self.assertTrue(math.isfinite(soc_deep_floor))
+        self.assertGreater(soc_deep_floor, soc_warm)
+        # Meaningful reduction vs no floor (actual ~440x at -18 C).
+        self.assertGreater(soc_deep_nofloor / soc_deep_floor, 50.0)
+
+
+# ===================================================================
+# Autotrophic / heterotrophic reference-temperature decoupling (CUE fix)
+# ===================================================================
+
+class TestReferenceTemperatureDecoupling(unittest.TestCase):
+    """The autotrophic maintenance-respiration reference ``T_ref_ra`` and the
+    heterotrophic (soil-decomposition) reference ``T_ref`` are ORTHOGONAL:
+    ``T_ref_ra`` drives ONLY autotrophic ``R_maint``; ``T_ref`` drives ONLY
+    heterotrophic decomposition.  Guards the decoupling introduced by the CUE fix
+    (maintenance respiration was over-consuming GPP through the shared 10 degC
+    reference, collapsing CUE = NPP/GPP to ~0.11 with negative NPP)."""
+
+    def _diag(self, cfg, T_val=298.0):
+        ncol = 3
+        state = _make_carbon_state(shape=(ncol,))
+        _s, _f, diag = step_carbon_differland(
+            state, jnp.full(ncol, 350.0), jnp.full(ncol, T_val),
+            jnp.full(ncol, 400.0), jnp.full(ncol, 0.8), jnp.full(ncol, 0.7),
+            160.0, jnp.full(ncol, 3e-5), cfg, 1800.0, return_diagnostics=True)
+        return diag
+
+    def test_heterotrophic_modifier_invariant_to_T_ref_ra(self):
+        """Changing T_ref_ra must NOT change the heterotrophic modifiers
+        (``_temperate_modifier`` / ``_som_decomp_modifier`` use ``T_ref``, and
+        ``analytic_som_soc`` is built from ``_som_decomp_modifier``)."""
+        precip = jnp.array([3e-5, 3e-5])
+        T = jnp.array([300.0, 270.0])
+        lo = _default_config(scheme="differland", T_ref_ra=298.15)
+        hi = _default_config(scheme="differland", T_ref_ra=350.0)
+        npt.assert_allclose(_temperate_modifier(T, precip, lo),
+                            _temperate_modifier(T, precip, hi), rtol=0, atol=0)
+        npt.assert_allclose(_som_decomp_modifier(T, precip, lo),
+                            _som_decomp_modifier(T, precip, hi), rtol=0, atol=0)
+
+    def test_autotrophic_R_maint_invariant_to_T_ref(self):
+        """Changing the heterotrophic ``T_ref`` must NOT change autotrophic
+        ``R_maint`` (which uses ``T_ref_ra`` + ``Q10_exp`` only)."""
+        base = self._diag(_default_config(scheme="differland", T_ref=283.15))
+        alt = self._diag(_default_config(scheme="differland", T_ref=250.0))
+        npt.assert_allclose(base.r_maint, alt.r_maint, rtol=1e-12, atol=0)
+
+    def test_R_maint_exact_ratio_from_T_ref_ra(self):
+        """+15 K in ``T_ref_ra`` scales ``R_maint`` by exactly
+        ``exp(-Q10_exp*15) = 0.5488116`` at every temperature (a UNIFORM rescaling
+        of the maintenance curve, not a warm-only correction)."""
+        cfg_lo = _default_config(scheme="differland", T_ref_ra=283.15)
+        cfg_hi = _default_config(scheme="differland", T_ref_ra=298.15)
+        ratio = self._diag(cfg_hi).r_maint / self._diag(cfg_lo).r_maint
+        expected = math.exp(-cfg_lo.Q10_exp * 15.0)  # 0.5488116...
+        npt.assert_allclose(ratio, expected, rtol=1e-6, atol=0)
+
+    def test_higher_T_ref_ra_lowers_rauto_raises_npp(self):
+        """Raising ``T_ref_ra`` lowers ``R_maint`` and ``R_auto`` and RAISES NPP
+        (the fix direction: less maintenance loss => more net production).
+        ``R_auto = f_auto*GPP + (1-f_auto)*R_maint`` is strictly increasing in
+        ``R_maint``, and ``NPP = GPP - R_auto``."""
+        d_lo = self._diag(_default_config(scheme="differland", T_ref_ra=283.15))
+        d_hi = self._diag(_default_config(scheme="differland", T_ref_ra=298.15))
+        self.assertTrue(bool(jnp.all(d_hi.r_maint < d_lo.r_maint)))
+        self.assertTrue(bool(jnp.all(d_hi.r_auto < d_lo.r_auto)))
+        self.assertTrue(bool(jnp.all(d_hi.npp > d_lo.npp)))
+
+    def test_jit_and_grad_smoke(self):
+        """``step_carbon_differland`` stays JIT-able and differentiable through the
+        new reference (``T_ref_ra`` is a static float leaf; no new control flow)."""
+        cfg = _default_config(scheme="differland")
+        ncol = 2
+        state = _make_carbon_state(shape=(ncol,))
+        sw = jnp.full(ncol, 320.0)
+        co2 = jnp.full(ncol, 400.0)
+        beta = jnp.full(ncol, 0.8)
+        lat = jnp.full(ncol, 0.7)
+        precip = jnp.full(ncol, 3e-5)
+        jitted = jax.jit(lambda st, Tair: step_carbon_differland(
+            st, sw, Tair, co2, beta, lat, 150.0, precip, cfg, 1800.0))
+        s2, f2 = jitted(state, jnp.full(ncol, 295.0))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(f2))))
+        for name in s2._fields:
+            self.assertTrue(bool(jnp.all(jnp.isfinite(getattr(s2, name)))))
+
+        def loss(Tair):
+            _s, _f, diag = step_carbon_differland(
+                state, sw, Tair, co2, beta, lat, 150.0, precip, cfg, 1800.0,
+                return_diagnostics=True)
+            return jnp.sum(diag.npp)
+        g = jax.grad(loss)(jnp.full(ncol, 295.0))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(g))))
+
+
+# ===================================================================
 # DifferLand step
 # ===================================================================
 
@@ -288,6 +1162,8 @@ class TestDifferLandStep(unittest.TestCase):
 
     def test_pools_stay_positive(self):
         new_state, _ = self._step_once()
+        # A2: all eight pools (incl. the live slow/passive SOM pools) stay above
+        # the 1 gC/m2 floor for a well-stocked column at a realistic dt.
         for name in new_state._fields:
             arr = getattr(new_state, name)
             self.assertTrue(jnp.all(arr >= 1.0), f"{name} below floor")
@@ -438,7 +1314,9 @@ class TestDifferLandStep(unittest.TestCase):
             C_root=jnp.full((ncol,), 400.0),
             C_wood=jnp.full((ncol,), 10000.0),
             C_lit=jnp.full((ncol,), 600.0),
-            C_som=jnp.full((ncol,), 12000.0),
+            C_som_active=jnp.full((ncol,), 12000.0),
+            C_som_slow=jnp.zeros((ncol,)),
+            C_som_passive=jnp.zeros((ncol,)),
         )
         sw = jnp.zeros(ncol)            # no GPP
         T = jnp.full(ncol, 290.0)
@@ -480,7 +1358,9 @@ class TestDifferLandStep(unittest.TestCase):
             C_root=jnp.full((ncol,), 400.0),
             C_wood=jnp.full((ncol,), 10000.0),
             C_lit=jnp.full((ncol,), 600.0),
-            C_som=jnp.full((ncol,), 12000.0),
+            C_som_active=jnp.full((ncol,), 12000.0),
+            C_som_slow=jnp.zeros((ncol,)),
+            C_som_passive=jnp.zeros((ncol,)),
         )
         sw = jnp.zeros(ncol)            # no GPP
         T = jnp.full(ncol, 290.0)
@@ -682,6 +1562,40 @@ class TestWoodyAllocation(unittest.TestCase):
                                 err_msg=f"allocation not closed (woody={woody})")
 
 
+class TestSequentialAllocation(unittest.TestCase):
+    """Direct test of the shared DALEC allocation helper (also used by the closed-form
+    live-pool forward) -- the exact telescoping partition step_carbon_differland uses."""
+
+    def test_partition_matches_hand_value_and_closes(self):
+        from legoesm.land.carbon.carbon_cycle import sequential_allocation
+        npp = jnp.asarray([100.0, 0.0])
+        A_fol, A_lab, A_root_base, A_wood_raw = sequential_allocation(
+            npp, 0.15, 0.10, 0.25)
+        # a_fol=.15; a_lab=(1-.15)*.10=.085; a_root_base=(1-.15)(1-.10)*.25=.19125;
+        # a_wood_raw = 1 - .15 - .085 - .19125 = .57375 (of NPP).
+        npt.assert_allclose(A_fol, [15.0, 0.0], rtol=1e-12)
+        npt.assert_allclose(A_lab, [8.5, 0.0], rtol=1e-12)
+        npt.assert_allclose(A_root_base, [19.125, 0.0], rtol=1e-12)
+        npt.assert_allclose(A_wood_raw, [57.375, 0.0], rtol=1e-12)
+        # The four fluxes sum to NPP EXACTLY (telescoping remainder).
+        npt.assert_allclose(A_fol + A_lab + A_root_base + A_wood_raw, npp,
+                            rtol=0, atol=0)
+
+    def test_matches_step_carbon_allocation(self):
+        """The helper reproduces the step's absolute allocation fluxes (shared numerics)."""
+        from legoesm.land.carbon.carbon_cycle import sequential_allocation
+        cfg = _default_config(scheme="differland", woody=True)
+        diag = TestWoodyAllocation()._diag(woody=True)
+        npp_pos = jnp.maximum(diag.npp, 0.0)
+        A_fol, A_lab, A_root_base, A_wood_raw = sequential_allocation(
+            npp_pos, cfg.f_fol, cfg.f_lab, cfg.f_root)
+        npt.assert_allclose(A_fol, diag.a_fol, rtol=1e-12)
+        npt.assert_allclose(A_lab, diag.a_lab, rtol=1e-12)
+        # Woody: a_root == A_root_base, a_wood == max(A_wood_raw, 0).
+        npt.assert_allclose(A_root_base, diag.a_root, rtol=1e-12)
+        npt.assert_allclose(jnp.maximum(A_wood_raw, 0.0), diag.a_wood, rtol=1e-12)
+
+
 # ===================================================================
 # Seasonal Cycle
 # ===================================================================
@@ -794,7 +1708,12 @@ class TestInitCarbonState(unittest.TestCase):
         cfg = _default_config(C_lab_init=50.0, C_som_init=5000.0)
         state = init_carbon_state((3,), cfg)
         npt.assert_allclose(state.C_lab, 50.0)
-        npt.assert_allclose(state.C_som, 5000.0)
+        # A2: C_som_init is partitioned across the three pools by CENTURY
+        # fractions (0.03 / 0.32 / 0.65); som_total is preserved exactly.
+        npt.assert_allclose(som_total(state), 5000.0, rtol=1e-9)
+        npt.assert_allclose(state.C_som_active, 0.03 * 5000.0, rtol=1e-9)
+        npt.assert_allclose(state.C_som_slow, 0.32 * 5000.0, rtol=1e-9)
+        npt.assert_allclose(state.C_som_passive, 0.65 * 5000.0, rtol=1e-9)
 
     def test_woody_init_keeps_wood_pool(self):
         cfg = _default_config(woody=True, C_wood_init=8000.0)

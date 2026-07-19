@@ -573,7 +573,7 @@ def _shapiro_smooth_slopes(S_x, S_y, mask):
     wW = mask * jnp.pad(mask, ((0, 0), (1, 0)))[:, :-1]   # wet(i,j) & wet(i,j-1)
     wN = mask * jnp.pad(mask, ((0, 1), (0, 0)))[1:, :]    # wet(i,j) & wet(i+1,j)
     wS = mask * jnp.pad(mask, ((1, 0), (0, 0)))[:-1, :]   # wet(i,j) & wet(i-1,j)
-    zcofw = (m / 16.0) * (wE + wW)[:, :, None] * (wN + wS)[:, :, None] * 0.25  # coeff-ok: 16 = (1-2-1)^2 binomial weight sum (NEMO ldfslp z1_16)
+    zcofw = (m / 16.0) * (wE + wW)[:, :, None] * (wN + wS)[:, :, None] * 0.25  # coeff-ok: 16 = (1+2+1)^2 binomial weight sum (NEMO ldfslp z1_16)
 
     w = (1.0, 2.0, 1.0)                                   # 1-D binomial kernel
     def smooth(f):
@@ -779,7 +779,7 @@ def compute_nemo_native_slopes(
         for a in range(3):
             for b in range(3):
                 acc = acc + w[a] * w[b] * fp[a:a + nlat, b:b + nlon, :]
-        return acc * cof / 16.0  # coeff-ok: (1-2-1)^2 binomial weight sum (NEMO ldfslp Shapiro z1_16)
+        return acc * cof / 16.0  # coeff-ok: 16 = (1+2+1)^2 binomial weight sum (NEMO ldfslp z1_16), same as L486
 
     def _kp1m(a):  # mask at level k+1, zero at the bottom
         return jnp.concatenate(

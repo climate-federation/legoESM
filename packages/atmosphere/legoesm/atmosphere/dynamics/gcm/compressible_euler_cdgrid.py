@@ -1095,13 +1095,7 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             self.cdgrid, self.config, physics_tendency,
         )
 
-    def reset_target_mass(self) -> None:
-        """Clear the anchored mass target (iter-20; mirrors iter-18 API)."""
-        self._target_mass = None
 
-    def set_target_mass(self, target_mass) -> None:
-        """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
-        self._target_mass = target_mass
 
     def compute_dry_mass(self, state: NonHydrostaticState) -> jax.Array:
         """Global dry mass ``∫ J · (rho_ref + rho') · dz · dA`` (fp64).
@@ -1610,8 +1604,17 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
     # integrate() and integrate_scan() inherited from IntegrationMixin
 
 
-def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
-    """FV3_3D iter 392: factory for FV3-faithful NH config.
+def make_fv3_component_fidelity_nh_config(
+        **overrides) -> CDGridCompressibleEulerConfig:
+    """Factory for the FV3 COMPONENT-FIDELITY NH config (iter 392 lineage).
+
+    NAMING (phase 5 of the FV3-native roadmap): enables the individually
+    FV3-validated COMPONENTS inside legoESM's stabilized solver.  NOT a
+    full FV3 implementation: RK3 time integration (FV3: forward-backward
+    acoustic splitting), interpolated halos, cell-centred state with a
+    non-Lagrangian vertical (FV3: D-grid covariant winds + Lagrangian
+    remapping).  Full-fidelity claims are gated on the phase-4 native core
+    (tests/atmosphere/dycore/unit/test_fv3_naming_phase5.py).
 
     Pair with ``use_duogrid=True`` so iter-325 halo wiring + iter-370
     ``use_fv3_cross_face_du_proj`` transfer values.  Enables
@@ -1674,6 +1677,25 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
     return CDGridCompressibleEulerConfig(**defaults)
 
 
+def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
+    """Deprecated alias of :func:`make_fv3_component_fidelity_nh_config`.
+
+    The old name overclaimed: the configuration is component-fidelity, not
+    a full FV3 implementation (phase-5 naming correction).
+    """
+    import warnings
+
+    warnings.warn(
+        "make_fv3_faithful_nh_config is a deprecated alias: the "
+        "configuration is FV3 COMPONENT-fidelity (RK3 + interpolated "
+        "halos + cell-centred, non-Lagrangian state), not a full FV3 "
+        "implementation. Use make_fv3_component_fidelity_nh_config.",
+        FutureWarning,
+        stacklevel=2,
+    )
+    return make_fv3_component_fidelity_nh_config(**overrides)
+
+
 def make_legoesm_nh_min_edge_config(**overrides) -> CDGridCompressibleEulerConfig:
     """FV3_3D iter 467: NH config for min cube-edge artifact in legoESM.
 
@@ -1689,7 +1711,7 @@ def make_legoesm_nh_min_edge_config(**overrides) -> CDGridCompressibleEulerConfi
     )
     # User overrides > iter-466 overrides > factory defaults
     edge_min_overrides.update(overrides)
-    return make_fv3_faithful_nh_config(**edge_min_overrides)
+    return make_fv3_component_fidelity_nh_config(**edge_min_overrides)
 
 
 def make_legoesm_nh_min_edge_aggressive_config(
@@ -1714,4 +1736,4 @@ def make_legoesm_nh_min_edge_aggressive_config(
         corner_div_damp_d2_bg=5e-2,
     )
     aggressive_overrides.update(overrides)
-    return make_fv3_faithful_nh_config(**aggressive_overrides)
+    return make_fv3_component_fidelity_nh_config(**aggressive_overrides)

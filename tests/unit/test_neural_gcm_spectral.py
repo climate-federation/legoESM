@@ -1212,8 +1212,136 @@ def test_chunk_loader_prefetch_matches_serial(monkeypatch):
     assert serial1 == pref1 == serial[1:]
 
 
+def test_stage_tree_moves_arrays_skips_non_arrays():
+    """``_stage_tree`` device_puts array leaves and leaves None / non-array leaves
+    untouched, so a (ics, tgts, forcings=None) chunk stages without choking."""
+    from legoesm.training.neural_gcm_spectral import _stage_tree
+
+    cpu = jax.devices("cpu")[0]
+    tree = {"arr": jnp.arange(3.0), "none": None, "meta": "label", "n": 2}
+    out = _stage_tree(tree, cpu)
+    assert list(out["arr"].devices()) == [cpu]   # array moved
+    assert out["none"] is None                    # None passthrough
+    assert out["meta"] == "label" and out["n"] == 2  # non-array leaves untouched
+
+
+class TestHostResidentDataset:
+    """#1155: the non-chunked trainers (classical / sfno_full) load ALL pairs
+    up front; built on the compute device that is ~130 GB at T106 all-years —
+    an unconditional GPU OOM during LOADING (Derecho job 6758505). The fix:
+    ``load_training_data(host_resident=True)`` builds under the CPU backend,
+    and the training loops stage each sample to the compute device per step
+    (``host_staged`` — the same contract as the #985 prefetch path)."""
+
+    def test_stage_sample_default_device_and_passthrough(self):
+        from legoesm.training.neural_gcm_spectral import stage_sample
+
+        dev0 = jax.devices()[0]
+        tree = {"arr": jnp.arange(4.0), "none": None, "meta": "x"}
+        out = stage_sample(tree)                       # default: backend dev 0
+        assert list(out["arr"].devices()) == [dev0]
+        assert out["none"] is None and out["meta"] == "x"
+
+    def test_host_build_device_fallback_warns_and_returns_none(
+            self, monkeypatch, caplog):
+        import legoesm.training.neural_gcm_spectral as mod
+
+        def _no_cpu(kind=None):
+            raise RuntimeError("no cpu backend")
+        monkeypatch.setattr(mod.jax, "devices", _no_cpu)
+        import logging
+        with caplog.at_level(logging.WARNING):
+            dev = mod.host_build_device("test-site")
+        assert dev is None
+        assert any("CPU backend is unavailable" in r.message
+                   for r in caplog.records)
+
+    def test_load_training_data_host_resident_enters_cpu_default_device(
+            self, monkeypatch):
+        """host_resident=True must wrap the (real) load body in
+        ``jax.default_device(cpu)``. The body is cut short at its first
+        external dependency (zarr open) with a sentinel, so no network."""
+        import legoesm.training.neural_gcm_spectral as mod
+        import legoesm.training.era5_to_state as e2s
+
+        entered = []
+        real_default_device = jax.default_device
+
+        def _recording_default_device(dev):
+            entered.append(dev)
+            return real_default_device(dev)
+        monkeypatch.setattr(mod.jax, "default_device",
+                            _recording_default_device)
+
+        class _Sentinel(Exception):
+            pass
+
+        def _boom(*a, **k):
+            raise _Sentinel
+        monkeypatch.setattr(e2s, "open_era5_zarr", _boom)
+        monkeypatch.setattr(e2s, "ensure_local_cache", _boom)
+        monkeypatch.setattr(e2s, "ensure_window_scoped_cache", _boom,
+                            raising=False)
+
+        import pytest
+        cfg = self._tiny_cfg()
+        with pytest.raises(_Sentinel):
+            mod.load_training_data(cfg, _GRID, _SIGMA, cache_dir="",
+                                   windows=None, host_resident=True)
+        cpu0 = jax.devices("cpu")[0]
+        assert entered and entered[0] == cpu0, (
+            "host_resident load must enter jax.default_device(cpu[0]) "
+            f"before touching data (entered={entered})")
+
+    def _tiny_cfg(self, **kw):
+        from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
+        from legoesm.training.losses import LossConfig
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
+        return NeuralGCMSpectralConfig(
+            n_max=N_MAX, n_levels=NLEV, dt=1800.0,
+            pe_config=SpectralPEConfig(time_integrator="ssp_rk3"),
+            lr=1e-4, warmup_steps=0, optimizer="adamw",
+            rollout_curriculum=((1, 1),),   # 1h lead x 1 epoch
+            loss_config=LossConfig(
+                multi_step_hours=(1,), multi_step_weights=(1.0,)),
+            log_every=1, **kw,
+        )
+
+    def test_spectral_loop_host_staged_bitwise_parity(self, tmp_path):
+        """The non-chunked loop with host_staged=True must produce weights
+        BIT-IDENTICAL to host_staged=False on the same data — staging is
+        placement-only, never numerics. (On the CPU test backend the staging
+        device_put is a same-device move; the test guards the plumbing:
+        tuple-target handling, forcings=None, rebind lifetime.)"""
+        from legoesm.training.neural_gcm_spectral import (
+            _train_spectral_loop, make_sfno_spectral_physics,
+            carry_to_spectral_state,
+        )
+
+        carry = _make_gaussian_carry()
+        ic = carry_to_spectral_state(carry, _GRID)
+        ics, tgts = [ic], [(carry,)]     # lead-1 target tuple, 1 sample
+
+        results = []
+        for staged in (False, True):
+            cfg = self._tiny_cfg(checkpoint_dir=str(tmp_path / f"s{staged}"))
+            model, hist = _train_spectral_loop(
+                _make_small_sfno(), make_sfno_spectral_physics,
+                _GRID, _SIGMA, ics, tgts, cfg,
+                start_epoch=0, host_staged=staged,
+            )
+            results.append((model, hist))
+
+        (m0, h0), (m1, h1) = results
+        assert h0 == h1, "loss history must be identical"
+        for a, b in zip(jax.tree_util.tree_leaves(eqx.filter(m0, eqx.is_array)),
+                        jax.tree_util.tree_leaves(eqx.filter(m1, eqx.is_array))):
+            assert jnp.array_equal(a, b), "weights must be bit-identical"
+
+
 if __name__ == "__main__":
     test_prefetch_iter_preserves_order_and_completes()
     test_prefetch_iter_propagates_producer_exception()
     test_prefetch_iter_is_lazy_bounded()
+    test_stage_tree_moves_arrays_skips_non_arrays()
     print("ok (run test_chunk_loader_prefetch_matches_serial under pytest)")

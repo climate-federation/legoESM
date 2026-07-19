@@ -182,6 +182,40 @@ class TestPhysicsSchemeConfig:
         assert fn is not None
         assert cfg is not None
 
+    def test_bechtold_autoconversion_threads_to_config(self):
+        """--convective-precip-split autoconversion must reach BechtoldConfig via
+        the DEDICATED bechtold branch (codex HIGH regression: bechtold does not
+        pass through the shared _split block used by the other schemes)."""
+        from legoesm.driver.physics_pipeline import _resolve_convection
+        _fn, cfg = _resolve_convection(ExperimentConfig(
+            convection="bechtold", convective_precip_split="autoconversion",
+            autoconv_q_c_crit=8.0e-4, autoconv_pe_max=0.8))
+        assert cfg.precip_split_scheme == "autoconversion"
+        assert cfg.autoconv_q_c_crit == 8.0e-4
+        assert cfg.autoconv_pe_max == 0.8
+
+    def test_tiedtke_autoconversion_threads_to_config(self):
+        from legoesm.driver.physics_pipeline import _resolve_convection
+        _fn, cfg = _resolve_convection(ExperimentConfig(
+            convection="tiedtke", convective_precip_split="autoconversion"))
+        assert cfg.precip_split_scheme == "autoconversion"
+
+    def test_bechtold_default_split_is_constant(self):
+        # default stays "constant" -> no silent behaviour change from the feature
+        from legoesm.driver.physics_pipeline import _resolve_convection
+        _fn, cfg = _resolve_convection(ExperimentConfig(convection="bechtold"))
+        assert cfg.precip_split_scheme == "constant"
+
+    def test_autoconversion_on_unsupporting_scheme_raises(self):
+        """A non-constant split on a scheme without precip_split_scheme must fail
+        LOUDLY (codex MED), not silently run the constant split."""
+        import pytest
+        from legoesm.driver.physics_pipeline import _resolve_convection
+        with pytest.raises(ValueError, match="autoconversion split"):
+            _resolve_convection(ExperimentConfig(
+                convection="zhang_mcfarlane",
+                convective_precip_split="autoconversion"))
+
 
 # =========================================================================
 # 3. Cloud-radiation coupling wiring

@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 import numpy as np
 import jax
@@ -409,6 +409,89 @@ def exchange_state_mpas_ocean(local_state, layout: VoronoiPartitionLayout):
         eta=local_state.eta.replace(data=eta_ex),
         w=local_state.w.replace(data=w_ex),
     )
+
+
+class MPASOceanHaloRefresh(NamedTuple):
+    """Packed IN-STEP halo refresh callables for the distributed MPAS ocean
+    step (the stage-correctness lever — see
+    ``docs/performance/scaling/mpas_ocean_distributed_stage_audit.md``).
+
+    The per-step entry refresh (:func:`exchange_state_mpas_ocean`) restores
+    ``halo_depth`` rings at step ENTRY only; the step's internal stencil
+    chains (del4 = 4 hops, forward-backward Coriolis = 2 hops on UPDATED u,
+    2-6 hops PER barotropic substep, TVD tracer advection = 2 hops on
+    UPDATED T/S) consume more hops than ``halo_depth = 2`` between
+    refreshes, silently corrupting owned cells at partition boundaries.
+    Threading this object through ``MPASOceanModel.step(halo_refresh=...)``
+    re-arms the halo at each dependency frontier.
+
+    Each callable issues ONE batched union-neighbor message per neighbor
+    per dtype group (:func:`batched_halo_exchange` — AD-safe ``custom_vjp``
+    sendrecv, safe inside ``lax.scan``; identity when the schedule has no
+    neighbors).  ``None`` (the serial default everywhere) keeps every
+    consumer byte-identical — the refresh sites are static Python
+    ``if halo_refresh is not None`` branches.
+
+    Fields
+    ------
+    edges : Callable(*fields) -> tuple
+        Refresh edge-indexed fields ``(n_local_edges, ...)``.
+    cells : Callable(*fields) -> tuple
+        Refresh cell-indexed fields ``(n_local_cells, ...)``.
+    both : Callable(edge_fields, cell_fields) -> (tuple, tuple)
+        Refresh a mixed group in the SAME packed message (e.g. the
+        barotropic substep's ``u_bar`` edge + ``eta`` cell pair).
+    vertices : Callable(*fields) -> tuple
+        Refresh vertex-indexed fields ``(n_local_vertices, ...)`` via the
+        per-field :class:`~legoesm.parallel.halo_exchange_voronoi.
+        VoronoiHaloExchange` (``partition.vertex_comm``) — NOT the packed
+        cell/edge message (the batched schedule carries no vertex lane;
+        the ONLY vertex consumer is the K_zeta_bih vorticity-biharmonic
+        intermediate, one field per tendency call, so a per-field
+        exchange is proportionate).  Same AD-safe custom_vjp sendrecv.
+    """
+
+    edges: Callable
+    cells: Callable
+    both: Callable
+    vertices: Callable
+
+
+def make_mpas_ocean_halo_refresh(layout) -> MPASOceanHaloRefresh:
+    """Build the in-step refresh callables for an armed
+    :class:`VoronoiPartitionLayout` (see :class:`MPASOceanHaloRefresh`)."""
+    from legoesm.parallel.halo_exchange_voronoi import VoronoiHaloExchange
+
+    sched = layout.batched_comm
+    if sched is None:
+        # Hand-built layout (mirrors make_voronoi_mpi_step's rebuild).
+        sched = build_batched_halo_schedule(
+            layout.partition.cell_comm, layout.partition.edge_comm,
+        )
+    rank = layout.rank
+    _vx = VoronoiHaloExchange(layout.partition, backend="mpi")
+
+    def _edges(*fields):
+        out_e, _ = batched_halo_exchange(fields, (), sched, rank)
+        return out_e
+
+    def _cells(*fields):
+        _, out_c = batched_halo_exchange((), fields, sched, rank)
+        return out_c
+
+    def _both(edge_fields, cell_fields):
+        return batched_halo_exchange(edge_fields, cell_fields, sched, rank)
+
+    def _vertices(*fields):
+        # np=1 / no-neighbor degeneracy: identity WITHOUT touching the
+        # MPI stack (mirrors batched_halo_exchange's early return —
+        # _exchange_mpi calls require_mpi_stack unconditionally).
+        if not layout.partition.vertex_comm.neighbor_ranks:
+            return tuple(fields)
+        return tuple(_vx.exchange_vertex_field(f) for f in fields)
+
+    return MPASOceanHaloRefresh(edges=_edges, cells=_cells, both=_both,
+                                vertices=_vertices)
 
 
 def gather_voronoi_field(
@@ -943,6 +1026,14 @@ def make_voronoi_mpi_step(
         # sigma from ``cellsOnEdge``); column-local AMIP physics is unaffected
         # by it but the exchange keeps the boundary consistent.
         phys_state_out = phys_state
+        # Surface-flux diagnostic (sw_net_sfc, lw_net_sfc, precip) the coupler
+        # reads from ``_carry_aux`` for the daily ocean/land forcing.  Mirrors
+        # the serial ``primitive_eq_mpas._step_jit``: extract it from the physics
+        # tendency and publish it (rank-local, matching the rank-local state the
+        # MPI-voronoi coupler already sees).  Without this the coupled MPI-voronoi
+        # ocean/land was forced with zero surface flux (the serial path exported
+        # it, the MPI bypass did not).
+        sfc_diag = (None, None, None)
         if physics_fn is not None:
             # Column-local physics needs no neighbor cells -> skip the exchange.
             state_phys_in = (
@@ -959,6 +1050,12 @@ def make_voronoi_mpi_step(
                 _pt, phys_state_out = _pr[0], _pr[1]
             else:
                 _pt = _pr
+            _sw_sfc = getattr(_pt, "sw_net_sfc", None)
+            _lw_sfc = getattr(_pt, "lw_net_sfc", None)
+            _pr_sfc = getattr(_pt, "precip", None)
+            if (_sw_sfc is not None or _lw_sfc is not None
+                    or _pr_sfc is not None):
+                sfc_diag = (_sw_sfc, _lw_sfc, _pr_sfc)
             state_new = MPASHydrostaticState(
                 u=state_phys_in.u.replace(
                     data=state_phys_in.u.data + dt * _pt.du_dt.data),
@@ -1001,7 +1098,7 @@ def make_voronoi_mpi_step(
                 state_new, state, _owned_area, _total_area_global,
             )
 
-        return cast_pytree(state_new, None, "storage"), phys_state_out
+        return cast_pytree(state_new, None, "storage"), phys_state_out, sfc_diag
 
     logger.info(
         "Voronoi MPI step ready: rank=%d/%d, %d owned cells, %d local cells",
@@ -1023,7 +1120,23 @@ def make_voronoi_mpi_step(
             refuse_unthreaded_stateful_physics(
                 physics_fn, phys_state,
                 where="make_voronoi_mpi_step(return_phys_state=True)")
-            return _step(state, dt, forcing, phys_state)
+            _state_out, _phys_out, _sfc = _step(state, dt, forcing, phys_state)
+            # Publish the surface-flux diagnostic on the model so ``_run_mpas``
+            # stashes it into ``_carry_aux`` for the coupler — the coupled
+            # MPI-voronoi path otherwise forced the ocean/land with zero surface
+            # flux.  Guard against stashing a Tracer (an outer jit/scan/grad would
+            # leak it into the next trace, gh-417) and merge ELEMENT-WISE
+            # keep-last-non-None — both mirror the serial
+            # ``primitive_eq_mpas.step()`` (a held-radiation step refreshes precip
+            # while retaining the last radiation sw/lw).  Python-level side stash
+            # (post-jit), same as the serial ``self._sfc_diag``.
+            if not any(isinstance(leaf, jax.core.Tracer)
+                       for leaf in jax.tree_util.tree_leaves(_sfc)):
+                _prev = getattr(model, "_sfc_diag", None) or (None, None, None)
+                model._sfc_diag = tuple(
+                    new if new is not None else old
+                    for new, old in zip(_sfc, _prev))
+            return _state_out, _phys_out
         return _step_carry
 
     # Backward-compatible contract for the dynamics / stateless-physics

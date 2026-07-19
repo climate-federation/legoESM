@@ -955,12 +955,10 @@ def barotropic_substeps_latlon_cgrid(
     # ``(... + F_slow_u) * u_mask``) — so closed/land faces receive nothing.
     # Feature-gated on the STATIC config bool (CLAUDE.md feature-gating exception)
     # AND a supplied traced model time: disabled / no-time => bit-identical.
-    _tf_cfg = getattr(config, "tidal_forcing", None)
-    if _tf_cfg is not None and _tf_cfg.enabled and t_seconds is not None:
-        from legoesm.ocean.physics.tidal_forcing import tidal_acceleration
-        _a_tide_x, _a_tide_y = tidal_acceleration(grid, t_seconds, _tf_cfg, g=g)
-        F_slow_u = F_slow_u + _a_tide_x.astype(F_slow_u.dtype)
-        F_slow_v = F_slow_v + _a_tide_y.astype(F_slow_v.dtype)
+    from legoesm.ocean.physics.tidal_forcing import apply_tidal_forcing
+    F_slow_u, F_slow_v = apply_tidal_forcing(
+        F_slow_u, F_slow_v, grid, t_seconds,
+        getattr(config, "tidal_forcing", None), g=g)
 
     # Depth-averaged velocity.  Cast h_k to _dt because z_coord.sigma_w
     # may be float64 (jnp.linspace default under x64), which would
@@ -1355,14 +1353,15 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
 
     # Tide on the EXTENDED geometry (analytic in the grid — no exchange
     # needed; owned rows are bit-identical to the standard path's values).
-    _tf_cfg = getattr(config, "tidal_forcing", None)
-    if _tf_cfg is not None and _tf_cfg.enabled and t_seconds is not None:
-        from legoesm.ocean.physics.tidal_forcing import tidal_acceleration
-        with local_halo_pads():
-            _a_tide_x, _a_tide_y = tidal_acceleration(
-                grid_ext, t_seconds, _tf_cfg, g=g)
-        Fsu_ext = Fsu_ext + _a_tide_x.astype(Fsu_ext.dtype)
-        Fsv_ext = Fsv_ext + _a_tide_y.astype(Fsv_ext.dtype)
+    from legoesm.ocean.physics.tidal_forcing import apply_tidal_forcing
+    # Wide-halo path: the equilibrium tide is evaluated on the EXTENDED band
+    # geometry, so the acceleration call must run under local_halo_pads(). The
+    # single-owner wrapper does the enabled/t_seconds gate, masking contract and
+    # the carry-invariant dtype cast; only the halo-pad context is band-specific.
+    with local_halo_pads():
+        Fsu_ext, Fsv_ext = apply_tidal_forcing(
+            Fsu_ext, Fsv_ext, grid_ext, t_seconds,
+            getattr(config, "tidal_forcing", None), g=g)
 
     eta_floor_ext = min_water_col - H_ext
     area_ext = grid_ext.area.astype(_dt)

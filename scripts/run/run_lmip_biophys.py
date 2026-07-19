@@ -79,6 +79,9 @@ def make_grid(grid_type: str, resolution: int):
     if gt == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
         return create_latlon_grid(resolution)
+    if gt == "mpas":                                  # voronoi / icosahedral
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        return create_voronoi_mesh(resolution)       # N = SCVT subdivision level
     raise ValueError(f"unsupported grid_type {grid_type!r}")
 
 

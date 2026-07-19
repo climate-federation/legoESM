@@ -450,26 +450,3 @@ def _cgrid_velocity_divergence(u_face, v_face, grid):
     net_lat = hx_iface[1:, :] * v_face[1:, :] - hx_iface[:-1, :] * v_face[:-1, :]
 
     return (net_lon + net_lat) / grid.area
-
-
-def cgrid_fv_scalar_advection_latlon(q, u_face, v_face, grid, limiter=True):
-    """PPM advection of scalar q by C-grid face velocities (advective form).
-
-    Computes -v·∇q = -div(q v) + q div(v).  The div(v) term uses direct
-    velocity divergence (no PPM needed for q=1), halving transport cost.
-
-    Parameters
-    ----------
-    q : jax.Array, shape (n_lat, n_lon)
-    u_face : jax.Array, shape (n_lat, n_lon+1)
-    v_face : jax.Array, shape (n_lat+1, n_lon)
-    grid : LatLonGrid
-    limiter : bool
-
-    Returns
-    -------
-    jax.Array, shape (n_lat, n_lon)
-    """
-    flux_form = cgrid_fv_flux_divergence_latlon(q, u_face, v_face, grid, limiter)
-    div_v = _cgrid_velocity_divergence(u_face, v_face, grid)
-    return flux_form + q * div_v

@@ -7,10 +7,26 @@ Provides:
 
 Pure JAX functions, compatible with jit/grad/vmap.
 
+Faithfulness
+------------
+``tests/ocean/unit/test_eos_wright_faithful.py`` pins the DEFAULT ``wright_eos``
+(previously only qualitatively checked, while every alternate EOS was value-pinned):
+(1) the density rational polynomial to round-off (rel 1e-12) across a T×S×p grid
+vs an independent scalar reimplementation; (2) an INDEPENDENT physical cross-check
+that ρ_Wright agrees with the separately-pinned UNESCO-80 EOS to < 0.01 kg/m^3 at
+the surface (catches any material coefficient error affecting these points — four
+surface values cannot pin down all 15 coefficients, but a gross error diverges);
+(3) ``thermal_expansion_coeff`` α and ``haline_contraction_coeff`` β (which use
+``jax.grad``) against independent ANALYTIC derivatives of the closed form (rel
+1e-9); (4) the MOM6/Wright coefficients as a canary; (5) physical monotonicity and
+x64/float32 AD-finiteness.  The EOS polynomial runs in the precision policy's
+compute dtype (float32 by default), so the round-off pins set the fp64 policy.
+
 Reference
 ---------
 Wright, D. G. (1997): An Equation of State for Use in Ocean Models:
 Ockham's Razor Revisited. J. Atmos. Oceanic Tech., 14(3), 735-740.
+Coefficients from MOM6 ``MOM_EOS_Wright.F90`` (reduced-range fit).
 """
 
 from __future__ import annotations

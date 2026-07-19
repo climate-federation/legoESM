@@ -276,6 +276,14 @@ class SegmentCarry(NamedTuple):
     tke: jax.Array = None
     qke: jax.Array = None
     gwd_spectrum: jax.Array = None
+    # Diagnostic CLUBB sub-grid cloud fraction (ncol, nlev) carried one step
+    # (radiation runs before turbulence) so ``compute_radiation_core`` can use it
+    # in the cloud optics instead of the RH grid-scale fraction — the compiled-
+    # rollout twin of the per-step ``_run_per_step`` carry (marine-Sc albedo
+    # lever).  ``None`` (default / feature off, or a non-cf-producing closure) =>
+    # byte-identical legacy carry.  Threaded exactly like ``tke``: fed to
+    # step_unified via ``_dm_in`` and read back from ``phys_out.cloud_fraction``.
+    cloud_fraction: jax.Array = None
     conv_precip_prev: jax.Array = None
     # Lagged (previous-step) total precip [kg/m²/s] driving the opt-in
     # convective cloud-fraction source.  Radiation runs BEFORE convection in
@@ -319,6 +327,7 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                T_land=None, q_i=None, q_s=None, q_g=None,
                N_c=None, N_r=None, N_i=None,
                tke=None, qke=None, gwd_spectrum=None,
+               cloud_fraction=None,
                conv_precip_prev=None,
                land_ml=None, w_land=None, snow=None,
                conv_prog_nlev=None):
@@ -453,6 +462,8 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         qke=None if qke is None else _promote(qke, storage),
         gwd_spectrum=(None if gwd_spectrum is None
                       else _promote(gwd_spectrum, storage)),
+        cloud_fraction=(None if cloud_fraction is None
+                        else _promote(cloud_fraction, storage)),
         conv_precip_prev=_promote(conv_precip_prev, storage),
         land_ml=land_ml,   # pytree (MultiLayerLandState) or None — not a scalar field
         # Soil-water bucket: None unless the bucket is active (identical
@@ -1000,6 +1011,7 @@ class _SplitStepLocals(NamedTuple):
     phys_tke: object
     phys_qke: object
     phys_gwd: object
+    phys_cloud_fraction: object = None
 
 
 _MOIST_FIELDS = ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_c", "N_r", "N_i")
@@ -1063,7 +1075,7 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
     for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
         if moist[_nm] is not None:
             _dm_in[_nm] = moist[_nm]
-    for _nm in ("tke", "qke", "gwd_spectrum"):
+    for _nm in ("tke", "qke", "gwd_spectrum", "cloud_fraction"):
         _fld = getattr(carry, _nm)
         if _fld is not None:
             _dm_in[_nm] = _fld
@@ -1224,6 +1236,7 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         w_land_new=w_land_new, snow_new=snow_new,
         phys_tke=phys_out.tke, phys_qke=phys_out.qke,
         phys_gwd=phys_out.gwd_spectrum,
+        phys_cloud_fraction=phys_out.cloud_fraction,
     )
 
 
@@ -1355,6 +1368,12 @@ def finalize_split_step(carry, lz, statics):
                           lz.phys_gwd if lz.phys_gwd is not None
                           else carry.gwd_spectrum,
                           carry.gwd_spectrum)),
+        cloud_fraction=(None if carry.cloud_fraction is None
+                        else _match_dtype(
+                            lz.phys_cloud_fraction
+                            if lz.phys_cloud_fraction is not None
+                            else carry.cloud_fraction,
+                            carry.cloud_fraction)),
         conv_precip_prev=_match_dtype(
             lz.conv_precip_prev_new, carry.conv_precip_prev),
         land_ml=lz.land_ml_new,
@@ -1984,9 +2003,14 @@ def build_segment_fn(
                     carry.T_land.at[_ofi].set(_T_land_local)
                     if carry.T_land is not None else None
                 )
-                # multilayer land tile is single-rank only (calibration) -> carry the
-                # state through unchanged on the MPI/owned-face path.
-                land_ml_new = carry.land_ml
+                # Multilayer land: capture the advanced state (step_unified's
+                # optional 4th return), identical to the single-rank path
+                # (_step_split_physics_and_finalize).  ``carry.land_ml`` is the
+                # rank-local owned-face columns (scattered in
+                # ModelDriver._setup_parallel), so _step_unified advanced THIS
+                # rank's soil columns; capture them instead of discarding.  When
+                # land_ml is None (slab land) the else-branch carries None.
+                land_ml_new = _ret[3] if len(_ret) > 3 else carry.land_ml
                 # Soil-water bucket: w_land_new rides PhysicsOutput
                 # (advanced in physics_step_no_rad), scattered at owned
                 # indices.  Carried through unchanged for legacy wrappers
@@ -2029,6 +2053,7 @@ def build_segment_fn(
                     w_land_new=w_land_new, snow_new=snow_new,
                     phys_tke=phys_out.tke, phys_qke=phys_out.qke,
                     phys_gwd=phys_out.gwd_spectrum,
+                    phys_cloud_fraction=phys_out.cloud_fraction,
                 )
             else:
                 # Single-rank (single-controller / lat-band-SPMD) operator-split
@@ -2201,11 +2226,16 @@ def build_segment_fn(
             def _own(fld):
                 return None if fld is None else fld[_ofi]
 
-            # 8th return (multilayer land state) is unused on the MPI owned-face
-            # path: multilayer land is single-rank only, so land_ml_new is carried
-            # separately (= carry.land_ml) above; discard the radiation-core value.
+            # 8th return = the advanced MULTILAYER land state (carry.land_ml is
+            # the rank-local owned columns, scattered in
+            # ModelDriver._setup_parallel).  In the UNFUSED-radiation split the
+            # land tile is advanced ONLY here (radiation/surface core), never in
+            # the norad scan — so capture it; discarding it froze the soil
+            # (serial too).  The clear-sky second pass below discards its 8th
+            # (diagnostic re-run, must not re-advance).
             (dT_dt_rad, sw_net_sfc, lw_net_sfc,
-             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new_local, _) = \
+             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new_local,
+             land_ml_new) = \
                 pipeline.compute_radiation_core(
                     carry.T[_ofi], carry.p_s[_ofi], carry.q_v[_ofi],
                     forcing.sst, forcing.sic, lat, lon,
@@ -2269,10 +2299,12 @@ def build_segment_fn(
                 if carry.T_land is not None else None
             )
         else:
-            # 8th return (multilayer land state) unused on this MPI path — land_ml
-            # is single-rank only and carried separately (see land_ml_new above).
+            # 8th return = the advanced multilayer land state (see the owned-face
+            # branch above): the unfused-radiation split advances the land tile
+            # ONLY in this radiation/surface core, so capture it — discarding it
+            # froze the soil.  land_ml is None for slab-land runs (else-carry).
             (dT_dt_rad, sw_net_sfc, lw_net_sfc,
-             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new, _) = \
+             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new, land_ml_new) = \
                 pipeline.compute_radiation_core(
                     carry.T, carry.p_s, carry.q_v,
                     forcing.sst, forcing.sic, lat, lon,
@@ -2343,6 +2375,11 @@ def build_segment_fn(
                 held_new[7], carry.held_lw_up_toa_clr),
             T_land=(None if carry.T_land is None
                     else _match_dtype(T_land_new, carry.T_land)),
+            # Advanced multilayer land state (rank-local owned columns under
+            # cube-face MPI; None for slab-land runs).  Without this the
+            # unfused-radiation path never wrote the stepped soil back and the
+            # Richards state froze across the whole run.
+            land_ml=land_ml_new,
         )
 
     @partial(jax.jit, static_argnums=(1,), donate_argnums=(0,))

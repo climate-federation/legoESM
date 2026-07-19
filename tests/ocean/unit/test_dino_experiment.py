@@ -1622,7 +1622,11 @@ class TestSlopeLimitNemoCap:
         with pytest.raises(ValueError, match="slope_limit"):
             self._w_triads("gerdes")
 
-    def test_centered_scheme_rejects_cap(self):
+    def test_centered_scheme_accepts_cap(self):
+        # nemo_cap is wired for the centered slope path since 2026-07-16
+        # (previously it raised; the DM95 taper killed the flux at steep
+        # ML-base outcrops where NEMO's cap keeps pumping — plan §G). Lock
+        # that centered + nemo_cap runs and returns finite tendencies.
         from legoesm.ocean.experiments.dino import (
             dino_lat_lon_grid, dino_lat_lon_state, dino_lat_lon_vertical,
             dino_r1_exact_config,
@@ -1636,11 +1640,13 @@ class TestSlopeLimitNemoCap:
         st = dino_lat_lon_state(g, z, cfg)
         from legoesm.ocean.experiments.dino import dino_lat_lon_model_config
         mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
-        gm_bad = mc.gm_redi._replace(slope_scheme="centered")
-        with pytest.raises(ValueError, match="nemo_cap"):
-            gm_redi_tracer_tendency_latlon(
-                st.T.data, st.S.data, st.eta.data, st.H_bathy.data,
-                g, z, gm_bad, eos=mc.eos)
+        gm_centered = mc.gm_redi._replace(slope_scheme="centered")
+        assert gm_centered.slope_limit == "nemo_cap"
+        dT_dt, dS_dt = gm_redi_tracer_tendency_latlon(
+            st.T.data, st.S.data, st.eta.data, st.H_bathy.data,
+            g, z, gm_centered, eos=mc.eos)
+        assert bool(jnp.all(jnp.isfinite(dT_dt)))
+        assert bool(jnp.all(jnp.isfinite(dS_dt)))
 
     def test_preset_selects_cap(self):
         from legoesm.ocean.experiments.dino import (

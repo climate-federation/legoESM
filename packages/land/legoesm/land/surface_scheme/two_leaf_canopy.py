@@ -307,8 +307,15 @@ def compute_two_leaf_canopy_fluxes(
     # (Schuepp 1993 midrange), matching PFT_LEAF_WIDTH's default leaf class.
     _d_leaf_in = _get(lp, "d_leaf", None)
     d_leaf = jnp.full(ncol, _DEFAULT_D_LEAF) if _d_leaf_in is None else _d_leaf_in
-    emissivity_per_col = _get(
-        lp, "emissivity", jnp.full(ncol, land_config.emissivity_land))
+    # NB: the two-stream ``canopy_longwave_rt`` resolves longwave from the
+    # SEPARATE leaf and soil emissivities (cc.epsf / cc.epss) and exports the
+    # conservative column ``eps_eff`` used as the surface emissivity below.  The
+    # single broadband ``CanopyLandParams.emissivity`` has no unique mapping to
+    # that leaf/soil pair, so this scheme uses the config-resolved pair and does
+    # NOT consume the broadband field — that field drives the simpler SEB/slab
+    # path instead (``simple_seb.compute_seb_fluxes``).  (Threading an OBSERVED
+    # broadband emissivity into the two-stream RT would be a deliberate mapping
+    # policy — a separate, validated change.)
 
     # ``TgC`` priority:
     #   1. Caller-supplied ``TgC_override`` (state-carried 30-day EMA from
@@ -452,8 +459,10 @@ def compute_two_leaf_canopy_fluxes(
     H_Sun   = fluxes_per_col["H_Sun"]
     H_Sh    = fluxes_per_col["H_Sh"]
     H_Soil  = fluxes_per_col["H_Soil"]
-    An_Sun  = fluxes_per_col["An_Sun"]
+    An_Sun  = fluxes_per_col["An_Sun"]        # NET (drives SIF + leaf coupling)
     An_Sh   = fluxes_per_col["An_Sh"]
+    Agross_Sun = fluxes_per_col["Agross_Sun"]  # GROSS (carbon-model GPP)
+    Agross_Sh  = fluxes_per_col["Agross_Sh"]
     G       = fluxes_per_col["G"]
     gs_Sun  = fluxes_per_col["gs_Sun"]
     gs_Sh   = fluxes_per_col["gs_Sh"]
@@ -464,7 +473,15 @@ def compute_two_leaf_canopy_fluxes(
 
     LE_tot = LE_Sun + LE_Sh + LE_Soil
     H_tot  = H_Sun  + H_Sh  + H_Soil
-    GPP    = (An_Sun + An_Sh) * _G_C_PER_UMOL_CO2    # gC m-2 s-1
+    # GPP is GROSS carbon uptake (BEFORE leaf dark respiration).  The carbon
+    # model (carbon_cycle.step_carbon) re-charges foliar MAINTENANCE
+    # respiration r_maint_fol*C_fol separately, so exporting NET An here would
+    # double-count leaf respiration (once as Rd folded into An, once as
+    # r_maint_fol) and bias carbon-use efficiency (NPP/GPP) low.  This matches
+    # the SimpleSEB path (carbon/stomata.py: gpp = max(A_gross, 0)*_MC).  NET
+    # An_Sun/An_Sh still drive stomatal coupling, the leaf energy/CO2 flux, and
+    # SIF (below); only the carbon-facing GPP is gross.
+    GPP    = (Agross_Sun + Agross_Sh) * _G_C_PER_UMOL_CO2    # gC m-2 s-1 (GROSS)
 
     # ---- Optional solar-induced fluorescence (passive TOC diagnostic) ----
     # cc.sif is a static config leaf, so this Python gate does not double-trace.

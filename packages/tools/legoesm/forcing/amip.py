@@ -19,12 +19,20 @@ References
 
 from __future__ import annotations
 
+import logging
 from typing import NamedTuple
 
 import jax.numpy as jnp
 import numpy as np
+from legoesm.forcing.time_utils import NOLEAP_DAYS_PER_MONTH, NOLEAP_MONTH_STARTS
 
 from legoesm import constants
+
+logger = logging.getLogger(__name__)
+
+# Vectorised views of the shared noleap calendar tables (month index 0-based).
+_NOLEAP_MONTH_STARTS_ARR = np.asarray(NOLEAP_MONTH_STARTS[:12], dtype=np.int64)
+_NOLEAP_MONTH_LEN_ARR = np.asarray(NOLEAP_DAYS_PER_MONTH, dtype=np.int64)
 
 
 class AMIPForcingConfig(NamedTuple):
@@ -92,8 +100,13 @@ class AMIPForcing(NamedTuple):
     sst : jax.Array
         Sea surface temperature [K], shape (ntime, ...) where ``...``
         is ``(6, n, n)`` for cubed-sphere or ``(n_lat, n_lon)`` for Gaussian.
+        Mid-month bcs ANCHOR values — deliberately unclamped (may dip below
+        the freezing point); the physical floor is applied to the
+        interpolated value in :func:`get_forcing_at_time` (Taylor 2000).
     sic : jax.Array
-        Sea-ice concentration [0-1], same shape as sst.
+        Sea-ice concentration ANCHORS, same shape as sst.  May overshoot
+        [0, 1] (PCMDI mid-month bcs convention); clipped to [0, 1] only
+        AFTER time interpolation in :func:`get_forcing_at_time`.
     config : AMIPForcingConfig
         Configuration used to load the data.
     """
@@ -148,25 +161,97 @@ def _is_icon_unstructured(ds) -> bool:
     return "cell" in ds.dims and "clon" in ds.coords and "clat" in ds.coords
 
 
+def _noleap_days_since_epoch(year, month0, dom0, day_frac, epoch_year: int):
+    """Model-clock (noleap) day count for calendar dates, by CALENDAR DATE.
+
+    ``day = (year - epoch_year)*365 + noleap_day_of_year(month, day) - 1 +
+    day_frac`` with Feb 29 collapsed onto Feb 28 (day-of-month clamped to
+    the noleap month length).  The model day advances on a strict 365-day
+    calendar (``time_utils.day_to_calendar``), so a TRUE Gregorian day
+    count off a Gregorian file axis would run ~1 day per 4 years ahead of
+    the model's nominal date (~9 days over 1979-2014) while insolation
+    stays 365-periodic.  Mapping each file timestamp by calendar date
+    makes the model day index the file by *simulated* calendar date
+    exactly (audit F1).
+
+    Parameters are array-like: ``year`` (calendar year), ``month0``
+    (0-based month), ``dom0`` (0-based day of month), ``day_frac``
+    (fraction of day in [0, 1)).
+    """
+    year = np.asarray(year, dtype=np.int64)
+    month0 = np.asarray(month0, dtype=np.int64)
+    dom0 = np.minimum(
+        np.asarray(dom0, dtype=np.int64), _NOLEAP_MONTH_LEN_ARR[month0] - 1
+    )
+    return (
+        (year - epoch_year) * 365.0
+        + _NOLEAP_MONTH_STARTS_ARR[month0]
+        + dom0
+        + np.asarray(day_frac, dtype=np.float64)
+    )
+
+
+def _drop_collapsed_leap_records(
+    times_days: np.ndarray,
+    sst: np.ndarray,
+    sic: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Drop records whose noleap-mapped day coordinate did not advance.
+
+    The by-calendar-date anchoring collapses Feb 29 onto Feb 28, so a DAILY
+    Gregorian axis maps two consecutive records onto the same noleap day.
+    Keep the first (Feb 28) and drop the duplicate (Feb 29) — the OMIP §2.2
+    leap-day-filtering convention (``time_utils.is_feb_29``) — so the axis
+    stays strictly increasing for the ``searchsorted`` interpolation in
+    :func:`get_forcing_at_time`.  Monthly (bcs) axes are unaffected.
+    """
+    if times_days.shape[0] < 2:
+        return times_days, sst, sic
+    keep = np.ones(times_days.shape[0], dtype=bool)
+    keep[1:] = np.diff(times_days) > 0.0
+    if keep.all():
+        return times_days, sst, sic
+    n_dropped = int((~keep).sum())
+    # Loud, not silent: for a daily Gregorian file this is the expected one
+    # Feb-29 per leap year; anything more (e.g. a 360_day daily file whose
+    # Feb 29/30 both collapse) deserves the user's attention.
+    logger.warning(
+        "AMIP forcing: dropped %d record(s) whose calendar date collapses on "
+        "the model's noleap clock (leap-day filtering, OMIP protocol).",
+        n_dropped,
+    )
+    return times_days[keep], sst[keep], sic[keep]
+
+
 def _time_coord_to_days(time_coord, epoch_year: int | None = None) -> np.ndarray:
     """Convert numeric, NumPy datetime, or cftime coordinates to days.
 
     When ``epoch_year`` is given and the axis is calendar-aware (datetime64 or
-    cftime), returns **absolute** days since ``epoch_year-01-01`` so a model day
-    (also days since ``start_year-01-01``) indexes the file by real calendar
-    date — the AMIP-II requirement that a run use the SST/SIC of its *simulated*
-    dates, and preserving the mid-month bcs anchor (Jan value at day ~15.5, not
-    day 0).  With ``epoch_year=None`` it falls back to days since the first
-    record (legacy relative indexing).  A bare-numeric axis carries no reference
-    date, so it is returned as-is when an epoch is requested (the synthetic AMIP
-    deck already writes it as days since ``start_year-01-01``).
+    cftime), returns days since ``epoch_year-01-01`` **on the model's noleap
+    (365-day) clock**, mapping each file timestamp by CALENDAR DATE (Feb 29
+    collapses onto Feb 28; see :func:`_noleap_days_since_epoch`) so a model day
+    (also days since ``start_year-01-01`` on the noleap clock) indexes the file
+    by its *simulated* calendar date — the AMIP-II requirement — with no
+    Gregorian-vs-noleap leap-day drift, and preserving the mid-month bcs anchor
+    (Jan value at day ~15.5, not day 0).  With ``epoch_year=None`` it falls back
+    to days since the first record (legacy relative indexing).  A bare-numeric
+    axis carries no reference date, so it is returned as-is when an epoch is
+    requested (the synthetic AMIP deck already writes it as days since
+    ``start_year-01-01``).
     """
     time_arr = np.asarray(time_coord)
 
     if np.issubdtype(time_arr.dtype, np.datetime64):
         if epoch_year is not None:
-            epoch = np.datetime64(f"{epoch_year:04d}-01-01")
-            return ((time_arr - epoch) / np.timedelta64(1, "D")).astype(np.float64)
+            months_int = time_arr.astype("datetime64[M]").astype(np.int64)
+            year_num = months_int // 12 + 1970
+            month0 = months_int % 12
+            days_d = time_arr.astype("datetime64[D]")
+            dom0 = (
+                days_d - time_arr.astype("datetime64[M]").astype("datetime64[D]")
+            ).astype(np.int64)
+            frac = ((time_arr - days_d) / np.timedelta64(1, "D")).astype(np.float64)
+            return _noleap_days_since_epoch(year_num, month0, dom0, frac, epoch_year)
         t0 = time_arr[0]
         return ((time_arr - t0) / np.timedelta64(1, "D")).astype(np.float64)
 
@@ -175,13 +260,35 @@ def _time_coord_to_days(time_coord, epoch_year: int | None = None) -> np.ndarray
         import cftime
 
         if epoch_year is not None:
-            units = f"days since {epoch_year:04d}-01-01 00:00:00"
-        else:
-            units = (
-                "days since "
-                f"{first.year:04d}-{first.month:02d}-{first.day:02d} "
-                f"{first.hour:02d}:{first.minute:02d}:{first.second:02d}"
-            )
+            # By-calendar-date noleap mapping for EVERY cftime calendar: for a
+            # noleap-dated file this is identical to date2num("days since
+            # epoch"), while a Gregorian-dated file loses its leap days (which
+            # the model clock never lives through) instead of drifting.  A
+            # 360_day/all_leap file is likewise indexed by its stamped
+            # calendar date (out-of-range days clamp to the noleap month
+            # length) — a raw 360/366-day count would drift +-5/+1 d/yr
+            # against the model's 365-day clock.
+            vals = []
+            for t in time_arr.ravel():
+                day_frac = (
+                    t.hour * 3600.0
+                    + t.minute * 60.0
+                    + t.second
+                    + getattr(t, "microsecond", 0) / 1e6
+                ) / 86400.0
+                vals.append(
+                    float(
+                        _noleap_days_since_epoch(
+                            t.year, t.month - 1, t.day - 1, day_frac, epoch_year
+                        )
+                    )
+                )
+            return np.asarray(vals, dtype=np.float64).reshape(time_arr.shape)
+        units = (
+            "days since "
+            f"{first.year:04d}-{first.month:02d}-{first.day:02d} "
+            f"{first.hour:02d}:{first.minute:02d}:{first.second:02d}"
+        )
         return np.asarray(
             cftime.date2num(list(time_arr), units=units, calendar=first.calendar),
             dtype=np.float64,
@@ -210,8 +317,149 @@ def _time_coord_to_days(time_coord, epoch_year: int | None = None) -> np.ndarray
     return values - values[0]
 
 
+def _validate_sst_sic_units(
+    sst_data: np.ndarray,
+    sic_data: np.ndarray,
+    sst_units_attr: str,
+    sic_units_attr: str,
+    config: AMIPForcingConfig,
+) -> None:
+    """Units-attribute + converted-value sanity guard on RAW SST/SIC anchors.
+
+    Shared by the lat-lon and ICON-unstructured load paths (audit F3: the
+    ICON path previously bypassed every data-quality guard).  Cross-checks
+    the file's ``units`` attributes against the configured ``sst_offset`` /
+    ``sic_scale`` conversions and bounds the CONVERTED values, raising a
+    precise ``ValueError`` instead of silently mis-forcing.  Operates on the
+    UNCONVERTED arrays (offset/scale applied internally for the sanity
+    bounds); NaN anchors are tolerated (``nanmin``/``nanmax``).
+
+    Units-attribute consistency guard (audit 2026-06-11) — the same
+    defense-in-depth the ozone (``_ozone_unit_factor``) and GHG
+    (``_GHG_UNIT_TO_MOLE_FRACTION``) loaders carry.  ``sst_offset`` /
+    ``sic_scale`` are CONFIG-driven, so a Kelvin SST file run with the
+    default Celsius offset (or a percent SIC file with scale=1.0) would
+    silently corrupt the boundary condition (SST→~575 K, masked only on the
+    low side by the freeze floor; SIC→100×, masked by the [0,1] clip).
+    """
+    def _norm(s):
+        return s.strip().lower().replace("_", " ").replace("-", " ")
+    _sst_units = _norm(str(sst_units_attr))
+    _sic_units = _norm(str(sic_units_attr))
+    _sst_is_celsius = _sst_units in (
+        "degc", "deg c", "celsius", "c", "degrees celsius",
+        "degree celsius", "degreesc",
+    )
+    _sst_is_kelvin = _sst_units in (
+        "k", "kelvin", "degk", "deg k", "degrees kelvin",
+        "degree kelvin",
+    )
+    # A Celsius file needs the +T_freeze offset (tight tolerance,
+    # correct sign); anything else (wrong sign, 100, 150) is a
+    # misconfiguration, not a C->K conversion (codex review).
+    if _sst_is_celsius and abs(config.sst_offset - constants.T_freeze) > 1.0:
+        raise ValueError(
+            f"SST file {config.sst_var!r} has units={_sst_units!r} "
+            f"(Celsius) but sst_offset={config.sst_offset} is not the "
+            f"+{constants.T_freeze} K Celsius->Kelvin offset. Pass "
+            f"--sst-offset {constants.T_freeze} (constants.T_freeze)."
+        )
+    if _sst_is_kelvin and abs(config.sst_offset) > 1.0:
+        raise ValueError(
+            f"SST file {config.sst_var!r} has units={_sst_units!r} "
+            f"(Kelvin) but sst_offset={config.sst_offset} would add a "
+            f"spurious +{constants.T_freeze}. Pass --sst-offset 0 for a "
+            "Kelvin file."
+        )
+    # Units-INDEPENDENT physical sanity on the CONVERTED SST: even a
+    # file with no/unknown units attribute is caught here.  A Kelvin
+    # file run with the default Celsius offset lands at ~575 K; a
+    # Celsius file with offset=0 lands at ~0-30 K.  Both are
+    # unphysical for an ocean surface (the downstream T_freeze_ocean
+    # floor only catches the cold side, masking the hot Kelvin+offset
+    # failure).  Bounds are generous (ocean SST spans ~271-310 K).
+    _sst_max = float(np.nanmax(sst_data.astype(np.float64) + config.sst_offset))
+    _sst_min = float(np.nanmin(sst_data.astype(np.float64) + config.sst_offset))
+    if _sst_max > 340.0 or _sst_min < 240.0:
+        raise ValueError(
+            f"SST file {config.sst_var!r} converts to "
+            f"[{_sst_min:.1f}, {_sst_max:.1f}] K after "
+            f"sst_offset={config.sst_offset} (units={_sst_units!r}). "
+            "That is outside the physical ocean range (~240-340 K) — "
+            "likely a Kelvin file with a spurious Celsius offset or a "
+            "Celsius file with offset=0. Set --sst-offset correctly."
+        )
+    # SIC: '%'/'percent' need scale 0.01; '1'/'fraction' need 1.0.
+    # Empty/unknown units are AMBIGUOUS (codex review): do not assume
+    # fraction — the converted-value sanity below catches a bad scale.
+    _sic_is_percent = _sic_units in ("%", "percent")
+    # "(0 1)" is the NCAR-RDA ERA5 sea-ice (ci) units string "(0-1)" after _norm's
+    # "-"->" " — an unambiguous [0,1] fraction, so positively validate it (else a wrong
+    # sic_scale=0.01 on a real ERA5 file would slip past, all-zeros*0.01 masking it in
+    # the value-sanity floor) (codex-review iter 420).
+    _sic_is_fraction = _sic_units in ("1", "fraction", "dimensionless", "(0 1)")
+    # sic_scale == 0 is an explicit no-sea-ice sensitivity run (zeroes SIC);
+    # exempt it from the units/scale checks — it is unambiguously intentional
+    # (nobody misconfigures a scale of exactly 0) and yields a valid [0,1] field.
+    _no_ice = config.sic_scale == 0.0
+    if _sic_is_percent and not _no_ice and abs(config.sic_scale - 0.01) > 1e-6:
+        raise ValueError(
+            f"SIC file {config.sic_var!r} has units={_sic_units!r} "
+            f"(percent) but sic_scale={config.sic_scale}. Pass "
+            "--sic-scale 0.01 for a percent SIC file."
+        )
+    if _sic_is_fraction and not _no_ice and abs(config.sic_scale - 1.0) > 1e-6:
+        raise ValueError(
+            f"SIC file {config.sic_var!r} has units={_sic_units!r} "
+            f"(fraction) but sic_scale={config.sic_scale}. Pass "
+            "--sic-scale 1.0 for a fraction SIC file."
+        )
+    # Units-independent SIC sanity on the CONVERTED value: a percent
+    # file (0-100) scaled by 1.0 lands at ~50-100 — a wrong-scale error.
+    # The threshold allows the PCMDI mid-month "bcs" convention (Taylor
+    # et al. 2000), whose reconstructed anchors legitimately overshoot
+    # [0,1] to ~+/-25 after correct 0.01 scaling (raw ~+/-2500%); those
+    # overshoots are clipped only AFTER time interpolation, per protocol,
+    # so they must not be rejected here. A genuine 100x scale error still
+    # trips it.
+    _sic_max = float(np.nanmax(np.abs(sic_data.astype(np.float64)
+                                      * config.sic_scale)))
+    if _sic_max > 50.0:
+        raise ValueError(
+            f"SIC file {config.sic_var!r} reaches {_sic_max:.1f} "
+            f"after sic_scale={config.sic_scale} (units={_sic_units!r}) "
+            "— far beyond the +/-25 of the mid-month bcs convention. "
+            "Likely a percent file needing --sic-scale 0.01."
+        )
+
+
+def _pin_times_f64_warn_if_fp32(times_days: np.ndarray) -> jnp.ndarray:
+    """Return the forcing time axis as JAX float64, warning if the fp32
+    precision policy (x64 disabled) silently downcasts it.
+
+    An anchored transient axis carries large absolute day counts (~1e4-1e5)
+    whose sub-day resolution (mid-month .5) is lost at float32 (ULP ~
+    offset*2^-23).  The float64 request is a no-op under fp32 — warn when the
+    resulting quantization actually bites (audit FL3, shared by the lat-lon and
+    ICON loaders).
+    """
+    times = jnp.asarray(times_days, dtype=jnp.float64)
+    max_abs_day = float(np.max(np.abs(times_days))) if times_days.size else 0.0
+    if times.dtype == jnp.float32 and max_abs_day * 2.0 ** -23 > 0.01:
+        logger.warning(
+            "AMIP forcing time axis stored at float32 (x64 disabled): "
+            "absolute day offset ~%.0f gives ~%.3f-day (~%.0f-min) "
+            "quantization of the mid-month anchors. Enable JAX_ENABLE_X64=1 "
+            "(fp64 policy) for exact sub-day forcing indexing.",
+            max_abs_day, max_abs_day * 2.0 ** -23,
+            max_abs_day * 2.0 ** -23 * 1440.0,
+        )
+    return times
+
+
 def _load_icon_unstructured(
-    config: AMIPForcingConfig, grid, start_year: int | None = None
+    config: AMIPForcingConfig, grid, start_year: int | None = None,
+    run_days: float | None = None,
 ) -> AMIPForcing:
     """Load AMIP forcing from ICON unstructured NetCDF files.
 
@@ -232,6 +480,7 @@ def _load_icon_unstructured(
         clon = ds_sst["clon"].values.astype(np.float64)   # radians
         clat = ds_sst["clat"].values.astype(np.float64)   # radians
         sst_data = ds_sst[config.sst_var].values.astype(np.float64)
+        sst_units_attr = str(ds_sst[config.sst_var].attrs.get("units", ""))
         time_coord = ds_sst[config.time_var].values
     finally:
         ds_sst.close()
@@ -241,6 +490,7 @@ def _load_icon_unstructured(
     ds_sic = xr.open_dataset(sic_path)
     try:
         sic_data = ds_sic[config.sic_var].values.astype(np.float64)
+        sic_units_attr = str(ds_sic[config.sic_var].attrs.get("units", ""))
     finally:
         ds_sic.close()
 
@@ -249,21 +499,35 @@ def _load_icon_unstructured(
         sst_data = sst_data[None, :]
         sic_data = sic_data[None, :]
 
+    # Units/scale + converted-value sanity guards — the SAME checks as the
+    # lat-lon path (audit F3: the ICON dispatch previously skipped them).
+    _validate_sst_sic_units(
+        sst_data, sic_data, sst_units_attr, sic_units_attr, config
+    )
+
     # --- Unit conversions ---
     sst_data = sst_data + config.sst_offset
     sic_data = sic_data * config.sic_scale
-    sic_data = np.clip(sic_data, 0.0, 1.0)
-    # Clamp SST to the seawater freezing point (271.35 K).  Was 200 K
-    # — 71 K below physical freezing — which silently allowed
-    # unphysical sub-freezing SST values to leak into surface-flux
-    # bulk formulas.
-    sst_data = np.maximum(sst_data, constants.T_freeze_ocean)
+    # NOTE: SIC clamp to [0,1] and the SST freezing floor are applied only
+    # AFTER time interpolation (get_forcing_at_time), NOT to these mid-month
+    # anchors — the same Taylor et al. (2000) bcs clip-after-interp
+    # convention as the lat-lon path (audit F2: clamping the anchors at load
+    # damped the SIC/SST seasonal cycle near the pack ice and cold tongue).
 
-    # --- Build KD-tree from ICON cell centroids (3D Cartesian) ---
+    # --- ICON cell centroids (3D Cartesian) ---
     x_src = np.cos(clat) * np.cos(clon)
     y_src = np.cos(clat) * np.sin(clon)
     z_src = np.sin(clat)
-    tree = cKDTree(np.stack([x_src, y_src, z_src], axis=-1))
+    coords_src = np.stack([x_src, y_src, z_src], axis=-1)
+
+    # Fill NaN (land-masked ICON cells) with the nearest valid cell BEFORE
+    # the KD-tree regrid — a NaN source cell would otherwise propagate to
+    # every target point whose nearest neighbour it is (audit F3).
+    sst_data = _fill_nan_nearest_points(sst_data, coords_src)
+    sic_data = _fill_nan_nearest_points(sic_data, coords_src)
+
+    # --- Build KD-tree from ICON cell centroids ---
+    tree = cKDTree(coords_src)
 
     # --- Target grid points (3D Cartesian) ---
     grid_lat = np.asarray(grid.grid_lat)  # radians
@@ -303,16 +567,25 @@ def _load_icon_unstructured(
                 f" relative to {start_year}-01-01. Stage a file that includes"
                 " the run period, or set start_year to a year in the file."
             )
-
-    sic_regridded = np.clip(sic_regridded, 0.0, 1.0)
+        times_days, sst_regridded, sic_regridded = _drop_collapsed_leap_records(
+            times_days, sst_regridded, sic_regridded
+        )
+        # End-of-record hold is silent by design; warn when the run is known
+        # to extend past coverage (audit FL1, parity with the lat-lon path).
+        if run_days is not None and times_days[-1] < run_days:
+            logger.warning(
+                "AMIP forcing ends at day %.0f (relative to start_year=%s) "
+                "but the run is %.0f days: SST/SIC will HOLD the last record "
+                "for the final %.0f days. Stage a file covering the full run "
+                "period for time-varying forcing throughout.",
+                float(times_days[-1]), start_year, float(run_days),
+                float(run_days) - float(times_days[-1]),
+            )
 
     from legoesm.core.precision import get_policy
     _dtype = get_policy().storage
-    # times pinned to float64: an anchored transient axis carries large
-    # absolute day counts (~1e4-1e5) whose sub-day resolution (mid-month .5)
-    # would be lost at float32 (ULP ~5e-3 day).
     return AMIPForcing(
-        times=jnp.asarray(times_days, dtype=jnp.float64),
+        times=_pin_times_f64_warn_if_fp32(times_days),
         sst=jnp.array(sst_regridded, dtype=_dtype),
         sic=jnp.array(sic_regridded, dtype=_dtype),
         config=config,
@@ -320,7 +593,8 @@ def _load_icon_unstructured(
 
 
 def load_amip_forcing(
-    config: AMIPForcingConfig, grid, start_year: int | None = None
+    config: AMIPForcingConfig, grid, start_year: int | None = None,
+    run_days: float | None = None,
 ) -> AMIPForcing:
     """Load AMIP forcing from NetCDF and regrid to the target grid.
 
@@ -388,7 +662,8 @@ def load_amip_forcing(
         if ds_sic is not ds_sst:
             ds_sic.close()
         ds_sst.close()
-        return _load_icon_unstructured(config, grid, start_year=start_year)
+        return _load_icon_unstructured(
+            config, grid, start_year=start_year, run_days=run_days)
 
     try:
         # --- Validate required variables ---
@@ -434,104 +709,15 @@ def load_amip_forcing(
         sst_data = ds_sst[config.sst_var].values
         sic_data = ds_sic[config.sic_var].values
 
-        # Units-attribute consistency guard (audit 2026-06-11) — the
-        # same defense-in-depth the ozone (_ozone_unit_factor) and GHG
-        # (_GHG_UNIT_TO_MOLE_FRACTION) loaders carry.  ``sst_offset`` /
-        # ``sic_scale`` are CONFIG-driven, so a Kelvin SST file run with
-        # the default +273.15 offset (or a percent SIC file with
-        # scale=1.0) would silently corrupt the boundary condition
-        # (SST→~575 K, masked only on the low side by the freeze floor;
-        # SIC→100×, masked by the [0,1] clip).  Cross-check the file's
-        # ``units`` attribute against the configured conversion and
-        # raise a precise error instead of silently mis-forcing.
-        def _norm(s):
-            return s.strip().lower().replace("_", " ").replace("-", " ")
-        _sst_units = _norm(str(ds_sst[config.sst_var].attrs.get("units", "")))
-        _sic_units = _norm(str(ds_sic[config.sic_var].attrs.get("units", "")))
-        _sst_is_celsius = _sst_units in (
-            "degc", "deg c", "celsius", "c", "degrees celsius",
-            "degree celsius", "degreesc",
+        # Units/scale + converted-value sanity guards, shared with the ICON
+        # path (see _validate_sst_sic_units for the full rationale).
+        _validate_sst_sic_units(
+            sst_data,
+            sic_data,
+            ds_sst[config.sst_var].attrs.get("units", ""),
+            ds_sic[config.sic_var].attrs.get("units", ""),
+            config,
         )
-        _sst_is_kelvin = _sst_units in (
-            "k", "kelvin", "degk", "deg k", "degrees kelvin",
-            "degree kelvin",
-        )
-        # A Celsius file needs the +273.15 K offset (tight tolerance,
-        # correct sign); anything else (wrong sign, 100, 150) is a
-        # misconfiguration, not a C->K conversion (codex review).
-        if _sst_is_celsius and abs(config.sst_offset - constants.T_freeze) > 1.0:
-            raise ValueError(
-                f"SST file {config.sst_var!r} has units={_sst_units!r} "
-                f"(Celsius) but sst_offset={config.sst_offset} is not the "
-                f"+{constants.T_freeze} K Celsius->Kelvin offset. Pass "
-                "--sst-offset 273.15 (constants.T_freeze)."
-            )
-        if _sst_is_kelvin and abs(config.sst_offset) > 1.0:
-            raise ValueError(
-                f"SST file {config.sst_var!r} has units={_sst_units!r} "
-                f"(Kelvin) but sst_offset={config.sst_offset} would add a "
-                "spurious +273.15. Pass --sst-offset 0 for a Kelvin file."
-            )
-        # Units-INDEPENDENT physical sanity on the CONVERTED SST: even a
-        # file with no/unknown units attribute is caught here.  A Kelvin
-        # file run with the default +273.15 offset lands at ~575 K; a
-        # Celsius file with offset=0 lands at ~0-30 K.  Both are
-        # unphysical for an ocean surface (the downstream T_freeze_ocean
-        # floor only catches the cold side, masking the hot Kelvin+offset
-        # failure).  Bounds are generous (ocean SST spans ~271-310 K).
-        _sst_max = float(np.nanmax(sst_data.astype(np.float64) + config.sst_offset))
-        _sst_min = float(np.nanmin(sst_data.astype(np.float64) + config.sst_offset))
-        if _sst_max > 340.0 or _sst_min < 240.0:
-            raise ValueError(
-                f"SST file {config.sst_var!r} converts to "
-                f"[{_sst_min:.1f}, {_sst_max:.1f}] K after "
-                f"sst_offset={config.sst_offset} (units={_sst_units!r}). "
-                "That is outside the physical ocean range (~240-340 K) — "
-                "likely a Kelvin file with a spurious +273.15 offset or a "
-                "Celsius file with offset=0. Set --sst-offset correctly."
-            )
-        # SIC: '%'/'percent' need scale 0.01; '1'/'fraction' need 1.0.
-        # Empty/unknown units are AMBIGUOUS (codex review): do not assume
-        # fraction — the converted-value sanity below catches a bad scale.
-        _sic_is_percent = _sic_units in ("%", "percent")
-        # "(0 1)" is the NCAR-RDA ERA5 sea-ice (ci) units string "(0-1)" after _norm's
-        # "-"->" " — an unambiguous [0,1] fraction, so positively validate it (else a wrong
-        # sic_scale=0.01 on a real ERA5 file would slip past, all-zeros*0.01 masking it in
-        # the value-sanity floor) (codex-review iter 420).
-        _sic_is_fraction = _sic_units in ("1", "fraction", "dimensionless", "(0 1)")
-        # sic_scale == 0 is an explicit no-sea-ice sensitivity run (zeroes SIC);
-        # exempt it from the units/scale checks — it is unambiguously intentional
-        # (nobody misconfigures a scale of exactly 0) and yields a valid [0,1] field.
-        _no_ice = config.sic_scale == 0.0
-        if _sic_is_percent and not _no_ice and abs(config.sic_scale - 0.01) > 1e-6:
-            raise ValueError(
-                f"SIC file {config.sic_var!r} has units={_sic_units!r} "
-                f"(percent) but sic_scale={config.sic_scale}. Pass "
-                "--sic-scale 0.01 for a percent SIC file."
-            )
-        if _sic_is_fraction and not _no_ice and abs(config.sic_scale - 1.0) > 1e-6:
-            raise ValueError(
-                f"SIC file {config.sic_var!r} has units={_sic_units!r} "
-                f"(fraction) but sic_scale={config.sic_scale}. Pass "
-                "--sic-scale 1.0 for a fraction SIC file."
-            )
-        # Units-independent SIC sanity on the CONVERTED value: a percent
-        # file (0-100) scaled by 1.0 lands at ~50-100 — a wrong-scale error.
-        # The threshold allows the PCMDI mid-month "bcs" convention (Taylor
-        # et al. 2000), whose reconstructed anchors legitimately overshoot
-        # [0,1] to ~+/-25 after correct 0.01 scaling (raw ~+/-2500%); those
-        # overshoots are clipped only AFTER time interpolation, per protocol,
-        # so they must not be rejected here. A genuine 100x scale error still
-        # trips it.
-        _sic_max = float(np.nanmax(np.abs(sic_data.astype(np.float64)
-                                          * config.sic_scale)))
-        if _sic_max > 50.0:
-            raise ValueError(
-                f"SIC file {config.sic_var!r} reaches {_sic_max:.1f} "
-                f"after sic_scale={config.sic_scale} (units={_sic_units!r}) "
-                "— far beyond the +/-25 of the mid-month bcs convention. "
-                "Likely a percent file needing --sic-scale 0.01."
-            )
 
         if sst_data.ndim == 2:
             sst_data = sst_data[None, ...]
@@ -636,6 +822,24 @@ def load_amip_forcing(
                     f" relative to {start_year}-01-01. Stage a file that includes"
                     " the run period, or set start_year to a year in the file."
                 )
+            times_days, sst_regridded, sic_regridded = (
+                _drop_collapsed_leap_records(
+                    times_days, sst_regridded, sic_regridded
+                )
+            )
+            # End-of-record hold is SILENT by design (get_forcing_at_time
+            # clamps a transient file past its last record). Warn loudly when
+            # the run is known to extend past coverage so a user does not
+            # unknowingly hold a stale SST for years (audit FL1).
+            if run_days is not None and times_days[-1] < run_days:
+                logger.warning(
+                    "AMIP forcing ends at day %.0f (relative to start_year=%s) "
+                    "but the run is %.0f days: SST/SIC will HOLD the last "
+                    "record for the final %.0f days. Stage a file covering the "
+                    "full run period for time-varying forcing throughout.",
+                    float(times_days[-1]), start_year, float(run_days),
+                    float(run_days) - float(times_days[-1]),
+                )
     finally:
         if ds_sic is not ds_sst:
             ds_sic.close()
@@ -643,13 +847,12 @@ def load_amip_forcing(
 
     # Anchor values are kept un-clamped (mid-month bcs convention); the physical
     # SIC [0,1] clip and SST freezing floor are applied after time interpolation
-    # in get_forcing_at_time. ``times`` is pinned to float64 because an anchored
-    # transient axis carries large absolute day counts (~1e4-1e5) whose sub-day
-    # resolution (mid-month .5) would be lost at float32 (ULP ~5e-3 day).
+    # in get_forcing_at_time.
     from legoesm.core.precision import get_policy
     _dtype = get_policy().storage
+    _times = _pin_times_f64_warn_if_fp32(times_days)
     return AMIPForcing(
-        times=jnp.asarray(times_days, dtype=jnp.float64),
+        times=_times,
         sst=jnp.array(sst_regridded, dtype=_dtype),
         sic=jnp.array(sic_regridded, dtype=_dtype),
         config=config,
@@ -774,8 +977,6 @@ def _fill_nan_nearest(
     if not np.any(np.isnan(data)):
         return data
 
-    from scipy.interpolate import NearestNDInterpolator
-
     # Build coordinate meshgrid
     lon_2d, lat_2d = np.meshgrid(lon, lat)
 
@@ -787,17 +988,53 @@ def _fill_nan_nearest(
     z = np.sin(lat_rad)
     coords = np.stack([x.ravel(), y.ravel(), z.ravel()], axis=-1)
 
+    ntime = data.shape[0]
+    filled = _fill_nan_nearest_points(data.reshape(ntime, -1), coords)
+    return filled.reshape(data.shape)
+
+
+def _fill_nan_nearest_points(data: np.ndarray, coords: np.ndarray) -> np.ndarray:
+    """Fill NaN values with the nearest valid neighbour on arbitrary points.
+
+    Shared core of :func:`_fill_nan_nearest` (lat-lon meshes), also used
+    directly on ICON unstructured cell centroids (audit F3: land-masked NaN
+    cells must be filled BEFORE the KD-tree regrid).  An all-NaN frame is
+    left unchanged (no valid donor exists), matching the lat-lon behavior.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Data array, shape (ntime, npoints). NaN marks missing values.
+    coords : np.ndarray
+        Unit-sphere Cartesian coordinates, shape (npoints, 3).
+
+    Returns
+    -------
+    np.ndarray
+        Data with NaNs filled, shape (ntime, npoints).
+    """
+    if not np.any(np.isnan(data)):
+        return data
+
+    from scipy.interpolate import NearestNDInterpolator
+
     filled = data.copy()
     for t in range(data.shape[0]):
         frame = data[t]
-        mask_valid = ~np.isnan(frame.ravel())
-        if mask_valid.all() or not mask_valid.any():
+        mask_valid = ~np.isnan(frame)
+        if not mask_valid.any():
+            # No valid donor for this frame — silently leaving it all-NaN
+            # would leak NaN into the regrid + runtime as a NaN surface
+            # temperature at step N with no message (audit FL2). Fail loud.
+            raise ValueError(
+                f"AMIP forcing frame {t} is entirely NaN/missing; no valid "
+                "point to fill from. Check the source file's time slice "
+                f"(record {t}) for an all-masked field."
+            )
+        if mask_valid.all():
             continue
 
-        interp = NearestNDInterpolator(
-            coords[mask_valid], frame.ravel()[mask_valid]
-        )
-        frame_filled = interp(coords).reshape(frame.shape)
-        filled[t] = frame_filled
+        interp = NearestNDInterpolator(coords[mask_valid], frame[mask_valid])
+        filled[t] = interp(coords)
 
     return filled

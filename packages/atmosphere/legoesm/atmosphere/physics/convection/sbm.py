@@ -2,18 +2,63 @@
 
 A relaxation-based convection parameterization for idealized aquaplanet
 experiments. Convective columns are relaxed toward a moist adiabatic
-temperature profile with an enthalpy-conserving correction.
+temperature profile with an approximately enthalpy-conserving (2-iteration
+Newton, ~1e-3 residual) correction.
 
-Algorithm:
+Algorithm (in code order):
 1. Compute moist adiabat from surface temperature upward
-2. Construct reference moisture profile: q_ref = RH_ref * q_sat(T_moist, p)
-3. Apply enthalpy-conserving correction (energy budget closure)
-4. Compute CAPE and smooth trigger
-5. Relax T and q_v toward reference profiles over timescale tau_c
-6. Diagnose precipitation from column moisture convergence
+2. Compute CAPE from the RAW moist adiabat (before the Newton correction, to avoid
+   artificial CAPE from the enthalpy adjustment)
+3. Newton-correct the reference temperature T_ref from the moist adiabat
+   (approximately enthalpy-conserving, 2-iteration, ~1e-3 closure)
+4. Reference moisture q_ref = RH_ref * q_sat(T_ref, p) at the Newton T_ref, then
+   the Frierson shallow redistribution (net-moistening columns only: subtract the
+   cloud-mean moistening deficit from q_ref, add the latent-equivalent to T_ref)
+5. Relax T and q_v toward the (T_ref, q_ref) references over tau_c, scaled by the
+   smooth CAPE trigger
+6. Condensation source + P>=0 drying gate (precip deferred to microphysics)
 
-All operations use smooth (differentiable) approximations for
-compatibility with jax.grad.
+Differentiability: the scheme is JAX-AD-compatible (jax.grad-safe), NOT globally
+smooth.  The forward path deliberately contains a HARD membership comparison
+(T_moist >= T), ``maximum``/``clip`` kinks, and a HARD P>=0 drying gate.  Gradients
+flow via a straight-through estimator for the cloud mask (forward = hard step,
+backward = sigmoid') plus a.e. subgradients at the clamps/gate.  Only the CAPE
+trigger is a genuinely smooth sigmoid.
+
+Faithfulness
+------------
+The SBM ASSEMBLY (the 2-iteration Newton enthalpy correction, q_ref = RH_ref*q_sat,
+the relaxation dT_dt = trigger*mask*(T_ref-T)/tau_c, the condensation rescale
+[column-water-conserving to the 1e-20 floor], and the P>=0 drying gate) is pinned to
+round-off (rel 1e-12)
+against an independent numpy reimplementation in ``tests/unit/test_sbm_faithful.py``,
+which REUSES the shared, separately-tested thermodynamics (``compute_moist_adiabat``,
+``compute_cape``, ``cape_trigger``, ``saturation_mixing_ratio``) as givens.  Truth-
+tiers pinned there: total-water conservation ``Sum(dq_v_dt + dq_c_conv_dt)*dp/g = 0``
+EXACTLY in a net-drying column whose column condensation candidate exceeds 1e-20 (every
+physically active column; a <=1e-20 residual survives only in the degenerate near-zero-
+condensation corner where the ``safe_divide`` AD-guard floors), and the (Newton-limited,
+~1e-3) enthalpy closure.
+NOTE — net-moistening handling, A/B RESOLVED (2026-07-17, PR #1147; the owed full-module
+A/B ran: shallow branch toggled off, forward output + gradients diffed across a drying /
+moistening / mixed / rh-sweep column battery).  VERDICT: the Frierson SHALLOW branch is
+LIVE — KEEP.  It is NOT superseded by the ``drying_gate`` (issue #771); the two compose:
+
+  * MODERATELY net-moistening columns (uniform rh ~ 0.5-0.6 soundings in the battery):
+    the shallow redistribution zeros the column integral, the gate then passes the
+    REDISTRIBUTED local tendencies (|dT_dt| ~ 1e-3 K/s, column water residual ~ 1e-20).
+    With the branch removed the raw integral > 0 keeps the gate SHUT and the column is
+    silently zeroed — convection off where the scheme should redistribute.  This live
+    regime is pinned in test_sbm_faithful.py (deleting the branch turns it red).
+  * STRONGLY net-moistening columns (rh ~ 0.2): forward output is 0 with or without the
+    branch (the gate dominates) BUT the GRADIENTS differ (the shallow shift shapes the
+    backward path through the zeroed output) — removal is not even AD-neutral there.
+  * Net-drying / mixed columns: byte-identical with the branch removed (the shift is
+    exactly 0), as designed.
+
+The gate's job stays what the pins say: zeroing the residual LOCAL tendencies of columns
+whose integral the shallow branch could not fully cancel.  Neither mechanism subsumes
+the other; do not remove either.
 
 References
 ----------
@@ -45,9 +90,14 @@ from legoesm.atmosphere.physics._shared import safe_divide
 __physics_contract__ = {
     "summary": (
         "Simplified Betts-Miller convective adjustment: relax T and q_v toward "
-        "a moist-adiabatic reference (q_ref = RH_ref*q_sat) over tau_c, with an "
-        "enthalpy-conserving Newton correction and a column-water-conserving "
-        "condensation source. Smooth (differentiable)."
+        "a Newton- and shallow-adjusted moist-adiabatic reference (T_ref, q_ref; "
+        "q_ref = RH_ref*q_sat at the Newton T_ref, less the shallow shift) over "
+        "tau_c, with an "
+        "approximately enthalpy-conserving 2-iteration Newton correction and a "
+        "condensation source (column-water-conserving to the 1e-20 floor). "
+        "JAX-AD-compatible "
+        "(straight-through cloud mask + a.e. subgradients; NOT globally smooth — "
+        "hard mask, maximum/clip kinks, hard P>=0 gate)."
     ),
     "inputs": {
         "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa", "dt": "s",
@@ -61,24 +111,41 @@ __physics_contract__ = {
         "z up; surface at [:, -1]. Where CAPE>threshold the column relaxes "
         "toward the (warmer, moist-adiabatic) reference: "
         "dT_dt = trigger*mask*(T_ref-T)/tau_c and "
-        "dq_v_dt = trigger*mask*(q_ref-q_v)/tau_c. The Newton correction "
-        "enforces column-integrated (c_pd*dT + L_v*dq_v) = 0 (enthalpy/MSE "
-        "conserved); the condensation source dq_c_conv_dt >= 0 is rescaled so "
-        "its column integral equals the column net drying (total water "
-        "conserved), deferred to microphysics for precip."
+        "dq_v_dt = trigger*mask*(q_ref-q_v)/tau_c. The 2-iteration Newton "
+        "correction drives column-integrated (c_pd*dT + L_v*dq_v) toward 0 "
+        "(approximate enthalpy/MSE closure, ~1e-3 relative residual — NOT exact; "
+        "a 3rd Newton step would reach ~1e-7); the condensation source "
+        "dq_c_conv_dt >= 0 is rescaled so its column integral equals the column "
+        "net drying (total water conserved EXACTLY when the column condensation "
+        "candidate > 1e-20; a <=1e-20 residual survives only in the degenerate "
+        "near-zero-condensation corner where the safe_divide AD-guard floors), "
+        "deferred to microphysics for precip."
     ),
-    "conserves": ["energy", "moisture"],
+    # The ``moisture`` token = total water, conserved EXACTLY for every physically
+    # active drying column (condensation rescale, truth-tier); a bounded <=1e-20
+    # safe_divide AD-guard residual survives ONLY in the degenerate near-zero-
+    # condensation corner (the token carries this documented caveat, matching the
+    # Kain-Fritsch contract, which likewise lists the token with a degenerate-corner
+    # residual note).  Energy is only APPROXIMATELY conserved (2-iteration Newton,
+    # ~1e-3 residual — NOT machine precision), so it is documented in prose above but
+    # NOT listed as a machine-readable conserved quantity here.
+    "conserves": ["moisture"],  # exact to the 1e-20 floor (see caveat above)
     "differentiable": True,
     "reference": (
         "Frierson (2007), J. Atmos. Sci. 64, 1959-1976; "
         "Betts & Miller (1986), Q. J. R. Meteorol. Soc. 112, 693-709"
     ),
     "idealized_test": (
-        "tests/unit/test_physics_convection.py; CAPE<=threshold -> zero "
-        "tendency (trigger off); a conditionally-unstable column relaxes "
-        "T -> moist adiabat and q_v -> RH_ref*q_sat with column-integrated "
-        "(c_pd*dT + L_v*dq_v) = 0 (enthalpy) and the dq_c column integral = the "
-        "column net drying (total water)."
+        "tests/unit/test_physics_convection.py; CAPE sufficiently below threshold "
+        "-> negligible tendency (smooth sigmoid trigger: 0.5 at equality, strictly "
+        "positive but small below); a conditionally-unstable column relaxes T and "
+        "q_v toward the Newton-adjusted, shallow-corrected references (T_ref = moist "
+        "adiabat + 2-iteration enthalpy correction + shallow shift; q_ref = "
+        "RH_ref*q_sat(T_ref_newton) - shift, evaluated at the pre-shift Newton T_ref), "
+        "NOT the raw moist adiabat, with column-integrated "
+        "(c_pd*dT + L_v*dq_v) ~ 0 (approximate enthalpy, Newton-limited ~1e-3) "
+        "and the dq_c column integral = the column net drying (total water, exact "
+        "up to the 1e-20 safe_divide AD-guard floor)."
     ),
 }
 
@@ -148,7 +215,7 @@ def sbm_convection(
     #    to avoid artificial CAPE from the Newton correction.
     cape = compute_cape(T, T_moist, p_full, p_half)  # (ncol,)
 
-    # 5. Enthalpy-conserving correction (Newton iteration)
+    # 5. Approximately enthalpy-conserving correction (2-iteration Newton, ~1e-3)
     #    Only over the cloud layer (masked levels).
     def _newton_step(T_trial):
         q_trial = RH_ref[:, None] * saturation_mixing_ratio(T_trial, p_full)
@@ -181,7 +248,7 @@ def sbm_convection(
     #     below clips ``col_net_drying`` to 0 and so cannot absorb it (the
     #     column then has Σ(dq_v + dq_c) > 0).  Frierson's shallow branch sets
     #     precipitation to zero and conserves column-integrated moisture (and,
-    #     via the enthalpy-conserving refs, column enthalpy) by a pure
+    #     via the approximately enthalpy-conserving refs, column enthalpy) by a pure
     #     redistribution.  We realise this by subtracting the cloud-layer
     #     mass-weighted-mean MOISTENING deficit from ``q_ref`` (so the
     #     column-integrated dq_v vanishes in the shallow regime) and adding the
@@ -237,11 +304,20 @@ def sbm_convection(
     # ``-a/eps**2`` terms that overflow under ``jax.value_and_grad``
     # (issue #249).  ``safe_divide`` masks the bad branch *before* the
     # divide so neither cotangent path differentiates ``1/x²`` at tiny ``x``.
+    # Total-water bookkeeping: ``∫dq_c·dp/g = col_net_drying`` EXACTLY whenever
+    # ``col_local_cond > eps`` (safe_divide returns the true ratio and
+    # ``∫local_cond·dp/g = col_local_cond``).  Because ``col_net_drying <=
+    # col_local_cond`` always, this holds for every physically active drying
+    # column; ONLY in the degenerate corner where the WHOLE column's condensation
+    # candidate ``col_local_cond <= eps = 1e-20`` does the floor return 0, leaving a
+    # ``<= 1e-20`` water residual (negligible; the alternative 1/x² VJP overflow is
+    # worse).
     dq_c_conv_dt = local_cond * safe_divide(
         col_net_drying, col_local_cond, eps=1e-20,
     )  # (ncol, nlev) [kg/kg/s]
 
-    # Column-water conservation (issue #771).  The relaxation ``(q_ref - q_v)``
+    # Column-water conservation to the 1e-20 safe_divide floor (issue #771).  The
+    # relaxation ``(q_ref - q_v)``
     # can NET-MOISTEN a column that is net-subsaturated relative to
     # ``q_ref = RH_ref*q_sat`` (column integral ``∫dq_v > 0``), injecting column
     # water with no source: a single-column adjustment has no moisture supply for
@@ -251,10 +327,11 @@ def sbm_convection(
     # moisten.  Gate the WHOLE adjustment off there so convection only ever dries
     # or stays neutral (never creates water); this is the ``P >= 0`` constraint of
     # a Betts-Miller adjustment.  Net-DRYING columns are byte-identical
-    # (``gate = 1``) and stay enthalpy-neutral because ``dT_dt`` and ``dq_v_dt``
-    # carry the SAME per-column gate, preserving the Newton
-    # ``∫(c_pd·dT + L_v·dq_v) = 0`` closure.  ``col_net_drying > 0`` iff the column
-    # is net-drying (``col_net_drying = clip(-∫dq_v, 0)``).
+    # (``gate = 1``) and preserve whatever enthalpy residual the Newton step left:
+    # ``dT_dt`` and ``dq_v_dt`` carry the SAME per-column gate, so the gate does not
+    # change the Newton-limited (approximate, ~1e-3) ``∫(c_pd·dT + L_v·dq_v) ≈ 0``
+    # closure — it neither tightens nor loosens it.  ``col_net_drying > 0`` iff the
+    # column is net-drying (``col_net_drying = clip(-∫dq_v, 0)``).
     drying_gate = (col_net_drying > 0.0).astype(dq_v_dt.dtype)  # (ncol, 1)
     dT_dt = dT_dt * drying_gate
     dq_v_dt = dq_v_dt * drying_gate

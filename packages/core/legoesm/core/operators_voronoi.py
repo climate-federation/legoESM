@@ -765,19 +765,29 @@ def vector_laplacian_del2_3d(u_edge_3d, mesh):
     return grad_div - grad_curl_tangent
 
 
-def vector_laplacian_del4_3d(u_edge_3d, mesh):
+def vector_laplacian_del4_3d(u_edge_3d, mesh, *, mid_refresh=None):
     """Biharmonic vector Laplacian for all levels.
 
     Parameters
     ----------
     u_edge_3d : jax.Array, shape (nEdges, nlev)
     mesh : VoronoiMesh
+    mid_refresh : Callable(*edge_fields) -> tuple, optional
+        Distributed-only halo refresh applied to the INTERMEDIATE
+        Laplacian: the two-pass stencil consumes 4 hops, twice a
+        ``halo_depth=2`` partition budget, so without a mid-operator
+        refresh the outer pass reads a corrupted ``del2`` ring and owned
+        edges at partition boundaries silently diverge from serial
+        (MPAS stage-correctness audit).  ``None`` (serial) is the
+        byte-identical default.
 
     Returns
     -------
     jax.Array, shape (nEdges, nlev)
     """
     del2_u = vector_laplacian_del2_3d(u_edge_3d, mesh)
+    if mid_refresh is not None:
+        (del2_u,) = mid_refresh(del2_u)
     return -vector_laplacian_del2_3d(del2_u, mesh)
 
 
@@ -842,7 +852,7 @@ def bilaplacian_cell_3d(f_cell_3d, mesh, *, mask=None):
     return laplacian_cell_3d(lap_f, mesh, mask=mask)
 
 
-def smagorinsky_biharmonic_3d(u_edge_3d, mesh, C_smag):
+def smagorinsky_biharmonic_3d(u_edge_3d, mesh, C_smag, *, mid_refresh=None):
     """Smagorinsky biharmonic viscosity: ``-del2(A_smag * del2(u))``.
 
     Flow-dependent biharmonic viscosity using the Smagorinsky (1963)
@@ -895,6 +905,9 @@ def smagorinsky_biharmonic_3d(u_edge_3d, mesh, C_smag):
     # --- Two-pass biharmonic: -del2(A_smag * del2(u)) ---
     del2_u = vector_laplacian_del2_3d(u_edge_3d, mesh)  # (nEdges, nlev)
     intermediate = A_smag * del2_u                        # (nEdges, nlev)
+    if mid_refresh is not None:
+        # Distributed mid-operator refresh — see vector_laplacian_del4_3d.
+        (intermediate,) = mid_refresh(intermediate)
     return -vector_laplacian_del2_3d(intermediate, mesh)  # (nEdges, nlev)
 
 
@@ -1020,7 +1033,8 @@ def leith_viscosity_edge_3d(u_edge_3d, mesh, C_leith, *, modified=False):
     return (C_leith * delta_edge[:, None]) ** 3 * norm        # (nEdges, nlev)
 
 
-def leith_biharmonic_3d(u_edge_3d, mesh, C_leith, *, modified=False):
+def leith_biharmonic_3d(u_edge_3d, mesh, C_leith, *, modified=False,
+                        mid_refresh=None):
     """Leith-biharmonic viscosity: ``-del2(A_L * del2(u))``.
 
     Two-pass structure mirroring ``smagorinsky_biharmonic_3d``: the
@@ -1034,6 +1048,9 @@ def leith_biharmonic_3d(u_edge_3d, mesh, C_leith, *, modified=False):
     C_leith : float
     modified : bool
         Include the divergence-gradient term.
+    mid_refresh : Callable(*edge_fields) -> tuple, optional
+        Distributed mid-operator halo refresh of the intermediate
+        (see ``vector_laplacian_del4_3d``); ``None`` = serial identity.
 
     Returns
     -------
@@ -1042,6 +1059,11 @@ def leith_biharmonic_3d(u_edge_3d, mesh, C_leith, *, modified=False):
     A_L = leith_viscosity_edge_3d(u_edge_3d, mesh, C_leith, modified=modified)
     del2_u = vector_laplacian_del2_3d(u_edge_3d, mesh)
     intermediate = A_L * del2_u
+    if mid_refresh is not None:
+        # Distributed mid-operator refresh — see vector_laplacian_del4_3d
+        # (two-pass = 4 hops > halo_depth; refresh the coefficient-scaled
+        # intermediate so the outer pass reads a fresh ring).
+        (intermediate,) = mid_refresh(intermediate)
     return -vector_laplacian_del2_3d(intermediate, mesh)
 
 
@@ -1145,7 +1167,7 @@ def vertex_laplacian_3d(phi_vertex_3d, mesh):
     return lap
 
 
-def biharmonic_vorticity_del4_3d(u_edge_3d, mesh):
+def biharmonic_vorticity_del4_3d(u_edge_3d, mesh, *, mid_refresh=None):
     """Edge-normal force from biharmonic damping on relative vorticity ζ.
 
     Returns the edge-normal force that, when added to ``du/dt`` in the
@@ -1184,6 +1206,13 @@ def biharmonic_vorticity_del4_3d(u_edge_3d, mesh):
     """
     zeta_v = curl_vertex_3d(u_edge_3d, mesh)        # (nVertices, nlev)
     lap_zeta_v = vertex_laplacian_3d(zeta_v, mesh)  # (nVertices, nlev)
+    if mid_refresh is not None:
+        # Distributed mid-operator refresh (VERTEX channel): the
+        # curl -> vertex-Laplacian -> tangential-gradient chain is 3
+        # stencil hops from u — one beyond a halo_depth=2 budget — so
+        # the vertex Laplacian's ring is re-armed before the final
+        # gradient (see vector_laplacian_del4_3d).
+        (lap_zeta_v,) = mid_refresh(lap_zeta_v)
 
     v0 = mesh.verticesOnEdge[0]
     v1 = mesh.verticesOnEdge[1]

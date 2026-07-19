@@ -114,9 +114,13 @@ def main() -> int:
                    help="Enable Holland-Jenkins ice-shelf basal melt "
                         "(requires --ice-shelf-mask + --ice-draft NPY).")
     p.add_argument("--ice-shelf-mask", type=Path, default=None,
-                   help="NPY file with (n_lat, n_lon) {0,1} cavity mask.")
+                   help="NPY file with the {0,1} cavity mask on the run grid: "
+                        "(n_lat, n_lon) for --grid latlon, (nCells,) for "
+                        "--grid mpas.")
     p.add_argument("--ice-draft", type=Path, default=None,
-                   help="NPY file with (n_lat, n_lon) ice-base depth [m].")
+                   help="NPY file with ice-base depth [m] on the run grid: "
+                        "(n_lat, n_lon) for --grid latlon, (nCells,) for "
+                        "--grid mpas.")
     p.add_argument("--ice-shelf-scheme",
                    choices=["three_equation", "linear"],
                    default="three_equation")
@@ -157,14 +161,17 @@ def main() -> int:
         apply_runoff_step,
         apply_runoff_step_mpas,
         apply_ice_shelf_basal_step,
+        apply_ice_shelf_basal_step_mpas,
         apply_tidal_mixing_step,
     )
     from legoesm.ocean.forcing.dai_trenberth import (
         load_dai_trenberth, project_runoff_to_grid,
+        project_runoff_to_mpas_cells,
     )
     from legoesm.ocean.physics.ice_shelf import IceShelfConfig
     from legoesm.ocean.physics.vertical_mixing.tidal import (
         TidalMixingConfig,
+        brunt_vaisala_cell_from_eos,
         synthetic_baroclinic_tide_energy_from_bathy,
     )
     import jax.numpy as jnp
@@ -235,10 +242,11 @@ def main() -> int:
 
     # --- Dai-Trenberth runoff setup ----------------------------------
     runoff_on_grid = None
+    runoff_area = None
     if args.runoff:
-        if args.grid != "latlon":
+        if args.grid not in ("latlon", "mpas"):
             print(
-                f"==> WARNING: --runoff not yet supported on grid="
+                f"==> WARNING: --runoff not supported on grid="
                 f"{args.grid!r}; ignoring."
             )
         else:
@@ -247,33 +255,63 @@ def main() -> int:
                 f"(cache: {args.runoff_cache or 'synthetic'})"
             )
             rivers = load_dai_trenberth(cache_dir=args.runoff_cache)
-            lat_deg = np.degrees(np.asarray(grid.lat))
-            lon_deg = np.degrees(np.asarray(grid.lon))
-            cell_area = np.asarray(getattr(grid, "area", None))
-            if cell_area is None or cell_area.shape != (
-                lat_deg.size, lon_deg.size
-            ):
-                # Fallback: cos(lat)-weighted nominal cell area.
-                R_e = float(getattr(grid, "radius", constants.R_earth))
-                dlon_g = 2.0 * np.pi / lon_deg.size
-                dlat_g = np.pi / lat_deg.size
-                cell_area = (
-                    R_e * R_e * dlon_g * dlat_g
-                    * np.cos(np.deg2rad(lat_deg))[:, None]
-                    * np.ones((1, lon_deg.size))
-                )
             ocean_mask = np.asarray(state.land_mask.data, dtype=np.int32)
-            runoff_on_grid = project_runoff_to_grid(
-                rivers,
-                grid_lat_deg=lat_deg,
-                grid_lon_deg=lon_deg,
-                cell_area_m2=cell_area,
-                month=None,
-                ocean_mask=ocean_mask,
-            )
+            if args.grid == "mpas":
+                # Unstructured mesh: bin river mouths onto cell centres by
+                # great-circle nearest-ocean-cell (project_runoff_to_mpas_cells),
+                # the counterpart of the lat-lon binning below. Cell area is the
+                # mesh's own areaCell (no cos(lat) fallback needed).
+                lat_cell = np.degrees(np.asarray(grid.latCell))
+                lon_cell = np.degrees(np.asarray(grid.lonCell))
+                runoff_area = np.asarray(grid.areaCell, dtype=np.float64)
+                runoff_on_grid = project_runoff_to_mpas_cells(
+                    rivers,
+                    lat_cell_deg=lat_cell,
+                    lon_cell_deg=lon_cell,
+                    area_cell_m2=runoff_area,
+                    month=None,
+                    ocean_mask=ocean_mask,
+                )
+            else:
+                lat_deg = np.degrees(np.asarray(grid.lat))
+                lon_deg = np.degrees(np.asarray(grid.lon))
+                cell_area = np.asarray(getattr(grid, "area", None))
+                if cell_area is None or cell_area.shape != (
+                    lat_deg.size, lon_deg.size
+                ):
+                    # Fallback: cos(lat)-weighted nominal cell area.
+                    R_e = float(getattr(grid, "radius", constants.R_earth))
+                    dlon_g = 2.0 * np.pi / lon_deg.size
+                    dlat_g = np.pi / lat_deg.size
+                    cell_area = (
+                        R_e * R_e * dlon_g * dlat_g
+                        * np.cos(np.deg2rad(lat_deg))[:, None]
+                        * np.ones((1, lon_deg.size))
+                    )
+                runoff_area = cell_area
+                runoff_on_grid = project_runoff_to_grid(
+                    rivers,
+                    grid_lat_deg=lat_deg,
+                    grid_lon_deg=lon_deg,
+                    cell_area_m2=cell_area,
+                    month=None,
+                    ocean_mask=ocean_mask,
+                )
+            # Report the freshwater actually landed vs the river source, so any
+            # runoff DROPPED for lack of a nearby ocean cell is visible rather
+            # than a silent mass sink (both projectors drop; codex).
+            source_kg_s = float(rivers.monthly_flux_kg_s.mean(axis=0).sum())
+            landed_kg_s = float((runoff_on_grid * runoff_area).sum())
+            dropped_kg_s = max(source_kg_s - landed_kg_s, 0.0)
+            dropped_pct = 100.0 * dropped_kg_s / max(source_kg_s, 1.0)
+            # Always report the dropped fraction (codex): any freshwater with no
+            # ocean cell in range is a mass sink and must be visible, however
+            # small.
             print(
-                f"   Runoff grid total: "
-                f"{float((runoff_on_grid * cell_area).sum()):.3e} kg/s"
+                f"   Runoff landed: {landed_kg_s:.3e} kg/s of "
+                f"{source_kg_s:.3e} kg/s source "
+                f"(dropped {dropped_kg_s:.3e} kg/s = {dropped_pct:.2f}% "
+                f"with no ocean cell in range)"
             )
 
     # --- Ice-shelf setup ---------------------------------------------
@@ -281,9 +319,11 @@ def main() -> int:
     ice_shelf_mask_arr = None
     ice_draft_arr = None
     if args.ice_shelf:
-        if args.grid != "latlon":
+        if args.grid not in ("latlon", "mpas"):
+            # Both grids have a tested basal-melt apply
+            # (apply_ice_shelf_basal_step / _mpas); anything else is unsupported.
             print(
-                f"==> WARNING: --ice-shelf not yet supported on grid="
+                f"==> WARNING: --ice-shelf not supported on grid="
                 f"{args.grid!r}; ignoring."
             )
         elif args.ice_shelf_mask is None or args.ice_draft is None:
@@ -316,12 +356,21 @@ def main() -> int:
     tidal_config = None
     tidal_static = None
     if args.tidal_mixing:
-        if args.grid != "latlon":
+        if args.grid not in ("latlon", "mpas"):
             print(
-                f"==> WARNING: --tidal-mixing not yet supported on "
+                f"==> WARNING: --tidal-mixing not supported on "
                 f"grid={args.grid!r}; ignoring."
             )
         else:
+            # Grid-agnostic: the whole tidal-mixing chain
+            # (synthetic_baroclinic_tide_energy_from_bathy ->
+            # compute_layer_thickness -> the N²/F(z)/K_tidal per-step block ->
+            # apply_tidal_mixing_step) operates purely over the trailing
+            # vertical axis (`...`, `axis=-1`, `[..., None]`), so it runs on
+            # lat-lon (n_lat, n_lon, nlev) AND MPAS (nCells, nlev) unchanged.
+            # The ONLY shape-specific piece is the layer-depth broadcast below,
+            # which now derives its spatial shape from E_BT_arr rather than
+            # assuming 2-D.
             tidal_config = TidalMixingConfig(enabled=True)
             H_bathy_arr = np.asarray(state.H_bathy.data, dtype=np.float64)
             E_BT_arr = np.asarray(
@@ -333,19 +382,46 @@ def main() -> int:
             dz_ref_arr = np.asarray(z_coord.dz_ref, dtype=np.float64)[:nlev_static]
             z_edges = np.concatenate([[0.0], np.cumsum(dz_ref_arr)])
             layer_depths_1d = 0.5 * (z_edges[:-1] + z_edges[1:])
-            lat_n, lon_n = E_BT_arr.shape
-            layer_depths_3d = np.broadcast_to(
-                layer_depths_1d, (lat_n, lon_n, nlev_static),
+            # Broadcast to (*spatial, nlev): (n_lat, n_lon, nlev) on lat-lon,
+            # (nCells, nlev) on MPAS -- spatial shape comes from E_BT_arr, which
+            # is elementwise in H_bathy and so already carries the grid shape.
+            layer_depths_nd = np.broadcast_to(
+                layer_depths_1d, E_BT_arr.shape + (nlev_static,),
             ).copy()
             tidal_static = {
                 "E_BT": E_BT_arr,
-                "layer_depths": layer_depths_3d,
+                "layer_depths": layer_depths_nd,
                 "H_bathy": H_bathy_arr,
             }
             print(
                 f"==> Tidal mixing enabled (per-step tracer mixing); "
                 f"E_BT global mean: {float(np.mean(E_BT_arr)):.3e} W/m²"
             )
+
+    # Build the tidal-N² EOS ONCE from the SAME EOS the model integrates
+    # (default "wright"), so the tidal diffusivity's stratification is
+    # consistent with the dynamical core rather than a hardcoded linear
+    # ρ-anomaly (issue #1111). make_eos_fn returns a light closure; the
+    # per-step N² evaluates it on the host T/S arrays.
+    tidal_eos_fn = None
+    tidal_rho_0 = None
+    tidal_g = None
+    if tidal_static is not None:
+        from legoesm.ocean.eos import make_eos_fn
+        # Source ρ₀ / g from the SAME model config the dynamical core uses (not
+        # module constants). Build the EOS EXACTLY as the core does so tidal
+        # density matches the integrated density: the geometric-depth NEMO path
+        # passes rho0=config.rho_0 (ocean_pe_latlon_cgrid), the default "insitu"
+        # path and MPAS pass none — mirror that conditional here.
+        tidal_rho_0 = float(model.config.rho_0)
+        tidal_g = float(model.config.g)
+        _eos_kw = ({"rho0": tidal_rho_0}
+                   if getattr(model.config, "eos_depth", "insitu") == "geometric"
+                   else {})
+        tidal_eos_fn = make_eos_fn(
+            model.config.eos, getattr(model.config, "eos_linear", None),
+            **_eos_kw,
+        )
 
 
     # Auto-resume: prefer ``--restart-from``, fallback to latest in
@@ -474,27 +550,53 @@ def main() -> int:
                 z_coord=z_coord, grid=grid, grid_type=args.grid,
                 dt=dt,
             )
-            # Dai-Trenberth runoff (when enabled + lat-lon).
+            # Dai-Trenberth runoff (when enabled). Grid-dispatched like the
+            # SSS / ice-shelf steps: the mpas apply shares the same virtual-salt
+            # + eta-rise convention. Both R fields carry the (spatial,) shape
+            # their projector produced -- (n_lat, n_lon) or (nCells,).
             if runoff_on_grid is not None:
-                state = apply_runoff_step(
-                    state,
-                    R_kg_m2_s=runoff_on_grid,
-                    z_coord=z_coord,
-                    dt=dt,
-                )
+                if args.grid == "mpas":
+                    state = apply_runoff_step_mpas(
+                        state,
+                        R_kg_m2_s=runoff_on_grid,
+                        z_coord=z_coord,
+                        dt=dt,
+                    )
+                else:
+                    state = apply_runoff_step(
+                        state,
+                        R_kg_m2_s=runoff_on_grid,
+                        z_coord=z_coord,
+                        dt=dt,
+                    )
 
-            # Ice-shelf basal melt (when enabled + lat-lon).
+            # Ice-shelf basal melt (when enabled). Grid-dispatched exactly like
+            # the SSS-restoring / runoff steps above: the lat-lon and MPAS apply
+            # functions share the same three-equation basal-melt convention and
+            # both are unit-tested. The MPAS variant was implemented and tested
+            # but previously unreachable -- the driver warned "not supported on
+            # grid=mpas" for a step it already had.
             if (ice_shelf_config is not None
                     and ice_shelf_mask_arr is not None
                     and ice_draft_arr is not None):
-                state, _ = apply_ice_shelf_basal_step(
-                    state,
-                    ice_shelf_mask=ice_shelf_mask_arr,
-                    ice_draft_m=ice_draft_arr,
-                    z_coord=z_coord,
-                    dt=dt,
-                    config=ice_shelf_config,
-                )
+                if args.grid == "mpas":
+                    state, _ = apply_ice_shelf_basal_step_mpas(
+                        state,
+                        ice_shelf_mask=ice_shelf_mask_arr,
+                        ice_draft_m=ice_draft_arr,
+                        z_coord=z_coord,
+                        dt=dt,
+                        config=ice_shelf_config,
+                    )
+                else:
+                    state, _ = apply_ice_shelf_basal_step(
+                        state,
+                        ice_shelf_mask=ice_shelf_mask_arr,
+                        ice_draft_m=ice_draft_arr,
+                        z_coord=z_coord,
+                        dt=dt,
+                        config=ice_shelf_config,
+                    )
 
             # OMIP-2 SSS restoring (when enabled).  Ocean-only driver
             # passes explicit zero ice-fraction; coupled-ice driver
@@ -539,48 +641,20 @@ def main() -> int:
                 ), dtype=np.float64)
                 T_arr = np.asarray(state.T.data, dtype=np.float64)
                 S_arr = np.asarray(state.S.data, dtype=np.float64)
-                nlev_loc = h_partial_now.shape[-1]
-                # Linear-EOS density for N² (Boussinesq, ρ-anomaly).
-                # α_T / β_S match the defaults in ``ocean/eos.py``.
-                alpha_T = 2.0e-4
-                beta_S = 7.4e-4
-                rho_0_loc = float(np.asarray(constants.rho_ocean))
-                g_loc = float(constants.g)
+                rho_0_loc = tidal_rho_0
                 N2_min = float(tidal_config.N_squared_min)
-                if nlev_loc < 2:
-                    # Degenerate single-layer column — diffusion is a
-                    # no-op but we still want the diagnostic + a sane
-                    # ``N2`` floor to feed ``K_tidal``.
-                    N2_cell = np.full_like(h_partial_now, N2_min)
-                else:
-                    rho = rho_0_loc * (
-                        1.0 - alpha_T * T_arr + beta_S * S_arr
-                    )
-                    dz_int = 0.5 * (
-                        h_partial_now[..., :-1] + h_partial_now[..., 1:]
-                    )
-                    dz_int = np.where(dz_int > 1.0e-12, dz_int, 1.0)
-                    N2_iface = -(g_loc / rho_0_loc) * (
-                        rho[..., :-1] - rho[..., 1:]
-                    ) / dz_int
-                    # Pad to cell centres: replicate end interfaces at
-                    # top and bottom, average adjacent interfaces
-                    # inside.
-                    N2_top = N2_iface[..., :1]
-                    N2_bot = N2_iface[..., -1:]
-                    if N2_iface.shape[-1] >= 2:
-                        N2_avg = 0.5 * (
-                            N2_iface[..., :-1] + N2_iface[..., 1:]
-                        )
-                        N2_cell = np.concatenate(
-                            [N2_top, N2_avg, N2_bot], axis=-1,
-                        )
-                    else:
-                        # nlev == 2 → one interface → broadcast.
-                        N2_cell = np.broadcast_to(
-                            N2_iface, h_partial_now.shape,
-                        ).copy()
-                    N2_cell = np.maximum(N2_cell, N2_min)
+                # N² from the model-selected EOS (issue #1111): locally-
+                # referenced density difference at the shared interface
+                # pressure, cell-centred + floored. Evaluated on device via
+                # the EOS closure, then pulled back to host for the NumPy
+                # tidal path below.
+                N2_cell = np.asarray(
+                    brunt_vaisala_cell_from_eos(
+                        T_arr, S_arr, h_partial_now, tidal_eos_fn,
+                        rho_0=rho_0_loc, n_squared_min=N2_min, g=tidal_g,
+                    ),
+                    dtype=np.float64,
+                )
 
                 # Numpy mirror of ``compute_tidal_diffusivity``:
                 # K_tidal = Γ q E_BT F(z) / (ρ_0 N²), clipped to K_max,

@@ -4,8 +4,46 @@ A simple one-moment warm-rain scheme tracking cloud water and rain.
 Processes: saturation adjustment, autoconversion, accretion, evaporation,
 rain sedimentation, and latent heating.
 
-All operations use smooth (differentiable) approximations for
-compatibility with jax.grad.
+Operations use AD-safe approximations (smooth switches + guarded fractional
+powers) for jax.grad compatibility; the scheme is NOT globally smooth — it
+retains max/min/clip kinks (donor clamps, positivity floors).
+
+Faithfulness to Kessler (1969)
+------------------------------
+FAITHFUL (classic Kessler process forms + coefficients):
+  * **Autoconversion** cloud->rain ``A = k1·max(q_c − a, 0)`` with the canonical
+    Kessler / Klemp-Wilhelmson constants ``k1 = 1e-3 s⁻¹`` (``autoconversion_rate``)
+    and threshold ``a = 1e-3 kg/kg`` (``autoconversion_threshold``).
+  * **Accretion** (collection of cloud by rain) ``C = k2·q_c·q_r^0.875`` with
+    ``k2 = 2.2`` (``accretion_coeff``) and the classic 0.875 exponent.
+  * **Sedimentation density correction** ``(ρ_sfc/max(ρ, 0.1))^0.5`` — the classic
+    ``(ρ_0/ρ)^½`` air-density fall-speed factor (ρ floored at 0.1 kg/m³ aloft for
+    AD safety).
+  * **Latent heating** ``dT/dt = L_v·(cond − evap)/c_pd`` — thermodynamically
+    consistent with the vapour<->liquid exchange.
+DEPARTURES / SURROGATES:
+  * **Rain-evaporation SURROGATE rate**:
+    ``E = evap_coeff·((q_sat − q_v)/q_sat)·q_r^0.525``.  Only the Marshall-Palmer
+    ventilation exponent 0.525 and the sub-saturation driver are Kessler-lineage —
+    and here the exponent is applied to ``q_r`` rather than the classic rain CONTENT
+    ``(ρ q_r)``.  The classic Klemp-Wilhelmson evaporation additionally carries a
+    ``1/ρ`` factor, a ventilation polynomial (``≈ 1.6 + 124.9·(ρ q_r)^0.2046``), and
+    a thermodynamic-resistance denominator; all of that is collapsed into the single
+    tunable ``evaporation_coeff``.
+  * **Constant rain fall speed**: ``V_t = rain_fall_speed·(ρ_sfc/max(ρ, 0.1))^0.5``
+    with a configurable DEFAULT ``rain_fall_speed = 5 m/s``.  The classic Kessler mass-
+    weighted terminal velocity is q_r-DEPENDENT (``∝ (ρ q_r)^0.1364``); dropping
+    that dependence makes the sedimentation flux LINEAR in q_r (not ``q_r^1.1364``).
+  * **Smooth saturation adjustment**: a sigmoid switch (``saturation_sharpness``)
+    replaces Kessler's hard/instantaneous saturation adjustment, for
+    differentiability.
+  * **AD-safe / differentiable positivity limiters**: positivity limiting itself is
+    standard in Kessler implementations, but the SPECIFIC differentiable forms here
+    are departures — ``safe_pow`` fractional-power guards, a condensation donor
+    clamp against q_v, a joint q_c-sink donor clamp, an RH-deficit resolution floor,
+    and a dt-limited sedimentation flux.  None alter the classic rates in the
+    unclamped, resolved regime.
+Non-behavioral pins: ``tests/atmosphere/hydrostatic/unit/test_kessler_faithful.py``.
 
 References
 ----------

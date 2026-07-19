@@ -521,6 +521,18 @@ class TKEConfig(NamedTuple):
     # value smaller than the real dt over-damps; larger risks instability.
     # Default 300.0 preserves the historical hard-coded estimate.
     cfl_cap_dt_s: float = 300.0
+    # ``eice``: under-ice attenuation of the lc/etau wave-driven TKE sources
+    #   (NEMO nn_eice).  0 (default, BIT-IDENTICAL) = no attenuation — the
+    #   orchestrators do not thread ice concentration, so both kernels inject
+    #   full wave TKE even under compact ice.  Nonzero modes thread
+    #   ``surface_forcing.ice_concentration`` as an EFFECTIVE ``ice_frac``
+    #   into the kernels' built-in ``(1-ice_frac)`` factor:
+    #     1 -> eff = fi            (factor (1-fi),        NEMO nn_eice=1)
+    #     3 -> eff = min(4*fi, 1)  (factor max(0,1-4*fi), NEMO nn_eice=3 —
+    #          the ORCA1 namelist choice; wave TKE killed at fi >= 0.25).
+    #   2026-07-18 audit: the kernels ALWAYS supported ``ice_frac`` but no
+    #   caller supplied it — under-ice TKE injection over-mixed the Arctic.
+    eice: int = 0                        # 0 off | 1 (1-fi) | 3 max(0,1-4fi)  (NEMO nn_eice)
 
 
 class KPPConfig(NamedTuple):
@@ -665,9 +677,20 @@ class CATKEConfig(NamedTuple):
     maximum_tke_diffusivity: float = float("inf")     # K_e cap [m^2/s]
 
 
+#: Canonical set of vertical-mixing closures ``compute_vertical_K_profiles``
+#: dispatches. SINGLE SOURCE OF TRUTH -- the k_profiles.py fail-loud raise reads
+#: this instead of a hand-copied literal list, exactly as ``VALID_EOS_SCHEMES``
+#: backs ``make_eos_fn`` (so the dispatch and the "valid schemes" message can
+#: never drift). Every member is reachable through the public YAML key
+#: ``ocean.physics.vertical_mixing.scheme`` (pinned by test_config_footguns).
+VALID_VERTICAL_MIXING_SCHEMES = frozenset(
+    {"none", "constant", "richardson", "tke", "catke", "kpp"}
+)
+
+
 class VerticalMixingConfig(NamedTuple):
     """Top-level vertical mixing configuration."""
-    scheme: str = "constant"  # "constant", "richardson", "kpp", "tke", "catke", "none"
+    scheme: str = "constant"  # one of VALID_VERTICAL_MIXING_SCHEMES
     constant: ConstantVerticalMixingConfig = ConstantVerticalMixingConfig()
     richardson: RichardsonVerticalMixingConfig = RichardsonVerticalMixingConfig()
     kpp: KPPConfig = KPPConfig()

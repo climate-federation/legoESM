@@ -189,6 +189,26 @@ def test_adapter_scheme_swappable_kessler():
     assert float(jnp.max(dth)) > 0.0
 
 
+def test_adapter_rejects_inappropriate_schemes():
+    """The LES adapter must REJECT non-resolved-cloud schemes: 'sundqvist' is a
+    large-scale (subgrid RH>RH_crit) GCM diagnostic condensation scheme that
+    condenses in every cell above RH_crit on the LES grid -> spurious
+    near-overcast (measured cc~0.9-1.0, LWP 20-43 g/m^2 across BOMEX/DYCOMS/RICO
+    vs 0.03-0.24 for the resolved-cloud schemes); 'none' builds no adapter;
+    'ml_emulator' needs a trained-model arg the adapter never passes."""
+    nz, dz, dt = 16, 50.0, 5.0
+    ref = _ref_for(nz, dz)
+    with pytest.raises(ValueError, match=r"(?i)large-scale"):
+        make_les_microphysics_fn(MicrophysicsConfig(scheme="sundqvist"), ref, dz, dt)
+    with pytest.raises(ValueError):
+        make_les_microphysics_fn(MicrophysicsConfig(scheme="none"), ref, dz, dt)
+    with pytest.raises(NotImplementedError):
+        make_les_microphysics_fn(MicrophysicsConfig(scheme="ml_emulator"), ref, dz, dt)
+    # A resolved-cloud scheme still builds fine (guard is not over-broad).
+    assert make_les_microphysics_fn(
+        MicrophysicsConfig(scheme="morrison"), ref, dz, dt).scheme_name == "morrison"
+
+
 # --------------------------------------------------------------------------- #
 # Monotone (van-Leer TVD) scalar transport — the moist-instability fix.        #
 # --------------------------------------------------------------------------- #
@@ -298,6 +318,49 @@ def test_weno5_less_diffusive_than_vanleer():
     assert grad_w5 > grad_vl                               # sharper = less diffusive
     # both stay bounded (essentially non-oscillatory)
     assert col(p_w5).max() <= 1.05 and col(p_w5).min() >= -0.05
+
+
+def test_weno5_tracer_positivity_guard_forces_vanleer():
+    """PORT of the CRM #966 positivity guard: with ``scalar_advection='weno5'``
+    the positive-definite WATER TRACERS are advected with the monotone van_leer
+    limiter (WENO5-Z is not positivity-preserving → q<0 feeds microphysics as a
+    spurious source), while the signed θ′ keeps weno5.  Verifies the routing in
+    :func:`rhs`."""
+    base = _grid(nz=24)
+    g = sl.make_grid(base.cfg._replace(
+        scalar_advection="weno5", monotone_scalars=True, sgs_buoyancy=False))
+    ny, nx, nz = g.cfg.ny, g.cfg.nx, g.cfg.nz
+    rng = np.random.RandomState(3)
+    u = jnp.asarray(rng.rand(ny, nx, nz))
+    v = jnp.asarray(rng.rand(ny, nx, nz))
+    w = jnp.zeros((ny, nx, nz + 1)).at[..., 1:nz].set(
+        jnp.asarray(rng.rand(ny, nx, nz - 1)))
+    theta = jnp.asarray(300.0 + rng.rand(ny, nx, nz))
+    # SMOOTH positive tracer (x- and z-varying): weno5 (5th order) and van_leer
+    # (2nd order) give measurably different flux divergences on a smooth field —
+    # at a pure discontinuity both collapse to upwind and would coincide.
+    zc = jnp.arange(nz) + 0.5
+    xx = jnp.arange(nx)
+    prof = 1.0 + 0.4 * jnp.sin(2 * jnp.pi * zc / nz)       # (nz,), positive
+    horiz = 1.0 + 0.3 * jnp.cos(2 * jnp.pi * xx / nx)      # (nx,), positive
+    tr = (prof[None, None, :] * horiz[None, :, None]
+          * jnp.ones((ny, nx, nz))).astype(theta.dtype)
+    tracers = jnp.zeros((ny, nx, nz, g.cfg.n_tracers)).at[..., 0].set(
+        tr).at[..., 1].set(0.5 * tr)
+    _, _, _, _, Rtheta, Rtracers = sl.rhs(
+        u, v, w, g, (0.0, 0.0), 0.0, theta=theta, tracers=tracers)
+    nu_t = sl.eddy_viscosity(u, v, w, g)
+    # θ uses the CONFIG scheme (weno5) — unchanged by the guard.
+    Rtheta_weno = sl.scalar_rhs_monotone(theta, u, v, w, nu_t, g, 0.0)
+    assert np.allclose(np.asarray(Rtheta), np.asarray(Rtheta_weno))
+    # every tracer slot is forced to van_leer, NOT weno5.
+    for k in range(g.cfg.n_tracers):
+        r_vl = sl.scalar_rhs_monotone(
+            tracers[..., k], u, v, w, nu_t, g, 0.0, scheme="van_leer")
+        assert np.allclose(np.asarray(Rtracers[..., k]), np.asarray(r_vl))
+    # non-vacuous: on the sharp slot weno5 ≠ van_leer, so the guard is doing work.
+    r_weno0 = sl.scalar_rhs_monotone(tracers[..., 0], u, v, w, nu_t, g, 0.0)
+    assert not np.allclose(np.asarray(Rtracers[..., 0]), np.asarray(r_weno0))
 
 
 # --------------------------------------------------------------------------- #

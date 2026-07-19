@@ -161,15 +161,29 @@ def test_score_forecast_mask_changes_rmse():
     assert s_unmasked["t850"]["rmse"] > 1.0                      # bad cell dominates
 
 
-def test_score_forecast_all_masked_raises():
+def test_score_forecast_all_masked_records_nan_and_warns():
+    # An all-masked field (undefined score) must NOT crash the whole scorecard —
+    # a degenerate forecast is a legitimate comparison input. It records NaN and
+    # warns loudly, and the OTHER fields still score.
+    import math
+    import warnings
+
     from evaluations.wb_forecast import score_forecast
     lat = np.array([-45.0, 45.0])
-    pred = {"t850": jnp.ones((2, 2))}
-    verif = {"t850": jnp.zeros((2, 2))}
-    clim = {"t850": jnp.zeros((2, 2))}
-    valid = {"t850": jnp.zeros((2, 2), dtype=bool)}   # entirely below ground -> undefined
-    with pytest.raises(ValueError):
-        score_forecast(pred, verif, clim, lat, valid=valid)
+    pred = {"t850": jnp.ones((2, 2)), "z500": jnp.ones((2, 2))}
+    verif = {"t850": jnp.zeros((2, 2)), "z500": jnp.zeros((2, 2))}
+    clim = {"t850": jnp.zeros((2, 2)), "z500": jnp.zeros((2, 2))}
+    valid = {
+        "t850": jnp.zeros((2, 2), dtype=bool),   # entirely below ground -> NaN
+        "z500": jnp.ones((2, 2), dtype=bool),    # fully valid -> real score
+    }
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        s = score_forecast(pred, verif, clim, lat, valid=valid)
+    assert math.isnan(s["t850"]["rmse"])         # degenerate field -> NaN
+    assert math.isnan(s["t850"]["acc"])
+    assert s["z500"]["rmse"] >= 0.0              # other field still scored
+    assert any("no valid" in str(x.message) for x in w)   # warned loudly
 
 
 def test_headline_10m_wind_not_stronger_than_lowest_level():

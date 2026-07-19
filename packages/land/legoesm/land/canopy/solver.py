@@ -49,7 +49,7 @@ import jax.numpy as jnp
 from functools import partial
 from typing import NamedTuple
 
-from legoesm.land.canopy.config import CanopyConfig
+from legoesm.land.canopy.config import CanopyConfig, VALID_LE_MODULES
 from legoesm.land.canopy.radiative_transfer import canopy_longwave_rt
 from legoesm.land.canopy.photosynthesis import photosynthesis
 from legoesm.land.canopy.stability import (
@@ -196,10 +196,13 @@ def _canopy_residual(
     # ---- Photosynthesis ----
     T_phot_sun = b.Ta if use_ta_for_photosynthesis else Tf_Sun
     T_phot_sh  = b.Ta if use_ta_for_photosynthesis else Tf_Sh
-    An_Sun = photosynthesis(
+    # Only NET An enters the residual (stomatal conductance + leaf CO2/energy
+    # flux); the GROSS assimilation (carbon-model GPP) is consumed downstream
+    # in ``canopy_forward``, so discard it here.
+    An_Sun, _ = photosynthesis(
         T_phot_sun, Ci_Sun, b.APAR_Sun,
         b.Vcmax25_Sun, b.Vcmax25_C4Sun, b.fC4, b.Ps, b.alf, b.TgC)
-    An_Sh = photosynthesis(
+    An_Sh, _ = photosynthesis(
         T_phot_sh,  Ci_Sh,  b.APAR_Sh,
         b.Vcmax25_Sh, b.Vcmax25_C4Sh, b.fC4, b.Ps, b.alf, b.TgC)
 
@@ -337,10 +340,15 @@ def canopy_forward(
 
     T_phot_sun = b.Ta if use_ta_for_photosynthesis else Tf_Sun
     T_phot_sh  = b.Ta if use_ta_for_photosynthesis else Tf_Sh
-    An_Sun = photosynthesis(
+    # NET An (An_Sun/An_Sh) drives the leaf energy/CO2 flux + SIF; GROSS A
+    # (Agross_Sun/Agross_Sh) is the carbon-model GPP (uptake BEFORE dark
+    # respiration).  Both are returned so ``two_leaf_canopy`` can report GROSS
+    # GPP while the leaf coupling stays NET (avoids double-counting foliar
+    # respiration against the carbon model's r_maint_fol*C_fol).
+    An_Sun, Agross_Sun = photosynthesis(
         T_phot_sun, Ci_Sun, b.APAR_Sun,
         b.Vcmax25_Sun, b.Vcmax25_C4Sun, b.fC4, b.Ps, b.alf, b.TgC)
-    An_Sh = photosynthesis(
+    An_Sh, Agross_Sh = photosynthesis(
         T_phot_sh,  Ci_Sh,  b.APAR_Sh,
         b.Vcmax25_Sh, b.Vcmax25_C4Sh, b.fC4, b.Ps, b.alf, b.TgC)
 
@@ -389,6 +397,7 @@ def canopy_forward(
 
     return dict(
         An_Sun=An_Sun, An_Sh=An_Sh,
+        Agross_Sun=Agross_Sun, Agross_Sh=Agross_Sh,
         LE_Sun=LE_Sun, LE_Sh=LE_Sh, LE_Soil=LE_Soil,
         H_Sun=H_Sun,   H_Sh=H_Sh,   H_Soil=H_Soil,
         Rn_Sun=Rn_Sun, Rn_Sh=Rn_Sh, Rn_Soil=Rn_Soil,
@@ -428,6 +437,15 @@ def solve_canopy_closure(
     x_final : shape (6,)  — converged state
     n_iters : scalar int  — iteration count when convergence was first reached
     """
+    # Fail-early on a typo'd LE_module: the internal leaf-energy dispatch is a
+    # bare ``if LE_module == "BT": ... else: # PM``, so an unknown value would
+    # SILENTLY run Penman-Monteith.  Guards the direct-call path (callers that
+    # skip CanopyConfig.validate).  Shares config.VALID_LE_MODULES (no drift).
+    if config.LE_module not in VALID_LE_MODULES:
+        raise ValueError(
+            f"unknown LE_module {config.LE_module!r}; the leaf-energy method "
+            f"must be one of {VALID_LE_MODULES} ('BT'=bulk transfer, "
+            "'PM'=Penman-Monteith)")
     solver = _make_implicit_newton_solver(
         LE_module=config.LE_module,
         stomatal_model=config.stomatal_model,

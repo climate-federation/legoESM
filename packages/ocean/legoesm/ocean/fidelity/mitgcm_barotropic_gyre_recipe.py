@@ -180,7 +180,8 @@ def build_gyre_config(
     the per-deck knobs: homogeneous linear EOS, single Laplacian ``viscAh=400``,
     no vertical mixing / physics (single layer), ``abEps=0.01``, and the
     ``barotropic_solver`` (the tutorial validates the per-tendency oracle tier on
-    the split ``implicit_cn``; the equilibrium tier uses ``GyreFaithfulModel``).
+    the split ``implicit_cn``; the retired equilibrium-tier GyreFaithfulModel
+    stepper is documented in mitgcm_gyre_energy_conservation.md).
     """
     return mitgcm_canonical_ocean_config(
         g=G_BARO,
@@ -209,26 +210,6 @@ def build_gyre_state(z_coord) -> LatLonCGridOceanState:
         geom, z_coord,
         land_mask_override=build_gyre_land_mask(),
     )
-
-
-def build_gyre_faithful_model(
-    *, n: int = NX, dx_m: float = DX_M, dt_s: float = DT_S,
-):
-    """The MITgcm-faithful single-layer integrator for the EQUILIBRIUM oracle tier.
-
-    Returns a ``GyreFaithfulModel`` (unsplit explicit-Coriolis → implicit free
-    surface, every operator calibrated to MITgcm's momU/momV diagnostics) that
-    reproduces MITgcm's laminar equilibrium ``|u|max≈0.031, |v|max≈0.084`` at 1×
-    AND 2× resolution.  The canonical split ``LatLonCGridOceanModel`` matches the
-    oracle at the 10-step / per-tendency tier (``build_gyre_recipe``) but runs the
-    marginally-resolved (Munk δ≈1.7-cell) gyre turbulent at equilibrium because its
-    barotropic/baroclinic split + forward-backward-Coriolis predictor sits on the
-    unstable side of the western-boundary-current instability.  Use this stepper for
-    the multi-year equilibrium comparison; see
-    ``docs/ocean/fidelity/mitgcm_gyre_energy_conservation.md``.
-    """
-    from legoesm.ocean.fidelity.mitgcm_gyre_faithful import GyreFaithfulModel
-    return GyreFaithfulModel(n=n, dx_m=dx_m, dt_s=dt_s)
 
 
 def build_gyre_recipe(

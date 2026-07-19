@@ -11,7 +11,7 @@ __param_spec__ = {
         "excluded": {
             "cfl_dt_estimate": "numerics: solver/CFL/smoothing parameter",
             "cfl_safety": "numerics: solver/CFL/smoothing parameter",
-            "n2_threshold": "measurement convention: EVD trigger threshold on N² (NEMO zdfevd rn2<threshold), not trainable",
+            "n2_threshold": "convention: NEMO zdfevd static-instability trigger threshold on N^2 [1/s^2] (detection noise floor, hard-threshold path only; not a trainable closure)",
             "nu_bg": "default 0 = disabled/off (enable via config, not training)",
             "nu_conv": "default 0 = disabled/off (enable via config, not training)",
             "sigmoid_sharpness": "numerics: solver/CFL/smoothing parameter",

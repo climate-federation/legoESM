@@ -31,18 +31,23 @@ logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 # auto-detect for it — it would try to load libmpi before argv is parsed and
 # hard-crash on a node without a loadable MPI library (verified).
 from legoesm.parallel.early_init import maybe_init_jax_distributed
+
 if "--multicontroller" not in sys.argv:
     maybe_init_jax_distributed()
 
-from legoesm import constants
 from legoesm.driver.config import (
+    VALID_RADIATION,
+    VALID_TURBULENCE,
     DycoreConfig,
     EvaluationConfig,
     ExperimentConfig,
     GridConfig,
     OutputConfig,
+    parse_gwd_spec,
 )
 from legoesm.driver.run_status import status_to_exit_code
+
+from legoesm import constants
 
 _DYCORE_DEFAULTS = DycoreConfig()
 _OUTPUT_DEFAULTS = OutputConfig()
@@ -144,7 +149,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # ``voronoi`` / ``icosahedral`` / ``mpas_voronoi`` are accepted and
     # normalised by ``legoesm.driver.config.normalize_grid_type``
     # before reaching any internal dispatch.
-    parser.add_argument("--grid-type", type=str, default="cubed_sphere",
+    # default=None is a sentinel meaning "not explicitly set" so that
+    # _postprocess_args can distinguish a real user choice from the production
+    # default (cubed_sphere) when checking --truncation/--discretization
+    # conflicts; it resolves the sentinel to "cubed_sphere" afterwards.
+    parser.add_argument("--grid-type", type=str, default=None,
                         choices=["cubed_sphere", "gaussian", "latlon",
                                  "mpas",
                                  "voronoi", "icosahedral", "mpas_voronoi"])
@@ -161,7 +170,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # the postprocessor canonicalises 'cgrid' → 'latlon_cgrid' so the
     # downstream factory finds a matching ``(model_type, discretization,
     # grid_type)`` triple.
-    parser.add_argument("--discretization", type=str, default="centered",
+    # default=None sentinel: see --grid-type; resolves to "centered".
+    parser.add_argument("--discretization", type=str, default=None,
                         choices=["centered", "finite_volume", "cgrid",
                                   "latlon_cgrid", "cdgrid", "mpas", "spectral"])
     parser.add_argument("--truncation", type=int, default=None,
@@ -241,7 +251,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--time-integrator", type=str, default="auto",
         choices=["auto", "ssp_rk3", "ssp_rk3_scan", "ssp_rk34",
-                 "ssp_rk54", "ssp_rk54_scan", "rk4"],
+                 "ssp_rk54", "ssp_rk54_scan", "rk4",
+                 "leapfrog", "leapfrog_si"],
         help="Time integrator.  'auto' (default) selects each dycore's "
              "own stable default: ssp_rk3 on cube/lat-lon (IEEE-"
              "identical to existing runs) and ssp_rk54_scan on MPAS "
@@ -251,7 +262,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "verbatim to every dycore, including ssp_rk3 on MPAS for "
              "deliberate integrator-sensitivity runs.  ssp_rk3_scan is "
              "the JIT-compile-time optimised variant for production "
-             "lat-lon C-grid AMIP.",
+             "lat-lon C-grid AMIP.  leapfrog / leapfrog_si are the "
+             "SPECTRAL dycore's single-physics-eval path — required to run "
+             "PROGNOSTIC physics (clubb_lite TKE / bechtold / prognostic "
+             "GWD) faithfully on gaussian/spectral (#405); the per-RK-stage "
+             "ssp_rk3 spectral path still diagnostic-swaps prognostic "
+             "schemes.",
     )
     parser.add_argument(
         "--implicit-grav-wave-use-pcg", action="store_true",
@@ -343,8 +359,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Path to ERA5 Zarr store for --ic era5")
 
     # Radiation
+    # Derived from the canonical tuple so this list cannot drift from
+    # validate_strict.  "none" is REQUIRED here, not decorative: this driver
+    # has a --held-suarez-forcing lane, HS forcing is ADDITIVE to the physics
+    # pipeline rather than a replacement, and a genuine dry HS run therefore
+    # needs radiation OFF.  Omitting it made the dry-core lane unreachable from
+    # this driver (scheme-reachability audit).
     parser.add_argument("--radiation", type=str, default="gray",
-                        choices=["gray", "rrtmg", "rrtmgp"])
+                        choices=list(VALID_RADIATION),
+                        help="Radiation scheme (default: gray). 'none' is for "
+                             "the dry --held-suarez-forcing lane.")
     # Default is ``None`` so ``_postprocess_args`` can tell an explicit
     # ``--rad-update-steps 1`` from "the user did not pass this flag".
     # ``--production-profile`` only auto-sets the production cadence
@@ -353,6 +377,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rad-update-steps", type=int, default=None)
     parser.add_argument("--unfused-radiation", action="store_true", default=False,
                         help="Run radiation outside the compiled segment scan")
+    parser.add_argument("--per-step-rollout", action="store_true", default=False,
+                        help="Use the per-step Python-loop rollout "
+                             "(driver.run(compiled=False)) instead of the "
+                             "compiled lax.scan segments. Slower, but threads the "
+                             "CLUBB cloud-fraction->radiation carry "
+                             "(--use-clubb-cloud-fraction), which the compiled "
+                             "SegmentCarry path does not yet carry.")
     parser.add_argument("--rrtmgp-gpoint-batch-size", type=int,
                         default=_EXPERIMENT_DEFAULTS.rrtmgp_gpoint_batch_size,
                         help="RRTMGP g-point batch size (0 = auto/checkpointed)")
@@ -520,12 +551,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # disabled only for an idealized / dry-dynamics run, which must opt in via
     # --allow-disabled-physics (or --held-suarez-forcing / --enable-latlon-spmd).
     # Enforced by _require_full_physics_for_amip; see the directive in CLAUDE.
+    # mynn25 was missing while run_coupled offers it, and it resolves through
+    # the shared turbulence factory (integration.get_turbulence_fn) -- drift.
+    # Derived from the canonical tuple: this hand-copied list is exactly what
+    # drifted (it silently omitted mynn25 while run_coupled's copy omitted
+    # clubb_lite/ysu -- same ModelDriver, same factory, two different answers to
+    # "what can I run?").
     parser.add_argument("--turbulence", type=str, default="louis",
-                        choices=[
-                            "none", "smagorinsky", "louis", "tke",
-                            "clubb_lite", "clubb", "holtslag_boville", "ysu", "edmf",
-                        ])
-    parser.add_argument("--gravity-wave-drag", type=str, default="mcfarlane",
+                        choices=list(VALID_TURBULENCE))
+    parser.add_argument("--cloudtop-entrainment-efficiency",
+                        dest="louis_cloudtop_entrainment_efficiency", type=float,
+                        default=0.0,
+                        help="Marine-Sc cloud-top entrainment efficiency A in "
+                             "[0,1] for the Louis PBL (K_ent = A*W_REF*dz*gates, "
+                             "W_REF=0.02 m/s): vents trapped BL-top moisture into "
+                             "the dry free troposphere to thin excess stratocumulus "
+                             "liquid cloud (the AMIP albedo bias) WITHOUT a "
+                             "surface-evaporation trade.  0 = off (default); "
+                             "warm-start/ramp only (cold-start caveat).")
+    # Shared validator: composites keep working and a typo is now rejected at
+    # the CLI (this flag previously had `type=str` with no validation at all).
+    parser.add_argument("--gravity-wave-drag", type=parse_gwd_spec,
+                        default="mcfarlane",
                         help="GWD scheme: none, rayleigh, lindzen, mcfarlane, "
                              "hines, prognostic_spectral, ml_emulator, or a "
                              "'+'-joined composite whose source tendencies are "
@@ -565,6 +612,53 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[kg/kg] (None=CloudConfig default; tuned slab 3e-4).")
     parser.add_argument("--rh-crit", dest="cloud_rh_crit", type=float, default=None,
                         help="Critical RH for cloud onset (None=scheme default).")
+    parser.add_argument("--clubb-cf-override-strength",
+                        dest="cloud_clubb_cf_override_strength", type=float,
+                        default=None,
+                        help="Blend strength [0,1] toward diagnostic-CLUBB cloud "
+                             "fraction in the BL when --use-clubb-cloud-fraction "
+                             "is on (1.0=full replacement, which drove a real-SST "
+                             "surface-heating runaway; ~0.3-0.5 gentler+stable). "
+                             "None=CloudConfig default (1.0).")
+    parser.add_argument("--clubb-cf-override-floor",
+                        dest="cloud_clubb_cf_override_floor", type=float,
+                        default=None,
+                        help="Minimum BL cloud fraction [0,1] the CLUBB override "
+                             "may leave — breaks the cloud->0 cloud-temperature "
+                             "runaway that full reduction caused, so a LARGER "
+                             "albedo fix can run stably (~0.15-0.25). None="
+                             "CloudConfig default (0.0 = no floor).")
+    parser.add_argument("--cloud-inhomogeneity-factor",
+                        dest="cloud_inhomogeneity_factor", type=float, default=None,
+                        help="Cahalan (1994) horizontal-inhomogeneity factor chi "
+                             "[0.3,1.0] scaling the radiative cloud water path "
+                             "(plane-parallel albedo bias). LOWER => thinner "
+                             "optics => lower albedo. None=CloudConfig default 1.0 "
+                             "(homogeneous). ~0.7 is the observed correction. "
+                             "Only used when --cloud-optics-inhomogeneity=constant.")
+    parser.add_argument("--cloud-optics-inhomogeneity",
+                        dest="cloud_optics_inhomogeneity",
+                        choices=["constant", "two_region"], default="constant",
+                        help="Sub-grid cloud-optics inhomogeneity scheme: "
+                             "'constant' (Cahalan scalar chi, legacy default) or "
+                             "'two_region' (TAU-DEPENDENT Shonk-Hogan 2008 optic "
+                             "that breaks the plane-parallel tau-saturation a "
+                             "scalar cannot -- a thick cloud is reduced MORE than "
+                             "a thin one).")
+    parser.add_argument("--cloud-fsd", dest="cloud_fsd", type=float, default=None,
+                        help="Fractional std-dev of in-cloud water for the "
+                             "two_region optic [0,1] (Shonk-Hogan ~0.75; HIGHER "
+                             "=> thinner leaking sub-column => lower albedo). "
+                             "None=CloudConfig default 0.75.")
+    parser.add_argument("--use-clubb-cloud-fraction",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Route diagnostic CLUBB's sub-grid PDF cloud "
+                             "fraction into the cloud optics instead of the RH "
+                             "grid-scale one (marine-Sc over-bright albedo lever; "
+                             "a moist closure is less overcast over a saturated "
+                             "marine BL => lower LWP floor => lower albedo). "
+                             "Requires --turbulence clubb (diagnostic). Default "
+                             "off = RH grid-scale cloud fraction (byte-identical).")
     parser.add_argument("--cloud-p-xr", dest="cloud_p_xr", type=float, default=None,
                         help="Xu-Randall cloud-fraction RH exponent p_xr (None="
                              "default 0.25; bounds 0.05..1.0). HIGHER => cloud "
@@ -575,6 +669,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Xu-Randall condensate sensitivity alpha_xr (None="
                              "default 100; bounds 10..1000). LOWER => cloud "
                              "fraction grows more slowly with condensate.")
+    parser.add_argument("--diagnostic-condensate-scheme",
+                        dest="cloud_diagnostic_condensate_scheme",
+                        choices=["constant", "adiabatic"], default="constant",
+                        help="Vertical structure of the stratiform in-cloud "
+                             "condensate floor. 'constant' (default) = flat "
+                             "q_c_diagnostic at every cloudy level (validated). "
+                             "'adiabatic' = depth-scaled adiabatic LWC that dims "
+                             "THIN warm marine stratocumulus (the source-side "
+                             "marine-BL albedo fix) while deep clouds stay at "
+                             "the cap.")
+    parser.add_argument("--adiabatic-lwc-rate", dest="cloud_adiabatic_lwc_rate",
+                        type=float, default=None,
+                        help="In-cloud LWC growth per metre of cloudy depth "
+                             "[kg/kg/m] for --diagnostic-condensate-scheme="
+                             "adiabatic (None=CloudConfig default 1.5e-6 ~ "
+                             "1.5 g/kg per km; bounds 5e-7..3e-6).")
     parser.add_argument("--convective-cloud", dest="convective_cloud",
                         action=argparse.BooleanOptionalAction, default=False,
                         help="Add the convective (thin-cirrus) cloud-fraction "
@@ -601,6 +711,148 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[J/kg]; lower it to trigger convection more readily "
                              "at coarse resolution (the AMIP precip-deficit lever). "
                              f"Default {_EXPERIMENT_DEFAULTS.bechtold_cape_threshold}.")
+    parser.add_argument("--bechtold-conv-top-pa", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_conv_top_pa,
+                        dest="bechtold_conv_top_pa",
+                        help="Bechtold convective-top pressure [Pa]: gates the "
+                             "(non-detraining) plume + compensating-subsidence "
+                             "above this cutoff (stability). 15000 (150 hPa) is a "
+                             "tighter-than-kernel cap; raise toward 10000 (100 hPa) "
+                             "if deep tropical tops are clipped. "
+                             f"Default {_EXPERIMENT_DEFAULTS.bechtold_conv_top_pa}.")
+    parser.add_argument("--bechtold-downdraft-evap", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_downdraft_evap,
+                        dest="bechtold_downdraft_evap",
+                        help="Bechtold convective-downdraft evaporation efficiency "
+                             "[0,0.5] (marine-evaporation / precip lever, #847): "
+                             "higher => the downdraft re-evaporates more rain => "
+                             "more sub-cloud COOLING => cold pools enhance "
+                             "convective triggering => more precip => net column "
+                             "drying => larger sea-air gradient => higher surface "
+                             f"evaporation. Default {_EXPERIMENT_DEFAULTS.bechtold_downdraft_evap} "
+                             "(weak); Tiedtke ~0.3.")
+    parser.add_argument("--bechtold-downdraft-alpha", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_downdraft_alpha,
+                        dest="bechtold_downdraft_alpha",
+                        help="Bechtold downdraft mass-flux fraction [0,0.9]. "
+                             f"Default {_EXPERIMENT_DEFAULTS.bechtold_downdraft_alpha}.")
+    parser.add_argument("--bechtold-downdraft-rh-min", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_downdraft_rh_min,
+                        dest="bechtold_downdraft_rh_min",
+                        help="Bechtold downdraft column-RH suppression threshold "
+                             f"[0,1]. Default {_EXPERIMENT_DEFAULTS.bechtold_downdraft_rh_min}.")
+    parser.add_argument("--bechtold-downdraft-transport",
+                        dest="bechtold_downdraft_transport",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_downdraft_transport,
+                        help="Enable the Bechtold PENETRATIVE downdraft: advect "
+                             "low-MSE (dry) mid-level air DOWN into the sub-cloud "
+                             "layer (Tiedtke 1989), DRYING the marine BL => "
+                             "stronger surface evaporation + less BL liquid cloud "
+                             "(lower albedo). UNLIKE --bechtold-downdraft-evap "
+                             "(rain re-evaporation, which MOISTENS), this is the "
+                             "BL-ventilation lever. --no-bechtold-downdraft-transport "
+                             "disables a config-file default. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_downdraft_transport}.")
+    parser.add_argument("--bechtold-use-ifs-cape-closure",
+                        dest="bechtold_use_ifs_cape_closure",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_cape_closure,
+                        help="Enable the full IFS deep CAPE closure "
+                             "ZMFUB1=ZCAPE*ZMFUB/(ZHEAT*ZXTAU) (openifs "
+                             "cumastrn.F90:704-833) instead of the legacy "
+                             "surrogate deep closure. "
+                             "--no-bechtold-use-ifs-cape-closure disables a "
+                             "config-file default. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_cape_closure}.")
+    parser.add_argument("--bechtold-use-ifs-subcloud-evap",
+                        dest="bechtold_use_ifs_subcloud_evap",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_subcloud_evap,
+                        help="Enable the IFS Kessler sub-cloud evaporation of "
+                             "convective rain (openifs cuflxn.F90:436-475: "
+                             "RCPECONS rate, ZRHEBC RH break) instead of the "
+                             "crude downdraft-efficiency re-evaporation. "
+                             "--no-bechtold-use-ifs-subcloud-evap disables a "
+                             "config-file default. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_subcloud_evap}.")
+    parser.add_argument("--bechtold-use-ifs-inplume-precip",
+                        dest="bechtold_use_ifs_inplume_precip",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_inplume_precip,
+                        help="Enable the IFS in-updraft precipitation formation "
+                             "(openifs cuascn.F90:718-773 analytic Sundqvist "
+                             "conversion; bypasses the post-hoc precip split). "
+                             "--no-bechtold-use-ifs-inplume-precip disables a "
+                             "config-file default. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_inplume_precip}.")
+    parser.add_argument("--bechtold-use-ifs-downdraft",
+                        dest="bechtold_use_ifs_downdraft",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_downdraft,
+                        help="Enable the IFS convective downdraft (openifs "
+                             "cudlfsn+cuddrafn: LFS, saturated entraining "
+                             "descent, rain debit, closure/CMT coupling). "
+                             "--no-bechtold-use-ifs-downdraft disables a "
+                             "config-file default. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_downdraft}.")
+    parser.add_argument("--bechtold-use-ifs-snow-melt",
+                        dest="bechtold_use_ifs_snow_melt",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_snow_melt,
+                        help="Enable the IFS convective snow partition + melt "
+                             "(openifs cuflxn.F90 FOEALFCU wet-bulb split, "
+                             "RTAUMEL melt; FOLD variant). Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_snow_melt}.")
+    parser.add_argument("--bechtold-use-ifs-capdcycl",
+                        dest="bechtold_use_ifs_capdcycl",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_capdcycl,
+                        help="Enable the IFS RCAPDCYCL=2 diurnal-cycle CAPE "
+                             "correction (openifs cumastrn.F90:780-833; land "
+                             "deep convection peaks late afternoon). Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_capdcycl}.")
+    parser.add_argument("--bechtold-use-ifs-land-rhebc",
+                        dest="bechtold_use_ifs_land_rhebc",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_land_rhebc,
+                        help="Enable the IFS land RH break for sub-cloud rain "
+                             "evaporation (cuflxn.F90 0.70/0.75 land vs "
+                             "0.85/0.92 ocean). Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_land_rhebc}.")
+    parser.add_argument("--bechtold-use-ifs-shallow-closure",
+                        dest="bechtold_use_ifs_shallow_closure",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_shallow_closure,
+                        help="Enable the IFS shallow PBL-equilibrium closure "
+                             "(openifs cumastrn.F90 ZDHPBL/ZDH; flux-form "
+                             "supply from same-step bulk SHF+LHF + sub-cloud "
+                             "radiative convergence). "
+                             "--no-bechtold-use-ifs-shallow-closure disables "
+                             "a config-file default. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_shallow_closure}.")
+    parser.add_argument("--bechtold-dx-m", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_dx_m,
+                        dest="bechtold_dx_m",
+                        help="Grid spacing [m] for the IFS ZTAURES convective-"
+                             "turnover resolution factor (cumastrn.F90:762-768;"
+                             " ZDX=sqrt(cell area)). 0 disables (legacy "
+                             "factor 1.0). Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_dx_m}.")
+    parser.add_argument("--bechtold-downdraft-entrain-rate", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_downdraft_entrain_rate,
+                        dest="bechtold_downdraft_entrain_rate",
+                        help="Penetrative-downdraft fractional entrainment rate "
+                             "[1/m] (mixes it toward the environment as it sinks; "
+                             "larger => arrives less dry => weaker BL drying). "
+                             f"Default {_EXPERIMENT_DEFAULTS.bechtold_downdraft_entrain_rate}.")
+    parser.add_argument("--bechtold-downdraft-detrain-scale", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_downdraft_detrain_scale_m,
+                        dest="bechtold_downdraft_detrain_scale_m",
+                        help="Near-surface height scale [m] over which the "
+                             "penetrative-downdraft mass flux tapers to zero (the "
+                             "drying-deposit depth). Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_downdraft_detrain_scale_m}.")
 
     # Joint ML physics parameterization
     parser.add_argument("--physics-parameterization", type=str, default="none",
@@ -669,6 +921,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "uses each scheme's own default (Tiedtke 0.0=off, "
                              "Bechtold 0.7=on, the #929 fix); pass 0.0 to force "
                              "the legacy no-split path.")
+    parser.add_argument("--convective-precip-split", type=str, default="constant",
+                        choices=["constant", "autoconversion"],
+                        help="Convective precip-split scheme (Bechtold/Tiedtke): "
+                             "'constant' uses the fixed "
+                             "--convective-precip-efficiency; 'autoconversion' "
+                             "derives the precip fraction PHYSICALLY from the "
+                             "plume updraft cloud water (Sundqvist-1978), so the "
+                             "efficiency emerges from the updraft loading instead "
+                             "of a tuned constant.")
+    parser.add_argument("--autoconv-q-c-crit", type=float, default=5.0e-4,
+                        help="Autoconversion critical updraft cloud water [kg/kg] "
+                             "for --convective-precip-split autoconversion "
+                             "(Sundqvist 1978). Default 5e-4.")
+    parser.add_argument("--autoconv-pe-max", type=float, default=0.9,
+                        help="Ceiling on the emergent convective precip fraction "
+                             "for --convective-precip-split autoconversion. "
+                             "Default 0.9.")
     parser.add_argument("--convective-buoyancy-death-memory",
                         action="store_true",
                         help="Tiedtke plume buoyancy-death memory: once a "
@@ -951,6 +1220,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Host-side forcing update cadence [days]")
     parser.add_argument("--seed", type=int, default=_EXPERIMENT_DEFAULTS.seed,
                         help="Master RNG seed for reproducibility")
+    # BooleanOptionalAction so a YAML value can be turned OFF from the CLI
+    # (--no-cmip-output / --no-clear-sky-diag): the clear-sky 2nd RRTMGP pass
+    # roughly DOUBLES the radiation compile + per-step cost, unneeded for a
+    # convection-scheme precip/albedo comparison (#872).
     parser.add_argument("--cmip-output", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--clear-sky-diag", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
@@ -1121,13 +1394,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
+    # Defensive boundary: --grid-type/--discretization carry a None sentinel
+    # default (explicitness tracking for the --truncation conflict guard in
+    # _postprocess_args). A caller that skips _postprocess_args must still get
+    # the production defaults, not None (codex review 2026-07-17).
+    if args.grid_type is None:
+        args.grid_type = "cubed_sphere"
+    if args.discretization is None:
+        args.discretization = "centered"
     grid_config = GridConfig(
         grid_type=args.grid_type,
         resolution=args.resolution,
         nlev=args.nlev,
         vertical_coord=args.vertical_coord,
-        p_top_Pa=args.p_top or 200.0,
-        stretching=args.stretching or 2.0,
+        p_top_Pa=args.p_top if args.p_top is not None else 200.0,
+        stretching=args.stretching if args.stretching is not None else 2.0,
         use_duogrid=getattr(args, "use_duogrid", False),
     )
 
@@ -1244,10 +1525,14 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_scheme=args.clouds,
         cloud_rh_crit_bl=args.cloud_rh_crit_bl,
         cloud_sigma_bl=args.cloud_sigma_bl,
+        use_clubb_cloud_fraction=args.use_clubb_cloud_fraction,
         microphysics=args.microphysics,
         nc_from_aerosol=args.aerosol_ccn,
         subgrid_autoconversion=args.subgrid_autoconversion,
         convective_precip_efficiency=args.convective_precip_efficiency,
+        convective_precip_split=args.convective_precip_split,
+        autoconv_q_c_crit=args.autoconv_q_c_crit,
+        autoconv_pe_max=args.autoconv_pe_max,
         convective_buoyancy_death_memory=args.convective_buoyancy_death_memory,
         convection=args.convection,
         turbulence=args.turbulence,
@@ -1255,11 +1540,19 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         # Tuned air-sea + cloud calibration (mirror run_coupled).
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
+        louis_cloudtop_entrainment_efficiency=args.louis_cloudtop_entrainment_efficiency,
         surface_thermo_convention=args.bulk_thermo_convention,
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
         cloud_rh_crit=args.cloud_rh_crit,
+        cloud_clubb_cf_override_strength=args.cloud_clubb_cf_override_strength,
+        cloud_clubb_cf_override_floor=args.cloud_clubb_cf_override_floor,
+        cloud_inhomogeneity_factor=args.cloud_inhomogeneity_factor,
+        cloud_optics_inhomogeneity=args.cloud_optics_inhomogeneity,
+        cloud_fsd=args.cloud_fsd,
         cloud_p_xr=args.cloud_p_xr,
         cloud_alpha_xr=args.cloud_alpha_xr,
+        cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
+        cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         convective_cloud=args.convective_cloud,
         fix_moisture=args.fix_moisture,
         energy_consistent_moisture_clip=args.energy_consistent_moisture_clip,
@@ -1319,6 +1612,22 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sbm_RH_ref=args.sbm_rh_ref,
         sbm_cape_threshold=args.sbm_cape_threshold,
         bechtold_cape_threshold=args.bechtold_cape_threshold,
+        bechtold_conv_top_pa=args.bechtold_conv_top_pa,
+        bechtold_downdraft_evap=args.bechtold_downdraft_evap,
+        bechtold_downdraft_alpha=args.bechtold_downdraft_alpha,
+        bechtold_downdraft_rh_min=args.bechtold_downdraft_rh_min,
+        bechtold_downdraft_transport=args.bechtold_downdraft_transport,
+        bechtold_downdraft_entrain_rate=args.bechtold_downdraft_entrain_rate,
+        bechtold_downdraft_detrain_scale_m=args.bechtold_downdraft_detrain_scale_m,
+        bechtold_use_ifs_cape_closure=args.bechtold_use_ifs_cape_closure,
+        bechtold_use_ifs_subcloud_evap=args.bechtold_use_ifs_subcloud_evap,
+        bechtold_use_ifs_inplume_precip=args.bechtold_use_ifs_inplume_precip,
+        bechtold_dx_m=args.bechtold_dx_m,
+        bechtold_use_ifs_downdraft=args.bechtold_use_ifs_downdraft,
+        bechtold_use_ifs_shallow_closure=args.bechtold_use_ifs_shallow_closure,
+        bechtold_use_ifs_capdcycl=args.bechtold_use_ifs_capdcycl,
+        bechtold_use_ifs_land_rhebc=args.bechtold_use_ifs_land_rhebc,
+        bechtold_use_ifs_snow_melt=args.bechtold_use_ifs_snow_melt,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
         latlon_spmd_compiled_segments=args.latlon_spmd_compiled_segments,
@@ -1341,6 +1650,51 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         **({"T_init": args.t_init} if args.t_init is not None else {}),
         **({"rh_init": args.rh_init} if args.rh_init is not None else {}),
     )
+
+
+_SPECTRAL_PROGNOSTIC_CONVECTION = frozenset({
+    "tiedtke", "bechtold", "zhang_mcfarlane", "kain_fritsch", "mass_flux",
+    "edmf", "emanuel"})
+
+
+def _apply_spectral_scheme_fallback(args: argparse.Namespace, argv) -> argparse.Namespace:
+    """Spectral/gaussian AMIP: the spectral run loop cannot thread a prognostic
+    physics carry yet (issue #405), so prognostic convection / gravity-wave-drag
+    are refused deep in setup. When the user did NOT explicitly pick them, fall
+    back to the diagnostic schemes the spectral loop CAN run — convection ->
+    ``sbm``, GWD -> ``rayleigh`` — with a notice, so gaussian AMIP runs out of the
+    box. Explicit ``--convection`` / ``--gravity-wave-drag`` are honoured verbatim
+    (and still correctly refused by the loop if prognostic — the user's call).
+    The faithful prognostic-on-spectral path is threading PhysicsState through the
+    spectral step (the #405 follow-up), NOT this scheme swap. No-op off spectral."""
+    if getattr(args, "discretization", None) != "spectral":
+        return args
+    # #405: the spectral run loop now THREADS the prognostic PhysicsState carry
+    # on the LEAPFROG path (single physics eval per step), so a prognostic
+    # scheme runs FAITHFULLY there — do not downgrade it.  The downgrade below
+    # applies only to the per-RK-stage ssp_rk3 path, where a single-step carry
+    # is ill-defined.  (Auto-selecting leapfrog_si + its semi-implicit matrices
+    # for an `auto` integrator is a further usability step; today the prognostic
+    # spectral path is reached via an explicit `--time-integrator leapfrog_si`.)
+    _integ = str(getattr(args, "time_integrator", "auto")).lower()
+    if _integ in ("leapfrog", "leapfrog_si"):
+        print("[run_amip] spectral leapfrog path: prognostic physics carry is "
+              "threaded (#405) — schemes run faithfully (no diagnostic swap).",
+              flush=True)
+        return args
+    toks = list(argv or [])
+    has = lambda f: any(a == f or a.startswith(f + "=") for a in toks)
+    if not has("--convection") and args.convection in _SPECTRAL_PROGNOSTIC_CONVECTION:
+        print(f"[run_amip] spectral loop cannot thread prognostic convection "
+              f"'{args.convection}' yet (issue #405) -> diagnostic 'sbm'. "
+              f"Pass --convection to override.", flush=True)
+        args.convection = "sbm"
+    if not has("--gravity-wave-drag") and "mcfarlane" in str(args.gravity_wave_drag):
+        print(f"[run_amip] spectral loop cannot thread prognostic GWD "
+              f"'{args.gravity_wave_drag}' yet (issue #405) -> diagnostic "
+              f"'rayleigh'. Pass --gravity-wave-drag to override.", flush=True)
+        args.gravity_wave_drag = "rayleigh"
+    return args
 
 
 def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> argparse.Namespace:
@@ -1373,9 +1727,18 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
               "when a land-sea mask is set); land albedo stays the "
               "latitude-only curve.")
 
-    if (args.forcing_path is None and args.restart_from is None
-            and args.dataset != "analytical"):
-        parser.error("--forcing-path required (unless --dataset analytical or --restart-from)")
+    # SST/SIC forcing is NOT stored in the checkpoint, and driver.setup()
+    # (which loads forcing) runs before load_checkpoint — so a restart of a
+    # real-data run still needs --forcing-path.  The old message exempted
+    # --restart-from, which was false: it deferred the failure to a confusing
+    # deep "AMIPForcingConfig.path is empty" inside setup (audit 2026-07-17).
+    if args.forcing_path is None and args.dataset != "analytical":
+        parser.error(
+            "--forcing-path required for --dataset "
+            f"{args.dataset!r} (unless --dataset analytical). Forcing is not "
+            "stored in the checkpoint, so a --restart-from run must re-supply "
+            "the same --forcing-path."
+        )
     if args.solar_source in ("file", "spectral_file") and not args.solar_file:
         parser.error("--solar-file required when --solar-source is file/spectral_file")
     if args.ic == "era5" and not args.ic_path:
@@ -1411,13 +1774,14 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
         parser.error("--subgrid-autoconversion requires --microphysics "
                      "morrison (the in-cloud closure lives in the Morrison "
                      "warm-rain path)")
+    _RAIN_SPLIT_SCHEMES = ("tiedtke", "bechtold", "zhang_mcfarlane",
+                           "kain_fritsch", "mass_flux", "edmf")
     if (args.convective_precip_efficiency is not None
             and args.convective_precip_efficiency > 0.0
-            and args.convection not in ("tiedtke", "bechtold")):
-        parser.error("--convective-precip-efficiency requires --convection "
-                     "tiedtke or bechtold (only the mass-flux schemes "
-                     "implement the in-updraft precipitation split; other "
-                     "schemes ignore the knob)")
+            and args.convection not in _RAIN_SPLIT_SCHEMES):
+        parser.error("--convective-precip-efficiency requires a mass-flux "
+                     f"convection scheme with the shared in-updraft-rain "
+                     f"split: {_RAIN_SPLIT_SCHEMES}")
     if args.convective_buoyancy_death_memory and args.convection != "tiedtke":
         parser.error("--convective-buoyancy-death-memory requires --convection "
                      "tiedtke (plume buoyancy-death memory is a Tiedtke "
@@ -1448,22 +1812,52 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
                 "--physics-parameterization ml currently requires "
                 "--convection mass_flux and --turbulence louis"
             )
-    if args.evaluate and not args.cmip_output:
-        parser.error("--evaluate requires --cmip-output (ClimateEval reads "
-                     "the CMOR Amon/ output tree)")
         if not args.physics_parameterization_checkpoint or not args.physics_parameterization_stats:
             parser.error(
                 "--physics-parameterization ml requires both "
                 "--physics-parameterization-checkpoint and "
                 "--physics-parameterization-stats"
             )
+    if args.evaluate and not args.cmip_output:
+        parser.error("--evaluate requires --cmip-output (ClimateEval reads "
+                     "the CMOR Amon/ output tree)")
 
-    # Auto-configure spectral runs
+    # Auto-configure spectral runs. --truncation implies the Gaussian/spectral
+    # pair, and --discretization spectral implies the Gaussian grid; an
+    # explicitly conflicting choice must be a hard error, not a silent
+    # override (the only silent grid fallback in the driver, audit
+    # 2026-07-17). --grid-type/--discretization use a None sentinel default so
+    # ANY explicit value — including one equal to the production default — is
+    # distinguishable from unset and conflict-checked.
+    if args.truncation is not None:
+        if args.grid_type not in (None, "gaussian"):
+            parser.error(
+                f"--truncation implies --grid-type gaussian but "
+                f"--grid-type {args.grid_type} was given; drop one of them"
+            )
+        if args.discretization not in (None, "spectral"):
+            parser.error(
+                f"--truncation implies --discretization spectral but "
+                f"--discretization {args.discretization} was given; "
+                "drop one of them"
+            )
+    if args.discretization == "spectral" and args.grid_type not in (
+            None, "gaussian"):
+        parser.error(
+            f"--discretization spectral implies --grid-type gaussian but "
+            f"--grid-type {args.grid_type} was given; drop one of them"
+        )
     if args.discretization == "spectral" or args.truncation is not None:
         args.discretization = "spectral"
         args.grid_type = "gaussian"
         if args.truncation is not None:
             args.resolution = args.truncation
+    # Resolve the sentinels to the production defaults AFTER the conflict
+    # checks above.
+    if args.grid_type is None:
+        args.grid_type = "cubed_sphere"
+    if args.discretization is None:
+        args.discretization = "centered"
 
     # Canonicalise legacy ``cgrid`` → ``latlon_cgrid`` so the dycore
     # factory finds a matching (model_type, discretization, grid_type)
@@ -1869,6 +2263,7 @@ def main(argv: list[str] | None = None):
                          "'bulk_thermo_convention', 'convective_cloud'"))
 
     args = parser.parse_args(argv)
+    _apply_spectral_scheme_fallback(args, argv if argv is not None else sys.argv[1:])
     args = _postprocess_args(args, parser)
 
     # Route-B multicontroller: initialize jax.distributed BEFORE any device work
@@ -2047,7 +2442,8 @@ def main(argv: list[str] | None = None):
         driver.config = driver.config._replace(days=int(n_profile_days + 1))
         with jax.profiler.trace(profile_dir):
             profile_status = driver.run(start_step=start_step,
-                                        start_day=start_day)
+                                        start_day=start_day,
+                                        compiled=not args.per_step_rollout)
         if _is_root:
             print(f"Profile saved to {profile_dir}")
             print("View with: tensorboard --logdir " + profile_dir)
@@ -2062,7 +2458,8 @@ def main(argv: list[str] | None = None):
 
     if _is_root:
         print("Running...")
-    run_status = driver.run(start_step=start_step, start_day=start_day)
+    run_status = driver.run(start_step=start_step, start_day=start_day,
+                            compiled=not args.per_step_rollout)
 
     # Post-run FAILURE detection needs TWO independent signals — either one
     # non-clean means exit 1 (so a SLURM ``afterok`` chain STOPS instead of

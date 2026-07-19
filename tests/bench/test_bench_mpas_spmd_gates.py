@@ -127,6 +127,10 @@ def test_single_process_two_virtual_devices_with_gates(tmp_path):
     assert rec["component"] == "mpas_atm"
     assert rec["n_devices"] == 2
     assert "parity" in proc.stdout and "MISMATCH" not in proc.stdout
+    # #1113 ask 2: the ppermute round count is now recorded per row.
+    assert "hlo_collective_permutes" in rec
+    assert rec["hlo_collective_permutes"] is None or isinstance(
+        rec["hlo_collective_permutes"], int)
 
 
 @pytest.mark.timeout(600)

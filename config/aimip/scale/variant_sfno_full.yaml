@@ -1,0 +1,44 @@
+# AIMIP-at-scale variant: SFNO full-atmosphere emulator (no dycore,
+# no physics).
+#
+# The trained SFNO directly maps ``state_t -> state_{t+dt_sfno}``
+# (:class:`SFNOPrimitiveEquationModel` in ``state_update`` mode), so the
+# ENTIRE atmosphere — dynamics AND all physics including radiation — is
+# learned.  A post-hoc dry-air-mass correction is applied after each
+# macro step.
+
+aimip_variant: "sfno_full"
+
+# Nothing classical runs — dycore and every physics scheme (radiation
+# included) are emulated by the SFNO.  The "none" tags are informational
+# (not consumed by run_aimip) and record that no classical scheme is
+# active.
+convection: "none"
+turbulence: "none"
+gravity_wave_drag: "none"
+cloud_scheme: "none"
+microphysics: "none"
+radiation: "none"
+
+# SFNO architecture — pinned to the SAME values as the scale
+# variant_sfno_physics overlay (64 / 4, which overrides the base's 96 / 6)
+# so the sfno_full vs sfno_physics comparison is architecture-matched.
+# Raise both together if you want more emulator capacity.
+sfno_embed_dim: 64
+sfno_n_blocks: 4
+sfno_mlp_expansion: 4
+sfno_seed: 0
+
+# Macro time step of the emulator [s]: 6 h, the standard
+# SFNO/FourCastNet autoregressive cadence.
+dt_sfno: 21600.0
+
+# ``_train_sfno_full_loop`` supports NEITHER the rollout curriculum NOR
+# chunked streaming (it loads the full window set once and checkpoints
+# per-epoch only — no chunk_latest.eqx).  Neutralize the base keys here
+# so the config states what actually runs instead of being silently
+# ignored; training supervises the base loss multi_step_hours (6/12 h =
+# 1-2 SFNO macro steps), the standard SFNO training setup.
+aimip_rollout_curriculum: null
+aimip_chunk_windows: 0
+aimip_chunk_prefetch: false

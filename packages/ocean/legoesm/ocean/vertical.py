@@ -449,10 +449,13 @@ class OceanPartialCellCoordinate(NamedTuple):
     h_partial: jnp.ndarray
     bottom_level: jnp.ndarray
     is_active: jnp.ndarray
-    # Optional EXACT positive T-point depths [m], shape (nlev,) — the
-    # coordinate's geometric ladder (NEMO ``gdept_1d``) for the fidelity
-    # PGF quadrature, mirroring ``OceanZStarCoordinate.t_depth_ref``.
-    # ``None`` → HPG reverts to interface-midpoint depths. Trailing +
+    # Exact reference T-level depths (NEMO ``gdept_1d``; z*-only fidelity
+    # field) propagated from the wrapped z* coordinate so non-midpoint
+    # reference ladders keep their true centre geometry under partial
+    # cells (MLE nla10 + gate-N2 consumers; codex MLE-rhop r2), and so the
+    # fidelity PGF quadrature keeps the exact ladder (mirrors
+    # ``OceanZStarCoordinate.t_depth_ref``).  ``None`` on the model's own
+    # midpoint grids → HPG reverts to interface-midpoint depths. Trailing +
     # defaulted so existing constructions stay backward-compatible.
     t_depth_ref: jnp.ndarray | None = None
 
@@ -558,6 +561,10 @@ def create_partial_cell_coordinate(
         h_partial=h_partial,
         bottom_level=bottom_level,
         is_active=is_active,
+        # Propagate the z*-only exact NEMO gdept so partial-cell wraps of a
+        # NEMO reference ladder keep true centre depths (nla10 tolerance,
+        # gate-N2 pressure geometry, and any future partial-cell PGF
+        # fidelity).  ``getattr``: plain midpoint z* coords carry None.
         t_depth_ref=getattr(z_coord, "t_depth_ref", None),
     )
 

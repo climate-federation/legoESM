@@ -28,6 +28,7 @@ Relationship to other modules
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import time
@@ -68,6 +69,7 @@ from legoesm.training.era5_to_state import (
     era5_to_spectral_carry,
 )
 from legoesm.training.losses import LossConfig, level_weights
+from legoesm.training.data_parallel import mpi_abort_on_uncaught
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +139,13 @@ class NeuralGCMSpectralConfig(NamedTuple):
     # opts in at a link boundary. Ordering + start_chunk resume are identical to
     # the serial path (see _prefetch_iter).
     chunk_prefetch: bool = False
+    # Data-parallel (#985 item 1): when True AND launched under a multi-rank MPI
+    # job (nproc>1), each chunk's samples are sharded across ranks and gradients
+    # are averaged every step -> ~N x throughput on the 72 h-lead phase's GPU
+    # time.  Off / single-rank -> byte-identical serial path.  This shifts the
+    # effective batch from 1 (serial SGD) to N (one synced update per N samples),
+    # so it is a training-trajectory change, not just a speedup — opt in per run.
+    data_parallel: bool = False
 
     # Data
     n_train_days: int = 365      # Number of daily IC/target pairs
@@ -666,9 +675,9 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
 # =============================================================================
 
 # The column MLP physics component lives in the physics directory:
-#   legoesm.atmosphere.physics.learned_column
+#   legoesm.atmosphere.physics.neural_physics
 # Re-export the coupling function for training convenience.
-from legoesm.atmosphere.physics.learned_column import (  # noqa: E402
+from legoesm.atmosphere.physics.neural_physics import (  # noqa: E402
     make_column_physics_fn as make_column_mlp_spectral_physics,
     build_column_physics,
 )
@@ -1578,17 +1587,76 @@ def _training_year_range(windows, config) -> tuple[int, int]:
     return (start, start + max(0, (n_days - 1) // 365) + 1)
 
 
+def host_build_device(warn_label: str = "host-resident load"):
+    """The JAX CPU device for host-side array construction, or ``None``.
+
+    Shared preflight for every host-build site (#985 prefetch, #1155
+    non-chunked loads): returns ``jax.devices("cpu")[0]`` when the CPU
+    backend exists, else warns and returns ``None`` so the caller falls back
+    to building on the compute device (roomy configs are unchanged;
+    memory-tight ones need ``JAX_PLATFORMS=cuda,cpu``).
+    """
+    try:
+        return jax.devices("cpu")[0]
+    except RuntimeError:
+        logger.warning(
+            f"{warn_label}: the JAX CPU backend is unavailable "
+            "(JAX_PLATFORMS?), so arrays will be built on the compute device "
+            "(GPU-OOM risk for dataset-sized loads). Add 'cpu' to "
+            "JAX_PLATFORMS to enable host residency."
+        )
+        return None
+
+
+def stage_sample(tree, device=None):
+    """Public per-sample staging: move a sample pytree's ARRAY leaves onto
+    the compute device (default: this process's first local device).
+
+    Consumer-side half of the host-resident-dataset contract (#1155).
+    Placement semantics (measured, jax 0.10): arrays built under
+    ``jax.default_device(cpu)`` are UNCOMMITTED — a GPU-jitted step would
+    transfer them per call anyway, so staging is not a crash guard. It IS
+    the explicit-placement hygiene: it makes each sample's single H2D copy
+    visible at the call site, keeps behavior identical if the dataset ever
+    arrives COMMITTED (e.g. an explicit ``device_put(cpu)`` producer), and
+    bounds peak device footprint to one sample. Wraps the #985
+    ``_stage_tree``. Uses ``jax.local_devices()`` (not ``jax.devices()``)
+    so a multi-process runtime never targets a non-addressable device.
+    """
+    if device is None:
+        device = jax.local_devices()[0]
+    return _stage_tree(tree, device)
+
+
 def load_training_data(
     config: NeuralGCMSpectralConfig,
     grid: GaussianGrid,
     sigma: SigmaCoordinate,
     cache_dir: str = "data/era5_cache",
     windows: list | None = None,
+    host_resident: bool = False,
 ):
     """Load ERA5 daily IC/target pairs and convert to spectral states.
 
     Opens the ERA5 Zarr store once and batch-loads all needed time slices,
     avoiding per-slice GCS connection overhead.
+
+    ``host_resident=True`` builds every carry under the JAX CPU backend
+    (``jax.default_device``) so a dataset-sized load never materialises on
+    the GPU — the #1155 fix for the non-chunked trainers (they load ALL
+    pairs up front; at T106 all-years that is ~130 GB device-resident, an
+    unconditional OOM). Consumers pair it with per-sample staging
+    (``stage_sample`` / the training loops' ``host_staged=True``) — see
+    ``stage_sample`` for the honest placement semantics (explicit-placement
+    hygiene, not a crash guard: default_device-built arrays are
+    UNCOMMITTED). Trade-offs, accepted and measured against the
+    alternative: the per-snapshot spectral transforms run on CPU during the
+    load (the load is GCS-dominated in practice — job 6758505 measured
+    ~4.4 s/snapshot pure streaming), and staged consumers re-transfer each
+    sample per epoch (~seconds/epoch of H2D vs. hour-scale epochs). A CPU
+    backend is REQUIRED: with no viable success path for a dataset-sized
+    device build, an absent backend raises immediately instead of warning
+    and then OOMing hours into the load (fail-fast).
 
     Parameters
     ----------
@@ -1605,6 +1673,11 @@ def load_training_data(
         the results are concatenated.  This is the AIMIP-style
         multi-year / multi-season sampling protocol.  When ``None``
         the legacy single-window behaviour applies.
+    host_resident : bool
+        Build every array under the JAX CPU backend (see the prose above:
+        the #1155 fix for non-chunked full-dataset loads). Requires the
+        CPU backend (raises otherwise). Consumers pair it with per-sample
+        staging (``stage_sample`` / ``host_staged=True``).
 
     Returns
     -------
@@ -1617,6 +1690,28 @@ def load_training_data(
         coordinate was unreadable) — consumed by the prescribed
         surface-forcing path.
     """
+    if host_resident:
+        _host = host_build_device("load_training_data(host_resident=True)")
+        if _host is None:
+            # No CPU backend = no viable success path for a dataset-sized
+            # load (the device build is the #1155 OOM by construction, hit
+            # only AFTER hours of streaming). Fail fast with the remedy.
+            raise RuntimeError(
+                "load_training_data(host_resident=True) requires the JAX "
+                "CPU backend (add 'cpu' to JAX_PLATFORMS, e.g. "
+                "JAX_PLATFORMS=cuda,cpu): a full-dataset build on the "
+                "compute device OOMs at scale (#1155)."
+            )
+        # NOTE for signature growth: the recursive call forwards EVERY
+        # kwarg explicitly — a new load_training_data parameter must be
+        # added here too, or the host-resident path silently uses its
+        # default (tested: the recursion pins host_resident=False).
+        with jax.default_device(_host):
+            return load_training_data(
+                config, grid, sigma, cache_dir=cache_dir,
+                windows=windows, host_resident=False,
+            )
+
     import numpy as np
     from legoesm.training.era5_to_state import (
         open_era5_zarr, resolve_var, ERA5Slice, ensure_local_cache,
@@ -1631,19 +1726,27 @@ def load_training_data(
     # read stale for the others.  ensure_local_cache is idempotent (skips if the
     # store already exists), so only the first call pays the download.
     store = era5_config.zarr_store
-    # OPT-IN (default OFF -> byte-identical to the old GCS-every-epoch path):
-    # set LEGOESM_ERA5_LOCAL_CACHE=1 to materialise each span to a local zarr
-    # once and read it locally thereafter (#895, ~50 h/run).  Gated behind an
-    # env flag rather than on by default because the ensure_local_cache path is
-    # unexercised on this repo and its speedup + output compatibility must be
-    # validated on the target cluster (Derecho/GCS) — not reachable from CI.
     import os
-    if cache_dir and os.environ.get("LEGOESM_ERA5_LOCAL_CACHE"):
-        # Year-SCOPE the cache store.  ensure_local_cache keys only on path
-        # existence — it does NOT verify an existing store covers the requested
-        # years — so a shared cache_dir reused across runs/phases with different
-        # spans would silently read a stale/narrow subset (codex).  Give each
-        # distinct span its own subdir so the existence check is never stale.
+    # WINDOW-scoped cache (#985): supersedes the year-span cache for the AIMIP
+    # T106 workload — materialise ONLY the ~2,880 snapshots the training
+    # windows touch (~0.5 TB) instead of full 6-hourly year spans (~10 TB), and
+    # read them back BY TIMESTAMP.  The scoped store is built AFTER the absolute
+    # time indices are known (below), so the calendar is read from the REMOTE
+    # store here; ``LEGOESM_ERA5_WINDOW_CACHE=1`` opts in.
+    _window_cache = bool(
+        cache_dir and os.environ.get("LEGOESM_ERA5_WINDOW_CACHE")
+    )
+    # OPT-IN year-span cache (default OFF -> byte-identical to the GCS-every-
+    # epoch path): LEGOESM_ERA5_LOCAL_CACHE=1 materialises each YEAR span once
+    # and reads it locally thereafter (#895).  Superseded by the window cache
+    # above when both are set.
+    if not _window_cache and cache_dir and os.environ.get(
+        "LEGOESM_ERA5_LOCAL_CACHE"
+    ):
+        # Year-SCOPE the cache store.  ensure_local_cache now keys on a
+        # completeness marker (not bare path existence), so a walltime-killed
+        # build is rebuilt, not read as fill-value NaNs (#942/#985); the
+        # per-span subdir still keeps distinct spans from colliding.
         _yrs = _training_year_range(windows, config)
         _scoped = os.path.join(os.fspath(cache_dir), f"y{_yrs[0]}_{_yrs[1]}")
         store = str(ensure_local_cache(era5_config, _scoped, years=_yrs))
@@ -1763,23 +1866,86 @@ def load_training_data(
             f"opening Zarr store once, reading {len(time_indices)} snapshots)..."
         )
 
-    # Read lat/lon and pressure levels
-    lat = np.deg2rad(ds.lat.values.astype(np.float64))
-    lon = np.deg2rad(ds.lon.values.astype(np.float64))
+    # Real wall-clock timestamp per sample POSITION (index into time_indices).
+    # Used for ic_times in EVERY mode, and — in window-cache mode — to select
+    # snapshots from the scoped store by timestamp instead of absolute index.
+    try:
+        _full_times = np.array(ds.time.values, dtype="datetime64[ns]")
+        sample_times = [_full_times[t] for t in time_indices]
+    except Exception as exc:  # zarr store without a readable time coord
+        sample_times = None
+        logger.warning(
+            f"load_training_data: ds.time unavailable ({exc!r}); ic_times will "
+            f"be None (prescribed-forcing training needs it)."
+        )
+
+    # Window-scoped read store (#985): build the cache from the REMOTE store at
+    # exactly the (unique) touched indices, then read snapshots back BY
+    # TIMESTAMP.  Reading by timestamp — not by a remapped integer position — is
+    # robust to overlapping windows / target spillover that make time_indices
+    # non-unique: the scoped store holds each timestamp once and ``.sel`` finds
+    # it regardless of how many sample positions reference it.
+    read_by_time = False
+    read_ds = ds
+    if _window_cache:
+        if sample_times is None:
+            raise RuntimeError(
+                "LEGOESM_ERA5_WINDOW_CACHE needs a readable ds.time to scope "
+                "the cache by timestamp."
+            )
+        from legoesm.training.era5_to_state import (
+            selection_fingerprint, wait_for_cache,
+        )
+        _uniq = sorted({int(t) for t in time_indices})
+        _yrs = _training_year_range(windows, config)
+        # Fingerprint the EXACT selection + source config into BOTH the cache
+        # dir and its marker, so two different window sets that happen to share a
+        # year span + snapshot count never reuse each other's store (codex #985).
+        _fp = selection_fingerprint(_uniq, era5_config)
+        _scoped = os.path.join(
+            os.fspath(cache_dir), f"ywin_{_yrs[0]}_{_yrs[1]}_{_fp}",
+        )
+
+        # Multi-rank: serialize the WRITE so the ranks don't race on the shared
+        # `.building` dir / os.replace (codex #985).  Coordinate via the
+        # FILESYSTEM MARKER, NOT an MPI barrier: this loader can run on the
+        # background prefetch thread while the main thread is mid gradient-
+        # allreduce on COMM_WORLD, and a barrier there would interleave with
+        # those collectives and deadlock.  Rank 0 (or a single rank) builds; the
+        # others poll for the marker.  ensure_local_cache is idempotent, so an
+        # already-complete store just returns.
+        from legoesm.training.data_parallel import mpi_rank_size
+        _rank, _nproc = mpi_rank_size()
+        if _nproc > 1 and _rank != 0:
+            _cache_path = wait_for_cache(_scoped, len(_uniq), _fp)
+        else:
+            _cache_path = ensure_local_cache(
+                era5_config, _scoped, years=_yrs,
+                time_selection=_uniq, fingerprint=_fp,
+            )
+        read_ds = open_era5_zarr(str(_cache_path))
+        read_by_time = True
+        logger.info(
+            f"Window-scoped ERA5 cache: {len(_uniq)} unique snapshots at "
+            f"{_cache_path}"
+        )
+
+    # Read lat/lon and pressure levels (from the store actually read).
+    lat = np.deg2rad(read_ds.lat.values.astype(np.float64))
+    lon = np.deg2rad(read_ds.lon.values.astype(np.float64))
     plev_hPa = np.array(era5_config.levels, dtype=np.float64)
     plev_Pa = np.sort(plev_hPa * 100.0)
-    level_dim = "level" if "level" in ds.dims else "pressure_level"
+    level_dim = "level" if "level" in read_ds.dims else "pressure_level"
 
     # Load surface geopotential (static, no time dim)
-    phis_var = resolve_var(ds, "geopotential_at_surface")
+    phis_var = resolve_var(read_ds, "geopotential_at_surface")
     if phis_var:
-        phis_era5 = ds[phis_var].values.astype(np.float32)
+        phis_era5 = read_ds[phis_var].values.astype(np.float32)
     else:
         phis_era5 = np.zeros((len(lat), len(lon)), dtype=np.float32)
 
-    def _load_one_snapshot(time_idx):
-        """Load one ERA5 snapshot and regrid to model grid."""
-        ds_t = ds.isel(time=time_idx)
+    def _load_one_snapshot(ds_t):
+        """Regrid one already-selected ERA5 time slice to the model grid."""
 
         def _get_3d(name):
             r = resolve_var(ds_t, name)
@@ -1801,10 +1967,10 @@ def load_training_data(
         def _get_2d(name):
             r = resolve_var(ds_t, name)
             if r is None:
-                r = resolve_var(ds, name)
+                r = resolve_var(read_ds, name)
                 if r is None:
                     return np.zeros((len(lat), len(lon)), dtype=np.float32)
-                return ds[r].values.squeeze().astype(np.float32)
+                return read_ds[r].values.squeeze().astype(np.float32)
             data = ds_t[r].values
             data = data.squeeze()
             while data.ndim > 2:
@@ -1823,15 +1989,21 @@ def load_training_data(
         )
         return era5_to_spectral_carry(era5, grid, sigma)
 
-    # Load all snapshots
+    # Load all snapshots.  Position ``j`` maps to absolute index
+    # ``time_indices[j]`` in the full store; window-cache mode selects the SAME
+    # snapshot from the scoped store by its wall-clock timestamp.
     import time as _time
     t0 = _time.time()
     carries = []
-    for i, tidx in enumerate(time_indices):
-        carries.append(_load_one_snapshot(tidx))
-        if (i + 1) % 50 == 0:
+    for j in range(len(time_indices)):
+        if read_by_time:
+            ds_t = read_ds.sel(time=sample_times[j])
+        else:
+            ds_t = read_ds.isel(time=time_indices[j])
+        carries.append(_load_one_snapshot(ds_t))
+        if (j + 1) % 50 == 0:
             elapsed = _time.time() - t0
-            logger.info(f"  Loaded {i+1}/{len(time_indices)} snapshots ({elapsed:.0f}s)")
+            logger.info(f"  Loaded {j+1}/{len(time_indices)} snapshots ({elapsed:.0f}s)")
 
     logger.info(f"Loaded {len(time_indices)} snapshots ({_time.time()-t0:.0f}s)")
 
@@ -1842,16 +2014,10 @@ def load_training_data(
     # lead in ``multi_step_hours``.  Downstream callers detect the
     # tuple form and run K chained 6-hour rollouts.
     # Wall-clock IC times (np.datetime64) per sample — consumed by the
-    # prescribed-surface-forcing path (``build_amip_sample_forcings``)
-    # to evaluate SST/sea-ice + the orbital calendar at each sample.
-    try:
-        _era5_times = np.array(ds.time.values, dtype="datetime64[ns]")
-    except Exception as exc:  # zarr store without a readable time coord
-        _era5_times = None
-        logger.warning(
-            f"load_training_data: ds.time unavailable ({exc!r}); "
-            f"ic_times will be None (prescribed-forcing training needs it)."
-        )
+    # prescribed-surface-forcing path (``build_amip_sample_forcings``) to
+    # evaluate SST/sea-ice + the orbital calendar at each sample.  ``sample_times``
+    # (position -> real timestamp) was computed up front from the full-store
+    # calendar, so it is correct in every cache mode.
     ic_states = []
     target_carries: list = []
     ic_times: list = []
@@ -1861,8 +2027,7 @@ def load_training_data(
         for d in range(n_w):
             ic_states.append(carry_to_spectral_state(carries[base + d], grid))
             ic_times.append(
-                _era5_times[time_indices[base + d]]
-                if _era5_times is not None else None
+                sample_times[base + d] if sample_times is not None else None
             )
             if multi_step:
                 targets_seq = tuple(
@@ -1891,6 +2056,72 @@ def load_training_data(
 # Training entry point
 # =============================================================================
 
+def _resolve_dp_context(config):
+    """``(dp_on, rank, nproc, comm)`` for the chunked spectral trainer (#985).
+
+    Data-parallel training is active only when ``config.data_parallel`` is set
+    AND a multi-rank MPI launcher yields ``nproc > 1``.  Off / single-rank ->
+    ``(False, 0, 1, None)``: the caller takes the serial fused-step path, which
+    is byte-identical to the pre-#985 loop (the default run is unchanged).
+    ``comm=None`` lets the reductions default to ``MPI.COMM_WORLD``.
+    """
+    if not bool(getattr(config, "data_parallel", False)):
+        return False, 0, 1, None
+    from legoesm.training.data_parallel import mpi_rank_size
+
+    rank, nproc = mpi_rank_size()
+    if nproc <= 1:
+        return False, rank, 1, None
+    return True, rank, nproc, None
+
+
+def _dp_updates_per_epoch(chunk_sizes, nproc: int) -> int:
+    """Per-rank optimizer updates in ONE epoch under data-parallel sharding:
+    ``sum_chunks floor(chunk_size / nproc)`` (each rank does one update per
+    LOCAL sample; drop_remainder discards ``chunk_size % nproc``).
+
+    Raises if any chunk is smaller than the world size — a rank would then get
+    an empty shard and the epoch would do zero updates (silent no-op).  Used to
+    size the LR schedule to the real update count AND as the fail-fast guard.
+    """
+    sizes = [int(s) for s in chunk_sizes]
+    if not sizes:
+        raise ValueError("data_parallel: no chunks to train on.")
+    if min(sizes) < nproc:
+        raise ValueError(
+            f"data_parallel needs every chunk >= the world size ({nproc} "
+            f"ranks), but the smallest chunk has {min(sizes)} sample(s): with "
+            f"drop_remainder sharding a rank would get an empty shard and the "
+            f"epoch would do zero updates. Reduce ranks or raise chunk_windows."
+        )
+    return sum(s // nproc for s in sizes)
+
+
+def _dp_chunk_sizes(chunk_loader, n_samples_epoch: int) -> list[int]:
+    """Per-chunk sample counts used to size + guard the DP schedule.
+
+    Sharding happens PER CHUNK, so DP needs the real per-chunk sizes — NOT the
+    epoch total treated as one chunk (that would size the schedule wrong AND
+    hide an undersized chunk that silently trains zero samples).  A ``chunk_loader``
+    MUST therefore expose ``chunk_sizes`` (the built-in ``_make_chunk_loader``
+    does); a custom loader that omits it is rejected rather than mis-sized.  The
+    single in-memory pass (``chunk_loader is None``) is exactly one chunk.
+    """
+    if chunk_loader is None:
+        return [int(n_samples_epoch)]
+    cs = getattr(chunk_loader, "chunk_sizes", None)
+    if cs is None:
+        raise ValueError(
+            "data_parallel requires the chunk loader to expose `chunk_sizes` "
+            "(per-chunk sample counts) so per-chunk sharding is sized and "
+            "guarded correctly; _make_chunk_loader sets it — a custom loader "
+            "must too."
+        )
+    return [int(s) for s in cs]
+
+
+@mpi_abort_on_uncaught  # a rank dying (OOM/NaN) MPI_Aborts the job instead of
+# leaving its peers hung in the next gradient allreduce (#985)
 def _train_spectral_loop(
     model: eqx.Module,
     make_physics_fn,
@@ -1905,9 +2136,17 @@ def _train_spectral_loop(
     chunk_loader=None,
     n_samples_total: int | None = None,
     resume_from_dir=None,
+    host_staged: bool = False,
 ):
     """Shared training loop for any learned-physics model coupled to the
     spectral PE dycore.
+
+    ``host_staged=True`` declares that the PROVIDED ``ic_states`` /
+    ``target_carries`` / ``sample_forcings`` were built host-resident
+    (``load_training_data(host_resident=True)``, #1155) — each sample is then
+    moved to the compute device just before its step, exactly like the #985
+    prefetch path (which signals the same thing via the chunk loader's
+    ``host_staged`` attribute).
 
     Parameters
     ----------
@@ -2011,7 +2250,38 @@ def _train_spectral_loop(
                     f"Curriculum lead {h}h has no loaded target "
                     f"(multi_step_hours={_leads_loaded})."
                 )
-    total_steps = max(1, n_epochs_total * max(1, n_samples_epoch))
+    # --- data-parallel context (#985), resolved BEFORE the optimizer so the
+    # warmup+cosine schedule is sized by the ACTUAL number of optimizer updates.
+    # Under DP each rank performs one update per LOCAL sample, i.e. only
+    # sum_chunks floor(chunk_size / nproc) updates per epoch — sizing the
+    # schedule by the unsharded sample count would leave the LR ~nproc x too
+    # high at the end of training.  Off / single-rank -> serial, byte-identical.
+    dp_on, dp_rank, dp_nproc, dp_comm = _resolve_dp_context(config)
+    _all_reduce_grad_mean = _global_sum_mpi = _shard_samples = None
+    if dp_on:
+        from legoesm.parallel.reductions import global_sum_mpi as _global_sum_mpi
+        from legoesm.training.data_parallel import (
+            all_reduce_grad_mean as _all_reduce_grad_mean,
+            shard_samples as _shard_samples,
+        )
+        _chunk_sizes = _dp_chunk_sizes(chunk_loader, n_samples_epoch)
+        _updates_per_epoch = _dp_updates_per_epoch(_chunk_sizes, dp_nproc)
+        _dropped = sum(s % dp_nproc for s in _chunk_sizes)
+        if _dropped:
+            logger.warning(
+                f"data_parallel drops {_dropped} remainder sample(s) per epoch "
+                f"(chunk sizes not divisible by {dp_nproc} ranks)."
+            )
+        logger.info(
+            f"Data-parallel training: rank {dp_rank}/{dp_nproc}; each chunk's "
+            f"samples sharded across ranks (drop_remainder), gradients averaged "
+            f"per step, checkpoints written by rank 0 only. "
+            f"{_updates_per_epoch} updates/epoch/rank."
+        )
+    else:
+        _updates_per_epoch = n_samples_epoch
+
+    total_steps = max(1, n_epochs_total * max(1, _updates_per_epoch))
     base_optimizer = create_optimizer(TrainingConfig(
         lr=config.lr,
         warmup_steps=config.warmup_steps,
@@ -2262,62 +2532,69 @@ def _train_spectral_loop(
     else:
         epoch_plan = [(None, None, None)] * n_epochs_total
 
-    def _make_train_step(phase_spec):
-        """Jitted train step for one epoch-plan spec.
+    def _loss_components(m, ic_spectral, target_carry, forcing_base, phase_spec):
+        """Per-sample loss + components for ``phase_spec``.
 
         ``(None, None, None)`` = the default path (chained multi-step or
         legacy single-rollout).  A curriculum spec = single rollout of
-        ``n_steps_phase`` scored against target index ``k_target``.
+        ``n_steps_phase`` scored against target index ``k_target``.  SHARED by
+        the serial fused step and the data-parallel grad-only step, so both run
+        byte-identical physics (nproc==1 DP reproduces serial exactly).
         """
         _, k_target, n_steps_phase = phase_spec
-
-        def _train_step(model, opt_state, ic_spectral, target_carry, forcing_base):
-            def loss_fn(m):
-                physics = make_physics_fn(m, grid)
-                if k_target is not None:
-                    # Curriculum phase: one rollout to the phase lead.
-                    tgt = (target_carry[k_target]
-                           if type(target_carry) is tuple else target_carry)
-                    pred = _rollout_one_segment(
-                        ic_spectral, physics, n_steps_phase, 0.0,
-                        forcing_base=forcing_base,
-                    )
-                    return _spectral_state_loss_components(
-                        pred, tgt, grid, sigma, sigma_full, loss_cfg_train,
-                    )
-                if segment_steps:
-                    state = ic_spectral
-                    total = jnp.float32(0.0)
-                    comp_total = {
-                        "mse": jnp.float32(0.0),
-                        "bias": jnp.float32(0.0),
-                        "crps": jnp.float32(0.0),
-                        "spec_crps": jnp.float32(0.0),
-                    }
-                    t_offset = 0.0
-                    for k, n_seg in enumerate(segment_steps):
-                        state = _rollout_one_segment(
-                            state, physics, n_seg, t_offset,
-                            forcing_base=forcing_base,
-                        )
-                        seg_loss, seg_comp = _spectral_state_loss_components(
-                            state, target_carry[k], grid, sigma,
-                            sigma_full, loss_cfg_train,
-                        )
-                        total = total + ms_weights[k] * seg_loss
-                        for key in comp_total:
-                            comp_total[key] = comp_total[key] + ms_weights[k] * seg_comp[key]
-                        t_offset = t_offset + float(n_seg) * config.dt
-                    inv = 1.0 / ms_weight_sum
-                    return total * inv, {k: v * inv for k, v in comp_total.items()}
-                # Legacy single-step path.
-                pred = _rollout_one_segment(
-                    ic_spectral, physics, n_steps_rollout, 0.0,
+        physics = make_physics_fn(m, grid)
+        if k_target is not None:
+            # Curriculum phase: one rollout to the phase lead.
+            tgt = (target_carry[k_target]
+                   if type(target_carry) is tuple else target_carry)
+            pred = _rollout_one_segment(
+                ic_spectral, physics, n_steps_phase, 0.0,
+                forcing_base=forcing_base,
+            )
+            return _spectral_state_loss_components(
+                pred, tgt, grid, sigma, sigma_full, loss_cfg_train,
+            )
+        if segment_steps:
+            state = ic_spectral
+            total = jnp.float32(0.0)
+            comp_total = {
+                "mse": jnp.float32(0.0),
+                "bias": jnp.float32(0.0),
+                "crps": jnp.float32(0.0),
+                "spec_crps": jnp.float32(0.0),
+            }
+            t_offset = 0.0
+            for k, n_seg in enumerate(segment_steps):
+                state = _rollout_one_segment(
+                    state, physics, n_seg, t_offset,
                     forcing_base=forcing_base,
                 )
-                return _spectral_state_loss_components(
-                    pred, target_carry, grid, sigma,
+                seg_loss, seg_comp = _spectral_state_loss_components(
+                    state, target_carry[k], grid, sigma,
                     sigma_full, loss_cfg_train,
+                )
+                total = total + ms_weights[k] * seg_loss
+                for key in comp_total:
+                    comp_total[key] = comp_total[key] + ms_weights[k] * seg_comp[key]
+                t_offset = t_offset + float(n_seg) * config.dt
+            inv = 1.0 / ms_weight_sum
+            return total * inv, {k: v * inv for k, v in comp_total.items()}
+        # Legacy single-step path.
+        pred = _rollout_one_segment(
+            ic_spectral, physics, n_steps_rollout, 0.0,
+            forcing_base=forcing_base,
+        )
+        return _spectral_state_loss_components(
+            pred, target_carry, grid, sigma,
+            sigma_full, loss_cfg_train,
+        )
+
+    def _make_train_step(phase_spec):
+        """Jitted fused (grad + optax update) train step — the serial path."""
+        def _train_step(model, opt_state, ic_spectral, target_carry, forcing_base):
+            def loss_fn(m):
+                return _loss_components(
+                    m, ic_spectral, target_carry, forcing_base, phase_spec,
                 )
             (loss, components), grads = eqx.filter_value_and_grad(
                 loss_fn, has_aux=True,
@@ -2333,14 +2610,40 @@ def _train_spectral_loop(
 
         return eqx.filter_jit(_train_step)
 
+    def _make_dp_grad_step(phase_spec):
+        """Jitted GRAD-ONLY step for data-parallel training.
+
+        Returns ``(loss, components, grads)`` for THIS rank's sample; the caller
+        averages ``grads`` across ranks (``all_reduce_grad_mean``) BEFORE the
+        optax update, so the cross-rank collective sits between grad and update
+        and the cheap update stays outside JIT (matches the WB DP path).
+        """
+        def _grad_step(model, ic_spectral, target_carry, forcing_base):
+            def loss_fn(m):
+                return _loss_components(
+                    m, ic_spectral, target_carry, forcing_base, phase_spec,
+                )
+            (loss, components), grads = eqx.filter_value_and_grad(
+                loss_fn, has_aux=True,
+            )(model)
+            return loss, components, eqx.filter(grads, eqx.is_array)
+
+        return eqx.filter_jit(_grad_step)
+
     # One jitted step per distinct phase spec (compile once, reuse across
     # that phase's epochs AND across chunks — shapes are constant).
     _step_cache: dict = {}
+    _dp_step_cache: dict = {}
 
     def _train_step_for(spec):
         if spec not in _step_cache:
             _step_cache[spec] = _make_train_step(spec)
         return _step_cache[spec]
+
+    def _dp_grad_step_for(spec):
+        if spec not in _dp_step_cache:
+            _dp_step_cache[spec] = _make_dp_grad_step(spec)
+        return _dp_step_cache[spec]
 
     def _iter_epoch_data(start_chunk=0):
         """Yield (ic_states, target_carries, sample_forcings) chunks.
@@ -2363,10 +2666,19 @@ def _train_spectral_loop(
         if chunk_loader is not None else 1
     )
 
+    # When the chunk loader host-stages chunks (prefetch, #985), each chunk
+    # arrives on the CPU and must be moved onto the compute device at the point
+    # of use in the loop below -- see the loop body for why this is not done in
+    # the prefetch consumer.
+    _host_staged = bool(getattr(chunk_loader, "host_staged", False)) or bool(host_staged)
+    _compute_dev = jax.devices()[0] if _host_staged else None
+
     best_loss = float("inf")
     patience_counter = 0
     early_stop_patience = int(getattr(config, "early_stop_patience", 0) or 0)
     early_stop_min_delta = float(getattr(config, "early_stop_min_delta", 1.0e-3))
+
+    # (data-parallel context was resolved above, before the optimizer schedule.)
 
     if start_epoch >= n_epochs_total:
         logger.info(
@@ -2377,7 +2689,8 @@ def _train_spectral_loop(
 
     for epoch in range(start_epoch, n_epochs_total):
         phase_spec = epoch_plan[epoch]
-        train_step = _train_step_for(phase_spec)
+        train_step = None if dp_on else _train_step_for(phase_spec)
+        dp_grad_step = _dp_grad_step_for(phase_spec) if dp_on else None
         epoch_loss = 0.0
         epoch_components = {"mse": 0.0, "bias": 0.0, "crps": 0.0, "spec_crps": 0.0}
         t0 = time.time()
@@ -2390,16 +2703,61 @@ def _train_spectral_loop(
         chunk_pos = chunk_skip - 1
         for chunk_ics, chunk_targets, chunk_forcings in _iter_epoch_data(chunk_skip):
             chunk_pos += 1  # absolute chunk index within the epoch
-            for chunk_i, (ic, target) in enumerate(
-                    zip(chunk_ics, chunk_targets)):
-                sample_idx += 1
-                model, opt_state, loss, grad_norm, components = train_step(
-                    model, opt_state, ic, target,
-                    chunk_forcings[chunk_i] if chunk_forcings is not None
-                    else None,
+            # Data-parallel: deterministic CONTIGUOUS shard of this chunk's
+            # samples to this rank (drop_remainder keeps ranks balanced so the
+            # per-step gradient allreduce never deadlocks).  The shard depends
+            # only on (rank, nproc, chunk order), all deterministic -> a resume
+            # re-shards identically, so chunk_latest.eqx stays reproducible.
+            if dp_on:
+                _sh = _shard_samples(
+                    list(range(len(chunk_ics))), dp_rank, dp_nproc,
                 )
+                _ics = [chunk_ics[i] for i in _sh]
+                _tgts = [chunk_targets[i] for i in _sh]
+                _forc = ([chunk_forcings[i] for i in _sh]
+                         if chunk_forcings is not None else None)
+            else:
+                _ics, _tgts, _forc = chunk_ics, chunk_targets, chunk_forcings
+
+            for chunk_i, (ic, target) in enumerate(zip(_ics, _tgts)):
+                sample_idx += 1
+                _fb = _forc[chunk_i] if _forc is not None else None
+                if _host_staged:
+                    # Host-staged chunks are built on the CPU (see
+                    # _make_chunk_loader); move only THIS sample onto the compute
+                    # device, right before its step. Peak device footprint is one
+                    # sample (the prior sample's device arrays are freed when
+                    # ic/target/_fb rebind), so a prefetched chunk never rides GPU
+                    # memory -- the #985 OOM. Rebinding ic/target keeps this local.
+                    ic = _stage_tree(ic, _compute_dev)
+                    target = _stage_tree(target, _compute_dev)
+                    if _fb is not None:
+                        _fb = _stage_tree(_fb, _compute_dev)
+                if dp_on:
+                    # Local grad on this rank's sample -> average across ranks
+                    # BEFORE the update, so every replica applies the identical
+                    # gradient and stays in sync (no weight broadcast).
+                    loss, components, grads = dp_grad_step(
+                        model, ic, target, _fb,
+                    )
+                    grads = _all_reduce_grad_mean(
+                        grads, dp_nproc, comm=dp_comm,
+                    )
+                    grad_norm = optax.global_norm(grads)
+                    updates, opt_state = optimizer.update(
+                        grads, opt_state, eqx.filter(model, eqx.is_array),
+                    )
+                    model = eqx.apply_updates(model, updates)
+                else:
+                    model, opt_state, loss, grad_norm, components = train_step(
+                        model, opt_state, ic, target, _fb,
+                    )
 
                 # --- NaN / Inf detection (outside JIT, values materialized) ---
+                # A rank hitting NaN raises; the @mpi_abort_on_uncaught decorator
+                # on this loop then MPI_Aborts the whole job, so its peers can't
+                # hang in the next gradient allreduce (#985). A NaN-consensus
+                # allreduce would only make the message tidier — skipped.
                 loss_val = float(loss)
                 if jnp.isnan(loss) or jnp.isinf(loss):
                     raise RuntimeError(
@@ -2425,7 +2783,10 @@ def _train_spectral_loop(
             # loses at most one chunk instead of the whole epoch.  The last
             # chunk of epoch e normalises to (e+1, 0).  (No-op on the single
             # in-memory path, whose epoch == one chunk == the per-epoch save.)
-            if chunk_loader is not None:
+            # Rank 0 only under DP: every rank holds the identical replicated
+            # model + optimizer state, so one writer is correct and avoids a
+            # shared-filesystem write race.  All ranks resume by reading it.
+            if chunk_loader is not None and dp_rank == 0:
                 _next_chunk = chunk_pos + 1
                 if _next_chunk >= n_chunks_per_epoch:
                     _save_epoch, _save_chunk = epoch + 1, 0
@@ -2442,11 +2803,32 @@ def _train_spectral_loop(
                 )
 
         n_samples = max(sample_idx + 1, 1)
-        avg_loss = epoch_loss / n_samples
-        avg_components = {k: v / n_samples for k, v in epoch_components.items()}
+        if dp_on:
+            # Global epoch means across ranks (n_samples/epoch_loss are per-rank
+            # local under sharding).  All ranks call this collective in lockstep
+            # — balanced shards guarantee equal per-rank step counts — so it can
+            # never deadlock; the shared avg_loss also keeps any early-stop
+            # decision identical on every rank.
+            _keys = ("mse", "bias", "crps", "spec_crps")
+            _acc = _global_sum_mpi(
+                jnp.asarray(
+                    [epoch_loss] + [epoch_components[k] for k in _keys]
+                    + [float(n_samples)]
+                ),
+                comm=dp_comm,
+            )
+            _accl = [float(x) for x in _acc]
+            _gn = max(_accl[-1], 1.0)
+            avg_loss = _accl[0] / _gn
+            avg_components = {k: _accl[1 + i] / _gn for i, k in enumerate(_keys)}
+        else:
+            avg_loss = epoch_loss / n_samples
+            avg_components = {k: v / n_samples for k, v in epoch_components.items()}
         loss_history.append(avg_loss)
 
-        if epoch % config.log_every == 0 or epoch == n_epochs_total - 1:
+        if (epoch % config.log_every == 0 or epoch == n_epochs_total - 1) and (
+            dp_rank == 0
+        ):
             elapsed = time.time() - t0
             _lead_tag = (f" [lead={phase_spec[0]}h]"
                          if phase_spec[0] is not None else "")
@@ -2461,13 +2843,15 @@ def _train_spectral_loop(
 
         # Save a per-epoch checkpoint so the chained-resubmit driver
         # (run_aimip.py --resume) can pick up from epoch+1 if SLURM
-        # walltime kills the job mid-training.
+        # walltime kills the job mid-training.  Rank 0 only under DP (identical
+        # replicated model on every rank).
         from legoesm.ml.training import save_checkpoint
         ckpt_dir = Path(config.checkpoint_dir)
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-        ckpt_path = ckpt_dir / f"epoch_{epoch:04d}.eqx"
-        save_checkpoint(model, ckpt_path)
-        logger.info(f"Saved checkpoint: {ckpt_path}")
+        if dp_rank == 0:
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            ckpt_path = ckpt_dir / f"epoch_{epoch:04d}.eqx"
+            save_checkpoint(model, ckpt_path)
+            logger.info(f"Saved checkpoint: {ckpt_path}")
 
         # AIMIP-style early stopping.  Stop when the rolling loss has
         # not improved by more than ``early_stop_min_delta`` for
@@ -2592,6 +2976,20 @@ def _prefetch_iter(gen, buffer=1):
             pass
 
 
+def _stage_tree(tree, device):
+    """``device_put`` only the ARRAY leaves of ``tree`` onto ``device``, leaving
+    None / metadata leaves untouched.
+
+    A chunk is ``(ic_states, targets, forcings)`` of pytrees whose leaves are
+    mostly arrays but not exclusively (``forcings`` may be ``None``); a bare
+    ``jax.device_put(tree, device)`` chokes on a non-array leaf, so filter to
+    arrays via ``eqx.is_array``. Used to host-stage prefetched chunks (#985).
+    """
+    return jax.tree_util.tree_map(
+        lambda x: jax.device_put(x, device) if eqx.is_array(x) else x, tree
+    )
+
+
 def _make_chunk_loader(config, grid, sigma, cache_dir,
                        surface_forcing_path, forcing_cache_path):
     """Streaming/chunked data source for DENSE all-years training.
@@ -2623,14 +3021,38 @@ def _make_chunk_loader(config, grid, sigma, cache_dir,
     )
 
     prefetch = bool(getattr(config, "chunk_prefetch", False))
+    # Prefetch host-staging (#985): the background producer BUILDS the buffered
+    # (next) chunk directly on the CPU -- via ``jax.default_device`` in _load_group
+    # below -- instead of building it on the GPU and copying it down. That
+    # distinction is the fix: a T106 4xA100 run OOM'd because the prefetched chunk
+    # rode GPU memory during the current chunk's training peak, and a post-hoc
+    # device_put(cpu) does NOT help (the arrays are constructed on the GPU first).
+    # ``jax.default_device`` is thread-local, so the producer thread builds on the
+    # CPU while the main thread trains on the GPU. Each SAMPLE is then moved onto
+    # the compute device just before its step (the training loop), so a prefetched
+    # chunk never rides GPU memory. Needs the JAX CPU backend -- add 'cpu' to
+    # JAX_PLATFORMS under a CUDA-only launch; if it is unavailable we warn and
+    # fall back to building on the compute device (a roomy config is unchanged).
+    _host_dev = None
+    if prefetch:
+        # Shared preflight (#1155 refactor): one copy of the cpu-backend
+        # resolution + warning for every host-build site. Prefetch keeps the
+        # warn-and-fallback behavior (a chunk is bounded, unlike the
+        # non-chunked full-dataset loads, which fail fast instead).
+        _host_dev = host_build_device("chunk_prefetch host staging")
 
     def _load_group(group):
-        ics, tgts, times = load_training_data(
-            config, grid, sigma, cache_dir, windows=group,
-        )
-        forcings = _maybe_build_sample_forcings(
-            surface_forcing_path, times, grid, forcing_cache_path,
-        )
+        # Build on the CPU when host-staging (thread-local default device), so the
+        # buffered chunk is never constructed on the GPU (#985).
+        _ctx = (jax.default_device(_host_dev) if _host_dev is not None
+                else contextlib.nullcontext())
+        with _ctx:
+            ics, tgts, times = load_training_data(
+                config, grid, sigma, cache_dir, windows=group,
+            )
+            forcings = _maybe_build_sample_forcings(
+                surface_forcing_path, times, grid, forcing_cache_path,
+            )
         return ics, tgts, forcings
 
     def _chunks(start_chunk=0):
@@ -2650,9 +3072,19 @@ def _make_chunk_loader(config, grid, sigma, cache_dir,
         # the same _serial generator), so the resume contract is unchanged.
         yield from (_prefetch_iter(_serial()) if prefetch else _serial())
 
+    # True when chunks are built host-staged (prefetch + CPU backend): the
+    # training loop must then device_put each SAMPLE onto the compute device at
+    # the point of use (#985).
+    _chunks.host_staged = _host_dev is not None
     # Number of chunks per epoch (constant): the mid-epoch checkpoint reads
     # this to normalise the last chunk of an epoch to the next epoch's start.
     _chunks.n_chunks = len(groups)
+    # Per-chunk sample counts (deterministic from the window partition): the DP
+    # path sizes the LR schedule by the exact per-rank update count and guards
+    # against a chunk smaller than the world size (#985).
+    _chunks.chunk_sizes = [
+        sum(nd * _SNAPSHOTS_PER_DAY for (_, _, nd) in g) for g in groups
+    ]
     return _chunks, n_total
 
 
@@ -2747,6 +3179,7 @@ def train_neural_gcm_spectral(
 
     ic_states, target_carries, ic_times = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
+        host_resident=True,   # non-chunked full-dataset load (#1155)
     )
     sample_forcings = _maybe_build_sample_forcings(
         surface_forcing_path, ic_times, grid, forcing_cache_path,
@@ -2757,7 +3190,101 @@ def train_neural_gcm_spectral(
         grid, sigma, ic_states, target_carries, config,
         start_epoch=start_epoch,
         sample_forcings=sample_forcings,
+        host_staged=True,   # dataset loaded host-resident above (#1155)
     )
+
+
+# Minimum per-channel std for the sfno_full Z-score normalization.  A constant
+# channel (e.g. a spatially/temporally invariant surface field) has std 0, so
+# ``(x - mean)/std`` would divide by zero; the shared
+# ``compute_normalization_stats`` floors the VARIANCE at ``eps**2`` (finite
+# forward AND gradient — see its docstring), so this ``eps`` is the std floor.
+# 1e-6 is a numerics guard, not a tunable physics coefficient.
+_SFNO_FULL_STD_FLOOR = 1.0e-6  # coeff-ok: div-by-zero guard for constant channels
+
+
+def compute_sfno_full_norm_stats(ic_states, grid, sigma, std_floor=_SFNO_FULL_STD_FLOOR):
+    """Per-channel Z-score stats for the sfno_full emulator, in EMULATOR order.
+
+    The emulator normalises the packed PE channel tensor produced by
+    :func:`legoesm.ml.channel_packing.pack_pe_state` (layout
+    ``[u(nlev), v(nlev), T(nlev), q(nlev), lnps, phis]``), whose channels span
+    ~8 orders of magnitude (surface pressure ~1e5 Pa vs specific humidity
+    ~1e-3).  Training on the RAW tensor makes the network output explode
+    (epoch-0 NaN).  This computes per-channel mean/std over the training ICs in
+    that SAME packed order, so training and eval apply an identical transform.
+
+    Each spectral ``SpectralHydrostaticState`` IC is packed to grid space
+    ``(n_lat, n_lon, n_channels)``; statistics are taken over all sample +
+    spatial cells (unweighted — the SFNO operates on the Gaussian grid
+    uniformly).  Samples are STREAMED (two passes, one packed sample resident
+    at a time) rather than stacked: a single on-device stack of all ICs is
+    ~16 GiB at T106 all-years and OOMs the load-time stats step (#1155-class
+    invariant: never materialise the full dataset on-device).  The variance is
+    floored exactly as :func:`legoesm.ml.normalization.compute_normalization_stats`
+    does (``var >= std_floor**2``) so a constant channel yields
+    ``std == std_floor`` with a finite gradient (no div-by-zero, no ``0 * inf``
+    NaN in the backward pass).  Numerically equivalent to the stacked
+    two-pass form up to float summation order.
+
+    Parameters
+    ----------
+    ic_states : list[SpectralHydrostaticState]
+        Training initial conditions (spectral space); packed here.
+    grid : GaussianGrid
+    sigma : SigmaCoordinate
+        Passed to ``pack_pe_state`` positionally for call-site symmetry
+        (packing is on the model sigma levels; the arg is otherwise unused).
+    std_floor : float
+        Minimum per-channel std (div-by-zero guard).
+
+    Returns
+    -------
+    NormalizationStats
+        ``mean``/``std`` of shape ``(n_channels,)`` in packed-channel order.
+    """
+    import numpy as np
+    from legoesm.ml.normalization import NormalizationStats
+
+    if not ic_states:
+        raise ValueError(
+            "compute_sfno_full_norm_stats: ic_states is empty; cannot compute "
+            "normalization statistics with no training data."
+        )
+
+    def _packed_f64(s):
+        # One packed grid-space sample (n_lat, n_lon, n_ch), f64 to match the
+        # spectral-transform precision and keep the streamed reduction stable.
+        return jnp.asarray(pack_pe_state(s, grid, sigma), dtype=jnp.float64)
+
+    # Pass 1: per-channel mean over sample + spatial cells. Accumulate the
+    # channel-axis-preserving sum one sample at a time (peak device footprint:
+    # one packed sample, ~14 MiB at T106, vs ~16 GiB for the full stack).
+    ch_sum = None
+    cell_count = 0
+    for s in ic_states:
+        p = _packed_f64(s)
+        contrib = jnp.sum(p, axis=tuple(range(p.ndim - 1)))   # (n_ch,)
+        ch_sum = contrib if ch_sum is None else ch_sum + contrib
+        cell_count += int(np.prod(p.shape[:-1]))
+    mean = ch_sum / cell_count
+
+    # Pass 2: variance ABOUT THE MEAN (matches compute_normalization_stats'
+    # mean((data-mean)**2), not the cancellation-prone E[x^2]-E[x]^2 form).
+    ch_sqsum = None
+    for s in ic_states:
+        p = _packed_f64(s)
+        contrib = jnp.sum((p - mean) ** 2, axis=tuple(range(p.ndim - 1)))
+        ch_sqsum = contrib if ch_sqsum is None else ch_sqsum + contrib
+    var = ch_sqsum / cell_count
+
+    # Floor the VARIANCE before sqrt (identical convention to
+    # compute_normalization_stats): var==0 -> d(sqrt)/dvar = inf -> 0*inf NaN
+    # in the backward pass; clamping to std_floor**2 gives std>=std_floor with
+    # a finite gradient.
+    var_floor = float(std_floor) ** 2
+    std = jnp.sqrt(jnp.maximum(var, var_floor))
+    return NormalizationStats(mean=mean, std=std)
 
 
 def train_sfno_full_spectral(
@@ -2788,6 +3315,18 @@ def train_sfno_full_spectral(
 
     Returns (trained_sfno, loss_history).
     """
+    if bool(getattr(config, "data_parallel", False)):
+        # sfno_full uses _train_sfno_full_loop, which does NOT resolve the DP
+        # context or average gradients — an MPI launch would run independent
+        # serial training on every rank (with competing checkpoint writes).
+        # Reject the combination rather than silently mis-train (#985); DP is
+        # implemented only for the chunked _train_spectral_loop variants.
+        raise NotImplementedError(
+            "data_parallel is not implemented for the sfno_full variant "
+            "(its _train_sfno_full_loop is not DP-aware). Use sfno_physics / "
+            "column_nn / classical for data-parallel training, or add DP to "
+            "_train_sfno_full_loop first."
+        )
     from legoesm.atmosphere.dynamics.neural.sfno_pe import (
         SFNOPrimitiveEquationConfig,
     )
@@ -2821,20 +3360,150 @@ def train_sfno_full_spectral(
         # synthesis/clip/re-analysis); previously silently ignored.
         correct_moisture_budget=False,
         clip_q=False,
-        use_normalization=False,
+        # Per-channel Z-score normalization ON: the raw PE channel tensor spans
+        # ~8 orders of magnitude (p_s ~1e5 Pa vs q ~1e-3), which drove the
+        # epoch-0 NaN.  norm_stats are computed from the training ICs below and
+        # persisted to a sidecar so the WB2 eval bridge applies the SAME
+        # transform (state_update denormalises the network output as a full
+        # state — correct, see sfno_pe.py:129-140,395-396).
+        use_normalization=True,
     )
 
     sfno, start_epoch = maybe_resume_model(sfno, resume_from_dir)
 
+    # Host-resident dataset (#1155): sfno_full loads ALL pairs up front (no
+    # chunking) — at T106 all-years that is ~130 GB, an unconditional GPU OOM
+    # if built on the compute device. Build on host; the loop stages each
+    # sample to the GPU just before its step.
     ic_states, target_carries, _ic_times = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
+        host_resident=True,
+    )
+
+    # Data-driven per-channel stats in packed-emulator order (same channel
+    # layout the wrapper sees via pack_pe_state).  A resumed run recomputes
+    # identical stats from the same deterministic windows and overwrites the
+    # sidecar idempotently.
+    norm_stats = compute_sfno_full_norm_stats(ic_states, grid, sigma)
+
+    # Persist the stats next to the checkpoints (config.checkpoint_dir ==
+    # {output_dir}/{aimip_variant}).  The eval bridge reloads norm_stats.npz
+    # from this same directory so train + eval share ONE source of truth (the
+    # eqx checkpoint serialises only the SFNO leaves, NOT the wrapper's
+    # norm_stats — so a sidecar, not the checkpoint, carries the values).
+    from legoesm.ml.normalization import save_normalization_stats
+    ckpt_dir = Path(config.checkpoint_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    stats_path = ckpt_dir / "norm_stats.npz"
+    save_normalization_stats(norm_stats, stats_path)
+    logger.info(
+        f"SFNO full-emulator: saved per-channel norm stats "
+        f"({norm_stats.mean.shape[-1]} channels) to {stats_path}"
     )
 
     return _train_sfno_full_loop(
         sfno, pe_emulator_cfg, grid, sigma,
         ic_states, target_carries, config, dt_sfno,
         start_epoch=start_epoch,
+        norm_stats=norm_stats,
     )
+
+
+def build_sfno_curriculum_epoch_plan(
+    rollout_curriculum,
+    multi_step_hours,
+    dt_sfno: float,
+    n_epochs_fallback: int,
+):
+    """Flat per-epoch plan for the sfno_full rollout curriculum.
+
+    Pure (jax-free) mirror of the epoch-plan build in
+    :func:`_train_spectral_loop` (the dycore-mode curriculum, see
+    neural_gcm_spectral.py `epoch_plan` at the ``if curriculum:`` block), but
+    expressed in SFNO **macro** steps (``dt_sfno``) instead of dycore
+    micro-steps (``config.dt``).
+
+    Each NeuralGCM-style phase ``(lead_hours, n_epochs)`` supervises a single
+    autoregressive rollout to ``lead_hours`` scored against the ERA5 target at
+    that lead.  Targets for every phase lead are loaded up front, one per entry
+    of ``multi_step_hours`` (``load_training_data`` returns a tuple of K carries
+    per sample when ``multi_step_hours`` is set), so a phase's target is indexed
+    by ``k_target = multi_step_hours.index(lead_hours)``.
+
+    Parameters
+    ----------
+    rollout_curriculum : sequence of ``(lead_hours, n_epochs)`` or None
+        Short-lead-first phases.  ``None`` (or empty) -> the caller keeps the
+        fixed chained-multi-step behaviour; this returns a fallback plan of
+        ``n_epochs_fallback`` no-op ``(None, None, None)`` entries so the epoch
+        loop can index it uniformly.
+    multi_step_hours : sequence of int
+        The sorted set of loaded target leads (``loss_config.multi_step_hours``).
+        EVERY curriculum lead must be a member, else its target was never loaded.
+    dt_sfno : float
+        SFNO macro (autoregressive) time step [s].  ``n_sfno_steps`` for a lead
+        is ``round(lead_hours * 3600 / dt_sfno)`` (the same hours->steps
+        conversion the dycore-mode plan uses with ``config.dt``).
+    n_epochs_fallback : int
+        Length of the no-op plan returned when ``rollout_curriculum`` is falsy.
+
+    Returns
+    -------
+    list of ``(lead_hours, k_target, n_sfno_steps)``
+        One entry per GLOBAL epoch (phase ``(h, ep)`` contributes ``ep`` copies
+        of its spec).  Resume (``start_epoch``) indexes into this list.  When
+        ``rollout_curriculum`` is falsy: ``[(None, None, None)] * n_epochs_fallback``.
+
+    Raises
+    ------
+    ValueError
+        If ``multi_step_hours`` is empty while a curriculum is given (no targets
+        loaded), or if any curriculum lead is not in ``multi_step_hours``
+        (its target was never loaded).  Same message style as the dycore-mode
+        curriculum validation in :func:`_train_spectral_loop`.
+    """
+    curriculum = tuple(
+        (int(h), int(ep)) for h, ep in (rollout_curriculum or ())
+    )
+    if not curriculum:
+        return [(None, None, None)] * int(n_epochs_fallback)
+
+    leads_loaded = tuple(int(h) for h in (multi_step_hours or ()))
+    if not leads_loaded:
+        raise ValueError(
+            "rollout_curriculum needs loss_config.multi_step_hours to "
+            "carry the curriculum leads (targets per lead)."
+        )
+    for h, _ in curriculum:
+        if h not in leads_loaded:
+            raise ValueError(
+                f"Curriculum lead {h}h has no loaded target "
+                f"(multi_step_hours={leads_loaded})."
+            )
+
+    # Flat epoch plan: (phase_lead_hours, target_index, n_sfno_steps) per
+    # global epoch.  n_sfno_steps = round(lead * 3600 / dt_sfno) — the macro-step
+    # analogue of the dycore plan's round(lead * 3600 / config.dt).
+    epoch_plan = []
+    for h, ep in curriculum:
+        # A state-update SFNO advances in WHOLE macro steps, so the lead MUST be
+        # a positive exact multiple of dt_sfno.  Reject a misaligned lead LOUDLY:
+        # round() would otherwise silently supervise the wrong horizon (e.g. a
+        # 6 h lead at dt_sfno=12 h -> 0 steps -> the IC scored against the +6 h
+        # target = a zero-gradient phase; a 6 h lead at dt_sfno=4 h -> 2 steps =
+        # an 8 h prediction scored against a +6 h target).
+        steps_f = h * 3600.0 / dt_sfno
+        n_sfno_steps = int(round(steps_f))
+        if n_sfno_steps <= 0 or abs(steps_f - n_sfno_steps) > 1e-6:
+            raise ValueError(
+                f"Curriculum lead {h}h is not a positive exact multiple of "
+                f"dt_sfno={dt_sfno:g}s ({steps_f:.4f} macro steps). Pick leads on "
+                f"the dt_sfno grid (a state-update SFNO cannot take a fractional "
+                f"final step)."
+            )
+        spec = (h, leads_loaded.index(h), n_sfno_steps)
+        epoch_plan.extend([spec] * ep)
+    return epoch_plan
 
 
 def _train_sfno_full_loop(
@@ -2848,8 +3517,14 @@ def _train_sfno_full_loop(
     dt_sfno: float,
     *,
     start_epoch: int = 0,
+    host_staged: bool = True,
+    norm_stats=None,
 ):
     """Training loop for SFNO full-atmosphere emulator (no dycore).
+
+    ``host_staged`` (default True — the caller loads host-resident, #1155):
+    each sample is moved to the compute device just before its step, so the
+    full dataset never rides GPU memory.
 
     Parallel to :func:`_train_spectral_loop` but uses
     ``SFNOPrimitiveEquationModel.step(state, dt_sfno)`` for rollout
@@ -2862,18 +3537,16 @@ def _train_sfno_full_loop(
     )
     from legoesm.ml.training import TrainingConfig, create_optimizer
 
-    sigma_full = jnp.asarray(sigma.sigma_full)
+    # Fail early (before the JIT trace) if normalization is requested without
+    # stats — the wrapper raises the same contract deep in loss_fn otherwise.
+    if pe_emulator_cfg.use_normalization and norm_stats is None:
+        raise ValueError(
+            "_train_sfno_full_loop: pe_emulator_cfg.use_normalization=True but "
+            "norm_stats is None. Pass norm_stats (see "
+            "compute_sfno_full_norm_stats) or set use_normalization=False."
+        )
 
-    total_steps = max(1, config.n_epochs * max(1, len(ic_states)))
-    optimizer = create_optimizer(TrainingConfig(
-        lr=config.lr,
-        warmup_steps=config.warmup_steps,
-        total_steps=total_steps,
-        weight_decay=config.weight_decay,
-        grad_clip_norm=config.grad_clip_norm,
-        optimizer=config.optimizer,
-    ))
-    opt_state = optimizer.init(eqx.filter(sfno, eqx.is_array))
+    sigma_full = jnp.asarray(sigma.sigma_full)
     loss_history = []
 
     # Multi-step segment schedule (same lead set as the dycore-mode
@@ -2930,83 +3603,207 @@ def _train_sfno_full_loop(
             f"(~{n_sfno_single * dt_sfno / 3600:.1f} h)"
         )
 
+    # --- rollout curriculum (NeuralGCM-style stability training) ---
+    # When ``config.rollout_curriculum`` is set, each phase supervises ONE
+    # autoregressive rollout to ``lead_hours`` scored against the ERA5 target at
+    # that lead (single-lead loss), progressively longer.  Mirrors the dycore-
+    # mode curriculum in ``_train_spectral_loop`` (see
+    # ``build_sfno_curriculum_epoch_plan`` for the pure epoch-plan build shared
+    # with the unit test), but in SFNO macro steps.  Targets for every phase
+    # lead were loaded up front: the caller sets ``loss_config.multi_step_hours``
+    # to the sorted set of curriculum leads so ``load_training_data`` builds a
+    # target tuple per sample (``target_carry[k_target]`` picks the phase lead).
+    # ``None`` keeps the fixed chained-multi-step behaviour above byte-identical.
+    epoch_plan = build_sfno_curriculum_epoch_plan(
+        config.rollout_curriculum,
+        multi_step_hours_train,
+        dt_sfno,
+        config.n_epochs,
+    )
+    curriculum_on = bool(config.rollout_curriculum)
+    n_epochs_total = len(epoch_plan)
+    if curriculum_on:
+        logger.info(
+            "SFNO full-emulator rollout curriculum active: "
+            + ", ".join(
+                f"{h}h x{ep}"
+                for h, ep in (
+                    (int(h), int(ep)) for h, ep in config.rollout_curriculum
+                )
+            )
+            + f" ({n_epochs_total} epochs total)"
+        )
+
+    # Optimizer schedule sized by the ACTUAL epoch count (curriculum overrides
+    # config.n_epochs with sum-of-phase-epochs), so the warmup+cosine decay is
+    # correct for a curriculum run (mirrors _train_spectral_loop, which sizes
+    # total_steps by n_epochs_total).  One optax update per sample per epoch.
+    total_steps = max(1, n_epochs_total * max(1, len(ic_states)))
+    optimizer = create_optimizer(TrainingConfig(
+        lr=config.lr,
+        warmup_steps=config.warmup_steps,
+        total_steps=total_steps,
+        weight_decay=config.weight_decay,
+        grad_clip_norm=config.grad_clip_norm,
+        optimizer=config.optimizer,
+    ))
+    opt_state = optimizer.init(eqx.filter(sfno, eqx.is_array))
+
     logger.info(
-        f"SFNO full-emulator training: {config.n_epochs} epochs, "
+        f"SFNO full-emulator training: {n_epochs_total} epochs, "
         f"{len(ic_states)} samples/epoch, dt_sfno={dt_sfno:.0f}s"
     )
 
     def _rollout_segment(state, model_wrapper, n_steps):
-        """Iterate ``model_wrapper.step`` ``n_steps`` times via lax.scan."""
-        def body(s, _):
-            return model_wrapper.step(s, dt_sfno), None
-        final, _ = jax.lax.scan(body, state, jnp.arange(n_steps))
+        """Iterate ``model_wrapper.step`` ``n_steps`` times via lax.scan.
+
+        The scan body is ``jax.checkpoint``-wrapped (``prevent_cse=True``,
+        ``policy=nothing_saveable``) — the SAME gradient-checkpoint pattern the
+        dycore-mode training rollout uses (see ``spectral_rollout``'s
+        ``step_fn_ckpt`` and ``run_amip_rollout``'s ``_step``). Without it a long
+        curriculum rollout (e.g. 120 h = 20 SFNO macro steps at dt_sfno=6 h)
+        stores every step's activations for reverse-mode AD and OOMs on a large
+        SFNO. ``nothing_saveable`` recomputes every intermediate on the backward
+        pass, trading compute for O(1)-per-step activation memory; the transform
+        is a pure function of the differentiable SFNO weights, so gradients are
+        unchanged (AD-exact). Insensitive on short (1-2 step) segments.
+        """
+        step_ckpt = jax.checkpoint(
+            lambda s, _: (model_wrapper.step(s, dt_sfno), None),
+            prevent_cse=True,
+            policy=jax.checkpoint_policies.nothing_saveable,
+        )
+        final, _ = jax.lax.scan(step_ckpt, state, jnp.arange(n_steps))
         return final
 
-    def _train_step(sfno_m, opt_state_in, ic_spectral, target_carry):
-        def loss_fn(m):
-            # Rebuild the wrapper inside the trace; ``grid``,
-            # ``sigma``, and ``pe_emulator_cfg`` are static so the
-            # constructor introduces no new array work, and the inner
-            # SFNO ``m`` is the differentiable target.
-            wrapper = SFNOPrimitiveEquationModel(
-                grid=grid,
-                sigma_coord=sigma,
-                config=pe_emulator_cfg,
-                sfno_model=m,
-            )
-            state = ic_spectral
-            total = jnp.float32(0.0)
-            comp_total = {
-                "mse": jnp.float32(0.0),
-                "bias": jnp.float32(0.0),
-                "crps": jnp.float32(0.0),
-                "spec_crps": jnp.float32(0.0),
-            }
-            for k, n_seg in enumerate(segment_steps):
-                state = _rollout_segment(state, wrapper, n_seg)
-                seg_loss, seg_comp = _spectral_state_loss_components(
-                    state, target_carry[k], grid, sigma,
-                    sigma_full, loss_cfg_train,
-                )
-                total = total + ms_weights[k] * seg_loss
-                for key in comp_total:
-                    comp_total[key] = comp_total[key] + ms_weights[k] * seg_comp[key]
-            inv = 1.0 / ms_weight_sum
-            return total * inv, {k: v * inv for k, v in comp_total.items()}
-
-        (loss, components), grads = eqx.filter_value_and_grad(
-            loss_fn, has_aux=True,
-        )(sfno_m)
-        grad_norm = optax.global_norm(eqx.filter(grads, eqx.is_array))
-        updates, new_opt_state = optimizer.update(
-            eqx.filter(grads, eqx.is_array),
-            opt_state_in,
-            eqx.filter(sfno_m, eqx.is_array),
+    def _build_wrapper(m):
+        # Rebuild the wrapper inside the trace; ``grid``, ``sigma`` and
+        # ``pe_emulator_cfg`` are static so the constructor introduces no new
+        # array work, and the inner SFNO ``m`` is the differentiable target.
+        # ``norm_stats`` is a NamedTuple of jnp arrays; it enters the trace as a
+        # closed-over constant (identical stats every step). The (de)normalize
+        # transform is differentiable, so gradients flow to the SFNO weights
+        # unchanged (SegmentForcing doctrine: the stats are static per training,
+        # not a per-iter changing arg).
+        return SFNOPrimitiveEquationModel(
+            grid=grid,
+            sigma_coord=sigma,
+            config=pe_emulator_cfg,
+            sfno_model=m,
+            norm_stats=norm_stats,
         )
-        new_model = eqx.apply_updates(sfno_m, updates)
-        return new_model, new_opt_state, loss, grad_norm, components
 
-    train_step = eqx.filter_jit(_train_step)
+    def _chained_loss(m, ic_spectral, target_carry):
+        """Default (non-curriculum) chained multi-step loss — UNCHANGED path."""
+        wrapper = _build_wrapper(m)
+        state = ic_spectral
+        total = jnp.float32(0.0)
+        comp_total = {
+            "mse": jnp.float32(0.0),
+            "bias": jnp.float32(0.0),
+            "crps": jnp.float32(0.0),
+            "spec_crps": jnp.float32(0.0),
+        }
+        for k, n_seg in enumerate(segment_steps):
+            state = _rollout_segment(state, wrapper, n_seg)
+            seg_loss, seg_comp = _spectral_state_loss_components(
+                state, target_carry[k], grid, sigma,
+                sigma_full, loss_cfg_train,
+            )
+            total = total + ms_weights[k] * seg_loss
+            for key in comp_total:
+                comp_total[key] = comp_total[key] + ms_weights[k] * seg_comp[key]
+        inv = 1.0 / ms_weight_sum
+        return total * inv, {k: v * inv for k, v in comp_total.items()}
+
+    def _curriculum_loss(m, ic_spectral, target_carry, k_target, n_sfno_steps):
+        """Single-lead curriculum loss: ONE rollout to ``n_sfno_steps`` scored
+        against the ERA5 target at that lead.  ``target_carry`` is the K-tuple of
+        carries built by ``load_training_data`` (one per multi_step_hours lead);
+        ``k_target`` selects the phase lead's target.  A defensive fallback
+        indexes tuple targets only (a non-tuple target with a curriculum would
+        mean the loader disagreed with the plan — but the loader always returns
+        a tuple when multi_step_hours is set, which the curriculum requires)."""
+        wrapper = _build_wrapper(m)
+        tgt = (target_carry[k_target]
+               if type(target_carry) is tuple else target_carry)
+        state = _rollout_segment(ic_spectral, wrapper, n_sfno_steps)
+        return _spectral_state_loss_components(
+            state, tgt, grid, sigma, sigma_full, loss_cfg_train,
+        )
+
+    def _make_train_step(phase_spec):
+        """Jitted fused (grad + optax update) train step for ``phase_spec``.
+
+        ``(None, None, None)`` -> the default chained multi-step loss.  A
+        curriculum spec ``(lead, k_target, n_sfno_steps)`` -> a single rollout
+        to that lead.  One jitted step per DISTINCT ``n_sfno_steps`` (phase
+        compiles once, reused across that phase's epochs) — mirrors
+        ``_train_spectral_loop._train_step_for``.
+        """
+        _, k_target, n_sfno_steps = phase_spec
+
+        def _train_step(sfno_m, opt_state_in, ic_spectral, target_carry):
+            def loss_fn(m):
+                if k_target is not None:
+                    return _curriculum_loss(
+                        m, ic_spectral, target_carry, k_target, n_sfno_steps,
+                    )
+                return _chained_loss(m, ic_spectral, target_carry)
+
+            (loss, components), grads = eqx.filter_value_and_grad(
+                loss_fn, has_aux=True,
+            )(sfno_m)
+            grad_norm = optax.global_norm(eqx.filter(grads, eqx.is_array))
+            updates, new_opt_state = optimizer.update(
+                eqx.filter(grads, eqx.is_array),
+                opt_state_in,
+                eqx.filter(sfno_m, eqx.is_array),
+            )
+            new_model = eqx.apply_updates(sfno_m, updates)
+            return new_model, new_opt_state, loss, grad_norm, components
+
+        return eqx.filter_jit(_train_step)
+
+    # One jitted step per distinct phase spec (compile once, reuse across that
+    # phase's epochs — shapes are constant within a phase).
+    _step_cache: dict = {}
+
+    def _train_step_for(spec):
+        if spec not in _step_cache:
+            _step_cache[spec] = _make_train_step(spec)
+        return _step_cache[spec]
 
     best_loss = float("inf")
     patience_counter = 0
     early_stop_patience = int(getattr(config, "early_stop_patience", 0) or 0)
     early_stop_min_delta = float(getattr(config, "early_stop_min_delta", 1.0e-3))
 
-    if start_epoch >= config.n_epochs:
+    if start_epoch >= n_epochs_total:
         logger.info(
-            f"Resume: start_epoch={start_epoch} >= n_epochs={config.n_epochs}; "
+            f"Resume: start_epoch={start_epoch} >= n_epochs={n_epochs_total}; "
             f"skipping training loop (already complete)."
         )
         return sfno, loss_history
 
-    for epoch in range(start_epoch, config.n_epochs):
+    for epoch in range(start_epoch, n_epochs_total):
+        # Curriculum: this epoch's phase spec (resume indexes into epoch_plan);
+        # the per-phase jitted step compiles once and is reused within a phase.
+        # Non-curriculum: epoch_plan[epoch] == (None, None, None) -> the default
+        # chained-multi-step train_step for every epoch (single compile).
+        train_step = _train_step_for(epoch_plan[epoch])
         epoch_loss = 0.0
         epoch_components = {"mse": 0.0, "bias": 0.0, "crps": 0.0, "spec_crps": 0.0}
         t0 = time.time()
         grad_norm_val = 0.0
 
         for sample_idx, (ic, target) in enumerate(zip(ic_states, target_carries)):
+            if host_staged:
+                # Host-resident dataset (#1155): stage only THIS sample onto
+                # the compute device; the prior sample's device copies free
+                # when ic/target rebind. Peak device footprint: one sample.
+                ic = stage_sample(ic)
+                target = stage_sample(target)
             sfno, opt_state, loss, grad_norm, components = train_step(
                 sfno, opt_state, ic, target,
             )
@@ -3033,7 +3830,7 @@ def _train_sfno_full_loop(
         avg_components = {k: v / n_samples for k, v in epoch_components.items()}
         loss_history.append(avg_loss)
 
-        if epoch % config.log_every == 0 or epoch == config.n_epochs - 1:
+        if epoch % config.log_every == 0 or epoch == n_epochs_total - 1:
             elapsed = time.time() - t0
             logger.info(
                 f"Epoch {epoch:4d}: loss={avg_loss:.6f} "
@@ -3054,7 +3851,13 @@ def _train_sfno_full_loop(
         save_checkpoint(sfno, ckpt_path)
         logger.info(f"Saved checkpoint: {ckpt_path}")
 
-        if early_stop_patience > 0:
+        # Early stopping is DISABLED under a rollout curriculum (mirrors
+        # _train_spectral_loop): loss magnitudes are NOT comparable across phases
+        # (a longer lead has a naturally larger loss), so a stop triggered right
+        # after an early short-lead phase would silently skip the remaining — most
+        # stability-critical — long phases (24/48/120 h). The per-phase epoch
+        # counts are the explicit training budget instead.
+        if early_stop_patience > 0 and not config.rollout_curriculum:
             if best_loss - avg_loss > early_stop_min_delta:
                 best_loss = avg_loss
                 patience_counter = 0
@@ -3124,6 +3927,7 @@ def train_column_mlp_spectral(
 
     ic_states, target_carries, ic_times = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
+        host_resident=True,   # non-chunked full-dataset load (#1155)
     )
     sample_forcings = _maybe_build_sample_forcings(
         surface_forcing_path, ic_times, grid, forcing_cache_path,
@@ -3134,6 +3938,7 @@ def train_column_mlp_spectral(
         grid, sigma, ic_states, target_carries, config,
         start_epoch=start_epoch,
         sample_forcings=sample_forcings,
+        host_staged=True,   # dataset loaded host-resident above (#1155)
     )
 
 
@@ -3167,6 +3972,7 @@ def train_physics_params_spectral(
 
     ic_states, target_carries, _ic_times = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
+        host_resident=True,   # non-chunked full-dataset load (#1155)
     )
 
     dt = config.dt
@@ -3177,4 +3983,5 @@ def train_physics_params_spectral(
     return _train_spectral_loop(
         params, _make_physics_fn,
         grid, sigma, ic_states, target_carries, config,
+        host_staged=True,   # dataset loaded host-resident above (#1155)
     )

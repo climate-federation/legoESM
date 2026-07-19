@@ -363,6 +363,12 @@ class RRTMGP:
       return (
           RRTMGP._optics_cache_key(config),
           config.use_scan,
+          # g-point accumulation strategy changes the compiled RTE solve
+          # (vmap block vs per-g-point scan) and its answer to re-association
+          # tolerance — key on it so a batch_size/checkpoint change rebuilds
+          # the cached solver instead of silently reusing the prior one.
+          getattr(config, "gpoint_batch_size", 0),
+          getattr(config, "gpoint_checkpoint", True),
           getattr(config, "use_optimal_angle", False),
           config.S_0,
           config.aerosol_ssa,

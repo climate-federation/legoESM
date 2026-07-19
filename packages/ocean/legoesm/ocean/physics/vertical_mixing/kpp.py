@@ -15,6 +15,41 @@ The caller should provide surface wind stress and buoyancy flux when
 available.  If tau_x/tau_y are None, a simplified u_star proxy from
 surface speed is used.
 
+Faithfulness
+------------
+``tests/ocean/unit/test_kpp_lmd94_faithful.py`` pins the LMD94 closed forms to
+round-off (rel 1e-12) against an INDEPENDENT reimplementation with the published
+Appendix B constants, and canaries the ``KPPConfig`` defaults against them.
+
+FAITHFUL to LMD94:
+- ``_kpp_velocity_scales`` — the App. B similarity scales w_m/w_s in all three
+  regimes.  In THIS module's sign convention (zeta = d/L_MO, negative for stable
+  forcing): stable (kappa*u*/(1+5*|zeta|)), weakly unstable ((1+16|zeta|)^{1/4,1/2}
+  Businger-Dyer), and convective (kappa*(a*u*^3 + c*kappa*B_f*d)^{1/3}), with the
+  momentum/scalar joins at |zeta| = zeta_m = 0.2 and zeta_s = 1.0 and the
+  surface-layer cap d_eff = min(d, epsilon*h).
+- ``_kpp_unresolved_shear_variance`` — the Eq. 23 V_t^2 with the explicit
+  (-beta_T)^1/2 prefactor and Cv = 1.6 (a prior 2.236x-too-large bug is fixed).
+- ``_boundary_layer_depth`` — the Eq. 21 bulk-Richardson TERM: the Ri_b criterion
+  with density referenced to the surface pressure (potential density,
+  CVMix/MOM6 convention).  The crossing DEPTH itself is a sigmoid blend, not
+  LMD94's discrete interpolation — see DEPARTURES.
+- ``KPPConfig`` App. B constants (kappa, Ri_c=0.3, Cv=1.6, a_m, c_m, a_s, c_s,
+  zeta_m, zeta_s, 16/5 Businger coefficients).
+
+DEPARTURES (documented, canaried in the test):
+- ``_kpp_shape_function`` G(sigma) = sigma*(1-sigma)^2 is the REDUCED cubic:
+  G(1) = G'(1) = 0, so both K_bl and dK_bl/dz vanish at the BL base.  The full
+  LMD94 App. B / Eq. D cubic G = sigma*(1 + a2*sigma + a3*sigma^2) fixes a2, a3
+  to MATCH the boundary-layer diffusivity AND its derivative to the interior K at
+  sigma = 1; the reduced form cannot represent a nonzero interior-matched base
+  value/slope, so it omits that matching construction (base entrainment is
+  under-represented whenever the interior K/dK is nonzero there).
+- The BL-depth crossing is a differentiable sigmoid-weighted interpolation
+  (``crossing_sharpness``), not LMD94's discrete linear interpolation.
+- AD-safety floors/caps (d_eff cap, w >= 1e-10, N^2 >= 0, base clips) and the
+  optional Langmuir-turbulence enhancement (off by default).
+
 References
 ----------
 - Large, W. G., McWilliams, J. C., & Doney, S. C. (1994). Oceanic
@@ -26,10 +61,10 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-
-from legoesm import constants
 from legoesm.ocean.eos import (
     compute_buoyancy_frequency,
+)
+from legoesm.ocean.eos import (
     rho_0 as rho_0_ref,
 )
 from legoesm.ocean.physics.mixing import vertical_diffusion_variable_K
@@ -37,6 +72,8 @@ from legoesm.ocean.physics.vertical_mixing._shared import richardson_number
 from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
 from legoesm.ocean.physics.vertical_mixing.output import VerticalMixingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
+
+from legoesm import constants
 
 __physics_contract__ = {
     "summary": (
@@ -146,6 +183,40 @@ def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, eps):
     return w_m, w_s
 
 
+def _kpp_shape_function(sigma):
+    """LMD94 boundary-layer shape function G(sigma) = sigma*(1-sigma)^2.
+
+    This is the REDUCED KPP cubic: the full LMD94 (App. B / Eq. D) is
+    G(sigma) = sigma*(1 + a2*sigma + a3*sigma^2) with a2, a3 fixed so that both
+    the boundary-layer diffusivity AND its vertical derivative MATCH the interior
+    K at sigma = 1.  Here G(1) = 0 AND G'(1) = 0, so both K_bl and dK_bl/dz vanish
+    at the boundary-layer base; the reduced form cannot represent a nonzero
+    interior-matched base value/slope, so it omits that matching construction (a
+    documented faithfulness gap — base entrainment is under-represented whenever
+    the interior K/dK is nonzero there).  ``sigma`` is clipped to [0, 1] first
+    (outside the BL, G = 0).  G peaks at sigma = 1/3 with G(1/3) = 4/27.
+    """
+    sigma_clip = jnp.clip(sigma, 0.0, 1.0)
+    return sigma_clip * (1.0 - sigma_clip) ** 2
+
+
+def _kpp_unresolved_shear_variance(N, d, w_s, cfg, eps):
+    """LMD94 Eq. 23 unresolved-shear velocity variance V_t^2 [m^2/s^2].
+
+        V_t^2(d) = Cv * (-beta_T)^1/2 / (Ri_c * kappa^2) * (c_s*eps_lmd)^-1/2
+                   * d * N * w_s(d)
+
+    The (-beta_T)^1/2 = sqrt(0.2) prefactor (``cfg.neg_beta_T``) is applied
+    EXPLICITLY; Cv keeps its standalone LMD94 value 1.6 (it does NOT absorb
+    sqrt(0.2)).  The d*N*w_s factor [m * 1/s * m/s] makes V_t^2 a velocity
+    squared, dimensionally additive with the resolved shear du^2+dv^2.  Only
+    stable stratification contributes (the caller passes N = sqrt(max(N^2, 0))).
+    """
+    return (cfg.Cv * cfg.neg_beta_T ** 0.5 * N * d * w_s
+            / (cfg.Ri_crit * cfg.kappa_vk ** 2
+               * jnp.sqrt(jnp.maximum(cfg.c_s * cfg.epsilon_lmd, eps))))
+
+
 def _boundary_layer_depth(
     rho: jnp.ndarray,
     T: jnp.ndarray,
@@ -223,9 +294,7 @@ def _boundary_layer_depth(
     h_est = max_depth if h_bl_prev is None else h_bl_prev
     h_safe = jnp.maximum(h_est[..., jnp.newaxis], eps)
     _, w_s_vt = _kpp_velocity_scales(u_star, B_f, z_depth, h_safe, cfg, eps)
-    V_t2 = (cfg.Cv * cfg.neg_beta_T ** 0.5 * N_full * z_depth * w_s_vt
-            / (cfg.Ri_crit * cfg.kappa_vk ** 2
-               * jnp.sqrt(jnp.maximum(cfg.c_s * cfg.epsilon_lmd, eps))))
+    V_t2 = _kpp_unresolved_shear_variance(N_full, z_depth, w_s_vt, cfg, eps)
 
     # Bulk Richardson number
     Ri_b = (g * delta_rho * z_depth) / (
@@ -372,16 +441,11 @@ def kpp_vertical_mixing(
     z_depth = jnp.cumsum(dz_actual, axis=-1) - 0.5 * dz_actual
     sigma = z_depth / jnp.maximum(h_bl[..., jnp.newaxis], eps)
 
-    # --- Shape function G(sigma) = sigma * (1 - sigma)^2 ---
-    # NOTE: this is the REDUCED non-matching KPP cubic.  The full LMD94
-    # (App. B / Eq. D) matches both the boundary-layer diffusivity AND its
-    # vertical derivative to the interior K at sigma = 1 via
-    # G(sigma) = sigma * (1 + a2*sigma + a3*sigma^2) with a2, a3 set by that
-    # matching; here K_bl and dK_bl/dz both vanish at the BL base, so
-    # entrainment at the base is under-represented.  Documented faithfulness
-    # gap (interior-matching not yet implemented); see KPP audit.
+    # --- Shape function G(sigma) = sigma * (1 - sigma)^2 (LMD94 reduced cubic) ---
+    # See _kpp_shape_function: this is the non-matching cubic, a documented
+    # faithfulness gap (G(1)=G'(1)=0 => under-represented base entrainment).
+    G = _kpp_shape_function(sigma)
     sigma_clip = jnp.clip(sigma, 0.0, 1.0)
-    G = sigma_clip * (1.0 - sigma_clip) ** 2
 
     # --- Turbulent velocity scales w_m (momentum) / w_s (scalar) ---
     # LMD94 Appendix B; shared with the bulk-Richardson V_t^2 via

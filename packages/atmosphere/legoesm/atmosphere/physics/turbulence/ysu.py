@@ -1,35 +1,80 @@
 """YSU (Yonsei University) PBL turbulence scheme — differentiable variant.
 
 Nonlocal K-profile with an explicit entrainment flux at the PBL top.
-The K-profile follows the same structure as Holtslag-Boville but adds
-the Hong et al. (2006) prescribed PBL-top entrainment heat flux
-``(w'θ')_h = −e_ratio·(w'θ')_0``, applied as a flux-matched diffusivity
-localized at the inversion (see the entrainment block in
-:func:`ysu_turbulence`).
+The K-profile follows the same structure as Holtslag-Boville but adds a
+free-convective-LIMIT surrogate for the Hong et al. (2006) PBL-top
+entrainment: a prescribed heat flux ``(w'θ')_h = −e_ratio·(w'θ')_0`` (a fixed
+fraction of the SURFACE flux, dropping Hong06's shear-dependent ``w_m³`` term),
+applied as a flux-matched diffusivity localized at the inversion (see the
+entrainment block in :func:`ysu_turbulence` and the Faithfulness section below).
 
 .. note::
 
    **Implementation note vs published YSU.** Published YSU (Hong et al.
-   2006) prescribes the PBL-top entrainment as an explicit
-   *gradient-independent* flux boundary condition at the inversion
-   (proportional to the surface buoyancy flux,
-   ``w'θ'_h ≈ -0.15·w'θ'_0``).  Because this module builds K profiles
-   and integrates them with implicit vertical diffusion, the prescribed
-   flux enters instead as a FLUX-MATCHED eddy diffusivity
+   2006) prescribes the PBL-top entrainment as an explicit,
+   gradient-independent inversion-flux source term (not a boundary
+   condition), scaled by the entrainment velocity ``w_m³ = w*³ + 5·u*³`` (so it
+   carries a mechanical ``u*``/shear contribution).  This module makes
+   TWO simplifications: (i) the entrainment flux is taken as a fixed
+   fraction of the SURFACE flux, ``w'θ'_h ≈ −0.15·w'θ'_0`` — the
+   FREE-CONVECTIVE limit, dropping the shear term; and (ii) because the
+   module builds K profiles and integrates them with implicit vertical
+   diffusion, that prescribed flux enters as a FLUX-MATCHED eddy
+   diffusivity
    ``K_h,ent = e_ratio·(w'θ')_0 / max(∂θ_v/∂z, floor)`` under a
    Gaussian envelope centred on ``h_pbl`` (width
    ``config.entrainment_width_frac``): the resulting down-gradient flux
    ``−K_ent·∂θ_v/∂z`` at the inversion reproduces the prescribed
    ``(w'θ')_h`` exactly where the inversion gradient exceeds the floor,
    and saturates (stability-capped) in weakly stratified interfaces.
-   Chosen as a smooth, fully differentiable closure (no flux-BC
-   branch) at GCM-typical vertical resolution.
+   Chosen as a smooth, fully differentiable closure (no prescribed-
+   inversion-flux branch) at GCM-typical vertical resolution.
+
+Faithfulness to Hong et al. (2006) / Troen-Mahrt (1986)
+-------------------------------------------------------
+FAITHFUL (published forms + constants):
+  * **Nonlocal K-profile** ``K_m = κ·w_s·z·(1 − z/h)²`` (Troen-Mahrt 1986 /
+    Hong06), whose shape ``(z/h)(1 − z/h)²`` peaks at exactly ``4/27`` at
+    ``z = h/3`` (``_KPROFILE_PEAK_FRAC``, used as the entrainment-K stability cap).
+  * **Mixed-layer velocity scale** ``w_s = (u*³ + c·κ·w*³·z/h)^{1/3}`` blending
+    mechanical and convective scaling (Hong06), with the convective velocity
+    ``w* = ((g/θ)·h·(w'θ')_0)^{1/3}``.
+  * **Bulk-Richardson PBL height** with the Troen-Mahrt thermal-excess parcel
+    ``θ_T = b·(w'θ')_0/w_s`` — an unstable surface heat flux deepens ``h_pbl``.
+  * **Local-Ri free-atmosphere mixing** above the PBL (a genuine YSU component) and
+    the entrainment COEFFICIENT ``e_ratio = 0.15`` (the Hong06 free-convective
+    entrainment value).  Sign: unstable ``(w'θ')_0 > 0`` ⇒ downward entrainment flux
+    (``K_ent ≥ 0``).
+DEPARTURES / SURROGATES:
+  * **Fixed surface-flux-ratio entrainment**: the implemented
+    ``(w'θ')_h = −e_ratio·(w'θ')_0`` is only the FREE-CONVECTIVE LIMIT of Hong06.
+    The published scheme scales the entrainment velocity by ``w_m³ = w*³ + 5·u*³``,
+    so its true PBL-top flux carries a mechanical (``u*``/shear) contribution that
+    this shear-independent fixed ratio DROPS.  Only the 0.15 coefficient is the
+    published value; the fixed-fraction-of-surface-flux LAW is a surrogate.
+  * **Flux-matched K realization** of that prescribed flux (see the note above):
+    ``K_ent = e_ratio·(w'θ')_0/max(∂θ_v/∂z, floor)`` under a Gaussian envelope at
+    ``h_pbl`` — a smooth, fully differentiable stand-in for the prescribed
+    inversion flux, NOT that inversion-flux source term itself.
+  * **Entrainment stability cap** ``K_ent ≤ (4/27)·κ·w_s(h)·h`` and a gradient floor
+    ``∂θ_v/∂z ≥ 1e-4`` — guards (not tunables) that break the ``e_ratio`` linearity
+    once the flux-matched K would exceed the peak mixed-layer K.
+  * **Local-K coefficients + smooth blend**: the above-PBL local-Ri mixing is
+    faithful YSU, but its specific Louis (1982) coefficients (shared
+    ``_shared.louis_stability_functions``) and the sigmoid PBL/local blend are a
+    re-tuned, smoothed closure.
+  * **Smooth switches**: sigmoid PBL/local blend and a smooth first-crossing PBL-top
+    detection replace hard index searches, for differentiability.
+Non-behavioral pins: ``tests/atmosphere/hydrostatic/unit/test_ysu_faithful.py``.
 
 References
 ----------
 - Hong, S.-Y., Noh, Y., & Dudhia, J. (2006). A new vertical diffusion
   package with an explicit treatment of entrainment processes. Mon.
   Wea. Rev., 134, 2318-2341.
+- Troen, I., & Mahrt, L. (1986). A simple model of the atmospheric
+  boundary layer; sensitivity to surface evaporation. Boundary-Layer
+  Meteorol., 37, 129-148.
 """
 
 from __future__ import annotations
@@ -65,8 +110,9 @@ __physics_contract__ = {
     "summary": (
         "YSU (Yonsei University) nonlocal K-profile PBL scheme: a convective "
         "mixed-layer K-profile with a countergradient nonlocal heat flux and "
-        "the Hong06 prescribed PBL-top entrainment flux (w'th')_h = "
-        "-e_ratio*(w'th')_0 applied as a flux-matched K at the inversion, "
+        "a free-convective-limit PBL-top entrainment flux (w'th')_h = "
+        "-e_ratio*(w'th')_0 (a surrogate for Hong06's shear-dependent w_m "
+        "entrainment) applied as a flux-matched K at the inversion, "
         "all applied by implicit vertical diffusion with surface-flux BCs."
     ),
     "inputs": {
@@ -84,8 +130,9 @@ __physics_contract__ = {
         "gamma_c) with countergradient gamma_c >= 0 (upward heat transport in "
         "the convective BL, gated to unstable surface forcing). Km, Kh >= 0; "
         "an unstable surface heat flux (shflx > 0 upward) deepens h_pbl via a "
-        "thermal-excess parcel. The prescribed PBL-top entrainment flux "
-        "(w'th')_h = -e_ratio*(w'th')_0 is NEGATIVE (downward) for unstable "
+        "thermal-excess parcel. The prescribed (free-convective-limit) PBL-top "
+        "entrainment flux (w'th')_h = -e_ratio*(w'th')_0 is NEGATIVE (downward) "
+        "for unstable "
         "surface forcing — warm air entrained down across the inversion, "
         "warming the PBL top region — and is realized down-gradient via a "
         "flux-matched K_ent >= 0 at the inversion. shflx, lhflx positive "

@@ -59,6 +59,9 @@ diagnostics/
 # Local-only research-PDF stash (papers consulted while planning).
 # See CLAUDE.md "Code Hygiene Rules" — never committed.
 docs/references/
+# Local-only oracle source clones consulted for faithfulness audits
+# (e.g. ecmwf-ifs/openifs for the Bechtold convection audit) — never committed.
+ifs-source/
 
 # Exceptions: the `.nc` files under
 # `src/legoesm/atmosphere/physics/radiation/rrtmgp/optics/rrtmgp_data/`
@@ -152,6 +155,9 @@ docs/_build/
 !packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/data/
 !packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/data/mie_lut_sampling.npz
 
+# local diff-work virtualenv (never commit)
+.venv_diffwork/
+
 # --- Committed forcing / boundary-condition INPUT data (small, tracked so a
 # fresh clone can run the AMIP/LES/OMIP smokes without a data download). These
 # are model INPUTS, not runtime OUTPUTS — the `data/` and `*.nc` ignores above
@@ -168,3 +174,4 @@ data/*
 !data/les_cases/
 !data/les_cases/**/
 !data/les_cases/**
+e3sm-source/

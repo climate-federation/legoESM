@@ -60,6 +60,105 @@ retune it (and ``fesc``) against satellite SIF for absolute matching.
 All functions are pure JAX, JIT-compatible and differentiable (safe-guarded
 divisions use the double-``where`` trick so reverse-mode gradients stay finite
 at ``APAR -> 0`` and ``Ci -> Gamma*``).
+
+Faithfulness (oracle: BEPS-SIF ``photosyn_gs.c::SIF_y`` + je/xxn block, Qiu 2015)
+--------------------------------------------------------------------------------
+The steady-state fluorescence-yield core :func:`fluorescence_yield` is a
+**byte-faithful** port of the BEPS-SIF ``SIF_y`` C function — every coefficient
+equals the source verbatim::
+
+    kf = 0.05;  kd = 0.95;  kp = 4.0;
+    ps_sif = kp/(kf+kp+kd)*(1.0-xxn);
+    kk = exp(log(xxn)*2.83);                    // = xxn**2.83
+    kn = 2.48*(1+0.114)*kk/(kk+0.114);          // van der Tol (2014) NPQ
+    fm = kf/(kf+kd+kn);
+    fs = fm*(1.0-ps_sif);
+
+and :func:`actual_electron_transport` reproduces the BEPS proxy
+``je = aphoto*(ci+2*gammac)/(ci-gammac)`` (with a floor at 0) in the NORMAL
+regime.  Note ``kn_beta = 0.114`` is the value hardcoded in ``SIF_y`` — NOT the
+``0.0114`` of van der Tol's drought-stressed parameter set (a factor-of-ten
+trap).  ``tests/land/unit/test_canopy_sif_faithful.py`` pins the full ``fs(x)``
+curve, ``je``, ``x`` and the composed ``leaf_sif = fs(x)*APAR`` against an
+INDEPENDENT scalar reimplementation to round-off (rel ``1e-12``), with every
+coefficient (``kn0``/``kn_beta``/``kn_gamma``/``kf``/``kd``/``kp``/the ``2*Γ*``
+factor/the ``0.05`` scale) canaried so the pin is provably non-vacuous.
+
+FAITHFUL where it counts — the byte-identical ``fs(x)``, ``je`` and ``x`` hold to
+round-off across the strictly-nonsingular NORMAL regime ``Ci - Gamma* > eps`` AND
+``APAR > eps`` (``eps = 1e-9``).  The departures below fall into (a) absolute
+calibration (#1, #5); (b) the singular EDGES ``Ci -> Gamma*`` / ``APAR -> 0``
+(the #2 knife-edge, #3), where BEPS's raw C divisions hit ``0/0`` (NaN) or
+``je/0`` (``±inf``) at EXACT equality and a differentiable model must guard the
+``0/0`` to keep the reverse-mode gradient (and forward value) finite; and (c) the
+physically-degenerate at/below-compensation region ``Ci <= Gamma*`` (#2) —
+NONSINGULAR (e.g. ``Ci=40, Gamma*=43`` has denom ``-3``) but where BEPS's
+``if(je<0)`` floor leaks a sign-flipped ``je`` artifact that the module instead
+sends to ``je=0``.  #4 (the symmetric ``[0,1]`` x-clip) is a robustness guard
+that spans (b) and the ordinary regime: its LOWER clip fires at the
+light-saturation edge (``je > mey*APAR``, matching BEPS's ``xxn<0 -> 0``), while
+its UPPER clip fires only on the native-``je`` API
+(:func:`leaf_sif_from_je`) for a caller-supplied ``je<0`` at ORDINARY ``APAR``
+(not an edge).  Each departure is canaried in that test.
+(``APAR`` is absorbed PAR, ``>= 0`` by definition — the ``SIF >= 0`` guarantee and
+this characterisation both assume ``APAR >= 0``; a negative ``APAR`` is out of
+contract.  When the ``Ci -> Gamma*`` and ``APAR -> 0`` guards overlap, the dark
+guard #3 is applied LAST, so ``APAR <= eps`` forces ``x = 0`` even where #2 would
+otherwise give ``x = 1``.)
+
+DEPARTURES from BEPS-SIF ``SIF_y``:
+
+1. **Absorbed PAR, not incident PPFD** (the only normal-regime departure).
+   BEPS forms BOTH the light-saturation denominator and the emitted flux from
+   INCIDENT PPFD — ``xxn = 1 - je/(iphoton*0.05)`` and
+   ``*xSIF = SIF_y(xxn)*iphoton`` with ``iphoton = 4.55*0.5*rad_leaf``.  legoESM
+   feeds ABSORBED PAR to both (``x = 1 - je/(max_electron_yield*APAR)``,
+   ``SIF = fs*APAR``), keeping the shared ``0.05`` as the tunable
+   ``max_electron_yield``.  The yield *shape* ``fs(x)`` is unchanged, so re-tune
+   ``max_electron_yield`` (and ``fesc``) against satellite SIF for absolute
+   matching.  A reformulation, not a bug.
+2. **``je`` floored to 0 across the whole at/below-compensation region
+   ``Ci <= Gamma*`` (and the ``(Gamma*, Gamma*+eps]`` knife-edge)**, via a
+   ``denom = Ci - Gamma* > eps`` guard.  This SUPERSEDES BEPS's cruder
+   ``if(je<0) je=0`` floor, which only catches ``An<0`` when ``Ci > Gamma*``
+   (positive denominator): for ``Ci < Gamma*`` the sign of ``je`` FLIPS, so
+   BEPS's floor leaks two artifacts that legoESM instead sends to ``je=0``
+   (``x=1`` for ``APAR > eps``, no photosynthetic electron transport at/below
+   compensation — the physical answer):
+     - ``An < 0`` (respiring leaf below compensation): BEPS ``je = neg/neg`` is
+       spuriously POSITIVE (e.g. ``An=-1, Ci=40, Gamma*=43 -> je=+42``, so BEPS
+       ``x=0``) — a whole half-plane, not an ``eps`` set.
+     - ``An > 0`` on the knife-edge ``Ci in (Gamma*, Gamma*+eps]``: BEPS ``je``
+       is huge-positive, then masked to ``x=0`` by its own ``xxn<0 -> 0`` clip.
+   The guard is a double-``where`` (not a one-sided ``max(denom,eps)``, which
+   would flip the sign into a huge ``je``) so the reverse-mode gradient at
+   ``Ci=Gamma*`` stays finite.  At EXACT ``Ci = Gamma*`` BEPS computes ``0/0``
+   (NaN for ``An=0``) or ``±inf`` (IEEE, ``An!=0``); the guard returns the finite
+   ``je=0`` regardless of ``An`` (``x=1`` when ``APAR > eps``; ``x=0`` if also
+   ``APAR <= eps``, per #3).  Both regions are physically degenerate.
+3. **Dark guard ``APAR <= eps -> x = 0``** (mirror of #2 at ``APAR -> 0``).  For
+   any ``APAR <= eps`` the module returns ``x=0`` rather than the C formula
+   ``1 - je/(APAR*0.05)``, via a double-``where`` for a finite gradient at
+   ``APAR=0``.  At EXACT ``APAR = 0`` BEPS computes ``je/0`` — ``0/0`` (NaN) once
+   ``je`` is floored to 0, or ``+inf`` for a residual ``je>0``; the guard returns
+   the finite ``x=0`` (SIF ``0``).  For ``0 < APAR <= eps`` BEPS's ``x -> 1``
+   limit (at ``je=0``) differs from the guard's ``x=0``, but the emitted
+   ``fs(0)*APAR = O(eps)`` makes the SIF flux error negligible.
+4. **Symmetric x-clip.**  BEPS clips only ``xxn<0 -> 0`` (relying on
+   ``je>=0 => xxn<=1``); legoESM clips ``[0,1]`` — redundantly, in BOTH
+   :func:`degree_of_light_saturation` and (at its input) :func:`fluorescence_yield`
+   — so ``x`` can never leave ``[0,1]``.  On the ``An``/``Ci`` inversion path
+   (:func:`leaf_sif`) ``je>=0`` so the upper clip is a no-op; on the native-``je``
+   API (:func:`leaf_sif_from_je`, the CLM-ML path) a caller-supplied ``je<0`` with
+   ``APAR > eps`` gives ``x>1`` and the upper clip keeps it in ``SIF_y``'s
+   ``[0,1]`` domain (for ``APAR <= eps`` the dark guard #3 sets ``x=0`` first, so
+   the upper clip is not involved).
+5. **Escape probability ``fesc``.**  An ADDITIVE emitted->observed
+   top-of-canopy factor (Yang & van der Tol 2016), clamped ``[0,1]``, applied at
+   the canopy-aggregation sites; BEPS ``SIF_y`` has no such factor.  ``fesc = 1``
+   (the default) gives the raw, un-attenuated legoESM emitted SIF — which equals
+   BEPS's ``fs*iphoton`` form ONLY under the absorbed=incident identification of
+   departure #1 (i.e. it does not by itself undo that reformulation).
 """
 
 from __future__ import annotations
@@ -325,12 +424,18 @@ __physics_contract__ = {
     ),
     "inputs": {
         "An": "umol/m^2/s", "Ci": "umol/mol", "gamma_star": "umol/mol",
-        "apar": "umol/m^2/s",
+        "apar": "umol/m^2/s (>= 0; absorbed PAR)",
+        "leaf_area": "m^2/m^2 (>= 0; leaf-area index, multilayer path only)",
     },
     "outputs": {"sif": "umol/m^2/s"},
     "sign_convention": (
-        "SIF >= 0 (emission). je floored at 0; degree of light saturation x in "
-        "[0,1]; fluorescence yield fs in (0,1); SIF = fs*APAR so APAR=0 -> SIF=0."
+        "SIF >= 0 (emission) FOR APAR >= 0 (absorbed PAR; the input domain). je "
+        "floored at 0; degree of light saturation x in [0,1]; fluorescence yield "
+        "fs in (0,1); SIF = fs*APAR so APAR=0 -> SIF=0. A negative APAR is out of "
+        "contract (SIF = fs(0)*APAR < 0) — absorbed PAR is non-negative by "
+        "definition. The multilayer path (multilayer_canopy_sif) additionally "
+        "weights by leaf_area (LAI); leaf_area >= 0 is likewise required for "
+        "SIF >= 0 (both APAR and LAI are non-negative by definition)."
     ),
     "conserves": [],  # passive diagnostic, not a conservation law
     "differentiable": True,

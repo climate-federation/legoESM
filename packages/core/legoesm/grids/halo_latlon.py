@@ -195,10 +195,11 @@ def _dispatch_latlon_2d_fold(data, topology, halo, *, is_vector_v):
 
     ``proc_lon > 1`` splits longitude, so the fold's 180-deg shift needs the
     lat-pencil transpose (not yet wired) — fall back to the labeled
-    wall-pole benchmark pad (``pad_halo_latlon_2d(pole_bc="wall")``).  Only
-    reachable by explicitly building a >1 longitude split;
-    :func:`legoesm.parallel.latlon_mpi.make_latlon_2d_mpi_step` refuses
-    ``proc_lon>1``, so no atmospheric step reaches a wall pole through here.
+    wall-pole benchmark pad (``pad_halo_latlon_2d(pole_bc="wall")``).
+    :func:`legoesm.parallel.latlon_mpi.make_latlon_2d_mpi_step` now WIRES
+    proc_lon>1 for regular / wall-pole grids (so an atmospheric wall-pole
+    step DOES reach here), but still refuses the TRIPOLAR fold — the 180-deg
+    fold path below is the wall-pole case only.
     Handles 2-D and 3-D (the level axis rides through both backends).
     """
     from legoesm.parallel.latlon_mpi import (

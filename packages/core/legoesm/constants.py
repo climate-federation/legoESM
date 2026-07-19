@@ -124,16 +124,15 @@ orbital_eccentricity = 0.016704         # [-] orbital eccentricity (year ~2000)
 orbital_obliquity_deg = 23.439          # [deg] obliquity of the ecliptic
 orbital_long_perihelion_deg = 282.895   # [deg] longitude of perihelion from VE
 
-# Broadband longwave emissivities (used as defaults when a tile config
-# does not specify its own).  Sea-water and most ice surfaces are
-# near-blackbody in the thermal-IR window; sand/dry-soil ~0.91.
-# Note: ``driver/config.py`` and ``driver/physics_pipeline.py`` carry
-# pre-existing ``emissivity_ice = 0.95`` defaults that predate the
-# centralisation here.  0.97 is the fresh-sea-ice / fresh-snow
-# value used by ``ice/config.py`` and the bare-ice albedo path; 0.95
-# represents a melt-pond / weathered ice surface mix.  Reconciliation
-# is tracked as a follow-up — see slopbuster review of
-# Physical_Consistency PR.
+# Broadband longwave emissivities — the source of truth for the CENTRALIZED
+# surface-tile emissivity defaults: ``driver/config.py`` (ExperimentConfig),
+# ``driver/physics_pipeline.py``, and ``land/config.py`` reference these
+# (enforced by test_constants_consistency.
+# test_surface_emissivity_defaults_reference_constants).  Scheme-specific
+# radiation keeps its own convention (gray uses a black surface eps=1.0);
+# ``ice/config.py`` independently shares the 0.97 fresh-ice value.  Sea-water
+# and fresh ice/snow are near-blackbody in the thermal-IR window; generic
+# land ~0.95.
 emissivity_ocean = 0.97         # [-] open ocean / lake water
 emissivity_ice = 0.97           # [-] fresh sea ice / fresh snow
 emissivity_land = 0.95          # [-] generic land surface
@@ -237,6 +236,14 @@ R_universal = 8.314462618       # [J/(mol·K)] ≈ N_A·k_B (value truncated at
 # its own literal rather than R_universal/N_A because the R_universal literal
 # above is truncated (deriving would be off by ~2e-11 relative).
 k_B = 1.380649e-23              # [J/K] (exact, SI)
+
+# Planck constant and speed of light — exact by the 2019 SI redefinition.
+# Needed to convert a spectral radiance / irradiance [W/m^2] into a photon flux
+# [mol photons / m^2 / s] through the photon energy E = h*c/lambda — e.g. the
+# satellite-SIF radiance -> emitted-photon-flux conversion in
+# scripts/data/build_sif_observations.py (and any PAR / quantum-yield code).
+h_planck = 6.62607015e-34       # [J·s]  Planck constant        (exact, SI 2019)
+c_light = 2.99792458e8          # [m/s]  speed of light in vacuum (exact, SI)
 
 # ==============================================================================
 # Mathematical Constants

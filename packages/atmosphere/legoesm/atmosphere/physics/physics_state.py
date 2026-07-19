@@ -162,6 +162,38 @@ class PhysicsState(NamedTuple):
     # re-derivable as arange(ncol) — restart loaders may default it.
     col_index: jnp.ndarray
     aerosol_number: jnp.ndarray = None
+    # Sub-grid LIQUID cloud fraction [-], shape (ncol, nlev), written by a
+    # turbulence scheme that carries its own PDF cloud closure (CLUBB) so the
+    # radiation module can consume it (cloud_scheme="clubb") instead of the
+    # RH-diagnosed grid-scale one.  Always materialised as zeros (uniform
+    # pytree, byte-identical for runs that never read it — radiation ignores it
+    # unless cloud_scheme="clubb"); appended LAST with a default so existing
+    # direct constructors are unaffected.
+    cloud_fraction: jnp.ndarray = None
+    # OPTIONAL per-step DYNAMICS (large-scale advective) tendencies of T [K/s]
+    # and q_v [kg/kg/s], shape (ncol, nlev) — the IFS ``PTENTA``/``PTENQA``
+    # analog consumed by Bechtold's RCAPQADV CAPE-advection correction
+    # (``use_ifs_cape_qadv``; see convection/bechtold.py).  A process-split
+    # driver writes ``(state_after_dyn - state_before_dyn)/dt`` here BEFORE the
+    # convection call, AND passes convection the post-dynamics state — the leaf
+    # forms its reference environment as ``state - dyn_tendency*dt``, so the
+    # two must be staged consistently (the IFS ``ZTENH2 = ZTENH - PTENTA*dt``
+    # convention).  These are a diagnostic INPUT to the closure (they shape
+    # CAPE), NOT applied to the state by convection — the dynamics updates the
+    # state separately, so there is no double count.  ``None``
+    # (default) leaves the RCAPQADV path inert; the convection bridge raises at
+    # trace time if ``use_ifs_cape_qadv`` is on while these are absent.
+    # Appended LAST with a default so existing direct constructors are
+    # unaffected.
+    dyn_tendency_T: jnp.ndarray = None
+    dyn_tendency_qv: jnp.ndarray = None
+
+
+# Per-step INPUT fields (recomputed by the driver from forcing/dynamics before
+# every convection call) — NOT evolving physics memory, so they are neither
+# persisted in a restart checkpoint nor subject to the carry-completeness gate.
+# A checkpoint legitimately lacks them; the fresh seed's ``None`` is correct.
+PHYSSTATE_INPUT_FIELDS = frozenset({"dyn_tendency_T", "dyn_tendency_qv"})
 
 
 def init_physics_state(
@@ -303,6 +335,11 @@ def init_physics_state(
     # are byte-identical; only evolved when the prognostic-aerosol option is on.
     aerosol_number = jnp.zeros((ncol, nlev), dtype=dtype)
 
+    # --- CLUBB sub-grid cloud fraction hand-off (turbulence -> radiation) ---
+    # Zeros before the first turbulence step; a PDF turbulence scheme (CLUBB)
+    # overwrites it each step and radiation reads it when cloud_scheme="clubb".
+    cloud_fraction = jnp.zeros((ncol, nlev), dtype=dtype)
+
     return PhysicsState(
         tke=tke,
         conv_prog_profile=conv_prog_profile,
@@ -315,6 +352,12 @@ def init_physics_state(
         rad_heating=rad_heating,
         col_index=jnp.arange(ncol, dtype=jnp.int32),
         aerosol_number=aerosol_number,
+        cloud_fraction=cloud_fraction,
+        # Dynamics-tendency inputs default None (RCAPQADV inert); a
+        # process-split driver / SCM writes them per step (see the field
+        # docstrings).
+        dyn_tendency_T=None,
+        dyn_tendency_qv=None,
     )
 
 
@@ -361,4 +404,15 @@ def update_physics_state(phys_state, updates):
         aerosol_number=updates.get(
             "aerosol_number", phys_state.aerosol_number
         ),
+        cloud_fraction=updates.get(
+            "cloud_fraction", phys_state.cloud_fraction
+        ),
+        # Per-step INPUTS: CONSUMED each call, never carried forward.  Default
+        # to None (NOT the prior value) so a driver that forgets to refresh
+        # them on a later step fails CLOSED — the bridge guard raises on a
+        # None carry rather than silently pairing a STALE dynamics tendency
+        # with a new post-dynamics state (RCAPQADV staging contract, codex
+        # r2).  A driver re-populates them before every convection call.
+        dyn_tendency_T=updates.get("dyn_tendency_T", None),
+        dyn_tendency_qv=updates.get("dyn_tendency_qv", None),
     )

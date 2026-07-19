@@ -86,6 +86,17 @@ OC_NLEV="${OC_NLEV:-20}"
 N_WARMUP="${N_WARMUP:-3}"
 N_TIMING="${N_TIMING:-30}"
 
+# XLA collective-permute combining + pipelined p2p. #1113 found the route-B MPAS
+# (lane E) throughput wall is the ppermute ROUND COUNT (9->24->30 as the SFC
+# partition gains edge-coloring rounds) times a fixed ~0.11 ms/round launch
+# floor — NOT transport bandwidth (GDR-off was immaterial at these message
+# sizes). These flags fuse adjacent collective-permutes and pipeline the p2p,
+# attacking the round count directly (the issue's top-priority remedy). Shared
+# with the lane-T A/B `xla` arm. On by default for lane E; MPAS_CP_COMBINE=0
+# for a baseline arm.
+_XLA_COMM_FLAGS="--xla_gpu_collective_permute_combine_threshold_bytes=33554432 --xla_gpu_enable_pipelined_p2p=true"
+MPAS_CP_COMBINE="${MPAS_CP_COMBINE:-1}"  # lane E CP-combining default (#1113)
+
 # Shared NCCL-over-Slingshot env for every jax.distributed lane (A/C/D):
 # NCCL owns the GPU traffic — keep GPU-aware cray-mpich OFF (mixing
 # GPU-aware MPICH and NCCL in one app risks deadlock — CSCS/ALCF guidance);
@@ -206,6 +217,12 @@ if [ "$RUN_MPAS" = "1" ]; then
     echo "=== LANE E: icosahedral MPAS multicontroller, np=6 over 2 nodes (L$ICO_LEVEL) ==="
     (
         nccl_env
+        # CP-combining + pipelined p2p ON by default (#1113): the ppermute
+        # round count, not bandwidth, is lane E's wall.
+        if [ "$MPAS_CP_COMBINE" = "1" ]; then
+            export XLA_FLAGS="${XLA_FLAGS:-} ${_XLA_COMM_FLAGS}"
+            echo "lane E: XLA CP-combining on (#1113) -> $_XLA_COMM_FLAGS"
+        fi
         # Smoke gate first: small mesh, parity + conservation armed.
         mpiexec -n 6 --ppn 3 bash -c "$PIN" _ \
             "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
@@ -282,7 +299,7 @@ fi
 RUN_TUNE="${RUN_TUNE:-0}"
 if [ "$RUN_TUNE" = "1" ]; then
     echo "=== LANE T: comm-tuning A/B (latlon atm np=8; cube np=6) ==="
-    _XLA_COMM_FLAGS="--xla_gpu_collective_permute_combine_threshold_bytes=33554432 --xla_gpu_enable_pipelined_p2p=true"
+    # (_XLA_COMM_FLAGS defined once at the top; shared with lane E's default.)
     for ARM in base fused xla pgle; do
         echo "--- lane T arm=$ARM: atm latlon LL$LL_RES np=8 ---"
         (

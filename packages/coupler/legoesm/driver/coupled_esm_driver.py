@@ -18,6 +18,7 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
+from legoesm.driver.air_sea_consistency import validate_air_sea_consistency
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.coupled_config import CoupledConfig
 from legoesm.diagnostics.energy_budget import area_weighted_mean
@@ -53,6 +54,39 @@ def enable_diurnal_surface_land(land_cfg):
     if cfg.carbon.scheme != "differland":   # Farquhar needs the differland LAI
         cfg = cfg._replace(carbon=CarbonConfig(scheme="differland"))
     return cfg
+
+
+def assert_land_tile_reachable(land_mode, f_land_mode, f_land) -> None:
+    """Raise if a land model is configured but its tile has zero area everywhere.
+
+    The driver-level invariant on the MATERIALIZED land fraction, the residue the
+    CONFIG-level CLI guard (``run_coupled.apply_land_runoff_scheme``) documents it
+    cannot see: ``land_mode != "none"`` builds land physics, yet ``f_land`` comes
+    out identically zero, so the entire land tile is silently dead. ``f_land`` is
+    a fraction in ``[0, 1]``, so ``max(f_land) == 0`` iff there is no land in any
+    cell -- the ``from_ocean`` all-wet-ocean-mask path and the ``analytical``
+    degenerate-grid (no latitude) fall-to-zeros path, neither visible to any
+    config predicate.
+
+    ``f_land_mode == "zero"`` is EXCLUDED: that is the explicit
+    aquaplanet-with-slab-land request (``--preset aquaplanet --land-scheme slab``;
+    ``run_coupled.py``), where a zero land area is intended, not an accident.
+
+    Pure -> unit-testable; the driver calls it once at coupler-init after
+    materialising ``f_land``."""
+    if land_mode == "none" or f_land_mode == "zero":
+        return
+    # f_land >= 0 everywhere by construction, so max <= 0 <=> all cells zero.
+    if float(jnp.max(f_land)) <= 0.0:
+        raise ValueError(
+            f"land_mode={land_mode!r} builds a land model but the materialized "
+            f"land fraction is zero everywhere (f_land_mode={f_land_mode!r}): "
+            f"the land tile is silently dead. This is the from_ocean "
+            f"all-wet-ocean-mask or the analytical degenerate-grid (no latitude) "
+            f"residue that no config-level predicate can see. Set "
+            f"f_land_mode='zero' if you intend an aquaplanet, or supply a grid "
+            f"latitude / an ocean mask that actually contains land."
+        )
 
 
 def _flatten_pytree_to_npz(state, prefix: str) -> dict:
@@ -159,6 +193,7 @@ class CoupledESMDriver:
     ):
         self.atm_config = atm_config
         self.coupled_cfg = coupled_config or CoupledConfig()
+        validate_air_sea_consistency(atm_config, coupler_config)
         self._atm = ModelDriver(atm_config, output_dir=output_dir)
         self._coupler_config = coupler_config
         self._ice_config = ice_config
@@ -301,6 +336,14 @@ class CoupledESMDriver:
         """Build the prognostic 3D ``LatLonCGridOceanModel`` (ocean_mode=
         'dynamic') on the shared lat-lon grid with the OMIP-validated stable
         cold-start stack.  See docs/ocean/coupled_3d_ocean_plan.md (Phase 1)."""
+        # Voronoi/MPAS ocean: a co-located 3-D MPAS ocean on the atmosphere's
+        # Voronoi mesh has its own init recipe + edge/cell TRiSK staggering (NOT
+        # the lat-lon C-grid stack below).  Dispatch early, mirroring the tripole
+        # early-return.
+        from legoesm.grids.voronoi import VoronoiMesh
+        if isinstance(self._ocean_grid, VoronoiMesh):
+            self._init_mpas_dynamic_ocean(T_sfc_mean)
+            return
         from legoesm.grids.latlon import LatLonGrid
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -658,6 +701,86 @@ class CoupledESMDriver:
             f"barotropic={ocfg.barotropic.barotropic_solver}, pgf={ocfg.pgf_scheme}, "
             f"mesh={cfg.tripole_mesh_path}")
 
+    def _init_mpas_dynamic_ocean(self, T_sfc_mean: float):
+        """Build the prognostic 3-D MPAS ocean (``MPASOceanModel``) CO-LOCATED on
+        the atmosphere's Voronoi mesh, from the OMIP-validated NEMO-match dycore
+        recipe (the single source of truth ``nemo_match_mpas_model_config``, the
+        same config scripts/run/run_omip.py steps) + a stratified rest cold
+        start.
+
+        MPAS uses TRiSK C-grid staggering — edge-normal velocity, cell-centred
+        T/S/eta — unlike the lat-lon Arakawa-C ocean, so SST + surface currents
+        are read back through the Perot edge->cell reconstruction in the MPAS
+        branch of :meth:`_ocean_surface_KuvC`.  Surface fluxes are supplied
+        EXTERNALLY by the coupler (``surface_forcing`` scheme='none' — the
+        dynamics-core external tau/q_net block is the sole consumer), exactly as
+        the OMIP JRA55 forcing mode does; the recipe's idealized prescribed-wind
+        + restoring forcing is off."""
+        from legoesm.grids.voronoi import VoronoiMesh
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        from legoesm.ocean.fidelity.nemo_match_recipe import (
+            nemo_match_mpas_model_config,
+        )
+        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm import constants
+
+        cfg = self.coupled_cfg
+        if cfg.ocean_dt_s <= 0.0:
+            raise ValueError(f"ocean_dt_s must be > 0, got {cfg.ocean_dt_s!r}")
+        # Co-located: the ocean mesh IS the atmosphere's Voronoi mesh (identity
+        # remap) — reuse it; never rebuild at a mismatched resolution.
+        mesh = self._ocean_grid
+        if not isinstance(mesh, VoronoiMesh):
+            raise ValueError(
+                "_init_mpas_dynamic_ocean requires a VoronoiMesh (MPAS) ocean "
+                f"grid; got {type(mesh).__name__}.")
+        z_coord = create_ocean_z_star(cfg.ocean_nlev, H_max=cfg.ocean_H_max_m)
+        # Proven OMIP NEMO-match MPAS dycore + coefficients (locked by
+        # tests/ocean/unit/test_recipes.py), with ONLY the two coupled-run
+        # overlays:
+        #   * surface_forcing scheme='none' so the coupler's air-sea tau/q_net
+        #     (assembled in _assemble_ocean_forcing) is the SOLE surface forcing,
+        #     NOT the recipe's idealized prescribed-wind + restoring default;
+        #   * normalize_freshwater=True (the CORE-II net ~+0.65 Sv P-E+R input
+        #     would otherwise accumulate as a global fresh drift) — matching the
+        #     lat-lon/tripole from_flat(normalize_freshwater=True) path.
+        base = nemo_match_mpas_model_config()
+        config = base._replace(
+            physics=base.physics._replace(
+                surface_forcing=base.physics.surface_forcing._replace(
+                    scheme="none")),
+            normalize_freshwater=True,
+        )
+        self._ocean_model = MPASOceanModel(mesh, z_coord, config)
+        # Stratified rest cold start (zero velocity/SSH, exponential T, uniform
+        # S).  land_lat_threshold=90 => all-ocean, matching a co-located
+        # aquaplanet atmosphere (f_land=0) so the wet masks agree — the same
+        # rationale as the lat-lon ocean_ic='rest' branch.  The surface layer
+        # starts near the atmosphere's mean SST (T_sfc_mean [K] -> degC) so the
+        # cold start is not shocked by a large air-sea temperature jump.
+        T_surf_C = float(T_sfc_mean) - float(constants.T_freeze)
+        self._ocean_state = rest_state_mpas_ocean(
+            mesh, z_coord, T_water_init_C=T_surf_C, H_max=cfg.ocean_H_max_m,
+            land_lat_threshold=90.0,
+        )
+        self._ocean_step = self._ocean_model.step
+        self._ocean_z_coord = z_coord
+        self._ocean_land_mask = self._ocean_state.land_mask.data
+        self._ocean_is_mpas = True
+        self._is_dynamic_ocean = True
+        # No climatological restoring target on the idealized cold start; the
+        # optional surface relaxation (_apply_ocean_restoring) stays a no-op
+        # unless a target is configured.
+        self._ocean_T_target = None
+        self._ocean_S_target = None
+        _ocean_frac = float(jnp.mean(self._ocean_land_mask))
+        logger.info(
+            "  Ocean: mode=dynamic (3D MPASOceanModel, voronoi), ic=rest, "
+            f"ocean_frac={_ocean_frac:.2f}, nlev={cfg.ocean_nlev}, "
+            f"ocean_dt={cfg.ocean_dt_s}s, surface_forcing=none(coupled), "
+            "normalize_freshwater=True")
+
     def _init_coupler(self):
         """Initialize coupler, land, ice, lake surface states."""
         from legoesm.core.precision import get_policy
@@ -782,12 +905,56 @@ class CoupledESMDriver:
         if cfg.use_pft and cfg.land_mode != "none":
             land_param_provider = self._build_pft_provider(shape_2d)
 
+        # Optional spun-up land carbon IC (the finidat global_carbon_ic.npz):
+        # INGEST the seeded per-cell 8-pool CarbonState + the per-cell permafrost
+        # phi so the coupled run starts carbon at its mapped equilibrium and
+        # MAINTAINS the seeded permafrost SOC (phi -> make_coupler's f_perma
+        # protection), instead of cold-starting carbon and decomposing the seed.
+        # Only meaningful for the multilayer differland carbon column; a carbon IC
+        # with slab / carbon-off land is a caller error (fail loud, never a silent
+        # no-op).  ""/None (default) => cold-start + no protection (byte-identical).
+        carbon_override = None
+        land_soil_frozen_fraction = None
+        carbon_ic_path = getattr(cfg, "carbon_ic_path", "")
+        if carbon_ic_path:
+            import math
+
+            from legoesm.land.carbon.global_init import load_finidat_carbon_ic
+            from legoesm.land.config import MultiLayerLandConfig as _MLLC
+            if not (isinstance(land_cfg, _MLLC)
+                    and land_cfg.carbon.scheme == "differland"):
+                raise ValueError(
+                    f"carbon_ic_path={carbon_ic_path!r} requires multilayer land "
+                    "with the differland carbon scheme (land_mode='multilayer', "
+                    f"carbon active); got land_config {type(land_cfg).__name__} / "
+                    f"carbon scheme {land_cfg.carbon.scheme!r}.")
+            if self._atm._grid_lat is None or self._atm._grid_lon is None:
+                raise ValueError(
+                    "carbon_ic_path needs the atmosphere grid lat/lon to grid-"
+                    "match the finidat; the atmosphere exposes none.")
+            ncol = int(math.prod(shape_2d))
+            lat_deg = np.rad2deg(np.asarray(self._atm._grid_lat)).reshape(-1)
+            lon_deg = np.rad2deg(np.asarray(self._atm._grid_lon)).reshape(-1)
+            carbon_override, land_soil_frozen_fraction = load_finidat_carbon_ic(
+                carbon_ic_path, expect_ncol=ncol,
+                target_lat_deg=lat_deg, target_lon_deg=lon_deg)
+            if carbon_override is None:
+                raise ValueError(
+                    f"carbon_ic_path={carbon_ic_path!r} is not a carbon finidat "
+                    "(missing the 8 CarbonState pool fields); expected a "
+                    "global_carbon_ic.npz from build_global_carbon_ic.py.")
+            logger.info(
+                "  Land carbon IC: seeded %d-column CarbonState from finidat %s "
+                "(permafrost phi %s)", ncol, carbon_ic_path,
+                "threaded" if land_soil_frozen_fraction is not None else "absent")
+
         # Build coupler step function
         self._step_surface = make_coupler(
             coupler_cfg, land_cfg, ice_cfg, lake_cfg,
             lat=self._atm._grid_lat,
             grid=self._atm.grid,
             land_param_provider=land_param_provider,
+            land_soil_frozen_fraction=land_soil_frozen_fraction,
         )
 
         # Initialize surface state.  Optionally warm-start the soil at the
@@ -799,7 +966,8 @@ class CoupledESMDriver:
             soil_kwargs["T_soil_init"] = self._atm.state.T.data[..., -1]
             logger.info("  Soil warm-start: T_soil init = atm near-surface air T")
         self._sfc_state = init_surface_state(
-            shape_2d, land_config=land_cfg, **soil_kwargs,
+            shape_2d, land_config=land_cfg, carbon_override=carbon_override,
+            **soil_kwargs,
         )
 
         # Tile fractions
@@ -878,6 +1046,12 @@ class CoupledESMDriver:
             f_land=f_land,
             f_lake=jnp.zeros(shape_2d, dtype=_sd),
         )
+
+        # Driver-level invariant on the MATERIALIZED land fraction (the residue
+        # the CONFIG-level CLI helper apply_land_runoff_scheme documents it
+        # cannot catch): a land model configured yet f_land identically zero =
+        # a silently dead land tile.
+        assert_land_tile_reachable(cfg.land_mode, cfg.f_land_mode, f_land)
 
         land_frac = float(jnp.mean(f_land))
         pft_str = " (PFT)" if land_param_provider is not None else ""
@@ -1273,8 +1447,21 @@ class CoupledESMDriver:
         q_v = self._atm.q_v
         p_s = state.p_s.data
         T_low = state.T.data[..., -1]
-        u_low = state.u.data[..., -1]
-        v_low = state.v.data[..., -1]
+        # Low-level winds for the ocean surface stress + bulk turbulent fluxes.
+        # cube/latlon carry cell-centered u/v Fields directly; MPAS (voronoi)
+        # carries edge-normal velocity (state.v is None) -> Perot-reconstruct the
+        # cell-centered (zonal, meridional) winds. (Spectral is gated upstream:
+        # its state is spectral coefficients, so the whole extractor would need a
+        # grid synthesis — a separate follow-up.)
+        if state.v is not None:
+            u_low = state.u.data[..., -1]
+            v_low = state.v.data[..., -1]
+        else:
+            from legoesm.grids.voronoi import reconstruct_cell_velocity
+            _u_cell, _v_cell = reconstruct_cell_velocity(
+                state.u.data, self._atm.grid)
+            u_low = _u_cell[..., -1]
+            v_low = _v_cell[..., -1]
         q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
         sigma_full = jnp.asarray(self._atm.sigma.sigma_full)
         p_low = p_s * sigma_full[-1]
@@ -1505,6 +1692,20 @@ class CoupledESMDriver:
             sst = self._ocean_state.T_sfc.data
             z = jnp.zeros_like(sst)
             return sst, z, z
+        if getattr(self, "_ocean_is_mpas", False):
+            # 3-D MPAS ocean: SST = top-level cell T [°C -> K]; surface currents
+            # = Perot area-weighted edge->cell reconstruction of the top-level
+            # edge-normal velocity, returned DIRECTLY in the geographic
+            # (east, north) basis (reconstruct_cell_velocity) — the basis the
+            # o2a coupler expects, so NO rotation is needed (unlike the tripole
+            # cap below).  All returns are shape (nCells,).
+            from legoesm import constants
+            from legoesm.grids.voronoi import reconstruct_cell_velocity
+            T_mpas = self._ocean_state.T.data            # (nCells, nlev) [°C]
+            sst = T_mpas[..., 0] + constants.T_freeze    # top level -> K
+            u_east, v_north = reconstruct_cell_velocity(
+                self._ocean_state.u.data[..., 0], self._ocean_grid)
+            return sst, u_east, v_north
         from legoesm import constants
         T = self._ocean_state.T.data                 # (n_lat, n_lon, nlev) [°C]
         sst = T[..., 0] + constants.T_freeze         # top level → K
@@ -2091,9 +2292,18 @@ class CoupledESMDriver:
                 fresh = self._ocean_state
                 restored, _ = _restore_pytree_from_npz(
                     fresh, data, "ocean3d_", coupled_path.name, strict=True)
+                # Reset the static geometry to the deterministic fresh-init
+                # values (config-derived, identical on a clean resume).  The
+                # MPAS/voronoi ocean state carries H_bathy + a cell land_mask
+                # but has NO edge u/v masks (its mesh geometry lives on the
+                # model, not the state), so the latlon C-grid face-mask triple
+                # reset only applies where those fields exist — an unconditional
+                # ``_replace(u_mask=..., v_mask=...)`` crashes MPASOceanState.
                 self._ocean_state = restored._replace(
-                    H_bathy=fresh.H_bathy, land_mask=fresh.land_mask,
-                    u_mask=fresh.u_mask, v_mask=fresh.v_mask)
+                    H_bathy=fresh.H_bathy, land_mask=fresh.land_mask)
+                if hasattr(fresh, "u_mask"):
+                    self._ocean_state = self._ocean_state._replace(
+                        u_mask=fresh.u_mask, v_mask=fresh.v_mask)
 
         if "ocean_T_sfc" in data.files and self._ocean_state is not None:
             saved_shape = tuple(int(s) for s in data["ocean_T_sfc"].shape)

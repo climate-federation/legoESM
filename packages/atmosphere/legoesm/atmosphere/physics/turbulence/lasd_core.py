@@ -14,6 +14,34 @@ identity at both ratios for the scale-dependence parameter
 ``β = C_s²(2Δ)/C_s²(Δ)`` per level (quintic root), then forms a LOCALLY-averaged
 (3×3) ``C_s²`` field. Test filters are sharp spectral cutoffs (oracle
 ``Filtering_Level1/2``); the polynomial coefficients are plane-averaged.
+
+Faithfulness
+------------
+Every closed form here is a faithful port of the jax-alfa oracle
+(``DynamicSGS_LASDD_SM.LASDD``, ``Filtering_Level1/2``, ``Utilities.Roots`` +
+``Imfilter`` + ``PlanarMean``), pinned to round-off (rel 1e-12) against an INDEPENDENT
+numpy reimplementation in ``tests/unit/test_lasd_faithful.py``: the sharp spectral test
+filter (cutoff ``round(N/(2·FGR·TFR))``), the 3×3 periodic box average /9, the Laguerre
+max-real-root-in-(0,5) β-solver (default 1.0, cross-checked against ``numpy.roots`` — a
+different algorithm), and the full a1..e2 / aa..ff / M_ij / LM / MM / ``C_s²``-clip
+assembly (with the Lilly-1992 error-functional coefficient ``_LASD_LILLY_COEFF=8`` and
+``_TFR=2``).  Documented departures from the oracle:
+- ``cs_max`` is a CONFIGURABLE clip extension: the oracle hardcodes 1.0, and the default
+  ``cs_max=1`` reproduces the oracle mask exactly, but ``cs_max != 1`` DOES change the
+  modeled closure (a different ceiling on ``C_s²``) — it is an extension, not a pure
+  reformatting.
+- ``C_s²`` uses a RAW divide after FLOORING the denominator
+  (``LMx / where(|MMx|<1e-10, 1e-10, MMx)``), not the project ``safe_divide`` helper;
+  it is forward-identical to the oracle (the ``|MMx|<1e-10`` cells are masked to 0 either
+  way) and keeps the reverse-mode cotangent finite by never dividing by a tiny denominator.
+- the β-solver is a fixed-trip ``lax.scan`` that FREEZES the converged root via ``where``
+  (the oracle uses a ``while_loop`` that stops early).  It returns the SAME converged root
+  as the oracle to the Laguerre tolerance, but is NOT bit-identical to the ``while_loop``
+  (it keeps evaluating — and discarding — later Laguerre steps after convergence) and can
+  differ at a convergence boundary; the scan form is what makes it reverse-mode
+  differentiable.
+- the ``(ny, nx, nz)`` layout (oracle ``(nx, ny, nz)`` — a transpose) and the optional
+  MPI y-slab distributed path (serial path is the pinned one).
 """
 from __future__ import annotations
 
@@ -139,10 +167,25 @@ def laguerre_max_real_root_beta(coeffs6: jax.Array) -> jax.Array:
 
     Faithful port of the jax-alfa β-solver (``Utilities.Roots`` Laguerre +
     ``ComputeBeta1``). Fixed-trip ``lax.scan`` (freeze-on-convergence) ⇒
-    reverse-mode differentiable. ``coeffs6`` is ``(..., 6)`` DESCENDING degree."""
+    reverse-mode differentiable. ``coeffs6`` is ``(..., 6)`` DESCENDING degree.
+
+    AD note: differentiable almost everywhere (reverse-mode finite), with the two Laguerre
+    singularities that a repeated/degenerate polynomial can hit GUARDED, forward-identically:
+    (i) the ALL-ZERO polynomial (a strain-free level → every coefficient 0) is detected in
+    ``per_level`` and the solver is fed a benign quintic (default ``1.0`` selected forward);
+    (ii) ``sqrt(disc)`` at ``disc == 0`` (a repeated root, e.g. ``x^5`` → disc == 0 at every
+    guess) uses a double-``where`` so the VJP never differentiates sqrt at 0.  A quintic with
+    no root in ``(0, 5)`` (the ``nanmax`` → default-``1.0`` branch) is also finite-gradient.
+    NOT smoothed: a tiny-but-nonzero ``disc`` from a NEAR-repeated-root polynomial gives a
+    large-but-finite VJP (kept faithful to the oracle's raw sqrt) — a measure-zero-adjacent
+    locus not reached by a physical strain field.  See ``test_lasd_faithful.py``."""
     cdtype = jnp.complex128 if jax.config.jax_enable_x64 else jnp.complex64
     guesses = jnp.array([0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.5], cdtype)  # coeff-ok: dynamic-coeff root-search initial guesses
     n_deg, tol, max_iter = 5, 1e-6, 20  # coeff-ok: polynomial degree / tol / max iterations
+    # A benign, well-conditioned quintic (x^5 - 1, real root at 1.0) fed to the solver in
+    # place of an all-zero (strain-free-level) polynomial, so the Laguerre sqrt(0)/0-inf
+    # trap never produces a NaN cotangent.  The default 1.0 is selected forward regardless.
+    benign_quintic = jnp.array([1.0, 0.0, 0.0, 0.0, 0.0, -1.0])  # coeff-ok: AD-guard poly
 
     def one_root(coeffs, x0):
         coeffs = coeffs.astype(cdtype)
@@ -157,7 +200,13 @@ def laguerre_max_real_root_beta(coeffs6: jax.Array) -> jax.Array:
             G = df / fs
             H = G ** 2 - d2f / fs
             disc = (n_deg - 1) * (n_deg * H - G ** 2)
-            sq = jnp.sqrt(disc)
+            # AD guard: sqrt(disc) has a SINGULAR reverse derivative at disc == 0, which a
+            # repeated-root polynomial (e.g. x^5 -> disc == 0 at every guess) hits exactly.
+            # Double-``where``: forward sqrt(0) = 0 is unchanged, but the VJP never
+            # differentiates sqrt AT 0 (the inner where feeds 1 there).
+            disc_zero = disc == 0
+            sq = jnp.where(disc_zero, jnp.zeros_like(disc),
+                           jnp.sqrt(jnp.where(disc_zero, jnp.ones_like(disc), disc)))
             d1, d2 = G + sq, G - sq
             denom = jnp.where(jnp.abs(d1) > jnp.abs(d2), d1, d2)
             denom = jnp.where(jnp.abs(denom) < jnp.abs(eps), eps, denom)
@@ -170,13 +219,21 @@ def laguerre_max_real_root_beta(coeffs6: jax.Array) -> jax.Array:
         return jnp.where(conv, xf, jnp.nan + 0j)
 
     def per_level(coeffs):
-        roots = jax.vmap(lambda g: one_root(coeffs, g))(guesses)
+        # AD guard: a strain-free level yields an ALL-ZERO quintic (0·strain = 0 exactly),
+        # on which the Laguerre step is a √0 / 0·∞ trap that poisons the reverse gradient
+        # with NaN (the forward still defaults to 1.0).  Detect it (max|coeff| == 0, exact
+        # for a 0·strain level) and feed the solver the BENIGN quintic instead, then select
+        # the default 1.0 forward.  Forward-IDENTICAL for every non-degenerate polynomial
+        # (``where`` picks ``coeffs``); NaN-free gradient on the degenerate one.
+        degenerate = jnp.max(jnp.abs(coeffs)) == 0.0
+        safe = jnp.where(degenerate, benign_quintic, coeffs)
+        roots = jax.vmap(lambda g: one_root(safe, g))(guesses)
         valid = jnp.where(
             (jnp.abs(jnp.imag(roots)) < 1e-6)
             & (jnp.real(roots) > 0.0) & (jnp.real(roots) < 5.0),  # coeff-ok: physical-root upper bound
             jnp.real(roots), jnp.nan)
         mx = jnp.nanmax(valid)
-        return jnp.where(jnp.isnan(mx), 1.0, mx)
+        return jnp.where(degenerate, 1.0, jnp.where(jnp.isnan(mx), 1.0, mx))
 
     return jax.vmap(per_level)(coeffs6)
 

@@ -16,15 +16,24 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.AhmedNeelinDCAConfig.tau_adjust_s',
     'atm.conv.AhmedNeelinDCAConfig.w_b',
     'atm.conv.AhmedNeelinDCAConfig.w_l',
-    # atm: BechtoldConfig (13)
+    # atm: BechtoldConfig (14)
     'atm.conv.BechtoldConfig.M_b_max',
     'atm.conv.BechtoldConfig.cape_pbl_depth',
+    # RCAPQADV blend weight (2026-07-17 ZDQCV closure work): same conscious
+    # exclusion as the rest of the BechtoldConfig family (CLI/ExperimentConfig
+    # scalars, not the --params qualified-name loader).
+    'atm.conv.BechtoldConfig.cape_qadv_weight',
     'atm.conv.BechtoldConfig.cloud_depth_deep',
     'atm.conv.BechtoldConfig.cloud_depth_shallow_max',
     'atm.conv.BechtoldConfig.delta_deep',
     'atm.conv.BechtoldConfig.delta_midlevel',
     'atm.conv.BechtoldConfig.delta_shallow',
     'atm.conv.BechtoldConfig.downdraft_alpha',
+    # CLI-only (--bechtold-downdraft-entrain-rate), like its siblings
+    # downdraft_alpha / downdraft_evap_efficiency: the whole penetrative-
+    # downdraft family is exposed as ExperimentConfig scalars + CLI flags, not
+    # via the --params qualified-name loader.  Conscious exclusion.
+    'atm.conv.BechtoldConfig.downdraft_entrain_rate',
     'atm.conv.BechtoldConfig.downdraft_evap_efficiency',
     'atm.conv.BechtoldConfig.stochastic_amplitude',
     'atm.conv.BechtoldConfig.stochastic_decorrelation',
@@ -158,7 +167,7 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.KuoConfig.anthes_rh_offset',
     'atm.conv.KuoConfig.entrainment',
     # atm: LindzenConfig (2)
-    'atm.gwd.LindzenConfig.critical_Fr',
+    'atm.gwd.LindzenConfig.fcrit2',
     'atm.gwd.LindzenConfig.h_topo',
     # atm: LouisConfig (6)
     'atm.turb.LouisConfig.Ri_crit',
@@ -225,7 +234,12 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.micro.P3Config.a_v_r',
     'atm.micro.P3Config.agg_coeff',
     'atm.micro.P3Config.cooper_T_act',
+    # gSAM scheme-1 nucleation-gate params (2026-07-17 Cooper-faithfulness
+    # closure): same conscious exclusion as the rest of the P3Config family —
+    # the whole class is not routed through any driver's --params loader yet.
+    'atm.micro.P3Config.cooper_T_nuc',
     'atm.micro.P3Config.cooper_a',
+    'atm.micro.P3Config.cooper_supi_min',
     'atm.micro.P3Config.dep_coeff',
     'atm.micro.P3Config.evap_coeff',
     'atm.micro.P3Config.k_ac',
