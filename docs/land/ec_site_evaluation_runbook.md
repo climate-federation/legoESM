@@ -98,6 +98,26 @@ site attrs).
   as an uncertainty band (raw fluxes under-close the surface energy budget; the model
   closes it, so it sits inside the band).
 
+### Data provenance & caveats
+
+- **The evaluation targets are RAW, never gap-filled.** Gap-filling in the
+  `*_driver_v2_gapfree.nc` files applies only to the *meteorological forcing* (the model
+  inputs: SW/LW down, T, VPD, wind, pressure, soil T). The *targets* — observed GPP
+  (`GPP_DT`), latent heat (`ET`), sensible heat (`H`), and the closure-corrected
+  `ET_CORR`/`H_CORR` band — keep their genuine NaN gaps (reader `_obs_masked`: *"no
+  gap-fill so the comparison ignores missing tower data"*), and those gaps are excluded
+  from every metric. Verified: the target variables are byte-identical between the raw
+  `*_driver_v2.nc` and the `*_gapfree.nc` files (0 filled points, 0 value change). The
+  `valid` mask further restricts scoring to steps whose *forcing* was genuinely observed
+  (pre gap-fill), so filled forcing does not inflate the skill either.
+- **⚠ Observed soil moisture (`SWC`) has gap-fill artifacts at some sites** — US-MMS
+  (a constant-filled 2018 tail + step), US-Ton (blocky flat segments), DE-Obe (a 2018
+  step). `SWC` is used *only* for the prognostic soil initial condition (the first
+  finite value, before any artifact) and the observed soil-moisture panel of
+  `_carbon.png`; it does **not** drive the fluxes (soil moisture is prognostic). So these
+  artifacts affect only the soil-moisture comparison for those sites/years, not the
+  LE/H/GPP skill. Treat the `SWC` panel qualitatively at US-MMS/US-Ton/DE-Obe.
+
 ## D. Add a site
 
 1. Add the site to `EC_SITE_PHYSICS` in `scripts/run/run_ec_site.py`
