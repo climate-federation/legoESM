@@ -790,6 +790,16 @@ class BarotropicConfig(NamedTuple):
     #   triad (pv_flux_al81_partial_cell with f_vtx), which EXERTS a restoring
     #   on the checkerboard so the null mode cannot grow.  Requires
     #   add_barotropic_coriolis=True (in-substep Coriolis on).
+    # "een_metric": as "een" but METRIC-COMPLETE -- folds NEMO's e1v/r1_e1u (u)
+    #   and e2u/r1_e2v (v) horizontal scale factors into ffu/ffv exactly
+    #   (dynspg_ts.F90:1349-1379) -- the coefficients NEMO's dyn_cor_2D actually
+    #   uses.  The per-unit-width "een" drops them, leaving an O(dcos phi) work
+    #   residual; retaining them makes discrete enstrophy conservation exact on
+    #   the sphere (strictly more NEMO-faithful).  NB it is a ~1% high-lat
+    #   correction and, twin-verified, does NOT cure the DINO |lat|~68deg 2dx ETA
+    #   runaway (a free-surface mode via the barotropic PGF/continuity coupling,
+    #   not the Coriolis V->u averaging) -- it is a fidelity refinement, not that
+    #   fix.
     barotropic_coriolis: str = "avg"
     differentiable_barotropic: bool = False
     # SOTA-local split-explicit barotropic (MOM6/MPAS-Ocean style): when True the

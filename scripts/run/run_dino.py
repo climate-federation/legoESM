@@ -228,7 +228,7 @@ def _parse_args():
     )
     p.add_argument(
         "--barotropic-coriolis",
-        choices=("avg", "een"),
+        choices=("avg", "een", "een_metric"),
         default=None,
         help="In-substep barotropic Coriolis discretization "
              "(DINOConfig.barotropic_coriolis; explicit_substep only). "
@@ -236,7 +236,11 @@ def _parse_args():
              "checkerboard — the C-grid barotropic Coriolis null mode that "
              "drives the spurious deep-equatorial jet. 'een' = NEMO "
              "dyn_spg_ts::dyn_cor_2D enstrophy-conserving EEN (ln_dynvor_een), "
-             "which restores the null mode (node 16; the DINO card default).",
+             "which restores the velocity null mode. 'een_metric' = METRIC-"
+             "COMPLETE EEN (folds NEMO's e1v/r1_e1u + e2u/r1_e2v scale factors "
+             "into ffu/ffv exactly, matching NEMO dyn_cor_2D) — the more NEMO-"
+             "faithful choice (node 16; DINO default). NB it is a ~1% high-lat "
+             "correction and does NOT cure the |lat|~68deg 2dx eta runaway.",
     )
     p.add_argument(
         "--barotropic-coriolis-split",

@@ -802,8 +802,21 @@ DINO_RECIPES: dict[str, dict] = {
         "barotropic_solver": "explicit_substep",
         "barotropic_time_filter": "nemo_boxcar_centred",
         # namdyn_vor: ln_dynvor_een — enstrophy-conserving EEN barotropic
-        # Coriolis (node 16; cures the deep-equatorial jet null mode).
-        "barotropic_coriolis": "een",
+        # Coriolis (node 16; cures the deep-equatorial jet velocity null mode).
+        # "een_metric" = METRIC-COMPLETE: folds NEMO's e1v/r1_e1u + e2u/r1_e2v
+        # scale factors into ffu/ffv EXACTLY (dynspg_ts.F90:1349-1379) — the
+        # coefficients NEMO's dyn_cor_2D actually uses, so this is the strictly
+        # more NEMO-faithful barotropic Coriolis for the card (discrete enstrophy
+        # conservation exact on the Mercator grid).
+        # NB (twin-verified 2026-07-19): the e1/e2 factors are a ~1% high-lat
+        # correction and do NOT cure the |lat|~68deg 2dx ETA runaway — the FE
+        # step-twin from the bridged NEMO restart still NaNs at s26 with
+        # een_metric, nearly byte-identical to "een" (eta 868 vs 862 @s24). That
+        # runaway is a free-surface 2dx eta mode fed through the barotropic
+        # PGF/continuity coupling, NOT the Coriolis V->u averaging the EEN
+        # restores; the faithful cure remains the standing barotropic free-
+        # surface redesign. een_metric is kept as the faithful Coriolis choice.
+        "barotropic_coriolis": "een_metric",
         # ln_bt_auto=T + rn_bt_cmax=0.8 => NEMO computes nn_e=23 for this exact
         # DINO 1deg grid at rn_Dt=2700 s (RUN_STEPDUMP/ocean.output: "in
         # iterations nn_e = 23", max courant 0.779). NOT the namelist fallback

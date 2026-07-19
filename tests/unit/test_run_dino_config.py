@@ -87,6 +87,13 @@ def test_barotropic_coriolis_flag_parses(monkeypatch):
     assert args.barotropic_coriolis == "een"
 
 
+def test_barotropic_coriolis_een_metric_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--barotropic-coriolis", "een_metric"])
+    args = rd._parse_args()
+    assert args.barotropic_coriolis == "een_metric"
+
+
 def test_barotropic_coriolis_default_none(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run_dino"])
     assert rd._parse_args().barotropic_coriolis is None

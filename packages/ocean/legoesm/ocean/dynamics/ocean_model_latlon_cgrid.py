@@ -1768,11 +1768,11 @@ class LatLonCGridOceanModel:
                 # (barotropic.barotropic_coriolis="een"); the legacy 4-pt-avg
                 # face-f "avg" stencil would leave an O(1) residual Coriolis.
                 if getattr(config.barotropic, "barotropic_coriolis",
-                           "avg") != "een":
+                           "avg") not in ("een", "een_metric"):
                     raise ValueError(
                         f'vorticity_scheme="{_vs}" with '
                         'barotropic_coriolis_split="live" requires '
-                        'barotropic.barotropic_coriolis="een" (NEMO '
+                        'barotropic.barotropic_coriolis="een"/"een_metric" (NEMO '
                         "dyn_spg_ts::dyn_cor_2D EEN): the _total planetary "
                         "term is the vertex-f EEN transport-form flux, so the "
                         "live pre-step subtraction must use the SAME EEN "
@@ -2808,8 +2808,9 @@ class LatLonCGridOceanModel:
                 # beta-plane with flat full-cell bathymetry (average and
                 # depth-mean commute), else an O(dx^2)/topographic residual
                 # remains; the EEN path cancels exactly (same helper both sides).
-                if getattr(self.config.barotropic, "barotropic_coriolis",
-                           "avg") == "een":
+                _bt_cor_split = getattr(
+                    self.config.barotropic, "barotropic_coriolis", "avg")
+                if _bt_cor_split in ("een", "een_metric"):
                     # NEMO ln_dynvor_een DINO (nemo_dino_kamm_mlf): the _total
                     # planetary term rides the vertex-f EEN transport-form flux,
                     # so the pre-step subtraction must use the SAME EEN stencil
@@ -2836,7 +2837,8 @@ class LatLonCGridOceanModel:
                     _cor_u_sub, _cor_v_sub = barotropic_coriolis_een_pre_step(
                         state_mid.u.data, state_mid.v.data, h_k_pre, _grid,
                         state.land_mask.data, state.u_mask.data,
-                        state.v_mask.data, _min_wc, F_slow_u.dtype)
+                        state.v_mask.data, _min_wc, F_slow_u.dtype,
+                        metric_complete=(_bt_cor_split == "een_metric"))
                     F_slow_u = (F_slow_u - _cor_u_sub) * state.u_mask.data
                     F_slow_v = (F_slow_v - _cor_v_sub) * state.v_mask.data
                     _add_bt_cor = True
