@@ -1,0 +1,109 @@
+#!/bin/bash -l
+#PBS -N legoesm_ad_overhead
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=1:ncpus=64:mpiprocs=1:ngpus=1:gpu_type=a100:mem=200GB
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# Cost of reverse-mode AD on ONE A100: gradient step vs forward step.
+#
+# WHY: every throughput number in the route-B campaign is FORWARD-ONLY, and
+# the AD correctness tests carry no timing, so the repo cannot currently say
+# what a gradient COSTS.  This job produces that one number on the hardware
+# the scaling curves were measured on.
+#
+# SINGLE GPU, deliberately.  This is NOT a scaling job: distributed
+# reverse-mode AD has never run above 6 ranks in this repo, so a multi-GPU
+# gradient number would be a new (and likely bug-finding) campaign, not a
+# measurement.  Do not quote this as evidence that AD scales.
+#
+# METRIC NOTE (read before quoting): the dycore is bandwidth-bound
+# (~0.35 FLOP/byte), so the WALL ratio partly reflects whether the reverse
+# tape fits in HBM.  The bench prints wall x, FLOP x, byte x and the tape
+# size; the FLOP ratio is the portable statement.  On the dev laptop (CPU)
+# the FLOP ratio was 5.8-7.7x while the wall ratio ranged 5.3-10.6x purely
+# with tape residency -- the point of running on A100 is to get the wall
+# number on hardware where the tape (0.3-1 GB) fits in 40 GB HBM.
+#
+# Matched to the campaign by construction: same `build_amip_step` builder,
+# physics=none, float32, same grids/resolutions as the Fig. 6 ladder.
+#
+# SUBMIT (from the checkout you want measured -- worktree-safe):
+#   qsub scripts/cluster/scaling_derecho/ad_overhead_gpu.pbs
+#   # knobs:
+#   #   -v CASES="cubed-sphere:48 latlon:192",STEPS=8,REPEATS=9,NLEV=26
+#   #   -v PRECISION=float64        (fp64 AD -- expect a different ratio)
+#   #   -v PHYSICS=held_suarez      (adds forcing; changes the ratio)
+# ===========================================================================
+set -uo pipefail
+
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+if   [ -f "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}/scripts/cluster/scaling_derecho"
+elif [ -f "${SUBMIT_DIR}/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}"
+else
+    echo "ERROR: cannot find _env.sh from PBS_O_WORKDIR=${SUBMIT_DIR}" >&2
+    exit 1
+fi
+export JAX_PLATFORMS=cuda
+export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
+# Worktree-safe REPO: _env.sh defaults to /glade/work/$USER/legoESM, which is
+# the WRONG checkout when submitted from a worktree (the known trap that made
+# an earlier sweep silently run main-branch code).  Derive from this script.
+: "${LEGOESM_REPO:=$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
+export LEGOESM_REPO
+# shellcheck source=_env.sh
+source "${SCRIPT_DIR}/_env.sh"          # provides PY, REPO, SCRATCH
+cd "$REPO"
+
+# grid:resolution pairs.  Defaults span the Fig. 6 grids at sizes that fit one
+# A100 comfortably under full BPTT; raise with -v CASES=... if headroom allows.
+CASES="${CASES:-cubed-sphere:48 latlon:192 icosahedral:6}"
+NLEV="${NLEV:-26}"
+STEPS="${STEPS:-8}"
+REPEATS="${REPEATS:-9}"
+PRECISION="${PRECISION:-float32}"
+PHYSICS="${PHYSICS:-none}"
+OUTDIR="${OUTDIR:-${SCRATCH}/legoesm_scaling/ad_overhead_$(date +%Y%m%d_%H%M%S)}"
+mkdir -p "$OUTDIR"
+
+echo "=== AD overhead, 1x A100 ==="
+echo "REPO=$REPO"
+echo "CASES=$CASES  NLEV=$NLEV  STEPS=$STEPS  REPEATS=$REPEATS"
+echo "PRECISION=$PRECISION  PHYSICS=$PHYSICS"
+echo "OUTDIR=$OUTDIR"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+echo
+
+rc_all=0
+for case_spec in $CASES; do
+    grid="${case_spec%%:*}"
+    res="${case_spec##*:}"
+    if [ "$grid" = "$res" ]; then
+        echo "ERROR: CASES entry '$case_spec' must be grid:resolution" >&2
+        exit 1
+    fi
+    tag="${grid}_r${res}_L${NLEV}_${PRECISION}_s${STEPS}"
+    echo "--- $tag ---"
+    $PY scripts/bench/bench_ad_overhead.py \
+        --grid "$grid" --resolution "$res" --nlev "$NLEV" \
+        --precision "$PRECISION" --physics-level "$PHYSICS" \
+        --steps "$STEPS" --repeats "$REPEATS" \
+        --json "${OUTDIR}/${tag}.json"
+    rc=$?
+    # A per-case failure must NOT abort the sweep (a full-BPTT OOM at one size
+    # is itself a result) but MUST be visible in the exit code.
+    if [ $rc -ne 0 ]; then
+        echo "WARN: $tag exited rc=$rc" >&2
+        rc_all=1
+    fi
+    echo
+done
+
+echo "=== JSON written to $OUTDIR ==="
+ls -la "$OUTDIR"
+exit $rc_all

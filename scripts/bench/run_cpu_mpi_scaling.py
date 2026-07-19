@@ -448,7 +448,7 @@ def _auto_dt(n_grid: int, grid_type: str) -> float:
 # Build benchmark step functions
 # ===========================================================================
 
-def _build_amip_step(
+def build_amip_step(
     *,
     grid_type: str,
     resolution: int,
@@ -1157,7 +1157,7 @@ def run_single_benchmark(
     import jax.numpy as jnp
 
     (step_fn, state, dt_used, total_cells, cells_per_rank,
-     part_metrics) = _build_amip_step(
+     part_metrics) = build_amip_step(
         grid_type=grid_type,
         resolution=resolution,
         nlev=nlev,
