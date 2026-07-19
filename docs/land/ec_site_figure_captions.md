@@ -70,8 +70,8 @@ and sensible heat (blue) on the left axis and GPP (green) on the right axis;
 dashed open markers are observations, solid filled markers are the model, and the
 shaded band is the energy-balance-closure envelope on the energy fluxes.
 
-Pooled daily skill (Nash–Sutcliffe efficiency vs **raw** obs): **LE ≈ 0.49**,
-**H ≈ 0.56**, **GPP ≈ 0.72** (0.62 / 0.68 for LE / GPP vs the closure-corrected
+Pooled daily skill (Nash–Sutcliffe efficiency vs **raw** obs): **LE ≈ 0.57**,
+**H ≈ 0.56**, **GPP ≈ 0.72** (LE / H rise to 0.67 / 0.68 vs the closure-corrected
 obs).
 
 ---

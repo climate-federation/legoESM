@@ -44,8 +44,8 @@ JAX_ENABLE_X64=1 python scripts/plot/plot_ec_site_publication.py \
 - **`_summary.png`** — pooled model–observation scatter (skill vs raw and vs corrected
   obs) and year-to-year means.
 
-Expected pooled daily skill (Nash–Sutcliffe vs raw obs): LE ≈ 0.49, H ≈ 0.56,
-GPP ≈ 0.72 (0.62 / 0.68 vs the closure-corrected obs).
+Expected pooled daily skill (Nash–Sutcliffe vs raw obs): LE ≈ 0.57, H ≈ 0.56,
+GPP ≈ 0.72 (LE / H rise to 0.67 / 0.68 vs the closure-corrected obs).
 
 The rendered high-resolution figures are also checked in under
 `docs/land/figures/ec_site/` (`ec_site_energy.png`, `ec_site_carbon.png`,
@@ -53,22 +53,24 @@ The rendered high-resolution figures are also checked in under
 
 ---
 
-## B. Regenerate the model outputs from driver data
+## B. Re-run the model from the checked-in trimmed drivers
 
-To re-run the model (e.g. to add a site or change the canopy config) you need the
-DifferBESS half-hourly driver NetCDFs, `<SITE>_driver_v2[_gapfree|_etcorr].nc`
-(SW/LW down, T, q, wind, precip, CO2, per-step LAI / Vcmax, and the observed fluxes).
-These are large (100–220 MB/site) FLUXNET-derived files and are **not** checked in;
-point `--driver-dir` at wherever you have them.
+The trimmed driver NetCDFs are **checked in** under
+`scripts/validate/ec_site_example_drivers/` — each is the analysis-window subset of
+the DifferBESS half-hourly driver, keeping only the variables the model drives on
+and is evaluated against (forcing + observed targets + closure band + gap-fill
+flags), at the source float64 precision, fully annotated (units / long_name /
+description + FLUXNET/DifferBESS provenance). So the model itself re-runs from the
+repo alone — no external data:
 
 ```bash
 JAX_ENABLE_X64=1 python scripts/run/run_ec_site_evaluation.py \
     --site DE-Hai --out DE-Hai.nc \
-    --driver-dir /path/to/sitelevel/nc \
+    --driver-dir scripts/validate/ec_site_example_drivers \
     --year-lo 2010 --year-hi 2013
 ```
 
-Run each site (windows used for the checked-in outputs):
+Run each site over its window, then plot the directory of NetCDFs as in section A:
 
 | site | `--year-lo --year-hi` |
 |------|-----------------------|
@@ -77,10 +79,15 @@ Run each site (windows used for the checked-in outputs):
 | US-Ton | 2015 2018 |
 | DE-Hai | 2010 2013 |
 
-then plot the directory of NetCDFs as in section A. The runner writes exactly the
-variables the plotter reads (`gpp_mod`, `le_mod`, `le_canopy`, `le_soil`, `h_mod`,
-`theta_prof`, and the `*_obs` / `*_obs_corr` counterparts, plus a `valid` mask and
-site attrs).
+This reproduces the checked-in `ec_site_example_data/*.nc` outputs (and hence the
+figures) bit-for-bit. The runner writes exactly the variables the plotter reads
+(`gpp_mod`, `le_mod`, `le_canopy`, `le_soil`, `h_mod`, `theta_prof`, the `*_obs` /
+`*_obs_corr` counterparts, plus `valid` / `reverted` masks and site attrs).
+
+The trimmed drivers are rebuilt from the full external DifferBESS files (100–220
+MB/site, not checked in) with `scripts/data/build_ec_site_example_drivers.py`
+(`--src-dir <dir with *_driver_v2_gapfree.nc>`) — use that to add a site or widen a
+window.
 
 ---
 

@@ -77,6 +77,11 @@ docs/references/
 # a stripped, compressed model+obs asset (~14 MB) so the publication figures
 # regenerate from the repo alone.  See docs/land/ec_site_evaluation_runbook.md.
 !scripts/validate/ec_site_example_data/*.nc
+# Exception: the trimmed EC-site DRIVER NetCDFs (analysis-window subset, model-
+# consumed variables only, float64, annotated; ~30 MB) so the model itself can be
+# re-run from the repo alone (runbook section B).  Built by
+# scripts/data/build_ec_site_example_drivers.py.
+!scripts/validate/ec_site_example_drivers/*.nc
 # `!src/legoesm/ml/data/` is the minimum un-ignore needed for git to
 # descend into the directory (since `data/` above ignores it).  That
 # ALONE would allow arbitrary non-`.py` files in.  Re-ignore
