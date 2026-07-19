@@ -50,3 +50,21 @@ def test_validate_accepts_known_turbulence_closures(closure, extra):
     """Every VALID closure name passes validation (guard is not over-eager)."""
     cfg = CompressibleEulerConfig(turbulence_closure=closure, **_BASE, **extra)
     validate_plane_config(cfg)          # must not raise
+
+
+def test_turbulence_guards_share_one_allowlist():
+    """The fail-early validator AND the slow_tendencies hot-path guard test
+    membership against the SAME ``_VALID_TURBULENCE_CLOSURES`` constant — pin
+    both so re-hardcoding a literal tuple in either (drift) goes red, and pin
+    the set so dropping a valid closure (e.g. re-losing ``none``) goes red."""
+    import inspect
+
+    from legoesm.atmosphere.dynamics.les import compressible_euler_plane as cep
+
+    assert cep._VALID_TURBULENCE_CLOSURES == (
+        "smagorinsky", "molecular", "none", "vreman", "amd")
+    for fn in (cep.validate_plane_config,
+               cep.plane_compressible_euler_slow_tendencies):
+        assert "not in _VALID_TURBULENCE_CLOSURES" in inspect.getsource(fn), (
+            f"{fn.__name__} must guard against the shared constant, not a "
+            "duplicated literal")
