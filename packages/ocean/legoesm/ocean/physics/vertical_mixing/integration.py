@@ -208,12 +208,23 @@ def _make_kpp(config: VerticalMixingConfig,
             # C-grid: u at lon+1, v at lat+1 faces → cell centers
             u_data = 0.5 * (u_data[:, :-1, :] + u_data[:, 1:, :])
             v_data = 0.5 * (v_data[:-1, :, :] + v_data[1:, :, :])
+        # Under-ice velocity-scale attenuation (KPPConfig.eice; NEMO nn_eice) —
+        # same static-config gate as the implicit k_profiles path so the
+        # explicit pipeline honours eice instead of silently no-oping it
+        # (dispatch discipline).  eice=0 -> ice_frac=None -> bit-identical.
+        _kpp_eice = int(getattr(cfg, "eice", 0))
+        if _kpp_eice not in (0, 1, 3):
+            raise ValueError(
+                f"Unknown KPPConfig.eice={_kpp_eice!r}; expected 0, 1 or 3.")
+        _kpp_ice_fr = (getattr(surface_forcing, "ice_concentration", None)
+                       if (_kpp_eice != 0 and surface_forcing is not None)
+                       else None)
         out = kpp_vertical_mixing(
             u_data, v_data, state.T.data, state.S.data,
             rho, state.eta.data, z_coord, J, cfg,
             tau_x=tau_x, tau_y=tau_y, B_f=B_f,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
-            apply_diffusion=apply_diffusion,
+            apply_diffusion=apply_diffusion, ice_frac=_kpp_ice_fr,
         )
         # When apply_diffusion is False, KPP returns zero du/dv at
         # cell-center shape (from the C-grid u/v interpolation above).

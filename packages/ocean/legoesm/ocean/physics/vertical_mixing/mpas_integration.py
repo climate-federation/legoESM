@@ -349,6 +349,13 @@ def make_kpp_physics_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callable
             "vertical-mixing bridge yet (lat-lon / tripole only) — reject "
             "rather than silently drop the wave-driven mixing.")
     cfg = config.kpp
+    if int(getattr(config.kpp, "eice", 0)) != 0:
+        raise NotImplementedError(
+            "KPPConfig.eice != 0 (under-ice velocity-scale attenuation) is not "
+            "wired on the MPAS KPP bridge yet: this bridge receives no ice "
+            "concentration (mpas_physics passes tau/q only). Set eice=0 on "
+            "MPAS, or run the under-ice KPP lever on the lat-lon C-grid where "
+            "surface_forcing.ice_concentration is threaded.")
 
     def physics_fn(
         state: MPASOceanState,
@@ -550,6 +557,13 @@ def make_kpp_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
             "vertical-mixing bridge yet (lat-lon / tripole only) — reject "
             "rather than silently drop the wave-driven mixing.")
     cfg = config.kpp
+    if int(getattr(config.kpp, "eice", 0)) != 0:
+        raise NotImplementedError(
+            "KPPConfig.eice != 0 (under-ice velocity-scale attenuation) is not "
+            "wired on the MPAS KPP bridge yet: this bridge receives no ice "
+            "concentration (mpas_physics passes tau/q only). Set eice=0 on "
+            "MPAS, or run the under-ice KPP lever on the lat-lon C-grid where "
+            "surface_forcing.ice_concentration is threaded.")
 
     def profiles_fn(
         state: MPASOceanState,
