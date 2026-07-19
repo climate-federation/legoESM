@@ -69,11 +69,12 @@ def test_photosynthesis_mixing_is_weighted_average():
         Vcmax25_C3=jnp.array(60.0), Vcmax25_C4=jnp.array(40.0),
         Ps=jnp.array(101325.0), alf=jnp.array(0.3), TgC=jnp.array(20.0),
     )
-    An_c3_only = photosynthesis(fC4=jnp.array(0.0), **args)
-    An_c4_only = photosynthesis(fC4=jnp.array(1.0), **args)
-    An_mix     = photosynthesis(fC4=jnp.array(0.5), **args)
-    expected_mix = 0.5 * An_c3_only + 0.5 * An_c4_only
-    assert jnp.allclose(An_mix, expected_mix, atol=1e-5)
+    # photosynthesis returns (An_net, A_gross); both blend continuously in fC4.
+    An_c3_only, Ag_c3_only = photosynthesis(fC4=jnp.array(0.0), **args)
+    An_c4_only, Ag_c4_only = photosynthesis(fC4=jnp.array(1.0), **args)
+    An_mix, Ag_mix         = photosynthesis(fC4=jnp.array(0.5), **args)
+    assert jnp.allclose(An_mix, 0.5 * An_c3_only + 0.5 * An_c4_only, atol=1e-5)
+    assert jnp.allclose(Ag_mix, 0.5 * Ag_c3_only + 0.5 * Ag_c4_only, atol=1e-5)
 
 
 def test_photosynthesis_differentiable():
