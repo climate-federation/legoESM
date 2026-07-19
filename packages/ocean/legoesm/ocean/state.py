@@ -780,7 +780,7 @@ class BarotropicConfig(NamedTuple):
     barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
     bebt: float = 0.2               # Semi-implicit barotropic PGF [0,1]. 0=forward-backward, 0.2=MOM6 default.
     maxvel_barotropic: float = 0.0  # Velocity clipping [m/s]. 0=disabled. MOM6 uses 6.0.
-    barotropic_time_filter: str = "cosine"  # "box", "cosine", "power_law" (SM2005 ROMS/MOM6/Oceananigans extended-window filter; damps the 2dx barotropic Coriolis null mode), or "nemo_boxcar_centred" (dynspg_ts ln_bt_fw=F + nn_bt_flt=1: boxcar width n centred at t+dt, ~1.5n substeps)
+    barotropic_time_filter: str = "cosine"  # "box", "cosine", "power_law" (SM2005 ROMS/MOM6/Oceananigans extended-window filter; damps the 2dx barotropic Coriolis null mode), or "nemo_boxcar_centred" (dynspg_ts ln_bt_fw=F + nn_bt_flt=2: boxcar width 2n centred at t+dt, 2n-1 substeps)
     # In-substep barotropic Coriolis discretization (node 16, DINO deep-eq jet).
     # "avg" (DEFAULT, bit-identical legacy): plain 4-point V->u / U->v average,
     #   which ANNIHILATES the 2dx zonal checkerboard (the C-grid barotropic

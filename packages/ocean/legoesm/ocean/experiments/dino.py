@@ -781,7 +781,13 @@ DINO_RECIPES: dict[str, dict] = {
         # namdyn_vor: ln_dynvor_een — enstrophy-conserving EEN barotropic
         # Coriolis (node 16; cures the deep-equatorial jet null mode).
         "barotropic_coriolis": "een",
-        "n_barotropic_substeps": 30,
+        # ln_bt_auto=T + rn_bt_cmax=0.8 => NEMO computes nn_e=23 for this exact
+        # DINO 1deg grid at rn_Dt=2700 s (RUN_STEPDUMP/ocean.output: "in
+        # iterations nn_e = 23", max courant 0.779). NOT the namelist fallback
+        # nn_e=30 (only used when ln_bt_auto=F). Matches the boxcar window that
+        # sets the step-averaged eta. Re-derive via barotropic_common.
+        # nemo_auto_substeps if the grid or dt changes.
+        "n_barotropic_substeps": 23,
         # -- Surface forcing (namusr_def: ln_ann_cyc=T seasonal cycle) --
         "forcing_annual_cycle": True,
         "wind_through_step": True,

@@ -1670,7 +1670,7 @@ class TestSlopeLimitNemoCap:
 
 
 class TestNemoCentredBarotropic:
-    """dynspg_ts ln_bt_fw=F + nn_bt_flt=1 forward-frame reduction."""
+    """dynspg_ts ln_bt_fw=F + nn_bt_flt=2 forward-frame reduction."""
 
     def test_boxcar_window_centred_at_new_time(self):
         from legoesm.ocean.dynamics.barotropic_common import (
@@ -1682,16 +1682,16 @@ class TestNemoCentredBarotropic:
         w = np.asarray(w)
         assert n_loop == w.size
         np.testing.assert_allclose(w.sum(), 1.0, rtol=1e-14)
-        # F90 transliteration: zwgt1(jn)=1 where |jn - n|/n < 0.5
+        # F90 transliteration (ts_wgt CASE(2)): zwgt1(jn)=1 where |jn-n|/n < 1
         jn = np.arange(1, n_loop + 1, dtype=float)
-        expect = (np.abs(jn - n) / n < 0.5).astype(float)
+        expect = (np.abs(jn - n) / n < 1.0).astype(float)
         expect = expect / expect.sum()
         np.testing.assert_allclose(w, expect, rtol=1e-14)
-        # centroid at the baroclinic step (tau = 1)
+        # centroid at the baroclinic step (tau = 1); symmetric window
         centroid = (w * jn / n).sum()
         np.testing.assert_allclose(centroid, 1.0, rtol=0, atol=0.05)
-        # window extends past the step but not to 2n
-        assert n < n_loop < 2 * n
+        # nn_bt_flt=2 boxcar: full width 2n -> loop runs jn=1..2n-1
+        assert n_loop == 2 * n - 1
 
     def test_transport_weights_continuity_telescoping(self):
         """w_transport[j] = sum(w[j:]) / n — the unique choice with

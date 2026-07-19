@@ -89,17 +89,18 @@ def compute_nemo_boxcar_centred_weights(
     n_substeps: int,
     dtype: jnp.dtype,
 ):
-    """NEMO dynspg_ts centred boxcar averaging (ln_bt_fw=F, nn_bt_flt=1).
+    """NEMO dynspg_ts centred boxcar averaging (ln_bt_fw=F, nn_bt_flt=2).
 
     NEMO's centred split-explicit runs the barotropic past the
-    baroclinic step and averages η/U over a boxcar of width ``nn_e``
-    CENTRED on the new-time point (ts_wgt: ``zwgt1(jn)=1`` where
-    ``|jn − jic|/nn_e < 0.5``; in the forward frame the centre ``jic``
+    baroclinic step and averages η/U over a boxcar of width ``2·nn_e``
+    CENTRED on the new-time point (ts_wgt CASE(2): ``zwgt1(jn)=1`` where
+    ``|jn − jic|/nn_e < 1``; in the forward frame the centre ``jic``
     is the substep that lands on t+Δt, i.e. ``jn = n_substeps``).  The
-    window therefore spans τ ∈ (0.5, 1.5) baroclinic steps: substeps
-    before it evolve the state with zero averaging weight, and the loop
-    runs to the last in-window substep (``n_loop ≈ 1.5·n``).  The
-    secondary (transport) weights are the SM2005/ts_wgt tail sums
+    window therefore spans τ ∈ (0, 2) baroclinic steps: the loop runs to
+    the last in-window substep ``jn = 2·n − 1`` (``n_loop = 2·n − 1``).
+    This is the DINO namelist value (namdyn_spg nn_bt_flt=2); the older
+    nn_bt_flt=1 (width nn_e, ``<0.5``) is not used by any shipped card.
+    The secondary (transport) weights are the SM2005/ts_wgt tail sums
     ``w_transport[j] = Σ_{i≥j} w_i / n_substeps`` — the unique choice
     that keeps ``div(Hu_avg) == (η_old − η_avg)/dt`` (uniform-tracer
     preservation), exactly as the other filters in this module.
@@ -123,7 +124,11 @@ def compute_nemo_boxcar_centred_weights(
         raise ValueError(
             f"nemo_boxcar_centred needs n_substeps >= 2, got {n_substeps!r}")
     jn = _np.arange(1, 3 * n_substeps + 1, dtype=_np.float64)
-    w = (_np.abs(jn - n_substeps) / n_substeps < 0.5).astype(_np.float64)
+    # nn_bt_flt=2: boxcar HALF-width == nn_e (full width 2*nn_e), the DINO
+    # namelist value (ts_wgt CASE(2): |jn-jic|/nn_e < 1).  In the forward
+    # frame jic=n_substeps, so the window spans jn = 1 .. 2*n_substeps-1,
+    # i.e. tau in (0, 2) baroclinic steps centred at t+dt.
+    w = (_np.abs(jn - n_substeps) / n_substeps < 1.0).astype(_np.float64)
     m_star = int(_np.max(_np.where(w > 0.0)[0]) + 1)   # last in-window substep
     w = w[:m_star]
     w = w / w.sum()
