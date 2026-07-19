@@ -47,6 +47,14 @@ class TestAttenuationHelper:
         with pytest.raises(ValueError, match="eice"):
             _kpp_ice_attenuation(jnp.ones((2,)), 2)
 
+    def test_unknown_raises_even_when_off_or_none(self):
+        # contract (codex LOW): the static-value validation runs BEFORE the
+        # off/None short-circuit, so a bad mode never slips through as 1.0.
+        with pytest.raises(ValueError, match="eice"):
+            _kpp_ice_attenuation(None, 2)
+        with pytest.raises(ValueError, match="eice"):
+            _kpp_ice_attenuation(jnp.zeros((2,)), 5)
+
 
 class TestVelocityScales:
     @staticmethod

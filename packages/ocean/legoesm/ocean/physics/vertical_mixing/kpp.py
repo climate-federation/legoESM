@@ -126,30 +126,29 @@ _EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
 def _kpp_ice_attenuation(ice_frac, eice):
     """Under-ice attenuation factor ``(1 - eff)`` for the KPP velocity scales.
 
-    Mirror of the TKE closure's NEMO ``nn_eice`` (see
-    ``vertical_mixing.tke``): compact sea ice caps the surface, so the
-    surface-forcing-driven turbulent velocity scales — and hence both the
-    boundary-layer depth (via ``V_t^2``) and the mixing coefficients — are
-    reduced under ice.  ``eice`` selects the effective ice fraction:
+    KPP analogue of the TKE closure's ice-fraction suppression: compact sea
+    ice caps the surface, so the surface-forcing-driven turbulent velocity
+    scales — and hence both the boundary-layer depth (via ``V_t^2``) and the
+    mixing coefficients — are reduced under ice.  ``eice`` selects the
+    effective ice fraction (NOT a literal nn_eice port — NEMO's control is on
+    the Langmuir/wave-TKE sources; here it is the broader KPP w-scale):
 
     - ``0`` (default, BIT-IDENTICAL): no attenuation (returns 1.0).
-    - ``1``: eff = fi              -> factor (1 - fi).
-    - ``3``: eff = min(4*fi, 1)    -> factor max(0, 1 - 4*fi) (NEMO nn_eice=3;
-      mixing fully suppressed at fi >= 0.25).
+    - ``1``: eff = fi              -> factor (1 - fi)   [legoESM linear mode;
+      NOTE this is NOT NEMO nn_eice=1, which is 1-tanh(10*fi)].
+    - ``3``: eff = min(4*fi, 1)    -> factor max(0, 1 - 4*fi)  (matches NEMO
+      nn_eice=3; mixing fully suppressed at fi >= 0.25).
 
     ``ice_frac`` None (no coupler ice field) -> 1.0.  Unknown ``eice`` raises
-    (dispatch hardening; static config value).
+    even when off/None (contract: validate the STATIC config value first).
     """
+    if eice not in (0, 1, 3):
+        raise ValueError(
+            f"Unknown KPPConfig.eice={eice!r}; expected 0 (off), 1 (linear "
+            "1-fi) or 3 (max(0,1-4*fi), NEMO nn_eice=3).")
     if eice == 0 or ice_frac is None:
         return 1.0
-    if eice == 1:
-        eff = ice_frac
-    elif eice == 3:
-        eff = jnp.minimum(4.0 * ice_frac, 1.0)
-    else:
-        raise ValueError(
-            f"Unknown KPPConfig.eice={eice!r}; expected 0 (off), 1 ((1-fi)) "
-            "or 3 (max(0,1-4*fi), NEMO nn_eice=3).")
+    eff = ice_frac if eice == 1 else jnp.minimum(4.0 * ice_frac, 1.0)
     return jnp.maximum(1.0 - eff, 0.0)[..., jnp.newaxis]
 
 

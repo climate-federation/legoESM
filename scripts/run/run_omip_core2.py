@@ -3903,6 +3903,20 @@ def main() -> int:
 
     # KPP MLD-deepening sensitivity flags are mpas-only (fail loud, never silent).
     _validate_kpp_grid(args.grid, args.kpp_ri_crit, args.kpp_cv, args.kpp_eice)
+    # --kpp-eice needs an ice source to bite: surface_forcing.ice_concentration
+    # is attached only under --prognostic-sea-ice or a prescribed SIC field
+    # (--ice-albedo/--ice-thermo/--sss-restore load it).  Without one, ice_frac
+    # stays None and the attenuation is silently inert (codex MED) — reject
+    # loudly rather than run a no-op lever.
+    if args.kpp_eice not in (None, 0) and not (
+            args.prognostic_sea_ice or args.ice_albedo or args.ice_thermo
+            or args.sss_restore):
+        raise SystemExit(
+            "--kpp-eice needs a sea-ice source to attenuate against: add "
+            "--prognostic-sea-ice (or a prescribed SIC via --ice-albedo/"
+            "--ice-thermo/--sss-restore). Without one the surface ice "
+            "concentration never reaches the KPP closure and the flag is a "
+            "silent no-op.")
     _validate_pcg_variant_grid(args.grid, args.barotropic_pcg_variant,
                                args.barotropic_solver)
 
