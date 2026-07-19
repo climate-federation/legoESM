@@ -352,10 +352,17 @@ def _load_midepoch_checkpoint(
         m, o, em, e, c = eqx.tree_deserialise_leaves(str(path), _tmpl5)
         return m, o, em, int(e), int(c)
 
-    # Try the layout the caller expects first, then the other.
-    _order = (_read5, _read4) if ema_template is not None else (_read4, _read5)
+    # ALWAYS attempt the 5-tuple layout FIRST, then fall back to 4-tuple.
+    # Direction matters because equinox accepts a PREFIX template without
+    # rejecting trailing file leaves (patrick-kidger/equinox#136): reading a
+    # genuine 5-tuple with the 4-tuple template could silently consume the
+    # EMA's leaves as the position ints. 5-first avoids that — a real
+    # 5-tuple deserialises cleanly, and a genuine 4-tuple read with the
+    # 5-tuple template RELIABLY raises (the file's int32 epoch scalar lands
+    # where the 5-tuple template expects the EMA model's float array leaf,
+    # a dtype/shape mismatch), so control reaches the 4-tuple fallback.
     _last_exc = None
-    for _reader in _order:
+    for _reader in (_read5, _read4):
         try:
             m, o, em, e, c = _reader()
         except Exception as exc:  # equinox mismatch: broad by design
@@ -366,7 +373,7 @@ def _load_midepoch_checkpoint(
             return m, o, int(e), int(c)
         return m, o, em, int(e), int(c)
     raise RuntimeError(
-        f"Could not deserialise {path} as either the 4-tuple or 5-tuple "
+        f"Could not deserialise {path} as either the 5-tuple or 4-tuple "
         f"mid-epoch layout: {_last_exc!r}"
     )
 
