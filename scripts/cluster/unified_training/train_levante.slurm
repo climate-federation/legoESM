@@ -39,8 +39,12 @@ mkdir -p "$OUT"
 LINK_BUDGET_S=$(( 12*3600 - 45*60 ))
 
 resubmit_self() {
-  sbatch --export=ALL,CAMPAIGN="$CAMPAIGN",SUITE="$SUITE",VARIANT="$VARIANT",OUT="$OUT",CHAIN="$((CHAIN+1))",CHAIN_MAX="$CHAIN_MAX",RESUME=1 \
-    "$REPO/scripts/cluster/unified_training/train_levante.slurm"
+  # Export explicitly, then --export=ALL (inherited-ALL precedence over the
+  # comma-list form would freeze CHAIN; codex HIGH).
+  export CAMPAIGN SUITE VARIANT OUT CHAIN_MAX
+  export CHAIN=$((CHAIN+1))
+  export RESUME=1
+  sbatch --export=ALL "$REPO/scripts/cluster/unified_training/train_levante.slurm"
 }
 
 source "$REPO/scripts/cluster/unified_training/_chain_body.sh"

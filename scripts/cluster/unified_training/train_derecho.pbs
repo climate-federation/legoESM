@@ -42,8 +42,14 @@ mkdir -p "$OUT"
 LINK_BUDGET_S=$(( 12*3600 - 45*60 ))
 
 resubmit_self() {
-  qsub -v CAMPAIGN="$CAMPAIGN",SUITE="$SUITE",VARIANT="$VARIANT",OUT="$OUT",CHAIN="$((CHAIN+1))",CHAIN_MAX="$CHAIN_MAX",RESUME=1 \
-    "$PBS_O_WORKDIR/scripts/cluster/unified_training/train_derecho.pbs"
+  # Export explicitly + `qsub -V` (pass the whole environment) rather than
+  # `-v k=v,...`: a comma-list cannot carry a comma-bearing value and the
+  # inherited-env form keeps CHAIN advancing. WB modes ride VARIANT as
+  # '+'-separated (never ',') so no value here contains a comma.
+  export CAMPAIGN SUITE VARIANT OUT CHAIN_MAX
+  export CHAIN=$((CHAIN+1))
+  export RESUME=1
+  qsub -V "$PBS_O_WORKDIR/scripts/cluster/unified_training/train_derecho.pbs"
 }
 
 source "$REPO/scripts/cluster/unified_training/_chain_body.sh"

@@ -2391,20 +2391,31 @@ def _train_spectral_loop(
     # run directory keeps working.
     ema_decay = float(getattr(config, "ema_decay", 0.0) or 0.0)
     ema_model = None
+    _ema_update_fn = None
     if ema_decay > 0.0:
         ema_model = init_ema(model)
+        # One jitted EMA step reused across the loop (a bare per-step
+        # partition/tree-map/combine on a large SFNO is host-dispatch bound;
+        # codex MED). decay is closed over -> single trace.
+        _ema_update_fn = eqx.filter_jit(
+            lambda e, m: ema_update(e, m, ema_decay)
+        )
         _ema_src = None
-        if resume_from_dir is not None:
+        _resumed_weights = midepoch_restored or start_epoch > 0
+        if resume_from_dir is not None and _resumed_weights:
+            # Mid-epoch resume (any epoch, including epoch 0) prefers the
+            # chunk-latest EMA sibling; epoch-boundary resume prefers the
+            # last completed epoch's EMA file.
             if midepoch_restored:
                 _cand = Path(resume_from_dir) / MIDEPOCH_EMA_CHECKPOINT_NAME
             else:
                 _cand = (
                     Path(resume_from_dir) / f"epoch_{start_epoch - 1:04d}_ema.eqx"
                 )
-            if start_epoch > 0 and _cand.exists():
+            if _cand.exists():
                 ema_model = eqx.tree_deserialise_leaves(_cand, ema_model)
                 _ema_src = str(_cand)
-        if start_epoch > 0:
+        if _resumed_weights:
             if _ema_src is not None:
                 logger.info(f"EMA resume: restored {_ema_src}")
             else:
@@ -2774,7 +2785,7 @@ def _train_spectral_loop(
                         model, opt_state, ic, target, _fb,
                     )
                 if ema_model is not None:
-                    ema_model = ema_update(ema_model, model, ema_decay)
+                    ema_model = _ema_update_fn(ema_model, model)
 
                 # --- NaN / Inf detection (outside JIT, values materialized) ---
                 # A rank hitting NaN raises; the @mpi_abort_on_uncaught decorator
@@ -2815,10 +2826,12 @@ def _train_spectral_loop(
                     _save_epoch, _save_chunk = epoch + 1, 0
                 else:
                     _save_epoch, _save_chunk = epoch, _next_chunk
-                _save_midepoch_checkpoint(
-                    config.checkpoint_dir, model, opt_state,
-                    _save_epoch, _save_chunk,
-                )
+                # EMA sibling FIRST, raw+optimizer checkpoint second: the raw
+                # file carries the resume position, so a preemption between
+                # the two writes leaves an old raw + new EMA (the resume then
+                # replays the chunk and the EMA converges back within
+                # ~1/(1-decay) steps) rather than a new position with a stale
+                # EMA. The pair is not atomic — known, logged on resume.
                 if ema_model is not None:
                     from legoesm.ml.training import save_checkpoint
                     save_checkpoint(
@@ -2826,6 +2839,10 @@ def _train_spectral_loop(
                         Path(config.checkpoint_dir)
                         / MIDEPOCH_EMA_CHECKPOINT_NAME,
                     )
+                _save_midepoch_checkpoint(
+                    config.checkpoint_dir, model, opt_state,
+                    _save_epoch, _save_chunk,
+                )
                 logger.info(
                     f"Saved mid-epoch checkpoint {MIDEPOCH_CHECKPOINT_NAME} "
                     f"(epoch {epoch}, chunk {chunk_pos} done -> resume at "
@@ -3225,6 +3242,7 @@ def train_neural_gcm_spectral(
         start_epoch=start_epoch,
         sample_forcings=sample_forcings,
         host_staged=True,   # dataset loaded host-resident above (#1155)
+        resume_from_dir=resume_from_dir,   # EMA resume needs the dir too
     )
 
 
@@ -3788,8 +3806,12 @@ def _train_sfno_full_loop(
     # file of the last completed epoch, else re-seeds from raw weights.
     ema_decay = float(getattr(config, "ema_decay", 0.0) or 0.0)
     ema_model = None
+    _ema_update_fn = None
     if ema_decay > 0.0:
         ema_model = init_ema(sfno)
+        _ema_update_fn = eqx.filter_jit(
+            lambda e, m: ema_update(e, m, ema_decay)
+        )
         if start_epoch > 0:
             _cand = (
                 Path(config.checkpoint_dir)
@@ -3833,7 +3855,7 @@ def _train_sfno_full_loop(
                 sfno, opt_state, ic, target,
             )
             if ema_model is not None:
-                ema_model = ema_update(ema_model, sfno, ema_decay)
+                ema_model = _ema_update_fn(ema_model, sfno)
 
             loss_val = float(loss)
             if jnp.isnan(loss) or jnp.isinf(loss):
@@ -3970,6 +3992,7 @@ def train_column_mlp_spectral(
         start_epoch=start_epoch,
         sample_forcings=sample_forcings,
         host_staged=True,   # dataset loaded host-resident above (#1155)
+        resume_from_dir=resume_from_dir,   # EMA resume needs the dir too
     )
 
 

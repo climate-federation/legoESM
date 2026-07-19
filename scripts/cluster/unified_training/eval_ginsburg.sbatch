@@ -10,7 +10,8 @@
 # Unified-path evaluation on Ginsburg: WB2 scorecard (+plot) for a trained
 # campaign. Single-process; run AFTER the train chain completes. The eval
 # prefers the EMA checkpoint when present (campaign_driver, D3).
-#   sbatch --export=ALL,CONFIG=config/wb/campaign/spectral_t63.yaml,MODES=physics,neural_gcm,sfno,OUT=results/wb_campaign \
+#   MODES uses '+' (not ',': a comma breaks sbatch --export=ALL,k=v parsing):
+#   sbatch --export=ALL,CONFIG=config/wb/campaign/spectral_t63.yaml,MODES=physics+neural_gcm+sfno,OUT=results/wb_campaign \
 #     scripts/cluster/unified_training/eval_ginsburg.sbatch
 set -euo pipefail
 
@@ -21,10 +22,11 @@ export JAX_PLATFORMS=cuda,cpu
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 CONFIG="${CONFIG:-config/wb/campaign/spectral_t63.yaml}"
-MODES="${MODES:-physics,neural_gcm,sfno}"
+MODES="${MODES:-physics+neural_gcm+sfno}"   # '+' separated (see header)
 OUT="${OUT:-results/wb_campaign}"
+MODES_CSV="${MODES//+/,}"
 
-echo "[uni-eval] $(date) config=$CONFIG modes=$MODES out=$OUT"
+echo "[uni-eval] $(date) config=$CONFIG modes=$MODES_CSV out=$OUT"
 "$UT_PYTHON" -u scripts/run/run_weatherbench_campaign.py \
-  --config "$CONFIG" --modes "$MODES" --stages eval,plot --out-root "$OUT"
+  --config "$CONFIG" --modes "$MODES_CSV" --stages eval,plot --out-root "$OUT"
 echo "[uni-eval] done $(date)"

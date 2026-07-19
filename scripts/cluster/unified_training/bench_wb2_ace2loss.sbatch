@@ -25,14 +25,22 @@ LEADS="${LEADS:-24,72,120,240}"
 OUT_ROOT="${OUT_ROOT:-results/bench_wb2_ace2loss}"
 mkdir -p "$OUT_ROOT"
 
+# run_aimip_wb2_eval.VALID_VARIANTS = classical | column_nn | sfno_full.
+# The ace2loss campaign trained sfno_PHYSICS (SFNO physics, dycore kept),
+# which the WB2 spectral-state eval harness does not score — so it is not
+# listed here (a separate sfno_full run would be the SFNO WB2 entry).
 declare -A CKPT=(
   [classical]=results/aimip_ace2loss/classical/params.eqx
   [column_nn]=results/aimip_ace2loss_column_nn/column_nn/params.eqx
-  [sfno_physics]=results/aimip_ace2loss_sfno_physics/sfno_physics/params.eqx
 )
+# Prefer the EMA-evaluated weights when present (D3).
+for v in "${!CKPT[@]}"; do
+  ema="${CKPT[$v]%params.eqx}params_ema.eqx"
+  [ -f "$ema" ] && CKPT[$v]="$ema"
+done
 
 SCORECARD_ARGS=()
-for v in classical column_nn sfno_physics; do
+for v in classical column_nn; do
   ck="${CKPT[$v]}"
   if [ ! -f "$ck" ]; then
     echo "[bench-wb2] SKIP $v: no checkpoint at $ck"

@@ -108,10 +108,15 @@ def parse_curriculum(
                 f"Curriculum stage rollout_hours must be > 0; got "
                 f"{stage.rollout_hours}."
             )
-        if stage.n_epochs <= 0:
+        if stage.n_epochs < 0:
             raise ValueError(
-                f"Curriculum stage n_epochs must be > 0; got {stage.n_epochs}."
+                f"Curriculum stage n_epochs must be >= 0; got {stage.n_epochs}."
             )
+        if stage.n_epochs == 0:
+            # Legacy inline behaviour: a zero-epoch phase contributes nothing
+            # to the epoch plan — skip it rather than erroring (a sweep
+            # config may zero-out a phase to disable it).
+            continue
         if stage.lr_scale <= 0:
             raise ValueError(
                 f"Curriculum stage lr_scale must be > 0; got {stage.lr_scale}."
@@ -207,9 +212,13 @@ def build_curriculum_epoch_plan(
     # into multi_step_hours, not the phase order), so the ladder-monotonic
     # doctrine is enforced only where suites are validated (campaign driver
     # / parse_curriculum default), never at plan-build time.
+    if curriculum is not None and not isinstance(curriculum, dict):
+        # Materialize first: a generator must not lose its first item to the
+        # CurriculumStage type probe below.
+        curriculum = tuple(curriculum)
     stages = (
-        tuple(curriculum)
-        if curriculum and isinstance(next(iter(curriculum)), CurriculumStage)
+        curriculum
+        if curriculum and isinstance(curriculum[0], CurriculumStage)
         else parse_curriculum(curriculum, allow_non_monotonic=True)
     )
     if not stages:

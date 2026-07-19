@@ -184,9 +184,15 @@ def _build_spectral_config(cfg: dict[str, Any]):
     # ...]): the loader must build a target at EVERY curriculum lead, so
     # loss.multi_step_hours is forced to the sorted unique leads (equal
     # weights; the curriculum path scores one lead per phase anyway).
+    # parse_curriculum accepts both the legacy [[hours, epochs], ...] form
+    # and the extended dict-stage form ({"stages": [...]}); lr_scale /
+    # pushforward metadata is carried by the stages (schedule wiring is the
+    # documented open item), while the (hours, epochs) pairs drive the
+    # epoch plan exactly as before.
+    from legoesm.training.curriculum import parse_curriculum
+    _stages = parse_curriculum(cfg.get("aimip_rollout_curriculum"))
     curriculum = tuple(
-        (int(h), int(ep))
-        for h, ep in (cfg.get("aimip_rollout_curriculum") or ())
+        (int(s.rollout_hours), int(s.n_epochs)) for s in _stages
     ) or None
     if curriculum:
         _leads = tuple(sorted({h for h, _ in curriculum}))
@@ -524,6 +530,7 @@ def _train_aimip_classical(
         grid, sigma, ic_states, target_carries, spec_cfg,
         start_epoch=start_epoch,
         host_staged=True,   # dataset loaded host-resident above (#1155)
+        resume_from_dir=resume_from_dir,   # EMA resume needs the dir too
     )
 
 
@@ -984,17 +991,46 @@ def main():
             # the held-out test windows (default 2017).  Both reports use
             # an identical loss / rollout horizon so they are directly
             # comparable in absolute K.
+            # Evaluate-the-EMA doctrine (D3): when EMA is enabled, score and
+            # publish the EMA weights (params_ema.eqx) alongside the raw
+            # params.eqx; the scorecard records which weights were scored.
+            eval_model = model
+            eval_weights = "raw"
+            ema_ckpt_path = None
+            if float(cfg.get("aimip_ema_decay", 0.0)) > 0.0:
+                import equinox as eqx
+                _ema_files = sorted(
+                    (output_dir / variant).glob("epoch_*_ema.eqx"),
+                    key=lambda p: int(p.stem.split("_")[1]),
+                )
+                if _ema_files:
+                    eval_model = eqx.tree_deserialise_leaves(
+                        _ema_files[-1], model
+                    )
+                    eval_weights = "ema"
+                    logger.info(
+                        f"{variant}: evaluating EMA weights "
+                        f"({_ema_files[-1].name})"
+                    )
+                else:
+                    logger.warning(
+                        f"{variant}: aimip_ema_decay set but no "
+                        "epoch_*_ema.eqx found — evaluating raw weights."
+                    )
             eval_metrics_test = _evaluate_variant(
-                variant, model, cfg, cache_dir, period="test",
+                variant, eval_model, cfg, cache_dir, period="test",
             )
             eval_metrics_train = _evaluate_variant(
-                variant, model, cfg, cache_dir, period="train",
+                variant, eval_model, cfg, cache_dir, period="train",
             )
             ckpt_path = output_dir / variant / "params.eqx"
             ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
             from legoesm.ml.training import save_checkpoint
             save_checkpoint(model, ckpt_path)
+            if eval_weights == "ema":
+                ema_ckpt_path = output_dir / variant / "params_ema.eqx"
+                save_checkpoint(eval_model, ema_ckpt_path)
 
             results["variants"][variant] = {
                 "train_loss_history": [float(x) for x in loss_history],
@@ -1002,6 +1038,11 @@ def main():
                 "eval_metrics": eval_metrics_test,
                 "eval_metrics_train_period": eval_metrics_train,
                 "checkpoint": str(ckpt_path),
+                "eval_weights": eval_weights,
+                **(
+                    {"checkpoint_ema": str(ema_ckpt_path)}
+                    if ema_ckpt_path is not None else {}
+                ),
             }
             # ``loss_history`` is empty on an eval-only resume (all epochs already
             # done, start_epoch == n_epochs -> zero training iterations); guard the

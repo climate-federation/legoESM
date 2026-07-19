@@ -41,8 +41,14 @@ mkdir -p "$OUT"
 LINK_BUDGET_S=$(( 72*3600 - 45*60 ))
 
 resubmit_self() {
-  sbatch --export=ALL,CAMPAIGN="$CAMPAIGN",SUITE="$SUITE",VARIANT="$VARIANT",OUT="$OUT",CHAIN="$((CHAIN+1))",CHAIN_MAX="$CHAIN_MAX",RESUME=1 \
-    "$REPO/scripts/cluster/unified_training/train_ginsburg.sbatch"
+  # Export explicitly, then --export=ALL: on this Slurm, values inherited
+  # via ALL take precedence over the comma-list form, so CHAIN would stop
+  # advancing once exported (codex HIGH). Exporting the updated values in
+  # THIS shell makes them the inherited ones.
+  export CAMPAIGN SUITE VARIANT OUT CHAIN_MAX
+  export CHAIN=$((CHAIN+1))
+  export RESUME=1
+  sbatch --export=ALL "$REPO/scripts/cluster/unified_training/train_ginsburg.sbatch"
 }
 
 source "$REPO/scripts/cluster/unified_training/_chain_body.sh"

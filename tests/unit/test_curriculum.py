@@ -55,7 +55,7 @@ def test_parse_empty_and_none():
     "bad",
     [
         [(0, 2)],  # non-positive hours
-        [(6, 0)],  # non-positive epochs
+        [(6, -1)],  # negative epochs
         [{"rollout_hours": 6, "n_epochs": 1, "lr_scale": 0.0}],
         [{"rollout_hours": 6, "n_epochs": 1, "pushforward_no_grad_steps": -1}],
         [{"rollout_hours": 6}],  # missing n_epochs
@@ -67,6 +67,13 @@ def test_parse_empty_and_none():
 def test_parse_rejects_malformed(bad):
     with pytest.raises(ValueError):
         parse_curriculum(bad)
+
+
+def test_parse_skips_zero_epoch_phase():
+    # legacy inline behaviour: a zero-epoch phase contributes nothing and is
+    # dropped, not an error (matches the pre-extraction epoch-plan build).
+    stages = parse_curriculum([(6, 0), (12, 3)])
+    assert stages == (CurriculumStage(12.0, 3),)
 
 
 def test_parse_rejects_decreasing_ladder():
@@ -142,6 +149,15 @@ def test_epoch_plan_accepts_parsed_stages():
     assert build_curriculum_epoch_plan(
         stages, (12, 24, 72, 120), 1800.0, 1
     ) == build_curriculum_epoch_plan(LEGACY_T106, (12, 24, 72, 120), 1800.0, 1)
+
+
+def test_epoch_plan_generator_keeps_first_phase():
+    # A generator of CurriculumStages must not lose its first item to the
+    # type probe (codex LOW).
+    gen = (s for s in parse_curriculum(LEGACY_T106))
+    plan = build_curriculum_epoch_plan(gen, (12, 24, 72, 120), 1800.0, 1)
+    assert plan[0] == (12, 0, 24)
+    assert len(plan) == 7
 
 
 def test_epoch_plan_pushforward_bounds():
