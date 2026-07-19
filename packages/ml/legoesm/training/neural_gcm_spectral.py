@@ -287,55 +287,75 @@ def maybe_resume_model(model_template, resume_from_dir):
 # =============================================================================
 
 MIDEPOCH_CHECKPOINT_NAME = "chunk_latest.eqx"
-# EMA sibling of the mid-epoch checkpoint (model-template payload, written
-# atomically by ml.training.save_checkpoint next to chunk_latest.eqx).
-MIDEPOCH_EMA_CHECKPOINT_NAME = "chunk_latest_ema.eqx"
 
 
-def _save_midepoch_checkpoint(ckpt_dir, model, opt_state, epoch, next_chunk):
+def _save_midepoch_checkpoint(
+    ckpt_dir, model, opt_state, epoch, next_chunk, ema_model=None
+):
     """Atomically save the mid-epoch (per-chunk) resume state.
 
-    Serialises ``(model, opt_state, epoch, next_chunk)`` as one payload
-    via :func:`legoesm.ml.training.save_checkpoint` (temp file + atomic
-    ``os.replace``), so the model weights, the optimizer state and the
-    resume position land together or not at all.
+    Serialises ``(model, opt_state, [ema_model,] epoch, next_chunk)`` as ONE
+    payload via :func:`legoesm.ml.training.save_checkpoint` (temp file +
+    atomic ``os.replace``), so the model weights, the optimizer state, the
+    EMA weights and the resume position land together or not at all — there
+    is no torn raw/EMA pair (the EMA is inside the same atomic write).
 
-    ``epoch``/``next_chunk`` give the position to RESUME AT (the last
-    chunk of epoch ``e`` is stored as ``(e+1, 0)``).
+    When ``ema_model`` is None the legacy 4-tuple layout is written (EMA
+    disabled); when provided a 5-tuple with the EMA between opt_state and
+    the position ints. ``epoch``/``next_chunk`` give the position to RESUME
+    AT (the last chunk of epoch ``e`` is stored as ``(e+1, 0)``).
     """
     from legoesm.ml.training import save_checkpoint
     ckpt_dir = Path(ckpt_dir)
-    payload = (
-        model,
-        opt_state,
-        jnp.asarray(int(epoch), dtype=jnp.int32),
-        jnp.asarray(int(next_chunk), dtype=jnp.int32),
-    )
+    _epoch_i = jnp.asarray(int(epoch), dtype=jnp.int32)
+    _chunk_i = jnp.asarray(int(next_chunk), dtype=jnp.int32)
+    if ema_model is None:
+        payload = (model, opt_state, _epoch_i, _chunk_i)
+    else:
+        payload = (model, opt_state, ema_model, _epoch_i, _chunk_i)
     save_checkpoint(payload, ckpt_dir / MIDEPOCH_CHECKPOINT_NAME)
 
 
-def _load_midepoch_checkpoint(ckpt_dir, model_template, opt_state_template):
+def _load_midepoch_checkpoint(
+    ckpt_dir, model_template, opt_state_template, ema_template=None
+):
     """Load the mid-epoch resume state, or ``None`` if absent.
 
-    Returns ``(model, opt_state, epoch:int, next_chunk:int)``.  The
-    templates must match the structure that ``_save_midepoch_checkpoint``
-    wrote (a freshly built model + ``optimizer.init(...)`` opt_state).
+    Returns ``(model, opt_state, epoch:int, next_chunk:int)`` when
+    ``ema_template`` is None, else ``(model, opt_state, ema_model,
+    epoch, next_chunk)``. The templates must match the structure that
+    ``_save_midepoch_checkpoint`` wrote. If an EMA template is supplied but
+    the on-disk payload is the legacy 4-tuple (EMA enabled on the resume of
+    a non-EMA run), the EMA is returned as None so the caller reseeds it.
     """
     if ckpt_dir is None:
         return None
     path = Path(ckpt_dir) / MIDEPOCH_CHECKPOINT_NAME
     if not path.exists():
         return None
+    _zero = jnp.asarray(0, dtype=jnp.int32)
+    if ema_template is None:
+        template = (model_template, opt_state_template, _zero, _zero)
+        model, opt_state, epoch, next_chunk = eqx.tree_deserialise_leaves(
+            str(path), template,
+        )
+        return model, opt_state, int(epoch), int(next_chunk)
     template = (
-        model_template,
-        opt_state_template,
-        jnp.asarray(0, dtype=jnp.int32),
-        jnp.asarray(0, dtype=jnp.int32),
+        model_template, opt_state_template, ema_template, _zero, _zero,
     )
-    model, opt_state, epoch, next_chunk = eqx.tree_deserialise_leaves(
-        str(path), template,
-    )
-    return model, opt_state, int(epoch), int(next_chunk)
+    try:
+        model, opt_state, ema_model, epoch, next_chunk = (
+            eqx.tree_deserialise_leaves(str(path), template)
+        )
+        return model, opt_state, ema_model, int(epoch), int(next_chunk)
+    except (ValueError, EOFError):
+        # Legacy 4-tuple payload (EMA turned on for this resume of a run
+        # that trained without it): load the raw state, reseed EMA=None.
+        legacy = (model_template, opt_state_template, _zero, _zero)
+        model, opt_state, epoch, next_chunk = eqx.tree_deserialise_leaves(
+            str(path), legacy,
+        )
+        return model, opt_state, None, int(epoch), int(next_chunk)
 
 
 # =============================================================================
@@ -2348,14 +2368,28 @@ def _train_spectral_loop(
     # optimizer trajectory unbroken.  Honoured only when it is at least as
     # advanced as the epoch-granular resume (``m_epoch >= start_epoch``);
     # a stale one (older epoch) is ignored.
+    # EMA is folded into the mid-epoch payload (atomic — no torn raw/EMA
+    # pair), so its decay must be known before the mid-epoch load.
+    ema_decay = float(getattr(config, "ema_decay", 0.0) or 0.0)
+    _restored_ema = None            # EMA recovered from chunk_latest.eqx
+    _midepoch_ema_present = False    # payload carried an EMA (vs legacy)
     resume_chunk = 0
     midepoch_restored = False
     if chunk_loader is not None and resume_from_dir is not None:
-        _mid = _load_midepoch_checkpoint(resume_from_dir, model, opt_state)
+        _ema_tmpl = init_ema(model) if ema_decay > 0.0 else None
+        _mid = _load_midepoch_checkpoint(
+            resume_from_dir, model, opt_state, ema_template=_ema_tmpl,
+        )
         if _mid is not None:
-            m_model, m_opt_state, m_epoch, m_next_chunk = _mid
+            if _ema_tmpl is not None:
+                m_model, m_opt_state, m_ema, m_epoch, m_next_chunk = _mid
+            else:
+                m_model, m_opt_state, m_epoch, m_next_chunk = _mid
+                m_ema = None
             if m_epoch >= start_epoch:
                 model, opt_state = m_model, m_opt_state
+                _restored_ema = m_ema
+                _midepoch_ema_present = m_ema is not None
                 start_epoch = m_epoch
                 resume_chunk = m_next_chunk
                 midepoch_restored = True
@@ -2389,46 +2423,56 @@ def _train_spectral_loop(
     # beside each checkpoint. Resume prefers a matching *_ema.eqx; falls
     # back to re-seeding from the restored raw model (logged) so a legacy
     # run directory keeps working.
-    ema_decay = float(getattr(config, "ema_decay", 0.0) or 0.0)
+    # --- EMA of the trainable weights (D3, training/ema.py) --------------
+    # Updated on the host after every optimizer step (identical on every DP
+    # rank: same averaged gradient -> same model -> same EMA). For the
+    # chunked path the EMA lives INSIDE the atomic chunk_latest.eqx payload
+    # (no torn raw/EMA pair); the per-epoch path saves epoch_NNNN_ema.eqx
+    # beside epoch_NNNN.eqx and an epoch-boundary resume restores that.
     ema_model = None
     _ema_update_fn = None
     if ema_decay > 0.0:
         ema_model = init_ema(model)
         # One jitted EMA step reused across the loop (a bare per-step
-        # partition/tree-map/combine on a large SFNO is host-dispatch bound;
-        # codex MED). decay is closed over -> single trace.
+        # partition/tree-map/combine on a large SFNO is host-dispatch bound).
+        # decay is closed over -> single trace.
         _ema_update_fn = eqx.filter_jit(
             lambda e, m: ema_update(e, m, ema_decay)
         )
-        _ema_src = None
         _resumed_weights = midepoch_restored or start_epoch > 0
-        if resume_from_dir is not None and _resumed_weights:
-            # Mid-epoch resume (any epoch, including epoch 0) prefers the
-            # chunk-latest EMA sibling; epoch-boundary resume prefers the
-            # last completed epoch's EMA file. The EMA sibling is written
-            # just before the raw+position checkpoint, so a preemption
-            # between the two leaves the EMA at most one chunk ahead of the
-            # resumed raw position; replaying that chunk double-weights it in
-            # the EMA by ~1-decay per sample (negligible at decay 0.9999,
-            # self-heals within ~1/(1-decay) steps) — not worth a torn-pair
-            # rejection that would throw away real EMA history.
-            if midepoch_restored:
-                _cand = Path(resume_from_dir) / MIDEPOCH_EMA_CHECKPOINT_NAME
-            else:
-                _cand = (
-                    Path(resume_from_dir) / f"epoch_{start_epoch - 1:04d}_ema.eqx"
-                )
+        if _restored_ema is not None:
+            # From the atomic mid-epoch payload: exactly paired with the
+            # restored model + position.
+            ema_model = _restored_ema
+            logger.info(
+                f"EMA resume: restored from {MIDEPOCH_CHECKPOINT_NAME} "
+                "(atomic payload)"
+            )
+        elif (
+            resume_from_dir is not None
+            and not midepoch_restored
+            and start_epoch > 0
+        ):
+            # Epoch-boundary resume: the EMA sibling of the last completed
+            # epoch's checkpoint.
+            _cand = (
+                Path(resume_from_dir) / f"epoch_{start_epoch - 1:04d}_ema.eqx"
+            )
             if _cand.exists():
                 ema_model = eqx.tree_deserialise_leaves(_cand, ema_model)
-                _ema_src = str(_cand)
-        if _resumed_weights:
-            if _ema_src is not None:
-                logger.info(f"EMA resume: restored {_ema_src}")
+                logger.info(f"EMA resume: restored {_cand}")
             else:
                 logger.warning(
-                    "EMA resume: no *_ema.eqx found in the resume dir; "
-                    "re-seeding the EMA from the restored raw weights."
+                    f"EMA resume: no {_cand.name} — re-seeding the EMA from "
+                    "the restored raw weights."
                 )
+        elif _resumed_weights and midepoch_restored and not _midepoch_ema_present:
+            # Enabled EMA on the resume of a run trained without it (legacy
+            # 4-tuple payload): reseed from the restored raw weights.
+            logger.warning(
+                "EMA resume: the mid-epoch checkpoint predates EMA — "
+                "re-seeding the EMA from the restored raw weights."
+            )
 
     logger.info(
         f"Training: {config.n_epochs} epochs, "
@@ -2832,27 +2876,15 @@ def _train_spectral_loop(
                     _save_epoch, _save_chunk = epoch + 1, 0
                 else:
                     _save_epoch, _save_chunk = epoch, _next_chunk
-                # Raw+position checkpoint FIRST, EMA sibling SECOND (EMA-last,
-                # matching the per-epoch save). Rationale: the EMA file's
-                # mtime is then always >= its paired raw file, so (a) the
-                # newest-mtime EMA on disk is unambiguously the pair of the
-                # newest raw checkpoint (used by the eval selector), and (b) a
-                # preemption between the two writes leaves the EMA one chunk
-                # BEHIND the resumed position — replaying that chunk lets the
-                # EMA catch up (no double-count), the safe tear direction. The
-                # pair is not atomic — this ordering makes the non-atomic case
-                # self-correct.
+                # EMA folded into the single atomic mid-epoch payload: the
+                # raw weights, optimizer state, EMA weights and resume
+                # position land together or not at all (no torn raw/EMA
+                # pair — the whole class of "EMA out of sync with position"
+                # bugs is eliminated by the atomic write).
                 _save_midepoch_checkpoint(
                     config.checkpoint_dir, model, opt_state,
-                    _save_epoch, _save_chunk,
+                    _save_epoch, _save_chunk, ema_model=ema_model,
                 )
-                if ema_model is not None:
-                    from legoesm.ml.training import save_checkpoint
-                    save_checkpoint(
-                        ema_model,
-                        Path(config.checkpoint_dir)
-                        / MIDEPOCH_EMA_CHECKPOINT_NAME,
-                    )
                 logger.info(
                     f"Saved mid-epoch checkpoint {MIDEPOCH_CHECKPOINT_NAME} "
                     f"(epoch {epoch}, chunk {chunk_pos} done -> resume at "

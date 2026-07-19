@@ -180,6 +180,58 @@ def test_midepoch_roundtrip_preserves_model_optstate_and_position(tmp_path):
     assert not _leaves_equal(lo, tmpl_opt_state)      # not the fresh template
 
 
+def test_midepoch_roundtrip_with_ema_is_atomic_5tuple(tmp_path):
+    """With an ema_model the payload is one atomic 5-tuple: model, opt_state,
+    EMA, epoch, next_chunk restore together (no separate EMA file)."""
+    ck = tmp_path / "ck"
+    ck.mkdir()
+    opt = optax.adam(1e-3)
+    model, opt_state = _stepped_opt_state(_TinyModel(jax.random.PRNGKey(1)), opt)
+    ema = _TinyModel(jax.random.PRNGKey(7))  # distinct from model
+
+    _save_midepoch_checkpoint(
+        ck, model, opt_state, epoch=4, next_chunk=1, ema_model=ema,
+    )
+    # Single atomic file — no separate chunk_latest_ema.eqx.
+    assert (ck / MIDEPOCH_CHECKPOINT_NAME).exists()
+    assert not (ck / "chunk_latest_ema.eqx").exists()
+
+    tmpl = _TinyModel(jax.random.PRNGKey(999))
+    tmpl_opt = opt.init(eqx.filter(tmpl, eqx.is_array))
+    ema_tmpl = _TinyModel(jax.random.PRNGKey(888))
+    loaded = _load_midepoch_checkpoint(
+        ck, tmpl, tmpl_opt, ema_template=ema_tmpl,
+    )
+    assert loaded is not None
+    lm, lo, lema, epoch, next_chunk = loaded
+    assert (epoch, next_chunk) == (4, 1)
+    assert jnp.array_equal(lm.w, model.w)
+    assert jnp.array_equal(lema.w, ema.w)             # EMA restored exactly
+    assert not jnp.array_equal(lema.w, lm.w)          # and distinct from model
+
+
+def test_midepoch_ema_template_on_legacy_4tuple_returns_none_ema(tmp_path):
+    """Enabling EMA on the resume of a run that trained WITHOUT it: the
+    on-disk payload is the legacy 4-tuple, so the loader returns ema=None
+    (caller reseeds) rather than raising."""
+    ck = tmp_path / "ck"
+    ck.mkdir()
+    opt = optax.adam(1e-3)
+    model, opt_state = _stepped_opt_state(_TinyModel(jax.random.PRNGKey(2)), opt)
+    _save_midepoch_checkpoint(ck, model, opt_state, epoch=1, next_chunk=0)
+
+    tmpl = _TinyModel(jax.random.PRNGKey(999))
+    tmpl_opt = opt.init(eqx.filter(tmpl, eqx.is_array))
+    loaded = _load_midepoch_checkpoint(
+        ck, tmpl, tmpl_opt, ema_template=_TinyModel(jax.random.PRNGKey(5)),
+    )
+    assert loaded is not None
+    lm, lo, lema, epoch, next_chunk = loaded
+    assert lema is None
+    assert (epoch, next_chunk) == (1, 0)
+    assert jnp.array_equal(lm.w, model.w)
+
+
 def test_save_checkpoint_is_atomic_under_torn_write(tmp_path, monkeypatch):
     """A walltime kill mid-serialise must never corrupt the prior
     checkpoint: ``save_checkpoint`` writes a temp file then os.replace,

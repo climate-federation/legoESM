@@ -999,29 +999,24 @@ def main():
             ema_ckpt_path = None
             if float(cfg.get("aimip_ema_decay", 0.0)) > 0.0:
                 import equinox as eqx
-                # The returned ``model`` matches the newest RAW checkpoint
-                # (maybe_resume loads the newest epoch_*.eqx; the chunked
-                # path may restore a newer chunk_latest.eqx). Because every
-                # EMA file is written AFTER its paired raw file (EMA-last
-                # ordering, both epoch and chunk saves), the EMA whose mtime
-                # is newest is the pair of that model — INCLUDING the
-                # chunk_latest_ema case, which a pure epoch-sibling lookup
-                # misses. Require the chosen EMA to be at least as new as the
-                # newest raw file; a torn epoch pair (raw written, its EMA
-                # not) leaves the newest EMA older than the newest raw, so we
-                # fall back to raw rather than publish a stale EMA.
+                # The returned ``model`` matches the newest RAW checkpoint.
+                # Standalone EMA files are the per-epoch epoch_NNNN_ema.eqx
+                # (the chunked path folds the EMA into the atomic
+                # chunk_latest.eqx instead — not a file readable here). Eval
+                # the newest epoch EMA only when it is at least as new as the
+                # newest raw checkpoint (incl. chunk_latest.eqx); otherwise
+                # the model is ahead of any standalone EMA (a torn epoch pair
+                # or a chunk-ahead eval-only resume), so fall back to raw
+                # rather than publish a stale EMA.
                 from legoesm.training.neural_gcm_spectral import (
                     MIDEPOCH_CHECKPOINT_NAME,
-                    MIDEPOCH_EMA_CHECKPOINT_NAME,
                 )
                 _vdir = output_dir / variant
                 _raws = [
                     p for p in _vdir.glob("epoch_*.eqx")
                     if not p.stem.endswith("_ema")
                 ] + list(_vdir.glob(MIDEPOCH_CHECKPOINT_NAME))
-                _emas = list(_vdir.glob("epoch_*_ema.eqx")) + list(
-                    _vdir.glob(MIDEPOCH_EMA_CHECKPOINT_NAME)
-                )
+                _emas = list(_vdir.glob("epoch_*_ema.eqx"))
                 _newest_raw_mt = (
                     max(p.stat().st_mtime for p in _raws) if _raws else None
                 )
