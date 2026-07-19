@@ -20,6 +20,16 @@ Per-site tower height and rooting depth live in the `EC_SITE_PHYSICS` table in
 (`scripts/cluster/ec_site/ec_site_soil_texture.csv`). These are the reproducible
 defaults — no hand-set environment is required.
 
+**Tower height is measured; rooting depth is a modeling choice.** The *tower height*
+column (`z_ref`) is the observed FLUXNET BADM `Reference_height_v`. The *rooting*
+column (`root_depth`), by contrast, is a **modeling choice** — the e-folding depth of
+the *prescribed* root-density profile (`root_frac = exp(-z/root_depth)`), set to a
+value plausible for the site's PFT and soil profile (deeper for phreatophytes that tap
+deep soil / weathered-bedrock water through the dry season) and validated against the
+fluxes, **not** a measured rooting depth. The `10 m column` for US-Ton and
+`soil_depth_m` are likewise column-depth choices. Treat `root_depth` / `soil_depth_m`
+as tunable modeling inputs, not observations.
+
 ---
 
 ## A. Reproduce the figures (self-contained — no external data)
@@ -137,17 +147,3 @@ Note: the model under-predicts GPP/latent heat at **dense, high-LAI wet broadlea
 forests** (a documented coupled-closure bistability — see
 `two_leaf_canopy_wet_forest_bistability.md`), so tropical/wet-EBF sites are not yet
 suitable panel members.
-
----
-
-### Note on the per-site parameters
-
-The `EC_SITE_PHYSICS` entries are not all measurements. The **tower height**
-(`z_ref`) *is* observed — the FLUXNET BADM `Reference_height_v`. The **rooting
-depth** (`root_depth`), by contrast, is a **modeling choice**: it is the e-folding
-depth of the *prescribed* root-density profile (`root_frac = exp(-z/root_depth)`),
-set to a value plausible for the site's PFT and soil profile (deeper for
-phreatophytes that tap deep soil / weathered-bedrock water through the dry season),
-and validated against the fluxes — **not** a measured rooting depth. `soil_depth_m`
-is likewise a column-depth choice. Treat `root_depth` / `soil_depth_m` as tunable
-modeling inputs, not observations.
