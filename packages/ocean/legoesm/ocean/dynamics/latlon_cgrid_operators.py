@@ -1354,8 +1354,12 @@ def nemo_ldf_lap_viscosity_cgrid(
     is_3d = u.ndim == 3
 
     def _bm(m):
-        # broadcast a 2-D face/cell/vertex mask over the trailing level axis
-        return m[..., jnp.newaxis] if is_3d else m
+        # broadcast a 2-D face/cell/vertex mask over the trailing level axis;
+        # an already-3-D mask (per-level staircase vertex mask — NEMO 3-D
+        # fmask analogue) passes through unchanged.
+        if is_3d:
+            return m if m.ndim == 3 else m[..., jnp.newaxis]
+        return m
 
     def _bc(c):
         # broadcast a (n_lat,) or (n_lat+1,) latitude coefficient over lon [, lev]
