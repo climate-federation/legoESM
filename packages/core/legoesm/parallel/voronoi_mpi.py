@@ -1026,6 +1026,14 @@ def make_voronoi_mpi_step(
         # sigma from ``cellsOnEdge``); column-local AMIP physics is unaffected
         # by it but the exchange keeps the boundary consistent.
         phys_state_out = phys_state
+        # Surface-flux diagnostic (sw_net_sfc, lw_net_sfc, precip) the coupler
+        # reads from ``_carry_aux`` for the daily ocean/land forcing.  Mirrors
+        # the serial ``primitive_eq_mpas._step_jit``: extract it from the physics
+        # tendency and publish it (rank-local, matching the rank-local state the
+        # MPI-voronoi coupler already sees).  Without this the coupled MPI-voronoi
+        # ocean/land was forced with zero surface flux (the serial path exported
+        # it, the MPI bypass did not).
+        sfc_diag = (None, None, None)
         if physics_fn is not None:
             # Column-local physics needs no neighbor cells -> skip the exchange.
             state_phys_in = (
@@ -1042,6 +1050,12 @@ def make_voronoi_mpi_step(
                 _pt, phys_state_out = _pr[0], _pr[1]
             else:
                 _pt = _pr
+            _sw_sfc = getattr(_pt, "sw_net_sfc", None)
+            _lw_sfc = getattr(_pt, "lw_net_sfc", None)
+            _pr_sfc = getattr(_pt, "precip", None)
+            if (_sw_sfc is not None or _lw_sfc is not None
+                    or _pr_sfc is not None):
+                sfc_diag = (_sw_sfc, _lw_sfc, _pr_sfc)
             state_new = MPASHydrostaticState(
                 u=state_phys_in.u.replace(
                     data=state_phys_in.u.data + dt * _pt.du_dt.data),
@@ -1084,7 +1098,7 @@ def make_voronoi_mpi_step(
                 state_new, state, _owned_area, _total_area_global,
             )
 
-        return cast_pytree(state_new, None, "storage"), phys_state_out
+        return cast_pytree(state_new, None, "storage"), phys_state_out, sfc_diag
 
     logger.info(
         "Voronoi MPI step ready: rank=%d/%d, %d owned cells, %d local cells",
@@ -1106,7 +1120,23 @@ def make_voronoi_mpi_step(
             refuse_unthreaded_stateful_physics(
                 physics_fn, phys_state,
                 where="make_voronoi_mpi_step(return_phys_state=True)")
-            return _step(state, dt, forcing, phys_state)
+            _state_out, _phys_out, _sfc = _step(state, dt, forcing, phys_state)
+            # Publish the surface-flux diagnostic on the model so ``_run_mpas``
+            # stashes it into ``_carry_aux`` for the coupler — the coupled
+            # MPI-voronoi path otherwise forced the ocean/land with zero surface
+            # flux.  Guard against stashing a Tracer (an outer jit/scan/grad would
+            # leak it into the next trace, gh-417) and merge ELEMENT-WISE
+            # keep-last-non-None — both mirror the serial
+            # ``primitive_eq_mpas.step()`` (a held-radiation step refreshes precip
+            # while retaining the last radiation sw/lw).  Python-level side stash
+            # (post-jit), same as the serial ``self._sfc_diag``.
+            if not any(isinstance(leaf, jax.core.Tracer)
+                       for leaf in jax.tree_util.tree_leaves(_sfc)):
+                _prev = getattr(model, "_sfc_diag", None) or (None, None, None)
+                model._sfc_diag = tuple(
+                    new if new is not None else old
+                    for new, old in zip(_sfc, _prev))
+            return _state_out, _phys_out
         return _step_carry
 
     # Backward-compatible contract for the dynamics / stateless-physics

@@ -98,6 +98,29 @@ def test_land_spinup_writes_metrics_and_restart(tmp_path):
     assert np.asarray(state.T_soil).shape == (ncol, _N_LAYERS)
 
 
+def test_land_spinup_voronoi_grid_pipeline():
+    """A3: the standalone land drivers support the Voronoi/MPAS mesh.  ``make_grid``
+    now builds a VoronoiMesh, and the two grid-facing helpers the land columns
+    depend on — ``grid_latlon_rad`` (per-column lat/lon) and the surfdata regrid
+    target ``_target_latlon_flat`` — are already grid-agnostic (both read
+    ``latCell``/``lonCell``), so the per-column land model runs on ``nCells``
+    columns exactly like any gridded columns.  This validates the voronoi grid
+    plumbing (the A3 change); the full end-to-end soil/canopy step is exercised
+    grid-agnostically by the cubed_sphere spin-up test above."""
+    from legoesm.land.global_surface_data import _target_latlon_flat
+    from legoesm.grids.voronoi import VoronoiMesh
+    smoke = _load_driver()._load_smoke()
+    grid = smoke.make_grid("voronoi", 2)              # SCVT level-2 mesh
+    assert isinstance(grid, VoronoiMesh)
+    lat, lon = smoke.grid_latlon_rad(grid)
+    ncol = int(lat.shape[0])
+    assert ncol > 0 and bool(np.isfinite(np.asarray(lat)).all())
+    assert -np.pi / 2 - 1e-6 <= float(lat.min())
+    assert float(lat.max()) <= np.pi / 2 + 1e-6
+    tlat, tlon, shp = _target_latlon_flat(grid)       # surfdata regrids to these
+    assert tlat.shape[0] == ncol and tuple(shp) == (ncol,)
+
+
 def test_land_spinup_restart_resume_advances_calendar(tmp_path):
     """--restart-from resumes at the prior t_end_s and advances the year index
     (the chained long-spin-up path)."""
