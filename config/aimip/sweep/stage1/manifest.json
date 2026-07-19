@@ -8,7 +8,7 @@
   },
   "baseline_yaml": "config/aimip/sweep/stage1/baseline_classical_t21_rrtmgp.yaml",
   "results_dir": "results/aimip_classical_sweep_stage1",
-  "n_combos": 27,
+  "n_combos": 25,
   "combos": [
     {
       "name": "combo_baseline",
@@ -203,18 +203,6 @@
       "suite": "config/aimip/sweep/stage1/combo_turb_edmf/suite.yaml"
     },
     {
-      "name": "combo_turb_none",
-      "dim": "aimip_turbulence",
-      "scheme": "none",
-      "overrides": {
-        "aimip_convection": "tiedtke",
-        "aimip_turbulence": "none",
-        "aimip_gwd": "mcfarlane",
-        "aimip_microphysics": "sundqvist"
-      },
-      "suite": "config/aimip/sweep/stage1/combo_turb_none/suite.yaml"
-    },
-    {
       "name": "combo_gwd_lindzen",
       "dim": "aimip_gwd",
       "scheme": "lindzen",
@@ -261,18 +249,6 @@
         "aimip_microphysics": "sundqvist"
       },
       "suite": "config/aimip/sweep/stage1/combo_gwd_prognostic_spectral/suite.yaml"
-    },
-    {
-      "name": "combo_gwd_none",
-      "dim": "aimip_gwd",
-      "scheme": "none",
-      "overrides": {
-        "aimip_convection": "tiedtke",
-        "aimip_turbulence": "louis",
-        "aimip_gwd": "none",
-        "aimip_microphysics": "sundqvist"
-      },
-      "suite": "config/aimip/sweep/stage1/combo_gwd_none/suite.yaml"
     },
     {
       "name": "combo_micro_kessler",
@@ -323,16 +299,17 @@
       "suite": "config/aimip/sweep/stage1/combo_micro_thompson/suite.yaml"
     },
     {
-      "name": "combo_micro_none",
-      "dim": "aimip_microphysics",
-      "scheme": "none",
+      "name": "combo_cloud_sundqvist",
+      "dim": "aimip_cloud",
+      "scheme": "sundqvist",
       "overrides": {
         "aimip_convection": "tiedtke",
         "aimip_turbulence": "louis",
         "aimip_gwd": "mcfarlane",
-        "aimip_microphysics": "none"
+        "aimip_microphysics": "sundqvist",
+        "aimip_cloud": "sundqvist"
       },
-      "suite": "config/aimip/sweep/stage1/combo_micro_none/suite.yaml"
+      "suite": "config/aimip/sweep/stage1/combo_cloud_sundqvist/suite.yaml"
     }
   ]
 }
