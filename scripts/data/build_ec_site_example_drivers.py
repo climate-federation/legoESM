@@ -36,7 +36,10 @@ SITES = [("US-MMS", 2015, 2018), ("DE-Obe", 2015, 2018),
 # from the reader's required-input list so this never drifts from the model.
 _FORCING = list(ec_site._REQUIRED)            # SW/LW/TA/VPD/PA/WS/P/CO2/SZA/SWC/TS/LAI/CI/...
 _TARGETS = ["ET", "GPP_DT", "H", "NEE", "USTAR", "ET_CORR", "H_CORR"]  # evaluated against (raw)
-_META = ["Vcmax25_C3Leaf", "IGBP", "CLIMATE", "C4", "CANOPY_HEIGHT", "LAT", "LONG"]
+# EMISSIVITY is consumed by the reader (CanopyLandParams.emissivity) but is NOT in
+# ``_REQUIRED`` (it has a 0.97 fallback), so it must be listed explicitly here or a
+# trimmed driver would silently fall back and diverge from the full-driver run.
+_META = ["EMISSIVITY", "Vcmax25_C3Leaf", "IGBP", "CLIMATE", "C4", "CANOPY_HEIGHT", "LAT", "LONG"]
 _FLAGS = ["met_atm_filled", "met_any_filled", "soil_filled"]          # gap-fill provenance
 KEEP = list(dict.fromkeys(_FORCING + _TARGETS + _META + _FLAGS))
 

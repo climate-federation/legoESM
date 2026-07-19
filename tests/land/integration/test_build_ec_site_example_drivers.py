@@ -34,23 +34,40 @@ def test_build_one_trims_and_annotates(tmp_path):
     src = tmp_path / "src"; src.mkdir()
     out = tmp_path / "out"
     # synthetic driver spanning >1 year so the window subset is a real cut
-    _make_driver(str(src / "SYN-Test_driver_v2_gapfree.nc"), n=48 * 400)
+    dp = str(src / "SYN-Test_driver_v2_gapfree.nc")
+    _make_driver(dp, n=48 * 400)
     build = _load("build_ec_site_example_drivers", _BUILD_PY)
+    # augment with the consumed vars the base synthetic driver lacks, so the test
+    # exercises the FULL keep-set (closure band + gap-fill flags), then compare the
+    # output against exactly what the model consumes AND the source provides.
+    with xr.open_dataset(dp) as _d:
+        srcds = _d.load().copy(deep=True)
+    nn = srcds.sizes["time"]
+    for extra, val in [("ET_CORR", 2.2), ("H_CORR", 50.0), ("met_atm_filled", 0.0),
+                       ("met_any_filled", 0.0), ("soil_filled", 0.0)]:
+        srcds[extra] = ("time", np.full(nn, val))
+    srcds.to_netcdf(dp)
 
     p = build.build_one("SYN-Test", 2015, 2015, str(src), str(out))
     assert pathlib.Path(p).name == "SYN-Test_driver_v2_gapfree.nc"
     ds = xr.open_dataset(p)
 
-    # every kept variable is one the model consumes; source float64 is preserved
-    # (no downcast — prognostic soil moisture drifts under float32).
-    assert set(ds.data_vars) <= set(build.KEEP)
-    assert "SW_IN" in ds and "GPP_DT" in ds            # forcing + a target survived
+    # EXACTLY the kept vars the source provides survive — a consumed var silently
+    # dropped from build_one's `have` filter (e.g. the EMISSIVITY regression) fails.
+    expected = {v for v in build.KEEP if v in srcds.data_vars}
+    assert set(ds.data_vars) == expected
+    assert "EMISSIVITY" in ds and "ET_CORR" in ds and "soil_filled" in ds
     for v in ds.data_vars:
-        if np.issubdtype(ds[v].dtype, np.floating):
+        if np.issubdtype(ds[v].dtype, np.floating):      # source float64 preserved
             assert ds[v].dtype == np.float64
-        # metadata present on every kept variable
-        for a in ("units", "long_name", "description"):
+        for a in ("units", "long_name", "description"):  # metadata on every var
             assert a in ds[v].attrs and ds[v].attrs[a]
+    # exact units for the reader-sensitive fields (a hPa->Pa etc. regression fails)
+    assert ds["VPD"].attrs["units"] == "hPa"
+    assert ds["PA"].attrs["units"] == "kPa"
+    assert ds["SWC"].attrs["units"] == "percent"
+    assert ds["ET"].attrs["units"] == "mm day-1"
+    assert ds["CO2"].attrs["units"] in {"umol mol-1", "ppm"}
 
     # window actually subset (synthetic starts 2015-06-01; one year -> < full record)
     assert set(np.unique(ds.time.dt.year.values)) == {2015}
