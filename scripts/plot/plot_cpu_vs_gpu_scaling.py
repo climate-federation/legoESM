@@ -165,6 +165,12 @@ _PAPER_LINES = ["--", "-.", "-"]
 # icosahedral run 128 MPI procs/node. Same hardware, ~15x different per-node
 # throughput -- so the cube CPU panel is NOT comparable to its neighbours.
 _CUBE_CPU_NOTE = "1 proc × 128 threads\n(XLA-CPU, not MPI-packed)"
+# Icosahedral is the one CONTROLLED column: both backends run route A (mpi4jax
+# point-to-point, the same RCB cell partition and _auto_dt via
+# run_cpu_mpi_scaling), so the CPU-vs-GPU offset there is a like-for-like
+# comparison, not an as-deployed one. lat-lon and cube remain route-A-CPU vs
+# route-B-GPU (transport + decomposition differ).
+_ICO_CONTROLLED_NOTE = "controlled: route A\nboth backends"
 
 
 def make_paper_figure(rows, out_dir: Path, name: str = "fig_cpu_gpu_mcells",
@@ -172,20 +178,24 @@ def make_paper_figure(rows, out_dir: Path, name: str = "fig_cpu_gpu_mcells",
     """2x3 paper figure: CPU (top) / GPU (bottom) x cube / ico / lat-lon.
 
     Mcells/s ONLY -- SYPD is deliberately absent. SYPD = f(dt), and the
-    route-B SPMD lanes (lat-lon + icosahedral GPU) carry a benchmark-default
-    dt rather than a CFL one, so any SYPD from them is not physical. Mcells/s
-    is timestep-free and valid across every lane.
+    route-B lat-lon GPU lane carries a benchmark-default dt rather than a CFL
+    one, so any SYPD from it is not physical. Mcells/s is timestep-free and
+    valid across every lane.
 
     The y-axis is SHARED across all six panels: the CPU-vs-GPU comparison is
     read as the VERTICAL OFFSET between rows, which only works on one scale.
 
-    Comparison caveat (see the campaign report SCOPE): for lat-lon and
-    icosahedral the CPU rows are route A (mpi4jax, 2-D pencil) and the GPU
-    rows are route B (jax.distributed/NCCL, 1-D lat-band), so transport,
-    decomposition AND hardware all differ. Read this as AS-DEPLOYED
-    throughput -- what each stack delivers as actually configured -- never as
-    a hardware speed-up. Cubed-sphere alone is a controlled comparison (both
-    lanes cs_spmd, same driver, same dt).
+    Comparison status per grid (see the campaign report SCOPE):
+    - icosahedral: CONTROLLED. Both backends run route A (mpi4jax, same RCB
+      cell partition and _auto_dt via run_cpu_mpi_scaling), so the CPU-vs-GPU
+      offset is like-for-like.
+    - lat-lon: AS-DEPLOYED. CPU is route A (2-D pencil), GPU is route B
+      (jax.distributed/NCCL, 1-D lat-band); transport AND decomposition
+      differ, so read as what each stack delivers as configured, not a
+      hardware speed-up.
+    - cubed-sphere: route-controlled (both cs_spmd) but the CPU side is
+      face-capped to 1 proc x 128 threads, so its per-node throughput is not
+      comparable to the MPI-packed lat-lon/ico CPU panels.
     """
     if rows and metric not in rows[0]:
         raise SystemExit(
@@ -243,6 +253,10 @@ def make_paper_figure(rows, out_dir: Path, name: str = "fig_cpu_gpu_mcells",
                 ax.annotate(_CUBE_CPU_NOTE, xy=(0.04, 0.96),
                             xycoords="axes fraction", fontsize=7,
                             color="#b5562a", va="top")
+            if row == 0 and grid == "icosahedral":
+                ax.annotate(_ICO_CONTROLLED_NOTE, xy=(0.04, 0.96),
+                            xycoords="axes fraction", fontsize=7,
+                            color="#2c6f4f", va="top")
             if ax.get_legend_handles_labels()[0]:
                 ax.legend(fontsize=7.5, frameon=False, loc="best")
 
