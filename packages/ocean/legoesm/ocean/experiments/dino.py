@@ -776,6 +776,29 @@ DINO_RECIPES: dict[str, dict] = {
         "A_h_eq_boost": 1.0,
         "A_h_floor": 0.0,
         # -- Barotropic / free surface (namdyn_spg: ln_dynspg_ts=T; nn_bt_flt=2; nn_e=30) --
+        # FE-FRAME FIDELITY CEILING (verified 2026-07-18, step-dump twin vs NEMO
+        # RUN_STEPDUMP kt=5760->5761): this card runs the barotropic mode on the
+        # forward_euler outer frame, but NEMO-DINO's dyn_spg_ts is intrinsically
+        # the MLF/centred barotropic (ln_bt_fw=F, a 2*nn_e window over 2dt seeded
+        # from the before-level). Two MLF-only composition pieces are therefore
+        # FAITHFULLY guarded OUT of this frame (do NOT re-wire them here):
+        #   * barotropic_time_filter="nemo_boxcar_ab3" (AB3 vel + AM4 ssh temporal
+        #     dissipation) requires outer_integrator="leapfrog" — the 2dt window +
+        #     before-seed are what make the AM4 boxcar faithful; on the dt/nn_e
+        #     forward window the dissipation window is halved (unfaithful).
+        #   * barotropic_coriolis_split="live" (in-substep dyn_cor_2D) requires
+        #     coriolis_scheme="explicit_ab2" so F_slow CONTAINS the planetary
+        #     Coriolis for the pre-step subtraction to cancel; this card uses
+        #     matsuno_split (planetary Coriolis applied as a separate rotation,
+        #     NOT in F_slow) -> live subtraction would leave an O(1) residual.
+        # The step-1 eta residual (interior rms 1.88e-2 m) is NOT a 2dx barotropic
+        # checkerboard (2dx-proj/total = 0.000) but a smooth west-wall + equatorial
+        # pattern = the forward_euler-vs-MLF integrator-frame difference, which no
+        # barotropic sub-step composition can remove. The bit-faithful NEMO-DINO
+        # dynspg_ts match is the MLF card (nemo_dino_kamm_mlf), not this FE card.
+        # barotropic_diffusion_alpha (0.01, default) is a forward-frame 2dx
+        # stability crutch, not a NEMO term; setting it 0 slightly WORSENS step-1
+        # eta (1.88->1.94e-2) and does not touch the (non-2dx) residual.
         "barotropic_solver": "explicit_substep",
         "barotropic_time_filter": "nemo_boxcar_centred",
         # namdyn_vor: ln_dynvor_een — enstrophy-conserving EEN barotropic
