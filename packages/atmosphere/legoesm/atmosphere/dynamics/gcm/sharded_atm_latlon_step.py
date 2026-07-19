@@ -89,12 +89,16 @@ def build_sharded_held_suarez_state_atm_latlon(
     The #1100 invariant for multi-process runs: **neither global builds nor
     ``device_put`` replication** — every global-shaped leaf is created with
     ``jax.make_array_from_callback``, whose callback is invoked only for the
-    row slices owned by THIS process's addressable devices (and which, unlike
-    ``device_put`` on a replicated sharding, runs no cross-process
-    ``assert_equal`` all-gather).  This removes the per-process global-state
-    BUILD that made the route-B lat-lon bench OOM under full-node CPU packing
-    (``held_suarez_init_latlon`` + ``hydrostatic_to_cgrid`` materialised the
-    full ``(n_lat, n_lon, nlev)`` state on every process before sharding).
+    row slices owned by THIS process's addressable devices (documented JAX
+    semantics: per-addressable-shard callbacks with GLOBAL index slices).  No
+    full global array is ever handed to ``device_put`` — the path measured to
+    detonate under many-process packing in #1100 (its cross-process
+    consistency check amplified even small replicated objects; an
+    implementation behaviour we cite as measured, not as API contract).  This
+    removes the per-process global-state BUILD that made the route-B lat-lon
+    bench OOM under full-node CPU packing (``held_suarez_init_latlon`` +
+    ``hydrostatic_to_cgrid`` materialised the full ``(n_lat, n_lon, nlev)``
+    state on every process before sharding).
 
     Bit-identical to
     ``shard_state_atm_latlon(hydrostatic_to_cgrid(held_suarez_init_latlon(
@@ -143,8 +147,10 @@ def build_sharded_held_suarez_state_atm_latlon(
 
     def _T_cb(idx):
         shape = _slice_shape((n_lat, n_lon, nlev), idx)
-        block = jnp.full(shape, T_init, dtype=_dtype)
-        # same op as init's global ``T.at[:, :, -1].add(pert)`` on these rows
+        # EXACT expression of held_suarez_init_latlon (``ones * T_init`` then
+        # ``.at[:, :, -1].add(pert)``) so promotion semantics match for
+        # strongly-typed ``T_init`` too, not just Python floats.
+        block = jnp.ones(shape, dtype=_dtype) * T_init
         return block.at[:, :, -1].add(pert2d[idx[0], idx[1]])
 
     def _ps_cb(idx):
