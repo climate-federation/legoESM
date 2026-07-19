@@ -137,3 +137,17 @@ Note: the model under-predicts GPP/latent heat at **dense, high-LAI wet broadlea
 forests** (a documented coupled-closure bistability — see
 `two_leaf_canopy_wet_forest_bistability.md`), so tropical/wet-EBF sites are not yet
 suitable panel members.
+
+---
+
+### Note on the per-site parameters
+
+The `EC_SITE_PHYSICS` entries are not all measurements. The **tower height**
+(`z_ref`) *is* observed — the FLUXNET BADM `Reference_height_v`. The **rooting
+depth** (`root_depth`), by contrast, is a **modeling choice**: it is the e-folding
+depth of the *prescribed* root-density profile (`root_frac = exp(-z/root_depth)`),
+set to a value plausible for the site's PFT and soil profile (deeper for
+phreatophytes that tap deep soil / weathered-bedrock water through the dry season),
+and validated against the fluxes — **not** a measured rooting depth. `soil_depth_m`
+is likewise a column-depth choice. Treat `root_depth` / `soil_depth_m` as tunable
+modeling inputs, not observations.

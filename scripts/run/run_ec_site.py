@@ -82,11 +82,13 @@ _SOIL_FC_WP = {"siltloam": (0.33, 0.13), "sandyloam": (0.21, 0.10)}
 # height is the only site-specific aerodynamic input.  The Ball-Berry intercept
 # stress (stress_b0) is set globally (cuticular conductance persists on live
 # leaves; a dormant/deciduous canopy self-limits via LAI -> 0), not per site.
-# root_depth reflects the rooting depth the site's soil profile actually permits:
-# a deep glacial-till loam (US-MMS) roots deeper than a shallow montane podzol
-# (DE-Obe) or an annual grassland (US-Var), while phreatophytes tapping deep soil /
-# weathered-bedrock water through the dry season (US-Ton oaks, AU-How savanna) root
-# far deeper.  These are the per-site values validated against the FLUXNET fluxes.
+# root_depth is a MODELING CHOICE (the e-folding depth of the prescribed root-
+# density profile), NOT a measured rooting depth: it is set to a value plausible for
+# the site's PFT and soil profile and validated against the FLUXNET fluxes, not
+# observed directly.  A deep glacial-till loam (US-MMS) is given deeper roots than a
+# shallow montane podzol (DE-Obe) or an annual grassland (US-Var), and phreatophytes
+# tapping deep soil / weathered-bedrock water through the dry season (US-Ton oaks,
+# AU-How savanna) deeper still.  soil_depth_m is likewise a column-depth choice.
 EC_SITE_PHYSICS: dict[str, dict[str, float]] = {
     "US-MMS": {"z_ref": 46.0, "root_depth": 2.0},                     # deep loam, DBF
     "DE-Obe": {"z_ref": 30.0, "root_depth": 1.0},                     # shallow montane ENF
