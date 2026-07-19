@@ -461,6 +461,11 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         dT_dt = first.dT_dt.data
         dp_s_dt = first.dp_s_dt.data
         dphis_dt = first.dphis_dt.data
+        # Surface precip [kg/m^2/s]: summed across whichever modules produce it
+        # (microphysics does; radiation/turbulence/GWD do not -> None). Kept as a
+        # diagnostic (not a tendency) so the lean MPAS loop can export it.
+        precip_accum = (first.precip.data
+                        if getattr(first, "precip", None) is not None else None)
 
         # Accumulate tracer tendencies from all physics modules
         combined_tracer_tends = {}
@@ -506,8 +511,12 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                     else:
                         combined_tracer_tends[k] = v.data
 
+            if getattr(t, "precip", None) is not None:
+                precip_accum = (t.precip.data if precip_accum is None
+                                else precip_accum + t.precip.data)
+
         return (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
-                combined_tracer_tends, phys_updates, first)
+                combined_tracer_tends, phys_updates, first, precip_accum)
 
     def _build_combined(first, du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
                         combined_tracer_tends):
@@ -531,6 +540,16 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             tracer_tendencies=tracer_tends_out,
         )
 
+    def _attach_sfc_precip(combined, first, precip_accum):
+        """Carry surface precip [kg/m^2/s] on the combined tendency (dropped by
+        _build_combined) so the lean MPAS loop can export it. No-op / byte-
+        identical when microphysics produced no precip (precip_accum is None)."""
+        if precip_accum is None:
+            return combined
+        return combined._replace(precip=Field(
+            data=precip_accum, name="precip",
+            dims=first.dp_s_dt.dims, units="kg/m^2/s"))
+
     def physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None):
         has_v = state.v is not None
 
@@ -553,7 +572,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                     dT = dT + cached_rad.reshape(dT.shape)
                 return zt._replace(dT_dt=zt.dT_dt.replace(data=dT)), phys_state
             (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
-             combined_tracer_tends, phys_updates, first) = _accumulate(
+             combined_tracer_tends, phys_updates, first,
+             precip_accum) = _accumulate(
                 _non_rad_fns, state, grid, sigma_coord, phys_state, forcing)
             if cached_rad is not None:
                 # cached_rad is column-shaped (ncol, nlev); restore native layout.
@@ -561,6 +581,9 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             combined = _build_combined(
                 first, du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
                 combined_tracer_tends)
+            # Held-radiation sub-step: no fresh sw/lw solve, but precip (from
+            # microphysics, which runs every step) is still exported.
+            combined = _attach_sfc_precip(combined, first, precip_accum)
             # rad_heating is carried UNCHANGED (not in phys_updates).
             phys_state_out = update_physics_state(phys_state, phys_updates)
             return combined, phys_state_out
@@ -569,7 +592,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         if not tagged_fns:
             return _zero_tendencies(state, has_v), None
         (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
-         combined_tracer_tends, phys_updates, first) = _accumulate(
+         combined_tracer_tends, phys_updates, first,
+         precip_accum) = _accumulate(
             tagged_fns, state, grid, sigma_coord, phys_state, forcing)
         # Cache the radiative heating contribution for the held sub-cycle
         # steps.  Radiation is tagged_fns[0], so ``first.dT_dt`` is exactly
@@ -596,6 +620,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             # constructs a fresh tendency that drops these diagnostic fields).
             combined = combined._replace(
                 sw_net_sfc=first.sw_net_sfc, lw_net_sfc=first.lw_net_sfc)
+        # Same for surface precip (from microphysics; _build_combined drops it).
+        combined = _attach_sfc_precip(combined, first, precip_accum)
         phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
 

@@ -5435,6 +5435,9 @@ class ModelDriver:
                         # HS repack — else HS+radiation loses them (codex).
                         sw_net_sfc=rrtmgp_tend.sw_net_sfc,
                         lw_net_sfc=rrtmgp_tend.lw_net_sfc,
+                        # ...including surface precip (HS+microphysics), else the
+                        # ocean P-E / land forcing loses it through the repack.
+                        precip=getattr(rrtmgp_tend, "precip", None),
                     )
                     return summed, phys_state_out
 
@@ -5785,9 +5788,20 @@ class ModelDriver:
                         if _sfc_diag is not None:
                             if not isinstance(self._carry_aux, dict):
                                 self._carry_aux = {}
-                            self._carry_aux["held_sw_net_sfc"] = _sfc_diag[0].data
-                            self._carry_aux["held_lw_net_sfc"] = _sfc_diag[1].data
-                            if not getattr(self, "_logged_sfc_export", False):
+                            # Each element is None on the step where its source
+                            # is inactive (sw/lw on a held-radiation sub-step or
+                            # radiation=none; precip on a dry run) — stash only
+                            # the fresh ones, keeping the last value otherwise.
+                            if _sfc_diag[0] is not None:
+                                self._carry_aux["held_sw_net_sfc"] = _sfc_diag[0].data
+                            if _sfc_diag[1] is not None:
+                                self._carry_aux["held_lw_net_sfc"] = _sfc_diag[1].data
+                            # Surface precip [kg/m^2/s] for the ocean P-E /
+                            # land forcing (None on a dry MPAS run).
+                            if len(_sfc_diag) > 2 and _sfc_diag[2] is not None:
+                                self._carry_aux["seg_precip"] = _sfc_diag[2].data
+                            if (not getattr(self, "_logged_sfc_export", False)
+                                    and "held_sw_net_sfc" in self._carry_aux):
                                 _sw = self._carry_aux["held_sw_net_sfc"]
                                 logger.info(
                                     "  Coupled surface radiative forcing (MPAS "
