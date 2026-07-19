@@ -113,6 +113,18 @@ def main():
                              "into grid-scale cloud q_c (the coarse-RCE cloud source "
                              "morrison then processes; the rest precipitates). A "
                              "closure knob (tunable) — 0 disables the source.")
+    parser.add_argument("--cloud-fraction-scheme",
+                        choices=["sundqvist", "xu_randall", "resolved"],
+                        default="sundqvist",
+                        help="Subgrid cloud-fraction / saturation scheme feeding the "
+                             "RRTMGP cloud optics (--radiation rrtmgp --microphysics "
+                             "morrison). 'sundqvist' (default) diagnoses cloud from RH "
+                             "and floors the in-cloud condensate, so a coarse "
+                             "subsaturated grid-mean column (where the resolved q_c "
+                             "evaporates to ~0) still carries radiatively-active cloud "
+                             "— unlike a binary q_c>threshold cover. 'xu_randall' also "
+                             "needs resolved condensate; 'resolved' is the CRM "
+                             "convention (cf from explicit q_c only).")
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--grid-type", type=str, default="cubed_sphere",
                         choices=["cubed_sphere", "gaussian", "latlon", "voronoi"],
@@ -557,8 +569,14 @@ def main():
         # while the incoming flux stays at the RCE target regardless of mu0.
         RCE_MU0 = float(args.rce_cos_zenith)
         _rce_insol = 409.6                              # W/m^2 (RCEMIP)
+        # include_clouds gates the RRTMGP cloud optics (rrtmgp.py: has_clouds =
+        # config.include_clouds and ...); it defaults False, so WITHOUT this the
+        # cloud_path/r_eff kwargs are silently ignored and morrison RCE runs
+        # clear-sky regardless of the cloud fraction.  Turn the cloud tables on
+        # exactly when morrison supplies condensate for the optics.
         rrtmgp_config = RRTMGPConfig(sfc_albedo=sfc_albedo,
-                                     S_0=_rce_insol / RCE_MU0)
+                                     S_0=_rce_insol / RCE_MU0,
+                                     include_clouds=USE_MORRISON)
         preload_rrtmgp_optics(rrtmgp_config)   # load gas/cloud optics once (host)
     if USE_MORRISON:
         from legoesm.atmosphere.physics.microphysics.morrison import (
@@ -568,6 +586,15 @@ def main():
         # Warm-phase M2005 on the coarse RCE columns (deep-ice is a follow-up):
         # condense -> q_c, autoconvert/accrete -> q_r, sediment/evaporate rain.
         morrison_config = MorrisonConfig()
+        # Subgrid cloud fraction + condensate floor for the RRTMGP optics. The
+        # coarse grid-mean saturation adjustment condenses ~0 in a subsaturated
+        # column, so the resolved q_c alone leaves clouds optically inert and RCE
+        # runs effectively clear. Reuse the SAME diagnostic the AMIP/coupled
+        # radiation path uses (no re-derived cloud optics): Sundqvist diagnoses
+        # cf from RH and floors the in-cloud condensate at cf*q_c_diagnostic.
+        from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+            compute_cloud_properties, CloudConfig)
+        cloud_config = CloudConfig(scheme=args.cloud_fraction_scheme)
 
     # Grid-specific hyperdiffusion (spectral/voronoi handle diffusion in dycore)
     _apply_hyperdiff = None
@@ -623,19 +650,25 @@ def main():
             mu0 = jnp.full(ncol, float(args.rce_cos_zenith), dtype=T_col.dtype)
             if USE_MORRISON:
                 dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
-                cloudy = q_c_col > 1e-8
-                clwp = jnp.where(cloudy, 1.0e3 * q_c_col * dp_col / constants.g,
-                                 0.0)                                # g/m^2
-                # r_eff stays a POSITIVE constant even in clear cells so any
-                # path/r_eff in the optics can't divide by zero; cloud_fraction
-                # masks the (zero-path) clear cells. (codex 2026-07-18)
-                r_eff = jnp.full_like(q_c_col, 10.0)                 # um (liq)
-                cfrac = cloudy.astype(T_col.dtype)
+                # Subgrid cloud fraction + condensate floor from the SHARED
+                # diagnostic (Sundqvist / Xu-Randall).  A binary q_c>threshold
+                # cover left the coarse RCE column clear whenever the grid-mean
+                # saturation adjustment condensed ~0 (q_c evaporates in the
+                # subsaturated grid mean) — so morrison RCE was effectively
+                # clear-sky.  compute_cloud_properties diagnoses cf from RH and
+                # floors the in-cloud liquid/ice at cf*q_c_diagnostic, then
+                # to_rrtmg_kwargs() hands the solver GRID-MEAN paths [kg/m^2]
+                # (the calibrated AMIP/coupled units — the old inline path
+                # passed g/m^2, 1e3x too large, masked only because q_c~=0) and
+                # deliberately omits cloud_fraction (grid-mean LWP already
+                # carries the cf discount; passing both double-counts it).
+                cloud_props = compute_cloud_properties(
+                    T=T_col, p_full=p_full_col, q_v=q_v_col, dp=dp_col,
+                    config=cloud_config, q_cloud=q_c_col)
                 rad = rrtmgp_radiation(
                     T=T_col, p_full=p_full_col, p_half=p_half_col,
                     sfc_temperature=T_sfc_col, q_v=q_v_col, cos_zenith=mu0,
-                    config=rrtmgp_config, cloud_path_liq=clwp,
-                    cloud_r_eff_liq=r_eff, cloud_fraction=cfrac)
+                    config=rrtmgp_config, **cloud_props.to_rrtmg_kwargs())
             else:
                 rad = rrtmgp_radiation(
                     T=T_col, p_full=p_full_col, p_half=p_half_col,
@@ -818,6 +851,8 @@ def main():
     print("=" * 70)
     _rad_label = "RRTMGP" if USE_RRTMGP else "gray"
     _micro_label = "morrison" if USE_MORRISON else "sat-adjust"
+    if USE_RRTMGP and USE_MORRISON:
+        _micro_label += f" (cloud fraction: {args.cloud_fraction_scheme})"
     print(f"  Moist RCE: {_ocean_label} {args.mode} + {_rad_label} radiation + "
           f"SBM convection + {_micro_label} microphysics")
     print("=" * 70)
