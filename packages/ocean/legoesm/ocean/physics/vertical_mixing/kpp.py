@@ -123,7 +123,37 @@ __physics_contract__ = {
 _EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
 
 
-def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, eps):
+def _kpp_ice_attenuation(ice_frac, eice):
+    """Under-ice attenuation factor ``(1 - eff)`` for the KPP velocity scales.
+
+    Mirror of the TKE closure's NEMO ``nn_eice`` (see
+    ``vertical_mixing.tke``): compact sea ice caps the surface, so the
+    surface-forcing-driven turbulent velocity scales — and hence both the
+    boundary-layer depth (via ``V_t^2``) and the mixing coefficients — are
+    reduced under ice.  ``eice`` selects the effective ice fraction:
+
+    - ``0`` (default, BIT-IDENTICAL): no attenuation (returns 1.0).
+    - ``1``: eff = fi              -> factor (1 - fi).
+    - ``3``: eff = min(4*fi, 1)    -> factor max(0, 1 - 4*fi) (NEMO nn_eice=3;
+      mixing fully suppressed at fi >= 0.25).
+
+    ``ice_frac`` None (no coupler ice field) -> 1.0.  Unknown ``eice`` raises
+    (dispatch hardening; static config value).
+    """
+    if eice == 0 or ice_frac is None:
+        return 1.0
+    if eice == 1:
+        eff = ice_frac
+    elif eice == 3:
+        eff = jnp.minimum(4.0 * ice_frac, 1.0)
+    else:
+        raise ValueError(
+            f"Unknown KPPConfig.eice={eice!r}; expected 0 (off), 1 ((1-fi)) "
+            "or 3 (max(0,1-4*fi), NEMO nn_eice=3).")
+    return jnp.maximum(1.0 - eff, 0.0)[..., jnp.newaxis]
+
+
+def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, eps, ice_frac=None):
     """LMD94 (Appendix B) turbulent velocity scales at depth(s) ``d``.
 
     Returns the momentum (``w_m``) and scalar (``w_s``) similarity velocity
@@ -131,6 +161,13 @@ def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, eps):
     bulk-Richardson ``V_t^2`` (in ``_boundary_layer_depth``) and the
     boundary-layer diffusivities (in ``kpp_vertical_mixing``) share ONE
     velocity-scale implementation instead of duplicating it.
+
+    ``ice_frac`` (0-1 sea-ice concentration, or None) drives the under-ice
+    attenuation ``(1 - eff)`` (``KPPConfig.eice``; NEMO nn_eice) applied to the
+    FINAL ``w_m``/``w_s``: it shrinks both the mixing coefficients AND ``V_t^2``
+    (so the bulk-Ri boundary layer shoals), the KPP analogue of the TKE
+    closure's under-ice wave-TKE suppression.  ``eice=0`` -> factor 1 ->
+    bit-identical.
 
     Parameters
     ----------
@@ -180,6 +217,13 @@ def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, eps):
                 / jnp.maximum(1.0 + cfg.businger_stable_coeff * jnp.maximum(-zeta, 0.0), 1.0))
     w_m = jnp.maximum(jnp.where(is_unstable, w_m_unstable, w_stable), 1e-10)
     w_s = jnp.maximum(jnp.where(is_unstable, w_s_unstable, w_stable), 1e-10)
+    # Under-ice attenuation (NEMO nn_eice; KPPConfig.eice) — applied to the
+    # final scales so it flows into BOTH V_t^2 (BL depth) and the K profiles.
+    # The 1e-10 floors above are re-imposed so a full-ice factor of 0 does not
+    # produce an exactly-zero scale that would divide-by-zero downstream.
+    _att = _kpp_ice_attenuation(ice_frac, getattr(cfg, "eice", 0))
+    w_m = jnp.maximum(w_m * _att, 1e-10)
+    w_s = jnp.maximum(w_s * _att, 1e-10)
     return w_m, w_s
 
 
@@ -231,6 +275,7 @@ def _boundary_layer_depth(
     g: float = constants.g,
     h_bl_prev: jnp.ndarray | None = None,
     eos_fn=None,
+    ice_frac: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Estimate boundary layer depth h via bulk Richardson number.
 
@@ -293,7 +338,8 @@ def _boundary_layer_depth(
     max_depth = z_depth[..., -1]
     h_est = max_depth if h_bl_prev is None else h_bl_prev
     h_safe = jnp.maximum(h_est[..., jnp.newaxis], eps)
-    _, w_s_vt = _kpp_velocity_scales(u_star, B_f, z_depth, h_safe, cfg, eps)
+    _, w_s_vt = _kpp_velocity_scales(u_star, B_f, z_depth, h_safe, cfg, eps,
+                                     ice_frac=ice_frac)
     V_t2 = _kpp_unresolved_shear_variance(N_full, z_depth, w_s_vt, cfg, eps)
 
     # Bulk Richardson number
@@ -372,6 +418,7 @@ def kpp_vertical_mixing(
     dt: float | None = None,
     eos_fn=None,
     u_stokes: jnp.ndarray | None = None,
+    ice_frac: jnp.ndarray | None = None,
 ) -> VerticalMixingOutput:
     """Apply LMD94-style KPP vertical mixing.
 
@@ -434,7 +481,7 @@ def kpp_vertical_mixing(
     # --- Boundary layer depth ---
     h_bl = _boundary_layer_depth(
         rho, T, S, u, v, z_coord, jacobian, u_star, B_f, cfg, g,
-        h_bl_prev=h_bl_prev, eos_fn=eos_fn,
+        h_bl_prev=h_bl_prev, eos_fn=eos_fn, ice_frac=ice_frac,
     )
 
     # --- Depth coordinate ---
@@ -454,7 +501,7 @@ def kpp_vertical_mixing(
     # convection (F-OCEAN-1), while w_m feeds the momentum viscosity.
     d = sigma_clip * h_bl[..., jnp.newaxis]
     w_m, w_s = _kpp_velocity_scales(
-        u_star, B_f, d, h_bl[..., jnp.newaxis], cfg, eps,
+        u_star, B_f, d, h_bl[..., jnp.newaxis], cfg, eps, ice_frac=ice_frac,
     )
 
     # --- Langmuir turbulence enhancement (KPP-Langmuir) ---

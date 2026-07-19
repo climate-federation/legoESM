@@ -604,6 +604,17 @@ class KPPConfig(NamedTuple):
     enable_langmuir: bool = False    # opt-in Langmuir enhancement
     langmuir_coeff: float = 0.08     # C_L in eps_L = sqrt(1 + C_L/La_t^2)
     langmuir_number_default: float = 0.3  # fallback La_t when no Stokes-drift input
+    # ``eice``: under-ice attenuation of the KPP turbulent velocity scales
+    #   (NEMO nn_eice analogue; mirrors TKEConfig.eice).  Compact sea ice caps
+    #   the surface, so the surface-forcing-driven w_m/w_s — and hence BOTH the
+    #   bulk-Ri boundary-layer depth (via V_t^2) and the mixing coefficients —
+    #   are scaled by (1 - eff) under ice.  0 (default, BIT-IDENTICAL) = off;
+    #   1 = eff=fi (1-fi); 3 = eff=min(4*fi,1) (max(0,1-4*fi), NEMO nn_eice=3,
+    #   mixing killed at fi>=0.25).  Consumes surface_forcing.ice_concentration
+    #   (2026-07-19: the KPP grids' Arctic halocline erosion — over-deep MLD +
+    #   Siberian salty — that TKEConfig.eice fixed on the TKE grid but never
+    #   reached the KPP grids).
+    eice: int = 0                    # 0 off | 1 (1-fi) | 3 max(0,1-4fi)
 
 
 class CATKEConfig(NamedTuple):

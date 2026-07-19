@@ -1627,7 +1627,7 @@ def _resolve_wind_vfac(relative_winds: bool, wind_vfac):
     return vfac
 
 
-def _kpp_vmix_override(kpp_ri_crit=None, kpp_cv=None):
+def _kpp_vmix_override(kpp_ri_crit=None, kpp_cv=None, kpp_eice=None):
     """Build a KPP ``VerticalMixingConfig`` overriding ONLY the CLI-set knobs.
 
     Returns ``None`` when neither knob is given so the caller falls through to
@@ -1635,7 +1635,7 @@ def _kpp_vmix_override(kpp_ri_crit=None, kpp_cv=None):
     byte-for-byte the pre-flag config (no silent re-defaulting of the other
     KPP fields).  ``Ri_crit`` / ``Cv`` must be finite and within their accepted
     range (see ``_KPP_RI_CRIT_RANGE`` / ``_KPP_CV_RANGE``)."""
-    if kpp_ri_crit is None and kpp_cv is None:
+    if kpp_ri_crit is None and kpp_cv is None and kpp_eice is None:
         return None
     from legoesm.ocean.physics.vertical_mixing.config import (
         KPPConfig, VerticalMixingConfig,
@@ -1655,6 +1655,12 @@ def _kpp_vmix_override(kpp_ri_crit=None, kpp_cv=None):
     if kpp_cv is not None:
         _check("kpp-cv", kpp_cv, _KPP_CV_RANGE)
         kpp = kpp._replace(Cv=float(kpp_cv))
+    if kpp_eice is not None:
+        if int(kpp_eice) not in (0, 1, 3):
+            raise ValueError(
+                f"--kpp-eice must be 0, 1 or 3 (NEMO nn_eice modes); "
+                f"got {kpp_eice!r}.")
+        kpp = kpp._replace(eice=int(kpp_eice))
     return VerticalMixingConfig(scheme="kpp", kpp=kpp)
 
 
@@ -3758,6 +3764,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "(default 1.6). RAISING it increases V_t^2 -> deeper "
                         "boundary layer, LOWERING it shoals it (same MLD lever "
                         "as --kpp-ri-crit). --grid mpas/latlon_bathy only.")
+    p.add_argument("--kpp-eice", type=int, default=None, choices=[0, 1, 3],
+                   help="Under-ice attenuation of the KPP turbulent velocity "
+                        "scales (NEMO nn_eice analogue; KPP mirror of "
+                        "--tke-eice). Compact ice scales w_m/w_s by (1-eff) so "
+                        "BOTH the boundary-layer depth and mixing shrink under "
+                        "ice. None/0 (default) = off; 1 = (1-fi); 3 = "
+                        "max(0,1-4*fi) (killed at fi>=0.25). The KPP grids' "
+                        "Arctic halocline-erosion lever (over-deep MLD + "
+                        "Siberian salty) that --tke-eice fixed only on the TKE "
+                        "grid. Needs --prognostic-sea-ice or a prescribed SIC. "
+                        "--grid latlon_bathy (MPAS KPP bridge has no ice yet).")
     p.add_argument("--tripole-vmix", type=str, default="none",
                    choices=["none", "tke", "kpp"],
                    help="Vertical-mixing CLOSURE on the tripole grid (the "
@@ -4268,7 +4285,7 @@ def main() -> int:
             bottom_drag_z0=args.bottom_drag_z0,
             bottom_drag_ke0=args.bottom_drag_ke0,
             iwm=_iwm_cfg, ddm=_ddm_cfg,
-            vertical_mixing=_kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv),
+            vertical_mixing=_kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv, args.kpp_eice),
             ew_cyclic_overlap=bool(args.ew_cyclic_overlap),
         )
         app_grid_type = "mpas"
@@ -4330,7 +4347,7 @@ def main() -> int:
             ddm=_ddm_cfg,
             # KPP Ri_crit/Cv override (shoal the too-deep winter ML). None
             # unless --kpp-ri-crit/--kpp-cv given -> default KPPConfig unchanged.
-            vertical_mixing=_kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv),
+            vertical_mixing=_kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv, args.kpp_eice),
             prescribed_flow=args.prescribed_flow,
             no_gm_redi=args.no_gm_redi,
         )
