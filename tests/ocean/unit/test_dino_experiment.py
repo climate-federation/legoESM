@@ -1523,7 +1523,11 @@ class TestIsoneutralRediOnly:
         with pytest.raises(ValueError, match="lateral_tracer_mixing"):
             dino_lat_lon_model_config(g, cfg, physics=True)
 
-    def test_iso_plus_eiv_rejected(self):
+    def test_iso_plus_eiv_combined(self):
+        # isoneutral + EIV is the FULL NEMO namtra_ldf + namtra_eiv combo
+        # (DINO Kamm: static Redi aht=1/2*Ud*e1(phi) + Treguier-21 GM capped
+        # at aei0=1/2*Ue*Le) — wired 2026-07-19 (previously raised). Lock:
+        # no geopotential K_h, cos-scaled Redi, adaptive kappa enabled.
         import dataclasses
 
         from legoesm.ocean.experiments.dino import (
@@ -1531,10 +1535,14 @@ class TestIsoneutralRediOnly:
         )
         cfg = dataclasses.replace(
             DINOConfig(), lateral_tracer_mixing="isoneutral",
-            use_gm_redi=True)
+            use_gm_redi=True, gm_kappa_scheme="treguier",
+            treguier_aei0=1500.0)
         g = dino_lat_lon_grid(cfg, n_lon=12)
-        with pytest.raises(ValueError, match="EIV"):
-            dino_lat_lon_model_config(g, cfg, physics=True)
+        mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
+        assert mc.K_h == 0.0
+        assert mc.gm_redi.kappa_redi_lat_scaling
+        assert mc.gm_redi.treguier.enabled
+        assert mc.gm_redi.treguier.aei0 == 1500.0
 
     def test_static_kappa_override_row_scaling(self):
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
