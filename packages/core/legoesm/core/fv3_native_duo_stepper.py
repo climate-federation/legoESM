@@ -443,15 +443,15 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
 _SW_CFG_DEFAULT = {
     "hord_tr": 8, "hord_vt": 6, "hord_tm": 6, "hord_dp": 6,
     "hord_mt": 6, "nord_v": 1, "damp_v": 0.2,
-    "dddmp": 0.2, "d2_bg": 0.0, "d4_bg": 0.12,
+    "dddmp": 0.2, "d2_bg": 0.0, "d4_bg": 0.12, "nord": 1,
 }
 
 SW_CFG_CASE8 = {
-    # Zenodo C48.sw.case8 fms.out damping block + fv_core_nml (del-6
-    # nord=2 approximated by the ported nord=1/del-4 at the same 0.12)
+    # Zenodo C48.sw.case8 fms.out damping block + fv_core_nml:
+    # del-6 (nord=2) bg 0.12, vort damping OFF, dddmp 0, hords all 8
     "hord_tr": 8, "hord_vt": 8, "hord_tm": 8, "hord_dp": 8,
     "hord_mt": 8, "nord_v": 1, "damp_v": 0.0,
-    "dddmp": 0.0, "d2_bg": 0.0, "d4_bg": 0.12,
+    "dddmp": 0.0, "d2_bg": 0.0, "d4_bg": 0.12, "nord": 2,
 }
 
 
@@ -566,7 +566,7 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float,
                        s12[t - 1]["xfx_adv"], s12[t - 1]["yfx_adv"],
                        s12[t - 1]["ra_x"], s12[t - 1]["ra_y"],
                        s4["ke"], ctx["gs6"][t - 1], bd, npx, npx,
-                       dt=dt, hord_vt=cfg["hord_vt"], nord=1,
+                       dt=dt, hord_vt=cfg["hord_vt"], nord=cfg["nord"],
                        dddmp=cfg["dddmp"],
                        d2_bg=cfg["d2_bg"], d4_bg=cfg["d4_bg"],
                        d_con=0.0)
