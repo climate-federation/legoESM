@@ -5430,6 +5430,11 @@ class ModelDriver:
                         dphis_dt=rrtmgp_tend.dphis_dt.replace(
                             data=rrtmgp_tend.dphis_dt.data + hs_tend.dphis_dt.data),
                         tracer_tendencies=rrtmgp_tend.tracer_tendencies,
+                        # Forward the radiation surface-flux diagnostics (HS adds
+                        # no surface radiation) so the coupled export survives the
+                        # HS repack — else HS+radiation loses them (codex).
+                        sw_net_sfc=rrtmgp_tend.sw_net_sfc,
+                        lw_net_sfc=rrtmgp_tend.lw_net_sfc,
                     )
                     return summed, phys_state_out
 
@@ -5767,6 +5772,30 @@ class ModelDriver:
                     # step 0 has nothing to step yet (_last_force_day is None).
                     if (self._segment_callback is not None
                             and _last_force_day is not None):
+                        # Export the surface net radiative fluxes the MPAS
+                        # physics computed (sw/lw net [W/m^2, +into surface])
+                        # to the coupler's forcing channel: _build_atm_forcing
+                        # reads held_sw_net_sfc/held_lw_net_sfc from _carry_aux.
+                        # Without this the lean MPAS loop stashed nothing, so
+                        # the coupled ocean/land tiles were forced with zero
+                        # shortwave (the #1202 coupled-voronoi gap). The compiled
+                        # cube/latlon path stashes the equivalent from
+                        # PhysicsOutput; this is the lean-path equivalent.
+                        _sfc_diag = getattr(self.model, "_sfc_diag", None)
+                        if _sfc_diag is not None:
+                            if not isinstance(self._carry_aux, dict):
+                                self._carry_aux = {}
+                            self._carry_aux["held_sw_net_sfc"] = _sfc_diag[0].data
+                            self._carry_aux["held_lw_net_sfc"] = _sfc_diag[1].data
+                            if not getattr(self, "_logged_sfc_export", False):
+                                _sw = self._carry_aux["held_sw_net_sfc"]
+                                logger.info(
+                                    "  Coupled surface radiative forcing (MPAS "
+                                    "export): sw_net_sfc mean=%.1f range=[%.1f,"
+                                    "%.1f] W/m^2",
+                                    float(jnp.mean(_sw)), float(jnp.min(_sw)),
+                                    float(jnp.max(_sw)))
+                                self._logged_sfc_export = True
                         self._current_day = _force_day
                         self._segment_callback(self, _force_day, 86400.0)
                     # Sample the daily fields at the CANONICAL day boundary

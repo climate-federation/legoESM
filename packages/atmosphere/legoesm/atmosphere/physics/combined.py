@@ -589,6 +589,13 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         combined = _build_combined(
             first, du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
             combined_tracer_tends)
+        if _has_rad:
+            # Carry the surface net radiative fluxes (radiation is tagged_fns[0],
+            # so ``first`` holds them) on the combined tendency, so the lean MPAS
+            # coupled loop can export sw/lw net to the coupler (_build_combined
+            # constructs a fresh tendency that drops these diagnostic fields).
+            combined = combined._replace(
+                sw_net_sfc=first.sw_net_sfc, lw_net_sfc=first.lw_net_sfc)
         phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
 
