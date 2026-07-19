@@ -34,6 +34,7 @@ from legoesm.land.snow_budget import update_snow
 from legoesm.land.state import LandState
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.surface_scheme import (
+    SimpleSEBConfig,
     TwoLeafCanopyConfig,
     compute_simple_seb_fluxes,
     compute_two_leaf_canopy_fluxes,
@@ -83,6 +84,11 @@ def step_land(
             state, forcing, config, U_min, dt,
             lat=lat, carbon_state=carbon_state, doy=doy,
             land_params=land_params)
+
+    if not isinstance(config.surface_scheme, SimpleSEBConfig):
+        raise ValueError(
+            f"unknown surface_scheme {type(config.surface_scheme).__name__}; "
+            "expected SimpleSEBConfig (default bulk SEB) or TwoLeafCanopyConfig")
 
     lp = land_params
     T_soil = state.T_soil.data

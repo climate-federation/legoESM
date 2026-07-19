@@ -14,6 +14,7 @@ def test_fcrit2_couples_launch_cap_and_saturation():
         mcfarlane_gwd)
     from legoesm.atmosphere.physics.gravity_wave_drag.config import (
         McFarlaneConfig)
+    from legoesm import constants
     ncol, nlev = 1, 30
     # strong flow over a big mountain, N constant: stress saturates aloft.
     p_half = jnp.linspace(100e2, 1000e2, nlev + 1)[None, :]
@@ -23,7 +24,7 @@ def test_fcrit2_couples_launch_cap_and_saturation():
     v = jnp.zeros((ncol, nlev))
     z_full = -7500.0 * jnp.log(p_full / 1000e2)
     z_half = -7500.0 * jnp.log(jnp.clip(p_half, 1.0, None) / 1000e2)
-    rho = p_full / (287.0 * T)
+    rho = p_full / (constants.R_d * T)
     h_topo = jnp.full((ncol,), 800.0)
     lat = jnp.zeros((ncol,))
     kw = dict(u=u, v=v, T=T, p_full=p_full, p_half=p_half,
