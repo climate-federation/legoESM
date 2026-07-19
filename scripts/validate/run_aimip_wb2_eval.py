@@ -492,6 +492,12 @@ def main(argv=None, ds=None):
             "eval_year in the config YAML.")
     cadence = int(yml.get("era5_cadence_hours", 6))
 
+    # _build_spectral_config derives checkpoint_dir from output_dir/variant, but
+    # this eval loads the model from --checkpoint (not checkpoint_dir) and reads
+    # the sfno_full norm-stats sidecar next to it — so output_dir is UNUSED here.
+    # Minimal suites (e.g. config/aimip/scale/*) keep output_dir at the suite top
+    # level, not in the merged base+variant config, so inject a harmless default.
+    yml.setdefault("output_dir", "results/aimip_wb2_eval")
     spec_cfg = run_aimip._build_spectral_config(yml)
     grid = create_gaussian_grid(spec_cfg.n_max, dealiasing="quadratic")
     sigma = create_sigma_coordinate(
