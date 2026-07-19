@@ -123,19 +123,45 @@ These are each a scoped project, not a quick edit; ranked by value:
   cube-face MPI. Gated bit-identical to serial at np={2,3,6}. Remaining:
   transient LULC under MPI (global param rebuild) and the SPMD/lat-band land
   partition specs (still refused).
-- **Coupled atm+ocean scaling bench lane** — NO coupled scaling benchmark
-  exists; every lane is component-only. `coupled_esm_driver.py` has no MPI
-  step (no scatter/halo/init-distributed), so this needs a coupled MPI
-  step built first (cube-atm replicated × ocean band-decomposed × coupler
-  regrid ownership), then a route-A CPU-MPI parity+conservation-gated lane.
-  Highest-value missing *measurement infra*.
-- **Distributed polar filter under `proc_lon>1`** — `latlon_mpi.py` refuses
-  the polar rFFT on a longitude-split rank; unlocking 2-D lat-lon MPI at
-  the poles needs a lon-gather FFT or a filter redesign under the
-  no-allgather doctrine (route-consistent). Specialized; low rank.
-- **Adjoint-side halo overlap** — blocked on nonblocking mpi4jax
-  primitives (Isend/Irecv absent); not actionable until the comm backend
-  exposes them.
+- **Coupled atm+ocean scaling bench lane** — SHIPPED (first coupled MPI step):
+  `coupler/coupled_latlon_band.py` couples the atm C-grid dycore + a
+  co-located slab SST on a SHARED lat-lon grid, SAME latitude-band
+  decomposition, via an EXPLICIT band-local sensible-heat exchange at the
+  interval boundary (the `_segment_hook` pattern — atm step compiles ONCE, no
+  per-interval recompile). The coupling is pointwise per cell => fully
+  band-local (no cross-rank comm, no regrid); the sensible exchange conserves
+  the coupled surface energy EXACTLY per cell, and the one non-conservative
+  term — the freezing clamp — is RETURNED as `clamp_energy` (a source == the
+  latent-fusion debit an unmodelled ice reservoir carries) so the budget stays
+  auditable. Lane: `scripts/bench/bench_coupled_latlon_scaling.py`
+  (`--parity-gate`). Gates: `tests/distributed/test_coupled_latlon_mpi.py`
+  (np2/np4 serial==band-MPI parity + global energy conservation),
+  `tests/unit/test_coupled_latlon_band.py`. This is the CORRECTNESS + capability
+  infra; the production timing envelope (fold real radiation + bulk fluxes into
+  the SAME jitted step via SST-in / flux-out threading on `make_latlon_mpi_step`,
+  no interval recompile) is the follow-up. Cube-atm × latlon/tripole-ocean
+  production coupling stays BLOCKED (cross-family regrid `NotImplementedError`,
+  incompatible decompositions, gather-needing regrid).
+- **Distributed polar filter under `proc_lon>1`** — SHIPPED: the polar
+  rFFT now gathers the full lon circle via the AD-safe lat-pencil transpose
+  (`lon_gather_full`/`lon_scatter_full`), rebuilds the mask at the global
+  n_lon, and the u-face closure routes through `pad_lon_cgrid` (east
+  neighbour under a split). Decomposition-invariant to the dynamics floor +
+  AD-safe (`test_latlon_2d_polar_filter_mpi.py`). NOTE: 2-D lat-lon MPI is
+  still measured net-negative on the latency-bound fabric and needs the
+  pole-fold + tripole-fold transposes before it is a production win — this
+  removes the polar-filter blocker so the path is CORRECT when a better
+  fabric or the folds land.
+- **Adjoint-side halo overlap** — DEFINITIVELY resolved (2026-07-18b): NOT
+  actionable on route A and ALREADY handled on route B, so there is nothing
+  to build. Route A (mpi4jax): `dir(mpi4jax)` exposes only blocking
+  `send`/`recv`/`sendrecv` — no `isend`/`irecv`, so no non-blocking overlap
+  is possible, and the `_sendrecv_vjp` backward is a single blocking exchange
+  with no interior compute to overlap (codex-confirmed). Route B (SPMD
+  ppermute): `xla_gpu_enable_latency_hiding_scheduler=true` is ON by default
+  (`runtime/backend.py`), so ppermute collectives are overlapped by XLA in
+  BOTH the forward and backward passes automatically. Revisit only if a
+  non-blocking mpi4jax (or a raw mpi4py Isend/Irecv) backend is added.
 
 ## Superseded / corrected claims (with sources)
 

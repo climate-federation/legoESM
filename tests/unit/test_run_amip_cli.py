@@ -10,12 +10,36 @@ import pytest
 from legoesm import constants
 from scripts.run.run_amip import (
     _apply_aimip_classical_overrides,
+    _apply_spectral_scheme_fallback,
     _postprocess_args,
     _print_forcing_activity,
     _require_full_physics_for_amip,
     build_arg_parser,
     build_config_from_args,
 )
+
+
+def test_spectral_scheme_fallback():
+    p = build_arg_parser()
+    base = ["--grid-type", "gaussian", "--discretization", "spectral",
+            "--truncation", "21"]
+
+    # Default (prognostic tiedtke/mcfarlane) on spectral -> auto diagnostic.
+    a = _apply_spectral_scheme_fallback(p.parse_args(base), base)
+    assert a.convection == "sbm", "spectral did not fall back to diagnostic convection"
+    assert "mcfarlane" not in str(a.gravity_wave_drag), \
+        "spectral did not fall back off prognostic GWD"
+    assert a.gravity_wave_drag == "rayleigh"
+
+    # Explicit --convection is honoured verbatim (user's call, even if prognostic).
+    argv = base + ["--convection", "tiedtke"]
+    a2 = _apply_spectral_scheme_fallback(p.parse_args(argv), argv)
+    assert a2.convection == "tiedtke", "explicit --convection was overridden"
+
+    # Non-spectral grid: no-op (keeps the prognostic defaults).
+    cs = ["--grid-type", "cubed_sphere", "--discretization", "cdgrid"]
+    a3 = _apply_spectral_scheme_fallback(p.parse_args(cs), cs)
+    assert a3.convection == "tiedtke", "non-spectral grid wrongly swapped schemes"
 
 
 def test_multilayer_land_flags_flow_to_config():

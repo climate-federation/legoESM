@@ -1259,6 +1259,7 @@ def tke_vertical_mixing(
     lat_deg: jnp.ndarray | None = None,
     T_n2: jnp.ndarray | None = None,
     S_n2: jnp.ndarray | None = None,
+    ice_frac: jnp.ndarray | None = None,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
 
@@ -1437,7 +1438,8 @@ def tke_vertical_mixing(
     if _lc_on:
         # Langmuir source enters the RHS as +dt·source — exactly NEMO's
         # pre-solve ``en += rn_Dt·source`` (zdftke.F90:367).
-        _lc_src = nemo_langmuir_tke_source(taum, N2, _depth_w, dz_half, cfg)
+        _lc_src = nemo_langmuir_tke_source(taum, N2, _depth_w, dz_half, cfg,
+                                           ice_frac=ice_frac)
         external_source = (_lc_src if external_source is None
                            else external_source + _lc_src)
 
@@ -1475,7 +1477,8 @@ def tke_vertical_mixing(
         # injection in the diagnostic n_iterations=3 chain; codex P1/P2
         # review finding #2). Prognostic mode (n_iterations=1) identical.
         tke_curr = nemo_etau_injection(
-            tke_curr, taum, _depth_w, cfg, rho_0=rho_0, lat_deg=lat_deg)
+            tke_curr, taum, _depth_w, cfg, rho_0=rho_0, lat_deg=lat_deg,
+            ice_frac=ice_frac)
 
     # Final K from converged TKE.
     l_k_final, l_eps_final = compute_mixing_lengths(
@@ -1579,6 +1582,7 @@ def tke_set_diffusivities(
     boundary_cap: jnp.ndarray | None = None,
     T_n2: jnp.ndarray | None = None,
     S_n2: jnp.ndarray | None = None,
+    ice_frac: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, TKEPostMixingContext]:
     """Veros ``set_tke_diffusivities`` (tke.py:20-113) from the CARRIED TKE.
 
@@ -1643,7 +1647,7 @@ def tke_set_diffusivities(
         # solve — the same timing offset the post_mixing_veros path accepts
         # for the diffusivities themselves (review note 2026-07-16).
         langmuir_source = nemo_langmuir_tke_source(
-            taum, N2, -z_interface, dz_half, cfg)
+            taum, N2, -z_interface, dz_half, cfg, ice_frac=ice_frac)
     else:
         langmuir_source = None
 
@@ -1877,7 +1881,7 @@ def tke_integrate_post_mixing(
         # sqrt(e)/l_eps. Net first-order dissipation identical; the discrete
         # decay factor differs from plain backward-Euler at large dt*diss
         # (NEMO: (1+0.5a)/(1+1.5a) -> 1/3; backward-Euler: 1/(1+a) -> 0).
-        b = 1.0 - (a + c) + 1.5 * dt * _diss_w
+        b = 1.0 - (a + c) + 1.5 * dt * _diss_w  # coeff-ok: NEMO zdftke semi-implicit split zfact2=1.5*rn_Dt*rn_ediss (zdftke.F90:241)
         forc_w = forc_w + 0.5 * _diss_w * e_w
     elif _disc == "backward_euler":
         b = 1.0 - (a + c) + dt * _diss_w

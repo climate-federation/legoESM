@@ -35,13 +35,50 @@ from legoesm.grids.fv3_native_gridstruct import (
 
 def build_six_face_duo_context(n: int, ng: int = 3,
                                use_ext_bundle: bool = False,
-                               vector_corner: str = "lagrange") -> dict:
-    """Gridstructs + Bounds for all six faces (certified builders)."""
+                               vector_corner: str = "lagrange",
+                               ext_exclude: tuple = (),
+                               use_ext_metrics: bool = False,
+                               oracle_conventions: bool = False) -> dict:
+    """Gridstructs + Bounds for all six faces (certified builders).
+
+    ``oracle_conventions=True`` = the BOUNDED-conventions lane the
+    Zenodo duo runs actually execute (proven by the C48 fms.out
+    da_min_c: duo took the ``bounded_domain`` grid-init arms).  Metrics
+    come from ``build_fv3_native_gridstruct_bounded`` (extended
+    own-face lattice, real geometry everywhere incl the regular
+    120-degree vertex kink cosa=-1/2/sina=sqrt(3)/2/rsina=4/3), and
+    every stage guard sees ``bounded_domain=True`` with the four
+    corner flags FALSE (upstream sets them only at
+    ``.not.bounded``) — so the d_sw4 corner-KE fix and every
+    plain-lane corner/edge special-case switch off exactly as in the
+    duo runs.
+
+    ``oracle_conventions=False`` keeps the plain-conventions stack
+    (kinked mpp-state metrics + the SB4-era angle/area overrides that
+    approximate the bounded values at edges).
+    """
     from legoesm.core.fv3_native_sw_core import Bounds
     from legoesm.grids.fv3_native_halos import ed_supergrid_lonlat_ref
     from legoesm.grids.fv3_native_metrics import compute_fv3_native_angles
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_OMEGA,
+        FV3_RADIUS_M,
+        build_fv3_native_gridstruct_bounded,
+    )
 
-    gs6 = [build_fv3_native_gridstruct(n, ng, tile=t) for t in range(1, 7)]
+    # radius/omega: the W2 balanced state, the duo-target gate and the
+    # Zenodo reference all use the FMS constants printed by the duo run
+    # log ("Radius is 6371200.0, omega is 7.2921e-5") — the builder's
+    # constants.R_earth/Omega defaults put a broad scale error on every
+    # metric and Coriolis term (codex vertex-diff P2).
+    if oracle_conventions:
+        gs6 = [build_fv3_native_gridstruct_bounded(n, ng, tile=t)
+               for t in range(1, 7)]
+    else:
+        gs6 = [build_fv3_native_gridstruct(n, ng, tile=t,
+                                           radius=FV3_RADIUS_M,
+                                           omega=FV3_OMEGA)
+               for t in range(1, 7)]
 
     # DUO angle override: the plain-mpp gridstruct poisons the panel-edge
     # B-node sina/rsina (plain FV3 never reads them — its non-duo d_sw3
@@ -56,7 +93,7 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     lon6c = np.stack([lon6s[t][::2, ::2] for t in range(6)])
     lat6c = np.stack([lat6s[t][::2, ::2] for t in range(6)])
     ang = compute_fv3_native_angles(lon6c, lat6c)
-    for t in range(6):
+    for t in range(6) if not oracle_conventions else ():
         gs = gs6[t]
         blk = (slice(ng, ng + npx), slice(ng, ng + npx))
         cb = np.array(ang["cosa_b"][t])
@@ -90,7 +127,7 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     )
 
     lo = 1 - ng
-    for gs in gs6:
+    for gs in (gs6 if not oracle_conventions else ()):
         area = np.array(gs["area"], copy=True)
         _fill_corners_agrid_x(_fort(area, lo, lo), npx, ng)
         rarea = np.array(gs["rarea"], copy=True)
@@ -109,12 +146,14 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     dg = create_fv3_native_duogrid_data(n, ng=min(ng, 3), k2e_nord=4)
 
     for gs in gs6:
-        gs.setdefault("bounded_domain", False)
-        gs.setdefault("grid_type", 0)
-        gs.setdefault("sw_corner", True)
-        gs.setdefault("se_corner", True)
-        gs.setdefault("ne_corner", True)
-        gs.setdefault("nw_corner", True)
+        # bounded lane: guards see bounded_domain=True + corner flags
+        # FALSE (upstream sets sw..ne_corner only at .not.bounded) —
+        # d_sw4's corner-KE fix and every plain corner special switch
+        # off exactly as in the duo runs
+        gs["bounded_domain"] = bool(oracle_conventions)
+        gs["grid_type"] = 0
+        for k in ("sw_corner", "se_corner", "ne_corner", "nw_corner"):
+            gs[k] = not oracle_conventions
     ectx = None
     if use_ext_bundle:
         # FULL ext consistency bundle: the faithful ext_scalar /
@@ -128,10 +167,23 @@ def build_six_face_duo_context(n: int, ng: int = 3,
         from legoesm.grids.fv3_native_ext_vector import build_ext_context
         from legoesm.grids.fv3_native_gridstruct import extend_gridstruct
 
+        bad = set(ext_exclude) - {"divgd", "cvec", "metrics", "dvec", "ascalar"}
+        if bad:
+            raise ValueError(f"ext_exclude: unknown families {sorted(bad)}")
         ectx = build_ext_context(n, ng, gs6,
                                  vector_corner=vector_corner)
-        gs6 = [extend_gridstruct(gs6[t], n, ng, tile=t + 1)
-               for t in range(6)]
+        # ORACLE-FAITHFUL DEFAULT (Zenodo grep): upstream duo d_sw
+        # consumes the model gridstruct metrics — the model tree never
+        # reads the dg ext metrics; extend_gridstruct was OUR coherence
+        # intuition with no upstream counterpart, so ext halo METRICS
+        # are a NON-FAITHFUL measurement opt-in.  (The 2026-07-18
+        # attribution scores once cited here were old-diagnostic-lens
+        # numbers — void, see docs/dycore/fv3_native_p4c_oracle.md
+        # RE-BASELINE — but the grep-based faithfulness argument
+        # stands on its own.)
+        if use_ext_metrics and "metrics" not in ext_exclude:
+            gs6 = [extend_gridstruct(gs6[t], n, ng, tile=t + 1)
+                   for t in range(6)]
 
     from legoesm.grids.fv3_native_gridstruct import (
         build_extended_corner_lonlat,
@@ -144,6 +196,8 @@ def build_six_face_duo_context(n: int, ng: int = 3,
 
     return {"n": n, "ng": ng, "gs6": gs6, "dg": dg,
             "use_ext_bundle": use_ext_bundle, "ectx": ectx,
+            "ext_exclude": tuple(ext_exclude),
+            "oracle_conventions": bool(oracle_conventions),
             "kk6": kk6, "ee6": ee6,
             "bd": Bounds.single_tile(n, ng)}
 
@@ -322,8 +376,16 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
             ext_vector_cgrid_sixface,
         )
 
-        ext_scalar_sixface(divgd6, "B", ctx["ectx"])
-        ext_vector_cgrid_sixface(uc6, vc6, ctx["ectx"])
+        if "divgd" in ctx.get("ext_exclude", ()):
+            for t in range(1, 7):
+                exchange_bgrid_scalar_halos(divgd6, t, n, ng)
+        else:
+            ext_scalar_sixface(divgd6, "B", ctx["ectx"])
+        if "cvec" in ctx.get("ext_exclude", ()):
+            for t in range(1, 7):
+                exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
+        else:
+            ext_vector_cgrid_sixface(uc6, vc6, ctx["ectx"])
     else:
         for t in range(1, 7):
             exchange_bgrid_scalar_halos(divgd6, t, n, ng)
@@ -419,9 +481,18 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
             ext_vector_dgrid_sixface,
         )
 
-        ext_scalar_sixface(delp6, "A", ctx["ectx"])
-        ext_scalar_sixface(pt6, "A", ctx["ectx"])
-        ext_vector_dgrid_sixface(u6, v6, ctx["ectx"])
+        if "ascalar" in ctx.get("ext_exclude", ()):
+            for t in range(1, 7):
+                exchange_agrid_scalar_halos(delp6, t, n, ng)
+                exchange_agrid_scalar_halos(pt6, t, n, ng)
+        else:
+            ext_scalar_sixface(delp6, "A", ctx["ectx"])
+            ext_scalar_sixface(pt6, "A", ctx["ectx"])
+        if "dvec" in ctx.get("ext_exclude", ()):
+            for t in range(1, 7):
+                exchange_dgrid_vector_halos(u6, v6, t, n, ng)
+        else:
+            ext_vector_dgrid_sixface(u6, v6, ctx["ectx"])
     else:
         for t in range(1, 7):
             exchange_dgrid_vector_halos(u6, v6, t, n, ng)
@@ -516,9 +587,12 @@ def one_grad_p_1lev(u, v, pkc, gz, divg2, gs: dict, bd, npx: int,
         "dya": fort(gs["dya"], isd, jsd),
         "edge_w": gs["edge_w"], "edge_e": gs["edge_e"],
         "edge_s": gs["edge_s"], "edge_n": gs["edge_n"],
-        "bounded_domain": False, "grid_type": 0,
-        "sw_corner": True, "se_corner": True,
-        "nw_corner": True, "ne_corner": True,
+        "bounded_domain": bool(gs.get("bounded_domain", False)),
+        "grid_type": 0,
+        "sw_corner": bool(gs.get("sw_corner", True)),
+        "se_corner": bool(gs.get("se_corner", True)),
+        "nw_corner": bool(gs.get("nw_corner", True)),
+        "ne_corner": bool(gs.get("ne_corner", True)),
     }
 
     pk1 = np.array(pkc[:, :, 0], copy=True)
@@ -610,8 +684,13 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
         # post-step delp/pt refresh (dyn_core.F90:1336-1337)
         from legoesm.grids.fv3_native_ext_vector import ext_scalar_sixface
 
-        ext_scalar_sixface(delp6, "A", ctx["ectx"])
-        ext_scalar_sixface(pt6, "A", ctx["ectx"])
+        if "ascalar" in ctx.get("ext_exclude", ()):
+            for t in range(1, 7):
+                exchange_agrid_scalar_halos(delp6, t, n, ng)
+                exchange_agrid_scalar_halos(pt6, t, n, ng)
+        else:
+            ext_scalar_sixface(delp6, "A", ctx["ectx"])
+            ext_scalar_sixface(pt6, "A", ctx["ectx"])
     else:
         for t in range(1, 7):
             exchange_agrid_scalar_halos(delp6, t, n, ng)
@@ -648,7 +727,7 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
 
 
 def w2_six_face_state(ctx: dict, alpha: float = 0.0,
-                      u0: float = 38.61068276698372,
+                      u0: float | None = None,
                       gh0: float = 2.94e4) -> list:
     """Williamson case-2 BALANCED six-face state on the SW-via-
     production convention (pt≡1, delp = g·h):
@@ -663,10 +742,14 @@ def w2_six_face_state(ctx: dict, alpha: float = 0.0,
     handled by the step-entry exchanges).
     """
     from legoesm import constants
+    from legoesm.grids.fv3_native_gridstruct import FV3_OMEGA, FV3_RADIUS_M
 
-    a_r = 6371.0e3                      # FV3_RADIUS_M convention
-    omega = constants.Omega
-    g = constants.g
+    a_r = FV3_RADIUS_M
+    omega = FV3_OMEGA
+    g = constants.g                     # cancels: delp = g*h = gh0 - coef*S^2
+    if u0 is None:
+        # upstream test_cases case 2: Ubar = 2*pi*radius / (12 days)
+        u0 = 2.0 * np.pi * a_r / (12.0 * 86400.0)
     coef = (a_r * omega * u0 + 0.5 * u0 * u0)
 
     states = []

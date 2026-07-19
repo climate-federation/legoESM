@@ -2225,6 +2225,12 @@ def plane_compressible_euler_slow_tendencies(
     # diffusion operators below are SHARED, so LES and DNS reuse the CRM
     # machinery unchanged — only K_m differs.
     _closure = getattr(config, "turbulence_closure", "smagorinsky")
+    if _closure not in ("smagorinsky", "molecular", "none", "vreman", "amd"):
+        raise ValueError(
+            f"unknown turbulence_closure {_closure!r}; must be one of "
+            "'smagorinsky', 'molecular', 'none', 'vreman', 'amd' — a typo "
+            "would otherwise silently disable ALL SGS turbulence "
+            "(indistinguishable from the intentional 'none' inviscid mode)")
     _use_smag = _closure == "smagorinsky" and config.smagorinsky_cs > 0.0
     _use_mol = (_closure == "molecular"
                 and getattr(config, "molecular_viscosity", 0.0) > 0.0)

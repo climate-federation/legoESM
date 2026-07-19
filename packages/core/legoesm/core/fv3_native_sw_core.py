@@ -489,7 +489,10 @@ def c_sw(delp: np.ndarray, pt: np.ndarray, w: np.ndarray,
     is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
     isd, jsd = bd.isd, bd.jsd
     iep1, jep1 = ie + 1, je + 1
-    bounded_domain = False
+    # threaded from the gridstruct (codex bounded-r2 finding 4: the
+    # hardcoded False was inert on the duo path but a latent mismatch);
+    # plain callers carry bounded_domain=False in gs
+    bounded_domain = bool(gs.get("bounded_domain", False))
 
     delp = np.array(delp, dtype=np.float64, copy=True)
     pt = np.array(pt, dtype=np.float64, copy=True)
@@ -663,8 +666,15 @@ def c_sw(delp: np.ndarray, pt: np.ndarray, w: np.ndarray,
     # ---- compute KE (cubed-sphere branch) ----
     ke = _fl(is_ - 1, ie + 1, js - 1, je + 1)
     vort = _fl(is_ - 1, ie + 1, js - 1, je + 1)
-    if bounded_domain or grid_type >= 3:  # pragma: no cover
-        raise NotImplementedError
+    # upstream branch predicate is `bounded .or. grid_type>=3 .or.
+    # duogrid` -> ONE simple-upwind branch; the duo lane below IS that
+    # branch, so only a bounded/gt>=3 request WITHOUT duo is unported
+    # (codex bounded-r3 P0: raising on the flag alone aborted the
+    # bounded duo lane its own handler follows)
+    if (bounded_domain or grid_type >= 3) and not duogrid:
+        raise NotImplementedError(
+            "c_sw: bounded/grid_type>=3 KE branch only ported via the "
+            "duo lane (duogrid=True)")
     if duogrid:
         # DUO KE/vorticity — simple upwind, NO sin_sg panel-edge special-
         # case (sw_core.F90:303-321, the bounded/grid_type>=3/duogrid branch)

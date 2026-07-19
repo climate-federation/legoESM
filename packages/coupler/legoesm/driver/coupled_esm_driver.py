@@ -1359,8 +1359,21 @@ class CoupledESMDriver:
         q_v = self._atm.q_v
         p_s = state.p_s.data
         T_low = state.T.data[..., -1]
-        u_low = state.u.data[..., -1]
-        v_low = state.v.data[..., -1]
+        # Low-level winds for the ocean surface stress + bulk turbulent fluxes.
+        # cube/latlon carry cell-centered u/v Fields directly; MPAS (voronoi)
+        # carries edge-normal velocity (state.v is None) -> Perot-reconstruct the
+        # cell-centered (zonal, meridional) winds. (Spectral is gated upstream:
+        # its state is spectral coefficients, so the whole extractor would need a
+        # grid synthesis — a separate follow-up.)
+        if state.v is not None:
+            u_low = state.u.data[..., -1]
+            v_low = state.v.data[..., -1]
+        else:
+            from legoesm.grids.voronoi import reconstruct_cell_velocity
+            _u_cell, _v_cell = reconstruct_cell_velocity(
+                state.u.data, self._atm.grid)
+            u_low = _u_cell[..., -1]
+            v_low = _v_cell[..., -1]
         q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
         sigma_full = jnp.asarray(self._atm.sigma.sigma_full)
         p_low = p_s * sigma_full[-1]

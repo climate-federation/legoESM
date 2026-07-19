@@ -325,8 +325,16 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
                 uc[i, j - 1] + uc[i + 1, j - 1]
                 + uc[i, j] + uc[i + 1, j])) * RSIN_V[i, j]
 
-    # ---- panel edges (auth 656-726; fire always on the global cube) ----
-    if is_ == 1:                                     # West edge
+    # ---- panel edges (auth 656-726) ----
+    # Guard `.not.bounded .or. .not.duogrid` (auth 656): fires on the
+    # plain-conventions lane (bounded=F), SKIPPED entirely in the real
+    # duo runs (bounded_domain=T — the interior ut/vt formula stands at
+    # the panel edges, reading the bounded gridstruct's real edge
+    # rsin_u/rsin_v).  The corner 2x2 blocks below sit inside the same
+    # upstream guard and self-gate via the corner flags (FALSE under
+    # bounded).
+    plain_edges = not bool(gs.get("bounded_domain", False))
+    if plain_edges and is_ == 1:                     # West edge
         for j in range(jsd, jed + 1):
             if uc[1, j] * dt > 0.0:
                 ut[1, j] = uc[1, j] / SIN_SG[0, j, 3 - 1]
@@ -337,7 +345,7 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
                 ut[0, j - 1] + ut[1, j - 1] + ut[0, j] + ut[1, j])
             vt[1, j] = vc[1, j] - 0.25 * COSA_V[1, j] * (
                 ut[1, j - 1] + ut[2, j - 1] + ut[1, j] + ut[2, j])
-    if (ie + 1) == npx:                              # East edge
+    if plain_edges and (ie + 1) == npx:              # East edge
         for j in range(jsd, jed + 1):
             if uc[npx, j] * dt > 0.0:
                 ut[npx, j] = uc[npx, j] / SIN_SG[npx - 1, j, 3 - 1]
@@ -350,7 +358,7 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
             vt[npx, j] = vc[npx, j] - 0.25 * COSA_V[npx, j] * (
                 ut[npx, j - 1] + ut[npx + 1, j - 1]
                 + ut[npx, j] + ut[npx + 1, j])
-    if js == 1:                                      # South edge
+    if plain_edges and js == 1:                      # South edge
         for i in range(isd, ied + 1):
             if vc[i, 1] * dt > 0.0:
                 vt[i, 1] = vc[i, 1] / SIN_SG[i, 0, 4 - 1]
@@ -361,7 +369,7 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
                 vt[i - 1, 0] + vt[i, 0] + vt[i - 1, 1] + vt[i, 1])
             ut[i, 1] = uc[i, 1] - 0.25 * COSA_U[i, 1] * (
                 vt[i - 1, 1] + vt[i, 1] + vt[i - 1, 2] + vt[i, 2])
-    if (je + 1) == npy:                              # North edge
+    if plain_edges and (je + 1) == npy:              # North edge
         for i in range(isd, ied + 1):
             if vc[i, npy] * dt > 0.0:
                 vt[i, npy] = vc[i, npy] / SIN_SG[i, npy - 1, 4 - 1]
@@ -727,12 +735,13 @@ def d_sw3_duo(u, v, uc, vc, gs: dict, bd: Bounds, npx: int, npy: int, *,
 def d_sw4_duo(u, v, ut, vt, ke, gs: dict, bd: Bounds, npx: int, npy: int,
               *, dt: float) -> dict:
     """sw_core.F90 d_sw4 (symmetryclean 1390-1472) — the 4-corner KE
-    fix.  Its guard ``.not.bounded .or. .not.duogrid`` (auth 1440) is
-    ALWAYS TRUE on the global cube (bounded=F), so the corner formulas
-    fire on the duo lane too, reading u/v and the d_sw1 ut/vt workspace
-    at cells the duo interior DOES write (ut over is:ie+1 x jsd:jed, vt
-    over isd:ied x js:je+1 cover every corner read) — all inputs fully
-    defined, no sentinel dependence.
+    fix.  Its guard ``.not.bounded .or. .not.duogrid`` (auth 1440)
+    fires on the PLAIN-conventions lane (bounded=F) and is SKIPPED in
+    the bounded duo runs (bounded_domain=T) — threaded below.  On the
+    plain lane the corner formulas read u/v and the d_sw1 ut/vt
+    workspace at cells the duo interior DOES write (ut over is:ie+1 x
+    jsd:jed, vt over isd:ied x js:je+1 cover every corner read) — all
+    inputs fully defined, no sentinel dependence.
 
     ke is INTENT(INOUT) upstream (in dyn_core it arrives as the inline
     KE assembly kee = 0.5*(ubbtemp*vbbtemp + ubb*vbb)); the oracle
@@ -748,12 +757,19 @@ def d_sw4_duo(u, v, ut, vt, ke, gs: dict, bd: Bounds, npx: int, npy: int,
     vt = fort(np.array(vt, dtype=np.float64, copy=True), isd, jsd)
     ke = fort(np.array(ke, dtype=np.float64, copy=True), isd, jsd)
 
-    sw_corner = bool(gs.get("sw_corner", True))
-    se_corner = bool(gs.get("se_corner", True))
-    ne_corner = bool(gs.get("ne_corner", True))
-    nw_corner = bool(gs.get("nw_corner", True))
+    # auth 1440 outer guard `.not.bounded .or. .not.duogrid`: on this
+    # duo-only port that reduces to `not bounded` — the corner formulas
+    # fire on the plain lane and are skipped in the bounded duo runs.
+    # The corner flags gate each block exactly as upstream (they are
+    # FALSE under bounded anyway; the explicit guard makes a raw
+    # gridstruct with default-true flags behave like source — codex
+    # bounded-r2 finding 4).
+    bounded = bool(gs.get("bounded_domain", False))
+    sw_corner = (not bounded) and bool(gs.get("sw_corner", True))
+    se_corner = (not bounded) and bool(gs.get("se_corner", True))
+    ne_corner = (not bounded) and bool(gs.get("ne_corner", True))
+    nw_corner = (not bounded) and bool(gs.get("nw_corner", True))
 
-    # auth 1440-1466 (guard always true at bounded=F)
     dt6 = dt / 6.0
     if sw_corner:
         ke[1, 1] = dt6 * ((ut[1, 1] + ut[1, 0]) * u[1, 1]
@@ -857,7 +873,8 @@ def d_sw5_duo(delp, u, v, uc, vc, ua, va, divg_d, crx_adv, cry_adv,
         "edge_w": gs["edge_w"], "edge_e": gs["edge_e"],
         "edge_s": gs["edge_s"], "edge_n": gs["edge_n"],
         "da_min": float(gs["da_min"]), "da_min_c": da_min_c,
-        "bounded_domain": False, "grid_type": 0,
+        "bounded_domain": bool(gs.get("bounded_domain", False)),
+        "grid_type": 0,
         "sw_corner": bool(gs.get("sw_corner", True)),
         "se_corner": bool(gs.get("se_corner", True)),
         "nw_corner": bool(gs.get("nw_corner", True)),
@@ -994,7 +1011,8 @@ def d_sw6_duo(u, v, ut, vt, ke, wk, vortfluxx, vortfluxy, gs: dict,
         "del6_v": fort(gs["del6_v"], isd, jsd),
         "del6_u": fort(gs["del6_u"], isd, jsd),
         "rarea": fort(gs["rarea"], isd, jsd),
-        "bounded_domain": False, "grid_type": 0,
+        "bounded_domain": bool(gs.get("bounded_domain", False)),
+        "grid_type": 0,
         "sw_corner": bool(gs.get("sw_corner", True)),
         "se_corner": bool(gs.get("se_corner", True)),
         "nw_corner": bool(gs.get("nw_corner", True)),
