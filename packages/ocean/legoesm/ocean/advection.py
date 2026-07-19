@@ -834,6 +834,7 @@ def fct_tracer_advection(
     grid: "LatLonGrid",
     dt: float,
     high_order: str = "ppm",
+    tracer_before: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """FCT tracer advection: high-order accuracy with guaranteed monotonicity.
 
@@ -863,6 +864,19 @@ def fct_tracer_advection(
         DINO / ORCA1 namelist selection). The centred face value is NOT
         pre-clamped to local bounds (NEMO doesn't); the Zalesak step
         supplies all the monotonicity.
+    tracer_before : (n_lat, n_lon, nlev) or None
+        BEFORE-level tracer (Kbb) for the leapfrog outer step.  Under the
+        modified leap-frog the FCT-limited advective increment is applied to
+        the BEFORE state (``T(Naa) = T(Nbb) + 2dt·RHS``), so the Zalesak
+        monotonicity base — the first-order upwind low-order flux, the
+        provisional low-order update ``q_td``, and the local ``q_min``/``q_max``
+        bounds — must be taken from the BEFORE level, exactly as NEMO
+        ``traadv_fct``: ``fct_up1(...,pt(Kbb))`` for the upstream flux and
+        ``nonosc(Kbb, ..., p2dt=2dt)`` for the bounds, while the high-order
+        ANTIDIFFUSIVE face is still built from the NOW level (Kmm) via
+        ``0.5·pU·(pt(Kmm)+pt(Kmm))``.  ``None`` (forward-Euler / AB2 path)
+        ⇒ base == ``tracer`` (Kbb == Kmm) ⇒ byte-identical to the FE-certified
+        scheme.
 
     Returns
     -------
@@ -881,9 +895,17 @@ def fct_tracer_advection(
 
     eps = 1e-30
 
+    # Monotonicity base (Kbb under leapfrog; == tracer on the FE/AB2 path).
+    # The low-order upwind flux, the vertical upwind interface flux, the
+    # provisional low-order update ``q_td``, and the ``q_min``/``q_max`` stencil
+    # bounds are ALL built from ``base`` — NEMO ``fct_up1(pt(Kbb))`` +
+    # ``nonosc(Kbb)``.  The high-order antidiffusive faces stay on ``tracer``
+    # (Kmm).  ``tracer_before is None`` ⇒ ``base is tracer`` ⇒ byte-identical.
+    base = tracer if tracer_before is None else tracer_before
+
     # --- Step 1: Horizontal face fluxes (low and high order) ---
-    tr_u_low = upwind_to_u_points(tracer, mass_flux_u)
-    tr_v_low = upwind_to_v_points(tracer, mass_flux_v)
+    tr_u_low = upwind_to_u_points(base, mass_flux_u)
+    tr_v_low = upwind_to_v_points(base, mass_flux_v)
     flux_u_low = mass_flux_u * tr_u_low
     flux_v_low = mass_flux_v * tr_v_low
     div_h_low = divergence_cgrid(flux_u_low, flux_v_low, grid)
@@ -900,11 +922,13 @@ def fct_tracer_advection(
     # --- Step 2: Vertical interface fluxes (low and high order) ---
     nlev = tracer.shape[-1]
     w_int = w_half[..., 1:nlev]  # interior interfaces (..., nlev-1)
-    T_below = tracer[..., 1:]    # (..., nlev-1)
+    T_below = tracer[..., 1:]    # (..., nlev-1) NOW level (Kmm), high-order
     T_above = tracer[..., :-1]   # (..., nlev-1)
 
-    # Upwind interface flux
-    T_face_low = jnp.where(w_int > 0.0, T_below, T_above)
+    # Upwind interface flux from the BEFORE (Kbb) base level
+    Tb_below = base[..., 1:]     # (..., nlev-1)
+    Tb_above = base[..., :-1]    # (..., nlev-1)
+    T_face_low = jnp.where(w_int > 0.0, Tb_below, Tb_above)
     F_vert_low_int = w_int * T_face_low  # (..., nlev-1)
 
     if high_order == "ppm":
@@ -955,21 +979,22 @@ def fct_tracer_advection(
     # Local min / max over the (cell + 6 neighbours) stencil.  For non-
     # cyclic latitude the boundary cell is its own south/north neighbour
     # (copy BC); periodic in lon; vertical clamps to top/bottom layer.
-    tr_west = jnp.roll(tracer, 1, axis=1)
-    tr_east = jnp.roll(tracer, -1, axis=1)
-    tr_south = jnp.concatenate([tracer[:1, :, :], tracer[:-1, :, :]], axis=0)
-    tr_north = jnp.concatenate([tracer[1:, :, :], tracer[-1:, :, :]], axis=0)
-    tr_above = jnp.concatenate([tracer[..., :1], tracer[..., :-1]], axis=-1)
-    tr_below = jnp.concatenate([tracer[..., 1:], tracer[..., -1:]], axis=-1)
+    # Stencil bounds from the BEFORE (Kbb) base level (NEMO nonosc pbef=Kbb).
+    tr_west = jnp.roll(base, 1, axis=1)
+    tr_east = jnp.roll(base, -1, axis=1)
+    tr_south = jnp.concatenate([base[:1, :, :], base[:-1, :, :]], axis=0)
+    tr_north = jnp.concatenate([base[1:, :, :], base[-1:, :, :]], axis=0)
+    tr_above = jnp.concatenate([base[..., :1], base[..., :-1]], axis=-1)
+    tr_below = jnp.concatenate([base[..., 1:], base[..., -1:]], axis=-1)
     q_min = jnp.minimum(
-        jnp.minimum(jnp.minimum(tracer, tr_west), jnp.minimum(tr_east, tr_south)),
+        jnp.minimum(jnp.minimum(base, tr_west), jnp.minimum(tr_east, tr_south)),
         jnp.minimum(jnp.minimum(tr_north, tr_above), tr_below),
     )
     q_max = jnp.maximum(
-        jnp.maximum(jnp.maximum(tracer, tr_west), jnp.maximum(tr_east, tr_south)),
+        jnp.maximum(jnp.maximum(base, tr_west), jnp.maximum(tr_east, tr_south)),
         jnp.maximum(jnp.maximum(tr_north, tr_above), tr_below),
     )
-    q_td = tracer + dq_low * dt  # provisional low-order update
+    q_td = base + dq_low * dt  # provisional low-order update (from Kbb)
 
     alpha_u_full, alpha_v, alpha_vert_face = _zalesak_signsplit_face_alphas(
         ad_flux_u, ad_flux_v, ad_vert_int,

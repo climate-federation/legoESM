@@ -181,8 +181,14 @@ def _compute_advection_flux_div(
     dt: float,
     recon_fill_mask: jnp.ndarray | None = None,
     linssh_top_flux: bool = False,
+    tr_before: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute advection flux divergence for a single tracer field.
+
+    ``tr_before`` (leapfrog only): BEFORE-level (Kbb) tracer for the FCT
+    monotonicity base (see ``fct_tracer_advection``).  ``None`` on the FE/AB2
+    path ⇒ base == ``tr`` ⇒ byte-identical.  Only the FCT schemes consume it
+    (the other schemes are single-level and already leapfrog-consistent).
 
     Returns ``(div_hut, vert_flux_div)`` — horizontal and vertical
     components of the total flux divergence.  Units: [tracer · m/s]
@@ -223,12 +229,17 @@ def _compute_advection_flux_div(
             neumann_fill_cgrid,
         )
         tr = neumann_fill_cgrid(tr, recon_fill_mask, grid=grid)
+        # Same wall fill for the BEFORE base so its upwind flux + bounds see the
+        # identical flat wall extension (dead cells only ⇒ wet columns intact).
+        if tr_before is not None:
+            tr_before = neumann_fill_cgrid(tr_before, recon_fill_mask, grid=grid)
 
     if tracer_advection in ("ppm_fct", "fct2"):
         from legoesm.ocean.advection import fct_tracer_advection
         div_hut, vert_flux_div = fct_tracer_advection(
             tr, mass_flux_u, mass_flux_v, w_baro, h_k_old, grid, dt,
             high_order="ppm" if tracer_advection == "ppm_fct" else "centred2",
+            tracer_before=tr_before,
         )
     elif tracer_advection == "ppm":
         from legoesm.ocean.advection import (
@@ -369,8 +380,16 @@ def _compute_advection_flux_div_pair(
     dt: float,
     recon_fill_mask: jnp.ndarray | None = None,
     linssh_top_flux: bool = False,
+    tr_a_before: jnp.ndarray | None = None,
+    tr_b_before: jnp.ndarray | None = None,
 ):
     """Advection flux divergence for TWO tracers (T, S) in one pass.
+
+    ``tr_a_before``/``tr_b_before`` (leapfrog only): BEFORE-level (Kbb) tracers
+    forwarded to the FCT monotonicity base (see ``fct_tracer_advection``).  FCT
+    is NOT a ``_LEVEL_SEPARABLE_H_SCHEMES`` member, so it always takes the
+    per-tracer fallback below where the before-levels are threaded through;
+    ``None`` ⇒ byte-identical FE/AB2 behaviour.
 
     The horizontal reconstructions of the production schemes
     (``_LEVEL_SEPARABLE_H_SCHEMES``) are level-independent, so both
@@ -408,12 +427,14 @@ def _compute_advection_flux_div_pair(
                 w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
                 recon_fill_mask=recon_fill_mask,
                 linssh_top_flux=linssh_top_flux,
+                tr_before=tr_a_before,
             ),
             _compute_advection_flux_div(
                 tr_b, tracer_advection, mass_flux_u, mass_flux_v,
                 w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
                 recon_fill_mask=recon_fill_mask,
                 linssh_top_flux=linssh_top_flux,
+                tr_before=tr_b_before,
             ),
         )
 
@@ -2300,8 +2321,19 @@ class LatLonCGridOceanModel:
                    grid=None, vertex_mask=None, t_seconds=None,
                    _ab2_scope_override: str | None = None,
                    _barotropic_substep_scale: int = 1,
-                   _barotropic_before_state=None):
+                   _barotropic_before_state=None,
+                   _fct_tracer_before=None):
         """Core step logic — no JIT wrapper.
+
+        ``_fct_tracer_before`` (private, MLF): ``(T_before, S_before)`` — the
+        BEFORE-level (Nbb) tracers the leap-frog step passes so the FCT/Zalesak
+        monotonicity base (low-order upwind flux, ``q_td``, ``q_min``/``q_max``
+        bounds) is taken from Kbb, matching where the leap-frog APPLIES the
+        limited advective increment (``T(Naa) = T(Nbb) + 2dt·RHS``).  The base
+        is carried through the SAME pre-advection physics increment as the NOW
+        tracer (``base = T_before + (T_mid − T_now)``), so the guaranteed-monotone
+        after-state is the actual leap-frog after-state.  ``None`` (FE/AB2) ⇒
+        base == NOW ⇒ byte-identical FCT (see ``fct_tracer_advection``).
 
         ``_barotropic_before_state`` (private, MLF): ``(eta_before, u_before,
         v_before)`` — the BEFORE-level (Nbb) ssh + 3-D velocity the leap-frog
@@ -3536,6 +3568,18 @@ class LatLonCGridOceanModel:
             # NEMO key_linssh: top-cell concentration/dilution flux (static
             # coordinate flag; see _compute_advection_flux_div).
             _linssh = getattr(self.z_coord, "linear_free_surface", False)
+            # Leap-frog FCT monotonicity base (Kbb).  The FCT-limited advective
+            # increment is applied to the BEFORE level; carry the before tracer
+            # through the SAME pre-advection physics increment as ``T_mid`` so
+            # the FCT bounds/low-order match the actual after-state base:
+            #   base = T_before + (T_mid − T_now).
+            # ``None`` (FE/AB2) ⇒ byte-identical.  RK3-under-leapfrog is not a
+            # configured path, so it keeps the NOW base (unchanged).
+            if _fct_tracer_before is not None:
+                _T_adv_before = _fct_tracer_before[0] + (T_mid - state.T.data)
+                _S_adv_before = _fct_tracer_before[1] + (S_mid - state.S.data)
+            else:
+                _T_adv_before = _S_adv_before = None
             if _tti == "rk3":
                 T_corrected, S_corrected = _ssp_rk3_tracer_pair_step(
                     T_mid, S_mid, _adv,
@@ -3552,6 +3596,7 @@ class LatLonCGridOceanModel:
                     h_k_old, h_u_old, h_v_old, _grid, dt,
                     recon_fill_mask=_wall_fill_mask,
                     linssh_top_flux=_linssh,
+                    tr_a_before=_T_adv_before, tr_b_before=_S_adv_before,
                 )
 
             for tr_name in ['T', 'S']:
@@ -6098,7 +6143,14 @@ class LatLonCGridOceanModel:
             _barotropic_substep_scale=_baro_scale,
             _barotropic_before_state=(
                 state.eta_before.data, state.u_before.data,
-                state.v_before.data))
+                state.v_before.data),
+            # FCT/Zalesak monotonicity base = BEFORE level (Kbb): the limited
+            # advective increment is applied to Nbb below (T_naa = T_before +
+            # (state_expl.T − state.T)), so the FCT bounds must be Kbb-based
+            # (NEMO nonosc(Kbb), p2dt=2dt) — else the FE-certified (Nnn,dt)
+            # bounds admit cold undershoot at high-lat wall fronts under 2dt.
+            _fct_tracer_before=(
+                state.T_before.data, state.S_before.data))
         # 1b. DISSIPATIVE Nbb pass — evaluate dyn_ldf(Kbb)/tra_ldf(Kbb) + the GM/eiv
         #     trend on the BEFORE state and keep ONLY its dissipative increment
         #     (2dt·diss(Nbb), applied forward-in-time). The GM/Redi destabiliser is
