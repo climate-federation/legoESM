@@ -1338,6 +1338,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     (pass ``f_vtx``), but that is not the wired default. NEMO oracle fidelity.
     #     Dispatched in ``_bc_pv_flux``; an unknown value raises ValueError there.
     vorticity_scheme: str = "al81"
+    # Boundary-q convention for the AL81/EEN PV flux at land-adjacent vertices:
+    # "neumann_fill" (default; smooth fill — WENO-stencil safety) or "nemo_live"
+    # (NEMO vor_een ln_dynvor_msk=F: coast shear-vorticity stays LIVE in the
+    # triads; select on NEMO-faithful cards). Unknown raises in the operator.
+    een_q_boundary: str = "neumann_fill"
     # WENO vertical momentum advection of the FULL velocity (matches Oceananigans, which
     # advects the full horizontal momentum vertically) instead of legoESM's default
     # baroclinic PERTURBATION u'=u−U_bar. The two differ by the flux-form redistribution

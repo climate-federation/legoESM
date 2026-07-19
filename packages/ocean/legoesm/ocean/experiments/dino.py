@@ -540,6 +540,9 @@ class DINOConfig:
     #     with coriolis_scheme="explicit_ab2" (Matsuno off) — used by the leapfrog
     #     (nemo_dino_kamm_mlf) card.
     vorticity_scheme: str = "al81"
+    # Boundary-q for the AL81/EEN PV flux: "neumann_fill" (legacy smooth fill)
+    # or "nemo_live" (vor_een ln_dynvor_msk=F: coast shear-zeta live in triads).
+    een_q_boundary: str = "neumann_fill"
     # Robert-Asselin filter coefficient (rn_atfp) for outer_integrator="leapfrog"
     # (NEMO plain RA, not Williams). NEMO default 0.1. Ignored otherwise.
     asselin_gamma: float = 0.1
@@ -893,6 +896,8 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     **DINO_RECIPES["nemo_dino_kamm"],
     "outer_integrator": "leapfrog",       # NEMO stp_MLF (key_qco, no key_RK3)
     "vorticity_scheme": "een_total",      # ln_dynvor_een: (f+zeta) in the EEN triad
+    "een_q_boundary": "nemo_live",        # vor_een keeps coast shear-zeta LIVE
+                                          # (ln_dynvor_msk=F; no Neumann fill)
     "coriolis_scheme": "explicit_ab2",    # Matsuno rotation OFF; Coriolis in the RHS
     "asselin_gamma": 0.1,                 # rn_atfp (plain Robert-Asselin, not Williams)
     # LIVE in-substep EEN barotropic Coriolis (node 16, NEMO dyn_cor_2D applied
@@ -2294,6 +2299,7 @@ def dino_lat_lon_model_config(
         coriolis_scheme=cfg.coriolis_scheme,
         outer_integrator=cfg.outer_integrator,
         vorticity_scheme=cfg.vorticity_scheme,
+        een_q_boundary=cfg.een_q_boundary,
         asselin_gamma=cfg.asselin_gamma,
         ab2_scope=cfg.ab2_scope,
         # Routed into config.barotropic by from_flat.  Required by the
