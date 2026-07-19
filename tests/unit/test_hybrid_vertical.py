@@ -736,7 +736,7 @@ class TestSB81FullLevelLnP:
         ref = constants.R_d * T0 * np.log(p0)
         # column-to-column spread per level must vanish (FP cumsum noise only)
         spread = np.abs(inv - ref).max()
-        assert spread < 1e-6 * abs(ref), (
+        assert spread < 1e-12 * abs(ref), (
             f"isothermal rest invariant violated: spread {spread:.3e} "
             f"vs |ref| {abs(ref):.3e}")
 

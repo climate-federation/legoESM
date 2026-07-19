@@ -21,12 +21,15 @@ half-level construction the geopotential integrates, so the pair cancels
 discretely at uniform-T rest (residual here: ~9e-12 m/s, ten orders below the
 broken form).
 
-Three tests (all MUST pass at machine tolerance):
-  * ``test_sigma_rest_over_topo_is_balanced`` — pure-sigma control.
+Four tests (all MUST pass):
+  * ``test_sigma_rest_over_topo_is_balanced`` — pure-sigma control (machine tol).
   * ``test_hybrid_A0_same_B_is_balanced`` — standard hybrid ``B`` with ``A=0``
-    (the SB81 form reduces exactly to the sigma correction there).
+    (the SB81 form reduces to the sigma correction there; machine tol).
   * ``test_hybrid_rest_over_topo_is_balanced`` — real (A≠0) hybrid levels; the
-    former ``xfail(strict)`` reproducer, now the regression gate for the fix.
+    former ``xfail(strict)`` reproducer, now the regression gate for the fix
+    (machine tol under fp64).
+  * ``test_hybrid_rest_over_topo_fp32_policy`` — same case at the production
+    fp32 policy (few-mm/s gate; fp32 round-off dominates there).
 """
 from __future__ import annotations
 
@@ -148,3 +151,27 @@ def test_hybrid_rest_over_topo_is_balanced():
     assert vN < _BALANCED_TOL_MS, (
         f"hybrid rest-over-topography drifted to {vN:.3e} m/s "
         f"(> {_BALANCED_TOL_MS} m/s) — #1029 SB81 PGF regression")
+
+
+def test_hybrid_rest_over_topo_fp32_policy():
+    """The SB81 balance must also hold usefully under the DEFAULT fp32 policy.
+
+    fp32 cannot reach machine rest (the PGF differences two ~1e6 m^2/s^2
+    terms; log/cumsum round-off seeds ~1e-7 m/s^2 accelerations), but the
+    discrete consistency still keeps the 200-step drift at the few-mm/s level
+    (measured ~4.3e-3 m/s) — 40x below the broken analytic-factor form
+    (0.18 m/s). Gate at 0.02 m/s: catches a revert at fp32 while leaving 5x
+    headroom over the measured value.
+    """
+    # No fp64 fixture override here: run under whatever the default policy is
+    # (fp32 in production). The autouse fixture pins fp64, so explicitly set
+    # fp32 for this one test and restore via the fixture teardown ordering.
+    from legoesm.core.precision import set_policy, PrecisionPolicy
+    from legoesm.grids.vertical import standard_hybrid_levels
+    set_policy(PrecisionPolicy.fp32())
+    v0, vN, finite = _face_max_wind_after_rest_run(standard_hybrid_levels(_NLEV))
+    assert finite
+    assert v0 == 0.0
+    assert vN < 0.02, (
+        f"fp32 hybrid rest-over-topography drifted to {vN:.3e} m/s (> 0.02) — "
+        f"#1029 SB81 PGF regression at production precision")

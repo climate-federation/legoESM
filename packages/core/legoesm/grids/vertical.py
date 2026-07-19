@@ -1989,9 +1989,12 @@ def sb81_full_level_ln_p(
     temperature ``-grad(Phi_k) - R_d T grad(ln p_k)`` reduces to
     ``-grad(phi_s + R_d T ln p_s)``, which vanishes identically for a
     hydrostatically balanced rest state over terrain (#1029).  On a pure-sigma
-    or ``A=0`` coordinate it reduces exactly to ``ln p_s`` plus a spatially
+    or ``A=0`` coordinate it reduces to ``ln p_s`` plus a spatially
     constant per-level offset, so its gradient equals ``grad(ln p_s)`` — the
-    sigma-path correction.
+    sigma-path correction — up to a ~1e-12 top-layer artifact of the
+    ``p_half`` zero-clip when the top interface pressure is exactly 0
+    (``alpha_0`` picks up a weak ``p_s`` dependence through the clipped
+    ``ln`` ratio; physically nil, pinned by the A=0 unit test).
 
     Returns
     -------
