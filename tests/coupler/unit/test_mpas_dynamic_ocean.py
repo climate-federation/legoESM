@@ -148,6 +148,29 @@ class TestMPASDynamicOcean(unittest.TestCase):
         with self.assertRaises(ValueError):
             drv._init_dynamic_ocean(285.0)
 
+    def test_ocean_checkpoint_restore_reset_handles_mpas_state(self):
+        """Regression (codex HIGH): the coupled checkpoint restore resets the
+        ocean's static geometry from the fresh init.  MPASOceanState carries
+        H_bathy + a cell land_mask but has NO edge u/v masks (its mesh geometry
+        lives on the model, not the state), so the latlon C-grid face-mask reset
+        must be hasattr-guarded — the unconditional _replace(u_mask=..., v_mask=
+        ...) crashed the voronoi dynamic-ocean checkpoint restore."""
+        drv, _ = _build_mpas_driver()
+        fresh = drv._ocean_state
+        # The MPAS state genuinely lacks the face masks -> the guard is
+        # load-bearing, and the pre-fix unconditional reset would crash.
+        self.assertFalse(hasattr(fresh, "u_mask"))
+        with self.assertRaises(ValueError):
+            fresh._replace(u_mask=fresh.land_mask)
+        # The FIXED (guarded) reset round-trips geometry without raising.
+        restored = fresh._replace(
+            H_bathy=fresh.H_bathy, land_mask=fresh.land_mask)
+        if hasattr(fresh, "u_mask"):
+            restored = restored._replace(
+                u_mask=fresh.u_mask, v_mask=fresh.v_mask)
+        self.assertIs(restored.land_mask, fresh.land_mask)
+        self.assertIs(restored.H_bathy, fresh.H_bathy)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2292,9 +2292,18 @@ class CoupledESMDriver:
                 fresh = self._ocean_state
                 restored, _ = _restore_pytree_from_npz(
                     fresh, data, "ocean3d_", coupled_path.name, strict=True)
+                # Reset the static geometry to the deterministic fresh-init
+                # values (config-derived, identical on a clean resume).  The
+                # MPAS/voronoi ocean state carries H_bathy + a cell land_mask
+                # but has NO edge u/v masks (its mesh geometry lives on the
+                # model, not the state), so the latlon C-grid face-mask triple
+                # reset only applies where those fields exist — an unconditional
+                # ``_replace(u_mask=..., v_mask=...)`` crashes MPASOceanState.
                 self._ocean_state = restored._replace(
-                    H_bathy=fresh.H_bathy, land_mask=fresh.land_mask,
-                    u_mask=fresh.u_mask, v_mask=fresh.v_mask)
+                    H_bathy=fresh.H_bathy, land_mask=fresh.land_mask)
+                if hasattr(fresh, "u_mask"):
+                    self._ocean_state = self._ocean_state._replace(
+                        u_mask=fresh.u_mask, v_mask=fresh.v_mask)
 
         if "ocean_T_sfc" in data.files and self._ocean_state is not None:
             saved_shape = tuple(int(s) for s in data["ocean_T_sfc"].shape)
