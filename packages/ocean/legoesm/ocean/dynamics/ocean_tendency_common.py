@@ -178,8 +178,9 @@ def iterate_eos_and_pressure_anomaly(
         Baroclinic pressure anomaly (same shape as ``T``).  Returned in
         whatever precision was used for the cumulative sum.
     """
-    del mask  # currently unused (passed to fill_fn by the caller); kept
-              # in signature for clarity at call sites.
+    # ``mask`` is read only by the legacy dynamic depth-dependent reference
+    # branch below (``is_active_3d is None``); do NOT ``del`` it — deleting it
+    # raised UnboundLocalError whenever that branch was selected.
 
     T_filled = fill_fn(T)
     S_filled = fill_fn(S)
