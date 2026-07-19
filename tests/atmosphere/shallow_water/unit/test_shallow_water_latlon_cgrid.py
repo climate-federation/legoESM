@@ -504,3 +504,159 @@ class TestPPMTransport:
         v = jnp.zeros((n_lat + 1, n_lon))
         tend = cgrid_fv_flux_divergence_latlon(q, u, v, grid)
         assert jnp.max(jnp.abs(tend)) < 1e-10
+
+
+# ==============================================================================
+# Biharmonic (del-4) viscosity
+# ==============================================================================
+
+class TestBiharmonicViscosity:
+    """The nu_del4 term must be scale-selective (unlike A_h), damping
+    (sign), pole-capped (stability), and must fail loud without dt."""
+
+    NU4 = 1.0e16  # interior coefficient sized for n_lat=32 (dy ~ 625 km)
+
+    def _isolated_biharmonic_tendency(self, grid, u, v, dt=300.0):
+        """Return the biharmonic contribution alone: tend(nu4>0) - tend(nu4=0).
+
+        Both calls share every other term (PGF, Coriolis, KE gradient),
+        so the difference isolates -nu4*lap^2(u,v) exactly.
+        """
+        h = jnp.full((grid.n_lat, grid.n_lon), 5000.0)
+        h_s = jnp.zeros_like(h)
+        state = CGridLatLonShallowWaterState(h=h, u=u, v=v, h_s=h_s)
+        cfg_on = CGridLatLonShallowWaterConfig(nu_del4=self.NU4)
+        cfg_off = CGridLatLonShallowWaterConfig(nu_del4=0.0)
+        _, du_on, dv_on = cgrid_latlon_sw_tendencies(state, grid, cfg_on, dt)
+        _, du_off, dv_off = cgrid_latlon_sw_tendencies(state, grid, cfg_off, dt)
+        return du_on - du_off, dv_on - dv_off
+
+    def test_scale_selective(self, grid):
+        """Per-unit-amplitude damping of a 2*dx checkerboard must exceed
+        that of a zonal-wavenumber-2 mode by orders of magnitude (k^4)."""
+        lon_f = jnp.concatenate([grid.lon - 0.5 * grid.dlon,
+                                 (grid.lon - 0.5 * grid.dlon)[0:1] + 2 * jnp.pi])
+        amp = 1.0e-3  # keep the quadratic KE-gradient term negligible
+        u_large = amp * jnp.cos(2.0 * lon_f)[None, :] * jnp.ones((grid.n_lat, 1))
+        i = jnp.arange(grid.n_lon + 1)
+        j = jnp.arange(grid.n_lat)
+        u_noise = amp * ((-1.0) ** (i[None, :] + j[:, None]))
+        v0 = jnp.zeros((grid.n_lat + 1, grid.n_lon))
+
+        du_l, _ = self._isolated_biharmonic_tendency(grid, u_large, v0)
+        du_n, _ = self._isolated_biharmonic_tendency(grid, u_noise, v0)
+        # Compare damping rates on interior rows (pole rows are capped).
+        sl = slice(8, 24)
+        rate_large = float(jnp.max(jnp.abs(du_l[sl]))) / amp
+        rate_noise = float(jnp.max(jnp.abs(du_n[sl]))) / amp
+        assert rate_noise > 50.0 * rate_large, (rate_noise, rate_large)
+
+    def test_sign_damps(self, grid):
+        """-nu4*lap^2(u) must anticorrelate with u (energy sink)."""
+        i = jnp.arange(grid.n_lon + 1)
+        j = jnp.arange(grid.n_lat)
+        u_noise = 1.0e-3 * ((-1.0) ** (i[None, :] + j[:, None]))
+        v0 = jnp.zeros((grid.n_lat + 1, grid.n_lon))
+        du, _ = self._isolated_biharmonic_tendency(grid, u_noise, v0)
+        assert float(jnp.sum(u_noise * du)) < 0.0
+
+    def test_requires_dt(self, grid):
+        state = williamson_test2_cgrid(grid)
+        cfg = CGridLatLonShallowWaterConfig(nu_del4=self.NU4)
+        with pytest.raises(ValueError, match="requires the"):
+            cgrid_latlon_sw_tendencies(state, grid, cfg, None)
+
+    def test_pole_cap_profile(self, grid):
+        """Interior rows keep nu_del4; pole-adjacent rows are reduced."""
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
+            _nu_del4_row_profiles)
+        big = 1.0e18  # deliberately above every row's stability cap
+        cfg = CGridLatLonShallowWaterConfig(nu_del4=big)
+        nu_u, nu_v = _nu_del4_row_profiles(grid, cfg, dt=300.0)
+        assert nu_u.shape == (grid.n_lat, 1)
+        assert nu_v.shape == (grid.n_lat + 1, 1)
+        # Every row obeys the cap on BOTH staggerings:
+        # nu * dt * lam^2 <= cfl_frac.
+        dy = grid.radius * grid.dlat
+        dx_u = grid.radius * grid.dlon * grid.cos_lat
+        dx_v = grid.radius * grid.dlon * grid.cos_lat_v
+        lam_u = 4.0 / dx_u ** 2 + 4.0 / dy ** 2
+        lam_v = 4.0 / dx_v ** 2 + 4.0 / dy ** 2
+        # fp32-safe tolerance: capped rows sit EXACTLY at the bound, and
+        # the grid/profile arrays are stored fp32 under the default
+        # precision policy, so the recomputed product can exceed the
+        # bound by ~1e-7 relative rounding.
+        assert jnp.all(nu_u[:, 0] * 300.0 * lam_u ** 2
+                       <= cfg.nu_del4_cfl_frac * (1 + 1e-5))
+        assert jnp.all(nu_v[:, 0] * 300.0 * lam_v ** 2
+                       <= cfg.nu_del4_cfl_frac * (1 + 1e-5))
+        # Pole-adjacent rows are strictly below the equatorial rows, and
+        # the exact-pole v rows (cos clamped to 1e-10) are ~zero.
+        assert float(nu_u[0, 0]) < float(nu_u[grid.n_lat // 2, 0])
+        assert float(nu_v[0, 0]) < 1e-6 * float(nu_v[grid.n_lat // 2, 0])
+        assert float(nu_v[-1, 0]) < 1e-6 * float(nu_v[grid.n_lat // 2, 0])
+        # Every value is finite (no inf leaking from the pole clamps).
+        assert jnp.all(jnp.isfinite(nu_u)) and jnp.all(jnp.isfinite(nu_v))
+
+    def test_checkerboard_decay_rate_matches_discrete_eigenvalue(self, grid):
+        """Absolute-rate check (codex review): for the 2-D checkerboard,
+        the isolated biharmonic tendency must equal -nu*lam^2*u with
+        lam = 4/dx^2 + 4/dy^2 on near-equator rows (dx ~ dy there and
+        the metric is locally uniform)."""
+        i = jnp.arange(grid.n_lon + 1)
+        j = jnp.arange(grid.n_lat)
+        amp = 1.0e-3
+        u_noise = amp * ((-1.0) ** (i[None, :] + j[:, None]))
+        v0 = jnp.zeros((grid.n_lat + 1, grid.n_lon))
+        du, _ = self._isolated_biharmonic_tendency(grid, u_noise, v0)
+        # Predicted rate on the equator-adjacent rows.
+        dy = float(grid.radius * grid.dlat)
+        row = grid.n_lat // 2
+        dx = float(grid.radius * grid.dlon * grid.cos_lat[row])
+        lam = 4.0 / dx ** 2 + 4.0 / dy ** 2
+        predicted = self.NU4 * lam ** 2
+        measured = float(jnp.abs(du[row, grid.n_lon // 2])) / amp
+        assert 0.5 * predicted < measured < 1.5 * predicted, (
+            measured, predicted)
+
+    def test_tendencies_noarg_falls_back_to_constructor_dt(self, grid):
+        """model.tendencies(state) without dt (DycoreComponent path) must
+        work with nu_del4 > 0 via the constructor-dt fallback (codex
+        iter-3)."""
+        cfg = CGridLatLonShallowWaterConfig(nu_del4=self.NU4)
+        model = CGridLatLonShallowWaterModel(grid, cfg, dt=300.0)
+        state = williamson_test2_cgrid(grid)
+        dh, du, dv = model.tendencies(state)
+        assert jnp.all(jnp.isfinite(dh))
+        assert jnp.all(jnp.isfinite(du))
+        assert jnp.all(jnp.isfinite(dv))
+
+    def test_step_stable_with_polar_grid_noise(self, grid):
+        """Seeded grid-scale noise in the pole-adjacent rows must stay
+        finite under an above-cap coefficient: without the row cap the
+        polar rows violate the del-4 CFL within a few steps."""
+        cfg = CGridLatLonShallowWaterConfig(nu_del4=1.0e18, fix_mass=True)
+        model = CGridLatLonShallowWaterModel(grid, cfg)
+        state = williamson_test2_cgrid(grid)
+        i = jnp.arange(grid.n_lon + 1)
+        j = jnp.arange(grid.n_lat)
+        noise = 1.0 * ((-1.0) ** (i[None, :] + j[:, None]))
+        band = ((j < 3) | (j >= grid.n_lat - 3)).astype(noise.dtype)
+        state = state._replace(u=state.u + noise * band[:, None])
+        for _ in range(10):
+            state = model.step(state, dt=60.0)
+        assert jnp.all(jnp.isfinite(state.h))
+        assert jnp.all(jnp.isfinite(state.u))
+        assert jnp.all(jnp.isfinite(state.v))
+
+    def test_step_stable_with_biharmonic(self, grid):
+        """W2 steps finitely with an above-cap coefficient (pole rows
+        would blow up within a few steps without the row cap)."""
+        cfg = CGridLatLonShallowWaterConfig(
+            nu_del4=1.0e18, fix_mass=True)
+        model = CGridLatLonShallowWaterModel(grid, cfg)
+        state = williamson_test2_cgrid(grid)
+        for _ in range(10):
+            state = model.step(state, dt=60.0)
+        assert jnp.all(jnp.isfinite(state.h))
+        assert jnp.all(jnp.isfinite(state.u))

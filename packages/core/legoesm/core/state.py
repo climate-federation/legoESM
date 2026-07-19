@@ -109,6 +109,22 @@ class HydrostaticTendencies(NamedTuple):
     dphis_dt: Field
     dv_dt: Field | None = None
     tracer_tendencies: dict[str, Field] | None = None
+    # Surface radiative net fluxes [W/m^2, +into surface], carried on the
+    # radiation tendency so the lean MPAS/spectral loops can export them to the
+    # coupler (the compiled cube/latlon path exports the equivalent via
+    # PhysicsOutput; the lean HydrostaticTendencies had no such channel, which
+    # left the coupled-voronoi ocean/land tiles forced with zero shortwave).
+    # None on non-radiation tendencies and when radiation is inactive; added at
+    # the end with None defaults so every existing constructor is unaffected.
+    sw_net_sfc: Field | None = None
+    lw_net_sfc: Field | None = None
+    # Surface precipitation [kg/m^2/s, +into surface], carried on the
+    # microphysics tendency so the lean MPAS/spectral loops can export it to the
+    # coupler's ocean P-E / land forcing (the compiled path exports the
+    # equivalent via PhysicsOutput.precip). None when microphysics is inactive;
+    # this is the SURFACE precip (micro sedimentation), NOT the column vapour
+    # sink (which is P-E and would double-count the separately-applied evap).
+    precip: Field | None = None
 
 
 class FV3HydrostaticState(NamedTuple):

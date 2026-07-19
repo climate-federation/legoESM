@@ -663,7 +663,7 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
     ),
     "emissivity_land": TuningParameter(
         name="emissivity_land",
-        default=0.96,
+        default=constants.emissivity_land,
         min_val=0.85,
         max_val=1.00,
         units="1",

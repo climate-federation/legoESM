@@ -43,6 +43,7 @@ from legoesm.ocean.experiments.dino import (
     dino_lat_lon_grid,
     dino_lat_lon_initial_state_arrays,
     dino_lat_lon_model_config,
+    nemo_faithful_dino_config,
     dino_top_layer_S_tendency,
     dino_top_layer_T_tendency,
     dino_top_layer_u_tendency,
@@ -156,6 +157,63 @@ class TestDINOConfig:
             dino._dino_vertical_mixing_config(
                 dataclasses.replace(cfg, vmix_scheme="bogus"))
 
+    def test_tke_prandtl_ri_maps_nemo_nn_pdl(self):
+        """DINOConfig.tke_prandtl_ri=True wires the NEMO zdftke nn_pdl=1
+        Richardson Prandtl: prandtl_mode='richardson' with coeff=1/ri_cri,
+        ri_cri=2/(2+c_eps/c_k)=2/9 -> coeff=4.5. Default False keeps Pr=10
+        constant (other recipes byte-identical). Truth-tier: in a strongly
+        stratified column (Ri>>ri_cri) the tracer avt drops to 0.1*avm (NEMO
+        pdlr floor); in a convecting column (Ri<0) avt tracks avm (Pr=1)."""
+        import dataclasses
+        from legoesm.ocean.physics.vertical_mixing.tke import (
+            _prandtl_number, compute_K_from_tke,
+        )
+        cfg = DINOConfig()
+        assert cfg.tke_prandtl_ri is False
+        # Default (off): constant Pr=10.
+        vm_off = dino._dino_vertical_mixing_config(
+            dataclasses.replace(cfg, vmix_scheme="tke"))
+        assert vm_off.tke.prandtl_mode == "constant"
+        # On: NEMO Ri-Prandtl.
+        vm_on = dino._dino_vertical_mixing_config(
+            dataclasses.replace(cfg, vmix_scheme="tke", tke_prandtl_ri=True))
+        tke = vm_on.tke
+        assert tke.prandtl_mode == "richardson"
+        ri_cri = 2.0 / (2.0 + tke.c_eps / tke.c_k)          # NEMO 2/9
+        assert tke.prandtl_ri_coeff == pytest.approx(1.0 / ri_cri)
+        assert tke.prandtl_ri_coeff == pytest.approx(4.5)
+        # pdlr(Ri) curve matches NEMO MAX(0.1, ri_cri/MAX(ri_cri,Ri)) exactly.
+        Ri = np.array([-1.0, 0.0, 0.1, ri_cri, 1.0, 5.0, 50.0])
+        N2 = jnp.asarray(Ri)                                 # unit shear -> Ri=N2
+        Pr = np.asarray(_prandtl_number(N2, jnp.ones_like(N2), jnp.ones_like(N2), tke))
+        pdlr_nemo = np.maximum(0.1, ri_cri / np.maximum(ri_cri, Ri))
+        np.testing.assert_allclose(1.0 / Pr, pdlr_nemo, rtol=0, atol=1e-12)
+        # Strongly stratified interior: avt -> 0.1*avm (pdlr floor). Build K
+        # with a large raw K_M (l_k, e sized so K_M >> floors/ceiling irrelevant).
+        strat = tke._replace(kappaM_max=1e6, kappaM_min=1e-6, kappaH_min=1e-9)
+        e = jnp.full((5,), 1e-2)
+        l_k = jnp.full((5,), 10.0)
+        big_ri = jnp.full((5,), 100.0)                       # Ri=100 >> ri_cri
+        K_M, K_H = compute_K_from_tke(
+            e, l_k, strat, N2=big_ri, shear_sq=jnp.ones((5,)))
+        np.testing.assert_allclose(np.asarray(K_H) / np.asarray(K_M), 0.1,
+                                   rtol=1e-6)
+        # Convecting column: Ri<0 -> Pr=1 -> avt tracks avm (before floors).
+        _, K_H_conv = compute_K_from_tke(
+            e, l_k, strat, N2=jnp.full((5,), -1.0), shear_sq=jnp.ones((5,)))
+        np.testing.assert_allclose(np.asarray(K_H_conv) / np.asarray(K_M), 1.0,
+                                   rtol=1e-6)
+
+    def test_nemo_dino_kamm_recipe_sets_ri_prandtl(self):
+        """The complete NEMO card enables nn_pdl=1; other recipes do not."""
+        cfg = dino_config_for_recipe("nemo_dino_kamm")
+        assert cfg.tke_prandtl_ri is True
+        vm = dino._dino_vertical_mixing_config(cfg)
+        assert vm.tke.prandtl_mode == "richardson"
+        assert vm.tke.prandtl_ri_coeff == pytest.approx(4.5)
+        # Backward-compat: the Veros DINO card keeps constant Pr.
+        assert dino_config_for_recipe("veros").tke_prandtl_ri is False
+
     def test_registry_entry(self):
         assert "dino" in AVAILABLE_EXPERIMENTS
         assert AVAILABLE_EXPERIMENTS["dino"] is EXPERIMENT_CONFIG
@@ -185,7 +243,9 @@ class TestDINORecipes:
 
     def test_catalog_membership(self):
         assert set(DINO_RECIPES) == {
-            "legoesm_default", "nemo_paper", "veros", "mitgcm", "oceananigans"}
+            "legoesm_default", "nemo_paper", "nemo_dino_kamm",
+            "nemo_dino_kamm_mlf",
+            "veros", "mitgcm", "oceananigans"}
         assert set(DINO_L2_RECIPES) == {"veros", "mitgcm", "oceananigans"}
         assert set(DINO_L2_RECIPES) <= set(DINO_RECIPES)
 
@@ -199,6 +259,11 @@ class TestDINORecipes:
         nemo = dino_config_for_recipe("nemo_paper")
         assert (nemo.eos, nemo.vmix_scheme, nemo.tracer_advection) == (
             "nemo_seos", "tke", "tvd")
+        # nemo_paper must use the geometric S-EOS depth (NEMO gdept) — the DINO
+        # tendency certificate showed insitu carries a 10x depth-proportional
+        # error in the thermobaric term.  Other recipes keep the insitu default.
+        assert nemo.eos_depth == "geometric"
+        assert dino_config_for_recipe("legoesm_default").eos_depth == "insitu"
         veros = dino_config_for_recipe("veros")
         assert (veros.eos, veros.vmix_scheme, veros.tracer_advection,
                 veros.barotropic_solver) == (
@@ -213,6 +278,77 @@ class TestDINORecipes:
         assert (ocn.eos, ocn.vmix_scheme, ocn.tracer_advection,
                 ocn.momentum_advection, ocn.outer_integrator) == (
             "veros_gsw", "catke", "weno7", "weno7", "ab2")
+
+    def test_nemo_dino_kamm_card_is_complete(self):
+        # The completed NEMO-DINO card (Kamm 2025) sets EVERY NEMO-relevant field
+        # explicitly (unlike nemo_paper, which inherits legoESM defaults on ~8).
+        # Assert each against its NEMO namelist value so the card can't drift.
+        c = dino_config_for_recipe("nemo_dino_kamm")
+        nemo = {
+            "eos": "nemo_seos", "eos_depth": "geometric",
+            "vertical_coordinate": "masked_zco",          # ln_zco_nam, full-step
+            "vmix_scheme": "tke", "tke_momentum_visc_bg": 1.2e-4,  # rn_avm0
+            "convection_smooth_transition": False, "convection_n2_mode": "adiabatic",
+            "convection_n2_threshold": -1e-12,            # zdfevd
+            "bottom_drag_scheme": "nemo_quadratic",       # ln_non_lin
+            "tracer_advection": "fct2",                   # nn_fct=2
+            "gm_kappa_scheme": "treguier", "redi_S_max": 0.01,  # nn_aei=21, rn_slpmax
+            "ke_gradient_scheme": "hollingsworth",        # nn_dynkeg=1
+            "A_h_eq_boost": 1.0, "A_h_floor": 0.0,        # no legoESM stabilizers
+            "barotropic_solver": "explicit_substep",      # ln_dynspg_ts
+            "barotropic_time_filter": "nemo_boxcar_centred",  # nn_bt_flt=2
+            "forcing_annual_cycle": True, "wind_through_step": True,  # ln_ann_cyc
+            "use_gm_redi": True,                          # ln_ldfeiv
+        }
+        for field, want in nemo.items():
+            assert getattr(c, field) == want, f"{field}: {getattr(c, field)} != {want}"
+        # It must build a model config (the demanding masked_zco + stabilizers-off
+        # + boxcar combination is exercised) — the recipe is runnable, not just a
+        # dict of values.
+        grid = dino_lat_lon_grid(c, n_lon=10)
+        dino_lat_lon_model_config(grid, c, physics=True)
+
+    def test_nemo_paper_convection_is_nemo_hard_switch(self):
+        # NEMO zdfevd is a HARD rn2<0 switch on the adiabatic (eosbn2) N^2. The
+        # legoESM sigmoid default leaks enhanced mixing into weakly-stable water
+        # and over-cools the DINO thermocline ~0.7 C (62-day matched-grid check:
+        # T@262m 8.78 vs NEMO 9.50 -> 9.55 with the hard step). The nemo_paper
+        # oracle recipe must select the faithful pair; other recipes keep the
+        # smooth legoESM default (behavior preservation).
+        nemo = dino_config_for_recipe("nemo_paper")
+        assert nemo.convection_smooth_transition is False
+        assert nemo.convection_n2_mode == "adiabatic"
+        assert nemo.convection_n2_threshold == -1e-12   # NEMO zdfevd threshold
+        default = dino_config_for_recipe("legoesm_default")
+        assert default.convection_smooth_transition is True
+        assert default.convection_n2_mode == "insitu"
+        assert default.convection_n2_threshold == 0.0
+        # The faithful pair must actually THREAD into the built EnhancedDiffusion
+        # config (both the lat-lon and MPAS convection builders read the cfg).
+        grid = dino_lat_lon_grid(nemo, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, nemo, physics=True)
+        ed = mc.physics.convection.enhanced_diffusion
+        assert ed.smooth_transition is False
+        assert ed.n2_mode == "adiabatic"
+        assert ed.n2_threshold == -1e-12
+
+    def test_gm_redi_mld_criterion_threads_and_validates(self):
+        import dataclasses
+        # nemo_dino_kamm selects the NEMO N^2-integral MLD criterion; it must
+        # reach the built GMRediConfig.
+        kamm = dino_config_for_recipe("nemo_dino_kamm")
+        assert kamm.gm_redi_mld_criterion == "n2_integral"
+        grid = dino_lat_lon_grid(kamm, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, kamm, physics=False)
+        assert mc.gm_redi.mld_criterion == "n2_integral"
+        # Default recipe keeps the byte-identical pot-density criterion.
+        default = dino_config_for_recipe("legoesm_default")
+        assert default.gm_redi_mld_criterion == "rho_c"
+        # The config builder raises on an unknown criterion (dispatch hardening).
+        bad = dataclasses.replace(DINOConfig(), gm_redi_mld_criterion="bogus")
+        gridb = dino_lat_lon_grid(bad, n_lon=10)
+        with pytest.raises(ValueError, match="gm_redi_mld_criterion"):
+            dino_lat_lon_model_config(gridb, bad, physics=False)
 
     def test_base_override_preserved(self):
         # A recipe overlay keeps the non-scheme setup fields of the base config.
@@ -283,6 +419,70 @@ class TestDINORecipes:
         assert mc.flat_get("outer_integrator") == "ab2"
         assert mc.flat_get("ab2_scope") == "total"
         assert mc.flat_get("barotropic_slow_forcing_ab2") is True
+
+
+class TestNemoFaithfulGrid:
+    """Opt-in NEMO-exact DINO grid (nemo_faithful_grid). Mesh-verified against
+    our NEMO 5.0.2 DINO build: 48×195, equator on a T-point, faces [1,49]."""
+
+    def test_default_grid_unchanged(self):
+        # Opt-in: a bare config keeps the legoESM [-50,0]/198×50 grid.
+        import numpy as np
+        assert DINOConfig().nemo_faithful_grid is False
+        grid = dino_lat_lon_grid(DINOConfig())
+        assert np.asarray(grid.lat).shape == (198,)     # equator on a face
+        assert np.asarray(grid.lon).shape == (50,)
+
+    def test_nemo_faithful_matches_nemo_mesh(self):
+        # NEMO DINO R1: 48 zonal cells (T-centres [1.5,48.5]), 195 rows with the
+        # equator ON a T-point (j=97 = 0.0°) at ±69.151°. The projection is
+        # identical; only the half-cell equator staggering + count differ.
+        import numpy as np
+        cfg = nemo_faithful_dino_config()
+        assert cfg.nemo_faithful_grid is True
+        assert (cfg.lon_west_deg, cfg.lon_east_deg) == (1.0, 49.0)
+        assert cfg.sill_lon_m_deg == 1.0        # sill anchor co-set to west wall
+        grid = dino_lat_lon_grid(cfg)
+        lat = np.degrees(np.asarray(grid.lat))
+        lon = np.degrees(np.asarray(grid.lon))
+        assert lat.shape == (195,) and lon.shape == (48,)
+        assert lon[0] == pytest.approx(1.5, abs=1e-4)
+        assert lon[-1] == pytest.approx(48.5, abs=1e-4)
+        assert lat[97] == pytest.approx(0.0, abs=1e-5)     # equator on T-point
+        assert abs(lat[0]) == pytest.approx(69.1514, abs=1e-3)
+
+    def test_nemo_faithful_bathymetry_domain_is_wet(self):
+        # The co-set lon frame keeps the bathymetry valid (not an all-land
+        # domain) — the sill anchor tracks the western wall at 1.0.
+        import numpy as np
+        from legoesm.ocean.experiments.dino import dino_lat_lon_bowl
+        cfg = nemo_faithful_dino_config()
+        H = np.asarray(dino_lat_lon_bowl(dino_lat_lon_grid(cfg), cfg))
+        assert (H > 1.0).any()                              # not all land
+        assert H.max() == pytest.approx(cfg.H_deep, abs=1.0)
+
+    def test_config_helper_preserves_base_recipe(self):
+        # run_dino applies `nemo_faithful_dino_config(base=cfg)` AFTER the recipe
+        # overlay, so it must keep the recipe's scheme choices while co-setting
+        # only the grid/bathymetry lon frame. This covers the flag->config wiring
+        # the CLI relies on (the helper's base= path).
+        base = dino_config_for_recipe("nemo_paper")
+        cfg = nemo_faithful_dino_config(base=base)
+        assert cfg.nemo_faithful_grid is True
+        assert (cfg.lon_west_deg, cfg.lon_east_deg, cfg.sill_lon_m_deg) == (
+            1.0, 49.0, 1.0)
+        # recipe fields survive (eos, convection fidelity, barotropic solver)
+        assert cfg.eos == "nemo_seos"
+        assert cfg.convection_smooth_transition is False
+        assert cfg.convection_n2_mode == "adiabatic"
+
+    def test_flag_without_lon_frame_raises(self):
+        # Flipping the flag alone (legoESM [-50,0] frame) would put every grid
+        # lon outside the basin -> all land; the builder fails loudly instead.
+        import dataclasses
+        with pytest.raises(ValueError, match="NEMO .1,49. longitude frame"):
+            dino_lat_lon_grid(
+                dataclasses.replace(DINOConfig(), nemo_faithful_grid=True))
 
 
 # ---------------------------------------------------------------------
@@ -569,6 +769,128 @@ class TestLatLonInitialState:
         T_col = np.asarray(T_2d)
         assert T_col.shape == (8,)
         assert T_col[0] > T_col[-1]
+
+    def test_initial_T_S_nemo_case4_bit_exact(self):
+        # NEMO usr_def_istate CASE 4 is bit-reproduced by dino_initial_T_S
+        # once the meridional-blend anchors are supplied from the model grid
+        # (phi_max=MAXVAL(gphit), t_bot/s_bot=MINVAL over the WET field) —
+        # the pure (lat,z) formula cannot see the tmask/gphit.
+        # NEMO wp is float64; the 1e-12 bit-exact gate needs x64 (float32
+        # residual is ~6e-7). Scoped to this test so the rest of the file
+        # keeps the suite-default dtype.
+        import jax
+        prev = jax.config.jax_enable_x64
+        jax.config.update("jax_enable_x64", True)
+        try:
+            self._check_nemo_case4_bit_exact()
+        finally:
+            jax.config.update("jax_enable_x64", prev)
+
+    def _check_nemo_case4_bit_exact(self):
+        cfg = DINOConfig()
+
+        # Reference 1-D depths (positive down) whose DEEPEST level is globally
+        # dry — the full-step (ln_zco) staircase that makes MINVAL-over-wet
+        # differ from T_1d[-1].
+        z_pos = np.array([25.0, 120.0, 500.0, 1500.0, 3000.0, 4200.0])
+        z_full_ref = -z_pos                       # legoESM: negative below surface
+        lat = np.array([-62.0, -30.0, 0.0, 30.0, 62.0])  # max|lat| = 62 != 70
+        # tmask: last level dry everywhere; row |lat|=62 also dry at level 4.
+        tmask = np.ones((len(lat), len(z_pos)))
+        tmask[:, -1] = 0.0
+        tmask[[0, 4], -2] = 0.0
+
+        # --- NEMO case-4 exact transcription (usrdef_istate.F90) ---
+        T1d = np.asarray(dino_T_profile_1d(z_pos))
+        S1d = np.asarray(dino_S_profile_1d(z_pos))
+        T_uni = T1d[None, :] * tmask               # horizontally-uniform, masked
+        S_uni = S1d[None, :] * tmask
+        phi_max = np.abs(lat).max()                # MAXVAL(gphit)
+        t_bot = (T_uni + 100.0 * (1.0 - tmask)).min()   # MINVAL over wet
+        s_bot = (S_uni + 100.0 * (1.0 - tmask)).min()
+        fac = (phi_max - np.abs(lat))[:, None] / phi_max
+        T_nemo = ((T1d[None, :] - t_bot) * fac + t_bot) * tmask
+        S_nemo = ((S1d[None, :] - s_bot) * fac + s_bot) * tmask
+
+        # --- legoESM with the NEMO-matched overrides ---
+        T_l, S_l = dino_initial_T_S(
+            lat, z_full_ref, cfg,
+            phi_max_deg=phi_max, t_bot=float(t_bot), s_bot=float(s_bot),
+        )
+        T_l = np.asarray(T_l) * tmask
+        S_l = np.asarray(S_l) * tmask
+        assert np.max(np.abs(T_l - T_nemo)) < 1e-12
+        assert np.max(np.abs(S_l - S_nemo)) < 1e-12
+
+        # --- default (no overrides) is BYTE-IDENTICAL to the legacy formula ---
+        T_def, S_def = dino_initial_T_S(lat, z_full_ref, cfg)
+        fac_def = (cfg.lat_max_deg - np.abs(lat))[:, None] / cfg.lat_max_deg
+        T_legacy = (T1d[None, :] - T1d[-1]) * fac_def + T1d[-1]
+        S_legacy = (S1d[None, :] - S1d[-1]) * fac_def + S1d[-1]
+        np.testing.assert_array_equal(np.asarray(T_def), T_legacy)
+        np.testing.assert_array_equal(np.asarray(S_def), S_legacy)
+
+    def test_land_mask_override_default_is_byte_identical(self):
+        # Default land_mask_override=None reproduces the analytic seam wall
+        # exactly (backward-compat for the standalone bowl recipes).
+        cfg = DINOConfig()
+        grid = dino_lat_lon_grid(cfg, n_lon=6)
+        zc = create_levy_stretched_z_star(
+            n_levels=4, H_max=cfg.H_deep, dz_min=400.0, k_th=3.0, a_cr=2.0,
+        )
+        base = dino_lat_lon_initial_state_arrays(grid, zc, cfg)
+        seam = dino_lat_lon_initial_state_arrays(
+            grid, zc, cfg, land_mask_override=None)
+        for a, b in zip(base, seam):
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+    def test_land_mask_override_reentrant_keeps_seam_wet(self):
+        # An i-periodic (ln_Iperio) override marks the whole domain wet ->
+        # the westernmost column j-index 0 stays ocean (no seam wall) and
+        # its T/S are NOT zeroed (no cold T=0 wall cell).
+        cfg = DINOConfig()
+        grid = dino_lat_lon_grid(cfg, n_lon=6)
+        zc = create_levy_stretched_z_star(
+            n_levels=4, H_max=cfg.H_deep, dz_min=400.0, k_th=3.0, a_cr=2.0,
+        )
+        # Seam wall (default) masks column 0 outside the channel band.
+        _, _, _, lm_seam = dino_lat_lon_initial_state_arrays(grid, zc, cfg)
+        assert float(np.asarray(lm_seam)[:, 0].sum()) < grid.n_lat  # some land
+        # Re-entrant override: everything wet.
+        wet = jnp.ones((grid.n_lat, grid.n_lon))
+        T, S, _, lm = dino_lat_lon_initial_state_arrays(
+            grid, zc, cfg, land_mask_override=wet)
+        np.testing.assert_array_equal(np.asarray(lm), np.ones_like(np.asarray(lm)))
+        # Column 0 T/S kept (not zeroed) since it is now wet.
+        assert np.all(np.asarray(T)[:, 0, 0] != 0.0)
+
+    def test_land_mask_override_reentrant_periodic_u_mask(self):
+        # The full state built with a re-entrant override has periodic-
+        # consistent zonal face masks (u_mask[:,0] == u_mask[:,-1] wrap) and
+        # keeps the N/S walls (ln_Iperio: i-periodic, j-walled).
+        from legoesm.ocean.experiments.dino import dino_lat_lon_state
+        cfg = DINOConfig()
+        grid = dino_lat_lon_grid(cfg, n_lon=6)
+        zc = create_levy_stretched_z_star(
+            n_levels=4, H_max=cfg.H_deep, dz_min=400.0, k_th=3.0, a_cr=2.0,
+        )
+        wet = jnp.ones((grid.n_lat, grid.n_lon))
+        st = dino_lat_lon_state(grid, zc, cfg, land_mask_override=wet)
+        um = np.asarray(st.u_mask.data)
+        vm = np.asarray(st.v_mask.data)
+        assert um.shape == (grid.n_lat, grid.n_lon + 1)
+        # Re-entrant: the west-seam u-face (column 0) is OPEN (all wet) — the
+        # meaningful contrast to the default seam wall, where those faces are
+        # dry.  (The trailing wrap column mirrors column 0 by construction.)
+        st_wall = dino_lat_lon_state(grid, zc, cfg)              # default seam wall
+        um_wall = np.asarray(st_wall.u_mask.data)
+        assert np.all(um[:, 0] > 0.5)                            # open seam
+        assert np.any(um_wall[:, 0] < 0.5)                       # walled seam
+        np.testing.assert_array_equal(um[:, 0], um[:, -1])       # wrap convention
+        # Interior u-faces all wet (fully re-entrant, no seam wall).
+        assert np.all(um > 0.5)
+        # N/S boundary v-faces stay walls (not j-periodic).
+        assert np.all(vm[0] < 0.5) and np.all(vm[-1] < 0.5)
 
 
 # ---------------------------------------------------------------------
@@ -1300,7 +1622,11 @@ class TestSlopeLimitNemoCap:
         with pytest.raises(ValueError, match="slope_limit"):
             self._w_triads("gerdes")
 
-    def test_centered_scheme_rejects_cap(self):
+    def test_centered_scheme_accepts_cap(self):
+        # nemo_cap is wired for the centered slope path since 2026-07-16
+        # (previously it raised; the DM95 taper killed the flux at steep
+        # ML-base outcrops where NEMO's cap keeps pumping — plan §G). Lock
+        # that centered + nemo_cap runs and returns finite tendencies.
         from legoesm.ocean.experiments.dino import (
             dino_lat_lon_grid, dino_lat_lon_state, dino_lat_lon_vertical,
             dino_r1_exact_config,
@@ -1314,11 +1640,13 @@ class TestSlopeLimitNemoCap:
         st = dino_lat_lon_state(g, z, cfg)
         from legoesm.ocean.experiments.dino import dino_lat_lon_model_config
         mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
-        gm_bad = mc.gm_redi._replace(slope_scheme="centered")
-        with pytest.raises(ValueError, match="nemo_cap"):
-            gm_redi_tracer_tendency_latlon(
-                st.T.data, st.S.data, st.eta.data, st.H_bathy.data,
-                g, z, gm_bad, eos=mc.eos)
+        gm_centered = mc.gm_redi._replace(slope_scheme="centered")
+        assert gm_centered.slope_limit == "nemo_cap"
+        dT_dt, dS_dt = gm_redi_tracer_tendency_latlon(
+            st.T.data, st.S.data, st.eta.data, st.H_bathy.data,
+            g, z, gm_centered, eos=mc.eos)
+        assert bool(jnp.all(jnp.isfinite(dT_dt)))
+        assert bool(jnp.all(jnp.isfinite(dS_dt)))
 
     def test_preset_selects_cap(self):
         from legoesm.ocean.experiments.dino import (
@@ -1348,7 +1676,7 @@ class TestSlopeLimitNemoCap:
 
 
 class TestNemoCentredBarotropic:
-    """dynspg_ts ln_bt_fw=F + nn_bt_flt=1 forward-frame reduction."""
+    """dynspg_ts ln_bt_fw=F + nn_bt_flt=2 forward-frame reduction."""
 
     def test_boxcar_window_centred_at_new_time(self):
         from legoesm.ocean.dynamics.barotropic_common import (
@@ -1360,16 +1688,16 @@ class TestNemoCentredBarotropic:
         w = np.asarray(w)
         assert n_loop == w.size
         np.testing.assert_allclose(w.sum(), 1.0, rtol=1e-14)
-        # F90 transliteration: zwgt1(jn)=1 where |jn - n|/n < 0.5
+        # F90 transliteration (ts_wgt CASE(2)): zwgt1(jn)=1 where |jn-n|/n < 1
         jn = np.arange(1, n_loop + 1, dtype=float)
-        expect = (np.abs(jn - n) / n < 0.5).astype(float)
+        expect = (np.abs(jn - n) / n < 1.0).astype(float)
         expect = expect / expect.sum()
         np.testing.assert_allclose(w, expect, rtol=1e-14)
-        # centroid at the baroclinic step (tau = 1)
+        # centroid at the baroclinic step (tau = 1); symmetric window
         centroid = (w * jn / n).sum()
         np.testing.assert_allclose(centroid, 1.0, rtol=0, atol=0.05)
-        # window extends past the step but not to 2n
-        assert n < n_loop < 2 * n
+        # nn_bt_flt=2 boxcar: full width 2n -> loop runs jn=1..2n-1
+        assert n_loop == 2 * n - 1
 
     def test_transport_weights_continuity_telescoping(self):
         """w_transport[j] = sum(w[j:]) / n — the unique choice with

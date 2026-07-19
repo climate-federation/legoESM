@@ -336,6 +336,14 @@ class CoupledESMDriver:
         """Build the prognostic 3D ``LatLonCGridOceanModel`` (ocean_mode=
         'dynamic') on the shared lat-lon grid with the OMIP-validated stable
         cold-start stack.  See docs/ocean/coupled_3d_ocean_plan.md (Phase 1)."""
+        # Voronoi/MPAS ocean: a co-located 3-D MPAS ocean on the atmosphere's
+        # Voronoi mesh has its own init recipe + edge/cell TRiSK staggering (NOT
+        # the lat-lon C-grid stack below).  Dispatch early, mirroring the tripole
+        # early-return.
+        from legoesm.grids.voronoi import VoronoiMesh
+        if isinstance(self._ocean_grid, VoronoiMesh):
+            self._init_mpas_dynamic_ocean(T_sfc_mean)
+            return
         from legoesm.grids.latlon import LatLonGrid
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -692,6 +700,86 @@ class CoupledESMDriver:
             f"nlev={cfg.ocean_nlev}, ocean_dt={cfg.ocean_dt_s}s, "
             f"barotropic={ocfg.barotropic.barotropic_solver}, pgf={ocfg.pgf_scheme}, "
             f"mesh={cfg.tripole_mesh_path}")
+
+    def _init_mpas_dynamic_ocean(self, T_sfc_mean: float):
+        """Build the prognostic 3-D MPAS ocean (``MPASOceanModel``) CO-LOCATED on
+        the atmosphere's Voronoi mesh, from the OMIP-validated NEMO-match dycore
+        recipe (the single source of truth ``nemo_match_mpas_model_config``, the
+        same config scripts/run/run_omip.py steps) + a stratified rest cold
+        start.
+
+        MPAS uses TRiSK C-grid staggering — edge-normal velocity, cell-centred
+        T/S/eta — unlike the lat-lon Arakawa-C ocean, so SST + surface currents
+        are read back through the Perot edge->cell reconstruction in the MPAS
+        branch of :meth:`_ocean_surface_KuvC`.  Surface fluxes are supplied
+        EXTERNALLY by the coupler (``surface_forcing`` scheme='none' — the
+        dynamics-core external tau/q_net block is the sole consumer), exactly as
+        the OMIP JRA55 forcing mode does; the recipe's idealized prescribed-wind
+        + restoring forcing is off."""
+        from legoesm.grids.voronoi import VoronoiMesh
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        from legoesm.ocean.fidelity.nemo_match_recipe import (
+            nemo_match_mpas_model_config,
+        )
+        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm import constants
+
+        cfg = self.coupled_cfg
+        if cfg.ocean_dt_s <= 0.0:
+            raise ValueError(f"ocean_dt_s must be > 0, got {cfg.ocean_dt_s!r}")
+        # Co-located: the ocean mesh IS the atmosphere's Voronoi mesh (identity
+        # remap) — reuse it; never rebuild at a mismatched resolution.
+        mesh = self._ocean_grid
+        if not isinstance(mesh, VoronoiMesh):
+            raise ValueError(
+                "_init_mpas_dynamic_ocean requires a VoronoiMesh (MPAS) ocean "
+                f"grid; got {type(mesh).__name__}.")
+        z_coord = create_ocean_z_star(cfg.ocean_nlev, H_max=cfg.ocean_H_max_m)
+        # Proven OMIP NEMO-match MPAS dycore + coefficients (locked by
+        # tests/ocean/unit/test_recipes.py), with ONLY the two coupled-run
+        # overlays:
+        #   * surface_forcing scheme='none' so the coupler's air-sea tau/q_net
+        #     (assembled in _assemble_ocean_forcing) is the SOLE surface forcing,
+        #     NOT the recipe's idealized prescribed-wind + restoring default;
+        #   * normalize_freshwater=True (the CORE-II net ~+0.65 Sv P-E+R input
+        #     would otherwise accumulate as a global fresh drift) — matching the
+        #     lat-lon/tripole from_flat(normalize_freshwater=True) path.
+        base = nemo_match_mpas_model_config()
+        config = base._replace(
+            physics=base.physics._replace(
+                surface_forcing=base.physics.surface_forcing._replace(
+                    scheme="none")),
+            normalize_freshwater=True,
+        )
+        self._ocean_model = MPASOceanModel(mesh, z_coord, config)
+        # Stratified rest cold start (zero velocity/SSH, exponential T, uniform
+        # S).  land_lat_threshold=90 => all-ocean, matching a co-located
+        # aquaplanet atmosphere (f_land=0) so the wet masks agree — the same
+        # rationale as the lat-lon ocean_ic='rest' branch.  The surface layer
+        # starts near the atmosphere's mean SST (T_sfc_mean [K] -> degC) so the
+        # cold start is not shocked by a large air-sea temperature jump.
+        T_surf_C = float(T_sfc_mean) - float(constants.T_freeze)
+        self._ocean_state = rest_state_mpas_ocean(
+            mesh, z_coord, T_water_init_C=T_surf_C, H_max=cfg.ocean_H_max_m,
+            land_lat_threshold=90.0,
+        )
+        self._ocean_step = self._ocean_model.step
+        self._ocean_z_coord = z_coord
+        self._ocean_land_mask = self._ocean_state.land_mask.data
+        self._ocean_is_mpas = True
+        self._is_dynamic_ocean = True
+        # No climatological restoring target on the idealized cold start; the
+        # optional surface relaxation (_apply_ocean_restoring) stays a no-op
+        # unless a target is configured.
+        self._ocean_T_target = None
+        self._ocean_S_target = None
+        _ocean_frac = float(jnp.mean(self._ocean_land_mask))
+        logger.info(
+            "  Ocean: mode=dynamic (3D MPASOceanModel, voronoi), ic=rest, "
+            f"ocean_frac={_ocean_frac:.2f}, nlev={cfg.ocean_nlev}, "
+            f"ocean_dt={cfg.ocean_dt_s}s, surface_forcing=none(coupled), "
+            "normalize_freshwater=True")
 
     def _init_coupler(self):
         """Initialize coupler, land, ice, lake surface states."""
@@ -1356,12 +1444,43 @@ class CoupledESMDriver:
         )
 
         state = self._atm.state
-        q_v = self._atm.q_v
-        p_s = state.p_s.data
-        T_low = state.T.data[..., -1]
-        u_low = state.u.data[..., -1]
-        v_low = state.v.data[..., -1]
-        q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
+        # Low-level winds/T/q/p_s for the ocean surface stress + bulk turbulent
+        # fluxes.  Three atm-state layouts:
+        #   * cube/latlon  -> cell-centered u/v/T/p_s Fields, read directly.
+        #   * MPAS/voronoi -> edge-normal velocity (state.v is None); Perot-
+        #     reconstruct the cell-centered (zonal, meridional) winds.
+        #   * SPECTRAL     -> the state is spectral COEFFICIENTS, so synthesize
+        #     every field to grid (spectral_pe_to_grid) before extracting the
+        #     lowest level.  Moisture is grid-space in the state's tracers dict
+        #     (NOT in spectral_pe_to_grid); zeros on a dry spectral run.
+        if hasattr(state, "vor_hat"):
+            from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+                spectral_pe_to_grid,
+            )
+            _f = spectral_pe_to_grid(state, self._atm.grid, self._atm.sigma)
+            p_s = _f["p_s"]
+            T_low = _f["T"][..., -1]
+            u_low = _f["u"][..., -1]
+            v_low = _f["v"][..., -1]
+            _tr = getattr(state, "tracers", None)
+            _qg = _tr.get("q_v") if _tr else None
+            _qgd = (_qg.data if hasattr(_qg, "data") else _qg)  # Field -> array
+            q_low = (_qgd[..., -1] if _qgd is not None
+                     else jnp.zeros_like(T_low))
+        else:
+            q_v = self._atm.q_v
+            p_s = state.p_s.data
+            T_low = state.T.data[..., -1]
+            if state.v is not None:
+                u_low = state.u.data[..., -1]
+                v_low = state.v.data[..., -1]
+            else:
+                from legoesm.grids.voronoi import reconstruct_cell_velocity
+                _u_cell, _v_cell = reconstruct_cell_velocity(
+                    state.u.data, self._atm.grid)
+                u_low = _u_cell[..., -1]
+                v_low = _v_cell[..., -1]
+            q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
         sigma_full = jnp.asarray(self._atm.sigma.sigma_full)
         p_low = p_s * sigma_full[-1]
         # Moist-air density: rho = p / (R_d * T_v), T_v = T*(1 + (1/eps - 1)*q).
@@ -1591,6 +1710,20 @@ class CoupledESMDriver:
             sst = self._ocean_state.T_sfc.data
             z = jnp.zeros_like(sst)
             return sst, z, z
+        if getattr(self, "_ocean_is_mpas", False):
+            # 3-D MPAS ocean: SST = top-level cell T [°C -> K]; surface currents
+            # = Perot area-weighted edge->cell reconstruction of the top-level
+            # edge-normal velocity, returned DIRECTLY in the geographic
+            # (east, north) basis (reconstruct_cell_velocity) — the basis the
+            # o2a coupler expects, so NO rotation is needed (unlike the tripole
+            # cap below).  All returns are shape (nCells,).
+            from legoesm import constants
+            from legoesm.grids.voronoi import reconstruct_cell_velocity
+            T_mpas = self._ocean_state.T.data            # (nCells, nlev) [°C]
+            sst = T_mpas[..., 0] + constants.T_freeze    # top level -> K
+            u_east, v_north = reconstruct_cell_velocity(
+                self._ocean_state.u.data[..., 0], self._ocean_grid)
+            return sst, u_east, v_north
         from legoesm import constants
         T = self._ocean_state.T.data                 # (n_lat, n_lon, nlev) [°C]
         sst = T[..., 0] + constants.T_freeze         # top level → K
@@ -2177,9 +2310,18 @@ class CoupledESMDriver:
                 fresh = self._ocean_state
                 restored, _ = _restore_pytree_from_npz(
                     fresh, data, "ocean3d_", coupled_path.name, strict=True)
+                # Reset the static geometry to the deterministic fresh-init
+                # values (config-derived, identical on a clean resume).  The
+                # MPAS/voronoi ocean state carries H_bathy + a cell land_mask
+                # but has NO edge u/v masks (its mesh geometry lives on the
+                # model, not the state), so the latlon C-grid face-mask triple
+                # reset only applies where those fields exist — an unconditional
+                # ``_replace(u_mask=..., v_mask=...)`` crashes MPASOceanState.
                 self._ocean_state = restored._replace(
-                    H_bathy=fresh.H_bathy, land_mask=fresh.land_mask,
-                    u_mask=fresh.u_mask, v_mask=fresh.v_mask)
+                    H_bathy=fresh.H_bathy, land_mask=fresh.land_mask)
+                if hasattr(fresh, "u_mask"):
+                    self._ocean_state = self._ocean_state._replace(
+                        u_mask=fresh.u_mask, v_mask=fresh.v_mask)
 
         if "ocean_T_sfc" in data.files and self._ocean_state is not None:
             saved_shape = tuple(int(s) for s in data["ocean_T_sfc"].shape)

@@ -27,14 +27,13 @@ tests pin the *mechanism* that makes that survival hold.
 
 import jax.numpy as jnp
 import numpy as np
-import pytest
-
 from legoesm.core.field import Field
 from legoesm.core.precision import PrecisionPolicy, set_policy
-from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-    barotropic_substeps_latlon_cgrid)
+from legoesm.ocean.dynamics.barotropic_latlon_cgrid import barotropic_substeps_latlon_cgrid
 from legoesm.ocean.experiments.silvestri_baroclinic_jet import (
-    SilvestriJetConfig, build_silvestri_baroclinic_jet_setup)
+    SilvestriJetConfig,
+    build_silvestri_baroclinic_jet_setup,
+)
 
 set_policy(PrecisionPolicy.fp64())
 
@@ -123,6 +122,125 @@ def test_cure_removes_in_substep_coriolis():
         f"Coriolis (no U from a divergence-free V), got {np.max(np.abs(u_off)):.2e}")
 
 
+def _een_cfg(cfg):
+    return cfg._replace(barotropic=cfg.barotropic._replace(
+        barotropic_coriolis="een"))
+
+
+def test_een_restores_the_checkerboard_null_mode():
+    """NEMO EEN (``barotropic_coriolis="een"``) EXERTS a restoring on the 2Δx
+    checkerboard the 4-pt average annihilates — the node-16 fix.
+
+    The 4-pt-avg Coriolis gives ~0 U response to the checkerboard (null mode);
+    the enstrophy-conserving EEN gives a response COMPARABLE to a smooth V
+    (the mode is no longer invisible to the discrete Coriolis).
+    """
+    r, cfg, s = _rest_setup()
+    een = _een_cfg(cfg)
+    ck = _set_v(s, _checkerboard_v(s))
+    sm = _set_v(s, _smooth_v(s))
+    cor_ck_avg = _coriolis_u(r, cfg, ck)
+    cor_ck_een = _coriolis_u(r, een, ck)
+    cor_sm_een = _coriolis_u(r, een, sm)
+    # avg annihilates the checkerboard...
+    assert cor_ck_avg < 1e-3 * cor_sm_een, (
+        f"control: avg should annihilate the checkerboard, got {cor_ck_avg:.2e}")
+    # ...EEN restores it: the checkerboard now drives a Coriolis U of the same
+    # order as a smooth field (no longer a null mode).
+    assert cor_ck_een > 0.1 * cor_sm_een, (
+        f"EEN failed to restore the null mode: cor_ck_een={cor_ck_een:.2e} "
+        f"vs cor_sm_een={cor_sm_een:.2e}")
+    # and EEN is a genuine change vs avg on the checkerboard.
+    assert cor_ck_een > 100.0 * max(cor_ck_avg, 1e-30)
+
+
+def test_een_barotropic_coriolis_conserves_energy():
+    """The EEN barotropic Coriolis does ~no work (Σ hu·A·U·cor_u + hv·A·V·cor_v
+    ≈ 0), the defining property of the enstrophy-conserving triad.  Residual is
+    limited by the coastal Neumann fill / partial cells (same character as the
+    baroclinic AL81 operator), not machine precision on a walled basin."""
+    from legoesm.grids.latlon import ensure_geometry
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _build_een_barotropic_inputs,
+        een_barotropic_coriolis,
+    )
+    from legoesm.ocean.vertical import compute_layer_thickness
+    setup = build_silvestri_baroclinic_jet_setup(
+        n_lat=24, n_lon=16, scheme="W9V", nlev=4,
+        config=SilvestriJetConfig(), stabilize=False)
+    grid = ensure_geometry(setup.grid)
+    st = setup.initial_state
+    h_bathy = st.H_bathy.data.astype(jnp.float64)
+    mask = st.land_mask.data.astype(jnp.float64)
+    um = st.u_mask.data.astype(jnp.float64)
+    vm = st.v_mask.data.astype(jnp.float64)
+    h_k = compute_layer_thickness(
+        jnp.zeros_like(h_bathy), h_bathy, setup.z_coord,
+        min_water_column_m=setup.model_config.min_water_column_m)
+    pre = _build_een_barotropic_inputs(h_k, grid, mask, um, vm, jnp.float64)
+    nlat, nlon = mask.shape
+    rng = np.random.default_rng(0)
+    u_r = jnp.asarray(rng.standard_normal((nlat, nlon + 1))) * um
+    v_r = jnp.asarray(rng.standard_normal((nlat + 1, nlon))) * vm
+    cu, cv = een_barotropic_coriolis(u_r, v_r, pre)
+    area = grid.area
+    a_u = 0.5 * (jnp.roll(area, 1, 1) + area)
+    a_u = jnp.concatenate([a_u, a_u[:, :1]], 1)
+    a_v = jnp.concatenate([area[:1], 0.5 * (area[:-1] + area[1:]), area[-1:]], 0)
+    work = float(jnp.sum(pre["hu"] * a_u * u_r * cu)
+                 + jnp.sum(pre["hv"] * a_v * v_r * cv))
+    scale = float(jnp.sum(jnp.abs(pre["hu"] * a_u * u_r * cu))
+                  + jnp.sum(jnp.abs(pre["hv"] * a_v * v_r * cv)))
+    assert abs(work) / scale < 1e-2, (
+        f"EEN Coriolis does spurious work: rel={work / scale:.2e}")
+
+
+def test_een_pre_step_matches_substep_zero_live_term():
+    """``barotropic_coriolis_een_pre_step`` (the live-split F_slow subtraction) IS
+    exactly the substep-0 live EEN Coriolis the loop applies — so subtracting it
+    from F_slow cancels the double-count at substep 0 (the node-16 LIVE cure).
+
+    Pins the argument wiring: the helper must compose the SAME
+    ``_depth_average_to_faces`` + ``_build_een_barotropic_inputs`` +
+    ``een_barotropic_coriolis`` the substep loop calls internally (a swapped u/v
+    or wrong thickness would break this equality)."""
+    from legoesm.grids.latlon import ensure_geometry
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _build_een_barotropic_inputs,
+        _depth_average_to_faces,
+        barotropic_coriolis_een_pre_step,
+        een_barotropic_coriolis,
+    )
+    from legoesm.ocean.vertical import compute_layer_thickness
+    setup = build_silvestri_baroclinic_jet_setup(
+        n_lat=24, n_lon=16, scheme="W9V", nlev=4,
+        config=SilvestriJetConfig(), stabilize=False)
+    grid = ensure_geometry(setup.grid)
+    st = setup.initial_state
+    h_bathy = st.H_bathy.data.astype(jnp.float64)
+    mask = st.land_mask.data.astype(jnp.float64)
+    um = st.u_mask.data.astype(jnp.float64)
+    vm = st.v_mask.data.astype(jnp.float64)
+    h_k = compute_layer_thickness(
+        jnp.zeros_like(h_bathy), h_bathy, setup.z_coord,
+        min_water_column_m=setup.model_config.min_water_column_m)
+    nlat, nlon, nlev = h_k.shape
+    rng = np.random.default_rng(1)
+    u3 = jnp.asarray(rng.standard_normal((nlat, nlon + 1, nlev))) * um[..., None]
+    v3 = jnp.asarray(rng.standard_normal((nlat + 1, nlon, nlev))) * vm[..., None]
+    mwc = jnp.asarray(setup.model_config.min_water_column_m, dtype=jnp.float64)
+    cu, cv = barotropic_coriolis_een_pre_step(
+        u3, v3, h_k, grid, mask, um, vm, mwc, jnp.float64)
+    # independent reconstruction of the substep-0 live term
+    pre = _build_een_barotropic_inputs(h_k, grid, mask, um, vm, jnp.float64)
+    U, V = _depth_average_to_faces(u3, v3, h_k, mwc, mask, um, vm, grid)
+    cu_ref, cv_ref = een_barotropic_coriolis(U, V, pre)
+    np.testing.assert_allclose(np.asarray(cu), np.asarray(cu_ref), rtol=0, atol=0)
+    np.testing.assert_allclose(np.asarray(cv), np.asarray(cv_ref), rtol=0, atol=0)
+    # non-vacuous: the term is actually non-trivial
+    assert float(np.max(np.abs(np.asarray(cu)))) > 0.0
+
+
 def test_explicit_ab2_config_gates_in_substep_coriolis():
     """The §5 faithful stack wires coriolis_scheme=explicit_ab2 (=> term off)."""
     r = build_silvestri_baroclinic_jet_setup(
@@ -133,3 +251,181 @@ def test_explicit_ab2_config_gates_in_substep_coriolis():
     assert mc.barotropic.barotropic_solver == "explicit_substep"
     assert mc.barotropic.barotropic_slow_forcing_ab2 is True
     assert mc.barotropic.barotropic_diffusion_alpha == 0.0
+
+
+# =====================================================================
+# METRIC-COMPLETE EEN (barotropic_coriolis="een_metric"): NEMO ffu/ffv
+# retain the e1v/r1_e1u (u) + e2u/r1_e2v (v) horizontal scale factors the
+# per-unit-width "een" drops (dynspg_ts.F90:1349-1379) — the coefficients NEMO's
+# dyn_cor_2D actually uses, so this is the strictly more NEMO-faithful barotropic
+# Coriolis. These gates pin (a) the fold is EXACTLY an identity when the metrics
+# are uniform (so "een_metric" ≡ "een" ≡ f·V̄ in the flat-uniform limit) and
+# (b) it is a latitude-scaling correction (≈0 at the equator, O(1%) at high lat)
+# that reduces the high-lat Coriolis energy-budget residual.
+# NB (twin-verified 2026-07-19): this ~1% correction does NOT cure the DINO
+# |lat|~68° 2Δx ETA runaway (the FE step-twin still NaNs at s26, near byte-
+# identical to "een") — that is a free-surface mode via the barotropic
+# PGF/continuity coupling, not the Coriolis V→u averaging the EEN restores.
+# =====================================================================
+
+
+def _een_pre_from_silvestri(metric_complete):
+    from legoesm.grids.latlon import ensure_geometry
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _build_een_barotropic_inputs,
+    )
+    from legoesm.ocean.vertical import compute_layer_thickness
+    setup = build_silvestri_baroclinic_jet_setup(
+        n_lat=24, n_lon=16, scheme="W9V", nlev=4,
+        config=SilvestriJetConfig(), stabilize=False)
+    grid = ensure_geometry(setup.grid)
+    st = setup.initial_state
+    h_bathy = st.H_bathy.data.astype(jnp.float64)
+    mask = st.land_mask.data.astype(jnp.float64)
+    um = st.u_mask.data.astype(jnp.float64)
+    vm = st.v_mask.data.astype(jnp.float64)
+    h_k = compute_layer_thickness(
+        jnp.zeros_like(h_bathy), h_bathy, setup.z_coord,
+        min_water_column_m=setup.model_config.min_water_column_m)
+    pre = _build_een_barotropic_inputs(
+        h_k, grid, mask, um, vm, jnp.float64, metric_complete=metric_complete)
+    return grid, mask, um, vm, pre
+
+
+def test_een_metric_reduces_to_een_on_uniform_metrics():
+    """Flat-uniform limit (gate a): when the horizontal scale factors are
+    UNIFORM (e1u≡e1v, e2u≡e2v) the NEMO metric fold — scale the flux velocity
+    by the neighbour width, divide the output by the local width — is EXACTLY
+    an identity, so "een_metric" reproduces "een" to machine precision.  On a
+    lat-lon grid they legitimately DIFFER (that difference IS the fix)."""
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        een_barotropic_coriolis,
+    )
+    _, _, um, vm, pre_plain = _een_pre_from_silvestri(metric_complete=False)
+    # Force uniform metrics onto a metric_complete pre: any nonzero constant c
+    # gives (·c)/(c) = identity → must equal the plain "een" output bit-for-bit
+    # up to fp round-off.
+    c1, c2 = 7.0e4, 1.1e5
+    pre_uniform = dict(pre_plain)
+    pre_uniform["metric_complete"] = True
+    pre_uniform["e1u"] = jnp.full_like(pre_plain["hu"], c1)
+    pre_uniform["e1v"] = jnp.full_like(pre_plain["hv"], c1)
+    pre_uniform["e2u"] = jnp.full_like(pre_plain["hu"], c2)
+    pre_uniform["e2v"] = jnp.full_like(pre_plain["hv"], c2)
+    nlat, nlon = um.shape[0], vm.shape[1]
+    rng = np.random.default_rng(3)
+    u_r = jnp.asarray(rng.standard_normal((nlat, nlon + 1))) * um
+    v_r = jnp.asarray(rng.standard_normal((nlat + 1, nlon))) * vm
+    cu_p, cv_p = een_barotropic_coriolis(u_r, v_r, pre_plain)
+    cu_m, cv_m = een_barotropic_coriolis(u_r, v_r, pre_uniform)
+    np.testing.assert_allclose(np.asarray(cu_m), np.asarray(cu_p),
+                               rtol=1e-12, atol=1e-14)
+    np.testing.assert_allclose(np.asarray(cv_m), np.asarray(cv_p),
+                               rtol=1e-12, atol=1e-14)
+    # non-vacuous: the term is genuinely non-trivial
+    assert float(np.max(np.abs(np.asarray(cu_p)))) > 0.0
+
+
+def _highlat_channel_pre(metric_complete, lat_s=55.0, lat_n=75.0,
+                         n_lat=40, n_lon=16):
+    """Coast-free (periodic-x) high-latitude channel, all interior wet, flat
+    bottom — isolates the O(Δcosφ) metric error from any coastal Neumann fill."""
+    from legoesm.grids.latlon import create_regional_latlon_grid, ensure_geometry
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _build_een_barotropic_inputs,
+    )
+    grid1d, land = create_regional_latlon_grid(
+        n_lat=n_lat, n_lon=n_lon, lat_south=lat_s, lat_north=lat_n,
+        periodic_x=True)
+    grid = ensure_geometry(grid1d)
+    mask = jnp.asarray(land, dtype=jnp.float64)   # interior all wet, N/S walls
+    um, vm = compute_face_masks(mask, grid)
+    um = um.astype(jnp.float64)
+    vm = vm.astype(jnp.float64)
+    ny, nx = mask.shape
+    h_k = jnp.broadcast_to(
+        (mask * 1000.0)[..., None], (ny, nx, 1)).astype(jnp.float64)
+    pre = _build_een_barotropic_inputs(
+        h_k, grid, mask, um, vm, jnp.float64, metric_complete=metric_complete)
+    return grid, mask, um, vm, pre
+
+
+def _energy_rel(grid, pre, u_r, v_r, cu, cv):
+    """|Σ (e1·e2·h)·(u·cor_u + v·cor_v)| / Σ|·| — the Coriolis energy-budget
+    residual under the NEMO discrete KE norm (u-/v-cell volume e1·e2·h =
+    grid.dx_*·dy_*·h). The AL81/EEN operator is an energy-ENSTROPHY compromise,
+    NOT a machine-precision energy conserver on a walled basin (see the sibling
+    test docstring), so this is O(1e-2..1e-3); the metric fold reduces the
+    LAT-DEPENDENT slice of it."""
+    a_u = grid.dx_u * grid.dy_u
+    a_v = grid.dx_v * grid.dy_v
+    wu = pre["hu"] * a_u * u_r * cu
+    wv = pre["hv"] * a_v * v_r * cv
+    work = float(jnp.sum(wu) + jnp.sum(wv))
+    scale = float(jnp.sum(jnp.abs(wu)) + jnp.sum(jnp.abs(wv)))
+    return abs(work) / scale
+
+
+def _metric_correction_and_energy(lat_s, lat_n, seed):
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        een_barotropic_coriolis,
+    )
+    g_p, _, um, vm, pre_p = _highlat_channel_pre(
+        metric_complete=False, lat_s=lat_s, lat_n=lat_n)
+    g_m, _, _, _, pre_m = _highlat_channel_pre(
+        metric_complete=True, lat_s=lat_s, lat_n=lat_n)
+    nlat, nlon = um.shape[0], vm.shape[1]
+    rng = np.random.default_rng(seed)
+    u_r = jnp.asarray(rng.standard_normal((nlat, nlon + 1))) * um
+    v_r = jnp.asarray(rng.standard_normal((nlat + 1, nlon))) * vm
+    cu_p, cv_p = een_barotropic_coriolis(u_r, v_r, pre_p)
+    cu_m, cv_m = een_barotropic_coriolis(u_r, v_r, pre_m)
+    corr = float(np.max(np.abs(np.asarray(cu_m) - np.asarray(cu_p)))) / max(
+        float(np.max(np.abs(np.asarray(cu_p)))), 1e-30)
+    return corr, _energy_rel(g_p, pre_p, u_r, v_r, cu_p, cv_p), \
+        _energy_rel(g_m, pre_m, u_r, v_r, cu_m, cv_m)
+
+
+def test_een_metric_correction_scales_with_latitude():
+    """High-lat gate (gate b): the NEMO e1v/r1_e1u + e2u/r1_e2v metric fold is
+    the term the EEN enstrophy budget needs where ∂cosφ ≠ 0.  It must therefore
+    (i) VANISH in the near-uniform equatorial band and (ii) become a material
+    O(1%) correction at 55–75°N, where it also REDUCES the Coriolis energy-budget
+    residual — the exact latitude signature of NEMO's high-lat metric term.
+    (A machine-precision energy gate is NOT claimed: the isolated AL81 operator
+    is an energy-enstrophy compromise, not an exact energy conserver — the flat-
+    uniform identity gate above is the machine-precision anchor.  And this ~1%
+    correction is NOT the DINO |lat|~68° eta-runaway fix: the FE/MLF step-twin
+    still blows with een_metric — see the module header.)"""
+    corr_eq, _, _ = _metric_correction_and_energy(-5.0, 5.0, seed=4)
+    corr_hi, rel_p, rel_m = _metric_correction_and_energy(55.0, 75.0, seed=4)
+    # (i) metric ≡ identity in the near-uniform equatorial band...
+    assert corr_eq < 1e-3, f"metric wrongly active at the equator: {corr_eq:.2e}"
+    # (ii) ...and a material, latitude-growing correction at high lat...
+    assert corr_hi > 5e-3, f"metric fold too weak at high lat: {corr_hi:.2e}"
+    assert corr_hi > 10.0 * corr_eq, (
+        f"metric correction does not scale with latitude: "
+        f"eq={corr_eq:.2e} hi={corr_hi:.2e}")
+    # ...that measurably reduces the high-lat Coriolis energy-budget residual.
+    assert rel_m < rel_p, (
+        f"metric fold did not reduce the high-lat energy residual: "
+        f"plain={rel_p:.2e} metric={rel_m:.2e}")
+
+
+def test_een_metric_dispatches_and_restores_null_mode():
+    """The "een_metric" config value is accepted end-to-end through the substep
+    loop and (like "een") restores the 2Δx checkerboard the 4-pt avg kills."""
+    r, cfg, s = _rest_setup()
+    metric = cfg._replace(barotropic=cfg.barotropic._replace(
+        barotropic_coriolis="een_metric"))
+    ck = _set_v(s, _checkerboard_v(s))
+    sm = _set_v(s, _smooth_v(s))
+    cor_ck_avg = _coriolis_u(r, cfg, ck)
+    cor_ck_m = _coriolis_u(r, metric, ck)
+    cor_sm_m = _coriolis_u(r, metric, sm)
+    assert cor_ck_avg < 1e-3 * cor_sm_m
+    assert cor_ck_m > 0.1 * cor_sm_m, (
+        f"een_metric failed to restore the null mode: {cor_ck_m:.2e} "
+        f"vs smooth {cor_sm_m:.2e}")
+    assert cor_ck_m > 100.0 * max(cor_ck_avg, 1e-30)

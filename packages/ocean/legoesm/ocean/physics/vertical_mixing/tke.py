@@ -874,15 +874,37 @@ def _solve_tke_backward_euler(
         b_diff = -(a_diff + c_diff)
 
     # Total tridiagonal matrix entries:
-    #   (1 + dt * (diss_rate + buoy_sink_rate)) * e_new
+    #   (1 + dt * (diss_mult*diss_rate + buoy_sink_rate)) * e_new
     #     + diffusion contribution = e_old + dt * P_s + flux BC
-    diag = 1.0 + dt * (diss_rate + buoy_sink_rate) + b_diff
+    # Dissipation time-discretization (TKEConfig.dissipation_discretization):
+    #   "backward_euler" (default, BIT-IDENTICAL): fully-implicit, diss on the
+    #     diagonal at the linearized rate diss_rate.
+    #   "nemo_1p5_split": NEMO zdftke semi-implicit split (zdftke.F90:241-242,
+    #     414,419): zfact2=1.5·rn_Dt·rn_ediss on the diagonal + zfact3=0.5·
+    #     rn_ediss·dissl·en added back EXPLICITLY to the RHS, both linearized at
+    #     the CARRIED sqrt(e)/l_eps. Same first-order dissipation; the discrete
+    #     decay factor differs from plain backward-Euler at large dt·diss. The
+    #     buoyancy sink keeps its own (implicit-split) treatment — only the
+    #     Kolmogoroff dissipation is split, matching NEMO. Mirrors the identical
+    #     split already used in tke_integrate_post_mixing (the Veros step order).
+    _disc = getattr(cfg, "dissipation_discretization", "backward_euler")
+    if _disc == "nemo_1p5_split":
+        diag = 1.0 + dt * (1.5 * diss_rate + buoy_sink_rate) + b_diff  # coeff-ok: NEMO zdftke semi-implicit dissipation split weight (zfact2=1.5·rn_ediss, zdftke.F90:241)
+    elif _disc == "backward_euler":
+        diag = 1.0 + dt * (diss_rate + buoy_sink_rate) + b_diff
+    else:
+        raise ValueError(
+            "Unknown TKEConfig.dissipation_discretization: must be one of "
+            f"('backward_euler', 'nemo_1p5_split'), got {_disc!r}")
 
     # RHS: explicit shear-production source + explicit convective buoyancy
     # production (zero in the default in-situ mode) + previous-step e
     # + the external energy-recycling source ``forc`` (eke_diss_iw + K_diss_bot,
     # Veros integrate_tke; zero / None ⇒ bit-identical).
     rhs = e_old + dt * (P_s + buoy_source)
+    if _disc == "nemo_1p5_split":
+        # zfact3·dissl·en explicit add-back (NEMO zdftke.F90:419).
+        rhs = rhs + dt * 0.5 * diss_rate * e_old
     if external_source is not None:
         rhs = rhs + dt * external_source
 
@@ -1259,6 +1281,8 @@ def tke_vertical_mixing(
     lat_deg: jnp.ndarray | None = None,
     T_n2: jnp.ndarray | None = None,
     S_n2: jnp.ndarray | None = None,
+    t_depth: jnp.ndarray | None = None,
+    w_depth: jnp.ndarray | None = None,
     ice_frac: jnp.ndarray | None = None,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
@@ -1376,6 +1400,25 @@ def tke_vertical_mixing(
     else:
         dz_cell = None
 
+    # NEMO nn_mxl=3 (tke_mxl_choice=3) needs the e3t cell thicknesses for the
+    # lup/ldown |dl/dz|<=e3t mixing-length sweeps (zdftke.F90:690-704) even
+    # when the Veros metric-slot feature (veros_dz_slots) is OFF — the two are
+    # independent (choice 3 is the length construction; veros_dz_slots is the
+    # TKE-diffusion/injection metric). Derive the cell thicknesses here from the
+    # reference thickness + z-star Jacobian the caller already threads, and feed
+    # ONLY the mixing-length call — the backward-Euler solver keeps its own
+    # veros_slots-gated (dz_cell, dz_surface) pair untouched, so choices 1/2 and
+    # every non-veros_slots recipe stay BIT-IDENTICAL.
+    dz_cell_mxl = dz_cell
+    if cfg.tke_mxl_choice == 3 and dz_cell_mxl is None:
+        if dz_ref is None or jacobian is None:
+            raise ValueError(
+                "tke_mxl_choice=3 (NEMO nn_mxl=3) requires dz_ref and jacobian "
+                "(the e3t cell thicknesses) for the lup/ldown mixing-length "
+                "sweeps; pass them to tke_vertical_mixing."
+            )
+        dz_cell_mxl = dz_ref * jacobian[..., jnp.newaxis]
+
     if tke_old is None:
         leading_shape = rho_cell.shape[:-1]
         nlev = rho_cell.shape[-1]
@@ -1390,7 +1433,7 @@ def tke_vertical_mixing(
     # Static stability N^2. ``"insitu"`` (default) is the clipped in-situ
     # form (BIT-IDENTICAL); ``"adiabatic"`` is the SIGNED Veros parcel-
     # displacement form that lets the TKE convect (N^2 < 0).
-    signed_n2 = cfg.n2_mode == "adiabatic"
+    signed_n2 = cfg.n2_mode in ("adiabatic", "nemo_bn2")
     # Diffusivity-stage N² time level (TKEConfig.n2_before_advection): the
     # before-advection (Nnow) T/S override, when supplied by the caller (see
     # tke_set_diffusivities). Python-static; None ⇒ BIT-IDENTICAL.
@@ -1402,6 +1445,7 @@ def tke_vertical_mixing(
         dz_ref=dz_ref, jacobian=jacobian, eos_fn=eos_fn,
         n2_mode=cfg.n2_mode,
         adiabatic_over_dz_half=veros_slots,
+        t_depth=t_depth, w_depth=w_depth,
     )
 
     if taum_surface is not None:
@@ -1450,7 +1494,7 @@ def tke_vertical_mixing(
     for _ in range(max(1, int(n_iterations))):
         l_k, l_eps = compute_mixing_lengths(
             tke_curr, N2, dz_half, cfg, signed_n2=signed_n2,
-            dz_cell=dz_cell, boundary_cap=boundary_cap,
+            dz_cell=dz_cell_mxl, boundary_cap=boundary_cap,
             l_surface_anchor=_l_anchor)
         K_M_curr, K_H_curr = compute_K_from_tke(
             tke_curr, l_k, cfg, N2=N2, shear_sq=shear_sq,
@@ -1483,7 +1527,7 @@ def tke_vertical_mixing(
     # Final K from converged TKE.
     l_k_final, l_eps_final = compute_mixing_lengths(
         tke_curr, N2, dz_half, cfg, signed_n2=signed_n2,
-        dz_cell=dz_cell, boundary_cap=boundary_cap,
+        dz_cell=dz_cell_mxl, boundary_cap=boundary_cap,
         l_surface_anchor=_l_anchor)
     K_M, K_H = compute_K_from_tke(
         tke_curr, l_k_final, cfg, N2=N2, shear_sq=shear_sq,
@@ -1881,7 +1925,7 @@ def tke_integrate_post_mixing(
         # sqrt(e)/l_eps. Net first-order dissipation identical; the discrete
         # decay factor differs from plain backward-Euler at large dt*diss
         # (NEMO: (1+0.5a)/(1+1.5a) -> 1/3; backward-Euler: 1/(1+a) -> 0).
-        b = 1.0 - (a + c) + 1.5 * dt * _diss_w
+        b = 1.0 - (a + c) + 1.5 * dt * _diss_w  # coeff-ok: NEMO zdftke semi-implicit split zfact2=1.5*rn_Dt*rn_ediss (zdftke.F90:241)
         forc_w = forc_w + 0.5 * _diss_w * e_w
     elif _disc == "backward_euler":
         b = 1.0 - (a + c) + dt * _diss_w

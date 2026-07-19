@@ -320,3 +320,32 @@ def test_two_leaf_public_export_gpp_is_gross():
     g = jax.grad(_sum_gpp)(60.0)
     assert jnp.isfinite(g)
     assert abs(float(g)) > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Dispatch hardening: unknown LE_module must raise, not silently run PM.
+# The internal leaf-energy dispatch is ``if LE_module == "BT": ... else: # PM``
+# — a bare else, so a typo'd LE_module silently runs the Penman-Monteith
+# branch with no error.  Guard it at both the config validator and the solver
+# entry (CLAUDE.md dispatch rules).
+# ---------------------------------------------------------------------------
+import pytest
+
+
+def test_config_validate_rejects_unknown_le_module():
+    bad = CanopyConfig()._replace(LE_module="bogus")
+    with pytest.raises(ValueError, match="LE_module"):
+        bad.validate()
+
+
+def test_config_validate_accepts_known_le_modules():
+    for m in ("BT", "PM"):
+        CanopyConfig()._replace(LE_module=m).validate()   # must not raise
+
+
+def test_solver_rejects_unknown_le_module():
+    """Guard fires at solve_canopy_closure entry, before the Newton scan —
+    a bogus config raises even with a throwaway (None) forcing bundle."""
+    bad = CanopyConfig()._replace(LE_module="bogus")
+    with pytest.raises(ValueError, match="LE_module"):
+        solve_canopy_closure(jnp.zeros(6), None, bad)
