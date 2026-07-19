@@ -2406,15 +2406,33 @@ def _train_spectral_loop(
             # Mid-epoch resume (any epoch, including epoch 0) prefers the
             # chunk-latest EMA sibling; epoch-boundary resume prefers the
             # last completed epoch's EMA file.
+            _torn = False
             if midepoch_restored:
                 _cand = Path(resume_from_dir) / MIDEPOCH_EMA_CHECKPOINT_NAME
+                # The EMA sibling is written BEFORE the raw+position
+                # checkpoint, so a kill between the two leaves an EMA OLDER
+                # than the raw file (raw position ahead of the EMA). Reject
+                # that torn pair and reseed from the restored raw weights
+                # rather than load a stale EMA (codex MED).
+                _raw = Path(resume_from_dir) / MIDEPOCH_CHECKPOINT_NAME
+                if (
+                    _cand.exists() and _raw.exists()
+                    and _cand.stat().st_mtime < _raw.stat().st_mtime
+                ):
+                    _torn = True
             else:
                 _cand = (
                     Path(resume_from_dir) / f"epoch_{start_epoch - 1:04d}_ema.eqx"
                 )
-            if _cand.exists():
+            if _cand.exists() and not _torn:
                 ema_model = eqx.tree_deserialise_leaves(_cand, ema_model)
                 _ema_src = str(_cand)
+            elif _torn:
+                logger.warning(
+                    "EMA resume: chunk_latest_ema.eqx is older than "
+                    "chunk_latest.eqx (torn write) — reseeding the EMA from "
+                    "the restored raw weights."
+                )
         if _resumed_weights:
             if _ema_src is not None:
                 logger.info(f"EMA resume: restored {_ema_src}")

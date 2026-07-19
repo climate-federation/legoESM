@@ -999,23 +999,33 @@ def main():
             ema_ckpt_path = None
             if float(cfg.get("aimip_ema_decay", 0.0)) > 0.0:
                 import equinox as eqx
-                _ema_files = sorted(
-                    (output_dir / variant).glob("epoch_*_ema.eqx"),
+                # Score the EMA SIBLING of the newest RAW epoch checkpoint —
+                # NOT the globally newest *_ema.eqx. A kill after epoch_N.eqx
+                # but before epoch_N_ema.eqx would otherwise let an eval-only
+                # resume publish the stale epoch_(N-1) EMA as the current
+                # params_ema.eqx (codex HIGH).
+                _raw = sorted(
+                    (
+                        p for p in (output_dir / variant).glob("epoch_*.eqx")
+                        if not p.stem.endswith("_ema")
+                    ),
                     key=lambda p: int(p.stem.split("_")[1]),
                 )
-                if _ema_files:
-                    eval_model = eqx.tree_deserialise_leaves(
-                        _ema_files[-1], model
-                    )
+                _ema_sib = (
+                    _raw[-1].with_name(f"{_raw[-1].stem}_ema.eqx")
+                    if _raw else None
+                )
+                if _ema_sib is not None and _ema_sib.exists():
+                    eval_model = eqx.tree_deserialise_leaves(_ema_sib, model)
                     eval_weights = "ema"
                     logger.info(
-                        f"{variant}: evaluating EMA weights "
-                        f"({_ema_files[-1].name})"
+                        f"{variant}: evaluating EMA weights ({_ema_sib.name})"
                     )
                 else:
                     logger.warning(
-                        f"{variant}: aimip_ema_decay set but no "
-                        "epoch_*_ema.eqx found — evaluating raw weights."
+                        f"{variant}: aimip_ema_decay set but no EMA sibling "
+                        f"for the newest raw checkpoint — evaluating raw "
+                        "weights."
                     )
             eval_metrics_test = _evaluate_variant(
                 variant, eval_model, cfg, cache_dir, period="test",

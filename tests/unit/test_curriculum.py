@@ -151,6 +151,17 @@ def test_epoch_plan_accepts_parsed_stages():
     ) == build_curriculum_epoch_plan(LEGACY_T106, (12, 24, 72, 120), 1800.0, 1)
 
 
+def test_epoch_plan_accepts_dict_stage_form():
+    # {"stages": [...]} must reach the epoch plan, not KeyError on the
+    # index probe (codex HIGH regression guard).
+    spec = {"stages": [
+        {"rollout_hours": 12, "n_epochs": 2},
+        {"rollout_hours": 24, "n_epochs": 1},
+    ]}
+    plan = build_curriculum_epoch_plan(spec, (12, 24), 1800.0, 9)
+    assert plan == [(12, 0, 24), (12, 0, 24), (24, 1, 48)]
+
+
 def test_epoch_plan_generator_keeps_first_phase():
     # A generator of CurriculumStages must not lose its first item to the
     # type probe (codex LOW).

@@ -212,15 +212,20 @@ def build_curriculum_epoch_plan(
     # into multi_step_hours, not the phase order), so the ladder-monotonic
     # doctrine is enforced only where suites are validated (campaign driver
     # / parse_curriculum default), never at plan-build time.
-    if curriculum is not None and not isinstance(curriculum, dict):
-        # Materialize first: a generator must not lose its first item to the
-        # CurriculumStage type probe below.
-        curriculum = tuple(curriculum)
-    stages = (
-        curriculum
-        if curriculum and isinstance(curriculum[0], CurriculumStage)
-        else parse_curriculum(curriculum, allow_non_monotonic=True)
-    )
+    if isinstance(curriculum, dict):
+        # Dict-stage form ({"stages": [...]}) — parse straight through (it is
+        # not indexable, and a pre-parsed sequence is never a dict).
+        stages = parse_curriculum(curriculum, allow_non_monotonic=True)
+    else:
+        if curriculum is not None:
+            # Materialize first: a generator must not lose its first item to
+            # the CurriculumStage type probe below.
+            curriculum = tuple(curriculum)
+        stages = (
+            curriculum
+            if curriculum and isinstance(curriculum[0], CurriculumStage)
+            else parse_curriculum(curriculum, allow_non_monotonic=True)
+        )
     if not stages:
         return [(None, None, None)] * int(n_epochs_fallback)
 
