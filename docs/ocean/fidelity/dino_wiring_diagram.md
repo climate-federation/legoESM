@@ -893,3 +893,44 @@ u and v at depth (its η=0 physical-depth reconstruction ≠ NEMO `ln_hpg_sco` J
 Real fix = a NEMO-`ln_hpg_sco`-faithful s-coordinate Jacobian PGF option for z*, and/or
 verifying the z* interface-depth (`key_qco`) reconstruction — both current PGF schemes
 inherit the coordinate metric.
+
+### CORRECTION (2026-07-18) — the v-hpg 0.686 was a MASK ARTIFACT; the verdict above is WRONG
+
+The verdict above is **retracted**. A verify-first re-run (bridge the SAME kt=5761
+state with the coordinate the 180-day comparison ACTUALLY uses —
+`bridge_nemo_to_legoesm_topo(..., full_step=True)` `OceanPartialCellCoordinate` — AND,
+for contrast, pure z-star) shows the two are **byte-identical**: v-hpg seam-excl corr
+= **0.6861 in BOTH**. Full-step levels are FLAT (no slope), so the "terrain-following
+z-star PGF slope error" mechanism cannot be the cause — refuted.
+
+The 0.686 is a **single-boundary-row correlation-mask artifact**, not a PGF defect:
+
+- The instrument mask `core_v[:, 4:-3, 1:]` (`dino_term_compare.py`) excludes the
+  longitude seam and surface level but **NOT the northernmost v-face row** (native
+  v-point `n_lat-1`, lat 69.3°, the closed north wall). There legoESM correctly zeroes
+  the wall face (`v≡0`, `rms_lego=0.000`) while NEMO stores a large **un-masked**
+  diagnostic `vtrd_hpg` (`rms_nemo=2.75e-5`, ~25× the interior amplitude on the
+  developed state). Per-row leverage: excluding **only** that one row lifts the pooled
+  corr **0.686 → 1.0000**. Excluding first+last rows → **1.0000**.
+- **Interior v-hpg matches NEMO to corr 1.0000** on the developed 5761 state, both
+  coordinates. Confirmed independently: a from-scratch numpy transcription of NEMO
+  `dynhpg.F90::hpg_zco` (trapezoidal `e3w`-weighted accumulation of the horizontal
+  density difference) matches BOTH NEMO `vtrd_hpg` and legoESM `pgf_ke_v` at corr
+  **1.0000** (u and v).
+- **Why u was 1.0000, v looked bad, and the smooth state was fine:** u is 1.0000
+  because the i-periodic grid has no zonal wall row. v-hpg on the SMOOTH M5SPIN
+  (kt=2000) state = **0.9999 unshifted** through the identical harness (and a ±1 row
+  shift makes it WORSE) — the wall-row diagnostic is negligible there and grows with
+  the developed high-lat density structure + depth (hydrostatic accumulation), which is
+  exactly why the artifact appeared depth-degrading on the 5761 state. The earlier "+1
+  row shift helps (0.686→0.94)" was a red herring from the 2Δy wall-adjacent content,
+  not a stagger bug (the metric `dy_v` matches NEMO `e2v` to ≤0.2% at every row, and
+  the shared pressure field is exact — proven by u=1.0000).
+
+**Consequence.** There is **no v-PGF defect** and no model code change. `dyn_hpg` is
+✅ VERIFIED-MATCH (corr 1.0000, u and v, interior, both coordinates) — consistent with
+node 15's Round-9 audit. The wall v-row is a diagnostic-bookkeeping mismatch with zero
+physics consequence (the wall face carries `v≡0`). The instrument mask was corrected to
+drop the north wall row (`core_v[:-1, 4:-3, 1:]`). The residual BSF/deep-eq-jet story is
+UNCHANGED: `dyn_hpg` is NOT a first divergence, and the "HPG-v first divergence" line in
+the kt=5761 stage-dump section above should be read as **this correction supersedes it**.
