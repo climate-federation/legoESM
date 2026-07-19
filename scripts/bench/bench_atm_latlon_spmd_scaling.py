@@ -85,13 +85,10 @@ from metadata import (  # noqa: E402
 )
 
 
-def _build(n_lat, n_lon, nlev):
+def _build_model(n_lat, n_lon, nlev):
     from legoesm import constants
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationConfig, CGridLatLonPrimitiveEquationModel)
-    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
-        hydrostatic_to_cgrid)
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate
 
@@ -101,9 +98,18 @@ def _build(n_lat, n_lon, nlev):
     cfg = CGridLatLonPrimitiveEquationConfig(
         fix_mass=True, use_polar_filter=False, use_ppm_transport=True,
         time_integrator="ssp_rk3")
-    model = CGridLatLonPrimitiveEquationModel(grid, sigma, cfg)
-    hs0 = held_suarez_init_latlon(grid, sigma)
-    c0 = hydrostatic_to_cgrid(hs0, grid)
+    return CGridLatLonPrimitiveEquationModel(grid, sigma, cfg)
+
+
+def _build(n_lat, n_lon, nlev):
+    # nd=1 lane + tests: global (unsharded) IC build, unchanged protocol.
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
+        hydrostatic_to_cgrid)
+
+    model = _build_model(n_lat, n_lon, nlev)
+    hs0 = held_suarez_init_latlon(model.grid, model.sigma_coord)
+    c0 = hydrostatic_to_cgrid(hs0, model.grid)
     return model, c0
 
 
@@ -187,8 +193,10 @@ def main() -> int:
         init_multicontroller_distributed(args.coordinator)
 
     from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
-        atm_latlon_geometry_bytes, make_sharded_atm_latlon_segment,
-        make_sharded_atm_latlon_step, shard_state_atm_latlon)
+        atm_latlon_geometry_bytes,
+        build_sharded_held_suarez_state_atm_latlon,
+        make_sharded_atm_latlon_segment,
+        make_sharded_atm_latlon_step)
     seg_n = int(args.segment_steps)
     if seg_n < 0:
         raise SystemExit(f"--segment-steps must be >= 0, got {seg_n}")
@@ -213,15 +221,22 @@ def main() -> int:
     if n_lat % nd != 0:
         raise SystemExit(f"n_lat {n_lat} not divisible by n_devices {nd}")
 
-    model, c0 = _build(n_lat, args.n_lon, args.nlev)
-
     if nd == 1:
+        model, c0 = _build(n_lat, args.n_lon, args.nlev)
         mesh = None
         c = c0
     else:
+        # #1100: band-local IC construction. The nd>1 lanes never materialise
+        # the global (n_lat, n_lon, nlev) state per process — each leaf is
+        # created via make_array_from_callback for the rows this process's
+        # devices own (no global build, no device_put replication, no
+        # assert_equal all-gather). This is what lets full-node-packed CPU
+        # rungs (128 procs/node) survive at large n_lat.
+        model = _build_model(n_lat, args.n_lon, args.nlev)
         mesh = jax.sharding.Mesh(np.array(jax.devices()[:nd]),
                                  axis_names=("lat",))
-        c = shard_state_atm_latlon(c0, mesh)
+        c = build_sharded_held_suarez_state_atm_latlon(
+            model.grid, model.sigma_coord, mesh)
     if seg_n > 0:
         seg_fn = make_sharded_atm_latlon_segment(
             model, mesh, seg_n, physics_fn=physics_fn)

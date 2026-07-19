@@ -77,6 +77,97 @@ def shard_state_atm_latlon(
     )
 
 
+def build_sharded_held_suarez_state_atm_latlon(
+    grid, sigma_coord, mesh, *,
+    T_init: float = 300.0,
+    p_s_init: float | None = None,
+    perturbation_amplitude: float = 1.0,
+    seed: int = 42,
+) -> CGridLatLonHydrostaticState:
+    """Band-local Held-Suarez C-grid state, directly in the sharded layout.
+
+    The #1100 invariant for multi-process runs: **neither global builds nor
+    ``device_put`` replication** — every global-shaped leaf is created with
+    ``jax.make_array_from_callback``, whose callback is invoked only for the
+    row slices owned by THIS process's addressable devices (and which, unlike
+    ``device_put`` on a replicated sharding, runs no cross-process
+    ``assert_equal`` all-gather).  This removes the per-process global-state
+    BUILD that made the route-B lat-lon bench OOM under full-node CPU packing
+    (``held_suarez_init_latlon`` + ``hydrostatic_to_cgrid`` materialised the
+    full ``(n_lat, n_lon, nlev)`` state on every process before sharding).
+
+    Bit-identical to
+    ``shard_state_atm_latlon(hydrostatic_to_cgrid(held_suarez_init_latlon(
+    grid, sigma), grid), mesh)`` for the flat-terrain case — gated by
+    ``tests/parallel/test_atm_latlon_bandlocal_build.py``.  The staggered
+    ``v`` is created directly as its sharded ``v_lower`` layout (the dropped
+    north pole-wall face is identically zero in this at-rest IC, exactly what
+    ``gather_state_atm_latlon`` re-appends).
+
+    One deliberate exception: the 2-D lowest-level temperature perturbation
+    (``jax.random.normal`` over ``(n_lat, n_lon)``) is evaluated in full on
+    every process — identical threefry streams cannot be row-sliced without
+    evaluating the whole field, and at bench scale it is O(10 MB) vs the
+    O(GB) 3-D leaves the callback path avoids.
+
+    Flat terrain only (the bench IC): there is deliberately no ``phis``
+    parameter — the topography variant of ``held_suarez_init_latlon`` would
+    need its own band-local surface-pressure callback; extend explicitly
+    rather than reuse this builder.
+    """
+    from legoesm import constants
+    from legoesm.core.precision import get_policy
+
+    _dtype = get_policy().storage
+    if p_s_init is None:
+        p_s_init = constants.p_ref
+
+    n_lat, n_lon = grid.n_lat, grid.n_lon
+    nlev = sigma_coord.n_levels
+
+    # 2-D seed field, exact expression of held_suarez_init_latlon
+    key = jax.random.PRNGKey(seed)
+    pert2d = jax.random.normal(key, (n_lat, n_lon), dtype=_dtype) * jnp.asarray(
+        perturbation_amplitude, dtype=_dtype
+    )
+
+    def _slice_shape(gshape, idx):
+        return tuple(len(range(*sl.indices(n))) for sl, n in zip(idx, gshape))
+
+    def _make(gshape, cb):
+        sharding = NamedSharding(mesh, P("lat", *((None,) * (len(gshape) - 1))))
+        return jax.make_array_from_callback(gshape, sharding, cb)
+
+    def _zeros_cb(gshape):
+        return lambda idx: jnp.zeros(_slice_shape(gshape, idx), dtype=_dtype)
+
+    def _T_cb(idx):
+        shape = _slice_shape((n_lat, n_lon, nlev), idx)
+        block = jnp.full(shape, T_init, dtype=_dtype)
+        # same op as init's global ``T.at[:, :, -1].add(pert)`` on these rows
+        return block.at[:, :, -1].add(pert2d[idx[0], idx[1]])
+
+    def _ps_cb(idx):
+        shape = _slice_shape((n_lat, n_lon), idx)
+        # held_suarez_init_latlon with phis=None: p_s_init * exp(-0/(R_d T))
+        phis_block = jnp.zeros(shape, dtype=_dtype)
+        return (p_s_init * jnp.exp(
+            -phis_block / (constants.R_d * T_init))).astype(_dtype)
+
+    sh_u = (n_lat, n_lon + 1, nlev)
+    sh_vlow = (n_lat, n_lon, nlev)   # sharded layout: pole-wall face dropped
+    sh_T = (n_lat, n_lon, nlev)
+    sh_2d = (n_lat, n_lon)
+    return CGridLatLonHydrostaticState(
+        u=_make(sh_u, _zeros_cb(sh_u)),
+        v=_make(sh_vlow, _zeros_cb(sh_vlow)),
+        T=_make(sh_T, _T_cb),
+        p_s=_make(sh_2d, _ps_cb),
+        phis=_make(sh_2d, _zeros_cb(sh_2d)),
+        tracers={},
+    )
+
+
 def gather_state_atm_latlon(
     state: CGridLatLonHydrostaticState, mesh,
 ) -> CGridLatLonHydrostaticState:
