@@ -251,7 +251,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--time-integrator", type=str, default="auto",
         choices=["auto", "ssp_rk3", "ssp_rk3_scan", "ssp_rk34",
-                 "ssp_rk54", "ssp_rk54_scan", "rk4"],
+                 "ssp_rk54", "ssp_rk54_scan", "rk4",
+                 "leapfrog", "leapfrog_si"],
         help="Time integrator.  'auto' (default) selects each dycore's "
              "own stable default: ssp_rk3 on cube/lat-lon (IEEE-"
              "identical to existing runs) and ssp_rk54_scan on MPAS "
@@ -261,7 +262,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "verbatim to every dycore, including ssp_rk3 on MPAS for "
              "deliberate integrator-sensitivity runs.  ssp_rk3_scan is "
              "the JIT-compile-time optimised variant for production "
-             "lat-lon C-grid AMIP.",
+             "lat-lon C-grid AMIP.  leapfrog / leapfrog_si are the "
+             "SPECTRAL dycore's single-physics-eval path — required to run "
+             "PROGNOSTIC physics (clubb_lite TKE / bechtold / prognostic "
+             "GWD) faithfully on gaussian/spectral (#405); the per-RK-stage "
+             "ssp_rk3 spectral path still diagnostic-swaps prognostic "
+             "schemes.",
     )
     parser.add_argument(
         "--implicit-grav-wave-use-pcg", action="store_true",
@@ -1662,6 +1668,19 @@ def _apply_spectral_scheme_fallback(args: argparse.Namespace, argv) -> argparse.
     The faithful prognostic-on-spectral path is threading PhysicsState through the
     spectral step (the #405 follow-up), NOT this scheme swap. No-op off spectral."""
     if getattr(args, "discretization", None) != "spectral":
+        return args
+    # #405: the spectral run loop now THREADS the prognostic PhysicsState carry
+    # on the LEAPFROG path (single physics eval per step), so a prognostic
+    # scheme runs FAITHFULLY there — do not downgrade it.  The downgrade below
+    # applies only to the per-RK-stage ssp_rk3 path, where a single-step carry
+    # is ill-defined.  (Auto-selecting leapfrog_si + its semi-implicit matrices
+    # for an `auto` integrator is a further usability step; today the prognostic
+    # spectral path is reached via an explicit `--time-integrator leapfrog_si`.)
+    _integ = str(getattr(args, "time_integrator", "auto")).lower()
+    if _integ in ("leapfrog", "leapfrog_si"):
+        print("[run_amip] spectral leapfrog path: prognostic physics carry is "
+              "threaded (#405) — schemes run faithfully (no diagnostic swap).",
+              flush=True)
         return args
     toks = list(argv or [])
     has = lambda f: any(a == f or a.startswith(f + "=") for a in toks)

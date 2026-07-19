@@ -728,3 +728,74 @@ class TestSpectralPESolverAxis:
         from legoesm.atmosphere.dynamics import solver_axes
         axes = solver_axes("spectral_primitive_equations")
         assert axes == ("hydrostatic", "spectral")
+
+
+# --------------------------------------------------------------------------- #
+# #405 — prognostic (stateful) physics on the spectral dycore (leapfrog only)  #
+# --------------------------------------------------------------------------- #
+def _mock_stateful_physics():
+    """A PROGNOSTIC physics_fn: zero spectral tendency (isolates the carry) +
+    advances a scalar carry by 1 each call.  Tagged ``_requires_phys_state``."""
+    calls = {"n": 0}
+
+    def physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None):
+        calls["n"] += 1
+        return jax.tree.map(jnp.zeros_like, state), phys_state + 1.0
+
+    physics_fn._requires_phys_state = True
+    return physics_fn, calls
+
+
+def test_prognostic_physics_threads_on_leapfrog(rest_state, grid, sigma_coord):
+    """#405: a stateful physics_fn threads its PhysicsState carry across steps on
+    the leapfrog_si path (evaluated ONCE per step, carry advanced not reseeded),
+    and the advanced carry is published on ``model._phys_state``."""
+    config = SpectralPEConfig(time_integrator="leapfrog_si", semi_implicit=True)
+    model = SpectralPrimitiveEquationModel(grid, sigma_coord, config)
+    physics_fn, calls = _mock_stateful_physics()
+    carry = jnp.array(0.0)
+    st = rest_state
+    for _ in range(3):
+        st = model.step(st, dt=300.0, physics_fn=physics_fn, phys_state=carry)
+        carry = model._phys_state
+    assert float(carry) == 3.0            # advanced once per step, no reseed
+    assert calls["n"] == 3                # ONE physics eval per step (not per-stage)
+    assert bool(jnp.all(jnp.isfinite(st.vor_hat.data)))
+
+
+def test_prognostic_zero_tendency_reduces_to_plain_leapfrog(
+        rest_state, grid, sigma_coord):
+    """The threaded path with a ZERO physics tendency must be numerically
+    identical to a plain (no-physics) leapfrog run — proves the ``physics_tendency``
+    hook adds exactly the physics contribution and nothing else."""
+    config = SpectralPEConfig(time_integrator="leapfrog_si", semi_implicit=True)
+    physics_fn, _ = _mock_stateful_physics()
+    m1 = SpectralPrimitiveEquationModel(grid, sigma_coord, config)
+    s1 = rest_state
+    for _ in range(3):
+        s1 = m1.step(s1, dt=300.0, physics_fn=physics_fn, phys_state=jnp.array(0.0))
+    m2 = SpectralPrimitiveEquationModel(grid, sigma_coord, config)
+    s2 = rest_state
+    for _ in range(3):
+        s2 = m2.step(s2, dt=300.0)        # no physics
+    assert bool(jnp.allclose(s1.T_hat.data, s2.T_hat.data))
+    assert bool(jnp.allclose(s1.vor_hat.data, s2.vor_hat.data))
+
+
+def test_prognostic_physics_refused_off_leapfrog_or_unthreaded(
+        rest_state, grid, sigma_coord):
+    """A stateful physics_fn still refuses where the carry is ill-defined:
+    on ssp_rk3 (per-RK-stage physics) and on leapfrog WITHOUT a threaded carry."""
+    physics_fn, _ = _mock_stateful_physics()
+    # ssp_rk3 + stateful (even with a carry) -> refused (per-stage eval).
+    m_rk3 = SpectralPrimitiveEquationModel(
+        grid, sigma_coord, SpectralPEConfig(time_integrator="ssp_rk3"))
+    with pytest.raises(NotImplementedError):
+        m_rk3.step(rest_state, dt=300.0, physics_fn=physics_fn,
+                   phys_state=jnp.array(0.0))
+    # leapfrog + stateful but NO carry -> refused (would silently reseed).
+    m_lf = SpectralPrimitiveEquationModel(
+        grid, sigma_coord,
+        SpectralPEConfig(time_integrator="leapfrog_si", semi_implicit=True))
+    with pytest.raises(NotImplementedError):
+        m_lf.step(rest_state, dt=300.0, physics_fn=physics_fn)
