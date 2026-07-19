@@ -799,3 +799,48 @@ def test_prognostic_physics_refused_off_leapfrog_or_unthreaded(
         SpectralPEConfig(time_integrator="leapfrog_si", semi_implicit=True))
     with pytest.raises(NotImplementedError):
         m_lf.step(rest_state, dt=300.0, physics_fn=physics_fn)
+
+
+def test_leapfrog_si_lagged_physics_stable_under_stiff_damping():
+    """Stiff/dissipative physics on the CENTERED leapfrog level excites
+    leapfrog's computational-mode instability; the leapfrog BODY applies the
+    physics LAGGED to n-1 (#405 fix, _make_leapfrog_tendency_fn) to stabilise
+    it.  A strong Rayleigh damping (2*dt/tau = 2) of an active vorticity field
+    grows without bound under centered application but stays finite with the
+    lag.  (End-to-end: sbm convection + louis turbulence + prognostic clubb_lite
+    each NaN'd the spectral T_hat within a day before this fix, stable after.)"""
+    import jax
+    grid = create_gaussian_grid(n_max=21)
+    sigma_coord = create_sigma_coordinate(10)
+    st = isothermal_rest_state_spectral(
+        grid, sigma_coord, perturbation_amplitude=0.0)
+    # Inject an ACTIVE vorticity field (a real circulation for the damping to act
+    # on — the bare rest state is trivially steady).
+    vor_pert = 1.0e-4 * jax.random.normal(
+        jax.random.PRNGKey(0), st.vor_hat.data.shape)
+    st = st._replace(vor_hat=st.vor_hat.replace(data=st.vor_hat.data + vor_pert))
+    dt = 300.0
+    tau = 4.0 * dt    # stiff but physical: centered leapfrog root |lambda|>1, lagged decays
+
+    def stiff_damp(state, g, s):
+        z = jnp.zeros_like(state.T_hat.data)
+        return state._replace(
+            vor_hat=state.vor_hat.replace(data=-state.vor_hat.data / tau),
+            div_hat=state.div_hat.replace(data=-state.div_hat.data / tau),
+            T_hat=state.T_hat.replace(data=z),
+            lnps_hat=state.lnps_hat.replace(
+                data=jnp.zeros_like(state.lnps_hat.data)),
+        )
+
+    a = grid.radius
+    eig = grid.n_max * (grid.n_max + 1) / (a * a)
+    cfg = SpectralPEConfig(
+        time_integrator="leapfrog_si", semi_implicit=True,
+        hyperdiff_coeff=1.0 / (0.5 * 3600.0 * eig ** 2), hyperdiff_order=2)
+    m = SpectralPrimitiveEquationModel(grid, sigma_coord, cfg)
+    for _ in range(80):
+        st = m.step(st, dt, physics_fn=stiff_damp)
+    assert bool(jnp.isfinite(st.vor_hat.data).all())
+    assert bool(jnp.isfinite(st.T_hat.data).all())
+    # The lagged damping should DECAY the vorticity, not amplify it.
+    assert float(jnp.max(jnp.abs(st.vor_hat.data))) < 1.0e-4

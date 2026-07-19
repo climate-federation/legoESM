@@ -442,8 +442,8 @@ def photosynthesis(
     Ps: jax.Array,
     alf: jax.Array,
     TgC: jax.Array,
-) -> jax.Array:
-    """Net assimilation for a mixed C3/C4 canopy.
+) -> tuple[jax.Array, jax.Array]:
+    """Net AND gross assimilation for a mixed C3/C4 canopy.
 
     Computes both C3 and C4 rates and combines them using a continuous
     fraction fC4, so the result is differentiable with respect to fC4.
@@ -460,12 +460,31 @@ def photosynthesis(
 
     Returns
     -------
-    An : net assimilation rate [umol m-2 s-1]
+    An : net assimilation rate [umol m-2 s-1], clamped to >= 0 — drives the
+        leaf energy/CO2 flux + SIF in the canopy residual.
+    A_gross : gross assimilation (GPP, before dark respiration) [umol m-2 s-1] —
+        the carbon-model uptake the caller consumes downstream so foliar
+        respiration is not double-counted (see ``solver.canopy_forward``).
+
+    The two big-leaf callers (``_canopy_residual``, ``canopy_forward``) unpack
+    both; a single-value return crashes their ``An, _ = photosynthesis(...)``
+    unpack ("iteration over a 0-d array").  The public ``c3_photosynthesis`` /
+    ``c4_photosynthesis`` wrappers keep their single-value (net) contract for
+    their standalone callers; NET here is byte-identical to blending those
+    wrappers — ``An = max(a_gross - rd, 0)``, weighted by fC4.
     """
-    An_C3 = c3_photosynthesis(Tf, Ci, APAR, Vcmax25_C3, Ps, alf, TgC)
-    An_C4 = c4_photosynthesis(Tf, Ci, APAR, Vcmax25_C4)
-    # Continuous weighted average — fully differentiable wrt fC4
-    return (1.0 - fC4) * An_C3 + fC4 * An_C4
+    del Ps, alf  # signature parity; FvCB uses _PHI_PSII and mole-fraction Ci
+    # Use the inner FvCB assimilation (which exposes a_gross + rd) so GROSS GPP
+    # can be returned alongside NET An — without changing the single-value
+    # c3/c4_photosynthesis wrappers relied on elsewhere.
+    r_c3 = c3_assimilation(Tf, Ci, APAR, Vcmax25_C3, TgC)
+    r_c4 = c4_assimilation(Tf, Ci, APAR, Vcmax25_C4)
+    An_C3 = jnp.where(r_c3.a_gross - r_c3.rd < 0.0, 0.0, r_c3.a_gross - r_c3.rd)
+    An_C4 = jnp.where(r_c4.a_gross - r_c4.rd < 0.0, 0.0, r_c4.a_gross - r_c4.rd)
+    # Continuous weighted averages — fully differentiable wrt fC4
+    An = (1.0 - fC4) * An_C3 + fC4 * An_C4
+    A_gross = (1.0 - fC4) * r_c3.a_gross + fC4 * r_c4.a_gross
+    return An, A_gross
 
 
 __physics_contract__ = {
@@ -484,9 +503,10 @@ __physics_contract__ = {
         "Tf": "K", "Ci": "umol/mol", "APAR": "umol/m^2/s",
         "Vcmax25": "umol/m^2/s", "TgC": "degC", "fC4": "1",
     },
-    "outputs": {"An": "umol/m^2/s"},
+    "outputs": {"An": "umol/m^2/s", "A_gross": "umol/m^2/s"},
     "sign_convention": (
-        "An >= 0 (gross assimilation minus dark respiration, floored at 0). "
+        "Returns (An, A_gross), both >= 0.  A_gross is the gross assimilation "
+        "(GPP, before dark respiration); An = max(A_gross - Rd, 0). "
         "Light- (Aj), Rubisco- (Ac) and product- (Ap) limited rates are each "
         ">= 0; net An is gross A minus Rd."
     ),
