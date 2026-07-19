@@ -534,8 +534,12 @@ def main(argv=None, ds=None):
     _assert_leads_on_dt_grid(cfg_args.leads_hours, dt_orch)
 
     # --- ERA5 cases (ICs + forcing + WB2-grid verification) ---
-    era5_cfg = TrainingERA5Config(dt_hours=cadence)._replace(
-        zarr_store=yml["era5_zarr"])
+    # era5_zarr may be absent from minimal suites (config/aimip/scale/*), which
+    # train off TrainingERA5Config's default store (WB2_ERA5_ZARR). Fall back to
+    # that same default so eval reads the SAME ERA5 source training did.
+    era5_cfg = TrainingERA5Config(dt_hours=cadence)
+    if yml.get("era5_zarr"):
+        era5_cfg = era5_cfg._replace(zarr_store=yml["era5_zarr"])
     cases = build_forecast_cases(
         era5_cfg, grid, sigma,
         leads_hours=cfg_args.leads_hours, eval_year=eval_year,
