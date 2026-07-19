@@ -1591,12 +1591,21 @@ class LatLonCGridOceanModel:
                                "nemo_boxcar_ab3"}
         if (getattr(config, "surface_stress_implicit", False)
                 and not getattr(config.barotropic,
-                                "nemo_stage_mean_imposition", False)):
+                                "nemo_stage_mean_imposition", False)
+                and config.barotropic.barotropic_solver != "explicit_substep"):
+            # Under the split-explicit free surface ("explicit_substep") the
+            # post-solve depth-mean shift is NEMO's OWN MLF arrangement
+            # (stpmlf.F90: dyn_spg THEN dyn_zdf, no post-zdf re-imposition —
+            # the shift feeds the next step's Kbb barotropic seed), and
+            # F_slow carries the wind for the substeps exactly as NEMO's
+            # zu_frc wind term (dynspg_ts.F90 ~L360).  So no stage-mean
+            # imposition is required there; other solvers keep the guard.
             raise ValueError(
                 "surface_stress_implicit=True deposits the wind stress inside "
                 "the implicit vertical solve, which SHIFTS the depth mean "
-                "after the barotropic solve; it requires "
-                "barotropic.nemo_stage_mean_imposition=True (NEMO "
+                "after the barotropic solve; outside "
+                'barotropic_solver="explicit_substep" (NEMO stpmlf order) it '
+                "requires barotropic.nemo_stage_mean_imposition=True (NEMO "
                 "stprk3_stg:440) to re-impose the barotropic mean — "
                 "otherwise the wind's depth-mean is double-counted "
                 "(F_slow + the solve).")

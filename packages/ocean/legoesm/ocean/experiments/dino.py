@@ -167,6 +167,13 @@ class DINOConfig:
     # but NOT the momentum).  False (default) keeps the historical
     # post-step wind application bit-exact.
     wind_through_step: bool = False
+    # NEMO dynzdf wind placement (the last composition item): deposit the wind
+    # stress in the TOP CELL of the implicit vertical solve's RHS
+    # (dynzdf.F90:326-335) instead of an explicit surface kick, with the wind's
+    # depth-mean carried by F_slow for the barotropic substeps (NEMO zu_frc,
+    # dynspg_ts.F90 ~L360).  Requires wind_through_step=True (the stress must
+    # reach model.step's surface_forcing).  Default False = prior behaviour.
+    surface_stress_implicit: bool = False
     S_star_eq: float = 37.25       # equatorial target S [g/kg]
     S_star_n: float = 35.1         # northern boundary target S [g/kg]
     S_star_s: float = 35.0         # southern boundary target S [g/kg]
@@ -2309,6 +2316,8 @@ def dino_lat_lon_model_config(
 
     model_cfg = LatLonCGridOceanConfig.from_flat(
         rho_0=cfg.rho_0,
+        # NEMO dynzdf wind placement (see DINOConfig.surface_stress_implicit).
+        surface_stress_implicit=cfg.surface_stress_implicit,
         A_h=A_h_base,
         A_h_lat_scaling=True,         # cos(lat) per-row scaling — Phase 1B
         # Node 14: "nemo_div_curl" embeds ahmt/ahmf=½·rn_Uv·MAX(e1,e2) inside the
