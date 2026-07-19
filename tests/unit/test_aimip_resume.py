@@ -232,6 +232,28 @@ def test_midepoch_ema_template_on_legacy_4tuple_returns_none_ema(tmp_path):
     assert jnp.array_equal(lm.w, model.w)
 
 
+def test_midepoch_5tuple_loaded_with_ema_disabled_drops_ema(tmp_path):
+    """The reverse layout mismatch: an EMA 5-tuple on disk resumed with EMA
+    DISABLED (ema_template=None) must load the raw 4-tuple state, not abort
+    on the embedded EMA leaves."""
+    ck = tmp_path / "ck"
+    ck.mkdir()
+    opt = optax.adam(1e-3)
+    model, opt_state = _stepped_opt_state(_TinyModel(jax.random.PRNGKey(2)), opt)
+    ema = _TinyModel(jax.random.PRNGKey(7))
+    _save_midepoch_checkpoint(
+        ck, model, opt_state, epoch=3, next_chunk=2, ema_model=ema,
+    )
+
+    tmpl = _TinyModel(jax.random.PRNGKey(999))
+    tmpl_opt = opt.init(eqx.filter(tmpl, eqx.is_array))
+    loaded = _load_midepoch_checkpoint(ck, tmpl, tmpl_opt)  # ema_template=None
+    assert loaded is not None
+    lm, lo, epoch, next_chunk = loaded          # 4-tuple return
+    assert (epoch, next_chunk) == (3, 2)
+    assert jnp.array_equal(lm.w, model.w)
+
+
 def test_save_checkpoint_is_atomic_under_torn_write(tmp_path, monkeypatch):
     """A walltime kill mid-serialise must never corrupt the prior
     checkpoint: ``save_checkpoint`` writes a temp file then os.replace,

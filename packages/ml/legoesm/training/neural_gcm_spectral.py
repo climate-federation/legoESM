@@ -151,9 +151,10 @@ class NeuralGCMSpectralConfig(NamedTuple):
     # EMA of the trainable weights (U-Cast/GenCast convention, see
     # training/ema.py): when > 0, maintain ema <- d*ema + (1-d)*model after
     # every optimizer step and save ``epoch_NNNN_ema.eqx`` beside each
-    # per-epoch checkpoint (plus ``chunk_latest_ema.eqx`` on the chunked
-    # path). Evaluation prefers the EMA weights when the file exists.
-    # 0.0 = off (legacy behaviour, byte-identical trajectory).
+    # per-epoch checkpoint; on the chunked path the EMA is folded INTO the
+    # atomic ``chunk_latest.eqx`` payload (no separate file). Evaluation
+    # prefers the EMA weights when present. 0.0 = off (legacy behaviour,
+    # byte-identical trajectory).
     ema_decay: float = 0.0
 
     # Data
@@ -322,11 +323,13 @@ def _load_midepoch_checkpoint(
     """Load the mid-epoch resume state, or ``None`` if absent.
 
     Returns ``(model, opt_state, epoch:int, next_chunk:int)`` when
-    ``ema_template`` is None, else ``(model, opt_state, ema_model,
-    epoch, next_chunk)``. The templates must match the structure that
-    ``_save_midepoch_checkpoint`` wrote. If an EMA template is supplied but
-    the on-disk payload is the legacy 4-tuple (EMA enabled on the resume of
-    a non-EMA run), the EMA is returned as None so the caller reseeds it.
+    ``ema_template`` is None, else ``(model, opt_state, ema_model, epoch,
+    next_chunk)`` (``ema_model`` is None if the on-disk payload predates
+    EMA). ROBUST to a layout/arity mismatch in EITHER direction — an EMA
+    5-tuple resumed with EMA disabled, or a legacy 4-tuple resumed with EMA
+    enabled — by trying the requested layout first and the other on any
+    deserialise failure (equinox raises assorted exception types on a
+    template mismatch, so the fallback is deliberately broad).
     """
     if ckpt_dir is None:
         return None
@@ -334,28 +337,38 @@ def _load_midepoch_checkpoint(
     if not path.exists():
         return None
     _zero = jnp.asarray(0, dtype=jnp.int32)
-    if ema_template is None:
-        template = (model_template, opt_state_template, _zero, _zero)
-        model, opt_state, epoch, next_chunk = eqx.tree_deserialise_leaves(
-            str(path), template,
-        )
-        return model, opt_state, int(epoch), int(next_chunk)
-    template = (
-        model_template, opt_state_template, ema_template, _zero, _zero,
+    _tmpl4 = (model_template, opt_state_template, _zero, _zero)
+    # A usable EMA template for the 5-tuple attempt: the caller's, or a
+    # copy of the model template (structure is all that matters for
+    # deserialise; leaves are overwritten from disk).
+    _ema_t = ema_template if ema_template is not None else model_template
+    _tmpl5 = (model_template, opt_state_template, _ema_t, _zero, _zero)
+
+    def _read4():
+        m, o, e, c = eqx.tree_deserialise_leaves(str(path), _tmpl4)
+        return m, o, None, int(e), int(c)
+
+    def _read5():
+        m, o, em, e, c = eqx.tree_deserialise_leaves(str(path), _tmpl5)
+        return m, o, em, int(e), int(c)
+
+    # Try the layout the caller expects first, then the other.
+    _order = (_read5, _read4) if ema_template is not None else (_read4, _read5)
+    _last_exc = None
+    for _reader in _order:
+        try:
+            m, o, em, e, c = _reader()
+        except Exception as exc:  # equinox mismatch: broad by design
+            _last_exc = exc
+            continue
+        if ema_template is None:
+            # Caller does not want the EMA (EMA disabled this run) — drop it.
+            return m, o, int(e), int(c)
+        return m, o, em, int(e), int(c)
+    raise RuntimeError(
+        f"Could not deserialise {path} as either the 4-tuple or 5-tuple "
+        f"mid-epoch layout: {_last_exc!r}"
     )
-    try:
-        model, opt_state, ema_model, epoch, next_chunk = (
-            eqx.tree_deserialise_leaves(str(path), template)
-        )
-        return model, opt_state, ema_model, int(epoch), int(next_chunk)
-    except (ValueError, EOFError):
-        # Legacy 4-tuple payload (EMA turned on for this resume of a run
-        # that trained without it): load the raw state, reseed EMA=None.
-        legacy = (model_template, opt_state_template, _zero, _zero)
-        model, opt_state, epoch, next_chunk = eqx.tree_deserialise_leaves(
-            str(path), legacy,
-        )
-        return model, opt_state, None, int(epoch), int(next_chunk)
 
 
 # =============================================================================
