@@ -151,13 +151,29 @@ def _build_spectral_config(cfg: dict[str, Any]):
     from legoesm.training.losses import LossConfig
 
     loss_kwargs = cfg.get("loss", {}) or {}
+    # Named loss preset (D5): numbers live once in
+    # config/wb/loss_presets/<name>.yaml; the suite's own loss: block wins
+    # key-by-key.
+    _preset = cfg.get("loss_preset")
+    if _preset:
+        from legoesm.training.loss_presets import (
+            load_loss_preset,
+            merge_loss_preset,
+        )
+        loss_kwargs = merge_loss_preset(load_loss_preset(str(_preset)), loss_kwargs)
+    _unknown = set(loss_kwargs) - set(LossConfig._fields)
+    if _unknown:
+        raise ValueError(
+            f"Unknown loss config keys {sorted(_unknown)} (typo?); valid "
+            f"keys are the LossConfig fields in training/losses.py."
+        )
     # YAML lists -> tuples for fields LossConfig declares as tuples.
     # Keeps the NamedTuple hashable for ``filter_jit`` static-arg
     # comparisons and matches the tuple-typed default.
     _tuple_fields = {"multi_step_hours", "multi_step_weights"}
     loss_config = LossConfig(**{
         k: (tuple(v) if k in _tuple_fields and v is not None else v)
-        for k, v in loss_kwargs.items() if k in LossConfig._fields
+        for k, v in loss_kwargs.items()
     })
 
     # Rollout curriculum (aimip_rollout_curriculum: [[lead_hours, epochs],
@@ -217,6 +233,7 @@ def _build_spectral_config(cfg: dict[str, Any]):
         chunk_windows=int(cfg.get("aimip_chunk_windows", 0)),
         chunk_prefetch=bool(cfg.get("aimip_chunk_prefetch", False)),
         data_parallel=bool(cfg.get("aimip_data_parallel", False)),
+        ema_decay=float(cfg.get("aimip_ema_decay", 0.0)),
         spatial_lr_scale=float(cfg.get("aimip_spatial_lr_scale", 1.0)),
         rad_update_interval=int(cfg.get("aimip_rad_update_interval", 1)),
         loss_config=loss_config,

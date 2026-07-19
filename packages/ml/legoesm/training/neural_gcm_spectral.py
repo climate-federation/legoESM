@@ -68,6 +68,8 @@ from legoesm.training.era5_to_state import (
     TrainingERA5Config,
     era5_to_spectral_carry,
 )
+from legoesm.training.curriculum import build_curriculum_epoch_plan
+from legoesm.training.ema import ema_update, init_ema
 from legoesm.training.losses import LossConfig, level_weights
 from legoesm.training.data_parallel import mpi_abort_on_uncaught
 
@@ -146,6 +148,13 @@ class NeuralGCMSpectralConfig(NamedTuple):
     # effective batch from 1 (serial SGD) to N (one synced update per N samples),
     # so it is a training-trajectory change, not just a speedup — opt in per run.
     data_parallel: bool = False
+    # EMA of the trainable weights (U-Cast/GenCast convention, see
+    # training/ema.py): when > 0, maintain ema <- d*ema + (1-d)*model after
+    # every optimizer step and save ``epoch_NNNN_ema.eqx`` beside each
+    # per-epoch checkpoint (plus ``chunk_latest_ema.eqx`` on the chunked
+    # path). Evaluation prefers the EMA weights when the file exists.
+    # 0.0 = off (legacy behaviour, byte-identical trajectory).
+    ema_decay: float = 0.0
 
     # Data
     n_train_days: int = 365      # Number of daily IC/target pairs
@@ -278,6 +287,9 @@ def maybe_resume_model(model_template, resume_from_dir):
 # =============================================================================
 
 MIDEPOCH_CHECKPOINT_NAME = "chunk_latest.eqx"
+# EMA sibling of the mid-epoch checkpoint (model-template payload, written
+# atomically by ml.training.save_checkpoint next to chunk_latest.eqx).
+MIDEPOCH_EMA_CHECKPOINT_NAME = "chunk_latest_ema.eqx"
 
 
 def _save_midepoch_checkpoint(ckpt_dir, model, opt_state, epoch, next_chunk):
@@ -2234,22 +2246,15 @@ def _train_spectral_loop(
     )
     # Fail-early curriculum validation (before the optimizer schedule is
     # built, so a bad curriculum surfaces as ITS error, not a schedule
-    # side-effect like decay_steps=0).
+    # side-effect like decay_steps=0). The shared builder raises the
+    # canonical errors; the plan itself is rebuilt later next to its use.
     if curriculum:
-        _leads_loaded = tuple(
-            int(h) for h in (config.loss_config.multi_step_hours or ())
+        build_curriculum_epoch_plan(
+            curriculum,
+            tuple(int(h) for h in (config.loss_config.multi_step_hours or ())),
+            config.dt,
+            0,
         )
-        if not _leads_loaded:
-            raise ValueError(
-                "rollout_curriculum needs loss_config.multi_step_hours to "
-                "carry the curriculum leads (targets per lead)."
-            )
-        for h, _ in curriculum:
-            if h not in _leads_loaded:
-                raise ValueError(
-                    f"Curriculum lead {h}h has no loaded target "
-                    f"(multi_step_hours={_leads_loaded})."
-                )
     # --- data-parallel context (#985), resolved BEFORE the optimizer so the
     # warmup+cosine schedule is sized by the ACTUAL number of optimizer updates.
     # Under DP each rank performs one update per LOCAL sample, i.e. only
@@ -2378,6 +2383,36 @@ def _train_spectral_loop(
         )
     loss_history = []
 
+    # --- EMA of the trainable weights (D3, training/ema.py) --------------
+    # Updated on the host after every optimizer step (identical on every
+    # DP rank: same averaged gradient -> same model -> same EMA), saved
+    # beside each checkpoint. Resume prefers a matching *_ema.eqx; falls
+    # back to re-seeding from the restored raw model (logged) so a legacy
+    # run directory keeps working.
+    ema_decay = float(getattr(config, "ema_decay", 0.0) or 0.0)
+    ema_model = None
+    if ema_decay > 0.0:
+        ema_model = init_ema(model)
+        _ema_src = None
+        if resume_from_dir is not None:
+            if midepoch_restored:
+                _cand = Path(resume_from_dir) / MIDEPOCH_EMA_CHECKPOINT_NAME
+            else:
+                _cand = (
+                    Path(resume_from_dir) / f"epoch_{start_epoch - 1:04d}_ema.eqx"
+                )
+            if start_epoch > 0 and _cand.exists():
+                ema_model = eqx.tree_deserialise_leaves(_cand, ema_model)
+                _ema_src = str(_cand)
+        if start_epoch > 0:
+            if _ema_src is not None:
+                logger.info(f"EMA resume: restored {_ema_src}")
+            else:
+                logger.warning(
+                    "EMA resume: no *_ema.eqx found in the resume dir; "
+                    "re-seeding the EMA from the restored raw weights."
+                )
+
     logger.info(
         f"Training: {config.n_epochs} epochs, "
         f"{n_samples_epoch} samples/epoch, "
@@ -2505,32 +2540,18 @@ def _train_spectral_loop(
     # every phase lead were loaded up front: the caller must set
     # ``loss_config.multi_step_hours`` to the sorted set of curriculum
     # leads so ``load_training_data`` builds a target tuple per sample.
+    # Flat epoch plan: (phase_lead_hours, target_index, n_steps) per
+    # global epoch — resume (start_epoch) indexes into this plan. Shared
+    # implementation with the sfno_full macro-step plan (curriculum.py).
+    epoch_plan = build_curriculum_epoch_plan(
+        curriculum, multi_step_hours_train, config.dt, n_epochs_total
+    )
     if curriculum:
-        if not multi_step_hours_train:
-            raise ValueError(
-                "rollout_curriculum needs loss_config.multi_step_hours to "
-                "carry the curriculum leads (targets per lead)."
-            )
-        for h, _ in curriculum:
-            if h not in multi_step_hours_train:
-                raise ValueError(
-                    f"Curriculum lead {h}h has no loaded target "
-                    f"(multi_step_hours={multi_step_hours_train})."
-                )
-        # Flat epoch plan: (phase_lead_hours, target_index, n_steps) per
-        # global epoch — resume (start_epoch) indexes into this plan.
-        epoch_plan = []
-        for h, ep in curriculum:
-            spec = (h, multi_step_hours_train.index(h),
-                    int(round(h * 3600.0 / config.dt)))
-            epoch_plan.extend([spec] * ep)
         logger.info(
             f"Rollout curriculum active: "
             + ", ".join(f"{h}h x{ep}" for h, ep in curriculum)
             + f" ({len(epoch_plan)} epochs total)"
         )
-    else:
-        epoch_plan = [(None, None, None)] * n_epochs_total
 
     def _loss_components(m, ic_spectral, target_carry, forcing_base, phase_spec):
         """Per-sample loss + components for ``phase_spec``.
@@ -2752,6 +2773,8 @@ def _train_spectral_loop(
                     model, opt_state, loss, grad_norm, components = train_step(
                         model, opt_state, ic, target, _fb,
                     )
+                if ema_model is not None:
+                    ema_model = ema_update(ema_model, model, ema_decay)
 
                 # --- NaN / Inf detection (outside JIT, values materialized) ---
                 # A rank hitting NaN raises; the @mpi_abort_on_uncaught decorator
@@ -2796,6 +2819,13 @@ def _train_spectral_loop(
                     config.checkpoint_dir, model, opt_state,
                     _save_epoch, _save_chunk,
                 )
+                if ema_model is not None:
+                    from legoesm.ml.training import save_checkpoint
+                    save_checkpoint(
+                        ema_model,
+                        Path(config.checkpoint_dir)
+                        / MIDEPOCH_EMA_CHECKPOINT_NAME,
+                    )
                 logger.info(
                     f"Saved mid-epoch checkpoint {MIDEPOCH_CHECKPOINT_NAME} "
                     f"(epoch {epoch}, chunk {chunk_pos} done -> resume at "
@@ -2852,6 +2882,10 @@ def _train_spectral_loop(
             ckpt_path = ckpt_dir / f"epoch_{epoch:04d}.eqx"
             save_checkpoint(model, ckpt_path)
             logger.info(f"Saved checkpoint: {ckpt_path}")
+            if ema_model is not None:
+                ema_path = ckpt_dir / f"epoch_{epoch:04d}_ema.eqx"
+                save_checkpoint(ema_model, ema_path)
+                logger.info(f"Saved EMA checkpoint: {ema_path}")
 
         # AIMIP-style early stopping.  Stop when the rolling loss has
         # not improved by more than ``early_stop_min_delta`` for
@@ -3462,48 +3496,17 @@ def build_sfno_curriculum_epoch_plan(
         (its target was never loaded).  Same message style as the dycore-mode
         curriculum validation in :func:`_train_spectral_loop`.
     """
-    curriculum = tuple(
-        (int(h), int(ep)) for h, ep in (rollout_curriculum or ())
+    # Delegates to the shared curriculum module; require_exact enforces the
+    # whole-macro-step rule (a misaligned lead would otherwise silently
+    # supervise the wrong horizon — see curriculum.build_curriculum_epoch_plan).
+    return build_curriculum_epoch_plan(
+        rollout_curriculum,
+        multi_step_hours,
+        dt_sfno,
+        int(n_epochs_fallback),
+        require_exact=True,
+        dt_name="dt_sfno",
     )
-    if not curriculum:
-        return [(None, None, None)] * int(n_epochs_fallback)
-
-    leads_loaded = tuple(int(h) for h in (multi_step_hours or ()))
-    if not leads_loaded:
-        raise ValueError(
-            "rollout_curriculum needs loss_config.multi_step_hours to "
-            "carry the curriculum leads (targets per lead)."
-        )
-    for h, _ in curriculum:
-        if h not in leads_loaded:
-            raise ValueError(
-                f"Curriculum lead {h}h has no loaded target "
-                f"(multi_step_hours={leads_loaded})."
-            )
-
-    # Flat epoch plan: (phase_lead_hours, target_index, n_sfno_steps) per
-    # global epoch.  n_sfno_steps = round(lead * 3600 / dt_sfno) — the macro-step
-    # analogue of the dycore plan's round(lead * 3600 / config.dt).
-    epoch_plan = []
-    for h, ep in curriculum:
-        # A state-update SFNO advances in WHOLE macro steps, so the lead MUST be
-        # a positive exact multiple of dt_sfno.  Reject a misaligned lead LOUDLY:
-        # round() would otherwise silently supervise the wrong horizon (e.g. a
-        # 6 h lead at dt_sfno=12 h -> 0 steps -> the IC scored against the +6 h
-        # target = a zero-gradient phase; a 6 h lead at dt_sfno=4 h -> 2 steps =
-        # an 8 h prediction scored against a +6 h target).
-        steps_f = h * 3600.0 / dt_sfno
-        n_sfno_steps = int(round(steps_f))
-        if n_sfno_steps <= 0 or abs(steps_f - n_sfno_steps) > 1e-6:
-            raise ValueError(
-                f"Curriculum lead {h}h is not a positive exact multiple of "
-                f"dt_sfno={dt_sfno:g}s ({steps_f:.4f} macro steps). Pick leads on "
-                f"the dt_sfno grid (a state-update SFNO cannot take a fractional "
-                f"final step)."
-            )
-        spec = (h, leads_loaded.index(h), n_sfno_steps)
-        epoch_plan.extend([spec] * ep)
-    return epoch_plan
 
 
 def _train_sfno_full_loop(
@@ -3779,6 +3782,28 @@ def _train_sfno_full_loop(
     early_stop_patience = int(getattr(config, "early_stop_patience", 0) or 0)
     early_stop_min_delta = float(getattr(config, "early_stop_min_delta", 1.0e-3))
 
+    # EMA of the SFNO weights (D3, training/ema.py) — same doctrine as
+    # _train_spectral_loop: host-side update after every optimizer step,
+    # epoch_NNNN_ema.eqx beside each checkpoint, resume prefers the EMA
+    # file of the last completed epoch, else re-seeds from raw weights.
+    ema_decay = float(getattr(config, "ema_decay", 0.0) or 0.0)
+    ema_model = None
+    if ema_decay > 0.0:
+        ema_model = init_ema(sfno)
+        if start_epoch > 0:
+            _cand = (
+                Path(config.checkpoint_dir)
+                / f"epoch_{start_epoch - 1:04d}_ema.eqx"
+            )
+            if _cand.exists():
+                ema_model = eqx.tree_deserialise_leaves(_cand, ema_model)
+                logger.info(f"EMA resume: restored {_cand}")
+            else:
+                logger.warning(
+                    "EMA resume: no *_ema.eqx found; re-seeding the EMA "
+                    "from the restored raw weights."
+                )
+
     if start_epoch >= n_epochs_total:
         logger.info(
             f"Resume: start_epoch={start_epoch} >= n_epochs={n_epochs_total}; "
@@ -3807,6 +3832,8 @@ def _train_sfno_full_loop(
             sfno, opt_state, loss, grad_norm, components = train_step(
                 sfno, opt_state, ic, target,
             )
+            if ema_model is not None:
+                ema_model = ema_update(ema_model, sfno, ema_decay)
 
             loss_val = float(loss)
             if jnp.isnan(loss) or jnp.isinf(loss):
@@ -3850,6 +3877,10 @@ def _train_sfno_full_loop(
         ckpt_path = ckpt_dir / f"epoch_{epoch:04d}.eqx"
         save_checkpoint(sfno, ckpt_path)
         logger.info(f"Saved checkpoint: {ckpt_path}")
+        if ema_model is not None:
+            ema_path = ckpt_dir / f"epoch_{epoch:04d}_ema.eqx"
+            save_checkpoint(ema_model, ema_path)
+            logger.info(f"Saved EMA checkpoint: {ema_path}")
 
         # Early stopping is DISABLED under a rollout curriculum (mirrors
         # _train_spectral_loop): loss magnitudes are NOT comparable across phases

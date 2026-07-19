@@ -1,0 +1,25 @@
+# ACE2-style training loss (Watt-Meyer et al., arXiv:2411.11268) — the
+# validated aimip_ace2loss campaign mapping onto LossConfig
+# (packages/ml/legoesm/training/losses.py):
+# - pure MSE (bias / CRPS / spectral weights stay at their 0.0 defaults),
+# - residual normalization: scale by the std of the 6-h field CHANGE (the
+#   predictable tendency), not the full-field std,
+# - loss summed over 2 autoregressive 6-h steps (ACE2 convention),
+# - flat per-variable weights (ACE2's per-named-channel table — x10 Z500,
+#   x5 T850 — has no per-level analogue in LossConfig; flat weights +
+#   pressure level weighting are the closest supported mapping).
+#
+# ACE2 additionally supervises TOA/surface radiative fluxes; that variant
+# is the ace2_flux preset (kept separate so the running ace2 campaign's
+# loss stays byte-identical).
+loss:
+  residual_normalize: true
+  normalize_by_scale: false
+  multi_step_hours: [6, 12]
+  multi_step_weights: [1.0, 1.0]
+  w_T: 0.5
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.5
+  w_ps: 0.3
+  level_weighting: pressure
