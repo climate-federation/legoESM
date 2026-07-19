@@ -45,10 +45,22 @@ sweep.
 from __future__ import annotations
 
 import argparse
-import json
+import sys
 from pathlib import Path
 
-import yaml
+# packages/* namespace roots (the sweep planner core lives in
+# legoesm.training.sweep_planner; PYTHONPATH may not carry them when this
+# planner runs bare on a login node).
+_REPO = Path(__file__).resolve().parents[2]
+for _d in sorted((_REPO / "packages").glob("*/")):
+    if (_d / "legoesm").is_dir() and str(_d) not in sys.path:
+        sys.path.insert(0, str(_d))
+
+from legoesm.training.sweep_planner import (  # noqa: E402
+    build_oat_combos,
+    validate_sweep_baseline,
+    write_sweep_plan,
+)
 
 
 # Baseline scheme choices (matches the production AIMIP classical recipe).
@@ -93,37 +105,6 @@ SWEEP_SPACE = {
 BASELINE_REL = Path("config/aimip/sweep/stage1/baseline_classical_t21_rrtmgp.yaml")
 SWEEP_DIR_REL = Path("config/aimip/sweep/stage1")
 RESULTS_DIR_REL = Path("results/aimip_classical_sweep_stage1")
-
-
-def _combo_name(dim: str, scheme: str) -> str:
-    """Per-combo dirname -- short, ASCII, sortable."""
-    short_dim = {
-        "aimip_convection": "conv",
-        "aimip_turbulence": "turb",
-        "aimip_gwd": "gwd",
-        "aimip_microphysics": "micro",
-        "aimip_cloud": "cloud",
-    }[dim]
-    return f"combo_{short_dim}_{scheme}"
-
-
-def _write_combo(repo_root: Path, combo_name: str, overrides: dict, *,
-                 baseline_rel: Path, results_dir_rel: Path) -> None:
-    """Write the per-combo suite.yaml + variant_classical.yaml pair."""
-    combo_dir = repo_root / SWEEP_DIR_REL / combo_name
-    combo_dir.mkdir(parents=True, exist_ok=True)
-
-    suite_yaml = {
-        "base": str(baseline_rel),
-        "variants": ["classical"],
-        "output_dir": str(results_dir_rel / combo_name),
-    }
-    overlay_yaml = dict(overrides)  # keys are aimip_* scheme literals
-
-    with (combo_dir / "suite.yaml").open("w") as fh:
-        yaml.safe_dump(suite_yaml, fh, sort_keys=False)
-    with (combo_dir / "variant_classical.yaml").open("w") as fh:
-        yaml.safe_dump(overlay_yaml, fh, sort_keys=False)
 
 
 def _write_runner_sbatch(repo_root: Path, manifest_rel: Path) -> Path:
@@ -194,49 +175,20 @@ def main():
     args = parser.parse_args()
 
     repo_root = args.repo_root.resolve()
-    baseline_path = repo_root / BASELINE_REL
-    if not baseline_path.exists():
-        raise FileNotFoundError(f"Missing baseline: {baseline_path}")
+    validate_sweep_baseline(repo_root, BASELINE_REL)
 
-    # Build the combo list.  "combo_baseline" goes first so the
-    # baseline scorecard is index 0; the OAT alternatives follow.
-    combos: list[dict] = []
-    combos.append({
-        "name": "combo_baseline",
-        "dim": "baseline",
-        "scheme": "tiedtke+louis+mcfarlane+sundqvist",
-        "overrides": dict(BASELINE),
-    })
-    for dim, alts in SWEEP_SPACE.items():
-        for alt in alts:
-            overrides = dict(BASELINE)
-            overrides[dim] = alt
-            combos.append({
-                "name": _combo_name(dim, alt),
-                "dim": dim,
-                "scheme": alt,
-                "overrides": overrides,
-            })
-
-    # Write per-combo config pairs.
-    for combo in combos:
-        _write_combo(
-            repo_root, combo["name"], combo["overrides"],
-            baseline_rel=BASELINE_REL,
-            results_dir_rel=RESULTS_DIR_REL,
-        )
-        combo["suite"] = str(SWEEP_DIR_REL / combo["name"] / "suite.yaml")
-
-    manifest = {
-        "stage": 1,
-        "baseline": dict(BASELINE),
-        "baseline_yaml": str(BASELINE_REL),
-        "results_dir": str(RESULTS_DIR_REL),
-        "n_combos": len(combos),
-        "combos": combos,
-    }
-    manifest_path = repo_root / SWEEP_DIR_REL / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    # "combo_baseline" goes first so the baseline scorecard is index 0;
+    # the OAT alternatives follow (shared planner core, D6).
+    combos = build_oat_combos(BASELINE, SWEEP_SPACE)
+    manifest_path = write_sweep_plan(
+        repo_root,
+        campaign="aimip",
+        combos=combos,
+        sweep_dir_rel=SWEEP_DIR_REL,
+        results_dir_rel=RESULTS_DIR_REL,
+        baseline=BASELINE,
+        baseline_rel=BASELINE_REL,
+    )
 
     runner_sbatch = _write_runner_sbatch(
         repo_root,

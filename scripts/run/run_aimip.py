@@ -263,6 +263,18 @@ def _train_variant(
     )
 
     if variant == "classical":
+        # Classical-mode radiation pin (campaign_driver, design D1): scheme
+        # swaps always run under rrtmgp so convection/turbulence comparisons
+        # are not confounded by the radiation backend. Smoke and an explicit
+        # allow_non_rrtmgp escape are exempt.
+        from legoesm.training.campaign_driver import (
+            validate_classical_radiation,
+        )
+        validate_classical_radiation(
+            str(cfg.get("aimip_radiation", "rrtmgp")),
+            smoke=bool(cfg.get("smoke", False)),
+            allow_non_rrtmgp=bool(cfg.get("allow_non_rrtmgp", False)),
+        )
         return _train_aimip_classical(
             spec_cfg, cache_dir, cfg=cfg, resume_from_dir=resume_from_dir,
         )
