@@ -32,10 +32,6 @@ class BiogeoConfig(NamedTuple):
     wind_speed : float
         Constant 10-m wind speed [m/s] for gas exchange (used when
         no atmospheric coupling provides wind). Default 7.0.
-    K_h_bio : float
-        Horizontal diffusivity for biogeo tracers [m^2/s]. Default 1e3.
-    K_v_bio : float
-        Vertical diffusivity for biogeo tracers [m^2/s]. Default 1e-4.
 
     NPZD parameters
     ---------------
@@ -43,8 +39,6 @@ class BiogeoConfig(NamedTuple):
         Maximum phytoplankton growth rate [1/day]. Default 1.5.
     k_N : float
         Nutrient half-saturation [mol N/m^3]. Default 0.7e-3.
-    k_PAR : float
-        Light half-saturation [W/m^2]. Default 30.0.
     alpha_P : float
         Initial slope of P-I curve [1/(W/m^2)/day]. Default 0.025.
     g_max : float
@@ -67,8 +61,6 @@ class BiogeoConfig(NamedTuple):
         Chlorophyll self-shading [m^2/(mol N)]. Default 25.0.
     R_CN : float
         Redfield C:N ratio [mol C / mol N]. Default 6.625.
-    R_ON : float
-        Redfield O2:N ratio [mol O2 / mol N]. Default 10.625.
     R_CaP : float
         Rain ratio (CaCO3 production / organic C export). Default 0.07.
 
@@ -94,13 +86,10 @@ class BiogeoConfig(NamedTuple):
     # Carbonate chemistry
     pCO2_atm: float = 400.0
     wind_speed: float = 7.0
-    K_h_bio: float = 1.0e3
-    K_v_bio: float = 1.0e-4
 
     # NPZD
     mu_max: float = 1.5
     k_N: float = 0.7e-3
-    k_PAR: float = 30.0
     alpha_P: float = 0.025
     g_max: float = 0.6
     k_P: float = 0.2e-3
@@ -112,7 +101,6 @@ class BiogeoConfig(NamedTuple):
     k_w_atten: float = 0.04
     k_chl_atten: float = 25.0
     R_CN: float = 6.625
-    R_ON: float = 10.625
     R_CaP: float = 0.07
 
     # Initial conditions
