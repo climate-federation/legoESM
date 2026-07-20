@@ -2257,14 +2257,19 @@ def _require_prognostic_ice_for_salinity_flags(ice_sinew, ice_drain_days,
 
 
 def _require_local_fw_salinity_for_entrapment(ice_sinew,
-                                              freshwater_salinity) -> None:
+                                              freshwater_salinity,
+                                              normalize_freshwater=True) -> None:
     """``--ice-sinew`` computes the ICE side of the freeze exchange at the
     LOCAL surface salinity (f·SSS_local); the OCEAN side (the freshwater
     extraction's virtual-salt closure) must use the SAME reference or the net
     salinification is (S_ref − S_ice_stored) instead of the physical
     (SSS_local − S_ice_stored) — on a 27-PSU shelf with the fixed S_ref≈35
     that MINTS ~2x the ocean salt tendency (codex HIGH).  Require the F1
-    ``--freshwater-salinity local`` pairing instead of silently mispairing."""
+    ``--freshwater-salinity local`` pairing instead of silently mispairing.
+    The model REJECTS local + normalize_freshwater at setup (global-salt
+    covariance), so require ``--no-normalize-freshwater`` here too — a clear
+    up-front message instead of the late model-constructor failure (codex
+    r2)."""
     if ice_sinew is not None and freshwater_salinity != "local":
         raise SystemExit(
             "--ice-sinew (local-SSS ice entrapment) requires "
@@ -2273,6 +2278,14 @@ def _require_local_fw_salinity_for_entrapment(ice_sinew,
             "freeze exchange nets (S_ref - S_ice) instead of the physical "
             "(SSS_local - S_ice), minting excess salt on fresh shelves "
             "(~2x on a 27-PSU shelf vs S_ref=35).")
+    if ice_sinew is not None and normalize_freshwater:
+        raise SystemExit(
+            "--ice-sinew requires --no-normalize-freshwater as well: the "
+            "model rejects freshwater_salinity=local combined with "
+            "normalize_freshwater (the normalization's global-salt promise "
+            "breaks under the local-S covariance), so the full flag set is "
+            "--ice-sinew ... --freshwater-salinity local "
+            "--no-normalize-freshwater.")
 
 
 def _resolve_ice_categories(n_categories, ridging, supports_dynamics,
@@ -4155,7 +4168,8 @@ def main() -> int:
     _require_prognostic_ice_for_salinity_flags(
         args.ice_sinew, args.ice_drain_days, args.prognostic_sea_ice)
     _require_local_fw_salinity_for_entrapment(
-        args.ice_sinew, args.freshwater_salinity)
+        args.ice_sinew, args.freshwater_salinity,
+        normalize_freshwater=not args.no_normalize_freshwater)
 
     # --prescribed-flow gates (PRE-BUILD, on the static args): grid support +
     # the --spinup-drag rejection + the --no-gm-redi requirement.  NB: no

@@ -274,8 +274,19 @@ class TestEntrapmentRequiresLocalFwSalinity:
         from scripts.run.run_omip_core2 import (
             _require_local_fw_salinity_for_entrapment,
         )
-        _require_local_fw_salinity_for_entrapment(0.75, "local")  # no raise
+        _require_local_fw_salinity_for_entrapment(
+            0.75, "local", normalize_freshwater=False)   # no raise
         _require_local_fw_salinity_for_entrapment(None, "s_ref")  # no raise
+
+    def test_sinew_with_normalize_refused_early(self):
+        """local + normalize is rejected later by the model constructor —
+        the guard must fail EARLY with the full flag set (codex r2)."""
+        from scripts.run.run_omip_core2 import (
+            _require_local_fw_salinity_for_entrapment,
+        )
+        with pytest.raises(SystemExit, match="no-normalize-freshwater"):
+            _require_local_fw_salinity_for_entrapment(
+                0.75, "local", normalize_freshwater=True)
 
 
 class TestIceGlobalStatsMulticat:

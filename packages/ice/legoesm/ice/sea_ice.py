@@ -364,9 +364,13 @@ def step_sea_ice(
         # "25 PSU" floor alone let f_entrap=1.0 ride a 30-PSU cap and clip
         # every 32-PSU cell at formation (codex MED).
         _cap_needed = _fe * 40.0
-        if float(config.brine.S_ice_max) < _cap_needed:
+        _cap = float(config.brine.S_ice_max)
+        # NOT (cap >= needed) rather than (cap < needed): a NaN cap fails
+        # EVERY comparison, so `< needed` would silently pass it through to
+        # poison the clamp (codex r2).
+        if not (_math.isfinite(_cap) and _cap >= _cap_needed):
             raise ValueError(
-                f"BrineConfig.f_entrap={_fe} requires S_ice_max >= "
+                f"BrineConfig.f_entrap={_fe} requires a FINITE S_ice_max >= "
                 f"{_cap_needed:.1f} PSU (= f_entrap * 40, the most saline "
                 f"plausible surface water) to hold the entrapped new-ice "
                 f"salinity without the clamp re-front-loading the brine at "

@@ -460,3 +460,13 @@ def test_step_rejects_nonfinite_tau():
                                      S_ice_max=30.0))
     with pytest.raises(ValueError, match="FINITE"):
         _step_with_brine(BrineConfig(enabled=True, tau_drain_days=float("nan")))
+
+
+def test_step_rejects_nan_cap():
+    """A NaN S_ice_max fails every comparison, so `cap < needed` would pass
+    it silently into the clamp (codex r2) — the guard must use
+    NOT(finite AND cap >= needed)."""
+    with pytest.raises(ValueError, match="FINITE"):
+        _step_with_brine(BrineConfig(enabled=True, f_entrap=0.75,
+                                     tau_drain_days=15.0,
+                                     S_ice_max=float("nan")))
