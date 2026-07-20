@@ -71,9 +71,13 @@ def _step(Tl, cstate, gi, *, Ts, psi, th, lat, cfg, lc):
 
 
 def _warm_start():
+    import legoesm.land.canopy.clm_ml_interface as ifc
     from legoesm.land.canopy.clm_ml_interface import extract_clm_ml_grid_info
     Ts, psi, th, lat, cfg, lc = _fixtures()
     kw = dict(Ts=Ts, psi=psi, th=th, lat=lat, cfg=cfg, lc=lc)
+    # Reset the process-global topology cache so the cold start builds this
+    # config's structure, not a prior test's leftover (CLM-ML uses process globals).
+    ifc._last_topology_key = None
     out0, st0 = _step(jnp.full(NCOL, 295.0), None, None, **kw)
     gi = extract_clm_ml_grid_info(st0)
     return st0, gi, kw
@@ -88,17 +92,65 @@ def test_forward_step_runs_under_jit():
     assert jnp.isfinite(out.lhflx).all()
 
 
-def test_jit_matches_eager_forward():
-    """jit forward == eager forward, bit-close (self-check; XLA-reassoc tol)."""
+def test_device_path_matches_host_path():
+    """DEVICE traceable path == the original HOST path, bit-close.
+
+    The precision-gate self-check: the SAME warm step two ways on the SAME state —
+    the original host path (grid_info=None -> _traceable False -> host solar +
+    cached topology) versus the device path under jax.jit (grid_info=gi ->
+    _traceable True -> cos_zenith_device + re-installed topology).  A real
+    divergence would mean the de-host changed the physics, not just where it runs
+    (it once did: the scan/grid= path dropped the ML sub-step flux averaging, so
+    the canopy-air storage term reappeared in sensible heat — a ~40% shflx error).
+
+    CLM-ML keeps topology in PROCESS-GLOBAL state that the eager path reads through
+    a cache (``_last_topology_key``): a prior test with a different config leaves
+    stale globals, so we reset the cache before the host reference to force it to
+    re-install THIS config's topology (the device path always re-installs).  In a
+    truly fresh process both paths are bit-identical.
+    """
+    import legoesm.land.canopy.clm_ml_interface as ifc
     st0, gi, kw = _warm_start()
     Tl = jnp.full(NCOL, 296.0)
-    out_e, _ = _step(Tl, st0, gi, **kw)
-    out_j = jax.jit(lambda t: _step(t, st0, gi, **kw)[0])(Tl)
+    ifc._last_topology_key = None                              # force host re-install
+    out_host, _ = _step(Tl, st0, None, **kw)                   # grid_info=None: host path
+    out_dev = jax.jit(lambda t: _step(t, st0, gi, **kw)[0])(Tl)  # device jit path
     for name in ("shflx", "lhflx", "gpp", "sw_net", "lw_net", "stflx_air"):
-        e = getattr(out_e, name)
-        j = getattr(out_j, name)
-        assert jnp.allclose(e, j, atol=1e-6, rtol=1e-7), (
-            f"{name}: eager {e} vs jit {j}")
+        h = getattr(out_host, name)
+        d = getattr(out_dev, name)
+        assert jnp.allclose(h, d, atol=1e-6, rtol=1e-7), (
+            f"{name}: host {h} vs device {d}")
+
+
+def test_traceable_rejects_nonzero_met_type():
+    """met_type != 0 on the traceable path is a hard error (curr_calday reliance)."""
+    from legoesm.land.canopy.config import CLMMLCanopyConfig
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
+    st0, gi, kw = _warm_start()
+    cfg3 = CLMMLCanopyConfig(met_type=3)
+    lc3 = MultiLayerLandConfig(surface_scheme=cfg3)
+    Ts, psi, th, lat = kw["Ts"], kw["psi"], kw["th"], kw["lat"]
+    with pytest.raises(ValueError, match="met_type==0"):
+        compute_clm_ml_canopy_fluxes(
+            T_soil_top=Ts[:, 0], forcing=_forcing(jnp.full(NCOL, 296.0)),
+            canopy_config=cfg3, land_config=lc3, land_params=None,
+            canopy_state=st0, dt=1800.0, T_soil=Ts, psi_soil=psi, theta_soil=th,
+            lat=lat, doy=180.0, grid_info=gi)
+
+
+def test_traceable_rejects_supplied_lon():
+    """lon != None on the traceable path is a hard error (solar-semantics divergence)."""
+    from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
+    st0, gi, kw = _warm_start()
+    Ts, psi, th, lat, cfg, lc = (kw["Ts"], kw["psi"], kw["th"], kw["lat"],
+                                 kw["cfg"], kw["lc"])
+    with pytest.raises(ValueError, match="requires lon=None"):
+        compute_clm_ml_canopy_fluxes(
+            T_soil_top=Ts[:, 0], forcing=_forcing(jnp.full(NCOL, 296.0)),
+            canopy_config=cfg, land_config=lc, land_params=None,
+            canopy_state=st0, dt=1800.0, T_soil=Ts, psi_soil=psi, theta_soil=th,
+            lat=lat, lon=jnp.zeros(NCOL), doy=180.0, grid_info=gi)
 
 
 def test_grad_flows_through_jit_forward():

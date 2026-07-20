@@ -1721,14 +1721,57 @@ def compute_clm_ml_canopy_fluxes(
 
     global _last_topology_key
     if _traceable:
-        # Warm traceable step (jax.jit / global path): the ONLY per-step
-        # time-dependent geometry is the solar zenith, threaded to the kernel as a
-        # device array (``cos_zenith_device``) so NO host orbital recompute and NO
-        # CLM-global topology write happens here.  Every other CLM topology / orbital
-        # global was set once at cold start (the first, eager step) and is constant
-        # across the warm rollout.  ``cos_zen`` is (ncol,), aligned with the 1-based
-        # patch filter built below (column i -> patch i+1).
-        cos_zen = jnp.maximum(jnp.asarray(forcing.cos_zenith, dtype=jnp.float64), 0.0)
+        # ---- Warm traceable step (jax.jit / global path) ----------------------
+        # Removes the two per-step HOST dependencies that break a jax.jit trace:
+        #  (1) solar zenith — threaded to the kernel as a DEVICE array
+        #      (``cos_zenith_device``) instead of the host shr_orb_cosz recompute;
+        #  (2) per-step CLM time globals — at met_type==0 the backend's calendar
+        #      interpolation days are all 0 (curr_calday unused; verified in
+        #      MLCanopyFluxesMod's time block), so nothing per-step reads them.
+        # It STILL re-installs THIS (config, grid)'s CLM topology + step size every
+        # trace (concrete host writes, executed once at trace time — cheap): the
+        # kernel reads process-global ``col.z/zi``, ``patch.itype`` (pft) and
+        # ``get_step_size()``, but ``grid_info`` carries only (p,ncan,ntop,nbot).
+        # A DIFFERENT config's cold-start left in those globals would otherwise be
+        # traced against this warm state (silent wrong structure/params — codex
+        # CRITICAL), and a different caller's ``dt`` would corrupt ``num_ml_steps``.
+        if int(canopy_config.met_type) != 0:
+            raise ValueError(
+                "CLM-ML traceable/jit path supports met_type==0 (external coupler "
+                f"forcing) only; got met_type={canopy_config.met_type}. Other "
+                "met_types interpolate CLM forcing on curr_calday, a per-step CLM "
+                "time global that cannot be written from a traced doy.")
+        if lon is not None:
+            raise ValueError(
+                "CLM-ML traceable/jit path requires lon=None: it takes the solar "
+                "zenith straight from forcing.cos_zenith (device).  The lon-supplied "
+                "path instead computes zenith from lat/lon/doy and IGNORES "
+                "forcing.cos_zenith, so allowing lon here would silently diverge "
+                "from the eager result. Pass cos_zenith via forcing, leave lon=None.")
+        # Solar zenith is GEOMETRY (non-differentiated by contract): stop_gradient
+        # so a jax.grad over forcing.cos_zenith cannot leak a gradient through
+        # arccos into the radiation.  (The differentiable=True path already rejects
+        # a traced geometry leaf; this also covers the differentiable=False
+        # traceable path.)  (ncol,), aligned with the 1-based filter built below.
+        cos_zen = jnp.maximum(
+            jax.lax.stop_gradient(jnp.asarray(forcing.cos_zenith, dtype=jnp.float64)),
+            0.0)
+        # Re-install topology + step size for THIS (config, grid).  lat is geometry
+        # (concrete); lon is None here, so grc.londeg is irrelevant to the
+        # device-zenith path (structure only).  Soil grid is concrete (built under
+        # ensure_compile_time_eval above).  The _setup_* helpers write CLM module
+        # globals (col.snl, col.z/zi, patch.itype, grc.*, the step size) via jnp, so
+        # they must run under ensure_compile_time_eval too: otherwise those writes
+        # would be TRACERS under jax.jit and the backend's np.asarray(col.snl) etc.
+        # would raise.  Every input is concrete, so this is a pure trace-time setup.
+        _lat_deg = (np.array(lat, dtype=np.float64) if lat is not None
+                    else np.zeros(ncol, dtype=np.float64))
+        _lon_deg = np.zeros(ncol, dtype=np.float64)
+        with jax.ensure_compile_time_eval():
+            _setup_clm_time(dt, 0.0, 0)  # concrete: get_step_size()==dt; calday unused
+            _setup_clm_topology(ncol, _lat_deg, _lon_deg, dz_soil, z_soil,
+                                float(land_config.z_ref),
+                                pft_clm=int(canopy_config.pft_clm))
     else:
         # ---- Latitude / longitude arrays ----
         if lat is not None:
