@@ -6456,7 +6456,9 @@ class LatLonCGridOceanModel:
                     eos_linear=self.config.eos_linear, mask=cmask,
                     rho_0=self.config.constants.rho_0, g=self.config.constants.g,
                     kappa_redi_override=_kri_static,
-                    density_jacobian=_gm_dj)
+                    density_jacobian=_gm_dj,
+                    # #1226: same wall masks as the tendency call above.
+                    u_mask=u_mask, v_mask=v_mask)
         du_p = (state.u_incr_prev.data if state.u_incr_prev is not None
                 else jnp.zeros_like(du_n))
         dv_p = (state.v_incr_prev.data if state.v_incr_prev is not None

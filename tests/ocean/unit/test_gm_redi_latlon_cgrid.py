@@ -1354,8 +1354,13 @@ class TestNemoIsoLapOperator:
         act = ((mask[:, :, jnp.newaxis] > 0.5)
                & (z_top[jnp.newaxis, jnp.newaxis, :] < H_bathy[:, :, jnp.newaxis])
                ).astype(T.dtype)
+        # The dispatcher NEGATES the mode-b producer slopes into NEMO's
+        # ldfslp sign convention (2026-07-17 winter ttrd_ldf certificate —
+        # see the mode-b branch comment in gm_redi_tracer_tendency_latlon);
+        # feed the direct call the same negated slopes.  (This test was
+        # broken on main since the negation landed; fixed with #1226.)
         dT_direct = nemo_iso_lap_tracer_tendency_latlon_cgrid(
-            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jac_d, grid,
+            T, -S_x, -S_y, mask, u_mask, v_mask, z_coord, jac_d, grid,
             cfg_n.kappa_Redi, act)
         assert jnp.allclose(dT, dT_direct, rtol=1e-12, atol=1e-30)
 
@@ -1782,3 +1787,72 @@ class TestK33NemoNativeA33:
         # (interface m sits atop cell m+1; cells nlev-2, nlev-1 are dry there)
         shoal = K33[:, 2 * n_lon // 3:, nlev - 3:]
         assert float(jnp.max(jnp.abs(shoal))) == 0.0
+
+    def test_a33_stencil_nonuniform_kappa_staircase(self):
+        """Level-pairing + kappa-placement gate (codex r1 #5): with a kappa
+        field varying in BOTH row and depth and a staircase with partial-wet
+        stencils, K33 must equal the direct NEMO-index a33 formula
+        (faces (k-1,k), masked-kappa sum / wet count, wmask(k) factor) at
+        every interface.  A k/k+1 pairing error or an unmasked kappa sum
+        shifts this everywhere the kappa profile varies."""
+        import numpy as np
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        n_lat, n_lon, nlev = T.shape
+        cfg_n = self._cfg_native(cfg)
+        dz = jnp.asarray(z_coord.dz_ref)
+        H_stair = jnp.asarray(H_bathy).at[:, 2 * n_lon // 3:].set(
+            float(jnp.sum(dz[:-2])))
+        # kappa varying in row AND depth (3-D center field)
+        kap = (1000.0
+               * (1.0 + 0.3 * jnp.arange(n_lat)[:, None, None] / n_lat)
+               * (1.0 + 0.5 * jnp.arange(nlev)[None, None, :] / nlev)
+               * jnp.ones((n_lat, n_lon, nlev)))
+        from legoesm.ocean.eos import make_eos_fn
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            compute_isoneutral_K33_latlon, compute_nemo_native_slopes,
+            gm_redi_density_and_jacobian, nemo_iso_face_masks)
+        K33 = compute_isoneutral_K33_latlon(
+            T, S, eta, H_stair, grid, z_coord, cfg_n,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
+            kappa_redi_override=kap)
+        # ---- direct NEMO-index reference ----
+        rho_d, _ = gm_redi_density_and_jacobian(
+            T, S, eta, H_stair, grid, z_coord, eos="linear", mask=mask)
+        z_top = jnp.cumsum(dz) - dz
+        act = ((mask[:, :, jnp.newaxis] > 0.5)
+               & (z_top[jnp.newaxis, jnp.newaxis, :]
+                  < H_stair[:, :, jnp.newaxis])).astype(T.dtype)
+        _, _, wi, wj = compute_nemo_native_slopes(
+            rho_d, T, S, mask, u_mask, v_mask, z_coord, grid, cfg_n,
+            make_eos_fn("linear", None), active_3d=act)
+        um3, vm3, wm3 = (np.asarray(a) for a in
+                         nemo_iso_face_masks(u_mask, v_mask, act))
+        kapn = np.asarray(kap)
+        win, wjn = np.asarray(wi), np.asarray(wj)
+        ref = np.zeros((n_lat, n_lon, nlev - 1))
+        for j in range(n_lat):
+            for i in range(n_lon):
+                im1 = (i - 1) % n_lon   # roll semantics of the operator
+                jm1 = (j - 1) % n_lat
+                for m in range(nlev - 1):
+                    k = m + 1           # w-point at the TOP of cell k
+                    cu = (um3[j, i, k] + um3[j, im1, k]
+                          + um3[j, i, k - 1] + um3[j, im1, k - 1])
+                    su = (kapn[j, i, k] * um3[j, i, k]
+                          + kapn[j, im1, k] * um3[j, im1, k]
+                          + kapn[j, i, k - 1] * um3[j, i, k - 1]
+                          + kapn[j, im1, k - 1] * um3[j, im1, k - 1])
+                    cv = (vm3[j, i, k] + vm3[jm1, i, k]
+                          + vm3[j, i, k - 1] + vm3[jm1, i, k - 1])
+                    sv = (kapn[j, i, k] * vm3[j, i, k]
+                          + kapn[jm1, i, k] * vm3[jm1, i, k]
+                          + kapn[j, i, k - 1] * vm3[j, i, k - 1]
+                          + kapn[jm1, i, k - 1] * vm3[jm1, i, k - 1])
+                    zahu = su * wm3[j, i, k] / max(cu, 1.0)
+                    zahv = sv * wm3[j, i, k] / max(cv, 1.0)
+                    ref[j, i, m] = (zahu * win[j, i, k] ** 2
+                                    + zahv * wjn[j, i, k] ** 2)
+        np.testing.assert_allclose(
+            np.asarray(K33), ref, rtol=1e-12, atol=1e-20,
+            err_msg="K33 != direct traldf_iso_a33 NEMO-index reference")
