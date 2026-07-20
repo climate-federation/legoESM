@@ -1942,6 +1942,69 @@ def sm1_edge_fv3(
     return ze_new
 
 
+def sb81_halflevel_construction(
+    coord: HybridSigmaPressureCoordinate,
+    p_s: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Simmons-Burridge (1981) half-level construction for hybrid coordinates.
+
+    Single source for the (p_half_safe, ln_ratio, alpha) triple used by BOTH
+    the hydrostatic geopotential integration and the momentum
+    pressure-gradient correction.  Sharing the bit-identical ``alpha`` is a
+    correctness requirement, not hygiene: the discrete rest-over-terrain
+    cancellation of ``-grad(Phi) - R_d T grad(ln p)`` (#1029) holds only when
+    the two terms difference the SAME floating-point fields.
+
+    Parameters
+    ----------
+    coord : HybridSigmaPressureCoordinate
+    p_s : jax.Array
+        Surface pressure, shape (...,).
+
+    Returns
+    -------
+    (p_half_safe, ln_ratio, alpha)
+        Interface pressures clipped away from zero (..., nlev+1), layer log
+        ratios ``ln(p_{k+1/2}/p_{k-1/2})`` (..., nlev), and the exact SB81
+        ``alpha_k = 1 - (p_{k-1/2}/dp_k) ln_ratio_k`` (..., nlev).
+    """
+    p_half = pressure_from_hybrid(coord, p_s, full=False)  # (..., nlev+1)
+    p_half_safe = jnp.clip(p_half, 1e-10, None)
+    ln_ratio = jnp.log(p_half_safe[..., 1:] / p_half_safe[..., :-1])  # (..., nlev)
+    dp = p_half_safe[..., 1:] - p_half_safe[..., :-1]
+    alpha = 1.0 - (p_half_safe[..., :-1] / dp) * ln_ratio  # (..., nlev)
+    return p_half_safe, ln_ratio, alpha
+
+
+def sb81_full_level_ln_p(
+    coord: HybridSigmaPressureCoordinate,
+    p_s: jax.Array,
+) -> jax.Array:
+    """SB81 full-level log-pressure ``ln p_k = ln p_{k+1/2} - alpha_k``.
+
+    This is the discrete field whose horizontal gradient forms the
+    energy-consistent pair with ``-grad(Phi)`` from
+    :func:`compute_geopotential_hybrid`: because
+    ``sum_{j>k} ln_ratio_j = ln p_s - ln p_{k+1/2}`` telescopes, at uniform
+    temperature ``-grad(Phi_k) - R_d T grad(ln p_k)`` reduces to
+    ``-grad(phi_s + R_d T ln p_s)``, which vanishes identically for a
+    hydrostatically balanced rest state over terrain (#1029).  On a pure-sigma
+    or ``A=0`` coordinate it reduces to ``ln p_s`` plus a spatially
+    constant per-level offset, so its gradient equals ``grad(ln p_s)`` — the
+    sigma-path correction — up to a ~1e-12 top-layer artifact of the
+    ``p_half`` zero-clip when the top interface pressure is exactly 0
+    (``alpha_0`` picks up a weak ``p_s`` dependence through the clipped
+    ``ln`` ratio; physically nil, pinned by the A=0 unit test).
+
+    Returns
+    -------
+    jax.Array
+        Full-level log-pressure, shape (..., nlev).
+    """
+    p_half_safe, _, alpha = sb81_halflevel_construction(coord, p_s)
+    return jnp.log(p_half_safe[..., 1:]) - alpha
+
+
 def compute_geopotential_hybrid(
     T: jax.Array,
     p_s: jax.Array,
@@ -1970,17 +2033,8 @@ def compute_geopotential_hybrid(
     """
     R_d = constants.R_d
 
-    # Compute hybrid pressures at interfaces and full levels
-    p_half = pressure_from_hybrid(coord, p_s, full=False)  # (..., nlev+1)
-    p_full = pressure_from_hybrid(coord, p_s, full=True)   # (..., nlev)
-
-    p_half_safe = jnp.clip(p_half, 1e-10, None)
-    jnp.clip(p_full, 1e-10, None)
-
-    # Log ratios and exact Simmons-Burridge alpha — spatially dependent
-    ln_ratio = jnp.log(p_half_safe[..., 1:] / p_half_safe[..., :-1])  # (..., nlev)
-    dp = p_half_safe[..., 1:] - p_half_safe[..., :-1]
-    alpha = 1.0 - (p_half_safe[..., :-1] / dp) * ln_ratio  # (..., nlev)
+    # Half-level construction shared with the hybrid PGF correction (#1029)
+    _, ln_ratio, alpha = sb81_halflevel_construction(coord, p_s)
 
     # Geopotential thickness of each full layer
     dPhi = R_d * T * ln_ratio  # (..., nlev)

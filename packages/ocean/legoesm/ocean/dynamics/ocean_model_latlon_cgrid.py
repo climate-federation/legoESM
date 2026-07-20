@@ -3456,6 +3456,7 @@ class LatLonCGridOceanModel:
                 kappa_redi_override=kappa_redi_override,
                 density_jacobian=_gm_dens_jac,
                 return_bolus_transport=_want_bolus,
+                dt=dt,
             )
             if _want_bolus:
                 dT_gm, dS_gm, _bolus = _gm_out
@@ -3483,6 +3484,13 @@ class LatLonCGridOceanModel:
                     rho_0=self.config.constants.rho_0, g=self.config.constants.g,
                     kappa_redi_override=kappa_redi_override,
                     density_jacobian=_gm_dens_jac,
+                    # #1226: the SAME wall masks the tendency dispatcher uses,
+                    # so the nemo_native K33 slopes/masks are bit-identical to
+                    # the explicit operator's (staircase-aware; the K33-side
+                    # 2-D rebuild was flat-bottom-only).
+                    u_mask=state.u_mask.data,
+                    v_mask=state.v_mask.data,
+                    dt=dt,
                 )
             if _ab2_advective:
                 # AB2 "advective" scope: GM/Redi is a DISSIPATIVE (isoneutral +
@@ -4487,6 +4495,7 @@ class LatLonCGridOceanModel:
                 eos=self.config.eos, eos_linear=self.config.eos_linear,
                 mask=lm, u_mask=state.u_mask.data, v_mask=state.v_mask.data,
                 rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+                dt=dt,
             )
             if (_scale_w is not None and eke_cfg.source_p_diss_iso
                     and kappa_redi_w is None):
@@ -6452,7 +6461,7 @@ class LatLonCGridOceanModel:
                 u_mask=u_mask, v_mask=v_mask,
                 rho_0=self.config.constants.rho_0, g=self.config.constants.g,
                 kappa_redi_override=_kri_static,
-                density_jacobian=_gm_dj)
+                density_jacobian=_gm_dj, dt=dt)
             dT_n = dT_n + dt * dT_gm    # noqa: N806
             dS_n = dS_n + dt * dS_gm    # noqa: N806
             if gm_cfg.implicit_K33:
@@ -6462,7 +6471,9 @@ class LatLonCGridOceanModel:
                     eos_linear=self.config.eos_linear, mask=cmask,
                     rho_0=self.config.constants.rho_0, g=self.config.constants.g,
                     kappa_redi_override=_kri_static,
-                    density_jacobian=_gm_dj)
+                    density_jacobian=_gm_dj,
+                    # #1226: same wall masks as the tendency call above.
+                    u_mask=u_mask, v_mask=v_mask, dt=dt)
         du_p = (state.u_incr_prev.data if state.u_incr_prev is not None
                 else jnp.zeros_like(du_n))
         dv_p = (state.v_incr_prev.data if state.v_incr_prev is not None

@@ -1227,6 +1227,10 @@ class SpectralPrimitiveEquationModel:
         self._sponge_dt = None
         # Leapfrog state management
         self._state_prev = None  # Previous time level for leapfrog
+        # Previous-step prognostic physics tendency, applied LAGGED (n-1) in the
+        # leapfrog body for stability (#405 stiff-physics fix); None until the
+        # first stateful step.
+        self._prev_phys_tend = None
         # Precompute implicit hyperdiffusion filter (unconditionally stable)
         self._hyperdiff_filter = None
         self._hyperdiff_filter_div = None  # iter-69: precomputed hf**2
@@ -1720,10 +1724,24 @@ class SpectralPrimitiveEquationModel:
                      and phys_state is not None)
         _phys_tend = None
         if _stateful:
-            _phys_tend, _phys_state_out = physics_fn(
+            # Physics is evaluated at state_n every step so the prognostic carry
+            # (TKE / convection state / PRNG) advances once per step, consistent
+            # with the current state.  BUT in the leapfrog BODY the tendency
+            # APPLIED to the centered dynamics is the PREVIOUS step's — evaluated
+            # at n-1 — the same lagged-physics stabiliser as the diagnostic path
+            # (_make_leapfrog_tendency_fn): a stiff prognostic tendency at the
+            # centered n level excites leapfrog's computational mode (clubb_lite /
+            # bechtold NaN'd otherwise).  The Euler STARTUP applies the current
+            # (n) tendency — a forward step with no computational mode.
+            _phys_tend_now, _phys_state_out = physics_fn(
                 state, self.grid, self.sigma_coord,
                 phys_state=phys_state, forcing=forcing_data)
             self._phys_state = _phys_state_out
+            if self._state_prev is None or self._prev_phys_tend is None:
+                _phys_tend = _phys_tend_now          # Euler startup: forward (n)
+            else:
+                _phys_tend = self._prev_phys_tend    # leapfrog body: lagged (n-1)
+            self._prev_phys_tend = _phys_tend_now    # store for next step's lag
 
         if self._state_prev is None:
             # --- First step: forward Euler + SI ---
@@ -1854,6 +1872,42 @@ class SpectralPrimitiveEquationModel:
             )
         return tendency_fn
 
+    def _make_leapfrog_tendency_fn(self, physics_fn, state_lag,
+                                   forcing_data=_NO_FORCING):
+        """Leapfrog tendency with the PHYSICS evaluated ONCE at ``state_lag``
+        (the n-1 level) while the DYNAMICS use the passed tendency-eval state (n).
+
+        Leapfrog centers the tendency at X^n and advances X^{n-1} -> X^{n+1}
+        over 2*dt.  Stiff / dissipative physics (convective adjustment,
+        boundary-layer + vertical diffusion) at the CENTERED n level excites
+        leapfrog's computational mode: for dX/dt = -X/tau the centered scheme
+        X^{n+1} = X^{n-1} - 2*dt*X^n/tau has a computational root
+        |lambda| = 1 + O(dt/tau) > 1 (unconditionally unstable).  Evaluating the
+        physics at X^{n-1} instead gives X^{n+1} = X^{n-1}(1 - 2*dt/tau) +
+        dynamics, stable for 2*dt/tau < 2 — the standard leapfrog "lagged
+        (uncentered) physics" treatment.  The one-step (dt) physics lag is O(dt)
+        and negligible for the slow parameterisations.  Empirically: gray
+        radiation was stable centered (smooth heating), but sbm convection AND
+        louis turbulence each NaN'd the spectral T_hat within a day — both are
+        the stiff vertical processes this lag stabilises.  The Euler STARTUP
+        step keeps physics at n (a forward step, which has no computational
+        mode), so only the leapfrog body lags.
+        """
+        phys = None
+        if physics_fn is not None:
+            if forcing_data is _NO_FORCING:
+                _r = physics_fn(state_lag, self.grid, self.sigma_coord)
+            else:
+                _r = physics_fn(
+                    state_lag, self.grid, self.sigma_coord, forcing_data)
+            phys = _r[0] if type(_r) is tuple else _r
+
+        def tendency_fn(s):
+            return spectral_pe_tendencies(
+                s, self.grid, self.sigma_coord, self.config, phys,
+            )
+        return tendency_fn
+
     @partial(jax.jit, static_argnums=(0, 2, 3))
     def _euler_si_jit(self, state, dt, physics_fn=None):
         """JIT-compiled Euler + SI step (leapfrog startup), optionally with physics.
@@ -1885,8 +1939,11 @@ class SpectralPrimitiveEquationModel:
 
         ``dt`` static — closure-captures ``self._si_data_lf`` (see
         ``_euler_si_jit``).
+
+        Physics is LAGGED to ``state_nm1`` (n-1) for leapfrog stability — see
+        :meth:`_make_leapfrog_tendency_fn`.
         """
-        tendency_fn = self._make_tendency_fn(physics_fn)
+        tendency_fn = self._make_leapfrog_tendency_fn(physics_fn, state_nm1)
         return leapfrog_si_step(
             state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
         )
@@ -1899,8 +1956,12 @@ class SpectralPrimitiveEquationModel:
 
         ``self``, ``dt``, ``physics_fn`` static (dt keys the cache — see
         ``_euler_si_jit``); ``forcing_data`` traced.
+
+        Physics is LAGGED to ``state_nm1`` (n-1) for leapfrog stability — see
+        :meth:`_make_leapfrog_tendency_fn`.
         """
-        tendency_fn = self._make_tendency_fn(physics_fn, forcing_data)
+        tendency_fn = self._make_leapfrog_tendency_fn(
+            physics_fn, state_nm1, forcing_data)
         return leapfrog_si_step(
             state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
         )

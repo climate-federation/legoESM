@@ -87,9 +87,9 @@ rejects a wrong file/flag combination loudly.
 ### Production physics defaults
 
 The deck pins a faithful, validated stack (override any with the matching
-flag): **RRTMG** radiation, **Morrison** double-moment microphysics
-(M2005/MG — SAM-oracle validated), **Sundqvist** cloud fraction, **SBM**
-convection, **Louis** PBL, with **aerosol→CCN** coupling (Andreae 2009) and
+flag): **RRTMG correlated-k** radiation, **Morrison double-moment** microphysics
+(M2005/MG — SAM-oracle validated), **Sundqvist** cloud fraction, **Bechthold (mass flux)**
+convection, **Louis (first order)** PBL, **McFarlane (orographic)** GWD, **Hines (non-orographic)** GWD, with **aerosol→CCN** coupling (Andreae 2009) and
 **zenith-dependent ocean albedo** (Briegleb 1992) on the pipeline grids.
 `--dt-auto` picks each grid's stability-ladder timestep (C36→150 s,
 latlon72→75 s, T47→150 s, voronoi→300 s) so long runs cannot blow up.

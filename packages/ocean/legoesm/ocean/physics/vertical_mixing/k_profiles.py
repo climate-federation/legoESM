@@ -708,13 +708,24 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         # Surface buoyancy flux + kinematic T/S fluxes (shared with CATKE).
         B_f, Q_sfc_T, Q_sfc_S = _surface_buoyancy_flux(
             surface_forcing, state, constants_config, eos_fn=eos_fn)
+        # Under-ice attenuation of the KPP velocity scales (KPPConfig.eice;
+        # NEMO nn_eice) — reads the coupler's ice concentration, gated on the
+        # STATIC config value so eice=0 stays bit-identical (ice_frac=None).
+        # Unknown eice raises inside kpp (dispatch hardening on the static val).
+        _kpp_eice = int(getattr(vmix_cfg.kpp, "eice", 0))
+        if _kpp_eice not in (0, 1, 3):
+            raise ValueError(
+                f"Unknown KPPConfig.eice={_kpp_eice!r}; expected 0, 1 or 3.")
+        _kpp_ice_fr = (getattr(surface_forcing, "ice_concentration", None)
+                       if (_kpp_eice != 0 and surface_forcing is not None)
+                       else None)
 
         out = kpp_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             rho, state.eta.data, z_coord, J, vmix_cfg.kpp,
             tau_x=tau_x, tau_y=tau_y, B_f=B_f,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
-            apply_diffusion=False, eos_fn=eos_fn,
+            apply_diffusion=False, eos_fn=eos_fn, ice_frac=_kpp_ice_fr,
         )
         return out.K_v, out.A_v, None
 

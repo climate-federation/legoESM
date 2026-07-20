@@ -127,6 +127,14 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "tracer_tendencies_mpas": ("legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas", "tracer_tendencies_mpas"),
     "TracerTransportLatLonModel": ("legoesm.atmosphere.dynamics.gcm.tracer_transport_latlon", "TracerTransportLatLonModel"),
     "tracer_tendencies_latlon": ("legoesm.atmosphere.dynamics.gcm.tracer_transport_latlon", "tracer_tendencies_latlon"),
+    "SpectralTracerTransportModel": (
+        "legoesm.atmosphere.dynamics.gcm.tracer_transport_spectral",
+        "SpectralTracerTransportModel",
+    ),
+    "tracer_tendencies_spectral": (
+        "legoesm.atmosphere.dynamics.gcm.tracer_transport_spectral",
+        "tracer_tendencies_spectral",
+    ),
     # --- Shared utilities (acoustic substeps, sponge, Exner) ---
     "CompressibleEulerConfig": ("legoesm.atmosphere.dynamics.gcm.compressible_euler", "CompressibleEulerConfig"),
     "compute_exner_perturbation": ("legoesm.atmosphere.dynamics.gcm.compressible_euler", "compute_exner_perturbation"),
@@ -219,6 +227,7 @@ AVAILABLE_SOLVERS = [
     "tracer_transport",
     "tracer_transport_mpas",
     "tracer_transport_latlon",
+    "tracer_transport_spectral",
 ]
 
 # Deprecated flat names that alias a canonical solver
@@ -386,6 +395,7 @@ _SOLVER_TO_CLASS = {
     "tracer_transport": "TracerTransportModel",
     "tracer_transport_mpas": "TracerTransportMPASModel",
     "tracer_transport_latlon": "TracerTransportLatLonModel",
+    "tracer_transport_spectral": "SpectralTracerTransportModel",
     "mpas_primitive_equations": "MPASPrimitiveEquationModel",
     "mpas_compressible_euler": "MPASCompressibleEulerModel",
     "plane_compressible_euler": "PlaneCompressibleEulerModel",
