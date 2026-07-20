@@ -542,11 +542,35 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-timestamp", action="store_true")
     p.add_argument("--expect-devices", type=int, default=None,
                    help="Anti-fake-scaling gate: fail LOUDLY unless the run "
-                        "actually shards over exactly this many devices "
-                        "(single-process => local_device_count; MPI => "
-                        "world_size). Used by the cluster ladders so a rung "
-                        "narrowed to 1 GPU can never record a fake census.")
+                        "actually shards over exactly this many DISTINCT "
+                        "physical devices (local devices, gathered across MPI "
+                        "ranks and de-duplicated, so neither a rank pinned to "
+                        "a shared GPU nor a rank holding extra GPUs passes). "
+                        "Used by the cluster ladders so a rung narrowed to "
+                        "1 GPU can never record a fake census.")
     return p
+
+
+def check_expected_devices(all_keys, expect: int, detail: str = "") -> str | None:
+    """Anti-fake-scaling verdict: ``None`` to proceed, else the error message.
+
+    ``all_keys`` is one identity key per device SLOT across all ranks (see the
+    call site).  Two failures are distinguished because they need different
+    operator fixes: duplicate keys mean ranks share a physical GPU (fix the
+    binding / CUDA_VISIBLE_DEVICES), a distinct-count mismatch means the rung
+    is not the requested width (fix the ladder or the allocation).
+    """
+    distinct = set(all_keys)
+    if len(distinct) != len(all_keys):
+        return (f"ERROR: {len(all_keys)} device slot(s) map to only "
+                f"{len(distinct)} distinct device(s) — ranks are "
+                f"oversubscribed onto the same GPU ({detail}). "
+                "Refusing to record a fake scaling row.")
+    if len(distinct) != expect:
+        return (f"ERROR: --expect-devices {expect} but the run sees "
+                f"{len(distinct)} distinct device(s) ({detail})"
+                " — refusing to record a fake scaling row.")
+    return None
 
 
 def main() -> int:
@@ -565,18 +589,34 @@ def main() -> int:
 
     # Anti-fake-scaling gate (see --expect-devices): a census/scaling row is
     # meaningless if the process did not actually shard over the intended
-    # device count.  Single-process SPMD shards over local_device_count;
-    # MPI shards over world_size.  Fail LOUDLY here, before any measurement.
+    # device count.  Fail LOUDLY here, before any measurement.
+    #
+    # Rank count is NOT a device count (codex P1): under MPI each rank builds
+    # its mesh from its OWN local devices, so `-np 2` with both ranks
+    # inheriting CUDA_VISIBLE_DEVICES=0,1 spans four device slots, while two
+    # ranks oversubscribed onto one physical GPU span one.  Both would pass a
+    # world_size check while recording a fake row.  So count DISTINCT physical
+    # devices: identify each by (host, CUDA_VISIBLE_DEVICES, device.id) —
+    # under route-A MPI the ranks are independent JAX processes whose local
+    # device ids both start at 0, so the CVD mask is what separates two real
+    # GPUs from the same GPU twice.
     if args.expect_devices is not None:
-        actual = world_size if world_size > 1 else jax.local_device_count()
-        if actual != args.expect_devices:
-            raise SystemExit(
-                f"ERROR: --expect-devices {args.expect_devices} but the run "
-                f"sees {actual} device(s) "
-                f"(world_size={world_size}, "
-                f"local_device_count={jax.local_device_count()}, "
-                f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')})"
-                " — refusing to record a fake scaling row.")
+        import socket
+        cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+        local_keys = [(socket.gethostname(), cvd, d.id) for d in jax.local_devices()]
+        all_keys = local_keys
+        if world_size > 1:
+            # Collective: EVERY rank must enter allgather or the job hangs.
+            from mpi4py import MPI
+            all_keys = [k for per_rank in MPI.COMM_WORLD.allgather(local_keys)
+                        for k in per_rank]
+        err = check_expected_devices(
+            all_keys, args.expect_devices,
+            detail=(f"world_size={world_size}, "
+                    f"local_device_count={jax.local_device_count()}, "
+                    f"CUDA_VISIBLE_DEVICES={cvd}"))
+        if err:
+            raise SystemExit(err)
 
     from legoesm.parallel.scaling_diagnostics import (
         DiagnosticHarness,
