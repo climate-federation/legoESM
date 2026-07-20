@@ -647,7 +647,10 @@ class TestConfig(unittest.TestCase):
         cfg = CLMMLCanopyConfig()
         self.assertEqual(cfg.nlevmlcan, 9)
         self.assertEqual(cfg.runge_kutta_type, 10)
-        self.assertEqual(cfg.num_ml_steps, 1)
+        # None = derive the sub-step from dtime_ml_target_s rather than follow
+        # the host timestep (see tests/land/unit/test_clm_ml_substep.py).
+        self.assertIsNone(cfg.num_ml_steps)
+        self.assertAlmostEqual(cfg.dtime_ml_target_s, 300.0)
         self.assertAlmostEqual(cfg.o2ref, 209.0)
         self.assertEqual(cfg.met_type, 0)
 

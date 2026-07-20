@@ -21,7 +21,10 @@ Variable-unit conventions
 
 from __future__ import annotations
 
+import math
+import numbers
 import sys
+import warnings
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -334,6 +337,94 @@ def _commit_diff_turbulence_scheme(scheme: str) -> None:
     """
     global _DIFF_TURBULENCE_SCHEME
     _DIFF_TURBULENCE_SCHEME = scheme
+
+
+def resolve_num_ml_steps(canopy_config: CLMMLCanopyConfig, dt: float) -> int:
+    """CLM-ML sub-steps to take within one legoESM step of length ``dt``.
+
+    ``num_ml_steps=None`` (the default) derives the count so the canopy runs at
+    its design sub-step ``dtime_ml_target_s`` regardless of the host timestep.
+    That matters because the canopy air-space storage term is stiff on a
+    timescale of minutes: driving it at the host ``dt`` (1800 s is typical)
+    makes the term a numerical artefact that buffers energy through the day and
+    releases it at night.  See ``CLMMLCanopyConfig.num_ml_steps``.
+
+    An explicit count that implies a sub-step COARSER than the design value is
+    REFUSED, unless ``allow_coarse_ml_substep`` opts in (for reproducing a
+    published or legacy configuration verbatim), in which case it warns.
+    """
+    # Shared validator: rejects bools, non-numbers, nan and inf as well as <= 0.
+    # Guarded explicitly rather than trusted because an inf target would make
+    # ceil() return 1 and silently defeat the very check this function exists
+    # to enforce, and a bool dt would be read as a 1-second step.
+    from legoesm.core.setup_selector import require_positive_finite
+    # NB the shared validator accepts None as "not set / use the default"; both
+    # of these are REQUIRED here, so reject None first — otherwise it would fall
+    # through to float() and raise TypeError instead of the documented error.
+    for _name, _value in (("CLM-ML canopy step dt", dt),
+                          ("CLMMLCanopyConfig.dtime_ml_target_s",
+                           canopy_config.dtime_ml_target_s)):
+        if _value is None:
+            raise ValueError(f"{_name} must be a finite number > 0, got None")
+        require_positive_finite(_name, _value)
+    dt = float(dt)
+    target = float(canopy_config.dtime_ml_target_s)
+
+    ratio = dt / target
+    if not math.isfinite(ratio):
+        # e.g. a denormal target (5e-324) overflows the division; ceil() would
+        # raise OverflowError instead of the documented validation error.
+        raise ValueError(
+            f"CLM-ML sub-step count dt/dtime_ml_target_s is not finite "
+            f"(dt={dt!r}, target={target!r})")
+
+    if canopy_config.num_ml_steps is None:
+        # CEILING, not round: rounding to nearest can land on a count whose
+        # sub-step is COARSER than the target (dt=750 -> round(2.5)=2 -> 375 s),
+        # which is exactly the regime this field exists to avoid.
+        return max(1, math.ceil(ratio))
+
+    n_sub = canopy_config.num_ml_steps
+    # Explicit means explicit: silently int()-coercing would accept a 1.9 or a
+    # YAML "6" and run a different sub-step than the config asked for.  Any
+    # integral type is fine (a count assembled from numpy is still a count);
+    # bool is not, since ``num_ml_steps=True`` is a mistake, not a request for
+    # one sub-step.
+    if isinstance(n_sub, bool) or not isinstance(n_sub, numbers.Integral):
+        raise TypeError(
+            "CLMMLCanopyConfig.num_ml_steps must be an integer (or None to "
+            f"derive it from dtime_ml_target_s), got {n_sub!r} of type "
+            f"{type(n_sub).__name__}")
+    n_sub = int(n_sub)
+    if n_sub < 1:
+        raise ValueError(
+            "CLMMLCanopyConfig.num_ml_steps must be >= 1 (or None to derive it "
+            f"from dtime_ml_target_s), got {n_sub!r}")
+
+    effective = dt / n_sub
+    if effective > target:
+        msg = (
+            f"CLM-ML canopy sub-step would be {effective:.12g} s "
+            f"(dt={dt:.12g} s / num_ml_steps={n_sub}), coarser than the "
+            f"{target:.12g} s the scheme is designed for. The canopy air-space "
+            "storage term is stiff on a timescale of minutes, so it buffers "
+            "energy through the day and releases it at night — inflating "
+            "nighttime latent heat and delaying the sensible-heat peak (at "
+            "US-MMS this cost 58% of the latent-heat diurnal skill). Pass "
+            "num_ml_steps=None to derive the sub-step automatically.")
+        if canopy_config.allow_coarse_ml_substep is not True:
+            # `is not True`, not falsiness: opting into a known-degraded
+            # configuration must be an explicit bool, so a stray "false"
+            # string cannot enable it by truthiness.
+            # Refuse rather than warn: a warning is routinely suppressed or
+            # buried in batch output, and this silently degrades production
+            # fluxes.  allow_coarse_ml_substep=True is the deliberate opt-in.
+            raise ValueError(
+                msg + " Set allow_coarse_ml_substep=True to run anyway (e.g. "
+                "to reproduce a legacy configuration verbatim).")
+        warnings.warn(msg + " Running anyway: allow_coarse_ml_substep=True.",
+                      RuntimeWarning, stacklevel=2)
+    return n_sub
 
 
 def _setup_clm_topology(
@@ -1430,8 +1521,13 @@ def compute_clm_ml_canopy_fluxes(
     new_canopy_state : CanopyState
         Updated prognostic state to carry forward to the next step.
     """
-    # ---- Fail-early on the static string-dispatch fields ----
+    # ---- Fail-early on the static config, BEFORE any CLM state is touched ----
+    # Both of these raise on a bad static value.  They run at function entry
+    # rather than next to their point of use so an invalid config aborts before
+    # _ensure_clm_initialized / _setup_clm_time have mutated process-global CLM
+    # module state, leaving it consistent for the caller's next attempt.
     canopy_config.validate()
+    n_ml_steps = resolve_num_ml_steps(canopy_config, dt)
 
     # ---- Phase-1 CLM initialization (once) ----
     _ensure_clm_initialized()
@@ -1674,8 +1770,9 @@ def compute_clm_ml_canopy_fluxes(
     import multilayer_canopy.MLclm_varctl as _ml_ctl
     _ml_ctl.runge_kutta_type = canopy_config.runge_kutta_type
     _ml_ctl.met_type = canopy_config.met_type
-    # dtime_ml: sub-step length. Must divide dt evenly.
-    _ml_ctl.dtime_ml = dt / max(1, canopy_config.num_ml_steps)
+    # dtime_ml: sub-step length. Must divide dt evenly.  Count resolved (and
+    # validated) at function entry above.
+    _ml_ctl.dtime_ml = dt / n_ml_steps
     _ml_ctl.mlcan_to_clm = 0  # we read output directly from mlcanopy_type
     # DIFFERENTIABLE_MODE is a static intent flag (currently vestigial upstream —
     # every physics module switches on the ``grid`` argument, not this global —
