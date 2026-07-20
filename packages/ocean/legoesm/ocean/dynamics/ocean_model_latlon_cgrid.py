@@ -6449,7 +6449,7 @@ class LatLonCGridOceanModel:
                 u_mask=u_mask, v_mask=v_mask,
                 rho_0=self.config.constants.rho_0, g=self.config.constants.g,
                 kappa_redi_override=_kri_static,
-                density_jacobian=_gm_dj)
+                density_jacobian=_gm_dj, dt=dt)
             dT_n = dT_n + dt * dT_gm    # noqa: N806
             dS_n = dS_n + dt * dS_gm    # noqa: N806
             if gm_cfg.implicit_K33:
