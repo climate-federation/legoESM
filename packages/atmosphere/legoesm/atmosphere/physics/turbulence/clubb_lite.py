@@ -35,8 +35,7 @@ version instead integrates a TKE-scaled magnitude: shear production
 dissipation (linearised rate ``C_eps*sqrt(wp2)/l`` times ``wp2``).  ``wp2`` is
 therefore a TKE-like scale used only to set the
 mixing time scale and the down-gradient diffusivities, NOT a strict second
-moment.  (The ``CLUBBLiteConfig`` C1/C4/C5 fields are legacy and unused by
-this reduced budget.)
+moment.
 
 where tau = l / sqrt(wp2) is the turbulence time scale.
 
@@ -70,8 +69,8 @@ WHAT IT OMITS / SIMPLIFIES (the fidelity gap vs full CLUBB):
   2. wp3 (third moment) is NOT carried -> no skewness-driven nonlocal /
      counter-gradient transport that distinguishes CLUBB from a 2nd-order
      down-gradient scheme.
-  3. Pressure terms / return-to-isotropy use simple linear damping
-     (C1,C4,C5/tau) instead of CLUBB's full pressure-correlation closure
+  3. Pressure terms / return-to-isotropy use the single ``C_eps``
+     dissipation instead of CLUBB's full pressure-correlation closure
      with the C-coefficient hierarchy (C2, C6, C7, C8, C11, C14, ...).
   4. No subgrid cloud-water (rcm) feedback into buoyancy production, no
      SILHS sub-columns, no cloud-top radiative/evaporative entrainment
@@ -382,7 +381,7 @@ def clubb_lite_turbulence(
     # diagnosis inverts EXACTLY this form (c_eps_from_budget).
     net_prod = clubb_wp2_production(Km_full, Kh_full, S2, N2)
 
-    # Dissipation coefficient: C1/tau (semi-implicit). ``C_eps`` may be a scalar
+    # Dissipation coefficient: ``C_eps``-based (semi-implicit). ``C_eps`` may be a scalar
     # (production, byte-identical) OR a per-column LES-informed correction (it sets
     # the GCM's equilibrium wp2 so it tracks the LES w'² — closing the C_K
     # wp2-identification gap); broadcast it over the vertical like C_K / Pr_t.
