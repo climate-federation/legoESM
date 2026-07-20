@@ -224,6 +224,24 @@ class BrineConfig(NamedTuple):
     S_ocean_ref: float = constants.S_ocean_ref       # Reference ocean salinity [PSU]
     S_ice_min: float = 0.0
     S_ice_max: float = 12.0            # Cap for numerical stability
+    # --- New-ice salt entrapment + gravity drainage (NEMO SI3 nn_icesal=2) ---
+    # Legacy (both None): new ice forms at the CONSTANT S_ice_new (4 PSU), so
+    # the ocean receives the ENTIRE (S_ocean - 4) brine at formation — a
+    # front-load ~3.5x NEMO's on a 32-PSU Arctic shelf that erodes the
+    # halocline in month 1.  NEMO forms new ice at rn_sinew * SSS (0.75,
+    # entrapment) and drains the excess toward the mature bulk salinity over a
+    # gravity-drainage timescale — same TOTAL brine, released gradually.
+    # f_entrap: fraction of the LOCAL ocean surface salinity captured by newly
+    #   frozen lead/basal ice (NEMO rn_sinew = 0.75).  None = legacy constant.
+    #   Requires the coupler to thread ocean_sss (falls back to S_ocean_ref
+    #   where no local field is available) and S_ice_max raised to hold the
+    #   salty new ice (~0.9 * f_entrap * SSS_max; validated at the ice step).
+    f_entrap: float | None = None
+    # tau_drain_days: e-folding time [days] of the downward-only relaxation of
+    #   bulk ice salinity toward S_ice_new (the mature value; SI3 gravity
+    #   drainage O(10-20 d)).  The drained salt reaches the ocean through the
+    #   conservation-by-construction salt-flux residual.  None = no drainage.
+    tau_drain_days: float | None = None
 
 
 class RidgingConfig(NamedTuple):

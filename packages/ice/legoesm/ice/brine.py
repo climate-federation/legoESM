@@ -73,15 +73,17 @@ def update_salinity_and_salt_flux(
     *,
     rho_ice: float,
     dt: float,
-    S_lead_ice: float,
-    S_white_ice: float,
+    S_lead_ice: float | jnp.ndarray,
+    S_white_ice: float | jnp.ndarray,
     delta_V_basal_freeze: jnp.ndarray | float = 0.0,
-    S_basal_ice: float | None = None,
+    S_basal_ice: float | jnp.ndarray | None = None,
     delta_V_sublim: jnp.ndarray | float = 0.0,
     delta_V_fresh_refreeze: jnp.ndarray | float = 0.0,
     S_fresh_ice: float = 0.0,
     S_ice_min: float = 0.0,
     S_ice_max: float = _BRINE_DEFAULTS.S_ice_max,
+    S_drain_target: float | None = None,
+    tau_drain_s: float | None = None,
 ) -> SaltBudgetResult:
     """Update bulk ice salinity and emit ocean salt-flux diagnostic.
 
@@ -120,9 +122,14 @@ def update_salinity_and_salt_flux(
         Ice density [kg/m³].
     dt : float
         Time step [s].
-    S_lead_ice : float
-        Salinity of newly frozen lead ice [PSU] (typically 4).
-    S_white_ice : float
+    S_lead_ice : float or array
+        Salinity of newly frozen lead ice [PSU].  Scalar 4 is the legacy
+        CICE-style bulk constant; the NEMO SI3 ``rn_sinew`` entrapment mode
+        passes the per-cell array ``f_entrap · SSS_local`` (broadcast to the
+        ``V`` shape by the caller) so new shelf ice captures most of the local
+        salt and the brine is released GRADUALLY by drainage, not
+        front-loaded at formation.
+    S_white_ice : float or array
         Salinity of white ice from flooding [PSU] (typically
         ``0.5 · S_ocean_ref ≈ 17``).
     delta_V_basal_freeze : array or float
@@ -155,6 +162,24 @@ def update_salinity_and_salt_flux(
         Salinity of the fresh refrozen-meltwater ice [PSU], default 0.
     S_ice_min, S_ice_max : float
         Numerical clamp [PSU].
+    S_drain_target, tau_drain_s : float or None
+        Gravity-drainage relaxation (NEMO SI3 ``nn_icesal=2`` style): after
+        the freeze/melt salt accounting, the bulk salinity relaxes toward
+        ``S_drain_target`` (the mature multi-year value, typically the legacy
+        4 PSU) with e-folding time ``tau_drain_s``:
+
+            S -> target + (S - target) · exp(-dt/tau)
+
+        applied ONLY where it would LOWER the salinity (drainage removes
+        brine; it never salts the ice back up toward a higher target).  The
+        drained salt reaches the ocean automatically through the
+        ``(salt_old - salt_stored)/dt`` residual — no separate flux term, so
+        conservation stays exact BY CONSTRUCTION.  ``None`` (default) disables
+        drainage — bit-identical to the legacy budget.  Pair with the
+        entrapment ``S_lead_ice`` array: entrapment holds the salt at
+        formation, drainage releases it over ``tau`` instead of the legacy
+        instant (S_ocean − 4) front-load that erodes the halocline in
+        month 1.
 
     Returns
     -------
@@ -207,6 +232,15 @@ def update_salinity_and_salt_flux(
     # atmosphere).  Without this cap, a step that fully sublimates old ice
     # while freezing new lead ice would bury the old salt in the new ice
     # (spuriously raising its salinity) and under-report the ocean salt flux.
+    # Operator-split note (drainage interplay): this headroom is evaluated
+    # against the PRE-drain ``S_ice_old``, while the gravity-drainage relax
+    # below can lower the final salinity and thus leave more end-of-step
+    # capacity than assumed here.  In the corner case (salty sublimating
+    # column + drainage active) some sublimation salt therefore reaches the
+    # ocean THIS step that a drain-first ordering would have retained one more
+    # step.  This is a deliberate first-order split: the ledger stays exact
+    # (post-drain/post-clamp storage + residual == salt_old), only the release
+    # timing shifts by <= one step in that corner (codex MED, documented).
     old_salt_headroom = jnp.maximum(
         (S_ice_max - S_ice_old) * V_remain, 0.0
     )
@@ -238,6 +272,19 @@ def update_salinity_and_salt_flux(
         salt_new / (V_safe * rho_ice * PSU_TO_KG_PER_KG),
         0.0,
     )
+    # --- Gravity drainage (NEMO SI3 nn_icesal=2 style; opt-in) ---
+    # Relax the bulk salinity toward the mature target, DOWNWARD ONLY
+    # (drainage removes brine; it must never re-salt fresher ice up toward
+    # the target).  Applied BEFORE the clamp so the drained state is what the
+    # ice stores; the drained salt then reaches the ocean through the
+    # (salt_old - salt_stored)/dt residual below — exact conservation with no
+    # separate flux term.  Static Python gate: None -> bit-identical legacy.
+    if S_drain_target is not None and tau_drain_s is not None:
+        _decay = jnp.exp(-dt / tau_drain_s)
+        S_drained = S_drain_target + (S_ice_unclamped - S_drain_target) * _decay
+        S_ice_unclamped = jnp.where(
+            S_ice_unclamped > S_drain_target, S_drained, S_ice_unclamped
+        )
     S_ice_new = jnp.clip(S_ice_unclamped, S_ice_min, S_ice_max)
 
     # Actual stored salt mass in the post-step ice (consistent with the

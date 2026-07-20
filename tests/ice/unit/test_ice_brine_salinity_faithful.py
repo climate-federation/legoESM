@@ -76,6 +76,8 @@ def _call(**kw):
         S_fresh_ice=kw.get("s_fresh", 0.0),
         S_ice_min=kw.get("s_min", 0.0),
         S_ice_max=kw.get("s_max", 12.0),
+        S_drain_target=kw.get("s_drain_target"),
+        tau_drain_s=kw.get("tau_drain_s"),
     )
 
 
@@ -299,3 +301,162 @@ def test_aggregate_salt_flux_sums_categories():
     per_cat = jnp.asarray([[-1.0, 2.0, -0.5]])
     total = aggregate_salt_flux(per_cat, axis=-1)
     np.testing.assert_allclose(np.asarray(total), np.asarray([0.5]), rtol=1e-13)
+
+
+# ---------------------------------------------------------------------------
+# 7. NEMO SI3 nn_icesal=2 mode: new-ice salt ENTRAPMENT (rn_sinew · SSS as an
+#    ARRAY S_lead) + GRAVITY DRAINAGE (downward relax toward the mature bulk
+#    value, salt-conserving through the (salt_old − salt_stored)/dt residual).
+# ---------------------------------------------------------------------------
+def test_drainage_relaxes_toward_target_exactly_and_conserves():
+    """Pure drainage (no freeze/melt): S follows the exact e-fold toward the
+    target, and the drained salt reaches the ocean as a POSITIVE flux equal to
+    the stored-salt drop (conservation by construction)."""
+    s_old, v, tau = 24.0, 0.5, 10 * 86400.0
+    out = _call(s_old=[s_old], v_old=[v], v_new=[v],
+                s_max=30.0, s_drain_target=4.0, tau_drain_s=tau)
+    expect_S = 4.0 + (s_old - 4.0) * np.exp(-_DT / tau)
+    np.testing.assert_allclose(float(out.S_ice_new[0]), expect_S, rtol=1e-13)
+    # drained salt -> ocean: flux*dt == (S_old - S_new)·V·conv > 0
+    np.testing.assert_allclose(
+        _flux0(out) * _DT, (s_old - expect_S) * v * _CONV, rtol=1e-12)
+    assert _flux0(out) > 0.0
+
+
+def test_drainage_is_downward_only():
+    """Ice FRESHER than the target must NOT be salted back up (drainage
+    removes brine, it never adds salt)."""
+    out = _call(s_old=[2.0], v_old=[0.5], v_new=[0.5],
+                s_max=30.0, s_drain_target=4.0, tau_drain_s=86400.0)
+    np.testing.assert_allclose(float(out.S_ice_new[0]), 2.0, rtol=1e-13)
+    np.testing.assert_allclose(_flux0(out), 0.0, atol=1e-18)
+
+
+def test_drainage_none_is_bit_identical_legacy():
+    """S_drain_target/tau None (the defaults) must reproduce the legacy
+    budget EXACTLY — the opt-in gate."""
+    kw = dict(s_old=[9.0], v_old=[0.4], v_new=[0.55], dv_lead=[0.1],
+              dv_basal=[0.05], s_lead=4.0)
+    legacy = _call(**kw)
+    gated = _call(**kw, s_drain_target=None, tau_drain_s=None)
+    np.testing.assert_array_equal(np.asarray(legacy.S_ice_new),
+                                  np.asarray(gated.S_ice_new))
+    np.testing.assert_array_equal(np.asarray(legacy.salt_flux_to_ocean),
+                                  np.asarray(gated.salt_flux_to_ocean))
+
+
+def test_entrapment_array_s_lead_reduces_formation_frontload():
+    """Array S_lead (0.75·SSS ≈ 24 on a 32-PSU shelf) vs legacy const 4:
+    the new ice CAPTURES most of the local salt, so the ocean's NEGATIVE
+    salt-uptake at formation is ~6x larger in magnitude — i.e. the instant
+    (SSS − S_new) brine front-load shrinks from 28 to 8 PSU-equivalent.
+    Also proves the array path broadcasts and conserves exactly."""
+    dv = 0.1
+    legacy = _call(s_old=[0.0], v_old=[0.0], v_new=[dv], dv_lead=[dv],
+                   s_lead=4.0, s_max=30.0)
+    entrap = _call(s_old=[0.0], v_old=[0.0], v_new=[dv], dv_lead=[dv],
+                   s_lead=jnp.asarray([0.75 * 32.0]), s_max=30.0)
+    np.testing.assert_allclose(_flux0(legacy) * _DT, -4.0 * dv * _CONV,
+                               rtol=1e-13)
+    np.testing.assert_allclose(_flux0(entrap) * _DT, -24.0 * dv * _CONV,
+                               rtol=1e-13)
+    assert _flux0(entrap) < _flux0(legacy) < 0.0
+    np.testing.assert_allclose(float(entrap.S_ice_new[0]), 24.0, rtol=1e-13)
+
+
+def test_entrap_then_drain_releases_gradually_and_closes():
+    """Two-step story: (1) freeze at the entrapped 24 PSU (ocean keeps only
+    the 8-PSU-equivalent residual), (2) drainage step returns salt to the
+    ocean; TOTAL ocean salt over both steps equals the legacy single-step
+    front-load once fully drained — same total brine, different timing."""
+    dv, tau = 0.1, 5 * 86400.0
+    step1 = _call(s_old=[0.0], v_old=[0.0], v_new=[dv], dv_lead=[dv],
+                  s_lead=jnp.asarray([24.0]), s_max=30.0,
+                  s_drain_target=4.0, tau_drain_s=tau)
+    S1 = float(step1.S_ice_new[0])
+    assert 4.0 < S1 < 24.0          # already partially drained within step 1
+    step2 = _call(s_old=[S1], v_old=[dv], v_new=[dv],
+                  s_max=30.0, s_drain_target=4.0, tau_drain_s=tau)
+    assert _flux0(step2) > 0.0       # gradual release continues
+    # Conservation ledger: ocean uptake at formation + stored + released
+    # equals the total salt the freezing seawater carried MINUS what the
+    # ocean kept — i.e. every term is accounted, nothing minted.
+    ocean_step1 = _flux0(step1) * _DT           # < 0 (uptake into ice)
+    ocean_step2 = _flux0(step2) * _DT           # > 0 (drained back)
+    stored_end = float(step2.S_ice_new[0]) * dv * _CONV
+    np.testing.assert_allclose(-ocean_step1, stored_end + ocean_step2,
+                               rtol=1e-12)
+
+
+def test_brine_config_new_fields_default_off():
+    cfg = BrineConfig()
+    assert cfg.f_entrap is None
+    assert cfg.tau_drain_days is None
+
+
+# ---------------------------------------------------------------------------
+# 8. step_sea_ice static-config fail-early for the entrapment mode.  These
+#    raises fire in the pure-config validation block BEFORE any state use, so
+#    minimal placeholder args suffice (they must never be touched).
+# ---------------------------------------------------------------------------
+def _step_with_brine(brine):
+    from legoesm.ice.config import SeaIceConfig
+    from legoesm.ice.sea_ice import step_sea_ice
+    cfg = SeaIceConfig(brine=brine)
+    return step_sea_ice(None, None, None, None, None, cfg, 0.0, 3600.0)
+
+
+def test_step_rejects_entrapment_without_brine_channel():
+    with pytest.raises(ValueError, match="brine.enabled"):
+        _step_with_brine(BrineConfig(enabled=False, f_entrap=0.75,
+                                     tau_drain_days=15.0, S_ice_max=30.0))
+
+
+def test_step_rejects_entrapment_without_drainage():
+    with pytest.raises(ValueError, match="tau_drain_days"):
+        _step_with_brine(BrineConfig(enabled=True, f_entrap=0.75,
+                                     S_ice_max=30.0))
+
+
+def test_step_rejects_entrapment_with_legacy_cap():
+    """S_ice_max=12 would clamp the entrapped ~24-PSU new ice instantly,
+    silently reproducing the front-load the mode removes -> hard reject."""
+    with pytest.raises(ValueError, match="S_ice_max"):
+        _step_with_brine(BrineConfig(enabled=True, f_entrap=0.75,
+                                     tau_drain_days=15.0))
+
+
+def test_step_rejects_out_of_range_entrapment_and_tau():
+    with pytest.raises(ValueError, match="f_entrap"):
+        _step_with_brine(BrineConfig(enabled=True, f_entrap=1.5,
+                                     tau_drain_days=15.0, S_ice_max=60.0))
+    with pytest.raises(ValueError, match="tau_drain_days"):
+        _step_with_brine(BrineConfig(enabled=True, tau_drain_days=-1.0))
+
+
+def test_step_cap_scales_with_entrapment_fraction():
+    """The cap rule is f_entrap*40 (most saline plausible surface water), not
+    a flat 25/30: f=1.0 on a 30-PSU cap would clip ordinary 32-PSU water at
+    formation and silently re-front-load the brine (codex MED)."""
+    with pytest.raises(ValueError, match="S_ice_max"):
+        _step_with_brine(BrineConfig(enabled=True, f_entrap=1.0,
+                                     tau_drain_days=15.0, S_ice_max=30.0))
+    # f=0.75 needs exactly 30 -> the driver default passes.
+    with pytest.raises(ValueError, match="brine.enabled|dynamics|state"):
+        # passes the salinity validation (cap OK) and fails only later on the
+        # placeholder state — proving the cap rule accepted f*40 == S_ice_max.
+        try:
+            _step_with_brine(BrineConfig(enabled=True, f_entrap=0.75,
+                                         tau_drain_days=15.0, S_ice_max=30.0))
+        except (AttributeError, TypeError) as e:  # placeholder state reached
+            raise ValueError(f"state: {e}")       # normalize for the assert
+
+
+def test_step_rejects_nonfinite_tau():
+    """inf never drains (permanently buried salt); nan poisons the state."""
+    with pytest.raises(ValueError, match="FINITE"):
+        _step_with_brine(BrineConfig(enabled=True, f_entrap=0.75,
+                                     tau_drain_days=float("inf"),
+                                     S_ice_max=30.0))
+    with pytest.raises(ValueError, match="FINITE"):
+        _step_with_brine(BrineConfig(enabled=True, tau_drain_days=float("nan")))

@@ -229,6 +229,55 @@ class TestItdFlagsRequirePrognosticIce:
         _require_prognostic_ice_for_itd_flags(5, True, True)  # no raise
 
 
+class TestSalinityFlagsRequirePrognosticIce:
+    """--ice-sinew/--ice-drain-days (NEMO SI3 nn_icesal=2 entrapment +
+    gravity drainage) configure the prognostic BrineConfig only — without
+    --prognostic-sea-ice they would be accepted no-ops (same
+    accept-then-ignore shape as the ITD flags)."""
+
+    def test_sinew_without_prognostic_ice_refused(self):
+        from scripts.run.run_omip_core2 import (
+            _require_prognostic_ice_for_salinity_flags,
+        )
+        with pytest.raises(SystemExit, match="--prognostic-sea-ice"):
+            _require_prognostic_ice_for_salinity_flags(0.75, None, False)
+
+    def test_drain_without_prognostic_ice_refused(self):
+        from scripts.run.run_omip_core2 import (
+            _require_prognostic_ice_for_salinity_flags,
+        )
+        with pytest.raises(SystemExit, match="--prognostic-sea-ice"):
+            _require_prognostic_ice_for_salinity_flags(None, 15.0, False)
+
+    def test_defaults_and_prognostic_pass(self):
+        from scripts.run.run_omip_core2 import (
+            _require_prognostic_ice_for_salinity_flags,
+        )
+        _require_prognostic_ice_for_salinity_flags(None, None, False)  # no raise
+        _require_prognostic_ice_for_salinity_flags(0.75, 15.0, True)   # no raise
+
+
+class TestEntrapmentRequiresLocalFwSalinity:
+    """--ice-sinew computes the ICE side at local SSS; the ocean virtual-salt
+    closure must share that reference (--freshwater-salinity local) or pure
+    freezing nets (S_ref - S_ice) instead of (SSS_local - S_ice), minting
+    ~2x the salt tendency on a fresh shelf (codex HIGH)."""
+
+    def test_sinew_with_sref_fw_refused(self):
+        from scripts.run.run_omip_core2 import (
+            _require_local_fw_salinity_for_entrapment,
+        )
+        with pytest.raises(SystemExit, match="freshwater-salinity local"):
+            _require_local_fw_salinity_for_entrapment(0.75, "s_ref")
+
+    def test_sinew_with_local_fw_passes(self):
+        from scripts.run.run_omip_core2 import (
+            _require_local_fw_salinity_for_entrapment,
+        )
+        _require_local_fw_salinity_for_entrapment(0.75, "local")  # no raise
+        _require_local_fw_salinity_for_entrapment(None, "s_ref")  # no raise
+
+
 class TestIceGlobalStatsMulticat:
     """_ice_global_stats crashed on a real multi-category state: its old
     ``conc.ndim > h.ndim`` aggregation test was never true (both fields carry

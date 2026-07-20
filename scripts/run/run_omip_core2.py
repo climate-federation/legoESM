@@ -2239,6 +2239,42 @@ def _require_prognostic_ice_for_itd_flags(ice_categories, ice_ridging,
             "paths have no thickness distribution).")
 
 
+def _require_prognostic_ice_for_salinity_flags(ice_sinew, ice_drain_days,
+                                               prognostic_sea_ice) -> None:
+    """Refuse ``--ice-sinew``/``--ice-drain-days`` without
+    ``--prognostic-sea-ice``: they configure the prognostic BrineConfig
+    (new-ice salt entrapment + gravity drainage), so without it the flags
+    would be accepted and silently ignored (the surrogate ice paths have no
+    salt budget) — the accept-then-ignore shape the reachability audit
+    forbids.  The --ice-sinew requires-drainage pairing and value ranges are
+    validated downstream in ``step_sea_ice`` (static-config fail-early)."""
+    if ((ice_sinew is not None or ice_drain_days is not None)
+            and not prognostic_sea_ice):
+        raise SystemExit(
+            "--ice-sinew/--ice-drain-days configure the prognostic sea-ice "
+            "brine budget: add --prognostic-sea-ice (the surrogate ice paths "
+            "have no salt budget, so the flags would be silently ignored).")
+
+
+def _require_local_fw_salinity_for_entrapment(ice_sinew,
+                                              freshwater_salinity) -> None:
+    """``--ice-sinew`` computes the ICE side of the freeze exchange at the
+    LOCAL surface salinity (f·SSS_local); the OCEAN side (the freshwater
+    extraction's virtual-salt closure) must use the SAME reference or the net
+    salinification is (S_ref − S_ice_stored) instead of the physical
+    (SSS_local − S_ice_stored) — on a 27-PSU shelf with the fixed S_ref≈35
+    that MINTS ~2x the ocean salt tendency (codex HIGH).  Require the F1
+    ``--freshwater-salinity local`` pairing instead of silently mispairing."""
+    if ice_sinew is not None and freshwater_salinity != "local":
+        raise SystemExit(
+            "--ice-sinew (local-SSS ice entrapment) requires "
+            "--freshwater-salinity local: the ocean virtual-salt closure must "
+            "use the SAME local surface salinity as the ice side, or the "
+            "freeze exchange nets (S_ref - S_ice) instead of the physical "
+            "(SSS_local - S_ice), minting excess salt on fresh shelves "
+            "(~2x on a 27-PSU shelf vs S_ref=35).")
+
+
 def _resolve_ice_categories(n_categories, ridging, supports_dynamics,
                             grid_desc):
     """Resolve ``--ice-categories`` / ``--ice-ridging`` into the
@@ -3494,6 +3530,26 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Bulk salinity of newly-frozen lead/basal ice [PSU] for the "
                         "--prognostic-sea-ice brine closure (BrineConfig.S_ice_new; "
                         "default constants.S_ice_bulk_default ~4 PSU).")
+    p.add_argument("--ice-sinew", type=float, default=None,
+                   help="NEMO SI3 new-ice salt ENTRAPMENT fraction (rn_sinew; "
+                        "NEMO ORCA1 uses 0.75): newly frozen lead/basal ice "
+                        "captures f*SSS_local instead of the constant ~4 PSU, "
+                        "so the brine is released GRADUALLY by --ice-drain-days "
+                        "drainage instead of front-loaded at formation (the "
+                        "month-1 Arctic halocline-erosion driver; legacy "
+                        "rejects (SSS-4) instantly ~3.5x NEMO on a fresh "
+                        "shelf). Requires --ice-drain-days AND "
+                        "--freshwater-salinity local (the ocean virtual-salt "
+                        "closure must share the local-SSS reference); raises "
+                        "BrineConfig.S_ice_max to max(30, f*40) to hold the "
+                        "salty new ice. --prognostic-sea-ice only.")
+    p.add_argument("--ice-drain-days", type=float, default=None,
+                   help="Gravity-drainage e-folding time [days] relaxing bulk "
+                        "ice salinity DOWNWARD toward S_ice_new (~4 PSU; NEMO "
+                        "SI3 nn_icesal=2 style, O(15-20 d)). Drained salt "
+                        "reaches the ocean through the conservation-by-"
+                        "construction salt-flux residual. Legal alone (drains "
+                        "legacy-const ice); required by --ice-sinew.")
     p.add_argument("--ice-init", type=str, default=None,
                    help="NEMO SI3 ice initial-state file (Ice_initialization.nc: "
                         "at_i/ht_i[/ht_s/sm_i/tmsu]) — start --prognostic-sea-ice "
@@ -4096,6 +4152,10 @@ def main() -> int:
             "NEMO siconc climatology, not this file).")
     _require_prognostic_ice_for_itd_flags(
         args.ice_categories, args.ice_ridging, args.prognostic_sea_ice)
+    _require_prognostic_ice_for_salinity_flags(
+        args.ice_sinew, args.ice_drain_days, args.prognostic_sea_ice)
+    _require_local_fw_salinity_for_entrapment(
+        args.ice_sinew, args.freshwater_salinity)
 
     # --prescribed-flow gates (PRE-BUILD, on the static args): grid support +
     # the --spinup-drag rejection + the --no-gm-redi requirement.  NB: no
@@ -4970,6 +5030,23 @@ def main() -> int:
         _brine = BrineConfig(enabled=True)
         if args.prognostic_ice_salinity is not None:
             _brine = _brine._replace(S_ice_new=float(args.prognostic_ice_salinity))
+        # NEMO SI3 nn_icesal=2 new-ice salinity: entrapment (rn_sinew) +
+        # gravity drainage.  --ice-sinew alone raises in step_sea_ice
+        # (entrapped salt would be permanently buried without drainage);
+        # --ice-drain-days alone is legal (drain the legacy-const ice).
+        # S_ice_max is raised to hold the entrapped salinity (validated at
+        # the ice step: >= 25 required).
+        if args.ice_sinew is not None:
+            # Cap sized to hold the entrapped salinity at the most saline
+            # plausible surface water (f * 40 PSU; validated in step_sea_ice)
+            # so the clamp never silently re-front-loads brine at saline
+            # cells; floor 30 keeps the f<=0.75 default behaviour.
+            _brine = _brine._replace(
+                f_entrap=float(args.ice_sinew),
+                S_ice_max=max(30.0, float(args.ice_sinew) * 40.0))
+        if args.ice_drain_days is not None:
+            _brine = _brine._replace(
+                tau_drain_days=float(args.ice_drain_days))
         # Multi-category ITD (--ice-categories / --ice-ridging): resolve the
         # request against THIS grid's capabilities (refuse-not-ignore).
         _n_cat, _itd_remap, _ridging_on = _resolve_ice_categories(
@@ -5749,9 +5826,15 @@ def main() -> int:
             _ice_conc_pre = ice_state.concentration.data
             if _ice_conc_pre.ndim > np.asarray(state.land_mask.data).ndim:
                 _ice_conc_pre = jnp.sum(_ice_conc_pre, axis=-1)  # multi-cat
+            # Local ocean surface salinity for the NEMO-SI3 new-ice salt
+            # entrapment (BrineConfig.f_entrap; --ice-sinew): same top-level
+            # slice convention as sst_K above.  Inert (unused) when the
+            # entrapment mode is off — step_sea_ice ignores it then.
+            sss_sfc = jnp.asarray(state.S.data)[..., 0]
             ice_state, ice_resp = step_sea_ice(
                 ice_state, atm_ice, sst_K, ocn_u, ocn_v,
-                ice_config, U_min=0.0, dt=dt, grid=grid)
+                ice_config, U_min=0.0, dt=dt, grid=grid,
+                ocean_sss=sss_sfc)
             if args.ew_cyclic_overlap and app_grid_type == "tripole":
                 # Re-slave the duplicated ORCA halo columns after transport
                 # (codex: the C-grid ice advection wraps with period nx, off

@@ -198,6 +198,7 @@ def step_sea_ice(
     U_min: float,
     dt: float,
     grid=None,
+    ocean_sss: jnp.ndarray | None = None,
 ):
     """Step the sea ice model forward by dt seconds.
 
@@ -221,6 +222,12 @@ def step_sea_ice(
         Time step [s].
     grid : CubedSphereGrid, optional
         Required when ``dynamics != "none"`` or ``transport != "none"``.
+    ocean_sss : jnp.ndarray or None
+        Ocean surface salinity [PSU], per-cell (same horizontal shape as
+        ``ocean_sst``).  Consumed ONLY by the NEMO-SI3-style new-ice salt
+        entrapment (``BrineConfig.f_entrap``) on the extended-physics path;
+        ``None`` falls back to ``BrineConfig.S_ocean_ref`` there, and is
+        ignored entirely under the legacy constant new-ice salinity.
 
     Returns
     -------
@@ -332,6 +339,53 @@ def step_sea_ice(
             f"Unknown config.itd_remap={config.itd_remap!r}; expected "
             "'simple' or 'lipscomb2001'."
         )
+    # New-ice salt entrapment (BrineConfig.f_entrap; NEMO SI3 rn_sinew):
+    # static-config fail-early.  Entrapped new ice holds f_entrap * SSS
+    # (~24 PSU on a 32-PSU shelf) — with the legacy S_ice_max=12 cap the clamp
+    # would instantly reject the excess back to the ocean, silently reproducing
+    # the front-loaded brine the mode exists to remove.  Require headroom, a
+    # sane fraction, and a drainage path (without tau_drain_days the entrapped
+    # salt would be PERMANENTLY buried instead of gradually released).
+    if config.brine.f_entrap is not None:
+        if not config.brine.enabled:
+            raise ValueError(
+                "BrineConfig.f_entrap is set but brine.enabled=False: the "
+                "entrapment lives in the brine salt budget, so it would be "
+                "silently ignored.  Enable the brine channel or drop f_entrap.")
+        import math as _math
+        _fe = float(config.brine.f_entrap)
+        if not (_math.isfinite(_fe) and 0.0 < _fe <= 1.0):
+            raise ValueError(
+                f"BrineConfig.f_entrap={_fe} out of range; expected a finite "
+                "fraction in (0, 1] (NEMO rn_sinew = 0.75).")
+        # Cap must hold the entrapped salinity at the MOST saline plausible
+        # surface water (~40 PSU, hypersaline marginal seas), or the clamp
+        # quietly re-front-loads the brine exactly where SSS is high — the
+        # "25 PSU" floor alone let f_entrap=1.0 ride a 30-PSU cap and clip
+        # every 32-PSU cell at formation (codex MED).
+        _cap_needed = _fe * 40.0
+        if float(config.brine.S_ice_max) < _cap_needed:
+            raise ValueError(
+                f"BrineConfig.f_entrap={_fe} requires S_ice_max >= "
+                f"{_cap_needed:.1f} PSU (= f_entrap * 40, the most saline "
+                f"plausible surface water) to hold the entrapped new-ice "
+                f"salinity without the clamp re-front-loading the brine at "
+                f"saline cells (got S_ice_max={config.brine.S_ice_max}).")
+        if config.brine.tau_drain_days is None:
+            raise ValueError(
+                "BrineConfig.f_entrap requires tau_drain_days: without gravity "
+                "drainage the entrapped salt is permanently buried in the ice "
+                "instead of gradually released to the ocean (the whole point "
+                "of the NEMO nn_icesal=2 mode).  Set tau_drain_days (~15-20).")
+    if config.brine.tau_drain_days is not None:
+        import math as _math
+        _tau = float(config.brine.tau_drain_days)
+        if not (_math.isfinite(_tau) and _tau > 0.0):
+            raise ValueError(
+                f"BrineConfig.tau_drain_days={config.brine.tau_drain_days} "
+                "must be FINITE and positive (e-folding days of the gravity-"
+                "drainage relaxation): inf never drains (permanently buried "
+                "salt) and nan poisons the salinity state.")
 
     # Multi-category tracer conservation: the 'simple' (linear) ITD remap
     # transfers only h / concentration / temperature across category bins, NOT
@@ -389,7 +443,7 @@ def step_sea_ice(
         # multi-category config (skipping ITD remap / ridging) or vice versa.
         _validate_dynamic_state_shape(state.h_ice.data.shape, config, grid)
         return _step_dynamic_v2(state, forcing, ocean_sst, ocean_u, ocean_v,
-                                config, U_min, dt, grid)
+                                config, U_min, dt, grid, ocean_sss=ocean_sss)
     else:
         # Legacy dynamic path (free_drift / EVP / mEVP without new physics):
         # apply the same grid-aware shape validation as the new-physics path
@@ -1680,8 +1734,16 @@ def _thermo_v2(
     *,
     open_water_fraction: jnp.ndarray | None = None,
     enable_lead_freeze: bool = True,
+    ocean_sss: jnp.ndarray | None = None,
 ) -> dict:
     """Extended thermodynamics: snow + brine + SW scheme + ponds aware.
+
+    ``ocean_sss`` (per-cell ocean surface salinity [PSU], or None) feeds the
+    NEMO-SI3-style new-ice salt entrapment (``BrineConfig.f_entrap``): new
+    lead/basal ice forms at ``f_entrap * SSS_local`` instead of the constant
+    ``S_ice_new``.  None -> the entrapment falls back to
+    ``f_entrap * S_ocean_ref`` (still gradual-release, just not local);
+    ignored entirely when ``f_entrap`` is None (legacy constant salinity).
 
     Returns a dictionary of post-step per-category fields plus
     diagnostics needed by the caller to build the coupler response
@@ -2097,6 +2159,34 @@ def _thermo_v2(
     if config.brine.enabled:
         V_old = h * conc
         V_new_cat = h_new * conc_new
+        # --- New-ice salinity: NEMO SI3 entrapment (opt-in) vs legacy const.
+        # f_entrap set -> new lead/basal ice captures f_entrap * SSS (NEMO
+        # rn_sinew = 0.75), releasing the brine GRADUALLY via the gravity-
+        # drainage relax below instead of front-loading (S_ocean - 4) at
+        # formation (the month-1 halocline-erosion driver).  ocean_sss is the
+        # per-cell local field when the coupler threads it; falls back to the
+        # S_ocean_ref constant (still gradual-release, just not local).
+        # Static Python gate on the config -> None keeps the legacy path
+        # bit-identical.
+        if config.brine.f_entrap is not None:
+            _sss_for_entrap = (ocean_sss if ocean_sss is not None
+                               else config.brine.S_ocean_ref)
+            _S_new_ice = config.brine.f_entrap * _sss_for_entrap
+            # White ice (snow flooding) pore water must use the SAME local
+            # salinity reference as the entrapped lead/basal ice — mixing the
+            # local new-ice salinity with a fixed-S_ocean_ref pore salinity
+            # would re-introduce the reference mismatch on the flooding
+            # channel (codex: local-pairing consistency).
+            _S_white = (_sss_for_entrap
+                        * (config.rho_ice - config.snow.rho_snow)
+                        / config.rho_ice)
+        else:
+            _S_new_ice = config.brine.S_ice_new
+            _S_white = (config.brine.S_ocean_ref
+                        * (config.rho_ice - config.snow.rho_snow)
+                        / config.rho_ice)
+        _tau_drain_s = (config.brine.tau_drain_days * 86400.0
+                        if config.brine.tau_drain_days is not None else None)
         brine = update_salinity_and_salt_flux(
             S_ice_old=S_ice,
             V_ice_old=V_old,
@@ -2105,7 +2195,7 @@ def _thermo_v2(
             delta_V_white_ice=delta_V_white_ice * conc_new,
             rho_ice=config.rho_ice,
             dt=dt,
-            S_lead_ice=config.brine.S_ice_new,
+            S_lead_ice=_S_new_ice,
             # White ice forms by seawater flooding the snow pores.  Its salinity
             # is the salt the drawn seawater would leave if fully retained,
             # S_pore = S_ocean * (rho_ice - rho_snow)/rho_ice (the pore-water
@@ -2119,18 +2209,14 @@ def _thermo_v2(
             # salt flux is the drop in stored salt).  This replaces the old
             # hardcoded 0.5*S_ocean that had NO matching ocean water withdrawal
             # (the salt-without-water freshening bug).
-            S_white_ice=(
-                config.brine.S_ocean_ref
-                * (config.rho_ice - config.snow.rho_snow)
-                / config.rho_ice
-            ),
+            S_white_ice=_S_white,
             # Basal congelation freezes seawater onto the ice base — a
             # salty-ice source.  Pass the per-cell basal-freeze volume
             # (per-ice-area growth × ice fraction) at the first-year
             # congelation salinity so the salt budget closes against the
             # basal-growth freshwater extraction (codex finding).
             delta_V_basal_freeze=basal_growth_m * conc,
-            S_basal_ice=config.brine.S_ice_new,
+            S_basal_ice=_S_new_ice,
             # Ice lost to sublimation leaves to the ATMOSPHERE, not the
             # ocean — its salt stays in the column (concentrating it).
             # Pass the per-cell sublimated ice volume so the brine budget
@@ -2146,6 +2232,10 @@ def _thermo_v2(
             S_fresh_ice=config.brine.S_ice_min,
             S_ice_min=config.brine.S_ice_min,
             S_ice_max=config.brine.S_ice_max,
+            S_drain_target=(config.brine.S_ice_new
+                            if config.brine.tau_drain_days is not None
+                            else None),
+            tau_drain_s=_tau_drain_s,
         )
         S_ice_new = brine.S_ice_new
         salt_flux_to_ocean = brine.salt_flux_to_ocean
@@ -2313,6 +2403,7 @@ def _step_dynamic_v2(
     U_min: float,
     dt: float,
     grid=None,
+    ocean_sss: jnp.ndarray | None = None,
 ) -> tuple[DynamicSeaIceState, TileResponse]:
     """Extended dynamic sea-ice step with Tier-1 + Tier-2 physics.
 
@@ -2515,6 +2606,7 @@ def _step_dynamic_v2(
                 forcing, ocean_sst, config, U_min, dt,
                 open_water_fraction=open_water_agg,
                 enable_lead_freeze=(k == 0),
+                ocean_sss=ocean_sss,
             )
             h_list.append(result["h"])
             T_list.append(result["T"])
@@ -2599,6 +2691,7 @@ def _step_dynamic_v2(
         result = _thermo_v2(
             h, T_ice, conc, h_snow, S_ice, pond_area, pond_depth,
             forcing, ocean_sst, config, U_min, dt,
+            ocean_sss=ocean_sss,
         )
         h = result["h"]
         T_ice = result["T"]
