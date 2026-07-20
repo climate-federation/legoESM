@@ -1140,6 +1140,23 @@ def _warn_if_not_fv3_native_grid(model_name: str, grid) -> None:
         )
 
 
+def _parse_cross_face_halo_env():
+    """LEGOESM_SW_FB_CROSS_FACE_HALO -> d_sw5 divg ghost mode.
+
+    0 = zero-ring (default), 1 = attenuated nearest-row ghost,
+    2 = FAITHFUL certified k2e ring map (ED duogrid only).  Sampled at
+    TRACE time (the FB step is jitted with static self): set it before
+    model construction; changing it afterwards does not retrace.
+    """
+    raw = os.environ.get("LEGOESM_SW_FB_CROSS_FACE_HALO", "0")
+    table = {"0": False, "1": True, "2": "faithful"}
+    if raw not in table:
+        raise ValueError(
+            "LEGOESM_SW_FB_CROSS_FACE_HALO must be one of 0/1/2 "
+            f"(zero-ring / nearest-row / faithful); got {raw!r}")
+    return table[raw]
+
+
 class FV3FBShallowWaterModel:
     """EXPERIMENTAL: FV3 forward-backward shallow water model.
 
@@ -1248,15 +1265,14 @@ class FV3FBShallowWaterModel:
             # enable it via `CDGridShallowWaterConfig`.  Default OFF.
             apply_fortran_xppm_boundary=(
                 self.config.apply_fortran_xppm_boundary),
-            # EXPERIMENT (2026-07-19): the faithful attenuated cross-face
-            # divergence ghost (Fortran ext_scalar, dyn_core.F90:651).
-            # Default-OFF zero-ring ghost is stable on EQUIANGULAR but
-            # the ED-gnomonic grid blows up at the modon collision
-            # (step ~13300); the cross-face halo is the duo-stepper's
-            # fix.  Env-gated (nord=1 only; the FB M1 preset is nord=1).
-            cross_face_halo=(
-                os.environ.get("LEGOESM_SW_FB_CROSS_FACE_HALO", "0")
-                == "1"),
+            # EXPERIMENT (2026-07-19/20): d_sw5 divergence ghost modes.
+            # 0 = zero-ring (default; ED grid blows up at the modon
+            # collision step ~13300); 1 = attenuated nearest-row copy
+            # (survives the collision, blows at the poleward phase
+            # ~day 37); 2 = FAITHFUL certified k2e ring map
+            # (duogrid_bgrid_ring — the ext_scalar B-grid exchange as
+            # a static linear map).  nord=1 only.
+            cross_face_halo=_parse_cross_face_halo_env(),
         )
 
         state_new = FV3EdgeShallowWaterState(

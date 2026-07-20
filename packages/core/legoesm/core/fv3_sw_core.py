@@ -2062,10 +2062,26 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
     # built from duogrid tables — silently no-opping on a non-duogrid grid
     # would run different physics than requested.  Static config → fn-entry
     # raise (repo dispatch doctrine).
+    if cross_face_halo not in (False, True, "faithful"):
+        raise ValueError(
+            "d_sw5_corner_divergence: cross_face_halo must be False "
+            "(zero-ring), True (nearest-row attenuated ghost) or "
+            f"'faithful' (certified k2e ring map); got {cross_face_halo!r}")
     if cross_face_halo and cdgrid.base.duogrid is None:
         raise ValueError(
             "d_sw5_corner_divergence: cross_face_halo=True requires a "
             "duogrid grid (create_cubed_sphere(..., use_duogrid=True)).")
+    if (cross_face_halo == "faithful"
+            and getattr(cdgrid.base, "gnomonic_form", "") != "ed"):
+        # codex bgring-r1 P0-2: the certified ring map's k2e/corner
+        # tables are ED-lattice-specific (equiangular tables differ by
+        # up to 0.96 at C12) — a non-ED grid would silently run wrong
+        # weights.
+        raise ValueError(
+            "d_sw5_corner_divergence: cross_face_halo='faithful' is "
+            "certified for the ED gnomonic duogrid only "
+            "(create_fv3_native_cubed_sphere); got gnomonic_form="
+            f"{getattr(cdgrid.base, 'gnomonic_form', None)!r}")
 
     n = cdgrid.n
     cosa_u = cdgrid.cosa_u
@@ -2190,7 +2206,23 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
                 "zero-ring for nord>=2.")
 
         for _it in range(nord):
-            if use_cross_face_halo:
+            if use_cross_face_halo == "faithful":
+                # 2026-07-20: the FAITHFUL exchange (dyn_core.F90:652
+                # ext_scalar B-grid ghost = mpp copy + k2e cube_rmp
+                # Lagrange ring + corner Lagrange) as a static linear
+                # map extracted by impulse-probing the certified numpy
+                # ext_scalar_sixface(·,"B") — weights ARE the certified
+                # code's output (duogrid_bgrid_ring).  Map is
+                # grid-static: built once per n (disk-cached), applied
+                # as a jit-safe gather/segment-sum.
+                from legoesm.grids.duogrid_bgrid_ring import (
+                    apply_bgrid_ring1,
+                    build_bgrid_ring1_map,
+                )
+
+                ring_map = build_bgrid_ring1_map(n)   # cached, trace-time
+                divg_d_pad = apply_bgrid_ring1(divg_d, ring_map, n)
+            elif use_cross_face_halo:
                 # 2026-07-10 opt-in port (dyn_core.F90:652 ext_scalar B-grid
                 # ghost exchange + sw_core.F90:1737-1787 duogrid nord loop):
                 # the ghost ring holds the neighbour's ATTENUATED divg_d via
