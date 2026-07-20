@@ -331,3 +331,73 @@ def apply_bgrid_ring1(field, ring_map: dict, n: int):
     padded = padded.at[:, 1:npx + 1, 0].set(ring[:, 2])       # south
     padded = padded.at[:, 1:npx + 1, npx + 1].set(ring[:, 3])  # north
     return padded
+
+
+# ---------------------------------------------------------------------------
+# S1 (task #12): full-halo VECTOR exchange maps — the certified
+# ext_vector_dgrid/cgrid_sixface as static linear maps (impulse probe,
+# same pattern as the B ring; vector exchanges mix u and v components
+# across rotated faces, so sources span BOTH arrays)
+# ---------------------------------------------------------------------------
+
+def _run_certified_dvector(u6c: np.ndarray, v6c: np.ndarray,
+                           n: int, ng: int, ectx: dict):
+    """Certified D-vector exchange on CREATE-layout compute winds.
+
+    u6c (6, n, n+1) covariant D u on y-faces; v6c (6, n+1, n).  Runs
+    ext_vector_dgrid_sixface in reference layout (conjugated in/out)
+    and returns the FULL-lattice create-layout arrays
+    u_full (6, n+2ng, n+2ng+1), v_full (6, n+2ng+1, n+2ng) — compute
+    block + all halos as the certified exchange leaves them.
+    """
+    from legoesm.grids.cubed_sphere import (
+        _GNOMONIC_ED_FACE_PERM as PERM,
+        _GNOMONIC_ED_FACE_ROT as ROT,
+    )
+    from legoesm.grids.fv3_native_ext_vector import (
+        ext_vector_dgrid_sixface,
+    )
+
+    m_a = n + 2 * ng
+    sl_a = slice(ng, ng + n)
+    sl_b = slice(ng, ng + n + 1)
+
+    # create -> reference for the staggered PAIR: inverse of
+    # create[F] = rot90(ref[PERM[F]], ROT[F]) with component swap on
+    # odd k and orientation SIGNS from the covariant transformation:
+    # under rot90(k=1) (CCW), (i,j)->(-j,i): u_new(i',j') = v_old with
+    # sign +, v_new = -u_old (covariant components transform with the
+    # Jacobian).  Composed k times.
+    def ref_pair(uc, vc):
+        u_ref = [None] * 6
+        v_ref = [None] * 6
+        for F in range(6):
+            k = ROT[F] % 4
+            uu, vv = uc[F], vc[F]
+            # invert: apply rot90 by -k with covariant component rule
+            for _ in range(k):
+                # one CW step (inverse of one CCW): (u,v) <- (-v, u)
+                uu, vv = -np.rot90(vv, -1), np.rot90(uu, -1)
+            u_ref[PERM[F]] = uu
+            v_ref[PERM[F]] = vv
+        return np.stack(u_ref), np.stack(v_ref)
+
+    def create_pair_full(u_ref_full, v_ref_full):
+        out_u, out_v = [], []
+        for F in range(6):
+            uu, vv = u_ref_full[PERM[F]], v_ref_full[PERM[F]]
+            for _ in range(ROT[F] % 4):
+                # one CCW step: (u,v) <- (v, -u)
+                uu, vv = np.rot90(vv, 1), -np.rot90(uu, 1)
+            out_u.append(uu)
+            out_v.append(vv)
+        return np.stack(out_u), np.stack(out_v)
+
+    u_ref_c, v_ref_c = ref_pair(u6c, v6c)
+    u6 = [np.zeros((m_a, m_a + 1)) for _ in range(6)]
+    v6 = [np.zeros((m_a + 1, m_a)) for _ in range(6)]
+    for t in range(6):
+        u6[t][sl_a, sl_b] = u_ref_c[t]
+        v6[t][sl_b, sl_a] = v_ref_c[t]
+    ext_vector_dgrid_sixface(u6, v6, ectx)
+    return create_pair_full(np.stack(u6), np.stack(v6))
