@@ -356,6 +356,13 @@ def _assert_turbulence_scheme_for_trace(scheme: str) -> None:
       locked to a different scheme that an already-compiled step keeps running.
 
     Both are hard errors (no silent degrade), mirroring the eager probe's contract.
+
+    OPERATIONAL CONSTRAINT (codex round-2): the ψ̂ tables are process-global and this
+    check is a string label, not a lock over the assert→trace→table-capture region.
+    It is sound for the intended deployment — one serialized process running one
+    turbulence scheme — but is NOT thread-safe: a concurrent thread mutating the
+    tables between this assert and the backend trace could capture the wrong scheme.
+    Run CLM-ML canopy rollouts single-threaded / one-scheme-per-process.
     """
     if scheme not in VALID_CLM_ML_TURBULENCE_SCHEMES:
         raise ValueError(
@@ -1640,20 +1647,35 @@ def compute_clm_ml_canopy_fluxes(
     # fail with an actionable message instead.  (Differentiating the physical
     # forcing leaves — T_lowest, sw_down, q, u, v, lw_down, p, co2 — is fully
     # supported; only geometry must stay concrete.)
-    if _want_diff:
-        for _geo_name, _geo_val in (
-            ("forcing.cos_zenith", forcing.cos_zenith),
-            ("lat", lat),
-            ("lon", lon),
-        ):
+    # lat/lon feed HOST-side CLM topology/orbital setup (np.array(lat),
+    # _setup_clm_topology) that runs at trace time on ANY traceable step (diff OR
+    # jit-forward), so a TRACED lat/lon (e.g. jax.jit over lat) would raise a cryptic
+    # TracerArrayConversionError.  Guard them on every traceable step.  (dt is
+    # already forced concrete upstream by resolve_num_ml_steps' math.ceil.)
+    # cos_zenith is NOT checked here: on the traceable path it is a DEVICE input
+    # (cos_zenith_device, jnp.asarray + stop_gradient), so it MAY be a tracer — the
+    # normal case when forcing is built inside the jitted step.  Codex round-2 HIGH.
+    if _want_diff or _traceable:
+        for _geo_name, _geo_val in (("lat", lat), ("lon", lon)):
             if _geo_val is not None and isinstance(_geo_val, jax.core.Tracer):
                 raise ValueError(
-                    f"CLM-ML diff mode: {_geo_name} is a jax tracer, but solar "
-                    "geometry (lat/lon/doy/cos_zenith) is a NON-differentiated static "
-                    "input (host-side CLM orbital setup). Differentiate only the "
-                    "physical forcing leaves and keep geometry concrete (close over "
-                    "it, or jax.lax.stop_gradient it before the grad boundary)."
+                    f"CLM-ML traceable/diff path: {_geo_name} is a jax tracer, but "
+                    "it feeds host-side CLM topology/orbital setup and must be a "
+                    "NON-differentiated STATIC input. Keep geometry concrete (close "
+                    "over it, or jax.lax.stop_gradient it before the jit/grad boundary); "
+                    "vary only the physical forcing leaves and doy per step."
                 )
+    # Diff-TRAINING contract: additionally keep cos_zenith concrete so a grad over the
+    # whole AtmToSurface pytree does not try to train through the Sun's position.
+    # (The jit-forward traceable path handles a traced cos_zenith via stop_gradient.)
+    if _want_diff and forcing.cos_zenith is not None and isinstance(
+            forcing.cos_zenith, jax.core.Tracer):
+        raise ValueError(
+            "CLM-ML diff mode: forcing.cos_zenith is a jax tracer, but solar geometry "
+            "is a NON-differentiated static input. Differentiate only the physical "
+            "forcing leaves (T_lowest, sw_down, q, u, v, lw_down, p, co2); close over "
+            "or stop_gradient cos_zenith before the grad boundary."
+        )
 
     # Cold-start-under-grad guard.  ``differentiable=True`` needs a WARM state:
     # the first (cold) step builds the canopy vertical structure via host-side
@@ -1772,6 +1794,12 @@ def compute_clm_ml_canopy_fluxes(
             _setup_clm_topology(ncol, _lat_deg, _lon_deg, dz_soil, z_soil,
                                 float(land_config.z_ref),
                                 pft_clm=int(canopy_config.pft_clm))
+        # Invalidate the eager topology cache: this traceable step overwrote the
+        # process-global topology (with lon_deg=0), so a LATER eager call whose
+        # cached _last_topology_key still matches would skip _setup_clm_topology and
+        # run against these (device-path) globals.  Forcing None makes the next
+        # eager call re-install its own topology (codex round-2 HIGH).
+        _last_topology_key = None
     else:
         # ---- Latitude / longitude arrays ----
         if lat is not None:

@@ -139,6 +139,28 @@ def test_traceable_rejects_nonzero_met_type():
             lat=lat, doy=180.0, grid_info=gi)
 
 
+def test_traceable_rejects_traced_lat():
+    """A TRACED lat on the traceable path fails LOUDLY (geometry must be static).
+
+    lat feeds host-side CLM topology setup (np.array(lat) / _setup_clm_topology), so
+    jit-ing over lat would otherwise raise a cryptic TracerArrayConversionError deep
+    in the backend.  The geometry guard catches it with actionable guidance.
+    """
+    st0, gi, kw = _warm_start()
+    Ts, psi, th, cfg, lc = kw["Ts"], kw["psi"], kw["th"], kw["cfg"], kw["lc"]
+
+    def run(lat):
+        from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
+        return compute_clm_ml_canopy_fluxes(
+            T_soil_top=Ts[:, 0], forcing=_forcing(jnp.full(NCOL, 296.0)),
+            canopy_config=cfg, land_config=lc, land_params=None, canopy_state=st0,
+            dt=1800.0, T_soil=Ts, psi_soil=psi, theta_soil=th, lat=lat, doy=180.0,
+            grid_info=gi)[0].shflx
+
+    with pytest.raises(ValueError, match="lat is a jax tracer"):
+        jax.jit(run)(jnp.zeros(NCOL))
+
+
 def test_traceable_rejects_supplied_lon():
     """lon != None on the traceable path is a hard error (solar-semantics divergence)."""
     from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
