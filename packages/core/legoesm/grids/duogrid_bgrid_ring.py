@@ -215,6 +215,88 @@ def _apply_numpy(field6: np.ndarray, m: dict, n: int) -> np.ndarray:
     return out.reshape(6, 4, npx)
 
 
+def build_d5_metric_bundle(n: int, ng: int = 3) -> dict:
+    """BOUNDED-gridstruct D5 metric geometry, create layout (codex
+    converge-r1 rank-1): the d_sw5 divergence-damping metric fields the
+    FB core previously edge-padded/approximated.  A real ghost ring
+    activates exactly these coefficients (they are inert under the
+    zero ring), so ring + metrics must be consistent TOGETHER.
+
+    Returns numpy arrays (jnp at use):
+      divg_u_pad (6, n+2, n+1)  — bounded divg_u incl the two native
+                                  halo rows (replaces the mode='edge'
+                                  pad), create layout;
+      divg_v_pad (6, n+1, n+2)  — same for divg_v;
+      dxc (6, n+1, n), dyc (6, n, n+1), rarea_c (6, n+1, n+1) — the
+      compute-domain D5 geometry from the bounded builder;
+      da_min_c (float) — global bounded min (damping coefficient base).
+
+    Component-aware layout transform per cubed_sphere_cdgrid's
+    _remap_fv3_metrics_to_create: odd face rotations SWAP the staggered
+    pair members (divg_u<->divg_v, dxc<->dyc) — naive independent
+    rotation is wrong.
+    """
+    key = ("d5-bundle-v1", n, ng)
+    if key in _CACHE:
+        return _CACHE[key]
+
+    from legoesm.grids.cubed_sphere import (
+        _GNOMONIC_ED_FACE_PERM as PERM,
+        _GNOMONIC_ED_FACE_ROT as ROT,
+    )
+    from legoesm.grids.fv3_native_gridstruct import (
+        build_fv3_native_gridstruct_bounded,
+    )
+
+    gs6 = [build_fv3_native_gridstruct_bounded(n, ng, tile=t)
+           for t in range(1, 7)]
+    sl_b = slice(ng, ng + n + 1)
+    sl_a = slice(ng, ng + n)
+    sl_bp = slice(ng - 1, ng + n + 2)   # node range with 1 halo each side
+
+    del sl_bp  # (kept naming parity with the builder; ranges inline)
+    u_ref = np.stack(
+        [g["divg_u"][ng - 1:ng + n + 1, sl_b] for g in gs6])
+    v_ref = np.stack(
+        [g["divg_v"][sl_b, ng - 1:ng + n + 1] for g in gs6])
+    dxc_ref = np.stack([g["dxc"][sl_b, sl_a] for g in gs6])
+    dyc_ref = np.stack([g["dyc"][sl_a, sl_b] for g in gs6])
+    rc_ref = np.stack([g["rarea_c"][sl_b, sl_b] for g in gs6])
+    da_min_c = min(float(g["da_min_c"]) for g in gs6)
+
+    def _square(a):
+        return np.stack([np.rot90(a[PERM[F]], ROT[F]) for F in range(6)])
+
+    def _pair(ax, ay):
+        ox, oy = [], []
+        for F in range(6):
+            g, k = PERM[F], ROT[F]
+            if k % 2 == 0:
+                ox.append(np.rot90(ax[g], k))
+                oy.append(np.rot90(ay[g], k))
+            else:
+                ox.append(np.rot90(ay[g], k))
+                oy.append(np.rot90(ax[g], k))
+        return np.stack(ox), np.stack(oy)
+
+    u_c, v_c = _pair(u_ref, v_ref)
+    dxc_c, dyc_c = _pair(dxc_ref, dyc_ref)
+    m = {"divg_u_pad": u_c, "divg_v_pad": v_c,
+         "dxc": dxc_c, "dyc": dyc_c,
+         "rarea_c": _square(rc_ref), "da_min_c": da_min_c}
+    for k2, v2 in m.items():
+        if k2 == "da_min_c":
+            continue
+        want = {"divg_u_pad": (6, n + 2, n + 1),
+                "divg_v_pad": (6, n + 1, n + 2),
+                "dxc": (6, n + 1, n), "dyc": (6, n, n + 1),
+                "rarea_c": (6, n + 1, n + 1)}[k2]
+        if v2.shape != want:
+            raise AssertionError(f"d5 bundle {k2}: {v2.shape} != {want}")
+    _CACHE[key] = m
+    return m
+
+
 def apply_bgrid_ring1(field, ring_map: dict, n: int):
     """Faithful ring-1 pad inside jitted code.
 

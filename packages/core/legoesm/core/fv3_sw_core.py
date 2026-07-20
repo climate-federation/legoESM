@@ -1832,17 +1832,21 @@ def _del6_vt_flux(nord, damp, q, cdgrid, use_duogrid=False):
     return fx2, fy2
 
 
-def _divergence_corner_duo(u_d, v_d, ua, va, cdgrid):
+def _divergence_corner_duo(u_d, v_d, ua, va, cdgrid, *,
+                           dxc=None, dyc=None, rarea_c=None):
     """FV3 divergence_corner_duo (sw_core.F90:2345-2447). Corner divergence for nord>0 hyperviscosity.
 
     Cross-velocity correction via cos_sg/sin_sg. Face-boundary zeroing + 0.25 attenuation.
+    ``dxc``/``dyc``/``rarea_c`` overrides: the faithful-ring D5 bundle
+    (bounded-gridstruct geometry) — default None keeps cdgrid's fields
+    byte-identical for every existing caller.
     """
     n = cdgrid.n
     sg = cdgrid.sin_sg
     cg = cdgrid.cos_sg
-    dxc = cdgrid.dxc   # (6, n+1, n) centre-to-centre in x
-    dyc = cdgrid.dyc   # (6, n, n+1) centre-to-centre in y
-    rarea_c = cdgrid.rarea_c  # (6, n+1, n+1)
+    dxc = cdgrid.dxc if dxc is None else dxc   # (6, n+1, n)
+    dyc = cdgrid.dyc if dyc is None else dyc   # (6, n, n+1)
+    rarea_c = cdgrid.rarea_c if rarea_c is None else rarea_c
 
     # iter-657/949: mode='edge' here is a numerical no-op (face-boundary zeroing kills the diff)
     ua_pad = jnp.pad(ua, [(0, 0), (1, 1), (0, 0)], mode='edge')  # (6, n+2, n)
@@ -2093,6 +2097,22 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
     dyc = cdgrid.dyc          # (6, n, n+1)
     rarea_c = cdgrid.rarea_c  # (6, n+1, n+1)
     da_min_c = jnp.min(1.0 / rarea_c)  # minimum corner area
+    d5_bundle = None
+    if cross_face_halo == "faithful":
+        # codex converge-r1 rank-1: a real ghost ring activates the D5
+        # metric-halo coefficients that are inert under the zero ring —
+        # ring + metrics must be consistent TOGETHER.  The bundle is
+        # the BOUNDED gridstruct's D5 geometry (real native halo
+        # strips) in create layout, built once per n (trace-time
+        # numpy, jnp constants under jit).
+        from legoesm.grids.duogrid_bgrid_ring import build_d5_metric_bundle
+
+        d5_bundle = build_d5_metric_bundle(n)
+        dxc = jnp.asarray(d5_bundle["dxc"], dtype=dxc.dtype)
+        dyc = jnp.asarray(d5_bundle["dyc"], dtype=dyc.dtype)
+        rarea_c = jnp.asarray(d5_bundle["rarea_c"], dtype=rarea_c.dtype)
+        da_min_c = jnp.asarray(d5_bundle["da_min_c"],
+                               dtype=jnp.result_type(rarea_c))
 
     # iter-656: ua/va padding inside nord==0 branch only (not module scope)
     if nord == 0:
@@ -2147,7 +2167,12 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
         # (truth tier) outranks oracle-matching -> default stays False.
         # (non-duogrid + cross_face_halo=True raises at fn entry.)
         use_cross_face_halo = cross_face_halo
-        divg_d = _divergence_corner_duo(u_d, v_d, ua, va, cdgrid)
+        if d5_bundle is not None:
+            divg_d = _divergence_corner_duo(
+                u_d, v_d, ua, va, cdgrid,
+                dxc=dxc, dyc=dyc, rarea_c=rarea_c)
+        else:
+            divg_d = _divergence_corner_duo(u_d, v_d, ua, va, cdgrid)
         delpc = divg_d
 
         # dd8 (FV3:1811)
@@ -2192,6 +2217,16 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
                              mode='edge')  # (6, n+2, n+1)
         divg_v_pad = jnp.pad(divg_v_met, [(0, 0), (0, 0), (1, 1)],
                              mode='edge')  # (6, n+1, n+2)
+        if d5_bundle is not None:
+            # faithful lane: the BOUNDED gridstruct's real divg_u/divg_v
+            # incl the native halo rows (replaces both the edge-pad AND
+            # the cdgrid-interior approximation — codex converge-r1:
+            # these coefficients multiply the ring-activated gradients
+            # directly, so they must be geometry-consistent with it)
+            divg_u_pad = jnp.asarray(d5_bundle["divg_u_pad"],
+                                     dtype=divg_u_pad.dtype)
+            divg_v_pad = jnp.asarray(d5_bundle["divg_v_pad"],
+                                     dtype=divg_v_pad.dtype)
 
         # codex 2026-07-10 (HIGH): the opt-in one-ring re-copy is NOT
         # equivalent to Fortran's shrinking wider-halo in-place evolution for
