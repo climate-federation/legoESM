@@ -1955,3 +1955,18 @@ class TestK33NemoNativeA33:
                 T, S, eta, H_bathy, grid, z_coord, cfg_bad2,
                 eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
                 dt=2700.0)
+
+    def test_msc_guard_covers_all_schemes(self):
+        """msc_stabilize on triads/centered is rejected at fn entry (codex
+        r7) — no scheme branch silently ignores the flag."""
+        import pytest as _pytest
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        for scheme in ("triads", "centered"):
+            cfg_bad = cfg._replace(
+                slope_scheme=scheme, msc_stabilize=True, kappa_GM=0.0)
+            with _pytest.raises(ValueError, match="nemo_iso_lap"):
+                gm_redi_tracer_tendency_latlon(
+                    T, S, eta, H_bathy, grid, z_coord, cfg_bad,
+                    eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
+                    dt=2700.0)
