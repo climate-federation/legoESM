@@ -551,6 +551,40 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def device_identity_keys(local_positions, cvd: str | None, hostname: str):
+    """Physical-device identity key per LOCAL device slot: ``(host, token)``.
+
+    ``local_positions`` are the 0-based positions of this process's devices
+    within ``jax.local_devices()`` (that ordering IS the CUDA ordinal order).
+
+    A device id is CUDA_VISIBLE_DEVICES-RELATIVE, so the raw ordinal is not an
+    identity (codex P1): with per-rank binding, masks ``0,1`` and ``1,2`` both
+    expose physical GPU 1, which as a bare ordinal looks like two different
+    GPUs and fakes a wider run.  Resolving the ordinal THROUGH the mask maps
+    both back to the same token ``"1"``.  Mask entries may be UUIDs
+    (``GPU-abc...``) rather than indices; those are already stable identities
+    and pass through unchanged.
+
+    ponytail: host+masked-ordinal, not a true UUID. Ceiling: it cannot
+    distinguish two GPUs that a container/MIG namespace presents as the same
+    index on the same hostname. That needs pynvml UUIDs (a new dependency);
+    add it if the clusters ever run this under per-rank device namespaces.
+    """
+    mask = None
+    if cvd:
+        mask = [t.strip() for t in cvd.split(",") if t.strip()]
+    keys = []
+    for pos in local_positions:
+        if mask is not None:
+            # Out-of-range means the mask does not describe this device list;
+            # fall back to a distinct ordinal token rather than aliasing slots.
+            token = mask[pos] if pos < len(mask) else f"ordinal{pos}"
+        else:
+            token = str(pos)
+        keys.append((hostname, token))
+    return keys
+
+
 def check_expected_devices(all_keys, expect: int, detail: str = "") -> str | None:
     """Anti-fake-scaling verdict: ``None`` to proceed, else the error message.
 
@@ -596,14 +630,15 @@ def main() -> int:
     # inheriting CUDA_VISIBLE_DEVICES=0,1 spans four device slots, while two
     # ranks oversubscribed onto one physical GPU span one.  Both would pass a
     # world_size check while recording a fake row.  So count DISTINCT physical
-    # devices: identify each by (host, CUDA_VISIBLE_DEVICES, device.id) —
-    # under route-A MPI the ranks are independent JAX processes whose local
-    # device ids both start at 0, so the CVD mask is what separates two real
-    # GPUs from the same GPU twice.
+    # devices, identified by device_identity_keys() — under route-A MPI the
+    # ranks are independent JAX processes whose local device ordinals both
+    # start at 0, so the CVD mask is what separates two real GPUs from the
+    # same GPU counted twice.
     if args.expect_devices is not None:
         import socket
         cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
-        local_keys = [(socket.gethostname(), cvd, d.id) for d in jax.local_devices()]
+        local_keys = device_identity_keys(
+            range(len(jax.local_devices())), cvd, socket.gethostname())
         all_keys = local_keys
         if world_size > 1:
             # Collective: EVERY rank must enter allgather or the job hangs.
