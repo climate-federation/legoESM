@@ -121,6 +121,61 @@ def test_builder_kpp_defaults():
     assert vm.kpp == KPPConfig()
 
 
+def test_builder_kpp_honors_overrides():
+    """tripole-vmix kpp threads --kpp-ri-crit/--kpp-cv/--kpp-eice through the
+    SAME _kpp_vmix_override as the mpas/latlon builders, so a tripole-KPP run
+    can hold KPP params byte-identical to an MPAS-KPP run (the same-scheme
+    cross-grid pair isolating the grid effect)."""
+    from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
+    r = _runner()
+    vm = r.build_tripole_vmix_config(
+        "kpp", kpp_ri_crit=0.15, kpp_eice=3)
+    assert vm.scheme == "kpp"
+    assert vm.kpp.Ri_crit == 0.15
+    assert vm.kpp.eice == 3
+    # untouched fields keep scheme defaults (no re-derived override logic)
+    assert vm.kpp.Cv == KPPConfig().Cv
+    # and it matches the mpas/latlon override object exactly
+    assert vm == r._kpp_vmix_override(0.15, None, 3)
+
+
+def test_builder_kpp_overrides_rejected_on_other_closures():
+    """KPP overrides on 'none'/'tke' would be silently dropped -> reject."""
+    r = _runner()
+    for vmix in ("none", "tke"):
+        with pytest.raises(ValueError, match="tripole-vmix kpp"):
+            r.build_tripole_vmix_config(vmix, kpp_ri_crit=0.15)
+        with pytest.raises(ValueError, match="tripole-vmix kpp"):
+            r.build_tripole_vmix_config(vmix, kpp_eice=3)
+
+
+def test_builder_tke_eice_rejected_on_non_tke_closures():
+    """--tke-eice only reaches the TKE closure; 'none'/'kpp' must reject
+    (symmetric to the KPP-override reject), pointing at --kpp-eice."""
+    r = _runner()
+    for vmix in ("none", "kpp"):
+        with pytest.raises(ValueError, match="tripole-vmix tke"):
+            r.build_tripole_vmix_config(vmix, tke_eice=3)
+
+
+def test_build_tripole_validates_closure_overrides_before_mesh():
+    """codex-HIGH regression: with the DEFAULT --tripole-vmix none the
+    optional-physics block in build_tripole is skipped, so the closure-mismatch
+    rejects must run UNCONDITIONALLY (and before any mesh work) — a
+    --tke-eice/--kpp-* override on the default closure raises the closure
+    ValueError, NOT a silent no-op (and not a mesh FileNotFoundError, proving
+    the validation precedes the eORCA load)."""
+    r = _runner()
+    bogus = "/nonexistent/mesh_that_must_never_be_opened.nc"
+    with pytest.raises(ValueError, match="tripole-vmix tke"):
+        r.build_tripole(75, 6000.0, bogus, tripole_vmix="none", tke_eice=3)
+    with pytest.raises(ValueError, match="tripole-vmix kpp"):
+        r.build_tripole(75, 6000.0, bogus, tripole_vmix="none", kpp_eice=3)
+    with pytest.raises(ValueError, match="tripole-vmix kpp"):
+        r.build_tripole(75, 6000.0, bogus, tripole_vmix="tke",
+                        kpp_ri_crit=0.15)
+
+
 def test_builder_unknown_raises():
     r = _runner()
     with pytest.raises(ValueError, match="tripole-vmix"):

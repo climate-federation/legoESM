@@ -83,6 +83,26 @@ def test_guard_noop_on_kpp_grids_or_no_flags():
         _validate_kpp_grid(grid, None, None)                  # no flags: ok
 
 
+def test_guard_tripole_kpp_vmix_allows_overrides():
+    """--grid tripole WITH --tripole-vmix kpp runs a LIVE KPP boundary layer
+    (build_tripole_vmix_config 'kpp' branch) -> the overrides reach it, so the
+    guard must ALLOW them there — the same-scheme cross-grid pair (tripole-KPP
+    vs MPAS-KPP) that isolates the grid effect."""
+    _validate_kpp_grid("tripole", kpp_ri_crit=0.15, kpp_cv=None,
+                       kpp_eice=3, tripole_vmix="kpp")        # no raise
+    # But any NON-kpp tripole closure still rejects (silent no-op otherwise).
+    for vmix in ("none", "tke", None):
+        with pytest.raises(SystemExit):
+            _validate_kpp_grid("tripole", kpp_ri_crit=0.15,
+                               tripole_vmix=vmix)
+        with pytest.raises(SystemExit):
+            _validate_kpp_grid("tripole", kpp_eice=3, tripole_vmix=vmix)
+    # cubed_sphere stays rejected regardless of the tripole knob.
+    with pytest.raises(SystemExit):
+        _validate_kpp_grid("cubed_sphere", kpp_ri_crit=0.15,
+                           tripole_vmix="kpp")
+
+
 def test_build_mpas_ocean_threads_override_to_create_setup(monkeypatch):
     """Integration: build_mpas_ocean MUST forward ``vertical_mixing`` to
     _create_setup (a future dropped kwarg would otherwise pass the pure-helper

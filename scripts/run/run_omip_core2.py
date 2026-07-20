@@ -462,7 +462,8 @@ def orca1_zdftke_config(iwm_enabled: bool = False):
     )
 
 
-def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None):
+def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
+                              kpp_ri_crit=None, kpp_cv=None, kpp_eice=None):
     """``VerticalMixingConfig`` for ``--tripole-vmix`` (+ optional zdfiwm).
 
     ``tripole_vmix``: "none" (byte-identical no-closure default), "tke"
@@ -479,10 +480,33 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None):
     ``tke_eice`` (``--tke-eice``): None keeps the ORCA1 card default
     (nn_eice=3); 0/1/3 override the under-ice lc/etau attenuation mode for
     A/B runs (0 reproduces the pre-2026-07-18 no-attenuation behaviour).
+
+    ``kpp_ri_crit`` / ``kpp_cv`` / ``kpp_eice`` (``--kpp-ri-crit`` /
+    ``--kpp-cv`` / ``--kpp-eice``): KPP overrides for ``tripole_vmix="kpp"``,
+    applied through the SAME :func:`_kpp_vmix_override` the mpas/latlon
+    builders use, so a tripole-KPP run can hold KPP params byte-identical to
+    an MPAS-KPP run (the same-scheme cross-grid pair that isolates the GRID
+    effect; the scheme effect is trp-TKE vs trp-KPP on the fixed grid).
+    Rejected on the non-KPP closures (a silently-dropped override is the
+    dispatch footgun) — mirroring how ``tke_eice`` is TKE-only.
     """
     from legoesm.ocean.physics.vertical_mixing.config import (
         KPPConfig, VerticalMixingConfig,
     )
+    _kpp_overrides = (kpp_ri_crit is not None or kpp_cv is not None
+                      or kpp_eice is not None)
+    if _kpp_overrides and tripole_vmix != "kpp":
+        raise ValueError(
+            f"--kpp-ri-crit/--kpp-cv/--kpp-eice require --tripole-vmix kpp "
+            f"(got --tripole-vmix {tripole_vmix!r}); the "
+            f"{tripole_vmix!r} closure would silently ignore them.")
+    if tke_eice is not None and tripole_vmix != "tke":
+        # Symmetric reject: --tke-eice only reaches the TKE closure; on
+        # "none"/"kpp" it would be silently dropped (dispatch footgun).
+        raise ValueError(
+            f"--tke-eice requires --tripole-vmix tke (got --tripole-vmix "
+            f"{tripole_vmix!r}); the {tripole_vmix!r} closure would silently "
+            "ignore it (for KPP under-ice attenuation use --kpp-eice).")
     _iwm_on = iwm is not None and iwm.enabled
     if tripole_vmix == "none":
         vm = VerticalMixingConfig(scheme="none")
@@ -496,7 +520,10 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None):
             _tke = _tke._replace(eice=int(tke_eice))
         vm = VerticalMixingConfig(scheme="tke", tke=_tke)
     elif tripole_vmix == "kpp":
-        vm = VerticalMixingConfig(scheme="kpp", kpp=KPPConfig())
+        # Same override helper as the mpas/latlon builders (no re-derived
+        # KPP-override logic); None (no overrides) -> scheme defaults.
+        vm = (_kpp_vmix_override(kpp_ri_crit, kpp_cv, kpp_eice)
+              or VerticalMixingConfig(scheme="kpp", kpp=KPPConfig()))
     else:
         raise ValueError(
             f"unknown --tripole-vmix {tripole_vmix!r}; expected 'none', "
@@ -528,7 +555,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   bottom_drag_cdmax=None, bottom_drag_z0=None,
                   bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
                   ddm=None, prescribed_flow=None, no_gm_redi=False,
-                  tripole_vmix="none", tke_eice=None):
+                  tripole_vmix="none", tke_eice=None,
+                  kpp_ri_crit=None, kpp_cv=None, kpp_eice=None):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -548,6 +576,20 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             f"unknown tripole_vmix {tripole_vmix!r}; expected 'none', 'tke' "
             "or 'kpp'.")
     from scripts.run import run_omip
+    # Build (and thereby VALIDATE) the vertical-mixing closure config FIRST,
+    # before ANY mesh/setup work: the tke_eice / kpp_* closure-mismatch rejects
+    # live in build_tripole_vmix_config, and with the default
+    # --tripole-vmix none the optional-physics block far below is skipped
+    # entirely — a --tke-eice/--kpp-* override would then be silently ignored
+    # instead of rejected (codex HIGH).  Doing it at the top also fails fast
+    # (no expensive eORCA mesh load for a doomed config) and makes the reject
+    # unit-testable with a bogus mesh path.  Pure config construction; the
+    # optional-physics block reuses ``_vm_cfg``.
+    _use_iwm = iwm is not None and iwm.enabled
+    _vm_cfg = build_tripole_vmix_config(
+        tripole_vmix, iwm=iwm if _use_iwm else None,
+        tke_eice=tke_eice,
+        kpp_ri_crit=kpp_ri_crit, kpp_cv=kpp_cv, kpp_eice=kpp_eice)
     # Pick the tripole resolution from the mesh file: eORCA025 (1/4 deg) vs the
     # default eORCA1 (1 deg). create_tripole_grid reads the grid (glamt/e1t.../
     # tmask + fold) from this SAME file, so the grid and the land_mask/bathy
@@ -628,9 +670,10 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
     # same physics_fn pipeline.  Default (both off) leaves the validated
     # faithful config untouched.
     _use_convection = bool(convection and convection != "none")
-    _use_iwm = iwm is not None and iwm.enabled
     _use_ddm = ddm is not None and ddm.enabled
     _use_vmix = bool(tripole_vmix and tripole_vmix != "none")
+    # (_use_iwm + _vm_cfg were computed/validated at the TOP of this function,
+    # before the mesh load — see the codex-HIGH note there.)
     if (_use_convection or mle is not None or _use_iwm or _use_ddm
             or _use_vmix):
         from legoesm.ocean.physics.combined import OceanPhysicsConfig
@@ -663,14 +706,13 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         # last audited namelist gap — NEMO ORCA1 runs zdftke).  "none"
         # (default) keeps the byte-identical no-closure pipeline; "tke"
         # attaches the ORCA1 &namzdf_tke mapping (orca1_zdftke_config);
-        # "kpp" attaches KPP defaults.  TKE/CATKE K-profiles are computed
-        # inside the implicit solve's compute_vertical_K_profiles fallback
-        # (combined.py keeps the pipeline factory a deliberate no-op), which
-        # receives the step-time surface_forcing (CORE-II tau_x/tau_y) — so
-        # the surface TKE input sees the real wind stress.
-        _vm_cfg = build_tripole_vmix_config(
-            tripole_vmix, iwm=iwm if _use_iwm else None,
-            tke_eice=tke_eice)
+        # "kpp" attaches KPP defaults (+ the --kpp-* overrides).  TKE/CATKE
+        # K-profiles are computed inside the implicit solve's
+        # compute_vertical_K_profiles fallback (combined.py keeps the pipeline
+        # factory a deliberate no-op), which receives the step-time
+        # surface_forcing (CORE-II tau_x/tau_y) — so the surface TKE input
+        # sees the real wind stress.  (_vm_cfg was built + validated above,
+        # BEFORE this opt-in block.)
         if _use_vmix:
             print(f"[setup] tripole vertical-mixing closure: {tripole_vmix}"
                   + (" (ORCA1 namzdf_tke namelist mapping)"
@@ -1664,23 +1706,30 @@ def _kpp_vmix_override(kpp_ri_crit=None, kpp_cv=None, kpp_eice=None):
     return VerticalMixingConfig(scheme="kpp", kpp=kpp)
 
 
-def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None, kpp_eice=None):
+def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None, kpp_eice=None,
+                       tripole_vmix=None):
     """Reject the KPP override flags on grids whose CORE-II builder does not
     thread ``vertical_mixing`` INTO A LIVE KPP scheme (a flag that silently does
     nothing is the dispatch footgun CLAUDE.md forbids).  ``mpas`` and
     ``latlon_bathy`` run KPP (``bathy_physics.vertical_mixing``) so the override
-    reaches ``KPPConfig.Ri_crit``/``Cv``.  ``tripole`` ships ``physics=None``
-    (the dynamics-core implicit vertical solve, NO KPP boundary layer) so a KPP
-    override would be a silent no-op there -> still rejected; ``cubed_sphere``
-    is not wired.  Extend this set only when the builder actually runs KPP."""
-    if (kpp_ri_crit is not None or kpp_cv is not None
-            or kpp_eice is not None) and grid not in (
+    reaches ``KPPConfig.Ri_crit``/``Cv``.  ``tripole`` runs KPP ONLY under
+    ``--tripole-vmix kpp`` (its default ships ``physics=None`` — the
+    dynamics-core implicit vertical solve, NO KPP boundary layer), so the
+    overrides are allowed there exactly when that closure is selected —
+    the same-scheme cross-grid pair (tripole-KPP vs MPAS-KPP) that isolates
+    the GRID effect.  ``cubed_sphere`` is not wired.  Extend this set only
+    when the builder actually runs KPP."""
+    _wants_kpp_override = (kpp_ri_crit is not None or kpp_cv is not None
+                           or kpp_eice is not None)
+    _tripole_kpp = grid == "tripole" and tripole_vmix == "kpp"
+    if _wants_kpp_override and not _tripole_kpp and grid not in (
             "mpas", "latlon_bathy"):
         raise SystemExit(
-            f"--kpp-ri-crit/--kpp-cv/--kpp-eice are wired for --grid mpas/latlon_bathy "
-            f"(grids that run the KPP boundary layer), not --grid {grid!r}. "
-            f"tripole runs the dynamics-core implicit vertical solve (no KPP) "
-            f"so the override would silently do nothing.")
+            f"--kpp-ri-crit/--kpp-cv/--kpp-eice are wired for --grid "
+            f"mpas/latlon_bathy, or --grid tripole WITH --tripole-vmix kpp "
+            f"(configurations that run the KPP boundary layer), not --grid "
+            f"{grid!r} (tripole-vmix={tripole_vmix!r}). Without a live KPP "
+            f"the override would silently do nothing.")
     # --kpp-eice IS wired on --grid mpas: _run_mpas_kpp threads
     # surface_forcing.ice_concentration to the shared KPP under-ice
     # attenuation (the earlier "tau/q only" MPAS restriction is removed —
@@ -3762,13 +3811,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "boundary layer (mpas: fix subtropical MLD ~half of "
                         "NEMO); LOWERING it shoals it (latlon_bathy: fix the "
                         "too-deep JANUARY winter ML, 174 m vs NEMO 93 m, that "
-                        "cools the 100 m mode water). --grid mpas/latlon_bathy "
-                        "only (both run KPP); tripole has no KPP boundary layer.")
+                        "cools the 100 m mode water). --grid mpas/latlon_bathy, "
+                        "or tripole WITH --tripole-vmix kpp (its default closure "
+                        "has no KPP boundary layer).")
     p.add_argument("--kpp-cv", type=float, default=None,
                    help="Override the KPP unresolved-shear coefficient Cv "
                         "(default 1.6). RAISING it increases V_t^2 -> deeper "
                         "boundary layer, LOWERING it shoals it (same MLD lever "
-                        "as --kpp-ri-crit). --grid mpas/latlon_bathy only.")
+                        "as --kpp-ri-crit). Same grid rule as --kpp-ri-crit.")
     p.add_argument("--kpp-eice", type=int, default=None, choices=[0, 1, 3],
                    help="Under-ice attenuation of the KPP turbulent velocity "
                         "scales (KPP w-scale analogue of ice suppression; "
@@ -3780,8 +3830,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "Arctic halocline-erosion lever (over-deep MLD + "
                         "Siberian salty) that --tke-eice fixed only on the TKE "
                         "grid. Needs --prognostic-sea-ice or a prescribed SIC. "
-                        "--grid latlon_bathy or mpas (both KPP-boundary-layer "
-                        "grids; the MPAS bridge now threads ice_concentration).")
+                        "--grid latlon_bathy / mpas (the MPAS bridge threads "
+                        "ice_concentration), or tripole WITH --tripole-vmix kpp.")
     p.add_argument("--tripole-vmix", type=str, default="none",
                    choices=["none", "tke", "kpp"],
                    help="Vertical-mixing CLOSURE on the tripole grid (the "
@@ -3901,8 +3951,10 @@ def main() -> int:
     p = _build_arg_parser()
     args = p.parse_args()
 
-    # KPP MLD-deepening sensitivity flags are mpas-only (fail loud, never silent).
-    _validate_kpp_grid(args.grid, args.kpp_ri_crit, args.kpp_cv, args.kpp_eice)
+    # KPP MLD-deepening sensitivity flags need a LIVE KPP (fail loud, never
+    # silent): mpas / latlon_bathy, or tripole under --tripole-vmix kpp.
+    _validate_kpp_grid(args.grid, args.kpp_ri_crit, args.kpp_cv, args.kpp_eice,
+                       tripole_vmix=args.tripole_vmix)
     # --kpp-eice needs an ice source to bite: surface_forcing.ice_concentration
     # is attached only under --prognostic-sea-ice or a prescribed SIC field
     # (--ice-albedo/--ice-thermo/--sss-restore load it).  Without one, ice_frac
@@ -4255,6 +4307,11 @@ def main() -> int:
             no_gm_redi=args.no_gm_redi,
             tripole_vmix=args.tripole_vmix,
             tke_eice=args.tke_eice,
+            # KPP overrides for --tripole-vmix kpp (same _kpp_vmix_override as
+            # mpas/latlon) -> tripole-KPP can match an MPAS-KPP run param-for-
+            # param: the same-scheme cross-grid pair isolating the GRID effect.
+            kpp_ri_crit=args.kpp_ri_crit, kpp_cv=args.kpp_cv,
+            kpp_eice=args.kpp_eice,
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":
