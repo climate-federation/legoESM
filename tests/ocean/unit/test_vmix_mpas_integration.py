@@ -34,6 +34,7 @@ from legoesm.ocean.physics.vertical_mixing.mpas_integration import (
     make_kpp_physics_mpas,
     make_kpp_profiles_mpas,
 )
+from legoesm.ocean.state import OceanSurfaceForcing
 from legoesm.ocean.vertical import create_ocean_z_star
 
 
@@ -234,3 +235,85 @@ class TestMPASSurfaceBuoyancyFlux:
         # real-salt contribution (no-double-count contract).
         assert Q_sfc_S is not None
         assert jnp.allclose(Q_sfc_S, 0.0)
+
+
+def _mpas_ice_forcing(nCells, ice=1.0, q_net=-200.0, tau=0.1):
+    """Surface-cooling + wind forcing WITH sea-ice cover on the MPAS cell grid.
+
+    Cooling (q_net<0) is destabilising -> a convective KPP boundary layer;
+    wind (tau) drives the shear velocity scale.  ``ice_concentration`` (nCells,)
+    is what the under-ice attenuation reads.
+    """
+    return OceanSurfaceForcing(
+        q_net=jnp.full((nCells,), q_net),
+        tau_x=jnp.full((nCells,), tau),
+        tau_y=jnp.zeros((nCells,)),
+        ice_concentration=jnp.full((nCells,), ice),
+    )
+
+
+class TestKPPUnderIceMPAS:
+    """MPAS KPP under-ice attenuation (``KPPConfig.eice``; NEMO ``nn_eice``).
+
+    The lat-lon eice lever now reaches the MPAS bridge: ``_run_mpas_kpp`` reads
+    ``surface_forcing.ice_concentration`` under the shared static eice gate and
+    threads it to ``kpp_vertical_mixing`` -> ``_kpp_ice_attenuation`` (the same
+    grid-agnostic kernel the C-grid paths use).  These pin the ADAPTER contract
+    (the attenuation kernel itself is covered by ``test_kpp_under_ice.py``).
+    """
+
+    def test_eice3_builds_and_runs_no_raise(self, mesh, z_coord, state):
+        """eice=3 must no longer raise NotImplementedError on the MPAS bridge —
+        it is wired.  Build + run returns finite, non-negative K_v."""
+        cfg = VerticalMixingConfig(scheme="kpp", kpp=KPPConfig(eice=3))
+        pf = make_kpp_profiles_mpas(cfg)
+        nCells = state.T.data.shape[0]
+        A_v, K_v = pf(state, mesh, z_coord, _mpas_ice_forcing(nCells))
+        assert bool(jnp.all(jnp.isfinite(K_v))) and bool(jnp.all(K_v >= 0.0))
+        assert bool(jnp.all(jnp.isfinite(A_v))) and bool(jnp.all(A_v >= 0.0))
+
+    def test_full_ice_attenuates_diffusivity(self, mesh, z_coord, state):
+        """Under full ice (fi=1), eice=3 gives eff=min(4·1,1)=1 -> attenuation
+        max(0,1-1)=0 -> the KPP velocity scales floor -> the boundary-layer
+        diffusivity collapses toward background vs the un-attenuated eice=0 run
+        on the SAME forcing.  Proves ice_concentration reaches the scales."""
+        nCells = state.T.data.shape[0]
+        forcing = _mpas_ice_forcing(nCells, ice=1.0)
+        pf0 = make_kpp_profiles_mpas(
+            VerticalMixingConfig(scheme="kpp", kpp=KPPConfig(eice=0)))
+        pf3 = make_kpp_profiles_mpas(
+            VerticalMixingConfig(scheme="kpp", kpp=KPPConfig(eice=3)))
+        _, Kv0 = pf0(state, mesh, z_coord, forcing)
+        _, Kv3 = pf3(state, mesh, z_coord, forcing)
+        ocean = state.land_mask.data >= 0.5     # (nCells,)
+        sum0 = float(jnp.sum(Kv0[ocean]))
+        sum3 = float(jnp.sum(Kv3[ocean]))
+        assert sum0 > 0.0, ("non-vacuous guard: eice=0 must produce a KPP "
+                            "boundary layer to attenuate")
+        assert sum3 < sum0, (
+            "eice=3 under full ice did not reduce KPP diffusivity — ice "
+            "concentration is not reaching the MPAS velocity-scale attenuation.")
+
+    def test_eice0_ignores_ice_bit_identical(self, mesh, z_coord, state):
+        """eice=0 must NOT read ice_concentration: forcing WITH ice gives the
+        bit-identical K_v to forcing without it (no silent under-ice coupling on
+        the default path — the eice=0 -> ice_frac=None gate)."""
+        nCells = state.T.data.shape[0]
+        pf0 = make_kpp_profiles_mpas(
+            VerticalMixingConfig(scheme="kpp", kpp=KPPConfig(eice=0)))
+        f_ice = _mpas_ice_forcing(nCells, ice=1.0)
+        f_noice = f_ice._replace(ice_concentration=None)
+        _, Kv_ice = pf0(state, mesh, z_coord, f_ice)
+        _, Kv_noice = pf0(state, mesh, z_coord, f_noice)
+        assert jnp.allclose(Kv_ice, Kv_noice), (
+            "eice=0 path read ice_concentration (should be inert).")
+
+    def test_unknown_eice_raises(self, mesh, z_coord, state):
+        """An out-of-set eice (dispatch footgun) raises rather than silently
+        running an undefined attenuation — validated at the call, like the
+        C-grid paths."""
+        cfg = VerticalMixingConfig(scheme="kpp", kpp=KPPConfig(eice=2))
+        pf = make_kpp_profiles_mpas(cfg)
+        nCells = state.T.data.shape[0]
+        with pytest.raises(ValueError, match="eice"):
+            pf(state, mesh, z_coord, _mpas_ice_forcing(nCells))

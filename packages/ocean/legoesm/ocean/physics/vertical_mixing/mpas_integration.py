@@ -314,6 +314,22 @@ def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg,
     fw = getattr(surface_forcing, "freshwater", None) if surface_forcing else None
     salt = getattr(surface_forcing, "salt_flux", None) if surface_forcing else None
 
+    # Under-ice velocity-scale attenuation (KPPConfig.eice; NEMO nn_eice) —
+    # the SAME static-config gate as the lat-lon KPP paths
+    # (integration.py / k_profiles.py) so MPAS honours eice through the shared
+    # grid-agnostic ``_kpp_ice_attenuation`` instead of silently no-oping it
+    # (dispatch discipline).  eice=0 -> ice_frac=None -> bit-identical to the
+    # pre-eice MPAS-KPP path.  ``ice_concentration`` (nCells,) rides on the
+    # full surface_forcing the model threads to the KPP factory (verified:
+    # ocean_model_mpas.py passes the WHOLE forcing, not a tau/q strip).
+    _kpp_eice = int(getattr(cfg, "eice", 0))
+    if _kpp_eice not in (0, 1, 3):
+        raise ValueError(
+            f"Unknown KPPConfig.eice={_kpp_eice!r}; expected 0, 1 or 3.")
+    ice_frac = (getattr(surface_forcing, "ice_concentration", None)
+                if (_kpp_eice != 0 and surface_forcing is not None)
+                else None)
+
     # Surface buoyancy + kinematic T/S fluxes (shared MPAS helper).
     B_f, Q_sfc_T, Q_sfc_S = _mpas_surface_buoyancy_flux(
         q_net, fw, salt, T_3d, S_3d, eos_fn=eos_fn)
@@ -323,7 +339,7 @@ def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg,
         rho, eta, z_coord, J, cfg,
         tau_x=tau_x, tau_y=tau_y, B_f=B_f,
         Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
-        eos_fn=eos_fn,
+        eos_fn=eos_fn, ice_frac=ice_frac,
     )
     return kpp_out, J
 
@@ -349,13 +365,10 @@ def make_kpp_physics_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callable
             "vertical-mixing bridge yet (lat-lon / tripole only) — reject "
             "rather than silently drop the wave-driven mixing.")
     cfg = config.kpp
-    if int(getattr(config.kpp, "eice", 0)) != 0:
-        raise NotImplementedError(
-            "KPPConfig.eice != 0 (under-ice velocity-scale attenuation) is not "
-            "wired on the MPAS KPP bridge yet: this bridge receives no ice "
-            "concentration (mpas_physics passes tau/q only). Set eice=0 on "
-            "MPAS, or run the under-ice KPP lever on the lat-lon C-grid where "
-            "surface_forcing.ice_concentration is threaded.")
+    # NOTE: KPPConfig.eice (under-ice velocity-scale attenuation) IS wired on
+    # the MPAS KPP bridge — ``_run_mpas_kpp`` reads surface_forcing.
+    # ice_concentration under the shared eice gate and threads it to
+    # ``kpp_vertical_mixing``.  eice is validated (0/1/3) there per call.
 
     def physics_fn(
         state: MPASOceanState,
@@ -557,13 +570,10 @@ def make_kpp_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
             "vertical-mixing bridge yet (lat-lon / tripole only) — reject "
             "rather than silently drop the wave-driven mixing.")
     cfg = config.kpp
-    if int(getattr(config.kpp, "eice", 0)) != 0:
-        raise NotImplementedError(
-            "KPPConfig.eice != 0 (under-ice velocity-scale attenuation) is not "
-            "wired on the MPAS KPP bridge yet: this bridge receives no ice "
-            "concentration (mpas_physics passes tau/q only). Set eice=0 on "
-            "MPAS, or run the under-ice KPP lever on the lat-lon C-grid where "
-            "surface_forcing.ice_concentration is threaded.")
+    # NOTE: KPPConfig.eice (under-ice velocity-scale attenuation) IS wired on
+    # the MPAS KPP bridge — ``_run_mpas_kpp`` reads surface_forcing.
+    # ice_concentration under the shared eice gate and threads it to
+    # ``kpp_vertical_mixing``.  eice is validated (0/1/3) there per call.
 
     def profiles_fn(
         state: MPASOceanState,

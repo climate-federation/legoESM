@@ -1681,12 +1681,10 @@ def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None, kpp_eice=None):
             f"(grids that run the KPP boundary layer), not --grid {grid!r}. "
             f"tripole runs the dynamics-core implicit vertical solve (no KPP) "
             f"so the override would silently do nothing.")
-    if kpp_eice is not None and grid == "mpas":
-        raise SystemExit(
-            "--kpp-eice is wired for --grid latlon_bathy only: the MPAS KPP "
-            "vertical-mixing bridge receives no ice concentration yet "
-            "(mpas_physics passes tau/q only), so the attenuation would "
-            "silently no-op there. Run the under-ice KPP lever on latlon.")
+    # --kpp-eice IS wired on --grid mpas: _run_mpas_kpp threads
+    # surface_forcing.ice_concentration to the shared KPP under-ice
+    # attenuation (the earlier "tau/q only" MPAS restriction is removed —
+    # ocean_model_mpas.py passes the whole forcing to the KPP factory).
 
 
 def _validate_pcg_variant_grid(grid, barotropic_pcg_variant=None,

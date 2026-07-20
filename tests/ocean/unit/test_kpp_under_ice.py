@@ -168,15 +168,25 @@ def test_config_default_off():
     assert KPPConfig().eice == 0
 
 
-def test_mpas_kpp_bridge_rejects_eice():
+def test_mpas_kpp_bridge_threads_eice():
+    """The MPAS KPP bridge now WIRES eice (the capability gap is closed):
+    ``_run_mpas_kpp`` (shared by both KPP factories) reads
+    ``surface_forcing.ice_concentration`` under the same static eice gate as the
+    C-grid paths and threads ``ice_frac`` to ``kpp_vertical_mixing`` — it must NO
+    LONGER hard-reject eice.  Functional attenuation is covered by
+    ``test_vmix_mpas_integration.py::TestKPPUnderIceMPAS``; this is the fast
+    source-level anti-regression tripwire that the wiring is not silently
+    reverted back to a NotImplementedError."""
     import inspect
     from legoesm.ocean.physics.vertical_mixing import mpas_integration
+    # Shared prep threads ice under the eice gate.
+    src_run = inspect.getsource(mpas_integration._run_mpas_kpp)
+    assert 'getattr(cfg, "eice", 0)' in src_run
+    assert 'ice_concentration' in src_run
+    assert 'ice_frac=ice_frac' in src_run
+    # The old capability-gap reject is gone from BOTH KPP factories (the IWM
+    # NotImplementedError is unrelated and legitimately stays).
     for fn in (mpas_integration.make_kpp_physics_mpas,
                mpas_integration.make_kpp_profiles_mpas):
         src = inspect.getsource(fn)
-        # the static eice guard + its NotImplementedError must both be present
-        # (the message wraps across string-continuation lines, so match the
-        # contiguous fragments, not the wrapped phrase).
-        assert 'getattr(config.kpp, "eice", 0)' in src
-        assert "NotImplementedError" in src
-        assert "MPAS KPP bridge" in src
+        assert "KPPConfig.eice != 0" not in src   # old eice reject removed
