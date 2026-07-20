@@ -1947,3 +1947,11 @@ class TestK33NemoNativeA33:
                 T, S, eta, H_bathy, grid, z_coord, cfg_bad,
                 eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
                 dt=2700.0)
+        # ... and msc on the mode_b placement is rejected too (the flag
+        # would otherwise be silently ignored — guard covers ALL branches).
+        cfg_bad2 = cfg_msc._replace(slope_positions="mode_b")
+        with _pytest.raises(ValueError, match="nemo_native"):
+            gm_redi_tracer_tendency_latlon(
+                T, S, eta, H_bathy, grid, z_coord, cfg_bad2,
+                eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
+                dt=2700.0)
