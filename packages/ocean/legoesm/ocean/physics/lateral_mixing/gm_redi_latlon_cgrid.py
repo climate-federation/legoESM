@@ -1204,16 +1204,22 @@ def nemo_iso_w_kappa_sums(aht, umask, vmask):
     """
     ax_y, ax_x, ax_z = 0, 1, 2
     up = lambda a: jnp.roll(a, +1, ax_z)     # level k-1 view
+    # Summation ORDER matters (FP non-associativity): use NEMO a33's literal
+    # order  ahtu(i,k-1) + ahtu(i-1,k) + ahtu(i-1,k-1) + ahtu(i,k)  — which,
+    # rolled to the explicit flux's (k,k+1) pair, reproduces the operator's
+    # pre-#1226 order  aht(k) + ah_im1(k+1) + ah_im1(k) + aht(k+1)  exactly
+    # (interior masks are 1.0 and x*1.0 is exact), keeping the all-wet
+    # interior byte-identical (codex round-2 #1).
     um_im1 = jnp.roll(umask, +1, ax_x)
     ah_im1 = jnp.roll(aht, +1, ax_x)
-    cnt_u = umask + um_im1 + up(umask) + up(um_im1)
-    ksum_u = (aht * umask + ah_im1 * um_im1
-              + up(aht * umask) + up(ah_im1 * um_im1))
+    A_u, B_u = aht * umask, ah_im1 * um_im1
+    cnt_u = up(umask) + um_im1 + up(um_im1) + umask
+    ksum_u = up(A_u) + B_u + up(B_u) + A_u
     vm_jm1 = jnp.roll(vmask, +1, ax_y)
     ah_jm1 = jnp.roll(aht, +1, ax_y)
-    cnt_v = vmask + vm_jm1 + up(vmask) + up(vm_jm1)
-    ksum_v = (aht * vmask + ah_jm1 * vm_jm1
-              + up(aht * vmask) + up(ah_jm1 * vm_jm1))
+    A_v, B_v = aht * vmask, ah_jm1 * vm_jm1
+    cnt_v = up(vmask) + vm_jm1 + up(vm_jm1) + vmask
+    ksum_v = up(A_v) + B_v + up(B_v) + A_v
     return ksum_u, cnt_u, ksum_v, cnt_v
 
 
