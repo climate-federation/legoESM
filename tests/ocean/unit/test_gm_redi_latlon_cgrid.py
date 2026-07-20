@@ -1688,3 +1688,97 @@ class TestMSCStabilize:
         b0 = self._call(a0)
         on0 = self._call(a0, msc_stabilize=True, dt=3600.0)
         assert jnp.allclose(b0, on0, rtol=1e-10, atol=1e-30)
+
+
+class TestK33NemoNativeA33:
+    """#1226: the nemo_native K33 is NEMO's traldf_iso_a33 ah_wslp2 — the
+    mask-normalized 4-point ahtu/ahtv w-average times the SAME wslpi/wslpj
+    the explicit operator differences.  A K33 built from a different slope
+    discretization under-covers the dropped diagonal and the net vertical
+    diffusivity goes negative — the kappa-scaled DINO tracer runaway.
+    """
+
+    def _cfg_native(self, cfg):
+        return cfg._replace(
+            slope_scheme="nemo_iso_lap", slope_positions="nemo_native",
+            slope_limit="nemo_cap", implicit_K33=True, kappa_GM=0.0)
+
+    def test_homogeneous_tracer_rest_on_staircase(self):
+        """Homogeneous T,S on a STAIRCASE bathymetry: slopes are zero, so the
+        explicit tendency AND the implicit K33 must both be exactly zero —
+        the #1226 instrument-(a) rest gate."""
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        n_lat, n_lon, nlev = T.shape
+        cfg_n = self._cfg_native(cfg)
+        # staircase: shoal the eastern third by 2 levels
+        dz = jnp.asarray(z_coord.dz_ref)
+        H_stair = jnp.asarray(H_bathy).at[:, 2 * n_lon // 3:].set(
+            float(jnp.sum(dz[:-2])))
+        T0 = jnp.full_like(T, 10.0)
+        S0 = jnp.full_like(S, 35.0)
+        dT, dS = gm_redi_tracer_tendency_latlon(
+            T0, S0, eta, H_stair, grid, z_coord, cfg_n,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask)
+        assert float(jnp.max(jnp.abs(dT))) == 0.0
+        assert float(jnp.max(jnp.abs(dS))) == 0.0
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            compute_isoneutral_K33_latlon)
+        K33 = compute_isoneutral_K33_latlon(
+            T0, S0, eta, H_stair, grid, z_coord, cfg_n,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask)
+        assert K33.shape == (n_lat, n_lon, nlev - 1)
+        assert float(jnp.max(jnp.abs(K33))) == 0.0
+
+    def test_interior_matches_kappa_slope_square(self):
+        """Flat bottom, uniform kappa, away from walls: ah_wslp2 reduces to
+        kappa*(wslpi^2+wslpj^2) — the pre-#1226 formula is the interior
+        limit of the a33 transcription (regression anchor)."""
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        cfg_n = self._cfg_native(cfg)
+        from legoesm.ocean.eos import make_eos_fn
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            compute_isoneutral_K33_latlon, compute_nemo_native_slopes,
+            gm_redi_density_and_jacobian)
+        K33 = compute_isoneutral_K33_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg_n,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask)
+        rho_d, _ = gm_redi_density_and_jacobian(
+            T, S, eta, H_bathy, grid, z_coord, eos="linear", mask=mask)
+        z_top = jnp.cumsum(z_coord.dz_ref) - z_coord.dz_ref
+        act = ((mask[:, :, jnp.newaxis] > 0.5)
+               & (z_top[jnp.newaxis, jnp.newaxis, :]
+                  < H_bathy[:, :, jnp.newaxis])).astype(T.dtype)
+        _, _, wi, wj = compute_nemo_native_slopes(
+            rho_d, T, S, mask, u_mask, v_mask, z_coord, grid, cfg_n,
+            make_eos_fn("linear", None), active_3d=act)
+        ref = (cfg_n.kappa_Redi * (wi ** 2 + wj ** 2))[:, :, 1:]
+        # interior cells only (2 rows/cols from any wall)
+        d = jnp.abs(K33 - ref)[2:-2, 2:-2, :]
+        r = jnp.abs(ref)[2:-2, 2:-2, :]
+        assert float(jnp.max(d)) <= 1e-12 * max(float(jnp.max(r)), 1e-30), (
+            f"interior a33 != kappa*S^2: max|d|={float(jnp.max(d)):.3e} "
+            f"vs max|ref|={float(jnp.max(r)):.3e}")
+
+    def test_k33_finite_nonnegative_on_staircase(self):
+        """Staircase walls: the mask-normalized w-kappa stays finite and
+        K33 >= 0 everywhere (zero where the w-point is dry)."""
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        n_lat, n_lon, nlev = T.shape
+        cfg_n = self._cfg_native(cfg)
+        dz = jnp.asarray(z_coord.dz_ref)
+        H_stair = jnp.asarray(H_bathy).at[:, 2 * n_lon // 3:].set(
+            float(jnp.sum(dz[:-2])))
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            compute_isoneutral_K33_latlon)
+        K33 = compute_isoneutral_K33_latlon(
+            T, S, eta, H_stair, grid, z_coord, cfg_n,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask)
+        assert bool(jnp.all(jnp.isfinite(K33)))
+        assert float(jnp.min(K33)) >= 0.0
+        # sub-seafloor interfaces of the shoaled columns carry ZERO K33
+        # (interface m sits atop cell m+1; cells nlev-2, nlev-1 are dry there)
+        shoal = K33[:, 2 * n_lon // 3:, nlev - 3:]
+        assert float(jnp.max(jnp.abs(shoal))) == 0.0
