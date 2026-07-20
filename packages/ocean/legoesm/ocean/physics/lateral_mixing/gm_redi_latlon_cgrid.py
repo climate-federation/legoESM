@@ -1163,6 +1163,60 @@ def nemo_eiv_bolus_transport(
     return u_eiv, v_eiv, w_eiv_kp1
 
 
+def nemo_iso_face_masks(u_mask, v_mask, act):
+    """NEMO-convention 3-D face masks from the 2-D walls + 3-D wet mask.
+
+    ``umask[j,i,k]`` = east u-face of cell i wet at level k (wall open AND
+    both bracketing cells wet); ``vmask`` the north analogue;
+    ``wmask(k) = tmask(k)·tmask(k-1)``, ``wmask(0)=tmask(0)``.
+
+    Shared by the explicit ``nemo_iso_lap`` operator and the implicit K33
+    (traldf_iso_a33) so the two sides of the explicit/implicit split build
+    their stencils from IDENTICAL masks (#1226).
+    """
+    umask = u_mask[:, 1:, jnp.newaxis] * act * jnp.roll(act, -1, axis=1)
+    vmask = v_mask[1:, :, jnp.newaxis] * act * jnp.roll(act, -1, axis=0)
+    wmask = act * jnp.roll(act, +1, axis=2)
+    wmask = wmask.at[:, :, 0].set(act[:, :, 0])
+    return umask, vmask, wmask
+
+
+def nemo_iso_w_kappa_sums(aht, umask, vmask):
+    """Masked 4-point kappa sums + wet counts for the traldf_iso w-point
+    kappa average, in the a33 "above" convention: level pair (k-1, k),
+    faces (i-1, i) / (j-1, j).
+
+    NEMO masks ``ahtu/ahtv`` at build (``ldftra.F90:365``), so its raw
+    4-sum is a WET-ONLY sum — transcribed here as masked-kappa-sum, with
+    the wet count returned separately because the two consumers apply
+    DIFFERENT wmask indices to the normalization (transcription detail):
+
+      * a33 / implicit K33 (``traldf_iso_a33``): faces (k-1,k) with
+        ``zmsku = wmask(k)/MAX(count,1)`` — use these fields directly.
+      * explicit flux at the interface BELOW cell k
+        (``traldf_iso_scheme.h90:109``): faces (k,k+1) with
+        ``zmsku = wmask(k)/MAX(count,1)`` — i.e. ``roll(sum/count, -1)``
+        in the level axis but wmask NOT rolled.
+
+    ONE sum/count implementation shared by both so the explicit/implicit
+    split can never diverge (#1226).  Returns
+    ``(ksum_u, cnt_u, ksum_v, cnt_v)``, all (n_lat, n_lon, nlev).
+    """
+    ax_y, ax_x, ax_z = 0, 1, 2
+    up = lambda a: jnp.roll(a, +1, ax_z)     # level k-1 view
+    um_im1 = jnp.roll(umask, +1, ax_x)
+    ah_im1 = jnp.roll(aht, +1, ax_x)
+    cnt_u = umask + um_im1 + up(umask) + up(um_im1)
+    ksum_u = (aht * umask + ah_im1 * um_im1
+              + up(aht * umask) + up(ah_im1 * um_im1))
+    vm_jm1 = jnp.roll(vmask, +1, ax_y)
+    ah_jm1 = jnp.roll(aht, +1, ax_y)
+    cnt_v = vmask + vm_jm1 + up(vmask) + up(vm_jm1)
+    ksum_v = (aht * vmask + ah_jm1 * vm_jm1
+              + up(aht * vmask) + up(ah_jm1 * vm_jm1))
+    return ksum_u, cnt_u, ksum_v, cnt_v
+
+
 def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     q: jnp.ndarray,
     S_x: jnp.ndarray,
@@ -1284,12 +1338,8 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     # (act column-uniform ⇒ act(i)==act(i+1)) but prevents a silent flux leak
     # into a dry cell at a lateral bathymetry step (a topographic column next to
     # a shallower one) — the "stale face mask → mass leak" footgun.
-    umask = u_mask[:, 1:, jnp.newaxis] * act * jnp.roll(act, -1, axis=1)
-    vmask = v_mask[1:, :, jnp.newaxis] * act * jnp.roll(act, -1, axis=0)
-    # NEMO wmask(k)=tmask(k)·tmask(k-1); wmask(0)=tmask(0). Zeros the interface
-    # below the deepest wet cell (the sea floor).
-    wmask = act * jnp.roll(act, +1, axis=2)
-    wmask = wmask.at[:, :, 0].set(act[:, :, 0])
+    # Shared with the implicit-K33 side (#1226): one mask construction.
+    umask, vmask, wmask = nemo_iso_face_masks(u_mask, v_mask, act)
 
     # --- Diffusivity as a 3-D field (NEMO ahtu=ahtv=aht).  Broadcast a
     # scalar / 2-D per-column / 3-D interface kappa to (n_lat,n_lon,nlev). ---
@@ -1349,25 +1399,20 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     zfv = aht * (zA22 * zdjt + zA23 * avg4_v)
 
     # ================= VERTICAL flux zfw at w-level jk+1 (A31 + A32) ========
-    um_im1 = jnp.roll(umask, +1, ax_x)
-    um_kp1 = jnp.roll(umask, -1, ax_z)
-    um_im1_kp1 = jnp.roll(um_im1, -1, ax_z)
-    zmsku_w = wmask / jnp.maximum(umask + um_im1_kp1 + um_im1 + um_kp1, 1.0)
-    vm_jm1 = jnp.roll(vmask, +1, ax_y)
-    vm_kp1 = jnp.roll(vmask, -1, ax_z)
-    vm_jm1_kp1 = jnp.roll(vm_jm1, -1, ax_z)
-    zmskv_w = wmask / jnp.maximum(vmask + vm_jm1_kp1 + vm_jm1 + vm_kp1, 1.0)
-
-    # zahu_w = (Σ4 ahtu around the w-point) · zmsku_w  (zmsku_w appears TWICE:
-    # here and explicitly in zA31 — faithful to traldf_iso_scheme.h90).
-    ahtu_im1 = jnp.roll(aht, +1, ax_x)
-    ahtu_kp1 = jnp.roll(aht, -1, ax_z)
-    ahtu_im1_kp1 = jnp.roll(ahtu_im1, -1, ax_z)
-    zahu_w = (aht + ahtu_im1_kp1 + ahtu_im1 + ahtu_kp1) * zmsku_w
-    ahtv_jm1 = jnp.roll(aht, +1, ax_y)
-    ahtv_kp1 = jnp.roll(aht, -1, ax_z)
-    ahtv_jm1_kp1 = jnp.roll(ahtv_jm1, -1, ax_z)
-    zahv_w = (aht + ahtv_jm1_kp1 + ahtv_jm1 + ahtv_kp1) * zmskv_w
+    # Shared a33 kappa sums (#1226): faces (k,k+1) here = the "above"
+    # sums at k+1 (roll -1); the wmask factor stays AT k — NEMO's
+    # scheme.h90:109 zmsku uses wmask(jk) with the (jk,jk+1) face pair
+    # (transcription detail; NOT a pure shift of the a33 stencil).
+    # NEMO masks aht at build (ldftra:365), so the shared masked-sum /
+    # wet-count IS scheme.h90's (masked 4-sum)·zmsku — the previous
+    # inline version summed UNMASKED kappa (4k/N at an N-wet-face wall
+    # vs the K33's k: the residual split mismatch).
+    _ksum_u, _cnt_u, _ksum_v, _cnt_v = nemo_iso_w_kappa_sums(
+        aht, umask, vmask)
+    zmsku_w = wmask / jnp.maximum(jnp.roll(_cnt_u, -1, ax_z), 1.0)
+    zmskv_w = wmask / jnp.maximum(jnp.roll(_cnt_v, -1, ax_z), 1.0)
+    zahu_w = jnp.roll(_ksum_u, -1, ax_z) * zmsku_w
+    zahv_w = jnp.roll(_ksum_v, -1, ax_z) * zmskv_w
 
     wslpi_kp1 = jnp.roll(wslpi, -1, ax_z)            # wslpi(jk+1)
     wslpj_kp1 = jnp.roll(wslpj, -1, ax_z)
@@ -2934,55 +2979,23 @@ def compute_isoneutral_K33_latlon(
             _rho, T, S, _m, _um, _vm, z_coord, grid, cfg, _eosfn,
             rho_0=rho_0, g=g, active_3d=_act)
         _kap = cfg.kappa_Redi if kappa_redi_override is None else kappa_redi_override
-        nlev_n = T.shape[-1]
-        # ahtu/ahtv at u/v faces (NEMO placement) via the shared dispatch.
-        _, _kap_u, _kap_v, _ = _kappa_center_uvw(_kap, nlev_n)
-        _kap_u3 = (_kap_u * jnp.ones((1, 1, nlev_n), T.dtype)
-                   if isinstance(_kap_u, jnp.ndarray) and _kap_u.ndim == 3
-                   else jnp.broadcast_to(
-                       jnp.asarray(_kap_u, T.dtype),
-                       (T.shape[0], T.shape[1] + 1, 1))
-                   * jnp.ones((1, 1, nlev_n), T.dtype))
-        _kap_v3 = (_kap_v * jnp.ones((1, 1, nlev_n), T.dtype)
-                   if isinstance(_kap_v, jnp.ndarray) and _kap_v.ndim == 3
-                   else jnp.broadcast_to(
-                       jnp.asarray(_kap_v, T.dtype),
-                       (T.shape[0] + 1, T.shape[1], 1))
-                   * jnp.ones((1, 1, nlev_n), T.dtype))
-        # 3-D NEMO face masks: wall openness AND both bracketing cells wet
-        # at level k.  NEMO umask(ji) = east face of cell ji = legoESM u-face
-        # ji+1; interior faces only (boundary faces stay walls).
-        _um3 = jnp.zeros((T.shape[0], T.shape[1] + 1, nlev_n), T.dtype)
-        _um3 = _um3.at[:, 1:-1, :].set(
-            _um[:, 1:-1, jnp.newaxis] * _act[:, :-1, :] * _act[:, 1:, :])
-        _vm3 = jnp.zeros((T.shape[0] + 1, T.shape[1], nlev_n), T.dtype)
-        _vm3 = _vm3.at[1:-1, :, :].set(
-            _vm[1:-1, :, jnp.newaxis] * _act[:-1, :, :] * _act[1:, :, :])
-        # w-point mask at the top of cell k (k>=1): both bracketing cells wet.
-        _wm = _act * jnp.concatenate(
-            [jnp.ones_like(_act[:, :, :1]), _act[:, :, :-1]], axis=-1)
-        # NEMO a33 stencil at the w-point of cell (j,i,k), k>=1 (0-based;
-        # NEMO 2:jpkm1): ahtu/umask contributions from faces i,i+1 (legoESM
-        # indexing) at levels k and k-1:
-        #   zahu_w = (sum of 4 ahtu) * zmsku,  zmsku = wmask/MAX(count, 1).
-        # NEMO's ahtu is umask-masked at build (ldftra), so the raw 4-sum is
-        # a WET-ONLY sum and zmsku normalizes it by the wet count — i.e. the
-        # wet-face mean.  Transcribe as masked-kappa sum / wet count.
-        def _zah_w(face3, kapf3, lo_axis):
-            if lo_axis == 1:
-                f_lo, f_hi = face3[:, :-1, :], face3[:, 1:, :]
-                k_lo, k_hi = kapf3[:, :-1, :], kapf3[:, 1:, :]
-            else:
-                f_lo, f_hi = face3[:-1, :, :], face3[1:, :, :]
-                k_lo, k_hi = kapf3[:-1, :, :], kapf3[1:, :, :]
-            up = lambda a: jnp.concatenate(
-                [a[:, :, :1], a[:, :, :-1]], axis=-1)     # level k-1 view
-            cnt = f_lo + f_hi + up(f_lo) + up(f_hi)
-            ksum = (k_lo * f_lo + k_hi * f_hi
-                    + up(k_lo * f_lo) + up(k_hi * f_hi))
-            return ksum * (_wm / jnp.maximum(cnt, 1.0))
-        _zahu_w = _zah_w(_um3, _kap_u3, lo_axis=1)
-        _zahv_w = _zah_w(_vm3, _kap_v3, lo_axis=0)
+        # Center kappa broadcast IDENTICAL to the explicit operator's own
+        # ``aht`` block, then the SHARED mask + a33 kappa-sum helpers — one
+        # construction on both sides of the explicit/implicit split, so the
+        # coefficients cannot diverge at walls or with nonuniform kappa.
+        if isinstance(_kap, jnp.ndarray) and _kap.ndim == 3:
+            _aht = jnp.broadcast_to(_kap, T.shape)
+        elif isinstance(_kap, jnp.ndarray) and _kap.ndim == 2:
+            _aht = jnp.broadcast_to(_kap[:, :, jnp.newaxis], T.shape)
+        else:
+            _aht = jnp.broadcast_to(jnp.asarray(_kap, T.dtype), T.shape)
+        _um3, _vm3, _wm3 = nemo_iso_face_masks(_um, _vm, _act)
+        _ksum_u, _cnt_u, _ksum_v, _cnt_v = nemo_iso_w_kappa_sums(
+            _aht, _um3, _vm3)
+        # a33 (traldf_iso.F90:283): zmsku = wmask(k)/MAX(count,1) with the
+        # (k-1,k) face pair — the helper's native convention.
+        _zahu_w = _ksum_u * (_wm3 / jnp.maximum(_cnt_u, 1.0))
+        _zahv_w = _ksum_v * (_wm3 / jnp.maximum(_cnt_v, 1.0))
         _k33_w = _zahu_w * _wi ** 2 + _zahv_w * _wj ** 2   # (..., nlev) w-tops
         return _k33_w[:, :, 1:]                            # interfaces 0..nlev-2
     kappa_Redi = cfg.kappa_Redi if kappa_redi_override is None else kappa_redi_override
