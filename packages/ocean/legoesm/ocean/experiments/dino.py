@@ -2205,6 +2205,14 @@ def dino_lat_lon_model_config(
             # traldf_iso_a33 mask-normalized w-point kappa — NEMO's own
             # explicit/implicit split, transcribed.
             slope_positions="nemo_native",
+            # ln_traldf_msc=T (the DINO namelist): NEMO's Method of
+            # Stabilizing Correction — the explicit A33 remainder is bounded
+            # by the 1/2 vertical-CFL limit and the implicit solve receives
+            # the capped akz.  Without it the explicit off-diagonal terms at
+            # NEMO-strength kappa exceed their stability limit: the 1-year
+            # r1_exact screen ran away after day ~100 (T 27 -> 52 -> 90 C)
+            # with msc off, matching the missing-MSC signature (#1226).
+            msc_stabilize=True,
             mld_criterion=cfg.gm_redi_mld_criterion,
             visbeck=VisbeckConfig(enabled=False),
             treguier=TreguierConfig(enabled=False),

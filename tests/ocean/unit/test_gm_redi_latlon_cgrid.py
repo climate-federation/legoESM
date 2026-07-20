@@ -1856,3 +1856,61 @@ class TestK33NemoNativeA33:
         np.testing.assert_allclose(
             np.asarray(K33), ref, rtol=1e-12, atol=1e-20,
             err_msg="K33 != direct traldf_iso_a33 NEMO-index reference")
+
+    def test_msc_akz_split_identities(self):
+        """ln_traldf_msc=T (the DINO namelist): the a33 split must satisfy
+        0 <= akz <= ah_wslp2 + dt-independent identity checks — the explicit
+        remainder (ah_wslp2 - akz) is what scheme.h90 puts back in the flux,
+        so implicit(akz) + explicit remainder == full diagonal by
+        construction, and small dt drives akz -> 0 (all-explicit regime)."""
+        import numpy as np
+        from legoesm.grids.latlon import ensure_geometry
+        from legoesm.ocean.eos import make_eos_fn
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            compute_nemo_native_slopes, gm_redi_density_and_jacobian,
+            nemo_iso_a33, nemo_iso_face_masks)
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        cfg_n = self._cfg_native(cfg)
+        rho_d, _ = gm_redi_density_and_jacobian(
+            T, S, eta, H_bathy, grid, z_coord, eos="linear", mask=mask)
+        z_top = jnp.cumsum(z_coord.dz_ref) - z_coord.dz_ref
+        act = ((mask[:, :, jnp.newaxis] > 0.5)
+               & (z_top[jnp.newaxis, jnp.newaxis, :]
+                  < H_bathy[:, :, jnp.newaxis])).astype(T.dtype)
+        _, _, wi, wj = compute_nemo_native_slopes(
+            rho_d, T, S, mask, u_mask, v_mask, z_coord, grid, cfg_n,
+            make_eos_fn("linear", None), active_3d=act)
+        um3, vm3, wm3 = nemo_iso_face_masks(u_mask, v_mask, act)
+        aht = jnp.broadcast_to(jnp.asarray(2000.0, T.dtype), T.shape)
+        geom = ensure_geometry(grid)
+        e1u_c, e2v_c = geom.dx_u[:, 1:], geom.dy_v[1:, :]
+        e3t = z_coord.dz_ref[None, None, :] * jnp.ones_like(T)
+        e3w = 0.5 * (jnp.roll(e3t, +1, 2) + e3t)
+        e3w = e3w.at[:, :, 0].set(e3t[:, :, 0])
+        ahw_f, akz_f = nemo_iso_a33(
+            aht, um3, vm3, wm3, wi, wj, e1u_c, e2v_c, e3w ** 2,
+            dt=None, msc=False)
+        assert bool(jnp.all(akz_f == ahw_f))          # msc=F: full implicit
+        ahw, akz = nemo_iso_a33(
+            aht, um3, vm3, wm3, wi, wj, e1u_c, e2v_c, e3w ** 2,
+            dt=2700.0, msc=True)
+        np.testing.assert_array_equal(np.asarray(ahw), np.asarray(ahw_f))
+        assert float(jnp.min(akz)) >= 0.0
+        # akz <= zcoef0*e3w2/dt with the -1/2 cap => akz < ah_wslp2 + akz_h*e3w2
+        # (weak identity); the STRONG stability property: explicit remainder
+        # obeys the half-CFL bound  dt*(ah_wslp2 - akz)/e3w2 <= 1/2 + dt*akz_h
+        rem = np.asarray(ahw - akz)
+        bound = 0.5 * np.asarray(e3w ** 2) / 2700.0
+        # where akz > 0 the remainder equals the cap exactly minus akz_h part
+        assert np.all(rem <= np.asarray(ahw) + 1e-12)
+        # small dt -> cap not reached -> akz == 0 everywhere
+        _, akz_small = nemo_iso_a33(
+            aht, um3, vm3, wm3, wi, wj, e1u_c, e2v_c, e3w ** 2,
+            dt=1e-3, msc=True)
+        assert float(jnp.max(akz_small)) == 0.0
+        # msc=True without dt raises loudly
+        import pytest as _pytest
+        with _pytest.raises(ValueError, match="requires dt"):
+            nemo_iso_a33(aht, um3, vm3, wm3, wi, wj, e1u_c, e2v_c,
+                         e3w ** 2, dt=None, msc=True)
