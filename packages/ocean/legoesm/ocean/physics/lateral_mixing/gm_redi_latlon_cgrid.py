@@ -3521,6 +3521,8 @@ def compute_realized_signed_conversions(
                 T, S, eta, H_bathy, grid, z_coord, cfg, eos=eos,
                 eos_linear=eos_linear, mask=mask, rho_0=rho_0, g=g,
                 kappa_redi_override=kappa_redi,
+                # #1226: same wall masks as this function's flux path.
+                u_mask=u_mask, v_mask=v_mask,
             )
             Tf = neumann_fill_cgrid(T, mask)
             Sf = neumann_fill_cgrid(S, mask)
