@@ -385,9 +385,8 @@ def cgrid_latlon_hydrostatic_tendencies(
     # and left an O(slope) spurious force (the #1029 seed).  The SB81
     # gradients feed BOTH the momentum correction and the thermodynamic
     # ``v . grad_eta(ln p)`` conversion (one shared discrete field — see
-    # section 11), so the hybrid lane no longer takes a ``ln p_s``
-    # gradient at all.
-    ln_ps = jnp.log(p_s)
+    # section 11), so the hybrid lane neither carries nor differences a
+    # ``ln p_s`` channel.
     n_lat_g, n_lon_g, nlev_g = B.shape
     if _hybrid:
         from legoesm.grids.vertical import sb81_full_level_ln_p
@@ -396,6 +395,7 @@ def cgrid_latlon_hydrostatic_tendencies(
             [B, lnp_sb], axis=-1,
         )  # (n_lat, n_lon, 2*nlev)
     else:
+        ln_ps = jnp.log(p_s)
         _Bln_stack = jnp.concatenate(
             [B, ln_ps[..., jnp.newaxis]], axis=-1,
         )  # (n_lat, n_lon, nlev+1)
