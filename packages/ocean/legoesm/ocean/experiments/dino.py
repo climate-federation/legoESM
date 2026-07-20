@@ -540,6 +540,9 @@ class DINOConfig:
     #     with coriolis_scheme="explicit_ab2" (Matsuno off) — used by the leapfrog
     #     (nemo_dino_kamm_mlf) card.
     vorticity_scheme: str = "al81"
+    # Boundary-q for the AL81/EEN PV flux: "neumann_fill" (legacy smooth fill)
+    # or "nemo_live" (vor_een ln_dynvor_msk=F: coast shear-zeta live in triads).
+    een_q_boundary: str = "neumann_fill"
     # Robert-Asselin filter coefficient (rn_atfp) for outer_integrator="leapfrog"
     # (NEMO plain RA, not Williams). NEMO default 0.1. Ignored otherwise.
     asselin_gamma: float = 0.1
@@ -763,7 +766,24 @@ DINO_RECIPES: dict[str, dict] = {
         "tracer_advection": "fct2",
         # -- Tracer lateral diffusion (namtra_ldf: ln_traldf_iso + ln_traldf_msc,
         #    nn_aht_ijk_t=20, rn_Ud=0.027, rn_Ld=100e3) + GM (namtra_eiv: ln_ldfeiv=T,
-        #    nn_aei_ijk_t=21 => Treguier aei0 = rn_Ue*rn_Le = 0.03*100e3 = 3000). --
+        #    nn_aei_ijk_t=21 => Treguier aei0 = ½·rn_Ue·rn_Le = 1500, NOT Ue·Le=3000
+        #    — ldftra.F90:290 zUfac=r1_2·rn_Ud and :332 'aei0=1/2 rn_Ue*Le', the ½
+        #    convention holds for BOTH aht0 and aei0; card fixed 2026-07-19). NEMO
+        #    has NO separate geopotential background diffusion: its ONLY lateral
+        #    tracer mixing is the isoneutral ½·Ud·max(e1,e2) ≈ 1501·cosφ. The
+        #    prior card left lateral_tracer_mixing="geopotential" (K_h≈6e3
+        #    horizontal — a Veronis mixer NEMO does not have) + kappa_Redi=200
+        #    flat + dm95_taper: prime suspect for ACC 18-vs-69 Sv @y1 + the
+        #    smoothness deficit (SSH small-scale 0.41x @y1). --
+        # UNBLOCKED (2026-07-20, PR #1233): the 2026-07-19 runaway was NOT
+        # missing-MSC — the explicit operator and implicit K33 used DIFFERENT
+        # slope discretizations (PSD violated -> local antidiffusion). Fixed by
+        # the shared-a33 construction (slope_positions="nemo_native", K33 =
+        # traldf_iso_a33 verbatim, staircase masks). Faithful namtra_ldf
+        # selections now live:
+        "lateral_tracer_mixing": "isoneutral",   # ln_traldf_iso; no geopotential K_h
+        "redi_slope_limit": "nemo_cap",          # ldfslp rn_slpmax cap (not DM95)
+        "treguier_aei0": 1500.0,                 # 1/2*rn_Ue*rn_Le (ldftra.F90:332)
         #    NEMO's Madec STANDARD ln_traldf_iso operator + ln_ldfeiv GM bolus
         #    (ldf_eiv_trp_MLF), now implemented in the nemo_iso_lap path (conserving
         #    to machine precision + energetically correct — flattens isopycnals).
@@ -897,6 +917,8 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     **DINO_RECIPES["nemo_dino_kamm"],
     "outer_integrator": "leapfrog",       # NEMO stp_MLF (key_qco, no key_RK3)
     "vorticity_scheme": "een_total",      # ln_dynvor_een: (f+zeta) in the EEN triad
+    "een_q_boundary": "nemo_live",        # vor_een keeps coast shear-zeta LIVE
+                                          # (ln_dynvor_msk=F; no Neumann fill)
     "coriolis_scheme": "explicit_ab2",    # Matsuno rotation OFF; Coriolis in the RHS
     "asselin_gamma": 0.1,                 # rn_atfp (plain Robert-Asselin, not Williams)
     # LIVE in-substep EEN barotropic Coriolis (node 16, NEMO dyn_cor_2D applied
@@ -2180,17 +2202,17 @@ def dino_lat_lon_model_config(
         # REMAINING DEVIATION (documented, audit row 8): NEMO caps the
         # SLOPE at rn_slpmax and ramps it inside the ML; our DM95 tanh
         # TAPERS kappa to zero around S_max instead.
-        if cfg.use_gm_redi:
-            raise ValueError(
-                "DINOConfig: lateral_tracer_mixing='isoneutral' with "
-                "use_gm_redi=True (EIV) is not wired yet — the R1 oracle "
-                "runs EIV off; add the combined branch when the "
-                "eddy-permitting recipes need it.")
         # Equator aht = ½·U_T·R·dλ = K_h_base (the SAME coefficient the
         # legacy iso-level K_h used); per-row cos φ applied by the model
-        # via kappa_redi_lat_scaling.
+        # via kappa_redi_lat_scaling.  With use_gm_redi=True this is the
+        # full NEMO namtra_ldf + namtra_eiv combination (DINO R1 Kamm):
+        # static isoneutral Redi aht=½·Ud·e1(φ) (nn_aht_ijk_t=20) PLUS the
+        # Treguier-21 adaptive GM capped at aei0=½·Ue·Le — aht and aei are
+        # INDEPENDENT fields in NEMO (ldftra.F90:290,332).
         gm_redi_cfg = GMRediConfig(
-            kappa_GM=0.0,
+            # kappa_GM anchor is runtime-overridden by the enabled Treguier
+            # diagnostic (same non-degenerate anchor as the legacy branch).
+            kappa_GM=(cfg.visbeck_kappa_min if cfg.use_gm_redi else 0.0),
             kappa_Redi=float(K_h_base),
             kappa_redi_lat_scaling=True,
             S_max=cfg.redi_S_max,
@@ -2221,8 +2243,18 @@ def dino_lat_lon_model_config(
             # with msc off, matching the missing-MSC signature (#1226).
             msc_stabilize=True,
             mld_criterion=cfg.gm_redi_mld_criterion,
-            visbeck=VisbeckConfig(enabled=False),
-            treguier=TreguierConfig(enabled=False),
+            visbeck=VisbeckConfig(
+                enabled=(cfg.use_gm_redi
+                         and cfg.gm_kappa_scheme == "visbeck"),
+                alpha=cfg.visbeck_alpha,
+                kappa_min=cfg.visbeck_kappa_min,
+                kappa_max=cfg.visbeck_kappa_max,
+            ),
+            treguier=TreguierConfig(
+                enabled=(cfg.use_gm_redi
+                         and cfg.gm_kappa_scheme == "treguier"),
+                aei0=cfg.treguier_aei0,
+            ),
         )
     else:
         gm_redi_cfg = GMRediConfig(
@@ -2319,6 +2351,7 @@ def dino_lat_lon_model_config(
         coriolis_scheme=cfg.coriolis_scheme,
         outer_integrator=cfg.outer_integrator,
         vorticity_scheme=cfg.vorticity_scheme,
+        een_q_boundary=cfg.een_q_boundary,
         asselin_gamma=cfg.asselin_gamma,
         ab2_scope=cfg.ab2_scope,
         # Routed into config.barotropic by from_flat.  Required by the

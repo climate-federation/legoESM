@@ -1738,6 +1738,7 @@ def _bc_pv_flux(
     enstrophy_metric=False,
     reconstruct_zeta=False,
     vorticity_scheme="al81",
+    een_q_boundary="neumann_fill",
 ):
     """Stage 7b: vector-invariant potential-vorticity (vorticity) flux
     (Sadourny EC / Arakawa-Lamb-81 triad, or WENO-Z when momentum_advection is
@@ -1987,6 +1988,7 @@ def _bc_pv_flux(
                 zeta, h_vtx, h_v, v, h_u, u,
                 u_mask_3d, v_mask_3d, vtx_mask_va,
                 f_vtx=_f_vtx_al,
+                q_boundary=een_q_boundary,
             )
         else:  # "ene"
             # NEMO vor_ene Sadourny 2-point.  f_vtx=None → relative-only
@@ -2438,9 +2440,28 @@ def _bc_horizontal_viscosity(
             )
         _half_UM = config.lateral_viscosity.A_h / (grid.radius * grid.dlon)
         _ahmt, _ahmf = nemo_lateral_viscosity_coefficients(grid, _half_UM)
+        # 3-D staircase vertex mask (NEMO fmask analogue, rn_shlat=0 free-slip):
+        # a 2-D surface vertex mask broadcast over levels leaves zeta LIVE at
+        # submerged staircase side walls, where it is computed against the dry
+        # cells' zero velocities — an accidental NO-SLIP on every slope/sill
+        # face (ahmf·zeta stress) that NEMO's 3-D fmask zeroes (free-slip).
+        # Build per level from is_active; plain z-star coords (no is_active)
+        # keep the 2-D mask bit-identically.
+        _visc_vmask = vertex_mask
+        _act3 = getattr(z_coord, "is_active", None)
+        if _act3 is not None:
+            _cell3 = _act3.astype(u.dtype)
+            if mask is not None:
+                _cell3 = _cell3 * mask[..., jnp.newaxis]
+            _vm3 = jax.vmap(
+                lambda m2: compute_vertex_mask(m2, grid=grid),
+                in_axes=-1, out_axes=-1)(_cell3)
+            if vertex_mask is not None:
+                _vm3 = _vm3 * vertex_mask[..., jnp.newaxis]
+            _visc_vmask = _vm3
         diag_Ah_lap_u, diag_Ah_lap_v = nemo_ldf_lap_viscosity_cgrid(
             u, v, grid, _ahmt, _ahmf,
-            mask=mask, u_mask=u_mask, v_mask=v_mask, vertex_mask=vertex_mask)
+            mask=mask, u_mask=u_mask, v_mask=v_mask, vertex_mask=_visc_vmask)
         diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
         if _want_kdiss_flux:
             # cell-centre ahmt for the K_diss_h coefficient field. APPROXIMATION:
@@ -3670,6 +3691,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             enstrophy_metric=config.vortcor_enstrophy_metric,
             reconstruct_zeta=config.vortcor_reconstruct_zeta,
             vorticity_scheme=getattr(config, "vorticity_scheme", "al81"),
+            een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"),
         )
 
     # --- Stage 7b': PLANETARY Coriolis as an explicit tendency (Veros-faithful).

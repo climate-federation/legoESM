@@ -1354,8 +1354,12 @@ def nemo_ldf_lap_viscosity_cgrid(
     is_3d = u.ndim == 3
 
     def _bm(m):
-        # broadcast a 2-D face/cell/vertex mask over the trailing level axis
-        return m[..., jnp.newaxis] if is_3d else m
+        # broadcast a 2-D face/cell/vertex mask over the trailing level axis;
+        # an already-3-D mask (per-level staircase vertex mask — NEMO 3-D
+        # fmask analogue) passes through unchanged.
+        if is_3d:
+            return m if m.ndim == 3 else m[..., jnp.newaxis]
+        return m
 
     def _bc(c):
         # broadcast a (n_lat,) or (n_lat+1,) latitude coefficient over lon [, lev]
@@ -3873,6 +3877,7 @@ def pv_flux_al81_partial_cell(
     vtx_mask: jnp.ndarray,
     f_vtx: jnp.ndarray | None = None,
     eps_h: float = 1.0e-10,
+    q_boundary: str = "neumann_fill",
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Arakawa-Lamb 1981 (AL81) energy-and-enstrophy-conserving PV flux.
 
@@ -4054,11 +4059,21 @@ def pv_flux_al81_partial_cell(
     zeta_abs = zeta if f_vtx is None else zeta + f_vtx[..., jnp.newaxis]
     q = zeta_abs / jnp.maximum(h_vtx, eps_h)
 
-    # Neumann-fill q at land-adjacent vertices so the triad sees a
-    # smooth field across coastlines.  The fill is idempotent at
-    # interior wet vertices (vtx_mask == 1).  Keeps q in the same
-    # 4D shape ``(n_lat+1, n_lon+1, nlev)`` as zeta.
-    q = neumann_fill_vertex(q, vtx_mask)
+    # Boundary-q convention at land-adjacent vertices:
+    #   "neumann_fill" (default, bit-identical legacy): replace q by a smooth
+    #     Neumann fill from wet neighbours — WENO-stencil safety, but it ERASES
+    #     the wall shear-vorticity from the PV flux (free-slip-like PV).
+    #   "nemo_live": keep q live — NEMO vor_een (ln_dynvor_msk=F, DO-NOT-
+    #     ACTIVATE warning) computes zwz from the MASKED velocities and never
+    #     fills/masks it, so the coast shear (−u/e2f) is a real boundary
+    #     vorticity source feeding the triads (dynvor.F90:85-90; fully-dry
+    #     vertices still give q≈0 via the BIG_H h_vtx sentinel = z1_e3f=0).
+    if q_boundary == "neumann_fill":
+        q = neumann_fill_vertex(q, vtx_mask)
+    elif q_boundary != "nemo_live":
+        raise ValueError(
+            f"pv_flux_al81_partial_cell: unknown q_boundary={q_boundary!r} "
+            "(expected 'neumann_fill' or 'nemo_live').")
 
     # --- 2. Mass fluxes at u/v faces -------------------------------
     # ``F_u = h·u`` at u-faces, ``F_v = h·v`` at v-faces.  Multiply
