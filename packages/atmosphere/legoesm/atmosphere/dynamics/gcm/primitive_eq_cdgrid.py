@@ -1194,9 +1194,10 @@ def fv3_hydrostatic_tendencies(
     # * ``config.sponge_implicit = False`` (default) — legacy
     #   explicit-tendency form ``du/dt = -α u``.  Conditionally
     #   stable: forward Euler diverges at ``α · dt > 2`` and
-    #   SSP-RK3 around ``α · dt ≳ 2.5``.  At production parameters
-    #   (τ = 3600 s, dt = 150 s, peak α ≈ 2.8e-4 s⁻¹) the margin
-    #   is comfortable, so this path stays bit-exact for legacy
+    #   SSP-RK3 around ``α · dt ≳ 2.5``.  Even at the legacy 1-h τ
+    #   (τ = 3600 s, dt = 150 s, peak α ≈ 2.8e-4 s⁻¹) the margin was
+    #   comfortable; at the #1028 default (τ = 5 d, peak α ≈ 2.3e-6 s⁻¹)
+    #   it is ~120x wider, so this path stays bit-exact for legacy
     #   configs and direct callers of ``fv3_hydrostatic_tendencies``.
     #
     # * ``config.sponge_implicit = True`` — operator-split path.

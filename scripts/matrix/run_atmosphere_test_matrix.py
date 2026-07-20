@@ -572,10 +572,13 @@ KNOWN_FAILURES: dict[tuple[str, str, str], dict[str, Any]] = {
     # 27700 (~day 96), physics-free reproducer of the AMIP latlon topography
     # instability. Reproduces only in a full-length run (the 2-day --quick lane
     # never reaches the blow-up step and legitimately passes).
-    # MITIGATION WIRED (#1029): the topo run now enables the #836 top sponge,
-    # calibrated to the sibling cube PE rest-sponge's on-grid top-level rate so it
-    # is never stronger than the accepted sibling (avoids an over-damped false
-    # PASS). Entry KEPT until a 200-day A100 run confirms the sponge arrests the
+    # MITIGATION WIRED (#1029): the topo run now enables the #836 top sponge at
+    # its frozen 2026-06 calibration envelope (_TOPO_MIT_REF_*; historically
+    # derived from the then-current cube rest-sponge default, kept at that
+    # strength after #1028 retuned the live cube default — see the mitigation
+    # block), with a tripwire bounding it to that envelope (avoids an
+    # over-damped false PASS; this XPASS alarm is the second guard). Entry KEPT
+    # until a 200-day A100 run confirms the sponge arrests the
     # blow-up WITHOUT over-damping the resolved jet (controlled comparison vs the
     # flat-topo HS climate): if it passes, this reports XPASS (loud) -> remove the
     # entry; if it only delays the blow-up it stays XFAIL and the GENERATOR fix is
@@ -4141,8 +4144,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # _cfl_safe_dt_cube for the full calibration story.
         dt = _resolve_dt_cube(n, label="HS")
         # Iter-15 NOTE on the cubed-sphere upper-atmosphere sponge:
-        # The default ``sponge_tau_sec = 3600`` (1 hour) is FAR more
-        # aggressive than the FV3 Fortran reference
+        # The PRE-#1028 default ``sponge_tau_sec = 3600`` (1 hour) was FAR
+        # more aggressive than the FV3 Fortran reference
         # (``../FV3/atmos_cubed_sphere-symmetryclean/model/dyn_core.F90``,
         # subroutine ``Ray_fast`` line 2922-2985) which uses ``tau``
         # in DAYS — typical production setting is 5-10 days, i.e.
