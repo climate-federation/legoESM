@@ -313,6 +313,11 @@ class PhysicsPipeline:
         # whose kernel accepts ``land_frac_col`` for the E3SM driver-level
         # orographic landfrac scaling; the builder sets it from the config.
         self._gwd_takes_land_frac = False
+        # ``_gwd_takes_frontgf`` marks the frontal (CM) e3sm_cam source on a
+        # grid family with a frontogenesis producer (E3SM FRONTGF analogue,
+        # gravity_wave_drag/frontogenesis.py); the pipeline then computes
+        # frontgf per step from the pre-physics (u, v, T, p) fields.
+        self._gwd_takes_frontgf = False
         self.subgrid_topo_stddev = None
         # Set for a stateless '+'-composite GWD (issue #834): the combined
         # executor returns a (GWDOutput, spectrum) tuple even with no stateful
@@ -1567,6 +1572,20 @@ class PhysicsPipeline:
                     # (zeroed over ocean) BEFORE the heating closure; the
                     # e3sm_cam kernel applies it to its orographic source.
                     _gwd_kwargs["land_frac_col"] = ad.flatten_2d(self.f_land)
+                if self._gwd_takes_frontgf:
+                    # E3SM drives the frontal (CM) source from the dycore
+                    # frontogenesis function (pbuf FRONTGF, gw_drag.F90 via
+                    # gravity_waves_sources.F90).  Compute it here from THIS
+                    # step's pre-physics fields with the grid family's
+                    # producer (covariant ugradv recipe; the build-time gate
+                    # below guarantees the family is supported).
+                    from legoesm.atmosphere.physics.gravity_wave_drag.frontogenesis import (  # noqa: E501
+                        compute_frontogenesis,
+                    )
+                    _fgf_col, _ = compute_frontogenesis(
+                        u, v, T, p_full, self._grid,
+                    )
+                    _gwd_kwargs["frontgf_col"] = _fgf_col
                 if self._gwd_takes_netdt:
                     # E3SM drives the Beres convective GW source from the
                     # deep-convective heating (pbuf TTEND_DP,
@@ -3480,21 +3499,28 @@ def build_physics_pipeline(grid, sigma, config):
         _gwd_scheme == "e3sm_cam"
         and getattr(pipeline.gwd_config, "source", None) == "convective"
     )
-    # Dispatch hardening: the frontal (CM) source needs the frontogenesis
-    # function FRONTGF, which no legoESM dycore computes yet (E3SM's
-    # producer lives in the SE dynamics, not the vendored physics tree).
-    # The kernel's frontgf_col=None -> zeros path would make a coupled
-    # frontal selection a SILENT no-op — reject loudly at build time
-    # instead (the leaf keeps None->zeros for standalone/unit callers that
-    # pass frontgf explicitly).
+    # Frontal (CM) source needs the frontogenesis function FRONTGF (E3SM's
+    # producer lives in the SE dynamics, gravity_waves_sources.F90).  A
+    # producer now exists for the single-column / spectral-Gaussian /
+    # lat-lon families (gravity_wave_drag/frontogenesis.py, wired per step
+    # above); on any OTHER grid family the kernel's frontgf_col=None ->
+    # zeros path would make a coupled frontal selection a SILENT no-op —
+    # keep rejecting loudly there (the leaf keeps None->zeros for
+    # standalone/unit callers that pass frontgf explicitly).
     if (_gwd_scheme == "e3sm_cam"
             and getattr(pipeline.gwd_config, "source", None) == "frontal"):
-        raise ValueError(
-            "gravity_wave_drag='e3sm_cam' with source='frontal' is not "
-            "wired in the coupled pipeline: no dycore frontogenesis "
-            "(FRONTGF) producer exists, so the frontal source would launch "
-            "nothing (silent no-op). Use source='orographic' or "
-            "'convective', or drive e3sm_cam_gwd directly with an explicit "
-            "frontgf_col."
+        from legoesm.atmosphere.physics.gravity_wave_drag.frontogenesis import (
+            frontogenesis_supported,
         )
+        if not frontogenesis_supported(grid):
+            raise ValueError(
+                "gravity_wave_drag='e3sm_cam' with source='frontal' is not "
+                "wired for this grid family: the frontogenesis (FRONTGF) "
+                "producer supports single-column, spectral-Gaussian, and "
+                "lat-lon grids only, so the frontal source would launch "
+                "nothing here (silent no-op). Use source='orographic' or "
+                "'convective', or drive e3sm_cam_gwd directly with an "
+                "explicit frontgf_col."
+            )
+        pipeline._gwd_takes_frontgf = True
     return pipeline
