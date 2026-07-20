@@ -46,6 +46,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     compute_face_masks_3d,
     gradient_x_cgrid,
     gradient_y_cgrid,
+    interp_cell_to_uface,
+    interp_cell_to_vface,
 )
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
@@ -203,6 +205,92 @@ def test_two_column_step_form_stress_y():
 
     _, _, pgf_v_leg = _pgf_diag(coord, eta, _cfg(pgf_scheme="adcroft"))
     assert np.all(pgf_v_leg == 0.0)
+
+
+def test_f90_recurrence_oracle_nonuniform_rho():
+    """Direct dynhpg oracle with FULLY NONUNIFORM rho' (varying in lat, lon
+    AND k), unequal step depths and nonzero eta (codex r3 MED): the uniform-
+    rho' telescope tests cannot catch a vertical-weight/pairing error that
+    preserves the free-surface identity.  Here zhpi+zuap is transliterated
+    from dynhpg.F90 5.0.1:340-390 + the qco macros — surface formula,
+    (rhd(k)+rhd(k-1)) pairing, per-column (1+r3t) e3w stretch, gdept_z0
+    slope term, below-seafloor rhd mask, and the metric division — and every
+    wet u/v face/level must match the model's KE_PGF to roundoff."""
+    grid_ = _grid()
+    bl = np.full((NY, NX), NZ - 1, dtype=np.int32)
+    bl[:, NX // 2:] = 3                     # x-steps
+    bl[NY // 2:, : NX // 4] = 5             # + y-steps in the deep half
+    coord = _staircase(bl)
+
+    rng = np.random.default_rng(11)
+    eta = (0.4 * np.sin(2.0 * np.pi * (np.arange(NX) + 0.5) / NX)[None, :]
+           + 0.2 * np.cos(np.pi * (np.arange(NY) + 0.5) / NY)[:, None])
+    T3 = (T_REF_C - 4.0
+          + 2.0 * rng.standard_normal((NY, NX, NZ)))     # varies in ALL dims
+    H_bathy = jnp.sum(coord.h_partial, axis=-1)
+    wall = jnp.ones((NY, NX), dtype=jnp.float64)
+    st = rest_state_latlon_cgrid_ocean(
+        grid_, coord, land_mask_override=wall, H_bathy_override=H_bathy)
+    st = st._replace(
+        T=st.T.replace(data=jnp.asarray(T3, dtype=jnp.float64)),
+        S=st.S.replace(data=jnp.full(st.S.data.shape, 35.0,
+                                     dtype=jnp.float64)),
+        eta=st.eta.replace(data=jnp.asarray(eta, dtype=jnp.float64)),
+    )
+    _, diag = latlon_cgrid_ocean_baroclinic_tendencies(
+        st, grid_, coord, _cfg(), dt=300.0, diagnose_momentum=True)
+    pgf_u = np.asarray(diag.KE_PGF_u.data)
+    pgf_v = np.asarray(diag.KE_PGF_v.data)
+
+    # ---- oracle: literal dynhpg recurrence in numpy ----
+    g = constants.g
+    rho = RHO_0 * (1.0 - ALPHA_T * (T3 - T_REF_C))       # linear EOS, beta_S=0
+    rho_p = rho - RHO_0
+    active = np.asarray(coord.is_active)
+    rho_m = np.where(active, rho_p, 0.0)                 # NEMO masked rhd*rho0
+    # gdept ladder: cast the (policy-f32) coordinate values to f64 BEFORE
+    # differencing — the model's quadrature does exactly that (hi_precision
+    # t_q = asarray(ladder, float64)); an f32-native subtraction re-rounds
+    # e3w at ~2e-5 m (=> ~2e-4 Pa in P, 7e-8 relative — the probe signal).
+    t = np.abs(np.asarray(coord.z_full_ref)).astype(np.float64)
+    ht0 = np.asarray(jnp.sum(coord.h_partial, axis=-1))
+    r3t = np.where(ht0 > 0.0, eta / np.maximum(ht0, 1.0), 0.0)
+    # per-column hydrostatic recurrence P(k) [Pa]: surface e3w(1)=2*gdept(1),
+    # interior e3w(k)=gdept(k)-gdept(k-1), pair (rhd(k)+rhd(k-1)); the qco
+    # (1+r3t) e3w factor is column-constant -> applied as one stretch.
+    P = np.zeros_like(rho_m)
+    P[..., 0] = 0.5 * g * (2.0 * t[0]) * rho_m[..., 0]
+    for k in range(1, NZ):
+        P[..., k] = (P[..., k - 1]
+                     + 0.5 * g * (t[k] - t[k - 1])
+                     * (rho_m[..., k] + rho_m[..., k - 1]))
+    P = P * (1.0 + r3t)[..., None]                       # qco e3w stretch
+    Z = t[None, None, :] * (1.0 + r3t)[..., None] - eta[..., None]  # gdept_z0
+
+    # Face assembly through the SHARED horizontal operators (gradient_*_cgrid
+    # / interp_cell_to_*face): the vertical structure under test — surface
+    # weight, (rhd(k)+rhd(k-1)) pairing, ladder increments, (1+r3t) stretch,
+    # gdept_z0, below-seafloor mask — is all hand-built above, while the
+    # trivial 2-point delta/metric plumbing is common (a hand-copied metric
+    # formula only re-tests the grid's dx representation, at ~1e-5).
+    P_j = jnp.asarray(P)
+    Z_j = jnp.asarray(Z)
+    R_j = jnp.asarray(rho_m)
+    expected_u = np.asarray(
+        -(gradient_x_cgrid(P_j, grid_)
+          - constants.g * interp_cell_to_uface(R_j)
+          * gradient_x_cgrid(Z_j, grid_)) / RHO_0)
+    expected_v = np.asarray(
+        -(gradient_y_cgrid(P_j, grid_)
+          - constants.g * interp_cell_to_vface(R_j, grid_)
+          * gradient_y_cgrid(Z_j, grid_)) / RHO_0)
+    u_mask, v_mask = compute_face_masks_3d(coord.is_active, grid_)
+    u_mask = np.asarray(u_mask) > 0.5
+    v_mask = np.asarray(v_mask) > 0.5
+    np.testing.assert_allclose(
+        pgf_u[u_mask], expected_u[u_mask], rtol=1e-12, atol=1e-19)
+    np.testing.assert_allclose(
+        pgf_v[v_mask], expected_v[v_mask], rtol=1e-12, atol=1e-19)
 
 
 def test_eta_zero_reduces_to_adcroft_bitwise():
