@@ -231,6 +231,15 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # bare ``else: # PM``, so a typo silently runs Penman-Monteith. Guarded
         # at the config validator AND at the solver entry (direct-call path).
         ("packages/land/legoesm/land/canopy/solver.py", "solve_canopy_closure"),
+        # CLM-ML canopy-airspace turbulence dispatch (rsl_bonan|most): selects
+        # whether the Harman & Finnigan roughness-sublayer correction is active.
+        # An unknown value must raise, not fall through to the RSL default —
+        # the two schemes give different surface exchange, so a silent default
+        # would report MOST while running RSL. Guarded at BOTH ends:
+        # CLMMLCanopyConfig.validate() at the flux entry (the ``validate`` pair
+        # above covers both canopy configs) and the applier itself.
+        ("packages/land/legoesm/land/canopy/clm_ml_interface.py",
+         "_apply_turbulence_scheme"),
         ("packages/ml/legoesm/ml/physics/model.py", "_validate_microphysics_scheme"),
         ("packages/ml/legoesm/ml/training.py", "create_optimizer"),
         ("packages/ml/legoesm/training/aimip_params.py", "make_aimip_classical_spectral_physics"),

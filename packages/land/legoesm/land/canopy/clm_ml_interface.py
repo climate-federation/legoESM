@@ -30,7 +30,10 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.land.canopy.config import CLMMLCanopyConfig
+from legoesm.land.canopy.config import (
+    VALID_CLM_ML_TURBULENCE_SCHEMES,
+    CLMMLCanopyConfig,
+)
 from legoesm.land.canopy.sif import SIFConfig, multilayer_canopy_sif
 from legoesm.land.canopy.state import CanopyState
 from legoesm.land.surface_scheme import SurfaceFluxOutput
@@ -139,6 +142,198 @@ def _ensure_clm_initialized() -> None:
     _varorb.lambm0 = float(lambm0)
 
     _CLM_INITIALIZED = True
+
+
+# ---------------------------------------------------------------------------
+# Canopy-airspace turbulence scheme
+# ---------------------------------------------------------------------------
+# CLM-ML's Harman & Finnigan roughness-sublayer (RSL) formulation is, term by
+# term, Monin-Obukhov similarity PLUS a roughness-sublayer correction ψ̂
+# (Bonan et al. 2018 appendix A2, eqs. A16/A19):
+#
+#     psim = -psim1 + psim2 + c1*psihat_m(za) - c1*psihat_m(hc) + vkc/beta
+#     psic = -psic1 + psic2 + c1*psihat_h(za) - c1*psihat_h(hc)
+#
+# so ψ̂ ≡ 0 removes the RSL term exactly, leaving MOST ψ.  ψ̂ is evaluated by
+# bilinear interpolation of a lookup table, and every consumer in
+# ``MLCanopyTurbulenceMod`` reads one of the four module globals below: the JAX
+# ``_LookupPsihat{M,H}`` called by ``_GetPsiRSL``, and the pure-Python
+# ``_LookupPsihat{M,H}_scalar`` called by the Obukhov root solvers.  Swapping
+# all four switches the momentum AND scalar corrections across the eager,
+# scalar and differentiable paths at once — including the ``psim_hat2`` return
+# that normalises the WITHIN-canopy wind profile, which a patch of
+# ``_GetPsiRSL`` alone would leave inconsistent.
+#
+# SCOPE — what "most" does NOT do (do not overclaim in comparisons): it removes
+# ψ̂ only.  β = u*/u(h), the displacement height, and the u(hc) = u*/β canopy-top
+# anchor still come from Harman & Finnigan canopy-drag theory, and the
+# within-canopy mixing-length closure is untouched (CLM-ML has no alternative).
+# So "most" is "CLM-ML with the roughness-sublayer correction disabled", NOT a
+# reproduction of the two-leaf/big-leaf roughness-length MOST surface layer;
+# residual differences against the big-leaf scheme are NOT attributable to
+# canopy physiology alone.
+#
+# We deliberately do NOT touch ``MLclm_varctl.turb_type``: upstream implements
+# only ``turb_type == 1`` and every other value calls ``endrun``.
+#
+# clm-ml-jax exposes no public accessor for these tables, so they are addressed
+# by name, the pristine snapshot is checked for non-vacuity, and the applied
+# scheme is verified through the REAL lookup functions — a silent no-op here
+# would mean ``turbulence_scheme="most"`` quietly ran RSL physics.
+_PSIHAT_TABLE_ATTRS: tuple[str, ...] = (
+    "psigridM", "psigridH", "_psigridM_jax", "_psigridH_jax",
+)
+
+# Probe coordinates used to verify a scheme actually took effect, in the
+# lookup table's own coordinates: normalised height (z-hc)/(hc-d) and stability
+# (hc-d)/L.  Any interior point works; this one is well inside the tabulated
+# unstable range, where ψ̂ is comfortably non-zero.
+_PSIHAT_PROBE_ZDT: float = 0.5   # coeff-ok: table-interior probe coordinate
+_PSIHAT_PROBE_DTL: float = -0.2  # coeff-ok: table-interior probe coordinate
+
+# Pristine RSL tables, snapshotted once after LookupPsihatINI.  PRIVATE: CLM is
+# always handed a fresh copy, never this object, because upstream
+# ``LookupPsihatINI`` assigns into ``psigrid*`` IN PLACE and would otherwise
+# overwrite the snapshot (or a shared zero table) behind our back.
+_PSIHAT_RSL: dict[str, Any] | None = None
+# Scheme in force the first time a DIFFERENTIABLE step was built.  Diff mode
+# bakes the psihat table into the jaxpr as a trace-time constant, so a compiled
+# or differentiated function cannot follow a later switch.
+_DIFF_TURBULENCE_SCHEME: str | None = None
+
+
+def _psihat_probe() -> dict[str, float]:
+    """Evaluate ψ̂ through every real lookup entry point (JAX and scalar).
+
+    Keyed by entry point so a PARTIAL failure can be named: if the root-solver
+    lookups still return RSL values while ``_GetPsiRSL`` returns MOST (or vice
+    versa), the run is an inconsistent hybrid — worse than either scheme — and
+    the caller must be told exactly which path disagreed.
+    """
+    from multilayer_canopy import MLCanopyTurbulenceMod as _turb
+    return {
+        name: float(getattr(_turb, name)(_PSIHAT_PROBE_ZDT, _PSIHAT_PROBE_DTL))
+        for name in ("_LookupPsihatM", "_LookupPsihatH",
+                     "_LookupPsihatM_scalar", "_LookupPsihatH_scalar")
+    }
+
+
+def _apply_turbulence_scheme(scheme: str, *, differentiable: bool = False) -> None:
+    """Point CLM-ML's ψ̂ lookup tables at the selected turbulence scheme.
+
+    Called on EVERY canopy step, not once at init: the tables are process-global
+    CLM module state, so a one-shot mutation would leak the first caller's
+    scheme into every later column, config and run in the same process.
+
+    ``differentiable`` marks a step that will be traced.  Under ``jax.jit`` /
+    ``jax.grad`` the table is captured as a trace-time constant, so switching
+    schemes afterwards cannot reach an already-compiled function; that is
+    refused loudly instead of silently returning the other scheme's physics.
+    """
+    if scheme not in VALID_CLM_ML_TURBULENCE_SCHEMES:
+        raise ValueError(
+            f"unknown CLM-ML turbulence_scheme {scheme!r}; the canopy-airspace "
+            f"turbulence scheme must be one of {VALID_CLM_ML_TURBULENCE_SCHEMES}")
+
+    global _PSIHAT_RSL
+
+    if differentiable:
+        if (_DIFF_TURBULENCE_SCHEME is not None
+                and _DIFF_TURBULENCE_SCHEME != scheme):
+            raise RuntimeError(
+                "CLM-ML differentiable mode cannot switch turbulence_scheme "
+                f"within a process (was {_DIFF_TURBULENCE_SCHEME!r}, now "
+                f"{scheme!r}). The psihat lookup table is captured as a "
+                "trace-time constant, so an already-traced/compiled step would "
+                "keep running the OLD scheme while reporting the new one. Run "
+                "one scheme per process, or rebuild the traced function in a "
+                "fresh interpreter.")
+        # NOTE: only CHECKED here, never committed.  The lock is committed by
+        # _commit_diff_turbulence_scheme immediately before the step is traced,
+        # so no path that raises first can lock the process to a scheme it never
+        # actually compiled.
+
+    # The tables must be populated before they can be snapshotted: at import
+    # MLCanopyTurbulenceMod allocates psigrid* as ZEROS, so snapshotting a
+    # pre-init module would pin "rsl_bonan" to a MOST table forever.
+    _ensure_clm_initialized()
+    from multilayer_canopy import MLCanopyTurbulenceMod as _turb
+
+    if _PSIHAT_RSL is None:
+        snapshot: dict[str, Any] = {}
+        for attr in _PSIHAT_TABLE_ATTRS:
+            table = getattr(_turb, attr, None)
+            if table is None:
+                raise RuntimeError(
+                    "CLM-ML turbulence-scheme selection requires "
+                    f"MLCanopyTurbulenceMod.{attr} (an RSL psihat lookup table) "
+                    "to be populated, but it is absent or None. Either "
+                    "LookupPsihatINI has not run, or the installed clm-ml-jax "
+                    "stores psihat differently — in which case "
+                    "turbulence_scheme='most' would NOT remove the "
+                    "roughness-sublayer term and must not be trusted.")
+            if not bool(np.any(np.asarray(table))):
+                raise RuntimeError(
+                    f"CLM-ML psihat table MLCanopyTurbulenceMod.{attr} is "
+                    "all zeros, so the roughness-sublayer correction is already "
+                    "absent. Snapshotting it as the 'rsl_bonan' reference would "
+                    "silently pin BOTH schemes to Monin-Obukhov. Expected "
+                    "LookupPsihatINI to have loaded the RSL lookup tables.")
+            snapshot[attr] = table.copy()
+        _PSIHAT_RSL = snapshot
+
+    for attr in _PSIHAT_TABLE_ATTRS:
+        pristine = _PSIHAT_RSL[attr]
+        if scheme == "rsl_bonan":
+            # Fresh copy: never hand CLM the snapshot itself.
+            table = pristine.copy()
+        elif isinstance(pristine, jax.Array):
+            table = jnp.zeros_like(pristine)
+        else:
+            # Fresh zeros per apply, so an in-place upstream write can never
+            # turn a cached "most" table back into RSL values.
+            table = np.zeros_like(pristine)
+        setattr(_turb, attr, table)
+
+    # Verify through the REAL lookup functions rather than trusting that setting
+    # those four names still controls ψ̂.  Catches an upstream rename or analytic
+    # reimplementation, which would otherwise degrade to silently running the
+    # wrong scheme.  Run on EVERY apply, not only when the scheme changes: the
+    # lookup functions are module attributes that anything (a later import, a
+    # test, a plugin) can rebind at any time, and a cached "already verified"
+    # verdict would not notice.  Four scalar lookups per canopy step is noise
+    # next to CLM-ML's eager host-synchronising solver.
+    probe = _psihat_probe()
+    if scheme == "most":
+        bad = {k: v for k, v in probe.items() if v != 0.0}
+        if bad:
+            raise RuntimeError(
+                "turbulence_scheme='most' did not remove the roughness-sublayer "
+                f"term; these psihat lookups are still non-zero: {bad}. The "
+                f"installed clm-ml-jax no longer sources ψ̂ solely from "
+                f"{_PSIHAT_TABLE_ATTRS}; the MOST option must not be trusted.")
+    else:
+        # ANY zero path is a defect, not just all of them: a mix means the
+        # Obukhov root solver and _GetPsiRSL would run different theories.
+        bad = {k: v for k, v in probe.items() if v == 0.0}
+        if bad:
+            raise RuntimeError(
+                "turbulence_scheme='rsl_bonan' left psihat at zero for "
+                f"{sorted(bad)}, so that path silently runs Monin-Obukhov while "
+                "the rest runs the roughness-sublayer correction.")
+
+
+def _commit_diff_turbulence_scheme(scheme: str) -> None:
+    """Lock the process to ``scheme`` for differentiable mode.
+
+    Call this ONLY at the point where the traced step is about to be built —
+    after every diff-mode preflight check has passed.  Committing earlier (e.g.
+    inside :func:`_apply_turbulence_scheme`) would let a call that raises during
+    preflight lock the process to a scheme it never compiled, and then wrongly
+    reject a later, valid run under the other scheme.
+    """
+    global _DIFF_TURBULENCE_SCHEME
+    _DIFF_TURBULENCE_SCHEME = scheme
 
 
 def _setup_clm_topology(
@@ -1235,6 +1430,9 @@ def compute_clm_ml_canopy_fluxes(
     new_canopy_state : CanopyState
         Updated prognostic state to carry forward to the next step.
     """
+    # ---- Fail-early on the static string-dispatch fields ----
+    canopy_config.validate()
+
     # ---- Phase-1 CLM initialization (once) ----
     _ensure_clm_initialized()
 
@@ -1484,6 +1682,14 @@ def compute_clm_ml_canopy_fluxes(
     # but set it to match the mode so any future read is consistent).
     _ml_ctl.DIFFERENTIABLE_MODE = bool(_diff_mode)
 
+    # ---- Select the canopy-airspace turbulence scheme ----
+    # Re-applied every step (not once at init) because the psihat tables it
+    # swaps are process-global CLM state shared by every column and config.
+    # ``differentiable`` lets it refuse a mid-process switch that an already
+    # traced/compiled step could not follow.
+    _apply_turbulence_scheme(
+        canopy_config.turbulence_scheme, differentiable=bool(_diff_mode))
+
     # ---- Build GridInfo for the differentiable path ----
     # Structural ints must be concrete Python ints extracted BEFORE jax.grad
     # tracing (int() on a tracer raises ConcretizationTypeError).  The warm-start
@@ -1582,6 +1788,13 @@ def compute_clm_ml_canopy_fluxes(
         _o2ref_py=float(canopy_config.o2ref),
         **_opt_kwargs,
     )
+
+    if _diff_mode:
+        # MLCanopyFluxes RETURNED, so a traced artefact really was built with the
+        # psihat table this scheme installed. Only now may the process be locked:
+        # committing before the call would lock a scheme that a failed trace
+        # never compiled, and then wrongly reject a later valid run.
+        _commit_diff_turbulence_scheme(canopy_config.turbulence_scheme)
 
     # ---- Extract SurfaceFluxOutput ----
     surface_out = _extract_surface_fluxes(
