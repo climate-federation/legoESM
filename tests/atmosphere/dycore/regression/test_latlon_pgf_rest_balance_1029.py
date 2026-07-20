@@ -62,12 +62,13 @@ _BALANCED_TOL_MS = 1e-6   # terrain-PGF cancels discretely; only fp64 round-off
 
 
 def _face_max_wind_after_rest_run(coord) -> tuple[float, float, bool]:
-    """(native face max|v| at t=0, after _N_STEPS, all-finite) for rest-over-topo.
+    """(max(|u|,|v|) over faces at t=0, after _N_STEPS, all-finite) for
+    rest-over-topo.
 
     ``coord`` is the vertical coordinate (hybrid or sigma); the DCMIP 2-0-0
     mountain (h_0=2000 m) is the same for both. The metric is the raw C-grid
-    face max of |u| and |v| — a cell-average could hide a checkerboard face
-    mode."""
+    face max over BOTH wind components — a cell-average could hide a
+    checkerboard face mode."""
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationModel,

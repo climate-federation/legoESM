@@ -365,14 +365,14 @@ def cgrid_latlon_hydrostatic_tendencies(
     # --- 4. Bernoulli function B = Φ + KE ---
     B = Phi + KE
 
-    # --- 5/6. Bernoulli + ln(p_s) gradients (batched at faces) ---
-    # ``B`` is (n_lat, n_lon, nlev) and ``ln_ps`` is (n_lat, n_lon).
+    # --- 5/6. Bernoulli + log-pressure gradients (batched at faces) ---
     # ``gradient_*_cgrid`` treats any trailing axis as a passive batch
-    # (the per-lat ``cos_lat`` / ``dx_u`` metric broadcasts cleanly), so
-    # we promote ``ln_ps`` to a single-level tensor and concatenate
-    # along the level axis.  Each gradient runs once on the batched
-    # tensor; ``ln_ps`` claims the trailing slot.
-    # 4 gradient calls collapse to 2 (one batched x + one batched y).
+    # (the per-lat ``cos_lat`` / ``dx_u`` metric broadcasts cleanly), so the
+    # per-lane pressure field is concatenated onto ``B`` along the level
+    # axis and each gradient runs ONCE on the batched tensor:
+    #   sigma:  [B (nlev), ln_ps (1)]        -> (n_lat, n_lon, nlev+1)
+    #   hybrid: [B (nlev), ln p^SB (nlev)]   -> (n_lat, n_lon, 2*nlev)
+    # Multiple gradient calls collapse to 2 (one batched x + one batched y).
     #
     # #1029 (hybrid only): the momentum pressure-gradient correction
     # differences the SB81 full-level log-pressure ``ln p_k =
@@ -433,11 +433,11 @@ def cgrid_latlon_hydrostatic_tendencies(
     # dead-code-eliminated).
     from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
     if _hybrid:
-        # #1029: the momentum correction now differences the SB81
-        # ``ln p_k`` field directly (section 5/6), so the analytic
-        # ``hybrid_factor`` no longer rides this pad — the thermodynamic
-        # ``v . grad(ln p)`` term recomputes it inline at cell centres
-        # (no ghost rows needed there).
+        # #1029: BOTH the momentum correction and the thermodynamic
+        # ``v . grad(ln p)`` conversion difference the SB81 ``ln p_k``
+        # face gradients from section 5/6, so the analytic
+        # ``hybrid_factor`` no longer exists on this lane and nothing of
+        # it rides this pad.
         _ps3 = p_s[..., jnp.newaxis]
         (_T_lat_pad, _u_lat_pad, _dp_lat_pad,
          _ps_lat_pad) = pad_with_pole_bc_lat_multi(
