@@ -56,7 +56,6 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
-from legoesm import constants
 from legoesm.core.field import Field
 
 
@@ -92,7 +91,6 @@ class OverflowConfig:
     depth_decay_factor: float = 0.5  # Temperature decay with depth
 
     # Physical parameters for RPE calculation
-    rho_reference: float = constants.rho_ocean
     alpha_T: float = 2.0e-4         # Thermal expansion coefficient [1/K]
     T_reference_C: float = 12.5       # Reference temperature [°C]
 
@@ -417,7 +415,7 @@ def validate_results(final_state, diagnostics: Dict[str, list],
         return False, "NaN/Inf detected in final temperature field"
     if hasattr(final_state, 'eta') and not jnp.all(jnp.isfinite(final_state.eta.data)):
         return False, "NaN/Inf detected in final eta field"
-    
+
     # Check for temperature blowup — fuse min/max into a single host
     # sync rather than two ``float(jnp.X(...))`` calls.
     if hasattr(final_state, 'T'):

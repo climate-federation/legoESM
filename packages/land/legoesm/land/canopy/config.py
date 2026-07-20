@@ -15,7 +15,6 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import jax
-import jax.numpy as jnp
 
 from legoesm.land.canopy.sif import SIFConfig
 
@@ -204,7 +203,6 @@ class CanopyConfig(NamedTuple):
     # Soil moisture stress thresholds (when no Richards state available)
     wilting_point: float = 0.15   # theta_wp [m3/m3]
     field_capacity: float = 0.30  # theta_fc [m3/m3]
-    n_root_layers: int = 5        # number of layers to integrate for root-zone stress
 
     # Optional solar-induced fluorescence (SIF) diagnostic.  ``None`` (default)
     # disables it; a ``SIFConfig`` enables the passive top-of-canopy SIF output
