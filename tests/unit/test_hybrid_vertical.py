@@ -671,3 +671,107 @@ class TestStandardLevels:
         p_s = jnp.full((2, 2), P_REF)
         dp = dp_from_hybrid(coord, p_s)
         assert jnp.all(dp > 0)
+
+
+class TestSB81FullLevelLnP:
+    """#1029: SB81 full-level log-pressure — the discrete pair of Phi."""
+
+    @pytest.fixture(autouse=True)
+    def _fp64(self):
+        # The machine-precision invariants below (1e-12 relative) require
+        # fp64; make the class self-contained rather than depending on the
+        # runner's JAX_ENABLE_X64 environment.
+        from legoesm.core.precision import (
+            set_policy, get_policy, PrecisionPolicy)
+        prev = get_policy()
+        set_policy(PrecisionPolicy.fp64())
+        try:
+            yield
+        finally:
+            set_policy(prev)
+
+    def _coord(self, nlev=20):
+        from legoesm.grids.vertical import standard_hybrid_levels
+        return standard_hybrid_levels(nlev)
+
+    def test_shared_alpha_bit_identical_with_geopotential(self):
+        """sb81_halflevel_construction is THE construction Phi integrates."""
+        from legoesm.grids.vertical import (
+            sb81_halflevel_construction, compute_geopotential_hybrid)
+        from legoesm import constants
+        coord = self._coord()
+        p_s = jnp.asarray([[9.3e4, 1.01e5], [6.5e4, 1.03e5]], dtype=jnp.float64)
+        p_half_safe, ln_ratio, alpha = sb81_halflevel_construction(coord, p_s)
+        # Reconstruct Phi from the triple exactly as compute_geopotential_hybrid
+        T = jnp.full(p_s.shape + (coord.n_levels,), 260.0, dtype=jnp.float64)
+        phis = jnp.zeros_like(p_s)
+        dPhi = constants.R_d * T * ln_ratio
+        cs = jnp.cumsum(dPhi[..., ::-1], axis=-1)[..., ::-1]
+        Phi_above = phis[..., None] + cs
+        Phi_below = jnp.concatenate([Phi_above[..., 1:], phis[..., None]], axis=-1)
+        Phi_rec = Phi_below + alpha * constants.R_d * T
+        Phi = compute_geopotential_hybrid(T, p_s, coord, phis)
+        np.testing.assert_array_equal(np.asarray(Phi_rec), np.asarray(Phi))
+
+    def test_full_level_ln_p_inside_layer(self):
+        """exp(ln p_k) must lie strictly inside (p_{k-1/2}, p_{k+1/2})."""
+        from legoesm.grids.vertical import (
+            sb81_full_level_ln_p, sb81_halflevel_construction)
+        coord = self._coord()
+        p_s = jnp.asarray([8.0e4, 1.0e5], dtype=jnp.float64)
+        lnp = sb81_full_level_ln_p(coord, p_s)
+        p_half_safe, _, _ = sb81_halflevel_construction(coord, p_s)
+        p_sb = np.exp(np.asarray(lnp))
+        assert np.all(p_sb < np.asarray(p_half_safe[..., 1:]))
+        # top layer p_{k-1/2} can be tiny; allow equality only there
+        assert np.all(p_sb[..., 1:] > np.asarray(p_half_safe[..., 1:-1]))
+
+    def test_isothermal_rest_invariant(self):
+        """Phi_k + R_d T0 ln p_k^SB is COLUMN-INDEPENDENT at isothermal rest.
+
+        With phis = -R_d T0 ln(p_s/p0), the sum telescopes to R_d T0 ln p0 at
+        every level, for ANY p_s — so any discrete horizontal gradient of
+        (Phi + R_d T ln p^SB) vanishes, which is exactly the #1029
+        rest-over-terrain balance the momentum PGF needs.
+        """
+        from legoesm.grids.vertical import (
+            sb81_full_level_ln_p, compute_geopotential_hybrid)
+        from legoesm import constants
+        coord = self._coord()
+        T0 = 300.0
+        p0 = 1.0e5
+        p_s = jnp.asarray(
+            [6.0e4, 7.5e4, 9.0e4, 1.0e5, 1.05e5], dtype=jnp.float64)
+        phis = -constants.R_d * T0 * jnp.log(p_s / p0)
+        T = jnp.full(p_s.shape + (coord.n_levels,), T0, dtype=jnp.float64)
+        Phi = compute_geopotential_hybrid(T, p_s, coord, phis)
+        lnp = sb81_full_level_ln_p(coord, p_s)
+        inv = np.asarray(Phi + constants.R_d * T0 * lnp)  # (5, nlev)
+        ref = constants.R_d * T0 * np.log(p0)
+        # column-to-column spread per level must vanish (FP cumsum noise only)
+        spread = np.abs(inv - ref).max()
+        assert spread < 1e-12 * abs(ref), (
+            f"isothermal rest invariant violated: spread {spread:.3e} "
+            f"vs |ref| {abs(ref):.3e}")
+
+    def test_a0_reduces_to_sigma_form(self):
+        """A=0: ln p^SB - ln p_s is column-independent per level (to ~1e-12).
+
+        So grad(ln p^SB) matches grad(ln p_s) — the sigma-path correction —
+        up to the top-layer zero-clip artifact documented below; NOT an exact
+        identity in the clipped top layer.
+        """
+        from legoesm.grids.vertical import (
+            sb81_full_level_ln_p, create_hybrid_coordinate,
+            standard_hybrid_levels)
+        std = standard_hybrid_levels(20)
+        coord = create_hybrid_coordinate(
+            20, jnp.zeros_like(std.A_half), std.B_half)
+        p_s = jnp.asarray([7.0e4, 8.5e4, 1.0e5], dtype=jnp.float64)
+        lnp = np.asarray(sb81_full_level_ln_p(coord, p_s))
+        # ln p^SB(ps) - ln(ps) must be the same constant for every column.
+        # Tol 1e-11, not machine-eps: at A=0 the top interface is p=0 clipped
+        # to 1e-10 Pa, which makes alpha_0 column-dependent at ~1e-12 — a clip
+        # artifact confined to the top layer, physically nil.
+        resid = lnp - np.log(np.asarray(p_s))[..., None]
+        assert np.abs(resid - resid[0]).max() < 1e-11
