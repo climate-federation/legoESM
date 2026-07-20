@@ -1648,7 +1648,10 @@ class TestSlopeLimitNemoCap:
         st = dino_lat_lon_state(g, z, cfg)
         from legoesm.ocean.experiments.dino import dino_lat_lon_model_config
         mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
-        gm_centered = mc.gm_redi._replace(slope_scheme="centered")
+        # msc_stabilize (ln_traldf_msc, PR #1233) is nemo_iso_lap-only —
+        # clear it when switching to the centered scheme (guarded).
+        gm_centered = mc.gm_redi._replace(
+            slope_scheme="centered", msc_stabilize=False)
         assert gm_centered.slope_limit == "nemo_cap"
         dT_dt, dS_dt = gm_redi_tracer_tendency_latlon(
             st.T.data, st.S.data, st.eta.data, st.H_bathy.data,
