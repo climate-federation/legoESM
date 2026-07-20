@@ -329,6 +329,18 @@ def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg,
     ice_frac = (getattr(surface_forcing, "ice_concentration", None)
                 if (_kpp_eice != 0 and surface_forcing is not None)
                 else None)
+    if _kpp_eice != 0 and ice_frac is None:
+        # Fail fast: eice was EXPLICITLY requested but no ice field is present
+        # (surface_forcing None, or ice_concentration None).  Silently running
+        # the un-attenuated closure is the dispatch footgun CLAUDE.md forbids,
+        # and it would regress the old MPAS-KPP hard reject for direct-API
+        # callers (MPASOceanModel / make_kpp_*_mpas) that bypass
+        # run_omip_core2.main()'s ice-source guard (codex MED).  ice_frac is a
+        # static None here (pytree structure), so this branch is trace-time.
+        raise ValueError(
+            f"KPPConfig.eice={_kpp_eice} (MPAS under-ice attenuation) requires "
+            "surface_forcing.ice_concentration, but none was supplied. Provide "
+            "sea-ice concentration (prognostic or prescribed SIC) or set eice=0.")
 
     # Surface buoyancy + kinematic T/S fluxes (shared MPAS helper).
     B_f, Q_sfc_T, Q_sfc_S = _mpas_surface_buoyancy_flux(

@@ -3780,7 +3780,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "Arctic halocline-erosion lever (over-deep MLD + "
                         "Siberian salty) that --tke-eice fixed only on the TKE "
                         "grid. Needs --prognostic-sea-ice or a prescribed SIC. "
-                        "--grid latlon_bathy (MPAS KPP bridge has no ice yet).")
+                        "--grid latlon_bathy or mpas (both KPP-boundary-layer "
+                        "grids; the MPAS bridge now threads ice_concentration).")
     p.add_argument("--tripole-vmix", type=str, default="none",
                    choices=["none", "tke", "kpp"],
                    help="Vertical-mixing CLOSURE on the tripole grid (the "

@@ -317,3 +317,18 @@ class TestKPPUnderIceMPAS:
         nCells = state.T.data.shape[0]
         with pytest.raises(ValueError, match="eice"):
             pf(state, mesh, z_coord, _mpas_ice_forcing(nCells))
+
+    def test_eice_without_ice_field_fails_fast(self, mesh, z_coord, state):
+        """eice!=0 with a forcing that LACKS ice_concentration must FAIL FAST,
+        not silently run the un-attenuated closure — restores the old MPAS-KPP
+        hard reject for direct-API callers that bypass run_omip_core2.main()'s
+        ice-source guard (codex MED).  Two absent-ice shapes: forcing present
+        but ice None, and no forcing at all."""
+        nCells = state.T.data.shape[0]
+        pf = make_kpp_profiles_mpas(
+            VerticalMixingConfig(scheme="kpp", kpp=KPPConfig(eice=3)))
+        f_noice = _mpas_ice_forcing(nCells)._replace(ice_concentration=None)
+        with pytest.raises(ValueError, match="ice_concentration"):
+            pf(state, mesh, z_coord, f_noice)
+        with pytest.raises(ValueError, match="ice_concentration"):
+            pf(state, mesh, z_coord, None)
