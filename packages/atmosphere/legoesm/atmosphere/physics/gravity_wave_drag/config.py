@@ -137,7 +137,6 @@ __param_spec__ = {
             "Fr_sharpness": "sigmoid sharpness of the saturation stress-ratio breaking transition (NOT a Froude-number transition); a differentiability/smoothing width, not a closure",
             "crit_level_sharpness": "sigmoid sharpness of the smooth critical-level filter; a differentiability/smoothing width, not a closure",
             "crit_level_floor": "signed source-projected wind U_proj (NOT a wind magnitude) at which the smooth critical-level filter is half-on; a smoothing/regulariser offset, not a closure",
-            "N_ref": "declared but never read by lindzen_gwd (N is computed from the local theta gradient); phantom trainable — exposing it would offer a no-op gradient",
         },
         "params": {
             # --- orographic launch amplitude ---
@@ -233,11 +232,6 @@ class LindzenConfig(NamedTuple):
         Sub-grid topographic height [m] (default 500).
     k_wave : float
         Horizontal wavenumber [1/m] (default 2*pi/100e3).
-    N_ref : float
-        RESERVED / currently unused (default 0.01) — N is diagnosed from the
-        local stratification (theta gradient via ``brunt_vaisala_n_full``), not
-        from this field, so setting it does NOT change the launch/saturation
-        stress.
     fcrit2 : float
         Critical Froude number squared scaling the saturation CAP VALUE
         (``tau_sat_eff = fcrit2*tau_sat`` — the oracle ``effkwv = kwv*fcrit2``
@@ -282,7 +276,6 @@ class LindzenConfig(NamedTuple):
     """
     h_topo: float = 500.0
     k_wave: float = 2.0 * math.pi / 100e3
-    N_ref: float = 0.01
     fcrit2: float = 1.0
     Fr_sharpness: float = 20.0
     crit_level_sharpness: float = 10.0

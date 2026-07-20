@@ -51,13 +51,6 @@ __param_spec__ = {
     "CLUBBLiteConfig": {
         "scheme_key": "atm.turb.CLUBBLiteConfig",
         "excluded": {
-            # C1/C4/C5 are the full-CLUBB pressure-covariance coefficients;
-            # this reduced "lite" surrogate dropped the higher-moment block
-            # that consumed them (see clubb_lite.py iter-172 note), so they
-            # are NOT read by the body — excluded as dead in this scheme.
-            "C1": "unused in CLUBB-lite: higher-moment closure block removed",
-            "C4": "unused in CLUBB-lite: higher-moment closure block removed",
-            "C5": "unused in CLUBB-lite: higher-moment closure block removed",
             "tke_min": "numerics: solver/smoothing/tolerance/iteration parameter",
         },
         "params": {
@@ -172,11 +165,6 @@ __param_spec__ = {
     "TurbulentEDMFConfig": {
         "scheme_key": "atm.turb.TurbulentEDMFConfig",
         "excluded": {
-            # The simplified-EDMF updraft scan implements lateral entrainment
-            # only (edmf.py:215); there is no detrainment term, so
-            # detrainment_rate is not read by the body — a dead (zero-gradient)
-            # knob until detrainment is implemented. Excluded, not tunable.
-            "detrainment_rate": "unused in simplified EDMF: no detrainment term in the updraft scan",
             "tke_min": "numerics: solver/smoothing/tolerance/iteration parameter",
             "updraft_deactivation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
         },
@@ -464,12 +452,6 @@ class CLUBBLiteConfig(NamedTuple):
 
     Fields
     ------
-    C1 : float
-        Pressure scrambling / return-to-isotropy coeff for w'² (default 4.0).
-    C4 : float
-        Pressure scrambling for flux moments w'θ_l', w'r_t' (default 3.0).
-    C5 : float
-        Scalar variance dissipation rate (default 3.0).
     C_eps : float
         TKE dissipation coefficient (default 0.19).
     C_K : float
@@ -483,9 +465,6 @@ class CLUBBLiteConfig(NamedTuple):
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
-    C1: float = 4.0
-    C4: float = 3.0
-    C5: float = 3.0
     C_eps: float = 0.19
     C_K: float = 0.4
     Pr_t: float = 0.33
@@ -721,8 +700,6 @@ class TurbulentEDMFConfig(NamedTuple):
         Minimum updraft velocity [m/s] (default 0.1).
     entrainment_rate : float
         Lateral entrainment rate [1/m] (default 1e-3).
-    detrainment_rate : float
-        Lateral detrainment rate [1/m] (default 2e-3).
     parcel_dT : float
         Initial updraft potential-temperature perturbation [K]
         (default 0.5).  Was hardcoded as ``+0.5`` in the scan body
@@ -746,7 +723,6 @@ class TurbulentEDMFConfig(NamedTuple):
     a_updraft: float = 0.1
     w_updraft_min: float = 0.1
     entrainment_rate: float = 1e-3
-    detrainment_rate: float = 2e-3
     parcel_dT: float = 0.5
     updraft_deactivation_sharpness: float = 20.0
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
