@@ -79,13 +79,6 @@ class BaroclinicGyreConfig:
     T_scale_depth: float = 1000.0  # Temperature e-folding depth [m]
     S_uniform: float = 35.0        # Salinity [PSU]
 
-    # Surface temperature restoring
-    enable_restoring: bool = False  # Enable SST restoring (disabled: can't combine with wind)
-    T_restore_time: float = 30.0   # Restoring timescale [days]
-    T_equator: float = 20.0        # Equatorial SST [degC] — matches T_water_init_C
-    T_pole_C: float = 2.0            # Polar SST [degC] — matches T_deep_C
-    T_mid_lat: float = 45.0        # Reference latitude for gradient [degrees]
-
     # Wind forcing parameters — same as barotropic case
     wind_stress_max: float = 0.3   # Maximum wind stress [Pa]
     wind_profile: str = "double_gyre_sin2"  # "double_gyre" (cosine) or "double_gyre_sin2"
@@ -155,7 +148,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         )
         # Add vertical stratification
         return _add_stratification(state, z_coord, config)
-        
+
     else:
         raise ValueError(f"Grid type {grid_type} not supported for baroclinic_gyre")
 

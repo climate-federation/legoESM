@@ -558,11 +558,8 @@ class DINOConfig:
     barotropic_slow_forcing_ab2: bool = False     # True (Oceananigans card)
 
     # ------------------------------------------------------------------
-    # Diagnostics (paper Figs 5-6: MOC and σ_2 referenced to 2000 m)
+    # Derived / effective properties
     # ------------------------------------------------------------------
-    sigma_2_ref_depth: float = 2000.0     # reference depth for σ_2 [m]
-    rho_ref_z0: float = 1026.0            # ρ_ref(z=0) [kg/m³]
-    rho_ref_z2000: float = 1035.0         # ρ_ref(z=2000) [kg/m³]
 
     @property
     def A_v_bg_effective(self) -> float:
