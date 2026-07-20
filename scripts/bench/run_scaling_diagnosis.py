@@ -96,14 +96,22 @@ def _configure_env(precision: str = "float64"):
     if str(_repo_root) not in sys.path:
         sys.path.insert(0, str(_repo_root))
 
-    # GPU affinity for MPI
-    local_rank = (
-        os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
-        or os.environ.get("MV2_COMM_WORLD_LOCAL_RANK")
-        or os.environ.get("SLURM_LOCALID")
-    )
-    if local_rank is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = local_rank
+    # GPU affinity for MPI: pin each rank to its node-local GPU.  ONLY when the
+    # caller has not already set CUDA_VISIBLE_DEVICES — otherwise a single-
+    # process census/scaling ladder that exports e.g. CUDA_VISIBLE_DEVICES=0,1
+    # to shard over 2 GPUs would be silently narrowed to GPU 0 (SLURM sets
+    # SLURM_LOCALID=0 even for a 1-task batch step), collapsing the run to one
+    # device and recording a FAKE serial census under the multi-device dir.
+    # A real multi-task srun/mpirun step leaves CVD unset per rank, so the
+    # local-rank pin still applies there.
+    if "CUDA_VISIBLE_DEVICES" not in os.environ:
+        local_rank = (
+            os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
+            or os.environ.get("MV2_COMM_WORLD_LOCAL_RANK")
+            or os.environ.get("SLURM_LOCALID")
+        )
+        if local_rank is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = local_rank
 
     # Enable profiling-friendly XLA flags when running on GPU (or
     # auto-detect / unset).  Skip when ``JAX_PLATFORMS`` is explicitly
@@ -466,6 +474,41 @@ def run_scan_timing(
     }
 
 
+def run_collective_census(step_fn, state, dt: float) -> dict:
+    """Static HLO collective census of the compiled per-step function.
+
+    The remaining strong-scaling loss at small per-device tiles is
+    ``per-step message count x per-message latency`` (2026-07-08 census note):
+    f64 and f32 GPU strong-scaling curves coincide => LATENCY-bound, not
+    bandwidth-bound, so the message COUNT — not the byte volume — is the lever.
+    This makes that count a first-class, tracked diagnostic instead of a
+    one-off ``scripts/tmp`` probe.
+
+    STATIC: the count is fixed by the partition / edge-coloring schedule, not
+    the data.  A CPU virtual-device compile reproduces the DEFAULT-flags count,
+    which is why this same probe runs cheaply in local CI; but it is NOT fully
+    backend-independent — GPU-only XLA collective combining / pipelined-p2p
+    (lane T) can LOWER the optimized count, so the cluster jobs run this against
+    the real on-device executable to capture what the GPU actually launches.
+    Counts XLA collectives only — route-A ``mpi4jax`` sendrecv are opaque
+    custom-calls (invisible here AND to the XLA latency-hiding scheduler; that
+    opacity is itself the route-A ceiling), so a ~0 census on an MPI rank is the
+    expected reading, not a bug.
+
+    Returns the per-family census plus the device count it was taken at (the
+    schedule is device-count dependent: more shards => more exchange rounds).
+    """
+    import jax
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from metadata import hlo_collective_census  # sibling scripts/bench module
+
+    census = hlo_collective_census(step_fn, state, dt)
+    return {
+        "n_devices": jax.local_device_count(),
+        "census": census,  # None if the step could not be lowered/compiled
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -476,7 +519,8 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--mode", choices=["full", "quick", "halo-only",
-                                       "reduction", "roofline", "profile"],
+                                       "reduction", "roofline", "profile",
+                                       "census"],
                    default="full")
     p.add_argument("--grid", choices=["cubed-sphere"], default="cubed-sphere",
                    help="Grid type (cubed-sphere supported for now)")
@@ -496,6 +540,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Capture XLA/TensorBoard profile traces")
     p.add_argument("--output-dir", default="results/scaling_diagnosis")
     p.add_argument("--no-timestamp", action="store_true")
+    p.add_argument("--expect-devices", type=int, default=None,
+                   help="Anti-fake-scaling gate: fail LOUDLY unless the run "
+                        "actually shards over exactly this many devices "
+                        "(single-process => local_device_count; MPI => "
+                        "world_size). Used by the cluster ladders so a rung "
+                        "narrowed to 1 GPU can never record a fake census.")
     return p
 
 
@@ -512,6 +562,21 @@ def main() -> int:
 
     rank, world_size = _init_distributed(args.grid, global_n=args.n)
     is_rank0 = (rank == 0)
+
+    # Anti-fake-scaling gate (see --expect-devices): a census/scaling row is
+    # meaningless if the process did not actually shard over the intended
+    # device count.  Single-process SPMD shards over local_device_count;
+    # MPI shards over world_size.  Fail LOUDLY here, before any measurement.
+    if args.expect_devices is not None:
+        actual = world_size if world_size > 1 else jax.local_device_count()
+        if actual != args.expect_devices:
+            raise SystemExit(
+                f"ERROR: --expect-devices {args.expect_devices} but the run "
+                f"sees {actual} device(s) "
+                f"(world_size={world_size}, "
+                f"local_device_count={jax.local_device_count()}, "
+                f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')})"
+                " — refusing to record a fake scaling row.")
 
     from legoesm.parallel.scaling_diagnostics import (
         DiagnosticHarness,
@@ -591,6 +656,44 @@ def main() -> int:
         grid_type=args.grid, config=config_info,
     )
     harness.memory_snapshot("initial")
+
+    # ---------------------------------------------------------------
+    # [1b] Static collective census (message-count = latency-bound lever)
+    # ---------------------------------------------------------------
+    census_info = None
+    if args.mode in ("full", "quick", "census"):
+        if is_rank0:
+            print("\n[1b] Collective census (static HLO message count)...",
+                  flush=True)
+        census_info = run_collective_census(step_fn, state, args.dt)
+        if is_rank0:
+            c = census_info.get("census")
+            if c is None:
+                print("  census: unavailable (step not lowerable on this "
+                      "backend)")
+            else:
+                print(f"  {census_info['n_devices']} device(s): "
+                      f"{c['collective_permute']} collective-permute, "
+                      f"{c['all_reduce']} all-reduce, "
+                      f"{c['all_gather']} all-gather / step")
+                if census_info["n_devices"] == 1:
+                    print("  (single device: no inter-device schedule — run "
+                          "with XLA_FLAGS=--xla_force_host_platform_device_"
+                          "count=N or on multi-GPU for the real count)")
+
+    # ``census`` mode is census-only: emit the report and stop before the
+    # timing phases (each of which is gated on its own mode below and so is
+    # already skipped — this early return just avoids the empty setup churn).
+    if args.mode == "census":
+        harness.dump(output_dir / f"diag_rank{rank}.json",
+                     extra={"collective_census": census_info})
+        if is_rank0:
+            summary = {"world_size": world_size, "config": config_info,
+                       "collective_census": census_info}
+            with open(output_dir / "summary.json", "w") as f:
+                json.dump(summary, f, indent=2, default=str)
+            print(f"\n  Census written to {output_dir}/")
+        return 0
 
     # ---------------------------------------------------------------
     # [2] Per-step profiling
@@ -718,6 +821,8 @@ def main() -> int:
     # Build and save reports
     # ---------------------------------------------------------------
     extra = {}
+    if census_info:
+        extra["collective_census"] = census_info
     if scan_info:
         extra["scan_throughput"] = scan_info
     if halo_info:
@@ -748,32 +853,39 @@ def main() -> int:
     # ---------------------------------------------------------------
     # Cross-rank summary (rank 0 gathers)
     # ---------------------------------------------------------------
-    if is_rank0 and world_size > 1:
+    # ``comm.gather`` is COLLECTIVE — EVERY rank must call it or the root
+    # blocks forever.  So the gather is guarded by ``world_size > 1`` (all
+    # ranks), NOT by ``is_rank0`` (which would deadlock the non-root ranks);
+    # only rank 0 writes the file from the gathered result.
+    if world_size > 1:
         try:
             from mpi4py import MPI
             comm = MPI.COMM_WORLD
-            # Gather scan timing from all ranks
+            # Gather scan timing from all ranks (collective — all ranks call).
             local_data = {
                 "rank": rank,
                 "phase_timing": harness.timer.summary(),
             }
             all_data = comm.gather(local_data, root=0)
-            if all_data:
+            if is_rank0 and all_data:
                 summary = {
                     "world_size": world_size,
                     "config": config_info,
                     "per_rank_timing": all_data,
                     "scan_throughput": scan_info,
+                    "collective_census": census_info,
                 }
                 with open(output_dir / "summary.json", "w") as f:
                     json.dump(summary, f, indent=2, default=str)
         except Exception as e:
-            print(f"  Warning: cross-rank summary failed: {e}")
-    elif is_rank0 and world_size == 1:
+            if is_rank0:
+                print(f"  Warning: cross-rank summary failed: {e}")
+    elif is_rank0:
         summary = {
             "world_size": 1,
             "config": config_info,
             "scan_throughput": scan_info,
+            "collective_census": census_info,
         }
         with open(output_dir / "summary.json", "w") as f:
             json.dump(summary, f, indent=2, default=str)
