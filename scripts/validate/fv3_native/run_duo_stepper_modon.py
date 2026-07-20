@@ -33,6 +33,9 @@ def main():
     ap.add_argument("--days", type=float, default=60.0)
     ap.add_argument("--frame-days", type=float, default=5.0)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--d-ext", type=float, default=None,
+                    help="override the preset's external-mode filter "
+                         "coefficient (seam-ringing discriminator)")
     ap.add_argument("--plain-conventions", action="store_true",
                     help="A/B arm: plain-conventions lane (default is "
                          "the bounded lane + ext bundle — the lane "
@@ -92,6 +95,8 @@ def main():
     else:
         sw_cfg = None
         d_ext = 0.02
+    if args.d_ext is not None:
+        d_ext = args.d_ext
 
     def wind_fn(ll):
         u_e, v_n = _modon_winds_geo(ll[..., 0], ll[..., 1], FV3_RADIUS_M)
