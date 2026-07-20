@@ -206,6 +206,9 @@ def probe_latlon_cgrid(
                 eos_linear=getattr(config, "eos_linear", None),
                 mask=state.land_mask.data,
                 rho_0=config.constants.rho_0, g=config.constants.g,
+                # #1226: same wall masks as the tendency call above.
+                u_mask=state.u_mask.data, v_mask=state.v_mask.data,
+                dt=dt_tr,
             )
             # Match the production model: zero K33 at non-wet interfaces
             # so partial-cell bottom cells never mix against below-bottom

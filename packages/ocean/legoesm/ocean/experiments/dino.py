@@ -631,6 +631,13 @@ def dino_r1_exact_config(**overrides) -> DINOConfig:
         vertical_coordinate="masked_zco",
         pgf_quadrature="nemo_trapezoid",
         lateral_tracer_mixing="isoneutral",
+        # #1226: the NEMO ln_traldf_iso operator IS nemo_iso_lap — the
+        # DINOConfig default ("triads", the Griffies approximation) left this
+        # NEMO-exactness preset running a non-NEMO explicit operator while
+        # the isoneutral builder's slope_positions="nemo_native" routed the
+        # implicit K33 through the a33 stencil: a mismatched split pair the
+        # fn-entry MSC guard now rejects loudly.
+        gm_redi_slope_scheme="nemo_iso_lap",
         redi_S_max=0.01,               # rn_slpmax
         redi_slope_limit="nemo_cap",   # ldfslp cap semantics (not DM95)
         # Centred split-explicit barotropic (ln_bt_fw=F + flt=1) is
@@ -2192,6 +2199,27 @@ def dino_lat_lon_model_config(
             slope_density="neutral",
             slope_limit=cfg.redi_slope_limit,
             implicit_K33=True,
+            # #1226: the explicit operator and the implicit K33 MUST share one
+            # slope discretization.  With the default mode_b placement the
+            # operator differences the single interface slope field while the
+            # K33 getter built its diagonal from the 8-triad machinery — two
+            # slope sets whose amplitudes differ O(35%), so the rotated
+            # tensor's PSD condition (implicit S^2 >= explicit S^2, pointwise)
+            # fails and the net vertical diffusivity goes NEGATIVE — the
+            # kappa-scaled local tracer runaway (stable at kappa=200, T>38C
+            # by day 90 at NEMO strength).  nemo_native uses ldfslp's four-
+            # position slopes on BOTH sides (bit-identical arrays) with the
+            # traldf_iso_a33 mask-normalized w-point kappa — NEMO's own
+            # explicit/implicit split, transcribed.
+            slope_positions="nemo_native",
+            # ln_traldf_msc=T (the DINO namelist): NEMO's Method of
+            # Stabilizing Correction — the explicit A33 remainder is bounded
+            # by the 1/2 vertical-CFL limit and the implicit solve receives
+            # the capped akz.  Without it the explicit off-diagonal terms at
+            # NEMO-strength kappa exceed their stability limit: the 1-year
+            # r1_exact screen ran away after day ~100 (T 27 -> 52 -> 90 C)
+            # with msc off, matching the missing-MSC signature (#1226).
+            msc_stabilize=True,
             mld_criterion=cfg.gm_redi_mld_criterion,
             visbeck=VisbeckConfig(enabled=False),
             treguier=TreguierConfig(enabled=False),
