@@ -143,6 +143,11 @@ PFT_CANOPY_HEIGHT: dict[str, float] = {
 _VALID_STOMATAL_MODELS = ("ball_berry", "medlyn")
 VALID_LE_MODULES = ("BT", "PM")
 
+# Valid values for the CLM-ML canopy-airspace turbulence dispatch field
+# (``CLMMLCanopyConfig.turbulence_scheme``).  Public so the interface that
+# applies the scheme and the config validator share one source of truth.
+VALID_CLM_ML_TURBULENCE_SCHEMES = ("rsl_bonan", "most")
+
 
 class CanopyConfig(NamedTuple):
     """Physics settings for the canopy energy balance solver."""
@@ -614,3 +619,67 @@ class CLMMLCanopyConfig(NamedTuple):
     # looping OUTSIDE ``jax.grad`` and accumulating per-column gradients.  See
     # ``docs/land/clm_ml_differentiable_integration_scope.md``.
     differentiable: bool = False
+
+    # Canopy-airspace turbulence: which similarity theory sets the exchange
+    # between canopy top and the atmospheric reference height.
+    #   "rsl_bonan" (default) — Harman & Finnigan roughness-sublayer theory as
+    #       implemented by Bonan et al. (2018) appendix A2: the Monin-Obukhov
+    #       ψ functions PLUS the roughness-sublayer ψ̂ correction
+    #       (``psi = -psi1 + psi2 + c1*psihat(za) - c1*psihat(hc) [+ vkc/beta]``).
+    #       This is CLM-ML's native formulation and the stand-alone default.
+    #   "most" — the roughness-sublayer correction is switched off (ψ̂ ≡ 0), so
+    #       the ψ stability functions reduce to Monin-Obukhov similarity.  Use
+    #       it to isolate how much of a multilayer-vs-big-leaf difference is due
+    #       to the RSL enhancement, or when a coupled run wants the canopy to
+    #       drop its own RSL in favour of plain surface-layer similarity.
+    #
+    # SCOPE — read before attributing any model difference to this switch:
+    #   * ψ̂ is removed EVERYWHERE it appears, not just above the canopy: the
+    #     canopy-top→reference-height exchange AND the ψ̂ normalisation of the
+    #     within-canopy wind profile (``psim_hat2``).  Removing it from only one
+    #     would leave the two profiles on different theories.
+    #   * "most" is NOT the two-leaf / big-leaf surface layer.  β = u*/u(h), the
+    #     displacement height and the u(hc) = u*/β canopy-top anchor still come
+    #     from Harman & Finnigan canopy-drag theory, and the within-canopy
+    #     mixing-length closure is unchanged (CLM-ML has no alternative).  A
+    #     residual flux difference against the big-leaf scheme therefore is NOT
+    #     evidence about canopy physiology on its own.
+    #
+    # COUPLED-MODEL DIRECTION (not implemented; both options above are
+    # stand-alone constructs).  Once the atmosphere resolves levels down into
+    # the canopy, neither RSL nor MOST is needed as a separate canopy closure:
+    # the canopy airspace is just more atmospheric layers, so it can carry the
+    # ATMOSPHERE's turbulence scheme, with the canopy entering as extra terms
+    # rather than as its own similarity theory —
+    #   (a) form/viscous drag on the MEAN momentum equation,
+    #   (b) heat/moisture/CO2 sources and sinks from the leaves,
+    #   (c) porosity / plant-area weighting of the layer volumes and areas,
+    #   (d) the matching canopy terms in the TURBULENCE budget itself: wake
+    #       production from drag on the resolved flow, the short-circuited
+    #       cascade / enhanced dissipation it feeds, and a mixing length capped
+    #       by the canopy shear scale rather than by distance to the ground.
+    # (d) is not optional book-keeping: drag removes mean kinetic energy, and an
+    # atmospheric closure applied inside the canopy WITHOUT that pathway gets
+    # in-canopy mixing (hence the whole scalar transport) wrong while silently
+    # violating the TKE budget.  RSL and MOST are both surface-layer *similarity*
+    # fits standing in for turbulence a stand-alone canopy cannot resolve; a
+    # coupled run that shares the atmospheric closure replaces the stand-in
+    # rather than choosing between two versions of it, and removes the
+    # RSL-vs-MOST inconsistency between the land and atmosphere sides.
+    turbulence_scheme: str = "rsl_bonan"
+
+    def validate(self) -> "CLMMLCanopyConfig":
+        """Fail-early check of the static string-dispatch fields.
+
+        Called at the non-jitted CLM-ML entry (``compute_clm_ml_canopy_
+        fluxes``) so a typo'd ``turbulence_scheme`` aborts at land-component
+        setup instead of silently running the default RSL physics.  Returns
+        ``self`` for chaining.
+        """
+        if self.turbulence_scheme not in VALID_CLM_ML_TURBULENCE_SCHEMES:
+            raise ValueError(
+                f"unknown turbulence_scheme {self.turbulence_scheme!r}; the "
+                "CLM-ML canopy-airspace turbulence scheme must be one of "
+                f"{VALID_CLM_ML_TURBULENCE_SCHEMES} ('rsl_bonan'=Harman & "
+                "Finnigan roughness sublayer, 'most'=Monin-Obukhov only)")
+        return self
