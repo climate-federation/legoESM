@@ -4295,35 +4295,38 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # PGF correction discretely consistent with Phi(p_s) (implicates A_half;
         # #1078), owed with W2 visual validation -- NOT this sponge.
         #
-        # CALIBRATE the sponge to the sibling cube PE rest-sponge so it is never
-        # STRONGER than the accepted sibling on the resolved grid (an over-strong
-        # sponge could turn a 200-day PASS into an over-damped FALSE success --
-        # codex R1). The cube damps u/v with rate ((s0-sigma)/s0)^2 / tau per level
-        # (primitive_eq_cdgrid.py: sponge_sigma s0=0.15, sponge_tau_sec tau=3600),
-        # whose top FULL level only samples a FRACTION of the 1/tau lid peak. The
-        # lat-lon #836 sponge peaks at its own top full level, so pin its coeff to
-        # the cube's on-grid rate AT that level. At THIS case's FIXED resolution
-        # (nlev=DEFAULT_NLEV=40) the lat-lon profile is then <= the cube at every
-        # resolved level -- but that is NOT grid-general (sin2-in-log-p vs cube
-        # quadratic-in-sigma shapes differ). The tripwire below VERIFIES the actual
-        # <=-cube property AND that the sponge is active, on whatever grid is in
-        # use, and fails LOUDLY otherwise (a future DEFAULT_NLEV change could
-        # silently disable it or over-damp at a mid level). Under-damping is the
-        # SAFE failure (stays XFAIL, honest); over-damping is the false-pass we
-        # design out. Flat-topo HS is untouched (sponge_coeff=0 -> byte-identical).
-        _CUBE_SPONGE_SIGMA, _CUBE_SPONGE_TAU_S = 0.15, 3600.0  # primitive_eq_cdgrid.py
+        # MITIGATION STRENGTH: frozen at its 2026-06 calibration envelope —
+        # rate ((s0-sigma)/s0)^2 / tau with s0=0.15, tau=3600 s, evaluated at
+        # the top full level.  That envelope was ORIGINALLY derived from the
+        # then-current cube PE rest-sponge default; #1028 (2026-07-19) showed
+        # that 1-h cube default was itself a jet-killing mis-calibration and
+        # the cube config default is now 5 d — but THIS mitigation's measured
+        # behaviour (holds the topo case to its tracked XFAIL trajectory;
+        # insufficient to prevent the lid-wave blowup, #1029) was established
+        # AT the frozen strength, so the strength is kept and the constants
+        # below now carry their own provenance instead of referencing the
+        # live cube config.  The tripwire below verifies (a) the sponge is
+        # ACTIVE (a DEFAULT_NLEV change could silently disable it) and
+        # (b) the on-grid profile never EXCEEDS the frozen envelope (an
+        # accidentally-strengthened sponge could over-damp the case into a
+        # false 200-day PASS; the KNOWN_FAILURES registry's loud XPASS alarm
+        # is the second line of defence).  Under-damping is the SAFE failure
+        # (stays XFAIL, honest).  Flat-topo HS is untouched (sponge_coeff=0
+        # -> byte-identical).
+        _TOPO_MIT_REF_SIGMA, _TOPO_MIT_REF_TAU_S = 0.15, 3600.0  # frozen 2026-06 envelope (#1029/#1086)
         # #836 lat-lon sponge geometry -- set EXPLICITLY (not left to the config
         # defaults) so the tripwire below verifies the SAME profile the model runs.
         _SPONGE_WIDTH_M, _SPONGE_SCALE_H_M, _SPONGE_SHAPE = 10000.0, 7500.0, "sin2"
-        _sig = np.asarray(sigma.sigma_full, dtype=np.float64)  # fp64 view: cube ref + reporting
-        _cube_top_frac = max(
-            (_CUBE_SPONGE_SIGMA - float(_sig[0])) / _CUBE_SPONGE_SIGMA, 0.0)
-        _sponge_coeff = _cube_top_frac**2 / _CUBE_SPONGE_TAU_S if _topo else 0.0
+        _sig = np.asarray(sigma.sigma_full, dtype=np.float64)  # fp64 view: envelope + reporting
+        _mit_top_frac = max(
+            (_TOPO_MIT_REF_SIGMA - float(_sig[0])) / _TOPO_MIT_REF_SIGMA, 0.0)
+        _sponge_coeff = _mit_top_frac**2 / _TOPO_MIT_REF_TAU_S if _topo else 0.0
         if _topo:
-            # Tripwire (dispatch-hardening / mechanical invariant): the calibrated
-            # lat-lon sponge must be (a) ACTIVE and (b) <= the accepted cube
-            # sibling at EVERY resolved level. Verify the real profiles; raise on
-            # violation rather than ship a silently-disabled or over-damping run.
+            # Tripwire (dispatch-hardening / mechanical invariant): the
+            # mitigation sponge must be (a) ACTIVE and (b) <= its frozen
+            # 2026-06 envelope at EVERY resolved level. Verify the real
+            # profiles; raise on violation rather than ship a
+            # silently-disabled or accidentally-strengthened run.
             from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
                 sponge_profile as _sponge_profile)
             # Evaluate the lat-lon profile EXACTLY as the tendency does (codex R4):
@@ -4333,28 +4336,30 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             _ll = np.asarray(_sponge_profile(
                 _z, _z[0], _SPONGE_WIDTH_M, _sponge_coeff, shape=_SPONGE_SHAPE),
                 dtype=np.float64)   # to numpy fp64 ONLY for the comparison
-            _cube = (np.clip((_CUBE_SPONGE_SIGMA - _sig) / _CUBE_SPONGE_SIGMA,
-                             0.0, 1.0) ** 2) / _CUBE_SPONGE_TAU_S
-            if _cube_top_frac <= 0.0 or float(_ll.max()) <= 0.0:
+            _env = (np.clip((_TOPO_MIT_REF_SIGMA - _sig) / _TOPO_MIT_REF_SIGMA,
+                            0.0, 1.0) ** 2) / _TOPO_MIT_REF_TAU_S
+            if _mit_top_frac <= 0.0 or float(_ll.max()) <= 0.0:
                 raise SystemExit(
                     f"#1029 held_suarez_topo top-sponge is DISABLED at "
-                    f"nlev={nlev} (sigma_full[0]={float(_sig[0]):.4f} vs cube "
-                    f"sponge_sigma {_CUBE_SPONGE_SIGMA}); re-calibrate before "
+                    f"nlev={nlev} (sigma_full[0]={float(_sig[0]):.4f} vs envelope "
+                    f"sigma {_TOPO_MIT_REF_SIGMA}); re-calibrate before "
                     f"running -- never ship the topo case with no mitigation.")
-            # RELATIVE tolerance: the calibrated top level EQUALS the cube rate by
-            # construction, and _ll comes from the jnp sponge_profile (policy dtype
-            # -- often fp32), so an absolute tol would false-fire on ~1e-5 fp32
-            # round-off at the equal top level. 0.1% cleanly separates round-off
-            # from a real crossover (the L20 case is ~271% over).
-            _viol = np.where(_ll > _cube * 1.001 + 1e-15)[0]
+            # RELATIVE tolerance: the calibrated top level EQUALS the envelope
+            # rate by construction, and _ll comes from the jnp sponge_profile
+            # (policy dtype -- often fp32), so an absolute tol would false-fire
+            # on ~1e-5 fp32 round-off at the equal top level. 0.1% cleanly
+            # separates round-off from a real crossover (the L20 case is ~271%
+            # over).
+            _viol = np.where(_ll > _env * 1.001 + 1e-15)[0]
             if _viol.size:
-                _k = int(_viol[int(np.argmax((_ll - _cube)[_viol]))])
+                _k = int(_viol[int(np.argmax((_ll - _env)[_viol]))])
                 raise SystemExit(
-                    f"#1029 held_suarez_topo top-sponge OVER-DAMPS vs the cube "
-                    f"sibling at level {_k} (sigma={float(_sig[_k]):.4f}, "
-                    f"nlev={nlev}): latlon {float(_ll[_k]):.3e} > cube "
-                    f"{float(_cube[_k]):.3e} 1/s. The sin2/cube shapes only align "
-                    f"at L40; re-calibrate the sponge width/shape for this grid.")
+                    f"#1029 held_suarez_topo top-sponge EXCEEDS its frozen "
+                    f"envelope at level {_k} (sigma={float(_sig[_k]):.4f}, "
+                    f"nlev={nlev}): latlon {float(_ll[_k]):.3e} > envelope "
+                    f"{float(_env[_k]):.3e} 1/s. The sin2/envelope shapes only "
+                    f"align at L40; re-calibrate the sponge width/shape for "
+                    f"this grid.")
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
