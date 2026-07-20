@@ -2868,6 +2868,15 @@ def gm_redi_tracer_tendency_latlon(
                 "Unknown GMRediConfig.slope_positions scheme: must be one of "
                 f"('mode_b', 'nemo_native'), got {_positions!r}")
         if _positions == "nemo_native":
+            # Guard (codex r5): MSC's capped akz goes to the IMPLICIT solve;
+            # with implicit_K33=False nobody applies it and the akz portion
+            # of the diagonal silently vanishes (unstable AND unfaithful).
+            if getattr(cfg, "msc_stabilize", False) and not cfg.implicit_K33:
+                raise ValueError(
+                    "GMRediConfig: msc_stabilize=True (ln_traldf_msc) "
+                    "requires implicit_K33=True — the capped akz must be "
+                    "applied by the implicit vertical solve; without it the "
+                    "akz part of the a33 diagonal is silently dropped.")
             # ldfslp native four-position slopes: NEMO sign convention and
             # NEMO's own limiters (double cap, ML ramp, Shapiro) built in —
             # NO dispatch negation, exact traldf_iso stencil (amplitude 1.0).

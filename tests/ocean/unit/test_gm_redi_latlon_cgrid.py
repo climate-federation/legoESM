@@ -1900,10 +1900,14 @@ class TestK33NemoNativeA33:
         # akz <= zcoef0*e3w2/dt with the -1/2 cap => akz < ah_wslp2 + akz_h*e3w2
         # (weak identity); the STRONG stability property: explicit remainder
         # obeys the half-CFL bound  dt*(ah_wslp2 - akz)/e3w2 <= 1/2 + dt*akz_h
+        # remainder never exceeds the full diagonal (akz >= 0), and the cap
+        # is monotone in dt: a larger dt sends MORE of the diagonal implicit.
         rem = np.asarray(ahw - akz)
-        bound = 0.5 * np.asarray(e3w ** 2) / 2700.0
-        # where akz > 0 the remainder equals the cap exactly minus akz_h part
         assert np.all(rem <= np.asarray(ahw) + 1e-12)
+        _, akz_2x = nemo_iso_a33(
+            aht, um3, vm3, wm3, wi, wj, e1u_c, e2v_c, e3w ** 2,
+            dt=5400.0, msc=True)
+        assert np.all(np.asarray(akz_2x) >= np.asarray(akz) - 1e-15)
         # small dt -> cap not reached -> akz == 0 everywhere
         _, akz_small = nemo_iso_a33(
             aht, um3, vm3, wm3, wi, wj, e1u_c, e2v_c, e3w ** 2,
@@ -1914,3 +1918,32 @@ class TestK33NemoNativeA33:
         with _pytest.raises(ValueError, match="requires dt"):
             nemo_iso_a33(aht, um3, vm3, wm3, wi, wj, e1u_c, e2v_c,
                          e3w ** 2, dt=None, msc=True)
+
+    def test_msc_k33_getter_returns_akz_and_guard(self):
+        """Composition: with msc_stabilize=True the K33 getter returns the
+        CAPPED akz (< the msc=False full diagonal wherever the cap binds),
+        and msc without implicit_K33 is rejected loudly at dispatch."""
+        import numpy as np
+        import pytest as _pytest
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            compute_isoneutral_K33_latlon)
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        cfg_full = self._cfg_native(cfg)
+        cfg_msc = cfg_full._replace(msc_stabilize=True)
+        K_full = compute_isoneutral_K33_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg_full,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask)
+        K_msc = compute_isoneutral_K33_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg_msc,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
+            dt=2700.0)
+        assert np.all(np.asarray(K_msc) <= np.asarray(K_full) + 1e-15)
+        assert float(jnp.min(K_msc)) >= 0.0
+        # msc without implicit_K33 -> loud dispatch error
+        cfg_bad = cfg_msc._replace(implicit_K33=False)
+        with _pytest.raises(ValueError, match="requires implicit_K33"):
+            gm_redi_tracer_tendency_latlon(
+                T, S, eta, H_bathy, grid, z_coord, cfg_bad,
+                eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
+                dt=2700.0)
