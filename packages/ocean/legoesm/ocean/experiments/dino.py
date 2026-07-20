@@ -2192,6 +2192,19 @@ def dino_lat_lon_model_config(
             slope_density="neutral",
             slope_limit=cfg.redi_slope_limit,
             implicit_K33=True,
+            # #1226: the explicit operator and the implicit K33 MUST share one
+            # slope discretization.  With the default mode_b placement the
+            # operator differences the single interface slope field while the
+            # K33 getter built its diagonal from the 8-triad machinery — two
+            # slope sets whose amplitudes differ O(35%), so the rotated
+            # tensor's PSD condition (implicit S^2 >= explicit S^2, pointwise)
+            # fails and the net vertical diffusivity goes NEGATIVE — the
+            # kappa-scaled local tracer runaway (stable at kappa=200, T>38C
+            # by day 90 at NEMO strength).  nemo_native uses ldfslp's four-
+            # position slopes on BOTH sides (bit-identical arrays) with the
+            # traldf_iso_a33 mask-normalized w-point kappa — NEMO's own
+            # explicit/implicit split, transcribed.
+            slope_positions="nemo_native",
             mld_criterion=cfg.gm_redi_mld_criterion,
             visbeck=VisbeckConfig(enabled=False),
             treguier=TreguierConfig(enabled=False),

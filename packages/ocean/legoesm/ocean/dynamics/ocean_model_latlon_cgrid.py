@@ -3481,6 +3481,12 @@ class LatLonCGridOceanModel:
                     rho_0=self.config.constants.rho_0, g=self.config.constants.g,
                     kappa_redi_override=kappa_redi_override,
                     density_jacobian=_gm_dens_jac,
+                    # #1226: the SAME wall masks the tendency dispatcher uses,
+                    # so the nemo_native K33 slopes/masks are bit-identical to
+                    # the explicit operator's (staircase-aware; the K33-side
+                    # 2-D rebuild was flat-bottom-only).
+                    u_mask=state.u_mask.data,
+                    v_mask=state.v_mask.data,
                 )
             if _ab2_advective:
                 # AB2 "advective" scope: GM/Redi is a DISSIPATIVE (isoneutral +
