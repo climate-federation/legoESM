@@ -2867,16 +2867,27 @@ def gm_redi_tracer_tendency_latlon(
             raise ValueError(
                 "Unknown GMRediConfig.slope_positions scheme: must be one of "
                 f"('mode_b', 'nemo_native'), got {_positions!r}")
-        if _positions == "nemo_native":
-            # Guard (codex r5): MSC's capped akz goes to the IMPLICIT solve;
-            # with implicit_K33=False nobody applies it and the akz portion
-            # of the diagonal silently vanishes (unstable AND unfaithful).
-            if getattr(cfg, "msc_stabilize", False) and not cfg.implicit_K33:
+        # Guards (codex r5/r6, hoisted to scheme entry so EVERY sub-branch is
+        # covered): MSC's capped akz goes to the IMPLICIT solve — with
+        # implicit_K33=False nobody applies it and the akz portion of the
+        # diagonal silently vanishes (unstable AND unfaithful); and MSC is
+        # only implemented on the native-slope stencil — with mode_b the
+        # flag would be silently ignored.
+        if getattr(cfg, "msc_stabilize", False):
+            if not cfg.implicit_K33:
                 raise ValueError(
                     "GMRediConfig: msc_stabilize=True (ln_traldf_msc) "
                     "requires implicit_K33=True — the capped akz must be "
                     "applied by the implicit vertical solve; without it the "
                     "akz part of the a33 diagonal is silently dropped.")
+            if _positions != "nemo_native":
+                raise ValueError(
+                    "GMRediConfig: msc_stabilize=True (ln_traldf_msc) "
+                    "requires slope_positions='nemo_native' — the MSC split "
+                    "is implemented on the native ldfslp stencil only; with "
+                    f"slope_positions={_positions!r} the flag would be "
+                    "silently ignored.")
+        if _positions == "nemo_native":
             # ldfslp native four-position slopes: NEMO sign convention and
             # NEMO's own limiters (double cap, ML ramp, Shapiro) built in —
             # NO dispatch negation, exact traldf_iso stencil (amplitude 1.0).
