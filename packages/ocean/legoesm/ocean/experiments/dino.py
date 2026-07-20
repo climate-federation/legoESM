@@ -631,6 +631,13 @@ def dino_r1_exact_config(**overrides) -> DINOConfig:
         vertical_coordinate="masked_zco",
         pgf_quadrature="nemo_trapezoid",
         lateral_tracer_mixing="isoneutral",
+        # #1226: the NEMO ln_traldf_iso operator IS nemo_iso_lap — the
+        # DINOConfig default ("triads", the Griffies approximation) left this
+        # NEMO-exactness preset running a non-NEMO explicit operator while
+        # the isoneutral builder's slope_positions="nemo_native" routed the
+        # implicit K33 through the a33 stencil: a mismatched split pair the
+        # fn-entry MSC guard now rejects loudly.
+        gm_redi_slope_scheme="nemo_iso_lap",
         redi_S_max=0.01,               # rn_slpmax
         redi_slope_limit="nemo_cap",   # ldfslp cap semantics (not DM95)
         # Centred split-explicit barotropic (ln_bt_fw=F + flt=1) is
