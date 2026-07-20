@@ -2646,6 +2646,54 @@ class TestHeldSuarezDissipationImbalance:
         with _pytest.raises(ValueError):
             M._auto_ah_scale(72, "not-a-number")
 
+    def test_auto_ah_scale_1028_hs_low_res_bucket(self):
+        """#1028: the Held-Suarez path passes low_res_scale=0.1, which
+        applies ONLY in the n<48 auto bucket — the C48 (x2, iter-37) and
+        C72+ (x10, iter-33) buckets are stability-driven and unchanged.
+        """
+        # n<48 auto with the HS scale → 0.1, with a #1028 message.
+        for n in (24, 36):
+            scale, msg = M._auto_ah_scale(
+                n, None, low_res_scale=M._HS_AH_1028_SCALE)
+            assert scale == M._HS_AH_1028_SCALE == 0.1
+            assert msg is not None and "#1028" in msg
+            assert "LEGOESM_AH_SCALE" in msg
+
+        # Stability buckets unaffected by the kwarg.
+        scale, _ = M._auto_ah_scale(48, None, low_res_scale=0.1)
+        assert scale == 2.0
+        scale, _ = M._auto_ah_scale(72, None, low_res_scale=0.1)
+        assert scale == 10.0
+
+        # Explicit env var still overrides the HS bucket.
+        scale, msg = M._auto_ah_scale(36, "1.0", low_res_scale=0.1)
+        assert scale == 1.0 and msg is None
+
+        # auto_disable escape hatch still restores x1 everywhere.
+        scale, msg = M._auto_ah_scale(
+            36, None, auto_disable=True, low_res_scale=0.1)
+        assert scale == 1.0 and msg is None
+
+        # Default kwarg (non-HS callers: baroclinic, AMIP case) → old 1.0.
+        scale, msg = M._auto_ah_scale(36, None)
+        assert scale == 1.0 and msg is None
+
+    def test_hs_hd_scale_env_knob_1028(self):
+        """#1028: LEGOESM_HS_HD_SCALE parse — unset/empty → 1.0; explicit
+        value verbatim; non-positive/non-finite rejected loudly."""
+        import pytest as _pytest
+
+        assert M._hs_hd_scale_from_env(None) == 1.0
+        assert M._hs_hd_scale_from_env("") == 1.0
+        assert M._hs_hd_scale_from_env("   ") == 1.0
+        assert M._hs_hd_scale_from_env("0.1") == 0.1
+        assert M._hs_hd_scale_from_env("2.5") == 2.5
+        for bad in ("0", "-1.0", "nan", "inf"):
+            with _pytest.raises(SystemExit, match="finite positive"):
+                M._hs_hd_scale_from_env(bad)
+        with _pytest.raises(ValueError):
+            M._hs_hd_scale_from_env("not-a-number")
+
     def test_laplacian_visc_cube_v2_extrapolation_powerlaw(self):
         """iter 39: the v2 log-linear extrapolation should produce
         ``A_h ∝ n^2.32`` between C36 and C72.  Pin the slope.
@@ -2911,13 +2959,29 @@ class TestHeldSuarezDissipationImbalance:
         body = self._find_branch_body("cubed_sphere")
 
         # Each local assignment has the right RHS.
-        hd_rhs = self._resolve_local_assignment(body, "hd")
         dd_rhs = self._resolve_local_assignment(body, "dd")
         n_rhs = self._resolve_local_assignment(body, "n")
 
-        assert hd_rhs is not None and self._is_call_to(hd_rhs, "_hyperdiff_cube", "n"), (
-            "iter-60 codex MEDIUM: ``hd = _hyperdiff_cube(n)`` "
-            "expected in cube HS branch"
+        # For ``hd``: #1028 added a ``LEGOESM_HS_HD_SCALE`` probe multiply
+        # after the helper call, so (like ``ah`` below) the branch may have
+        # multiple ``hd = ...`` assignments — ANY of them must invoke the
+        # canonical helper.
+        hd_assignments = []
+        for stmt in body:
+            for node in ast.walk(stmt):
+                if (
+                    isinstance(node, ast.Assign)
+                    and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == "hd"
+                ):
+                    hd_assignments.append(node.value)
+        assert hd_assignments and any(
+            "_hyperdiff_cube" in ast.unparse(rhs) for rhs in hd_assignments
+        ), (
+            f"iter-60 codex MEDIUM: cube ``hd`` should derive from "
+            f"``_hyperdiff_cube(n)`` somewhere in the chain.  Saw: "
+            f"{[ast.unparse(rhs) for rhs in hd_assignments]}"
         )
         assert dd_rhs is not None and self._is_call_to(dd_rhs, "_div_damp_cube", "n"), (
             "iter-60 codex MEDIUM: ``dd = _div_damp_cube(n)`` "

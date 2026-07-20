@@ -1074,10 +1074,45 @@ def _resolve_dt_cube(
     return dt
 
 
+def _hs_hd_scale_from_env(env_value: str | None) -> float:
+    """Parse the ``LEGOESM_HS_HD_SCALE`` probe knob (#1028).
+
+    Scales the cube Held-Suarez del-4 hyperdiffusion; mirrors the
+    ``LEGOESM_AH_SCALE`` semantics for unset/empty (→ 1.0, unchanged) and
+    rejects non-positive / non-finite values loudly.
+    """
+    import math
+    if env_value is None or env_value.strip() == "":
+        return 1.0
+    scale = float(env_value)
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise SystemExit(
+            f"LEGOESM_HS_HD_SCALE must be a finite positive float, "
+            f"got {env_value!r}")
+    return scale
+
+
+# --- #1028: Held-Suarez low-resolution A_h reduction (2026-07-19/20) ---
+# At C36 the un-scaled Laplacian (A_h = 4.08e6 m^2/s) e-folds 2000-km modes
+# in ~0.29 d — faster than baroclinic growth (1-2 d) — and was measured to be
+# the dominant suppressor of the HS jet spin-up (200-d factorial: A_h x1 ->
+# 7.9 m/s, x0.1 -> 13.0, x0.03 -> 13.6, x0.01 -> 13.8 (saturated); del-4
+# x0.1 an exact null).  x0.1 takes most of the recovery at the largest
+# stability margin, and the full HS ladder at x0.1 is 200-d validated at C36
+# (sigma + hybrid + topo, topo PASS, mass ~1e-15).  Applies ONLY to the
+# n < 48 auto bucket of the HELD-SUAREZ path: the C48 (x2, iter-37) and
+# C72+ (x10, iter-33) buckets are STABILITY-driven — C72 NaN'd at the old x1
+# level, so cutting there is not backed by evidence — and the baroclinic
+# path keeps x1.0 (untested at reduced A_h).  Explicit LEGOESM_AH_SCALE
+# still overrides everything.
+_HS_AH_1028_SCALE: float = 0.1
+
+
 def _auto_ah_scale(
     n: int,
     env_value: str | None = None,
     auto_disable: bool = False,
+    low_res_scale: float = 1.0,
 ) -> tuple[float, str | None]:
     """Resolve the iter-43 ``LEGOESM_AH_SCALE`` auto-apply for cube res ``n``.
 
@@ -1086,7 +1121,9 @@ def _auto_ah_scale(
 
     Auto-apply rules (when ``env_value`` is None or empty string AND
     ``auto_disable`` is False):
-    -   n  <  48  → scale=1.0 (no change, iter-19 default)
+    -   n  <  48  → scale=``low_res_scale`` (1.0 default; the Held-Suarez
+        path passes ``_HS_AH_1028_SCALE`` = 0.1 — see the #1028 block
+        above)
     -   n  ∈ [48, 72) → scale=2.0 (iter-37 sweet spot, EXTRAPOLATED
         from C48 stability data — C60 is inferred, not directly
         validated; codex iter-45 review caveat)
@@ -1132,6 +1169,12 @@ def _auto_ah_scale(
             f"[FV3_3D iter 43 auto] At C{n} auto-applying "
             f"LEGOESM_AH_SCALE=2 (iter-37 sweet spot).  Set env var "
             f"to override."
+        )
+    if low_res_scale != 1.0:
+        return low_res_scale, (
+            f"[#1028 auto] At C{n} auto-applying "
+            f"LEGOESM_AH_SCALE={low_res_scale:g} (Held-Suarez low-res A_h "
+            f"reduction; 200-d validated at C36).  Set env var to override."
         )
     return 1.0, None
 
@@ -4064,22 +4107,22 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # #1028 probe knob: scale the cube HS del-4 hyperdiffusion (mirrors
         # LEGOESM_AH_SCALE; default 1.0 = unchanged). At C36 the default hd
         # e-folds 2000-km modes in ~3.8 d — comparable to baroclinic growth —
-        # so the dead-jet factorial needs this axis too.
-        _hs_hd_scale = float(os.environ.get("LEGOESM_HS_HD_SCALE", "1.0"))
-        if _hs_hd_scale <= 0.0:
-            raise SystemExit(
-                f"LEGOESM_HS_HD_SCALE must be > 0, got {_hs_hd_scale}")
-        hd = hd * _hs_hd_scale
+        # so the dead-jet factorial needs this axis too.  (Factorial verdict:
+        # hd x0.1 was an exact null on the 200-d HS jet — the knob stays for
+        # probing, the default stays 1.0.)
+        hd = hd * _hs_hd_scale_from_env(os.environ.get("LEGOESM_HS_HD_SCALE"))
         dd = _div_damp_cube(n)
         ah = _laplacian_visc_cube(n)
         # FV3_3D iter 33/34: scale A_h via env var.  matrix default
         # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
-        # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
-        # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
+        # A_h but stable at 10x).  Set LEGOESM_AH_SCALE=10.0 at C72.
         # FV3_3D iter 43/44/46: auto-apply resolution-dependent A_h
         # scale via _auto_ah_scale helper.  Explicit env var overrides;
         # LEGOESM_AH_AUTO_DISABLE=1 disables the auto-apply entirely
         # (iter-46 codex backwards-compat opt-out).
+        # #1028: the n<48 HS bucket auto-applies _HS_AH_1028_SCALE (0.1) —
+        # the old x1 Laplacian was the dominant suppressor of HS jet
+        # spin-up (see the constant's provenance block).
         _ah_auto_disable = (
             os.environ.get("LEGOESM_AH_AUTO_DISABLE", "0").strip().lower()
             in ("1", "true", "yes", "on")
@@ -4087,6 +4130,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         _ah_scale, _ah_msg = _auto_ah_scale(
             n, os.environ.get("LEGOESM_AH_SCALE"),
             auto_disable=_ah_auto_disable,
+            low_res_scale=_HS_AH_1028_SCALE,
         )
         if _ah_msg is not None:
             print(_ah_msg, flush=True)
@@ -4111,18 +4155,21 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         #   - τ = 1 h (default): cube-vs-latlon mean_T gap  -5.0 K
         #   - τ = 7 d (FV3-like):                          -10.8 K
         #   - τ = ∞ (sponge OFF, iter-13):                 -11.3 K
-        # The aggressive 1-h sponge produces the BEST cross-grid
-        # agreement on this metric, despite being non-canonical for
-        # HS.  Suspected cause: the cubed-sphere hyperdiffusion +
-        # sponge combination is empirically tuned to roughly match
-        # the effective dissipation that lat-lon's Laplacian
-        # viscosity provides; a weaker sponge under-damps the
-        # cubed-sphere upper troposphere and the climatology drifts
-        # further from the lat-lon / icosahedral / spectral cluster.
-        # NOT yet established for HYBRID coord, RRTMGP radiation,
-        # or 200-day spin-up — those may have different optimal τ.
-        # Keep the 1-h default for this HS test until a more
-        # principled retuning is done.
+        # The aggressive 1-h sponge produced the BEST cross-grid
+        # agreement on that metric — but #1028 (2026-07-19) showed the
+        # mean_T tuning was CONFOUNDED: it was evaluated while no
+        # jet-strength gate existed, and the 1-h sponge is the dominant
+        # global KE sink (-1.0/day on a balanced jet, fp64 budget closed
+        # to 4e-16; 99% of all KE loss on an eddying state).  It capped
+        # the HS jet and drains any ERA5-initialised/AMIP circulation.
+        # The config default is now tau = 5 d (FV3 Ray_fast-like;
+        # primitive_eq_cdgrid.py) — 200-d validated: HS sigma/hybrid
+        # neutral-positive (7.3->7.9 / 6.9->7.3), cube topo PASS, and
+        # the -1/day drain on resolved jets gone (6-d JW decay A/B:
+        # tau=1h leaves 30% KE vs 61% at days-scale/off).  The
+        # cross-grid mean_T calibration is OWED a redo with the #1049
+        # jet floor active (tracked in #1028); expect the -10.8 K-class
+        # gap numbers above until then.
         # FV3_3D iter 13: optional FV3-faithful post-step vorticity
         # damping (SW backbone reuse).  Set LEGOESM_DAMP_V=0.30 to
         # opt in (~17 % mid-level cube-imprint reduction at C36).
