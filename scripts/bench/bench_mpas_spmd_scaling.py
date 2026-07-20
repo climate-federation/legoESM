@@ -73,7 +73,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # or an f32 ablation is falsifiable from the JSONL row alone.  metadata.py
 # imports JAX lazily, so this is safe before jax.distributed.initialize.
 from metadata import (  # noqa: E402
-    annotate_incomplete, hlo_collective_permutes, scaling_metadata,
+    annotate_incomplete, hlo_collective_census, scaling_metadata,
     tidy_throughput_fields)
 
 # SPMD full-step parity tolerances — the FLOATING-POINT RE-ASSOCIATION floor
@@ -399,7 +399,10 @@ def main() -> int:
         _census_fn = lambda st: step(st, dt, physics_fn=physics_fn)  # noqa: E731
     else:
         _census_fn = lambda st: step(st, dt)  # noqa: E731
-    hlo_cp = hlo_collective_permutes(_census_fn, s)
+    # ONE compile → full per-family census; the CP scalar (the #1113 round-count
+    # wall) is the collective_permute member, so no second compile for it.
+    hlo_census = hlo_collective_census(_census_fn, s)
+    hlo_cp = hlo_census["collective_permute"] if hlo_census else None
 
     # --- Correctness gates (before any timing is reported) -----------------
     if args.parity_gate or args.check_conservation:
@@ -485,6 +488,9 @@ def main() -> int:
         # multi-node ceiling is this count x the ~0.11 ms launch floor, so it
         # belongs on every row like the cube benches.
         hlo_collective_permutes=hlo_cp,
+        # full per-family census (permute + all-reduce + all-gather + ...) on
+        # the SAME compile: exposes any reduction the ico step introduces.
+        hlo_collectives=hlo_census,
     )
     # Flat aggregator-compatible identity + metric fields (see the latlon
     # twin): resolution = subdivision level, matching run_cpu_mpi_scaling's
