@@ -74,6 +74,7 @@ Beyond the route-A `gpu_moist_scaling.slurm` above:
 | `gpu_scaling.sbatch` | ATM (cube AMIP physics, single-process multi-GPU) + OCEAN (`bench_ocean_latlon_spmd_scaling.py`, 1/2/4 A100 with parity+conservation smoke) on one GPU node. Plain GPU env — no mpi4jax. |
 | `gpu_multinode_scaling.sbatch` | MULTI-NODE route-B lanes over NCCL/IB (SLURM auto-detected `jax.distributed`): A = cube `--cs-spmd` (6 GPU / 2 nodes), C = atm lat-lon `--multicontroller` (8 GPU), D = ocean `--multicontroller` (8 GPU). |
 | `cpu_scaling.sbatch` | ATM + OCEAN CPU-MPI rank ladders on `compute` nodes (`legoesm-mpi` env), with fail-fast smokes. |
+| `diagnosis.sbatch` | BOTTLENECK diagnosis via `scripts/bench/run_scaling_diagnosis.py` — per-phase halo bandwidth, reduction latency, roofline, compute/comm overlap, and the **static collective census** (collective-permute + all-reduce + all-gather per step) the throughput jobs do NOT capture. Climbs the cube face-shard `1 2 3` ladder so the message-count-vs-shard curve — the LATENCY-bound anti-scaling signal — is recorded. `sbatch --export=ALL,MODE=census` for counts only. Derecho twin: `scaling_derecho/diagnosis.pbs`. |
 
 `_env.sh` now also carries the NCCL-over-IB defaults for the route-B lanes
 (`NCCL_IB_HCA=mlx5`, `NCCL_SOCKET_IFNAME=ib0`, `NCCL_NET_GDR_LEVEL=PHB`,

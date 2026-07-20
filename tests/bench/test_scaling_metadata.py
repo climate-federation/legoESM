@@ -377,14 +377,97 @@ def test_count_collective_permutes_matches_hyphen_and_underscore():
     assert md.count_collective_permutes("no collectives here") == 0
 
 
+def _cpu_compile():
+    """Pin the HLO-probe compiles to a CPU device.
+
+    The probes read ``compile().as_text()``, and some backends return None for
+    it (the experimental Apple ``mps`` plugin does) — which would make the
+    "collective-free fn -> all-zero census" assertion vacuously unreachable on
+    a dev laptop.  CPU is also the reproducible-by-construction reference the
+    census docstring names (the DEFAULT schedule, no GPU collective-combining),
+    so this keeps the assertion meaningful on every machine.  Production probes
+    deliberately do NOT pin: cluster jobs must census the REAL on-device
+    executable.
+    """
+    import jax
+    return jax.default_device(jax.devices("cpu")[0])
+
+
 def test_hlo_collective_permutes_lowers_counts_and_is_error_safe():
     """The best-effort probe lowers a fn and counts its collective-permutes: a
     fn with none -> 0; an unlowerable fn -> None (never raises). Real ppermute
     counting is exercised by the MPAS/cube bench gates and
     count_collective_permutes' synthetic HLO test above."""
     import jax.numpy as jnp
-    assert md.hlo_collective_permutes(lambda x: x + 1, jnp.arange(4.0)) == 0
+    with _cpu_compile():
+        assert md.hlo_collective_permutes(lambda x: x + 1, jnp.arange(4.0)) == 0
 
-    def _boom(x):
-        raise RuntimeError("unlowerable")
-    assert md.hlo_collective_permutes(_boom, jnp.arange(4.0)) is None
+        def _boom(x):
+            raise RuntimeError("unlowerable")
+        assert md.hlo_collective_permutes(_boom, jnp.arange(4.0)) is None
+
+
+def test_count_collectives_full_census_all_families():
+    """Full census counts every collective family with the same op-call-form
+    discipline: async ``-start`` once (``-done`` excluded), StableHLO
+    underscore + optimized hyphen, and a config-header flag echo that merely
+    CONTAINS an op name never inflates the count."""
+    hlo = "\n".join([
+        # config-header echo of XLA_FLAGS -> must NOT match (no op-call paren)
+        "  // xla_gpu_collective_permute_combine_threshold_bytes=33554432",
+        "  %a = collective-permute(%x)",             # permute (optimized)
+        "  %b = collective_permute(%y)",             # permute (StableHLO)
+        "  %c = collective-permute-done(%a)",        # async companion -> drop
+        "  %r1 = all-reduce(%p)",                    # reduction (hyphen)
+        "  %r2 = all_reduce_start(%q)",              # async reduction -> count once
+        "  %r3 = all-reduce-done(%r2)",              # async companion -> drop
+        "  %g = all-gather(%z)",                     # all-gather
+        "  %a2a = all-to-all(%w)",                   # all-to-all
+        "  %rs = reduce-scatter(%v)",                # reduce-scatter
+    ])
+    c = md.count_collectives(hlo)
+    assert c["collective_permute"] == 2
+    assert c["all_reduce"] == 2          # hyphen op + async-start (done dropped)
+    assert c["all_gather"] == 1
+    assert c["all_to_all"] == 1
+    assert c["reduce_scatter"] == 1
+    assert c["total"] == 7
+    # permute family stays bit-identical to the canonical scalar helper
+    assert c["collective_permute"] == md.count_collective_permutes(hlo)
+
+    empty = md.count_collectives("no collectives here")
+    assert empty["total"] == 0
+    assert set(empty) == {"collective_permute", "all_reduce", "all_gather",
+                          "all_to_all", "reduce_scatter", "total"}
+
+
+def test_census_does_not_false_drop_ops_with_done_in_metadata():
+    """Regression (codex): the ``-done`` async COMPANION is excluded by the
+    regex structurally (``op-done(`` never matches ``op(?:[_-]start)?\\(``), so
+    a line that merely CONTAINS the substring "done" elsewhere — an XLA
+    metadata op_name, a ``%done_*`` SSA name — must STILL be counted.  A blunt
+    ``"done" not in line`` filter would false-drop these to zero."""
+    hlo = "\n".join([
+        '  %r = all-reduce(%p), metadata={op_name="jit(step)/done_stage/psum"}',
+        '  %done_mass = f32[] collective-permute(%q)',
+        '  %g = all-gather(%z), metadata={op_name="reduce_done/x"}',
+    ])
+    c = md.count_collectives(hlo)
+    assert c["all_reduce"] == 1        # NOT dropped despite "done" in metadata
+    assert c["collective_permute"] == 1  # NOT dropped despite %done_ SSA name
+    assert c["all_gather"] == 1
+    # canonical permute helper is fixed by the same shared counter
+    assert md.count_collective_permutes(hlo) == 1
+
+
+def test_hlo_collective_census_lowers_and_is_error_safe():
+    """Best-effort full-census probe: a collective-free fn -> all-zero dict;
+    an unlowerable fn -> None (never raises)."""
+    import jax.numpy as jnp
+    with _cpu_compile():
+        census = md.hlo_collective_census(lambda x: x + 1, jnp.arange(4.0))
+        assert census is not None and census["total"] == 0
+
+        def _boom(x):
+            raise RuntimeError("unlowerable")
+        assert md.hlo_collective_census(_boom, jnp.arange(4.0)) is None
