@@ -699,8 +699,18 @@ def _fb_cube_sw_model(n: int, test_num: int, *, fv3_native_grid: bool = False,
     else:
         grid = (create_cubed_sphere(n, omega=0.0, use_duogrid=True)
                 if test_num == 8 else create_cubed_sphere(n, use_duogrid=True))
-    return FV3FBShallowWaterModel(grid, fb_m1_preset_config(),
-                                  fv3_native_angles=fv3_native_angles)
+    # FB-preset damping overrides (2026-07-19 modon cross-face-halo
+    # tuning): the M1 preset (d4_bg=0.16, dddmp=0.2, damp_v=0.02) is
+    # calibrated for W2; the ED-grid modon collision, once its seam
+    # blowup is cured by LEGOESM_SW_FB_CROSS_FACE_HALO=1, needs a
+    # post-collision damping sweep to stay stable without dispersing.
+    _fb_d4 = float(os.environ.get("LEGOESM_SW_FB_D4_BG", "0.16"))
+    _fb_dd = float(os.environ.get("LEGOESM_SW_FB_DDDMP", "0.2"))
+    _fb_dv = float(os.environ.get("LEGOESM_SW_FB_DAMP_V", "0.02"))
+    return FV3FBShallowWaterModel(
+        grid, fb_m1_preset_config(d4_bg=_fb_d4, dddmp=_fb_dd,
+                                  damp_v=_fb_dv),
+        fv3_native_angles=fv3_native_angles)
 
 
 def _modon_hyperdiff_coeff(n: int) -> float:
@@ -2564,6 +2574,10 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                 grid = create_cubed_sphere(n)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         dt = 300.0
+        if test_num == 8:
+            # modon dt override (2026-07-19 CFL-vs-geometry discriminator
+            # for the FB cross-face-halo poleward-phase blowup)
+            dt = float(os.environ.get("LEGOESM_SW_MODON_DT", str(dt)))
         # Iter-760: switch to Fortran-faithful del-n vorticity damping
         # (sw_core.F90:1948-1999) instead of the scalar bilaplacian on
         # geographic wind components.  del6_vt_flux damps relative

@@ -21,6 +21,7 @@ References
 
 from __future__ import annotations
 
+import os
 import warnings
 from functools import partial
 from typing import NamedTuple
@@ -1247,6 +1248,15 @@ class FV3FBShallowWaterModel:
             # enable it via `CDGridShallowWaterConfig`.  Default OFF.
             apply_fortran_xppm_boundary=(
                 self.config.apply_fortran_xppm_boundary),
+            # EXPERIMENT (2026-07-19): the faithful attenuated cross-face
+            # divergence ghost (Fortran ext_scalar, dyn_core.F90:651).
+            # Default-OFF zero-ring ghost is stable on EQUIANGULAR but
+            # the ED-gnomonic grid blows up at the modon collision
+            # (step ~13300); the cross-face halo is the duo-stepper's
+            # fix.  Env-gated (nord=1 only; the FB M1 preset is nord=1).
+            cross_face_halo=(
+                os.environ.get("LEGOESM_SW_FB_CROSS_FACE_HALO", "0")
+                == "1"),
         )
 
         state_new = FV3EdgeShallowWaterState(

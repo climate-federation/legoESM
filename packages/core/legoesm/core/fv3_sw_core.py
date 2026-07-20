@@ -2989,7 +2989,8 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
                  damp_v=0.0, nord_v=0,
                  apply_legacy_d_sw4_corner_ke_fix=False,
                  apply_legacy_d_sw5_corner_corrections=False,
-                 apply_fortran_xppm_boundary=False):
+                 apply_fortran_xppm_boundary=False,
+                 cross_face_halo=False):
     """FV3 d_sw1..d_sw6 D-grid full-step (dyn_core.F90).
 
     d_sw1: transport velocity + PPM mass transport. d_sw3: B-grid KE transport.
@@ -3060,7 +3061,8 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
             u_d, v_d, ua, va, cdgrid, dt,
             d2_bg=d2_bg, dddmp=dddmp, d4_bg=d4_bg, nord=nord,
             apply_legacy_corner_corrections=(
-                apply_legacy_d_sw5_corner_corrections))
+                apply_legacy_d_sw5_corner_corrections),
+            cross_face_halo=cross_face_halo)
         ke_corner = ke_corner + ke_damping
 
     # iter-944b: REVERTED iter-942 ke_corner sync (FV3 reference has it commented out)
@@ -3195,7 +3197,8 @@ def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=constants.g,
                    damp_v=0.0, nord_v=0,
                    apply_legacy_d_sw4_corner_ke_fix=False,
                    apply_legacy_d_sw5_corner_corrections=False,
-                   apply_fortran_xppm_boundary=False):
+                   apply_fortran_xppm_boundary=False,
+                   cross_face_halo=False):
     """EXPERIMENTAL FV3 forward-backward SW step (unstable at C16; use fv3_sw_tendencies+RK3 for prod).
 
     Phase 1: c_sw (dt/2). Phase 2: p_grad_c (dt/2). Phase 3: _d_sw_native d_sw1-6 chain.
@@ -3237,7 +3240,8 @@ def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=constants.g,
         apply_legacy_d_sw4_corner_ke_fix=apply_legacy_d_sw4_corner_ke_fix,
         apply_legacy_d_sw5_corner_corrections=(
             apply_legacy_d_sw5_corner_corrections),
-        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
+        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
+        cross_face_halo=cross_face_halo)
 
     # Phase 4: one_grad_p — D-grid BACKWARD pressure-gradient update on the
     # prognostic winds (FV3 dyn_core.F90:2347 one_grad_p / 1529 grad1_p_update).
