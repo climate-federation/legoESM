@@ -16,24 +16,15 @@ import jax.numpy as jnp
 
 from legoesm.atmosphere.physics.thermodynamics import compute_moist_adiabat
 
+# Shared, AD-safe profile primitives live in the low-level core module so the LES
+# suite and the SCM-RCE metrics cannot drift. Re-exported here for the existing
+# call sites that import them from this module.
+from legoesm.core.profile_metrics import safe_sqrt, weighted_rmse, weighted_std
+
 
 PRECIP_NORMALIZATION_MM_DAY = 3.0
 PRECIP_SCORE_WEIGHT = 1.0
 
-
-def safe_sqrt(x: jax.Array) -> jax.Array:
-    """``sqrt`` with a finite gradient at ``x == 0``.
-
-    ``sqrt(0)`` is itself finite (0) but its derivative ``1/(2 sqrt(0)) = inf``,
-    so a PERFECT fit (residual == 0 — the exact minimiser the trainer targets)
-    produces a NaN gradient.  The double-``where`` masks the zero out of the
-    branch that is differentiated, giving the EXACT value ``sqrt(0) == 0`` on
-    the forward pass AND a finite (zero) gradient on the backward pass — so the
-    existing "metrics are exactly 0 at a matching profile" invariant is kept.
-    """
-    x = jnp.asarray(x)
-    safe_x = jnp.where(x > 0, x, jnp.ones_like(x))
-    return jnp.where(x > 0, jnp.sqrt(safe_x), jnp.zeros_like(x))
 
 MADIAB_MEAN_TOL_K = 8.0
 MADIAB_MAX_TOL_K = 30.0
@@ -42,28 +33,6 @@ TROP_MAX_Z_KM = 25.0
 COLD_POINT_MIN_K = 175.0
 COLD_POINT_MAX_K = 210.0
 MIN_FREE_TROP_LEVELS = 3
-
-
-def weighted_std(profile: jax.Array, weights: jax.Array) -> jax.Array:
-    """Mass-weighted vertical standard deviation."""
-    profile = jnp.asarray(profile)
-    weights = jnp.asarray(weights, dtype=profile.dtype)
-    mean = jnp.sum(weights * profile)
-    var = jnp.sum(weights * (profile - mean) ** 2)
-    # safe_sqrt keeps the gradient finite for a perfectly uniform profile
-    # (var == 0) while still returning exactly 0.
-    return safe_sqrt(var)
-
-
-def weighted_rmse(diff: jax.Array, weights: jax.Array) -> jax.Array:
-    """Mass-weighted vertical RMSE.
-
-    Uses a floored sqrt so the gradient stays finite at a perfect fit
-    (``diff == 0`` makes ``d sqrt(s)/ds = 1/(2 sqrt(s))`` blow up at ``s == 0``).
-    """
-    diff = jnp.asarray(diff)
-    weights = jnp.asarray(weights, dtype=diff.dtype)
-    return safe_sqrt(jnp.sum(weights * diff ** 2))
 
 
 def score_profiles_jax(

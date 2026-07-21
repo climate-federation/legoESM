@@ -61,7 +61,7 @@ ANCHOR_CASES: tuple[LESCase, ...] = (
         core="spectral",
         grid=LESGrid(nx=64, ny=64, nz=96, Lx_m=400.0, Ly_m=400.0, Lz_m=400.0, dt_s=0.1),
         duration_hours=4.0,
-        surface_theta_flux_K_m_s=-0.005,  # run_spectral_sbl --Q0 fallback (GABLS1 = 0.25 K/hr cooling)
+        surface_theta_flux_K_m_s=-0.005,  # run_spectral_sbl --Q0 (GABLS1 0.25 K/hr cooling)
         geostrophic_wind_m_s=8.0,         # --Ug default
         sgs_variants=_SGS_SPREAD,         # stable anchor is in the D7 spread subset
         driver="run_spectral_sbl.py",

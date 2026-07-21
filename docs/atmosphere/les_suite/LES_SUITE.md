@@ -95,6 +95,10 @@ registry today.** RICO is out of scope (§3).
 - `ml/training.create_optimizer()` (warmup+cosine+clip; adamw/adam/muon).
 - `training/scm_rce_metrics.py` + `core/profile_metrics.py`: mass-weighted, std-normalized
   profile RMSE. Reuse the primitives; the LES score is a new *assembly*, not new numerics.
+  **Build note (2026-07-21):** `core/profile_metrics.py` did not exist on this tree; the
+  primitives (`safe_sqrt`/`weighted_std`/`weighted_rmse`) were extracted there from
+  `scm_rce_metrics.py` (which now re-exports them) so the atmosphere-side LES score can reuse
+  them without an atmosphere→training circular import. Added `layer_weights_from_heights`.
 - Derivative-free precedent: `run_scm_rce_campaign.py::_candidate_values` (default →
   25%/75% of each bound → uniform random fill).
 - AD precedent: `run_scm_rce_params.py` / `train_scm_rce_params.py`.
@@ -275,10 +279,14 @@ config next to every number.
    into the nested `CLUBBConfig.params` and re-wrap. Tests: `test_clubb_param_spec.py`,
    `test_scm_rce_clubb_nesting.py`. Merged 2026-07-11 (branch `clubb-param-spec`); driver-level
    `--params` reachability is baselined as a follow-up like every other turbulence scheme.
-5. **[next — CPU-OK] Build** `les_suite/registry.py` (LESCase registry, mirroring
-   `ocean/fidelity/registry.py`) + the LES→SCM `bridge.py`, wire the matrix spec. This is the
-   infrastructure that turns the scattered `run_*.py` LES drivers into enumerable cases; it
-   needs no GPU and unblocks the rest of the suite.
+5. **[in progress — CPU-OK] Build** the library 4-tuple + drivers. Done so far
+   (2026-07-21): `registry.py` + `catalog.py` (merged 49959ec94); `bridge.py`
+   (artifact schema + LES→SCMForcing + truth extraction), `counter_gradient.py`
+   (Q1 structural diagnostic), `score.py` (D6 diagnostic + prognostic assemblies),
+   `core/profile_metrics.py` (shared primitives). Remaining: matrix-spec wiring
+   (`run_les_suite_matrix.py`), the `run_les_suite.py` / `tune_scm_to_les.py`
+   drivers, and the `build_les_scorecard.py` / `compare_les_intercomparison.py`
+   validators. See `CHANGELOG.md` for the detailed per-module log.
 
 Each code step follows CLAUDE.md: pre-impl grep, a direct unit test per new `.py`, and — for
 the CLUBB spec, the bridge, and the score assembly (physics/numerics-touching) — the mandatory

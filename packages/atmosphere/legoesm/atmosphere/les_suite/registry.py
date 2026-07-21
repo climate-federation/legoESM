@@ -156,7 +156,9 @@ class LESCase:
         if len(set(self.sgs_variants)) != len(self.sgs_variants):
             raise RegistryError(f"{self.name}: duplicate sgs_variants {self.sgs_variants}")
         if not (isinstance(self.duration_hours, (int, float)) and self.duration_hours > 0):
-            raise RegistryError(f"{self.name}: duration_hours must be > 0, got {self.duration_hours!r}")
+            raise RegistryError(
+                f"{self.name}: duration_hours must be > 0, got {self.duration_hours!r}"
+            )
         for axis in ("surface_theta_flux_K_m_s", "geostrophic_wind_m_s"):
             v = getattr(self, axis)
             if v is not None and not isinstance(v, (int, float)):
