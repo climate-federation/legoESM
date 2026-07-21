@@ -66,7 +66,13 @@ def _build_cbl(case, args, dtype):
         Lx=case.grid.Lx_m, Ly=case.grid.Ly_m, Lz=case.grid.Lz_m,
         z0=args.z0, dealias=True, smagorinsky_dynamic=True,
         sgs_model="smagorinsky", time_scheme="rk3",
-        buoyancy=True, theta_ref0=theta0, pr_sgs=args.pr_sgs)
+        buoyancy=True, theta_ref0=theta0, pr_sgs=args.pr_sgs,
+        # sgs_buoyancy MUST stay off: emit.sgs_vertical_scalar_flux_mean reconstructs
+        # the SGS heat flux from eddy_viscosity() with K_h=ν_t/Pr, matching the core's
+        # scalar_rhs. If sgs_buoyancy were on, the core rescales ν_t by the Lilly
+        # factor (spectral_les_plane rhs) and the emitted SGS flux would no longer
+        # equal the flux the model integrated.
+        sgs_buoyancy=False)
     g = sl.make_grid(cfg, dtype=dtype)
     z = g.z_c
     th = jnp.where(z > args.zi0, theta0 + args.gamma * (z - args.zi0),

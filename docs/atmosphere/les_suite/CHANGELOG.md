@@ -16,11 +16,12 @@ Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
 | Shared profile primitives | `core/profile_metrics.py` | **done** (iter 1) |
 | Matrix-spec wiring | `les_suite/matrix.py` + `scripts/matrix/run_les_suite_matrix.py` | **done** (iter 1) |
 | Matrix spec wiring | `scripts/matrix/run_les_suite_matrix.py` | **done** (iter 1) |
-| LES ensemble driver | `scripts/run/run_les_suite.py` | todo |
-| SCM→LES tuner | `scripts/run/tune_scm_to_les.py` | todo |
+| LES ensemble driver | `scripts/run/run_les_suite.py` | **done** (iter 2, dry CBL) |
+| SCM→LES tuner | `scripts/run/tune_scm_to_les.py` | todo (NEXT) |
 | Scorecard | `scripts/validate/les_suite/build_les_scorecard.py` | todo |
 | Intercomparison gate (D7/gate-0) | `les_suite/intercomparison.py` + `scripts/validate/les_suite/compare_les_intercomparison.py` | **done** (iter 2) |
-| Gate-0 Nieuwstadt CBL run | `results/les_suite/gate0_nieuwstadt/` | **GPU-unblocked** (iter 2, 2×V100S available) — running |
+| Gate-0 Nieuwstadt CBL run | `results/les_suite/gate0_nieuwstadt/` + `docs/.../gate0_nieuwstadt_result.json` | **PASS** (iter 2, buoyant path validated) |
+| LES ensemble driver | `scripts/run/run_les_suite.py` + `les_suite/emit.py` | **done** (iter 2, dry CBL wired; pipeline validated) |
 | Q1/Q2/Q3 science answers | (require the full GPU LES ensemble + tuning) | in progress (GPU now available) |
 
 ## Conventions locked during the build
@@ -124,10 +125,30 @@ Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
   0.89, well-mixing). Verdict recorded once the production run + validator finish.
 - Codex review of `intercomparison.py` running in parallel with the LES run.
 
-**NEXT:** feed gate-0 output through the validator (the buoyant-path verdict); if it
-passes, build `run_les_suite.py` (registry case → LES → self-describing bridge
-artifact incl. SGS flux) to emit the ensemble, then `tune_scm_to_les.py` — the
-per-(closure,
+- **Gate-0 PASS** (validator on the 96³ x64 run): σ_w/w_*=0.679, mixed-layer
+  ∂θ/∂z=0.070 mK/m, surface flux 0.861, entrainment -0.156 — all four bands. The
+  buoyant path of the spectral truth core is validated against Nieuwstadt-1993; the
+  §3 named risk (buoyant path least-validated) is retired. Fixture: JSON committed.
+- **`emit.py` (12 tests) + `run_les_suite.py` (3 dispatch tests)**: the ensemble
+  driver. emit does the horizontal-mean + resolved/SGS flux reductions (SGS flux =
+  -<(ν_t/Pr)∂θ/∂z> from the closure's `eddy_viscosity`); SGS-flux SIGN convention
+  gets explicit analytic tests. Driver: registry case → spectral LES → validated
+  artifact. Dry CBL wired; stable/moist regimes raise (honest dispatch).
+- **SGS-flux model-consistency CONFIRMED** (read the core, not inferred):
+  `spectral_les_plane.rhs` sets `nu_t = eddy_viscosity(...)` (line 1116) and
+  `scalar_rhs` uses `Kh = nu_t/pr_sgs` — identical to emit. The `sgs_buoyancy` Lilly
+  rescale (1126-7) is skipped (driver pins `sgs_buoyancy=False`), so the emitted SGS
+  flux equals the flux the model integrated. Driver comments the invariant.
+- **Full pipeline VALIDATED end-to-end on GPU** (96³ CBL, 0.35 h f32): emit →
+  `load_artifact` → `diagnostic_truth` → surface flux ratio resolved 0.999 + SGS
+  0.011 = **1.010** (~1, physically correct); the Q1 `diagnose_truth` counter-gradient
+  diagnostic **detects a structural-ceiling layer at 675-758 m** — a real Q1a result.
+- 132 les_suite/core tests green; counter-gradient gradient tests made
+  precision-robust (x32/x64). Codex review of emit/run_les_suite running.
+- Committed: intercomparison gate (de7672463), gate-0 fix (8d1bdc81b), emit +
+  run_les_suite (218129efd).
+
+**NEXT:** `tune_scm_to_les.py` — the per-(closure,
 regime) AD + derivative-free tuner (D4). Reuse (do NOT fork): `scm.py` +
 `scm_forcing.py` (single-column integration, CPU-cheap), `training/param_collector`
 (`build_trainable_params`/`apply_param_overrides`), `ml/training.create_optimizer`,
