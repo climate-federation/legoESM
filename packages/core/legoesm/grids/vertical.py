@@ -2310,6 +2310,104 @@ def vertical_advection_theta_hybrid(
     return exner * vertical_advection_hybrid(theta, mass_flux, p_s, coord)
 
 
+def sb81_omega_over_p_dyn(
+    cumsum_mass_div: jax.Array,
+    coord: HybridSigmaPressureCoordinate,
+    p_s: jax.Array,
+    dp_s_dt: jax.Array | None = None,
+) -> jax.Array:
+    """SB81 α-weighted DYNAMIC part of the energy conversion ``(ω/p)_k``.
+
+    Simmons & Burridge (1981) / IFS discretization of the non-advective part
+    of the thermodynamic conversion term (#1029 ω-side)::
+
+        (ω/p)_k^dyn = -(1/Δp_k) [ L_k · (Σ_{j<k} C_j - B_top·dp_s/dt)
+                                   + α_k · C_k ]
+
+    with ``C_j = ∇·(v_j Δp_j)`` the flux-form layer mass divergence,
+    ``L_k = ln(p_{k+1/2}/p_{k-1/2})`` and ``α_k`` the exact SB81 alpha from
+    :func:`sb81_halflevel_construction` — the SAME half-level construction
+    the geopotential integration and the momentum/thermo ``ln p`` gradients
+    use (the arithmetic ``ω_full / p_full`` form this replaces was a third,
+    independent discretization of the same continuous operator).  ``Δp_k``
+    is differenced INTERNALLY from the same clipped half-level pressures as
+    ``L_k``/``α_k`` — passing an externally-built ``dA + dB·p_s`` thickness
+    would differ by rounding (and by the clip in a zero-p-top layer),
+    breaking the discrete identities below.
+
+    The caller adds the advective part ``v_k · ∇(ln p_k^SB)`` separately
+    (the shared SB81 full-level field of :func:`sb81_full_level_ln_p`);
+    together they discretize the full ``ω/p``.  The ``∂p/∂t`` and
+    ``η̇ ∂p/∂η`` contributions are CONTAINED in the cumulative-divergence
+    expression (continuity + the ``F = 0`` top closure fold them in) —
+    EXCEPT the top-boundary term when the coordinate's top interface itself
+    moves in pressure (``B_top != 0``, e.g. a sigma-like coordinate with
+    ``p_top = sigma_top·p_s``): there ``(∂p/∂t + η̇ ∂p/∂η)(p̂) =
+    B_top·dp_s/dt - cumsum(p̂)`` and the constant layer-averages against
+    ``dp/p`` to ``+ B_top·dp_s/dt·L_k/Δp_k``.  Pass ``dp_s_dt`` (the RAW
+    continuity diagnosis ``-D_total/B_range``, NOT a globally corrected
+    variant — a zero-mean fixer applied to the prognostic ``dp_s/dt``
+    breaks the continuity identity this derivation rests on) to include
+    it; the term is multiplied by ``coord.B_half[0]`` traced (no Python
+    branch), so ``B_top = 0`` coordinates const-fold it away and the
+    function stays jit/AD-safe for traced coordinates.
+
+    Discrete column identity (unit-tested to fp64 roundoff, not bit
+    exactness — separate ``log``/multiply/reduce roundings)::
+
+        Σ_k Δp_k (ω/p)_k^dyn = -Σ_j C_j (ln p_s - ln p_j^SB)
+                               + B_top·dp_s/dt · ln(p_s / p_top_safe)
+
+    i.e. the column-integrated conversion telescopes onto the SAME discrete
+    ``ln p^SB`` field whose gradient does the momentum PGF work.  This is a
+    VERTICAL-discretization consistency statement only: on the C-grid the
+    horizontal pairing (face-flux ``C`` vs the centre-averaged
+    ``v·∇ln p^SB`` product) is not exact summation-by-parts, so no exact
+    global energy-conservation claim follows (#1029 tracks the residual
+    via the forced ``held_suarez_topo`` A/B, not an algebraic proof).
+
+    Top-layer convention at an exactly-zero-pressure top: the clipped
+    construction gives ``α_0 → 1`` (documented in
+    :func:`sb81_full_level_ln_p`), NOT the IFS ``α_1 = ln 2`` special case
+    — chosen so the conversion, the geopotential and the ``ln p^SB``
+    gradients keep ONE α field; adopting the IFS convention would have to
+    change all three together.
+
+    Parameters
+    ----------
+    cumsum_mass_div : jax.Array
+        ``cumsum(div(dp·v), axis=-1)`` — INCLUSIVE cumulative flux-form mass
+        divergence, shape (..., nlev) [Pa/s].
+    coord : HybridSigmaPressureCoordinate
+    p_s : jax.Array
+        Surface pressure, shape (...,) [Pa].
+    dp_s_dt : jax.Array or None
+        RAW surface-pressure tendency ``-D_total/B_range``, shape (...,)
+        [Pa/s].  Only consumed through ``B_top`` (moving-top coordinates);
+        ``None`` omits the term.
+
+    Returns
+    -------
+    jax.Array
+        ``(ω/p)_k^dyn``, shape (..., nlev) [1/s].
+    """
+    p_half_safe, ln_ratio, alpha = sb81_halflevel_construction(coord, p_s)
+    # Internal Δp from the SAME clipped half-level pressures as L/α.
+    dp = p_half_safe[..., 1:] - p_half_safe[..., :-1]
+    # C_k from the inclusive cumsum (C_0 = cumsum_0): one Pad HLO, no concat.
+    pad_axes = ((0, 0),) * (cumsum_mass_div.ndim - 1) + ((1, 0),)
+    cumsum_excl = jnp.pad(cumsum_mass_div[..., :-1], pad_axes)  # Σ_{j<k} C_j
+    C = cumsum_mass_div - cumsum_excl                           # C_k
+    if dp_s_dt is not None:
+        # Moving-top term: traced multiply by B_half[0] (jit/AD-safe; a
+        # static B_top = 0 const-folds to the fixed-top expression).
+        cumsum_excl = cumsum_excl - coord.B_half[0] * dp_s_dt[..., jnp.newaxis]
+    num = ln_ratio * cumsum_excl + alpha * C
+    # 1e-10 Pa: division-safety floor only (real layer thicknesses are far
+    # above it; matches the module's other dp floors).
+    return -num / jnp.maximum(dp, 1e-10)
+
+
 def compute_omega_hybrid(
     mass_flux: jax.Array,
     p_s: jax.Array,

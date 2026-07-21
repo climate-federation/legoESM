@@ -162,6 +162,7 @@ class DycoreConfig(NamedTuple):
     sponge_shape: str = "sin2"            # "sin2" | "sam_rational"
     sponge_scale_height_m: float = 7500.0  # log-pressure scale height for sigma->z
 
+
     # Task #25: time integrator override.  Lat-lon C-grid uses
     # ``ssp_rk3`` by default — three RK3 stages unrolled with the
     # tendency function inlined 3×.  Setting
@@ -215,6 +216,16 @@ class DycoreConfig(NamedTuple):
     # (``component_factory``).  Set 0.0 to reproduce the pre-#930 dycore exactly.
     # Appended last to preserve positional ABI.
     mpas_nu_vert4_T: float = 2.0e-6
+    # #1029 ω-side: SB81 α-weighted κT·ω/p energy conversion on the hybrid
+    # lat-lon C-grid lane (discretization-consistent with the geopotential
+    # and the momentum/thermo ln p^SB gradients).  Default OFF — the
+    # consistent form removes the arithmetic form's accidental damping of
+    # the #1029(b) lid-amplified orographic-wave mode (held_suarez_topo
+    # latlon blowup day ~49 -> ~12, A/B job 9130802); opt-in until the lid
+    # treatment lands.  Threaded by ``component_factory`` (mirrors the
+    # sponge/polar-filter passthrough).  Appended last to preserve
+    # positional ABI (codex #1029 r3 #2).
+    sb81_omega_conversion: bool = False
 
 
 class EvaluationConfig(NamedTuple):
