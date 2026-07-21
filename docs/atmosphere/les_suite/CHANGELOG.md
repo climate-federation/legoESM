@@ -103,6 +103,17 @@ Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
 - **Codex round 2: VERDICT CLEAN.** All 6 round-1 fixes verified correct + complete;
   matrix.py selection/dispatch-hardening verified across all 16 cases; no new
   defects. The mandatory iterate-with-codex loop converged in 2 iterations.
-- Full suite at iter-1 close: 104 les_suite/core tests green (33 bridge, 10
-  counter-gradient, 16 matrix, 23 registry, 16 score, 8 core-metrics — pre-npz
-  count; +2 npz round-trip).
+- Full suite at iter-1 close: 109 les_suite/core/scm-rce tests green; ruff clean.
+- **Committed** as `feat(les-suite): LES→SCM bridge, Q1 counter-gradient, D6 score,
+  matrix wiring` (branch les-suite-optimization).
+
+**NEXT (iter 2, CPU-OK):** `scripts/run/tune_scm_to_les.py` — the per-(closure,
+regime) AD + derivative-free tuner (D4). Reuse (do NOT fork): `scm.py` +
+`scm_forcing.py` (single-column integration, CPU-cheap), `training/param_collector`
+(`build_trainable_params`/`apply_param_overrides`), `ml/training.create_optimizer`,
+and the RCE-tuning precedents `scripts/run/{run_scm_rce_params,train_scm_rce_params,
+run_scm_rce_campaign}.py`. It consumes cached LES artifacts (`bridge.load_artifact`)
+→ `artifact_to_scm_forcing` + `diagnostic_truth`/`prognostic_truth` → `score.*`.
+Then the two validators (`build_les_scorecard.py`, `compare_les_intercomparison.py`)
+and, GPU-gated, `run_les_suite.py` + gate-0. Science answers (Q1/Q2/Q3) stay blocked
+until a GPU allocation runs the LES ensemble (§8 step 3).
