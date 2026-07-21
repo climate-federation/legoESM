@@ -209,17 +209,29 @@ def test_trace_asserts_turbulence_scheme_applied():
         ifc._DIFF_TURBULENCE_SCHEME = saved_lock
 
 
-def test_traced_multicolumn_rejected_s2_pending():
-    """ncol>1 with TRACED forcing (a coupled/global jitted segment) fails LOUDLY.
-
-    The de-hosted traceable path is single-column so far (S1).  A multi-column
-    step inside jax.jit would otherwise fall through to the eager host path and
-    raise a cryptic TracerArrayConversionError deep in the backend.  The S2
-    backstop catches it at the interface with actionable guidance.  This is the
-    single chokepoint covering every driver path (string- and object-config).
-    EAGER multi-column (concrete arrays) is NOT rejected — only traced ncol>1.
-    """
+def _forcing_n(n, Tl, *, sw=400.0, q=0.010):
     from legoesm.core.coupling_fields import AtmToSurface
+    return AtmToSurface(
+        sw_down=jnp.full(n, sw), lw_down=jnp.full(n, 350.0),
+        precip_total=jnp.zeros(n), precip_snow=jnp.zeros(n),
+        T_lowest=Tl, q_lowest=jnp.full(n, q),
+        u_lowest=jnp.full(n, 4.0), v_lowest=jnp.full(n, 1.5),
+        p_lowest=jnp.full(n, 95000.0), p_surface=jnp.full(n, 100000.0),
+        rho_lowest=jnp.full(n, 1.2), cos_zenith=jnp.full(n, 0.7),
+        co2_ppmv=jnp.full(n, 400.0), has_radiation=jnp.ones(n),
+        has_precipitation=jnp.ones(n))
+
+
+def test_traced_multicolumn_without_gridinfo_rejected():
+    """ncol>1 under jax.jit WITHOUT a per-column grid_info fails LOUDLY.
+
+    The structural ints (ncan/ntop/nbot) vary per column, so ncol>1 traceable
+    needs a length-ncol GridInfo tuple.  Without it, ncol>1 would fall through to
+    the eager host path and raise a cryptic TracerArrayConversionError deep in the
+    backend.  The interface backstop catches it — the single chokepoint covering
+    every driver path (string- and object-config).  EAGER multi-column (concrete
+    arrays) stays valid; only a TRACED ncol>1 without grid_info is rejected.
+    """
     from legoesm.land.canopy.config import CLMMLCanopyConfig
     from legoesm.land.config import MultiLayerLandConfig
     from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
@@ -233,19 +245,126 @@ def test_traced_multicolumn_rejected_s2_pending():
     lat = jnp.zeros(n)
 
     def run(Tl):
-        forcing = AtmToSurface(
-            sw_down=jnp.full(n, 400.0), lw_down=jnp.full(n, 350.0),
-            precip_total=jnp.zeros(n), precip_snow=jnp.zeros(n),
-            T_lowest=Tl, q_lowest=jnp.full(n, 0.010),
-            u_lowest=jnp.full(n, 4.0), v_lowest=jnp.full(n, 1.5),
-            p_lowest=jnp.full(n, 95000.0), p_surface=jnp.full(n, 100000.0),
-            rho_lowest=jnp.full(n, 1.2), cos_zenith=jnp.full(n, 0.7),
-            co2_ppmv=jnp.full(n, 400.0), has_radiation=jnp.ones(n),
-            has_precipitation=jnp.ones(n))
         return compute_clm_ml_canopy_fluxes(
-            T_soil_top=Ts[:, 0], forcing=forcing, canopy_config=cfg,
+            T_soil_top=Ts[:, 0], forcing=_forcing_n(n, Tl), canopy_config=cfg,
             land_config=lc, land_params=None, canopy_state=None, dt=1800.0,
             T_soil=Ts, psi_soil=psi, theta_soil=th, lat=lat, doy=180.0)[0].shflx
 
-    with pytest.raises(NotImplementedError, match="single-column only"):
+    with pytest.raises(NotImplementedError, match="per-column GridInfo"):
         jax.jit(run)(jnp.full(n, 296.0))
+
+
+def test_multicolumn_matches_independent_single_columns():
+    """S2: a jitted ncol=2 step == two independent ncol=1 steps (column independence).
+
+    Canopy columns are physically independent (no horizontal coupling), so the
+    per-column loop must reproduce, column-for-column, the PROVEN single-column S1
+    path — with DIFFERENT forcing per column so any cross-column leakage (a mixed
+    cos_zenith slice, a stale GridInfo, a scatter to the wrong patch) shows up.
+    This validates the multi-column traceable path against S1 as the reference.
+    """
+    import legoesm.land.canopy.clm_ml_interface as ifc
+    from legoesm.land.canopy.config import CLMMLCanopyConfig
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.canopy.clm_ml_interface import (
+        compute_clm_ml_canopy_fluxes, extract_clm_ml_grid_info)
+
+    cfg = CLMMLCanopyConfig()
+    lc = MultiLayerLandConfig(surface_scheme=cfg)
+    # Two columns with DIFFERENT forcing (temperature + insolation + humidity).
+    Tl = jnp.array([293.0, 300.0])
+    sw = jnp.array([300.0, 500.0])
+    q = jnp.array([0.008, 0.014])
+
+    cosf = jnp.array([0.6, 0.8])  # per-column FORWARD cos(zenith)
+
+    def _forcing2(Tl_, sw_, q_, cos_):
+        from legoesm.core.coupling_fields import AtmToSurface
+        n = 2
+        return AtmToSurface(
+            sw_down=sw_, lw_down=jnp.full(n, 350.0),
+            precip_total=jnp.zeros(n), precip_snow=jnp.zeros(n),
+            T_lowest=Tl_, q_lowest=q_,
+            u_lowest=jnp.full(n, 4.0), v_lowest=jnp.full(n, 1.5),
+            p_lowest=jnp.full(n, 95000.0), p_surface=jnp.full(n, 100000.0),
+            rho_lowest=jnp.full(n, 1.2), cos_zenith=cos_,
+            co2_ppmv=jnp.full(n, 400.0), has_radiation=jnp.ones(n),
+            has_precipitation=jnp.ones(n))
+
+    Ts2 = jnp.full((2, 8), 290.0)
+    psi2 = jnp.full((2, 8), -0.5)
+    th2 = jnp.full((2, 8), 0.25)
+    lat2 = jnp.zeros(2)
+
+    # --- Warm-start 2 columns (eager cold step), extract the per-column tuple ---
+    # The warm forcing MUST be per-column identical to the single-column reference
+    # warm-start (_forcing_n: T=295, sw=400, q=0.010, cos=0.7) so both start the
+    # forward step from the SAME warm state — otherwise the comparison confounds a
+    # warm-state difference with the multi-vs-single code path under test.
+    ifc._last_topology_key = None
+    _out0, st2 = compute_clm_ml_canopy_fluxes(
+        T_soil_top=Ts2[:, 0],
+        forcing=_forcing2(jnp.full(2, 295.0), jnp.full(2, 400.0),
+                          jnp.full(2, 0.010), jnp.full(2, 0.7)),
+        canopy_config=cfg, land_config=lc, land_params=None, canopy_state=None,
+        dt=1800.0, T_soil=Ts2, psi_soil=psi2, theta_soil=th2, lat=lat2, doy=180.0)
+    gi2 = extract_clm_ml_grid_info(st2)
+    assert isinstance(gi2, tuple) and len(gi2) == 2, "expected per-column GridInfo tuple"
+
+    # --- ncol=2 jitted forward (the S2 per-column loop) ---
+    def run2(Tl_, sw_, q_):
+        return compute_clm_ml_canopy_fluxes(
+            T_soil_top=Ts2[:, 0], forcing=_forcing2(Tl_, sw_, q_, cosf),
+            canopy_config=cfg, land_config=lc, land_params=None, canopy_state=st2,
+            dt=1800.0, T_soil=Ts2, psi_soil=psi2, theta_soil=th2, lat=lat2,
+            doy=180.0, grid_info=gi2)[0]
+    out2 = jax.jit(run2)(Tl, sw, q)
+
+    # --- Reference: each column alone through the S1 single-column path ---
+    # Warm-start each single column EAGERLY (outside jit), like real usage, then
+    # jit only the forward step closing over its concrete GridInfo.
+    from legoesm.core.coupling_fields import AtmToSurface
+
+    def _f1(col):
+        return AtmToSurface(
+            sw_down=sw[col:col + 1], lw_down=jnp.full(1, 350.0),
+            precip_total=jnp.zeros(1), precip_snow=jnp.zeros(1),
+            T_lowest=Tl[col:col + 1], q_lowest=q[col:col + 1],
+            u_lowest=jnp.full(1, 4.0), v_lowest=jnp.full(1, 1.5),
+            p_lowest=jnp.full(1, 95000.0), p_surface=jnp.full(1, 100000.0),
+            rho_lowest=jnp.full(1, 1.2), cos_zenith=jnp.array([0.6 if col == 0 else 0.8]),
+            co2_ppmv=jnp.full(1, 400.0), has_radiation=jnp.ones(1),
+            has_precipitation=jnp.ones(1))
+
+    def _ref_col(col):
+        Ts1 = jnp.full((1, 8), 290.0)
+        psi1 = jnp.full((1, 8), -0.5)
+        th1 = jnp.full((1, 8), 0.25)
+        lat1 = jnp.zeros(1)  # geometry: concrete, closed over (never a tracer)
+        ifc._last_topology_key = None
+        _o, st1 = compute_clm_ml_canopy_fluxes(
+            T_soil_top=Ts1[:, 0], forcing=_forcing_n(1, jnp.array([295.0])),
+            canopy_config=cfg, land_config=lc, land_params=None, canopy_state=None,
+            dt=1800.0, T_soil=Ts1, psi_soil=psi1, theta_soil=th1,
+            lat=lat1, doy=180.0)
+        gi1 = extract_clm_ml_grid_info(st1)
+
+        def _fwd():
+            return compute_clm_ml_canopy_fluxes(
+                T_soil_top=Ts1[:, 0], forcing=_f1(col), canopy_config=cfg,
+                land_config=lc, land_params=None, canopy_state=st1, dt=1800.0,
+                T_soil=Ts1, psi_soil=psi1, theta_soil=th1, lat=lat1,
+                doy=180.0, grid_info=gi1)[0]
+        return jax.jit(_fwd)()
+
+    ref0 = _ref_col(0)
+    ref1 = _ref_col(1)
+
+    for name in ("shflx", "lhflx", "gpp", "sw_net", "lw_net"):
+        got = getattr(out2, name)
+        r0 = getattr(ref0, name)
+        r1 = getattr(ref1, name)
+        assert jnp.allclose(got[0], r0[0], atol=1e-6, rtol=1e-6), (
+            f"{name}[col0] multi {got[0]} vs single {r0[0]}")
+        assert jnp.allclose(got[1], r1[0], atol=1e-6, rtol=1e-6), (
+            f"{name}[col1] multi {got[1]} vs single {r1[0]}")

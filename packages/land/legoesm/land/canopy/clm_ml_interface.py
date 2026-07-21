@@ -1451,16 +1451,19 @@ def _extract_surface_fluxes(
 # ---------------------------------------------------------------------------
 
 
-def extract_clm_ml_grid_info(canopy_state: CanopyState, patch: int = 1) -> Any:
-    """Extract the concrete ``GridInfo(p, ncan, ntop, nbot)`` from a warm state.
+def extract_clm_ml_grid_info(canopy_state: CanopyState, patch: int | None = None) -> Any:
+    """Extract the concrete canopy structure (``ncan``/``ntop``/``nbot``) from a warm state.
 
     Call this ONCE on a concrete (non-traced) warm-start ``CanopyState`` — e.g.
     the state returned by the first forward step — and thread the result through
-    every subsequent differentiable step via ``compute_clm_ml_canopy_fluxes(...,
-    grid_info=...)``.  This keeps the single-site structural integers
-    (``ncan``/``ntop``/``nbot``) CONCRETE even when the carried
-    ``canopy_state.mlcanopy`` becomes a ``jax.grad`` tracer in a multi-step
+    every subsequent traceable step via ``compute_clm_ml_canopy_fluxes(...,
+    grid_info=...)``.  This keeps the structural integers CONCRETE even when the
+    carried ``canopy_state.mlcanopy`` becomes a tracer in a jitted/differentiated
     rollout (otherwise ``int(tracer)`` raises ``ConcretizationTypeError``).
+
+    ``ncan``/``ntop``/``nbot`` VARY per column (they are functions of canopy
+    height / PFT beta-distribution, built per patch in ``initVerticalStructure``),
+    so a multi-column run needs one ``GridInfo`` per column.
 
     Parameters
     ----------
@@ -1468,12 +1471,19 @@ def extract_clm_ml_grid_info(canopy_state: CanopyState, patch: int = 1) -> Any:
         A concrete warm-started state (``canopy_state.mlcanopy`` populated by a
         prior forward step).  Must NOT be a tracer.
     patch:
-        1-based patch index (single-site diff mode uses ``1``).
+        Optional 1-based patch index.  When given, extract ONLY that patch and
+        return a single ``GridInfo`` (single-site diff / back-compat).  When
+        ``None`` (default), auto-detect: a single-column state returns one
+        ``GridInfo``; a multi-column state (ncol>1) returns a TUPLE of per-column
+        ``GridInfo`` aligned with the 1-based patch order (entry ``c`` -> patch
+        ``c+1``), which the traceable path threads into its per-column loop.
 
     Returns
     -------
-    GridInfo
-        ``multilayer_canopy.MLclm_varctl.GridInfo`` with concrete Python ints.
+    GridInfo | tuple[GridInfo, ...]
+        One ``GridInfo`` (single column / explicit ``patch``) or a per-column
+        tuple (ncol>1).  ``multilayer_canopy.MLclm_varctl.GridInfo`` fields are
+        concrete Python ints.
     """
     from multilayer_canopy.MLclm_varctl import GridInfo
     if canopy_state is None or canopy_state.mlcanopy is None:
@@ -1482,13 +1492,23 @@ def extract_clm_ml_grid_info(canopy_state: CanopyState, patch: int = 1) -> Any:
             "mlcanopy is populated; got None. Run one forward step first."
         )
     m = canopy_state.mlcanopy
-    try:
+    # 1-based patch dim: arrays are (ncol+1,) with index 0 unused (begp=1).
+    ncol = int(m.ncan_canopy.shape[0]) - 1
+
+    def _gi(p: int):
         return GridInfo(
-            p=int(patch),
-            ncan=int(m.ncan_canopy[patch]),
-            ntop=int(m.ntop_canopy[patch]),
-            nbot=int(m.nbot_canopy[patch]),
+            p=int(p),
+            ncan=int(m.ncan_canopy[p]),
+            ntop=int(m.ntop_canopy[p]),
+            nbot=int(m.nbot_canopy[p]),
         )
+
+    try:
+        if patch is not None:
+            return _gi(patch)
+        if ncol == 1:
+            return _gi(1)
+        return tuple(_gi(c + 1) for c in range(ncol))
     except jax.errors.ConcretizationTypeError as exc:  # pragma: no cover - guard
         raise RuntimeError(
             "extract_clm_ml_grid_info must be called on a CONCRETE canopy_state "
@@ -1631,29 +1651,46 @@ def compute_clm_ml_canopy_fluxes(
     # even WITHOUT jax.grad — this is what a jax.jit scan-over-time uses to keep the
     # whole segment on device (SegmentForcing / warm-start doctrine).  ``_diff_mode``
     # stays the stricter grad-only subset (it additionally runs the AD-capability
-    # and geometry-tracer guards).  Both share the de-hosted per-step machinery:
-    # the cold-start (first) step still runs the eager host topology build below.
-    # S1 keeps this single-column (the GridInfo carries one column's structure);
-    # multi-column traceable is S2 (per-column GridInfo).
-    _traceable = (_diff_mode or (_warm_started and grid_info is not None)) and ncol == 1
+    # and geometry-tracer guards) and is SINGLE-COLUMN only (multi-column training
+    # would loop columns outside jax.grad).  Both share the de-hosted per-step
+    # machinery; the cold-start (first) step still runs the eager host build below.
+    #
+    # S2 (multi-column traceable jit-forward): canopy columns are PHYSICALLY
+    # INDEPENDENT (no horizontal coupling — each patch is a standalone 1-D canopy),
+    # so a warm ncol>1 step threads ONE GridInfo per column (a length-ncol tuple
+    # from ``extract_clm_ml_grid_info``) and the call site below loops the columns,
+    # invoking the proven single-patch kernel once per column with ``filter=[c+1]``,
+    # ``grid=gi[c]`` and a per-column ``cos_zenith_device``.  ncan/ntop/nbot VARY
+    # per column, which is exactly why the per-column GridInfo tuple is required.
+    # NOTE: GridInfo is a NamedTuple (hence a tuple), so distinguish a SINGLE
+    # GridInfo from a TUPLE-of-GridInfos by the ``ncan`` attribute (present on a
+    # GridInfo, absent on the outer tuple/list) — an isinstance(tuple) check would
+    # wrongly unpack a lone GridInfo into its four int fields.
+    _gi_list = None
+    if grid_info is not None:
+        _gi_list = [grid_info] if hasattr(grid_info, "ncan") else list(grid_info)
+    _percolumn_ok = _gi_list is not None and len(_gi_list) == ncol
+    # jax.grad training stays single-column; jit-forward supports ncol>=1 given a
+    # per-column GridInfo.
+    _traceable = (
+        (_diff_mode and ncol == 1)
+        or (_warm_started and grid_info is not None and (ncol == 1 or _percolumn_ok))
+    )
+    _traceable_multi = _traceable and ncol > 1  # the per-column loop path
 
-    # ---- Multi-column-under-trace backstop (S2 pending) -----------------------
-    # The de-hosted TRACEABLE path is single-column so far (``_traceable`` above
-    # requires ncol==1): the GridInfo carries ONE column's structure and the
-    # backend ``grid=`` kernel processes one patch.  A coupled/global run steps
-    # the land tile over ALL model columns (ncol>1) INSIDE a jitted segment, so
-    # ncol>1 falls through to the EAGER host path below, whose
-    # ``np.array(forcing.*)`` marshalling raises a cryptic
-    # TracerArrayConversionError on the traced forcing deep in the backend.
-    # Detect it here — ncol>1 with ANY traced forcing/soil leaf — and fail with
-    # actionable guidance instead.  This is the single chokepoint every driver
-    # path funnels through (the string-keyed model_driver gate is the friendly
-    # early failure for run_amip; this also covers the object-config paths —
-    # coupled_esm_driver / earth_system_driver — that pass a
-    # MultiLayerLandConfig(surface_scheme=CLMMLCanopyConfig()) directly).
-    # EAGER multi-column forward (concrete arrays, offline global) stays valid —
-    # only a TRACED ncol>1 is rejected.
-    if ncol != 1:
+    # ---- Multi-column-under-trace backstop -----------------------------------
+    # ncol>1 traceable requires a per-column GridInfo tuple (the structural ints
+    # vary per column).  Without it, ncol>1 falls to the EAGER host path below,
+    # whose ``np.array(forcing.*)`` marshalling raises a cryptic
+    # TracerArrayConversionError on traced forcing deep in the backend.  Detect
+    # that case — ncol>1, NOT traceable, with ANY traced forcing/soil leaf — and
+    # fail with actionable guidance.  This is the single chokepoint every driver
+    # path funnels through, covering the object-config drivers (coupled_esm_driver
+    # / earth_system_driver) that pass a MultiLayerLandConfig(surface_scheme=
+    # CLMMLCanopyConfig()) directly.  EAGER multi-column forward (concrete arrays,
+    # offline global) stays valid — only a TRACED ncol>1 WITHOUT a per-column
+    # GridInfo is rejected.
+    if ncol != 1 and not _traceable:
         _traced_ncol_leaf = next(
             (
                 _n
@@ -1668,14 +1705,14 @@ def compute_clm_ml_canopy_fluxes(
         )
         if _traced_ncol_leaf is not None:
             raise NotImplementedError(
-                "CLM-ML multilayer canopy under jax.jit/grad is single-column only "
-                f"so far (S1); got ncol={ncol} with a traced leaf "
-                f"({_traced_ncol_leaf}) — i.e. a coupled/global run stepping every "
-                "model column inside a jitted segment. The per-column traceable "
-                "path (S2) is in progress. Today: use scripts/run/run_lmip.py "
-                "--land-surface-scheme clm_ml for single-point CLM-ML, run the "
-                "multi-column forward EAGERLY (concrete arrays, no jit), or select "
-                "the two_leaf canopy for a coupled run."
+                "CLM-ML multilayer canopy under jax.jit needs a per-column GridInfo "
+                f"for ncol>1; got ncol={ncol} with a traced leaf "
+                f"({_traced_ncol_leaf}) but grid_info="
+                f"{'None' if grid_info is None else f'len={len(_gi_list)}'} "
+                "(expected a length-ncol tuple from extract_clm_ml_grid_info on the "
+                "warm-start state).  Warm-start one forward step, extract the "
+                "per-column structure, and thread it via grid_info=.  (jax.grad "
+                "training through the canopy remains single-column.)"
             )
 
     # Solar geometry (lat / lon / doy / cos_zenith) is a NON-differentiated
@@ -2028,43 +2065,68 @@ def compute_clm_ml_canopy_fluxes(
                 "recompute that breaks a jax.jit trace). Update clm-ml-jax to a "
                 "revision that adds cos_zenith_device= to MLCanopyFluxes / _GetCLMVar."
             )
-        _p = int(filter_exposedvegp[0])
-        # Structural ints (ncan/ntop/nbot) must be CONCRETE Python ints — the diff
-        # path reads them at trace time.  Two sources:
-        #  (1) caller-supplied ``grid_info`` (REQUIRED for a multi-step
-        #      differentiated rollout: there the carried ``canopy_state.mlcanopy``
-        #      is itself a tracer, so reading ints off it would raise); or
-        #  (2) the warm template ``mlcanopy`` when it is concrete (single warm
-        #      step whose state is a captured constant under jax.grad).
         # ``dpai_profile.shape`` is static, so the range check works either way.
         _ncan_max = int(mlcanopy.dpai_profile.shape[1])
-        if grid_info is not None:
-            _ncan_p = int(grid_info.ncan)
-            _ntop_p = int(grid_info.ntop)
-            _nbot_p = int(grid_info.nbot)
+        if _traceable_multi:
+            # Multi-column (S2): one validated GridInfo per column, mapped to the
+            # 1-based patch position (entry c -> patch c+1) so a tuple built in any
+            # order is realigned here.  ncan/ntop/nbot VARY per column.
+            if vcmaxpft_jax is not None or g1_medlyn_jax is not None:
+                raise NotImplementedError(
+                    "CLM-ML multi-column (ncol>1) traceable forward does not support "
+                    "the trainable-param overrides (vcmaxpft_jax / g1_medlyn_jax): "
+                    "those belong to the single-column jax.grad training path. "
+                    "Differentiate one column at a time."
+                )
+            _grids = []
+            for _c in range(ncol):
+                _g = _gi_list[_c]
+                _ncan_c = int(_g.ncan)
+                if not (1 <= _ncan_c <= _ncan_max):
+                    raise ValueError(
+                        f"CLM-ML traceable multi-column: column {_c} (patch {_c + 1}) "
+                        f"has ncan={_ncan_c} (valid 1..{_ncan_max}) — the per-column "
+                        "grid_info is not a warm-started structure. Extract it from a "
+                        "warm forward step via extract_clm_ml_grid_info(state0)."
+                    )
+                _grids.append(GridInfo(p=_c + 1, ncan=_ncan_c,
+                                       ntop=int(_g.ntop), nbot=int(_g.nbot)))
         else:
-            try:
-                _ncan_p = int(mlcanopy.ncan_canopy[_p])
-                _ntop_p = int(mlcanopy.ntop_canopy[_p])
-                _nbot_p = int(mlcanopy.nbot_canopy[_p])
-            except jax.errors.ConcretizationTypeError as exc:
-                raise RuntimeError(
-                    "CLM-ML diff mode: the canopy_state.mlcanopy structural ints "
-                    "(ncan/ntop/nbot) are TRACED — this happens when a differentiated "
-                    "loss unrolls MULTIPLE canopy steps and carries the returned state "
-                    "as the jax.grad tape's carry. Extract the concrete structural "
-                    "ints once from the warm-start state and thread them through every "
-                    "step via grid_info=extract_clm_ml_grid_info(state0)."
-                ) from exc
-        if not (1 <= _ncan_p <= _ncan_max):
-            raise ValueError(
-                "CLM-ML diff mode needs a warm-started canopy_state whose vertical "
-                f"structure is initialised; got ncan={_ncan_p} (valid 1..{_ncan_max}). "
-                "Run one forward (differentiable=False or cold-start) step first."
-            )
-        grid = GridInfo(p=_p, ncan=_ncan_p, ntop=_ntop_p, nbot=_nbot_p)
+            # Single column.  Structural ints (ncan/ntop/nbot) must be CONCRETE
+            # Python ints — the diff path reads them at trace time.  Two sources:
+            #  (1) caller-supplied ``grid_info`` (REQUIRED for a multi-step
+            #      differentiated rollout: the carried ``mlcanopy`` is a tracer,
+            #      so reading ints off it would raise); or
+            #  (2) the warm template ``mlcanopy`` when it is concrete.
+            _p = int(filter_exposedvegp[0])
+            if grid_info is not None:
+                _g0 = _gi_list[0]
+                _ncan_p = int(_g0.ncan)
+                _ntop_p = int(_g0.ntop)
+                _nbot_p = int(_g0.nbot)
+            else:
+                try:
+                    _ncan_p = int(mlcanopy.ncan_canopy[_p])
+                    _ntop_p = int(mlcanopy.ntop_canopy[_p])
+                    _nbot_p = int(mlcanopy.nbot_canopy[_p])
+                except jax.errors.ConcretizationTypeError as exc:
+                    raise RuntimeError(
+                        "CLM-ML diff mode: the canopy_state.mlcanopy structural ints "
+                        "(ncan/ntop/nbot) are TRACED — this happens when a differentiated "
+                        "loss unrolls MULTIPLE canopy steps and carries the returned state "
+                        "as the jax.grad tape's carry. Extract the concrete structural "
+                        "ints once from the warm-start state and thread them through every "
+                        "step via grid_info=extract_clm_ml_grid_info(state0)."
+                    ) from exc
+            if not (1 <= _ncan_p <= _ncan_max):
+                raise ValueError(
+                    "CLM-ML diff mode needs a warm-started canopy_state whose vertical "
+                    f"structure is initialised; got ncan={_ncan_p} (valid 1..{_ncan_max}). "
+                    "Run one forward (differentiable=False or cold-start) step first."
+                )
+            _grids = [GridInfo(p=_p, ncan=_ncan_p, ntop=_ntop_p, nbot=_nbot_p)]
     else:
-        grid = None
+        _grids = None
 
     # ---- Call MLCanopyFluxes ----
     # Only forward the diff-mode / trainable-param kwargs when they are actually
@@ -2074,38 +2136,57 @@ def compute_clm_ml_canopy_fluxes(
     # (Codex P1: an older clm-ml-jax would otherwise TypeError on every call,
     # including production forward-only runs).  Diff mode is already gated by the
     # capability guard above.
-    _opt_kwargs: dict[str, Any] = {}
-    if grid is not None:
-        _opt_kwargs["grid"] = grid
-    if _traceable:
-        # Device solar zenith (cos), (ncol,) aligned with filter_exposedvegp.  Lets
-        # _GetCLMVar set solar_zen_forcing WITHOUT the host shr_orb_cosz recompute
-        # that reads per-step orbital globals — the last per-step host op removed.
-        _opt_kwargs["cos_zenith_device"] = cos_zen
-    if vcmaxpft_jax is not None:
-        _opt_kwargs["vcmaxpft_jax"] = vcmaxpft_jax
-    if g1_medlyn_jax is not None:
-        _opt_kwargs["g1_MED_jax"] = g1_medlyn_jax
-    mlcanopy_new = MLCanopyFluxes(
-        bounds=bounds,
-        num_exposedvegp=num_exposedvegp,
-        filter_exposedvegp=filter_exposedvegp,
-        atm2lnd_inst=stubs["atm2lnd"],
-        canopystate_inst=stubs["canopystate"],
-        soilstate_inst=stubs["soilstate"],
-        temperature_inst=stubs["temperature"],
-        waterstatebulk_inst=stubs["waterstatebulk"],
-        waterfluxbulk_inst=stubs["waterfluxbulk"],
-        energyflux_inst=stubs["energyflux"],
-        frictionvel_inst=stubs["frictionvel"],
-        surfalb_inst=stubs["surfalb"],
-        solarabs_inst=stubs["solarabs"],
-        mlcanopy_inst=mlcanopy,
-        wateratm2lndbulk_inst=stubs["wateratm2lndbulk"],
-        waterdiagnosticbulk_inst=stubs["waterdiagnosticbulk"],
-        _o2ref_py=float(canopy_config.o2ref),
-        **_opt_kwargs,
-    )
+    def _call_mlcanopy(mlc, flt, num, gridobj, cosz):
+        _opt_kwargs: dict[str, Any] = {}
+        if gridobj is not None:
+            _opt_kwargs["grid"] = gridobj
+        if _traceable:
+            # Device solar zenith (cos), aligned with ``flt`` (entry k -> patch
+            # flt[k]).  Lets _GetCLMVar set solar_zen_forcing WITHOUT the host
+            # shr_orb_cosz recompute that reads per-step orbital globals.
+            _opt_kwargs["cos_zenith_device"] = cosz
+        if vcmaxpft_jax is not None:
+            _opt_kwargs["vcmaxpft_jax"] = vcmaxpft_jax
+        if g1_medlyn_jax is not None:
+            _opt_kwargs["g1_MED_jax"] = g1_medlyn_jax
+        return MLCanopyFluxes(
+            bounds=bounds,
+            num_exposedvegp=num,
+            filter_exposedvegp=flt,
+            atm2lnd_inst=stubs["atm2lnd"],
+            canopystate_inst=stubs["canopystate"],
+            soilstate_inst=stubs["soilstate"],
+            temperature_inst=stubs["temperature"],
+            waterstatebulk_inst=stubs["waterstatebulk"],
+            waterfluxbulk_inst=stubs["waterfluxbulk"],
+            energyflux_inst=stubs["energyflux"],
+            frictionvel_inst=stubs["frictionvel"],
+            surfalb_inst=stubs["surfalb"],
+            solarabs_inst=stubs["solarabs"],
+            mlcanopy_inst=mlc,
+            wateratm2lndbulk_inst=stubs["wateratm2lndbulk"],
+            waterdiagnosticbulk_inst=stubs["waterdiagnosticbulk"],
+            _o2ref_py=float(canopy_config.o2ref),
+            **_opt_kwargs,
+        )
+
+    if _traceable_multi:
+        # Per-column loop (S2): canopy columns are physically independent, so the
+        # proven single-patch kernel runs once per column with ``filter=[c+1]`` and
+        # that column's GridInfo + cos(zenith) slice; the ``grid=`` kernel writes
+        # ONLY patch c+1, so chaining the returned mlcanopy accumulates every
+        # column.  NOTE (perf ceiling): the Python loop UNROLLS in the trace, so the
+        # HLO grows O(ncol) — fine for a modest coupled test, not for a full-AMIP
+        # column count (thousands).  The masked-vmap rewrite (S3) removes the loop.
+        mlcanopy_new = mlcanopy
+        for _c in range(ncol):
+            mlcanopy_new = _call_mlcanopy(
+                mlcanopy_new, [_c + 1], 1, _grids[_c],
+                cos_zen[_c:_c + 1] if _traceable else None)
+    else:
+        _grid0 = _grids[0] if _grids is not None else None
+        mlcanopy_new = _call_mlcanopy(
+            mlcanopy, filter_exposedvegp, num_exposedvegp, _grid0, cos_zen)
 
     if _traceable:
         # MLCanopyFluxes RETURNED, so a traced artefact really was built with the
