@@ -59,6 +59,10 @@ aimip_optimizer: "adamw"
 # Gray two-stream radiation (Frierson) -- cheap, differentiable in
 # tau_equator / tau_pole; matches the smoke baseline for this run.
 aimip_radiation: "gray"
+# Historical config predating the classical-mode rrtmgp pin
+# (campaign_driver.validate_classical_radiation); explicit escape keeps the
+# original experiment reproducible.
+allow_non_rrtmgp: true
 aimip_rad_update_interval: 6
 
 # Disable spatial-surface fields (T21 + gray rad is the smoke profile;
