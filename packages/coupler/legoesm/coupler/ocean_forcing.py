@@ -170,6 +170,22 @@ def blend_ice_ocean_forcing(
     """
     from legoesm.ocean.freshwater import net_freshwater_flux
 
+    # Ownership contract: this blend OWNS sf.freshwater and sf.salt_flux (it
+    # assembles both below).  A caller pre-setting either would be silently
+    # overwritten — hiding a double application or discarding another
+    # salt/freshwater source — so raise loudly instead (trace-time structural
+    # check; every production caller builds sf with both channels unset).
+    if open_sf.freshwater is not None:
+        raise ValueError(
+            "blend_ice_ocean_forcing owns OceanSurfaceForcing.freshwater "
+            "(the KPP surface-buoyancy channel); the caller must pass it "
+            "unset (None) — a preset value would be silently overwritten.")
+    if open_sf.salt_flux is not None:
+        raise ValueError(
+            "blend_ice_ocean_forcing owns OceanSurfaceForcing.salt_flux "
+            "(the ice brine-rejection channel); the caller must pass it "
+            "unset (None) — a preset value would be silently overwritten.")
+
     A_raw = jnp.clip(jnp.asarray(ice_concentration), 0.0, 1.0)
     if ocean_mask is None:
         m = jnp.ones_like(A_raw)
@@ -263,6 +279,7 @@ def omip_sea_ice_surface_forcing(
     v_ocean=None,
     U_min: float = 1.0,
     grid=None,
+    ocean_mask=None,
 ):
     """Advance a slab sea-ice tile one OMIP step and return the BLENDED
     ``(new_ice_state, FreshwaterForcing, OceanSurfaceForcing)`` for the ocean.
@@ -308,6 +325,13 @@ def omip_sea_ice_surface_forcing(
     grid : grid or None
         Required only for ice dynamics / advection / ridging; a pure
         thermodynamic slab (``dynamics="none"``) accepts ``None``.
+    ocean_mask : array or None
+        1 = ocean, 0 = land; ``None`` = all ocean (the flat-bottom / aquaplanet
+        legacy behaviour).  Threaded to :func:`blend_ice_ocean_forcing`, which
+        zeroes the ice concentration and every ice->ocean channel on land
+        cells.  Callers whose domain has land (the JRA55 latlon-bathy /
+        tripole lanes in ``run_omip.py``) MUST pass their land mask, or
+        spurious land-cell ice budgets reach the blend boundary.
 
     Returns
     -------
@@ -323,16 +347,17 @@ def omip_sea_ice_surface_forcing(
     )
 
     # Post-step ice concentration sets the open-ocean fraction (the ONE
-    # documented concentration time level for heat / SW / stress / evap).  No
-    # land/lake in an OMIP ocean-only run -> ocean_mask=None; the caller's
-    # sf carries FINAL open-water values -> sw_partition="prescaled".  The
+    # documented concentration time level for heat / SW / stress / evap).
+    # ocean_mask defaults to None (all ocean) for flat-bottom callers;
+    # land-bearing lanes thread their land mask through.  The caller's sf
+    # carries FINAL open-water values -> sw_partition="prescaled".  The
     # partition weights live ONLY in blend_ice_ocean_forcing.
     fw, sf = blend_ice_ocean_forcing(
         open_sf=open_ocean_sf,
         open_fw=open_ocean_fw,
         ice_resp=ice_resp,
         ice_concentration=new_ice.concentration.data,
-        ocean_mask=None,
+        ocean_mask=ocean_mask,
         sw_partition="prescaled",
     )
     return new_ice, fw, sf

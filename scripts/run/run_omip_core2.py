@@ -1680,7 +1680,9 @@ def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None, kpp_eice=None):
             f"--kpp-ri-crit/--kpp-cv/--kpp-eice are wired for --grid mpas/latlon_bathy "
             f"(grids that run the KPP boundary layer), not --grid {grid!r}. "
             f"tripole runs the dynamics-core implicit vertical solve (no KPP) "
-            f"so the override would silently do nothing.")
+            f"so the override would silently do nothing; its opt-in closure "
+            f"is selected by --tripole-vmix (tke/kpp at scheme defaults, "
+            f"no Ri_crit/Cv knobs).")
     if kpp_eice is not None and grid == "mpas":
         raise SystemExit(
             "--kpp-eice is wired for --grid latlon_bathy only: the MPAS KPP "
