@@ -513,13 +513,13 @@ class TKEConfig(NamedTuple):
     #   step, like Veros's zero-initialised dtke[taum1]). Requires
     #   ``prognostic=True`` (advecting a diagnostic TKE is a config error).
     advection_scheme: str = "none"
-    # Timestep [s] used to derive the explicit-diffusion CFL ceiling
-    # A_v_max = 0.25 * min(dz_k, dz_k+1)^2 / cfl_cap_dt_s on the MPAS path
-    # (make_tke_profiles_mpas caps the diagnostic K_M / K_H; mirrors the KPP
-    # MPAS bridge's KPPConfig.cfl_cap_dt_s exactly — same numerics parameter).
-    # MUST be set to the ocean dynamics dt for the cap to be correct: a
-    # value smaller than the real dt over-damps; larger risks instability.
-    # Default 300.0 preserves the historical hard-coded estimate.
+    # HISTORICAL / currently unused: the MPAS TKE bridge no longer applies an
+    # explicit-diffusion CFL post-cap (make_tke_profiles_mpas is implicit-only
+    # — the backward-Euler solve is unconditionally stable; the C-grid zdftke
+    # path and NEMO cap nothing, and a 0.25*dz^2/cfl_cap_dt_s ceiling bound in
+    # convective columns, breaking closure equivalence across grids).  The
+    # field is retained for config compatibility; the KPP MPAS bridge keeps
+    # ITS cap via KPPConfig.cfl_cap_dt_s (KPP also has an explicit path).
     cfl_cap_dt_s: float = 300.0
     # ``eice``: under-ice attenuation of the lc/etau wave-driven TKE sources
     #   (NEMO nn_eice).  0 (default, BIT-IDENTICAL) = no attenuation — the
