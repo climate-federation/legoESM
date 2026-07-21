@@ -207,6 +207,11 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # same rationale as the clubb / column-LES modules. N815 = dataclass field, N803 = arg.
 "packages/atmosphere/legoesm/atmosphere/les_suite/registry.py" = ["N815"]
 "packages/atmosphere/legoesm/atmosphere/les_suite/catalog.py" = ["N803"]
+# CBL intercomparison gate: physical symbol Q0 (surface heat flux) as an arg, and
+# the mK/m unit suffix on the well-mixed metric field read clearer than snake_case
+# (units-in-names rule); same rationale as the clubb / column-LES modules.
+"packages/atmosphere/legoesm/atmosphere/les_suite/intercomparison.py" = ["N803", "N815"]
+"tests/atmosphere/les_suite/test_intercomparison.py" = ["N802", "N803", "N806"]
 # Column large-scale extractor: physical symbol names (T, T_v for temperature /
 # virtual temperature) read clearer than snake_case; same rationale. Test files
 # use the same symbols (T) + set jax_enable_x64 before importing (E402).
