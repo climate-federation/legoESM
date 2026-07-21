@@ -58,6 +58,20 @@ from legoesm.timestepping.split_explicit import select_dt  # noqa: E402
 _WIRED_REGIMES = ("dry_convective",)
 
 
+def frame_step_schedule(n_steps: int, frames: int) -> list[int]:
+    """Step indices (after the t=0 IC) at which to record ``frames`` snapshots.
+
+    Returns up to ``frames-1`` strictly-increasing DISTINCT step indices in
+    ``[1, n_steps]`` (the last is always ``n_steps`` → final frame ≈ T). Sampling by
+    index — not by crossing continuous time targets — guarantees distinct snapshot
+    times and no overshoot past ``n_steps``. If ``dt`` is too coarse to resolve
+    ``frames`` distinct snapshots (``n_steps < frames-1``), fewer are returned (the
+    caller reports it); never a silent duplicate/drop.
+    """
+    n_out = min(frames - 1, max(1, n_steps))
+    return sorted({int(round(k * n_steps / n_out)) for k in range(1, n_out + 1)})
+
+
 def _build_cbl(case, args, dtype):
     """Dry free-convective CBL IC + config (mirrors run_spectral_cbl.build)."""
     theta0 = args.theta0
@@ -163,12 +177,28 @@ def main(argv: list[str] | None = None) -> int:
     dt0 = (float(args.dt) if args.dt is not None else
            select_dt(g.dx, max_wind_safe=args.max_wind, cfl_safe=args.cfl,
                      dt_cap=args.dt_max))
+    if dt0 >= T:
+        raise SystemExit(
+            f"dt={dt0:.3f}s >= integration length T={T:.1f}s: a single step would "
+            "overshoot the whole run. Use a smaller --dt or a longer --hours.")
     dt = jnp.asarray(dt0, dtype)
-    frame_times = np.linspace(0.0, T, args.frames)
+
+    # Frame schedule by STEP INDEX (robust to any dt): integrate n_steps ≈ T/dt fixed
+    # steps and record at evenly-spaced step indices. Sampling by index (not by
+    # crossing continuous targets) guarantees strictly-increasing, DISTINCT snapshot
+    # times, the final frame at t=n_steps·dt≈T, and no overshoot past T+dt. If dt is
+    # too coarse to resolve `frames` distinct snapshots, we record as many as there
+    # are steps and say so (never a silent drop).
+    n_steps = max(1, int(round(T / dt0)))
+    rec_steps = frame_step_schedule(n_steps, args.frames)
+    if len(rec_steps) < args.frames - 1:
+        print(f"[warn] dt={dt0:.3f}s over {n_steps} steps cannot resolve "
+              f"{args.frames} frames; recording {len(rec_steps) + 1}")
 
     sgs_name = case.sgs_variants[0]
     print(f"[les-suite emit] case={case.name} regime={case.regime} "
-          f"grid={case.grid.label} Q0={Q0} hours={hours} dt={dt0:.3f} sgs={sgs_name}")
+          f"grid={case.grid.label} Q0={Q0} hours={hours} dt={dt0:.3f} "
+          f"n_steps={n_steps} frames={len(rec_steps) + 1} sgs={sgs_name}")
 
     recs_z = None
     theta_s, u_s, v_s, wthr_s, wths_s, times = [], [], [], [], [], []
@@ -188,41 +218,35 @@ def main(argv: list[str] | None = None) -> int:
     # score initialises the SCM to LES(t=0), so the IC must be the real t=0 state,
     # not a once-stepped state mislabeled t=0.
     _record(0.0)
-    t = 0.0
+    rec_set = set(rec_steps)
     first = True
     t0 = time.time()
-    # Integrate; snapshot at each frame target AT OR AFTER it. frame_times[0]=0 is
-    # already recorded, so drive the remaining targets (through the final one = T).
-    for target in frame_times[1:]:
-        while t < target - 1e-9:
-            st, _ = step(st, dt=dt, first=first)
-            first = False
-            t += float(dt)
-        mw = float(jnp.max(jnp.abs(st.w)))
-        if not np.isfinite(mw) or mw > 1e3:
-            print(f"[BLOWUP] t={t:.0f}s max|w|={mw}")
-            return 1
-        _record(t)
+    for k in range(1, n_steps + 1):
+        st, _ = step(st, dt=dt, first=first)
+        first = False
+        if k in rec_set:
+            mw = float(jnp.max(jnp.abs(st.w)))
+            if not np.isfinite(mw) or mw > 1e3:
+                print(f"[BLOWUP] step {k} t={k * dt0:.0f}s max|w|={mw}")
+                return 1
+            _record(k * dt0)
     print(f"[DONE] wall={time.time()-t0:.1f}s  {len(times)} frames")
 
-    # de-duplicate strictly-increasing times (the t=0 + first-frame may coincide)
+    # Times are strictly increasing + distinct by construction (index sampling).
     times_arr = np.asarray(times)
-    keep = np.concatenate([[True], np.diff(times_arr) > 0])
-    sel = np.where(keep)[0]
-
     artifact = build_reference_artifact(
         case_name=case.name,
         sgs=sgs_name,
         z=recs_z,
-        times_s=times_arr[sel],
-        theta=np.stack(theta_s)[sel],
-        u=np.stack(u_s)[sel],
-        v=np.stack(v_s)[sel],
-        wtheta_resolved=np.stack(wthr_s)[sel],
-        wtheta_sgs=np.stack(wths_s)[sel],
+        times_s=times_arr,
+        theta=np.stack(theta_s),
+        u=np.stack(u_s),
+        v=np.stack(v_s),
+        wtheta_resolved=np.stack(wthr_s),
+        wtheta_sgs=np.stack(wths_s),
         subsidence_w=np.zeros_like(recs_z),   # free-convective CBL: no subsidence
         prescribe="fluxes",
-        w_theta_s=np.full(sel.shape[0], Q0),
+        w_theta_s=np.full(times_arr.shape[0], Q0),
         f_c=0.0,
     )
     out = args.output / f"{case.name}__{sgs_name}.npz"

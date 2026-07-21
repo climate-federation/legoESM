@@ -36,3 +36,30 @@ def test_not_wired_regime_raises_systemexit():
 def test_wired_regimes_contains_dry_convective():
     m = _driver()
     assert "dry_convective" in m._WIRED_REGIMES
+
+
+# --- frame scheduling (codex round-2 regression) ------------------------------
+def test_frame_schedule_production_evenly_spaced():
+    m = _driver()
+    # 7200 steps (dt=1, T=7200), 12 frames → 11 post-IC snapshots, last = n_steps
+    rec = m.frame_step_schedule(7200, 12)
+    assert len(rec) == 11
+    assert rec == sorted(set(rec))           # strictly increasing + distinct
+    assert rec[-1] == 7200                    # final frame at T
+    assert all(1 <= k <= 7200 for k in rec)
+
+
+def test_frame_schedule_distinct_and_capped_when_dt_coarse():
+    m = _driver()
+    # only 3 steps but 6 frames requested → at most 3 distinct post-IC snapshots
+    rec = m.frame_step_schedule(3, 6)
+    assert rec == [1, 2, 3]                    # distinct, no duplicates/drops
+    assert rec == sorted(set(rec))
+
+
+def test_frame_schedule_last_is_nsteps():
+    m = _driver()
+    for n_steps, frames in [(100, 5), (7, 4), (14400, 12), (5, 10)]:
+        rec = m.frame_step_schedule(n_steps, frames)
+        assert rec[-1] == n_steps
+        assert rec == sorted(set(rec))
