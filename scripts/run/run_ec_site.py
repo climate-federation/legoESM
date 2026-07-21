@@ -293,7 +293,8 @@ def _clmml_land_params(cp, sai: float):
 def _prognostic_fluxes(d: ECSiteDriver,
                        canopy_config: TwoLeafCanopyConfig | CLMMLCanopyConfig,
                        land_config: MultiLayerLandConfig, U_min: float,
-                       nudge_tau_days: float = 0.0, clmml_sai: float = _CLMML_SAI):
+                       nudge_tau_days: float = 0.0, clmml_sai: float = _CLMML_SAI,
+                       stomatal_m_scale: float = 1.0):
     """Integrate the FULL multilayer land forward in time (``lax.scan``).
 
     Unlike diagnostic mode (per-step ``vmap`` with the soil PRESCRIBED), the soil
@@ -322,6 +323,16 @@ def _prognostic_fluxes(d: ECSiteDriver,
     Returns (gpp_gC, le_wm2, h_wm2, t_surface, reverted) each shape (n_time,).
     """
     is_clmml = isinstance(canopy_config, CLMMLCanopyConfig)
+
+    # Stomatal-slope sensitivity: scale the two-leaf Ball-Berry slope m (C3+C4),
+    # which sets stomatal conductance per unit assimilation.  Higher m => more
+    # transpiration at the SAME GPP (lower water-use efficiency) => more LE, less
+    # H — the correct-direction lever for the Bowen bias.  Applied to the driver
+    # canopy params for the two-leaf arm only (CLM-ML reads its own g1_BB).
+    if stomatal_m_scale != 1.0 and not is_clmml:
+        d = d._replace(canopy_params=d.canopy_params._replace(
+            m_C3=d.canopy_params.m_C3 * stomatal_m_scale,
+            m_C4=d.canopy_params.m_C4 * stomatal_m_scale))
 
     # --- initial soil state from the driver's first finite soil obs ---
     # Initialise from the OBSERVED volumetric soil moisture directly (theta_soil
@@ -563,7 +574,8 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              stress_b0: bool = False, select_best_year: bool = False,
              texture_csv: str = _DEFAULT_TEXTURE_CSV,
              canopy: str = "two_leaf", clm_pft: int = 7,
-             clmml_sai: float = _CLMML_SAI) -> dict:
+             clmml_sai: float = _CLMML_SAI, u_min: float = _U_MIN,
+             stomatal_m_scale: float = 1.0) -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
     if canopy not in ("two_leaf", "clmml"):
@@ -622,8 +634,8 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         gpp_gC, le, h, _ = _diagnostic_fluxes(d, canopy_config, land_config, chunk)
     else:
         gpp_gC, le, h, _ts, reverted, ts_soil, swc_soil, ustar = _prognostic_fluxes(
-            d, canopy_config, land_config, _U_MIN, nudge_tau_days=nudge_tau_days,
-            clmml_sai=clmml_sai)
+            d, canopy_config, land_config, u_min, nudge_tau_days=nudge_tau_days,
+            clmml_sai=clmml_sai, stomatal_m_scale=stomatal_m_scale)
     model = {
         "gpp_umol": gpp_gC / _GC_PER_UMOL_CO2,   # gC/m2/s -> umolCO2/m2/s (obs units)
         "le_wm2": le, "h_wm2": h,
@@ -749,6 +761,13 @@ def main() -> int:
     ap.add_argument("--clmml-sai", type=float, default=_CLMML_SAI,
                     help="stem area index [m2/m2] for the CLM-ML canopy (the "
                          "two-leaf arm has no stem-area term); tunable")
+    ap.add_argument("--stomatal-m-scale", type=float, default=1.0,
+                    help="scale the two-leaf Ball-Berry slope m (transpiration "
+                         "per assimilation); >1 => more LE, less H at fixed GPP")
+    ap.add_argument("--u-min", type=float, default=_U_MIN,
+                    help="wind-speed floor [m/s]; canopy sees "
+                         "sqrt(u^2+v^2+u_min^2). Shared by both arms; lower => "
+                         "less aerodynamic conductance => less sensible heat")
     ap.add_argument("--select-best-year", action="store_true",
                     help="run only the calendar year with the most observed flux "
                          "steps (contiguous, spans both seasons) — ~12-24x faster "
@@ -765,7 +784,8 @@ def main() -> int:
                  stress_b0=args.stress_b0, select_best_year=args.select_best_year,
                  texture_csv=args.texture_csv,
                  canopy=args.canopy, clm_pft=args.clm_pft,
-                 clmml_sai=args.clmml_sai)
+                 clmml_sai=args.clmml_sai, u_min=args.u_min,
+                 stomatal_m_scale=args.stomatal_m_scale)
     return 0
 
 
