@@ -5154,6 +5154,12 @@ def main() -> int:
             itd_remap=_itd_remap,     # 'lipscomb2001' whenever _n_cat > 1
             ridging=RidgingConfig(enabled=_ridging_on),
             brine=_brine,            # brine-rejection salt flux -> ocean salt_flux
+            # PROGNOSTIC ocean: the driver applies the open-water atmospheric
+            # q_net to the ocean itself (blend f_open share), so lead-freeze
+            # latent must be CREDITED (frazil convention) — the legacy charge
+            # double-counts the heat and drives the supercooling latch (the
+            # Antarctic coastal ice runaway; 2026-07-21 bisect).
+            lead_freeze_latent="credit",
             # Under-ice transmitted SW is owned by the ICE model (constant-
             # scheme transmittance): the ice EB is debited and the ocean
             # receives it via resp.ocean_heat_extraction (-= sw_penetrated),

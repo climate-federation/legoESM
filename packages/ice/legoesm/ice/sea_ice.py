@@ -339,6 +339,12 @@ def step_sea_ice(
             f"Unknown config.itd_remap={config.itd_remap!r}; expected "
             "'simple' or 'lipscomb2001'."
         )
+    if config.lead_freeze_latent not in ("charge", "credit"):
+        raise ValueError(
+            f"Unknown SeaIceConfig.lead_freeze_latent="
+            f"{config.lead_freeze_latent!r}; expected 'charge' (legacy/slab: "
+            "ocean debited L_f on lead freeze) or 'credit' (prognostic-ocean "
+            "frazil convention: freezing releases L_f into the water).")
     # New-ice salt entrapment (BrineConfig.f_entrap; NEMO SI3 rn_sinew):
     # static-config fail-early.  Entrapped new ice holds f_entrap * SSS
     # (~24 PSU on a 32-PSU shelf) — with the legacy S_ice_max=12 cap the clamp
@@ -2347,9 +2353,19 @@ def _thermo_v2(
     #     channel and closes the energy budget without a skin re-solve — upgrade
     #     to an atmospheric credit if/when the 0-layer skin gains an enthalpy
     #     channel.
+    # Lead-freeze latent sign (SeaIceConfig.lead_freeze_latent; validated at
+    # step_sea_ice entry).  Sign convention: extraction positive = ocean LOSES
+    # heat.  "charge" (+1, legacy): ocean debited L_f — correct for the
+    # slab/implicit-ocean surrogates where this term IS the atmospheric
+    # cooling.  "credit" (−1, frazil): freezing RELEASES L_f into the water —
+    # required under a PROGNOSTIC ocean that separately receives the
+    # open-water atmospheric q_net, where the charge double-counts the same
+    # heat and drives the supercooling latch (the Antarctic coastal ice
+    # runaway; see config.py).  Static Python branch on the config literal.
+    _lead_latent_sign = 1.0 if config.lead_freeze_latent == "charge" else -1.0
     ocean_heat_extraction = (
         F_ocean * conc * ocean_heat_scale
-        + delta_V_lead_freeze * config.rho_ice * config.L_f / dt
+        + _lead_latent_sign * delta_V_lead_freeze * config.rho_ice * config.L_f / dt
         + refreeze_ice_m * config.rho_ice * config.L_f / dt * conc_new
         # Surplus surface-melt heat from a melt-out step warms the ocean
         # (ocean GAINS -> NEGATIVE extraction); previously this energy was

@@ -422,3 +422,22 @@ class SeaIceConfig(NamedTuple):
     # APPENDED at the tail (after every pre-existing field) so positional
     # SeaIceConfig(...) constructors keep their meaning (codex L1-r1 #3).
     sw_transmittance_const: float = 0.0
+    # Lead-freeze latent-heat routing to the ocean tile (the supercooling-latch
+    # fix; APPENDED at the tail — positional safety):
+    #  * "charge" (default, legacy/slab-correct): the ocean is DEBITED
+    #    L_f per kg of new lead ice (positive ocean_heat_extraction).  Correct
+    #    when the ocean tile does NOT separately receive the open-water
+    #    atmospheric flux (slab/implicit-ocean surrogates): the charge IS the
+    #    atmospheric cooling, delivered through the ice budget.
+    #  * "credit" (prognostic-ocean frazil convention): freezing RELEASES
+    #    L_f into the water (standard frazil thermodynamics), warming the
+    #    supercooled cell back toward freezing.  REQUIRED when the driver
+    #    already applies the open-water atmospheric q_net to the prognostic
+    #    ocean (blend f_open share): the legacy charge then DOUBLE-COUNTS the
+    #    same heat (atm takes Q once through the lead, the charge takes Q
+    #    again) → the ocean supercools without bound → the lead-freeze SST
+    #    gate LATCHES open → the Antarctic coastal ice runaway (2026-07-21
+    #    bisect: window→sea_ice.py→gate, ll11 gate-revert BOUNDED).  With the
+    #    credit the ledger closes (atm −Q; ice +Q/L_f as volume; ocean −Q+Q)
+    #    and the latch becomes a self-limiting negative feedback.
+    lead_freeze_latent: str = "charge"
