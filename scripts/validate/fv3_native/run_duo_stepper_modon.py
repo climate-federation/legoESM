@@ -33,6 +33,9 @@ def main():
     ap.add_argument("--days", type=float, default=60.0)
     ap.add_argument("--frame-days", type=float, default=5.0)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--nord", type=int, default=None,
+                    help="override the preset's divergence-damping "
+                         "order (codex lattice-r1 rank-2 screen)")
     ap.add_argument("--d-ext", type=float, default=None,
                     help="override the preset's external-mode filter "
                          "coefficient (seam-ringing discriminator)")
@@ -97,6 +100,8 @@ def main():
         d_ext = 0.02
     if args.d_ext is not None:
         d_ext = args.d_ext
+    if args.nord is not None and sw_cfg is not None:
+        sw_cfg["nord"] = args.nord
 
     def wind_fn(ll):
         u_e, v_n = _modon_winds_geo(ll[..., 0], ll[..., 1], FV3_RADIUS_M)
