@@ -47,6 +47,18 @@ Demonstrating the §7 machinery produces real numbers (full answers need the ens
   down-gradient) closure is STRUCTURALLY unable to match the LES flux, regardless of
   tuning — the tuning-independent ceiling on local closures. The full Q1 threshold
   needs this across the w'θ'ₛ grid (the unwired dry-grid emission).
+- **Q2 (per-regime closure skill)** — mynn25 tier-1 derivative-free tuning on the 2 h
+  CBL (17 candidates, dt=5, nlev=32): default loss **0.397**, best **0.397** (A1/A2
+  mixing coefficients have negligible leverage on the dry-CBL θ fit → the default is
+  already near-optimal). A real Q2 data point for the dry-convective anchor; the full
+  ranking needs the other 8 closures wired. Scorecard generated end-to-end.
+- **BUG found + fixed (CLAUDE.md precision rule — instrument, don't infer)**: the FIRST
+  Q2 run reported "100% improvement, best_loss=0.0". Instrumenting it (not trusting it)
+  showed the "best" candidate's SCM had DIVERGED to NaN θ, yet `scm_les_final_loss`
+  returned 0.0 — the score's `safe_sqrt` maps NaN→0 (a perfect fit), so a blown-up SCM
+  was selected as best. Fixed: the loss returns +inf on non-finite SCM output
+  (01792620c); regression test locks it. A runtime-only failure codex's static review
+  could not see — exactly the case the precision rule exists for.
 
 ## Conventions locked during the build
 - LES reference artifacts are **self-describing**: each carries both the truth
