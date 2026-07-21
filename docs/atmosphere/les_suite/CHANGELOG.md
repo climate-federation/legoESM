@@ -163,7 +163,11 @@ Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
   (f70a7b46a): step-index sampling via the tested pure helper `frame_step_schedule`
   — strictly-increasing distinct times, final at n_steps·dt≈T, dt≥T guarded; 3
   regression tests cover codex's failing cases. GPU re-run: [0,252,504,756,1008,1260].
-  Codex round 3 verifying the schedule.
+- **Codex round 3: VERDICT CLEAN** — frame_step_schedule verified over exhaustive
+  n_steps=1..500 × frames=2..700 (distinct, final=n_steps, no silent shorten); driver
+  records len(schedule)+1 frames, times strictly increasing, no off-by-one; the
+  removed dedup/sel logic is safe (duplicates no longer constructible). The
+  iterate-with-codex loop on emission converged (2→1→0 issues).
 - Committed: intercomparison gate (de7672463), gate-0 fix (8d1bdc81b), emit +
   run_les_suite (218129efd).
 
